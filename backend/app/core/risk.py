@@ -24,6 +24,8 @@ class RiskController:
         self.consecutive_losses: int = 0
         self.kill_switch: bool = False
         self.paused: bool = False
+        self._pause_reason: str = ""
+        self._kill_switch_reason: str = ""
 
     def check(self) -> RiskResult:
         if self.kill_switch:
@@ -60,12 +62,15 @@ class RiskController:
 
     def pause(self, reason: str = "manual") -> None:
         self.paused = True
+        self._pause_reason = reason
 
     def resume(self) -> None:
         self.paused = False
+        self._pause_reason = ""
 
     def enable_kill_switch(self, reason: str = "manual") -> None:
         self.kill_switch = True
+        self._kill_switch_reason = reason
 
     def disable_kill_switch(self) -> None:
         self.kill_switch = False

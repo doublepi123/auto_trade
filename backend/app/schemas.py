@@ -9,8 +9,8 @@ from pydantic import BaseModel, Field, field_validator
 class StrategyConfigSchema(BaseModel):
     symbol: str = Field(default="", max_length=50)
     market: str = Field(default="US")
-    buy_low: float = Field(default=0.0, gt=0)
-    sell_high: float = Field(default=0.0, gt=0)
+    buy_low: Optional[float] = Field(default=None, gt=0)
+    sell_high: Optional[float] = Field(default=None, gt=0)
     short_selling: bool = Field(default=False)
     max_daily_loss: float = Field(default=5000.0, gt=0)
     max_consecutive_losses: int = Field(default=3, ge=1)
@@ -25,9 +25,11 @@ class StrategyConfigSchema(BaseModel):
 
     @field_validator("sell_high")
     @classmethod
-    def validate_sell_high(cls, v: float, info: Any) -> float:
-        buy_low = info.data.get("buy_low", 0.0)
-        if v <= buy_low:
+    def validate_sell_high(cls, v: Optional[float], info: Any) -> Optional[float]:
+        if v is None:
+            return v
+        buy_low = info.data.get("buy_low")
+        if buy_low is not None and v <= buy_low:
             raise ValueError("sell_high must be greater than buy_low")
         return v
 

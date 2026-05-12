@@ -58,16 +58,20 @@ const saving = ref(false)
 const saved = ref(false)
 
 onMounted(async () => {
-  const s = await getStrategy()
-  form.value = {
-    symbol: s.symbol,
-    market: s.market,
-    buy_low: s.buy_low,
-    sell_high: s.sell_high,
-    short_selling: s.short_selling,
-    max_daily_loss: s.max_daily_loss,
-    max_consecutive_losses: s.max_consecutive_losses,
-    sct_key: s.sct_key,
+  try {
+    const s = await getStrategy()
+    form.value = {
+      symbol: s.symbol,
+      market: s.market,
+      buy_low: s.buy_low,
+      sell_high: s.sell_high,
+      short_selling: s.short_selling,
+      max_daily_loss: s.max_daily_loss,
+      max_consecutive_losses: s.max_consecutive_losses,
+      sct_key: s.sct_key,
+    }
+  } catch (e) {
+    console.error('Failed to load strategy:', e)
   }
 })
 

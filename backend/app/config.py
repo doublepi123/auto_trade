@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -17,18 +18,18 @@ class Settings(BaseSettings):
 
     sct_key: str = ""
 
-    default_strategy: dict = {
+    default_strategy: dict = Field(default_factory=lambda: {
         "symbol": "",
         "market": "US",
         "buy_low": 0.0,
         "sell_high": 0.0,
         "short_selling": False,
-    }
+    })
 
-    default_risk: dict = {
+    default_risk: dict = Field(default_factory=lambda: {
         "max_daily_loss": 5000.0,
         "max_consecutive_losses": 3,
-    }
+    })
 
     def ensure_data_dir(self) -> None:
         data_dir = Path("data")

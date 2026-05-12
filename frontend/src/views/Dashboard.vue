@@ -5,7 +5,7 @@
       <el-col :span="8">
         <el-card>
           <template #header>Engine State</template>
-          <el-tag :type="stateTagType">{{ status.engine_state.toUpperCase() }}</el-tag>
+          <el-tag :type="stateTagType">{{ status.engine_state?.toUpperCase() ?? 'UNKNOWN' }}</el-tag>
         </el-card>
       </el-col>
       <el-col :span="8">
@@ -60,6 +60,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed } from 'vue'
+import { ElMessage } from 'element-plus'
 import { getStrategy, getStatus, pauseTrading, resumeTrading, activateKillSwitch, startTrading, stopTrading } from '../api'
 import type { StrategyConfig, StatusData } from '../types'
 
@@ -105,27 +106,47 @@ async function refresh() {
 }
 
 async function handlePause() {
-  await pauseTrading()
-  await refresh()
+  try {
+    await pauseTrading()
+    await refresh()
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail || e?.message || 'Pause failed')
+  }
 }
 
 async function handleResume() {
-  await resumeTrading()
-  await refresh()
+  try {
+    await resumeTrading()
+    await refresh()
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail || e?.message || 'Resume failed')
+  }
 }
 
 async function handleKillSwitch() {
-  await activateKillSwitch()
-  await refresh()
+  try {
+    await activateKillSwitch()
+    await refresh()
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail || e?.message || 'Kill switch failed')
+  }
 }
 
 async function handleStart() {
-  await startTrading()
-  await refresh()
+  try {
+    await startTrading()
+    await refresh()
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail || e?.message || 'Start failed')
+  }
 }
 
 async function handleStop() {
-  await stopTrading()
-  await refresh()
+  try {
+    await stopTrading()
+    await refresh()
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail || e?.message || 'Stop failed')
+  }
 }
 </script>

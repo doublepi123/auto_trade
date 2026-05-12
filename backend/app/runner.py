@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.core.broker import BrokerGateway, Quote
-from app.core.engine import StrategyEngine, StrategyParams, TriggerResult
+from app.core.engine import StrategyEngine, StrategyParams, TriggerResult, EngineState
 from app.core.notify import ServerChanNotifier
 from app.core.risk import RiskConfig, RiskController
 from app.database import SessionLocal
@@ -20,7 +20,6 @@ from app.services.strategy_service import StrategyService
 from app.api.ws import manager
 
 logger = logging.getLogger("auto_trade.runner")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 
 
 class AppRunner:
@@ -31,11 +30,16 @@ class AppRunner:
         self.notifier = ServerChanNotifier("")
         self._running = False
         self._thread: threading.Thread | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._start_lock = threading.Lock()
+        self._quotes_subscribed = False
 
     def start(self) -> None:
-        if self._running:
-            return
-        self._running = True
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
+        with self._start_lock:
+            if self._running:
+                return
+            self._running = True
 
         db = SessionLocal()
         try:
@@ -50,7 +54,7 @@ class AppRunner:
                 sell_high=config.sell_high,
                 short_selling=config.short_selling,
             )
-            self.engine.state = state.engine_state
+            self.engine.state = EngineState(state.engine_state)
             self.engine.last_price = state.last_price
 
             self.risk.config = RiskConfig(
@@ -64,9 +68,15 @@ class AppRunner:
 
             self.notifier = ServerChanNotifier(config.sct_key)
 
-            if config.symbol:
+            try:
+                self._loop = asyncio.get_running_loop()
+            except RuntimeError:
+                self._loop = None
+
+            if config.symbol and not self._quotes_subscribed:
                 try:
                     self.broker.subscribe_quotes(config.symbol, self._on_quote)
+                    self._quotes_subscribed = True
                     logger.info(f"subscribed to {config.symbol} quotes")
                 except Exception as exc:
                     logger.warning(f"cannot subscribe quotes (SDK may not be available): {exc}")
@@ -79,8 +89,12 @@ class AppRunner:
 
     def stop(self) -> None:
         self._running = False
+        self._quotes_subscribed = False
+        self.broker.close()
 
     def _on_quote(self, quote: Quote) -> None:
+        if not self._running:
+            return
         try:
             result = self.engine.update_price(quote.last_price)
             self._broadcast_status()
@@ -120,6 +134,7 @@ class AppRunner:
         price = Decimal(str(quote.last_price))
         qty = (cash / price).quantize(Decimal("0.01"))
         if qty <= 0:
+            logger.warning("BUY: qty <= 0, cash=%s price=%s", cash, price)
             return
 
         result = self.broker.submit_limit_order(symbol, "BUY", qty, price)
@@ -134,16 +149,19 @@ class AppRunner:
             return
 
         price = Decimal(str(quote.last_price))
+        pnl = (float(price) - float(long_pos.avg_price)) * float(long_pos.quantity)
         result = self.broker.submit_limit_order(symbol, "SELL", long_pos.quantity, price)
         self._record_order(result.broker_order_id, symbol, "SELL", float(long_pos.quantity), float(price))
         self.notifier.notify_order("SELL", symbol, str(long_pos.quantity), str(price), result.broker_order_id)
-        logger.info(f"SELL: {symbol} qty={long_pos.quantity} price={price}")
+        self.risk.record_trade(pnl)
+        logger.info(f"SELL: {symbol} qty={long_pos.quantity} price={price} pnl={pnl}")
 
     def _execute_sell_short(self, symbol: str, quote: Quote) -> None:
         cash = self.broker.get_cash()
         price = Decimal(str(quote.last_price))
         qty = (cash / price).quantize(Decimal("0.01"))
         if qty <= 0:
+            logger.warning("SELL_SHORT: qty <= 0, cash=%s price=%s", cash, price)
             return
 
         result = self.broker.submit_limit_order(symbol, "SELL", qty, price)
@@ -158,9 +176,11 @@ class AppRunner:
             return
 
         price = Decimal(str(quote.last_price))
+        pnl = 0.0
         result = self.broker.submit_limit_order(symbol, "BUY", pos.quantity, price)
         self._record_order(result.broker_order_id, symbol, "BUY", float(pos.quantity), float(price))
         self.notifier.notify_order("BUY_TO_COVER", symbol, str(pos.quantity), str(price), result.broker_order_id)
+        self.risk.record_trade(pnl)
         logger.info(f"BUY_TO_COVER: {symbol} qty={pos.quantity} price={price}")
 
     def _record_order(self, order_id: str, symbol: str, side: str, qty: float, price: float) -> None:
@@ -197,9 +217,10 @@ class AppRunner:
                 "kill_switch": self.risk.kill_switch,
                 "paused": self.risk.paused,
             }
-            asyncio.run(manager.broadcast(data))
+            if self._loop and self._loop.is_running():
+                asyncio.run_coroutine_threadsafe(manager.broadcast(data), self._loop)
         except Exception:
-            pass
+            logger.warning("broadcast failed")
 
     def _run_loop(self) -> None:
         while self._running:

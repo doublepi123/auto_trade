@@ -29,7 +29,11 @@ import type { OrderRecord } from '../types'
 const orders = ref<OrderRecord[]>([])
 
 onMounted(async () => {
-  orders.value = await getOrders(100)
+  try {
+    orders.value = await getOrders(100)
+  } catch (e) {
+    console.error('Failed to load orders:', e)
+  }
 })
 
 function statusType(status: string): string {

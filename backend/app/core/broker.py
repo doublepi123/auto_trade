@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Callable
 
+from app.config import settings
+
 
 def _import_openapi() -> Any:
     for name in ("longport.openapi", "longbridge.openapi"):
@@ -47,13 +49,14 @@ class BrokerGateway:
         self._quote_ctx: Any = None
         self._trade_ctx: Any = None
         self._quote_callbacks: list[Callable[[Quote], None]] = []
+        self._subscribed_symbol: str | None = None
 
     def _init_clients(self) -> None:
         if self._quote_ctx is None:
             module = _import_openapi()
-            app_key = os.getenv("LONGBRIDGE_APP_KEY", "") or os.getenv("LONGPORT_APP_KEY", "")
-            app_secret = os.getenv("LONGBRIDGE_APP_SECRET", "") or os.getenv("LONGPORT_APP_SECRET", "")
-            access_token = os.getenv("LONGBRIDGE_ACCESS_TOKEN", "") or os.getenv("LONGPORT_ACCESS_TOKEN", "")
+            app_key = settings.longbridge_app_key or os.getenv("LONGPORT_APP_KEY", "")
+            app_secret = settings.longbridge_app_secret or os.getenv("LONGPORT_APP_SECRET", "")
+            access_token = settings.longbridge_access_token or os.getenv("LONGPORT_ACCESS_TOKEN", "")
 
             config = module.Config.from_apikey(app_key, app_secret, access_token)
             self._quote_ctx = module.QuoteContext(config)
@@ -75,8 +78,11 @@ class BrokerGateway:
         )
 
     def subscribe_quotes(self, symbol: str, callback: Callable[[Quote], None]) -> None:
+        if self._subscribed_symbol == symbol:
+            return
         self._init_clients()
         self._quote_callbacks.append(callback)
+        self._subscribed_symbol = symbol
         module = _import_openapi()
         TopicType = getattr(module, "TopicType", None)
 
@@ -116,7 +122,7 @@ class BrokerGateway:
             remark="auto-trade",
         )
 
-        order_id = str(getattr(response, "order_id", getattr(response, "broker_order_id", str(response))))
+        order_id = str(getattr(response, "order_id", getattr(response, "broker_order_id", "")))
         return OrderResult(
             broker_order_id=order_id,
             symbol=symbol,
@@ -132,8 +138,13 @@ class BrokerGateway:
         items = response if isinstance(response, list) else getattr(response, "channels", [response])
         positions: list[Position] = []
         for item in items:
-            qty = Decimal(str(getattr(item, "available_quantity", getattr(item, "quantity", "0"))))
+            raw = getattr(item, "available_quantity", None)
+            if raw is None:
+                raw = getattr(item, "quantity", 0)
+            qty = Decimal(str(raw)) if raw is not None else Decimal("0")
             if qty > 0:
+                # NOTE: hardcoded side="LONG" because the SDK response does not
+                # expose a side field. Short positions will be incorrectly labeled.
                 positions.append(Position(
                     symbol=str(getattr(item, "symbol", "")),
                     side="LONG",
@@ -141,6 +152,17 @@ class BrokerGateway:
                     avg_price=Decimal(str(getattr(item, "cost_price", "0"))),
                 ))
         return positions
+
+    def close(self) -> None:
+        self._quote_callbacks.clear()
+        self._subscribed_symbol = None
+        if self._quote_ctx is not None:
+            try:
+                self._quote_ctx.close()
+            except Exception:
+                pass
+        self._quote_ctx = None
+        self._trade_ctx = None
 
     def get_cash(self) -> Decimal:
         self._init_clients()
@@ -154,4 +176,6 @@ class BrokerGateway:
                 return Decimal(str(getattr(response[0], "available_cash", "0")))
             return Decimal(str(getattr(response, "available_cash", getattr(response, "cash", "0"))))
         except Exception:
-            return Decimal("0")
+            import logging
+            logging.getLogger("auto_trade.broker").exception("failed to get account balance")
+            raise

@@ -26,12 +26,15 @@ def start_runner(db: Session = Depends(get_db)) -> MessageResponse:
     svc = StrategyService(db)
     svc.update_runtime_state(paused=False, kill_switch=False)
     get_runner().start()
+    get_runner().risk.resume()
+    get_runner().risk.disable_kill_switch()
     return MessageResponse(message="runner started")
 
 
 @router.post("/control/stop", response_model=MessageResponse)
 def stop_runner(payload: ControlRequest, db: Session = Depends(get_db)) -> MessageResponse:
     get_runner().stop()
+    get_runner().risk.pause("manual")
     svc = StrategyService(db)
     svc.update_runtime_state(paused=True)
     return MessageResponse(message="runner stopped")
@@ -44,6 +47,7 @@ def pause_trading(
 ) -> MessageResponse:
     svc = StrategyService(db)
     svc.update_runtime_state(paused=True)
+    get_runner().risk.pause(payload.reason)
     return MessageResponse(message="trading paused")
 
 
@@ -51,6 +55,7 @@ def pause_trading(
 def resume_trading(db: Session = Depends(get_db)) -> MessageResponse:
     svc = StrategyService(db)
     svc.update_runtime_state(paused=False)
+    get_runner().risk.resume()
     return MessageResponse(message="trading resumed")
 
 
@@ -61,4 +66,13 @@ def kill_switch(
 ) -> MessageResponse:
     svc = StrategyService(db)
     svc.update_runtime_state(kill_switch=True)
+    get_runner().risk.enable_kill_switch(payload.reason)
     return MessageResponse(message="kill switch activated")
+
+
+@router.post("/control/disable-kill-switch", response_model=MessageResponse)
+def disable_kill_switch(db: Session = Depends(get_db)) -> MessageResponse:
+    svc = StrategyService(db)
+    svc.update_runtime_state(kill_switch=False)
+    get_runner().risk.disable_kill_switch()
+    return MessageResponse(message="kill switch disabled")
