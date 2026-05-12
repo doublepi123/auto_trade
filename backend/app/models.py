@@ -36,7 +36,7 @@ class OrderRecord(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     broker_order_id: Mapped[str] = mapped_column(String(100), default="")
     symbol: Mapped[str] = mapped_column(String(50))
-    side: Mapped[str] = mapped_column(String(10))
+    side: Mapped[str] = mapped_column(String(20))
     quantity: Mapped[float] = mapped_column(Float)
     price: Mapped[float] = mapped_column(Float)
     status: Mapped[str] = mapped_column(String(20), default="SUBMITTED")

@@ -37,6 +37,39 @@ class TestBrokerGateway:
         assert len(received) == 1
         assert received[0].last_price == 120.0
 
+    def test_get_positions_flattens_stock_position_channels(self) -> None:
+        class StockInfo:
+            def __init__(self, symbol: str, quantity: str, available_quantity: str, cost_price: str) -> None:
+                self.symbol = symbol
+                self.quantity = quantity
+                self.available_quantity = available_quantity
+                self.cost_price = cost_price
+
+        class Channel:
+            stock_info = [
+                StockInfo("700.HK", "650", "-450", "457.53"),
+                StockInfo("AAPL.US", "-12", "-12", "180.00"),
+            ]
+
+        class Response:
+            channels = [Channel()]
+
+        class TradeContext:
+            def stock_positions(self) -> Response:
+                return Response()
+
+        gw = BrokerGateway()
+        gw._quote_ctx = object()
+        gw._trade_ctx = TradeContext()
+
+        positions = gw.get_positions()
+
+        assert [p.symbol for p in positions] == ["700.HK", "AAPL.US"]
+        assert positions[0].quantity == Decimal("650")
+        assert positions[0].side == "LONG"
+        assert positions[1].quantity == Decimal("12")
+        assert positions[1].side == "SHORT"
+
 
 class TestBrokerImports:
     def test_import_openapi_fallback(self) -> None:

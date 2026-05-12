@@ -70,6 +70,20 @@ class TestAPI:
         })
         assert resp.status_code == 422
 
+    def test_update_strategy_rejects_partial_threshold_inversion(self) -> None:
+        _clean_strategy()
+        initial = client.put("/api/strategy", json={
+            "symbol": "AAPL.US",
+            "market": "US",
+            "buy_low": 100.0,
+            "sell_high": 200.0,
+        })
+        assert initial.status_code == 200
+
+        resp = client.put("/api/strategy", json={"buy_low": 250.0})
+
+        assert resp.status_code == 422
+
     def test_get_status(self) -> None:
         resp = client.get("/api/status")
         assert resp.status_code == 200

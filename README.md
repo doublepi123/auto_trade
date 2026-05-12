@@ -90,9 +90,9 @@ cp .env.example .env
 编辑 `.env`：
 
 ```env
-LONGBRIDGE_APP_KEY=你的AppKey
-LONGBRIDGE_APP_SECRET=你的AppSecret
-LONGBRIDGE_ACCESS_TOKEN=你的AccessToken
+LONGPORT_APP_KEY=你的AppKey
+LONGPORT_APP_SECRET=你的AppSecret
+LONGPORT_ACCESS_TOKEN=你的AccessToken
 AUTO_TRADE_SCT_KEY=你的Server酱SendKey  # 可选
 ```
 
@@ -231,12 +231,12 @@ auto_trade/
 |------|------|--------|
 | `AUTO_TRADE_ENV` | 运行环境 | `dev` |
 | `AUTO_TRADE_DATABASE_URL` | SQLite 数据库路径 | `sqlite:///data/auto_trade.db` |
-| `LONGBRIDGE_APP_KEY` | 长桥 App Key | - |
-| `LONGBRIDGE_APP_SECRET` | 长桥 App Secret | - |
-| `LONGBRIDGE_ACCESS_TOKEN` | 长桥 Access Token | - |
+| `LONGPORT_APP_KEY` | 长桥 App Key | - |
+| `LONGPORT_APP_SECRET` | 长桥 App Secret | - |
+| `LONGPORT_ACCESS_TOKEN` | 长桥 Access Token | - |
 | `AUTO_TRADE_SCT_KEY` | Server酱 SendKey | - |
 
-所有 auto_trade 特定配置均使用 `AUTO_TRADE_` 前缀。
+长桥 SDK 官方使用 `LONGPORT_*` 凭证变量；项目仍兼容旧的 `LONGBRIDGE_*` 变量名。所有 auto_trade 特定配置均使用 `AUTO_TRADE_` 前缀。
 
 ## 安全
 

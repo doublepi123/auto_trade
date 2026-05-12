@@ -44,6 +44,39 @@ class Position:
     avg_price: Decimal
 
 
+def _get_value(item: Any, key: str, default: Any = None) -> Any:
+    if isinstance(item, dict):
+        return item.get(key, default)
+    return getattr(item, key, default)
+
+
+def _iter_position_items(item: Any) -> list[Any]:
+    if item is None:
+        return []
+    if isinstance(item, list):
+        result: list[Any] = []
+        for child in item:
+            result.extend(_iter_position_items(child))
+        return result
+    if isinstance(item, dict):
+        nested = item.get("data", item)
+        if nested is not item:
+            return _iter_position_items(nested)
+        for key in ("list", "channels", "stock_info", "positions"):
+            if key in item:
+                return _iter_position_items(item[key])
+        return [item] if item.get("symbol") else []
+
+    children: list[Any] = []
+    for attr in ("channels", "list", "stock_info", "positions"):
+        nested = getattr(item, attr, None)
+        if nested is not None:
+            children.extend(_iter_position_items(nested))
+    if children:
+        return children
+    return [item] if getattr(item, "symbol", "") else []
+
+
 class BrokerGateway:
     def __init__(self) -> None:
         self._quote_ctx: Any = None
@@ -135,22 +168,23 @@ class BrokerGateway:
     def get_positions(self) -> list[Position]:
         self._init_clients()
         response = self._trade_ctx.stock_positions()
-        items = response if isinstance(response, list) else getattr(response, "channels", [response])
         positions: list[Position] = []
-        for item in items:
-            raw = getattr(item, "available_quantity", None)
+        for item in _iter_position_items(response):
+            raw = _get_value(item, "quantity", None)
             if raw is None:
-                raw = getattr(item, "quantity", 0)
+                raw = _get_value(item, "available_quantity", 0)
             qty = Decimal(str(raw)) if raw is not None else Decimal("0")
-            if qty > 0:
-                # NOTE: hardcoded side="LONG" because the SDK response does not
-                # expose a side field. Short positions will be incorrectly labeled.
-                positions.append(Position(
-                    symbol=str(getattr(item, "symbol", "")),
-                    side="LONG",
-                    quantity=qty,
-                    avg_price=Decimal(str(getattr(item, "cost_price", "0"))),
-                ))
+            if qty == 0:
+                continue
+
+            raw_side = str(_get_value(item, "side", "")).upper()
+            side = raw_side if raw_side in {"LONG", "SHORT"} else ("SHORT" if qty < 0 else "LONG")
+            positions.append(Position(
+                symbol=str(_get_value(item, "symbol", "")),
+                side=side,
+                quantity=abs(qty),
+                avg_price=Decimal(str(_get_value(item, "cost_price", _get_value(item, "avg_price", "0")))),
+            ))
         return positions
 
     def close(self) -> None:

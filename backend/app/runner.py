@@ -5,6 +5,7 @@ import json
 import logging
 import threading
 import time
+from datetime import datetime
 from decimal import Decimal
 
 from sqlalchemy.orm import Session
@@ -56,6 +57,8 @@ class AppRunner:
             )
             self.engine.state = EngineState(state.engine_state)
             self.engine.last_price = state.last_price
+            self.engine.last_trigger_price = state.last_trigger_price
+            self.engine.last_trigger_at = state.last_trigger_at
 
             self.risk.config = RiskConfig(
                 max_daily_loss=config.max_daily_loss,
@@ -96,92 +99,128 @@ class AppRunner:
         if not self._running:
             return
         try:
+            engine_snapshot = (
+                self.engine.state,
+                self.engine.last_trigger_price,
+                self.engine.last_trigger_at,
+            )
             result = self.engine.update_price(quote.last_price)
             self._broadcast_status()
 
             if result.triggered:
-                self._handle_trigger(result, quote)
+                executed = self._handle_trigger(result, quote)
+                if not executed:
+                    self._restore_engine_snapshot(engine_snapshot)
+                    self._broadcast_status()
         except Exception:
             logger.exception("error processing quote")
 
-    def _handle_trigger(self, result: TriggerResult, quote: Quote) -> None:
+    def _restore_engine_snapshot(self, snapshot: tuple[EngineState, float, datetime | None]) -> None:
+        state, last_trigger_price, last_trigger_at = snapshot
+        self.engine.state = state
+        self.engine.last_trigger_price = last_trigger_price
+        self.engine.last_trigger_at = last_trigger_at
+
+    def _handle_trigger(self, result: TriggerResult, quote: Quote) -> bool:
         risk_result = self.risk.check()
         if not risk_result.approved:
             logger.warning(f"risk rejected: {risk_result.reason}")
             self._record_risk_event(risk_result.reason)
             self.notifier.notify_risk_event("REJECTED", risk_result.reason)
-            return
+            return False
 
         try:
             symbol = self.engine.params.symbol
+            executed = False
             if result.action == "BUY":
-                self._execute_buy(symbol, quote)
+                executed = self._execute_buy(symbol, quote)
             elif result.action == "SELL":
-                self._execute_sell(symbol, quote)
+                executed = self._execute_sell(symbol, quote)
             elif result.action == "SELL_SHORT":
-                self._execute_sell_short(symbol, quote)
+                executed = self._execute_sell_short(symbol, quote)
             elif result.action == "BUY_TO_COVER":
-                self._execute_buy_to_cover(symbol, quote)
+                executed = self._execute_buy_to_cover(symbol, quote)
 
-            self._broadcast_status()
+            if executed:
+                self._broadcast_status()
+            return executed
         except Exception as exc:
             logger.exception(f"order execution failed: {exc}")
             self._record_risk_event(str(exc))
             self.notifier.notify_risk_event("ORDER_FAILED", str(exc))
+            return False
 
-    def _execute_buy(self, symbol: str, quote: Quote) -> None:
+    def _execute_buy(self, symbol: str, quote: Quote) -> bool:
         cash = self.broker.get_cash()
         price = Decimal(str(quote.last_price))
+        if price <= 0:
+            logger.warning("BUY: price <= 0, price=%s", price)
+            return False
         qty = (cash / price).quantize(Decimal("0.01"))
         if qty <= 0:
             logger.warning("BUY: qty <= 0, cash=%s price=%s", cash, price)
-            return
+            return False
 
         result = self.broker.submit_limit_order(symbol, "BUY", qty, price)
         self._record_order(result.broker_order_id, symbol, "BUY", float(qty), float(price))
         self.notifier.notify_order("BUY", symbol, str(qty), str(price), result.broker_order_id)
         logger.info(f"BUY: {symbol} qty={qty} price={price}")
+        return True
 
-    def _execute_sell(self, symbol: str, quote: Quote) -> None:
+    def _execute_sell(self, symbol: str, quote: Quote) -> bool:
         positions = self.broker.get_positions()
-        long_pos = next((p for p in positions if p.side == "LONG"), None)
+        long_pos = next((p for p in positions if p.symbol == symbol and p.side == "LONG"), None)
         if long_pos is None:
-            return
+            logger.warning("SELL: no long position for %s", symbol)
+            return False
 
         price = Decimal(str(quote.last_price))
+        if price <= 0:
+            logger.warning("SELL: price <= 0, price=%s", price)
+            return False
         pnl = (float(price) - float(long_pos.avg_price)) * float(long_pos.quantity)
         result = self.broker.submit_limit_order(symbol, "SELL", long_pos.quantity, price)
         self._record_order(result.broker_order_id, symbol, "SELL", float(long_pos.quantity), float(price))
         self.notifier.notify_order("SELL", symbol, str(long_pos.quantity), str(price), result.broker_order_id)
         self.risk.record_trade(pnl)
         logger.info(f"SELL: {symbol} qty={long_pos.quantity} price={price} pnl={pnl}")
+        return True
 
-    def _execute_sell_short(self, symbol: str, quote: Quote) -> None:
+    def _execute_sell_short(self, symbol: str, quote: Quote) -> bool:
         cash = self.broker.get_cash()
         price = Decimal(str(quote.last_price))
+        if price <= 0:
+            logger.warning("SELL_SHORT: price <= 0, price=%s", price)
+            return False
         qty = (cash / price).quantize(Decimal("0.01"))
         if qty <= 0:
             logger.warning("SELL_SHORT: qty <= 0, cash=%s price=%s", cash, price)
-            return
+            return False
 
         result = self.broker.submit_limit_order(symbol, "SELL", qty, price)
-        self._record_order(result.broker_order_id, symbol, "SELL", float(qty), float(price))
+        self._record_order(result.broker_order_id, symbol, "SELL_SHORT", float(qty), float(price))
         self.notifier.notify_order("SELL_SHORT", symbol, str(qty), str(price), result.broker_order_id)
         logger.info(f"SELL_SHORT: {symbol} qty={qty} price={price}")
+        return True
 
-    def _execute_buy_to_cover(self, symbol: str, quote: Quote) -> None:
+    def _execute_buy_to_cover(self, symbol: str, quote: Quote) -> bool:
         positions = self.broker.get_positions()
-        pos = next((p for p in positions if p.symbol == symbol and p.quantity > 0), None)
+        pos = next((p for p in positions if p.symbol == symbol and p.side == "SHORT" and p.quantity > 0), None)
         if pos is None:
-            return
+            logger.warning("BUY_TO_COVER: no short position for %s", symbol)
+            return False
 
         price = Decimal(str(quote.last_price))
+        if price <= 0:
+            logger.warning("BUY_TO_COVER: price <= 0, price=%s", price)
+            return False
         pnl = 0.0
         result = self.broker.submit_limit_order(symbol, "BUY", pos.quantity, price)
-        self._record_order(result.broker_order_id, symbol, "BUY", float(pos.quantity), float(price))
+        self._record_order(result.broker_order_id, symbol, "BUY_TO_COVER", float(pos.quantity), float(price))
         self.notifier.notify_order("BUY_TO_COVER", symbol, str(pos.quantity), str(price), result.broker_order_id)
         self.risk.record_trade(pnl)
         logger.info(f"BUY_TO_COVER: {symbol} qty={pos.quantity} price={price}")
+        return True
 
     def _record_order(self, order_id: str, symbol: str, side: str, qty: float, price: float) -> None:
         db = SessionLocal()
@@ -241,6 +280,8 @@ class AppRunner:
                 consecutive_losses=self.risk.consecutive_losses,
                 kill_switch=self.risk.kill_switch,
                 paused=self.risk.paused,
+                last_trigger_price=self.engine.last_trigger_price,
+                last_trigger_at=self.engine.last_trigger_at,
             )
         finally:
             db.close()

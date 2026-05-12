@@ -1,5 +1,3 @@
-import shutil
-import tempfile
 from pathlib import Path
 
 import os
@@ -24,3 +22,65 @@ class TestSettings:
         data_dir = Path("data")
         s.ensure_data_dir()
         assert data_dir.exists()
+
+    def test_reads_official_longport_credentials_from_parent_env_file(self, monkeypatch, tmp_path) -> None:
+        for name in (
+            "AUTO_TRADE_LONGBRIDGE_APP_KEY",
+            "AUTO_TRADE_LONGBRIDGE_APP_SECRET",
+            "AUTO_TRADE_LONGBRIDGE_ACCESS_TOKEN",
+            "LONGBRIDGE_APP_KEY",
+            "LONGBRIDGE_APP_SECRET",
+            "LONGBRIDGE_ACCESS_TOKEN",
+            "LONGPORT_APP_KEY",
+            "LONGPORT_APP_SECRET",
+            "LONGPORT_ACCESS_TOKEN",
+        ):
+            monkeypatch.delenv(name, raising=False)
+
+        root = tmp_path / "project"
+        backend = root / "backend"
+        backend.mkdir(parents=True)
+        (root / ".env").write_text(
+            "LONGPORT_APP_KEY=official-key\n"
+            "LONGPORT_APP_SECRET=official-secret\n"
+            "LONGPORT_ACCESS_TOKEN=official-token\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.chdir(backend)
+        s = Settings()
+
+        assert s.longbridge_app_key == "official-key"
+        assert s.longbridge_app_secret == "official-secret"
+        assert s.longbridge_access_token == "official-token"
+
+    def test_reads_legacy_longbridge_credentials_from_parent_env_file(self, monkeypatch, tmp_path) -> None:
+        for name in (
+            "AUTO_TRADE_LONGBRIDGE_APP_KEY",
+            "AUTO_TRADE_LONGBRIDGE_APP_SECRET",
+            "AUTO_TRADE_LONGBRIDGE_ACCESS_TOKEN",
+            "LONGBRIDGE_APP_KEY",
+            "LONGBRIDGE_APP_SECRET",
+            "LONGBRIDGE_ACCESS_TOKEN",
+            "LONGPORT_APP_KEY",
+            "LONGPORT_APP_SECRET",
+            "LONGPORT_ACCESS_TOKEN",
+        ):
+            monkeypatch.delenv(name, raising=False)
+
+        root = tmp_path / "project"
+        backend = root / "backend"
+        backend.mkdir(parents=True)
+        (root / ".env").write_text(
+            "LONGBRIDGE_APP_KEY=legacy-key\n"
+            "LONGBRIDGE_APP_SECRET=legacy-secret\n"
+            "LONGBRIDGE_ACCESS_TOKEN=legacy-token\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.chdir(backend)
+        s = Settings()
+
+        assert s.longbridge_app_key == "legacy-key"
+        assert s.longbridge_app_secret == "legacy-secret"
+        assert s.longbridge_access_token == "legacy-token"

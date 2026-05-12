@@ -2,12 +2,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_prefix="AUTO_TRADE_")
+    model_config = SettingsConfigDict(
+        env_file=("../.env", ".env"),
+        env_prefix="AUTO_TRADE_",
+        populate_by_name=True,
+    )
 
     env: str = "dev"
     database_url: str = "sqlite:///data/auto_trade.db"
@@ -15,6 +19,13 @@ class Settings(BaseSettings):
     longbridge_app_key: str = ""
     longbridge_app_secret: str = ""
     longbridge_access_token: str = ""
+
+    longport_app_key: str = Field(default="", validation_alias="LONGPORT_APP_KEY")
+    longport_app_secret: str = Field(default="", validation_alias="LONGPORT_APP_SECRET")
+    longport_access_token: str = Field(default="", validation_alias="LONGPORT_ACCESS_TOKEN")
+    legacy_longbridge_app_key: str = Field(default="", validation_alias="LONGBRIDGE_APP_KEY")
+    legacy_longbridge_app_secret: str = Field(default="", validation_alias="LONGBRIDGE_APP_SECRET")
+    legacy_longbridge_access_token: str = Field(default="", validation_alias="LONGBRIDGE_ACCESS_TOKEN")
 
     sct_key: str = ""
 
@@ -30,6 +41,17 @@ class Settings(BaseSettings):
         "max_daily_loss": 5000.0,
         "max_consecutive_losses": 3,
     })
+
+    @model_validator(mode="after")
+    def merge_longbridge_credentials(self) -> "Settings":
+        self.longbridge_app_key = self.longbridge_app_key or self.longport_app_key or self.legacy_longbridge_app_key
+        self.longbridge_app_secret = (
+            self.longbridge_app_secret or self.longport_app_secret or self.legacy_longbridge_app_secret
+        )
+        self.longbridge_access_token = (
+            self.longbridge_access_token or self.longport_access_token or self.legacy_longbridge_access_token
+        )
+        return self
 
     def ensure_data_dir(self) -> None:
         data_dir = Path("data")
