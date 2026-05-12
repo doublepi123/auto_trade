@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  backend:
+    build: ./backend
+    ports:
+      - '8000:8000'
+    volumes:
+      - ./data:/app/data
+    environment:
+      - AUTO_TRADE_ENV=${AUTO_TRADE_ENV:-dev}
+      - AUTO_TRADE_DATABASE_URL=sqlite:///app/data/auto_trade.db
+      - LONGBRIDGE_APP_KEY=${LONGBRIDGE_APP_KEY:-}
+      - LONGBRIDGE_APP_SECRET=${LONGBRIDGE_APP_SECRET:-}
+      - LONGBRIDGE_ACCESS_TOKEN=${LONGBRIDGE_ACCESS_TOKEN:-}
+      - AUTO_TRADE_SCT_KEY=${AUTO_TRADE_SCT_KEY:-}
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    ports:
+      - '8080:80'
+    depends_on:
+      - backend
+    restart: unless-stopped

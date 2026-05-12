@@ -1,0 +1,49 @@
+import axios from 'axios'
+import type { StrategyConfig, StatusData, OrderRecord } from '../types'
+
+const api = axios.create({ baseURL: '' })
+
+export async function getStrategy(): Promise<StrategyConfig> {
+  const resp = await api.get('/api/strategy')
+  return resp.data
+}
+
+export async function updateStrategy(data: Partial<StrategyConfig>): Promise<StrategyConfig> {
+  const resp = await api.put('/api/strategy', data)
+  return resp.data
+}
+
+export async function getStatus(): Promise<StatusData> {
+  const resp = await api.get('/api/status')
+  return resp.data
+}
+
+export async function getOrders(limit = 50): Promise<OrderRecord[]> {
+  const resp = await api.get('/api/orders', { params: { limit } })
+  return resp.data
+}
+
+export async function pauseTrading(reason = 'manual'): Promise<{ message: string }> {
+  const resp = await api.post('/api/control/pause', { reason })
+  return resp.data
+}
+
+export async function resumeTrading(): Promise<{ message: string }> {
+  const resp = await api.post('/api/control/resume')
+  return resp.data
+}
+
+export async function activateKillSwitch(reason = 'manual'): Promise<{ message: string }> {
+  const resp = await api.post('/api/control/kill-switch', { reason })
+  return resp.data
+}
+
+export async function startTrading(): Promise<{ message: string }> {
+  const resp = await api.post('/api/control/start')
+  return resp.data
+}
+
+export async function stopTrading(reason = 'manual'): Promise<{ message: string }> {
+  const resp = await api.post('/api/control/stop', { reason })
+  return resp.data
+}

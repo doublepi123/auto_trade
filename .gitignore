@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+dist/
+
+# SQLite
+*.db
+
+# Data
+data/
+
+# Frontend
+node_modules/
+frontend/dist/
+
+# Environment
+.env
+!.env.example
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Logs
+*.log
+
+# Docker
+docker-compose.override.yaml
+
+# OS
+.DS_Store
+Thumbs.db
