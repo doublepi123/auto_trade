@@ -15,6 +15,7 @@ class StrategyService:
         config = self.db.query(StrategyConfig).order_by(StrategyConfig.id.desc()).first()
         if config is None:
             config = StrategyConfig()
+            config.updated_at = datetime.now(timezone.utc)
             self.db.add(config)
             self.db.commit()
         return config
@@ -26,7 +27,7 @@ class StrategyService:
 
         updatable_fields = [
             "symbol", "market", "buy_low", "sell_high",
-            "short_selling", "max_daily_loss", "max_consecutive_losses", "sct_key",
+            "short_selling", "max_daily_loss", "max_consecutive_losses",
         ]
         for field in updatable_fields:
             if field in data:

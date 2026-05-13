@@ -6,7 +6,7 @@ os.environ["AUTO_TRADE_DATABASE_URL"] = "sqlite:///data/test_api.db"
 from fastapi.testclient import TestClient
 
 from app.database import engine as db_engine, SessionLocal
-from app.models import Base, StrategyConfig
+from app.models import Base, CredentialConfig, StrategyConfig
 from app.main import app
 
 
@@ -18,6 +18,13 @@ client = TestClient(app)
 def _clean_strategy() -> None:
     db = SessionLocal()
     db.query(StrategyConfig).delete()
+    db.commit()
+    db.close()
+
+
+def _clean_credentials() -> None:
+    db = SessionLocal()
+    db.query(CredentialConfig).delete()
     db.commit()
     db.close()
 
@@ -34,6 +41,14 @@ class TestAPI:
         assert resp.status_code == 200
         data = resp.json()
         assert data["symbol"] == ""
+        assert "sct_key" not in data
+
+    def test_get_credentials_default(self) -> None:
+        _clean_credentials()
+        resp = client.get("/api/credentials")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["longbridge_app_key"] == ""
 
     def test_update_strategy_valid(self) -> None:
         resp = client.put("/api/strategy", json={
@@ -44,13 +59,13 @@ class TestAPI:
             "short_selling": False,
             "max_daily_loss": 5000.0,
             "max_consecutive_losses": 3,
-            "sct_key": "",
         })
         assert resp.status_code == 200
         data = resp.json()
         assert data["symbol"] == "AAPL.US"
         assert data["buy_low"] == 100.0
         assert data["sell_high"] == 200.0
+        assert "sct_key" not in data
 
     def test_update_strategy_invalid_market(self) -> None:
         resp = client.put("/api/strategy", json={

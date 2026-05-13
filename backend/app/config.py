@@ -29,6 +29,8 @@ class Settings(BaseSettings):
 
     sct_key: str = ""
 
+    api_key: str = ""
+
     default_strategy: dict = Field(default_factory=lambda: {
         "symbol": "",
         "market": "US",

@@ -30,6 +30,17 @@ class StrategyConfig(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
 
+class CredentialConfig(Base):
+    __tablename__ = "credential_config"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    longbridge_app_key: Mapped[str] = mapped_column(Text, default="")
+    longbridge_app_secret: Mapped[str] = mapped_column(Text, default="")
+    longbridge_access_token: Mapped[str] = mapped_column(Text, default="")
+    sct_key: Mapped[str] = mapped_column(Text, default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+
 class OrderRecord(Base):
     __tablename__ = "orders"
 

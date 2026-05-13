@@ -9,7 +9,7 @@ services:
       - ./data:/app/data
     environment:
       - AUTO_TRADE_ENV=${AUTO_TRADE_ENV:-dev}
-      - AUTO_TRADE_DATABASE_URL=sqlite:///app/data/auto_trade.db
+      - AUTO_TRADE_DATABASE_URL=sqlite:////app/data/auto_trade.db
       - LONGPORT_APP_KEY=${LONGPORT_APP_KEY:-}
       - LONGPORT_APP_SECRET=${LONGPORT_APP_SECRET:-}
       - LONGPORT_ACCESS_TOKEN=${LONGPORT_ACCESS_TOKEN:-}
@@ -22,7 +22,7 @@ services:
   frontend:
     build: ./frontend
     ports:
-      - '8080:80'
+      - '${AUTO_TRADE_FRONTEND_PORT:-8080}:80'
     depends_on:
       - backend
     restart: unless-stopped

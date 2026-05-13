@@ -67,7 +67,7 @@ import type { StrategyConfig, StatusData } from '../types'
 const strategy = ref<StrategyConfig>({
   id: 0, symbol: '', market: 'US', buy_low: 0, sell_high: 0,
   short_selling: false, max_daily_loss: 5000, max_consecutive_losses: 3,
-  sct_key: '', updated_at: '',
+  updated_at: '',
 })
 
 const status = ref<StatusData>({
@@ -102,6 +102,7 @@ async function refresh() {
     status.value = st
   } catch (e) {
     console.error('Failed to refresh:', e)
+    ElMessage.error('Failed to refresh dashboard data')
   }
 }
 

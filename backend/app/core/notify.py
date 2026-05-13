@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import httpx
+import logging
+
+logger = logging.getLogger("auto_trade.notify")
 
 
 class ServerChanNotifier:
@@ -15,6 +18,7 @@ class ServerChanNotifier:
             resp = httpx.post(self._url, data={"title": title, "desp": content}, timeout=10)
             return resp.status_code == 200
         except Exception:
+            logger.warning("ServerChan notification failed: title=%s", title)
             return False
 
     def notify_order(self, side: str, symbol: str, quantity: str, price: str, order_id: str) -> bool:

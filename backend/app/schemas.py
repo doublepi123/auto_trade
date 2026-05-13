@@ -14,7 +14,6 @@ class StrategyConfigSchema(BaseModel):
     short_selling: bool = Field(default=False)
     max_daily_loss: float = Field(default=5000.0, gt=0)
     max_consecutive_losses: int = Field(default=3, ge=1)
-    sct_key: str = Field(default="", max_length=200)
 
     @field_validator("market")
     @classmethod
@@ -34,6 +33,28 @@ class StrategyConfigSchema(BaseModel):
         return v
 
 
+class CredentialConfigSchema(BaseModel):
+    longbridge_app_key: str = Field(default="", max_length=4096)
+    longbridge_app_secret: str = Field(default="", max_length=4096)
+    longbridge_access_token: str = Field(default="", max_length=4096)
+    sct_key: str = Field(default="", max_length=4096)
+
+
+class CredentialResponse(BaseModel):
+    id: int
+    longbridge_app_key: str
+    longbridge_app_secret: str
+    longbridge_access_token: str
+    sct_key: str
+    has_longbridge_app_key: bool = False
+    has_longbridge_app_secret: bool = False
+    has_longbridge_access_token: bool = False
+    has_sct_key: bool = False
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
 class StrategyResponse(BaseModel):
     id: int
     symbol: str
@@ -43,7 +64,6 @@ class StrategyResponse(BaseModel):
     short_selling: bool
     max_daily_loss: float
     max_consecutive_losses: int
-    sct_key: str
     updated_at: datetime
 
     model_config = {"from_attributes": True}

@@ -11,12 +11,13 @@ from decimal import Decimal
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.core.broker import BrokerGateway, Quote
+from app.core.broker import BrokerCredentials, BrokerGateway, Quote
 from app.core.engine import StrategyEngine, StrategyParams, TriggerResult, EngineState
 from app.core.notify import ServerChanNotifier
 from app.core.risk import RiskConfig, RiskController
 from app.database import SessionLocal
 from app.models import OrderRecord, RiskEvent
+from app.services.credentials_service import CredentialsService, PlainCredentials
 from app.services.strategy_service import StrategyService
 from app.api.ws import manager
 
@@ -33,15 +34,10 @@ class AppRunner:
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._start_lock = threading.Lock()
+        self._state_lock = threading.RLock()
         self._quotes_subscribed = False
 
-    def start(self) -> None:
-        logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
-        with self._start_lock:
-            if self._running:
-                return
-            self._running = True
-
+    def _initialize_runner(self) -> None:
         db = SessionLocal()
         try:
             svc = StrategyService(db)
@@ -69,7 +65,7 @@ class AppRunner:
             self.risk.kill_switch = state.kill_switch
             self.risk.paused = state.paused
 
-            self.notifier = ServerChanNotifier(config.sct_key)
+            self._apply_credentials(self._load_credentials(), resubscribe=False)
 
             try:
                 self._loop = asyncio.get_running_loop()
@@ -82,18 +78,71 @@ class AppRunner:
                     self._quotes_subscribed = True
                     logger.info(f"subscribed to {config.symbol} quotes")
                 except Exception as exc:
-                    logger.warning(f"cannot subscribe quotes (SDK may not be available): {exc}")
+                    logger.error(f"quote subscription failed for {config.symbol}: {exc}")
+                    logger.error("system running without quote updates - trading engine may be non-functional")
         finally:
             db.close()
+
+    def start(self) -> None:
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
+        with self._start_lock:
+            if self._running:
+                return
+            self._running = True
+            self._initialize_runner()
 
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
         logger.info("runner started")
 
+    def _load_credentials(self) -> PlainCredentials:
+        db = SessionLocal()
+        try:
+            return CredentialsService(db).get_plain_credentials()
+        finally:
+            db.close()
+
+    def _apply_credentials(self, credentials: PlainCredentials, *, resubscribe: bool) -> None:
+        with self._state_lock:
+            symbol = self.engine.params.symbol
+            should_resubscribe = resubscribe and bool(symbol)
+            new_notifier = ServerChanNotifier(credentials.sct_key or settings.sct_key)
+
+            new_broker = BrokerGateway(
+                BrokerCredentials(
+                    app_key=credentials.longbridge_app_key,
+                    app_secret=credentials.longbridge_app_secret,
+                    access_token=credentials.longbridge_access_token,
+                )
+            )
+
+            if should_resubscribe:
+                try:
+                    new_broker.subscribe_quotes(symbol, self._on_quote)
+                except Exception as exc:
+                    logger.warning(f"cannot subscribe quotes after credential reload: {exc}")
+                    self.notifier = new_notifier
+                    new_broker.close()
+                    return
+
+            old_broker = self.broker
+            old_broker.close()
+            self.broker = new_broker
+            self.notifier = new_notifier
+
+            if should_resubscribe:
+                self._quotes_subscribed = True
+            elif not resubscribe:
+                self._quotes_subscribed = False
+
+    def reload_credentials(self) -> None:
+        self._apply_credentials(self._load_credentials(), resubscribe=self._running)
+
     def stop(self) -> None:
-        self._running = False
-        self._quotes_subscribed = False
-        self.broker.close()
+        with self._state_lock:
+            self._running = False
+            self._quotes_subscribed = False
+            self.broker.close()
 
     def _on_quote(self, quote: Quote) -> None:
         if not self._running:
@@ -151,7 +200,8 @@ class AppRunner:
             return False
 
     def _execute_buy(self, symbol: str, quote: Quote) -> bool:
-        cash = self.broker.get_cash()
+        broker = self.broker
+        cash = broker.get_cash()
         price = Decimal(str(quote.last_price))
         if price <= 0:
             logger.warning("BUY: price <= 0, price=%s", price)
@@ -161,14 +211,15 @@ class AppRunner:
             logger.warning("BUY: qty <= 0, cash=%s price=%s", cash, price)
             return False
 
-        result = self.broker.submit_limit_order(symbol, "BUY", qty, price)
+        result = broker.submit_limit_order(symbol, "BUY", qty, price)
         self._record_order(result.broker_order_id, symbol, "BUY", float(qty), float(price))
         self.notifier.notify_order("BUY", symbol, str(qty), str(price), result.broker_order_id)
         logger.info(f"BUY: {symbol} qty={qty} price={price}")
         return True
 
     def _execute_sell(self, symbol: str, quote: Quote) -> bool:
-        positions = self.broker.get_positions()
+        broker = self.broker
+        positions = broker.get_positions()
         long_pos = next((p for p in positions if p.symbol == symbol and p.side == "LONG"), None)
         if long_pos is None:
             logger.warning("SELL: no long position for %s", symbol)
@@ -179,7 +230,7 @@ class AppRunner:
             logger.warning("SELL: price <= 0, price=%s", price)
             return False
         pnl = (float(price) - float(long_pos.avg_price)) * float(long_pos.quantity)
-        result = self.broker.submit_limit_order(symbol, "SELL", long_pos.quantity, price)
+        result = broker.submit_limit_order(symbol, "SELL", long_pos.quantity, price)
         self._record_order(result.broker_order_id, symbol, "SELL", float(long_pos.quantity), float(price))
         self.notifier.notify_order("SELL", symbol, str(long_pos.quantity), str(price), result.broker_order_id)
         self.risk.record_trade(pnl)
@@ -187,7 +238,8 @@ class AppRunner:
         return True
 
     def _execute_sell_short(self, symbol: str, quote: Quote) -> bool:
-        cash = self.broker.get_cash()
+        broker = self.broker
+        cash = broker.get_cash()
         price = Decimal(str(quote.last_price))
         if price <= 0:
             logger.warning("SELL_SHORT: price <= 0, price=%s", price)
@@ -197,14 +249,16 @@ class AppRunner:
             logger.warning("SELL_SHORT: qty <= 0, cash=%s price=%s", cash, price)
             return False
 
-        result = self.broker.submit_limit_order(symbol, "SELL", qty, price)
+        result = broker.submit_limit_order(symbol, "SELL", qty, price)
         self._record_order(result.broker_order_id, symbol, "SELL_SHORT", float(qty), float(price))
         self.notifier.notify_order("SELL_SHORT", symbol, str(qty), str(price), result.broker_order_id)
+        self.risk.record_trade(0.0)
         logger.info(f"SELL_SHORT: {symbol} qty={qty} price={price}")
         return True
 
     def _execute_buy_to_cover(self, symbol: str, quote: Quote) -> bool:
-        positions = self.broker.get_positions()
+        broker = self.broker
+        positions = broker.get_positions()
         pos = next((p for p in positions if p.symbol == symbol and p.side == "SHORT" and p.quantity > 0), None)
         if pos is None:
             logger.warning("BUY_TO_COVER: no short position for %s", symbol)
@@ -214,12 +268,12 @@ class AppRunner:
         if price <= 0:
             logger.warning("BUY_TO_COVER: price <= 0, price=%s", price)
             return False
-        pnl = 0.0
-        result = self.broker.submit_limit_order(symbol, "BUY", pos.quantity, price)
+        pnl = (float(pos.avg_price) - float(price)) * float(pos.quantity)
+        result = broker.submit_limit_order(symbol, "BUY", pos.quantity, price)
         self._record_order(result.broker_order_id, symbol, "BUY_TO_COVER", float(pos.quantity), float(price))
         self.notifier.notify_order("BUY_TO_COVER", symbol, str(pos.quantity), str(price), result.broker_order_id)
         self.risk.record_trade(pnl)
-        logger.info(f"BUY_TO_COVER: {symbol} qty={pos.quantity} price={price}")
+        logger.info(f"BUY_TO_COVER: {symbol} qty={pos.quantity} price={price} pnl={pnl}")
         return True
 
     def _record_order(self, order_id: str, symbol: str, side: str, qty: float, price: float) -> None:
@@ -237,6 +291,9 @@ class AppRunner:
             db.commit()
         finally:
             db.close()
+
+    # TODO: Implement order status polling or broker webhook integration to update
+    # order status from SUBMITTED to FILLED/REJECTED/CANCELLED using broker SDK.
 
     def _record_risk_event(self, reason: str) -> None:
         db = SessionLocal()

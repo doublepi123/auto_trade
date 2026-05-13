@@ -7,7 +7,19 @@ export interface StrategyConfig {
   short_selling: boolean
   max_daily_loss: number
   max_consecutive_losses: number
+  updated_at: string
+}
+
+export interface CredentialsConfig {
+  id: number
+  longbridge_app_key: string
+  longbridge_app_secret: string
+  longbridge_access_token: string
   sct_key: string
+  has_longbridge_app_key: boolean
+  has_longbridge_app_secret: boolean
+  has_longbridge_access_token: boolean
+  has_sct_key: boolean
   updated_at: string
 }
 

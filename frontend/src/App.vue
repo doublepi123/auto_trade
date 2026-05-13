@@ -5,6 +5,7 @@
       <el-menu mode="horizontal" :default-active="route.path" router>
         <el-menu-item index="/">Dashboard</el-menu-item>
         <el-menu-item index="/strategy">Strategy</el-menu-item>
+        <el-menu-item index="/credentials">Credentials</el-menu-item>
         <el-menu-item index="/history">Trade History</el-menu-item>
       </el-menu>
     </el-header>

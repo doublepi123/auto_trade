@@ -6,6 +6,7 @@ from typing import AsyncGenerator
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.credentials import router as credentials_router
 from app.api.strategy import router as strategy_router
 from app.api.trade import router as trade_router
 from app.api.ws import router as ws_router
@@ -33,6 +34,7 @@ app.add_middleware(
 )
 
 app.include_router(strategy_router)
+app.include_router(credentials_router)
 app.include_router(trade_router)
 app.include_router(ws_router)
 

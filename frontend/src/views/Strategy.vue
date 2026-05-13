@@ -27,9 +27,6 @@
         <el-form-item label="Max Consecutive Losses">
           <el-input-number v-model="form.max_consecutive_losses" :min="1" />
         </el-form-item>
-        <el-form-item label="ServerChan SCT Key">
-          <el-input v-model="form.sct_key" placeholder="SCT key for notifications" show-password />
-        </el-form-item>
         <el-form-item>
           <el-button type="primary" @click="handleSave" :loading="saving">Save</el-button>
           <el-tag v-if="saved" type="success" style="margin-left: 10px">Saved!</el-tag>
@@ -41,6 +38,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
+import { ElMessage } from 'element-plus'
 import { getStrategy, updateStrategy } from '../api'
 
 const form = ref({
@@ -51,7 +49,6 @@ const form = ref({
   short_selling: false,
   max_daily_loss: 5000,
   max_consecutive_losses: 3,
-  sct_key: '',
 })
 
 const saving = ref(false)
@@ -68,7 +65,6 @@ onMounted(async () => {
       short_selling: s.short_selling,
       max_daily_loss: s.max_daily_loss,
       max_consecutive_losses: s.max_consecutive_losses,
-      sct_key: s.sct_key,
     }
   } catch (e) {
     console.error('Failed to load strategy:', e)
@@ -83,6 +79,7 @@ async function handleSave() {
     saved.value = true
   } catch (e) {
     console.error('Save failed:', e)
+    ElMessage.error('Save failed')
   } finally {
     saving.value = false
   }

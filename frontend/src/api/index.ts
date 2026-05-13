@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { StrategyConfig, StatusData, OrderRecord } from '../types'
+import type { CredentialsConfig, StrategyConfig, StatusData, OrderRecord } from '../types'
 
 const api = axios.create({ baseURL: '' })
 
@@ -10,6 +10,16 @@ export async function getStrategy(): Promise<StrategyConfig> {
 
 export async function updateStrategy(data: Partial<StrategyConfig>): Promise<StrategyConfig> {
   const resp = await api.put('/api/strategy', data)
+  return resp.data
+}
+
+export async function getCredentials(): Promise<CredentialsConfig> {
+  const resp = await api.get('/api/credentials')
+  return resp.data
+}
+
+export async function updateCredentials(data: Partial<CredentialsConfig>): Promise<CredentialsConfig> {
+  const resp = await api.put('/api/credentials', data)
   return resp.data
 }
 
