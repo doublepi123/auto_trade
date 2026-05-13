@@ -25,7 +25,7 @@ def get_credentials(db: Session = Depends(get_db)) -> CredentialResponse:
 @router.put("/credentials", response_model=CredentialResponse, dependencies=[Depends(require_api_key())])
 def update_credentials(payload: CredentialConfigSchema, db: Session = Depends(get_db)) -> CredentialResponse:
     svc = CredentialsService(db)
-    data = payload.model_dump(exclude_unset=True, exclude_none=True)
+    data = payload.model_dump(exclude_unset=True)
     config = svc.update_config(data)
     try:
         get_runner().reload_credentials()

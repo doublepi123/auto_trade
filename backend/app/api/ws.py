@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import secrets
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.config import settings
 
@@ -17,8 +18,7 @@ class ConnectionManager:
     def __init__(self) -> None:
         self.active_connections: list[WebSocket] = []
 
-    async def connect(self, ws: WebSocket) -> None:
-        await ws.accept()
+    def connect(self, ws: WebSocket) -> None:
         self.active_connections.append(ws)
 
     def disconnect(self, ws: WebSocket) -> None:
@@ -50,12 +50,24 @@ manager = ConnectionManager()
 
 
 @router.websocket("/ws")
-async def websocket_endpoint(ws: WebSocket, token: str = Query(default="")) -> None:
-    if settings.api_key and not secrets.compare_digest(token, settings.api_key):
-        logger.warning("invalid or missing API key for WebSocket from %s", ws.client)
-        await ws.close(code=4001)
-        return
-    await manager.connect(ws)
+async def websocket_endpoint(ws: WebSocket) -> None:
+    await ws.accept()
+
+    if settings.api_key:
+        try:
+            auth_msg = await asyncio.wait_for(ws.receive_text(), timeout=10)
+            auth_data = json.loads(auth_msg) if auth_msg.startswith("{") else {"token": auth_msg}
+            token = auth_data.get("token", auth_data.get("api_key", ""))
+            if not secrets.compare_digest(token, settings.api_key):
+                logger.warning("invalid API key for WebSocket from %s", ws.client)
+                await ws.close(code=4001)
+                return
+        except Exception:
+            logger.warning("WebSocket auth failed from %s", ws.client)
+            await ws.close(code=4001)
+            return
+
+    manager.connect(ws)
     try:
         while True:
             data = await ws.receive_text()

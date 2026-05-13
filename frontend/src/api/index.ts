@@ -3,6 +3,14 @@ import type { CredentialsConfig, StrategyConfig, StatusData, OrderRecord } from 
 
 const api = axios.create({ baseURL: '' })
 
+api.interceptors.request.use((config) => {
+  const key = localStorage.getItem('api_key')
+  if (key) {
+    config.headers['X-API-Key'] = key
+  }
+  return config
+})
+
 export async function getStrategy(): Promise<StrategyConfig> {
   const resp = await api.get('/api/strategy')
   return resp.data

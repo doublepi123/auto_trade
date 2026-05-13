@@ -23,7 +23,7 @@ def get_strategy(db: Session = Depends(get_db)) -> StrategyResponse:
 def put_strategy(payload: StrategyConfigSchema, db: Session = Depends(get_db)) -> StrategyResponse:
     svc = StrategyService(db)
     current = svc.get_config()
-    data = payload.model_dump(exclude_unset=True, exclude_none=True)
+    data = payload.model_dump(exclude_unset=True)
     merged = {
         "symbol": data.get("symbol", current.symbol),
         "market": data.get("market", current.market),

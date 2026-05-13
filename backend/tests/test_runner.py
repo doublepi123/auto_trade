@@ -1,4 +1,5 @@
 from decimal import Decimal
+from unittest.mock import patch
 
 from app.core.broker import Position, Quote
 from app.core.engine import EngineState, StrategyParams
@@ -18,7 +19,7 @@ class TestAppRunner:
         runner = AppRunner()
         assert runner._running is False
         assert runner._thread is None
-        assert runner.engine.state == "flat"
+        assert runner.engine.state == EngineState.FLAT
         assert runner.risk.kill_switch is False
 
     def test_get_runner_singleton(self) -> None:
@@ -33,16 +34,19 @@ class TestAppRunner:
 
     def test_runner_start_stop_cycle(self) -> None:
         runner = AppRunner()
-        runner.start()
+        with patch.object(runner, '_initialize_runner'):
+            runner.start()
         assert runner._running is True
         runner.stop()
         assert runner._running is False
 
     def test_runner_double_start(self) -> None:
         runner = AppRunner()
-        runner.start()
+        with patch.object(runner, '_initialize_runner'):
+            runner.start()
         first_thread = runner._thread
-        runner.start()
+        with patch.object(runner, '_initialize_runner'):
+            runner.start()
         assert runner._thread is first_thread
         runner.stop()
 

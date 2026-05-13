@@ -10,11 +10,16 @@ from app.config import settings
 
 logger = logging.getLogger("auto_trade.auth")
 
+_auth_disabled_warned = False
+
 
 def require_api_key() -> Callable:
     def dependency(request: Request) -> None:
+        global _auth_disabled_warned
         if not settings.api_key:
-            logger.warning("AUTO_TRADE_API_KEY not configured - auth disabled")
+            if not _auth_disabled_warned:
+                logger.warning("AUTO_TRADE_API_KEY not configured - auth disabled")
+                _auth_disabled_warned = True
             return
         provided = request.headers.get("X-API-Key", "")
         if not provided or not secrets.compare_digest(provided, settings.api_key):

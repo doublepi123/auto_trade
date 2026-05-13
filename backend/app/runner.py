@@ -51,7 +51,11 @@ class AppRunner:
                 sell_high=config.sell_high,
                 short_selling=config.short_selling,
             )
-            self.engine.state = EngineState(state.engine_state)
+            try:
+                self.engine.state = EngineState(state.engine_state)
+            except ValueError:
+                logger.warning("invalid engine state %r in DB, defaulting to FLAT", state.engine_state)
+                self.engine.state = EngineState.FLAT
             self.engine.last_price = state.last_price
             self.engine.last_trigger_price = state.last_trigger_price
             self.engine.last_trigger_at = state.last_trigger_at
@@ -84,7 +88,6 @@ class AppRunner:
             db.close()
 
     def start(self) -> None:
-        logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
         with self._start_lock:
             if self._running:
                 return
@@ -106,7 +109,7 @@ class AppRunner:
         with self._state_lock:
             symbol = self.engine.params.symbol
             should_resubscribe = resubscribe and bool(symbol)
-            new_notifier = ServerChanNotifier(credentials.sct_key or settings.sct_key)
+            new_notifier = ServerChanNotifier(credentials.sct_key if credentials.sct_key else settings.sct_key)
 
             new_broker = BrokerGateway(
                 BrokerCredentials(
@@ -206,12 +209,13 @@ class AppRunner:
         if price <= 0:
             logger.warning("BUY: price <= 0, price=%s", price)
             return False
-        qty = (cash / price).quantize(Decimal("0.01"))
+        usable_cash = (cash * Decimal("0.98")).quantize(Decimal("0.01"))
+        qty = int(usable_cash / price)
         if qty <= 0:
             logger.warning("BUY: qty <= 0, cash=%s price=%s", cash, price)
             return False
 
-        result = broker.submit_limit_order(symbol, "BUY", qty, price)
+        result = broker.submit_limit_order(symbol, "BUY", Decimal(qty), price)
         self._record_order(result.broker_order_id, symbol, "BUY", float(qty), float(price))
         self.notifier.notify_order("BUY", symbol, str(qty), str(price), result.broker_order_id)
         logger.info(f"BUY: {symbol} qty={qty} price={price}")
@@ -229,7 +233,7 @@ class AppRunner:
         if price <= 0:
             logger.warning("SELL: price <= 0, price=%s", price)
             return False
-        pnl = (float(price) - float(long_pos.avg_price)) * float(long_pos.quantity)
+        pnl = float((price - long_pos.avg_price) * long_pos.quantity)
         result = broker.submit_limit_order(symbol, "SELL", long_pos.quantity, price)
         self._record_order(result.broker_order_id, symbol, "SELL", float(long_pos.quantity), float(price))
         self.notifier.notify_order("SELL", symbol, str(long_pos.quantity), str(price), result.broker_order_id)
@@ -244,15 +248,15 @@ class AppRunner:
         if price <= 0:
             logger.warning("SELL_SHORT: price <= 0, price=%s", price)
             return False
-        qty = (cash / price).quantize(Decimal("0.01"))
+        usable_cash = (cash * Decimal("0.98")).quantize(Decimal("0.01"))
+        qty = int(usable_cash / price)
         if qty <= 0:
             logger.warning("SELL_SHORT: qty <= 0, cash=%s price=%s", cash, price)
             return False
 
-        result = broker.submit_limit_order(symbol, "SELL", qty, price)
+        result = broker.submit_limit_order(symbol, "SELL", Decimal(qty), price)
         self._record_order(result.broker_order_id, symbol, "SELL_SHORT", float(qty), float(price))
         self.notifier.notify_order("SELL_SHORT", symbol, str(qty), str(price), result.broker_order_id)
-        self.risk.record_trade(0.0)
         logger.info(f"SELL_SHORT: {symbol} qty={qty} price={price}")
         return True
 
@@ -268,7 +272,7 @@ class AppRunner:
         if price <= 0:
             logger.warning("BUY_TO_COVER: price <= 0, price=%s", price)
             return False
-        pnl = (float(pos.avg_price) - float(price)) * float(pos.quantity)
+        pnl = float((pos.avg_price - price) * pos.quantity)
         result = broker.submit_limit_order(symbol, "BUY", pos.quantity, price)
         self._record_order(result.broker_order_id, symbol, "BUY_TO_COVER", float(pos.quantity), float(price))
         self.notifier.notify_order("BUY_TO_COVER", symbol, str(pos.quantity), str(price), result.broker_order_id)
@@ -331,7 +335,7 @@ class AppRunner:
         try:
             svc = StrategyService(db)
             svc.update_runtime_state(
-                engine_state=self.engine.state,
+                engine_state=self.engine.state.value,
                 last_price=self.engine.last_price,
                 daily_pnl=self.risk.daily_pnl,
                 consecutive_losses=self.risk.consecutive_losses,

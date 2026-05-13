@@ -1,24 +1,24 @@
 <template>
   <div>
-    <h3>Dashboard</h3>
+    <h3>仪表盘</h3>
     <el-row :gutter="20">
       <el-col :span="8">
         <el-card>
-          <template #header>Engine State</template>
-          <el-tag :type="stateTagType">{{ status.engine_state?.toUpperCase() ?? 'UNKNOWN' }}</el-tag>
+          <template #header>引擎状态</template>
+          <el-tag :type="stateTagType">{{ engineStateLabel(status.engine_state) }}</el-tag>
         </el-card>
       </el-col>
       <el-col :span="8">
         <el-card>
-          <template #header>Last Price</template>
-          <h1>${{ status.last_price.toFixed(2) }}</h1>
+          <template #header>最新价格</template>
+          <h1>${{ (status.last_price ?? 0).toFixed(2) }}</h1>
         </el-card>
       </el-col>
       <el-col :span="8">
         <el-card>
-          <template #header>Daily P&L</template>
+          <template #header>今日盈亏</template>
           <h1 :style="{ color: status.daily_pnl >= 0 ? 'green' : 'red' }">
-            ${{ status.daily_pnl.toFixed(2) }}
+            ${{ (status.daily_pnl ?? 0).toFixed(2) }}
           </h1>
         </el-card>
       </el-col>
@@ -27,33 +27,33 @@
     <el-row :gutter="20" style="margin-top: 20px">
       <el-col :span="12">
         <el-card>
-          <template #header>Risk Status</template>
-          <p>Kill Switch: <el-tag :type="status.kill_switch ? 'danger' : 'success'">{{ status.kill_switch ? 'ON' : 'OFF' }}</el-tag></p>
-          <p>Paused: <el-tag :type="status.paused ? 'warning' : 'success'">{{ status.paused ? 'YES' : 'NO' }}</el-tag></p>
-          <p>Consecutive Losses: {{ status.consecutive_losses }}</p>
+          <template #header>风控状态</template>
+          <p>紧急停止：<el-tag :type="status.kill_switch ? 'danger' : 'success'">{{ status.kill_switch ? '已开启' : '已关闭' }}</el-tag></p>
+          <p>暂停状态：<el-tag :type="status.paused ? 'warning' : 'success'">{{ status.paused ? '已暂停' : '运行中' }}</el-tag></p>
+          <p>连续亏损次数：{{ status.consecutive_losses }}</p>
         </el-card>
       </el-col>
       <el-col :span="12">
         <el-card>
-          <template #header>Controls</template>
+          <template #header>操作控制</template>
           <el-space>
-            <el-button type="primary" @click="handleStart">Start</el-button>
-            <el-button type="danger" @click="handleStop">Stop</el-button>
-            <el-button type="warning" @click="handlePause" :disabled="status.paused">Pause</el-button>
-            <el-button type="success" @click="handleResume" :disabled="!status.paused">Resume</el-button>
-            <el-button type="danger" plain @click="handleKillSwitch">Kill Switch</el-button>
+            <el-button type="primary" @click="handleStart">启动</el-button>
+            <el-button type="danger" @click="handleStop">停止</el-button>
+            <el-button type="warning" @click="handlePause" :disabled="status.paused">暂停</el-button>
+            <el-button type="success" @click="handleResume" :disabled="!status.paused">恢复</el-button>
+            <el-button type="danger" plain @click="handleKillSwitch">紧急停止</el-button>
           </el-space>
         </el-card>
       </el-col>
     </el-row>
 
     <el-card style="margin-top: 20px">
-      <template #header>Quote Info</template>
-      <p>Symbol: {{ strategy.symbol || 'Not configured' }}</p>
-      <p>Market: {{ strategy.market }}</p>
-      <p>Buy Low: ${{ strategy.buy_low }}</p>
-      <p>Sell High: ${{ strategy.sell_high }}</p>
-      <p>Short Selling: {{ strategy.short_selling ? 'Yes' : 'No' }}</p>
+      <template #header>行情信息</template>
+      <p>股票代码：{{ strategy.symbol || '未配置' }}</p>
+      <p>市场：{{ marketLabel(strategy.market) }}</p>
+      <p>买入价下限：${{ strategy.buy_low }}</p>
+      <p>卖出价上限：${{ strategy.sell_high }}</p>
+      <p>做空：{{ strategy.short_selling ? '是' : '否' }}</p>
     </el-card>
   </div>
 </template>
@@ -63,6 +63,7 @@ import { ref, onMounted, onUnmounted, computed } from 'vue'
 import { ElMessage } from 'element-plus'
 import { getStrategy, getStatus, pauseTrading, resumeTrading, activateKillSwitch, startTrading, stopTrading } from '../api'
 import type { StrategyConfig, StatusData } from '../types'
+import { engineStateLabel, marketLabel } from '../utils/labels'
 
 const strategy = ref<StrategyConfig>({
   id: 0, symbol: '', market: 'US', buy_low: 0, sell_high: 0,
@@ -101,8 +102,8 @@ async function refresh() {
     strategy.value = s
     status.value = st
   } catch (e) {
-    console.error('Failed to refresh:', e)
-    ElMessage.error('Failed to refresh dashboard data')
+    console.error('刷新仪表盘失败：', e)
+    ElMessage.error('刷新仪表盘数据失败')
   }
 }
 
@@ -111,7 +112,8 @@ async function handlePause() {
     await pauseTrading()
     await refresh()
   } catch (e: any) {
-    ElMessage.error(e?.response?.data?.detail || e?.message || 'Pause failed')
+    console.error('暂停交易失败：', e)
+    ElMessage.error('暂停交易失败')
   }
 }
 
@@ -120,7 +122,8 @@ async function handleResume() {
     await resumeTrading()
     await refresh()
   } catch (e: any) {
-    ElMessage.error(e?.response?.data?.detail || e?.message || 'Resume failed')
+    console.error('恢复交易失败：', e)
+    ElMessage.error('恢复交易失败')
   }
 }
 
@@ -129,7 +132,8 @@ async function handleKillSwitch() {
     await activateKillSwitch()
     await refresh()
   } catch (e: any) {
-    ElMessage.error(e?.response?.data?.detail || e?.message || 'Kill switch failed')
+    console.error('开启紧急停止失败：', e)
+    ElMessage.error('开启紧急停止失败')
   }
 }
 
@@ -138,7 +142,8 @@ async function handleStart() {
     await startTrading()
     await refresh()
   } catch (e: any) {
-    ElMessage.error(e?.response?.data?.detail || e?.message || 'Start failed')
+    console.error('启动交易失败：', e)
+    ElMessage.error('启动交易失败')
   }
 }
 
@@ -147,7 +152,8 @@ async function handleStop() {
     await stopTrading()
     await refresh()
   } catch (e: any) {
-    ElMessage.error(e?.response?.data?.detail || e?.message || 'Stop failed')
+    console.error('停止交易失败：', e)
+    ElMessage.error('停止交易失败')
   }
 }
 </script>

@@ -1,7 +1,7 @@
 from decimal import Decimal
 
 from app.core import broker as broker_module
-from app.core.broker import BrokerCredentials, BrokerGateway, OrderResult, Position, Quote, _import_openapi
+from app.core.broker import BrokerCredentials, BrokerGateway, OrderResult, Position, Quote, _import_openapi, _SIDE_MAP
 
 
 class TestQuote:
@@ -47,20 +47,41 @@ class TestBrokerGateway:
         monkeypatch.setattr(broker_module.settings, "longbridge_app_key", "settings-key", raising=False)
         monkeypatch.setattr(broker_module.settings, "longbridge_app_secret", "settings-secret", raising=False)
         monkeypatch.setattr(broker_module.settings, "longbridge_access_token", "settings-token", raising=False)
-        monkeypatch.setattr(
-            broker_module.os,
-            "getenv",
-            lambda key, default="": {
-                "LONGPORT_APP_KEY": "env-key",
-                "LONGPORT_APP_SECRET": "env-secret",
-                "LONGPORT_ACCESS_TOKEN": "env-token",
-            }.get(key, default),
-        )
 
         gw = BrokerGateway(BrokerCredentials(app_key="db-key", app_secret="db-secret", access_token="db-token"))
         gw._init_clients()
 
         assert captured["args"] == ("db-key", "db-secret", "db-token")
+
+    def test_init_falls_back_to_settings(self, monkeypatch) -> None:
+        captured: dict[str, tuple[str, str, str]] = {}
+
+        class FakeConfig:
+            @staticmethod
+            def from_apikey(app_key: str, app_secret: str, access_token: str) -> tuple[str, str, str]:
+                captured["args"] = (app_key, app_secret, access_token)
+                return app_key, app_secret, access_token
+
+        class FakeModule:
+            Config = FakeConfig
+
+            class QuoteContext:
+                def __init__(self, config: object) -> None:
+                    self.config = config
+
+            class TradeContext:
+                def __init__(self, config: object) -> None:
+                    self.config = config
+
+        monkeypatch.setattr(broker_module, "_import_openapi", lambda: FakeModule)
+        monkeypatch.setattr(broker_module.settings, "longbridge_app_key", "settings-key", raising=False)
+        monkeypatch.setattr(broker_module.settings, "longbridge_app_secret", "settings-secret", raising=False)
+        monkeypatch.setattr(broker_module.settings, "longbridge_access_token", "settings-token", raising=False)
+
+        gw = BrokerGateway()
+        gw._init_clients()
+
+        assert captured["args"] == ("settings-key", "settings-secret", "settings-token")
 
     def test_quote_callbacks_registration(self) -> None:
         gw = BrokerGateway()
@@ -130,3 +151,17 @@ class TestBrokerDataclasses:
         p = Position(symbol="AAPL.US", side="LONG", quantity=Decimal("10"), avg_price=Decimal("150"))
         assert p.symbol == "AAPL.US"
         assert p.side == "LONG"
+
+
+class TestSideMap:
+    def test_buy_maps_to_buy(self) -> None:
+        assert _SIDE_MAP["BUY"] == "Buy"
+
+    def test_sell_maps_to_sell(self) -> None:
+        assert _SIDE_MAP["SELL"] == "Sell"
+
+    def test_sell_short_maps_to_sell(self) -> None:
+        assert _SIDE_MAP["SELL_SHORT"] == "Sell"
+
+    def test_buy_to_cover_maps_to_buy(self) -> None:
+        assert _SIDE_MAP["BUY_TO_COVER"] == "Buy"

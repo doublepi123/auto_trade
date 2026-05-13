@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
@@ -13,6 +14,8 @@ from app.api.ws import router as ws_router
 from app.config import settings
 from app.database import init_db
 from app.runner import get_runner
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 
 
 @asynccontextmanager
