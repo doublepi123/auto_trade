@@ -34,10 +34,15 @@ class RiskController:
             return RiskResult(approved=False, reason="trading is paused")
         return self._check_limits()
 
+    def reset_consecutive_losses(self) -> None:
+        """Public method to reset the consecutive losses counter."""
+        self.consecutive_losses = 0
+
     def _check_limits(self) -> RiskResult:
         today = date.today()
         if today != self._today:
             self.daily_pnl = 0.0
+            self.consecutive_losses = 0
             self._today = today
 
         if self.daily_pnl <= -abs(self.config.max_daily_loss):

@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 from pathlib import Path
 
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+
+logger = logging.getLogger(__name__)
 
 
 _PREFIX = "enc:"
@@ -63,21 +67,55 @@ def decrypt_secret(value: str) -> str:
     return AESGCM(data_key).decrypt(_decode(payload["n"]), _decode(payload["c"]), None).decode("utf-8")
 
 
+def _derive_kek() -> bytes | None:
+    """Derive a key-encrypting key from CREDENTIAL_MASTER_KEY env var via PBKDF2."""
+    master_key = os.environ.get("CREDENTIAL_MASTER_KEY")
+    if not master_key:
+        return None
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=b"auto_trade_credential_kek",
+        iterations=600_000,
+    )
+    return kdf.derive(master_key.encode("utf-8"))
+
+
 def _load_private_key() -> rsa.RSAPrivateKey:
     if _KEY_PATH.exists():
         _KEY_PATH.chmod(0o600)
-        return serialization.load_pem_private_key(_KEY_PATH.read_bytes(), password=None)
+        key_bytes = _KEY_PATH.read_bytes()
+        kek = _derive_kek()
+        if kek is not None:
+            try:
+                return serialization.load_pem_private_key(key_bytes, password=kek)
+            except (ValueError, TypeError):
+                pass
+        return serialization.load_pem_private_key(key_bytes, password=None)
 
     _KEY_PATH.parent.mkdir(parents=True, exist_ok=True)
     private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    kek = _derive_kek()
+    if kek is not None:
+        encryption_algorithm = serialization.BestAvailableEncryption(kek)
+    else:
+        logger.warning(
+            "CREDENTIAL_MASTER_KEY not set – storing credential private key without encryption. "
+            "Set the env var to protect stored credentials from filesystem read access."
+        )
+        encryption_algorithm = serialization.NoEncryption()
     key_bytes = private_key.private_bytes(
         encoding=serialization.Encoding.PEM,
         format=serialization.PrivateFormat.PKCS8,
-        encryption_algorithm=serialization.NoEncryption(),
+        encryption_algorithm=encryption_algorithm,
     )
-    fd = os.open(_KEY_PATH, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "wb") as key_file:
-        key_file.write(key_bytes)
+    try:
+        fd = os.open(_KEY_PATH, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as key_file:
+            key_file.write(key_bytes)
+    except FileExistsError:
+        # Another process already created the key file; reload it.
+        return _load_private_key()
     return private_key
 
 

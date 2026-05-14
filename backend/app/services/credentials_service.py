@@ -66,7 +66,7 @@ class CredentialsService:
             "sct_key",
         ]
         for field in updatable_fields:
-            if field in data and data[field]:
+            if field in data and data[field] is not None:
                 setattr(config, field, encrypt_secret(data[field]))
 
         config.updated_at = datetime.now(timezone.utc)

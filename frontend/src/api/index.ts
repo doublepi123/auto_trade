@@ -1,4 +1,5 @@
 import axios from 'axios'
+import { ElMessage } from 'element-plus'
 import type { CredentialsConfig, StrategyConfig, StatusData, OrderRecord } from '../types'
 
 const api = axios.create({ baseURL: '' })
@@ -10,6 +11,22 @@ api.interceptors.request.use((config) => {
   }
   return config
 })
+
+api.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (error.response) {
+      const { status } = error.response
+      if (status === 401) {
+        localStorage.removeItem('api_key')
+        ElMessage.error('Authentication failed. Please re-enter your API key.')
+      } else if (status === 403) {
+        ElMessage.error('Access denied. You do not have permission to perform this action.')
+      }
+    }
+    return Promise.reject(error)
+  },
+)
 
 export async function getStrategy(): Promise<StrategyConfig> {
   const resp = await api.get('/api/strategy')

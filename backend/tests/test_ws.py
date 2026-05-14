@@ -11,29 +11,32 @@ class TestConnectionManager:
         mgr = ConnectionManager()
         assert mgr.active_connections == []
 
-    def test_connect(self) -> None:
+    @pytest.mark.asyncio
+    async def test_connect(self) -> None:
         mgr = ConnectionManager()
-        ws = MagicMock()
-        mgr.connect(ws)
+        ws = AsyncMock()
+        await mgr.connect(ws)
         assert ws in mgr.active_connections
 
-    def test_disconnect_when_connected(self) -> None:
+    @pytest.mark.asyncio
+    async def test_disconnect_when_connected(self) -> None:
         mgr = ConnectionManager()
-        ws = MagicMock()
+        ws = AsyncMock()
         mgr.active_connections.append(ws)
-        mgr.disconnect(ws)
+        await mgr.disconnect(ws)
         assert ws not in mgr.active_connections
 
-    def test_disconnect_when_not_connected(self) -> None:
+    @pytest.mark.asyncio
+    async def test_disconnect_when_not_connected(self) -> None:
         mgr = ConnectionManager()
-        ws = MagicMock()
-        mgr.disconnect(ws)
+        ws = AsyncMock()
+        await mgr.disconnect(ws)
 
     @pytest.mark.asyncio
     async def test_broadcast_to_active_connections(self) -> None:
         mgr = ConnectionManager()
         ws = AsyncMock()
-        mgr.connect(ws)
+        await mgr.connect(ws)
         await mgr.broadcast({"type": "status", "value": 123})
         ws.send_text.assert_awaited_once_with(json.dumps({"type": "status", "value": 123}))
 
@@ -43,8 +46,8 @@ class TestConnectionManager:
         ws_good = AsyncMock()
         ws_dead = AsyncMock()
         ws_dead.send_text.side_effect = Exception("connection lost")
-        mgr.connect(ws_good)
-        mgr.connect(ws_dead)
+        await mgr.connect(ws_good)
+        await mgr.connect(ws_dead)
         await mgr.broadcast({"type": "ping"})
         assert ws_dead not in mgr.active_connections
         assert ws_good in mgr.active_connections

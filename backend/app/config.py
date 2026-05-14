@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+logger = logging.getLogger(__name__)
 
 
 class Settings(BaseSettings):
@@ -53,6 +56,15 @@ class Settings(BaseSettings):
         self.longbridge_access_token = (
             self.longbridge_access_token or self.longport_access_token or self.legacy_longbridge_access_token
         )
+        return self
+
+    @model_validator(mode="after")
+    def warn_empty_api_key(self) -> "Settings":
+        if not self.api_key:
+            logger.warning(
+                "AUTO_TRADE_API_KEY is empty — the API is running without authentication. "
+                "Set a non-empty API key via environment variable or .env file to secure the application."
+            )
         return self
 
     def ensure_data_dir(self) -> None:

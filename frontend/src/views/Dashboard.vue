@@ -60,7 +60,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { getStrategy, getStatus, pauseTrading, resumeTrading, activateKillSwitch, startTrading, stopTrading } from '../api'
 import type { StrategyConfig, StatusData } from '../types'
 import { engineStateLabel, marketLabel } from '../utils/labels'
@@ -129,11 +129,14 @@ async function handleResume() {
 
 async function handleKillSwitch() {
   try {
+    await ElMessageBox.confirm('Are you sure you want to activate the kill switch? This will immediately halt all trading.', 'Confirm', { type: 'warning' })
     await activateKillSwitch()
     await refresh()
   } catch (e: any) {
-    console.error('开启紧急停止失败：', e)
-    ElMessage.error('开启紧急停止失败')
+    if (e !== 'cancel') {
+      console.error('开启紧急停止失败：', e)
+      ElMessage.error('开启紧急停止失败')
+    }
   }
 }
 
@@ -149,11 +152,14 @@ async function handleStart() {
 
 async function handleStop() {
   try {
+    await ElMessageBox.confirm('Are you sure you want to stop trading?', 'Confirm', { type: 'warning' })
     await stopTrading()
     await refresh()
   } catch (e: any) {
-    console.error('停止交易失败：', e)
-    ElMessage.error('停止交易失败')
+    if (e !== 'cancel') {
+      console.error('停止交易失败：', e)
+      ElMessage.error('停止交易失败')
+    }
   }
 }
 </script>

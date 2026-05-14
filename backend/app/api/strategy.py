@@ -37,7 +37,7 @@ def put_strategy(payload: StrategyConfigSchema, db: Session = Depends(get_db)) -
         StrategyConfigSchema.model_validate(merged)
     except ValidationError as e:
         raise HTTPException(status_code=422, detail=str(e))
-    config = svc.update_config(data)
+    config = svc.update_config(merged)
     return StrategyResponse.model_validate(config)
 
 

@@ -7,15 +7,20 @@ logger = logging.getLogger("auto_trade.notify")
 
 
 class ServerChanNotifier:
+    BASE_URL: str = "https://sctapi.ftqq.com/"
+
     def __init__(self, sct_key: str) -> None:
         self._sct_key = sct_key
-        self._url = f"https://sctapi.ftqq.com/{sct_key}.send"
 
     def send(self, title: str, content: str = "") -> bool:
         if not self._sct_key:
             return False
         try:
-            resp = httpx.post(self._url, data={"title": title, "desp": content}, timeout=10)
+            resp = httpx.post(
+                self.BASE_URL,
+                data={"title": title, "desp": content, "sendkey": self._sct_key},
+                timeout=10,
+            )
             return resp.status_code == 200
         except Exception:
             logger.warning("ServerChan notification failed: title=%s", title)

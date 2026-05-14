@@ -27,8 +27,6 @@ def start_runner(db: Session = Depends(get_db)) -> MessageResponse:
     svc = StrategyService(db)
     svc.update_runtime_state(paused=False, kill_switch=False)
     get_runner().start()
-    get_runner().risk.resume()
-    get_runner().risk.disable_kill_switch()
     return MessageResponse(message="runner started")
 
 

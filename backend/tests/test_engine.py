@@ -95,7 +95,8 @@ class TestStrategyEngine:
 
     def test_empty_params_no_trigger(self) -> None:
         engine = StrategyEngine()
-        engine.update_price(50.0)
+        result = engine.update_price(50.0)
+        assert result.triggered is False
         assert engine.last_price == 50.0
 
     def test_sync_state_from_engine_no_position(self) -> None:

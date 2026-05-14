@@ -155,7 +155,7 @@ class TestRunnerCredentials:
         assert runner.notifier.sct_key == "reload-sct"
         assert runner.broker.subscriptions[0][0] == "AAPL.US"
 
-    def test_reload_credentials_keeps_broker_but_updates_notifier_when_resubscribe_fails(self, monkeypatch) -> None:
+    def test_reload_credentials_keeps_broker_and_notifier_when_resubscribe_fails(self, monkeypatch) -> None:
         credential = CredentialConfig(
             longbridge_app_key="reload-key",
             longbridge_app_secret="reload-secret",
@@ -169,13 +169,14 @@ class TestRunnerCredentials:
 
         runner = AppRunner()
         old_broker = runner.broker
+        old_notifier = runner.notifier
         runner._running = True
         runner.engine.params.symbol = "AAPL.US"
 
         runner.reload_credentials()
 
         assert runner.broker is old_broker
-        assert runner.notifier.sct_key == "reload-sct"
+        assert runner.notifier is old_notifier
 
     def test_reload_credentials_uses_env_sct_key_fallback(self, monkeypatch) -> None:
         credential = CredentialConfig(

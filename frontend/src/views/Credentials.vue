@@ -32,7 +32,7 @@
           </el-input>
         </el-form-item>
         <el-form-item>
-          <el-button type="primary" @click="handleSave" :loading="saving" :disabled="loading">保存</el-button>
+          <el-button type="primary" native-type="submit" :loading="saving" :disabled="loading">保存</el-button>
           <el-tag v-if="saved" type="success" style="margin-left: 10px">已保存</el-tag>
         </el-form-item>
       </el-form>

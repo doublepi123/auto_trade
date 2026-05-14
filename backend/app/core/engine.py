@@ -43,7 +43,7 @@ class StrategyEngine:
     def update_price(self, price: float) -> TriggerResult:
         self.last_price = price
 
-        if not self.params.symbol or self.params.buy_low <= 0 or self.params.sell_high <= 0:
+        if not self.params.symbol or self.params.buy_low <= 0 or self.params.sell_high <= 0 or self.params.buy_low >= self.params.sell_high:
             return TriggerResult(triggered=False)
 
         if self._in_cooldown():

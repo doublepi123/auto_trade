@@ -28,7 +28,7 @@
           <el-input-number v-model="form.max_consecutive_losses" :min="1" />
         </el-form-item>
         <el-form-item>
-          <el-button type="primary" @click="handleSave" :loading="saving">Save</el-button>
+          <el-button type="primary" native-type="submit" :loading="saving">Save</el-button>
           <el-tag v-if="saved" type="success" style="margin-left: 10px">Saved!</el-tag>
         </el-form-item>
       </el-form>
@@ -72,6 +72,23 @@ onMounted(async () => {
 })
 
 async function handleSave() {
+  if (!form.value.symbol) {
+    ElMessage.error('Symbol is required')
+    return
+  }
+  if (form.value.buy_low <= 0) {
+    ElMessage.error('Buy low price must be greater than 0')
+    return
+  }
+  if (form.value.sell_high <= 0) {
+    ElMessage.error('Sell high price must be greater than 0')
+    return
+  }
+  if (form.value.buy_low >= form.value.sell_high) {
+    ElMessage.error('Buy low price must be less than sell high price')
+    return
+  }
+
   saving.value = true
   saved.value = false
   try {

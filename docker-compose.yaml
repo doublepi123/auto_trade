@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   backend:
     build: ./backend
@@ -17,6 +15,12 @@ services:
       - LONGBRIDGE_APP_SECRET=${LONGBRIDGE_APP_SECRET:-}
       - LONGBRIDGE_ACCESS_TOKEN=${LONGBRIDGE_ACCESS_TOKEN:-}
       - AUTO_TRADE_SCT_KEY=${AUTO_TRADE_SCT_KEY:-}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/docs", "||", "exit", "1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
     restart: unless-stopped
 
   frontend:
@@ -24,5 +28,6 @@ services:
     ports:
       - '${AUTO_TRADE_FRONTEND_PORT:-8080}:80'
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     restart: unless-stopped

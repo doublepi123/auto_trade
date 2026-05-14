@@ -15,7 +15,7 @@ def _import_openapi() -> Any:
     for name in ("longport.openapi", "longbridge.openapi"):
         try:
             return __import__(name, fromlist=["Config"])
-        except ModuleNotFoundError:
+        except ImportError:
             continue
     raise RuntimeError("Longbridge SDK not installed. Install longport or longbridge.")
 
@@ -74,7 +74,10 @@ def _iter_position_items(item: Any) -> list[Any]:
             return _iter_position_items(nested)
         for key in ("list", "channels", "stock_info", "positions"):
             if key in item:
-                return _iter_position_items(item[key])
+                nested = item[key]
+                if nested is item:
+                    continue
+                return _iter_position_items(nested)
         return [item] if item.get("symbol") else []
 
     children: list[Any] = []
@@ -147,8 +150,11 @@ class BrokerGateway:
                     ask=float(getattr(_event, "ask", 0)),
                     timestamp=str(getattr(_event, "timestamp", "")),
                 )
-                for cb in self._quote_callbacks:
-                    cb(quote)
+                for cb in list(self._quote_callbacks):
+                    try:
+                        cb(quote)
+                    except Exception:
+                        logger.exception("quote callback failed for %s", _symbol)
 
             self._quote_ctx.set_on_quote(_on_quote)
             topics = [TopicType.Quote] if TopicType else []
@@ -196,17 +202,25 @@ class BrokerGateway:
                 raw = _get_value(item, "quantity", None)
                 if raw is None:
                     raw = _get_value(item, "available_quantity", 0)
-                qty = Decimal(str(raw)) if raw is not None else Decimal("0")
+                try:
+                    qty = Decimal(str(raw)) if raw is not None else Decimal("0")
+                except Exception:
+                    qty = Decimal("0")
                 if qty == 0:
                     continue
 
                 raw_side = str(_get_value(item, "side", "")).upper()
                 side = raw_side if raw_side in {"LONG", "SHORT"} else ("SHORT" if qty < 0 else "LONG")
+                raw_avg = _get_value(item, "cost_price", _get_value(item, "avg_price", "0"))
+                try:
+                    avg_price = Decimal(str(raw_avg))
+                except Exception:
+                    avg_price = Decimal("0")
                 positions.append(Position(
                     symbol=str(_get_value(item, "symbol", "")),
                     side=side,
                     quantity=abs(qty),
-                    avg_price=Decimal(str(_get_value(item, "cost_price", _get_value(item, "avg_price", "0")))),
+                    avg_price=avg_price,
                 ))
             return positions
 
@@ -220,6 +234,11 @@ class BrokerGateway:
                 except Exception:
                     pass
             self._quote_ctx = None
+            if self._trade_ctx is not None:
+                try:
+                    self._trade_ctx.close()
+                except Exception:
+                    pass
             self._trade_ctx = None
 
     def get_cash(self) -> Decimal:
@@ -232,7 +251,8 @@ class BrokerGateway:
                         currency = getattr(item, "currency", "")
                         if currency in ("USD", "HKD"):
                             return Decimal(str(getattr(item, "available_cash", getattr(item, "cash", "0"))))
-                    return Decimal(str(getattr(response[0], "available_cash", "0")))
+                    logger.warning("get_cash: no USD/HKD item found in account_balance response")
+                    return Decimal("0")
                 return Decimal(str(getattr(response, "available_cash", getattr(response, "cash", "0"))))
             except Exception:
                 logger.exception("failed to get account balance")

@@ -91,8 +91,12 @@ class AppRunner:
         with self._start_lock:
             if self._running:
                 return
+            try:
+                self._initialize_runner()
+            except Exception:
+                logger.exception("runner initialization failed")
+                return
             self._running = True
-            self._initialize_runner()
 
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
@@ -124,7 +128,6 @@ class AppRunner:
                     new_broker.subscribe_quotes(symbol, self._on_quote)
                 except Exception as exc:
                     logger.warning(f"cannot subscribe quotes after credential reload: {exc}")
-                    self.notifier = new_notifier
                     new_broker.close()
                     return
 
@@ -148,24 +151,25 @@ class AppRunner:
             self.broker.close()
 
     def _on_quote(self, quote: Quote) -> None:
-        if not self._running:
-            return
-        try:
-            engine_snapshot = (
-                self.engine.state,
-                self.engine.last_trigger_price,
-                self.engine.last_trigger_at,
-            )
-            result = self.engine.update_price(quote.last_price)
-            self._broadcast_status()
+        with self._state_lock:
+            if not self._running:
+                return
+            try:
+                engine_snapshot = (
+                    self.engine.state,
+                    self.engine.last_trigger_price,
+                    self.engine.last_trigger_at,
+                )
+                result = self.engine.update_price(quote.last_price)
+                self._broadcast_status()
 
-            if result.triggered:
-                executed = self._handle_trigger(result, quote)
-                if not executed:
-                    self._restore_engine_snapshot(engine_snapshot)
-                    self._broadcast_status()
-        except Exception:
-            logger.exception("error processing quote")
+                if result.triggered:
+                    executed = self._handle_trigger(result, quote)
+                    if not executed:
+                        self._restore_engine_snapshot(engine_snapshot)
+                        self._broadcast_status()
+            except Exception:
+                logger.exception("error processing quote")
 
     def _restore_engine_snapshot(self, snapshot: tuple[EngineState, float, datetime | None]) -> None:
         state, last_trigger_price, last_trigger_at = snapshot
@@ -349,10 +353,13 @@ class AppRunner:
 
 
 _runner: AppRunner | None = None
+_runner_lock = threading.Lock()
 
 
 def get_runner() -> AppRunner:
     global _runner
     if _runner is None:
-        _runner = AppRunner()
+        with _runner_lock:
+            if _runner is None:
+                _runner = AppRunner()
     return _runner

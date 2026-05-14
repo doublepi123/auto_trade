@@ -31,12 +31,14 @@ def _bootstrap_credentials(db: Session, credential_model: type, strategy_model: 
         credential = credential_model()
         if legacy is not None and legacy.sct_key:
             credential.sct_key = encrypt_secret(legacy.sct_key)
+            legacy.sct_key = ""
         db.add(credential)
         db.commit()
         return
 
     if not credential.sct_key and legacy is not None and legacy.sct_key:
         credential.sct_key = encrypt_secret(legacy.sct_key)
+        legacy.sct_key = ""
         db.add(credential)
         db.commit()
 
