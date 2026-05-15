@@ -54,6 +54,26 @@ class Position:
     avg_price: Decimal
 
 
+@dataclass
+class CashBalance:
+    currency: str
+    available_cash: Decimal
+    frozen_cash: Decimal
+
+
+@dataclass
+class NetAsset:
+    currency: str
+    amount: Decimal
+
+
+@dataclass
+class AccountInfo:
+    total_assets: Decimal
+    cash_balances: list[CashBalance]
+    net_assets: list[NetAsset]
+
+
 def _get_value(item: Any, key: str, default: Any = None) -> Any:
     if isinstance(item, dict):
         return item.get(key, default)
@@ -270,6 +290,49 @@ class BrokerGateway:
                     logger.warning("get_cash: no USD/HKD item found in account_balance response")
                     return Decimal("0")
                 return Decimal(str(getattr(response, "available_cash", getattr(response, "cash", "0"))))
+            except Exception:
+                logger.exception("failed to get account balance")
+                raise
+
+    def get_account(self) -> AccountInfo:
+        with self._lock:
+            self._init_clients()
+            try:
+                response = self._trade_ctx.account_balance()
+                cash_balances: list[CashBalance] = []
+                net_assets: list[NetAsset] = []
+                total_assets = Decimal("0")
+                items = response if isinstance(response, list) else [response]
+                primary_currency = ""
+                primary_total = Decimal("0")
+
+                for item in items:
+                    currency = str(getattr(item, "currency", ""))
+                    available = Decimal(str(getattr(item, "available_cash", getattr(item, "cash", "0"))))
+                    frozen = Decimal(str(getattr(item, "frozen_cash", getattr(item, "frozen_amounts", "0"))))
+                    net_amount = Decimal(str(getattr(item, "net_assets", "0")))
+                    cash_balances.append(CashBalance(
+                        currency=currency,
+                        available_cash=available,
+                        frozen_cash=frozen,
+                    ))
+                    net_assets.append(NetAsset(
+                        currency=currency,
+                        amount=net_amount,
+                    ))
+                    if currency in ("USD", "HKD") and not primary_currency:
+                        primary_currency = currency
+                        primary_total = net_amount
+                    total_assets += net_amount
+
+                if primary_currency:
+                    total_assets = primary_total
+
+                return AccountInfo(
+                    total_assets=total_assets,
+                    cash_balances=cash_balances,
+                    net_assets=net_assets,
+                )
             except Exception:
                 logger.exception("failed to get account balance")
                 raise

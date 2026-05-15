@@ -1,7 +1,18 @@
 from decimal import Decimal
 
 from app.core import broker as broker_module
-from app.core.broker import BrokerCredentials, BrokerGateway, OrderResult, Position, Quote, _import_openapi, _SIDE_MAP
+from app.core.broker import (
+    AccountInfo,
+    BrokerCredentials,
+    BrokerGateway,
+    CashBalance,
+    NetAsset,
+    OrderResult,
+    Position,
+    Quote,
+    _import_openapi,
+    _SIDE_MAP,
+)
 
 
 class TestQuote:
@@ -165,3 +176,175 @@ class TestSideMap:
 
     def test_buy_to_cover_maps_to_buy(self) -> None:
         assert _SIDE_MAP["BUY_TO_COVER"] == "Buy"
+
+
+class TestCashBalance:
+    def test_cash_balance_fields(self) -> None:
+        cb = CashBalance(currency="USD", available_cash=Decimal("1000"), frozen_cash=Decimal("200"))
+        assert cb.currency == "USD"
+        assert cb.available_cash == Decimal("1000")
+        assert cb.frozen_cash == Decimal("200")
+
+
+class TestNetAsset:
+    def test_net_asset_fields(self) -> None:
+        na = NetAsset(currency="HKD", amount=Decimal("50000"))
+        assert na.currency == "HKD"
+        assert na.amount == Decimal("50000")
+
+
+class TestAccountInfo:
+    def test_account_info_with_primary_currency(self) -> None:
+        cb = CashBalance(currency="USD", available_cash=Decimal("1000"), frozen_cash=Decimal("200"))
+        na = NetAsset(currency="USD", amount=Decimal("50000"))
+        ai = AccountInfo(total_assets=Decimal("50000"), cash_balances=[cb], net_assets=[na])
+        assert ai.total_assets == Decimal("50000")
+        assert len(ai.cash_balances) == 1
+        assert len(ai.net_assets) == 1
+
+    def test_account_info_with_multiple_currencies(self) -> None:
+        cb_usd = CashBalance(currency="USD", available_cash=Decimal("1000"), frozen_cash=Decimal("200"))
+        cb_hkd = CashBalance(currency="HKD", available_cash=Decimal("5000"), frozen_cash=Decimal("100"))
+        na_usd = NetAsset(currency="USD", amount=Decimal("50000"))
+        na_hkd = NetAsset(currency="HKD", amount=Decimal("390000"))
+        ai = AccountInfo(
+            total_assets=Decimal("50000"),
+            cash_balances=[cb_usd, cb_hkd],
+            net_assets=[na_usd, na_hkd],
+        )
+        assert len(ai.cash_balances) == 2
+        assert len(ai.net_assets) == 2
+
+
+class TestGetAccount:
+    def _make_fake_module(self):
+        class BalanceItem:
+            def __init__(self, currency, available_cash, frozen_cash, net_assets):
+                self.currency = currency
+                self.available_cash = available_cash
+                self.frozen_cash = frozen_cash
+                self.net_assets = net_assets
+
+        class FakeConfig:
+            @staticmethod
+            def from_apikey(app_key, app_secret, access_token):
+                return (app_key, app_secret, access_token)
+
+        class FakeModule:
+            Config = FakeConfig
+
+            class QuoteContext:
+                def __init__(self, config):
+                    pass
+
+            class TradeContext:
+                def __init__(self, config):
+                    self._config = config
+
+        return FakeModule, BalanceItem
+
+    def test_get_account_single_currency(self, monkeypatch) -> None:
+        FakeModule, BalanceItem = self._make_fake_module()
+
+        class TradeContext:
+            def __init__(self, config):
+                pass
+
+            def account_balance(self):
+                return [BalanceItem("USD", "5000", "1000", "50000")]
+
+        monkeypatch.setattr(broker_module, "_import_openapi", lambda: FakeModule)
+        monkeypatch.setattr(broker_module.settings, "longbridge_app_key", "k", raising=False)
+        monkeypatch.setattr(broker_module.settings, "longbridge_app_secret", "s", raising=False)
+        monkeypatch.setattr(broker_module.settings, "longbridge_access_token", "t", raising=False)
+
+        gw = BrokerGateway()
+        gw._trade_ctx = TradeContext(None)
+        gw._quote_ctx = object()
+        result = gw.get_account()
+        assert result.total_assets == Decimal("50000")
+        assert len(result.cash_balances) == 1
+        assert result.cash_balances[0].currency == "USD"
+        assert result.cash_balances[0].available_cash == Decimal("5000")
+        assert result.cash_balances[0].frozen_cash == Decimal("1000")
+        assert len(result.net_assets) == 1
+        assert result.net_assets[0].currency == "USD"
+        assert result.net_assets[0].amount == Decimal("50000")
+
+    def test_get_account_picks_primary_currency(self, monkeypatch) -> None:
+        FakeModule, BalanceItem = self._make_fake_module()
+
+        class TradeContext:
+            def __init__(self, config):
+                pass
+
+            def account_balance(self):
+                return [
+                    BalanceItem("CNH", "1000", "200", "7200"),
+                    BalanceItem("USD", "5000", "1000", "50000"),
+                ]
+
+        monkeypatch.setattr(broker_module, "_import_openapi", lambda: FakeModule)
+        monkeypatch.setattr(broker_module.settings, "longbridge_app_key", "k", raising=False)
+        monkeypatch.setattr(broker_module.settings, "longbridge_app_secret", "s", raising=False)
+        monkeypatch.setattr(broker_module.settings, "longbridge_access_token", "t", raising=False)
+
+        gw = BrokerGateway()
+        gw._trade_ctx = TradeContext(None)
+        gw._quote_ctx = object()
+        result = gw.get_account()
+        assert result.total_assets == Decimal("50000")
+        assert len(result.cash_balances) == 2
+        assert len(result.net_assets) == 2
+
+    def test_get_account_no_primary_currency(self, monkeypatch) -> None:
+        FakeModule, BalanceItem = self._make_fake_module()
+
+        class TradeContext:
+            def __init__(self, config):
+                pass
+
+            def account_balance(self):
+                return [BalanceItem("CNH", "1000", "200", "7200")]
+
+        monkeypatch.setattr(broker_module, "_import_openapi", lambda: FakeModule)
+        monkeypatch.setattr(broker_module.settings, "longbridge_app_key", "k", raising=False)
+        monkeypatch.setattr(broker_module.settings, "longbridge_app_secret", "s", raising=False)
+        monkeypatch.setattr(broker_module.settings, "longbridge_access_token", "t", raising=False)
+
+        gw = BrokerGateway()
+        gw._trade_ctx = TradeContext(None)
+        gw._quote_ctx = object()
+        result = gw.get_account()
+        assert result.total_assets == Decimal("7200")
+        assert len(result.cash_balances) == 1
+        assert result.cash_balances[0].currency == "CNH"
+
+    def test_get_account_frozen_amounts_fallback(self, monkeypatch) -> None:
+        FakeModule, BalanceItem = self._make_fake_module()
+
+        class BalanceItemAlt:
+            def __init__(self, currency, cash, frozen_amounts, net_assets):
+                self.currency = currency
+                self.cash = cash
+                self.frozen_amounts = frozen_amounts
+                self.net_assets = net_assets
+
+        class TradeContext:
+            def __init__(self, config):
+                pass
+
+            def account_balance(self):
+                return [BalanceItemAlt("USD", "3000", "500", "40000")]
+
+        monkeypatch.setattr(broker_module, "_import_openapi", lambda: FakeModule)
+        monkeypatch.setattr(broker_module.settings, "longbridge_app_key", "k", raising=False)
+        monkeypatch.setattr(broker_module.settings, "longbridge_app_secret", "s", raising=False)
+        monkeypatch.setattr(broker_module.settings, "longbridge_access_token", "t", raising=False)
+
+        gw = BrokerGateway()
+        gw._trade_ctx = TradeContext(None)
+        gw._quote_ctx = object()
+        result = gw.get_account()
+        assert result.cash_balances[0].available_cash == Decimal("3000")
+        assert result.cash_balances[0].frozen_cash == Decimal("500")
