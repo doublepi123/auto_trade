@@ -164,10 +164,15 @@ class AppRunner:
                 self._broadcast_status()
 
                 if result.triggered:
-                    executed = self._handle_trigger(result, quote)
-                    if not executed:
+                    try:
+                        executed = self._handle_trigger(result, quote)
+                        if not executed:
+                            self._restore_engine_snapshot(engine_snapshot)
+                            self._broadcast_status()
+                    except Exception:
                         self._restore_engine_snapshot(engine_snapshot)
                         self._broadcast_status()
+                        raise
             except Exception:
                 logger.exception("error processing quote")
 
@@ -220,8 +225,8 @@ class AppRunner:
             return False
 
         result = broker.submit_limit_order(symbol, "BUY", Decimal(qty), price)
-        self._record_order(result.broker_order_id, symbol, "BUY", float(qty), float(price))
-        self.notifier.notify_order("BUY", symbol, str(qty), str(price), result.broker_order_id)
+        self._safe_record_order(result.broker_order_id, symbol, "BUY", float(qty), float(price))
+        self._safe_notify_order("BUY", symbol, str(qty), str(price), result.broker_order_id)
         logger.info(f"BUY: {symbol} qty={qty} price={price}")
         return True
 
@@ -239,8 +244,8 @@ class AppRunner:
             return False
         pnl = float((price - long_pos.avg_price) * long_pos.quantity)
         result = broker.submit_limit_order(symbol, "SELL", long_pos.quantity, price)
-        self._record_order(result.broker_order_id, symbol, "SELL", float(long_pos.quantity), float(price))
-        self.notifier.notify_order("SELL", symbol, str(long_pos.quantity), str(price), result.broker_order_id)
+        self._safe_record_order(result.broker_order_id, symbol, "SELL", float(long_pos.quantity), float(price))
+        self._safe_notify_order("SELL", symbol, str(long_pos.quantity), str(price), result.broker_order_id)
         self.risk.record_trade(pnl)
         logger.info(f"SELL: {symbol} qty={long_pos.quantity} price={price} pnl={pnl}")
         return True
@@ -259,8 +264,8 @@ class AppRunner:
             return False
 
         result = broker.submit_limit_order(symbol, "SELL", Decimal(qty), price)
-        self._record_order(result.broker_order_id, symbol, "SELL_SHORT", float(qty), float(price))
-        self.notifier.notify_order("SELL_SHORT", symbol, str(qty), str(price), result.broker_order_id)
+        self._safe_record_order(result.broker_order_id, symbol, "SELL_SHORT", float(qty), float(price))
+        self._safe_notify_order("SELL_SHORT", symbol, str(qty), str(price), result.broker_order_id)
         logger.info(f"SELL_SHORT: {symbol} qty={qty} price={price}")
         return True
 
@@ -278,8 +283,8 @@ class AppRunner:
             return False
         pnl = float((pos.avg_price - price) * pos.quantity)
         result = broker.submit_limit_order(symbol, "BUY", pos.quantity, price)
-        self._record_order(result.broker_order_id, symbol, "BUY_TO_COVER", float(pos.quantity), float(price))
-        self.notifier.notify_order("BUY_TO_COVER", symbol, str(pos.quantity), str(price), result.broker_order_id)
+        self._safe_record_order(result.broker_order_id, symbol, "BUY_TO_COVER", float(pos.quantity), float(price))
+        self._safe_notify_order("BUY_TO_COVER", symbol, str(pos.quantity), str(price), result.broker_order_id)
         self.risk.record_trade(pnl)
         logger.info(f"BUY_TO_COVER: {symbol} qty={pos.quantity} price={price} pnl={pnl}")
         return True
@@ -299,6 +304,18 @@ class AppRunner:
             db.commit()
         finally:
             db.close()
+
+    def _safe_record_order(self, order_id: str, symbol: str, side: str, qty: float, price: float) -> None:
+        try:
+            self._record_order(order_id, symbol, side, qty, price)
+        except Exception:
+            logger.exception("failed to record order %s for %s (broker order is still live)", order_id, symbol)
+
+    def _safe_notify_order(self, side: str, symbol: str, quantity: str, price: str, order_id: str) -> None:
+        try:
+            self.notifier.notify_order(side, symbol, quantity, price, order_id)
+        except Exception:
+            logger.exception("failed to send order notification for %s %s", side, symbol)
 
     # TODO: Implement order status polling or broker webhook integration to update
     # order status from SUBMITTED to FILLED/REJECTED/CANCELLED using broker SDK.

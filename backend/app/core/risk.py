@@ -57,6 +57,7 @@ class RiskController:
         today = date.today()
         if today != self._today:
             self.daily_pnl = 0.0
+            self.consecutive_losses = 0
             self._today = today
 
         self.daily_pnl += pnl
@@ -79,3 +80,4 @@ class RiskController:
 
     def disable_kill_switch(self) -> None:
         self.kill_switch = False
+        self._kill_switch_reason = ""

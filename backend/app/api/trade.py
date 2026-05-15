@@ -32,8 +32,8 @@ def start_runner(db: Session = Depends(get_db)) -> MessageResponse:
 
 @router.post("/control/stop", response_model=MessageResponse, dependencies=[Depends(require_api_key())])
 def stop_runner(payload: ControlRequest, db: Session = Depends(get_db)) -> MessageResponse:
-    get_runner().stop()
     get_runner().risk.pause("manual")
+    get_runner().stop()
     svc = StrategyService(db)
     svc.update_runtime_state(paused=True)
     return MessageResponse(message="runner stopped")

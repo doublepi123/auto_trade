@@ -1,5 +1,5 @@
 <template>
-  <div>
+  <div v-loading="initialLoading">
     <h3>仪表盘</h3>
     <el-row :gutter="20">
       <el-col :span="8">
@@ -37,10 +37,10 @@
         <el-card>
           <template #header>操作控制</template>
           <el-space>
-            <el-button type="primary" @click="handleStart">启动</el-button>
+            <el-button type="primary" @click="handleStart" :disabled="status.kill_switch">启动</el-button>
             <el-button type="danger" @click="handleStop">停止</el-button>
-            <el-button type="warning" @click="handlePause" :disabled="status.paused">暂停</el-button>
-            <el-button type="success" @click="handleResume" :disabled="!status.paused">恢复</el-button>
+            <el-button type="warning" @click="handlePause" :disabled="status.paused || status.kill_switch">暂停</el-button>
+            <el-button type="success" @click="handleResume" :disabled="!status.paused || status.kill_switch">恢复</el-button>
             <el-button type="danger" plain @click="handleKillSwitch">紧急停止</el-button>
           </el-space>
         </el-card>
@@ -77,6 +77,8 @@ const status = ref<StatusData>({
   last_price: 0, last_trigger_price: 0, last_trigger_at: null,
 })
 
+const initialLoading = ref(true)
+
 const stateTagType = computed(() => {
   switch (status.value.engine_state) {
     case 'long': return 'success'
@@ -85,15 +87,105 @@ const stateTagType = computed(() => {
   }
 })
 
-let timer: ReturnType<typeof setInterval> | null = null
+let ws: WebSocket | null = null
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+let pollTimer: ReturnType<typeof setInterval> | null = null
+let useWebSocket = false
+
+function connectWebSocket() {
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  const wsUrl = `${protocol}//${window.location.host}/ws`
+  ws = new WebSocket(wsUrl)
+
+  const apiKey = localStorage.getItem('api_key')
+  ws.onopen = () => {
+    useWebSocket = true
+    if (apiKey) {
+      ws?.send(JSON.stringify({ token: apiKey }))
+    }
+  }
+
+  ws.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data)
+      if (data.type === 'pong') return
+      if (data.state !== undefined) {
+        status.value = {
+          engine_state: data.state,
+          paused: data.risks?.paused ?? status.value.paused,
+          kill_switch: data.risks?.kill_switch ?? status.value.kill_switch,
+          daily_pnl: data.risks?.daily_pnl ?? status.value.daily_pnl,
+          consecutive_losses: data.risks?.consecutive_losses ?? status.value.consecutive_losses,
+          last_price: data.last_price ?? status.value.last_price,
+          last_trigger_price: data.last_trigger_price ?? status.value.last_trigger_price,
+          last_trigger_at: data.last_trigger_at ?? status.value.last_trigger_at,
+        }
+      }
+    } catch {
+      // ignore parse errors
+    }
+  }
+
+  ws.onclose = () => {
+    useWebSocket = false
+    ws = null
+    scheduleReconnect()
+  }
+
+  ws.onerror = () => {
+    useWebSocket = false
+  }
+}
+
+function scheduleReconnect() {
+  if (reconnectTimer) return
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null
+    connectWebSocket()
+  }, 5000)
+}
+
+function startPolling() {
+  pollTimer = setInterval(async () => {
+    if (useWebSocket) return
+    try {
+      const st = await getStatus()
+      status.value = st
+    } catch {
+      // silent — WebSocket may reconnect
+    }
+  }, 3000)
+}
 
 onMounted(async () => {
-  await refresh()
-  timer = setInterval(refresh, 3000)
+  try {
+    const [s, st] = await Promise.all([getStrategy(), getStatus()])
+    strategy.value = s
+    status.value = st
+  } catch (e) {
+    console.error('刷新仪表盘失败：', e)
+    ElMessage.error('刷新仪表盘数据失败')
+  } finally {
+    initialLoading.value = false
+  }
+  connectWebSocket()
+  startPolling()
 })
 
 onUnmounted(() => {
-  if (timer) clearInterval(timer)
+  if (ws) {
+    ws.onclose = null
+    ws.close()
+    ws = null
+  }
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer)
+    reconnectTimer = null
+  }
+  if (pollTimer) {
+    clearInterval(pollTimer)
+    pollTimer = null
+  }
 })
 
 async function refresh() {
@@ -103,7 +195,6 @@ async function refresh() {
     status.value = st
   } catch (e) {
     console.error('刷新仪表盘失败：', e)
-    ElMessage.error('刷新仪表盘数据失败')
   }
 }
 
@@ -129,7 +220,7 @@ async function handleResume() {
 
 async function handleKillSwitch() {
   try {
-    await ElMessageBox.confirm('Are you sure you want to activate the kill switch? This will immediately halt all trading.', 'Confirm', { type: 'warning' })
+    await ElMessageBox.confirm('确定要开启紧急停止吗？这将立即停止所有交易。', '确认', { type: 'warning' })
     await activateKillSwitch()
     await refresh()
   } catch (e: any) {
@@ -152,7 +243,7 @@ async function handleStart() {
 
 async function handleStop() {
   try {
-    await ElMessageBox.confirm('Are you sure you want to stop trading?', 'Confirm', { type: 'warning' })
+    await ElMessageBox.confirm('确定要停止交易吗？', '确认', { type: 'warning' })
     await stopTrading()
     await refresh()
   } catch (e: any) {
@@ -162,4 +253,3 @@ async function handleStop() {
     }
   }
 }
-</script>

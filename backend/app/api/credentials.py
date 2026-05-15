@@ -27,8 +27,12 @@ def update_credentials(payload: CredentialConfigSchema, db: Session = Depends(ge
     svc = CredentialsService(db)
     data = payload.model_dump(exclude_unset=True)
     config = svc.update_config(data)
+    reload_warning = None
     try:
         get_runner().reload_credentials()
     except Exception:
         logger.exception("credential reload failed after save")
-    return CredentialResponse.model_validate(svc.to_response(config))
+        reload_warning = "Credentials saved but live reload failed. A restart may be required for changes to take effect."
+    response = svc.to_response(config)
+    response["reload_warning"] = reload_warning
+    return CredentialResponse.model_validate(response)

@@ -90,7 +90,11 @@ def _load_private_key() -> rsa.RSAPrivateKey:
             try:
                 return serialization.load_pem_private_key(key_bytes, password=kek)
             except (ValueError, TypeError):
-                pass
+                raise ValueError(
+                    "CREDENTIAL_MASTER_KEY does not match the key file encryption. "
+                    "If the master key was changed, delete data/credential_private_key.pem "
+                    "and restart to regenerate (existing encrypted credentials will be lost)."
+                )
         return serialization.load_pem_private_key(key_bytes, password=None)
 
     _KEY_PATH.parent.mkdir(parents=True, exist_ok=True)

@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.api.auth import require_api_key
 from app.database import get_db
-from app.schemas import StatusResponse, StrategyConfigSchema, StrategyResponse
+from app.schemas import StatusResponse, StrategyConfigSchema, StrategyMergedSchema, StrategyResponse
 from app.services.strategy_service import StrategyService
 
 router = APIRouter(prefix="/api", tags=["strategy"])
@@ -34,7 +34,7 @@ def put_strategy(payload: StrategyConfigSchema, db: Session = Depends(get_db)) -
         "max_consecutive_losses": data.get("max_consecutive_losses", current.max_consecutive_losses),
     }
     try:
-        StrategyConfigSchema.model_validate(merged)
+        StrategyMergedSchema.model_validate(merged)
     except ValidationError as e:
         raise HTTPException(status_code=422, detail=str(e))
     config = svc.update_config(merged)

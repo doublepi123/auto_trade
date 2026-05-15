@@ -91,4 +91,6 @@ async def websocket_endpoint(ws: WebSocket) -> None:
             if data == "ping":
                 await ws.send_text(json.dumps({"type": "pong"}))
     except WebSocketDisconnect:
+        pass
+    finally:
         await manager.disconnect(ws)

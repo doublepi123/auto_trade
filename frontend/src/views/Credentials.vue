@@ -36,6 +36,7 @@
           <el-tag v-if="saved" type="success" style="margin-left: 10px">已保存</el-tag>
         </el-form-item>
       </el-form>
+      <el-alert v-if="reloadWarning" type="warning" :title="reloadWarning" show-icon style="margin-top: 12px" />
     </el-card>
   </div>
 </template>
@@ -62,6 +63,7 @@ const hasFlags = ref({
 const saving = ref(false)
 const loading = ref(true)
 const saved = ref(false)
+const reloadWarning = ref<string | null>(null)
 
 watch(form, () => {
   saved.value = false
@@ -96,6 +98,7 @@ async function handleSave() {
       has_longbridge_access_token: resp.has_longbridge_access_token,
       has_sct_key: resp.has_sct_key,
     }
+    reloadWarning.value = resp.reload_warning ?? null
     saved.value = true
   } catch (e) {
     console.error('保存凭证失败：', e)

@@ -21,6 +21,7 @@ export interface CredentialsConfig {
   has_longbridge_access_token: boolean
   has_sct_key: boolean
   updated_at: string
+  reload_warning?: string | null
 }
 
 export interface StatusData {
