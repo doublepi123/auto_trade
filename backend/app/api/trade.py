@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+from decimal import Decimal
+
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import OrderRecord
 from app.runner import get_runner
-from app.schemas import ControlRequest, MessageResponse, OrderResponse
+from app.schemas import AccountResponse, CashBalanceSchema, ControlRequest, MessageResponse, OrderResponse, PositionSchema
 from app.services.strategy_service import StrategyService
 from app.api.auth import require_api_key
 
@@ -20,6 +22,51 @@ def get_orders(
 ) -> list[OrderResponse]:
     orders = db.query(OrderRecord).order_by(OrderRecord.created_at.desc()).limit(limit).all()
     return [OrderResponse.model_validate(o) for o in orders]
+
+
+@router.get("/account", response_model=AccountResponse, dependencies=[Depends(require_api_key())])
+def get_account() -> AccountResponse:
+    runner = get_runner()
+    broker = runner.broker
+    try:
+        account = broker.get_account()
+        total_assets = float(account.total_assets)
+        cash_balances = [
+            CashBalanceSchema(
+                currency=cb.currency,
+                available_cash=float(cb.available_cash),
+                frozen_cash=float(cb.frozen_cash),
+            )
+            for cb in account.cash_balances
+        ]
+    except Exception:
+        total_assets = 0.0
+        cash_balances = []
+
+    try:
+        broker_positions = broker.get_positions()
+        positions: list[PositionSchema] = []
+        for pos in broker_positions:
+            try:
+                quote = broker.get_quote(pos.symbol)
+                market_value = float(pos.quantity * Decimal(str(quote.last_price)))
+            except Exception:
+                market_value = float(pos.quantity * pos.avg_price)
+            positions.append(PositionSchema(
+                symbol=pos.symbol,
+                side=pos.side,
+                quantity=float(pos.quantity),
+                avg_price=float(pos.avg_price),
+                market_value=market_value,
+            ))
+    except Exception:
+        positions = []
+
+    return AccountResponse(
+        total_assets=total_assets,
+        cash_balances=cash_balances,
+        positions=positions,
+    )
 
 
 @router.post("/control/start", response_model=MessageResponse, dependencies=[Depends(require_api_key())])

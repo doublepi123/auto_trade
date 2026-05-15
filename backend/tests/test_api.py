@@ -139,5 +139,13 @@ class TestAPI:
         resp = client.get("/api/health")
         assert resp.status_code == 200
 
+    def test_get_account(self) -> None:
+        resp = client.get("/api/account")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "total_assets" in data
+        assert "cash_balances" in data
+        assert "positions" in data
+
     def test_app_title(self) -> None:
         assert app.title == "Auto Trade"

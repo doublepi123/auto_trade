@@ -130,3 +130,23 @@ class ControlRequest(BaseModel):
 
 class MessageResponse(BaseModel):
     message: str
+
+
+class CashBalanceSchema(BaseModel):
+    currency: str
+    available_cash: float
+    frozen_cash: float
+
+
+class PositionSchema(BaseModel):
+    symbol: str
+    side: str
+    quantity: float
+    avg_price: float
+    market_value: float
+
+
+class AccountResponse(BaseModel):
+    total_assets: float
+    cash_balances: list[CashBalanceSchema]
+    positions: list[PositionSchema]
