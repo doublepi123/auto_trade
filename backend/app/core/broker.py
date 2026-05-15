@@ -136,8 +136,13 @@ class BrokerGateway:
                 if callback not in self._quote_callbacks:
                     self._quote_callbacks.append(callback)
                 return
+            if self._subscribed_symbol and self._quote_ctx is not None:
+                try:
+                    self._quote_ctx.unsubscribe([self._subscribed_symbol])
+                except Exception:
+                    logger.warning("failed to unsubscribe from %s", self._subscribed_symbol)
             self._init_clients()
-            self._quote_callbacks.append(callback)
+            self._quote_callbacks = [callback]
             self._subscribed_symbol = symbol
             module = _import_openapi()
             TopicType = getattr(module, "TopicType", None)
@@ -184,13 +189,14 @@ class BrokerGateway:
             )
 
             order_id = str(getattr(response, "order_id", getattr(response, "broker_order_id", "")))
+            raw_status = str(getattr(response, "status", "SUBMITTED")).upper()
             return OrderResult(
                 broker_order_id=order_id,
                 symbol=symbol,
                 side=side,
                 quantity=quantity,
                 price=price,
-                status="SUBMITTED",
+                status=raw_status if raw_status in {"SUBMITTED", "FILLED", "REJECTED", "CANCELLED", "PARTIAL_FILLED"} else "SUBMITTED",
             )
 
     def get_positions(self) -> list[Position]:
@@ -240,6 +246,16 @@ class BrokerGateway:
                 except Exception:
                     pass
             self._trade_ctx = None
+
+    def unsubscribe_quotes(self) -> None:
+        with self._lock:
+            if self._subscribed_symbol and self._quote_ctx is not None:
+                try:
+                    self._quote_ctx.unsubscribe([self._subscribed_symbol])
+                except Exception:
+                    logger.warning("failed to unsubscribe from %s", self._subscribed_symbol)
+            self._quote_callbacks.clear()
+            self._subscribed_symbol = None
 
     def get_cash(self) -> Decimal:
         with self._lock:

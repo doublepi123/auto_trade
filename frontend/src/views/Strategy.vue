@@ -28,7 +28,7 @@
           <el-input-number v-model="form.max_consecutive_losses" :min="1" />
         </el-form-item>
         <el-form-item>
-          <el-button type="primary" native-type="submit" :loading="saving">保存</el-button>
+          <el-button type="primary" native-type="submit" :loading="saving" :disabled="loading">保存</el-button>
           <el-tag v-if="saved" type="success" style="margin-left: 10px">已保存</el-tag>
         </el-form-item>
       </el-form>
@@ -37,7 +37,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, watch, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { getStrategy, updateStrategy } from '../api'
 
@@ -53,6 +53,11 @@ const form = ref({
 
 const saving = ref(false)
 const saved = ref(false)
+const loading = ref(true)
+
+watch(form, () => {
+  saved.value = false
+}, { deep: true })
 
 onMounted(async () => {
   try {
@@ -68,6 +73,9 @@ onMounted(async () => {
     }
   } catch (e) {
     console.error('加载策略失败：', e)
+    ElMessage.error('加载策略失败')
+  } finally {
+    loading.value = false
   }
 })
 

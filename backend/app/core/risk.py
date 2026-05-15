@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from datetime import date
 
@@ -26,17 +27,19 @@ class RiskController:
         self.paused: bool = False
         self._pause_reason: str = ""
         self._kill_switch_reason: str = ""
+        self._lock = threading.Lock()
 
     def check(self) -> RiskResult:
-        if self.kill_switch:
-            return RiskResult(approved=False, reason="kill switch is active")
-        if self.paused:
-            return RiskResult(approved=False, reason="trading is paused")
-        return self._check_limits()
+        with self._lock:
+            if self.kill_switch:
+                return RiskResult(approved=False, reason="kill switch is active")
+            if self.paused:
+                return RiskResult(approved=False, reason="trading is paused")
+            return self._check_limits()
 
     def reset_consecutive_losses(self) -> None:
-        """Public method to reset the consecutive losses counter."""
-        self.consecutive_losses = 0
+        with self._lock:
+            self.consecutive_losses = 0
 
     def _check_limits(self) -> RiskResult:
         today = date.today()
@@ -54,30 +57,35 @@ class RiskController:
         return RiskResult(approved=True)
 
     def record_trade(self, pnl: float) -> None:
-        today = date.today()
-        if today != self._today:
-            self.daily_pnl = 0.0
-            self.consecutive_losses = 0
-            self._today = today
+        with self._lock:
+            today = date.today()
+            if today != self._today:
+                self.daily_pnl = 0.0
+                self.consecutive_losses = 0
+                self._today = today
 
-        self.daily_pnl += pnl
-        if pnl < 0:
-            self.consecutive_losses += 1
-        else:
-            self.consecutive_losses = 0
+            self.daily_pnl += pnl
+            if pnl < 0:
+                self.consecutive_losses += 1
+            else:
+                self.consecutive_losses = 0
 
     def pause(self, reason: str = "manual") -> None:
-        self.paused = True
-        self._pause_reason = reason
+        with self._lock:
+            self.paused = True
+            self._pause_reason = reason
 
     def resume(self) -> None:
-        self.paused = False
-        self._pause_reason = ""
+        with self._lock:
+            self.paused = False
+            self._pause_reason = ""
 
     def enable_kill_switch(self, reason: str = "manual") -> None:
-        self.kill_switch = True
-        self._kill_switch_reason = reason
+        with self._lock:
+            self.kill_switch = True
+            self._kill_switch_reason = reason
 
     def disable_kill_switch(self) -> None:
-        self.kill_switch = False
-        self._kill_switch_reason = ""
+        with self._lock:
+            self.kill_switch = False
+            self._kill_switch_reason = ""

@@ -18,12 +18,18 @@ api.interceptors.response.use(
       const { status } = error.response
       if (status === 401) {
         localStorage.removeItem('api_key')
-        window.dispatchEvent(new CustomEvent('api-key-required'))
+        if (!_notified401) {
+          _notified401 = true
+          window.dispatchEvent(new CustomEvent('api-key-required'))
+          setTimeout(() => { _notified401 = false }, 1000)
+        }
       }
     }
     return Promise.reject(error)
   },
 )
+
+let _notified401 = false
 
 export async function getStrategy(): Promise<StrategyConfig> {
   const resp = await api.get('/api/strategy')

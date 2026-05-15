@@ -49,8 +49,10 @@ onMounted(loadOrders)
 function statusType(status: string): string {
   switch (status) {
     case 'FILLED': return 'success'
+    case 'PARTIAL_FILLED': return 'warning'
     case 'SUBMITTED': return 'warning'
-    case 'REJECTED': case 'CANCELLED': return 'info'
+    case 'REJECTED': return 'danger'
+    case 'CANCELLED': return 'info'
     default: return ''
   }
 }

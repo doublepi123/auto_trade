@@ -9,6 +9,7 @@ const routes = [
   { path: '/strategy', component: Strategy },
   { path: '/credentials', component: Credentials },
   { path: '/history', component: TradeHistory },
+  { path: '/:pathMatch(.*)*', redirect: '/' },
 ]
 
 export default createRouter({

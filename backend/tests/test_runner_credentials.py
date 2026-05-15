@@ -74,6 +74,12 @@ class FakeThread:
     def start(self) -> None:
         self.started = True
 
+    def is_alive(self) -> bool:
+        return False
+
+    def join(self, timeout: float | None = None) -> None:
+        pass
+
 
 class FakeStrategyService:
     def __init__(self, _db: object) -> None:

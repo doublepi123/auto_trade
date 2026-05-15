@@ -16,9 +16,10 @@ class ServerChanNotifier:
         if not self._sct_key:
             return False
         try:
+            url = f"{self.BASE_URL}{self._sct_key}.send"
             resp = httpx.post(
-                self.BASE_URL,
-                data={"title": title, "desp": content, "sendkey": self._sct_key},
+                url,
+                data={"title": title, "desp": content},
                 timeout=10,
             )
             return resp.status_code == 200

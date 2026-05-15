@@ -87,20 +87,24 @@ class AppRunner:
         finally:
             db.close()
 
-    def start(self) -> None:
+    def start(self) -> bool:
         with self._start_lock:
             if self._running:
-                return
+                return False
+            if self._thread is not None and self._thread.is_alive():
+                self._running = False
+                self._thread.join(timeout=10)
             try:
                 self._initialize_runner()
             except Exception:
                 logger.exception("runner initialization failed")
-                return
+                return False
             self._running = True
 
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
         logger.info("runner started")
+        return True
 
     def _load_credentials(self) -> PlainCredentials:
         db = SessionLocal()
@@ -138,17 +142,54 @@ class AppRunner:
 
             if should_resubscribe:
                 self._quotes_subscribed = True
-            elif not resubscribe:
+            else:
                 self._quotes_subscribed = False
 
     def reload_credentials(self) -> None:
         self._apply_credentials(self._load_credentials(), resubscribe=self._running)
+
+    def reload_strategy(self) -> None:
+        with self._state_lock:
+            db = SessionLocal()
+            try:
+                svc = StrategyService(db)
+                config = svc.get_config()
+                old_symbol = self.engine.params.symbol
+                self.engine.params = StrategyParams(
+                    symbol=config.symbol,
+                    market=config.market,
+                    buy_low=config.buy_low,
+                    sell_high=config.sell_high,
+                    short_selling=config.short_selling,
+                )
+                self.risk.config = RiskConfig(
+                    max_daily_loss=config.max_daily_loss,
+                    max_consecutive_losses=config.max_consecutive_losses,
+                )
+                if config.symbol != old_symbol and self._running:
+                    if self._quotes_subscribed:
+                        try:
+                            self.broker.unsubscribe_quotes()
+                        except Exception:
+                            logger.warning("failed to unsubscribe old symbol during strategy reload")
+                        self._quotes_subscribed = False
+                    if config.symbol:
+                        try:
+                            self.broker.subscribe_quotes(config.symbol, self._on_quote)
+                            self._quotes_subscribed = True
+                            logger.info(f"re-subscribed to {config.symbol} after strategy reload")
+                        except Exception as exc:
+                            logger.error(f"quote subscription failed after strategy reload: {exc}")
+            finally:
+                db.close()
 
     def stop(self) -> None:
         with self._state_lock:
             self._running = False
             self._quotes_subscribed = False
             self.broker.close()
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=10)
 
     def _on_quote(self, quote: Quote) -> None:
         with self._state_lock:
@@ -178,9 +219,10 @@ class AppRunner:
 
     def _restore_engine_snapshot(self, snapshot: tuple[EngineState, float, datetime | None]) -> None:
         state, last_trigger_price, last_trigger_at = snapshot
-        self.engine.state = state
-        self.engine.last_trigger_price = last_trigger_price
-        self.engine.last_trigger_at = last_trigger_at
+        with self.engine._lock:
+            self.engine.state = state
+            self.engine.last_trigger_price = last_trigger_price
+            self.engine.last_trigger_at = last_trigger_at
 
     def _handle_trigger(self, result: TriggerResult, quote: Quote) -> bool:
         risk_result = self.risk.check()
@@ -352,18 +394,28 @@ class AppRunner:
             time.sleep(5)
 
     def _persist_state(self) -> None:
+        with self._state_lock:
+            engine_state = self.engine.state.value
+            last_price = self.engine.last_price
+            last_trigger_price = self.engine.last_trigger_price
+            last_trigger_at = self.engine.last_trigger_at
+            daily_pnl = self.risk.daily_pnl
+            consecutive_losses = self.risk.consecutive_losses
+            kill_switch = self.risk.kill_switch
+            paused = self.risk.paused
+
         db = SessionLocal()
         try:
             svc = StrategyService(db)
             svc.update_runtime_state(
-                engine_state=self.engine.state.value,
-                last_price=self.engine.last_price,
-                daily_pnl=self.risk.daily_pnl,
-                consecutive_losses=self.risk.consecutive_losses,
-                kill_switch=self.risk.kill_switch,
-                paused=self.risk.paused,
-                last_trigger_price=self.engine.last_trigger_price,
-                last_trigger_at=self.engine.last_trigger_at,
+                engine_state=engine_state,
+                last_price=last_price,
+                daily_pnl=daily_pnl,
+                consecutive_losses=consecutive_losses,
+                kill_switch=kill_switch,
+                paused=paused,
+                last_trigger_price=last_trigger_price,
+                last_trigger_at=last_trigger_at,
             )
         finally:
             db.close()

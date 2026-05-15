@@ -1,5 +1,6 @@
 <template>
   <div v-loading="initialLoading">
+    <el-alert v-if="loadError" type="error" title="无法连接服务器，请检查网络和 API 密钥" show-icon style="margin-bottom: 16px" />
     <h3>仪表盘</h3>
     <el-row :gutter="20">
       <el-col :span="8">
@@ -78,6 +79,7 @@ const status = ref<StatusData>({
 })
 
 const initialLoading = ref(true)
+const loadError = ref(false)
 
 const stateTagType = computed(() => {
   switch (status.value.engine_state) {
@@ -91,6 +93,7 @@ let ws: WebSocket | null = null
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 let pollTimer: ReturnType<typeof setInterval> | null = null
 let useWebSocket = false
+let reconnectAttempts = 0
 
 function connectWebSocket() {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
@@ -100,6 +103,7 @@ function connectWebSocket() {
   const apiKey = localStorage.getItem('api_key')
   ws.onopen = () => {
     useWebSocket = true
+    reconnectAttempts = 0
     if (apiKey) {
       ws?.send(JSON.stringify({ token: apiKey }))
     }
@@ -139,10 +143,12 @@ function connectWebSocket() {
 
 function scheduleReconnect() {
   if (reconnectTimer) return
+  const delay = Math.min(5000 * Math.pow(2, reconnectAttempts), 60000)
+  reconnectAttempts++
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null
     connectWebSocket()
-  }, 5000)
+  }, delay)
 }
 
 function startPolling() {
@@ -164,6 +170,7 @@ onMounted(async () => {
     status.value = st
   } catch (e) {
     console.error('刷新仪表盘失败：', e)
+    loadError.value = true
     ElMessage.error('刷新仪表盘数据失败')
   } finally {
     initialLoading.value = false

@@ -26,7 +26,9 @@ def get_orders(
 def start_runner(db: Session = Depends(get_db)) -> MessageResponse:
     svc = StrategyService(db)
     svc.update_runtime_state(paused=False, kill_switch=False)
-    get_runner().start()
+    started = get_runner().start()
+    if not started:
+        return MessageResponse(message="runner is already running or failed to start")
     return MessageResponse(message="runner started")
 
 

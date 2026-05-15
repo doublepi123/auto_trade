@@ -6,6 +6,8 @@ from typing import Optional
 from sqlalchemy import Boolean, DateTime, Float, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
+_TZDateTime = lambda: DateTime(timezone=True)
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -27,7 +29,7 @@ class StrategyConfig(Base):
     max_daily_loss: Mapped[float] = mapped_column(Float, default=5000.0)
     max_consecutive_losses: Mapped[int] = mapped_column(Integer, default=3)
     sct_key: Mapped[str] = mapped_column(String(200), default="")
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(_TZDateTime(), default=_utcnow)
 
 
 class CredentialConfig(Base):
@@ -38,7 +40,7 @@ class CredentialConfig(Base):
     longbridge_app_secret: Mapped[str] = mapped_column(Text, default="")
     longbridge_access_token: Mapped[str] = mapped_column(Text, default="")
     sct_key: Mapped[str] = mapped_column(Text, default="")
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(_TZDateTime(), default=_utcnow)
 
 
 class OrderRecord(Base):
@@ -51,8 +53,8 @@ class OrderRecord(Base):
     quantity: Mapped[float] = mapped_column(Float)
     price: Mapped[float] = mapped_column(Float)
     status: Mapped[str] = mapped_column(String(20), default="SUBMITTED")
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
-    filled_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(_TZDateTime(), default=_utcnow)
+    filled_at: Mapped[Optional[datetime]] = mapped_column(_TZDateTime(), nullable=True)
     raw_response: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
 
@@ -62,7 +64,7 @@ class RiskEvent(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     event_type: Mapped[str] = mapped_column(String(50))
     reason: Mapped[str] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    created_at: Mapped[datetime] = mapped_column(_TZDateTime(), default=_utcnow)
 
 
 class RuntimeState(Base):
@@ -76,5 +78,5 @@ class RuntimeState(Base):
     consecutive_losses: Mapped[int] = mapped_column(Integer, default=0)
     last_price: Mapped[float] = mapped_column(Float, default=0.0)
     last_trigger_price: Mapped[float] = mapped_column(Float, default=0.0)
-    last_trigger_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    last_trigger_at: Mapped[Optional[datetime]] = mapped_column(_TZDateTime(), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(_TZDateTime(), default=_utcnow)

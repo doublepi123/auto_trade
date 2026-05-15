@@ -32,7 +32,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 
@@ -41,10 +41,11 @@ const route = useRoute()
 const showApiKeyDialog = ref(false)
 const apiKeyInput = ref('')
 
-const hasApiKey = computed(() => !!localStorage.getItem('api_key'))
+const hasApiKey = ref(!!localStorage.getItem('api_key'))
 
 function onApiKeyRequired() {
   showApiKeyDialog.value = true
+  hasApiKey.value = false
   ElMessage.error('API 密钥无效，请重新设置')
 }
 
@@ -59,6 +60,7 @@ onUnmounted(() => {
 function saveApiKey() {
   if (apiKeyInput.value) {
     localStorage.setItem('api_key', apiKeyInput.value)
+    hasApiKey.value = true
     apiKeyInput.value = ''
     showApiKeyDialog.value = false
     ElMessage.success('API 密钥已保存')
@@ -67,6 +69,7 @@ function saveApiKey() {
 
 function clearApiKey() {
   localStorage.removeItem('api_key')
+  hasApiKey.value = false
   apiKeyInput.value = ''
   showApiKeyDialog.value = false
   ElMessage.success('API 密钥已清除')

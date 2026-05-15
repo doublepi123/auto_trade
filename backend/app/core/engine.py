@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -39,8 +40,13 @@ class StrategyEngine:
         self.last_trigger_price: float = 0.0
         self.last_trigger_at: Optional[datetime] = None
         self._cooldown_seconds: int = 60
+        self._lock = threading.Lock()
 
     def update_price(self, price: float) -> TriggerResult:
+        with self._lock:
+            return self._update_price_locked(price)
+
+    def _update_price_locked(self, price: float) -> TriggerResult:
         self.last_price = price
 
         if not self.params.symbol or self.params.buy_low <= 0 or self.params.sell_high <= 0 or self.params.buy_low >= self.params.sell_high:
@@ -100,21 +106,26 @@ class StrategyEngine:
         return elapsed < self._cooldown_seconds
 
     def sync_state(self, has_long_position: bool, has_short_position: bool) -> None:
-        if has_long_position:
-            self.state = EngineState.LONG
-        elif has_short_position:
-            self.state = EngineState.SHORT
-        else:
-            self.state = EngineState.FLAT
+        with self._lock:
+            if has_long_position and has_short_position:
+                logger.warning("both long and short positions detected; defaulting to LONG")
+            if has_long_position:
+                self.state = EngineState.LONG
+            elif has_short_position:
+                self.state = EngineState.SHORT
+            else:
+                self.state = EngineState.FLAT
+            self.last_trigger_at = None
 
     def to_dict(self) -> dict:
-        return {
-            "state": self.state.value,
-            "last_price": self.last_price,
-            "last_trigger_price": self.last_trigger_price,
-            "last_trigger_at": self.last_trigger_at.isoformat() if self.last_trigger_at else None,
-            "symbol": self.params.symbol,
-            "buy_low": self.params.buy_low,
-            "sell_high": self.params.sell_high,
-            "short_selling": self.params.short_selling,
-        }
+        with self._lock:
+            return {
+                "state": self.state.value,
+                "last_price": self.last_price,
+                "last_trigger_price": self.last_trigger_price,
+                "last_trigger_at": self.last_trigger_at.isoformat() if self.last_trigger_at else None,
+                "symbol": self.params.symbol,
+                "buy_low": self.params.buy_low,
+                "sell_high": self.params.sell_high,
+                "short_selling": self.params.short_selling,
+            }
