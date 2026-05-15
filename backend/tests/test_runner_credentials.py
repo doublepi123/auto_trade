@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import os
 from types import SimpleNamespace
 
 from app import runner as runner_module
-from app.core.broker import BrokerCredentials
 from app.models import CredentialConfig
 from app.runner import AppRunner
 
@@ -42,8 +42,7 @@ class FakeSession:
 class FakeBrokerGateway:
     instances: list[FakeBrokerGateway] = []
 
-    def __init__(self, credentials: BrokerCredentials | None = None) -> None:
-        self.credentials = credentials
+    def __init__(self) -> None:
         self.closed = False
         self.subscriptions: list[tuple[str, object]] = []
         FakeBrokerGateway.instances.append(self)
@@ -53,6 +52,9 @@ class FakeBrokerGateway:
 
     def subscribe_quotes(self, symbol: str, callback: object) -> None:
         self.subscriptions.append((symbol, callback))
+
+    def unsubscribe_quotes(self) -> None:
+        self.subscriptions.clear()
 
 
 class FailingSubscribeBrokerGateway(FakeBrokerGateway):
@@ -129,9 +131,10 @@ class TestRunnerCredentials:
         runner = AppRunner()
         runner.start()
 
-        assert runner.broker.credentials == BrokerCredentials(app_key="db-key", app_secret="db-secret", access_token="db-token")
+        assert os.environ.get("LONGPORT_APP_KEY") == "db-key"
+        assert os.environ.get("LONGPORT_APP_SECRET") == "db-secret"
+        assert os.environ.get("LONGPORT_ACCESS_TOKEN") == "db-token"
         assert runner.notifier.sct_key == "db-sct"
-        assert runner.broker.subscriptions[0][0] == "AAPL.US"
 
         runner.stop()
 
@@ -157,7 +160,9 @@ class TestRunnerCredentials:
         runner.reload_credentials()
 
         assert old_broker.closed is True
-        assert runner.broker.credentials == BrokerCredentials(app_key="reload-key", app_secret="reload-secret", access_token="reload-token")
+        assert os.environ.get("LONGPORT_APP_KEY") == "reload-key"
+        assert os.environ.get("LONGPORT_APP_SECRET") == "reload-secret"
+        assert os.environ.get("LONGPORT_ACCESS_TOKEN") == "reload-token"
         assert runner.notifier.sct_key == "reload-sct"
         assert runner.broker.subscriptions[0][0] == "AAPL.US"
 

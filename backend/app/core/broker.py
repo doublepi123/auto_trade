@@ -114,8 +114,7 @@ _SIDE_MAP = {"BUY": "Buy", "SELL": "Sell", "SELL_SHORT": "Sell", "BUY_TO_COVER":
 
 
 class BrokerGateway:
-    def __init__(self, credentials: BrokerCredentials | None = None) -> None:
-        self._credentials = credentials or BrokerCredentials()
+    def __init__(self) -> None:
         self._lock = threading.RLock()
         self._quote_ctx: Any = None
         self._trade_ctx: Any = None
@@ -126,11 +125,7 @@ class BrokerGateway:
         with self._lock:
             if self._quote_ctx is None:
                 module = _import_openapi()
-                app_key = self._credentials.app_key or settings.longbridge_app_key
-                app_secret = self._credentials.app_secret or settings.longbridge_app_secret
-                access_token = self._credentials.access_token or settings.longbridge_access_token
-
-                config = module.Config.from_apikey(app_key, app_secret, access_token)
+                config = module.Config.from_env()
                 self._quote_ctx = module.QuoteContext(config)
                 self._trade_ctx = module.TradeContext(config)
 
@@ -254,17 +249,13 @@ class BrokerGateway:
         with self._lock:
             self._quote_callbacks.clear()
             self._subscribed_symbol = None
-            if self._quote_ctx is not None:
-                try:
-                    self._quote_ctx.close()
-                except Exception:
-                    pass
+            for ctx in (self._quote_ctx, self._trade_ctx):
+                if ctx is not None:
+                    try:
+                        ctx.close()
+                    except (AttributeError, TypeError):
+                        pass
             self._quote_ctx = None
-            if self._trade_ctx is not None:
-                try:
-                    self._trade_ctx.close()
-                except Exception:
-                    pass
             self._trade_ctx = None
 
     def unsubscribe_quotes(self) -> None:
@@ -282,14 +273,19 @@ class BrokerGateway:
             self._init_clients()
             try:
                 response = self._trade_ctx.account_balance()
-                if isinstance(response, list) and response:
-                    for item in response:
-                        currency = getattr(item, "currency", "")
-                        if currency in ("USD", "HKD"):
-                            return Decimal(str(getattr(item, "available_cash", getattr(item, "cash", "0"))))
-                    logger.warning("get_cash: no USD/HKD item found in account_balance response")
-                    return Decimal("0")
-                return Decimal(str(getattr(response, "available_cash", getattr(response, "cash", "0"))))
+                items = response if isinstance(response, list) else [response]
+                for item in items:
+                    cash_infos = getattr(item, "cash_infos", None)
+                    if cash_infos:
+                        for ci in cash_infos:
+                            currency = str(getattr(ci, "currency", ""))
+                            if currency in ("USD", "HKD"):
+                                return Decimal(str(getattr(ci, "available_cash", "0")))
+                    currency = str(getattr(item, "currency", ""))
+                    if currency in ("USD", "HKD"):
+                        return Decimal(str(getattr(item, "total_cash", "0")))
+                logger.warning("get_cash: no USD/HKD item found in account_balance response")
+                return Decimal("0")
             except Exception:
                 logger.exception("failed to get account balance")
                 raise
@@ -308,14 +304,7 @@ class BrokerGateway:
 
                 for item in items:
                     currency = str(getattr(item, "currency", ""))
-                    available = Decimal(str(getattr(item, "available_cash", getattr(item, "cash", "0"))))
-                    frozen = Decimal(str(getattr(item, "frozen_cash", getattr(item, "frozen_amounts", "0"))))
                     net_amount = Decimal(str(getattr(item, "net_assets", "0")))
-                    cash_balances.append(CashBalance(
-                        currency=currency,
-                        available_cash=available,
-                        frozen_cash=frozen,
-                    ))
                     net_assets.append(NetAsset(
                         currency=currency,
                         amount=net_amount,
@@ -324,6 +313,18 @@ class BrokerGateway:
                         primary_currency = currency
                         primary_total = net_amount
                     total_assets += net_amount
+
+                    cash_infos = getattr(item, "cash_infos", None)
+                    if cash_infos:
+                        for ci in cash_infos:
+                            ci_currency = str(getattr(ci, "currency", ""))
+                            ci_available = Decimal(str(getattr(ci, "available_cash", "0")))
+                            ci_frozen = Decimal(str(getattr(ci, "frozen_cash", "0")))
+                            cash_balances.append(CashBalance(
+                                currency=ci_currency,
+                                available_cash=ci_available,
+                                frozen_cash=ci_frozen,
+                            ))
 
                 if primary_currency:
                     total_assets = primary_total

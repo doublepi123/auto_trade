@@ -34,65 +34,61 @@ class TestBrokerGateway:
         assert gw._quote_ctx is None
         assert gw._trade_ctx is None
 
-    def test_init_prefers_explicit_credentials(self, monkeypatch) -> None:
-        captured: dict[str, tuple[str, str, str]] = {}
+    def test_init_clients_uses_from_env(self, monkeypatch) -> None:
+        called = {}
 
         class FakeConfig:
             @staticmethod
-            def from_apikey(app_key: str, app_secret: str, access_token: str) -> tuple[str, str, str]:
-                captured["args"] = (app_key, app_secret, access_token)
-                return app_key, app_secret, access_token
+            def from_env():
+                called["from_env"] = True
+                return "fake-config"
 
         class FakeModule:
             Config = FakeConfig
 
             class QuoteContext:
-                def __init__(self, config: object) -> None:
-                    self.config = config
+                def __init__(self, config):
+                    called["quote_ctx_config"] = config
 
             class TradeContext:
-                def __init__(self, config: object) -> None:
-                    self.config = config
+                def __init__(self, config):
+                    called["trade_ctx_config"] = config
 
         monkeypatch.setattr(broker_module, "_import_openapi", lambda: FakeModule)
-        monkeypatch.setattr(broker_module.settings, "longbridge_app_key", "settings-key", raising=False)
-        monkeypatch.setattr(broker_module.settings, "longbridge_app_secret", "settings-secret", raising=False)
-        monkeypatch.setattr(broker_module.settings, "longbridge_access_token", "settings-token", raising=False)
-
-        gw = BrokerGateway(BrokerCredentials(app_key="db-key", app_secret="db-secret", access_token="db-token"))
-        gw._init_clients()
-
-        assert captured["args"] == ("db-key", "db-secret", "db-token")
-
-    def test_init_falls_back_to_settings(self, monkeypatch) -> None:
-        captured: dict[str, tuple[str, str, str]] = {}
-
-        class FakeConfig:
-            @staticmethod
-            def from_apikey(app_key: str, app_secret: str, access_token: str) -> tuple[str, str, str]:
-                captured["args"] = (app_key, app_secret, access_token)
-                return app_key, app_secret, access_token
-
-        class FakeModule:
-            Config = FakeConfig
-
-            class QuoteContext:
-                def __init__(self, config: object) -> None:
-                    self.config = config
-
-            class TradeContext:
-                def __init__(self, config: object) -> None:
-                    self.config = config
-
-        monkeypatch.setattr(broker_module, "_import_openapi", lambda: FakeModule)
-        monkeypatch.setattr(broker_module.settings, "longbridge_app_key", "settings-key", raising=False)
-        monkeypatch.setattr(broker_module.settings, "longbridge_app_secret", "settings-secret", raising=False)
-        monkeypatch.setattr(broker_module.settings, "longbridge_access_token", "settings-token", raising=False)
 
         gw = BrokerGateway()
         gw._init_clients()
 
-        assert captured["args"] == ("settings-key", "settings-secret", "settings-token")
+        assert called["from_env"] is True
+        assert called["quote_ctx_config"] == "fake-config"
+        assert called["trade_ctx_config"] == "fake-config"
+
+    def test_init_clients_from_env_no_credentials(self, monkeypatch) -> None:
+        called = {}
+
+        class FakeConfig:
+            @staticmethod
+            def from_env():
+                called["from_env"] = True
+                return "fake-config"
+
+        class FakeModule:
+            Config = FakeConfig
+
+            class QuoteContext:
+                def __init__(self, config):
+                    called["quote_ctx_config"] = config
+
+            class TradeContext:
+                def __init__(self, config):
+                    called["trade_ctx_config"] = config
+
+        monkeypatch.setattr(broker_module, "_import_openapi", lambda: FakeModule)
+
+        gw = BrokerGateway()
+        gw._init_clients()
+
+        assert called["from_env"] is True
 
     def test_quote_callbacks_registration(self) -> None:
         gw = BrokerGateway()
@@ -218,17 +214,10 @@ class TestAccountInfo:
 
 class TestGetAccount:
     def _make_fake_module(self):
-        class BalanceItem:
-            def __init__(self, currency, available_cash, frozen_cash, net_assets):
-                self.currency = currency
-                self.available_cash = available_cash
-                self.frozen_cash = frozen_cash
-                self.net_assets = net_assets
-
         class FakeConfig:
             @staticmethod
-            def from_apikey(app_key, app_secret, access_token):
-                return (app_key, app_secret, access_token)
+            def from_env():
+                return "fake-config"
 
         class FakeModule:
             Config = FakeConfig
@@ -241,22 +230,29 @@ class TestGetAccount:
                 def __init__(self, config):
                     self._config = config
 
-        return FakeModule, BalanceItem
+        return FakeModule
 
     def test_get_account_single_currency(self, monkeypatch) -> None:
-        FakeModule, BalanceItem = self._make_fake_module()
+        FakeModule = self._make_fake_module()
+
+        class CashInfo:
+            def __init__(self, currency, available_cash, frozen_cash):
+                self.currency = currency
+                self.available_cash = available_cash
+                self.frozen_cash = frozen_cash
+
+        class BalanceItem:
+            def __init__(self, currency, net_assets, cash_infos):
+                self.currency = currency
+                self.net_assets = net_assets
+                self.cash_infos = cash_infos
 
         class TradeContext:
             def __init__(self, config):
                 pass
 
             def account_balance(self):
-                return [BalanceItem("USD", "5000", "1000", "50000")]
-
-        monkeypatch.setattr(broker_module, "_import_openapi", lambda: FakeModule)
-        monkeypatch.setattr(broker_module.settings, "longbridge_app_key", "k", raising=False)
-        monkeypatch.setattr(broker_module.settings, "longbridge_app_secret", "s", raising=False)
-        monkeypatch.setattr(broker_module.settings, "longbridge_access_token", "t", raising=False)
+                return [BalanceItem("USD", "50000", [CashInfo("USD", "5000", "1000")])]
 
         gw = BrokerGateway()
         gw._trade_ctx = TradeContext(None)
@@ -272,7 +268,19 @@ class TestGetAccount:
         assert result.net_assets[0].amount == Decimal("50000")
 
     def test_get_account_picks_primary_currency(self, monkeypatch) -> None:
-        FakeModule, BalanceItem = self._make_fake_module()
+        FakeModule = self._make_fake_module()
+
+        class CashInfo:
+            def __init__(self, currency, available_cash, frozen_cash):
+                self.currency = currency
+                self.available_cash = available_cash
+                self.frozen_cash = frozen_cash
+
+        class BalanceItem:
+            def __init__(self, currency, net_assets, cash_infos):
+                self.currency = currency
+                self.net_assets = net_assets
+                self.cash_infos = cash_infos
 
         class TradeContext:
             def __init__(self, config):
@@ -280,14 +288,9 @@ class TestGetAccount:
 
             def account_balance(self):
                 return [
-                    BalanceItem("CNH", "1000", "200", "7200"),
-                    BalanceItem("USD", "5000", "1000", "50000"),
+                    BalanceItem("CNH", "7200", [CashInfo("CNH", "1000", "200")]),
+                    BalanceItem("USD", "50000", [CashInfo("USD", "5000", "1000")]),
                 ]
-
-        monkeypatch.setattr(broker_module, "_import_openapi", lambda: FakeModule)
-        monkeypatch.setattr(broker_module.settings, "longbridge_app_key", "k", raising=False)
-        monkeypatch.setattr(broker_module.settings, "longbridge_app_secret", "s", raising=False)
-        monkeypatch.setattr(broker_module.settings, "longbridge_access_token", "t", raising=False)
 
         gw = BrokerGateway()
         gw._trade_ctx = TradeContext(None)
@@ -298,19 +301,26 @@ class TestGetAccount:
         assert len(result.net_assets) == 2
 
     def test_get_account_no_primary_currency(self, monkeypatch) -> None:
-        FakeModule, BalanceItem = self._make_fake_module()
+        FakeModule = self._make_fake_module()
+
+        class CashInfo:
+            def __init__(self, currency, available_cash, frozen_cash):
+                self.currency = currency
+                self.available_cash = available_cash
+                self.frozen_cash = frozen_cash
+
+        class BalanceItem:
+            def __init__(self, currency, net_assets, cash_infos):
+                self.currency = currency
+                self.net_assets = net_assets
+                self.cash_infos = cash_infos
 
         class TradeContext:
             def __init__(self, config):
                 pass
 
             def account_balance(self):
-                return [BalanceItem("CNH", "1000", "200", "7200")]
-
-        monkeypatch.setattr(broker_module, "_import_openapi", lambda: FakeModule)
-        monkeypatch.setattr(broker_module.settings, "longbridge_app_key", "k", raising=False)
-        monkeypatch.setattr(broker_module.settings, "longbridge_app_secret", "s", raising=False)
-        monkeypatch.setattr(broker_module.settings, "longbridge_access_token", "t", raising=False)
+                return [BalanceItem("CNH", "7200", [CashInfo("CNH", "1000", "200")])]
 
         gw = BrokerGateway()
         gw._trade_ctx = TradeContext(None)
@@ -320,31 +330,35 @@ class TestGetAccount:
         assert len(result.cash_balances) == 1
         assert result.cash_balances[0].currency == "CNH"
 
-    def test_get_account_frozen_amounts_fallback(self, monkeypatch) -> None:
-        FakeModule, BalanceItem = self._make_fake_module()
+    def test_get_account_multiple_cash_infos(self, monkeypatch) -> None:
+        FakeModule = self._make_fake_module()
 
-        class BalanceItemAlt:
-            def __init__(self, currency, cash, frozen_amounts, net_assets):
+        class CashInfo:
+            def __init__(self, currency, available_cash, frozen_cash):
                 self.currency = currency
-                self.cash = cash
-                self.frozen_amounts = frozen_amounts
+                self.available_cash = available_cash
+                self.frozen_cash = frozen_cash
+
+        class BalanceItem:
+            def __init__(self, currency, net_assets, cash_infos):
+                self.currency = currency
                 self.net_assets = net_assets
+                self.cash_infos = cash_infos
 
         class TradeContext:
             def __init__(self, config):
                 pass
 
             def account_balance(self):
-                return [BalanceItemAlt("USD", "3000", "500", "40000")]
-
-        monkeypatch.setattr(broker_module, "_import_openapi", lambda: FakeModule)
-        monkeypatch.setattr(broker_module.settings, "longbridge_app_key", "k", raising=False)
-        monkeypatch.setattr(broker_module.settings, "longbridge_app_secret", "s", raising=False)
-        monkeypatch.setattr(broker_module.settings, "longbridge_access_token", "t", raising=False)
+                return [BalanceItem("HKD", "200000", [CashInfo("USD", "1000", "200"), CashInfo("HKD", "5000", "100")])]
 
         gw = BrokerGateway()
         gw._trade_ctx = TradeContext(None)
         gw._quote_ctx = object()
         result = gw.get_account()
-        assert result.cash_balances[0].available_cash == Decimal("3000")
-        assert result.cash_balances[0].frozen_cash == Decimal("500")
+        assert result.total_assets == Decimal("200000")
+        assert len(result.cash_balances) == 2
+        assert result.cash_balances[0].currency == "USD"
+        assert result.cash_balances[0].available_cash == Decimal("1000")
+        assert result.cash_balances[1].currency == "HKD"
+        assert result.cash_balances[1].available_cash == Decimal("5000")

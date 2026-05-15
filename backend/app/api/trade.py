@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, Query
@@ -40,6 +41,7 @@ def get_account() -> AccountResponse:
             for cb in account.cash_balances
         ]
     except Exception:
+        logging.getLogger("auto_trade.trade").exception("failed to get account balance")
         total_assets = 0.0
         cash_balances = []
 
@@ -51,6 +53,7 @@ def get_account() -> AccountResponse:
                 quote = broker.get_quote(pos.symbol)
                 market_value = float(pos.quantity * Decimal(str(quote.last_price)))
             except Exception:
+                logging.getLogger("auto_trade.trade").warning("failed to get quote for %s, using avg_price fallback", pos.symbol)
                 market_value = float(pos.quantity * pos.avg_price)
             positions.append(PositionSchema(
                 symbol=pos.symbol,
@@ -60,6 +63,7 @@ def get_account() -> AccountResponse:
                 market_value=market_value,
             ))
     except Exception:
+        logging.getLogger("auto_trade.trade").exception("failed to get positions")
         positions = []
 
     return AccountResponse(

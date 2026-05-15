@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import threading
 import time
 from datetime import datetime
@@ -11,7 +12,7 @@ from decimal import Decimal
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.core.broker import BrokerCredentials, BrokerGateway, Quote
+from app.core.broker import BrokerGateway, Quote
 from app.core.engine import StrategyEngine, StrategyParams, TriggerResult, EngineState
 from app.core.notify import ServerChanNotifier
 from app.core.risk import RiskConfig, RiskController
@@ -119,13 +120,14 @@ class AppRunner:
             should_resubscribe = resubscribe and bool(symbol)
             new_notifier = ServerChanNotifier(credentials.sct_key if credentials.sct_key else settings.sct_key)
 
-            new_broker = BrokerGateway(
-                BrokerCredentials(
-                    app_key=credentials.longbridge_app_key,
-                    app_secret=credentials.longbridge_app_secret,
-                    access_token=credentials.longbridge_access_token,
-                )
-            )
+            if credentials.longbridge_app_key:
+                os.environ["LONGPORT_APP_KEY"] = credentials.longbridge_app_key
+            if credentials.longbridge_app_secret:
+                os.environ["LONGPORT_APP_SECRET"] = credentials.longbridge_app_secret
+            if credentials.longbridge_access_token:
+                os.environ["LONGPORT_ACCESS_TOKEN"] = credentials.longbridge_access_token
+
+            new_broker = BrokerGateway()
 
             if should_resubscribe:
                 try:
