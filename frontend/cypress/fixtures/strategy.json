@@ -1,0 +1,11 @@
+{
+  "id": 1,
+  "symbol": "AAPL.US",
+  "market": "US",
+  "buy_low": 150.0,
+  "sell_high": 200.0,
+  "short_selling": false,
+  "max_daily_loss": 5000.0,
+  "max_consecutive_losses": 3,
+  "updated_at": "2026-01-01T00:00:00Z"
+}

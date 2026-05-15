@@ -1,0 +1,20 @@
+describe('Credentials', () => {
+  beforeEach(() => {
+    cy.visit('/#/credentials')
+    cy.get('h3', { timeout: 10000 }).should('contain', '凭证设置')
+  })
+
+  it('displays credentials form title', () => {
+    cy.get('h3').should('contain', '凭证设置')
+  })
+
+  it('shows credential input labels', () => {
+    cy.get('.el-form-item__label').should('contain', '长桥应用标识')
+    cy.get('.el-form-item__label').should('contain', '长桥应用密钥')
+    cy.get('.el-form-item__label').should('contain', '长桥访问令牌')
+  })
+
+  it('has save button', () => {
+    cy.get('button.el-button--primary').should('be.visible')
+  })
+})
