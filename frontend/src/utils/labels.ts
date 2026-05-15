@@ -51,3 +51,14 @@ export function orderStatusLabel(status?: string | null): string {
       return '未知状态'
   }
 }
+
+export function positionSideLabel(side?: string | null): string {
+  switch (side) {
+    case 'LONG':
+      return '多头'
+    case 'SHORT':
+      return '空头'
+    default:
+      return '未知'
+  }
+}

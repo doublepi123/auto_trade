@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { CredentialsConfig, StrategyConfig, StatusData, OrderRecord } from '../types'
+import type { AccountInfo, CredentialsConfig, StrategyConfig, StatusData, OrderRecord } from '../types'
 
 const api = axios.create({ baseURL: '' })
 
@@ -83,5 +83,10 @@ export async function startTrading(): Promise<{ message: string }> {
 
 export async function stopTrading(reason = 'manual'): Promise<{ message: string }> {
   const resp = await api.post('/api/control/stop', { reason })
+  return resp.data
+}
+
+export async function getAccount(): Promise<AccountInfo> {
+  const resp = await api.get('/api/account')
   return resp.data
 }

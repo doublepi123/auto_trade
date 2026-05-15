@@ -46,3 +46,23 @@ export interface OrderRecord {
   created_at: string
   filled_at: string | null
 }
+
+export interface CashBalance {
+  currency: string
+  available_cash: number
+  frozen_cash: number
+}
+
+export interface Position {
+  symbol: string
+  side: string
+  quantity: number
+  avg_price: number
+  market_value: number
+}
+
+export interface AccountInfo {
+  total_assets: number
+  cash_balances: CashBalance[]
+  positions: Position[]
+}

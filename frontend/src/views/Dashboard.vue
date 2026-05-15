@@ -48,6 +48,52 @@
       </el-col>
     </el-row>
 
+    <el-row :gutter="20" style="margin-top: 20px">
+      <el-col :span="8">
+        <el-card>
+          <template #header>总资产</template>
+          <h1 :style="{ color: account.total_assets >= 0 ? 'green' : 'red' }">
+            ${{ account.total_assets.toFixed(2) }}
+          </h1>
+        </el-card>
+      </el-col>
+      <el-col :span="16">
+        <el-card>
+          <template #header>现金余额</template>
+          <el-table :data="account.cash_balances" size="small" v-if="account.cash_balances.length > 0" style="width: 100%">
+            <el-table-column prop="currency" label="币种" width="100" />
+            <el-table-column prop="available_cash" label="可用" width="150">
+              <template #default="{ row }">${{ row.available_cash.toFixed(2) }}</template>
+            </el-table-column>
+            <el-table-column prop="frozen_cash" label="冻结" width="150">
+              <template #default="{ row }">${{ row.frozen_cash.toFixed(2) }}</template>
+            </el-table-column>
+          </el-table>
+          <p v-else style="color: #999; text-align: center">暂无数据</p>
+        </el-card>
+      </el-col>
+    </el-row>
+
+    <el-card style="margin-top: 20px">
+      <template #header>持仓明细</template>
+      <el-table :data="account.positions" size="small" v-if="account.positions.length > 0" style="width: 100%">
+        <el-table-column prop="symbol" label="股票代码" width="150" />
+        <el-table-column prop="side" label="方向" width="100">
+          <template #default="{ row }">{{ positionSideLabel(row.side) }}</template>
+        </el-table-column>
+        <el-table-column prop="quantity" label="数量" width="120">
+          <template #default="{ row }">{{ row.quantity.toFixed(0) }}</template>
+        </el-table-column>
+        <el-table-column prop="avg_price" label="均价" width="150">
+          <template #default="{ row }">${{ row.avg_price.toFixed(2) }}</template>
+        </el-table-column>
+        <el-table-column prop="market_value" label="市值" width="150">
+          <template #default="{ row }">${{ row.market_value.toFixed(2) }}</template>
+        </el-table-column>
+      </el-table>
+      <p v-else style="color: #999; text-align: center">暂无持仓</p>
+    </el-card>
+
     <el-card style="margin-top: 20px">
       <template #header>行情信息</template>
       <p>股票代码：{{ strategy.symbol || '未配置' }}</p>
@@ -62,9 +108,9 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { getStrategy, getStatus, pauseTrading, resumeTrading, activateKillSwitch, startTrading, stopTrading } from '../api'
-import type { StrategyConfig, StatusData } from '../types'
-import { engineStateLabel, marketLabel } from '../utils/labels'
+import { getStrategy, getStatus, pauseTrading, resumeTrading, activateKillSwitch, startTrading, stopTrading, getAccount } from '../api'
+import type { StrategyConfig, StatusData, AccountInfo } from '../types'
+import { engineStateLabel, marketLabel, positionSideLabel } from '../utils/labels'
 
 const strategy = ref<StrategyConfig>({
   id: 0, symbol: '', market: 'US', buy_low: 0, sell_high: 0,
@@ -78,6 +124,12 @@ const status = ref<StatusData>({
   last_price: 0, last_trigger_price: 0, last_trigger_at: null,
 })
 
+const account = ref<AccountInfo>({
+  total_assets: 0,
+  cash_balances: [],
+  positions: [],
+})
+const accountLoading = ref(false)
 const initialLoading = ref(true)
 const loadError = ref(false)
 
@@ -94,6 +146,7 @@ let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 let pollTimer: ReturnType<typeof setInterval> | null = null
 let useWebSocket = false
 let reconnectAttempts = 0
+let accountRefreshTimer: ReturnType<typeof setInterval> | null = null
 
 function connectWebSocket() {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
@@ -163,11 +216,26 @@ function startPolling() {
   }, 3000)
 }
 
+function startAccountRefresh() {
+  accountRefreshTimer = setInterval(async () => {
+    try {
+      account.value = await getAccount()
+    } catch {
+      // silent — account data will retry on next interval
+    }
+  }, 10000)
+}
+
 onMounted(async () => {
   try {
-    const [s, st] = await Promise.all([getStrategy(), getStatus()])
+    const [s, st, acc] = await Promise.all([
+      getStrategy(),
+      getStatus(),
+      getAccount().catch(() => ({ total_assets: 0, cash_balances: [], positions: [] })),
+    ])
     strategy.value = s
     status.value = st
+    account.value = acc
   } catch (e) {
     console.error('刷新仪表盘失败：', e)
     loadError.value = true
@@ -177,6 +245,7 @@ onMounted(async () => {
   }
   connectWebSocket()
   startPolling()
+  startAccountRefresh()
 })
 
 onUnmounted(() => {
@@ -193,13 +262,22 @@ onUnmounted(() => {
     clearInterval(pollTimer)
     pollTimer = null
   }
+  if (accountRefreshTimer) {
+    clearInterval(accountRefreshTimer)
+    accountRefreshTimer = null
+  }
 })
 
 async function refresh() {
   try {
-    const [s, st] = await Promise.all([getStrategy(), getStatus()])
+    const [s, st, acc] = await Promise.all([
+      getStrategy(),
+      getStatus(),
+      getAccount().catch(() => ({ total_assets: 0, cash_balances: [], positions: [] })),
+    ])
     strategy.value = s
     status.value = st
+    account.value = acc
   } catch (e) {
     console.error('刷新仪表盘失败：', e)
   }
@@ -260,3 +338,4 @@ async function handleStop() {
     }
   }
 }
+</script>

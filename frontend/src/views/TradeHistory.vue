@@ -56,3 +56,4 @@ function statusType(status: string): string {
     default: return ''
   }
 }
+</script>

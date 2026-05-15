@@ -74,3 +74,4 @@ function clearApiKey() {
   showApiKeyDialog.value = false
   ElMessage.success('API 密钥已清除')
 }
+</script>
