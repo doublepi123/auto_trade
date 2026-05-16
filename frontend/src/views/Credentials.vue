@@ -91,7 +91,10 @@ async function handleSave() {
   saving.value = true
   saved.value = false
   try {
-    const resp = await updateCredentials(form.value)
+    const payload = Object.fromEntries(
+      Object.entries(form.value).filter(([, value]) => value.trim() !== ''),
+    )
+    const resp = await updateCredentials(payload)
     hasFlags.value = {
       has_longbridge_app_key: resp.has_longbridge_app_key,
       has_longbridge_app_secret: resp.has_longbridge_app_secret,

@@ -76,6 +76,11 @@ export async function activateKillSwitch(reason = 'manual'): Promise<{ message: 
   return resp.data
 }
 
+export async function disableKillSwitch(): Promise<{ message: string }> {
+  const resp = await api.post('/api/control/disable-kill-switch')
+  return resp.data
+}
+
 export async function startTrading(): Promise<{ message: string }> {
   const resp = await api.post('/api/control/start')
   return resp.data

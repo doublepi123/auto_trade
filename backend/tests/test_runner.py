@@ -1,7 +1,8 @@
+import asyncio
 from decimal import Decimal
 from unittest.mock import patch
 
-from app.core.broker import Position, Quote
+from app.core.broker import OrderResult, Position, Quote
 from app.core.engine import EngineState, StrategyParams
 from app.runner import AppRunner, get_runner
 
@@ -49,6 +50,56 @@ class TestAppRunner:
             runner.start()
         assert runner._thread is first_thread
         runner.stop()
+
+    def test_initialize_runner_preserves_existing_loop_when_no_running_loop(self) -> None:
+        runner = AppRunner()
+        existing_loop = asyncio.new_event_loop()
+        runner._loop = existing_loop
+
+        class FakeService:
+            def __init__(self, _db) -> None:
+                pass
+
+            def get_config(self):
+                class Config:
+                    symbol = ""
+                    market = "US"
+                    buy_low = 0.0
+                    sell_high = 0.0
+                    short_selling = False
+                    max_daily_loss = 5000.0
+                    max_consecutive_losses = 3
+
+                return Config()
+
+            def get_runtime_state(self):
+                class State:
+                    engine_state = "flat"
+                    last_price = 0.0
+                    last_trigger_price = 0.0
+                    last_trigger_at = None
+                    daily_pnl = 0.0
+                    consecutive_losses = 0
+                    kill_switch = False
+                    paused = False
+
+                return State()
+
+        class FakeDb:
+            def close(self) -> None:
+                pass
+
+        with (
+            patch("app.runner.StrategyService", FakeService),
+            patch("app.runner.SessionLocal", lambda: FakeDb()),
+            patch.object(runner, "_load_credentials") as load_credentials,
+            patch.object(runner, "_apply_credentials") as apply_credentials,
+        ):
+            load_credentials.return_value = object()
+            runner._initialize_runner()
+
+        assert runner._loop is existing_loop
+        existing_loop.close()
 
     def test_broadcast_status_no_connections(self) -> None:
         runner = AppRunner()
@@ -115,3 +166,28 @@ class TestAppRunner:
 
         assert executed is True
         assert broker.submitted_quantity == Decimal("5")
+
+    def test_execute_buy_returns_false_for_rejected_order(self) -> None:
+        class Broker:
+            def get_cash(self, _currency=None) -> Decimal:
+                return Decimal("1000")
+
+            def submit_limit_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal) -> OrderResult:
+                return OrderResult(
+                    broker_order_id="order-rejected",
+                    symbol=symbol,
+                    side=side,
+                    quantity=quantity,
+                    price=price,
+                    status="REJECTED",
+                )
+
+        runner = AppRunner()
+        runner.broker = Broker()
+        runner.engine.params.market = "US"
+        runner.notifier = _NoopNotifier()
+        runner._record_order = lambda *args: None
+
+        executed = runner._execute_buy("AAPL.US", Quote("AAPL.US", 100.0, 99.5, 100.5, ""))
+
+        assert executed is False

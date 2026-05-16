@@ -6,6 +6,15 @@ from typing import Any, Optional
 from pydantic import BaseModel, Field, field_validator
 
 
+def _normalize_symbol(value: str) -> str:
+    symbol = value.strip().upper()
+    if not symbol:
+        raise ValueError("symbol is required")
+    if "." not in symbol:
+        raise ValueError("symbol must include market suffix, e.g. AAPL.US")
+    return symbol
+
+
 class StrategyConfigSchema(BaseModel):
     symbol: str = Field(default="", max_length=50)
     market: str = Field(default="US")
@@ -21,6 +30,11 @@ class StrategyConfigSchema(BaseModel):
         if v not in ("US", "HK"):
             raise ValueError("market must be US or HK")
         return v
+
+    @field_validator("symbol")
+    @classmethod
+    def validate_symbol(cls, v: str) -> str:
+        return _normalize_symbol(v)
 
     @field_validator("sell_high")
     @classmethod
@@ -48,6 +62,11 @@ class StrategyMergedSchema(BaseModel):
         if v not in ("US", "HK"):
             raise ValueError("market must be US or HK")
         return v
+
+    @field_validator("symbol")
+    @classmethod
+    def validate_symbol(cls, v: str) -> str:
+        return _normalize_symbol(v)
 
     @field_validator("sell_high")
     @classmethod
@@ -150,3 +169,5 @@ class AccountResponse(BaseModel):
     total_assets: float
     cash_balances: list[CashBalanceSchema]
     positions: list[PositionSchema]
+    available: bool = True
+    error: Optional[str] = None

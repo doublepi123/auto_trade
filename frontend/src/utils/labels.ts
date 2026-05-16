@@ -43,6 +43,8 @@ export function orderStatusLabel(status?: string | null): string {
       return '已提交'
     case 'FILLED':
       return '已成交'
+    case 'PARTIAL_FILLED':
+      return '部分成交'
     case 'REJECTED':
       return '已拒绝'
     case 'CANCELLED':

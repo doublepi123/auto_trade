@@ -105,6 +105,51 @@ class TestBrokerGateway:
         assert len(received) == 1
         assert received[0].last_price == 120.0
 
+    def test_subscribe_failure_does_not_mark_symbol_subscribed(self, monkeypatch) -> None:
+        class FakeConfig:
+            @staticmethod
+            def from_env():
+                return "fake-config"
+
+        class QuoteContext:
+            def __init__(self, _config):
+                pass
+
+            def set_on_quote(self, _callback):
+                pass
+
+            def subscribe(self, _symbols, _topics):
+                raise RuntimeError("subscribe failed")
+
+            def unsubscribe(self, _symbols):
+                pass
+
+        class TradeContext:
+            def __init__(self, _config):
+                pass
+
+        class TopicType:
+            Quote = "Quote"
+
+        class FakeModule:
+            pass
+
+        FakeModule.Config = FakeConfig
+        FakeModule.QuoteContext = QuoteContext
+        FakeModule.TradeContext = TradeContext
+        FakeModule.TopicType = TopicType
+
+        monkeypatch.setattr(broker_module, "_import_openapi", lambda: FakeModule)
+        gw = BrokerGateway()
+
+        try:
+            gw.subscribe_quotes("AAPL.US", lambda _quote: None)
+        except RuntimeError:
+            pass
+
+        assert gw._subscribed_symbol is None
+        assert gw._quote_callbacks == []
+
     def test_get_positions_flattens_stock_position_channels(self) -> None:
         class StockInfo:
             def __init__(self, symbol: str, quantity: str, available_quantity: str, cost_price: str) -> None:
@@ -362,3 +407,22 @@ class TestGetAccount:
         assert result.cash_balances[0].available_cash == Decimal("1000")
         assert result.cash_balances[1].currency == "HKD"
         assert result.cash_balances[1].available_cash == Decimal("5000")
+
+    def test_get_cash_prefers_requested_currency(self) -> None:
+        class CashInfo:
+            def __init__(self, currency, available_cash):
+                self.currency = currency
+                self.available_cash = available_cash
+
+        class BalanceItem:
+            cash_infos = [CashInfo("USD", "1000"), CashInfo("HKD", "5000")]
+
+        class TradeContext:
+            def account_balance(self):
+                return [BalanceItem()]
+
+        gw = BrokerGateway()
+        gw._trade_ctx = TradeContext()
+        gw._quote_ctx = object()
+
+        assert gw.get_cash("HKD") == Decimal("5000")

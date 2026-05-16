@@ -1,6 +1,6 @@
 describe('Strategy', () => {
   beforeEach(() => {
-    cy.visit('/strategy')
+    cy.visit('/#/strategy')
     cy.contains('策略配置', { timeout: 10000 }).should('be.visible')
   })
 

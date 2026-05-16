@@ -2,7 +2,7 @@ services:
   backend:
     build: ./backend
     ports:
-      - '8000:8000'
+      - '127.0.0.1:8000:8000'
     volumes:
       - ./data:/app/data
     environment:
@@ -15,6 +15,8 @@ services:
       - LONGBRIDGE_APP_SECRET=${LONGBRIDGE_APP_SECRET:-}
       - LONGBRIDGE_ACCESS_TOKEN=${LONGBRIDGE_ACCESS_TOKEN:-}
       - AUTO_TRADE_SCT_KEY=${AUTO_TRADE_SCT_KEY:-}
+      - AUTO_TRADE_API_KEY=${AUTO_TRADE_API_KEY:?Set AUTO_TRADE_API_KEY in .env before starting Docker Compose}
+      - CREDENTIAL_MASTER_KEY=${CREDENTIAL_MASTER_KEY:-}
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8000/api/health || exit 1"]
       interval: 30s
@@ -26,7 +28,7 @@ services:
   frontend:
     build: ./frontend
     ports:
-      - '${AUTO_TRADE_FRONTEND_PORT:-8080}:80'
+      - '127.0.0.1:${AUTO_TRADE_FRONTEND_PORT:-8080}:80'
     depends_on:
       backend:
         condition: service_healthy

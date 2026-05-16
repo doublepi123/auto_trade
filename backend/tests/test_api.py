@@ -5,6 +5,7 @@ os.environ["AUTO_TRADE_DATABASE_URL"] = "sqlite:///data/test_api.db"
 
 from fastapi.testclient import TestClient
 
+from app.api import trade as trade_api
 from app.database import engine as db_engine, SessionLocal
 from app.models import Base, CredentialConfig, StrategyConfig
 from app.main import app
@@ -82,6 +83,16 @@ class TestAPI:
             "market": "US",
             "buy_low": 200.0,
             "sell_high": 100.0,
+        })
+        assert resp.status_code == 422
+
+    def test_update_strategy_rejects_blank_symbol(self) -> None:
+        _clean_strategy()
+        resp = client.put("/api/strategy", json={
+            "symbol": "   ",
+            "market": "US",
+            "buy_low": 100.0,
+            "sell_high": 200.0,
         })
         assert resp.status_code == 422
 
@@ -186,6 +197,26 @@ class TestAPI:
         assert isinstance(data["total_assets"], (int, float))
         assert isinstance(data["cash_balances"], list)
         assert isinstance(data["positions"], list)
+
+    def test_account_endpoint_marks_unavailable_on_broker_error(self, monkeypatch) -> None:
+        class FailingBroker:
+            def get_account(self):
+                raise RuntimeError("account unavailable")
+
+            def get_positions(self):
+                raise RuntimeError("positions unavailable")
+
+        class Runner:
+            broker = FailingBroker()
+
+        monkeypatch.setattr(trade_api, "get_runner", lambda: Runner())
+
+        resp = client.get("/api/account")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["available"] is False
+        assert data["error"] == "Account data unavailable"
 
     def test_status_has_all_fields(self) -> None:
         resp = client.get("/api/status")

@@ -18,6 +18,7 @@ from app.database import init_db
 from app.runner import get_runner
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
+logger = logging.getLogger("auto_trade.main")
 
 
 async def _ws_cleanup_task() -> None:

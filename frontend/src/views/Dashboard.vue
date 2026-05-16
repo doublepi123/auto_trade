@@ -1,6 +1,7 @@
 <template>
   <div v-loading="initialLoading">
     <el-alert v-if="loadError" type="error" title="无法连接服务器，请检查网络和 API 密钥" show-icon style="margin-bottom: 16px" />
+    <el-alert v-if="accountError" type="warning" title="账户资产暂时不可用，请检查券商凭证或稍后重试" show-icon style="margin-bottom: 16px" />
     <h3>仪表盘</h3>
     <el-row :gutter="20">
       <el-col :span="8">
@@ -43,6 +44,7 @@
             <el-button type="warning" @click="handlePause" :disabled="status.paused || status.kill_switch">暂停</el-button>
             <el-button type="success" @click="handleResume" :disabled="!status.paused || status.kill_switch">恢复</el-button>
             <el-button type="danger" plain @click="handleKillSwitch">紧急停止</el-button>
+            <el-button v-if="status.kill_switch" type="success" plain @click="handleDisableKillSwitch">解除紧急停止</el-button>
           </el-space>
         </el-card>
       </el-col>
@@ -108,7 +110,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { getStrategy, getStatus, pauseTrading, resumeTrading, activateKillSwitch, startTrading, stopTrading, getAccount } from '../api'
+import { getStrategy, getStatus, pauseTrading, resumeTrading, activateKillSwitch, disableKillSwitch, startTrading, stopTrading, getAccount } from '../api'
 import type { StrategyConfig, StatusData, AccountInfo } from '../types'
 import { engineStateLabel, marketLabel, positionSideLabel } from '../utils/labels'
 
@@ -128,10 +130,13 @@ const account = ref<AccountInfo>({
   total_assets: 0,
   cash_balances: [],
   positions: [],
+  available: true,
+  error: null,
 })
 const accountLoading = ref(false)
 const initialLoading = ref(true)
 const loadError = ref(false)
+const accountError = ref(false)
 
 const stateTagType = computed(() => {
   switch (status.value.engine_state) {
@@ -147,6 +152,7 @@ let pollTimer: ReturnType<typeof setInterval> | null = null
 let useWebSocket = false
 let reconnectAttempts = 0
 let accountRefreshTimer: ReturnType<typeof setInterval> | null = null
+let lastWsStatusAt = 0
 
 function connectWebSocket() {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
@@ -167,6 +173,7 @@ function connectWebSocket() {
       const data = JSON.parse(event.data)
       if (data.type === 'pong') return
       if (data.state !== undefined) {
+        lastWsStatusAt = Date.now()
         status.value = {
           engine_state: data.state,
           paused: data.risks?.paused ?? status.value.paused,
@@ -204,12 +211,17 @@ function scheduleReconnect() {
   }, delay)
 }
 
+function hasFreshWebSocketStatus() {
+  return useWebSocket && Date.now() - lastWsStatusAt < 10000
+}
+
 function startPolling() {
   pollTimer = setInterval(async () => {
-    if (useWebSocket) return
+    if (hasFreshWebSocketStatus()) return
     try {
       const st = await getStatus()
       status.value = st
+      loadError.value = false
     } catch {
       // silent — WebSocket may reconnect
     }
@@ -220,7 +232,9 @@ function startAccountRefresh() {
   accountRefreshTimer = setInterval(async () => {
     try {
       account.value = await getAccount()
+      accountError.value = !account.value.available
     } catch {
+      accountError.value = true
       // silent — account data will retry on next interval
     }
   }, 10000)
@@ -231,11 +245,16 @@ onMounted(async () => {
     const [s, st, acc] = await Promise.all([
       getStrategy(),
       getStatus(),
-      getAccount().catch(() => ({ total_assets: 0, cash_balances: [], positions: [] })),
+      getAccount().catch(() => {
+        accountError.value = true
+        return { total_assets: 0, cash_balances: [], positions: [], available: false, error: 'Account data unavailable' }
+      }),
     ])
     strategy.value = s
     status.value = st
     account.value = acc
+    accountError.value = !acc.available
+    loadError.value = false
   } catch (e) {
     console.error('刷新仪表盘失败：', e)
     loadError.value = true
@@ -246,6 +265,7 @@ onMounted(async () => {
   connectWebSocket()
   startPolling()
   startAccountRefresh()
+  window.addEventListener('api-key-updated', handleApiKeyUpdated)
 })
 
 onUnmounted(() => {
@@ -266,6 +286,7 @@ onUnmounted(() => {
     clearInterval(accountRefreshTimer)
     accountRefreshTimer = null
   }
+  window.removeEventListener('api-key-updated', handleApiKeyUpdated)
 })
 
 async function refresh() {
@@ -273,14 +294,40 @@ async function refresh() {
     const [s, st, acc] = await Promise.all([
       getStrategy(),
       getStatus(),
-      getAccount().catch(() => ({ total_assets: 0, cash_balances: [], positions: [] })),
+      getAccount().catch(() => {
+        accountError.value = true
+        return { total_assets: 0, cash_balances: [], positions: [], available: false, error: 'Account data unavailable' }
+      }),
     ])
     strategy.value = s
     status.value = st
     account.value = acc
+    accountError.value = !acc.available
+    loadError.value = false
   } catch (e) {
     console.error('刷新仪表盘失败：', e)
+    loadError.value = true
   }
+}
+
+function reconnectWebSocketNow() {
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer)
+    reconnectTimer = null
+  }
+  if (ws) {
+    ws.onclose = null
+    ws.close()
+    ws = null
+  }
+  useWebSocket = false
+  lastWsStatusAt = 0
+  connectWebSocket()
+}
+
+function handleApiKeyUpdated() {
+  refresh()
+  reconnectWebSocketNow()
 }
 
 async function handlePause() {
@@ -312,6 +359,19 @@ async function handleKillSwitch() {
     if (e !== 'cancel') {
       console.error('开启紧急停止失败：', e)
       ElMessage.error('开启紧急停止失败')
+    }
+  }
+}
+
+async function handleDisableKillSwitch() {
+  try {
+    await ElMessageBox.confirm('确定要解除紧急停止吗？请确认风险后再恢复交易。', '确认', { type: 'warning' })
+    await disableKillSwitch()
+    await refresh()
+  } catch (e: any) {
+    if (e !== 'cancel') {
+      console.error('解除紧急停止失败：', e)
+      ElMessage.error('解除紧急停止失败')
     }
   }
 }

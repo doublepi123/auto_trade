@@ -65,4 +65,6 @@ export interface AccountInfo {
   total_assets: number
   cash_balances: CashBalance[]
   positions: Position[]
+  available: boolean
+  error?: string | null
 }

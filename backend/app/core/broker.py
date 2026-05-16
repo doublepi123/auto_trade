@@ -156,9 +156,9 @@ class BrokerGateway:
                     self._quote_ctx.unsubscribe([self._subscribed_symbol])
                 except Exception:
                     logger.warning("failed to unsubscribe from %s", self._subscribed_symbol)
+                self._subscribed_symbol = None
+                self._quote_callbacks = []
             self._init_clients()
-            self._quote_callbacks = [callback]
-            self._subscribed_symbol = symbol
             module = _import_openapi()
             TopicType = getattr(module, "TopicType", None)
 
@@ -179,6 +179,8 @@ class BrokerGateway:
             self._quote_ctx.set_on_quote(_on_quote)
             topics = [TopicType.Quote] if TopicType else []
             self._quote_ctx.subscribe([symbol], topics)
+            self._quote_callbacks = [callback]
+            self._subscribed_symbol = symbol
 
     def submit_limit_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal) -> OrderResult:
         with self._lock:
@@ -268,23 +270,28 @@ class BrokerGateway:
             self._quote_callbacks.clear()
             self._subscribed_symbol = None
 
-    def get_cash(self) -> Decimal:
+    def get_cash(self, currency: str | None = None) -> Decimal:
         with self._lock:
             self._init_clients()
             try:
                 response = self._trade_ctx.account_balance()
                 items = response if isinstance(response, list) else [response]
+                target_currency = currency.upper() if currency else None
                 for item in items:
                     cash_infos = getattr(item, "cash_infos", None)
                     if cash_infos:
                         for ci in cash_infos:
-                            currency = str(getattr(ci, "currency", ""))
-                            if currency in ("USD", "HKD"):
+                            item_currency = str(getattr(ci, "currency", ""))
+                            if target_currency and item_currency == target_currency:
                                 return Decimal(str(getattr(ci, "available_cash", "0")))
-                    currency = str(getattr(item, "currency", ""))
-                    if currency in ("USD", "HKD"):
+                            if not target_currency and item_currency in ("USD", "HKD"):
+                                return Decimal(str(getattr(ci, "available_cash", "0")))
+                    item_currency = str(getattr(item, "currency", ""))
+                    if target_currency and item_currency == target_currency:
                         return Decimal(str(getattr(item, "total_cash", "0")))
-                logger.warning("get_cash: no USD/HKD item found in account_balance response")
+                    if not target_currency and item_currency in ("USD", "HKD"):
+                        return Decimal(str(getattr(item, "total_cash", "0")))
+                logger.warning("get_cash: no %s item found in account_balance response", target_currency or "USD/HKD")
                 return Decimal("0")
             except Exception:
                 logger.exception("failed to get account balance")

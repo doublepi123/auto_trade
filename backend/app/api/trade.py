@@ -29,6 +29,7 @@ def get_orders(
 def get_account() -> AccountResponse:
     runner = get_runner()
     broker = runner.broker
+    available = True
     try:
         account = broker.get_account()
         total_assets = float(account.total_assets)
@@ -42,6 +43,7 @@ def get_account() -> AccountResponse:
         ]
     except Exception:
         logging.getLogger("auto_trade.trade").exception("failed to get account balance")
+        available = False
         total_assets = 0.0
         cash_balances = []
 
@@ -64,12 +66,15 @@ def get_account() -> AccountResponse:
             ))
     except Exception:
         logging.getLogger("auto_trade.trade").exception("failed to get positions")
+        available = False
         positions = []
 
     return AccountResponse(
         total_assets=total_assets,
         cash_balances=cash_balances,
         positions=positions,
+        available=available,
+        error=None if available else "Account data unavailable",
     )
 
 

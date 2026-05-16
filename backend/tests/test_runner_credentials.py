@@ -206,3 +206,45 @@ class TestRunnerCredentials:
         runner.reload_credentials()
 
         assert runner.notifier.sct_key == "env-sct"
+
+    def test_reload_credentials_removes_blank_longport_env_vars(self, monkeypatch) -> None:
+        credential = CredentialConfig(
+            longbridge_app_key="",
+            longbridge_app_secret="",
+            longbridge_access_token="",
+            sct_key="",
+        )
+        monkeypatch.setenv("LONGPORT_APP_KEY", "old-key")
+        monkeypatch.setenv("LONGPORT_APP_SECRET", "old-secret")
+        monkeypatch.setenv("LONGPORT_ACCESS_TOKEN", "old-token")
+        monkeypatch.setattr(runner_module, "BrokerGateway", FakeBrokerGateway)
+        monkeypatch.setattr(runner_module, "ServerChanNotifier", FakeNotifier)
+        monkeypatch.setattr(runner_module, "SessionLocal", lambda: FakeSession(credential))
+
+        runner = AppRunner()
+        runner.reload_credentials()
+
+        assert "LONGPORT_APP_KEY" not in os.environ
+        assert "LONGPORT_APP_SECRET" not in os.environ
+        assert "LONGPORT_ACCESS_TOKEN" not in os.environ
+
+    def test_blank_database_credentials_keep_config_env_credentials(self, monkeypatch) -> None:
+        credential = CredentialConfig(
+            longbridge_app_key="",
+            longbridge_app_secret="",
+            longbridge_access_token="",
+            sct_key="",
+        )
+        monkeypatch.setattr(runner_module.settings, "longbridge_app_key", "env-key", raising=False)
+        monkeypatch.setattr(runner_module.settings, "longbridge_app_secret", "env-secret", raising=False)
+        monkeypatch.setattr(runner_module.settings, "longbridge_access_token", "env-token", raising=False)
+        monkeypatch.setattr(runner_module, "BrokerGateway", FakeBrokerGateway)
+        monkeypatch.setattr(runner_module, "ServerChanNotifier", FakeNotifier)
+        monkeypatch.setattr(runner_module, "SessionLocal", lambda: FakeSession(credential))
+
+        runner = AppRunner()
+        runner.reload_credentials()
+
+        assert os.environ.get("LONGPORT_APP_KEY") == "env-key"
+        assert os.environ.get("LONGPORT_APP_SECRET") == "env-secret"
+        assert os.environ.get("LONGPORT_ACCESS_TOKEN") == "env-token"

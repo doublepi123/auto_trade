@@ -68,6 +68,8 @@ class CredentialsService:
         for field in updatable_fields:
             if field in data and data[field] is not None:
                 value = data[field]
+                if value == "":
+                    continue
                 setattr(config, field, encrypt_secret(value) if value else "")
 
         config.updated_at = datetime.now(timezone.utc)

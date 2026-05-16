@@ -1,14 +1,14 @@
 <template>
   <el-container>
-    <el-header>
+    <el-header class="app-header">
       <h2>Auto Trade</h2>
-      <el-menu mode="horizontal" :default-active="route.path" router>
+      <el-menu class="app-menu" mode="horizontal" :default-active="route.path" router>
         <el-menu-item index="/">仪表盘</el-menu-item>
         <el-menu-item index="/strategy">策略配置</el-menu-item>
         <el-menu-item index="/credentials">凭证设置</el-menu-item>
         <el-menu-item index="/history">交易历史</el-menu-item>
       </el-menu>
-      <el-button text @click="showApiKeyDialog = true" style="margin-left: auto">
+      <el-button text @click="showApiKeyDialog = true">
         {{ hasApiKey ? 'API 密钥已设置' : '设置 API 密钥' }}
       </el-button>
     </el-header>
@@ -58,11 +58,13 @@ onUnmounted(() => {
 })
 
 function saveApiKey() {
-  if (apiKeyInput.value) {
-    localStorage.setItem('api_key', apiKeyInput.value)
+  const key = apiKeyInput.value.trim()
+  if (key) {
+    localStorage.setItem('api_key', key)
     hasApiKey.value = true
     apiKeyInput.value = ''
     showApiKeyDialog.value = false
+    window.dispatchEvent(new CustomEvent('api-key-updated'))
     ElMessage.success('API 密钥已保存')
   }
 }
@@ -75,3 +77,22 @@ function clearApiKey() {
   ElMessage.success('API 密钥已清除')
 }
 </script>
+
+<style scoped>
+.app-header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.app-header h2 {
+  flex: 0 0 auto;
+  margin: 0;
+  white-space: nowrap;
+}
+
+.app-menu {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+</style>

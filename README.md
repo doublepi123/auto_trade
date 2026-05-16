@@ -94,6 +94,8 @@ LONGPORT_APP_KEY=你的AppKey
 LONGPORT_APP_SECRET=你的AppSecret
 LONGPORT_ACCESS_TOKEN=你的AccessToken
 AUTO_TRADE_SCT_KEY=你的Server酱SendKey  # 可选
+AUTO_TRADE_API_KEY=请填写一个较长的管理密钥
+CREDENTIAL_MASTER_KEY=请填写一个较长的本机凭证加密主密钥
 ```
 
 长桥凭证获取：<https://open.longbridge.com/>
@@ -235,6 +237,8 @@ auto_trade/
 | `LONGPORT_APP_SECRET` | 长桥 App Secret | - |
 | `LONGPORT_ACCESS_TOKEN` | 长桥 Access Token | - |
 | `AUTO_TRADE_SCT_KEY` | Server酱 SendKey | - |
+| `AUTO_TRADE_API_KEY` | Web/API 管理密钥，Docker Compose 启动时必须设置 | - |
+| `CREDENTIAL_MASTER_KEY` | 本地保存券商凭证时用于加密私钥文件的主密钥，建议首次保存凭证前设置 | - |
 
 长桥 SDK 官方使用 `LONGPORT_*` 凭证变量；项目仍兼容旧的 `LONGBRIDGE_*` 变量名。所有 auto_trade 特定配置均使用 `AUTO_TRADE_` 前缀。
 
@@ -242,8 +246,9 @@ auto_trade/
 
 - **绝不提交** `.env`、API 凭证到代码仓库（已加入 `.gitignore`）
 - 长桥凭证通过环境变量注入，不写入配置文件
+- Docker Compose 默认只绑定 `127.0.0.1`，并要求设置 `AUTO_TRADE_API_KEY`
 - 生产环境建议通过 Docker secrets 或外部密钥管理服务注入敏感信息
-- Web UI 默认绑定 `127.0.0.1`，如暴露到公网需配置反向代理 + HTTPS + 认证
+- 如需暴露到公网，请先配置反向代理、HTTPS、认证和访问控制
 
 ## 限制
 

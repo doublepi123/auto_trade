@@ -1,0 +1,8 @@
+node_modules
+dist
+.vite
+.vue-global-types
+cypress/screenshots
+cypress/videos
+npm-debug.log*
+*.log

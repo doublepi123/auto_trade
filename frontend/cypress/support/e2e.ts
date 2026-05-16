@@ -22,7 +22,7 @@ Cypress.Commands.add('stubApi', () => {
   }).as('getStatus')
 
   cy.intercept('GET', '/api/account', {
-    body: { total_assets: 0, cash_balances: [], positions: [] },
+    body: { total_assets: 0, cash_balances: [], positions: [], available: true, error: null },
   }).as('getAccount')
 
   cy.intercept('GET', '/api/credentials', {

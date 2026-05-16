@@ -133,6 +133,41 @@ class TestCredentialsAPI:
         finally:
             db.close()
 
+    def test_update_credentials_preserves_existing_values_when_blank(self) -> None:
+        _clean_credentials()
+        initial = client.put("/api/credentials", json={
+            "longbridge_app_key": "key",
+            "longbridge_app_secret": "secret",
+            "longbridge_access_token": "token",
+            "sct_key": "sct",
+        })
+        assert initial.status_code == 200
+
+        resp = client.put("/api/credentials", json={
+            "longbridge_app_key": "",
+            "longbridge_app_secret": "",
+            "longbridge_access_token": "",
+            "sct_key": "",
+        })
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["has_longbridge_app_key"] is True
+        assert data["has_longbridge_app_secret"] is True
+        assert data["has_longbridge_access_token"] is True
+        assert data["has_sct_key"] is True
+
+        db = SessionLocal()
+        try:
+            credential = db.query(CredentialConfig).order_by(CredentialConfig.id.desc()).first()
+            assert credential is not None
+            assert decrypt_secret(credential.longbridge_app_key) == "key"
+            assert decrypt_secret(credential.longbridge_app_secret) == "secret"
+            assert decrypt_secret(credential.longbridge_access_token) == "token"
+            assert decrypt_secret(credential.sct_key) == "sct"
+        finally:
+            db.close()
+
     def test_update_credentials_ignores_reload_failure(self, monkeypatch) -> None:
         class FailingRunner:
             def reload_credentials(self) -> None:

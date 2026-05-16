@@ -75,7 +75,7 @@ class AppRunner:
             try:
                 self._loop = asyncio.get_running_loop()
             except RuntimeError:
-                self._loop = None
+                pass
 
             if config.symbol and not self._quotes_subscribed:
                 try:
@@ -120,12 +120,12 @@ class AppRunner:
             should_resubscribe = resubscribe and bool(symbol)
             new_notifier = ServerChanNotifier(credentials.sct_key if credentials.sct_key else settings.sct_key)
 
-            if credentials.longbridge_app_key:
-                os.environ["LONGPORT_APP_KEY"] = credentials.longbridge_app_key
-            if credentials.longbridge_app_secret:
-                os.environ["LONGPORT_APP_SECRET"] = credentials.longbridge_app_secret
-            if credentials.longbridge_access_token:
-                os.environ["LONGPORT_ACCESS_TOKEN"] = credentials.longbridge_access_token
+            self._set_or_clear_env("LONGPORT_APP_KEY", credentials.longbridge_app_key or settings.longbridge_app_key)
+            self._set_or_clear_env("LONGPORT_APP_SECRET", credentials.longbridge_app_secret or settings.longbridge_app_secret)
+            self._set_or_clear_env(
+                "LONGPORT_ACCESS_TOKEN",
+                credentials.longbridge_access_token or settings.longbridge_access_token,
+            )
 
             new_broker = BrokerGateway()
 
@@ -149,6 +149,13 @@ class AppRunner:
 
     def reload_credentials(self) -> None:
         self._apply_credentials(self._load_credentials(), resubscribe=self._running)
+
+    @staticmethod
+    def _set_or_clear_env(name: str, value: str) -> None:
+        if value:
+            os.environ[name] = value
+        else:
+            os.environ.pop(name, None)
 
     def reload_strategy(self) -> None:
         with self._state_lock:
@@ -257,7 +264,7 @@ class AppRunner:
 
     def _execute_buy(self, symbol: str, quote: Quote) -> bool:
         broker = self.broker
-        cash = broker.get_cash()
+        cash = broker.get_cash(self._cash_currency())
         price = Decimal(str(quote.last_price))
         if price <= 0:
             logger.warning("BUY: price <= 0, price=%s", price)
@@ -269,7 +276,11 @@ class AppRunner:
             return False
 
         result = broker.submit_limit_order(symbol, "BUY", Decimal(qty), price)
-        self._safe_record_order(result.broker_order_id, symbol, "BUY", float(qty), float(price))
+        status = getattr(result, "status", "SUBMITTED")
+        self._safe_record_order(result.broker_order_id, symbol, "BUY", float(qty), float(price), status)
+        if not self._order_was_accepted(result):
+            logger.warning("BUY rejected by broker: %s status=%s", result.broker_order_id, status)
+            return False
         self._safe_notify_order("BUY", symbol, str(qty), str(price), result.broker_order_id)
         logger.info(f"BUY: {symbol} qty={qty} price={price}")
         return True
@@ -288,7 +299,11 @@ class AppRunner:
             return False
         pnl = float((price - long_pos.avg_price) * long_pos.quantity)
         result = broker.submit_limit_order(symbol, "SELL", long_pos.quantity, price)
-        self._safe_record_order(result.broker_order_id, symbol, "SELL", float(long_pos.quantity), float(price))
+        status = getattr(result, "status", "SUBMITTED")
+        self._safe_record_order(result.broker_order_id, symbol, "SELL", float(long_pos.quantity), float(price), status)
+        if not self._order_was_accepted(result):
+            logger.warning("SELL rejected by broker: %s status=%s", result.broker_order_id, status)
+            return False
         self._safe_notify_order("SELL", symbol, str(long_pos.quantity), str(price), result.broker_order_id)
         self.risk.record_trade(pnl)
         logger.info(f"SELL: {symbol} qty={long_pos.quantity} price={price} pnl={pnl}")
@@ -296,7 +311,7 @@ class AppRunner:
 
     def _execute_sell_short(self, symbol: str, quote: Quote) -> bool:
         broker = self.broker
-        cash = broker.get_cash()
+        cash = broker.get_cash(self._cash_currency())
         price = Decimal(str(quote.last_price))
         if price <= 0:
             logger.warning("SELL_SHORT: price <= 0, price=%s", price)
@@ -308,7 +323,11 @@ class AppRunner:
             return False
 
         result = broker.submit_limit_order(symbol, "SELL", Decimal(qty), price)
-        self._safe_record_order(result.broker_order_id, symbol, "SELL_SHORT", float(qty), float(price))
+        status = getattr(result, "status", "SUBMITTED")
+        self._safe_record_order(result.broker_order_id, symbol, "SELL_SHORT", float(qty), float(price), status)
+        if not self._order_was_accepted(result):
+            logger.warning("SELL_SHORT rejected by broker: %s status=%s", result.broker_order_id, status)
+            return False
         self._safe_notify_order("SELL_SHORT", symbol, str(qty), str(price), result.broker_order_id)
         logger.info(f"SELL_SHORT: {symbol} qty={qty} price={price}")
         return True
@@ -327,13 +346,17 @@ class AppRunner:
             return False
         pnl = float((pos.avg_price - price) * pos.quantity)
         result = broker.submit_limit_order(symbol, "BUY", pos.quantity, price)
-        self._safe_record_order(result.broker_order_id, symbol, "BUY_TO_COVER", float(pos.quantity), float(price))
+        status = getattr(result, "status", "SUBMITTED")
+        self._safe_record_order(result.broker_order_id, symbol, "BUY_TO_COVER", float(pos.quantity), float(price), status)
+        if not self._order_was_accepted(result):
+            logger.warning("BUY_TO_COVER rejected by broker: %s status=%s", result.broker_order_id, status)
+            return False
         self._safe_notify_order("BUY_TO_COVER", symbol, str(pos.quantity), str(price), result.broker_order_id)
         self.risk.record_trade(pnl)
         logger.info(f"BUY_TO_COVER: {symbol} qty={pos.quantity} price={price} pnl={pnl}")
         return True
 
-    def _record_order(self, order_id: str, symbol: str, side: str, qty: float, price: float) -> None:
+    def _record_order(self, order_id: str, symbol: str, side: str, qty: float, price: float, status: str = "SUBMITTED") -> None:
         db = SessionLocal()
         try:
             order = OrderRecord(
@@ -342,18 +365,25 @@ class AppRunner:
                 side=side,
                 quantity=qty,
                 price=price,
-                status="SUBMITTED",
+                status=status,
             )
             db.add(order)
             db.commit()
         finally:
             db.close()
 
-    def _safe_record_order(self, order_id: str, symbol: str, side: str, qty: float, price: float) -> None:
+    def _safe_record_order(self, order_id: str, symbol: str, side: str, qty: float, price: float, status: str = "SUBMITTED") -> None:
         try:
-            self._record_order(order_id, symbol, side, qty, price)
+            self._record_order(order_id, symbol, side, qty, price, status)
         except Exception:
             logger.exception("failed to record order %s for %s (broker order is still live)", order_id, symbol)
+
+    def _cash_currency(self) -> str:
+        return "HKD" if self.engine.params.market == "HK" else "USD"
+
+    @staticmethod
+    def _order_was_accepted(result: object) -> bool:
+        return getattr(result, "status", "SUBMITTED") not in {"REJECTED", "CANCELLED"}
 
     def _safe_notify_order(self, side: str, symbol: str, quantity: str, price: str, order_id: str) -> None:
         try:
