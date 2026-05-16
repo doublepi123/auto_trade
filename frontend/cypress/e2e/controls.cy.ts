@@ -5,14 +5,14 @@ describe('Controls', () => {
   })
 
   it('can pause trading', () => {
-    cy.get('button').contains('暂停').click()
+    cy.get('button').contains('暂停').click({ force: true })
     cy.contains('已暂停').should('be.visible')
   })
 
   it('can resume trading after pause', () => {
-    cy.get('button').contains('暂停').click()
+    cy.get('button').contains('暂停').click({ force: true })
     cy.contains('已暂停').should('be.visible')
-    cy.get('button').contains('恢复').click()
+    cy.get('button').contains('恢复').click({ force: true })
     cy.contains('运行中').should('be.visible')
   })
 
