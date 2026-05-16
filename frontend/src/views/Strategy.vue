@@ -33,6 +33,7 @@
         </el-form-item>
       </el-form>
     </el-card>
+    <el-alert v-if="error" type="error" :title="error" show-icon style="max-width: 600px; margin-top: 12px" />
   </div>
 </template>
 
@@ -40,6 +41,7 @@
 import { ref, watch, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { getStrategy, updateStrategy } from '../api'
+import { useFormSaveState } from '../composables/useFormSaveState'
 
 const form = ref({
   symbol: '',
@@ -51,12 +53,10 @@ const form = ref({
   max_consecutive_losses: 3,
 })
 
-const saving = ref(false)
-const saved = ref(false)
-const loading = ref(true)
+const { loading, saving, saved, error, markDirty, beginSave, saveSucceeded, saveFailed } = useFormSaveState()
 
 watch(form, () => {
-  saved.value = false
+  markDirty()
 }, { deep: true })
 
 onMounted(async () => {
@@ -73,6 +73,7 @@ onMounted(async () => {
     }
   } catch (e) {
     console.error('加载策略失败：', e)
+    error.value = '加载策略失败'
     ElMessage.error('加载策略失败')
   } finally {
     loading.value = false
@@ -80,6 +81,7 @@ onMounted(async () => {
 })
 
 async function handleSave() {
+  if (loading.value || saving.value) return
   if (!form.value.symbol) {
     ElMessage.error('股票代码不能为空')
     return
@@ -97,16 +99,14 @@ async function handleSave() {
     return
   }
 
-  saving.value = true
-  saved.value = false
+  beginSave()
   try {
     await updateStrategy(form.value)
-    saved.value = true
+    saveSucceeded()
   } catch (e) {
     console.error('保存失败：', e)
+    saveFailed('保存失败')
     ElMessage.error('保存失败')
-  } finally {
-    saving.value = false
   }
 }
 </script>

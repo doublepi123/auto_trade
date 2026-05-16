@@ -186,12 +186,10 @@ class TestGetAccountEndpointBrokerFailure:
         runner.broker = mock_broker
 
         resp = client.get("/api/account")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["total_assets"] == 0.0
-        assert data["cash_balances"] == []
+        assert resp.status_code == 503
+        assert resp.json()["detail"] == "account data unavailable"
 
-    def test_account_endpoint_broker_get_account_fails_positions_still_work(self):
+    def test_account_endpoint_broker_get_account_fails_does_not_return_positions(self):
         runner = get_runner()
         mock_broker = MagicMock()
         mock_broker.get_account.side_effect = Exception("connection failed")
@@ -204,11 +202,8 @@ class TestGetAccountEndpointBrokerFailure:
         runner.broker = mock_broker
 
         resp = client.get("/api/account")
-        data = resp.json()
-        assert data["total_assets"] == 0.0
-        assert data["cash_balances"] == []
-        assert len(data["positions"]) == 1
-        assert data["positions"][0]["market_value"] == pytest.approx(1550.0)
+        assert resp.status_code == 503
+        mock_broker.get_positions.assert_not_called()
 
     def test_account_endpoint_broker_get_positions_fails(self):
         runner = get_runner()
@@ -234,11 +229,8 @@ class TestGetAccountEndpointBrokerFailure:
         runner.broker = mock_broker
 
         resp = client.get("/api/account")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["total_assets"] == 0.0
-        assert data["cash_balances"] == []
-        assert data["positions"] == []
+        assert resp.status_code == 503
+        assert resp.json()["detail"] == "account data unavailable"
 
 
 class TestGetAccountEndpointQuoteFallback:

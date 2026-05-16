@@ -1,10 +1,13 @@
 import os
+from decimal import Decimal
+from types import SimpleNamespace
 
 os.environ["AUTO_TRADE_DATABASE_URL"] = "sqlite:///data/test_api.db"
 
 
 from fastapi.testclient import TestClient
 
+from app.api import trade as trade_api
 from app.database import engine as db_engine, SessionLocal
 from app.models import Base, CredentialConfig, StrategyConfig
 from app.main import app
@@ -139,7 +142,16 @@ class TestAPI:
         resp = client.get("/api/health")
         assert resp.status_code == 200
 
-    def test_get_account(self) -> None:
+    def test_get_account(self, monkeypatch) -> None:
+        class Broker:
+            def get_account(self) -> object:
+                return SimpleNamespace(total_assets=Decimal("100"), cash_balances=[], net_assets=[])
+
+            def get_positions(self) -> list[object]:
+                return []
+
+        monkeypatch.setattr(trade_api, "get_runner", lambda: SimpleNamespace(broker=Broker()))
+
         resp = client.get("/api/account")
         assert resp.status_code == 200
         data = resp.json()
@@ -179,13 +191,19 @@ class TestAPI:
         assert resp.status_code == 200
         assert isinstance(resp.json(), list)
 
-    def test_account_endpoint_returns_default_structure(self) -> None:
+    def test_account_endpoint_reports_unavailable_without_broker_credentials(self, monkeypatch) -> None:
+        class Broker:
+            def get_account(self) -> object:
+                raise RuntimeError("missing credentials")
+
+            def get_positions(self) -> list[object]:
+                raise AssertionError("positions should not be loaded when account is unavailable")
+
+        monkeypatch.setattr(trade_api, "get_runner", lambda: SimpleNamespace(broker=Broker()))
+
         resp = client.get("/api/account")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert isinstance(data["total_assets"], (int, float))
-        assert isinstance(data["cash_balances"], list)
-        assert isinstance(data["positions"], list)
+        assert resp.status_code == 503
+        assert resp.json()["detail"] == "account data unavailable"
 
     def test_status_has_all_fields(self) -> None:
         resp = client.get("/api/status")

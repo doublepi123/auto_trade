@@ -1,15 +1,13 @@
 from __future__ import annotations
 
-import logging
-from decimal import Decimal
-
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import OrderRecord
 from app.runner import get_runner
-from app.schemas import AccountResponse, CashBalanceSchema, ControlRequest, MessageResponse, OrderResponse, PositionSchema
+from app.schemas import AccountResponse, ControlRequest, MessageResponse, OrderResponse
+from app.services.account_service import AccountService, AccountUnavailableError
 from app.services.strategy_service import StrategyService
 from app.api.auth import require_api_key
 
@@ -28,49 +26,10 @@ def get_orders(
 @router.get("/account", response_model=AccountResponse, dependencies=[Depends(require_api_key())])
 def get_account() -> AccountResponse:
     runner = get_runner()
-    broker = runner.broker
     try:
-        account = broker.get_account()
-        total_assets = float(account.total_assets)
-        cash_balances = [
-            CashBalanceSchema(
-                currency=cb.currency,
-                available_cash=float(cb.available_cash),
-                frozen_cash=float(cb.frozen_cash),
-            )
-            for cb in account.cash_balances
-        ]
-    except Exception:
-        logging.getLogger("auto_trade.trade").exception("failed to get account balance")
-        total_assets = 0.0
-        cash_balances = []
-
-    try:
-        broker_positions = broker.get_positions()
-        positions: list[PositionSchema] = []
-        for pos in broker_positions:
-            try:
-                quote = broker.get_quote(pos.symbol)
-                market_value = float(pos.quantity * Decimal(str(quote.last_price)))
-            except Exception:
-                logging.getLogger("auto_trade.trade").warning("failed to get quote for %s, using avg_price fallback", pos.symbol)
-                market_value = float(pos.quantity * pos.avg_price)
-            positions.append(PositionSchema(
-                symbol=pos.symbol,
-                side=pos.side,
-                quantity=float(pos.quantity),
-                avg_price=float(pos.avg_price),
-                market_value=market_value,
-            ))
-    except Exception:
-        logging.getLogger("auto_trade.trade").exception("failed to get positions")
-        positions = []
-
-    return AccountResponse(
-        total_assets=total_assets,
-        cash_balances=cash_balances,
-        positions=positions,
-    )
+        return AccountService(runner.broker).get_account_response()
+    except AccountUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
 
 
 @router.post("/control/start", response_model=MessageResponse, dependencies=[Depends(require_api_key())])

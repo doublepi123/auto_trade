@@ -10,6 +10,8 @@ dist/
 
 # Data
 data/
+.superpowers/
+.worktrees/
 
 # Frontend
 node_modules/

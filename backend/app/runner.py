@@ -1,15 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 import threading
 import time
 from datetime import datetime
-from decimal import Decimal
-
-from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.core.broker import BrokerGateway, Quote
@@ -19,7 +15,9 @@ from app.core.risk import RiskConfig, RiskController
 from app.database import SessionLocal
 from app.models import OrderRecord, RiskEvent
 from app.services.credentials_service import CredentialsService, PlainCredentials
+from app.services.runtime_state_service import RuntimeStateService
 from app.services.strategy_service import StrategyService
+from app.services.trade_execution_service import TradeExecutionService
 from app.api.ws import manager
 
 logger = logging.getLogger("auto_trade.runner")
@@ -31,6 +29,11 @@ class AppRunner:
         self.engine = StrategyEngine()
         self.risk = RiskController()
         self.notifier = ServerChanNotifier("")
+        self.runtime_state = RuntimeStateService()
+        self.trade_execution = TradeExecutionService(
+            record_order=self._safe_record_order,
+            record_risk_event=self._record_risk_event,
+        )
         self._running = False
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -43,32 +46,7 @@ class AppRunner:
         try:
             svc = StrategyService(db)
             config = svc.get_config()
-            state = svc.get_runtime_state()
-
-            self.engine.params = StrategyParams(
-                symbol=config.symbol,
-                market=config.market,
-                buy_low=config.buy_low,
-                sell_high=config.sell_high,
-                short_selling=config.short_selling,
-            )
-            try:
-                self.engine.state = EngineState(state.engine_state)
-            except ValueError:
-                logger.warning("invalid engine state %r in DB, defaulting to FLAT", state.engine_state)
-                self.engine.state = EngineState.FLAT
-            self.engine.last_price = state.last_price
-            self.engine.last_trigger_price = state.last_trigger_price
-            self.engine.last_trigger_at = state.last_trigger_at
-
-            self.risk.config = RiskConfig(
-                max_daily_loss=config.max_daily_loss,
-                max_consecutive_losses=config.max_consecutive_losses,
-            )
-            self.risk.daily_pnl = state.daily_pnl
-            self.risk.consecutive_losses = state.consecutive_losses
-            self.risk.kill_switch = state.kill_switch
-            self.risk.paused = state.paused
+            self.runtime_state.load(svc, self.engine, self.risk)
 
             self._apply_credentials(self._load_credentials(), resubscribe=False)
 
@@ -227,111 +205,17 @@ class AppRunner:
             self.engine.last_trigger_at = last_trigger_at
 
     def _handle_trigger(self, result: TriggerResult, quote: Quote) -> bool:
-        risk_result = self.risk.check()
-        if not risk_result.approved:
-            logger.warning(f"risk rejected: {risk_result.reason}")
-            self._record_risk_event(risk_result.reason)
-            self.notifier.notify_risk_event("REJECTED", risk_result.reason)
-            return False
-
-        try:
-            symbol = self.engine.params.symbol
-            executed = False
-            if result.action == "BUY":
-                executed = self._execute_buy(symbol, quote)
-            elif result.action == "SELL":
-                executed = self._execute_sell(symbol, quote)
-            elif result.action == "SELL_SHORT":
-                executed = self._execute_sell_short(symbol, quote)
-            elif result.action == "BUY_TO_COVER":
-                executed = self._execute_buy_to_cover(symbol, quote)
-
-            if executed:
-                self._broadcast_status()
-            return executed
-        except Exception as exc:
-            logger.exception(f"order execution failed: {exc}")
-            self._record_risk_event(str(exc))
-            self.notifier.notify_risk_event("ORDER_FAILED", str(exc))
-            return False
-
-    def _execute_buy(self, symbol: str, quote: Quote) -> bool:
-        broker = self.broker
-        cash = broker.get_cash()
-        price = Decimal(str(quote.last_price))
-        if price <= 0:
-            logger.warning("BUY: price <= 0, price=%s", price)
-            return False
-        usable_cash = (cash * Decimal("0.98")).quantize(Decimal("0.01"))
-        qty = int(usable_cash / price)
-        if qty <= 0:
-            logger.warning("BUY: qty <= 0, cash=%s price=%s", cash, price)
-            return False
-
-        result = broker.submit_limit_order(symbol, "BUY", Decimal(qty), price)
-        self._safe_record_order(result.broker_order_id, symbol, "BUY", float(qty), float(price))
-        self._safe_notify_order("BUY", symbol, str(qty), str(price), result.broker_order_id)
-        logger.info(f"BUY: {symbol} qty={qty} price={price}")
-        return True
-
-    def _execute_sell(self, symbol: str, quote: Quote) -> bool:
-        broker = self.broker
-        positions = broker.get_positions()
-        long_pos = next((p for p in positions if p.symbol == symbol and p.side == "LONG"), None)
-        if long_pos is None:
-            logger.warning("SELL: no long position for %s", symbol)
-            return False
-
-        price = Decimal(str(quote.last_price))
-        if price <= 0:
-            logger.warning("SELL: price <= 0, price=%s", price)
-            return False
-        pnl = float((price - long_pos.avg_price) * long_pos.quantity)
-        result = broker.submit_limit_order(symbol, "SELL", long_pos.quantity, price)
-        self._safe_record_order(result.broker_order_id, symbol, "SELL", float(long_pos.quantity), float(price))
-        self._safe_notify_order("SELL", symbol, str(long_pos.quantity), str(price), result.broker_order_id)
-        self.risk.record_trade(pnl)
-        logger.info(f"SELL: {symbol} qty={long_pos.quantity} price={price} pnl={pnl}")
-        return True
-
-    def _execute_sell_short(self, symbol: str, quote: Quote) -> bool:
-        broker = self.broker
-        cash = broker.get_cash()
-        price = Decimal(str(quote.last_price))
-        if price <= 0:
-            logger.warning("SELL_SHORT: price <= 0, price=%s", price)
-            return False
-        usable_cash = (cash * Decimal("0.98")).quantize(Decimal("0.01"))
-        qty = int(usable_cash / price)
-        if qty <= 0:
-            logger.warning("SELL_SHORT: qty <= 0, cash=%s price=%s", cash, price)
-            return False
-
-        result = broker.submit_limit_order(symbol, "SELL", Decimal(qty), price)
-        self._safe_record_order(result.broker_order_id, symbol, "SELL_SHORT", float(qty), float(price))
-        self._safe_notify_order("SELL_SHORT", symbol, str(qty), str(price), result.broker_order_id)
-        logger.info(f"SELL_SHORT: {symbol} qty={qty} price={price}")
-        return True
-
-    def _execute_buy_to_cover(self, symbol: str, quote: Quote) -> bool:
-        broker = self.broker
-        positions = broker.get_positions()
-        pos = next((p for p in positions if p.symbol == symbol and p.side == "SHORT" and p.quantity > 0), None)
-        if pos is None:
-            logger.warning("BUY_TO_COVER: no short position for %s", symbol)
-            return False
-
-        price = Decimal(str(quote.last_price))
-        if price <= 0:
-            logger.warning("BUY_TO_COVER: price <= 0, price=%s", price)
-            return False
-        pnl = float((pos.avg_price - price) * pos.quantity)
-        result = broker.submit_limit_order(symbol, "BUY", pos.quantity, price)
-        self._safe_record_order(result.broker_order_id, symbol, "BUY_TO_COVER", float(pos.quantity), float(price))
-        self._safe_notify_order("BUY_TO_COVER", symbol, str(pos.quantity), str(price), result.broker_order_id)
-        self.risk.record_trade(pnl)
-        logger.info(f"BUY_TO_COVER: {symbol} qty={pos.quantity} price={price} pnl={pnl}")
-        return True
+        executed = self.trade_execution.execute(
+            result.action,
+            self.engine.params.symbol,
+            quote,
+            self.broker,
+            self.risk,
+            self.notifier,
+        )
+        if executed:
+            self._broadcast_status()
+        return executed
 
     def _record_order(self, order_id: str, symbol: str, side: str, qty: float, price: float) -> None:
         db = SessionLocal()
@@ -354,12 +238,6 @@ class AppRunner:
             self._record_order(order_id, symbol, side, qty, price)
         except Exception:
             logger.exception("failed to record order %s for %s (broker order is still live)", order_id, symbol)
-
-    def _safe_notify_order(self, side: str, symbol: str, quantity: str, price: str, order_id: str) -> None:
-        try:
-            self.notifier.notify_order(side, symbol, quantity, price, order_id)
-        except Exception:
-            logger.exception("failed to send order notification for %s %s", side, symbol)
 
     # TODO: Implement order status polling or broker webhook integration to update
     # order status from SUBMITTED to FILLED/REJECTED/CANCELLED using broker SDK.
@@ -397,28 +275,12 @@ class AppRunner:
 
     def _persist_state(self) -> None:
         with self._state_lock:
-            engine_state = self.engine.state.value
-            last_price = self.engine.last_price
-            last_trigger_price = self.engine.last_trigger_price
-            last_trigger_at = self.engine.last_trigger_at
-            daily_pnl = self.risk.daily_pnl
-            consecutive_losses = self.risk.consecutive_losses
-            kill_switch = self.risk.kill_switch
-            paused = self.risk.paused
+            snapshot = self.runtime_state.snapshot(self.engine, self.risk)
 
         db = SessionLocal()
         try:
             svc = StrategyService(db)
-            svc.update_runtime_state(
-                engine_state=engine_state,
-                last_price=last_price,
-                daily_pnl=daily_pnl,
-                consecutive_losses=consecutive_losses,
-                kill_switch=kill_switch,
-                paused=paused,
-                last_trigger_price=last_trigger_price,
-                last_trigger_at=last_trigger_at,
-            )
+            self.runtime_state.persist_snapshot(svc, snapshot)
         finally:
             db.close()
 

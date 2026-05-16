@@ -75,7 +75,7 @@
 ## 前置条件
 
 - Docker 和 Docker Compose（推荐部署方式）
-- 或 Python 3.9+ / Node.js 18+（本地开发）
+- 或 Python 3.11+ / Node.js 18+（本地开发）
 - 长桥账户：需获取 App Key、App Secret、Access Token
 - （可选）Server酱 SendKey：用于微信通知
 
@@ -136,9 +136,10 @@ docker compose down
 
 ```bash
 cd backend
-pip3 install -r requirements.txt
+python3.11 -m venv .venv
+.venv/bin/pip install -r requirements.txt -r requirements-dev.txt
 cp ../.env.example ../.env  # 或手动创建 backend/.env
-uvicorn app.main:app --reload --port 8000
+.venv/bin/uvicorn app.main:app --reload --port 8000
 ```
 
 ### 前端
@@ -149,13 +150,17 @@ npm install
 npm run dev     # http://localhost:3000，自动代理 /api 和 /ws 到后端
 ```
 
+### 重置本地开发数据
+
+本项目当前不维护 SQLite 迁移。重构或模型变更后，如遇到旧数据导致的异常，可以停止服务并删除 `backend/data/auto_trade.db` 或 `.env` 中 `AUTO_TRADE_DATABASE_URL` 指向的 SQLite 文件，然后重新启动服务。
+
 ### 运行测试
 
 ```bash
 cd backend
-python3 -m pytest tests/ -v                     # 全部 (77 个)
-python3 -m pytest tests/ --cov=app --cov-report=term  # 含覆盖率
-python3 -m pytest tests/test_engine.py -v        # 单模块
+.venv/bin/python -m pytest tests/ -q
+.venv/bin/python -m pytest tests/ --cov=app --cov-report=term  # 含覆盖率
+.venv/bin/python -m pytest tests/test_engine.py -q        # 单模块
 ```
 
 ---
@@ -173,8 +178,9 @@ auto_trade/
 │   │   ├── schemas.py           # Pydantic 请求/响应 schema
 │   │   ├── runner.py            # 后台运行器：订阅行情 → 策略评估 → 下单 → 广播
 │   │   ├── api/
+│   │   │   ├── credentials.py   # GET/PUT /api/credentials
 │   │   │   ├── strategy.py      # GET/PUT /api/strategy, GET /api/status
-│   │   │   ├── trade.py         # GET /api/orders, POST /api/control/*
+│   │   │   ├── trade.py         # GET /api/orders, /api/account, POST /api/control/*
 │   │   │   └── ws.py            # WebSocket /ws（ConnectionManager 单例）
 │   │   ├── core/
 │   │   │   ├── broker.py        # 长桥 SDK 封装（Quote/Trade/Position）
@@ -182,8 +188,12 @@ auto_trade/
 │   │   │   ├── risk.py          # 风控控制器（日亏损、连续亏损、暂停、kill switch）
 │   │   │   └── notify.py        # Server酱通知客户端
 │   │   └── services/
-│   │       └── strategy_service.py  # 策略配置与运行时状态的 CRUD
-│   ├── tests/                   # pytest, 77 tests, 80% coverage
+│   │       ├── account_service.py          # 账户摘要、现金余额、持仓读取
+│   │       ├── credentials_service.py      # 凭证读取、保存与清除
+│   │       ├── runtime_state_service.py    # 运行时状态持久化
+│   │       ├── strategy_service.py         # 策略配置 CRUD
+│   │       └── trade_execution_service.py  # 交易控制与订单执行
+│   ├── tests/                   # pytest 单元测试与覆盖率
 │   ├── requirements.txt
 │   ├── Dockerfile
 │   └── docker-entrypoint.sh
@@ -191,9 +201,11 @@ auto_trade/
 │   ├── src/
 │   │   ├── App.vue              # 容器布局 + 导航
 │   │   ├── router/index.ts      # 路由：/ → Dashboard, /strategy, /history
-│   │   ├── api/index.ts         # axios 封装所有后端接口
+│   │   ├── api/                 # axios 客户端与 credentials/strategy/trade 接口模块
+│   │   ├── composables/         # useDashboardData/useStatusStream/useFormSaveState
 │   │   ├── types/index.ts       # TypeScript 类型定义
 │   │   └── views/
+│   │       ├── Credentials.vue   # 长桥与 Server酱凭证管理
 │   │       ├── Dashboard.vue     # 实时状态面板 + 启停/暂停/恢复/kill switch
 │   │       ├── Strategy.vue      # 策略参数配置表单
 │   │       └── TradeHistory.vue  # 订单成交历史表格
@@ -212,15 +224,19 @@ auto_trade/
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/api/health` | 健康检查 |
+| `GET` | `/api/credentials` | 获取凭证配置状态 |
+| `PUT` | `/api/credentials` | 保存或清除凭证 |
 | `GET` | `/api/strategy` | 获取策略配置 |
 | `PUT` | `/api/strategy` | 更新策略配置 |
 | `GET` | `/api/status` | 获取运行时状态（引擎状态、价格、盈亏） |
+| `GET` | `/api/account` | 获取账户资产、现金和持仓摘要 |
 | `GET` | `/api/orders` | 查询订单列表（`?limit=50`） |
 | `POST` | `/api/control/start` | 启动策略运行 |
 | `POST` | `/api/control/stop` | 停止策略运行 |
 | `POST` | `/api/control/pause` | 暂停交易 |
 | `POST` | `/api/control/resume` | 恢复交易 |
 | `POST` | `/api/control/kill-switch` | 紧急停止 |
+| `POST` | `/api/control/disable-kill-switch` | 关闭紧急停止 |
 | `WS` | `/ws` | WebSocket 实时状态推送 |
 
 ## 配置参考
