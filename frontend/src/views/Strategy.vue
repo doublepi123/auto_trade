@@ -38,7 +38,8 @@
 
 <script setup lang="ts">
 import { ref, watch, onMounted } from 'vue'
-import { ElMessage } from 'element-plus'
+import { onBeforeRouteLeave } from 'vue-router'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { getStrategy, updateStrategy } from '../api'
 
 const form = ref({
@@ -54,9 +55,12 @@ const form = ref({
 const saving = ref(false)
 const saved = ref(false)
 const loading = ref(true)
+const savedSnapshot = ref(serializeForm())
 
 watch(form, () => {
-  saved.value = false
+  if (isDirty()) {
+    saved.value = false
+  }
 }, { deep: true })
 
 onMounted(async () => {
@@ -71,6 +75,7 @@ onMounted(async () => {
       max_daily_loss: s.max_daily_loss,
       max_consecutive_losses: s.max_consecutive_losses,
     }
+    savedSnapshot.value = serializeForm()
   } catch (e) {
     console.error('加载策略失败：', e)
     ElMessage.error('加载策略失败')
@@ -78,6 +83,21 @@ onMounted(async () => {
     loading.value = false
   }
 })
+
+onBeforeRouteLeave(() => {
+  if (!isDirty()) return true
+  return ElMessageBox.confirm('策略配置尚未保存，确定要离开当前页面吗？', '未保存的更改', { type: 'warning' })
+    .then(() => true)
+    .catch(() => false)
+})
+
+function serializeForm(): string {
+  return JSON.stringify(form.value)
+}
+
+function isDirty(): boolean {
+  return serializeForm() !== savedSnapshot.value
+}
 
 async function handleSave() {
   if (!form.value.symbol) {
@@ -101,10 +121,19 @@ async function handleSave() {
   saved.value = false
   try {
     await updateStrategy(form.value)
+    savedSnapshot.value = serializeForm()
     saved.value = true
-  } catch (e) {
+  } catch (e: any) {
     console.error('保存失败：', e)
-    ElMessage.error('保存失败')
+    const detail = e?.response?.data?.detail
+    if (typeof detail === 'string' && detail) {
+      ElMessage.error(`保存失败：${detail}`)
+    } else if (Array.isArray(detail)) {
+      const msgs = detail.map((d: any) => d.msg || d.message || JSON.stringify(d)).join('；')
+      ElMessage.error(`保存失败：${msgs}`)
+    } else {
+      ElMessage.error('保存失败')
+    }
   } finally {
     saving.value = false
   }

@@ -4,6 +4,8 @@ from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from app.core.broker import OrderResult, Position, Quote
 from app.core.engine import EngineState, StrategyParams
 from app.runner import AppRunner, get_runner
@@ -244,11 +246,17 @@ class TestAppRunner:
         runner.broker = broker
         runner.notifier = _NoopNotifier()
         runner._record_order = lambda *args: None
+        updates: list[tuple[str, str, object]] = []
+        runner._update_order_status = lambda order_id, status, filled_at=None, executed_quantity=None, executed_price=None: updates.append((order_id, status, filled_at))
 
         executed = runner._execute_sell("AAPL.US", Quote("AAPL.US", 201.0, 200.5, 201.5, ""))
 
         assert executed is True
         assert broker.submitted_quantity == Decimal("5")
+        assert runner.risk.daily_pnl == 255.0
+        assert updates[-1][0] == "order-1"
+        assert updates[-1][1] == "FILLED"
+        assert updates[-1][2] is not None
 
     def test_execute_buy_returns_false_for_rejected_order(self) -> None:
         class Broker:
@@ -275,7 +283,8 @@ class TestAppRunner:
 
         assert executed is False
 
-    def test_execute_sell_records_pnl_only_after_order_is_filled(self) -> None:
+    @pytest.mark.parametrize("terminal_status", ["REJECTED", "CANCELLED"])
+    def test_execute_sell_records_terminal_status_timestamp(self, terminal_status: str) -> None:
         runner = AppRunner()
         updates: list[tuple[str, str, object]] = []
 
@@ -298,25 +307,25 @@ class TestAppRunner:
                 assert runner.risk.daily_pnl == 0.0
                 return SimpleNamespace(
                     broker_order_id=order_id,
-                    status="FILLED",
-                    executed_quantity=Decimal("5"),
-                    executed_price=Decimal("205"),
+                    status=terminal_status,
+                    executed_quantity=Decimal("0"),
+                    executed_price=Decimal("0"),
                 )
 
         runner.broker = Broker()
         runner.notifier = _NoopNotifier()
         runner._record_order = lambda *args: None
-        runner._update_order_status = lambda order_id, status, filled_at=None: updates.append((order_id, status, filled_at))
+        runner._update_order_status = lambda order_id, status, filled_at=None, executed_quantity=None, executed_price=None: updates.append((order_id, status, filled_at))
         runner._order_status_poll_interval_seconds = 0
         runner._order_status_timeout_seconds = 1
 
         executed = runner._execute_sell("AAPL.US", Quote("AAPL.US", 201.0, 200.5, 201.5, ""))
 
-        assert executed is True
-        assert runner.risk.daily_pnl == 275.0
+        assert executed is False
+        assert runner.risk.daily_pnl == 0.0
         assert updates
         assert updates[-1][0] == "order-1"
-        assert updates[-1][1] == "FILLED"
+        assert updates[-1][1] == terminal_status
         assert updates[-1][2] is not None
 
     def test_execute_sell_without_fill_tracks_pending_without_pnl_or_filled_status(self) -> None:
@@ -348,7 +357,7 @@ class TestAppRunner:
         runner.broker = Broker()
         runner.notifier = _NoopNotifier()
         runner._record_order = lambda *args: None
-        runner._update_order_status = lambda order_id, status, filled_at=None: updates.append((order_id, status, filled_at))
+        runner._update_order_status = lambda order_id, status, filled_at=None, executed_quantity=None, executed_price=None: updates.append((order_id, status, filled_at))
         runner._order_status_poll_interval_seconds = 0
         runner._order_status_timeout_seconds = 0
 
@@ -796,7 +805,7 @@ class TestAppRunner:
         runner.broker = Broker()
         runner.notifier = _NoopNotifier()
         runner._record_order = lambda *args: None
-        runner._update_order_status = lambda order_id, status, filled_at=None: updates.append((order_id, status, filled_at))
+        runner._update_order_status = lambda order_id, status, filled_at=None, executed_quantity=None, executed_price=None: updates.append((order_id, status, filled_at))
         runner._order_status_poll_interval_seconds = 0
         runner._order_status_timeout_seconds = 1
 

@@ -1,3 +1,29 @@
+type EngineState = 'flat' | 'long' | 'short'
+
+interface StatusStub {
+  engine_state: EngineState
+  paused: boolean
+  kill_switch: boolean
+  daily_pnl: number
+  consecutive_losses: number
+  last_price: number
+  last_trigger_price: number
+  last_trigger_at: string | null
+}
+
+function initialStatus(): StatusStub {
+  return {
+    engine_state: 'flat',
+    paused: false,
+    kill_switch: false,
+    daily_pnl: 0,
+    consecutive_losses: 0,
+    last_price: 0,
+    last_trigger_price: 0,
+    last_trigger_at: null,
+  }
+}
+
 Cypress.Commands.add('setupApp', () => {
   cy.window().then((win) => {
     win.localStorage.setItem('api_key', 'test-api-key')
@@ -5,6 +31,8 @@ Cypress.Commands.add('setupApp', () => {
 })
 
 Cypress.Commands.add('stubApi', () => {
+  let status = initialStatus()
+
   cy.intercept('GET', '/api/strategy', {
     body: {
       id: 1, symbol: '', market: 'US', buy_low: 0, sell_high: 0,
@@ -13,12 +41,8 @@ Cypress.Commands.add('stubApi', () => {
     },
   }).as('getStrategy')
 
-  cy.intercept('GET', '/api/status', {
-    body: {
-      engine_state: 'flat', paused: false, kill_switch: false,
-      daily_pnl: 0, consecutive_losses: 0, last_price: 0,
-      last_trigger_price: 0, last_trigger_at: null,
-    },
+  cy.intercept('GET', '/api/status', (req) => {
+    req.reply({ body: status })
   }).as('getStatus')
 
   cy.intercept('GET', '/api/account', {
@@ -37,7 +61,35 @@ Cypress.Commands.add('stubApi', () => {
 
   cy.intercept('GET', '/api/orders*', { body: [] }).as('getOrders')
 
-  cy.intercept('POST', '/api/control/*', { body: { message: 'ok' } }).as('controlAction')
+  cy.intercept('POST', '/api/control/start', (req) => {
+    status = { ...status, paused: false, kill_switch: false }
+    req.reply({ body: { message: 'runner started' } })
+  }).as('startAction')
+
+  cy.intercept('POST', '/api/control/stop', (req) => {
+    status = { ...status, paused: true }
+    req.reply({ body: { message: 'runner stopped' } })
+  }).as('stopAction')
+
+  cy.intercept('POST', '/api/control/pause', (req) => {
+    status = { ...status, paused: true }
+    req.reply({ body: { message: 'trading paused' } })
+  }).as('pauseAction')
+
+  cy.intercept('POST', '/api/control/resume', (req) => {
+    status = { ...status, paused: false }
+    req.reply({ body: { message: 'trading resumed' } })
+  }).as('resumeAction')
+
+  cy.intercept('POST', '/api/control/kill-switch', (req) => {
+    status = { ...status, kill_switch: true }
+    req.reply({ body: { message: 'kill switch activated' } })
+  }).as('killSwitchAction')
+
+  cy.intercept('POST', '/api/control/disable-kill-switch', (req) => {
+    status = { ...status, kill_switch: false }
+    req.reply({ body: { message: 'kill switch disabled' } })
+  }).as('disableKillSwitchAction')
 
   cy.intercept('PUT', '/api/strategy', {
     body: {
@@ -58,11 +110,23 @@ Cypress.Commands.add('stubApi', () => {
   }).as('saveCredentials')
 })
 
+Cypress.Commands.add('visitApp', (path = '/') => {
+  cy.stubApi()
+  cy.visit(path, {
+    onBeforeLoad(win) {
+      win.localStorage.setItem('api_key', 'test-api-key')
+    },
+  })
+})
+
 declare global {
   namespace Cypress {
     interface Chainable {
       setupApp: () => Chainable<void>
       stubApi: () => Chainable<void>
+      visitApp: (path?: string) => Chainable<void>
     }
   }
 }
+
+export {}

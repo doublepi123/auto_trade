@@ -129,9 +129,11 @@ class TestAPI:
     def test_kill_switch(self) -> None:
         resp = client.post("/api/control/kill-switch", json={"reason": "testing"})
         assert resp.status_code == 200
-        assert resp.json()["message"] == "kill switch activated"
+        assert "kill switch activated" in resp.json()["message"]
 
     def test_start_runner(self) -> None:
+        client.post("/api/control/disable-kill-switch")
+        client.post("/api/control/resume")
         resp = client.post("/api/control/start")
         assert resp.status_code == 200
         assert resp.json()["message"] == "runner started"
@@ -166,7 +168,7 @@ class TestAPI:
         assert resp.status_code == 200
         resp = client.post("/api/control/disable-kill-switch")
         assert resp.status_code == 200
-        assert resp.json()["message"] == "kill switch disabled"
+        assert "kill switch disabled" in resp.json()["message"]
 
     def test_put_credentials(self) -> None:
         _clean_credentials()

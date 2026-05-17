@@ -52,6 +52,8 @@ class OrderRecord(Base):
     side: Mapped[str] = mapped_column(String(20))
     quantity: Mapped[float] = mapped_column(Float)
     price: Mapped[float] = mapped_column(Float)
+    executed_quantity: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    executed_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="SUBMITTED")
     created_at: Mapped[datetime] = mapped_column(_TZDateTime(), default=_utcnow)
     filled_at: Mapped[Optional[datetime]] = mapped_column(_TZDateTime(), nullable=True)

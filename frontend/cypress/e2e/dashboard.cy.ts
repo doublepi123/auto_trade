@@ -1,6 +1,6 @@
 describe('Dashboard', () => {
   beforeEach(() => {
-    cy.visit('/')
+    cy.visitApp('/')
     cy.contains('仪表盘', { timeout: 10000 }).should('be.visible')
   })
 

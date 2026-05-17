@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -80,9 +80,12 @@ def get_account() -> AccountResponse:
 
 @router.post("/control/start", response_model=MessageResponse, dependencies=[Depends(require_api_key())])
 def start_runner(db: Session = Depends(get_db)) -> MessageResponse:
+    runner = get_runner()
+    if runner.risk.kill_switch:
+        raise HTTPException(status_code=403, detail="Kill switch is active — disable it before starting")
     svc = StrategyService(db)
-    svc.update_runtime_state(paused=False, kill_switch=False)
-    started = get_runner().start()
+    svc.update_runtime_state(paused=False)
+    started = runner.start()
     if not started:
         return MessageResponse(message="runner is already running or failed to start")
     return MessageResponse(message="runner started")
@@ -121,15 +124,18 @@ def kill_switch(
     payload: ControlRequest,
     db: Session = Depends(get_db),
 ) -> MessageResponse:
+    runner = get_runner()
+    runner.risk.pause(payload.reason)
+    runner.risk.enable_kill_switch(payload.reason)
     svc = StrategyService(db)
-    svc.update_runtime_state(kill_switch=True)
-    get_runner().risk.enable_kill_switch(payload.reason)
-    return MessageResponse(message="kill switch activated")
+    svc.update_runtime_state(kill_switch=True, paused=True)
+    return MessageResponse(message="kill switch activated — trading paused")
 
 
 @router.post("/control/disable-kill-switch", response_model=MessageResponse, dependencies=[Depends(require_api_key())])
 def disable_kill_switch(db: Session = Depends(get_db)) -> MessageResponse:
+    runner = get_runner()
+    runner.risk.disable_kill_switch()
     svc = StrategyService(db)
     svc.update_runtime_state(kill_switch=False)
-    get_runner().risk.disable_kill_switch()
-    return MessageResponse(message="kill switch disabled")
+    return MessageResponse(message="kill switch disabled — trading remains paused, use Resume to re-enable")

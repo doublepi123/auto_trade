@@ -69,8 +69,9 @@ class CredentialsService:
             if field in data and data[field] is not None:
                 value = data[field]
                 if value == "":
-                    continue
-                setattr(config, field, encrypt_secret(value) if value else "")
+                    setattr(config, field, "")
+                else:
+                    setattr(config, field, encrypt_secret(value))
 
         config.updated_at = datetime.now(timezone.utc)
         self.db.add(config)

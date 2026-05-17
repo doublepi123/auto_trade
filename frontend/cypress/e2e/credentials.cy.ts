@@ -1,6 +1,6 @@
 describe('Credentials', () => {
   beforeEach(() => {
-    cy.visit('/#/credentials')
+    cy.visitApp('/#/credentials')
     cy.get('h3', { timeout: 10000 }).should('contain', '凭证设置')
   })
 

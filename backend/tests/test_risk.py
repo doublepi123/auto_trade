@@ -76,9 +76,11 @@ class TestRiskController:
         ctrl = RiskController()
         ctrl._today = date.today() - timedelta(days=1)
         ctrl.daily_pnl = -999999.0
+        ctrl.consecutive_losses = 99
         result = ctrl.check()
         assert result.approved is True
         assert ctrl.daily_pnl == 0.0
+        assert ctrl.consecutive_losses == 0
 
     def test_record_trade_resets_daily_pnl_on_new_day(self) -> None:
         from datetime import date, timedelta

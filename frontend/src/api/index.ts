@@ -1,7 +1,7 @@
 import axios from 'axios'
 import type { AccountInfo, CredentialsConfig, StrategyConfig, StatusData, OrderRecord } from '../types'
 
-const api = axios.create({ baseURL: '' })
+const api = axios.create({ baseURL: '', timeout: 10000 })
 
 api.interceptors.request.use((config) => {
   const key = localStorage.getItem('api_key')

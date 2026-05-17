@@ -9,8 +9,22 @@
           <el-tag :type="row.side === 'BUY' || row.side === 'BUY_TO_COVER' ? 'success' : 'danger'">{{ orderSideLabel(row.side) }}</el-tag>
         </template>
       </el-table-column>
-      <el-table-column prop="quantity" label="数量" width="120" />
-      <el-table-column prop="price" label="价格" width="100" />
+      <el-table-column prop="quantity" label="数量" width="120">
+        <template #default="{ row }">
+          <span>{{ row.quantity }}</span>
+          <el-tag v-if="row.executed_quantity !== null && row.executed_quantity !== row.quantity" size="small" type="warning" style="margin-left: 4px">
+            成交 {{ row.executed_quantity }}
+          </el-tag>
+        </template>
+      </el-table-column>
+      <el-table-column prop="price" label="价格" width="100">
+        <template #default="{ row }">
+          <span>${{ row.price }}</span>
+          <span v-if="row.executed_price !== null && row.executed_price !== row.price" style="color: #e6a23c; font-size: 12px; margin-left: 4px">
+            成交 ${{ row.executed_price }}
+          </span>
+        </template>
+      </el-table-column>
       <el-table-column prop="status" label="状态" width="120">
         <template #default="{ row }">
           <el-tag :type="statusType(row.status)">{{ orderStatusLabel(row.status) }}</el-tag>

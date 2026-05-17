@@ -1,6 +1,6 @@
 describe('Navigation', () => {
   it('navigates between pages via menu', () => {
-    cy.visit('/')
+    cy.visitApp('/')
     cy.contains('仪表盘', { timeout: 10000 }).should('be.visible')
 
     cy.contains('策略配置').click()

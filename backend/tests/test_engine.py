@@ -17,10 +17,25 @@ class TestStrategyEngine:
         assert result.action == "BUY"
         assert engine.state == EngineState.LONG
 
+    def test_price_at_buy_low_boundary_triggers_buy(self) -> None:
+        engine = StrategyEngine(make_params(100, 200))
+        result = engine.update_price(100.0)
+        assert result.triggered is True
+        assert result.action == "BUY"
+        assert engine.state == EngineState.LONG
+
     def test_price_above_sell_high_from_long_triggers_sell(self) -> None:
         engine = StrategyEngine(make_params(100, 200))
         engine.state = EngineState.LONG
         result = engine.update_price(201.0)
+        assert result.triggered is True
+        assert result.action == "SELL"
+        assert engine.state == EngineState.FLAT
+
+    def test_price_at_sell_high_boundary_from_long_triggers_sell(self) -> None:
+        engine = StrategyEngine(make_params(100, 200))
+        engine.state = EngineState.LONG
+        result = engine.update_price(200.0)
         assert result.triggered is True
         assert result.action == "SELL"
         assert engine.state == EngineState.FLAT
@@ -85,7 +100,7 @@ class TestStrategyEngine:
 
     def test_cooldown_prevents_trigger(self) -> None:
         engine = StrategyEngine(make_params(100, 200))
-        engine._last_trigger_at = None
+        engine.last_trigger_at = None
         engine._cooldown_seconds = 60
         result = engine.update_price(99.0)
         assert result.triggered is True

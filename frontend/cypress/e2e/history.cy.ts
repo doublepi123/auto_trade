@@ -1,6 +1,6 @@
 describe('History', () => {
   beforeEach(() => {
-    cy.visit('/#/history')
+    cy.visitApp('/#/history')
     cy.get('h3', { timeout: 10000 }).should('contain', '交易历史')
   })
 

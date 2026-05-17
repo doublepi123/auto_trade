@@ -34,7 +34,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 
 const route = useRoute()
 
@@ -69,12 +69,20 @@ function saveApiKey() {
   }
 }
 
-function clearApiKey() {
-  localStorage.removeItem('api_key')
-  hasApiKey.value = false
-  apiKeyInput.value = ''
-  showApiKeyDialog.value = false
-  ElMessage.success('API 密钥已清除')
+async function clearApiKey() {
+  try {
+    await ElMessageBox.confirm('确定要清除已保存的 API 密钥吗？清除后需要重新输入才能访问受保护接口。', '确认清除', { type: 'warning' })
+    localStorage.removeItem('api_key')
+    hasApiKey.value = false
+    apiKeyInput.value = ''
+    showApiKeyDialog.value = false
+    window.dispatchEvent(new CustomEvent('api-key-updated'))
+    ElMessage.success('API 密钥已清除')
+  } catch (reason) {
+    if (reason !== 'cancel' && reason !== 'close') {
+      ElMessage.error('清除 API 密钥失败')
+    }
+  }
 }
 </script>
 

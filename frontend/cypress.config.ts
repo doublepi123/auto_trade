@@ -1,8 +1,10 @@
 import { defineConfig } from 'cypress'
 
+const baseUrl = process.env.CYPRESS_BASE_URL || 'http://localhost:8080'
+
 export default defineConfig({
   e2e: {
-    baseUrl: 'http://localhost:8081',
+    baseUrl,
     supportFile: 'cypress/support/e2e.ts',
     specPattern: 'cypress/e2e/**/*.cy.{js,ts}',
     viewportWidth: 1280,

@@ -136,6 +136,8 @@ class OrderResponse(BaseModel):
     side: str
     quantity: float
     price: float
+    executed_quantity: Optional[float] = None
+    executed_price: Optional[float] = None
     status: str
     created_at: datetime
     filled_at: Optional[datetime]

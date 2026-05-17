@@ -133,7 +133,7 @@ class TestCredentialsAPI:
         finally:
             db.close()
 
-    def test_update_credentials_preserves_existing_values_when_blank(self) -> None:
+    def test_update_credentials_clears_when_blank(self) -> None:
         _clean_credentials()
         initial = client.put("/api/credentials", json={
             "longbridge_app_key": "key",
@@ -152,19 +152,19 @@ class TestCredentialsAPI:
 
         assert resp.status_code == 200
         data = resp.json()
-        assert data["has_longbridge_app_key"] is True
-        assert data["has_longbridge_app_secret"] is True
-        assert data["has_longbridge_access_token"] is True
-        assert data["has_sct_key"] is True
+        assert data["has_longbridge_app_key"] is False
+        assert data["has_longbridge_app_secret"] is False
+        assert data["has_longbridge_access_token"] is False
+        assert data["has_sct_key"] is False
 
         db = SessionLocal()
         try:
             credential = db.query(CredentialConfig).order_by(CredentialConfig.id.desc()).first()
             assert credential is not None
-            assert decrypt_secret(credential.longbridge_app_key) == "key"
-            assert decrypt_secret(credential.longbridge_app_secret) == "secret"
-            assert decrypt_secret(credential.longbridge_access_token) == "token"
-            assert decrypt_secret(credential.sct_key) == "sct"
+            assert decrypt_secret(credential.longbridge_app_key) == ""
+            assert decrypt_secret(credential.longbridge_app_secret) == ""
+            assert decrypt_secret(credential.longbridge_access_token) == ""
+            assert decrypt_secret(credential.sct_key) == ""
         finally:
             db.close()
 

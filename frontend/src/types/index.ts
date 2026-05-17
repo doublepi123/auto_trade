@@ -42,6 +42,8 @@ export interface OrderRecord {
   side: string
   quantity: number
   price: number
+  executed_quantity: number | null
+  executed_price: number | null
   status: string
   created_at: string
   filled_at: string | null

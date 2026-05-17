@@ -155,7 +155,7 @@ npm run dev     # http://localhost:3000，自动代理 /api 和 /ws 到后端
 
 ```bash
 cd backend
-python3 -m pytest tests/ -v                     # 全部 (77 个)
+python3 -m pytest tests/ -v                     # 全部测试
 python3 -m pytest tests/ --cov=app --cov-report=term  # 含覆盖率
 python3 -m pytest tests/test_engine.py -v        # 单模块
 ```
@@ -175,6 +175,8 @@ auto_trade/
 │   │   ├── schemas.py           # Pydantic 请求/响应 schema
 │   │   ├── runner.py            # 后台运行器：订阅行情 → 策略评估 → 下单 → 广播
 │   │   ├── api/
+│   │   │   ├── account.py       # GET /api/account
+│   │   │   ├── credentials.py   # GET/PUT /api/credentials
 │   │   │   ├── strategy.py      # GET/PUT /api/strategy, GET /api/status
 │   │   │   ├── trade.py         # GET /api/orders, POST /api/control/*
 │   │   │   └── ws.py            # WebSocket /ws（ConnectionManager 单例）
@@ -184,21 +186,35 @@ auto_trade/
 │   │   │   ├── risk.py          # 风控控制器（日亏损、连续亏损、暂停、kill switch）
 │   │   │   └── notify.py        # Server酱通知客户端
 │   │   └── services/
-│   │       └── strategy_service.py  # 策略配置与运行时状态的 CRUD
-│   ├── tests/                   # pytest, 77 tests, 80% coverage
+│   │       ├── credentials_service.py  # 凭证加密存取与状态管理
+│   │       └── strategy_service.py     # 策略配置与运行时状态的 CRUD
+│   ├── tests/                   # pytest 测试
 │   ├── requirements.txt
 │   ├── Dockerfile
 │   └── docker-entrypoint.sh
 ├── frontend/
 │   ├── src/
 │   │   ├── App.vue              # 容器布局 + 导航
-│   │   ├── router/index.ts      # 路由：/ → Dashboard, /strategy, /history
+│   │   ├── router/index.ts      # 路由：/ → Dashboard, /strategy, /credentials, /history
 │   │   ├── api/index.ts         # axios 封装所有后端接口
 │   │   ├── types/index.ts       # TypeScript 类型定义
 │   │   └── views/
+│   │       ├── Credentials.vue   # 长桥和 Server酱凭证配置（加密保存）
 │   │       ├── Dashboard.vue     # 实时状态面板 + 启停/暂停/恢复/kill switch
 │   │       ├── Strategy.vue      # 策略参数配置表单
 │   │       └── TradeHistory.vue  # 订单成交历史表格
+│   ├── cypress/                  # Cypress E2E 测试与 API stub
+│   │   ├── e2e/
+│   │   │   ├── navigation.cy.ts
+│   │   │   ├── dashboard.cy.ts
+│   │   │   ├── controls.cy.ts
+│   │   │   ├── strategy.cy.ts
+│   │   │   ├── history.cy.ts
+│   │   │   └── credentials.cy.ts
+│   │   ├── fixtures/
+│   │   │   └── strategy.json
+│   │   └── support/
+│   │       └── e2e.ts
 │   ├── package.json
 │   ├── vite.config.ts
 │   ├── nginx.conf               # Nginx 反向代理配置（生产）
@@ -217,12 +233,16 @@ auto_trade/
 | `GET` | `/api/strategy` | 获取策略配置 |
 | `PUT` | `/api/strategy` | 更新策略配置 |
 | `GET` | `/api/status` | 获取运行时状态（引擎状态、价格、盈亏） |
+| `GET` | `/api/credentials` | 获取凭证配置状态（不返回明文凭证） |
+| `PUT` | `/api/credentials` | 更新长桥和 Server酱凭证 |
+| `GET` | `/api/account` | 获取账户资产、现金余额和持仓信息 |
 | `GET` | `/api/orders` | 查询订单列表（`?limit=50`） |
 | `POST` | `/api/control/start` | 启动策略运行 |
 | `POST` | `/api/control/stop` | 停止策略运行 |
 | `POST` | `/api/control/pause` | 暂停交易 |
 | `POST` | `/api/control/resume` | 恢复交易 |
 | `POST` | `/api/control/kill-switch` | 紧急停止 |
+| `POST` | `/api/control/disable-kill-switch` | 解除紧急停止 |
 | `WS` | `/ws` | WebSocket 实时状态推送 |
 
 ## 配置参考
@@ -245,7 +265,7 @@ auto_trade/
 ## 安全
 
 - **绝不提交** `.env`、API 凭证到代码仓库（已加入 `.gitignore`）
-- 长桥凭证通过环境变量注入，不写入配置文件
+- 长桥凭证可通过环境变量注入，也可通过加密的凭证 API / Web UI 保存到本地；前端不会回显或输出明文凭证
 - Docker Compose 默认只绑定 `127.0.0.1`，并要求设置 `AUTO_TRADE_API_KEY`
 - 生产环境建议通过 Docker secrets 或外部密钥管理服务注入敏感信息
 - 如需暴露到公网，请先配置反向代理、HTTPS、认证和访问控制

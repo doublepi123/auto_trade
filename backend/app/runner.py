@@ -446,6 +446,7 @@ class AppRunner:
         pnl = float((fill_price - long_pos.avg_price) * fill_qty)
         self._safe_notify_order("SELL", symbol, str(fill_qty), str(fill_price), result.broker_order_id)
         self.risk.record_trade(pnl)
+        self._persist_risk_state()
         logger.info(f"SELL: {symbol} qty={fill_qty} price={fill_price} pnl={pnl}")
         return True
 
@@ -528,6 +529,7 @@ class AppRunner:
         pnl = float((pos.avg_price - fill_price) * fill_qty)
         self._safe_notify_order("BUY_TO_COVER", symbol, str(fill_qty), str(fill_price), result.broker_order_id)
         self.risk.record_trade(pnl)
+        self._persist_risk_state()
         logger.info(f"BUY_TO_COVER: {symbol} qty={fill_qty} price={fill_price} pnl={pnl}")
         return True
 
@@ -607,6 +609,7 @@ class AppRunner:
             pnl = float((fill_price - avg_price) * fill_qty)
             self._safe_notify_order("SELL", pending.symbol, str(fill_qty), str(fill_price), pending.broker_order_id)
             self.risk.record_trade(pnl)
+            self._persist_risk_state()
             logger.info(f"SELL filled: {pending.symbol} qty={fill_qty} price={fill_price} pnl={pnl}")
             return
         if pending.action == "BUY_TO_COVER":
@@ -614,6 +617,7 @@ class AppRunner:
             pnl = float((avg_price - fill_price) * fill_qty)
             self._safe_notify_order("BUY_TO_COVER", pending.symbol, str(fill_qty), str(fill_price), pending.broker_order_id)
             self.risk.record_trade(pnl)
+            self._persist_risk_state()
             logger.info(f"BUY_TO_COVER filled: {pending.symbol} qty={fill_qty} price={fill_price} pnl={pnl}")
             return
         self._safe_notify_order(pending.action, pending.symbol, str(fill_qty), str(fill_price), pending.broker_order_id)
@@ -698,7 +702,14 @@ class AppRunner:
         except Exception:
             logger.exception("failed to record order %s for %s (broker order is still live)", order_id, symbol)
 
-    def _update_order_status(self, order_id: str, status: str, filled_at: datetime | None = None) -> None:
+    def _update_order_status(
+        self,
+        order_id: str,
+        status: str,
+        filled_at: datetime | None = None,
+        executed_quantity: float | None = None,
+        executed_price: float | None = None,
+    ) -> None:
         db = SessionLocal()
         try:
             order = db.query(OrderRecord).filter(OrderRecord.broker_order_id == order_id).order_by(OrderRecord.id.desc()).first()
@@ -708,14 +719,25 @@ class AppRunner:
             order.status = status
             if filled_at is not None:
                 order.filled_at = filled_at
+            if executed_quantity is not None:
+                order.executed_quantity = executed_quantity
+            if executed_price is not None:
+                order.executed_price = executed_price
             db.add(order)
             db.commit()
         finally:
             db.close()
 
-    def _safe_update_order_status(self, order_id: str, status: str, filled_at: datetime | None = None) -> None:
+    def _safe_update_order_status(
+        self,
+        order_id: str,
+        status: str,
+        filled_at: datetime | None = None,
+        executed_quantity: float | None = None,
+        executed_price: float | None = None,
+    ) -> None:
         try:
-            self._update_order_status(order_id, status, filled_at)
+            self._update_order_status(order_id, status, filled_at, executed_quantity, executed_price)
         except Exception:
             logger.exception("failed to update order %s to status %s", order_id, status)
 
@@ -723,8 +745,16 @@ class AppRunner:
         status = getattr(result, "status", "SUBMITTED")
         if status == "SUBMITTED":
             return
-        filled_at = datetime.now(timezone.utc) if status == "FILLED" else None
-        self._safe_update_order_status(getattr(result, "broker_order_id", ""), status, filled_at)
+        filled_at = datetime.now(timezone.utc) if status in {"FILLED", "REJECTED", "CANCELLED"} else None
+        executed_quantity = getattr(result, "executed_quantity", None)
+        executed_price = getattr(result, "executed_price", None)
+        self._safe_update_order_status(
+            getattr(result, "broker_order_id", ""),
+            status,
+            filled_at,
+            float(executed_quantity) if executed_quantity is not None else None,
+            float(executed_price) if executed_price is not None else None,
+        )
 
     def _cash_currency(self) -> str:
         return "HKD" if self.engine.params.market == "HK" else "USD"
@@ -789,10 +819,22 @@ class AppRunner:
     def _run_loop(self) -> None:
         while self._running:
             try:
+                self._reconcile_pending_order_in_loop()
+            except Exception:
+                logger.exception("error reconciling pending orders")
+            try:
                 self._persist_state()
             except Exception:
                 logger.exception("error persisting state")
             time.sleep(5)
+
+    def _reconcile_pending_order_in_loop(self) -> None:
+        pending_order: _PendingOrder | None = None
+        with self._state_lock:
+            if self._pending_order is not None:
+                pending_order = self._pending_order
+        if pending_order is not None:
+            self._reconcile_pending_order(pending_order)
 
     def _persist_state(self) -> None:
         with self._state_lock:
@@ -818,6 +860,18 @@ class AppRunner:
                 last_trigger_price=last_trigger_price,
                 last_trigger_at=last_trigger_at,
             )
+        finally:
+            db.close()
+
+    def _persist_risk_state(self) -> None:
+        with self._state_lock:
+            daily_pnl = self.risk.daily_pnl
+            consecutive_losses = self.risk.consecutive_losses
+
+        db = SessionLocal()
+        try:
+            svc = StrategyService(db)
+            svc.update_runtime_state(daily_pnl=daily_pnl, consecutive_losses=consecutive_losses)
         finally:
             db.close()
 

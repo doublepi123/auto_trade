@@ -1,33 +1,39 @@
 <template>
   <div v-loading="initialLoading">
-    <el-alert v-if="loadError" type="error" title="无法连接服务器，请检查网络和 API 密钥" show-icon style="margin-bottom: 16px" />
+    <el-alert v-if="loadError" type="error" title="无法连接服务器，请检查网络和 API 密钥" show-icon :closable="false" style="margin-bottom: 16px">
+      <el-button size="small" type="primary" plain @click="refresh">重试连接</el-button>
+    </el-alert>
     <el-alert v-if="accountError" type="warning" title="账户资产暂时不可用，请检查券商凭证或稍后重试" show-icon style="margin-bottom: 16px" />
-    <h3>仪表盘</h3>
+    <div class="page-heading">
+      <h3>仪表盘</h3>
+      <el-tag :type="realtimeStatusType" effect="plain">{{ realtimeStatusLabel }}</el-tag>
+    </div>
     <el-row :gutter="20">
-      <el-col :span="8">
+      <el-col :xs="24" :sm="12" :lg="8">
         <el-card>
           <template #header>引擎状态</template>
           <el-tag :type="stateTagType">{{ engineStateLabel(status.engine_state) }}</el-tag>
         </el-card>
       </el-col>
-      <el-col :span="8">
+      <el-col :xs="24" :sm="12" :lg="8">
         <el-card>
           <template #header>最新价格</template>
           <h1>${{ (status.last_price ?? 0).toFixed(2) }}</h1>
         </el-card>
       </el-col>
-      <el-col :span="8">
+      <el-col :xs="24" :sm="12" :lg="8">
         <el-card>
           <template #header>今日盈亏</template>
-          <h1 :style="{ color: status.daily_pnl >= 0 ? 'green' : 'red' }">
-            ${{ (status.daily_pnl ?? 0).toFixed(2) }}
+          <h1 :class="metricClass(status.daily_pnl)">
+            <span class="metric-label">{{ pnlLabel(status.daily_pnl) }}</span>
+            {{ signedCurrency(status.daily_pnl) }}
           </h1>
         </el-card>
       </el-col>
     </el-row>
 
     <el-row :gutter="20" style="margin-top: 20px">
-      <el-col :span="12">
+      <el-col :xs="24" :md="12">
         <el-card>
           <template #header>风控状态</template>
           <p>紧急停止：<el-tag :type="status.kill_switch ? 'danger' : 'success'">{{ status.kill_switch ? '已开启' : '已关闭' }}</el-tag></p>
@@ -35,7 +41,7 @@
           <p>连续亏损次数：{{ status.consecutive_losses }}</p>
         </el-card>
       </el-col>
-      <el-col :span="12">
+      <el-col :xs="24" :md="12">
         <el-card>
           <template #header>操作控制</template>
           <el-space>
@@ -51,23 +57,24 @@
     </el-row>
 
     <el-row :gutter="20" style="margin-top: 20px">
-      <el-col :span="8">
+      <el-col :xs="24" :lg="8">
         <el-card>
           <template #header>总资产</template>
-          <h1 :style="{ color: account.total_assets >= 0 ? 'green' : 'red' }">
+          <h1 :class="account.available ? 'metric-positive' : 'metric-negative'">
+            <span class="metric-label">{{ account.available ? '可用' : '异常' }}</span>
             ${{ account.total_assets.toFixed(2) }}
           </h1>
         </el-card>
       </el-col>
-      <el-col :span="16">
+      <el-col :xs="24" :lg="16">
         <el-card>
           <template #header>现金余额</template>
-          <el-table :data="account.cash_balances" size="small" v-if="account.cash_balances.length > 0" style="width: 100%">
-            <el-table-column prop="currency" label="币种" width="100" />
-            <el-table-column prop="available_cash" label="可用" width="150">
+          <el-table :data="account.cash_balances" size="small" v-if="account.cash_balances.length > 0" class="responsive-table">
+            <el-table-column prop="currency" label="币种" min-width="90" />
+            <el-table-column prop="available_cash" label="可用" min-width="120">
               <template #default="{ row }">${{ row.available_cash.toFixed(2) }}</template>
             </el-table-column>
-            <el-table-column prop="frozen_cash" label="冻结" width="150">
+            <el-table-column prop="frozen_cash" label="冻结" min-width="120">
               <template #default="{ row }">${{ row.frozen_cash.toFixed(2) }}</template>
             </el-table-column>
           </el-table>
@@ -78,18 +85,18 @@
 
     <el-card style="margin-top: 20px">
       <template #header>持仓明细</template>
-      <el-table :data="account.positions" size="small" v-if="account.positions.length > 0" style="width: 100%">
-        <el-table-column prop="symbol" label="股票代码" width="150" />
-        <el-table-column prop="side" label="方向" width="100">
+      <el-table :data="account.positions" size="small" v-if="account.positions.length > 0" class="responsive-table">
+        <el-table-column prop="symbol" label="股票代码" min-width="130" />
+        <el-table-column prop="side" label="方向" min-width="90">
           <template #default="{ row }">{{ positionSideLabel(row.side) }}</template>
         </el-table-column>
-        <el-table-column prop="quantity" label="数量" width="120">
+        <el-table-column prop="quantity" label="数量" min-width="100">
           <template #default="{ row }">{{ row.quantity.toFixed(0) }}</template>
         </el-table-column>
-        <el-table-column prop="avg_price" label="均价" width="150">
+        <el-table-column prop="avg_price" label="均价" min-width="120">
           <template #default="{ row }">${{ row.avg_price.toFixed(2) }}</template>
         </el-table-column>
-        <el-table-column prop="market_value" label="市值" width="150">
+        <el-table-column prop="market_value" label="市值" min-width="120">
           <template #default="{ row }">${{ row.market_value.toFixed(2) }}</template>
         </el-table-column>
       </el-table>
@@ -137,11 +144,30 @@ const accountLoading = ref(false)
 const initialLoading = ref(true)
 const loadError = ref(false)
 const accountError = ref(false)
+const realtimeStatus = ref<'connecting' | 'connected' | 'reconnecting' | 'polling'>('connecting')
 
 const stateTagType = computed(() => {
   switch (status.value.engine_state) {
     case 'long': return 'success'
     case 'short': return 'danger'
+    default: return 'info'
+  }
+})
+
+const realtimeStatusLabel = computed(() => {
+  switch (realtimeStatus.value) {
+    case 'connected': return '实时连接正常'
+    case 'reconnecting': return '实时重连中'
+    case 'polling': return '轮询兜底'
+    default: return '实时连接中'
+  }
+})
+
+const realtimeStatusType = computed(() => {
+  switch (realtimeStatus.value) {
+    case 'connected': return 'success'
+    case 'reconnecting': return 'warning'
+    case 'polling': return 'info'
     default: return 'info'
   }
 })
@@ -155,6 +181,7 @@ let accountRefreshTimer: ReturnType<typeof setInterval> | null = null
 let lastWsStatusAt = 0
 
 function connectWebSocket() {
+  realtimeStatus.value = 'connecting'
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
   const wsUrl = `${protocol}//${window.location.host}/ws`
   ws = new WebSocket(wsUrl)
@@ -162,6 +189,7 @@ function connectWebSocket() {
   const apiKey = localStorage.getItem('api_key')
   ws.onopen = () => {
     useWebSocket = true
+    realtimeStatus.value = 'connected'
     reconnectAttempts = 0
     if (apiKey) {
       ws?.send(JSON.stringify({ token: apiKey }))
@@ -174,6 +202,7 @@ function connectWebSocket() {
       if (data.type === 'pong') return
       if (data.state !== undefined) {
         lastWsStatusAt = Date.now()
+        realtimeStatus.value = 'connected'
         status.value = {
           engine_state: data.state,
           paused: data.risks?.paused ?? status.value.paused,
@@ -192,17 +221,20 @@ function connectWebSocket() {
 
   ws.onclose = () => {
     useWebSocket = false
+    realtimeStatus.value = 'reconnecting'
     ws = null
     scheduleReconnect()
   }
 
   ws.onerror = () => {
     useWebSocket = false
+    realtimeStatus.value = 'polling'
   }
 }
 
 function scheduleReconnect() {
   if (reconnectTimer) return
+  realtimeStatus.value = 'reconnecting'
   const delay = Math.min(5000 * Math.pow(2, reconnectAttempts), 60000)
   reconnectAttempts++
   reconnectTimer = setTimeout(() => {
@@ -222,6 +254,9 @@ function startPolling() {
       const st = await getStatus()
       status.value = st
       loadError.value = false
+      if (!hasFreshWebSocketStatus()) {
+        realtimeStatus.value = 'polling'
+      }
     } catch {
       // silent — WebSocket may reconnect
     }
@@ -321,8 +356,31 @@ function reconnectWebSocketNow() {
     ws = null
   }
   useWebSocket = false
+  realtimeStatus.value = 'connecting'
   lastWsStatusAt = 0
   connectWebSocket()
+}
+
+function signedCurrency(value: number | null | undefined): string {
+  const normalized = value ?? 0
+  const amount = Math.abs(normalized).toFixed(2)
+  if (normalized > 0) return `+$${amount}`
+  if (normalized < 0) return `-$${amount}`
+  return `$${amount}`
+}
+
+function pnlLabel(value: number | null | undefined): string {
+  const normalized = value ?? 0
+  if (normalized > 0) return '盈利'
+  if (normalized < 0) return '亏损'
+  return '持平'
+}
+
+function metricClass(value: number | null | undefined): string {
+  const normalized = value ?? 0
+  if (normalized > 0) return 'metric-positive'
+  if (normalized < 0) return 'metric-negative'
+  return 'metric-neutral'
 }
 
 function handleApiKeyUpdated() {
@@ -334,7 +392,7 @@ async function handlePause() {
   try {
     await pauseTrading()
     await refresh()
-  } catch (e: any) {
+  } catch (e) {
     console.error('暂停交易失败：', e)
     ElMessage.error('暂停交易失败')
   }
@@ -344,7 +402,7 @@ async function handleResume() {
   try {
     await resumeTrading()
     await refresh()
-  } catch (e: any) {
+  } catch (e) {
     console.error('恢复交易失败：', e)
     ElMessage.error('恢复交易失败')
   }
@@ -355,7 +413,7 @@ async function handleKillSwitch() {
     await ElMessageBox.confirm('确定要开启紧急停止吗？这将立即停止所有交易。', '确认', { type: 'warning' })
     await activateKillSwitch()
     await refresh()
-  } catch (e: any) {
+  } catch (e) {
     if (e !== 'cancel') {
       console.error('开启紧急停止失败：', e)
       ElMessage.error('开启紧急停止失败')
@@ -368,7 +426,7 @@ async function handleDisableKillSwitch() {
     await ElMessageBox.confirm('确定要解除紧急停止吗？请确认风险后再恢复交易。', '确认', { type: 'warning' })
     await disableKillSwitch()
     await refresh()
-  } catch (e: any) {
+  } catch (e) {
     if (e !== 'cancel') {
       console.error('解除紧急停止失败：', e)
       ElMessage.error('解除紧急停止失败')
@@ -380,7 +438,7 @@ async function handleStart() {
   try {
     await startTrading()
     await refresh()
-  } catch (e: any) {
+  } catch (e) {
     console.error('启动交易失败：', e)
     ElMessage.error('启动交易失败')
   }
@@ -391,7 +449,7 @@ async function handleStop() {
     await ElMessageBox.confirm('确定要停止交易吗？', '确认', { type: 'warning' })
     await stopTrading()
     await refresh()
-  } catch (e: any) {
+  } catch (e) {
     if (e !== 'cancel') {
       console.error('停止交易失败：', e)
       ElMessage.error('停止交易失败')
@@ -399,3 +457,44 @@ async function handleStop() {
   }
 }
 </script>
+
+<style scoped>
+.page-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.page-heading h3 {
+  margin: 0 0 16px;
+}
+
+.metric-positive {
+  color: #1f7a3a;
+}
+
+.metric-negative {
+  color: #b42318;
+}
+
+.metric-neutral {
+  color: #606266;
+}
+
+.metric-label {
+  display: inline-block;
+  margin-right: 8px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.responsive-table {
+  width: 100%;
+}
+
+:deep(.el-col) {
+  margin-bottom: 16px;
+}
+</style>
