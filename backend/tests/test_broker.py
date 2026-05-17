@@ -183,6 +183,29 @@ class TestBrokerGateway:
         assert positions[1].quantity == Decimal("12")
         assert positions[1].side == "SHORT"
 
+    def test_get_order_status_normalizes_order_detail(self) -> None:
+        class Detail:
+            order_id = "order-1"
+            status = "PartialFilled"
+            executed_quantity = "3"
+            executed_price = "201.5"
+
+        class TradeContext:
+            def order_detail(self, order_id: str) -> Detail:
+                assert order_id == "order-1"
+                return Detail()
+
+        gw = BrokerGateway()
+        gw._quote_ctx = object()
+        gw._trade_ctx = TradeContext()
+
+        result = gw.get_order_status("order-1")
+
+        assert result.broker_order_id == "order-1"
+        assert result.status == "PARTIAL_FILLED"
+        assert result.executed_quantity == Decimal("3")
+        assert result.executed_price == Decimal("201.5")
+
 
 class TestBrokerImports:
     def test_import_openapi_fallback(self) -> None:

@@ -47,6 +47,14 @@ class OrderResult:
 
 
 @dataclass
+class OrderStatusResult:
+    broker_order_id: str
+    status: str
+    executed_quantity: Decimal = Decimal("0")
+    executed_price: Decimal = Decimal("0")
+
+
+@dataclass
 class Position:
     symbol: str
     side: str
@@ -111,6 +119,31 @@ def _iter_position_items(item: Any) -> list[Any]:
 
 
 _SIDE_MAP = {"BUY": "Buy", "SELL": "Sell", "SELL_SHORT": "Sell", "BUY_TO_COVER": "Buy"}
+
+
+def _normalize_order_status(raw_status: Any) -> str:
+    text = str(getattr(raw_status, "value", raw_status)).split(".")[-1]
+    key = text.upper().replace("_", "").replace("-", "").replace(" ", "")
+    if key == "FILLED":
+        return "FILLED"
+    if key == "PARTIALFILLED":
+        return "PARTIAL_FILLED"
+    if key == "REJECTED":
+        return "REJECTED"
+    if key in {"CANCELED", "CANCELLED", "EXPIRED", "PARTIALWITHDRAWAL"}:
+        return "CANCELLED"
+    return "SUBMITTED"
+
+
+def _decimal_attr(item: Any, *names: str) -> Decimal:
+    for name in names:
+        value = _get_value(item, name, None)
+        if value is not None:
+            try:
+                return Decimal(str(value))
+            except Exception:
+                return Decimal("0")
+    return Decimal("0")
 
 
 class BrokerGateway:
@@ -206,14 +239,25 @@ class BrokerGateway:
             )
 
             order_id = str(getattr(response, "order_id", getattr(response, "broker_order_id", "")))
-            raw_status = str(getattr(response, "status", "SUBMITTED")).upper()
+            raw_status = getattr(response, "status", "SUBMITTED")
             return OrderResult(
                 broker_order_id=order_id,
                 symbol=symbol,
                 side=side,
                 quantity=quantity,
                 price=price,
-                status=raw_status if raw_status in {"SUBMITTED", "FILLED", "REJECTED", "CANCELLED", "PARTIAL_FILLED"} else "SUBMITTED",
+                status=_normalize_order_status(raw_status),
+            )
+
+    def get_order_status(self, order_id: str) -> OrderStatusResult:
+        with self._lock:
+            self._init_clients()
+            detail = self._trade_ctx.order_detail(order_id)
+            return OrderStatusResult(
+                broker_order_id=str(_get_value(detail, "order_id", order_id)),
+                status=_normalize_order_status(_get_value(detail, "status", "SUBMITTED")),
+                executed_quantity=_decimal_attr(detail, "executed_quantity", "filled_quantity", "quantity"),
+                executed_price=_decimal_attr(detail, "executed_price", "filled_price", "price"),
             )
 
     def get_positions(self) -> list[Position]:
