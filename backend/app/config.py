@@ -14,6 +14,7 @@ class Settings(BaseSettings):
         env_file=("../.env", ".env"),
         env_prefix="AUTO_TRADE_",
         populate_by_name=True,
+        extra="ignore",
     )
 
     env: str = "dev"

@@ -84,3 +84,19 @@ class TestSettings:
         assert s.longbridge_app_key == "legacy-key"
         assert s.longbridge_app_secret == "legacy-secret"
         assert s.longbridge_access_token == "legacy-token"
+
+    def test_ignores_credential_master_key_from_parent_env_file(self, monkeypatch, tmp_path) -> None:
+        monkeypatch.delenv("CREDENTIAL_MASTER_KEY", raising=False)
+
+        root = tmp_path / "project"
+        backend = root / "backend"
+        backend.mkdir(parents=True)
+        (root / ".env").write_text(
+            "CREDENTIAL_MASTER_KEY=local-encryption-key\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.chdir(backend)
+        s = Settings()
+
+        assert s.env == "dev"

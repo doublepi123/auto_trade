@@ -15,3 +15,10 @@ def test_docker_compose_binds_published_ports_to_localhost() -> None:
 
     assert "127.0.0.1:8000:8000" in compose
     assert "127.0.0.1:${AUTO_TRADE_FRONTEND_PORT:-8080}:80" in compose
+
+
+def test_frontend_healthcheck_uses_ipv4_loopback() -> None:
+    dockerfile = (ROOT / "frontend" / "Dockerfile").read_text(encoding="utf-8")
+
+    assert "http://127.0.0.1/" in dockerfile
+    assert "http://localhost/" not in dockerfile
