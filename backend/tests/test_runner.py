@@ -1,5 +1,7 @@
 import asyncio
+import threading
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.core.broker import OrderResult, Position, Quote
@@ -86,6 +88,19 @@ class TestAppRunner:
                 return State()
 
         class FakeDb:
+            def query(self, _model):
+                class Query:
+                    def filter(self, *_args):
+                        return self
+
+                    def order_by(self, *_args):
+                        return self
+
+                    def first(self):
+                        return None
+
+                return Query()
+
             def close(self) -> None:
                 pass
 
@@ -100,6 +115,66 @@ class TestAppRunner:
 
         assert runner._loop is existing_loop
         existing_loop.close()
+
+    def test_initialize_runner_pauses_when_unresolved_live_order_exists(self) -> None:
+        runner = AppRunner()
+
+        class FakeService:
+            def __init__(self, _db) -> None:
+                pass
+
+            def get_config(self):
+                class Config:
+                    symbol = "AAPL.US"
+                    market = "US"
+                    buy_low = 100.0
+                    sell_high = 200.0
+                    short_selling = False
+                    max_daily_loss = 5000.0
+                    max_consecutive_losses = 3
+
+                return Config()
+
+            def get_runtime_state(self):
+                class State:
+                    engine_state = "flat"
+                    last_price = 0.0
+                    last_trigger_price = 0.0
+                    last_trigger_at = None
+                    daily_pnl = 0.0
+                    consecutive_losses = 0
+                    kill_switch = False
+                    paused = False
+
+                return State()
+
+        class FakeQuery:
+            def filter(self, *_args):
+                return self
+
+            def order_by(self, *_args):
+                return self
+
+            def first(self):
+                return SimpleNamespace(broker_order_id="order-live", status="SUBMITTED")
+
+        class FakeDb:
+            def query(self, _model):
+                return FakeQuery()
+
+            def close(self) -> None:
+                pass
+
+        with (
+            patch("app.runner.StrategyService", FakeService),
+            patch("app.runner.SessionLocal", lambda: FakeDb()),
+            patch.object(runner, "_load_credentials") as load_credentials,
+            patch.object(runner, "_apply_credentials") as apply_credentials,
+        ):
+            load_credentials.return_value = object()
+            runner._initialize_runner()
+
+        assert runner.risk.paused is True
 
     def test_broadcast_status_no_connections(self) -> None:
         runner = AppRunner()
@@ -156,6 +231,14 @@ class TestAppRunner:
 
                 return Result()
 
+            def get_order_status(self, order_id: str):
+                return SimpleNamespace(
+                    broker_order_id=order_id,
+                    status="FILLED",
+                    executed_quantity=self.submitted_quantity,
+                    executed_price=Decimal("201"),
+                )
+
         runner = AppRunner()
         broker = Broker()
         runner.broker = broker
@@ -191,3 +274,534 @@ class TestAppRunner:
         executed = runner._execute_buy("AAPL.US", Quote("AAPL.US", 100.0, 99.5, 100.5, ""))
 
         assert executed is False
+
+    def test_execute_sell_records_pnl_only_after_order_is_filled(self) -> None:
+        runner = AppRunner()
+        updates: list[tuple[str, str, object]] = []
+
+        class Broker:
+            def get_positions(self) -> list[Position]:
+                return [Position(symbol="AAPL.US", side="LONG", quantity=Decimal("5"), avg_price=Decimal("150"))]
+
+            def submit_limit_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal) -> OrderResult:
+                return OrderResult(
+                    broker_order_id="order-1",
+                    symbol=symbol,
+                    side=side,
+                    quantity=quantity,
+                    price=price,
+                    status="SUBMITTED",
+                )
+
+            def get_order_status(self, order_id: str):
+                assert order_id == "order-1"
+                assert runner.risk.daily_pnl == 0.0
+                return SimpleNamespace(
+                    broker_order_id=order_id,
+                    status="FILLED",
+                    executed_quantity=Decimal("5"),
+                    executed_price=Decimal("205"),
+                )
+
+        runner.broker = Broker()
+        runner.notifier = _NoopNotifier()
+        runner._record_order = lambda *args: None
+        runner._update_order_status = lambda order_id, status, filled_at=None: updates.append((order_id, status, filled_at))
+        runner._order_status_poll_interval_seconds = 0
+        runner._order_status_timeout_seconds = 1
+
+        executed = runner._execute_sell("AAPL.US", Quote("AAPL.US", 201.0, 200.5, 201.5, ""))
+
+        assert executed is True
+        assert runner.risk.daily_pnl == 275.0
+        assert updates
+        assert updates[-1][0] == "order-1"
+        assert updates[-1][1] == "FILLED"
+        assert updates[-1][2] is not None
+
+    def test_execute_sell_without_fill_tracks_pending_without_pnl_or_filled_status(self) -> None:
+        runner = AppRunner()
+        updates: list[tuple[str, str, object]] = []
+
+        class Broker:
+            def get_positions(self) -> list[Position]:
+                return [Position(symbol="AAPL.US", side="LONG", quantity=Decimal("5"), avg_price=Decimal("150"))]
+
+            def submit_limit_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal) -> OrderResult:
+                return OrderResult(
+                    broker_order_id="order-1",
+                    symbol=symbol,
+                    side=side,
+                    quantity=quantity,
+                    price=price,
+                    status="SUBMITTED",
+                )
+
+            def get_order_status(self, order_id: str):
+                return SimpleNamespace(
+                    broker_order_id=order_id,
+                    status="SUBMITTED",
+                    executed_quantity=Decimal("0"),
+                    executed_price=Decimal("0"),
+                )
+
+        runner.broker = Broker()
+        runner.notifier = _NoopNotifier()
+        runner._record_order = lambda *args: None
+        runner._update_order_status = lambda order_id, status, filled_at=None: updates.append((order_id, status, filled_at))
+        runner._order_status_poll_interval_seconds = 0
+        runner._order_status_timeout_seconds = 0
+
+        executed = runner._execute_sell("AAPL.US", Quote("AAPL.US", 201.0, 200.5, 201.5, ""))
+
+        assert executed is True
+        assert runner.risk.daily_pnl == 0.0
+        assert runner._pending_order is not None
+        assert runner._pending_order.broker_order_id == "order-1"
+        assert all(status != "FILLED" for _order_id, status, _filled_at in updates)
+
+    def test_live_submitted_timeout_keeps_trigger_state_and_skips_duplicate_order(self) -> None:
+        class Broker:
+            def __init__(self) -> None:
+                self.submissions = 0
+
+            def get_cash(self, _currency=None) -> Decimal:
+                return Decimal("1000")
+
+            def submit_limit_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal) -> OrderResult:
+                self.submissions += 1
+                return OrderResult(
+                    broker_order_id="order-1",
+                    symbol=symbol,
+                    side=side,
+                    quantity=quantity,
+                    price=price,
+                    status="SUBMITTED",
+                )
+
+            def get_order_status(self, order_id: str):
+                return SimpleNamespace(
+                    broker_order_id=order_id,
+                    status="SUBMITTED",
+                    executed_quantity=Decimal("0"),
+                    executed_price=Decimal("0"),
+                )
+
+        runner = AppRunner()
+        broker = Broker()
+        runner.broker = broker
+        runner._running = True
+        runner.engine.params = StrategyParams(symbol="AAPL.US", buy_low=100.0, sell_high=200.0)
+        runner.notifier = _NoopNotifier()
+        runner._record_order = lambda *args: None
+        runner._order_status_poll_interval_seconds = 0
+        runner._order_status_timeout_seconds = 0
+
+        quote = Quote("AAPL.US", 99.0, 98.5, 99.5, "")
+        runner._on_quote(quote)
+        runner._on_quote(quote)
+
+        assert broker.submissions == 1
+        assert runner.engine.state == EngineState.LONG
+        assert runner._pending_order is not None
+
+    def test_partial_filled_timeout_keeps_pending_and_skips_duplicate_order(self) -> None:
+        class Broker:
+            def __init__(self) -> None:
+                self.submissions = 0
+
+            def get_cash(self, _currency=None) -> Decimal:
+                return Decimal("1000")
+
+            def submit_limit_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal) -> OrderResult:
+                self.submissions += 1
+                return OrderResult(
+                    broker_order_id="order-1",
+                    symbol=symbol,
+                    side=side,
+                    quantity=quantity,
+                    price=price,
+                    status="SUBMITTED",
+                )
+
+            def get_order_status(self, order_id: str):
+                return SimpleNamespace(
+                    broker_order_id=order_id,
+                    status="PARTIAL_FILLED",
+                    executed_quantity=Decimal("1"),
+                    executed_price=Decimal("99"),
+                )
+
+        runner = AppRunner()
+        broker = Broker()
+        runner.broker = broker
+        runner._running = True
+        runner.engine.params = StrategyParams(symbol="AAPL.US", buy_low=100.0, sell_high=200.0)
+        runner.notifier = _NoopNotifier()
+        runner._record_order = lambda *args: None
+        runner._update_order_status = lambda *args, **kwargs: None
+        runner._order_status_poll_interval_seconds = 0
+        runner._order_status_timeout_seconds = 0
+
+        quote = Quote("AAPL.US", 99.0, 98.5, 99.5, "")
+        runner._on_quote(quote)
+        runner._on_quote(quote)
+
+        assert broker.submissions == 1
+        assert runner.engine.state == EngineState.LONG
+        assert runner._pending_order is not None
+
+    def test_pending_order_rejection_restores_snapshot_and_later_quote_can_retrigger(self) -> None:
+        class Broker:
+            def __init__(self) -> None:
+                self.submissions = 0
+                self.statuses = ["SUBMITTED", "REJECTED", "REJECTED"]
+
+            def get_cash(self, _currency=None) -> Decimal:
+                return Decimal("1000")
+
+            def submit_limit_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal) -> OrderResult:
+                self.submissions += 1
+                return OrderResult(
+                    broker_order_id=f"order-{self.submissions}",
+                    symbol=symbol,
+                    side=side,
+                    quantity=quantity,
+                    price=price,
+                    status="SUBMITTED",
+                )
+
+            def get_order_status(self, order_id: str):
+                status = self.statuses.pop(0)
+                return SimpleNamespace(
+                    broker_order_id=order_id,
+                    status=status,
+                    executed_quantity=Decimal("0"),
+                    executed_price=Decimal("0"),
+                )
+
+        runner = AppRunner()
+        broker = Broker()
+        runner.broker = broker
+        runner._running = True
+        runner.engine.params = StrategyParams(symbol="AAPL.US", buy_low=100.0, sell_high=200.0)
+        runner.notifier = _NoopNotifier()
+        runner._record_order = lambda *args: None
+        runner._update_order_status = lambda *args, **kwargs: None
+        runner._order_status_poll_interval_seconds = 0
+        runner._order_status_timeout_seconds = 0
+
+        quote = Quote("AAPL.US", 99.0, 98.5, 99.5, "")
+        runner._on_quote(quote)
+        assert broker.submissions == 1
+        assert runner.engine.state == EngineState.LONG
+
+        runner._on_quote(quote)
+        assert broker.submissions == 1
+        assert runner.engine.state == EngineState.FLAT
+        assert runner._pending_order is None
+
+        runner._on_quote(quote)
+        assert broker.submissions == 1
+        assert runner.risk.paused is True
+
+    def test_trigger_uses_symbol_snapshot_if_strategy_changes_before_submit(self) -> None:
+        entered_first_broadcast = threading.Event()
+        release_first_broadcast = threading.Event()
+        broadcast_calls = 0
+
+        class Broker:
+            def __init__(self) -> None:
+                self.submitted_symbols: list[str] = []
+
+            def get_cash(self, _currency=None) -> Decimal:
+                return Decimal("1000")
+
+            def submit_limit_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal) -> OrderResult:
+                self.submitted_symbols.append(symbol)
+                return OrderResult(
+                    broker_order_id="order-1",
+                    symbol=symbol,
+                    side=side,
+                    quantity=quantity,
+                    price=price,
+                    status="REJECTED",
+                )
+
+        runner = AppRunner()
+        broker = Broker()
+        runner.broker = broker
+        runner._running = True
+        runner.engine.params = StrategyParams(symbol="AAPL.US", buy_low=100.0, sell_high=200.0)
+        runner.notifier = _NoopNotifier()
+        runner._record_order = lambda *args: None
+        runner._update_order_status = lambda *args, **kwargs: None
+
+        def broadcast_status() -> None:
+            nonlocal broadcast_calls
+            broadcast_calls += 1
+            if broadcast_calls == 1:
+                entered_first_broadcast.set()
+                release_first_broadcast.wait(timeout=2)
+
+        runner._broadcast_status = broadcast_status
+        thread = threading.Thread(target=runner._on_quote, args=(Quote("AAPL.US", 99.0, 98.5, 99.5, ""),))
+        thread.start()
+        try:
+            assert entered_first_broadcast.wait(timeout=1)
+            runner.engine.params = StrategyParams(symbol="MSFT.US", buy_low=50.0, sell_high=80.0)
+        finally:
+            release_first_broadcast.set()
+            thread.join(timeout=2)
+
+        assert thread.is_alive() is False
+        assert broker.submitted_symbols == ["AAPL.US"]
+
+    def test_stop_does_not_close_broker_while_order_status_poll_is_running(self) -> None:
+        entered_status_poll = threading.Event()
+        release_status_poll = threading.Event()
+
+        class Broker:
+            def __init__(self) -> None:
+                self.closed = False
+
+            def get_cash(self, _currency=None) -> Decimal:
+                return Decimal("1000")
+
+            def submit_limit_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal) -> OrderResult:
+                return OrderResult(
+                    broker_order_id="order-1",
+                    symbol=symbol,
+                    side=side,
+                    quantity=quantity,
+                    price=price,
+                    status="SUBMITTED",
+                )
+
+            def get_order_status(self, order_id: str):
+                entered_status_poll.set()
+                release_status_poll.wait(timeout=2)
+                return SimpleNamespace(
+                    broker_order_id=order_id,
+                    status="FILLED",
+                    executed_quantity=Decimal("9"),
+                    executed_price=Decimal("99"),
+                )
+
+            def close(self) -> None:
+                self.closed = True
+
+        runner = AppRunner()
+        broker = Broker()
+        runner.broker = broker
+        runner._running = True
+        runner.engine.params = StrategyParams(symbol="AAPL.US", buy_low=100.0, sell_high=200.0)
+        runner.notifier = _NoopNotifier()
+        runner._record_order = lambda *args: None
+        runner._update_order_status = lambda *args, **kwargs: None
+        runner._order_status_poll_interval_seconds = 0
+        runner._order_status_timeout_seconds = 2
+
+        thread = threading.Thread(target=runner._on_quote, args=(Quote("AAPL.US", 99.0, 98.5, 99.5, ""),))
+        thread.start()
+        try:
+            assert entered_status_poll.wait(timeout=1)
+            runner.stop()
+            assert broker.closed is False
+        finally:
+            release_status_poll.set()
+            thread.join(timeout=2)
+
+        assert thread.is_alive() is False
+        assert broker.closed is True
+
+    def test_pending_partial_cancel_accounts_fill_and_keeps_residual_position_state(self) -> None:
+        class Broker:
+            def __init__(self) -> None:
+                self.statuses = [
+                    SimpleNamespace(
+                        broker_order_id="order-1",
+                        status="PARTIAL_FILLED",
+                        executed_quantity=Decimal("2"),
+                        executed_price=Decimal("205"),
+                    ),
+                    SimpleNamespace(
+                        broker_order_id="order-1",
+                        status="CANCELLED",
+                        executed_quantity=Decimal("2"),
+                        executed_price=Decimal("205"),
+                    ),
+                ]
+
+            def get_positions(self) -> list[Position]:
+                return [Position(symbol="AAPL.US", side="LONG", quantity=Decimal("5"), avg_price=Decimal("150"))]
+
+            def submit_limit_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal) -> OrderResult:
+                return OrderResult(
+                    broker_order_id="order-1",
+                    symbol=symbol,
+                    side=side,
+                    quantity=quantity,
+                    price=price,
+                    status="SUBMITTED",
+                )
+
+            def get_order_status(self, order_id: str):
+                return self.statuses.pop(0)
+
+        runner = AppRunner()
+        runner.broker = Broker()
+        runner._running = True
+        runner.engine.params = StrategyParams(symbol="AAPL.US", buy_low=100.0, sell_high=200.0)
+        runner.engine.state = EngineState.LONG
+        runner.notifier = _NoopNotifier()
+        runner._record_order = lambda *args: None
+        runner._update_order_status = lambda *args, **kwargs: None
+        runner._order_status_poll_interval_seconds = 0
+        runner._order_status_timeout_seconds = 0
+
+        quote = Quote("AAPL.US", 201.0, 200.5, 201.5, "")
+        runner._on_quote(quote)
+        assert runner.engine.state == EngineState.FLAT
+        assert runner._pending_order is not None
+
+        runner._on_quote(quote)
+
+        assert runner.risk.daily_pnl == 110.0
+        assert runner.engine.state == EngineState.LONG
+        assert runner._pending_order is None
+
+    def test_pending_order_reconcile_is_throttled_between_poll_intervals(self) -> None:
+        class Broker:
+            def __init__(self) -> None:
+                self.status_checks = 0
+
+            def get_cash(self, _currency=None) -> Decimal:
+                return Decimal("1000")
+
+            def submit_limit_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal) -> OrderResult:
+                return OrderResult(
+                    broker_order_id="order-1",
+                    symbol=symbol,
+                    side=side,
+                    quantity=quantity,
+                    price=price,
+                    status="SUBMITTED",
+                )
+
+            def get_order_status(self, order_id: str):
+                self.status_checks += 1
+                return SimpleNamespace(
+                    broker_order_id=order_id,
+                    status="SUBMITTED",
+                    executed_quantity=Decimal("0"),
+                    executed_price=Decimal("0"),
+                )
+
+        runner = AppRunner()
+        broker = Broker()
+        runner.broker = broker
+        runner._running = True
+        runner.engine.params = StrategyParams(symbol="AAPL.US", buy_low=100.0, sell_high=200.0)
+        runner.notifier = _NoopNotifier()
+        runner._record_order = lambda *args: None
+        runner._order_status_poll_interval_seconds = 60
+        runner._order_status_timeout_seconds = 0
+
+        quote = Quote("AAPL.US", 99.0, 98.5, 99.5, "")
+        runner._on_quote(quote)
+        runner._on_quote(quote)
+        runner._on_quote(quote)
+
+        assert broker.status_checks == 1
+
+    def test_on_quote_does_not_hold_state_lock_while_polling_order_status(self) -> None:
+        entered_status_poll = threading.Event()
+        release_status_poll = threading.Event()
+
+        class Broker:
+            def get_cash(self, _currency=None) -> Decimal:
+                return Decimal("1000")
+
+            def submit_limit_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal) -> OrderResult:
+                return OrderResult(
+                    broker_order_id="order-1",
+                    symbol=symbol,
+                    side=side,
+                    quantity=quantity,
+                    price=price,
+                    status="SUBMITTED",
+                )
+
+            def get_order_status(self, order_id: str):
+                entered_status_poll.set()
+                release_status_poll.wait(timeout=2)
+                return SimpleNamespace(
+                    broker_order_id=order_id,
+                    status="FILLED",
+                    executed_quantity=Decimal("9"),
+                    executed_price=Decimal("99"),
+                )
+
+        runner = AppRunner()
+        runner.broker = Broker()
+        runner._running = True
+        runner.engine.params = StrategyParams(symbol="AAPL.US", buy_low=100.0, sell_high=200.0)
+        runner.notifier = _NoopNotifier()
+        runner._record_order = lambda *args: None
+        runner._update_order_status = lambda *args, **kwargs: None
+        runner._order_status_poll_interval_seconds = 0
+        runner._order_status_timeout_seconds = 2
+
+        thread = threading.Thread(target=runner._on_quote, args=(Quote("AAPL.US", 99.0, 98.5, 99.5, ""),))
+        thread.start()
+        try:
+            assert entered_status_poll.wait(timeout=1)
+            acquired = runner._state_lock.acquire(timeout=0.1)
+            if acquired:
+                runner._state_lock.release()
+            assert acquired is True
+        finally:
+            release_status_poll.set()
+            thread.join(timeout=2)
+
+        assert thread.is_alive() is False
+
+    def test_execute_sell_rejected_after_submit_updates_status_without_pnl(self) -> None:
+        runner = AppRunner()
+        updates: list[tuple[str, str, object]] = []
+
+        class Broker:
+            def get_positions(self) -> list[Position]:
+                return [Position(symbol="AAPL.US", side="LONG", quantity=Decimal("5"), avg_price=Decimal("150"))]
+
+            def submit_limit_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal) -> OrderResult:
+                return OrderResult(
+                    broker_order_id="order-1",
+                    symbol=symbol,
+                    side=side,
+                    quantity=quantity,
+                    price=price,
+                    status="SUBMITTED",
+                )
+
+            def get_order_status(self, order_id: str):
+                return SimpleNamespace(
+                    broker_order_id=order_id,
+                    status="REJECTED",
+                    executed_quantity=Decimal("0"),
+                    executed_price=Decimal("0"),
+                )
+
+        runner.broker = Broker()
+        runner.notifier = _NoopNotifier()
+        runner._record_order = lambda *args: None
+        runner._update_order_status = lambda order_id, status, filled_at=None: updates.append((order_id, status, filled_at))
+        runner._order_status_poll_interval_seconds = 0
+        runner._order_status_timeout_seconds = 1
+
+        executed = runner._execute_sell("AAPL.US", Quote("AAPL.US", 201.0, 200.5, 201.5, ""))
+
+        assert executed is False
+        assert runner.risk.daily_pnl == 0.0
+        assert updates[-1][1] == "REJECTED"

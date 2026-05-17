@@ -13,18 +13,24 @@ class FakeSession:
         self._config = config
         self.closed = False
 
-    def query(self, _model: object) -> object:
+    def query(self, model: object) -> object:
         class _Query:
-            def __init__(self, config: CredentialConfig) -> None:
+            def __init__(self, config: CredentialConfig, model: object) -> None:
                 self._config = config
+                self._model = model
+
+            def filter(self, *_args: object, **_kwargs: object) -> _Query:
+                return self
 
             def order_by(self, *_args: object, **_kwargs: object) -> _Query:
                 return self
 
-            def first(self) -> CredentialConfig:
+            def first(self) -> CredentialConfig | None:
+                if getattr(self._model, "__name__", "") != "CredentialConfig":
+                    return None
                 return self._config
 
-        return _Query(self._config)
+        return _Query(self._config, model)
 
     def close(self) -> None:
         self.closed = True
