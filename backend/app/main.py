@@ -15,8 +15,11 @@ from app.api.trade import router as trade_router
 from app.api.ws import router as ws_router
 from app.api.ws import manager as ws_manager
 from app.config import settings
-from app.database import init_db
+from app.database import init_db, SessionLocal
 from app.runner import get_runner
+from app.services.llm_advisor_service import LLMAdvisorService
+from app.services.interval_application_service import IntervalApplicationService
+from app.services.strategy_service import StrategyService
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 logger = logging.getLogger("auto_trade.main")
@@ -31,14 +34,53 @@ async def _ws_cleanup_task() -> None:
             pass
 
 
+async def _llm_analysis_cron() -> None:
+    from app.database import SessionLocal
+    from app.services.llm_advisor_service import LLMAdvisorService
+    from app.services.strategy_service import StrategyService
+    from app.runner import get_runner
+
+    interval_seconds = settings.llm_interval_cron_minutes * 60
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            db = SessionLocal()
+            try:
+                svc = StrategyService(db)
+                config = svc.get_config()
+                if not config.auto_interval_enabled or not config.symbol:
+                    continue
+
+                runner = get_runner()
+                current_price = runner.engine.last_price if runner.engine else 0.0
+
+                advisor = LLMAdvisorService()
+                advisor.analyze(
+                    symbol=config.symbol,
+                    market=config.market,
+                    current_price=current_price,
+                    current_buy_low=config.buy_low,
+                    current_sell_high=config.sell_high,
+                    short_selling=config.short_selling,
+                    current_position=runner.engine.state.value if runner.engine else "flat",
+                    recent_trades=[],
+                )
+            finally:
+                db.close()
+        except Exception:
+            logger.exception("LLM analysis cron failed")
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     init_db()
     if not get_runner().start():
         logger.warning("runner failed to start during app lifespan — trading engine is not running")
     cleanup_task = asyncio.create_task(_ws_cleanup_task())
+    llm_task = asyncio.create_task(_llm_analysis_cron())
     yield
     cleanup_task.cancel()
+    llm_task.cancel()
     get_runner().stop()
 
 
