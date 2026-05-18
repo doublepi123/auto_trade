@@ -2,7 +2,7 @@
   <div>
     <h3>策略配置</h3>
     <el-card style="max-width: 600px">
-      <el-form :model="form" label-width="180px" @submit.prevent="handleSave">
+      <el-form :model="form" label-width="180px" @submit.prevent="save">
         <el-form-item label="股票代码">
           <el-input v-model="form.symbol" placeholder="例如 AAPL.US" />
         </el-form-item>
@@ -28,8 +28,9 @@
           <el-input-number v-model="form.max_consecutive_losses" :min="1" />
         </el-form-item>
         <el-form-item>
-          <el-button type="primary" native-type="submit" :loading="saving" :disabled="loading">保存</el-button>
+          <el-button type="primary" native-type="submit" :loading="saving" :disabled="loading || !isDirty">保存</el-button>
           <el-tag v-if="saved" type="success" style="margin-left: 10px">已保存</el-tag>
+          <el-tag v-if="error" type="danger" style="margin-left: 10px">{{ error }}</el-tag>
         </el-form-item>
       </el-form>
     </el-card>
@@ -37,36 +38,24 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch, onMounted } from 'vue'
 import { onBeforeRouteLeave } from 'vue-router'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessageBox } from 'element-plus'
 import { getStrategy, updateStrategy } from '../api'
+import { useFormState } from '../composables/useFormState'
 
-const form = ref({
-  symbol: '',
-  market: 'US' as 'US' | 'HK',
-  buy_low: 0,
-  sell_high: 0,
-  short_selling: false,
-  max_daily_loss: 5000,
-  max_consecutive_losses: 3,
-})
-
-const saving = ref(false)
-const saved = ref(false)
-const loading = ref(true)
-const savedSnapshot = ref(serializeForm())
-
-watch(form, () => {
-  if (isDirty()) {
-    saved.value = false
-  }
-}, { deep: true })
-
-onMounted(async () => {
-  try {
+const { form, loading, saving, saved, error, isDirty, load, save } = useFormState({
+  initial: {
+    symbol: '',
+    market: 'US' as 'US' | 'HK',
+    buy_low: 0,
+    sell_high: 0,
+    short_selling: false,
+    max_daily_loss: 5000,
+    max_consecutive_losses: 3,
+  },
+  load: async () => {
     const s = await getStrategy()
-    form.value = {
+    return {
       symbol: s.symbol,
       market: s.market,
       buy_low: s.buy_low,
@@ -75,67 +64,18 @@ onMounted(async () => {
       max_daily_loss: s.max_daily_loss,
       max_consecutive_losses: s.max_consecutive_losses,
     }
-    savedSnapshot.value = serializeForm()
-  } catch (e) {
-    console.error('加载策略失败：', e)
-    ElMessage.error('加载策略失败')
-  } finally {
-    loading.value = false
-  }
+  },
+  save: async (data) => {
+    await updateStrategy(data)
+  },
 })
 
+load()
+
 onBeforeRouteLeave(() => {
-  if (!isDirty()) return true
+  if (!isDirty.value) return true
   return ElMessageBox.confirm('策略配置尚未保存，确定要离开当前页面吗？', '未保存的更改', { type: 'warning' })
     .then(() => true)
     .catch(() => false)
 })
-
-function serializeForm(): string {
-  return JSON.stringify(form.value)
-}
-
-function isDirty(): boolean {
-  return serializeForm() !== savedSnapshot.value
-}
-
-async function handleSave() {
-  if (!form.value.symbol) {
-    ElMessage.error('股票代码不能为空')
-    return
-  }
-  if (form.value.buy_low <= 0) {
-    ElMessage.error('买入价下限必须大于 0')
-    return
-  }
-  if (form.value.sell_high <= 0) {
-    ElMessage.error('卖出价上限必须大于 0')
-    return
-  }
-  if (form.value.buy_low >= form.value.sell_high) {
-    ElMessage.error('买入价下限必须小于卖出价上限')
-    return
-  }
-
-  saving.value = true
-  saved.value = false
-  try {
-    await updateStrategy(form.value)
-    savedSnapshot.value = serializeForm()
-    saved.value = true
-  } catch (e: any) {
-    console.error('保存失败：', e)
-    const detail = e?.response?.data?.detail
-    if (typeof detail === 'string' && detail) {
-      ElMessage.error(`保存失败：${detail}`)
-    } else if (Array.isArray(detail)) {
-      const msgs = detail.map((d: any) => d.msg || d.message || JSON.stringify(d)).join('；')
-      ElMessage.error(`保存失败：${msgs}`)
-    } else {
-      ElMessage.error('保存失败')
-    }
-  } finally {
-    saving.value = false
-  }
-}
 </script>

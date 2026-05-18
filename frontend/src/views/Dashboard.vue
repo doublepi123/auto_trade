@@ -1,18 +1,24 @@
 <template>
   <div v-loading="initialLoading">
     <el-alert v-if="loadError" type="error" title="无法连接服务器，请检查网络和 API 密钥" show-icon :closable="false" style="margin-bottom: 16px">
-      <el-button size="small" type="primary" plain @click="refresh">重试连接</el-button>
+      <el-button size="small" type="primary" plain @click="handleRetry">重试连接</el-button>
     </el-alert>
+
     <el-alert v-if="accountError" type="warning" title="账户资产暂时不可用，请检查券商凭证或稍后重试" show-icon style="margin-bottom: 16px" />
+
     <div class="page-heading">
       <h3>仪表盘</h3>
       <el-tag :type="realtimeStatusType" effect="plain">{{ realtimeStatusLabel }}</el-tag>
     </div>
+
     <el-row :gutter="20">
       <el-col :xs="24" :sm="12" :lg="8">
         <el-card>
           <template #header>引擎状态</template>
           <el-tag :type="stateTagType">{{ engineStateLabel(status.engine_state) }}</el-tag>
+          <p style="margin-top: 12px">
+            运行器：<el-tag :type="status.runner_running ? 'success' : 'info'">{{ status.runner_running ? '运行中' : '未启动' }}</el-tag>
+          </p>
         </el-card>
       </el-col>
       <el-col :xs="24" :sm="12" :lg="8">
@@ -45,7 +51,7 @@
         <el-card>
           <template #header>操作控制</template>
           <el-space>
-            <el-button type="primary" @click="handleStart" :disabled="status.kill_switch">启动</el-button>
+            <el-button type="primary" @click="handleStart" :disabled="status.kill_switch || status.runner_running">启动</el-button>
             <el-button type="danger" @click="handleStop">停止</el-button>
             <el-button type="warning" @click="handlePause" :disabled="status.paused || status.kill_switch">暂停</el-button>
             <el-button type="success" @click="handleResume" :disabled="!status.paused || status.kill_switch">恢复</el-button>
@@ -78,6 +84,7 @@
               <template #default="{ row }">${{ row.frozen_cash.toFixed(2) }}</template>
             </el-table-column>
           </el-table>
+          <p v-else-if="!account.available" style="color: #999; text-align: center">数据不可用</p>
           <p v-else style="color: #999; text-align: center">暂无数据</p>
         </el-card>
       </el-col>
@@ -100,6 +107,7 @@
           <template #default="{ row }">${{ row.market_value.toFixed(2) }}</template>
         </el-table-column>
       </el-table>
+      <p v-else-if="!account.available" style="color: #999; text-align: center">数据不可用</p>
       <p v-else style="color: #999; text-align: center">暂无持仓</p>
     </el-card>
 
@@ -115,36 +123,17 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, computed } from 'vue'
+import { computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { getStrategy, getStatus, pauseTrading, resumeTrading, activateKillSwitch, disableKillSwitch, startTrading, stopTrading, getAccount } from '../api'
-import type { StrategyConfig, StatusData, AccountInfo } from '../types'
+import { useDashboardData } from '../composables/useDashboardData'
+import { useStatusStream } from '../composables/useStatusStream'
+import { useAccountRefresh } from '../composables/useAccountRefresh'
+import { startTrading, stopTrading, pauseTrading, resumeTrading, activateKillSwitch, disableKillSwitch } from '../api'
 import { engineStateLabel, marketLabel, positionSideLabel } from '../utils/labels'
 
-const strategy = ref<StrategyConfig>({
-  id: 0, symbol: '', market: 'US', buy_low: 0, sell_high: 0,
-  short_selling: false, max_daily_loss: 5000, max_consecutive_losses: 3,
-  updated_at: '',
-})
-
-const status = ref<StatusData>({
-  engine_state: 'flat', paused: false, kill_switch: false,
-  daily_pnl: 0, consecutive_losses: 0,
-  last_price: 0, last_trigger_price: 0, last_trigger_at: null,
-})
-
-const account = ref<AccountInfo>({
-  total_assets: 0,
-  cash_balances: [],
-  positions: [],
-  available: true,
-  error: null,
-})
-const accountLoading = ref(false)
-const initialLoading = ref(true)
-const loadError = ref(false)
-const accountError = ref(false)
-const realtimeStatus = ref<'connecting' | 'connected' | 'reconnecting' | 'polling'>('connecting')
+const { strategy, status, initialLoading, loadError, load, refreshStatus } = useDashboardData()
+const { realtimeStatus, reconnectNow } = useStatusStream(status)
+const { account, accountError, refresh: refreshAccount } = useAccountRefresh()
 
 const stateTagType = computed(() => {
   switch (status.value.engine_state) {
@@ -172,193 +161,75 @@ const realtimeStatusType = computed(() => {
   }
 })
 
-let ws: WebSocket | null = null
-let reconnectTimer: ReturnType<typeof setTimeout> | null = null
-let pollTimer: ReturnType<typeof setInterval> | null = null
-let useWebSocket = false
-let reconnectAttempts = 0
-let accountRefreshTimer: ReturnType<typeof setInterval> | null = null
-let lastWsStatusAt = 0
-
-function connectWebSocket() {
-  realtimeStatus.value = 'connecting'
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-  const wsUrl = `${protocol}//${window.location.host}/ws`
-  ws = new WebSocket(wsUrl)
-
-  const apiKey = localStorage.getItem('api_key')
-  ws.onopen = () => {
-    useWebSocket = true
-    realtimeStatus.value = 'connected'
-    reconnectAttempts = 0
-    if (apiKey) {
-      ws?.send(JSON.stringify({ token: apiKey }))
-    }
-  }
-
-  ws.onmessage = (event) => {
-    try {
-      const data = JSON.parse(event.data)
-      if (data.type === 'pong') return
-      if (data.state !== undefined) {
-        lastWsStatusAt = Date.now()
-        realtimeStatus.value = 'connected'
-        status.value = {
-          engine_state: data.state,
-          paused: data.risks?.paused ?? status.value.paused,
-          kill_switch: data.risks?.kill_switch ?? status.value.kill_switch,
-          daily_pnl: data.risks?.daily_pnl ?? status.value.daily_pnl,
-          consecutive_losses: data.risks?.consecutive_losses ?? status.value.consecutive_losses,
-          last_price: data.last_price ?? status.value.last_price,
-          last_trigger_price: data.last_trigger_price ?? status.value.last_trigger_price,
-          last_trigger_at: data.last_trigger_at ?? status.value.last_trigger_at,
-        }
-      }
-    } catch {
-      // ignore parse errors
-    }
-  }
-
-  ws.onclose = () => {
-    useWebSocket = false
-    realtimeStatus.value = 'reconnecting'
-    ws = null
-    scheduleReconnect()
-  }
-
-  ws.onerror = () => {
-    useWebSocket = false
-    realtimeStatus.value = 'polling'
-  }
-}
-
-function scheduleReconnect() {
-  if (reconnectTimer) return
-  realtimeStatus.value = 'reconnecting'
-  const delay = Math.min(5000 * Math.pow(2, reconnectAttempts), 60000)
-  reconnectAttempts++
-  reconnectTimer = setTimeout(() => {
-    reconnectTimer = null
-    connectWebSocket()
-  }, delay)
-}
-
-function hasFreshWebSocketStatus() {
-  return useWebSocket && Date.now() - lastWsStatusAt < 10000
-}
-
-function startPolling() {
-  pollTimer = setInterval(async () => {
-    if (hasFreshWebSocketStatus()) return
-    try {
-      const st = await getStatus()
-      status.value = st
-      loadError.value = false
-      if (!hasFreshWebSocketStatus()) {
-        realtimeStatus.value = 'polling'
-      }
-    } catch {
-      // silent — WebSocket may reconnect
-    }
-  }, 3000)
-}
-
-function startAccountRefresh() {
-  accountRefreshTimer = setInterval(async () => {
-    try {
-      account.value = await getAccount()
-      accountError.value = !account.value.available
-    } catch {
-      accountError.value = true
-      // silent — account data will retry on next interval
-    }
-  }, 10000)
-}
-
-onMounted(async () => {
+async function handleRetry() {
+  loadError.value = false
   try {
-    const [s, st, acc] = await Promise.all([
-      getStrategy(),
-      getStatus(),
-      getAccount().catch(() => {
-        accountError.value = true
-        return { total_assets: 0, cash_balances: [], positions: [], available: false, error: 'Account data unavailable' }
-      }),
-    ])
-    strategy.value = s
-    status.value = st
-    account.value = acc
-    accountError.value = !acc.available
-    loadError.value = false
-  } catch (e) {
-    console.error('刷新仪表盘失败：', e)
-    loadError.value = true
-    ElMessage.error('刷新仪表盘数据失败')
-  } finally {
-    initialLoading.value = false
-  }
-  connectWebSocket()
-  startPolling()
-  startAccountRefresh()
-  window.addEventListener('api-key-updated', handleApiKeyUpdated)
-})
-
-onUnmounted(() => {
-  if (ws) {
-    ws.onclose = null
-    ws.close()
-    ws = null
-  }
-  if (reconnectTimer) {
-    clearTimeout(reconnectTimer)
-    reconnectTimer = null
-  }
-  if (pollTimer) {
-    clearInterval(pollTimer)
-    pollTimer = null
-  }
-  if (accountRefreshTimer) {
-    clearInterval(accountRefreshTimer)
-    accountRefreshTimer = null
-  }
-  window.removeEventListener('api-key-updated', handleApiKeyUpdated)
-})
-
-async function refresh() {
-  try {
-    const [s, st, acc] = await Promise.all([
-      getStrategy(),
-      getStatus(),
-      getAccount().catch(() => {
-        accountError.value = true
-        return { total_assets: 0, cash_balances: [], positions: [], available: false, error: 'Account data unavailable' }
-      }),
-    ])
-    strategy.value = s
-    status.value = st
-    account.value = acc
-    accountError.value = !acc.available
-    loadError.value = false
-  } catch (e) {
-    console.error('刷新仪表盘失败：', e)
-    loadError.value = true
+    await load()
+    await refreshAccount()
+  } catch {
+    void 0
   }
 }
 
-function reconnectWebSocketNow() {
-  if (reconnectTimer) {
-    clearTimeout(reconnectTimer)
-    reconnectTimer = null
+async function handleStart() {
+  try {
+    await startTrading()
+    ElMessage.success('交易已启动')
+    await refreshStatus()
+  } catch (e) {
+    ElMessage.error('启动失败')
   }
-  if (ws) {
-    ws.onclose = null
-    ws.close()
-    ws = null
+}
+
+async function handleStop() {
+  try {
+    await stopTrading()
+    ElMessage.success('交易已停止')
+    await refreshStatus()
+  } catch (e) {
+    ElMessage.error('停止失败')
   }
-  useWebSocket = false
-  realtimeStatus.value = 'connecting'
-  lastWsStatusAt = 0
-  connectWebSocket()
+}
+
+async function handlePause() {
+  try {
+    await pauseTrading()
+    ElMessage.success('交易已暂停')
+    await refreshStatus()
+  } catch (e) {
+    ElMessage.error('暂停失败')
+  }
+}
+
+async function handleResume() {
+  try {
+    await resumeTrading()
+    ElMessage.success('交易已恢复')
+    await refreshStatus()
+  } catch (e) {
+    ElMessage.error('恢复失败')
+  }
+}
+
+async function handleKillSwitch() {
+  try {
+    await ElMessageBox.confirm('确定要触发紧急停止吗？', '紧急停止', { type: 'warning' })
+    await activateKillSwitch()
+    ElMessage.success('紧急停止已触发')
+    await refreshStatus()
+  } catch {
+    void 0
+  }
+}
+
+async function handleDisableKillSwitch() {
+  try {
+    await disableKillSwitch()
+    ElMessage.success('紧急停止已解除')
+    await refreshStatus()
+  } catch (e) {
+    ElMessage.error('解除失败')
+  }
 }
 
 function signedCurrency(value: number | null | undefined): string {
@@ -380,121 +251,6 @@ function metricClass(value: number | null | undefined): string {
   const normalized = value ?? 0
   if (normalized > 0) return 'metric-positive'
   if (normalized < 0) return 'metric-negative'
-  return 'metric-neutral'
-}
-
-function handleApiKeyUpdated() {
-  refresh()
-  reconnectWebSocketNow()
-}
-
-async function handlePause() {
-  try {
-    await pauseTrading()
-    await refresh()
-  } catch (e) {
-    console.error('暂停交易失败：', e)
-    ElMessage.error('暂停交易失败')
-  }
-}
-
-async function handleResume() {
-  try {
-    await resumeTrading()
-    await refresh()
-  } catch (e) {
-    console.error('恢复交易失败：', e)
-    ElMessage.error('恢复交易失败')
-  }
-}
-
-async function handleKillSwitch() {
-  try {
-    await ElMessageBox.confirm('确定要开启紧急停止吗？这将立即停止所有交易。', '确认', { type: 'warning' })
-    await activateKillSwitch()
-    await refresh()
-  } catch (e) {
-    if (e !== 'cancel') {
-      console.error('开启紧急停止失败：', e)
-      ElMessage.error('开启紧急停止失败')
-    }
-  }
-}
-
-async function handleDisableKillSwitch() {
-  try {
-    await ElMessageBox.confirm('确定要解除紧急停止吗？请确认风险后再恢复交易。', '确认', { type: 'warning' })
-    await disableKillSwitch()
-    await refresh()
-  } catch (e) {
-    if (e !== 'cancel') {
-      console.error('解除紧急停止失败：', e)
-      ElMessage.error('解除紧急停止失败')
-    }
-  }
-}
-
-async function handleStart() {
-  try {
-    await startTrading()
-    await refresh()
-  } catch (e) {
-    console.error('启动交易失败：', e)
-    ElMessage.error('启动交易失败')
-  }
-}
-
-async function handleStop() {
-  try {
-    await ElMessageBox.confirm('确定要停止交易吗？', '确认', { type: 'warning' })
-    await stopTrading()
-    await refresh()
-  } catch (e) {
-    if (e !== 'cancel') {
-      console.error('停止交易失败：', e)
-      ElMessage.error('停止交易失败')
-    }
-  }
+  return ''
 }
 </script>
-
-<style scoped>
-.page-heading {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-
-.page-heading h3 {
-  margin: 0 0 16px;
-}
-
-.metric-positive {
-  color: #1f7a3a;
-}
-
-.metric-negative {
-  color: #b42318;
-}
-
-.metric-neutral {
-  color: #606266;
-}
-
-.metric-label {
-  display: inline-block;
-  margin-right: 8px;
-  font-size: 14px;
-  font-weight: 600;
-}
-
-.responsive-table {
-  width: 100%;
-}
-
-:deep(.el-col) {
-  margin-bottom: 16px;
-}
-</style>

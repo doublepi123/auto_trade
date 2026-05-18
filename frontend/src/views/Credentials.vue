@@ -39,8 +39,9 @@
           </el-input>
         </el-form-item>
         <el-form-item>
-          <el-button type="primary" native-type="submit" :loading="saving" :disabled="loading">保存</el-button>
+          <el-button type="primary" native-type="submit" :loading="saving" :disabled="loading || !isDirty">保存</el-button>
           <el-tag v-if="saved" type="success" style="margin-left: 10px">已保存</el-tag>
+          <el-tag v-if="error" type="danger" style="margin-left: 10px">{{ error }}</el-tag>
         </el-form-item>
       </el-form>
       <el-alert v-if="reloadWarning" type="warning" :title="reloadWarning" show-icon style="margin-top: 12px" />
@@ -51,7 +52,7 @@
 <script setup lang="ts">
 import { onMounted, ref, watch } from 'vue'
 import { onBeforeRouteLeave } from 'vue-router'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessageBox } from 'element-plus'
 import { getCredentials, updateCredentials } from '../api'
 
 const form = ref({
@@ -71,12 +72,14 @@ const hasFlags = ref({
 const saving = ref(false)
 const loading = ref(true)
 const saved = ref(false)
+const error = ref<string | null>(null)
 const reloadWarning = ref<string | null>(null)
 const savedSnapshot = ref(serializeForm())
 
 watch(form, () => {
   if (isDirty()) {
     saved.value = false
+    error.value = null
   }
 }, { deep: true })
 
@@ -92,7 +95,7 @@ onMounted(async () => {
     savedSnapshot.value = serializeForm()
   } catch (e) {
     console.error('加载凭证失败：', e)
-    ElMessage.error('加载凭证失败')
+    error.value = '加载失败'
   } finally {
     loading.value = false
   }
@@ -127,6 +130,7 @@ async function handleSave() {
   if (loading.value) return
   saving.value = true
   saved.value = false
+  error.value = null
   try {
     const payload = Object.fromEntries(
       Object.entries(form.value).filter(([, value]) => value.trim() !== ''),
@@ -143,7 +147,7 @@ async function handleSave() {
     saved.value = true
   } catch (e) {
     console.error('保存凭证失败：', e)
-    ElMessage.error('保存凭证失败')
+    error.value = '保存失败'
   } finally {
     saving.value = false
   }
