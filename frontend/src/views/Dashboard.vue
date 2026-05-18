@@ -119,21 +119,31 @@
       <p>卖出价上限：${{ strategy.sell_high }}</p>
       <p>做空：{{ strategy.short_selling ? '是' : '否' }}</p>
     </el-card>
+
+    <el-card v-if="llmStatus?.enabled || llmStatus?.reject_reason" style="margin-top: 20px">
+      <template #header>LLM 智能区间</template>
+      <p>状态：<el-tag :type="llmStatus.enabled ? 'success' : 'info'">{{ llmStatus.enabled ? '已启用' : '已禁用' }}</el-tag></p>
+      <p v-if="llmStatus.next_analysis_at">下次分析：{{ new Date(llmStatus.next_analysis_at).toLocaleString() }}</p>
+      <p v-if="llmStatus.reject_reason" style="color: #f56c6c">上次被拒：{{ llmStatus.reject_reason }}</p>
+    </el-card>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useDashboardData } from '../composables/useDashboardData'
 import { useStatusStream } from '../composables/useStatusStream'
 import { useAccountRefresh } from '../composables/useAccountRefresh'
-import { startTrading, stopTrading, pauseTrading, resumeTrading, activateKillSwitch, disableKillSwitch } from '../api'
+import { startTrading, stopTrading, pauseTrading, resumeTrading, activateKillSwitch, disableKillSwitch, getLLMIntervalStatus } from '../api'
+import type { LLMIntervalStatus } from '../types'
 import { engineStateLabel, marketLabel, positionSideLabel } from '../utils/labels'
 
 const { strategy, status, initialLoading, loadError, load, refreshStatus } = useDashboardData()
 const { realtimeStatus, reconnectNow } = useStatusStream(status)
 const { account, accountError, refresh: refreshAccount } = useAccountRefresh()
+
+const llmStatus = ref<LLMIntervalStatus | null>(null)
 
 const stateTagType = computed(() => {
   switch (status.value.engine_state) {
@@ -170,6 +180,18 @@ async function handleRetry() {
     void 0
   }
 }
+
+async function loadLLMStatus() {
+  try {
+    llmStatus.value = await getLLMIntervalStatus()
+  } catch {
+    llmStatus.value = null
+  }
+}
+
+onMounted(() => {
+  loadLLMStatus()
+})
 
 async function handleStart() {
   try {
