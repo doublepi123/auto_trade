@@ -37,6 +37,13 @@ class Settings(BaseSettings):
 
     api_key: str = ""
 
+    deepseek_api_key: str = ""
+    deepseek_api_url: str = "https://api.deepseek.com/v1/chat/completions"
+    llm_interval_cron_minutes: int = 240
+    llm_interval_volatility_threshold_pct: float = 5.0
+    llm_min_confidence: float = 0.7
+    llm_max_stripe_width_pct: float = 20.0
+
     default_strategy: dict = Field(default_factory=lambda: {
         "symbol": "",
         "market": "US",
