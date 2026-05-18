@@ -7,6 +7,7 @@ os.environ["AUTO_TRADE_DATABASE_URL"] = "sqlite:///data/test_llm.db"
 import pytest
 
 from app.services.data_aggregator import DataAggregator
+from app.services.llm_advisor_service import LLMAdvisorService
 
 
 class TestDataAggregator:
