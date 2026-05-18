@@ -28,6 +28,7 @@ export interface StatusData {
   engine_state: string
   paused: boolean
   kill_switch: boolean
+  runner_running: boolean
   daily_pnl: number
   consecutive_losses: number
   last_price: number
