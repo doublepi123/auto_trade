@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import settings
@@ -13,12 +14,30 @@ def init_db() -> None:
     from app.models import Base, CredentialConfig, StrategyConfig
 
     Base.metadata.create_all(bind=engine)
+    _ensure_order_execution_columns(engine)
 
     db = SessionLocal()
     try:
         _bootstrap_credentials(db, CredentialConfig, StrategyConfig)
     finally:
         db.close()
+
+
+def _ensure_order_execution_columns(db_engine: Engine) -> None:
+    inspector = inspect(db_engine)
+    if "orders" not in inspector.get_table_names():
+        return
+
+    columns = {column["name"] for column in inspector.get_columns("orders")}
+    missing_columns = {
+        "executed_quantity": "FLOAT",
+        "executed_price": "FLOAT",
+    }.items()
+
+    with db_engine.begin() as connection:
+        for name, column_type in missing_columns:
+            if name not in columns:
+                connection.exec_driver_sql(f"ALTER TABLE orders ADD COLUMN {name} {column_type}")
 
 
 def _bootstrap_credentials(db: Session, credential_model: type, strategy_model: type) -> None:

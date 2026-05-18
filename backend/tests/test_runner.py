@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
+from app import runner as runner_module
 from app.core.broker import OrderResult, Position, Quote
 from app.core.engine import EngineState, StrategyParams
 from app.runner import AppRunner, get_runner
@@ -20,6 +21,30 @@ class _NoopNotifier:
 
 
 class TestAppRunner:
+    def _stub_trade_callbacks(self, runner: AppRunner) -> None:
+        runner._trade_svc._record_order = lambda *args: None
+        runner._trade_svc._update_order_status = lambda *args, **kwargs: None
+        runner._trade_svc._record_risk_event = lambda reason: None
+
+    def _execute_buy(self, runner: AppRunner, symbol: str, quote: Quote):
+        return runner._trade_svc._execute_buy(
+            symbol,
+            quote,
+            runner.broker,
+            runner.risk,
+            runner.notifier,
+            runner._cash_currency(),
+        )
+
+    def _execute_sell(self, runner: AppRunner, symbol: str, quote: Quote):
+        return runner._trade_svc._execute_sell(
+            symbol,
+            quote,
+            runner.broker,
+            runner.risk,
+            runner.notifier,
+        )
+
     def test_runner_init_defaults(self) -> None:
         runner = AppRunner()
         assert runner._running is False
@@ -107,8 +132,8 @@ class TestAppRunner:
                 pass
 
         with (
-            patch("app.runner.StrategyService", FakeService),
             patch("app.runner.SessionLocal", lambda: FakeDb()),
+            patch.object(runner._state_svc, "load") as load_state,
             patch.object(runner, "_load_credentials") as load_credentials,
             patch.object(runner, "_apply_credentials") as apply_credentials,
         ):
@@ -168,12 +193,17 @@ class TestAppRunner:
                 pass
 
         with (
-            patch("app.runner.StrategyService", FakeService),
             patch("app.runner.SessionLocal", lambda: FakeDb()),
+            patch.object(runner._state_svc, "load") as load_state,
             patch.object(runner, "_load_credentials") as load_credentials,
             patch.object(runner, "_apply_credentials") as apply_credentials,
         ):
             load_credentials.return_value = object()
+            load_state.side_effect = lambda _db, engine, _risk: setattr(
+                engine,
+                "params",
+                StrategyParams(symbol="AAPL.US", buy_low=100.0, sell_high=200.0),
+            )
             runner._initialize_runner()
 
         assert runner.risk.paused is True
@@ -181,6 +211,31 @@ class TestAppRunner:
     def test_broadcast_status_no_connections(self) -> None:
         runner = AppRunner()
         runner._broadcast_status()
+
+    def test_broadcast_status_includes_runner_running(self, monkeypatch) -> None:
+        messages = []
+
+        async def broadcast(message):
+            messages.append(message)
+
+        def run_coroutine_threadsafe(coro, _loop):
+            asyncio.run(coro)
+            return None
+
+        class RunningLoop:
+            def is_running(self) -> bool:
+                return True
+
+        monkeypatch.setattr(runner_module.manager, "broadcast", broadcast)
+        monkeypatch.setattr(runner_module.asyncio, "run_coroutine_threadsafe", run_coroutine_threadsafe)
+        runner = AppRunner()
+        runner._running = True
+        runner._thread = SimpleNamespace(is_alive=lambda: True)
+        runner._loop = RunningLoop()
+
+        runner._broadcast_status()
+
+        assert messages[0]["runner_running"] is True
 
     def test_risk_rejection_rolls_back_triggered_engine_state(self) -> None:
         runner = AppRunner()
@@ -245,13 +300,14 @@ class TestAppRunner:
         broker = Broker()
         runner.broker = broker
         runner.notifier = _NoopNotifier()
-        runner._record_order = lambda *args: None
+        self._stub_trade_callbacks(runner)
         updates: list[tuple[str, str, object]] = []
-        runner._update_order_status = lambda order_id, status, filled_at=None, executed_quantity=None, executed_price=None: updates.append((order_id, status, filled_at))
+        runner._trade_svc._update_order_status = lambda order_id, status, filled_at=None, executed_quantity=None, executed_price=None: updates.append((order_id, status, filled_at))
 
-        executed = runner._execute_sell("AAPL.US", Quote("AAPL.US", 201.0, 200.5, 201.5, ""))
+        order_status = self._execute_sell(runner, "AAPL.US", Quote("AAPL.US", 201.0, 200.5, 201.5, ""))
 
-        assert executed is True
+        assert order_status is not None
+        assert order_status.status == "FILLED"
         assert broker.submitted_quantity == Decimal("5")
         assert runner.risk.daily_pnl == 255.0
         assert updates[-1][0] == "order-1"
@@ -277,11 +333,12 @@ class TestAppRunner:
         runner.broker = Broker()
         runner.engine.params.market = "US"
         runner.notifier = _NoopNotifier()
-        runner._record_order = lambda *args: None
+        self._stub_trade_callbacks(runner)
 
-        executed = runner._execute_buy("AAPL.US", Quote("AAPL.US", 100.0, 99.5, 100.5, ""))
+        order_status = self._execute_buy(runner, "AAPL.US", Quote("AAPL.US", 100.0, 99.5, 100.5, ""))
 
-        assert executed is False
+        assert order_status is not None
+        assert order_status.status == "REJECTED"
 
     @pytest.mark.parametrize("terminal_status", ["REJECTED", "CANCELLED"])
     def test_execute_sell_records_terminal_status_timestamp(self, terminal_status: str) -> None:
@@ -314,14 +371,15 @@ class TestAppRunner:
 
         runner.broker = Broker()
         runner.notifier = _NoopNotifier()
-        runner._record_order = lambda *args: None
-        runner._update_order_status = lambda order_id, status, filled_at=None, executed_quantity=None, executed_price=None: updates.append((order_id, status, filled_at))
-        runner._order_status_poll_interval_seconds = 0
-        runner._order_status_timeout_seconds = 1
+        self._stub_trade_callbacks(runner)
+        runner._trade_svc._update_order_status = lambda order_id, status, filled_at=None, executed_quantity=None, executed_price=None: updates.append((order_id, status, filled_at))
+        runner._trade_svc._order_status_poll_interval_seconds = 0
+        runner._trade_svc._order_status_timeout_seconds = 1
 
-        executed = runner._execute_sell("AAPL.US", Quote("AAPL.US", 201.0, 200.5, 201.5, ""))
+        order_status = self._execute_sell(runner, "AAPL.US", Quote("AAPL.US", 201.0, 200.5, 201.5, ""))
 
-        assert executed is False
+        assert order_status is not None
+        assert order_status.status == terminal_status
         assert runner.risk.daily_pnl == 0.0
         assert updates
         assert updates[-1][0] == "order-1"
@@ -356,17 +414,18 @@ class TestAppRunner:
 
         runner.broker = Broker()
         runner.notifier = _NoopNotifier()
-        runner._record_order = lambda *args: None
-        runner._update_order_status = lambda order_id, status, filled_at=None, executed_quantity=None, executed_price=None: updates.append((order_id, status, filled_at))
-        runner._order_status_poll_interval_seconds = 0
-        runner._order_status_timeout_seconds = 0
+        self._stub_trade_callbacks(runner)
+        runner._trade_svc._update_order_status = lambda order_id, status, filled_at=None, executed_quantity=None, executed_price=None: updates.append((order_id, status, filled_at))
+        runner._trade_svc._order_status_poll_interval_seconds = 0
+        runner._trade_svc._order_status_timeout_seconds = 0
 
-        executed = runner._execute_sell("AAPL.US", Quote("AAPL.US", 201.0, 200.5, 201.5, ""))
+        order_status = self._execute_sell(runner, "AAPL.US", Quote("AAPL.US", 201.0, 200.5, 201.5, ""))
 
-        assert executed is True
+        assert order_status is not None
+        assert order_status.status == "SUBMITTED"
         assert runner.risk.daily_pnl == 0.0
-        assert runner._pending_order is not None
-        assert runner._pending_order.broker_order_id == "order-1"
+        assert runner._trade_svc._pending_order is not None
+        assert runner._trade_svc._pending_order.broker_order_id == "order-1"
         assert all(status != "FILLED" for _order_id, status, _filled_at in updates)
 
     def test_live_submitted_timeout_keeps_trigger_state_and_skips_duplicate_order(self) -> None:
@@ -402,9 +461,9 @@ class TestAppRunner:
         runner._running = True
         runner.engine.params = StrategyParams(symbol="AAPL.US", buy_low=100.0, sell_high=200.0)
         runner.notifier = _NoopNotifier()
-        runner._record_order = lambda *args: None
-        runner._order_status_poll_interval_seconds = 0
-        runner._order_status_timeout_seconds = 0
+        self._stub_trade_callbacks(runner)
+        runner._trade_svc._order_status_poll_interval_seconds = 0
+        runner._trade_svc._order_status_timeout_seconds = 0
 
         quote = Quote("AAPL.US", 99.0, 98.5, 99.5, "")
         runner._on_quote(quote)
@@ -412,7 +471,7 @@ class TestAppRunner:
 
         assert broker.submissions == 1
         assert runner.engine.state == EngineState.LONG
-        assert runner._pending_order is not None
+        assert runner._trade_svc._pending_order is not None
 
     def test_partial_filled_timeout_keeps_pending_and_skips_duplicate_order(self) -> None:
         class Broker:
@@ -447,10 +506,9 @@ class TestAppRunner:
         runner._running = True
         runner.engine.params = StrategyParams(symbol="AAPL.US", buy_low=100.0, sell_high=200.0)
         runner.notifier = _NoopNotifier()
-        runner._record_order = lambda *args: None
-        runner._update_order_status = lambda *args, **kwargs: None
-        runner._order_status_poll_interval_seconds = 0
-        runner._order_status_timeout_seconds = 0
+        self._stub_trade_callbacks(runner)
+        runner._trade_svc._order_status_poll_interval_seconds = 0
+        runner._trade_svc._order_status_timeout_seconds = 0
 
         quote = Quote("AAPL.US", 99.0, 98.5, 99.5, "")
         runner._on_quote(quote)
@@ -458,7 +516,7 @@ class TestAppRunner:
 
         assert broker.submissions == 1
         assert runner.engine.state == EngineState.LONG
-        assert runner._pending_order is not None
+        assert runner._trade_svc._pending_order is not None
 
     def test_pending_order_rejection_restores_snapshot_and_later_quote_can_retrigger(self) -> None:
         class Broker:
@@ -495,10 +553,9 @@ class TestAppRunner:
         runner._running = True
         runner.engine.params = StrategyParams(symbol="AAPL.US", buy_low=100.0, sell_high=200.0)
         runner.notifier = _NoopNotifier()
-        runner._record_order = lambda *args: None
-        runner._update_order_status = lambda *args, **kwargs: None
-        runner._order_status_poll_interval_seconds = 0
-        runner._order_status_timeout_seconds = 0
+        self._stub_trade_callbacks(runner)
+        runner._trade_svc._order_status_poll_interval_seconds = 0
+        runner._trade_svc._order_status_timeout_seconds = 0
 
         quote = Quote("AAPL.US", 99.0, 98.5, 99.5, "")
         runner._on_quote(quote)
@@ -508,7 +565,7 @@ class TestAppRunner:
         runner._on_quote(quote)
         assert broker.submissions == 1
         assert runner.engine.state == EngineState.FLAT
-        assert runner._pending_order is None
+        assert runner._trade_svc._pending_order is None
 
         runner._on_quote(quote)
         assert broker.submissions == 1
@@ -543,8 +600,7 @@ class TestAppRunner:
         runner._running = True
         runner.engine.params = StrategyParams(symbol="AAPL.US", buy_low=100.0, sell_high=200.0)
         runner.notifier = _NoopNotifier()
-        runner._record_order = lambda *args: None
-        runner._update_order_status = lambda *args, **kwargs: None
+        self._stub_trade_callbacks(runner)
 
         def broadcast_status() -> None:
             nonlocal broadcast_calls
@@ -606,10 +662,9 @@ class TestAppRunner:
         runner._running = True
         runner.engine.params = StrategyParams(symbol="AAPL.US", buy_low=100.0, sell_high=200.0)
         runner.notifier = _NoopNotifier()
-        runner._record_order = lambda *args: None
-        runner._update_order_status = lambda *args, **kwargs: None
-        runner._order_status_poll_interval_seconds = 0
-        runner._order_status_timeout_seconds = 2
+        self._stub_trade_callbacks(runner)
+        runner._trade_svc._order_status_poll_interval_seconds = 0
+        runner._trade_svc._order_status_timeout_seconds = 2
 
         thread = threading.Thread(target=runner._on_quote, args=(Quote("AAPL.US", 99.0, 98.5, 99.5, ""),))
         thread.start()
@@ -664,21 +719,20 @@ class TestAppRunner:
         runner.engine.params = StrategyParams(symbol="AAPL.US", buy_low=100.0, sell_high=200.0)
         runner.engine.state = EngineState.LONG
         runner.notifier = _NoopNotifier()
-        runner._record_order = lambda *args: None
-        runner._update_order_status = lambda *args, **kwargs: None
-        runner._order_status_poll_interval_seconds = 0
-        runner._order_status_timeout_seconds = 0
+        self._stub_trade_callbacks(runner)
+        runner._trade_svc._order_status_poll_interval_seconds = 0
+        runner._trade_svc._order_status_timeout_seconds = 0
 
         quote = Quote("AAPL.US", 201.0, 200.5, 201.5, "")
         runner._on_quote(quote)
         assert runner.engine.state == EngineState.FLAT
-        assert runner._pending_order is not None
+        assert runner._trade_svc._pending_order is not None
 
         runner._on_quote(quote)
 
         assert runner.risk.daily_pnl == 110.0
         assert runner.engine.state == EngineState.LONG
-        assert runner._pending_order is None
+        assert runner._trade_svc._pending_order is None
 
     def test_pending_order_reconcile_is_throttled_between_poll_intervals(self) -> None:
         class Broker:
@@ -713,9 +767,9 @@ class TestAppRunner:
         runner._running = True
         runner.engine.params = StrategyParams(symbol="AAPL.US", buy_low=100.0, sell_high=200.0)
         runner.notifier = _NoopNotifier()
-        runner._record_order = lambda *args: None
-        runner._order_status_poll_interval_seconds = 60
-        runner._order_status_timeout_seconds = 0
+        self._stub_trade_callbacks(runner)
+        runner._trade_svc._order_status_poll_interval_seconds = 60
+        runner._trade_svc._order_status_timeout_seconds = 0
 
         quote = Quote("AAPL.US", 99.0, 98.5, 99.5, "")
         runner._on_quote(quote)
@@ -757,10 +811,9 @@ class TestAppRunner:
         runner._running = True
         runner.engine.params = StrategyParams(symbol="AAPL.US", buy_low=100.0, sell_high=200.0)
         runner.notifier = _NoopNotifier()
-        runner._record_order = lambda *args: None
-        runner._update_order_status = lambda *args, **kwargs: None
-        runner._order_status_poll_interval_seconds = 0
-        runner._order_status_timeout_seconds = 2
+        self._stub_trade_callbacks(runner)
+        runner._trade_svc._order_status_poll_interval_seconds = 0
+        runner._trade_svc._order_status_timeout_seconds = 2
 
         thread = threading.Thread(target=runner._on_quote, args=(Quote("AAPL.US", 99.0, 98.5, 99.5, ""),))
         thread.start()
@@ -804,13 +857,14 @@ class TestAppRunner:
 
         runner.broker = Broker()
         runner.notifier = _NoopNotifier()
-        runner._record_order = lambda *args: None
-        runner._update_order_status = lambda order_id, status, filled_at=None, executed_quantity=None, executed_price=None: updates.append((order_id, status, filled_at))
-        runner._order_status_poll_interval_seconds = 0
-        runner._order_status_timeout_seconds = 1
+        self._stub_trade_callbacks(runner)
+        runner._trade_svc._update_order_status = lambda order_id, status, filled_at=None, executed_quantity=None, executed_price=None: updates.append((order_id, status, filled_at))
+        runner._trade_svc._order_status_poll_interval_seconds = 0
+        runner._trade_svc._order_status_timeout_seconds = 1
 
-        executed = runner._execute_sell("AAPL.US", Quote("AAPL.US", 201.0, 200.5, 201.5, ""))
+        order_status = self._execute_sell(runner, "AAPL.US", Quote("AAPL.US", 201.0, 200.5, 201.5, ""))
 
-        assert executed is False
+        assert order_status is not None
+        assert order_status.status == "REJECTED"
         assert runner.risk.daily_pnl == 0.0
         assert updates[-1][1] == "REJECTED"

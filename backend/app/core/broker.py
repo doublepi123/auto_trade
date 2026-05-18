@@ -193,7 +193,7 @@ class BrokerGateway:
                 self._quote_callbacks = []
             self._init_clients()
             module = _import_openapi()
-            TopicType = getattr(module, "TopicType", None)
+            SubType = getattr(module, "SubType", None)
 
             def _on_quote(_symbol: str, _event: Any) -> None:
                 quote = Quote(
@@ -210,7 +210,7 @@ class BrokerGateway:
                         logger.exception("quote callback failed for %s", _symbol)
 
             self._quote_ctx.set_on_quote(_on_quote)
-            topics = [TopicType.Quote] if TopicType else []
+            topics = [SubType.Quote] if SubType else []
             self._quote_ctx.subscribe([symbol], topics)
             self._quote_callbacks = [callback]
             self._subscribed_symbol = symbol

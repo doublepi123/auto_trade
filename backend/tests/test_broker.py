@@ -157,6 +157,49 @@ class TestBrokerGateway:
         assert gw._subscribed_symbol is None
         assert gw._quote_callbacks == []
 
+    def test_subscribe_quotes_uses_quote_subtype(self, monkeypatch) -> None:
+        called = {}
+
+        class FakeConfig:
+            @staticmethod
+            def from_env():
+                return "fake-config"
+
+        class QuoteContext:
+            def __init__(self, _config):
+                pass
+
+            def set_on_quote(self, callback):
+                called["callback"] = callback
+
+            def subscribe(self, symbols, subtypes):
+                called["symbols"] = symbols
+                called["subtypes"] = subtypes
+
+        class TradeContext:
+            def __init__(self, _config):
+                pass
+
+        class SubType:
+            Quote = "SubType.Quote"
+
+        class FakeModule:
+            pass
+
+        FakeModule.Config = FakeConfig
+        FakeModule.QuoteContext = QuoteContext
+        FakeModule.TradeContext = TradeContext
+        FakeModule.SubType = SubType
+
+        monkeypatch.setattr(broker_module, "_import_openapi", lambda: FakeModule)
+        gw = BrokerGateway()
+
+        gw.subscribe_quotes("AAPL.US", lambda _quote: None)
+
+        assert called["symbols"] == ["AAPL.US"]
+        assert called["subtypes"] == ["SubType.Quote"]
+        assert gw._subscribed_symbol == "AAPL.US"
+
     def test_get_positions_flattens_stock_position_channels(self) -> None:
         class StockInfo:
             def __init__(self, symbol: str, quantity: str, available_quantity: str, cost_price: str) -> None:

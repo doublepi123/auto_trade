@@ -5,6 +5,7 @@ os.environ["AUTO_TRADE_DATABASE_URL"] = "sqlite:///data/test_api.db"
 
 from fastapi.testclient import TestClient
 
+from app.api import strategy as strategy_api
 from app.api import trade as trade_api
 from app.database import engine as db_engine, SessionLocal
 from app.models import Base, CredentialConfig, StrategyConfig
@@ -228,9 +229,21 @@ class TestAPI:
             "engine_state", "paused", "kill_switch",
             "daily_pnl", "consecutive_losses",
             "last_price", "last_trigger_price", "last_trigger_at",
+            "runner_running",
         ]
         for field in expected_fields:
             assert field in data
+
+    def test_status_reports_live_runner_state(self, monkeypatch) -> None:
+        class RunningRunner:
+            is_running = True
+
+        monkeypatch.setattr(strategy_api, "get_runner", lambda: RunningRunner())
+
+        resp = client.get("/api/status")
+
+        assert resp.status_code == 200
+        assert resp.json()["runner_running"] is True
 
     def test_strategy_partial_update(self) -> None:
         _clean_strategy()

@@ -120,6 +120,7 @@ class StatusResponse(BaseModel):
     engine_state: str
     paused: bool
     kill_switch: bool
+    runner_running: bool = False
     daily_pnl: float
     consecutive_losses: int
     last_price: float
