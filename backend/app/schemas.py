@@ -174,3 +174,60 @@ class AccountResponse(BaseModel):
     positions: list[PositionSchema]
     available: bool = True
     error: Optional[str] = None
+
+
+class LLMAnalyzeRequest(BaseModel):
+    force: bool = Field(default=False)
+
+
+class LLMAnalyzeResponse(BaseModel):
+    success: bool
+    applied: bool = False
+    reason: str = ""
+    suggested_buy_low: Optional[float] = None
+    suggested_sell_high: Optional[float] = None
+    confidence_score: Optional[float] = None
+    analysis: Optional[str] = None
+    next_analysis_at: Optional[str] = None
+    applied_at: Optional[str] = None
+
+
+class LLMIntervalStatus(BaseModel):
+    enabled: bool = False
+    last_analysis_at: Optional[str] = None
+    next_analysis_at: Optional[str] = None
+    current_suggestion: Optional[dict[str, Any]] = None
+    applied_values: Optional[dict[str, Any]] = None
+    reject_reason: Optional[str] = None
+
+
+class LLMAnalyzeRequest(BaseModel):
+    force: bool = Field(default=False)
+
+
+class LLMAnalyzeResponse(BaseModel):
+    success: bool
+    applied: bool
+    reason: str
+    suggested_buy_low: Optional[float] = None
+    suggested_sell_high: Optional[float] = None
+    confidence_score: Optional[float] = None
+    analysis: Optional[str] = None
+    next_analysis_at: Optional[str] = None
+    applied_at: Optional[str] = None
+
+
+class LLMSuggestion(BaseModel):
+    buy_low: float
+    sell_high: float
+    confidence_score: float
+    analysis: str
+
+
+class LLMIntervalStatus(BaseModel):
+    enabled: bool
+    last_analysis_at: Optional[str] = None
+    next_analysis_at: Optional[str] = None
+    current_suggestion: Optional[LLMSuggestion] = None
+    applied_values: Optional[dict] = None
+    reject_reason: Optional[str] = None
