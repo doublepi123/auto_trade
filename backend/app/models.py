@@ -31,6 +31,18 @@ class StrategyConfig(Base):
     sct_key: Mapped[str] = mapped_column(String(200), default="")
     updated_at: Mapped[datetime] = mapped_column(_TZDateTime(), default=_utcnow)
 
+    auto_interval_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    llm_suggested_buy_low: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    llm_suggested_sell_high: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    llm_confidence_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    llm_analysis: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    llm_last_analysis_at: Mapped[Optional[datetime]] = mapped_column(_TZDateTime(), nullable=True)
+    llm_next_analysis_at: Mapped[Optional[datetime]] = mapped_column(_TZDateTime(), nullable=True)
+    llm_applied_buy_low: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    llm_applied_sell_high: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    llm_applied_at: Mapped[Optional[datetime]] = mapped_column(_TZDateTime(), nullable=True)
+    llm_reject_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
 
 class CredentialConfig(Base):
     __tablename__ = "credential_config"
