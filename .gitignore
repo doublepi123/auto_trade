@@ -32,6 +32,9 @@ frontend/cypress/screenshots/
 # Logs
 *.log
 
+# Opencode agent sessions
+.sisyphus/
+
 # Docker
 docker-compose.override.yaml
 
