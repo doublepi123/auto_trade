@@ -1,6 +1,38 @@
 <template>
   <div>
     <h3>策略配置</h3>
+
+    <el-card style="max-width: 600px; margin-bottom: 20px">
+      <div style="display: flex; justify-content: space-between; align-items: center">
+        <h4>LLM 智能区间</h4>
+        <el-switch
+          v-model="llmStatus.enabled"
+          active-text="启用"
+          inactive-text="禁用"
+          @change="toggleLLM"
+        />
+      </div>
+      <div v-if="llmStatus.current_suggestion" style="margin-top: 12px">
+        <p>置信度: {{ llmStatus.current_suggestion.confidence_score }}</p>
+        <p>建议区间: {{ llmStatus.current_suggestion.buy_low.toFixed(2) }} ~ {{ llmStatus.current_suggestion.sell_high.toFixed(2) }}</p>
+        <p>分析: {{ llmStatus.current_suggestion.analysis }}</p>
+      </div>
+      <div v-if="llmStatus.applied_values" style="margin-top: 8px">
+        <p>已应用: {{ llmStatus.applied_values.buy_low.toFixed(2) }} ~ {{ llmStatus.applied_values.sell_high.toFixed(2) }}</p>
+      </div>
+      <div v-if="llmStatus.reject_reason" style="margin-top: 8px; color: #f56c6c">
+        <p>上次被拒: {{ llmStatus.reject_reason }}</p>
+      </div>
+      <div style="margin-top: 12px">
+        <el-button size="small" :loading="analyzing" @click="triggerAnalyze">
+          立即重新分析
+        </el-button>
+        <span v-if="llmStatus.next_analysis_at" style="margin-left: 12px; color: #909399; font-size: 12px">
+          下次分析: {{ formatTime(llmStatus.next_analysis_at) }}
+        </span>
+      </div>
+    </el-card>
+
     <el-card style="max-width: 600px">
       <el-form :model="form" label-width="180px" @submit.prevent="save">
         <el-form-item label="股票代码">
@@ -38,10 +70,12 @@
 </template>
 
 <script setup lang="ts">
+import { ref, onMounted } from 'vue'
 import { onBeforeRouteLeave } from 'vue-router'
-import { ElMessageBox } from 'element-plus'
-import { getStrategy, updateStrategy } from '../api'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { getStrategy, updateStrategy, getLLMIntervalStatus, analyzeLLMInterval, enableLLMInterval, disableLLMInterval } from '../api'
 import { useFormState } from '../composables/useFormState'
+import type { LLMIntervalStatus } from '../types'
 
 const { form, loading, saving, saved, error, isDirty, load, save } = useFormState({
   initial: {
@@ -70,7 +104,70 @@ const { form, loading, saving, saved, error, isDirty, load, save } = useFormStat
   },
 })
 
+const llmStatus = ref<LLMIntervalStatus>({
+  enabled: false,
+  last_analysis_at: null,
+  next_analysis_at: null,
+  current_suggestion: null,
+  applied_values: null,
+  reject_reason: null,
+})
+
+const analyzing = ref(false)
+
+const loadLLMStatus = async () => {
+  try {
+    llmStatus.value = await getLLMIntervalStatus()
+  } catch {
+    // silent
+  }
+}
+
+const toggleLLM = async (val: boolean) => {
+  try {
+    if (val) {
+      await enableLLMInterval()
+    } else {
+      await disableLLMInterval()
+    }
+    ElMessage.success(val ? 'LLM 智能区间已启用' : 'LLM 智能区间已禁用')
+    await loadLLMStatus()
+  } catch {
+    ElMessage.error('操作失败')
+    llmStatus.value.enabled = !val
+  }
+}
+
+const triggerAnalyze = async () => {
+  analyzing.value = true
+  try {
+    const result = await analyzeLLMInterval(true)
+    if (result.success) {
+      ElMessage.success('分析完成')
+      if (result.applied) {
+        ElMessage.success(`已应用新区间: ${result.buy_low?.toFixed(2)} ~ ${result.sell_high?.toFixed(2)}`)
+        await load()
+      } else {
+        ElMessage.info(result.reason)
+      }
+    } else {
+      ElMessage.warning(result.reason)
+    }
+    await loadLLMStatus()
+  } catch {
+    ElMessage.error('分析失败')
+  } finally {
+    analyzing.value = false
+  }
+}
+
+const formatTime = (iso: string | null) => {
+  if (!iso) return '-'
+  return new Date(iso).toLocaleString('zh-CN')
+}
+
 load()
+loadLLMStatus()
 
 onBeforeRouteLeave(() => {
   if (!isDirty.value) return true
