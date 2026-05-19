@@ -68,7 +68,33 @@ class TestAPI:
         assert data["symbol"] == "AAPL.US"
         assert data["buy_low"] == 100.0
         assert data["sell_high"] == 200.0
+        assert data["llm_interval_minutes"] == 240
         assert "sct_key" not in data
+
+    def test_update_strategy_allows_llm_interval_minutes(self) -> None:
+        _clean_strategy()
+        resp = client.put("/api/strategy", json={
+            "symbol": "AAPL.US",
+            "market": "US",
+            "buy_low": 100.0,
+            "sell_high": 200.0,
+            "llm_interval_minutes": 60,
+        })
+
+        assert resp.status_code == 200
+        assert resp.json()["llm_interval_minutes"] == 60
+
+    def test_update_strategy_rejects_invalid_llm_interval_minutes(self) -> None:
+        _clean_strategy()
+        resp = client.put("/api/strategy", json={
+            "symbol": "AAPL.US",
+            "market": "US",
+            "buy_low": 100.0,
+            "sell_high": 200.0,
+            "llm_interval_minutes": 5,
+        })
+
+        assert resp.status_code == 422
 
     def test_update_strategy_invalid_market(self) -> None:
         resp = client.put("/api/strategy", json={
@@ -279,6 +305,54 @@ class TestAPI:
             "next_analysis_at": None,
             "applied_at": None,
         }
+
+    def test_llm_analyze_applies_suggested_interval(self, monkeypatch) -> None:
+        _clean_strategy()
+        setup = client.put("/api/strategy", json={
+            "symbol": "AAPL.US",
+            "market": "US",
+            "buy_low": 100.0,
+            "sell_high": 200.0,
+        })
+        assert setup.status_code == 200
+
+        class SuccessfulAdvisor:
+            def analyze(self, **_kwargs):
+                return {
+                    "success": True,
+                    "suggested_buy_low": 195.0,
+                    "suggested_sell_high": 205.0,
+                    "confidence_score": 0.85,
+                    "analysis": "test analysis",
+                    "next_analysis_at": "2026-05-19T21:45:55+00:00",
+                }
+
+        class Runner:
+            class Engine:
+                last_price = 200.0
+
+                class State:
+                    value = "long"
+
+                state = State()
+
+            engine = Engine()
+
+        monkeypatch.setattr(llm_api, "LLMAdvisorService", SuccessfulAdvisor)
+        monkeypatch.setattr(llm_api, "get_runner", lambda: Runner())
+
+        resp = client.post("/api/strategy/llm-interval/analyze", json={"force": True})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["success"] is True
+        assert data["applied"] is True
+        assert data["suggested_buy_low"] == 195.0
+        assert data["suggested_sell_high"] == 205.0
+
+        strategy = client.get("/api/strategy").json()
+        assert strategy["buy_low"] == 195.0
+        assert strategy["sell_high"] == 205.0
 
     def test_strategy_partial_update(self) -> None:
         _clean_strategy()

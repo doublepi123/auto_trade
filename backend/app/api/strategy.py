@@ -36,6 +36,7 @@ def put_strategy(payload: StrategyConfigSchema, db: Session = Depends(get_db)) -
         "short_selling": data["short_selling"] if "short_selling" in data and data["short_selling"] is not None else current.short_selling,
         "max_daily_loss": data["max_daily_loss"] if "max_daily_loss" in data and data["max_daily_loss"] is not None else current.max_daily_loss,
         "max_consecutive_losses": data["max_consecutive_losses"] if "max_consecutive_losses" in data and data["max_consecutive_losses"] is not None else current.max_consecutive_losses,
+        "llm_interval_minutes": data["llm_interval_minutes"] if "llm_interval_minutes" in data and data["llm_interval_minutes"] is not None else current.llm_interval_minutes,
     }
     try:
         StrategyMergedSchema.model_validate(merged)
