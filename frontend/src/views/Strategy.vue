@@ -83,6 +83,19 @@ import { getStrategy, updateStrategy, getLLMIntervalStatus, analyzeLLMInterval, 
 import { useFormState } from '../composables/useFormState'
 import type { LLMIntervalStatus } from '../types'
 
+interface StrategyForm {
+  symbol: string
+  market: 'US' | 'HK'
+  buy_low: number
+  sell_high: number
+  short_selling: boolean
+  max_daily_loss: number
+  max_consecutive_losses: number
+  llm_interval_minutes: number
+}
+
+const loadedStrategy = ref<StrategyForm | null>(null)
+
 const { form, loading, saving, saved, error, isDirty, load, save } = useFormState({
   initial: {
     symbol: '',
@@ -96,7 +109,7 @@ const { form, loading, saving, saved, error, isDirty, load, save } = useFormStat
   },
   load: async () => {
     const s = await getStrategy()
-    return {
+    const loaded: StrategyForm = {
       symbol: s.symbol,
       market: s.market,
       buy_low: s.buy_low,
@@ -106,9 +119,22 @@ const { form, loading, saving, saved, error, isDirty, load, save } = useFormStat
       max_consecutive_losses: s.max_consecutive_losses,
       llm_interval_minutes: s.llm_interval_minutes,
     }
+    loadedStrategy.value = loaded
+    return loaded
   },
   save: async (data) => {
-    await updateStrategy(data)
+    const patch: Partial<StrategyForm> = {}
+    const previous = loadedStrategy.value
+    if (!previous || data.symbol !== previous.symbol) patch.symbol = data.symbol
+    if (!previous || data.market !== previous.market) patch.market = data.market
+    if (!previous || data.buy_low !== previous.buy_low) patch.buy_low = data.buy_low
+    if (!previous || data.sell_high !== previous.sell_high) patch.sell_high = data.sell_high
+    if (!previous || data.short_selling !== previous.short_selling) patch.short_selling = data.short_selling
+    if (!previous || data.max_daily_loss !== previous.max_daily_loss) patch.max_daily_loss = data.max_daily_loss
+    if (!previous || data.max_consecutive_losses !== previous.max_consecutive_losses) patch.max_consecutive_losses = data.max_consecutive_losses
+    if (!previous || data.llm_interval_minutes !== previous.llm_interval_minutes) patch.llm_interval_minutes = data.llm_interval_minutes
+    await updateStrategy(patch)
+    loadedStrategy.value = { ...data }
   },
 })
 
