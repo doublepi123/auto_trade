@@ -34,6 +34,9 @@ class LLMAdvisorService:
         short_selling: bool,
         current_position: str,
         recent_trades: list[dict[str, Any]],
+        position_quantity: float = 0.0,
+        position_avg_price: float = 0.0,
+        unrealized_pnl_pct: float = 0.0,
         force: bool = False,
     ) -> dict[str, Any]:
         """Run LLM analysis and return recommendation."""
@@ -75,6 +78,9 @@ class LLMAdvisorService:
             bb_lower=market_data.get("bb_lower", 0.0),
             current_position=current_position,
             recent_trades=recent_trades,
+            position_quantity=position_quantity,
+            position_avg_price=position_avg_price,
+            unrealized_pnl_pct=unrealized_pnl_pct,
         )
 
         try:

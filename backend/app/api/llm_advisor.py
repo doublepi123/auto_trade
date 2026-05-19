@@ -19,6 +19,39 @@ logger = logging.getLogger("auto_trade.llm_api")
 router = APIRouter(prefix="/api", tags=["llm"])
 
 
+def _position_context(symbol: str, current_price: float) -> dict[str, float | str]:
+    runner = get_runner()
+    try:
+        positions = runner.broker.get_positions()
+    except Exception:
+        logger.exception("failed to load position context for LLM analysis")
+        return {
+            "side": runner.engine.state.value.upper(),
+            "quantity": 0.0,
+            "avg_price": 0.0,
+            "unrealized_pnl_pct": 0.0,
+        }
+
+    position = next((p for p in positions if p.symbol == symbol and p.quantity > 0), None)
+    if position is None:
+        return {"side": "FLAT", "quantity": 0.0, "avg_price": 0.0, "unrealized_pnl_pct": 0.0}
+
+    avg_price = float(position.avg_price)
+    if avg_price <= 0:
+        pnl_pct = 0.0
+    elif position.side == "SHORT":
+        pnl_pct = (avg_price - current_price) / avg_price * 100
+    else:
+        pnl_pct = (current_price - avg_price) / avg_price * 100
+
+    return {
+        "side": position.side,
+        "quantity": float(position.quantity),
+        "avg_price": avg_price,
+        "unrealized_pnl_pct": pnl_pct,
+    }
+
+
 @router.post("/strategy/llm-interval/analyze", response_model=LLMAnalyzeResponse)
 def analyze_llm_interval(
     payload: LLMAnalyzeRequest,
@@ -32,6 +65,7 @@ def analyze_llm_interval(
 
     last_price = get_runner().engine.last_price
     current_price = last_price if last_price else config.buy_low
+    position_context = _position_context(config.symbol, current_price)
     advisor = LLMAdvisorService()
     result = advisor.analyze(
         symbol=config.symbol,
@@ -40,8 +74,11 @@ def analyze_llm_interval(
         current_buy_low=config.buy_low,
         current_sell_high=config.sell_high,
         short_selling=config.short_selling,
-        current_position=get_runner().engine.state.value,
+        current_position=str(position_context["side"]),
         recent_trades=[],
+        position_quantity=float(position_context["quantity"]),
+        position_avg_price=float(position_context["avg_price"]),
+        unrealized_pnl_pct=float(position_context["unrealized_pnl_pct"]),
         force=payload.force,
     )
 

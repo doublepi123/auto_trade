@@ -93,6 +93,33 @@ class TestDataAggregator:
         assert "BUY" in prompt
         assert "SELL" in prompt
 
+    def test_build_prompt_includes_position_cost_context(self, aggregator: DataAggregator) -> None:
+        prompt = aggregator.build_prompt(
+            symbol="NVDA.US",
+            market="US",
+            current_price=221.8,
+            current_buy_low=219.68,
+            current_sell_high=224.12,
+            short_selling=False,
+            daily_candles=[],
+            minute_candles=[],
+            atr=0.0,
+            bb_upper=0.0,
+            bb_middle=0.0,
+            bb_lower=0.0,
+            current_position="LONG",
+            recent_trades=[],
+            position_quantity=18.0,
+            position_avg_price=255.942,
+            unrealized_pnl_pct=-13.34,
+        )
+
+        assert "当前持仓方向: LONG" in prompt
+        assert "当前持仓数量: 18.0" in prompt
+        assert "持仓成本价: 255.94" in prompt
+        assert "浮动盈亏比例: -13.34%" in prompt
+        assert "不要仅按当前价格" in prompt
+
 
 class TestLLMAdvisorService:
     @pytest.fixture

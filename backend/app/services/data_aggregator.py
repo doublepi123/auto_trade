@@ -142,6 +142,9 @@ class DataAggregator:
         bb_lower: float,
         current_position: str,
         recent_trades: list[dict[str, Any]],
+        position_quantity: float = 0.0,
+        position_avg_price: float = 0.0,
+        unrealized_pnl_pct: float = 0.0,
     ) -> str:
         """Build LLM prompt from aggregated market data."""
         ohlcv_table = "| 日期 | 开盘 | 最高 | 最低 | 收盘 | 成交量 |\n|------|------|------|------|------|--------|"
@@ -175,7 +178,10 @@ class DataAggregator:
 - ATR(14): {atr:.2f}
 - 布林带: 上轨 {bb_upper:.2f} / 中轨 {bb_middle:.2f} / 下轨 {bb_lower:.2f}
 - 当前价格: {current_price:.2f}
-- 当前持仓: {current_position}
+- 当前持仓方向: {current_position}
+- 当前持仓数量: {position_quantity}
+- 持仓成本价: {position_avg_price:.2f}
+- 浮动盈亏比例: {unrealized_pnl_pct:.2f}%
 - 最近成交: {trades_summary}
 
 ## 请输出以下 JSON 格式：
@@ -193,4 +199,5 @@ class DataAggregator:
 3. confidence_score >= 0.7 才建议采纳
 4. 避免给出与现有持仓方向矛盾的区间
 5. 区间宽度应基于 ATR 尽量收窄，促进高频交易
-6. 建议：buy_low ≈ 当前价格 × (1 - 1%)，sell_high ≈ 当前价格 × (1 + 1%)"""
+6. FLAT 状态可参考当前价格和 ATR；已有持仓时必须结合持仓成本价、持仓数量和浮动盈亏设计区间，不要仅按当前价格 ±1% 滚动追价
+7. LONG 状态下，buy_low 是加仓触发价，应结合成本价和回撤幅度；sell_high 应优先考虑持仓成本价，不要在未说明止损的情况下长期低于成本价"""
