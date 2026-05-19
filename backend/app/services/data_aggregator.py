@@ -106,7 +106,7 @@ class DataAggregator:
         if len(true_ranges) < period:
             period = len(true_ranges)
 
-        return statistics.mean(true_ranges[-period:])
+        return float(statistics.mean(true_ranges[-period:]))
 
     @staticmethod
     def _compute_bollinger_bands(
@@ -157,6 +157,11 @@ class DataAggregator:
 
         return f"""你是一个专业量化交易顾问。请基于以下市场数据，为区间交易策略推荐买入下限（buy_low）和卖出上限（sell_high）。
 
+## 交易目标
+- 期望以**少量多次**的方式尽可能**增加交易频次**，获取更高收益
+- 建议区间宽度尽量收窄，推荐控制在当前价格的 **±1×ATR** 范围内
+- buy_low 与 sell_high 的差值不宜过大，以便价格在较小区间内多次触发交易
+
 ## 当前策略参数
 - 标的: {symbol} ({market})
 - 当前 buy_low: {current_buy_low:.2f}
@@ -184,6 +189,8 @@ class DataAggregator:
 
 注意：
 1. sell_high 必须严格大于 buy_low
-2. confidence_score >= 0.7 才建议采纳
-3. 避免给出与现有持仓方向矛盾的区间
-"""
+2. ** sell_high 必须严格大于当前价格 {current_price:.2f}，buy_low 必须严格小于当前价格 {current_price:.2f} **
+3. confidence_score >= 0.7 才建议采纳
+4. 避免给出与现有持仓方向矛盾的区间
+5. 区间宽度应基于 ATR 尽量收窄，促进高频交易
+6. 建议：buy_low ≈ 当前价格 × (1 - 1%)，sell_high ≈ 当前价格 × (1 + 1%)"""

@@ -102,7 +102,11 @@ class StrategyEngine:
     def _in_cooldown(self) -> bool:
         if self.last_trigger_at is None:
             return False
-        elapsed = (datetime.now(timezone.utc) - self.last_trigger_at).total_seconds()
+        now = datetime.now(timezone.utc)
+        last = self.last_trigger_at
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        elapsed = (now - last).total_seconds()
         return elapsed < self._cooldown_seconds
 
     def sync_state(self, has_long_position: bool, has_short_position: bool) -> None:

@@ -85,7 +85,7 @@ class IntervalApplicationService:
             return False
 
         old_sell_high = config.sell_high
-        min_sell_high = current_price * 1.05
+        min_sell_high = current_price * (1 + settings.llm_interval_volatility_threshold_pct / 100)
 
         if new_sell_high >= old_sell_high:
             config.sell_high = new_sell_high
@@ -101,7 +101,7 @@ class IntervalApplicationService:
             return False
 
         old_buy_low = config.buy_low
-        max_buy_low = current_price * 0.95
+        max_buy_low = current_price * (1 - settings.llm_interval_volatility_threshold_pct / 100)
 
         if new_buy_low <= old_buy_low:
             config.buy_low = new_buy_low
@@ -126,12 +126,6 @@ class IntervalApplicationService:
 
         if sell_high <= buy_low:
             return f"sell_high ({sell_high:.2f}) must be greater than buy_low ({buy_low:.2f})"
-
-        if sell_high < current_price * 1.05:
-            return f"sell_high ({sell_high:.2f}) too close to current price ({current_price:.2f})"
-
-        if buy_low > current_price * 0.95:
-            return f"buy_low ({buy_low:.2f}) too close to current price ({current_price:.2f})"
 
         stripe_width_pct = (sell_high - buy_low) / current_price * 100
         if stripe_width_pct > settings.llm_max_stripe_width_pct:
