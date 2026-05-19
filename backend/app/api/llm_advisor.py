@@ -6,7 +6,6 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app.api.auth import require_api_key
 from app.database import get_db
 from app.runner import get_runner
 from app.schemas import LLMAnalyzeRequest, LLMAnalyzeResponse, LLMIntervalStatus, MessageResponse
@@ -19,7 +18,7 @@ logger = logging.getLogger("auto_trade.llm_api")
 router = APIRouter(prefix="/api", tags=["llm"])
 
 
-@router.post("/strategy/llm-interval/analyze", response_model=LLMAnalyzeResponse, dependencies=[Depends(require_api_key())])
+@router.post("/strategy/llm-interval/analyze", response_model=LLMAnalyzeResponse)
 def analyze_llm_interval(
     payload: LLMAnalyzeRequest,
     db: Session = Depends(get_db),
@@ -46,6 +45,7 @@ def analyze_llm_interval(
     if not result["success"]:
         return LLMAnalyzeResponse(
             success=False,
+            applied=False,
             reason=result.get("error", "Unknown error"),
         )
 
@@ -55,8 +55,6 @@ def analyze_llm_interval(
             db=db,
             engine_state=get_runner().engine.state.value,
             current_price=get_runner().engine.last_price or config.buy_low,
-            current_buy_low=config.buy_low,
-            current_sell_high=config.sell_high,
             suggestion={
                 "suggested_buy_low": result.get("suggested_buy_low"),
                 "suggested_sell_high": result.get("suggested_sell_high"),
@@ -87,7 +85,7 @@ def analyze_llm_interval(
     )
 
 
-@router.get("/strategy/llm-interval/status", response_model=LLMIntervalStatus, dependencies=[Depends(require_api_key())])
+@router.get("/strategy/llm-interval/status", response_model=LLMIntervalStatus)
 def get_llm_interval_status(db: Session = Depends(get_db)) -> LLMIntervalStatus:
     svc = StrategyService(db)
     config = svc.get_config()
@@ -118,7 +116,7 @@ def get_llm_interval_status(db: Session = Depends(get_db)) -> LLMIntervalStatus:
     )
 
 
-@router.put("/strategy/llm-interval/enable", response_model=MessageResponse, dependencies=[Depends(require_api_key())])
+@router.put("/strategy/llm-interval/enable", response_model=MessageResponse)
 def enable_llm_interval(db: Session = Depends(get_db)) -> MessageResponse:
     svc = StrategyService(db)
     config = svc.get_config()
@@ -127,7 +125,7 @@ def enable_llm_interval(db: Session = Depends(get_db)) -> MessageResponse:
     return MessageResponse(message="LLM auto interval enabled")
 
 
-@router.put("/strategy/llm-interval/disable", response_model=MessageResponse, dependencies=[Depends(require_api_key())])
+@router.put("/strategy/llm-interval/disable", response_model=MessageResponse)
 def disable_llm_interval(db: Session = Depends(get_db)) -> MessageResponse:
     svc = StrategyService(db)
     config = svc.get_config()

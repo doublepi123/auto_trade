@@ -5,6 +5,7 @@ os.environ["AUTO_TRADE_DATABASE_URL"] = "sqlite:///data/test_api.db"
 
 from fastapi.testclient import TestClient
 
+from app.api import llm_advisor as llm_api
 from app.api import strategy as strategy_api
 from app.api import trade as trade_api
 from app.database import engine as db_engine, SessionLocal
@@ -244,6 +245,40 @@ class TestAPI:
 
         assert resp.status_code == 200
         assert resp.json()["runner_running"] is True
+
+    def test_llm_analyze_returns_structured_failure(self, monkeypatch) -> None:
+        _clean_strategy()
+        setup = client.put("/api/strategy", json={
+            "symbol": "AAPL.US",
+            "market": "US",
+            "buy_low": 100.0,
+            "sell_high": 200.0,
+        })
+        assert setup.status_code == 200
+
+        class MissingKeyAdvisor:
+            def analyze(self, **_kwargs):
+                return {
+                    "success": False,
+                    "error": "LLM analysis failed: DEEPSEEK_API_KEY is not configured",
+                }
+
+        monkeypatch.setattr(llm_api, "LLMAdvisorService", MissingKeyAdvisor)
+
+        resp = client.post("/api/strategy/llm-interval/analyze", json={"force": True})
+
+        assert resp.status_code == 200
+        assert resp.json() == {
+            "success": False,
+            "applied": False,
+            "reason": "LLM analysis failed: DEEPSEEK_API_KEY is not configured",
+            "suggested_buy_low": None,
+            "suggested_sell_high": None,
+            "confidence_score": None,
+            "analysis": None,
+            "next_analysis_at": None,
+            "applied_at": None,
+        }
 
     def test_strategy_partial_update(self) -> None:
         _clean_strategy()

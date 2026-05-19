@@ -100,45 +100,6 @@ class TestLLMAdvisorService:
         return LLMAdvisorService()
 
     def test_parse_response_plain_json(self, advisor: LLMAdvisorService) -> None:
-        raw = '{"suggested_buy_low": 180, "suggested_sell_high": 220, "confidence_score": 0.85, "analysis": "test"}'
-        result = advisor._parse_response(raw)
-        assert result["suggested_buy_low"] == 180
-        assert result["confidence_score"] == 0.85
-
-    def test_parse_response_markdown_block(self, advisor: LLMAdvisorService) -> None:
-        raw = '```json\n{"suggested_buy_low": 190, "suggested_sell_high": 230, "confidence_score": 0.9, "analysis": "markdown"}\n```'
-        result = advisor._parse_response(raw)
-        assert result["suggested_buy_low"] == 190
-        assert result["analysis"] == "markdown"
-
-    def test_parse_response_invalid_json(self, advisor: LLMAdvisorService) -> None:
-        with pytest.raises(Exception):
-            advisor._parse_response("not valid json")
-
-    def test_is_throttled_initial_state(self, advisor: LLMAdvisorService) -> None:
-        assert not advisor._is_throttled()
-
-    def test_analyze_missing_api_key(self, advisor: LLMAdvisorService) -> None:
-        result = advisor.analyze(
-            symbol="AAPL.US",
-            market="US",
-            current_price=200.0,
-            current_buy_low=180.0,
-            current_sell_high=220.0,
-            short_selling=False,
-            current_position="FLAT",
-            recent_trades=[],
-        )
-        assert result["success"] is False
-        assert "failed" in result["error"] or "not configured" in result["error"]
-
-
-class TestLLMAdvisorService:
-    @pytest.fixture
-    def advisor(self) -> LLMAdvisorService:
-        return LLMAdvisorService()
-
-    def test_parse_response_plain_json(self, advisor: LLMAdvisorService) -> None:
         raw = '{"suggested_buy_low": 180.0, "suggested_sell_high": 220.0, "confidence_score": 0.85, "analysis": "test"}'
         result = advisor._parse_response(raw)
         assert result["suggested_buy_low"] == 180.0
@@ -158,7 +119,9 @@ class TestLLMAdvisorService:
     def test_is_throttled_initially_false(self, advisor: LLMAdvisorService) -> None:
         assert advisor._is_throttled() is False
 
-    def test_analyze_no_api_key(self, advisor: LLMAdvisorService) -> None:
+    def test_analyze_no_api_key(self, advisor: LLMAdvisorService, monkeypatch) -> None:
+        import app.config
+        monkeypatch.setattr(app.config.settings, "deepseek_api_key", "")
         result = advisor.analyze(
             symbol="AAPL.US",
             market="US",
