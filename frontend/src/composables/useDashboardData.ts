@@ -5,6 +5,7 @@ import type { StrategyConfig, StatusData } from '../types'
 const defaultStrategy: StrategyConfig = {
   id: 0, symbol: '', market: 'US', buy_low: 0, sell_high: 0,
   short_selling: false, max_daily_loss: 5000, max_consecutive_losses: 3,
+  llm_interval_minutes: 240,
   updated_at: '',
 }
 

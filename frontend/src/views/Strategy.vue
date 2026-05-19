@@ -24,6 +24,9 @@
         <p>上次被拒: {{ llmStatus.reject_reason }}</p>
       </div>
       <div style="margin-top: 12px">
+        <p style="margin-bottom: 8px">
+          刷新间隔：{{ llmStatus.interval_minutes }} 分钟
+        </p>
         <el-button size="small" :loading="analyzing" @click="triggerAnalyze">
           立即重新分析
         </el-button>
@@ -59,6 +62,9 @@
         <el-form-item label="连续亏损暂停阈值">
           <el-input-number v-model="form.max_consecutive_losses" :min="1" />
         </el-form-item>
+        <el-form-item label="LLM刷新间隔（分钟）">
+          <el-input-number v-model="form.llm_interval_minutes" :min="15" :max="1440" :step="15" />
+        </el-form-item>
         <el-form-item>
           <el-button type="primary" native-type="submit" :loading="saving" :disabled="loading || !isDirty">保存</el-button>
           <el-tag v-if="saved" type="success" style="margin-left: 10px">已保存</el-tag>
@@ -86,6 +92,7 @@ const { form, loading, saving, saved, error, isDirty, load, save } = useFormStat
     short_selling: false,
     max_daily_loss: 5000,
     max_consecutive_losses: 3,
+    llm_interval_minutes: 240,
   },
   load: async () => {
     const s = await getStrategy()
@@ -97,6 +104,7 @@ const { form, loading, saving, saved, error, isDirty, load, save } = useFormStat
       short_selling: s.short_selling,
       max_daily_loss: s.max_daily_loss,
       max_consecutive_losses: s.max_consecutive_losses,
+      llm_interval_minutes: s.llm_interval_minutes,
     }
   },
   save: async (data) => {
@@ -106,6 +114,7 @@ const { form, loading, saving, saved, error, isDirty, load, save } = useFormStat
 
 const llmStatus = ref<LLMIntervalStatus>({
   enabled: false,
+  interval_minutes: 240,
   last_analysis_at: null,
   next_analysis_at: null,
   current_suggestion: null,
@@ -145,7 +154,7 @@ const triggerAnalyze = async () => {
     if (result.success) {
       ElMessage.success('分析完成')
       if (result.applied) {
-        ElMessage.success(`已应用新区间: ${result.buy_low?.toFixed(2)} ~ ${result.sell_high?.toFixed(2)}`)
+        ElMessage.success(`已应用新区间: ${result.suggested_buy_low?.toFixed(2)} ~ ${result.suggested_sell_high?.toFixed(2)}`)
         await load()
       } else {
         ElMessage.info(result.reason)

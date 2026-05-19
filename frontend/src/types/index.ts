@@ -7,6 +7,7 @@ export interface StrategyConfig {
   short_selling: boolean
   max_daily_loss: number
   max_consecutive_losses: number
+  llm_interval_minutes: number
   updated_at: string
 }
 
@@ -81,25 +82,7 @@ export interface LLMSuggestion {
 
 export interface LLMIntervalStatus {
   enabled: boolean
-  last_analysis_at: string | null
-  next_analysis_at: string | null
-  current_suggestion: LLMSuggestion | null
-  applied_values: {
-    buy_low: number
-    sell_high: number
-  } | null
-  reject_reason: string | null
-}
-
-export interface LLMSuggestion {
-  buy_low: number
-  sell_high: number
-  confidence_score: number
-  analysis: string
-}
-
-export interface LLMIntervalStatus {
-  enabled: boolean
+  interval_minutes: number
   last_analysis_at: string | null
   next_analysis_at: string | null
   current_suggestion: LLMSuggestion | null
