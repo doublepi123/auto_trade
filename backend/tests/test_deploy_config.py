@@ -10,6 +10,18 @@ def test_docker_compose_passes_api_key_to_backend() -> None:
     assert "AUTO_TRADE_API_KEY=" in compose
 
 
+def test_docker_compose_passes_deepseek_key_to_backend() -> None:
+    compose = (ROOT / "docker-compose.yaml").read_text(encoding="utf-8")
+
+    assert "DEEPSEEK_API_KEY=" in compose
+
+
+def test_env_example_documents_deepseek_key() -> None:
+    env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
+
+    assert "DEEPSEEK_API_KEY=" in env_example
+
+
 def test_docker_compose_binds_published_ports_to_localhost() -> None:
     compose = (ROOT / "docker-compose.yaml").read_text(encoding="utf-8")
 

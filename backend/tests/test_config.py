@@ -100,3 +100,20 @@ class TestSettings:
         s = Settings()
 
         assert s.env == "dev"
+
+    def test_reads_deepseek_api_key_from_unprefixed_env_var(self, monkeypatch, tmp_path) -> None:
+        monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+        monkeypatch.delenv("AUTO_TRADE_DEEPSEEK_API_KEY", raising=False)
+
+        root = tmp_path / "project"
+        backend = root / "backend"
+        backend.mkdir(parents=True)
+        (root / ".env").write_text(
+            "DEEPSEEK_API_KEY=sk-test-key\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.chdir(backend)
+        s = Settings()
+
+        assert s.deepseek_api_key == "sk-test-key"
