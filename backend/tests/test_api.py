@@ -78,11 +78,11 @@ class TestAPI:
             "market": "US",
             "buy_low": 100.0,
             "sell_high": 200.0,
-            "llm_interval_minutes": 60,
+            "llm_interval_minutes": 1,
         })
 
         assert resp.status_code == 200
-        assert resp.json()["llm_interval_minutes"] == 60
+        assert resp.json()["llm_interval_minutes"] == 1
 
     def test_update_strategy_rejects_invalid_llm_interval_minutes(self) -> None:
         _clean_strategy()
@@ -91,7 +91,7 @@ class TestAPI:
             "market": "US",
             "buy_low": 100.0,
             "sell_high": 200.0,
-            "llm_interval_minutes": 5,
+            "llm_interval_minutes": 0,
         })
 
         assert resp.status_code == 422

@@ -23,7 +23,7 @@ class StrategyConfigSchema(BaseModel):
     short_selling: bool = Field(default=False)
     max_daily_loss: float = Field(default=5000.0, gt=0)
     max_consecutive_losses: int = Field(default=3, ge=1)
-    llm_interval_minutes: Optional[int] = Field(default=None, ge=15, le=1440)
+    llm_interval_minutes: Optional[int] = Field(default=None, ge=1, le=1440)
 
     @field_validator("market")
     @classmethod
@@ -56,7 +56,7 @@ class StrategyMergedSchema(BaseModel):
     short_selling: bool = Field(default=False)
     max_daily_loss: float = Field(default=5000.0, gt=0)
     max_consecutive_losses: int = Field(default=3, ge=1)
-    llm_interval_minutes: int = Field(default=240, ge=15, le=1440)
+    llm_interval_minutes: int = Field(default=240, ge=1, le=1440)
 
     @field_validator("market")
     @classmethod

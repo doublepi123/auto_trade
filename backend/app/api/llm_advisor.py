@@ -97,7 +97,7 @@ def get_llm_interval_status(db: Session = Depends(get_db)) -> LLMIntervalStatus:
         }
 
     next_analysis_at = config.llm_next_analysis_at
-    if next_analysis_at is None and config.llm_last_analysis_at is not None:
+    if config.llm_last_analysis_at is not None:
         last_analysis_at = config.llm_last_analysis_at
         if last_analysis_at.tzinfo is None:
             last_analysis_at = last_analysis_at.replace(tzinfo=timezone.utc)
