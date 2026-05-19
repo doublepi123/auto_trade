@@ -40,6 +40,29 @@ class TestStrategyEngine:
         assert result.action == "SELL"
         assert engine.state == EngineState.FLAT
 
+    def test_price_below_buy_low_from_long_triggers_add_on_buy(self) -> None:
+        engine = StrategyEngine(make_params(100, 200))
+        engine.state = EngineState.LONG
+
+        result = engine.update_price(99.0)
+
+        assert result.triggered is True
+        assert result.action == "BUY"
+        assert engine.state == EngineState.LONG
+
+    def test_cooldown_prevents_repeated_add_on_buy(self) -> None:
+        engine = StrategyEngine(make_params(100, 200))
+        engine.state = EngineState.LONG
+        engine._cooldown_seconds = 60
+
+        first = engine.update_price(99.0)
+        second = engine.update_price(98.0)
+
+        assert first.triggered is True
+        assert first.action == "BUY"
+        assert second.triggered is False
+        assert engine.state == EngineState.LONG
+
     def test_price_range_no_trigger_from_flat(self) -> None:
         engine = StrategyEngine(make_params(100, 200))
         result = engine.update_price(150.0)
