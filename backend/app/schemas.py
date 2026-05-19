@@ -23,6 +23,7 @@ class StrategyConfigSchema(BaseModel):
     short_selling: bool = Field(default=False)
     max_daily_loss: float = Field(default=5000.0, gt=0)
     max_consecutive_losses: int = Field(default=3, ge=1)
+    llm_interval_minutes: Optional[int] = Field(default=None, ge=15, le=1440)
 
     @field_validator("market")
     @classmethod
@@ -55,6 +56,7 @@ class StrategyMergedSchema(BaseModel):
     short_selling: bool = Field(default=False)
     max_daily_loss: float = Field(default=5000.0, gt=0)
     max_consecutive_losses: int = Field(default=3, ge=1)
+    llm_interval_minutes: int = Field(default=240, ge=15, le=1440)
 
     @field_validator("market")
     @classmethod
@@ -111,6 +113,7 @@ class StrategyResponse(BaseModel):
     short_selling: bool
     max_daily_loss: float
     max_consecutive_losses: int
+    llm_interval_minutes: int
     updated_at: datetime
 
     model_config = {"from_attributes": True}
@@ -182,31 +185,6 @@ class LLMAnalyzeRequest(BaseModel):
 
 class LLMAnalyzeResponse(BaseModel):
     success: bool
-    applied: bool = False
-    reason: str = ""
-    suggested_buy_low: Optional[float] = None
-    suggested_sell_high: Optional[float] = None
-    confidence_score: Optional[float] = None
-    analysis: Optional[str] = None
-    next_analysis_at: Optional[str] = None
-    applied_at: Optional[str] = None
-
-
-class LLMIntervalStatus(BaseModel):
-    enabled: bool = False
-    last_analysis_at: Optional[str] = None
-    next_analysis_at: Optional[str] = None
-    current_suggestion: Optional[dict[str, Any]] = None
-    applied_values: Optional[dict[str, Any]] = None
-    reject_reason: Optional[str] = None
-
-
-class LLMAnalyzeRequest(BaseModel):
-    force: bool = Field(default=False)
-
-
-class LLMAnalyzeResponse(BaseModel):
-    success: bool
     applied: bool
     reason: str
     suggested_buy_low: Optional[float] = None
@@ -226,6 +204,7 @@ class LLMSuggestion(BaseModel):
 
 class LLMIntervalStatus(BaseModel):
     enabled: bool
+    interval_minutes: int
     last_analysis_at: Optional[str] = None
     next_analysis_at: Optional[str] = None
     current_suggestion: Optional[LLMSuggestion] = None

@@ -32,6 +32,7 @@ class StrategyConfig(Base):
     updated_at: Mapped[datetime] = mapped_column(_TZDateTime(), default=_utcnow)
 
     auto_interval_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    llm_interval_minutes: Mapped[int] = mapped_column(Integer, default=240)
     llm_suggested_buy_low: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     llm_suggested_sell_high: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     llm_confidence_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
