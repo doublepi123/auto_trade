@@ -27,6 +27,9 @@
         <p style="margin-bottom: 8px">
           刷新间隔：{{ llmStatus.interval_minutes }} 分钟
         </p>
+        <p style="margin-bottom: 8px">
+          最近成功刷新：{{ formatTime(llmStatus.last_analysis_at) }}
+        </p>
         <el-button size="small" :loading="analyzing" @click="triggerAnalyze">
           立即重新分析
         </el-button>
@@ -63,7 +66,7 @@
           <el-input-number v-model="form.max_consecutive_losses" :min="1" />
         </el-form-item>
         <el-form-item label="LLM刷新间隔（分钟）">
-          <el-input-number v-model="form.llm_interval_minutes" :min="15" :max="1440" :step="15" />
+          <el-input-number v-model="form.llm_interval_minutes" :min="1" :max="1440" :step="1" />
         </el-form-item>
         <el-form-item>
           <el-button type="primary" native-type="submit" :loading="saving" :disabled="loading || !isDirty">保存</el-button>
