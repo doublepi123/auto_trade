@@ -25,9 +25,7 @@ function initialStatus(): StatusStub {
 }
 
 Cypress.Commands.add('setupApp', () => {
-  cy.window().then((win) => {
-    win.localStorage.setItem('api_key', 'test-api-key')
-  })
+  // No-op: API key auth removed
 })
 
 Cypress.Commands.add('stubApi', () => {
@@ -112,11 +110,7 @@ Cypress.Commands.add('stubApi', () => {
 
 Cypress.Commands.add('visitApp', (path = '/') => {
   cy.stubApi()
-  cy.visit(path, {
-    onBeforeLoad(win) {
-      win.localStorage.setItem('api_key', 'test-api-key')
-    },
-  })
+  cy.visit(path)
 })
 
 declare global {

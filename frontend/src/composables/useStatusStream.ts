@@ -18,14 +18,10 @@ export function useStatusStream(status: { value: StatusData }) {
     const wsUrl = `${protocol}//${window.location.host}/ws`
     ws = new WebSocket(wsUrl)
 
-    const apiKey = localStorage.getItem('api_key')
     ws.onopen = () => {
       useWebSocket = true
       realtimeStatus.value = 'connected'
       reconnectAttempts = 0
-      if (apiKey) {
-        ws?.send(JSON.stringify({ token: apiKey }))
-      }
     }
 
     ws.onmessage = (event) => {
