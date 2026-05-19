@@ -119,6 +119,14 @@ class TestLLMAdvisorService:
     def test_is_throttled_initially_false(self, advisor: LLMAdvisorService) -> None:
         assert advisor._is_throttled() is False
 
+    def test_is_throttled_respects_configurable_seconds(self, advisor: LLMAdvisorService, monkeypatch) -> None:
+        import app.services.llm_advisor_service as service_module
+        monkeypatch.setattr(service_module, "_LAST_ANALYSIS_TIMESTAMP", 100.0)
+        monkeypatch.setattr(service_module.time, "monotonic", lambda: 120.0)
+
+        assert advisor._is_throttled(30.0) is True
+        assert advisor._is_throttled(10.0) is False
+
     def test_analyze_no_api_key(self, advisor: LLMAdvisorService, monkeypatch) -> None:
         import app.config
         monkeypatch.setattr(app.config.settings, "deepseek_api_key", "")

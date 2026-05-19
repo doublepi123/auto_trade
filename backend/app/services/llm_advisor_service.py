@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -16,7 +16,6 @@ from app.services.strategy_service import StrategyService
 logger = logging.getLogger("auto_trade.llm_advisor")
 
 _LAST_ANALYSIS_TIMESTAMP: float = 0.0
-_THROTTLE_SECONDS: float = 1800.0
 
 
 class LLMAdvisorService:
@@ -40,10 +39,11 @@ class LLMAdvisorService:
         """Run LLM analysis and return recommendation."""
         global _LAST_ANALYSIS_TIMESTAMP
 
-        if not force and self._is_throttled():
+        interval_minutes = self._get_interval_minutes()
+        if not force and self._is_throttled(interval_minutes * 60):
             return {
                 "success": False,
-                "error": "Analysis throttled: please wait 30 minutes between analyses",
+                "error": f"Analysis throttled: please wait {interval_minutes} minutes between analyses",
             }
 
         try:
@@ -91,9 +91,10 @@ class LLMAdvisorService:
 
         db = SessionLocal()
         try:
-            self._record_analysis(db, result)
+            next_analysis_at = self._record_analysis(db, result, interval_minutes)
         except Exception:
             logger.exception("failed to record LLM analysis")
+            next_analysis_at = datetime.now(timezone.utc) + timedelta(minutes=interval_minutes)
         finally:
             db.close()
 
@@ -105,7 +106,7 @@ class LLMAdvisorService:
             "suggested_sell_high": result.get("suggested_sell_high"),
             "confidence_score": result.get("confidence_score"),
             "analysis": result.get("analysis"),
-            "next_analysis_at": datetime.now(timezone.utc).isoformat(),
+            "next_analysis_at": next_analysis_at.isoformat(),
             "applied_at": None,
         }
 
@@ -149,17 +150,33 @@ class LLMAdvisorService:
         return json.loads(raw)
 
     @staticmethod
-    def _is_throttled() -> bool:
-        """Check if analysis is throttled (30-min window)."""
-        return time.monotonic() - _LAST_ANALYSIS_TIMESTAMP < _THROTTLE_SECONDS
+    def _is_throttled(interval_seconds: float = 1800.0) -> bool:
+        """Check if analysis is throttled."""
+        return time.monotonic() - _LAST_ANALYSIS_TIMESTAMP < interval_seconds
 
-    def _record_analysis(self, db: Any, result: dict[str, Any]) -> None:
+    @staticmethod
+    def _get_interval_minutes() -> int:
+        db = SessionLocal()
+        try:
+            config = StrategyService(db).get_config()
+            return config.llm_interval_minutes or settings.llm_interval_cron_minutes
+        except Exception:
+            logger.exception("failed to load LLM interval minutes; using settings default")
+            return settings.llm_interval_cron_minutes
+        finally:
+            db.close()
+
+    def _record_analysis(self, db: Any, result: dict[str, Any], interval_minutes: int) -> datetime:
         """Record LLM analysis result to database."""
         svc = StrategyService(db)
         config = svc.get_config()
+        now = datetime.now(timezone.utc)
+        next_analysis_at = now + timedelta(minutes=interval_minutes)
         config.llm_suggested_buy_low = result.get("suggested_buy_low")
         config.llm_suggested_sell_high = result.get("suggested_sell_high")
         config.llm_confidence_score = result.get("confidence_score")
         config.llm_analysis = result.get("analysis")
-        config.llm_last_analysis_at = datetime.now(timezone.utc)
+        config.llm_last_analysis_at = now
+        config.llm_next_analysis_at = next_analysis_at
         db.commit()
+        return next_analysis_at

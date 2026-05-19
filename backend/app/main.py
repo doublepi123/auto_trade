@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from typing import AsyncGenerator
 
 from fastapi import FastAPI
@@ -40,9 +41,8 @@ async def _llm_analysis_cron() -> None:
     from app.services.strategy_service import StrategyService
     from app.runner import get_runner
 
-    interval_seconds = settings.llm_interval_cron_minutes * 60
     while True:
-        await asyncio.sleep(interval_seconds)
+        await asyncio.sleep(60)
         try:
             db = SessionLocal()
             try:
@@ -51,11 +51,20 @@ async def _llm_analysis_cron() -> None:
                 if not config.auto_interval_enabled or not config.symbol:
                     continue
 
+                now = datetime.now(timezone.utc)
+                interval_minutes = config.llm_interval_minutes or settings.llm_interval_cron_minutes
+                last_analysis_at = config.llm_last_analysis_at
+                if last_analysis_at is not None:
+                    if last_analysis_at.tzinfo is None:
+                        last_analysis_at = last_analysis_at.replace(tzinfo=timezone.utc)
+                    if now - last_analysis_at < timedelta(minutes=interval_minutes):
+                        continue
+
                 runner = get_runner()
                 current_price = runner.engine.last_price if runner.engine else 0.0
 
                 advisor = LLMAdvisorService()
-                advisor.analyze(
+                result = advisor.analyze(
                     symbol=config.symbol,
                     market=config.market,
                     current_price=current_price,
@@ -64,7 +73,18 @@ async def _llm_analysis_cron() -> None:
                     short_selling=config.short_selling,
                     current_position=runner.engine.state.value if runner.engine else "flat",
                     recent_trades=[],
+                    force=True,
                 )
+                if result.get("success"):
+                    IntervalApplicationService().apply_direct_suggestion(
+                        db=db,
+                        current_price=current_price or config.buy_low,
+                        suggestion={
+                            "suggested_buy_low": result.get("suggested_buy_low"),
+                            "suggested_sell_high": result.get("suggested_sell_high"),
+                            "confidence_score": result.get("confidence_score"),
+                        },
+                    )
             finally:
                 db.close()
         except Exception:
