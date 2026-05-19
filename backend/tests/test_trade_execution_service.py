@@ -100,3 +100,98 @@ class TestTradeExecutionServiceBasics:
         assert svc._order_status_is_live(MagicMock(status="PARTIAL_FILLED")) is True
         assert svc._order_status_is_live(MagicMock(status="FILLED")) is False
         assert svc._order_status_is_live(MagicMock(status="REJECTED")) is False
+
+    def test_execute_buy_uses_margin_max_quantity(self, svc: TradeExecutionService, monkeypatch) -> None:
+        from app.core.broker import OrderResult, Quote
+        from app.core.risk import RiskController
+        from app.core.notify import ServerChanNotifier
+
+        broker = MagicMock()
+        broker.estimate_margin_max_quantity.return_value = Decimal("100")
+        broker.submit_limit_order.return_value = OrderResult("order-1", "NVDA.US", "BUY", Decimal("90"), Decimal("222.5"), "FILLED")
+        monkeypatch.setattr(svc, "_wait_for_order_completion", lambda result, broker_arg=None: OrderStatus("order-1", "FILLED", Decimal("90"), Decimal("222.5")))
+
+        status = svc.execute(
+            "BUY",
+            "NVDA.US",
+            Quote("NVDA.US", 222.5, 222.4, 222.6, ""),
+            broker,
+            RiskController(),
+            ServerChanNotifier(""),
+            "USD",
+        )
+
+        assert status is not None
+        broker.estimate_margin_max_quantity.assert_called_once_with("NVDA.US", "BUY", Decimal("222.5"), "USD")
+        broker.get_cash.assert_not_called()
+        broker.submit_limit_order.assert_called_once_with("NVDA.US", "BUY", Decimal("90"), Decimal("222.5"))
+
+    def test_execute_sell_short_uses_margin_max_quantity(self, svc: TradeExecutionService, monkeypatch) -> None:
+        from app.core.broker import OrderResult, Quote
+        from app.core.risk import RiskController
+        from app.core.notify import ServerChanNotifier
+
+        broker = MagicMock()
+        broker.estimate_margin_max_quantity.return_value = Decimal("50")
+        broker.submit_limit_order.return_value = OrderResult("order-2", "NVDA.US", "SELL", Decimal("45"), Decimal("225"), "FILLED")
+        monkeypatch.setattr(svc, "_wait_for_order_completion", lambda result, broker_arg=None: OrderStatus("order-2", "FILLED", Decimal("45"), Decimal("225")))
+
+        status = svc.execute(
+            "SELL_SHORT",
+            "NVDA.US",
+            Quote("NVDA.US", 225, 224.9, 225.1, ""),
+            broker,
+            RiskController(),
+            ServerChanNotifier(""),
+            "USD",
+        )
+
+        assert status is not None
+        broker.estimate_margin_max_quantity.assert_called_once_with("NVDA.US", "SELL", Decimal("225"), "USD")
+        broker.get_cash.assert_not_called()
+        broker.submit_limit_order.assert_called_once_with("NVDA.US", "SELL", Decimal("45"), Decimal("225"))
+
+    def test_execute_buy_skips_zero_margin_quantity(self, svc: TradeExecutionService) -> None:
+        from app.core.broker import Quote
+        from app.core.risk import RiskController
+        from app.core.notify import ServerChanNotifier
+
+        broker = MagicMock()
+        broker.estimate_margin_max_quantity.return_value = Decimal("1")
+
+        status = svc.execute(
+            "BUY",
+            "NVDA.US",
+            Quote("NVDA.US", 222.5, 222.4, 222.6, ""),
+            broker,
+            RiskController(),
+            ServerChanNotifier(""),
+            "USD",
+        )
+
+        assert status is None
+        broker.submit_limit_order.assert_not_called()
+
+    def test_execute_sell_still_uses_position_quantity(self, svc: TradeExecutionService, monkeypatch) -> None:
+        from app.core.broker import OrderResult, Position, Quote
+        from app.core.risk import RiskController
+        from app.core.notify import ServerChanNotifier
+
+        broker = MagicMock()
+        broker.get_positions.return_value = [Position("NVDA.US", "LONG", Decimal("7"), Decimal("220"))]
+        broker.submit_limit_order.return_value = OrderResult("order-3", "NVDA.US", "SELL", Decimal("7"), Decimal("225"), "FILLED")
+        monkeypatch.setattr(svc, "_wait_for_order_completion", lambda result, broker_arg=None: OrderStatus("order-3", "FILLED", Decimal("7"), Decimal("225")))
+
+        status = svc.execute(
+            "SELL",
+            "NVDA.US",
+            Quote("NVDA.US", 225, 224.9, 225.1, ""),
+            broker,
+            RiskController(),
+            ServerChanNotifier(""),
+            "USD",
+        )
+
+        assert status is not None
+        broker.estimate_margin_max_quantity.assert_not_called()
+        broker.submit_limit_order.assert_called_once_with("NVDA.US", "SELL", Decimal("7"), Decimal("225"))

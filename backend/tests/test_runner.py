@@ -251,6 +251,33 @@ class TestAppRunner:
         assert runner.engine.last_trigger_at is None
         assert runner.engine.last_trigger_price == 0.0
 
+    def test_on_quote_submits_add_on_buy_when_long_below_buy_low(self) -> None:
+        class Broker:
+            def __init__(self) -> None:
+                self.submissions: list[tuple[str, Decimal]] = []
+
+            def estimate_margin_max_quantity(self, _symbol, _side, _price, _currency=None) -> Decimal:
+                return Decimal("10")
+
+            def submit_limit_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal) -> OrderResult:
+                self.submissions.append((side, quantity))
+                return OrderResult(f"order-{len(self.submissions)}", symbol, side, quantity, price, "FILLED")
+
+        runner = AppRunner()
+        broker = Broker()
+        runner.broker = broker
+        runner._running = True
+        runner.engine.params = StrategyParams(symbol="AAPL.US", buy_low=100.0, sell_high=200.0)
+        runner.engine.state = EngineState.LONG
+        runner.engine.last_trigger_at = None
+        runner.notifier = _NoopNotifier()
+        self._stub_trade_callbacks(runner)
+
+        runner._on_quote(Quote("AAPL.US", 99.0, 98.5, 99.5, ""))
+
+        assert broker.submissions == [("BUY", Decimal("9"))]
+        assert runner.engine.state == EngineState.LONG
+
     def test_missing_position_rolls_back_sell_trigger(self) -> None:
         class Broker:
             def get_positions(self) -> list[Position]:
@@ -318,6 +345,9 @@ class TestAppRunner:
         class Broker:
             def get_cash(self, _currency=None) -> Decimal:
                 return Decimal("1000")
+
+            def estimate_margin_max_quantity(self, _symbol, _side, _price, _currency=None) -> Decimal:
+                return Decimal("10")
 
             def submit_limit_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal) -> OrderResult:
                 return OrderResult(
@@ -436,6 +466,9 @@ class TestAppRunner:
             def get_cash(self, _currency=None) -> Decimal:
                 return Decimal("1000")
 
+            def estimate_margin_max_quantity(self, _symbol, _side, _price, _currency=None) -> Decimal:
+                return Decimal("10")
+
             def submit_limit_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal) -> OrderResult:
                 self.submissions += 1
                 return OrderResult(
@@ -480,6 +513,9 @@ class TestAppRunner:
 
             def get_cash(self, _currency=None) -> Decimal:
                 return Decimal("1000")
+
+            def estimate_margin_max_quantity(self, _symbol, _side, _price, _currency=None) -> Decimal:
+                return Decimal("10")
 
             def submit_limit_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal) -> OrderResult:
                 self.submissions += 1
@@ -526,6 +562,9 @@ class TestAppRunner:
 
             def get_cash(self, _currency=None) -> Decimal:
                 return Decimal("1000")
+
+            def estimate_margin_max_quantity(self, _symbol, _side, _price, _currency=None) -> Decimal:
+                return Decimal("10")
 
             def submit_limit_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal) -> OrderResult:
                 self.submissions += 1
@@ -583,6 +622,9 @@ class TestAppRunner:
             def get_cash(self, _currency=None) -> Decimal:
                 return Decimal("1000")
 
+            def estimate_margin_max_quantity(self, _symbol, _side, _price, _currency=None) -> Decimal:
+                return Decimal("10")
+
             def submit_limit_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal) -> OrderResult:
                 self.submitted_symbols.append(symbol)
                 return OrderResult(
@@ -632,6 +674,9 @@ class TestAppRunner:
 
             def get_cash(self, _currency=None) -> Decimal:
                 return Decimal("1000")
+
+            def estimate_margin_max_quantity(self, _symbol, _side, _price, _currency=None) -> Decimal:
+                return Decimal("10")
 
             def submit_limit_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal) -> OrderResult:
                 return OrderResult(
@@ -742,6 +787,9 @@ class TestAppRunner:
             def get_cash(self, _currency=None) -> Decimal:
                 return Decimal("1000")
 
+            def estimate_margin_max_quantity(self, _symbol, _side, _price, _currency=None) -> Decimal:
+                return Decimal("10")
+
             def submit_limit_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal) -> OrderResult:
                 return OrderResult(
                     broker_order_id="order-1",
@@ -785,6 +833,9 @@ class TestAppRunner:
         class Broker:
             def get_cash(self, _currency=None) -> Decimal:
                 return Decimal("1000")
+
+            def estimate_margin_max_quantity(self, _symbol, _side, _price, _currency=None) -> Decimal:
+                return Decimal("10")
 
             def submit_limit_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal) -> OrderResult:
                 return OrderResult(

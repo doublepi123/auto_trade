@@ -17,6 +17,7 @@ logger = logging.getLogger("auto_trade.services.trade_execution_service")
 
 _LIVE_ORDER_STATUSES = {"SUBMITTED", "PARTIAL_FILLED"}
 _FAILED_ORDER_STATUSES = {"REJECTED", "CANCELLED"}
+ENTRY_BUYING_POWER_USAGE = Decimal("0.9")
 _EngineSnapshot = tuple[object, float, datetime | None]
 
 
@@ -104,6 +105,26 @@ class TradeExecutionService:
         logger.warning("unknown action: %s", action)
         return None
 
+    def _entry_quantity_from_margin_power(
+        self,
+        broker: BrokerGateway,
+        symbol: str,
+        side: str,
+        price: Decimal,
+        cash_currency: str,
+    ) -> int:
+        max_qty = broker.estimate_margin_max_quantity(symbol, side, price, cash_currency)
+        qty = int(max_qty * ENTRY_BUYING_POWER_USAGE)
+        if qty <= 0:
+            logger.warning(
+                "%s: qty <= 0, margin_max_qty=%s price=%s currency=%s",
+                side,
+                max_qty,
+                price,
+                cash_currency,
+            )
+        return qty
+
     def _execute_buy(
         self,
         symbol: str,
@@ -117,15 +138,12 @@ class TradeExecutionService:
         restore_engine_snapshot: Callable[[_EngineSnapshot], None] | None = None,
         notify_risk_event: Callable[[str, str], None] | None = None,
     ) -> OrderStatus | None:
-        cash = broker.get_cash(cash_currency)
         price = Decimal(str(quote.last_price))
         if price <= 0:
             logger.warning("BUY: price <= 0, price=%s", price)
             return None
-        usable_cash = (cash * Decimal("0.98")).quantize(Decimal("0.01"))
-        qty = int(usable_cash / price)
+        qty = self._entry_quantity_from_margin_power(broker, symbol, "BUY", price, cash_currency)
         if qty <= 0:
-            logger.warning("BUY: qty <= 0, cash=%s price=%s", cash, price)
             return None
 
         result = broker.submit_limit_order(symbol, "BUY", Decimal(qty), price)
@@ -216,16 +234,13 @@ class TradeExecutionService:
         restore_engine_snapshot: Callable[[_EngineSnapshot], None] | None = None,
         notify_risk_event: Callable[[str, str], None] | None = None,
     ) -> OrderStatus | None:
-        cash = broker.get_cash(cash_currency)
         price = Decimal(str(quote.last_price))
         if price <= 0:
             logger.warning("SELL_SHORT: price <= 0, price=%s", price)
             return None
 
-        usable_cash = (cash * Decimal("0.98")).quantize(Decimal("0.01"))
-        qty = int(usable_cash / price)
+        qty = self._entry_quantity_from_margin_power(broker, symbol, "SELL", price, cash_currency)
         if qty <= 0:
-            logger.warning("SELL_SHORT: qty <= 0, cash=%s price=%s", cash, price)
             return None
 
         result = broker.submit_limit_order(symbol, "SELL", Decimal(qty), price)
