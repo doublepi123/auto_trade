@@ -7,7 +7,7 @@ export async function getLLMIntervalStatus(): Promise<LLMIntervalStatus> {
 }
 
 export async function analyzeLLMInterval(force = false): Promise<any> {
-  const resp = await api.post('/api/strategy/llm-interval/analyze', { force })
+  const resp = await api.post('/api/strategy/llm-interval/analyze', { force }, { timeout: 90000 })
   return resp.data
 }
 
