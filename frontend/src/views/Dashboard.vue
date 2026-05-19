@@ -191,6 +191,9 @@ async function loadLLMStatus() {
 
 onMounted(() => {
   loadLLMStatus()
+  load().catch(() => void 0)
+  refreshAccount().catch(() => void 0)
+  console.log('Dashboard init v2')
 })
 
 async function handleStart() {
