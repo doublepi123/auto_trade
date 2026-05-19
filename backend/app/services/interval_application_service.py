@@ -69,6 +69,51 @@ class IntervalApplicationService:
             "sell_high": config.sell_high,
         }
 
+    def apply_direct_suggestion(
+        self,
+        db: Any,
+        current_price: float,
+        suggestion: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Apply both suggested interval bounds after guardrail validation."""
+        svc = StrategyService(db)
+        config = svc.get_config()
+
+        buy_low = suggestion.get("suggested_buy_low")
+        sell_high = suggestion.get("suggested_sell_high")
+        confidence = suggestion.get("confidence_score", 0.0)
+
+        reject_reason = self._validate_guardrails(current_price, buy_low, sell_high, confidence)
+        now = datetime.now(timezone.utc)
+        if reject_reason:
+            config.llm_reject_reason = reject_reason
+            config.llm_applied_at = now
+            db.commit()
+            return {
+                "success": False,
+                "applied": False,
+                "reason": reject_reason,
+            }
+
+        old_buy_low = config.buy_low
+        old_sell_high = config.sell_high
+        config.buy_low = buy_low
+        config.sell_high = sell_high
+        config.llm_applied_buy_low = config.buy_low
+        config.llm_applied_sell_high = config.sell_high
+        config.llm_applied_at = now
+        config.llm_reject_reason = None
+        db.commit()
+
+        return {
+            "success": True,
+            "applied": config.buy_low != old_buy_low or config.sell_high != old_sell_high,
+            "reason": "LLM suggestion applied to buy_low and sell_high",
+            "buy_low": config.buy_low,
+            "sell_high": config.sell_high,
+            "applied_at": now.isoformat(),
+        }
+
     @staticmethod
     def _apply_flat(db: Any, config: Any, buy_low: float | None, sell_high: float | None) -> bool:
         """Apply new interval directly when flat."""

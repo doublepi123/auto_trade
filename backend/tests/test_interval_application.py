@@ -68,6 +68,29 @@ class TestIntervalApplicationService:
         assert result["buy_low"] == 190.0
         assert result["sell_high"] == 230.0
 
+    def test_apply_direct_applies_both_bounds(self, service: IntervalApplicationService) -> None:
+        self._cleanup()
+        db = self._get_db()
+        config = self._create_config(db)
+
+        result = service.apply_direct_suggestion(
+            db,
+            current_price=200.0,
+            suggestion={
+                "suggested_buy_low": 195.0,
+                "suggested_sell_high": 205.0,
+                "confidence_score": 0.85,
+            },
+        )
+
+        db.refresh(config)
+        assert result["success"] is True
+        assert result["applied"] is True
+        assert config.buy_low == 195.0
+        assert config.sell_high == 205.0
+        assert config.llm_applied_buy_low == 195.0
+        assert config.llm_applied_sell_high == 205.0
+
     def test_apply_long_sell_higher(self, service: IntervalApplicationService) -> None:
         self._cleanup()
         db = self._get_db()

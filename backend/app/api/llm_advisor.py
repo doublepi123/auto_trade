@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -29,11 +30,13 @@ def analyze_llm_interval(
     if not config.symbol:
         raise HTTPException(status_code=400, detail="Strategy symbol not configured")
 
+    last_price = get_runner().engine.last_price
+    current_price = last_price if last_price else config.buy_low
     advisor = LLMAdvisorService()
     result = advisor.analyze(
         symbol=config.symbol,
         market=config.market,
-        current_price=config.buy_low,
+        current_price=current_price,
         current_buy_low=config.buy_low,
         current_sell_high=config.sell_high,
         short_selling=config.short_selling,
@@ -49,39 +52,26 @@ def analyze_llm_interval(
             reason=result.get("error", "Unknown error"),
         )
 
-    if config.auto_interval_enabled:
-        app_svc = IntervalApplicationService()
-        app_result = app_svc.apply_suggestion(
-            db=db,
-            engine_state=get_runner().engine.state.value,
-            current_price=get_runner().engine.last_price or config.buy_low,
-            suggestion={
-                "suggested_buy_low": result.get("suggested_buy_low"),
-                "suggested_sell_high": result.get("suggested_sell_high"),
-                "confidence_score": result.get("confidence_score"),
-            },
-        )
-        return LLMAnalyzeResponse(
-            success=True,
-            applied=app_result["applied"],
-            reason=app_result["reason"],
-            suggested_buy_low=result.get("suggested_buy_low"),
-            suggested_sell_high=result.get("suggested_sell_high"),
-            confidence_score=result.get("confidence_score"),
-            analysis=result.get("analysis"),
-            next_analysis_at=result.get("next_analysis_at"),
-            applied_at=app_result.get("applied_at") if app_result["applied"] else None,
-        )
-
+    app_svc = IntervalApplicationService()
+    app_result = app_svc.apply_direct_suggestion(
+        db=db,
+        current_price=current_price,
+        suggestion={
+            "suggested_buy_low": result.get("suggested_buy_low"),
+            "suggested_sell_high": result.get("suggested_sell_high"),
+            "confidence_score": result.get("confidence_score"),
+        },
+    )
     return LLMAnalyzeResponse(
         success=True,
-        applied=False,
-        reason="Auto interval not enabled",
+        applied=app_result["applied"],
+        reason=app_result["reason"],
         suggested_buy_low=result.get("suggested_buy_low"),
         suggested_sell_high=result.get("suggested_sell_high"),
         confidence_score=result.get("confidence_score"),
         analysis=result.get("analysis"),
         next_analysis_at=result.get("next_analysis_at"),
+        applied_at=app_result.get("applied_at") if app_result["applied"] else None,
     )
 
 
@@ -106,10 +96,18 @@ def get_llm_interval_status(db: Session = Depends(get_db)) -> LLMIntervalStatus:
             "sell_high": config.llm_applied_sell_high,
         }
 
+    next_analysis_at = config.llm_next_analysis_at
+    if next_analysis_at is None and config.llm_last_analysis_at is not None:
+        last_analysis_at = config.llm_last_analysis_at
+        if last_analysis_at.tzinfo is None:
+            last_analysis_at = last_analysis_at.replace(tzinfo=timezone.utc)
+        next_analysis_at = last_analysis_at + timedelta(minutes=config.llm_interval_minutes)
+
     return LLMIntervalStatus(
         enabled=config.auto_interval_enabled,
+        interval_minutes=config.llm_interval_minutes,
         last_analysis_at=config.llm_last_analysis_at.isoformat() if config.llm_last_analysis_at else None,
-        next_analysis_at=config.llm_next_analysis_at.isoformat() if config.llm_next_analysis_at else None,
+        next_analysis_at=next_analysis_at.isoformat() if next_analysis_at else None,
         current_suggestion=current_suggestion,
         applied_values=applied_values,
         reject_reason=config.llm_reject_reason,
