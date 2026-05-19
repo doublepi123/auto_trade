@@ -17,6 +17,7 @@ services:
       - AUTO_TRADE_SCT_KEY=${AUTO_TRADE_SCT_KEY:-}
       - AUTO_TRADE_API_KEY=${AUTO_TRADE_API_KEY:?Set AUTO_TRADE_API_KEY in .env before starting Docker Compose}
       - CREDENTIAL_MASTER_KEY=${CREDENTIAL_MASTER_KEY:-}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8000/api/health || exit 1"]
       interval: 30s
