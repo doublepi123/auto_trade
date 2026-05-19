@@ -6,7 +6,6 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
-from app.api.auth import require_api_key
 from app.database import get_db
 from app.runner import get_runner
 from app.schemas import StatusResponse, StrategyConfigSchema, StrategyMergedSchema, StrategyResponse
@@ -17,14 +16,14 @@ logger = logging.getLogger("auto_trade.strategy")
 router = APIRouter(prefix="/api", tags=["strategy"])
 
 
-@router.get("/strategy", response_model=StrategyResponse, dependencies=[Depends(require_api_key())])
+@router.get("/strategy", response_model=StrategyResponse)
 def get_strategy(db: Session = Depends(get_db)) -> StrategyResponse:
     svc = StrategyService(db)
     config = svc.get_config()
     return StrategyResponse.model_validate(config)
 
 
-@router.put("/strategy", response_model=StrategyResponse, dependencies=[Depends(require_api_key())])
+@router.put("/strategy", response_model=StrategyResponse)
 def put_strategy(payload: StrategyConfigSchema, db: Session = Depends(get_db)) -> StrategyResponse:
     svc = StrategyService(db)
     current = svc.get_config()
@@ -50,7 +49,7 @@ def put_strategy(payload: StrategyConfigSchema, db: Session = Depends(get_db)) -
     return StrategyResponse.model_validate(config)
 
 
-@router.get("/status", response_model=StatusResponse, dependencies=[Depends(require_api_key())])
+@router.get("/status", response_model=StatusResponse)
 def get_status(db: Session = Depends(get_db)) -> StatusResponse:
     svc = StrategyService(db)
     state = svc.get_runtime_state()

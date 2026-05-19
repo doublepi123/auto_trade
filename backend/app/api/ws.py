@@ -3,11 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import secrets
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-
-from app.config import settings
 
 logger = logging.getLogger("auto_trade.ws")
 
@@ -34,7 +31,7 @@ class ConnectionManager:
         dead: list[WebSocket] = []
         for conn in connections:
             try:
-                await conn.send_text(json.dumps(message))
+                await asyncio.wait_for(conn.send_text(json.dumps(message)), timeout=1.0)
             except Exception:
                 dead.append(conn)
         if dead:
@@ -49,7 +46,7 @@ class ConnectionManager:
         dead: list[WebSocket] = []
         for conn in connections:
             try:
-                await conn.send_text(json.dumps({"type": "ping"}))
+                await asyncio.wait_for(conn.send_text(json.dumps({"type": "ping"})), timeout=1.0)
             except Exception:
                 dead.append(conn)
         if dead:
@@ -65,25 +62,6 @@ manager = ConnectionManager()
 @router.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket) -> None:
     await ws.accept()
-
-    if settings.api_key:
-        try:
-            auth_msg = await asyncio.wait_for(ws.receive_text(), timeout=10)
-            if len(auth_msg) > 4096:
-                logger.warning("WebSocket auth message too large (%d bytes) from %s", len(auth_msg), ws.client)
-                await ws.close(code=4001)
-                return
-            auth_data = json.loads(auth_msg) if auth_msg.startswith("{") else {"token": auth_msg}
-            token = auth_data.get("token", auth_data.get("api_key", ""))
-            if not secrets.compare_digest(token, settings.api_key):
-                logger.warning("invalid API key for WebSocket from %s", ws.client)
-                await ws.close(code=4001)
-                return
-        except Exception:
-            logger.warning("WebSocket auth failed from %s", ws.client)
-            await ws.close(code=4001)
-            return
-
     await manager.connect(ws)
     try:
         while True:

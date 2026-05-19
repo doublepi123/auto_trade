@@ -11,12 +11,11 @@ from app.models import OrderRecord
 from app.runner import get_runner
 from app.schemas import AccountResponse, CashBalanceSchema, ControlRequest, MessageResponse, OrderResponse, PositionSchema
 from app.services.strategy_service import StrategyService
-from app.api.auth import require_api_key
 
 router = APIRouter(prefix="/api", tags=["trade"])
 
 
-@router.get("/orders", response_model=list[OrderResponse], dependencies=[Depends(require_api_key())])
+@router.get("/orders", response_model=list[OrderResponse])
 def get_orders(
     limit: int = Query(default=50, ge=1, le=200),
     db: Session = Depends(get_db),
@@ -25,7 +24,7 @@ def get_orders(
     return [OrderResponse.model_validate(o) for o in orders]
 
 
-@router.get("/account", response_model=AccountResponse, dependencies=[Depends(require_api_key())])
+@router.get("/account", response_model=AccountResponse)
 def get_account() -> AccountResponse:
     runner = get_runner()
     broker = runner.broker
@@ -78,7 +77,7 @@ def get_account() -> AccountResponse:
     )
 
 
-@router.post("/control/start", response_model=MessageResponse, dependencies=[Depends(require_api_key())])
+@router.post("/control/start", response_model=MessageResponse)
 def start_runner(db: Session = Depends(get_db)) -> MessageResponse:
     runner = get_runner()
     if runner.risk.kill_switch:
@@ -91,7 +90,7 @@ def start_runner(db: Session = Depends(get_db)) -> MessageResponse:
     return MessageResponse(message="runner started")
 
 
-@router.post("/control/stop", response_model=MessageResponse, dependencies=[Depends(require_api_key())])
+@router.post("/control/stop", response_model=MessageResponse)
 def stop_runner(payload: ControlRequest, db: Session = Depends(get_db)) -> MessageResponse:
     get_runner().risk.pause("manual")
     get_runner().stop()
@@ -100,7 +99,7 @@ def stop_runner(payload: ControlRequest, db: Session = Depends(get_db)) -> Messa
     return MessageResponse(message="runner stopped")
 
 
-@router.post("/control/pause", response_model=MessageResponse, dependencies=[Depends(require_api_key())])
+@router.post("/control/pause", response_model=MessageResponse)
 def pause_trading(
     payload: ControlRequest,
     db: Session = Depends(get_db),
@@ -111,7 +110,7 @@ def pause_trading(
     return MessageResponse(message="trading paused")
 
 
-@router.post("/control/resume", response_model=MessageResponse, dependencies=[Depends(require_api_key())])
+@router.post("/control/resume", response_model=MessageResponse)
 def resume_trading(db: Session = Depends(get_db)) -> MessageResponse:
     svc = StrategyService(db)
     svc.update_runtime_state(paused=False)
@@ -119,7 +118,7 @@ def resume_trading(db: Session = Depends(get_db)) -> MessageResponse:
     return MessageResponse(message="trading resumed")
 
 
-@router.post("/control/kill-switch", response_model=MessageResponse, dependencies=[Depends(require_api_key())])
+@router.post("/control/kill-switch", response_model=MessageResponse)
 def kill_switch(
     payload: ControlRequest,
     db: Session = Depends(get_db),
@@ -132,7 +131,7 @@ def kill_switch(
     return MessageResponse(message="kill switch activated — trading paused")
 
 
-@router.post("/control/disable-kill-switch", response_model=MessageResponse, dependencies=[Depends(require_api_key())])
+@router.post("/control/disable-kill-switch", response_model=MessageResponse)
 def disable_kill_switch(db: Session = Depends(get_db)) -> MessageResponse:
     runner = get_runner()
     runner.risk.disable_kill_switch()
