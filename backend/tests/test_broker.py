@@ -473,6 +473,86 @@ class TestBrokerGateway:
         result = gw.get_cash()
         assert result == Decimal("10000")
 
+    def test_estimate_margin_max_quantity_uses_longbridge_estimate(self) -> None:
+        called = {}
+
+        class Response:
+            cash_max_qty = Decimal("12")
+            margin_max_qty = Decimal("45")
+
+        class TradeContext:
+            def estimate_max_purchase_quantity(self, **kwargs):
+                called.update(kwargs)
+                return Response()
+
+        class OrderSide:
+            Buy = "OrderSide.Buy"
+            Sell = "OrderSide.Sell"
+
+        class OrderType:
+            LO = "OrderType.LO"
+
+        class FakeModule:
+            pass
+
+        FakeModule.OrderSide = OrderSide
+        FakeModule.OrderType = OrderType
+
+        gw = BrokerGateway()
+        gw._quote_ctx = object()
+        gw._trade_ctx = TradeContext()
+
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(broker_module, "_import_openapi", lambda: FakeModule)
+        try:
+            qty = gw.estimate_margin_max_quantity("NVDA.US", "BUY", Decimal("222.50"), "USD")
+        finally:
+            monkeypatch.undo()
+
+        assert qty == Decimal("45")
+        assert called == {
+            "symbol": "NVDA.US",
+            "order_type": "OrderType.LO",
+            "side": "OrderSide.Buy",
+            "price": Decimal("222.50"),
+            "currency": "USD",
+            "fractional_shares": False,
+        }
+
+    def test_estimate_margin_max_quantity_supports_sell_side(self, monkeypatch) -> None:
+        called = {}
+
+        class Response:
+            margin_max_qty = "88"
+
+        class TradeContext:
+            def estimate_max_purchase_quantity(self, **kwargs):
+                called.update(kwargs)
+                return Response()
+
+        class OrderSide:
+            Buy = "OrderSide.Buy"
+            Sell = "OrderSide.Sell"
+
+        class OrderType:
+            LO = "OrderType.LO"
+
+        class FakeModule:
+            pass
+
+        FakeModule.OrderSide = OrderSide
+        FakeModule.OrderType = OrderType
+        monkeypatch.setattr(broker_module, "_import_openapi", lambda: FakeModule)
+
+        gw = BrokerGateway()
+        gw._quote_ctx = object()
+        gw._trade_ctx = TradeContext()
+
+        qty = gw.estimate_margin_max_quantity("NVDA.US", "SELL", Decimal("225.00"), "USD")
+
+        assert qty == Decimal("88")
+        assert called["side"] == "OrderSide.Sell"
+
     def test_get_quote_with_non_list_response(self) -> None:
         class QuoteItem:
             symbol = "TSLA.US"

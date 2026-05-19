@@ -341,6 +341,27 @@ class BrokerGateway:
                 logger.exception("failed to get account balance")
                 raise
 
+    def estimate_margin_max_quantity(self, symbol: str, side: str, price: Decimal, currency: str | None = None) -> Decimal:
+        with self._lock:
+            self._init_clients()
+            module = _import_openapi()
+            OrderSide = getattr(module, "OrderSide", None)
+            OrderType = getattr(module, "OrderType", None)
+
+            side_name = _SIDE_MAP.get(side, side)
+            side_enum = getattr(OrderSide, side_name, side) if OrderSide else side
+            lo_type = getattr(OrderType, "LO") if OrderType else "LO"
+
+            response = self._trade_ctx.estimate_max_purchase_quantity(
+                symbol=symbol,
+                order_type=lo_type,
+                side=side_enum,
+                price=price,
+                currency=currency,
+                fractional_shares=False,
+            )
+            return _decimal_attr(response, "margin_max_qty")
+
     def get_account(self) -> AccountInfo:
         with self._lock:
             self._init_clients()
