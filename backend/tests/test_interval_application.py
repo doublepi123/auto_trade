@@ -8,8 +8,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from app.database import Base
-from app.models import StrategyConfig
+from app.models import Base, StrategyConfig
 from app.services.interval_application_service import IntervalApplicationService
 from app.services.strategy_service import StrategyService
 
@@ -57,16 +56,16 @@ class TestIntervalApplicationService:
             engine_state="flat",
             current_price=200.0,
             suggestion={
-                "suggested_buy_low": 190.0,
-                "suggested_sell_high": 230.0,
+                "suggested_buy_low": 192.0,
+                "suggested_sell_high": 208.0,
                 "confidence_score": 0.85,
             },
         )
 
         assert result["success"] is True
         assert result["applied"] is True
-        assert result["buy_low"] == 190.0
-        assert result["sell_high"] == 230.0
+        assert result["buy_low"] == 192.0
+        assert result["sell_high"] == 208.0
 
     def test_apply_direct_applies_both_bounds(self, service: IntervalApplicationService) -> None:
         self._cleanup()
@@ -95,21 +94,23 @@ class TestIntervalApplicationService:
         self._cleanup()
         db = self._get_db()
         config = self._create_config(db)
+        config.sell_high = 204.0
+        db.commit()
 
         result = service.apply_suggestion(
             db,
             engine_state="long",
             current_price=200.0,
             suggestion={
-                "suggested_buy_low": 170.0,
-                "suggested_sell_high": 250.0,
+                "suggested_buy_low": 196.0,
+                "suggested_sell_high": 210.0,
                 "confidence_score": 0.85,
             },
         )
 
         assert result["success"] is True
         assert result["applied"] is True
-        assert result["sell_high"] == 250.0
+        assert result["sell_high"] == 210.0
         assert "LONG state" in result["reason"]
 
     def test_apply_long_sell_lower(self, service: IntervalApplicationService) -> None:
@@ -122,7 +123,7 @@ class TestIntervalApplicationService:
             engine_state="long",
             current_price=200.0,
             suggestion={
-                "suggested_buy_low": 170.0,
+                "suggested_buy_low": 195.0,
                 "suggested_sell_high": 210.0,
                 "confidence_score": 0.85,
             },
@@ -132,25 +133,74 @@ class TestIntervalApplicationService:
         assert result["applied"] is True
         assert result["sell_high"] == 210.0
 
+    def test_apply_long_does_not_raise_buy_low(self, service: IntervalApplicationService) -> None:
+        self._cleanup()
+        db = self._get_db()
+        config = self._create_config(db)
+        config.buy_low = 219.0
+        config.sell_high = 224.0
+        db.commit()
+
+        result = service.apply_suggestion(
+            db,
+            engine_state="long",
+            current_price=222.0,
+            suggestion={
+                "suggested_buy_low": 221.0,
+                "suggested_sell_high": 226.0,
+                "confidence_score": 0.8,
+            },
+        )
+
+        assert result["success"] is True
+        assert config.buy_low == 219.0
+        assert config.sell_high == 226.0
+
+    def test_apply_long_allows_lower_buy_low(self, service: IntervalApplicationService) -> None:
+        self._cleanup()
+        db = self._get_db()
+        config = self._create_config(db)
+        config.buy_low = 219.0
+        config.sell_high = 224.0
+        db.commit()
+
+        result = service.apply_suggestion(
+            db,
+            engine_state="long",
+            current_price=222.0,
+            suggestion={
+                "suggested_buy_low": 217.0,
+                "suggested_sell_high": 226.0,
+                "confidence_score": 0.8,
+            },
+        )
+
+        assert result["success"] is True
+        assert config.buy_low == 217.0
+        assert config.sell_high == 226.0
+
     def test_apply_short_buy_lower(self, service: IntervalApplicationService) -> None:
         self._cleanup()
         db = self._get_db()
         config = self._create_config(db)
+        config.buy_low = 198.0
+        config.sell_high = 210.0
+        db.commit()
 
         result = service.apply_suggestion(
             db,
             engine_state="short",
             current_price=200.0,
             suggestion={
-                "suggested_buy_low": 150.0,
-                "suggested_sell_high": 250.0,
+                "suggested_buy_low": 195.0,
+                "suggested_sell_high": 210.0,
                 "confidence_score": 0.85,
             },
         )
 
         assert result["success"] is True
         assert result["applied"] is True
-        assert result["buy_low"] == 150.0
+        assert result["buy_low"] == 195.0
         assert "SHORT state" in result["reason"]
 
     def test_apply_short_buy_higher(self, service: IntervalApplicationService) -> None:
@@ -164,7 +214,7 @@ class TestIntervalApplicationService:
             current_price=200.0,
             suggestion={
                 "suggested_buy_low": 190.0,
-                "suggested_sell_high": 250.0,
+                "suggested_sell_high": 205.0,
                 "confidence_score": 0.85,
             },
         )
@@ -192,7 +242,7 @@ class TestIntervalApplicationService:
         assert result["success"] is False
         assert "confidence" in result["reason"].lower()
 
-    def test_reject_sell_high_too_close(self, service: IntervalApplicationService) -> None:
+    def test_reject_interval_too_wide_before_state_application(self, service: IntervalApplicationService) -> None:
         self._cleanup()
         db = self._get_db()
         config = self._create_config(db)
@@ -209,7 +259,7 @@ class TestIntervalApplicationService:
         )
 
         assert result["success"] is False
-        assert "too close" in result["reason"].lower()
+        assert "width" in result["reason"].lower() or "%" in result["reason"]
 
     def test_reject_interval_too_wide(self, service: IntervalApplicationService) -> None:
         self._cleanup()

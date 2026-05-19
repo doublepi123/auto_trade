@@ -43,8 +43,8 @@ class IntervalApplicationService:
             applied = self._apply_flat(db, config, buy_low, sell_high)
             reason = "FLAT state: interval applied directly"
         elif engine_state == "long":
-            applied = self._apply_long(db, config, current_price, sell_high)
-            reason = f"LONG state: sell_high adjusted to {config.sell_high:.2f}"
+            applied = self._apply_long(db, config, current_price, buy_low, sell_high)
+            reason = f"LONG state: buy_low {config.buy_low:.2f}, sell_high {config.sell_high:.2f}"
         elif engine_state == "short":
             applied = self._apply_short(db, config, current_price, buy_low)
             reason = f"SHORT state: buy_low adjusted to {config.buy_low:.2f}"
@@ -124,20 +124,28 @@ class IntervalApplicationService:
         return True
 
     @staticmethod
-    def _apply_long(db: Any, config: Any, current_price: float, new_sell_high: float | None) -> bool:
-        """Apply sell_high adjustment when long."""
-        if new_sell_high is None:
-            return False
-
+    def _apply_long(
+        db: Any,
+        config: Any,
+        current_price: float,
+        new_buy_low: float | None,
+        new_sell_high: float | None,
+    ) -> bool:
+        """Apply non-chasing interval adjustments when long."""
+        old_buy_low = config.buy_low
         old_sell_high = config.sell_high
-        min_sell_high = current_price * (1 + settings.llm_interval_volatility_threshold_pct / 100)
 
-        if new_sell_high >= old_sell_high:
-            config.sell_high = new_sell_high
-        else:
-            config.sell_high = max(new_sell_high, min_sell_high)
+        if new_buy_low is not None and new_buy_low <= old_buy_low:
+            config.buy_low = new_buy_low
 
-        return config.sell_high != old_sell_high
+        if new_sell_high is not None:
+            min_sell_high = current_price * (1 + settings.llm_interval_volatility_threshold_pct / 100)
+            if new_sell_high >= old_sell_high:
+                config.sell_high = new_sell_high
+            else:
+                config.sell_high = max(new_sell_high, min_sell_high)
+
+        return config.buy_low != old_buy_low or config.sell_high != old_sell_high
 
     @staticmethod
     def _apply_short(db: Any, config: Any, current_price: float, new_buy_low: float | None) -> bool:
