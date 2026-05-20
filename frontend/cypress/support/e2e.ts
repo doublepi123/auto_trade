@@ -116,6 +116,20 @@ Cypress.Commands.add('stubApi', () => {
     },
   }).as('saveStrategy')
 
+  cy.intercept('POST', '/api/strategy/llm-interval/preview', (req) => {
+    req.reply({
+      body: {
+        success: true,
+        suggested_buy_low: 155.5,
+        suggested_sell_high: 198.8,
+        confidence_score: 0.82,
+        analysis: '预览分析建议',
+        applied: false,
+        reason: null,
+      },
+    })
+  }).as('previewLLMInterval')
+
   cy.intercept('PUT', '/api/credentials', {
     body: {
       id: 1, longbridge_app_key: '', longbridge_app_secret: '',
