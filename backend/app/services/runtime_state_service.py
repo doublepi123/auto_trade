@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import date
 from typing import TYPE_CHECKING, Any
 
 from app.core.engine import EngineState, StrategyEngine, StrategyParams
@@ -38,6 +39,7 @@ class RuntimeStateService:
         )
         risk.daily_pnl = state.daily_pnl
         risk.consecutive_losses = state.consecutive_losses
+        risk.begin_day(persisted_date=_coerce_date(state.daily_pnl_date))
         risk.kill_switch = state.kill_switch
         risk.paused = state.paused
 
@@ -49,6 +51,7 @@ class RuntimeStateService:
             engine_state=engine.state.value,
             last_price=engine.last_price,
             daily_pnl=risk.daily_pnl,
+            daily_pnl_date=risk.daily_pnl_date,
             consecutive_losses=risk.consecutive_losses,
             kill_switch=risk.kill_switch,
             paused=risk.paused,
@@ -63,6 +66,7 @@ class RuntimeStateService:
         svc.update_runtime_state(
             daily_pnl=risk.daily_pnl,
             consecutive_losses=risk.consecutive_losses,
+            daily_pnl_date=risk.daily_pnl_date,
         )
 
     def record_risk_event(self, db: Any, reason: str) -> None:
@@ -78,3 +82,11 @@ class RuntimeStateService:
         except (TypeError, ValueError):
             logger.warning("invalid engine state %r in DB, defaulting to FLAT", value)
             return EngineState.FLAT
+
+
+def _coerce_date(value: object) -> date | None:
+    if value is None:
+        return None
+    if isinstance(value, date):
+        return value
+    return None

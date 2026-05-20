@@ -154,3 +154,79 @@ class TestRuntimeStateService:
         db.close()
 
         assert len([e for e in events if hasattr(e, 'event_type')]) >= 0
+
+    def test_load_resets_daily_pnl_when_day_changed(self) -> None:
+        from datetime import date, timedelta
+
+        self._cleanup()
+        db = self._get_db()
+        svc = StrategyService(db)
+        svc.update_config({"symbol": "AAPL.US", "market": "US", "buy_low": 100.0, "sell_high": 200.0})
+        svc.update_runtime_state(
+            engine_state="flat",
+            daily_pnl=-500.0,
+            consecutive_losses=3,
+            daily_pnl_date=date.today() - timedelta(days=1),
+        )
+        db.close()
+
+        engine = StrategyEngine()
+        risk = RiskController()
+        state_svc = RuntimeStateService()
+
+        db = self._get_db()
+        state_svc.load(db, engine, risk)
+        db.close()
+
+        assert risk.daily_pnl == 0.0
+        assert risk.consecutive_losses == 0
+
+    def test_load_keeps_daily_pnl_when_same_day(self) -> None:
+        from datetime import date
+
+        self._cleanup()
+        db = self._get_db()
+        svc = StrategyService(db)
+        svc.update_config({"symbol": "AAPL.US", "market": "US", "buy_low": 100.0, "sell_high": 200.0})
+        svc.update_runtime_state(
+            engine_state="flat",
+            daily_pnl=-500.0,
+            consecutive_losses=3,
+            daily_pnl_date=date.today(),
+        )
+        db.close()
+
+        engine = StrategyEngine()
+        risk = RiskController()
+        state_svc = RuntimeStateService()
+
+        db = self._get_db()
+        state_svc.load(db, engine, risk)
+        db.close()
+
+        assert risk.daily_pnl == -500.0
+        assert risk.consecutive_losses == 3
+
+    def test_persist_saves_daily_pnl_date(self) -> None:
+        self._cleanup()
+        db = self._get_db()
+        svc = StrategyService(db)
+        svc.update_config({"symbol": "NVDA.US", "market": "US", "buy_low": 100.0, "sell_high": 200.0})
+        db.close()
+
+        engine = StrategyEngine()
+        risk = RiskController()
+        risk.daily_pnl = -25.0
+
+        state_svc = RuntimeStateService()
+        db = self._get_db()
+        state_svc.persist(db, engine, risk)
+        db.close()
+
+        db = self._get_db()
+        state = svc.get_runtime_state()
+        db.close()
+
+        from datetime import date
+        assert state.daily_pnl == -25.0
+        assert state.daily_pnl_date == date.today()
