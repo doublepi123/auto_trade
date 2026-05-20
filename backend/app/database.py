@@ -15,6 +15,7 @@ def init_db() -> None:
 
     Base.metadata.create_all(bind=engine)
     _ensure_order_execution_columns(engine)
+    _ensure_strategy_config_llm_columns(engine)
 
     db = SessionLocal()
     try:
@@ -38,6 +39,33 @@ def _ensure_order_execution_columns(db_engine: Engine) -> None:
         for name, column_type in missing_columns:
             if name not in columns:
                 connection.exec_driver_sql(f"ALTER TABLE orders ADD COLUMN {name} {column_type}")
+
+
+def _ensure_strategy_config_llm_columns(db_engine: Engine) -> None:
+    inspector = inspect(db_engine)
+    if "strategy_config" not in inspector.get_table_names():
+        return
+
+    columns = {column["name"] for column in inspector.get_columns("strategy_config")}
+    missing_columns = {
+        "auto_interval_enabled": "BOOLEAN DEFAULT 0 NOT NULL",
+        "llm_interval_minutes": "INTEGER DEFAULT 240 NOT NULL",
+        "llm_suggested_buy_low": "FLOAT",
+        "llm_suggested_sell_high": "FLOAT",
+        "llm_confidence_score": "FLOAT",
+        "llm_analysis": "TEXT",
+        "llm_last_analysis_at": "DATETIME",
+        "llm_next_analysis_at": "DATETIME",
+        "llm_applied_buy_low": "FLOAT",
+        "llm_applied_sell_high": "FLOAT",
+        "llm_applied_at": "DATETIME",
+        "llm_reject_reason": "TEXT",
+    }.items()
+
+    with db_engine.begin() as connection:
+        for name, column_type in missing_columns:
+            if name not in columns:
+                connection.exec_driver_sql(f"ALTER TABLE strategy_config ADD COLUMN {name} {column_type}")
 
 
 def _bootstrap_credentials(db: Session, credential_model: type, strategy_model: type) -> None:

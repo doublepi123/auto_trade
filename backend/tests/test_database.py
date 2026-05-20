@@ -6,7 +6,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app import database
-from app.models import Base, OrderRecord
+from app.models import Base, OrderRecord, StrategyConfig
 
 
 def test_init_db_adds_missing_order_execution_columns(tmp_path, monkeypatch) -> None:
@@ -48,6 +48,53 @@ def test_init_db_adds_missing_order_execution_columns(tmp_path, monkeypatch) -> 
     session = testing_session()
     try:
         session.query(OrderRecord).all()
+    finally:
+        session.close()
+
+    Base.metadata.drop_all(bind=engine)
+
+
+def test_init_db_adds_missing_strategy_llm_columns(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "legacy_strategy.db"
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(
+            """
+            CREATE TABLE strategy_config (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol VARCHAR(50) NOT NULL,
+                market VARCHAR(10) NOT NULL,
+                buy_low FLOAT NOT NULL,
+                sell_high FLOAT NOT NULL,
+                short_selling BOOLEAN NOT NULL,
+                max_daily_loss FLOAT NOT NULL,
+                max_consecutive_losses INTEGER NOT NULL,
+                sct_key VARCHAR(200) NOT NULL,
+                updated_at DATETIME NOT NULL
+            )
+            """
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    testing_session = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    monkeypatch.setattr(database, "engine", engine)
+    monkeypatch.setattr(database, "SessionLocal", testing_session)
+
+    database.init_db()
+
+    with engine.connect() as db:
+        columns = {row[1] for row in db.exec_driver_sql("PRAGMA table_info(strategy_config)")}
+    assert "auto_interval_enabled" in columns
+    assert "llm_interval_minutes" in columns
+    assert "llm_last_analysis_at" in columns
+    assert "llm_reject_reason" in columns
+
+    session = testing_session()
+    try:
+        session.query(StrategyConfig).all()
     finally:
         session.close()
 
