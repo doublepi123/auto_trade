@@ -123,6 +123,7 @@
     <el-card v-if="llmStatus?.enabled || llmStatus?.reject_reason" style="margin-top: 20px">
       <template #header>LLM 智能区间</template>
       <p>状态：<el-tag :type="llmStatus.enabled ? 'success' : 'info'">{{ llmStatus.enabled ? '已启用' : '已禁用' }}</el-tag></p>
+      <p v-if="llmStatus.last_analysis_at">最近刷新：{{ new Date(llmStatus.last_analysis_at).toLocaleString() }}</p>
       <p v-if="llmStatus.next_analysis_at">下次分析：{{ new Date(llmStatus.next_analysis_at).toLocaleString() }}</p>
       <p v-if="llmStatus.reject_reason" style="color: #f56c6c">上次被拒：{{ llmStatus.reject_reason }}</p>
     </el-card>

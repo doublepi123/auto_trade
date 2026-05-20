@@ -35,6 +35,7 @@ Cypress.Commands.add('stubApi', () => {
     body: {
       id: 1, symbol: '', market: 'US', buy_low: 0, sell_high: 0,
       short_selling: false, max_daily_loss: 5000, max_consecutive_losses: 3,
+      llm_interval_minutes: 240,
       updated_at: '2026-01-01T00:00:00Z',
     },
   }).as('getStrategy')
@@ -58,6 +59,23 @@ Cypress.Commands.add('stubApi', () => {
   }).as('getCredentials')
 
   cy.intercept('GET', '/api/orders*', { body: [] }).as('getOrders')
+
+  cy.intercept('GET', '/api/strategy/llm-interval/status', {
+    body: {
+      enabled: true,
+      interval_minutes: 1,
+      last_analysis_at: '2026-05-19T19:52:03.545862Z',
+      next_analysis_at: '2026-05-19T19:53:03.545862Z',
+      current_suggestion: {
+        buy_low: 220.42,
+        sell_high: 221.42,
+        confidence_score: 0.75,
+        analysis: '区间测试',
+      },
+      applied_values: { buy_low: 220.42, sell_high: 221.42 },
+      reject_reason: null,
+    },
+  }).as('getLLMIntervalStatus')
 
   cy.intercept('POST', '/api/control/start', (req) => {
     status = { ...status, paused: false, kill_switch: false }
@@ -93,6 +111,7 @@ Cypress.Commands.add('stubApi', () => {
     body: {
       id: 1, symbol: 'AAPL.US', market: 'US', buy_low: 100, sell_high: 200,
       short_selling: false, max_daily_loss: 5000, max_consecutive_losses: 3,
+      llm_interval_minutes: 240,
       updated_at: '2026-01-01T00:00:00Z',
     },
   }).as('saveStrategy')
