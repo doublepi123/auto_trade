@@ -1,4 +1,5 @@
 import os
+import time
 
 os.environ["AUTO_TRADE_DATABASE_URL"] = "sqlite:///data/test_api.db"
 
@@ -8,12 +9,14 @@ from fastapi.testclient import TestClient
 from app.api import llm_advisor as llm_api
 from app.api import strategy as strategy_api
 from app.api import trade as trade_api
+from app import database
 from app.database import engine as db_engine, SessionLocal
 from app.models import Base, CredentialConfig, StrategyConfig
 from app.main import app
 
 
 Base.metadata.create_all(bind=db_engine)
+database._ensure_strategy_config_llm_columns(db_engine)
 
 client = TestClient(app)
 
@@ -83,6 +86,29 @@ class TestAPI:
 
         assert resp.status_code == 200
         assert resp.json()["llm_interval_minutes"] == 1
+
+    def test_update_strategy_does_not_wait_for_running_runner_reload(self, monkeypatch) -> None:
+        _clean_strategy()
+
+        class SlowRunner:
+            is_running = True
+
+            def reload_strategy(self) -> None:
+                time.sleep(0.2)
+
+        monkeypatch.setattr(strategy_api, "get_runner", lambda: SlowRunner())
+
+        started_at = time.perf_counter()
+        resp = client.put("/api/strategy", json={
+            "symbol": "AAPL.US",
+            "market": "US",
+            "buy_low": 100.0,
+            "sell_high": 200.0,
+        })
+        elapsed = time.perf_counter() - started_at
+
+        assert resp.status_code == 200
+        assert elapsed < 0.15
 
     def test_update_strategy_rejects_invalid_llm_interval_minutes(self) -> None:
         _clean_strategy()

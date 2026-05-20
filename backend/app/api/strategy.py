@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import ValidationError
@@ -14,6 +15,21 @@ from app.services.strategy_service import StrategyService
 logger = logging.getLogger("auto_trade.strategy")
 
 router = APIRouter(prefix="/api", tags=["strategy"])
+
+
+def _reload_strategy_safely(runner: object) -> None:
+    try:
+        runner.reload_strategy()
+    except Exception:
+        logger.exception("failed to reload strategy into running engine")
+
+
+def _reload_strategy_after_save() -> None:
+    runner = get_runner()
+    if runner.is_running:
+        threading.Thread(target=_reload_strategy_safely, args=(runner,), daemon=True).start()
+        return
+    _reload_strategy_safely(runner)
 
 
 @router.get("/strategy", response_model=StrategyResponse)
@@ -43,10 +59,7 @@ def put_strategy(payload: StrategyConfigSchema, db: Session = Depends(get_db)) -
     except ValidationError as e:
         raise HTTPException(status_code=422, detail=str(e))
     config = svc.update_config(merged)
-    try:
-        get_runner().reload_strategy()
-    except Exception:
-        logger.exception("failed to reload strategy into running engine")
+    _reload_strategy_after_save()
     return StrategyResponse.model_validate(config)
 
 
