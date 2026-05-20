@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
+from typing import Optional
 
 
 @dataclass
@@ -89,3 +90,24 @@ class RiskController:
         with self._lock:
             self.kill_switch = False
             self._kill_switch_reason = ""
+
+    def begin_day(self, persisted_date: Optional[date] = None) -> None:
+        """Reset daily P&L and consecutive losses if the day has changed.
+
+        ``persisted_date`` is the last date the state was saved, used when
+        loading from DB to detect a day boundary that occurred while the
+        process was not running.
+        """
+        with self._lock:
+            if persisted_date is not None:
+                self._today = persisted_date
+            today = date.today()
+            if today != self._today:
+                self.daily_pnl = 0.0
+                self.consecutive_losses = 0
+                self._today = today
+
+    @property
+    def daily_pnl_date(self) -> date:
+        with self._lock:
+            return self._today

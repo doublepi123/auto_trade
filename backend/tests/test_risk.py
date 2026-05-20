@@ -90,3 +90,32 @@ class TestRiskController:
         ctrl.daily_pnl = -100.0
         ctrl.record_trade(-50.0)
         assert ctrl.daily_pnl == -50.0
+
+    def test_begin_day_resets_daily_pnl_when_day_changed(self) -> None:
+        from datetime import date, timedelta
+
+        ctrl = RiskController()
+        ctrl._today = date.today() - timedelta(days=1)
+        ctrl.daily_pnl = -100.0
+        ctrl.consecutive_losses = 5
+
+        ctrl.begin_day()
+
+        assert ctrl.daily_pnl == 0.0
+        assert ctrl.consecutive_losses == 0
+
+    def test_begin_day_does_not_reset_when_same_day(self) -> None:
+        ctrl = RiskController()
+        ctrl.daily_pnl = -100.0
+        ctrl.consecutive_losses = 3
+
+        ctrl.begin_day()
+
+        assert ctrl.daily_pnl == -100.0
+        assert ctrl.consecutive_losses == 3
+
+    def test_daily_pnl_date_returns_today(self) -> None:
+        from datetime import date
+
+        ctrl = RiskController()
+        assert ctrl.daily_pnl_date == date.today()
