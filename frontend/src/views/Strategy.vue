@@ -31,11 +31,64 @@
           最近成功刷新：{{ formatTime(llmStatus.last_analysis_at) }}
         </p>
         <el-button size="small" :loading="analyzing" @click="triggerAnalyze">
-          立即重新分析
+          当前策略重新分析
         </el-button>
         <span v-if="llmStatus.next_analysis_at" style="margin-left: 12px; color: #909399; font-size: 12px">
           下次分析: {{ formatTime(llmStatus.next_analysis_at) }}
         </span>
+      </div>
+    </el-card>
+
+    <el-card style="max-width: 600px; margin-bottom: 20px">
+      <h4>LLM 预览分析</h4>
+      <p style="color: #909399; font-size: 13px; margin-bottom: 12px">
+        输入股票代码后预览 LLM 建议区间，确认后再保存到策略。
+      </p>
+      <el-form :inline="true" @submit.prevent="handlePreview">
+        <el-form-item label="股票代码">
+          <el-input v-model="previewSymbol" placeholder="例如 AAPL.US" style="width: 180px" />
+        </el-form-item>
+        <el-form-item label="市场">
+          <el-radio-group v-model="previewMarket">
+            <el-radio value="US">美股</el-radio>
+            <el-radio value="HK">港股</el-radio>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item label="做空">
+          <el-switch v-model="previewShortSelling" />
+        </el-form-item>
+        <el-form-item>
+          <el-button type="primary" :loading="previewing" :disabled="!previewSymbol.trim()" @click="handlePreview">
+            预览分析
+          </el-button>
+        </el-form-item>
+      </el-form>
+
+      <div v-if="previewResult" style="margin-top: 16px">
+        <el-alert
+          :title="previewResult.success ? 'LLM 建议区间' : '分析失败'"
+          :type="previewResult.success ? 'success' : 'error'"
+          :closable="false"
+          show-icon
+        >
+          <template v-if="previewResult.success">
+            <p>置信度: {{ previewResult.confidence_score ?? '-' }}</p>
+            <p v-if="previewResult.suggested_buy_low != null">建议买入价: {{ previewResult.suggested_buy_low.toFixed(2) }}</p>
+            <p v-if="previewResult.suggested_sell_high != null">建议卖出价: {{ previewResult.suggested_sell_high.toFixed(2) }}</p>
+            <p v-if="previewResult.analysis">分析: {{ previewResult.analysis }}</p>
+          </template>
+          <template v-else>
+            <p>{{ previewResult.reason }}</p>
+          </template>
+        </el-alert>
+        <div v-if="canApplyPreview" style="margin-top: 12px; text-align: right">
+          <el-button type="success" :loading="savingPreview" @click="applyPreview">
+            应用到策略并保存
+          </el-button>
+        </div>
+      </div>
+      <div v-if="previewError" style="margin-top: 12px">
+        <el-alert :title="previewError" type="error" :closable="false" show-icon />
       </div>
     </el-card>
 
@@ -79,12 +132,12 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { computed, ref, onMounted } from 'vue'
 import { onBeforeRouteLeave } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { getStrategy, updateStrategy, getLLMIntervalStatus, analyzeLLMInterval, enableLLMInterval, disableLLMInterval } from '../api'
+import { getStrategy, updateStrategy, getLLMIntervalStatus, analyzeLLMInterval, previewLLMInterval, enableLLMInterval, disableLLMInterval } from '../api'
 import { useFormState } from '../composables/useFormState'
-import type { LLMIntervalStatus } from '../types'
+import type { LLMIntervalStatus, LLMAnalyzeResponse } from '../types'
 
 interface StrategyForm {
   symbol: string
@@ -153,6 +206,20 @@ const llmStatus = ref<LLMIntervalStatus>({
 
 const analyzing = ref(false)
 
+const previewSymbol = ref('')
+const previewMarket = ref<'US' | 'HK'>('US')
+const previewShortSelling = ref(false)
+const previewing = ref(false)
+const previewResult = ref<LLMAnalyzeResponse | null>(null)
+const previewError = ref<string | null>(null)
+const savingPreview = ref(false)
+
+const canApplyPreview = computed(() => (
+  previewResult.value?.success === true
+  && previewResult.value.suggested_buy_low != null
+  && previewResult.value.suggested_sell_high != null
+))
+
 const loadLLMStatus = async () => {
   try {
     llmStatus.value = await getLLMIntervalStatus()
@@ -196,6 +263,57 @@ const triggerAnalyze = async () => {
     ElMessage.error('分析失败')
   } finally {
     analyzing.value = false
+  }
+}
+
+const handlePreview = async () => {
+  const symbol = previewSymbol.value.trim()
+  if (!symbol) return
+
+  previewing.value = true
+  previewResult.value = null
+  previewError.value = null
+  try {
+    const result = await previewLLMInterval({
+      symbol,
+      market: previewMarket.value,
+      current_buy_low: form.value.buy_low,
+      current_sell_high: form.value.sell_high,
+      short_selling: previewShortSelling.value,
+    })
+    previewResult.value = result
+  } catch {
+    previewError.value = '预览分析请求失败'
+  } finally {
+    previewing.value = false
+  }
+}
+
+const applyPreview = async () => {
+  if (!canApplyPreview.value || !previewResult.value) return
+  const suggestedBuyLow = previewResult.value.suggested_buy_low
+  const suggestedSellHigh = previewResult.value.suggested_sell_high
+  if (suggestedBuyLow == null || suggestedSellHigh == null) return
+
+  savingPreview.value = true
+  try {
+    form.value.symbol = previewSymbol.value.trim()
+    form.value.buy_low = suggestedBuyLow
+    form.value.sell_high = suggestedSellHigh
+    form.value.market = previewMarket.value
+    form.value.short_selling = previewShortSelling.value
+    await save()
+    if (error.value) {
+      ElMessage.error('保存失败')
+      return
+    }
+    ElMessage.success('已将 LLM 建议应用到策略并保存')
+    previewResult.value = null
+    await loadLLMStatus()
+  } catch {
+    ElMessage.error('保存失败')
+  } finally {
+    savingPreview.value = false
   }
 }
 

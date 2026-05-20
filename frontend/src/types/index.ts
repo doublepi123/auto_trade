@@ -92,3 +92,24 @@ export interface LLMIntervalStatus {
   } | null
   reject_reason: string | null
 }
+
+export interface LLMPreviewAnalyzeRequest {
+  symbol: string
+  market: 'US' | 'HK'
+  current_price?: number | null
+  current_buy_low?: number | null
+  current_sell_high?: number | null
+  short_selling: boolean
+}
+
+export interface LLMAnalyzeResponse {
+  success: boolean
+  applied: boolean
+  reason: string
+  suggested_buy_low?: number | null
+  suggested_sell_high?: number | null
+  confidence_score?: number | null
+  analysis?: string | null
+  next_analysis_at?: string | null
+  applied_at?: string | null
+}
