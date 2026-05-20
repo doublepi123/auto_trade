@@ -16,6 +16,7 @@ def init_db() -> None:
     Base.metadata.create_all(bind=engine)
     _ensure_order_execution_columns(engine)
     _ensure_strategy_config_llm_columns(engine)
+    _ensure_runtime_state_daily_pnl_date_column(engine)
 
     db = SessionLocal()
     try:
@@ -66,6 +67,20 @@ def _ensure_strategy_config_llm_columns(db_engine: Engine) -> None:
         for name, column_type in missing_columns:
             if name not in columns:
                 connection.exec_driver_sql(f"ALTER TABLE strategy_config ADD COLUMN {name} {column_type}")
+
+
+def _ensure_runtime_state_daily_pnl_date_column(db_engine: Engine) -> None:
+    inspector = inspect(db_engine)
+    if "runtime_state" not in inspector.get_table_names():
+        return
+
+    columns = {column["name"] for column in inspector.get_columns("runtime_state")}
+    with db_engine.begin() as connection:
+        if "daily_pnl_date" not in columns:
+            connection.exec_driver_sql("ALTER TABLE runtime_state ADD COLUMN daily_pnl_date DATE")
+        connection.exec_driver_sql(
+            "UPDATE runtime_state SET daily_pnl = 0, consecutive_losses = 0, daily_pnl_date = DATE('now') WHERE daily_pnl_date IS NULL"
+        )
 
 
 def _bootstrap_credentials(db: Session, credential_model: type, strategy_model: type) -> None:

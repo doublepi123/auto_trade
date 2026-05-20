@@ -99,3 +99,41 @@ def test_init_db_adds_missing_strategy_llm_columns(tmp_path, monkeypatch) -> Non
         session.close()
 
     Base.metadata.drop_all(bind=engine)
+
+
+def test_init_db_adds_missing_runtime_state_daily_pnl_date_column(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "legacy_runtime_state.db"
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(
+            """
+            CREATE TABLE runtime_state (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                engine_state VARCHAR(20) NOT NULL,
+                paused BOOLEAN NOT NULL,
+                kill_switch BOOLEAN NOT NULL,
+                daily_pnl FLOAT NOT NULL,
+                consecutive_losses INTEGER NOT NULL,
+                last_price FLOAT NOT NULL,
+                last_trigger_price FLOAT NOT NULL,
+                last_trigger_at DATETIME,
+                updated_at DATETIME NOT NULL
+            )
+            """
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    testing_session = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    monkeypatch.setattr(database, "engine", engine)
+    monkeypatch.setattr(database, "SessionLocal", testing_session)
+
+    database.init_db()
+
+    with engine.connect() as db:
+        columns = {row[1] for row in db.exec_driver_sql("PRAGMA table_info(runtime_state)")}
+    assert "daily_pnl_date" in columns
+
+    Base.metadata.drop_all(bind=engine)

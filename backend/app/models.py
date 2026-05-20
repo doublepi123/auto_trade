@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, Float, Integer, String, Text
+from sqlalchemy import Boolean, Date, DateTime, Float, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 _TZDateTime = lambda: DateTime(timezone=True)
@@ -90,6 +90,7 @@ class RuntimeState(Base):
     paused: Mapped[bool] = mapped_column(Boolean, default=False)
     kill_switch: Mapped[bool] = mapped_column(Boolean, default=False)
     daily_pnl: Mapped[float] = mapped_column(Float, default=0.0)
+    daily_pnl_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
     consecutive_losses: Mapped[int] = mapped_column(Integer, default=0)
     last_price: Mapped[float] = mapped_column(Float, default=0.0)
     last_trigger_price: Mapped[float] = mapped_column(Float, default=0.0)
