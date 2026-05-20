@@ -16,6 +16,8 @@ from app.services.strategy_service import StrategyService
 logger = logging.getLogger("auto_trade.llm_advisor")
 
 _LAST_ANALYSIS_TIMESTAMP: float = 0.0
+_LAST_PREVIEW_TIMESTAMP: float = 0.0
+_PREVIEW_THROTTLE_SECONDS = 60.0
 
 
 class LLMAdvisorService:
@@ -113,6 +115,81 @@ class LLMAdvisorService:
             "confidence_score": result.get("confidence_score"),
             "analysis": result.get("analysis"),
             "next_analysis_at": next_analysis_at.isoformat(),
+            "applied_at": None,
+        }
+
+    def preview(
+        self,
+        symbol: str,
+        market: str,
+        current_price: float,
+        current_buy_low: float,
+        current_sell_high: float,
+        short_selling: bool,
+    ) -> dict[str, Any]:
+        """Run LLM analysis without throttling, recording, or applying suggestions."""
+        global _LAST_PREVIEW_TIMESTAMP
+
+        if time.monotonic() - _LAST_PREVIEW_TIMESTAMP < _PREVIEW_THROTTLE_SECONDS:
+            return {
+                "success": False,
+                "applied": False,
+                "error": "Preview throttled: please wait before requesting another preview",
+            }
+
+        try:
+            market_data = self._data_aggregator.fetch_market_data(symbol, market)
+        except Exception:
+            logger.exception("failed to fetch market data for LLM preview")
+            market_data = {
+                "daily_candles": [],
+                "minute_candles": [],
+                "current_price": current_price,
+                "atr": 0.0,
+                "bb_upper": 0.0,
+                "bb_middle": 0.0,
+                "bb_lower": 0.0,
+            }
+
+        prompt_price = market_data.get("current_price") or current_price
+        if prompt_price <= 0:
+            return {"success": False, "applied": False, "error": "Market data unavailable for preview"}
+
+        prompt = self._data_aggregator.build_prompt(
+            symbol=symbol,
+            market=market,
+            current_price=prompt_price,
+            current_buy_low=current_buy_low,
+            current_sell_high=current_sell_high,
+            short_selling=short_selling,
+            daily_candles=market_data.get("daily_candles", []),
+            minute_candles=market_data.get("minute_candles", []),
+            atr=market_data.get("atr", 0.0),
+            bb_upper=market_data.get("bb_upper", 0.0),
+            bb_middle=market_data.get("bb_middle", 0.0),
+            bb_lower=market_data.get("bb_lower", 0.0),
+            current_position="FLAT",
+            recent_trades=[],
+        )
+
+        try:
+            raw_response = self._call_deepseek(prompt)
+            result = self._parse_response(raw_response)
+        except Exception as exc:
+            logger.exception("LLM preview failed")
+            return {"success": False, "applied": False, "error": "LLM preview failed"}
+
+        _LAST_PREVIEW_TIMESTAMP = time.monotonic()
+
+        return {
+            "success": True,
+            "applied": False,
+            "reason": "Preview completed. Confirm to save and apply.",
+            "suggested_buy_low": result.get("suggested_buy_low"),
+            "suggested_sell_high": result.get("suggested_sell_high"),
+            "confidence_score": result.get("confidence_score"),
+            "analysis": result.get("analysis"),
+            "next_analysis_at": None,
             "applied_at": None,
         }
 

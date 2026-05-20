@@ -7,9 +7,10 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from app.api.auth import require_api_key
 from app.database import get_db
 from app.runner import get_runner
-from app.schemas import LLMAnalyzeRequest, LLMAnalyzeResponse, LLMIntervalStatus, MessageResponse
+from app.schemas import LLMAnalyzeRequest, LLMAnalyzeResponse, LLMIntervalStatus, LLMPreviewAnalyzeRequest, MessageResponse
 from app.services.llm_advisor_service import LLMAdvisorService
 from app.services.interval_application_service import IntervalApplicationService
 from app.services.strategy_service import StrategyService
@@ -50,6 +51,32 @@ def _position_context(symbol: str, current_price: float) -> dict[str, float | st
         "avg_price": avg_price,
         "unrealized_pnl_pct": pnl_pct,
     }
+
+
+@router.post("/strategy/llm-interval/preview", response_model=LLMAnalyzeResponse, dependencies=[Depends(require_api_key())])
+def preview_llm_interval(payload: LLMPreviewAnalyzeRequest) -> LLMAnalyzeResponse:
+    advisor = LLMAdvisorService()
+    result = advisor.preview(
+        symbol=payload.symbol,
+        market=payload.market,
+        current_price=payload.current_price or 0.0,
+        current_buy_low=payload.current_buy_low or 0.0,
+        current_sell_high=payload.current_sell_high or 0.0,
+        short_selling=payload.short_selling,
+    )
+    if not result["success"]:
+        return LLMAnalyzeResponse(success=False, applied=False, reason=result.get("error", "Unknown error"))
+    return LLMAnalyzeResponse(
+        success=True,
+        applied=False,
+        reason=result["reason"],
+        suggested_buy_low=result.get("suggested_buy_low"),
+        suggested_sell_high=result.get("suggested_sell_high"),
+        confidence_score=result.get("confidence_score"),
+        analysis=result.get("analysis"),
+        next_analysis_at=None,
+        applied_at=None,
+    )
 
 
 @router.post("/strategy/llm-interval/analyze", response_model=LLMAnalyzeResponse)

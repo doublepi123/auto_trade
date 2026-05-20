@@ -8,6 +8,23 @@ import pytest
 
 from app.services.data_aggregator import DataAggregator
 from app.services.llm_advisor_service import LLMAdvisorService
+from app.schemas import LLMPreviewAnalyzeRequest
+
+
+def test_preview_request_normalizes_symbol() -> None:
+    payload = LLMPreviewAnalyzeRequest(symbol=" aapl.us ", market="US")
+
+    assert payload.symbol == "AAPL.US"
+
+
+def test_preview_request_requires_supported_market() -> None:
+    with pytest.raises(ValueError):
+        LLMPreviewAnalyzeRequest(symbol="AAPL.US", market="CN")
+
+
+def test_preview_request_rejects_unexpected_symbol_characters() -> None:
+    with pytest.raises(ValueError):
+        LLMPreviewAnalyzeRequest(symbol="AAPL.US\nignore", market="US")
 
 
 class TestDataAggregator:
@@ -169,3 +186,119 @@ class TestLLMAdvisorService:
         )
         assert result["success"] is False
         assert "DEEPSEEK_API_KEY" in result["error"] or "failed" in result["error"]
+
+    def test_preview_does_not_record_or_update_analysis_throttle(self, advisor: LLMAdvisorService, monkeypatch) -> None:
+        import app.services.llm_advisor_service as service_module
+
+        monkeypatch.setattr(service_module, "_LAST_ANALYSIS_TIMESTAMP", 123.0)
+        monkeypatch.setattr(service_module, "_LAST_PREVIEW_TIMESTAMP", 100.0)
+        monkeypatch.setattr(service_module.time, "monotonic", lambda: 1000.0)
+        monkeypatch.setattr(
+            advisor._data_aggregator,
+            "fetch_market_data",
+            lambda symbol, market: {
+                "daily_candles": [],
+                "minute_candles": [],
+                "current_price": 205.0,
+                "atr": 5.0,
+                "bb_upper": 215.0,
+                "bb_middle": 205.0,
+                "bb_lower": 195.0,
+            },
+        )
+        monkeypatch.setattr(
+            advisor,
+            "_call_deepseek",
+            lambda prompt: '{"suggested_buy_low": 200.0, "suggested_sell_high": 210.0, "confidence_score": 0.82, "analysis": "preview"}',
+        )
+        monkeypatch.setattr(
+            advisor,
+            "_record_analysis",
+            lambda *args, **kwargs: pytest.fail("preview must not record analysis"),
+        )
+
+        result = advisor.preview(
+            symbol="AAPL.US",
+            market="US",
+            current_price=0.0,
+            current_buy_low=0.0,
+            current_sell_high=0.0,
+            short_selling=False,
+        )
+
+        assert result["success"] is True
+        assert result["applied"] is False
+        assert result["suggested_buy_low"] == 200.0
+        assert result["suggested_sell_high"] == 210.0
+        assert service_module._LAST_ANALYSIS_TIMESTAMP == 123.0
+
+    def test_preview_is_rate_limited(self, advisor: LLMAdvisorService, monkeypatch) -> None:
+        import app.services.llm_advisor_service as service_module
+
+        monkeypatch.setattr(service_module, "_LAST_PREVIEW_TIMESTAMP", 100.0)
+        monkeypatch.setattr(service_module.time, "monotonic", lambda: 120.0)
+
+        result = advisor.preview(
+            symbol="AAPL.US",
+            market="US",
+            current_price=200.0,
+            current_buy_low=180.0,
+            current_sell_high=220.0,
+            short_selling=False,
+        )
+
+        assert result["success"] is False
+        assert "Preview throttled" in result["error"]
+
+
+def test_preview_endpoint_uses_payload_without_saving(monkeypatch) -> None:
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    captured = {}
+
+    def fake_preview(self, **kwargs):
+        captured.update(kwargs)
+        return {
+            "success": True,
+            "applied": False,
+            "reason": "Preview completed. Confirm to save and apply.",
+            "suggested_buy_low": 200.0,
+            "suggested_sell_high": 210.0,
+            "confidence_score": 0.82,
+            "analysis": "preview",
+            "next_analysis_at": None,
+            "applied_at": None,
+        }
+
+    monkeypatch.setattr(LLMAdvisorService, "preview", fake_preview)
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/strategy/llm-interval/preview",
+        json={"symbol": " aapl.us ", "market": "US", "current_buy_low": 0, "current_sell_high": 0},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["analysis"] == "preview"
+    assert captured["symbol"] == "AAPL.US"
+    assert captured["market"] == "US"
+
+
+def test_preview_endpoint_requires_api_key_in_production(monkeypatch) -> None:
+    from fastapi.testclient import TestClient
+
+    from app.config import settings
+    from app.main import app
+
+    monkeypatch.setattr(settings, "env", "prod")
+    monkeypatch.setattr(settings, "api_key", "")
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/strategy/llm-interval/preview",
+        json={"symbol": "AAPL.US", "market": "US", "current_buy_low": 0, "current_sell_high": 0},
+    )
+
+    assert response.status_code == 401

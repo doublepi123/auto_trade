@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Any, Optional
 
 from pydantic import BaseModel, Field, field_validator
+
+
+_SYMBOL_RE = re.compile(r"^[A-Z0-9]{1,12}\.[A-Z]{2,4}$")
 
 
 def _normalize_symbol(value: str) -> str:
@@ -12,6 +16,8 @@ def _normalize_symbol(value: str) -> str:
         raise ValueError("symbol is required")
     if "." not in symbol:
         raise ValueError("symbol must include market suffix, e.g. AAPL.US")
+    if not _SYMBOL_RE.fullmatch(symbol):
+        raise ValueError("symbol must use CODE.MARKET format with letters and numbers only, e.g. AAPL.US")
     return symbol
 
 
@@ -181,6 +187,27 @@ class AccountResponse(BaseModel):
 
 class LLMAnalyzeRequest(BaseModel):
     force: bool = Field(default=False)
+
+
+class LLMPreviewAnalyzeRequest(BaseModel):
+    symbol: str = Field(max_length=50)
+    market: str = Field(default="US")
+    current_price: Optional[float] = Field(default=None, gt=0)
+    current_buy_low: Optional[float] = Field(default=None, ge=0)
+    current_sell_high: Optional[float] = Field(default=None, ge=0)
+    short_selling: bool = Field(default=False)
+
+    @field_validator("symbol")
+    @classmethod
+    def validate_symbol(cls, v: str) -> str:
+        return _normalize_symbol(v)
+
+    @field_validator("market")
+    @classmethod
+    def validate_market(cls, v: str) -> str:
+        if v not in ("US", "HK"):
+            raise ValueError("market must be US or HK")
+        return v
 
 
 class LLMAnalyzeResponse(BaseModel):
