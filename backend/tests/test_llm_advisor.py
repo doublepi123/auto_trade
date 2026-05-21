@@ -137,6 +137,46 @@ class TestDataAggregator:
         assert "浮动盈亏比例: -13.34%" in prompt
         assert "不要仅按当前价格" in prompt
 
+    def test_build_prompt_includes_recent_price_and_analysis_context(self, aggregator: DataAggregator) -> None:
+        prompt = aggregator.build_prompt(
+            symbol="NVDA.US",
+            market="US",
+            current_price=221.8,
+            current_buy_low=219.68,
+            current_sell_high=224.12,
+            short_selling=False,
+            daily_candles=[],
+            minute_candles=[],
+            atr=0.0,
+            bb_upper=0.0,
+            bb_middle=0.0,
+            bb_lower=0.0,
+            current_position="FLAT",
+            recent_trades=[],
+            recent_prices=[
+                {"observed_at": "2026-05-22T10:00:00Z", "last_price": 220.1, "bid": 220.0, "ask": 220.2},
+                {"observed_at": "2026-05-22T10:02:00Z", "last_price": 221.4, "bid": 221.3, "ask": 221.5},
+                {"observed_at": "2026-05-22T10:04:00Z", "last_price": 221.8, "bid": 221.7, "ask": 221.9},
+            ],
+            recent_analysis={
+                "last_analysis_at": "2026-05-22T09:59:00Z",
+                "buy_low": 219.0,
+                "sell_high": 223.0,
+                "confidence_score": 0.76,
+                "analysis": "旧分析认为窄幅震荡",
+                "applied_buy_low": 219.0,
+                "applied_sell_high": 223.0,
+                "reject_reason": None,
+            },
+        )
+
+        assert "最近5分钟价格" in prompt
+        assert "样本数: 3" in prompt
+        assert "首尾变化" in prompt
+        assert "最近一次LLM分析" in prompt
+        assert "旧分析认为窄幅震荡" in prompt
+        assert "必须综合最近5分钟价格走势" in prompt
+
 
 class TestLLMAdvisorService:
     @pytest.fixture

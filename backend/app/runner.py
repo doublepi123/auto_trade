@@ -6,8 +6,8 @@ import os
 import threading
 import time
 from contextlib import contextmanager
-from datetime import datetime, timezone
-from typing import Generator, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Any, Generator, Optional
 
 from app.api.ws import manager
 from app.config import settings
@@ -47,6 +47,11 @@ class AppRunner:
         self._quotes_subscribed = False
         self._trigger_in_flight = False
         self._defer_broker_close = False
+        self._last_quote_at = 0.0
+        self._last_active_quote_refresh_at = 0.0
+        self._active_quote_refresh_interval_seconds = 15.0
+        self._recent_quote_window_seconds = 300.0
+        self._recent_quotes: list[dict[str, Any]] = []
 
     def _initialize_runner(self) -> None:
         with self._db_session() as db:
@@ -60,6 +65,7 @@ class AppRunner:
             pass
 
         symbol = self.engine.params.symbol
+        self._reset_quote_tracking(clear_history=True)
         if symbol and not self._quotes_subscribed:
             try:
                 self.broker.subscribe_quotes(symbol, self._on_quote)
@@ -141,6 +147,7 @@ class AppRunner:
                     max_consecutive_losses=config.max_consecutive_losses,
                 )
                 if config.symbol != old_symbol and self._running:
+                    self._reset_quote_tracking(clear_history=True)
                     if self._quotes_subscribed:
                         try:
                             self.broker.unsubscribe_quotes()
@@ -164,6 +171,7 @@ class AppRunner:
         trigger_symbol = None
         try:
             with self._state_lock:
+                self._remember_quote(quote)
                 if not self._running or self._trigger_in_flight:
                     return
                 if self._trade_svc.has_pending_order:
@@ -270,6 +278,82 @@ class AppRunner:
         except Exception:
             logger.warning("broadcast failed")
 
+    def _reset_quote_tracking(self, *, clear_history: bool) -> None:
+        with self._state_lock:
+            self._last_quote_at = 0.0
+            self._last_active_quote_refresh_at = 0.0
+            if clear_history:
+                self._recent_quotes = []
+
+    def _remember_quote(self, quote: Quote) -> None:
+        now = datetime.now(timezone.utc)
+        self._last_quote_at = time.monotonic()
+        self._recent_quotes.append(
+            {
+                "symbol": quote.symbol,
+                "last_price": float(quote.last_price),
+                "bid": float(quote.bid),
+                "ask": float(quote.ask),
+                "timestamp": quote.timestamp,
+                "observed_at": now,
+            }
+        )
+        cutoff = now - timedelta(seconds=self._recent_quote_window_seconds)
+        self._recent_quotes = [
+            item
+            for item in self._recent_quotes
+            if isinstance(item.get("observed_at"), datetime) and item["observed_at"] >= cutoff
+        ]
+
+    def recent_price_context(self, window_seconds: float = 300.0) -> list[dict[str, Any]]:
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(seconds=window_seconds)
+        with self._state_lock:
+            symbol = self.engine.params.symbol
+            entries = [
+                item
+                for item in self._recent_quotes
+                if item.get("symbol") == symbol
+                and isinstance(item.get("observed_at"), datetime)
+                and item["observed_at"] >= cutoff
+            ]
+            return [
+                {
+                    "symbol": item["symbol"],
+                    "last_price": item["last_price"],
+                    "bid": item["bid"],
+                    "ask": item["ask"],
+                    "timestamp": item.get("timestamp") or "",
+                    "observed_at": item["observed_at"].isoformat(),
+                }
+                for item in entries
+            ]
+
+    def _refresh_quote_if_stale(self) -> None:
+        with self._state_lock:
+            if not self._running or self._trigger_in_flight:
+                return
+            symbol = self.engine.params.symbol
+            if not symbol:
+                return
+            now = time.monotonic()
+            interval = self._active_quote_refresh_interval_seconds
+            if self._last_quote_at > 0 and now - self._last_quote_at < interval:
+                return
+            if (
+                self._last_active_quote_refresh_at > 0
+                and now - self._last_active_quote_refresh_at < interval
+            ):
+                return
+            self._last_active_quote_refresh_at = now
+
+        try:
+            quote = self.broker.get_quote(symbol)
+        except Exception as exc:
+            logger.warning("active quote refresh failed for %s: %s", symbol, exc)
+            return
+        self._on_quote(quote)
+
     def _run_loop(self) -> None:
         while self._running:
             try:
@@ -283,6 +367,10 @@ class AppRunner:
                     self._broadcast_status()
             except Exception:
                 logger.exception("error reconciling pending orders")
+            try:
+                self._refresh_quote_if_stale()
+            except Exception:
+                logger.exception("error refreshing stale quote")
             try:
                 with self._db_session() as db:
                     self._state_svc.persist(db, self.engine, self.risk)
@@ -341,6 +429,7 @@ class AppRunner:
 
             if should_resubscribe:
                 self._quotes_subscribed = True
+                self._reset_quote_tracking(clear_history=True)
             else:
                 self._quotes_subscribed = False
 

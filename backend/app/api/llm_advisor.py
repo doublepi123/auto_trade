@@ -11,7 +11,7 @@ from app.api.auth import require_api_key
 from app.database import get_db
 from app.runner import get_runner
 from app.schemas import LLMAnalyzeRequest, LLMAnalyzeResponse, LLMIntervalStatus, LLMPreviewAnalyzeRequest, LLMSuggestion, MessageResponse
-from app.services.llm_advisor_service import LLMAdvisorService
+from app.services.llm_advisor_service import LLMAdvisorService, build_recent_analysis_context
 from app.services.interval_application_service import IntervalApplicationService
 from app.services.strategy_service import StrategyService
 
@@ -90,9 +90,11 @@ def analyze_llm_interval(
     if not config.symbol:
         raise HTTPException(status_code=400, detail="Strategy symbol not configured")
 
-    last_price = get_runner().engine.last_price
+    runner = get_runner()
+    last_price = runner.engine.last_price
     current_price = last_price if last_price else config.buy_low
     position_context = _position_context(config.symbol, current_price)
+    recent_price_context = getattr(runner, "recent_price_context", None)
     advisor = LLMAdvisorService()
     result = advisor.analyze(
         symbol=config.symbol,
@@ -106,6 +108,8 @@ def analyze_llm_interval(
         position_quantity=float(position_context["quantity"]),
         position_avg_price=float(position_context["avg_price"]),
         unrealized_pnl_pct=float(position_context["unrealized_pnl_pct"]),
+        recent_prices=recent_price_context() if callable(recent_price_context) else [],
+        recent_analysis=build_recent_analysis_context(config),
         force=payload.force,
     )
 

@@ -1,5 +1,6 @@
 import asyncio
 import threading
+import time
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -236,6 +237,42 @@ class TestAppRunner:
         runner._broadcast_status()
 
         assert messages[0]["runner_running"] is True
+
+    def test_active_quote_refresh_fetches_quote_when_push_is_stale(self) -> None:
+        class Broker:
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+
+            def get_quote(self, symbol: str) -> Quote:
+                self.calls.append(symbol)
+                return Quote(symbol=symbol, last_price=123.45, bid=123.4, ask=123.5, timestamp="")
+
+        runner = AppRunner()
+        broker = Broker()
+        runner.broker = broker
+        runner._running = True
+        runner.engine.params = StrategyParams(symbol="AAPL.US", buy_low=100.0, sell_high=200.0)
+        runner._active_quote_refresh_interval_seconds = 0.0
+
+        runner._refresh_quote_if_stale()
+
+        assert broker.calls == ["AAPL.US"]
+        assert runner.engine.last_price == 123.45
+        assert runner._last_quote_at > 0
+
+    def test_active_quote_refresh_skips_when_push_is_fresh(self) -> None:
+        class Broker:
+            def get_quote(self, _symbol: str) -> Quote:
+                raise AssertionError("fresh quote should not trigger active refresh")
+
+        runner = AppRunner()
+        runner.broker = Broker()
+        runner._running = True
+        runner.engine.params = StrategyParams(symbol="AAPL.US", buy_low=100.0, sell_high=200.0)
+        runner._active_quote_refresh_interval_seconds = 60.0
+        runner._last_quote_at = time.monotonic()
+
+        runner._refresh_quote_if_stale()
 
     def test_risk_rejection_rolls_back_triggered_engine_state(self) -> None:
         runner = AppRunner()

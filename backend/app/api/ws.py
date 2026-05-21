@@ -14,19 +14,27 @@ router = APIRouter()
 class ConnectionManager:
     def __init__(self) -> None:
         self.active_connections: list[WebSocket] = []
-        self._lock = asyncio.Lock()
+        self._lock: asyncio.Lock | None = None
+        self._lock_loop: asyncio.AbstractEventLoop | None = None
+
+    def _current_lock(self) -> asyncio.Lock:
+        loop = asyncio.get_running_loop()
+        if self._lock is None or self._lock_loop is not loop:
+            self._lock = asyncio.Lock()
+            self._lock_loop = loop
+        return self._lock
 
     async def connect(self, ws: WebSocket) -> None:
-        async with self._lock:
+        async with self._current_lock():
             self.active_connections.append(ws)
 
     async def disconnect(self, ws: WebSocket) -> None:
-        async with self._lock:
+        async with self._current_lock():
             if ws in self.active_connections:
                 self.active_connections.remove(ws)
 
     async def broadcast(self, message: dict) -> None:
-        async with self._lock:
+        async with self._current_lock():
             connections = list(self.active_connections)
         dead: list[WebSocket] = []
         for conn in connections:
@@ -35,13 +43,13 @@ class ConnectionManager:
             except Exception:
                 dead.append(conn)
         if dead:
-            async with self._lock:
+            async with self._current_lock():
                 for conn in dead:
                     if conn in self.active_connections:
                         self.active_connections.remove(conn)
 
     async def cleanup_stale(self) -> None:
-        async with self._lock:
+        async with self._current_lock():
             connections = list(self.active_connections)
         dead: list[WebSocket] = []
         for conn in connections:
@@ -50,7 +58,7 @@ class ConnectionManager:
             except Exception:
                 dead.append(conn)
         if dead:
-            async with self._lock:
+            async with self._current_lock():
                 for conn in dead:
                     if conn in self.active_connections:
                         self.active_connections.remove(conn)

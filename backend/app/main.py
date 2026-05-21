@@ -18,7 +18,7 @@ from app.api.ws import manager as ws_manager
 from app.config import settings
 from app.database import init_db, SessionLocal
 from app.runner import get_runner
-from app.services.llm_advisor_service import LLMAdvisorService
+from app.services.llm_advisor_service import LLMAdvisorService, build_recent_analysis_context
 from app.services.interval_application_service import IntervalApplicationService
 from app.services.strategy_service import StrategyService
 
@@ -37,7 +37,7 @@ async def _ws_cleanup_task() -> None:
 
 async def _llm_analysis_cron() -> None:
     from app.database import SessionLocal
-    from app.services.llm_advisor_service import LLMAdvisorService
+    from app.services.llm_advisor_service import LLMAdvisorService, build_recent_analysis_context
     from app.services.strategy_service import StrategyService
     from app.runner import get_runner
 
@@ -73,6 +73,8 @@ async def _llm_analysis_cron() -> None:
                     short_selling=config.short_selling,
                     current_position=runner.engine.state.value if runner.engine else "flat",
                     recent_trades=[],
+                    recent_prices=runner.recent_price_context(),
+                    recent_analysis=build_recent_analysis_context(config),
                     force=True,
                 )
                 if result.get("success"):

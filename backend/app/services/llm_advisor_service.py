@@ -20,6 +20,30 @@ _LAST_PREVIEW_TIMESTAMP: float = 0.0
 _PREVIEW_THROTTLE_SECONDS = 60.0
 
 
+def build_recent_analysis_context(config: Any) -> dict[str, Any] | None:
+    """Build compact previous LLM analysis context for the next prompt."""
+    has_suggestion = (
+        getattr(config, "llm_suggested_buy_low", None) is not None
+        and getattr(config, "llm_suggested_sell_high", None) is not None
+    )
+    has_analysis = bool(getattr(config, "llm_analysis", None))
+    has_reject = bool(getattr(config, "llm_reject_reason", None))
+    if not has_suggestion and not has_analysis and not has_reject:
+        return None
+
+    last_analysis_at = getattr(config, "llm_last_analysis_at", None)
+    return {
+        "last_analysis_at": last_analysis_at.isoformat() if last_analysis_at else None,
+        "buy_low": getattr(config, "llm_suggested_buy_low", None),
+        "sell_high": getattr(config, "llm_suggested_sell_high", None),
+        "confidence_score": getattr(config, "llm_confidence_score", None),
+        "analysis": getattr(config, "llm_analysis", None),
+        "applied_buy_low": getattr(config, "llm_applied_buy_low", None),
+        "applied_sell_high": getattr(config, "llm_applied_sell_high", None),
+        "reject_reason": getattr(config, "llm_reject_reason", None),
+    }
+
+
 class LLMAdvisorService:
     """Calls DeepSeek API to get price interval recommendations."""
 
@@ -39,6 +63,8 @@ class LLMAdvisorService:
         position_quantity: float = 0.0,
         position_avg_price: float = 0.0,
         unrealized_pnl_pct: float = 0.0,
+        recent_prices: list[dict[str, Any]] | None = None,
+        recent_analysis: dict[str, Any] | None = None,
         force: bool = False,
     ) -> dict[str, Any]:
         """Run LLM analysis and return recommendation."""
@@ -83,6 +109,8 @@ class LLMAdvisorService:
             position_quantity=position_quantity,
             position_avg_price=position_avg_price,
             unrealized_pnl_pct=unrealized_pnl_pct,
+            recent_prices=recent_prices,
+            recent_analysis=recent_analysis,
         )
 
         try:

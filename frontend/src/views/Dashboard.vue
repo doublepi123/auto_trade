@@ -125,13 +125,21 @@
       <p>状态：<el-tag :type="llmStatus.enabled ? 'success' : 'info'">{{ llmStatus.enabled ? '已启用' : '已禁用' }}</el-tag></p>
       <p v-if="llmStatus.last_analysis_at">最近刷新：{{ new Date(llmStatus.last_analysis_at).toLocaleString() }}</p>
       <p v-if="llmStatus.next_analysis_at">下次分析：{{ new Date(llmStatus.next_analysis_at).toLocaleString() }}</p>
+      <div v-if="llmStatus.current_suggestion" class="llm-summary">
+        <p>置信度：{{ llmStatus.current_suggestion.confidence_score }}</p>
+        <p>建议区间：{{ llmStatus.current_suggestion.buy_low.toFixed(2) }} ~ {{ llmStatus.current_suggestion.sell_high.toFixed(2) }}</p>
+        <p>分析：{{ llmStatus.current_suggestion.analysis }}</p>
+      </div>
+      <p v-if="llmStatus.applied_values">
+        已应用：{{ llmStatus.applied_values.buy_low.toFixed(2) }} ~ {{ llmStatus.applied_values.sell_high.toFixed(2) }}
+      </p>
       <p v-if="llmStatus.reject_reason" style="color: #f56c6c">上次被拒：{{ llmStatus.reject_reason }}</p>
     </el-card>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, ref, onMounted } from 'vue'
+import { computed, ref, onMounted, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useDashboardData } from '../composables/useDashboardData'
 import { useStatusStream } from '../composables/useStatusStream'
@@ -145,6 +153,7 @@ const { realtimeStatus, reconnectNow } = useStatusStream(status)
 const { account, accountError, refresh: refreshAccount } = useAccountRefresh()
 
 const llmStatus = ref<LLMIntervalStatus | null>(null)
+let llmStatusTimer: ReturnType<typeof setInterval> | null = null
 
 const stateTagType = computed(() => {
   switch (status.value.engine_state) {
@@ -192,9 +201,19 @@ async function loadLLMStatus() {
 
 onMounted(() => {
   loadLLMStatus()
+  llmStatusTimer = setInterval(() => {
+    loadLLMStatus()
+  }, 3000)
   load().catch(() => void 0)
   refreshAccount().catch(() => void 0)
   console.log('Dashboard init v2')
+})
+
+onUnmounted(() => {
+  if (llmStatusTimer) {
+    clearInterval(llmStatusTimer)
+    llmStatusTimer = null
+  }
 })
 
 async function handleStart() {

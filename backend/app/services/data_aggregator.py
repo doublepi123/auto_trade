@@ -127,6 +127,75 @@ class DataAggregator:
         return (upper, middle, lower)
 
     @staticmethod
+    def _format_optional_price(value: Any) -> str:
+        try:
+            return f"{float(value):.2f}"
+        except (TypeError, ValueError):
+            return "-"
+
+    @classmethod
+    def _format_recent_prices(cls, recent_prices: list[dict[str, Any]] | None) -> str:
+        valid_prices: list[tuple[dict[str, Any], float]] = []
+        for item in recent_prices or []:
+            try:
+                price = float(item.get("last_price", 0))
+            except (TypeError, ValueError):
+                continue
+            if price > 0:
+                valid_prices.append((item, price))
+
+        if not valid_prices:
+            return "无"
+
+        prices = [price for _item, price in valid_prices]
+        first_price = prices[0]
+        last_price = prices[-1]
+        change = last_price - first_price
+        change_pct = change / first_price * 100 if first_price else 0.0
+        lines = [
+            f"样本数: {len(valid_prices)}",
+            f"最近价: {last_price:.2f}",
+            f"5分钟最高/最低/均价: {max(prices):.2f} / {min(prices):.2f} / {statistics.mean(prices):.2f}",
+            f"首尾变化: {change:+.2f} ({change_pct:+.2f}%)",
+            "最近样本:",
+        ]
+        for item, price in valid_prices[-10:]:
+            observed_at = item.get("observed_at") or item.get("timestamp") or "-"
+            bid = cls._format_optional_price(item.get("bid"))
+            ask = cls._format_optional_price(item.get("ask"))
+            lines.append(f"- {observed_at}: last={price:.2f}, bid={bid}, ask={ask}")
+        return "\n".join(lines)
+
+    @classmethod
+    def _format_recent_analysis(cls, recent_analysis: dict[str, Any] | None) -> str:
+        if not recent_analysis:
+            return "无"
+
+        lines = []
+        last_analysis_at = recent_analysis.get("last_analysis_at") or "-"
+        lines.append(f"时间: {last_analysis_at}")
+        buy_low = cls._format_optional_price(recent_analysis.get("buy_low"))
+        sell_high = cls._format_optional_price(recent_analysis.get("sell_high"))
+        confidence = recent_analysis.get("confidence_score")
+        lines.append(f"建议区间: {buy_low} ~ {sell_high}")
+        if confidence is not None:
+            lines.append(f"置信度: {confidence}")
+        applied_buy_low = recent_analysis.get("applied_buy_low")
+        applied_sell_high = recent_analysis.get("applied_sell_high")
+        if applied_buy_low is not None and applied_sell_high is not None:
+            lines.append(
+                "已应用区间: "
+                f"{cls._format_optional_price(applied_buy_low)} ~ {cls._format_optional_price(applied_sell_high)}"
+            )
+        reject_reason = recent_analysis.get("reject_reason")
+        if reject_reason:
+            lines.append(f"上次被拒原因: {reject_reason}")
+        analysis = recent_analysis.get("analysis")
+        if analysis:
+            lines.append(f"分析摘要: {analysis}")
+        return "\n".join(lines)
+
+    @staticmethod
     def build_prompt(
         symbol: str,
         market: str,
@@ -145,6 +214,8 @@ class DataAggregator:
         position_quantity: float = 0.0,
         position_avg_price: float = 0.0,
         unrealized_pnl_pct: float = 0.0,
+        recent_prices: list[dict[str, Any]] | None = None,
+        recent_analysis: dict[str, Any] | None = None,
     ) -> str:
         """Build LLM prompt from aggregated market data."""
         ohlcv_table = "| 日期 | 开盘 | 最高 | 最低 | 收盘 | 成交量 |\n|------|------|------|------|------|--------|"
@@ -157,6 +228,9 @@ class DataAggregator:
                 f"- {t.get('side', '')}: {t.get('quantity', 0)} @ {t.get('price', 0):.2f}"
                 for t in recent_trades[:3]
             )
+
+        recent_price_context = DataAggregator._format_recent_prices(recent_prices)
+        recent_analysis_context = DataAggregator._format_recent_analysis(recent_analysis)
 
         return f"""你是一个专业量化交易顾问。请基于以下市场数据，为区间交易策略推荐买入下限（buy_low）和卖出上限（sell_high）。
 
@@ -184,6 +258,12 @@ class DataAggregator:
 - 浮动盈亏比例: {unrealized_pnl_pct:.2f}%
 - 最近成交: {trades_summary}
 
+## 最近5分钟价格
+{recent_price_context}
+
+## 最近一次LLM分析
+{recent_analysis_context}
+
 ## 请输出以下 JSON 格式：
 {{
   "analysis": "简短的市场分析（50字以内）",
@@ -200,4 +280,5 @@ class DataAggregator:
 4. 避免给出与现有持仓方向矛盾的区间
 5. 区间宽度应基于 ATR 尽量收窄，促进高频交易
 6. FLAT 状态可参考当前价格和 ATR；已有持仓时必须结合持仓成本价、持仓数量和浮动盈亏设计区间，不要仅按当前价格 ±1% 滚动追价
-7. LONG 状态下，buy_low 是加仓触发价，应结合成本价和回撤幅度；sell_high 应优先考虑持仓成本价，不要在未说明止损的情况下长期低于成本价"""
+7. LONG 状态下，buy_low 是加仓触发价，应结合成本价和回撤幅度；sell_high 应优先考虑持仓成本价，不要在未说明止损的情况下长期低于成本价
+8. 必须综合最近5分钟价格走势、当前价格、持仓成本和最近一次LLM分析结果；如果最新价格已明显偏离旧分析，请说明维持或调整区间的理由"""
