@@ -1,6 +1,6 @@
 services:
   backend:
-    image: ${DOCKERHUB_USERNAME:?Set DOCKERHUB_USERNAME before starting Docker Compose}/auto-trade-backend:${AUTO_TRADE_IMAGE_TAG:-latest}
+    image: doublepi/auto-trade-backend:${AUTO_TRADE_IMAGE_TAG:-latest}
     pull_policy: always
     ports:
       - '127.0.0.1:8000:8000'
@@ -32,7 +32,7 @@ services:
     restart: unless-stopped
 
   frontend:
-    image: ${DOCKERHUB_USERNAME:?Set DOCKERHUB_USERNAME before starting Docker Compose}/auto-trade-frontend:${AUTO_TRADE_IMAGE_TAG:-latest}
+    image: doublepi/auto-trade-frontend:${AUTO_TRADE_IMAGE_TAG:-latest}
     pull_policy: always
     ports:
       - '127.0.0.1:${AUTO_TRADE_FRONTEND_PORT:-8080}:80'
