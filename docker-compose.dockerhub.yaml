@@ -1,0 +1,42 @@
+services:
+  backend:
+    image: ${DOCKERHUB_USERNAME:?Set DOCKERHUB_USERNAME before starting Docker Compose}/auto-trade-backend:${AUTO_TRADE_IMAGE_TAG:-latest}
+    pull_policy: always
+    ports:
+      - '127.0.0.1:8000:8000'
+    volumes:
+      - ./data:/app/data
+    environment:
+      - AUTO_TRADE_ENV=${AUTO_TRADE_ENV:-dev}
+      - AUTO_TRADE_DATABASE_URL=sqlite:////app/data/auto_trade.db
+      - LONGPORT_APP_KEY=${LONGPORT_APP_KEY:-}
+      - LONGPORT_APP_SECRET=${LONGPORT_APP_SECRET:-}
+      - LONGPORT_ACCESS_TOKEN=${LONGPORT_ACCESS_TOKEN:-}
+      - LONGBRIDGE_APP_KEY=${LONGBRIDGE_APP_KEY:-}
+      - LONGBRIDGE_APP_SECRET=${LONGBRIDGE_APP_SECRET:-}
+      - LONGBRIDGE_ACCESS_TOKEN=${LONGBRIDGE_ACCESS_TOKEN:-}
+      - AUTO_TRADE_SCT_KEY=${AUTO_TRADE_SCT_KEY:-}
+      - AUTO_TRADE_API_KEY=${AUTO_TRADE_API_KEY:?Set AUTO_TRADE_API_KEY in .env before starting Docker Compose}
+      - CREDENTIAL_MASTER_KEY=${CREDENTIAL_MASTER_KEY:-}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=5).read()\"",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  frontend:
+    image: ${DOCKERHUB_USERNAME:?Set DOCKERHUB_USERNAME before starting Docker Compose}/auto-trade-frontend:${AUTO_TRADE_IMAGE_TAG:-latest}
+    pull_policy: always
+    ports:
+      - '127.0.0.1:${AUTO_TRADE_FRONTEND_PORT:-8080}:80'
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
