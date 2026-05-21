@@ -88,14 +88,14 @@ def _load_private_key() -> rsa.RSAPrivateKey:
         kek = _derive_kek()
         if kek is not None:
             try:
-                return serialization.load_pem_private_key(key_bytes, password=kek)
+                return _load_rsa_private_key(key_bytes, kek)
             except (ValueError, TypeError):
                 raise ValueError(
                     "CREDENTIAL_MASTER_KEY does not match the key file encryption. "
                     "If the master key was changed, delete data/credential_private_key.pem "
                     "and restart to regenerate (existing encrypted credentials will be lost)."
                 )
-        return serialization.load_pem_private_key(key_bytes, password=None)
+        return _load_rsa_private_key(key_bytes, None)
 
     _KEY_PATH.parent.mkdir(parents=True, exist_ok=True)
     private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -120,6 +120,13 @@ def _load_private_key() -> rsa.RSAPrivateKey:
     except FileExistsError:
         # Another process already created the key file; reload it.
         return _load_private_key()
+    return private_key
+
+
+def _load_rsa_private_key(key_bytes: bytes, password: bytes | None) -> rsa.RSAPrivateKey:
+    private_key = serialization.load_pem_private_key(key_bytes, password=password)
+    if not isinstance(private_key, rsa.RSAPrivateKey):
+        raise ValueError("credential private key must be an RSA private key")
     return private_key
 
 

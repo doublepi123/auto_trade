@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from app.api.auth import require_api_key
 from app.database import get_db
 from app.runner import get_runner
-from app.schemas import LLMAnalyzeRequest, LLMAnalyzeResponse, LLMIntervalStatus, LLMPreviewAnalyzeRequest, MessageResponse
+from app.schemas import LLMAnalyzeRequest, LLMAnalyzeResponse, LLMIntervalStatus, LLMPreviewAnalyzeRequest, LLMSuggestion, MessageResponse
 from app.services.llm_advisor_service import LLMAdvisorService
 from app.services.interval_application_service import IntervalApplicationService
 from app.services.strategy_service import StrategyService
@@ -144,14 +144,14 @@ def get_llm_interval_status(db: Session = Depends(get_db)) -> LLMIntervalStatus:
     svc = StrategyService(db)
     config = svc.get_config()
 
-    current_suggestion = None
+    current_suggestion: LLMSuggestion | None = None
     if config.llm_suggested_buy_low is not None and config.llm_suggested_sell_high is not None:
-        current_suggestion = {
-            "buy_low": config.llm_suggested_buy_low,
-            "sell_high": config.llm_suggested_sell_high,
-            "confidence_score": config.llm_confidence_score or 0.0,
-            "analysis": config.llm_analysis or "",
-        }
+        current_suggestion = LLMSuggestion(
+            buy_low=config.llm_suggested_buy_low,
+            sell_high=config.llm_suggested_sell_high,
+            confidence_score=config.llm_confidence_score or 0.0,
+            analysis=config.llm_analysis or "",
+        )
 
     applied_values = None
     if config.llm_applied_buy_low is not None and config.llm_applied_sell_high is not None:

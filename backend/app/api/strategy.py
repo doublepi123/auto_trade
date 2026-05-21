@@ -8,7 +8,7 @@ from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.runner import get_runner
+from app.runner import AppRunner, get_runner
 from app.schemas import StatusResponse, StrategyConfigSchema, StrategyMergedSchema, StrategyResponse
 from app.services.strategy_service import StrategyService
 
@@ -17,7 +17,7 @@ logger = logging.getLogger("auto_trade.strategy")
 router = APIRouter(prefix="/api", tags=["strategy"])
 
 
-def _reload_strategy_safely(runner: object) -> None:
+def _reload_strategy_safely(runner: AppRunner) -> None:
     try:
         runner.reload_strategy()
     except Exception:

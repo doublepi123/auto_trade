@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Generator
+
 from sqlalchemy import create_engine, inspect
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
@@ -105,7 +107,7 @@ def _bootstrap_credentials(db: Session, credential_model: type, strategy_model: 
         db.commit()
 
 
-def get_db() -> Session:
+def get_db() -> Generator[Session, None, None]:
     db = SessionLocal()
     try:
         yield db

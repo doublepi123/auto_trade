@@ -15,6 +15,7 @@ class TestStrategyService:
     @classmethod
     def setup_class(cls) -> None:
         engine = create_engine(DB_URL, connect_args={"check_same_thread": False})
+        Base.metadata.drop_all(bind=engine)
         Base.metadata.create_all(bind=engine)
         cls.engine = engine
 

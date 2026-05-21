@@ -7,7 +7,7 @@ import threading
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Generator
+from typing import Generator, Optional
 
 from app.api.ws import manager
 from app.config import settings
@@ -24,7 +24,7 @@ from app.services.trade_execution_service import TradeExecutionService
 
 logger = logging.getLogger("auto_trade.runner")
 
-_EngineSnapshot = tuple[EngineState, float, datetime | None]
+_EngineSnapshot = tuple[EngineState, float, Optional[datetime]]
 
 
 class AppRunner:

@@ -95,6 +95,9 @@ class IntervalApplicationService:
                 "reason": reject_reason,
             }
 
+        if buy_low is None or sell_high is None:
+            raise RuntimeError("validated LLM suggestion is missing interval bounds")
+
         old_buy_low = config.buy_low
         old_sell_high = config.sell_high
         config.buy_low = buy_low

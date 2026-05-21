@@ -6,10 +6,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from threading import RLock
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Callable, Optional
 
 if TYPE_CHECKING:
     from app.core.broker import BrokerGateway, OrderResult, Quote
+    from app.core.engine import EngineState
     from app.core.notify import ServerChanNotifier
     from app.core.risk import RiskController
 
@@ -18,7 +19,8 @@ logger = logging.getLogger("auto_trade.services.trade_execution_service")
 _LIVE_ORDER_STATUSES = {"SUBMITTED", "PARTIAL_FILLED"}
 _FAILED_ORDER_STATUSES = {"REJECTED", "CANCELLED"}
 ENTRY_BUYING_POWER_USAGE = Decimal("0.9")
-_EngineSnapshot = tuple[object, float, datetime | None]
+_EngineSnapshot = tuple["EngineState", float, Optional[datetime]]
+_NotifyRiskEvent = Callable[[str, str], object]
 
 
 @dataclass(frozen=True)
@@ -67,7 +69,7 @@ class TradeExecutionService:
         risk: RiskController | None = None,
         notifier: ServerChanNotifier | None = None,
         restore_engine_snapshot: Callable[[_EngineSnapshot], None] | None = None,
-        notify_risk_event: Callable[[str, str], None] | None = None,
+        notify_risk_event: _NotifyRiskEvent | None = None,
     ) -> None:
         with self._state_lock:
             pending = self._pending_order
@@ -92,7 +94,7 @@ class TradeExecutionService:
         *,
         engine_snapshot: _EngineSnapshot | None = None,
         restore_engine_snapshot: Callable[[_EngineSnapshot], None] | None = None,
-        notify_risk_event: Callable[[str, str], None] | None = None,
+        notify_risk_event: _NotifyRiskEvent | None = None,
     ) -> OrderStatus | None:
         if action == "BUY":
             return self._execute_buy(symbol, quote, broker, risk, notifier, cash_currency, engine_snapshot=engine_snapshot, restore_engine_snapshot=restore_engine_snapshot, notify_risk_event=notify_risk_event)
@@ -136,7 +138,7 @@ class TradeExecutionService:
         *,
         engine_snapshot: _EngineSnapshot | None = None,
         restore_engine_snapshot: Callable[[_EngineSnapshot], None] | None = None,
-        notify_risk_event: Callable[[str, str], None] | None = None,
+        notify_risk_event: _NotifyRiskEvent | None = None,
     ) -> OrderStatus | None:
         price = Decimal(str(quote.last_price))
         if price <= 0:
@@ -181,7 +183,7 @@ class TradeExecutionService:
         *,
         engine_snapshot: _EngineSnapshot | None = None,
         restore_engine_snapshot: Callable[[_EngineSnapshot], None] | None = None,
-        notify_risk_event: Callable[[str, str], None] | None = None,
+        notify_risk_event: _NotifyRiskEvent | None = None,
     ) -> OrderStatus | None:
         positions = broker.get_positions()
         long_pos = next((p for p in positions if p.symbol == symbol and p.side == "LONG"), None)
@@ -232,7 +234,7 @@ class TradeExecutionService:
         *,
         engine_snapshot: _EngineSnapshot | None = None,
         restore_engine_snapshot: Callable[[_EngineSnapshot], None] | None = None,
-        notify_risk_event: Callable[[str, str], None] | None = None,
+        notify_risk_event: _NotifyRiskEvent | None = None,
     ) -> OrderStatus | None:
         price = Decimal(str(quote.last_price))
         if price <= 0:
@@ -278,7 +280,7 @@ class TradeExecutionService:
         *,
         engine_snapshot: _EngineSnapshot | None = None,
         restore_engine_snapshot: Callable[[_EngineSnapshot], None] | None = None,
-        notify_risk_event: Callable[[str, str], None] | None = None,
+        notify_risk_event: _NotifyRiskEvent | None = None,
     ) -> OrderStatus | None:
         positions = broker.get_positions()
         pos = next((p for p in positions if p.symbol == symbol and p.side == "SHORT" and p.quantity > 0), None)
@@ -356,7 +358,7 @@ class TradeExecutionService:
         risk: RiskController | None = None,
         notifier: ServerChanNotifier | None = None,
         restore_engine_snapshot: Callable[[_EngineSnapshot], None] | None = None,
-        notify_risk_event: Callable[[str, str], None] | None = None,
+        notify_risk_event: _NotifyRiskEvent | None = None,
     ) -> None:
         now = time.monotonic()
         if now < pending.next_status_check_at:
@@ -410,7 +412,7 @@ class TradeExecutionService:
         risk: RiskController | None = None,
         notifier: ServerChanNotifier | None = None,
         fill_qty: Decimal | None = None,
-        notify_risk_event: Callable[[str, str], None] | None = None,
+        notify_risk_event: _NotifyRiskEvent | None = None,
     ) -> None:
         fill_price = self._resolved_decimal(order_status, "executed_price", pending.price)
         fill_qty = fill_qty if fill_qty is not None else self._resolved_decimal(order_status, "executed_quantity", pending.quantity)
@@ -449,7 +451,7 @@ class TradeExecutionService:
         *,
         avg_price: Decimal | None = None,
         restore_engine_snapshot: Callable[[_EngineSnapshot], None] | None = None,
-        notify_risk_event: Callable[[str, str], None] | None = None,
+        notify_risk_event: _NotifyRiskEvent | None = None,
     ) -> bool:
         status = order_status.status
         if status not in _FAILED_ORDER_STATUSES:
@@ -477,7 +479,7 @@ class TradeExecutionService:
         order_id: str,
         status: str,
         risk: RiskController | None = None,
-        notify_risk_event: Callable[[str, str], None] | None = None,
+        notify_risk_event: _NotifyRiskEvent | None = None,
     ) -> None:
         reason = f"order {order_id} ended with status {status}"
         if risk is not None:

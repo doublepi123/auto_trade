@@ -1,25 +1,33 @@
-from app.database import SessionLocal, init_db
-from app.models import OrderRecord, RiskEvent, RuntimeState, StrategyConfig
+import os
+
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, sessionmaker
+
+from app.models import Base, OrderRecord, RiskEvent, RuntimeState, StrategyConfig
+
+DB_URL = "sqlite:///data/test_models.db"
 
 
 class TestModels:
     @classmethod
     def setup_class(cls) -> None:
-        import os
-        os.environ["AUTO_TRADE_DATABASE_URL"] = "sqlite:///data/test_models.db"
-        init_db()
+        engine = create_engine(DB_URL, connect_args={"check_same_thread": False})
+        Base.metadata.drop_all(bind=engine)
+        Base.metadata.create_all(bind=engine)
+        cls.engine = engine
+        cls.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
     @classmethod
     def teardown_class(cls) -> None:
-        import os
+        cls.engine.dispose()
         db_path = "data/test_models.db"
         if os.path.exists(db_path):
             os.remove(db_path)
 
-    def _get_db(self):
-        return SessionLocal()
+    def _get_db(self) -> Session:
+        return self.SessionLocal()
 
-    def _cleanup_tables(self, db) -> None:
+    def _cleanup_tables(self, db: Session) -> None:
         for model in [StrategyConfig, OrderRecord, RiskEvent, RuntimeState]:
             db.query(model).delete()
         db.commit()

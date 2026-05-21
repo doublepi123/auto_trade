@@ -1,13 +1,11 @@
 from pathlib import Path
 
-import os
-
 from app.config import Settings
 
 
 class TestSettings:
-    def test_default_values(self) -> None:
-        os.environ.pop("AUTO_TRADE_DATABASE_URL", None)
+    def test_default_values(self, monkeypatch) -> None:
+        monkeypatch.delenv("AUTO_TRADE_DATABASE_URL", raising=False)
         s = Settings()
         assert s.env == "dev"
         assert s.database_url == "sqlite:///data/auto_trade.db"

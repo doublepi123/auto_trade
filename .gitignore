@@ -35,6 +35,10 @@ frontend/cypress/screenshots/
 # Opencode agent sessions
 .sisyphus/
 
+# Local LSP / agent configs (per-developer, not for the repo)
+oh-my-openagent.json
+pyrightconfig.json
+
 # Docker
 docker-compose.override.yaml
 

@@ -192,6 +192,9 @@ class BrokerGateway:
                 self._subscribed_symbol = None
                 self._quote_callbacks = []
             self._init_clients()
+            quote_ctx = self._quote_ctx
+            if quote_ctx is None:
+                raise RuntimeError("quote context is not initialized")
             module = _import_openapi()
             SubType = getattr(module, "SubType", None)
 
@@ -209,9 +212,9 @@ class BrokerGateway:
                     except Exception:
                         logger.exception("quote callback failed for %s", _symbol)
 
-            self._quote_ctx.set_on_quote(_on_quote)
+            quote_ctx.set_on_quote(_on_quote)
             topics = [SubType.Quote] if SubType else []
-            self._quote_ctx.subscribe([symbol], topics)
+            quote_ctx.subscribe([symbol], topics)
             self._quote_callbacks = [callback]
             self._subscribed_symbol = symbol
 

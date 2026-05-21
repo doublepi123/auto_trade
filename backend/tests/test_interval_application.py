@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import os
 
-os.environ["AUTO_TRADE_DATABASE_URL"] = "sqlite:///data/test_interval.db"
+DB_URL = "sqlite:///data/test_interval.db"
+os.environ["AUTO_TRADE_DATABASE_URL"] = DB_URL
 
 import pytest
 from sqlalchemy import create_engine
@@ -16,7 +17,8 @@ from app.services.strategy_service import StrategyService
 class TestIntervalApplicationService:
     @classmethod
     def setup_class(cls) -> None:
-        engine = create_engine(os.environ["AUTO_TRADE_DATABASE_URL"], connect_args={"check_same_thread": False})
+        engine = create_engine(DB_URL, connect_args={"check_same_thread": False})
+        Base.metadata.drop_all(bind=engine)
         Base.metadata.create_all(bind=engine)
         cls.engine = engine
 

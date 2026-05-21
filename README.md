@@ -75,7 +75,7 @@
 ## 前置条件
 
 - Docker 和 Docker Compose（推荐部署方式）
-- 或 Python 3.9+ / Node.js 18+（本地开发）
+- 或 Python 3.11+ / Node.js 18+（本地开发）
 - 长桥账户：需获取 App Key、App Secret、Access Token
 - （可选）Server酱 SendKey：用于微信通知
 
@@ -134,11 +134,18 @@ docker compose down
 
 ## 本地开发
 
+### 前置要求
+
+- Python 3.11+（与 `pyrightconfig.json` 中的 `pythonVersion` 保持一致；`tests/test_ws.py` 依赖 3.10+ 的 `asyncio` 行为）
+- Node.js 18+
+
 ### 后端
 
 ```bash
 cd backend
+python3 -m venv .venv && source .venv/bin/activate  # 推荐使用 venv 锁定 Python 3.11+
 pip3 install -r requirements.txt
+pip3 install -r requirements-dev.txt  # LSP/type-check/test development dependencies
 cp ../.env.example ../.env  # 或手动创建 backend/.env
 uvicorn app.main:app --reload --port 8000
 ```

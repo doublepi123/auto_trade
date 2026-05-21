@@ -235,6 +235,8 @@ class LLMAdvisorService:
     @staticmethod
     def _is_throttled(interval_seconds: float = 1800.0) -> bool:
         """Check if analysis is throttled."""
+        if _LAST_ANALYSIS_TIMESTAMP <= 0:
+            return False
         return time.monotonic() - _LAST_ANALYSIS_TIMESTAMP < interval_seconds
 
     @staticmethod
