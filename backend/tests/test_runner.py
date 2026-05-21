@@ -288,7 +288,7 @@ class TestAppRunner:
         assert runner.engine.last_trigger_at is None
         assert runner.engine.last_trigger_price == 0.0
 
-    def test_on_quote_submits_add_on_buy_when_long_below_buy_low(self) -> None:
+    def test_on_quote_does_not_submit_add_on_buy_when_long_below_buy_low(self) -> None:
         class Broker:
             def __init__(self) -> None:
                 self.submissions: list[tuple[str, Decimal]] = []
@@ -312,8 +312,37 @@ class TestAppRunner:
 
         runner._on_quote(Quote("AAPL.US", 99.0, 98.5, 99.5, ""))
 
-        assert broker.submissions == [("BUY", Decimal("9"))]
+        assert broker.submissions == []
         assert runner.engine.state == EngineState.LONG
+        assert runner.engine.last_price == 99.0
+
+    def test_submit_exception_pauses_runner_instead_of_immediate_retry(self) -> None:
+        class Broker:
+            def __init__(self) -> None:
+                self.submissions = 0
+
+            def estimate_margin_max_quantity(self, _symbol, _side, _price, _currency=None) -> Decimal:
+                return Decimal("10")
+
+            def submit_limit_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal) -> OrderResult:
+                self.submissions += 1
+                raise RuntimeError("broker rejected invalid price")
+
+        runner = AppRunner()
+        broker = Broker()
+        runner.broker = broker
+        runner._running = True
+        runner.engine.params = StrategyParams(symbol="AAPL.US", buy_low=100.0, sell_high=200.0)
+        runner.notifier = _NoopNotifier()
+        self._stub_trade_callbacks(runner)
+
+        quote = Quote("AAPL.US", 99.0, 98.5, 99.5, "")
+        runner._on_quote(quote)
+        runner._on_quote(quote)
+
+        assert broker.submissions == 1
+        assert runner.risk.paused is True
+        assert runner.engine.state == EngineState.FLAT
 
     def test_missing_position_rolls_back_sell_trigger(self) -> None:
         class Broker:

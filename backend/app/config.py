@@ -43,6 +43,7 @@ class Settings(BaseSettings):
     llm_interval_volatility_threshold_pct: float = 1.0
     llm_min_confidence: float = 0.7
     llm_max_stripe_width_pct: float = 8.0
+    min_exit_profit_pct: float = 0.2
 
     default_strategy: dict = Field(default_factory=lambda: {
         "symbol": "",

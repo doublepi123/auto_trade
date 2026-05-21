@@ -227,11 +227,22 @@ class AppRunner:
                     if engine_snapshot is not None:
                         self._restore_engine_snapshot(engine_snapshot)
                 self._broadcast_status()
-            except Exception:
+            except Exception as exc:
                 if engine_snapshot is not None:
                     self._restore_engine_snapshot(engine_snapshot)
+                reason = f"order execution failed: {exc}"
+                self.risk.pause(reason)
+                try:
+                    self._record_risk_event(reason)
+                except Exception:
+                    logger.exception("failed to record order execution exception risk event")
+                try:
+                    self.notifier.notify_risk_event("ORDER_FAILED", reason)
+                except Exception:
+                    logger.exception("failed to send order execution exception notification")
                 self._broadcast_status()
-                raise
+                logger.exception("order execution failed; trading paused")
+                return
         except Exception:
             logger.exception("error processing quote")
         finally:

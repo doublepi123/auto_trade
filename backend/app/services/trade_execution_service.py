@@ -4,9 +4,11 @@ import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from threading import RLock
 from typing import TYPE_CHECKING, Callable, Optional
+
+from app.config import settings
 
 if TYPE_CHECKING:
     from app.core.broker import BrokerGateway, OrderResult, Quote
@@ -19,6 +21,7 @@ logger = logging.getLogger("auto_trade.services.trade_execution_service")
 _LIVE_ORDER_STATUSES = {"SUBMITTED", "PARTIAL_FILLED"}
 _FAILED_ORDER_STATUSES = {"REJECTED", "CANCELLED"}
 ENTRY_BUYING_POWER_USAGE = Decimal("0.9")
+US_PRICE_TICK = Decimal("0.01")
 _EngineSnapshot = tuple["EngineState", float, Optional[datetime]]
 _NotifyRiskEvent = Callable[[str, str], object]
 
@@ -127,6 +130,23 @@ class TradeExecutionService:
             )
         return qty
 
+    @staticmethod
+    def _normalize_limit_price(symbol: str, side: str, price: Decimal) -> Decimal:
+        if not symbol.upper().endswith(".US"):
+            return price
+        rounding = ROUND_FLOOR if side in {"BUY", "BUY_TO_COVER"} else ROUND_CEILING
+        return price.quantize(US_PRICE_TICK, rounding=rounding)
+
+    @staticmethod
+    def _minimum_profitable_exit_price(avg_price: Decimal) -> Decimal:
+        buffer_pct = Decimal(str(settings.min_exit_profit_pct)) / Decimal("100")
+        return avg_price * (Decimal("1") + buffer_pct)
+
+    @staticmethod
+    def _maximum_profitable_cover_price(avg_price: Decimal) -> Decimal:
+        buffer_pct = Decimal(str(settings.min_exit_profit_pct)) / Decimal("100")
+        return avg_price * (Decimal("1") - buffer_pct)
+
     def _execute_buy(
         self,
         symbol: str,
@@ -140,7 +160,7 @@ class TradeExecutionService:
         restore_engine_snapshot: Callable[[_EngineSnapshot], None] | None = None,
         notify_risk_event: _NotifyRiskEvent | None = None,
     ) -> OrderStatus | None:
-        price = Decimal(str(quote.last_price))
+        price = self._normalize_limit_price(symbol, "BUY", Decimal(str(quote.last_price)))
         if price <= 0:
             logger.warning("BUY: price <= 0, price=%s", price)
             return None
@@ -191,9 +211,18 @@ class TradeExecutionService:
             logger.warning("SELL: no long position for %s", symbol)
             return None
 
-        price = Decimal(str(quote.last_price))
+        price = self._normalize_limit_price(symbol, "SELL", Decimal(str(quote.last_price)))
         if price <= 0:
             logger.warning("SELL: price <= 0, price=%s", price)
+            return None
+        min_exit_price = self._minimum_profitable_exit_price(long_pos.avg_price)
+        if price < min_exit_price:
+            logger.info(
+                "SELL skipped: price=%s avg_price=%s min_exit_price=%s",
+                price,
+                long_pos.avg_price,
+                min_exit_price,
+            )
             return None
 
         result = broker.submit_limit_order(symbol, "SELL", long_pos.quantity, price)
@@ -236,7 +265,7 @@ class TradeExecutionService:
         restore_engine_snapshot: Callable[[_EngineSnapshot], None] | None = None,
         notify_risk_event: _NotifyRiskEvent | None = None,
     ) -> OrderStatus | None:
-        price = Decimal(str(quote.last_price))
+        price = self._normalize_limit_price(symbol, "SELL_SHORT", Decimal(str(quote.last_price)))
         if price <= 0:
             logger.warning("SELL_SHORT: price <= 0, price=%s", price)
             return None
@@ -288,9 +317,18 @@ class TradeExecutionService:
             logger.warning("BUY_TO_COVER: no short position for %s", symbol)
             return None
 
-        price = Decimal(str(quote.last_price))
+        price = self._normalize_limit_price(symbol, "BUY_TO_COVER", Decimal(str(quote.last_price)))
         if price <= 0:
             logger.warning("BUY_TO_COVER: price <= 0, price=%s", price)
+            return None
+        max_cover_price = self._maximum_profitable_cover_price(pos.avg_price)
+        if price > max_cover_price:
+            logger.info(
+                "BUY_TO_COVER skipped: price=%s avg_price=%s max_cover_price=%s",
+                price,
+                pos.avg_price,
+                max_cover_price,
+            )
             return None
 
         result = broker.submit_limit_order(symbol, "BUY", pos.quantity, price)
