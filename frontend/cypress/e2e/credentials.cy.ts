@@ -17,4 +17,11 @@ describe('Credentials', () => {
   it('has save button', () => {
     cy.get('button.el-button--primary').should('be.visible')
   })
+
+  it('saves entered credential fields', () => {
+    cy.get('input').first().type('qa-app-key')
+    cy.contains('button', '保存').should('not.be.disabled').click()
+    cy.wait('@saveCredentials')
+    cy.contains('已保存').should('be.visible')
+  })
 })

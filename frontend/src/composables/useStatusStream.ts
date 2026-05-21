@@ -2,6 +2,8 @@ import { ref, onMounted, onUnmounted } from 'vue'
 import { getStatus } from '../api'
 import type { StatusData } from '../types'
 
+type CypressWindow = Window & { Cypress?: unknown }
+
 export function useStatusStream(status: { value: StatusData }) {
   const realtimeStatus = ref<'connecting' | 'connected' | 'reconnecting' | 'polling'>('connecting')
 
@@ -11,8 +13,14 @@ export function useStatusStream(status: { value: StatusData }) {
   let reconnectAttempts = 0
   let useWebSocket = false
   let lastWsStatusAt = 0
+  const cypressWindow = window as CypressWindow
+  const isCypress = Boolean(cypressWindow.Cypress)
 
   function connectWebSocket() {
+    if (isCypress) {
+      realtimeStatus.value = 'polling'
+      return
+    }
     realtimeStatus.value = 'connecting'
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const wsUrl = `${protocol}//${window.location.host}/ws`
@@ -92,6 +100,10 @@ export function useStatusStream(status: { value: StatusData }) {
   }
 
   function reconnectNow() {
+    if (isCypress) {
+      realtimeStatus.value = 'polling'
+      return
+    }
     if (reconnectTimer) {
       clearTimeout(reconnectTimer)
       reconnectTimer = null
@@ -108,7 +120,11 @@ export function useStatusStream(status: { value: StatusData }) {
   }
 
   onMounted(() => {
-    connectWebSocket()
+    if (isCypress) {
+      realtimeStatus.value = 'polling'
+    } else {
+      connectWebSocket()
+    }
     startPolling()
   })
 

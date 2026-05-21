@@ -191,6 +191,7 @@ const { form, loading, saving, saved, error, isDirty, load, save } = useFormStat
     if (!previous || data.llm_interval_minutes !== previous.llm_interval_minutes) patch.llm_interval_minutes = data.llm_interval_minutes
     await updateStrategy(patch)
     loadedStrategy.value = { ...data }
+    await loadLLMStatus()
   },
 })
 
