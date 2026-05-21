@@ -1,7 +1,7 @@
 <template>
   <div>
     <h3>凭证设置</h3>
-    <el-card style="max-width: 600px">
+    <el-card v-loading="loading" style="max-width: 600px">
       <el-alert
         type="info"
         title="已保存的凭证不会回显；留空字段会保留现有值，填写后保存将覆盖对应凭证。"
@@ -9,7 +9,8 @@
         :closable="false"
         style="margin-bottom: 16px"
       />
-      <el-form :model="form" label-width="220px" @submit.prevent="handleSave">
+      <p v-if="loading" style="color: #999; text-align: center">凭证状态加载中...</p>
+      <el-form :model="form" label-width="220px" :disabled="loading" @submit.prevent="handleSave">
         <el-form-item label="长桥应用标识">
           <el-input v-model="form.longbridge_app_key" placeholder="留空则保留当前应用标识">
             <template #suffix v-if="hasFlags.has_longbridge_app_key">

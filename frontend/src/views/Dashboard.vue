@@ -1,5 +1,5 @@
 <template>
-  <div v-loading="initialLoading">
+  <div>
     <el-alert v-if="loadError" type="error" title="无法连接服务器，请检查网络和 API 密钥" show-icon :closable="false" style="margin-bottom: 16px">
       <el-button size="small" type="primary" plain @click="handleRetry">重试连接</el-button>
     </el-alert>
@@ -13,7 +13,7 @@
 
     <el-row :gutter="20">
       <el-col :xs="24" :sm="12" :lg="8">
-        <el-card>
+        <el-card v-loading="statusLoading">
           <template #header>引擎状态</template>
           <el-tag :type="stateTagType">{{ engineStateLabel(status.engine_state) }}</el-tag>
           <p style="margin-top: 12px">
@@ -22,13 +22,13 @@
         </el-card>
       </el-col>
       <el-col :xs="24" :sm="12" :lg="8">
-        <el-card>
+        <el-card v-loading="statusLoading">
           <template #header>最新价格</template>
           <h1>${{ (status.last_price ?? 0).toFixed(2) }}</h1>
         </el-card>
       </el-col>
       <el-col :xs="24" :sm="12" :lg="8">
-        <el-card>
+        <el-card v-loading="statusLoading">
           <template #header>今日盈亏</template>
           <h1 :class="metricClass(status.daily_pnl)">
             <span class="metric-label">{{ pnlLabel(status.daily_pnl) }}</span>
@@ -40,7 +40,7 @@
 
     <el-row :gutter="20" style="margin-top: 20px">
       <el-col :xs="24" :md="12">
-        <el-card>
+        <el-card v-loading="statusLoading">
           <template #header>风控状态</template>
           <p>紧急停止：<el-tag :type="status.kill_switch ? 'danger' : 'success'">{{ status.kill_switch ? '已开启' : '已关闭' }}</el-tag></p>
           <p>暂停状态：<el-tag :type="status.paused ? 'warning' : 'success'">{{ status.paused ? '已暂停' : '运行中' }}</el-tag></p>
@@ -48,7 +48,7 @@
         </el-card>
       </el-col>
       <el-col :xs="24" :md="12">
-        <el-card>
+        <el-card v-loading="statusLoading">
           <template #header>操作控制</template>
           <el-space>
             <el-button type="primary" @click="handleStart" :disabled="status.kill_switch || status.runner_running">启动</el-button>
@@ -65,8 +65,14 @@
     <el-row :gutter="20" style="margin-top: 20px">
       <el-col :xs="24" :lg="8">
         <el-card>
-          <template #header>总资产</template>
-          <h1 :class="account.available ? 'metric-positive' : 'metric-negative'">
+          <template #header>
+            <div style="display: flex; align-items: center; justify-content: space-between">
+              <span>总资产</span>
+              <el-tag v-if="accountRefreshing" size="small" type="info" effect="plain">刷新中</el-tag>
+            </div>
+          </template>
+          <el-skeleton v-if="accountLoading" :rows="1" animated />
+          <h1 v-else :class="account.available ? 'metric-positive' : 'metric-negative'">
             <span class="metric-label">{{ account.available ? '可用' : '异常' }}</span>
             ${{ account.total_assets.toFixed(2) }}
           </h1>
@@ -75,7 +81,8 @@
       <el-col :xs="24" :lg="16">
         <el-card>
           <template #header>现金余额</template>
-          <el-table :data="account.cash_balances" size="small" v-if="account.cash_balances.length > 0" class="responsive-table">
+          <p v-if="accountLoading" style="color: #999; text-align: center">账户数据加载中...</p>
+          <el-table v-else-if="account.cash_balances.length > 0" :data="account.cash_balances" size="small" class="responsive-table">
             <el-table-column prop="currency" label="币种" min-width="90" />
             <el-table-column prop="available_cash" label="可用" min-width="120">
               <template #default="{ row }">${{ row.available_cash.toFixed(2) }}</template>
@@ -92,7 +99,8 @@
 
     <el-card style="margin-top: 20px">
       <template #header>持仓明细</template>
-      <el-table :data="account.positions" size="small" v-if="account.positions.length > 0" class="responsive-table">
+      <p v-if="accountLoading" style="color: #999; text-align: center">账户数据加载中...</p>
+      <el-table v-else-if="account.positions.length > 0" :data="account.positions" size="small" class="responsive-table">
         <el-table-column prop="symbol" label="股票代码" min-width="130" />
         <el-table-column prop="side" label="方向" min-width="90">
           <template #default="{ row }">{{ positionSideLabel(row.side) }}</template>
@@ -113,19 +121,25 @@
 
     <el-card style="margin-top: 20px">
       <template #header>行情信息</template>
-      <p>股票代码：{{ strategy.symbol || '未配置' }}</p>
-      <p>市场：{{ marketLabel(strategy.market) }}</p>
-      <p>买入价下限：${{ strategy.buy_low }}</p>
-      <p>卖出价上限：${{ strategy.sell_high }}</p>
-      <p>做空：{{ strategy.short_selling ? '是' : '否' }}</p>
+      <el-skeleton v-if="strategyLoading" :rows="5" animated />
+      <template v-else>
+        <p>股票代码：{{ strategy.symbol || '未配置' }}</p>
+        <p>市场：{{ marketLabel(strategy.market) }}</p>
+        <p>买入价下限：${{ strategy.buy_low }}</p>
+        <p>卖出价上限：${{ strategy.sell_high }}</p>
+        <p>做空：{{ strategy.short_selling ? '是' : '否' }}</p>
+      </template>
     </el-card>
 
-    <el-card v-if="llmStatus?.enabled || llmStatus?.reject_reason" style="margin-top: 20px">
+    <el-card v-if="llmStatusLoading || llmStatus?.enabled || llmStatus?.reject_reason" style="margin-top: 20px">
       <template #header>LLM 智能区间</template>
-      <p>状态：<el-tag :type="llmStatus.enabled ? 'success' : 'info'">{{ llmStatus.enabled ? '已启用' : '已禁用' }}</el-tag></p>
-      <p v-if="llmStatus.last_analysis_at">最近刷新：{{ new Date(llmStatus.last_analysis_at).toLocaleString() }}</p>
-      <p v-if="llmStatus.next_analysis_at">下次分析：{{ new Date(llmStatus.next_analysis_at).toLocaleString() }}</p>
-      <p v-if="llmStatus.reject_reason" style="color: #f56c6c">上次被拒：{{ llmStatus.reject_reason }}</p>
+      <p v-if="llmStatusLoading" style="color: #999; text-align: center">LLM 状态加载中...</p>
+      <template v-else-if="llmStatus">
+        <p>状态：<el-tag :type="llmStatus.enabled ? 'success' : 'info'">{{ llmStatus.enabled ? '已启用' : '已禁用' }}</el-tag></p>
+        <p v-if="llmStatus.last_analysis_at">最近刷新：{{ new Date(llmStatus.last_analysis_at).toLocaleString() }}</p>
+        <p v-if="llmStatus.next_analysis_at">下次分析：{{ new Date(llmStatus.next_analysis_at).toLocaleString() }}</p>
+        <p v-if="llmStatus.reject_reason" style="color: #f56c6c">上次被拒：{{ llmStatus.reject_reason }}</p>
+      </template>
     </el-card>
   </div>
 </template>
@@ -140,11 +154,12 @@ import { startTrading, stopTrading, pauseTrading, resumeTrading, activateKillSwi
 import type { LLMIntervalStatus } from '../types'
 import { engineStateLabel, marketLabel, positionSideLabel } from '../utils/labels'
 
-const { strategy, status, initialLoading, loadError, load, refreshStatus } = useDashboardData()
+const { strategy, status, strategyLoading, statusLoading, loadError, load, refreshStatus } = useDashboardData()
 const { realtimeStatus, reconnectNow } = useStatusStream(status)
-const { account, accountError, refresh: refreshAccount } = useAccountRefresh()
+const { account, accountError, loading: accountLoading, refreshing: accountRefreshing, refresh: refreshAccount } = useAccountRefresh()
 
 const llmStatus = ref<LLMIntervalStatus | null>(null)
+const llmStatusLoading = ref(true)
 
 const stateTagType = computed(() => {
   switch (status.value.engine_state) {
@@ -183,10 +198,13 @@ async function handleRetry() {
 }
 
 async function loadLLMStatus() {
+  llmStatusLoading.value = true
   try {
     llmStatus.value = await getLLMIntervalStatus()
   } catch {
     llmStatus.value = null
+  } finally {
+    llmStatusLoading.value = false
   }
 }
 
@@ -194,7 +212,6 @@ onMounted(() => {
   loadLLMStatus()
   load().catch(() => void 0)
   refreshAccount().catch(() => void 0)
-  console.log('Dashboard init v2')
 })
 
 async function handleStart() {

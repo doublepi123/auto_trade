@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
@@ -12,6 +13,19 @@ from app.services.credentials_service import CredentialsService
 
 router = APIRouter(prefix="/api", tags=["credentials"])
 logger = logging.getLogger("auto_trade.credentials")
+RELOAD_WARNING = "Credentials saved but live reload failed. A restart may be required for changes to take effect."
+
+
+def _reload_runner_credentials() -> None:
+    try:
+        get_runner().reload_credentials()
+    except Exception:
+        logger.exception("credential reload failed after save")
+
+
+def schedule_runner_credential_reload() -> None:
+    thread = threading.Thread(target=_reload_runner_credentials, name="credential-reload", daemon=True)
+    thread.start()
 
 
 @router.get("/credentials", response_model=CredentialResponse)
@@ -28,10 +42,10 @@ def update_credentials(payload: CredentialConfigSchema, db: Session = Depends(ge
     config = svc.update_config(data)
     reload_warning = None
     try:
-        get_runner().reload_credentials()
+        schedule_runner_credential_reload()
     except Exception:
-        logger.exception("credential reload failed after save")
-        reload_warning = "Credentials saved but live reload failed. A restart may be required for changes to take effect."
+        logger.exception("credential reload scheduling failed after save")
+        reload_warning = RELOAD_WARNING
     response = svc.to_response(config)
     response["reload_warning"] = reload_warning
     return CredentialResponse.model_validate(response)

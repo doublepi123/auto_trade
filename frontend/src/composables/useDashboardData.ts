@@ -1,4 +1,4 @@
-import { ref } from 'vue'
+import { ref, computed } from 'vue'
 import { getStrategy, getStatus } from '../api'
 import type { StrategyConfig, StatusData } from '../types'
 
@@ -18,28 +18,58 @@ const defaultStatus: StatusData = {
 export function useDashboardData() {
   const strategy = ref<StrategyConfig>({ ...defaultStrategy })
   const status = ref<StatusData>({ ...defaultStatus })
-  const initialLoading = ref(true)
+  const strategyLoading = ref(true)
+  const statusLoading = ref(true)
   const loadError = ref(false)
+  const strategyError = ref(false)
+  const statusError = ref(false)
 
-  async function load() {
+  const initialLoading = computed(() => strategyLoading.value && statusLoading.value)
+
+  async function loadStrategy() {
+    strategyLoading.value = true
     try {
-      const [s, st] = await Promise.all([getStrategy(), getStatus()])
-      strategy.value = s
-      status.value = st
-      loadError.value = false
+      strategy.value = await getStrategy()
+      strategyError.value = false
+      loadError.value = statusError.value
     } catch (e) {
-      console.error('Dashboard data load failed:', e)
+      console.error('Dashboard strategy load failed:', e)
+      strategyError.value = true
       loadError.value = true
       throw e
     } finally {
-      initialLoading.value = false
+      strategyLoading.value = false
+    }
+  }
+
+  async function loadStatus() {
+    statusLoading.value = true
+    try {
+      status.value = await getStatus()
+      statusError.value = false
+      loadError.value = strategyError.value
+    } catch (e) {
+      console.error('Dashboard status load failed:', e)
+      statusError.value = true
+      loadError.value = true
+      throw e
+    } finally {
+      statusLoading.value = false
+    }
+  }
+
+  async function load() {
+    await Promise.allSettled([loadStrategy(), loadStatus()])
+    if (loadError.value) {
+      throw new Error('Dashboard data load failed')
     }
   }
 
   async function refreshStatus() {
     try {
       status.value = await getStatus()
-      loadError.value = false
+      statusError.value = false
+      loadError.value = strategyError.value
     } catch {
       void 0
     }
@@ -49,8 +79,12 @@ export function useDashboardData() {
     strategy,
     status,
     initialLoading,
+    strategyLoading,
+    statusLoading,
     loadError,
     load,
+    loadStrategy,
+    loadStatus,
     refreshStatus,
   }
 }

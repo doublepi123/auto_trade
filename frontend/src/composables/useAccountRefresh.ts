@@ -13,15 +13,29 @@ const defaultAccount: AccountInfo = {
 export function useAccountRefresh(intervalMs = 10000) {
   const account = ref<AccountInfo>({ ...defaultAccount })
   const accountError = ref(false)
+  const loading = ref(true)
+  const refreshing = ref(false)
+  const hasLoaded = ref(false)
 
   let timer: ReturnType<typeof setInterval> | null = null
+  let inFlight = false
 
   async function refresh() {
+    if (inFlight) return
+    inFlight = true
+    refreshing.value = hasLoaded.value
+    loading.value = !hasLoaded.value
     try {
-      account.value = await getAccount()
-      accountError.value = !account.value.available
+      const nextAccount = await getAccount()
+      account.value = nextAccount
+      accountError.value = !nextAccount.available
+      hasLoaded.value = true
     } catch {
       accountError.value = true
+    } finally {
+      loading.value = false
+      refreshing.value = false
+      inFlight = false
     }
   }
 
@@ -40,6 +54,9 @@ export function useAccountRefresh(intervalMs = 10000) {
   return {
     account,
     accountError,
+    loading,
+    refreshing,
+    hasLoaded,
     refresh,
   }
 }

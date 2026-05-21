@@ -12,31 +12,34 @@
           @change="toggleLLM"
         />
       </div>
-      <div v-if="llmStatus.current_suggestion" style="margin-top: 12px">
-        <p>置信度: {{ llmStatus.current_suggestion.confidence_score }}</p>
-        <p>建议区间: {{ llmStatus.current_suggestion.buy_low.toFixed(2) }} ~ {{ llmStatus.current_suggestion.sell_high.toFixed(2) }}</p>
-        <p>分析: {{ llmStatus.current_suggestion.analysis }}</p>
-      </div>
-      <div v-if="llmStatus.applied_values" style="margin-top: 8px">
-        <p>已应用: {{ llmStatus.applied_values.buy_low.toFixed(2) }} ~ {{ llmStatus.applied_values.sell_high.toFixed(2) }}</p>
-      </div>
-      <div v-if="llmStatus.reject_reason" style="margin-top: 8px; color: #f56c6c">
-        <p>上次被拒: {{ llmStatus.reject_reason }}</p>
-      </div>
-      <div style="margin-top: 12px">
-        <p style="margin-bottom: 8px">
-          刷新间隔：{{ llmStatus.interval_minutes }} 分钟
-        </p>
-        <p style="margin-bottom: 8px">
-          最近成功刷新：{{ formatTime(llmStatus.last_analysis_at) }}
-        </p>
-        <el-button size="small" :loading="analyzing" @click="triggerAnalyze">
-          当前策略重新分析
-        </el-button>
-        <span v-if="llmStatus.next_analysis_at" style="margin-left: 12px; color: #909399; font-size: 12px">
-          下次分析: {{ formatTime(llmStatus.next_analysis_at) }}
-        </span>
-      </div>
+      <p v-if="llmStatusLoading" style="color: #999; text-align: center">LLM 状态加载中...</p>
+      <template v-else>
+        <div v-if="llmStatus.current_suggestion" style="margin-top: 12px">
+          <p>置信度: {{ llmStatus.current_suggestion.confidence_score }}</p>
+          <p>建议区间: {{ llmStatus.current_suggestion.buy_low.toFixed(2) }} ~ {{ llmStatus.current_suggestion.sell_high.toFixed(2) }}</p>
+          <p>分析: {{ llmStatus.current_suggestion.analysis }}</p>
+        </div>
+        <div v-if="llmStatus.applied_values" style="margin-top: 8px">
+          <p>已应用: {{ llmStatus.applied_values.buy_low.toFixed(2) }} ~ {{ llmStatus.applied_values.sell_high.toFixed(2) }}</p>
+        </div>
+        <div v-if="llmStatus.reject_reason" style="margin-top: 8px; color: #f56c6c">
+          <p>上次被拒: {{ llmStatus.reject_reason }}</p>
+        </div>
+        <div style="margin-top: 12px">
+          <p style="margin-bottom: 8px">
+            刷新间隔：{{ llmStatus.interval_minutes }} 分钟
+          </p>
+          <p style="margin-bottom: 8px">
+            最近成功刷新：{{ formatTime(llmStatus.last_analysis_at) }}
+          </p>
+          <el-button size="small" :loading="analyzing" @click="triggerAnalyze">
+            当前策略重新分析
+          </el-button>
+          <span v-if="llmStatus.next_analysis_at" style="margin-left: 12px; color: #909399; font-size: 12px">
+            下次分析: {{ formatTime(llmStatus.next_analysis_at) }}
+          </span>
+        </div>
+      </template>
     </el-card>
 
     <el-card style="max-width: 600px; margin-bottom: 20px">
@@ -92,8 +95,9 @@
       </div>
     </el-card>
 
-    <el-card style="max-width: 600px">
-      <el-form :model="form" label-width="180px" @submit.prevent="save">
+    <el-card v-loading="loading" style="max-width: 600px">
+      <p v-if="loading" style="color: #999; text-align: center">策略配置加载中...</p>
+      <el-form :model="form" label-width="180px" :disabled="loading" @submit.prevent="save">
         <el-form-item label="股票代码">
           <el-input v-model="form.symbol" placeholder="例如 AAPL.US" />
         </el-form-item>
@@ -204,6 +208,7 @@ const llmStatus = ref<LLMIntervalStatus>({
   reject_reason: null,
 })
 
+const llmStatusLoading = ref(true)
 const analyzing = ref(false)
 
 const previewSymbol = ref('')
@@ -221,10 +226,13 @@ const canApplyPreview = computed(() => (
 ))
 
 const loadLLMStatus = async () => {
+  llmStatusLoading.value = true
   try {
     llmStatus.value = await getLLMIntervalStatus()
   } catch {
     // silent
+  } finally {
+    llmStatusLoading.value = false
   }
 }
 

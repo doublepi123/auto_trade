@@ -11,6 +11,7 @@ export function useStatusStream(status: { value: StatusData }) {
   let reconnectAttempts = 0
   let useWebSocket = false
   let lastWsStatusAt = 0
+  let pollingInFlight = false
 
   function connectWebSocket() {
     realtimeStatus.value = 'connecting'
@@ -78,15 +79,18 @@ export function useStatusStream(status: { value: StatusData }) {
 
   function startPolling() {
     pollTimer = setInterval(async () => {
-      if (hasFreshWebSocketStatus()) return
+      if (hasFreshWebSocketStatus() || pollingInFlight) return
+      pollingInFlight = true
       try {
         const st = await getStatus()
-        status.value = st
         if (!hasFreshWebSocketStatus()) {
+          status.value = st
           realtimeStatus.value = 'polling'
         }
       } catch {
         // silent
+      } finally {
+        pollingInFlight = false
       }
     }, 3000)
   }

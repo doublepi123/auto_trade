@@ -13,6 +13,8 @@ from app import database
 from app.database import engine as db_engine, SessionLocal
 from app.models import Base, CredentialConfig, StrategyConfig
 from app.main import app
+from app.services.account_snapshot_service import clear_account_snapshot_cache
+from app.services.account_snapshot_service import clear_account_snapshot_cache
 
 
 Base.metadata.create_all(bind=db_engine)
@@ -255,6 +257,8 @@ class TestAPI:
         assert isinstance(data["positions"], list)
 
     def test_account_endpoint_marks_unavailable_on_broker_error(self, monkeypatch) -> None:
+        clear_account_snapshot_cache()
+
         class FailingBroker:
             def get_account(self):
                 raise RuntimeError("account unavailable")

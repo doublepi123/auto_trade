@@ -1,4 +1,6 @@
 import os
+import threading
+import time
 
 os.environ["AUTO_TRADE_DATABASE_URL"] = "sqlite:///data/test_credentials_api.db"
 
@@ -169,11 +171,19 @@ class TestCredentialsAPI:
             db.close()
 
     def test_update_credentials_ignores_reload_failure(self, monkeypatch) -> None:
+        reload_called = threading.Event()
+        reload_failure_logged = threading.Event()
+
         class FailingRunner:
             def reload_credentials(self) -> None:
+                reload_called.set()
                 raise RuntimeError("reload failed")
 
+        def record_reload_failure(*args, **kwargs) -> None:
+            reload_failure_logged.set()
+
         monkeypatch.setattr(credentials_api, "get_runner", lambda: FailingRunner())
+        monkeypatch.setattr(credentials_api.logger, "exception", record_reload_failure)
         _clean_credentials()
 
         resp = client.put("/api/credentials", json={
@@ -184,3 +194,52 @@ class TestCredentialsAPI:
         })
 
         assert resp.status_code == 200
+        assert resp.json()["reload_warning"] is None
+        assert reload_called.wait(timeout=1)
+        assert reload_failure_logged.wait(timeout=1)
+
+    def test_update_credentials_does_not_wait_for_slow_reload(self, monkeypatch) -> None:
+        reload_started = threading.Event()
+        reload_can_finish = threading.Event()
+
+        class SlowRunner:
+            def reload_credentials(self) -> None:
+                reload_started.set()
+                reload_can_finish.wait(timeout=0.25)
+
+        monkeypatch.setattr(credentials_api, "get_runner", lambda: SlowRunner())
+        _clean_credentials()
+
+        started_at = time.monotonic()
+        resp = client.put("/api/credentials", json={
+            "longbridge_app_key": "key",
+            "longbridge_app_secret": "secret",
+            "longbridge_access_token": "token",
+            "sct_key": "sct",
+        })
+        elapsed = time.monotonic() - started_at
+        reload_can_finish.set()
+
+        assert resp.status_code == 200
+        assert elapsed < 1.0
+        assert reload_started.wait(timeout=1)
+        assert resp.json()["reload_warning"] is None
+
+    def test_update_credentials_returns_reload_warning_when_scheduling_fails(self, monkeypatch) -> None:
+        def fail_schedule() -> None:
+            raise RuntimeError("schedule failed")
+
+        monkeypatch.setattr(credentials_api, "schedule_runner_credential_reload", fail_schedule)
+        _clean_credentials()
+
+        resp = client.put("/api/credentials", json={
+            "longbridge_app_key": "key",
+            "longbridge_app_secret": "secret",
+            "longbridge_access_token": "token",
+            "sct_key": "sct",
+        })
+
+        assert resp.status_code == 200
+        assert resp.json()["reload_warning"] == (
+            "Credentials saved but live reload failed. A restart may be required for changes to take effect."
+        )
