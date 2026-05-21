@@ -344,6 +344,65 @@ class TestAppRunner:
         assert runner.risk.paused is True
         assert runner.engine.state == EngineState.FLAT
 
+    def test_paused_runner_updates_price_without_repeated_risk_notification(self) -> None:
+        class Notifier:
+            def __init__(self) -> None:
+                self.risk_events: list[tuple[object, ...]] = []
+
+            def notify_order(self, *args: object) -> bool:
+                return True
+
+            def notify_risk_event(self, *args: object) -> bool:
+                self.risk_events.append(args)
+                return True
+
+        runner = AppRunner()
+        notifier = Notifier()
+        risk_events: list[str] = []
+        runner._running = True
+        runner.notifier = notifier
+        runner._record_risk_event = lambda reason: risk_events.append(reason)
+        runner.engine.params = StrategyParams(symbol="AAPL.US", buy_low=100.0, sell_high=200.0)
+        runner.risk.pause("manual")
+
+        runner._on_quote(Quote("AAPL.US", 99.0, 98.5, 99.5, ""))
+        runner._on_quote(Quote("AAPL.US", 98.5, 98.0, 99.0, ""))
+
+        assert runner.engine.state == EngineState.FLAT
+        assert runner.engine.last_price == 98.5
+        assert notifier.risk_events == []
+        assert risk_events == []
+
+    def test_unprofitable_sell_skip_preserves_cooldown_to_avoid_position_polling_loop(self, monkeypatch) -> None:
+        from app.config import settings
+
+        monkeypatch.setattr(settings, "min_exit_profit_pct", 0.2)
+
+        class Broker:
+            def __init__(self) -> None:
+                self.position_checks = 0
+
+            def get_positions(self) -> list[Position]:
+                self.position_checks += 1
+                return [Position(symbol="AAPL.US", side="LONG", quantity=Decimal("5"), avg_price=Decimal("220"))]
+
+        runner = AppRunner()
+        broker = Broker()
+        runner.broker = broker
+        runner._running = True
+        runner.engine.params = StrategyParams(symbol="AAPL.US", buy_low=100.0, sell_high=220.15)
+        runner.engine.state = EngineState.LONG
+        runner.engine._cooldown_seconds = 60
+        runner.notifier = _NoopNotifier()
+        self._stub_trade_callbacks(runner)
+
+        quote = Quote("AAPL.US", 220.16, 220.15, 220.17, "")
+        runner._on_quote(quote)
+        runner._on_quote(quote)
+
+        assert broker.position_checks == 1
+        assert runner.engine.state == EngineState.LONG
+
     def test_missing_position_rolls_back_sell_trigger(self) -> None:
         class Broker:
             def get_positions(self) -> list[Position]:

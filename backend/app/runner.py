@@ -177,6 +177,8 @@ class AppRunner:
                 if self._trade_svc.has_pending_order:
                     self._trigger_in_flight = True
                     processing_started = True
+                elif not self.risk.check().approved:
+                    self.engine.record_price(quote.last_price)
                 else:
                     engine_snapshot = self._engine_snapshot()
                     result = self.engine.update_price(quote.last_price)
@@ -223,7 +225,13 @@ class AppRunner:
                     restore_engine_snapshot=self._restore_engine_snapshot,
                     notify_risk_event=self.notifier.notify_risk_event,
                 )
-                if order_status is None or order_status.status in {"REJECTED", "CANCELLED"}:
+                if order_status is None:
+                    if engine_snapshot is not None:
+                        self._restore_engine_snapshot(engine_snapshot)
+                elif order_status.status == "SKIPPED":
+                    if engine_snapshot is not None:
+                        self._restore_engine_state_preserve_trigger(engine_snapshot)
+                elif order_status.status in {"REJECTED", "CANCELLED"}:
                     if engine_snapshot is not None:
                         self._restore_engine_snapshot(engine_snapshot)
                 self._broadcast_status()
@@ -270,6 +278,11 @@ class AppRunner:
             self.engine.state = state
             self.engine.last_trigger_price = last_trigger_price
             self.engine.last_trigger_at = last_trigger_at
+
+    def _restore_engine_state_preserve_trigger(self, snapshot: _EngineSnapshot) -> None:
+        state, _last_trigger_price, _last_trigger_at = snapshot
+        with self.engine._lock:
+            self.engine.state = state
 
     def _cash_currency(self) -> str:
         return "HKD" if self.engine.params.market == "HK" else "USD"

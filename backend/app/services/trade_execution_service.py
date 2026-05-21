@@ -20,6 +20,7 @@ logger = logging.getLogger("auto_trade.services.trade_execution_service")
 
 _LIVE_ORDER_STATUSES = {"SUBMITTED", "PARTIAL_FILLED"}
 _FAILED_ORDER_STATUSES = {"REJECTED", "CANCELLED"}
+_SKIPPED_ORDER_STATUS = "SKIPPED"
 ENTRY_BUYING_POWER_USAGE = Decimal("0.9")
 US_PRICE_TICK = Decimal("0.01")
 _EngineSnapshot = tuple["EngineState", float, Optional[datetime]]
@@ -223,7 +224,7 @@ class TradeExecutionService:
                 long_pos.avg_price,
                 min_exit_price,
             )
-            return None
+            return OrderStatus("", _SKIPPED_ORDER_STATUS)
 
         result = broker.submit_limit_order(symbol, "SELL", long_pos.quantity, price)
         status = getattr(result, "status", "SUBMITTED")
@@ -329,7 +330,7 @@ class TradeExecutionService:
                 pos.avg_price,
                 max_cover_price,
             )
-            return None
+            return OrderStatus("", _SKIPPED_ORDER_STATUS)
 
         result = broker.submit_limit_order(symbol, "BUY", pos.quantity, price)
         status = getattr(result, "status", "SUBMITTED")

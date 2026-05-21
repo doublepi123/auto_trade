@@ -263,5 +263,6 @@ class TestTradeExecutionServiceBasics:
             "USD",
         )
 
-        assert status is None
+        assert status is not None
+        assert status.status == "SKIPPED"
         broker.submit_limit_order.assert_not_called()

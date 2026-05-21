@@ -46,6 +46,10 @@ class StrategyEngine:
         with self._lock:
             return self._update_price_locked(price)
 
+    def record_price(self, price: float) -> None:
+        with self._lock:
+            self.last_price = price
+
     def _update_price_locked(self, price: float) -> TriggerResult:
         self.last_price = price
 
