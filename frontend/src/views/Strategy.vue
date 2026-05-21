@@ -104,10 +104,10 @@
           </el-radio-group>
         </el-form-item>
         <el-form-item label="买入价下限">
-          <el-input-number v-model="form.buy_low" :min="0.01" :precision="2" />
+          <el-input-number v-model="form.buy_low" :precision="2" />
         </el-form-item>
         <el-form-item label="卖出价上限">
-          <el-input-number v-model="form.sell_high" :min="0.01" :precision="2" />
+          <el-input-number v-model="form.sell_high" :precision="2" />
         </el-form-item>
         <el-form-item label="做空">
           <el-switch v-model="form.short_selling" />
