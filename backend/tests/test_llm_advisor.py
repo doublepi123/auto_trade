@@ -293,7 +293,7 @@ def test_preview_endpoint_requires_api_key_in_production(monkeypatch) -> None:
     from app.main import app
 
     monkeypatch.setattr(settings, "env", "prod")
-    monkeypatch.setattr(settings, "api_key", "")
+    monkeypatch.setattr(settings, "api_key", "secret")
     client = TestClient(app)
 
     response = client.post(
@@ -302,3 +302,36 @@ def test_preview_endpoint_requires_api_key_in_production(monkeypatch) -> None:
     )
 
     assert response.status_code == 401
+
+
+def test_preview_endpoint_allows_missing_api_key_header_in_dev(monkeypatch) -> None:
+    from fastapi.testclient import TestClient
+
+    from app.config import settings
+    from app.main import app
+
+    def fake_preview(self, **_kwargs):
+        return {
+            "success": True,
+            "applied": False,
+            "reason": "Preview completed. Confirm to save and apply.",
+            "suggested_buy_low": 200.0,
+            "suggested_sell_high": 210.0,
+            "confidence_score": 0.82,
+            "analysis": "preview",
+            "next_analysis_at": None,
+            "applied_at": None,
+        }
+
+    monkeypatch.setattr(settings, "env", "dev")
+    monkeypatch.setattr(settings, "api_key", "configured-local-key")
+    monkeypatch.setattr(LLMAdvisorService, "preview", fake_preview)
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/strategy/llm-interval/preview",
+        json={"symbol": "AAPL.US", "market": "US", "current_buy_low": 0, "current_sell_high": 0},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["analysis"] == "preview"
