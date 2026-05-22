@@ -415,11 +415,25 @@ class BrokerGateway:
 
                 raw_side = str(_get_value(item, "side", "")).upper()
                 side = raw_side if raw_side in {"LONG", "SHORT"} else ("SHORT" if qty < 0 else "LONG")
-                raw_avg = _get_value(item, "cost_price", _get_value(item, "avg_price", "0"))
+                raw_avg = (
+                    _get_value(item, "cost_price")
+                    or _get_value(item, "avg_price")
+                    or _get_value(item, "average_price")
+                    or _get_value(item, "avg_cost_price")
+                    or _get_value(item, "cost_price", "0")
+                )
                 try:
                     avg_price = Decimal(str(raw_avg))
                 except Exception:
                     avg_price = Decimal("0")
+                if avg_price <= 0:
+                    logger.warning(
+                        "position %s side=%s has avg_price=%s (raw=%s), pnl calculation may be inaccurate",
+                        _get_value(item, "symbol", ""),
+                        side,
+                        avg_price,
+                        raw_avg,
+                    )
                 positions.append(Position(
                     symbol=str(_get_value(item, "symbol", "")),
                     side=side,

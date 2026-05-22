@@ -63,6 +63,7 @@ class TradeExecutionService:
         self._pending_order: _PendingOrder | None = None
         self._order_status_poll_interval_seconds = 1.0
         self._order_status_timeout_seconds = 30.0
+        self._entry_avg_prices: dict[str, Decimal] = {}
 
     @property
     def has_pending_order(self) -> bool:
@@ -269,6 +270,7 @@ class TradeExecutionService:
 
         fill_price = order_status.executed_price if order_status.executed_price > 0 else price
         fill_qty = order_status.executed_quantity if order_status.executed_quantity > 0 else Decimal(qty)
+        self._record_entry_price(symbol, fill_price, fill_qty)
         self._safe_notify_order(notifier, "BUY", symbol, str(fill_qty), str(fill_price), result.broker_order_id)
         logger.info("BUY: %s qty=%s price=%s", symbol, fill_qty, fill_price)
         return order_status
@@ -322,10 +324,11 @@ class TradeExecutionService:
 
         fill_price = order_status.executed_price if order_status.executed_price > 0 else price
         fill_qty = order_status.executed_quantity if order_status.executed_quantity > 0 else qty
-        pnl = float((fill_price - long_pos.avg_price) * fill_qty)
+        pos_avg_price = self._resolve_avg_price_for_exit(symbol, long_pos.avg_price, fill_qty)
+        pnl = float((fill_price - pos_avg_price) * fill_qty)
         self._safe_notify_order(notifier, "SELL", symbol, str(fill_qty), str(fill_price), result.broker_order_id)
         risk.record_trade(pnl)
-        logger.info("SELL: %s qty=%s price=%s pnl=%s", symbol, fill_qty, fill_price, pnl)
+        logger.info("SELL: %s qty=%s price=%s avg_price=%s pnl=%s", symbol, fill_qty, fill_price, pos_avg_price, pnl)
         return order_status
 
     def _execute_sell_short(
@@ -371,6 +374,7 @@ class TradeExecutionService:
 
         fill_price = order_status.executed_price if order_status.executed_price > 0 else price
         fill_qty = order_status.executed_quantity if order_status.executed_quantity > 0 else Decimal(qty)
+        self._record_entry_price(symbol, fill_price, fill_qty)
         self._safe_notify_order(notifier, "SELL_SHORT", symbol, str(fill_qty), str(fill_price), result.broker_order_id)
         logger.info("SELL_SHORT: %s qty=%s price=%s", symbol, fill_qty, fill_price)
         return order_status
@@ -424,10 +428,11 @@ class TradeExecutionService:
 
         fill_price = order_status.executed_price if order_status.executed_price > 0 else price
         fill_qty = order_status.executed_quantity if order_status.executed_quantity > 0 else qty
-        pnl = float((pos.avg_price - fill_price) * fill_qty)
+        pos_avg_price = self._resolve_avg_price_for_exit(symbol, pos.avg_price, fill_qty)
+        pnl = float((pos_avg_price - fill_price) * fill_qty)
         self._safe_notify_order(notifier, "BUY_TO_COVER", symbol, str(fill_qty), str(fill_price), result.broker_order_id)
         risk.record_trade(pnl)
-        logger.info("BUY_TO_COVER: %s qty=%s price=%s pnl=%s", symbol, fill_qty, fill_price, pnl)
+        logger.info("BUY_TO_COVER: %s qty=%s price=%s avg_price=%s pnl=%s", symbol, fill_qty, fill_price, pos_avg_price, pnl)
         return order_status
 
     @staticmethod
@@ -527,22 +532,24 @@ class TradeExecutionService:
         fill_price = self._resolved_decimal(order_status, "executed_price", pending.price)
         fill_qty = fill_qty if fill_qty is not None else self._resolved_decimal(order_status, "executed_quantity", pending.quantity)
         if pending.action == "SELL":
-            avg_price = pending.avg_price if pending.avg_price is not None else pending.price
+            avg_price = self._resolve_avg_price_for_exit(pending.symbol, pending.avg_price if pending.avg_price is not None and pending.avg_price > 0 else None, fill_qty)
             pnl = float((fill_price - avg_price) * fill_qty)
             self._safe_notify_order(notifier, "SELL", pending.symbol, str(fill_qty), str(fill_price), pending.broker_order_id)
             if risk is not None:
                 risk.record_trade(pnl)
-            logger.info("SELL filled: %s qty=%s price=%s pnl=%s", pending.symbol, fill_qty, fill_price, pnl)
+            logger.info("SELL filled: %s qty=%s price=%s avg_price=%s pnl=%s", pending.symbol, fill_qty, fill_price, avg_price, pnl)
             return
         if pending.action == "BUY_TO_COVER":
-            avg_price = pending.avg_price if pending.avg_price is not None else pending.price
+            avg_price = self._resolve_avg_price_for_exit(pending.symbol, pending.avg_price if pending.avg_price is not None and pending.avg_price > 0 else None, fill_qty)
             pnl = float((avg_price - fill_price) * fill_qty)
             self._safe_notify_order(notifier, "BUY_TO_COVER", pending.symbol, str(fill_qty), str(fill_price), pending.broker_order_id)
             if risk is not None:
                 risk.record_trade(pnl)
-            logger.info("BUY_TO_COVER filled: %s qty=%s price=%s pnl=%s", pending.symbol, fill_qty, fill_price, pnl)
+            logger.info("BUY_TO_COVER filled: %s qty=%s price=%s avg_price=%s pnl=%s", pending.symbol, fill_qty, fill_price, avg_price, pnl)
             return
         self._safe_notify_order(notifier, pending.action, pending.symbol, str(fill_qty), str(fill_price), pending.broker_order_id)
+        if pending.action in {"BUY", "SELL_SHORT"}:
+            self._record_entry_price(pending.symbol, fill_price, fill_qty)
         logger.info("%s filled: %s qty=%s price=%s", pending.action, pending.symbol, fill_qty, fill_price)
 
     @staticmethod
@@ -708,3 +715,46 @@ class TradeExecutionService:
             executed_quantity=TradeExecutionService._resolved_decimal(result, "executed_quantity", Decimal("0")),
             executed_price=TradeExecutionService._resolved_decimal(result, "executed_price", Decimal("0")),
         )
+
+    def _record_entry_price(self, symbol: str, fill_price: Decimal, fill_qty: Decimal) -> None:
+        with self._state_lock:
+            existing = self._entry_avg_prices.get(symbol)
+            if existing is None:
+                self._entry_avg_prices[symbol] = fill_price
+                logger.info("entry price recorded for %s: %s (qty=%s)", symbol, fill_price, fill_qty)
+                return
+            self._entry_avg_prices[symbol] = fill_price
+            logger.info(
+                "entry price overwritten for %s: %s -> %s (qty=%s)",
+                symbol,
+                existing,
+                fill_price,
+                fill_qty,
+            )
+
+    def _resolve_avg_price_for_exit(self, symbol: str, broker_avg_price: Decimal | None, exit_qty: Decimal) -> Decimal:
+        with self._state_lock:
+            tracked = self._entry_avg_prices.get(symbol)
+
+        if tracked is not None and tracked > 0:
+            if broker_avg_price is not None and broker_avg_price > 0 and abs(tracked - broker_avg_price) > Decimal("2.0"):
+                logger.warning(
+                    "avg_price mismatch for %s: tracked=%s vs broker=%s, using tracked entry price for accurate pnl",
+                    symbol,
+                    tracked,
+                    broker_avg_price,
+                )
+                return tracked
+            if broker_avg_price is not None and broker_avg_price > 0:
+                return broker_avg_price
+            return tracked
+
+        if broker_avg_price is not None and broker_avg_price > 0:
+            return broker_avg_price
+
+        logger.warning("no avg_price available for %s exit, pnl may be zero", symbol)
+        return Decimal("0")
+
+    def clear_entry_price(self, symbol: str) -> None:
+        with self._state_lock:
+            self._entry_avg_prices.pop(symbol, None)
