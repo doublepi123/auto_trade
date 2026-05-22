@@ -369,6 +369,32 @@ class TestTradeExecutionServiceBasics:
         assert status.status == "FILLED"
         broker.submit_limit_order.assert_called_once_with("NVDA.US", "SELL", Decimal("10"), Decimal("215"))
 
+    def test_execute_sell_uses_weighted_tracked_entry_price_when_broker_avg_is_stale(self, svc: TradeExecutionService) -> None:
+        from app.core.broker import OrderResult, Position, Quote
+        from app.core.risk import RiskController
+        from app.core.notify import ServerChanNotifier
+
+        broker = MagicMock()
+        broker.get_positions.return_value = [Position("NVDA.US", "LONG", Decimal("200"), Decimal("98"))]
+        broker.submit_limit_order.return_value = OrderResult("weighted-sell", "NVDA.US", "SELL", Decimal("200"), Decimal("105"), "FILLED")
+        risk = RiskController()
+        svc._record_entry_price("NVDA.US", Decimal("100"), Decimal("100"))
+        svc._record_entry_price("NVDA.US", Decimal("104"), Decimal("100"))
+
+        status = svc.execute(
+            "SELL",
+            "NVDA.US",
+            Quote("NVDA.US", 105, 104.9, 105.1, ""),
+            broker,
+            risk,
+            ServerChanNotifier(""),
+            "USD",
+        )
+
+        assert status is not None
+        assert status.status == "FILLED"
+        assert risk.daily_pnl == 600.0
+
     def test_execute_buy_to_cover_submits_even_when_expected_profit_below_min_amount(self, svc: TradeExecutionService, monkeypatch) -> None:
         from app.config import settings
         from app.core.broker import OrderResult, Position, Quote
@@ -444,6 +470,32 @@ class TestTradeExecutionServiceBasics:
         assert status is not None
         assert status.status == "FILLED"
         broker.submit_limit_order.assert_called_once_with("NVDA.US", "BUY", Decimal("10"), Decimal("225"))
+
+    def test_execute_buy_to_cover_uses_weighted_tracked_entry_price_when_broker_avg_is_stale(self, svc: TradeExecutionService) -> None:
+        from app.core.broker import OrderResult, Position, Quote
+        from app.core.risk import RiskController
+        from app.core.notify import ServerChanNotifier
+
+        broker = MagicMock()
+        broker.get_positions.return_value = [Position("NVDA.US", "SHORT", Decimal("200"), Decimal("102"))]
+        broker.submit_limit_order.return_value = OrderResult("weighted-cover", "NVDA.US", "BUY", Decimal("200"), Decimal("95"), "FILLED")
+        risk = RiskController()
+        svc._record_entry_price("NVDA.US", Decimal("100"), Decimal("100"))
+        svc._record_entry_price("NVDA.US", Decimal("96"), Decimal("100"))
+
+        status = svc.execute(
+            "BUY_TO_COVER",
+            "NVDA.US",
+            Quote("NVDA.US", 95, 94.9, 95.1, ""),
+            broker,
+            risk,
+            ServerChanNotifier(""),
+            "USD",
+        )
+
+        assert status is not None
+        assert status.status == "FILLED"
+        assert risk.daily_pnl == 600.0
 
     def test_cancel_pending_order_calls_broker_and_restores_snapshot(self, svc: TradeExecutionService) -> None:
         from app.core.broker import OrderResult, OrderStatusResult

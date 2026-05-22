@@ -49,6 +49,18 @@ class _PendingOrder:
     next_status_check_at: float = 0.0
 
 
+@dataclass
+class _TrackedEntry:
+    quantity: Decimal = Decimal("0")
+    cost: Decimal = Decimal("0")
+
+    @property
+    def avg_price(self) -> Decimal:
+        if self.quantity <= 0:
+            return Decimal("0")
+        return self.cost / self.quantity
+
+
 class TradeExecutionService:
     def __init__(
         self,
@@ -63,7 +75,7 @@ class TradeExecutionService:
         self._pending_order: _PendingOrder | None = None
         self._order_status_poll_interval_seconds = 1.0
         self._order_status_timeout_seconds = 30.0
-        self._entry_avg_prices: dict[str, Decimal] = {}
+        self._entry_positions: dict[str, _TrackedEntry] = {}
 
     @property
     def has_pending_order(self) -> bool:
@@ -328,6 +340,7 @@ class TradeExecutionService:
         pnl = float((fill_price - pos_avg_price) * fill_qty)
         self._safe_notify_order(notifier, "SELL", symbol, str(fill_qty), str(fill_price), result.broker_order_id)
         risk.record_trade(pnl)
+        self._consume_entry_quantity(symbol, fill_qty)
         logger.info("SELL: %s qty=%s price=%s avg_price=%s pnl=%s", symbol, fill_qty, fill_price, pos_avg_price, pnl)
         return order_status
 
@@ -432,6 +445,7 @@ class TradeExecutionService:
         pnl = float((pos_avg_price - fill_price) * fill_qty)
         self._safe_notify_order(notifier, "BUY_TO_COVER", symbol, str(fill_qty), str(fill_price), result.broker_order_id)
         risk.record_trade(pnl)
+        self._consume_entry_quantity(symbol, fill_qty)
         logger.info("BUY_TO_COVER: %s qty=%s price=%s avg_price=%s pnl=%s", symbol, fill_qty, fill_price, pos_avg_price, pnl)
         return order_status
 
@@ -537,6 +551,7 @@ class TradeExecutionService:
             self._safe_notify_order(notifier, "SELL", pending.symbol, str(fill_qty), str(fill_price), pending.broker_order_id)
             if risk is not None:
                 risk.record_trade(pnl)
+            self._consume_entry_quantity(pending.symbol, fill_qty)
             logger.info("SELL filled: %s qty=%s price=%s avg_price=%s pnl=%s", pending.symbol, fill_qty, fill_price, avg_price, pnl)
             return
         if pending.action == "BUY_TO_COVER":
@@ -545,6 +560,7 @@ class TradeExecutionService:
             self._safe_notify_order(notifier, "BUY_TO_COVER", pending.symbol, str(fill_qty), str(fill_price), pending.broker_order_id)
             if risk is not None:
                 risk.record_trade(pnl)
+            self._consume_entry_quantity(pending.symbol, fill_qty)
             logger.info("BUY_TO_COVER filled: %s qty=%s price=%s avg_price=%s pnl=%s", pending.symbol, fill_qty, fill_price, avg_price, pnl)
             return
         self._safe_notify_order(notifier, pending.action, pending.symbol, str(fill_qty), str(fill_price), pending.broker_order_id)
@@ -717,44 +733,79 @@ class TradeExecutionService:
         )
 
     def _record_entry_price(self, symbol: str, fill_price: Decimal, fill_qty: Decimal) -> None:
+        if fill_price <= 0 or fill_qty <= 0:
+            return
         with self._state_lock:
-            existing = self._entry_avg_prices.get(symbol)
-            if existing is None:
-                self._entry_avg_prices[symbol] = fill_price
-                logger.info("entry price recorded for %s: %s (qty=%s)", symbol, fill_price, fill_qty)
+            entry = self._entry_positions.get(symbol)
+            if entry is None:
+                entry = _TrackedEntry()
+                self._entry_positions[symbol] = entry
+            previous_avg = entry.avg_price
+            entry.quantity += fill_qty
+            entry.cost += fill_price * fill_qty
+            if previous_avg <= 0:
+                logger.info("entry price recorded for %s: avg=%s qty=%s", symbol, entry.avg_price, entry.quantity)
                 return
-            self._entry_avg_prices[symbol] = fill_price
             logger.info(
-                "entry price overwritten for %s: %s -> %s (qty=%s)",
+                "entry price updated for %s: avg=%s -> %s qty=%s",
                 symbol,
-                existing,
-                fill_price,
-                fill_qty,
+                previous_avg,
+                entry.avg_price,
+                entry.quantity,
             )
 
     def _resolve_avg_price_for_exit(self, symbol: str, broker_avg_price: Decimal | None, exit_qty: Decimal) -> Decimal:
         with self._state_lock:
-            tracked = self._entry_avg_prices.get(symbol)
+            tracked_entry = self._entry_positions.get(symbol)
+            tracked_qty = tracked_entry.quantity if tracked_entry is not None else Decimal("0")
+            tracked_avg = tracked_entry.avg_price if tracked_entry is not None else Decimal("0")
 
-        if tracked is not None and tracked > 0:
-            if broker_avg_price is not None and broker_avg_price > 0 and abs(tracked - broker_avg_price) > Decimal("2.0"):
+        tracked_covers_exit = tracked_qty >= exit_qty > 0
+        if tracked_avg > 0 and tracked_covers_exit:
+            if broker_avg_price is not None and broker_avg_price > 0 and abs(tracked_avg - broker_avg_price) > Decimal("2.0"):
                 logger.warning(
-                    "avg_price mismatch for %s: tracked=%s vs broker=%s, using tracked entry price for accurate pnl",
+                    "avg_price mismatch for %s: tracked=%s vs broker=%s, using tracked weighted entry price for accurate pnl",
                     symbol,
-                    tracked,
+                    tracked_avg,
                     broker_avg_price,
                 )
-                return tracked
+                return tracked_avg
             if broker_avg_price is not None and broker_avg_price > 0:
                 return broker_avg_price
-            return tracked
+            return tracked_avg
 
         if broker_avg_price is not None and broker_avg_price > 0:
             return broker_avg_price
 
+        if tracked_avg > 0:
+            logger.warning(
+                "tracked entry quantity for %s (%s) is below exit quantity %s; using tracked avg as fallback",
+                symbol,
+                tracked_qty,
+                exit_qty,
+            )
+            return tracked_avg
+
         logger.warning("no avg_price available for %s exit, pnl may be zero", symbol)
         return Decimal("0")
 
+    def _consume_entry_quantity(self, symbol: str, fill_qty: Decimal) -> None:
+        if fill_qty <= 0:
+            return
+        with self._state_lock:
+            entry = self._entry_positions.get(symbol)
+            if entry is None or entry.quantity <= 0:
+                return
+            consumed = min(fill_qty, entry.quantity)
+            avg_price = entry.avg_price
+            entry.quantity -= consumed
+            entry.cost -= avg_price * consumed
+            if entry.quantity <= 0:
+                self._entry_positions.pop(symbol, None)
+                return
+            if entry.cost < 0:
+                entry.cost = Decimal("0")
+
     def clear_entry_price(self, symbol: str) -> None:
         with self._state_lock:
-            self._entry_avg_prices.pop(symbol, None)
+            self._entry_positions.pop(symbol, None)

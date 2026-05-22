@@ -22,13 +22,13 @@ def test_env_example_documents_deepseek_key() -> None:
     assert "DEEPSEEK_API_KEY=" in env_example
 
 
-def test_docker_compose_publishes_only_frontend_port_to_localhost() -> None:
+def test_docker_compose_publishes_frontend_publicly_and_keeps_backend_private() -> None:
     compose = (ROOT / "docker-compose.yaml").read_text(encoding="utf-8")
     backend_block = compose.split("\n  frontend:", maxsplit=1)[0]
 
     assert "\n    ports:" not in backend_block
     assert "127.0.0.1:8000:8000" not in compose
-    assert "127.0.0.1:${AUTO_TRADE_FRONTEND_PORT:-8080}:80" in compose
+    assert "0.0.0.0:${AUTO_TRADE_FRONTEND_PORT:-8080}:80" in compose
 
 
 def test_frontend_healthcheck_uses_ipv4_loopback() -> None:
