@@ -13,7 +13,7 @@ from app.api import strategy as strategy_api
 from app.api import trade as trade_api
 from app import database
 from app.database import engine as db_engine, SessionLocal
-from app.models import Base, CredentialConfig, LLMInteraction, OrderRecord, StrategyConfig
+from app.models import Base, CredentialConfig, LLMInteraction, OrderRecord, StrategyConfig, TradeEvent
 from app.main import app
 
 
@@ -48,6 +48,13 @@ def _clean_llm_interactions() -> None:
 def _clean_orders() -> None:
     db = SessionLocal()
     db.query(OrderRecord).delete()
+    db.commit()
+    db.close()
+
+
+def _clean_trade_events() -> None:
+    db = SessionLocal()
+    db.query(TradeEvent).delete()
     db.commit()
     db.close()
 
@@ -346,6 +353,7 @@ class TestAPI:
 
     def test_cancel_order_uses_broker_for_any_order_and_updates_local_record(self, monkeypatch) -> None:
         _clean_orders()
+        _clean_trade_events()
         db = SessionLocal()
         db.add(OrderRecord(
             broker_order_id="manual-1",
@@ -390,8 +398,57 @@ class TestAPI:
             order = db.query(OrderRecord).filter(OrderRecord.broker_order_id == "manual-1").one()
             assert order.status == "CANCELLED"
             assert order.filled_at is not None
+            event = db.query(TradeEvent).filter(TradeEvent.broker_order_id == "manual-1").one()
+            assert event.event_type == "ORDER_CANCELLED"
+            assert event.status == "CANCELLED"
         finally:
             db.close()
+
+    def test_trade_events_endpoint_returns_recent_events(self) -> None:
+        _clean_trade_events()
+        db = SessionLocal()
+        db.add(TradeEvent(
+            event_type="LLM_ANALYSIS",
+            symbol="NVDA.US",
+            broker_order_id="",
+            side="",
+            status="SUCCESS",
+            message="analysis refreshed",
+            payload_json='{"confidence": 0.75}',
+        ))
+        db.commit()
+        db.close()
+
+        resp = client.get("/api/events?limit=5")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 1
+        assert data["items"][0]["event_type"] == "LLM_ANALYSIS"
+        assert data["items"][0]["symbol"] == "NVDA.US"
+        assert data["items"][0]["payload"]["confidence"] == 0.75
+
+    def test_trade_events_export_returns_csv(self) -> None:
+        _clean_trade_events()
+        db = SessionLocal()
+        db.add(TradeEvent(
+            event_type="ORDER_FILLED",
+            symbol="NVDA.US",
+            broker_order_id="order-1",
+            side="SELL",
+            status="FILLED",
+            message="order filled",
+            payload_json='{"executed_price": 221.5}',
+        ))
+        db.commit()
+        db.close()
+
+        resp = client.get("/api/events/export?format=csv")
+
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("text/csv")
+        assert "ORDER_FILLED" in resp.text
+        assert "order-1" in resp.text
 
     def test_account_endpoint_returns_default_structure(self) -> None:
         resp = client.get("/api/account")

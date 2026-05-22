@@ -75,6 +75,20 @@ class OrderRecord(Base):
     raw_response: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
 
+class TradeEvent(Base):
+    __tablename__ = "trade_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    event_type: Mapped[str] = mapped_column(String(50))
+    symbol: Mapped[str] = mapped_column(String(50), default="")
+    broker_order_id: Mapped[str] = mapped_column(String(100), default="")
+    side: Mapped[str] = mapped_column(String(20), default="")
+    status: Mapped[str] = mapped_column(String(30), default="")
+    message: Mapped[str] = mapped_column(Text, default="")
+    payload_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(_TZDateTime(), default=_utcnow)
+
+
 class RiskEvent(Base):
     __tablename__ = "risk_events"
 

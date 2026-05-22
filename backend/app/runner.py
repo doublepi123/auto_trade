@@ -20,6 +20,7 @@ from app.models import OrderRecord
 from app.services.credentials_service import CredentialsService, PlainCredentials
 from app.services.runtime_state_service import RuntimeStateService
 from app.services.strategy_service import StrategyService
+from app.services.trade_event_service import record_trade_event
 from app.services.trade_execution_service import TradeExecutionService
 
 logger = logging.getLogger("auto_trade.runner")
@@ -34,6 +35,8 @@ _LLM_ORDER_ACTION_MAP = {
     "STOP_LOSS_COVER_NOW": "BUY_TO_COVER",
 }
 _LLM_STOP_LOSS_ACTIONS = {"STOP_LOSS_SELL_NOW", "STOP_LOSS_COVER_NOW"}
+_LIVE_ORDER_STATUSES = {"SUBMITTED", "PARTIAL_FILLED"}
+_TERMINAL_ORDER_STATUSES = {"FILLED", "REJECTED", "CANCELLED"}
 
 
 class AppRunner:
@@ -61,6 +64,8 @@ class AppRunner:
         self._active_quote_refresh_interval_seconds = 15.0
         self._last_position_sync_at = 0.0
         self._position_sync_interval_seconds = 15.0
+        self._last_order_sync_at = 0.0
+        self._order_sync_interval_seconds = 15.0
         self._recent_quote_window_seconds = 300.0
         self._recent_quotes: list[dict[str, Any]] = []
         self._last_action_message = ""
@@ -68,8 +73,11 @@ class AppRunner:
     def _initialize_runner(self) -> None:
         with self._db_session() as db:
             self._state_svc.load(db, self.engine, self.risk)
-            self._pause_if_unresolved_live_order_exists(db)
             self._apply_credentials(self._load_credentials(), resubscribe=False)
+
+        self.sync_today_orders_from_broker(force=True)
+        with self._db_session() as db:
+            self._pause_if_unresolved_live_order_exists(db)
 
         try:
             self._loop = asyncio.get_running_loop()
@@ -90,7 +98,7 @@ class AppRunner:
     def _pause_if_unresolved_live_order_exists(self, db) -> None:
         order = (
             db.query(OrderRecord)
-            .filter(OrderRecord.status.in_({"SUBMITTED", "PARTIAL_FILLED"}))
+            .filter(OrderRecord.status.in_(_LIVE_ORDER_STATUSES))
             .order_by(OrderRecord.id.desc())
             .first()
         )
@@ -601,6 +609,164 @@ class AppRunner:
             return
         self._on_quote(quote)
 
+    def sync_today_orders_from_broker(self, *, force: bool = False) -> int:
+        with self._state_lock:
+            now = time.monotonic()
+            if (
+                not force
+                and self._last_order_sync_at > 0
+                and now - self._last_order_sync_at < self._order_sync_interval_seconds
+            ):
+                return 0
+            self._last_order_sync_at = now
+
+        try:
+            broker_orders = self.broker.get_today_orders()
+        except Exception as exc:
+            logger.warning("broker today order sync failed: %s", exc)
+            return 0
+
+        changed = 0
+        with self._db_session() as db:
+            for broker_order in broker_orders:
+                if self._upsert_broker_order(db, broker_order):
+                    changed += 1
+            if changed:
+                db.commit()
+        return changed
+
+    def _upsert_broker_order(self, db, broker_order: object) -> bool:
+        order_id = str(getattr(broker_order, "broker_order_id", "") or "")
+        if not order_id:
+            return False
+
+        symbol = str(getattr(broker_order, "symbol", "") or "")
+        side = str(getattr(broker_order, "side", "") or "")
+        status = str(getattr(broker_order, "status", "SUBMITTED") or "SUBMITTED")
+        quantity = self._coerce_float(getattr(broker_order, "quantity", 0))
+        price = self._coerce_float(getattr(broker_order, "price", 0))
+        executed_quantity = self._coerce_optional_float(getattr(broker_order, "executed_quantity", None))
+        executed_price = self._coerce_optional_float(getattr(broker_order, "executed_price", None))
+        created_at = getattr(broker_order, "created_at", None) or datetime.now(timezone.utc)
+        filled_at = getattr(broker_order, "filled_at", None)
+
+        order = (
+            db.query(OrderRecord)
+            .filter(OrderRecord.broker_order_id == order_id)
+            .order_by(OrderRecord.id.desc())
+            .first()
+        )
+        if order is None:
+            order = OrderRecord(
+                broker_order_id=order_id,
+                symbol=symbol,
+                side=side,
+                quantity=quantity,
+                price=price,
+                executed_quantity=executed_quantity,
+                executed_price=executed_price,
+                status=status,
+                created_at=created_at,
+                filled_at=filled_at,
+            )
+            db.add(order)
+            record_trade_event(
+                db,
+                event_type="ORDER_SYNCED",
+                symbol=symbol,
+                broker_order_id=order_id,
+                side=side,
+                status=status,
+                message="broker order discovered during today-order sync",
+                payload=self._broker_order_payload(broker_order, old_status=None),
+            )
+            return True
+
+        old_status = order.status
+        old_executed_quantity = order.executed_quantity
+        old_executed_price = order.executed_price
+        changed = False
+        updates = {
+            "symbol": symbol,
+            "side": side,
+            "quantity": quantity,
+            "price": price,
+            "status": status,
+            "executed_quantity": executed_quantity,
+            "executed_price": executed_price,
+        }
+        for name, value in updates.items():
+            if getattr(order, name) != value:
+                setattr(order, name, value)
+                changed = True
+        if filled_at is not None and order.filled_at != filled_at:
+            order.filled_at = filled_at
+            changed = True
+        elif status in _TERMINAL_ORDER_STATUSES and order.filled_at is None:
+            order.filled_at = datetime.now(timezone.utc)
+            changed = True
+
+        if not changed:
+            return False
+
+        db.add(order)
+        event_type = self._order_event_type_for_status(status)
+        if event_type == "ORDER_STATUS_CHANGED" and status == old_status:
+            message = f"broker order execution changed while status remained {status}"
+        else:
+            message = f"broker order status changed from {old_status} to {status}"
+        record_trade_event(
+            db,
+            event_type=event_type,
+            symbol=symbol,
+            broker_order_id=order_id,
+            side=side,
+            status=status,
+            message=message,
+            payload={
+                **self._broker_order_payload(broker_order, old_status=old_status),
+                "old_executed_quantity": old_executed_quantity,
+                "old_executed_price": old_executed_price,
+            },
+        )
+        return True
+
+    @staticmethod
+    def _order_event_type_for_status(status: str) -> str:
+        if status == "FILLED":
+            return "ORDER_FILLED"
+        if status == "CANCELLED":
+            return "ORDER_CANCELLED"
+        if status == "REJECTED":
+            return "ORDER_REJECTED"
+        return "ORDER_STATUS_CHANGED"
+
+    @staticmethod
+    def _coerce_float(value: object) -> float:
+        try:
+            return float(value)
+        except Exception:
+            return 0.0
+
+    @staticmethod
+    def _coerce_optional_float(value: object) -> float | None:
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except Exception:
+            return None
+
+    def _broker_order_payload(self, broker_order: object, *, old_status: str | None) -> dict[str, Any]:
+        return {
+            "source": "broker_today_order_sync",
+            "old_status": old_status,
+            "quantity": self._coerce_float(getattr(broker_order, "quantity", 0)),
+            "price": self._coerce_float(getattr(broker_order, "price", 0)),
+            "executed_quantity": self._coerce_optional_float(getattr(broker_order, "executed_quantity", None)),
+            "executed_price": self._coerce_optional_float(getattr(broker_order, "executed_price", None)),
+        }
+
     def _run_loop(self) -> None:
         while self._running:
             try:
@@ -614,6 +780,11 @@ class AppRunner:
                     self._broadcast_status()
             except Exception:
                 logger.exception("error reconciling pending orders")
+            try:
+                if self.sync_today_orders_from_broker():
+                    self._broadcast_status()
+            except Exception:
+                logger.exception("error syncing broker today orders")
             try:
                 self._auto_resume_pause_if_due()
             except Exception:
@@ -717,6 +888,15 @@ class AppRunner:
             reason = self.risk.pause_reason
             self.risk.resume()
         logger.info("auto-resumed trading after transient pause: %s", reason)
+        with self._db_session() as db:
+            record_trade_event(
+                db,
+                event_type="RISK_AUTO_RESUMED",
+                status="RUNNING",
+                message=reason,
+                payload={"source": "auto_resume_pause"},
+            )
+            db.commit()
         self._broadcast_status()
         return True
 
@@ -793,6 +973,27 @@ class AppRunner:
                 status=status,
             )
             db.add(order)
+            record_trade_event(
+                db,
+                event_type="ORDER_SUBMITTED",
+                symbol=symbol,
+                broker_order_id=order_id,
+                side=side,
+                status=status,
+                message=f"{side} order submitted",
+                payload={"quantity": qty, "price": price, "source": "runner"},
+            )
+            if status in _TERMINAL_ORDER_STATUSES or status == "PARTIAL_FILLED":
+                record_trade_event(
+                    db,
+                    event_type=self._order_event_type_for_status(status),
+                    symbol=symbol,
+                    broker_order_id=order_id,
+                    side=side,
+                    status=status,
+                    message=f"{side} order returned immediate status {status}",
+                    payload={"quantity": qty, "price": price, "source": "runner_submit_result"},
+                )
             db.commit()
 
     def _update_order_status(
@@ -813,6 +1014,9 @@ class AppRunner:
             if order is None:
                 logger.warning("cannot update missing order %s to status %s", order_id, status)
                 return
+            old_status = order.status
+            old_executed_quantity = order.executed_quantity
+            old_executed_price = order.executed_price
             order.status = status
             if filled_at is not None:
                 order.filled_at = filled_at
@@ -820,12 +1024,43 @@ class AppRunner:
                 order.executed_quantity = executed_quantity
             if executed_price is not None:
                 order.executed_price = executed_price
+            changed = (
+                old_status != status
+                or old_executed_quantity != order.executed_quantity
+                or old_executed_price != order.executed_price
+            )
+            if changed:
+                record_trade_event(
+                    db,
+                    event_type=self._order_event_type_for_status(status),
+                    symbol=order.symbol,
+                    broker_order_id=order_id,
+                    side=order.side,
+                    status=status,
+                    message=f"order status changed from {old_status} to {status}",
+                    payload={
+                        "source": "runner_order_status",
+                        "old_status": old_status,
+                        "old_executed_quantity": old_executed_quantity,
+                        "old_executed_price": old_executed_price,
+                        "executed_quantity": order.executed_quantity,
+                        "executed_price": order.executed_price,
+                    },
+                )
             db.add(order)
             db.commit()
 
     def _record_risk_event(self, reason: str) -> None:
         with self._db_session() as db:
             self._state_svc.record_risk_event(db, reason)
+            record_trade_event(
+                db,
+                event_type="RISK_PAUSED",
+                status="PAUSED",
+                message=reason,
+                payload={"source": "risk_controller"},
+            )
+            db.commit()
 
 
 _runner: AppRunner | None = None

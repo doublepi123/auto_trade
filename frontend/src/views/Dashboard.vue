@@ -206,6 +206,26 @@
         </el-table>
         <p v-else class="empty-note">暂无订单</p>
       </div>
+
+      <div class="detail-panel recent-events" data-testid="recent-events">
+        <div class="section-title">
+          <h4>决策时间线</h4>
+          <span>{{ recentEvents.length }} 条</span>
+        </div>
+        <div v-if="recentEvents.length > 0" class="event-list">
+          <div v-for="event in recentEvents" :key="event.id" class="event-row">
+            <div class="event-main">
+              <el-tag size="small" :type="eventTagType(event.event_type, event.status)" effect="plain">
+                {{ tradeEventTypeLabel(event.event_type) }}
+              </el-tag>
+              <strong>{{ event.symbol || event.broker_order_id || '-' }}</strong>
+              <small>{{ formatDateTime(event.created_at) }}</small>
+            </div>
+            <p>{{ event.message || event.status || '-' }}</p>
+          </div>
+        </div>
+        <p v-else class="empty-note">暂无决策事件</p>
+      </div>
     </section>
   </div>
 </template>
@@ -216,9 +236,9 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { useDashboardData } from '../composables/useDashboardData'
 import { useStatusStream } from '../composables/useStatusStream'
 import { useAccountRefresh } from '../composables/useAccountRefresh'
-import { startTrading, stopTrading, pauseTrading, resumeTrading, activateKillSwitch, disableKillSwitch, getLLMIntervalStatus, getOrders } from '../api'
-import type { LLMIntervalStatus, OrderRecord, Position } from '../types'
-import { engineStateLabel, marketLabel, positionSideLabel } from '../utils/labels'
+import { startTrading, stopTrading, pauseTrading, resumeTrading, activateKillSwitch, disableKillSwitch, getLLMIntervalStatus, getOrders, getTradeEvents } from '../api'
+import type { LLMIntervalStatus, OrderRecord, Position, TradeEventRecord } from '../types'
+import { engineStateLabel, marketLabel, positionSideLabel, tradeEventTypeLabel } from '../utils/labels'
 
 const { strategy, status, initialLoading, loadError, load, refreshStatus } = useDashboardData()
 const { realtimeStatus } = useStatusStream(status)
@@ -226,6 +246,7 @@ const { account, accountError, refresh: refreshAccount } = useAccountRefresh()
 
 const llmStatus = ref<LLMIntervalStatus | null>(null)
 const recentOrders = ref<OrderRecord[]>([])
+const recentEvents = ref<TradeEventRecord[]>([])
 let llmStatusTimer: ReturnType<typeof setInterval> | null = null
 
 const stateTagType = computed(() => {
@@ -292,7 +313,7 @@ async function handleRetry() {
   loadError.value = false
   try {
     await load()
-    await Promise.all([refreshAccount(), loadLLMStatus(), loadRecentOrders()])
+    await Promise.all([refreshAccount(), loadLLMStatus(), loadRecentOrders(), loadRecentEvents()])
   } catch {
     void 0
   }
@@ -314,12 +335,22 @@ async function loadRecentOrders() {
   }
 }
 
+async function loadRecentEvents() {
+  try {
+    recentEvents.value = (await getTradeEvents({ page: 1, page_size: 5 })).items.slice(0, 5)
+  } catch {
+    recentEvents.value = []
+  }
+}
+
 onMounted(() => {
   loadLLMStatus()
   loadRecentOrders()
+  loadRecentEvents()
   llmStatusTimer = setInterval(() => {
     loadLLMStatus()
     loadRecentOrders()
+    loadRecentEvents()
   }, 3000)
   load().catch(() => void 0)
   refreshAccount().catch(() => void 0)
@@ -439,6 +470,16 @@ function metricClass(value: number | null | undefined): string {
   if (normalized > 0) return 'metric-positive'
   if (normalized < 0) return 'metric-negative'
   return ''
+}
+
+function eventTagType(eventTypeValue: string, status: string): string {
+  if (eventTypeValue === 'LLM_ANALYSIS') return status === 'FAILED' ? 'danger' : 'primary'
+  if (eventTypeValue === 'RISK_PAUSED') return 'danger'
+  if (eventTypeValue === 'RISK_AUTO_RESUMED') return 'success'
+  if (eventTypeValue === 'ORDER_FILLED') return 'success'
+  if (eventTypeValue === 'ORDER_CANCELLED') return 'info'
+  if (eventTypeValue === 'ORDER_REJECTED') return 'danger'
+  return 'warning'
 }
 </script>
 
@@ -720,7 +761,7 @@ function metricClass(value: number | null | undefined): string {
 
 .detail-grid {
   display: grid;
-  grid-template-columns: 1.1fr 1fr 1.15fr;
+  grid-template-columns: 1.05fr 1fr 1.05fr 1.15fr;
   gap: 12px;
 }
 
@@ -767,6 +808,50 @@ function metricClass(value: number | null | undefined): string {
 .risk-list {
   color: #4b5563;
   font-size: 13px;
+}
+
+.event-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.event-row {
+  border-radius: 6px;
+  padding: 9px;
+  background: #f8fafc;
+}
+
+.event-main {
+  display: grid;
+  grid-template-columns: auto minmax(80px, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.event-main strong {
+  overflow: hidden;
+  color: #172033;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.event-main small {
+  color: #7a8595;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.event-row p {
+  display: -webkit-box;
+  margin: 7px 0 0;
+  overflow: hidden;
+  color: #4b5563;
+  font-size: 12px;
+  line-height: 1.45;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
 }
 
 .empty-note {

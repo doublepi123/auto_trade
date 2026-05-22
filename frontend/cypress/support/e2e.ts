@@ -72,6 +72,27 @@ Cypress.Commands.add('stubApi', () => {
     },
   }).as('getOrders')
 
+  cy.intercept('GET', '/api/events*', {
+    body: {
+      items: [
+        {
+          id: 1,
+          event_type: 'LLM_ANALYSIS',
+          symbol: 'NVDA.US',
+          broker_order_id: '',
+          side: '',
+          status: 'SUCCESS',
+          message: '区间测试',
+          payload: { confidence_score: 0.75 },
+          created_at: '2026-05-19T19:52:03.545862Z',
+        },
+      ],
+      total: 1,
+      page: 1,
+      page_size: 20,
+    },
+  }).as('getEvents')
+
   cy.intercept('GET', '/api/strategy/llm-interval/status', {
     body: {
       enabled: true,

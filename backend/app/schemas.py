@@ -178,6 +178,25 @@ class OrderCancelResponse(BaseModel):
     message: str
 
 
+class TradeEventResponse(BaseModel):
+    id: int
+    event_type: str
+    symbol: str
+    broker_order_id: str
+    side: str
+    status: str
+    message: str
+    payload: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+
+
+class TradeEventPageResponse(BaseModel):
+    items: list[TradeEventResponse]
+    total: int
+    page: int
+    page_size: int
+
+
 class ControlRequest(BaseModel):
     reason: str = Field(default="manual")
 

@@ -1,18 +1,22 @@
 from __future__ import annotations
 
+import csv
+import io
+import json
 import logging
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import OrderRecord
+from app.models import OrderRecord, TradeEvent
 from app.runner import get_runner
-from app.schemas import AccountResponse, CashBalanceSchema, ControlRequest, MessageResponse, OrderCancelResponse, OrderPageResponse, OrderResponse, PositionSchema
+from app.schemas import AccountResponse, CashBalanceSchema, ControlRequest, MessageResponse, OrderCancelResponse, OrderPageResponse, OrderResponse, PositionSchema, TradeEventPageResponse, TradeEventResponse
 from app.services.strategy_service import StrategyService
+from app.services.trade_event_service import decode_event_payload, record_trade_event
 
 router = APIRouter(prefix="/api", tags=["trade"])
 
@@ -85,7 +89,32 @@ def _order_sort_key(item: OrderResponse) -> float:
     return value.timestamp()
 
 
+def _order_event_type_for_status(status: str) -> str:
+    if status == "FILLED":
+        return "ORDER_FILLED"
+    if status == "CANCELLED":
+        return "ORDER_CANCELLED"
+    if status == "REJECTED":
+        return "ORDER_REJECTED"
+    return "ORDER_STATUS_CHANGED"
+
+
+def _trade_event_response(event: TradeEvent) -> TradeEventResponse:
+    return TradeEventResponse(
+        id=event.id,
+        event_type=event.event_type,
+        symbol=event.symbol,
+        broker_order_id=event.broker_order_id,
+        side=event.side,
+        status=event.status,
+        message=event.message,
+        payload=decode_event_payload(event.payload_json),
+        created_at=event.created_at,
+    )
+
+
 def _update_local_order_from_status(db: Session, order_id: str, status_result: Any) -> None:
+    status = str(getattr(status_result, "status", "CANCELLED"))
     order = (
         db.query(OrderRecord)
         .filter(OrderRecord.broker_order_id == order_id)
@@ -93,8 +122,23 @@ def _update_local_order_from_status(db: Session, order_id: str, status_result: A
         .first()
     )
     if order is None:
+        record_trade_event(
+            db,
+            event_type=_order_event_type_for_status(status),
+            broker_order_id=order_id,
+            status=status,
+            message=f"broker order cancel returned status {status}",
+            payload={
+                "source": "order_cancel_api",
+                "executed_quantity": _float_attr(status_result, "executed_quantity"),
+                "executed_price": _float_attr(status_result, "executed_price"),
+            },
+        )
+        db.commit()
         return
-    status = str(getattr(status_result, "status", "CANCELLED"))
+    old_status = order.status
+    old_executed_quantity = order.executed_quantity
+    old_executed_price = order.executed_price
     order.status = status
     executed_quantity = _float_attr(status_result, "executed_quantity")
     executed_price = _float_attr(status_result, "executed_price")
@@ -104,6 +148,29 @@ def _update_local_order_from_status(db: Session, order_id: str, status_result: A
         order.executed_price = executed_price
     if status in _TERMINAL_ORDER_STATUSES:
         order.filled_at = datetime.now(timezone.utc)
+    changed = (
+        old_status != order.status
+        or old_executed_quantity != order.executed_quantity
+        or old_executed_price != order.executed_price
+    )
+    if changed:
+        record_trade_event(
+            db,
+            event_type=_order_event_type_for_status(status),
+            symbol=order.symbol,
+            broker_order_id=order_id,
+            side=order.side,
+            status=status,
+            message=f"order status changed from {old_status} to {status}",
+            payload={
+                "source": "order_cancel_api",
+                "old_status": old_status,
+                "old_executed_quantity": old_executed_quantity,
+                "old_executed_price": old_executed_price,
+                "executed_quantity": order.executed_quantity,
+                "executed_price": order.executed_price,
+            },
+        )
     db.add(order)
     db.commit()
 
@@ -143,6 +210,95 @@ def get_orders(
             merged[local_key] = _local_order_response(local_order)
     items = sorted(merged.values(), key=_order_sort_key, reverse=True)
     return _paginate_orders(items, page=page, page_size=page_size, scope=scope)
+
+
+@router.get("/events", response_model=TradeEventPageResponse)
+def get_trade_events(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=200),
+    limit: Optional[int] = Query(default=None, ge=1, le=200),
+    symbol: Optional[str] = Query(default=None, max_length=50),
+    event_type: Optional[str] = Query(default=None, max_length=50),
+    db: Session = Depends(get_db),
+) -> TradeEventPageResponse:
+    if limit is not None:
+        page_size = limit
+    query = db.query(TradeEvent)
+    if symbol:
+        query = query.filter(TradeEvent.symbol == symbol)
+    if event_type:
+        query = query.filter(TradeEvent.event_type == event_type)
+
+    total = query.count()
+    events = (
+        query.order_by(TradeEvent.created_at.desc(), TradeEvent.id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+    return TradeEventPageResponse(
+        items=[_trade_event_response(event) for event in events],
+        total=total,
+        page=page,
+        page_size=page_size,
+    )
+
+
+@router.get("/events/export")
+def export_trade_events(
+    format: str = Query(default="csv", pattern="^(csv|json)$"),
+    limit: int = Query(default=1000, ge=1, le=10000),
+    db: Session = Depends(get_db),
+) -> Response:
+    events = (
+        db.query(TradeEvent)
+        .order_by(TradeEvent.created_at.desc(), TradeEvent.id.desc())
+        .limit(limit)
+        .all()
+    )
+    rows = [
+        {
+            "id": event.id,
+            "event_type": event.event_type,
+            "symbol": event.symbol,
+            "broker_order_id": event.broker_order_id,
+            "side": event.side,
+            "status": event.status,
+            "message": event.message,
+            "payload": decode_event_payload(event.payload_json),
+            "created_at": event.created_at.isoformat(),
+        }
+        for event in events
+    ]
+    filename = f"trade-events-{datetime.now().strftime('%Y%m%d-%H%M%S')}.{format}"
+    if format == "json":
+        return Response(
+            content=json.dumps(rows, ensure_ascii=False, default=str),
+            media_type="application/json",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=[
+        "id",
+        "event_type",
+        "symbol",
+        "broker_order_id",
+        "side",
+        "status",
+        "message",
+        "payload",
+        "created_at",
+    ])
+    writer.writeheader()
+    for row in rows:
+        csv_row = {**row, "payload": json.dumps(row["payload"], ensure_ascii=False, default=str)}
+        writer.writerow(csv_row)
+    return Response(
+        content=output.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.post("/orders/{order_id}/cancel", response_model=OrderCancelResponse)

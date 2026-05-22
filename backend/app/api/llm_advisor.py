@@ -16,6 +16,7 @@ from app.services.llm_advisor_service import LLMAdvisorService, build_recent_ana
 from app.services.llm_interaction_service import LLMInteractionService
 from app.services.interval_application_service import IntervalApplicationService
 from app.services.strategy_service import StrategyService
+from app.services.trade_event_service import record_trade_event
 
 logger = logging.getLogger("auto_trade.llm_api")
 
@@ -193,6 +194,15 @@ def analyze_llm_interval(
     )
 
     if not result["success"]:
+        record_trade_event(
+            db,
+            event_type="LLM_ANALYSIS",
+            symbol=config.symbol,
+            status="FAILED",
+            message=result.get("error", "Unknown error"),
+            payload={"interaction_id": result.get("interaction_id")},
+        )
+        db.commit()
         return LLMAnalyzeResponse(
             success=False,
             applied=False,
@@ -230,6 +240,26 @@ def analyze_llm_interval(
             )
         except Exception:
             logger.exception("failed to update LLM interaction outcome")
+
+    record_trade_event(
+        db,
+        event_type="LLM_ANALYSIS",
+        symbol=config.symbol,
+        status="SUCCESS",
+        message=result.get("analysis") or app_result["reason"],
+        payload={
+            "interaction_id": interaction_id,
+            "confidence_score": result.get("confidence_score"),
+            "suggested_buy_low": result.get("suggested_buy_low"),
+            "suggested_sell_high": result.get("suggested_sell_high"),
+            "applied": app_result["applied"],
+            "apply_reason": app_result["reason"],
+            "order_action": result.get("order_action"),
+            "order_status": order_result.get("status"),
+            "order_id": order_result.get("order_id"),
+        },
+    )
+    db.commit()
 
     return LLMAnalyzeResponse(
         success=True,

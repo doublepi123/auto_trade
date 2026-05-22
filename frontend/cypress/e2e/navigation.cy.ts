@@ -15,6 +15,10 @@ describe('Navigation', () => {
     cy.url().should('include', '/history')
     cy.contains('交易历史').should('be.visible')
 
+    cy.get('.app-menu').contains('决策时间线').click()
+    cy.url().should('include', '/events')
+    cy.contains('决策时间线').should('be.visible')
+
     cy.get('.app-menu').contains('仪表盘').click()
     cy.url().should('include', '/')
     cy.contains('仪表盘').should('be.visible')

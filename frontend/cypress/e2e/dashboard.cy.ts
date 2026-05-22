@@ -32,6 +32,12 @@ describe('Dashboard', () => {
     cy.contains('行情信息').should('be.visible')
   })
 
+  it('shows recent decision timeline events', () => {
+    cy.contains('决策时间线').should('be.visible')
+    cy.contains('LLM 分析').should('be.visible')
+    cy.contains('区间测试').should('be.visible')
+  })
+
   it('displays control buttons', () => {
     cy.contains('操作控制').should('be.visible')
     cy.get('button').contains('启动').should('be.visible')

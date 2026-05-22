@@ -70,6 +70,25 @@ export interface OrderCancelResult {
   message: string
 }
 
+export interface TradeEventRecord {
+  id: number
+  event_type: string
+  symbol: string
+  broker_order_id: string
+  side: string
+  status: string
+  message: string
+  payload: Record<string, unknown>
+  created_at: string
+}
+
+export interface TradeEventPage {
+  items: TradeEventRecord[]
+  total: number
+  page: number
+  page_size: number
+}
+
 export interface CashBalance {
   currency: string
   available_cash: number

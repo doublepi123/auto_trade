@@ -64,3 +64,28 @@ export function positionSideLabel(side?: string | null): string {
       return '未知'
   }
 }
+
+export function tradeEventTypeLabel(eventType?: string | null): string {
+  switch (eventType) {
+    case 'LLM_ANALYSIS':
+      return 'LLM 分析'
+    case 'ORDER_SUBMITTED':
+      return '已下单'
+    case 'ORDER_SYNCED':
+      return '订单同步'
+    case 'ORDER_FILLED':
+      return '订单成交'
+    case 'ORDER_CANCELLED':
+      return '订单撤销'
+    case 'ORDER_REJECTED':
+      return '订单拒绝'
+    case 'ORDER_STATUS_CHANGED':
+      return '订单更新'
+    case 'RISK_PAUSED':
+      return '风控暂停'
+    case 'RISK_AUTO_RESUMED':
+      return '自动恢复'
+    default:
+      return eventType || '事件'
+  }
+}

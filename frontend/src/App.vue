@@ -7,6 +7,7 @@
         <el-menu-item index="/strategy">策略配置</el-menu-item>
         <el-menu-item index="/credentials">凭证设置</el-menu-item>
         <el-menu-item index="/history">交易历史</el-menu-item>
+        <el-menu-item index="/events">决策时间线</el-menu-item>
       </el-menu>
     </el-header>
     <el-main>
