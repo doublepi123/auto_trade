@@ -704,19 +704,10 @@ class TestAppRunner:
 
             def submit_limit_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal):
                 self.submitted_quantity = quantity
-
-                class Result:
-                    broker_order_id = "order-1"
-
-                return Result()
+                return OrderResult("order-1", symbol, side, quantity, price, "FILLED")
 
             def get_order_status(self, order_id: str):
-                return SimpleNamespace(
-                    broker_order_id=order_id,
-                    status="FILLED",
-                    executed_quantity=self.submitted_quantity,
-                    executed_price=Decimal("201"),
-                )
+                raise AssertionError("submitted FILLED result should not poll order status")
 
         runner = AppRunner()
         broker = Broker()
@@ -804,8 +795,12 @@ class TestAppRunner:
         order_status = self._execute_sell(runner, "AAPL.US", Quote("AAPL.US", 201.0, 200.5, 201.5, ""))
 
         assert order_status is not None
-        assert order_status.status == terminal_status
+        assert order_status.status == "SUBMITTED"
         assert runner.risk.daily_pnl == 0.0
+        assert runner._trade_svc._pending_order is not None
+
+        runner._trade_svc.reconcile(runner.risk, runner.notifier, runner._restore_engine_snapshot, runner.notifier.notify_risk_event)
+
         assert updates
         assert updates[-1][0] == "order-1"
         assert updates[-1][1] == terminal_status
@@ -953,7 +948,7 @@ class TestAppRunner:
         class Broker:
             def __init__(self) -> None:
                 self.submissions = 0
-                self.statuses = ["SUBMITTED", "REJECTED", "REJECTED"]
+                self.statuses = ["REJECTED", "REJECTED"]
 
             def get_cash(self, _currency=None) -> Decimal:
                 return Decimal("1000")
@@ -1059,13 +1054,11 @@ class TestAppRunner:
         assert thread.is_alive() is False
         assert broker.submitted_symbols == ["AAPL.US"]
 
-    def test_stop_does_not_close_broker_while_order_status_poll_is_running(self) -> None:
-        entered_status_poll = threading.Event()
-        release_status_poll = threading.Event()
-
+    def test_stop_closes_broker_after_fast_submit_tracking(self) -> None:
         class Broker:
             def __init__(self) -> None:
                 self.closed = False
+                self.status_checks = 0
 
             def get_cash(self, _currency=None) -> Decimal:
                 return Decimal("1000")
@@ -1084,14 +1077,8 @@ class TestAppRunner:
                 )
 
             def get_order_status(self, order_id: str):
-                entered_status_poll.set()
-                release_status_poll.wait(timeout=2)
-                return SimpleNamespace(
-                    broker_order_id=order_id,
-                    status="FILLED",
-                    executed_quantity=Decimal("9"),
-                    executed_price=Decimal("99"),
-                )
+                self.status_checks += 1
+                raise AssertionError("quote trigger should not poll order status before returning")
 
             def close(self) -> None:
                 self.closed = True
@@ -1108,15 +1095,12 @@ class TestAppRunner:
 
         thread = threading.Thread(target=runner._on_quote, args=(Quote("AAPL.US", 99.0, 98.5, 99.5, ""),))
         thread.start()
-        try:
-            assert entered_status_poll.wait(timeout=1)
-            runner.stop()
-            assert broker.closed is False
-        finally:
-            release_status_poll.set()
-            thread.join(timeout=2)
+        thread.join(timeout=2)
 
         assert thread.is_alive() is False
+        assert broker.status_checks == 0
+        assert runner._trade_svc.has_pending_order is True
+        runner.stop()
         assert broker.closed is True
 
     def test_pending_partial_cancel_accounts_fill_and_keeps_residual_position_state(self) -> None:
@@ -1165,6 +1149,12 @@ class TestAppRunner:
 
         quote = Quote("AAPL.US", 201.0, 200.5, 201.5, "")
         runner._on_quote(quote)
+        assert runner.engine.state == EngineState.FLAT
+        assert runner._trade_svc._pending_order is not None
+
+        runner._on_quote(quote)
+
+        assert runner.risk.daily_pnl == 0.0
         assert runner.engine.state == EngineState.FLAT
         assert runner._trade_svc._pending_order is not None
 
@@ -1219,13 +1209,13 @@ class TestAppRunner:
         runner._on_quote(quote)
         runner._on_quote(quote)
 
-        assert broker.status_checks == 1
+        assert broker.status_checks == 0
 
-    def test_on_quote_does_not_hold_state_lock_while_polling_order_status(self) -> None:
-        entered_status_poll = threading.Event()
-        release_status_poll = threading.Event()
-
+    def test_on_quote_tracks_pending_order_without_status_poll(self) -> None:
         class Broker:
+            def __init__(self) -> None:
+                self.status_checks = 0
+
             def get_cash(self, _currency=None) -> Decimal:
                 return Decimal("1000")
 
@@ -1243,17 +1233,12 @@ class TestAppRunner:
                 )
 
             def get_order_status(self, order_id: str):
-                entered_status_poll.set()
-                release_status_poll.wait(timeout=2)
-                return SimpleNamespace(
-                    broker_order_id=order_id,
-                    status="FILLED",
-                    executed_quantity=Decimal("9"),
-                    executed_price=Decimal("99"),
-                )
+                self.status_checks += 1
+                raise AssertionError("quote trigger should not poll order status before returning")
 
         runner = AppRunner()
-        runner.broker = Broker()
+        broker = Broker()
+        runner.broker = broker
         runner._running = True
         runner.engine.params = StrategyParams(symbol="AAPL.US", buy_low=100.0, sell_high=200.0)
         runner.notifier = _NoopNotifier()
@@ -1263,17 +1248,11 @@ class TestAppRunner:
 
         thread = threading.Thread(target=runner._on_quote, args=(Quote("AAPL.US", 99.0, 98.5, 99.5, ""),))
         thread.start()
-        try:
-            assert entered_status_poll.wait(timeout=1)
-            acquired = runner._state_lock.acquire(timeout=0.1)
-            if acquired:
-                runner._state_lock.release()
-            assert acquired is True
-        finally:
-            release_status_poll.set()
-            thread.join(timeout=2)
+        thread.join(timeout=2)
 
         assert thread.is_alive() is False
+        assert broker.status_checks == 0
+        assert runner._trade_svc.has_pending_order is True
 
     def test_execute_sell_rejected_after_submit_updates_status_without_pnl(self) -> None:
         runner = AppRunner()
@@ -1311,6 +1290,10 @@ class TestAppRunner:
         order_status = self._execute_sell(runner, "AAPL.US", Quote("AAPL.US", 201.0, 200.5, 201.5, ""))
 
         assert order_status is not None
-        assert order_status.status == "REJECTED"
+        assert order_status.status == "SUBMITTED"
         assert runner.risk.daily_pnl == 0.0
+        assert runner._trade_svc._pending_order is not None
+
+        runner._trade_svc.reconcile(runner.risk, runner.notifier, runner._restore_engine_snapshot, runner.notifier.notify_risk_event)
+
         assert updates[-1][1] == "REJECTED"

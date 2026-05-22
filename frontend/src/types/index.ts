@@ -37,6 +37,7 @@ export interface StatusData {
   last_price: number
   last_trigger_price: number
   last_trigger_at: string | null
+  last_action_message: string
 }
 
 export interface OrderRecord {

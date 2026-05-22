@@ -49,6 +49,7 @@ export function useStatusStream(status: { value: StatusData }) {
             last_price: data.last_price ?? status.value.last_price,
             last_trigger_price: data.last_trigger_price ?? status.value.last_trigger_price,
             last_trigger_at: data.last_trigger_at ?? status.value.last_trigger_at,
+            last_action_message: data.last_action_message ?? status.value.last_action_message,
           }
         }
       } catch {

@@ -64,9 +64,10 @@ async def _llm_analysis_cron() -> None:
                 current_price = runner.engine.last_price if runner.engine else 0.0
                 if current_price <= 0:
                     current_price = config.buy_low
-                from app.api.llm_advisor import _account_context, _position_context
+                from app.api.llm_advisor import _account_context, _interval_reference_quantity, _position_context
 
                 position_context = _position_context(config.symbol, current_price)
+                account_context = _account_context(config.symbol, config.market, current_price, config.short_selling)
 
                 advisor = LLMAdvisorService()
                 result = advisor.analyze(
@@ -84,7 +85,7 @@ async def _llm_analysis_cron() -> None:
                     min_profit_amount=config.min_profit_amount,
                     recent_prices=runner.recent_price_context(),
                     recent_analysis=build_recent_analysis_context(config),
-                    account_context=_account_context(config.symbol, config.market, current_price, config.short_selling),
+                    account_context=account_context,
                     force=True,
                 )
                 if result.get("success"):
@@ -96,6 +97,7 @@ async def _llm_analysis_cron() -> None:
                             "suggested_sell_high": result.get("suggested_sell_high"),
                             "confidence_score": result.get("confidence_score"),
                         },
+                        reference_quantity=_interval_reference_quantity(position_context, account_context),
                     )
                     order_result = {"status": "NO_ACTION", "order_id": None}
                     if result.get("order_action") and result.get("order_action") != "NONE":

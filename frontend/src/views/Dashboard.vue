@@ -70,6 +70,10 @@
               <span>最低盈利</span>
               <strong>${{ formatNumber(strategy.min_profit_amount) }}</strong>
             </div>
+            <div v-if="status.last_action_message" class="action-message">
+              <span>最近动作</span>
+              <strong>{{ status.last_action_message }}</strong>
+            </div>
           </div>
         </section>
 
@@ -619,6 +623,15 @@ function metricClass(value: number | null | undefined): string {
   margin-top: 3px;
   color: #172033;
   font-size: 18px;
+}
+
+.action-message {
+  grid-column: 1 / -1;
+}
+
+.action-message strong {
+  font-size: 13px;
+  line-height: 1.45;
 }
 
 .position-symbol {

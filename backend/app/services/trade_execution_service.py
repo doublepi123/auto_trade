@@ -33,6 +33,7 @@ class OrderStatus:
     status: str
     executed_quantity: Decimal = Decimal("0")
     executed_price: Decimal = Decimal("0")
+    reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -209,7 +210,7 @@ class TradeExecutionService:
         result = broker.submit_limit_order(symbol, "BUY", Decimal(qty), price)
         status = getattr(result, "status", "SUBMITTED")
         self._safe_record_order(result.broker_order_id, symbol, "BUY", float(qty), float(price), status)
-        order_status = self._wait_for_order_completion(result, broker)
+        order_status = self._order_status_from_submit_result(result)
         self._safe_update_order_status_from_result(order_status)
 
         if self._order_status_is_live(order_status):
@@ -255,27 +256,10 @@ class TradeExecutionService:
         if price <= 0:
             logger.warning("SELL: price <= 0, price=%s", price)
             return None
-        required_profit = self._minimum_required_profit_amount(
-            long_pos.avg_price,
-            long_pos.quantity,
-            min_profit_amount,
-        )
-        expected_profit = (price - long_pos.avg_price) * long_pos.quantity
-        if not allow_loss_exit and expected_profit < required_profit:
-            logger.info(
-                "SELL skipped: price=%s avg_price=%s quantity=%s expected_profit=%s required_profit=%s",
-                price,
-                long_pos.avg_price,
-                long_pos.quantity,
-                expected_profit,
-                required_profit,
-            )
-            return OrderStatus("", _SKIPPED_ORDER_STATUS)
-
         result = broker.submit_limit_order(symbol, "SELL", long_pos.quantity, price)
         status = getattr(result, "status", "SUBMITTED")
         self._safe_record_order(result.broker_order_id, symbol, "SELL", float(long_pos.quantity), float(price), status)
-        order_status = self._wait_for_order_completion(result, broker)
+        order_status = self._order_status_from_submit_result(result)
         self._safe_update_order_status_from_result(order_status)
 
         if self._order_status_is_live(order_status):
@@ -324,7 +308,7 @@ class TradeExecutionService:
         result = broker.submit_limit_order(symbol, "SELL", Decimal(qty), price)
         status = getattr(result, "status", "SUBMITTED")
         self._safe_record_order(result.broker_order_id, symbol, "SELL_SHORT", float(qty), float(price), status)
-        order_status = self._wait_for_order_completion(result, broker)
+        order_status = self._order_status_from_submit_result(result)
         self._safe_update_order_status_from_result(order_status)
 
         if self._order_status_is_live(order_status):
@@ -370,27 +354,10 @@ class TradeExecutionService:
         if price <= 0:
             logger.warning("BUY_TO_COVER: price <= 0, price=%s", price)
             return None
-        required_profit = self._minimum_required_profit_amount(
-            pos.avg_price,
-            pos.quantity,
-            min_profit_amount,
-        )
-        expected_profit = (pos.avg_price - price) * pos.quantity
-        if not allow_loss_exit and expected_profit < required_profit:
-            logger.info(
-                "BUY_TO_COVER skipped: price=%s avg_price=%s quantity=%s expected_profit=%s required_profit=%s",
-                price,
-                pos.avg_price,
-                pos.quantity,
-                expected_profit,
-                required_profit,
-            )
-            return OrderStatus("", _SKIPPED_ORDER_STATUS)
-
         result = broker.submit_limit_order(symbol, "BUY", pos.quantity, price)
         status = getattr(result, "status", "SUBMITTED")
         self._safe_record_order(result.broker_order_id, symbol, "BUY_TO_COVER", float(pos.quantity), float(price), status)
-        order_status = self._wait_for_order_completion(result, broker)
+        order_status = self._order_status_from_submit_result(result)
         self._safe_update_order_status_from_result(order_status)
 
         if self._order_status_is_live(order_status):
@@ -656,6 +623,16 @@ class TradeExecutionService:
             if time.monotonic() >= deadline:
                 return last_status
             time.sleep(self._order_status_poll_interval_seconds)
+
+    @staticmethod
+    def _order_status_from_submit_result(result: OrderResult) -> OrderStatus:
+        status = getattr(result, "status", "SUBMITTED")
+        return OrderStatus(
+            broker_order_id=result.broker_order_id,
+            status=status,
+            executed_quantity=getattr(result, "quantity", Decimal("0")) if status == "FILLED" else Decimal("0"),
+            executed_price=getattr(result, "price", Decimal("0")) if status == "FILLED" else Decimal("0"),
+        )
 
     def _safe_notify_order(
         self,

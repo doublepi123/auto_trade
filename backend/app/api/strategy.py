@@ -70,5 +70,7 @@ def get_status(db: Session = Depends(get_db)) -> StatusResponse:
     svc = StrategyService(db)
     state = svc.get_runtime_state()
     response = StatusResponse.model_validate(state)
-    response.runner_running = get_runner().is_running
+    runner = get_runner()
+    response.runner_running = runner.is_running
+    response.last_action_message = getattr(runner, "last_action_message", "")
     return response

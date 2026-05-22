@@ -110,6 +110,16 @@ def _account_context(symbol: str, market: str, current_price: float, short_selli
     return context
 
 
+def _interval_reference_quantity(position_context: dict[str, Any], account_context: dict[str, Any]) -> float:
+    position_quantity = float(position_context.get("quantity") or 0.0)
+    if position_quantity > 0:
+        return position_quantity
+    max_buy_quantity = float(account_context.get("max_buy_quantity") or 0.0)
+    if max_buy_quantity > 0:
+        return max(max_buy_quantity * 0.9, 1.0)
+    return 1.0
+
+
 @router.post("/strategy/llm-interval/preview", response_model=LLMAnalyzeResponse, dependencies=[Depends(require_api_key())])
 def preview_llm_interval(payload: LLMPreviewAnalyzeRequest) -> LLMAnalyzeResponse:
     advisor = LLMAdvisorService()
@@ -161,6 +171,7 @@ def analyze_llm_interval(
     current_price = last_price if last_price else config.buy_low
     position_context = _position_context(config.symbol, current_price)
     recent_price_context = getattr(runner, "recent_price_context", None)
+    account_context = _account_context(config.symbol, config.market, current_price, config.short_selling)
     advisor = LLMAdvisorService()
     result = advisor.analyze(
         symbol=config.symbol,
@@ -177,7 +188,7 @@ def analyze_llm_interval(
         min_profit_amount=config.min_profit_amount,
         recent_prices=recent_price_context() if callable(recent_price_context) else [],
         recent_analysis=build_recent_analysis_context(config),
-        account_context=_account_context(config.symbol, config.market, current_price, config.short_selling),
+        account_context=account_context,
         force=payload.force,
     )
 
@@ -198,6 +209,7 @@ def analyze_llm_interval(
             "suggested_sell_high": result.get("suggested_sell_high"),
             "confidence_score": result.get("confidence_score"),
         },
+        reference_quantity=_interval_reference_quantity(position_context, account_context),
     )
     order_result = {"executed": False, "status": "NO_ACTION", "order_id": None}
     if result.get("order_action") and result.get("order_action") != "NONE":

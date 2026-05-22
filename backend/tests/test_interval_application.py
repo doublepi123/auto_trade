@@ -92,6 +92,54 @@ class TestIntervalApplicationService:
         assert config.llm_applied_buy_low == 195.0
         assert config.llm_applied_sell_high == 205.0
 
+    def test_apply_direct_rejects_interval_narrower_than_min_profit_amount(self, service: IntervalApplicationService) -> None:
+        self._cleanup()
+        db = self._get_db()
+        config = self._create_config(db)
+        config.min_profit_amount = 1.5
+        db.commit()
+
+        result = service.apply_direct_suggestion(
+            db,
+            current_price=200.0,
+            suggestion={
+                "suggested_buy_low": 199.5,
+                "suggested_sell_high": 200.5,
+                "confidence_score": 0.85,
+            },
+        )
+
+        db.refresh(config)
+        assert result["success"] is False
+        assert result["applied"] is False
+        assert "minimum profit" in result["reason"].lower()
+        assert config.buy_low == 180.0
+        assert config.sell_high == 220.0
+
+    def test_apply_direct_uses_reference_quantity_for_min_profit_amount(self, service: IntervalApplicationService) -> None:
+        self._cleanup()
+        db = self._get_db()
+        config = self._create_config(db)
+        config.min_profit_amount = 1.5
+        db.commit()
+
+        result = service.apply_direct_suggestion(
+            db,
+            current_price=200.0,
+            suggestion={
+                "suggested_buy_low": 199.75,
+                "suggested_sell_high": 200.25,
+                "confidence_score": 0.85,
+            },
+            reference_quantity=10,
+        )
+
+        db.refresh(config)
+        assert result["success"] is True
+        assert result["applied"] is True
+        assert config.buy_low == 199.75
+        assert config.sell_high == 200.25
+
     def test_apply_long_sell_higher(self, service: IntervalApplicationService) -> None:
         self._cleanup()
         db = self._get_db()

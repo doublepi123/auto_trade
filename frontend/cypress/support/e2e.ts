@@ -9,6 +9,7 @@ interface StatusStub {
   last_price: number
   last_trigger_price: number
   last_trigger_at: string | null
+  last_action_message: string
 }
 
 function initialStatus(): StatusStub {
@@ -21,6 +22,7 @@ function initialStatus(): StatusStub {
     last_price: 0,
     last_trigger_price: 0,
     last_trigger_at: null,
+    last_action_message: '',
   }
 }
 

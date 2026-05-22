@@ -13,7 +13,7 @@ const defaultStrategy: StrategyConfig = {
 const defaultStatus: StatusData = {
   engine_state: 'flat', paused: false, kill_switch: false, runner_running: false,
   daily_pnl: 0, consecutive_losses: 0,
-  last_price: 0, last_trigger_price: 0, last_trigger_at: null,
+  last_price: 0, last_trigger_price: 0, last_trigger_at: null, last_action_message: '',
 }
 
 export function useDashboardData() {

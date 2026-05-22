@@ -320,7 +320,7 @@ class TestAPI:
             "engine_state", "paused", "kill_switch",
             "daily_pnl", "consecutive_losses",
             "last_price", "last_trigger_price", "last_trigger_at",
-            "runner_running",
+            "runner_running", "last_action_message",
         ]
         for field in expected_fields:
             assert field in data

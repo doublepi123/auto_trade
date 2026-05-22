@@ -63,6 +63,7 @@ class AppRunner:
         self._position_sync_interval_seconds = 15.0
         self._recent_quote_window_seconds = 300.0
         self._recent_quotes: list[dict[str, Any]] = []
+        self._last_action_message = ""
 
     def _initialize_runner(self) -> None:
         with self._db_session() as db:
@@ -214,10 +215,12 @@ class AppRunner:
 
             if result is None or not result.triggered:
                 return
+            self._set_last_action_message(result.description)
 
             risk_result = self.risk.check()
             if not risk_result.approved:
                 logger.warning("risk rejected: %s", risk_result.reason)
+                self._set_last_action_message(f"{result.action} rejected by risk: {risk_result.reason}")
                 self._record_risk_event(risk_result.reason)
                 self.notifier.notify_risk_event("REJECTED", risk_result.reason)
                 if engine_snapshot is not None:
@@ -240,19 +243,27 @@ class AppRunner:
                     notify_risk_event=self.notifier.notify_risk_event,
                 )
                 if order_status is None:
+                    self._set_last_action_message(f"{result.action} skipped: no order submitted")
                     if engine_snapshot is not None:
                         self._restore_engine_snapshot(engine_snapshot)
                 elif order_status.status == "SKIPPED":
+                    reason = order_status.reason or "order skipped"
+                    self._set_last_action_message(f"{result.action} skipped: {reason}")
                     if engine_snapshot is not None:
                         self._restore_engine_state_preserve_trigger(engine_snapshot)
                 elif order_status.status in {"REJECTED", "CANCELLED"}:
+                    self._set_last_action_message(f"{result.action} ended with status {order_status.status}")
                     if engine_snapshot is not None:
                         self._restore_engine_snapshot(engine_snapshot)
+                else:
+                    order_id = order_status.broker_order_id or "-"
+                    self._set_last_action_message(f"{result.action} {order_status.status}: {order_id}")
                 self._broadcast_status()
             except Exception as exc:
                 if engine_snapshot is not None:
                     self._restore_engine_snapshot(engine_snapshot)
                 reason = f"order execution failed: {exc}"
+                self._set_last_action_message(reason)
                 self.risk.pause(
                     reason,
                     auto_resumable=self._is_auto_resumable_pause_reason(reason),
@@ -492,10 +503,20 @@ class AppRunner:
                 "paused": self.risk.paused,
             }
             data["runner_running"] = self.is_running
+            data["last_action_message"] = self.last_action_message
             if self._loop and self._loop.is_running():
                 asyncio.run_coroutine_threadsafe(manager.broadcast(data), self._loop)
         except Exception:
             logger.warning("broadcast failed")
+
+    def _set_last_action_message(self, message: str) -> None:
+        with self._state_lock:
+            self._last_action_message = message
+
+    @property
+    def last_action_message(self) -> str:
+        with self._state_lock:
+            return self._last_action_message
 
     def _reset_quote_tracking(self, *, clear_history: bool) -> None:
         with self._state_lock:

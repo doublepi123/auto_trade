@@ -44,6 +44,29 @@ describe('Dashboard', () => {
     cy.contains('暂停状态').should('be.visible')
   })
 
+  it('shows the latest trigger skip reason', () => {
+    cy.intercept('GET', '/api/status', {
+      body: {
+        engine_state: 'long',
+        paused: false,
+        kill_switch: false,
+        runner_running: true,
+        daily_pnl: 0,
+        consecutive_losses: 0,
+        last_price: 220.84,
+        last_trigger_price: 220.84,
+        last_trigger_at: '2026-05-22T12:42:03Z',
+        last_action_message: 'SELL skipped: no long position for NVDA.US',
+      },
+    }).as('statusWithActionMessage')
+
+    cy.visit('/')
+    cy.wait('@statusWithActionMessage')
+
+    cy.get('[data-testid="price-panel"]').should('contain', '最近动作')
+    cy.get('[data-testid="price-panel"]').should('contain', 'SELL skipped')
+  })
+
   it('shows an at-a-glance cockpit summary above the fold', () => {
     cy.intercept('GET', '/api/strategy', {
       body: {
@@ -72,6 +95,7 @@ describe('Dashboard', () => {
         last_price: 219.99,
         last_trigger_price: 219.9,
         last_trigger_at: null,
+        last_action_message: '',
       },
     }).as('cockpitStatus')
     cy.intercept('GET', '/api/account', {

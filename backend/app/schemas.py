@@ -141,6 +141,7 @@ class StatusResponse(BaseModel):
     last_price: float
     last_trigger_price: float
     last_trigger_at: Optional[datetime]
+    last_action_message: str = ""
 
     model_config = {"from_attributes": True}
 

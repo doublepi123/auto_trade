@@ -19,6 +19,7 @@ class IntervalApplicationService:
         engine_state: str,
         current_price: float,
         suggestion: dict[str, Any],
+        reference_quantity: float = 1.0,
     ) -> dict[str, Any]:
         """Apply LLM suggestion based on current engine state."""
         svc = StrategyService(db)
@@ -28,7 +29,14 @@ class IntervalApplicationService:
         sell_high = suggestion.get("suggested_sell_high")
         confidence = suggestion.get("confidence_score", 0.0)
 
-        reject_reason = self._validate_guardrails(current_price, buy_low, sell_high, confidence)
+        reject_reason = self._validate_guardrails(
+            current_price,
+            buy_low,
+            sell_high,
+            confidence,
+            min_profit_amount=config.min_profit_amount,
+            reference_quantity=reference_quantity,
+        )
         if reject_reason:
             config.llm_reject_reason = reject_reason
             config.llm_applied_at = datetime.now(timezone.utc)
@@ -74,6 +82,7 @@ class IntervalApplicationService:
         db: Any,
         current_price: float,
         suggestion: dict[str, Any],
+        reference_quantity: float = 1.0,
     ) -> dict[str, Any]:
         """Apply both suggested interval bounds after guardrail validation."""
         svc = StrategyService(db)
@@ -83,7 +92,14 @@ class IntervalApplicationService:
         sell_high = suggestion.get("suggested_sell_high")
         confidence = suggestion.get("confidence_score", 0.0)
 
-        reject_reason = self._validate_guardrails(current_price, buy_low, sell_high, confidence)
+        reject_reason = self._validate_guardrails(
+            current_price,
+            buy_low,
+            sell_high,
+            confidence,
+            min_profit_amount=config.min_profit_amount,
+            reference_quantity=reference_quantity,
+        )
         now = datetime.now(timezone.utc)
         if reject_reason:
             config.llm_reject_reason = reject_reason
@@ -172,6 +188,9 @@ class IntervalApplicationService:
         buy_low: float | None,
         sell_high: float | None,
         confidence: float,
+        *,
+        min_profit_amount: float = 0.0,
+        reference_quantity: float = 1.0,
     ) -> str | None:
         """Validate suggestion against risk guardrails. Returns reject reason or None."""
         if confidence < settings.llm_min_confidence:
@@ -183,8 +202,38 @@ class IntervalApplicationService:
         if sell_high <= buy_low:
             return f"sell_high ({sell_high:.2f}) must be greater than buy_low ({buy_low:.2f})"
 
+        interval_width = sell_high - buy_low
+        minimum_width = IntervalApplicationService._minimum_interval_width(
+            current_price,
+            min_profit_amount,
+            reference_quantity,
+        )
+        if interval_width < minimum_width:
+            return (
+                f"interval width ({interval_width:.2f}) below minimum profit width "
+                f"{minimum_width:.2f}"
+            )
+
         stripe_width_pct = (sell_high - buy_low) / current_price * 100
         if stripe_width_pct > settings.llm_max_stripe_width_pct:
             return f"interval width ({stripe_width_pct:.1f}%) exceeds max {settings.llm_max_stripe_width_pct}%"
 
         return None
+
+    @staticmethod
+    def _minimum_interval_width(
+        current_price: float,
+        min_profit_amount: float,
+        reference_quantity: float,
+    ) -> float:
+        pct_width = current_price * settings.min_exit_profit_pct / 100 if current_price > 0 else 0.0
+        try:
+            quantity = float(reference_quantity)
+        except (TypeError, ValueError):
+            quantity = 0.0
+        try:
+            configured_amount = float(min_profit_amount)
+        except (TypeError, ValueError):
+            configured_amount = 0.0
+        amount_width = configured_amount / quantity if configured_amount > 0 and quantity > 0 else 0.0
+        return max(pct_width, amount_width)

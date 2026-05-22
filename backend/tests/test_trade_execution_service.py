@@ -150,6 +150,31 @@ class TestTradeExecutionServiceBasics:
         broker.estimate_margin_max_quantity.assert_called_once_with("NVDA.US", "BUY", Decimal("222.50"), "USD")
         broker.submit_limit_order.assert_called_once_with("NVDA.US", "BUY", Decimal("90"), Decimal("222.50"))
 
+    def test_execute_buy_tracks_submitted_order_without_immediate_status_poll(self, svc: TradeExecutionService) -> None:
+        from app.core.broker import OrderResult, Quote
+        from app.core.risk import RiskController
+        from app.core.notify import ServerChanNotifier
+
+        broker = MagicMock()
+        broker.estimate_margin_max_quantity.return_value = Decimal("100")
+        broker.submit_limit_order.return_value = OrderResult("order-live", "NVDA.US", "BUY", Decimal("90"), Decimal("222.5"), "SUBMITTED")
+        broker.get_order_status.return_value = MagicMock(status="SUBMITTED")
+
+        status = svc.execute(
+            "BUY",
+            "NVDA.US",
+            Quote("NVDA.US", 222.5, 222.4, 222.6, ""),
+            broker,
+            RiskController(),
+            ServerChanNotifier(""),
+            "USD",
+        )
+
+        assert status is not None
+        assert status.status == "SUBMITTED"
+        assert svc.has_pending_order is True
+        broker.get_order_status.assert_not_called()
+
     def test_execute_sell_short_uses_margin_max_quantity(self, svc: TradeExecutionService, monkeypatch) -> None:
         from app.core.broker import OrderResult, Quote
         from app.core.risk import RiskController
@@ -243,15 +268,16 @@ class TestTradeExecutionServiceBasics:
         assert status is not None
         broker.submit_limit_order.assert_called_once_with("NVDA.US", "SELL", Decimal("7"), Decimal("225.51"))
 
-    def test_execute_sell_skips_when_price_does_not_cover_min_profit_buffer(self, svc: TradeExecutionService, monkeypatch) -> None:
+    def test_execute_sell_submits_even_when_price_does_not_cover_min_profit_buffer(self, svc: TradeExecutionService, monkeypatch) -> None:
         from app.config import settings
-        from app.core.broker import Position, Quote
+        from app.core.broker import OrderResult, Position, Quote
         from app.core.risk import RiskController
         from app.core.notify import ServerChanNotifier
 
         monkeypatch.setattr(settings, "min_exit_profit_pct", 0.2)
         broker = MagicMock()
         broker.get_positions.return_value = [Position("NVDA.US", "LONG", Decimal("7"), Decimal("220"))]
+        broker.submit_limit_order.return_value = OrderResult("order-sell", "NVDA.US", "SELL", Decimal("7"), Decimal("220.3"), "FILLED")
 
         status = svc.execute(
             "SELL",
@@ -264,18 +290,19 @@ class TestTradeExecutionServiceBasics:
         )
 
         assert status is not None
-        assert status.status == "SKIPPED"
-        broker.submit_limit_order.assert_not_called()
+        assert status.status == "FILLED"
+        broker.submit_limit_order.assert_called_once_with("NVDA.US", "SELL", Decimal("7"), Decimal("220.3"))
 
-    def test_execute_sell_skips_when_expected_profit_below_min_amount(self, svc: TradeExecutionService, monkeypatch) -> None:
+    def test_execute_sell_submits_even_when_expected_profit_below_min_amount(self, svc: TradeExecutionService, monkeypatch) -> None:
         from app.config import settings
-        from app.core.broker import Position, Quote
+        from app.core.broker import OrderResult, Position, Quote
         from app.core.risk import RiskController
         from app.core.notify import ServerChanNotifier
 
         monkeypatch.setattr(settings, "min_exit_profit_pct", 0.0)
         broker = MagicMock()
         broker.get_positions.return_value = [Position("NVDA.US", "LONG", Decimal("10"), Decimal("220"))]
+        broker.submit_limit_order.return_value = OrderResult("order-sell", "NVDA.US", "SELL", Decimal("10"), Decimal("220.4"), "FILLED")
 
         status = svc.execute(
             "SELL",
@@ -289,8 +316,8 @@ class TestTradeExecutionServiceBasics:
         )
 
         assert status is not None
-        assert status.status == "SKIPPED"
-        broker.submit_limit_order.assert_not_called()
+        assert status.status == "FILLED"
+        broker.submit_limit_order.assert_called_once_with("NVDA.US", "SELL", Decimal("10"), Decimal("220.4"))
 
     def test_execute_sell_allows_stop_loss_exit_below_min_profit(self, svc: TradeExecutionService, monkeypatch) -> None:
         from app.config import settings
@@ -320,15 +347,16 @@ class TestTradeExecutionServiceBasics:
         assert status.status == "FILLED"
         broker.submit_limit_order.assert_called_once_with("NVDA.US", "SELL", Decimal("10"), Decimal("215"))
 
-    def test_execute_buy_to_cover_skips_when_expected_profit_below_min_amount(self, svc: TradeExecutionService, monkeypatch) -> None:
+    def test_execute_buy_to_cover_submits_even_when_expected_profit_below_min_amount(self, svc: TradeExecutionService, monkeypatch) -> None:
         from app.config import settings
-        from app.core.broker import Position, Quote
+        from app.core.broker import OrderResult, Position, Quote
         from app.core.risk import RiskController
         from app.core.notify import ServerChanNotifier
 
         monkeypatch.setattr(settings, "min_exit_profit_pct", 0.0)
         broker = MagicMock()
         broker.get_positions.return_value = [Position("NVDA.US", "SHORT", Decimal("10"), Decimal("220"))]
+        broker.submit_limit_order.return_value = OrderResult("order-cover", "NVDA.US", "BUY", Decimal("10"), Decimal("219.7"), "FILLED")
 
         status = svc.execute(
             "BUY_TO_COVER",
@@ -342,8 +370,8 @@ class TestTradeExecutionServiceBasics:
         )
 
         assert status is not None
-        assert status.status == "SKIPPED"
-        broker.submit_limit_order.assert_not_called()
+        assert status.status == "FILLED"
+        broker.submit_limit_order.assert_called_once_with("NVDA.US", "BUY", Decimal("10"), Decimal("219.7"))
 
     def test_execute_buy_to_cover_allows_stop_loss_exit_below_min_profit(self, svc: TradeExecutionService, monkeypatch) -> None:
         from app.config import settings
