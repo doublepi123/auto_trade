@@ -113,21 +113,29 @@ describe('Dashboard', () => {
       },
     }).as('cockpitAccount')
     cy.intercept('GET', '/api/orders*', {
-      body: [
-        {
-          id: 1,
-          broker_order_id: 'order-1',
-          symbol: 'NVDA.US',
-          side: 'SELL',
-          quantity: 1,
-          price: 218.51,
-          executed_quantity: 1,
-          executed_price: 219.8,
-          status: 'FILLED',
-          created_at: '2026-05-22T10:59:02Z',
-          filled_at: '2026-05-22T10:59:03Z',
-        },
-      ],
+      body: {
+        items: [
+          {
+            id: 1,
+            broker_order_id: 'order-1',
+            symbol: 'NVDA.US',
+            side: 'SELL',
+            quantity: 1,
+            price: 218.51,
+            executed_quantity: 1,
+            executed_price: 219.8,
+            status: 'FILLED',
+            created_at: '2026-05-22T10:59:02Z',
+            filled_at: '2026-05-22T10:59:03Z',
+            source: 'local',
+            cancellable: false,
+          },
+        ],
+        total: 1,
+        page: 1,
+        page_size: 5,
+        scope: 'today',
+      },
     }).as('cockpitOrders')
 
     cy.visit('/')

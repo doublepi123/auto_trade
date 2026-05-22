@@ -245,6 +245,28 @@ class TestTradeExecutionServiceBasics:
         broker.estimate_margin_max_quantity.assert_not_called()
         broker.submit_limit_order.assert_called_once_with("NVDA.US", "SELL", Decimal("7"), Decimal("225"))
 
+    def test_execute_sell_caps_quantity_to_available_long_position(self, svc: TradeExecutionService) -> None:
+        from app.core.broker import OrderResult, Position, Quote
+        from app.core.risk import RiskController
+        from app.core.notify import ServerChanNotifier
+
+        broker = MagicMock()
+        broker.get_positions.return_value = [Position("NVDA.US", "LONG", Decimal("10"), Decimal("220"), available_quantity=Decimal("4"))]
+        broker.submit_limit_order.return_value = OrderResult("order-sell", "NVDA.US", "SELL", Decimal("4"), Decimal("225"), "FILLED")
+
+        status = svc.execute(
+            "SELL",
+            "NVDA.US",
+            Quote("NVDA.US", 225, 224.9, 225.1, ""),
+            broker,
+            RiskController(),
+            ServerChanNotifier(""),
+            "USD",
+        )
+
+        assert status is not None
+        broker.submit_limit_order.assert_called_once_with("NVDA.US", "SELL", Decimal("4"), Decimal("225"))
+
     def test_execute_sell_normalizes_us_limit_price_to_cent_tick(self, svc: TradeExecutionService, monkeypatch) -> None:
         from app.core.broker import OrderResult, Position, Quote
         from app.core.risk import RiskController
@@ -372,6 +394,28 @@ class TestTradeExecutionServiceBasics:
         assert status is not None
         assert status.status == "FILLED"
         broker.submit_limit_order.assert_called_once_with("NVDA.US", "BUY", Decimal("10"), Decimal("219.7"))
+
+    def test_execute_buy_to_cover_caps_quantity_to_available_short_position(self, svc: TradeExecutionService) -> None:
+        from app.core.broker import OrderResult, Position, Quote
+        from app.core.risk import RiskController
+        from app.core.notify import ServerChanNotifier
+
+        broker = MagicMock()
+        broker.get_positions.return_value = [Position("NVDA.US", "SHORT", Decimal("12"), Decimal("220"), available_quantity=Decimal("5"))]
+        broker.submit_limit_order.return_value = OrderResult("order-cover", "NVDA.US", "BUY", Decimal("5"), Decimal("219"), "FILLED")
+
+        status = svc.execute(
+            "BUY_TO_COVER",
+            "NVDA.US",
+            Quote("NVDA.US", 219, 218.9, 219.1, ""),
+            broker,
+            RiskController(),
+            ServerChanNotifier(""),
+            "USD",
+        )
+
+        assert status is not None
+        broker.submit_limit_order.assert_called_once_with("NVDA.US", "BUY", Decimal("5"), Decimal("219"))
 
     def test_execute_buy_to_cover_allows_stop_loss_exit_below_min_profit(self, svc: TradeExecutionService, monkeypatch) -> None:
         from app.config import settings

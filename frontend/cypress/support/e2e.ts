@@ -62,7 +62,15 @@ Cypress.Commands.add('stubApi', () => {
     },
   }).as('getCredentials')
 
-  cy.intercept('GET', '/api/orders*', { body: [] }).as('getOrders')
+  cy.intercept('GET', '/api/orders*', {
+    body: {
+      items: [],
+      total: 0,
+      page: 1,
+      page_size: 10,
+      scope: 'today',
+    },
+  }).as('getOrders')
 
   cy.intercept('GET', '/api/strategy/llm-interval/status', {
     body: {

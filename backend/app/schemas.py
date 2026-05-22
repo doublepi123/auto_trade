@@ -147,7 +147,7 @@ class StatusResponse(BaseModel):
 
 
 class OrderResponse(BaseModel):
-    id: int
+    id: int = 0
     broker_order_id: str
     symbol: str
     side: str
@@ -158,8 +158,24 @@ class OrderResponse(BaseModel):
     status: str
     created_at: datetime
     filled_at: Optional[datetime]
+    source: str = "local"
+    cancellable: bool = False
 
     model_config = {"from_attributes": True}
+
+
+class OrderPageResponse(BaseModel):
+    items: list[OrderResponse]
+    total: int
+    page: int
+    page_size: int
+    scope: str = "today"
+
+
+class OrderCancelResponse(BaseModel):
+    broker_order_id: str
+    status: str
+    message: str
 
 
 class ControlRequest(BaseModel):

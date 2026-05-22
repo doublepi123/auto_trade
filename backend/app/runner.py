@@ -390,6 +390,13 @@ class AppRunner:
             with self._state_lock:
                 self._trigger_in_flight = False
 
+    def cancel_order_by_id(self, order_id: str):
+        return self._trade_svc.cancel_order_by_id(
+            order_id,
+            self.broker,
+            restore_engine_snapshot=self._restore_engine_snapshot,
+        )
+
     def _execute_llm_trade_action(self, action: str, price: Any = None, *, allow_loss_exit: bool = False) -> dict[str, Any]:
         risk_result = self.risk.check()
         if not risk_result.approved:

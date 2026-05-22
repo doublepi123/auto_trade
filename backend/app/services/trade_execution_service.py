@@ -113,6 +113,27 @@ class TradeExecutionService:
         logger.info("pending order cancelled: %s status=%s", pending.broker_order_id, order_status.status)
         return order_status
 
+    def cancel_order_by_id(
+        self,
+        order_id: str,
+        broker: BrokerGateway,
+        *,
+        restore_engine_snapshot: Callable[[_EngineSnapshot], None] | None = None,
+    ) -> OrderStatus:
+        with self._state_lock:
+            pending = self._pending_order
+        if pending is not None and pending.broker_order_id == order_id:
+            return self.cancel_pending_order(restore_engine_snapshot=restore_engine_snapshot)
+
+        try:
+            order_status = self._coerce_order_status(broker.cancel_order(order_id), order_id)
+        except Exception:
+            logger.exception("failed to cancel order %s", order_id)
+            return OrderStatus(order_id, "CANCEL_FAILED")
+        self._safe_update_order_status_from_result(order_status)
+        logger.info("order cancelled by id: %s status=%s", order_id, order_status.status)
+        return order_status
+
     def execute(
         self,
         action: str,
@@ -186,6 +207,26 @@ class TradeExecutionService:
         configured_amount = TradeExecutionService._coerce_non_negative_decimal(min_profit_amount)
         return max(pct_profit_amount, configured_amount)
 
+    @staticmethod
+    def _exit_quantity_from_position(position: object) -> Decimal:
+        try:
+            position_quantity = Decimal(str(getattr(position, "quantity", Decimal("0"))))
+        except Exception:
+            return Decimal("0")
+        if position_quantity <= 0:
+            return Decimal("0")
+
+        available = getattr(position, "available_quantity", None)
+        if available is None:
+            return position_quantity
+        try:
+            available_quantity = Decimal(str(available))
+        except Exception:
+            return position_quantity
+        if available_quantity <= 0:
+            return Decimal("0")
+        return min(position_quantity, available_quantity)
+
     def _execute_buy(
         self,
         symbol: str,
@@ -251,14 +292,18 @@ class TradeExecutionService:
         if long_pos is None:
             logger.warning("SELL: no long position for %s", symbol)
             return None
+        qty = self._exit_quantity_from_position(long_pos)
+        if qty <= 0:
+            logger.warning("SELL: no available long quantity for %s", symbol)
+            return OrderStatus("", _SKIPPED_ORDER_STATUS, reason=f"no available long quantity for {symbol}")
 
         price = self._normalize_limit_price(symbol, "SELL", Decimal(str(quote.last_price)))
         if price <= 0:
             logger.warning("SELL: price <= 0, price=%s", price)
             return None
-        result = broker.submit_limit_order(symbol, "SELL", long_pos.quantity, price)
+        result = broker.submit_limit_order(symbol, "SELL", qty, price)
         status = getattr(result, "status", "SUBMITTED")
-        self._safe_record_order(result.broker_order_id, symbol, "SELL", float(long_pos.quantity), float(price), status)
+        self._safe_record_order(result.broker_order_id, symbol, "SELL", float(qty), float(price), status)
         order_status = self._order_status_from_submit_result(result)
         self._safe_update_order_status_from_result(order_status)
 
@@ -276,7 +321,7 @@ class TradeExecutionService:
             return order_status
 
         fill_price = order_status.executed_price if order_status.executed_price > 0 else price
-        fill_qty = order_status.executed_quantity if order_status.executed_quantity > 0 else long_pos.quantity
+        fill_qty = order_status.executed_quantity if order_status.executed_quantity > 0 else qty
         pnl = float((fill_price - long_pos.avg_price) * fill_qty)
         self._safe_notify_order(notifier, "SELL", symbol, str(fill_qty), str(fill_price), result.broker_order_id)
         risk.record_trade(pnl)
@@ -349,14 +394,18 @@ class TradeExecutionService:
         if pos is None:
             logger.warning("BUY_TO_COVER: no short position for %s", symbol)
             return None
+        qty = self._exit_quantity_from_position(pos)
+        if qty <= 0:
+            logger.warning("BUY_TO_COVER: no available short quantity for %s", symbol)
+            return OrderStatus("", _SKIPPED_ORDER_STATUS, reason=f"no available short quantity for {symbol}")
 
         price = self._normalize_limit_price(symbol, "BUY_TO_COVER", Decimal(str(quote.last_price)))
         if price <= 0:
             logger.warning("BUY_TO_COVER: price <= 0, price=%s", price)
             return None
-        result = broker.submit_limit_order(symbol, "BUY", pos.quantity, price)
+        result = broker.submit_limit_order(symbol, "BUY", qty, price)
         status = getattr(result, "status", "SUBMITTED")
-        self._safe_record_order(result.broker_order_id, symbol, "BUY_TO_COVER", float(pos.quantity), float(price), status)
+        self._safe_record_order(result.broker_order_id, symbol, "BUY_TO_COVER", float(qty), float(price), status)
         order_status = self._order_status_from_submit_result(result)
         self._safe_update_order_status_from_result(order_status)
 
@@ -374,7 +423,7 @@ class TradeExecutionService:
             return order_status
 
         fill_price = order_status.executed_price if order_status.executed_price > 0 else price
-        fill_qty = order_status.executed_quantity if order_status.executed_quantity > 0 else pos.quantity
+        fill_qty = order_status.executed_quantity if order_status.executed_quantity > 0 else qty
         pnl = float((pos.avg_price - fill_price) * fill_qty)
         self._safe_notify_order(notifier, "BUY_TO_COVER", symbol, str(fill_qty), str(fill_price), result.broker_order_id)
         risk.record_trade(pnl)

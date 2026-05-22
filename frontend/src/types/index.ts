@@ -52,6 +52,22 @@ export interface OrderRecord {
   status: string
   created_at: string
   filled_at: string | null
+  source: string
+  cancellable: boolean
+}
+
+export interface OrderPage {
+  items: OrderRecord[]
+  total: number
+  page: number
+  page_size: number
+  scope: 'today' | 'history'
+}
+
+export interface OrderCancelResult {
+  broker_order_id: string
+  status: string
+  message: string
 }
 
 export interface CashBalance {

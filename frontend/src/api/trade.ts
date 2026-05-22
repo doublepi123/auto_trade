@@ -1,8 +1,30 @@
 import { api } from './client'
-import type { OrderRecord, AccountInfo } from '../types'
+import type { AccountInfo, OrderCancelResult, OrderPage } from '../types'
 
-export async function getOrders(limit = 50): Promise<OrderRecord[]> {
-  const resp = await api.get('/api/orders', { params: { limit } })
+export interface GetOrdersParams {
+  scope?: 'today' | 'history'
+  page?: number
+  page_size?: number
+  limit?: number
+}
+
+export async function getOrders(params: GetOrdersParams | number = {}): Promise<OrderPage> {
+  const requestParams = typeof params === 'number' ? { limit: params } : params
+  const resp = await api.get('/api/orders', { params: requestParams })
+  if (Array.isArray(resp.data)) {
+    return {
+      items: resp.data,
+      total: resp.data.length,
+      page: 1,
+      page_size: resp.data.length,
+      scope: 'history',
+    }
+  }
+  return resp.data
+}
+
+export async function cancelOrder(orderId: string): Promise<OrderCancelResult> {
+  const resp = await api.post(`/api/orders/${encodeURIComponent(orderId)}/cancel`)
   return resp.data
 }
 

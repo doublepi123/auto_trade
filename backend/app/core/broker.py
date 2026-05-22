@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import threading
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Callable
 
@@ -55,11 +56,26 @@ class OrderStatusResult:
 
 
 @dataclass
+class BrokerOrder:
+    broker_order_id: str
+    symbol: str
+    side: str
+    quantity: Decimal
+    price: Decimal
+    executed_quantity: Decimal
+    executed_price: Decimal
+    status: str
+    created_at: datetime | None = None
+    filled_at: datetime | None = None
+
+
+@dataclass
 class Position:
     symbol: str
     side: str
     quantity: Decimal
     avg_price: Decimal
+    available_quantity: Decimal | None = None
 
 
 @dataclass
@@ -118,6 +134,33 @@ def _iter_position_items(item: Any) -> list[Any]:
     return [item] if getattr(item, "symbol", "") else []
 
 
+def _iter_order_items(item: Any) -> list[Any]:
+    if item is None:
+        return []
+    if isinstance(item, (list, tuple)):
+        result: list[Any] = []
+        for child in item:
+            result.extend(_iter_order_items(child))
+        return result
+    if isinstance(item, dict):
+        nested = item.get("data", item)
+        if nested is not item:
+            return _iter_order_items(nested)
+        for key in ("orders", "list", "items"):
+            if key in item:
+                return _iter_order_items(item[key])
+        return [item] if item.get("order_id") or item.get("broker_order_id") else []
+
+    children: list[Any] = []
+    for attr in ("orders", "list", "items", "data"):
+        nested = getattr(item, attr, None)
+        if nested is not None and nested is not item:
+            children.extend(_iter_order_items(nested))
+    if children:
+        return children
+    return [item] if getattr(item, "order_id", None) or getattr(item, "broker_order_id", None) else []
+
+
 _SIDE_MAP = {"BUY": "Buy", "SELL": "Sell", "SELL_SHORT": "Sell", "BUY_TO_COVER": "Buy"}
 
 
@@ -144,6 +187,35 @@ def _decimal_attr(item: Any, *names: str) -> Decimal:
             except Exception:
                 return Decimal("0")
     return Decimal("0")
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(text)
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed
+    except ValueError:
+        return None
+
+
+def _normalize_order_side(raw_side: Any) -> str:
+    text = str(getattr(raw_side, "value", raw_side)).split(".")[-1]
+    key = text.upper().replace("_", "").replace("-", "").replace(" ", "")
+    if key in {"BUY", "BUYTOCOVER"}:
+        return "BUY_TO_COVER" if key == "BUYTOCOVER" else "BUY"
+    if key in {"SELL", "SELLSHORT"}:
+        return "SELL_SHORT" if key == "SELLSHORT" else "SELL"
+    return text.upper() or "UNKNOWN"
 
 
 class BrokerGateway:
@@ -263,6 +335,45 @@ class BrokerGateway:
                 executed_price=_decimal_attr(detail, "executed_price", "filled_price", "price"),
             )
 
+    def get_today_orders(self) -> list[BrokerOrder]:
+        with self._lock:
+            self._init_clients()
+            response = None
+            last_error: Exception | None = None
+            for method_name in ("today_orders", "order_list", "stock_order_list", "orders"):
+                method = getattr(self._trade_ctx, method_name, None)
+                if method is None:
+                    continue
+                try:
+                    response = method()
+                    break
+                except TypeError as exc:
+                    last_error = exc
+                    continue
+            if response is None:
+                if last_error is not None:
+                    raise last_error
+                raise RuntimeError("broker does not support listing today orders")
+
+            orders: list[BrokerOrder] = []
+            for item in _iter_order_items(response):
+                order_id = str(_get_value(item, "order_id", _get_value(item, "broker_order_id", "")))
+                if not order_id:
+                    continue
+                orders.append(BrokerOrder(
+                    broker_order_id=order_id,
+                    symbol=str(_get_value(item, "symbol", "")),
+                    side=_normalize_order_side(_get_value(item, "side", "")),
+                    quantity=_decimal_attr(item, "submitted_quantity", "quantity"),
+                    price=_decimal_attr(item, "submitted_price", "price", "limit_price"),
+                    executed_quantity=_decimal_attr(item, "executed_quantity", "filled_quantity"),
+                    executed_price=_decimal_attr(item, "executed_price", "filled_price"),
+                    status=_normalize_order_status(_get_value(item, "status", "SUBMITTED")),
+                    created_at=_parse_datetime(_get_value(item, "created_at", _get_value(item, "submitted_at", None))),
+                    filled_at=_parse_datetime(_get_value(item, "filled_at", _get_value(item, "updated_at", None))),
+                ))
+            return orders
+
     def cancel_order(self, order_id: str) -> OrderStatusResult:
         with self._lock:
             self._init_clients()
@@ -286,12 +397,19 @@ class BrokerGateway:
             positions: list[Position] = []
             for item in _iter_position_items(response):
                 raw = _get_value(item, "quantity", None)
+                raw_available = _get_value(item, "available_quantity", None)
                 if raw is None:
-                    raw = _get_value(item, "available_quantity", 0)
+                    raw = raw_available if raw_available is not None else 0
                 try:
                     qty = Decimal(str(raw)) if raw is not None else Decimal("0")
                 except Exception:
                     qty = Decimal("0")
+                available_qty = None
+                if raw_available is not None:
+                    try:
+                        available_qty = abs(Decimal(str(raw_available)))
+                    except Exception:
+                        available_qty = None
                 if qty == 0:
                     continue
 
@@ -307,6 +425,7 @@ class BrokerGateway:
                     side=side,
                     quantity=abs(qty),
                     avg_price=avg_price,
+                    available_quantity=available_qty,
                 ))
             return positions
 

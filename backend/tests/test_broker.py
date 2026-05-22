@@ -256,6 +256,38 @@ class TestBrokerGateway:
         assert result.executed_quantity == Decimal("3")
         assert result.executed_price == Decimal("201.5")
 
+    def test_get_today_orders_normalizes_trade_context_orders(self) -> None:
+        class Detail:
+            def __init__(self, order_id: str, symbol: str) -> None:
+                self.order_id = order_id
+                self.symbol = symbol
+                self.side = "Sell"
+                self.submitted_quantity = "7"
+                self.submitted_price = "225.5"
+                self.executed_quantity = "2"
+                self.executed_price = "225.6"
+                self.status = "PartialFilled"
+                self.created_at = "2026-05-22T13:00:00Z"
+
+        class TradeContext:
+            def today_orders(self):
+                return [Detail("order-1", "NVDA.US")]
+
+        gw = BrokerGateway()
+        gw._quote_ctx = object()
+        gw._trade_ctx = TradeContext()
+
+        orders = gw.get_today_orders()
+
+        assert len(orders) == 1
+        assert orders[0].broker_order_id == "order-1"
+        assert orders[0].symbol == "NVDA.US"
+        assert orders[0].side == "SELL"
+        assert orders[0].quantity == Decimal("7")
+        assert orders[0].price == Decimal("225.5")
+        assert orders[0].executed_quantity == Decimal("2")
+        assert orders[0].status == "PARTIAL_FILLED"
+
     def test_cancel_order_uses_trade_context_cancel_order(self) -> None:
         called = {}
 

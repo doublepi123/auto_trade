@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from decimal import Decimal
+from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
@@ -9,19 +11,160 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import OrderRecord
 from app.runner import get_runner
-from app.schemas import AccountResponse, CashBalanceSchema, ControlRequest, MessageResponse, OrderResponse, PositionSchema
+from app.schemas import AccountResponse, CashBalanceSchema, ControlRequest, MessageResponse, OrderCancelResponse, OrderPageResponse, OrderResponse, PositionSchema
 from app.services.strategy_service import StrategyService
 
 router = APIRouter(prefix="/api", tags=["trade"])
 
+_LIVE_ORDER_STATUSES = {"SUBMITTED", "PARTIAL_FILLED"}
+_TERMINAL_ORDER_STATUSES = {"FILLED", "REJECTED", "CANCELLED"}
 
-@router.get("/orders", response_model=list[OrderResponse])
+
+def _is_today(value: datetime | None) -> bool:
+    if value is None:
+        return False
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone().date() == datetime.now().astimezone().date()
+
+
+def _local_order_response(order: OrderRecord) -> OrderResponse:
+    response = OrderResponse.model_validate(order)
+    response.source = "local"
+    response.cancellable = response.status in _LIVE_ORDER_STATUSES
+    return response
+
+
+def _float_attr(item: Any, name: str) -> float | None:
+    value = getattr(item, name, None)
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+def _broker_order_response(item: Any, local_order: OrderRecord | None = None) -> OrderResponse:
+    status = str(getattr(item, "status", "SUBMITTED"))
+    created_at = getattr(item, "created_at", None) or (local_order.created_at if local_order else datetime.now(timezone.utc))
+    return OrderResponse(
+        id=local_order.id if local_order else 0,
+        broker_order_id=str(getattr(item, "broker_order_id", "")),
+        symbol=str(getattr(item, "symbol", local_order.symbol if local_order else "")),
+        side=str(getattr(item, "side", local_order.side if local_order else "")),
+        quantity=float(getattr(item, "quantity", local_order.quantity if local_order else 0)),
+        price=float(getattr(item, "price", local_order.price if local_order else 0)),
+        executed_quantity=_float_attr(item, "executed_quantity"),
+        executed_price=_float_attr(item, "executed_price"),
+        status=status,
+        created_at=created_at,
+        filled_at=getattr(item, "filled_at", None) or (local_order.filled_at if local_order else None),
+        source="broker",
+        cancellable=status in _LIVE_ORDER_STATUSES,
+    )
+
+
+def _paginate_orders(items: list[OrderResponse], *, page: int, page_size: int, scope: str) -> OrderPageResponse:
+    total = len(items)
+    start = (page - 1) * page_size
+    end = start + page_size
+    return OrderPageResponse(
+        items=items[start:end],
+        total=total,
+        page=page,
+        page_size=page_size,
+        scope=scope,
+    )
+
+
+def _order_sort_key(item: OrderResponse) -> float:
+    value = item.created_at
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.timestamp()
+
+
+def _update_local_order_from_status(db: Session, order_id: str, status_result: Any) -> None:
+    order = (
+        db.query(OrderRecord)
+        .filter(OrderRecord.broker_order_id == order_id)
+        .order_by(OrderRecord.id.desc())
+        .first()
+    )
+    if order is None:
+        return
+    status = str(getattr(status_result, "status", "CANCELLED"))
+    order.status = status
+    executed_quantity = _float_attr(status_result, "executed_quantity")
+    executed_price = _float_attr(status_result, "executed_price")
+    if executed_quantity is not None:
+        order.executed_quantity = executed_quantity
+    if executed_price is not None:
+        order.executed_price = executed_price
+    if status in _TERMINAL_ORDER_STATUSES:
+        order.filled_at = datetime.now(timezone.utc)
+    db.add(order)
+    db.commit()
+
+
+@router.get("/orders", response_model=OrderPageResponse)
 def get_orders(
-    limit: int = Query(default=50, ge=1, le=200),
+    scope: str = Query(default="today", pattern="^(today|history)$"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=10, ge=1, le=200),
+    limit: Optional[int] = Query(default=None, ge=1, le=200),
     db: Session = Depends(get_db),
-) -> list[OrderResponse]:
-    orders = db.query(OrderRecord).order_by(OrderRecord.created_at.desc()).limit(limit).all()
-    return [OrderResponse.model_validate(o) for o in orders]
+) -> OrderPageResponse:
+    if limit is not None:
+        page_size = limit
+
+    local_orders = db.query(OrderRecord).order_by(OrderRecord.created_at.desc()).all()
+    if scope == "history":
+        items = [_local_order_response(order) for order in local_orders]
+        return _paginate_orders(items, page=page, page_size=page_size, scope=scope)
+
+    local_today = [order for order in local_orders if _is_today(order.created_at)]
+    local_by_broker_id = {order.broker_order_id: order for order in local_today if order.broker_order_id}
+    merged: dict[str, OrderResponse] = {}
+    try:
+        broker_orders = get_runner().broker.get_today_orders()
+    except Exception:
+        logging.getLogger("auto_trade.trade").exception("failed to get broker today orders")
+        broker_orders = []
+    for broker_order in broker_orders:
+        order_id = str(getattr(broker_order, "broker_order_id", ""))
+        if not order_id:
+            continue
+        merged[order_id] = _broker_order_response(broker_order, local_by_broker_id.get(order_id))
+    for local_order in local_today:
+        local_key = local_order.broker_order_id or f"local-{local_order.id}"
+        if local_key not in merged:
+            merged[local_key] = _local_order_response(local_order)
+    items = sorted(merged.values(), key=_order_sort_key, reverse=True)
+    return _paginate_orders(items, page=page, page_size=page_size, scope=scope)
+
+
+@router.post("/orders/{order_id}/cancel", response_model=OrderCancelResponse)
+def cancel_order(order_id: str, db: Session = Depends(get_db)) -> OrderCancelResponse:
+    runner = get_runner()
+    try:
+        cancel_by_id = getattr(runner, "cancel_order_by_id", None)
+        if callable(cancel_by_id):
+            status_result = cancel_by_id(order_id)
+        else:
+            status_result = runner.broker.cancel_order(order_id)
+    except Exception as exc:
+        logging.getLogger("auto_trade.trade").exception("failed to cancel order %s", order_id)
+        raise HTTPException(status_code=400, detail=f"cancel order failed: {exc}") from exc
+
+    _update_local_order_from_status(db, order_id, status_result)
+    status = str(getattr(status_result, "status", "CANCELLED"))
+    return OrderCancelResponse(
+        broker_order_id=str(getattr(status_result, "broker_order_id", order_id)),
+        status=status,
+        message="order cancelled" if status == "CANCELLED" else f"order cancel status: {status}",
+    )
 
 
 @router.get("/account", response_model=AccountResponse)

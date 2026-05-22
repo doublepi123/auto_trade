@@ -308,7 +308,7 @@ async function loadLLMStatus() {
 
 async function loadRecentOrders() {
   try {
-    recentOrders.value = (await getOrders(5)).slice(0, 5)
+    recentOrders.value = (await getOrders({ scope: 'today', page: 1, page_size: 5 })).items.slice(0, 5)
   } catch {
     recentOrders.value = []
   }
