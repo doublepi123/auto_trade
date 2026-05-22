@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from app.core.engine import StrategyEngine, EngineState
 from app.core.risk import RiskController
 from app.models import Base
-from app.models import StrategyConfig, RuntimeState
+from app.models import RuntimeState, RuntimeStateSnapshot, StrategyConfig
 from app.services.runtime_state_service import RuntimeStateService
 from app.services.strategy_service import StrategyService
 
@@ -29,6 +29,7 @@ class TestRuntimeStateService:
     def _cleanup(self) -> None:
         db = self._get_db()
         db.query(StrategyConfig).delete()
+        db.query(RuntimeStateSnapshot).delete()
         db.query(RuntimeState).delete()
         db.commit()
         db.close()
@@ -160,6 +161,60 @@ class TestRuntimeStateService:
         assert state.daily_pnl == -25.0
         assert state.consecutive_losses == 1
         assert state.engine_state == "flat"
+
+    def test_persist_records_status_history_snapshot(self) -> None:
+        self._cleanup()
+        engine = StrategyEngine()
+        engine.state = EngineState.LONG
+        engine.last_price = 221.5
+        risk = RiskController()
+        risk.daily_pnl = 12.25
+        risk.consecutive_losses = 0
+
+        state_svc = RuntimeStateService()
+        db = self._get_db()
+        try:
+            state_svc.persist(db, engine, risk)
+            points = state_svc.query_history(db, limit=10)
+        finally:
+            db.close()
+
+        assert len(points) == 1
+        assert points[0].engine_state == "long"
+        assert points[0].last_price == 221.5
+        assert points[0].daily_pnl == 12.25
+
+    def test_query_history_returns_points_in_time_order(self) -> None:
+        self._cleanup()
+        from datetime import datetime, timezone
+
+        db = self._get_db()
+        try:
+            db.add(RuntimeStateSnapshot(
+                engine_state="flat",
+                last_price=220.0,
+                daily_pnl=0.0,
+                consecutive_losses=0,
+                paused=False,
+                kill_switch=False,
+                created_at=datetime(2026, 5, 22, 10, 1, tzinfo=timezone.utc),
+            ))
+            db.add(RuntimeStateSnapshot(
+                engine_state="long",
+                last_price=221.0,
+                daily_pnl=5.0,
+                consecutive_losses=0,
+                paused=False,
+                kill_switch=False,
+                created_at=datetime(2026, 5, 22, 10, 2, tzinfo=timezone.utc),
+            ))
+            db.commit()
+
+            points = RuntimeStateService().query_history(db, limit=10)
+        finally:
+            db.close()
+
+        assert [point.last_price for point in points] == [220.0, 221.0]
 
     def test_record_risk_event(self) -> None:
         self._cleanup()

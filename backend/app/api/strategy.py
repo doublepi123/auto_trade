@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import logging
 import threading
+from datetime import datetime, timedelta, timezone
+from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.models import OrderRecord
 from app.runner import AppRunner, get_runner
-from app.schemas import StatusResponse, StrategyConfigSchema, StrategyMergedSchema, StrategyResponse
+from app.schemas import StatusHistoryPoint, StatusHistoryResponse, StatusResponse, StrategyConfigSchema, StrategyMergedSchema, StrategyResponse, TradeSignalMarker
+from app.services.runtime_state_service import RuntimeStateService
 from app.services.strategy_service import StrategyService
 
 logger = logging.getLogger("auto_trade.strategy")
@@ -74,3 +78,62 @@ def get_status(db: Session = Depends(get_db)) -> StatusResponse:
     response.runner_running = runner.is_running
     response.last_action_message = getattr(runner, "last_action_message", "")
     return response
+
+
+@router.get("/status/history", response_model=StatusHistoryResponse)
+def get_status_history(
+    from_: Optional[datetime] = Query(default=None, alias="from"),
+    to: Optional[datetime] = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=1000),
+    db: Session = Depends(get_db),
+) -> StatusHistoryResponse:
+    end_at = to or datetime.now(timezone.utc)
+    start_at = from_ or (end_at - timedelta(hours=6))
+    snapshots = RuntimeStateService().query_history(db, start_at=start_at, end_at=end_at, limit=limit)
+    points = [
+        StatusHistoryPoint(
+            timestamp=snapshot.created_at,
+            engine_state=snapshot.engine_state,
+            paused=snapshot.paused,
+            kill_switch=snapshot.kill_switch,
+            daily_pnl=snapshot.daily_pnl,
+            consecutive_losses=snapshot.consecutive_losses,
+            last_price=snapshot.last_price,
+            last_trigger_price=snapshot.last_trigger_price,
+        )
+        for snapshot in snapshots
+    ]
+    if not points:
+        state = StrategyService(db).get_runtime_state()
+        points = [
+            StatusHistoryPoint(
+                timestamp=state.updated_at,
+                engine_state=state.engine_state,
+                paused=state.paused,
+                kill_switch=state.kill_switch,
+                daily_pnl=state.daily_pnl,
+                consecutive_losses=state.consecutive_losses,
+                last_price=state.last_price,
+                last_trigger_price=state.last_trigger_price,
+            )
+        ]
+
+    marker_query = db.query(OrderRecord).filter(OrderRecord.status.in_(("FILLED", "PARTIAL_FILLED")))
+    if start_at is not None:
+        marker_query = marker_query.filter(OrderRecord.created_at >= start_at)
+    if end_at is not None:
+        marker_query = marker_query.filter(OrderRecord.created_at <= end_at)
+    orders = marker_query.order_by(OrderRecord.created_at.asc()).limit(200).all()
+    markers = [
+        TradeSignalMarker(
+            timestamp=order.filled_at or order.created_at,
+            broker_order_id=order.broker_order_id,
+            symbol=order.symbol,
+            side=order.side,
+            quantity=order.executed_quantity or order.quantity,
+            price=order.executed_price or order.price,
+            status=order.status,
+        )
+        for order in orders
+    ]
+    return StatusHistoryResponse(points=points, markers=markers)

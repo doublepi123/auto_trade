@@ -13,7 +13,7 @@ from app.api import strategy as strategy_api
 from app.api import trade as trade_api
 from app import database
 from app.database import engine as db_engine, SessionLocal
-from app.models import Base, CredentialConfig, LLMInteraction, OrderRecord, StrategyConfig, TradeEvent
+from app.models import Base, CredentialConfig, LLMInteraction, OrderRecord, RuntimeStateSnapshot, StrategyConfig, TradeEvent
 from app.main import app
 
 
@@ -47,6 +47,14 @@ def _clean_llm_interactions() -> None:
 
 def _clean_orders() -> None:
     db = SessionLocal()
+    db.query(OrderRecord).delete()
+    db.commit()
+    db.close()
+
+
+def _clean_status_history() -> None:
+    db = SessionLocal()
+    db.query(RuntimeStateSnapshot).delete()
     db.query(OrderRecord).delete()
     db.commit()
     db.close()
@@ -223,6 +231,51 @@ class TestAPI:
         assert resp.status_code == 200
         data = resp.json()
         assert "engine_state" in data
+
+    def test_status_history_returns_points_and_trade_markers(self) -> None:
+        _clean_status_history()
+        db = SessionLocal()
+        db.add(RuntimeStateSnapshot(
+            engine_state="flat",
+            last_price=220.1,
+            daily_pnl=0.0,
+            consecutive_losses=0,
+            paused=False,
+            kill_switch=False,
+            created_at=datetime(2026, 5, 22, 10, 0, tzinfo=timezone.utc),
+        ))
+        db.add(RuntimeStateSnapshot(
+            engine_state="long",
+            last_price=221.2,
+            daily_pnl=12.5,
+            consecutive_losses=0,
+            paused=False,
+            kill_switch=False,
+            created_at=datetime(2026, 5, 22, 10, 1, tzinfo=timezone.utc),
+        ))
+        db.add(OrderRecord(
+            broker_order_id="filled-1",
+            symbol="NVDA.US",
+            side="BUY",
+            quantity=3,
+            price=220.5,
+            executed_quantity=3,
+            executed_price=220.6,
+            status="FILLED",
+            created_at=datetime(2026, 5, 22, 10, 1, tzinfo=timezone.utc),
+            filled_at=datetime(2026, 5, 22, 10, 1, tzinfo=timezone.utc),
+        ))
+        db.commit()
+        db.close()
+
+        resp = client.get("/api/status/history?limit=20")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert [point["last_price"] for point in data["points"]] == [220.1, 221.2]
+        assert data["markers"][0]["broker_order_id"] == "filled-1"
+        assert data["markers"][0]["side"] == "BUY"
+        assert data["markers"][0]["price"] == 220.6
 
     def test_pause_trading(self) -> None:
         resp = client.post("/api/control/pause", json={"reason": "testing"})

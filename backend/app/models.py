@@ -135,3 +135,17 @@ class RuntimeState(Base):
     last_trigger_price: Mapped[float] = mapped_column(Float, default=0.0)
     last_trigger_at: Mapped[Optional[datetime]] = mapped_column(_TZDateTime(), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(_TZDateTime(), default=_utcnow)
+
+
+class RuntimeStateSnapshot(Base):
+    __tablename__ = "runtime_state_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    engine_state: Mapped[str] = mapped_column(String(20), default="flat")
+    paused: Mapped[bool] = mapped_column(Boolean, default=False)
+    kill_switch: Mapped[bool] = mapped_column(Boolean, default=False)
+    daily_pnl: Mapped[float] = mapped_column(Float, default=0.0)
+    consecutive_losses: Mapped[int] = mapped_column(Integer, default=0)
+    last_price: Mapped[float] = mapped_column(Float, default=0.0)
+    last_trigger_price: Mapped[float] = mapped_column(Float, default=0.0)
+    created_at: Mapped[datetime] = mapped_column(_TZDateTime(), default=_utcnow)

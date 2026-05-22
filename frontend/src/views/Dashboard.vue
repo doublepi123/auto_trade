@@ -150,6 +150,16 @@
       </div>
     </section>
 
+    <section class="chart-grid" data-testid="dashboard-charts">
+      <PriceChart
+        :points="chartPoints"
+        :markers="tradeMarkers"
+        :buy-low="strategy.buy_low"
+        :sell-high="strategy.sell_high"
+      />
+      <PnLChart :points="chartPoints" />
+    </section>
+
     <section class="detail-grid">
       <div class="detail-panel account-panel">
         <div class="section-title">
@@ -231,13 +241,15 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, onMounted, onUnmounted } from 'vue'
+import { computed, ref, onMounted, onUnmounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import PriceChart from '../components/PriceChart.vue'
+import PnLChart from '../components/PnLChart.vue'
 import { useDashboardData } from '../composables/useDashboardData'
 import { useStatusStream } from '../composables/useStatusStream'
 import { useAccountRefresh } from '../composables/useAccountRefresh'
-import { startTrading, stopTrading, pauseTrading, resumeTrading, activateKillSwitch, disableKillSwitch, getLLMIntervalStatus, getOrders, getTradeEvents } from '../api'
-import type { LLMIntervalStatus, OrderRecord, Position, TradeEventRecord } from '../types'
+import { startTrading, stopTrading, pauseTrading, resumeTrading, activateKillSwitch, disableKillSwitch, getLLMIntervalStatus, getOrders, getTradeEvents, getStatusHistory } from '../api'
+import type { LLMIntervalStatus, OrderRecord, Position, StatusHistoryPoint, TradeEventRecord, TradeSignalMarker } from '../types'
 import { engineStateLabel, marketLabel, positionSideLabel, tradeEventTypeLabel } from '../utils/labels'
 
 const { strategy, status, initialLoading, loadError, load, refreshStatus } = useDashboardData()
@@ -247,7 +259,10 @@ const { account, accountError, refresh: refreshAccount } = useAccountRefresh()
 const llmStatus = ref<LLMIntervalStatus | null>(null)
 const recentOrders = ref<OrderRecord[]>([])
 const recentEvents = ref<TradeEventRecord[]>([])
+const chartPoints = ref<StatusHistoryPoint[]>([])
+const tradeMarkers = ref<TradeSignalMarker[]>([])
 let llmStatusTimer: ReturnType<typeof setInterval> | null = null
+const MAX_CHART_POINTS = 200
 
 const stateTagType = computed(() => {
   switch (status.value.engine_state) {
@@ -314,6 +329,7 @@ async function handleRetry() {
   try {
     await load()
     await Promise.all([refreshAccount(), loadLLMStatus(), loadRecentOrders(), loadRecentEvents()])
+    await loadStatusHistory()
   } catch {
     void 0
   }
@@ -343,10 +359,46 @@ async function loadRecentEvents() {
   }
 }
 
+async function loadStatusHistory() {
+  try {
+    const history = await getStatusHistory(MAX_CHART_POINTS)
+    chartPoints.value = history.points.slice(-MAX_CHART_POINTS)
+    tradeMarkers.value = history.markers
+  } catch {
+    chartPoints.value = []
+    tradeMarkers.value = []
+  }
+}
+
+function appendStatusPoint() {
+  const now = new Date().toISOString()
+  const point: StatusHistoryPoint = {
+    timestamp: now,
+    engine_state: status.value.engine_state,
+    paused: status.value.paused,
+    kill_switch: status.value.kill_switch,
+    daily_pnl: status.value.daily_pnl,
+    consecutive_losses: status.value.consecutive_losses,
+    last_price: status.value.last_price,
+    last_trigger_price: status.value.last_trigger_price,
+  }
+  const previous = chartPoints.value[chartPoints.value.length - 1]
+  if (
+    previous
+    && previous.last_price === point.last_price
+    && previous.daily_pnl === point.daily_pnl
+    && previous.engine_state === point.engine_state
+  ) {
+    return
+  }
+  chartPoints.value = [...chartPoints.value, point].slice(-MAX_CHART_POINTS)
+}
+
 onMounted(() => {
   loadLLMStatus()
   loadRecentOrders()
   loadRecentEvents()
+  loadStatusHistory()
   llmStatusTimer = setInterval(() => {
     loadLLMStatus()
     loadRecentOrders()
@@ -355,6 +407,17 @@ onMounted(() => {
   load().catch(() => void 0)
   refreshAccount().catch(() => void 0)
 })
+
+watch(
+  () => [
+    status.value.last_price,
+    status.value.daily_pnl,
+    status.value.engine_state,
+    status.value.paused,
+    status.value.kill_switch,
+  ],
+  appendStatusPoint,
+)
 
 onUnmounted(() => {
   if (llmStatusTimer) {
@@ -759,6 +822,12 @@ function eventTagType(eventTypeValue: string, status: string): string {
   grid-column: 1 / -1;
 }
 
+.chart-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr);
+  gap: 12px;
+}
+
 .detail-grid {
   display: grid;
   grid-template-columns: 1.05fr 1fr 1.05fr 1.15fr;
@@ -878,6 +947,7 @@ function eventTagType(eventTypeValue: string, status: string): string {
   }
 
   .cockpit-grid,
+  .chart-grid,
   .detail-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -896,6 +966,7 @@ function eventTagType(eventTypeValue: string, status: string): string {
 
   .status-strip,
   .cockpit-grid,
+  .chart-grid,
   .strategy-list {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -939,12 +1010,14 @@ function eventTagType(eventTypeValue: string, status: string): string {
 @media (max-width: 520px) {
   .status-strip,
   .cockpit-grid,
+  .chart-grid,
   .position-main,
   .strategy-list {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .cockpit-grid,
+  .chart-grid,
   .position-main,
   .strategy-list {
     grid-template-columns: 1fr;

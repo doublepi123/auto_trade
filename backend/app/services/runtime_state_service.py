@@ -68,6 +68,7 @@ class RuntimeStateService:
             last_trigger_price=engine.last_trigger_price,
             last_trigger_at=engine.last_trigger_at,
         )
+        self.record_snapshot(db, engine, risk)
 
     def persist_risk(self, db: Any, risk: RiskController) -> None:
         from app.services.strategy_service import StrategyService
@@ -85,6 +86,43 @@ class RuntimeStateService:
         event = RiskEvent(event_type="RISK_REJECTION", reason=reason)
         db.add(event)
         db.commit()
+
+    def record_snapshot(self, db: Any, engine: StrategyEngine, risk: RiskController) -> None:
+        from app.models import RuntimeStateSnapshot
+
+        snapshot = RuntimeStateSnapshot(
+            engine_state=engine.state.value,
+            paused=risk.paused,
+            kill_switch=risk.kill_switch,
+            daily_pnl=risk.daily_pnl,
+            consecutive_losses=risk.consecutive_losses,
+            last_price=engine.last_price,
+            last_trigger_price=engine.last_trigger_price,
+        )
+        db.add(snapshot)
+        db.commit()
+
+    def query_history(
+        self,
+        db: Any,
+        *,
+        start_at: datetime | None = None,
+        end_at: datetime | None = None,
+        limit: int = 200,
+    ) -> list[Any]:
+        from app.models import RuntimeStateSnapshot
+
+        query = db.query(RuntimeStateSnapshot)
+        if start_at is not None:
+            query = query.filter(RuntimeStateSnapshot.created_at >= start_at)
+        if end_at is not None:
+            query = query.filter(RuntimeStateSnapshot.created_at <= end_at)
+        rows = (
+            query.order_by(RuntimeStateSnapshot.created_at.desc(), RuntimeStateSnapshot.id.desc())
+            .limit(limit)
+            .all()
+        )
+        return list(reversed(rows))
 
     def _coerce_engine_state(self, value: object) -> EngineState:
         try:

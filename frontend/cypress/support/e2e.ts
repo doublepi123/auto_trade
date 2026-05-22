@@ -48,6 +48,44 @@ Cypress.Commands.add('stubApi', () => {
     req.reply({ body: status })
   }).as('getStatus')
 
+  cy.intercept('GET', '/api/status/history*', {
+    body: {
+      points: [
+        {
+          timestamp: '2026-05-22T10:00:00Z',
+          engine_state: 'flat',
+          paused: false,
+          kill_switch: false,
+          daily_pnl: 0,
+          consecutive_losses: 0,
+          last_price: 220.1,
+          last_trigger_price: 0,
+        },
+        {
+          timestamp: '2026-05-22T10:01:00Z',
+          engine_state: 'long',
+          paused: false,
+          kill_switch: false,
+          daily_pnl: 12.5,
+          consecutive_losses: 0,
+          last_price: 221.2,
+          last_trigger_price: 220.6,
+        },
+      ],
+      markers: [
+        {
+          timestamp: '2026-05-22T10:01:00Z',
+          broker_order_id: 'filled-1',
+          symbol: 'NVDA.US',
+          side: 'BUY',
+          quantity: 3,
+          price: 220.6,
+          status: 'FILLED',
+        },
+      ],
+    },
+  }).as('getStatusHistory')
+
   cy.intercept('GET', '/api/account', {
     body: { total_assets: 0, cash_balances: [], positions: [], available: true, error: null },
   }).as('getAccount')

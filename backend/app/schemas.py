@@ -146,6 +146,32 @@ class StatusResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class StatusHistoryPoint(BaseModel):
+    timestamp: datetime
+    engine_state: str
+    paused: bool
+    kill_switch: bool
+    daily_pnl: float
+    consecutive_losses: int
+    last_price: float
+    last_trigger_price: float
+
+
+class TradeSignalMarker(BaseModel):
+    timestamp: datetime
+    broker_order_id: str
+    symbol: str
+    side: str
+    quantity: float
+    price: float
+    status: str
+
+
+class StatusHistoryResponse(BaseModel):
+    points: list[StatusHistoryPoint]
+    markers: list[TradeSignalMarker]
+
+
 class OrderResponse(BaseModel):
     id: int = 0
     broker_order_id: str

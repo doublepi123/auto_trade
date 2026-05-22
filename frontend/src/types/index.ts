@@ -40,6 +40,32 @@ export interface StatusData {
   last_action_message: string
 }
 
+export interface StatusHistoryPoint {
+  timestamp: string
+  engine_state: string
+  paused: boolean
+  kill_switch: boolean
+  daily_pnl: number
+  consecutive_losses: number
+  last_price: number
+  last_trigger_price: number
+}
+
+export interface TradeSignalMarker {
+  timestamp: string
+  broker_order_id: string
+  symbol: string
+  side: string
+  quantity: number
+  price: number
+  status: string
+}
+
+export interface StatusHistory {
+  points: StatusHistoryPoint[]
+  markers: TradeSignalMarker[]
+}
+
 export interface OrderRecord {
   id: number
   broker_order_id: string
