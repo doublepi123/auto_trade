@@ -313,9 +313,9 @@ class DataAggregator:
   "suggested_sell_high": 具体价格,
   "confidence_score": 0.0到1.0,
   "reasoning": "简要推理过程",
-  "order_action": "NONE | BUY_NOW | SELL_NOW | SELL_SHORT_NOW | BUY_TO_COVER_NOW | CANCEL_PENDING | CANCEL_REPLACE",
+  "order_action": "NONE | BUY_NOW | SELL_NOW | SELL_SHORT_NOW | BUY_TO_COVER_NOW | STOP_LOSS_SELL_NOW | STOP_LOSS_COVER_NOW | CANCEL_PENDING | CANCEL_REPLACE",
   "order_price": 具体挂单价格或 null,
-  "replacement_action": "NONE | BUY_NOW | SELL_NOW | SELL_SHORT_NOW | BUY_TO_COVER_NOW",
+  "replacement_action": "NONE | BUY_NOW | SELL_NOW | SELL_SHORT_NOW | BUY_TO_COVER_NOW | STOP_LOSS_SELL_NOW | STOP_LOSS_COVER_NOW",
   "replacement_price": 撤单重挂的新价格或 null,
   "order_reason": "如需立刻交易或撤单重挂，说明原因；否则为空字符串"
 }}
@@ -332,5 +332,7 @@ class DataAggregator:
 9. 有持仓时，建议退出价格需要让预期毛盈利覆盖单笔最低盈利金额，避免交易频率过高导致手续费吞噬收益
 10. 对美股/US 标的，价格波动较快；当信号、购买力和风险收益支持交易时，优先采用“先挂单”策略，不要因为担心价格变化而只给 NONE
 11. 若已有当前挂单且你产生了新的即时动作或新价格，按“撤旧单再重挂”的策略输出 CANCEL_REPLACE，并给出 replacement_action 与 replacement_price
-12. 默认 order_action 使用 NONE；只有当最近5分钟累次数据、购买力、持仓成本和风险收益都支持“立即行动”时，才输出 BUY_NOW/SELL_NOW 等动作
-13. 不允许输出 JSON 以外的解释文本"""
+12. 必须主动评估止损：若 LONG 持仓下最近5分钟价格连续下破关键支撑、跌幅扩大、买盘无法支撑或出现开始崩盘迹象，应输出 STOP_LOSS_SELL_NOW 及时卖出；若 SHORT 持仓出现相反方向的逼空风险，应输出 STOP_LOSS_COVER_NOW
+13. 止损动作允许以控制亏损为优先目标，不受单笔最低盈利金额约束；但必须在 order_reason 中明确写出支撑失效、崩盘、量价恶化或逼空风险等依据
+14. 默认 order_action 使用 NONE；只有当最近5分钟累次数据、购买力、持仓成本和风险收益都支持“立即行动”时，才输出 BUY_NOW/SELL_NOW/STOP_LOSS_SELL_NOW 等动作
+15. 不允许输出 JSON 以外的解释文本"""

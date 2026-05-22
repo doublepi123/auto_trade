@@ -292,6 +292,34 @@ class TestTradeExecutionServiceBasics:
         assert status.status == "SKIPPED"
         broker.submit_limit_order.assert_not_called()
 
+    def test_execute_sell_allows_stop_loss_exit_below_min_profit(self, svc: TradeExecutionService, monkeypatch) -> None:
+        from app.config import settings
+        from app.core.broker import OrderResult, Position, Quote
+        from app.core.risk import RiskController
+        from app.core.notify import ServerChanNotifier
+
+        monkeypatch.setattr(settings, "min_exit_profit_pct", 0.2)
+        broker = MagicMock()
+        broker.get_positions.return_value = [Position("NVDA.US", "LONG", Decimal("10"), Decimal("220"))]
+        broker.submit_limit_order.return_value = OrderResult("stop-loss-1", "NVDA.US", "SELL", Decimal("10"), Decimal("215"), "FILLED")
+        monkeypatch.setattr(svc, "_wait_for_order_completion", lambda result, broker_arg=None: OrderStatus("stop-loss-1", "FILLED", Decimal("10"), Decimal("215")))
+
+        status = svc.execute(
+            "SELL",
+            "NVDA.US",
+            Quote("NVDA.US", 215, 214.9, 215.1, ""),
+            broker,
+            RiskController(),
+            ServerChanNotifier(""),
+            "USD",
+            min_profit_amount=Decimal("50"),
+            allow_loss_exit=True,
+        )
+
+        assert status is not None
+        assert status.status == "FILLED"
+        broker.submit_limit_order.assert_called_once_with("NVDA.US", "SELL", Decimal("10"), Decimal("215"))
+
     def test_execute_buy_to_cover_skips_when_expected_profit_below_min_amount(self, svc: TradeExecutionService, monkeypatch) -> None:
         from app.config import settings
         from app.core.broker import Position, Quote
@@ -316,6 +344,34 @@ class TestTradeExecutionServiceBasics:
         assert status is not None
         assert status.status == "SKIPPED"
         broker.submit_limit_order.assert_not_called()
+
+    def test_execute_buy_to_cover_allows_stop_loss_exit_below_min_profit(self, svc: TradeExecutionService, monkeypatch) -> None:
+        from app.config import settings
+        from app.core.broker import OrderResult, Position, Quote
+        from app.core.risk import RiskController
+        from app.core.notify import ServerChanNotifier
+
+        monkeypatch.setattr(settings, "min_exit_profit_pct", 0.2)
+        broker = MagicMock()
+        broker.get_positions.return_value = [Position("NVDA.US", "SHORT", Decimal("10"), Decimal("220"))]
+        broker.submit_limit_order.return_value = OrderResult("stop-cover-1", "NVDA.US", "BUY", Decimal("10"), Decimal("225"), "FILLED")
+        monkeypatch.setattr(svc, "_wait_for_order_completion", lambda result, broker_arg=None: OrderStatus("stop-cover-1", "FILLED", Decimal("10"), Decimal("225")))
+
+        status = svc.execute(
+            "BUY_TO_COVER",
+            "NVDA.US",
+            Quote("NVDA.US", 225, 224.9, 225.1, ""),
+            broker,
+            RiskController(),
+            ServerChanNotifier(""),
+            "USD",
+            min_profit_amount=Decimal("50"),
+            allow_loss_exit=True,
+        )
+
+        assert status is not None
+        assert status.status == "FILLED"
+        broker.submit_limit_order.assert_called_once_with("NVDA.US", "BUY", Decimal("10"), Decimal("225"))
 
     def test_cancel_pending_order_calls_broker_and_restores_snapshot(self, svc: TradeExecutionService) -> None:
         from app.core.broker import OrderResult, OrderStatusResult

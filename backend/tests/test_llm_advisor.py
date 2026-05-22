@@ -220,9 +220,14 @@ class TestDataAggregator:
         assert "累计绝对波动" in prompt
         assert '"order_action"' in prompt
         assert "BUY_NOW" in prompt
+        assert "STOP_LOSS_SELL_NOW" in prompt
+        assert "STOP_LOSS_COVER_NOW" in prompt
         assert "CANCEL_REPLACE" in prompt
         assert "先挂单" in prompt
         assert "撤旧单再重挂" in prompt
+        assert "止损" in prompt
+        assert "支撑失效" in prompt
+        assert "崩盘" in prompt
 
 
 class TestLLMAdvisorService:
@@ -265,6 +270,23 @@ class TestLLMAdvisorService:
         assert result["order_action"] == "BUY_NOW"
         assert result["order_price"] == 221.75
         assert result["order_reason"] == "价格重新站上均线"
+
+    def test_parse_response_preserves_stop_loss_action(self, advisor: LLMAdvisorService) -> None:
+        raw = """
+        {
+          "suggested_buy_low": 214.0,
+          "suggested_sell_high": 224.0,
+          "confidence_score": 0.9,
+          "analysis": "支撑失效",
+          "order_action": "STOP_LOSS_SELL_NOW",
+          "order_price": 215.0,
+          "order_reason": "跌破支撑且量价恶化"
+        }
+        """
+        result = advisor._parse_response(raw)
+
+        assert result["order_action"] == "STOP_LOSS_SELL_NOW"
+        assert result["order_price"] == 215.0
 
     def test_is_throttled_initially_false(self, advisor: LLMAdvisorService) -> None:
         assert advisor._is_throttled() is False

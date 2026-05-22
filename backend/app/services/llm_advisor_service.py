@@ -25,10 +25,20 @@ _ORDER_ACTIONS = {
     "SELL_NOW",
     "SELL_SHORT_NOW",
     "BUY_TO_COVER_NOW",
+    "STOP_LOSS_SELL_NOW",
+    "STOP_LOSS_COVER_NOW",
     "CANCEL_PENDING",
     "CANCEL_REPLACE",
 }
-_REPLACEMENT_ACTIONS = {"NONE", "BUY_NOW", "SELL_NOW", "SELL_SHORT_NOW", "BUY_TO_COVER_NOW"}
+_REPLACEMENT_ACTIONS = {
+    "NONE",
+    "BUY_NOW",
+    "SELL_NOW",
+    "SELL_SHORT_NOW",
+    "BUY_TO_COVER_NOW",
+    "STOP_LOSS_SELL_NOW",
+    "STOP_LOSS_COVER_NOW",
+}
 
 
 def build_recent_analysis_context(config: Any) -> dict[str, Any] | None:

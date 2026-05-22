@@ -30,7 +30,10 @@ _LLM_ORDER_ACTION_MAP = {
     "SELL_NOW": "SELL",
     "SELL_SHORT_NOW": "SELL_SHORT",
     "BUY_TO_COVER_NOW": "BUY_TO_COVER",
+    "STOP_LOSS_SELL_NOW": "SELL",
+    "STOP_LOSS_COVER_NOW": "BUY_TO_COVER",
 }
+_LLM_STOP_LOSS_ACTIONS = {"STOP_LOSS_SELL_NOW", "STOP_LOSS_COVER_NOW"}
 
 
 class AppRunner:
@@ -339,6 +342,7 @@ class AppRunner:
                 return self._execute_llm_trade_action(
                     mapped_action,
                     decision.get("replacement_price") or decision.get("order_price"),
+                    allow_loss_exit=replacement_action in _LLM_STOP_LOSS_ACTIONS,
                 )
 
             mapped_action = _LLM_ORDER_ACTION_MAP.get(action)
@@ -356,16 +360,24 @@ class AppRunner:
                         "order_id": replaced_order_id,
                         "action": mapped_action,
                     }
-                result = self._execute_llm_trade_action(mapped_action, decision.get("order_price"))
+                result = self._execute_llm_trade_action(
+                    mapped_action,
+                    decision.get("order_price"),
+                    allow_loss_exit=action in _LLM_STOP_LOSS_ACTIONS,
+                )
                 if replaced_order_id is not None:
                     result["replaced_order_id"] = replaced_order_id
                 return result
-            return self._execute_llm_trade_action(mapped_action, decision.get("order_price"))
+            return self._execute_llm_trade_action(
+                mapped_action,
+                decision.get("order_price"),
+                allow_loss_exit=action in _LLM_STOP_LOSS_ACTIONS,
+            )
         finally:
             with self._state_lock:
                 self._trigger_in_flight = False
 
-    def _execute_llm_trade_action(self, action: str, price: Any = None) -> dict[str, Any]:
+    def _execute_llm_trade_action(self, action: str, price: Any = None, *, allow_loss_exit: bool = False) -> dict[str, Any]:
         risk_result = self.risk.check()
         if not risk_result.approved:
             return {"executed": False, "status": "RISK_REJECTED", "order_id": None, "action": action}
@@ -393,6 +405,7 @@ class AppRunner:
             notifier=self.notifier,
             cash_currency=self._cash_currency(),
             min_profit_amount=self.engine.params.min_profit_amount,
+            allow_loss_exit=allow_loss_exit,
             engine_snapshot=engine_snapshot,
             restore_engine_snapshot=self._restore_engine_snapshot,
             notify_risk_event=self.notifier.notify_risk_event,

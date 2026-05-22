@@ -123,6 +123,7 @@ class TradeExecutionService:
         cash_currency: str,
         *,
         min_profit_amount: Decimal | float | int = Decimal("0"),
+        allow_loss_exit: bool = False,
         engine_snapshot: _EngineSnapshot | None = None,
         restore_engine_snapshot: Callable[[_EngineSnapshot], None] | None = None,
         notify_risk_event: _NotifyRiskEvent | None = None,
@@ -130,11 +131,11 @@ class TradeExecutionService:
         if action == "BUY":
             return self._execute_buy(symbol, quote, broker, risk, notifier, cash_currency, engine_snapshot=engine_snapshot, restore_engine_snapshot=restore_engine_snapshot, notify_risk_event=notify_risk_event)
         if action == "SELL":
-            return self._execute_sell(symbol, quote, broker, risk, notifier, min_profit_amount=min_profit_amount, engine_snapshot=engine_snapshot, restore_engine_snapshot=restore_engine_snapshot, notify_risk_event=notify_risk_event)
+            return self._execute_sell(symbol, quote, broker, risk, notifier, min_profit_amount=min_profit_amount, allow_loss_exit=allow_loss_exit, engine_snapshot=engine_snapshot, restore_engine_snapshot=restore_engine_snapshot, notify_risk_event=notify_risk_event)
         if action == "SELL_SHORT":
             return self._execute_sell_short(symbol, quote, broker, risk, notifier, cash_currency, engine_snapshot=engine_snapshot, restore_engine_snapshot=restore_engine_snapshot, notify_risk_event=notify_risk_event)
         if action == "BUY_TO_COVER":
-            return self._execute_buy_to_cover(symbol, quote, broker, risk, notifier, min_profit_amount=min_profit_amount, engine_snapshot=engine_snapshot, restore_engine_snapshot=restore_engine_snapshot, notify_risk_event=notify_risk_event)
+            return self._execute_buy_to_cover(symbol, quote, broker, risk, notifier, min_profit_amount=min_profit_amount, allow_loss_exit=allow_loss_exit, engine_snapshot=engine_snapshot, restore_engine_snapshot=restore_engine_snapshot, notify_risk_event=notify_risk_event)
         logger.warning("unknown action: %s", action)
         return None
 
@@ -239,6 +240,7 @@ class TradeExecutionService:
         notifier: ServerChanNotifier,
         *,
         min_profit_amount: Decimal | float | int = Decimal("0"),
+        allow_loss_exit: bool = False,
         engine_snapshot: _EngineSnapshot | None = None,
         restore_engine_snapshot: Callable[[_EngineSnapshot], None] | None = None,
         notify_risk_event: _NotifyRiskEvent | None = None,
@@ -259,7 +261,7 @@ class TradeExecutionService:
             min_profit_amount,
         )
         expected_profit = (price - long_pos.avg_price) * long_pos.quantity
-        if expected_profit < required_profit:
+        if not allow_loss_exit and expected_profit < required_profit:
             logger.info(
                 "SELL skipped: price=%s avg_price=%s quantity=%s expected_profit=%s required_profit=%s",
                 price,
@@ -353,6 +355,7 @@ class TradeExecutionService:
         notifier: ServerChanNotifier,
         *,
         min_profit_amount: Decimal | float | int = Decimal("0"),
+        allow_loss_exit: bool = False,
         engine_snapshot: _EngineSnapshot | None = None,
         restore_engine_snapshot: Callable[[_EngineSnapshot], None] | None = None,
         notify_risk_event: _NotifyRiskEvent | None = None,
@@ -373,7 +376,7 @@ class TradeExecutionService:
             min_profit_amount,
         )
         expected_profit = (pos.avg_price - price) * pos.quantity
-        if expected_profit < required_profit:
+        if not allow_loss_exit and expected_profit < required_profit:
             logger.info(
                 "BUY_TO_COVER skipped: price=%s avg_price=%s quantity=%s expected_profit=%s required_profit=%s",
                 price,

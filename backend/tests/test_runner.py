@@ -191,6 +191,39 @@ class TestAppRunner:
         assert runner._trade_svc.has_pending_order is False
         assert runner.engine.state == EngineState.LONG
 
+    def test_execute_llm_order_decision_stop_loss_sell_bypasses_profit_guard(self) -> None:
+        class Broker:
+            def __init__(self) -> None:
+                self.submitted = []
+
+            def get_quote(self, symbol: str) -> Quote:
+                return Quote(symbol, 215.0, 214.9, 215.1, "")
+
+            def get_positions(self) -> list[Position]:
+                return [Position("NVDA.US", "LONG", Decimal("8"), Decimal("220"))]
+
+            def submit_limit_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal) -> OrderResult:
+                self.submitted.append((symbol, side, quantity, price))
+                return OrderResult("order-stop-loss", symbol, side, quantity, price, "FILLED")
+
+        runner = AppRunner()
+        runner._running = True
+        runner.engine.params = StrategyParams(symbol="NVDA.US", market="US", buy_low=218, sell_high=225, min_profit_amount=50)
+        runner.engine.state = EngineState.LONG
+        runner.broker = Broker()
+        runner.notifier = _NoopNotifier()
+        self._stub_trade_callbacks(runner)
+
+        result = runner.execute_llm_order_decision({
+            "order_action": "STOP_LOSS_SELL_NOW",
+            "order_price": 215.0,
+            "order_reason": "支撑失效并开始崩盘",
+        })
+
+        assert result == {"executed": True, "status": "FILLED", "order_id": "order-stop-loss", "action": "SELL"}
+        assert runner.broker.submitted == [("NVDA.US", "SELL", Decimal("8"), Decimal("215.00"))]
+        assert runner.engine.state == EngineState.FLAT
+
     def test_get_runner_singleton(self) -> None:
         r1 = get_runner()
         r2 = get_runner()
