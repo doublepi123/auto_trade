@@ -23,6 +23,7 @@ class StrategyParams:
     buy_low: float = 0.0
     sell_high: float = 0.0
     short_selling: bool = False
+    min_profit_amount: float = 0.0
 
 
 @dataclass
@@ -136,4 +137,5 @@ class StrategyEngine:
                 "buy_low": self.params.buy_low,
                 "sell_high": self.params.sell_high,
                 "short_selling": self.params.short_selling,
+                "min_profit_amount": self.params.min_profit_amount,
             }

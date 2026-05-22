@@ -88,6 +88,7 @@ def test_init_db_adds_missing_strategy_llm_columns(tmp_path, monkeypatch) -> Non
     with engine.connect() as db:
         columns = {row[1] for row in db.exec_driver_sql("PRAGMA table_info(strategy_config)")}
     assert "auto_interval_enabled" in columns
+    assert "min_profit_amount" in columns
     assert "llm_interval_minutes" in columns
     assert "llm_last_analysis_at" in columns
     assert "llm_reject_reason" in columns

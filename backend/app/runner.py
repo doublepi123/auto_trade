@@ -141,6 +141,7 @@ class AppRunner:
                     buy_low=config.buy_low,
                     sell_high=config.sell_high,
                     short_selling=config.short_selling,
+                    min_profit_amount=config.min_profit_amount,
                 )
                 self.risk.config = RiskConfig(
                     max_daily_loss=config.max_daily_loss,
@@ -221,6 +222,7 @@ class AppRunner:
                     risk=self.risk,
                     notifier=self.notifier,
                     cash_currency=self._cash_currency(),
+                    min_profit_amount=self.engine.params.min_profit_amount,
                     engine_snapshot=engine_snapshot,
                     restore_engine_snapshot=self._restore_engine_snapshot,
                     notify_risk_event=self.notifier.notify_risk_event,

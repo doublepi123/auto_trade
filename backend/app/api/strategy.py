@@ -50,6 +50,7 @@ def put_strategy(payload: StrategyConfigSchema, db: Session = Depends(get_db)) -
         "buy_low": data["buy_low"] if "buy_low" in data and data["buy_low"] is not None else current.buy_low,
         "sell_high": data["sell_high"] if "sell_high" in data and data["sell_high"] is not None else current.sell_high,
         "short_selling": data["short_selling"] if "short_selling" in data and data["short_selling"] is not None else current.short_selling,
+        "min_profit_amount": data["min_profit_amount"] if "min_profit_amount" in data and data["min_profit_amount"] is not None else current.min_profit_amount,
         "max_daily_loss": data["max_daily_loss"] if "max_daily_loss" in data and data["max_daily_loss"] is not None else current.max_daily_loss,
         "max_consecutive_losses": data["max_consecutive_losses"] if "max_consecutive_losses" in data and data["max_consecutive_losses"] is not None else current.max_consecutive_losses,
         "llm_interval_minutes": data["llm_interval_minutes"] if "llm_interval_minutes" in data and data["llm_interval_minutes"] is not None else current.llm_interval_minutes,

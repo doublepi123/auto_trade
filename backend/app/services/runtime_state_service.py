@@ -27,6 +27,7 @@ class RuntimeStateService:
             buy_low=config.buy_low,
             sell_high=config.sell_high,
             short_selling=config.short_selling,
+            min_profit_amount=config.min_profit_amount,
         )
         engine.state = self._coerce_engine_state(state.engine_state)
         engine.last_price = state.last_price

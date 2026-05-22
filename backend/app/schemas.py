@@ -27,6 +27,7 @@ class StrategyConfigSchema(BaseModel):
     buy_low: Optional[float] = Field(default=None, gt=0)
     sell_high: Optional[float] = Field(default=None, gt=0)
     short_selling: bool = Field(default=False)
+    min_profit_amount: Optional[float] = Field(default=None, ge=0)
     max_daily_loss: float = Field(default=5000.0, gt=0)
     max_consecutive_losses: int = Field(default=3, ge=1)
     llm_interval_minutes: Optional[int] = Field(default=None, ge=1, le=1440)
@@ -60,6 +61,7 @@ class StrategyMergedSchema(BaseModel):
     buy_low: Optional[float] = Field(default=None)
     sell_high: Optional[float] = Field(default=None)
     short_selling: bool = Field(default=False)
+    min_profit_amount: float = Field(default=0.0, ge=0)
     max_daily_loss: float = Field(default=5000.0, gt=0)
     max_consecutive_losses: int = Field(default=3, ge=1)
     llm_interval_minutes: int = Field(default=240, ge=1, le=1440)
@@ -117,6 +119,7 @@ class StrategyResponse(BaseModel):
     buy_low: float
     sell_high: float
     short_selling: bool
+    min_profit_amount: float
     max_daily_loss: float
     max_consecutive_losses: int
     llm_interval_minutes: int
@@ -195,6 +198,7 @@ class LLMPreviewAnalyzeRequest(BaseModel):
     current_price: Optional[float] = Field(default=None, gt=0)
     current_buy_low: Optional[float] = Field(default=None, ge=0)
     current_sell_high: Optional[float] = Field(default=None, ge=0)
+    min_profit_amount: Optional[float] = Field(default=None, ge=0)
     short_selling: bool = Field(default=False)
 
     @field_validator("symbol")

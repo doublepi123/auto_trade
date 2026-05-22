@@ -96,6 +96,7 @@ class TradeExecutionService:
         notifier: ServerChanNotifier,
         cash_currency: str,
         *,
+        min_profit_amount: Decimal | float | int = Decimal("0"),
         engine_snapshot: _EngineSnapshot | None = None,
         restore_engine_snapshot: Callable[[_EngineSnapshot], None] | None = None,
         notify_risk_event: _NotifyRiskEvent | None = None,
@@ -103,11 +104,11 @@ class TradeExecutionService:
         if action == "BUY":
             return self._execute_buy(symbol, quote, broker, risk, notifier, cash_currency, engine_snapshot=engine_snapshot, restore_engine_snapshot=restore_engine_snapshot, notify_risk_event=notify_risk_event)
         if action == "SELL":
-            return self._execute_sell(symbol, quote, broker, risk, notifier, engine_snapshot=engine_snapshot, restore_engine_snapshot=restore_engine_snapshot, notify_risk_event=notify_risk_event)
+            return self._execute_sell(symbol, quote, broker, risk, notifier, min_profit_amount=min_profit_amount, engine_snapshot=engine_snapshot, restore_engine_snapshot=restore_engine_snapshot, notify_risk_event=notify_risk_event)
         if action == "SELL_SHORT":
             return self._execute_sell_short(symbol, quote, broker, risk, notifier, cash_currency, engine_snapshot=engine_snapshot, restore_engine_snapshot=restore_engine_snapshot, notify_risk_event=notify_risk_event)
         if action == "BUY_TO_COVER":
-            return self._execute_buy_to_cover(symbol, quote, broker, risk, notifier, engine_snapshot=engine_snapshot, restore_engine_snapshot=restore_engine_snapshot, notify_risk_event=notify_risk_event)
+            return self._execute_buy_to_cover(symbol, quote, broker, risk, notifier, min_profit_amount=min_profit_amount, engine_snapshot=engine_snapshot, restore_engine_snapshot=restore_engine_snapshot, notify_risk_event=notify_risk_event)
         logger.warning("unknown action: %s", action)
         return None
 
@@ -139,14 +140,23 @@ class TradeExecutionService:
         return price.quantize(US_PRICE_TICK, rounding=rounding)
 
     @staticmethod
-    def _minimum_profitable_exit_price(avg_price: Decimal) -> Decimal:
-        buffer_pct = Decimal(str(settings.min_exit_profit_pct)) / Decimal("100")
-        return avg_price * (Decimal("1") + buffer_pct)
+    def _coerce_non_negative_decimal(value: Decimal | float | int) -> Decimal:
+        try:
+            amount = Decimal(str(value))
+        except Exception:
+            return Decimal("0")
+        return amount if amount > 0 else Decimal("0")
 
     @staticmethod
-    def _maximum_profitable_cover_price(avg_price: Decimal) -> Decimal:
+    def _minimum_required_profit_amount(
+        avg_price: Decimal,
+        quantity: Decimal,
+        min_profit_amount: Decimal | float | int,
+    ) -> Decimal:
         buffer_pct = Decimal(str(settings.min_exit_profit_pct)) / Decimal("100")
-        return avg_price * (Decimal("1") - buffer_pct)
+        pct_profit_amount = avg_price * quantity * buffer_pct
+        configured_amount = TradeExecutionService._coerce_non_negative_decimal(min_profit_amount)
+        return max(pct_profit_amount, configured_amount)
 
     def _execute_buy(
         self,
@@ -202,6 +212,7 @@ class TradeExecutionService:
         risk: RiskController,
         notifier: ServerChanNotifier,
         *,
+        min_profit_amount: Decimal | float | int = Decimal("0"),
         engine_snapshot: _EngineSnapshot | None = None,
         restore_engine_snapshot: Callable[[_EngineSnapshot], None] | None = None,
         notify_risk_event: _NotifyRiskEvent | None = None,
@@ -216,13 +227,20 @@ class TradeExecutionService:
         if price <= 0:
             logger.warning("SELL: price <= 0, price=%s", price)
             return None
-        min_exit_price = self._minimum_profitable_exit_price(long_pos.avg_price)
-        if price < min_exit_price:
+        required_profit = self._minimum_required_profit_amount(
+            long_pos.avg_price,
+            long_pos.quantity,
+            min_profit_amount,
+        )
+        expected_profit = (price - long_pos.avg_price) * long_pos.quantity
+        if expected_profit < required_profit:
             logger.info(
-                "SELL skipped: price=%s avg_price=%s min_exit_price=%s",
+                "SELL skipped: price=%s avg_price=%s quantity=%s expected_profit=%s required_profit=%s",
                 price,
                 long_pos.avg_price,
-                min_exit_price,
+                long_pos.quantity,
+                expected_profit,
+                required_profit,
             )
             return OrderStatus("", _SKIPPED_ORDER_STATUS)
 
@@ -308,6 +326,7 @@ class TradeExecutionService:
         risk: RiskController,
         notifier: ServerChanNotifier,
         *,
+        min_profit_amount: Decimal | float | int = Decimal("0"),
         engine_snapshot: _EngineSnapshot | None = None,
         restore_engine_snapshot: Callable[[_EngineSnapshot], None] | None = None,
         notify_risk_event: _NotifyRiskEvent | None = None,
@@ -322,13 +341,20 @@ class TradeExecutionService:
         if price <= 0:
             logger.warning("BUY_TO_COVER: price <= 0, price=%s", price)
             return None
-        max_cover_price = self._maximum_profitable_cover_price(pos.avg_price)
-        if price > max_cover_price:
+        required_profit = self._minimum_required_profit_amount(
+            pos.avg_price,
+            pos.quantity,
+            min_profit_amount,
+        )
+        expected_profit = (pos.avg_price - price) * pos.quantity
+        if expected_profit < required_profit:
             logger.info(
-                "BUY_TO_COVER skipped: price=%s avg_price=%s max_cover_price=%s",
+                "BUY_TO_COVER skipped: price=%s avg_price=%s quantity=%s expected_profit=%s required_profit=%s",
                 price,
                 pos.avg_price,
-                max_cover_price,
+                pos.quantity,
+                expected_profit,
+                required_profit,
             )
             return OrderStatus("", _SKIPPED_ORDER_STATUS)
 

@@ -129,11 +129,13 @@ class TestDataAggregator:
             position_quantity=18.0,
             position_avg_price=255.942,
             unrealized_pnl_pct=-13.34,
+            min_profit_amount=10.0,
         )
 
         assert "当前持仓方向: LONG" in prompt
         assert "当前持仓数量: 18.0" in prompt
         assert "持仓成本价: 255.94" in prompt
+        assert "单笔最低盈利金额: 10.00" in prompt
         assert "浮动盈亏比例: -13.34%" in prompt
         assert "不要仅按当前价格" in prompt
 
@@ -317,13 +319,20 @@ def test_preview_endpoint_uses_payload_without_saving(monkeypatch) -> None:
 
     response = client.post(
         "/api/strategy/llm-interval/preview",
-        json={"symbol": " aapl.us ", "market": "US", "current_buy_low": 0, "current_sell_high": 0},
+        json={
+            "symbol": " aapl.us ",
+            "market": "US",
+            "current_buy_low": 0,
+            "current_sell_high": 0,
+            "min_profit_amount": 7.5,
+        },
     )
 
     assert response.status_code == 200
     assert response.json()["analysis"] == "preview"
     assert captured["symbol"] == "AAPL.US"
     assert captured["market"] == "US"
+    assert captured["min_profit_amount"] == 7.5
 
 
 def test_preview_endpoint_requires_api_key_in_production(monkeypatch) -> None:

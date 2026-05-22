@@ -51,6 +51,7 @@ def _ensure_strategy_config_llm_columns(db_engine: Engine) -> None:
 
     columns = {column["name"] for column in inspector.get_columns("strategy_config")}
     missing_columns = {
+        "min_profit_amount": "FLOAT DEFAULT 0 NOT NULL",
         "auto_interval_enabled": "BOOLEAN DEFAULT 0 NOT NULL",
         "llm_interval_minutes": "INTEGER DEFAULT 240 NOT NULL",
         "llm_suggested_buy_low": "FLOAT",

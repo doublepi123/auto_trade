@@ -5,6 +5,7 @@ export interface StrategyConfig {
   buy_low: number
   sell_high: number
   short_selling: boolean
+  min_profit_amount: number
   max_daily_loss: number
   max_consecutive_losses: number
   llm_interval_minutes: number
@@ -99,6 +100,7 @@ export interface LLMPreviewAnalyzeRequest {
   current_price?: number | null
   current_buy_low?: number | null
   current_sell_high?: number | null
+  min_profit_amount?: number | null
   short_selling: boolean
 }
 

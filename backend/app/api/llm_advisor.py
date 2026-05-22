@@ -63,6 +63,7 @@ def preview_llm_interval(payload: LLMPreviewAnalyzeRequest) -> LLMAnalyzeRespons
         current_buy_low=payload.current_buy_low or 0.0,
         current_sell_high=payload.current_sell_high or 0.0,
         short_selling=payload.short_selling,
+        min_profit_amount=payload.min_profit_amount or 0.0,
     )
     if not result["success"]:
         return LLMAnalyzeResponse(success=False, applied=False, reason=result.get("error", "Unknown error"))
@@ -108,6 +109,7 @@ def analyze_llm_interval(
         position_quantity=float(position_context["quantity"]),
         position_avg_price=float(position_context["avg_price"]),
         unrealized_pnl_pct=float(position_context["unrealized_pnl_pct"]),
+        min_profit_amount=config.min_profit_amount,
         recent_prices=recent_price_context() if callable(recent_price_context) else [],
         recent_analysis=build_recent_analysis_context(config),
         force=payload.force,

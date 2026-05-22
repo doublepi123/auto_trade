@@ -65,12 +65,14 @@ class TestAPI:
             "short_selling": False,
             "max_daily_loss": 5000.0,
             "max_consecutive_losses": 3,
+            "min_profit_amount": 8.5,
         })
         assert resp.status_code == 200
         data = resp.json()
         assert data["symbol"] == "AAPL.US"
         assert data["buy_low"] == 100.0
         assert data["sell_high"] == 200.0
+        assert data["min_profit_amount"] == 8.5
         assert data["llm_interval_minutes"] == 240
         assert "sct_key" not in data
 
@@ -118,6 +120,18 @@ class TestAPI:
             "buy_low": 100.0,
             "sell_high": 200.0,
             "llm_interval_minutes": 0,
+        })
+
+        assert resp.status_code == 422
+
+    def test_update_strategy_rejects_negative_min_profit_amount(self) -> None:
+        _clean_strategy()
+        resp = client.put("/api/strategy", json={
+            "symbol": "AAPL.US",
+            "market": "US",
+            "buy_low": 100.0,
+            "sell_high": 200.0,
+            "min_profit_amount": -1,
         })
 
         assert resp.status_code == 422

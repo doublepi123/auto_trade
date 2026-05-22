@@ -214,6 +214,7 @@ class DataAggregator:
         position_quantity: float = 0.0,
         position_avg_price: float = 0.0,
         unrealized_pnl_pct: float = 0.0,
+        min_profit_amount: float = 0.0,
         recent_prices: list[dict[str, Any]] | None = None,
         recent_analysis: dict[str, Any] | None = None,
     ) -> str:
@@ -244,6 +245,7 @@ class DataAggregator:
 - 当前 buy_low: {current_buy_low:.2f}
 - 当前 sell_high: {current_sell_high:.2f}
 - 允许做空: {short_selling}
+- 单笔最低盈利金额: {min_profit_amount:.2f}
 
 ## 市场数据（最近 7 天日 K 线）
 {ohlcv_table}
@@ -281,4 +283,5 @@ class DataAggregator:
 5. 区间宽度应基于 ATR 尽量收窄，促进高频交易
 6. FLAT 状态可参考当前价格和 ATR；已有持仓时必须结合持仓成本价、持仓数量和浮动盈亏设计区间，不要仅按当前价格 ±1% 滚动追价
 7. LONG 状态下，buy_low 是加仓触发价，应结合成本价和回撤幅度；sell_high 应优先考虑持仓成本价，不要在未说明止损的情况下长期低于成本价
-8. 必须综合最近5分钟价格走势、当前价格、持仓成本和最近一次LLM分析结果；如果最新价格已明显偏离旧分析，请说明维持或调整区间的理由"""
+8. 必须综合最近5分钟价格走势、当前价格、持仓成本和最近一次LLM分析结果；如果最新价格已明显偏离旧分析，请说明维持或调整区间的理由
+9. 有持仓时，建议退出价格需要让预期毛盈利覆盖单笔最低盈利金额，避免交易频率过高导致手续费吞噬收益"""

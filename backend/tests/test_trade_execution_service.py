@@ -266,3 +266,53 @@ class TestTradeExecutionServiceBasics:
         assert status is not None
         assert status.status == "SKIPPED"
         broker.submit_limit_order.assert_not_called()
+
+    def test_execute_sell_skips_when_expected_profit_below_min_amount(self, svc: TradeExecutionService, monkeypatch) -> None:
+        from app.config import settings
+        from app.core.broker import Position, Quote
+        from app.core.risk import RiskController
+        from app.core.notify import ServerChanNotifier
+
+        monkeypatch.setattr(settings, "min_exit_profit_pct", 0.0)
+        broker = MagicMock()
+        broker.get_positions.return_value = [Position("NVDA.US", "LONG", Decimal("10"), Decimal("220"))]
+
+        status = svc.execute(
+            "SELL",
+            "NVDA.US",
+            Quote("NVDA.US", 220.4, 220.39, 220.41, ""),
+            broker,
+            RiskController(),
+            ServerChanNotifier(""),
+            "USD",
+            min_profit_amount=Decimal("5"),
+        )
+
+        assert status is not None
+        assert status.status == "SKIPPED"
+        broker.submit_limit_order.assert_not_called()
+
+    def test_execute_buy_to_cover_skips_when_expected_profit_below_min_amount(self, svc: TradeExecutionService, monkeypatch) -> None:
+        from app.config import settings
+        from app.core.broker import Position, Quote
+        from app.core.risk import RiskController
+        from app.core.notify import ServerChanNotifier
+
+        monkeypatch.setattr(settings, "min_exit_profit_pct", 0.0)
+        broker = MagicMock()
+        broker.get_positions.return_value = [Position("NVDA.US", "SHORT", Decimal("10"), Decimal("220"))]
+
+        status = svc.execute(
+            "BUY_TO_COVER",
+            "NVDA.US",
+            Quote("NVDA.US", 219.7, 219.69, 219.71, ""),
+            broker,
+            RiskController(),
+            ServerChanNotifier(""),
+            "USD",
+            min_profit_amount=Decimal("5"),
+        )
+
+        assert status is not None
+        assert status.status == "SKIPPED"
+        broker.submit_limit_order.assert_not_called()

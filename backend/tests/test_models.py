@@ -44,6 +44,7 @@ class TestModels:
             assert result.symbol == "AAPL.US"
             assert result.buy_low == 100.0
             assert result.sell_high == 200.0
+            assert result.min_profit_amount == 0.0
             assert result.updated_at is not None
         finally:
             db.close()

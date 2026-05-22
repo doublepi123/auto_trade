@@ -26,6 +26,7 @@ class StrategyConfig(Base):
     buy_low: Mapped[float] = mapped_column(Float, default=0.0)
     sell_high: Mapped[float] = mapped_column(Float, default=0.0)
     short_selling: Mapped[bool] = mapped_column(Boolean, default=False)
+    min_profit_amount: Mapped[float] = mapped_column(Float, default=0.0)
     max_daily_loss: Mapped[float] = mapped_column(Float, default=5000.0)
     max_consecutive_losses: Mapped[int] = mapped_column(Integer, default=3)
     sct_key: Mapped[str] = mapped_column(String(200), default="")

@@ -47,13 +47,16 @@ class TestStrategyService:
             "symbol": "AAPL.US",
             "buy_low": 100.0,
             "sell_high": 200.0,
+            "min_profit_amount": 6.5,
         })
         assert updated.symbol == "AAPL.US"
         assert updated.buy_low == 100.0
         assert updated.sell_high == 200.0
+        assert updated.min_profit_amount == 6.5
 
         config = svc.get_config()
         assert config.symbol == "AAPL.US"
+        assert config.min_profit_amount == 6.5
         db.close()
 
     def test_get_runtime_state_defaults(self) -> None:

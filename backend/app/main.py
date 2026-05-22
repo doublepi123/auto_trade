@@ -73,6 +73,7 @@ async def _llm_analysis_cron() -> None:
                     short_selling=config.short_selling,
                     current_position=runner.engine.state.value if runner.engine else "flat",
                     recent_trades=[],
+                    min_profit_amount=config.min_profit_amount,
                     recent_prices=runner.recent_price_context(),
                     recent_analysis=build_recent_analysis_context(config),
                     force=True,

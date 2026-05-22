@@ -112,6 +112,9 @@
         <el-form-item label="做空">
           <el-switch v-model="form.short_selling" />
         </el-form-item>
+        <el-form-item label="单笔最低盈利金额">
+          <el-input-number v-model="form.min_profit_amount" :min="0" :precision="2" :step="0.01" />
+        </el-form-item>
         <el-form-item label="单日最大亏损">
           <el-input-number v-model="form.max_daily_loss" :min="1" :precision="2" />
         </el-form-item>
@@ -145,6 +148,7 @@ interface StrategyForm {
   buy_low: number
   sell_high: number
   short_selling: boolean
+  min_profit_amount: number
   max_daily_loss: number
   max_consecutive_losses: number
   llm_interval_minutes: number
@@ -159,6 +163,7 @@ const { form, loading, saving, saved, error, isDirty, load, save } = useFormStat
     buy_low: 0,
     sell_high: 0,
     short_selling: false,
+    min_profit_amount: 0,
     max_daily_loss: 5000,
     max_consecutive_losses: 3,
     llm_interval_minutes: 240,
@@ -171,6 +176,7 @@ const { form, loading, saving, saved, error, isDirty, load, save } = useFormStat
       buy_low: s.buy_low,
       sell_high: s.sell_high,
       short_selling: s.short_selling,
+      min_profit_amount: s.min_profit_amount,
       max_daily_loss: s.max_daily_loss,
       max_consecutive_losses: s.max_consecutive_losses,
       llm_interval_minutes: s.llm_interval_minutes,
@@ -186,6 +192,7 @@ const { form, loading, saving, saved, error, isDirty, load, save } = useFormStat
     if (!previous || data.buy_low !== previous.buy_low) patch.buy_low = data.buy_low
     if (!previous || data.sell_high !== previous.sell_high) patch.sell_high = data.sell_high
     if (!previous || data.short_selling !== previous.short_selling) patch.short_selling = data.short_selling
+    if (!previous || data.min_profit_amount !== previous.min_profit_amount) patch.min_profit_amount = data.min_profit_amount
     if (!previous || data.max_daily_loss !== previous.max_daily_loss) patch.max_daily_loss = data.max_daily_loss
     if (!previous || data.max_consecutive_losses !== previous.max_consecutive_losses) patch.max_consecutive_losses = data.max_consecutive_losses
     if (!previous || data.llm_interval_minutes !== previous.llm_interval_minutes) patch.llm_interval_minutes = data.llm_interval_minutes
@@ -280,6 +287,7 @@ const handlePreview = async () => {
       market: previewMarket.value,
       current_buy_low: form.value.buy_low,
       current_sell_high: form.value.sell_high,
+      min_profit_amount: form.value.min_profit_amount,
       short_selling: previewShortSelling.value,
     })
     previewResult.value = result

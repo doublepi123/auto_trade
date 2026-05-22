@@ -63,6 +63,7 @@ class LLMAdvisorService:
         position_quantity: float = 0.0,
         position_avg_price: float = 0.0,
         unrealized_pnl_pct: float = 0.0,
+        min_profit_amount: float = 0.0,
         recent_prices: list[dict[str, Any]] | None = None,
         recent_analysis: dict[str, Any] | None = None,
         force: bool = False,
@@ -109,6 +110,7 @@ class LLMAdvisorService:
             position_quantity=position_quantity,
             position_avg_price=position_avg_price,
             unrealized_pnl_pct=unrealized_pnl_pct,
+            min_profit_amount=min_profit_amount,
             recent_prices=recent_prices,
             recent_analysis=recent_analysis,
         )
@@ -154,6 +156,7 @@ class LLMAdvisorService:
         current_buy_low: float,
         current_sell_high: float,
         short_selling: bool,
+        min_profit_amount: float = 0.0,
     ) -> dict[str, Any]:
         """Run LLM analysis without throttling, recording, or applying suggestions."""
         global _LAST_PREVIEW_TIMESTAMP
@@ -198,6 +201,7 @@ class LLMAdvisorService:
             bb_lower=market_data.get("bb_lower", 0.0),
             current_position="FLAT",
             recent_trades=[],
+            min_profit_amount=min_profit_amount,
         )
 
         try:
