@@ -230,17 +230,18 @@ class TestRuntimeStateService:
         assert len([e for e in events if hasattr(e, 'event_type')]) >= 0
 
     def test_load_resets_daily_pnl_when_day_changed(self) -> None:
-        from datetime import date, timedelta
+        from datetime import datetime, timedelta, timezone
 
         self._cleanup()
         db = self._get_db()
         svc = StrategyService(db)
+        utc_day = datetime.now(timezone.utc).date()
         svc.update_config({"symbol": "AAPL.US", "market": "US", "buy_low": 100.0, "sell_high": 200.0})
         svc.update_runtime_state(
             engine_state="flat",
             daily_pnl=-500.0,
             consecutive_losses=3,
-            daily_pnl_date=date.today() - timedelta(days=1),
+            daily_pnl_date=utc_day - timedelta(days=1),
         )
         db.close()
 
@@ -256,17 +257,18 @@ class TestRuntimeStateService:
         assert risk.consecutive_losses == 0
 
     def test_load_keeps_daily_pnl_when_same_day(self) -> None:
-        from datetime import date
+        from datetime import datetime, timezone
 
         self._cleanup()
         db = self._get_db()
         svc = StrategyService(db)
+        utc_day = datetime.now(timezone.utc).date()
         svc.update_config({"symbol": "AAPL.US", "market": "US", "buy_low": 100.0, "sell_high": 200.0})
         svc.update_runtime_state(
             engine_state="flat",
             daily_pnl=-500.0,
             consecutive_losses=3,
-            daily_pnl_date=date.today(),
+            daily_pnl_date=utc_day,
         )
         db.close()
 
@@ -301,6 +303,6 @@ class TestRuntimeStateService:
         state = svc.get_runtime_state()
         db.close()
 
-        from datetime import date
+        from datetime import datetime, timezone
         assert state.daily_pnl == -25.0
-        assert state.daily_pnl_date == date.today()
+        assert state.daily_pnl_date == datetime.now(timezone.utc).date()

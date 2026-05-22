@@ -22,7 +22,7 @@ class RiskController:
     def __init__(self, config: RiskConfig | None = None) -> None:
         self.config = config or RiskConfig()
         self.daily_pnl: float = 0.0
-        self._today: date = date.today()
+        self._today: date = _current_risk_day()
         self.consecutive_losses: int = 0
         self.kill_switch: bool = False
         self.paused: bool = False
@@ -48,7 +48,7 @@ class RiskController:
             self.consecutive_losses = 0
 
     def _check_limits(self) -> RiskResult:
-        today = date.today()
+        today = _current_risk_day()
         if today != self._today:
             self.daily_pnl = 0.0
             self.consecutive_losses = 0
@@ -64,7 +64,7 @@ class RiskController:
 
     def record_trade(self, pnl: float) -> None:
         with self._lock:
-            today = date.today()
+            today = _current_risk_day()
             if today != self._today:
                 self.daily_pnl = 0.0
                 self.consecutive_losses = 0
@@ -75,6 +75,12 @@ class RiskController:
                 self.consecutive_losses += 1
             else:
                 self.consecutive_losses = 0
+
+    def replace_daily_pnl(self, daily_pnl: float, consecutive_losses: int, pnl_date: date | None = None) -> None:
+        with self._lock:
+            self.daily_pnl = daily_pnl
+            self.consecutive_losses = max(0, consecutive_losses)
+            self._today = pnl_date or _current_risk_day()
 
     def pause(
         self,
@@ -129,7 +135,7 @@ class RiskController:
         with self._lock:
             if persisted_date is not None:
                 self._today = persisted_date
-            today = date.today()
+            today = _current_risk_day()
             if today != self._today:
                 self.daily_pnl = 0.0
                 self.consecutive_losses = 0
@@ -154,3 +160,7 @@ class RiskController:
     def pause_auto_resumable(self) -> bool:
         with self._lock:
             return self._pause_auto_resumable
+
+
+def _current_risk_day() -> date:
+    return datetime.now(timezone.utc).date()

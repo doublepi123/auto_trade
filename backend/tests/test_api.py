@@ -1,6 +1,6 @@
 import os
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, time as datetime_time, timezone
 from types import SimpleNamespace
 
 os.environ["AUTO_TRADE_DATABASE_URL"] = "sqlite:///data/test_api.db"
@@ -13,8 +13,9 @@ from app.api import strategy as strategy_api
 from app.api import trade as trade_api
 from app import database
 from app.database import engine as db_engine, SessionLocal
-from app.models import Base, CredentialConfig, LLMInteraction, OrderRecord, RuntimeStateSnapshot, StrategyConfig, TradeEvent
+from app.models import Base, CredentialConfig, LLMInteraction, OrderRecord, RuntimeState, RuntimeStateSnapshot, StrategyConfig, TradeEvent
 from app.main import app
+from app.services.strategy_service import StrategyService
 
 
 Base.metadata.create_all(bind=db_engine)
@@ -56,6 +57,13 @@ def _clean_status_history() -> None:
     db = SessionLocal()
     db.query(RuntimeStateSnapshot).delete()
     db.query(OrderRecord).delete()
+    db.commit()
+    db.close()
+
+
+def _clean_runtime_state() -> None:
+    db = SessionLocal()
+    db.query(RuntimeState).delete()
     db.commit()
     db.close()
 
@@ -232,6 +240,49 @@ class TestAPI:
         data = resp.json()
         assert "engine_state" in data
 
+    def test_get_status_recomputes_daily_pnl_from_filled_orders(self) -> None:
+        _clean_orders()
+        _clean_runtime_state()
+        trade_day = datetime.now(timezone.utc).date()
+        first_fill = datetime.combine(trade_day, datetime_time(10, 0), tzinfo=timezone.utc)
+        second_fill = datetime.combine(trade_day, datetime_time(10, 5), tzinfo=timezone.utc)
+        db = SessionLocal()
+        StrategyService(db).update_runtime_state(daily_pnl=999.0, daily_pnl_date=trade_day, consecutive_losses=3)
+        db.add_all([
+            OrderRecord(
+                broker_order_id="status-buy",
+                symbol="NVDA.US",
+                side="BUY",
+                quantity=2,
+                price=100,
+                executed_quantity=2,
+                executed_price=100,
+                status="FILLED",
+                created_at=first_fill,
+                filled_at=first_fill,
+            ),
+            OrderRecord(
+                broker_order_id="status-sell",
+                symbol="NVDA.US",
+                side="SELL",
+                quantity=2,
+                price=103,
+                executed_quantity=2,
+                executed_price=103,
+                status="FILLED",
+                created_at=second_fill,
+                filled_at=second_fill,
+            ),
+        ])
+        db.commit()
+        db.close()
+
+        resp = client.get("/api/status")
+
+        assert resp.status_code == 200
+        assert resp.json()["daily_pnl"] == 6.0
+        assert resp.json()["consecutive_losses"] == 0
+
     def test_status_history_returns_points_and_trade_markers(self) -> None:
         _clean_status_history()
         db = SessionLocal()
@@ -268,7 +319,7 @@ class TestAPI:
         db.commit()
         db.close()
 
-        resp = client.get("/api/status/history?limit=20")
+        resp = client.get("/api/status/history?from=2026-05-22T09:59:00Z&to=2026-05-22T10:02:00Z&limit=20")
 
         assert resp.status_code == 200
         data = resp.json()

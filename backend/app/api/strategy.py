@@ -13,6 +13,7 @@ from app.database import get_db
 from app.models import OrderRecord
 from app.runner import AppRunner, get_runner
 from app.schemas import StatusHistoryPoint, StatusHistoryResponse, StatusResponse, StrategyConfigSchema, StrategyMergedSchema, StrategyResponse, TradeSignalMarker
+from app.services.daily_pnl_service import DailyPnlService
 from app.services.runtime_state_service import RuntimeStateService
 from app.services.strategy_service import StrategyService
 
@@ -73,6 +74,17 @@ def put_strategy(payload: StrategyConfigSchema, db: Session = Depends(get_db)) -
 def get_status(db: Session = Depends(get_db)) -> StatusResponse:
     svc = StrategyService(db)
     state = svc.get_runtime_state()
+    pnl_result = DailyPnlService(db).calculate()
+    if (
+        abs(state.daily_pnl - pnl_result.realized_pnl) > 1e-9
+        or state.consecutive_losses != pnl_result.consecutive_losses
+        or state.daily_pnl_date != pnl_result.trade_day
+    ):
+        state = svc.update_runtime_state(
+            daily_pnl=pnl_result.realized_pnl,
+            daily_pnl_date=pnl_result.trade_day,
+            consecutive_losses=pnl_result.consecutive_losses,
+        )
     response = StatusResponse.model_validate(state)
     runner = get_runner()
     response.runner_running = runner.is_running

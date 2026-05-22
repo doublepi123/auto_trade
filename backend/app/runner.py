@@ -17,6 +17,7 @@ from app.core.notify import ServerChanNotifier
 from app.core.risk import RiskConfig, RiskController
 from app.database import SessionLocal
 from app.models import OrderRecord
+from app.services.daily_pnl_service import DailyPnlService
 from app.services.credentials_service import CredentialsService, PlainCredentials
 from app.services.runtime_state_service import RuntimeStateService
 from app.services.strategy_service import StrategyService
@@ -76,6 +77,7 @@ class AppRunner:
             self._apply_credentials(self._load_credentials(), resubscribe=False)
 
         self.sync_today_orders_from_broker(force=True)
+        self._sync_risk_from_order_ledger()
         with self._db_session() as db:
             self._pause_if_unresolved_live_order_exists(db)
 
@@ -633,7 +635,43 @@ class AppRunner:
                     changed += 1
             if changed:
                 db.commit()
+        self._sync_risk_from_order_ledger()
         return changed
+
+    def _sync_risk_from_order_ledger(self) -> bool:
+        try:
+            with self._db_session() as db:
+                result = DailyPnlService(db).calculate()
+        except Exception:
+            logger.exception("failed to sync realized daily pnl from order ledger")
+            return False
+
+        with self._state_lock:
+            old_daily_pnl = self.risk.daily_pnl
+            old_consecutive_losses = self.risk.consecutive_losses
+            old_daily_pnl_date = self.risk.daily_pnl_date
+            changed = (
+                abs(old_daily_pnl - result.realized_pnl) > 1e-9
+                or old_consecutive_losses != result.consecutive_losses
+                or old_daily_pnl_date != result.trade_day
+            )
+            if not changed:
+                return False
+            self.risk.replace_daily_pnl(
+                result.realized_pnl,
+                result.consecutive_losses,
+                result.trade_day,
+            )
+
+        with self._db_session() as db:
+            self._state_svc.persist_risk(db, self.risk)
+        logger.info(
+            "synced realized daily pnl from order ledger: pnl=%s consecutive_losses=%s trades=%s",
+            result.realized_pnl,
+            result.consecutive_losses,
+            len(result.trades),
+        )
+        return True
 
     def _upsert_broker_order(self, db, broker_order: object) -> bool:
         order_id = str(getattr(broker_order, "broker_order_id", "") or "")
