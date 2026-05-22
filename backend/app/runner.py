@@ -345,7 +345,21 @@ class AppRunner:
             if mapped_action is None:
                 return {"executed": False, "status": "UNKNOWN_ACTION", "order_id": None, "action": action}
             if self._trade_svc.has_pending_order:
-                return {"executed": False, "status": "PENDING_ORDER_EXISTS", "order_id": None, "action": mapped_action}
+                cancel_status = self._trade_svc.cancel_pending_order(
+                    restore_engine_snapshot=self._restore_engine_snapshot,
+                )
+                replaced_order_id = cancel_status.broker_order_id or None
+                if cancel_status.status not in {"CANCELLED", "NO_PENDING_ORDER"}:
+                    return {
+                        "executed": False,
+                        "status": cancel_status.status,
+                        "order_id": replaced_order_id,
+                        "action": mapped_action,
+                    }
+                result = self._execute_llm_trade_action(mapped_action, decision.get("order_price"))
+                if replaced_order_id is not None:
+                    result["replaced_order_id"] = replaced_order_id
+                return result
             return self._execute_llm_trade_action(mapped_action, decision.get("order_price"))
         finally:
             with self._state_lock:

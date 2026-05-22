@@ -221,6 +221,8 @@ class TestDataAggregator:
         assert '"order_action"' in prompt
         assert "BUY_NOW" in prompt
         assert "CANCEL_REPLACE" in prompt
+        assert "先挂单" in prompt
+        assert "撤旧单再重挂" in prompt
 
 
 class TestLLMAdvisorService:
