@@ -1,6 +1,6 @@
 describe('Strategy status refresh', () => {
   it('refreshes LLM interval status after saving strategy changes', () => {
-    let intervalMinutes = 240
+    let intervalMinutes = 2
 
     cy.intercept('GET', '/api/strategy', {
       body: {
@@ -10,6 +10,8 @@ describe('Strategy status refresh', () => {
         buy_low: 100,
         sell_high: 200,
         short_selling: false,
+        min_profit_amount: 0,
+        auto_resume_minutes: 3,
         max_daily_loss: 5000,
         max_consecutive_losses: 3,
         llm_interval_minutes: intervalMinutes,
@@ -55,6 +57,8 @@ describe('Strategy status refresh', () => {
           buy_low: 100,
           sell_high: 200,
           short_selling: false,
+          min_profit_amount: 0,
+          auto_resume_minutes: 3,
           max_daily_loss: 5000,
           max_consecutive_losses: 3,
           llm_interval_minutes: intervalMinutes,
@@ -64,12 +68,14 @@ describe('Strategy status refresh', () => {
     }).as('saveStrategy')
 
     cy.visit('/#/strategy')
-    cy.contains('刷新间隔：240 分钟').should('be.visible')
+    cy.contains('刷新间隔：2 分钟').should('be.visible')
     cy.contains('.el-form-item', 'LLM刷新间隔（分钟）')
-      .find('.el-input-number__increase')
-      .click()
-    cy.contains('button', '保存').click()
+      .find('input')
+      .clear()
+      .type('3')
+      .blur()
+    cy.contains('button', '保存').should('not.be.disabled').click()
     cy.wait('@saveStrategy')
-    cy.contains('刷新间隔：241 分钟').should('be.visible')
+    cy.contains('刷新间隔：3 分钟').should('be.visible')
   })
 })

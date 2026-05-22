@@ -1,6 +1,7 @@
 import asyncio
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -343,6 +344,66 @@ class TestAppRunner:
         assert broker.submissions == 1
         assert runner.risk.paused is True
         assert runner.engine.state == EngineState.FLAT
+
+    def test_rate_limit_submit_exception_marks_pause_auto_resumable(self) -> None:
+        class Broker:
+            def __init__(self) -> None:
+                self.submissions = 0
+
+            def estimate_margin_max_quantity(self, _symbol, _side, _price, _currency=None) -> Decimal:
+                return Decimal("10")
+
+            def submit_limit_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal) -> OrderResult:
+                self.submissions += 1
+                raise RuntimeError("429 too many requests")
+
+        runner = AppRunner()
+        broker = Broker()
+        runner.broker = broker
+        runner._running = True
+        runner.engine.params = StrategyParams(symbol="AAPL.US", buy_low=100.0, sell_high=200.0)
+        runner.notifier = _NoopNotifier()
+        self._stub_trade_callbacks(runner)
+
+        runner._on_quote(Quote("AAPL.US", 99.0, 98.5, 99.5, ""))
+
+        assert runner.risk.paused is True
+        assert runner.risk.pause_auto_resumable is True
+        assert "429" in runner.risk.pause_reason
+
+    def test_auto_resume_transient_pause_after_configured_delay(self) -> None:
+        runner = AppRunner()
+        now = datetime(2026, 5, 22, 10, 3, tzinfo=timezone.utc)
+        paused_at = now - timedelta(minutes=3, seconds=1)
+        runner.engine.params = StrategyParams(
+            symbol="AAPL.US",
+            buy_low=100.0,
+            sell_high=200.0,
+            auto_resume_minutes=3,
+        )
+        runner.risk.pause("429 too many requests", auto_resumable=True, paused_at=paused_at)
+
+        resumed = runner._auto_resume_pause_if_due(now=now)
+
+        assert resumed is True
+        assert runner.risk.paused is False
+
+    def test_auto_resume_does_not_resume_manual_pause(self) -> None:
+        runner = AppRunner()
+        now = datetime(2026, 5, 22, 10, 3, tzinfo=timezone.utc)
+        paused_at = now - timedelta(minutes=10)
+        runner.engine.params = StrategyParams(
+            symbol="AAPL.US",
+            buy_low=100.0,
+            sell_high=200.0,
+            auto_resume_minutes=3,
+        )
+        runner.risk.pause("manual", auto_resumable=False, paused_at=paused_at)
+
+        resumed = runner._auto_resume_pause_if_due(now=now)
+
+        assert resumed is False
+        assert runner.risk.paused is True
 
     def test_paused_runner_updates_price_without_repeated_risk_notification(self) -> None:
         class Notifier:

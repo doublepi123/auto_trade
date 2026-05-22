@@ -17,6 +17,7 @@ from app.main import app
 
 Base.metadata.create_all(bind=db_engine)
 database._ensure_strategy_config_llm_columns(db_engine)
+database._ensure_runtime_state_daily_pnl_date_column(db_engine)
 
 client = TestClient(app)
 
@@ -47,6 +48,8 @@ class TestAPI:
         assert resp.status_code == 200
         data = resp.json()
         assert data["symbol"] == ""
+        assert data["llm_interval_minutes"] == 2
+        assert data["auto_resume_minutes"] == 3
         assert "sct_key" not in data
 
     def test_get_credentials_default(self) -> None:
@@ -66,6 +69,7 @@ class TestAPI:
             "max_daily_loss": 5000.0,
             "max_consecutive_losses": 3,
             "min_profit_amount": 8.5,
+            "auto_resume_minutes": 4,
         })
         assert resp.status_code == 200
         data = resp.json()
@@ -73,7 +77,8 @@ class TestAPI:
         assert data["buy_low"] == 100.0
         assert data["sell_high"] == 200.0
         assert data["min_profit_amount"] == 8.5
-        assert data["llm_interval_minutes"] == 240
+        assert data["auto_resume_minutes"] == 4
+        assert data["llm_interval_minutes"] == 2
         assert "sct_key" not in data
 
     def test_update_strategy_allows_llm_interval_minutes(self) -> None:
@@ -132,6 +137,18 @@ class TestAPI:
             "buy_low": 100.0,
             "sell_high": 200.0,
             "min_profit_amount": -1,
+        })
+
+        assert resp.status_code == 422
+
+    def test_update_strategy_rejects_negative_auto_resume_minutes(self) -> None:
+        _clean_strategy()
+        resp = client.put("/api/strategy", json={
+            "symbol": "AAPL.US",
+            "market": "US",
+            "buy_low": 100.0,
+            "sell_high": 200.0,
+            "auto_resume_minutes": -1,
         })
 
         assert resp.status_code == 422

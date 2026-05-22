@@ -28,6 +28,7 @@ class StrategyConfigSchema(BaseModel):
     sell_high: Optional[float] = Field(default=None, gt=0)
     short_selling: bool = Field(default=False)
     min_profit_amount: Optional[float] = Field(default=None, ge=0)
+    auto_resume_minutes: Optional[int] = Field(default=None, ge=0, le=1440)
     max_daily_loss: float = Field(default=5000.0, gt=0)
     max_consecutive_losses: int = Field(default=3, ge=1)
     llm_interval_minutes: Optional[int] = Field(default=None, ge=1, le=1440)
@@ -62,9 +63,10 @@ class StrategyMergedSchema(BaseModel):
     sell_high: Optional[float] = Field(default=None)
     short_selling: bool = Field(default=False)
     min_profit_amount: float = Field(default=0.0, ge=0)
+    auto_resume_minutes: int = Field(default=3, ge=0, le=1440)
     max_daily_loss: float = Field(default=5000.0, gt=0)
     max_consecutive_losses: int = Field(default=3, ge=1)
-    llm_interval_minutes: int = Field(default=240, ge=1, le=1440)
+    llm_interval_minutes: int = Field(default=2, ge=1, le=1440)
 
     @field_validator("market")
     @classmethod
@@ -120,6 +122,7 @@ class StrategyResponse(BaseModel):
     sell_high: float
     short_selling: bool
     min_profit_amount: float
+    auto_resume_minutes: int
     max_daily_loss: float
     max_consecutive_losses: int
     llm_interval_minutes: int

@@ -142,6 +142,7 @@ class AppRunner:
                     sell_high=config.sell_high,
                     short_selling=config.short_selling,
                     min_profit_amount=config.min_profit_amount,
+                    auto_resume_minutes=config.auto_resume_minutes,
                 )
                 self.risk.config = RiskConfig(
                     max_daily_loss=config.max_daily_loss,
@@ -241,7 +242,10 @@ class AppRunner:
                 if engine_snapshot is not None:
                     self._restore_engine_snapshot(engine_snapshot)
                 reason = f"order execution failed: {exc}"
-                self.risk.pause(reason)
+                self.risk.pause(
+                    reason,
+                    auto_resumable=self._is_auto_resumable_pause_reason(reason),
+                )
                 try:
                     self._record_risk_event(reason)
                 except Exception:
@@ -394,6 +398,10 @@ class AppRunner:
             except Exception:
                 logger.exception("error reconciling pending orders")
             try:
+                self._auto_resume_pause_if_due()
+            except Exception:
+                logger.exception("error checking pause auto resume")
+            try:
                 self._refresh_quote_if_stale()
             except Exception:
                 logger.exception("error refreshing stale quote")
@@ -403,6 +411,45 @@ class AppRunner:
             except Exception:
                 logger.exception("error persisting state")
             time.sleep(5)
+
+    @staticmethod
+    def _is_auto_resumable_pause_reason(reason: str) -> bool:
+        normalized = reason.lower()
+        transient_markers = (
+            "429",
+            "rate limit",
+            "rate_limit",
+            "too many requests",
+            "too frequent",
+            "throttle",
+            "throttled",
+            "frequency",
+            "限流",
+            "频率",
+            "请求过于频繁",
+        )
+        return any(marker in normalized for marker in transient_markers)
+
+    def _auto_resume_pause_if_due(self, now: datetime | None = None) -> bool:
+        now = now or datetime.now(timezone.utc)
+        with self._state_lock:
+            if not self.risk.paused or self.risk.kill_switch:
+                return False
+            auto_resume_minutes = self.engine.params.auto_resume_minutes
+            paused_at = self.risk.paused_at
+            if auto_resume_minutes <= 0 or paused_at is None:
+                return False
+            if paused_at.tzinfo is None:
+                paused_at = paused_at.replace(tzinfo=timezone.utc)
+            if not self.risk.pause_auto_resumable:
+                return False
+            if now - paused_at < timedelta(minutes=auto_resume_minutes):
+                return False
+            reason = self.risk.pause_reason
+            self.risk.resume()
+        logger.info("auto-resumed trading after transient pause: %s", reason)
+        self._broadcast_status()
+        return True
 
     @staticmethod
     @contextmanager

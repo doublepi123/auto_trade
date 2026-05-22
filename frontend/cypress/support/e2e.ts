@@ -36,7 +36,8 @@ Cypress.Commands.add('stubApi', () => {
       id: 1, symbol: '', market: 'US', buy_low: 0, sell_high: 0,
       short_selling: false, max_daily_loss: 5000, max_consecutive_losses: 3,
       min_profit_amount: 0,
-      llm_interval_minutes: 240,
+      auto_resume_minutes: 3,
+      llm_interval_minutes: 2,
       updated_at: '2026-01-01T00:00:00Z',
     },
   }).as('getStrategy')
@@ -113,7 +114,8 @@ Cypress.Commands.add('stubApi', () => {
       id: 1, symbol: 'AAPL.US', market: 'US', buy_low: 100, sell_high: 200,
       short_selling: false, max_daily_loss: 5000, max_consecutive_losses: 3,
       min_profit_amount: 0,
-      llm_interval_minutes: 240,
+      auto_resume_minutes: 3,
+      llm_interval_minutes: 2,
       updated_at: '2026-01-01T00:00:00Z',
     },
   }).as('saveStrategy')

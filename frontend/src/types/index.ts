@@ -6,6 +6,7 @@ export interface StrategyConfig {
   sell_high: number
   short_selling: boolean
   min_profit_amount: number
+  auto_resume_minutes: number
   max_daily_loss: number
   max_consecutive_losses: number
   llm_interval_minutes: number

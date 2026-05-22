@@ -24,6 +24,7 @@ class StrategyParams:
     sell_high: float = 0.0
     short_selling: bool = False
     min_profit_amount: float = 0.0
+    auto_resume_minutes: int = 3
 
 
 @dataclass
@@ -138,4 +139,5 @@ class StrategyEngine:
                 "sell_high": self.params.sell_high,
                 "short_selling": self.params.short_selling,
                 "min_profit_amount": self.params.min_profit_amount,
+                "auto_resume_minutes": self.params.auto_resume_minutes,
             }

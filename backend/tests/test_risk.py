@@ -21,6 +21,32 @@ class TestRiskController:
         result = ctrl.check()
         assert result.approved is True
 
+    def test_pause_records_auto_resume_metadata(self) -> None:
+        from datetime import datetime, timezone
+
+        paused_at = datetime(2026, 5, 22, 10, 0, tzinfo=timezone.utc)
+        ctrl = RiskController()
+
+        ctrl.pause("rate limit", auto_resumable=True, paused_at=paused_at)
+
+        assert ctrl.paused is True
+        assert ctrl.pause_reason == "rate limit"
+        assert ctrl.pause_auto_resumable is True
+        assert ctrl.paused_at == paused_at
+
+    def test_restore_pause_metadata(self) -> None:
+        from datetime import datetime, timezone
+
+        paused_at = datetime(2026, 5, 22, 10, 0, tzinfo=timezone.utc)
+        ctrl = RiskController()
+
+        ctrl.restore_pause(True, "429 too many requests", paused_at, True)
+
+        assert ctrl.paused is True
+        assert ctrl.pause_reason == "429 too many requests"
+        assert ctrl.pause_auto_resumable is True
+        assert ctrl.paused_at == paused_at
+
     def test_kill_switch_rejected(self) -> None:
         ctrl = RiskController()
         ctrl.enable_kill_switch()

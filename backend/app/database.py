@@ -52,8 +52,9 @@ def _ensure_strategy_config_llm_columns(db_engine: Engine) -> None:
     columns = {column["name"] for column in inspector.get_columns("strategy_config")}
     missing_columns = {
         "min_profit_amount": "FLOAT DEFAULT 0 NOT NULL",
+        "auto_resume_minutes": "INTEGER DEFAULT 3 NOT NULL",
         "auto_interval_enabled": "BOOLEAN DEFAULT 0 NOT NULL",
-        "llm_interval_minutes": "INTEGER DEFAULT 240 NOT NULL",
+        "llm_interval_minutes": "INTEGER DEFAULT 2 NOT NULL",
         "llm_suggested_buy_low": "FLOAT",
         "llm_suggested_sell_high": "FLOAT",
         "llm_confidence_score": "FLOAT",
@@ -81,6 +82,14 @@ def _ensure_runtime_state_daily_pnl_date_column(db_engine: Engine) -> None:
     with db_engine.begin() as connection:
         if "daily_pnl_date" not in columns:
             connection.exec_driver_sql("ALTER TABLE runtime_state ADD COLUMN daily_pnl_date DATE")
+        if "pause_reason" not in columns:
+            connection.exec_driver_sql("ALTER TABLE runtime_state ADD COLUMN pause_reason TEXT DEFAULT '' NOT NULL")
+        if "paused_at" not in columns:
+            connection.exec_driver_sql("ALTER TABLE runtime_state ADD COLUMN paused_at DATETIME")
+        if "pause_auto_resumable" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE runtime_state ADD COLUMN pause_auto_resumable BOOLEAN DEFAULT 0 NOT NULL"
+            )
         connection.exec_driver_sql(
             "UPDATE runtime_state SET daily_pnl = 0, consecutive_losses = 0, daily_pnl_date = DATE('now') WHERE daily_pnl_date IS NULL"
         )

@@ -89,6 +89,7 @@ def test_init_db_adds_missing_strategy_llm_columns(tmp_path, monkeypatch) -> Non
         columns = {row[1] for row in db.exec_driver_sql("PRAGMA table_info(strategy_config)")}
     assert "auto_interval_enabled" in columns
     assert "min_profit_amount" in columns
+    assert "auto_resume_minutes" in columns
     assert "llm_interval_minutes" in columns
     assert "llm_last_analysis_at" in columns
     assert "llm_reject_reason" in columns
@@ -136,5 +137,8 @@ def test_init_db_adds_missing_runtime_state_daily_pnl_date_column(tmp_path, monk
     with engine.connect() as db:
         columns = {row[1] for row in db.exec_driver_sql("PRAGMA table_info(runtime_state)")}
     assert "daily_pnl_date" in columns
+    assert "pause_reason" in columns
+    assert "paused_at" in columns
+    assert "pause_auto_resumable" in columns
 
     Base.metadata.drop_all(bind=engine)

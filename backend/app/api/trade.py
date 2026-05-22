@@ -83,7 +83,7 @@ def start_runner(db: Session = Depends(get_db)) -> MessageResponse:
     if runner.risk.kill_switch:
         raise HTTPException(status_code=403, detail="Kill switch is active — disable it before starting")
     svc = StrategyService(db)
-    svc.update_runtime_state(paused=False)
+    svc.update_runtime_state(paused=False, pause_reason="", paused_at=None, pause_auto_resumable=False)
     started = runner.start()
     if not started:
         return MessageResponse(message="runner is already running or failed to start")
@@ -92,10 +92,16 @@ def start_runner(db: Session = Depends(get_db)) -> MessageResponse:
 
 @router.post("/control/stop", response_model=MessageResponse)
 def stop_runner(payload: ControlRequest, db: Session = Depends(get_db)) -> MessageResponse:
-    get_runner().risk.pause("manual")
+    runner = get_runner()
+    runner.risk.pause("manual")
     get_runner().stop()
     svc = StrategyService(db)
-    svc.update_runtime_state(paused=True)
+    svc.update_runtime_state(
+        paused=True,
+        pause_reason=runner.risk.pause_reason,
+        paused_at=runner.risk.paused_at,
+        pause_auto_resumable=runner.risk.pause_auto_resumable,
+    )
     return MessageResponse(message="runner stopped")
 
 
@@ -104,17 +110,23 @@ def pause_trading(
     payload: ControlRequest,
     db: Session = Depends(get_db),
 ) -> MessageResponse:
+    runner = get_runner()
+    runner.risk.pause(payload.reason)
     svc = StrategyService(db)
-    svc.update_runtime_state(paused=True)
-    get_runner().risk.pause(payload.reason)
+    svc.update_runtime_state(
+        paused=True,
+        pause_reason=runner.risk.pause_reason,
+        paused_at=runner.risk.paused_at,
+        pause_auto_resumable=runner.risk.pause_auto_resumable,
+    )
     return MessageResponse(message="trading paused")
 
 
 @router.post("/control/resume", response_model=MessageResponse)
 def resume_trading(db: Session = Depends(get_db)) -> MessageResponse:
-    svc = StrategyService(db)
-    svc.update_runtime_state(paused=False)
     get_runner().risk.resume()
+    svc = StrategyService(db)
+    svc.update_runtime_state(paused=False, pause_reason="", paused_at=None, pause_auto_resumable=False)
     return MessageResponse(message="trading resumed")
 
 
@@ -127,7 +139,13 @@ def kill_switch(
     runner.risk.pause(payload.reason)
     runner.risk.enable_kill_switch(payload.reason)
     svc = StrategyService(db)
-    svc.update_runtime_state(kill_switch=True, paused=True)
+    svc.update_runtime_state(
+        kill_switch=True,
+        paused=True,
+        pause_reason=runner.risk.pause_reason,
+        paused_at=runner.risk.paused_at,
+        pause_auto_resumable=runner.risk.pause_auto_resumable,
+    )
     return MessageResponse(message="kill switch activated — trading paused")
 
 

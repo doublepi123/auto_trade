@@ -9,6 +9,7 @@ describe('Strategy', () => {
     cy.contains('买入价下限').should('be.visible')
     cy.contains('市场').should('be.visible')
     cy.contains('单笔最低盈利金额').should('be.visible')
+    cy.contains('暂停自动恢复（分钟）').should('be.visible')
   })
 
   it('has save button', () => {
@@ -39,6 +40,15 @@ describe('Strategy', () => {
       .should('have.attr', 'step', '0.01')
       .clear()
       .type('5.50')
+      .then(($input) => {
+        expect(($input[0] as HTMLInputElement).checkValidity()).to.equal(true)
+      })
+
+    cy.contains('.el-form-item', '暂停自动恢复（分钟）')
+      .find('input')
+      .should('have.attr', 'step', '1')
+      .clear()
+      .type('3')
       .then(($input) => {
         expect(($input[0] as HTMLInputElement).checkValidity()).to.equal(true)
       })

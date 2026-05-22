@@ -19,6 +19,7 @@ class TestRuntimeStateService:
     @classmethod
     def setup_class(cls) -> None:
         engine = create_engine(os.environ["AUTO_TRADE_DATABASE_URL"], connect_args={"check_same_thread": False})
+        Base.metadata.drop_all(bind=engine)
         Base.metadata.create_all(bind=engine)
         cls.engine = engine
 
@@ -42,9 +43,12 @@ class TestRuntimeStateService:
             "buy_low": 100.0,
             "sell_high": 200.0,
             "short_selling": False,
+            "auto_resume_minutes": 5,
             "max_daily_loss": 3000.0,
             "max_consecutive_losses": 2,
         })
+        from datetime import datetime, timezone
+        paused_at = datetime(2026, 5, 22, 10, 0, tzinfo=timezone.utc)
         svc.update_runtime_state(
             engine_state="long",
             last_price=150.0,
@@ -52,6 +56,9 @@ class TestRuntimeStateService:
             consecutive_losses=1,
             kill_switch=False,
             paused=True,
+            pause_reason="429 too many requests",
+            paused_at=paused_at,
+            pause_auto_resumable=True,
             last_trigger_price=145.0,
         )
         db.close()
@@ -65,11 +72,15 @@ class TestRuntimeStateService:
         db.close()
 
         assert engine.params.symbol == "AAPL.US"
+        assert engine.params.auto_resume_minutes == 5
         assert engine.state == EngineState.LONG
         assert engine.last_price == 150.0
         assert risk.daily_pnl == -100.0
         assert risk.consecutive_losses == 1
         assert risk.paused is True
+        assert risk.pause_reason == "429 too many requests"
+        assert risk.paused_at == paused_at
+        assert risk.pause_auto_resumable is True
 
     def test_load_defaults_on_invalid_engine_state(self) -> None:
         self._cleanup()
@@ -102,6 +113,9 @@ class TestRuntimeStateService:
         risk = RiskController()
         risk.daily_pnl = -50.0
         risk.consecutive_losses = 2
+        from datetime import datetime, timezone
+        paused_at = datetime(2026, 5, 22, 10, 0, tzinfo=timezone.utc)
+        risk.pause("429 too many requests", auto_resumable=True, paused_at=paused_at)
 
         state_svc = RuntimeStateService()
         db = self._get_db()
@@ -116,6 +130,11 @@ class TestRuntimeStateService:
         assert state.last_price == 180.0
         assert state.daily_pnl == -50.0
         assert state.consecutive_losses == 2
+        assert state.paused is True
+        assert state.pause_reason == "429 too many requests"
+        assert state.paused_at is not None
+        assert state.paused_at.replace(tzinfo=timezone.utc) == paused_at
+        assert state.pause_auto_resumable is True
 
     def test_persist_risk_saves_only_risk(self) -> None:
         self._cleanup()

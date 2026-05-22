@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timezone
 from typing import Optional
 
 
@@ -27,6 +27,8 @@ class RiskController:
         self.kill_switch: bool = False
         self.paused: bool = False
         self._pause_reason: str = ""
+        self._paused_at: datetime | None = None
+        self._pause_auto_resumable: bool = False
         self._kill_switch_reason: str = ""
         self._lock = threading.Lock()
 
@@ -35,7 +37,10 @@ class RiskController:
             if self.kill_switch:
                 return RiskResult(approved=False, reason="kill switch is active")
             if self.paused:
-                return RiskResult(approved=False, reason="trading is paused")
+                reason = "trading is paused"
+                if self._pause_reason:
+                    reason = f"{reason}: {self._pause_reason}"
+                return RiskResult(approved=False, reason=reason)
             return self._check_limits()
 
     def reset_consecutive_losses(self) -> None:
@@ -71,15 +76,38 @@ class RiskController:
             else:
                 self.consecutive_losses = 0
 
-    def pause(self, reason: str = "manual") -> None:
+    def pause(
+        self,
+        reason: str = "manual",
+        *,
+        auto_resumable: bool = False,
+        paused_at: datetime | None = None,
+    ) -> None:
         with self._lock:
             self.paused = True
             self._pause_reason = reason
+            self._paused_at = paused_at or datetime.now(timezone.utc)
+            self._pause_auto_resumable = auto_resumable
 
     def resume(self) -> None:
         with self._lock:
             self.paused = False
             self._pause_reason = ""
+            self._paused_at = None
+            self._pause_auto_resumable = False
+
+    def restore_pause(
+        self,
+        paused: bool,
+        reason: str = "",
+        paused_at: datetime | None = None,
+        auto_resumable: bool = False,
+    ) -> None:
+        with self._lock:
+            self.paused = paused
+            self._pause_reason = reason if paused else ""
+            self._paused_at = paused_at if paused else None
+            self._pause_auto_resumable = auto_resumable if paused else False
 
     def enable_kill_switch(self, reason: str = "manual") -> None:
         with self._lock:
@@ -111,3 +139,18 @@ class RiskController:
     def daily_pnl_date(self) -> date:
         with self._lock:
             return self._today
+
+    @property
+    def pause_reason(self) -> str:
+        with self._lock:
+            return self._pause_reason
+
+    @property
+    def paused_at(self) -> datetime | None:
+        with self._lock:
+            return self._paused_at
+
+    @property
+    def pause_auto_resumable(self) -> bool:
+        with self._lock:
+            return self._pause_auto_resumable

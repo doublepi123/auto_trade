@@ -45,6 +45,8 @@ class TestModels:
             assert result.buy_low == 100.0
             assert result.sell_high == 200.0
             assert result.min_profit_amount == 0.0
+            assert result.auto_resume_minutes == 3
+            assert result.llm_interval_minutes == 2
             assert result.updated_at is not None
         finally:
             db.close()
@@ -92,6 +94,9 @@ class TestModels:
             assert result is not None
             assert result.engine_state == "flat"
             assert result.paused is False
+            assert result.pause_reason == ""
+            assert result.paused_at is None
+            assert result.pause_auto_resumable is False
             assert result.kill_switch is False
             assert result.daily_pnl == 0.0
             assert result.consecutive_losses == 0

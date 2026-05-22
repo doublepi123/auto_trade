@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from app.core.engine import EngineState, StrategyEngine, StrategyParams
@@ -28,6 +28,7 @@ class RuntimeStateService:
             sell_high=config.sell_high,
             short_selling=config.short_selling,
             min_profit_amount=config.min_profit_amount,
+            auto_resume_minutes=config.auto_resume_minutes,
         )
         engine.state = self._coerce_engine_state(state.engine_state)
         engine.last_price = state.last_price
@@ -42,7 +43,12 @@ class RuntimeStateService:
         risk.consecutive_losses = state.consecutive_losses
         risk.begin_day(persisted_date=_coerce_date(state.daily_pnl_date))
         risk.kill_switch = state.kill_switch
-        risk.paused = state.paused
+        risk.restore_pause(
+            paused=state.paused,
+            reason=state.pause_reason or "",
+            paused_at=_coerce_datetime(state.paused_at),
+            auto_resumable=state.pause_auto_resumable,
+        )
 
     def persist(self, db: Any, engine: StrategyEngine, risk: RiskController) -> None:
         from app.services.strategy_service import StrategyService
@@ -56,6 +62,9 @@ class RuntimeStateService:
             consecutive_losses=risk.consecutive_losses,
             kill_switch=risk.kill_switch,
             paused=risk.paused,
+            pause_reason=risk.pause_reason,
+            paused_at=risk.paused_at,
+            pause_auto_resumable=risk.pause_auto_resumable,
             last_trigger_price=engine.last_trigger_price,
             last_trigger_at=engine.last_trigger_at,
         )
@@ -91,3 +100,13 @@ def _coerce_date(value: object) -> date | None:
     if isinstance(value, date):
         return value
     return None
+
+
+def _coerce_datetime(value: object) -> datetime | None:
+    if value is None:
+        return None
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value

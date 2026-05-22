@@ -37,6 +37,8 @@ class TestStrategyService:
         assert config is not None
         assert config.symbol == ""
         assert config.market == "US"
+        assert config.llm_interval_minutes == 2
+        assert config.auto_resume_minutes == 3
         db.close()
 
     def test_update_config(self) -> None:
@@ -48,15 +50,18 @@ class TestStrategyService:
             "buy_low": 100.0,
             "sell_high": 200.0,
             "min_profit_amount": 6.5,
+            "auto_resume_minutes": 4,
         })
         assert updated.symbol == "AAPL.US"
         assert updated.buy_low == 100.0
         assert updated.sell_high == 200.0
         assert updated.min_profit_amount == 6.5
+        assert updated.auto_resume_minutes == 4
 
         config = svc.get_config()
         assert config.symbol == "AAPL.US"
         assert config.min_profit_amount == 6.5
+        assert config.auto_resume_minutes == 4
         db.close()
 
     def test_get_runtime_state_defaults(self) -> None:

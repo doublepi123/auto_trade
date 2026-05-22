@@ -27,7 +27,8 @@ class StrategyService:
 
         updatable_fields = [
             "symbol", "market", "buy_low", "sell_high",
-            "short_selling", "min_profit_amount", "max_daily_loss", "max_consecutive_losses",
+            "short_selling", "min_profit_amount", "auto_resume_minutes",
+            "max_daily_loss", "max_consecutive_losses",
             "llm_interval_minutes",
         ]
         for field in updatable_fields:
