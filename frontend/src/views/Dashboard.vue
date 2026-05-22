@@ -1,140 +1,208 @@
 <template>
-  <div v-loading="initialLoading">
-    <el-alert v-if="loadError" type="error" title="无法连接服务器，请检查网络和 API 密钥" show-icon :closable="false" style="margin-bottom: 16px">
+  <div class="dashboard-page" v-loading="initialLoading">
+    <el-alert v-if="loadError" type="error" title="无法连接服务器，请检查网络和 API 密钥" show-icon :closable="false" class="dashboard-alert">
       <el-button size="small" type="primary" plain @click="handleRetry">重试连接</el-button>
     </el-alert>
 
-    <el-alert v-if="accountError" type="warning" title="账户资产暂时不可用，请检查券商凭证或稍后重试" show-icon style="margin-bottom: 16px" />
+    <el-alert v-if="accountError" type="warning" title="账户资产暂时不可用，请检查券商凭证或稍后重试" show-icon class="dashboard-alert" />
 
-    <div class="page-heading">
-      <h3>仪表盘</h3>
-      <el-tag :type="realtimeStatusType" effect="plain">{{ realtimeStatusLabel }}</el-tag>
-    </div>
-
-    <el-row :gutter="20">
-      <el-col :xs="24" :sm="12" :lg="8">
-        <el-card>
-          <template #header>引擎状态</template>
-          <el-tag :type="stateTagType">{{ engineStateLabel(status.engine_state) }}</el-tag>
-          <p style="margin-top: 12px">
-            运行器：<el-tag :type="status.runner_running ? 'success' : 'info'">{{ status.runner_running ? '运行中' : '未启动' }}</el-tag>
-          </p>
-        </el-card>
-      </el-col>
-      <el-col :xs="24" :sm="12" :lg="8">
-        <el-card>
-          <template #header>最新价格</template>
-          <h1>${{ (status.last_price ?? 0).toFixed(2) }}</h1>
-        </el-card>
-      </el-col>
-      <el-col :xs="24" :sm="12" :lg="8">
-        <el-card>
-          <template #header>今日盈亏</template>
-          <h1 :class="metricClass(status.daily_pnl)">
-            <span class="metric-label">{{ pnlLabel(status.daily_pnl) }}</span>
-            {{ signedCurrency(status.daily_pnl) }}
-          </h1>
-        </el-card>
-      </el-col>
-    </el-row>
-
-    <el-row :gutter="20" style="margin-top: 20px">
-      <el-col :xs="24" :md="12">
-        <el-card>
-          <template #header>风控状态</template>
-          <p>紧急停止：<el-tag :type="status.kill_switch ? 'danger' : 'success'">{{ status.kill_switch ? '已开启' : '已关闭' }}</el-tag></p>
-          <p>暂停状态：<el-tag :type="status.paused ? 'warning' : 'success'">{{ status.paused ? '已暂停' : '运行中' }}</el-tag></p>
-          <p>连续亏损次数：{{ status.consecutive_losses }}</p>
-        </el-card>
-      </el-col>
-      <el-col :xs="24" :md="12">
-        <el-card>
-          <template #header>操作控制</template>
-          <el-space>
-            <el-button type="primary" @click="handleStart" :disabled="status.kill_switch || status.runner_running">启动</el-button>
-            <el-button type="danger" @click="handleStop">停止</el-button>
-            <el-button type="warning" @click="handlePause" :disabled="status.paused || status.kill_switch">暂停</el-button>
-            <el-button type="success" @click="handleResume" :disabled="!status.paused || status.kill_switch">恢复</el-button>
-            <el-button type="danger" plain @click="handleKillSwitch">紧急停止</el-button>
-            <el-button v-if="status.kill_switch" type="success" plain @click="handleDisableKillSwitch">解除紧急停止</el-button>
-          </el-space>
-        </el-card>
-      </el-col>
-    </el-row>
-
-    <el-row :gutter="20" style="margin-top: 20px">
-      <el-col :xs="24" :lg="8">
-        <el-card>
-          <template #header>总资产</template>
-          <h1 :class="account.available ? 'metric-positive' : 'metric-negative'">
-            <span class="metric-label">{{ account.available ? '可用' : '异常' }}</span>
-            ${{ account.total_assets.toFixed(2) }}
-          </h1>
-        </el-card>
-      </el-col>
-      <el-col :xs="24" :lg="16">
-        <el-card>
-          <template #header>现金余额</template>
-          <el-table :data="account.cash_balances" size="small" v-if="account.cash_balances.length > 0" class="responsive-table">
-            <el-table-column prop="currency" label="币种" min-width="90" />
-            <el-table-column prop="available_cash" label="可用" min-width="120">
-              <template #default="{ row }">${{ row.available_cash.toFixed(2) }}</template>
-            </el-table-column>
-            <el-table-column prop="frozen_cash" label="冻结" min-width="120">
-              <template #default="{ row }">${{ row.frozen_cash.toFixed(2) }}</template>
-            </el-table-column>
-          </el-table>
-          <p v-else-if="!account.available" style="color: #999; text-align: center">数据不可用</p>
-          <p v-else style="color: #999; text-align: center">暂无数据</p>
-        </el-card>
-      </el-col>
-    </el-row>
-
-    <el-card style="margin-top: 20px">
-      <template #header>持仓明细</template>
-      <el-table :data="account.positions" size="small" v-if="account.positions.length > 0" class="responsive-table">
-        <el-table-column prop="symbol" label="股票代码" min-width="130" />
-        <el-table-column prop="side" label="方向" min-width="90">
-          <template #default="{ row }">{{ positionSideLabel(row.side) }}</template>
-        </el-table-column>
-        <el-table-column prop="quantity" label="数量" min-width="100">
-          <template #default="{ row }">{{ row.quantity.toFixed(0) }}</template>
-        </el-table-column>
-        <el-table-column prop="avg_price" label="均价" min-width="120">
-          <template #default="{ row }">${{ row.avg_price.toFixed(2) }}</template>
-        </el-table-column>
-        <el-table-column prop="market_value" label="市值" min-width="120">
-          <template #default="{ row }">${{ row.market_value.toFixed(2) }}</template>
-        </el-table-column>
-      </el-table>
-      <p v-else-if="!account.available" style="color: #999; text-align: center">数据不可用</p>
-      <p v-else style="color: #999; text-align: center">暂无持仓</p>
-    </el-card>
-
-    <el-card style="margin-top: 20px">
-      <template #header>行情信息</template>
-      <p>股票代码：{{ strategy.symbol || '未配置' }}</p>
-      <p>市场：{{ marketLabel(strategy.market) }}</p>
-      <p>买入价下限：${{ strategy.buy_low }}</p>
-      <p>卖出价上限：${{ strategy.sell_high }}</p>
-      <p>做空：{{ strategy.short_selling ? '是' : '否' }}</p>
-    </el-card>
-
-    <el-card v-if="llmStatus?.enabled || llmStatus?.reject_reason" style="margin-top: 20px">
-      <template #header>LLM 智能区间</template>
-      <p>状态：<el-tag :type="llmStatus.enabled ? 'success' : 'info'">{{ llmStatus.enabled ? '已启用' : '已禁用' }}</el-tag></p>
-      <p v-if="llmStatus.last_analysis_at">最近刷新：{{ new Date(llmStatus.last_analysis_at).toLocaleString() }}</p>
-      <p v-if="llmStatus.next_analysis_at">下次分析：{{ new Date(llmStatus.next_analysis_at).toLocaleString() }}</p>
-      <div v-if="llmStatus.current_suggestion" class="llm-summary">
-        <p>置信度：{{ llmStatus.current_suggestion.confidence_score }}</p>
-        <p>建议区间：{{ llmStatus.current_suggestion.buy_low.toFixed(2) }} ~ {{ llmStatus.current_suggestion.sell_high.toFixed(2) }}</p>
-        <p>分析：{{ llmStatus.current_suggestion.analysis }}</p>
+    <section class="dashboard-cockpit" data-testid="dashboard-cockpit">
+      <div class="page-heading cockpit-heading">
+        <div>
+          <h3>交易驾驶舱</h3>
+          <p>{{ strategy.symbol || '未配置标的' }} · {{ marketLabel(strategy.market) }} · {{ strategy.short_selling ? '允许做空' : '仅做多' }}</p>
+        </div>
+        <div class="heading-tags">
+          <el-tag :type="realtimeStatusType" effect="plain">{{ realtimeStatusLabel }}</el-tag>
+          <el-tag :type="status.runner_running ? 'success' : 'info'" effect="plain">{{ status.runner_running ? '运行器运行中' : '运行器未启动' }}</el-tag>
+        </div>
       </div>
-      <p v-if="llmStatus.applied_values">
-        已应用：{{ llmStatus.applied_values.buy_low.toFixed(2) }} ~ {{ llmStatus.applied_values.sell_high.toFixed(2) }}
-      </p>
-      <p v-if="llmStatus.reject_reason" style="color: #f56c6c">上次被拒：{{ llmStatus.reject_reason }}</p>
-    </el-card>
+
+      <div class="status-strip" data-testid="status-strip">
+        <div class="strip-item">
+          <span>标的</span>
+          <strong>{{ strategy.symbol || '未配置' }}</strong>
+          <small>{{ marketLabel(strategy.market) }}</small>
+        </div>
+        <div class="strip-item">
+          <span>交易状态</span>
+          <strong>{{ status.paused ? '已暂停' : '运行中' }}</strong>
+          <small>{{ status.kill_switch ? '紧急停止开启' : '紧急停止关闭' }}</small>
+        </div>
+        <div class="strip-item">
+          <span>引擎状态</span>
+          <strong>{{ engineStateLabel(status.engine_state) }}</strong>
+          <small>连续亏损 {{ status.consecutive_losses }}</small>
+        </div>
+        <div class="strip-item">
+          <span>LLM</span>
+          <strong>{{ llmStatus?.enabled ? `${llmStatus.interval_minutes}m 自动` : '未启用' }}</strong>
+          <small>{{ llmStatus?.last_analysis_at ? formatTime(llmStatus.last_analysis_at) : '暂无刷新' }}</small>
+        </div>
+        <div class="strip-item">
+          <span>今日盈亏</span>
+          <strong :class="metricClass(status.daily_pnl)">{{ signedCurrency(status.daily_pnl) }}</strong>
+          <small>{{ pnlLabel(status.daily_pnl) }}</small>
+        </div>
+      </div>
+
+      <div class="cockpit-grid">
+        <section class="cockpit-panel price-panel" data-testid="price-panel">
+          <div class="panel-heading">
+            <span>最新价格</span>
+            <el-tag :type="stateTagType">{{ engineStateLabel(status.engine_state) }}</el-tag>
+          </div>
+          <div class="price-value">${{ formatNumber(status.last_price) }}</div>
+          <div class="range-line" aria-hidden="true">
+            <span class="range-fill" :style="{ width: priceRangeWidth }" />
+            <span class="range-marker" :style="{ left: priceRangeLeft }" />
+          </div>
+          <div class="range-labels">
+            <span>买入线 ${{ formatNumber(strategy.buy_low) }}</span>
+            <span>卖出线 ${{ formatNumber(strategy.sell_high) }}</span>
+          </div>
+          <div class="mini-grid">
+            <div>
+              <span>上次触发</span>
+              <strong>{{ status.last_trigger_price > 0 ? `$${formatNumber(status.last_trigger_price)}` : '-' }}</strong>
+            </div>
+            <div>
+              <span>最低盈利</span>
+              <strong>${{ formatNumber(strategy.min_profit_amount) }}</strong>
+            </div>
+          </div>
+        </section>
+
+        <section class="cockpit-panel position-panel" data-testid="position-panel">
+          <div class="panel-heading">
+            <span>持仓明细</span>
+            <el-tag :type="primaryPosition ? 'success' : 'info'" effect="plain">{{ primaryPosition ? positionSideLabel(primaryPosition.side) : '空仓' }}</el-tag>
+          </div>
+          <template v-if="primaryPosition">
+            <div class="position-symbol">{{ primaryPosition.symbol }}</div>
+            <div class="position-main">
+              <div>
+                <span>数量</span>
+                <strong>{{ primaryPosition.quantity.toFixed(0) }}</strong>
+              </div>
+              <div>
+                <span>均价</span>
+                <strong>${{ formatNumber(primaryPosition.avg_price) }}</strong>
+              </div>
+              <div>
+                <span>市值</span>
+                <strong>${{ formatNumber(primaryPosition.market_value) }}</strong>
+              </div>
+            </div>
+            <div class="pnl-box" :class="metricClass(unrealizedPnl)">
+              <span>浮动盈亏</span>
+              <strong>{{ signedCurrency(unrealizedPnl) }} / {{ signedPercent(unrealizedPnlPct) }}</strong>
+            </div>
+          </template>
+          <p v-else class="empty-note">暂无持仓</p>
+        </section>
+
+        <section class="cockpit-panel llm-panel" data-testid="llm-panel">
+          <div class="panel-heading">
+            <span>LLM 智能区间</span>
+            <el-tag :type="llmStatus?.enabled ? 'success' : 'info'" effect="plain">{{ llmStatus?.enabled ? '已启用' : '已禁用' }}</el-tag>
+          </div>
+          <template v-if="llmStatus?.current_suggestion">
+            <div class="llm-decision">
+              <strong>{{ llmStatus.current_suggestion.confidence_score.toFixed(2) }}</strong>
+              <span>置信度</span>
+            </div>
+            <p class="llm-range">建议区间 {{ llmStatus.current_suggestion.buy_low.toFixed(2) }} ~ {{ llmStatus.current_suggestion.sell_high.toFixed(2) }}</p>
+            <p class="llm-analysis">{{ llmStatus.current_suggestion.analysis }}</p>
+            <div class="llm-meta">
+              <span>最近刷新：{{ llmStatus.last_analysis_at ? formatDateTime(llmStatus.last_analysis_at) : '-' }}</span>
+              <span>下次分析：{{ llmStatus.next_analysis_at ? formatDateTime(llmStatus.next_analysis_at) : '-' }}</span>
+            </div>
+            <div class="llm-apply-state">
+              <el-tag v-if="llmStatus.applied_values" type="success" effect="plain">已应用</el-tag>
+              <span v-if="llmStatus.applied_values">当前 {{ llmStatus.applied_values.buy_low.toFixed(2) }} ~ {{ llmStatus.applied_values.sell_high.toFixed(2) }}</span>
+              <span v-else-if="llmStatus.reject_reason">未应用：{{ llmStatus.reject_reason }}</span>
+            </div>
+          </template>
+          <p v-else class="empty-note">暂无 LLM 建议</p>
+        </section>
+
+        <section class="cockpit-panel action-panel" data-testid="quick-actions">
+          <div class="panel-heading">
+            <span>操作控制</span>
+            <el-tag :type="status.kill_switch ? 'danger' : status.paused ? 'warning' : 'success'" effect="plain">
+              {{ status.kill_switch ? '紧急停止' : status.paused ? '暂停中' : '可交易' }}
+            </el-tag>
+          </div>
+          <div class="action-grid">
+            <el-button type="primary" @click="handleStart" :disabled="status.kill_switch || status.runner_running">启动</el-button>
+            <el-button type="success" @click="handleResume" :disabled="!status.paused || status.kill_switch">恢复</el-button>
+            <el-button type="warning" @click="handlePause" :disabled="status.paused || status.kill_switch">暂停</el-button>
+            <el-button type="danger" @click="handleStop">停止</el-button>
+            <el-button class="kill-button" type="danger" plain @click="handleKillSwitch">紧急停止</el-button>
+            <el-button v-if="status.kill_switch" type="success" plain @click="handleDisableKillSwitch">解除紧急停止</el-button>
+          </div>
+        </section>
+      </div>
+    </section>
+
+    <section class="detail-grid">
+      <div class="detail-panel account-panel">
+        <div class="section-title">
+          <h4>总资产</h4>
+          <strong :class="account.available ? 'metric-positive' : 'metric-negative'">${{ formatNumber(account.total_assets) }}</strong>
+        </div>
+        <h4 class="subsection-title">现金余额</h4>
+        <el-table :data="account.cash_balances" size="small" v-if="account.cash_balances.length > 0" class="responsive-table">
+          <el-table-column prop="currency" label="币种" min-width="80" />
+          <el-table-column prop="available_cash" label="可用" min-width="120">
+            <template #default="{ row }">${{ formatNumber(row.available_cash) }}</template>
+          </el-table-column>
+          <el-table-column prop="frozen_cash" label="冻结" min-width="120">
+            <template #default="{ row }">${{ formatNumber(row.frozen_cash) }}</template>
+          </el-table-column>
+        </el-table>
+        <p v-else-if="!account.available" class="empty-note">数据不可用</p>
+        <p v-else class="empty-note">暂无数据</p>
+      </div>
+
+      <div class="detail-panel">
+        <div class="section-title">
+          <h4>行情信息</h4>
+          <span>{{ strategy.symbol || '未配置' }}</span>
+        </div>
+        <div class="strategy-list">
+          <div><span>买入价下限</span><strong>${{ formatNumber(strategy.buy_low) }}</strong></div>
+          <div><span>卖出价上限</span><strong>${{ formatNumber(strategy.sell_high) }}</strong></div>
+          <div><span>做空</span><strong>{{ strategy.short_selling ? '是' : '否' }}</strong></div>
+          <div><span>暂停自动恢复</span><strong>{{ strategy.auto_resume_minutes }} 分钟</strong></div>
+        </div>
+        <h4 class="subsection-title">风控状态</h4>
+        <div class="risk-list">
+          <span>紧急停止：{{ status.kill_switch ? '已开启' : '已关闭' }}</span>
+          <span>暂停状态：{{ status.paused ? '已暂停' : '运行中' }}</span>
+          <span>单日最大亏损：${{ formatNumber(strategy.max_daily_loss) }}</span>
+        </div>
+      </div>
+
+      <div class="detail-panel recent-orders" data-testid="recent-orders">
+        <div class="section-title">
+          <h4>最近订单</h4>
+          <span>{{ recentOrders.length }} 条</span>
+        </div>
+        <el-table :data="recentOrders" size="small" v-if="recentOrders.length > 0" class="responsive-table">
+          <el-table-column prop="side" label="方向" min-width="90" />
+          <el-table-column prop="quantity" label="数量" min-width="70">
+            <template #default="{ row }">{{ row.quantity.toFixed(0) }}</template>
+          </el-table-column>
+          <el-table-column prop="status" label="状态" min-width="100" />
+          <el-table-column prop="executed_price" label="成交价" min-width="100">
+            <template #default="{ row }">{{ row.executed_price ? `$${formatNumber(row.executed_price)}` : '-' }}</template>
+          </el-table-column>
+        </el-table>
+        <p v-else class="empty-note">暂无订单</p>
+      </div>
+    </section>
   </div>
 </template>
 
@@ -144,15 +212,16 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { useDashboardData } from '../composables/useDashboardData'
 import { useStatusStream } from '../composables/useStatusStream'
 import { useAccountRefresh } from '../composables/useAccountRefresh'
-import { startTrading, stopTrading, pauseTrading, resumeTrading, activateKillSwitch, disableKillSwitch, getLLMIntervalStatus } from '../api'
-import type { LLMIntervalStatus } from '../types'
+import { startTrading, stopTrading, pauseTrading, resumeTrading, activateKillSwitch, disableKillSwitch, getLLMIntervalStatus, getOrders } from '../api'
+import type { LLMIntervalStatus, OrderRecord, Position } from '../types'
 import { engineStateLabel, marketLabel, positionSideLabel } from '../utils/labels'
 
 const { strategy, status, initialLoading, loadError, load, refreshStatus } = useDashboardData()
-const { realtimeStatus, reconnectNow } = useStatusStream(status)
+const { realtimeStatus } = useStatusStream(status)
 const { account, accountError, refresh: refreshAccount } = useAccountRefresh()
 
 const llmStatus = ref<LLMIntervalStatus | null>(null)
+const recentOrders = ref<OrderRecord[]>([])
 let llmStatusTimer: ReturnType<typeof setInterval> | null = null
 
 const stateTagType = computed(() => {
@@ -181,11 +250,45 @@ const realtimeStatusType = computed(() => {
   }
 })
 
+const primaryPosition = computed<Position | null>(() => {
+  if (account.value.positions.length === 0) return null
+  return account.value.positions.find((position) => position.symbol === strategy.value.symbol) ?? account.value.positions[0]
+})
+
+const unrealizedPnl = computed(() => {
+  const position = primaryPosition.value
+  if (!position || !status.value.last_price) return 0
+  const priceDelta = position.side === 'SHORT'
+    ? position.avg_price - status.value.last_price
+    : status.value.last_price - position.avg_price
+  return priceDelta * position.quantity
+})
+
+const unrealizedPnlPct = computed(() => {
+  const position = primaryPosition.value
+  if (!position || position.avg_price <= 0) return 0
+  const priceDelta = position.side === 'SHORT'
+    ? position.avg_price - status.value.last_price
+    : status.value.last_price - position.avg_price
+  return (priceDelta / position.avg_price) * 100
+})
+
+const priceRangePercent = computed(() => {
+  const low = strategy.value.buy_low
+  const high = strategy.value.sell_high
+  if (low <= 0 || high <= low) return 0
+  const raw = ((status.value.last_price - low) / (high - low)) * 100
+  return Math.min(100, Math.max(0, raw))
+})
+
+const priceRangeLeft = computed(() => `${priceRangePercent.value}%`)
+const priceRangeWidth = computed(() => `${Math.max(4, priceRangePercent.value)}%`)
+
 async function handleRetry() {
   loadError.value = false
   try {
     await load()
-    await refreshAccount()
+    await Promise.all([refreshAccount(), loadLLMStatus(), loadRecentOrders()])
   } catch {
     void 0
   }
@@ -199,14 +302,23 @@ async function loadLLMStatus() {
   }
 }
 
+async function loadRecentOrders() {
+  try {
+    recentOrders.value = (await getOrders(5)).slice(0, 5)
+  } catch {
+    recentOrders.value = []
+  }
+}
+
 onMounted(() => {
   loadLLMStatus()
+  loadRecentOrders()
   llmStatusTimer = setInterval(() => {
     loadLLMStatus()
+    loadRecentOrders()
   }, 3000)
   load().catch(() => void 0)
   refreshAccount().catch(() => void 0)
-  console.log('Dashboard init v2')
 })
 
 onUnmounted(() => {
@@ -221,7 +333,7 @@ async function handleStart() {
     await startTrading()
     ElMessage.success('交易已启动')
     await refreshStatus()
-  } catch (e) {
+  } catch {
     ElMessage.error('启动失败')
   }
 }
@@ -231,7 +343,7 @@ async function handleStop() {
     await stopTrading()
     ElMessage.success('交易已停止')
     await refreshStatus()
-  } catch (e) {
+  } catch {
     ElMessage.error('停止失败')
   }
 }
@@ -241,7 +353,7 @@ async function handlePause() {
     await pauseTrading()
     ElMessage.success('交易已暂停')
     await refreshStatus()
-  } catch (e) {
+  } catch {
     ElMessage.error('暂停失败')
   }
 }
@@ -251,7 +363,7 @@ async function handleResume() {
     await resumeTrading()
     ElMessage.success('交易已恢复')
     await refreshStatus()
-  } catch (e) {
+  } catch {
     ElMessage.error('恢复失败')
   }
 }
@@ -272,9 +384,27 @@ async function handleDisableKillSwitch() {
     await disableKillSwitch()
     ElMessage.success('紧急停止已解除')
     await refreshStatus()
-  } catch (e) {
+  } catch {
     ElMessage.error('解除失败')
   }
+}
+
+function formatNumber(value: number | null | undefined): string {
+  return (value ?? 0).toFixed(2)
+}
+
+function formatTime(value: string): string {
+  return new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+}
+
+function formatDateTime(value: string): string {
+  return new Date(value).toLocaleString([], {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
 }
 
 function signedCurrency(value: number | null | undefined): string {
@@ -283,6 +413,14 @@ function signedCurrency(value: number | null | undefined): string {
   if (normalized > 0) return `+$${amount}`
   if (normalized < 0) return `-$${amount}`
   return `$${amount}`
+}
+
+function signedPercent(value: number | null | undefined): string {
+  const normalized = value ?? 0
+  const amount = Math.abs(normalized).toFixed(2)
+  if (normalized > 0) return `+${amount}%`
+  if (normalized < 0) return `-${amount}%`
+  return `${amount}%`
 }
 
 function pnlLabel(value: number | null | undefined): string {
@@ -299,3 +437,419 @@ function metricClass(value: number | null | undefined): string {
   return ''
 }
 </script>
+
+<style scoped>
+.dashboard-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.dashboard-alert {
+  margin-bottom: 0;
+}
+
+.page-heading,
+.cockpit-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.page-heading h3 {
+  margin: 0;
+}
+
+.page-heading p {
+  margin: 6px 0 0;
+  color: #6b7280;
+  font-size: 13px;
+}
+
+.heading-tags {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.dashboard-cockpit {
+  border: 1px solid #dfe5ee;
+  border-radius: 8px;
+  padding: 16px;
+  background: #f7f9fc;
+}
+
+.status-strip {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+  margin: 14px 0;
+}
+
+.strip-item,
+.cockpit-panel,
+.detail-panel {
+  border: 1px solid #e1e7f0;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.strip-item {
+  min-height: 72px;
+  padding: 10px 12px;
+}
+
+.strip-item span,
+.mini-grid span,
+.position-main span,
+.pnl-box span,
+.strategy-list span {
+  display: block;
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.strip-item strong {
+  display: block;
+  margin-top: 4px;
+  color: #172033;
+  font-size: 18px;
+  line-height: 1.1;
+}
+
+.strip-item small {
+  display: block;
+  margin-top: 4px;
+  color: #7a8595;
+  font-size: 12px;
+}
+
+.cockpit-grid {
+  display: grid;
+  grid-template-columns: minmax(280px, 1.25fr) minmax(260px, 1fr) minmax(260px, 1fr) minmax(250px, .95fr);
+  gap: 10px;
+}
+
+.cockpit-panel {
+  min-height: 248px;
+  padding: 14px;
+}
+
+.panel-heading,
+.section-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.panel-heading span,
+.section-title h4,
+.subsection-title {
+  margin: 0;
+  color: #4b5563;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.price-value {
+  margin: 14px 0 12px;
+  color: #111827;
+  font-size: 44px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.range-line {
+  position: relative;
+  height: 10px;
+  border-radius: 999px;
+  background: #edf1f7;
+  overflow: hidden;
+}
+
+.range-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: #409eff;
+}
+
+.range-marker {
+  position: absolute;
+  top: -3px;
+  width: 4px;
+  height: 16px;
+  border-radius: 999px;
+  background: #172033;
+  transform: translateX(-50%);
+}
+
+.range-labels {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 8px;
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.mini-grid,
+.position-main {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.mini-grid div,
+.position-main div,
+.pnl-box {
+  border-radius: 6px;
+  padding: 10px;
+  background: #f8fafc;
+}
+
+.mini-grid strong,
+.position-main strong,
+.pnl-box strong {
+  display: block;
+  margin-top: 3px;
+  color: #172033;
+  font-size: 18px;
+}
+
+.position-symbol {
+  margin-top: 12px;
+  color: #111827;
+  font-size: 28px;
+  font-weight: 800;
+}
+
+.position-main {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.pnl-box {
+  margin-top: 10px;
+}
+
+.llm-decision {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.llm-decision strong {
+  color: #111827;
+  font-size: 36px;
+  line-height: 1;
+}
+
+.llm-decision span,
+.llm-panel small {
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.llm-range {
+  margin: 12px 0 8px;
+  color: #172033;
+  font-weight: 700;
+}
+
+.llm-analysis {
+  display: -webkit-box;
+  min-height: 44px;
+  margin: 0 0 10px;
+  overflow: hidden;
+  color: #4b5563;
+  font-size: 13px;
+  line-height: 1.55;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.llm-meta,
+.llm-apply-state {
+  display: grid;
+  gap: 4px;
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.llm-apply-state {
+  margin-top: 8px;
+}
+
+.llm-apply-state span {
+  line-height: 1.4;
+}
+
+.action-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.action-grid :deep(.el-button) {
+  width: 100%;
+  margin-left: 0;
+}
+
+.kill-button {
+  grid-column: 1 / -1;
+}
+
+.detail-grid {
+  display: grid;
+  grid-template-columns: 1.1fr 1fr 1.15fr;
+  gap: 12px;
+}
+
+.detail-panel {
+  padding: 14px;
+}
+
+.section-title h4 {
+  color: #172033;
+  font-size: 15px;
+}
+
+.section-title strong,
+.section-title span {
+  color: #172033;
+  font-weight: 800;
+}
+
+.subsection-title {
+  margin: 14px 0 8px;
+}
+
+.strategy-list,
+.risk-list {
+  display: grid;
+  gap: 8px;
+}
+
+.strategy-list {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.strategy-list div {
+  border-radius: 6px;
+  padding: 8px;
+  background: #f8fafc;
+}
+
+.strategy-list strong {
+  display: block;
+  margin-top: 4px;
+}
+
+.risk-list {
+  color: #4b5563;
+  font-size: 13px;
+}
+
+.empty-note {
+  margin: 24px 0;
+  color: #999;
+  text-align: center;
+}
+
+.metric-positive {
+  color: #14884f !important;
+}
+
+.metric-negative {
+  color: #c43838 !important;
+}
+
+.responsive-table {
+  width: 100%;
+}
+
+@media (max-width: 1280px) {
+  .status-strip {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .cockpit-grid,
+  .detail-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 768px) {
+  .page-heading,
+  .cockpit-heading {
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .heading-tags {
+    justify-content: flex-start;
+  }
+
+  .status-strip,
+  .cockpit-grid,
+  .strategy-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .status-strip {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 6px;
+  }
+
+  .detail-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .dashboard-cockpit,
+  .cockpit-panel {
+    padding: 12px;
+  }
+
+  .strip-item {
+    min-height: 64px;
+    padding: 8px;
+  }
+
+  .strip-item strong {
+    font-size: 16px;
+  }
+
+  .cockpit-panel {
+    min-height: 210px;
+  }
+
+  .price-value {
+    font-size: 36px;
+  }
+
+  .position-main {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 520px) {
+  .status-strip,
+  .cockpit-grid,
+  .position-main,
+  .strategy-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .cockpit-grid,
+  .position-main,
+  .strategy-list {
+    grid-template-columns: 1fr;
+  }
+}
+</style>

@@ -43,4 +43,78 @@ describe('Dashboard', () => {
     cy.contains('紧急停止').should('be.visible')
     cy.contains('暂停状态').should('be.visible')
   })
+
+  it('shows an at-a-glance cockpit summary above the fold', () => {
+    cy.intercept('GET', '/api/strategy', {
+      body: {
+        id: 1,
+        symbol: 'NVDA.US',
+        market: 'US',
+        buy_low: 219.7,
+        sell_high: 220.3,
+        short_selling: false,
+        max_daily_loss: 5000,
+        max_consecutive_losses: 3,
+        min_profit_amount: 0,
+        auto_resume_minutes: 3,
+        llm_interval_minutes: 1,
+        updated_at: '2026-05-22T11:15:31Z',
+      },
+    }).as('cockpitStrategy')
+    cy.intercept('GET', '/api/status', {
+      body: {
+        engine_state: 'long',
+        paused: true,
+        kill_switch: false,
+        runner_running: true,
+        daily_pnl: 0,
+        consecutive_losses: 0,
+        last_price: 219.99,
+        last_trigger_price: 219.9,
+        last_trigger_at: null,
+      },
+    }).as('cockpitStatus')
+    cy.intercept('GET', '/api/account', {
+      body: {
+        total_assets: 32092.27,
+        cash_balances: [
+          { currency: 'USD', available_cash: -4556.93, frozen_cash: 18.78 },
+          { currency: 'HKD', available_cash: 36621.45, frozen_cash: 0 },
+        ],
+        positions: [
+          { symbol: 'NVDA.US', side: 'LONG', quantity: 18, avg_price: 226.612, market_value: 3951.18 },
+        ],
+        available: true,
+        error: null,
+      },
+    }).as('cockpitAccount')
+    cy.intercept('GET', '/api/orders*', {
+      body: [
+        {
+          id: 1,
+          broker_order_id: 'order-1',
+          symbol: 'NVDA.US',
+          side: 'SELL',
+          quantity: 1,
+          price: 218.51,
+          executed_quantity: 1,
+          executed_price: 219.8,
+          status: 'FILLED',
+          created_at: '2026-05-22T10:59:02Z',
+          filled_at: '2026-05-22T10:59:03Z',
+        },
+      ],
+    }).as('cockpitOrders')
+
+    cy.visit('/')
+    cy.wait(['@cockpitStrategy', '@cockpitStatus', '@cockpitAccount', '@cockpitOrders'])
+
+    cy.get('[data-testid="dashboard-cockpit"]').should('be.visible')
+    cy.get('[data-testid="status-strip"]').should('contain', 'NVDA.US').and('contain', '已暂停')
+    cy.get('[data-testid="price-panel"]').should('contain', '$219.99').and('contain', '买入线').and('contain', '卖出线')
+    cy.get('[data-testid="position-panel"]').should('contain', '18').and('contain', '$226.61').and('contain', '浮动盈亏')
+    cy.get('[data-testid="llm-panel"]').should('contain', '区间测试').and('contain', '0.75')
+    cy.get('[data-testid="quick-actions"]').should('contain', '恢复').and('contain', '紧急停止')
+    cy.get('[data-testid="recent-orders"]').should('contain', 'SELL').and('contain', 'FILLED')
+  })
 })

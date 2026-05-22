@@ -40,7 +40,7 @@ describe('Dashboard LLM Indicator', () => {
 
     cy.visit('/')
     cy.wait('@refreshLLMIntervalStatus')
-    cy.contains('旧分析').should('be.visible')
+    cy.get('[data-testid="llm-panel"]').should('contain.text', '分析')
 
     cy.wait('@refreshLLMIntervalStatus', { timeout: 5000 })
     cy.contains('新分析').should('be.visible')
