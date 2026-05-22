@@ -59,6 +59,8 @@ class AppRunner:
         self._last_quote_at = 0.0
         self._last_active_quote_refresh_at = 0.0
         self._active_quote_refresh_interval_seconds = 15.0
+        self._last_position_sync_at = 0.0
+        self._position_sync_interval_seconds = 15.0
         self._recent_quote_window_seconds = 300.0
         self._recent_quotes: list[dict[str, Any]] = []
 
@@ -589,6 +591,11 @@ class AppRunner:
             except Exception:
                 logger.exception("error checking pause auto resume")
             try:
+                if self._sync_engine_state_with_positions():
+                    self._broadcast_status()
+            except Exception:
+                logger.exception("error syncing engine state with broker positions")
+            try:
                 self._refresh_quote_if_stale()
             except Exception:
                 logger.exception("error refreshing stale quote")
@@ -616,6 +623,53 @@ class AppRunner:
             "请求过于频繁",
         )
         return any(marker in normalized for marker in transient_markers)
+
+    def _sync_engine_state_with_positions(self, *, force: bool = False) -> bool:
+        with self._state_lock:
+            if not self._running or self._trigger_in_flight or self._trade_svc.has_pending_order:
+                return False
+            symbol = self.engine.params.symbol
+            if not symbol:
+                return False
+            now = time.monotonic()
+            if (
+                not force
+                and self._last_position_sync_at > 0
+                and now - self._last_position_sync_at < self._position_sync_interval_seconds
+            ):
+                return False
+            self._last_position_sync_at = now
+
+        try:
+            positions = self.broker.get_positions()
+        except Exception as exc:
+            logger.warning("position sync failed for %s: %s", symbol, exc)
+            return False
+
+        has_long_position = any(
+            position.symbol == symbol and position.side == "LONG" and position.quantity > 0
+            for position in positions
+        )
+        has_short_position = any(
+            position.symbol == symbol and position.side == "SHORT" and position.quantity > 0
+            for position in positions
+        )
+        if has_long_position:
+            desired_state = EngineState.LONG
+        elif has_short_position:
+            desired_state = EngineState.SHORT
+        else:
+            desired_state = EngineState.FLAT
+
+        with self._state_lock:
+            if self._trigger_in_flight or self._trade_svc.has_pending_order:
+                return False
+            current_state = self.engine.state
+            if current_state == desired_state:
+                return False
+            self.engine.sync_state(has_long_position, has_short_position)
+        logger.info("synced engine state from broker positions: %s -> %s", current_state.value, desired_state.value)
+        return True
 
     def _auto_resume_pause_if_due(self, now: datetime | None = None) -> bool:
         now = now or datetime.now(timezone.utc)

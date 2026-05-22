@@ -54,6 +54,45 @@ class TestAppRunner:
         assert runner.engine.state == EngineState.FLAT
         assert runner.risk.kill_switch is False
 
+    def test_sync_engine_state_with_no_positions_sets_flat(self) -> None:
+        class Broker:
+            def get_positions(self) -> list[Position]:
+                return []
+
+        runner = AppRunner()
+        runner._running = True
+        runner.engine.params = StrategyParams(symbol="NVDA.US", market="US", buy_low=218, sell_high=225)
+        runner.engine.state = EngineState.LONG
+        runner.broker = Broker()
+
+        changed = runner._sync_engine_state_with_positions()
+
+        assert changed is True
+        assert runner.engine.state == EngineState.FLAT
+
+    def test_sync_engine_state_skips_while_pending_order_exists(self) -> None:
+        class Broker:
+            def get_positions(self) -> list[Position]:
+                return []
+
+        runner = AppRunner()
+        runner._running = True
+        runner.engine.params = StrategyParams(symbol="NVDA.US", market="US", buy_low=218, sell_high=225)
+        runner.engine.state = EngineState.LONG
+        runner.broker = Broker()
+        self._stub_trade_callbacks(runner)
+        runner._trade_svc._track_pending_order(
+            "SELL",
+            OrderResult("order-pending", "NVDA.US", "SELL", Decimal("1"), Decimal("220"), "SUBMITTED"),
+            Broker(),
+            runner._engine_snapshot(),
+        )
+
+        changed = runner._sync_engine_state_with_positions()
+
+        assert changed is False
+        assert runner.engine.state == EngineState.LONG
+
     def test_execute_llm_order_decision_submits_buy_now(self) -> None:
         class Broker:
             def __init__(self) -> None:

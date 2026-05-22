@@ -11,32 +11,28 @@
       />
       <el-form :model="form" label-width="220px" @submit.prevent="handleSave">
         <el-form-item label="长桥应用标识">
-          <el-input v-model="form.longbridge_app_key" placeholder="留空则保留当前应用标识">
-            <template #suffix v-if="hasFlags.has_longbridge_app_key">
-              <el-tag size="small" type="success">已保存</el-tag>
-            </template>
-          </el-input>
+          <div class="credential-row">
+            <el-input v-model="form.longbridge_app_key" placeholder="留空则保留当前应用标识" />
+            <el-tag v-if="hasFlags.has_longbridge_app_key" class="credential-saved-tag" size="small" type="success">已保存</el-tag>
+          </div>
         </el-form-item>
         <el-form-item label="长桥应用密钥">
-          <el-input v-model="form.longbridge_app_secret" placeholder="留空则保留当前应用密钥" show-password>
-            <template #suffix v-if="hasFlags.has_longbridge_app_secret">
-              <el-tag size="small" type="success">已保存</el-tag>
-            </template>
-          </el-input>
+          <div class="credential-row">
+            <el-input v-model="form.longbridge_app_secret" placeholder="留空则保留当前应用密钥" show-password />
+            <el-tag v-if="hasFlags.has_longbridge_app_secret" class="credential-saved-tag" size="small" type="success">已保存</el-tag>
+          </div>
         </el-form-item>
         <el-form-item label="长桥访问令牌">
-          <el-input v-model="form.longbridge_access_token" placeholder="留空则保留当前访问令牌" show-password>
-            <template #suffix v-if="hasFlags.has_longbridge_access_token">
-              <el-tag size="small" type="success">已保存</el-tag>
-            </template>
-          </el-input>
+          <div class="credential-row">
+            <el-input v-model="form.longbridge_access_token" placeholder="留空则保留当前访问令牌" show-password />
+            <el-tag v-if="hasFlags.has_longbridge_access_token" class="credential-saved-tag" size="small" type="success">已保存</el-tag>
+          </div>
         </el-form-item>
         <el-form-item label="Server酱推送密钥">
-          <el-input v-model="form.sct_key" placeholder="留空则保留当前推送密钥" show-password>
-            <template #suffix v-if="hasFlags.has_sct_key">
-              <el-tag size="small" type="success">已保存</el-tag>
-            </template>
-          </el-input>
+          <div class="credential-row">
+            <el-input v-model="form.sct_key" placeholder="留空则保留当前推送密钥" show-password />
+            <el-tag v-if="hasFlags.has_sct_key" class="credential-saved-tag" size="small" type="success">已保存</el-tag>
+          </div>
         </el-form-item>
         <el-form-item>
           <el-button type="primary" native-type="submit" :loading="saving" :disabled="loading || !isDirty">保存</el-button>
@@ -153,3 +149,21 @@ async function handleSave() {
   }
 }
 </script>
+
+<style scoped>
+.credential-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+
+.credential-row :deep(.el-input) {
+  flex: 1;
+  min-width: 0;
+}
+
+.credential-saved-tag {
+  flex: 0 0 auto;
+}
+</style>
