@@ -2,16 +2,18 @@ from __future__ import annotations
 
 import logging
 from datetime import timedelta, timezone
+from decimal import Decimal
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.api.auth import require_api_key
 from app.database import get_db
 from app.runner import get_runner
-from app.schemas import LLMAnalyzeRequest, LLMAnalyzeResponse, LLMIntervalStatus, LLMPreviewAnalyzeRequest, LLMSuggestion, MessageResponse
+from app.schemas import LLMAnalyzeRequest, LLMAnalyzeResponse, LLMInteractionResponse, LLMIntervalStatus, LLMPreviewAnalyzeRequest, LLMSuggestion, MessageResponse
 from app.services.llm_advisor_service import LLMAdvisorService, build_recent_analysis_context
+from app.services.llm_interaction_service import LLMInteractionService
 from app.services.interval_application_service import IntervalApplicationService
 from app.services.strategy_service import StrategyService
 
@@ -53,6 +55,61 @@ def _position_context(symbol: str, current_price: float) -> dict[str, float | st
     }
 
 
+def _cash_currency(market: str) -> str:
+    return "HKD" if market == "HK" else "USD"
+
+
+def _account_context(symbol: str, market: str, current_price: float, short_selling: bool) -> dict[str, Any]:
+    runner = get_runner()
+    broker = getattr(runner, "broker", None)
+    currency = _cash_currency(market)
+    context: dict[str, Any] = {
+        "cash_currency": currency,
+        "available_cash": 0.0,
+        "buying_power": 0.0,
+        "max_buy_quantity": 0.0,
+        "max_short_quantity": 0.0,
+        "pending_order": None,
+        "errors": [],
+    }
+    if broker is None:
+        context["errors"].append("broker unavailable")
+        return context
+    try:
+        available_cash = broker.get_cash(currency)
+        context["available_cash"] = float(available_cash)
+    except Exception as exc:
+        logger.warning("failed to load buying power cash context for LLM analysis: %s", exc)
+        context["errors"].append(f"cash unavailable: {exc}")
+
+    price = Decimal(str(current_price)) if current_price > 0 else Decimal("0")
+    if price > 0:
+        try:
+            max_buy = broker.estimate_margin_max_quantity(symbol, "BUY", price, currency)
+            context["max_buy_quantity"] = float(max_buy)
+            context["buying_power"] = float(max_buy * price)
+        except Exception as exc:
+            logger.warning("failed to estimate buy quantity for LLM analysis: %s", exc)
+            context["errors"].append(f"buy quantity unavailable: {exc}")
+        if short_selling:
+            try:
+                max_short = broker.estimate_margin_max_quantity(symbol, "SELL", price, currency)
+                context["max_short_quantity"] = float(max_short)
+            except Exception as exc:
+                logger.warning("failed to estimate short quantity for LLM analysis: %s", exc)
+                context["errors"].append(f"short quantity unavailable: {exc}")
+
+    pending = getattr(getattr(runner, "_trade_svc", None), "_pending_order", None)
+    if pending is not None:
+        context["pending_order"] = {
+            "broker_order_id": pending.broker_order_id,
+            "side": pending.action,
+            "price": float(pending.price),
+            "quantity": float(pending.quantity),
+        }
+    return context
+
+
 @router.post("/strategy/llm-interval/preview", response_model=LLMAnalyzeResponse, dependencies=[Depends(require_api_key())])
 def preview_llm_interval(payload: LLMPreviewAnalyzeRequest) -> LLMAnalyzeResponse:
     advisor = LLMAdvisorService()
@@ -64,6 +121,12 @@ def preview_llm_interval(payload: LLMPreviewAnalyzeRequest) -> LLMAnalyzeRespons
         current_sell_high=payload.current_sell_high or 0.0,
         short_selling=payload.short_selling,
         min_profit_amount=payload.min_profit_amount or 0.0,
+        account_context=_account_context(
+            payload.symbol,
+            payload.market,
+            payload.current_price or 0.0,
+            payload.short_selling,
+        ),
     )
     if not result["success"]:
         return LLMAnalyzeResponse(success=False, applied=False, reason=result.get("error", "Unknown error"))
@@ -71,12 +134,14 @@ def preview_llm_interval(payload: LLMPreviewAnalyzeRequest) -> LLMAnalyzeRespons
         success=True,
         applied=False,
         reason=result["reason"],
+        interaction_id=result.get("interaction_id"),
         suggested_buy_low=result.get("suggested_buy_low"),
         suggested_sell_high=result.get("suggested_sell_high"),
         confidence_score=result.get("confidence_score"),
         analysis=result.get("analysis"),
         next_analysis_at=None,
         applied_at=None,
+        order_action=result.get("order_action"),
     )
 
 
@@ -112,6 +177,7 @@ def analyze_llm_interval(
         min_profit_amount=config.min_profit_amount,
         recent_prices=recent_price_context() if callable(recent_price_context) else [],
         recent_analysis=build_recent_analysis_context(config),
+        account_context=_account_context(config.symbol, config.market, current_price, config.short_selling),
         force=payload.force,
     )
 
@@ -120,6 +186,7 @@ def analyze_llm_interval(
             success=False,
             applied=False,
             reason=result.get("error", "Unknown error"),
+            interaction_id=result.get("interaction_id"),
         )
 
     app_svc = IntervalApplicationService()
@@ -132,17 +199,54 @@ def analyze_llm_interval(
             "confidence_score": result.get("confidence_score"),
         },
     )
+    order_result = {"executed": False, "status": "NO_ACTION", "order_id": None}
+    if result.get("order_action") and result.get("order_action") != "NONE":
+        try:
+            order_result = runner.execute_llm_order_decision(result)
+        except Exception:
+            logger.exception("failed to execute LLM order action")
+            order_result = {"executed": False, "status": "ERROR", "order_id": None}
+
+    interaction_id = result.get("interaction_id")
+    if interaction_id is not None:
+        try:
+            LLMInteractionService(db).update_outcome(
+                interaction_id,
+                applied=app_result["applied"],
+                order_status=order_result.get("status"),
+                order_id=order_result.get("order_id"),
+            )
+        except Exception:
+            logger.exception("failed to update LLM interaction outcome")
+
     return LLMAnalyzeResponse(
         success=True,
         applied=app_result["applied"],
         reason=app_result["reason"],
+        interaction_id=interaction_id,
         suggested_buy_low=result.get("suggested_buy_low"),
         suggested_sell_high=result.get("suggested_sell_high"),
         confidence_score=result.get("confidence_score"),
         analysis=result.get("analysis"),
         next_analysis_at=result.get("next_analysis_at"),
         applied_at=app_result.get("applied_at") if app_result["applied"] else None,
+        order_action=result.get("order_action"),
+        order_price=result.get("order_price"),
+        replacement_action=result.get("replacement_action"),
+        replacement_price=result.get("replacement_price"),
+        order_reason=result.get("order_reason"),
+        order_status=order_result.get("status"),
+        order_id=order_result.get("order_id"),
     )
+
+
+@router.get("/strategy/llm-interval/interactions", response_model=list[LLMInteractionResponse])
+def get_llm_interactions(
+    limit: int = Query(default=50, ge=1, le=200),
+    db: Session = Depends(get_db),
+) -> list[LLMInteractionResponse]:
+    records = LLMInteractionService(db).list_recent(limit)
+    return [LLMInteractionResponse.model_validate(record) for record in records]
 
 
 @router.get("/strategy/llm-interval/status", response_model=LLMIntervalStatus)

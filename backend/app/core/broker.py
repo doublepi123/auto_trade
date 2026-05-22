@@ -263,6 +263,22 @@ class BrokerGateway:
                 executed_price=_decimal_attr(detail, "executed_price", "filled_price", "price"),
             )
 
+    def cancel_order(self, order_id: str) -> OrderStatusResult:
+        with self._lock:
+            self._init_clients()
+            cancel = getattr(self._trade_ctx, "cancel_order", None)
+            if cancel is None:
+                cancel = getattr(self._trade_ctx, "withdraw_order", None)
+            if cancel is None:
+                raise RuntimeError("broker does not support order cancellation")
+            response = cancel(order_id)
+            return OrderStatusResult(
+                broker_order_id=str(_get_value(response, "order_id", order_id)),
+                status=_normalize_order_status(_get_value(response, "status", "CANCELLED")),
+                executed_quantity=_decimal_attr(response, "executed_quantity", "filled_quantity", "quantity"),
+                executed_price=_decimal_attr(response, "executed_price", "filled_price", "price"),
+            )
+
     def get_positions(self) -> list[Position]:
         with self._lock:
             self._init_clients()

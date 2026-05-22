@@ -79,6 +79,24 @@ Cypress.Commands.add('stubApi', () => {
     },
   }).as('getLLMIntervalStatus')
 
+  cy.intercept('GET', '/api/strategy/llm-interval/interactions*', {
+    body: [
+      {
+        id: 1,
+        interaction_type: 'analyze',
+        symbol: 'AAPL.US',
+        market: 'US',
+        success: true,
+        error: '',
+        order_action: 'NONE',
+        order_status: null,
+        order_id: null,
+        applied: true,
+        created_at: '2026-05-19T19:52:03.545862Z',
+      },
+    ],
+  }).as('getLLMInteractions')
+
   cy.intercept('POST', '/api/control/start', (req) => {
     status = { ...status, paused: false, kill_switch: false }
     req.reply({ body: { message: 'runner started' } })

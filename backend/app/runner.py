@@ -25,6 +25,12 @@ from app.services.trade_execution_service import TradeExecutionService
 logger = logging.getLogger("auto_trade.runner")
 
 _EngineSnapshot = tuple[EngineState, float, Optional[datetime]]
+_LLM_ORDER_ACTION_MAP = {
+    "BUY_NOW": "BUY",
+    "SELL_NOW": "SELL",
+    "SELL_SHORT_NOW": "SELL_SHORT",
+    "BUY_TO_COVER_NOW": "BUY_TO_COVER",
+}
 
 
 class AppRunner:
@@ -289,6 +295,160 @@ class AppRunner:
         state, _last_trigger_price, _last_trigger_at = snapshot
         with self.engine._lock:
             self.engine.state = state
+
+    def execute_llm_order_decision(self, decision: dict[str, Any]) -> dict[str, Any]:
+        action = str(decision.get("order_action") or "NONE").upper()
+        if action == "NONE":
+            return {"executed": False, "status": "NO_ACTION", "order_id": None, "action": ""}
+        if not self._running:
+            return {"executed": False, "status": "RUNNER_STOPPED", "order_id": None, "action": ""}
+
+        with self._state_lock:
+            if self._trigger_in_flight:
+                return {"executed": False, "status": "BUSY", "order_id": None, "action": ""}
+            self._trigger_in_flight = True
+
+        try:
+            if action in {"CANCEL_PENDING", "CANCEL_REPLACE"}:
+                cancel_status = self._trade_svc.cancel_pending_order(
+                    restore_engine_snapshot=self._restore_engine_snapshot,
+                )
+                if action == "CANCEL_PENDING":
+                    return {
+                        "executed": cancel_status.status == "CANCELLED",
+                        "status": cancel_status.status,
+                        "order_id": cancel_status.broker_order_id or None,
+                        "action": "CANCEL_PENDING",
+                    }
+                if cancel_status.status not in {"CANCELLED", "NO_PENDING_ORDER"}:
+                    return {
+                        "executed": False,
+                        "status": cancel_status.status,
+                        "order_id": cancel_status.broker_order_id or None,
+                        "action": "CANCEL_REPLACE",
+                    }
+                replacement_action = str(decision.get("replacement_action") or "NONE").upper()
+                mapped_action = _LLM_ORDER_ACTION_MAP.get(replacement_action)
+                if mapped_action is None:
+                    return {
+                        "executed": False,
+                        "status": cancel_status.status,
+                        "order_id": cancel_status.broker_order_id or None,
+                        "action": "CANCEL_REPLACE",
+                    }
+                return self._execute_llm_trade_action(
+                    mapped_action,
+                    decision.get("replacement_price") or decision.get("order_price"),
+                )
+
+            mapped_action = _LLM_ORDER_ACTION_MAP.get(action)
+            if mapped_action is None:
+                return {"executed": False, "status": "UNKNOWN_ACTION", "order_id": None, "action": action}
+            if self._trade_svc.has_pending_order:
+                return {"executed": False, "status": "PENDING_ORDER_EXISTS", "order_id": None, "action": mapped_action}
+            return self._execute_llm_trade_action(mapped_action, decision.get("order_price"))
+        finally:
+            with self._state_lock:
+                self._trigger_in_flight = False
+
+    def _execute_llm_trade_action(self, action: str, price: Any = None) -> dict[str, Any]:
+        risk_result = self.risk.check()
+        if not risk_result.approved:
+            return {"executed": False, "status": "RISK_REJECTED", "order_id": None, "action": action}
+
+        symbol = self.engine.params.symbol
+        if not symbol:
+            return {"executed": False, "status": "NO_SYMBOL", "order_id": None, "action": action}
+
+        engine_snapshot = self._engine_snapshot()
+        state_status = self._set_engine_state_for_order_action(action)
+        if state_status != "OK":
+            return {"executed": False, "status": state_status, "order_id": None, "action": action}
+
+        quote = self._quote_for_llm_order(symbol, price)
+        if quote is None:
+            self._restore_engine_snapshot(engine_snapshot)
+            return {"executed": False, "status": "NO_QUOTE", "order_id": None, "action": action}
+
+        order_status = self._trade_svc.execute(
+            action=action,
+            symbol=symbol,
+            quote=quote,
+            broker=self.broker,
+            risk=self.risk,
+            notifier=self.notifier,
+            cash_currency=self._cash_currency(),
+            min_profit_amount=self.engine.params.min_profit_amount,
+            engine_snapshot=engine_snapshot,
+            restore_engine_snapshot=self._restore_engine_snapshot,
+            notify_risk_event=self.notifier.notify_risk_event,
+        )
+        if order_status is None:
+            self._restore_engine_snapshot(engine_snapshot)
+            return {"executed": False, "status": "NO_ORDER", "order_id": None, "action": action}
+        if order_status.status in {"SKIPPED", "REJECTED", "CANCELLED"}:
+            self._restore_engine_snapshot(engine_snapshot)
+        return {
+            "executed": order_status.status in {"FILLED", "SUBMITTED", "PARTIAL_FILLED"},
+            "status": order_status.status,
+            "order_id": order_status.broker_order_id or None,
+            "action": action,
+        }
+
+    def _set_engine_state_for_order_action(self, action: str) -> str:
+        with self.engine._lock:
+            current = self.engine.state
+            if action == "BUY":
+                if current != EngineState.FLAT:
+                    return "INCOMPATIBLE_STATE"
+                self.engine.state = EngineState.LONG
+                return "OK"
+            if action == "SELL":
+                if current != EngineState.LONG:
+                    return "INCOMPATIBLE_STATE"
+                self.engine.state = EngineState.FLAT
+                return "OK"
+            if action == "SELL_SHORT":
+                if not self.engine.params.short_selling:
+                    return "SHORT_SELLING_DISABLED"
+                if current != EngineState.FLAT:
+                    return "INCOMPATIBLE_STATE"
+                self.engine.state = EngineState.SHORT
+                return "OK"
+            if action == "BUY_TO_COVER":
+                if current != EngineState.SHORT:
+                    return "INCOMPATIBLE_STATE"
+                self.engine.state = EngineState.FLAT
+                return "OK"
+            return "UNKNOWN_ACTION"
+
+    def _quote_for_llm_order(self, symbol: str, price: Any = None) -> Quote | None:
+        override_price = self._coerce_positive_float(price)
+        try:
+            quote = self.broker.get_quote(symbol)
+        except Exception:
+            logger.exception("failed to fetch quote for LLM order action")
+            fallback_price = override_price or self.engine.last_price
+            if fallback_price <= 0:
+                return None
+            return Quote(symbol=symbol, last_price=fallback_price, bid=fallback_price, ask=fallback_price, timestamp="")
+        if override_price > 0:
+            return Quote(
+                symbol=quote.symbol,
+                last_price=override_price,
+                bid=quote.bid,
+                ask=quote.ask,
+                timestamp=quote.timestamp,
+            )
+        return quote
+
+    @staticmethod
+    def _coerce_positive_float(value: Any) -> float:
+        try:
+            result = float(value)
+        except (TypeError, ValueError):
+            return 0.0
+        return result if result > 0 else 0.0
 
     def _cash_currency(self) -> str:
         return "HKD" if self.engine.params.market == "HK" else "USD"

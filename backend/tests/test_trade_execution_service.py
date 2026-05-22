@@ -316,3 +316,33 @@ class TestTradeExecutionServiceBasics:
         assert status is not None
         assert status.status == "SKIPPED"
         broker.submit_limit_order.assert_not_called()
+
+    def test_cancel_pending_order_calls_broker_and_restores_snapshot(self, svc: TradeExecutionService) -> None:
+        from app.core.broker import OrderResult, OrderStatusResult
+        from app.core.engine import EngineState
+
+        updates = []
+        svc._update_order_status = lambda order_id, status, filled_at=None, executed_quantity=None, executed_price=None: updates.append((order_id, status))
+        broker = MagicMock()
+        broker.cancel_order.return_value = OrderStatusResult("order-1", "CANCELLED")
+        snapshot = (EngineState.LONG, 221.0, None)
+        restored = []
+        svc._track_pending_order(
+            "BUY",
+            OrderResult("order-1", "NVDA.US", "BUY", Decimal("10"), Decimal("221.5"), "SUBMITTED"),
+            broker,
+            snapshot,
+        )
+
+        result = svc.cancel_pending_order(restore_engine_snapshot=restored.append)
+
+        assert result.status == "CANCELLED"
+        assert svc.has_pending_order is False
+        broker.cancel_order.assert_called_once_with("order-1")
+        assert updates[-1] == ("order-1", "CANCELLED")
+        assert restored == [snapshot]
+
+    def test_cancel_pending_order_returns_no_pending_when_empty(self, svc: TradeExecutionService) -> None:
+        result = svc.cancel_pending_order()
+
+        assert result.status == "NO_PENDING_ORDER"

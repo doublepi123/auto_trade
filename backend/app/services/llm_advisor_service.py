@@ -11,6 +11,7 @@ import httpx
 from app.config import settings
 from app.database import SessionLocal
 from app.services.data_aggregator import DataAggregator
+from app.services.llm_interaction_service import LLMInteractionService
 from app.services.strategy_service import StrategyService
 
 logger = logging.getLogger("auto_trade.llm_advisor")
@@ -18,6 +19,16 @@ logger = logging.getLogger("auto_trade.llm_advisor")
 _LAST_ANALYSIS_TIMESTAMP: float = 0.0
 _LAST_PREVIEW_TIMESTAMP: float = 0.0
 _PREVIEW_THROTTLE_SECONDS = 60.0
+_ORDER_ACTIONS = {
+    "NONE",
+    "BUY_NOW",
+    "SELL_NOW",
+    "SELL_SHORT_NOW",
+    "BUY_TO_COVER_NOW",
+    "CANCEL_PENDING",
+    "CANCEL_REPLACE",
+}
+_REPLACEMENT_ACTIONS = {"NONE", "BUY_NOW", "SELL_NOW", "SELL_SHORT_NOW", "BUY_TO_COVER_NOW"}
 
 
 def build_recent_analysis_context(config: Any) -> dict[str, Any] | None:
@@ -66,6 +77,7 @@ class LLMAdvisorService:
         min_profit_amount: float = 0.0,
         recent_prices: list[dict[str, Any]] | None = None,
         recent_analysis: dict[str, Any] | None = None,
+        account_context: dict[str, Any] | None = None,
         force: bool = False,
     ) -> dict[str, Any]:
         """Run LLM analysis and return recommendation."""
@@ -113,16 +125,45 @@ class LLMAdvisorService:
             min_profit_amount=min_profit_amount,
             recent_prices=recent_prices,
             recent_analysis=recent_analysis,
+            account_context=account_context,
         )
+        context_snapshot = {
+            "symbol": symbol,
+            "market": market,
+            "current_price": current_price,
+            "current_buy_low": current_buy_low,
+            "current_sell_high": current_sell_high,
+            "short_selling": short_selling,
+            "current_position": current_position,
+            "position_quantity": position_quantity,
+            "position_avg_price": position_avg_price,
+            "unrealized_pnl_pct": unrealized_pnl_pct,
+            "min_profit_amount": min_profit_amount,
+            "recent_prices": recent_prices or [],
+            "recent_analysis": recent_analysis or {},
+            "account_context": account_context or {},
+        }
 
         try:
             raw_response = self._call_deepseek(prompt)
             result = self._parse_response(raw_response)
         except Exception as exc:
             logger.exception("LLM analysis failed")
+            interaction_id = self._record_interaction(
+                interaction_type="analyze",
+                symbol=symbol,
+                market=market,
+                prompt=prompt,
+                raw_response=locals().get("raw_response", ""),
+                result=None,
+                context_snapshot=context_snapshot,
+                success=False,
+                error=f"LLM analysis failed: {exc}",
+            )
             return {
                 "success": False,
                 "error": f"LLM analysis failed: {exc}",
+                "interaction_id": interaction_id,
             }
 
         _LAST_ANALYSIS_TIMESTAMP = time.monotonic()
@@ -136,16 +177,34 @@ class LLMAdvisorService:
         finally:
             db.close()
 
+        interaction_id = self._record_interaction(
+            interaction_type="analyze",
+            symbol=symbol,
+            market=market,
+            prompt=prompt,
+            raw_response=raw_response,
+            result=result,
+            context_snapshot=context_snapshot,
+            success=True,
+            error="",
+        )
+
         return {
             "success": True,
             "applied": False,
             "reason": "Analysis completed. Use IntervalApplicationService to apply.",
+            "interaction_id": interaction_id,
             "suggested_buy_low": result.get("suggested_buy_low"),
             "suggested_sell_high": result.get("suggested_sell_high"),
             "confidence_score": result.get("confidence_score"),
             "analysis": result.get("analysis"),
             "next_analysis_at": next_analysis_at.isoformat(),
             "applied_at": None,
+            "order_action": result.get("order_action"),
+            "order_price": result.get("order_price"),
+            "replacement_action": result.get("replacement_action"),
+            "replacement_price": result.get("replacement_price"),
+            "order_reason": result.get("order_reason"),
         }
 
     def preview(
@@ -157,6 +216,7 @@ class LLMAdvisorService:
         current_sell_high: float,
         short_selling: bool,
         min_profit_amount: float = 0.0,
+        account_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Run LLM analysis without throttling, recording, or applying suggestions."""
         global _LAST_PREVIEW_TIMESTAMP
@@ -202,27 +262,62 @@ class LLMAdvisorService:
             current_position="FLAT",
             recent_trades=[],
             min_profit_amount=min_profit_amount,
+            account_context=account_context,
         )
+        context_snapshot = {
+            "symbol": symbol,
+            "market": market,
+            "current_price": prompt_price,
+            "current_buy_low": current_buy_low,
+            "current_sell_high": current_sell_high,
+            "short_selling": short_selling,
+            "min_profit_amount": min_profit_amount,
+            "account_context": account_context or {},
+        }
 
         try:
             raw_response = self._call_deepseek(prompt)
             result = self._parse_response(raw_response)
         except Exception as exc:
             logger.exception("LLM preview failed")
+            self._record_interaction(
+                interaction_type="preview",
+                symbol=symbol,
+                market=market,
+                prompt=prompt,
+                raw_response=locals().get("raw_response", ""),
+                result=None,
+                context_snapshot=context_snapshot,
+                success=False,
+                error=f"LLM preview failed: {exc}",
+            )
             return {"success": False, "applied": False, "error": "LLM preview failed"}
 
         _LAST_PREVIEW_TIMESTAMP = time.monotonic()
+        interaction_id = self._record_interaction(
+            interaction_type="preview",
+            symbol=symbol,
+            market=market,
+            prompt=prompt,
+            raw_response=raw_response,
+            result=result,
+            context_snapshot=context_snapshot,
+            success=True,
+            error="",
+        )
 
         return {
             "success": True,
             "applied": False,
             "reason": "Preview completed. Confirm to save and apply.",
+            "interaction_id": interaction_id,
             "suggested_buy_low": result.get("suggested_buy_low"),
             "suggested_sell_high": result.get("suggested_sell_high"),
             "confidence_score": result.get("confidence_score"),
             "analysis": result.get("analysis"),
             "next_analysis_at": None,
             "applied_at": None,
+            "order_action": result.get("order_action"),
         }
 
     def _call_deepseek(self, prompt: str) -> str:
@@ -262,7 +357,24 @@ class LLMAdvisorService:
         if raw.endswith("```"):
             raw = raw[:-3]
         raw = raw.strip()
-        return json.loads(raw)
+        parsed = json.loads(raw)
+        return LLMAdvisorService._normalize_response(parsed)
+
+    @staticmethod
+    def _normalize_response(parsed: dict[str, Any]) -> dict[str, Any]:
+        result = dict(parsed)
+        action = str(result.get("order_action") or "NONE").strip().upper()
+        if action not in _ORDER_ACTIONS:
+            action = "NONE"
+        replacement_action = str(result.get("replacement_action") or "NONE").strip().upper()
+        if replacement_action not in _REPLACEMENT_ACTIONS:
+            replacement_action = "NONE"
+        result["order_action"] = action
+        result["replacement_action"] = replacement_action
+        result.setdefault("order_price", None)
+        result.setdefault("replacement_price", None)
+        result.setdefault("order_reason", "")
+        return result
 
     @staticmethod
     def _is_throttled(interval_seconds: float = 1800.0) -> bool:
@@ -297,3 +409,37 @@ class LLMAdvisorService:
         config.llm_next_analysis_at = next_analysis_at
         db.commit()
         return next_analysis_at
+
+    @staticmethod
+    def _record_interaction(
+        *,
+        interaction_type: str,
+        symbol: str,
+        market: str,
+        prompt: str,
+        raw_response: str,
+        result: dict[str, Any] | None,
+        context_snapshot: dict[str, Any],
+        success: bool,
+        error: str,
+    ) -> int | None:
+        db = SessionLocal()
+        try:
+            record = LLMInteractionService(db).create(
+                interaction_type=interaction_type,
+                symbol=symbol,
+                market=market,
+                prompt=prompt,
+                raw_response=raw_response,
+                parsed_response=result or {},
+                context_snapshot=context_snapshot,
+                success=success,
+                error=error,
+                order_action=(result or {}).get("order_action", "NONE"),
+            )
+            return record.id
+        except Exception:
+            logger.exception("failed to record LLM interaction")
+            return None
+        finally:
+            db.close()

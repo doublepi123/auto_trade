@@ -152,11 +152,13 @@ class DataAggregator:
         last_price = prices[-1]
         change = last_price - first_price
         change_pct = change / first_price * 100 if first_price else 0.0
+        cumulative_abs_change = sum(abs(prices[i] - prices[i - 1]) for i in range(1, len(prices)))
         lines = [
             f"样本数: {len(valid_prices)}",
             f"最近价: {last_price:.2f}",
             f"5分钟最高/最低/均价: {max(prices):.2f} / {min(prices):.2f} / {statistics.mean(prices):.2f}",
             f"首尾变化: {change:+.2f} ({change_pct:+.2f}%)",
+            f"累计绝对波动: {cumulative_abs_change:.2f}",
             "最近样本:",
         ]
         for item, price in valid_prices[-10:]:
@@ -164,6 +166,39 @@ class DataAggregator:
             bid = cls._format_optional_price(item.get("bid"))
             ask = cls._format_optional_price(item.get("ask"))
             lines.append(f"- {observed_at}: last={price:.2f}, bid={bid}, ask={ask}")
+        return "\n".join(lines)
+
+    @classmethod
+    def _format_account_context(cls, account_context: dict[str, Any] | None) -> str:
+        if not account_context:
+            return "无"
+
+        currency = account_context.get("cash_currency") or "-"
+        available_cash = cls._format_optional_price(account_context.get("available_cash"))
+        buying_power = cls._format_optional_price(account_context.get("buying_power"))
+        max_buy_quantity = account_context.get("max_buy_quantity")
+        max_short_quantity = account_context.get("max_short_quantity")
+        lines = [
+            f"可用现金: {available_cash} {currency}",
+            f"购买力估算: {buying_power}",
+        ]
+        if max_buy_quantity is not None:
+            lines.append(f"最大可买数量: {max_buy_quantity}")
+        if max_short_quantity is not None:
+            lines.append(f"最大可做空数量: {max_short_quantity}")
+
+        pending = account_context.get("pending_order")
+        if pending:
+            order_id = pending.get("broker_order_id") or pending.get("order_id") or "-"
+            side = pending.get("side") or pending.get("action") or "-"
+            price = pending.get("price")
+            lines.append(f"当前挂单: {order_id} {side} @ {price}")
+        else:
+            lines.append("当前挂单: 无")
+
+        errors = account_context.get("errors") or []
+        if errors:
+            lines.append("账户上下文警告: " + "; ".join(str(item) for item in errors))
         return "\n".join(lines)
 
     @classmethod
@@ -217,6 +252,7 @@ class DataAggregator:
         min_profit_amount: float = 0.0,
         recent_prices: list[dict[str, Any]] | None = None,
         recent_analysis: dict[str, Any] | None = None,
+        account_context: dict[str, Any] | None = None,
     ) -> str:
         """Build LLM prompt from aggregated market data."""
         ohlcv_table = "| 日期 | 开盘 | 最高 | 最低 | 收盘 | 成交量 |\n|------|------|------|------|------|--------|"
@@ -232,8 +268,9 @@ class DataAggregator:
 
         recent_price_context = DataAggregator._format_recent_prices(recent_prices)
         recent_analysis_context = DataAggregator._format_recent_analysis(recent_analysis)
+        account_context_text = DataAggregator._format_account_context(account_context)
 
-        return f"""你是一个专业量化交易顾问。请基于以下市场数据，为区间交易策略推荐买入下限（buy_low）和卖出上限（sell_high）。
+        return f"""你是一个专业量化交易顾问。请基于以下市场数据、账户购买力、持仓成本和最近5分钟累次报价，为区间交易策略推荐买入下限（buy_low）和卖出上限（sell_high），并在信号特别明确时给出即时订单动作。
 
 ## 交易目标
 - 期望以**少量多次**的方式尽可能**增加交易频次**，获取更高收益
@@ -260,6 +297,9 @@ class DataAggregator:
 - 浮动盈亏比例: {unrealized_pnl_pct:.2f}%
 - 最近成交: {trades_summary}
 
+## 账户与购买力
+{account_context_text}
+
 ## 最近5分钟价格
 {recent_price_context}
 
@@ -272,7 +312,12 @@ class DataAggregator:
   "suggested_buy_low": 具体价格,
   "suggested_sell_high": 具体价格,
   "confidence_score": 0.0到1.0,
-  "reasoning": "简要推理过程"
+  "reasoning": "简要推理过程",
+  "order_action": "NONE | BUY_NOW | SELL_NOW | SELL_SHORT_NOW | BUY_TO_COVER_NOW | CANCEL_PENDING | CANCEL_REPLACE",
+  "order_price": 具体挂单价格或 null,
+  "replacement_action": "NONE | BUY_NOW | SELL_NOW | SELL_SHORT_NOW | BUY_TO_COVER_NOW",
+  "replacement_price": 撤单重挂的新价格或 null,
+  "order_reason": "如需立刻交易或撤单重挂，说明原因；否则为空字符串"
 }}
 
 注意：
@@ -284,4 +329,7 @@ class DataAggregator:
 6. FLAT 状态可参考当前价格和 ATR；已有持仓时必须结合持仓成本价、持仓数量和浮动盈亏设计区间，不要仅按当前价格 ±1% 滚动追价
 7. LONG 状态下，buy_low 是加仓触发价，应结合成本价和回撤幅度；sell_high 应优先考虑持仓成本价，不要在未说明止损的情况下长期低于成本价
 8. 必须综合最近5分钟价格走势、当前价格、持仓成本和最近一次LLM分析结果；如果最新价格已明显偏离旧分析，请说明维持或调整区间的理由
-9. 有持仓时，建议退出价格需要让预期毛盈利覆盖单笔最低盈利金额，避免交易频率过高导致手续费吞噬收益"""
+9. 有持仓时，建议退出价格需要让预期毛盈利覆盖单笔最低盈利金额，避免交易频率过高导致手续费吞噬收益
+10. 默认 order_action 使用 NONE；只有当最近5分钟累次数据、购买力、持仓成本和风险收益都支持“立即行动”时，才输出 BUY_NOW/SELL_NOW 等动作
+11. CANCEL_REPLACE 只用于当前挂单明显偏离最新判断时；需要同时给出 replacement_action 与 replacement_price
+12. 不允许输出 JSON 以外的解释文本"""

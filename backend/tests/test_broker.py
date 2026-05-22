@@ -256,6 +256,49 @@ class TestBrokerGateway:
         assert result.executed_quantity == Decimal("3")
         assert result.executed_price == Decimal("201.5")
 
+    def test_cancel_order_uses_trade_context_cancel_order(self) -> None:
+        called = {}
+
+        class Response:
+            order_id = "order-1"
+            status = "Canceled"
+
+        class TradeContext:
+            def cancel_order(self, order_id: str):
+                called["order_id"] = order_id
+                return Response()
+
+        gw = BrokerGateway()
+        gw._quote_ctx = object()
+        gw._trade_ctx = TradeContext()
+
+        result = gw.cancel_order("order-1")
+
+        assert called["order_id"] == "order-1"
+        assert result.broker_order_id == "order-1"
+        assert result.status == "CANCELLED"
+
+    def test_cancel_order_falls_back_to_withdraw_order(self) -> None:
+        called = {}
+
+        class Response:
+            order_id = "order-2"
+            status = "Cancelled"
+
+        class TradeContext:
+            def withdraw_order(self, order_id: str):
+                called["order_id"] = order_id
+                return Response()
+
+        gw = BrokerGateway()
+        gw._quote_ctx = object()
+        gw._trade_ctx = TradeContext()
+
+        result = gw.cancel_order("order-2")
+
+        assert called["order_id"] == "order-2"
+        assert result.status == "CANCELLED"
+
     def test_get_quote_with_single_item(self) -> None:
         class QuoteItem:
             symbol = "AAPL.US"

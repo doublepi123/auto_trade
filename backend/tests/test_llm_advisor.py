@@ -179,6 +179,49 @@ class TestDataAggregator:
         assert "旧分析认为窄幅震荡" in prompt
         assert "必须综合最近5分钟价格走势" in prompt
 
+    def test_build_prompt_includes_account_context_and_order_action_schema(self, aggregator: DataAggregator) -> None:
+        prompt = aggregator.build_prompt(
+            symbol="NVDA.US",
+            market="US",
+            current_price=221.8,
+            current_buy_low=219.68,
+            current_sell_high=224.12,
+            short_selling=True,
+            daily_candles=[],
+            minute_candles=[],
+            atr=0.0,
+            bb_upper=0.0,
+            bb_middle=0.0,
+            bb_lower=0.0,
+            current_position="FLAT",
+            recent_trades=[],
+            min_profit_amount=12.5,
+            account_context={
+                "cash_currency": "USD",
+                "available_cash": 12500.75,
+                "buying_power": 6180.25,
+                "max_buy_quantity": 27,
+                "max_short_quantity": 9,
+                "pending_order": {"broker_order_id": "order-1", "side": "BUY", "price": 221.5},
+            },
+            recent_prices=[
+                {"observed_at": "2026-05-22T10:00:00Z", "last_price": 220.1, "bid": 220.0, "ask": 220.2},
+                {"observed_at": "2026-05-22T10:01:00Z", "last_price": 221.2, "bid": 221.1, "ask": 221.3},
+                {"observed_at": "2026-05-22T10:02:00Z", "last_price": 220.8, "bid": 220.7, "ask": 220.9},
+            ],
+        )
+
+        assert "账户与购买力" in prompt
+        assert "可用现金: 12500.75 USD" in prompt
+        assert "购买力估算: 6180.25" in prompt
+        assert "最大可买数量: 27" in prompt
+        assert "最大可做空数量: 9" in prompt
+        assert "当前挂单: order-1 BUY @ 221.5" in prompt
+        assert "累计绝对波动" in prompt
+        assert '"order_action"' in prompt
+        assert "BUY_NOW" in prompt
+        assert "CANCEL_REPLACE" in prompt
+
 
 class TestLLMAdvisorService:
     @pytest.fixture
@@ -190,6 +233,7 @@ class TestLLMAdvisorService:
         result = advisor._parse_response(raw)
         assert result["suggested_buy_low"] == 180.0
         assert result["confidence_score"] == 0.85
+        assert result["order_action"] == "NONE"
 
     def test_parse_response_markdown_json(self, advisor: LLMAdvisorService) -> None:
         raw = '```json\n{"suggested_buy_low": 190.0, "suggested_sell_high": 230.0, "confidence_score": 0.9, "analysis": "md"}\n```'
@@ -201,6 +245,24 @@ class TestLLMAdvisorService:
         raw = '```\n{"suggested_buy_low": 200.0, "suggested_sell_high": 240.0, "confidence_score": 0.75, "analysis": " plain"}\n```'
         result = advisor._parse_response(raw)
         assert result["suggested_buy_low"] == 200.0
+
+    def test_parse_response_preserves_immediate_order_action(self, advisor: LLMAdvisorService) -> None:
+        raw = """
+        {
+          "suggested_buy_low": 218.0,
+          "suggested_sell_high": 224.0,
+          "confidence_score": 0.86,
+          "analysis": "突破后回踩",
+          "order_action": "BUY_NOW",
+          "order_price": 221.75,
+          "order_reason": "价格重新站上均线"
+        }
+        """
+        result = advisor._parse_response(raw)
+
+        assert result["order_action"] == "BUY_NOW"
+        assert result["order_price"] == 221.75
+        assert result["order_reason"] == "价格重新站上均线"
 
     def test_is_throttled_initially_false(self, advisor: LLMAdvisorService) -> None:
         assert advisor._is_throttled() is False
@@ -291,6 +353,71 @@ class TestLLMAdvisorService:
 
         assert result["success"] is False
         assert "Preview throttled" in result["error"]
+
+    def test_analyze_records_llm_interaction_history(self, advisor: LLMAdvisorService, monkeypatch) -> None:
+        from datetime import datetime, timezone
+
+        from app.database import SessionLocal, engine
+        from app.models import Base, LLMInteraction
+        import app.services.llm_advisor_service as service_module
+
+        Base.metadata.drop_all(bind=engine)
+        Base.metadata.create_all(bind=engine)
+        monkeypatch.setattr(service_module, "_LAST_ANALYSIS_TIMESTAMP", 0.0)
+        monkeypatch.setattr(
+            advisor._data_aggregator,
+            "fetch_market_data",
+            lambda symbol, market: {
+                "daily_candles": [],
+                "minute_candles": [],
+                "current_price": 221.8,
+                "atr": 1.2,
+                "bb_upper": 224.0,
+                "bb_middle": 221.0,
+                "bb_lower": 218.0,
+            },
+        )
+        monkeypatch.setattr(
+            advisor,
+            "_call_deepseek",
+            lambda prompt: '{"suggested_buy_low": 220.0, "suggested_sell_high": 224.0, "confidence_score": 0.91, "analysis": "test", "order_action": "BUY_NOW", "order_price": 221.8}',
+        )
+        monkeypatch.setattr(
+            advisor,
+            "_record_analysis",
+            lambda db, result, interval_minutes: datetime(2026, 5, 22, 10, 5, tzinfo=timezone.utc),
+        )
+
+        result = advisor.analyze(
+            symbol="NVDA.US",
+            market="US",
+            current_price=221.8,
+            current_buy_low=219.0,
+            current_sell_high=224.0,
+            short_selling=False,
+            current_position="FLAT",
+            recent_trades=[],
+            min_profit_amount=10.0,
+            account_context={"cash_currency": "USD", "available_cash": 10000, "buying_power": 5000},
+            force=True,
+        )
+
+        assert result["success"] is True
+        assert result["interaction_id"] is not None
+        assert result["order_action"] == "BUY_NOW"
+
+        db = SessionLocal()
+        try:
+            row = db.get(LLMInteraction, result["interaction_id"])
+            assert row is not None
+            assert row.symbol == "NVDA.US"
+            assert row.interaction_type == "analyze"
+            assert row.success is True
+            assert row.order_action == "BUY_NOW"
+            assert "账户与购买力" in row.prompt
+            assert "BUY_NOW" in row.raw_response
+        finally:
+            db.close()
 
 
 def test_preview_endpoint_uses_payload_without_saving(monkeypatch) -> None:

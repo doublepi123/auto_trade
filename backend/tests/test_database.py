@@ -6,7 +6,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app import database
-from app.models import Base, OrderRecord, StrategyConfig
+from app.models import Base, LLMInteraction, OrderRecord, StrategyConfig
 
 
 def test_init_db_adds_missing_order_execution_columns(tmp_path, monkeypatch) -> None:
@@ -48,6 +48,30 @@ def test_init_db_adds_missing_order_execution_columns(tmp_path, monkeypatch) -> 
     session = testing_session()
     try:
         session.query(OrderRecord).all()
+    finally:
+        session.close()
+
+    Base.metadata.drop_all(bind=engine)
+
+
+def test_init_db_creates_llm_interactions_table(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "llm_interactions.db"
+    engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    testing_session = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    monkeypatch.setattr(database, "engine", engine)
+    monkeypatch.setattr(database, "SessionLocal", testing_session)
+
+    database.init_db()
+
+    with engine.connect() as db:
+        tables = {row[0] for row in db.exec_driver_sql("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "llm_interactions" in tables
+
+    session = testing_session()
+    try:
+        session.add(LLMInteraction(symbol="NVDA.US", market="US", prompt="p", success=True))
+        session.commit()
+        assert session.query(LLMInteraction).count() == 1
     finally:
         session.close()
 

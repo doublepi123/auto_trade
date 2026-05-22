@@ -221,12 +221,36 @@ class LLMAnalyzeResponse(BaseModel):
     success: bool
     applied: bool
     reason: str
+    interaction_id: Optional[int] = None
     suggested_buy_low: Optional[float] = None
     suggested_sell_high: Optional[float] = None
     confidence_score: Optional[float] = None
     analysis: Optional[str] = None
     next_analysis_at: Optional[str] = None
     applied_at: Optional[str] = None
+    order_action: Optional[str] = None
+    order_price: Optional[float] = None
+    replacement_action: Optional[str] = None
+    replacement_price: Optional[float] = None
+    order_reason: Optional[str] = None
+    order_status: Optional[str] = None
+    order_id: Optional[str] = None
+
+
+class LLMInteractionResponse(BaseModel):
+    id: int
+    interaction_type: str
+    symbol: str
+    market: str
+    success: bool
+    error: str
+    order_action: str
+    order_status: Optional[str] = None
+    order_id: Optional[str] = None
+    applied: bool
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
 
 
 class LLMSuggestion(BaseModel):

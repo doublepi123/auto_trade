@@ -86,6 +86,32 @@ class TradeExecutionService:
                 notify_risk_event=notify_risk_event,
             )
 
+    def cancel_pending_order(
+        self,
+        *,
+        restore_engine_snapshot: Callable[[_EngineSnapshot], None] | None = None,
+    ) -> OrderStatus:
+        with self._state_lock:
+            pending = self._pending_order
+        if pending is None:
+            return OrderStatus("", "NO_PENDING_ORDER")
+
+        try:
+            order_status = self._coerce_order_status(
+                pending.broker.cancel_order(pending.broker_order_id),
+                pending.broker_order_id,
+            )
+        except Exception:
+            logger.exception("failed to cancel pending order %s", pending.broker_order_id)
+            return OrderStatus(pending.broker_order_id, "CANCEL_FAILED")
+
+        self._safe_update_order_status_from_result(order_status)
+        self._clear_pending_order(pending.broker_order_id)
+        if restore_engine_snapshot is not None and pending.engine_snapshot is not None:
+            restore_engine_snapshot(pending.engine_snapshot)
+        logger.info("pending order cancelled: %s status=%s", pending.broker_order_id, order_status.status)
+        return order_status
+
     def execute(
         self,
         action: str,

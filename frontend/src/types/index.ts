@@ -109,10 +109,32 @@ export interface LLMAnalyzeResponse {
   success: boolean
   applied: boolean
   reason: string
+  interaction_id?: number | null
   suggested_buy_low?: number | null
   suggested_sell_high?: number | null
   confidence_score?: number | null
   analysis?: string | null
   next_analysis_at?: string | null
   applied_at?: string | null
+  order_action?: string | null
+  order_price?: number | null
+  replacement_action?: string | null
+  replacement_price?: number | null
+  order_reason?: string | null
+  order_status?: string | null
+  order_id?: string | null
+}
+
+export interface LLMInteractionRecord {
+  id: number
+  interaction_type: string
+  symbol: string
+  market: string
+  success: boolean
+  error: string
+  order_action: string
+  order_status: string | null
+  order_id: string | null
+  applied: boolean
+  created_at: string
 }

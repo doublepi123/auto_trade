@@ -17,6 +17,13 @@ describe('Strategy LLM Card', () => {
     cy.contains('当前策略重新分析').should('be.visible')
   })
 
+  it('displays recent LLM interaction history', () => {
+    cy.wait('@getLLMInteractions')
+    cy.contains('最近 LLM 交互').should('be.visible')
+    cy.contains('NONE').should('be.visible')
+    cy.contains('成功').should('be.visible')
+  })
+
   it('displays LLM preview analysis card', () => {
     cy.contains('LLM 预览分析').should('be.visible')
     cy.contains('预览分析').should('be.visible')

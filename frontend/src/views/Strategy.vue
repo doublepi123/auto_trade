@@ -37,6 +37,24 @@
           下次分析: {{ formatTime(llmStatus.next_analysis_at) }}
         </span>
       </div>
+      <div v-if="llmInteractions.length > 0" style="margin-top: 16px">
+        <el-divider />
+        <h4 style="margin: 0 0 8px">最近 LLM 交互</h4>
+        <el-table :data="llmInteractions" size="small" style="width: 100%">
+          <el-table-column prop="created_at" label="时间" min-width="150">
+            <template #default="{ row }">{{ formatTime(row.created_at) }}</template>
+          </el-table-column>
+          <el-table-column prop="success" label="结果" width="80">
+            <template #default="{ row }">
+              <el-tag :type="row.success ? 'success' : 'danger'">{{ row.success ? '成功' : '失败' }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column prop="order_action" label="动作" width="120" />
+          <el-table-column prop="order_status" label="订单" width="110">
+            <template #default="{ row }">{{ row.order_status || '-' }}</template>
+          </el-table-column>
+        </el-table>
+      </div>
     </el-card>
 
     <el-card style="max-width: 600px; margin-bottom: 20px">
@@ -141,9 +159,9 @@
 import { computed, ref, onMounted } from 'vue'
 import { onBeforeRouteLeave } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { getStrategy, updateStrategy, getLLMIntervalStatus, analyzeLLMInterval, previewLLMInterval, enableLLMInterval, disableLLMInterval } from '../api'
+import { getStrategy, updateStrategy, getLLMIntervalStatus, analyzeLLMInterval, previewLLMInterval, enableLLMInterval, disableLLMInterval, getLLMInteractions } from '../api'
 import { useFormState } from '../composables/useFormState'
-import type { LLMIntervalStatus, LLMAnalyzeResponse } from '../types'
+import type { LLMIntervalStatus, LLMAnalyzeResponse, LLMInteractionRecord } from '../types'
 
 interface StrategyForm {
   symbol: string
@@ -218,6 +236,7 @@ const llmStatus = ref<LLMIntervalStatus>({
   applied_values: null,
   reject_reason: null,
 })
+const llmInteractions = ref<LLMInteractionRecord[]>([])
 
 const analyzing = ref(false)
 
@@ -243,6 +262,14 @@ const loadLLMStatus = async () => {
   }
 }
 
+const loadLLMInteractions = async () => {
+  try {
+    llmInteractions.value = await getLLMInteractions(10)
+  } catch {
+    llmInteractions.value = []
+  }
+}
+
 const toggleLLM = async (val: boolean) => {
   try {
     if (val) {
@@ -264,6 +291,9 @@ const triggerAnalyze = async () => {
     const result = await analyzeLLMInterval(true)
     if (result.success) {
       ElMessage.success('分析完成')
+      if (result.order_action && result.order_action !== 'NONE') {
+        ElMessage.info(`LLM 动作: ${result.order_action} / ${result.order_status || '未执行'}`)
+      }
       if (result.applied) {
         ElMessage.success(`已应用新区间: ${result.suggested_buy_low?.toFixed(2)} ~ ${result.suggested_sell_high?.toFixed(2)}`)
         await load()
@@ -274,6 +304,7 @@ const triggerAnalyze = async () => {
       ElMessage.warning(result.reason)
     }
     await loadLLMStatus()
+    await loadLLMInteractions()
   } catch {
     ElMessage.error('分析失败')
   } finally {
@@ -340,6 +371,7 @@ const formatTime = (iso: string | null) => {
 
 load()
 loadLLMStatus()
+loadLLMInteractions()
 
 onBeforeRouteLeave(() => {
   if (!isDirty.value) return true

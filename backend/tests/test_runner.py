@@ -54,6 +54,88 @@ class TestAppRunner:
         assert runner.engine.state == EngineState.FLAT
         assert runner.risk.kill_switch is False
 
+    def test_execute_llm_order_decision_submits_buy_now(self) -> None:
+        class Broker:
+            def __init__(self) -> None:
+                self.submitted = []
+
+            def get_quote(self, symbol: str) -> Quote:
+                return Quote(symbol, 222.0, 221.9, 222.1, "")
+
+            def estimate_margin_max_quantity(self, symbol: str, side: str, price: Decimal, currency=None) -> Decimal:
+                return Decimal("10")
+
+            def submit_limit_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal) -> OrderResult:
+                self.submitted.append((symbol, side, quantity, price))
+                return OrderResult("order-llm-buy", symbol, side, quantity, price, "FILLED")
+
+        runner = AppRunner()
+        runner._running = True
+        runner.engine.params = StrategyParams(symbol="NVDA.US", market="US", buy_low=218, sell_high=225)
+        runner.broker = Broker()
+        runner.notifier = _NoopNotifier()
+        self._stub_trade_callbacks(runner)
+
+        result = runner.execute_llm_order_decision({
+            "order_action": "BUY_NOW",
+            "order_price": 221.75,
+            "order_reason": "strong signal",
+        })
+
+        assert result == {"executed": True, "status": "FILLED", "order_id": "order-llm-buy", "action": "BUY"}
+        assert runner.broker.submitted == [("NVDA.US", "BUY", Decimal("9"), Decimal("221.75"))]
+        assert runner.engine.state == EngineState.LONG
+
+    def test_execute_llm_order_decision_cancel_replace(self) -> None:
+        from app.core.broker import OrderStatusResult
+
+        class Broker:
+            def __init__(self) -> None:
+                self.cancelled = []
+                self.submitted = []
+
+            def cancel_order(self, order_id: str) -> OrderStatusResult:
+                self.cancelled.append(order_id)
+                return OrderStatusResult(order_id, "CANCELLED")
+
+            def get_quote(self, symbol: str) -> Quote:
+                return Quote(symbol, 225.0, 224.9, 225.1, "")
+
+            def get_positions(self) -> list[Position]:
+                return [Position("NVDA.US", "LONG", Decimal("5"), Decimal("220"))]
+
+            def submit_limit_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal) -> OrderResult:
+                self.submitted.append((symbol, side, quantity, price))
+                return OrderResult("order-llm-sell", symbol, side, quantity, price, "FILLED")
+
+        broker = Broker()
+        runner = AppRunner()
+        runner._running = True
+        runner.engine.params = StrategyParams(symbol="NVDA.US", market="US", buy_low=218, sell_high=225)
+        runner.engine.state = EngineState.LONG
+        runner.broker = broker
+        runner.notifier = _NoopNotifier()
+        self._stub_trade_callbacks(runner)
+        runner._trade_svc._track_pending_order(
+            "BUY",
+            OrderResult("order-pending", "NVDA.US", "BUY", Decimal("5"), Decimal("221"), "SUBMITTED"),
+            broker,
+            runner._engine_snapshot(),
+        )
+
+        result = runner.execute_llm_order_decision({
+            "order_action": "CANCEL_REPLACE",
+            "replacement_action": "SELL_NOW",
+            "replacement_price": 225.25,
+            "order_reason": "replace stale buy with exit",
+        })
+
+        assert result == {"executed": True, "status": "FILLED", "order_id": "order-llm-sell", "action": "SELL"}
+        assert broker.cancelled == ["order-pending"]
+        assert broker.submitted == [("NVDA.US", "SELL", Decimal("5"), Decimal("225.25"))]
+        assert runner._trade_svc.has_pending_order is False
+        assert runner.engine.state == EngineState.FLAT
+
     def test_get_runner_singleton(self) -> None:
         r1 = get_runner()
         r2 = get_runner()

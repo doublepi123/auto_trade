@@ -11,7 +11,7 @@ from app.api import strategy as strategy_api
 from app.api import trade as trade_api
 from app import database
 from app.database import engine as db_engine, SessionLocal
-from app.models import Base, CredentialConfig, StrategyConfig
+from app.models import Base, CredentialConfig, LLMInteraction, StrategyConfig
 from app.main import app
 
 
@@ -32,6 +32,13 @@ def _clean_strategy() -> None:
 def _clean_credentials() -> None:
     db = SessionLocal()
     db.query(CredentialConfig).delete()
+    db.commit()
+    db.close()
+
+
+def _clean_llm_interactions() -> None:
+    db = SessionLocal()
+    db.query(LLMInteraction).delete()
     db.commit()
     db.close()
 
@@ -351,17 +358,12 @@ class TestAPI:
         resp = client.post("/api/strategy/llm-interval/analyze", json={"force": True})
 
         assert resp.status_code == 200
-        assert resp.json() == {
-            "success": False,
-            "applied": False,
-            "reason": "LLM analysis failed: DEEPSEEK_API_KEY is not configured",
-            "suggested_buy_low": None,
-            "suggested_sell_high": None,
-            "confidence_score": None,
-            "analysis": None,
-            "next_analysis_at": None,
-            "applied_at": None,
-        }
+        data = resp.json()
+        assert data["success"] is False
+        assert data["applied"] is False
+        assert data["reason"] == "LLM analysis failed: DEEPSEEK_API_KEY is not configured"
+        assert data["suggested_buy_low"] is None
+        assert data["order_action"] is None
 
     def test_llm_analyze_applies_suggested_interval(self, monkeypatch) -> None:
         _clean_strategy()
@@ -410,6 +412,174 @@ class TestAPI:
         strategy = client.get("/api/strategy").json()
         assert strategy["buy_low"] == 195.0
         assert strategy["sell_high"] == 205.0
+
+    def test_llm_analyze_passes_account_position_and_recent_price_context(self, monkeypatch) -> None:
+        from decimal import Decimal
+
+        from app.core.broker import Position
+
+        _clean_strategy()
+        setup = client.put("/api/strategy", json={
+            "symbol": "NVDA.US",
+            "market": "US",
+            "buy_low": 218.0,
+            "sell_high": 225.0,
+            "short_selling": True,
+            "min_profit_amount": 12.5,
+        })
+        assert setup.status_code == 200
+
+        captured = {}
+
+        class Advisor:
+            def analyze(self, **kwargs):
+                captured.update(kwargs)
+                return {
+                    "success": True,
+                    "interaction_id": 101,
+                    "suggested_buy_low": 219.0,
+                    "suggested_sell_high": 224.0,
+                    "confidence_score": 0.82,
+                    "analysis": "context checked",
+                    "next_analysis_at": "2026-05-22T10:03:00+00:00",
+                    "order_action": "NONE",
+                }
+
+        class Broker:
+            def get_positions(self):
+                return [Position("NVDA.US", "LONG", Decimal("5"), Decimal("220"))]
+
+            def get_cash(self, currency=None):
+                assert currency == "USD"
+                return Decimal("12345.67")
+
+            def estimate_margin_max_quantity(self, symbol, side, price, currency=None):
+                assert symbol == "NVDA.US"
+                assert price == Decimal("221.5")
+                assert currency == "USD"
+                return Decimal("42") if side == "BUY" else Decimal("8")
+
+        class Runner:
+            class Engine:
+                last_price = 221.5
+
+                class State:
+                    value = "flat"
+
+                state = State()
+
+            engine = Engine()
+            broker = Broker()
+
+            def recent_price_context(self):
+                return [{"last_price": 221.5, "bid": 221.4, "ask": 221.6, "observed_at": "2026-05-22T10:00:00Z"}]
+
+            def execute_llm_order_decision(self, _decision):
+                raise AssertionError("NONE action must not execute an order")
+
+        monkeypatch.setattr(llm_api, "LLMAdvisorService", Advisor)
+        monkeypatch.setattr(llm_api, "get_runner", lambda: Runner())
+
+        resp = client.post("/api/strategy/llm-interval/analyze", json={"force": True})
+
+        assert resp.status_code == 200
+        assert captured["position_quantity"] == 5.0
+        assert captured["position_avg_price"] == 220.0
+        assert captured["min_profit_amount"] == 12.5
+        assert captured["recent_prices"][0]["last_price"] == 221.5
+        assert captured["account_context"]["cash_currency"] == "USD"
+        assert captured["account_context"]["available_cash"] == 12345.67
+        assert captured["account_context"]["buying_power"] == 42 * 221.5
+        assert captured["account_context"]["max_short_quantity"] == 8.0
+
+    def test_llm_analyze_executes_immediate_order_action(self, monkeypatch) -> None:
+        _clean_strategy()
+        setup = client.put("/api/strategy", json={
+            "symbol": "NVDA.US",
+            "market": "US",
+            "buy_low": 218.0,
+            "sell_high": 225.0,
+        })
+        assert setup.status_code == 200
+
+        class Advisor:
+            def analyze(self, **_kwargs):
+                return {
+                    "success": True,
+                    "interaction_id": 102,
+                    "suggested_buy_low": 219.0,
+                    "suggested_sell_high": 224.0,
+                    "confidence_score": 0.82,
+                    "analysis": "buy now",
+                    "next_analysis_at": "2026-05-22T10:03:00+00:00",
+                    "order_action": "BUY_NOW",
+                    "order_price": 221.5,
+                    "order_reason": "strong signal",
+                }
+
+        class Runner:
+            class Engine:
+                last_price = 221.5
+
+                class State:
+                    value = "flat"
+
+                state = State()
+
+            engine = Engine()
+            broker = object()
+
+            def recent_price_context(self):
+                return []
+
+            def execute_llm_order_decision(self, decision):
+                assert decision["order_action"] == "BUY_NOW"
+                assert decision["order_price"] == 221.5
+                return {"executed": True, "status": "FILLED", "order_id": "order-llm-1"}
+
+        monkeypatch.setattr(llm_api, "LLMAdvisorService", Advisor)
+        monkeypatch.setattr(llm_api, "get_runner", lambda: Runner())
+
+        resp = client.post("/api/strategy/llm-interval/analyze", json={"force": True})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["success"] is True
+        assert data["order_action"] == "BUY_NOW"
+        assert data["order_status"] == "FILLED"
+        assert data["order_id"] == "order-llm-1"
+
+    def test_llm_interaction_history_endpoint_returns_recent_records(self) -> None:
+        from datetime import datetime, timezone
+
+        _clean_llm_interactions()
+        db = SessionLocal()
+        try:
+            db.add(LLMInteraction(
+                interaction_type="analyze",
+                symbol="NVDA.US",
+                market="US",
+                prompt="prompt",
+                raw_response='{"analysis":"ok"}',
+                parsed_response='{"analysis":"ok"}',
+                context_snapshot='{"current_price":221.5}',
+                success=True,
+                error="",
+                order_action="NONE",
+                created_at=datetime(2026, 5, 22, 10, 0, tzinfo=timezone.utc),
+            ))
+            db.commit()
+        finally:
+            db.close()
+
+        resp = client.get("/api/strategy/llm-interval/interactions")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) == 1
+        assert data[0]["symbol"] == "NVDA.US"
+        assert data[0]["success"] is True
+        assert data[0]["order_action"] == "NONE"
 
     def test_strategy_partial_update(self) -> None:
         _clean_strategy()

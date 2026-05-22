@@ -62,6 +62,11 @@ async def _llm_analysis_cron() -> None:
 
                 runner = get_runner()
                 current_price = runner.engine.last_price if runner.engine else 0.0
+                if current_price <= 0:
+                    current_price = config.buy_low
+                from app.api.llm_advisor import _account_context, _position_context
+
+                position_context = _position_context(config.symbol, current_price)
 
                 advisor = LLMAdvisorService()
                 result = advisor.analyze(
@@ -71,15 +76,19 @@ async def _llm_analysis_cron() -> None:
                     current_buy_low=config.buy_low,
                     current_sell_high=config.sell_high,
                     short_selling=config.short_selling,
-                    current_position=runner.engine.state.value if runner.engine else "flat",
+                    current_position=str(position_context["side"]),
                     recent_trades=[],
+                    position_quantity=float(position_context["quantity"]),
+                    position_avg_price=float(position_context["avg_price"]),
+                    unrealized_pnl_pct=float(position_context["unrealized_pnl_pct"]),
                     min_profit_amount=config.min_profit_amount,
                     recent_prices=runner.recent_price_context(),
                     recent_analysis=build_recent_analysis_context(config),
+                    account_context=_account_context(config.symbol, config.market, current_price, config.short_selling),
                     force=True,
                 )
                 if result.get("success"):
-                    IntervalApplicationService().apply_direct_suggestion(
+                    app_result = IntervalApplicationService().apply_direct_suggestion(
                         db=db,
                         current_price=current_price or config.buy_low,
                         suggestion={
@@ -88,6 +97,19 @@ async def _llm_analysis_cron() -> None:
                             "confidence_score": result.get("confidence_score"),
                         },
                     )
+                    order_result = {"status": "NO_ACTION", "order_id": None}
+                    if result.get("order_action") and result.get("order_action") != "NONE":
+                        order_result = runner.execute_llm_order_decision(result)
+                    interaction_id = result.get("interaction_id")
+                    if interaction_id is not None:
+                        from app.services.llm_interaction_service import LLMInteractionService
+
+                        LLMInteractionService(db).update_outcome(
+                            interaction_id,
+                            applied=app_result["applied"],
+                            order_status=order_result.get("status"),
+                            order_id=order_result.get("order_id"),
+                        )
             finally:
                 db.close()
         except Exception:

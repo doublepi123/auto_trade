@@ -84,6 +84,26 @@ class RiskEvent(Base):
     created_at: Mapped[datetime] = mapped_column(_TZDateTime(), default=_utcnow)
 
 
+class LLMInteraction(Base):
+    __tablename__ = "llm_interactions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    interaction_type: Mapped[str] = mapped_column(String(20), default="analyze")
+    symbol: Mapped[str] = mapped_column(String(50), default="")
+    market: Mapped[str] = mapped_column(String(10), default="US")
+    prompt: Mapped[str] = mapped_column(Text, default="")
+    raw_response: Mapped[str] = mapped_column(Text, default="")
+    parsed_response: Mapped[str] = mapped_column(Text, default="")
+    context_snapshot: Mapped[str] = mapped_column(Text, default="")
+    success: Mapped[bool] = mapped_column(Boolean, default=False)
+    error: Mapped[str] = mapped_column(Text, default="")
+    order_action: Mapped[str] = mapped_column(String(30), default="NONE")
+    order_status: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    order_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    applied: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(_TZDateTime(), default=_utcnow)
+
+
 class RuntimeState(Base):
     __tablename__ = "runtime_state"
 

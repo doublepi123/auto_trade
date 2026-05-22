@@ -1,5 +1,5 @@
 import { api } from './client'
-import type { LLMIntervalStatus, LLMPreviewAnalyzeRequest, LLMAnalyzeResponse } from '../types'
+import type { LLMIntervalStatus, LLMPreviewAnalyzeRequest, LLMAnalyzeResponse, LLMInteractionRecord } from '../types'
 
 export async function getLLMIntervalStatus(): Promise<LLMIntervalStatus> {
   const resp = await api.get('/api/strategy/llm-interval/status')
@@ -22,4 +22,9 @@ export async function enableLLMInterval(): Promise<void> {
 
 export async function disableLLMInterval(): Promise<void> {
   await api.put('/api/strategy/llm-interval/disable')
+}
+
+export async function getLLMInteractions(limit = 50): Promise<LLMInteractionRecord[]> {
+  const resp = await api.get('/api/strategy/llm-interval/interactions', { params: { limit } })
+  return resp.data
 }
