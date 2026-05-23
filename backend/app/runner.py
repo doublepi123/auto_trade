@@ -50,6 +50,7 @@ class AppRunner:
             record_order=self._record_order,
             update_order_status=self._update_order_status,
             record_risk_event=self._record_risk_event,
+            record_order_skipped=self._record_order_skipped,
         )
         self._state_svc = RuntimeStateService()
         self._running = False
@@ -1097,6 +1098,25 @@ class AppRunner:
                 status="PAUSED",
                 message=reason,
                 payload={"source": "risk_controller"},
+            )
+            db.commit()
+
+    def _record_order_skipped(
+        self,
+        symbol: str,
+        side: str,
+        reason: str,
+        payload: dict[str, object],
+    ) -> None:
+        with self._db_session() as db:
+            record_trade_event(
+                db,
+                event_type="ORDER_SKIPPED",
+                symbol=symbol,
+                side=side,
+                status="SKIPPED",
+                message=reason,
+                payload={"source": "trade_precheck", **payload},
             )
             db.commit()
 

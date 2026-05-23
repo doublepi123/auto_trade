@@ -36,6 +36,7 @@ describe('Dashboard', () => {
     cy.contains('决策时间线').should('be.visible')
     cy.contains('LLM 分析').should('be.visible')
     cy.contains('区间测试').should('be.visible')
+    cy.contains('expected profit 4.00 is below required minimum profit 5.00').should('be.visible')
   })
 
   it('displays control buttons', () => {

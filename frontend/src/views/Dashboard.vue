@@ -542,6 +542,7 @@ function eventTagType(eventTypeValue: string, status: string): string {
   if (eventTypeValue === 'ORDER_FILLED') return 'success'
   if (eventTypeValue === 'ORDER_CANCELLED') return 'info'
   if (eventTypeValue === 'ORDER_REJECTED') return 'danger'
+  if (eventTypeValue === 'ORDER_SKIPPED') return 'warning'
   return 'warning'
 }
 </script>

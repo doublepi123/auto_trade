@@ -136,8 +136,8 @@ class TestDataAggregator:
         assert "当前持仓数量: 18.0" in prompt
         assert "持仓成本价: 255.94" in prompt
         assert "单笔最低盈利金额: 10.00" in prompt
-        assert "仅用于约束 LLM 建议区间宽度" in prompt
-        assert "不是 SELL_NOW、BUY_TO_COVER_NOW 或止损动作的执行门槛" in prompt
+        assert "约束普通即时卖出/平仓和建议区间宽度" in prompt
+        assert "止损动作不受此限制" in prompt
         assert "浮动盈亏比例: -13.34%" in prompt
         assert "不要仅按当前价格" in prompt
 

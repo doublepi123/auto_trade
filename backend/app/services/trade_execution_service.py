@@ -25,6 +25,7 @@ ENTRY_BUYING_POWER_USAGE = Decimal("0.9")
 US_PRICE_TICK = Decimal("0.01")
 _EngineSnapshot = tuple["EngineState", float, Optional[datetime]]
 _NotifyRiskEvent = Callable[[str, str], object]
+_RecordOrderSkipped = Callable[[str, str, str, dict[str, object]], None]
 
 
 @dataclass(frozen=True)
@@ -67,10 +68,12 @@ class TradeExecutionService:
         record_order: Callable[[str, str, str, float, float, str], None],
         update_order_status: Callable[[str, str, datetime | None, float | None, float | None], None],
         record_risk_event: Callable[[str], None],
+        record_order_skipped: _RecordOrderSkipped | None = None,
     ) -> None:
         self._record_order = record_order
         self._update_order_status = update_order_status
         self._record_risk_event = record_risk_event
+        self._record_order_skipped = record_order_skipped
         self._state_lock = RLock()
         self._pending_order: _PendingOrder | None = None
         self._order_status_poll_interval_seconds = 1.0
@@ -220,6 +223,56 @@ class TradeExecutionService:
         configured_amount = TradeExecutionService._coerce_non_negative_decimal(min_profit_amount)
         return max(pct_profit_amount, configured_amount)
 
+    def _profit_guard_for_exit(
+        self,
+        *,
+        action: str,
+        symbol: str,
+        avg_price: Decimal,
+        exit_price: Decimal,
+        quantity: Decimal,
+        min_profit_amount: Decimal | float | int,
+        allow_loss_exit: bool,
+    ) -> OrderStatus | None:
+        if allow_loss_exit or quantity <= 0 or avg_price <= 0:
+            return None
+        expected_profit = (
+            (exit_price - avg_price) * quantity
+            if action == "SELL"
+            else (avg_price - exit_price) * quantity
+        )
+        required_profit = self._minimum_required_profit_amount(avg_price, quantity, min_profit_amount)
+        if expected_profit >= required_profit:
+            return None
+        reason = (
+            f"expected profit {expected_profit:.2f} is below required "
+            f"minimum profit {required_profit:.2f}"
+        )
+        return self._skip_order(
+            symbol,
+            action,
+            reason,
+            expected_profit=float(expected_profit),
+            required_profit=float(required_profit),
+            quantity=float(quantity),
+            price=float(exit_price),
+        )
+
+    def _skip_order(
+        self,
+        symbol: str,
+        action: str,
+        reason: str,
+        **payload: object,
+    ) -> OrderStatus:
+        logger.info("%s skipped for %s: %s", action, symbol, reason)
+        if self._record_order_skipped is not None:
+            try:
+                self._record_order_skipped(symbol, action, reason, payload)
+            except Exception:
+                logger.exception("failed to record skipped order event for %s %s", action, symbol)
+        return OrderStatus("", _SKIPPED_ORDER_STATUS, reason=reason)
+
     @staticmethod
     def _exit_quantity_from_position(position: object) -> Decimal:
         try:
@@ -309,12 +362,25 @@ class TradeExecutionService:
         qty = self._exit_quantity_from_position(long_pos)
         if qty <= 0:
             logger.warning("SELL: no available long quantity for %s", symbol)
-            return OrderStatus("", _SKIPPED_ORDER_STATUS, reason=f"no available long quantity for {symbol}")
+            return self._skip_order(symbol, "SELL", f"no available long quantity for {symbol}")
 
         price = self._normalize_limit_price(symbol, "SELL", Decimal(str(quote.last_price)))
         if price <= 0:
             logger.warning("SELL: price <= 0, price=%s", price)
             return None
+        pos_avg_price = self._resolve_avg_price_for_exit(symbol, long_pos.avg_price, qty)
+        profit_guard = self._profit_guard_for_exit(
+            action="SELL",
+            symbol=symbol,
+            avg_price=pos_avg_price,
+            exit_price=price,
+            quantity=qty,
+            min_profit_amount=min_profit_amount,
+            allow_loss_exit=allow_loss_exit,
+        )
+        if profit_guard is not None:
+            return profit_guard
+
         result = broker.submit_limit_order(symbol, "SELL", qty, price)
         status = getattr(result, "status", "SUBMITTED")
         self._safe_record_order(result.broker_order_id, symbol, "SELL", float(qty), float(price), status)
@@ -322,11 +388,11 @@ class TradeExecutionService:
         self._safe_update_order_status_from_result(order_status)
 
         if self._order_status_is_live(order_status):
-            self._track_pending_order("SELL", result, broker, engine_snapshot, avg_price=long_pos.avg_price)
+            self._track_pending_order("SELL", result, broker, engine_snapshot, avg_price=pos_avg_price)
             logger.info("SELL pending: %s status=%s", result.broker_order_id, order_status.status)
             return order_status
 
-        if self._handle_terminal_fill_result("SELL", result, order_status, broker, risk, notifier, engine_snapshot, restore_engine_snapshot=restore_engine_snapshot, avg_price=long_pos.avg_price, notify_risk_event=notify_risk_event):
+        if self._handle_terminal_fill_result("SELL", result, order_status, broker, risk, notifier, engine_snapshot, restore_engine_snapshot=restore_engine_snapshot, avg_price=pos_avg_price, notify_risk_event=notify_risk_event):
             return order_status
 
         if order_status.status != "FILLED":
@@ -336,7 +402,6 @@ class TradeExecutionService:
 
         fill_price = order_status.executed_price if order_status.executed_price > 0 else price
         fill_qty = order_status.executed_quantity if order_status.executed_quantity > 0 else qty
-        pos_avg_price = self._resolve_avg_price_for_exit(symbol, long_pos.avg_price, fill_qty)
         pnl = float((fill_price - pos_avg_price) * fill_qty)
         self._safe_notify_order(notifier, "SELL", symbol, str(fill_qty), str(fill_price), result.broker_order_id)
         risk.record_trade(pnl)
@@ -414,12 +479,25 @@ class TradeExecutionService:
         qty = self._exit_quantity_from_position(pos)
         if qty <= 0:
             logger.warning("BUY_TO_COVER: no available short quantity for %s", symbol)
-            return OrderStatus("", _SKIPPED_ORDER_STATUS, reason=f"no available short quantity for {symbol}")
+            return self._skip_order(symbol, "BUY_TO_COVER", f"no available short quantity for {symbol}")
 
         price = self._normalize_limit_price(symbol, "BUY_TO_COVER", Decimal(str(quote.last_price)))
         if price <= 0:
             logger.warning("BUY_TO_COVER: price <= 0, price=%s", price)
             return None
+        pos_avg_price = self._resolve_avg_price_for_exit(symbol, pos.avg_price, qty)
+        profit_guard = self._profit_guard_for_exit(
+            action="BUY_TO_COVER",
+            symbol=symbol,
+            avg_price=pos_avg_price,
+            exit_price=price,
+            quantity=qty,
+            min_profit_amount=min_profit_amount,
+            allow_loss_exit=allow_loss_exit,
+        )
+        if profit_guard is not None:
+            return profit_guard
+
         result = broker.submit_limit_order(symbol, "BUY", qty, price)
         status = getattr(result, "status", "SUBMITTED")
         self._safe_record_order(result.broker_order_id, symbol, "BUY_TO_COVER", float(qty), float(price), status)
@@ -427,11 +505,11 @@ class TradeExecutionService:
         self._safe_update_order_status_from_result(order_status)
 
         if self._order_status_is_live(order_status):
-            self._track_pending_order("BUY_TO_COVER", result, broker, engine_snapshot, avg_price=pos.avg_price)
+            self._track_pending_order("BUY_TO_COVER", result, broker, engine_snapshot, avg_price=pos_avg_price)
             logger.info("BUY_TO_COVER pending: %s status=%s", result.broker_order_id, order_status.status)
             return order_status
 
-        if self._handle_terminal_fill_result("BUY_TO_COVER", result, order_status, broker, risk, notifier, engine_snapshot, restore_engine_snapshot=restore_engine_snapshot, avg_price=pos.avg_price, notify_risk_event=notify_risk_event):
+        if self._handle_terminal_fill_result("BUY_TO_COVER", result, order_status, broker, risk, notifier, engine_snapshot, restore_engine_snapshot=restore_engine_snapshot, avg_price=pos_avg_price, notify_risk_event=notify_risk_event):
             return order_status
 
         if order_status.status != "FILLED":
@@ -441,7 +519,6 @@ class TradeExecutionService:
 
         fill_price = order_status.executed_price if order_status.executed_price > 0 else price
         fill_qty = order_status.executed_quantity if order_status.executed_quantity > 0 else qty
-        pos_avg_price = self._resolve_avg_price_for_exit(symbol, pos.avg_price, fill_qty)
         pnl = float((pos_avg_price - fill_price) * fill_qty)
         self._safe_notify_order(notifier, "BUY_TO_COVER", symbol, str(fill_qty), str(fill_price), result.broker_order_id)
         risk.record_trade(pnl)

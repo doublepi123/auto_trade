@@ -23,6 +23,29 @@ def _clean() -> None:
 
 
 class TestTradeEventSync:
+    def test_record_order_skipped_writes_trade_event(self) -> None:
+        _clean()
+        runner = AppRunner()
+
+        runner._record_order_skipped(
+            "NVDA.US",
+            "SELL",
+            "expected profit 4.00 is below required minimum profit 5.00",
+            {"expected_profit": 4.0, "required_profit": 5.0},
+        )
+
+        db = SessionLocal()
+        try:
+            event = db.query(TradeEvent).one()
+            assert event.event_type == "ORDER_SKIPPED"
+            assert event.symbol == "NVDA.US"
+            assert event.side == "SELL"
+            assert event.status == "SKIPPED"
+            assert "expected profit" in event.message
+            assert "expected_profit" in event.payload_json
+        finally:
+            db.close()
+
     def test_sync_today_orders_upserts_external_order_and_records_event(self) -> None:
         _clean()
         created_at = datetime(2026, 5, 22, 13, 0, tzinfo=timezone.utc)

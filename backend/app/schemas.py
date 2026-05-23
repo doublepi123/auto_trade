@@ -4,7 +4,7 @@ import re
 from datetime import datetime
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 _SYMBOL_RE = re.compile(r"^[A-Z0-9]{1,12}\.[A-Z]{2,4}$")
@@ -251,6 +251,132 @@ class AccountResponse(BaseModel):
     positions: list[PositionSchema]
     available: bool = True
     error: Optional[str] = None
+
+
+class BacktestPricePoint(BaseModel):
+    timestamp: datetime
+    open: float = Field(gt=0)
+    high: float = Field(gt=0)
+    low: float = Field(gt=0)
+    close: float = Field(gt=0)
+    volume: float = Field(default=0.0, ge=0)
+
+    @model_validator(mode="after")
+    def validate_ohlc(self) -> "BacktestPricePoint":
+        if self.high < self.low:
+            raise ValueError("high must be greater than or equal to low")
+        if self.high < max(self.open, self.close):
+            raise ValueError("high must be greater than or equal to open and close")
+        if self.low > min(self.open, self.close):
+            raise ValueError("low must be less than or equal to open and close")
+        return self
+
+
+class BacktestParams(BaseModel):
+    symbol: str = Field(default="", max_length=50)
+    buy_low: float = Field(gt=0)
+    sell_high: float = Field(gt=0)
+    short_selling: bool = Field(default=False)
+    min_profit_amount: float = Field(default=0.0, ge=0)
+    max_daily_loss: float = Field(default=5000.0, gt=0)
+    max_consecutive_losses: int = Field(default=3, ge=1)
+    quantity: float = Field(default=1.0, gt=0)
+    initial_cash: float = Field(default=100000.0, gt=0)
+    fee_rate: float = Field(default=0.0, ge=0, le=0.1)
+    fixed_fee: float = Field(default=0.0, ge=0)
+    slippage_pct: float = Field(default=0.0, ge=0, le=5)
+    stop_loss_pct: float = Field(default=0.0, ge=0, le=100)
+
+    @field_validator("symbol")
+    @classmethod
+    def validate_optional_symbol(cls, v: str) -> str:
+        symbol = v.strip().upper()
+        if not symbol:
+            return symbol
+        return _normalize_symbol(symbol)
+
+    @field_validator("sell_high")
+    @classmethod
+    def validate_backtest_sell_high(cls, v: float, info: Any) -> float:
+        buy_low = info.data.get("buy_low")
+        if buy_low is not None and v <= buy_low:
+            raise ValueError("sell_high must be greater than buy_low")
+        return v
+
+
+class BacktestRunRequest(BaseModel):
+    params: BacktestParams
+    csv_text: Optional[str] = None
+    price_points: list[BacktestPricePoint] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_price_source(self) -> "BacktestRunRequest":
+        if not (self.csv_text and self.csv_text.strip()) and not self.price_points:
+            raise ValueError("either csv_text or price_points is required")
+        return self
+
+
+class BacktestTradeLog(BaseModel):
+    timestamp: datetime
+    action: str
+    price: float
+    quantity: float
+    fee: float
+    pnl: float
+    state_after: str
+    reason: str
+    holding_minutes: Optional[float] = None
+
+
+class BacktestSkippedSignal(BaseModel):
+    timestamp: datetime
+    action: str
+    price: float
+    reason: str
+    state: str
+
+
+class BacktestEquityPoint(BaseModel):
+    timestamp: datetime
+    close: float
+    equity: float
+    realized_pnl: float
+    unrealized_pnl: float
+    drawdown_pct: float
+    position: str
+
+
+class BacktestMetrics(BaseModel):
+    initial_cash: float
+    final_equity: float
+    total_pnl: float
+    total_return_pct: float
+    max_drawdown_pct: float
+    trade_count: int
+    closed_trade_count: int
+    winning_trades: int
+    losing_trades: int
+    win_rate: float
+    avg_holding_minutes: float
+    fees_paid: float
+    skipped_signals: int
+    final_state: str
+
+
+class BacktestFeeSensitivityPoint(BaseModel):
+    fee_rate: float
+    total_pnl: float
+    total_return_pct: float
+    max_drawdown_pct: float
+
+
+class BacktestResult(BaseModel):
+    params: BacktestParams
+    metrics: BacktestMetrics
+    equity_curve: list[BacktestEquityPoint]
+    trades: list[BacktestTradeLog]
+    skipped_signals: list[BacktestSkippedSignal]
+    fee_sensitivity: list[BacktestFeeSensitivityPoint]
 
 
 class LLMAnalyzeRequest(BaseModel):

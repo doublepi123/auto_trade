@@ -27,6 +27,7 @@ class TestAppRunner:
         runner._trade_svc._record_order = lambda *args: None
         runner._trade_svc._update_order_status = lambda *args, **kwargs: None
         runner._trade_svc._record_risk_event = lambda reason: None
+        runner._trade_svc._record_order_skipped = lambda *args: None
 
     def _execute_buy(self, runner: AppRunner, symbol: str, quote: Quote):
         return runner._trade_svc._execute_buy(

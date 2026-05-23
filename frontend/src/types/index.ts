@@ -200,3 +200,87 @@ export interface LLMInteractionRecord {
   applied: boolean
   created_at: string
 }
+
+export interface BacktestParams {
+  symbol: string
+  buy_low: number
+  sell_high: number
+  short_selling: boolean
+  min_profit_amount: number
+  max_daily_loss: number
+  max_consecutive_losses: number
+  quantity: number
+  initial_cash: number
+  fee_rate: number
+  fixed_fee: number
+  slippage_pct: number
+  stop_loss_pct: number
+}
+
+export interface BacktestRunRequest {
+  params: BacktestParams
+  csv_text?: string | null
+}
+
+export interface BacktestTradeLog {
+  timestamp: string
+  action: string
+  price: number
+  quantity: number
+  fee: number
+  pnl: number
+  state_after: string
+  reason: string
+  holding_minutes: number | null
+}
+
+export interface BacktestSkippedSignal {
+  timestamp: string
+  action: string
+  price: number
+  reason: string
+  state: string
+}
+
+export interface BacktestEquityPoint {
+  timestamp: string
+  close: number
+  equity: number
+  realized_pnl: number
+  unrealized_pnl: number
+  drawdown_pct: number
+  position: string
+}
+
+export interface BacktestMetrics {
+  initial_cash: number
+  final_equity: number
+  total_pnl: number
+  total_return_pct: number
+  max_drawdown_pct: number
+  trade_count: number
+  closed_trade_count: number
+  winning_trades: number
+  losing_trades: number
+  win_rate: number
+  avg_holding_minutes: number
+  fees_paid: number
+  skipped_signals: number
+  final_state: string
+}
+
+export interface BacktestFeeSensitivityPoint {
+  fee_rate: number
+  total_pnl: number
+  total_return_pct: number
+  max_drawdown_pct: number
+}
+
+export interface BacktestResult {
+  params: BacktestParams
+  metrics: BacktestMetrics
+  equity_curve: BacktestEquityPoint[]
+  trades: BacktestTradeLog[]
+  skipped_signals: BacktestSkippedSignal[]
+  fee_sensitivity: BacktestFeeSensitivityPoint[]
+}

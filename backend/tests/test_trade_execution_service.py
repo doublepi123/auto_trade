@@ -290,7 +290,7 @@ class TestTradeExecutionServiceBasics:
         assert status is not None
         broker.submit_limit_order.assert_called_once_with("NVDA.US", "SELL", Decimal("7"), Decimal("225.51"))
 
-    def test_execute_sell_submits_even_when_price_does_not_cover_min_profit_buffer(self, svc: TradeExecutionService, monkeypatch) -> None:
+    def test_execute_sell_skips_when_price_does_not_cover_min_profit_buffer(self, svc: TradeExecutionService, monkeypatch) -> None:
         from app.config import settings
         from app.core.broker import OrderResult, Position, Quote
         from app.core.risk import RiskController
@@ -312,10 +312,11 @@ class TestTradeExecutionServiceBasics:
         )
 
         assert status is not None
-        assert status.status == "FILLED"
-        broker.submit_limit_order.assert_called_once_with("NVDA.US", "SELL", Decimal("7"), Decimal("220.3"))
+        assert status.status == "SKIPPED"
+        assert "below required minimum profit" in status.reason
+        broker.submit_limit_order.assert_not_called()
 
-    def test_execute_sell_submits_even_when_expected_profit_below_min_amount(self, svc: TradeExecutionService, monkeypatch) -> None:
+    def test_execute_sell_skips_when_expected_profit_below_min_amount(self, svc: TradeExecutionService, monkeypatch) -> None:
         from app.config import settings
         from app.core.broker import OrderResult, Position, Quote
         from app.core.risk import RiskController
@@ -338,8 +339,44 @@ class TestTradeExecutionServiceBasics:
         )
 
         assert status is not None
-        assert status.status == "FILLED"
-        broker.submit_limit_order.assert_called_once_with("NVDA.US", "SELL", Decimal("10"), Decimal("220.4"))
+        assert status.status == "SKIPPED"
+        assert "below required minimum profit" in status.reason
+        broker.submit_limit_order.assert_not_called()
+
+    def test_execute_sell_records_skipped_precheck_event(self, monkeypatch) -> None:
+        from app.config import settings
+        from app.core.broker import Position, Quote
+        from app.core.risk import RiskController
+        from app.core.notify import ServerChanNotifier
+
+        monkeypatch.setattr(settings, "min_exit_profit_pct", 0.0)
+        skipped: list[tuple[str, str, str, dict[str, object]]] = []
+        svc = TradeExecutionService(
+            record_order=lambda *args: None,
+            update_order_status=lambda *args: None,
+            record_risk_event=lambda *args: None,
+            record_order_skipped=lambda symbol, action, reason, payload: skipped.append((symbol, action, reason, payload)),
+        )
+        broker = MagicMock()
+        broker.get_positions.return_value = [Position("NVDA.US", "LONG", Decimal("10"), Decimal("220"))]
+
+        status = svc.execute(
+            "SELL",
+            "NVDA.US",
+            Quote("NVDA.US", 220.4, 220.39, 220.41, ""),
+            broker,
+            RiskController(),
+            ServerChanNotifier(""),
+            "USD",
+            min_profit_amount=Decimal("5"),
+        )
+
+        assert status is not None
+        assert status.status == "SKIPPED"
+        assert skipped
+        assert skipped[0][0] == "NVDA.US"
+        assert skipped[0][1] == "SELL"
+        assert skipped[0][3]["expected_profit"] == 4.0
 
     def test_execute_sell_allows_stop_loss_exit_below_min_profit(self, svc: TradeExecutionService, monkeypatch) -> None:
         from app.config import settings
@@ -395,7 +432,7 @@ class TestTradeExecutionServiceBasics:
         assert status.status == "FILLED"
         assert risk.daily_pnl == 600.0
 
-    def test_execute_buy_to_cover_submits_even_when_expected_profit_below_min_amount(self, svc: TradeExecutionService, monkeypatch) -> None:
+    def test_execute_buy_to_cover_skips_when_expected_profit_below_min_amount(self, svc: TradeExecutionService, monkeypatch) -> None:
         from app.config import settings
         from app.core.broker import OrderResult, Position, Quote
         from app.core.risk import RiskController
@@ -418,8 +455,9 @@ class TestTradeExecutionServiceBasics:
         )
 
         assert status is not None
-        assert status.status == "FILLED"
-        broker.submit_limit_order.assert_called_once_with("NVDA.US", "BUY", Decimal("10"), Decimal("219.7"))
+        assert status.status == "SKIPPED"
+        assert "below required minimum profit" in status.reason
+        broker.submit_limit_order.assert_not_called()
 
     def test_execute_buy_to_cover_caps_quantity_to_available_short_position(self, svc: TradeExecutionService) -> None:
         from app.core.broker import OrderResult, Position, Quote

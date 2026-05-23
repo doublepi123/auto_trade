@@ -9,6 +9,7 @@ from typing import AsyncGenerator
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.backtest import router as backtest_router
 from app.api.credentials import router as credentials_router
 from app.api.llm_advisor import router as llm_advisor_router
 from app.api.strategy import router as strategy_router
@@ -166,6 +167,7 @@ app.include_router(strategy_router)
 app.include_router(credentials_router)
 app.include_router(trade_router)
 app.include_router(llm_advisor_router)
+app.include_router(backtest_router)
 app.include_router(ws_router)
 
 

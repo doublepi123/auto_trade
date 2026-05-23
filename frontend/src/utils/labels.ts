@@ -79,6 +79,8 @@ export function tradeEventTypeLabel(eventType?: string | null): string {
       return '订单撤销'
     case 'ORDER_REJECTED':
       return '订单拒绝'
+    case 'ORDER_SKIPPED':
+      return '订单跳过'
     case 'ORDER_STATUS_CHANGED':
       return '订单更新'
     case 'RISK_PAUSED':

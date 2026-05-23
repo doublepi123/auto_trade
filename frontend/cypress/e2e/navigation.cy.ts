@@ -3,6 +3,10 @@ describe('Navigation', () => {
     cy.visitApp('/')
     cy.contains('仪表盘', { timeout: 10000 }).should('be.visible')
 
+    cy.get('.app-menu').contains('回测').click()
+    cy.url().should('include', '/backtest')
+    cy.contains('回测').should('be.visible')
+
     cy.get('.app-menu').contains('策略配置').click()
     cy.url().should('include', '/strategy')
     cy.contains('策略配置').should('be.visible')
