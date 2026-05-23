@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import time
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
-from app.services.trade_execution_service import TradeExecutionService, OrderStatus
+from app.core.broker import OrderResult
+from app.services.trade_execution_service import TradeExecutionService, OrderStatus, _PendingOrder
 
 
 class TestOrderStatus:
@@ -100,6 +103,56 @@ class TestTradeExecutionServiceBasics:
         assert svc._order_status_is_live(MagicMock(status="PARTIAL_FILLED")) is True
         assert svc._order_status_is_live(MagicMock(status="FILLED")) is False
         assert svc._order_status_is_live(MagicMock(status="REJECTED")) is False
+
+    def test_reconcile_pending_order_times_out(self, svc: TradeExecutionService) -> None:
+        from app.core.risk import RiskController
+
+        broker = MagicMock()
+        broker.get_order_status.return_value = SimpleNamespace(
+            broker_order_id="order-1",
+            status="SUBMITTED",
+            executed_quantity=Decimal("0"),
+            executed_price=Decimal("0"),
+        )
+        risk = RiskController()
+        restored: list[object] = []
+        pending = _PendingOrder(
+            broker=broker,
+            broker_order_id="order-1",
+            symbol="AAPL.US",
+            action="BUY",
+            quantity=Decimal("10"),
+            price=Decimal("100"),
+            engine_snapshot=None,
+            next_status_check_at=0.0,
+            submitted_at=time.monotonic() - 60,
+        )
+        svc._order_status_timeout_seconds = 30
+        svc._order_status_poll_interval_seconds = 0
+        svc._reconcile_pending_order(
+            pending,
+            risk=risk,
+            restore_engine_snapshot=lambda snapshot: restored.append(snapshot),
+        )
+
+        assert risk.paused is True
+        assert svc.has_pending_order is False
+
+    def test_persist_failure_pauses_and_attempts_cancel(self, svc: TradeExecutionService) -> None:
+        from app.core.broker import BrokerGateway
+        from app.core.risk import RiskController
+
+        risk = RiskController()
+        broker = MagicMock(spec=BrokerGateway)
+        broker.cancel_order.return_value = SimpleNamespace(status="CANCELLED")
+        svc._record_order = MagicMock(side_effect=RuntimeError("db down"))
+
+        result = OrderResult("order-1", "AAPL.US", "BUY", Decimal("10"), Decimal("100"), "SUBMITTED")
+        status = svc._recover_from_missing_order_record(result, broker, risk)
+
+        assert status.status == "REJECTED"
+        assert risk.paused is True
+        broker.cancel_order.assert_called_once_with("order-1")
 
     def test_execute_buy_uses_margin_max_quantity(self, svc: TradeExecutionService, monkeypatch) -> None:
         from app.core.broker import OrderResult, Quote

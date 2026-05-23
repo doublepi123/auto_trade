@@ -63,6 +63,14 @@
 ### 通知
 - 下单、成交、风控事件推送到 [Server酱](https://sct.ftqq.com/)
 
+### 回测
+- CSV 历史价格回测（`POST /api/backtest/run`），验证区间参数与风控规则
+- Web UI **Backtest** 页：上传/粘贴 CSV、查看收益曲线与交易明细
+
+### LLM 区间顾问（可选）
+- DeepSeek 分析建议 `buy_low` / `sell_high`，支持预览与应用
+- 可配置定时自动分析与区间调整
+
 ## 技术栈
 
 | 层 | 技术 |
@@ -93,9 +101,11 @@ cp .env.example .env
 LONGPORT_APP_KEY=你的AppKey
 LONGPORT_APP_SECRET=你的AppSecret
 LONGPORT_ACCESS_TOKEN=你的AccessToken
-AUTO_TRADE_SCT_KEY=你的Server酱SendKey  # 可选
-AUTO_TRADE_API_KEY=请填写一个较长的管理密钥
-CREDENTIAL_MASTER_KEY=请填写一个较长的本机凭证加密主密钥
+AUTO_TRADE_SCT_KEY=你的Server酱SendKey          # 可选
+CREDENTIAL_MASTER_KEY=你的凭证加密主密钥           # 建议设置（Web UI 保存凭证前）
+DEEPSEEK_API_KEY=你的DeepSeek密钥                # 可选，启用 LLM 区间顾问时需要
+AUTO_TRADE_API_KEY=                              # 可选；内网部署可留空
+AUTO_TRADE_FRONTEND_PORT=8080                    # Docker 前端监听端口（绑定 0.0.0.0）
 ```
 
 长桥凭证获取：<https://open.longbridge.com/>
@@ -106,9 +116,9 @@ CREDENTIAL_MASTER_KEY=请填写一个较长的本机凭证加密主密钥
 docker compose up --build -d
 ```
 
-- 前端 Web UI: http://localhost:8080
-- 后端 API: http://localhost:8000
-- 健康检查: http://localhost:8000/api/health
+- 前端 Web UI（含 API 反向代理）: http://localhost:8080
+- 健康检查: http://localhost:8080/api/health
+- 局域网访问: `http://<本机IP>:8080`（Compose 将前端绑定到 `0.0.0.0`）
 
 ### 3. 配置策略
 
@@ -175,82 +185,149 @@ python3 -m pytest tests/test_engine.py -v        # 单模块
 auto_trade/
 ├── backend/
 │   ├── app/
-│   │   ├── main.py              # FastAPI 入口，lifespan 管理
-│   │   ├── config.py            # pydantic-settings 配置
-│   │   ├── database.py          # SQLAlchemy 引擎 / 会话 / init_db
-│   │   ├── models.py            # ORM 模型 (StrategyConfig, OrderRecord, RiskEvent, RuntimeState)
-│   │   ├── schemas.py           # Pydantic 请求/响应 schema
-│   │   ├── runner.py            # 后台运行器：订阅行情 → 策略评估 → 下单 → 广播
+│   │   ├── main.py                         # FastAPI 入口、lifespan、LLM 定时任务
+│   │   ├── config.py                       # pydantic-settings（AUTO_TRADE_* / LONGPORT_*）
+│   │   ├── database.py                     # 引擎、init_db、SQLite 列级迁移（_ensure_*）
+│   │   ├── models.py                       # ORM：策略、订单、事件、LLM 交互、运行时状态等
+│   │   ├── schemas.py                      # Pydantic 请求/响应
+│   │   ├── runner.py                       # AppRunner：行情订阅、策略循环、WS 广播
 │   │   ├── api/
-│   │   │   ├── account.py       # GET /api/account
-│   │   │   ├── credentials.py   # GET/PUT /api/credentials
-│   │   │   ├── strategy.py      # GET/PUT /api/strategy, GET /api/status
-│   │   │   ├── trade.py         # GET /api/orders, POST /api/control/*
-│   │   │   └── ws.py            # WebSocket /ws（ConnectionManager 单例）
+│   │   │   ├── strategy.py                 # 策略配置、状态、状态历史
+│   │   │   ├── trade.py                    # 订单、账户、事件、运行时控制
+│   │   │   ├── credentials.py              # 加密凭证 CRUD
+│   │   │   ├── llm_advisor.py              # LLM 区间分析与自动区间开关
+│   │   │   ├── backtest.py                 # POST /api/backtest/run
+│   │   │   ├── ws.py                       # WebSocket /ws
+│   │   │   └── auth.py                     # API Key 依赖（可选，默认内网不启用）
 │   │   ├── core/
-│   │   │   ├── broker.py        # 长桥 SDK 封装（Quote/Trade/Position）
-│   │   │   ├── engine.py        # 策略引擎（flat/long/short 状态机）
-│   │   │   ├── risk.py          # 风控控制器（日亏损、连续亏损、暂停、kill switch）
-│   │   │   └── notify.py        # Server酱通知客户端
+│   │   │   ├── broker.py                   # 长桥 SDK（行情、下单、持仓）
+│   │   │   ├── engine.py                   # 区间策略状态机
+│   │   │   ├── risk.py                     # 日亏损、连续亏损、暂停、kill switch
+│   │   │   ├── backtest.py                 # 离线回测引擎
+│   │   │   ├── notify.py                   # Server酱通知
+│   │   │   └── credential_crypto.py        # RSA + AES-GCM 凭证加密
 │   │   └── services/
-│   │       ├── credentials_service.py  # 凭证加密存取与状态管理
-│   │       └── strategy_service.py     # 策略配置与运行时状态的 CRUD
-│   ├── tests/                   # pytest 测试
+│   │       ├── strategy_service.py         # 策略与运行时状态 CRUD
+│   │       ├── trade_execution_service.py  # 下单、pending 对账、盈亏记录
+│   │       ├── runtime_state_service.py    # 状态持久化与历史快照
+│   │       ├── daily_pnl_service.py        # 订单账本日盈亏重算
+│   │       ├── credentials_service.py      # 凭证存取（掩码响应）
+│   │       ├── llm_advisor_service.py      # DeepSeek 区间建议
+│   │       ├── interval_application_service.py  # 区间建议应用规则
+│   │       ├── llm_interaction_service.py  # LLM 调用记录
+│   │       ├── trade_event_service.py      # 决策时间线事件
+│   │       └── data_aggregator.py          # 账户/持仓聚合
+│   ├── tests/                              # pytest
+│   ├── alembic/                            # 历史迁移（运行时以 database._ensure_* 为准）
 │   ├── requirements.txt
+│   ├── requirements-dev.txt
 │   ├── Dockerfile
 │   └── docker-entrypoint.sh
 ├── frontend/
 │   ├── src/
-│   │   ├── App.vue              # 容器布局 + 导航
-│   │   ├── router/index.ts      # 路由：/ → Dashboard, /strategy, /credentials, /history
-│   │   ├── api/index.ts         # axios 封装所有后端接口
-│   │   ├── types/index.ts       # TypeScript 类型定义
+│   │   ├── App.vue                         # 布局与导航
+│   │   ├── router/index.ts                 # Hash 路由（见下表）
+│   │   ├── api/                            # 按域拆分的 HTTP 客户端
+│   │   │   ├── client.ts                   # axios 实例
+│   │   │   ├── strategy.ts / trade.ts / credentials.ts
+│   │   │   ├── llm_advisor.ts / backtest.ts / events.ts
+│   │   ├── composables/                    # useDashboardData、useStatusStream 等
+│   │   ├── components/                     # PriceChart、PnLChart、BacktestChart
+│   │   ├── types/index.ts
 │   │   └── views/
-│   │       ├── Credentials.vue   # 长桥和 Server酱凭证配置（加密保存）
-│   │       ├── Dashboard.vue     # 实时状态面板 + 启停/暂停/恢复/kill switch
-│   │       ├── Strategy.vue      # 策略参数配置表单
-│   │       └── TradeHistory.vue  # 订单成交历史表格
-│   ├── cypress/                  # Cypress E2E 测试与 API stub
-│   │   ├── e2e/
-│   │   │   ├── navigation.cy.ts
-│   │   │   ├── dashboard.cy.ts
-│   │   │   ├── controls.cy.ts
-│   │   │   ├── strategy.cy.ts
-│   │   │   ├── history.cy.ts
-│   │   │   └── credentials.cy.ts
-│   │   ├── fixtures/
-│   │   │   └── strategy.json
-│   │   └── support/
-│   │       └── e2e.ts
-│   ├── package.json
+│   │       ├── Dashboard.vue               # 实时面板、图表、启停控制
+│   │       ├── Strategy.vue                # 策略参数 + LLM 区间
+│   │       ├── TradeHistory.vue            # 订单列表与撤单
+│   │       ├── DecisionTimeline.vue        # 决策事件时间线（/events）
+│   │       ├── Backtest.vue                # CSV 回测
+│   │       └── Credentials.vue             # 凭证配置（不回显明文）
+│   ├── cypress/e2e/                        # E2E（navigation、dashboard、backtest、events…）
+│   ├── nginx.conf                          # 生产：/api、/ws 反代到 backend
 │   ├── vite.config.ts
-│   ├── nginx.conf               # Nginx 反向代理配置（生产）
 │   └── Dockerfile
-├── docker-compose.yaml
+├── docker-compose.yaml                     # frontend 0.0.0.0:8080，backend 仅内网
+├── docs/Roadmap.md
 ├── .env.example
-├── .gitignore
 └── README.md
 ```
 
+### 前端路由
+
+| 路径 | 页面 |
+|------|------|
+| `/#/` | Dashboard — 实时状态、图表、启停/暂停/kill switch |
+| `/#/strategy` | Strategy — 区间参数、LLM 顾问 |
+| `/#/history` | Trade History — 今日/历史订单、撤单 |
+| `/#/events` | Decision Timeline — 交易与 LLM 决策事件 |
+| `/#/backtest` | Backtest — CSV 回测 |
+| `/#/credentials` | Credentials — 长桥 / Server酱凭证 |
+
 ## API 参考
+
+除特别说明外，路径均相对于 Web 入口（Docker 下为 `http://<host>:8080`；本地开发前端代理到 `localhost:8000`）。
+
+### 健康与策略
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/api/health` | 健康检查 |
+| `GET` | `/api/health` | 健康检查（`ok`, `env`） |
 | `GET` | `/api/strategy` | 获取策略配置 |
-| `PUT` | `/api/strategy` | 更新策略配置 |
-| `GET` | `/api/status` | 获取运行时状态（引擎状态、价格、盈亏） |
-| `GET` | `/api/credentials` | 获取凭证配置状态（不返回明文凭证） |
-| `PUT` | `/api/credentials` | 更新长桥和 Server酱凭证 |
-| `GET` | `/api/account` | 获取账户资产、现金余额和持仓信息 |
-| `GET` | `/api/orders` | 查询订单列表（`?limit=50`） |
-| `POST` | `/api/control/start` | 启动策略运行 |
-| `POST` | `/api/control/stop` | 停止策略运行 |
-| `POST` | `/api/control/pause` | 暂停交易 |
+| `PUT` | `/api/strategy` | 更新策略配置（支持部分字段） |
+| `GET` | `/api/status` | 运行时状态：引擎、价格、盈亏、暂停、kill switch、`runner_running` |
+| `GET` | `/api/status/history` | 状态历史快照；查询参数 `from`、`to`、`limit`（默认近 6 小时，最多 1000 条） |
+
+### 凭证与账户
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/credentials` | 凭证配置状态（掩码，无明文） |
+| `PUT` | `/api/credentials` | 更新长桥 / Server酱凭证 |
+| `GET` | `/api/account` | 账户净值、现金、持仓 |
+
+### 订单与事件
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/orders` | 分页订单；`scope=today\|history`，`page`，`page_size`（或兼容 `limit`） |
+| `POST` | `/api/orders/{order_id}/cancel` | 撤销指定券商订单 |
+| `GET` | `/api/events` | 决策时间线分页；`page`，`page_size`，可选 `symbol`、`event_type` |
+| `GET` | `/api/events/export` | 导出事件；`format=csv\|json`，`limit` |
+
+### 运行时控制
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/control/start` | 启动策略（订阅行情） |
+| `POST` | `/api/control/stop` | 停止策略 |
+| `POST` | `/api/control/pause` | 暂停交易；可选 JSON body：`reason` |
 | `POST` | `/api/control/resume` | 恢复交易 |
 | `POST` | `/api/control/kill-switch` | 紧急停止 |
 | `POST` | `/api/control/disable-kill-switch` | 解除紧急停止 |
-| `WS` | `/ws` | WebSocket 实时状态推送 |
+
+### LLM 区间顾问
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/strategy/llm-interval/preview` | 预览分析（不应用、不下单） |
+| `POST` | `/api/strategy/llm-interval/analyze` | 分析并可应用区间 / 触发 LLM 下单建议 |
+| `GET` | `/api/strategy/llm-interval/status` | 当前 LLM 区间状态与最近建议 |
+| `GET` | `/api/strategy/llm-interval/interactions` | 历史交互记录；`limit` |
+| `PUT` | `/api/strategy/llm-interval/enable` | 开启自动定时分析 |
+| `PUT` | `/api/strategy/llm-interval/disable` | 关闭自动定时分析 |
+
+### 回测
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/backtest/run` | 运行回测；body：`csv_text` 或 `price_points[]` + `params` |
+
+### WebSocket
+
+| Protocol | Path | Description |
+|----------|------|-------------|
+| `WS` | `/ws` | 实时推送引擎状态、价格、风控标志等 JSON |
+
+> **说明：** `POST /api/strategy/llm-interval/preview` 在配置了 `AUTO_TRADE_API_KEY` 且非 dev/test 时可要求 `X-API-Key`；内网部署通常留空该变量即可。
 
 ## 配置参考
 
@@ -260,22 +337,26 @@ auto_trade/
 |------|------|--------|
 | `AUTO_TRADE_ENV` | 运行环境 | `dev` |
 | `AUTO_TRADE_DATABASE_URL` | SQLite 数据库路径 | `sqlite:///data/auto_trade.db` |
+| `AUTO_TRADE_FRONTEND_PORT` | Docker 前端映射端口（绑定 `0.0.0.0`） | `8080` |
 | `LONGPORT_APP_KEY` | 长桥 App Key | - |
 | `LONGPORT_APP_SECRET` | 长桥 App Secret | - |
 | `LONGPORT_ACCESS_TOKEN` | 长桥 Access Token | - |
 | `AUTO_TRADE_SCT_KEY` | Server酱 SendKey | - |
-| `AUTO_TRADE_API_KEY` | Web/API 管理密钥，Docker Compose 启动时必须设置 | - |
-| `CREDENTIAL_MASTER_KEY` | 本地保存券商凭证时用于加密私钥文件的主密钥，建议首次保存凭证前设置 | - |
+| `AUTO_TRADE_API_KEY` | 可选 API 密钥（内网可留空） | - |
+| `CREDENTIAL_MASTER_KEY` | 凭证加密主密钥；保护 `data/credential_private_key.pem` | - |
+| `AUTO_TRADE_CREDENTIAL_KEY_PATH` | RSA 私钥文件路径（测试/多实例可覆盖） | `data/credential_private_key.pem` |
+| `DEEPSEEK_API_KEY` | DeepSeek API 密钥（LLM 顾问） | - |
+| `AUTO_TRADE_MIN_EXIT_PROFIT_PCT` | 平仓最低盈利百分比缓冲 | `0.2` |
 
-长桥 SDK 官方使用 `LONGPORT_*` 凭证变量；项目仍兼容旧的 `LONGBRIDGE_*` 变量名。所有 auto_trade 特定配置均使用 `AUTO_TRADE_` 前缀。
+长桥 SDK 官方使用 `LONGPORT_*` 凭证变量；项目仍兼容旧的 `LONGBRIDGE_*` 变量名。`auto_trade` 业务配置使用 `AUTO_TRADE_` 前缀；`CREDENTIAL_MASTER_KEY` 无此前缀。
 
 ## 安全
 
 - **绝不提交** `.env`、API 凭证到代码仓库（已加入 `.gitignore`）
 - 长桥凭证可通过环境变量注入，也可通过加密的凭证 API / Web UI 保存到本地；前端不会回显或输出明文凭证
-- Docker Compose 默认只绑定 `127.0.0.1`，并要求设置 `AUTO_TRADE_API_KEY`
+- **部署假设：仅在内网使用。** Docker Compose 将前端绑定到 `0.0.0.0:${AUTO_TRADE_FRONTEND_PORT:-8080}`，便于局域网内其它设备访问；请确保网络边界可信（防火墙/VLAN），不要将服务直接暴露到公网
+- `AUTO_TRADE_API_KEY` 为可选配置项（内网部署可不启用 API 鉴权）
 - 生产环境建议通过 Docker secrets 或外部密钥管理服务注入敏感信息
-- 如需暴露到公网，请先配置反向代理、HTTPS、认证和访问控制
 
 ## 限制
 
@@ -283,7 +364,7 @@ auto_trade/
 - 长桥 SDK 不适合高频交易，请控制下单频率
 - 行情权限、交易权限和可交易品种以长桥账户实际开通为准
 - 交易时段、费率以长桥 App 和官网实时展示为准
-- 暂不支持回测系统
+- 回测为离线 CSV 模拟，与实盘滑点/成交可能有差异
 
 ## License
 

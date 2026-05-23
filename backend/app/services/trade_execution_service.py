@@ -18,6 +18,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("auto_trade.services.trade_execution_service")
 
+
+class OrderPersistenceError(RuntimeError):
+    """Raised when a broker order was submitted but could not be persisted locally."""
+
+
 _LIVE_ORDER_STATUSES = {"SUBMITTED", "PARTIAL_FILLED"}
 _FAILED_ORDER_STATUSES = {"REJECTED", "CANCELLED"}
 _SKIPPED_ORDER_STATUS = "SKIPPED"
@@ -48,6 +53,7 @@ class _PendingOrder:
     engine_snapshot: _EngineSnapshot | None
     avg_price: Decimal | None = None
     next_status_check_at: float = 0.0
+    submitted_at: float = 0.0
 
 
 @dataclass
@@ -166,6 +172,16 @@ class TradeExecutionService:
         restore_engine_snapshot: Callable[[_EngineSnapshot], None] | None = None,
         notify_risk_event: _NotifyRiskEvent | None = None,
     ) -> OrderStatus | None:
+        risk_result = risk.check()
+        if not risk_result.approved:
+            logger.warning("execute rejected by risk: %s", risk_result.reason)
+            return OrderStatus("", _SKIPPED_ORDER_STATUS, reason=risk_result.reason)
+
+        with self._state_lock:
+            if self._pending_order is not None:
+                logger.warning("execute skipped: pending order %s still live", self._pending_order.broker_order_id)
+                return OrderStatus("", _SKIPPED_ORDER_STATUS, reason="pending order in flight")
+
         if action == "BUY":
             return self._execute_buy(symbol, quote, broker, risk, notifier, cash_currency, engine_snapshot=engine_snapshot, restore_engine_snapshot=restore_engine_snapshot, notify_risk_event=notify_risk_event)
         if action == "SELL":
@@ -316,7 +332,17 @@ class TradeExecutionService:
 
         result = broker.submit_limit_order(symbol, "BUY", Decimal(qty), price)
         status = getattr(result, "status", "SUBMITTED")
-        self._safe_record_order(result.broker_order_id, symbol, "BUY", float(qty), float(price), status)
+        try:
+            self._persist_submitted_order(result.broker_order_id, symbol, "BUY", float(qty), float(price), status)
+        except OrderPersistenceError:
+            return self._recover_from_missing_order_record(
+                result,
+                broker,
+                risk,
+                notify_risk_event=notify_risk_event,
+                engine_snapshot=engine_snapshot,
+                restore_engine_snapshot=restore_engine_snapshot,
+            )
         order_status = self._order_status_from_submit_result(result)
         self._safe_update_order_status_from_result(order_status)
 
@@ -383,7 +409,17 @@ class TradeExecutionService:
 
         result = broker.submit_limit_order(symbol, "SELL", qty, price)
         status = getattr(result, "status", "SUBMITTED")
-        self._safe_record_order(result.broker_order_id, symbol, "SELL", float(qty), float(price), status)
+        try:
+            self._persist_submitted_order(result.broker_order_id, symbol, "SELL", float(qty), float(price), status)
+        except OrderPersistenceError:
+            return self._recover_from_missing_order_record(
+                result,
+                broker,
+                risk,
+                notify_risk_event=notify_risk_event,
+                engine_snapshot=engine_snapshot,
+                restore_engine_snapshot=restore_engine_snapshot,
+            )
         order_status = self._order_status_from_submit_result(result)
         self._safe_update_order_status_from_result(order_status)
 
@@ -433,7 +469,17 @@ class TradeExecutionService:
 
         result = broker.submit_limit_order(symbol, "SELL", Decimal(qty), price)
         status = getattr(result, "status", "SUBMITTED")
-        self._safe_record_order(result.broker_order_id, symbol, "SELL_SHORT", float(qty), float(price), status)
+        try:
+            self._persist_submitted_order(result.broker_order_id, symbol, "SELL_SHORT", float(qty), float(price), status)
+        except OrderPersistenceError:
+            return self._recover_from_missing_order_record(
+                result,
+                broker,
+                risk,
+                notify_risk_event=notify_risk_event,
+                engine_snapshot=engine_snapshot,
+                restore_engine_snapshot=restore_engine_snapshot,
+            )
         order_status = self._order_status_from_submit_result(result)
         self._safe_update_order_status_from_result(order_status)
 
@@ -500,7 +546,17 @@ class TradeExecutionService:
 
         result = broker.submit_limit_order(symbol, "BUY", qty, price)
         status = getattr(result, "status", "SUBMITTED")
-        self._safe_record_order(result.broker_order_id, symbol, "BUY_TO_COVER", float(qty), float(price), status)
+        try:
+            self._persist_submitted_order(result.broker_order_id, symbol, "BUY_TO_COVER", float(qty), float(price), status)
+        except OrderPersistenceError:
+            return self._recover_from_missing_order_record(
+                result,
+                broker,
+                risk,
+                notify_risk_event=notify_risk_event,
+                engine_snapshot=engine_snapshot,
+                restore_engine_snapshot=restore_engine_snapshot,
+            )
         order_status = self._order_status_from_submit_result(result)
         self._safe_update_order_status_from_result(order_status)
 
@@ -549,6 +605,7 @@ class TradeExecutionService:
             engine_snapshot=engine_snapshot,
             avg_price=avg_price,
             next_status_check_at=time.monotonic() + self._order_status_poll_interval_seconds,
+            submitted_at=time.monotonic(),
         )
         with self._state_lock:
             self._pending_order = pending
@@ -569,6 +626,19 @@ class TradeExecutionService:
         now = time.monotonic()
         if now < pending.next_status_check_at:
             return
+        if (
+            self._order_status_timeout_seconds > 0
+            and now - pending.submitted_at >= self._order_status_timeout_seconds
+        ):
+            self._handle_pending_order_timeout(
+                pending,
+                risk=risk,
+                notifier=notifier,
+                restore_engine_snapshot=restore_engine_snapshot,
+                notify_risk_event=notify_risk_event,
+            )
+            return
+
         updated_pending = _PendingOrder(
             broker=pending.broker,
             broker_order_id=pending.broker_order_id,
@@ -579,6 +649,7 @@ class TradeExecutionService:
             engine_snapshot=pending.engine_snapshot,
             avg_price=pending.avg_price,
             next_status_check_at=now + self._order_status_poll_interval_seconds,
+            submitted_at=pending.submitted_at,
         )
         with self._state_lock:
             self._pending_order = updated_pending
@@ -609,6 +680,63 @@ class TradeExecutionService:
                 restore_engine_snapshot(updated_pending.engine_snapshot)
             return
         logger.debug("pending order still live: %s status=%s", updated_pending.broker_order_id, status)
+
+    def _handle_pending_order_timeout(
+        self,
+        pending: _PendingOrder,
+        *,
+        risk: RiskController | None = None,
+        notifier: ServerChanNotifier | None = None,
+        restore_engine_snapshot: Callable[[_EngineSnapshot], None] | None = None,
+        notify_risk_event: _NotifyRiskEvent | None = None,
+    ) -> None:
+        reason = f"pending order {pending.broker_order_id} timed out after {self._order_status_timeout_seconds:.0f}s"
+        logger.warning(reason)
+        try:
+            order_status = self._coerce_order_status(
+                pending.broker.get_order_status(pending.broker_order_id),
+                pending.broker_order_id,
+            )
+            self._safe_update_order_status_from_result(order_status)
+            if order_status.status == "FILLED":
+                self._finalize_pending_fill(pending, order_status, risk=risk, notifier=notifier, notify_risk_event=notify_risk_event)
+                self._clear_pending_order(pending.broker_order_id)
+                return
+            if order_status.status in _FAILED_ORDER_STATUSES:
+                fill_qty = self._resolved_decimal(order_status, "executed_quantity", Decimal("0"))
+                if fill_qty > 0:
+                    self._finalize_pending_fill(
+                        pending,
+                        order_status,
+                        risk=risk,
+                        notifier=notifier,
+                        fill_qty=fill_qty,
+                        notify_risk_event=notify_risk_event,
+                    )
+                else:
+                    self._pause_after_failed_order(pending.broker_order_id, order_status.status, risk, notify_risk_event)
+                self._clear_pending_order(pending.broker_order_id)
+                if restore_engine_snapshot is not None and pending.engine_snapshot is not None:
+                    restore_engine_snapshot(pending.engine_snapshot)
+                return
+        except Exception:
+            logger.exception("failed to query pending order status during timeout for %s", pending.broker_order_id)
+
+        if risk is not None:
+            risk.pause(reason, auto_resumable=False)
+        try:
+            self._record_risk_event(reason)
+        except Exception:
+            logger.exception("failed to record pending-order timeout risk event for %s", pending.broker_order_id)
+        if notify_risk_event is not None:
+            try:
+                notify_risk_event("ORDER_TIMEOUT", reason)
+            except Exception:
+                logger.exception("failed to send pending-order timeout notification for %s", pending.broker_order_id)
+
+        self._clear_pending_order(pending.broker_order_id)
+        if restore_engine_snapshot is not None and pending.engine_snapshot is not None:
+            restore_engine_snapshot(pending.engine_snapshot)
 
     def _finalize_pending_fill(
         self,
@@ -713,11 +841,43 @@ class TradeExecutionService:
             return fallback
         return decimal_value if decimal_value > 0 else fallback
 
-    def _safe_record_order(self, order_id: str, symbol: str, side: str, qty: float, price: float, status: str = "SUBMITTED") -> None:
+    def _persist_submitted_order(self, order_id: str, symbol: str, side: str, qty: float, price: float, status: str = "SUBMITTED") -> None:
         try:
             self._record_order(order_id, symbol, side, qty, price, status)
-        except Exception:
+        except Exception as exc:
             logger.exception("failed to record order %s for %s", order_id, symbol)
+            raise OrderPersistenceError(f"failed to persist order {order_id}") from exc
+
+    def _recover_from_missing_order_record(
+        self,
+        result: OrderResult,
+        broker: BrokerGateway,
+        risk: RiskController,
+        *,
+        notify_risk_event: _NotifyRiskEvent | None = None,
+        engine_snapshot: _EngineSnapshot | None = None,
+        restore_engine_snapshot: Callable[[_EngineSnapshot], None] | None = None,
+    ) -> OrderStatus:
+        reason = f"order {result.broker_order_id} submitted but local record failed"
+        logger.error(reason)
+        if self._order_status_is_live(result):
+            try:
+                broker.cancel_order(result.broker_order_id)
+            except Exception:
+                logger.exception("failed to cancel orphan order %s after persistence failure", result.broker_order_id)
+        risk.pause(reason, auto_resumable=False)
+        try:
+            self._record_risk_event(reason)
+        except Exception:
+            logger.exception("failed to record orphan-order risk event for %s", result.broker_order_id)
+        if notify_risk_event is not None:
+            try:
+                notify_risk_event("ORDER_PERSISTENCE_FAILED", reason)
+            except Exception:
+                logger.exception("failed to send orphan-order notification for %s", result.broker_order_id)
+        if restore_engine_snapshot is not None and engine_snapshot is not None:
+            restore_engine_snapshot(engine_snapshot)
+        return OrderStatus(result.broker_order_id, "REJECTED", reason=reason)
 
     def _safe_update_order_status(
         self,

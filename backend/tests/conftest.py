@@ -8,6 +8,10 @@ os.environ["AUTO_TRADE_DATABASE_URL"] = os.environ.get(
     "AUTO_TRADE_TEST_DATABASE_URL",
     f"sqlite:///{tempfile.gettempdir()}/auto_trade_pytest_{os.getpid()}.db",
 )
+os.environ["AUTO_TRADE_CREDENTIAL_KEY_PATH"] = os.path.join(
+    tempfile.gettempdir(),
+    f"auto_trade_cred_key_{os.getpid()}.pem",
+)
 
 for name in (
     "AUTO_TRADE_API_KEY",

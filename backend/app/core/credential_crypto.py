@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 _PREFIX = "enc:"
-_KEY_PATH = Path("data/credential_private_key.pem")
+_KEY_PATH = Path(os.environ.get("AUTO_TRADE_CREDENTIAL_KEY_PATH", "data/credential_private_key.pem"))
 
 
 def is_encrypted(value: str) -> bool:

@@ -111,6 +111,14 @@ class TestStrategyEngine:
         engine.sync_state(has_long_position=False, has_short_position=False)
         assert engine.state == EngineState.FLAT
 
+    def test_sync_state_preserves_trigger_cooldown(self) -> None:
+        from datetime import datetime, timezone
+
+        engine = StrategyEngine(make_params(100, 200))
+        engine.last_trigger_at = datetime.now(timezone.utc)
+        engine.sync_state(has_long_position=True, has_short_position=False)
+        assert engine.last_trigger_at is not None
+
     def test_to_dict(self) -> None:
         engine = StrategyEngine(make_params(100, 200))
         d = engine.to_dict()

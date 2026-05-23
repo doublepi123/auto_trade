@@ -17,6 +17,7 @@ def init_db() -> None:
 
     Base.metadata.create_all(bind=engine)
     _ensure_order_execution_columns(engine)
+    _ensure_order_raw_response_column(engine)
     _ensure_strategy_config_llm_columns(engine)
     _ensure_runtime_state_daily_pnl_date_column(engine)
 
@@ -42,6 +43,17 @@ def _ensure_order_execution_columns(db_engine: Engine) -> None:
         for name, column_type in missing_columns:
             if name not in columns:
                 connection.exec_driver_sql(f"ALTER TABLE orders ADD COLUMN {name} {column_type}")
+
+
+def _ensure_order_raw_response_column(db_engine: Engine) -> None:
+    inspector = inspect(db_engine)
+    if "orders" not in inspector.get_table_names():
+        return
+
+    columns = {column["name"] for column in inspector.get_columns("orders")}
+    with db_engine.begin() as connection:
+        if "raw_response" not in columns:
+            connection.exec_driver_sql("ALTER TABLE orders ADD COLUMN raw_response TEXT")
 
 
 def _ensure_strategy_config_llm_columns(db_engine: Engine) -> None:

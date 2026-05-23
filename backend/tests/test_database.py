@@ -54,6 +54,45 @@ def test_init_db_adds_missing_order_execution_columns(tmp_path, monkeypatch) -> 
     Base.metadata.drop_all(bind=engine)
 
 
+def test_init_db_adds_missing_order_raw_response_column(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "legacy_orders.db"
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(
+            """
+            CREATE TABLE orders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                broker_order_id VARCHAR(100) NOT NULL,
+                symbol VARCHAR(50) NOT NULL,
+                side VARCHAR(20) NOT NULL,
+                quantity FLOAT NOT NULL,
+                price FLOAT NOT NULL,
+                status VARCHAR(20) NOT NULL,
+                created_at DATETIME NOT NULL,
+                filled_at DATETIME,
+                executed_quantity FLOAT,
+                executed_price FLOAT
+            )
+            """
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    testing_session = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    monkeypatch.setattr(database, "engine", engine)
+    monkeypatch.setattr(database, "SessionLocal", testing_session)
+
+    database.init_db()
+
+    with engine.connect() as db:
+        columns = {row[1] for row in db.exec_driver_sql("PRAGMA table_info(orders)")}
+    assert "raw_response" in columns
+
+    Base.metadata.drop_all(bind=engine)
+
+
 def test_init_db_creates_llm_interactions_table(tmp_path, monkeypatch) -> None:
     db_path = tmp_path / "llm_interactions.db"
     engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})

@@ -33,23 +33,19 @@
 
 当前系统已经完成 LLM 自动决策上下文、主动价格刷新、订单同步、今日订单分页与撤单、决策时间线、Dashboard 图表化监控。后续计划按“先降低交易风险，再增强复盘能力，再提升运维体验”的顺序推进。
 
-### P3：回测与参数验证 MVP
+### P3：回测与参数验证 MVP ✅（已完成）
 
 > **目标：** 在实盘继续运行前，用历史价格序列验证当前策略区间、最低盈利金额、止损/撤单规则的收益和风险。
 
-#### 范围
+#### 已交付
 
-- 后端新增纯函数式 `BacktestEngine`，不调用券商、不发通知、不写真实订单。
-- 支持 CSV 输入：`timestamp,open,high,low,close,volume`。
-- 支持策略参数覆盖：`buy_low`, `sell_high`, `short_selling`, `min_profit_amount`, `max_daily_loss`, `max_consecutive_losses`。
-- 输出：收益曲线、交易明细、胜率、最大回撤、总收益、平均持仓时间、手续费敏感性。
-- 前端新增“回测”页面：CSV 上传/粘贴、参数表单、结果图表、交易明细表。
+- 后端 `BacktestEngine` + `POST /api/backtest/run`（CSV：`timestamp,open,high,low,close,volume`）
+- 前端 **Backtest** 页：CSV 上传/粘贴、参数表单、收益曲线、交易明细、手续费敏感性
+- pytest + Cypress `backtest.cy.ts` 覆盖主流程
 
-#### 验证
+#### 后续可选增强
 
-- 后端测试覆盖 `flat -> long -> flat`、`flat -> short -> flat`、止损、日亏损暂停、最低盈利金额过滤。
-- Cypress 覆盖上传 CSV、运行回测、展示指标和交易表。
-- Docker 部署后 `POST /api/backtest/run` 返回稳定结构。
+- Sharpe / 盈亏比等扩展指标（Roadmap 原列项，当前 UI 未展示）
 
 ### P4：交易执行安全与成本控制增强
 

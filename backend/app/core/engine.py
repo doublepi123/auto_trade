@@ -125,7 +125,6 @@ class StrategyEngine:
                 self.state = EngineState.SHORT
             else:
                 self.state = EngineState.FLAT
-            self.last_trigger_at = None
 
     def to_dict(self) -> dict:
         with self._lock:
