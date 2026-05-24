@@ -7,16 +7,18 @@ import threading
 import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from typing import Any, Generator, Optional
 
 from app.api.ws import manager
 from app.config import settings
 from app.core.broker import BrokerGateway, Quote
 from app.core.engine import EngineState, StrategyEngine, StrategyParams
+from app.core.market_calendar import is_trading_hours, trade_day_for
 from app.core.notify import ServerChanNotifier
 from app.core.risk import RiskConfig, RiskController
 from app.database import SessionLocal
-from app.models import OrderRecord
+from app.models import OrderRecord, TrackedEntry
 from app.services.daily_pnl_service import DailyPnlService
 from app.services.credentials_service import CredentialsService, PlainCredentials
 from app.services.runtime_state_service import RuntimeStateService
@@ -44,13 +46,14 @@ class AppRunner:
     def __init__(self) -> None:
         self.broker = BrokerGateway()
         self.engine = StrategyEngine()
-        self.risk = RiskController()
+        self.risk = RiskController(trade_day_provider=self._market_trade_day)
         self.notifier = ServerChanNotifier("")
         self._trade_svc = TradeExecutionService(
             record_order=self._record_order,
             update_order_status=self._update_order_status,
             record_risk_event=self._record_risk_event,
             record_order_skipped=self._record_order_skipped,
+            persist_entry=self._persist_tracked_entry,
         )
         self._state_svc = RuntimeStateService()
         self._running = False
@@ -62,25 +65,30 @@ class AppRunner:
         self._trigger_in_flight = False
         self._defer_broker_close = False
         self._last_quote_at = 0.0
+        self._last_push_quote_at = 0.0
         self._last_active_quote_refresh_at = 0.0
         self._active_quote_refresh_interval_seconds = 15.0
+        self._quote_resubscribe_threshold_seconds = 90.0
         self._last_position_sync_at = 0.0
         self._position_sync_interval_seconds = 15.0
         self._last_order_sync_at = 0.0
         self._order_sync_interval_seconds = 15.0
         self._recent_quote_window_seconds = 300.0
+        self._recent_quotes_cap = 500
         self._recent_quotes: list[dict[str, Any]] = []
         self._last_action_message = ""
 
     def _initialize_runner(self) -> None:
         with self._db_session() as db:
             self._state_svc.load(db, self.engine, self.risk)
+            self._load_tracked_entries(db)
             self._apply_credentials(self._load_credentials(), resubscribe=False)
 
         self.sync_today_orders_from_broker(force=True)
         self._sync_risk_from_order_ledger()
         with self._db_session() as db:
             self._pause_if_unresolved_live_order_exists(db)
+            self._reconcile_tracked_entries_with_broker(db)
 
         try:
             self._loop = asyncio.get_running_loop()
@@ -93,6 +101,7 @@ class AppRunner:
             try:
                 self.broker.subscribe_quotes(symbol, self._on_quote)
                 self._quotes_subscribed = True
+                self._last_push_quote_at = time.monotonic()
                 logger.info("subscribed to %s quotes", symbol)
             except Exception as exc:
                 logger.error("quote subscription failed for %s: %s", symbol, exc)
@@ -111,10 +120,12 @@ class AppRunner:
         logger.warning(reason)
         self.risk.pause(reason)
 
-    def start(self) -> bool:
+    def start(self, *, loop: asyncio.AbstractEventLoop | None = None) -> bool:
         with self._start_lock:
             if self._running:
                 return False
+            if loop is not None:
+                self._loop = loop
             if self._thread is not None and self._thread.is_alive():
                 self._running = False
                 self._thread.join(timeout=10)
@@ -183,19 +194,22 @@ class AppRunner:
                         try:
                             self.broker.subscribe_quotes(config.symbol, self._on_quote)
                             self._quotes_subscribed = True
+                            self._last_push_quote_at = time.monotonic()
                             logger.info("re-subscribed to %s after strategy reload", config.symbol)
                         except Exception as exc:
                             logger.error("quote subscription failed after strategy reload: %s", exc)
             finally:
                 db.close()
 
-    def _on_quote(self, quote: Quote) -> None:
+    def _on_quote(self, quote: Quote, *, is_push: bool = True) -> None:
         processing_started = False
         result = None
         engine_snapshot = None
         trigger_symbol = None
         try:
             with self._state_lock:
+                if is_push:
+                    self._last_push_quote_at = time.monotonic()
                 self._remember_quote(quote)
                 if not self._running or self._trigger_in_flight:
                     return
@@ -539,6 +553,7 @@ class AppRunner:
     def _reset_quote_tracking(self, *, clear_history: bool) -> None:
         with self._state_lock:
             self._last_quote_at = 0.0
+            self._last_push_quote_at = 0.0
             self._last_active_quote_refresh_at = 0.0
             if clear_history:
                 self._recent_quotes = []
@@ -562,6 +577,8 @@ class AppRunner:
             for item in self._recent_quotes
             if isinstance(item.get("observed_at"), datetime) and item["observed_at"] >= cutoff
         ]
+        if len(self._recent_quotes) > self._recent_quotes_cap:
+            self._recent_quotes = self._recent_quotes[-self._recent_quotes_cap:]
 
     def recent_price_context(self, window_seconds: float = 300.0) -> list[dict[str, Any]]:
         now = datetime.now(timezone.utc)
@@ -587,6 +604,44 @@ class AppRunner:
                 for item in entries
             ]
 
+    def _resubscribe_quotes_if_silent(self) -> bool:
+        """If the quote stream has been silent past the threshold, drop and resubscribe.
+
+        Active refresh can keep prices current when a stream drops, but it
+        intentionally does not update ``_last_push_quote_at``. This watchdog
+        therefore repairs a silent subscription even while polling succeeds.
+        """
+        with self._state_lock:
+            if not self._running or self._trigger_in_flight:
+                return False
+            symbol = self.engine.params.symbol
+            if not symbol or not self._quotes_subscribed:
+                return False
+            if not is_trading_hours(self.engine.params.market):
+                return False
+            if self._last_push_quote_at <= 0:
+                return False
+            silence = time.monotonic() - self._last_push_quote_at
+            if silence < self._quote_resubscribe_threshold_seconds:
+                return False
+
+        try:
+            self.broker.unsubscribe_quotes()
+        except Exception:
+            logger.warning("failed to unsubscribe before resubscribe for %s", symbol)
+        try:
+            self.broker.subscribe_quotes(symbol, self._on_quote)
+        except Exception as exc:
+            logger.error("quote resubscribe failed for %s: %s", symbol, exc)
+            with self._state_lock:
+                self._quotes_subscribed = False
+            return False
+        with self._state_lock:
+            self._quotes_subscribed = True
+            self._last_push_quote_at = time.monotonic()
+        logger.warning("resubscribed quotes for %s after %.0fs silence", symbol, silence)
+        return True
+
     def _refresh_quote_if_stale(self) -> None:
         with self._state_lock:
             if not self._running or self._trigger_in_flight:
@@ -610,7 +665,7 @@ class AppRunner:
         except Exception as exc:
             logger.warning("active quote refresh failed for %s: %s", symbol, exc)
             return
-        self._on_quote(quote)
+        self._on_quote(quote, is_push=False)
 
     def sync_today_orders_from_broker(self, *, force: bool = False) -> int:
         with self._state_lock:
@@ -639,10 +694,19 @@ class AppRunner:
         self._sync_risk_from_order_ledger()
         return changed
 
+    def _market_trade_day(self):
+        return trade_day_for(self.engine.params.market)
+
+    def _market_trade_day_for(self, instant) -> Any:
+        return trade_day_for(self.engine.params.market, instant)
+
     def _sync_risk_from_order_ledger(self) -> bool:
         try:
             with self._db_session() as db:
-                result = DailyPnlService(db).calculate()
+                result = DailyPnlService(db).calculate(
+                    trade_day=self._market_trade_day(),
+                    to_trade_day=self._market_trade_day_for,
+                )
         except Exception:
             logger.exception("failed to sync realized daily pnl from order ledger")
             return False
@@ -782,8 +846,10 @@ class AppRunner:
 
     @staticmethod
     def _coerce_float(value: object) -> float:
+        if value is None:
+            return 0.0
         try:
-            return float(value)
+            return float(value)  # pyright: ignore[reportArgumentType]
         except Exception:
             return 0.0
 
@@ -792,7 +858,7 @@ class AppRunner:
         if value is None:
             return None
         try:
-            return float(value)
+            return float(value)  # pyright: ignore[reportArgumentType]
         except Exception:
             return None
 
@@ -837,6 +903,10 @@ class AppRunner:
                 self._refresh_quote_if_stale()
             except Exception:
                 logger.exception("error refreshing stale quote")
+            try:
+                self._resubscribe_quotes_if_silent()
+            except Exception:
+                logger.exception("error resubscribing stale quote stream")
             try:
                 with self._db_session() as db:
                     self._state_svc.persist(db, self.engine, self.risk)
@@ -991,6 +1061,7 @@ class AppRunner:
             if should_resubscribe:
                 self._quotes_subscribed = True
                 self._reset_quote_tracking(clear_history=True)
+                self._last_push_quote_at = time.monotonic()
             else:
                 self._quotes_subscribed = False
 
@@ -1100,6 +1171,89 @@ class AppRunner:
                 payload={"source": "risk_controller"},
             )
             db.commit()
+
+    def _load_tracked_entries(self, db) -> None:
+        try:
+            rows = db.query(TrackedEntry).all()
+        except Exception:
+            logger.exception("failed to load tracked entries")
+            return
+        entries: dict[str, tuple[Decimal, Decimal]] = {}
+        for row in rows:
+            try:
+                quantity = Decimal(str(row.quantity))
+                cost = Decimal(str(row.cost))
+            except Exception:
+                continue
+            if quantity > 0 and cost > 0:
+                entries[row.symbol] = (quantity, cost)
+        if entries:
+            self._trade_svc.load_tracked_entries(entries)
+            logger.info("restored %d tracked entry positions from db", len(entries))
+
+    def _persist_tracked_entry(self, symbol: str, quantity: Decimal, cost: Decimal) -> None:
+        with self._db_session() as db:
+            existing = db.query(TrackedEntry).filter(TrackedEntry.symbol == symbol).first()
+            if quantity <= 0:
+                if existing is not None:
+                    db.delete(existing)
+                    db.commit()
+                return
+            if existing is None:
+                existing = TrackedEntry(
+                    symbol=symbol,
+                    quantity=float(quantity),
+                    cost=float(cost),
+                )
+                db.add(existing)
+            else:
+                existing.quantity = float(quantity)
+                existing.cost = float(cost)
+                existing.updated_at = datetime.now(timezone.utc)
+            db.commit()
+
+    def _reconcile_tracked_entries_with_broker(self, db) -> None:
+        snapshot = self._trade_svc.snapshot_tracked_entries()
+        if not snapshot:
+            return
+        try:
+            positions = self.broker.get_positions()
+        except Exception as exc:
+            logger.warning("tracked entry reconciliation skipped: %s", exc)
+            return
+        broker_qty: dict[str, Decimal] = {}
+        for pos in positions:
+            try:
+                qty = Decimal(str(pos.quantity))
+            except Exception:
+                continue
+            broker_qty[pos.symbol] = broker_qty.get(pos.symbol, Decimal("0")) + qty
+        for symbol, (tracked_qty, tracked_cost) in snapshot.items():
+            broker_have = broker_qty.get(symbol, Decimal("0"))
+            if tracked_qty <= 0:
+                continue
+            drift_pct = abs(tracked_qty - broker_have) / tracked_qty
+            if drift_pct < Decimal("0.05") and abs(tracked_qty - broker_have) < Decimal("1"):
+                continue
+            payload = {
+                "symbol": symbol,
+                "tracked_quantity": float(tracked_qty),
+                "tracked_avg_price": float(tracked_cost / tracked_qty) if tracked_qty > 0 else 0.0,
+                "broker_quantity": float(broker_have),
+                "drift_pct": float(drift_pct),
+                "source": "startup_tracked_entry_reconcile",
+            }
+            record_trade_event(
+                db,
+                event_type="TRACKED_ENTRY_DRIFT",
+                symbol=symbol,
+                status="WARNING",
+                message=(
+                    f"tracked qty {tracked_qty} diverged from broker qty {broker_have} for {symbol}"
+                ),
+                payload=payload,
+            )
+        db.commit()
 
     def _record_order_skipped(
         self,

@@ -55,39 +55,6 @@ class TestTradeExecutionServiceBasics:
         result = svc._resolved_decimal(item, "executed_price", Decimal("99"))
         assert result == Decimal("99")
 
-    def test_wait_for_order_completion_already_filled(self, svc: TradeExecutionService) -> None:
-        from app.core.broker import OrderResult
-        result = OrderResult(
-            broker_order_id="1",
-            symbol="AAPL.US",
-            side="BUY",
-            quantity=Decimal("10"),
-            price=Decimal("150"),
-            status="FILLED",
-        )
-        status = svc._wait_for_order_completion(result, None)
-        assert status.status == "FILLED"
-
-    def test_wait_for_order_completion_rejected(self, svc: TradeExecutionService) -> None:
-        from app.core.broker import OrderResult
-        result = OrderResult(
-            broker_order_id="1",
-            symbol="AAPL.US",
-            side="BUY",
-            quantity=Decimal("10"),
-            price=Decimal("150"),
-            status="SUBMITTED",
-        )
-        broker = MagicMock()
-        broker.get_order_status.return_value = MagicMock(
-            status="REJECTED",
-            executed_quantity=Decimal("0"),
-            executed_price=Decimal("0"),
-            broker_order_id="1",
-        )
-        status = svc._wait_for_order_completion(result, broker)
-        assert status.status == "REJECTED"
-
     def test_coerce_order_status(self, svc: TradeExecutionService) -> None:
         raw = MagicMock()
         raw.status = "FILLED"
@@ -162,7 +129,6 @@ class TestTradeExecutionServiceBasics:
         broker = MagicMock()
         broker.estimate_margin_max_quantity.return_value = Decimal("100")
         broker.submit_limit_order.return_value = OrderResult("order-1", "NVDA.US", "BUY", Decimal("90"), Decimal("222.5"), "FILLED")
-        monkeypatch.setattr(svc, "_wait_for_order_completion", lambda result, broker_arg=None: OrderStatus("order-1", "FILLED", Decimal("90"), Decimal("222.5")))
 
         status = svc.execute(
             "BUY",
@@ -179,6 +145,82 @@ class TestTradeExecutionServiceBasics:
         broker.get_cash.assert_not_called()
         broker.submit_limit_order.assert_called_once_with("NVDA.US", "BUY", Decimal("90"), Decimal("222.5"))
 
+    def test_normalize_limit_price_hk_tier_boundaries(self) -> None:
+        # 0.243 lives in the 0.005-tick tier (≥0.25 is not yet reached → 0.001 tier)
+        # Actually 0.243 < 0.25 → 0.001 tick tier. BUY rounds down, SELL rounds up.
+        assert TradeExecutionService._normalize_limit_price("0700.HK", "BUY", Decimal("0.2433")) == Decimal("0.243")
+        assert TradeExecutionService._normalize_limit_price("0700.HK", "SELL", Decimal("0.2431")) == Decimal("0.244")
+        # 0.30 → 0.005 tick tier (>=0.25 and <0.50)
+        assert TradeExecutionService._normalize_limit_price("0700.HK", "BUY", Decimal("0.303")) == Decimal("0.300")
+        assert TradeExecutionService._normalize_limit_price("0700.HK", "SELL", Decimal("0.301")) == Decimal("0.305")
+        # 5.00 → 0.01 tick tier (>=0.5 and <10)
+        assert TradeExecutionService._normalize_limit_price("0700.HK", "BUY", Decimal("5.005")) == Decimal("5.00")
+        assert TradeExecutionService._normalize_limit_price("0700.HK", "SELL", Decimal("5.005")) == Decimal("5.01")
+        # Phase 1: 10-20 now trades in 0.01 ticks.
+        assert TradeExecutionService._normalize_limit_price("0700.HK", "BUY", Decimal("15.017")) == Decimal("15.01")
+        assert TradeExecutionService._normalize_limit_price("0700.HK", "SELL", Decimal("15.011")) == Decimal("15.02")
+        # Phase 1: 20-50 now trades in 0.02 ticks.
+        assert TradeExecutionService._normalize_limit_price("0700.HK", "BUY", Decimal("25.037")) == Decimal("25.02")
+        assert TradeExecutionService._normalize_limit_price("0700.HK", "SELL", Decimal("25.037")) == Decimal("25.04")
+        # 150.04 -> 0.10 tick tier (>=100 and <200): BUY floors to 150.00, SELL ceils to 150.10.
+        assert TradeExecutionService._normalize_limit_price("0700.HK", "BUY", Decimal("150.04")) == Decimal("150.00")
+        assert TradeExecutionService._normalize_limit_price("0700.HK", "SELL", Decimal("150.01")) == Decimal("150.10")
+
+    def test_normalize_limit_price_passes_through_non_us_non_hk(self) -> None:
+        # Markets without explicit tick mapping must not silently mutate the price.
+        price = Decimal("1234.5678")
+        assert TradeExecutionService._normalize_limit_price("FOO.SG", "BUY", price) == price
+
+    def test_load_tracked_entries_round_trip(self, svc: TradeExecutionService) -> None:
+        svc.load_tracked_entries({
+            "AAPL.US": (Decimal("100"), Decimal("15000")),
+            "0700.HK": (Decimal("0"), Decimal("0")),  # ignored
+        })
+        snapshot = svc.snapshot_tracked_entries()
+        assert "0700.HK" not in snapshot
+        assert snapshot["AAPL.US"] == (Decimal("100"), Decimal("15000"))
+
+    def test_persist_callback_invoked_on_entry_and_exit(self) -> None:
+        calls: list[tuple[str, Decimal, Decimal]] = []
+
+        svc = TradeExecutionService(
+            record_order=lambda *args: None,
+            update_order_status=lambda *args: None,
+            record_risk_event=lambda *args: None,
+            persist_entry=lambda symbol, qty, cost: calls.append((symbol, qty, cost)),
+        )
+
+        svc._record_entry_price("AAPL.US", Decimal("150"), Decimal("10"))
+        assert calls[-1] == ("AAPL.US", Decimal("10"), Decimal("1500"))
+
+        svc._record_entry_price("AAPL.US", Decimal("160"), Decimal("10"))
+        assert calls[-1] == ("AAPL.US", Decimal("20"), Decimal("3100"))
+
+        svc._consume_entry_quantity("AAPL.US", Decimal("5"))
+        symbol, qty, _cost = calls[-1]
+        assert symbol == "AAPL.US"
+        assert qty == Decimal("15")
+
+        svc._consume_entry_quantity("AAPL.US", Decimal("15"))
+        assert calls[-1] == ("AAPL.US", Decimal("0"), Decimal("0"))
+
+    def test_persist_callback_failure_does_not_break_flow(self, svc: TradeExecutionService) -> None:
+        def failing_callback(symbol: str, qty: Decimal, cost: Decimal) -> None:
+            raise RuntimeError("persist failed")
+
+        svc._persist_entry = failing_callback
+        # Should not raise.
+        svc._record_entry_price("AAPL.US", Decimal("10"), Decimal("5"))
+        assert svc.snapshot_tracked_entries()["AAPL.US"][0] == Decimal("5")
+
+    def test_restart_recovery_uses_tracked_avg_for_exit_pnl(self, svc: TradeExecutionService) -> None:
+        # Simulate a restart: tracked entries restored from DB, broker reports a stale avg_price.
+        svc.load_tracked_entries({"AAPL.US": (Decimal("10"), Decimal("1000"))})  # avg = 100
+        broker_avg_price = Decimal("90")  # stale
+        avg = svc._resolve_avg_price_for_exit("AAPL.US", broker_avg_price, Decimal("10"))
+        # Tracked avg (100) differs by >$2 from broker (90) -> use tracked.
+        assert avg == Decimal("100")
+
     def test_execute_buy_normalizes_us_limit_price_to_cent_tick(self, svc: TradeExecutionService, monkeypatch) -> None:
         from app.core.broker import OrderResult, Quote
         from app.core.risk import RiskController
@@ -187,7 +229,6 @@ class TestTradeExecutionServiceBasics:
         broker = MagicMock()
         broker.estimate_margin_max_quantity.return_value = Decimal("100")
         broker.submit_limit_order.return_value = OrderResult("order-1", "NVDA.US", "BUY", Decimal("90"), Decimal("222.50"), "FILLED")
-        monkeypatch.setattr(svc, "_wait_for_order_completion", lambda result, broker_arg=None: OrderStatus("order-1", "FILLED", Decimal("90"), Decimal("222.50")))
 
         status = svc.execute(
             "BUY",
@@ -236,7 +277,6 @@ class TestTradeExecutionServiceBasics:
         broker = MagicMock()
         broker.estimate_margin_max_quantity.return_value = Decimal("50")
         broker.submit_limit_order.return_value = OrderResult("order-2", "NVDA.US", "SELL", Decimal("45"), Decimal("225"), "FILLED")
-        monkeypatch.setattr(svc, "_wait_for_order_completion", lambda result, broker_arg=None: OrderStatus("order-2", "FILLED", Decimal("45"), Decimal("225")))
 
         status = svc.execute(
             "SELL_SHORT",
@@ -282,7 +322,6 @@ class TestTradeExecutionServiceBasics:
         broker = MagicMock()
         broker.get_positions.return_value = [Position("NVDA.US", "LONG", Decimal("7"), Decimal("220"))]
         broker.submit_limit_order.return_value = OrderResult("order-3", "NVDA.US", "SELL", Decimal("7"), Decimal("225"), "FILLED")
-        monkeypatch.setattr(svc, "_wait_for_order_completion", lambda result, broker_arg=None: OrderStatus("order-3", "FILLED", Decimal("7"), Decimal("225")))
 
         status = svc.execute(
             "SELL",
@@ -328,7 +367,6 @@ class TestTradeExecutionServiceBasics:
         broker = MagicMock()
         broker.get_positions.return_value = [Position("NVDA.US", "LONG", Decimal("7"), Decimal("220"))]
         broker.submit_limit_order.return_value = OrderResult("order-3", "NVDA.US", "SELL", Decimal("7"), Decimal("225.51"), "FILLED")
-        monkeypatch.setattr(svc, "_wait_for_order_completion", lambda result, broker_arg=None: OrderStatus("order-3", "FILLED", Decimal("7"), Decimal("225.51")))
 
         status = svc.execute(
             "SELL",
@@ -441,7 +479,6 @@ class TestTradeExecutionServiceBasics:
         broker = MagicMock()
         broker.get_positions.return_value = [Position("NVDA.US", "LONG", Decimal("10"), Decimal("220"))]
         broker.submit_limit_order.return_value = OrderResult("stop-loss-1", "NVDA.US", "SELL", Decimal("10"), Decimal("215"), "FILLED")
-        monkeypatch.setattr(svc, "_wait_for_order_completion", lambda result, broker_arg=None: OrderStatus("stop-loss-1", "FILLED", Decimal("10"), Decimal("215")))
 
         status = svc.execute(
             "SELL",
@@ -544,7 +581,6 @@ class TestTradeExecutionServiceBasics:
         broker = MagicMock()
         broker.get_positions.return_value = [Position("NVDA.US", "SHORT", Decimal("10"), Decimal("220"))]
         broker.submit_limit_order.return_value = OrderResult("stop-cover-1", "NVDA.US", "BUY", Decimal("10"), Decimal("225"), "FILLED")
-        monkeypatch.setattr(svc, "_wait_for_order_completion", lambda result, broker_arg=None: OrderStatus("stop-cover-1", "FILLED", Decimal("10"), Decimal("225")))
 
         status = svc.execute(
             "BUY_TO_COVER",

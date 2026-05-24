@@ -23,6 +23,18 @@ logger = logging.getLogger("auto_trade.llm_api")
 router = APIRouter(prefix="/api", tags=["llm"])
 
 
+def _coerce_recent_prices(source: Any) -> list[dict[str, Any]]:
+    if not callable(source):
+        return []
+    try:
+        result = source()
+    except Exception:
+        return []
+    if isinstance(result, list):
+        return [item for item in result if isinstance(item, dict)]
+    return []
+
+
 def _position_context(symbol: str, current_price: float) -> dict[str, float | str]:
     runner = get_runner()
     try:
@@ -187,7 +199,7 @@ def analyze_llm_interval(
         position_avg_price=float(position_context["avg_price"]),
         unrealized_pnl_pct=float(position_context["unrealized_pnl_pct"]),
         min_profit_amount=config.min_profit_amount,
-        recent_prices=recent_price_context() if callable(recent_price_context) else [],
+        recent_prices=_coerce_recent_prices(recent_price_context),
         recent_analysis=build_recent_analysis_context(config),
         account_context=account_context,
         force=payload.force,

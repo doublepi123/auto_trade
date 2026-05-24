@@ -14,6 +14,23 @@ describe('History', () => {
     cy.contains('button', '刷新').should('be.visible')
   })
 
+  it('refreshes today orders from the broker when requested by the user', () => {
+    cy.stubApi()
+    cy.intercept('GET', /\/api\/orders\?.*refresh=true/, {
+      body: {
+        items: [],
+        total: 0,
+        page: 1,
+        page_size: 10,
+        scope: 'today',
+      },
+    }).as('refreshTodayOrders')
+
+    cy.visit('/#/history')
+    cy.contains('button', '刷新').click()
+    cy.wait('@refreshTodayOrders')
+  })
+
   it('loads paginated today orders by default and can cancel any live order', () => {
     cy.stubApi()
     cy.intercept('GET', '/api/orders*', {

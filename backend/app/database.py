@@ -20,6 +20,7 @@ def init_db() -> None:
     _ensure_order_raw_response_column(engine)
     _ensure_strategy_config_llm_columns(engine)
     _ensure_runtime_state_daily_pnl_date_column(engine)
+    _ensure_tracked_entries_table(engine)
 
     db = SessionLocal()
     try:
@@ -104,6 +105,23 @@ def _ensure_runtime_state_daily_pnl_date_column(db_engine: Engine) -> None:
             )
         connection.exec_driver_sql(
             "UPDATE runtime_state SET daily_pnl = 0, consecutive_losses = 0, daily_pnl_date = DATE('now') WHERE daily_pnl_date IS NULL"
+        )
+
+
+def _ensure_tracked_entries_table(db_engine: Engine) -> None:
+    inspector = inspect(db_engine)
+    if "tracked_entries" in inspector.get_table_names():
+        return
+    with db_engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS tracked_entries (
+                symbol VARCHAR(50) PRIMARY KEY,
+                quantity FLOAT NOT NULL DEFAULT 0,
+                cost FLOAT NOT NULL DEFAULT 0,
+                updated_at DATETIME
+            )
+            """
         )
 
 

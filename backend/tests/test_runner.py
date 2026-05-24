@@ -420,6 +420,221 @@ class TestAppRunner:
 
         assert runner.risk.paused is True
 
+    def test_load_tracked_entries_restores_in_memory_state(self) -> None:
+        runner = AppRunner()
+
+        loaded_rows = [
+            SimpleNamespace(symbol="AAPL.US", quantity=10.0, cost=1500.0),
+            SimpleNamespace(symbol="0700.HK", quantity=0.0, cost=0.0),  # skipped
+        ]
+
+        class FakeQuery:
+            def all(self_inner):
+                return loaded_rows
+
+        class FakeDb:
+            def query(self_inner, _model):
+                return FakeQuery()
+
+        runner._load_tracked_entries(FakeDb())
+
+        snapshot = runner._trade_svc.snapshot_tracked_entries()
+        assert "AAPL.US" in snapshot
+        assert snapshot["AAPL.US"] == (Decimal("10.0"), Decimal("1500.0"))
+        assert "0700.HK" not in snapshot
+
+    def test_reconcile_tracked_entries_records_drift_event(self) -> None:
+        runner = AppRunner()
+        runner._trade_svc.load_tracked_entries({"AAPL.US": (Decimal("100"), Decimal("15000"))})
+
+        class Broker:
+            def get_positions(self):
+                return [Position(symbol="AAPL.US", side="LONG", quantity=Decimal("80"), avg_price=Decimal("150"))]
+
+        runner.broker = Broker()
+
+        events: list[dict] = []
+
+        def record_event(_db, **kwargs):
+            events.append(kwargs)
+
+        class FakeDb:
+            def commit(self):
+                pass
+
+        with patch("app.runner.record_trade_event", side_effect=record_event):
+            runner._reconcile_tracked_entries_with_broker(FakeDb())
+
+        assert events, "drift event should be recorded"
+        assert events[0]["event_type"] == "TRACKED_ENTRY_DRIFT"
+        assert events[0]["payload"]["tracked_quantity"] == 100.0
+        assert events[0]["payload"]["broker_quantity"] == 80.0
+
+    def test_reconcile_tracked_entries_skips_when_within_tolerance(self) -> None:
+        runner = AppRunner()
+        runner._trade_svc.load_tracked_entries({"AAPL.US": (Decimal("100"), Decimal("15000"))})
+
+        class Broker:
+            def get_positions(self):
+                return [Position(symbol="AAPL.US", side="LONG", quantity=Decimal("100"), avg_price=Decimal("150"))]
+
+        runner.broker = Broker()
+
+        events: list[dict] = []
+
+        def record_event(_db, **kwargs):
+            events.append(kwargs)
+
+        class FakeDb:
+            def commit(self):
+                pass
+
+        with patch("app.runner.record_trade_event", side_effect=record_event):
+            runner._reconcile_tracked_entries_with_broker(FakeDb())
+
+        assert events == []
+
+    def test_persist_tracked_entry_writes_then_deletes(self) -> None:
+        from app.database import SessionLocal, engine
+        from app.models import Base, TrackedEntry
+
+        Base.metadata.drop_all(bind=engine)
+        Base.metadata.create_all(bind=engine)
+
+        runner = AppRunner()
+        runner._persist_tracked_entry("AAPL.US", Decimal("10"), Decimal("1500"))
+
+        db = SessionLocal()
+        try:
+            row = db.query(TrackedEntry).filter(TrackedEntry.symbol == "AAPL.US").first()
+            assert row is not None
+            assert row.quantity == 10.0
+            assert row.cost == 1500.0
+        finally:
+            db.close()
+
+        runner._persist_tracked_entry("AAPL.US", Decimal("0"), Decimal("0"))
+
+        db = SessionLocal()
+        try:
+            assert db.query(TrackedEntry).filter(TrackedEntry.symbol == "AAPL.US").first() is None
+        finally:
+            db.close()
+
+    def test_resubscribe_quotes_fires_after_silence_threshold(self, monkeypatch) -> None:
+        class Broker:
+            def __init__(self) -> None:
+                self.unsubscribed = False
+                self.subscribed_to: str | None = None
+
+            def unsubscribe_quotes(self) -> None:
+                self.unsubscribed = True
+
+            def subscribe_quotes(self, symbol, callback) -> None:
+                self.subscribed_to = symbol
+
+        runner = AppRunner()
+        runner._running = True
+        runner.engine.params = StrategyParams(symbol="AAPL.US", market="US", buy_low=100.0, sell_high=110.0)
+        runner._quotes_subscribed = True
+        runner.broker = Broker()
+
+        monkeypatch.setattr(runner_module, "is_trading_hours", lambda _market: True, raising=False)
+        monkeypatch.setattr(runner_module.time, "monotonic", lambda: 1000.0)
+        runner._last_push_quote_at = 850.0  # 150s ago, beyond 90s threshold
+
+        result = runner._resubscribe_quotes_if_silent()
+
+        assert result is True
+        assert runner.broker.unsubscribed is True
+        assert runner.broker.subscribed_to == "AAPL.US"
+        assert runner._last_push_quote_at == 1000.0  # bumped by resubscribe
+
+    def test_resubscribe_quotes_noops_when_quote_is_recent(self, monkeypatch) -> None:
+        class Broker:
+            def __init__(self) -> None:
+                self.unsubscribed = False
+
+            def unsubscribe_quotes(self) -> None:
+                self.unsubscribed = True
+
+            def subscribe_quotes(self, *_args) -> None:
+                pass
+
+        runner = AppRunner()
+        runner._running = True
+        runner.engine.params = StrategyParams(symbol="AAPL.US", market="US", buy_low=100.0, sell_high=110.0)
+        runner._quotes_subscribed = True
+        runner.broker = Broker()
+
+        monkeypatch.setattr(runner_module, "is_trading_hours", lambda _market: True, raising=False)
+        monkeypatch.setattr(runner_module.time, "monotonic", lambda: 1000.0)
+        runner._last_push_quote_at = 990.0  # 10s ago - fresh
+
+        assert runner._resubscribe_quotes_if_silent() is False
+        assert runner.broker.unsubscribed is False
+
+    def test_active_refresh_does_not_mask_silent_push_subscription(self, monkeypatch) -> None:
+        class Broker:
+            def __init__(self) -> None:
+                self.unsubscribed = False
+                self.subscribed_to: str | None = None
+
+            def get_quote(self, symbol: str) -> Quote:
+                return Quote(symbol=symbol, last_price=123.45, bid=123.4, ask=123.5, timestamp="")
+
+            def unsubscribe_quotes(self) -> None:
+                self.unsubscribed = True
+
+            def subscribe_quotes(self, symbol, _callback) -> None:
+                self.subscribed_to = symbol
+
+        runner = AppRunner()
+        runner.broker = Broker()
+        runner._running = True
+        runner._quotes_subscribed = True
+        runner.engine.params = StrategyParams(symbol="AAPL.US", buy_low=100.0, sell_high=200.0)
+        runner._active_quote_refresh_interval_seconds = 0.0
+
+        monkeypatch.setattr(runner_module, "is_trading_hours", lambda _market: True, raising=False)
+        monkeypatch.setattr(runner_module.time, "monotonic", lambda: 1000.0)
+        runner._last_push_quote_at = 850.0
+        runner._last_quote_at = 850.0
+
+        runner._refresh_quote_if_stale()
+        assert runner._last_quote_at == 1000.0
+        assert runner._last_push_quote_at == 850.0
+
+        assert runner._resubscribe_quotes_if_silent() is True
+        assert runner.broker.unsubscribed is True
+        assert runner.broker.subscribed_to == "AAPL.US"
+
+    def test_resubscribe_quotes_does_not_run_outside_trading_hours(self, monkeypatch) -> None:
+        class Broker:
+            def __init__(self) -> None:
+                self.unsubscribed = False
+                self.subscribed = False
+
+            def unsubscribe_quotes(self) -> None:
+                self.unsubscribed = True
+
+            def subscribe_quotes(self, _symbol, _callback) -> None:
+                self.subscribed = True
+
+        runner = AppRunner()
+        runner.broker = Broker()
+        runner._running = True
+        runner._quotes_subscribed = True
+        runner.engine.params = StrategyParams(symbol="AAPL.US", market="US", buy_low=100.0, sell_high=200.0)
+        runner._last_push_quote_at = 850.0
+
+        monkeypatch.setattr(runner_module, "is_trading_hours", lambda _market: False, raising=False)
+        monkeypatch.setattr(runner_module.time, "monotonic", lambda: 1000.0)
+
+        assert runner._resubscribe_quotes_if_silent() is False
+        assert runner.broker.unsubscribed is False
+        assert runner.broker.subscribed is False
+
     def test_broadcast_status_no_connections(self) -> None:
         runner = AppRunner()
         runner._broadcast_status()

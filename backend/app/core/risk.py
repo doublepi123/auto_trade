@@ -3,7 +3,7 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
-from typing import Optional
+from typing import Callable, Optional
 
 
 @dataclass
@@ -18,11 +18,20 @@ class RiskResult:
     reason: str = ""
 
 
+TradeDayProvider = Callable[[], date]
+
+
 class RiskController:
-    def __init__(self, config: RiskConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: RiskConfig | None = None,
+        *,
+        trade_day_provider: TradeDayProvider | None = None,
+    ) -> None:
         self.config = config or RiskConfig()
+        self._trade_day_provider: TradeDayProvider = trade_day_provider or _current_risk_day
         self.daily_pnl: float = 0.0
-        self._today: date = _current_risk_day()
+        self._today: date = self._trade_day_provider()
         self.consecutive_losses: int = 0
         self.kill_switch: bool = False
         self.paused: bool = False
@@ -31,6 +40,11 @@ class RiskController:
         self._pause_auto_resumable: bool = False
         self._kill_switch_reason: str = ""
         self._lock = threading.Lock()
+
+    def set_trade_day_provider(self, provider: TradeDayProvider) -> None:
+        with self._lock:
+            self._trade_day_provider = provider
+            self._today = provider()
 
     def check(self) -> RiskResult:
         with self._lock:
@@ -48,7 +62,7 @@ class RiskController:
             self.consecutive_losses = 0
 
     def _check_limits(self) -> RiskResult:
-        today = _current_risk_day()
+        today = self._trade_day_provider()
         if today != self._today:
             self.daily_pnl = 0.0
             self.consecutive_losses = 0
@@ -64,7 +78,7 @@ class RiskController:
 
     def record_trade(self, pnl: float) -> None:
         with self._lock:
-            today = _current_risk_day()
+            today = self._trade_day_provider()
             if today != self._today:
                 self.daily_pnl = 0.0
                 self.consecutive_losses = 0
@@ -80,7 +94,7 @@ class RiskController:
         with self._lock:
             self.daily_pnl = daily_pnl
             self.consecutive_losses = max(0, consecutive_losses)
-            self._today = pnl_date or _current_risk_day()
+            self._today = pnl_date or self._trade_day_provider()
 
     def pause(
         self,
@@ -135,7 +149,7 @@ class RiskController:
         with self._lock:
             if persisted_date is not None:
                 self._today = persisted_date
-            today = _current_risk_day()
+            today = self._trade_day_provider()
             if today != self._today:
                 self.daily_pnl = 0.0
                 self.consecutive_losses = 0

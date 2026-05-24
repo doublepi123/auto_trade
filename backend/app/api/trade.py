@@ -181,10 +181,17 @@ def get_orders(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=10, ge=1, le=200),
     limit: Optional[int] = Query(default=None, ge=1, le=200),
+    refresh: bool = Query(default=False),
     db: Session = Depends(get_db),
 ) -> OrderPageResponse:
     if limit is not None:
         page_size = limit
+
+    if scope == "today" and refresh:
+        try:
+            get_runner().sync_today_orders_from_broker(force=True)
+        except Exception:
+            logging.getLogger("auto_trade.trade").exception("force-refresh today orders failed")
 
     local_orders = db.query(OrderRecord).order_by(OrderRecord.created_at.desc()).all()
     if scope == "history":
@@ -192,23 +199,11 @@ def get_orders(
         return _paginate_orders(items, page=page, page_size=page_size, scope=scope)
 
     local_today = [order for order in local_orders if _is_today(order.created_at)]
-    local_by_broker_id = {order.broker_order_id: order for order in local_today if order.broker_order_id}
-    merged: dict[str, OrderResponse] = {}
-    try:
-        broker_orders = get_runner().broker.get_today_orders()
-    except Exception:
-        logging.getLogger("auto_trade.trade").exception("failed to get broker today orders")
-        broker_orders = []
-    for broker_order in broker_orders:
-        order_id = str(getattr(broker_order, "broker_order_id", ""))
-        if not order_id:
-            continue
-        merged[order_id] = _broker_order_response(broker_order, local_by_broker_id.get(order_id))
-    for local_order in local_today:
-        local_key = local_order.broker_order_id or f"local-{local_order.id}"
-        if local_key not in merged:
-            merged[local_key] = _local_order_response(local_order)
-    items = sorted(merged.values(), key=_order_sort_key, reverse=True)
+    items = sorted(
+        (_local_order_response(order) for order in local_today),
+        key=_order_sort_key,
+        reverse=True,
+    )
     return _paginate_orders(items, page=page, page_size=page_size, scope=scope)
 
 
@@ -347,13 +342,21 @@ def get_account() -> AccountResponse:
 
     try:
         broker_positions = broker.get_positions()
+        position_symbols = sorted({pos.symbol for pos in broker_positions if pos.symbol})
+        quote_map: dict[str, float] = {}
+        if position_symbols:
+            try:
+                for quote in broker.get_quotes(position_symbols):
+                    if quote.symbol and quote.last_price > 0:
+                        quote_map[quote.symbol] = float(quote.last_price)
+            except Exception:
+                logging.getLogger("auto_trade.trade").warning("batch quote fetch failed; using avg_price fallback")
         positions: list[PositionSchema] = []
         for pos in broker_positions:
-            try:
-                quote = broker.get_quote(pos.symbol)
-                market_value = float(pos.quantity * Decimal(str(quote.last_price)))
-            except Exception:
-                logging.getLogger("auto_trade.trade").warning("failed to get quote for %s, using avg_price fallback", pos.symbol)
+            last_price = quote_map.get(pos.symbol)
+            if last_price is not None and last_price > 0:
+                market_value = float(pos.quantity * Decimal(str(last_price)))
+            else:
                 market_value = float(pos.quantity * pos.avg_price)
             positions.append(PositionSchema(
                 symbol=pos.symbol,

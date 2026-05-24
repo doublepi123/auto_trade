@@ -94,9 +94,9 @@ class TestGetAccountEndpointSuccess:
         mock_broker.get_positions.return_value = [
             Position(symbol="AAPL.US", side="LONG", quantity=Decimal("10"), avg_price=Decimal("150")),
         ]
-        mock_broker.get_quote.return_value = Quote(
-            symbol="AAPL.US", last_price=155.0, bid=154.5, ask=155.5, timestamp="2026-01-01",
-        )
+        mock_broker.get_quotes.return_value = [
+            Quote(symbol="AAPL.US", last_price=155.0, bid=154.5, ask=155.5, timestamp="2026-01-01"),
+        ]
         runner.broker = mock_broker
 
         resp = client.get("/api/account")
@@ -125,9 +125,9 @@ class TestGetAccountEndpointSuccess:
         mock_broker.get_positions.return_value = [
             Position(symbol="TSLA.US", side="LONG", quantity=Decimal("5"), avg_price=Decimal("200")),
         ]
-        mock_broker.get_quote.return_value = Quote(
-            symbol="TSLA.US", last_price=250.0, bid=249.5, ask=250.5, timestamp="",
-        )
+        mock_broker.get_quotes.return_value = [
+            Quote(symbol="TSLA.US", last_price=250.0, bid=249.5, ask=250.5, timestamp=""),
+        ]
         runner.broker = mock_broker
 
         resp = client.get("/api/account")
@@ -149,7 +149,7 @@ class TestGetAccountEndpointSuccess:
             Position(symbol="AAPL.US", side="LONG", quantity=Decimal("10"), avg_price=Decimal("150")),
             Position(symbol="TSLA.US", side="SHORT", quantity=Decimal("5"), avg_price=Decimal("200")),
         ]
-        mock_broker.get_quote.side_effect = [
+        mock_broker.get_quotes.return_value = [
             Quote(symbol="AAPL.US", last_price=160.0, bid=159.5, ask=160.5, timestamp=""),
             Quote(symbol="TSLA.US", last_price=190.0, bid=189.5, ask=190.5, timestamp=""),
         ]
@@ -198,9 +198,9 @@ class TestGetAccountEndpointBrokerFailure:
         mock_broker.get_positions.return_value = [
             Position(symbol="AAPL.US", side="LONG", quantity=Decimal("10"), avg_price=Decimal("150")),
         ]
-        mock_broker.get_quote.return_value = Quote(
-            symbol="AAPL.US", last_price=155.0, bid=154.5, ask=155.5, timestamp="",
-        )
+        mock_broker.get_quotes.return_value = [
+            Quote(symbol="AAPL.US", last_price=155.0, bid=154.5, ask=155.5, timestamp=""),
+        ]
         runner.broker = mock_broker
 
         resp = client.get("/api/account")
@@ -253,7 +253,7 @@ class TestGetAccountEndpointQuoteFallback:
         mock_broker.get_positions.return_value = [
             Position(symbol="AAPL.US", side="LONG", quantity=Decimal("10"), avg_price=Decimal("150")),
         ]
-        mock_broker.get_quote.side_effect = Exception("quote unavailable")
+        mock_broker.get_quotes.side_effect = Exception("quote unavailable")
         runner.broker = mock_broker
 
         resp = client.get("/api/account")
@@ -273,12 +273,11 @@ class TestGetAccountEndpointQuoteFallback:
             Position(symbol="TSLA.US", side="LONG", quantity=Decimal("5"), avg_price=Decimal("200")),
         ]
 
-        def quote_side_effect(symbol):
-            if symbol == "AAPL.US":
-                return Quote(symbol="AAPL.US", last_price=160.0, bid=159.5, ask=160.5, timestamp="")
-            raise Exception("quote unavailable")
-
-        mock_broker.get_quote.side_effect = quote_side_effect
+        # Batch quote returns only AAPL successfully; TSLA quote omitted, endpoint
+        # must fall back to avg_price * quantity for it.
+        mock_broker.get_quotes.return_value = [
+            Quote(symbol="AAPL.US", last_price=160.0, bid=159.5, ask=160.5, timestamp=""),
+        ]
         runner.broker = mock_broker
 
         resp = client.get("/api/account")

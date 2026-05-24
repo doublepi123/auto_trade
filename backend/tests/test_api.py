@@ -1,6 +1,6 @@
 import os
 import time
-from datetime import date, datetime, time as datetime_time, timezone
+from datetime import date, datetime, time as datetime_time, timedelta, timezone
 from types import SimpleNamespace
 
 os.environ["AUTO_TRADE_DATABASE_URL"] = "sqlite:///data/test_api.db"
@@ -406,42 +406,36 @@ class TestAPI:
         assert resp.status_code == 200
         assert isinstance(resp.json()["items"], list)
 
-    def test_orders_default_to_broker_today_orders_with_pagination(self, monkeypatch) -> None:
+    def test_orders_default_returns_local_today_orders_with_pagination(self) -> None:
         _clean_orders()
-
-        class Broker:
-            def get_today_orders(self):
-                return [
-                    SimpleNamespace(
-                        broker_order_id="manual-1",
-                        symbol="NVDA.US",
-                        side="BUY",
-                        quantity=10,
-                        price=220.1,
-                        executed_quantity=0,
-                        executed_price=0,
-                        status="SUBMITTED",
-                        created_at=datetime(2026, 5, 22, 13, 0, tzinfo=timezone.utc),
-                        filled_at=None,
-                    ),
-                    SimpleNamespace(
-                        broker_order_id="manual-2",
-                        symbol="AAPL.US",
-                        side="SELL",
-                        quantity=3,
-                        price=199.5,
-                        executed_quantity=1,
-                        executed_price=199.6,
-                        status="PARTIAL_FILLED",
-                        created_at=datetime(2026, 5, 22, 12, 0, tzinfo=timezone.utc),
-                        filled_at=None,
-                    ),
-                ]
-
-        class Runner:
-            broker = Broker()
-
-        monkeypatch.setattr(trade_api, "get_runner", lambda: Runner())
+        db = SessionLocal()
+        # `_is_today` compares against the server's local date — use ``now()`` directly
+        # so the inserted timestamps land on local today regardless of UTC/local drift.
+        now_local = datetime.now().astimezone()
+        db.add_all([
+            OrderRecord(
+                broker_order_id="manual-1",
+                symbol="NVDA.US",
+                side="BUY",
+                quantity=10,
+                price=220.1,
+                status="SUBMITTED",
+                created_at=now_local,
+            ),
+            OrderRecord(
+                broker_order_id="manual-2",
+                symbol="AAPL.US",
+                side="SELL",
+                quantity=3,
+                price=199.5,
+                executed_quantity=1,
+                executed_price=199.6,
+                status="PARTIAL_FILLED",
+                created_at=now_local - timedelta(minutes=30),
+            ),
+        ])
+        db.commit()
+        db.close()
 
         resp = client.get("/api/orders?page=2&page_size=1")
 
@@ -452,8 +446,26 @@ class TestAPI:
         assert data["page_size"] == 1
         assert data["total"] == 2
         assert data["items"][0]["broker_order_id"] == "manual-2"
-        assert data["items"][0]["source"] == "broker"
+        assert data["items"][0]["source"] == "local"
         assert data["items"][0]["cancellable"] is True
+
+    def test_orders_today_refresh_triggers_runner_sync(self, monkeypatch) -> None:
+        _clean_orders()
+        calls: list[bool] = []
+
+        class Runner:
+            broker = None
+
+            def sync_today_orders_from_broker(self, *, force: bool) -> int:
+                calls.append(force)
+                return 0
+
+        monkeypatch.setattr(trade_api, "get_runner", lambda: Runner())
+
+        resp = client.get("/api/orders?refresh=1")
+
+        assert resp.status_code == 200
+        assert calls == [True]
 
     def test_cancel_order_uses_broker_for_any_order_and_updates_local_record(self, monkeypatch) -> None:
         _clean_orders()

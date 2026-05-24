@@ -163,3 +163,28 @@ class TestRiskController:
         assert result.approved is True
         assert ctrl.daily_pnl == -42.0
         assert ctrl.consecutive_losses == 1
+
+    def test_trade_day_provider_drives_day_boundary(self) -> None:
+        from datetime import date
+
+        days = iter([date(2026, 5, 22), date(2026, 5, 22), date(2026, 5, 23)])
+        ctrl = RiskController(trade_day_provider=lambda: next(days))
+        ctrl.daily_pnl = -100.0
+        ctrl.consecutive_losses = 2
+
+        # provider still returns 2026-05-22 → no reset
+        ctrl.check()
+        assert ctrl.daily_pnl == -100.0
+        assert ctrl.consecutive_losses == 2
+
+        # provider flips to 2026-05-23 → reset
+        ctrl.check()
+        assert ctrl.daily_pnl == 0.0
+        assert ctrl.consecutive_losses == 0
+
+    def test_set_trade_day_provider_updates_today(self) -> None:
+        from datetime import date
+
+        ctrl = RiskController()
+        ctrl.set_trade_day_provider(lambda: date(2030, 1, 1))
+        assert ctrl.daily_pnl_date == date(2030, 1, 1)

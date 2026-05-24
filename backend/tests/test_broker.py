@@ -2,9 +2,12 @@ from decimal import Decimal
 
 import pytest
 
+from datetime import datetime, timezone
+
 from app.core import broker as broker_module
 from app.core.broker import (
     AccountInfo,
+    BrokerCandle,
     BrokerCredentials,
     BrokerGateway,
     CashBalance,
@@ -18,6 +21,8 @@ from app.core.broker import (
     _import_openapi,
     _iter_position_items,
     _normalize_order_status,
+    _normalize_period_name,
+    _parse_candle_timestamp,
     _SIDE_MAP,
 )
 
@@ -364,6 +369,87 @@ class TestBrokerGateway:
         gw._quote_ctx = EmptyQuoteContext()
         with pytest.raises(ValueError, match="no quote data"):
             gw.get_quote("AAPL.US")
+
+    def test_get_candlesticks_returns_normalized_bars(self, monkeypatch) -> None:
+        class FakeAdjust:
+            NoAdjust = "noadj"
+
+        class FakePeriod:
+            Day = "DAY"
+
+        class FakeCandle:
+            def __init__(self, ts, o, h, l, c, v):
+                self.timestamp = ts
+                self.open = o
+                self.high = h
+                self.low = l
+                self.close = c
+                self.volume = v
+                self.turnover = v * c
+
+        class FakeQuoteContext:
+            def __init__(self) -> None:
+                self.calls: list[tuple] = []
+
+            def candlesticks(self, symbol, period, count, adjust):
+                self.calls.append((symbol, period, count, adjust))
+                return [
+                    FakeCandle(datetime(2026, 5, 2, tzinfo=timezone.utc), 100, 105, 99, 103, 1500),
+                    FakeCandle(datetime(2026, 5, 1, tzinfo=timezone.utc), 99, 102, 97, 100, 1200),
+                ]
+
+        class FakeModule:
+            Period = FakePeriod
+            AdjustType = FakeAdjust
+
+        monkeypatch.setattr(broker_module, "_import_openapi", lambda: FakeModule)
+        gw = BrokerGateway()
+        gw._quote_ctx = FakeQuoteContext()
+        gw._trade_ctx = object()
+
+        candles = gw.get_candlesticks("AAPL.US", "Day", 2)
+
+        assert len(candles) == 2
+        assert candles[0].timestamp < candles[1].timestamp, "result must be sorted ascending"
+        assert all(isinstance(c, BrokerCandle) for c in candles)
+        assert candles[1].close == 103.0
+        assert gw._quote_ctx.calls[0] == ("AAPL.US", "DAY", 2, "noadj")
+
+    def test_get_candlesticks_handles_zero_count(self) -> None:
+        gw = BrokerGateway()
+        gw._quote_ctx = object()
+        assert gw.get_candlesticks("AAPL.US", "Day", 0) == []
+
+    def test_get_candlesticks_rejects_unknown_period(self, monkeypatch) -> None:
+        class FakeModule:
+            class Period:
+                Day = "DAY"
+
+            class AdjustType:
+                NoAdjust = "noadj"
+
+        monkeypatch.setattr(broker_module, "_import_openapi", lambda: FakeModule)
+        gw = BrokerGateway()
+        gw._quote_ctx = object()
+        gw._trade_ctx = object()
+        with pytest.raises(ValueError, match="unsupported candlestick period"):
+            gw.get_candlesticks("AAPL.US", "Tick_1", 1)
+
+    def test_normalize_period_name(self) -> None:
+        assert _normalize_period_name("Day") == "Day"
+        assert _normalize_period_name("MIN_1") == "Min_1"
+        assert _normalize_period_name("MIN5") == "Min_5"
+        assert _normalize_period_name("1D") == "Day"
+        assert _normalize_period_name("WEEK") == "Week"
+
+    def test_parse_candle_timestamp_from_datetime(self) -> None:
+        naive = datetime(2026, 5, 1, 12, 0, 0)
+        parsed = _parse_candle_timestamp(naive)
+        assert parsed is not None and parsed.tzinfo is timezone.utc
+
+    def test_parse_candle_timestamp_from_unix_seconds(self) -> None:
+        parsed = _parse_candle_timestamp(1714563600)
+        assert parsed is not None and parsed.tzinfo is timezone.utc
 
     def test_submit_limit_order(self, monkeypatch) -> None:
         called = {}

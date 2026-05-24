@@ -4,11 +4,29 @@ import os
 
 os.environ["AUTO_TRADE_DATABASE_URL"] = "sqlite:///data/test_llm.db"
 
+from datetime import datetime, timezone
+
 import pytest
 
-from app.services.data_aggregator import DataAggregator
+from app.core.broker import BrokerCandle
+from app.services.data_aggregator import (
+    DataAggregator,
+    _compute_atr,
+    _compute_bollinger_bands,
+)
 from app.services.llm_advisor_service import LLMAdvisorService
 from app.schemas import LLMPreviewAnalyzeRequest
+
+
+def _candle(high: float, low: float, close: float, *, day: int = 1) -> BrokerCandle:
+    return BrokerCandle(
+        timestamp=datetime(2026, 5, day, tzinfo=timezone.utc),
+        open=(high + low) / 2,
+        high=high,
+        low=low,
+        close=close,
+        volume=1000.0,
+    )
 
 
 def test_preview_request_normalizes_symbol() -> None:
@@ -33,32 +51,36 @@ class TestDataAggregator:
         return DataAggregator()
 
     def test_compute_atr_basic(self, aggregator: DataAggregator) -> None:
+        del aggregator
         candles = [
-            {"high": 110, "low": 100, "close": 105},
-            {"high": 112, "low": 103, "close": 108},
-            {"high": 115, "low": 106, "close": 110},
-            {"high": 113, "low": 107, "close": 109},
-            {"high": 116, "low": 108, "close": 112},
+            _candle(110, 100, 105, day=1),
+            _candle(112, 103, 108, day=2),
+            _candle(115, 106, 110, day=3),
+            _candle(113, 107, 109, day=4),
+            _candle(116, 108, 112, day=5),
         ]
-        atr = aggregator._compute_atr(candles)
+        atr = _compute_atr(candles)
         assert atr > 0
         assert isinstance(atr, float)
 
     def test_compute_atr_insufficient_data(self, aggregator: DataAggregator) -> None:
-        assert aggregator._compute_atr([]) == 0.0
-        assert aggregator._compute_atr([{"high": 100, "low": 90, "close": 95}]) == 0.0
+        del aggregator
+        assert _compute_atr([]) == 0.0
+        assert _compute_atr([_candle(100, 90, 95)]) == 0.0
 
     def test_compute_bollinger_bands_basic(self, aggregator: DataAggregator) -> None:
+        del aggregator
         closes = [100, 102, 101, 103, 104, 102, 105, 106, 104, 107]
-        upper, middle, lower = aggregator._compute_bollinger_bands(closes)
+        upper, middle, lower = _compute_bollinger_bands(closes)
         assert upper > middle > lower
         assert isinstance(upper, float)
         assert isinstance(middle, float)
         assert isinstance(lower, float)
 
     def test_compute_bollinger_bands_insufficient_data(self, aggregator: DataAggregator) -> None:
-        assert aggregator._compute_bollinger_bands([]) == (0.0, 0.0, 0.0)
-        assert aggregator._compute_bollinger_bands([100]) == (0.0, 0.0, 0.0)
+        del aggregator
+        assert _compute_bollinger_bands([]) == (0.0, 0.0, 0.0)
+        assert _compute_bollinger_bands([100]) == (0.0, 0.0, 0.0)
 
     def test_build_prompt_structure(self, aggregator: DataAggregator) -> None:
         prompt = aggregator.build_prompt(

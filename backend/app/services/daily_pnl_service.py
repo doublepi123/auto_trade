@@ -3,11 +3,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal
-from typing import Any
+from typing import Any, Callable
 
 
 _ZERO = Decimal("0")
 _FILLED_STATUS = "FILLED"
+
+ToTradeDay = Callable[[datetime], date]
+
+
+def _utc_date(instant: datetime) -> date:
+    return instant.astimezone(timezone.utc).date()
 
 
 @dataclass(frozen=True)
@@ -59,10 +65,17 @@ class DailyPnlService:
     def __init__(self, db: Any) -> None:
         self._db = db
 
-    def calculate(self, *, trade_day: date | None = None, symbol: str | None = None) -> DailyPnlResult:
+    def calculate(
+        self,
+        *,
+        trade_day: date | None = None,
+        symbol: str | None = None,
+        to_trade_day: ToTradeDay | None = None,
+    ) -> DailyPnlResult:
         from app.models import OrderRecord
 
-        target_day = trade_day or datetime.now(timezone.utc).date()
+        resolve_day: ToTradeDay = to_trade_day or _utc_date
+        target_day = trade_day or resolve_day(datetime.now(timezone.utc))
         query = self._db.query(OrderRecord)
         if symbol:
             query = query.filter(OrderRecord.symbol == symbol)
@@ -77,7 +90,7 @@ class DailyPnlService:
         fills = [
             fill
             for order in latest_orders.values()
-            if (fill := self._fill_from_order(order)) is not None and fill.filled_at.date() <= target_day
+            if (fill := self._fill_from_order(order)) is not None and resolve_day(fill.filled_at) <= target_day
         ]
         fills.sort(key=lambda item: (item.filled_at, item.id))
 
@@ -89,7 +102,7 @@ class DailyPnlService:
         for fill in fills:
             position = positions.setdefault(fill.symbol, _LedgerPosition())
             matched_quantity, pnl = self._apply_fill(position, fill)
-            if matched_quantity <= 0 or fill.filled_at.date() != target_day:
+            if matched_quantity <= 0 or resolve_day(fill.filled_at) != target_day:
                 continue
 
             realized_pnl += pnl

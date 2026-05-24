@@ -143,14 +143,16 @@ async def _llm_analysis_cron() -> None:
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     init_db()
-    if not get_runner().start():
+    runner = get_runner()
+    started = await asyncio.to_thread(runner.start, loop=asyncio.get_running_loop())
+    if not started:
         logger.warning("runner failed to start during app lifespan — trading engine is not running")
     cleanup_task = asyncio.create_task(_ws_cleanup_task())
     llm_task = asyncio.create_task(_llm_analysis_cron())
     yield
     cleanup_task.cancel()
     llm_task.cancel()
-    get_runner().stop()
+    await asyncio.to_thread(get_runner().stop)
 
 
 app = FastAPI(title="Auto Trade", version="0.1.0", lifespan=lifespan)

@@ -58,7 +58,7 @@
       </el-table-column>
     </el-table>
     <div class="orders-footer">
-      <el-button @click="loadOrders" :loading="loading">刷新</el-button>
+      <el-button @click="loadOrders(true)" :loading="loading">刷新</el-button>
       <el-pagination
         background
         layout="total, sizes, prev, pager, next"
@@ -88,10 +88,15 @@ const page = ref(1)
 const pageSize = ref(10)
 const total = ref(0)
 
-async function loadOrders() {
+async function loadOrders(refresh = false) {
   loading.value = true
   try {
-    const data = await getOrders({ scope: scope.value, page: page.value, page_size: pageSize.value })
+    const data = await getOrders({
+      scope: scope.value,
+      page: page.value,
+      page_size: pageSize.value,
+      ...(scope.value === 'today' && refresh ? { refresh: true } : {}),
+    })
     orders.value = data.items
     total.value = data.total
   } catch (e) {
@@ -102,7 +107,7 @@ async function loadOrders() {
   }
 }
 
-onMounted(loadOrders)
+onMounted(() => loadOrders())
 
 function handleScopeChange() {
   page.value = 1

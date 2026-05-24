@@ -6,6 +6,7 @@ export interface GetOrdersParams {
   page?: number
   page_size?: number
   limit?: number
+  refresh?: boolean
 }
 
 export async function getOrders(params: GetOrdersParams | number = {}): Promise<OrderPage> {

@@ -9,6 +9,7 @@ from typing import Any
 import httpx
 
 from app.config import settings
+from app.core.broker import BrokerGateway
 from app.database import SessionLocal
 from app.services.data_aggregator import DataAggregator
 from app.services.llm_interaction_service import LLMInteractionService
@@ -68,8 +69,8 @@ def build_recent_analysis_context(config: Any) -> dict[str, Any] | None:
 class LLMAdvisorService:
     """Calls DeepSeek API to get price interval recommendations."""
 
-    def __init__(self) -> None:
-        self._data_aggregator = DataAggregator()
+    def __init__(self, broker: BrokerGateway | None = None) -> None:
+        self._data_aggregator = DataAggregator(broker=broker)
 
     def analyze(
         self,

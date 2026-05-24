@@ -207,6 +207,12 @@ class TestIntervalApplicationService:
         assert config.sell_high == 226.0
 
     def test_apply_long_allows_lower_buy_low(self, service: IntervalApplicationService) -> None:
+        """LONG 状态允许 LLM 下调 buy_low 实现追价加仓。
+
+        参见 docs/Roadmap.md '迭代 0 / 0.2 渐进式平滑过渡策略' 与 'P7'' 段：
+        2026-05-25 决议保留此追价行为，规则被文档化为方案 B。
+        如未来改回 "持仓状态下只放宽不收紧"，需同步更新 Roadmap。
+        """
         self._cleanup()
         db = self._get_db()
         config = self._create_config(db)

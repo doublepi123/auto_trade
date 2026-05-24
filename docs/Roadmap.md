@@ -29,7 +29,207 @@
   - 引入 Vue Composables (`useDashboardData`, `useStatusStream`, `useAccountRefresh`, `useFormState`) 清理页面级逻辑。
   - 补充 E2E 测试（Cypress 全页面导航、控制、策略、凭证、历史），Dashboard 可用性区分不可用与零值。
 
+## 2026-05-24 全面审计 & 下一步迭代（取代下文 P4~P8 排序）
+
+> 本节为 2026-05-24 一次完整代码审计后的产物，**优先级高于下文 2026-05-22 列出的 P4~P8**。原 P3 回测已完成，原 P4~P8 主题保留但顺延到 P9 之后。
+>
+> 审计基线：`pytest 374 passed, 1 skipped`、前端 `vue-tsc` 通过、`basedpyright` 报 3 处 `object`→数值类型推断错误（`llm_advisor.py:190`、`runner.py:786`、`runner.py:795`）。
+
+### 审计发现（按严重度）
+
+#### A. 交易正确性 / 数据真实性
+
+1. **`DataAggregator` 完全伪造 LLM 用的历史 K 线**（`backend/app/services/data_aggregator.py:47-81`）
+   - `_fetch_daily_candles` / `_fetch_minute_candles` 只调用 `broker.get_quote()` 一次，用 `last_price * 0.98/1.02` 合成 1 根假 OHLC 返回。
+   - ATR(14) 需要 ≥5 根 → 永远返回 `0`；布林带需要 ≥10 根 → 永远返回 `(0, 0, 0)`。
+   - `LLMAdvisorService.analyze` 把这一根伪造数据塞进 prompt 的"最近 7 天日 K"表，**整个 LLM 顾问回路一直在假数据上跑。**
+   - longport SDK 实际暴露 `QuoteContext.candlesticks` / `history_candlesticks_by_date` / `history_candlesticks_by_offset`，但 `BrokerGateway` 没包装。
+
+2. **`IntervalApplicationService` LONG/SHORT 行为与设计文档相反**（`backend/app/services/interval_application_service.py:146-183`）
+   - CLAUDE.md / 原设计：`LONG → 只允许上抬 sell_high`，`buy_low 忽略`。
+   - 实现：`if new_buy_low <= old_buy_low: config.buy_low = new_buy_low` —— 实际允许 LONG 状态**下调** buy_low（即追加买入），SHORT 镜像同理。
+   - 必须二选一：要么改代码恢复"只放宽不收紧"，要么改文档承认追价行为。
+
+3. **`daily_pnl` / `consecutive_losses` 按 UTC 日切日**（`backend/app/core/risk.py:165`、`backend/app/services/daily_pnl_service.py:65`）
+   - 美股 RTH = UTC 14:30~21:00；港股 RTH = UTC 01:30~08:00。UTC 00:00 切日点落在两边都不合理的时刻。
+   - 结果：日内连损/亏损上限会在不该重置的时点重置。
+
+4. **HK 标的没有 tick 量化**（`backend/app/services/trade_execution_service.py:217`）
+   - `_normalize_limit_price` 只处理 `.US` 的 0.01 tick；HK 阶梯 tick（0.001/0.005/0.01/0.02/0.05）未实现，下单价格可能被券商拒。
+
+#### B. 安全
+
+5. **`require_api_key` 实际只挂在 `/strategy/llm-interval/preview` 一个端点**（`backend/app/api/auth.py` + `backend/app/api/llm_advisor.py:124`）
+   - 全部变更类 endpoint 裸奔：`/api/control/{start,stop,pause,resume,kill-switch,disable-kill-switch}`、`PUT /api/strategy`、`PUT /api/credentials`、`POST /api/orders/{id}/cancel`、`WS /ws`。
+   - 即使是挂了的端点，`auth.py:21` 的 `if settings.env in ("dev","test") and not provided: return` 让 dev/test 下"不带 header 即放行"。
+   - 内网假设下尚可接受，但同时也意味着 `AUTO_TRADE_API_KEY` 实际形同虚设。
+
+#### C. 可靠性 / 恢复
+
+6. **`runner.start()` 在 `lifespan` 中同步阻塞事件循环**（`backend/app/main.py:146`）：`_initialize_runner` 包含多次券商网络调用，会让 FastAPI 启动期阻塞秒级。
+7. **`TradeExecutionService._entry_positions` 仅在内存**：commits `e094691`/`1499828` 引入加权入场成本修复 broker `avg_price` 偏差，但进程重启后丢失，退回到被修复前的状态。
+8. **Longport WebSocket 没有重连**（`backend/app/core/broker.py:253`）：只能靠 `_refresh_quote_if_stale` 每 15s 主动拉 quote 续命，底层订阅断了不会重订。
+9. **缺少交易时段守卫**：盘前/盘后/休市 quote 也会触发下单。
+10. **券商调用无 retry/backoff**：限流靠 `_is_auto_resumable_pause_reason` 字符串匹配（含中文 `限流` `频率`），易漏判。
+
+#### D. 性能
+
+11. **`/api/account` 对每个持仓循环 `broker.get_quote()`**（`backend/app/api/trade.py:353`）—— N 次往返，每次刷新都触发。
+12. **`/api/orders?scope=today` 每次都去券商拉**，与 runner 后台 15s 同步重复，浪费 quota。
+13. **`TradeExecutionService._wait_for_order_completion` 是死代码**（已被 pending reconcile 取代，且内含阻塞 `time.sleep`）。
+14. **`AppRunner._recent_quotes` 无上限**，只靠时间窗剪枝。
+
+#### E. 测试覆盖盲区
+
+15. `DataAggregator` 零测试 —— 假数据 bug 因此长期未被发现。
+16. `IntervalApplicationService._apply_long` 无对照规范的断言，行为漂移没被守护。
+17. 无"重启 + pending 订单存在"的端到端集成测试，仅有单元级 mock。
+
+### 迭代排序（2026-05-24 起执行）
+
+| 顺序 | 代号 | 主题 | 价值 | 预估工时 |
+|------|------|------|------|----------|
+| 1 | **P1** | DataAggregator 真实 K 线 | 直接修复 LLM 决策基础 | 1~2 天 |
+| 2 | **P2** | API 鉴权收紧 | 关上"内网漂移到半公网"时的最大漏洞 | 1 天 |
+| 3 | **P3'** | 交易日 + HK tick | 多市场正确性，避免风控/日 PnL 错切日 | 2~3 天 |
+| 4 | **P4'** | 入场成本持久化 + 重启对账 | 修复重启后 PnL 计算回退到 broker `avg_price` | 2 天 |
+| 5 | **P5'** | lifespan 非阻塞 + WS 重订 | 提升运行时韧性 | 1~2 天 |
+| 6 | **P6'** | 性能：批量 quote + 去重 today_orders | 降低券商 quota 与前端延迟 | 0.5 天 |
+| 7 | **P7'** | `IntervalApplicationService` 对齐文档 | 终止行为与文档不一致 | 0.5 天 |
+| 8 | **P8'** | lint / 死代码清理 | 还清现存类型债 | 0.5 天 |
+| 9+ | 沿用下文 | 审计日志、移动端、复盘工作台、观察列表 | 顺延执行 | — |
+
+### P1：DataAggregator 真实 K 线
+
+> **目标：** 让 LLM 顾问拿到真实历史，恢复 ATR/布林带的有效性。
+
+#### 范围
+
+- `backend/app/core/broker.py`
+  - 新增 `BrokerGateway.get_candlesticks(symbol: str, period: str, count: int) -> list[BrokerCandle]`，封装 `quote_ctx.history_candlesticks_by_offset(symbol, period, AdjustType, count, direction)`。
+  - 数据结构 `BrokerCandle(timestamp, open, high, low, close, volume)`，统一返回 `datetime` 而非字符串。
+- `backend/app/services/data_aggregator.py`
+  - `_fetch_daily_candles` 改为请求最近 30 根日 K（保留 `slice[-7:]` 给 prompt 但 ATR/布林带用全部）。
+  - `_fetch_minute_candles` 改为请求最近 60~120 根 1 分钟 K。
+  - 删除 `quote.last_price * 0.98/1.02` 合成代码；如果 broker 不可用就返回空列表并让 prompt 提示"历史数据不可用"。
+  - `fetch_market_data` 接受外部传入的 `BrokerGateway`（避免每次新建 + close），由 `LLMAdvisorService` 注入 `runner.broker` 或独立实例。
+- `backend/tests/test_data_aggregator.py`（新）
+  - 用 mock broker 验证 7 根日 K → ATR(14) 非零、布林带三值与 mean/std 一致。
+  - 验证 broker 抛错时 `fetch_market_data` 返回空列表而非合成数据。
+- `backend/tests/test_broker.py` 增 candlesticks 包装测试（mock longport）。
+
+#### 验证
+
+- [ ] `pytest tests/test_data_aggregator.py tests/test_broker.py tests/test_llm_advisor.py -v` 全通。
+- [ ] `basedpyright` 不引入新错误。
+- [ ] 手工：开启 `AUTO_TRADE_ENV=dev`，触发 `/api/strategy/llm-interval/preview`，检查 prompt 文本里 `日 K 表` 行数 >1 且各行 OHLC 不再相同。
+
+### P2：API 鉴权收紧
+
+> **目标：** 让 `AUTO_TRADE_API_KEY` 真正生效，关闭 dev/test 自动放行。
+
+#### 范围
+
+- `backend/app/api/auth.py`
+  - 拆为两个 dependency：`require_api_key`（强制）与 `require_api_key_optional`（兼容内网空 key）。
+  - 删除 `if settings.env in ("dev","test") and not provided: return` 分支；改为"未配置 key 时 GET 放行、变更类拒绝"，由路由选用。
+- `backend/app/main.py`
+  - `include_router` 时显式给变更类 router 加 `dependencies=[Depends(require_api_key)]`：`trade_router`（限 control + cancel）、`strategy_router`（限 PUT/POST）、`credentials_router`、`llm_advisor_router`（analyze/enable/disable）。
+  - 拆分 `trade_router` 为读 / 写两份，或对 control 路由用 `APIRouter(..., dependencies=[...])` 嵌套。
+- `backend/app/api/ws.py`
+  - 支持 `?token=<api_key>` query 校验；启动横幅打印 `auth=on/off`。
+- 测试：`tests/test_auth.py`（新），覆盖未配置 / 配置 + 正确 header / 配置 + 错误 header / WS 三种路径。
+
+#### 验证
+
+- [ ] 设置 `AUTO_TRADE_API_KEY=test` 后，无 header 调用 `POST /api/control/pause` 返回 401。
+- [ ] 不设置 `AUTO_TRADE_API_KEY` 时，无 header 调用 `POST /api/control/pause` 仍按当前内网假设放行（README 同步澄清）。
+- [ ] `WS /ws?token=wrong` 被拒。
+
+### P3'：交易所感知交易日 + HK tick
+
+> **目标：** 用标的所在市场的"交易日"切风控/日 PnL；让 HK 限价单价格落到合法 tick。
+
+#### 范围
+
+- 新建 `backend/app/core/market_calendar.py`
+  - `trade_day_for(market: str, instant: datetime) -> date`：US 用 ET，HK 用 HKT，按 RTH 结束时间切日（US 16:00 ET / HK 16:00 HKT）。
+  - `is_trading_hours(market: str, instant: datetime) -> bool`（为后续交易时段守卫预留）。
+- `backend/app/core/risk.py`：`RiskController` 接受 `trade_day_provider: Callable[[], date]`，默认仍 UTC（保持向后兼容），由 `AppRunner` 注入 market-aware 版本。
+- `backend/app/services/daily_pnl_service.py`：`calculate(trade_day=...)` 调用方传入按市场计算的 `target_day`。
+- `backend/app/services/trade_execution_service.py`：`_normalize_limit_price` 加入 HK 阶梯 tick 表（来自港交所规则），同 `BUY` 向下、`SELL` 向上的取整方向。
+- 测试：
+  - `tests/test_market_calendar.py`（新）：覆盖 US/HK 交易日边界、夏令时切换。
+  - `tests/test_risk.py`、`tests/test_daily_pnl_service.py` 补"交易日切日 = 交易所收盘"用例。
+  - `tests/test_trade_execution_service.py` 补 HK tick 量化用例。
+
+#### 验证
+
+- [ ] 模拟 `2026-05-24 13:00 UTC`（美股 9:00 ET，盘前）和 `2026-05-24 19:30 UTC`（美股 15:30 ET，临近收盘），同一个 US 标的视作同一交易日。
+- [ ] HK 标的报价 `0.243` 时 BUY 限价被量化到 `0.240` / SELL 到 `0.245`（步长 0.005）。
+
+### P4'：入场成本持久化 + 重启对账
+
+> **目标：** 进程重启后仍能用加权入场成本计算平仓 PnL，避免回到 broker `avg_price` 偏差。
+
+#### 范围
+
+- 新表 `tracked_entries(symbol PK, quantity, cost, updated_at)`，`database._ensure_tracked_entries_table` 补丁旧库。
+- `TradeExecutionService._record_entry_price` / `_consume_entry_quantity` 改为同步落表（保留内存缓存当 fast path）。
+- `AppRunner._initialize_runner` 启动时把 `tracked_entries` 注入回 `_trade_svc._entry_positions`。
+- 启动对账：若 `tracked.quantity` 与 broker `position.quantity` 偏差 > 5% 或差值绝对量 > 阈值，写 `RECONCILE_DRIFT` 事件 + 通知。
+- 测试：`tests/test_trade_execution_service.py` 加"重启 → tracked 复原 → 平仓 PnL 用 tracked avg"用例；`tests/test_runner.py` 加 reconcile 漂移用例。
+
+#### 验证
+
+- [ ] 端到端：`BUY 100@10` → 重启 → broker 改 `avg=11`（mock）→ `SELL 100@12`，PnL 仍按 10 算 ≈ 200。
+
+### P5'：lifespan 非阻塞 + WS 重订
+
+> **目标：** FastAPI 启动不被券商网络阻塞；行情 WebSocket 断线能自愈。
+
+#### 范围
+
+- `backend/app/main.py:lifespan`：`await asyncio.to_thread(get_runner().start)`，捕获返回 False 时仅记 warning 不阻塞。
+- `backend/app/core/broker.py`：
+  - 利用 longport SDK 的 disconnect 回调（如有）；若无，新增"看门狗"：`AppRunner._run_loop` 已每 5s 跑，扩展为检测 `_last_quote_at` 超过阈值且 quote_ctx 仍声称 alive 时强制 `unsubscribe + subscribe`。
+- 测试：`tests/test_runner.py` 用 fake broker 注入"60s 无 quote"场景，断言触发重订。
+
+#### 验证
+
+- [ ] 启动期 `/api/health` 在 1s 内返回（即便 broker 凭证为空）。
+- [ ] 模拟订阅丢失后，30s 内 quote 恢复推送。
+
+### P6'：性能优化
+
+#### 范围
+
+- `backend/app/api/trade.py:get_account` 用 `broker.quote([s for s in positions])` 一次取回所有报价。
+- `backend/app/api/trade.py:get_orders` 默认从 DB 读 today 订单，仅当 `?refresh=1` 时触发 broker 同步；前端按钮触发 refresh。
+- `backend/app/runner.py:_remember_quote` 给 `_recent_quotes` 加 `len ≤ 500` 硬上限。
+
+#### 验证
+
+- [ ] 持仓 5 个标的时 `/api/account` 单次延迟下降到接近一次 quote 的耗时。
+- [ ] 高频 quote 注入下 `_recent_quotes` 长度稳定。
+
+### P7'：IntervalApplicationService 对齐文档 ✅（2026-05-25 完成 — 方案 B）
+
+- 决策：**保留现行追价/加仓逻辑**，更新 Roadmap 的"迭代 0 → 0.2 渐进式平滑过渡策略"小节，明确描述实际行为是"LLM 在持仓状态下可以下调 buy_low 追价加仓 / 上抬 sell_high 拉高目标价"。
+- 行为对照表见上文 `迭代 0 / 0.2`。
+- `tests/test_interval_application.py` 已包含此行为断言；后续可在该文件加注释链接本节作为权威说明。
+
+### P8'：lint / 死代码清理
+
+- 修 `basedpyright` 3 处错误（用 `isinstance` 或显式 cast）。
+- 删除 `TradeExecutionService._wait_for_order_completion`。
+- 删除 `Settings.frontend_port`（未使用）。
+
+---
+
 ## 后续迭代计划（2026-05-22 更新）
+
+> 注：以下 P4~P8 在 2026-05-24 审计后顺延到 P1~P8' 完成之后再执行，主题不变。
 
 当前系统已经完成 LLM 自动决策上下文、主动价格刷新、订单同步、今日订单分页与撤单、决策时间线、Dashboard 图表化监控。后续计划按“先降低交易风险，再增强复盘能力，再提升运维体验”的顺序推进。
 
@@ -177,11 +377,11 @@
 
 - 新建文件：
   - `backend/app/services/interval_application_service.py`：核心规则引擎。
-- 实现细节：
+- 实现细节（**2026-05-25 更新：实际行为是"追价加仓"，非原"只放宽不收紧"**）：
   - **FLAT（空仓）**：LLM 建议立即生效。
-  - **LONG（持多）**：只能上调 sell_high（取 max(old, new)），buy_low 被忽略。
-  - **SHORT（持空）**：只能下调 buy_low（取 min(old, new)），sell_high 被忽略。
-  - **风控兜底**：置信度 < 0.7 拒绝；sell_high < price * 1.05 拒绝；buy_low > price * 0.95 拒绝；区间宽度 > 20% 拒绝。
+  - **LONG（持多）**：sell_high 优先取 `max(old, new)`；若 `new_sell_high < old_sell_high`，强制不低于 `current_price * (1 + 波动阈值)` 防贴现价。new_buy_low 仅在 `≤ old_buy_low` 时下调（**允许 LLM 追价加仓**），不会上抬 buy_low。
+  - **SHORT（持空）**：镜像 LONG —— buy_low 仅在 `≤ old_buy_low` 时下调；否则取 `min(new, current_price * (1 - 波动阈值))`，**允许 LLM 追价加空**。
+  - **风控兜底**：置信度 < `llm_min_confidence`（默认 0.7）拒绝；区间宽度 > `llm_max_stripe_width_pct`（默认 8%）拒绝；区间宽度 < `min_exit_profit_pct * current_price` 或 `min_profit_amount/reference_quantity` 拒绝。
 
 #### 0.3 定时触发与手动触发
 

@@ -28,6 +28,31 @@ _FAILED_ORDER_STATUSES = {"REJECTED", "CANCELLED"}
 _SKIPPED_ORDER_STATUS = "SKIPPED"
 ENTRY_BUYING_POWER_USAGE = Decimal("0.9")
 US_PRICE_TICK = Decimal("0.01")
+
+# HKEX stepped tick table (https://www.hkex.com.hk/Services/Trading/Securities/Overview/Trading-Mechanism)
+# Ordered ascending by upper bound; the matching tier is the first whose
+# upper bound is strictly greater than the price.
+_HK_TICK_TABLE: list[tuple[Decimal, Decimal]] = [
+    (Decimal("0.25"), Decimal("0.001")),
+    (Decimal("0.50"), Decimal("0.005")),
+    (Decimal("10.00"), Decimal("0.010")),
+    (Decimal("20.00"), Decimal("0.010")),
+    (Decimal("50.00"), Decimal("0.020")),
+    (Decimal("100.00"), Decimal("0.050")),
+    (Decimal("200.00"), Decimal("0.100")),
+    (Decimal("500.00"), Decimal("0.200")),
+    (Decimal("1000.00"), Decimal("0.500")),
+    (Decimal("2000.00"), Decimal("1.000")),
+    (Decimal("5000.00"), Decimal("2.000")),
+    (Decimal("9995.00"), Decimal("5.000")),
+]
+
+
+def _hk_tick_for(price: Decimal) -> Decimal:
+    for upper, tick in _HK_TICK_TABLE:
+        if price < upper:
+            return tick
+    return _HK_TICK_TABLE[-1][1]
 _EngineSnapshot = tuple["EngineState", float, Optional[datetime]]
 _NotifyRiskEvent = Callable[[str, str], object]
 _RecordOrderSkipped = Callable[[str, str, str, dict[str, object]], None]
@@ -68,6 +93,9 @@ class _TrackedEntry:
         return self.cost / self.quantity
 
 
+_EntryPersistCallback = Callable[[str, Decimal, Decimal], None]
+
+
 class TradeExecutionService:
     def __init__(
         self,
@@ -75,16 +103,34 @@ class TradeExecutionService:
         update_order_status: Callable[[str, str, datetime | None, float | None, float | None], None],
         record_risk_event: Callable[[str], None],
         record_order_skipped: _RecordOrderSkipped | None = None,
+        persist_entry: _EntryPersistCallback | None = None,
     ) -> None:
         self._record_order = record_order
         self._update_order_status = update_order_status
         self._record_risk_event = record_risk_event
         self._record_order_skipped = record_order_skipped
+        self._persist_entry = persist_entry
         self._state_lock = RLock()
         self._pending_order: _PendingOrder | None = None
         self._order_status_poll_interval_seconds = 1.0
         self._order_status_timeout_seconds = 30.0
         self._entry_positions: dict[str, _TrackedEntry] = {}
+
+    def load_tracked_entries(self, entries: dict[str, tuple[Decimal, Decimal]]) -> None:
+        """Restore tracked entry positions (typically at runner startup)."""
+        with self._state_lock:
+            self._entry_positions.clear()
+            for symbol, (quantity, cost) in entries.items():
+                if quantity <= 0 or cost <= 0:
+                    continue
+                self._entry_positions[symbol] = _TrackedEntry(quantity=quantity, cost=cost)
+
+    def snapshot_tracked_entries(self) -> dict[str, tuple[Decimal, Decimal]]:
+        with self._state_lock:
+            return {
+                symbol: (entry.quantity, entry.cost)
+                for symbol, entry in self._entry_positions.items()
+            }
 
     @property
     def has_pending_order(self) -> bool:
@@ -215,10 +261,17 @@ class TradeExecutionService:
 
     @staticmethod
     def _normalize_limit_price(symbol: str, side: str, price: Decimal) -> Decimal:
-        if not symbol.upper().endswith(".US"):
-            return price
+        upper_symbol = symbol.upper()
         rounding = ROUND_FLOOR if side in {"BUY", "BUY_TO_COVER"} else ROUND_CEILING
-        return price.quantize(US_PRICE_TICK, rounding=rounding)
+        if upper_symbol.endswith(".US"):
+            return price.quantize(US_PRICE_TICK, rounding=rounding)
+        if upper_symbol.endswith(".HK"):
+            if price <= 0:
+                return price
+            tick = _hk_tick_for(price)
+            steps = (price / tick).to_integral_value(rounding=rounding)
+            return (steps * tick).quantize(tick)
+        return price
 
     @staticmethod
     def _coerce_non_negative_decimal(value: Decimal | float | int) -> Decimal:
@@ -905,34 +958,6 @@ class TradeExecutionService:
             float(getattr(result, "executed_price", 0)) if getattr(result, "executed_price", 0) is not None else None,
         )
 
-    def _wait_for_order_completion(self, result: OrderResult, broker: BrokerGateway | None = None) -> OrderStatus:
-        broker = broker or getattr(result, "broker", None)
-        status = getattr(result, "status", "SUBMITTED")
-        last_status = OrderStatus(
-            broker_order_id=result.broker_order_id,
-            status=status,
-            executed_quantity=getattr(result, "quantity", Decimal("0")) if status == "FILLED" else Decimal("0"),
-            executed_price=getattr(result, "price", Decimal("0")) if status == "FILLED" else Decimal("0"),
-        )
-        if status in {"FILLED", "REJECTED", "CANCELLED"}:
-            return last_status
-        if broker is None:
-            return last_status
-
-        deadline = time.monotonic() + self._order_status_timeout_seconds
-        while True:
-            try:
-                raw_status = broker.get_order_status(result.broker_order_id)
-                last_status = self._coerce_order_status(raw_status, result.broker_order_id)
-            except Exception:
-                logger.exception("failed to query order status for %s", result.broker_order_id)
-                return last_status
-            if last_status.status in {"FILLED", "REJECTED", "CANCELLED"}:
-                return last_status
-            if time.monotonic() >= deadline:
-                return last_status
-            time.sleep(self._order_status_poll_interval_seconds)
-
     @staticmethod
     def _order_status_from_submit_result(result: OrderResult) -> OrderStatus:
         status = getattr(result, "status", "SUBMITTED")
@@ -980,16 +1005,26 @@ class TradeExecutionService:
             previous_avg = entry.avg_price
             entry.quantity += fill_qty
             entry.cost += fill_price * fill_qty
+            snapshot = (entry.quantity, entry.cost)
             if previous_avg <= 0:
                 logger.info("entry price recorded for %s: avg=%s qty=%s", symbol, entry.avg_price, entry.quantity)
-                return
-            logger.info(
-                "entry price updated for %s: avg=%s -> %s qty=%s",
-                symbol,
-                previous_avg,
-                entry.avg_price,
-                entry.quantity,
-            )
+            else:
+                logger.info(
+                    "entry price updated for %s: avg=%s -> %s qty=%s",
+                    symbol,
+                    previous_avg,
+                    entry.avg_price,
+                    entry.quantity,
+                )
+        self._persist_entry_safe(symbol, snapshot[0], snapshot[1])
+
+    def _persist_entry_safe(self, symbol: str, quantity: Decimal, cost: Decimal) -> None:
+        if self._persist_entry is None:
+            return
+        try:
+            self._persist_entry(symbol, quantity, cost)
+        except Exception:
+            logger.exception("failed to persist tracked entry for %s", symbol)
 
     def _resolve_avg_price_for_exit(self, symbol: str, broker_avg_price: Decimal | None, exit_qty: Decimal) -> Decimal:
         with self._state_lock:
@@ -1029,6 +1064,8 @@ class TradeExecutionService:
     def _consume_entry_quantity(self, symbol: str, fill_qty: Decimal) -> None:
         if fill_qty <= 0:
             return
+        snapshot: tuple[Decimal, Decimal] | None = None
+        cleared = False
         with self._state_lock:
             entry = self._entry_positions.get(symbol)
             if entry is None or entry.quantity <= 0:
@@ -1039,10 +1076,17 @@ class TradeExecutionService:
             entry.cost -= avg_price * consumed
             if entry.quantity <= 0:
                 self._entry_positions.pop(symbol, None)
-                return
-            if entry.cost < 0:
-                entry.cost = Decimal("0")
+                cleared = True
+            else:
+                if entry.cost < 0:
+                    entry.cost = Decimal("0")
+                snapshot = (entry.quantity, entry.cost)
+        if cleared:
+            self._persist_entry_safe(symbol, Decimal("0"), Decimal("0"))
+        elif snapshot is not None:
+            self._persist_entry_safe(symbol, snapshot[0], snapshot[1])
 
     def clear_entry_price(self, symbol: str) -> None:
         with self._state_lock:
             self._entry_positions.pop(symbol, None)
+        self._persist_entry_safe(symbol, Decimal("0"), Decimal("0"))

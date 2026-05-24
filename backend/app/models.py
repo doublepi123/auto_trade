@@ -137,6 +137,21 @@ class RuntimeState(Base):
     updated_at: Mapped[datetime] = mapped_column(_TZDateTime(), default=_utcnow)
 
 
+class TrackedEntry(Base):
+    """Persisted weighted-average entry cost used to compute exit PnL.
+
+    Survives process restarts so that exit accounting does not fall back to
+    the broker's stale ``avg_price``.
+    """
+
+    __tablename__ = "tracked_entries"
+
+    symbol: Mapped[str] = mapped_column(String(50), primary_key=True)
+    quantity: Mapped[float] = mapped_column(Float, default=0.0)
+    cost: Mapped[float] = mapped_column(Float, default=0.0)
+    updated_at: Mapped[datetime] = mapped_column(_TZDateTime(), default=_utcnow, onupdate=_utcnow)
+
+
 class RuntimeStateSnapshot(Base):
     __tablename__ = "runtime_state_snapshots"
 

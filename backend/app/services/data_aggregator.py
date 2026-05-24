@@ -2,41 +2,55 @@ from __future__ import annotations
 
 import logging
 import statistics
-from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from app.core.broker import BrokerGateway
+from app.core.broker import BrokerCandle, BrokerGateway
 
 logger = logging.getLogger("auto_trade.data_aggregator")
+
+
+_DAILY_CANDLE_COUNT = 30
+_MINUTE_CANDLE_COUNT = 120
+_PROMPT_DAILY_CANDLES = 7
+_PROMPT_MINUTE_CANDLES = 30
 
 
 class DataAggregator:
     """Aggregates market data and strategy state into LLM prompt format."""
 
+    def __init__(self, broker: BrokerGateway | None = None) -> None:
+        self._broker = broker
+
     def fetch_market_data(self, symbol: str, market: str) -> dict[str, Any]:
         """Fetch historical candles from Longbridge SDK."""
-        broker = BrokerGateway()
+        del market
+        broker, owns_broker = self._acquire_broker()
         try:
-            daily_candles = self._fetch_daily_candles(broker, symbol)
-            minute_candles = self._fetch_minute_candles(broker, symbol)
-            current_price = self._get_current_price(broker, symbol)
-        except Exception:
-            logger.exception("failed to fetch market data for %s", symbol)
-            daily_candles = []
-            minute_candles = []
-            current_price = 0.0
+            daily_candles = self._safe_fetch(
+                broker.get_candlesticks, symbol, "Day", _DAILY_CANDLE_COUNT,
+                label="daily candles",
+            )
+            minute_candles = self._safe_fetch(
+                broker.get_candlesticks, symbol, "Min_1", _MINUTE_CANDLE_COUNT,
+                label="minute candles",
+            )
+            current_price = self._safe_get_current_price(broker, symbol, daily_candles, minute_candles)
         finally:
-            broker.close()
+            if owns_broker:
+                broker.close()
 
-        atr = self._compute_atr(daily_candles) if len(daily_candles) >= 5 else 0.0
-        closes = [c["close"] for c in daily_candles]
+        daily_payload = [_candle_to_dict_daily(c) for c in daily_candles]
+        minute_payload = [_candle_to_dict_minute(c) for c in minute_candles]
+
+        atr = _compute_atr(daily_candles) if len(daily_candles) >= 5 else 0.0
+        closes = [c.close for c in daily_candles]
         bb_upper, bb_middle, bb_lower = (
-            self._compute_bollinger_bands(closes) if len(closes) >= 10 else (0.0, 0.0, 0.0)
+            _compute_bollinger_bands(closes) if len(closes) >= 10 else (0.0, 0.0, 0.0)
         )
 
         return {
-            "daily_candles": daily_candles,
-            "minute_candles": minute_candles,
+            "daily_candles": daily_payload,
+            "minute_candles": minute_payload,
             "current_price": current_price,
             "atr": atr,
             "bb_upper": bb_upper,
@@ -44,87 +58,44 @@ class DataAggregator:
             "bb_lower": bb_lower,
         }
 
-    def _fetch_daily_candles(self, broker: BrokerGateway, symbol: str) -> list[dict[str, Any]]:
-        """Fetch daily candles for the last 7 days."""
-        try:
-            quote = broker.get_quote(symbol)
-            return [
-                {
-                    "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-                    "open": quote.last_price * 0.98,
-                    "high": quote.last_price * 1.02,
-                    "low": quote.last_price * 0.97,
-                    "close": quote.last_price,
-                    "volume": 1000000,
-                }
-            ]
-        except Exception:
-            logger.warning("failed to fetch daily candles for %s", symbol)
-            return []
-
-    def _fetch_minute_candles(self, broker: BrokerGateway, symbol: str) -> list[dict[str, Any]]:
-        """Fetch minute candles for the last 24 hours."""
-        try:
-            quote = broker.get_quote(symbol)
-            return [
-                {
-                    "time": datetime.now(timezone.utc).strftime("%H:%M"),
-                    "open": quote.last_price * 0.99,
-                    "high": quote.last_price * 1.01,
-                    "low": quote.last_price * 0.98,
-                    "close": quote.last_price,
-                    "volume": 50000,
-                }
-            ]
-        except Exception:
-            logger.warning("failed to fetch minute candles for %s", symbol)
-            return []
-
-    def _get_current_price(self, broker: BrokerGateway, symbol: str) -> float:
-        """Get current price from broker."""
-        try:
-            quote = broker.get_quote(symbol)
-            return quote.last_price
-        except Exception:
-            logger.warning("failed to get current price for %s", symbol)
-            return 0.0
+    def _acquire_broker(self) -> tuple[BrokerGateway, bool]:
+        if self._broker is not None:
+            return self._broker, False
+        return BrokerGateway(), True
 
     @staticmethod
-    def _compute_atr(candles: list[dict[str, Any]], period: int = 14) -> float:
-        """Compute Average True Range from candle data."""
-        if len(candles) < 2:
-            return 0.0
-
-        true_ranges = []
-        for i in range(1, len(candles)):
-            high = candles[i]["high"]
-            low = candles[i]["low"]
-            prev_close = candles[i - 1]["close"]
-            tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
-            true_ranges.append(tr)
-
-        if len(true_ranges) < period:
-            period = len(true_ranges)
-
-        return float(statistics.mean(true_ranges[-period:]))
+    def _safe_fetch(
+        fn: Any,
+        symbol: str,
+        period: str,
+        count: int,
+        *,
+        label: str,
+    ) -> list[BrokerCandle]:
+        try:
+            return fn(symbol, period, count)
+        except Exception:
+            logger.exception("failed to fetch %s for %s", label, symbol)
+            return []
 
     @staticmethod
-    def _compute_bollinger_bands(
-        closes: list[float], period: int = 20, std_dev: int = 2
-    ) -> tuple[float, float, float]:
-        """Compute Bollinger Bands from close prices."""
-        if len(closes) < period:
-            period = len(closes)
-
-        if period < 2:
-            return (0.0, 0.0, 0.0)
-
-        recent_closes = closes[-period:]
-        middle = statistics.mean(recent_closes)
-        std = statistics.stdev(recent_closes) if len(recent_closes) > 1 else 0.0
-        upper = middle + std_dev * std
-        lower = middle - std_dev * std
-        return (upper, middle, lower)
+    def _safe_get_current_price(
+        broker: BrokerGateway,
+        symbol: str,
+        daily_candles: list[BrokerCandle],
+        minute_candles: list[BrokerCandle],
+    ) -> float:
+        try:
+            quote = broker.get_quote(symbol)
+            if quote.last_price > 0:
+                return float(quote.last_price)
+        except Exception:
+            logger.warning("failed to fetch current quote for %s", symbol)
+        if minute_candles:
+            return float(minute_candles[-1].close)
+        if daily_candles:
+            return float(daily_candles[-1].close)
+        return 0.0
 
     @staticmethod
     def _format_optional_price(value: Any) -> str:
@@ -255,9 +226,8 @@ class DataAggregator:
         account_context: dict[str, Any] | None = None,
     ) -> str:
         """Build LLM prompt from aggregated market data."""
-        ohlcv_table = "| 日期 | 开盘 | 最高 | 最低 | 收盘 | 成交量 |\n|------|------|------|------|------|--------|"
-        for c in daily_candles[-7:]:
-            ohlcv_table += f"\n| {c.get('date', '-')} | {c.get('open', 0):.2f} | {c.get('high', 0):.2f} | {c.get('low', 0):.2f} | {c.get('close', 0):.2f} | {c.get('volume', 0)} |"
+        ohlcv_table = _render_daily_table(daily_candles[-_PROMPT_DAILY_CANDLES:])
+        minute_table = _render_minute_table(minute_candles[-_PROMPT_MINUTE_CANDLES:])
 
         trades_summary = "无"
         if recent_trades:
@@ -284,8 +254,11 @@ class DataAggregator:
 - 允许做空: {short_selling}
 - 单笔最低盈利金额: {min_profit_amount:.2f}（约束普通即时卖出/平仓和建议区间宽度；止损动作不受此限制）
 
-## 市场数据（最近 7 天日 K 线）
+## 市场数据（最近日 K 线）
 {ohlcv_table}
+
+## 市场数据（最近 1 分钟 K 线）
+{minute_table}
 
 ## 当前技术指标
 - ATR(14): {atr:.2f}
@@ -337,3 +310,89 @@ class DataAggregator:
 14. 止损动作允许以控制亏损为优先目标，但必须在 order_reason 中明确写出支撑失效、崩盘、量价恶化或逼空风险等依据
 15. 默认 order_action 使用 NONE；只有当最近5分钟累次数据、购买力、持仓成本和风险收益都支持“立即行动”时，才输出 BUY_NOW/SELL_NOW/STOP_LOSS_SELL_NOW 等动作
 16. 不允许输出 JSON 以外的解释文本"""
+
+
+def _candle_to_dict_daily(candle: BrokerCandle) -> dict[str, Any]:
+    return {
+        "date": candle.timestamp.date().isoformat(),
+        "open": candle.open,
+        "high": candle.high,
+        "low": candle.low,
+        "close": candle.close,
+        "volume": candle.volume,
+    }
+
+
+def _candle_to_dict_minute(candle: BrokerCandle) -> dict[str, Any]:
+    return {
+        "time": candle.timestamp.strftime("%Y-%m-%d %H:%M"),
+        "open": candle.open,
+        "high": candle.high,
+        "low": candle.low,
+        "close": candle.close,
+        "volume": candle.volume,
+    }
+
+
+def _render_daily_table(rows: list[dict[str, Any]]) -> str:
+    if not rows:
+        return "（暂无可用历史日 K 数据）"
+    table = "| 日期 | 开盘 | 最高 | 最低 | 收盘 | 成交量 |\n|------|------|------|------|------|--------|"
+    for c in rows:
+        table += (
+            f"\n| {c.get('date', '-')} "
+            f"| {float(c.get('open', 0)):.2f} "
+            f"| {float(c.get('high', 0)):.2f} "
+            f"| {float(c.get('low', 0)):.2f} "
+            f"| {float(c.get('close', 0)):.2f} "
+            f"| {int(c.get('volume', 0))} |"
+        )
+    return table
+
+
+def _render_minute_table(rows: list[dict[str, Any]]) -> str:
+    if not rows:
+        return "（暂无可用 1 分钟 K 数据）"
+    table = "| 时间 | 开盘 | 最高 | 最低 | 收盘 | 成交量 |\n|------|------|------|------|------|--------|"
+    for c in rows:
+        table += (
+            f"\n| {c.get('time', '-')} "
+            f"| {float(c.get('open', 0)):.2f} "
+            f"| {float(c.get('high', 0)):.2f} "
+            f"| {float(c.get('low', 0)):.2f} "
+            f"| {float(c.get('close', 0)):.2f} "
+            f"| {int(c.get('volume', 0))} |"
+        )
+    return table
+
+
+def _compute_atr(candles: list[BrokerCandle], period: int = 14) -> float:
+    if len(candles) < 2:
+        return 0.0
+
+    true_ranges: list[float] = []
+    for i in range(1, len(candles)):
+        high = candles[i].high
+        low = candles[i].low
+        prev_close = candles[i - 1].close
+        true_ranges.append(max(high - low, abs(high - prev_close), abs(low - prev_close)))
+
+    if not true_ranges:
+        return 0.0
+    span = min(period, len(true_ranges))
+    return float(statistics.mean(true_ranges[-span:]))
+
+
+def _compute_bollinger_bands(
+    closes: list[float], period: int = 20, std_dev: int = 2
+) -> tuple[float, float, float]:
+    if len(closes) < 2:
+        return (0.0, 0.0, 0.0)
+
+    span = min(period, len(closes))
+    recent_closes = closes[-span:]
+    middle = statistics.mean(recent_closes)
+    std = statistics.stdev(recent_closes) if len(recent_closes) > 1 else 0.0
+    upper = middle + std_dev * std
+    lower = middle - std_dev * std
+    return (upper, middle, lower)

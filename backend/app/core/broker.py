@@ -37,6 +37,17 @@ class Quote:
     timestamp: str
 
 
+@dataclass(frozen=True)
+class BrokerCandle:
+    timestamp: datetime
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
+    turnover: float = 0.0
+
+
 @dataclass
 class OrderResult:
     broker_order_id: str
@@ -208,6 +219,39 @@ def _parse_datetime(value: Any) -> datetime | None:
         return None
 
 
+def _normalize_period_name(period: str) -> str:
+    text = str(period).strip().upper().replace("-", "_")
+    aliases = {
+        "DAY": "Day",
+        "D": "Day",
+        "1D": "Day",
+        "WEEK": "Week",
+        "MONTH": "Month",
+        "QUARTER": "Quarter",
+        "YEAR": "Year",
+    }
+    if text in aliases:
+        return aliases[text]
+    if text.startswith("MIN_"):
+        return "Min_" + text[len("MIN_"):]
+    if text.startswith("MIN") and text[3:].isdigit():
+        return "Min_" + text[3:]
+    return text.capitalize()
+
+
+def _parse_candle_timestamp(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(float(value), tz=timezone.utc)
+        except (OSError, OverflowError, ValueError):
+            return None
+    return _parse_datetime(value)
+
+
 def _normalize_order_side(raw_side: Any) -> str:
     text = str(getattr(raw_side, "value", raw_side)).split(".")[-1]
     key = text.upper().replace("_", "").replace("-", "").replace(" ", "")
@@ -234,21 +278,71 @@ class BrokerGateway:
                 self._quote_ctx = module.QuoteContext(config)
                 self._trade_ctx = module.TradeContext(config)
 
-    def get_quote(self, symbol: str) -> Quote:
+    def get_candlesticks(self, symbol: str, period: str, count: int) -> list[BrokerCandle]:
+        """Fetch recent candlesticks. ``period`` is one of ``DAY``, ``MIN_1``, ``MIN_5``, etc."""
+        if count <= 0:
+            return []
         with self._lock:
             self._init_clients()
-            response = self._quote_ctx.quote([symbol])
+            module = _import_openapi()
+            Period = getattr(module, "Period", None)
+            AdjustType = getattr(module, "AdjustType", None)
+            if Period is None or AdjustType is None:
+                raise RuntimeError("longport SDK is missing Period/AdjustType enums")
+
+            period_enum = getattr(Period, _normalize_period_name(period), None)
+            if period_enum is None:
+                raise ValueError(f"unsupported candlestick period: {period}")
+            adjust_enum = getattr(AdjustType, "NoAdjust", AdjustType)
+
+            quote_ctx = self._quote_ctx
+            if quote_ctx is None:
+                raise RuntimeError("quote context is not initialized")
+            response = quote_ctx.candlesticks(symbol, period_enum, count, adjust_enum)
             items = response if isinstance(response, list) else [response]
-            if not items:
-                raise ValueError(f"no quote data for {symbol}")
-            item = items[0]
-            return Quote(
-                symbol=str(getattr(item, "symbol", symbol)),
-                last_price=float(getattr(item, "last_done", 0)),
-                bid=float(getattr(item, "bid", 0)),
-                ask=float(getattr(item, "ask", 0)),
-                timestamp=str(getattr(item, "timestamp", "")),
-            )
+            candles: list[BrokerCandle] = []
+            for item in items:
+                ts = _parse_candle_timestamp(getattr(item, "timestamp", None))
+                if ts is None:
+                    continue
+                try:
+                    candles.append(BrokerCandle(
+                        timestamp=ts,
+                        open=float(getattr(item, "open", 0)),
+                        high=float(getattr(item, "high", 0)),
+                        low=float(getattr(item, "low", 0)),
+                        close=float(getattr(item, "close", 0)),
+                        volume=float(getattr(item, "volume", 0)),
+                        turnover=float(getattr(item, "turnover", 0)),
+                    ))
+                except (TypeError, ValueError):
+                    continue
+            candles.sort(key=lambda c: c.timestamp)
+            return candles
+
+    def get_quote(self, symbol: str) -> Quote:
+        quotes = self.get_quotes([symbol])
+        if not quotes:
+            raise ValueError(f"no quote data for {symbol}")
+        return quotes[0]
+
+    def get_quotes(self, symbols: list[str]) -> list[Quote]:
+        if not symbols:
+            return []
+        with self._lock:
+            self._init_clients()
+            response = self._quote_ctx.quote(symbols)
+            items = response if isinstance(response, list) else [response]
+            quotes: list[Quote] = []
+            for fallback_symbol, item in zip(symbols, items):
+                quotes.append(Quote(
+                    symbol=str(getattr(item, "symbol", fallback_symbol)),
+                    last_price=float(getattr(item, "last_done", 0)),
+                    bid=float(getattr(item, "bid", 0)),
+                    ask=float(getattr(item, "ask", 0)),
+                    timestamp=str(getattr(item, "timestamp", "")),
+                ))
+            return quotes
 
     def subscribe_quotes(self, symbol: str, callback: Callable[[Quote], None]) -> None:
         with self._lock:

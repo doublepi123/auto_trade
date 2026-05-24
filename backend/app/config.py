@@ -33,8 +33,6 @@ class Settings(BaseSettings):
 
     sct_key: str = ""
 
-    frontend_port: str = "8081"
-
     api_key: str = ""
 
     deepseek_api_key: str = Field(default="", validation_alias="DEEPSEEK_API_KEY")

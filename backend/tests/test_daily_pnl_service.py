@@ -162,6 +162,96 @@ class TestDailyPnlService:
         assert result.realized_pnl == approx(3.0)
         assert result.consecutive_losses == 0
 
+    def test_market_aware_trade_day_keeps_after_hours_fill_on_session_day(self) -> None:
+        """A US fill at 22:30 UTC = 18:30 ET still belongs to that session day."""
+        self._cleanup()
+        from app.core.market_calendar import trade_day_for
+
+        session_day = date(2026, 5, 22)
+        # UTC date for filled_at is 2026-05-22, but happens AFTER local RTH close
+        after_close = datetime(2026, 5, 22, 22, 30, tzinfo=timezone.utc)
+        db = self._get_db()
+        db.add_all([
+            OrderRecord(
+                broker_order_id="buy-rth",
+                symbol="AAPL.US",
+                side="BUY",
+                quantity=10,
+                price=100,
+                executed_quantity=10,
+                executed_price=100,
+                status="FILLED",
+                created_at=self._dt(session_day, 14),
+                filled_at=self._dt(session_day, 14, 1),
+            ),
+            OrderRecord(
+                broker_order_id="sell-after-hours",
+                symbol="AAPL.US",
+                side="SELL",
+                quantity=10,
+                price=110,
+                executed_quantity=10,
+                executed_price=110,
+                status="FILLED",
+                created_at=after_close,
+                filled_at=after_close,
+            ),
+        ])
+        db.commit()
+
+        result = DailyPnlService(db).calculate(
+            trade_day=session_day,
+            to_trade_day=lambda dt: trade_day_for("US", dt),
+        )
+        db.close()
+
+        assert result.realized_pnl == approx(100.0)
+        assert any(t.broker_order_id == "sell-after-hours" for t in result.trades)
+
+    def test_market_aware_trade_day_keeps_late_utc_us_fill_on_previous_session(self) -> None:
+        """01:00 UTC 2026-05-23 = 21:00 ET 2026-05-22 must count toward 2026-05-22 session."""
+        self._cleanup()
+        from app.core.market_calendar import trade_day_for
+
+        session_day = date(2026, 5, 22)
+        late_utc = datetime(2026, 5, 23, 1, 0, tzinfo=timezone.utc)  # 21:00 ET 5-22
+        db = self._get_db()
+        db.add_all([
+            OrderRecord(
+                broker_order_id="buy",
+                symbol="AAPL.US",
+                side="BUY",
+                quantity=5,
+                price=100,
+                executed_quantity=5,
+                executed_price=100,
+                status="FILLED",
+                created_at=self._dt(session_day, 14),
+                filled_at=self._dt(session_day, 14, 1),
+            ),
+            OrderRecord(
+                broker_order_id="sell-late",
+                symbol="AAPL.US",
+                side="SELL",
+                quantity=5,
+                price=104,
+                executed_quantity=5,
+                executed_price=104,
+                status="FILLED",
+                created_at=late_utc,
+                filled_at=late_utc,
+            ),
+        ])
+        db.commit()
+
+        result = DailyPnlService(db).calculate(
+            trade_day=session_day,
+            to_trade_day=lambda dt: trade_day_for("US", dt),
+        )
+        db.close()
+
+        assert result.realized_pnl == approx(20.0)
+
     def test_calculates_short_cover_pnl(self) -> None:
         self._cleanup()
         trade_day = date(2026, 5, 22)

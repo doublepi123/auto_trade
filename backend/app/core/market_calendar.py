@@ -1,0 +1,112 @@
+"""Exchange-aware calendar helpers.
+
+The trading day for risk accounting and daily PnL must follow the exchange's
+local clock, not UTC. The US session crosses UTC midnight cleanly only because
+RTH runs in the evening UTC; HK and other Asian sessions sit either side of
+UTC midnight too. Using a single UTC date to slice ``daily_pnl`` mid-session
+silently breaks accounting.
+
+The helpers below resolve a UTC instant to the exchange's local trade day
+("the trading session whose RTH window the instant belongs to or precedes"),
+and answer whether an instant is inside RTH for that market.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import date, datetime, time, timedelta, timezone
+from typing import Iterable
+from zoneinfo import ZoneInfo
+
+
+@dataclass(frozen=True)
+class MarketSession:
+    """A market's regular trading hours (local time)."""
+
+    code: str
+    timezone: ZoneInfo
+    rth_open: time
+    rth_close: time
+
+    def local(self, instant: datetime) -> datetime:
+        return _ensure_utc(instant).astimezone(self.timezone)
+
+    def trade_day(self, instant: datetime) -> date:
+        local = self.local(instant)
+        return local.date()
+
+    def is_rth(self, instant: datetime) -> bool:
+        local = self.local(instant)
+        if local.weekday() >= 5:
+            return False
+        current = local.time()
+        return self.rth_open <= current <= self.rth_close
+
+
+_US_SESSION = MarketSession(
+    code="US",
+    timezone=ZoneInfo("America/New_York"),
+    rth_open=time(9, 30),
+    rth_close=time(16, 0),
+)
+
+_HK_SESSION = MarketSession(
+    code="HK",
+    timezone=ZoneInfo("Asia/Hong_Kong"),
+    rth_open=time(9, 30),
+    rth_close=time(16, 0),
+)
+
+
+_SESSIONS: dict[str, MarketSession] = {
+    "US": _US_SESSION,
+    "HK": _HK_SESSION,
+}
+
+
+def get_session(market: str) -> MarketSession:
+    """Resolve a market code (US/HK) to its trading session. Defaults to US."""
+    return _SESSIONS.get((market or "US").upper(), _US_SESSION)
+
+
+def supported_markets() -> Iterable[str]:
+    return tuple(_SESSIONS.keys())
+
+
+def trade_day_for(market: str, instant: datetime | None = None) -> date:
+    """Return the trading day in the exchange's local clock.
+
+    The boundary is local midnight. Instants that fall on a weekend or after
+    RTH but before local midnight still belong to that local date; consumers
+    that need session-aware semantics should also consult ``is_trading_hours``.
+    """
+    session = get_session(market)
+    return session.trade_day(instant or datetime.now(timezone.utc))
+
+
+def is_trading_hours(market: str, instant: datetime | None = None) -> bool:
+    """Whether ``instant`` falls inside the market's regular trading hours."""
+    session = get_session(market)
+    return session.is_rth(instant or datetime.now(timezone.utc))
+
+
+def next_session_open(market: str, instant: datetime | None = None) -> datetime:
+    """Return the next RTH open in UTC after ``instant``.
+
+    Useful for diagnostic UI ("trading resumes at ...") — does not consult
+    holiday calendars.
+    """
+    session = get_session(market)
+    here = _ensure_utc(instant or datetime.now(timezone.utc)).astimezone(session.timezone)
+    candidate = here.replace(hour=session.rth_open.hour, minute=session.rth_open.minute, second=0, microsecond=0)
+    if here >= candidate or here.weekday() >= 5:
+        candidate = candidate + timedelta(days=1)
+    while candidate.weekday() >= 5:
+        candidate = candidate + timedelta(days=1)
+    return candidate.astimezone(timezone.utc)
+
+
+def _ensure_utc(instant: datetime) -> datetime:
+    if instant.tzinfo is None:
+        return instant.replace(tzinfo=timezone.utc)
+    return instant.astimezone(timezone.utc)
