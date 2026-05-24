@@ -57,8 +57,19 @@
 ### 风控
 - 单日最大亏损限制（默认 $5000）
 - 连续亏损 N 次自动暂停（默认 3 次）
+- **按交易所本地日历日**切日（US 用美东、HK 用香港时间），避免 UTC 午夜误重置日盈亏与连损计数
 - 手动暂停/恢复交易
 - Kill Switch 紧急停止
+
+### 盈亏与成本跟踪
+- 加权入场成本（`tracked_entries`）持久化到 SQLite，进程重启后平仓 PnL 仍按系统记录的均价计算，不依赖券商可能滞后的 `avg_price`
+- 启动时与券商持仓对账；数量偏差过大时写入 `TRACKED_ENTRY_DRIFT` 事件（决策时间线可见）
+
+### 行情与运行时
+- 长桥 WebSocket 推送行情；若 RTH 内推送静默超过约 90 秒，runner 自动退订并重订
+- 推送中断时仍可通过每 15 秒主动 `get_quote` 续命；主动拉取不计入「推送活跃」检测
+- FastAPI `lifespan` 在后台线程启动 runner，避免启动期阻塞 `/api/health`
+- Runner 后台约每 15 秒将券商当日订单同步到本地库
 
 ### 通知
 - 下单、成交、风控事件推送到 [Server酱](https://sct.ftqq.com/)
@@ -70,6 +81,8 @@
 ### LLM 区间顾问（可选）
 - DeepSeek 分析建议 `buy_low` / `sell_high`，支持预览与应用
 - 可配置定时自动分析与区间调整
+- Prompt 使用长桥真实日 K / 1 分钟 K（`BrokerGateway.get_candlesticks`），ATR(14) 与布林带基于历史 K 线计算
+- 持仓状态下允许 LLM **下调** `buy_low`（追价加仓）或 **上抬** `sell_high`（抬高目标），见 `docs/Roadmap.md` P7'
 
 ## 技术栈
 
@@ -188,7 +201,7 @@ auto_trade/
 │   │   ├── main.py                         # FastAPI 入口、lifespan、LLM 定时任务
 │   │   ├── config.py                       # pydantic-settings（AUTO_TRADE_* / LONGPORT_*）
 │   │   ├── database.py                     # 引擎、init_db、SQLite 列级迁移（_ensure_*）
-│   │   ├── models.py                       # ORM：策略、订单、事件、LLM 交互、运行时状态等
+│   │   ├── models.py                       # ORM：策略、订单、tracked_entries、事件、LLM、运行时状态等
 │   │   ├── schemas.py                      # Pydantic 请求/响应
 │   │   ├── runner.py                       # AppRunner：行情订阅、策略循环、WS 广播
 │   │   ├── api/
@@ -200,7 +213,8 @@ auto_trade/
 │   │   │   ├── ws.py                       # WebSocket /ws
 │   │   │   └── auth.py                     # API Key 依赖（可选，默认内网不启用）
 │   │   ├── core/
-│   │   │   ├── broker.py                   # 长桥 SDK（行情、下单、持仓）
+│   │   │   ├── broker.py                   # 长桥 SDK（行情、K 线、批量 quote、下单、持仓）
+│   │   │   ├── market_calendar.py          # US/HK 交易日与 RTH 判断（本地日历日）
 │   │   │   ├── engine.py                   # 区间策略状态机
 │   │   │   ├── risk.py                     # 日亏损、连续亏损、暂停、kill switch
 │   │   │   ├── backtest.py                 # 离线回测引擎
@@ -208,7 +222,7 @@ auto_trade/
 │   │   │   └── credential_crypto.py        # RSA + AES-GCM 凭证加密
 │   │   └── services/
 │   │       ├── strategy_service.py         # 策略与运行时状态 CRUD
-│   │       ├── trade_execution_service.py  # 下单、pending 对账、盈亏记录
+│   │       ├── trade_execution_service.py  # 下单、pending 对账、tracked 入场成本、HK/US tick
 │   │       ├── runtime_state_service.py    # 状态持久化与历史快照
 │   │       ├── daily_pnl_service.py        # 订单账本日盈亏重算
 │   │       ├── credentials_service.py      # 凭证存取（掩码响应）
@@ -216,7 +230,7 @@ auto_trade/
 │   │       ├── interval_application_service.py  # 区间建议应用规则
 │   │       ├── llm_interaction_service.py  # LLM 调用记录
 │   │       ├── trade_event_service.py      # 决策时间线事件
-│   │       └── data_aggregator.py          # 账户/持仓聚合
+│   │       └── data_aggregator.py          # LLM 行情聚合（真实 K 线、ATR/布林带）
 │   ├── tests/                              # pytest
 │   ├── alembic/                            # 历史迁移（运行时以 database._ensure_* 为准）
 │   ├── requirements.txt
@@ -257,7 +271,7 @@ auto_trade/
 |------|------|
 | `/#/` | Dashboard — 实时状态、图表、启停/暂停/kill switch |
 | `/#/strategy` | Strategy — 区间参数、LLM 顾问 |
-| `/#/history` | Trade History — 今日/历史订单、撤单 |
+| `/#/history` | Trade History — 今日/历史订单、撤单；今日列表默认读本地库，点「刷新」时 `refresh=true` 强制同步券商 |
 | `/#/events` | Decision Timeline — 交易与 LLM 决策事件 |
 | `/#/backtest` | Backtest — CSV 回测 |
 | `/#/credentials` | Credentials — 长桥 / Server酱凭证 |
@@ -282,13 +296,13 @@ auto_trade/
 |--------|------|-------------|
 | `GET` | `/api/credentials` | 凭证配置状态（掩码，无明文） |
 | `PUT` | `/api/credentials` | 更新长桥 / Server酱凭证 |
-| `GET` | `/api/account` | 账户净值、现金、持仓 |
+| `GET` | `/api/account` | 账户净值、现金、持仓（持仓市值一次批量 `get_quotes`） |
 
 ### 订单与事件
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/api/orders` | 分页订单；`scope=today\|history`，`page`，`page_size`（或兼容 `limit`） |
+| `GET` | `/api/orders` | 分页订单；`scope=today\|history`，`page`，`page_size`（或兼容 `limit`）；`refresh=true` 时（仅 `scope=today`）先强制从券商同步再返回本地库 |
 | `POST` | `/api/orders/{order_id}/cancel` | 撤销指定券商订单 |
 | `GET` | `/api/events` | 决策时间线分页；`page`，`page_size`，可选 `symbol`、`event_type` |
 | `GET` | `/api/events/export` | 导出事件；`format=csv\|json`，`limit` |
@@ -364,6 +378,8 @@ auto_trade/
 - 长桥 SDK 不适合高频交易，请控制下单频率
 - 行情权限、交易权限和可交易品种以长桥账户实际开通为准
 - 交易时段、费率以长桥 App 和官网实时展示为准
+- `market_calendar` 按交易所**本地日历日**与周末 RTH 判断，**不含节假日历**；休市日仍可能计入当日风控窗口
+- 今日订单列表默认读 SQLite；Dashboard 最近订单最多落后 runner 后台同步间隔（约 15s），需最新数据请在订单页点「刷新」
 - 回测为离线 CSV 模拟，与实盘滑点/成交可能有差异
 
 ## License

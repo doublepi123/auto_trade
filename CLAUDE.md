@@ -22,8 +22,8 @@ auto_trade/
 │   ├── app/
 │   │   ├── main.py                         # FastAPI 入口、lifespan、LLM 定时 cron
 │   │   ├── config.py                       # pydantic-settings（AUTO_TRADE_* / LONGPORT_*）
-│   │   ├── database.py                     # engine、init_db、SQLite _ensure_* 列补丁
-│   │   ├── models.py                       # StrategyConfig、OrderRecord、TradeEvent、LLMInteraction、RuntimeState…
+│   │   ├── database.py                     # engine、init_db、SQLite _ensure_*（含 tracked_entries 表）
+│   │   ├── models.py                       # StrategyConfig、OrderRecord、TrackedEntry、TradeEvent、LLMInteraction、RuntimeState…
 │   │   ├── schemas.py                      # Pydantic API schemas
 │   │   ├── runner.py                       # AppRunner：行情订阅、策略循环、WS 广播
 │   │   ├── api/
@@ -35,14 +35,15 @@ auto_trade/
 │   │   │   ├── ws.py                       # WebSocket /ws
 │   │   │   └── auth.py                     # require_api_key（可选；preview 可挂依赖）
 │   │   ├── core/
-│   │   │   ├── broker.py                   # BrokerGateway（longport）
+│   │   │   ├── broker.py                   # BrokerGateway：quote(s)、candlesticks、下单
+│   │   │   ├── market_calendar.py          # trade_day_for / is_trading_hours（US/HK 本地日）
 │   │   │   ├── engine.py                   # flat/long/short 状态机
-│   │   │   ├── risk.py                     # 日亏损、连续亏损、暂停、kill switch
+│   │   │   ├── risk.py                     # 日亏损、连续亏损；可注入 trade_day_provider
 │   │   │   ├── backtest.py                 # 离线回测引擎
 │   │   │   ├── notify.py                   # Server酱
 │   │   │   └── credential_crypto.py        # RSA + AES-GCM（AUTO_TRADE_CREDENTIAL_KEY_PATH）
 │   │   └── services/
-│   │       ├── trade_execution_service.py  # 下单、pending 对账、持久化失败恢复
+│   │       ├── trade_execution_service.py  # 下单、pending 对账、tracked 入场成本持久化、HK tick
 │   │       ├── strategy_service.py
 │   │       ├── runtime_state_service.py
 │   │       ├── daily_pnl_service.py
@@ -51,7 +52,7 @@ auto_trade/
 │   │       ├── interval_application_service.py
 │   │       ├── llm_interaction_service.py
 │   │       ├── trade_event_service.py
-│   │       └── data_aggregator.py
+│   │       └── data_aggregator.py          # 真实 K 线 → LLM prompt / ATR / 布林带
 │   ├── tests/                              # pytest（见「测试约定」）
 │   ├── alembic/                            # 历史迁移；运行时以 database._ensure_* 为准
 │   ├── requirements.txt
@@ -115,7 +116,7 @@ cd frontend && npm run type-check
 |----|----------|
 | 策略 | `GET/PUT /api/strategy`，`GET /api/status`，`GET /api/status/history` |
 | 控制 | `POST /api/control/{start,stop,pause,resume,kill-switch,disable-kill-switch}` |
-| 交易 | `GET /api/orders`，`POST /api/orders/{id}/cancel`，`GET /api/account` |
+| 交易 | `GET /api/orders`（`refresh=true` 强制同步今日订单），`POST /api/orders/{id}/cancel`，`GET /api/account`（批量 quote） |
 | 事件 | `GET /api/events`，`GET /api/events/export` |
 | 凭证 | `GET/PUT /api/credentials` |
 | LLM | `POST /api/strategy/llm-interval/{preview,analyze}`，`GET …/status`，`PUT …/enable\|disable` |
@@ -139,7 +140,7 @@ cd frontend && npm run type-check
 
 ### 数据库迁移
 
-- 运行时通过 `init_db()` → `_ensure_order_execution_columns`、`_ensure_order_raw_response_column`、`_ensure_strategy_config_llm_columns`、`_ensure_runtime_state_daily_pnl_date_column` 补丁旧表。
+- 运行时通过 `init_db()` → `_ensure_order_execution_columns`、`_ensure_order_raw_response_column`、`_ensure_strategy_config_llm_columns`、`_ensure_runtime_state_daily_pnl_date_column`、`_ensure_tracked_entries_table` 补丁旧表。
 - **`alembic/` 不用于生产**；加列须同步新增 `_ensure_*`。
 - 首次补 `daily_pnl_date` 时会把 NULL 行的 `daily_pnl`/`consecutive_losses` 置 0（一次性）。
 
@@ -153,7 +154,9 @@ cd frontend && npm run type-check
 
 ### 交易执行（TradeExecutionService）
 
-- 实盘下单后走 **pending 异步对账**（`_track_pending_order` + `_reconcile_pending_order`），非阻塞 `_wait_for_order_completion`。
+- **加权入场成本**保存在内存 + `tracked_entries` 表；`AppRunner` 启动时 `load_tracked_entries`，成交后 `persist_entry`；平仓 PnL 优先 tracked avg，不用 broker `avg_price`。
+- HK 限价按港交所阶梯 tick 量化（`.HK`）；US 仍 0.01。
+- 实盘下单后走 **pending 异步对账**（`_track_pending_order` + `_reconcile_pending_order`）；已删除阻塞式 `_wait_for_order_completion`。
 - `_order_status_timeout_seconds` 默认 30；**`= 0` 表示禁用** reconcile 超时。超时后 pause、清 pending、恢复 engine snapshot。
 - `execute()` 入口会再次 `risk.check()`，并拒绝已有 pending 时的并发下单。
 - 券商已提交但 **DB 写入失败** → `OrderPersistenceError` 路径：尝试撤单、pause、回滚 snapshot。
@@ -162,13 +165,26 @@ cd frontend && npm run type-check
 ### 经纪商交互
 
 - `BrokerGateway` 懒加载 `QuoteContext` / `TradeContext`。
-- 单 symbol 行情订阅；换 symbol 会 unsubscribe 旧的。
+- `get_quotes(symbols)` 批量报价；`get_candlesticks(symbol, period, count)` 供 `DataAggregator` / LLM。
+- 单 symbol 行情订阅；RTH 内推送静默 ~90s 时 runner `_resubscribe_quotes_if_silent`；主动 `get_quote` 刷新设 `is_push=False` 以免误判推送存活。
 - 测试通过 mock `BrokerGateway` 注入；`longport` 为可选依赖。
+
+### 交易日历（market_calendar）
+
+- `trade_day_for(market, instant)`：交易所本地**日历日**（非节假日历）；`AppRunner` 注入 `RiskController` 与 `DailyPnlService.to_trade_day`。
+- `is_trading_hours`：周末 + RTH 窗口；用于行情重订守卫，**不**阻止盘前盘后下单。
 
 ### LLM 顾问
 
 - 服务：`llm_advisor_service.py`、`interval_application_service.py`；HTTP：`api/llm_advisor.py`；后台：`main._llm_analysis_cron`。
+- `DataAggregator` 拉真实日 K / 1 分钟 K；`LLMAdvisorService(broker=...)` 可复用 runner 的 gateway。
+- LONG 态允许 LLM **降低** `buy_low`（追价加仓）；见 Roadmap P7'。
 - 节流：`_LAST_ANALYSIS_TIMESTAMP` 为 `time.monotonic()`；判断前检查 `<= 0` 避免冷启动误判。
+
+### AppRunner / lifespan
+
+- `main.lifespan`：`asyncio.to_thread(runner.start, loop=...)` / `to_thread(runner.stop)`，避免阻塞事件循环。
+- `sync_today_orders_from_broker` 约 15s 节流；`GET /api/orders?refresh=true` 可 `force` 同步。
 
 ### 代码风格
 

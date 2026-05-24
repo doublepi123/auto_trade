@@ -13,9 +13,31 @@
 | **API 覆盖** | ✅ 完备。策略配置、凭证管理、订单查询、状态获取、状态历史、事件时间线、运行时控制（启停/暂停/Kill Switch）。 |
 | **WebSocket 推送** | ✅ 就绪。实时状态同步。 |
 | **本地部署** | ✅ 就绪。Docker Compose 一键启动。 |
-| **测试** | ✅ 就绪。Backend pytest 单元测试、Frontend Cypress E2E 测试。 |
+| **测试** | ✅ 就绪。Backend pytest **417** 项、Frontend Cypress E2E 测试。 |
 | **凭证安全** | ✅ 就绪。主密钥 + AES-GCM 加密存储，前端不回显明文。 |
-| **数据库** | ✅ 就位。SQLite，含运行状态、状态快照、订单、LLM 交互、交易事件和凭证配置。 |
+| **数据库** | ✅ 就位。SQLite，含运行状态、状态快照、订单、`tracked_entries`、LLM 交互、交易事件和凭证配置。 |
+| **LLM 行情数据** | ✅ 真实 K 线（日 K + 1 分钟 K），ATR/布林带有效。 |
+| **多市场切日** | ✅ US/HK 交易所本地日历日驱动风控与日 PnL。 |
+| **入场成本** | ✅ `tracked_entries` 持久化 + 启动对账。 |
+
+---
+
+## 近期已完成迭代 (2026-05-25)
+
+> 对应 commit `feat: exchange trade days, tracked entries, and real LLM market data`。用户向说明已同步至 `README.md` / `CLAUDE.md`。
+
+| 代号 | 主题 | 状态 |
+|------|------|------|
+| **P1** | DataAggregator 真实 K 线 + `BrokerGateway.get_candlesticks` | ✅ |
+| **P3'** | `market_calendar` + 风控/日 PnL 按市场切日 + HK tick | ✅ |
+| **P4'** | `tracked_entries` 持久化 + 启动 `TRACKED_ENTRY_DRIFT` 对账 | ✅ |
+| **P5'** | lifespan 非阻塞启动；RTH 内推送静默重订（~90s） | ✅（未接 SDK disconnect 回调） |
+| **P6'** | 批量 quote、`/api/orders` 默认读 DB + `refresh`、`_recent_quotes` 上限 500 | ✅ |
+| **P7'** | IntervalApplication 与文档对齐（保留追价加仓） | ✅ |
+| **P8'** | 删除 `_wait_for_order_completion`、`Settings.frontend_port` | ✅ |
+| **P2** | API 鉴权收紧 | ⏳ 未做 |
+
+审计项 **#1、#3、#4、#6、#7、#8（部分）、#11、#12、#13、#14、#15** 已随上表修复；**#2**（区间应用）按 P7' 方案 B 保留实现；**#5、#9、#10、#17** 仍开放。
 
 ---
 
@@ -33,7 +55,7 @@
 
 > 本节为 2026-05-24 一次完整代码审计后的产物，**优先级高于下文 2026-05-22 列出的 P4~P8**。原 P3 回测已完成，原 P4~P8 主题保留但顺延到 P9 之后。
 >
-> 审计基线：`pytest 374 passed, 1 skipped`、前端 `vue-tsc` 通过、`basedpyright` 报 3 处 `object`→数值类型推断错误（`llm_advisor.py:190`、`runner.py:786`、`runner.py:795`）。
+> 审计基线（2026-05-24）：`pytest 374 passed, 1 skipped`。2026-05-25 交付后 **`pytest 417 passed`**；`basedpyright` 仍有少量待清项（见 P8'）。
 
 ### 审计发现（按严重度）
 
@@ -99,7 +121,7 @@
 | 8 | **P8'** | lint / 死代码清理 | 还清现存类型债 | 0.5 天 |
 | 9+ | 沿用下文 | 审计日志、移动端、复盘工作台、观察列表 | 顺延执行 | — |
 
-### P1：DataAggregator 真实 K 线
+### P1：DataAggregator 真实 K 线 ✅（2026-05-25 完成）
 
 > **目标：** 让 LLM 顾问拿到真实历史，恢复 ATR/布林带的有效性。
 
@@ -120,8 +142,8 @@
 
 #### 验证
 
-- [ ] `pytest tests/test_data_aggregator.py tests/test_broker.py tests/test_llm_advisor.py -v` 全通。
-- [ ] `basedpyright` 不引入新错误。
+- [x] `pytest tests/test_data_aggregator.py tests/test_broker.py tests/test_llm_advisor.py -v` 全通。
+- [ ] `basedpyright` 不引入新错误（P8' 部分待清）。
 - [ ] 手工：开启 `AUTO_TRADE_ENV=dev`，触发 `/api/strategy/llm-interval/preview`，检查 prompt 文本里 `日 K 表` 行数 >1 且各行 OHLC 不再相同。
 
 ### P2：API 鉴权收紧
@@ -146,14 +168,14 @@
 - [ ] 不设置 `AUTO_TRADE_API_KEY` 时，无 header 调用 `POST /api/control/pause` 仍按当前内网假设放行（README 同步澄清）。
 - [ ] `WS /ws?token=wrong` 被拒。
 
-### P3'：交易所感知交易日 + HK tick
+### P3'：交易所感知交易日 + HK tick ✅（2026-05-25 完成）
 
 > **目标：** 用标的所在市场的"交易日"切风控/日 PnL；让 HK 限价单价格落到合法 tick。
 
 #### 范围
 
 - 新建 `backend/app/core/market_calendar.py`
-  - `trade_day_for(market: str, instant: datetime) -> date`：US 用 ET，HK 用 HKT，按 RTH 结束时间切日（US 16:00 ET / HK 16:00 HKT）。
+  - `trade_day_for(market: str, instant: datetime) -> date`：US 用 ET、HK 用 HKT 的**本地日历日**（午夜切日；不含节假日历）。`is_trading_hours` 用于 RTH 窗口判断（如行情重订）。
   - `is_trading_hours(market: str, instant: datetime) -> bool`（为后续交易时段守卫预留）。
 - `backend/app/core/risk.py`：`RiskController` 接受 `trade_day_provider: Callable[[], date]`，默认仍 UTC（保持向后兼容），由 `AppRunner` 注入 market-aware 版本。
 - `backend/app/services/daily_pnl_service.py`：`calculate(trade_day=...)` 调用方传入按市场计算的 `target_day`。
@@ -165,10 +187,10 @@
 
 #### 验证
 
-- [ ] 模拟 `2026-05-24 13:00 UTC`（美股 9:00 ET，盘前）和 `2026-05-24 19:30 UTC`（美股 15:30 ET，临近收盘），同一个 US 标的视作同一交易日。
-- [ ] HK 标的报价 `0.243` 时 BUY 限价被量化到 `0.240` / SELL 到 `0.245`（步长 0.005）。
+- [x] `tests/test_market_calendar.py` 覆盖 US/HK 边界；`test_risk` / `test_daily_pnl_service` 补切日用例。
+- [x] HK tick：`tests/test_trade_execution_service.py`。
 
-### P4'：入场成本持久化 + 重启对账
+### P4'：入场成本持久化 + 重启对账 ✅（2026-05-25 完成）
 
 > **目标：** 进程重启后仍能用加权入场成本计算平仓 PnL，避免回到 broker `avg_price` 偏差。
 
@@ -177,14 +199,15 @@
 - 新表 `tracked_entries(symbol PK, quantity, cost, updated_at)`，`database._ensure_tracked_entries_table` 补丁旧库。
 - `TradeExecutionService._record_entry_price` / `_consume_entry_quantity` 改为同步落表（保留内存缓存当 fast path）。
 - `AppRunner._initialize_runner` 启动时把 `tracked_entries` 注入回 `_trade_svc._entry_positions`。
-- 启动对账：若 `tracked.quantity` 与 broker `position.quantity` 偏差 > 5% 或差值绝对量 > 阈值，写 `RECONCILE_DRIFT` 事件 + 通知。
+- 启动对账：若 `tracked.quantity` 与 broker `position.quantity` 偏差 > 5% 且绝对差 ≥ 1 股，写 **`TRACKED_ENTRY_DRIFT`** 事件（决策时间线）。
 - 测试：`tests/test_trade_execution_service.py` 加"重启 → tracked 复原 → 平仓 PnL 用 tracked avg"用例；`tests/test_runner.py` 加 reconcile 漂移用例。
 
 #### 验证
 
+- [x] 单元：`test_trade_execution_service` / `test_runner`（load + drift 事件）。
 - [ ] 端到端：`BUY 100@10` → 重启 → broker 改 `avg=11`（mock）→ `SELL 100@12`，PnL 仍按 10 算 ≈ 200。
 
-### P5'：lifespan 非阻塞 + WS 重订
+### P5'：lifespan 非阻塞 + WS 重订 ✅（2026-05-25 部分完成）
 
 > **目标：** FastAPI 启动不被券商网络阻塞；行情 WebSocket 断线能自愈。
 
@@ -197,10 +220,11 @@
 
 #### 验证
 
-- [ ] 启动期 `/api/health` 在 1s 内返回（即便 broker 凭证为空）。
-- [ ] 模拟订阅丢失后，30s 内 quote 恢复推送。
+- [x] `asyncio.to_thread(runner.start/stop)`；`test_runner` 重订用例。
+- [ ] 启动期 `/api/health` 在 1s 内返回（即便 broker 凭证为空）— 待手工压测。
+- [ ] 模拟订阅丢失后，30s 内 quote 恢复推送 — 依赖 RTH + 90s 静默阈值。
 
-### P6'：性能优化
+### P6'：性能优化 ✅（2026-05-25 完成）
 
 #### 范围
 
@@ -210,8 +234,7 @@
 
 #### 验证
 
-- [ ] 持仓 5 个标的时 `/api/account` 单次延迟下降到接近一次 quote 的耗时。
-- [ ] 高频 quote 注入下 `_recent_quotes` 长度稳定。
+- [x] `test_account_api` 批量 quote；`test_api` orders 默认本地；`test_runner` recent_quotes cap。
 
 ### P7'：IntervalApplicationService 对齐文档 ✅（2026-05-25 完成 — 方案 B）
 
@@ -219,11 +242,11 @@
 - 行为对照表见上文 `迭代 0 / 0.2`。
 - `tests/test_interval_application.py` 已包含此行为断言；后续可在该文件加注释链接本节作为权威说明。
 
-### P8'：lint / 死代码清理
+### P8'：lint / 死代码清理 ✅（2026-05-25 部分完成）
 
-- 修 `basedpyright` 3 处错误（用 `isinstance` 或显式 cast）。
-- 删除 `TradeExecutionService._wait_for_order_completion`。
-- 删除 `Settings.frontend_port`（未使用）。
+- [ ] 修 `basedpyright` 3 处错误（用 `isinstance` 或显式 cast）— `llm_advisor` / `runner` 已加 coerce，待全量 pyright 清零。
+- [x] 删除 `TradeExecutionService._wait_for_order_completion`。
+- [x] 删除 `Settings.frontend_port`（未使用）。
 
 ---
 
