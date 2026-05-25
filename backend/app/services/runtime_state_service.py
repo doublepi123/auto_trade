@@ -29,6 +29,10 @@ class RuntimeStateService:
             short_selling=config.short_selling,
             min_profit_amount=config.min_profit_amount,
             auto_resume_minutes=config.auto_resume_minutes,
+            fee_rate_us=config.fee_rate_us,
+            fee_rate_hk=config.fee_rate_hk,
+            min_repricing_pct=config.min_repricing_pct,
+            llm_action_cooldown_seconds=config.llm_action_cooldown_seconds,
         )
         engine.state = self._coerce_engine_state(state.engine_state)
         engine.last_price = state.last_price

@@ -47,6 +47,10 @@ class TestRuntimeStateService:
             "auto_resume_minutes": 5,
             "max_daily_loss": 3000.0,
             "max_consecutive_losses": 2,
+            "fee_rate_us": 0.001,
+            "fee_rate_hk": 0.004,
+            "min_repricing_pct": 0.004,
+            "llm_action_cooldown_seconds": 120,
         })
         from datetime import datetime, timezone
         paused_at = datetime(2026, 5, 22, 10, 0, tzinfo=timezone.utc)
@@ -74,6 +78,10 @@ class TestRuntimeStateService:
 
         assert engine.params.symbol == "AAPL.US"
         assert engine.params.auto_resume_minutes == 5
+        assert engine.params.fee_rate_us == 0.001
+        assert engine.params.fee_rate_hk == 0.004
+        assert engine.params.min_repricing_pct == 0.004
+        assert engine.params.llm_action_cooldown_seconds == 120
         assert engine.state == EngineState.LONG
         assert engine.last_price == 150.0
         assert risk.daily_pnl == -100.0

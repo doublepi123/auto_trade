@@ -30,6 +30,7 @@ class StrategyService:
             "short_selling", "min_profit_amount", "auto_resume_minutes",
             "max_daily_loss", "max_consecutive_losses",
             "llm_interval_minutes",
+            "fee_rate_us", "fee_rate_hk", "min_repricing_pct", "llm_action_cooldown_seconds",
         ]
         for field in updatable_fields:
             if field in data:

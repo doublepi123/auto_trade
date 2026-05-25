@@ -20,6 +20,7 @@ from app.services.strategy_service import StrategyService
 
 Base.metadata.create_all(bind=db_engine)
 database._ensure_strategy_config_llm_columns(db_engine)
+database._ensure_strategy_config_trade_safety_columns(db_engine)
 database._ensure_runtime_state_daily_pnl_date_column(db_engine)
 
 client = TestClient(app)
@@ -885,6 +886,39 @@ class TestAPI:
         assert data["short_selling"] is False
         assert data["max_daily_loss"] == 5000.0
         assert data["max_consecutive_losses"] == 3
+
+    def test_update_strategy_allows_trade_safety_settings(self) -> None:
+        _clean_strategy()
+        resp = client.put("/api/strategy", json={
+            "symbol": "AAPL.US",
+            "market": "US",
+            "buy_low": 100.0,
+            "sell_high": 200.0,
+            "fee_rate_us": 0.001,
+            "fee_rate_hk": 0.004,
+            "min_repricing_pct": 0.004,
+            "llm_action_cooldown_seconds": 120,
+        })
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["fee_rate_us"] == 0.001
+        assert data["fee_rate_hk"] == 0.004
+        assert data["min_repricing_pct"] == 0.004
+        assert data["llm_action_cooldown_seconds"] == 120
+
+    def test_update_strategy_rejects_invalid_trade_safety_settings(self) -> None:
+        resp = client.put("/api/strategy", json={
+            "symbol": "AAPL.US",
+            "market": "US",
+            "buy_low": 100.0,
+            "sell_high": 200.0,
+            "fee_rate_us": -0.01,
+            "min_repricing_pct": 0.06,
+            "llm_action_cooldown_seconds": 3601,
+        })
+
+        assert resp.status_code == 422
 
     def test_credentials_response_hides_values(self) -> None:
         _clean_credentials()

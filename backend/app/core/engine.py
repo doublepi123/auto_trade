@@ -25,6 +25,10 @@ class StrategyParams:
     short_selling: bool = False
     min_profit_amount: float = 0.0
     auto_resume_minutes: int = 3
+    fee_rate_us: float = 0.0005
+    fee_rate_hk: float = 0.0030
+    min_repricing_pct: float = 0.003
+    llm_action_cooldown_seconds: int = 60
 
 
 @dataclass

@@ -32,6 +32,10 @@ class StrategyConfigSchema(BaseModel):
     max_daily_loss: float = Field(default=5000.0, gt=0)
     max_consecutive_losses: int = Field(default=3, ge=1)
     llm_interval_minutes: Optional[int] = Field(default=None, ge=1, le=1440)
+    fee_rate_us: Optional[float] = Field(default=None, ge=0, le=0.01)
+    fee_rate_hk: Optional[float] = Field(default=None, ge=0, le=0.02)
+    min_repricing_pct: Optional[float] = Field(default=None, ge=0, le=0.05)
+    llm_action_cooldown_seconds: Optional[int] = Field(default=None, ge=0, le=3600)
 
     @field_validator("market")
     @classmethod
@@ -67,6 +71,10 @@ class StrategyMergedSchema(BaseModel):
     max_daily_loss: float = Field(default=5000.0, gt=0)
     max_consecutive_losses: int = Field(default=3, ge=1)
     llm_interval_minutes: int = Field(default=2, ge=1, le=1440)
+    fee_rate_us: float = Field(default=0.0005, ge=0, le=0.01)
+    fee_rate_hk: float = Field(default=0.0030, ge=0, le=0.02)
+    min_repricing_pct: float = Field(default=0.003, ge=0, le=0.05)
+    llm_action_cooldown_seconds: int = Field(default=60, ge=0, le=3600)
 
     @field_validator("market")
     @classmethod
@@ -126,6 +134,10 @@ class StrategyResponse(BaseModel):
     max_daily_loss: float
     max_consecutive_losses: int
     llm_interval_minutes: int
+    fee_rate_us: float
+    fee_rate_hk: float
+    min_repricing_pct: float
+    llm_action_cooldown_seconds: int
     updated_at: datetime
 
     model_config = {"from_attributes": True}

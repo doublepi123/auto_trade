@@ -19,6 +19,7 @@ def init_db() -> None:
     _ensure_order_execution_columns(engine)
     _ensure_order_raw_response_column(engine)
     _ensure_strategy_config_llm_columns(engine)
+    _ensure_strategy_config_trade_safety_columns(engine)
     _ensure_runtime_state_daily_pnl_date_column(engine)
     _ensure_tracked_entries_table(engine)
 
@@ -84,6 +85,25 @@ def _ensure_strategy_config_llm_columns(db_engine: Engine) -> None:
         for name, column_type in missing_columns:
             if name not in columns:
                 connection.exec_driver_sql(f"ALTER TABLE strategy_config ADD COLUMN {name} {column_type}")
+
+
+def _ensure_strategy_config_trade_safety_columns(db_engine: Engine) -> None:
+    inspector = inspect(db_engine)
+    if "strategy_config" not in inspector.get_table_names():
+        return
+    columns = {column["name"] for column in inspector.get_columns("strategy_config")}
+    missing_columns = {
+        "fee_rate_us": "FLOAT DEFAULT 0.0005 NOT NULL",
+        "fee_rate_hk": "FLOAT DEFAULT 0.003 NOT NULL",
+        "min_repricing_pct": "FLOAT DEFAULT 0.003 NOT NULL",
+        "llm_action_cooldown_seconds": "INTEGER DEFAULT 60 NOT NULL",
+    }.items()
+    with db_engine.begin() as connection:
+        for name, column_type in missing_columns:
+            if name not in columns:
+                connection.exec_driver_sql(
+                    f"ALTER TABLE strategy_config ADD COLUMN {name} {column_type}"
+                )
 
 
 def _ensure_runtime_state_daily_pnl_date_column(db_engine: Engine) -> None:

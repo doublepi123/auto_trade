@@ -33,6 +33,11 @@ class StrategyConfig(Base):
     sct_key: Mapped[str] = mapped_column(String(200), default="")
     updated_at: Mapped[datetime] = mapped_column(_TZDateTime(), default=_utcnow)
 
+    fee_rate_us: Mapped[float] = mapped_column(Float, default=0.0005)
+    fee_rate_hk: Mapped[float] = mapped_column(Float, default=0.0030)
+    min_repricing_pct: Mapped[float] = mapped_column(Float, default=0.003)
+    llm_action_cooldown_seconds: Mapped[int] = mapped_column(Integer, default=60)
+
     auto_interval_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     llm_interval_minutes: Mapped[int] = mapped_column(Integer, default=2)
     llm_suggested_buy_low: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
