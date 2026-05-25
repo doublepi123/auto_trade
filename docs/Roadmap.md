@@ -269,7 +269,7 @@
 
 #### P4 交付摘要
 
-- **配置持久化（Task 1）**：`StrategyConfig` 新增 `fee_rate_us`、`fee_rate_hk`、`min_repricing_pct`、`llm_action_cooldown_seconds`；`_ensure_strategy_config_p4_columns` 补旧表；API schema 与前端 Strategy 表单同步。
+- **配置持久化（Task 1）**：`StrategyConfig` 新增 `fee_rate_us`、`fee_rate_hk`、`min_repricing_pct`、`llm_action_cooldown_seconds`；`_ensure_strategy_config_trade_safety_columns` 补旧表；API schema 与前端 Strategy 表单同步。
 - **费用后收益门槛（Task 2）**：`_profit_guard_for_exit` 叠加 round-trip 费用估算；净收益不足时 `ORDER_SKIPPED` + `skip_category=”FEE”`；`allow_loss_exit=True` 绕过门槛。
 - **LLM 改价与冷却 Gate（Task 3）**：`execute_llm_order_decision` 在撤单前执行改价阈值（`REPRICING`）与同方向冷却（`COOLDOWN`）检查；`_last_llm_action_at[(symbol, side)]` 仅在成交/提交后更新；`CANCEL_PENDING` 不受 gate 影响。
 - **回测跳过原因分类（Task 4）**：`BacktestEngine` 跳过事件携带 `skip_category`，不读实盘 `fee_rate_us/hk`，离线模型保持独立。

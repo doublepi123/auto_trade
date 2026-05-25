@@ -140,7 +140,7 @@ cd frontend && npm run type-check
 
 ### 数据库迁移
 
-- 运行时通过 `init_db()` → `_ensure_order_execution_columns`、`_ensure_order_raw_response_column`、`_ensure_strategy_config_llm_columns`、`_ensure_runtime_state_daily_pnl_date_column`、`_ensure_tracked_entries_table`、`_ensure_strategy_config_p4_columns`（P4 新增：`fee_rate_us`、`fee_rate_hk`、`min_repricing_pct`、`llm_action_cooldown_seconds`）补丁旧表。
+- 运行时通过 `init_db()` → `_ensure_order_execution_columns`、`_ensure_order_raw_response_column`、`_ensure_strategy_config_llm_columns`、`_ensure_runtime_state_daily_pnl_date_column`、`_ensure_tracked_entries_table`、`_ensure_strategy_config_trade_safety_columns`（P4 新增：`fee_rate_us`、`fee_rate_hk`、`min_repricing_pct`、`llm_action_cooldown_seconds`）补丁旧表。
 - **`alembic/` 不用于生产**；加列须同步新增 `_ensure_*`。
 - 首次补 `daily_pnl_date` 时会把 NULL 行的 `daily_pnl`/`consecutive_losses` 置 0（一次性）。
 
