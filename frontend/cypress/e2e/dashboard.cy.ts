@@ -156,4 +156,9 @@ describe('Dashboard', () => {
     cy.get('[data-testid="quick-actions"]').should('contain', '恢复').and('contain', '紧急停止')
     cy.get('[data-testid="recent-orders"]').should('contain', 'SELL').and('contain', 'FILLED')
   })
+
+  it('shows the skipped order category in recent events', () => {
+    cy.visitApp('/')
+    cy.get('[data-testid="recent-events"]').should('contain', '成本不足')
+  })
 })

@@ -232,6 +232,10 @@
               <small>{{ formatDateTime(event.created_at) }}</small>
             </div>
             <p>{{ event.message || event.status || '-' }}</p>
+            <small
+              v-if="event.event_type === 'ORDER_SKIPPED' && event.payload?.skip_category"
+              class="skip-category"
+            >{{ skipCategoryLabel(String(event.payload.skip_category)) }}</small>
           </div>
         </div>
         <p v-else class="empty-note">暂无决策事件</p>
@@ -250,7 +254,7 @@ import { useStatusStream } from '../composables/useStatusStream'
 import { useAccountRefresh } from '../composables/useAccountRefresh'
 import { startTrading, stopTrading, pauseTrading, resumeTrading, activateKillSwitch, disableKillSwitch, getLLMIntervalStatus, getOrders, getTradeEvents, getStatusHistory } from '../api'
 import type { LLMIntervalStatus, OrderRecord, Position, StatusHistoryPoint, TradeEventRecord, TradeSignalMarker } from '../types'
-import { engineStateLabel, marketLabel, positionSideLabel, tradeEventTypeLabel } from '../utils/labels'
+import { engineStateLabel, marketLabel, positionSideLabel, skipCategoryLabel, tradeEventTypeLabel } from '../utils/labels'
 
 const { strategy, status, initialLoading, loadError, load, refreshStatus } = useDashboardData()
 const { realtimeStatus } = useStatusStream(status)
@@ -922,6 +926,13 @@ function eventTagType(eventTypeValue: string, status: string): string {
   line-height: 1.45;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
+}
+
+.skip-category {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
 }
 
 .empty-note {

@@ -136,7 +136,7 @@ Cypress.Commands.add('stubApi', () => {
           side: 'SELL',
           status: 'SKIPPED',
           message: 'expected profit 4.00 is below required minimum profit 5.00',
-          payload: { expected_profit: 4, required_profit: 5 },
+          payload: { skip_category: 'FEE', expected_profit: 4, estimated_fees: 1, required_profit: 5 },
           created_at: '2026-05-19T19:53:03.545862Z',
         },
       ],

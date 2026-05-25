@@ -6,13 +6,27 @@
         <p>行情、LLM、订单、风控事件按时间倒序汇总</p>
       </div>
       <div class="timeline-actions">
+        <el-select
+          v-model="selectedSkipCategory"
+          clearable
+          placeholder="跳过原因"
+          data-testid="skip-category-filter"
+          style="width: 150px"
+        >
+          <el-option label="成本不足" value="FEE" />
+          <el-option label="改价不显著" value="REPRICING" />
+          <el-option label="LLM 冷却中" value="COOLDOWN" />
+          <el-option label="风控阻断" value="RISK" />
+          <el-option label="已有挂单" value="PENDING" />
+          <el-option label="可用持仓不足" value="POSITION" />
+        </el-select>
         <el-button :loading="exporting === 'csv'" @click="handleExport('csv')">导出 CSV</el-button>
         <el-button :loading="exporting === 'json'" @click="handleExport('json')">导出 JSON</el-button>
         <el-button type="primary" :loading="loading" @click="loadEvents">刷新</el-button>
       </div>
     </div>
 
-    <el-table :data="events" stripe class="responsive-table" v-loading="loading">
+    <el-table :data="visibleEvents" stripe class="responsive-table" v-loading="loading">
       <el-table-column prop="event_type" label="事件" min-width="120">
         <template #default="{ row }">
           <el-tag :type="eventType(row.event_type, row.status)" effect="plain">{{ tradeEventTypeLabel(row.event_type) }}</el-tag>
@@ -30,6 +44,14 @@
       <el-table-column prop="status" label="状态" min-width="120">
         <template #default="{ row }">
           <el-tag :type="statusType(row.status)" effect="plain">{{ row.status || '-' }}</el-tag>
+        </template>
+      </el-table-column>
+      <el-table-column label="原因分类" min-width="120">
+        <template #default="{ row }">
+          <el-tag v-if="row.payload?.skip_category" type="warning" effect="plain">
+            {{ skipCategoryLabel(String(row.payload.skip_category)) }}
+          </el-tag>
+          <span v-else>-</span>
         </template>
       </el-table-column>
       <el-table-column prop="message" label="摘要" min-width="280" show-overflow-tooltip />
@@ -54,11 +76,11 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { exportTradeEvents, getTradeEvents } from '../api'
 import type { TradeEventRecord } from '../types'
-import { orderSideLabel, tradeEventTypeLabel } from '../utils/labels'
+import { orderSideLabel, skipCategoryLabel, tradeEventTypeLabel } from '../utils/labels'
 
 const events = ref<TradeEventRecord[]>([])
 const loading = ref(false)
@@ -66,6 +88,12 @@ const exporting = ref<'csv' | 'json' | ''>('')
 const total = ref(0)
 const page = ref(1)
 const pageSize = ref(20)
+const selectedSkipCategory = ref('')
+
+const visibleEvents = computed(() => {
+  if (!selectedSkipCategory.value) return events.value
+  return events.value.filter((event) => event.payload?.skip_category === selectedSkipCategory.value)
+})
 
 onMounted(loadEvents)
 
