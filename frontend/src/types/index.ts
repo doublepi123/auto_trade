@@ -240,6 +240,7 @@ export interface BacktestSkippedSignal {
   price: number
   reason: string
   state: string
+  category?: string | null
 }
 
 export interface BacktestEquityPoint {

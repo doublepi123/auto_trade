@@ -346,6 +346,7 @@ class BacktestSkippedSignal(BaseModel):
     price: float
     reason: str
     state: str
+    category: Optional[str] = None
 
 
 class BacktestEquityPoint(BaseModel):

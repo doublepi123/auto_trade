@@ -102,6 +102,7 @@ class TestBacktestEngine:
         assert result.metrics.final_state == "long"
         assert result.metrics.skipped_signals == 1
         assert "below min_profit_amount" in result.skipped_signals[0].reason
+        assert result.skipped_signals[0].category == "FEE"
 
     def test_daily_loss_pause_skips_new_entries(self) -> None:
         engine = BacktestEngine(BacktestEngineParams(
@@ -198,6 +199,24 @@ class TestBacktestAPI:
         assert [trade["action"] for trade in data["trades"]] == ["BUY", "SELL"]
         assert len(data["equity_curve"]) == 2
         assert len(data["fee_sensitivity"]) >= 3
+
+    def test_run_backtest_endpoint_returns_cost_skip_category(self) -> None:
+        resp = client.post("/api/backtest/run", json={
+            "params": {
+                "buy_low": 100,
+                "sell_high": 101,
+                "min_profit_amount": 5,
+                "fee_rate": 0.001,
+            },
+            "csv_text": (
+                "timestamp,open,high,low,close,volume\n"
+                "2026-05-22T10:00:00Z,100,100,99,100,1000\n"
+                "2026-05-22T10:01:00Z,100,101.5,100,101,1000\n"
+            ),
+        })
+
+        assert resp.status_code == 200
+        assert resp.json()["skipped_signals"][0]["category"] == "FEE"
 
     def test_run_backtest_endpoint_rejects_bad_csv(self) -> None:
         resp = client.post("/api/backtest/run", json={

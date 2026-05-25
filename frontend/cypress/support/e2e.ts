@@ -254,7 +254,14 @@ Cypress.Commands.add('stubApi', () => {
           holding_minutes: 1,
         },
       ],
-      skipped_signals: [],
+      skipped_signals: [{
+        timestamp: '2026-05-22T10:02:00Z',
+        action: 'SELL',
+        price: 101,
+        reason: 'net profit below min_profit_amount',
+        state: 'long',
+        category: 'FEE',
+      }],
       fee_sensitivity: [
         { fee_rate: 0, total_pnl: 200, total_return_pct: 2, max_drawdown_pct: 0 },
         { fee_rate: 0.001, total_pnl: 199.4, total_return_pct: 1.994, max_drawdown_pct: 0 },

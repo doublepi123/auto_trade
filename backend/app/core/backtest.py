@@ -53,6 +53,7 @@ class BacktestSkippedSignal:
     price: float
     reason: str
     state: str
+    category: str | None = None
 
 
 @dataclass(frozen=True)
@@ -158,6 +159,7 @@ class BacktestEngine:
                                 f"min_profit_amount {self.params.min_profit_amount:.2f}"
                             ),
                             state=position.side,
+                            category="FEE",
                         ))
                     else:
                         gross_pnl = self._gross_exit_pnl(position, price)
@@ -202,6 +204,7 @@ class BacktestEngine:
                             price=price,
                             reason=paused_reason,
                             state="flat",
+                            category="RISK",
                         ))
                     else:
                         entry_fee = self._fee(price, self.params.quantity)

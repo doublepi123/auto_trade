@@ -65,6 +65,18 @@ export function positionSideLabel(side?: string | null): string {
   }
 }
 
+export function skipCategoryLabel(category?: string | null): string {
+  switch (category) {
+    case 'FEE': return '成本不足'
+    case 'REPRICING': return '改价不显著'
+    case 'COOLDOWN': return 'LLM 冷却中'
+    case 'RISK': return '风控阻断'
+    case 'PENDING': return '已有挂单'
+    case 'POSITION': return '可用持仓不足'
+    default: return ''
+  }
+}
+
 export function tradeEventTypeLabel(eventType?: string | null): string {
   switch (eventType) {
     case 'LLM_ANALYSIS':

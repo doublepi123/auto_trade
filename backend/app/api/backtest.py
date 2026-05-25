@@ -90,6 +90,7 @@ def run_backtest(payload: BacktestRunRequest) -> BacktestResult:
                 price=signal.price,
                 reason=signal.reason,
                 state=signal.state,
+                category=signal.category,
             )
             for signal in result.skipped_signals
         ],

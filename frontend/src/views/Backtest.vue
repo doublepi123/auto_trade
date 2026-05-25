@@ -172,6 +172,9 @@
           <div v-for="signal in result.skipped_signals" :key="`${signal.timestamp}-${signal.action}`" class="skip-row">
             <strong>{{ actionLabel(signal.action) }} · ${{ formatNumber(signal.price) }}</strong>
             <span>{{ formatDateTime(signal.timestamp) }}</span>
+            <el-tag v-if="signal.category" size="small" type="warning" effect="plain">
+              {{ skipCategoryLabel(signal.category) }}
+            </el-tag>
             <p>{{ signal.reason }}</p>
           </div>
         </div>
@@ -202,6 +205,7 @@ import { ElMessage } from 'element-plus'
 import BacktestChart from '../components/BacktestChart.vue'
 import { getStrategy, runBacktest } from '../api'
 import type { BacktestParams, BacktestResult } from '../types'
+import { skipCategoryLabel } from '../utils/labels'
 
 const defaultParams: BacktestParams = {
   symbol: '',
