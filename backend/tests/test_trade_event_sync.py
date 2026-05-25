@@ -32,7 +32,7 @@ class TestTradeEventSync:
             "NVDA.US",
             "SELL",
             "expected profit 4.00 is below required minimum profit 5.00",
-            {"expected_profit": 4.0, "required_profit": 5.0},
+            {"skip_category": "FEE", "expected_profit": 4.0, "required_profit": 5.0},
         )
 
         db = SessionLocal()
@@ -44,6 +44,7 @@ class TestTradeEventSync:
             assert event.status == "SKIPPED"
             assert "expected profit" in event.message
             assert "expected_profit" in event.payload_json
+            assert '"skip_category": "FEE"' in event.payload_json
         finally:
             db.close()
 

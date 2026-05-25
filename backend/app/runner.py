@@ -14,6 +14,7 @@ from app.api.ws import manager
 from app.config import settings
 from app.core.broker import BrokerGateway, Quote
 from app.core.engine import EngineState, StrategyEngine, StrategyParams
+from app.core.fees import one_side_fee_rate
 from app.core.market_calendar import is_trading_hours, trade_day_for
 from app.core.notify import ServerChanNotifier
 from app.core.risk import RiskConfig, RiskController
@@ -267,6 +268,7 @@ class AppRunner:
                     notifier=self.notifier,
                     cash_currency=self._cash_currency(),
                     min_profit_amount=self.engine.params.min_profit_amount,
+                    fee_rate=self._live_fee_rate(),
                     engine_snapshot=engine_snapshot,
                     restore_engine_snapshot=self._restore_engine_snapshot,
                     notify_risk_event=self.notifier.notify_risk_event,
@@ -455,6 +457,7 @@ class AppRunner:
             cash_currency=self._cash_currency(),
             min_profit_amount=self.engine.params.min_profit_amount,
             allow_loss_exit=allow_loss_exit,
+            fee_rate=self._live_fee_rate(),
             engine_snapshot=engine_snapshot,
             restore_engine_snapshot=self._restore_engine_snapshot,
             notify_risk_event=self.notifier.notify_risk_event,
@@ -528,6 +531,13 @@ class AppRunner:
 
     def _cash_currency(self) -> str:
         return "HKD" if self.engine.params.market == "HK" else "USD"
+
+    def _live_fee_rate(self) -> Decimal:
+        return one_side_fee_rate(
+            self.engine.params.market,
+            Decimal(str(self.engine.params.fee_rate_us)),
+            Decimal(str(self.engine.params.fee_rate_hk)),
+        )
 
     def _broadcast_status(self) -> None:
         try:

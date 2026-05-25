@@ -653,3 +653,177 @@ class TestTradeExecutionServiceBasics:
         result = svc.cancel_pending_order()
 
         assert result.status == "NO_PENDING_ORDER"
+
+    def test_execute_sell_skips_when_fees_reduce_net_profit_below_minimum(self, monkeypatch) -> None:
+        from app.config import settings
+        from app.core.broker import OrderResult, Position, Quote
+        from app.core.risk import RiskController
+        from app.core.notify import ServerChanNotifier
+
+        monkeypatch.setattr(settings, "min_exit_profit_pct", 0.0)
+        skipped: list[tuple[str, str, str, dict[str, object]]] = []
+        svc = TradeExecutionService(
+            record_order=lambda *args: None,
+            update_order_status=lambda *args: None,
+            record_risk_event=lambda *args: None,
+            record_order_skipped=lambda symbol, action, reason, payload: skipped.append((symbol, action, reason, payload)),
+        )
+        broker = MagicMock()
+        # 10 units, entry avg_price=100, exit price=101 → gross profit = (101-100)*10 = 10
+        # fee_rate=0.001 → fees = (100+101)*10*0.001 = 2.01 → net = 7.99 < min_profit=9
+        broker.get_positions.return_value = [Position("NVDA.US", "LONG", Decimal("10"), Decimal("100"))]
+        broker.submit_limit_order.return_value = OrderResult("order-fee", "NVDA.US", "SELL", Decimal("10"), Decimal("101"), "FILLED")
+
+        status = svc.execute(
+            "SELL",
+            "NVDA.US",
+            Quote("NVDA.US", 101, 100.9, 101.1, ""),
+            broker,
+            RiskController(),
+            ServerChanNotifier(""),
+            "USD",
+            min_profit_amount=Decimal("9"),
+            fee_rate=Decimal("0.001"),
+        )
+
+        assert status is not None
+        assert status.status == "SKIPPED"
+        assert skipped, "expected record_order_skipped to be called"
+        payload = skipped[0][3]
+        assert payload["skip_category"] == "FEE"
+        assert abs(float(payload["estimated_fees"]) - 2.01) < 0.001
+        broker.submit_limit_order.assert_not_called()
+
+    def test_execute_sell_stop_loss_does_not_apply_fee_gate(self, monkeypatch) -> None:
+        from app.config import settings
+        from app.core.broker import OrderResult, Position, Quote
+        from app.core.risk import RiskController
+        from app.core.notify import ServerChanNotifier
+
+        monkeypatch.setattr(settings, "min_exit_profit_pct", 0.2)
+        broker = MagicMock()
+        # Selling at a loss — fee gate must not block
+        broker.get_positions.return_value = [Position("NVDA.US", "LONG", Decimal("10"), Decimal("220"))]
+        broker.submit_limit_order.return_value = OrderResult("stop-loss-fee", "NVDA.US", "SELL", Decimal("10"), Decimal("215"), "FILLED")
+        svc = TradeExecutionService(
+            record_order=lambda *args: None,
+            update_order_status=lambda *args: None,
+            record_risk_event=lambda *args: None,
+        )
+
+        status = svc.execute(
+            "SELL",
+            "NVDA.US",
+            Quote("NVDA.US", 215, 214.9, 215.1, ""),
+            broker,
+            RiskController(),
+            ServerChanNotifier(""),
+            "USD",
+            min_profit_amount=Decimal("50"),
+            allow_loss_exit=True,
+            fee_rate=Decimal("0.001"),
+        )
+
+        assert status is not None
+        assert status.status == "FILLED"
+        broker.submit_limit_order.assert_called_once()
+
+    def test_execute_risk_rejection_records_risk_skip_category(self) -> None:
+        from app.core.broker import Quote
+        from app.core.risk import RiskController
+        from app.core.notify import ServerChanNotifier
+
+        skipped: list[tuple[str, str, str, dict[str, object]]] = []
+        svc = TradeExecutionService(
+            record_order=lambda *args: None,
+            update_order_status=lambda *args: None,
+            record_risk_event=lambda *args: None,
+            record_order_skipped=lambda symbol, action, reason, payload: skipped.append((symbol, action, reason, payload)),
+        )
+        risk = RiskController()
+        risk.pause("test risk rejection")
+
+        status = svc.execute(
+            "BUY",
+            "NVDA.US",
+            Quote("NVDA.US", 220, 219.9, 220.1, ""),
+            MagicMock(),
+            risk,
+            ServerChanNotifier(""),
+            "USD",
+        )
+
+        assert status is not None
+        assert status.status == "SKIPPED"
+        assert skipped, "expected record_order_skipped to be called for risk rejection"
+        assert skipped[0][3]["skip_category"] == "RISK"
+
+    def test_execute_pending_rejection_records_pending_skip_category(self) -> None:
+        from app.core.broker import OrderResult, Quote
+        from app.core.risk import RiskController
+        from app.core.notify import ServerChanNotifier
+
+        skipped: list[tuple[str, str, str, dict[str, object]]] = []
+        svc = TradeExecutionService(
+            record_order=lambda *args: None,
+            update_order_status=lambda *args: None,
+            record_risk_event=lambda *args: None,
+            record_order_skipped=lambda symbol, action, reason, payload: skipped.append((symbol, action, reason, payload)),
+        )
+        broker = MagicMock()
+        # Inject a pending order to trigger the pending guard
+        svc._track_pending_order(
+            "BUY",
+            OrderResult("order-live", "NVDA.US", "BUY", Decimal("10"), Decimal("220"), "SUBMITTED"),
+            broker,
+            None,
+        )
+
+        status = svc.execute(
+            "BUY",
+            "NVDA.US",
+            Quote("NVDA.US", 221, 220.9, 221.1, ""),
+            broker,
+            RiskController(),
+            ServerChanNotifier(""),
+            "USD",
+        )
+
+        assert status is not None
+        assert status.status == "SKIPPED"
+        assert skipped, "expected record_order_skipped to be called for pending guard"
+        assert skipped[0][3]["skip_category"] == "PENDING"
+
+    def test_execute_sell_without_available_quantity_records_position_category(self) -> None:
+        from app.core.broker import Position, Quote
+        from app.core.risk import RiskController
+        from app.core.notify import ServerChanNotifier
+
+        skipped: list[tuple[str, str, str, dict[str, object]]] = []
+        svc = TradeExecutionService(
+            record_order=lambda *args: None,
+            update_order_status=lambda *args: None,
+            record_risk_event=lambda *args: None,
+            record_order_skipped=lambda symbol, action, reason, payload: skipped.append((symbol, action, reason, payload)),
+        )
+        broker = MagicMock()
+        # available_quantity=0 → no shares available to sell
+        broker.get_positions.return_value = [
+            Position("NVDA.US", "LONG", Decimal("10"), Decimal("220"), available_quantity=Decimal("0"))
+        ]
+
+        status = svc.execute(
+            "SELL",
+            "NVDA.US",
+            Quote("NVDA.US", 225, 224.9, 225.1, ""),
+            broker,
+            RiskController(),
+            ServerChanNotifier(""),
+            "USD",
+        )
+
+        assert status is not None
+        assert status.status == "SKIPPED"
+        assert skipped, "expected record_order_skipped to be called for zero available quantity"
+        assert skipped[0][3]["skip_category"] == "POSITION"
+        broker.submit_limit_order.assert_not_called()

@@ -9,6 +9,7 @@ from threading import RLock
 from typing import TYPE_CHECKING, Callable, Optional
 
 from app.config import settings
+from app.core.fees import estimate_round_trip_fee
 
 if TYPE_CHECKING:
     from app.core.broker import BrokerGateway, OrderResult, Quote
@@ -214,6 +215,7 @@ class TradeExecutionService:
         *,
         min_profit_amount: Decimal | float | int = Decimal("0"),
         allow_loss_exit: bool = False,
+        fee_rate: Decimal | float | int = Decimal("0"),
         engine_snapshot: _EngineSnapshot | None = None,
         restore_engine_snapshot: Callable[[_EngineSnapshot], None] | None = None,
         notify_risk_event: _NotifyRiskEvent | None = None,
@@ -221,21 +223,21 @@ class TradeExecutionService:
         risk_result = risk.check()
         if not risk_result.approved:
             logger.warning("execute rejected by risk: %s", risk_result.reason)
-            return OrderStatus("", _SKIPPED_ORDER_STATUS, reason=risk_result.reason)
+            return self._skip_order(symbol, action, risk_result.reason, skip_category="RISK")
 
         with self._state_lock:
             if self._pending_order is not None:
                 logger.warning("execute skipped: pending order %s still live", self._pending_order.broker_order_id)
-                return OrderStatus("", _SKIPPED_ORDER_STATUS, reason="pending order in flight")
+                return self._skip_order(symbol, action, "pending order in flight", skip_category="PENDING")
 
         if action == "BUY":
             return self._execute_buy(symbol, quote, broker, risk, notifier, cash_currency, engine_snapshot=engine_snapshot, restore_engine_snapshot=restore_engine_snapshot, notify_risk_event=notify_risk_event)
         if action == "SELL":
-            return self._execute_sell(symbol, quote, broker, risk, notifier, min_profit_amount=min_profit_amount, allow_loss_exit=allow_loss_exit, engine_snapshot=engine_snapshot, restore_engine_snapshot=restore_engine_snapshot, notify_risk_event=notify_risk_event)
+            return self._execute_sell(symbol, quote, broker, risk, notifier, min_profit_amount=min_profit_amount, allow_loss_exit=allow_loss_exit, fee_rate=fee_rate, engine_snapshot=engine_snapshot, restore_engine_snapshot=restore_engine_snapshot, notify_risk_event=notify_risk_event)
         if action == "SELL_SHORT":
             return self._execute_sell_short(symbol, quote, broker, risk, notifier, cash_currency, engine_snapshot=engine_snapshot, restore_engine_snapshot=restore_engine_snapshot, notify_risk_event=notify_risk_event)
         if action == "BUY_TO_COVER":
-            return self._execute_buy_to_cover(symbol, quote, broker, risk, notifier, min_profit_amount=min_profit_amount, allow_loss_exit=allow_loss_exit, engine_snapshot=engine_snapshot, restore_engine_snapshot=restore_engine_snapshot, notify_risk_event=notify_risk_event)
+            return self._execute_buy_to_cover(symbol, quote, broker, risk, notifier, min_profit_amount=min_profit_amount, allow_loss_exit=allow_loss_exit, fee_rate=fee_rate, engine_snapshot=engine_snapshot, restore_engine_snapshot=restore_engine_snapshot, notify_risk_event=notify_risk_event)
         logger.warning("unknown action: %s", action)
         return None
 
@@ -302,6 +304,7 @@ class TradeExecutionService:
         quantity: Decimal,
         min_profit_amount: Decimal | float | int,
         allow_loss_exit: bool,
+        fee_rate: Decimal | float | int = Decimal("0"),
     ) -> OrderStatus | None:
         if allow_loss_exit or quantity <= 0 or avg_price <= 0:
             return None
@@ -311,17 +314,27 @@ class TradeExecutionService:
             else (avg_price - exit_price) * quantity
         )
         required_profit = self._minimum_required_profit_amount(avg_price, quantity, min_profit_amount)
-        if expected_profit >= required_profit:
-            return None
-        reason = (
-            f"expected profit {expected_profit:.2f} is below required "
-            f"minimum profit {required_profit:.2f}"
+        rate = self._coerce_non_negative_decimal(fee_rate)
+        estimated_fees = estimate_round_trip_fee(
+            entry_price=avg_price,
+            exit_price=exit_price,
+            quantity=quantity,
+            one_side_rate=rate,
         )
+        net_expected_profit = expected_profit - estimated_fees
+        if net_expected_profit >= required_profit:
+            return None
         return self._skip_order(
             symbol,
             action,
-            reason,
+            (
+                f"net expected profit {net_expected_profit:.2f} after estimated fees "
+                f"{estimated_fees:.2f} is below required minimum profit {required_profit:.2f}"
+            ),
+            skip_category="FEE",
             expected_profit=float(expected_profit),
+            estimated_fees=float(estimated_fees),
+            net_expected_profit=float(net_expected_profit),
             required_profit=float(required_profit),
             quantity=float(quantity),
             price=float(exit_price),
@@ -332,12 +345,15 @@ class TradeExecutionService:
         symbol: str,
         action: str,
         reason: str,
+        *,
+        skip_category: str = "",
         **payload: object,
     ) -> OrderStatus:
         logger.info("%s skipped for %s: %s", action, symbol, reason)
         if self._record_order_skipped is not None:
             try:
-                self._record_order_skipped(symbol, action, reason, payload)
+                full_payload: dict[str, object] = {"skip_category": skip_category, **payload}
+                self._record_order_skipped(symbol, action, reason, full_payload)
             except Exception:
                 logger.exception("failed to record skipped order event for %s %s", action, symbol)
         return OrderStatus("", _SKIPPED_ORDER_STATUS, reason=reason)
@@ -429,6 +445,7 @@ class TradeExecutionService:
         *,
         min_profit_amount: Decimal | float | int = Decimal("0"),
         allow_loss_exit: bool = False,
+        fee_rate: Decimal | float | int = Decimal("0"),
         engine_snapshot: _EngineSnapshot | None = None,
         restore_engine_snapshot: Callable[[_EngineSnapshot], None] | None = None,
         notify_risk_event: _NotifyRiskEvent | None = None,
@@ -441,7 +458,7 @@ class TradeExecutionService:
         qty = self._exit_quantity_from_position(long_pos)
         if qty <= 0:
             logger.warning("SELL: no available long quantity for %s", symbol)
-            return self._skip_order(symbol, "SELL", f"no available long quantity for {symbol}")
+            return self._skip_order(symbol, "SELL", f"no available long quantity for {symbol}", skip_category="POSITION")
 
         price = self._normalize_limit_price(symbol, "SELL", Decimal(str(quote.last_price)))
         if price <= 0:
@@ -456,6 +473,7 @@ class TradeExecutionService:
             quantity=qty,
             min_profit_amount=min_profit_amount,
             allow_loss_exit=allow_loss_exit,
+            fee_rate=fee_rate,
         )
         if profit_guard is not None:
             return profit_guard
@@ -566,6 +584,7 @@ class TradeExecutionService:
         *,
         min_profit_amount: Decimal | float | int = Decimal("0"),
         allow_loss_exit: bool = False,
+        fee_rate: Decimal | float | int = Decimal("0"),
         engine_snapshot: _EngineSnapshot | None = None,
         restore_engine_snapshot: Callable[[_EngineSnapshot], None] | None = None,
         notify_risk_event: _NotifyRiskEvent | None = None,
@@ -578,7 +597,7 @@ class TradeExecutionService:
         qty = self._exit_quantity_from_position(pos)
         if qty <= 0:
             logger.warning("BUY_TO_COVER: no available short quantity for %s", symbol)
-            return self._skip_order(symbol, "BUY_TO_COVER", f"no available short quantity for {symbol}")
+            return self._skip_order(symbol, "BUY_TO_COVER", f"no available short quantity for {symbol}", skip_category="POSITION")
 
         price = self._normalize_limit_price(symbol, "BUY_TO_COVER", Decimal(str(quote.last_price)))
         if price <= 0:
@@ -593,6 +612,7 @@ class TradeExecutionService:
             quantity=qty,
             min_profit_amount=min_profit_amount,
             allow_loss_exit=allow_loss_exit,
+            fee_rate=fee_rate,
         )
         if profit_guard is not None:
             return profit_guard
