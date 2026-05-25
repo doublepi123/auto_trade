@@ -4,6 +4,7 @@ from datetime import datetime, time, timezone
 from decimal import Decimal
 
 from app.core.broker import BrokerOrder
+from app.core.market_calendar import trade_day_for
 from app.database import SessionLocal, engine as db_engine
 from app.models import Base, OrderRecord, TradeEvent
 from app.runner import AppRunner
@@ -143,7 +144,7 @@ class TestTradeEventSync:
 
     def test_sync_today_orders_recomputes_realized_daily_pnl(self) -> None:
         _clean()
-        trade_day = datetime.now(timezone.utc).date()
+        trade_day = trade_day_for("US")
         buy_fill = datetime.combine(trade_day, time(14, 0), tzinfo=timezone.utc)
         sell_fill = datetime.combine(trade_day, time(14, 5), tzinfo=timezone.utc)
 
