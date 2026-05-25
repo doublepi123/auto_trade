@@ -264,6 +264,98 @@ class TestAppRunner:
         assert runner.broker.submitted == [("NVDA.US", "SELL", Decimal("8"), Decimal("215.00"))]
         assert runner.engine.state == EngineState.FLAT
 
+    def _runner_with_pending_buy(self, price: Decimal) -> AppRunner:
+        from app.core.broker import OrderStatusResult
+
+        class Broker:
+            def __init__(self) -> None:
+                self.cancelled: list[str] = []
+
+            def cancel_order(self, order_id: str) -> OrderStatusResult:
+                self.cancelled.append(order_id)
+                return OrderStatusResult(order_id, "CANCELLED")
+
+        runner = AppRunner()
+        runner._running = True
+        runner.engine.params = StrategyParams(symbol="NVDA.US", market="US", buy_low=218, sell_high=225)
+        runner.broker = Broker()
+        self._stub_trade_callbacks(runner)
+        runner._trade_svc._track_pending_order(
+            "BUY",
+            OrderResult("order-pending", "NVDA.US", "BUY", Decimal("5"), price, "SUBMITTED"),
+            runner.broker,
+            runner._engine_snapshot(),
+        )
+        return runner
+
+    def test_llm_cancel_replace_below_repricing_threshold_preserves_pending(self) -> None:
+        runner = self._runner_with_pending_buy(price=Decimal("221.00"))
+        runner.engine.params.min_repricing_pct = 0.003
+        skipped: list[tuple] = []
+        runner._record_order_skipped = lambda *args: skipped.append(args)
+
+        result = runner.execute_llm_order_decision({
+            "order_action": "CANCEL_REPLACE",
+            "replacement_action": "BUY_NOW",
+            "replacement_price": 221.20,
+        })
+
+        assert result["status"] == "SKIPPED"
+        assert runner.broker.cancelled == []
+        assert runner._trade_svc.has_pending_order is True
+        assert skipped[0][3]["skip_category"] == "REPRICING"
+
+    def test_llm_cooldown_rejection_preserves_pending_before_cancel(self, monkeypatch) -> None:
+        runner = self._runner_with_pending_buy(price=Decimal("221.00"))
+        runner.engine.params.llm_action_cooldown_seconds = 60
+        runner._last_llm_action_at[("NVDA.US", "BUY")] = 100.0
+        runner._record_order_skipped = lambda *args: None
+        monkeypatch.setattr(runner_module.time, "monotonic", lambda: 120.0)
+
+        result = runner.execute_llm_order_decision({
+            "order_action": "BUY_NOW",
+            "order_price": 222.00,
+        })
+
+        assert result["status"] == "SKIPPED"
+        assert runner.broker.cancelled == []
+        assert runner._trade_svc.has_pending_order is True
+
+    def test_successful_llm_submission_records_broker_side_cooldown(self, monkeypatch) -> None:
+        class Broker:
+            def get_quote(self, symbol: str) -> Quote:
+                return Quote(symbol, 222.0, 221.9, 222.1, "")
+
+            def estimate_margin_max_quantity(self, symbol: str, side: str, price: Decimal, currency=None) -> Decimal:
+                return Decimal("10")
+
+            def submit_limit_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal) -> OrderResult:
+                return OrderResult("order-llm-buy", symbol, side, quantity, price, "FILLED")
+
+        runner = AppRunner()
+        runner._running = True
+        runner.engine.params = StrategyParams(symbol="NVDA.US", market="US", buy_low=218, sell_high=225)
+        runner.broker = Broker()
+        runner.notifier = _NoopNotifier()
+        self._stub_trade_callbacks(runner)
+        monkeypatch.setattr(runner_module.time, "monotonic", lambda: 100.0)
+        result = runner.execute_llm_order_decision({"order_action": "BUY_NOW", "order_price": 221.75})
+        assert result["executed"] is True
+        assert runner._last_llm_action_at[("NVDA.US", "BUY")] == 100.0
+
+    def test_llm_cancel_replace_without_valid_price_preserves_pending(self) -> None:
+        runner = self._runner_with_pending_buy(price=Decimal("221.00"))
+
+        result = runner.execute_llm_order_decision({
+            "order_action": "CANCEL_REPLACE",
+            "replacement_action": "BUY_NOW",
+            "replacement_price": None,
+        })
+
+        assert result["status"] == "NO_QUOTE"
+        assert runner.broker.cancelled == []
+        assert runner._trade_svc.has_pending_order is True
+
     def test_get_runner_singleton(self) -> None:
         r1 = get_runner()
         r2 = get_runner()

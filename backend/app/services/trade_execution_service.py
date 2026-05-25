@@ -138,6 +138,11 @@ class TradeExecutionService:
         with self._state_lock:
             return self._pending_order is not None
 
+    @property
+    def pending_order(self) -> _PendingOrder | None:
+        with self._state_lock:
+            return self._pending_order
+
     def reconcile(
         self,
         risk: RiskController | None = None,

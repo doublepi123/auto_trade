@@ -25,7 +25,7 @@ from app.services.credentials_service import CredentialsService, PlainCredential
 from app.services.runtime_state_service import RuntimeStateService
 from app.services.strategy_service import StrategyService
 from app.services.trade_event_service import record_trade_event
-from app.services.trade_execution_service import TradeExecutionService
+from app.services.trade_execution_service import TradeExecutionService, _PendingOrder
 
 logger = logging.getLogger("auto_trade.runner")
 
@@ -78,6 +78,7 @@ class AppRunner:
         self._recent_quotes_cap = 500
         self._recent_quotes: list[dict[str, Any]] = []
         self._last_action_message = ""
+        self._last_llm_action_at: dict[tuple[str, str], float] = {}
 
     def _initialize_runner(self) -> None:
         with self._db_session() as db:
@@ -357,26 +358,29 @@ class AppRunner:
 
         try:
             if action in {"CANCEL_PENDING", "CANCEL_REPLACE"}:
-                cancel_status = self._trade_svc.cancel_pending_order(
-                    restore_engine_snapshot=self._restore_engine_snapshot,
-                )
                 if action == "CANCEL_PENDING":
+                    cancel_status = self._trade_svc.cancel_pending_order(
+                        restore_engine_snapshot=self._restore_engine_snapshot,
+                    )
                     return {
                         "executed": cancel_status.status == "CANCELLED",
                         "status": cancel_status.status,
                         "order_id": cancel_status.broker_order_id or None,
                         "action": "CANCEL_PENDING",
                     }
-                if cancel_status.status not in {"CANCELLED", "NO_PENDING_ORDER"}:
-                    return {
-                        "executed": False,
-                        "status": cancel_status.status,
-                        "order_id": cancel_status.broker_order_id or None,
-                        "action": "CANCEL_REPLACE",
-                    }
                 replacement_action = str(decision.get("replacement_action") or "NONE").upper()
                 mapped_action = _LLM_ORDER_ACTION_MAP.get(replacement_action)
                 if mapped_action is None:
+                    return {"executed": False, "status": "UNKNOWN_ACTION", "order_id": None, "action": "CANCEL_REPLACE"}
+                proposed_price = decision.get("replacement_price") or decision.get("order_price")
+                pending = self._trade_svc.pending_order
+                skipped = self._precheck_llm_action(mapped_action, proposed_price, pending)
+                if skipped is not None:
+                    return skipped
+                cancel_status = self._trade_svc.cancel_pending_order(
+                    restore_engine_snapshot=self._restore_engine_snapshot,
+                )
+                if cancel_status.status not in {"CANCELLED", "NO_PENDING_ORDER"}:
                     return {
                         "executed": False,
                         "status": cancel_status.status,
@@ -385,14 +389,18 @@ class AppRunner:
                     }
                 return self._execute_llm_trade_action(
                     mapped_action,
-                    decision.get("replacement_price") or decision.get("order_price"),
+                    proposed_price,
                     allow_loss_exit=replacement_action in _LLM_STOP_LOSS_ACTIONS,
                 )
 
             mapped_action = _LLM_ORDER_ACTION_MAP.get(action)
             if mapped_action is None:
                 return {"executed": False, "status": "UNKNOWN_ACTION", "order_id": None, "action": action}
-            if self._trade_svc.has_pending_order:
+            pending = self._trade_svc.pending_order
+            skipped = self._precheck_llm_action(mapped_action, decision.get("order_price"), pending)
+            if skipped is not None:
+                return skipped
+            if pending is not None:
                 cancel_status = self._trade_svc.cancel_pending_order(
                     restore_engine_snapshot=self._restore_engine_snapshot,
                 )
@@ -467,12 +475,16 @@ class AppRunner:
             return {"executed": False, "status": "NO_ORDER", "order_id": None, "action": action}
         if order_status.status in {"SKIPPED", "REJECTED", "CANCELLED"}:
             self._restore_engine_snapshot(engine_snapshot)
-        return {
+        result = {
             "executed": order_status.status in {"FILLED", "SUBMITTED", "PARTIAL_FILLED"},
             "status": order_status.status,
             "order_id": order_status.broker_order_id or None,
             "action": action,
         }
+        if result["executed"]:
+            side = self._broker_side_for_action(action)
+            self._last_llm_action_at[(symbol, side)] = time.monotonic()
+        return result
 
     def _set_engine_state_for_order_action(self, action: str) -> str:
         with self.engine._lock:
@@ -1287,6 +1299,52 @@ class AppRunner:
                 payload={"source": "trade_precheck", **payload},
             )
             db.commit()
+
+    @staticmethod
+    def _broker_side_for_action(action: str) -> str:
+        return "BUY" if action in {"BUY", "BUY_TO_COVER"} else "SELL"
+
+    def _skip_llm_action(self, action: str, reason: str, **payload: object) -> dict[str, Any]:
+        symbol = self.engine.params.symbol
+        self._record_order_skipped(symbol, action, reason, payload)
+        return {"executed": False, "status": "SKIPPED", "order_id": None, "action": action}
+
+    def _precheck_llm_action(
+        self,
+        action: str,
+        proposed_price: Any,
+        pending: _PendingOrder | None,
+    ) -> dict[str, Any] | None:
+        symbol = self.engine.params.symbol
+        side = self._broker_side_for_action(action)
+        if pending is not None and self.engine.params.min_repricing_pct > 0:
+            normalized_price = self._coerce_positive_float(proposed_price)
+            if normalized_price <= 0:
+                return {"executed": False, "status": "NO_QUOTE", "order_id": None, "action": action}
+            old_price = pending.price
+            new_price = Decimal(str(normalized_price))
+            repricing_pct = abs(new_price - old_price) / old_price
+            if repricing_pct < Decimal(str(self.engine.params.min_repricing_pct)):
+                return self._skip_llm_action(
+                    action,
+                    "replacement price movement is below minimum threshold",
+                    skip_category="REPRICING",
+                    old_price=float(old_price),
+                    new_price=float(new_price),
+                    repricing_pct=float(repricing_pct),
+                )
+        cooldown = self.engine.params.llm_action_cooldown_seconds
+        last_at = self._last_llm_action_at.get((symbol, side))
+        if cooldown > 0 and last_at is not None:
+            remaining = cooldown - (time.monotonic() - last_at)
+            if remaining > 0:
+                return self._skip_llm_action(
+                    action,
+                    "LLM action remains in cooldown",
+                    skip_category="COOLDOWN",
+                    cooldown_remaining_seconds=remaining,
+                )
+        return None
 
 
 _runner: AppRunner | None = None
