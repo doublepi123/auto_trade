@@ -140,7 +140,7 @@ cd frontend && npm run type-check
 
 ### 数据库迁移
 
-- 运行时通过 `init_db()` → `_ensure_order_execution_columns`、`_ensure_order_raw_response_column`、`_ensure_strategy_config_llm_columns`、`_ensure_runtime_state_daily_pnl_date_column`、`_ensure_tracked_entries_table` 补丁旧表。
+- 运行时通过 `init_db()` → `_ensure_order_execution_columns`、`_ensure_order_raw_response_column`、`_ensure_strategy_config_llm_columns`、`_ensure_runtime_state_daily_pnl_date_column`、`_ensure_tracked_entries_table`、`_ensure_strategy_config_p4_columns`（P4 新增：`fee_rate_us`、`fee_rate_hk`、`min_repricing_pct`、`llm_action_cooldown_seconds`）补丁旧表。
 - **`alembic/` 不用于生产**；加列须同步新增 `_ensure_*`。
 - 首次补 `daily_pnl_date` 时会把 NULL 行的 `daily_pnl`/`consecutive_losses` 置 0（一次性）。
 
@@ -162,6 +162,10 @@ cd frontend && npm run type-check
 - `execute()` 入口会再次 `risk.check()`，并拒绝已有 pending 时的并发下单。
 - 券商已提交但 **DB 写入失败** → `OrderPersistenceError` 路径：尝试撤单、pause、回滚 snapshot。
 - `engine.sync_state()` **不会**清空 `last_trigger_at`（保留冷却）。
+- `StrategyConfig` 新增四项：`fee_rate_us` / `fee_rate_hk`（实盘普通平仓双边费用估算）、`min_repricing_pct`（LLM cancel-replace 最小改价阈值）、`llm_action_cooldown_seconds`（LLM 同方向发单冷却）。
+- `_profit_guard_for_exit` 在原 `min_profit_amount` 校验上叠加 round-trip 费用：`expected_profit - estimated_fees < required_profit` 即 `ORDER_SKIPPED` 且 `payload.skip_category = "FEE"`；`allow_loss_exit=True` 完全绕过费用门槛。
+- LLM `execute_llm_order_decision` 在调用 `cancel_pending_order` 之前执行改价（`REPRICING`）与冷却（`COOLDOWN`）gate；`CANCEL_PENDING` 不受 gate 影响。`_last_llm_action_at[(symbol, broker_side)]` 仅在 FILLED/SUBMITTED/PARTIAL_FILLED 后更新。
+- `record_order_skipped` payload 现已稳定带 `skip_category` ∈ `{FEE, REPRICING, COOLDOWN, RISK, PENDING, POSITION}`；前端 `skipCategoryLabel` 是唯一渲染入口。
 
 ### 经纪商交互
 

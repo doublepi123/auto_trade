@@ -13,7 +13,7 @@
 | **API 覆盖** | ✅ 完备。策略配置、凭证管理、订单查询、状态获取、状态历史、事件时间线、运行时控制（启停/暂停/Kill Switch）。 |
 | **WebSocket 推送** | ✅ 就绪。实时状态同步。 |
 | **本地部署** | ✅ 就绪。Docker Compose 一键启动。 |
-| **测试** | ✅ 就绪。Backend pytest **417** 项、Frontend Cypress E2E 测试。 |
+| **测试** | ✅ 就绪。Backend pytest **433** 项、Frontend Cypress E2E 测试。 |
 | **凭证安全** | ✅ 就绪。主密钥 + AES-GCM 加密存储，前端不回显明文。 |
 | **数据库** | ✅ 就位。SQLite，含运行状态、状态快照、订单、`tracked_entries`、LLM 交互、交易事件和凭证配置。 |
 | **LLM 行情数据** | ✅ 真实 K 线（日 K + 1 分钟 K），ATR/布林带有效。 |
@@ -55,7 +55,7 @@
 
 > 本节为 2026-05-24 一次完整代码审计后的产物。2026-05-25 用户决策明确不实施 P2；在已落地的正确性修复之后，下文 P4 成为当前下一迭代。
 >
-> 审计基线（2026-05-24）：`pytest 374 passed, 1 skipped`。2026-05-25 交付后 **`pytest 417 passed`**；`basedpyright` 仍有少量待清项（见 P8'）。
+> 审计基线（2026-05-24）：`pytest 374 passed, 1 skipped`。P1–P8' 交付后 **`pytest 417 passed`**；P4 交付后（2026-05-25）**`pytest 433 passed`**，`basedpyright` 0 errors。
 
 ### 审计发现（按严重度）
 
@@ -119,7 +119,7 @@
 | 6 | **P6'** | 性能：批量 quote + 去重 today_orders | 降低券商 quota 与前端延迟 | 0.5 天 |
 | 7 | **P7'** | `IntervalApplicationService` 对齐文档 | 终止行为与文档不一致 | 0.5 天 |
 | 8 | **P8'** | lint / 死代码清理 | 还清现存类型债 | 0.5 天 |
-| 下一步 | **P4** | 交易执行安全与成本控制增强 | 手续费门槛、撤单前改价保护、跳过原因可见 | 3~3.5 天 |
+| ✅ | **P4** | 交易执行安全与成本控制增强 | 手续费门槛、撤单前改价保护、跳过原因可见（2026-05-25 交付） | — |
 | 后续 | 沿用下文 | 审计日志、移动端、复盘工作台、观察列表 | P4 后顺序执行 | — |
 
 ### P1：DataAggregator 真实 K 线 ✅（2026-05-25 完成）
@@ -261,24 +261,28 @@
 
 - Sharpe / 盈亏比等扩展指标（Roadmap 原列项，当前 UI 未展示）
 
-### P4：交易执行安全与成本控制增强
+### P4：交易执行安全与成本控制增强 ✅（2026-05-25 交付，提交范围 29b4890 .. 4a9f36f）
 
-> **目标：** 进一步降低“无价值撤单重挂、重复 LLM 发单、手续费吞噬收益、跳过原因不可见”的风险。
+> **目标：** 进一步降低”无价值撤单重挂、重复 LLM 发单、手续费吞噬收益、跳过原因不可见”的风险。
 >
-> **状态：** 设计已确认，待实施。规格文档：`docs/superpowers/specs/2026-05-25-trade-execution-safety-design.md`。
+> **规格文档：** `docs/superpowers/specs/2026-05-25-trade-execution-safety-design.md`。
 
-#### 范围
+#### P4 交付摘要
 
-- 实盘普通平仓增加费用后收益门槛：估算 round-trip 费用后，再与现有 `min_profit_amount` / 百分比保护比较；止损不被费用规则拦截。
-- LLM `CANCEL_REPLACE` 在撤销现有挂单**之前**检查最小改价阈值，不足时保留原挂单并记录原因。
-- 增加仅适用于 LLM 主动交易动作的同方向执行冷却；普通区间触发保留现有 engine cooldown，不叠加新规则。
-- 在 Dashboard 和决策时间线展示“被跳过的交易原因”。
-- 回测保留已有费用、滑点与净收益模型，仅补充跳过原因分类，不套用实盘费率配置。
+- **配置持久化（Task 1）**：`StrategyConfig` 新增 `fee_rate_us`、`fee_rate_hk`、`min_repricing_pct`、`llm_action_cooldown_seconds`；`_ensure_strategy_config_p4_columns` 补旧表；API schema 与前端 Strategy 表单同步。
+- **费用后收益门槛（Task 2）**：`_profit_guard_for_exit` 叠加 round-trip 费用估算；净收益不足时 `ORDER_SKIPPED` + `skip_category=”FEE”`；`allow_loss_exit=True` 绕过门槛。
+- **LLM 改价与冷却 Gate（Task 3）**：`execute_llm_order_decision` 在撤单前执行改价阈值（`REPRICING`）与同方向冷却（`COOLDOWN`）检查；`_last_llm_action_at[(symbol, side)]` 仅在成交/提交后更新；`CANCEL_PENDING` 不受 gate 影响。
+- **回测跳过原因分类（Task 4）**：`BacktestEngine` 跳过事件携带 `skip_category`，不读实盘 `fee_rate_us/hk`，离线模型保持独立。
+- **Strategy 表单（Task 5）**：前端 Strategy 页面新增四个执行保护字段，含帮助提示与校验，`PUT /api/strategy` 持久化。
+- **Decision Timeline + Dashboard 展示（Task 6）**：`skipCategoryLabel` 统一渲染六类跳过标签（FEE / REPRICING / COOLDOWN / RISK / PENDING / POSITION）；Dashboard 最近动作与 Timeline 详情同步展示。
 
-#### 验证
+#### 验证结果（本轮交付后）
 
-- 后端测试覆盖：费用后收益不足被拒、止损放行、改价不足时不撤现有挂单、LLM 冷却在撤单前生效、已有跳过路径带分类。
-- Cypress 覆盖 Dashboard 最近动作和时间线显示跳过原因。
+- [x] `pytest 433 passed`（+16 项，相比 P4 前 417 项）
+- [x] `basedpyright` 0 errors, 0 warnings
+- [x] `npm run type-check` 通过
+- [x] `npm run build` 通过
+- [x] 边界检查：`backtest.py` 中无 `fee_rate_us` / `fee_rate_hk` 引用（回测费率配置独立）
 
 ### P5：操作审计与多渠道报警
 
@@ -350,18 +354,19 @@
 | 顺序 | 迭代 | 原因 |
 |------|------|------|
 | 已完成 | P3 回测与参数验证 MVP | 已为实盘调参提供历史验证基础。 |
-| 1 | P4 交易执行安全与成本控制增强 | 直接回应手续费、重复 LLM 动作和无价值撤单重挂风险。 |
-| 2 | P5 操作审计与多渠道报警 | 让系统进入更可运维、可追责、可恢复的状态。 |
+| 已完成 | **P4 交易执行安全与成本控制增强** | 直接回应手续费、重复 LLM 动作和无价值撤单重挂风险。✅ 2026-05-25 |
+| 1 | P5 操作审计与多渠道报警 | 让系统进入更可运维、可追责、可恢复的状态。 |
 | 3 | P6 移动端与应急操作体验 | 提升紧急止损/暂停的可达性。 |
 | 4 | P7 策略复盘与 LLM 优化工作台 | 基于已沉淀数据优化 prompt 和决策规则。 |
 | 5 | P8 多标的观察列表 | 扩展能力，但先限制为观察，避免放大自动交易风险。 |
 
 ### 下一步建议
 
-下一批优先做 **P4 交易执行安全与成本控制增强**，并按已确认规格实施：
+**P4 已交付**（2026-05-25）。下一批优先做 **P5 操作审计与多渠道报警**：
 
-1. 后端费用模型、退出保护、LLM 撤单前保护、配置迁移与单元测试。
-2. 前端配置及跳过原因展示、Cypress 与全量验证。
+1. 后端新增 `AuditLog` 表，记录策略修改、启停、Kill Switch、手动撤单等操作。
+2. 通知抽象为 Notifier 接口，支持 Server 酱 + 通用 Webhook。
+3. 前端 Credentials 增加通知渠道配置；Decision Timeline 增加审计事件筛选。
 
 ---
 

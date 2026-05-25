@@ -83,6 +83,14 @@
 - 可配置定时自动分析与区间调整
 - Prompt 使用长桥真实日 K / 1 分钟 K（`BrokerGateway.get_candlesticks`），ATR(14) 与布林带基于历史 K 线计算
 - 持仓状态下允许 LLM **下调** `buy_low`（追价加仓）或 **上抬** `sell_high`（抬高目标），见 `docs/Roadmap.md` P7'
+- LLM 撤单重挂（`CANCEL_REPLACE`）仅在新旧价格差达到 `min_repricing_pct` 阈值时执行；否则保留原挂单并记录 `REPRICING` 跳过原因
+- LLM 同方向（买/卖）发单受 `llm_action_cooldown_seconds` 独立冷却，未到期时记录 `COOLDOWN` 跳过原因；`CANCEL_PENDING` 撤单操作不受冷却影响
+
+### 交易执行安全
+- 普通平仓（非止损）在满足 `min_profit_amount` 之前，还需扣除按 `fee_rate_us` / `fee_rate_hk` 估算的双边手续费；费用后净收益仍不足时跳过并记录 `FEE` 原因
+- 止损路径（`allow_loss_exit=True`）完全绕过费用门槛与改价/冷却限制，确保止损优先
+- Decision Timeline 与 Dashboard 最近动作按分类展示跳过原因：`FEE` / `REPRICING` / `COOLDOWN` / `RISK` / `PENDING` / `POSITION`
+- 回测引擎拥有独立的 `fee_rate` / `fixed_fee` / `slippage_pct`，不读取实盘的市场费率配置，离线模拟结果与实盘独立
 
 ## 技术栈
 
@@ -146,6 +154,10 @@ docker compose up --build -d
 | Short Selling | 是否启用做空 | `false` |
 | Max Daily Loss | 单日最大亏损额度 | `5000` |
 | Max Consecutive Losses | 连续亏损暂停阈值 | `3` |
+| US Estimated Fee Rate (`fee_rate_us`) | 美股单边预估费率，用于实盘普通平仓的费用后收益门槛 | `0.05%` |
+| HK Estimated Fee Rate (`fee_rate_hk`) | 港股单边预估费率，用于实盘普通平仓的费用后收益门槛 | `0.30%` |
+| LLM Repricing Threshold (`min_repricing_pct`) | LLM 撤单重挂所需的最小改价百分比；未达阈值时保留原挂单 | `0.30%` |
+| LLM Action Cooldown (`llm_action_cooldown_seconds`) | LLM 同方向（买/卖）发单的最小间隔；到期前跳过并记录原因 | `60s` |
 
 保存后在 **Dashboard** 点击 **Start** 启动策略运行。
 
