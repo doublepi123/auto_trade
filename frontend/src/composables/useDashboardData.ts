@@ -7,6 +7,10 @@ const defaultStrategy: StrategyConfig = {
   short_selling: false, min_profit_amount: 0, auto_resume_minutes: 3,
   max_daily_loss: 5000, max_consecutive_losses: 3,
   llm_interval_minutes: 2,
+  fee_rate_us: 0.0005,
+  fee_rate_hk: 0.003,
+  min_repricing_pct: 0.003,
+  llm_action_cooldown_seconds: 60,
   updated_at: '',
 }
 

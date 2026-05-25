@@ -53,4 +53,21 @@ describe('Strategy', () => {
         expect(($input[0] as HTMLInputElement).checkValidity()).to.equal(true)
       })
   })
+
+  it('edits cost and LLM execution protection settings', () => {
+    cy.intercept('PUT', '/api/strategy', (req) => {
+      expect(req.body.fee_rate_us).to.equal(0.001)
+      expect(req.body.fee_rate_hk).to.equal(0.004)
+      expect(req.body.min_repricing_pct).to.equal(0.005)
+      expect(req.body.llm_action_cooldown_seconds).to.equal(120)
+      req.reply({ statusCode: 200, body: Object.assign({ id: 1, updated_at: '2026-05-25T00:00:00Z' }, req.body) })
+    }).as('saveSafetySettings')
+
+    cy.contains('美股单边预估费率').parent().find('input').clear().type('0.10')
+    cy.contains('港股单边预估费率').parent().find('input').clear().type('0.40')
+    cy.contains('LLM 最小改价').parent().find('input').clear().type('0.50')
+    cy.contains('LLM 同向冷却').parent().find('input').clear().type('120')
+    cy.contains('保存').click()
+    cy.wait('@saveSafetySettings')
+  })
 })

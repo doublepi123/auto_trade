@@ -10,6 +10,10 @@ export interface StrategyConfig {
   max_daily_loss: number
   max_consecutive_losses: number
   llm_interval_minutes: number
+  fee_rate_us: number
+  fee_rate_hk: number
+  min_repricing_pct: number
+  llm_action_cooldown_seconds: number
   updated_at: string
 }
 

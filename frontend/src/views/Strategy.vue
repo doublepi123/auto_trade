@@ -145,6 +145,19 @@
         <el-form-item label="LLM刷新间隔（分钟）">
           <el-input-number v-model="form.llm_interval_minutes" :min="1" :max="1440" :step="1" />
         </el-form-item>
+        <el-divider content-position="left">成本与执行保护</el-divider>
+        <el-form-item label="美股单边预估费率（%）">
+          <el-input-number v-model="form.fee_rate_us" :min="0" :max="1" :precision="3" :step="0.01" />
+        </el-form-item>
+        <el-form-item label="港股单边预估费率（%）">
+          <el-input-number v-model="form.fee_rate_hk" :min="0" :max="2" :precision="3" :step="0.01" />
+        </el-form-item>
+        <el-form-item label="LLM 最小改价（%）">
+          <el-input-number v-model="form.min_repricing_pct" :min="0" :max="5" :precision="3" :step="0.01" />
+        </el-form-item>
+        <el-form-item label="LLM 同向冷却（秒）">
+          <el-input-number v-model="form.llm_action_cooldown_seconds" :min="0" :max="3600" :step="1" />
+        </el-form-item>
         <el-form-item>
           <el-button type="primary" native-type="submit" :loading="saving" :disabled="loading || !isDirty">保存</el-button>
           <el-tag v-if="saved" type="success" style="margin-left: 10px">已保存</el-tag>
@@ -174,6 +187,10 @@ interface StrategyForm {
   max_daily_loss: number
   max_consecutive_losses: number
   llm_interval_minutes: number
+  fee_rate_us: number
+  fee_rate_hk: number
+  min_repricing_pct: number
+  llm_action_cooldown_seconds: number
 }
 
 const loadedStrategy = ref<StrategyForm | null>(null)
@@ -190,6 +207,10 @@ const { form, loading, saving, saved, error, isDirty, load, save } = useFormStat
     max_daily_loss: 5000,
     max_consecutive_losses: 3,
     llm_interval_minutes: 2,
+    fee_rate_us: 0.05,
+    fee_rate_hk: 0.30,
+    min_repricing_pct: 0.30,
+    llm_action_cooldown_seconds: 60,
   },
   load: async () => {
     const s = await getStrategy()
@@ -204,12 +225,16 @@ const { form, loading, saving, saved, error, isDirty, load, save } = useFormStat
       max_daily_loss: s.max_daily_loss,
       max_consecutive_losses: s.max_consecutive_losses,
       llm_interval_minutes: s.llm_interval_minutes,
+      fee_rate_us: s.fee_rate_us * 100,
+      fee_rate_hk: s.fee_rate_hk * 100,
+      min_repricing_pct: s.min_repricing_pct * 100,
+      llm_action_cooldown_seconds: s.llm_action_cooldown_seconds,
     }
     loadedStrategy.value = loaded
     return loaded
   },
   save: async (data) => {
-    const patch: Partial<StrategyForm> = {}
+    const patch: Parameters<typeof updateStrategy>[0] = {}
     const previous = loadedStrategy.value
     if (!previous || data.symbol !== previous.symbol) patch.symbol = data.symbol
     if (!previous || data.market !== previous.market) patch.market = data.market
@@ -221,6 +246,12 @@ const { form, loading, saving, saved, error, isDirty, load, save } = useFormStat
     if (!previous || data.max_daily_loss !== previous.max_daily_loss) patch.max_daily_loss = data.max_daily_loss
     if (!previous || data.max_consecutive_losses !== previous.max_consecutive_losses) patch.max_consecutive_losses = data.max_consecutive_losses
     if (!previous || data.llm_interval_minutes !== previous.llm_interval_minutes) patch.llm_interval_minutes = data.llm_interval_minutes
+    if (!previous || data.fee_rate_us !== previous.fee_rate_us) patch.fee_rate_us = data.fee_rate_us / 100
+    if (!previous || data.fee_rate_hk !== previous.fee_rate_hk) patch.fee_rate_hk = data.fee_rate_hk / 100
+    if (!previous || data.min_repricing_pct !== previous.min_repricing_pct) patch.min_repricing_pct = data.min_repricing_pct / 100
+    if (!previous || data.llm_action_cooldown_seconds !== previous.llm_action_cooldown_seconds) {
+      patch.llm_action_cooldown_seconds = data.llm_action_cooldown_seconds
+    }
     await updateStrategy(patch)
     loadedStrategy.value = { ...data }
     await loadLLMStatus()

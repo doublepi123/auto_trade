@@ -40,6 +40,10 @@ Cypress.Commands.add('stubApi', () => {
       min_profit_amount: 0,
       auto_resume_minutes: 3,
       llm_interval_minutes: 2,
+      fee_rate_us: 0.0005,
+      fee_rate_hk: 0.003,
+      min_repricing_pct: 0.003,
+      llm_action_cooldown_seconds: 60,
       updated_at: '2026-01-01T00:00:00Z',
     },
   }).as('getStrategy')
