@@ -9,7 +9,7 @@ def test_estimate_round_trip_fee_uses_entry_and_exit_notional() -> None:
         exit_price=Decimal("102"),
         quantity=Decimal("10"),
         one_side_rate=Decimal("0.001"),
-    ) == Decimal("2.020")
+    ) == Decimal("2.02")
 
 
 def test_one_side_fee_rate_selects_market_setting() -> None:

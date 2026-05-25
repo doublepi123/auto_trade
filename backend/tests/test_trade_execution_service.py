@@ -468,6 +468,7 @@ class TestTradeExecutionServiceBasics:
         assert skipped[0][0] == "NVDA.US"
         assert skipped[0][1] == "SELL"
         assert skipped[0][3]["expected_profit"] == 4.0
+        assert skipped[0][3]["skip_category"] == "FEE"
 
     def test_execute_sell_allows_stop_loss_exit_below_min_profit(self, svc: TradeExecutionService, monkeypatch) -> None:
         from app.config import settings
@@ -669,8 +670,6 @@ class TestTradeExecutionServiceBasics:
             record_order_skipped=lambda symbol, action, reason, payload: skipped.append((symbol, action, reason, payload)),
         )
         broker = MagicMock()
-        # 10 units, entry avg_price=100, exit price=101 → gross profit = (101-100)*10 = 10
-        # fee_rate=0.001 → fees = (100+101)*10*0.001 = 2.01 → net = 7.99 < min_profit=9
         broker.get_positions.return_value = [Position("NVDA.US", "LONG", Decimal("10"), Decimal("100"))]
         broker.submit_limit_order.return_value = OrderResult("order-fee", "NVDA.US", "SELL", Decimal("10"), Decimal("101"), "FILLED")
 
@@ -702,7 +701,6 @@ class TestTradeExecutionServiceBasics:
 
         monkeypatch.setattr(settings, "min_exit_profit_pct", 0.2)
         broker = MagicMock()
-        # Selling at a loss — fee gate must not block
         broker.get_positions.return_value = [Position("NVDA.US", "LONG", Decimal("10"), Decimal("220"))]
         broker.submit_limit_order.return_value = OrderResult("stop-loss-fee", "NVDA.US", "SELL", Decimal("10"), Decimal("215"), "FILLED")
         svc = TradeExecutionService(
@@ -771,7 +769,6 @@ class TestTradeExecutionServiceBasics:
             record_order_skipped=lambda symbol, action, reason, payload: skipped.append((symbol, action, reason, payload)),
         )
         broker = MagicMock()
-        # Inject a pending order to trigger the pending guard
         svc._track_pending_order(
             "BUY",
             OrderResult("order-live", "NVDA.US", "BUY", Decimal("10"), Decimal("220"), "SUBMITTED"),
@@ -807,7 +804,6 @@ class TestTradeExecutionServiceBasics:
             record_order_skipped=lambda symbol, action, reason, payload: skipped.append((symbol, action, reason, payload)),
         )
         broker = MagicMock()
-        # available_quantity=0 → no shares available to sell
         broker.get_positions.return_value = [
             Position("NVDA.US", "LONG", Decimal("10"), Decimal("220"), available_quantity=Decimal("0"))
         ]
@@ -826,4 +822,42 @@ class TestTradeExecutionServiceBasics:
         assert status.status == "SKIPPED"
         assert skipped, "expected record_order_skipped to be called for zero available quantity"
         assert skipped[0][3]["skip_category"] == "POSITION"
+        broker.submit_limit_order.assert_not_called()
+
+    def test_execute_buy_to_cover_skips_when_fees_reduce_net_profit_below_minimum(self, monkeypatch) -> None:
+        from app.config import settings
+        from app.core.broker import OrderResult, Position, Quote
+        from app.core.risk import RiskController
+        from app.core.notify import ServerChanNotifier
+
+        monkeypatch.setattr(settings, "min_exit_profit_pct", 0.0)
+        skipped: list[tuple[str, str, str, dict[str, object]]] = []
+        svc = TradeExecutionService(
+            record_order=lambda *args: None,
+            update_order_status=lambda *args: None,
+            record_risk_event=lambda *args: None,
+            record_order_skipped=lambda symbol, action, reason, payload: skipped.append((symbol, action, reason, payload)),
+        )
+        broker = MagicMock()
+        broker.get_positions.return_value = [Position("NVDA.US", "SHORT", Decimal("10"), Decimal("102"))]
+        broker.submit_limit_order.return_value = OrderResult("order-btc-fee", "NVDA.US", "BUY_TO_COVER", Decimal("10"), Decimal("101"), "FILLED")
+
+        status = svc.execute(
+            "BUY_TO_COVER",
+            "NVDA.US",
+            Quote("NVDA.US", 101, 100.9, 101.1, ""),
+            broker,
+            RiskController(),
+            ServerChanNotifier(""),
+            "USD",
+            min_profit_amount=Decimal("9"),
+            fee_rate=Decimal("0.001"),
+        )
+
+        assert status is not None
+        assert status.status == "SKIPPED"
+        assert skipped, "expected record_order_skipped to be called"
+        payload = skipped[0][3]
+        assert payload["skip_category"] == "FEE"
+        assert abs(float(payload["estimated_fees"]) - 2.03) < 0.001
         broker.submit_limit_order.assert_not_called()
