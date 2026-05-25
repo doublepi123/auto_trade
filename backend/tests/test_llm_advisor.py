@@ -29,6 +29,15 @@ def _candle(high: float, low: float, close: float, *, day: int = 1) -> BrokerCan
     )
 
 
+def test_deepseek_chat_payload_uses_v4_pro_thinking_max() -> None:
+    payload = LLMAdvisorService._deepseek_chat_payload("analyze NVDA")
+
+    assert payload["model"] == "deepseek-v4-pro"
+    assert payload["reasoning_effort"] == "max"
+    assert payload["thinking"] == {"type": "enabled"}
+    assert payload["messages"][1]["content"] == "analyze NVDA"
+
+
 def test_preview_request_normalizes_symbol() -> None:
     payload = LLMPreviewAnalyzeRequest(symbol=" aapl.us ", market="US")
 

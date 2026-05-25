@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+from typing import Literal
+
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -37,6 +39,15 @@ class Settings(BaseSettings):
 
     deepseek_api_key: str = Field(default="", validation_alias="DEEPSEEK_API_KEY")
     deepseek_api_url: str = "https://api.deepseek.com/v1/chat/completions"
+    deepseek_model: str = Field(default="deepseek-v4-pro", validation_alias="DEEPSEEK_MODEL")
+    deepseek_reasoning_effort: Literal["high", "max"] = Field(
+        default="max",
+        validation_alias="DEEPSEEK_REASONING_EFFORT",
+    )
+    deepseek_thinking_type: Literal["enabled", "disabled"] = Field(
+        default="enabled",
+        validation_alias="DEEPSEEK_THINKING_TYPE",
+    )
     llm_interval_cron_minutes: int = 2
     llm_interval_volatility_threshold_pct: float = 1.0
     llm_min_confidence: float = 0.7

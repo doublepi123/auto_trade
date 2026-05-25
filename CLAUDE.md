@@ -151,6 +151,7 @@ cd frontend && npm run type-check
 - `CREDENTIAL_MASTER_KEY`：加密 DB 内凭据及 PEM；**轮换后旧密文不可解**。
 - `AUTO_TRADE_CREDENTIAL_KEY_PATH`：RSA 私钥路径，默认 `data/credential_private_key.pem`。
 - `DEEPSEEK_API_KEY`：LLM 顾问（无此前缀，见 config 的 `validation_alias`）。
+- `DEEPSEEK_MODEL` / `DEEPSEEK_REASONING_EFFORT` / `DEEPSEEK_THINKING_TYPE`：默认 `deepseek-v4-pro` + thinking `max`（`enabled`）。
 - **API 鉴权增强不在 Roadmap 内**（owner decision 2026-05-25）：当前仅可信内网部署，`AUTO_TRADE_API_KEY` 可留空；若部署到不可信网络，必须重新评估所有写端点与 WebSocket 的访问控制。
 
 ### 交易执行（TradeExecutionService）

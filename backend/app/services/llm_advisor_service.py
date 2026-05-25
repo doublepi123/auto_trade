@@ -331,6 +331,22 @@ class LLMAdvisorService:
             "order_action": result.get("order_action"),
         }
 
+    @staticmethod
+    def _deepseek_chat_payload(prompt: str) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "model": settings.deepseek_model,
+            "messages": [
+                {"role": "system", "content": "You are a professional quantitative trading advisor."},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.3,
+            "max_tokens": 2048,
+            "thinking": {"type": settings.deepseek_thinking_type},
+        }
+        if settings.deepseek_thinking_type == "enabled":
+            payload["reasoning_effort"] = settings.deepseek_reasoning_effort
+        return payload
+
     def _call_deepseek(self, prompt: str) -> str:
         """Call DeepSeek API with the prompt."""
         if not settings.deepseek_api_key:
@@ -342,16 +358,8 @@ class LLMAdvisorService:
                 "Authorization": f"Bearer {settings.deepseek_api_key}",
                 "Content-Type": "application/json",
             },
-            json={
-                "model": "deepseek-chat",
-                "messages": [
-                    {"role": "system", "content": "You are a professional quantitative trading advisor."},
-                    {"role": "user", "content": prompt},
-                ],
-                "temperature": 0.3,
-                "max_tokens": 500,
-            },
-            timeout=30.0,
+            json=self._deepseek_chat_payload(prompt),
+            timeout=120.0,
         )
         response.raise_for_status()
         data = response.json()

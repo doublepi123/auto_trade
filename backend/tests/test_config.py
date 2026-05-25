@@ -115,3 +115,9 @@ class TestSettings:
         s = Settings()
 
         assert s.deepseek_api_key == "sk-test-key"
+
+    def test_deepseek_model_defaults_to_v4_pro_thinking_max(self) -> None:
+        s = Settings()
+        assert s.deepseek_model == "deepseek-v4-pro"
+        assert s.deepseek_reasoning_effort == "max"
+        assert s.deepseek_thinking_type == "enabled"
