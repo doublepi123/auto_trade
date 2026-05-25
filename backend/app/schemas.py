@@ -72,7 +72,7 @@ class StrategyMergedSchema(BaseModel):
     max_consecutive_losses: int = Field(default=3, ge=1)
     llm_interval_minutes: int = Field(default=2, ge=1, le=1440)
     fee_rate_us: float = Field(default=0.0005, ge=0, le=0.01)
-    fee_rate_hk: float = Field(default=0.0030, ge=0, le=0.02)
+    fee_rate_hk: float = Field(default=0.003, ge=0, le=0.02)
     min_repricing_pct: float = Field(default=0.003, ge=0, le=0.05)
     llm_action_cooldown_seconds: int = Field(default=60, ge=0, le=3600)
 

@@ -91,6 +91,7 @@ def _ensure_strategy_config_trade_safety_columns(db_engine: Engine) -> None:
     inspector = inspect(db_engine)
     if "strategy_config" not in inspector.get_table_names():
         return
+
     columns = {column["name"] for column in inspector.get_columns("strategy_config")}
     missing_columns = {
         "fee_rate_us": "FLOAT DEFAULT 0.0005 NOT NULL",
@@ -98,6 +99,7 @@ def _ensure_strategy_config_trade_safety_columns(db_engine: Engine) -> None:
         "min_repricing_pct": "FLOAT DEFAULT 0.003 NOT NULL",
         "llm_action_cooldown_seconds": "INTEGER DEFAULT 60 NOT NULL",
     }.items()
+
     with db_engine.begin() as connection:
         for name, column_type in missing_columns:
             if name not in columns:

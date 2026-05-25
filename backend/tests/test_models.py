@@ -49,7 +49,7 @@ class TestModels:
             assert result.llm_interval_minutes == 2
             assert result.updated_at is not None
             assert result.fee_rate_us == 0.0005
-            assert result.fee_rate_hk == 0.0030
+            assert result.fee_rate_hk == 0.003
             assert result.min_repricing_pct == 0.003
             assert result.llm_action_cooldown_seconds == 60
         finally:

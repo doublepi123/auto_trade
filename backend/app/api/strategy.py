@@ -60,10 +60,10 @@ def put_strategy(payload: StrategyConfigSchema, db: Session = Depends(get_db)) -
         "max_daily_loss": data["max_daily_loss"] if "max_daily_loss" in data and data["max_daily_loss"] is not None else current.max_daily_loss,
         "max_consecutive_losses": data["max_consecutive_losses"] if "max_consecutive_losses" in data and data["max_consecutive_losses"] is not None else current.max_consecutive_losses,
         "llm_interval_minutes": data["llm_interval_minutes"] if "llm_interval_minutes" in data and data["llm_interval_minutes"] is not None else current.llm_interval_minutes,
-        "fee_rate_us": data["fee_rate_us"] if data.get("fee_rate_us") is not None else current.fee_rate_us,
-        "fee_rate_hk": data["fee_rate_hk"] if data.get("fee_rate_hk") is not None else current.fee_rate_hk,
-        "min_repricing_pct": data["min_repricing_pct"] if data.get("min_repricing_pct") is not None else current.min_repricing_pct,
-        "llm_action_cooldown_seconds": data["llm_action_cooldown_seconds"] if data.get("llm_action_cooldown_seconds") is not None else current.llm_action_cooldown_seconds,
+        "fee_rate_us": data["fee_rate_us"] if "fee_rate_us" in data and data["fee_rate_us"] is not None else current.fee_rate_us,
+        "fee_rate_hk": data["fee_rate_hk"] if "fee_rate_hk" in data and data["fee_rate_hk"] is not None else current.fee_rate_hk,
+        "min_repricing_pct": data["min_repricing_pct"] if "min_repricing_pct" in data and data["min_repricing_pct"] is not None else current.min_repricing_pct,
+        "llm_action_cooldown_seconds": data["llm_action_cooldown_seconds"] if "llm_action_cooldown_seconds" in data and data["llm_action_cooldown_seconds"] is not None else current.llm_action_cooldown_seconds,
     }
     try:
         StrategyMergedSchema.model_validate(merged)

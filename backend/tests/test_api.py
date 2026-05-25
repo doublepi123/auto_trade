@@ -908,6 +908,7 @@ class TestAPI:
         assert data["llm_action_cooldown_seconds"] == 120
 
     def test_update_strategy_rejects_invalid_trade_safety_settings(self) -> None:
+        _clean_strategy()
         resp = client.put("/api/strategy", json={
             "symbol": "AAPL.US",
             "market": "US",
