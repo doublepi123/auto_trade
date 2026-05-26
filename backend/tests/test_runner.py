@@ -55,6 +55,10 @@ class TestAppRunner:
         assert runner.engine.state == EngineState.FLAT
         assert runner.risk.kill_switch is False
 
+    def test_broker_gets_audit_logger(self) -> None:
+        runner = AppRunner()
+        assert runner.broker._audit is runner._audit
+
     def test_sync_engine_state_with_no_positions_sets_flat(self) -> None:
         class Broker:
             def get_positions(self) -> list[Position]:
@@ -1605,3 +1609,102 @@ class TestAppRunner:
         runner._trade_svc.reconcile(runner.risk, runner.notifier, runner._restore_engine_snapshot, runner.notifier.notify_risk_event)
 
         assert updates[-1][1] == "REJECTED"
+
+
+def test_kill_switch_endpoint_fans_out_to_all_channels(monkeypatch) -> None:
+    from unittest.mock import MagicMock
+
+    from fastapi.testclient import TestClient
+
+    from app.api import trade as trade_api
+    from app.core.notifiers.multi_channel import MultiChannelNotifier
+    from app.main import app
+
+    sc = MagicMock()
+    wh = MagicMock()
+    sc.send.return_value = True
+    wh.send.return_value = True
+
+    runner = AppRunner()
+    runner.notifier = MultiChannelNotifier([(sc, "INFO"), (wh, "CRITICAL")])
+    runner.risk.disable_kill_switch()
+
+    monkeypatch.setattr(trade_api, "get_runner", lambda: runner)
+    test_client = TestClient(app)
+    resp = test_client.post("/api/control/kill-switch", json={"reason": "drill"})
+    assert resp.status_code == 200
+    sc.send.assert_called_once()
+    wh.send.assert_called_once()
+
+
+class TestTradingSessionGuard:
+    def _make_runner(self, mode: str = "RTH_ONLY") -> AppRunner:
+        runner = AppRunner()
+        runner.engine.params = StrategyParams(
+            symbol="AAPL.US", market="US", buy_low=100, sell_high=110,
+        )
+        runner._trading_session_mode = mode
+        return runner
+
+    def test_returns_none_when_mode_is_any(self, monkeypatch) -> None:
+        runner = self._make_runner(mode="ANY")
+        monkeypatch.setattr(runner_module, "is_trading_hours", lambda market: False)
+        assert runner._check_trading_session("BUY") is None
+
+    def test_returns_none_when_rth_only_and_in_hours(self, monkeypatch) -> None:
+        runner = self._make_runner(mode="RTH_ONLY")
+        monkeypatch.setattr(runner_module, "is_trading_hours", lambda market: True)
+        assert runner._check_trading_session("BUY") is None
+
+    def test_cancel_pending_action_bypasses_gate_outside_hours(self, monkeypatch) -> None:
+        runner = self._make_runner(mode="RTH_ONLY")
+        monkeypatch.setattr(runner_module, "is_trading_hours", lambda market: False)
+        assert runner._check_trading_session("CANCEL_PENDING") is None
+
+    def test_blocks_and_records_skip_and_audit_outside_hours(self, monkeypatch) -> None:
+        runner = self._make_runner(mode="RTH_ONLY")
+        monkeypatch.setattr(runner_module, "is_trading_hours", lambda market: False)
+
+        skip_calls: list[tuple] = []
+        audit_calls: list[tuple] = []
+        runner._record_order_skipped = lambda symbol, action, reason, payload: skip_calls.append(
+            (symbol, action, reason, payload)
+        )
+
+        class _AuditStub:
+            def record(self, action, **kw):
+                audit_calls.append((action, kw))
+
+        runner._audit = _AuditStub()  # type: ignore[assignment]
+
+        result = runner._check_trading_session("BUY")
+        assert isinstance(result, dict)
+        assert result.get("status") == "SKIPPED"
+        assert result.get("skip_category") == "SESSION"
+
+        assert len(skip_calls) == 1
+        symbol, action, reason, payload = skip_calls[0]
+        assert symbol == "AAPL.US"
+        assert action == "BUY"
+        assert "non-RTH" in reason
+        assert payload["skip_category"] == "SESSION"
+
+        assert audit_calls == [("TRADING_SESSION_BLOCKED", {
+            "severity": "INFO",
+            "request_summary": {"symbol": "AAPL.US", "action": "BUY", "market": "US"},
+        })]
+
+    def test_refresh_trading_session_mode_pulls_latest_from_db(self) -> None:
+        from app import database
+        from app.models import StrategyConfig
+
+        database.init_db()
+        with database.SessionLocal() as db:
+            db.query(StrategyConfig).delete()
+            db.add(StrategyConfig(symbol="AAPL.US", market="US", trading_session_mode="RTH_ONLY"))
+            db.commit()
+
+        runner = AppRunner()
+        assert runner._get_trading_session_mode() == "ANY"
+        runner._refresh_trading_session_mode()
+        assert runner._get_trading_session_mode() == "RTH_ONLY"

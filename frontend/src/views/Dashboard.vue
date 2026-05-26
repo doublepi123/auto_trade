@@ -44,6 +44,14 @@
           <strong :class="metricClass(status.daily_pnl)">{{ signedCurrency(status.daily_pnl) }}</strong>
           <small>{{ pnlLabel(status.daily_pnl) }}</small>
         </div>
+        <div class="strip-item" data-testid="session-hours-indicator">
+          <span>下单时段</span>
+          <strong>{{ status.trading_session_mode === 'RTH_ONLY' ? '仅 RTH' : '不限' }}</strong>
+          <small class="session-strip-hint">
+            <span class="session-dot" :class="sessionOrderDotClass" />
+            {{ sessionOrderHint }}
+          </small>
+        </div>
       </div>
 
       <div class="cockpit-grid">
@@ -223,10 +231,10 @@
           <span>{{ recentEvents.length }} 条</span>
         </div>
         <div v-if="recentEvents.length > 0" class="event-list">
-          <div v-for="event in recentEvents" :key="event.id" class="event-row">
+          <div v-for="event in recentEvents" :key="`${event.source}-${event.id}`" class="event-row">
             <div class="event-main">
-              <el-tag size="small" :type="eventTagType(event.event_type, event.status)" effect="plain">
-                {{ tradeEventTypeLabel(event.event_type) }}
+              <el-tag size="small" :type="eventTagType(event.event_type, event.status, event.source)" effect="plain">
+                {{ event.source === 'audit' ? auditActionLabel(event.event_type) : tradeEventTypeLabel(event.event_type) }}
               </el-tag>
               <strong>{{ event.symbol || event.broker_order_id || '-' }}</strong>
               <small>{{ formatDateTime(event.created_at) }}</small>
@@ -254,7 +262,7 @@ import { useStatusStream } from '../composables/useStatusStream'
 import { useAccountRefresh } from '../composables/useAccountRefresh'
 import { startTrading, stopTrading, pauseTrading, resumeTrading, activateKillSwitch, disableKillSwitch, getLLMIntervalStatus, getOrders, getTradeEvents, getStatusHistory } from '../api'
 import type { LLMIntervalStatus, OrderRecord, Position, StatusHistoryPoint, TradeEventRecord, TradeSignalMarker } from '../types'
-import { engineStateLabel, marketLabel, positionSideLabel, skipCategoryLabel, tradeEventTypeLabel } from '../utils/labels'
+import { engineStateLabel, auditActionLabel, marketLabel, positionSideLabel, skipCategoryLabel, tradeEventTypeLabel } from '../utils/labels'
 
 const { strategy, status, initialLoading, loadError, load, refreshStatus } = useDashboardData()
 const { realtimeStatus } = useStatusStream(status)
@@ -297,6 +305,20 @@ const realtimeStatusType = computed(() => {
 const primaryPosition = computed<Position | null>(() => {
   if (account.value.positions.length === 0) return null
   return account.value.positions.find((position) => position.symbol === strategy.value.symbol) ?? account.value.positions[0]
+})
+
+const sessionOrderHint = computed(() => {
+  if (status.value.trading_session_mode !== 'RTH_ONLY') {
+    return '未限制 RTH（非完整交易日历）'
+  }
+  return status.value.is_trading_hours
+    ? 'RTH 内可下单'
+    : '非 RTH，新单拦截'
+})
+
+const sessionOrderDotClass = computed(() => {
+  if (status.value.trading_session_mode !== 'RTH_ONLY') return 'session-dot-neutral'
+  return status.value.is_trading_hours ? 'session-dot-ok' : 'session-dot-block'
 })
 
 const unrealizedPnl = computed(() => {
@@ -539,7 +561,12 @@ function metricClass(value: number | null | undefined): string {
   return ''
 }
 
-function eventTagType(eventTypeValue: string, status: string): string {
+function eventTagType(
+  eventTypeValue: string,
+  status: string,
+  source?: TradeEventRecord['source'],
+): string {
+  if (source === 'audit') return eventTypeValue === 'KILL_SWITCH' ? 'danger' : 'info'
   if (eventTypeValue === 'LLM_ANALYSIS') return status === 'FAILED' ? 'danger' : 'primary'
   if (eventTypeValue === 'RISK_PAUSED') return 'danger'
   if (eventTypeValue === 'RISK_AUTO_RESUMED') return 'success'
@@ -637,6 +664,31 @@ function eventTagType(eventTypeValue: string, status: string): string {
   margin-top: 4px;
   color: #7a8595;
   font-size: 12px;
+}
+
+.session-strip-hint {
+  display: flex !important;
+  align-items: center;
+  gap: 6px;
+}
+
+.session-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.session-dot-ok {
+  background: #22c55e;
+}
+
+.session-dot-block {
+  background: #94a3b8;
+}
+
+.session-dot-neutral {
+  background: #cbd5e1;
 }
 
 .cockpit-grid {

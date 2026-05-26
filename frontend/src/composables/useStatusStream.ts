@@ -50,6 +50,9 @@ export function useStatusStream(status: { value: StatusData }) {
             last_trigger_price: data.last_trigger_price ?? status.value.last_trigger_price,
             last_trigger_at: data.last_trigger_at ?? status.value.last_trigger_at,
             last_action_message: data.last_action_message ?? status.value.last_action_message,
+            trading_session_mode:
+              data.trading_session_mode ?? status.value.trading_session_mode ?? 'ANY',
+            is_trading_hours: data.is_trading_hours ?? status.value.is_trading_hours ?? true,
           }
         }
       } catch {

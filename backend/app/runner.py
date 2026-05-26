@@ -6,17 +6,21 @@ import os
 import threading
 import time
 from contextlib import contextmanager
+from dataclasses import replace as dataclass_replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Generator, Optional
 
+from app.api.deps import init_audit_logger
 from app.api.ws import manager
 from app.config import settings
+from app.core.audit import AuditLogger
 from app.core.broker import BrokerGateway, Quote
 from app.core.engine import EngineState, StrategyEngine, StrategyParams
 from app.core.fees import one_side_fee_rate
 from app.core.market_calendar import is_trading_hours, trade_day_for
-from app.core.notify import ServerChanNotifier
+from app.core.notifiers.multi_channel import MultiChannelNotifier
+from app.core.notifiers.serverchan import ServerChanNotifier
 from app.core.risk import RiskConfig, RiskController
 from app.database import SessionLocal
 from app.models import OrderRecord, TrackedEntry
@@ -44,17 +48,27 @@ _TERMINAL_ORDER_STATUSES = {"FILLED", "REJECTED", "CANCELLED"}
 
 
 class AppRunner:
+    @staticmethod
+    def _build_broker(audit: AuditLogger) -> BrokerGateway:
+        try:
+            return BrokerGateway(audit=audit)
+        except TypeError:
+            # test doubles may not accept `audit=`
+            return BrokerGateway()
+
     def __init__(self) -> None:
-        self.broker = BrokerGateway()
+        self._audit: AuditLogger = init_audit_logger()
+        self.broker = self._build_broker(self._audit)
         self.engine = StrategyEngine()
         self.risk = RiskController(trade_day_provider=self._market_trade_day)
-        self.notifier = ServerChanNotifier("")
+        self.notifier = MultiChannelNotifier([(ServerChanNotifier(""), "INFO")])
         self._trade_svc = TradeExecutionService(
             record_order=self._record_order,
             update_order_status=self._update_order_status,
             record_risk_event=self._record_risk_event,
             record_order_skipped=self._record_order_skipped,
             persist_entry=self._persist_tracked_entry,
+            audit=self._audit,
         )
         self._state_svc = RuntimeStateService()
         self._running = False
@@ -63,6 +77,7 @@ class AppRunner:
         self._start_lock = threading.Lock()
         self._state_lock = threading.RLock()
         self._quotes_subscribed = False
+        self._trading_session_mode: str = "ANY"
         self._trigger_in_flight = False
         self._defer_broker_close = False
         self._last_quote_at = 0.0
@@ -85,6 +100,7 @@ class AppRunner:
             self._state_svc.load(db, self.engine, self.risk)
             self._load_tracked_entries(db)
             self._apply_credentials(self._load_credentials(), resubscribe=False)
+        self._refresh_trading_session_mode()
 
         self.sync_today_orders_from_broker(force=True)
         self._sync_risk_from_order_ledger()
@@ -188,6 +204,8 @@ class AppRunner:
                     max_daily_loss=config.max_daily_loss,
                     max_consecutive_losses=config.max_consecutive_losses,
                 )
+                mode = getattr(config, "trading_session_mode", None)
+                self._trading_session_mode = mode if mode else "ANY"
                 if config.symbol != old_symbol and self._running:
                     self._reset_quote_tracking(clear_history=True)
                     if self._quotes_subscribed:
@@ -268,6 +286,8 @@ class AppRunner:
                     risk=self.risk,
                     notifier=self.notifier,
                     cash_currency=self._cash_currency(),
+                    market=self.engine.params.market,
+                    trading_session_mode=self._get_trading_session_mode(),
                     min_profit_amount=self.engine.params.min_profit_amount,
                     fee_rate=self._live_fee_rate(),
                     engine_snapshot=engine_snapshot,
@@ -377,6 +397,9 @@ class AppRunner:
                 skipped = self._precheck_llm_action(mapped_action, proposed_price, pending)
                 if skipped is not None:
                     return skipped
+                session_skipped = self._check_trading_session(mapped_action)
+                if session_skipped is not None:
+                    return session_skipped
                 cancel_status = self._trade_svc.cancel_pending_order(
                     restore_engine_snapshot=self._restore_engine_snapshot,
                 )
@@ -401,6 +424,9 @@ class AppRunner:
             if skipped is not None:
                 return skipped
             if pending is not None:
+                session_skipped = self._check_trading_session(mapped_action)
+                if session_skipped is not None:
+                    return session_skipped
                 cancel_status = self._trade_svc.cancel_pending_order(
                     restore_engine_snapshot=self._restore_engine_snapshot,
                 )
@@ -463,6 +489,8 @@ class AppRunner:
             risk=self.risk,
             notifier=self.notifier,
             cash_currency=self._cash_currency(),
+            market=self.engine.params.market,
+            trading_session_mode=self._get_trading_session_mode(),
             min_profit_amount=self.engine.params.min_profit_amount,
             allow_loss_exit=allow_loss_exit,
             fee_rate=self._live_fee_rate(),
@@ -562,6 +590,8 @@ class AppRunner:
             }
             data["runner_running"] = self.is_running
             data["last_action_message"] = self.last_action_message
+            data["trading_session_mode"] = self._get_trading_session_mode()
+            data["is_trading_hours"] = is_trading_hours(self.engine.params.market)
             if self._loop and self._loop.is_running():
                 asyncio.run_coroutine_threadsafe(manager.broadcast(data), self._loop)
         except Exception:
@@ -1052,9 +1082,12 @@ class AppRunner:
         with self._state_lock:
             symbol = self.engine.params.symbol
             should_resubscribe = resubscribe and bool(symbol)
-            new_notifier = ServerChanNotifier(
-                credentials.sct_key if credentials.sct_key else settings.sct_key
+            sct_key = credentials.sct_key if credentials.sct_key else settings.sct_key
+            effective_credentials = (
+                credentials if credentials.sct_key == sct_key
+                else dataclass_replace(credentials, sct_key=sct_key)
             )
+            new_notifier = MultiChannelNotifier.from_credential_config(effective_credentials)
 
             self._set_or_clear_env(
                 "LONGPORT_APP_KEY",
@@ -1069,7 +1102,7 @@ class AppRunner:
                 credentials.longbridge_access_token or settings.longbridge_access_token,
             )
 
-            new_broker = BrokerGateway()
+            new_broker = self._build_broker(self._audit)
 
             if should_resubscribe:
                 try:
@@ -1303,6 +1336,54 @@ class AppRunner:
     @staticmethod
     def _broker_side_for_action(action: str) -> str:
         return "BUY" if action in {"BUY", "BUY_TO_COVER"} else "SELL"
+
+    def _get_trading_session_mode(self) -> str:
+        return self._trading_session_mode or "ANY"
+
+    def _refresh_trading_session_mode(self) -> None:
+        try:
+            with self._db_session() as db:
+                config = StrategyService(db).get_config()
+            mode = getattr(config, "trading_session_mode", None)
+        except Exception:
+            logger.warning("failed to refresh trading_session_mode; keeping cache", exc_info=True)
+            return
+        self._trading_session_mode = mode if mode else "ANY"
+
+    def _check_trading_session(self, action: str) -> dict[str, Any] | None:
+        """Layer-A gate: block before cancel_pending when RTH_ONLY and outside RTH."""
+        if action == "CANCEL_PENDING":
+            return None
+        if self._get_trading_session_mode() != "RTH_ONLY":
+            return None
+        market = self.engine.params.market
+        if is_trading_hours(market):
+            return None
+        reason = f"non-RTH for {market}"
+        self._record_order_skipped(
+            self.engine.params.symbol,
+            action,
+            reason,
+            {"skip_category": "SESSION", "market": market},
+        )
+        if self._audit:
+            self._audit.record(
+                "TRADING_SESSION_BLOCKED",
+                severity="INFO",
+                request_summary={
+                    "symbol": self.engine.params.symbol,
+                    "action": action,
+                    "market": market,
+                },
+            )
+        return {
+            "executed": False,
+            "status": "SKIPPED",
+            "skip_category": "SESSION",
+            "reason": reason,
+            "order_id": None,
+            "action": action,
+        }
 
     def _skip_llm_action(self, action: str, reason: str, **payload: object) -> dict[str, Any]:
         symbol = self.engine.params.symbol

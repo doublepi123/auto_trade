@@ -5,10 +5,13 @@ import threading
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
+from app.api.deps import extract_actor, get_audit_logger
+from app.core.audit import AuditLogger
+from app.core.market_calendar import is_trading_hours
 from app.database import get_db
 from app.models import OrderRecord
 from app.runner import AppRunner, get_runner
@@ -45,33 +48,61 @@ def get_strategy(db: Session = Depends(get_db)) -> StrategyResponse:
 
 
 @router.put("/strategy", response_model=StrategyResponse)
-def put_strategy(payload: StrategyConfigSchema, db: Session = Depends(get_db)) -> StrategyResponse:
-    svc = StrategyService(db)
-    current = svc.get_config()
-    data = payload.model_dump(exclude_unset=True)
-    merged = {
-        "symbol": data["symbol"] if "symbol" in data and data["symbol"] is not None else current.symbol,
-        "market": data["market"] if "market" in data and data["market"] is not None else current.market,
-        "buy_low": data["buy_low"] if "buy_low" in data and data["buy_low"] is not None else current.buy_low,
-        "sell_high": data["sell_high"] if "sell_high" in data and data["sell_high"] is not None else current.sell_high,
-        "short_selling": data["short_selling"] if "short_selling" in data and data["short_selling"] is not None else current.short_selling,
-        "min_profit_amount": data["min_profit_amount"] if "min_profit_amount" in data and data["min_profit_amount"] is not None else current.min_profit_amount,
-        "auto_resume_minutes": data["auto_resume_minutes"] if "auto_resume_minutes" in data and data["auto_resume_minutes"] is not None else current.auto_resume_minutes,
-        "max_daily_loss": data["max_daily_loss"] if "max_daily_loss" in data and data["max_daily_loss"] is not None else current.max_daily_loss,
-        "max_consecutive_losses": data["max_consecutive_losses"] if "max_consecutive_losses" in data and data["max_consecutive_losses"] is not None else current.max_consecutive_losses,
-        "llm_interval_minutes": data["llm_interval_minutes"] if "llm_interval_minutes" in data and data["llm_interval_minutes"] is not None else current.llm_interval_minutes,
-        "fee_rate_us": data["fee_rate_us"] if "fee_rate_us" in data and data["fee_rate_us"] is not None else current.fee_rate_us,
-        "fee_rate_hk": data["fee_rate_hk"] if "fee_rate_hk" in data and data["fee_rate_hk"] is not None else current.fee_rate_hk,
-        "min_repricing_pct": data["min_repricing_pct"] if "min_repricing_pct" in data and data["min_repricing_pct"] is not None else current.min_repricing_pct,
-        "llm_action_cooldown_seconds": data["llm_action_cooldown_seconds"] if "llm_action_cooldown_seconds" in data and data["llm_action_cooldown_seconds"] is not None else current.llm_action_cooldown_seconds,
-    }
+def put_strategy(
+    request: Request,
+    payload: StrategyConfigSchema,
+    db: Session = Depends(get_db),
+    audit: AuditLogger = Depends(get_audit_logger),
+) -> StrategyResponse:
+    actor_hash, source_ip = extract_actor(request)
+    result = "SUCCESS"
+    diff: dict = {}
     try:
-        StrategyMergedSchema.model_validate(merged)
-    except ValidationError as e:
-        raise HTTPException(status_code=422, detail=str(e))
-    config = svc.update_config(merged)
-    _reload_strategy_after_save()
-    return StrategyResponse.model_validate(config)
+        svc = StrategyService(db)
+        current = svc.get_config()
+        data = payload.model_dump(exclude_unset=True)
+        merged = {
+            "symbol": data["symbol"] if "symbol" in data and data["symbol"] is not None else current.symbol,
+            "market": data["market"] if "market" in data and data["market"] is not None else current.market,
+            "buy_low": data["buy_low"] if "buy_low" in data and data["buy_low"] is not None else current.buy_low,
+            "sell_high": data["sell_high"] if "sell_high" in data and data["sell_high"] is not None else current.sell_high,
+            "short_selling": data["short_selling"] if "short_selling" in data and data["short_selling"] is not None else current.short_selling,
+            "min_profit_amount": data["min_profit_amount"] if "min_profit_amount" in data and data["min_profit_amount"] is not None else current.min_profit_amount,
+            "auto_resume_minutes": data["auto_resume_minutes"] if "auto_resume_minutes" in data and data["auto_resume_minutes"] is not None else current.auto_resume_minutes,
+            "max_daily_loss": data["max_daily_loss"] if "max_daily_loss" in data and data["max_daily_loss"] is not None else current.max_daily_loss,
+            "max_consecutive_losses": data["max_consecutive_losses"] if "max_consecutive_losses" in data and data["max_consecutive_losses"] is not None else current.max_consecutive_losses,
+            "llm_interval_minutes": data["llm_interval_minutes"] if "llm_interval_minutes" in data and data["llm_interval_minutes"] is not None else current.llm_interval_minutes,
+            "fee_rate_us": data["fee_rate_us"] if "fee_rate_us" in data and data["fee_rate_us"] is not None else current.fee_rate_us,
+            "fee_rate_hk": data["fee_rate_hk"] if "fee_rate_hk" in data and data["fee_rate_hk"] is not None else current.fee_rate_hk,
+            "min_repricing_pct": data["min_repricing_pct"] if "min_repricing_pct" in data and data["min_repricing_pct"] is not None else current.min_repricing_pct,
+            "llm_action_cooldown_seconds": data["llm_action_cooldown_seconds"] if "llm_action_cooldown_seconds" in data and data["llm_action_cooldown_seconds"] is not None else current.llm_action_cooldown_seconds,
+            "trading_session_mode": data["trading_session_mode"] if "trading_session_mode" in data and data["trading_session_mode"] is not None else getattr(current, "trading_session_mode", "ANY"),
+        }
+        try:
+            StrategyMergedSchema.model_validate(merged)
+        except ValidationError as e:
+            raise HTTPException(status_code=422, detail=str(e)) from e
+        config, diff = svc.update_config(merged)
+        _reload_strategy_after_save()
+        return StrategyResponse.model_validate(config)
+    except HTTPException as exc:
+        result = "FAILED"
+        diff = {"detail": str(exc.detail)}
+        raise
+    except Exception as exc:
+        result = "FAILED"
+        diff = {"detail": str(exc)}
+        logger.exception("unexpected strategy update failure")
+        raise HTTPException(status_code=500, detail="strategy update failed") from exc
+    finally:
+        audit.record(
+            "STRATEGY_UPDATE",
+            severity="INFO",
+            actor_hash=actor_hash,
+            source_ip=source_ip,
+            request_summary={"changed": diff},
+            result=result,
+        )
 
 
 @router.get("/status", response_model=StatusResponse)
@@ -93,6 +124,9 @@ def get_status(db: Session = Depends(get_db)) -> StatusResponse:
     runner = get_runner()
     response.runner_running = runner.is_running
     response.last_action_message = getattr(runner, "last_action_message", "")
+    config = svc.get_config()
+    response.trading_session_mode = getattr(config, "trading_session_mode", "ANY") or "ANY"
+    response.is_trading_hours = is_trading_hours(config.market)
     return response
 
 

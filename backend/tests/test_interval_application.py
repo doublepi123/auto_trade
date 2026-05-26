@@ -33,7 +33,7 @@ class TestIntervalApplicationService:
 
     def _create_config(self, db: Session) -> StrategyConfig:
         svc = StrategyService(db)
-        config = svc.update_config({
+        config, _diff = svc.update_config({
             "symbol": "AAPL.US",
             "market": "US",
             "buy_low": 180.0,

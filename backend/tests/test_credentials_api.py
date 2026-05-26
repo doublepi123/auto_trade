@@ -8,11 +8,14 @@ from fastapi.testclient import TestClient
 from app.api import credentials as credentials_api
 from app.core.credential_crypto import decrypt_secret, is_encrypted
 from app.database import SessionLocal, engine as db_engine
-from app.models import Base, CredentialConfig, StrategyConfig
+from app.models import AuditLog, Base, CredentialConfig, StrategyConfig
 from app.main import app
 
 
+from app import database
+
 Base.metadata.create_all(bind=db_engine)
+database._ensure_audit_log_table(db_engine)
 
 client = TestClient(app)
 
@@ -20,6 +23,13 @@ client = TestClient(app)
 def _clean_credentials() -> None:
     db = SessionLocal()
     db.query(CredentialConfig).delete()
+    db.commit()
+    db.close()
+
+
+def _clean_audit_logs() -> None:
+    db = SessionLocal()
+    db.query(AuditLog).delete()
     db.commit()
     db.close()
 
@@ -184,3 +194,55 @@ class TestCredentialsAPI:
         })
 
         assert resp.status_code == 200
+
+
+def test_update_persists_notification_channels() -> None:
+    _clean_credentials()
+    payload = {
+        "notification_channels": [
+            {"type": "serverchan", "severity_floor": "INFO"},
+            {
+                "type": "webhook",
+                "url": "https://example.com/hook",
+                "severity_floor": "WARNING",
+            },
+        ]
+    }
+    resp = client.put("/api/credentials", json=payload)
+    assert resp.status_code == 200
+    body = client.get("/api/credentials").json()
+    assert body["notification_channels"][1]["url"] == "https://example.com/hook"
+
+
+def test_credentials_update_audits_with_masked_payload() -> None:
+    _clean_audit_logs()
+    _clean_credentials()
+    import json
+
+    payload = {
+        "longbridge_app_key": "newkey",
+        "longbridge_app_secret": "newsecret",
+        "longbridge_access_token": "newtoken",
+        "sct_key": "newsct",
+    }
+    resp = client.put("/api/credentials", json=payload)
+    assert resp.status_code == 200
+    db = SessionLocal()
+    try:
+        row = (
+            db.query(AuditLog)
+            .filter_by(action="CREDENTIALS_UPDATE")
+            .order_by(AuditLog.id.desc())
+            .first()
+        )
+        summary = json.loads(row.request_summary)
+        changed = summary["changed"]
+        for key in (
+            "longbridge_app_key",
+            "longbridge_app_secret",
+            "longbridge_access_token",
+            "sct_key",
+        ):
+            assert changed.get(key) == "***"
+    finally:
+        db.close()

@@ -241,3 +241,69 @@ def test_init_db_adds_missing_runtime_state_daily_pnl_date_column(tmp_path, monk
     assert "pause_auto_resumable" in columns
 
     Base.metadata.drop_all(bind=engine)
+
+
+def test_ensure_credential_config_notification_channels_column_adds_and_backfills(
+    tmp_path, monkeypatch
+) -> None:
+    import importlib
+    import json
+
+    db_path = tmp_path / "creds.db"
+    monkeypatch.setenv("AUTO_TRADE_DATABASE_URL", f"sqlite:///{db_path}")
+    import app.database as database
+
+    importlib.reload(database)
+    database.init_db()
+    with database.engine.connect() as conn:
+        cols = {
+            row[1] for row in conn.exec_driver_sql("PRAGMA table_info(credential_config);").fetchall()
+        }
+        assert "notification_channels" in cols
+
+    from app.models import CredentialConfig
+
+    with database.SessionLocal() as db:
+        cc = CredentialConfig()
+        db.add(cc)
+        db.commit()
+        db.refresh(cc)
+        assert json.loads(cc.notification_channels) == [
+            {"type": "serverchan", "severity_floor": "INFO"}
+        ]
+
+
+def test_ensure_audit_log_table_creates_schema(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "audit.db"
+    monkeypatch.setenv("AUTO_TRADE_DATABASE_URL", f"sqlite:///{db_path}")
+    import importlib
+
+    from app import database
+
+    importlib.reload(database)
+    database.init_db()
+
+    with database.engine.connect() as conn:
+        cols = {r[1] for r in conn.exec_driver_sql("PRAGMA table_info(audit_logs);").fetchall()}
+    assert cols == {
+        "id",
+        "action",
+        "severity",
+        "actor_hash",
+        "source_ip",
+        "request_summary",
+        "result",
+        "created_at",
+    }
+
+
+def test_ensure_audit_log_table_is_idempotent(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "audit2.db"
+    monkeypatch.setenv("AUTO_TRADE_DATABASE_URL", f"sqlite:///{db_path}")
+    import importlib
+
+    from app import database
+
+    importlib.reload(database)
+    database.init_db()
+    database.init_db()

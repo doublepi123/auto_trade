@@ -13,7 +13,7 @@ from app.api import strategy as strategy_api
 from app.api import trade as trade_api
 from app import database
 from app.database import engine as db_engine, SessionLocal
-from app.models import Base, CredentialConfig, LLMInteraction, OrderRecord, RuntimeState, RuntimeStateSnapshot, StrategyConfig, TradeEvent
+from app.models import AuditLog, Base, CredentialConfig, LLMInteraction, OrderRecord, RuntimeState, RuntimeStateSnapshot, StrategyConfig, TradeEvent
 from app.main import app
 from app.services.strategy_service import StrategyService
 
@@ -21,7 +21,10 @@ from app.services.strategy_service import StrategyService
 Base.metadata.create_all(bind=db_engine)
 database._ensure_strategy_config_llm_columns(db_engine)
 database._ensure_strategy_config_trade_safety_columns(db_engine)
+database._ensure_strategy_config_session_columns(db_engine)
 database._ensure_runtime_state_daily_pnl_date_column(db_engine)
+database._ensure_audit_log_table(db_engine)
+database._ensure_credential_config_notification_channels_column(db_engine)
 
 client = TestClient(app)
 
@@ -72,6 +75,13 @@ def _clean_runtime_state() -> None:
 def _clean_trade_events() -> None:
     db = SessionLocal()
     db.query(TradeEvent).delete()
+    db.commit()
+    db.close()
+
+
+def _clean_audit_logs() -> None:
+    db = SessionLocal()
+    db.query(AuditLog).delete()
     db.commit()
     db.close()
 
@@ -536,14 +546,93 @@ class TestAPI:
         db.commit()
         db.close()
 
-        resp = client.get("/api/events?limit=5")
+        resp = client.get("/api/events?limit=5&source=trade")
 
         assert resp.status_code == 200
         data = resp.json()
         assert data["total"] == 1
         assert data["items"][0]["event_type"] == "LLM_ANALYSIS"
         assert data["items"][0]["symbol"] == "NVDA.US"
+        assert data["items"][0]["source"] == "trade"
         assert data["items"][0]["payload"]["confidence"] == 0.75
+
+    def test_timeline_endpoint_merges_audit_and_trade(self) -> None:
+        _clean_trade_events()
+        _clean_audit_logs()
+        db = SessionLocal()
+        db.add(
+            TradeEvent(
+                event_type="ORDER_FILLED",
+                symbol="AAPL.US",
+                broker_order_id="o1",
+                side="BUY",
+                status="FILLED",
+                message="ok",
+                payload_json="{}",
+            )
+        )
+        db.add(
+            AuditLog(
+                action="KILL_SWITCH",
+                severity="CRITICAL",
+                actor_hash="abc",
+                source_ip="127.0.0.1",
+                request_summary='{"reason":"panic"}',
+                result="SUCCESS",
+            )
+        )
+        db.commit()
+        db.close()
+
+        resp = client.get("/api/events?page=1&page_size=20&source=all")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 2
+        assert len(data["items"]) == 2
+        types = {(row["source"], row["event_type"]) for row in data["items"]}
+        assert ("trade", "ORDER_FILLED") in types
+        assert ("audit", "KILL_SWITCH") in types
+        ks = next(r for r in data["items"] if r["source"] == "audit")
+        assert ks["severity"] == "CRITICAL"
+        assert ks["actor_hash"] == "abc"
+
+    def test_timeline_symbol_filter_excludes_unrelated_audit_rows(self) -> None:
+        _clean_trade_events()
+        _clean_audit_logs()
+        db = SessionLocal()
+        db.add(
+            TradeEvent(
+                event_type="ORDER_FILLED",
+                symbol="AAPL.US",
+                broker_order_id="o1",
+                side="BUY",
+                status="FILLED",
+                message="ok",
+                payload_json="{}",
+            )
+        )
+        db.add(
+            AuditLog(
+                action="KILL_SWITCH",
+                severity="CRITICAL",
+                actor_hash="abc",
+                source_ip="127.0.0.1",
+                request_summary='{"reason":"panic"}',
+                result="SUCCESS",
+            )
+        )
+        db.commit()
+        db.close()
+
+        resp = client.get("/api/events?page=1&page_size=20&source=all&symbol=AAPL.US")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 1
+        assert [(row["source"], row["event_type"]) for row in data["items"]] == [
+            ("trade", "ORDER_FILLED")
+        ]
 
     def test_trade_events_export_returns_csv(self) -> None:
         _clean_trade_events()
@@ -604,6 +693,7 @@ class TestAPI:
             "daily_pnl", "consecutive_losses",
             "last_price", "last_trigger_price", "last_trigger_at",
             "runner_running", "last_action_message",
+            "trading_session_mode", "is_trading_hours",
         ]
         for field in expected_fields:
             assert field in data
@@ -940,3 +1030,169 @@ class TestAPI:
         assert data["has_longbridge_app_secret"] is True
         assert data["has_longbridge_access_token"] is True
         assert data["has_sct_key"] is True
+
+
+def test_start_endpoint_writes_audit_success() -> None:
+    _clean_audit_logs()
+    resp = client.post("/api/control/start", headers={"x-api-key": "k1"})
+    assert resp.status_code == 200
+    db = SessionLocal()
+    try:
+        rows = db.query(AuditLog).filter_by(action="START").all()
+        assert len(rows) == 1
+        assert rows[0].result == "SUCCESS"
+        assert rows[0].actor_hash != "anonymous"
+    finally:
+        db.close()
+
+
+def test_kill_switch_endpoint_writes_critical() -> None:
+    _clean_audit_logs()
+    resp = client.post("/api/control/kill-switch", json={"reason": "test"})
+    assert resp.status_code == 200
+    import json
+
+    db = SessionLocal()
+    try:
+        row = db.query(AuditLog).filter_by(action="KILL_SWITCH").one()
+        assert row.severity == "CRITICAL"
+        assert json.loads(row.request_summary)["reason"] == "test"
+    finally:
+        db.close()
+
+
+def test_start_failure_writes_failed_audit(monkeypatch) -> None:
+    _clean_audit_logs()
+    from fastapi import HTTPException
+
+    class Runner:
+        risk = type("Risk", (), {"kill_switch": True})()
+
+        def start(self):
+            return True
+
+    monkeypatch.setattr(trade_api, "get_runner", lambda: Runner())
+    resp = client.post("/api/control/start")
+    assert resp.status_code == 403
+    db = SessionLocal()
+    try:
+        rows = db.query(AuditLog).filter_by(action="START").all()
+        assert any(r.result == "FAILED" for r in rows)
+    finally:
+        db.close()
+
+
+def test_start_unexpected_exception_writes_failed_audit(monkeypatch) -> None:
+    _clean_audit_logs()
+
+    class Runner:
+        risk = type("Risk", (), {"kill_switch": False})()
+
+        def start(self):
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(trade_api, "get_runner", lambda: Runner())
+    resp = client.post("/api/control/start")
+    assert resp.status_code == 500
+    db = SessionLocal()
+    try:
+        row = db.query(AuditLog).filter_by(action="START").order_by(AuditLog.id.desc()).first()
+        assert row is not None
+        assert row.result == "FAILED"
+        assert "boom" in row.request_summary
+    finally:
+        db.close()
+
+
+def test_strategy_update_writes_diff_audit() -> None:
+    _clean_audit_logs()
+    _clean_strategy()
+    import json
+
+    client.put(
+        "/api/strategy",
+        json={
+            "symbol": "AAPL.US",
+            "market": "US",
+            "buy_low": 100.0,
+            "sell_high": 200.0,
+        },
+    )
+    resp = client.put("/api/strategy", json={"buy_low": 99.5, "sell_high": 105.0})
+    assert resp.status_code == 200
+    db = SessionLocal()
+    try:
+        row = (
+            db.query(AuditLog)
+            .filter_by(action="STRATEGY_UPDATE")
+            .order_by(AuditLog.id.desc())
+            .first()
+        )
+        assert row is not None
+        assert row.result == "SUCCESS"
+        changed = json.loads(row.request_summary)["changed"]
+        assert "buy_low" in changed
+        assert changed["buy_low"]["new"] == 99.5
+        assert "sell_high" in changed
+    finally:
+        db.close()
+
+
+def test_strategy_update_audits_symbol_market_and_mode_changes() -> None:
+    _clean_audit_logs()
+    _clean_strategy()
+    import json
+
+    client.put(
+        "/api/strategy",
+        json={
+            "symbol": "AAPL.US",
+            "market": "US",
+            "buy_low": 100.0,
+            "sell_high": 200.0,
+            "trading_session_mode": "ANY",
+        },
+    )
+    resp = client.put(
+        "/api/strategy",
+        json={
+            "symbol": "0700.HK",
+            "market": "HK",
+            "trading_session_mode": "RTH_ONLY",
+        },
+    )
+    assert resp.status_code == 200
+    db = SessionLocal()
+    try:
+        row = (
+            db.query(AuditLog)
+            .filter_by(action="STRATEGY_UPDATE")
+            .order_by(AuditLog.id.desc())
+            .first()
+        )
+        changed = json.loads(row.request_summary)["changed"]
+        assert changed["symbol"]["new"] == "0700.HK"
+        assert changed["market"]["new"] == "HK"
+        assert changed["trading_session_mode"]["new"] == "RTH_ONLY"
+    finally:
+        db.close()
+
+
+def test_strategy_update_no_change_still_writes_audit() -> None:
+    _clean_audit_logs()
+    import json
+
+    cur = client.get("/api/strategy").json()
+    resp = client.put("/api/strategy", json={"buy_low": cur["buy_low"]})
+    assert resp.status_code == 200
+    db = SessionLocal()
+    try:
+        row = (
+            db.query(AuditLog)
+            .filter_by(action="STRATEGY_UPDATE")
+            .order_by(AuditLog.id.desc())
+            .first()
+        )
+        assert json.loads(row.request_summary)["changed"] == {}
+    finally:
+        db.close()

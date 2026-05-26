@@ -12,6 +12,7 @@ dist/
 data/
 .superpowers/
 .worktrees/
+.firecrawl/
 
 # Frontend
 node_modules/

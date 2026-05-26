@@ -8,7 +8,7 @@ class TestServerChanNotifier:
         notifier = ServerChanNotifier("")
         assert notifier.send("test", "content") is False
 
-    @patch("app.core.notify.httpx")
+    @patch("app.core.notifiers.serverchan.httpx")
     def test_send_success(self, mock_httpx: MagicMock) -> None:
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -20,7 +20,7 @@ class TestServerChanNotifier:
         assert result is True
         mock_httpx.post.assert_called_once()
 
-    @patch("app.core.notify.httpx")
+    @patch("app.core.notifiers.serverchan.httpx")
     def test_notify_order(self, mock_httpx: MagicMock) -> None:
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -33,7 +33,7 @@ class TestServerChanNotifier:
         call_args = mock_httpx.post.call_args[1]["data"]
         assert "[Auto Trade] BUY" in call_args["title"]
 
-    @patch("app.core.notify.httpx")
+    @patch("app.core.notifiers.serverchan.httpx")
     def test_notify_risk_event(self, mock_httpx: MagicMock) -> None:
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -46,7 +46,7 @@ class TestServerChanNotifier:
         call_args = mock_httpx.post.call_args[1]["data"]
         assert "DAILY_LOSS" in call_args["title"]
 
-    @patch("app.core.notify.httpx")
+    @patch("app.core.notifiers.serverchan.httpx")
     def test_send_http_error(self, mock_httpx: MagicMock) -> None:
         mock_httpx.post.side_effect = Exception("connection refused")
 
@@ -55,7 +55,7 @@ class TestServerChanNotifier:
 
         assert result is False
 
-    @patch("app.core.notify.httpx")
+    @patch("app.core.notifiers.serverchan.httpx")
     def test_notify_fill(self, mock_httpx: MagicMock) -> None:
         mock_resp = MagicMock()
         mock_resp.status_code = 200

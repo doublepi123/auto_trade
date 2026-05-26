@@ -158,6 +158,16 @@
         <el-form-item label="LLM 同向冷却（秒）">
           <el-input-number v-model="form.llm_action_cooldown_seconds" :min="0" :max="3600" :step="1" />
         </el-form-item>
+        <el-divider content-position="left">交易时段</el-divider>
+        <el-form-item label="新单时段">
+          <el-radio-group v-model="form.trading_session_mode" data-testid="trading-session-mode">
+            <el-radio value="ANY">任意时段</el-radio>
+            <el-radio value="RTH_ONLY">仅常规交易时段（RTH）</el-radio>
+          </el-radio-group>
+          <div style="margin-top: 8px; color: #909399; font-size: 12px; line-height: 1.4">
+            RTH 仅按工作日 + 开市窗口判断，<strong>不含交易所节假日</strong>；设为「任意」则与旧版行为一致。
+          </div>
+        </el-form-item>
         <el-form-item>
           <el-button type="primary" native-type="submit" :loading="saving" :disabled="loading || !isDirty">保存</el-button>
           <el-tag v-if="saved" type="success" style="margin-left: 10px">已保存</el-tag>
@@ -191,6 +201,7 @@ interface StrategyForm {
   fee_rate_hk: number
   min_repricing_pct: number
   llm_action_cooldown_seconds: number
+  trading_session_mode: 'ANY' | 'RTH_ONLY'
 }
 
 const loadedStrategy = ref<StrategyForm | null>(null)
@@ -211,6 +222,7 @@ const { form, loading, saving, saved, error, isDirty, load, save } = useFormStat
     fee_rate_hk: 0.30,
     min_repricing_pct: 0.30,
     llm_action_cooldown_seconds: 60,
+    trading_session_mode: 'ANY',
   },
   load: async () => {
     const s = await getStrategy()
@@ -229,6 +241,7 @@ const { form, loading, saving, saved, error, isDirty, load, save } = useFormStat
       fee_rate_hk: s.fee_rate_hk * 100,
       min_repricing_pct: s.min_repricing_pct * 100,
       llm_action_cooldown_seconds: s.llm_action_cooldown_seconds,
+      trading_session_mode: s.trading_session_mode === 'RTH_ONLY' ? 'RTH_ONLY' : 'ANY',
     }
     loadedStrategy.value = loaded
     return loaded
@@ -252,8 +265,14 @@ const { form, loading, saving, saved, error, isDirty, load, save } = useFormStat
     if (!previous || data.llm_action_cooldown_seconds !== previous.llm_action_cooldown_seconds) {
       patch.llm_action_cooldown_seconds = data.llm_action_cooldown_seconds
     }
+    if (!previous || data.trading_session_mode !== previous.trading_session_mode) {
+      patch.trading_session_mode = data.trading_session_mode === 'RTH_ONLY' ? 'RTH_ONLY' : 'ANY'
+    }
     await updateStrategy(patch)
-    loadedStrategy.value = { ...data }
+    loadedStrategy.value = {
+      ...data,
+      trading_session_mode: data.trading_session_mode === 'RTH_ONLY' ? 'RTH_ONLY' : 'ANY',
+    }
     await loadLLMStatus()
   },
 })

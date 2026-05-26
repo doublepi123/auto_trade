@@ -11,6 +11,7 @@ const defaultStrategy: StrategyConfig = {
   fee_rate_hk: 0.003,
   min_repricing_pct: 0.003,
   llm_action_cooldown_seconds: 60,
+  trading_session_mode: 'ANY',
   updated_at: '',
 }
 
@@ -18,6 +19,8 @@ const defaultStatus: StatusData = {
   engine_state: 'flat', paused: false, kill_switch: false, runner_running: false,
   daily_pnl: 0, consecutive_losses: 0,
   last_price: 0, last_trigger_price: 0, last_trigger_at: null, last_action_message: '',
+  trading_session_mode: 'ANY',
+  is_trading_hours: true,
 }
 
 export function useDashboardData() {

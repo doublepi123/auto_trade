@@ -10,11 +10,13 @@ from typing import TYPE_CHECKING, Callable, Optional
 
 from app.config import settings
 from app.core.fees import estimate_round_trip_fee
+from app.core.market_calendar import is_trading_hours
 
 if TYPE_CHECKING:
+    from app.core.audit import AuditLogger
     from app.core.broker import BrokerGateway, OrderResult, Quote
     from app.core.engine import EngineState
-    from app.core.notify import ServerChanNotifier
+    from app.core.notifiers import NotifierInterface
     from app.core.risk import RiskController
 
 logger = logging.getLogger("auto_trade.services.trade_execution_service")
@@ -105,12 +107,14 @@ class TradeExecutionService:
         record_risk_event: Callable[[str], None],
         record_order_skipped: _RecordOrderSkipped | None = None,
         persist_entry: _EntryPersistCallback | None = None,
+        audit: AuditLogger | None = None,
     ) -> None:
         self._record_order = record_order
         self._update_order_status = update_order_status
         self._record_risk_event = record_risk_event
         self._record_order_skipped = record_order_skipped
         self._persist_entry = persist_entry
+        self._audit = audit
         self._state_lock = RLock()
         self._pending_order: _PendingOrder | None = None
         self._order_status_poll_interval_seconds = 1.0
@@ -146,7 +150,7 @@ class TradeExecutionService:
     def reconcile(
         self,
         risk: RiskController | None = None,
-        notifier: ServerChanNotifier | None = None,
+        notifier: "NotifierInterface | None" = None,
         restore_engine_snapshot: Callable[[_EngineSnapshot], None] | None = None,
         notify_risk_event: _NotifyRiskEvent | None = None,
     ) -> None:
@@ -215,9 +219,11 @@ class TradeExecutionService:
         quote: Quote,
         broker: BrokerGateway,
         risk: RiskController,
-        notifier: ServerChanNotifier,
+        notifier: "NotifierInterface",
         cash_currency: str,
         *,
+        market: str = "US",
+        trading_session_mode: str = "ANY",
         min_profit_amount: Decimal | float | int = Decimal("0"),
         allow_loss_exit: bool = False,
         fee_rate: Decimal | float | int = Decimal("0"),
@@ -225,6 +231,15 @@ class TradeExecutionService:
         restore_engine_snapshot: Callable[[_EngineSnapshot], None] | None = None,
         notify_risk_event: _NotifyRiskEvent | None = None,
     ) -> OrderStatus | None:
+        if trading_session_mode == "RTH_ONLY" and not is_trading_hours(market):
+            # SESSION skip records ORDER_SKIPPED only; TRADING_SESSION_BLOCKED is layer A.
+            return self._skip_order(
+                symbol,
+                action,
+                f"non-RTH for {market}",
+                skip_category="SESSION",
+            )
+
         risk_result = risk.check()
         if not risk_result.approved:
             logger.warning("execute rejected by risk: %s", risk_result.reason)
@@ -389,7 +404,7 @@ class TradeExecutionService:
         quote: Quote,
         broker: BrokerGateway,
         risk: RiskController,
-        notifier: ServerChanNotifier,
+        notifier: "NotifierInterface",
         cash_currency: str,
         *,
         engine_snapshot: _EngineSnapshot | None = None,
@@ -446,7 +461,7 @@ class TradeExecutionService:
         quote: Quote,
         broker: BrokerGateway,
         risk: RiskController,
-        notifier: ServerChanNotifier,
+        notifier: "NotifierInterface",
         *,
         min_profit_amount: Decimal | float | int = Decimal("0"),
         allow_loss_exit: bool = False,
@@ -527,7 +542,7 @@ class TradeExecutionService:
         quote: Quote,
         broker: BrokerGateway,
         risk: RiskController,
-        notifier: ServerChanNotifier,
+        notifier: "NotifierInterface",
         cash_currency: str,
         *,
         engine_snapshot: _EngineSnapshot | None = None,
@@ -585,7 +600,7 @@ class TradeExecutionService:
         quote: Quote,
         broker: BrokerGateway,
         risk: RiskController,
-        notifier: ServerChanNotifier,
+        notifier: "NotifierInterface",
         *,
         min_profit_amount: Decimal | float | int = Decimal("0"),
         allow_loss_exit: bool = False,
@@ -697,7 +712,7 @@ class TradeExecutionService:
         self,
         pending: _PendingOrder,
         risk: RiskController | None = None,
-        notifier: ServerChanNotifier | None = None,
+        notifier: "NotifierInterface | None" = None,
         restore_engine_snapshot: Callable[[_EngineSnapshot], None] | None = None,
         notify_risk_event: _NotifyRiskEvent | None = None,
     ) -> None:
@@ -764,7 +779,7 @@ class TradeExecutionService:
         pending: _PendingOrder,
         *,
         risk: RiskController | None = None,
-        notifier: ServerChanNotifier | None = None,
+        notifier: "NotifierInterface | None" = None,
         restore_engine_snapshot: Callable[[_EngineSnapshot], None] | None = None,
         notify_risk_event: _NotifyRiskEvent | None = None,
     ) -> None:
@@ -822,7 +837,7 @@ class TradeExecutionService:
         order_status: OrderStatus,
         *,
         risk: RiskController | None = None,
-        notifier: ServerChanNotifier | None = None,
+        notifier: "NotifierInterface | None" = None,
         fill_qty: Decimal | None = None,
         notify_risk_event: _NotifyRiskEvent | None = None,
     ) -> None:
@@ -862,7 +877,7 @@ class TradeExecutionService:
         order_status: OrderStatus,
         broker: BrokerGateway,
         risk: RiskController | None,
-        notifier: ServerChanNotifier | None,
+        notifier: "NotifierInterface | None",
         engine_snapshot: _EngineSnapshot | None,
         *,
         avg_price: Decimal | None = None,
@@ -995,7 +1010,7 @@ class TradeExecutionService:
 
     def _safe_notify_order(
         self,
-        notifier: ServerChanNotifier | None,
+        notifier: "NotifierInterface | None",
         side: str,
         symbol: str,
         quantity: str,

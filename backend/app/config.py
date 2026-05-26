@@ -37,6 +37,15 @@ class Settings(BaseSettings):
 
     api_key: str = ""
 
+    audit_request_summary_limit: int = Field(
+        default=2048,
+        validation_alias="AUTO_TRADE_AUDIT_REQUEST_SUMMARY_LIMIT",
+    )
+
+    broker_retry_max: int = Field(default=3, validation_alias="AUTO_TRADE_BROKER_RETRY_MAX")
+    broker_quote_retry_max: int = Field(default=1, validation_alias="AUTO_TRADE_BROKER_QUOTE_RETRY_MAX")
+    broker_retry_base_ms: int = Field(default=1000, validation_alias="AUTO_TRADE_BROKER_RETRY_BASE_MS")
+
     deepseek_api_key: str = Field(default="", validation_alias="DEEPSEEK_API_KEY")
     deepseek_api_url: str = "https://api.deepseek.com/v1/chat/completions"
     deepseek_model: str = Field(default="deepseek-v4-pro", validation_alias="DEEPSEEK_MODEL")

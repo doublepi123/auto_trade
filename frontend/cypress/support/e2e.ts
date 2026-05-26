@@ -4,12 +4,15 @@ interface StatusStub {
   engine_state: EngineState
   paused: boolean
   kill_switch: boolean
+  runner_running: boolean
   daily_pnl: number
   consecutive_losses: number
   last_price: number
   last_trigger_price: number
   last_trigger_at: string | null
   last_action_message: string
+  trading_session_mode: 'ANY' | 'RTH_ONLY'
+  is_trading_hours: boolean
 }
 
 function initialStatus(): StatusStub {
@@ -17,12 +20,15 @@ function initialStatus(): StatusStub {
     engine_state: 'flat',
     paused: false,
     kill_switch: false,
+    runner_running: false,
     daily_pnl: 0,
     consecutive_losses: 0,
     last_price: 0,
     last_trigger_price: 0,
     last_trigger_at: null,
     last_action_message: '',
+    trading_session_mode: 'ANY',
+    is_trading_hours: true,
   }
 }
 
@@ -44,6 +50,7 @@ Cypress.Commands.add('stubApi', () => {
       fee_rate_hk: 0.003,
       min_repricing_pct: 0.003,
       llm_action_cooldown_seconds: 60,
+      trading_session_mode: 'ANY',
       updated_at: '2026-01-01T00:00:00Z',
     },
   }).as('getStrategy')
@@ -100,6 +107,7 @@ Cypress.Commands.add('stubApi', () => {
       longbridge_access_token: '', sct_key: '',
       has_longbridge_app_key: false, has_longbridge_app_secret: false,
       has_longbridge_access_token: false, has_sct_key: false,
+      notification_channels: [{ type: 'serverchan', severity_floor: 'INFO' }],
       updated_at: '2026-01-01T00:00:00Z',
     },
   }).as('getCredentials')
@@ -119,6 +127,7 @@ Cypress.Commands.add('stubApi', () => {
       items: [
         {
           id: 1,
+          source: 'trade',
           event_type: 'LLM_ANALYSIS',
           symbol: 'NVDA.US',
           broker_order_id: '',
@@ -130,6 +139,7 @@ Cypress.Commands.add('stubApi', () => {
         },
         {
           id: 2,
+          source: 'trade',
           event_type: 'ORDER_SKIPPED',
           symbol: 'NVDA.US',
           broker_order_id: '',
@@ -310,6 +320,7 @@ Cypress.Commands.add('stubApi', () => {
       min_profit_amount: 0,
       auto_resume_minutes: 3,
       llm_interval_minutes: 2,
+      trading_session_mode: 'ANY',
       updated_at: '2026-01-01T00:00:00Z',
     },
   }).as('saveStrategy')
@@ -334,6 +345,7 @@ Cypress.Commands.add('stubApi', () => {
       longbridge_access_token: '', sct_key: '',
       has_longbridge_app_key: false, has_longbridge_app_secret: false,
       has_longbridge_access_token: false, has_sct_key: false,
+      notification_channels: [{ type: 'serverchan', severity_floor: 'INFO' }],
       updated_at: '2026-01-01T00:00:00Z', reload_warning: null,
     },
   }).as('saveCredentials')

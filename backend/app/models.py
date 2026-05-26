@@ -50,6 +50,7 @@ class StrategyConfig(Base):
     llm_applied_sell_high: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     llm_applied_at: Mapped[Optional[datetime]] = mapped_column(_TZDateTime(), nullable=True)
     llm_reject_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    trading_session_mode: Mapped[str] = mapped_column(String(16), default="ANY", nullable=False)
 
 
 class CredentialConfig(Base):
@@ -60,6 +61,11 @@ class CredentialConfig(Base):
     longbridge_app_secret: Mapped[str] = mapped_column(Text, default="")
     longbridge_access_token: Mapped[str] = mapped_column(Text, default="")
     sct_key: Mapped[str] = mapped_column(Text, default="")
+    notification_channels: Mapped[str] = mapped_column(
+        Text,
+        default='[{"type":"serverchan","severity_floor":"INFO"}]',
+        nullable=False,
+    )
     updated_at: Mapped[datetime] = mapped_column(_TZDateTime(), default=_utcnow)
 
 
@@ -169,3 +175,16 @@ class RuntimeStateSnapshot(Base):
     last_price: Mapped[float] = mapped_column(Float, default=0.0)
     last_trigger_price: Mapped[float] = mapped_column(Float, default=0.0)
     created_at: Mapped[datetime] = mapped_column(_TZDateTime(), default=_utcnow)
+
+
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    action: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    severity: Mapped[str] = mapped_column(String(16), index=True, nullable=False, default="INFO")
+    actor_hash: Mapped[str] = mapped_column(String(64), nullable=False, default="anonymous")
+    source_ip: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    request_summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    result: Mapped[str] = mapped_column(String(16), nullable=False, default="SUCCESS")
+    created_at: Mapped[datetime] = mapped_column(_TZDateTime(), default=_utcnow, index=True)

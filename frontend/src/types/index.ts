@@ -14,7 +14,14 @@ export interface StrategyConfig {
   fee_rate_hk: number
   min_repricing_pct: number
   llm_action_cooldown_seconds: number
+  trading_session_mode: 'ANY' | 'RTH_ONLY'
   updated_at: string
+}
+
+export interface NotificationChannel {
+  type: 'serverchan' | 'webhook'
+  severity_floor: 'INFO' | 'WARNING' | 'CRITICAL'
+  url?: string
 }
 
 export interface CredentialsConfig {
@@ -27,6 +34,7 @@ export interface CredentialsConfig {
   has_longbridge_app_secret: boolean
   has_longbridge_access_token: boolean
   has_sct_key: boolean
+  notification_channels?: NotificationChannel[]
   updated_at: string
   reload_warning?: string | null
 }
@@ -42,6 +50,8 @@ export interface StatusData {
   last_trigger_price: number
   last_trigger_at: string | null
   last_action_message: string
+  trading_session_mode: 'ANY' | 'RTH_ONLY'
+  is_trading_hours: boolean
 }
 
 export interface StatusHistoryPoint {
@@ -102,6 +112,7 @@ export interface OrderCancelResult {
 
 export interface TradeEventRecord {
   id: number
+  source: 'trade' | 'audit'
   event_type: string
   symbol: string
   broker_order_id: string
@@ -110,6 +121,10 @@ export interface TradeEventRecord {
   message: string
   payload: Record<string, unknown>
   created_at: string
+  actor_hash?: string | null
+  source_ip?: string | null
+  severity?: string | null
+  result?: string | null
 }
 
 export interface TradeEventPage {
@@ -118,6 +133,8 @@ export interface TradeEventPage {
   page: number
   page_size: number
 }
+
+export type TimelineSource = 'all' | 'trade' | 'audit'
 
 export interface CashBalance {
   currency: string

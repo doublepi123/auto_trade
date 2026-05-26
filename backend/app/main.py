@@ -142,7 +142,10 @@ async def _llm_analysis_cron() -> None:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
+    from app.api.deps import init_audit_logger
+
     init_db()
+    init_audit_logger()
     runner = get_runner()
     started = await asyncio.to_thread(runner.start, loop=asyncio.get_running_loop())
     if not started:

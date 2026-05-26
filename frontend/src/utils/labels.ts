@@ -73,7 +73,25 @@ export function skipCategoryLabel(category?: string | null): string {
     case 'RISK': return '风控阻断'
     case 'PENDING': return '已有挂单'
     case 'POSITION': return '可用持仓不足'
+    case 'SESSION': return '非交易时段'
     default: return ''
+  }
+}
+
+export function auditActionLabel(action?: string | null): string {
+  switch (action) {
+    case 'START': return '启动运行'
+    case 'STOP': return '停止运行'
+    case 'PAUSE': return '暂停'
+    case 'RESUME': return '恢复'
+    case 'KILL_SWITCH': return '紧急停止'
+    case 'DISABLE_KILL_SWITCH': return '解除紧急停止'
+    case 'STRATEGY_UPDATE': return '策略更新'
+    case 'CREDENTIALS_UPDATE': return '凭证更新'
+    case 'ORDER_CANCEL': return '撤单'
+    case 'TRADING_SESSION_BLOCKED': return '时段拦截'
+    case 'BROKER_RETRY': return '券商重试'
+    default: return action || '审计事件'
   }
 }
 

@@ -20,8 +20,11 @@ def init_db() -> None:
     _ensure_order_raw_response_column(engine)
     _ensure_strategy_config_llm_columns(engine)
     _ensure_strategy_config_trade_safety_columns(engine)
+    _ensure_strategy_config_session_columns(engine)
     _ensure_runtime_state_daily_pnl_date_column(engine)
     _ensure_tracked_entries_table(engine)
+    _ensure_audit_log_table(engine)
+    _ensure_credential_config_notification_channels_column(engine)
 
     db = SessionLocal()
     try:
@@ -108,6 +111,19 @@ def _ensure_strategy_config_trade_safety_columns(db_engine: Engine) -> None:
                 )
 
 
+def _ensure_strategy_config_session_columns(db_engine: Engine) -> None:
+    inspector = inspect(db_engine)
+    if "strategy_config" not in inspector.get_table_names():
+        return
+
+    columns = {column["name"] for column in inspector.get_columns("strategy_config")}
+    with db_engine.begin() as connection:
+        if "trading_session_mode" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE strategy_config ADD COLUMN trading_session_mode VARCHAR(16) DEFAULT 'ANY' NOT NULL"
+            )
+
+
 def _ensure_runtime_state_daily_pnl_date_column(db_engine: Engine) -> None:
     inspector = inspect(db_engine)
     if "runtime_state" not in inspector.get_table_names():
@@ -128,6 +144,36 @@ def _ensure_runtime_state_daily_pnl_date_column(db_engine: Engine) -> None:
         connection.exec_driver_sql(
             "UPDATE runtime_state SET daily_pnl = 0, consecutive_losses = 0, daily_pnl_date = DATE('now') WHERE daily_pnl_date IS NULL"
         )
+
+
+def _ensure_audit_log_table(db_engine: Engine) -> None:
+    from app.models import Base
+
+    insp = inspect(db_engine)
+    if "audit_logs" in insp.get_table_names():
+        return
+    Base.metadata.tables["audit_logs"].create(db_engine, checkfirst=True)
+
+
+DEFAULT_NOTIFICATION_CHANNELS_JSON = '[{"type":"serverchan","severity_floor":"INFO"}]'
+
+
+def _ensure_credential_config_notification_channels_column(db_engine: Engine) -> None:
+    inspector = inspect(db_engine)
+    if "credential_config" not in inspector.get_table_names():
+        return
+    columns = {column["name"] for column in inspector.get_columns("credential_config")}
+    with db_engine.begin() as connection:
+        if "notification_channels" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE credential_config ADD COLUMN notification_channels TEXT "
+                f"DEFAULT '{DEFAULT_NOTIFICATION_CHANNELS_JSON}' NOT NULL"
+            )
+            connection.exec_driver_sql(
+                "UPDATE credential_config SET notification_channels = "
+                f"'{DEFAULT_NOTIFICATION_CHANNELS_JSON}' "
+                "WHERE notification_channels IS NULL OR notification_channels = ''"
+            )
 
 
 def _ensure_tracked_entries_table(db_engine: Engine) -> None:

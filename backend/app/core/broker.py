@@ -2,14 +2,51 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from app.config import settings
 
+if TYPE_CHECKING:
+    from app.core.audit import AuditLogger
+
+try:
+    from longport.openapi import OpenApiException as _OpenApiException
+
+    RETRYABLE_EXC: tuple[type[BaseException], ...] = (_OpenApiException,)
+except ImportError:
+    RETRYABLE_EXC = (Exception,)
+
 logger = logging.getLogger("auto_trade.broker")
+
+_RETRYABLE_MESSAGE_MARKERS = (
+    "限流",
+    "频率",
+    "rate limit",
+    "rate_limit",
+    "too many requests",
+    "too frequent",
+    "throttle",
+    "throttled",
+    "timeout",
+    "connection",
+    "unavailable",
+    "429",
+)
+
+
+def _is_retryable_message(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return any(marker in msg for marker in _RETRYABLE_MESSAGE_MARKERS)
+
+
+def _is_retryable_exception(exc: BaseException) -> bool:
+    if isinstance(exc, RETRYABLE_EXC):
+        return _is_retryable_message(exc)
+    return False
 
 
 def _import_openapi() -> Any:
@@ -263,12 +300,45 @@ def _normalize_order_side(raw_side: Any) -> str:
 
 
 class BrokerGateway:
-    def __init__(self) -> None:
+    def __init__(self, audit: AuditLogger | None = None) -> None:
+        self._audit = audit
         self._lock = threading.RLock()
         self._quote_ctx: Any = None
         self._trade_ctx: Any = None
         self._quote_callbacks: list[Callable[[Quote], None]] = []
         self._subscribed_symbol: str | None = None
+
+    def _call_with_retry(
+        self,
+        fn: Callable[[], Any],
+        *,
+        op: str,
+        max_retries: int,
+        base_ms: int,
+    ) -> Any:
+        for attempt in range(max_retries + 1):
+            try:
+                return fn()
+            except RETRYABLE_EXC as exc:
+                if not _is_retryable_exception(exc):
+                    raise
+                if attempt >= max_retries:
+                    raise
+                delay_s = (base_ms / 1000.0) * (2 ** attempt)
+                if self._audit:
+                    self._audit.record(
+                        "BROKER_RETRY",
+                        severity="INFO",
+                        request_summary={
+                            "op": op,
+                            "attempt": attempt + 1,
+                            "delay_s": delay_s,
+                            "exc": type(exc).__name__,
+                            "message": str(exc)[:200],
+                        },
+                    )
+                time.sleep(delay_s)
+        raise RuntimeError("unreachable")
 
     def _init_clients(self) -> None:
         with self._lock:
@@ -280,6 +350,14 @@ class BrokerGateway:
 
     def get_candlesticks(self, symbol: str, period: str, count: int) -> list[BrokerCandle]:
         """Fetch recent candlesticks. ``period`` is one of ``DAY``, ``MIN_1``, ``MIN_5``, etc."""
+        return self._call_with_retry(
+            lambda: self._get_candlesticks_inner(symbol, period, count),
+            op="get_candlesticks",
+            max_retries=settings.broker_retry_max,
+            base_ms=settings.broker_retry_base_ms,
+        )
+
+    def _get_candlesticks_inner(self, symbol: str, period: str, count: int) -> list[BrokerCandle]:
         if count <= 0:
             return []
         with self._lock:
@@ -321,7 +399,15 @@ class BrokerGateway:
             return candles
 
     def get_quote(self, symbol: str) -> Quote:
-        quotes = self.get_quotes([symbol])
+        return self._call_with_retry(
+            lambda: self._get_quote_inner(symbol),
+            op="get_quote",
+            max_retries=settings.broker_quote_retry_max,
+            base_ms=settings.broker_retry_base_ms,
+        )
+
+    def _get_quote_inner(self, symbol: str) -> Quote:
+        quotes = self._get_quotes_inner([symbol])
         if not quotes:
             raise ValueError(f"no quote data for {symbol}")
         return quotes[0]
@@ -329,6 +415,14 @@ class BrokerGateway:
     def get_quotes(self, symbols: list[str]) -> list[Quote]:
         if not symbols:
             return []
+        return self._call_with_retry(
+            lambda: self._get_quotes_inner(symbols),
+            op="get_quotes",
+            max_retries=settings.broker_quote_retry_max,
+            base_ms=settings.broker_retry_base_ms,
+        )
+
+    def _get_quotes_inner(self, symbols: list[str]) -> list[Quote]:
         with self._lock:
             self._init_clients()
             response = self._quote_ctx.quote(symbols)
@@ -385,6 +479,20 @@ class BrokerGateway:
             self._subscribed_symbol = symbol
 
     def submit_limit_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal) -> OrderResult:
+        return self._call_with_retry(
+            lambda: self._submit_limit_order_inner(symbol, side, quantity, price),
+            op="submit_limit_order",
+            max_retries=settings.broker_retry_max,
+            base_ms=settings.broker_retry_base_ms,
+        )
+
+    def _submit_limit_order_inner(
+        self,
+        symbol: str,
+        side: str,
+        quantity: Decimal,
+        price: Decimal,
+    ) -> OrderResult:
         with self._lock:
             self._init_clients()
             module = _import_openapi()
@@ -469,6 +577,14 @@ class BrokerGateway:
             return orders
 
     def cancel_order(self, order_id: str) -> OrderStatusResult:
+        return self._call_with_retry(
+            lambda: self._cancel_order_inner(order_id),
+            op="cancel_order",
+            max_retries=settings.broker_retry_max,
+            base_ms=settings.broker_retry_base_ms,
+        )
+
+    def _cancel_order_inner(self, order_id: str) -> OrderStatusResult:
         with self._lock:
             self._init_clients()
             cancel = getattr(self._trade_ctx, "cancel_order", None)

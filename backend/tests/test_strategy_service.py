@@ -45,7 +45,7 @@ class TestStrategyService:
         self._cleanup()
         db = self._get_db()
         svc = StrategyService(db)
-        updated = svc.update_config({
+        updated, diff = svc.update_config({
             "symbol": "AAPL.US",
             "buy_low": 100.0,
             "sell_high": 200.0,
@@ -53,6 +53,7 @@ class TestStrategyService:
             "auto_resume_minutes": 4,
         })
         assert updated.symbol == "AAPL.US"
+        assert "buy_low" in diff
         assert updated.buy_low == 100.0
         assert updated.sell_high == 200.0
         assert updated.min_profit_amount == 6.5

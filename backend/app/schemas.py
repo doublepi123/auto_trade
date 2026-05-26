@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -36,6 +36,7 @@ class StrategyConfigSchema(BaseModel):
     fee_rate_hk: Optional[float] = Field(default=None, ge=0, le=0.02)
     min_repricing_pct: Optional[float] = Field(default=None, ge=0, le=0.05)
     llm_action_cooldown_seconds: Optional[int] = Field(default=None, ge=0, le=3600)
+    trading_session_mode: Literal["RTH_ONLY", "ANY"] = "ANY"
 
     @field_validator("market")
     @classmethod
@@ -75,6 +76,7 @@ class StrategyMergedSchema(BaseModel):
     fee_rate_hk: float = Field(default=0.003, ge=0, le=0.02)
     min_repricing_pct: float = Field(default=0.003, ge=0, le=0.05)
     llm_action_cooldown_seconds: int = Field(default=60, ge=0, le=3600)
+    trading_session_mode: Literal["RTH_ONLY", "ANY"] = "ANY"
 
     @field_validator("market")
     @classmethod
@@ -99,11 +101,18 @@ class StrategyMergedSchema(BaseModel):
         return v
 
 
+class NotificationChannelSchema(BaseModel):
+    type: Literal["serverchan", "webhook"]
+    severity_floor: Literal["INFO", "WARNING", "CRITICAL"] = "INFO"
+    url: Optional[str] = None
+
+
 class CredentialConfigSchema(BaseModel):
     longbridge_app_key: str = Field(default="", max_length=4096)
     longbridge_app_secret: str = Field(default="", max_length=4096)
     longbridge_access_token: str = Field(default="", max_length=4096)
     sct_key: str = Field(default="", max_length=4096)
+    notification_channels: Optional[list[NotificationChannelSchema]] = None
 
 
 class CredentialResponse(BaseModel):
@@ -112,6 +121,7 @@ class CredentialResponse(BaseModel):
     longbridge_app_secret: str
     longbridge_access_token: str
     sct_key: str
+    notification_channels: list[NotificationChannelSchema] = Field(default_factory=list)
     has_longbridge_app_key: bool = False
     has_longbridge_app_secret: bool = False
     has_longbridge_access_token: bool = False
@@ -138,6 +148,7 @@ class StrategyResponse(BaseModel):
     fee_rate_hk: float
     min_repricing_pct: float
     llm_action_cooldown_seconds: int
+    trading_session_mode: str = "ANY"
     updated_at: datetime
 
     model_config = {"from_attributes": True}
@@ -154,6 +165,8 @@ class StatusResponse(BaseModel):
     last_trigger_price: float
     last_trigger_at: Optional[datetime]
     last_action_message: str = ""
+    trading_session_mode: str = "ANY"
+    is_trading_hours: bool = True
 
     model_config = {"from_attributes": True}
 
@@ -228,8 +241,27 @@ class TradeEventResponse(BaseModel):
     created_at: datetime
 
 
+class TimelineEventResponse(BaseModel):
+    """Unified row for ``GET /api/events`` (trade_events ∪ audit_logs)."""
+
+    source: Literal["trade", "audit"]
+    id: int
+    event_type: str
+    symbol: str = ""
+    broker_order_id: str = ""
+    side: str = ""
+    status: str = ""
+    message: str = ""
+    payload: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+    actor_hash: Optional[str] = None
+    source_ip: Optional[str] = None
+    severity: Optional[str] = None
+    result: Optional[str] = None
+
+
 class TradeEventPageResponse(BaseModel):
-    items: list[TradeEventResponse]
+    items: list[TimelineEventResponse]
     total: int
     page: int
     page_size: int
