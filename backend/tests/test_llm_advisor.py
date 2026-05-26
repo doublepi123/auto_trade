@@ -29,13 +29,19 @@ def _candle(high: float, low: float, close: float, *, day: int = 1) -> BrokerCan
     )
 
 
-def test_deepseek_chat_payload_uses_v4_pro_thinking_max() -> None:
+def test_deepseek_chat_payload_defaults_to_v4_pro_thinking_max() -> None:
     payload = LLMAdvisorService._deepseek_chat_payload("analyze NVDA")
 
     assert payload["model"] == "deepseek-v4-pro"
     assert payload["reasoning_effort"] == "max"
     assert payload["thinking"] == {"type": "enabled"}
     assert payload["messages"][1]["content"] == "analyze NVDA"
+
+
+def test_deepseek_chat_payload_uses_256k_completion_budget_for_thinking() -> None:
+    payload = LLMAdvisorService._deepseek_chat_payload("analyze NVDA")
+
+    assert payload["max_tokens"] == 262144
 
 
 def test_preview_request_normalizes_symbol() -> None:
@@ -320,6 +326,36 @@ class TestLLMAdvisorService:
 
         assert result["order_action"] == "STOP_LOSS_SELL_NOW"
         assert result["order_price"] == 215.0
+
+    def test_call_deepseek_reports_empty_content_after_token_exhaustion(self, advisor: LLMAdvisorService, monkeypatch) -> None:
+        import app.config
+        import app.services.llm_advisor_service as service_module
+
+        class FakeResponse:
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict:
+                return {
+                    "choices": [
+                        {
+                            "finish_reason": "length",
+                            "message": {
+                                "content": "",
+                                "reasoning_content": "long hidden reasoning",
+                            },
+                        }
+                    ],
+                    "usage": {
+                        "completion_tokens_details": {"reasoning_tokens": 2048},
+                    },
+                }
+
+        monkeypatch.setattr(app.config.settings, "deepseek_api_key", "test-key")
+        monkeypatch.setattr(service_module.httpx, "post", lambda *args, **kwargs: FakeResponse())
+
+        with pytest.raises(RuntimeError, match="empty content.*finish_reason=length"):
+            advisor._call_deepseek("analyze NVDA")
 
     def test_is_throttled_initially_false(self, advisor: LLMAdvisorService) -> None:
         assert advisor._is_throttled() is False

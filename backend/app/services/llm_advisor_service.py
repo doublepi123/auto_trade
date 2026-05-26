@@ -340,7 +340,7 @@ class LLMAdvisorService:
                 {"role": "user", "content": prompt},
             ],
             "temperature": 0.3,
-            "max_tokens": 2048,
+            "max_tokens": settings.deepseek_max_tokens,
             "thinking": {"type": settings.deepseek_thinking_type},
         }
         if settings.deepseek_thinking_type == "enabled":
@@ -363,7 +363,26 @@ class LLMAdvisorService:
         )
         response.raise_for_status()
         data = response.json()
-        return data["choices"][0]["message"]["content"]
+        choice = data["choices"][0]
+        message = choice["message"]
+        content = message.get("content") or ""
+        if not content.strip():
+            finish_reason = choice.get("finish_reason")
+            usage = data.get("usage") or {}
+            completion_details = usage.get("completion_tokens_details") if isinstance(usage, dict) else None
+            reasoning_tokens = (
+                completion_details.get("reasoning_tokens")
+                if isinstance(completion_details, dict)
+                else None
+            )
+            reasoning_len = len(str(message.get("reasoning_content") or ""))
+            raise RuntimeError(
+                "DeepSeek returned empty content"
+                f" (finish_reason={finish_reason}, reasoning_tokens={reasoning_tokens},"
+                f" reasoning_chars={reasoning_len}, max_tokens={settings.deepseek_max_tokens})."
+                " Increase DEEPSEEK_MAX_TOKENS or lower/disable DeepSeek thinking."
+            )
+        return content
 
     @staticmethod
     def _parse_response(raw: str) -> dict[str, Any]:

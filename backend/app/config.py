@@ -53,6 +53,7 @@ class Settings(BaseSettings):
         default="max",
         validation_alias="DEEPSEEK_REASONING_EFFORT",
     )
+    deepseek_max_tokens: int = Field(default=262144, validation_alias="DEEPSEEK_MAX_TOKENS")
     deepseek_thinking_type: Literal["enabled", "disabled"] = Field(
         default="enabled",
         validation_alias="DEEPSEEK_THINKING_TYPE",
