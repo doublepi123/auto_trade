@@ -71,12 +71,33 @@
 - FastAPI `lifespan` 在后台线程启动 runner，避免启动期阻塞 `/api/health`
 - Runner 后台约每 15 秒将券商当日订单同步到本地库
 
-### 通知
-- 下单、成交、风控事件推送到 [Server酱](https://sct.ftqq.com/)
+### 通知与审计
+- 多渠道通知：[Server酱](https://sct.ftqq.com/) + 自定义 Webhook，按 `severity_floor` 分级（`INFO` / `WARNING` / `CRITICAL`）路由
+- `notify_risk_event` 自带 severity 映射：`KILL_SWITCH` / `ORDER_PERSISTENCE_FAILED` → `CRITICAL`；`REJECTED` / `ORDER_FAILED` / `ORDER_TIMEOUT` / `DAILY_LOSS` → `WARNING`
+- 操作审计：策略修改、凭证修改、启停、暂停/恢复、Kill Switch、撤单都会写入 `audit_logs` 表，含 `actor_hash`（SHA-256 X-API-Key 前 16 hex）、`source_ip`、脱敏 `request_summary`、`severity`、`result`
+- Decision Timeline 支持 `source=trade|audit|all` 切换查看交易事件与审计事件，`event_type` 多选筛选
+
+### 交易时段守卫
+- `trading_session_mode = RTH_ONLY` 时仅在常规交易时段允许新下单与 LLM 撤单重挂；非交易时段记录 `ORDER_SKIPPED` + `skip_category=SESSION` 与 `TRADING_SESSION_BLOCKED` 审计
+- `CANCEL_PENDING` 撤单不受时段守卫限制（允许非 RTH 清理挂单）
+- 默认 `ANY`，上线零行为变更；用户主动切到 `RTH_ONLY` 才生效；**不含节假日历**（仅周末 + 常规 RTH 时段）
+
+### 券商韧性
+- `BrokerGateway._call_with_retry` 分档退避：订单（默认 3 次）全量指数退避；行情（默认 1 次）轻量重试
+- 每次重试写 `audit_logs.action=BROKER_RETRY`；重试耗尽走原 `_is_auto_resumable_pause_reason` → pause 路径
 
 ### 回测
 - CSV 历史价格回测（`POST /api/backtest/run`），验证区间参数与风控规则
 - Web UI **Backtest** 页：上传/粘贴 CSV、查看收益曲线与交易明细
+
+### 策略复盘（规划中 — P7）
+
+- 按交易日 × 当前 symbol 复盘价格走势、LLM 建议、实际成交、真实 PnL
+- 5 类错误标签（错过止损 / 过早进场 / 频繁重挂 / 收益不足 / 正常交易）查询时计算
+- 导出 JSON（细粒度，含 prompt 全文）或 CSV（扁平），用于 prompt 调优
+- `list_days` 仅返回“有数据的交易日”（基于 orders / llm_interactions / runtime_state_snapshots 并集），不补齐空白日历日
+- API 口径：参数非法返回 `422`；参数合法即使无数据也返回 `200` 空结构（不使用 `404` 表示“合法但无数据”）
+- 规划详情见 `docs/superpowers/specs/2026-05-26-replay-llm-workshop-design.md`
 
 ### LLM 区间顾问（可选）
 - DeepSeek 分析建议 `buy_low` / `sell_high`，支持预览与应用
@@ -284,9 +305,9 @@ auto_trade/
 | `/#/` | Dashboard — 实时状态、图表、启停/暂停/kill switch |
 | `/#/strategy` | Strategy — 区间参数、LLM 顾问 |
 | `/#/history` | Trade History — 今日/历史订单、撤单；今日列表默认读本地库，点「刷新」时 `refresh=true` 强制同步券商 |
-| `/#/events` | Decision Timeline — 交易与 LLM 决策事件 |
+| `/#/events` | Decision Timeline — 交易与 LLM 决策事件 + 审计事件（`source` 切换） |
 | `/#/backtest` | Backtest — CSV 回测 |
-| `/#/credentials` | Credentials — 长桥 / Server酱凭证 |
+| `/#/credentials` | Credentials — 长桥凭证 + 多渠道通知（Server 酱 / Webhook） |
 
 ## API 参考
 
@@ -316,8 +337,8 @@ auto_trade/
 |--------|------|-------------|
 | `GET` | `/api/orders` | 分页订单；`scope=today\|history`，`page`，`page_size`（或兼容 `limit`）；`refresh=true` 时（仅 `scope=today`）先强制从券商同步再返回本地库 |
 | `POST` | `/api/orders/{order_id}/cancel` | 撤销指定券商订单 |
-| `GET` | `/api/events` | 决策时间线分页；`page`，`page_size`，可选 `symbol`、`event_type` |
-| `GET` | `/api/events/export` | 导出事件；`format=csv\|json`，`limit` |
+| `GET` | `/api/events` | 决策时间线分页；`page`，`page_size`，可选 `symbol`、`event_type`（支持重复 query 或逗号分隔多选）、`source=trade\|audit\|all`（默认 `all`） |
+| `GET` | `/api/events/export` | 导出事件；`format=csv\|json`，`limit`（仅 `trade_events`，不含审计） |
 
 ### 运行时控制
 
@@ -346,6 +367,14 @@ auto_trade/
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/api/backtest/run` | 运行回测；body：`csv_text` 或 `price_points[]` + `params` |
+
+### 策略复盘（规划中，P7）
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/replay/days` | 最近交易日列表；`limit=1..90`，仅返回有数据日 |
+| `GET` | `/api/replay/{trade_day}` | 单日复盘明细；可选 `symbol`，合法但空数据返回 `200` 空结构 |
+| `GET` | `/api/replay/{trade_day}/export` | 导出复盘；`format=json\|csv`，浏览器原生下载 |
 
 ### WebSocket
 
@@ -376,6 +405,10 @@ auto_trade/
 | `DEEPSEEK_REASONING_EFFORT` | Thinking 力度（`high` / `max`） | `max` |
 | `DEEPSEEK_THINKING_TYPE` | 是否启用 thinking（`enabled` / `disabled`） | `enabled` |
 | `AUTO_TRADE_MIN_EXIT_PROFIT_PCT` | 平仓最低盈利百分比缓冲 | `0.2` |
+| `AUTO_TRADE_BROKER_RETRY_MAX` | 订单类券商调用最大重试次数（0 = 不重试，共 1 次调用） | `3` |
+| `AUTO_TRADE_BROKER_QUOTE_RETRY_MAX` | 行情类券商调用最大重试次数 | `1` |
+| `AUTO_TRADE_BROKER_RETRY_BASE_MS` | 指数退避基数（毫秒） | `1000` |
+| `AUTO_TRADE_AUDIT_REQUEST_SUMMARY_LIMIT` | 审计 `request_summary` 截断字节数 | `2048` |
 
 长桥 SDK 官方使用 `LONGPORT_*` 凭证变量；项目仍兼容旧的 `LONGBRIDGE_*` 变量名。`auto_trade` 业务配置使用 `AUTO_TRADE_` 前缀；`CREDENTIAL_MASTER_KEY` 无此前缀。
 

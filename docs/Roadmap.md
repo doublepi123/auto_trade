@@ -19,6 +19,33 @@
 | **LLM 行情数据** | ✅ 真实 K 线（日 K + 1 分钟 K），ATR/布林带有效。 |
 | **多市场切日** | ✅ US/HK 交易所本地日历日驱动风控与日 PnL。 |
 | **入场成本** | ✅ `tracked_entries` 持久化 + 启动对账。 |
+| **操作审计** | ✅ `audit_logs` 表 + `AuditLogger` + 9 个写端点接入（控制 / 策略 / 凭证 / 撤单）。 |
+| **多渠道通知** | ✅ `MultiChannelNotifier` + Server 酱 + Webhook + `severity_floor` 分级。 |
+| **交易时段守卫** | ✅ `trading_session_mode` 双层 gate（runner + execute 服务），`SESSION` skip 与 `TRADING_SESSION_BLOCKED` 审计。 |
+| **券商韧性** | ✅ `BrokerGateway._call_with_retry` 分档退避（订单 vs 行情），`BROKER_RETRY` 审计。 |
+
+---
+
+## 近期已完成迭代 (2026-05-26)
+
+> 对应 commit `323743b feat: add audit notifications and trading safety`。基线 `pytest 485 passed`，`basedpyright` 0/0。规格：[2026-05-26-audit-notification-trading-safety-design.md](superpowers/specs/2026-05-26-audit-notification-trading-safety-design.md)，实施计划：[2026-05-26-audit-notification-trading-safety.md](superpowers/plans/2026-05-26-audit-notification-trading-safety.md)。
+
+| Task | 主题 | 状态 |
+|------|------|------|
+| **T1** | `AuditLog` 模型 + `_ensure_audit_log_table` + `AuditLogger` + 9 个写端点审计 | ✅ |
+| **T2** | 交易时段守卫（`trading_session_mode` + 双层 gate + `SESSION` skip + `TRADING_SESSION_BLOCKED`） | ✅ |
+| **T3** | `BrokerGateway._call_with_retry` 分档退避（订单全量、行情低重试） + `BROKER_RETRY` 审计 | ✅ |
+| **T4** | `NotifierInterface` + `MultiChannelNotifier` + `ServerChan` / `Webhook` + severity 分级 | ✅ |
+| **T5** | 前端集成：Credentials 通知渠道、Strategy 交易时段、Decision Timeline `source` + 多选 + 审计卡片、Dashboard SESSION 指示器 | ✅ |
+| **T6** | 测试与 lint：~50 项 pytest 新增、3 个 cypress spec、`basedpyright` 0/0 | ✅ |
+
+**新增端点 / 改造端点**：
+- `GET /api/events` 现支持 `source=trade|audit|all` 与 `event_type` 重复参数（跨表 union 分页）。
+- 9 个写端点（control / strategy PUT / credentials PUT / orders cancel）记录 `audit_logs`，含 `actor_hash`（SHA-256 X-API-Key 前 16 hex）、`source_ip`、脱敏 `request_summary`、`result`、`severity`。
+
+**新增环境变量**：`AUTO_TRADE_BROKER_RETRY_MAX`、`AUTO_TRADE_BROKER_QUOTE_RETRY_MAX`、`AUTO_TRADE_BROKER_RETRY_BASE_MS`、`AUTO_TRADE_AUDIT_REQUEST_SUMMARY_LIMIT`。
+
+**显式 YAGNI 未做**（仍在 Roadmap 边缘）：节假日历、审计 CSV/JSON 导出、Webhook 模板编辑器、通知重发队列。
 
 ---
 
@@ -326,21 +353,32 @@
 - Cypress 移动端视口无横向滚动，关键按钮可点击，文字不溢出。
 - 浏览器手工验证 Dashboard、Strategy、History、Decision Timeline。
 
-### P7：策略复盘与 LLM 优化工作台
+### P7：策略复盘与 LLM 优化工作台 🚧（当前迭代）
 
-> **目标：** 利用已经保存的 LLM 交互、状态快照、订单事件，分析哪些提示词/决策真正赚钱。
+> **目标：** 利用已沉淀的 LLM 交互、状态快照、订单事件，按”交易日 × 当前 symbol”复盘，反哺 prompt 调优。
+>
+> **规格：** `docs/superpowers/specs/2026-05-26-replay-llm-workshop-design.md`
 
 #### 范围
 
-- 新增“复盘”页面：按日期/标的展示价格走势、LLM 建议、执行结果、真实 PnL。
-- 将 `llm_interactions` 与 `trade_events`、`orders` 通过 `interaction_id`/`order_id` 关联展示。
-- 支持导出复盘数据为 JSON/CSV。
-- 增加“错误类型”标签：过早买入、过早卖出、错过止损、频繁重挂、收益不足。
+- 新增”Replay”页面：按交易日展示 K 线走势 + LLM 建议 × 实际成交 × 真实 PnL。
+- 关联键：`LLMInteraction.order_id` ↔ `OrderRecord.broker_order_id`，**不增表、不加 FK**，查询时内存 JOIN。
+- 5 个错误标签按优先级评估：`MISSED_STOP` / `PREMATURE_ENTRY` / `FREQUENT_REPRICE` / `LOW_PROFIT` / `NORMAL`；阈值为代码常量。
+- 价格曲线优先来自 `BrokerGateway.get_candlesticks`，broker 不可用 / 历史超出保留时回退 `RuntimeStateSnapshot`。
+- 导出 JSON（细粒度，完整 prompt + 关联订单）与 CSV（扁平表格），浏览器原生下载。
+- `realized_pnl` 复用 `DailyPnlService.calculate` 重算，不修改写路径。
+- `list_days` 固定按 `orders` / `llm_interactions` / `runtime_state_snapshots` 三类数据并集构造（market-aware trade day），仅返回有数据日，不补齐空白日历日。
+- API 语义固定：参数非法返回 `422`；参数合法即使空数据也返回 `200`（空数组结构），不使用 `404` 表示“合法但无数据”。
+
+#### 显式不做
+
+- 多标的复盘（待 P8 Watchlist）；标签阈值可配置；历史 `StrategyConfig` 快照；反向 FK 字段。
 
 #### 验证
 
-- 后端测试覆盖复盘聚合 API。
-- Cypress 覆盖筛选、详情展开、导出。
+- 后端 pytest ~25 新增（聚合主路径 / trip 划分 / 5 个标签 / 三端点 / 导出格式 / 合法空数据返回 200）。
+- Cypress `replay.cy.ts` 覆盖列表、切日、导出、标签视觉。
+- `basedpyright` 0/0；`npm run type-check` + `build`。
 
 ### P8：多标的观察列表（暂不自动交易）
 

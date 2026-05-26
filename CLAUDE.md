@@ -6,7 +6,7 @@
 
 `auto_trade` 是基于长桥（Longbridge / Longport）OpenAPI 的自动化**区间交易**系统：
 
-- 后端：FastAPI + SQLAlchemy 2.0 + SQLite，运行交易状态机、风控、订单执行、Server酱通知。
+- 后端：FastAPI + SQLAlchemy 2.0 + SQLite，运行交易状态机、风控、订单执行、多渠道通知（Server 酱 + Webhook）、操作审计。
 - 前端：Vue 3 + Vite + Element Plus + TypeScript（Hash 路由）。
 - 经纪商 SDK：`longport`（行情订阅 + 下单）。
 - 可选：DeepSeek LLM 顾问，建议并应用 `buy_low` / `sell_high` 区间。
@@ -22,36 +22,40 @@ auto_trade/
 │   ├── app/
 │   │   ├── main.py                         # FastAPI 入口、lifespan、LLM 定时 cron
 │   │   ├── config.py                       # pydantic-settings（AUTO_TRADE_* / LONGPORT_*）
-│   │   ├── database.py                     # engine、init_db、SQLite _ensure_*（含 tracked_entries 表）
-│   │   ├── models.py                       # StrategyConfig、OrderRecord、TrackedEntry、TradeEvent、LLMInteraction、RuntimeState…
-│   │   ├── schemas.py                      # Pydantic API schemas
-│   │   ├── runner.py                       # AppRunner：行情订阅、策略循环、WS 广播
+│   │   ├── database.py                     # engine、init_db、SQLite _ensure_*（tracked_entries / audit_logs / session / notification_channels…）
+│   │   ├── models.py                       # StrategyConfig、OrderRecord、TrackedEntry、TradeEvent、LLMInteraction、RuntimeState、AuditLog…
+│   │   ├── schemas.py                      # Pydantic API schemas（含 AuditEventOut / NotificationChannel / 跨表 union EventPageResponse）
+│   │   ├── runner.py                       # AppRunner：行情订阅、策略循环、WS 广播、_check_trading_session（层 A）
 │   │   ├── api/
 │   │   │   ├── strategy.py                 # /api/strategy、/api/status、/api/status/history
-│   │   │   ├── trade.py                    # 订单、账户、事件、/api/control/*
-│   │   │   ├── credentials.py              # 加密凭证 CRUD
+│   │   │   ├── trade.py                    # 订单、账户、事件（跨表 union）、/api/control/*
+│   │   │   ├── credentials.py              # 加密凭证 CRUD + notification_channels
 │   │   │   ├── llm_advisor.py              # LLM 区间 analyze/preview/status
 │   │   │   ├── backtest.py                 # POST /api/backtest/run
 │   │   │   ├── ws.py                       # WebSocket /ws
-│   │   │   └── auth.py                     # require_api_key（可选；preview 可挂依赖）
+│   │   │   ├── auth.py                     # require_api_key（可选；preview 可挂依赖）
+│   │   │   └── deps.py                     # get_audit_logger / extract_actor DI helpers
 │   │   ├── core/
-│   │   │   ├── broker.py                   # BrokerGateway：quote(s)、candlesticks、下单
-│   │   │   ├── market_calendar.py          # trade_day_for / is_trading_hours（US/HK 本地日）
+│   │   │   ├── broker.py                   # BrokerGateway：quote(s)、candlesticks、下单 + _call_with_retry 分档
+│   │   │   ├── market_calendar.py          # trade_day_for / is_trading_hours（US/HK 本地日，不含节假日）
 │   │   │   ├── engine.py                   # flat/long/short 状态机
 │   │   │   ├── risk.py                     # 日亏损、连续亏损；可注入 trade_day_provider
 │   │   │   ├── backtest.py                 # 离线回测引擎
-│   │   │   ├── notify.py                   # Server酱
+│   │   │   ├── notify.py                   # 兼容层 re-export
+│   │   │   ├── notifiers/                  # NotifierInterface / MultiChannelNotifier / ServerChan / Webhook
+│   │   │   ├── audit.py                    # AuditLogger：审计写表、actor_hash、IP 提取
 │   │   │   └── credential_crypto.py        # RSA + AES-GCM（AUTO_TRADE_CREDENTIAL_KEY_PATH）
 │   │   └── services/
-│   │       ├── trade_execution_service.py  # 下单、pending 对账、tracked 入场成本持久化、HK tick
-│   │       ├── strategy_service.py
+│   │       ├── trade_execution_service.py  # 下单、pending 对账、tracked 入场成本持久化、HK tick、层 B 时段守卫
+│   │       ├── strategy_service.py         # update_config 返回审计 diff
 │   │       ├── runtime_state_service.py
 │   │       ├── daily_pnl_service.py
-│   │       ├── credentials_service.py
+│   │       ├── credentials_service.py      # notification_channels CRUD + 脱敏 diff
 │   │       ├── llm_advisor_service.py
 │   │       ├── interval_application_service.py
 │   │       ├── llm_interaction_service.py
 │   │       ├── trade_event_service.py
+│   │       ├── event_list_service.py       # 跨表 union（trade_events + audit_logs）分页
 │   │       └── data_aggregator.py          # 真实 K 线 → LLM prompt / ATR / 布林带
 │   ├── tests/                              # pytest（见「测试约定」）
 │   ├── alembic/                            # 历史迁移；运行时以 database._ensure_* 为准
@@ -114,11 +118,11 @@ cd frontend && npm run type-check
 
 | 域 | 代表路径 |
 |----|----------|
-| 策略 | `GET/PUT /api/strategy`，`GET /api/status`，`GET /api/status/history` |
-| 控制 | `POST /api/control/{start,stop,pause,resume,kill-switch,disable-kill-switch}` |
-| 交易 | `GET /api/orders`（`refresh=true` 强制同步今日订单），`POST /api/orders/{id}/cancel`，`GET /api/account`（批量 quote） |
-| 事件 | `GET /api/events`，`GET /api/events/export` |
-| 凭证 | `GET/PUT /api/credentials` |
+| 策略 | `GET/PUT /api/strategy`（含 `trading_session_mode`、`fee_rate_*`、`llm_*`），`GET /api/status`，`GET /api/status/history` |
+| 控制 | `POST /api/control/{start,stop,pause,resume,kill-switch,disable-kill-switch}`（全部写审计） |
+| 交易 | `GET /api/orders`（`refresh=true` 强制同步今日订单），`POST /api/orders/{id}/cancel`（写审计），`GET /api/account`（批量 quote） |
+| 事件 | `GET /api/events`（`source=trade\|audit\|all`，`event_type` 重复参数多选），`GET /api/events/export`（仅 `trade_events`） |
+| 凭证 | `GET/PUT /api/credentials`（含 `notification_channels`，写审计） |
 | LLM | `POST /api/strategy/llm-interval/{preview,analyze}`，`GET …/status`，`PUT …/enable\|disable` |
 | 回测 | `POST /api/backtest/run` |
 | 实时 | `WS /ws` |
@@ -140,7 +144,7 @@ cd frontend && npm run type-check
 
 ### 数据库迁移
 
-- 运行时通过 `init_db()` → `_ensure_order_execution_columns`、`_ensure_order_raw_response_column`、`_ensure_strategy_config_llm_columns`、`_ensure_runtime_state_daily_pnl_date_column`、`_ensure_tracked_entries_table`、`_ensure_strategy_config_trade_safety_columns`（P4 新增：`fee_rate_us`、`fee_rate_hk`、`min_repricing_pct`、`llm_action_cooldown_seconds`）补丁旧表。
+- 运行时通过 `init_db()` 顺序执行：`_ensure_order_execution_columns`、`_ensure_order_raw_response_column`、`_ensure_strategy_config_llm_columns`、`_ensure_strategy_config_trade_safety_columns`（P4：`fee_rate_us`、`fee_rate_hk`、`min_repricing_pct`、`llm_action_cooldown_seconds`）、`_ensure_strategy_config_session_columns`（P5+：`trading_session_mode`）、`_ensure_runtime_state_daily_pnl_date_column`、`_ensure_audit_log_table`（P5+）、`_ensure_credential_config_notification_channels_column`（P5+，回填默认 `[{"type":"serverchan","severity_floor":"INFO"}]`）、`_ensure_tracked_entries_table`。
 - **`alembic/` 不用于生产**；加列须同步新增 `_ensure_*`。
 - 首次补 `daily_pnl_date` 时会把 NULL 行的 `daily_pnl`/`consecutive_losses` 置 0（一次性）。
 
@@ -152,6 +156,8 @@ cd frontend && npm run type-check
 - `AUTO_TRADE_CREDENTIAL_KEY_PATH`：RSA 私钥路径，默认 `data/credential_private_key.pem`。
 - `DEEPSEEK_API_KEY`：LLM 顾问（无此前缀，见 config 的 `validation_alias`）。
 - `DEEPSEEK_MODEL` / `DEEPSEEK_REASONING_EFFORT` / `DEEPSEEK_THINKING_TYPE`：默认 `deepseek-v4-pro` + thinking `max`（`enabled`）。
+- `AUTO_TRADE_BROKER_RETRY_MAX`（默认 3，订单全量）、`AUTO_TRADE_BROKER_QUOTE_RETRY_MAX`（默认 1，行情）、`AUTO_TRADE_BROKER_RETRY_BASE_MS`（默认 1000）：`BrokerGateway._call_with_retry` 分档退避；`max_retries=0` 表示只调 1 次，无 sleep。
+- `AUTO_TRADE_AUDIT_REQUEST_SUMMARY_LIMIT`（默认 2048）：审计 `request_summary` 截断字节数；超出会附加 `...truncated`。
 - **API 鉴权增强不在 Roadmap 内**（owner decision 2026-05-25）：当前仅可信内网部署，`AUTO_TRADE_API_KEY` 可留空；若部署到不可信网络，必须重新评估所有写端点与 WebSocket 的访问控制。
 
 ### 交易执行（TradeExecutionService）
@@ -166,7 +172,15 @@ cd frontend && npm run type-check
 - `StrategyConfig` 新增四项：`fee_rate_us` / `fee_rate_hk`（实盘普通平仓双边费用估算）、`min_repricing_pct`（LLM cancel-replace 最小改价阈值）、`llm_action_cooldown_seconds`（LLM 同方向发单冷却）。
 - `_profit_guard_for_exit` 在原 `min_profit_amount` 校验上叠加 round-trip 费用：`expected_profit - estimated_fees < required_profit` 即 `ORDER_SKIPPED` 且 `payload.skip_category = "FEE"`；`allow_loss_exit=True` 完全绕过费用门槛。
 - LLM `execute_llm_order_decision` 在调用 `cancel_pending_order` 之前执行改价（`REPRICING`）与冷却（`COOLDOWN`）gate；`CANCEL_PENDING` 不受 gate 影响。`_last_llm_action_at[(symbol, broker_side)]` 仅在 FILLED/SUBMITTED/PARTIAL_FILLED 后更新。
-- `record_order_skipped` payload 现已稳定带 `skip_category` ∈ `{FEE, REPRICING, COOLDOWN, RISK, PENDING, POSITION}`；前端 `skipCategoryLabel` 是唯一渲染入口。
+- `record_order_skipped` payload 现已稳定带 `skip_category` ∈ `{FEE, REPRICING, COOLDOWN, RISK, PENDING, POSITION, SESSION}`；前端 `skipCategoryLabel` 是唯一渲染入口。
+- **交易时段守卫（P5+）**：`StrategyConfig.trading_session_mode ∈ {ANY, RTH_ONLY}`，默认 `ANY` 零行为变更。`RTH_ONLY` 时双层 gate：
+  - 层 A（`AppRunner._check_trading_session`）：`execute_llm_order_decision` 在 `_precheck_llm_action` 之后、任何 `cancel_pending_order` 之前；非 RTH 直接 skip + `TRADING_SESSION_BLOCKED` 审计 + `SESSION` skip 事件。
+  - 层 B（`TradeExecutionService.execute`）：在 `risk.check()` 之前；非 RTH skip + `skip_category="SESSION"`。
+  - `CANCEL_PENDING` 不受时段守卫限制（允许非 RTH 清理挂单）。
+  - 仅周末 + 常规 RTH 时段，**不含节假日历**，UI 文案明示。
+- **操作审计（P5+）**：`AuditLogger.record(...)` 写 `audit_logs`，`actor_hash = sha256(X-API-Key)[:16]`（无 header → `anonymous`），`source_ip` 取 `X-Forwarded-For` 第一段或 `client.host`。9 个端点接入：`POST /api/control/{start,stop,pause,resume,kill-switch,disable-kill-switch}`、`PUT /api/strategy`（diff）、`PUT /api/credentials`（脱敏 diff）、`POST /api/orders/{id}/cancel`。失败仅 log warning，不抛。
+- **多渠道通知（P5+）**：`MultiChannelNotifier.from_credential_config(cred)` 解析 `notification_channels` JSON（`[{type, severity_floor, url?}]`），按 `severity_floor` fan-out。`notify_risk_event` 内部映射 severity（`KILL_SWITCH` / `ORDER_PERSISTENCE_FAILED` → `CRITICAL`；`REJECTED` / `ORDER_FAILED` / `ORDER_TIMEOUT` / `DAILY_LOSS` → `WARNING`）。`_apply_credentials` 在凭证更新时重建 notifier。
+- **券商韧性（P5+）**：`BrokerGateway._call_with_retry(fn, op=, max_retries=, base_ms=)` 包装 `submit_order` / `cancel_order` / `get_quote(s)` / `get_candlesticks`；每次重试写 `audit_logs.action=BROKER_RETRY`；业务拒绝（余额不足、非法 tick）不重试。
 
 ### 经纪商交互
 
@@ -202,3 +216,5 @@ cd frontend && npm run type-check
 
 - 用户向说明以 **`README.md`** 为准；迭代计划见 **`docs/Roadmap.md`**。
 - 修改 API/路由/部署行为时，同步更新 README 与本文件。
+- 已交付迭代的规格文档保存在 `docs/superpowers/specs/`；实施计划在 `docs/superpowers/plans/`。
+- 当前下一迭代（P7 策略复盘）规格：`docs/superpowers/specs/2026-05-26-replay-llm-workshop-design.md`。
