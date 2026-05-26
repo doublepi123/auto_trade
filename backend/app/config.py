@@ -48,7 +48,7 @@ class Settings(BaseSettings):
 
     deepseek_api_key: str = Field(default="", validation_alias="DEEPSEEK_API_KEY")
     deepseek_api_url: str = "https://api.deepseek.com/v1/chat/completions"
-    deepseek_model: str = Field(default="deepseek-v4-pro", validation_alias="DEEPSEEK_MODEL")
+    deepseek_model: str = Field(default="deepseek-v4-flash", validation_alias="DEEPSEEK_MODEL")
     deepseek_reasoning_effort: Literal["high", "max"] = Field(
         default="max",
         validation_alias="DEEPSEEK_REASONING_EFFORT",
