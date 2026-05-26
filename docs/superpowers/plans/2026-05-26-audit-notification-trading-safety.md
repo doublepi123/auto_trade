@@ -160,9 +160,9 @@ Expected: PASS.
 - [ ] **Step 6: Commit**
 
 ```bash
-cd /Users/lcy/code/auto_trade
-git add backend/app/models.py backend/app/database.py backend/tests/test_database.py
-git commit -m "feat(p5+): add audit_logs table and runtime migration patch"
+cd /home/lcy/code/auto_trade/.worktrees/p5-plus-audit-notifications
+GIT_MASTER=1 git add backend/app/models.py backend/app/database.py backend/tests/test_database.py
+GIT_MASTER=1 git commit -m "feat(p5+): add audit_logs table and runtime migration patch"
 ```
 
 ### T1.2 — `AuditLogger` 工具类（TDD）
@@ -372,9 +372,9 @@ Expected: PASS（7 项）。
 - [ ] **Step 6: Commit**
 
 ```bash
-cd /Users/lcy/code/auto_trade
-git add backend/app/core/audit.py backend/app/config.py backend/tests/test_audit_logger.py
-git commit -m "feat(p5+): add AuditLogger with truncation and IP/actor helpers"
+cd /home/lcy/code/auto_trade/.worktrees/p5-plus-audit-notifications
+GIT_MASTER=1 git add backend/app/core/audit.py backend/app/config.py backend/tests/test_audit_logger.py
+GIT_MASTER=1 git commit -m "feat(p5+): add AuditLogger with truncation and IP/actor helpers"
 ```
 
 ### T1.3 — DI helpers & 应用启动注入
@@ -460,9 +460,9 @@ Expected: PASS（9 项）。
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/lcy/code/auto_trade
-git add backend/app/api/deps.py backend/app/main.py backend/tests/test_audit_logger.py
-git commit -m "feat(p5+): add audit DI helpers and lifespan init"
+cd /home/lcy/code/auto_trade/.worktrees/p5-plus-audit-notifications
+GIT_MASTER=1 git add backend/app/api/deps.py backend/app/main.py backend/tests/test_audit_logger.py
+GIT_MASTER=1 git commit -m "feat(p5+): add audit DI helpers and lifespan init"
 ```
 
 ### T1.4 — 接入 `POST /api/control/*` 7 个端点
@@ -575,9 +575,9 @@ Expected: 全 PASS；总数 `test_api.py` 比基线 +3 项以上。
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/lcy/code/auto_trade
-git add backend/app/api/trade.py backend/tests/test_api.py
-git commit -m "feat(p5+): record audit for control and order cancel endpoints"
+cd /home/lcy/code/auto_trade/.worktrees/p5-plus-audit-notifications
+GIT_MASTER=1 git add backend/app/api/trade.py backend/tests/test_api.py
+GIT_MASTER=1 git commit -m "feat(p5+): record audit for control and order cancel endpoints"
 ```
 
 ### T1.5 — `PUT /api/strategy` 与 `STRATEGY_UPDATE` diff
@@ -687,9 +687,9 @@ Expected: PASS（含原有 strategy_service 测试不应回退）。
 - [ ] **Step 6: Commit**
 
 ```bash
-cd /Users/lcy/code/auto_trade
-git add backend/app/services/strategy_service.py backend/app/api/strategy.py backend/tests/test_api.py
-git commit -m "feat(p5+): audit strategy updates with field-level diff"
+cd /home/lcy/code/auto_trade/.worktrees/p5-plus-audit-notifications
+GIT_MASTER=1 git add backend/app/services/strategy_service.py backend/app/api/strategy.py backend/tests/test_api.py
+GIT_MASTER=1 git commit -m "feat(p5+): audit strategy updates with field-level diff"
 ```
 
 ### T1.6 — `PUT /api/credentials` 脱敏审计
@@ -788,9 +788,9 @@ Expected: PASS（原有 test 不回退）。
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/lcy/code/auto_trade
-git add backend/app/api/credentials.py backend/tests/test_credentials_api.py
-git commit -m "feat(p5+): audit credential updates with masked secrets"
+cd /home/lcy/code/auto_trade/.worktrees/p5-plus-audit-notifications
+GIT_MASTER=1 git add backend/app/api/credentials.py backend/tests/test_credentials_api.py
+GIT_MASTER=1 git commit -m "feat(p5+): audit credential updates with masked secrets"
 ```
 
 ### T1.7 — `pytest`、`basedpyright` 全量绿
@@ -806,7 +806,7 @@ Expected: 比基线 435 增加 ≥10 项，全 PASS。
 - [ ] **Step 2: `basedpyright` 0 errors**
 
 ```bash
-cd /Users/lcy/code/auto_trade && python3 -m basedpyright
+cd /home/lcy/code/auto_trade/.worktrees/p5-plus-audit-notifications && python3 -m basedpyright
 ```
 
 Expected: 0 errors（如有原 P8' 遗留 3 处，本步暂不解决——留到 T6.4 一次清）。新增模块不应引入新 error。
@@ -814,7 +814,7 @@ Expected: 0 errors（如有原 P8' 遗留 3 处，本步暂不解决——留到
 - [ ] **Step 3: 若 T1 自身引入 typing 错误，inline 修复并 commit**
 
 ```bash
-git add -A && git commit -m "chore(p5+): typing fixes for audit module"
+GIT_MASTER=1 git add -A && GIT_MASTER=1 git commit -m "chore(p5+): typing fixes for audit module"
 ```
 
 ---
@@ -896,9 +896,9 @@ Expected: PASS。
 - [ ] **Step 7: Commit**
 
 ```bash
-cd /Users/lcy/code/auto_trade
-git add backend/app/models.py backend/app/database.py backend/app/schemas.py backend/tests/test_database.py
-git commit -m "feat(p5+): add trading_session_mode column with ANY default"
+cd /home/lcy/code/auto_trade/.worktrees/p5-plus-audit-notifications
+GIT_MASTER=1 git add backend/app/models.py backend/app/database.py backend/app/schemas.py backend/tests/test_database.py
+GIT_MASTER=1 git commit -m "feat(p5+): add trading_session_mode column with ANY default"
 ```
 
 ### T2.2 — 层 B：`TradeExecutionService.execute` 入口拦截
@@ -1047,9 +1047,9 @@ Expected: 原 ~150 项全 PASS（execute 调用站需更新 `market=..., trading
 - [ ] **Step 6: Commit**
 
 ```bash
-cd /Users/lcy/code/auto_trade
-git add backend/app/services/trade_execution_service.py backend/tests/test_trading_session_guard.py
-git commit -m "feat(p5+): layer B trading session guard in execute()"
+cd /home/lcy/code/auto_trade/.worktrees/p5-plus-audit-notifications
+GIT_MASTER=1 git add backend/app/services/trade_execution_service.py backend/tests/test_trading_session_guard.py
+GIT_MASTER=1 git commit -m "feat(p5+): layer B trading session guard in execute()"
 ```
 
 ### T2.3 — 层 A：`AppRunner._check_trading_session`
@@ -1180,9 +1180,9 @@ Expected: PASS；原 runner 测试不回退。
 - [ ] **Step 7: Commit**
 
 ```bash
-cd /Users/lcy/code/auto_trade
-git add backend/app/runner.py backend/app/services/trade_execution_service.py backend/tests/test_runner.py
-git commit -m "feat(p5+): layer A trading session guard before cancel_pending_order"
+cd /home/lcy/code/auto_trade/.worktrees/p5-plus-audit-notifications
+GIT_MASTER=1 git add backend/app/runner.py backend/app/services/trade_execution_service.py backend/tests/test_runner.py
+GIT_MASTER=1 git commit -m "feat(p5+): layer A trading session guard before cancel_pending_order"
 ```
 
 ### T2.4 — 行情触发路径也带 trading_session_mode
@@ -1222,9 +1222,9 @@ cd backend && python3 -m pytest tests/test_runner.py::test_quote_trigger_respect
 - [ ] **Step 4: Commit**
 
 ```bash
-cd /Users/lcy/code/auto_trade
-git add backend/app/runner.py backend/tests/test_runner.py
-git commit -m "feat(p5+): wire trading_session_mode into quote-triggered execute"
+cd /home/lcy/code/auto_trade/.worktrees/p5-plus-audit-notifications
+GIT_MASTER=1 git add backend/app/runner.py backend/tests/test_runner.py
+GIT_MASTER=1 git commit -m "feat(p5+): wire trading_session_mode into quote-triggered execute"
 ```
 
 ---
@@ -1244,7 +1244,7 @@ git commit -m "feat(p5+): wire trading_session_mode into quote-triggered execute
 - [ ] **Step 1: grep 异常类型可用性**
 
 ```bash
-cd /Users/lcy/code/auto_trade
+cd /home/lcy/code/auto_trade/.worktrees/p5-plus-audit-notifications
 python3 -c "import longport; print([n for n in dir(longport) if 'xception' in n or 'rror' in n])"
 python3 -c "from longport import openapi; print([n for n in dir(openapi) if 'xception' in n or 'rror' in n])" 2>/dev/null || true
 ```
@@ -1479,9 +1479,9 @@ cd backend && python3 -m pytest tests/test_broker.py -v
 - [ ] **Step 7: Commit**
 
 ```bash
-cd /Users/lcy/code/auto_trade
-git add backend/app/core/broker.py backend/app/config.py backend/tests/test_broker_retry.py
-git commit -m "feat(p5+): broker call retry/backoff with tiered limits and audit"
+cd /home/lcy/code/auto_trade/.worktrees/p5-plus-audit-notifications
+GIT_MASTER=1 git add backend/app/core/broker.py backend/app/config.py backend/tests/test_broker_retry.py
+GIT_MASTER=1 git commit -m "feat(p5+): broker call retry/backoff with tiered limits and audit"
 ```
 
 ### T3.3 — `AppRunner` 注入 audit 给 broker
@@ -1512,8 +1512,8 @@ cd backend && python3 -m pytest tests/test_runner.py::test_broker_gets_audit_log
 - [ ] **Step 4: Commit**
 
 ```bash
-git add backend/app/runner.py backend/tests/test_runner.py
-git commit -m "feat(p5+): pass AuditLogger to BrokerGateway for retry audit"
+GIT_MASTER=1 git add backend/app/runner.py backend/tests/test_runner.py
+GIT_MASTER=1 git commit -m "feat(p5+): pass AuditLogger to BrokerGateway for retry audit"
 ```
 
 ---
@@ -1602,8 +1602,8 @@ cd backend && python3 -m pytest tests/test_database.py::test_ensure_credential_c
 - [ ] **Step 5: Commit**
 
 ```bash
-git add backend/app/models.py backend/app/database.py backend/tests/test_database.py
-git commit -m "feat(p5+): add notification_channels JSON column with default backfill"
+GIT_MASTER=1 git add backend/app/models.py backend/app/database.py backend/tests/test_database.py
+GIT_MASTER=1 git commit -m "feat(p5+): add notification_channels JSON column with default backfill"
 ```
 
 ### T4.2 — Notifier 抽象 + `ServerChanNotifier` 迁移
@@ -1782,8 +1782,8 @@ Expected: 原测试 PASS（导入路径未变）。
 - [ ] **Step 6: Commit**
 
 ```bash
-git add backend/app/core/notify.py backend/app/core/notifiers/
-git commit -m "feat(p5+): split notifier into NotifierInterface and ServerChanNotifier modules"
+GIT_MASTER=1 git add backend/app/core/notify.py backend/app/core/notifiers/
+GIT_MASTER=1 git commit -m "feat(p5+): split notifier into NotifierInterface and ServerChanNotifier modules"
 ```
 
 ### T4.3 — `WebhookNotifier`（TDD）
@@ -1877,8 +1877,8 @@ cd backend && python3 -m pytest tests/test_webhook_notifier.py -v
 - [ ] **Step 4: Commit**
 
 ```bash
-git add backend/app/core/notifiers/webhook.py backend/tests/test_webhook_notifier.py
-git commit -m "feat(p5+): add WebhookNotifier with JSON payload"
+GIT_MASTER=1 git add backend/app/core/notifiers/webhook.py backend/tests/test_webhook_notifier.py
+GIT_MASTER=1 git commit -m "feat(p5+): add WebhookNotifier with JSON payload"
 ```
 
 ### T4.4 — `MultiChannelNotifier` fan-out 测试
@@ -1991,8 +1991,8 @@ Expected: 9 项 PASS。
 - [ ] **Step 3: Commit**
 
 ```bash
-git add backend/tests/test_notifier_multi_channel.py
-git commit -m "test(p5+): cover MultiChannelNotifier severity fan-out and fallback"
+GIT_MASTER=1 git add backend/tests/test_notifier_multi_channel.py
+GIT_MASTER=1 git commit -m "test(p5+): cover MultiChannelNotifier severity fan-out and fallback"
 ```
 
 ### T4.5 — `AppRunner` 用 `MultiChannelNotifier`，并补 `KILL_SWITCH` notify
@@ -2071,8 +2071,8 @@ Expected: PASS。
 - [ ] **Step 5: Commit**
 
 ```bash
-git add backend/app/runner.py backend/app/api/trade.py backend/tests/test_runner.py
-git commit -m "feat(p5+): use MultiChannelNotifier and emit KILL_SWITCH notify"
+GIT_MASTER=1 git add backend/app/runner.py backend/app/api/trade.py backend/tests/test_runner.py
+GIT_MASTER=1 git commit -m "feat(p5+): use MultiChannelNotifier and emit KILL_SWITCH notify"
 ```
 
 ### T4.6 — `Credentials` API 接受 `notification_channels`
@@ -2120,8 +2120,8 @@ cd backend && python3 -m pytest tests/test_credentials_api.py -v
 - [ ] **Step 5: Commit**
 
 ```bash
-git add backend/app/schemas.py backend/app/services/credentials_service.py backend/tests/test_credentials_api.py
-git commit -m "feat(p5+): persist notification_channels via credentials API"
+GIT_MASTER=1 git add backend/app/schemas.py backend/app/services/credentials_service.py backend/tests/test_credentials_api.py
+GIT_MASTER=1 git commit -m "feat(p5+): persist notification_channels via credentials API"
 ```
 
 ---
@@ -2261,8 +2261,8 @@ cd backend && python3 -m pytest tests/test_api.py::test_events_endpoint_supports
 - [ ] **Step 6: Commit**
 
 ```bash
-git add backend/app/api/trade.py backend/app/schemas.py backend/tests/test_api.py
-git commit -m "feat(p5+): cross-table union for /api/events with source filter"
+GIT_MASTER=1 git add backend/app/api/trade.py backend/app/schemas.py backend/tests/test_api.py
+GIT_MASTER=1 git commit -m "feat(p5+): cross-table union for /api/events with source filter"
 ```
 
 ### T5.2 — 前端：types + API client
@@ -2332,7 +2332,7 @@ export async function listEvents(params: ListEventsParams = {}) {
 - [ ] **Step 3: `npm run type-check`**
 
 ```bash
-cd /Users/lcy/code/auto_trade/frontend && npm run type-check
+cd /home/lcy/code/auto_trade/.worktrees/p5-plus-audit-notifications/frontend && npm run type-check
 ```
 
 Expected: 0 errors。
@@ -2340,8 +2340,8 @@ Expected: 0 errors。
 - [ ] **Step 4: Commit**
 
 ```bash
-git add frontend/src/types/ frontend/src/api/
-git commit -m "feat(p5+): frontend types and API client for audit/sessions/channels"
+GIT_MASTER=1 git add frontend/src/types/ frontend/src/api/
+GIT_MASTER=1 git commit -m "feat(p5+): frontend types and API client for audit/sessions/channels"
 ```
 
 ### T5.3 — Strategy.vue 加交易时段字段
@@ -2400,8 +2400,8 @@ cd frontend && npx cypress run --spec cypress/e2e/strategy_session_guard.cy.ts
 - [ ] **Step 4: Commit**
 
 ```bash
-git add frontend/src/views/Strategy.vue frontend/cypress/e2e/strategy_session_guard.cy.ts frontend/cypress/fixtures/strategy_any.json
-git commit -m "feat(p5+): Strategy form trading_session_mode field"
+GIT_MASTER=1 git add frontend/src/views/Strategy.vue frontend/cypress/e2e/strategy_session_guard.cy.ts frontend/cypress/fixtures/strategy_any.json
+GIT_MASTER=1 git commit -m "feat(p5+): Strategy form trading_session_mode field"
 ```
 
 ### T5.4 — Credentials.vue 通知渠道列表
@@ -2478,9 +2478,9 @@ describe('credentials notification channels', () => {
 
 ```bash
 cd frontend && npx cypress run --spec cypress/e2e/credentials_notifications.cy.ts
-cd /Users/lcy/code/auto_trade
-git add frontend/src/views/Credentials.vue frontend/cypress/e2e/credentials_notifications.cy.ts frontend/cypress/fixtures/credentials_default.json
-git commit -m "feat(p5+): credentials notification channels editor"
+cd /home/lcy/code/auto_trade/.worktrees/p5-plus-audit-notifications
+GIT_MASTER=1 git add frontend/src/views/Credentials.vue frontend/cypress/e2e/credentials_notifications.cy.ts frontend/cypress/fixtures/credentials_default.json
+GIT_MASTER=1 git commit -m "feat(p5+): credentials notification channels editor"
 ```
 
 ### T5.5 — Decision Timeline source 切换 + 审计卡片
@@ -2565,8 +2565,8 @@ Fixture `events_mixed.json` 至少 2 条 trade + 2 条 audit（含 KILL_SWITCH C
 
 ```bash
 cd frontend && npx cypress run --spec cypress/e2e/decision_timeline_audit.cy.ts
-git add frontend/src/views/ frontend/cypress/e2e/decision_timeline_audit.cy.ts frontend/cypress/fixtures/events_mixed.json
-git commit -m "feat(p5+): decision timeline source filter and audit cards"
+GIT_MASTER=1 git add frontend/src/views/ frontend/cypress/e2e/decision_timeline_audit.cy.ts frontend/cypress/fixtures/events_mixed.json
+GIT_MASTER=1 git commit -m "feat(p5+): decision timeline source filter and audit cards"
 ```
 
 ### T5.6 — Dashboard：SESSION 标签 + 时段指示器
@@ -2611,8 +2611,8 @@ Expected: 通过。
 - [ ] **Step 4: Commit**
 
 ```bash
-git add frontend/src/views/Dashboard.vue backend/app/api/ backend/tests/test_api.py
-git commit -m "feat(p5+): dashboard SESSION label and trading hours indicator"
+GIT_MASTER=1 git add frontend/src/views/Dashboard.vue backend/app/api/ backend/tests/test_api.py
+GIT_MASTER=1 git commit -m "feat(p5+): dashboard SESSION label and trading hours indicator"
 ```
 
 ---
@@ -2634,7 +2634,7 @@ Expected: 比基线 435 增加 ~30 项（target 465+），全 PASS。
 - [ ] **Step 1: 全量类型检查**
 
 ```bash
-cd /Users/lcy/code/auto_trade && python3 -m basedpyright
+cd /home/lcy/code/auto_trade/.worktrees/p5-plus-audit-notifications && python3 -m basedpyright
 ```
 
 Expected: 0 errors / 0 warnings。
@@ -2646,8 +2646,8 @@ Expected: 0 errors / 0 warnings。
 - [ ] **Step 3: Commit**
 
 ```bash
-git add -A
-git commit -m "chore(p5+): clear P8' typing errors"
+GIT_MASTER=1 git add -A
+GIT_MASTER=1 git commit -m "chore(p5+): clear P8' typing errors"
 ```
 
 ### T6.3 — 前端 type-check + build
@@ -2700,15 +2700,15 @@ Expected: 全 PASS。
 - [ ] **Step 4: Commit**
 
 ```bash
-git add README.md CLAUDE.md docs/Roadmap.md
-git commit -m "docs(p5+): sync README/CLAUDE/Roadmap for audit/notification/session iteration"
+GIT_MASTER=1 git add README.md CLAUDE.md docs/Roadmap.md
+GIT_MASTER=1 git commit -m "docs(p5+): sync README/CLAUDE/Roadmap for audit/notification/session iteration"
 ```
 
 ### T6.7 — 最终一次全量校验
 
 ```bash
 cd backend && python3 -m pytest tests/ -q
-cd /Users/lcy/code/auto_trade && python3 -m basedpyright
+cd /home/lcy/code/auto_trade/.worktrees/p5-plus-audit-notifications && python3 -m basedpyright
 cd frontend && npm run type-check && npm run build && npx cypress run
 ```
 
