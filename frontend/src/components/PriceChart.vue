@@ -249,4 +249,28 @@ function formatNumber(value: number | null | undefined): string {
 .legend-dot.buy {
   background: #14884f;
 }
+
+@media (max-width: 520px) {
+  .chart-panel {
+    min-height: 200px;
+    padding: 10px;
+  }
+
+  .chart-heading h4 {
+    font-size: 13px;
+  }
+
+  .chart-heading strong {
+    font-size: 16px;
+  }
+
+  .chart-svg {
+    height: 140px;
+  }
+
+  .chart-legend {
+    font-size: 11px;
+    gap: 6px;
+  }
+}
 </style>

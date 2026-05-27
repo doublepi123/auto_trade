@@ -159,13 +159,20 @@
     </section>
 
     <section class="chart-grid" data-testid="dashboard-charts">
-      <PriceChart
-        :points="chartPoints"
-        :markers="tradeMarkers"
-        :buy-low="strategy.buy_low"
-        :sell-high="strategy.sell_high"
-      />
-      <PnLChart :points="chartPoints" />
+      <div class="chart-controls">
+        <el-button v-if="isMobile" size="small" text @click="chartExpanded = !chartExpanded"
+          >{{ chartExpanded ? '收起图表' : '展开图表' }}</el-button
+        >
+      </div>
+      <div v-show="chartExpanded || !isMobile" class="chart-panels">
+        <PriceChart
+          :points="chartPoints"
+          :markers="tradeMarkers"
+          :buy-low="strategy.buy_low"
+          :sell-high="strategy.sell_high"
+        />
+        <PnLChart :points="chartPoints" />
+      </div>
     </section>
 
     <section class="detail-grid">
@@ -275,6 +282,19 @@ const chartPoints = ref<StatusHistoryPoint[]>([])
 const tradeMarkers = ref<TradeSignalMarker[]>([])
 let llmStatusTimer: ReturnType<typeof setInterval> | null = null
 const MAX_CHART_POINTS = 200
+const MOBILE_BREAKPOINT = 768
+const isMobile = ref(window.innerWidth <= MOBILE_BREAKPOINT)
+const chartExpanded = ref(!isMobile.value)
+
+function handleResize() {
+  isMobile.value = window.innerWidth <= MOBILE_BREAKPOINT
+}
+
+watch(isMobile, (mobile) => {
+  if (mobile) {
+    chartExpanded.value = false
+  }
+})
 
 const stateTagType = computed(() => {
   switch (status.value.engine_state) {
@@ -432,6 +452,7 @@ onMounted(() => {
   }, 3000)
   load().catch(() => void 0)
   refreshAccount().catch(() => void 0)
+  window.addEventListener('resize', handleResize)
 })
 
 watch(
@@ -450,6 +471,7 @@ onUnmounted(() => {
     clearInterval(llmStatusTimer)
     llmStatusTimer = null
   }
+  window.removeEventListener('resize', handleResize)
 })
 
 async function handleStart() {
@@ -880,9 +902,20 @@ function eventTagType(
 }
 
 .chart-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.chart-panels {
   display: grid;
   grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr);
   gap: 12px;
+}
+
+.chart-controls {
+  display: flex;
+  justify-content: flex-end;
 }
 
 .detail-grid {
@@ -1011,7 +1044,7 @@ function eventTagType(
   }
 
   .cockpit-grid,
-  .chart-grid,
+  .chart-panels,
   .detail-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -1030,13 +1063,13 @@ function eventTagType(
 
   .status-strip,
   .cockpit-grid,
-  .chart-grid,
+  .chart-panels,
   .strategy-list {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .status-strip {
-    grid-template-columns: repeat(5, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 6px;
   }
 
@@ -1069,22 +1102,45 @@ function eventTagType(
   .position-main {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
+
+  .action-grid :deep(.el-button) {
+    min-height: 44px;
+    font-size: 14px;
+  }
+
+  .chart-panels {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 520px) {
   .status-strip,
   .cockpit-grid,
-  .chart-grid,
+  .chart-panels,
   .position-main,
   .strategy-list {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .cockpit-grid,
-  .chart-grid,
+  .chart-panels,
   .position-main,
   .strategy-list {
     grid-template-columns: 1fr;
+  }
+
+  .action-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .action-grid :deep(.el-button) {
+    min-height: 48px;
+    font-size: 15px;
+  }
+
+  .kill-button {
+    min-height: 52px;
+    font-size: 16px;
   }
 }
 </style>

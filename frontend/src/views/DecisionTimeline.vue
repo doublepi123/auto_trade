@@ -352,4 +352,27 @@ function formatDateTime(value: string): string {
     justify-content: flex-start;
   }
 }
+
+@media (max-width: 520px) {
+  .timeline-page {
+    padding: 8px;
+    gap: 12px;
+  }
+
+  .timeline-header h3 {
+    font-size: 16px;
+  }
+
+  .timeline-header p {
+    font-size: 12px;
+  }
+
+  .timeline-actions {
+    gap: 6px;
+  }
+
+  .timeline-actions :deep(.el-select) {
+    width: 140px !important;
+  }
+}
 </style>

@@ -430,3 +430,30 @@ onBeforeRouteLeave(() => {
     .catch(() => false)
 })
 </script>
+
+<style scoped>
+@media (max-width: 520px) {
+  :deep(.el-form-item__label) {
+    float: none;
+    display: block;
+    text-align: left;
+    padding: 0 0 4px;
+    line-height: 1.4;
+  }
+
+  :deep(.el-form-item__content) {
+    margin-left: 0 !important;
+  }
+
+  :deep(.el-form-item) {
+    margin-bottom: 14px;
+  }
+
+  :deep(.el-input__wrapper),
+  :deep(.el-input-number),
+  :deep(.el-select),
+  :deep(.el-radio-group) {
+    width: 100% !important;
+  }
+}
+</style>

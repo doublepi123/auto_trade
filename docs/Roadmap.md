@@ -284,22 +284,30 @@
 - [x] `npm run build` 通过
 - [x] 边界检查：`backtest.py` 中无 `fee_rate_us` / `fee_rate_hk` 引用（回测费率配置独立）
 
-### P5：操作审计与多渠道报警
+### P5+：操作审计 + 多渠道报警 + 交易可靠性补强 ✅（2026-05-28 交付）
 
-> **目标：** 把运维行为、风险事件、关键交易动作完整审计化，并支持 Server 酱以外的通知通道。
+> **目标：** 把运维行为、风险事件、关键交易动作完整审计化；支持 Server 酱 + Webhook 多渠道通知；补齐交易时段守卫与 Broker 调用重试。
+>
+> **规格文档：** `docs/superpowers/specs/2026-05-26-audit-notification-trading-safety-design.md`
+>
+> **基线（交付后）：** `pytest 487 passed`，`basedpyright` 0 errors / 0 warnings，`npm run type-check` + `npm run build` 通过。
 
-#### 范围
+#### 交付摘要
 
-- 新增 `AuditLog`：记录策略修改、凭证修改、启动/停止/暂停/恢复/Kill Switch、手动撤单。
-- 审计字段包含：动作、操作者哈希、来源 IP、请求摘要、结果、时间。
-- 通知抽象为 Notifier 接口，支持 Server 酱和通用 Webhook。
-- 风控事件分级：`INFO`、`WARNING`、`CRITICAL`；Kill Switch、止损失败、订单拒绝进入高优先级。
-- 前端 Credentials 增加通知渠道配置；Decision Timeline 增加审计事件筛选。
+- **T1 — AuditLog 基础设施**：`audit_logs` 表 + `_ensure_audit_log_table` + `AuditLogger` 工具类（摘要截断/脱敏/异常吞掉不抛）+ DI helper `extract_actor` + `get_audit_logger`。9 个写端点（control ×5 / strategy / credentials / order cancel / kill-switch）全部接入审计写入。
+- **T2 — 交易时段守卫（双层）**：`StrategyConfig.trading_session_mode`（默认 `ANY`，零行为变更上线）+ `AppRunner._check_trading_session`（撤单前 gate）+ `TradeExecutionService.execute` 二次 gate；`CANCEL_PENDING` 显式放行；`skip_category="SESSION"`。
+- **T3 — Broker retry/backoff**：`BrokerGateway._call_with_retry` 分档（订单 `broker_retry_max=3` / 行情 `broker_quote_retry_max=1`）+ 指数退避；优先结构化异常，否则降级字符串匹配（`限流`/`频率`/`timeout`）；每次重试写 `BROKER_RETRY` 审计。
+- **T4 — Notifier 抽象 + Webhook + 分级**：`NotifierInterface` Protocol + `MultiChannelNotifier` fan-out（按 `severity_floor` 过滤）+ `WebhookNotifier`（JSON payload）+ `ServerChanNotifier` 迁入。`KILL_SWITCH` endpoint 补齐 `notify_risk_event("KILL_SWITCH", ..., severity="CRITICAL")`。`CredentialConfig.notification_channels` 持久化。
+- **T5 — 前端集成**：Strategy 表单加 `trading_session_mode` 单选（ANY/RTH_ONLY）+ 不含节假日提示；Credentials 增加通知渠道列表（Server酱/Webhook+severity_floor）；Decision Timeline 支持 `source=trade|audit|all` 切换 + 多选 event_type 过滤 + 审计卡片（severity/actor_hash/source_ip）；Dashboard skipCategoryLabel 增加 `SESSION` 标签。
+- **T6 — 测试与 lint 清零**：pytest 新增 ~52 项（总计 487）；Cypress 新增 3 个 spec（`credentials_notifications`、`decision_timeline_audit`、`strategy_session_guard`），共 14 个 E2E spec；`basedpyright` 0 errors。
 
 #### 验证
 
-- 后端测试覆盖审计写入、Webhook payload、通知失败降级。
-- Cypress 覆盖通知渠道配置和审计筛选。
+- [x] `pytest 487 passed`
+- [x] `basedpyright` 0 errors / 0 warnings
+- [x] `npm run type-check` 通过
+- [x] `npm run build` 通过
+- [x] Cypress 新增 3 个 spec 均通过
 
 ### P6：移动端与应急操作体验
 
@@ -351,35 +359,24 @@
 
 ### 建议执行顺序
 
-| 顺序 | 迭代 | 原因 |
-|------|------|------|
-| 已完成 | P3 回测与参数验证 MVP | 已为实盘调参提供历史验证基础。 |
-| 已完成 | **P4 交易执行安全与成本控制增强** | 直接回应手续费、重复 LLM 动作和无价值撤单重挂风险。✅ 2026-05-25 |
-| **当前** | **P5+ 操作审计 + 多渠道报警 + 交易可靠性补强** | 合并 Roadmap 原 P5 与审计遗留 #9（交易时段守卫）、#10（broker retry/backoff）。详见下文 "下一步建议"。 |
-| 2 | P6 移动端与应急操作体验 | 提升紧急止损/暂停的可达性。 |
-| 3 | P7 策略复盘与 LLM 优化工作台 | 基于已沉淀数据优化 prompt 和决策规则。 |
-| 4 | P8 多标的观察列表 | 扩展能力，但先限制为观察，避免放大自动交易风险。 |
+| 顺序 | 迭代 | 状态 | 原因 |
+|------|------|------|------|
+| 已完成 | P3 回测与参数验证 MVP | ✅ 已交付 | 已为实盘调参提供历史验证基础。 |
+| 已完成 | **P4 交易执行安全与成本控制增强** | ✅ 2026-05-25 | 直接回应手续费、重复 LLM 动作和无价值撤单重挂风险。 |
+| 已完成 | **P5+ 操作审计 + 多渠道报警 + 交易可靠性补强** | ✅ 2026-05-28 | 合并 Roadmap 原 P5 与审计遗留 #9/#10；487 项 pytest + 14 Cypress spec 全绿。 |
+| **当前** | **P6 移动端与应急操作体验** | 🔄 下一阶段 | 提升紧急止损/暂停的可达性。详见下文 "P6 迭代计划"。 |
+| 2 | P7 策略复盘与 LLM 优化工作台 | ⏳ 待排期 | 基于已沉淀数据优化 prompt 和决策规则。 |
+| 3 | P8 多标的观察列表 | ⏳ 待排期 | 扩展能力，但先限制为观察，避免放大自动交易风险。 |
 
 ### 下一步建议
 
-**P4 已交付**（2026-05-25）。当前下一迭代：**P5+ 操作审计 + 多渠道报警 + 交易可靠性补强**（Roadmap 原 P5 与审计遗留 #9、#10 合并）。
+**P5+ 已完成交付**。当前下一迭代：**P6 移动端与应急操作体验**。
 
-> **规格文档：** `docs/superpowers/specs/2026-05-26-audit-notification-trading-safety-design.md`
->
-> **基线（2026-05-26）：** `pytest 435 passed`，`basedpyright` 0 errors / 0 warnings。
+#### P6 迭代计划
 
-#### P5+ Task 拆分
-
-1. **T1 — AuditLog 基础设施**：`audit_logs` 表 + `_ensure_audit_log_table` + `AuditLogger` 工具类 + 9 个写端点（control / strategy / credentials / orders cancel）接入。
-2. **T4 — Notifier 抽象 + Webhook + 分级**（可与 T1 并行）：`NotifierInterface`、`MultiChannelNotifier`、`WebhookNotifier`；`notify_risk_event` 带 severity；补齐 `KILL_SWITCH` call site。
-3. **T2 — 交易时段守卫**：`StrategyConfig.trading_session_mode`（默认 `ANY`，零行为变更上线）+ `AppRunner._check_trading_session`（撤单前 gate，对齐 P4 模式）+ `TradeExecutionService.execute` 二次 gate + `skip_category="SESSION"`。
-4. **T3 — Broker retry/backoff**：`BrokerGateway._call_with_retry` 分档（订单全量退避 / 行情轻量）；longport 异常类型优先，否则降级字符串匹配；`BROKER_RETRY` 审计。
-5. **T5 — 前端集成**：Credentials 通知渠道列表、Strategy 交易时段字段、Decision Timeline `source` + 多选筛选 + 审计卡片、Dashboard SESSION 指示器（标注"不含节假日"）。
-6. **T6 — 测试与 lint 清零**：pytest（~30 新增）+ Cypress（3 新增 spec）+ `basedpyright` 清掉 P8' 遗留 3 处 error。
-
-#### 合并 P5 与 #9/#10 的理由
-
-交易时段守卫与 broker 重试本身就是审计要记录的事件源；分两轮上线会重复改一遍 Notifier 链路。
+> **目标：** 手机上能可靠查看状态和执行紧急操作，避免桌面不可用时无法止损/暂停。  
+> **时间：** 预估 1 周 (2026-05-28 → 2026-06-04)  
+> **基线：** `pytest 487 passed`, `basedpyright` 0 errors, `npm run build` 通过。
 
 ---
 

@@ -184,4 +184,15 @@ function statusType(status: string): string {
     flex-direction: column;
   }
 }
+
+@media (max-width: 520px) {
+  .orders-page {
+    padding: 8px;
+    gap: 12px;
+  }
+
+  .orders-header h3 {
+    font-size: 16px;
+  }
+}
 </style>
