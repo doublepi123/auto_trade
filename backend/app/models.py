@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from typing import Optional
 
-from sqlalchemy import Boolean, Date, DateTime, Float, Integer, String, Text
+from sqlalchemy import Boolean, Date, DateTime, Float, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 _TZDateTime = lambda: DateTime(timezone=True)
@@ -188,3 +188,19 @@ class AuditLog(Base):
     request_summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
     result: Mapped[str] = mapped_column(String(16), nullable=False, default="SUCCESS")
     created_at: Mapped[datetime] = mapped_column(_TZDateTime(), default=_utcnow, index=True)
+
+
+class WatchlistItem(Base):
+    """Symbols under observation; only the StrategyConfig.symbol is the active trading target."""
+
+    __tablename__ = "watchlist_items"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(50), nullable=False)
+    market: Mapped[str] = mapped_column(String(10), default="US", nullable=False)
+    alias: Mapped[str] = mapped_column(String(100), default="", nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(_TZDateTime(), default=_utcnow)
+
+    __table_args__ = (UniqueConstraint("symbol", name="uq_watchlist_symbol"),)
+

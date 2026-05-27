@@ -25,6 +25,7 @@ def init_db() -> None:
     _ensure_tracked_entries_table(engine)
     _ensure_audit_log_table(engine)
     _ensure_credential_config_notification_channels_column(engine)
+    _ensure_watchlist_items_table(engine)
 
     db = SessionLocal()
     try:
@@ -188,6 +189,25 @@ def _ensure_tracked_entries_table(db_engine: Engine) -> None:
                 quantity FLOAT NOT NULL DEFAULT 0,
                 cost FLOAT NOT NULL DEFAULT 0,
                 updated_at DATETIME
+            )
+            """
+        )
+
+
+def _ensure_watchlist_items_table(db_engine: Engine) -> None:
+    inspector = inspect(db_engine)
+    if "watchlist_items" in inspector.get_table_names():
+        return
+    with db_engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS watchlist_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol VARCHAR(50) NOT NULL UNIQUE,
+                market VARCHAR(10) DEFAULT 'US' NOT NULL,
+                alias VARCHAR(100) DEFAULT '' NOT NULL,
+                is_active BOOLEAN DEFAULT 0 NOT NULL,
+                created_at DATETIME
             )
             """
         )

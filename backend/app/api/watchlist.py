@@ -1,0 +1,101 @@
+from __future__ import annotations
+
+import logging
+from typing import List
+
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+
+from app.core.broker import BrokerGateway
+from app.database import get_db
+from app.schemas import WatchlistItemResponse, WatchlistItemSchema, MessageResponse, WatchlistQuote
+from app.services.watchlist_service import WatchlistService
+
+router = APIRouter(prefix="/api/watchlist", tags=["watchlist"])
+logger = logging.getLogger("auto_trade.watchlist")
+
+
+@router.get("", response_model=List[WatchlistItemResponse])
+def get_watchlist(db: Session = Depends(get_db)) -> List[WatchlistItemResponse]:
+    svc = WatchlistService(db)
+    items = svc.list_items()
+    return [WatchlistItemResponse.model_validate(item) for item in items]
+
+
+@router.post("", response_model=WatchlistItemResponse)
+def add_watchlist_item(
+    payload: WatchlistItemSchema,
+    db: Session = Depends(get_db),
+) -> WatchlistItemResponse:
+    svc = WatchlistService(db)
+    try:
+        item = svc.add_item(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return WatchlistItemResponse.model_validate(item)
+
+
+@router.delete("/{item_id}", response_model=MessageResponse)
+def remove_watchlist_item(
+    item_id: int,
+    db: Session = Depends(get_db),
+) -> MessageResponse:
+    svc = WatchlistService(db)
+    removed = svc.remove_item(item_id)
+    if not removed:
+        raise HTTPException(status_code=404, detail="watchlist item not found")
+    return MessageResponse(message="removed")
+
+
+@router.post("/{item_id}/set-trading", response_model=WatchlistItemResponse)
+def set_trading_symbol(
+    item_id: int,
+    db: Session = Depends(get_db),
+) -> WatchlistItemResponse:
+    from app.models import StrategyConfig
+    from app.api.strategy import _reload_strategy_after_save
+
+    svc = WatchlistService(db)
+    try:
+        item = svc.set_trading_symbol(item_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    # Sync active symbol to StrategyConfig (single trading target bridge)
+    strategy = db.query(StrategyConfig).order_by(StrategyConfig.id.desc()).first()
+    if strategy is not None:
+        strategy.symbol = item.symbol
+        strategy.market = item.market
+        db.add(strategy)
+        db.commit()
+        _reload_strategy_after_save()
+
+    return WatchlistItemResponse.model_validate(item)
+
+
+@router.get("/quotes", response_model=List[WatchlistQuote])
+def get_watchlist_quotes(
+    db: Session = Depends(get_db),
+) -> List[WatchlistQuote]:
+    svc = WatchlistService(db)
+    items = svc.list_items()
+    if not items:
+        return []
+
+    symbols = [item.symbol for item in items]
+    try:
+        broker = BrokerGateway()
+        quotes = broker.get_quotes(symbols)
+        return [
+            WatchlistQuote(
+                symbol=q.symbol,
+                last_price=q.last_price,
+                bid=q.bid,
+                ask=q.ask,
+                timestamp=q.timestamp,
+            )
+            for q in quotes
+        ]
+    except Exception:
+        logger.exception("failed to fetch watchlist quotes")
+        raise HTTPException(status_code=503, detail="broker quote unavailable") from None

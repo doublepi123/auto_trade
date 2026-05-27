@@ -6,6 +6,7 @@ import DecisionTimeline from '../views/DecisionTimeline.vue'
 import Review from '../views/Review.vue'
 import Strategy from '../views/Strategy.vue'
 import TradeHistory from '../views/TradeHistory.vue'
+import Watchlist from '../views/Watchlist.vue'
 
 const routes = [
   { path: '/', component: Dashboard },
@@ -15,6 +16,7 @@ const routes = [
   { path: '/history', component: TradeHistory },
   { path: '/events', component: DecisionTimeline },
   { path: '/review', component: Review },
+  { path: '/watchlist', component: Watchlist },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ]
 

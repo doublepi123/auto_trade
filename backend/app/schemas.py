@@ -529,3 +529,44 @@ class ReviewExportQuery(BaseModel):
     from_date: str
     to_date: str
     format: Literal["json", "csv"] = "json"
+
+
+class WatchlistItemSchema(BaseModel):
+    symbol: str = Field(max_length=50)
+    market: str = Field(default="US")
+    alias: str = Field(default="", max_length=100)
+
+    @field_validator("symbol")
+    @classmethod
+    def validate_symbol(cls, v: str) -> str:
+        return _normalize_symbol(v)
+
+    @field_validator("market")
+    @classmethod
+    def validate_market(cls, v: str) -> str:
+        if v not in ("US", "HK"):
+            raise ValueError("market must be US or HK")
+        return v
+
+
+class WatchlistItemResponse(BaseModel):
+    id: int
+    symbol: str
+    market: str
+    alias: str
+    is_active: bool
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class WatchlistQuote(BaseModel):
+    symbol: str
+    last_price: float
+    bid: float
+    ask: float
+    timestamp: str
+
+
+class WatchlistSetTradingRequest(BaseModel):
+    id: int

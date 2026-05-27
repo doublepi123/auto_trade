@@ -5,6 +5,7 @@
       <h2>Auto Trade</h2>
       <el-menu class="app-menu" mode="horizontal" :default-active="route.path" router>
         <el-menu-item index="/">仪表盘</el-menu-item>
+        <el-menu-item index="/watchlist">观察列表</el-menu-item>
         <el-menu-item index="/review">复盘</el-menu-item>
         <el-menu-item index="/backtest">回测</el-menu-item>
         <el-menu-item index="/strategy">策略配置</el-menu-item>

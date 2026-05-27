@@ -378,3 +378,20 @@ export interface ReviewResponse {
   all_error_tags: string[]
 }
 
+export interface WatchlistItem {
+  id: number
+  symbol: string
+  market: 'US' | 'HK'
+  alias: string
+  is_active: boolean
+  created_at: string
+}
+
+export interface WatchlistQuote {
+  symbol: string
+  last_price: number
+  bid: number
+  ask: number
+  timestamp: string
+}
+

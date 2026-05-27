@@ -366,7 +366,7 @@
 | 已完成 | **P5+ 操作审计 + 多渠道报警 + 交易可靠性补强** | ✅ 2026-05-28 | 合并 Roadmap 原 P5 与审计遗留 #9/#10；487 项 pytest + 14 Cypress spec 全绿。 |
 | 已完成 | **P6 移动端与应急操作体验** | ✅ 2026-05-28 | 底部 Tab 导航 + Dashboard 图表折叠 + 表单单列布局；15 个文件改动。 |
 | 已完成 | **P7 策略复盘与 LLM 优化工作台** | ✅ 2026-05-28 | 新增 ReviewService + /api/review/export + Review.vue；pytest 493 passed。 |
-| **当前** | **P8 多标的观察列表** | 🔄 下一阶段 | 扩展能力，但先限制为观察，避免放大自动交易风险。 |
+| 已完成 | **P8 多标的观察列表** | ✅ 2026-05-28 | WatchlistItem 模型 + CRUD API + 行情聚合 + Watchlist.vue；pytest 11 passed。 |
 
 ### 下一步建议
 
