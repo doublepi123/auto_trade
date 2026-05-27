@@ -1,0 +1,53 @@
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
+from sqlalchemy.orm import Session
+
+from app.database import get_db
+from app.services.review_service import ReviewService
+
+router = APIRouter(prefix="/api/review", tags=["review"])
+
+
+@router.get("")
+def get_review(
+    symbol: str = Query(..., description="Stock symbol, e.g. AAPL.US"),
+    from_date: str = Query(..., description="Start date (YYYY-MM-DD)"),
+    to_date: str = Query(..., description="End date (YYYY-MM-DD)"),
+    db: Session = Depends(get_db),
+):
+    try:
+        svc = ReviewService(db)
+        data = svc.get_review(symbol, from_date, to_date)
+        return data
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Review aggregation failed: {exc}")
+
+
+@router.get("/export")
+def export_review(
+    symbol: str = Query(..., description="Stock symbol, e.g. AAPL.US"),
+    from_date: str = Query(..., description="Start date (YYYY-MM-DD)"),
+    to_date: str = Query(..., description="End date (YYYY-MM-DD)"),
+    format: str = Query("json", description="Export format: json or csv"),
+    db: Session = Depends(get_db),
+):
+    if format not in ("json", "csv"):
+        raise HTTPException(status_code=400, detail="format must be json or csv")
+    try:
+        svc = ReviewService(db)
+        buf = svc.export_review(symbol, from_date, to_date, format)
+        media_type = "application/json" if format == "json" else "text/csv"
+        filename = f"review_{symbol.replace('.', '_')}_{from_date}_{to_date}.{format}"
+        return StreamingResponse(
+            buf,
+            media_type=media_type,
+            headers={"Content-Disposition": f"attachment; filename={filename}"},
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Review export failed: {exc}")

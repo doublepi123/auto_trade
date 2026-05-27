@@ -306,3 +306,75 @@ export interface BacktestResult {
   skipped_signals: BacktestSkippedSignal[]
   fee_sensitivity: BacktestFeeSensitivityPoint[]
 }
+
+export interface ReviewLLMInteraction {
+  id: number
+  interaction_type: string
+  symbol: string
+  market: string
+  success: boolean
+  order_action: string
+  order_status: string | null
+  order_id: string | null
+  applied: boolean
+  created_at: string
+}
+
+export interface ReviewOrder {
+  id: number
+  broker_order_id: string
+  symbol: string
+  side: string
+  quantity: number
+  price: number
+  executed_quantity: number | null
+  executed_price: number | null
+  status: string
+  created_at: string
+  filled_at: string | null
+}
+
+export interface ReviewEvent {
+  id: number
+  event_type: string
+  symbol: string
+  broker_order_id: string
+  side: string
+  status: string
+  message: string
+  payload_json: string
+  created_at: string
+}
+
+export interface ReviewSnapshot {
+  id: number
+  engine_state: string
+  daily_pnl: number
+  consecutive_losses: number
+  last_price: number
+  last_trigger_price: number
+  created_at: string
+}
+
+export interface ReviewDay {
+  date: string
+  symbol: string
+  llm_interactions: ReviewLLMInteraction[]
+  orders: ReviewOrder[]
+  events: ReviewEvent[]
+  snapshots: ReviewSnapshot[]
+  daily_pnl: number
+  trade_count: number
+  error_tags: string[]
+}
+
+export interface ReviewResponse {
+  symbol: string
+  from_date: string
+  to_date: string
+  days: ReviewDay[]
+  total_pnl: number
+  total_trades: number
+  all_error_tags: string[]
+}
+

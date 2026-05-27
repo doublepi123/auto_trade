@@ -501,3 +501,31 @@ class LLMIntervalStatus(BaseModel):
     current_suggestion: Optional[LLMSuggestion] = None
     applied_values: Optional[dict] = None
     reject_reason: Optional[str] = None
+
+
+class ReviewDaySchema(BaseModel):
+    date: str
+    symbol: str
+    llm_interactions: list[LLMInteractionSchema]
+    orders: list[OrderRecordSchema]
+    events: list[TradeEventRecordSchema]
+    daily_pnl: float
+    trade_count: int
+    error_tags: list[str]
+
+
+class ReviewResponse(BaseModel):
+    symbol: str
+    from_date: str
+    to_date: str
+    days: list[ReviewDaySchema]
+    total_pnl: float
+    total_trades: int
+    all_error_tags: list[str]
+
+
+class ReviewExportQuery(BaseModel):
+    symbol: str
+    from_date: str
+    to_date: str
+    format: Literal["json", "csv"] = "json"

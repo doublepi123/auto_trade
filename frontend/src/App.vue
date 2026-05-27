@@ -5,6 +5,7 @@
       <h2>Auto Trade</h2>
       <el-menu class="app-menu" mode="horizontal" :default-active="route.path" router>
         <el-menu-item index="/">仪表盘</el-menu-item>
+        <el-menu-item index="/review">复盘</el-menu-item>
         <el-menu-item index="/backtest">回测</el-menu-item>
         <el-menu-item index="/strategy">策略配置</el-menu-item>
         <el-menu-item index="/credentials">凭证设置</el-menu-item>
@@ -23,6 +24,10 @@
       <router-link to="/" class="nav-item" :class="{ active: route.path === '/' }">
         <el-icon><Odometer /></el-icon>
         <span>驾驶舱</span>
+      </router-link>
+      <router-link to="/review" class="nav-item" :class="{ active: route.path === '/review' }">
+        <el-icon><TrendCharts /></el-icon>
+        <span>复盘</span>
       </router-link>
       <router-link to="/strategy" class="nav-item" :class="{ active: route.path === '/strategy' }">
         <el-icon><Setting /></el-icon>
@@ -47,7 +52,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
-import { Odometer, Setting, List, Clock, Key } from '@element-plus/icons-vue'
+import { Odometer, Setting, List, Clock, Key, TrendCharts } from '@element-plus/icons-vue'
 
 const route = useRoute()
 const MOBILE_BREAKPOINT = 768
