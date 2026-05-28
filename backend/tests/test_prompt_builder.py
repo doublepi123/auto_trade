@@ -137,6 +137,6 @@ class TestStrategyModule:
         }
         result = module.render(context)
         assert "LONG" in result
-        assert "100" in result
-        assert "200.00" in result
+        assert "持仓数量: 100.00" in result
+        assert "持仓成本价: 200.00" in result
         assert "BUY" in result

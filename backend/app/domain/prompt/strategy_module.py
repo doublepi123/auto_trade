@@ -37,7 +37,7 @@ class StrategyModule(PromptModule):
 
 ## 持仓状态
 - 当前持仓方向: {current_position}
-- 当前持仓数量: {position_quantity}
+- 当前持仓数量: {position_quantity:.2f}
 - 持仓成本价: {position_avg_price:.2f}
 - 浮动盈亏比例: {unrealized_pnl_pct:.2f}%
 - 最近成交: {trades_summary}"""
