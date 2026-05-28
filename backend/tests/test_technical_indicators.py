@@ -373,3 +373,54 @@ class TestVWAP:
         result = TechnicalIndicators.calculate_vwap([100.0], [90.0], [95.0], [0.0])
         assert result["vwap_value"] == 0.0
         assert result["position"] == "at"
+
+
+class TestAggregateSignals:
+    """Tests for aggregate_signals method."""
+
+    def test_aggregate_bullish_consensus(self) -> None:
+        indicator_results = {
+            "rsi": 35.0,
+            "macd": {"macd": 0.5, "signal": 0.3, "histogram": 0.2},
+            "stochastic": {"stoch_k": 25.0, "stoch_d": 22.0, "signal": "oversold"},
+            "cci": {"cci_value": -80.0, "signal": "oversold"},
+            "williams_r": {"williams_r": -75.0, "signal": "oversold"},
+            "adx": {"adx_value": 30.0, "trend_strength": "moderate", "di_plus": 25.0, "di_minus": 15.0},
+            "obv": {"obv_values": [0, 100, 200], "obv_trend": "rising", "price_obv_divergence": "none"},
+        }
+        result = TechnicalIndicators.aggregate_signals(indicator_results)
+        assert result["overall_signal"] == "bullish"
+        assert result["confidence"] > 0.5
+
+    def test_aggregate_bearish_consensus(self) -> None:
+        indicator_results = {
+            "rsi": 75.0,
+            "macd": {"macd": -0.5, "signal": -0.3, "histogram": -0.2},
+            "stochastic": {"stoch_k": 85.0, "stoch_d": 88.0, "signal": "overbought"},
+            "cci": {"cci_value": 120.0, "signal": "overbought"},
+            "williams_r": {"williams_r": -15.0, "signal": "overbought"},
+            "adx": {"adx_value": 30.0, "trend_strength": "moderate", "di_plus": 15.0, "di_minus": 25.0},
+            "obv": {"obv_values": [0, -100, -200], "obv_trend": "falling", "price_obv_divergence": "none"},
+        }
+        result = TechnicalIndicators.aggregate_signals(indicator_results)
+        assert result["overall_signal"] == "bearish"
+        assert result["confidence"] > 0.5
+
+    def test_aggregate_neutral_mixed(self) -> None:
+        indicator_results = {
+            "rsi": 50.0,
+            "macd": {"macd": 0.0, "signal": 0.0, "histogram": 0.0},
+            "stochastic": {"stoch_k": 50.0, "stoch_d": 50.0, "signal": "neutral"},
+            "cci": {"cci_value": 0.0, "signal": "neutral"},
+            "williams_r": {"williams_r": -50.0, "signal": "neutral"},
+            "adx": {"adx_value": 15.0, "trend_strength": "none", "di_plus": 20.0, "di_minus": 20.0},
+            "obv": {"obv_values": [0, 0, 0], "obv_trend": "flat", "price_obv_divergence": "none"},
+        }
+        result = TechnicalIndicators.aggregate_signals(indicator_results)
+        assert result["overall_signal"] == "neutral"
+        assert result["confidence"] < 0.6
+
+    def test_aggregate_empty_input(self) -> None:
+        result = TechnicalIndicators.aggregate_signals({})
+        assert result["overall_signal"] == "neutral"
+        assert result["confidence"] == 0.0

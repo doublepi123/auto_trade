@@ -352,6 +352,113 @@ class TechnicalIndicators:
 
         return {"vwap_value": vwap_value, "price_vs_vwap": price_vs_vwap, "position": position}
 
+    @staticmethod
+    def aggregate_signals(indicator_results: dict[str, Any]) -> dict[str, Any]:
+        """Aggregate signals from all technical indicators."""
+        if not indicator_results:
+            return {"overall_signal": "neutral", "confidence": 0.0, "summary": "无指标数据"}
+
+        bullish_count = 0
+        bearish_count = 0
+        total_weight = 0.0
+
+        # RSI signal
+        rsi = indicator_results.get("rsi", 50.0)
+        if isinstance(rsi, (int, float)):
+            total_weight += 1.0
+            if rsi < 30:
+                bullish_count += 1
+            elif rsi > 70:
+                bearish_count += 1
+
+        # MACD signal
+        macd = indicator_results.get("macd", {})
+        if isinstance(macd, dict) and macd.get("histogram") is not None:
+            total_weight += 1.0
+            hist = float(macd.get("histogram", 0))
+            if hist > 0:
+                bullish_count += 1
+            elif hist < 0:
+                bearish_count += 1
+
+        # Stochastic signal
+        stoch = indicator_results.get("stochastic", {})
+        if isinstance(stoch, dict) and stoch.get("signal"):
+            total_weight += 1.0
+            if stoch["signal"] == "oversold":
+                bullish_count += 1
+            elif stoch["signal"] == "overbought":
+                bearish_count += 1
+
+        # CCI signal
+        cci = indicator_results.get("cci", {})
+        if isinstance(cci, dict) and cci.get("signal"):
+            total_weight += 1.0
+            if cci["signal"] == "oversold":
+                bullish_count += 1
+            elif cci["signal"] == "overbought":
+                bearish_count += 1
+
+        # Williams %R signal
+        williams = indicator_results.get("williams_r", {})
+        if isinstance(williams, dict) and williams.get("signal"):
+            total_weight += 1.0
+            if williams["signal"] == "oversold":
+                bullish_count += 1
+            elif williams["signal"] == "overbought":
+                bearish_count += 1
+
+        # ADX signal (trend direction)
+        adx = indicator_results.get("adx", {})
+        if isinstance(adx, dict) and adx.get("di_plus") is not None:
+            total_weight += 1.5
+            di_plus = float(adx.get("di_plus", 0))
+            di_minus = float(adx.get("di_minus", 0))
+            if di_plus > di_minus:
+                bullish_count += 1.5
+            elif di_minus > di_plus:
+                bearish_count += 1.5
+
+        # OBV signal
+        obv = indicator_results.get("obv", {})
+        if isinstance(obv, dict) and obv.get("obv_trend"):
+            total_weight += 1.0
+            if obv["obv_trend"] == "rising":
+                bullish_count += 1
+            elif obv["obv_trend"] == "falling":
+                bearish_count += 1
+
+        # Calculate confidence and signal
+        if total_weight == 0:
+            return {"overall_signal": "neutral", "confidence": 0.0, "summary": "无有效指标信号"}
+
+        bullish_ratio = bullish_count / total_weight
+        bearish_ratio = bearish_count / total_weight
+
+        if bullish_ratio > 0.6:
+            overall_signal = "bullish"
+            confidence = bullish_ratio
+        elif bearish_ratio > 0.6:
+            overall_signal = "bearish"
+            confidence = bearish_ratio
+        else:
+            overall_signal = "neutral"
+            confidence = max(bullish_ratio, bearish_ratio)
+
+        # Generate summary
+        signals = []
+        if bullish_count > 0:
+            signals.append(f"{int(bullish_count)}个看涨")
+        if bearish_count > 0:
+            signals.append(f"{int(bearish_count)}个看跌")
+        summary = f"综合信号: {overall_signal}（{', '.join(signals)}，置信度 {confidence:.2f}）"
+
+        return {
+            "overall_signal": overall_signal,
+            "confidence": confidence,
+            "summary": summary,
+        }
+
     @classmethod
     def analyze_multi_timeframe(
         cls,
