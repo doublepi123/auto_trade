@@ -83,3 +83,23 @@ class TestVolumeAnalysis:
         assert result["avg_volume"] == 0.0
         assert result["volume_ratio"] == 0.0
         assert result["trend"] == "unknown"
+
+
+class TestMultiTimeframe:
+    def test_aligned_uptrend(self) -> None:
+        daily = [100.0 + i for i in range(10)]
+        minute = [105.0 + i * 0.1 for i in range(30)]
+        result = TechnicalIndicators.analyze_multi_timeframe(daily, minute)
+        assert result["aligned"] is True
+        assert result["daily_trend"] == "up"
+
+    def test_mixed_trends_not_aligned(self) -> None:
+        daily = [100.0 + i for i in range(10)]  # up
+        minute = [110.0 - i * 0.1 for i in range(30)]  # down
+        result = TechnicalIndicators.analyze_multi_timeframe(daily, minute)
+        assert result["aligned"] is False
+
+    def test_short_data_returns_neutral(self) -> None:
+        result = TechnicalIndicators.analyze_multi_timeframe([100.0], [100.0])
+        assert result["daily_trend"] == "neutral"
+        assert result["minute_trend"] == "neutral"

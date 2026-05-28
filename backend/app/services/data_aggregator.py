@@ -62,6 +62,10 @@ class DataAggregator:
         sentiment_analyzer = MarketSentimentAnalyzer()
         sentiment = sentiment_analyzer.analyze_from_price_changes(price_changes[-10:])
 
+        daily_closes = [c.close for c in daily_candles]
+        minute_closes = [c.close for c in minute_candles]
+        multi_tf = TechnicalIndicators.analyze_multi_timeframe(daily_closes, minute_closes)
+
         return {
             "daily_candles": daily_payload,
             "minute_candles": minute_payload,
@@ -74,6 +78,7 @@ class DataAggregator:
             "macd": macd,
             "volume_analysis": volume_analysis,
             "sentiment": sentiment,
+            "multi_timeframe": multi_tf,
         }
 
     def _acquire_broker(self) -> tuple[BrokerGateway, bool]:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import statistics
-from typing import TypedDict
+from typing import Any, TypedDict
 
 
 class VolumeAnalysis(TypedDict):
@@ -96,3 +96,39 @@ class TechnicalIndicators:
             trend = "normal"
 
         return VolumeAnalysis(avg_volume=avg_vol, volume_ratio=ratio, trend=trend)
+
+    @classmethod
+    def analyze_multi_timeframe(
+        cls,
+        daily_closes: list[float],
+        minute_closes: list[float],
+    ) -> dict[str, Any]:
+        """Analyze trend alignment across timeframes."""
+        daily_trend = "neutral"
+        minute_trend = "neutral"
+
+        if len(daily_closes) >= 5:
+            daily_sma5 = statistics.mean(daily_closes[-5:])
+            daily_current = daily_closes[-1]
+            if daily_current > daily_sma5 * 1.01:
+                daily_trend = "up"
+            elif daily_current < daily_sma5 * 0.99:
+                daily_trend = "down"
+
+        if len(minute_closes) >= 20:
+            minute_sma20 = statistics.mean(minute_closes[-20:])
+            minute_current = minute_closes[-1]
+            if minute_current > minute_sma20 * 1.005:
+                minute_trend = "up"
+            elif minute_current < minute_sma20 * 0.995:
+                minute_trend = "down"
+
+        aligned = daily_trend == minute_trend and daily_trend != "neutral"
+
+        return {
+            "daily_trend": daily_trend,
+            "minute_trend": minute_trend,
+            "aligned": aligned,
+            "description": f"日线趋势: {daily_trend}, 分钟趋势: {minute_trend}"
+            + (", 趋势一致" if aligned else ""),
+        }
