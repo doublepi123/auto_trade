@@ -170,7 +170,7 @@ from app.domain.prompt.prompt_builder import PromptBuilder
 
 
 class TestPromptBuilder:
-    def _full_context(self) -> dict:
+    def _full_context(self) -> dict[str, object]:
         return {
             "symbol": "AAPL.US",
             "market": "US",

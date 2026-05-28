@@ -16,7 +16,7 @@ class PromptBuilder:
         return self
 
     def build(self, context: dict[str, Any]) -> str:
-        parts = []
+        parts: list[str] = []
         for module in self._modules:
             rendered = module.render(context)
             if rendered.strip():
