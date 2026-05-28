@@ -13,7 +13,7 @@
 | **API 覆盖** | ✅ 完备。策略配置、凭证管理、订单查询、状态获取、状态历史、事件时间线、运行时控制（启停/暂停/Kill Switch）。 |
 | **WebSocket 推送** | ✅ 就绪。实时状态同步。 |
 | **本地部署** | ✅ 就绪。Docker Compose 一键启动。 |
-| **测试** | ✅ 就绪。Backend pytest **433** 项、Frontend Cypress E2E 测试。 |
+| **测试** | ✅ 就绪。Backend pytest **549** 项、Frontend Cypress E2E 测试。 |
 | **凭证安全** | ✅ 就绪。主密钥 + AES-GCM 加密存储，前端不回显明文。 |
 | **数据库** | ✅ 就位。SQLite，含运行状态、状态快照、订单、`tracked_entries`、LLM 交互、交易事件和凭证配置。 |
 | **LLM 行情数据** | ✅ 真实 K 线（日 K + 1 分钟 K），ATR/布林带有效。 |
@@ -357,6 +357,40 @@
 - 后端测试覆盖观察列表 CRUD 和行情聚合。
 - Cypress 覆盖添加/删除观察标的、切换交易标的前的确认流程。
 
+### P9：LLM Prompt Engineering Optimization ✅（2026-05-29 交付）
+
+> **目标：** 通过模块化 prompt 架构、技术指标扩展和 A/B 测试支持，提升 LLM 交易顾问的决策质量和系统性能。
+>
+> **规格文档：** `docs/superpowers/specs/2026-05-28-llm-prompt-engineering-optimization-design.md`
+>
+> **实施计划：** `docs/superpowers/plans/2026-05-28-llm-prompt-optimization.md`
+>
+> **基线（交付后）：** `pytest 549 passed`，`basedpyright` 0 errors / 0 warnings，`npm run type-check` + `npm run build` 通过。
+
+#### Phase 1 交付摘要
+
+- **T1-T5 — 模块化 Prompt 架构**：`PromptModule` 抽象基类 + `SystemModule`（角色/规则）+ `ContextModule`（K 线/指标/情绪）+ `StrategyModule`（持仓/风控）+ `OutputModule`（JSON 格式）+ `PromptBuilder` 编排器。`DataAggregator.build_prompt()` 重构为模块化组合。
+- **T6 — 技术指标扩展**：RSI(14)、MACD(12,26,9)、成交量分析（均量/量比/趋势）集成到 `ContextModule`。
+- **T7 — DataAggregator 集成**：`fetch_market_data()` 返回扩展指标数据，`PromptBuilder` 自动渲染。
+- **T8 — 数据库模型**：`PromptVersion` + `ExperimentResult` 表 + `_ensure_*` 迁移补丁。
+- **T9 — ABTestManager**：prompt 变体选择 + 交互结果记录 + 胜率计算。
+- **T10 — Experiments API**：`/api/experiments` CRUD + 结果查询。
+- **T11 — LLMAdvisorService 集成**：使用 `PromptBuilder`，支持实验变体选择。
+
+#### Phase 2 交付摘要
+
+- **T13 — 市场情绪模块**：`SentimentAnalyzer` 分析价格动量、波动率、成交量异常，输出情绪评分（bearish/neutral/bullish）。
+- **T14 — 情绪集成**：`ContextModule` 渲染情绪分析结果到 prompt。
+- **T15 — 多时间框架分析**：日 K + 周 K 趋势对齐检测，输出 alignment 信号。
+- **T16 — 性能追踪器**：`PerformanceTracker` 记录 LLM 建议 vs 实际结果，计算准确率/收益/回撤；`/api/performance` 查询 API。
+
+#### 验证结果（本轮交付后）
+
+- [x] `pytest 549 passed`（+56 项，相比 P9 前 493 项）
+- [x] `basedpyright` 0 errors, 0 warnings, 0 notes
+- [x] `npm run type-check` 通过
+- [x] `npm run build` 通过（3.30s）
+
 ### 建议执行顺序
 
 | 顺序 | 迭代 | 状态 | 原因 |
@@ -367,16 +401,11 @@
 | 已完成 | **P6 移动端与应急操作体验** | ✅ 2026-05-28 | 底部 Tab 导航 + Dashboard 图表折叠 + 表单单列布局；15 个文件改动。 |
 | 已完成 | **P7 策略复盘与 LLM 优化工作台** | ✅ 2026-05-28 | 新增 ReviewService + /api/review/export + Review.vue；pytest 493 passed。 |
 | 已完成 | **P8 多标的观察列表** | ✅ 2026-05-28 | WatchlistItem 模型 + CRUD API + 行情聚合 + Watchlist.vue；pytest 11 passed。 |
+| 已完成 | **P9 LLM Prompt Engineering Optimization** | ✅ 2026-05-29 | 模块化 Prompt 架构 + 技术指标（RSI/MACD/Volume）+ A/B 测试 + 市场情绪 + 多时间框架 + 性能追踪；pytest 549 passed。 |
 
 ### 下一步建议
 
-**P5+ 已完成交付**。当前下一迭代：**P6 移动端与应急操作体验**。
-
-#### P6 迭代计划
-
-> **目标：** 手机上能可靠查看状态和执行紧急操作，避免桌面不可用时无法止损/暂停。  
-> **时间：** 预估 1 周 (2026-05-28 → 2026-06-04)  
-> **基线：** `pytest 487 passed`, `basedpyright` 0 errors, `npm run build` 通过。
+**P9 LLM Prompt Engineering Optimization 已完成交付**。后续可继续推进 P6（移动端）或 P3（回测增强）等迭代。
 
 ---
 

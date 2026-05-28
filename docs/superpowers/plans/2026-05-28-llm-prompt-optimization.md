@@ -2310,24 +2310,24 @@ git commit -m "feat(performance): add PerformanceTracker and API endpoints"
 
 ---
 
-### Task 17: Phase 2 综合验证
+### Task 17: Phase 2 综合验证 ✅（2026-05-29 完成）
 
-- [ ] **Step 1: Run full test suite**
+- [x] **Step 1: Run full test suite**
 
 Run: `cd backend && python -m pytest tests/ -v --timeout=60`
-Expected: ≥ 515 tests passed (493 baseline + ~22 new)
+Result: **549 passed** in 40.95s（远超 ≥ 515 预期）
 
-- [ ] **Step 2: Run type check**
+- [x] **Step 2: Run type check**
 
 Run: `cd backend && python -m basedpyright`
-Expected: 0 errors, 0 warnings
+Result: **0 errors, 0 warnings, 0 notes**
 
-- [ ] **Step 3: Run frontend build**
+- [x] **Step 3: Run frontend build**
 
 Run: `cd frontend && npm run type-check && npm run build`
-Expected: PASS
+Result: **PASS**（type-check 通过，build 3.30s 完成）
 
-- [ ] **Step 4: Update Roadmap.md**
+- [x] **Step 4: Update Roadmap.md**
 
 Mark the LLM Prompt Engineering Optimization iteration as complete.
 
