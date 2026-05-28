@@ -135,6 +135,7 @@ class LLMAdvisorService:
                 "rsi": 0.0,
                 "macd": {"macd": 0.0, "signal": 0.0, "histogram": 0.0},
                 "volume_analysis": {"avg_volume": 0.0, "volume_ratio": 0.0, "trend": "unknown"},
+                "sentiment": {"sentiment": "neutral", "score": 0.0, "description": "无"},
             }
 
         prompt = self._data_aggregator.build_prompt(
@@ -162,6 +163,7 @@ class LLMAdvisorService:
             rsi=market_data.get("rsi", 0.0),
             macd=market_data.get("macd"),
             volume_analysis=market_data.get("volume_analysis"),
+            sentiment=market_data.get("sentiment"),
         )
         context_snapshot = {
             "symbol": symbol,
@@ -279,6 +281,7 @@ class LLMAdvisorService:
                 "rsi": 0.0,
                 "macd": {"macd": 0.0, "signal": 0.0, "histogram": 0.0},
                 "volume_analysis": {"avg_volume": 0.0, "volume_ratio": 0.0, "trend": "unknown"},
+                "sentiment": {"sentiment": "neutral", "score": 0.0, "description": "无"},
             }
 
         prompt_price = market_data.get("current_price") or current_price
@@ -305,6 +308,7 @@ class LLMAdvisorService:
             rsi=market_data.get("rsi", 0.0),
             macd=market_data.get("macd"),
             volume_analysis=market_data.get("volume_analysis"),
+            sentiment=market_data.get("sentiment"),
         )
         context_snapshot = {
             "symbol": symbol,
