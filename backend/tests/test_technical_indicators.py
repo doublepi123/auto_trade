@@ -331,3 +331,45 @@ class TestWilliamsR:
         result = TechnicalIndicators.calculate_williams_r([], [], [])
         assert result["williams_r"] == -50.0
         assert result["signal"] == "neutral"
+
+
+class TestVWAP:
+    """Tests for Volume Weighted Average Price calculation."""
+
+    def test_vwap_basic(self) -> None:
+        highs = [102.0, 104.0, 106.0, 108.0, 110.0]
+        lows = [98.0, 100.0, 102.0, 104.0, 106.0]
+        closes = [100.0, 102.0, 104.0, 106.0, 108.0]
+        volumes = [1000.0, 1200.0, 1100.0, 1300.0, 1400.0]
+        result = TechnicalIndicators.calculate_vwap(highs, lows, closes, volumes)
+        expected_vwap = (100*1000 + 102*1200 + 104*1100 + 106*1300 + 108*1400) / 6000
+        assert abs(result["vwap_value"] - expected_vwap) < 0.01
+
+    def test_vwap_price_above(self) -> None:
+        highs = [100.0, 102.0, 104.0, 106.0, 108.0]
+        lows = [96.0, 98.0, 100.0, 102.0, 104.0]
+        closes = [98.0, 100.0, 102.0, 104.0, 107.0]
+        volumes = [1000.0, 1000.0, 1000.0, 1000.0, 1000.0]
+        result = TechnicalIndicators.calculate_vwap(highs, lows, closes, volumes)
+        assert result["position"] == "above"
+        assert result["price_vs_vwap"] > 0
+
+    def test_vwap_price_below(self) -> None:
+        highs = [100.0, 102.0, 104.0, 106.0, 108.0]
+        lows = [96.0, 98.0, 100.0, 102.0, 104.0]
+        closes = [98.0, 100.0, 102.0, 104.0, 99.0]
+        volumes = [1000.0, 1000.0, 1000.0, 1000.0, 1000.0]
+        result = TechnicalIndicators.calculate_vwap(highs, lows, closes, volumes)
+        assert result["position"] == "below"
+        assert result["price_vs_vwap"] < 0
+
+    def test_vwap_insufficient_data(self) -> None:
+        result = TechnicalIndicators.calculate_vwap([], [], [], [])
+        assert result["vwap_value"] == 0.0
+        assert result["price_vs_vwap"] == 0.0
+        assert result["position"] == "at"
+
+    def test_vwap_zero_volume(self) -> None:
+        result = TechnicalIndicators.calculate_vwap([100.0], [90.0], [95.0], [0.0])
+        assert result["vwap_value"] == 0.0
+        assert result["position"] == "at"

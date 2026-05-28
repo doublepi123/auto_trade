@@ -315,6 +315,43 @@ class TechnicalIndicators:
 
         return {"williams_r": williams_r, "signal": signal}
 
+    @staticmethod
+    def calculate_vwap(
+        highs: list[float],
+        lows: list[float],
+        closes: list[float],
+        volumes: list[float],
+    ) -> dict[str, Any]:
+        """Calculate Volume Weighted Average Price."""
+        if not highs or not lows or not closes or not volumes:
+            return {"vwap_value": 0.0, "price_vs_vwap": 0.0, "position": "at"}
+        if len(highs) != len(lows) or len(highs) != len(closes) or len(highs) != len(volumes):
+            return {"vwap_value": 0.0, "price_vs_vwap": 0.0, "position": "at"}
+
+        cumulative_tpv = 0.0
+        cumulative_volume = 0.0
+
+        for h, l, c, v in zip(highs, lows, closes, volumes):
+            typical_price = (h + l + c) / 3.0
+            cumulative_tpv += typical_price * v
+            cumulative_volume += v
+
+        if cumulative_volume == 0:
+            return {"vwap_value": 0.0, "price_vs_vwap": 0.0, "position": "at"}
+
+        vwap_value = cumulative_tpv / cumulative_volume
+        current_price = closes[-1]
+        price_vs_vwap = ((current_price - vwap_value) / vwap_value * 100.0) if vwap_value > 0 else 0.0
+
+        if current_price > vwap_value * 1.001:
+            position = "above"
+        elif current_price < vwap_value * 0.999:
+            position = "below"
+        else:
+            position = "at"
+
+        return {"vwap_value": vwap_value, "price_vs_vwap": price_vs_vwap, "position": position}
+
     @classmethod
     def analyze_multi_timeframe(
         cls,
