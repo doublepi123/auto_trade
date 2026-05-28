@@ -19,15 +19,15 @@ class TestMarketSentiment:
         # Simulate uptrend: prices rising over 5 days
         price_changes = [1.0, 2.0, 1.5, 3.0, 2.5]
         result = analyzer.analyze_from_price_changes(price_changes)
-        assert result["sentiment"] in ("bullish", "neutral")
-        assert -1.0 <= result["score"] <= 1.0
+        assert result["sentiment"] == "bullish"
+        assert result["score"] > 0.2
 
     def test_analyze_from_price_data_downtrend(self) -> None:
         analyzer = MarketSentimentAnalyzer()
         price_changes = [-2.0, -1.5, -3.0, -1.0, -2.5]
         result = analyzer.analyze_from_price_changes(price_changes)
-        assert result["sentiment"] in ("bearish", "neutral")
-        assert result["score"] < 0
+        assert result["sentiment"] == "bearish"
+        assert result["score"] < -0.2
 
     def test_analyze_empty_returns_neutral(self) -> None:
         analyzer = MarketSentimentAnalyzer()

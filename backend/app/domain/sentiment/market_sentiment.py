@@ -1,12 +1,21 @@
 from __future__ import annotations
 
 import statistics
+from typing import TypedDict
+
+
+class SentimentResult(TypedDict):
+    """Sentiment analysis result with typed fields."""
+
+    sentiment: str
+    score: float
+    description: str
 
 
 class MarketSentimentAnalyzer:
     """Derives market sentiment from price action data."""
 
-    def analyze_from_price_changes(self, price_changes: list[float]) -> dict:
+    def analyze_from_price_changes(self, price_changes: list[float]) -> SentimentResult:
         """Analyze sentiment from a series of price changes.
 
         Args:
@@ -16,7 +25,7 @@ class MarketSentimentAnalyzer:
             Dict with 'sentiment' (bullish/bearish/neutral), 'score' (-1 to 1), 'description'.
         """
         if not price_changes:
-            return {"sentiment": "neutral", "score": 0.0, "description": "无价格数据"}
+            return SentimentResult(sentiment="neutral", score=0.0, description="无价格数据")
 
         avg_change = statistics.mean(price_changes)
         positive_count = sum(1 for c in price_changes if c > 0)
@@ -24,7 +33,7 @@ class MarketSentimentAnalyzer:
         total = len(price_changes)
 
         # Score: normalized average + direction bias
-        max_abs = max(abs(c) for c in price_changes) if price_changes else 1.0
+        max_abs = max(abs(c) for c in price_changes)
         if max_abs == 0:
             normalized = 0.0
         else:
@@ -44,4 +53,4 @@ class MarketSentimentAnalyzer:
             sentiment = "neutral"
             description = f"市场情绪中性（得分 {score:.2f}）"
 
-        return {"sentiment": sentiment, "score": score, "description": description}
+        return SentimentResult(sentiment=sentiment, score=score, description=description)
