@@ -91,6 +91,62 @@ class ContextModule(PromptModule):
                     f"量比 {volume_ratio:.2f} / {trend}"
                 )
 
+        # Extended technical indicators
+        obv = context.get("obv", {})
+        adx = context.get("adx", {})
+        stochastic = context.get("stochastic", {})
+        cci = context.get("cci", {})
+        williams_r = context.get("williams_r", {})
+        vwap = context.get("vwap", {})
+        aggregate_signals = context.get("aggregate_signals", {})
+
+        has_extended = any([obv, adx, stochastic, cci, williams_r, vwap, aggregate_signals])
+        if has_extended:
+            lines.append("")
+            lines.append("## 技术指标扩展")
+            if obv and obv.get("obv_trend"):
+                lines.append(
+                    f"- OBV: 趋势 {obv['obv_trend']} / "
+                    f"背离 {obv.get('price_obv_divergence', 'none')}"
+                )
+            if adx and adx.get("adx_value") is not None:
+                adx_val = float(adx.get("adx_value", 0.0))
+                if adx_val > 0:
+                    lines.append(
+                        f"- ADX: {adx_val:.2f} / "
+                        f"趋势强度 {adx.get('trend_strength', 'none')}"
+                    )
+            if stochastic and stochastic.get("stoch_k") is not None:
+                stoch_k = float(stochastic.get("stoch_k", 50.0))
+                stoch_d = float(stochastic.get("stoch_d", 50.0))
+                lines.append(
+                    f"- Stochastic: %K {stoch_k:.2f} / %D {stoch_d:.2f} / "
+                    f"{stochastic.get('signal', 'neutral')}"
+                )
+            if cci and cci.get("cci_value") is not None:
+                cci_val = float(cci.get("cci_value", 0.0))
+                lines.append(
+                    f"- CCI: {cci_val:.2f} / {cci.get('signal', 'neutral')}"
+                )
+            if williams_r and williams_r.get("williams_r") is not None:
+                wr_val = float(williams_r.get("williams_r", -50.0))
+                lines.append(
+                    f"- Williams %R: {wr_val:.2f} / {williams_r.get('signal', 'neutral')}"
+                )
+            if vwap and vwap.get("vwap_value") is not None:
+                vwap_val = float(vwap.get("vwap_value", 0.0))
+                if vwap_val > 0:
+                    lines.append(
+                        f"- VWAP: {vwap_val:.2f} / "
+                        f"价格位置 {vwap.get('position', 'at')}"
+                    )
+            if aggregate_signals and aggregate_signals.get("overall_signal"):
+                overall = aggregate_signals.get("overall_signal", "neutral")
+                confidence = float(aggregate_signals.get("confidence", 0.0))
+                lines.append(
+                    f"- 综合信号: {overall} / 置信度 {confidence:.2f}"
+                )
+
         # Account & buying power
         account_context_text = context.get("account_context_text")
         if account_context_text:

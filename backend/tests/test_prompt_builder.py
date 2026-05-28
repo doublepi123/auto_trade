@@ -93,6 +93,69 @@ class TestContextModule:
         assert "62.50" in result
         assert "MACD" in result
 
+    def test_renders_extended_indicators(self) -> None:
+        module = ContextModule()
+        context = {
+            "symbol": "AAPL.US",
+            "market": "US",
+            "current_price": 200.0,
+            "daily_candles": [{"date": "2026-05-21", "open": 195.0, "high": 202.0, "low": 194.0, "close": 200.0, "volume": 50000}],
+            "minute_candles": [],
+            "atr": 3.5,
+            "bb_upper": 210.0,
+            "bb_middle": 200.0,
+            "bb_lower": 190.0,
+            "rsi": 55.0,
+            "macd": {"macd": 1.2, "signal": 0.8, "histogram": 0.4},
+            "volume_analysis": {"avg_volume": 55000.0, "volume_ratio": 1.1, "trend": "normal"},
+            "obv": {"obv_values": [0, 1000, 2000], "obv_trend": "rising", "price_obv_divergence": "none"},
+            "adx": {"adx_value": 28.5, "trend_strength": "moderate", "di_plus": 25.0, "di_minus": 15.0},
+            "stochastic": {"stoch_k": 65.0, "stoch_d": 60.0, "signal": "neutral"},
+            "cci": {"cci_value": 50.0, "signal": "neutral"},
+            "williams_r": {"williams_r": -35.0, "signal": "neutral"},
+            "vwap": {"vwap_value": 198.0, "price_vs_vwap": 1.01, "position": "above"},
+            "aggregate_signals": {"overall_signal": "bullish", "confidence": 0.75, "summary": "综合信号: bullish（3个看涨，置信度 0.75）"},
+        }
+        result = module.render(context)
+        assert "技术指标扩展" in result
+        assert "OBV" in result
+        assert "rising" in result
+        assert "ADX" in result
+        assert "28.50" in result
+        assert "moderate" in result
+        assert "Stochastic" in result
+        assert "%K 65.00" in result
+        assert "%D 60.00" in result
+        assert "CCI" in result
+        assert "50.00" in result
+        assert "Williams %R" in result
+        assert "-35.00" in result
+        assert "VWAP" in result
+        assert "198.00" in result
+        assert "above" in result
+        assert "综合信号" in result
+        assert "bullish" in result
+        assert "0.75" in result
+
+    def test_renders_no_extended_section_when_empty(self) -> None:
+        module = ContextModule()
+        context = {
+            "symbol": "AAPL.US",
+            "market": "US",
+            "current_price": 200.0,
+            "daily_candles": [],
+            "minute_candles": [],
+            "atr": 3.5,
+            "bb_upper": 210.0,
+            "bb_middle": 200.0,
+            "bb_lower": 190.0,
+            "rsi": 55.0,
+            "macd": {"macd": 1.2, "signal": 0.8, "histogram": 0.4},
+            "volume_analysis": {"avg_volume": 55000.0, "volume_ratio": 1.1, "trend": "normal"},
+        }
+        result = module.render(context)
+        assert "技术指标扩展" not in result
+
 
 from app.domain.prompt.strategy_module import StrategyModule
 
