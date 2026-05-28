@@ -8,13 +8,6 @@ _PROMPT_DAILY_CANDLES = 7
 _PROMPT_MINUTE_CANDLES = 30
 
 
-def _format_optional_price(value: Any) -> str:
-    try:
-        return f"{float(value):.2f}"
-    except (TypeError, ValueError):
-        return "-"
-
-
 def _render_daily_table(rows: list[dict[str, Any]]) -> str:
     if not rows:
         return "（暂无可用历史日 K 数据）"
