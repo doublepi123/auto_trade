@@ -74,18 +74,22 @@ class ContextModule(PromptModule):
 
         if rsi > 0:
             lines.append(f"- RSI(14): {rsi:.2f}")
-        if macd and macd.get("macd", 0) != 0:
-            macd_val = macd['macd']
-            signal_val = macd['signal']
-            hist_val = macd['histogram']
+        if macd and macd.get("macd") is not None:
+            macd_val = float(macd.get("macd", 0.0))
+            signal_val = float(macd.get("signal", 0.0))
+            hist_val = float(macd.get("histogram", 0.0))
             lines.append(
                 f"- MACD: {macd_val:.2f} / Signal: {signal_val:.2f} / Hist: {hist_val:.2f}"
             )
-        if volume_analysis and volume_analysis.get("avg_volume", 0) > 0:
-            lines.append(
-                f"- 成交量: 均量 {volume_analysis['avg_volume']:.0f} / "
-                f"量比 {volume_analysis['volume_ratio']:.2f} / {volume_analysis['trend']}"
-            )
+        if volume_analysis and volume_analysis.get("avg_volume") is not None:
+            avg_volume = float(volume_analysis.get("avg_volume", 0.0))
+            if avg_volume > 0:
+                volume_ratio = float(volume_analysis.get("volume_ratio", 0.0))
+                trend = volume_analysis.get("trend", "unknown")
+                lines.append(
+                    f"- 成交量: 均量 {avg_volume:.0f} / "
+                    f"量比 {volume_ratio:.2f} / {trend}"
+                )
 
         # Account & buying power
         account_context_text = context.get("account_context_text")

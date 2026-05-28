@@ -23,9 +23,14 @@ class StrategyModule(PromptModule):
 
         trades_summary = "无"
         if recent_trades:
+            def _fmt_trade(t: dict[str, Any]) -> str:
+                side = t.get("side", "")
+                qty = float(t.get("quantity") or 0)
+                price = float(t.get("price") or 0)
+                return f"- {side}: {qty} @ {price:.2f}"
+
             trades_summary = "\n".join(
-                f"- {t.get('side', '')}: {t.get('quantity', 0)} @ {t.get('price', 0):.2f}"
-                for t in recent_trades[:3]
+                _fmt_trade(t) for t in recent_trades[:3]
             )
 
         return f"""## 当前策略参数
