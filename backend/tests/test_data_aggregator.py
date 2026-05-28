@@ -220,3 +220,62 @@ class TestNewIndicators:
         assert "sentiment" in result
         # Only 1 price change from 2 candles, so sentiment should still have valid structure
         assert result["sentiment"]["sentiment"] in ("bullish", "bearish", "neutral")
+
+    def test_fetch_market_data_includes_new_indicator_fields(self) -> None:
+        broker = _FakeBroker(
+            daily=_build_candles(100.0, 30),
+            minute=_build_candles(100.0, 10),
+            quote_price=101.5,
+        )
+        aggregator = DataAggregator(broker=broker)
+        result = aggregator.fetch_market_data("AAPL.US", "US")
+
+        assert "obv" in result
+        assert "obv_trend" in result["obv"]
+        assert result["obv"]["obv_trend"] in ("rising", "falling", "flat")
+
+        assert "adx" in result
+        assert "adx_value" in result["adx"]
+        assert "trend_strength" in result["adx"]
+        assert result["adx"]["trend_strength"] in ("none", "weak", "moderate", "strong", "extreme")
+
+        assert "stochastic" in result
+        assert "stoch_k" in result["stochastic"]
+        assert "stoch_d" in result["stochastic"]
+        assert result["stochastic"]["signal"] in ("overbought", "oversold", "neutral")
+
+        assert "cci" in result
+        assert "cci_value" in result["cci"]
+        assert result["cci"]["signal"] in ("overbought", "oversold", "neutral")
+
+        assert "williams_r" in result
+        assert "williams_r" in result["williams_r"]
+        assert result["williams_r"]["signal"] in ("overbought", "oversold", "neutral")
+
+        assert "vwap" in result
+        assert "vwap_value" in result["vwap"]
+        assert "position" in result["vwap"]
+        assert result["vwap"]["position"] in ("above", "below", "at")
+
+        assert "aggregate_signals" in result
+        assert "overall_signal" in result["aggregate_signals"]
+        assert result["aggregate_signals"]["overall_signal"] in ("bullish", "bearish", "neutral")
+        assert "confidence" in result["aggregate_signals"]
+        assert "summary" in result["aggregate_signals"]
+
+    def test_fetch_market_data_new_indicators_empty_when_few_candles(self) -> None:
+        broker = _FakeBroker(
+            daily=_build_candles(100.0, 3),
+            minute=_build_candles(100.0, 5),
+            quote_price=101.5,
+        )
+        aggregator = DataAggregator(broker=broker)
+        result = aggregator.fetch_market_data("AAPL.US", "US")
+
+        assert result["adx"] == {}
+        assert result["stochastic"] == {}
+        assert result["cci"] == {}
+        assert result["williams_r"] == {}
+        assert "obv" in result
+        assert "vwap" in result
+        assert "aggregate_signals" in result

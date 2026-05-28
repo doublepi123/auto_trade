@@ -50,6 +50,8 @@ class DataAggregator:
 
         atr = _compute_atr(daily_candles) if len(daily_candles) >= 5 else 0.0
         closes = [c.close for c in daily_candles]
+        highs = [c.high for c in daily_candles]
+        lows = [c.low for c in daily_candles]
         volumes = [c.volume for c in daily_candles]
         bb_upper, bb_middle, bb_lower = (
             _compute_bollinger_bands(closes) if len(closes) >= 10 else (0.0, 0.0, 0.0)
@@ -65,6 +67,24 @@ class DataAggregator:
         minute_closes = [c.close for c in minute_candles]
         multi_tf = TechnicalIndicators.analyze_multi_timeframe(closes, minute_closes)
 
+        obv = TechnicalIndicators.calculate_obv(closes, volumes) if len(closes) >= 2 else {}
+        adx = TechnicalIndicators.calculate_adx(highs, lows, closes) if len(closes) >= 15 else {}
+        stochastic = TechnicalIndicators.calculate_stochastic(highs, lows, closes) if len(closes) >= 14 else {}
+        cci = TechnicalIndicators.calculate_cci(highs, lows, closes) if len(closes) >= 20 else {}
+        williams_r = TechnicalIndicators.calculate_williams_r(highs, lows, closes) if len(closes) >= 14 else {}
+        vwap = TechnicalIndicators.calculate_vwap(highs, lows, closes, volumes) if len(closes) >= 1 else {}
+
+        indicator_results: dict[str, Any] = {
+            "rsi": rsi,
+            "macd": macd,
+            "stochastic": stochastic,
+            "cci": cci,
+            "williams_r": williams_r,
+            "adx": adx,
+            "obv": obv,
+        }
+        aggregate_signals = TechnicalIndicators.aggregate_signals(indicator_results)
+
         return {
             "daily_candles": daily_payload,
             "minute_candles": minute_payload,
@@ -78,6 +98,13 @@ class DataAggregator:
             "volume_analysis": volume_analysis,
             "sentiment": sentiment,
             "multi_timeframe": multi_tf,
+            "obv": obv,
+            "adx": adx,
+            "stochastic": stochastic,
+            "cci": cci,
+            "williams_r": williams_r,
+            "vwap": vwap,
+            "aggregate_signals": aggregate_signals,
         }
 
     def _acquire_broker(self) -> tuple[BrokerGateway, bool]:
