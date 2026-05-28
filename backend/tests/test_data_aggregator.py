@@ -137,6 +137,9 @@ class TestFetchMarketData:
             bb_lower=market_data["bb_lower"],
             current_position="FLAT",
             recent_trades=[],
+            rsi=market_data["rsi"],
+            macd=market_data["macd"],
+            volume_analysis=market_data["volume_analysis"],
         )
 
         assert "暂无可用历史日 K 数据" not in prompt
@@ -164,6 +167,28 @@ class TestFetchMarketData:
             bb_lower=data["bb_lower"],
             current_position="FLAT",
             recent_trades=[],
+            rsi=data["rsi"],
+            macd=data["macd"],
+            volume_analysis=data["volume_analysis"],
         )
         assert "暂无可用历史日 K 数据" in prompt
         assert "暂无可用 1 分钟 K 数据" in prompt
+
+
+class TestNewIndicators:
+    def test_fetch_market_data_includes_rsi_macd_volume(self) -> None:
+        broker = _FakeBroker(
+            daily=_build_candles(100.0, 30),
+            minute=_build_candles(100.0, 10),
+            quote_price=101.5,
+        )
+        aggregator = DataAggregator(broker=broker)
+        result = aggregator.fetch_market_data("AAPL.US", "US")
+
+        assert "rsi" in result
+        assert "macd" in result
+        assert "volume_analysis" in result
+        assert result["rsi"] > 0
+        assert "macd" in result["macd"]
+        assert "signal" in result["macd"]
+        assert result["volume_analysis"]["avg_volume"] > 0

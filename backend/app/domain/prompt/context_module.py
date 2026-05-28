@@ -87,4 +87,25 @@ class ContextModule(PromptModule):
                 f"量比 {volume_analysis['volume_ratio']:.2f} / {volume_analysis['trend']}"
             )
 
+        # Account & buying power
+        account_context_text = context.get("account_context_text")
+        if account_context_text:
+            lines.append("")
+            lines.append("## 账户与购买力")
+            lines.append(account_context_text)
+
+        # Recent 5-min prices
+        recent_price_context = context.get("recent_price_context")
+        if recent_price_context:
+            lines.append("")
+            lines.append("## 最近5分钟价格")
+            lines.append(recent_price_context)
+
+        # Recent LLM analysis
+        recent_analysis_context = context.get("recent_analysis_context")
+        if recent_analysis_context:
+            lines.append("")
+            lines.append("## 最近一次LLM分析")
+            lines.append(recent_analysis_context)
+
         return "\n".join(lines)

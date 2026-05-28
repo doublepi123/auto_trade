@@ -5,14 +5,18 @@ import statistics
 from typing import Any
 
 from app.core.broker import BrokerCandle, BrokerGateway
+from app.domain.analysis.technical_indicators import TechnicalIndicators
+from app.domain.prompt.context_module import ContextModule
+from app.domain.prompt.output_module import OutputModule
+from app.domain.prompt.prompt_builder import PromptBuilder
+from app.domain.prompt.strategy_module import StrategyModule
+from app.domain.prompt.system_module import SystemModule
 
 logger = logging.getLogger("auto_trade.data_aggregator")
 
 
 _DAILY_CANDLE_COUNT = 30
 _MINUTE_CANDLE_COUNT = 120
-_PROMPT_DAILY_CANDLES = 7
-_PROMPT_MINUTE_CANDLES = 30
 
 
 class DataAggregator:
@@ -44,9 +48,13 @@ class DataAggregator:
 
         atr = _compute_atr(daily_candles) if len(daily_candles) >= 5 else 0.0
         closes = [c.close for c in daily_candles]
+        volumes = [c.volume for c in daily_candles]
         bb_upper, bb_middle, bb_lower = (
             _compute_bollinger_bands(closes) if len(closes) >= 10 else (0.0, 0.0, 0.0)
         )
+        rsi = TechnicalIndicators.calculate_rsi(closes) if len(closes) >= 15 else 0.0
+        macd = TechnicalIndicators.calculate_macd(closes)
+        volume_analysis = TechnicalIndicators.analyze_volume(volumes)
 
         return {
             "daily_candles": daily_payload,
@@ -56,6 +64,9 @@ class DataAggregator:
             "bb_upper": bb_upper,
             "bb_middle": bb_middle,
             "bb_lower": bb_lower,
+            "rsi": rsi,
+            "macd": macd,
+            "volume_analysis": volume_analysis,
         }
 
     def _acquire_broker(self) -> tuple[BrokerGateway, bool]:
@@ -224,92 +235,44 @@ class DataAggregator:
         recent_prices: list[dict[str, Any]] | None = None,
         recent_analysis: dict[str, Any] | None = None,
         account_context: dict[str, Any] | None = None,
+        rsi: float = 0.0,
+        macd: dict[str, float] | None = None,
+        volume_analysis: dict[str, Any] | None = None,
     ) -> str:
-        """Build LLM prompt from aggregated market data."""
-        ohlcv_table = _render_daily_table(daily_candles[-_PROMPT_DAILY_CANDLES:])
-        minute_table = _render_minute_table(minute_candles[-_PROMPT_MINUTE_CANDLES:])
+        """Build LLM prompt using modular PromptBuilder."""
+        context: dict[str, Any] = {
+            "symbol": symbol,
+            "market": market,
+            "current_price": current_price,
+            "current_buy_low": current_buy_low,
+            "current_sell_high": current_sell_high,
+            "short_selling": short_selling,
+            "daily_candles": daily_candles,
+            "minute_candles": minute_candles,
+            "atr": atr,
+            "bb_upper": bb_upper,
+            "bb_middle": bb_middle,
+            "bb_lower": bb_lower,
+            "current_position": current_position,
+            "recent_trades": recent_trades,
+            "position_quantity": position_quantity,
+            "position_avg_price": position_avg_price,
+            "unrealized_pnl_pct": unrealized_pnl_pct,
+            "min_profit_amount": min_profit_amount,
+            "rsi": rsi,
+            "macd": macd or {"macd": 0.0, "signal": 0.0, "histogram": 0.0},
+            "volume_analysis": volume_analysis or {"avg_volume": 0.0, "volume_ratio": 0.0, "trend": "unknown"},
+            "account_context_text": DataAggregator._format_account_context(account_context),
+            "recent_price_context": DataAggregator._format_recent_prices(recent_prices),
+            "recent_analysis_context": DataAggregator._format_recent_analysis(recent_analysis),
+        }
 
-        trades_summary = "无"
-        if recent_trades:
-            trades_summary = "\n".join(
-                f"- {t.get('side', '')}: {t.get('quantity', 0)} @ {t.get('price', 0):.2f}"
-                for t in recent_trades[:3]
-            )
-
-        recent_price_context = DataAggregator._format_recent_prices(recent_prices)
-        recent_analysis_context = DataAggregator._format_recent_analysis(recent_analysis)
-        account_context_text = DataAggregator._format_account_context(account_context)
-
-        return f"""你是一个专业量化交易顾问。请基于以下市场数据、账户购买力、持仓成本和最近5分钟累次报价，为区间交易策略推荐买入下限（buy_low）和卖出上限（sell_high），并在信号特别明确时给出即时订单动作。
-
-## 交易目标
-- 期望以**少量多次**的方式尽可能**增加交易频次**，获取更高收益
-- 建议区间宽度尽量收窄，推荐控制在当前价格的 **±1×ATR** 范围内
-- buy_low 与 sell_high 的差值不宜过大，以便价格在较小区间内多次触发交易
-
-## 当前策略参数
-- 标的: {symbol} ({market})
-- 当前 buy_low: {current_buy_low:.2f}
-- 当前 sell_high: {current_sell_high:.2f}
-- 允许做空: {short_selling}
-- 单笔最低盈利金额: {min_profit_amount:.2f}（约束普通即时卖出/平仓和建议区间宽度；止损动作不受此限制）
-
-## 市场数据（最近日 K 线）
-{ohlcv_table}
-
-## 市场数据（最近 1 分钟 K 线）
-{minute_table}
-
-## 当前技术指标
-- ATR(14): {atr:.2f}
-- 布林带: 上轨 {bb_upper:.2f} / 中轨 {bb_middle:.2f} / 下轨 {bb_lower:.2f}
-- 当前价格: {current_price:.2f}
-- 当前持仓方向: {current_position}
-- 当前持仓数量: {position_quantity}
-- 持仓成本价: {position_avg_price:.2f}
-- 浮动盈亏比例: {unrealized_pnl_pct:.2f}%
-- 最近成交: {trades_summary}
-
-## 账户与购买力
-{account_context_text}
-
-## 最近5分钟价格
-{recent_price_context}
-
-## 最近一次LLM分析
-{recent_analysis_context}
-
-## 请输出以下 JSON 格式：
-{{
-  "analysis": "简短的市场分析（50字以内）",
-  "suggested_buy_low": 具体价格,
-  "suggested_sell_high": 具体价格,
-  "confidence_score": 0.0到1.0,
-  "reasoning": "简要推理过程",
-  "order_action": "NONE | BUY_NOW | SELL_NOW | SELL_SHORT_NOW | BUY_TO_COVER_NOW | STOP_LOSS_SELL_NOW | STOP_LOSS_COVER_NOW | CANCEL_PENDING | CANCEL_REPLACE",
-  "order_price": 具体挂单价格或 null,
-  "replacement_action": "NONE | BUY_NOW | SELL_NOW | SELL_SHORT_NOW | BUY_TO_COVER_NOW | STOP_LOSS_SELL_NOW | STOP_LOSS_COVER_NOW",
-  "replacement_price": 撤单重挂的新价格或 null,
-  "order_reason": "如需立刻交易或撤单重挂，说明原因；否则为空字符串"
-}}
-
-注意：
-1. sell_high 必须严格大于 buy_low
-2. ** sell_high 必须严格大于当前价格 {current_price:.2f}，buy_low 必须严格小于当前价格 {current_price:.2f} **
-3. confidence_score >= 0.7 才建议采纳
-4. 避免给出与现有持仓方向矛盾的区间
-5. 区间宽度应基于 ATR 尽量收窄，促进高频交易
-6. FLAT 状态可参考当前价格和 ATR；已有持仓时必须结合持仓成本价、持仓数量和浮动盈亏设计区间，不要仅按当前价格 ±1% 滚动追价
-7. LONG 状态下，buy_low 是加仓触发价，应结合成本价和回撤幅度；sell_high 应优先考虑持仓成本价，不要在未说明止损的情况下长期低于成本价
-8. 必须综合最近5分钟价格走势、当前价格、持仓成本和最近一次LLM分析结果；如果最新价格已明显偏离旧分析，请说明维持或调整区间的理由
-9. 单笔最低盈利金额会约束 suggested_buy_low 与 suggested_sell_high 的区间宽度，也会作为普通 SELL_NOW、BUY_TO_COVER_NOW 的执行门槛，避免手续费成本吞噬收益；止损动作不受此门槛限制
-10. 当价格已到达卖出价、需要普通平仓或撤单重挂时，必须在 order_reason 中说明预估收益已覆盖最低盈利门槛；止损信号明确时可以直接给出止损动作
-11. 对美股/US 标的，价格波动较快；当信号、购买力和风险收益支持交易时，优先采用“先挂单”策略，不要因为担心价格变化而只给 NONE
-12. 若已有当前挂单且你产生了新的即时动作或新价格，按“撤旧单再重挂”的策略输出 CANCEL_REPLACE，并给出 replacement_action 与 replacement_price
-13. 必须主动评估止损：若 LONG 持仓下最近5分钟价格连续下破关键支撑、跌幅扩大、买盘无法支撑或出现开始崩盘迹象，应输出 STOP_LOSS_SELL_NOW 及时卖出；若 SHORT 持仓出现相反方向的逼空风险，应输出 STOP_LOSS_COVER_NOW
-14. 止损动作允许以控制亏损为优先目标，但必须在 order_reason 中明确写出支撑失效、崩盘、量价恶化或逼空风险等依据
-15. 默认 order_action 使用 NONE；只有当最近5分钟累次数据、购买力、持仓成本和风险收益都支持“立即行动”时，才输出 BUY_NOW/SELL_NOW/STOP_LOSS_SELL_NOW 等动作
-16. 不允许输出 JSON 以外的解释文本"""
+        builder = PromptBuilder()
+        builder.add_module(SystemModule())
+        builder.add_module(ContextModule())
+        builder.add_module(StrategyModule())
+        builder.add_module(OutputModule())
+        return builder.build(context)
 
 
 def _candle_to_dict_daily(candle: BrokerCandle) -> dict[str, Any]:
@@ -332,38 +295,6 @@ def _candle_to_dict_minute(candle: BrokerCandle) -> dict[str, Any]:
         "close": candle.close,
         "volume": candle.volume,
     }
-
-
-def _render_daily_table(rows: list[dict[str, Any]]) -> str:
-    if not rows:
-        return "（暂无可用历史日 K 数据）"
-    table = "| 日期 | 开盘 | 最高 | 最低 | 收盘 | 成交量 |\n|------|------|------|------|------|--------|"
-    for c in rows:
-        table += (
-            f"\n| {c.get('date', '-')} "
-            f"| {float(c.get('open', 0)):.2f} "
-            f"| {float(c.get('high', 0)):.2f} "
-            f"| {float(c.get('low', 0)):.2f} "
-            f"| {float(c.get('close', 0)):.2f} "
-            f"| {int(c.get('volume', 0))} |"
-        )
-    return table
-
-
-def _render_minute_table(rows: list[dict[str, Any]]) -> str:
-    if not rows:
-        return "（暂无可用 1 分钟 K 数据）"
-    table = "| 时间 | 开盘 | 最高 | 最低 | 收盘 | 成交量 |\n|------|------|------|------|------|--------|"
-    for c in rows:
-        table += (
-            f"\n| {c.get('time', '-')} "
-            f"| {float(c.get('open', 0)):.2f} "
-            f"| {float(c.get('high', 0)):.2f} "
-            f"| {float(c.get('low', 0)):.2f} "
-            f"| {float(c.get('close', 0)):.2f} "
-            f"| {int(c.get('volume', 0))} |"
-        )
-    return table
 
 
 def _compute_atr(candles: list[BrokerCandle], period: int = 14) -> float:
