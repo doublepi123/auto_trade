@@ -1,6 +1,15 @@
 from __future__ import annotations
 
 import statistics
+from typing import TypedDict
+
+
+class VolumeAnalysis(TypedDict):
+    """Volume analysis result with typed fields."""
+
+    avg_volume: float
+    volume_ratio: float
+    trend: str
 
 
 class TechnicalIndicators:
@@ -65,10 +74,10 @@ class TechnicalIndicators:
         }
 
     @staticmethod
-    def analyze_volume(volumes: list[float], lookback: int = 20) -> dict[str, float | str]:
+    def analyze_volume(volumes: list[float], lookback: int = 20) -> VolumeAnalysis:
         """Analyze volume relative to recent average."""
         if not volumes:
-            return {"avg_volume": 0.0, "volume_ratio": 0.0, "trend": "unknown"}
+            return VolumeAnalysis(avg_volume=0.0, volume_ratio=0.0, trend="unknown")
 
         recent = volumes[-lookback:] if len(volumes) >= lookback else volumes
         avg_vol = statistics.mean(recent[:-1]) if len(recent) > 1 else recent[0]
@@ -86,4 +95,4 @@ class TechnicalIndicators:
         else:
             trend = "normal"
 
-        return {"avg_volume": avg_vol, "volume_ratio": ratio, "trend": trend}
+        return VolumeAnalysis(avg_volume=avg_vol, volume_ratio=ratio, trend=trend)
