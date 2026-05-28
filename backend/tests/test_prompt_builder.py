@@ -140,3 +140,27 @@ class TestStrategyModule:
         assert "持仓数量: 100.00" in result
         assert "持仓成本价: 200.00" in result
         assert "BUY" in result
+
+
+from app.domain.prompt.output_module import OutputModule
+
+
+class TestOutputModule:
+    def test_renders_json_format(self) -> None:
+        module = OutputModule()
+        context = {"current_price": 200.0}
+        result = module.render(context)
+        assert "suggested_buy_low" in result
+        assert "suggested_sell_high" in result
+        assert "confidence_score" in result
+        assert "order_action" in result
+        assert "200.00" in result
+
+    def test_includes_all_constraints(self) -> None:
+        module = OutputModule()
+        context = {"current_price": 150.0}
+        result = module.render(context)
+        assert "sell_high 必须严格大于 buy_low" in result
+        assert "sell_high 必须严格大于当前价格" in result
+        assert "buy_low 必须严格小于当前价格" in result
+        assert "confidence_score >= 0.7" in result
