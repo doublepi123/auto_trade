@@ -9,8 +9,6 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.domain.experiment.ab_test_manager import ABTestManager
 from app.schemas import (
-    ExperimentResultResponse,
-    ExperimentSummary,
     MessageResponse,
     PromptVersionCreate,
     PromptVersionResponse,
