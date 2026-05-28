@@ -257,6 +257,36 @@ class TechnicalIndicators:
 
         return {"stoch_k": stoch_k, "stoch_d": stoch_d, "signal": signal}
 
+    @staticmethod
+    def calculate_cci(
+        highs: list[float],
+        lows: list[float],
+        closes: list[float],
+        period: int = 20,
+    ) -> dict[str, Any]:
+        """Calculate Commodity Channel Index."""
+        if len(highs) < period or len(highs) != len(lows) or len(highs) != len(closes):
+            return {"cci_value": 0.0, "signal": "neutral"}
+
+        typical_prices = [(h + l + c) / 3.0 for h, l, c in zip(highs, lows, closes)]
+        recent_tp = typical_prices[-period:]
+        sma_tp = sum(recent_tp) / period
+        mean_deviation = sum(abs(tp - sma_tp) for tp in recent_tp) / period
+
+        if mean_deviation == 0:
+            cci_value = 0.0
+        else:
+            cci_value = (typical_prices[-1] - sma_tp) / (0.015 * mean_deviation)
+
+        if cci_value > 100:
+            signal = "overbought"
+        elif cci_value < -100:
+            signal = "oversold"
+        else:
+            signal = "neutral"
+
+        return {"cci_value": cci_value, "signal": signal}
+
     @classmethod
     def analyze_multi_timeframe(
         cls,

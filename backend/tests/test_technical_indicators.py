@@ -249,3 +249,41 @@ class TestStochastic:
         assert result["stoch_k"] == 50.0
         assert result["stoch_d"] == 50.0
         assert result["signal"] == "neutral"
+
+
+class TestCCI:
+    """Tests for Commodity Channel Index calculation."""
+
+    def test_cci_overbought(self) -> None:
+        highs = [float(100 + i * 3) for i in range(25)]
+        lows = [float(95 + i * 3) for i in range(25)]
+        closes = [float(98 + i * 3) for i in range(25)]
+        result = TechnicalIndicators.calculate_cci(highs, lows, closes)
+        assert result["cci_value"] > 100
+        assert result["signal"] == "overbought"
+
+    def test_cci_oversold(self) -> None:
+        highs = [float(200 - i * 3) for i in range(25)]
+        lows = [float(195 - i * 3) for i in range(25)]
+        closes = [float(198 - i * 3) for i in range(25)]
+        result = TechnicalIndicators.calculate_cci(highs, lows, closes)
+        assert result["cci_value"] < -100
+        assert result["signal"] == "oversold"
+
+    def test_cci_neutral(self) -> None:
+        highs = [float(102 + (i % 4) * 2) for i in range(25)]
+        lows = [float(98 + (i % 4) * 2) for i in range(25)]
+        closes = [float(100 + (i % 4) * 2) for i in range(25)]
+        result = TechnicalIndicators.calculate_cci(highs, lows, closes)
+        assert -100 <= result["cci_value"] <= 100
+        assert result["signal"] == "neutral"
+
+    def test_cci_insufficient_data(self) -> None:
+        result = TechnicalIndicators.calculate_cci([100.0], [95.0], [98.0])
+        assert result["cci_value"] == 0.0
+        assert result["signal"] == "neutral"
+
+    def test_cci_empty_input(self) -> None:
+        result = TechnicalIndicators.calculate_cci([], [], [])
+        assert result["cci_value"] == 0.0
+        assert result["signal"] == "neutral"
