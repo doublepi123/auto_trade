@@ -9,8 +9,10 @@ from app.domain.analysis.technical_indicators import TechnicalIndicators
 from app.domain.prompt.context_module import ContextModule
 from app.domain.prompt.output_module import OutputModule
 from app.domain.prompt.prompt_builder import PromptBuilder
+from app.domain.prompt.sentiment_module import SentimentModule
 from app.domain.prompt.strategy_module import StrategyModule
 from app.domain.prompt.system_module import SystemModule
+from app.domain.sentiment.market_sentiment import MarketSentimentAnalyzer
 
 logger = logging.getLogger("auto_trade.data_aggregator")
 
@@ -56,6 +58,10 @@ class DataAggregator:
         macd = TechnicalIndicators.calculate_macd(closes)
         volume_analysis = TechnicalIndicators.analyze_volume(volumes)
 
+        price_changes = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
+        sentiment_analyzer = MarketSentimentAnalyzer()
+        sentiment = sentiment_analyzer.analyze_from_price_changes(price_changes[-10:])
+
         return {
             "daily_candles": daily_payload,
             "minute_candles": minute_payload,
@@ -67,6 +73,7 @@ class DataAggregator:
             "rsi": rsi,
             "macd": macd,
             "volume_analysis": volume_analysis,
+            "sentiment": sentiment,
         }
 
     def _acquire_broker(self) -> tuple[BrokerGateway, bool]:
@@ -238,6 +245,7 @@ class DataAggregator:
         rsi: float = 0.0,
         macd: dict[str, float] | None = None,
         volume_analysis: dict[str, Any] | None = None,
+        sentiment: dict[str, Any] | None = None,
     ) -> str:
         """Build LLM prompt using modular PromptBuilder."""
         context: dict[str, Any] = {
@@ -262,6 +270,7 @@ class DataAggregator:
             "rsi": rsi,
             "macd": macd or {"macd": 0.0, "signal": 0.0, "histogram": 0.0},
             "volume_analysis": volume_analysis or {"avg_volume": 0.0, "volume_ratio": 0.0, "trend": "unknown"},
+            "sentiment": sentiment or {"sentiment": "neutral", "score": 0.0, "description": "无"},
             "account_context_text": DataAggregator._format_account_context(account_context),
             "recent_price_context": DataAggregator._format_recent_prices(recent_prices),
             "recent_analysis_context": DataAggregator._format_recent_analysis(recent_analysis),
@@ -270,6 +279,7 @@ class DataAggregator:
         builder = PromptBuilder()
         builder.add_module(SystemModule())
         builder.add_module(ContextModule())
+        builder.add_module(SentimentModule())
         builder.add_module(StrategyModule())
         builder.add_module(OutputModule())
         return builder.build(context)

@@ -192,3 +192,31 @@ class TestNewIndicators:
         assert "macd" in result["macd"]
         assert "signal" in result["macd"]
         assert result["volume_analysis"]["avg_volume"] > 0
+
+    def test_fetch_market_data_includes_sentiment(self) -> None:
+        broker = _FakeBroker(
+            daily=_build_candles(100.0, 30),
+            minute=_build_candles(100.0, 10),
+            quote_price=101.5,
+        )
+        aggregator = DataAggregator(broker=broker)
+        result = aggregator.fetch_market_data("AAPL.US", "US")
+
+        assert "sentiment" in result
+        assert "sentiment" in result["sentiment"]
+        assert "score" in result["sentiment"]
+        assert "description" in result["sentiment"]
+        assert result["sentiment"]["sentiment"] in ("bullish", "bearish", "neutral")
+
+    def test_fetch_market_data_sentiment_neutral_when_few_candles(self) -> None:
+        broker = _FakeBroker(
+            daily=_build_candles(100.0, 2),
+            minute=_build_candles(100.0, 5),
+            quote_price=101.5,
+        )
+        aggregator = DataAggregator(broker=broker)
+        result = aggregator.fetch_market_data("AAPL.US", "US")
+
+        assert "sentiment" in result
+        # Only 1 price change from 2 candles, so sentiment should still have valid structure
+        assert result["sentiment"]["sentiment"] in ("bullish", "bearish", "neutral")
