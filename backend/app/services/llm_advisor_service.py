@@ -73,7 +73,10 @@ class LLMAdvisorService:
         self._data_aggregator = DataAggregator(broker=broker)
 
     def _get_active_prompt_template(self) -> str | None:
-        """Load active prompt template from experiment if available."""
+        """Load active prompt template from experiment if available.
+
+        TODO: Integrate into analyze/preview to support A/B testing of prompt variants.
+        """
         try:
             from app.domain.experiment.ab_test_manager import ABTestManager
 
@@ -129,6 +132,9 @@ class LLMAdvisorService:
                 "bb_upper": 0.0,
                 "bb_middle": 0.0,
                 "bb_lower": 0.0,
+                "rsi": 0.0,
+                "macd": {"macd": 0.0, "signal": 0.0, "histogram": 0.0},
+                "volume_analysis": {"avg_volume": 0.0, "volume_ratio": 0.0, "trend": "unknown"},
             }
 
         prompt = self._data_aggregator.build_prompt(
@@ -270,6 +276,9 @@ class LLMAdvisorService:
                 "bb_upper": 0.0,
                 "bb_middle": 0.0,
                 "bb_lower": 0.0,
+                "rsi": 0.0,
+                "macd": {"macd": 0.0, "signal": 0.0, "histogram": 0.0},
+                "volume_analysis": {"avg_volume": 0.0, "volume_ratio": 0.0, "trend": "unknown"},
             }
 
         prompt_price = market_data.get("current_price") or current_price

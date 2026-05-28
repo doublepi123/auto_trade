@@ -1,0 +1,17 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/pyright/main/packages/vscode-pyright/schemas/pyrightconfig.schema.json",
+  "include": ["backend/app", "backend/tests"],
+  "exclude": [
+    "**/__pycache__",
+    "backend/.venv",
+    "backend/data",
+    "data",
+    "frontend",
+    "node_modules"
+  ],
+  "extraPaths": ["backend"],
+  "venvPath": "backend",
+  "venv": ".venv",
+  "pythonVersion": "3.11",
+  "typeCheckingMode": "off"
+}
