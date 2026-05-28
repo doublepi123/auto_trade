@@ -164,3 +164,75 @@ class TestOutputModule:
         assert "sell_high 必须严格大于当前价格" in result
         assert "buy_low 必须严格小于当前价格" in result
         assert "confidence_score >= 0.7" in result
+
+
+from app.domain.prompt.prompt_builder import PromptBuilder
+
+
+class TestPromptBuilder:
+    def _full_context(self) -> dict:
+        return {
+            "symbol": "AAPL.US",
+            "market": "US",
+            "current_price": 200.0,
+            "current_buy_low": 190.0,
+            "current_sell_high": 210.0,
+            "short_selling": False,
+            "min_profit_amount": 5.0,
+            "current_position": "FLAT",
+            "position_quantity": 0.0,
+            "position_avg_price": 0.0,
+            "unrealized_pnl_pct": 0.0,
+            "recent_trades": [],
+            "daily_candles": [
+                {"date": "2026-05-20", "open": 195.0, "high": 202.0, "low": 194.0, "close": 200.0, "volume": 50000},
+            ],
+            "minute_candles": [],
+            "atr": 3.5,
+            "bb_upper": 210.0,
+            "bb_middle": 200.0,
+            "bb_lower": 190.0,
+            "rsi": 55.0,
+            "macd": {"macd": 1.2, "signal": 0.8, "histogram": 0.4},
+            "volume_analysis": {"avg_volume": 55000.0, "volume_ratio": 1.1, "trend": "normal"},
+            "recent_prices": [],
+            "recent_analysis": None,
+            "account_context": None,
+        }
+
+    def test_build_with_all_modules(self) -> None:
+        builder = PromptBuilder()
+        builder.add_module(SystemModule())
+        builder.add_module(ContextModule())
+        builder.add_module(StrategyModule())
+        builder.add_module(OutputModule())
+
+        prompt = builder.build(self._full_context())
+        assert "量化交易顾问" in prompt
+        assert "2026-05-20" in prompt
+        assert "FLAT" in prompt
+        assert "suggested_buy_low" in prompt
+
+    def test_build_with_no_modules_returns_empty(self) -> None:
+        builder = PromptBuilder()
+        result = builder.build(self._full_context())
+        assert result == ""
+
+    def test_build_preserves_module_order(self) -> None:
+        builder = PromptBuilder()
+        builder.add_module(SystemModule())
+        builder.add_module(OutputModule())
+
+        prompt = builder.build(self._full_context())
+        system_pos = prompt.index("量化交易顾问")
+        output_pos = prompt.index("suggested_buy_low")
+        assert system_pos < output_pos
+
+    def test_modules_are_independent(self) -> None:
+        """Each module renders independently; missing keys default gracefully."""
+        builder = PromptBuilder()
+        builder.add_module(ContextModule())
+        builder.add_module(StrategyModule())
+
+        prompt = builder.build({"symbol": "X.US", "market": "US"})
+        assert "X.US" in prompt
