@@ -92,3 +92,51 @@ class TestContextModule:
         assert "RSI" in result
         assert "62.50" in result
         assert "MACD" in result
+
+
+from app.domain.prompt.strategy_module import StrategyModule
+
+
+class TestStrategyModule:
+    def test_renders_flat_position(self) -> None:
+        module = StrategyModule()
+        context = {
+            "symbol": "AAPL.US",
+            "market": "US",
+            "current_buy_low": 190.0,
+            "current_sell_high": 210.0,
+            "short_selling": False,
+            "min_profit_amount": 5.0,
+            "current_position": "FLAT",
+            "position_quantity": 0.0,
+            "position_avg_price": 0.0,
+            "unrealized_pnl_pct": 0.0,
+            "recent_trades": [],
+        }
+        result = module.render(context)
+        assert "FLAT" in result
+        assert "190.00" in result
+        assert "210.00" in result
+
+    def test_renders_long_position_with_trades(self) -> None:
+        module = StrategyModule()
+        context = {
+            "symbol": "AAPL.US",
+            "market": "US",
+            "current_buy_low": 195.0,
+            "current_sell_high": 210.0,
+            "short_selling": False,
+            "min_profit_amount": 5.0,
+            "current_position": "LONG",
+            "position_quantity": 100.0,
+            "position_avg_price": 200.0,
+            "unrealized_pnl_pct": 2.5,
+            "recent_trades": [
+                {"side": "BUY", "quantity": 100, "price": 200.0},
+            ],
+        }
+        result = module.render(context)
+        assert "LONG" in result
+        assert "100" in result
+        assert "200.00" in result
+        assert "BUY" in result
