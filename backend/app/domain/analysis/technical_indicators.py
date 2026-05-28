@@ -143,6 +143,85 @@ class TechnicalIndicators:
         }
 
     @classmethod
+    def calculate_adx(
+        cls,
+        highs: list[float],
+        lows: list[float],
+        closes: list[float],
+        period: int = 14,
+    ) -> dict[str, Any]:
+        """Calculate Average Directional Index."""
+        if len(highs) < period + 1 or len(highs) != len(lows) or len(highs) != len(closes):
+            return {"adx_value": 0.0, "trend_strength": "none", "di_plus": 0.0, "di_minus": 0.0}
+
+        plus_dm: list[float] = []
+        minus_dm: list[float] = []
+        true_ranges: list[float] = []
+
+        for i in range(1, len(highs)):
+            high_diff = highs[i] - highs[i - 1]
+            low_diff = lows[i - 1] - lows[i]
+
+            plus_dm.append(high_diff if high_diff > low_diff and high_diff > 0 else 0.0)
+            minus_dm.append(low_diff if low_diff > high_diff and low_diff > 0 else 0.0)
+
+            true_ranges.append(max(
+                highs[i] - lows[i],
+                abs(highs[i] - closes[i - 1]),
+                abs(lows[i] - closes[i - 1]),
+            ))
+
+        def _smooth(values: list[float], p: int) -> list[float]:
+            if len(values) < p:
+                return []
+            result = [sum(values[:p])]
+            for i in range(p, len(values)):
+                result.append(result[-1] - result[-1] / p + values[i])
+            return result
+
+        smoothed_plus_dm = _smooth(plus_dm, period)
+        smoothed_minus_dm = _smooth(minus_dm, period)
+        smoothed_tr = _smooth(true_ranges, period)
+
+        if not smoothed_plus_dm or not smoothed_minus_dm or not smoothed_tr:
+            return {"adx_value": 0.0, "trend_strength": "none", "di_plus": 0.0, "di_minus": 0.0}
+
+        di_plus = [100.0 * pdm / tr if tr > 0 else 0.0
+                   for pdm, tr in zip(smoothed_plus_dm, smoothed_tr)]
+        di_minus = [100.0 * mdm / tr if tr > 0 else 0.0
+                    for mdm, tr in zip(smoothed_minus_dm, smoothed_tr)]
+
+        dx: list[float] = []
+        for dp, dm in zip(di_plus, di_minus):
+            total = dp + dm
+            dx.append(100.0 * abs(dp - dm) / total if total > 0 else 0.0)
+
+        if len(dx) < period:
+            adx_value = sum(dx) / len(dx) if dx else 0.0
+        else:
+            adx_value = sum(dx[:period]) / period
+            for i in range(period, len(dx)):
+                adx_value = (adx_value * (period - 1) + dx[i]) / period
+
+        if adx_value < 20:
+            trend_strength = "none"
+        elif adx_value < 25:
+            trend_strength = "weak"
+        elif adx_value < 40:
+            trend_strength = "moderate"
+        elif adx_value < 60:
+            trend_strength = "strong"
+        else:
+            trend_strength = "extreme"
+
+        return {
+            "adx_value": adx_value,
+            "trend_strength": trend_strength,
+            "di_plus": di_plus[-1] if di_plus else 0.0,
+            "di_minus": di_minus[-1] if di_minus else 0.0,
+        }
+
+    @classmethod
     def analyze_multi_timeframe(
         cls,
         daily_closes: list[float],

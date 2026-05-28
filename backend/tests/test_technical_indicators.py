@@ -157,3 +157,47 @@ class TestOBV:
         # OBV: 0, +1000, -3000, -2000, -2500 (falling trend)
         # Price is up from 100 to 105, OBV is down from 0 to -2500
         assert result["price_obv_divergence"] == "bearish"
+
+
+class TestADX:
+    """Tests for Average Directional Index calculation."""
+
+    def test_adx_strong_uptrend(self) -> None:
+        """ADX should be high in a strong uptrend."""
+        # Simulate strong uptrend: each bar makes new highs
+        highs = [float(100 + i * 2) for i in range(20)]
+        lows = [float(98 + i * 2) for i in range(20)]
+        closes = [float(99 + i * 2) for i in range(20)]
+        result = TechnicalIndicators.calculate_adx(highs, lows, closes)
+        assert result["adx_value"] > 25  # Should show trend
+        assert result["trend_strength"] in ("moderate", "strong", "extreme")
+
+    def test_adx_ranging_market(self) -> None:
+        """ADX should be low in a ranging market."""
+        # Simulate ranging market: prices oscillate
+        highs = [102.0, 101.0, 102.0, 101.0, 102.0, 101.0, 102.0, 101.0,
+                 102.0, 101.0, 102.0, 101.0, 102.0, 101.0, 102.0, 101.0,
+                 102.0, 101.0, 102.0, 101.0]
+        lows = [98.0, 99.0, 98.0, 99.0, 98.0, 99.0, 98.0, 99.0,
+                98.0, 99.0, 98.0, 99.0, 98.0, 99.0, 98.0, 99.0,
+                98.0, 99.0, 98.0, 99.0]
+        closes = [100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0,
+                  100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0,
+                  100.0, 100.0, 100.0, 100.0]
+        result = TechnicalIndicators.calculate_adx(highs, lows, closes)
+        assert result["adx_value"] < 25  # Should show no trend
+        assert result["trend_strength"] in ("none", "weak")
+
+    def test_adx_insufficient_data(self) -> None:
+        """ADX should return default for insufficient data."""
+        result = TechnicalIndicators.calculate_adx([100.0], [98.0], [99.0])
+        assert result["adx_value"] == 0.0
+        assert result["trend_strength"] == "none"
+        assert result["di_plus"] == 0.0
+        assert result["di_minus"] == 0.0
+
+    def test_adx_empty_input(self) -> None:
+        """ADX should return default for empty input."""
+        result = TechnicalIndicators.calculate_adx([], [], [])
+        assert result["adx_value"] == 0.0
+        assert result["trend_strength"] == "none"
