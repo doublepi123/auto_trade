@@ -573,6 +573,97 @@ def test_preview_endpoint_requires_api_key_in_production(monkeypatch) -> None:
     assert response.status_code == 401
 
 
+def test_analyze_passes_new_indicators_to_prompt(monkeypatch) -> None:
+    """Verify RSI, MACD, volume_analysis are included in prompt context."""
+    from app.services.data_aggregator import DataAggregator
+
+    captured_prompt: dict[str, object] = {}
+
+    def mock_fetch(self, symbol, market):
+        return {
+            "daily_candles": [],
+            "minute_candles": [],
+            "current_price": 100.0,
+            "atr": 3.0,
+            "bb_upper": 110.0,
+            "bb_middle": 100.0,
+            "bb_lower": 90.0,
+            "rsi": 65.0,
+            "macd": {"macd": 1.5, "signal": 1.0, "histogram": 0.5},
+            "volume_analysis": {"avg_volume": 50000.0, "volume_ratio": 1.2, "trend": "normal"},
+        }
+
+    original_build = DataAggregator.build_prompt
+
+    def capturing_build(**kwargs):
+        captured_prompt.update(kwargs)
+        return original_build(**kwargs)
+
+    monkeypatch.setattr(DataAggregator, "fetch_market_data", mock_fetch)
+    monkeypatch.setattr(DataAggregator, "build_prompt", staticmethod(capturing_build))
+
+    import app.config
+    import app.services.llm_advisor_service as service_module
+
+    monkeypatch.setattr(app.config.settings, "deepseek_api_key", "test-key")
+    monkeypatch.setattr(service_module, "_LAST_ANALYSIS_TIMESTAMP", 0.0)
+    monkeypatch.setattr(
+        service_module.httpx,
+        "post",
+        lambda *args, **kwargs: _FakeSuccessResponse(),
+    )
+    monkeypatch.setattr(
+        service_module.LLMAdvisorService,
+        "_record_analysis",
+        lambda self, db, result, interval: datetime(2026, 5, 28, 12, 0, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(
+        service_module.LLMAdvisorService,
+        "_record_interaction",
+        staticmethod(lambda **kwargs: 1),
+    )
+
+    advisor = LLMAdvisorService()
+    result = advisor.analyze(
+        symbol="AAPL.US",
+        market="US",
+        current_price=100.0,
+        current_buy_low=90.0,
+        current_sell_high=110.0,
+        short_selling=False,
+        current_position="FLAT",
+        recent_trades=[],
+        force=True,
+    )
+
+    assert result["success"] is True
+    assert captured_prompt["rsi"] == 65.0
+    assert captured_prompt["macd"] == {"macd": 1.5, "signal": 1.0, "histogram": 0.5}
+    assert captured_prompt["volume_analysis"] == {
+        "avg_volume": 50000.0,
+        "volume_ratio": 1.2,
+        "trend": "normal",
+    }
+
+
+class _FakeSuccessResponse:
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> dict:
+        return {
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "message": {
+                        "content": '{"suggested_buy_low": 95.0, "suggested_sell_high": 105.0, "confidence_score": 0.8, "analysis": "test"}',
+                    },
+                }
+            ],
+            "usage": {},
+        }
+
+
 def test_preview_endpoint_allows_missing_api_key_header_in_dev(monkeypatch) -> None:
     from fastapi.testclient import TestClient
 

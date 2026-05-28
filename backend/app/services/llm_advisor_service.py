@@ -72,6 +72,22 @@ class LLMAdvisorService:
     def __init__(self, broker: BrokerGateway | None = None) -> None:
         self._data_aggregator = DataAggregator(broker=broker)
 
+    def _get_active_prompt_template(self) -> str | None:
+        """Load active prompt template from experiment if available."""
+        try:
+            from app.domain.experiment.ab_test_manager import ABTestManager
+
+            db = SessionLocal()
+            try:
+                manager = ABTestManager(db)
+                active = manager.get_active_version()
+                return active.template if active else None
+            finally:
+                db.close()
+        except Exception:
+            logger.debug("no active experiment variant available")
+            return None
+
     def analyze(
         self,
         symbol: str,
@@ -137,6 +153,9 @@ class LLMAdvisorService:
             recent_prices=recent_prices,
             recent_analysis=recent_analysis,
             account_context=account_context,
+            rsi=market_data.get("rsi", 0.0),
+            macd=market_data.get("macd"),
+            volume_analysis=market_data.get("volume_analysis"),
         )
         context_snapshot = {
             "symbol": symbol,
@@ -274,6 +293,9 @@ class LLMAdvisorService:
             recent_trades=[],
             min_profit_amount=min_profit_amount,
             account_context=account_context,
+            rsi=market_data.get("rsi", 0.0),
+            macd=market_data.get("macd"),
+            volume_analysis=market_data.get("volume_analysis"),
         )
         context_snapshot = {
             "symbol": symbol,
