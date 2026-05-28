@@ -12,7 +12,7 @@ class ABTestManager:
     """Manages prompt versions and A/B test experiments."""
 
     def __init__(self, db: Session) -> None:
-        self.db = db
+        self.db: Session = db
 
     def create_version(
         self, name: str, version: str, description: str, template: str
@@ -43,7 +43,7 @@ class ABTestManager:
         )
 
     def activate_version(self, version_id: int) -> None:
-        self.db.query(PromptVersion).update({PromptVersion.is_active: False})
+        _ = self.db.query(PromptVersion).update({PromptVersion.is_active: False})
         version = self.db.get(PromptVersion, version_id)
         if version is None:
             raise ValueError(f"PromptVersion {version_id} not found")
@@ -61,6 +61,7 @@ class ABTestManager:
 
     def record_result(
         self,
+        *,
         experiment_name: str,
         variant_name: str,
         interaction_id: int | None = None,

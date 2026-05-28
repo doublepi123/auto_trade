@@ -86,9 +86,18 @@ class TestABTestManager:
 
     def test_get_experiment_summary(self, db_session: Session) -> None:
         manager = ABTestManager(db_session)
-        manager.record_result("exp1", "v1", 1, "BUY_NOW", "UP", 50.0, True)
-        manager.record_result("exp1", "v1", 2, "SELL_NOW", "DOWN", -20.0, False)
-        manager.record_result("exp1", "v2", 3, "BUY_NOW", "UP", 30.0, True)
+        manager.record_result(
+            experiment_name="exp1", variant_name="v1", interaction_id=1,
+            order_action="BUY_NOW", predicted_direction="UP", actual_pnl=50.0, was_profitable=True,
+        )
+        manager.record_result(
+            experiment_name="exp1", variant_name="v1", interaction_id=2,
+            order_action="SELL_NOW", predicted_direction="DOWN", actual_pnl=-20.0, was_profitable=False,
+        )
+        manager.record_result(
+            experiment_name="exp1", variant_name="v2", interaction_id=3,
+            order_action="BUY_NOW", predicted_direction="UP", actual_pnl=30.0, was_profitable=True,
+        )
 
         summary = manager.get_experiment_summary("exp1")
         assert len(summary) == 2
