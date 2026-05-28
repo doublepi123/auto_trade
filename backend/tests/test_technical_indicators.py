@@ -103,3 +103,57 @@ class TestMultiTimeframe:
         result = TechnicalIndicators.analyze_multi_timeframe([100.0], [100.0])
         assert result["daily_trend"] == "neutral"
         assert result["minute_trend"] == "neutral"
+
+
+class TestOBV:
+    """Tests for On-Balance Volume calculation."""
+
+    def test_obv_basic_uptrend(self) -> None:
+        """OBV should increase when price closes higher."""
+        closes = [100.0, 101.0, 102.0, 103.0, 104.0]
+        volumes = [1000.0, 1200.0, 1100.0, 1300.0, 1400.0]
+        result = TechnicalIndicators.calculate_obv(closes, volumes)
+        # Each close > previous, so OBV accumulates all volumes
+        assert result["obv_values"] == [0.0, 1200.0, 2300.0, 3600.0, 5000.0]
+        assert result["obv_trend"] == "rising"
+
+    def test_obv_basic_downtrend(self) -> None:
+        """OBV should decrease when price closes lower."""
+        closes = [104.0, 103.0, 102.0, 101.0, 100.0]
+        volumes = [1000.0, 1200.0, 1100.0, 1300.0, 1400.0]
+        result = TechnicalIndicators.calculate_obv(closes, volumes)
+        # Each close < previous, so OBV subtracts all volumes
+        assert result["obv_values"] == [0.0, -1200.0, -2300.0, -3600.0, -5000.0]
+        assert result["obv_trend"] == "falling"
+
+    def test_obv_mixed_movement(self) -> None:
+        """OBV should handle mixed price movements correctly."""
+        closes = [100.0, 102.0, 101.0, 103.0, 102.0]
+        volumes = [1000.0, 1200.0, 1100.0, 1300.0, 1400.0]
+        result = TechnicalIndicators.calculate_obv(closes, volumes)
+        # Day 1: +1200, Day 2: -1100, Day 3: +1300, Day 4: -1400
+        assert result["obv_values"] == [0.0, 1200.0, 100.0, 1400.0, 0.0]
+        assert result["obv_trend"] == "flat"
+
+    def test_obv_empty_input(self) -> None:
+        """OBV should return empty result for empty input."""
+        result = TechnicalIndicators.calculate_obv([], [])
+        assert result["obv_values"] == []
+        assert result["obv_trend"] == "flat"
+        assert result["price_obv_divergence"] == "none"
+
+    def test_obv_insufficient_data(self) -> None:
+        """OBV should handle single data point."""
+        result = TechnicalIndicators.calculate_obv([100.0], [1000.0])
+        assert result["obv_values"] == [0.0]
+        assert result["obv_trend"] == "flat"
+
+    def test_obv_price_obv_divergence_bearish(self) -> None:
+        """Detect bearish divergence: price rising but OBV falling."""
+        # Price: 100 -> 105 (up), but volumes decreasing on up days
+        closes = [100.0, 102.0, 101.0, 103.0, 105.0]
+        volumes = [5000.0, 1000.0, 4000.0, 1000.0, 500.0]
+        result = TechnicalIndicators.calculate_obv(closes, volumes)
+        # OBV: 0, +1000, -3000, -2000, -2500 (falling trend)
+        # Price is up from 100 to 105, OBV is down from 0 to -2500
+        assert result["price_obv_divergence"] == "bearish"

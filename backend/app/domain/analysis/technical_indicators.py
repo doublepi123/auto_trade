@@ -97,6 +97,51 @@ class TechnicalIndicators:
 
         return VolumeAnalysis(avg_volume=avg_vol, volume_ratio=ratio, trend=trend)
 
+    @staticmethod
+    def calculate_obv(
+        closes: list[float],
+        volumes: list[float],
+    ) -> dict[str, Any]:
+        """Calculate On-Balance Volume and trend."""
+        if not closes or not volumes or len(closes) != len(volumes):
+            return {"obv_values": [], "obv_trend": "flat", "price_obv_divergence": "none"}
+
+        obv_values: list[float] = [0.0]
+        for i in range(1, len(closes)):
+            if closes[i] > closes[i - 1]:
+                obv_values.append(obv_values[-1] + volumes[i])
+            elif closes[i] < closes[i - 1]:
+                obv_values.append(obv_values[-1] - volumes[i])
+            else:
+                obv_values.append(obv_values[-1])
+
+        lookback = min(5, len(obv_values))
+        if lookback < 2:
+            obv_trend = "flat"
+        else:
+            recent_obv = obv_values[-lookback:]
+            slope = recent_obv[-1] - recent_obv[0]
+            if slope > 0:
+                obv_trend = "rising"
+            elif slope < 0:
+                obv_trend = "falling"
+            else:
+                obv_trend = "flat"
+
+        price_obv_divergence = "none"
+        if len(closes) >= 5:
+            price_trend = "up" if closes[-1] > closes[-5] else "down" if closes[-1] < closes[-5] else "flat"
+            if price_trend == "up" and obv_trend == "falling":
+                price_obv_divergence = "bearish"
+            elif price_trend == "down" and obv_trend == "rising":
+                price_obv_divergence = "bullish"
+
+        return {
+            "obv_values": obv_values,
+            "obv_trend": obv_trend,
+            "price_obv_divergence": price_obv_divergence,
+        }
+
     @classmethod
     def analyze_multi_timeframe(
         cls,
