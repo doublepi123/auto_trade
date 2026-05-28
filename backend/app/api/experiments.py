@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -9,13 +8,13 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.domain.experiment.ab_test_manager import ABTestManager
 from app.schemas import (
+    ExperimentSummary,
     MessageResponse,
     PromptVersionCreate,
     PromptVersionResponse,
 )
 
 router = APIRouter(prefix="/api/experiments", tags=["experiments"])
-logger = logging.getLogger("auto_trade.experiments")
 
 
 @router.get("/versions", response_model=List[PromptVersionResponse])
@@ -30,12 +29,15 @@ def create_version(
     db: Session = Depends(get_db),
 ) -> PromptVersionResponse:
     manager = ABTestManager(db)
-    version = manager.create_version(
-        name=payload.name,
-        version=payload.version,
-        description=payload.description,
-        template=payload.template,
-    )
+    try:
+        version = manager.create_version(
+            name=payload.name,
+            version=payload.version,
+            description=payload.description,
+            template=payload.template,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Failed to create version: {exc}") from exc
     return PromptVersionResponse.model_validate(version)
 
 
@@ -61,7 +63,7 @@ def get_active_version(db: Session = Depends(get_db)) -> PromptVersionResponse |
     return PromptVersionResponse.model_validate(version)
 
 
-@router.get("/{experiment_name}/summary")
+@router.get("/{experiment_name}/summary", response_model=list[ExperimentSummary])
 def get_experiment_summary(
     experiment_name: str,
     db: Session = Depends(get_db),
