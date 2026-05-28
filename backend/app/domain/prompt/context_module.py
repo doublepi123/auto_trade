@@ -75,7 +75,12 @@ class ContextModule(PromptModule):
         if rsi > 0:
             lines.append(f"- RSI(14): {rsi:.2f}")
         if macd and macd.get("macd", 0) != 0:
-            lines.append(f"- MACD: {macd['macd']:.2f} / Signal: {macd['signal']:.2f} / Hist: {macd['histogram']:.2f}")
+            macd_val = macd['macd']
+            signal_val = macd['signal']
+            hist_val = macd['histogram']
+            lines.append(
+                f"- MACD: {macd_val:.2f} / Signal: {signal_val:.2f} / Hist: {hist_val:.2f}"
+            )
         if volume_analysis and volume_analysis.get("avg_volume", 0) > 0:
             lines.append(
                 f"- 成交量: 均量 {volume_analysis['avg_volume']:.0f} / "
