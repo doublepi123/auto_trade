@@ -26,6 +26,8 @@ def init_db() -> None:
     _ensure_audit_log_table(engine)
     _ensure_credential_config_notification_channels_column(engine)
     _ensure_watchlist_items_table(engine)
+    _ensure_prompt_versions_table(engine)
+    _ensure_experiment_results_table(engine)
 
     db = SessionLocal()
     try:
@@ -207,6 +209,48 @@ def _ensure_watchlist_items_table(db_engine: Engine) -> None:
                 market VARCHAR(10) DEFAULT 'US' NOT NULL,
                 alias VARCHAR(100) DEFAULT '' NOT NULL,
                 is_active BOOLEAN DEFAULT 0 NOT NULL,
+                created_at DATETIME
+            )
+            """
+        )
+
+
+def _ensure_prompt_versions_table(db_engine: Engine) -> None:
+    inspector = inspect(db_engine)
+    if "prompt_versions" in inspector.get_table_names():
+        return
+    with db_engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS prompt_versions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name VARCHAR(100) NOT NULL,
+                version VARCHAR(20) NOT NULL,
+                description TEXT DEFAULT '' NOT NULL,
+                template TEXT NOT NULL,
+                is_active BOOLEAN DEFAULT 0 NOT NULL,
+                created_at DATETIME
+            )
+            """
+        )
+
+
+def _ensure_experiment_results_table(db_engine: Engine) -> None:
+    inspector = inspect(db_engine)
+    if "experiment_results" in inspector.get_table_names():
+        return
+    with db_engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS experiment_results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                experiment_name VARCHAR(100) NOT NULL,
+                variant_name VARCHAR(100) NOT NULL,
+                interaction_id INTEGER,
+                order_action VARCHAR(32) DEFAULT 'NONE' NOT NULL,
+                predicted_direction VARCHAR(10) DEFAULT '' NOT NULL,
+                actual_pnl REAL DEFAULT 0.0 NOT NULL,
+                was_profitable BOOLEAN,
                 created_at DATETIME
             )
             """

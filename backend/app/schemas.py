@@ -570,3 +570,45 @@ class WatchlistQuote(BaseModel):
 
 class WatchlistSetTradingRequest(BaseModel):
     id: int
+
+
+class PromptVersionCreate(BaseModel):
+    name: str = Field(max_length=100)
+    version: str = Field(max_length=20)
+    description: str = Field(default="", max_length=500)
+    template: str
+
+
+class PromptVersionResponse(BaseModel):
+    id: int
+    name: str
+    version: str
+    description: str
+    template: str
+    is_active: bool
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class ExperimentResultResponse(BaseModel):
+    id: int
+    experiment_name: str
+    variant_name: str
+    interaction_id: int | None
+    order_action: str
+    predicted_direction: str
+    actual_pnl: float
+    was_profitable: bool | None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class ExperimentSummary(BaseModel):
+    experiment_name: str
+    variant_name: str
+    total_count: int
+    profitable_count: int
+    avg_pnl: float
+    win_rate: float

@@ -204,3 +204,33 @@ class WatchlistItem(Base):
 
     __table_args__ = (UniqueConstraint("symbol", name="uq_watchlist_symbol"),)
 
+
+class PromptVersion(Base):
+    """Versioned prompt templates for A/B testing."""
+
+    __tablename__ = "prompt_versions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    version: Mapped[str] = mapped_column(String(20), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    template: Mapped[str] = mapped_column(Text, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(_TZDateTime(), default=_utcnow)
+
+
+class ExperimentResult(Base):
+    """Tracks LLM experiment outcomes for A/B test analysis."""
+
+    __tablename__ = "experiment_results"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    experiment_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    variant_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    interaction_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    order_action: Mapped[str] = mapped_column(String(32), nullable=False, default="NONE")
+    predicted_direction: Mapped[str] = mapped_column(String(10), nullable=False, default="")
+    actual_pnl: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    was_profitable: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(_TZDateTime(), default=_utcnow)
+
