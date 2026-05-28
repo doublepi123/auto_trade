@@ -287,6 +287,34 @@ class TechnicalIndicators:
 
         return {"cci_value": cci_value, "signal": signal}
 
+    @staticmethod
+    def calculate_williams_r(
+        highs: list[float],
+        lows: list[float],
+        closes: list[float],
+        period: int = 14,
+    ) -> dict[str, Any]:
+        """Calculate Williams %R."""
+        if len(highs) < period or len(highs) != len(lows) or len(highs) != len(closes):
+            return {"williams_r": -50.0, "signal": "neutral"}
+
+        period_high = max(highs[-period:])
+        period_low = min(lows[-period:])
+
+        if period_high == period_low:
+            williams_r = -50.0
+        else:
+            williams_r = -100.0 * (period_high - closes[-1]) / (period_high - period_low)
+
+        if williams_r > -20:
+            signal = "overbought"
+        elif williams_r < -80:
+            signal = "oversold"
+        else:
+            signal = "neutral"
+
+        return {"williams_r": williams_r, "signal": signal}
+
     @classmethod
     def analyze_multi_timeframe(
         cls,

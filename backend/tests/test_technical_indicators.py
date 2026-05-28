@@ -287,3 +287,47 @@ class TestCCI:
         result = TechnicalIndicators.calculate_cci([], [], [])
         assert result["cci_value"] == 0.0
         assert result["signal"] == "neutral"
+
+
+class TestWilliamsR:
+    """Tests for Williams %R calculation."""
+
+    def test_williams_overbought(self) -> None:
+        highs = [100.0, 102.0, 105.0, 108.0, 110.0, 112.0, 115.0, 118.0,
+                 120.0, 122.0, 125.0, 128.0, 130.0, 132.0, 135.0]
+        lows = [90.0, 92.0, 95.0, 98.0, 100.0, 102.0, 105.0, 108.0,
+                110.0, 112.0, 115.0, 118.0, 120.0, 122.0, 125.0]
+        closes = [98.0, 100.0, 103.0, 106.0, 108.0, 110.0, 113.0, 116.0,
+                  118.0, 120.0, 123.0, 126.0, 128.0, 131.0, 134.0]
+        result = TechnicalIndicators.calculate_williams_r(highs, lows, closes)
+        assert result["williams_r"] > -20
+        assert result["signal"] == "overbought"
+
+    def test_williams_oversold(self) -> None:
+        highs = [100.0, 98.0, 96.0, 94.0, 92.0, 90.0, 88.0, 86.0,
+                 84.0, 82.0, 80.0, 78.0, 76.0, 74.0, 72.0]
+        lows = [90.0, 88.0, 86.0, 84.0, 82.0, 80.0, 78.0, 76.0,
+                74.0, 72.0, 70.0, 68.0, 66.0, 64.0, 62.0]
+        closes = [92.0, 90.0, 88.0, 86.0, 84.0, 82.0, 80.0, 78.0,
+                  76.0, 74.0, 72.0, 70.0, 68.0, 66.0, 64.0]
+        result = TechnicalIndicators.calculate_williams_r(highs, lows, closes)
+        assert result["williams_r"] < -80
+        assert result["signal"] == "oversold"
+
+    def test_williams_neutral(self) -> None:
+        highs = [float(100 + (i % 3) * 5) for i in range(20)]
+        lows = [float(90 + (i % 3) * 5) for i in range(20)]
+        closes = [float(95 + (i % 3) * 5) for i in range(20)]
+        result = TechnicalIndicators.calculate_williams_r(highs, lows, closes)
+        assert -80 <= result["williams_r"] <= -20
+        assert result["signal"] == "neutral"
+
+    def test_williams_insufficient_data(self) -> None:
+        result = TechnicalIndicators.calculate_williams_r([100.0], [90.0], [95.0])
+        assert result["williams_r"] == -50.0
+        assert result["signal"] == "neutral"
+
+    def test_williams_empty_input(self) -> None:
+        result = TechnicalIndicators.calculate_williams_r([], [], [])
+        assert result["williams_r"] == -50.0
+        assert result["signal"] == "neutral"
