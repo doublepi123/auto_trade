@@ -248,7 +248,7 @@ def _ensure_experiment_results_table(db_engine: Engine) -> None:
                 variant_name VARCHAR(100) NOT NULL,
                 interaction_id INTEGER,
                 order_action VARCHAR(32) DEFAULT 'NONE' NOT NULL,
-                predicted_direction VARCHAR(10) DEFAULT '' NOT NULL,
+                predicted_direction VARCHAR(32) DEFAULT '' NOT NULL,
                 actual_pnl REAL DEFAULT 0.0 NOT NULL,
                 was_profitable BOOLEAN,
                 created_at DATETIME

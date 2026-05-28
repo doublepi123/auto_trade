@@ -229,7 +229,7 @@ class ExperimentResult(Base):
     variant_name: Mapped[str] = mapped_column(String(100), nullable=False)
     interaction_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     order_action: Mapped[str] = mapped_column(String(32), nullable=False, default="NONE")
-    predicted_direction: Mapped[str] = mapped_column(String(10), nullable=False, default="")
+    predicted_direction: Mapped[str] = mapped_column(String(32), nullable=False, default="")
     actual_pnl: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     was_profitable: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     created_at: Mapped[datetime] = mapped_column(_TZDateTime(), default=_utcnow)

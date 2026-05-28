@@ -606,7 +606,6 @@ class ExperimentResultResponse(BaseModel):
 
 
 class ExperimentSummary(BaseModel):
-    experiment_name: str
     variant_name: str
     total_count: int
     profitable_count: int
