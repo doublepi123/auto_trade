@@ -8,8 +8,6 @@ os.environ.setdefault(
     f"sqlite:///{tempfile.gettempdir()}/auto_trade_test_performance.db",
 )
 
-from datetime import datetime, timezone
-
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
