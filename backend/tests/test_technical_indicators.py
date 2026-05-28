@@ -201,3 +201,51 @@ class TestADX:
         result = TechnicalIndicators.calculate_adx([], [], [])
         assert result["adx_value"] == 0.0
         assert result["trend_strength"] == "none"
+
+
+class TestStochastic:
+    """Tests for Stochastic Oscillator calculation."""
+
+    def test_stoch_overbought(self) -> None:
+        """Stochastic should indicate overbought when near highs."""
+        highs = [110.0, 112.0, 115.0, 118.0, 120.0, 122.0, 125.0, 128.0,
+                 130.0, 132.0, 135.0, 138.0, 140.0, 142.0, 145.0]
+        lows = [100.0, 102.0, 105.0, 108.0, 110.0, 112.0, 115.0, 118.0,
+                120.0, 122.0, 125.0, 128.0, 130.0, 132.0, 135.0]
+        closes = [105.0, 108.0, 112.0, 115.0, 118.0, 120.0, 123.0, 126.0,
+                  128.0, 130.0, 133.0, 136.0, 138.0, 141.0, 144.0]
+        result = TechnicalIndicators.calculate_stochastic(highs, lows, closes)
+        assert result["stoch_k"] > 80
+        assert result["signal"] == "overbought"
+
+    def test_stoch_oversold(self) -> None:
+        """Stochastic should indicate oversold when near lows."""
+        highs = [100.0, 98.0, 96.0, 94.0, 92.0, 90.0, 88.0, 86.0,
+                 84.0, 82.0, 80.0, 78.0, 76.0, 74.0, 72.0]
+        lows = [90.0, 88.0, 86.0, 84.0, 82.0, 80.0, 78.0, 76.0,
+                74.0, 72.0, 70.0, 68.0, 66.0, 64.0, 62.0]
+        closes = [95.0, 92.0, 88.0, 85.0, 82.0, 80.0, 78.0, 76.0,
+                  74.0, 72.0, 70.0, 68.0, 66.0, 64.0, 63.0]
+        result = TechnicalIndicators.calculate_stochastic(highs, lows, closes)
+        assert result["stoch_k"] < 20
+        assert result["signal"] == "oversold"
+
+    def test_stoch_neutral(self) -> None:
+        highs = [float(100 + (i % 3) * 5) for i in range(20)]
+        lows = [float(90 + (i % 3) * 5) for i in range(20)]
+        closes = [float(95 + (i % 3) * 5) for i in range(20)]
+        result = TechnicalIndicators.calculate_stochastic(highs, lows, closes)
+        assert 20 <= result["stoch_k"] <= 80
+        assert result["signal"] == "neutral"
+
+    def test_stoch_insufficient_data(self) -> None:
+        result = TechnicalIndicators.calculate_stochastic([100.0], [90.0], [95.0])
+        assert result["stoch_k"] == 50.0
+        assert result["stoch_d"] == 50.0
+        assert result["signal"] == "neutral"
+
+    def test_stoch_empty_input(self) -> None:
+        result = TechnicalIndicators.calculate_stochastic([], [], [])
+        assert result["stoch_k"] == 50.0
+        assert result["stoch_d"] == 50.0
+        assert result["signal"] == "neutral"

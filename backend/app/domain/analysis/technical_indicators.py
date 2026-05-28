@@ -221,6 +221,42 @@ class TechnicalIndicators:
             "di_minus": di_minus[-1] if di_minus else 0.0,
         }
 
+    @staticmethod
+    def calculate_stochastic(
+        highs: list[float],
+        lows: list[float],
+        closes: list[float],
+        k_period: int = 14,
+        d_period: int = 3,
+    ) -> dict[str, Any]:
+        """Calculate Stochastic Oscillator (%K and %D)."""
+        if len(highs) < k_period or len(highs) != len(lows) or len(highs) != len(closes):
+            return {"stoch_k": 50.0, "stoch_d": 50.0, "signal": "neutral"}
+
+        k_values: list[float] = []
+        for i in range(k_period - 1, len(highs)):
+            period_high = max(highs[i - k_period + 1:i + 1])
+            period_low = min(lows[i - k_period + 1:i + 1])
+            if period_high == period_low:
+                k_values.append(50.0)
+            else:
+                k_values.append(100.0 * (closes[i] - period_low) / (period_high - period_low))
+
+        stoch_k = k_values[-1] if k_values else 50.0
+        if len(k_values) >= d_period:
+            stoch_d = sum(k_values[-d_period:]) / d_period
+        else:
+            stoch_d = stoch_k
+
+        if stoch_k > 80:
+            signal = "overbought"
+        elif stoch_k < 20:
+            signal = "oversold"
+        else:
+            signal = "neutral"
+
+        return {"stoch_k": stoch_k, "stoch_d": stoch_d, "signal": signal}
+
     @classmethod
     def analyze_multi_timeframe(
         cls,
