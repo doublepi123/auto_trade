@@ -62,9 +62,8 @@ class DataAggregator:
         sentiment_analyzer = MarketSentimentAnalyzer()
         sentiment = sentiment_analyzer.analyze_from_price_changes(price_changes[-10:])
 
-        daily_closes = [c.close for c in daily_candles]
         minute_closes = [c.close for c in minute_candles]
-        multi_tf = TechnicalIndicators.analyze_multi_timeframe(daily_closes, minute_closes)
+        multi_tf = TechnicalIndicators.analyze_multi_timeframe(closes, minute_closes)
 
         return {
             "daily_candles": daily_payload,
