@@ -14,6 +14,15 @@ class ABTestManager:
     def __init__(self, db: Session) -> None:
         self.db: Session = db
 
+    def list_experiment_names(self) -> list[str]:
+        rows = (
+            self.db.query(ExperimentResult.experiment_name)
+            .distinct()
+            .order_by(ExperimentResult.experiment_name.asc())
+            .all()
+        )
+        return [name for (name,) in rows if name]
+
     def create_version(
         self, name: str, version: str, description: str, template: str
     ) -> PromptVersion:

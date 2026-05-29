@@ -17,6 +17,12 @@ from app.schemas import (
 router = APIRouter(prefix="/api/experiments", tags=["experiments"])
 
 
+@router.get("", response_model=List[str])
+def list_experiment_names(db: Session = Depends(get_db)) -> list[str]:
+    manager = ABTestManager(db)
+    return manager.list_experiment_names()
+
+
 @router.get("/versions", response_model=List[PromptVersionResponse])
 def list_versions(db: Session = Depends(get_db)) -> list[PromptVersionResponse]:
     manager = ABTestManager(db)
