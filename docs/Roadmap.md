@@ -421,6 +421,33 @@
 - [x] `npm run type-check` 通过
 - [x] `npm run build` 通过（3.64s）
 
+### P11：LLM 自适应特征选择 ✅（2026-05-29 交付）
+
+> **目标：** 实现 LLM 自主特征选择，根据市场状态自动选择最相关的技术指标，减少无关指标干扰，提升决策质量。
+>
+> **规格文档：** `docs/superpowers/specs/2026-05-29-llm-adaptive-feature-selection-design.md`
+>
+> **实施计划：** `docs/superpowers/plans/2026-05-29-llm-adaptive-feature-selection.md`
+>
+> **基线（交付后）：** `pytest 607 passed`，`basedpyright` 0 errors / 0 warnings，`npm run type-check` + `npm run build` 通过。
+
+#### 交付摘要
+
+- **T1 — MarketStateDetector**：基于 ADX/BB/ATR/Volume 检测市场状态（trending/ranging/volatile/neutral），输出状态 + 置信度 + 推荐指标。
+- **T2 — SelectionModule**：渲染市场状态和可用指标列表，引导 LLM 选择 3-5 个最相关指标。
+- **T3 — FeatureSelector**：解析 LLM 返回的 JSON 指标选择，过滤上下文只保留选中指标。
+- **T4 — DataAggregator 集成**：`fetch_market_data()` 返回市场状态数据。
+- **T5 — ContextModule 过滤**：根据 `selected_indicators` 只渲染选中指标。
+- **T6 — LLMAdvisorService 集成**：prompt 中加入 SelectionModule，LLM 分析时考虑指标选择。
+- **T7 — 最终验证**：pytest 607 passed，basedpyright 0 errors，前端构建通过。
+
+#### 验证结果（本轮交付后）
+
+- [x] `pytest 607 passed`（+20 项，相比 P10 前 587 项）
+- [x] `basedpyright` 0 errors, 0 warnings, 0 notes
+- [x] `npm run type-check` 通过
+- [x] `npm run build` 通过（4.50s）
+
 ### 建议执行顺序
 
 | 顺序 | 迭代 | 状态 | 原因 |
@@ -432,11 +459,12 @@
 | 已完成 | **P7 策略复盘与 LLM 优化工作台** | ✅ 2026-05-28 | 新增 ReviewService + /api/review/export + Review.vue；pytest 493 passed。 |
 | 已完成 | **P8 多标的观察列表** | ✅ 2026-05-28 | WatchlistItem 模型 + CRUD API + 行情聚合 + Watchlist.vue；pytest 11 passed。 |
 | 已完成 | **P9 LLM Prompt Engineering Optimization** | ✅ 2026-05-29 | 模块化 Prompt 架构 + 技术指标（RSI/MACD/Volume）+ A/B 测试 + 市场情绪 + 多时间框架 + 性能追踪；pytest 549 passed。 |
-| 已完成 | **P10 LLM 特征工程扩展** | ✅ 2026-05-29 | 新增 OBV/ADX/Stochastic/CCI/Williams %R/VWAP 六个技术指标 + aggregate_signals() 综合信号；pytest 586 passed, 1 skipped。 |
+| 已完成 | **P10 LLM 特征工程扩展** | ✅ 2026-05-29 | 新增 OBV/ADX/Stochastic/CCI/Williams %R/VWAP 六个技术指标 + aggregate_signals() 综合信号；pytest 587 passed。 |
+| 已完成 | **P11 LLM 自适应特征选择** | ✅ 2026-05-29 | MarketStateDetector + SelectionModule + FeatureSelector，LLM 基于市场状态自主选择指标；pytest 607 passed。 |
 
 ### 下一步建议
 
-**P10 LLM 特征工程扩展已完成交付**。后续可继续推进 P6（移动端）或 P3（回测增强）等迭代。
+**P11 LLM 自适应特征选择已完成交付**。后续可继续推进 P3（回测增强）或 P12（数据分析平台）等迭代。
 
 ---
 
