@@ -100,7 +100,7 @@ class ContextModule(PromptModule):
         vwap = context.get("vwap", {})
         aggregate_signals = context.get("aggregate_signals", {})
 
-        has_extended = any([obv, adx, stochastic, cci, williams_r, vwap, aggregate_signals])
+        has_extended = any((obv, adx, stochastic, cci, williams_r, vwap, aggregate_signals))
         if has_extended:
             lines.append("")
             lines.append("## 技术指标扩展")

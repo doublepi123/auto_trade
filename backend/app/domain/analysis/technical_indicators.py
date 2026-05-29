@@ -408,7 +408,7 @@ class TechnicalIndicators:
             elif williams["signal"] == "overbought":
                 bearish_count += 1
 
-        # ADX signal (trend direction)
+        # ADX signal (trend direction) — weighted higher as trend filter
         adx = indicator_results.get("adx", {})
         if isinstance(adx, dict) and adx.get("di_plus") is not None:
             total_weight += 1.5

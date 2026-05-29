@@ -391,6 +391,36 @@
 - [x] `npm run type-check` 通过
 - [x] `npm run build` 通过（3.30s）
 
+### P10：LLM 特征工程扩展 — 技术指标深度优化 ✅（2026-05-29 交付）
+
+> **目标：** 扩展经典技术指标覆盖，为 LLM 提供更全面的市场分析维度。
+>
+> **规格文档：** `docs/superpowers/specs/2026-05-29-llm-feature-engineering-expansion-design.md`
+>
+> **实施计划：** `docs/superpowers/plans/2026-05-29-llm-feature-engineering-expansion.md`
+>
+> **基线（交付后）：** `pytest 586 passed, 1 skipped`，`basedpyright` 0 errors / 0 warnings，`npm run type-check` + `npm run build` 通过。
+
+#### 交付摘要
+
+- **T1 — OBV（能量潮）**：量价背离检测，输出 OBV 序列 + 趋势 + 价格-OBV 背离信号。
+- **T2 — ADX（平均趋向指数）**：趋势强度判断，输出 ADX 值 + 趋势强度分类 + DI+/DI-。
+- **T3 — Stochastic（随机指标）**：超买超卖检测，输出 %K、%D、信号。
+- **T4 — CCI（商品通道指数）**：价格偏离度识别，输出 CCI 值 + 信号。
+- **T5 — Williams %R**：超买超卖检测（更敏感），输出 %R 值 + 信号。
+- **T6 — VWAP（成交量加权平均价）**：机构成本参考，输出 VWAP 值 + 价格相对位置。
+- **T7 — aggregate_signals()**：综合 7 个指标信号，输出 overall_signal + confidence + summary。
+- **T8 — DataAggregator 集成**：`fetch_market_data()` 返回所有新指标数据。
+- **T9 — ContextModule 渲染**：LLM prompt 新增"技术指标扩展"区块。
+- **T10 — 最终验证**：pytest 586 passed, 1 skipped，basedpyright 0 errors，前端构建通过。
+
+#### 验证结果（本轮交付后）
+
+- [x] `pytest 586 passed, 1 skipped`（+38 项，相比 P9 前 549 项）
+- [x] `basedpyright` 0 errors, 0 warnings, 0 notes
+- [x] `npm run type-check` 通过
+- [x] `npm run build` 通过（3.64s）
+
 ### 建议执行顺序
 
 | 顺序 | 迭代 | 状态 | 原因 |
@@ -402,10 +432,11 @@
 | 已完成 | **P7 策略复盘与 LLM 优化工作台** | ✅ 2026-05-28 | 新增 ReviewService + /api/review/export + Review.vue；pytest 493 passed。 |
 | 已完成 | **P8 多标的观察列表** | ✅ 2026-05-28 | WatchlistItem 模型 + CRUD API + 行情聚合 + Watchlist.vue；pytest 11 passed。 |
 | 已完成 | **P9 LLM Prompt Engineering Optimization** | ✅ 2026-05-29 | 模块化 Prompt 架构 + 技术指标（RSI/MACD/Volume）+ A/B 测试 + 市场情绪 + 多时间框架 + 性能追踪；pytest 549 passed。 |
+| 已完成 | **P10 LLM 特征工程扩展** | ✅ 2026-05-29 | 新增 OBV/ADX/Stochastic/CCI/Williams %R/VWAP 六个技术指标 + aggregate_signals() 综合信号；pytest 586 passed, 1 skipped。 |
 
 ### 下一步建议
 
-**P9 LLM Prompt Engineering Optimization 已完成交付**。后续可继续推进 P6（移动端）或 P3（回测增强）等迭代。
+**P10 LLM 特征工程扩展已完成交付**。后续可继续推进 P6（移动端）或 P3（回测增强）等迭代。
 
 ---
 
