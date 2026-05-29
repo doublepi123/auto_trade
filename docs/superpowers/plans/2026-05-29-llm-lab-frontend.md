@@ -1,4 +1,4 @@
-# P10 LLM 优化工作台前端化 Implementation Plan
+# P12 LLM 优化工作台前端化 Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -24,7 +24,7 @@
 - Create `backend/tests/test_performance_api.py`、`backend/tests/test_experiments_api.py`、`backend/tests/test_indicators_api.py`。
 
 **前端（新增 / 修改）**
-- Modify `frontend/src/types/index.ts` — 追加 P10 类型。
+- Modify `frontend/src/types/index.ts` — 追加 P12 类型。
 - Create `frontend/src/api/lab.ts` — 封装所有 lab API。
 - Create `frontend/src/views/Lab.vue` — 三页签工作台。
 - Modify `frontend/src/router/index.ts` — 加 `/lab` 路由。
@@ -1105,14 +1105,14 @@ Expected: 通过。
 - [ ] **Step 5: 更新文档**
 
 - `README.md`：API 表新增 `GET /api/experiments`、`GET /api/indicators`、`GET /api/performance/{stats,compare,recommendations}`；新增「优化工作台 / Lab」页面说明。
-- `docs/Roadmap.md`：新增「P10 LLM 优化工作台前端化 ✅」小节，记录交付摘要与验证结果（pytest 通过数、basedpyright 0/0、type-check + build 通过）。
+- `docs/Roadmap.md`：新增「P12 LLM 优化工作台前端化 ✅」小节，记录交付摘要与验证结果（pytest 通过数、basedpyright 0/0、type-check + build 通过）。
 - `CLAUDE.md`：在「API 速查」表 LLM / 实时 区域附近补三端点；在目录结构标注 `backend/app/api/indicators.py` 与 `frontend/src/views/Lab.vue`。
 
 - [ ] **Step 6: Commit**
 
 ```bash
 git add frontend/cypress/e2e/lab.cy.ts README.md docs/Roadmap.md CLAUDE.md
-git commit -m "test(lab): add Cypress e2e and sync README/Roadmap/CLAUDE for P10"
+git commit -m "test(lab): add Cypress e2e and sync README/Roadmap/CLAUDE for P12"
 ```
 
 ---

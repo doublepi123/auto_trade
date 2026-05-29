@@ -369,7 +369,7 @@ auto_trade/
 |--------|------|-------------|
 | `POST` | `/api/backtest/run` | 运行回测；body：`csv_text` 或 `price_points[]` + `params` |
 
-### LLM 优化工作台（P10）
+### LLM 优化工作台（P12）
 
 | Method | Path | Description |
 |--------|------|-------------|

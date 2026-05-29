@@ -495,7 +495,7 @@
 >
 > **实施计划：** `docs/superpowers/plans/2026-05-29-llm-lab-frontend.md`
 >
-> **基线（交付后）：** `pytest 560 passed`，`basedpyright` 0 errors / 0 warnings，`npm run type-check` + `npm run build` 通过，Cypress `lab.cy.ts` 4/4 通过。
+> **基线（集成后）：** rebase 到 origin/main（含 P10/P11）之上，全量 `pytest 621 passed`（P11 的 607 项 + 本迭代新增），`npm run type-check` + `npm run build` 通过，Cypress `lab.cy.ts` 4/4 通过。
 
 #### 交付摘要
 
@@ -511,7 +511,7 @@
 
 #### 验证结果
 
-- [x] `pytest 560 passed, 1 skipped`（+11 项，相比 P9 的 549 项；并修复一个因时区处理导致的 `test_orders_default_returns_local_today_orders_with_pagination` 偶现失败）
+- [x] `pytest 621 passed`（rebase 到 P11 的 607 项之上，本迭代新增端点测试全绿；并修复一个因时区/午夜边界导致的 `test_orders_default_returns_local_today_orders_with_pagination` 偶现失败）
 - [x] `basedpyright` 0 errors, 0 warnings, 0 notes
 - [x] `npm run type-check` 通过
 - [x] `npm run build` 通过（7.30s）
