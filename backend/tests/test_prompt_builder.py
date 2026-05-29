@@ -229,6 +229,33 @@ class TestOutputModule:
         assert "confidence_score >= 0.7" in result
 
 
+from app.domain.prompt.selection_module import SelectionModule
+
+
+class TestSelectionModule:
+    def test_renders_market_state(self) -> None:
+        """SelectionModule should render market state and indicators."""
+        context = {
+            "market_state": {
+                "state": "trending",
+                "description": "上升趋势（ADX=32）",
+                "suggested_indicators": ["adx", "macd", "obv"],
+            }
+        }
+        module = SelectionModule()
+        result = module.render(context)
+        assert "市场状态分析" in result
+        assert "上升趋势" in result
+        assert "ADX" in result
+        assert "建议优先考虑" in result
+
+    def test_empty_without_market_state(self) -> None:
+        """SelectionModule should return empty without market state."""
+        module = SelectionModule()
+        result = module.render({})
+        assert result == ""
+
+
 from app.domain.prompt.prompt_builder import PromptBuilder
 
 
