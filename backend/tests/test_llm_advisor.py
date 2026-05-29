@@ -575,8 +575,6 @@ def test_preview_endpoint_requires_api_key_in_production(monkeypatch) -> None:
 
 def test_analyze_passes_new_indicators_to_prompt(monkeypatch) -> None:
     """Verify RSI, MACD, volume_analysis are included in prompt context."""
-    from app.services.data_aggregator import DataAggregator
-
     captured_prompt: dict[str, object] = {}
 
     def mock_fetch(self, symbol, market):
@@ -593,14 +591,17 @@ def test_analyze_passes_new_indicators_to_prompt(monkeypatch) -> None:
             "volume_analysis": {"avg_volume": 50000.0, "volume_ratio": 1.2, "trend": "normal"},
         }
 
-    original_build = DataAggregator.build_prompt
+    from app.services.data_aggregator import DataAggregator
 
-    def capturing_build(**kwargs):
-        captured_prompt.update(kwargs)
-        return original_build(**kwargs)
+    original_build_prompt = LLMAdvisorService._build_prompt
+
+    def capturing_build_prompt(self, **kwargs):
+        market_data = kwargs.get("market_data", {})
+        captured_prompt.update(market_data)
+        return original_build_prompt(self, **kwargs)
 
     monkeypatch.setattr(DataAggregator, "fetch_market_data", mock_fetch)
-    monkeypatch.setattr(DataAggregator, "build_prompt", staticmethod(capturing_build))
+    monkeypatch.setattr(LLMAdvisorService, "_build_prompt", capturing_build_prompt)
 
     import app.config
     import app.services.llm_advisor_service as service_module

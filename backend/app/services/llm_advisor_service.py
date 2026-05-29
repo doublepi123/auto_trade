@@ -11,6 +11,14 @@ import httpx
 from app.config import settings
 from app.core.broker import BrokerGateway
 from app.database import SessionLocal
+from app.domain.prompt.context_module import ContextModule
+from app.domain.prompt.feature_selector import FeatureSelector
+from app.domain.prompt.output_module import OutputModule
+from app.domain.prompt.prompt_builder import PromptBuilder
+from app.domain.prompt.selection_module import SelectionModule
+from app.domain.prompt.sentiment_module import SentimentModule
+from app.domain.prompt.strategy_module import StrategyModule
+from app.domain.prompt.system_module import SystemModule
 from app.services.data_aggregator import DataAggregator
 from app.services.llm_interaction_service import LLMInteractionService
 from app.services.strategy_service import StrategyService
@@ -71,6 +79,75 @@ class LLMAdvisorService:
 
     def __init__(self, broker: BrokerGateway | None = None) -> None:
         self._data_aggregator = DataAggregator(broker=broker)
+
+    def _build_prompt(
+        self,
+        *,
+        symbol: str,
+        market: str,
+        current_price: float,
+        current_buy_low: float,
+        current_sell_high: float,
+        short_selling: bool,
+        current_position: str,
+        recent_trades: list[dict[str, Any]],
+        position_quantity: float,
+        position_avg_price: float,
+        unrealized_pnl_pct: float,
+        min_profit_amount: float,
+        recent_prices: list[dict[str, Any]] | None,
+        recent_analysis: dict[str, Any] | None,
+        account_context: dict[str, Any] | None,
+        market_data: dict[str, Any],
+    ) -> str:
+        """Build LLM prompt using modular PromptBuilder with SelectionModule."""
+        context: dict[str, Any] = {
+            "symbol": symbol,
+            "market": market,
+            "current_price": current_price,
+            "current_buy_low": current_buy_low,
+            "current_sell_high": current_sell_high,
+            "short_selling": short_selling,
+            "daily_candles": market_data.get("daily_candles", []),
+            "minute_candles": market_data.get("minute_candles", []),
+            "atr": market_data.get("atr", 0.0),
+            "bb_upper": market_data.get("bb_upper", 0.0),
+            "bb_middle": market_data.get("bb_middle", 0.0),
+            "bb_lower": market_data.get("bb_lower", 0.0),
+            "current_position": current_position,
+            "recent_trades": recent_trades,
+            "position_quantity": position_quantity,
+            "position_avg_price": position_avg_price,
+            "unrealized_pnl_pct": unrealized_pnl_pct,
+            "min_profit_amount": min_profit_amount,
+            "rsi": market_data.get("rsi", 0.0),
+            "macd": market_data.get("macd") or {"macd": 0.0, "signal": 0.0, "histogram": 0.0},
+            "volume_analysis": market_data.get("volume_analysis") or {"avg_volume": 0.0, "volume_ratio": 0.0, "trend": "unknown"},
+            "sentiment": market_data.get("sentiment") or {"sentiment": "neutral", "score": 0.0, "description": "无"},
+            "market_state": market_data.get("market_state"),
+            "obv": market_data.get("obv"),
+            "adx": market_data.get("adx"),
+            "stochastic": market_data.get("stochastic"),
+            "cci": market_data.get("cci"),
+            "williams_r": market_data.get("williams_r"),
+            "vwap": market_data.get("vwap"),
+            "aggregate_signals": market_data.get("aggregate_signals"),
+            "account_context_text": DataAggregator._format_account_context(account_context),
+            "recent_price_context": DataAggregator._format_recent_prices(recent_prices),
+            "recent_analysis_context": DataAggregator._format_recent_analysis(recent_analysis),
+        }
+        builder = PromptBuilder()
+        builder.add_module(SystemModule())
+        builder.add_module(SelectionModule())
+        builder.add_module(ContextModule())
+        builder.add_module(SentimentModule())
+        builder.add_module(StrategyModule())
+        builder.add_module(OutputModule())
+        return builder.build(context)
+
+    def _call_llm(self, prompt: str) -> str:
+        """Call LLM API (delegates to _call_deepseek)."""
+        return self._call_deepseek(prompt)
 
     def _get_active_prompt_template(self) -> str | None:
         """Load active prompt template from experiment if available.
@@ -138,19 +215,13 @@ class LLMAdvisorService:
                 "sentiment": {"sentiment": "neutral", "score": 0.0, "description": "无"},
             }
 
-        prompt = self._data_aggregator.build_prompt(
+        prompt = self._build_prompt(
             symbol=symbol,
             market=market,
             current_price=current_price,
             current_buy_low=current_buy_low,
             current_sell_high=current_sell_high,
             short_selling=short_selling,
-            daily_candles=market_data.get("daily_candles", []),
-            minute_candles=market_data.get("minute_candles", []),
-            atr=market_data.get("atr", 0.0),
-            bb_upper=market_data.get("bb_upper", 0.0),
-            bb_middle=market_data.get("bb_middle", 0.0),
-            bb_lower=market_data.get("bb_lower", 0.0),
             current_position=current_position,
             recent_trades=recent_trades,
             position_quantity=position_quantity,
@@ -160,10 +231,7 @@ class LLMAdvisorService:
             recent_prices=recent_prices,
             recent_analysis=recent_analysis,
             account_context=account_context,
-            rsi=market_data.get("rsi", 0.0),
-            macd=market_data.get("macd"),
-            volume_analysis=market_data.get("volume_analysis"),
-            sentiment=market_data.get("sentiment"),
+            market_data=market_data,
         )
         context_snapshot = {
             "symbol": symbol,
@@ -183,8 +251,13 @@ class LLMAdvisorService:
         }
 
         try:
-            raw_response = self._call_deepseek(prompt)
+            raw_response = self._call_llm(prompt)
             result = self._parse_response(raw_response)
+
+            market_state = market_data.get("market_state", {})
+            suggested = market_state.get("suggested_indicators", []) if market_state else []
+            selected = FeatureSelector.parse_selection(raw_response, suggested)
+            logger.info("LLM selected indicators: %s", selected)
         except Exception as exc:
             logger.exception("LLM analysis failed")
             interaction_id = self._record_interaction(
@@ -288,27 +361,23 @@ class LLMAdvisorService:
         if prompt_price <= 0:
             return {"success": False, "applied": False, "error": "Market data unavailable for preview"}
 
-        prompt = self._data_aggregator.build_prompt(
+        prompt = self._build_prompt(
             symbol=symbol,
             market=market,
             current_price=prompt_price,
             current_buy_low=current_buy_low,
             current_sell_high=current_sell_high,
             short_selling=short_selling,
-            daily_candles=market_data.get("daily_candles", []),
-            minute_candles=market_data.get("minute_candles", []),
-            atr=market_data.get("atr", 0.0),
-            bb_upper=market_data.get("bb_upper", 0.0),
-            bb_middle=market_data.get("bb_middle", 0.0),
-            bb_lower=market_data.get("bb_lower", 0.0),
             current_position="FLAT",
             recent_trades=[],
+            position_quantity=0.0,
+            position_avg_price=0.0,
+            unrealized_pnl_pct=0.0,
             min_profit_amount=min_profit_amount,
+            recent_prices=None,
+            recent_analysis=None,
             account_context=account_context,
-            rsi=market_data.get("rsi", 0.0),
-            macd=market_data.get("macd"),
-            volume_analysis=market_data.get("volume_analysis"),
-            sentiment=market_data.get("sentiment"),
+            market_data=market_data,
         )
         context_snapshot = {
             "symbol": symbol,
@@ -322,7 +391,7 @@ class LLMAdvisorService:
         }
 
         try:
-            raw_response = self._call_deepseek(prompt)
+            raw_response = self._call_llm(prompt)
             result = self._parse_response(raw_response)
         except Exception as exc:
             logger.exception("LLM preview failed")
