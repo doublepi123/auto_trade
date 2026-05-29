@@ -12,6 +12,7 @@
         <el-menu-item index="/credentials">凭证设置</el-menu-item>
         <el-menu-item index="/history">交易历史</el-menu-item>
         <el-menu-item index="/events">决策时间线</el-menu-item>
+        <el-menu-item index="/lab">优化工作台</el-menu-item>
       </el-menu>
     </el-header>
 

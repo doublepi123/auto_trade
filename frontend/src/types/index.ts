@@ -395,3 +395,83 @@ export interface WatchlistQuote {
   timestamp: string
 }
 
+export interface PromptVersion {
+  id: number
+  name: string
+  version: string
+  description: string
+  template: string
+  is_active: boolean
+  created_at: string
+}
+
+export interface PromptVersionCreate {
+  name: string
+  version: string
+  description?: string
+  template: string
+}
+
+export interface ExperimentSummary {
+  variant_name: string
+  total_count: number
+  profitable_count: number
+  avg_pnl: number
+  win_rate: number
+}
+
+export interface PerformanceStats {
+  total_trades: number
+  win_rate: number
+  total_pnl: number
+  avg_pnl: number
+}
+
+export interface PerformanceVariant {
+  variant: string
+  total_trades: number
+  win_rate: number
+  total_pnl: number
+  avg_pnl: number
+}
+
+export interface MacdValue {
+  macd: number
+  signal: number
+  histogram: number
+}
+
+export interface VolumeAnalysis {
+  avg_volume: number
+  volume_ratio: number
+  trend: string
+}
+
+export interface SentimentValue {
+  sentiment: string
+  score: number
+  description: string
+}
+
+export interface MultiTimeframe {
+  daily_trend: string
+  minute_trend: string
+  aligned: boolean
+  description: string
+}
+
+export interface IndicatorsResponse {
+  available: boolean
+  symbol: string
+  market: string
+  atr: number | null
+  rsi: number | null
+  macd: MacdValue | null
+  volume_analysis: VolumeAnalysis | null
+  sentiment: SentimentValue | null
+  multi_timeframe: MultiTimeframe | null
+  bb_upper: number | null
+  bb_middle: number | null
+  bb_lower: number | null
+}
+
