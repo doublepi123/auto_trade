@@ -121,10 +121,18 @@ const selectedSummaryExp = ref('')
 const summary = ref<ExperimentSummary[]>([])
 
 async function loadVersions() {
-  versions.value = await listPromptVersions()
+  try {
+    versions.value = await listPromptVersions()
+  } catch {
+    ElMessage.error('加载版本失败')
+  }
 }
 async function loadExperimentNames() {
-  experimentNames.value = await listExperimentNames()
+  try {
+    experimentNames.value = await listExperimentNames()
+  } catch {
+    ElMessage.error('加载实验列表失败')
+  }
 }
 async function submitVersion() {
   if (!newVersion.name || !newVersion.version || !newVersion.template) {
@@ -144,14 +152,26 @@ async function submitVersion() {
   }
 }
 async function activate(v: PromptVersion) {
-  await ElMessageBox.confirm(`确认将 "${v.name} ${v.version}" 设为激活版本？`, '确认激活')
-  await activatePromptVersion(v.id)
-  ElMessage.success('已激活')
-  await loadVersions()
+  try {
+    await ElMessageBox.confirm(`确认将 "${v.name} ${v.version}" 设为激活版本？`, '确认激活')
+  } catch {
+    return
+  }
+  try {
+    await activatePromptVersion(v.id)
+    ElMessage.success('已激活')
+    await loadVersions()
+  } catch {
+    ElMessage.error('激活失败')
+  }
 }
 async function loadSummary() {
   if (!selectedSummaryExp.value) return
-  summary.value = await getExperimentSummary(selectedSummaryExp.value)
+  try {
+    summary.value = await getExperimentSummary(selectedSummaryExp.value)
+  } catch {
+    ElMessage.error('加载实验摘要失败')
+  }
 }
 
 // --- Tab 2: performance ---
@@ -162,12 +182,16 @@ const recommendations = ref<string[]>([])
 
 async function loadPerformance() {
   if (!perfExp.value) { stats.value = null; variants.value = []; recommendations.value = []; return }
-  const [s, c, r] = await Promise.all([
-    getPerformanceStats(perfExp.value),
-    comparePerformanceVariants(perfExp.value),
-    getPerformanceRecommendations(perfExp.value),
-  ])
-  stats.value = s; variants.value = c; recommendations.value = r
+  try {
+    const [s, c, r] = await Promise.all([
+      getPerformanceStats(perfExp.value),
+      comparePerformanceVariants(perfExp.value),
+      getPerformanceRecommendations(perfExp.value),
+    ])
+    stats.value = s; variants.value = c; recommendations.value = r
+  } catch {
+    ElMessage.error('加载性能数据失败')
+  }
 }
 
 // --- Tab 3: indicators ---
