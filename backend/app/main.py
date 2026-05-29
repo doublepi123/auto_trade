@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.backtest import router as backtest_router
 from app.api.credentials import router as credentials_router
 from app.api.experiments import router as experiments_router
+from app.api.indicators import router as indicators_router
 from app.api.performance import router as performance_router
 from app.api.llm_advisor import router as llm_advisor_router
 from app.api.review import router as review_router
@@ -181,6 +182,7 @@ app.include_router(llm_advisor_router)
 app.include_router(backtest_router)
 app.include_router(experiments_router)
 app.include_router(performance_router)
+app.include_router(indicators_router)
 app.include_router(review_router)
 app.include_router(ws_router)
 

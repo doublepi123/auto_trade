@@ -626,3 +626,43 @@ class PerformanceVariant(BaseModel):
     win_rate: float
     total_pnl: float
     avg_pnl: float
+
+
+class MacdValue(BaseModel):
+    macd: float
+    signal: float
+    histogram: float
+
+
+class VolumeAnalysisSchema(BaseModel):
+    avg_volume: float
+    volume_ratio: float
+    trend: str
+
+
+class SentimentValue(BaseModel):
+    sentiment: str
+    score: float
+    description: str
+
+
+class MultiTimeframeSchema(BaseModel):
+    daily_trend: str
+    minute_trend: str
+    aligned: bool
+    description: str
+
+
+class IndicatorsResponse(BaseModel):
+    available: bool
+    symbol: str
+    market: str
+    atr: float | None = None
+    rsi: float | None = None
+    macd: MacdValue | None = None
+    volume_analysis: VolumeAnalysisSchema | None = None
+    sentiment: SentimentValue | None = None
+    multi_timeframe: MultiTimeframeSchema | None = None
+    bb_upper: float | None = None
+    bb_middle: float | None = None
+    bb_lower: float | None = None
