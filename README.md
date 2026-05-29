@@ -308,6 +308,7 @@ auto_trade/
 | `/#/events` | Decision Timeline — 交易与 LLM 决策事件 + 审计事件（`source` 切换） |
 | `/#/backtest` | Backtest — CSV 回测 |
 | `/#/credentials` | Credentials — 长桥凭证 + 多渠道通知（Server 酱 / Webhook） |
+| `/#/lab` | LLM 优化工作台 — 三页签：实验与版本（Prompt 版本管理 + 实验摘要）、性能看板（A/B 统计与优化建议）、指标面板（实时技术指标快照） |
 
 ## API 参考
 
@@ -367,6 +368,17 @@ auto_trade/
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/api/backtest/run` | 运行回测；body：`csv_text` 或 `price_points[]` + `params` |
+
+### LLM 优化工作台（P10）
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/experiments` | 列出所有实验名称（字符串数组） |
+| `GET` | `/api/experiments/{name}/summary` | 指定实验的变体摘要（`variant_name`、`win_rate`、`avg_pnl` 等） |
+| `GET` | `/api/performance/stats?experiment=` | 指定实验的汇总 A/B 统计（`total_trades`、`win_rate`、`total_pnl`、`avg_pnl`）；只读，不触发 LLM |
+| `GET` | `/api/performance/compare?experiment=` | 按变体拆分的 A/B 对比明细列表 |
+| `GET` | `/api/performance/recommendations?experiment=` | 基于历史数据的文字优化建议列表 |
+| `GET` | `/api/indicators?symbol=` | 实时技术指标快照（ATR、RSI、MACD、布林带、成交量分析、市场情绪、多时间框架趋势）；只读，不触发 LLM；broker 凭证缺失时 `available=false` |
 
 ### 策略复盘（规划中，P7）
 

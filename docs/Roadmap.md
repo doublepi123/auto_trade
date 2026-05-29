@@ -485,6 +485,37 @@
 - [x] `basedpyright` 0 errors, 0 warnings, 0 notes
 - [x] `npm run type-check` 通过
 - [x] `npm run build` 通过（4.50s）
+### P12：LLM 优化工作台前端化 ✅（2026-05-29 交付）
+
+> **目标：** 将 P9 后端已有的实验管理、性能追踪、技术指标等 API 暴露为可用的前端 Lab 页面，供用户直接查看和管理 Prompt 优化工作台。
+>
+> **说明：** 本迭代与远端独立推进的 P10（特征工程扩展）/P11（自适应特征选择）并行开发，集成时重新编号为 **P12** 以避免与已交付的 P10 冲突。
+>
+> **规格文档：** `docs/superpowers/specs/2026-05-29-llm-lab-frontend-design.md`
+>
+> **实施计划：** `docs/superpowers/plans/2026-05-29-llm-lab-frontend.md`
+>
+> **基线（交付后）：** `pytest 560 passed`，`basedpyright` 0 errors / 0 warnings，`npm run type-check` + `npm run build` 通过，Cypress `lab.cy.ts` 4/4 通过。
+
+#### 交付摘要
+
+- **后端 3 个只读端点**：
+  - `GET /api/experiments`（列出实验名称，复用 P9 `ExperimentResult` 表）
+  - `GET /api/indicators?symbol=`（实时技术指标快照：ATR、RSI、MACD、布林带、成交量、情绪、多时间框架；broker 缺失时 `available=false`）
+  - `GET /api/performance/{stats,compare,recommendations}?experiment=`（A/B 性能统计，补充响应模型 schema）
+- **前端 Lab 页（`/#/lab`）**：`Lab.vue` 三页签：
+  - **实验与版本**：Prompt 版本表格（`PromptVersion` 列表、激活操作）+ 版本创建表单 + 实验摘要选择查看
+  - **性能看板**：选择实验后展示 A/B 汇总统计（总交易/胜率/总 PnL/均 PnL）+ 变体对比表 + 优化建议列表
+  - **指标面板**：输入标的后查询实时技术指标，`available=false` 时显示"行情不可用"水印，否则渲染 6 张指标卡片
+- **Cypress E2E**：新增 `frontend/cypress/e2e/lab.cy.ts`，4 个测试用例覆盖三页签渲染、性能加载、指标不可用/可用
+
+#### 验证结果
+
+- [x] `pytest 560 passed, 1 skipped`（+11 项，相比 P9 的 549 项；并修复一个因时区处理导致的 `test_orders_default_returns_local_today_orders_with_pagination` 偶现失败）
+- [x] `basedpyright` 0 errors, 0 warnings, 0 notes
+- [x] `npm run type-check` 通过
+- [x] `npm run build` 通过（7.30s）
+- [x] `Cypress lab.cy.ts` 4/4 通过（本地 Vite dev server `CYPRESS_BASE_URL=http://localhost:3001`）
 
 ### 建议执行顺序
 
@@ -499,10 +530,11 @@
 | 已完成 | **P9 LLM Prompt Engineering Optimization** | ✅ 2026-05-29 | 模块化 Prompt 架构 + 技术指标（RSI/MACD/Volume）+ A/B 测试 + 市场情绪 + 多时间框架 + 性能追踪；pytest 549 passed。 |
 | 已完成 | **P10 LLM 特征工程扩展** | ✅ 2026-05-29 | 新增 OBV/ADX/Stochastic/CCI/Williams %R/VWAP 六个技术指标 + aggregate_signals() 综合信号；pytest 587 passed。 |
 | 已完成 | **P11 LLM 自适应特征选择** | ✅ 2026-05-29 | MarketStateDetector + SelectionModule + FeatureSelector，LLM 基于市场状态自主选择指标；pytest 607 passed。 |
+| 已完成 | **P12 LLM 优化工作台前端化** | ✅ 2026-05-29 | 暴露 P9 后端能力：3 个只读端点 + Lab 三页签前端；Cypress 4/4。 |
 
 ### 下一步建议
 
-**P11 LLM 自适应特征选择已完成交付**。后续可继续推进 P3（回测增强）或 P12（数据分析平台）等迭代。
+**P10–P12 均已完成交付**（P10 特征工程扩展、P11 自适应特征选择、P12 优化工作台前端化）。后续可继续推进 P3（回测增强）或数据分析平台等迭代。
 
 ---
 

@@ -32,6 +32,7 @@ auto_trade/
 │   │   │   ├── credentials.py              # 加密凭证 CRUD + notification_channels
 │   │   │   ├── llm_advisor.py              # LLM 区间 analyze/preview/status
 │   │   │   ├── backtest.py                 # POST /api/backtest/run
+│   │   │   ├── indicators.py               # GET /api/indicators（实时技术指标快照，只读）
 │   │   │   ├── ws.py                       # WebSocket /ws
 │   │   │   ├── auth.py                     # require_api_key（可选；preview 可挂依赖）
 │   │   │   └── deps.py                     # get_audit_logger / extract_actor DI helpers
@@ -63,11 +64,11 @@ auto_trade/
 │   └── requirements-dev.txt                # pytest / basedpyright
 ├── frontend/
 │   ├── src/
-│   │   ├── router/index.ts                 # /, /strategy, /history, /events, /backtest, /credentials
-│   │   ├── api/                            # client.ts + 按域模块
+│   │   ├── router/index.ts                 # /, /strategy, /history, /events, /backtest, /credentials, /lab
+│   │   ├── api/                            # client.ts + 按域模块（含 lab.ts：experiments/indicators/performance）
 │   │   ├── composables/                    # useDashboardData、useStatusStream…
 │   │   ├── components/                     # PriceChart、PnLChart、BacktestChart
-│   │   ├── views/                          # Dashboard、Strategy、TradeHistory、DecisionTimeline、Backtest、Credentials
+│   │   ├── views/                          # Dashboard、Strategy、TradeHistory、DecisionTimeline、Backtest、Credentials、Lab.vue
 │   │   └── types/index.ts
 │   └── cypress/e2e/                        # E2E（stub API）
 ├── docker-compose.yaml                     # frontend 0.0.0.0:8080；backend 仅容器内网
@@ -125,6 +126,9 @@ cd frontend && npm run type-check
 | 凭证 | `GET/PUT /api/credentials`（含 `notification_channels`，写审计） |
 | LLM | `POST /api/strategy/llm-interval/{preview,analyze}`，`GET …/status`，`PUT …/enable\|disable` |
 | 回测 | `POST /api/backtest/run` |
+| 实验 | `GET /api/experiments`（实验名称列表），`GET /api/experiments/{name}/summary`（变体摘要） |
+| 指标 | `GET /api/indicators?symbol=`（实时技术指标快照：ATR/RSI/MACD/布林带/成交量/情绪/多时间框架；只读，不触发 LLM） |
+| 性能 | `GET /api/performance/stats?experiment=`，`GET /api/performance/compare?experiment=`，`GET /api/performance/recommendations?experiment=`（A/B 统计；只读） |
 | 实时 | `WS /ws` |
 | 健康 | `GET /api/health` |
 
