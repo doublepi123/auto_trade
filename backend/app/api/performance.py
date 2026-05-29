@@ -8,12 +8,13 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.domain.performance.performance_tracker import PerformanceTracker
+from app.schemas import PerformanceStats, PerformanceVariant
 
 router = APIRouter(prefix="/api/performance", tags=["performance"])
 logger = logging.getLogger("auto_trade.performance")
 
 
-@router.get("/stats")
+@router.get("/stats", response_model=PerformanceStats)
 def get_stats(
     experiment: str = Query(..., description="Experiment name"),
     db: Session = Depends(get_db),
@@ -22,7 +23,7 @@ def get_stats(
     return tracker.get_overall_stats(experiment)
 
 
-@router.get("/compare")
+@router.get("/compare", response_model=list[PerformanceVariant])
 def compare_variants(
     experiment: str = Query(..., description="Experiment name"),
     db: Session = Depends(get_db),
@@ -31,7 +32,7 @@ def compare_variants(
     return tracker.compare_variants(experiment)
 
 
-@router.get("/recommendations")
+@router.get("/recommendations", response_model=list[str])
 def get_recommendations(
     experiment: str = Query(..., description="Experiment name"),
     db: Session = Depends(get_db),

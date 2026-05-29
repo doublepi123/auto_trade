@@ -611,3 +611,18 @@ class ExperimentSummary(BaseModel):
     profitable_count: int
     avg_pnl: float
     win_rate: float
+
+
+class PerformanceStats(BaseModel):
+    total_trades: int
+    win_rate: float
+    total_pnl: float
+    avg_pnl: float
+
+
+class PerformanceVariant(BaseModel):
+    variant: str
+    total_trades: int
+    win_rate: float
+    total_pnl: float
+    avg_pnl: float
