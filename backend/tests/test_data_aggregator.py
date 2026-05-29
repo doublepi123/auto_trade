@@ -279,3 +279,34 @@ class TestNewIndicators:
         assert "obv" in result
         assert "vwap" in result
         assert "aggregate_signals" in result
+
+
+class TestMarketState:
+    def test_fetch_market_data_includes_market_state(self) -> None:
+        broker = _FakeBroker(
+            daily=_build_candles(100.0, 30),
+            minute=_build_candles(100.0, 10),
+            quote_price=101.5,
+        )
+        aggregator = DataAggregator(broker=broker)
+        result = aggregator.fetch_market_data("AAPL.US", "US")
+
+        assert "market_state" in result
+        assert "state" in result["market_state"]
+        assert "confidence" in result["market_state"]
+        assert "description" in result["market_state"]
+        assert "suggested_indicators" in result["market_state"]
+        assert result["market_state"]["state"] in ("trending", "ranging", "volatile", "neutral")
+        assert 0.0 <= result["market_state"]["confidence"] <= 1.0
+
+    def test_fetch_market_data_market_state_neutral_when_insufficient_data(self) -> None:
+        broker = _FakeBroker(
+            daily=_build_candles(100.0, 2),
+            minute=_build_candles(100.0, 5),
+            quote_price=101.5,
+        )
+        aggregator = DataAggregator(broker=broker)
+        result = aggregator.fetch_market_data("AAPL.US", "US")
+
+        assert result["market_state"]["state"] == "neutral"
+        assert result["market_state"]["suggested_indicators"] == ["rsi", "macd", "atr", "vwap"]

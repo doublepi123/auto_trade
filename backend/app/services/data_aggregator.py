@@ -5,6 +5,7 @@ import statistics
 from typing import Any
 
 from app.core.broker import BrokerCandle, BrokerGateway
+from app.domain.analysis.market_state import MarketStateDetector
 from app.domain.analysis.technical_indicators import TechnicalIndicators
 from app.domain.prompt.context_module import ContextModule
 from app.domain.prompt.output_module import OutputModule
@@ -85,6 +86,16 @@ class DataAggregator:
         }
         aggregate_signals = TechnicalIndicators.aggregate_signals(indicator_results)
 
+        market_state = MarketStateDetector.detect(
+            adx=adx,
+            bb_upper=bb_upper,
+            bb_middle=bb_middle,
+            bb_lower=bb_lower,
+            atr=atr,
+            current_price=current_price,
+            volume_analysis=dict(volume_analysis),
+        )
+
         return {
             "daily_candles": daily_payload,
             "minute_candles": minute_payload,
@@ -105,6 +116,12 @@ class DataAggregator:
             "williams_r": williams_r,
             "vwap": vwap,
             "aggregate_signals": aggregate_signals,
+            "market_state": {
+                "state": market_state.state,
+                "confidence": market_state.confidence,
+                "description": market_state.description,
+                "suggested_indicators": market_state.suggested_indicators,
+            },
         }
 
     def _acquire_broker(self) -> tuple[BrokerGateway, bool]:
