@@ -420,10 +420,13 @@ class TestAPI:
     def test_orders_default_returns_local_today_orders_with_pagination(self) -> None:
         _clean_orders()
         db = SessionLocal()
-        # `_is_today` treats naive datetimes as UTC (matching the production _utcnow default).
-        # Use UTC so the stored naive string is correctly recognised as today after the
-        # UTC→local conversion in _is_today, regardless of the machine's timezone offset.
-        now_local = datetime.now(timezone.utc)
+        # `_is_today` treats naive datetimes as UTC then compares against the *local* date.
+        # Anchor both orders to local noon today (converted to UTC for storage, matching the
+        # production _utcnow default). This keeps the test deterministic regardless of the
+        # machine timezone or time of day — a naive "now - 30min" near local midnight would
+        # otherwise straddle the date boundary and drop one order from "today".
+        local_noon = datetime.now().astimezone().replace(hour=12, minute=0, second=0, microsecond=0)
+        now_local = local_noon.astimezone(timezone.utc)
         db.add_all([
             OrderRecord(
                 broker_order_id="manual-1",
