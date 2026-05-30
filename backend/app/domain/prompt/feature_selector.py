@@ -73,10 +73,8 @@ class FeatureSelector:
         if len(selected_indicators) < 5:
             filtered.pop("aggregate_signals", None)
 
-        if "atr" not in selected_indicators and "adx" not in selected_indicators:
-            filtered.pop("bb_upper", None)
-            filtered.pop("bb_middle", None)
-            filtered.pop("bb_lower", None)
+        # Bollinger Bands are always retained as fundamental reference data;
+        # they are not gated behind any specific indicator selection.
 
         if "obv" not in selected_indicators and "vwap" not in selected_indicators:
             filtered.pop("volume_analysis", None)

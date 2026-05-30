@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
 
+from app.config import settings
+
 logger = logging.getLogger("auto_trade.engine")
 
 
@@ -45,7 +47,7 @@ class StrategyEngine:
         self.last_price: float = 0.0
         self.last_trigger_price: float = 0.0
         self.last_trigger_at: Optional[datetime] = None
-        self._cooldown_seconds: int = 60
+        self._cooldown_seconds: int = settings.engine_cooldown_seconds
         self._lock = threading.Lock()
 
     def update_price(self, price: float) -> TriggerResult:

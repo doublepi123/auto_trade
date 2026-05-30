@@ -68,11 +68,11 @@ class ContextModule(PromptModule):
         if not selected_indicators or "atr" in selected_indicators:
             lines.append(f"- ATR(14): {atr:.2f}")
 
-        # Bollinger Bands
+        # Bollinger Bands — always shown as a fundamental reference indicator
         bb_upper = context.get("bb_upper", 0.0)
         bb_middle = context.get("bb_middle", 0.0)
         bb_lower = context.get("bb_lower", 0.0)
-        if not selected_indicators or "atr" in selected_indicators or "adx" in selected_indicators:
+        if bb_middle > 0:
             lines.append(f"- 布林带: 上轨 {bb_upper:.2f} / 中轨 {bb_middle:.2f} / 下轨 {bb_lower:.2f}")
 
         lines.append(f"- 当前价格: {current_price:.2f}")

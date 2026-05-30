@@ -135,7 +135,7 @@ def _interval_reference_quantity(position_context: dict[str, Any], account_conte
 
 @router.post("/strategy/llm-interval/preview", response_model=LLMAnalyzeResponse, dependencies=[Depends(require_api_key())])
 def preview_llm_interval(payload: LLMPreviewAnalyzeRequest) -> LLMAnalyzeResponse:
-    advisor = LLMAdvisorService()
+    advisor = LLMAdvisorService(broker=get_runner().broker)
     result = advisor.preview(
         symbol=payload.symbol,
         market=payload.market,
@@ -185,7 +185,7 @@ def analyze_llm_interval(
     position_context = _position_context(config.symbol, current_price)
     recent_price_context = getattr(runner, "recent_price_context", None)
     account_context = _account_context(config.symbol, config.market, current_price, config.short_selling)
-    advisor = LLMAdvisorService()
+    advisor = LLMAdvisorService(broker=runner.broker)
     result = advisor.analyze(
         symbol=config.symbol,
         market=config.market,

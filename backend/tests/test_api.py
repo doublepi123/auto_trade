@@ -724,6 +724,7 @@ class TestAPI:
         assert setup.status_code == 200
 
         class MissingKeyAdvisor:
+            def __init__(self, **_kwargs): pass
             def analyze(self, **_kwargs):
                 return {
                     "success": False,
@@ -753,6 +754,7 @@ class TestAPI:
         assert setup.status_code == 200
 
         class SuccessfulAdvisor:
+            def __init__(self, **_kwargs): pass
             def analyze(self, **_kwargs):
                 return {
                     "success": True,
@@ -773,6 +775,7 @@ class TestAPI:
                 state = State()
 
             engine = Engine()
+            broker = None
 
         monkeypatch.setattr(llm_api, "LLMAdvisorService", SuccessfulAdvisor)
         monkeypatch.setattr(llm_api, "get_runner", lambda: Runner())
@@ -809,6 +812,7 @@ class TestAPI:
         captured = {}
 
         class Advisor:
+            def __init__(self, **_kwargs): pass
             def analyze(self, **kwargs):
                 captured.update(kwargs)
                 return {
@@ -880,6 +884,7 @@ class TestAPI:
         assert setup.status_code == 200
 
         class Advisor:
+            def __init__(self, **_kwargs): pass
             def analyze(self, **_kwargs):
                 return {
                     "success": True,

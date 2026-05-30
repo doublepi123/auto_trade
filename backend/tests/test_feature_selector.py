@@ -58,12 +58,13 @@ class TestFeatureSelector:
         assert "symbol" in filtered
         assert "current_price" in filtered
 
-    def test_filter_removes_bb_without_atr_or_adx(self) -> None:
+    def test_filter_always_retains_bb_data(self) -> None:
+        """Bollinger Band data is always retained as fundamental reference data."""
         context = {"bb_upper": 1.0, "bb_middle": 0.5, "bb_lower": 0.0, "rsi": 50.0}
         filtered = FeatureSelector.filter_context(context, ["rsi"])
-        assert "bb_upper" not in filtered
-        assert "bb_middle" not in filtered
-        assert "bb_lower" not in filtered
+        assert "bb_upper" in filtered
+        assert "bb_middle" in filtered
+        assert "bb_lower" in filtered
 
     def test_filter_keeps_bb_with_atr(self) -> None:
         context = {"bb_upper": 1.0, "bb_middle": 0.5, "bb_lower": 0.0, "atr": 2.0}

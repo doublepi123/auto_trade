@@ -63,6 +63,7 @@ class Settings(BaseSettings):
     llm_min_confidence: float = 0.7
     llm_max_stripe_width_pct: float = 8.0
     min_exit_profit_pct: float = 0.2
+    engine_cooldown_seconds: int = Field(default=60, ge=0, le=3600, validation_alias="AUTO_TRADE_ENGINE_COOLDOWN_SECONDS")
 
     default_strategy: dict = Field(default_factory=lambda: {
         "symbol": "",

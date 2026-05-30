@@ -76,7 +76,7 @@ async def _llm_analysis_cron() -> None:
                 position_context = _position_context(config.symbol, current_price)
                 account_context = _account_context(config.symbol, config.market, current_price, config.short_selling)
 
-                advisor = LLMAdvisorService()
+                advisor = LLMAdvisorService(broker=runner.broker)
                 result = await asyncio.to_thread(
                     advisor.analyze,
                     symbol=config.symbol,
