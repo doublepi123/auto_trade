@@ -67,7 +67,7 @@ describe('Strategy', () => {
     cy.contains('港股单边预估费率').parent().find('input').clear().type('0.40')
     cy.contains('LLM 最小改价').parent().find('input').clear().type('0.50')
     cy.contains('LLM 同向冷却').parent().find('input').clear().type('120')
-    cy.contains('保存').click()
+    cy.contains('button', /^保存$/).click()
     cy.wait('@saveSafetySettings')
   })
 })

@@ -12,9 +12,9 @@ describe('Mobile smoke tests', { viewportWidth: 390, viewportHeight: 844 }, () =
   })
 
   it('Kill Switch button is visible and clickable', () => {
-    cy.contains('紧急停止').should('be.visible').click()
+    cy.get('[data-testid="quick-actions"]').contains('button', /^紧急停止$/).should('be.visible').click()
     cy.contains('.el-message-box', '确定要触发紧急停止吗？').should('be.visible')
-    cy.get('.el-message-box').contains('确定').click()
+    cy.get('.el-message-box').find('.el-button--primary').click()
     cy.contains('紧急停止已触发').should('be.visible')
   })
 
