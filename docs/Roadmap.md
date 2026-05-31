@@ -13,7 +13,7 @@
 | **API 覆盖** | ✅ 完备。策略配置、凭证管理、订单查询、状态获取、状态历史、事件时间线、运行时控制（启停/暂停/Kill Switch）。 |
 | **WebSocket 推送** | ✅ 就绪。实时状态同步。 |
 | **本地部署** | ✅ 就绪。Docker Compose 一键启动。 |
-| **测试** | ✅ 就绪。Backend pytest **549** 项、Frontend Cypress E2E 测试。 |
+| **测试** | ✅ 就绪。Backend pytest **628** 项、Frontend Cypress E2E 测试。 |
 | **凭证安全** | ✅ 就绪。主密钥 + AES-GCM 加密存储，前端不回显明文。 |
 | **数据库** | ✅ 就位。SQLite，含运行状态、状态快照、订单、`tracked_entries`、LLM 交互、交易事件和凭证配置。 |
 | **LLM 行情数据** | ✅ 真实 K 线（日 K + 1 分钟 K），ATR/布林带有效。 |
@@ -23,6 +23,9 @@
 | **多渠道通知** | ✅ `MultiChannelNotifier` + Server 酱 + Webhook + `severity_floor` 分级。 |
 | **交易时段守卫** | ✅ `trading_session_mode` 双层 gate（runner + execute 服务），`SESSION` skip 与 `TRADING_SESSION_BLOCKED` 审计。 |
 | **券商韧性** | ✅ `BrokerGateway._call_with_retry` 分档退避（订单 vs 行情），`BROKER_RETRY` 审计。 |
+| **LONG 加仓** | ✅ LONG 状态下 `price <= buy_low` 触发 BUY，保持 LONG；60s 冷却对齐。 |
+| **保证金下单量** | ✅ `margin_safety_factor` 可配置，BrokerGateway margin 路径已验证。 |
+| **LLM 持仓成本** | ✅ `ContextModule` 输出持仓方向/数量/均价/浮盈%；无持仓显示"当前无持仓"。 |
 
 ---
 
@@ -531,10 +534,12 @@
 | 已完成 | **P10 LLM 特征工程扩展** | ✅ 2026-05-29 | 新增 OBV/ADX/Stochastic/CCI/Williams %R/VWAP 六个技术指标 + aggregate_signals() 综合信号；pytest 587 passed。 |
 | 已完成 | **P11 LLM 自适应特征选择** | ✅ 2026-05-29 | MarketStateDetector + SelectionModule + FeatureSelector，LLM 基于市场状态自主选择指标；pytest 607 passed。 |
 | 已完成 | **P12 LLM 优化工作台前端化** | ✅ 2026-05-29 | 暴露 P9 后端能力：3 个只读端点 + Lab 三页签前端；Cypress 4/4。 |
+| 已完成 | **P13 加仓 + 成本锚定 LLM** | ✅ 2026-05-31 | Engine LONG→BUY 加仓 + ContextModule 持仓成本区块 + 冷却/优先级集成；pytest +8，basedpyright 0/0。 |
+| 已完成 | **P14 保证金下单量 | ✅ 2026-05-31 | margin_safety_factor 配置化 + BrokerGateway margin 路径验证；pytest 628 passed，frontend type-check + build 通过。 |
 
 ### 下一步建议
 
-**P10–P12 均已完成交付**（P10 特征工程扩展、P11 自适应特征选择、P12 优化工作台前端化）。后续可继续推进 P3（回测增强）或数据分析平台等迭代。
+**P13（加仓+成本锚定）和 P14（保证金下单量）均已完成交付。** 后续可推进 P15（Dashboard 性能优化）、P16（策略实验平台 Phase 1）、或 P18（技术债清理）。
 
 ---
 

@@ -37,6 +37,7 @@ class StrategyConfigSchema(BaseModel):
     min_repricing_pct: Optional[float] = Field(default=None, ge=0, le=0.05)
     llm_action_cooldown_seconds: Optional[int] = Field(default=None, ge=0, le=3600)
     trading_session_mode: Literal["RTH_ONLY", "ANY"] = "ANY"
+    margin_safety_factor: Optional[float] = Field(default=None, ge=0, le=1)
 
     @field_validator("market")
     @classmethod
@@ -77,6 +78,7 @@ class StrategyMergedSchema(BaseModel):
     min_repricing_pct: float = Field(default=0.003, ge=0, le=0.05)
     llm_action_cooldown_seconds: int = Field(default=60, ge=0, le=3600)
     trading_session_mode: Literal["RTH_ONLY", "ANY"] = "ANY"
+    margin_safety_factor: float = Field(default=0.9, ge=0, le=1)
 
     @field_validator("market")
     @classmethod
@@ -149,6 +151,7 @@ class StrategyResponse(BaseModel):
     min_repricing_pct: float
     llm_action_cooldown_seconds: int
     trading_session_mode: str = "ANY"
+    margin_safety_factor: float = 0.9
     updated_at: datetime
 
     model_config = {"from_attributes": True}

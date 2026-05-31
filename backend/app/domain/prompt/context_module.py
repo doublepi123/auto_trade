@@ -77,6 +77,25 @@ class ContextModule(PromptModule):
 
         lines.append(f"- 当前价格: {current_price:.2f}")
 
+        # Position cost section
+        current_position = context.get("current_position", "FLAT")
+        position_quantity = float(context.get("position_quantity", 0.0))
+        position_avg_price = float(context.get("position_avg_price", 0.0))
+        unrealized_pnl_pct = float(context.get("unrealized_pnl_pct", 0.0))
+
+        if position_quantity > 0 and position_avg_price > 0:
+            lines.append("")
+            lines.append("## 持仓成本")
+            lines.append(f"- 持仓方向: {current_position}")
+            lines.append(f"- 持仓数量: {position_quantity:.0f}")
+            lines.append(f"- 平均成本: {position_avg_price:.2f}")
+            lines.append(f"- 当前价格: {current_price:.2f}")
+            lines.append(f"- 浮盈/浮亏: {unrealized_pnl_pct:+.2f}%")
+        elif current_position == "FLAT" or position_quantity <= 0:
+            lines.append("")
+            lines.append("## 持仓成本")
+            lines.append("当前无持仓。")
+
         # RSI
         rsi = context.get("rsi", 0.0)
         if (not selected_indicators or "rsi" in selected_indicators) and rsi > 0:

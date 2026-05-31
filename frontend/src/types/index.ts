@@ -15,6 +15,7 @@ export interface StrategyConfig {
   min_repricing_pct: number
   llm_action_cooldown_seconds: number
   trading_session_mode: 'ANY' | 'RTH_ONLY'
+  margin_safety_factor: number
   updated_at: string
 }
 

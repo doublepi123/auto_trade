@@ -810,7 +810,7 @@ class TestAppRunner:
         assert runner.engine.last_trigger_at is None
         assert runner.engine.last_trigger_price == 0.0
 
-    def test_on_quote_does_not_submit_add_on_buy_when_long_below_buy_low(self) -> None:
+    def test_on_quote_submits_add_on_buy_when_long_below_buy_low(self) -> None:
         class Broker:
             def __init__(self) -> None:
                 self.submissions: list[tuple[str, Decimal]] = []
@@ -834,7 +834,9 @@ class TestAppRunner:
 
         runner._on_quote(Quote("AAPL.US", 99.0, 98.5, 99.5, ""))
 
-        assert broker.submissions == []
+        # P13: LONG + price <= buy_low now triggers add-on BUY
+        assert len(broker.submissions) == 1
+        assert broker.submissions[0][0] == "BUY"
         assert runner.engine.state == EngineState.LONG
         assert runner.engine.last_price == 99.0
 

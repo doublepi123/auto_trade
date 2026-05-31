@@ -12,6 +12,7 @@ const defaultStrategy: StrategyConfig = {
   min_repricing_pct: 0.003,
   llm_action_cooldown_seconds: 60,
   trading_session_mode: 'ANY',
+  margin_safety_factor: 0.9,
   updated_at: '',
 }
 

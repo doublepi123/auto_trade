@@ -40,26 +40,66 @@ class TestStrategyEngine:
         assert result.action == "SELL"
         assert engine.state == EngineState.FLAT
 
-    def test_price_below_buy_low_from_long_does_not_add_on_buy(self) -> None:
+    def test_price_below_buy_low_from_long_triggers_add_on_buy(self) -> None:
         engine = StrategyEngine(make_params(100, 200))
         engine.state = EngineState.LONG
 
         result = engine.update_price(99.0)
 
-        assert result.triggered is False
+        assert result.triggered is True
+        assert result.action == "BUY"
         assert engine.state == EngineState.LONG
 
-    def test_long_position_waits_for_sell_high_even_below_buy_low(self) -> None:
+    def test_add_on_buy_at_buy_low_boundary(self) -> None:
+        engine = StrategyEngine(make_params(100, 200))
+        engine.state = EngineState.LONG
+        result = engine.update_price(100.0)
+        assert result.triggered is True
+        assert result.action == "BUY"
+        assert engine.state == EngineState.LONG
+
+    def test_sell_priority_over_add_on_buy_in_long(self) -> None:
+        """SELL is evaluated first; with valid config buy_low < sell_high, both can't be true."""
+        engine = StrategyEngine(make_params(100, 200))
+        engine.state = EngineState.LONG
+        result = engine.update_price(201.0)
+        assert result.triggered is True
+        assert result.action == "SELL"
+        assert engine.state == EngineState.FLAT
+
+    def test_cooldown_blocks_add_on_buy(self) -> None:
         engine = StrategyEngine(make_params(100, 200))
         engine.state = EngineState.LONG
         engine._cooldown_seconds = 60
-
         first = engine.update_price(99.0)
+        assert first.triggered is True
+        assert first.action == "BUY"
+        assert engine.state == EngineState.LONG
         second = engine.update_price(98.0)
-
-        assert first.triggered is False
         assert second.triggered is False
         assert engine.state == EngineState.LONG
+
+    def test_cooldown_after_add_on_buy_blocks_sell(self) -> None:
+        engine = StrategyEngine(make_params(100, 200))
+        engine.state = EngineState.LONG
+        engine._cooldown_seconds = 60
+        engine.update_price(99.0)
+        result = engine.update_price(201.0)
+        assert result.triggered is False
+        assert engine.state == EngineState.LONG
+
+    def test_long_stays_long_after_multiple_add_on_buys(self) -> None:
+        engine = StrategyEngine(make_params(100, 200))
+        engine.state = EngineState.LONG
+        engine._cooldown_seconds = 0
+        engine.update_price(99.0)
+        assert engine.state == EngineState.LONG
+        engine.update_price(95.0)
+        assert engine.state == EngineState.LONG
+        result = engine.update_price(201.0)
+        assert result.triggered is True
+        assert result.action == "SELL"
+        assert engine.state == EngineState.FLAT
 
     def test_price_range_no_trigger_from_flat(self) -> None:
         engine = StrategyEngine(make_params(100, 200))

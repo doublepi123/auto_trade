@@ -94,6 +94,13 @@ class StrategyEngine:
                     action="SELL",
                     description=f"Price {price} >= sell_high {self.params.sell_high}, sell LONG",
                 )
+            if price <= self.params.buy_low:
+                self._mark_trigger(price)
+                return TriggerResult(
+                    triggered=True,
+                    action="BUY",
+                    description=f"Price {price} <= buy_low {self.params.buy_low}, add-on buy LONG",
+                )
 
         elif self.state == EngineState.SHORT:
             if price <= self.params.buy_low:

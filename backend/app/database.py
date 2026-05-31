@@ -28,6 +28,7 @@ def init_db() -> None:
     _ensure_watchlist_items_table(engine)
     _ensure_prompt_versions_table(engine)
     _ensure_experiment_results_table(engine)
+    _ensure_strategy_config_margin_safety_factor(engine)
 
     db = SessionLocal()
     try:
@@ -256,6 +257,18 @@ def _ensure_experiment_results_table(db_engine: Engine) -> None:
             """
         )
 
+
+def _ensure_strategy_config_margin_safety_factor(db_engine: Engine) -> None:
+    """Add margin_safety_factor column to strategy_config if missing."""
+    inspector = inspect(db_engine)
+    if "strategy_config" not in inspector.get_table_names():
+        return
+    columns = {column["name"] for column in inspector.get_columns("strategy_config")}
+    with db_engine.begin() as connection:
+        if "margin_safety_factor" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE strategy_config ADD COLUMN margin_safety_factor FLOAT DEFAULT 0.9"
+            )
 
 def _bootstrap_credentials(db: Session, credential_model: type, strategy_model: type) -> None:
     from app.core.credential_crypto import encrypt_secret

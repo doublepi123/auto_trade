@@ -158,6 +158,12 @@
         <el-form-item label="LLM 同向冷却（秒）">
           <el-input-number v-model="form.llm_action_cooldown_seconds" :min="0" :max="3600" :step="1" />
         </el-form-item>
+        <el-form-item label="买入保证金安全系数">
+          <el-input-number v-model="form.margin_safety_factor" :min="0" :max="1" :precision="2" :step="0.05" />
+          <div style="margin-left: 8px; color: #909399; font-size: 12px;">
+            从券商获取的最大买入量的乘数。0.9 = 使用 90% 的保证金购买力。
+          </div>
+        </el-form-item>
         <el-divider content-position="left">交易时段</el-divider>
         <el-form-item label="新单时段">
           <el-radio-group v-model="form.trading_session_mode" data-testid="trading-session-mode">
@@ -202,6 +208,7 @@ interface StrategyForm {
   min_repricing_pct: number
   llm_action_cooldown_seconds: number
   trading_session_mode: 'ANY' | 'RTH_ONLY'
+  margin_safety_factor: number
 }
 
 const loadedStrategy = ref<StrategyForm | null>(null)
@@ -222,6 +229,7 @@ const { form, loading, saving, saved, error, isDirty, load, save } = useFormStat
     fee_rate_hk: 0.30,
     min_repricing_pct: 0.30,
     llm_action_cooldown_seconds: 60,
+    margin_safety_factor: 0.9,
     trading_session_mode: 'ANY',
   },
   load: async () => {
@@ -241,6 +249,7 @@ const { form, loading, saving, saved, error, isDirty, load, save } = useFormStat
       fee_rate_hk: s.fee_rate_hk * 100,
       min_repricing_pct: s.min_repricing_pct * 100,
       llm_action_cooldown_seconds: s.llm_action_cooldown_seconds,
+      margin_safety_factor: s.margin_safety_factor ?? 0.9,
       trading_session_mode: s.trading_session_mode === 'RTH_ONLY' ? 'RTH_ONLY' : 'ANY',
     }
     loadedStrategy.value = loaded
@@ -268,6 +277,7 @@ const { form, loading, saving, saved, error, isDirty, load, save } = useFormStat
     if (!previous || data.trading_session_mode !== previous.trading_session_mode) {
       patch.trading_session_mode = data.trading_session_mode === 'RTH_ONLY' ? 'RTH_ONLY' : 'ANY'
     }
+    if (!previous || data.margin_safety_factor !== previous.margin_safety_factor) patch.margin_safety_factor = data.margin_safety_factor
     await updateStrategy(patch)
     loadedStrategy.value = {
       ...data,

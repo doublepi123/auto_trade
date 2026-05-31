@@ -51,6 +51,7 @@ class StrategyConfig(Base):
     llm_applied_at: Mapped[Optional[datetime]] = mapped_column(_TZDateTime(), nullable=True)
     llm_reject_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     trading_session_mode: Mapped[str] = mapped_column(String(16), default="ANY", nullable=False)
+    margin_safety_factor: Mapped[float | None] = mapped_column(Float, nullable=True, default=0.9)
 
 
 class CredentialConfig(Base):

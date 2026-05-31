@@ -268,16 +268,20 @@ class TradeExecutionService:
         side: str,
         price: Decimal,
         cash_currency: str,
+        *,
+        safety_factor: float | None = None,
     ) -> int:
         max_qty = broker.estimate_margin_max_quantity(symbol, side, price, cash_currency)
-        qty = int(max_qty * ENTRY_BUYING_POWER_USAGE)
+        factor = Decimal(str(safety_factor)) if safety_factor is not None else ENTRY_BUYING_POWER_USAGE
+        qty = int(max_qty * factor)
         if qty <= 0:
             logger.warning(
-                "%s: qty <= 0, margin_max_qty=%s price=%s currency=%s",
+                "%s: qty <= 0, margin_max_qty=%s price=%s currency=%s factor=%s",
                 side,
                 max_qty,
                 price,
                 cash_currency,
+                factor,
             )
         return qty
 
