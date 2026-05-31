@@ -535,11 +535,12 @@
 | 已完成 | **P11 LLM 自适应特征选择** | ✅ 2026-05-29 | MarketStateDetector + SelectionModule + FeatureSelector，LLM 基于市场状态自主选择指标；pytest 607 passed。 |
 | 已完成 | **P12 LLM 优化工作台前端化** | ✅ 2026-05-29 | 暴露 P9 后端能力：3 个只读端点 + Lab 三页签前端；Cypress 4/4。 |
 | 已完成 | **P13 加仓 + 成本锚定 LLM** | ✅ 2026-05-31 | Engine LONG→BUY 加仓 + ContextModule 持仓成本区块 + 冷却/优先级集成；pytest +8，basedpyright 0/0。 |
-| 已完成 | **P14 保证金下单量 | ✅ 2026-05-31 | margin_safety_factor 配置化 + BrokerGateway margin 路径验证；pytest 628 passed，frontend type-check + build 通过。 |
+| 已完成 | **P14 保证金下单量** | ✅ 2026-05-31 | margin_safety_factor 配置化 + BrokerGateway margin 路径验证；pytest 628 passed，frontend type-check + build 通过。 |
+| 已完成 | **P15 Dashboard & 配置性能优化** | ✅ 2026-05-31 | `/api/account` 短 TTL 缓存 + Dashboard 分区加载 + 配置页初始 loading guard；pytest 633 passed / basedpyright 0/0 / frontend build / 新增 Cypress 4 项通过。 |
 
 ### 下一步建议
 
-**P13（加仓+成本锚定）和 P14（保证金下单量）均已完成交付。** 后续可推进 P15（Dashboard 性能优化）、P16（策略实验平台 Phase 1）、或 P18（技术债清理）。
+**P15 Dashboard & 配置性能优化已完成交付。** 后续建议推进 P16（策略实验平台 Phase 1：批量回测 + 排行榜），P18 技术债可穿插处理。
 
 ---
 

@@ -1,5 +1,5 @@
 <template>
-  <div class="dashboard-page" v-loading="initialLoading">
+  <div class="dashboard-page">
     <el-alert v-if="loadError" type="error" title="无法连接服务器，请检查网络和 API 密钥" show-icon :closable="false" class="dashboard-alert">
       <el-button size="small" type="primary" plain @click="handleRetry">重试连接</el-button>
     </el-alert>
@@ -18,7 +18,7 @@
         </div>
       </div>
 
-      <div class="status-strip" data-testid="status-strip">
+      <div class="status-strip" data-testid="status-strip" v-loading="statusLoading || strategyLoading">
         <div class="strip-item">
           <span>标的</span>
           <strong>{{ strategy.symbol || '未配置' }}</strong>
@@ -55,7 +55,7 @@
       </div>
 
       <div class="cockpit-grid">
-        <section class="cockpit-panel price-panel" data-testid="price-panel">
+        <section class="cockpit-panel price-panel" data-testid="price-panel" v-loading="statusLoading || strategyLoading">
           <div class="panel-heading">
             <span>最新价格</span>
             <el-tag :type="stateTagType">{{ engineStateLabel(status.engine_state) }}</el-tag>
@@ -85,7 +85,7 @@
           </div>
         </section>
 
-        <section class="cockpit-panel position-panel" data-testid="position-panel">
+        <section class="cockpit-panel position-panel" data-testid="position-panel" v-loading="accountLoading">
           <div class="panel-heading">
             <span>持仓明细</span>
             <el-tag :type="primaryPosition ? 'success' : 'info'" effect="plain">{{ primaryPosition ? positionSideLabel(primaryPosition.side) : '空仓' }}</el-tag>
@@ -114,7 +114,7 @@
           <p v-else class="empty-note">暂无持仓</p>
         </section>
 
-        <section class="cockpit-panel llm-panel" data-testid="llm-panel">
+        <section class="cockpit-panel llm-panel" data-testid="llm-panel" v-loading="llmStatusLoading">
           <div class="panel-heading">
             <span>LLM 智能区间</span>
             <el-tag :type="llmStatus?.enabled ? 'success' : 'info'" effect="plain">{{ llmStatus?.enabled ? '已启用' : '已禁用' }}</el-tag>
@@ -139,7 +139,7 @@
           <p v-else class="empty-note">暂无 LLM 建议</p>
         </section>
 
-        <section class="cockpit-panel action-panel" data-testid="quick-actions">
+        <section class="cockpit-panel action-panel" data-testid="quick-actions" v-loading="statusLoading">
           <div class="panel-heading">
             <span>操作控制</span>
             <el-tag :type="status.kill_switch ? 'danger' : status.paused ? 'warning' : 'success'" effect="plain">
@@ -176,10 +176,11 @@
     </section>
 
     <section class="detail-grid">
-      <div class="detail-panel account-panel">
+      <div class="detail-panel account-panel" v-loading="accountLoading">
         <div class="section-title">
           <h4>总资产</h4>
           <strong :class="account.available ? 'metric-positive' : 'metric-negative'">${{ formatNumber(account.total_assets) }}</strong>
+          <el-tag v-if="accountRefreshing && !accountLoading" size="small" type="info">刷新中</el-tag>
         </div>
         <h4 class="subsection-title">现金余额</h4>
         <el-table :data="account.cash_balances" size="small" v-if="account.cash_balances.length > 0" class="responsive-table">
@@ -195,7 +196,7 @@
         <p v-else class="empty-note">暂无数据</p>
       </div>
 
-      <div class="detail-panel">
+      <div class="detail-panel" v-loading="strategyLoading || statusLoading">
         <div class="section-title">
           <h4>行情信息</h4>
           <span>{{ strategy.symbol || '未配置' }}</span>
@@ -214,7 +215,7 @@
         </div>
       </div>
 
-      <div class="detail-panel recent-orders" data-testid="recent-orders">
+      <div class="detail-panel recent-orders" data-testid="recent-orders" v-loading="recentOrdersLoading">
         <div class="section-title">
           <h4>最近订单</h4>
           <span>{{ recentOrders.length }} 条</span>
@@ -232,7 +233,7 @@
         <p v-else class="empty-note">暂无订单</p>
       </div>
 
-      <div class="detail-panel recent-events" data-testid="recent-events">
+      <div class="detail-panel recent-events" data-testid="recent-events" v-loading="recentEventsLoading">
         <div class="section-title">
           <h4>决策时间线</h4>
           <span>{{ recentEvents.length }} 条</span>
@@ -271,13 +272,18 @@ import { startTrading, stopTrading, pauseTrading, resumeTrading, activateKillSwi
 import type { LLMIntervalStatus, OrderRecord, Position, StatusHistoryPoint, TradeEventRecord, TradeSignalMarker } from '../types'
 import { engineStateLabel, auditActionLabel, marketLabel, positionSideLabel, skipCategoryLabel, tradeEventTypeLabel } from '../utils/labels'
 
-const { strategy, status, initialLoading, loadError, load, refreshStatus } = useDashboardData()
+type CypressWindow = Window & { Cypress?: unknown }
+const accountRefreshIntervalMs = (window as CypressWindow).Cypress ? 500 : 10000
+const { strategy, status, strategyLoading, statusLoading, loadError, load, refreshStatus } = useDashboardData()
 const { realtimeStatus } = useStatusStream(status)
-const { account, accountError, refresh: refreshAccount } = useAccountRefresh()
+const { account, accountError, accountLoading, accountRefreshing, refresh: refreshAccount } = useAccountRefresh(accountRefreshIntervalMs)
 
 const llmStatus = ref<LLMIntervalStatus | null>(null)
 const recentOrders = ref<OrderRecord[]>([])
 const recentEvents = ref<TradeEventRecord[]>([])
+const llmStatusLoading = ref(true)
+const recentOrdersLoading = ref(true)
+const recentEventsLoading = ref(true)
 const chartPoints = ref<StatusHistoryPoint[]>([])
 const tradeMarkers = ref<TradeSignalMarker[]>([])
 let llmStatusTimer: ReturnType<typeof setInterval> | null = null
@@ -382,26 +388,35 @@ async function handleRetry() {
 }
 
 async function loadLLMStatus() {
+  llmStatusLoading.value = true
   try {
     llmStatus.value = await getLLMIntervalStatus()
   } catch {
     llmStatus.value = null
+  } finally {
+    llmStatusLoading.value = false
   }
 }
 
 async function loadRecentOrders() {
+  recentOrdersLoading.value = true
   try {
     recentOrders.value = (await getOrders({ scope: 'today', page: 1, page_size: 5 })).items.slice(0, 5)
   } catch {
     recentOrders.value = []
+  } finally {
+    recentOrdersLoading.value = false
   }
 }
 
 async function loadRecentEvents() {
+  recentEventsLoading.value = true
   try {
     recentEvents.value = (await getTradeEvents({ page: 1, page_size: 5 })).items.slice(0, 5)
   } catch {
     recentEvents.value = []
+  } finally {
+    recentEventsLoading.value = false
   }
 }
 
@@ -451,7 +466,6 @@ onMounted(() => {
     loadRecentEvents()
   }, 3000)
   load().catch(() => void 0)
-  refreshAccount().catch(() => void 0)
   window.addEventListener('resize', handleResize)
 })
 

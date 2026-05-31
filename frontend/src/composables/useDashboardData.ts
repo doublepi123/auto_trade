@@ -29,28 +29,41 @@ export function useDashboardData() {
   const status = ref<StatusData>({ ...defaultStatus })
   const initialLoading = ref(true)
   const loadError = ref(false)
+  const strategyLoading = ref(true)
+  const statusLoading = ref(true)
+  let statusRefreshInFlight = false
 
   async function load() {
-    try {
-      const [s, st] = await Promise.all([getStrategy(), getStatus()])
-      strategy.value = s
-      status.value = st
-      loadError.value = false
-    } catch (e) {
-      console.error('Dashboard data load failed:', e)
+    initialLoading.value = true
+    loadError.value = false
+    strategyLoading.value = true
+    statusLoading.value = true
+    const strategyPromise = getStrategy()
+      .then((s) => { strategy.value = s })
+      .finally(() => { strategyLoading.value = false })
+    const statusPromise = getStatus()
+      .then((st) => { status.value = st })
+      .finally(() => { statusLoading.value = false })
+
+    const results = await Promise.allSettled([strategyPromise, statusPromise])
+    initialLoading.value = false
+    if (results.some((result) => result.status === 'rejected')) {
       loadError.value = true
-      throw e
-    } finally {
-      initialLoading.value = false
+      throw new Error('Dashboard data load failed')
     }
   }
 
   async function refreshStatus() {
+    if (statusRefreshInFlight) return
+    statusRefreshInFlight = true
     try {
       status.value = await getStatus()
       loadError.value = false
     } catch {
       void 0
+    } finally {
+      statusRefreshInFlight = false
+      statusLoading.value = false
     }
   }
 
@@ -58,6 +71,8 @@ export function useDashboardData() {
     strategy,
     status,
     initialLoading,
+    strategyLoading,
+    statusLoading,
     loadError,
     load,
     refreshStatus,

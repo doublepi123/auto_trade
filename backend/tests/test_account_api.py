@@ -21,12 +21,20 @@ client = TestClient(app)
 
 
 @pytest.fixture(autouse=True)
-def _reset_runner():
+def _reset_runner_and_cache():
+    import threading
     import app.runner as runner_mod
+    import app.api.trade as trade_api
     old = runner_mod._runner
+    old_refresh_lock = trade_api._account_refresh_lock
     runner_mod._runner = AppRunner()
+    trade_api._account_snapshot_cache = None
+    trade_api._account_refresh_lock = threading.Lock()
     yield
+    assert not trade_api._account_refresh_lock.locked()
     runner_mod._runner = old
+    trade_api._account_snapshot_cache = None
+    trade_api._account_refresh_lock = old_refresh_lock
 
 
 class TestAccountResponseSchema:
@@ -304,3 +312,154 @@ class TestGetAccountEndpointQuoteFallback:
         resp = client.get("/api/account")
         data = resp.json()
         assert data["total_assets"] == 50000.0
+
+
+class TestGetAccountEndpointCache:
+    def test_account_endpoint_uses_cached_snapshot_within_ttl(self, monkeypatch):
+        import app.api.trade as trade_api
+
+        runner = get_runner()
+        mock_broker = MagicMock()
+        mock_broker.get_account.return_value = AccountInfo(
+            total_assets=Decimal("50000"),
+            cash_balances=[CashBalance(currency="USD", available_cash=Decimal("1000"), frozen_cash=Decimal("0"))],
+            net_assets=[],
+        )
+        mock_broker.get_positions.return_value = []
+        runner.broker = mock_broker
+
+        trade_api._account_snapshot_cache = None
+        monkeypatch.setattr(trade_api, "_account_cache_now", lambda: 1000.0)
+
+        first = client.get("/api/account")
+        second = client.get("/api/account")
+
+        assert first.status_code == 200
+        assert second.status_code == 200
+        assert second.json()["total_assets"] == 50000.0
+        assert mock_broker.get_account.call_count == 1
+        assert mock_broker.get_positions.call_count == 1
+
+    def test_account_endpoint_refreshes_after_ttl(self, monkeypatch):
+        import app.api.trade as trade_api
+
+        runner = get_runner()
+        mock_broker = MagicMock()
+        mock_broker.get_account.return_value = AccountInfo(
+            total_assets=Decimal("50000"), cash_balances=[], net_assets=[]
+        )
+        mock_broker.get_positions.return_value = []
+        runner.broker = mock_broker
+        trade_api._account_snapshot_cache = None
+
+        now = {"value": 1000.0}
+        monkeypatch.setattr(trade_api, "_account_cache_now", lambda: now["value"])
+        client.get("/api/account")
+        now["value"] += trade_api.ACCOUNT_CACHE_TTL_SECONDS + 0.1
+        client.get("/api/account")
+
+        assert mock_broker.get_account.call_count == 2
+        assert mock_broker.get_positions.call_count == 2
+
+    def test_account_endpoint_returns_cache_when_refresh_fails(self, monkeypatch):
+        import app.api.trade as trade_api
+
+        runner = get_runner()
+        mock_broker = MagicMock()
+        mock_broker.get_account.return_value = AccountInfo(
+            total_assets=Decimal("50000"),
+            cash_balances=[CashBalance(currency="USD", available_cash=Decimal("1000"), frozen_cash=Decimal("0"))],
+            net_assets=[],
+        )
+        mock_broker.get_positions.return_value = []
+        runner.broker = mock_broker
+        trade_api._account_snapshot_cache = None
+
+        now = {"value": 1000.0}
+        monkeypatch.setattr(trade_api, "_account_cache_now", lambda: now["value"])
+        client.get("/api/account")
+        now["value"] += trade_api.ACCOUNT_CACHE_TTL_SECONDS + 0.1
+        mock_broker.get_account.side_effect = RuntimeError("broker down")
+        mock_broker.get_positions.side_effect = RuntimeError("broker down")
+
+        resp = client.get("/api/account")
+        data = resp.json()
+        assert resp.status_code == 200
+        assert data["available"] is True
+        assert data["total_assets"] == 50000.0
+        assert data["error"] is None
+
+    def test_account_endpoint_reports_unavailable_without_cache(self, monkeypatch):
+        import app.api.trade as trade_api
+
+        runner = get_runner()
+        mock_broker = MagicMock()
+        mock_broker.get_account.side_effect = RuntimeError("broker down")
+        mock_broker.get_positions.side_effect = RuntimeError("broker down")
+        runner.broker = mock_broker
+        trade_api._account_snapshot_cache = None
+        monkeypatch.setattr(trade_api, "_account_cache_now", lambda: 1000.0)
+
+        resp = client.get("/api/account")
+        data = resp.json()
+        assert resp.status_code == 200
+        assert data["available"] is False
+        assert data["error"] == "Account data unavailable"
+
+    def test_account_endpoint_stampede_protection(self, monkeypatch):
+        """Cold-cache concurrent requests: second waiter uses first's result."""
+        import app.api.trade as trade_api
+        import threading
+        import time
+
+        runner = get_runner()
+        mock_broker = MagicMock()
+        mock_broker.get_account.return_value = AccountInfo(
+            total_assets=Decimal("50000"),
+            cash_balances=[CashBalance(currency="USD", available_cash=Decimal("1000"), frozen_cash=Decimal("0"))],
+            net_assets=[],
+        )
+        mock_broker.get_positions.return_value = []
+        runner.broker = mock_broker
+        trade_api._account_snapshot_cache = None
+        monkeypatch.setattr(trade_api, "_account_cache_now", lambda: 1000.0)
+
+        entered_fetch = threading.Event()
+        release_fetch = threading.Event()
+        original_fetch = trade_api._fetch_account_response
+
+        def gated_fetch():
+            entered_fetch.set()
+            assert release_fetch.wait(timeout=5.0), "timed out waiting for release"
+            return original_fetch()
+
+        monkeypatch.setattr(trade_api, "_fetch_account_response", gated_fetch)
+
+        results: dict[str, tuple[int, dict]] = {}
+
+        def call_endpoint(label: str) -> None:
+            resp = client.get("/api/account")
+            results[label] = (resp.status_code, resp.json())
+
+        t1 = threading.Thread(target=call_endpoint, args=("first",), daemon=True)
+        t2 = threading.Thread(target=call_endpoint, args=("second",), daemon=True)
+
+        t1.start()
+        assert entered_fetch.wait(timeout=5.0), "t1 never entered fetch"
+
+        t2.start()
+        time.sleep(0.3)  # let t2 reach the blocking acquire
+
+        release_fetch.set()
+
+        t1.join(timeout=5.0)
+        t2.join(timeout=5.0)
+        assert not t1.is_alive(), "t1 did not finish"
+        assert not t2.is_alive(), "t2 did not finish"
+
+        assert results["first"][0] == 200
+        assert results["second"][0] == 200
+        assert results["first"][1]["total_assets"] == 50000.0
+        assert results["second"][1]["total_assets"] == 50000.0
+        assert mock_broker.get_account.call_count == 1
+        assert mock_broker.get_positions.call_count == 1

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import csv
 import io
+import threading
+import time
 import json
 import logging
 from datetime import datetime, timezone
@@ -340,8 +342,34 @@ def cancel_order(
         )
 
 
-@router.get("/account", response_model=AccountResponse)
-def get_account() -> AccountResponse:
+ACCOUNT_CACHE_TTL_SECONDS = 5.0
+_account_cache_lock = threading.Lock()
+_account_snapshot_cache: tuple[int, float, AccountResponse] | None = None
+_account_refresh_lock = threading.Lock()
+
+
+def _account_cache_now() -> float:
+    return time.monotonic()
+
+
+def _cached_account_response(broker: object, now: float, *, allow_stale: bool) -> AccountResponse | None:
+    with _account_cache_lock:
+        if _account_snapshot_cache is None:
+            return None
+        broker_id, cached_at, response = _account_snapshot_cache
+        if broker_id == id(broker) and (allow_stale or now - cached_at <= ACCOUNT_CACHE_TTL_SECONDS):
+            return response.model_copy(deep=True)
+    return None
+
+
+def _store_account_response(broker: object, now: float, response: AccountResponse) -> None:
+    with _account_cache_lock:
+        global _account_snapshot_cache
+        _account_snapshot_cache = (id(broker), now, response.model_copy(deep=True))
+
+
+
+def _fetch_account_response() -> AccountResponse:
     runner = get_runner()
     broker = runner.broker
     available = True
@@ -399,6 +427,54 @@ def get_account() -> AccountResponse:
         available=available,
         error=None if available else "Account data unavailable",
     )
+
+
+def _unavailable_account_response() -> AccountResponse:
+    return AccountResponse(
+        total_assets=0.0, cash_balances=[], positions=[],
+        available=False, error="Account data unavailable",
+    )
+
+
+@router.get("/account", response_model=AccountResponse)
+def get_account() -> AccountResponse:
+    broker = get_runner().broker
+    cached = _cached_account_response(broker, _account_cache_now(), allow_stale=False)
+    if cached is not None:
+        return cached
+
+    acquired = _account_refresh_lock.acquire(blocking=False)
+    if not acquired:
+        cached = _cached_account_response(broker, _account_cache_now(), allow_stale=True)
+        if cached is not None:
+            return cached
+        _account_refresh_lock.acquire()
+        acquired = True
+
+    try:
+        cached = _cached_account_response(broker, _account_cache_now(), allow_stale=False)
+        if cached is not None:
+            return cached
+        response = _fetch_account_response()
+    except Exception:
+        logger.exception("failed to refresh account snapshot")
+        cached = _cached_account_response(broker, _account_cache_now(), allow_stale=True)
+        if cached is not None:
+            return cached
+        return _unavailable_account_response()
+    finally:
+        if acquired:
+            _account_refresh_lock.release()
+
+    if not response.available:
+        cached = _cached_account_response(broker, _account_cache_now(), allow_stale=True)
+        if cached is not None:
+            return cached
+
+    if response.available:
+        _store_account_response(broker, _account_cache_now(), response)
+    return response
+
 
 
 @router.post("/control/start", response_model=MessageResponse)

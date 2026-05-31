@@ -110,8 +110,8 @@
       </div>
     </el-card>
 
-    <el-card style="max-width: 600px">
-      <el-form :model="form" label-width="180px" @submit.prevent="save">
+    <el-card style="max-width: 600px" v-loading="loading">
+      <el-form data-testid="strategy-config-form" :model="form" label-width="180px" @submit.prevent="save" :disabled="loading">
         <el-form-item label="股票代码">
           <el-input v-model="form.symbol" placeholder="例如 AAPL.US" />
         </el-form-item>
