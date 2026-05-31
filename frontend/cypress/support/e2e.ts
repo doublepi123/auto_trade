@@ -349,6 +349,11 @@ Cypress.Commands.add('stubApi', () => {
       updated_at: '2026-01-01T00:00:00Z', reload_warning: null,
     },
   }).as('saveCredentials')
+
+  cy.intercept('GET', '/api/strategy-experiments', { body: [] }).as('listStrategyExperiments')
+  cy.intercept('GET', '/api/strategy-experiments/*/runs*', {
+    body: { items: [], total: 0, page: 1, page_size: 20 },
+  }).as('listStrategyExperimentRuns')
 })
 
 Cypress.Commands.add('visitApp', (path = '/') => {

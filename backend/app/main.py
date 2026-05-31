@@ -17,6 +17,7 @@ from app.api.performance import router as performance_router
 from app.api.llm_advisor import router as llm_advisor_router
 from app.api.review import router as review_router
 from app.api.strategy import router as strategy_router
+from app.api.strategy_experiments import router as strategy_experiments_router
 from app.api.trade import router as trade_router
 from app.api.watchlist import router as watchlist_router
 from app.api.ws import router as ws_router
@@ -175,6 +176,7 @@ app.add_middleware(
 )
 
 app.include_router(strategy_router)
+app.include_router(strategy_experiments_router)
 app.include_router(credentials_router)
 app.include_router(trade_router)
 app.include_router(watchlist_router)

@@ -28,6 +28,8 @@ def init_db() -> None:
     _ensure_watchlist_items_table(engine)
     _ensure_prompt_versions_table(engine)
     _ensure_experiment_results_table(engine)
+    _ensure_strategy_experiments_table(engine)
+    _ensure_strategy_experiment_runs_table(engine)
     _ensure_strategy_config_margin_safety_factor(engine)
 
     db = SessionLocal()
@@ -257,6 +259,57 @@ def _ensure_experiment_results_table(db_engine: Engine) -> None:
             """
         )
 
+
+
+def _ensure_strategy_experiments_table(db_engine: Engine) -> None:
+    inspector = inspect(db_engine)
+    if "strategy_experiments" in inspector.get_table_names():
+        return
+    with db_engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS strategy_experiments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name VARCHAR(128) NOT NULL,
+                symbol VARCHAR(50) NOT NULL,
+                base_params_json TEXT NOT NULL,
+                parameter_grid_json TEXT NOT NULL,
+                status VARCHAR(16) DEFAULT 'PENDING' NOT NULL,
+                estimated_runs INTEGER DEFAULT 0 NOT NULL,
+                completed_runs INTEGER DEFAULT 0 NOT NULL,
+                failed_runs INTEGER DEFAULT 0 NOT NULL,
+                error TEXT DEFAULT '' NOT NULL,
+                created_at DATETIME,
+                completed_at DATETIME
+            )
+            """
+        )
+
+
+def _ensure_strategy_experiment_runs_table(db_engine: Engine) -> None:
+    inspector = inspect(db_engine)
+    if "strategy_experiment_runs" in inspector.get_table_names():
+        return
+    with db_engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS strategy_experiment_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                experiment_id INTEGER NOT NULL,
+                parameters_json TEXT NOT NULL,
+                status VARCHAR(16) DEFAULT 'COMPLETED' NOT NULL,
+                total_pnl REAL DEFAULT 0.0 NOT NULL,
+                total_return_pct REAL DEFAULT 0.0 NOT NULL,
+                max_drawdown_pct REAL DEFAULT 0.0 NOT NULL,
+                win_rate REAL DEFAULT 0.0 NOT NULL,
+                trade_count INTEGER DEFAULT 0 NOT NULL,
+                closed_trade_count INTEGER DEFAULT 0 NOT NULL,
+                result_summary_json TEXT DEFAULT '{}' NOT NULL,
+                error TEXT DEFAULT '' NOT NULL,
+                created_at DATETIME
+            )
+            """
+        )
 
 def _ensure_strategy_config_margin_safety_factor(db_engine: Engine) -> None:
     """Add margin_safety_factor column to strategy_config if missing."""

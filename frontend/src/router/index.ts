@@ -8,10 +8,12 @@ import Strategy from '../views/Strategy.vue'
 import TradeHistory from '../views/TradeHistory.vue'
 import Watchlist from '../views/Watchlist.vue'
 import Lab from '../views/Lab.vue'
+import Experiments from '../views/Experiments.vue'
 
 const routes = [
   { path: '/', component: Dashboard },
   { path: '/backtest', component: Backtest },
+  { path: '/experiments', component: Experiments },
   { path: '/strategy', component: Strategy },
   { path: '/credentials', component: Credentials },
   { path: '/history', component: TradeHistory },

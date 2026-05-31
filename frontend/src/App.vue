@@ -8,6 +8,7 @@
         <el-menu-item index="/watchlist">观察列表</el-menu-item>
         <el-menu-item index="/review">复盘</el-menu-item>
         <el-menu-item index="/backtest">回测</el-menu-item>
+        <el-menu-item index="/experiments">策略实验</el-menu-item>
         <el-menu-item index="/strategy">策略配置</el-menu-item>
         <el-menu-item index="/credentials">凭证设置</el-menu-item>
         <el-menu-item index="/history">交易历史</el-menu-item>

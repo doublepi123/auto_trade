@@ -307,3 +307,33 @@ def test_ensure_audit_log_table_is_idempotent(tmp_path, monkeypatch) -> None:
     importlib.reload(database)
     database.init_db()
     database.init_db()
+
+
+
+def test_init_db_creates_strategy_experiment_tables(tmp_path, monkeypatch) -> None:
+    """Verify init_db creates strategy_experiments and strategy_experiment_runs with expected columns."""
+    db_path = tmp_path / "strategy_exp.db"
+    monkeypatch.setenv("AUTO_TRADE_DATABASE_URL", f"sqlite:///{db_path}")
+    import importlib
+
+    from app import database
+
+    importlib.reload(database)
+    database.init_db()
+
+    with database.engine.connect() as conn:
+        cols_exp = {r[1] for r in conn.exec_driver_sql("PRAGMA table_info(strategy_experiments);").fetchall()}
+    assert cols_exp == {
+        "id", "name", "symbol", "base_params_json", "parameter_grid_json",
+        "status", "estimated_runs", "completed_runs", "failed_runs", "error",
+        "created_at", "completed_at",
+    }
+
+    with database.engine.connect() as conn:
+        cols_run = {r[1] for r in conn.exec_driver_sql("PRAGMA table_info(strategy_experiment_runs);").fetchall()}
+    assert cols_run == {
+        "id", "experiment_id", "parameters_json", "status",
+        "total_pnl", "total_return_pct", "max_drawdown_pct", "win_rate",
+        "trade_count", "closed_trade_count", "result_summary_json", "error",
+        "created_at",
+    }

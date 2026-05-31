@@ -476,3 +476,74 @@ export interface IndicatorsResponse {
   bb_lower: number | null
 }
 
+
+export interface StrategyExperimentGridRange {
+  start: number
+  end: number
+  step: number
+}
+
+export interface StrategyExperimentGridItem {
+  value?: number
+  values?: number[]
+  range?: StrategyExperimentGridRange
+}
+
+export type StrategyExperimentGrid = Partial<
+  Record<keyof BacktestParams, StrategyExperimentGridItem>
+>
+
+export interface StrategyExperimentCreate {
+  name: string
+  symbol: string
+  base_params: BacktestParams
+  parameter_grid: StrategyExperimentGrid
+}
+
+export interface StrategyExperimentRunRequest {
+  csv_text?: string | null
+}
+
+export type StrategyExperimentStatus =
+  | 'PENDING'
+  | 'RUNNING'
+  | 'COMPLETED'
+  | 'FAILED'
+
+export interface StrategyExperiment {
+  id: number
+  name: string
+  symbol: string
+  status: StrategyExperimentStatus
+  estimated_runs: number
+  completed_runs: number
+  failed_runs: number
+  error: string
+  base_params_json: string
+  parameter_grid_json: string
+  created_at: string
+  completed_at: string | null
+}
+
+export interface StrategyExperimentRun {
+  id: number
+  experiment_id: number
+  parameters: Partial<BacktestParams>
+  status: 'COMPLETED' | 'FAILED'
+  total_pnl: number
+  total_return_pct: number
+  max_drawdown_pct: number
+  win_rate: number
+  trade_count: number
+  closed_trade_count: number
+  result_summary_json: string
+  error: string
+  created_at: string
+}
+
+export interface StrategyExperimentRunPage {
+  items: StrategyExperimentRun[]
+  total: number
+  page: number
+  page_size: number
+}

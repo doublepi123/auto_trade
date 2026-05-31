@@ -427,6 +427,148 @@ class BacktestResult(BaseModel):
     fee_sensitivity: list[BacktestFeeSensitivityPoint]
 
 
+
+class StrategyExperimentGridValue(BaseModel):
+    value: float
+
+
+class StrategyExperimentGridRange(BaseModel):
+    start: float
+    end: float
+    step: float = Field(gt=0)
+
+    @model_validator(mode="after")
+    def validate_range_count(self) -> "StrategyExperimentGridRange":
+        if self.step <= 0:
+            raise ValueError("step must be positive")
+        # Count values that do not exceed end (with epsilon for float tolerance).
+        # Uses the same logic as ExperimentGridService._expand_item.
+        count = int((self.end - self.start) / self.step + 1e-12) + 1
+        if count < 1:
+            raise ValueError("range must produce at least one value")
+        if count > 500:
+            raise ValueError(f"range produces {count} values, exceeds maximum 500")
+        return self
+
+
+class StrategyExperimentGridItem(BaseModel):
+    value: Optional[float] = None
+    values: Optional[list[float]] = None
+    range: Optional[StrategyExperimentGridRange] = None
+
+    @model_validator(mode="after")
+    def validate_one_of(self) -> "StrategyExperimentGridItem":
+        count = sum(1 for x in [self.value, self.values, self.range] if x is not None)
+        if count != 1:
+            raise ValueError("must set exactly one of value, values, or range")
+        if self.values is not None and len(self.values) == 0:
+            raise ValueError("values must not be empty")
+        return self
+
+
+class StrategyExperimentCreate(BaseModel):
+    name: str = Field(max_length=128)
+    symbol: str = Field(max_length=50)
+    base_params: BacktestParams
+    parameter_grid: dict[str, StrategyExperimentGridItem] = Field(min_length=1)
+
+    _ALLOWED_GRID_KEYS: set[str] = {
+        "buy_low", "sell_high", "min_profit_amount", "max_daily_loss",
+        "max_consecutive_losses", "quantity", "initial_cash", "fee_rate",
+        "fixed_fee", "slippage_pct", "stop_loss_pct",
+    }
+
+    @field_validator("symbol")
+    @classmethod
+    def validate_symbol(cls, v: str) -> str:
+        return _normalize_symbol(v)
+
+    @model_validator(mode="after")
+    def validate_experiment(self) -> "StrategyExperimentCreate":
+        bp = self.base_params
+        if bp.symbol and bp.symbol != self.symbol:
+            raise ValueError("base_params.symbol must match symbol or be empty")
+        if not bp.symbol:
+            bp.symbol = self.symbol
+
+        for key in self.parameter_grid:
+            if key not in self._ALLOWED_GRID_KEYS:
+                raise ValueError(
+                    f"parameter_grid key '{key}' is not allowed. "
+                    f"Allowed: {sorted(self._ALLOWED_GRID_KEYS)}"
+                )
+
+        return self
+
+
+class StrategyExperimentRunRequest(BaseModel):
+    csv_text: Optional[str] = None
+    price_points: list[BacktestPricePoint] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_price_source(self) -> "StrategyExperimentRunRequest":
+        if not (self.csv_text and self.csv_text.strip()) and not self.price_points:
+            raise ValueError("either csv_text or price_points is required")
+        return self
+
+
+class StrategyExperimentResponse(BaseModel):
+    id: int
+    name: str
+    symbol: str
+    base_params_json: str
+    parameter_grid_json: str
+    status: str
+    estimated_runs: int
+    completed_runs: int
+    failed_runs: int
+    error: str
+    created_at: datetime
+    completed_at: Optional[datetime] = None
+    model_config = {"from_attributes": True}
+
+
+class StrategyExperimentRunResponse(BaseModel):
+    id: int
+    experiment_id: int
+    parameters: dict = Field(default_factory=dict)
+    status: str
+    total_pnl: float
+    total_return_pct: float
+    max_drawdown_pct: float
+    win_rate: float
+    trade_count: int
+    closed_trade_count: int
+    result_summary_json: str
+    error: str
+    created_at: datetime
+
+    @model_validator(mode="before")
+    @classmethod
+    def _remap_parameters(cls, data: Any) -> Any:
+        """Accept ORM attribute ``parameters_json`` as ``parameters``."""
+        import json as _json
+        if hasattr(data, "parameters_json"):
+            # SQLAlchemy model instance
+            d = {}
+            for c in data.__table__.columns:
+                d[c.name] = getattr(data, c.name)
+            raw = d.pop("parameters_json", "{}")
+            d["parameters"] = _json.loads(raw) if isinstance(raw, str) else raw
+            return d
+        if isinstance(data, dict) and "parameters_json" in data:
+            data = dict(data)
+            raw = data.pop("parameters_json", "{}")
+            data["parameters"] = _json.loads(raw) if isinstance(raw, str) else raw
+        return data
+
+
+class StrategyExperimentRunPage(BaseModel):
+    items: list[StrategyExperimentRunResponse]
+    page: int
+    page_size: int
+    total: int
+
 class LLMAnalyzeRequest(BaseModel):
     force: bool = Field(default=False)
 

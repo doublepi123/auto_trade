@@ -235,3 +235,36 @@ class ExperimentResult(Base):
     was_profitable: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     created_at: Mapped[datetime] = mapped_column(_TZDateTime(), default=_utcnow)
 
+class StrategyExperiment(Base):
+    __tablename__ = "strategy_experiments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(50), index=True, nullable=False)
+    base_params_json: Mapped[str] = mapped_column(Text, nullable=False)
+    parameter_grid_json: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), index=True, nullable=False, default="PENDING")
+    estimated_runs: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    completed_runs: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    failed_runs: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(_TZDateTime(), default=_utcnow, index=True)
+    completed_at: Mapped[datetime | None] = mapped_column(_TZDateTime(), nullable=True)
+
+
+class StrategyExperimentRun(Base):
+    __tablename__ = "strategy_experiment_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    experiment_id: Mapped[int] = mapped_column(Integer, index=True, nullable=False)
+    parameters_json: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), index=True, nullable=False, default="COMPLETED")
+    total_pnl: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    total_return_pct: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    max_drawdown_pct: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    win_rate: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    trade_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    closed_trade_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    result_summary_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    error: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(_TZDateTime(), default=_utcnow, index=True)
