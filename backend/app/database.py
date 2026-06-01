@@ -31,6 +31,7 @@ def init_db() -> None:
     _ensure_strategy_experiments_table(engine)
     _ensure_strategy_experiment_runs_table(engine)
     _ensure_strategy_config_margin_safety_factor(engine)
+    _ensure_llm_interaction_variant_column(engine)
 
     db = SessionLocal()
     try:
@@ -321,6 +322,18 @@ def _ensure_strategy_config_margin_safety_factor(db_engine: Engine) -> None:
         if "margin_safety_factor" not in columns:
             connection.exec_driver_sql(
                 "ALTER TABLE strategy_config ADD COLUMN margin_safety_factor FLOAT DEFAULT 0.9"
+            )
+
+def _ensure_llm_interaction_variant_column(db_engine: Engine) -> None:
+    """Add prompt_variant column to llm_interactions if missing."""
+    inspector = inspect(db_engine)
+    if "llm_interactions" not in inspector.get_table_names():
+        return
+    columns = {column["name"] for column in inspector.get_columns("llm_interactions")}
+    with db_engine.begin() as connection:
+        if "prompt_variant" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE llm_interactions ADD COLUMN prompt_variant VARCHAR(100)"
             )
 
 def _bootstrap_credentials(db: Session, credential_model: type, strategy_model: type) -> None:

@@ -99,8 +99,11 @@ class LLMAdvisorService:
         recent_analysis: dict[str, Any] | None,
         account_context: dict[str, Any] | None,
         market_data: dict[str, Any],
+        prompt_template: str | None = None,
     ) -> str:
-        """Build LLM prompt using modular PromptBuilder with SelectionModule."""
+        """Build LLM prompt using modular PromptBuilder or a custom template."""
+        if prompt_template:
+            return prompt_template
         context: dict[str, Any] = {
             "symbol": symbol,
             "market": market,
@@ -149,10 +152,34 @@ class LLMAdvisorService:
         """Call LLM API (delegates to _call_deepseek)."""
         return self._call_deepseek(prompt)
 
+    def _select_variant(self, symbol: str) -> tuple[str | None, str | None]:
+        """Select A/B prompt variant for the given symbol.
+
+        Returns (template, variant_name). If no experiment is configured or
+        no variants are available, returns (None, None).
+        """
+        experiment_name = settings.llm_experiment_name
+        if not experiment_name:
+            return None, None
+        try:
+            from app.domain.experiment.ab_test_manager import ABTestManager
+
+            db = SessionLocal()
+            try:
+                manager = ABTestManager(db)
+                variant = manager.select_variant(symbol, experiment_name)
+                if variant:
+                    return variant.template, f"{variant.name}:{variant.version}"
+            finally:
+                db.close()
+        except Exception:
+            logger.debug("failed to select A/B variant for %s", symbol, exc_info=True)
+        return None, None
+
     def _get_active_prompt_template(self) -> str | None:
         """Load active prompt template from experiment if available.
 
-        TODO: Integrate into analyze/preview to support A/B testing of prompt variants.
+        Fallback when A/B experiment name is not configured.
         """
         try:
             from app.domain.experiment.ab_test_manager import ABTestManager
@@ -215,6 +242,7 @@ class LLMAdvisorService:
                 "sentiment": {"sentiment": "neutral", "score": 0.0, "description": "无"},
             }
 
+        prompt_template, prompt_variant = self._select_variant(symbol)
         prompt = self._build_prompt(
             symbol=symbol,
             market=market,
@@ -232,6 +260,7 @@ class LLMAdvisorService:
             recent_analysis=recent_analysis,
             account_context=account_context,
             market_data=market_data,
+            prompt_template=prompt_template,
         )
         context_snapshot = {
             "symbol": symbol,
@@ -270,6 +299,7 @@ class LLMAdvisorService:
                 context_snapshot=context_snapshot,
                 success=False,
                 error=f"LLM analysis failed: {exc}",
+                prompt_variant=prompt_variant,
             )
             return {
                 "success": False,
@@ -277,7 +307,6 @@ class LLMAdvisorService:
                 "interaction_id": interaction_id,
             }
 
-        _LAST_ANALYSIS_TIMESTAMP = time.monotonic()  # pyright: ignore[reportConstantRedefinition]
         _LAST_ANALYSIS_TIMESTAMP = time.monotonic()  # pyright: ignore[reportConstantRedefinition]
 
         db = SessionLocal()
@@ -299,6 +328,7 @@ class LLMAdvisorService:
             context_snapshot=context_snapshot,
             success=True,
             error="",
+            prompt_variant=prompt_variant,
         )
 
         return {
@@ -362,6 +392,7 @@ class LLMAdvisorService:
         if prompt_price <= 0:
             return {"success": False, "applied": False, "error": "Market data unavailable for preview"}
 
+        prompt_template, prompt_variant = self._select_variant(symbol)
         prompt = self._build_prompt(
             symbol=symbol,
             market=market,
@@ -379,6 +410,7 @@ class LLMAdvisorService:
             recent_analysis=None,
             account_context=account_context,
             market_data=market_data,
+            prompt_template=prompt_template,
         )
         context_snapshot = {
             "symbol": symbol,
@@ -406,11 +438,12 @@ class LLMAdvisorService:
                 context_snapshot=context_snapshot,
                 success=False,
                 error=f"LLM preview failed: {exc}",
+                prompt_variant=prompt_variant,
             )
             return {"success": False, "applied": False, "error": "LLM preview failed"}
 
         _LAST_PREVIEW_TIMESTAMP = time.monotonic()  # pyright: ignore[reportConstantRedefinition]
-        _LAST_PREVIEW_TIMESTAMP = time.monotonic()  # pyright: ignore[reportConstantRedefinition]
+
         interaction_id = self._record_interaction(
             interaction_type="preview",
             symbol=symbol,
@@ -421,6 +454,7 @@ class LLMAdvisorService:
             context_snapshot=context_snapshot,
             success=True,
             error="",
+            prompt_variant=prompt_variant,
         )
 
         return {
@@ -566,6 +600,7 @@ class LLMAdvisorService:
         context_snapshot: dict[str, Any],
         success: bool,
         error: str,
+        prompt_variant: str | None = None,
     ) -> int | None:
         db = SessionLocal()
         try:
@@ -580,6 +615,7 @@ class LLMAdvisorService:
                 success=success,
                 error=error,
                 order_action=(result or {}).get("order_action", "NONE"),
+                prompt_variant=prompt_variant,
             )
             return record.id
         except Exception:

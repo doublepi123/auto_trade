@@ -127,6 +127,7 @@ class LLMInteraction(Base):
     order_status: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
     order_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     applied: Mapped[bool] = mapped_column(Boolean, default=False)
+    prompt_variant: Mapped[str | None] = mapped_column(String(100), nullable=True)
     created_at: Mapped[datetime] = mapped_column(_TZDateTime(), default=_utcnow)
 
 

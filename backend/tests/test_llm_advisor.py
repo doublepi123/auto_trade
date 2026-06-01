@@ -697,3 +697,86 @@ def test_preview_endpoint_allows_missing_api_key_header_in_dev(monkeypatch) -> N
 
     assert response.status_code == 200
     assert response.json()["analysis"] == "preview"
+
+
+class TestABVariantSelection:
+    def test_select_variant_returns_none_when_no_experiment_configured(self, monkeypatch) -> None:
+        import app.config
+        monkeypatch.setattr(app.config.settings, "llm_experiment_name", "")
+        advisor = LLMAdvisorService()
+        template, variant = advisor._select_variant("AAPL.US")
+        assert template is None
+        assert variant is None
+    def test_select_variant_returns_none_when_experiment_has_no_versions(self, monkeypatch) -> None:
+        import app.config
+        monkeypatch.setattr(app.config.settings, "llm_experiment_name", "test-exp")
+        advisor = LLMAdvisorService()
+        template, variant = advisor._select_variant("AAPL.US")
+        assert template is None
+        assert variant is None
+    def test_build_prompt_uses_custom_template_when_provided(self) -> None:
+        advisor = LLMAdvisorService()
+        custom = "custom prompt template"
+        result = advisor._build_prompt(
+            symbol="AAPL.US",
+            market="US",
+            current_price=200.0,
+            current_buy_low=180.0,
+            current_sell_high=220.0,
+            short_selling=False,
+            current_position="FLAT",
+            recent_trades=[],
+            position_quantity=0.0,
+            position_avg_price=0.0,
+            unrealized_pnl_pct=0.0,
+            min_profit_amount=0.0,
+            recent_prices=None,
+            recent_analysis=None,
+            account_context=None,
+            market_data={},
+            prompt_template=custom,
+        )
+        assert result == custom
+    def test_build_prompt_uses_default_modules_when_no_template(self) -> None:
+        advisor = LLMAdvisorService()
+        result = advisor._build_prompt(
+            symbol="AAPL.US",
+            market="US",
+            current_price=200.0,
+            current_buy_low=180.0,
+            current_sell_high=220.0,
+            short_selling=False,
+            current_position="FLAT",
+            recent_trades=[],
+            position_quantity=0.0,
+            position_avg_price=0.0,
+            unrealized_pnl_pct=0.0,
+            min_profit_amount=0.0,
+            recent_prices=None,
+            recent_analysis=None,
+            account_context=None,
+            market_data={"daily_candles": [], "atr": 0.0, "bb_upper": 0.0, "bb_middle": 0.0, "bb_lower": 0.0},
+        )
+        assert "AAPL.US" in result
+        assert "买入下限" in result or "buy_low" in result
+    def test_select_variant_returns_template_from_existing_version(self, monkeypatch) -> None:
+        import app.config
+        from app.database import SessionLocal, engine
+        from app.domain.experiment.ab_test_manager import ABTestManager
+        from app.models import Base, PromptVersion
+
+        Base.metadata.drop_all(bind=engine)
+        Base.metadata.create_all(bind=engine)
+        monkeypatch.setattr(app.config.settings, "llm_experiment_name", "ab-test")
+        db = SessionLocal()
+        try:
+            manager = ABTestManager(db)
+            manager.create_version("v1", "1.0", "first", "template v1")
+            db.commit()
+
+            advisor = LLMAdvisorService()
+            template, variant = advisor._select_variant("AAPL.US")
+            assert template == "template v1"
+            assert variant == "v1:1.0"
+        finally:
+            db.close()

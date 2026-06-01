@@ -540,10 +540,11 @@
 | 已完成 | **P16 策略实验平台 Phase 1：批量回测 + 排行榜** | ✅ 2026-05-31 | 新增 `/api/strategy-experiments`、参数网格服务、批量回测持久化、Experiments 页面；pytest 678 passed / basedpyright 0/0 / frontend type-check + build / Cypress 77 passed。 |
 | 已完成 | **P17 策略实验平台 Phase 2：LLM 评分 + 导出 + Strategy 草稿带回** | ✅ 2026-05-31 | `LLMRecommendationEvaluator`（6 类标签：EFFECTIVE/INEFFECTIVE/TOO_EARLY/TOO_LATE/RISKY/INSUFFICIENT_DATA）+ `GET /api/strategy-experiments/llm-evaluations`；实验 CSV/JSON 导出 + `GET /api/strategy-experiments/{id}/export`；Strategy 草稿带回（`/#/strategy?draftExperimentRunId=xxx`）；前端 Experiments 页面扩展；pytest +12，Cypress +3，frontend type-check + build 通过。 |
 | 已完成 | **P18 技术债清理：basedpyright 错误清零** | ✅ 2026-05-31 | 修复 app/ 42 处类型错误（dict/Callable/Generator 泛型补齐、Optional 访问保护、常量重定义消除）；修复 tests/ 约 120 处类型错误（MissingTypeArgument、OptionalMemberAccess、Generator 返回类型等）；pytest 691 passed / basedpyright 0 errors / frontend build / Cypress 80 passed。 |
+| 已完成 | **P19 A/B Testing 集成：LLM Prompt 变体实验** | ✅ 2026-05-31 | `LLMInteraction` 增 `prompt_variant` 字段 + `_ensure_llm_interaction_variant_column` 迁移；`Settings.llm_experiment_name` 配置；`LLMAdvisorService._select_variant` 确定性按 symbol hash 分配变体；`_build_prompt` 支持自定义 template；`analyze`/`preview` 全流程透传变体标识并写入 interaction 日志；pytest 696 passed / basedpyright 0 errors。 |
 
 ### 下一步建议
 
-**P18 技术债清理已完成交付。** 后续建议推进 P19（响应式与移动端适配）或 P20（日志审计与报警扩展），视业务优先级而定。
+**P19 A/B Testing 集成已完成交付。** 后续建议推进 P20（多标的自动交易扩展）或 P21（实时推送通知），视业务优先级而定。
 ---
 
 ## 原始规划记录（已交付部分保留作为历史）

@@ -23,10 +23,10 @@ database._ensure_strategy_config_llm_columns(db_engine)
 database._ensure_strategy_config_trade_safety_columns(db_engine)
 database._ensure_strategy_config_session_columns(db_engine)
 database._ensure_strategy_config_margin_safety_factor(db_engine)
+database._ensure_llm_interaction_variant_column(db_engine)
 database._ensure_runtime_state_daily_pnl_date_column(db_engine)
 database._ensure_audit_log_table(db_engine)
 database._ensure_credential_config_notification_channels_column(db_engine)
-
 client = TestClient(app)
 
 

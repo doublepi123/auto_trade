@@ -30,6 +30,7 @@ class LLMInteractionService:
         success: bool,
         error: str = "",
         order_action: str = "NONE",
+        prompt_variant: str | None = None,
     ) -> LLMInteraction:
         record = LLMInteraction(
             interaction_type=interaction_type,
@@ -42,6 +43,7 @@ class LLMInteractionService:
             success=success,
             error=error,
             order_action=order_action or "NONE",
+            prompt_variant=prompt_variant,
             created_at=datetime.now(timezone.utc),
         )
         self.db.add(record)

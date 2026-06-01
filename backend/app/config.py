@@ -61,6 +61,7 @@ class Settings(BaseSettings):
     llm_interval_volatility_threshold_pct: float = 1.0
     llm_min_confidence: float = 0.7
     llm_max_stripe_width_pct: float = 8.0
+    llm_experiment_name: str = Field(default="", validation_alias="AUTO_TRADE_LLM_EXPERIMENT_NAME")
     min_exit_profit_pct: float = 0.2
     engine_cooldown_seconds: int = Field(default=60, ge=0, le=3600, validation_alias="AUTO_TRADE_ENGINE_COOLDOWN_SECONDS")
 
