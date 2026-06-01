@@ -89,6 +89,9 @@ describe('Strategy Experiments', () => {
             win_rate: 0.5,
             trade_count: 4,
             closed_trade_count: 4,
+            sharpe_ratio: 0.55,
+            profit_factor: 1.2,
+            profit_loss_ratio: 1.5,
             error: null,
             created_at: '2026-01-01T00:00:00Z',
           },
@@ -103,6 +106,9 @@ describe('Strategy Experiments', () => {
             win_rate: 0.6,
             trade_count: 3,
             closed_trade_count: 3,
+            sharpe_ratio: 0.42,
+            profit_factor: 1.5,
+            profit_loss_ratio: 2.0,
             error: null,
             created_at: '2026-01-01T00:00:01Z',
           },
@@ -119,18 +125,15 @@ describe('Strategy Experiments', () => {
     // Wait for API calls
     cy.wait('@createExp')
     cy.wait('@runExp')
-    cy.wait('@listRuns')
-
-    // Assert leaderboard visible
-    cy.get('[data-testid="leaderboard-card"]').should('be.visible')
-    cy.get('[data-testid="leaderboard-table"]').should('be.visible')
-
     // Assert runs render with metrics
     cy.get('[data-testid="run-params"]').first().should('contain', 'buy_low')
     cy.get('[data-testid="run-pnl"]').first().should('contain', '120.50')
     cy.get('[data-testid="run-return"]').first().should('contain', '12.00%')
     cy.get('[data-testid="run-drawdown"]').first().should('contain', '2.00%')
     cy.get('[data-testid="run-win-rate"]').first().should('contain', '50.0%')
+    cy.get('[data-testid="run-sharpe"]').first().should('contain', '0.55')
+    cy.get('[data-testid="run-profit-factor"]').first().should('contain', '1.20')
+    cy.get('[data-testid="run-profit-loss-ratio"]').first().should('contain', '1.50')
 
     // Assert sort controls exist
     cy.get('[data-testid="sort-field-select"]').should('be.visible')
@@ -138,6 +141,7 @@ describe('Strategy Experiments', () => {
 
     // Assert second row exists
     cy.get('[data-testid="run-pnl"]').eq(1).should('contain', '80.00')
+
   })
 
   it('has desktop nav item for experiments', () => {

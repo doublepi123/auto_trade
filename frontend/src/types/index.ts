@@ -536,6 +536,9 @@ export interface StrategyExperimentRun {
   win_rate: number
   trade_count: number
   closed_trade_count: number
+  sharpe_ratio: number | null
+  profit_factor: number | null
+  profit_loss_ratio: number | null
   result_summary_json: string
   error: string
   created_at: string

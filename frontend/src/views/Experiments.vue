@@ -106,6 +106,9 @@
           <el-option label="总PnL" value="total_pnl" />
           <el-option label="最大回撤" value="max_drawdown_pct" />
           <el-option label="胜率" value="win_rate" />
+          <el-option label="Sharpe" value="sharpe_ratio" />
+          <el-option label="Profit Factor" value="profit_factor" />
+          <el-option label="盈亏比" value="profit_loss_ratio" />
           <el-option label="交易次数" value="trade_count" />
         </el-select>
         <el-select
@@ -148,6 +151,21 @@
         <el-table-column label="胜率" width="80">
           <template #default="{ row }">
             <span data-testid="run-win-rate">{{ (row.win_rate * 100).toFixed(1) }}%</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="Sharpe" width="80">
+          <template #default="{ row }">
+            <span data-testid="run-sharpe">{{ row.sharpe_ratio !== null ? row.sharpe_ratio.toFixed(2) : '-' }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="PF" width="70">
+          <template #default="{ row }">
+            <span data-testid="run-profit-factor">{{ row.profit_factor !== null ? row.profit_factor.toFixed(2) : '-' }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="盈亏比" width="80">
+          <template #default="{ row }">
+            <span data-testid="run-profit-loss-ratio">{{ row.profit_loss_ratio !== null ? row.profit_loss_ratio.toFixed(2) : '-' }}</span>
           </template>
         </el-table-column>
         <el-table-column label="交易" width="60" prop="trade_count" />

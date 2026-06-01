@@ -175,6 +175,72 @@ class TestBacktestEngine:
             raise AssertionError("invalid CSV should raise ValueError")
 
 
+class TestBacktestMetrics:
+    def test_sharpe_ratio_calculated_with_multiple_bars(self) -> None:
+        engine = BacktestEngine(BacktestEngineParams(
+            symbol="AAPL.US",
+            buy_low=100,
+            sell_high=200,
+            quantity=2,
+            initial_cash=10000,
+        ))
+        result = engine.run([
+            bar(0, 150, 160, 99, 105),
+            bar(1, 150, 201, 140, 200),
+            bar(2, 150, 201, 140, 200),
+            bar(3, 150, 201, 140, 200),
+        ])
+        assert result.metrics.total_pnl == 200
+        assert result.metrics.sharpe_ratio is not None
+        # 只有赢没有亏，profit_factor / profit_loss_ratio 无定义
+        assert result.metrics.profit_factor is None
+        assert result.metrics.profit_loss_ratio is None
+
+    def test_no_trades_returns_none_for_extra_metrics(self) -> None:
+        engine = BacktestEngine(BacktestEngineParams(
+            symbol="AAPL.US",
+            buy_low=100,
+            sell_high=200,
+            quantity=2,
+            initial_cash=10000,
+        ))
+        result = engine.run([
+            bar(0, 150, 160, 101, 150),
+            bar(1, 150, 160, 101, 150),
+            bar(2, 150, 160, 101, 150),
+        ])
+        assert result.metrics.closed_trade_count == 0
+        assert result.metrics.sharpe_ratio is None
+        assert result.metrics.profit_factor is None
+        assert result.metrics.profit_loss_ratio is None
+
+    def test_mixed_trades_produces_correct_profit_factor(self) -> None:
+        engine = BacktestEngine(BacktestEngineParams(
+            symbol="AAPL.US",
+            buy_low=100,
+            sell_high=110,
+            quantity=1,
+            initial_cash=10000,
+            stop_loss_pct=3,  # 3% 止损，入场价 100 -> 止损价 97
+        ))
+        # bar0 buy@100; bar1 sell@110 (+10); bar2 buy@100; bar3 sell@110 (+10); bar4 buy@100; bar5 stop@97 (-3)
+        result = engine.run([
+            bar(0, 105, 106, 99, 100),
+            bar(1, 105, 111, 105, 110),
+            bar(2, 105, 106, 99, 100),
+            bar(3, 105, 111, 105, 110),
+            bar(4, 105, 106, 99, 100),
+            bar(5, 96, 97, 95, 96),
+        ])
+        assert result.metrics.closed_trade_count == 3
+        assert result.metrics.winning_trades == 2
+        assert result.metrics.losing_trades == 1
+        # profit_factor = 20 / 3 = 6.666...
+        assert result.metrics.profit_factor is not None
+        assert abs(result.metrics.profit_factor - 20 / 3) < 1e-9
+        # profit_loss_ratio = 10 / 3 = 3.333...
+        assert result.metrics.profit_loss_ratio is not None
+        assert abs(result.metrics.profit_loss_ratio - 10 / 3) < 1e-9
 class TestBacktestAPI:
     def test_run_backtest_endpoint_returns_stable_structure(self) -> None:
         resp = client.post("/api/backtest/run", json={

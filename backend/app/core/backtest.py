@@ -4,7 +4,7 @@ import csv
 import io
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-
+from typing import Optional
 
 @dataclass(frozen=True)
 class BacktestBar:
@@ -83,6 +83,10 @@ class BacktestMetrics:
     fees_paid: float
     skipped_signals: int
     final_state: str
+    sharpe_ratio: Optional[float] = None
+    profit_factor: Optional[float] = None
+    profit_loss_ratio: Optional[float] = None
+
 
 
 @dataclass(frozen=True)
@@ -91,8 +95,6 @@ class BacktestFeeSensitivityPoint:
     total_pnl: float
     total_return_pct: float
     max_drawdown_pct: float
-
-
 @dataclass(frozen=True)
 class BacktestResultData:
     metrics: BacktestMetrics
@@ -248,6 +250,9 @@ class BacktestEngine:
         winning_trades = len([pnl for pnl in closed_trade_pnls if pnl > 0])
         losing_trades = len([pnl for pnl in closed_trade_pnls if pnl < 0])
         closed_trade_count = len(closed_trade_pnls)
+        sharpe = self._calc_sharpe_ratio(equity_curve)
+        profit_factor = self._calc_profit_factor(closed_trade_pnls)
+        profit_loss_ratio = self._calc_profit_loss_ratio(closed_trade_pnls)
         metrics = BacktestMetrics(
             initial_cash=self.params.initial_cash,
             final_equity=final_equity,
@@ -263,6 +268,9 @@ class BacktestEngine:
             fees_paid=fees_paid,
             skipped_signals=len(skipped),
             final_state=position.side if position else "flat",
+            sharpe_ratio=sharpe,
+            profit_factor=profit_factor,
+            profit_loss_ratio=profit_loss_ratio,
         )
         return BacktestResultData(
             metrics=metrics,
@@ -272,6 +280,45 @@ class BacktestEngine:
             fee_sensitivity=self._fee_sensitivity(ordered_bars) if include_fee_sensitivity else [],
         )
 
+    @staticmethod
+    def _calc_sharpe_ratio(equity_curve: list[BacktestEquityPoint]) -> Optional[float]:
+        if len(equity_curve) < 2:
+            return None
+        returns: list[float] = []
+        for i in range(1, len(equity_curve)):
+            prev = equity_curve[i - 1].equity
+            if prev > 0:
+                returns.append((equity_curve[i].equity - prev) / prev)
+            else:
+                returns.append(0.0)
+        if len(returns) < 2:
+            return None
+        mean_ret = sum(returns) / len(returns)
+        variance = sum((r - mean_ret) ** 2 for r in returns) / (len(returns) - 1)
+        std = variance ** 0.5
+        if std == 0:
+            return None
+        return mean_ret / std
+
+    @staticmethod
+    def _calc_profit_factor(closed_trade_pnls: list[float]) -> Optional[float]:
+        gross_profit = sum(pnl for pnl in closed_trade_pnls if pnl > 0)
+        gross_loss = sum(pnl for pnl in closed_trade_pnls if pnl < 0)
+        if gross_loss == 0:
+            return None
+        return gross_profit / abs(gross_loss)
+
+    @staticmethod
+    def _calc_profit_loss_ratio(closed_trade_pnls: list[float]) -> Optional[float]:
+        wins = [pnl for pnl in closed_trade_pnls if pnl > 0]
+        losses = [abs(pnl) for pnl in closed_trade_pnls if pnl < 0]
+        if not losses:
+            return None
+        avg_win = sum(wins) / len(wins) if wins else 0.0
+        avg_loss = sum(losses) / len(losses)
+        if avg_loss == 0:
+            return None
+        return avg_win / avg_loss
     def _validate_params(self) -> None:
         if self.params.buy_low <= 0:
             raise ValueError("buy_low must be greater than 0")

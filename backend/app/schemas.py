@@ -409,6 +409,9 @@ class BacktestMetrics(BaseModel):
     fees_paid: float
     skipped_signals: int
     final_state: str
+    sharpe_ratio: Optional[float] = None
+    profit_factor: Optional[float] = None
+    profit_loss_ratio: Optional[float] = None
 
 
 class BacktestFeeSensitivityPoint(BaseModel):
@@ -527,7 +530,6 @@ class StrategyExperimentResponse(BaseModel):
     completed_at: Optional[datetime] = None
     model_config = {"from_attributes": True}
 
-
 class StrategyExperimentRunResponse(BaseModel):
     id: int
     experiment_id: int
@@ -539,6 +541,9 @@ class StrategyExperimentRunResponse(BaseModel):
     win_rate: float
     trade_count: int
     closed_trade_count: int
+    sharpe_ratio: Optional[float] = None
+    profit_factor: Optional[float] = None
+    profit_loss_ratio: Optional[float] = None
     result_summary_json: str
     error: str
     created_at: datetime
@@ -561,7 +566,6 @@ class StrategyExperimentRunResponse(BaseModel):
             raw = data.pop("parameters_json", "{}")
             data["parameters"] = _json.loads(raw) if isinstance(raw, str) else raw
         return data
-
 
 class StrategyExperimentRunPage(BaseModel):
     items: list[StrategyExperimentRunResponse]

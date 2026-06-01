@@ -30,9 +30,9 @@ def init_db() -> None:
     _ensure_experiment_results_table(engine)
     _ensure_strategy_experiments_table(engine)
     _ensure_strategy_experiment_runs_table(engine)
+    _ensure_strategy_experiment_runs_extra_metrics(engine)
     _ensure_strategy_config_margin_safety_factor(engine)
     _ensure_llm_interaction_variant_column(engine)
-
     db = SessionLocal()
     try:
         _bootstrap_credentials(db, CredentialConfig, StrategyConfig)
@@ -312,6 +312,22 @@ def _ensure_strategy_experiment_runs_table(db_engine: Engine) -> None:
             """
         )
 
+def _ensure_strategy_experiment_runs_extra_metrics(db_engine: Engine) -> None:
+    inspector = inspect(db_engine)
+    if "strategy_experiment_runs" not in inspector.get_table_names():
+        return
+    columns = {column["name"] for column in inspector.get_columns("strategy_experiment_runs")}
+    missing = {
+        "sharpe_ratio": "FLOAT",
+        "profit_factor": "FLOAT",
+        "profit_loss_ratio": "FLOAT",
+    }
+    with db_engine.begin() as connection:
+        for name, column_type in missing.items():
+            if name not in columns:
+                connection.exec_driver_sql(
+                    f"ALTER TABLE strategy_experiment_runs ADD COLUMN {name} {column_type}"
+                )
 def _ensure_strategy_config_margin_safety_factor(db_engine: Engine) -> None:
     """Add margin_safety_factor column to strategy_config if missing."""
     inspector = inspect(db_engine)

@@ -31,6 +31,9 @@ _ALLOWED_SORT_FIELDS = {
     "max_drawdown_pct",
     "win_rate",
     "trade_count",
+    "sharpe_ratio",
+    "profit_factor",
+    "profit_loss_ratio",
     "created_at",
 }
 _ALLOWED_ORDERS = {"asc", "desc"}
@@ -169,6 +172,9 @@ class StrategyExperimentService:
                     win_rate=result.metrics.win_rate,
                     trade_count=result.metrics.trade_count,
                     closed_trade_count=result.metrics.closed_trade_count,
+                    sharpe_ratio=result.metrics.sharpe_ratio,
+                    profit_factor=result.metrics.profit_factor,
+                    profit_loss_ratio=result.metrics.profit_loss_ratio,
                     result_summary_json=json.dumps(
                         _build_result_summary(result),
                         ensure_ascii=False,
@@ -197,12 +203,14 @@ class StrategyExperimentService:
                     win_rate=0.0,
                     trade_count=0,
                     closed_trade_count=0,
+                    sharpe_ratio=None,
+                    profit_factor=None,
+                    profit_loss_ratio=None,
                     result_summary_json="{}",
                     error=str(exc),
                 )
                 self.db.add(run)
                 failed += 1
-
         now = datetime.now(timezone.utc)
         if failed == len(param_combos):
             exp.status = "FAILED"
@@ -313,6 +321,9 @@ class StrategyExperimentService:
                         "win_rate": r.win_rate,
                         "trade_count": r.trade_count,
                         "closed_trade_count": r.closed_trade_count,
+                        "sharpe_ratio": r.sharpe_ratio,
+                        "profit_factor": r.profit_factor,
+                        "profit_loss_ratio": r.profit_loss_ratio,
                         "error": r.error,
                     }
                     for r in runs
@@ -339,6 +350,9 @@ class StrategyExperimentService:
                     "win_rate",
                     "trade_count",
                     "closed_trade_count",
+                    "sharpe_ratio",
+                    "profit_factor",
+                    "profit_loss_ratio",
                     "error",
                 ]
             )
@@ -360,6 +374,9 @@ class StrategyExperimentService:
                         r.win_rate,
                         r.trade_count,
                         r.closed_trade_count,
+                        r.sharpe_ratio,
+                        r.profit_factor,
+                        r.profit_loss_ratio,
                         r.error,
                     ]
                 )
@@ -435,6 +452,9 @@ def _build_result_summary(result: BacktestResultData) -> dict[str, Any]:
             "fees_paid": result.metrics.fees_paid,
             "skipped_signals": result.metrics.skipped_signals,
             "final_state": result.metrics.final_state,
+            "sharpe_ratio": result.metrics.sharpe_ratio,
+            "profit_factor": result.metrics.profit_factor,
+            "profit_loss_ratio": result.metrics.profit_loss_ratio,
         },
         "trades": [
             _trade_to_dict(t) for t in result.trades[:20]

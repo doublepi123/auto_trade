@@ -372,6 +372,7 @@ def test_init_db_creates_strategy_experiment_tables(tmp_path, monkeypatch) -> No
     assert cols_run == {
         "id", "experiment_id", "parameters_json", "status",
         "total_pnl", "total_return_pct", "max_drawdown_pct", "win_rate",
-        "trade_count", "closed_trade_count", "result_summary_json", "error",
-        "created_at",
+        "trade_count", "closed_trade_count",
+        "sharpe_ratio", "profit_factor", "profit_loss_ratio",
+        "result_summary_json", "error", "created_at",
     }
