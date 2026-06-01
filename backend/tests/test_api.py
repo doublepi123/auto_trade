@@ -22,6 +22,7 @@ Base.metadata.create_all(bind=db_engine)
 database._ensure_strategy_config_llm_columns(db_engine)
 database._ensure_strategy_config_trade_safety_columns(db_engine)
 database._ensure_strategy_config_session_columns(db_engine)
+database._ensure_strategy_config_margin_safety_factor(db_engine)
 database._ensure_runtime_state_daily_pnl_date_column(db_engine)
 database._ensure_audit_log_table(db_engine)
 database._ensure_credential_config_notification_channels_column(db_engine)
@@ -1179,6 +1180,7 @@ def test_strategy_update_audits_symbol_market_and_mode_changes() -> None:
             .order_by(AuditLog.id.desc())
             .first()
         )
+        assert row is not None
         changed = json.loads(row.request_summary)["changed"]
         assert changed["symbol"]["new"] == "0700.HK"
         assert changed["market"]["new"] == "HK"
@@ -1202,6 +1204,7 @@ def test_strategy_update_no_change_still_writes_audit() -> None:
             .order_by(AuditLog.id.desc())
             .first()
         )
+        assert row is not None
         assert json.loads(row.request_summary)["changed"] == {}
     finally:
         db.close()

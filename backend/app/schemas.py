@@ -531,7 +531,7 @@ class StrategyExperimentResponse(BaseModel):
 class StrategyExperimentRunResponse(BaseModel):
     id: int
     experiment_id: int
-    parameters: dict = Field(default_factory=dict)
+    parameters: dict[str, Any] = Field(default_factory=dict)
     status: str
     total_pnl: float
     total_return_pct: float
@@ -644,16 +644,37 @@ class LLMIntervalStatus(BaseModel):
     last_analysis_at: Optional[str] = None
     next_analysis_at: Optional[str] = None
     current_suggestion: Optional[LLMSuggestion] = None
-    applied_values: Optional[dict] = None
+    applied_values: Optional[dict[str, Any]] = None
     reject_reason: Optional[str] = None
 
+
+class LLMEvaluationRequest(BaseModel):
+    symbol: str
+    start: Optional[datetime] = None
+    end: Optional[datetime] = None
+    horizon_minutes: int = Field(default=60, ge=5, le=1440)
+class LLMEvaluationSample(BaseModel):
+    interaction_id: int
+    created_at: str
+    order_action: str
+    order_price: Optional[float] = None
+    tag: str
+    reason: str
+    metrics: dict[str, Any] = Field(default_factory=dict)
+class LLMEvaluationResponse(BaseModel):
+    symbol: str
+    horizon_minutes: int
+    sample_count: int
+    tag_distribution: dict[str, int]
+    hit_rate: float
+    samples: list[LLMEvaluationSample]
 
 class ReviewDaySchema(BaseModel):
     date: str
     symbol: str
-    llm_interactions: list[LLMInteractionSchema]
-    orders: list[OrderRecordSchema]
-    events: list[TradeEventRecordSchema]
+    llm_interactions: list[dict[str, Any]]
+    orders: list[dict[str, Any]]
+    events: list[dict[str, Any]]
     daily_pnl: float
     trade_count: int
     error_tags: list[str]

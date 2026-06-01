@@ -16,6 +16,7 @@ from app import database
 
 Base.metadata.create_all(bind=db_engine)
 database._ensure_audit_log_table(db_engine)
+database._ensure_strategy_config_margin_safety_factor(db_engine)
 
 client = TestClient(app)
 
@@ -235,6 +236,7 @@ def test_credentials_update_audits_with_masked_payload() -> None:
             .order_by(AuditLog.id.desc())
             .first()
         )
+        assert row is not None
         summary = json.loads(row.request_summary)
         changed = summary["changed"]
         for key in (

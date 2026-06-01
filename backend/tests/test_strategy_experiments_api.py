@@ -1,4 +1,5 @@
 import os
+from typing import Any
 import tempfile
 
 os.environ["AUTO_TRADE_DATABASE_URL"] = (
@@ -22,7 +23,7 @@ _CSV = (
     "2026-05-22T10:01:00Z,150,201,140,200,1000\n"
 )
 
-_VALID_CREATE_PAYLOAD: dict = {
+_VALID_CREATE_PAYLOAD: dict[str, Any] = {
     "name": "test-exp",
     "symbol": "AAPL.US",
     "base_params": {
@@ -56,8 +57,10 @@ def _clean_db() -> None:
         db.close()
 
 
+from typing import Generator
+
 @pytest.fixture(autouse=True)
-def clean_db() -> None:
+def clean_db() -> Generator[None, None, None]:
     _clean_db()
     yield
     _clean_db()

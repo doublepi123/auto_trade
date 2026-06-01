@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -65,7 +64,7 @@ class Settings(BaseSettings):
     min_exit_profit_pct: float = 0.2
     engine_cooldown_seconds: int = Field(default=60, ge=0, le=3600, validation_alias="AUTO_TRADE_ENGINE_COOLDOWN_SECONDS")
 
-    default_strategy: dict = Field(default_factory=lambda: {
+    default_strategy: dict[str, Any] = Field(default_factory=lambda: {
         "symbol": "",
         "market": "US",
         "buy_low": 0.0,
@@ -73,8 +72,7 @@ class Settings(BaseSettings):
         "short_selling": False,
     })
 
-    default_risk: dict = Field(default_factory=lambda: {
-        "max_daily_loss": 5000.0,
+    default_risk: dict[str, Any] = Field(default_factory=lambda: {
         "max_consecutive_losses": 3,
     })
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import threading
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import ValidationError
@@ -56,7 +56,7 @@ def put_strategy(
 ) -> StrategyResponse:
     actor_hash, source_ip = extract_actor(request)
     result = "SUCCESS"
-    diff: dict = {}
+    diff: dict[str, Any] = {}
     try:
         svc = StrategyService(db)
         current = svc.get_config()

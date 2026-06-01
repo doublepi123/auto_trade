@@ -4,6 +4,7 @@ os.environ["AUTO_TRADE_DATABASE_URL"] = "sqlite:///data/test_account_api.db"
 
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -435,7 +436,7 @@ class TestGetAccountEndpointCache:
 
         monkeypatch.setattr(trade_api, "_fetch_account_response", gated_fetch)
 
-        results: dict[str, tuple[int, dict]] = {}
+        results: dict[str, tuple[int, dict[str, Any]]] = {}
 
         def call_endpoint(label: str) -> None:
             resp = client.get("/api/account")

@@ -215,7 +215,7 @@ def get_trade_events(
 
     items, total = list_timeline_events(
         db,
-        source=source,  # type: ignore[arg-type]
+        source=source,  # pyright: ignore
         event_types=event_type,
         symbol=symbol,
         page=page,

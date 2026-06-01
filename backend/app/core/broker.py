@@ -16,9 +16,10 @@ if TYPE_CHECKING:
 try:
     from longport.openapi import OpenApiException as _OpenApiException
 
-    RETRYABLE_EXC: tuple[type[BaseException], ...] = (_OpenApiException,)
+    _retryable_exc: tuple[type[BaseException], ...] = (_OpenApiException,)
 except ImportError:
-    RETRYABLE_EXC = (Exception,)
+    _retryable_exc = (Exception,)
+RETRYABLE_EXC = _retryable_exc
 
 logger = logging.getLogger("auto_trade.broker")
 

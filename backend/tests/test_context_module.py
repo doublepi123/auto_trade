@@ -1,10 +1,11 @@
 from __future__ import annotations
+from typing import Any
 
 from app.domain.prompt.context_module import ContextModule
 
 
-def _base_context(**overrides: object) -> dict:
-    ctx: dict = {
+def _base_context(**overrides: object) -> dict[str, Any]:
+    ctx: dict[str, Any] = {
         "daily_candles": [],
         "minute_candles": [],
         "current_price": 200.0,

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import asyncio
 import json
 import logging
@@ -33,7 +35,7 @@ class ConnectionManager:
             if ws in self.active_connections:
                 self.active_connections.remove(ws)
 
-    async def broadcast(self, message: dict) -> None:
+    async def broadcast(self, message: dict[str, Any]) -> None:
         async with self._current_lock():
             connections = list(self.active_connections)
         dead: list[WebSocket] = []

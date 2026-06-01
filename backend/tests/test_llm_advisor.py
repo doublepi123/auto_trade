@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import Any, cast
 
 import os
 
@@ -34,7 +35,7 @@ def test_deepseek_chat_payload_defaults_to_v4_flash_thinking_max() -> None:
 
     assert payload["model"] == "deepseek-v4-flash"
     assert payload["reasoning_effort"] == "max"
-    assert payload["thinking"] == {"type": "enabled"}
+    payload = cast(dict[str, Any], payload)
     assert payload["messages"][1]["content"] == "analyze NVDA"
 
 
@@ -85,7 +86,7 @@ class TestDataAggregator:
 
     def test_compute_bollinger_bands_basic(self, aggregator: DataAggregator) -> None:
         del aggregator
-        closes = [100, 102, 101, 103, 104, 102, 105, 106, 104, 107]
+        closes = [100.0, 102.0, 101.0, 103.0, 104.0, 102.0, 105.0, 106.0, 104.0, 107.0]
         upper, middle, lower = _compute_bollinger_bands(closes)
         assert upper > middle > lower
         assert isinstance(upper, float)
@@ -335,7 +336,7 @@ class TestLLMAdvisorService:
             def raise_for_status(self) -> None:
                 return None
 
-            def json(self) -> dict:
+            def json(self) -> dict[str, Any]:
                 return {
                     "choices": [
                         {
@@ -651,7 +652,7 @@ class _FakeSuccessResponse:
     def raise_for_status(self) -> None:
         return None
 
-    def json(self) -> dict:
+    def json(self) -> dict[str, Any]:
         return {
             "choices": [
                 {

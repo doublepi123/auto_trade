@@ -10,6 +10,7 @@ from dataclasses import replace as dataclass_replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Generator, Optional
+from sqlalchemy.orm import Session
 
 from app.api.deps import init_audit_logger
 from app.api.ws import manager
@@ -1067,7 +1068,7 @@ class AppRunner:
 
     @staticmethod
     @contextmanager
-    def _db_session() -> Generator:
+    def _db_session() -> Generator[Session, None, None]:
         db = SessionLocal()
         try:
             yield db

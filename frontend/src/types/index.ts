@@ -547,3 +547,21 @@ export interface StrategyExperimentRunPage {
   page: number
   page_size: number
 }
+
+export interface LLMEvaluationSample {
+  interaction_id: number
+  created_at: string
+  order_action: string
+  order_price: number | null
+  tag: string
+  reason: string
+  metrics: Record<string, unknown>
+}
+export interface LLMEvaluationResponse {
+  symbol: string
+  horizon_minutes: number
+  sample_count: number
+  tag_distribution: Record<string, number>
+  hit_rate: number
+  samples: LLMEvaluationSample[]
+}

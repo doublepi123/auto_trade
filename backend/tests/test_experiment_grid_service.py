@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import Any
 
 import pytest
 from pydantic import ValidationError
@@ -16,12 +17,12 @@ from app.services.experiment_grid_service import ExperimentGridService
 
 def _make_request(
     *,
-    base_overrides: dict | None = None,
-    grid: dict | None = None,
+    base_overrides: dict[str, Any] | None = None,
+    grid: dict[str, Any] | None = None,
     symbol: str = "AAPL.US",
     name: str = "test-exp",
 ) -> StrategyExperimentCreate:
-    defaults = {
+    defaults: dict[str, Any] = {
         "symbol": symbol,
         "buy_low": 100.0,
         "sell_high": 110.0,

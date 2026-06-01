@@ -186,7 +186,7 @@
 
 <script setup lang="ts">
 import { computed, ref, onMounted } from 'vue'
-import { onBeforeRouteLeave } from 'vue-router'
+import { onBeforeRouteLeave, useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { getStrategy, updateStrategy, getLLMIntervalStatus, analyzeLLMInterval, previewLLMInterval, enableLLMInterval, disableLLMInterval, getLLMInteractions } from '../api'
 import { useFormState } from '../composables/useFormState'
@@ -427,6 +427,19 @@ const applyPreview = async () => {
 const formatTime = (iso: string | null) => {
   if (!iso) return '-'
   return new Date(iso).toLocaleString('zh-CN')
+}
+
+const route = useRoute()
+// Apply draft experiment run parameters from query string
+const draftRunId = route.query.draftExperimentRunId
+if (draftRunId) {
+  const qb = route.query.buy_low
+  const qs = route.query.sell_high
+  const qf = route.query.fee_rate
+  if (qb) form.value.buy_low = Number(qb)
+  if (qs) form.value.sell_high = Number(qs)
+  if (qf) form.value.fee_rate_us = Number(qf) * 100
+  ElMessage.info(`已加载实验 Run #${draftRunId} 的草稿参数，请确认后保存`)
 }
 
 load()

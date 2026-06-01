@@ -92,8 +92,10 @@ class TestWatchlistApi:
         # First should be inactive now
         db = SessionLocal()
         item1 = db.query(WatchlistItem).filter(WatchlistItem.id == id1).first()
+        assert item1 is not None
         assert item1.is_active is False
         item2 = db.query(WatchlistItem).filter(WatchlistItem.id == id2).first()
+        assert item2 is not None
         assert item2.is_active is True
         db.close()
 
@@ -110,9 +112,9 @@ class TestWatchlistApi:
         resp = client.post(f"/api/watchlist/{item_id}/set-trading")
         assert resp.status_code == 200
 
-        # Verify strategy config updated
         db = SessionLocal()
         strategy = db.query(StrategyConfig).order_by(StrategyConfig.id.desc()).first()
+        assert strategy is not None
         assert strategy.symbol == "NVDA.US"
         assert strategy.market == "US"
         db.close()
@@ -130,7 +132,7 @@ class TestWatchlistService:
     def test_list_items(self, clean_db):
         db = SessionLocal()
         svc = WatchlistService(db)
-        svc.add_item(type("obj", (), {"symbol": "A.US", "market": "US", "alias": ""})())
+        svc.add_item(type("obj", (), {"symbol": "A.US", "market": "US", "alias": ""})())  # pyright: ignore
         items = svc.list_items()
         assert len(items) == 1
         db.close()
@@ -138,14 +140,22 @@ class TestWatchlistService:
     def test_set_trading_symbol_single_active(self, clean_db):
         db = SessionLocal()
         svc = WatchlistService(db)
-        item1 = svc.add_item(type("obj", (), {"symbol": "A.US", "market": "US", "alias": ""})())
-        item2 = svc.add_item(type("obj", (), {"symbol": "B.US", "market": "US", "alias": ""})())
+        item1 = svc.add_item(type("obj", (), {"symbol": "A.US", "market": "US", "alias": ""})())  # pyright: ignore
+        item2 = svc.add_item(type("obj", (), {"symbol": "B.US", "market": "US", "alias": ""})())  # pyright: ignore
 
         svc.set_trading_symbol(item1.id)
-        assert svc.get_item(item1.id).is_active is True
-        assert svc.get_item(item2.id).is_active is False
+        _item1 = svc.get_item(item1.id)
+        assert _item1 is not None
+        assert _item1.is_active is True
+        _item2 = svc.get_item(item2.id)
+        assert _item2 is not None
+        assert _item2.is_active is False
 
         svc.set_trading_symbol(item2.id)
-        assert svc.get_item(item1.id).is_active is False
-        assert svc.get_item(item2.id).is_active is True
+        _item1b = svc.get_item(item1.id)
+        assert _item1b is not None
+        assert _item1b.is_active is False
+        _item2b = svc.get_item(item2.id)
+        assert _item2b is not None
+        assert _item2b.is_active is True
         db.close()

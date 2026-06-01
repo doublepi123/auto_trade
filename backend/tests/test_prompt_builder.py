@@ -16,7 +16,7 @@ from app.domain.prompt.system_module import SystemModule
 class TestPromptModule:
     def test_base_class_is_abstract(self) -> None:
         with pytest.raises(TypeError):
-            PromptModule()  # type: ignore[abstract]
+            PromptModule()  # pyright: ignore
 
     def test_system_module_renders_role(self) -> None:
         module = SystemModule()

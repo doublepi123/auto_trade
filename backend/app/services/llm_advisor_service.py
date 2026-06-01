@@ -201,7 +201,7 @@ class LLMAdvisorService:
             market_data = self._data_aggregator.fetch_market_data(symbol, market)
         except Exception:
             logger.exception("failed to fetch market data for LLM analysis")
-            market_data = {
+            market_data: dict[str, Any] = {
                 "daily_candles": [],
                 "minute_candles": [],
                 "current_price": current_price,
@@ -277,7 +277,8 @@ class LLMAdvisorService:
                 "interaction_id": interaction_id,
             }
 
-        _LAST_ANALYSIS_TIMESTAMP = time.monotonic()
+        _LAST_ANALYSIS_TIMESTAMP = time.monotonic()  # pyright: ignore[reportConstantRedefinition]
+        _LAST_ANALYSIS_TIMESTAMP = time.monotonic()  # pyright: ignore[reportConstantRedefinition]
 
         db = SessionLocal()
         try:
@@ -343,7 +344,7 @@ class LLMAdvisorService:
             market_data = self._data_aggregator.fetch_market_data(symbol, market)
         except Exception:
             logger.exception("failed to fetch market data for LLM preview")
-            market_data = {
+            market_data: dict[str, Any] = {
                 "daily_candles": [],
                 "minute_candles": [],
                 "current_price": current_price,
@@ -357,7 +358,7 @@ class LLMAdvisorService:
                 "sentiment": {"sentiment": "neutral", "score": 0.0, "description": "无"},
             }
 
-        prompt_price = market_data.get("current_price") or current_price
+        prompt_price = float(market_data.get("current_price") or current_price)
         if prompt_price <= 0:
             return {"success": False, "applied": False, "error": "Market data unavailable for preview"}
 
@@ -408,7 +409,8 @@ class LLMAdvisorService:
             )
             return {"success": False, "applied": False, "error": "LLM preview failed"}
 
-        _LAST_PREVIEW_TIMESTAMP = time.monotonic()
+        _LAST_PREVIEW_TIMESTAMP = time.monotonic()  # pyright: ignore[reportConstantRedefinition]
+        _LAST_PREVIEW_TIMESTAMP = time.monotonic()  # pyright: ignore[reportConstantRedefinition]
         interaction_id = self._record_interaction(
             interaction_type="preview",
             symbol=symbol,

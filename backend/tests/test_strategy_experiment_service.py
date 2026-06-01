@@ -72,8 +72,10 @@ def _clean_db() -> None:
         db.close()
 
 
+from typing import Generator
+
 @pytest.fixture(autouse=True)
-def clean_db() -> None:
+def clean_db() -> Generator[None, None, None]:
     _clean_db()
     yield
     _clean_db()

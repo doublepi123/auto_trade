@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import List
+from typing import Any, List
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -73,6 +73,6 @@ def get_active_version(db: Session = Depends(get_db)) -> PromptVersionResponse |
 def get_experiment_summary(
     experiment_name: str,
     db: Session = Depends(get_db),
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     manager = ABTestManager(db)
     return manager.get_experiment_summary(experiment_name)

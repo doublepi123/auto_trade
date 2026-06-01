@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from typing import Any
 from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
@@ -44,7 +45,7 @@ class CredentialsService:
             notification_channels=config.notification_channels or DEFAULT_NOTIFICATION_CHANNELS_JSON,
         )
 
-    def _parse_notification_channels(self, config: CredentialConfig) -> list[dict]:
+    def _parse_notification_channels(self, config: CredentialConfig) -> list[dict[str, Any]]:
         try:
             raw = json.loads(config.notification_channels or DEFAULT_NOTIFICATION_CHANNELS_JSON)
         except json.JSONDecodeError:
@@ -53,7 +54,7 @@ class CredentialsService:
             return json.loads(DEFAULT_NOTIFICATION_CHANNELS_JSON)
         return raw
 
-    def to_response(self, config: CredentialConfig) -> dict:
+    def to_response(self, config: CredentialConfig) -> dict[str, Any]:
         return {
             "id": config.id,
             "longbridge_app_key": "",
@@ -68,7 +69,7 @@ class CredentialsService:
             "updated_at": config.updated_at,
         }
 
-    def update_config(self, data: dict) -> CredentialConfig:
+    def update_config(self, data: dict[str, Any]) -> CredentialConfig:
         config = self.db.query(CredentialConfig).order_by(CredentialConfig.id.desc()).first()
         if config is None:
             config = CredentialConfig()

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from typing import Any
 from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
@@ -263,13 +264,115 @@ class StrategyExperimentService:
             items=items, page=page, page_size=page_size, total=total
         )
 
+    def get_run(self, experiment_id: int, run_id: int) -> StrategyExperimentRunResponse:
+        """Get a single run by experiment and run id."""
+        self.get_experiment(experiment_id)
+        run = (
+            self.db.query(StrategyExperimentRun)
+            .filter(StrategyExperimentRun.experiment_id == experiment_id)
+            .filter(StrategyExperimentRun.id == run_id)
+            .first()
+        )
+        if run is None:
+            raise ValueError("strategy experiment run not found")
+        return StrategyExperimentRunResponse.model_validate(run)
+    def export_experiment(
+        self, experiment_id: int, format: str
+    ) -> dict[str, object] | str:
+        """Export experiment runs as JSON or CSV."""
+        exp = (
+            self.db.query(StrategyExperiment)
+            .filter(StrategyExperiment.id == experiment_id)
+            .first()
+        )
+        if exp is None:
+            raise ValueError("strategy experiment not found")
+        runs = (
+            self.db.query(StrategyExperimentRun)
+            .filter(StrategyExperimentRun.experiment_id == experiment_id)
+            .order_by(StrategyExperimentRun.total_return_pct.desc())
+            .all()
+        )
+        if format.lower() == "json":
+            return {
+                "experiment": {
+                    "id": exp.id,
+                    "name": exp.name,
+                    "symbol": exp.symbol,
+                    "status": exp.status,
+                    "created_at": exp.created_at.isoformat(),
+                },
+                "runs": [
+                    {
+                        "id": r.id,
+                        "parameters": json.loads(r.parameters_json),
+                        "status": r.status,
+                        "total_pnl": r.total_pnl,
+                        "total_return_pct": r.total_return_pct,
+                        "max_drawdown_pct": r.max_drawdown_pct,
+                        "win_rate": r.win_rate,
+                        "trade_count": r.trade_count,
+                        "closed_trade_count": r.closed_trade_count,
+                        "error": r.error,
+                    }
+                    for r in runs
+                ],
+            }
+        if format.lower() == "csv":
+            import csv
+            import io
+            output = io.StringIO()
+            writer = csv.writer(output)
+            writer.writerow(
+                [
+                    "run_id",
+                    "symbol",
+                    "buy_low",
+                    "sell_high",
+                    "quantity",
+                    "fee_rate",
+                    "slippage_pct",
+                    "status",
+                    "total_pnl",
+                    "total_return_pct",
+                    "max_drawdown_pct",
+                    "win_rate",
+                    "trade_count",
+                    "closed_trade_count",
+                    "error",
+                ]
+            )
+            for r in runs:
+                params = json.loads(r.parameters_json)
+                writer.writerow(
+                    [
+                        r.id,
+                        params.get("symbol", ""),
+                        params.get("buy_low", ""),
+                        params.get("sell_high", ""),
+                        params.get("quantity", ""),
+                        params.get("fee_rate", ""),
+                        params.get("slippage_pct", ""),
+                        r.status,
+                        r.total_pnl,
+                        r.total_return_pct,
+                        r.max_drawdown_pct,
+                        r.win_rate,
+                        r.trade_count,
+                        r.closed_trade_count,
+                        r.error,
+                    ]
+                )
+            return output.getvalue()
+        raise ValueError("format must be csv or json")
+
 
 # ── helpers ─────────────────────────────────────────────────────────────
 
 
 def _serializable_grid(
-    grid: dict[str, object],
-) -> dict[str, object]:
+    grid: dict[str, Any],
+) -> dict[str, Any]:
     """Convert the pydantic grid items to plain dicts for JSON storage."""
     out: dict[str, object] = {}
     for key, item in grid.items():
@@ -281,8 +384,8 @@ def _serializable_grid(
 
 
 def _deserialize_grid(
-    raw: dict[str, object],
-) -> dict[str, object]:
+    raw: dict[str, Any],
+) -> dict[str, Any]:
     """Reconstruct ``StrategyExperimentGridItem`` objects from stored dicts."""
     from app.schemas import StrategyExperimentGridItem
 
@@ -315,7 +418,7 @@ def _load_bars(request: StrategyExperimentRunRequest) -> list[BacktestBar]:
     ]
 
 
-def _build_result_summary(result: BacktestResultData) -> dict:
+def _build_result_summary(result: BacktestResultData) -> dict[str, Any]:
     return {
         "metrics": {
             "initial_cash": result.metrics.initial_cash,
@@ -342,7 +445,7 @@ def _build_result_summary(result: BacktestResultData) -> dict:
     }
 
 
-def _trade_to_dict(trade) -> dict:
+def _trade_to_dict(trade) -> dict[str, Any]:
     return {
         "timestamp": trade.timestamp.isoformat(),
         "action": trade.action,
@@ -356,7 +459,7 @@ def _trade_to_dict(trade) -> dict:
     }
 
 
-def _equity_point_to_dict(point) -> dict:
+def _equity_point_to_dict(point) -> dict[str, Any]:
     return {
         "timestamp": point.timestamp.isoformat(),
         "close": point.close,

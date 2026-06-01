@@ -39,7 +39,7 @@ class StrategyService:
             self.db.commit()
         return config
 
-    def update_config(self, data: dict) -> tuple[StrategyConfig, dict[str, Any]]:
+    def update_config(self, data: dict[str, Any]) -> tuple[StrategyConfig, dict[str, Any]]:
         config = self.db.query(StrategyConfig).order_by(StrategyConfig.id.desc()).first()
         if config is None:
             config = StrategyConfig()

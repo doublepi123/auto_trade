@@ -69,7 +69,7 @@ def _to_utc_timestamp(dt: datetime) -> float:
     return dt.astimezone(timezone.utc).timestamp()
 
 
-def _sort_key(item: TimelineEventResponse) -> tuple:
+def _sort_key(item: TimelineEventResponse) -> tuple[float, str, int]:
     return (-_to_utc_timestamp(item.created_at), item.source, -item.id)
 
 

@@ -161,6 +161,17 @@
             </span>
           </template>
         </el-table-column>
+        <el-table-column label="操作" width="120">
+          <template #default="{ row }">
+            <el-button
+              size="small"
+              @click="onDraftToStrategy(row)"
+              data-testid="run-draft-btn"
+            >
+              带回草稿
+            </el-button>
+          </template>
+        </el-table-column>
       </el-table>
 
       <el-pagination
@@ -174,19 +185,62 @@
         data-testid="runs-pagination"
       />
     </el-card>
+
+    <!-- LLM 评分卡片 -->
+    <el-card
+      v-if="currentExperimentId !== null"
+      header="LLM 建议评分"
+      style="margin-top: 16px"
+      data-testid="llm-eval-card"
+    >
+      <el-form inline>
+        <el-form-item label="标的">
+          <el-input v-model="evalSymbol" placeholder="AAPL.US" data-testid="eval-symbol" />
+        </el-form-item>
+        <el-form-item label="窗口(分)">
+          <el-input-number v-model="evalHorizon" :min="5" :max="1440" data-testid="eval-horizon" />
+        </el-form-item>
+        <el-form-item>
+          <el-button type="primary" @click="loadEvaluations" data-testid="eval-load-btn">加载评分</el-button>
+        </el-form-item>
+      </el-form>
+      <div v-if="evalResult">
+        <p>样本数: {{ evalResult.sample_count }} | 命中率: {{ (evalResult.hit_rate * 100).toFixed(1) }}%</p>
+        <el-table :data="evalResult.samples" size="small" style="margin-top: 8px">
+          <el-table-column prop="created_at" label="时间" width="160" />
+          <el-table-column prop="order_action" label="动作" width="100" />
+          <el-table-column prop="tag" label="标签" width="100">
+            <template #default="{ row }">
+              <el-tag :type="tagType(row.tag)">{{ row.tag }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column prop="reason" label="原因" />
+        </el-table>
+      </div>
+    </el-card>
+
+    <!-- 导出按钮 -->
+    <div v-if="currentExperimentId !== null" style="margin-top: 16px">
+      <el-button size="small" @click="onExport('json')" data-testid="exp-export-json">导出 JSON</el-button>
+      <el-button size="small" @click="onExport('csv')" data-testid="exp-export-csv">导出 CSV</el-button>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import {
   createStrategyExperiment,
+  exportStrategyExperiment,
+  getLLMEvaluations,
   runStrategyExperiment,
   listStrategyExperimentRuns,
 } from '../api/strategy_experiments'
 import type {
   BacktestParams,
+  LLMEvaluationResponse,
   StrategyExperimentGrid,
   StrategyExperimentGridItem,
   StrategyExperimentRun,
@@ -357,6 +411,82 @@ async function reloadRuns() {
 
 async function handlePageChange(page: number) {
   await fetchRuns(page)
+}
+
+// ── LLM Evaluation state ──
+const evalSymbol = ref('')
+const evalHorizon = ref(60)
+const evalResult = ref<LLMEvaluationResponse | null>(null)
+const router = useRouter()
+function tagType(tag: string): string {
+  switch (tag) {
+    case 'EFFECTIVE':
+      return 'success'
+    case 'INEFFECTIVE':
+      return 'info'
+    case 'TOO_EARLY':
+      return 'warning'
+    case 'TOO_LATE':
+      return 'warning'
+    case 'RISKY':
+      return 'danger'
+    case 'INSUFFICIENT_DATA':
+      return 'info'
+    default:
+      return 'info'
+  }
+}
+async function loadEvaluations() {
+  const sym = evalSymbol.value.trim().toUpperCase()
+  if (!sym) {
+    ElMessage.warning('请输入标的代码')
+    return
+  }
+  try {
+    const result = await getLLMEvaluations(sym, { horizon_minutes: evalHorizon.value })
+    evalResult.value = result
+  } catch (e: unknown) {
+    ElMessage.error(errorDetail(e) || '加载评分失败')
+  }
+}
+async function onExport(format: 'csv' | 'json') {
+  const expId = currentExperimentId.value
+  if (expId === null) return
+  try {
+    const data = await exportStrategyExperiment(expId, format)
+    if (format === 'csv' && data instanceof Blob) {
+      const url = window.URL.createObjectURL(data)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `experiment-${expId}.csv`
+      a.click()
+      window.URL.revokeObjectURL(url)
+    } else if (format === 'json') {
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
+      const url = window.URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `experiment-${expId}.json`
+      a.click()
+      window.URL.revokeObjectURL(url)
+    }
+  } catch (e: unknown) {
+    ElMessage.error(errorDetail(e) || '导出失败')
+  }
+}
+function onDraftToStrategy(row: StrategyExperimentRun) {
+  const params = row.parameters
+  router.push({
+    path: '/strategy',
+    query: {
+      draftExperimentRunId: String(row.id),
+      buy_low: String(params.buy_low ?? ''),
+      sell_high: String(params.sell_high ?? ''),
+      quantity: String(params.quantity ?? ''),
+      fee_rate: String(params.fee_rate ?? ''),
+      slippage_pct: String(params.slippage_pct ?? ''),
+    },
+  })
 }
 </script>
 

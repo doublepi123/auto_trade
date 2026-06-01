@@ -1,5 +1,6 @@
 import { api } from './client'
 import type {
+  LLMEvaluationResponse,
   StrategyExperiment,
   StrategyExperimentCreate,
   StrategyExperimentRun,
@@ -37,5 +38,32 @@ export async function listStrategyExperimentRuns(
   params: { sort: string; order: 'asc' | 'desc'; page: number; page_size: number },
 ): Promise<StrategyExperimentRunPage> {
   const resp = await api.get(`/api/strategy-experiments/${id}/runs`, { params })
+  return resp.data
+}
+
+export async function getStrategyExperimentRun(
+  experimentId: number,
+  runId: number,
+): Promise<StrategyExperimentRun> {
+  const resp = await api.get(`/api/strategy-experiments/${experimentId}/runs/${runId}`)
+  return resp.data
+}
+export async function exportStrategyExperiment(
+  experimentId: number,
+  format: 'csv' | 'json' = 'json',
+): Promise<Blob | Record<string, unknown>> {
+  const resp = await api.get(`/api/strategy-experiments/${experimentId}/export`, {
+    params: { format },
+    responseType: format === 'csv' ? 'blob' : 'json',
+  })
+  return resp.data
+}
+export async function getLLMEvaluations(
+  symbol: string,
+  params?: { start?: string; end?: string; horizon_minutes?: number },
+): Promise<LLMEvaluationResponse> {
+  const resp = await api.get('/api/strategy-experiments/llm-evaluations', {
+    params: { symbol, ...params },
+  })
   return resp.data
 }

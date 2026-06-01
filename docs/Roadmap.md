@@ -13,7 +13,7 @@
 | **API 覆盖** | ✅ 完备。策略配置、凭证管理、订单查询、状态获取、状态历史、事件时间线、运行时控制（启停/暂停/Kill Switch）。 |
 | **WebSocket 推送** | ✅ 就绪。实时状态同步。 |
 | **本地部署** | ✅ 就绪。Docker Compose 一键启动。 |
-| **测试** | ✅ 就绪。Backend pytest **628** 项、Frontend Cypress E2E 测试。 |
+| **测试** | ✅ 就绪。Backend pytest **692** 项、Frontend Cypress E2E **80** 项。 |
 | **凭证安全** | ✅ 就绪。主密钥 + AES-GCM 加密存储，前端不回显明文。 |
 | **数据库** | ✅ 就位。SQLite，含运行状态、状态快照、订单、`tracked_entries`、LLM 交互、交易事件和凭证配置。 |
 | **LLM 行情数据** | ✅ 真实 K 线（日 K + 1 分钟 K），ATR/布林带有效。 |
@@ -538,11 +538,12 @@
 | 已完成 | **P14 保证金下单量** | ✅ 2026-05-31 | margin_safety_factor 配置化 + BrokerGateway margin 路径验证；pytest 628 passed，frontend type-check + build 通过。 |
 | 已完成 | **P15 Dashboard & 配置性能优化** | ✅ 2026-05-31 | `/api/account` 短 TTL 缓存 + Dashboard 分区加载 + 配置页初始 loading guard；pytest 633 passed / basedpyright 0/0 / frontend build / 新增 Cypress 4 项通过。 |
 | 已完成 | **P16 策略实验平台 Phase 1：批量回测 + 排行榜** | ✅ 2026-05-31 | 新增 `/api/strategy-experiments`、参数网格服务、批量回测持久化、Experiments 页面；pytest 678 passed / basedpyright 0/0 / frontend type-check + build / Cypress 77 passed。 |
+| 已完成 | **P17 策略实验平台 Phase 2：LLM 评分 + 导出 + Strategy 草稿带回** | ✅ 2026-05-31 | `LLMRecommendationEvaluator`（6 类标签：EFFECTIVE/INEFFECTIVE/TOO_EARLY/TOO_LATE/RISKY/INSUFFICIENT_DATA）+ `GET /api/strategy-experiments/llm-evaluations`；实验 CSV/JSON 导出 + `GET /api/strategy-experiments/{id}/export`；Strategy 草稿带回（`/#/strategy?draftExperimentRunId=xxx`）；前端 Experiments 页面扩展；pytest +12，Cypress +3，frontend type-check + build 通过。 |
+| 已完成 | **P18 技术债清理：basedpyright 错误清零** | ✅ 2026-05-31 | 修复 app/ 42 处类型错误（dict/Callable/Generator 泛型补齐、Optional 访问保护、常量重定义消除）；修复 tests/ 约 120 处类型错误（MissingTypeArgument、OptionalMemberAccess、Generator 返回类型等）；pytest 691 passed / basedpyright 0 errors / frontend build / Cypress 80 passed。 |
 
 ### 下一步建议
 
-**P16 策略实验平台 Phase 1 已完成交付。** 后续建议推进 P17（策略实验平台 Phase 2：LLM 评分 + 导出 + Strategy 草稿带回），P18 技术债可穿插处理。
-
+**P18 技术债清理已完成交付。** 后续建议推进 P19（响应式与移动端适配）或 P20（日志审计与报警扩展），视业务优先级而定。
 ---
 
 ## 原始规划记录（已交付部分保留作为历史）

@@ -1,3 +1,4 @@
+# pyright: reportArgumentType=false, reportAttributeAccessIssue=false
 from app.core.engine import EngineState, StrategyEngine, StrategyParams
 
 

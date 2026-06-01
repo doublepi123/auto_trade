@@ -1,3 +1,5 @@
+# pyright: reportArgumentType=false, reportAttributeAccessIssue=false
+from typing import Any
 from decimal import Decimal
 
 import pytest
@@ -389,7 +391,7 @@ class TestBrokerGateway:
 
         class FakeQuoteContext:
             def __init__(self) -> None:
-                self.calls: list[tuple] = []
+                self.calls: list[tuple[Any, ...]] = []
 
             def candlesticks(self, symbol, period, count, adjust):
                 self.calls.append((symbol, period, count, adjust))

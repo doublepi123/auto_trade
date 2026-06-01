@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import secrets
-from typing import Callable
+from typing import Any, Callable
 
 from fastapi import HTTPException, Request
 
@@ -13,7 +13,7 @@ logger = logging.getLogger("auto_trade.auth")
 _auth_disabled_warned = False
 
 
-def require_api_key() -> Callable:
+def require_api_key() -> Callable[..., Any]:
     def dependency(request: Request) -> None:
         global _auth_disabled_warned
         provided = request.headers.get("X-API-Key", "")

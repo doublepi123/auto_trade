@@ -5,7 +5,7 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Optional
+from typing import Any, Optional
 
 from app.config import settings
 
@@ -139,7 +139,7 @@ class StrategyEngine:
             else:
                 self.state = EngineState.FLAT
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         with self._lock:
             return {
                 "state": self.state.value,

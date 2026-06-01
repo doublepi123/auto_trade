@@ -1,3 +1,5 @@
+# pyright: reportArgumentType=false, reportAttributeAccessIssue=false
+from typing import Any
 import asyncio
 import threading
 import time
@@ -295,7 +297,7 @@ class TestAppRunner:
     def test_llm_cancel_replace_below_repricing_threshold_preserves_pending(self) -> None:
         runner = self._runner_with_pending_buy(price=Decimal("221.00"))
         runner.engine.params.min_repricing_pct = 0.003
-        skipped: list[tuple] = []
+        skipped: list[tuple[Any, ...]] = []
         runner._record_order_skipped = lambda *args: skipped.append(args)
 
         result = runner.execute_llm_order_decision({
@@ -525,11 +527,11 @@ class TestAppRunner:
         ]
 
         class FakeQuery:
-            def all(self_inner):
+            def all(self) -> list[Any]:
                 return loaded_rows
 
         class FakeDb:
-            def query(self_inner, _model):
+            def query(self, _model: object) -> FakeQuery:
                 return FakeQuery()
 
         runner._load_tracked_entries(FakeDb())
@@ -549,7 +551,7 @@ class TestAppRunner:
 
         runner.broker = Broker()
 
-        events: list[dict] = []
+        events: list[dict[str, Any]] = []
 
         def record_event(_db, **kwargs):
             events.append(kwargs)
@@ -576,7 +578,7 @@ class TestAppRunner:
 
         runner.broker = Broker()
 
-        events: list[dict] = []
+        events: list[dict[str, Any]] = []
 
         def record_event(_db, **kwargs):
             events.append(kwargs)
@@ -1667,8 +1669,8 @@ class TestTradingSessionGuard:
         runner = self._make_runner(mode="RTH_ONLY")
         monkeypatch.setattr(runner_module, "is_trading_hours", lambda market: False)
 
-        skip_calls: list[tuple] = []
-        audit_calls: list[tuple] = []
+        skip_calls: list[tuple[Any, ...]] = []
+        audit_calls: list[tuple[Any, ...]] = []
         runner._record_order_skipped = lambda symbol, action, reason, payload: skip_calls.append(
             (symbol, action, reason, payload)
         )

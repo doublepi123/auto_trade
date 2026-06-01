@@ -23,6 +23,8 @@ class ExperimentGridService:
             return list(item.values)
         # range — iterate until exceeding end (with epsilon for float tolerance)
         r = item.range
+        if r is None:
+            return []
         values: list[float] = []
         i = 0
         while True:

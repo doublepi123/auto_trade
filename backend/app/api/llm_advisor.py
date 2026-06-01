@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from datetime import timedelta, timezone
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
@@ -247,8 +247,8 @@ def analyze_llm_interval(
             LLMInteractionService(db).update_outcome(
                 interaction_id,
                 applied=app_result["applied"],
-                order_status=order_result.get("status"),
-                order_id=order_result.get("order_id"),
+                order_status=cast(str | None, order_result.get("status")),
+                order_id=cast(str | None, order_result.get("order_id")),
             )
         except Exception:
             logger.exception("failed to update LLM interaction outcome")
@@ -289,8 +289,8 @@ def analyze_llm_interval(
         replacement_action=result.get("replacement_action"),
         replacement_price=result.get("replacement_price"),
         order_reason=result.get("order_reason"),
-        order_status=order_result.get("status"),
-        order_id=order_result.get("order_id"),
+        order_status=cast(str | None, order_result.get("status")),
+        order_id=cast(str | None, order_result.get("order_id")),
     )
 
 
