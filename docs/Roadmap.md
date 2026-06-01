@@ -541,10 +541,30 @@
 | 已完成 | **P17 策略实验平台 Phase 2：LLM 评分 + 导出 + Strategy 草稿带回** | ✅ 2026-05-31 | `LLMRecommendationEvaluator`（6 类标签：EFFECTIVE/INEFFECTIVE/TOO_EARLY/TOO_LATE/RISKY/INSUFFICIENT_DATA）+ `GET /api/strategy-experiments/llm-evaluations`；实验 CSV/JSON 导出 + `GET /api/strategy-experiments/{id}/export`；Strategy 草稿带回（`/#/strategy?draftExperimentRunId=xxx`）；前端 Experiments 页面扩展；pytest +12，Cypress +3，frontend type-check + build 通过。 |
 | 已完成 | **P18 技术债清理：basedpyright 错误清零** | ✅ 2026-05-31 | 修复 app/ 42 处类型错误（dict/Callable/Generator 泛型补齐、Optional 访问保护、常量重定义消除）；修复 tests/ 约 120 处类型错误（MissingTypeArgument、OptionalMemberAccess、Generator 返回类型等）；pytest 691 passed / basedpyright 0 errors / frontend build / Cypress 80 passed。 |
 | 已完成 | **P19 A/B Testing 集成：LLM Prompt 变体实验** | ✅ 2026-05-31 | `LLMInteraction` 增 `prompt_variant` 字段 + `_ensure_llm_interaction_variant_column` 迁移；`Settings.llm_experiment_name` 配置；`LLMAdvisorService._select_variant` 确定性按 symbol hash 分配变体；`_build_prompt` 支持自定义 template；`analyze`/`preview` 全流程透传变体标识并写入 interaction 日志；pytest 696 passed / basedpyright 0 errors。 |
+| 已完成 | **P20 策略实验平台扩展指标：Sharpe / Profit Factor / 盈亏比** | ✅ 2026-06-01 | `BacktestEngine` 计算 sharpe_ratio、profit_factor、profit_loss_ratio；`StrategyExperimentRun` 持久化新字段；排行榜支持排序与扩展指标展示；pytest 699 passed / basedpyright 0 errors / frontend build / Cypress 通过。 |
+| 已完成 | **P22 LLM 波动率触发补全** | ✅ 2026-06-01 | `_llm_analysis_tick` 提取提升可测试性；模块级 `_last_llm_trigger_price` + `_should_run_llm_analysis` 双门控（时间间隔 OR 价格波动 ≥ `llm_interval_volatility_threshold_pct`）；`RTH_ONLY` 交易时段守卫前置到分析层；pytest 715 passed / basedpyright 0 errors / frontend type-check + build 通过。 |
+| 已完成 | **P21 CI 质量门禁：测试/type-check 阻断坏提交** | ✅ 2026-06-01 | `.github/workflows/dockerhub.yml` 扩展为统一 CI：新增 `backend-test`（pytest + basedpyright）和 `frontend-check`（type-check + build）作业，`dockerhub` 作业依赖两者成功后才推送镜像；Cypress E2E 作为独立作业仅在 PR/手动触发运行，不阻塞主线发布；pip/npm 缓存已配置；pytest 715 passed / basedpyright 0 errors / frontend type-check + build 通过。 |
 
 ### 下一步建议
 
-**P19 A/B Testing 集成已完成交付。** 后续建议推进 P20（多标的自动交易扩展）或 P21（实时推送通知），视业务优先级而定。
+> P21 + P22 已完成交付。当前基线：`pytest 715 passed`，`basedpyright` 0 errors，`npm run type-check` + `npm run build` 通过。
+>
+> 后续建议推进 P23（前端实时通知中心），视业务优先级而定。
+>
+> 经代码审计，剩余缺口和机会：
+
+| 顺序 | 代号 | 主题 | 价值 | 预估工时 |
+|------|------|------|------|----------|
+| 1 | **P23** | 前端实时通知中心 | Dashboard 通过 WebSocket/轮询实时接收风控/跳过/审计事件，解决当前必须刷新才能看到的问题 | 2–3 天 |
+| 后续 | **P24** | 多标的自动交易扩展（评估） | Watchlist 现有观察能力扩展为单标的自动交易轮换；架构风险高，需单独立项 | — |
+
+**显式不做（与已有 YAGNI 决策保持一致）：**
+- 交易所节假日历
+- 审计 CSV/JSON 导出
+- Webhook 模板编辑器
+- 通知重发队列
+- 高频交易 / 复杂择时指标
+- 量化研究平台
 ---
 
 ## 原始规划记录（已交付部分保留作为历史）

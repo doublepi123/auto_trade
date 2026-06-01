@@ -32,6 +32,40 @@ from app.services.trade_event_service import record_trade_event
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 logger = logging.getLogger("auto_trade.main")
+_last_llm_trigger_price: float = 0.0
+
+
+def _price_drift_pct(current_price: float, last_price: float) -> float:
+    """Return percentage price drift between current and last reference price."""
+    if last_price <= 0 or current_price <= 0:
+        return 0.0
+    return abs(current_price - last_price) / last_price * 100
+
+
+def _should_run_llm_analysis(
+    current_price: float,
+    last_trigger_price: float,
+    threshold_pct: float,
+    last_analysis_at: datetime | None,
+    interval_minutes: int,
+    now: datetime,
+) -> tuple[bool, bool]:
+    """Return (time_gate_passed, volatility_triggered)."""
+    time_gate_passed = False
+    if last_analysis_at is not None:
+        if last_analysis_at.tzinfo is None:
+            last_analysis_at = last_analysis_at.replace(tzinfo=timezone.utc)
+        if now - last_analysis_at >= timedelta(minutes=interval_minutes):
+            time_gate_passed = True
+    else:
+        time_gate_passed = True
+
+    volatility_triggered = False
+    drift = _price_drift_pct(current_price, last_trigger_price)
+    if drift >= threshold_pct:
+        volatility_triggered = True
+
+    return time_gate_passed, volatility_triggered
 
 
 async def _ws_cleanup_task() -> None:
@@ -43,106 +77,126 @@ async def _ws_cleanup_task() -> None:
             pass
 
 
-async def _llm_analysis_cron() -> None:
+async def _llm_analysis_tick() -> None:
     from app.database import SessionLocal
     from app.services.llm_advisor_service import LLMAdvisorService, build_recent_analysis_context
     from app.services.strategy_service import StrategyService
     from app.runner import get_runner
 
+    db = SessionLocal()
+    try:
+        svc = StrategyService(db)
+        config = svc.get_config()
+        if not config.auto_interval_enabled or not config.symbol:
+            return
+
+        now = datetime.now(timezone.utc)
+        interval_minutes = config.llm_interval_minutes or settings.llm_interval_cron_minutes
+
+        runner = get_runner()
+        current_price = runner.engine.last_price if runner.engine else 0.0
+        if current_price <= 0:
+            current_price = config.buy_low
+
+        global _last_llm_trigger_price
+        time_gate_passed, volatility_triggered = _should_run_llm_analysis(
+            current_price=current_price,
+            last_trigger_price=_last_llm_trigger_price,
+            threshold_pct=settings.llm_interval_volatility_threshold_pct,
+            last_analysis_at=config.llm_last_analysis_at,
+            interval_minutes=interval_minutes,
+            now=now,
+        )
+
+        if not time_gate_passed and not volatility_triggered:
+            return
+
+        if config.trading_session_mode == "RTH_ONLY":
+            from app.core.market_calendar import is_trading_hours
+            if not is_trading_hours(config.market):
+                logger.info("LLM analysis skipped: non-RTH for %s", config.market)
+                return
+
+        _last_llm_trigger_price = current_price
+
+        from app.api.llm_advisor import _account_context, _interval_reference_quantity, _position_context
+
+        position_context = _position_context(config.symbol, current_price)
+        account_context = _account_context(config.symbol, config.market, current_price, config.short_selling)
+
+        advisor = LLMAdvisorService(broker=runner.broker)
+        result = await asyncio.to_thread(
+            advisor.analyze,
+            symbol=config.symbol,
+            market=config.market,
+            current_price=current_price,
+            current_buy_low=config.buy_low,
+            current_sell_high=config.sell_high,
+            short_selling=config.short_selling,
+            current_position=str(position_context["side"]),
+            recent_trades=[],
+            position_quantity=float(position_context["quantity"]),
+            position_avg_price=float(position_context["avg_price"]),
+            unrealized_pnl_pct=float(position_context["unrealized_pnl_pct"]),
+            min_profit_amount=config.min_profit_amount,
+            recent_prices=runner.recent_price_context(),
+            recent_analysis=build_recent_analysis_context(config),
+            account_context=account_context,
+            force=True,
+        )
+        if result.get("success"):
+            app_result = IntervalApplicationService().apply_direct_suggestion(
+                db=db,
+                current_price=current_price or config.buy_low,
+                suggestion={
+                    "suggested_buy_low": result.get("suggested_buy_low"),
+                    "suggested_sell_high": result.get("suggested_sell_high"),
+                    "confidence_score": result.get("confidence_score"),
+                },
+                reference_quantity=_interval_reference_quantity(position_context, account_context),
+            )
+            order_result = {"status": "NO_ACTION", "order_id": None}
+            if result.get("order_action") and result.get("order_action") != "NONE":
+                order_result = runner.execute_llm_order_decision(result)
+            interaction_id = result.get("interaction_id")
+            if interaction_id is not None:
+                from app.services.llm_interaction_service import LLMInteractionService
+
+                LLMInteractionService(db).update_outcome(
+                    interaction_id,
+                    applied=app_result["applied"],
+                    order_status=order_result.get("status"),
+                    order_id=order_result.get("order_id"),
+                )
+            record_trade_event(
+                db,
+                event_type="LLM_ANALYSIS",
+                symbol=config.symbol,
+                status="SUCCESS",
+                message=result.get("analysis") or app_result["reason"],
+                payload={
+                    "source": "cron",
+                    "interaction_id": interaction_id,
+                    "confidence_score": result.get("confidence_score"),
+                    "suggested_buy_low": result.get("suggested_buy_low"),
+                    "suggested_sell_high": result.get("suggested_sell_high"),
+                    "applied": app_result["applied"],
+                    "apply_reason": app_result["reason"],
+                    "order_action": result.get("order_action"),
+                    "order_status": order_result.get("status"),
+                    "order_id": order_result.get("order_id"),
+                },
+            )
+            db.commit()
+    finally:
+        db.close()
+
+
+async def _llm_analysis_cron() -> None:
     while True:
         await asyncio.sleep(60)
         try:
-            db = SessionLocal()
-            try:
-                svc = StrategyService(db)
-                config = svc.get_config()
-                if not config.auto_interval_enabled or not config.symbol:
-                    continue
-
-                now = datetime.now(timezone.utc)
-                interval_minutes = config.llm_interval_minutes or settings.llm_interval_cron_minutes
-                last_analysis_at = config.llm_last_analysis_at
-                if last_analysis_at is not None:
-                    if last_analysis_at.tzinfo is None:
-                        last_analysis_at = last_analysis_at.replace(tzinfo=timezone.utc)
-                    if now - last_analysis_at < timedelta(minutes=interval_minutes):
-                        continue
-
-                runner = get_runner()
-                current_price = runner.engine.last_price if runner.engine else 0.0
-                if current_price <= 0:
-                    current_price = config.buy_low
-                from app.api.llm_advisor import _account_context, _interval_reference_quantity, _position_context
-
-                position_context = _position_context(config.symbol, current_price)
-                account_context = _account_context(config.symbol, config.market, current_price, config.short_selling)
-
-                advisor = LLMAdvisorService(broker=runner.broker)
-                result = await asyncio.to_thread(
-                    advisor.analyze,
-                    symbol=config.symbol,
-                    market=config.market,
-                    current_price=current_price,
-                    current_buy_low=config.buy_low,
-                    current_sell_high=config.sell_high,
-                    short_selling=config.short_selling,
-                    current_position=str(position_context["side"]),
-                    recent_trades=[],
-                    position_quantity=float(position_context["quantity"]),
-                    position_avg_price=float(position_context["avg_price"]),
-                    unrealized_pnl_pct=float(position_context["unrealized_pnl_pct"]),
-                    min_profit_amount=config.min_profit_amount,
-                    recent_prices=runner.recent_price_context(),
-                    recent_analysis=build_recent_analysis_context(config),
-                    account_context=account_context,
-                    force=True,
-                )
-                if result.get("success"):
-                    app_result = IntervalApplicationService().apply_direct_suggestion(
-                        db=db,
-                        current_price=current_price or config.buy_low,
-                        suggestion={
-                            "suggested_buy_low": result.get("suggested_buy_low"),
-                            "suggested_sell_high": result.get("suggested_sell_high"),
-                            "confidence_score": result.get("confidence_score"),
-                        },
-                        reference_quantity=_interval_reference_quantity(position_context, account_context),
-                    )
-                    order_result = {"status": "NO_ACTION", "order_id": None}
-                    if result.get("order_action") and result.get("order_action") != "NONE":
-                        order_result = runner.execute_llm_order_decision(result)
-                    interaction_id = result.get("interaction_id")
-                    if interaction_id is not None:
-                        from app.services.llm_interaction_service import LLMInteractionService
-
-                        LLMInteractionService(db).update_outcome(
-                            interaction_id,
-                            applied=app_result["applied"],
-                            order_status=order_result.get("status"),
-                            order_id=order_result.get("order_id"),
-                        )
-                    record_trade_event(
-                        db,
-                        event_type="LLM_ANALYSIS",
-                        symbol=config.symbol,
-                        status="SUCCESS",
-                        message=result.get("analysis") or app_result["reason"],
-                        payload={
-                            "source": "cron",
-                            "interaction_id": interaction_id,
-                            "confidence_score": result.get("confidence_score"),
-                            "suggested_buy_low": result.get("suggested_buy_low"),
-                            "suggested_sell_high": result.get("suggested_sell_high"),
-                            "applied": app_result["applied"],
-                            "apply_reason": app_result["reason"],
-                            "order_action": result.get("order_action"),
-                            "order_status": order_result.get("status"),
-                            "order_id": order_result.get("order_id"),
-                        },
-                    )
-                    db.commit()
-            finally:
-                db.close()
+            await _llm_analysis_tick()
         except Exception:
             logger.exception("LLM analysis cron failed")
 
