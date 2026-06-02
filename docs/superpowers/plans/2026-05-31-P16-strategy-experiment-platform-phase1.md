@@ -1,5 +1,9 @@
 # P16 Strategy Experiment Platform Phase 1 Implementation Plan
 
+> **状态：✅ 已交付 2026-05-31**（commit `8168da2`，与 P17 合并提交）
+>
+> 本计划与实际交付一致，无需偏差修正。完整交付摘要见 [主 Roadmap.md](../../Roadmap.md) 中 P16 行。注意：commit 实际包含 P17（LLM 评分 + 导出 + draft 带回）的部分代码（`llm_recommendation_evaluator.py` 在后续 commit `084c0aa` 首次 commit；export 端点 + draft 带回随 `8168da2` 一同提交）。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 构建策略实验平台 Phase 1：基于同一份历史价格数据批量运行参数网格回测，持久化实验与 run 结果，并在前端提供排行榜比较。

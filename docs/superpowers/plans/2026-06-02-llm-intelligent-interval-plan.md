@@ -1,5 +1,16 @@
 # LLM Intelligent Interval Implementation Plan
 
+> **状态：🗄️ 已存档 / 暂不推进**（2026-06-01 整理）
+>
+> 本计划是 6/2 写的设计对应的 11-task 实施计划，与配套 spec [`2026-06-02-llm-intelligent-interval-design.md`](../specs/2026-06-02-llm-intelligent-interval-design.md) 一起保留。
+>
+> **决策依据：**
+> - 核心 LLM 区间调整能力已通过 P0/P9/P11 完整交付；现有 `LLMAdvisorService` 已具备区间推荐、置信度校验、IntervalApplication 渐进式过渡规则（含 6/2 路线图决策的"追价加仓"行为）。
+> - P22（commit `02ff712`）已补全波动率触发（`_should_run_llm_analysis` 双门控：时间间隔 OR 价格波动 ≥ `llm_interval_volatility_threshold_pct`），无需重建三件套。
+> - 详情见 [2026-05-31-next-iteration-roadmap.md](./2026-05-31-next-iteration-roadmap.md) 的"显式暂不做"段，以及 [主 Roadmap.md](../../Roadmap.md) 的"下一步建议"（P23 实时通知中心）。
+>
+> **保留原因：** 作为设计探索性文档与配套实施计划，保留供未来参考；若业务优先级变化，可基于此计划重启。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Implement DeepSeek LLM-powered intelligent price interval adjustment that automatically recommends and applies buy_low/sell_high based on market analysis, with progressive smooth transition when positions are held.
