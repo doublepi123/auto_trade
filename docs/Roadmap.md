@@ -135,7 +135,7 @@
 
 15. `DataAggregator` 零测试 —— 假数据 bug 因此长期未被发现。
 16. `IntervalApplicationService._apply_long` 无对照规范的断言，行为漂移没被守护。
-17. 无"重启 + pending 订单存在"的端到端集成测试，仅有单元级 mock。
+17. 无"重启 + pending 订单存在"的端到端集成测试，仅有单元级 mock。 ✅ **已关闭 2026-06-03**（P23a' 交付：新增 `tests/test_e2e_restart.py` 端到端覆盖 5 个场景——`tracked_entries` 持久化 + drift 对账、`unresolved live order` 触发风控暂停、`pending` 超时回收、runner refresh 与 DB 同步、start/stop 状态机无残留；详见 P23a' 段。）
 
 ### 迭代排序（2026-05-24 起执行）
 
@@ -543,13 +543,14 @@
 | 已完成 | **P19 A/B Testing 集成：LLM Prompt 变体实验** | ✅ 2026-05-31 | `LLMInteraction` 增 `prompt_variant` 字段 + `_ensure_llm_interaction_variant_column` 迁移；`Settings.llm_experiment_name` 配置；`LLMAdvisorService._select_variant` 确定性按 symbol hash 分配变体；`_build_prompt` 支持自定义 template；`analyze`/`preview` 全流程透传变体标识并写入 interaction 日志；pytest 696 passed / basedpyright 0 errors。 |
 | 已完成 | **P20 策略实验平台扩展指标：Sharpe / Profit Factor / 盈亏比** | ✅ 2026-06-01 | `BacktestEngine` 计算 sharpe_ratio、profit_factor、profit_loss_ratio；`StrategyExperimentRun` 持久化新字段；排行榜支持排序与扩展指标展示；pytest 699 passed / basedpyright 0 errors / frontend build / Cypress 通过。 |
 | 已完成 | **P22 LLM 波动率触发补全** | ✅ 2026-06-01 | `_llm_analysis_tick` 提取提升可测试性；模块级 `_last_llm_trigger_price` + `_should_run_llm_analysis` 双门控（时间间隔 OR 价格波动 ≥ `llm_interval_volatility_threshold_pct`）；`RTH_ONLY` 交易时段守卫前置到分析层；pytest 715 passed / basedpyright 0 errors / frontend type-check + build 通过。 |
+| 已完成 | **P23a' 审计 #17 端到端重启场景补齐** | ✅ 2026-06-03 | Part A（`llm_advisor_service._call_deepseek` 异常分层 + 9 个新单测：httpx 异常族 4 + 失败落库 2 + parse/preview 边界 2 + Task A1 timeout 1；`preview` 注释修正）。Part B（新增 `tests/test_e2e_restart.py` 5 个端到端场景：`tracked_entries` 持久化 + drift 对账 / unresolved live order 风险暂停 / `pending` 超时回收 / runner refresh 与 DB 同步 / start-stop 状态机无残留）。Part C（跨栈验证 + Roadmap 关闭 #17）。**未 commit**（用户决策）。pytest 730 passed（baseline 715 → +15）/ basedpyright 0 errors / 0 warnings / 0 notes / `npm run type-check` + `npm run build` 通过。**已知行为差异（不属于 #17 关闭范围）：** `_pause_if_unresolved_live_order_exists` 仅 `logger.warning + risk.pause`，不写 `RISK_PAUSED` 事件；记录为 Concern B，待后续审计项评估。 |
 | 已完成 | **P21 CI 质量门禁：测试/type-check 阻断坏提交** | ✅ 2026-06-01 | `.github/workflows/dockerhub.yml` 扩展为统一 CI：新增 `backend-test`（pytest + basedpyright）和 `frontend-check`（type-check + build）作业，`dockerhub` 作业依赖两者成功后才推送镜像；Cypress E2E 作为独立作业仅在 PR/手动触发运行，不阻塞主线发布；pip/npm 缓存已配置；pytest 715 passed / basedpyright 0 errors / frontend type-check + build 通过。 |
 
 ### 下一步建议
 
-> P21 + P22 已完成交付。当前基线：`pytest 715 passed`，`basedpyright` 0 errors，`npm run type-check` + `npm run build` 通过。
+> P21 + P22 + **P23a'** 已完成交付。**P23a' 关闭审计项 #17**（端到端重启场景补齐），但**用户决定不 commit**（详见 P23a' 行）。当前基线：`pytest 730 passed`，`basedpyright` 0 errors / 0 warnings / 0 notes，`npm run type-check` + `npm run build` 通过。
 >
-> 后续建议推进 P23（前端实时通知中心），视业务优先级而定。
+> 后续建议推进 P23（前端实时通知中心），视业务优先级而定。**P23 仍未启动。**
 >
 > 经代码审计，剩余缺口和机会：
 
