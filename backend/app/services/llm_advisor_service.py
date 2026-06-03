@@ -360,7 +360,12 @@ class LLMAdvisorService:
         min_profit_amount: float = 0.0,
         account_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Run LLM analysis without throttling, recording, or applying suggestions."""
+        """Run LLM preview analysis.
+
+        Records interaction for both success and failure paths (does not apply
+        suggestions, does not update analysis throttle, and never triggers
+        orders).
+        """
         global _LAST_PREVIEW_TIMESTAMP
 
         if time.monotonic() - _LAST_PREVIEW_TIMESTAMP < _PREVIEW_THROTTLE_SECONDS:
@@ -492,20 +497,41 @@ class LLMAdvisorService:
         if not settings.deepseek_api_key:
             raise RuntimeError("DEEPSEEK_API_KEY is not configured")
 
-        response = httpx.post(
-            settings.deepseek_api_url,
-            headers={
-                "Authorization": f"Bearer {settings.deepseek_api_key}",
-                "Content-Type": "application/json",
-            },
-            json=self._deepseek_chat_payload(prompt),
-            timeout=120.0,
-        )
-        response.raise_for_status()
-        data = response.json()
-        choice = data["choices"][0]
-        message = choice["message"]
-        content = message.get("content") or ""
+        try:
+            response = httpx.post(
+                settings.deepseek_api_url,
+                headers={
+                    "Authorization": f"Bearer {settings.deepseek_api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=self._deepseek_chat_payload(prompt),
+                timeout=120.0,
+            )
+        except httpx.TimeoutException as exc:
+            raise RuntimeError(f"DeepSeek request timeout: {exc}") from exc
+        except httpx.RequestError as exc:
+            raise RuntimeError(f"DeepSeek request failed: {exc}") from exc
+
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise RuntimeError(
+                f"DeepSeek HTTP {exc.response.status_code}: {exc.response.text[:200]}"
+            ) from exc
+
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise RuntimeError(
+                f"DeepSeek returned non-JSON response: {response.text[:200]}"
+            ) from exc
+
+        try:
+            choice = data["choices"][0]
+            message = choice["message"]
+            content = message.get("content") or ""
+        except (KeyError, IndexError, TypeError) as exc:
+            raise RuntimeError(f"DeepSeek response missing message content: {exc}") from exc
         if not content.strip():
             finish_reason = choice.get("finish_reason")
             usage = data.get("usage") or {}
@@ -536,6 +562,10 @@ class LLMAdvisorService:
             raw = raw[:-3]
         raw = raw.strip()
         parsed = json.loads(raw)
+        if not isinstance(parsed, dict):
+            raise TypeError(
+                f"LLM response must be a JSON object, got {type(parsed).__name__}"
+            )
         return LLMAdvisorService._normalize_response(parsed)
 
     @staticmethod

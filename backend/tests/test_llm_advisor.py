@@ -513,7 +513,6 @@ class TestLLMAdvisorService:
         finally:
             db.close()
 
-
 def test_preview_endpoint_uses_payload_without_saving(monkeypatch) -> None:
     from fastapi.testclient import TestClient
 
@@ -780,3 +779,322 @@ class TestABVariantSelection:
             assert variant == "v1:1.0"
         finally:
             db.close()
+
+
+class TestLLMAdvisorDegradation:
+    @pytest.fixture
+    def advisor(self) -> LLMAdvisorService:
+        return LLMAdvisorService()
+
+    def test_call_deepseek_timeout_raises_runtime_error(self, advisor: LLMAdvisorService, monkeypatch) -> None:
+        import app.config
+        import app.services.llm_advisor_service as service_module
+        import httpx
+
+        monkeypatch.setattr(app.config.settings, "deepseek_api_key", "test-key")
+        monkeypatch.setattr(
+            service_module.httpx,
+            "post",
+            lambda *args, **kwargs: (_ for _ in ()).throw(httpx.TimeoutException("request timed out")),
+        )
+
+        with pytest.raises(RuntimeError) as excinfo:
+            advisor._call_deepseek("analyze NVDA")
+
+        assert "timeout" in str(excinfo.value).lower()
+
+    def test_call_deepseek_request_error_raises_runtime_error(self, advisor: LLMAdvisorService, monkeypatch) -> None:
+        """httpx.RequestError (e.g. ConnectError) should be caught and re-raised as RuntimeError."""
+        import app.config
+        import app.services.llm_advisor_service as service_module
+        import httpx
+
+        fake_request = httpx.Request("POST", "https://api.deepseek.com/v1/chat/completions")
+
+        def raise_request_error(*args, **kwargs):
+            raise httpx.ConnectError("connection failed", request=fake_request)
+
+        monkeypatch.setattr(app.config.settings, "deepseek_api_key", "test-key")
+        monkeypatch.setattr(service_module.httpx, "post", raise_request_error)
+
+        with pytest.raises(RuntimeError) as excinfo:
+            advisor._call_deepseek("analyze NVDA")
+
+        # must contain "request" or be a network error message
+        msg = str(excinfo.value).lower()
+        assert "request" in msg
+
+    def test_call_deepseek_http_status_error_raises_runtime_error(self, advisor: LLMAdvisorService, monkeypatch) -> None:
+        """httpx.HTTPStatusError (5xx / 429) should be caught and re-raised as RuntimeError."""
+        import app.config
+        import app.services.llm_advisor_service as service_module
+        import httpx
+
+        fake_request = httpx.Request("POST", "https://api.deepseek.com/v1/chat/completions")
+        fake_response = httpx.Response(500, text="internal server error")
+
+        class FakeErrorResponse:
+            def raise_for_status(self) -> None:
+                raise httpx.HTTPStatusError(
+                    "500 Internal Server Error", request=fake_request, response=fake_response
+                )
+
+            @property
+            def text(self) -> str:
+                return "internal server error"
+
+            @property
+            def status_code(self) -> int:
+                return 500
+
+        monkeypatch.setattr(app.config.settings, "deepseek_api_key", "test-key")
+        monkeypatch.setattr(
+            service_module.httpx, "post", lambda *args, **kwargs: FakeErrorResponse()
+        )
+
+        with pytest.raises(RuntimeError) as excinfo:
+            advisor._call_deepseek("analyze NVDA")
+
+        msg = str(excinfo.value).lower()
+        assert "http" in msg
+        assert "500" in str(excinfo.value)
+
+    def test_call_deepseek_non_json_response_raises_runtime_error(self, advisor: LLMAdvisorService, monkeypatch) -> None:
+        """response.json() raising ValueError should be caught and re-raised as RuntimeError."""
+        import app.config
+        import app.services.llm_advisor_service as service_module
+
+        class FakeNonJsonResponse:
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict[str, object]:
+                raise ValueError("response body is not valid JSON")
+
+            @property
+            def text(self) -> str:
+                return "<html>not json</html>"
+
+        monkeypatch.setattr(app.config.settings, "deepseek_api_key", "test-key")
+        monkeypatch.setattr(
+            service_module.httpx,
+            "post",
+            lambda *args, **kwargs: FakeNonJsonResponse(),
+        )
+
+        with pytest.raises(RuntimeError) as excinfo:
+            advisor._call_deepseek("analyze NVDA")
+
+        msg = str(excinfo.value).lower()
+        assert "json" in msg or "response" in msg
+
+    def test_call_deepseek_missing_choices_raises_runtime_error(self, advisor: LLMAdvisorService, monkeypatch) -> None:
+        """response.json() returning {'choices': []} should be caught and re-raised as RuntimeError."""
+        import app.config
+        import app.services.llm_advisor_service as service_module
+
+        class FakeEmptyChoicesResponse:
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict[str, object]:
+                return {"choices": []}
+
+        monkeypatch.setattr(app.config.settings, "deepseek_api_key", "test-key")
+        monkeypatch.setattr(
+            service_module.httpx,
+            "post",
+            lambda *args, **kwargs: FakeEmptyChoicesResponse(),
+        )
+
+        with pytest.raises(RuntimeError) as excinfo:
+            advisor._call_deepseek("analyze NVDA")
+
+        msg = str(excinfo.value).lower()
+        assert any(keyword in msg for keyword in ("empty", "content", "choice"))
+
+    def test_analyze_records_failed_interaction_on_runtime_error(
+        self, advisor: LLMAdvisorService, monkeypatch
+    ) -> None:
+        """When _call_deepseek raises RuntimeError, analyze() must record a failed
+        llm_interactions row (success=False, error contains underlying info, raw_response empty)
+        and return success=False.
+        """
+        import app.config
+        from app.database import SessionLocal, engine
+        from app.models import Base, LLMInteraction
+        import app.services.llm_advisor_service as service_module
+
+        Base.metadata.drop_all(bind=engine)
+        Base.metadata.create_all(bind=engine)
+        monkeypatch.setattr(service_module, "_LAST_ANALYSIS_TIMESTAMP", 0.0)
+        monkeypatch.setattr(app.config.settings, "deepseek_api_key", "test-key")
+        monkeypatch.setattr(
+            advisor._data_aggregator,
+            "fetch_market_data",
+            lambda symbol, market: {
+                "daily_candles": [],
+                "minute_candles": [],
+                "current_price": 221.8,
+                "atr": 1.2,
+                "bb_upper": 224.0,
+                "bb_middle": 221.0,
+                "bb_lower": 218.0,
+            },
+        )
+
+        def raise_runtime_error(prompt: str) -> str:
+            raise RuntimeError("Simulated API outage")
+
+        monkeypatch.setattr(advisor, "_call_deepseek", raise_runtime_error)
+
+        result = advisor.analyze(
+            symbol="NVDA.US",
+            market="US",
+            current_price=221.8,
+            current_buy_low=219.0,
+            current_sell_high=224.0,
+            short_selling=False,
+            current_position="FLAT",
+            recent_trades=[],
+            min_profit_amount=10.0,
+            force=True,
+        )
+
+        assert result["success"] is False
+        assert "Simulated API outage" in result["error"]
+        assert result["interaction_id"] is not None
+
+        db = SessionLocal()
+        try:
+            row = db.get(LLMInteraction, result["interaction_id"])
+            assert row is not None
+            assert row.symbol == "NVDA.US"
+            assert row.interaction_type == "analyze"
+            assert row.success is False
+            assert row.error is not None
+            assert "Simulated API outage" in row.error
+            assert row.raw_response == ""
+        finally:
+            db.close()
+
+    def test_preview_records_failed_interaction_on_runtime_error(
+        self, advisor: LLMAdvisorService, monkeypatch
+    ) -> None:
+        """When _call_deepseek raises RuntimeError, preview() must record a failed
+        llm_interactions row (success=False, error contains underlying info, raw_response empty)
+        and return success=False.
+        """
+        from app.database import SessionLocal, engine
+        from app.models import Base, LLMInteraction
+        import app.services.llm_advisor_service as service_module
+
+        Base.metadata.drop_all(bind=engine)
+        Base.metadata.create_all(bind=engine)
+        monkeypatch.setattr(service_module, "_LAST_PREVIEW_TIMESTAMP", 0.0)
+        monkeypatch.setattr(
+            advisor._data_aggregator,
+            "fetch_market_data",
+            lambda symbol, market: {
+                "daily_candles": [],
+                "minute_candles": [],
+                "current_price": 205.0,
+                "atr": 5.0,
+                "bb_upper": 215.0,
+                "bb_middle": 205.0,
+                "bb_lower": 195.0,
+            },
+        )
+
+        def raise_runtime_error(prompt: str) -> str:
+            raise RuntimeError("Simulated API outage")
+
+        monkeypatch.setattr(advisor, "_call_deepseek", raise_runtime_error)
+
+        result = advisor.preview(
+            symbol="AAPL.US",
+            market="US",
+            current_price=200.0,
+            current_buy_low=180.0,
+            current_sell_high=220.0,
+            short_selling=False,
+        )
+
+        assert result["success"] is False
+        assert "interaction_id" not in result or result.get("interaction_id") is None
+
+        db = SessionLocal()
+        try:
+            rows = (
+                db.query(LLMInteraction)
+                .filter(LLMInteraction.symbol == "AAPL.US", LLMInteraction.interaction_type == "preview")
+                .all()
+            )
+            assert len(rows) == 1
+            row = rows[0]
+            assert row.success is False
+            assert row.error is not None
+            assert "Simulated API outage" in row.error
+            assert row.raw_response == ""
+        finally:
+            db.close()
+
+    def test_parse_response_non_dict_json_raises(self, advisor: LLMAdvisorService) -> None:
+        """Top-level non-dict JSON (list / str / number / list-of-pairs) must raise
+        TypeError/ValueError instead of silently producing a dict.
+        """
+        # top-level list
+        with pytest.raises((TypeError, ValueError)):
+            advisor._parse_response("[1, 2, 3]")
+
+        # top-level string
+        with pytest.raises((TypeError, ValueError)):
+            advisor._parse_response('"hello"')
+
+        # top-level number
+        with pytest.raises((TypeError, ValueError)):
+            advisor._parse_response("42")
+
+        # top-level list of pairs (would silently become a dict via dict() coercion)
+        with pytest.raises((TypeError, ValueError)):
+            advisor._parse_response('[[1, 2], [3, 4]]')
+
+    def test_preview_returns_error_when_current_price_unavailable(
+        self, advisor: LLMAdvisorService, monkeypatch
+    ) -> None:
+        """When market_data.current_price <= 0, preview() must return success=False
+        without calling _call_deepseek.
+        """
+        import app.services.llm_advisor_service as service_module
+
+        monkeypatch.setattr(service_module, "_LAST_PREVIEW_TIMESTAMP", 0.0)
+
+        def fail_call(prompt: str) -> str:
+            raise AssertionError("must not call _call_deepseek when current_price unavailable")
+
+        monkeypatch.setattr(advisor, "_call_deepseek", fail_call)
+        monkeypatch.setattr(
+            advisor._data_aggregator,
+            "fetch_market_data",
+            lambda symbol, market: {
+                "daily_candles": [],
+                "minute_candles": [],
+                "current_price": 0.0,
+                "atr": 0.0,
+                "bb_upper": 0.0,
+                "bb_middle": 0.0,
+                "bb_lower": 0.0,
+            },
+        )
+
+        result = advisor.preview(
+            symbol="AAPL.US",
+            market="US",
+            current_price=0.0,
+            current_buy_low=180.0,
+            current_sell_high=220.0,
+            short_selling=False,
+        )
+
+        assert result["success"] is False
+        assert "unavailable" in result.get("error", "").lower()
