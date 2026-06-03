@@ -1,6 +1,12 @@
 # Repository Guidelines
 
+> **Last refreshed:** 2026-06-03 / commit `c2fad57` (post-P23a'). Knowledge base regenerated via `/init-deep` (update mode). Test baseline: `pytest 730 passed`, `basedpyright 0 errors / 0 warnings / 0 notes`, `vue-tsc` clean. Audit #17 closed.
+
 Full-stack automated range-trading system for Longbridge (HK/US equities). Backend: Python 3.11+ FastAPI + SQLAlchemy 2.0 + SQLite. Frontend: Vue 3.5 + Vite 5 + Element Plus 2.8 + TypeScript (strict). LLM interval advisor via DeepSeek API (optional). Docker Compose deployment (nginx serving built SPA, reverse-proxying to uvicorn backend).
+
+**Distinct subdirectory deep-dives** (root-only docs are insufficient for these — see linked AGENTS.md):
+
+- `backend/app/domain/prompt/AGENTS.md` — LLM prompt plugin architecture (6 PromptModule subclasses + builder + feature selector). Pure computation, no I/O. Not duplicated in this root file.
 
 ---
 
@@ -222,24 +228,33 @@ docker compose -f docker-compose.dockerhub.yaml up
 |---|---|
 | Python | 3.11+ (3.11-slim in Docker) |
 | Node.js | 20.x (20-alpine in Docker) |
-| Python package manager | pip |
+| Python package manager | pip (no `pyproject.toml` — `backend/requirements.txt` + `backend/requirements-dev.txt`) |
 | Node package manager | npm (uses `npm ci` in Docker, `npm install` local) |
 | Python type checker | `basedpyright` (not mypy) |
 | TS type checker | `vue-tsc --noEmit` (strict mode) |
-| Python linter | None in dev dependencies (no ruff, flake8, or pylint) |
-| Frontend linter | None in dev dependencies |
+| Python linter | **None** (intentional — no ruff/flake8/pylint in dev deps) |
+| Frontend linter | **None** (intentional — no eslint/prettier in dev deps; no `.editorconfig`) |
 | Database | SQLite (no PostgreSQL/MySQL support) |
 | Deployment | Docker Compose (2 containers: backend internal, frontend via nginx) |
-| CI | GitHub Actions — Docker Hub build+push only (no test/lint step) |
+| CI | GitHub Actions — backend-test + frontend-check gate dockerhub publish (P21) |
 
 ### Notable Constraints
 
 - `pyrightconfig.json` is in `.gitignore` (developer-local). Project targets zero `basedpyright` errors.
 - Frontend Docker build includes type-check (`vue-tsc + vite build`); a TS error blocks the production build.
-- CI has **no test step** — quality gates are local only.
+- CI has **no test step** — quality gates are local only. (P21 added CI quality gates via `.github/workflows/dockerhub.yml` — see below.)
 - Docker Hub images use `latest` tag promiscuously (pushed on every default-branch commit).
 - No multi-arch Docker builds.
 - `docker-entrypoint.sh` mutates `alembic.ini` at runtime via `sed`.
+
+### Non-Obvious Config (not covered above)
+
+- **No `pyproject.toml`.** Backend deps split into `backend/requirements.txt` + `backend/requirements-dev.txt`; pytest config in `backend/pytest.ini`. Deliberate minimal-tooling choice.
+- **No `.editorconfig` / `.prettierrc` / `.eslintrc`** at any level. Python style: `basedpyright` only. Frontend style: `vue-tsc` only. No auto-formatter.
+- **Cypress `baseUrl` defaults to `http://localhost:8080`** (Docker/nginx) not `:3000` (Vite dev) — E2E tests target the deployed path.
+- **`docker-compose.dockerhub.yaml` is the prebuilt-image variant** — binds `127.0.0.1:8080`, sets `AUTO_TRADE_API_KEY` as required env, uses `pull_policy: always`. The main `docker-compose.yaml` is build-from-source + `0.0.0.0:8080` (LAN-friendly).
+- **`LONGPORT_*` is canonical**, but `LONGBRIDGE_*` is silently accepted via `merge_longbridge_credentials()` in `app/config.py`. Both old + new deploy scripts work.
+- **`.worktrees/`** in repo root is leftover from `using-git-worktrees` skill usage; **not part of main**, ignore in file counts / glob patterns.
 
 ---
 
@@ -247,11 +262,12 @@ docker compose -f docker-compose.dockerhub.yaml up
 
 ### Backend Tests
 
-- **49 test files** in `backend/tests/`, pure pytest 9.0.
+- **50 test files** in `backend/tests/` (incl. `test_e2e_restart.py` from P23a'), pure pytest 9.0.
 - **pytest-asyncio** with `asyncio_mode = auto` — async test functions handled transparently.
 - DB isolation: each module sets its own `AUTO_TRADE_DATABASE_URL` to an isolated SQLite file. No parallel write contention (runs serially).
 - conftest.py only sets env vars (DB URL per PID, credential key path) — **no fixtures**.
 - Mocking: **inline fake classes** preferred over patching. `_FakeBroker`, `_FakeSession`, `_NoopNotifier` defined per test module.
+- E2E restart coverage: `test_e2e_restart.py` (P23a') uses `TestClient(app)` + per-PID SQLite + fake broker to exercise full lifespan → runner.start → reconcile cycle. 5 scenarios: tracked_entries+drift, unresolved live order, pending timeout, refresh sync, start/stop state-machine.
 - Class-based grouping: `TestXxx` classes with `def test_*` methods. Helper methods prefixed `_`.
 - Coverage mix:
   - **Pure unit** (no DB, no IO): ~15 files (indicators, engine, risk, fees, calendar, sentiment, prompt modules)
