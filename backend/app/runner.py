@@ -71,6 +71,7 @@ class AppRunner:
             record_order_skipped=self._record_order_skipped,
             persist_entry=self._persist_tracked_entry,
             audit=self._audit,
+            margin_safety_factor=None,
         )
         self._state_svc = RuntimeStateService()
         self._running = False
@@ -297,6 +298,7 @@ class AppRunner:
                 )
                 mode = getattr(config, "trading_session_mode", None)
                 self._trading_session_mode = mode if mode else "ANY"
+                self._trade_svc.margin_safety_factor = getattr(config, "margin_safety_factor", None)
                 if config.symbol != old_symbol and self._running:
                     self._reset_quote_tracking(clear_history=True)
                     if self._quotes_subscribed:

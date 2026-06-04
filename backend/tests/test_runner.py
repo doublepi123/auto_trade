@@ -61,6 +61,42 @@ class TestAppRunner:
         runner = AppRunner()
         assert runner.broker._audit is runner._audit
 
+    def test_reload_strategy_updates_margin_safety_factor(self, monkeypatch) -> None:
+        from app.services.strategy_service import StrategyService
+        from app.models import StrategyConfig
+
+        runner = AppRunner()
+        runner._trade_svc.margin_safety_factor = None
+
+        class FakeConfig:
+            symbol = "AAPL.US"
+            market = "US"
+            buy_low = 100.0
+            sell_high = 200.0
+            short_selling = False
+            min_profit_amount = 0.0
+            auto_resume_minutes = 3
+            max_daily_loss = 5000.0
+            max_consecutive_losses = 3
+            fee_rate_us = 0.0005
+            fee_rate_hk = 0.003
+            min_repricing_pct = 0.003
+            llm_action_cooldown_seconds = 60
+            trading_session_mode = "ANY"
+            margin_safety_factor = 0.75
+
+        class FakeSvc:
+            def get_config(self):
+                return FakeConfig()
+
+        monkeypatch.setattr(StrategyService, "__init__", lambda self, db: None)
+        monkeypatch.setattr(StrategyService, "get_config", FakeSvc().get_config)
+        monkeypatch.setattr(runner.broker, "unsubscribe_quotes", lambda: None)
+        monkeypatch.setattr(runner.broker, "subscribe_quotes", lambda symbol, callback: None)
+
+        runner.reload_strategy()
+        assert runner._trade_svc.margin_safety_factor == 0.75
+
     def test_sync_engine_state_with_no_positions_sets_flat(self) -> None:
         class Broker:
             def get_positions(self) -> list[Position]:
