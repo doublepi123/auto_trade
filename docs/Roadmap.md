@@ -547,24 +547,13 @@
 | 已完成 | **P21 CI 质量门禁：测试/type-check 阻断坏提交** | ✅ 2026-06-01 | `.github/workflows/dockerhub.yml` 扩展为统一 CI：新增 `backend-test`（pytest + basedpyright）和 `frontend-check`（type-check + build）作业，`dockerhub` 作业依赖两者成功后才推送镜像；Cypress E2E 作为独立作业仅在 PR/手动触发运行，不阻塞主线发布；pip/npm 缓存已配置；pytest 715 passed / basedpyright 0 errors / frontend type-check + build 通过。 |
 | 已完成 | **P24 Wave 1：后端韧性（SDK disconnect + RISK_PAUSED 事件 + 测试加固）** | ✅ 2026-06-04 | 关闭 Roadmap P5' SDK disconnect 回调 + P23a' Concern B `RISK_PAUSED` 事件补写。BrokerGateway disconnect hook 机制 + AppRunner 自动重订 + 审计 `BROKER_DISCONNECT` / `BROKER_RETRY_EXHAUSTED`。`RISK_PAUSED` trade_event 含完整 payload。测试加固：freezegun 集成、DST 边界、并发死锁防护。pytest 750 passed / basedpyright 0/0/0 / vue-tsc clean / build 通过。 |
 | 已完成 | **P24 Wave 2：质量清扫（死代码 + ai-slop + 测试加固）** | ✅ 2026-06-04 | Task C：删除 5 个未使用 import/局部变量（vulture+pyflakes 扫描，双向 grep 确认）。Task F：提取常量到 `frontend/src/utils/constants.ts`（EVENT_TYPE/ORDER_STATUS/RUNNER_STATUS/PROMISE_STATUS），Dashboard 控制按钮补 6 个 data-testid。Task D：无新增 flaky。pytest 749+ passed / basedpyright 0/0/0 / vue-tsc clean / build 通过。 |
+| 已完成 | **P24 Wave 3：P23 前端实时通知中心 + 分支清理** | ✅ 2026-06-04 | Task P23：`useNotificationStream` composable（severity 分级 / 1s 节流 / CRITICAL 5条/分钟上限 / localStorage 偏好 / 断线补齐）。Dashboard 启用通知流。App.vue 右上角"通知偏好"弹窗。Task E：删除 4 个过时本地分支及 worktree。vue-tsc clean / build pass / Cypress spec 创建。 |
 
 ### 下一步建议
 
-> **当前执行中：P24（技术债清扫 + P23 前端实时通知中心）。**
+> **P24 全部交付完成。** 当前基线：`pytest 750 passed, 1 skipped` / `basedpyright` 0 errors / `vue-tsc` clean / `npm run build` pass。
 >
-> Wave 1（后端韧性）已 commit 到 main（`dba6852`）。正在执行 Waves 2-3。
->
-> 规格文档：`docs/superpowers/specs/2026-06-04-tech-debt-p23-design.md`
->
-> 执行计划：`docs/superpowers/plans/2026-06-04-execute-waves-2-3.md`
-
-
-**Waves 2-3 执行计划（当前）：**
-
-| Wave | 任务 | 主题 | 估时 |
-|------|------|------|------|
-| **Wave 2** | C + F + D | 质量清扫：死代码清理 + 前端 ai-slop 清理 + 测试加固收尾 | 1~1.5 天 |
-| **Wave 3** | P23 + E | 前端实时通知中心 Toast 浮层 + 删除过时分支 | 1.5~2 天 |
+> 后续建议推进 Roadmap 中已有的 **P24（原建议）：多标的自动交易扩展（评估）**，或根据业务优先级选择新方向。
 
 **基线：** `pytest 750 passed` / `basedpyright` 0/0/0 / `vue-tsc` clean / `npm run build` 通过
 
