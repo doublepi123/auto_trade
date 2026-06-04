@@ -545,19 +545,27 @@
 | 已完成 | **P22 LLM 波动率触发补全** | ✅ 2026-06-01 | `_llm_analysis_tick` 提取提升可测试性；模块级 `_last_llm_trigger_price` + `_should_run_llm_analysis` 双门控（时间间隔 OR 价格波动 ≥ `llm_interval_volatility_threshold_pct`）；`RTH_ONLY` 交易时段守卫前置到分析层；pytest 715 passed / basedpyright 0 errors / frontend type-check + build 通过。 |
 | 已完成 | **P23a' 审计 #17 端到端重启场景补齐** | ✅ 2026-06-03 | Part A（`llm_advisor_service._call_deepseek` 异常分层 + 9 个新单测：httpx 异常族 4 + 失败落库 2 + parse/preview 边界 2 + Task A1 timeout 1；`preview` 注释修正）。Part B（新增 `tests/test_e2e_restart.py` 5 个端到端场景：`tracked_entries` 持久化 + drift 对账 / unresolved live order 风险暂停 / `pending` 超时回收 / runner refresh 与 DB 同步 / start-stop 状态机无残留）。Part C（跨栈验证 + Roadmap 关闭 #17）。**未 commit**（用户决策）。pytest 730 passed（baseline 715 → +15）/ basedpyright 0 errors / 0 warnings / 0 notes / `npm run type-check` + `npm run build` 通过。**已知行为差异（不属于 #17 关闭范围）：** `_pause_if_unresolved_live_order_exists` 仅 `logger.warning + risk.pause`，不写 `RISK_PAUSED` 事件；记录为 Concern B，待后续审计项评估。 |
 | 已完成 | **P21 CI 质量门禁：测试/type-check 阻断坏提交** | ✅ 2026-06-01 | `.github/workflows/dockerhub.yml` 扩展为统一 CI：新增 `backend-test`（pytest + basedpyright）和 `frontend-check`（type-check + build）作业，`dockerhub` 作业依赖两者成功后才推送镜像；Cypress E2E 作为独立作业仅在 PR/手动触发运行，不阻塞主线发布；pip/npm 缓存已配置；pytest 715 passed / basedpyright 0 errors / frontend type-check + build 通过。 |
+| 进行中 | **P24 Wave 1：后端韧性（SDK disconnect + RISK_PAUSED 事件 + 测试加固）** | ✅ 2026-06-04 | 关闭 Roadmap P5' SDK disconnect 回调 + P23a' Concern B `RISK_PAUSED` 事件补写。BrokerGateway disconnect hook 机制 + AppRunner 自动重订 + 审计 `BROKER_DISCONNECT` / `BROKER_RETRY_EXHAUSTED`。`RISK_PAUSED` trade_event 含完整 payload。测试加固：freezegun 集成、DST 边界、并发死锁防护。pytest 750 passed / basedpyright 0/0/0 / vue-tsc clean / build 通过。 |
 
 ### 下一步建议
 
-> P21 + P22 + **P23a'** 已完成交付。**P23a' 关闭审计项 #17**（端到端重启场景补齐），但**用户决定不 commit**（详见 P23a' 行）。当前基线：`pytest 730 passed`，`basedpyright` 0 errors / 0 warnings / 0 notes，`npm run type-check` + `npm run build` 通过。
+> **当前执行中：P24（技术债清扫 + P23 前端实时通知中心）。**
 >
-> 后续建议推进 P23（前端实时通知中心），视业务优先级而定。**P23 仍未启动。**
+> Wave 1（后端韧性）已 commit 到 main（`dba6852`）。正在执行 Waves 2-3。
 >
-> 经代码审计，剩余缺口和机会：
+> 规格文档：`docs/superpowers/specs/2026-06-04-tech-debt-p23-design.md`
+>
+> 执行计划：`docs/superpowers/plans/2026-06-04-execute-waves-2-3.md`
 
-| 顺序 | 代号 | 主题 | 价值 | 预估工时 |
-|------|------|------|------|----------|
-| 1 | **P23** | 前端实时通知中心 | Dashboard 通过 WebSocket/轮询实时接收风控/跳过/审计事件，解决当前必须刷新才能看到的问题 | 2–3 天 |
-| 后续 | **P24** | 多标的自动交易扩展（评估） | Watchlist 现有观察能力扩展为单标的自动交易轮换；架构风险高，需单独立项 | — |
+
+**Waves 2-3 执行计划（当前）：**
+
+| Wave | 任务 | 主题 | 估时 |
+|------|------|------|------|
+| **Wave 2** | C + F + D | 质量清扫：死代码清理 + 前端 ai-slop 清理 + 测试加固收尾 | 1~1.5 天 |
+| **Wave 3** | P23 + E | 前端实时通知中心 Toast 浮层 + 删除过时分支 | 1.5~2 天 |
+
+**基线：** `pytest 750 passed` / `basedpyright` 0/0/0 / `vue-tsc` clean / `npm run build` 通过
 
 **显式不做（与已有 YAGNI 决策保持一致）：**
 - 交易所节假日历
