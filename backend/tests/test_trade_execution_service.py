@@ -146,6 +146,32 @@ class TestTradeExecutionServiceBasics:
         broker.get_cash.assert_not_called()
         broker.submit_limit_order.assert_called_once_with("NVDA.US", "BUY", Decimal("90"), Decimal("222.5"))
 
+    def test_margin_safety_factor_instance_attribute(self, svc: TradeExecutionService) -> None:
+        assert svc.margin_safety_factor is None
+        svc.margin_safety_factor = 0.75
+        assert svc.margin_safety_factor == 0.75
+
+    def test_entry_quantity_uses_instance_margin_safety_factor(self, svc: TradeExecutionService) -> None:
+        broker = MagicMock()
+        broker.estimate_margin_max_quantity.return_value = Decimal("100")
+        svc.margin_safety_factor = 0.75
+        qty = svc._entry_quantity_from_margin_power(broker, "AAPL.US", "BUY", Decimal("150"), "USD")
+        assert qty == 75  # 100 * 0.75
+
+    def test_entry_quantity_keyword_overrides_instance_attribute(self, svc: TradeExecutionService) -> None:
+        broker = MagicMock()
+        broker.estimate_margin_max_quantity.return_value = Decimal("100")
+        svc.margin_safety_factor = 0.75
+        qty = svc._entry_quantity_from_margin_power(broker, "AAPL.US", "BUY", Decimal("150"), "USD", safety_factor=0.5)
+        assert qty == 50  # 100 * 0.5
+
+    def test_entry_quantity_fallback_to_constant(self, svc: TradeExecutionService) -> None:
+        broker = MagicMock()
+        broker.estimate_margin_max_quantity.return_value = Decimal("100")
+        svc.margin_safety_factor = None
+        qty = svc._entry_quantity_from_margin_power(broker, "AAPL.US", "BUY", Decimal("150"), "USD")
+        assert qty == 90  # 100 * 0.9 (ENTRY_BUYING_POWER_USAGE)
+
     def test_normalize_limit_price_hk_tier_boundaries(self) -> None:
         # 0.243 lives in the 0.005-tick tier (≥0.25 is not yet reached → 0.001 tier)
         # Actually 0.243 < 0.25 → 0.001 tick tier. BUY rounds down, SELL rounds up.

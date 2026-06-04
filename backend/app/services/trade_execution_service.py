@@ -108,6 +108,7 @@ class TradeExecutionService:
         record_order_skipped: _RecordOrderSkipped | None = None,
         persist_entry: _EntryPersistCallback | None = None,
         audit: AuditLogger | None = None,
+        margin_safety_factor: float | None = None,
     ) -> None:
         self._record_order = record_order
         self._update_order_status = update_order_status
@@ -115,6 +116,7 @@ class TradeExecutionService:
         self._record_order_skipped = record_order_skipped
         self._persist_entry = persist_entry
         self._audit = audit
+        self.margin_safety_factor = margin_safety_factor
         self._state_lock = RLock()
         self._pending_order: _PendingOrder | None = None
         self._order_status_poll_interval_seconds = 1.0
@@ -272,7 +274,12 @@ class TradeExecutionService:
         safety_factor: float | None = None,
     ) -> int:
         max_qty = broker.estimate_margin_max_quantity(symbol, side, price, cash_currency)
-        factor = Decimal(str(safety_factor)) if safety_factor is not None else ENTRY_BUYING_POWER_USAGE
+        if safety_factor is not None:
+            factor = Decimal(str(safety_factor))
+        elif self.margin_safety_factor is not None:
+            factor = Decimal(str(self.margin_safety_factor))
+        else:
+            factor = ENTRY_BUYING_POWER_USAGE
         qty = int(max_qty * factor)
         if qty <= 0:
             logger.warning(
