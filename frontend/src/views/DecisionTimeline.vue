@@ -147,6 +147,7 @@ import { ElMessage } from 'element-plus'
 import { exportTradeEvents, getTradeEvents } from '../api'
 import type { TimelineSource, TradeEventRecord } from '../types'
 import { auditActionLabel, orderSideLabel, skipCategoryLabel, tradeEventTypeLabel } from '../utils/labels'
+import { EVENT_TYPE } from '../utils/constants'
 
 type Row = TradeEventRecord & { row_uid: string }
 
@@ -250,7 +251,7 @@ function eventType(eventTypeValue: string, status: string, source: TradeEventRec
     if (eventTypeValue === 'KILL_SWITCH') return 'danger'
     return 'info'
   }
-  if (eventTypeValue === 'LLM_ANALYSIS') return status === 'FAILED' ? 'danger' : 'primary'
+  if (eventTypeValue === EVENT_TYPE.LLM_ANALYSIS) return status === 'FAILED' ? 'danger' : 'primary'
   if (eventTypeValue === 'RISK_PAUSED') return 'danger'
   if (eventTypeValue === 'RISK_AUTO_RESUMED') return 'success'
   if (eventTypeValue === 'ORDER_FILLED') return 'success'

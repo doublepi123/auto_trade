@@ -1,6 +1,7 @@
 import { ref } from 'vue'
 import { getStrategy, getStatus } from '../api'
 import type { StrategyConfig, StatusData } from '../types'
+import { PROMISE_STATUS } from '../utils/constants'
 
 const defaultStrategy: StrategyConfig = {
   id: 0, symbol: '', market: 'US', buy_low: 0, sell_high: 0,
@@ -47,7 +48,7 @@ export function useDashboardData() {
 
     const results = await Promise.allSettled([strategyPromise, statusPromise])
     initialLoading.value = false
-    if (results.some((result) => result.status === 'rejected')) {
+    if (results.some((result) => result.status === PROMISE_STATUS.REJECTED)) {
       loadError.value = true
       throw new Error('Dashboard data load failed')
     }

@@ -171,8 +171,8 @@
         <el-table-column label="交易" width="60" prop="trade_count" />
         <el-table-column label="状态" width="100">
           <template #default="{ row }">
-            <el-tag v-if="row.status === 'COMPLETED'" type="success">完成</el-tag>
-            <el-tag v-else-if="row.status === 'FAILED'" type="danger">失败</el-tag>
+            <el-tag v-if="row.status === RUNNER_STATUS.COMPLETED" type="success">完成</el-tag>
+            <el-tag v-else-if="row.status === RUNNER_STATUS.FAILED" type="danger">失败</el-tag>
             <el-tag v-else>{{ row.status }}</el-tag>
             <span v-if="row.error" style="margin-left: 4px; color: #f56c6c; font-size: 12px" data-testid="run-error">
               {{ row.error }}
@@ -249,6 +249,7 @@
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
+import { RUNNER_STATUS } from '../utils/constants'
 import {
   createStrategyExperiment,
   exportStrategyExperiment,

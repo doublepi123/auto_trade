@@ -147,12 +147,12 @@
             </el-tag>
           </div>
           <div class="action-grid">
-            <el-button type="primary" @click="handleStart" :disabled="status.kill_switch || status.runner_running">启动</el-button>
-            <el-button type="success" @click="handleResume" :disabled="!status.paused || status.kill_switch">恢复</el-button>
-            <el-button type="warning" @click="handlePause" :disabled="status.paused || status.kill_switch">暂停</el-button>
-            <el-button type="danger" @click="handleStop">停止</el-button>
-            <el-button class="kill-button" type="danger" plain @click="handleKillSwitch">紧急停止</el-button>
-            <el-button v-if="status.kill_switch" type="success" plain @click="handleDisableKillSwitch">解除紧急停止</el-button>
+            <el-button type="primary" @click="handleStart" :disabled="status.kill_switch || status.runner_running" data-testid="dashboard-start-btn">启动</el-button>
+            <el-button type="success" @click="handleResume" :disabled="!status.paused || status.kill_switch" data-testid="dashboard-resume-btn">恢复</el-button>
+            <el-button type="warning" @click="handlePause" :disabled="status.paused || status.kill_switch" data-testid="dashboard-pause-btn">暂停</el-button>
+            <el-button type="danger" @click="handleStop" data-testid="dashboard-stop-btn">停止</el-button>
+            <el-button class="kill-button" type="danger" plain @click="handleKillSwitch" data-testid="dashboard-kill-btn">紧急停止</el-button>
+            <el-button v-if="status.kill_switch" type="success" plain @click="handleDisableKillSwitch" data-testid="dashboard-disable-kill-btn">解除紧急停止</el-button>
           </div>
         </section>
       </div>
@@ -249,7 +249,7 @@
             </div>
             <p>{{ event.message || event.status || '-' }}</p>
             <small
-              v-if="event.event_type === 'ORDER_SKIPPED' && event.payload?.skip_category"
+              v-if="event.event_type === EVENT_TYPE.ORDER_SKIPPED && event.payload?.skip_category"
               class="skip-category"
             >{{ skipCategoryLabel(String(event.payload.skip_category)) }}</small>
           </div>
@@ -271,6 +271,7 @@ import { useAccountRefresh } from '../composables/useAccountRefresh'
 import { startTrading, stopTrading, pauseTrading, resumeTrading, activateKillSwitch, disableKillSwitch, getLLMIntervalStatus, getOrders, getTradeEvents, getStatusHistory } from '../api'
 import type { LLMIntervalStatus, OrderRecord, Position, StatusHistoryPoint, TradeEventRecord, TradeSignalMarker } from '../types'
 import { engineStateLabel, auditActionLabel, marketLabel, positionSideLabel, skipCategoryLabel, tradeEventTypeLabel } from '../utils/labels'
+import { EVENT_TYPE } from '../utils/constants'
 
 type CypressWindow = Window & { Cypress?: unknown }
 const accountRefreshIntervalMs = (window as CypressWindow).Cypress ? 500 : 10000
@@ -603,7 +604,7 @@ function eventTagType(
   source?: TradeEventRecord['source'],
 ): string {
   if (source === 'audit') return eventTypeValue === 'KILL_SWITCH' ? 'danger' : 'info'
-  if (eventTypeValue === 'LLM_ANALYSIS') return status === 'FAILED' ? 'danger' : 'primary'
+  if (eventTypeValue === EVENT_TYPE.LLM_ANALYSIS) return status === 'FAILED' ? 'danger' : 'primary'
   if (eventTypeValue === 'RISK_PAUSED') return 'danger'
   if (eventTypeValue === 'RISK_AUTO_RESUMED') return 'success'
   if (eventTypeValue === 'ORDER_FILLED') return 'success'

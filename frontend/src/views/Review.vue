@@ -88,7 +88,7 @@
               <div v-for="order in day.orders" :key="order.id" class="item-row">
                 <el-tag :type="order.side === 'BUY' || order.side === 'BUY_TO_COVER' ? 'success' : 'danger'" size="small">{{ order.side }}</el-tag>
                 <span>{{ order.quantity.toFixed(0) }} 股 @ ${{ order.executed_price ?? order.price }}</span>
-                <el-tag :type="order.status === 'FILLED' ? 'success' : 'warning'" size="small">{{ order.status }}</el-tag>
+                <el-tag :type="order.status === ORDER_STATUS.FILLED ? 'success' : 'warning'" size="small">{{ order.status }}</el-tag>
                 <span class="muted">{{ formatTime(order.created_at) }}</span>
               </div>
             </div>
@@ -127,6 +127,7 @@ import { ref, computed } from 'vue'
 import { ElMessage } from 'element-plus'
 import { getReview, exportReview } from '../api/review'
 import type { ReviewResponse } from '../types'
+import { ORDER_STATUS } from '../utils/constants'
 
 const form = ref({
   symbol: 'AAPL.US',
