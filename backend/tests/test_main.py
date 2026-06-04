@@ -185,7 +185,7 @@ class TestLLMAnalysisTick:
         monkeypatch.setattr("app.database.SessionLocal", lambda: fake_db)
         monkeypatch.setattr("app.services.strategy_service.StrategyService", FakeStrategyService)
         monkeypatch.setattr("app.runner.get_runner", lambda: runner)
-        monkeypatch.setattr("app.main.build_recent_analysis_context", lambda cfg: [])
+        monkeypatch.setattr("app.services.llm_advisor_service.build_recent_analysis_context", lambda cfg: [])
         monkeypatch.setattr("app.main.record_trade_event", lambda *a, **kw: None)
         monkeypatch.setattr(
             "app.api.llm_advisor._position_context",

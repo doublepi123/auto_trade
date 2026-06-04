@@ -13,7 +13,6 @@ class SelectionModule(PromptModule):
         if not market_state:
             return ""
 
-        state = market_state.get("state", "neutral")
         description = market_state.get("description", "")
         suggested = market_state.get("suggested_indicators", [])
 

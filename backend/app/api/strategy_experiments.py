@@ -5,7 +5,6 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.schemas import (
-    LLMEvaluationRequest,
     LLMEvaluationResponse,
     StrategyExperimentCreate,
     StrategyExperimentResponse,

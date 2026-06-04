@@ -9,10 +9,6 @@ from app.core.risk import RiskConfig, RiskController
 
 logger = logging.getLogger("auto_trade.runtime_state")
 
-if TYPE_CHECKING:
-    from sqlalchemy.orm import Session
-
-
 class RuntimeStateService:
     def load(self, db: Any, engine: StrategyEngine, risk: RiskController) -> None:
         from app.services.strategy_service import StrategyService
