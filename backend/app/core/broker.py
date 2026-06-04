@@ -22,6 +22,7 @@ except ImportError:
 RETRYABLE_EXC = _retryable_exc
 
 logger = logging.getLogger("auto_trade.broker")
+DisconnectHook = Callable[[str], None]
 
 _RETRYABLE_MESSAGE_MARKERS = (
     "限流",
@@ -307,7 +308,37 @@ class BrokerGateway:
         self._quote_ctx: Any = None
         self._trade_ctx: Any = None
         self._quote_callbacks: list[Callable[[Quote], None]] = []
+        self._disconnect_hooks: list[DisconnectHook] = []
         self._subscribed_symbol: str | None = None
+
+    def register_disconnect_hook(self, hook: DisconnectHook) -> None:
+        """Register a broker disconnect hook, de-duplicating the same callable."""
+        if hook not in self._disconnect_hooks:
+            self._disconnect_hooks.append(hook)
+
+    def _call_disconnect_hooks(self, reason: str) -> None:
+        """Invoke disconnect hooks without letting one failure block others."""
+        for hook in list(self._disconnect_hooks):
+            try:
+                hook(reason)
+            except Exception as exc:
+                logger.warning("disconnect_hook_failed: %s", exc)
+
+    def _register_native_disconnect_if_available(self) -> None:
+        """Attach to the SDK disconnect event when available; watchdog remains the fallback."""
+        quote_ctx = self._quote_ctx
+        if quote_ctx is None:
+            return
+        on_disconnect = getattr(quote_ctx, "on_disconnect", None)
+        if not callable(on_disconnect):
+            on_disconnect = getattr(quote_ctx, "set_on_disconnect", None)
+        if not callable(on_disconnect):
+            logger.info("broker disconnect event unavailable; falling back to quote watchdog")
+            return
+        try:
+            on_disconnect(self._call_disconnect_hooks)
+        except Exception as exc:
+            logger.warning("native_disconnect_register_failed: %s", exc)
 
     def _call_with_retry(
         self,
@@ -348,6 +379,7 @@ class BrokerGateway:
                 config = module.Config.from_env()
                 self._quote_ctx = module.QuoteContext(config)
                 self._trade_ctx = module.TradeContext(config)
+                self._register_native_disconnect_if_available()
 
     def get_candlesticks(self, symbol: str, period: str, count: int) -> list[BrokerCandle]:
         """Fetch recent candlesticks. ``period`` is one of ``DAY``, ``MIN_1``, ``MIN_5``, etc."""

@@ -1,12 +1,13 @@
 import os
 import time
-from datetime import date, datetime, time as datetime_time, timedelta, timezone
+from datetime import datetime, time as datetime_time, timedelta, timezone
 from types import SimpleNamespace
 
 os.environ["AUTO_TRADE_DATABASE_URL"] = "sqlite:///data/test_api.db"
 
 
 from fastapi.testclient import TestClient
+from freezegun import freeze_time
 
 from app.api import llm_advisor as llm_api
 from app.api import strategy as strategy_api
@@ -356,11 +357,13 @@ class TestAPI:
         assert "kill switch activated" in resp.json()["message"]
 
     def test_start_runner(self) -> None:
+        client.post("/api/control/stop", json={"reason": "test reset"})
         client.post("/api/control/disable-kill-switch")
         client.post("/api/control/resume")
         resp = client.post("/api/control/start")
         assert resp.status_code == 200
         assert resp.json()["message"] == "runner started"
+        client.post("/api/control/stop", json={"reason": "test cleanup"})
 
     def test_stop_runner(self) -> None:
         resp = client.post("/api/control/stop", json={"reason": "testing"})
@@ -426,7 +429,8 @@ class TestAPI:
         # production _utcnow default). This keeps the test deterministic regardless of the
         # machine timezone or time of day — a naive "now - 30min" near local midnight would
         # otherwise straddle the date boundary and drop one order from "today".
-        local_noon = datetime.now().astimezone().replace(hour=12, minute=0, second=0, microsecond=0)
+        with freeze_time("2026-06-04 10:00:00", tz_offset=0):
+            local_noon = datetime.now().astimezone().replace(hour=12, minute=0, second=0, microsecond=0)
         now_local = local_noon.astimezone(timezone.utc)
         db.add_all([
             OrderRecord(
@@ -1073,7 +1077,6 @@ def test_kill_switch_endpoint_writes_critical() -> None:
 
 def test_start_failure_writes_failed_audit(monkeypatch) -> None:
     _clean_audit_logs()
-    from fastapi import HTTPException
 
     class Runner:
         risk = type("Risk", (), {"kill_switch": True})()

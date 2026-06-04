@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 
-import pytest
+from freezegun import freeze_time
 
 from app.core.market_calendar import (
     get_session,
@@ -82,3 +82,39 @@ def test_session_metadata() -> None:
     assert us.code == "US"
     assert us.rth_open.hour == 9 and us.rth_open.minute == 30
     assert us.rth_close.hour == 16
+
+
+class TestDstBoundary:
+    """Cover US DST boundaries and simultaneous US/HK local trade days."""
+
+    def test_us_dst_spring_forward_march_8_2026_keeps_trade_day(self) -> None:
+        with freeze_time("2026-03-08 06:30:00", tz_offset=0):
+            day = trade_day_for("US", datetime.now(timezone.utc))
+
+        assert day == date(2026, 3, 8)
+
+    def test_us_dst_fall_back_nov_1_2026_keeps_trade_day(self) -> None:
+        with freeze_time("2026-11-01 05:30:00", tz_offset=0):
+            day = trade_day_for("US", datetime.now(timezone.utc))
+
+        assert day == date(2026, 11, 1)
+
+    def test_us_rth_utc_open_moves_after_dst_boundaries(self) -> None:
+        with freeze_time("2026-03-09 13:30:00", tz_offset=0):
+            assert is_trading_hours("US", datetime.now(timezone.utc)) is True
+        with freeze_time("2026-11-02 14:30:00", tz_offset=0):
+            assert is_trading_hours("US", datetime.now(timezone.utc)) is True
+
+    def test_hk_dst_no_change_across_us_spring_boundary(self) -> None:
+        with freeze_time("2026-03-08 16:00:00", tz_offset=0):
+            day = trade_day_for("HK", datetime.now(timezone.utc))
+
+        assert day == date(2026, 3, 9)
+
+    def test_us_hk_simultaneous_trade_day_can_differ(self) -> None:
+        with freeze_time("2026-06-04 16:00:00", tz_offset=0):
+            us_day = trade_day_for("US", datetime.now(timezone.utc))
+            hk_day = trade_day_for("HK", datetime.now(timezone.utc))
+
+        assert us_day == date(2026, 6, 4)
+        assert hk_day == date(2026, 6, 5)

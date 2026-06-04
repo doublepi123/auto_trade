@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
@@ -32,6 +33,7 @@ from app.core.broker import AccountInfo, OrderResult, Position, Quote
 from app.database import SessionLocal, engine
 from app.main import app
 from app.models import (
+    AuditLog,
     Base,
     OrderRecord,
     RuntimeState,
@@ -88,6 +90,15 @@ class _FakeBroker:
         self.closed = False
         self.get_today_orders_calls = 0
         self.get_positions_calls = 0
+        self.disconnect_hooks: list[Callable[[str], None]] = []
+
+    def register_disconnect_hook(self, hook: Callable[[str], None]) -> None:
+        if hook not in self.disconnect_hooks:
+            self.disconnect_hooks.append(hook)
+
+    def simulate_disconnect(self, reason: str) -> None:
+        for hook in list(self.disconnect_hooks):
+            hook(reason)
 
     def subscribe_quotes(self, symbol: str, _callback: object) -> None:
         self.subscribed_to.append(symbol)
@@ -626,3 +637,38 @@ class TestE2EControlStartStopNoStateLeak:
         # seeded tracked entries or pending orders.
         assert runner._trade_svc.snapshot_tracked_entries() == {}
         assert runner._trade_svc.has_pending_order is False
+
+
+# ---------------------------------------------------------------------------
+# Scenario 6: broker disconnect hook triggers audit and resubscribe
+# ---------------------------------------------------------------------------
+class TestE2EBrokerDisconnectResubscribe:
+    def test_broker_disconnect_triggers_resubscribe_within_5s(
+        self, fresh_runner, monkeypatch
+    ) -> None:
+        _seed_strategy(symbol="AAPL.US")
+        fake_broker = _FakeBroker()
+        _install_fake_broker(monkeypatch, fake_broker)
+
+        with TestClient(app) as client:
+            response = client.post("/api/control/start")
+            assert response.status_code == 200
+            runner = get_runner()
+            assert runner._quotes_subscribed is True
+
+            fake_broker.simulate_disconnect("test_network_drop")
+            assert runner._quotes_subscribed is False
+
+            time.sleep(5.5)
+
+            db = SessionLocal()
+            try:
+                actions = [row.action for row in db.query(AuditLog).all()]
+            finally:
+                db.close()
+            assert "BROKER_DISCONNECT" in actions
+
+            status = client.get("/api/status").json()
+            assert status["paused"] is False
+            assert runner._quotes_subscribed is True
+            assert fake_broker.subscribed_to == ["AAPL.US"]

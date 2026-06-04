@@ -46,6 +46,7 @@ _LLM_ORDER_ACTION_MAP = {
 _LLM_STOP_LOSS_ACTIONS = {"STOP_LOSS_SELL_NOW", "STOP_LOSS_COVER_NOW"}
 _LIVE_ORDER_STATUSES = {"SUBMITTED", "PARTIAL_FILLED"}
 _TERMINAL_ORDER_STATUSES = {"FILLED", "REJECTED", "CANCELLED"}
+DISCONNECT_RETRY_EXHAUSTED_THRESHOLD = 3
 
 
 class AppRunner:
@@ -78,6 +79,7 @@ class AppRunner:
         self._start_lock = threading.Lock()
         self._state_lock = threading.RLock()
         self._quotes_subscribed = False
+        self._disconnect_retry_count = 0
         self._trading_session_mode: str = "ANY"
         self._trigger_in_flight = False
         self._defer_broker_close = False
@@ -101,6 +103,7 @@ class AppRunner:
             self._state_svc.load(db, self.engine, self.risk)
             self._load_tracked_entries(db)
             self._apply_credentials(self._load_credentials(), resubscribe=False)
+        self._register_broker_disconnect_hook()
         self._refresh_trading_session_mode()
 
         self.sync_today_orders_from_broker(force=True)
@@ -126,7 +129,7 @@ class AppRunner:
                 logger.error("quote subscription failed for %s: %s", symbol, exc)
                 logger.error("system running without quote updates")
 
-    def _pause_if_unresolved_live_order_exists(self, db) -> None:
+    def _pause_if_unresolved_live_order_exists(self, db) -> bool:
         order = (
             db.query(OrderRecord)
             .filter(OrderRecord.status.in_(_LIVE_ORDER_STATUSES))
@@ -134,10 +137,97 @@ class AppRunner:
             .first()
         )
         if order is None:
-            return
+            return False
         reason = f"unresolved live order {order.broker_order_id} requires manual confirmation"
         logger.warning(reason)
         self.risk.pause(reason)
+        try:
+            market = getattr(self.engine.params, "market", "")
+            record_trade_event(
+                db,
+                event_type="RISK_PAUSED",
+                status="PAUSED",
+                message=reason,
+                payload={
+                    "reason": "unresolved_live_order",
+                    "live_order_id": order.broker_order_id,
+                    "trade_day": str(trade_day_for(market, datetime.now(timezone.utc))),
+                },
+            )
+            db.commit()
+        except Exception as exc:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            logger.warning("risk_paused_event_record_failed", extra={"err": str(exc)})
+        return True
+
+    def _register_broker_disconnect_hook(self) -> None:
+        register = getattr(self.broker, "register_disconnect_hook", None)
+        if not callable(register):
+            return
+        register(self._on_disconnect)
+
+    def _record_broker_retry_exhausted(self, reason: str) -> None:
+        try:
+            self._audit.record(
+                "BROKER_RETRY_EXHAUSTED",
+                severity="CRITICAL",
+                request_summary={
+                    "reason": reason,
+                    "disconnect_retry_count": self._disconnect_retry_count,
+                },
+            )
+        except Exception as exc:
+            logger.warning("audit_record_failed: %s", exc)
+
+    def _on_disconnect(self, reason: str) -> None:
+        """Handle broker SDK disconnect events without auto-pausing trading."""
+        reason_text = str(reason)
+        logger.warning("broker_disconnect", extra={"reason": reason_text})
+        try:
+            self._audit.record(
+                "BROKER_DISCONNECT",
+                severity="WARNING",
+                request_summary={"reason": reason_text},
+            )
+        except Exception as exc:
+            logger.warning("audit_record_failed: %s", exc)
+        with self._state_lock:
+            self._quotes_subscribed = False
+            self._disconnect_retry_count += 1
+            retry_count = self._disconnect_retry_count
+        if retry_count >= DISCONNECT_RETRY_EXHAUSTED_THRESHOLD:
+            self._record_broker_retry_exhausted(reason_text)
+
+    def _on_resubscribe_if_needed(self) -> None:
+        """Resubscribe quotes after an SDK disconnect marks the stream unsubscribed."""
+        with self._state_lock:
+            if self._quotes_subscribed or self._trigger_in_flight:
+                return
+            symbol = self.engine.params.symbol
+            if not symbol:
+                return
+
+        try:
+            self.broker.unsubscribe_quotes()
+        except Exception:
+            logger.warning("failed to unsubscribe before disconnect resubscribe for %s", symbol)
+        try:
+            self.broker.subscribe_quotes(symbol, self._on_quote)
+        except Exception as exc:
+            logger.error("quote resubscribe after disconnect failed for %s: %s", symbol, exc)
+            with self._state_lock:
+                self._disconnect_retry_count += 1
+                retry_count = self._disconnect_retry_count
+            if retry_count >= DISCONNECT_RETRY_EXHAUSTED_THRESHOLD:
+                self._record_broker_retry_exhausted(str(exc))
+            raise
+        with self._state_lock:
+            self._quotes_subscribed = True
+            self._disconnect_retry_count = 0
+            self._last_push_quote_at = time.monotonic()
 
     def start(self, *, loop: asyncio.AbstractEventLoop | None = None) -> bool:
         with self._start_lock:
@@ -932,6 +1022,10 @@ class AppRunner:
     def _run_loop(self) -> None:
         while self._running:
             try:
+                self._on_resubscribe_if_needed()
+            except Exception:
+                logger.exception("error resubscribing after broker disconnect")
+            try:
                 if self._trade_svc.has_pending_order:
                     self._trade_svc.reconcile(
                         self.risk,
@@ -1104,6 +1198,9 @@ class AppRunner:
             )
 
             new_broker = self._build_broker(self._audit)
+            register = getattr(new_broker, "register_disconnect_hook", None)
+            if callable(register):
+                register(self._on_disconnect)
 
             if should_resubscribe:
                 try:
