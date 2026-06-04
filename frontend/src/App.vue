@@ -15,7 +15,13 @@
         <el-menu-item index="/events">决策时间线</el-menu-item>
         <el-menu-item index="/lab">优化工作台</el-menu-item>
       </el-menu>
+      <el-button size="small" text @click="dialogVisible = true" data-testid="nav-notification-settings"
+        >通知偏好</el-button
+      >
     </el-header>
+    <el-dialog v-model="dialogVisible" title="通知偏好" width="400px">
+      <NotificationSettings />
+    </el-dialog>
 
     <!-- 主内容区 -->
     <el-main :class="{ 'mobile-main': isMobile }">
@@ -56,8 +62,10 @@
 import { ref, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { Odometer, Setting, List, Clock, Key, TrendCharts } from '@element-plus/icons-vue'
+import NotificationSettings from './components/NotificationSettings.vue'
 
 const route = useRoute()
+const dialogVisible = ref(false)
 const MOBILE_BREAKPOINT = 768
 const isMobile = ref(window.innerWidth <= MOBILE_BREAKPOINT)
 

@@ -272,12 +272,14 @@ import { startTrading, stopTrading, pauseTrading, resumeTrading, activateKillSwi
 import type { LLMIntervalStatus, OrderRecord, Position, StatusHistoryPoint, TradeEventRecord, TradeSignalMarker } from '../types'
 import { engineStateLabel, auditActionLabel, marketLabel, positionSideLabel, skipCategoryLabel, tradeEventTypeLabel } from '../utils/labels'
 import { EVENT_TYPE } from '../utils/constants'
+import { useNotificationStream } from '../composables/useNotificationStream'
 
 type CypressWindow = Window & { Cypress?: unknown }
 const accountRefreshIntervalMs = (window as CypressWindow).Cypress ? 500 : 10000
 const { strategy, status, strategyLoading, statusLoading, loadError, load, refreshStatus } = useDashboardData()
 const { realtimeStatus } = useStatusStream(status)
 const { account, accountError, accountLoading, accountRefreshing, refresh: refreshAccount } = useAccountRefresh(accountRefreshIntervalMs)
+const notifications = useNotificationStream()
 
 const llmStatus = ref<LLMIntervalStatus | null>(null)
 const recentOrders = ref<OrderRecord[]>([])
@@ -468,6 +470,7 @@ onMounted(() => {
   }, 3000)
   load().catch(() => void 0)
   window.addEventListener('resize', handleResize)
+  notifications.enable()
 })
 
 watch(
@@ -487,6 +490,7 @@ onUnmounted(() => {
     llmStatusTimer = null
   }
   window.removeEventListener('resize', handleResize)
+  notifications.disable()
 })
 
 async function handleStart() {
