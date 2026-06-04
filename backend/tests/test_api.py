@@ -169,6 +169,24 @@ class TestAPI:
         assert resp.status_code == 200
         assert elapsed < 0.15
 
+    def test_update_strategy_persists_margin_safety_factor(self) -> None:
+        _clean_strategy()
+        resp = client.put("/api/strategy", json={
+            "symbol": "AAPL.US",
+            "market": "US",
+            "buy_low": 100.0,
+            "sell_high": 200.0,
+            "margin_safety_factor": 0.75,
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["margin_safety_factor"] == 0.75
+
+        # verify read-back
+        resp2 = client.get("/api/strategy")
+        assert resp2.status_code == 200
+        assert resp2.json()["margin_safety_factor"] == 0.75
+
     def test_update_strategy_rejects_invalid_llm_interval_minutes(self) -> None:
         _clean_strategy()
         resp = client.put("/api/strategy", json={

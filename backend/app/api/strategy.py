@@ -77,6 +77,7 @@ def put_strategy(
             "min_repricing_pct": data["min_repricing_pct"] if "min_repricing_pct" in data and data["min_repricing_pct"] is not None else current.min_repricing_pct,
             "llm_action_cooldown_seconds": data["llm_action_cooldown_seconds"] if "llm_action_cooldown_seconds" in data and data["llm_action_cooldown_seconds"] is not None else current.llm_action_cooldown_seconds,
             "trading_session_mode": data["trading_session_mode"] if "trading_session_mode" in data and data["trading_session_mode"] is not None else getattr(current, "trading_session_mode", "ANY"),
+            "margin_safety_factor": data["margin_safety_factor"] if "margin_safety_factor" in data and data["margin_safety_factor"] is not None else getattr(current, "margin_safety_factor", None),
         }
         try:
             StrategyMergedSchema.model_validate(merged)

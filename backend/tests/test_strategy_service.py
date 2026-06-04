@@ -65,6 +65,24 @@ class TestStrategyService:
         assert config.auto_resume_minutes == 4
         db.close()
 
+    def test_update_config_persists_margin_safety_factor(self) -> None:
+        self._cleanup()
+        db = self._get_db()
+        svc = StrategyService(db)
+        updated, diff = svc.update_config({
+            "symbol": "AAPL.US",
+            "buy_low": 100.0,
+            "sell_high": 200.0,
+            "margin_safety_factor": 0.75,
+        })
+        assert updated.margin_safety_factor == 0.75
+        assert "margin_safety_factor" in diff
+        assert diff["margin_safety_factor"]["new"] == 0.75
+
+        config = svc.get_config()
+        assert config.margin_safety_factor == 0.75
+        db.close()
+
     def test_get_runtime_state_defaults(self) -> None:
         self._cleanup()
         db = self._get_db()
