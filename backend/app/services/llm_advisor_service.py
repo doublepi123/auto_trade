@@ -213,6 +213,7 @@ class LLMAdvisorService:
         recent_analysis: dict[str, Any] | None = None,
         account_context: dict[str, Any] | None = None,
         force: bool = False,
+        persist: bool = True,
     ) -> dict[str, Any]:
         """Run LLM analysis and return recommendation."""
         global _LAST_ANALYSIS_TIMESTAMP
@@ -309,14 +310,15 @@ class LLMAdvisorService:
 
         _LAST_ANALYSIS_TIMESTAMP = time.monotonic()  # pyright: ignore[reportConstantRedefinition]
 
-        db = SessionLocal()
-        try:
-            next_analysis_at = self._record_analysis(db, result, interval_minutes)
-        except Exception:
-            logger.exception("failed to record LLM analysis")
-            next_analysis_at = datetime.now(timezone.utc) + timedelta(minutes=interval_minutes)
-        finally:
-            db.close()
+        next_analysis_at = datetime.now(timezone.utc) + timedelta(minutes=interval_minutes)
+        if persist:
+            db = SessionLocal()
+            try:
+                next_analysis_at = self._record_analysis(db, result, interval_minutes)
+            except Exception:
+                logger.exception("failed to record LLM analysis")
+            finally:
+                db.close()
 
         interaction_id = self._record_interaction(
             interaction_type="analyze",

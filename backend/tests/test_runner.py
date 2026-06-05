@@ -41,6 +41,192 @@ class TestAppRunner:
             runner._cash_currency(),
         )
 
+    def test_sync_symbol_runtimes_loads_watchlist_without_replacing_primary_engine(self, monkeypatch) -> None:
+        runner = AppRunner()
+        runner.engine.params = StrategyParams(symbol="NVDA.US", market="US", buy_low=100.0, sell_high=200.0)
+
+        class FakeWatchlistService:
+            def __init__(self, db) -> None:
+                pass
+
+            def list_items(self):
+                return [
+                    SimpleNamespace(symbol="AAPL.US", market="US"),
+                    SimpleNamespace(symbol="NVDA.US", market="US"),
+                ]
+
+        monkeypatch.setattr("app.runner.WatchlistService", FakeWatchlistService)
+
+        runner._sync_symbol_runtimes(object())
+
+        assert set(runner._symbol_runtimes) == {"NVDA.US", "AAPL.US"}
+        assert runner._symbol_runtimes["NVDA.US"].engine is runner.engine
+        assert runner._symbol_runtimes["AAPL.US"].engine is not runner.engine
+        assert runner._symbol_runtimes["AAPL.US"].engine.params.symbol == "AAPL.US"
+        assert runner.engine.params.symbol == "NVDA.US"
+
+    def test_secondary_quote_triggers_order_without_mutating_primary_engine(self, monkeypatch) -> None:
+        class Broker:
+            def __init__(self) -> None:
+                self.submissions: list[tuple[str, str, Decimal]] = []
+
+            def estimate_margin_max_quantity(self, _symbol, _side, _price, _currency=None) -> Decimal:
+                return Decimal("10")
+
+            def submit_limit_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal) -> OrderResult:
+                self.submissions.append((symbol, side, quantity))
+                return OrderResult(f"order-{len(self.submissions)}", symbol, side, quantity, price, "FILLED")
+
+        runner = AppRunner()
+        broker = Broker()
+        runner.broker = broker
+        runner._running = True
+        runner.engine.params = StrategyParams(symbol="NVDA.US", market="US", buy_low=100.0, sell_high=200.0)
+        runner.notifier = _NoopNotifier()
+        self._stub_trade_callbacks(runner)
+
+        class FakeWatchlistService:
+            def __init__(self, db) -> None:
+                pass
+
+            def list_items(self):
+                return [SimpleNamespace(symbol="AAPL.US", market="US")]
+
+        monkeypatch.setattr("app.runner.WatchlistService", FakeWatchlistService)
+        runner._sync_symbol_runtimes(object())
+        secondary = runner._symbol_runtimes["AAPL.US"]
+        secondary.engine.params.buy_low = 100.0
+        secondary.engine.params.sell_high = 200.0
+
+        runner._on_quote(Quote("AAPL.US", 99.0, 98.9, 99.1, ""))
+
+        assert broker.submissions == [("AAPL.US", "BUY", Decimal("9"))]
+        assert runner.engine.state == EngineState.FLAT
+        assert runner.engine.last_price == 0.0
+        assert secondary.engine.state == EngineState.LONG
+        assert secondary.engine.last_price == 99.0
+        assert len(secondary.recent_quotes) == 1
+        assert secondary.recent_quotes[0]["symbol"] == "AAPL.US"
+
+    def test_secondary_pending_order_blocks_only_same_symbol_duplicate(self, monkeypatch) -> None:
+        from app.core.broker import OrderStatusResult
+
+        class Broker:
+            def __init__(self) -> None:
+                self.submissions = 0
+                self.status_checks = 0
+
+            def estimate_margin_max_quantity(self, _symbol, _side, _price, _currency=None) -> Decimal:
+                return Decimal("10")
+
+            def submit_limit_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal) -> OrderResult:
+                self.submissions += 1
+                return OrderResult(f"order-{self.submissions}", symbol, side, quantity, price, "SUBMITTED")
+
+            def get_order_status(self, order_id: str) -> OrderStatusResult:
+                self.status_checks += 1
+                return OrderStatusResult(order_id, "SUBMITTED")
+
+        runner = AppRunner()
+        broker = Broker()
+        runner.broker = broker
+        runner._running = True
+        runner.engine.params = StrategyParams(symbol="NVDA.US", market="US", buy_low=100.0, sell_high=200.0)
+        runner.notifier = _NoopNotifier()
+        self._stub_trade_callbacks(runner)
+
+        class FakeWatchlistService:
+            def __init__(self, db) -> None:
+                pass
+
+            def list_items(self):
+                return [SimpleNamespace(symbol="AAPL.US", market="US")]
+
+        monkeypatch.setattr("app.runner.WatchlistService", FakeWatchlistService)
+        runner._sync_symbol_runtimes(object())
+        secondary = runner._symbol_runtimes["AAPL.US"]
+        secondary.engine.params.buy_low = 100.0
+        secondary.engine.params.sell_high = 200.0
+        quote = Quote("AAPL.US", 99.0, 98.9, 99.1, "")
+
+        runner._on_quote(quote)
+        runner._on_quote(quote)
+
+        assert broker.submissions == 1
+        assert runner._trade_svc.pending_order_for("AAPL.US") is not None
+
+
+    def test_diagnostics_reports_runner_symbol_and_pending_health(self) -> None:
+        runner = AppRunner()
+        runner._running = True
+        runner._quotes_subscribed = True
+        runner._trigger_in_flight = True
+        runner._last_push_quote_at = time.monotonic() - 12.0
+        runner._last_quote_at = time.monotonic() - 5.0
+        runner.engine.params = StrategyParams(symbol="NVDA.US", market="US", buy_low=100.0, sell_high=200.0)
+        runner.engine.last_price = 220.5
+        secondary = runner._build_symbol_runtime("AAPL.US", "US")
+        secondary.engine.last_price = 199.5
+        secondary.recent_quotes.append({"symbol": "AAPL.US"})
+        runner._symbol_runtimes = {
+            "NVDA.US": runner._build_symbol_runtime("NVDA.US", "US", primary=True),
+            "AAPL.US": secondary,
+        }
+        runner._trade_svc._track_pending_order(
+            "BUY",
+            OrderResult("order-aapl", "AAPL.US", "BUY", Decimal("9"), Decimal("99"), "SUBMITTED"),
+            runner.broker,
+            None,
+        )
+        runner.risk.pause("manual")
+
+        diagnostics = runner.diagnostics()
+
+        assert diagnostics["runner_running"] is False
+        assert diagnostics["thread_alive"] is False
+        assert diagnostics["quotes_subscribed"] is True
+        assert diagnostics["trigger_in_flight"] is True
+        assert diagnostics["pending_order_symbols"] == ["AAPL.US"]
+        assert diagnostics["quote_stream"]["last_push_age_seconds"] >= 12.0
+        assert diagnostics["quote_stream"]["last_quote_age_seconds"] >= 5.0
+        assert diagnostics["risk"]["paused"] is True
+        assert diagnostics["risk"]["pause_reason"] == "manual"
+        by_symbol = {item["symbol"]: item for item in diagnostics["symbol_runtimes"]}
+        assert by_symbol["NVDA.US"]["is_primary"] is True
+        assert by_symbol["NVDA.US"]["last_price"] == 220.5
+        assert by_symbol["AAPL.US"]["is_primary"] is False
+        assert by_symbol["AAPL.US"]["last_price"] == 199.5
+        assert by_symbol["AAPL.US"]["recent_quote_count"] == 1
+        assert by_symbol["AAPL.US"]["has_pending_order"] is True
+    def test_sync_symbol_runtimes_loads_persisted_secondary_engine_state(self, monkeypatch) -> None:
+        runner = AppRunner()
+        runner.engine.params = StrategyParams(symbol="NVDA.US", market="US", buy_low=100.0, sell_high=200.0)
+
+        class FakeWatchlistService:
+            def __init__(self, db) -> None:
+                pass
+
+            def list_items(self):
+                return [SimpleNamespace(symbol="AAPL.US", market="US")]
+
+        loaded: list[tuple[str, str]] = []
+
+        def fake_load_symbol_runtime(db, engine, symbol: str) -> None:
+            loaded.append((engine.params.symbol, symbol))
+            if symbol == "AAPL.US":
+                engine.state = EngineState.SHORT
+                engine.last_price = 199.5
+
+        monkeypatch.setattr("app.runner.WatchlistService", FakeWatchlistService)
+        monkeypatch.setattr(runner._state_svc, "load_symbol_runtime", fake_load_symbol_runtime)
+
+        runner._sync_symbol_runtimes(object())
+
+        secondary = runner._symbol_runtimes["AAPL.US"]
+        assert secondary.engine.state == EngineState.SHORT
+        assert secondary.engine.last_price == 199.5
+        assert loaded == [("AAPL.US", "AAPL.US")]
+
     def _execute_sell(self, runner: AppRunner, symbol: str, quote: Quote):
         return runner._trade_svc._execute_sell(
             symbol,
@@ -96,6 +282,36 @@ class TestAppRunner:
 
         runner.reload_strategy()
         assert runner._trade_svc.margin_safety_factor == 0.75
+
+    def test_initialize_runner_loads_margin_safety_factor(self, monkeypatch) -> None:
+        from contextlib import contextmanager
+
+        runner = AppRunner()
+        runner._trade_svc.margin_safety_factor = None
+
+        class FakeConfig:
+            margin_safety_factor = 0.65
+
+        @contextmanager
+        def fake_db_session():
+            yield object()
+
+        monkeypatch.setattr(runner, "_db_session", fake_db_session)
+        monkeypatch.setattr(runner._state_svc, "load", lambda db, engine, risk: FakeConfig())
+        monkeypatch.setattr(runner, "_load_tracked_entries", lambda db: None)
+        monkeypatch.setattr(runner, "_load_credentials", lambda: None)
+        monkeypatch.setattr(runner, "_apply_credentials", lambda credentials, *, resubscribe: None)
+        monkeypatch.setattr(runner, "_register_broker_disconnect_hook", lambda: None)
+        monkeypatch.setattr(runner, "_refresh_trading_session_mode", lambda: None)
+        monkeypatch.setattr(runner, "sync_today_orders_from_broker", lambda *, force: None)
+        monkeypatch.setattr(runner, "_sync_risk_from_order_ledger", lambda: None)
+        monkeypatch.setattr(runner, "_pause_if_unresolved_live_order_exists", lambda db: None)
+        monkeypatch.setattr(runner, "_reconcile_tracked_entries_with_broker", lambda db: None)
+        monkeypatch.setattr(runner.broker, "subscribe_quotes", lambda symbol, callback: None)
+
+        runner._initialize_runner()
+
+        assert runner._trade_svc.margin_safety_factor == 0.65
 
     def test_sync_engine_state_with_no_positions_sets_flat(self) -> None:
         class Broker:
@@ -384,6 +600,120 @@ class TestAppRunner:
         result = runner.execute_llm_order_decision({"order_action": "BUY_NOW", "order_price": 221.75})
         assert result["executed"] is True
         assert runner._last_llm_action_at[("NVDA.US", "BUY")] == 100.0
+
+    def test_llm_order_decision_targets_secondary_symbol_runtime(self, monkeypatch) -> None:
+        class Broker:
+            def __init__(self) -> None:
+                self.submitted = []
+
+            def get_quote(self, symbol: str) -> Quote:
+                return Quote(symbol, 199.0, 198.9, 199.1, "")
+
+            def estimate_margin_max_quantity(self, symbol: str, side: str, price: Decimal, currency=None) -> Decimal:
+                return Decimal("10")
+
+            def submit_limit_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal) -> OrderResult:
+                self.submitted.append((symbol, side, quantity, price))
+                return OrderResult("order-aapl-llm-buy", symbol, side, quantity, price, "FILLED")
+
+        runner = AppRunner()
+        runner._running = True
+        runner.engine.params = StrategyParams(symbol="NVDA.US", market="US", buy_low=218, sell_high=225)
+        runner.broker = Broker()
+        runner.notifier = _NoopNotifier()
+        self._stub_trade_callbacks(runner)
+        secondary = runner._build_symbol_runtime("AAPL.US", "US")
+        secondary.engine.params.buy_low = 190
+        secondary.engine.params.sell_high = 210
+        runner._symbol_runtimes = {"AAPL.US": secondary}
+        monkeypatch.setattr(runner_module.time, "monotonic", lambda: 100.0)
+
+        result = runner.execute_llm_order_decision({
+            "symbol": "AAPL.US",
+            "order_action": "BUY_NOW",
+            "order_price": 199.0,
+        })
+
+        assert result == {"executed": True, "status": "FILLED", "order_id": "order-aapl-llm-buy", "action": "BUY"}
+        assert runner.broker.submitted == [("AAPL.US", "BUY", Decimal("9"), Decimal("199.0"))]
+        assert runner.engine.state == EngineState.FLAT
+        assert secondary.engine.state == EngineState.LONG
+        assert runner._last_llm_action_at[("AAPL.US", "BUY")] == 100.0
+
+    def test_llm_cooldown_is_scoped_to_decision_symbol(self, monkeypatch) -> None:
+        class Broker:
+            def get_quote(self, symbol: str) -> Quote:
+                return Quote(symbol, 199.0, 198.9, 199.1, "")
+
+            def estimate_margin_max_quantity(self, symbol: str, side: str, price: Decimal, currency=None) -> Decimal:
+                return Decimal("10")
+
+            def submit_limit_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal) -> OrderResult:
+                return OrderResult("order-aapl-llm-buy", symbol, side, quantity, price, "FILLED")
+
+        runner = AppRunner()
+        runner._running = True
+        runner.engine.params = StrategyParams(
+            symbol="NVDA.US",
+            market="US",
+            buy_low=218,
+            sell_high=225,
+            llm_action_cooldown_seconds=60,
+        )
+        runner._last_llm_action_at[("NVDA.US", "BUY")] = 100.0
+        runner.broker = Broker()
+        runner.notifier = _NoopNotifier()
+        self._stub_trade_callbacks(runner)
+        secondary = runner._build_symbol_runtime("AAPL.US", "US")
+        secondary.engine.params.llm_action_cooldown_seconds = 60
+        runner._symbol_runtimes = {"AAPL.US": secondary}
+        monkeypatch.setattr(runner_module.time, "monotonic", lambda: 120.0)
+
+        result = runner.execute_llm_order_decision({
+            "symbol": "AAPL.US",
+            "order_action": "BUY_NOW",
+            "order_price": 199.0,
+        })
+
+        assert result["executed"] is True
+        assert runner._last_llm_action_at[("AAPL.US", "BUY")] == 120.0
+
+    def test_llm_symbol_statuses_report_pending_and_cooldowns(self, monkeypatch) -> None:
+        runner = AppRunner()
+        runner.engine.params = StrategyParams(
+            symbol="NVDA.US",
+            market="US",
+            buy_low=218,
+            sell_high=225,
+            llm_action_cooldown_seconds=60,
+        )
+        primary = runner._build_symbol_runtime("NVDA.US", "US", primary=True)
+        secondary = runner._build_symbol_runtime("AAPL.US", "US")
+        secondary.engine.params.llm_action_cooldown_seconds = 120
+        runner._symbol_runtimes = {
+            "NVDA.US": primary,
+            "AAPL.US": secondary,
+        }
+        runner._trade_svc._track_pending_order(
+            "BUY",
+            OrderResult("order-aapl", "AAPL.US", "BUY", Decimal("3"), Decimal("199"), "SUBMITTED"),
+            runner.broker,
+            None,
+        )
+        runner._last_llm_action_at[("NVDA.US", "BUY")] = 100.0
+        runner._last_llm_action_at[("AAPL.US", "SELL")] = 90.0
+        monkeypatch.setattr(runner_module.time, "monotonic", lambda: 130.0)
+
+        statuses = runner.llm_symbol_statuses()
+
+        by_symbol = {item["symbol"]: item for item in statuses}
+        assert by_symbol["NVDA.US"]["is_primary"] is True
+        assert by_symbol["NVDA.US"]["buy_cooldown_remaining_seconds"] == 30.0
+        assert by_symbol["NVDA.US"]["sell_cooldown_remaining_seconds"] is None
+        assert by_symbol["AAPL.US"]["is_primary"] is False
+        assert by_symbol["AAPL.US"]["has_pending_order"] is True
+        assert by_symbol["AAPL.US"]["buy_cooldown_remaining_seconds"] is None
+        assert by_symbol["AAPL.US"]["sell_cooldown_remaining_seconds"] == 80.0
 
     def test_llm_cancel_replace_without_valid_price_preserves_pending(self) -> None:
         runner = self._runner_with_pending_buy(price=Decimal("221.00"))

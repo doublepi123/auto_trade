@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, cast
 
@@ -12,10 +12,12 @@ from app.api.auth import require_api_key
 from app.database import get_db
 from app.runner import get_runner
 from app.schemas import LLMAnalyzeRequest, LLMAnalyzeResponse, LLMInteractionResponse, LLMIntervalStatus, LLMPreviewAnalyzeRequest, LLMSuggestion, MessageResponse
+from app.config import settings
 from app.services.llm_advisor_service import LLMAdvisorService, build_recent_analysis_context
 from app.services.llm_interaction_service import LLMInteractionService
 from app.services.interval_application_service import IntervalApplicationService
 from app.services.strategy_service import StrategyService
+from app.services.llm_symbol_state_service import LLMSymbolStateService
 from app.services.trade_event_service import record_trade_event
 
 logger = logging.getLogger("auto_trade.llm_api")
@@ -112,7 +114,12 @@ def _account_context(symbol: str, market: str, current_price: float, short_selli
                 logger.warning("failed to estimate short quantity for LLM analysis: %s", exc)
                 context["errors"].append(f"short quantity unavailable: {exc}")
 
-    pending = getattr(getattr(runner, "_trade_svc", None), "_pending_order", None)
+    trade_svc = getattr(runner, "_trade_svc", None)
+    pending_for_symbol = getattr(trade_svc, "pending_order_for", None)
+    if callable(pending_for_symbol):
+        pending = pending_for_symbol(symbol)
+    else:
+        pending = getattr(trade_svc, "pending_order", None)
     if pending is not None:
         context["pending_order"] = {
             "broker_order_id": pending.broker_order_id,
@@ -331,6 +338,25 @@ def get_llm_interval_status(db: Session = Depends(get_db)) -> LLMIntervalStatus:
             last_analysis_at = last_analysis_at.replace(tzinfo=timezone.utc)
         next_analysis_at = last_analysis_at + timedelta(minutes=config.llm_interval_minutes)
 
+    state_svc = LLMSymbolStateService(db)
+    persisted_states = state_svc.states_by_symbol()
+    raw_symbol_statuses = get_runner().llm_symbol_statuses()
+    symbol_statuses = []
+    for item in raw_symbol_statuses:
+        state = persisted_states.get(item["symbol"])
+        symbol_statuses.append(
+            {
+                **item,
+                "last_analysis_at": state.last_analysis_at.isoformat() if state and state.last_analysis_at else None,
+                "next_analysis_at": state.next_analysis_at.isoformat() if state and state.next_analysis_at else None,
+                "last_status": state.last_status if state and state.last_status else None,
+                "last_skip_reason": state.last_skip_reason if state and state.last_skip_reason else None,
+            }
+        )
+    tracked_symbol_count = len(symbol_statuses)
+    used_analyses_last_hour = state_svc.count_analyses_last_hour(datetime.now(timezone.utc))
+    remaining_analyses_this_hour = max(0, settings.llm_max_analyses_per_hour - used_analyses_last_hour)
+
     return LLMIntervalStatus(
         enabled=config.auto_interval_enabled,
         interval_minutes=config.llm_interval_minutes,
@@ -339,6 +365,19 @@ def get_llm_interval_status(db: Session = Depends(get_db)) -> LLMIntervalStatus:
         current_suggestion=current_suggestion,
         applied_values=applied_values,
         reject_reason=config.llm_reject_reason,
+        budget={
+            "max_symbols_per_cycle": settings.llm_max_symbols_per_cycle,
+            "max_analyses_per_hour": settings.llm_max_analyses_per_hour,
+            "tracked_symbol_count": tracked_symbol_count,
+            "effective_symbol_budget": min(
+                settings.llm_max_symbols_per_cycle,
+                tracked_symbol_count,
+                remaining_analyses_this_hour,
+            ),
+            "used_analyses_last_hour": used_analyses_last_hour,
+            "remaining_analyses_this_hour": remaining_analyses_this_hour,
+        },
+        symbol_statuses=symbol_statuses,
     )
 
 

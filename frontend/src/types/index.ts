@@ -56,6 +56,7 @@ export interface StatusData {
 }
 
 export interface StatusHistoryPoint {
+  symbol: string
   timestamp: string
   engine_state: string
   paused: boolean
@@ -79,6 +80,42 @@ export interface TradeSignalMarker {
 export interface StatusHistory {
   points: StatusHistoryPoint[]
   markers: TradeSignalMarker[]
+}
+
+export interface DiagnosticQuoteStream {
+  last_push_age_seconds: number | null
+  last_quote_age_seconds: number | null
+  recent_quote_count: number
+}
+
+export interface DiagnosticRiskState {
+  paused: boolean
+  kill_switch: boolean
+  pause_reason: string
+  daily_pnl: number
+  consecutive_losses: number
+}
+
+export interface DiagnosticSymbolRuntime {
+  symbol: string
+  market: string
+  is_primary: boolean
+  engine_state: string
+  last_price: number
+  last_trigger_price: number
+  recent_quote_count: number
+  has_pending_order: boolean
+}
+
+export interface DiagnosticsResponse {
+  runner_running: boolean
+  thread_alive: boolean
+  quotes_subscribed: boolean
+  trigger_in_flight: boolean
+  pending_order_symbols: string[]
+  quote_stream: DiagnosticQuoteStream
+  risk: DiagnosticRiskState
+  symbol_runtimes: DiagnosticSymbolRuntime[]
 }
 
 export interface OrderRecord {
@@ -390,6 +427,17 @@ export interface WatchlistItem {
 
 export interface WatchlistQuote {
   symbol: string
+  last_price: number
+  bid: number
+  ask: number
+  timestamp: string
+}
+
+export interface WatchlistSnapshot {
+  symbol: string
+  market: 'US' | 'HK'
+  alias: string
+  is_trading_target: boolean
   last_price: number
   bid: number
   ask: number

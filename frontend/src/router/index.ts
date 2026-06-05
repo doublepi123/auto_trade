@@ -1,26 +1,17 @@
-import { createRouter, createWebHashHistory } from 'vue-router'
+import { createRouter, createWebHashHistory, type RouteRecordRaw } from 'vue-router'
 import Dashboard from '../views/Dashboard.vue'
-import Backtest from '../views/Backtest.vue'
-import Credentials from '../views/Credentials.vue'
-import DecisionTimeline from '../views/DecisionTimeline.vue'
-import Review from '../views/Review.vue'
-import Strategy from '../views/Strategy.vue'
-import TradeHistory from '../views/TradeHistory.vue'
-import Watchlist from '../views/Watchlist.vue'
-import Lab from '../views/Lab.vue'
-import Experiments from '../views/Experiments.vue'
 
-const routes = [
+const routes: RouteRecordRaw[] = [
   { path: '/', component: Dashboard },
-  { path: '/backtest', component: Backtest },
-  { path: '/experiments', component: Experiments },
-  { path: '/strategy', component: Strategy },
-  { path: '/credentials', component: Credentials },
-  { path: '/history', component: TradeHistory },
-  { path: '/events', component: DecisionTimeline },
-  { path: '/review', component: Review },
-  { path: '/watchlist', component: Watchlist },
-  { path: '/lab', component: Lab },
+  { path: '/backtest', component: () => import('../views/Backtest.vue') },
+  { path: '/experiments', component: () => import('../views/Experiments.vue') },
+  { path: '/strategy', component: () => import('../views/Strategy.vue') },
+  { path: '/credentials', component: () => import('../views/Credentials.vue') },
+  { path: '/history', component: () => import('../views/TradeHistory.vue') },
+  { path: '/events', component: () => import('../views/DecisionTimeline.vue') },
+  { path: '/review', component: () => import('../views/Review.vue') },
+  { path: '/watchlist', component: () => import('../views/Watchlist.vue') },
+  { path: '/lab', component: () => import('../views/Lab.vue') },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ]
 

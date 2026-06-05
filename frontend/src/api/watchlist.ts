@@ -1,5 +1,5 @@
 import { api } from './client'
-import type { WatchlistItem, WatchlistQuote } from '../types'
+import type { WatchlistItem, WatchlistQuote, WatchlistSnapshot } from '../types'
 
 export async function getWatchlist(): Promise<WatchlistItem[]> {
   const resp = await api.get('/api/watchlist')
@@ -23,5 +23,10 @@ export async function activateWatchlistItem(itemId: number): Promise<WatchlistIt
 
 export async function getWatchlistQuotes(): Promise<WatchlistQuote[]> {
   const resp = await api.get('/api/watchlist/quotes')
+  return resp.data
+}
+
+export async function getWatchlistSnapshots(): Promise<WatchlistSnapshot[]> {
+  const resp = await api.get('/api/watchlist/snapshots')
   return resp.data
 }

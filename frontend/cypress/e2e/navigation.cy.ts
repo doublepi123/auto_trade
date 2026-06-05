@@ -23,6 +23,22 @@ describe('Navigation', () => {
     cy.url().should('include', '/events')
     cy.contains('决策时间线').should('be.visible')
 
+    cy.get('.app-menu').contains('观察列表').click()
+    cy.url().should('include', '/watchlist')
+    cy.contains('观察列表').should('be.visible')
+
+    cy.get('.app-menu').contains('复盘').click()
+    cy.url().should('include', '/review')
+    cy.contains('复盘工作台').should('be.visible')
+
+    cy.get('.app-menu').contains('策略实验').click()
+    cy.url().should('include', '/experiments')
+    cy.contains('策略实验').should('be.visible')
+
+    cy.get('.app-menu').contains('优化工作台').click()
+    cy.url().should('include', '/lab')
+    cy.contains('LLM 优化工作台').should('be.visible')
+
     cy.get('.app-menu').contains('仪表盘').click()
     cy.url().should('include', '/')
     cy.contains('仪表盘').should('be.visible')

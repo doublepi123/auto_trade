@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from freezegun import freeze_time
 
 from app.api import llm_advisor as llm_api
+from app.api import review as review_api
 from app.api import strategy as strategy_api
 from app.api import trade as trade_api
 from app import database
@@ -26,6 +27,7 @@ database._ensure_strategy_config_session_columns(db_engine)
 database._ensure_strategy_config_margin_safety_factor(db_engine)
 database._ensure_llm_interaction_variant_column(db_engine)
 database._ensure_runtime_state_daily_pnl_date_column(db_engine)
+database._ensure_runtime_state_symbol_columns(db_engine)
 database._ensure_audit_log_table(db_engine)
 database._ensure_credential_config_notification_channels_column(db_engine)
 client = TestClient(app)
@@ -52,6 +54,14 @@ def _clean_llm_interactions() -> None:
     db.close()
 
 
+
+def _clean_llm_symbol_schedule_state() -> None:
+    from app.models import LLMSymbolScheduleState
+
+    db = SessionLocal()
+    db.query(LLMSymbolScheduleState).delete()
+    db.commit()
+    db.close()
 def _clean_orders() -> None:
     db = SessionLocal()
     db.query(OrderRecord).delete()
@@ -359,6 +369,65 @@ class TestAPI:
         assert data["markers"][0]["side"] == "BUY"
         assert data["markers"][0]["price"] == 220.6
 
+
+    def test_status_history_filters_points_and_markers_by_symbol(self) -> None:
+        _clean_status_history()
+        db = SessionLocal()
+        db.add(RuntimeStateSnapshot(
+            symbol="NVDA.US",
+            engine_state="flat",
+            last_price=220.1,
+            daily_pnl=0.0,
+            consecutive_losses=0,
+            paused=False,
+            kill_switch=False,
+            created_at=datetime(2026, 5, 22, 10, 0, tzinfo=timezone.utc),
+        ))
+        db.add(RuntimeStateSnapshot(
+            symbol="AAPL.US",
+            engine_state="long",
+            last_price=199.2,
+            daily_pnl=8.5,
+            consecutive_losses=0,
+            paused=False,
+            kill_switch=False,
+            created_at=datetime(2026, 5, 22, 10, 1, tzinfo=timezone.utc),
+        ))
+        db.add(OrderRecord(
+            broker_order_id="filled-aapl",
+            symbol="AAPL.US",
+            side="BUY",
+            quantity=3,
+            price=199.0,
+            executed_quantity=3,
+            executed_price=199.1,
+            status="FILLED",
+            created_at=datetime(2026, 5, 22, 10, 1, tzinfo=timezone.utc),
+            filled_at=datetime(2026, 5, 22, 10, 1, tzinfo=timezone.utc),
+        ))
+        db.add(OrderRecord(
+            broker_order_id="filled-nvda",
+            symbol="NVDA.US",
+            side="BUY",
+            quantity=2,
+            price=220.0,
+            executed_quantity=2,
+            executed_price=220.2,
+            status="FILLED",
+            created_at=datetime(2026, 5, 22, 10, 2, tzinfo=timezone.utc),
+            filled_at=datetime(2026, 5, 22, 10, 2, tzinfo=timezone.utc),
+        ))
+        db.commit()
+        db.close()
+
+        resp = client.get("/api/status/history?symbol=AAPL.US&from=2026-05-22T09:59:00Z&to=2026-05-22T10:03:00Z&limit=20")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert [point["symbol"] for point in data["points"]] == ["AAPL.US"]
+        assert [point["last_price"] for point in data["points"]] == [199.2]
+        assert [marker["symbol"] for marker in data["markers"]] == ["AAPL.US"]
+        assert data["markers"][0]["broker_order_id"] == "filled-aapl"
     def test_pause_trading(self) -> None:
         resp = client.post("/api/control/pause", json={"reason": "testing"})
         assert resp.status_code == 200
@@ -374,7 +443,12 @@ class TestAPI:
         assert resp.status_code == 200
         assert "kill switch activated" in resp.json()["message"]
 
-    def test_start_runner(self) -> None:
+    def test_start_runner(self, monkeypatch) -> None:
+        _clean_credentials()
+        runner = trade_api.get_runner()
+        monkeypatch.setattr(runner.broker, "subscribe_quotes_batch", lambda symbols, callback: None)
+        monkeypatch.setattr(runner.broker, "subscribe_quotes", lambda symbol, callback: None)
+        monkeypatch.setattr(runner.broker, "unsubscribe_quotes", lambda: None)
         client.post("/api/control/stop", json={"reason": "test reset"})
         client.post("/api/control/disable-kill-switch")
         client.post("/api/control/resume")
@@ -475,7 +549,8 @@ class TestAPI:
         db.commit()
         db.close()
 
-        resp = client.get("/api/orders?page=2&page_size=1")
+        with freeze_time("2026-06-04 10:00:00", tz_offset=0):
+            resp = client.get("/api/orders?page=2&page_size=1")
 
         assert resp.status_code == 200
         data = resp.json()
@@ -735,6 +810,310 @@ class TestAPI:
 
         assert resp.status_code == 200
         assert resp.json()["runner_running"] is True
+
+    def test_diagnostics_returns_runner_health_snapshot(self, monkeypatch) -> None:
+        class DiagnosticsRunner:
+            def diagnostics(self):
+                return {
+                    "runner_running": True,
+                    "thread_alive": True,
+                    "quotes_subscribed": True,
+                    "trigger_in_flight": False,
+                    "pending_order_symbols": ["AAPL.US"],
+                    "quote_stream": {
+                        "last_push_age_seconds": 3.0,
+                        "last_quote_age_seconds": 2.0,
+                        "recent_quote_count": 4,
+                    },
+                    "risk": {
+                        "paused": False,
+                        "kill_switch": False,
+                        "pause_reason": "",
+                        "daily_pnl": 12.5,
+                        "consecutive_losses": 1,
+                    },
+                    "symbol_runtimes": [
+                        {
+                            "symbol": "NVDA.US",
+                            "market": "US",
+                            "is_primary": True,
+                            "engine_state": "flat",
+                            "last_price": 220.5,
+                            "last_trigger_price": 0.0,
+                            "recent_quote_count": 0,
+                            "has_pending_order": False,
+                        },
+                        {
+                            "symbol": "AAPL.US",
+                            "market": "US",
+                            "is_primary": False,
+                            "engine_state": "long",
+                            "last_price": 199.5,
+                            "last_trigger_price": 198.0,
+                            "recent_quote_count": 2,
+                            "has_pending_order": True,
+                        },
+                    ],
+                }
+
+        monkeypatch.setattr(strategy_api, "get_runner", lambda: DiagnosticsRunner())
+
+        resp = client.get("/api/diagnostics")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["runner_running"] is True
+        assert data["pending_order_symbols"] == ["AAPL.US"]
+        assert data["quote_stream"]["recent_quote_count"] == 4
+        assert data["risk"]["daily_pnl"] == 12.5
+        assert data["symbol_runtimes"][1]["symbol"] == "AAPL.US"
+        assert data["symbol_runtimes"][1]["has_pending_order"] is True
+
+    def test_llm_account_context_uses_pending_order_for_requested_symbol(self, monkeypatch) -> None:
+        class Broker:
+            def get_cash(self, currency: str):
+                return 10000
+
+            def estimate_margin_max_quantity(self, symbol, side, price, currency=None):
+                return 10
+
+        nvda_pending = SimpleNamespace(
+            broker_order_id="order-nvda",
+            action="BUY",
+            price=220.0,
+            quantity=5,
+        )
+        aapl_pending = SimpleNamespace(
+            broker_order_id="order-aapl",
+            action="SELL",
+            price=199.0,
+            quantity=3,
+        )
+
+        class TradeService:
+            pending_order = nvda_pending
+
+            def pending_order_for(self, symbol: str):
+                return aapl_pending if symbol == "AAPL.US" else None
+
+        runner = SimpleNamespace(broker=Broker(), _trade_svc=TradeService())
+        monkeypatch.setattr(llm_api, "get_runner", lambda: runner)
+
+        context = llm_api._account_context("AAPL.US", "US", 199.0, False)
+
+        assert context["pending_order"] == {
+            "broker_order_id": "order-aapl",
+            "side": "SELL",
+            "price": 199.0,
+            "quantity": 3.0,
+        }
+
+    def test_llm_interval_status_includes_budget_and_symbol_statuses(self, monkeypatch) -> None:
+        _clean_strategy()
+        resp = client.put("/api/strategy", json={
+            "symbol": "NVDA.US",
+            "market": "US",
+            "buy_low": 200.0,
+            "sell_high": 220.0,
+            "llm_interval_minutes": 5,
+        })
+        assert resp.status_code == 200
+
+        class Runner:
+            def llm_symbol_statuses(self):
+                return [
+                    {
+                        "symbol": "NVDA.US",
+                        "market": "US",
+                        "is_primary": True,
+                        "has_pending_order": False,
+                        "buy_cooldown_remaining_seconds": 12.0,
+                        "sell_cooldown_remaining_seconds": None,
+                    },
+                    {
+                        "symbol": "AAPL.US",
+                        "market": "US",
+                        "is_primary": False,
+                        "has_pending_order": True,
+                        "buy_cooldown_remaining_seconds": None,
+                        "sell_cooldown_remaining_seconds": 8.0,
+                    },
+                ]
+
+        monkeypatch.setattr(llm_api, "get_runner", lambda: Runner())
+        monkeypatch.setattr(llm_api.settings, "llm_max_symbols_per_cycle", 2)
+        monkeypatch.setattr(llm_api.settings, "llm_max_analyses_per_hour", 40)
+
+        resp = client.get("/api/strategy/llm-interval/status")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["budget"] == {
+            "max_symbols_per_cycle": 2,
+            "max_analyses_per_hour": 40,
+            "tracked_symbol_count": 2,
+            "effective_symbol_budget": 2,
+            "used_analyses_last_hour": 0,
+            "remaining_analyses_this_hour": 40,
+        }
+        assert data["symbol_statuses"][0]["symbol"] == "NVDA.US"
+        assert data["symbol_statuses"][0]["buy_cooldown_remaining_seconds"] == 12.0
+        assert data["symbol_statuses"][1]["symbol"] == "AAPL.US"
+        assert data["symbol_statuses"][1]["has_pending_order"] is True
+
+    def test_llm_interval_status_includes_persisted_schedule_state_and_usage(self, monkeypatch) -> None:
+        _clean_strategy()
+        _clean_llm_interactions()
+        from app.models import LLMSymbolScheduleState
+
+        resp = client.put("/api/strategy", json={
+            "symbol": "NVDA.US",
+            "market": "US",
+            "buy_low": 200.0,
+            "sell_high": 220.0,
+            "llm_interval_minutes": 5,
+        })
+        assert resp.status_code == 200
+        _clean_llm_interactions()
+        _clean_llm_symbol_schedule_state()
+        from app.models import LLMSymbolScheduleState
+
+        db = SessionLocal()
+        try:
+            db.add(LLMSymbolScheduleState(
+                symbol="NVDA.US",
+                market="US",
+                last_analysis_at=datetime(2026, 6, 4, 10, 0, tzinfo=timezone.utc),
+                next_analysis_at=datetime(2026, 6, 4, 10, 5, tzinfo=timezone.utc),
+                last_status="ANALYZED",
+                last_skip_reason="",
+            ))
+            db.add(LLMSymbolScheduleState(
+                symbol="AAPL.US",
+                market="US",
+                last_analysis_at=datetime(2026, 6, 4, 9, 58, tzinfo=timezone.utc),
+                next_analysis_at=datetime(2026, 6, 4, 10, 3, tzinfo=timezone.utc),
+                last_status="SKIPPED",
+                last_skip_reason="cycle budget exhausted",
+            ))
+            db.add(LLMInteraction(
+                interaction_type="analyze",
+                symbol="NVDA.US",
+                market="US",
+                prompt="p",
+                raw_response="{}",
+                parsed_response="{}",
+                context_snapshot="{}",
+                success=True,
+                created_at=datetime.now(timezone.utc) - timedelta(minutes=10),
+            ))
+            db.add(LLMInteraction(
+                interaction_type="analyze",
+                symbol="AAPL.US",
+                market="US",
+                prompt="p",
+                raw_response="{}",
+                parsed_response="{}",
+                context_snapshot="{}",
+                success=True,
+                created_at=datetime.now(timezone.utc) - timedelta(minutes=5),
+            ))
+            db.commit()
+        finally:
+            db.close()
+
+        class Runner:
+            def llm_symbol_statuses(self):
+                return [
+                    {
+                        "symbol": "NVDA.US",
+                        "market": "US",
+                        "is_primary": True,
+                        "has_pending_order": False,
+                        "buy_cooldown_remaining_seconds": 12.0,
+                        "sell_cooldown_remaining_seconds": None,
+                    },
+                    {
+                        "symbol": "AAPL.US",
+                        "market": "US",
+                        "is_primary": False,
+                        "has_pending_order": True,
+                        "buy_cooldown_remaining_seconds": None,
+                        "sell_cooldown_remaining_seconds": 8.0,
+                    },
+                ]
+
+        monkeypatch.setattr(llm_api, "get_runner", lambda: Runner())
+        monkeypatch.setattr(llm_api.settings, "llm_max_symbols_per_cycle", 2)
+        monkeypatch.setattr(llm_api.settings, "llm_max_analyses_per_hour", 40)
+
+        resp = client.get("/api/strategy/llm-interval/status")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["budget"]["used_analyses_last_hour"] == 2
+        assert data["budget"]["remaining_analyses_this_hour"] == 38
+        assert data["symbol_statuses"][0]["last_status"] == "ANALYZED"
+        assert data["symbol_statuses"][0]["next_analysis_at"].startswith("2026-06-04T10:05:00")
+        assert data["symbol_statuses"][1]["last_status"] == "SKIPPED"
+        assert data["symbol_statuses"][1]["last_skip_reason"] == "cycle budget exhausted"
+
+    def test_review_export_json_includes_filtered_diagnostics(self, monkeypatch) -> None:
+        _clean_status_history()
+        db = SessionLocal()
+        try:
+            db.add(RuntimeStateSnapshot(
+                symbol="AAPL.US",
+                engine_state="long",
+                last_price=199.2,
+                daily_pnl=8.5,
+                consecutive_losses=0,
+                paused=False,
+                kill_switch=False,
+                created_at=datetime(2026, 5, 22, 10, 1, tzinfo=timezone.utc),
+            ))
+            db.commit()
+        finally:
+            db.close()
+
+        class Runner:
+            def diagnostics(self):
+                return {
+                    "runner_running": True,
+                    "thread_alive": True,
+                    "quotes_subscribed": True,
+                    "trigger_in_flight": False,
+                    "pending_order_symbols": ["AAPL.US", "NVDA.US"],
+                    "quote_stream": {
+                        "last_push_age_seconds": 2.0,
+                        "last_quote_age_seconds": 1.0,
+                        "recent_quote_count": 4,
+                    },
+                    "risk": {
+                        "paused": False,
+                        "kill_switch": False,
+                        "pause_reason": "",
+                        "daily_pnl": 0.0,
+                        "consecutive_losses": 0,
+                    },
+                    "symbol_runtimes": [
+                        {"symbol": "AAPL.US", "engine_state": "long"},
+                        {"symbol": "NVDA.US", "engine_state": "flat"},
+                    ],
+                }
+
+        monkeypatch.setattr(review_api, "get_runner", lambda: Runner())
+
+        resp = client.get("/api/review/export?symbol=AAPL.US&from_date=2026-05-22&to_date=2026-05-22&format=json")
+
+        assert resp.status_code == 200
+        import json
+
+        data = json.loads(resp.content.decode("utf-8"))
+        assert data["review"]["symbol"] == "AAPL.US"
+        assert [point["symbol"] for point in data["runtime_history"]["points"]] == ["AAPL.US"]
+        assert data["diagnostics"]["pending_order_symbols"] == ["AAPL.US", "NVDA.US"]
+        assert data["diagnostics"]["symbol_runtimes"] == [{"symbol": "AAPL.US", "engine_state": "long"}]
 
     def test_llm_analyze_returns_structured_failure(self, monkeypatch) -> None:
         _clean_strategy()
@@ -1134,6 +1513,112 @@ def test_start_unexpected_exception_writes_failed_audit(monkeypatch) -> None:
     finally:
         db.close()
 
+
+def test_start_endpoint_writes_global_scope_to_audit_and_event(monkeypatch) -> None:
+    _clean_audit_logs()
+    _clean_trade_events()
+
+    class Risk:
+        kill_switch = False
+
+    runner = SimpleNamespace(
+        risk=Risk(),
+        engine=SimpleNamespace(params=SimpleNamespace(symbol="AAPL.US")),
+        _symbol_runtimes={
+            "AAPL.US": SimpleNamespace(),
+            "NVDA.US": SimpleNamespace(),
+        },
+        start=lambda: True,
+    )
+    monkeypatch.setattr(trade_api, "get_runner", lambda: runner)
+
+    resp = client.post("/api/control/start", headers={"x-api-key": "k1"})
+
+    assert resp.status_code == 200
+    import json
+
+    db = SessionLocal()
+    try:
+        audit_row = db.query(AuditLog).filter_by(action="START").order_by(AuditLog.id.desc()).one()
+        summary = json.loads(audit_row.request_summary)
+        assert summary["global_scope"] is True
+        assert summary["primary_symbol"] == "AAPL.US"
+        assert summary["affected_symbols"] == ["AAPL.US", "NVDA.US"]
+        assert summary["runtime_count"] == 2
+
+        event_row = db.query(TradeEvent).filter_by(event_type="CONTROL_START").order_by(TradeEvent.id.desc()).one()
+        payload = json.loads(event_row.payload_json)
+        assert payload["global_scope"] is True
+        assert payload["affected_symbols"] == ["AAPL.US", "NVDA.US"]
+        assert payload["runtime_count"] == 2
+    finally:
+        db.close()
+
+
+def test_kill_switch_writes_global_scope_to_audit_and_event(monkeypatch) -> None:
+    _clean_audit_logs()
+    _clean_trade_events()
+
+    class Risk:
+        def __init__(self) -> None:
+            self.kill_switch = False
+            self._pause_reason = ""
+            self._paused_at = None
+            self._pause_auto_resumable = False
+
+        def pause(self, reason: str) -> None:
+            self._pause_reason = reason
+            self._paused_at = datetime.now(timezone.utc)
+
+        def enable_kill_switch(self, reason: str) -> None:
+            self.kill_switch = True
+
+        @property
+        def pause_reason(self) -> str:
+            return self._pause_reason
+
+        @property
+        def paused_at(self):
+            return self._paused_at
+
+        @property
+        def pause_auto_resumable(self) -> bool:
+            return self._pause_auto_resumable
+
+    runner = SimpleNamespace(
+        risk=Risk(),
+        notifier=SimpleNamespace(notify_risk_event=lambda *args, **kwargs: None),
+        engine=SimpleNamespace(params=SimpleNamespace(symbol="AAPL.US")),
+        _symbol_runtimes={
+            "AAPL.US": SimpleNamespace(),
+            "NVDA.US": SimpleNamespace(),
+            "MSFT.US": SimpleNamespace(),
+        },
+    )
+    monkeypatch.setattr(trade_api, "get_runner", lambda: runner)
+
+    resp = client.post("/api/control/kill-switch", json={"reason": "panic"})
+
+    assert resp.status_code == 200
+    import json
+
+    db = SessionLocal()
+    try:
+        audit_row = db.query(AuditLog).filter_by(action="KILL_SWITCH").order_by(AuditLog.id.desc()).one()
+        summary = json.loads(audit_row.request_summary)
+        assert summary["reason"] == "panic"
+        assert summary["global_scope"] is True
+        assert summary["affected_symbols"] == ["AAPL.US", "MSFT.US", "NVDA.US"]
+        assert summary["runtime_count"] == 3
+
+        event_row = db.query(TradeEvent).filter_by(event_type="CONTROL_KILL_SWITCH").order_by(TradeEvent.id.desc()).one()
+        payload = json.loads(event_row.payload_json)
+        assert payload["reason"] == "panic"
+        assert payload["primary_symbol"] == "AAPL.US"
+        assert payload["affected_symbols"] == ["AAPL.US", "MSFT.US", "NVDA.US"]
+        assert payload["runtime_count"] == 3
+    finally:
+        db.close()
 
 def test_strategy_update_writes_diff_audit() -> None:
     _clean_audit_logs()

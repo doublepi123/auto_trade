@@ -161,4 +161,87 @@ describe('Dashboard', () => {
     cy.visitApp('/')
     cy.get('[data-testid="recent-events"]').should('contain', '成本不足')
   })
+
+  it('shows read-only multi-symbol snapshots', () => {
+    cy.visitApp('/')
+
+    cy.contains('多标的观察').should('be.visible')
+    cy.contains('NVDA.US').should('be.visible')
+    cy.contains('Nvidia').should('be.visible')
+    cy.contains('当前交易').should('be.visible')
+    cy.contains('AAPL.US').should('be.visible')
+  })
+
+  it('shows empty multi-symbol snapshot state', () => {
+    cy.intercept('GET', '/api/watchlist/snapshots', { body: [] })
+    cy.visit('/')
+
+    cy.contains('多标的观察').should('be.visible')
+    cy.contains('暂无观察标的').should('be.visible')
+  })
+
+  it('shows diagnostics panel with runner and symbol runtime health', () => {
+    cy.intercept('GET', '/api/diagnostics', {
+      body: {
+        runner_running: true,
+        thread_alive: true,
+        quotes_subscribed: true,
+        trigger_in_flight: false,
+        pending_order_symbols: ['AAPL.US'],
+        quote_stream: {
+          last_push_age_seconds: 3,
+          last_quote_age_seconds: 1,
+          recent_quote_count: 12,
+        },
+        risk: {
+          paused: false,
+          kill_switch: false,
+          pause_reason: '',
+          daily_pnl: 12.5,
+          consecutive_losses: 1,
+        },
+        symbol_runtimes: [
+          {
+            symbol: 'NVDA.US',
+            market: 'US',
+            is_primary: true,
+            engine_state: 'long',
+            last_price: 221.2,
+            last_trigger_price: 220.6,
+            recent_quote_count: 5,
+            has_pending_order: false,
+          },
+          {
+            symbol: 'AAPL.US',
+            market: 'US',
+            is_primary: false,
+            engine_state: 'flat',
+            last_price: 199.5,
+            last_trigger_price: 0,
+            recent_quote_count: 7,
+            has_pending_order: true,
+          },
+        ],
+      },
+    }).as('getDiagnostics')
+
+    cy.visit('/')
+    cy.wait('@getDiagnostics')
+
+    cy.contains('运行诊断').should('be.visible')
+    cy.contains('行情流').should('be.visible')
+    cy.contains('AAPL.US').should('be.visible')
+    cy.contains('线程存活').should('be.visible')
+    cy.contains('最近推送 3.0s').should('be.visible')
+  })
+
+  it('clarifies that control actions apply globally across symbol runtimes', () => {
+    cy.visitApp('/')
+    cy.get('[data-testid="quick-actions"]').should('contain', '全局控制')
+    cy.get('[data-testid="quick-actions"]').should('contain', '作用于全部标的运行时')
+    cy.get('[data-testid="dashboard-diagnostics"]').should('contain', '运行时总数')
+    cy.get('[data-testid="dashboard-diagnostics"]').should('contain', '2 个')
+    cy.contains('全局紧急停止').should('be.visible')
+    cy.contains('全局暂停状态').should('be.visible')
+  })
 })

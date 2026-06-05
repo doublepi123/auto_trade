@@ -5,6 +5,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.runner import get_runner
 from app.services.review_service import ReviewService
 
 router = APIRouter(prefix="/api/review", tags=["review"])
@@ -39,7 +40,12 @@ def export_review(
         raise HTTPException(status_code=400, detail="format must be json or csv")
     try:
         svc = ReviewService(db)
-        buf = svc.export_review(symbol, from_date, to_date, format)
+        diagnostics = get_runner().diagnostics()
+        diagnostics["symbol_runtimes"] = [
+            runtime for runtime in diagnostics.get("symbol_runtimes", [])
+            if runtime.get("symbol") == symbol
+        ]
+        buf = svc.export_review(symbol, from_date, to_date, format, diagnostics=diagnostics)
         media_type = "application/json" if format == "json" else "text/csv"
         filename = f"review_{symbol.replace('.', '_')}_{from_date}_{to_date}.{format}"
         return StreamingResponse(

@@ -1,8 +1,8 @@
 # P25: 运行时策略参数热重载 — `margin_safety_factor` 链路修复
 
-> **日期：** 2026-06-05
-> **状态：** 设计评审中
-> **目标：** 修复 `margin_safety_factor` 从配置保存到交易执行的全链路断裂，使其支持运行时热重载。
+> **日期：** 2026-06-04
+> **状态：** 已交付
+> **目标：** 修复 `margin_safety_factor` 从配置保存到交易执行的全链路断裂，使其支持保存后热重载与 runner 冷启动加载。
 
 ---
 
@@ -59,7 +59,7 @@ merged = {
 self._trade_svc.margin_safety_factor = getattr(config, "margin_safety_factor", None)
 ```
 
-同时在 `AppRunner.__init__` 中初始化 `_trade_svc` 时传入初始值（从 settings 或默认值）。
+同时在 `AppRunner._initialize_runner()` 中从 `RuntimeStateService.load()` 返回的配置注入启动初始值，避免进程重启后回退到硬编码常量。
 
 ### 4. 执行层：`backend/app/services/trade_execution_service.py`
 
@@ -102,6 +102,8 @@ self._trade_svc.margin_safety_factor = getattr(config, "margin_safety_factor", N
    - `safety_factor` 关键字参数仍可覆盖实例属性
    - 实例属性为 None 时回退到 `ENTRY_BUYING_POWER_USAGE`
 
+5. **冷启动测试**：`test_runner.py` 补充 `_initialize_runner()` 加载 DB 配置后 `_trade_svc.margin_safety_factor` 被注入的断言。
+
 ### 验证命令
 
 ```bash
@@ -110,6 +112,12 @@ cd backend && python3 -m basedpyright
 cd frontend && npm run type-check
 cd frontend && npm run build
 ```
+
+### 2026-06-04 验证结果
+
+- `python -m pytest tests/test_trade_execution_service.py::TestTradeExecutionServiceBasics::test_margin_safety_factor_instance_attribute ... tests/test_api.py::TestAPI::test_update_strategy_persists_margin_safety_factor -v`：8 passed。
+- `python -m pytest tests/ -v`：759 passed。
+- `basedpyright`：0 errors / 0 warnings / 0 notes。
 
 ---
 

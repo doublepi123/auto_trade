@@ -118,7 +118,7 @@ class TradeExecutionService:
         self._audit = audit
         self.margin_safety_factor = margin_safety_factor
         self._state_lock = RLock()
-        self._pending_order: _PendingOrder | None = None
+        self._pending_orders: dict[str, _PendingOrder] = {}
         self._order_status_poll_interval_seconds = 1.0
         self._order_status_timeout_seconds = 30.0
         self._entry_positions: dict[str, _TrackedEntry] = {}
@@ -132,6 +132,30 @@ class TradeExecutionService:
                     continue
                 self._entry_positions[symbol] = _TrackedEntry(quantity=quantity, cost=cost)
 
+    def load_pending_orders(self, pending_orders: list[_PendingOrder]) -> None:
+        with self._state_lock:
+            existing_by_id = {
+                pending.broker_order_id: pending
+                for pending in self._pending_orders.values()
+            }
+            self._pending_orders.clear()
+            for pending in pending_orders:
+                existing = existing_by_id.get(pending.broker_order_id)
+                if existing is not None:
+                    pending = _PendingOrder(
+                        broker=pending.broker,
+                        broker_order_id=pending.broker_order_id,
+                        symbol=pending.symbol,
+                        action=pending.action,
+                        quantity=pending.quantity,
+                        price=pending.price,
+                        engine_snapshot=existing.engine_snapshot,
+                        avg_price=existing.avg_price if existing.avg_price is not None else pending.avg_price,
+                        next_status_check_at=existing.next_status_check_at,
+                        submitted_at=existing.submitted_at,
+                    )
+                self._pending_orders[pending.symbol] = pending
+
     def snapshot_tracked_entries(self) -> dict[str, tuple[Decimal, Decimal]]:
         with self._state_lock:
             return {
@@ -142,12 +166,28 @@ class TradeExecutionService:
     @property
     def has_pending_order(self) -> bool:
         with self._state_lock:
-            return self._pending_order is not None
+            return bool(self._pending_orders)
 
     @property
     def pending_order(self) -> _PendingOrder | None:
         with self._state_lock:
-            return self._pending_order
+            return next(iter(self._pending_orders.values()), None)
+
+    def pending_order_for(self, symbol: str) -> _PendingOrder | None:
+        with self._state_lock:
+            return self._pending_orders.get(symbol)
+
+    @property
+    def _pending_order(self) -> _PendingOrder | None:
+        return self.pending_order
+
+    @_pending_order.setter
+    def _pending_order(self, pending: _PendingOrder | None) -> None:
+        with self._state_lock:
+            if pending is None:
+                self._pending_orders.clear()
+                return
+            self._pending_orders[pending.symbol] = pending
 
     def reconcile(
         self,
@@ -157,8 +197,8 @@ class TradeExecutionService:
         notify_risk_event: _NotifyRiskEvent | None = None,
     ) -> None:
         with self._state_lock:
-            pending = self._pending_order
-        if pending is not None:
+            pending_orders = list(self._pending_orders.values())
+        for pending in pending_orders:
             self._reconcile_pending_order(
                 pending,
                 risk=risk,
@@ -173,7 +213,22 @@ class TradeExecutionService:
         restore_engine_snapshot: Callable[[_EngineSnapshot], None] | None = None,
     ) -> OrderStatus:
         with self._state_lock:
-            pending = self._pending_order
+            pending = next(iter(self._pending_orders.values()), None)
+        if pending is None:
+            return OrderStatus("", "NO_PENDING_ORDER")
+        return self.cancel_pending_order_for_symbol(
+            pending.symbol,
+            restore_engine_snapshot=restore_engine_snapshot,
+        )
+
+    def cancel_pending_order_for_symbol(
+        self,
+        symbol: str,
+        *,
+        restore_engine_snapshot: Callable[[_EngineSnapshot], None] | None = None,
+    ) -> OrderStatus:
+        with self._state_lock:
+            pending = self._pending_orders.get(symbol)
         if pending is None:
             return OrderStatus("", "NO_PENDING_ORDER")
 
@@ -201,9 +256,15 @@ class TradeExecutionService:
         restore_engine_snapshot: Callable[[_EngineSnapshot], None] | None = None,
     ) -> OrderStatus:
         with self._state_lock:
-            pending = self._pending_order
-        if pending is not None and pending.broker_order_id == order_id:
-            return self.cancel_pending_order(restore_engine_snapshot=restore_engine_snapshot)
+            pending = next(
+                (item for item in self._pending_orders.values() if item.broker_order_id == order_id),
+                None,
+            )
+        if pending is not None:
+            return self.cancel_pending_order_for_symbol(
+                pending.symbol,
+                restore_engine_snapshot=restore_engine_snapshot,
+            )
 
         try:
             order_status = self._coerce_order_status(broker.cancel_order(order_id), order_id)
@@ -248,8 +309,9 @@ class TradeExecutionService:
             return self._skip_order(symbol, action, risk_result.reason, skip_category="RISK")
 
         with self._state_lock:
-            if self._pending_order is not None:
-                logger.warning("execute skipped: pending order %s still live", self._pending_order.broker_order_id)
+            pending = self._pending_orders.get(symbol)
+            if pending is not None:
+                logger.warning("execute skipped: pending order %s still live for %s", pending.broker_order_id, symbol)
                 return self._skip_order(symbol, action, "pending order in flight", skip_category="PENDING")
 
         if action == "BUY":
@@ -712,12 +774,14 @@ class TradeExecutionService:
             submitted_at=time.monotonic(),
         )
         with self._state_lock:
-            self._pending_order = pending
+            self._pending_orders[pending.symbol] = pending
 
     def _clear_pending_order(self, order_id: str) -> None:
         with self._state_lock:
-            if self._pending_order is not None and self._pending_order.broker_order_id == order_id:
-                self._pending_order = None
+            for symbol, pending in list(self._pending_orders.items()):
+                if pending.broker_order_id == order_id:
+                    del self._pending_orders[symbol]
+                    return
 
     def _reconcile_pending_order(
         self,
@@ -756,7 +820,7 @@ class TradeExecutionService:
             submitted_at=pending.submitted_at,
         )
         with self._state_lock:
-            self._pending_order = updated_pending
+            self._pending_orders[updated_pending.symbol] = updated_pending
 
         try:
             order_status = self._coerce_order_status(pending.broker.get_order_status(pending.broker_order_id), pending.broker_order_id)

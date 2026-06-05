@@ -58,6 +58,18 @@ class Settings(BaseSettings):
         validation_alias="DEEPSEEK_THINKING_TYPE",
     )
     llm_interval_cron_minutes: int = 2
+    llm_max_symbols_per_cycle: int = Field(
+        default=1,
+        ge=1,
+        le=100,
+        validation_alias="AUTO_TRADE_LLM_MAX_SYMBOLS_PER_CYCLE",
+    )
+    llm_max_analyses_per_hour: int = Field(
+        default=30,
+        ge=1,
+        le=10000,
+        validation_alias="AUTO_TRADE_LLM_MAX_ANALYSES_PER_HOUR",
+    )
     llm_interval_volatility_threshold_pct: float = 1.0
     llm_min_confidence: float = 0.7
     llm_max_stripe_width_pct: float = 8.0

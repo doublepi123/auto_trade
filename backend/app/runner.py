@@ -6,10 +6,10 @@ import os
 import threading
 import time
 from contextlib import contextmanager
-from dataclasses import replace as dataclass_replace
+from dataclasses import dataclass, replace as dataclass_replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Any, Generator, Optional
+from typing import Any, Generator, Optional, cast
 from sqlalchemy.orm import Session
 
 from app.api.deps import init_audit_logger
@@ -31,6 +31,7 @@ from app.services.runtime_state_service import RuntimeStateService
 from app.services.strategy_service import StrategyService
 from app.services.trade_event_service import record_trade_event
 from app.services.trade_execution_service import TradeExecutionService, _PendingOrder
+from app.services.watchlist_service import WatchlistService
 
 logger = logging.getLogger("auto_trade.runner")
 
@@ -49,6 +50,14 @@ _TERMINAL_ORDER_STATUSES = {"FILLED", "REJECTED", "CANCELLED"}
 DISCONNECT_RETRY_EXHAUSTED_THRESHOLD = 3
 
 
+@dataclass
+class SymbolRuntime:
+    symbol: str
+    market: str
+    engine: StrategyEngine
+    recent_quotes: list[dict[str, Any]]
+
+
 class AppRunner:
     @staticmethod
     def _build_broker(audit: AuditLogger) -> BrokerGateway:
@@ -62,6 +71,7 @@ class AppRunner:
         self._audit: AuditLogger = init_audit_logger()
         self.broker = self._build_broker(self._audit)
         self.engine = StrategyEngine()
+        self._symbol_runtimes: dict[str, SymbolRuntime] = {}
         self.risk = RiskController(trade_day_provider=self._market_trade_day)
         self.notifier = MultiChannelNotifier([(ServerChanNotifier(""), "INFO")])
         self._trade_svc = TradeExecutionService(
@@ -101,13 +111,17 @@ class AppRunner:
 
     def _initialize_runner(self) -> None:
         with self._db_session() as db:
-            self._state_svc.load(db, self.engine, self.risk)
+            config = self._state_svc.load(db, self.engine, self.risk)
+            self._trade_svc.margin_safety_factor = getattr(config, "margin_safety_factor", None)
             self._load_tracked_entries(db)
+            self._sync_symbol_runtimes(db)
             self._apply_credentials(self._load_credentials(), resubscribe=False)
         self._register_broker_disconnect_hook()
         self._refresh_trading_session_mode()
 
         self.sync_today_orders_from_broker(force=True)
+        with self._db_session() as db:
+            self._load_pending_orders(db)
         self._sync_risk_from_order_ledger()
         with self._db_session() as db:
             self._pause_if_unresolved_live_order_exists(db)
@@ -118,16 +132,17 @@ class AppRunner:
         except RuntimeError:
             pass
 
-        symbol = self.engine.params.symbol
         self._reset_quote_tracking(clear_history=True)
-        if symbol and not self._quotes_subscribed:
+        with self._state_lock:
+            symbols = self._desired_quote_symbols_locked()
+        if symbols and not self._quotes_subscribed:
             try:
-                self.broker.subscribe_quotes(symbol, self._on_quote)
+                self._subscribe_quote_symbols(self.broker, symbols)
                 self._quotes_subscribed = True
                 self._last_push_quote_at = time.monotonic()
-                logger.info("subscribed to %s quotes", symbol)
+                logger.info("subscribed to quote streams: %s", ", ".join(symbols))
             except Exception as exc:
-                logger.error("quote subscription failed for %s: %s", symbol, exc)
+                logger.error("quote subscription failed for %s: %s", ", ".join(symbols), exc)
                 logger.error("system running without quote updates")
 
     def _pause_if_unresolved_live_order_exists(self, db) -> bool:
@@ -170,6 +185,27 @@ class AppRunner:
             return
         register(self._on_disconnect)
 
+    def _desired_quote_symbols_locked(self) -> list[str]:
+        primary_symbol = self.engine.params.symbol
+        symbols: list[str] = []
+        if primary_symbol:
+            symbols.append(primary_symbol)
+        for symbol in self._symbol_runtimes:
+            if symbol and symbol != primary_symbol:
+                symbols.append(symbol)
+        return symbols
+
+    def _subscribe_quote_symbols(self, broker: Any, symbols: list[str]) -> None:
+        for symbol in symbols:
+            broker.subscribe_quotes(symbol, self._on_quote)
+
+    def _resubscribe_quote_symbols(self, broker: Any, symbols: list[str]) -> None:
+        try:
+            broker.unsubscribe_quotes()
+        except Exception:
+            logger.warning("failed to unsubscribe before resubscribe for %s", ", ".join(symbols))
+        self._subscribe_quote_symbols(broker, symbols)
+
     def _record_broker_retry_exhausted(self, reason: str) -> None:
         try:
             self._audit.record(
@@ -207,18 +243,14 @@ class AppRunner:
         with self._state_lock:
             if self._quotes_subscribed or self._trigger_in_flight:
                 return
-            symbol = self.engine.params.symbol
-            if not symbol:
+            symbols = self._desired_quote_symbols_locked()
+            if not symbols:
                 return
 
         try:
-            self.broker.unsubscribe_quotes()
-        except Exception:
-            logger.warning("failed to unsubscribe before disconnect resubscribe for %s", symbol)
-        try:
-            self.broker.subscribe_quotes(symbol, self._on_quote)
+            self._resubscribe_quote_symbols(self.broker, symbols)
         except Exception as exc:
-            logger.error("quote resubscribe after disconnect failed for %s: %s", symbol, exc)
+            logger.error("quote resubscribe after disconnect failed for %s: %s", ", ".join(symbols), exc)
             with self._state_lock:
                 self._disconnect_retry_count += 1
                 retry_count = self._disconnect_retry_count
@@ -254,6 +286,107 @@ class AppRunner:
     @property
     def is_running(self) -> bool:
         return self._running and self._thread is not None and self._thread.is_alive()
+
+    def diagnostics(self) -> dict[str, Any]:
+        now = time.monotonic()
+
+        def age_since(value: float) -> float | None:
+            if value <= 0:
+                return None
+            return max(0.0, now - value)
+
+        with self._state_lock:
+            thread_alive = self._thread is not None and self._thread.is_alive()
+            pending_order_symbols = sorted(getattr(self._trade_svc, "_pending_orders", {}).keys())
+            primary_symbol = self.engine.params.symbol
+            symbol_runtimes = [
+                {
+                    "symbol": runtime.symbol,
+                    "market": runtime.market,
+                    "is_primary": symbol == primary_symbol,
+                    "engine_state": runtime.engine.state.value,
+                    "last_price": float(runtime.engine.last_price),
+                    "last_trigger_price": float(runtime.engine.last_trigger_price),
+                    "recent_quote_count": len(runtime.recent_quotes),
+                    "has_pending_order": self._trade_svc.pending_order_for(symbol) is not None,
+                }
+                for symbol, runtime in sorted(self._symbol_runtimes.items())
+            ]
+            if primary_symbol and primary_symbol not in self._symbol_runtimes:
+                symbol_runtimes.insert(
+                    0,
+                    {
+                        "symbol": primary_symbol,
+                        "market": self.engine.params.market,
+                        "is_primary": True,
+                        "engine_state": self.engine.state.value,
+                        "last_price": float(self.engine.last_price),
+                        "last_trigger_price": float(self.engine.last_trigger_price),
+                        "recent_quote_count": len(self._recent_quotes),
+                        "has_pending_order": self._trade_svc.pending_order_for(primary_symbol) is not None,
+                    },
+                )
+            return {
+                "runner_running": self._running and thread_alive,
+                "thread_alive": thread_alive,
+                "quotes_subscribed": self._quotes_subscribed,
+                "trigger_in_flight": self._trigger_in_flight,
+                "pending_order_symbols": pending_order_symbols,
+                "quote_stream": {
+                    "last_push_age_seconds": age_since(self._last_push_quote_at),
+                    "last_quote_age_seconds": age_since(self._last_quote_at),
+                    "recent_quote_count": len(self._recent_quotes),
+                },
+                "risk": {
+                    "paused": self.risk.paused,
+                    "kill_switch": self.risk.kill_switch,
+                    "pause_reason": self.risk.pause_reason,
+                    "daily_pnl": float(self.risk.daily_pnl),
+                    "consecutive_losses": self.risk.consecutive_losses,
+                },
+                "symbol_runtimes": symbol_runtimes,
+            }
+
+    def llm_symbol_statuses(self) -> list[dict[str, Any]]:
+        now = time.monotonic()
+
+        def cooldown_remaining(symbol: str, side: str, seconds: int) -> float | None:
+            if seconds <= 0:
+                return None
+            last_at = self._last_llm_action_at.get((symbol, side))
+            if last_at is None:
+                return None
+            return max(0.0, seconds - (now - last_at))
+
+        with self._state_lock:
+            primary_symbol = self.engine.params.symbol
+            runtimes: list[tuple[str, str, StrategyEngine]] = []
+            seen: set[str] = set()
+            for symbol, runtime in sorted(self._symbol_runtimes.items()):
+                runtimes.append((symbol, runtime.market, runtime.engine))
+                seen.add(symbol)
+            if primary_symbol and primary_symbol not in seen:
+                runtimes.insert(0, (primary_symbol, self.engine.params.market, self.engine))
+
+            return [
+                {
+                    "symbol": symbol,
+                    "market": market,
+                    "is_primary": symbol == primary_symbol,
+                    "has_pending_order": self._trade_svc.pending_order_for(symbol) is not None,
+                    "buy_cooldown_remaining_seconds": cooldown_remaining(
+                        symbol,
+                        "BUY",
+                        engine.params.llm_action_cooldown_seconds,
+                    ),
+                    "sell_cooldown_remaining_seconds": cooldown_remaining(
+                        symbol,
+                        "SELL",
+                        engine.params.llm_action_cooldown_seconds,
+                    ),
+                }
+                for symbol, market, engine in runtimes
+            ]
 
     def stop(self) -> None:
         defer_broker_close = False
@@ -299,20 +432,23 @@ class AppRunner:
                 mode = getattr(config, "trading_session_mode", None)
                 self._trading_session_mode = mode if mode else "ANY"
                 self._trade_svc.margin_safety_factor = getattr(config, "margin_safety_factor", None)
-                if config.symbol != old_symbol and self._running:
+                self._sync_symbol_runtimes(db)
+                if self._running:
                     self._reset_quote_tracking(clear_history=True)
                     if self._quotes_subscribed:
                         try:
                             self.broker.unsubscribe_quotes()
                         except Exception:
-                            logger.warning("failed to unsubscribe old symbol during strategy reload")
+                            logger.warning("failed to unsubscribe old symbols during strategy reload")
                         self._quotes_subscribed = False
-                    if config.symbol:
+                    with self._state_lock:
+                        symbols = self._desired_quote_symbols_locked()
+                    if symbols:
                         try:
-                            self.broker.subscribe_quotes(config.symbol, self._on_quote)
+                            self._subscribe_quote_symbols(self.broker, symbols)
                             self._quotes_subscribed = True
                             self._last_push_quote_at = time.monotonic()
-                            logger.info("re-subscribed to %s after strategy reload", config.symbol)
+                            logger.info("re-subscribed to quote streams after strategy reload: %s", ", ".join(symbols))
                         except Exception as exc:
                             logger.error("quote subscription failed after strategy reload: %s", exc)
             finally:
@@ -323,27 +459,35 @@ class AppRunner:
         result = None
         engine_snapshot = None
         trigger_symbol = None
+        trigger_engine: StrategyEngine | None = None
+        trigger_market = self.engine.params.market
         try:
             with self._state_lock:
                 if is_push:
                     self._last_push_quote_at = time.monotonic()
                 self._remember_quote(quote)
+                runtime = self._symbol_runtimes.get(quote.symbol)
+                is_primary_symbol = quote.symbol == self.engine.params.symbol
+                active_engine = self.engine if is_primary_symbol or runtime is None else runtime.engine
+                active_market = self.engine.params.market if is_primary_symbol or runtime is None else runtime.market
                 if not self._running or self._trigger_in_flight:
                     return
-                if self._trade_svc.has_pending_order:
+                if self._trade_svc.pending_order_for(quote.symbol) is not None:
                     self._trigger_in_flight = True
                     processing_started = True
                 elif not self.risk.check().approved:
-                    self.engine.record_price(quote.last_price)
+                    active_engine.record_price(quote.last_price)
                 else:
-                    engine_snapshot = self._engine_snapshot()
-                    result = self.engine.update_price(quote.last_price)
+                    engine_snapshot = self._engine_snapshot_for(active_engine)
+                    result = active_engine.update_price(quote.last_price)
                     if result.triggered:
-                        trigger_symbol = self.engine.params.symbol
+                        trigger_symbol = active_engine.params.symbol or quote.symbol
+                        trigger_engine = active_engine
+                        trigger_market = active_market
                         self._trigger_in_flight = True
                         processing_started = True
 
-            if self._trade_svc.has_pending_order and processing_started:
+            if self._trade_svc.has_pending_order and processing_started and result is None:
                 self._trade_svc.reconcile(
                     self.risk,
                     self.notifier,
@@ -355,10 +499,14 @@ class AppRunner:
 
             self._broadcast_status()
 
-            if result is None or not result.triggered:
+            if result is None or not result.triggered or trigger_engine is None:
                 return
             self._set_last_action_message(result.description)
 
+            restore_engine_snapshot = lambda snapshot: self._restore_engine_snapshot_for(trigger_engine, snapshot)
+            restore_engine_state_preserve_trigger = (
+                lambda snapshot: self._restore_engine_state_preserve_trigger_for(trigger_engine, snapshot)
+            )
             risk_result = self.risk.check()
             if not risk_result.approved:
                 logger.warning("risk rejected: %s", risk_result.reason)
@@ -366,47 +514,47 @@ class AppRunner:
                 self._record_risk_event(risk_result.reason)
                 self.notifier.notify_risk_event("REJECTED", risk_result.reason)
                 if engine_snapshot is not None:
-                    self._restore_engine_snapshot(engine_snapshot)
+                    restore_engine_snapshot(engine_snapshot)
                 self._broadcast_status()
                 return
 
             try:
                 order_status = self._trade_svc.execute(
                     action=result.action,
-                    symbol=trigger_symbol or self.engine.params.symbol,
+                    symbol=trigger_symbol or quote.symbol,
                     quote=quote,
                     broker=self.broker,
                     risk=self.risk,
                     notifier=self.notifier,
-                    cash_currency=self._cash_currency(),
-                    market=self.engine.params.market,
+                    cash_currency=self._cash_currency_for_market(trigger_market),
+                    market=trigger_market,
                     trading_session_mode=self._get_trading_session_mode(),
-                    min_profit_amount=self.engine.params.min_profit_amount,
-                    fee_rate=self._live_fee_rate(),
+                    min_profit_amount=trigger_engine.params.min_profit_amount,
+                    fee_rate=self._live_fee_rate_for_market(trigger_market),
                     engine_snapshot=engine_snapshot,
-                    restore_engine_snapshot=self._restore_engine_snapshot,
+                    restore_engine_snapshot=restore_engine_snapshot,
                     notify_risk_event=self.notifier.notify_risk_event,
                 )
                 if order_status is None:
                     self._set_last_action_message(f"{result.action} skipped: no order submitted")
                     if engine_snapshot is not None:
-                        self._restore_engine_snapshot(engine_snapshot)
+                        restore_engine_snapshot(engine_snapshot)
                 elif order_status.status == "SKIPPED":
                     reason = order_status.reason or "order skipped"
                     self._set_last_action_message(f"{result.action} skipped: {reason}")
                     if engine_snapshot is not None:
-                        self._restore_engine_state_preserve_trigger(engine_snapshot)
+                        restore_engine_state_preserve_trigger(engine_snapshot)
                 elif order_status.status in {"REJECTED", "CANCELLED"}:
                     self._set_last_action_message(f"{result.action} ended with status {order_status.status}")
                     if engine_snapshot is not None:
-                        self._restore_engine_snapshot(engine_snapshot)
+                        restore_engine_snapshot(engine_snapshot)
                 else:
                     order_id = order_status.broker_order_id or "-"
                     self._set_last_action_message(f"{result.action} {order_status.status}: {order_id}")
                 self._broadcast_status()
             except Exception as exc:
                 if engine_snapshot is not None:
-                    self._restore_engine_snapshot(engine_snapshot)
+                    restore_engine_snapshot(engine_snapshot)
                 reason = f"order execution failed: {exc}"
                 self._set_last_action_message(reason)
                 self.risk.pause(
@@ -438,24 +586,42 @@ class AppRunner:
                     self.broker.close()
 
     def _engine_snapshot(self) -> _EngineSnapshot:
-        with self.engine._lock:
+        return self._engine_snapshot_for(self.engine)
+
+    def _engine_snapshot_for(self, engine: StrategyEngine) -> _EngineSnapshot:
+        with engine._lock:
             return (
-                self.engine.state,
-                self.engine.last_trigger_price,
-                self.engine.last_trigger_at,
+                engine.state,
+                engine.last_trigger_price,
+                engine.last_trigger_at,
             )
 
     def _restore_engine_snapshot(self, snapshot: _EngineSnapshot) -> None:
+        self._restore_engine_snapshot_for(self.engine, snapshot)
+
+    def _restore_engine_snapshot_for(self, engine: StrategyEngine, snapshot: _EngineSnapshot) -> None:
         state, last_trigger_price, last_trigger_at = snapshot
-        with self.engine._lock:
-            self.engine.state = state
-            self.engine.last_trigger_price = last_trigger_price
-            self.engine.last_trigger_at = last_trigger_at
+        with engine._lock:
+            engine.state = state
+            engine.last_trigger_price = last_trigger_price
+            engine.last_trigger_at = last_trigger_at
 
     def _restore_engine_state_preserve_trigger(self, snapshot: _EngineSnapshot) -> None:
+        self._restore_engine_state_preserve_trigger_for(self.engine, snapshot)
+
+    def _restore_engine_state_preserve_trigger_for(self, engine: StrategyEngine, snapshot: _EngineSnapshot) -> None:
         state, _last_trigger_price, _last_trigger_at = snapshot
-        with self.engine._lock:
-            self.engine.state = state
+        with engine._lock:
+            engine.state = state
+
+    def _runtime_for_symbol(self, symbol: str | None) -> tuple[str, str, StrategyEngine]:
+        requested_symbol = str(symbol or "").upper()
+        if not requested_symbol or requested_symbol == self.engine.params.symbol:
+            return self.engine.params.symbol, self.engine.params.market, self.engine
+        runtime = self._symbol_runtimes.get(requested_symbol)
+        if runtime is None:
+            return self.engine.params.symbol, self.engine.params.market, self.engine
+        return runtime.symbol, runtime.market, runtime.engine
 
     def execute_llm_order_decision(self, decision: dict[str, Any]) -> dict[str, Any]:
         action = str(decision.get("order_action") or "NONE").upper()
@@ -463,6 +629,8 @@ class AppRunner:
             return {"executed": False, "status": "NO_ACTION", "order_id": None, "action": ""}
         if not self._running:
             return {"executed": False, "status": "RUNNER_STOPPED", "order_id": None, "action": ""}
+
+        target_symbol, target_market, target_engine = self._runtime_for_symbol(cast(str | None, decision.get("symbol")))
 
         with self._state_lock:
             if self._trigger_in_flight:
@@ -472,8 +640,9 @@ class AppRunner:
         try:
             if action in {"CANCEL_PENDING", "CANCEL_REPLACE"}:
                 if action == "CANCEL_PENDING":
-                    cancel_status = self._trade_svc.cancel_pending_order(
-                        restore_engine_snapshot=self._restore_engine_snapshot,
+                    cancel_status = self._trade_svc.cancel_pending_order_for_symbol(
+                        target_symbol,
+                        restore_engine_snapshot=lambda snapshot: self._restore_engine_snapshot_for(target_engine, snapshot),
                     )
                     return {
                         "executed": cancel_status.status == "CANCELLED",
@@ -486,15 +655,22 @@ class AppRunner:
                 if mapped_action is None:
                     return {"executed": False, "status": "UNKNOWN_ACTION", "order_id": None, "action": "CANCEL_REPLACE"}
                 proposed_price = decision.get("replacement_price") or decision.get("order_price")
-                pending = self._trade_svc.pending_order
-                skipped = self._precheck_llm_action(mapped_action, proposed_price, pending)
+                pending = self._trade_svc.pending_order_for(target_symbol)
+                skipped = self._precheck_llm_action(
+                    mapped_action,
+                    proposed_price,
+                    pending,
+                    symbol=target_symbol,
+                    engine=target_engine,
+                )
                 if skipped is not None:
                     return skipped
                 session_skipped = self._check_trading_session(mapped_action)
                 if session_skipped is not None:
                     return session_skipped
-                cancel_status = self._trade_svc.cancel_pending_order(
-                    restore_engine_snapshot=self._restore_engine_snapshot,
+                cancel_status = self._trade_svc.cancel_pending_order_for_symbol(
+                    target_symbol,
+                    restore_engine_snapshot=lambda snapshot: self._restore_engine_snapshot_for(target_engine, snapshot),
                 )
                 if cancel_status.status not in {"CANCELLED", "NO_PENDING_ORDER"}:
                     return {
@@ -507,21 +683,31 @@ class AppRunner:
                     mapped_action,
                     proposed_price,
                     allow_loss_exit=replacement_action in _LLM_STOP_LOSS_ACTIONS,
+                    symbol=target_symbol,
+                    market=target_market,
+                    engine=target_engine,
                 )
 
             mapped_action = _LLM_ORDER_ACTION_MAP.get(action)
             if mapped_action is None:
                 return {"executed": False, "status": "UNKNOWN_ACTION", "order_id": None, "action": action}
-            pending = self._trade_svc.pending_order
-            skipped = self._precheck_llm_action(mapped_action, decision.get("order_price"), pending)
+            pending = self._trade_svc.pending_order_for(target_symbol)
+            skipped = self._precheck_llm_action(
+                mapped_action,
+                decision.get("order_price"),
+                pending,
+                symbol=target_symbol,
+                engine=target_engine,
+            )
             if skipped is not None:
                 return skipped
             if pending is not None:
                 session_skipped = self._check_trading_session(mapped_action)
                 if session_skipped is not None:
                     return session_skipped
-                cancel_status = self._trade_svc.cancel_pending_order(
-                    restore_engine_snapshot=self._restore_engine_snapshot,
+                cancel_status = self._trade_svc.cancel_pending_order_for_symbol(
+                    target_symbol,
+                    restore_engine_snapshot=lambda snapshot: self._restore_engine_snapshot_for(target_engine, snapshot),
                 )
                 replaced_order_id = cancel_status.broker_order_id or None
                 if cancel_status.status not in {"CANCELLED", "NO_PENDING_ORDER"}:
@@ -535,6 +721,9 @@ class AppRunner:
                     mapped_action,
                     decision.get("order_price"),
                     allow_loss_exit=action in _LLM_STOP_LOSS_ACTIONS,
+                    symbol=target_symbol,
+                    market=target_market,
+                    engine=target_engine,
                 )
                 if replaced_order_id is not None:
                     result["replaced_order_id"] = replaced_order_id
@@ -543,6 +732,9 @@ class AppRunner:
                 mapped_action,
                 decision.get("order_price"),
                 allow_loss_exit=action in _LLM_STOP_LOSS_ACTIONS,
+                symbol=target_symbol,
+                market=target_market,
+                engine=target_engine,
             )
         finally:
             with self._state_lock:
@@ -555,47 +747,60 @@ class AppRunner:
             restore_engine_snapshot=self._restore_engine_snapshot,
         )
 
-    def _execute_llm_trade_action(self, action: str, price: Any = None, *, allow_loss_exit: bool = False) -> dict[str, Any]:
+    def _execute_llm_trade_action(
+        self,
+        action: str,
+        price: Any = None,
+        *,
+        allow_loss_exit: bool = False,
+        symbol: str | None = None,
+        market: str | None = None,
+        engine: StrategyEngine | None = None,
+    ) -> dict[str, Any]:
         risk_result = self.risk.check()
         if not risk_result.approved:
             return {"executed": False, "status": "RISK_REJECTED", "order_id": None, "action": action}
 
-        symbol = self.engine.params.symbol
-        if not symbol:
+        target_symbol, target_market, target_engine = (
+            (symbol, market or self.engine.params.market, engine)
+            if symbol is not None and engine is not None
+            else self._runtime_for_symbol(symbol)
+        )
+        if not target_symbol:
             return {"executed": False, "status": "NO_SYMBOL", "order_id": None, "action": action}
 
-        engine_snapshot = self._engine_snapshot()
-        state_status = self._set_engine_state_for_order_action(action)
+        engine_snapshot = self._engine_snapshot_for(target_engine)
+        state_status = self._set_engine_state_for_order_action_on(target_engine, action)
         if state_status != "OK":
             return {"executed": False, "status": state_status, "order_id": None, "action": action}
 
-        quote = self._quote_for_llm_order(symbol, price)
+        quote = self._quote_for_llm_order(target_symbol, price)
         if quote is None:
-            self._restore_engine_snapshot(engine_snapshot)
+            self._restore_engine_snapshot_for(target_engine, engine_snapshot)
             return {"executed": False, "status": "NO_QUOTE", "order_id": None, "action": action}
 
         order_status = self._trade_svc.execute(
             action=action,
-            symbol=symbol,
+            symbol=target_symbol,
             quote=quote,
             broker=self.broker,
             risk=self.risk,
             notifier=self.notifier,
-            cash_currency=self._cash_currency(),
-            market=self.engine.params.market,
+            cash_currency=self._cash_currency_for_market(target_market),
+            market=target_market,
             trading_session_mode=self._get_trading_session_mode(),
-            min_profit_amount=self.engine.params.min_profit_amount,
+            min_profit_amount=target_engine.params.min_profit_amount,
             allow_loss_exit=allow_loss_exit,
-            fee_rate=self._live_fee_rate(),
+            fee_rate=self._live_fee_rate_for_market(target_market),
             engine_snapshot=engine_snapshot,
-            restore_engine_snapshot=self._restore_engine_snapshot,
+            restore_engine_snapshot=lambda snapshot: self._restore_engine_snapshot_for(target_engine, snapshot),
             notify_risk_event=self.notifier.notify_risk_event,
         )
         if order_status is None:
-            self._restore_engine_snapshot(engine_snapshot)
+            self._restore_engine_snapshot_for(target_engine, engine_snapshot)
             return {"executed": False, "status": "NO_ORDER", "order_id": None, "action": action}
         if order_status.status in {"SKIPPED", "REJECTED", "CANCELLED"}:
-            self._restore_engine_snapshot(engine_snapshot)
+            self._restore_engine_snapshot_for(target_engine, engine_snapshot)
         result = {
             "executed": order_status.status in {"FILLED", "SUBMITTED", "PARTIAL_FILLED"},
             "status": order_status.status,
@@ -604,33 +809,36 @@ class AppRunner:
         }
         if result["executed"]:
             side = self._broker_side_for_action(action)
-            self._last_llm_action_at[(symbol, side)] = time.monotonic()
+            self._last_llm_action_at[(target_symbol, side)] = time.monotonic()
         return result
 
     def _set_engine_state_for_order_action(self, action: str) -> str:
-        with self.engine._lock:
-            current = self.engine.state
+        return self._set_engine_state_for_order_action_on(self.engine, action)
+
+    def _set_engine_state_for_order_action_on(self, engine: StrategyEngine, action: str) -> str:
+        with engine._lock:
+            current = engine.state
             if action == "BUY":
                 if current != EngineState.FLAT:
                     return "INCOMPATIBLE_STATE"
-                self.engine.state = EngineState.LONG
+                engine.state = EngineState.LONG
                 return "OK"
             if action == "SELL":
                 if current != EngineState.LONG:
                     return "INCOMPATIBLE_STATE"
-                self.engine.state = EngineState.FLAT
+                engine.state = EngineState.FLAT
                 return "OK"
             if action == "SELL_SHORT":
-                if not self.engine.params.short_selling:
+                if not engine.params.short_selling:
                     return "SHORT_SELLING_DISABLED"
                 if current != EngineState.FLAT:
                     return "INCOMPATIBLE_STATE"
-                self.engine.state = EngineState.SHORT
+                engine.state = EngineState.SHORT
                 return "OK"
             if action == "BUY_TO_COVER":
                 if current != EngineState.SHORT:
                     return "INCOMPATIBLE_STATE"
-                self.engine.state = EngineState.FLAT
+                engine.state = EngineState.FLAT
                 return "OK"
             return "UNKNOWN_ACTION"
 
@@ -663,11 +871,18 @@ class AppRunner:
         return result if result > 0 else 0.0
 
     def _cash_currency(self) -> str:
-        return "HKD" if self.engine.params.market == "HK" else "USD"
+        return self._cash_currency_for_market(self.engine.params.market)
+
+    @staticmethod
+    def _cash_currency_for_market(market: str) -> str:
+        return "HKD" if market == "HK" else "USD"
 
     def _live_fee_rate(self) -> Decimal:
+        return self._live_fee_rate_for_market(self.engine.params.market)
+
+    def _live_fee_rate_for_market(self, market: str) -> Decimal:
         return one_side_fee_rate(
-            self.engine.params.market,
+            market,
             Decimal(str(self.engine.params.fee_rate_us)),
             Decimal(str(self.engine.params.fee_rate_hk)),
         )
@@ -709,6 +924,7 @@ class AppRunner:
 
     def _remember_quote(self, quote: Quote) -> None:
         now = datetime.now(timezone.utc)
+        self._remember_symbol_runtime_quote(quote, now)
         self._last_quote_at = time.monotonic()
         self._recent_quotes.append(
             {
@@ -763,8 +979,8 @@ class AppRunner:
         with self._state_lock:
             if not self._running or self._trigger_in_flight:
                 return False
-            symbol = self.engine.params.symbol
-            if not symbol or not self._quotes_subscribed:
+            symbols = self._desired_quote_symbols_locked()
+            if not symbols or not self._quotes_subscribed:
                 return False
             if not is_trading_hours(self.engine.params.market):
                 return False
@@ -775,20 +991,16 @@ class AppRunner:
                 return False
 
         try:
-            self.broker.unsubscribe_quotes()
-        except Exception:
-            logger.warning("failed to unsubscribe before resubscribe for %s", symbol)
-        try:
-            self.broker.subscribe_quotes(symbol, self._on_quote)
+            self._resubscribe_quote_symbols(self.broker, symbols)
         except Exception as exc:
-            logger.error("quote resubscribe failed for %s: %s", symbol, exc)
+            logger.error("quote resubscribe failed for %s: %s", ", ".join(symbols), exc)
             with self._state_lock:
                 self._quotes_subscribed = False
             return False
         with self._state_lock:
             self._quotes_subscribed = True
             self._last_push_quote_at = time.monotonic()
-        logger.warning("resubscribed quotes for %s after %.0fs silence", symbol, silence)
+        logger.warning("resubscribed quotes for %s after %.0fs silence", ", ".join(symbols), silence)
         return True
 
     def _refresh_quote_if_stale(self) -> None:
@@ -838,6 +1050,7 @@ class AppRunner:
             for broker_order in broker_orders:
                 if self._upsert_broker_order(db, broker_order):
                     changed += 1
+            self._load_pending_orders(db)
             if changed:
                 db.commit()
         self._sync_risk_from_order_ledger()
@@ -878,7 +1091,7 @@ class AppRunner:
             )
 
         with self._db_session() as db:
-            self._state_svc.persist_risk(db, self.risk)
+            self._state_svc.persist_risk(db, self.risk, symbol=self.engine.params.symbol)
         logger.info(
             "synced realized daily pnl from order ledger: pnl=%s consecutive_losses=%s trades=%s",
             result.realized_pnl,
@@ -1063,6 +1276,14 @@ class AppRunner:
             try:
                 with self._db_session() as db:
                     self._state_svc.persist(db, self.engine, self.risk)
+                    with self._state_lock:
+                        secondary_runtimes = [
+                            runtime
+                            for symbol, runtime in self._symbol_runtimes.items()
+                            if symbol != self.engine.params.symbol
+                        ]
+                    for runtime in secondary_runtimes:
+                        self._state_svc.persist_symbol(db, runtime.engine, runtime.symbol)
             except Exception:
                 logger.exception("error persisting state")
             time.sleep(5)
@@ -1205,13 +1426,14 @@ class AppRunner:
                 register(self._on_disconnect)
 
             if should_resubscribe:
+                with self._state_lock:
+                    symbols = self._desired_quote_symbols_locked()
                 try:
-                    new_broker.subscribe_quotes(symbol, self._on_quote)
+                    self._subscribe_quote_symbols(new_broker, symbols)
                 except Exception as exc:
                     logger.warning("cannot subscribe quotes after credential reload: %s", exc)
                     new_broker.close()
                     return
-
             old_broker = self.broker
             old_broker.close()
             self.broker = new_broker
@@ -1350,6 +1572,53 @@ class AppRunner:
             self._trade_svc.load_tracked_entries(entries)
             logger.info("restored %d tracked entry positions from db", len(entries))
 
+    def _load_pending_orders(self, db) -> None:
+        try:
+            rows = (
+                db.query(OrderRecord)
+                .filter(OrderRecord.status.in_(_LIVE_ORDER_STATUSES))
+                .order_by(OrderRecord.created_at.asc(), OrderRecord.id.asc())
+                .all()
+            )
+        except Exception:
+            logger.exception("failed to load pending orders")
+            return
+
+        now = time.monotonic()
+        current_utc = datetime.now(timezone.utc)
+        pending_orders: list[_PendingOrder] = []
+        for row in rows:
+            try:
+                quantity = Decimal(str(row.quantity))
+                price = Decimal(str(row.price))
+            except Exception:
+                continue
+            if quantity <= 0 or price <= 0:
+                continue
+            submitted_age_seconds = 0.0
+            if row.created_at is not None:
+                try:
+                    submitted_age_seconds = max(0.0, (current_utc - row.created_at).total_seconds())
+                except Exception:
+                    submitted_age_seconds = 0.0
+            pending_orders.append(
+                _PendingOrder(
+                    broker=self.broker,
+                    broker_order_id=row.broker_order_id,
+                    symbol=row.symbol,
+                    action=row.side,
+                    quantity=quantity,
+                    price=price,
+                    engine_snapshot=None,
+                    avg_price=None,
+                    next_status_check_at=0.0,
+                    submitted_at=now - submitted_age_seconds,
+                )
+            )
+        self._trade_svc.load_pending_orders(pending_orders)
+        if pending_orders:
+            logger.info("restored %d live pending orders from db", len(pending_orders))
+
     def _persist_tracked_entry(self, symbol: str, quantity: Decimal, cost: Decimal) -> None:
         with self._db_session() as db:
             existing = db.query(TrackedEntry).filter(TrackedEntry.symbol == symbol).first()
@@ -1437,6 +1706,75 @@ class AppRunner:
     def _broker_side_for_action(action: str) -> str:
         return "BUY" if action in {"BUY", "BUY_TO_COVER"} else "SELL"
 
+    def _build_symbol_runtime(self, symbol: str, market: str, *, primary: bool = False) -> SymbolRuntime:
+        engine = self.engine if primary else StrategyEngine(StrategyParams(symbol=symbol, market=market))
+        return SymbolRuntime(symbol=symbol, market=market, engine=engine, recent_quotes=[])
+
+    def _sync_symbol_runtimes(self, db: Session) -> None:
+        primary_symbol = self.engine.params.symbol
+        symbol_markets: dict[str, str] = {}
+        if primary_symbol:
+            symbol_markets[primary_symbol] = self.engine.params.market
+        try:
+            watchlist_items = WatchlistService(db).list_items()
+        except Exception:
+            logger.warning("failed to load watchlist symbol runtimes; using primary symbol only", exc_info=True)
+            watchlist_items = []
+        for item in watchlist_items:
+            symbol = getattr(item, "symbol", "")
+            if not symbol:
+                continue
+            symbol_markets[symbol] = getattr(item, "market", "US") or "US"
+
+        with self._state_lock:
+            for symbol, market in symbol_markets.items():
+                runtime = self._symbol_runtimes.get(symbol)
+                if runtime is None:
+                    runtime = self._build_symbol_runtime(
+                        symbol,
+                        market,
+                        primary=symbol == primary_symbol,
+                    )
+                    self._symbol_runtimes[symbol] = runtime
+                else:
+                    runtime.market = market
+                    runtime.engine.params.market = market
+                    if symbol == primary_symbol:
+                        runtime.engine = self.engine
+                if symbol != primary_symbol:
+                    try:
+                        self._state_svc.load_symbol_runtime(db, runtime.engine, symbol)
+                    except Exception:
+                        logger.warning("failed to load symbol runtime state for %s", symbol, exc_info=True)
+            for symbol in list(self._symbol_runtimes):
+                if symbol not in symbol_markets:
+                    del self._symbol_runtimes[symbol]
+
+    def _remember_symbol_runtime_quote(self, quote: Quote, observed_at: datetime) -> None:
+        runtime = self._symbol_runtimes.get(quote.symbol)
+        if runtime is None:
+            runtime = self._build_symbol_runtime(quote.symbol, self.engine.params.market)
+            self._symbol_runtimes[quote.symbol] = runtime
+        runtime.engine.record_price(quote.last_price)
+        runtime.recent_quotes.append(
+            {
+                "symbol": quote.symbol,
+                "last_price": float(quote.last_price),
+                "bid": float(quote.bid),
+                "ask": float(quote.ask),
+                "timestamp": quote.timestamp,
+                "observed_at": observed_at,
+            }
+        )
+        cutoff = observed_at - timedelta(seconds=self._recent_quote_window_seconds)
+        runtime.recent_quotes = [
+            item
+            for item in runtime.recent_quotes
+            if isinstance(item.get("observed_at"), datetime) and item["observed_at"] >= cutoff
+        ]
+        if len(runtime.recent_quotes) > self._recent_quotes_cap:
+            runtime.recent_quotes = runtime.recent_quotes[-self._recent_quotes_cap:]
+
     def _get_trading_session_mode(self) -> str:
         return self._trading_session_mode or "ANY"
 
@@ -1485,9 +1823,15 @@ class AppRunner:
             "action": action,
         }
 
-    def _skip_llm_action(self, action: str, reason: str, **payload: object) -> dict[str, Any]:
-        symbol = self.engine.params.symbol
-        self._record_order_skipped(symbol, action, reason, payload)
+    def _skip_llm_action(
+        self,
+        action: str,
+        reason: str,
+        *,
+        symbol: str | None = None,
+        **payload: object,
+    ) -> dict[str, Any]:
+        self._record_order_skipped(symbol or self.engine.params.symbol, action, reason, payload)
         return {"executed": False, "status": "SKIPPED", "order_id": None, "action": action}
 
     def _precheck_llm_action(
@@ -1495,33 +1839,43 @@ class AppRunner:
         action: str,
         proposed_price: Any,
         pending: _PendingOrder | None,
+        *,
+        symbol: str | None = None,
+        engine: StrategyEngine | None = None,
     ) -> dict[str, Any] | None:
-        symbol = self.engine.params.symbol
+        target_symbol, _market, target_engine = (
+            (symbol, self.engine.params.market, engine)
+            if symbol is not None and engine is not None
+            else self._runtime_for_symbol(symbol)
+        )
         side = self._broker_side_for_action(action)
-        if pending is not None and self.engine.params.min_repricing_pct > 0:
+        params = target_engine.params
+        if pending is not None and params.min_repricing_pct > 0:
             normalized_price = self._coerce_positive_float(proposed_price)
             if normalized_price <= 0:
                 return {"executed": False, "status": "NO_QUOTE", "order_id": None, "action": action}
             old_price = pending.price
             new_price = Decimal(str(normalized_price))
             repricing_pct = abs(new_price - old_price) / old_price
-            if repricing_pct < Decimal(str(self.engine.params.min_repricing_pct)):
+            if repricing_pct < Decimal(str(params.min_repricing_pct)):
                 return self._skip_llm_action(
                     action,
                     "replacement price movement is below minimum threshold",
+                    symbol=target_symbol,
                     skip_category="REPRICING",
                     old_price=float(old_price),
                     new_price=float(new_price),
                     repricing_pct=float(repricing_pct),
                 )
-        cooldown = self.engine.params.llm_action_cooldown_seconds
-        last_at = self._last_llm_action_at.get((symbol, side))
+        cooldown = params.llm_action_cooldown_seconds
+        last_at = self._last_llm_action_at.get((target_symbol, side))
         if cooldown > 0 and last_at is not None:
             remaining = cooldown - (time.monotonic() - last_at)
             if remaining > 0:
                 return self._skip_llm_action(
                     action,
                     "LLM action remains in cooldown",
+                    symbol=target_symbol,
                     skip_category="COOLDOWN",
                     cooldown_remaining_seconds=remaining,
                 )

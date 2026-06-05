@@ -76,10 +76,11 @@ def _make_event(db, event_type="ORDER_SKIPPED", symbol="AAPL.US", payload_json='
     return event
 
 
-def _make_snapshot(db, daily_pnl=0.0, last_price=100.0, created_at=None):
+def _make_snapshot(db, symbol="AAPL.US", daily_pnl=0.0, last_price=100.0, created_at=None):
     if created_at is None:
         created_at = datetime(2026, 5, 20, 10, 3, tzinfo=timezone.utc)
     snapshot = RuntimeStateSnapshot(
+        symbol=symbol,
         daily_pnl=daily_pnl,
         last_price=last_price,
         created_at=created_at,
@@ -123,7 +124,6 @@ def test_frequent_cancel_tag(db_session):
     result = svc.get_review("AAPL.US", "2026-05-20", "2026-05-20")
     assert "频繁重挂" in result["days"][0]["error_tags"]
 
-
 def test_review_export_json(db_session):
     _make_order(db_session)
     _make_snapshot(db_session, daily_pnl=50.0)
@@ -131,7 +131,8 @@ def test_review_export_json(db_session):
     buf = svc.export_review("AAPL.US", "2026-05-20", "2026-05-20", "json")
     import json
     data = json.loads(buf.read().decode("utf-8"))
-    assert data["symbol"] == "AAPL.US"
+    assert data["review"]["symbol"] == "AAPL.US"
+    assert data["runtime_history"]["points"][0]["symbol"] == "AAPL.US"
 
 
 def test_review_export_csv(db_session):
@@ -140,5 +141,54 @@ def test_review_export_csv(db_session):
     svc = ReviewService(db_session)
     buf = svc.export_review("AAPL.US", "2026-05-20", "2026-05-20", "csv")
     content = buf.read().decode("utf-8")
-    assert "date,symbol,trade_count,daily_pnl" in content
+    assert "section,row_type,date,symbol" in content
+    assert "review_day,summary,2026-05-20,AAPL.US" in content
     assert "2026-05-20" in content
+
+
+def test_review_export_json_includes_runtime_history_and_diagnostics(db_session):
+    _make_order(db_session)
+    _make_snapshot(db_session, symbol="AAPL.US", daily_pnl=50.0, last_price=105.0)
+    _make_snapshot(db_session, symbol="NVDA.US", daily_pnl=12.0, last_price=221.0)
+    svc = ReviewService(db_session)
+    buf = svc.export_review(
+        "AAPL.US",
+        "2026-05-20",
+        "2026-05-20",
+        "json",
+        diagnostics={
+            "runner_running": True,
+            "pending_order_symbols": ["AAPL.US"],
+            "symbol_runtimes": [{"symbol": "AAPL.US", "engine_state": "long"}],
+        },
+    )
+    import json
+
+    data = json.loads(buf.read().decode("utf-8"))
+    assert data["review"]["symbol"] == "AAPL.US"
+    assert [point["symbol"] for point in data["runtime_history"]["points"]] == ["AAPL.US"]
+    assert data["diagnostics"]["pending_order_symbols"] == ["AAPL.US"]
+    assert data["diagnostics"]["symbol_runtimes"] == [{"symbol": "AAPL.US", "engine_state": "long"}]
+
+
+def test_review_export_csv_contains_history_and_diagnostics_sections(db_session):
+    _make_order(db_session)
+    _make_snapshot(db_session, symbol="AAPL.US", daily_pnl=50.0, last_price=105.0)
+    svc = ReviewService(db_session)
+    buf = svc.export_review(
+        "AAPL.US",
+        "2026-05-20",
+        "2026-05-20",
+        "csv",
+        diagnostics={
+            "runner_running": True,
+            "pending_order_symbols": ["AAPL.US"],
+            "symbol_runtimes": [{"symbol": "AAPL.US", "engine_state": "long"}],
+        },
+    )
+    content = buf.read().decode("utf-8")
+    assert "section,row_type,date,symbol" in content
+    assert "review_day,summary,2026-05-20,AAPL.US" in content
+    assert "history_point,runtime_point,2026-05-20T10:03:00,AAPL.US" in content
+    assert "diagnostic_runtime,runtime,AAPL.US,AAPL.US" in content
+    assert "diagnostic_meta,pending_order_symbols,,AAPL.US" in content

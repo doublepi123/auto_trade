@@ -1,5 +1,5 @@
 import { api } from './client'
-import type { StatusData, StatusHistory, StrategyConfig } from '../types'
+import type { DiagnosticsResponse, StatusData, StatusHistory, StrategyConfig } from '../types'
 
 export async function getStrategy(): Promise<StrategyConfig> {
   const resp = await api.get('/api/strategy')
@@ -16,7 +16,17 @@ export async function getStatus(): Promise<StatusData> {
   return resp.data
 }
 
-export async function getStatusHistory(limit = 200): Promise<StatusHistory> {
-  const resp = await api.get('/api/status/history', { params: { limit } })
+export async function getStatusHistory(options: {
+  limit?: number
+  symbol?: string
+  from?: string
+  to?: string
+} = {}): Promise<StatusHistory> {
+  const resp = await api.get('/api/status/history', { params: options })
+  return resp.data
+}
+
+export async function getDiagnostics(): Promise<DiagnosticsResponse> {
+  const resp = await api.get('/api/diagnostics')
   return resp.data
 }

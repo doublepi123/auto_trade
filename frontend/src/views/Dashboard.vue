@@ -141,7 +141,10 @@
 
         <section class="cockpit-panel action-panel" data-testid="quick-actions" v-loading="statusLoading">
           <div class="panel-heading">
-            <span>操作控制</span>
+            <div>
+              <span>操作控制</span>
+              <p class="panel-caption">全局控制，作用于全部标的运行时</p>
+            </div>
             <el-tag :type="status.kill_switch ? 'danger' : status.paused ? 'warning' : 'success'" effect="plain">
               {{ status.kill_switch ? '紧急停止' : status.paused ? '暂停中' : '可交易' }}
             </el-tag>
@@ -158,8 +161,121 @@
       </div>
     </section>
 
+    <section class="detail-panel multi-symbol-panel" data-testid="multi-symbol-snapshots" v-loading="multiSymbolLoading">
+      <div class="section-title">
+        <h4>多标的观察</h4>
+        <el-button size="small" plain @click="refreshMultiSymbols">刷新</el-button>
+      </div>
+
+      <el-alert
+        v-if="multiSymbolError"
+        type="warning"
+        :closable="false"
+        :title="multiSymbolError"
+        class="multi-symbol-alert"
+      />
+
+      <el-empty v-if="!multiSymbolLoading && multiSymbolSnapshots.length === 0" description="暂无观察标的" />
+      <el-table v-else :data="multiSymbolSnapshots" size="small" class="responsive-table">
+        <el-table-column prop="symbol" label="标的" min-width="120" />
+        <el-table-column prop="alias" label="别名" min-width="120" />
+        <el-table-column prop="market" label="市场" width="80" />
+        <el-table-column label="最新价" width="110">
+          <template #default="{ row }">{{ row.last_price.toFixed(2) }}</template>
+        </el-table-column>
+        <el-table-column label="买一" width="110">
+          <template #default="{ row }">{{ row.bid.toFixed(2) }}</template>
+        </el-table-column>
+        <el-table-column label="卖一" width="110">
+          <template #default="{ row }">{{ row.ask.toFixed(2) }}</template>
+        </el-table-column>
+        <el-table-column label="更新时间" width="120">
+          <template #default="{ row }">{{ formatTime(row.timestamp) }}</template>
+        </el-table-column>
+        <el-table-column label="状态" width="110">
+          <template #default="{ row }">
+            <el-tag v-if="row.is_trading_target" type="success" size="small">当前交易</el-tag>
+            <span v-else>观察</span>
+          </template>
+        </el-table-column>
+      </el-table>
+    </section>
+
+    <section class="detail-panel diagnostics-panel" data-testid="dashboard-diagnostics" v-loading="diagnosticsLoading">
+      <div class="section-title">
+        <h4>运行诊断</h4>
+        <el-button size="small" plain @click="loadDiagnostics">刷新</el-button>
+      </div>
+      <template v-if="diagnostics">
+        <div class="diagnostics-grid">
+          <div class="diagnostic-block">
+            <span>线程存活</span>
+            <strong>{{ diagnostics.thread_alive ? '是' : '否' }}</strong>
+          </div>
+          <div class="diagnostic-block">
+            <span>行情流</span>
+            <strong>{{ diagnostics.quotes_subscribed ? '已订阅' : '未订阅' }}</strong>
+            <small>最近推送 {{ formatAgeSeconds(diagnostics.quote_stream.last_push_age_seconds) }}</small>
+          </div>
+          <div class="diagnostic-block">
+            <span>最近报价</span>
+            <strong>{{ formatAgeSeconds(diagnostics.quote_stream.last_quote_age_seconds) }}</strong>
+            <small>{{ diagnostics.quote_stream.recent_quote_count }} 条样本</small>
+          </div>
+          <div class="diagnostic-block">
+            <span>挂单标的</span>
+            <strong>{{ diagnostics.pending_order_symbols.length > 0 ? diagnostics.pending_order_symbols.join(', ') : '无' }}</strong>
+            <small>运行时总数 {{ diagnostics.symbol_runtimes.length }} 个</small>
+            <small>{{ diagnostics.trigger_in_flight ? '触发处理中' : '空闲' }}</small>
+          </div>
+        </div>
+
+        <el-table :data="diagnostics.symbol_runtimes" size="small" class="responsive-table">
+          <el-table-column prop="symbol" label="标的" min-width="120" />
+          <el-table-column label="状态" min-width="100">
+            <template #default="{ row }">{{ engineStateLabel(row.engine_state) }}</template>
+          </el-table-column>
+          <el-table-column label="角色" min-width="90">
+            <template #default="{ row }">
+              <el-tag :type="row.is_primary ? 'success' : 'info'" size="small">{{ row.is_primary ? '主标的' : '观察标的' }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="最新价" min-width="90">
+            <template #default="{ row }">${{ formatNumber(row.last_price) }}</template>
+          </el-table-column>
+          <el-table-column label="最近触发" min-width="90">
+            <template #default="{ row }">{{ row.last_trigger_price > 0 ? `$${formatNumber(row.last_trigger_price)}` : '-' }}</template>
+          </el-table-column>
+          <el-table-column label="样本数" min-width="70">
+            <template #default="{ row }">{{ row.recent_quote_count }}</template>
+          </el-table-column>
+          <el-table-column label="挂单" min-width="80">
+            <template #default="{ row }">{{ row.has_pending_order ? '存在挂单' : '无' }}</template>
+          </el-table-column>
+        </el-table>
+      </template>
+      <p v-else class="empty-note">暂无诊断数据</p>
+    </section>
+
     <section class="chart-grid" data-testid="dashboard-charts">
       <div class="chart-controls">
+        <div class="chart-symbol-controls">
+          <strong data-testid="chart-symbol-current">{{ selectedChartSymbol || strategy.symbol || '未配置标的' }}</strong>
+          <el-select
+            v-model="selectedChartSymbol"
+            size="small"
+            placeholder="选择图表标的"
+            style="width: 180px"
+            data-testid="chart-symbol-select"
+          >
+            <el-option
+              v-for="option in chartSymbolOptions"
+              :key="option.symbol"
+              :label="option.label"
+              :value="option.symbol"
+            />
+          </el-select>
+        </div>
         <el-button v-if="isMobile" size="small" text @click="chartExpanded = !chartExpanded"
           >{{ chartExpanded ? '收起图表' : '展开图表' }}</el-button
         >
@@ -168,8 +284,8 @@
         <PriceChart
           :points="chartPoints"
           :markers="tradeMarkers"
-          :buy-low="strategy.buy_low"
-          :sell-high="strategy.sell_high"
+          :buy-low="selectedChartIsPrimary ? strategy.buy_low : 0"
+          :sell-high="selectedChartIsPrimary ? strategy.sell_high : 0"
         />
         <PnLChart :points="chartPoints" />
       </div>
@@ -209,8 +325,8 @@
         </div>
         <h4 class="subsection-title">风控状态</h4>
         <div class="risk-list">
-          <span>紧急停止：{{ status.kill_switch ? '已开启' : '已关闭' }}</span>
-          <span>暂停状态：{{ status.paused ? '已暂停' : '运行中' }}</span>
+          <span>全局紧急停止：{{ status.kill_switch ? '已开启' : '已关闭' }}</span>
+          <span>全局暂停状态：{{ status.paused ? '已暂停' : '运行中' }}</span>
           <span>单日最大亏损：${{ formatNumber(strategy.max_daily_loss) }}</span>
         </div>
       </div>
@@ -268,13 +384,25 @@ import PnLChart from '../components/PnLChart.vue'
 import { useDashboardData } from '../composables/useDashboardData'
 import { useStatusStream } from '../composables/useStatusStream'
 import { useAccountRefresh } from '../composables/useAccountRefresh'
-import { startTrading, stopTrading, pauseTrading, resumeTrading, activateKillSwitch, disableKillSwitch, getLLMIntervalStatus, getOrders, getTradeEvents, getStatusHistory } from '../api'
-import type { LLMIntervalStatus, OrderRecord, Position, StatusHistoryPoint, TradeEventRecord, TradeSignalMarker } from '../types'
+import { useMultiSymbolSnapshots } from '../composables/useMultiSymbolSnapshots'
+import { useStatusHistorySeries } from '../composables/useStatusHistorySeries'
+import { useDiagnosticsSnapshot } from '../composables/useDiagnosticsSnapshot'
+import { startTrading, stopTrading, pauseTrading, resumeTrading, activateKillSwitch, disableKillSwitch, getLLMIntervalStatus, getOrders, getTradeEvents } from '../api'
+import type { LLMIntervalStatus, OrderRecord, Position, StatusHistoryPoint, TradeEventRecord } from '../types'
 import { engineStateLabel, auditActionLabel, marketLabel, positionSideLabel, skipCategoryLabel, tradeEventTypeLabel } from '../utils/labels'
 import { EVENT_TYPE } from '../utils/constants'
 import { useNotificationStream } from '../composables/useNotificationStream'
 
 type CypressWindow = Window & { Cypress?: unknown }
+const multiSymbols = useMultiSymbolSnapshots()
+const {
+  snapshots: multiSymbolSnapshots,
+  loading: multiSymbolLoading,
+  error: multiSymbolError,
+  refresh: refreshMultiSymbols,
+  start: startMultiSymbols,
+} = multiSymbols
+const selectedChartSymbol = ref('')
 const accountRefreshIntervalMs = (window as CypressWindow).Cypress ? 500 : 10000
 const { strategy, status, strategyLoading, statusLoading, loadError, load, refreshStatus } = useDashboardData()
 const { realtimeStatus } = useStatusStream(status)
@@ -287,8 +415,18 @@ const recentEvents = ref<TradeEventRecord[]>([])
 const llmStatusLoading = ref(true)
 const recentOrdersLoading = ref(true)
 const recentEventsLoading = ref(true)
-const chartPoints = ref<StatusHistoryPoint[]>([])
-const tradeMarkers = ref<TradeSignalMarker[]>([])
+const {
+  history: chartHistory,
+  load: loadChartHistory,
+  reset: resetChartHistory,
+} = useStatusHistorySeries()
+const chartPoints = computed(() => chartHistory.value.points)
+const tradeMarkers = computed(() => chartHistory.value.markers)
+const {
+  diagnostics,
+  loading: diagnosticsLoading,
+  load: loadDiagnostics,
+} = useDiagnosticsSnapshot()
 let llmStatusTimer: ReturnType<typeof setInterval> | null = null
 const MAX_CHART_POINTS = 200
 const MOBILE_BREAKPOINT = 768
@@ -350,6 +488,51 @@ const sessionOrderDotClass = computed(() => {
   return status.value.is_trading_hours ? 'session-dot-ok' : 'session-dot-block'
 })
 
+const chartSymbolOptions = computed(() => {
+  const options: Array<{ symbol: string; label: string }> = []
+  const seen = new Set<string>()
+  const primarySymbol = strategy.value.symbol || ''
+  if (primarySymbol) {
+    options.push({ symbol: primarySymbol, label: `${primarySymbol}（主标的）` })
+    seen.add(primarySymbol)
+  }
+  for (const item of multiSymbolSnapshots.value) {
+    if (!item.symbol || seen.has(item.symbol)) continue
+    const alias = item.alias ? `${item.symbol} · ${item.alias}` : item.symbol
+    options.push({ symbol: item.symbol, label: alias })
+    seen.add(item.symbol)
+  }
+  return options
+})
+
+const selectedChartIsPrimary = computed(() => selectedChartSymbol.value === (strategy.value.symbol || ''))
+
+function syncSelectedChartSymbol() {
+  const options = chartSymbolOptions.value
+  if (options.length === 0) {
+    selectedChartSymbol.value = strategy.value.symbol || ''
+    return
+  }
+  if (!selectedChartSymbol.value || !options.some((option) => option.symbol === selectedChartSymbol.value)) {
+    selectedChartSymbol.value = options[0].symbol
+  }
+}
+
+watch(chartSymbolOptions, () => {
+  syncSelectedChartSymbol()
+})
+
+watch(
+  () => strategy.value.symbol,
+  () => {
+    syncSelectedChartSymbol()
+  },
+)
+
+watch(selectedChartSymbol, () => {
+  void loadStatusHistory()
+})
+
 const unrealizedPnl = computed(() => {
   const position = primaryPosition.value
   if (!position || !status.value.last_price) return 0
@@ -383,7 +566,7 @@ async function handleRetry() {
   loadError.value = false
   try {
     await load()
-    await Promise.all([refreshAccount(), loadLLMStatus(), loadRecentOrders(), loadRecentEvents()])
+    await Promise.all([refreshAccount(), loadLLMStatus(), loadRecentOrders(), loadRecentEvents(), loadDiagnostics()])
     await loadStatusHistory()
   } catch {
     void 0
@@ -424,19 +607,32 @@ async function loadRecentEvents() {
 }
 
 async function loadStatusHistory() {
+  const symbol = selectedChartSymbol.value || strategy.value.symbol || ''
+  if (!symbol) {
+    resetChartHistory()
+    return
+  }
   try {
-    const history = await getStatusHistory(MAX_CHART_POINTS)
-    chartPoints.value = history.points.slice(-MAX_CHART_POINTS)
-    tradeMarkers.value = history.markers
+    const history = await loadChartHistory({ limit: MAX_CHART_POINTS, symbol })
+    chartHistory.value = {
+      points: history.points.slice(-MAX_CHART_POINTS),
+      markers: history.markers,
+    }
   } catch {
-    chartPoints.value = []
-    tradeMarkers.value = []
+    resetChartHistory()
   }
 }
 
 function appendStatusPoint() {
+  const primarySymbol = strategy.value.symbol || ''
+  if (!primarySymbol || selectedChartSymbol.value !== primarySymbol) {
+    return
+  }
   const now = new Date().toISOString()
+  const points = chartHistory.value.points
+  const previous = points[points.length - 1]
   const point: StatusHistoryPoint = {
+    symbol: primarySymbol,
     timestamp: now,
     engine_state: status.value.engine_state,
     paused: status.value.paused,
@@ -446,16 +642,19 @@ function appendStatusPoint() {
     last_price: status.value.last_price,
     last_trigger_price: status.value.last_trigger_price,
   }
-  const previous = chartPoints.value[chartPoints.value.length - 1]
   if (
     previous
     && previous.last_price === point.last_price
     && previous.daily_pnl === point.daily_pnl
     && previous.engine_state === point.engine_state
+    && previous.symbol === point.symbol
   ) {
     return
   }
-  chartPoints.value = [...chartPoints.value, point].slice(-MAX_CHART_POINTS)
+  chartHistory.value = {
+    points: [...points, point].slice(-MAX_CHART_POINTS),
+    markers: chartHistory.value.markers,
+  }
 }
 
 onMounted(() => {
@@ -463,10 +662,13 @@ onMounted(() => {
   loadRecentOrders()
   loadRecentEvents()
   loadStatusHistory()
+  loadDiagnostics()
+  startMultiSymbols()
   llmStatusTimer = setInterval(() => {
     loadLLMStatus()
     loadRecentOrders()
     loadRecentEvents()
+    loadDiagnostics()
   }, 3000)
   load().catch(() => void 0)
   window.addEventListener('resize', handleResize)
@@ -497,7 +699,7 @@ async function handleStart() {
   try {
     await startTrading()
     ElMessage.success('交易已启动')
-    await refreshStatus()
+    await Promise.all([refreshStatus(), loadDiagnostics()])
   } catch {
     ElMessage.error('启动失败')
   }
@@ -507,7 +709,7 @@ async function handleStop() {
   try {
     await stopTrading()
     ElMessage.success('交易已停止')
-    await refreshStatus()
+    await Promise.all([refreshStatus(), loadDiagnostics()])
   } catch {
     ElMessage.error('停止失败')
   }
@@ -517,7 +719,7 @@ async function handlePause() {
   try {
     await pauseTrading()
     ElMessage.success('交易已暂停')
-    await refreshStatus()
+    await Promise.all([refreshStatus(), loadDiagnostics()])
   } catch {
     ElMessage.error('暂停失败')
   }
@@ -527,7 +729,7 @@ async function handleResume() {
   try {
     await resumeTrading()
     ElMessage.success('交易已恢复')
-    await refreshStatus()
+    await Promise.all([refreshStatus(), loadDiagnostics()])
   } catch {
     ElMessage.error('恢复失败')
   }
@@ -538,7 +740,7 @@ async function handleKillSwitch() {
     await ElMessageBox.confirm('确定要触发紧急停止吗？', '紧急停止', { type: 'warning' })
     await activateKillSwitch()
     ElMessage.success('紧急停止已触发')
-    await refreshStatus()
+    await Promise.all([refreshStatus(), loadDiagnostics()])
   } catch {
     void 0
   }
@@ -548,10 +750,15 @@ async function handleDisableKillSwitch() {
   try {
     await disableKillSwitch()
     ElMessage.success('紧急停止已解除')
-    await refreshStatus()
+    await Promise.all([refreshStatus(), loadDiagnostics()])
   } catch {
     ElMessage.error('解除失败')
   }
+}
+
+function formatAgeSeconds(value: number | null | undefined): string {
+  if (value == null) return '-'
+  return `${value.toFixed(1)}s`
 }
 
 function formatNumber(value: number | null | undefined): string {
@@ -713,6 +920,12 @@ function eventTagType(
   gap: 6px;
 }
 
+.panel-caption {
+  margin: 4px 0 0;
+  color: #6b7280;
+  font-size: 12px;
+}
+
 .session-dot {
   width: 8px;
   height: 8px;
@@ -800,6 +1013,33 @@ function eventTagType(
   margin-top: 8px;
   color: #6b7280;
   font-size: 12px;
+}
+
+.diagnostics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.diagnostic-block {
+  border-radius: 6px;
+  padding: 10px;
+  background: #f8fafc;
+}
+
+.diagnostic-block span,
+.diagnostic-block small {
+  display: block;
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.diagnostic-block strong {
+  display: block;
+  margin-top: 4px;
+  color: #172033;
+  font-size: 16px;
 }
 
 .mini-grid,
@@ -934,7 +1174,15 @@ function eventTagType(
 
 .chart-controls {
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.chart-symbol-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
 
 .detail-grid {

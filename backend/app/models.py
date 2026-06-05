@@ -131,10 +131,24 @@ class LLMInteraction(Base):
     created_at: Mapped[datetime] = mapped_column(_TZDateTime(), default=_utcnow)
 
 
+class LLMSymbolScheduleState(Base):
+    __tablename__ = "llm_symbol_schedule_state"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(50), default="", unique=True, index=True)
+    market: Mapped[str] = mapped_column(String(10), default="US")
+    last_analysis_at: Mapped[Optional[datetime]] = mapped_column(_TZDateTime(), nullable=True)
+    next_analysis_at: Mapped[Optional[datetime]] = mapped_column(_TZDateTime(), nullable=True)
+    last_status: Mapped[str] = mapped_column(String(20), default="")
+    last_skip_reason: Mapped[str] = mapped_column(Text, default="")
+    updated_at: Mapped[datetime] = mapped_column(_TZDateTime(), default=_utcnow)
+
+
 class RuntimeState(Base):
     __tablename__ = "runtime_state"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(50), default="", index=True)
     engine_state: Mapped[str] = mapped_column(String(20), default="flat")
     paused: Mapped[bool] = mapped_column(Boolean, default=False)
     pause_reason: Mapped[str] = mapped_column(Text, default="")
@@ -169,6 +183,7 @@ class RuntimeStateSnapshot(Base):
     __tablename__ = "runtime_state_snapshots"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(50), default="", index=True)
     engine_state: Mapped[str] = mapped_column(String(20), default="flat")
     paused: Mapped[bool] = mapped_column(Boolean, default=False)
     kill_switch: Mapped[bool] = mapped_column(Boolean, default=False)

@@ -63,6 +63,7 @@ Cypress.Commands.add('stubApi', () => {
     body: {
       points: [
         {
+          symbol: 'NVDA.US',
           timestamp: '2026-05-22T10:00:00Z',
           engine_state: 'flat',
           paused: false,
@@ -73,6 +74,7 @@ Cypress.Commands.add('stubApi', () => {
           last_trigger_price: 0,
         },
         {
+          symbol: 'NVDA.US',
           timestamp: '2026-05-22T10:01:00Z',
           engine_state: 'long',
           paused: false,
@@ -155,6 +157,75 @@ Cypress.Commands.add('stubApi', () => {
       page_size: 20,
     },
   }).as('getEvents')
+
+  cy.intercept('GET', '/api/watchlist/snapshots', {
+    body: [
+      {
+        symbol: 'NVDA.US',
+        market: 'US',
+        alias: 'Nvidia',
+        is_trading_target: true,
+        last_price: 180.5,
+        bid: 180.4,
+        ask: 180.6,
+        timestamp: '2026-06-04T10:00:00Z',
+      },
+      {
+        symbol: 'AAPL.US',
+        market: 'US',
+        alias: 'Apple',
+        is_trading_target: false,
+        last_price: 199.5,
+        bid: 199.4,
+        ask: 199.6,
+        timestamp: '2026-06-04T10:00:00Z',
+      },
+    ],
+  }).as('getWatchlistSnapshots')
+
+  cy.intercept('GET', '/api/diagnostics', {
+    body: {
+      runner_running: false,
+      thread_alive: false,
+      quotes_subscribed: true,
+      trigger_in_flight: false,
+      pending_order_symbols: ['AAPL.US'],
+      quote_stream: {
+        last_push_age_seconds: 3,
+        last_quote_age_seconds: 1,
+        recent_quote_count: 12,
+      },
+      risk: {
+        paused: false,
+        kill_switch: false,
+        pause_reason: '',
+        daily_pnl: 12.5,
+        consecutive_losses: 1,
+      },
+      symbol_runtimes: [
+        {
+          symbol: 'NVDA.US',
+          market: 'US',
+          is_primary: true,
+          engine_state: 'long',
+          last_price: 221.2,
+          last_trigger_price: 220.6,
+          recent_quote_count: 5,
+          has_pending_order: false,
+        },
+        {
+          symbol: 'AAPL.US',
+          market: 'US',
+          is_primary: false,
+          engine_state: 'flat',
+          last_price: 199.5,
+          last_trigger_price: 0,
+          recent_quote_count: 7,
+          has_pending_order: true,
+        },
+      ],
+    },
+  }).as('getDiagnostics')
 
   cy.intercept('GET', '/api/strategy/llm-interval/status', {
     body: {

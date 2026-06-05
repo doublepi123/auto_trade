@@ -15,7 +15,7 @@ from app.core.market_calendar import is_trading_hours
 from app.database import get_db
 from app.models import OrderRecord
 from app.runner import AppRunner, get_runner
-from app.schemas import StatusHistoryPoint, StatusHistoryResponse, StatusResponse, StrategyConfigSchema, StrategyMergedSchema, StrategyResponse, TradeSignalMarker
+from app.schemas import DiagnosticsResponse, StatusHistoryPoint, StatusHistoryResponse, StatusResponse, StrategyConfigSchema, StrategyMergedSchema, StrategyResponse, TradeSignalMarker
 from app.services.daily_pnl_service import DailyPnlService
 from app.services.runtime_state_service import RuntimeStateService
 from app.services.strategy_service import StrategyService
@@ -109,7 +109,7 @@ def put_strategy(
 @router.get("/status", response_model=StatusResponse)
 def get_status(db: Session = Depends(get_db)) -> StatusResponse:
     svc = StrategyService(db)
-    state = svc.get_runtime_state()
+    state = svc.get_primary_runtime_state()
     pnl_result = DailyPnlService(db).calculate()
     if (
         abs(state.daily_pnl - pnl_result.realized_pnl) > 1e-9
@@ -117,6 +117,7 @@ def get_status(db: Session = Depends(get_db)) -> StatusResponse:
         or state.daily_pnl_date != pnl_result.trade_day
     ):
         state = svc.update_runtime_state(
+            symbol=state.symbol,
             daily_pnl=pnl_result.realized_pnl,
             daily_pnl_date=pnl_result.trade_day,
             consecutive_losses=pnl_result.consecutive_losses,
@@ -131,18 +132,36 @@ def get_status(db: Session = Depends(get_db)) -> StatusResponse:
     return response
 
 
+@router.get("/diagnostics", response_model=DiagnosticsResponse)
+def get_diagnostics() -> DiagnosticsResponse:
+    return DiagnosticsResponse.model_validate(get_runner().diagnostics())
+
+
 @router.get("/status/history", response_model=StatusHistoryResponse)
 def get_status_history(
     from_: Optional[datetime] = Query(default=None, alias="from"),
     to: Optional[datetime] = Query(default=None),
     limit: int = Query(default=200, ge=1, le=1000),
+    symbol: str | None = Query(default=None),
     db: Session = Depends(get_db),
 ) -> StatusHistoryResponse:
     end_at = to or datetime.now(timezone.utc)
     start_at = from_ or (end_at - timedelta(hours=6))
-    snapshots = RuntimeStateService().query_history(db, start_at=start_at, end_at=end_at, limit=limit)
+    normalized_symbol = (symbol or "").strip().upper()
+    config = StrategyService(db).get_config()
+    primary_symbol = (config.symbol or "").strip().upper()
+    include_legacy_empty = bool(normalized_symbol and normalized_symbol == primary_symbol)
+    snapshots = RuntimeStateService().query_history(
+        db,
+        start_at=start_at,
+        end_at=end_at,
+        limit=limit,
+        symbol=normalized_symbol,
+        include_legacy_empty=include_legacy_empty,
+    )
     points = [
         StatusHistoryPoint(
+            symbol=snapshot.symbol or normalized_symbol,
             timestamp=snapshot.created_at,
             engine_state=snapshot.engine_state,
             paused=snapshot.paused,
@@ -155,9 +174,13 @@ def get_status_history(
         for snapshot in snapshots
     ]
     if not points:
-        state = StrategyService(db).get_runtime_state()
+        if normalized_symbol and normalized_symbol == primary_symbol:
+            state = StrategyService(db).get_primary_runtime_state()
+        else:
+            state = StrategyService(db).get_runtime_state(symbol=normalized_symbol)
         points = [
             StatusHistoryPoint(
+                symbol=state.symbol or normalized_symbol,
                 timestamp=state.updated_at,
                 engine_state=state.engine_state,
                 paused=state.paused,
@@ -170,6 +193,8 @@ def get_status_history(
         ]
 
     marker_query = db.query(OrderRecord).filter(OrderRecord.status.in_(("FILLED", "PARTIAL_FILLED")))
+    if normalized_symbol:
+        marker_query = marker_query.filter(OrderRecord.symbol == normalized_symbol)
     if start_at is not None:
         marker_query = marker_query.filter(OrderRecord.created_at >= start_at)
     if end_at is not None:

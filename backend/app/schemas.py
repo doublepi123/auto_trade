@@ -175,6 +175,7 @@ class StatusResponse(BaseModel):
 
 
 class StatusHistoryPoint(BaseModel):
+    symbol: str = ""
     timestamp: datetime
     engine_state: str
     paused: bool
@@ -198,6 +199,42 @@ class TradeSignalMarker(BaseModel):
 class StatusHistoryResponse(BaseModel):
     points: list[StatusHistoryPoint]
     markers: list[TradeSignalMarker]
+
+
+class DiagnosticQuoteStream(BaseModel):
+    last_push_age_seconds: float | None = None
+    last_quote_age_seconds: float | None = None
+    recent_quote_count: int
+
+
+class DiagnosticRiskState(BaseModel):
+    paused: bool
+    kill_switch: bool
+    pause_reason: str = ""
+    daily_pnl: float
+    consecutive_losses: int
+
+
+class DiagnosticSymbolRuntime(BaseModel):
+    symbol: str
+    market: str
+    is_primary: bool
+    engine_state: str
+    last_price: float
+    last_trigger_price: float
+    recent_quote_count: int
+    has_pending_order: bool
+
+
+class DiagnosticsResponse(BaseModel):
+    runner_running: bool
+    thread_alive: bool
+    quotes_subscribed: bool
+    trigger_in_flight: bool
+    pending_order_symbols: list[str]
+    quote_stream: DiagnosticQuoteStream
+    risk: DiagnosticRiskState
+    symbol_runtimes: list[DiagnosticSymbolRuntime]
 
 
 class OrderResponse(BaseModel):
@@ -642,6 +679,28 @@ class LLMSuggestion(BaseModel):
     analysis: str
 
 
+
+class LLMBudgetStatus(BaseModel):
+    max_symbols_per_cycle: int
+    max_analyses_per_hour: int
+    tracked_symbol_count: int
+    effective_symbol_budget: int
+    used_analyses_last_hour: int = 0
+    remaining_analyses_this_hour: int = 0
+
+
+class LLMSymbolStatus(BaseModel):
+    symbol: str
+    market: str
+    is_primary: bool
+    has_pending_order: bool
+    buy_cooldown_remaining_seconds: float | None = None
+    sell_cooldown_remaining_seconds: float | None = None
+    last_analysis_at: str | None = None
+    next_analysis_at: str | None = None
+    last_status: str | None = None
+    last_skip_reason: str | None = None
+
 class LLMIntervalStatus(BaseModel):
     enabled: bool
     interval_minutes: int
@@ -650,6 +709,8 @@ class LLMIntervalStatus(BaseModel):
     current_suggestion: Optional[LLMSuggestion] = None
     applied_values: Optional[dict[str, Any]] = None
     reject_reason: Optional[str] = None
+    budget: LLMBudgetStatus
+    symbol_statuses: list[LLMSymbolStatus] = Field(default_factory=list)
 
 
 class LLMEvaluationRequest(BaseModel):
@@ -732,6 +793,17 @@ class WatchlistItemResponse(BaseModel):
 
 class WatchlistQuote(BaseModel):
     symbol: str
+    last_price: float
+    bid: float
+    ask: float
+    timestamp: str
+
+
+class WatchlistSnapshot(BaseModel):
+    symbol: str
+    market: str
+    alias: str = ""
+    is_trading_target: bool = False
     last_price: float
     bid: float
     ask: float

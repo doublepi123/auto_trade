@@ -128,6 +128,98 @@ class TestWatchlistApi:
         assert resp.status_code == 422
 
 
+    def test_get_watchlist_snapshots_empty(self, clean_db):
+        resp = client.get("/api/watchlist/snapshots")
+
+        assert resp.status_code == 200
+        assert resp.json() == []
+
+    def test_get_watchlist_snapshots_marks_current_trading_symbol(self, clean_db, monkeypatch):
+        from datetime import datetime, timezone
+        from decimal import Decimal
+        from types import SimpleNamespace
+
+        from app.api import watchlist as watchlist_api
+
+        db = SessionLocal()
+        db.add(StrategyConfig(symbol="NVDA.US", market="US"))
+        db.add_all(
+            [
+                WatchlistItem(symbol="NVDA.US", market="US", alias="Nvidia", is_active=True, created_at=datetime(2026, 6, 4, 10, 1, tzinfo=timezone.utc)),
+                WatchlistItem(symbol="AAPL.US", market="US", alias="Apple", is_active=False, created_at=datetime(2026, 6, 4, 10, 0, tzinfo=timezone.utc)),
+            ]
+        )
+        db.commit()
+        db.close()
+
+        class FakeBroker:
+            def get_quotes(self, symbols):
+                assert symbols == ["NVDA.US", "AAPL.US"]
+                return [
+                    SimpleNamespace(
+                        symbol="NVDA.US",
+                        last_price=Decimal("180.5"),
+                        bid=Decimal("180.4"),
+                        ask=Decimal("180.6"),
+                        timestamp="2026-06-04T10:00:00Z",
+                    ),
+                    SimpleNamespace(
+                        symbol="AAPL.US",
+                        last_price=Decimal("199.5"),
+                        bid=Decimal("199.4"),
+                        ask=Decimal("199.6"),
+                        timestamp=datetime(2026, 6, 4, 10, 0, tzinfo=timezone.utc),
+                    ),
+                ]
+
+        monkeypatch.setattr(watchlist_api, "BrokerGateway", lambda: FakeBroker())
+
+        resp = client.get("/api/watchlist/snapshots")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data == [
+            {
+                "symbol": "NVDA.US",
+                "market": "US",
+                "alias": "Nvidia",
+                "is_trading_target": True,
+                "last_price": 180.5,
+                "bid": 180.4,
+                "ask": 180.6,
+                "timestamp": "2026-06-04T10:00:00Z",
+            },
+            {
+                "symbol": "AAPL.US",
+                "market": "US",
+                "alias": "Apple",
+                "is_trading_target": False,
+                "last_price": 199.5,
+                "bid": 199.4,
+                "ask": 199.6,
+                "timestamp": "2026-06-04T10:00:00+00:00",
+            },
+        ]
+
+    def test_get_watchlist_snapshots_returns_503_when_broker_fails(self, clean_db, monkeypatch):
+        from app.api import watchlist as watchlist_api
+
+        db = SessionLocal()
+        db.add(WatchlistItem(symbol="NVDA.US", market="US", alias="Nvidia", is_active=False))
+        db.commit()
+        db.close()
+
+        class FakeBroker:
+            def get_quotes(self, symbols):
+                raise RuntimeError("broker down")
+
+        monkeypatch.setattr(watchlist_api, "BrokerGateway", lambda: FakeBroker())
+
+        resp = client.get("/api/watchlist/snapshots")
+
+        assert resp.status_code == 503
+        assert resp.json()["detail"] == "broker quote unavailable"
+
 class TestWatchlistService:
     def test_list_items(self, clean_db):
         db = SessionLocal()

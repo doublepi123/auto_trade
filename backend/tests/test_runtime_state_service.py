@@ -8,7 +8,7 @@ os.environ["AUTO_TRADE_DATABASE_URL"] = "sqlite:///data/test_runtime_state.db"
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from app.core.engine import StrategyEngine, EngineState
+from app.core.engine import StrategyEngine, EngineState, StrategyParams
 from app.core.risk import RiskController
 from app.models import Base
 from app.models import RuntimeState, RuntimeStateSnapshot, StrategyConfig
@@ -118,6 +118,7 @@ class TestRuntimeStateService:
         db.close()
 
         engine = StrategyEngine()
+        engine.params = StrategyParams(symbol="NVDA.US", market="US")
         engine.state = EngineState.SHORT
         engine.last_price = 180.0
         risk = RiskController()
@@ -133,7 +134,7 @@ class TestRuntimeStateService:
         db.close()
 
         db = self._get_db()
-        state = svc.get_runtime_state()
+        state = svc.get_runtime_state(symbol="NVDA.US")
         db.close()
 
         assert state.engine_state == "short"
@@ -160,11 +161,11 @@ class TestRuntimeStateService:
 
         state_svc = RuntimeStateService()
         db = self._get_db()
-        state_svc.persist_risk(db, risk)
+        state_svc.persist_risk(db, risk, symbol="META.US")
         db.close()
 
         db = self._get_db()
-        state = svc.get_runtime_state()
+        state = svc.get_primary_runtime_state()
         db.close()
 
         assert state.daily_pnl == -25.0
@@ -224,6 +225,88 @@ class TestRuntimeStateService:
             db.close()
 
         assert [point.last_price for point in points] == [220.0, 221.0]
+
+
+    def test_get_runtime_state_creates_symbol_scoped_rows(self) -> None:
+        self._cleanup()
+        db = self._get_db()
+        try:
+            svc = StrategyService(db)
+            primary = svc.get_runtime_state()
+            nvda = svc.get_runtime_state(symbol="NVDA.US")
+            aapl = svc.get_runtime_state(symbol="AAPL.US")
+            rows = [
+                (primary.id, primary.symbol),
+                (nvda.id, nvda.symbol),
+                (aapl.id, aapl.symbol),
+            ]
+        finally:
+            db.close()
+
+        assert rows[0][1] == ""
+        assert rows[1][1] == "NVDA.US"
+        assert rows[2][1] == "AAPL.US"
+        assert rows[0][0] != rows[1][0]
+        assert rows[1][0] != rows[2][0]
+
+    def test_persist_symbol_saves_independent_engine_state(self) -> None:
+        self._cleanup()
+        nvda_engine = StrategyEngine(StrategyParams(symbol="NVDA.US", market="US"))
+        nvda_engine.state = EngineState.LONG
+        nvda_engine.last_price = 222.5
+        aapl_engine = StrategyEngine(StrategyParams(symbol="AAPL.US", market="US"))
+        aapl_engine.state = EngineState.SHORT
+        aapl_engine.last_price = 199.5
+
+        state_svc = RuntimeStateService()
+        db = self._get_db()
+        try:
+            state_svc.persist_symbol(db, nvda_engine)
+            state_svc.persist_symbol(db, aapl_engine)
+            nvda = StrategyService(db).get_runtime_state(symbol="NVDA.US")
+            aapl = StrategyService(db).get_runtime_state(symbol="AAPL.US")
+        finally:
+            db.close()
+
+        assert nvda.engine_state == "long"
+        assert nvda.last_price == 222.5
+        assert aapl.engine_state == "short"
+        assert aapl.last_price == 199.5
+
+    def test_query_history_filters_by_symbol(self) -> None:
+        self._cleanup()
+        from datetime import datetime, timezone
+
+        db = self._get_db()
+        try:
+            db.add(RuntimeStateSnapshot(
+                symbol="NVDA.US",
+                engine_state="long",
+                last_price=222.0,
+                daily_pnl=0.0,
+                consecutive_losses=0,
+                paused=False,
+                kill_switch=False,
+                created_at=datetime(2026, 5, 22, 10, 1, tzinfo=timezone.utc),
+            ))
+            db.add(RuntimeStateSnapshot(
+                symbol="AAPL.US",
+                engine_state="short",
+                last_price=199.0,
+                daily_pnl=0.0,
+                consecutive_losses=0,
+                paused=False,
+                kill_switch=False,
+                created_at=datetime(2026, 5, 22, 10, 2, tzinfo=timezone.utc),
+            ))
+            db.commit()
+
+            points = RuntimeStateService().query_history(db, symbol="NVDA.US", limit=10)
+        finally:
+            db.close()
+
+        assert [point.symbol for point in points] == ["NVDA.US"]
+        assert [point.last_price for point in points] == [222.0]
 
     def test_record_risk_event(self) -> None:
         self._cleanup()
@@ -300,6 +383,7 @@ class TestRuntimeStateService:
         db.close()
 
         engine = StrategyEngine()
+        engine.params = StrategyParams(symbol="NVDA.US", market="US")
         risk = RiskController()
         risk.daily_pnl = -25.0
 
@@ -309,9 +393,87 @@ class TestRuntimeStateService:
         db.close()
 
         db = self._get_db()
-        state = svc.get_runtime_state()
+        state = svc.get_runtime_state(symbol="NVDA.US")
         db.close()
 
         from datetime import datetime, timezone
         assert state.daily_pnl == -25.0
         assert state.daily_pnl_date == datetime.now(timezone.utc).date()
+
+    def test_get_primary_runtime_state_migrates_legacy_row(self) -> None:
+        self._cleanup()
+        db = self._get_db()
+        try:
+            svc = StrategyService(db)
+            svc.update_config({"symbol": "AAPL.US", "market": "US", "buy_low": 100.0, "sell_high": 200.0})
+            legacy = svc.update_runtime_state(engine_state="long", last_price=180.0)
+            assert legacy.symbol == ""
+
+            migrated = svc.get_primary_runtime_state()
+            assert migrated.symbol == "AAPL.US"
+            assert migrated.engine_state == "long"
+            assert migrated.last_price == 180.0
+        finally:
+            db.close()
+
+    def test_persist_writes_primary_symbol_snapshots(self) -> None:
+        self._cleanup()
+        db = self._get_db()
+        try:
+            StrategyService(db).update_config(
+                {"symbol": "AAPL.US", "market": "US", "buy_low": 100.0, "sell_high": 200.0}
+            )
+            engine = StrategyEngine(StrategyParams(symbol="AAPL.US", market="US"))
+            engine.state = EngineState.LONG
+            engine.last_price = 190.0
+            risk = RiskController()
+
+            state_svc = RuntimeStateService()
+            state_svc.persist(db, engine, risk)
+
+            points = state_svc.query_history(db, symbol="AAPL.US", limit=10)
+            assert len(points) == 1
+            assert points[0].symbol == "AAPL.US"
+            assert points[0].last_price == 190.0
+        finally:
+            db.close()
+
+    def test_query_history_includes_legacy_snapshots_for_primary_symbol(self) -> None:
+        self._cleanup()
+        from datetime import datetime, timezone
+
+        db = self._get_db()
+        try:
+            db.add(RuntimeStateSnapshot(
+                symbol="",
+                engine_state="flat",
+                last_price=220.0,
+                daily_pnl=0.0,
+                consecutive_losses=0,
+                paused=False,
+                kill_switch=False,
+                created_at=datetime(2026, 5, 22, 10, 1, tzinfo=timezone.utc),
+            ))
+            db.add(RuntimeStateSnapshot(
+                symbol="AAPL.US",
+                engine_state="long",
+                last_price=221.0,
+                daily_pnl=5.0,
+                consecutive_losses=0,
+                paused=False,
+                kill_switch=False,
+                created_at=datetime(2026, 5, 22, 10, 2, tzinfo=timezone.utc),
+            ))
+            db.commit()
+
+            points = RuntimeStateService().query_history(
+                db,
+                symbol="AAPL.US",
+                include_legacy_empty=True,
+                limit=10,
+            )
+        finally:
+            db.close()
+
+        assert [point.last_price for point in points] == [220.0, 221.0]
+        assert [point.symbol for point in points] == ["", "AAPL.US"]

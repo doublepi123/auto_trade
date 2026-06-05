@@ -309,7 +309,7 @@ class BrokerGateway:
         self._trade_ctx: Any = None
         self._quote_callbacks: list[Callable[[Quote], None]] = []
         self._disconnect_hooks: list[DisconnectHook] = []
-        self._subscribed_symbol: str | None = None
+        self._subscribed_symbols: set[str] = set()
 
     def register_disconnect_hook(self, hook: DisconnectHook) -> None:
         """Register a broker disconnect hook, de-duplicating the same callable."""
@@ -472,21 +472,25 @@ class BrokerGateway:
             return quotes
 
     def subscribe_quotes(self, symbol: str, callback: Callable[[Quote], None]) -> None:
+        self.subscribe_quotes_batch([symbol], callback)
+
+    def subscribe_quotes_batch(self, symbols: list[str], callback: Callable[[Quote], None]) -> None:
+        unique_symbols = [symbol for symbol in dict.fromkeys(symbols) if symbol]
+        if not unique_symbols:
+            return
         with self._lock:
-            if self._subscribed_symbol == symbol:
-                if callback not in self._quote_callbacks:
-                    self._quote_callbacks.append(callback)
+            added_callback = False
+            if callback not in self._quote_callbacks:
+                self._quote_callbacks.append(callback)
+                added_callback = True
+            missing_symbols = [symbol for symbol in unique_symbols if symbol not in self._subscribed_symbols]
+            if not missing_symbols:
                 return
-            if self._subscribed_symbol and self._quote_ctx is not None:
-                try:
-                    self._quote_ctx.unsubscribe([self._subscribed_symbol])
-                except Exception:
-                    logger.warning("failed to unsubscribe from %s", self._subscribed_symbol)
-                self._subscribed_symbol = None
-                self._quote_callbacks = []
             self._init_clients()
             quote_ctx = self._quote_ctx
             if quote_ctx is None:
+                if added_callback:
+                    self._quote_callbacks.remove(callback)
                 raise RuntimeError("quote context is not initialized")
             module = _import_openapi()
             SubType = getattr(module, "SubType", None)
@@ -507,10 +511,13 @@ class BrokerGateway:
 
             quote_ctx.set_on_quote(_on_quote)
             topics = [SubType.Quote] if SubType else []
-            quote_ctx.subscribe([symbol], topics)
-            self._quote_callbacks = [callback]
-            self._subscribed_symbol = symbol
-
+            try:
+                quote_ctx.subscribe(missing_symbols, topics)
+            except Exception:
+                if added_callback and callback in self._quote_callbacks:
+                    self._quote_callbacks.remove(callback)
+                raise
+            self._subscribed_symbols.update(missing_symbols)
     def submit_limit_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal) -> OrderResult:
         return self._call_with_retry(
             lambda: self._submit_limit_order_inner(symbol, side, quantity, price),
@@ -689,7 +696,7 @@ class BrokerGateway:
     def close(self) -> None:
         with self._lock:
             self._quote_callbacks.clear()
-            self._subscribed_symbol = None
+            self._subscribed_symbols.clear()
             for ctx in (self._quote_ctx, self._trade_ctx):
                 if ctx is not None:
                     try:
@@ -701,13 +708,14 @@ class BrokerGateway:
 
     def unsubscribe_quotes(self) -> None:
         with self._lock:
-            if self._subscribed_symbol and self._quote_ctx is not None:
+            symbols = sorted(self._subscribed_symbols)
+            if symbols and self._quote_ctx is not None:
                 try:
-                    self._quote_ctx.unsubscribe([self._subscribed_symbol])
+                    self._quote_ctx.unsubscribe(symbols)
                 except Exception:
-                    logger.warning("failed to unsubscribe from %s", self._subscribed_symbol)
+                    logger.warning("failed to unsubscribe from %s", ", ".join(symbols))
             self._quote_callbacks.clear()
-            self._subscribed_symbol = None
+            self._subscribed_symbols.clear()
 
     def get_cash(self, currency: str | None = None) -> Decimal:
         with self._lock:

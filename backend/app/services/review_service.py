@@ -117,27 +117,143 @@ class ReviewService:
             "all_error_tags": sorted(all_error_tags),
         }
 
-    def export_review(self, symbol: str, from_date: str, to_date: str, fmt: str) -> io.BytesIO:
-        data = self.get_review(symbol, from_date, to_date)
+    def get_runtime_history(self, symbol: str, from_date: str, to_date: str) -> dict[str, Any]:
+        from_d = _parse_date(from_date)
+        to_d = _parse_date(to_date)
+        start_at = datetime(from_d.year, from_d.month, from_d.day, tzinfo=timezone.utc)
+        end_at = datetime(to_d.year, to_d.month, to_d.day, tzinfo=timezone.utc) + timedelta(days=1)
+
+        snapshots = (
+            self._db.query(RuntimeStateSnapshot)
+            .filter(
+                RuntimeStateSnapshot.symbol == symbol,
+                RuntimeStateSnapshot.created_at >= start_at,
+                RuntimeStateSnapshot.created_at < end_at,
+            )
+            .order_by(RuntimeStateSnapshot.created_at.asc(), RuntimeStateSnapshot.id.asc())
+            .all()
+        )
+
+        markers = (
+            self._db.query(OrderRecord)
+            .filter(
+                OrderRecord.symbol == symbol,
+                OrderRecord.status.in_(("FILLED", "PARTIAL_FILLED")),
+                OrderRecord.created_at >= start_at,
+                OrderRecord.created_at < end_at,
+            )
+            .order_by(OrderRecord.created_at.asc(), OrderRecord.id.asc())
+            .all()
+        )
+
+        return {
+            "points": [
+                {
+                    "symbol": snapshot.symbol,
+                    "timestamp": snapshot.created_at.isoformat(),
+                    "engine_state": snapshot.engine_state,
+                    "paused": snapshot.paused,
+                    "kill_switch": snapshot.kill_switch,
+                    "daily_pnl": snapshot.daily_pnl,
+                    "consecutive_losses": snapshot.consecutive_losses,
+                    "last_price": snapshot.last_price,
+                    "last_trigger_price": snapshot.last_trigger_price,
+                }
+                for snapshot in snapshots
+            ],
+            "markers": [
+                {
+                    "timestamp": order.created_at.isoformat(),
+                    "broker_order_id": order.broker_order_id,
+                    "symbol": order.symbol,
+                    "side": order.side,
+                    "quantity": order.executed_quantity or order.quantity,
+                    "price": order.executed_price or order.price,
+                    "status": order.status,
+                }
+                for order in markers
+            ],
+        }
+
+    def export_review(
+        self,
+        symbol: str,
+        from_date: str,
+        to_date: str,
+        fmt: str,
+        *,
+        diagnostics: dict[str, Any] | None = None,
+    ) -> io.BytesIO:
+        review = self.get_review(symbol, from_date, to_date)
+        runtime_history = self.get_runtime_history(symbol, from_date, to_date)
+        diagnostics_payload = diagnostics or {}
         if fmt == "json":
-            buf = io.BytesIO(json.dumps(data, ensure_ascii=False, indent=2, default=str).encode("utf-8"))
+            payload = {
+                "review": review,
+                "runtime_history": runtime_history,
+                "diagnostics": diagnostics_payload,
+            }
+            buf = io.BytesIO(json.dumps(payload, ensure_ascii=False, indent=2, default=str).encode("utf-8"))
             buf.seek(0)
             return buf
-        # CSV export: flatten to one row per day
         buf = io.StringIO()
         writer = csv.writer(buf)
-        writer.writerow(["date", "symbol", "trade_count", "daily_pnl", "error_tags", "llm_count", "order_count", "event_count"])
-        for day in data["days"]:
+        writer.writerow(["section", "row_type", "date", "symbol", "field_a", "field_b", "field_c", "field_d"])
+        for day in review["days"]:
             writer.writerow([
+                "review_day",
+                "summary",
                 day["date"],
                 symbol,
                 day["trade_count"],
                 day["daily_pnl"],
                 ";".join(day["error_tags"]),
-                len(day["llm_interactions"]),
-                len(day["orders"]),
                 len(day["events"]),
             ])
+        for point in runtime_history["points"]:
+            writer.writerow([
+                "history_point",
+                "runtime_point",
+                point["timestamp"],
+                point["symbol"],
+                point["engine_state"],
+                point["last_price"],
+                point["daily_pnl"],
+                point["last_trigger_price"],
+            ])
+        for marker in runtime_history["markers"]:
+            writer.writerow([
+                "history_marker",
+                "trade_marker",
+                marker["timestamp"],
+                marker["symbol"],
+                marker["side"],
+                marker["quantity"],
+                marker["price"],
+                marker["status"],
+            ])
+        for runtime in diagnostics_payload.get("symbol_runtimes", []):
+            writer.writerow([
+                "diagnostic_runtime",
+                "runtime",
+                runtime.get("symbol", ""),
+                runtime.get("symbol", ""),
+                runtime.get("engine_state", ""),
+                runtime.get("last_price", ""),
+                runtime.get("last_trigger_price", ""),
+                runtime.get("has_pending_order", ""),
+            ])
+        pending_symbols = diagnostics_payload.get("pending_order_symbols", [])
+        writer.writerow([
+            "diagnostic_meta",
+            "pending_order_symbols",
+            "",
+            ",".join(pending_symbols),
+            diagnostics_payload.get("runner_running", ""),
+            diagnostics_payload.get("thread_alive", ""),
+            diagnostics_payload.get("quotes_subscribed", ""),
+            diagnostics_payload.get("trigger_in_flight", ""),
+        ])
         bio = io.BytesIO(buf.getvalue().encode("utf-8"))
         bio.seek(0)
         return bio

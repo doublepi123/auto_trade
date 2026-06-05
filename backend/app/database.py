@@ -22,6 +22,8 @@ def init_db() -> None:
     _ensure_strategy_config_trade_safety_columns(engine)
     _ensure_strategy_config_session_columns(engine)
     _ensure_runtime_state_daily_pnl_date_column(engine)
+    _ensure_runtime_state_symbol_columns(engine)
+    _backfill_primary_runtime_state_symbols(engine)
     _ensure_tracked_entries_table(engine)
     _ensure_audit_log_table(engine)
     _ensure_credential_config_notification_channels_column(engine)
@@ -150,6 +152,60 @@ def _ensure_runtime_state_daily_pnl_date_column(db_engine: Engine) -> None:
             )
         connection.exec_driver_sql(
             "UPDATE runtime_state SET daily_pnl = 0, consecutive_losses = 0, daily_pnl_date = DATE('now') WHERE daily_pnl_date IS NULL"
+        )
+
+
+def _ensure_runtime_state_symbol_columns(db_engine: Engine) -> None:
+    inspector = inspect(db_engine)
+    table_names = set(inspector.get_table_names())
+
+    with db_engine.begin() as connection:
+        if "runtime_state" in table_names:
+            columns = {column["name"] for column in inspector.get_columns("runtime_state")}
+            if "symbol" not in columns:
+                connection.exec_driver_sql(
+                    "ALTER TABLE runtime_state ADD COLUMN symbol VARCHAR(50) DEFAULT '' NOT NULL"
+                )
+                connection.exec_driver_sql(
+                    "CREATE INDEX IF NOT EXISTS ix_runtime_state_symbol ON runtime_state (symbol)"
+                )
+        if "runtime_state_snapshots" in table_names:
+            columns = {column["name"] for column in inspector.get_columns("runtime_state_snapshots")}
+            if "symbol" not in columns:
+                connection.exec_driver_sql(
+                    "ALTER TABLE runtime_state_snapshots ADD COLUMN symbol VARCHAR(50) DEFAULT '' NOT NULL"
+                )
+                connection.exec_driver_sql(
+                    "CREATE INDEX IF NOT EXISTS ix_runtime_state_snapshots_symbol ON runtime_state_snapshots (symbol)"
+                )
+
+
+def _backfill_primary_runtime_state_symbols(db_engine: Engine) -> None:
+    inspector = inspect(db_engine)
+    if "runtime_state" not in inspector.get_table_names():
+        return
+    if "strategy_config" not in inspector.get_table_names():
+        return
+
+    with db_engine.begin() as connection:
+        row = connection.exec_driver_sql(
+            "SELECT symbol FROM strategy_config ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        if row is None or not row[0]:
+            return
+        primary_symbol = str(row[0]).strip().upper()
+        if not primary_symbol:
+            return
+        connection.exec_driver_sql(
+            """
+            UPDATE runtime_state
+            SET symbol = ?
+            WHERE symbol = ''
+              AND NOT EXISTS (
+                SELECT 1 FROM runtime_state WHERE symbol = ?
+              )
+            """,
+            (primary_symbol, primary_symbol),
         )
 
 

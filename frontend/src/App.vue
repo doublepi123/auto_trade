@@ -3,18 +3,18 @@
     <!-- 桌面端顶部导航 -->
     <el-header v-if="!isMobile" class="app-header" data-testid="desktop-nav">
       <h2>Auto Trade</h2>
-      <el-menu class="app-menu" mode="horizontal" :default-active="route.path" router>
-        <el-menu-item index="/">仪表盘</el-menu-item>
-        <el-menu-item index="/watchlist">观察列表</el-menu-item>
-        <el-menu-item index="/review">复盘</el-menu-item>
-        <el-menu-item index="/backtest">回测</el-menu-item>
-        <el-menu-item index="/experiments">策略实验</el-menu-item>
-        <el-menu-item index="/strategy">策略配置</el-menu-item>
-        <el-menu-item index="/credentials">凭证设置</el-menu-item>
-        <el-menu-item index="/history">交易历史</el-menu-item>
-        <el-menu-item index="/events">决策时间线</el-menu-item>
-        <el-menu-item index="/lab">优化工作台</el-menu-item>
-      </el-menu>
+      <nav class="app-menu" aria-label="主导航">
+        <router-link to="/" class="app-menu-link" :class="{ active: route.path === '/' }">仪表盘</router-link>
+        <router-link to="/watchlist" class="app-menu-link" :class="{ active: route.path === '/watchlist' }">观察列表</router-link>
+        <router-link to="/review" class="app-menu-link" :class="{ active: route.path === '/review' }">复盘</router-link>
+        <router-link to="/backtest" class="app-menu-link" :class="{ active: route.path === '/backtest' }">回测</router-link>
+        <router-link to="/experiments" class="app-menu-link" :class="{ active: route.path === '/experiments' }">策略实验</router-link>
+        <router-link to="/strategy" class="app-menu-link" :class="{ active: route.path === '/strategy' }">策略配置</router-link>
+        <router-link to="/credentials" class="app-menu-link" :class="{ active: route.path === '/credentials' }">凭证设置</router-link>
+        <router-link to="/history" class="app-menu-link" :class="{ active: route.path === '/history' }">交易历史</router-link>
+        <router-link to="/events" class="app-menu-link" :class="{ active: route.path === '/events' }">决策时间线</router-link>
+        <router-link to="/lab" class="app-menu-link" :class="{ active: route.path === '/lab' }">优化工作台</router-link>
+      </nav>
       <el-button size="small" text @click="dialogVisible = true" data-testid="nav-notification-settings"
         >通知偏好</el-button
       >
@@ -59,10 +59,11 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue'
+import { defineAsyncComponent, ref, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { Odometer, Setting, List, Clock, Key, TrendCharts } from '@element-plus/icons-vue'
-import NotificationSettings from './components/NotificationSettings.vue'
+
+const NotificationSettings = defineAsyncComponent(() => import('./components/NotificationSettings.vue'))
 
 const route = useRoute()
 const dialogVisible = ref(false)
@@ -100,8 +101,22 @@ onUnmounted(() => {
 }
 
 .app-menu {
+  display: flex;
+  align-items: center;
+  gap: 20px;
   flex: 1 1 auto;
   min-width: 0;
+}
+
+.app-menu-link {
+  color: #6b7280;
+  font-size: 13px;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.app-menu-link.active {
+  color: #409eff;
 }
 
 /* 移动端主内容区增加底部 padding 给导航栏留空间 */

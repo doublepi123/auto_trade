@@ -682,6 +682,92 @@ class TestTradeExecutionServiceBasics:
 
         assert result.status == "NO_PENDING_ORDER"
 
+    def test_pending_orders_are_tracked_per_symbol(self, svc: TradeExecutionService) -> None:
+        broker = MagicMock()
+        svc._track_pending_order(
+            "BUY",
+            OrderResult("order-nvda", "NVDA.US", "BUY", Decimal("10"), Decimal("220"), "SUBMITTED"),
+            broker,
+            None,
+        )
+        svc._track_pending_order(
+            "BUY",
+            OrderResult("order-aapl", "AAPL.US", "BUY", Decimal("5"), Decimal("199"), "SUBMITTED"),
+            broker,
+            None,
+        )
+
+        assert svc.has_pending_order is True
+        assert svc.pending_order is not None
+        assert svc.pending_order.broker_order_id == "order-nvda"
+        assert svc.pending_order_for("NVDA.US") is not None
+        assert svc.pending_order_for("NVDA.US").broker_order_id == "order-nvda"
+        assert svc.pending_order_for("AAPL.US") is not None
+        assert svc.pending_order_for("AAPL.US").broker_order_id == "order-aapl"
+
+    def test_execute_allows_different_symbol_when_another_symbol_is_pending(self) -> None:
+        from app.core.broker import Quote
+        from app.core.risk import RiskController
+        from app.core.notify import ServerChanNotifier
+
+        skipped: list[tuple[str, str, str, dict[str, object]]] = []
+        svc = TradeExecutionService(
+            record_order=lambda *args: None,
+            update_order_status=lambda *args: None,
+            record_risk_event=lambda *args: None,
+            record_order_skipped=lambda symbol, action, reason, payload: skipped.append((symbol, action, reason, payload)),
+        )
+        pending_broker = MagicMock()
+        svc._track_pending_order(
+            "BUY",
+            OrderResult("order-nvda", "NVDA.US", "BUY", Decimal("10"), Decimal("220"), "SUBMITTED"),
+            pending_broker,
+            None,
+        )
+        broker = MagicMock()
+        broker.get_cash.return_value = {"USD": Decimal("10000")}
+        broker.submit_limit_order.return_value = OrderResult("order-aapl", "AAPL.US", "BUY", Decimal("5"), Decimal("199"), "FILLED")
+
+        status = svc.execute(
+            "BUY",
+            "AAPL.US",
+            Quote("AAPL.US", 199, 198.9, 199.1, ""),
+            broker,
+            RiskController(),
+            ServerChanNotifier(""),
+            "USD",
+        )
+
+        assert status is not None
+        assert status.status == "FILLED"
+        assert skipped == []
+        broker.submit_limit_order.assert_called_once()
+
+    def test_cancel_pending_order_for_symbol_leaves_other_symbols_pending(self, svc: TradeExecutionService) -> None:
+        from app.core.broker import OrderStatusResult
+
+        broker = MagicMock()
+        broker.cancel_order.return_value = OrderStatusResult("order-aapl", "CANCELLED")
+        svc._track_pending_order(
+            "BUY",
+            OrderResult("order-nvda", "NVDA.US", "BUY", Decimal("10"), Decimal("220"), "SUBMITTED"),
+            broker,
+            None,
+        )
+        svc._track_pending_order(
+            "BUY",
+            OrderResult("order-aapl", "AAPL.US", "BUY", Decimal("5"), Decimal("199"), "SUBMITTED"),
+            broker,
+            None,
+        )
+
+        result = svc.cancel_pending_order_for_symbol("AAPL.US")
+
+        assert result.status == "CANCELLED"
+        assert svc.pending_order_for("AAPL.US") is None
+        assert svc.pending_order_for("NVDA.US") is not None
+        broker.cancel_order.assert_called_once_with("order-aapl")
+
     def test_execute_sell_skips_when_fees_reduce_net_profit_below_minimum(self, monkeypatch) -> None:
         from app.config import settings
         from app.core.broker import OrderResult, Position, Quote

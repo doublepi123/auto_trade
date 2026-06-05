@@ -7,7 +7,6 @@
       </div>
     </div>
 
-    <!-- Filters -->
     <el-card class="filter-card">
       <el-form :inline="true" @submit.prevent="handleSearch">
         <el-form-item label="股票代码">
@@ -27,7 +26,6 @@
       </el-form>
     </el-card>
 
-    <!-- Summary cards -->
     <template v-if="reviewData && reviewData.days.length > 0">
       <el-row :gutter="12" class="summary-row">
         <el-col :xs="12" :sm="6">
@@ -59,7 +57,88 @@
         </el-col>
       </el-row>
 
-      <!-- Timeline -->
+      <el-card class="runtime-history-card" data-testid="review-runtime-history">
+        <template #header>
+          <div class="runtime-history-header">
+            <div>
+              <strong>运行时状态历史</strong>
+              <p>{{ reviewSymbolLabel }}</p>
+            </div>
+            <el-tag size="small" type="info">{{ runtimeHistory.points.length }} 个样本</el-tag>
+          </div>
+        </template>
+
+        <el-alert
+          v-if="runtimeHistoryError"
+          :title="runtimeHistoryError"
+          type="warning"
+          :closable="false"
+          style="margin-bottom: 12px"
+        />
+
+        <el-empty
+          v-if="!runtimeHistoryLoading && runtimeHistory.points.length === 0"
+          description="当前条件下暂无运行时状态历史"
+        />
+        <div v-else class="chart-grid">
+          <PriceChart :points="runtimeHistory.points" :markers="runtimeHistory.markers" :buy-low="0" :sell-high="0" />
+          <PnLChart :points="runtimeHistory.points" />
+        </div>
+      </el-card>
+
+      <el-card class="runtime-history-card" data-testid="review-diagnostics">
+        <template #header>
+          <div class="runtime-history-header">
+            <div>
+              <strong>运行诊断快照</strong>
+              <p>{{ diagnosticsSymbolLabel }}</p>
+            </div>
+            <el-tag size="small" :type="selectedRuntimeDiagnostics?.has_pending_order ? 'warning' : 'success'">
+              {{ selectedRuntimeDiagnostics?.has_pending_order ? '存在挂单' : '无挂单' }}
+            </el-tag>
+          </div>
+        </template>
+
+        <el-alert
+          v-if="diagnosticsError"
+          :title="diagnosticsError"
+          type="warning"
+          :closable="false"
+          style="margin-bottom: 12px"
+        />
+
+        <template v-else-if="diagnostics && selectedRuntimeDiagnostics">
+          <div class="chart-grid diagnostics-summary-grid">
+            <div class="section-block">
+              <div class="section-title">运行态</div>
+              <div class="item-row">
+                <span>{{ selectedRuntimeDiagnostics.symbol }} · {{ selectedRuntimeDiagnostics.engine_state }}</span>
+                <el-tag :type="selectedRuntimeDiagnostics.is_primary ? 'success' : 'info'" size="small">
+                  {{ selectedRuntimeDiagnostics.is_primary ? '主标的' : '观察标的' }}
+                </el-tag>
+              </div>
+              <div class="item-row">
+                <span>最近价格 ${{ selectedRuntimeDiagnostics.last_price.toFixed(2) }}</span>
+                <span>触发价 {{ selectedRuntimeDiagnostics.last_trigger_price > 0 ? `$${selectedRuntimeDiagnostics.last_trigger_price.toFixed(2)}` : '-' }}</span>
+              </div>
+            </div>
+
+            <div class="section-block">
+              <div class="section-title">流与线程</div>
+              <div class="item-row">
+                <span>线程存活</span>
+                <strong>{{ diagnostics.thread_alive ? '是' : '否' }}</strong>
+              </div>
+              <div class="item-row">
+                <span>最近推送 {{ formatAgeSeconds(diagnostics.quote_stream.last_push_age_seconds) }}</span>
+                <span>最近报价 {{ formatAgeSeconds(diagnostics.quote_stream.last_quote_age_seconds) }}</span>
+              </div>
+            </div>
+          </div>
+        </template>
+        <p v-else class="empty-note">当前 symbol 暂无运行诊断快照</p>
+      </el-card>
+
       <div class="timeline-section">
         <div v-for="day in reviewData.days" :key="day.date" class="day-card">
           <div class="day-header">
@@ -72,7 +151,6 @@
           </div>
 
           <div class="day-body">
-            <!-- LLM suggestions -->
             <div v-if="day.llm_interactions.length > 0" class="section-block">
               <div class="section-title">LLM 建议</div>
               <div v-for="llm in day.llm_interactions" :key="llm.id" class="item-row">
@@ -82,7 +160,6 @@
               </div>
             </div>
 
-            <!-- Orders -->
             <div v-if="day.orders.length > 0" class="section-block">
               <div class="section-title">订单执行</div>
               <div v-for="order in day.orders" :key="order.id" class="item-row">
@@ -93,7 +170,6 @@
               </div>
             </div>
 
-            <!-- Events -->
             <div v-if="day.events.length > 0" class="section-block">
               <div class="section-title">交易事件</div>
               <div v-for="event in day.events" :key="event.id" class="item-row">
@@ -103,7 +179,6 @@
               </div>
             </div>
 
-            <!-- Snapshots -->
             <div v-if="day.snapshots.length > 0" class="section-block">
               <div class="section-title">行情快照</div>
               <div v-for="snap in day.snapshots" :key="snap.id" class="item-row">
@@ -117,15 +192,18 @@
       </div>
     </template>
 
-    <!-- Empty state -->
     <el-empty v-else-if="searched && !loading" description="No data for this period, please adjust filters" />
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { computed, ref } from 'vue'
 import { ElMessage } from 'element-plus'
+import PriceChart from '../components/PriceChart.vue'
+import PnLChart from '../components/PnLChart.vue'
 import { getReview, exportReview } from '../api/review'
+import { useStatusHistorySeries } from '../composables/useStatusHistorySeries'
+import { useDiagnosticsSnapshot } from '../composables/useDiagnosticsSnapshot'
 import type { ReviewResponse } from '../types'
 import { ORDER_STATUS } from '../utils/constants'
 
@@ -138,34 +216,72 @@ const form = ref({
 const loading = ref(false)
 const searched = ref(false)
 const reviewData = ref<ReviewResponse | null>(null)
+const {
+  history: runtimeHistory,
+  loading: runtimeHistoryLoading,
+  error: runtimeHistoryError,
+  load: loadRuntimeHistory,
+  reset: resetRuntimeHistory,
+} = useStatusHistorySeries()
+const {
+  diagnostics,
+  error: diagnosticsError,
+  selectedRuntime: selectedRuntimeDiagnostics,
+  load: loadDiagnostics,
+  reset: resetDiagnostics,
+} = useDiagnosticsSnapshot(computed(() => form.value.symbol))
 
 const pnlClass = computed(() => {
   if (!reviewData.value) return ''
   return reviewData.value.total_pnl >= 0 ? 'positive' : 'negative'
 })
 
-function handleSearch() {
+const reviewSymbolLabel = computed(() => {
+  if (runtimeHistory.value.points.length === 0) return form.value.symbol || '未选择标的'
+  return `${form.value.symbol} · ${runtimeHistory.value.points.length} 个样本`
+})
+
+const diagnosticsSymbolLabel = computed(() => {
+  if (selectedRuntimeDiagnostics.value) {
+    return `${selectedRuntimeDiagnostics.value.symbol} · ${selectedRuntimeDiagnostics.value.engine_state}`
+  }
+  return form.value.symbol || '未选择标的'
+})
+
+async function handleSearch() {
   if (!form.value.symbol || !form.value.from_date || !form.value.to_date) {
     ElMessage.warning('请填写完整的查询条件')
     return
   }
   loading.value = true
   searched.value = true
-  getReview({
-    symbol: form.value.symbol,
-    from_date: form.value.from_date,
-    to_date: form.value.to_date,
-  })
-    .then((res) => {
-      reviewData.value = res.data
-    })
-    .catch(() => {
-      ElMessage.error('查询复盘数据失败')
-      reviewData.value = null
-    })
-    .finally(() => {
-      loading.value = false
-    })
+
+  try {
+    const [reviewResponse, history, diagnosticsResponse] = await Promise.all([
+      getReview({
+        symbol: form.value.symbol,
+        from_date: form.value.from_date,
+        to_date: form.value.to_date,
+      }),
+      loadRuntimeHistory({
+        symbol: form.value.symbol,
+        from: `${form.value.from_date}T00:00:00Z`,
+        to: `${form.value.to_date}T23:59:59Z`,
+        limit: 200,
+      }),
+      loadDiagnostics(),
+    ])
+    reviewData.value = reviewResponse.data
+    runtimeHistory.value = history
+    diagnostics.value = diagnosticsResponse
+  } catch {
+    ElMessage.error('查询复盘数据失败')
+    reviewData.value = null
+    resetRuntimeHistory()
+    resetDiagnostics()
+  } finally {
+    loading.value = false
+  }
 }
 
 function handleExport(fmt: 'json' | 'csv') {
@@ -215,6 +331,11 @@ function signedCurrency(value: number): string {
 
 function formatTime(value: string): string {
   return new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+}
+
+function formatAgeSeconds(value: number | null | undefined): string {
+  if (value == null) return '-'
+  return `${value.toFixed(1)}s`
 }
 </script>
 
@@ -282,6 +403,33 @@ function formatTime(value: string): string {
   margin-top: 4px;
   color: #6b7280;
   font-size: 12px;
+}
+
+.runtime-history-card {
+  margin-bottom: 8px;
+}
+
+.runtime-history-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.runtime-history-header p {
+  margin: 4px 0 0;
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.chart-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+}
+
+.diagnostics-summary-grid .section-block {
+  height: 100%;
 }
 
 .timeline-section {

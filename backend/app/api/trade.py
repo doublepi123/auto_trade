@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import extract_actor, get_audit_logger
 from app.core.audit import AuditLogger
-from app.database import get_db
+from app.database import SessionLocal, get_db
 from app.models import OrderRecord, TradeEvent
 from app.runner import get_runner
 from app.schemas import AccountResponse, CashBalanceSchema, ControlRequest, MessageResponse, OrderCancelResponse, OrderPageResponse, OrderResponse, PositionSchema, TradeEventPageResponse
@@ -27,6 +27,39 @@ router = APIRouter(prefix="/api", tags=["trade"])
 logger = logging.getLogger("auto_trade.trade")
 
 _LIVE_ORDER_STATUSES = {"SUBMITTED", "PARTIAL_FILLED"}
+
+def _control_scope_snapshot(runner: Any) -> dict[str, Any]:
+    primary_symbol = getattr(getattr(getattr(runner, "engine", None), "params", None), "symbol", "") or ""
+    runtime_symbols = list(getattr(runner, "_symbol_runtimes", {}).keys())
+    symbols = sorted({symbol for symbol in runtime_symbols if symbol} | ({primary_symbol} if primary_symbol else set()))
+    return {
+        "global_scope": True,
+        "primary_symbol": primary_symbol,
+        "affected_symbols": symbols,
+        "runtime_count": len(symbols),
+    }
+
+
+def _record_control_trace(
+    *,
+    event_type: str,
+    status: str,
+    message: str,
+    payload: dict[str, Any],
+) -> None:
+    db = SessionLocal()
+    try:
+        record_trade_event(
+            db,
+            event_type=event_type,
+            symbol=payload.get("primary_symbol", ""),
+            status=status,
+            message=message,
+            payload=payload,
+        )
+        db.commit()
+    finally:
+        db.close()
 _TERMINAL_ORDER_STATUSES = {"FILLED", "REJECTED", "CANCELLED"}
 
 
@@ -486,26 +519,35 @@ def start_runner(
     actor_hash, source_ip = extract_actor(request)
     result = "SUCCESS"
     detail: dict[str, Any] = {}
+    control_scope: dict[str, Any] = {}
     try:
         runner = get_runner()
+        control_scope = _control_scope_snapshot(runner)
         if runner.risk.kill_switch:
             result = "FAILED"
-            detail = {"detail": "Kill switch is active — disable it before starting"}
+            detail = {**control_scope, "detail": "Kill switch is active — disable it before starting"}
             raise HTTPException(status_code=403, detail=detail["detail"])
         svc = StrategyService(db)
-        svc.update_runtime_state(paused=False, pause_reason="", paused_at=None, pause_auto_resumable=False)
+        svc.update_primary_runtime_state(paused=False, pause_reason="", paused_at=None, pause_auto_resumable=False)
+        _record_control_trace(
+            event_type="CONTROL_START",
+            status="REQUESTED",
+            message="runner start requested",
+            payload=control_scope,
+        )
         started = runner.start()
         if not started:
-            detail = {"detail": "runner is already running or failed to start"}
+            detail = {**control_scope, "detail": "runner is already running or failed to start"}
             return MessageResponse(message=detail["detail"])
+        detail = control_scope
         return MessageResponse(message="runner started")
     except HTTPException as exc:
         result = "FAILED"
-        detail = {"detail": str(exc.detail)}
+        detail = {**control_scope, "detail": str(exc.detail)}
         raise
     except Exception as exc:
         result = "FAILED"
-        detail = {"detail": str(exc)}
+        detail = {**control_scope, "detail": str(exc)}
         logger.exception("unexpected start runner failure")
         raise HTTPException(status_code=500, detail="runner start failed") from exc
     finally:
@@ -519,6 +561,7 @@ def start_runner(
         )
 
 
+
 @router.post("/control/stop", response_model=MessageResponse)
 def stop_runner(
     request: Request,
@@ -529,25 +572,28 @@ def stop_runner(
     actor_hash, source_ip = extract_actor(request)
     result = "SUCCESS"
     detail: dict[str, Any] = {}
+    control_scope: dict[str, Any] = {}
     try:
         runner = get_runner()
+        control_scope = _control_scope_snapshot(runner)
         runner.risk.pause("manual")
         get_runner().stop()
         svc = StrategyService(db)
-        svc.update_runtime_state(
+        svc.update_primary_runtime_state(
             paused=True,
             pause_reason=runner.risk.pause_reason,
             paused_at=runner.risk.paused_at,
             pause_auto_resumable=runner.risk.pause_auto_resumable,
         )
+        detail = {**control_scope, "reason": payload.reason}
         return MessageResponse(message="runner stopped")
     except HTTPException as exc:
         result = "FAILED"
-        detail = {"detail": str(exc.detail)}
+        detail = {**control_scope, "detail": str(exc.detail)}
         raise
     except Exception as exc:
         result = "FAILED"
-        detail = {"detail": str(exc)}
+        detail = {**control_scope, "detail": str(exc)}
         logger.exception("unexpected stop runner failure")
         raise HTTPException(status_code=500, detail="runner stop failed") from exc
     finally:
@@ -559,6 +605,15 @@ def stop_runner(
             request_summary=detail,
             result=result,
         )
+        try:
+            _record_control_trace(
+                event_type="CONTROL_STOP",
+                status=result,
+                message=detail.get("detail", "runner stopped"),
+                payload=detail,
+            )
+        except Exception:
+            logger.exception("failed to record control stop trace")
 
 
 @router.post("/control/pause", response_model=MessageResponse)
@@ -570,25 +625,28 @@ def pause_trading(
 ) -> MessageResponse:
     actor_hash, source_ip = extract_actor(request)
     result = "SUCCESS"
+    control_scope: dict[str, Any] = {}
     detail: dict[str, Any] = {"reason": payload.reason}
     try:
         runner = get_runner()
+        control_scope = _control_scope_snapshot(runner)
         runner.risk.pause(payload.reason)
         svc = StrategyService(db)
-        svc.update_runtime_state(
+        svc.update_primary_runtime_state(
             paused=True,
             pause_reason=runner.risk.pause_reason,
             paused_at=runner.risk.paused_at,
             pause_auto_resumable=runner.risk.pause_auto_resumable,
         )
+        detail = {**control_scope, "reason": payload.reason}
         return MessageResponse(message="trading paused")
     except HTTPException as exc:
         result = "FAILED"
-        detail = {"detail": str(exc.detail)}
+        detail = {**control_scope, "detail": str(exc.detail), "reason": payload.reason}
         raise
     except Exception as exc:
         result = "FAILED"
-        detail = {"detail": str(exc)}
+        detail = {**control_scope, "detail": str(exc), "reason": payload.reason}
         logger.exception("unexpected pause trading failure")
         raise HTTPException(status_code=500, detail="pause trading failed") from exc
     finally:
@@ -600,6 +658,15 @@ def pause_trading(
             request_summary=detail,
             result=result,
         )
+        try:
+            _record_control_trace(
+                event_type="CONTROL_PAUSE",
+                status=result,
+                message=detail.get("detail", "trading paused"),
+                payload=detail,
+            )
+        except Exception:
+            logger.exception("failed to record control pause trace")
 
 
 @router.post("/control/resume", response_model=MessageResponse)
@@ -611,18 +678,22 @@ def resume_trading(
     actor_hash, source_ip = extract_actor(request)
     result = "SUCCESS"
     detail: dict[str, Any] = {}
+    control_scope: dict[str, Any] = {}
     try:
-        get_runner().risk.resume()
+        runner = get_runner()
+        control_scope = _control_scope_snapshot(runner)
+        runner.risk.resume()
         svc = StrategyService(db)
-        svc.update_runtime_state(paused=False, pause_reason="", paused_at=None, pause_auto_resumable=False)
+        svc.update_primary_runtime_state(paused=False, pause_reason="", paused_at=None, pause_auto_resumable=False)
+        detail = control_scope
         return MessageResponse(message="trading resumed")
     except HTTPException as exc:
         result = "FAILED"
-        detail = {"detail": str(exc.detail)}
+        detail = {**control_scope, "detail": str(exc.detail)}
         raise
     except Exception as exc:
         result = "FAILED"
-        detail = {"detail": str(exc)}
+        detail = {**control_scope, "detail": str(exc)}
         logger.exception("unexpected resume trading failure")
         raise HTTPException(status_code=500, detail="resume trading failed") from exc
     finally:
@@ -634,6 +705,15 @@ def resume_trading(
             request_summary=detail,
             result=result,
         )
+        try:
+            _record_control_trace(
+                event_type="CONTROL_RESUME",
+                status=result,
+                message=detail.get("detail", "trading resumed"),
+                payload=detail,
+            )
+        except Exception:
+            logger.exception("failed to record control resume trace")
 
 
 @router.post("/control/kill-switch", response_model=MessageResponse)
@@ -645,9 +725,11 @@ def kill_switch(
 ) -> MessageResponse:
     actor_hash, source_ip = extract_actor(request)
     result = "SUCCESS"
+    control_scope: dict[str, Any] = {}
     detail: dict[str, Any] = {"reason": payload.reason}
     try:
         runner = get_runner()
+        control_scope = _control_scope_snapshot(runner)
         runner.risk.pause(payload.reason)
         runner.risk.enable_kill_switch(payload.reason)
         try:
@@ -655,21 +737,22 @@ def kill_switch(
         except Exception as exc:
             logging.getLogger("auto_trade.trade").warning("kill switch notify failed: %s", exc)
         svc = StrategyService(db)
-        svc.update_runtime_state(
+        svc.update_primary_runtime_state(
             kill_switch=True,
             paused=True,
             pause_reason=runner.risk.pause_reason,
             paused_at=runner.risk.paused_at,
             pause_auto_resumable=runner.risk.pause_auto_resumable,
         )
+        detail = {**control_scope, "reason": payload.reason}
         return MessageResponse(message="kill switch activated — trading paused")
     except HTTPException as exc:
         result = "FAILED"
-        detail = {"detail": str(exc.detail)}
+        detail = {**control_scope, "detail": str(exc.detail), "reason": payload.reason}
         raise
     except Exception as exc:
         result = "FAILED"
-        detail = {"detail": str(exc)}
+        detail = {**control_scope, "detail": str(exc), "reason": payload.reason}
         logger.exception("unexpected kill switch failure")
         raise HTTPException(status_code=500, detail="kill switch failed") from exc
     finally:
@@ -681,6 +764,15 @@ def kill_switch(
             request_summary=detail,
             result=result,
         )
+        try:
+            _record_control_trace(
+                event_type="CONTROL_KILL_SWITCH",
+                status=result,
+                message=detail.get("detail", "kill switch activated — trading paused"),
+                payload=detail,
+            )
+        except Exception:
+            logger.exception("failed to record control kill-switch trace")
 
 
 @router.post("/control/disable-kill-switch", response_model=MessageResponse)
@@ -692,19 +784,22 @@ def disable_kill_switch(
     actor_hash, source_ip = extract_actor(request)
     result = "SUCCESS"
     detail: dict[str, Any] = {}
+    control_scope: dict[str, Any] = {}
     try:
         runner = get_runner()
+        control_scope = _control_scope_snapshot(runner)
         runner.risk.disable_kill_switch()
         svc = StrategyService(db)
-        svc.update_runtime_state(kill_switch=False)
+        svc.update_primary_runtime_state(kill_switch=False)
+        detail = control_scope
         return MessageResponse(message="kill switch disabled — trading remains paused, use Resume to re-enable")
     except HTTPException as exc:
         result = "FAILED"
-        detail = {"detail": str(exc.detail)}
+        detail = {**control_scope, "detail": str(exc.detail)}
         raise
     except Exception as exc:
         result = "FAILED"
-        detail = {"detail": str(exc)}
+        detail = {**control_scope, "detail": str(exc)}
         logger.exception("unexpected disable kill switch failure")
         raise HTTPException(status_code=500, detail="disable kill switch failed") from exc
     finally:
@@ -716,3 +811,12 @@ def disable_kill_switch(
             request_summary=detail,
             result=result,
         )
+        try:
+            _record_control_trace(
+                event_type="CONTROL_DISABLE_KILL_SWITCH",
+                status=result,
+                message=detail.get("detail", "kill switch disabled — trading remains paused, use Resume to re-enable"),
+                payload=detail,
+            )
+        except Exception:
+            logger.exception("failed to record control disable-kill-switch trace")

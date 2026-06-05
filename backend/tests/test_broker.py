@@ -161,7 +161,7 @@ class TestBrokerGateway:
         except RuntimeError:
             pass
 
-        assert gw._subscribed_symbol is None
+        assert gw._subscribed_symbols == set()
         assert gw._quote_callbacks == []
 
     def test_subscribe_quotes_uses_quote_subtype(self, monkeypatch) -> None:
@@ -205,7 +205,56 @@ class TestBrokerGateway:
 
         assert called["symbols"] == ["AAPL.US"]
         assert called["subtypes"] == ["SubType.Quote"]
-        assert gw._subscribed_symbol == "AAPL.US"
+        assert gw._subscribed_symbols == {"AAPL.US"}
+
+    def test_subscribe_quotes_adds_multiple_symbols_without_unsubscribing_previous(self, monkeypatch) -> None:
+        called = {"subscribed": [], "unsubscribed": []}
+
+        class FakeConfig:
+            @staticmethod
+            def from_env():
+                return "fake-config"
+
+        class QuoteContext:
+            def __init__(self, _config):
+                pass
+
+            def set_on_quote(self, callback):
+                called["callback"] = callback
+
+            def subscribe(self, symbols, subtypes):
+                called["subscribed"].append((list(symbols), list(subtypes)))
+
+            def unsubscribe(self, symbols):
+                called["unsubscribed"].append(list(symbols))
+
+        class TradeContext:
+            def __init__(self, _config):
+                pass
+
+        class SubType:
+            Quote = "SubType.Quote"
+
+        class FakeModule:
+            pass
+
+        FakeModule.Config = FakeConfig
+        FakeModule.QuoteContext = QuoteContext
+        FakeModule.TradeContext = TradeContext
+        FakeModule.SubType = SubType
+
+        monkeypatch.setattr(broker_module, "_import_openapi", lambda: FakeModule)
+        gw = BrokerGateway()
+
+        gw.subscribe_quotes("AAPL.US", lambda _quote: None)
+        gw.subscribe_quotes("NVDA.US", lambda _quote: None)
+
+        assert gw._subscribed_symbols == {"AAPL.US", "NVDA.US"}
+        assert called["unsubscribed"] == []
+        assert called["subscribed"] == [
+            (["AAPL.US"], ["SubType.Quote"]),
+            (["NVDA.US"], ["SubType.Quote"]),
+        ]
 
     def test_get_positions_flattens_stock_position_channels(self) -> None:
         class StockInfo:
@@ -520,8 +569,9 @@ class TestBrokerGateway:
         assert quote_ctx.closed is True
         assert trade_ctx.closed is True
         assert gw._quote_callbacks == []
-        assert gw._subscribed_symbol is None
+        assert gw._subscribed_symbols == set()
         assert gw._quote_ctx is None
+        assert gw._trade_ctx is None
         assert gw._trade_ctx is None
 
     def test_close_handles_none_contexts(self) -> None:
@@ -548,19 +598,19 @@ class TestBrokerGateway:
 
         gw = BrokerGateway()
         gw._quote_ctx = FakeCtx()
-        gw._subscribed_symbol = "AAPL.US"
+        gw._subscribed_symbols = {"AAPL.US", "NVDA.US"}
         gw._quote_callbacks.append(lambda x: None)
 
         gw.unsubscribe_quotes()
 
-        assert gw._subscribed_symbol is None
+        assert gw._subscribed_symbols == set()
         assert gw._quote_callbacks == []
-        assert gw._quote_ctx.unsubscribed == ["AAPL.US"]
+        assert gw._quote_ctx.unsubscribed == ["AAPL.US", "NVDA.US"]
 
     def test_unsubscribe_quotes_when_no_subscription(self) -> None:
         gw = BrokerGateway()
         gw.unsubscribe_quotes()
-        assert gw._subscribed_symbol is None
+        assert gw._subscribed_symbols == set()
         assert gw._quote_callbacks == []
 
     def test_unsubscribe_quotes_logs_warning_on_error(self, caplog) -> None:
@@ -570,7 +620,7 @@ class TestBrokerGateway:
 
         gw = BrokerGateway()
         gw._quote_ctx = FakeCtx()
-        gw._subscribed_symbol = "AAPL.US"
+        gw._subscribed_symbols = {"AAPL.US"}
 
         gw.unsubscribe_quotes()
         assert "failed to unsubscribe" in caplog.text

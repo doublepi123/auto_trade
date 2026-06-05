@@ -40,6 +40,7 @@ from app.models import (
     StrategyConfig,
     TrackedEntry,
     TradeEvent,
+    WatchlistItem,
 )
 from app.runner import AppRunner, get_runner
 from app.services.trade_execution_service import _PendingOrder
@@ -672,3 +673,127 @@ class TestE2EBrokerDisconnectResubscribe:
             assert status["paused"] is False
             assert runner._quotes_subscribed is True
             assert fake_broker.subscribed_to == ["AAPL.US"]
+
+
+class TestE2EMultiSymbolSubscriptions:
+    def test_e2e_start_and_disconnect_resubscribe_all_runtime_symbols(
+        self, fresh_runner, monkeypatch
+    ) -> None:
+        _seed_strategy(symbol="AAPL.US")
+        db = SessionLocal()
+        try:
+            db.add(WatchlistItem(symbol="NVDA.US", market="US", alias="Nvidia", is_active=False))
+            db.commit()
+        finally:
+            db.close()
+
+        fake_broker = _FakeBroker()
+        _install_fake_broker(monkeypatch, fake_broker)
+
+        with TestClient(app) as client:
+            response = client.post("/api/control/start")
+            assert response.status_code == 200
+            runner = get_runner()
+            assert runner._quotes_subscribed is True
+            assert fake_broker.subscribed_to == ["AAPL.US", "NVDA.US"]
+
+            fake_broker.simulate_disconnect("multi_symbol_drop")
+            assert runner._quotes_subscribed is False
+
+            time.sleep(5.5)
+
+            assert runner._quotes_subscribed is True
+            assert fake_broker.subscribed_to == ["AAPL.US", "NVDA.US"]
+
+
+class TestE2EMultiSymbolPendingRestart:
+    def test_e2e_restart_restores_only_live_pending_orders_per_symbol(
+        self, fresh_runner, monkeypatch
+    ) -> None:
+        _seed_strategy(symbol="AAPL.US")
+        db = SessionLocal()
+        try:
+            db.add(WatchlistItem(symbol="NVDA.US", market="US", alias="Nvidia", is_active=False))
+            db.add(TrackedEntry(symbol="NVDA.US", quantity=2.0, cost=440.0))
+            db.add(
+                RuntimeState(
+                    symbol="NVDA.US",
+                    engine_state="long",
+                    last_price=221.0,
+                    last_trigger_price=220.5,
+                )
+            )
+            db.add(
+                OrderRecord(
+                    broker_order_id="order-pending-aapl",
+                    symbol="AAPL.US",
+                    side="BUY",
+                    quantity=3.0,
+                    price=199.0,
+                    status="SUBMITTED",
+                    created_at=datetime.now(timezone.utc) - timedelta(seconds=30),
+                )
+            )
+            db.add(
+                OrderRecord(
+                    broker_order_id="order-filled-nvda",
+                    symbol="NVDA.US",
+                    side="BUY",
+                    quantity=2.0,
+                    price=220.0,
+                    executed_quantity=2.0,
+                    executed_price=220.0,
+                    status="FILLED",
+                    created_at=datetime.now(timezone.utc) - timedelta(seconds=20),
+                    filled_at=datetime.now(timezone.utc) - timedelta(seconds=19),
+                )
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        fake_broker = _FakeBroker(
+            today_orders=[
+                _make_broker_order(
+                    "order-pending-aapl",
+                    symbol="AAPL.US",
+                    side="BUY",
+                    quantity=3.0,
+                    price=199.0,
+                    status="SUBMITTED",
+                ),
+                _make_broker_order(
+                    "order-filled-nvda",
+                    symbol="NVDA.US",
+                    side="BUY",
+                    quantity=2.0,
+                    price=220.0,
+                    status="FILLED",
+                    executed_quantity=2.0,
+                    executed_price=220.0,
+                    filled_at=datetime.now(timezone.utc),
+                ),
+            ],
+            positions=[
+                Position(
+                    symbol="NVDA.US",
+                    side="LONG",
+                    quantity=Decimal("2"),
+                    avg_price=Decimal("220"),
+                )
+            ],
+        )
+        _install_fake_broker(monkeypatch, fake_broker)
+
+        runner = get_runner()
+        runner._initialize_runner()
+
+        assert runner.risk.paused is True
+        assert "unresolved live order" in runner.risk.pause_reason.lower()
+        assert runner._trade_svc.pending_order_for("AAPL.US") is not None
+        assert runner._trade_svc.pending_order_for("AAPL.US").broker_order_id == "order-pending-aapl"
+        assert runner._trade_svc.pending_order_for("NVDA.US") is None
+        assert set(runner._symbol_runtimes) == {"AAPL.US", "NVDA.US"}
+        assert runner._symbol_runtimes["NVDA.US"].engine.state.value == "long"
+        tracked = runner._trade_svc.snapshot_tracked_entries()
+        assert tracked["NVDA.US"] == (Decimal("2.0"), Decimal("440.0"))

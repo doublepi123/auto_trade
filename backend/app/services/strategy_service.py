@@ -75,16 +75,41 @@ class StrategyService:
             diff["sct_key"] = {"changed": True}
         return config, diff
 
-    def get_runtime_state(self) -> RuntimeState:
-        state = self.db.query(RuntimeState).order_by(RuntimeState.id.desc()).first()
+    def resolve_primary_symbol(self) -> str:
+        return (self.get_config().symbol or "").strip().upper()
+
+    def get_runtime_state(self, symbol: str = "") -> RuntimeState:
+        normalized = (symbol or "").strip().upper()
+        state = self.db.query(RuntimeState).filter(RuntimeState.symbol == normalized).first()
         if state is None:
-            state = RuntimeState()
+            state = RuntimeState(symbol=normalized)
             self.db.add(state)
             self.db.commit()
         return state
 
-    def update_runtime_state(self, **kwargs: object) -> RuntimeState:
-        state = self.get_runtime_state()
+    def get_primary_runtime_state(self) -> RuntimeState:
+        symbol = self.resolve_primary_symbol()
+        if not symbol:
+            return self.get_runtime_state(symbol="")
+
+        named = self.db.query(RuntimeState).filter(RuntimeState.symbol == symbol).first()
+        if named is not None:
+            return named
+
+        legacy = self.db.query(RuntimeState).filter(RuntimeState.symbol == "").first()
+        if legacy is not None:
+            legacy.symbol = symbol
+            legacy.updated_at = datetime.now(timezone.utc)
+            self.db.add(legacy)
+            self.db.commit()
+            self.db.refresh(legacy)
+            return legacy
+
+        return self.get_runtime_state(symbol=symbol)
+
+    def update_runtime_state(self, symbol: str = "", **kwargs: object) -> RuntimeState:
+        normalized = (symbol or "").strip().upper()
+        state = self.get_runtime_state(symbol=normalized)
         for key, value in kwargs.items():
             if hasattr(state, key):
                 setattr(state, key, value)
@@ -93,3 +118,7 @@ class StrategyService:
         self.db.commit()
         self.db.refresh(state)
         return state
+
+    def update_primary_runtime_state(self, **kwargs: object) -> RuntimeState:
+        state = self.get_primary_runtime_state()
+        return self.update_runtime_state(symbol=state.symbol, **kwargs)

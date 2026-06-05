@@ -14,6 +14,7 @@ def _runner_for_disconnect_tests() -> AppRunner:
     runner.engine = StrategyEngine()
     runner.engine.params = StrategyParams(symbol="AAPL.US")
     runner._state_lock = threading.RLock()
+    runner._symbol_runtimes = {}
     runner._quotes_subscribed = True
     runner._last_push_quote_at = 1.0
     runner._audit = MagicMock()

@@ -15,11 +15,12 @@
 | 文件 | 职责 | 改动类型 |
 |------|------|---------|
 | `backend/app/services/trade_execution_service.py` | `TradeExecutionService` 增加 `margin_safety_factor` 实例属性；`_entry_quantity_from_margin_power` 优先使用实例属性 | 修改 |
-| `backend/app/runner.py` | `AppRunner.__init__` 初始化时传入 `margin_safety_factor`；`reload_strategy()` 更新 `_trade_svc.margin_safety_factor` | 修改 |
+| `backend/app/runner.py` | `_initialize_runner()` 冷启动注入配置值；`reload_strategy()` 保存后更新 `_trade_svc.margin_safety_factor` | 修改 |
+| `backend/app/services/runtime_state_service.py` | `load()` 返回已读取的策略配置，避免 runner 启动期重复查询 | 修改 |
 | `backend/app/services/strategy_service.py` | `STRATEGY_AUDIT_KEYS` 和 `updatable_fields` 追加 `margin_safety_factor` | 修改 |
 | `backend/app/api/strategy.py` | `PUT /api/strategy` 的 merged 字典追加 `margin_safety_factor` | 修改 |
 | `backend/tests/test_trade_execution_service.py` | 补充 `margin_safety_factor` 实例属性及 `_entry_quantity_from_margin_power` 消费测试 | 修改 |
-| `backend/tests/test_runner.py` | 补充 `reload_strategy()` 后 `_trade_svc.margin_safety_factor` 被更新的断言 | 修改 |
+| `backend/tests/test_runner.py` | 补充 `reload_strategy()` 与 `_initialize_runner()` 后 `_trade_svc.margin_safety_factor` 被更新的断言 | 修改 |
 | `backend/tests/test_strategy_service.py` | 补充 `update_config` 对 `margin_safety_factor` 的持久化验证 | 修改 |
 | `backend/tests/test_api.py` | 补充 `PUT /api/strategy` 对 `margin_safety_factor` 的传递与响应验证 | 修改 |
 
@@ -32,7 +33,7 @@
 - Modify: `backend/app/services/trade_execution_service.py:264-286`
 - Test: `backend/tests/test_trade_execution_service.py`
 
-- [ ] **Step 1: 给 `__init__` 增加 `margin_safety_factor` 参数并保存为实例属性**
+- [x] **Step 1: 给 `__init__` 增加 `margin_safety_factor` 参数并保存为实例属性**
 
 修改 `backend/app/services/trade_execution_service.py` 的 `__init__` 方法：
 
@@ -62,7 +63,7 @@ class TradeExecutionService:
         self._entry_positions: dict[str, _TrackedEntry] = {}
 ```
 
-- [ ] **Step 2: 修改 `_entry_quantity_from_margin_power` 优先使用实例属性**
+- [x] **Step 2: 修改 `_entry_quantity_from_margin_power` 优先使用实例属性**
 
 修改 `backend/app/services/trade_execution_service.py` 的 `_entry_quantity_from_margin_power` 方法：
 
@@ -97,7 +98,7 @@ class TradeExecutionService:
         return qty
 ```
 
-- [ ] **Step 3: 编写测试验证实例属性及消费逻辑**
+- [x] **Step 3: 编写测试验证实例属性及消费逻辑**
 
 在 `backend/tests/test_trade_execution_service.py` 中增加测试：
 
@@ -132,9 +133,9 @@ class TradeExecutionService:
         assert qty == 90  # 100 * 0.9 (ENTRY_BUYING_POWER_USAGE)
 ```
 
-- [ ] **Step 4: 运行测试**
+- [x] **Step 4: 运行测试**
 
-Run: `cd backend && python3 -m pytest tests/test_trade_execution_service.py::TestTradeExecutionService::test_margin_safety_factor_instance_attribute tests/test_trade_execution_service.py::TestTradeExecutionService::test_entry_quantity_uses_instance_margin_safety_factor tests/test_trade_execution_service.py::TestTradeExecutionService::test_entry_quantity_keyword_overrides_instance_attribute tests/test_trade_execution_service.py::TestTradeExecutionService::test_entry_quantity_fallback_to_constant -v`
+Run: `cd backend && python3 -m pytest tests/test_trade_execution_service.py::TestTradeExecutionServiceBasics::test_margin_safety_factor_instance_attribute tests/test_trade_execution_service.py::TestTradeExecutionServiceBasics::test_entry_quantity_uses_instance_margin_safety_factor tests/test_trade_execution_service.py::TestTradeExecutionServiceBasics::test_entry_quantity_keyword_overrides_instance_attribute tests/test_trade_execution_service.py::TestTradeExecutionServiceBasics::test_entry_quantity_fallback_to_constant -v`
 
 Expected: 4 PASSED
 
@@ -143,35 +144,36 @@ Expected: 4 PASSED
 ## Task 2: AppRunner 初始化和 reload 注入 `margin_safety_factor`
 
 **Files:**
-- Modify: `backend/app/runner.py:67-74`
+- Modify: `backend/app/runner.py:102-108`
 - Modify: `backend/app/runner.py:274-317`
+- Modify: `backend/app/services/runtime_state_service.py:13-52`
 - Test: `backend/tests/test_runner.py`
 
-- [ ] **Step 1: `AppRunner.__init__` 初始化 `_trade_svc` 时传入 `margin_safety_factor`**
+- [x] **Step 1: 冷启动 `_initialize_runner()` 从已加载配置注入 `margin_safety_factor`**
 
-修改 `backend/app/runner.py` 的 `__init__`：
+修改 `backend/app/services/runtime_state_service.py` 的 `load()`，返回已经读取的 `config`：
 
 ```python
-        self._trade_svc = TradeExecutionService(
-            record_order=self._record_order,
-            update_order_status=self._update_order_status,
-            record_risk_event=self._record_risk_event,
-            record_order_skipped=self._record_order_skipped,
-            persist_entry=self._persist_tracked_entry,
-            audit=self._audit,
-            margin_safety_factor=settings.margin_safety_factor,
+        risk.restore_pause(
+            paused=state.paused,
+            reason=state.pause_reason or "",
+            paused_at=_coerce_datetime(state.paused_at),
+            auto_resumable=state.pause_auto_resumable,
         )
+        return config
 ```
 
-**注意：** 需要确认 `settings.margin_safety_factor` 是否存在。如果不存在，从 `config.py` 中检查或直接使用 `None`（回退到常量）。
-
-如果 `settings` 中没有 `margin_safety_factor`，使用 `None`：
+修改 `backend/app/runner.py` 的 `_initialize_runner()`：
 
 ```python
-            margin_safety_factor=None,
+        with self._db_session() as db:
+            config = self._state_svc.load(db, self.engine, self.risk)
+            self._trade_svc.margin_safety_factor = getattr(config, "margin_safety_factor", None)
+            self._load_tracked_entries(db)
+            self._apply_credentials(self._load_credentials(), resubscribe=False)
 ```
 
-- [ ] **Step 2: `reload_strategy()` 中更新 `_trade_svc.margin_safety_factor`**
+- [x] **Step 2: `reload_strategy()` 中更新 `_trade_svc.margin_safety_factor`**
 
 在 `backend/app/runner.py` 的 `reload_strategy()` 方法中，在更新 `_trading_session_mode` 之后增加：
 
@@ -187,7 +189,7 @@ Expected: 4 PASSED
                 self._trade_svc.margin_safety_factor = getattr(config, "margin_safety_factor", None)
 ```
 
-- [ ] **Step 3: 编写测试验证 reload 后属性更新**
+- [x] **Step 3: 编写测试验证 reload 与冷启动后属性更新**
 
 在 `backend/tests/test_runner.py` 中增加测试：
 
@@ -227,11 +229,45 @@ Expected: 4 PASSED
         assert runner._trade_svc.margin_safety_factor == 0.75
 ```
 
-- [ ] **Step 4: 运行测试**
+同时增加冷启动测试：
 
-Run: `cd backend && python3 -m pytest tests/test_runner.py::TestAppRunner::test_reload_strategy_updates_margin_safety_factor -v`
+```python
+    def test_initialize_runner_loads_margin_safety_factor(self, monkeypatch) -> None:
+        from contextlib import contextmanager
 
-Expected: 1 PASSED
+        runner = AppRunner()
+        runner._trade_svc.margin_safety_factor = None
+
+        class FakeConfig:
+            margin_safety_factor = 0.65
+
+        @contextmanager
+        def fake_db_session():
+            yield object()
+
+        monkeypatch.setattr(runner, "_db_session", fake_db_session)
+        monkeypatch.setattr(runner._state_svc, "load", lambda db, engine, risk: FakeConfig())
+        monkeypatch.setattr(runner, "_load_tracked_entries", lambda db: None)
+        monkeypatch.setattr(runner, "_load_credentials", lambda: None)
+        monkeypatch.setattr(runner, "_apply_credentials", lambda credentials, *, resubscribe: None)
+        monkeypatch.setattr(runner, "_register_broker_disconnect_hook", lambda: None)
+        monkeypatch.setattr(runner, "_refresh_trading_session_mode", lambda: None)
+        monkeypatch.setattr(runner, "sync_today_orders_from_broker", lambda *, force: None)
+        monkeypatch.setattr(runner, "_sync_risk_from_order_ledger", lambda: None)
+        monkeypatch.setattr(runner, "_pause_if_unresolved_live_order_exists", lambda db: None)
+        monkeypatch.setattr(runner, "_reconcile_tracked_entries_with_broker", lambda db: None)
+        monkeypatch.setattr(runner.broker, "subscribe_quotes", lambda symbol, callback: None)
+
+        runner._initialize_runner()
+
+        assert runner._trade_svc.margin_safety_factor == 0.65
+```
+
+- [x] **Step 4: 运行测试**
+
+Run: `cd backend && python3 -m pytest tests/test_runner.py::TestAppRunner::test_reload_strategy_updates_margin_safety_factor tests/test_runner.py::TestAppRunner::test_initialize_runner_loads_margin_safety_factor -v`
+
+Expected: 2 PASSED
 
 ---
 
@@ -242,7 +278,7 @@ Expected: 1 PASSED
 - Modify: `backend/app/services/strategy_service.py:49-56`
 - Test: `backend/tests/test_strategy_service.py`
 
-- [ ] **Step 1: `STRATEGY_AUDIT_KEYS` 追加 `margin_safety_factor`**
+- [x] **Step 1: `STRATEGY_AUDIT_KEYS` 追加 `margin_safety_factor`**
 
 修改 `backend/app/services/strategy_service.py`：
 
@@ -267,7 +303,7 @@ STRATEGY_AUDIT_KEYS = (
 )
 ```
 
-- [ ] **Step 2: `updatable_fields` 追加 `margin_safety_factor`**
+- [x] **Step 2: `updatable_fields` 追加 `margin_safety_factor`**
 
 修改 `backend/app/services/strategy_service.py`：
 
@@ -283,7 +319,7 @@ STRATEGY_AUDIT_KEYS = (
         ]
 ```
 
-- [ ] **Step 3: 编写测试验证持久化**
+- [x] **Step 3: 编写测试验证持久化**
 
 在 `backend/tests/test_strategy_service.py` 的 `test_update_config` 中增加断言：
 
@@ -307,7 +343,7 @@ STRATEGY_AUDIT_KEYS = (
         db.close()
 ```
 
-- [ ] **Step 4: 运行测试**
+- [x] **Step 4: 运行测试**
 
 Run: `cd backend && python3 -m pytest tests/test_strategy_service.py::TestStrategyService::test_update_config_persists_margin_safety_factor -v`
 
@@ -321,18 +357,16 @@ Expected: 1 PASSED
 - Modify: `backend/app/api/strategy.py:64-80`
 - Test: `backend/tests/test_api.py`
 
-- [ ] **Step 1: merged 字典追加 `margin_safety_factor`**
+- [x] **Step 1: merged 字典追加 `margin_safety_factor`**
 
 在 `backend/app/api/strategy.py` 的 `put_strategy` 中，merged 字典增加：
-
 ```python
-        merged = {
-            ...,
-            "margin_safety_factor": data["margin_safety_factor"] if "margin_safety_factor" in data and data["margin_safety_factor"] is not None else current.margin_safety_factor,
+            "trading_session_mode": data["trading_session_mode"] if "trading_session_mode" in data and data["trading_session_mode"] is not None else getattr(current, "trading_session_mode", "ANY"),
+            "margin_safety_factor": data["margin_safety_factor"] if "margin_safety_factor" in data and data["margin_safety_factor"] is not None else getattr(current, "margin_safety_factor", None),
         }
 ```
 
-- [ ] **Step 2: 编写测试验证 API 传递**
+- [x] **Step 2: 编写测试验证 API 传递**
 
 在 `backend/tests/test_api.py` 中增加测试（放在现有的 strategy update 测试附近）：
 
@@ -356,9 +390,9 @@ Expected: 1 PASSED
         assert resp2.json()["margin_safety_factor"] == 0.75
 ```
 
-- [ ] **Step 3: 运行测试**
+- [x] **Step 3: 运行测试**
 
-Run: `cd backend && python3 -m pytest tests/test_api.py::TestApi::test_update_strategy_persists_margin_safety_factor -v`
+Run: `cd backend && python3 -m pytest tests/test_api.py::TestAPI::test_update_strategy_persists_margin_safety_factor -v`
 
 Expected: 1 PASSED
 
@@ -366,19 +400,19 @@ Expected: 1 PASSED
 
 ## Task 5: 全量验证
 
-- [ ] **Step 1: 运行后端全部测试**
+- [x] **Step 1: 运行后端全部测试**
 
 Run: `cd backend && python3 -m pytest tests/ -v`
 
 Expected: 全部通过（基线 750 passed + 新增 ≥6 项）
 
-- [ ] **Step 2: 类型检查**
+- [x] **Step 2: 类型检查**
 
 Run: `cd backend && python3 -m basedpyright`
 
 Expected: 0 errors / 0 warnings / 0 notes
 
-- [ ] **Step 3: 前端构建**
+- [x] **Step 3: 前端构建**
 
 Run: `cd frontend && npm run type-check && npm run build`
 
