@@ -492,39 +492,26 @@ class TradeExecutionService:
         if qty <= 0:
             return None
 
-        result = broker.submit_limit_order(symbol, "BUY", Decimal(qty), price)
-        status = getattr(result, "status", "SUBMITTED")
-        try:
-            self._persist_submitted_order(result.broker_order_id, symbol, "BUY", float(qty), float(price), status)
-        except OrderPersistenceError:
-            return self._recover_from_missing_order_record(
-                result,
-                broker,
-                risk,
-                notify_risk_event=notify_risk_event,
-                engine_snapshot=engine_snapshot,
-                restore_engine_snapshot=restore_engine_snapshot,
-            )
-        order_status = self._order_status_from_submit_result(result)
-        self._safe_update_order_status_from_result(order_status)
-
-        if self._order_status_is_live(order_status):
-            self._track_pending_order("BUY", result, broker, engine_snapshot)
-            logger.info("BUY pending: %s status=%s", result.broker_order_id, order_status.status)
-            return order_status
-
-        if self._handle_terminal_fill_result("BUY", result, order_status, broker, risk, notifier, engine_snapshot, restore_engine_snapshot=restore_engine_snapshot, notify_risk_event=notify_risk_event):
-            return order_status
-
-        if order_status.status != "FILLED":
-            self._pause_after_failed_order(result.broker_order_id, order_status.status, risk, notify_risk_event)
-            logger.warning("BUY not filled: %s status=%s", result.broker_order_id, order_status.status)
+        order_status = self._submit_limit_order(
+            "BUY",
+            symbol,
+            "BUY",
+            Decimal(qty),
+            price,
+            broker,
+            risk,
+            notifier,
+            engine_snapshot=engine_snapshot,
+            restore_engine_snapshot=restore_engine_snapshot,
+            notify_risk_event=notify_risk_event,
+        )
+        if order_status is None or order_status.status != "FILLED":
             return order_status
 
         fill_price = order_status.executed_price if order_status.executed_price > 0 else price
         fill_qty = order_status.executed_quantity if order_status.executed_quantity > 0 else Decimal(qty)
         self._record_entry_price(symbol, fill_price, fill_qty)
-        self._safe_notify_order(notifier, "BUY", symbol, str(fill_qty), str(fill_price), result.broker_order_id)
+        self._safe_notify_order(notifier, "BUY", symbol, str(fill_qty), str(fill_price), order_status.broker_order_id)
         logger.info("BUY: %s qty=%s price=%s", symbol, fill_qty, fill_price)
         return order_status
 
@@ -571,39 +558,27 @@ class TradeExecutionService:
         if profit_guard is not None:
             return profit_guard
 
-        result = broker.submit_limit_order(symbol, "SELL", qty, price)
-        status = getattr(result, "status", "SUBMITTED")
-        try:
-            self._persist_submitted_order(result.broker_order_id, symbol, "SELL", float(qty), float(price), status)
-        except OrderPersistenceError:
-            return self._recover_from_missing_order_record(
-                result,
-                broker,
-                risk,
-                notify_risk_event=notify_risk_event,
-                engine_snapshot=engine_snapshot,
-                restore_engine_snapshot=restore_engine_snapshot,
-            )
-        order_status = self._order_status_from_submit_result(result)
-        self._safe_update_order_status_from_result(order_status)
-
-        if self._order_status_is_live(order_status):
-            self._track_pending_order("SELL", result, broker, engine_snapshot, avg_price=pos_avg_price)
-            logger.info("SELL pending: %s status=%s", result.broker_order_id, order_status.status)
-            return order_status
-
-        if self._handle_terminal_fill_result("SELL", result, order_status, broker, risk, notifier, engine_snapshot, restore_engine_snapshot=restore_engine_snapshot, avg_price=pos_avg_price, notify_risk_event=notify_risk_event):
-            return order_status
-
-        if order_status.status != "FILLED":
-            self._pause_after_failed_order(result.broker_order_id, order_status.status, risk, notify_risk_event)
-            logger.warning("SELL not filled: %s status=%s", result.broker_order_id, order_status.status)
+        order_status = self._submit_limit_order(
+            "SELL",
+            symbol,
+            "SELL",
+            qty,
+            price,
+            broker,
+            risk,
+            notifier,
+            engine_snapshot=engine_snapshot,
+            restore_engine_snapshot=restore_engine_snapshot,
+            notify_risk_event=notify_risk_event,
+            avg_price=pos_avg_price,
+        )
+        if order_status is None or order_status.status != "FILLED":
             return order_status
 
         fill_price = order_status.executed_price if order_status.executed_price > 0 else price
         fill_qty = order_status.executed_quantity if order_status.executed_quantity > 0 else qty
         pnl = float((fill_price - pos_avg_price) * fill_qty)
-        self._safe_notify_order(notifier, "SELL", symbol, str(fill_qty), str(fill_price), result.broker_order_id)
+        self._safe_notify_order(notifier, "SELL", symbol, str(fill_qty), str(fill_price), order_status.broker_order_id)
         risk.record_trade(pnl)
         self._consume_entry_quantity(symbol, fill_qty)
         logger.info("SELL: %s qty=%s price=%s avg_price=%s pnl=%s", symbol, fill_qty, fill_price, pos_avg_price, pnl)
@@ -631,39 +606,26 @@ class TradeExecutionService:
         if qty <= 0:
             return None
 
-        result = broker.submit_limit_order(symbol, "SELL", Decimal(qty), price)
-        status = getattr(result, "status", "SUBMITTED")
-        try:
-            self._persist_submitted_order(result.broker_order_id, symbol, "SELL_SHORT", float(qty), float(price), status)
-        except OrderPersistenceError:
-            return self._recover_from_missing_order_record(
-                result,
-                broker,
-                risk,
-                notify_risk_event=notify_risk_event,
-                engine_snapshot=engine_snapshot,
-                restore_engine_snapshot=restore_engine_snapshot,
-            )
-        order_status = self._order_status_from_submit_result(result)
-        self._safe_update_order_status_from_result(order_status)
-
-        if self._order_status_is_live(order_status):
-            self._track_pending_order("SELL_SHORT", result, broker, engine_snapshot)
-            logger.info("SELL_SHORT pending: %s status=%s", result.broker_order_id, order_status.status)
-            return order_status
-
-        if self._handle_terminal_fill_result("SELL_SHORT", result, order_status, broker, risk, notifier, engine_snapshot, restore_engine_snapshot=restore_engine_snapshot, notify_risk_event=notify_risk_event):
-            return order_status
-
-        if order_status.status != "FILLED":
-            self._pause_after_failed_order(result.broker_order_id, order_status.status, risk, notify_risk_event)
-            logger.warning("SELL_SHORT not filled: %s status=%s", result.broker_order_id, order_status.status)
+        order_status = self._submit_limit_order(
+            "SELL_SHORT",
+            symbol,
+            "SELL",
+            Decimal(qty),
+            price,
+            broker,
+            risk,
+            notifier,
+            engine_snapshot=engine_snapshot,
+            restore_engine_snapshot=restore_engine_snapshot,
+            notify_risk_event=notify_risk_event,
+        )
+        if order_status is None or order_status.status != "FILLED":
             return order_status
 
         fill_price = order_status.executed_price if order_status.executed_price > 0 else price
         fill_qty = order_status.executed_quantity if order_status.executed_quantity > 0 else Decimal(qty)
         self._record_entry_price(symbol, fill_price, fill_qty)
-        self._safe_notify_order(notifier, "SELL_SHORT", symbol, str(fill_qty), str(fill_price), result.broker_order_id)
+        self._safe_notify_order(notifier, "SELL_SHORT", symbol, str(fill_qty), str(fill_price), order_status.broker_order_id)
         logger.info("SELL_SHORT: %s qty=%s price=%s", symbol, fill_qty, fill_price)
         return order_status
 
@@ -710,10 +672,60 @@ class TradeExecutionService:
         if profit_guard is not None:
             return profit_guard
 
-        result = broker.submit_limit_order(symbol, "BUY", qty, price)
+        order_status = self._submit_limit_order(
+            "BUY_TO_COVER",
+            symbol,
+            "BUY",
+            qty,
+            price,
+            broker,
+            risk,
+            notifier,
+            engine_snapshot=engine_snapshot,
+            restore_engine_snapshot=restore_engine_snapshot,
+            notify_risk_event=notify_risk_event,
+            avg_price=pos_avg_price,
+        )
+        if order_status is None or order_status.status != "FILLED":
+            return order_status
+
+        fill_price = order_status.executed_price if order_status.executed_price > 0 else price
+        fill_qty = order_status.executed_quantity if order_status.executed_quantity > 0 else qty
+        pnl = float((pos_avg_price - fill_price) * fill_qty)
+        self._safe_notify_order(notifier, "BUY_TO_COVER", symbol, str(fill_qty), str(fill_price), order_status.broker_order_id)
+        risk.record_trade(pnl)
+        self._consume_entry_quantity(symbol, fill_qty)
+        logger.info("BUY_TO_COVER: %s qty=%s price=%s avg_price=%s pnl=%s", symbol, fill_qty, fill_price, pos_avg_price, pnl)
+        return order_status
+
+    def _submit_limit_order(
+        self,
+        action: str,
+        symbol: str,
+        side: str,
+        qty: Decimal,
+        price: Decimal,
+        broker: BrokerGateway,
+        risk: RiskController,
+        notifier: "NotifierInterface",
+        *,
+        engine_snapshot: _EngineSnapshot | None = None,
+        restore_engine_snapshot: Callable[[_EngineSnapshot], None] | None = None,
+        notify_risk_event: _NotifyRiskEvent | None = None,
+        avg_price: Decimal | None = None,
+    ) -> OrderStatus | None:
+        """Submit a limit order, persist it, and handle immediate live/terminal/filled outcomes.
+
+        Returns ``OrderStatus`` for live, terminal, or filled orders.  Callers that
+        need post-fill bookkeeping (entry recording, PnL, position consumption)
+        should inspect ``status == "FILLED"`` and perform their own tail logic.
+        """
+        result = broker.submit_limit_order(symbol, side, qty, price)
         status = getattr(result, "status", "SUBMITTED")
         try:
-            self._persist_submitted_order(result.broker_order_id, symbol, "BUY_TO_COVER", float(qty), float(price), status)
+            self._persist_submitted_order(
+                result.broker_order_id, symbol, action, float(qty), float(price), status
+            )
         except OrderPersistenceError:
             return self._recover_from_missing_order_record(
                 result,
@@ -727,25 +739,29 @@ class TradeExecutionService:
         self._safe_update_order_status_from_result(order_status)
 
         if self._order_status_is_live(order_status):
-            self._track_pending_order("BUY_TO_COVER", result, broker, engine_snapshot, avg_price=pos_avg_price)
-            logger.info("BUY_TO_COVER pending: %s status=%s", result.broker_order_id, order_status.status)
+            self._track_pending_order(action, result, broker, engine_snapshot, avg_price=avg_price)
+            logger.info("%s pending: %s status=%s", action, result.broker_order_id, order_status.status)
             return order_status
 
-        if self._handle_terminal_fill_result("BUY_TO_COVER", result, order_status, broker, risk, notifier, engine_snapshot, restore_engine_snapshot=restore_engine_snapshot, avg_price=pos_avg_price, notify_risk_event=notify_risk_event):
+        if self._handle_terminal_fill_result(
+            action,
+            result,
+            order_status,
+            broker,
+            risk,
+            notifier,
+            engine_snapshot,
+            restore_engine_snapshot=restore_engine_snapshot,
+            avg_price=avg_price,
+            notify_risk_event=notify_risk_event,
+        ):
             return order_status
 
         if order_status.status != "FILLED":
             self._pause_after_failed_order(result.broker_order_id, order_status.status, risk, notify_risk_event)
-            logger.warning("BUY_TO_COVER not filled: %s status=%s", result.broker_order_id, order_status.status)
+            logger.warning("%s not filled: %s status=%s", action, result.broker_order_id, order_status.status)
             return order_status
 
-        fill_price = order_status.executed_price if order_status.executed_price > 0 else price
-        fill_qty = order_status.executed_quantity if order_status.executed_quantity > 0 else qty
-        pnl = float((pos_avg_price - fill_price) * fill_qty)
-        self._safe_notify_order(notifier, "BUY_TO_COVER", symbol, str(fill_qty), str(fill_price), result.broker_order_id)
-        risk.record_trade(pnl)
-        self._consume_entry_quantity(symbol, fill_qty)
-        logger.info("BUY_TO_COVER: %s qty=%s price=%s avg_price=%s pnl=%s", symbol, fill_qty, fill_price, pos_avg_price, pnl)
         return order_status
 
     @staticmethod
@@ -1064,7 +1080,7 @@ class TradeExecutionService:
         status = getattr(result, "status", "SUBMITTED")
         if status == "SUBMITTED":
             return
-        filled_at = datetime.now(timezone.utc) if status in {"FILLED", "REJECTED", "CANCELLED"} else None
+        filled_at = datetime.now(timezone.utc) if status == "FILLED" else None
         self._safe_update_order_status(
             getattr(result, "broker_order_id", ""),
             status,

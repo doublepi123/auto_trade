@@ -665,7 +665,9 @@ class AppRunner:
                 )
                 if skipped is not None:
                     return skipped
-                session_skipped = self._check_trading_session(mapped_action)
+                session_skipped = self._check_trading_session(
+                    mapped_action, symbol=target_symbol, market=target_market
+                )
                 if session_skipped is not None:
                     return session_skipped
                 cancel_status = self._trade_svc.cancel_pending_order_for_symbol(
@@ -702,7 +704,9 @@ class AppRunner:
             if skipped is not None:
                 return skipped
             if pending is not None:
-                session_skipped = self._check_trading_session(mapped_action)
+                session_skipped = self._check_trading_session(
+                    mapped_action, symbol=target_symbol, market=target_market
+                )
                 if session_skipped is not None:
                     return session_skipped
                 cancel_status = self._trade_svc.cancel_pending_order_for_symbol(
@@ -1167,7 +1171,7 @@ class AppRunner:
         if filled_at is not None and order.filled_at != filled_at:
             order.filled_at = filled_at
             changed = True
-        elif status in _TERMINAL_ORDER_STATUSES and order.filled_at is None:
+        elif status == "FILLED" and order.filled_at is None:
             order.filled_at = datetime.now(timezone.utc)
             changed = True
 
@@ -1788,30 +1792,36 @@ class AppRunner:
             return
         self._trading_session_mode = mode if mode else "ANY"
 
-    def _check_trading_session(self, action: str) -> dict[str, Any] | None:
+    def _check_trading_session(
+        self,
+        action: str,
+        symbol: str | None = None,
+        market: str | None = None,
+    ) -> dict[str, Any] | None:
         """Layer-A gate: block before cancel_pending when RTH_ONLY and outside RTH."""
         if action == "CANCEL_PENDING":
             return None
         if self._get_trading_session_mode() != "RTH_ONLY":
             return None
-        market = self.engine.params.market
-        if is_trading_hours(market):
+        target_market = market or self.engine.params.market
+        if is_trading_hours(target_market):
             return None
-        reason = f"non-RTH for {market}"
+        target_symbol = symbol or self.engine.params.symbol
+        reason = f"non-RTH for {target_market}"
         self._record_order_skipped(
-            self.engine.params.symbol,
+            target_symbol,
             action,
             reason,
-            {"skip_category": "SESSION", "market": market},
+            {"skip_category": "SESSION", "market": target_market},
         )
         if self._audit:
             self._audit.record(
                 "TRADING_SESSION_BLOCKED",
                 severity="INFO",
                 request_summary={
-                    "symbol": self.engine.params.symbol,
+                    "symbol": target_symbol,
                     "action": action,
-                    "market": market,
+                    "market": target_market,
                 },
             )
         return {

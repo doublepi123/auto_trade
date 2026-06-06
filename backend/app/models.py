@@ -31,7 +31,7 @@ class StrategyConfig(Base):
     max_daily_loss: Mapped[float] = mapped_column(Float, default=5000.0)
     max_consecutive_losses: Mapped[int] = mapped_column(Integer, default=3)
     sct_key: Mapped[str] = mapped_column(String(200), default="")
-    updated_at: Mapped[datetime] = mapped_column(_TZDateTime(), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(_TZDateTime(), default=_utcnow, onupdate=_utcnow)
 
     fee_rate_us: Mapped[float] = mapped_column(Float, default=0.0005)
     fee_rate_hk: Mapped[float] = mapped_column(Float, default=0.003)
@@ -67,7 +67,7 @@ class CredentialConfig(Base):
         default='[{"type":"serverchan","severity_floor":"INFO"}]',
         nullable=False,
     )
-    updated_at: Mapped[datetime] = mapped_column(_TZDateTime(), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(_TZDateTime(), default=_utcnow, onupdate=_utcnow)
 
 
 class OrderRecord(Base):
@@ -161,7 +161,7 @@ class RuntimeState(Base):
     last_price: Mapped[float] = mapped_column(Float, default=0.0)
     last_trigger_price: Mapped[float] = mapped_column(Float, default=0.0)
     last_trigger_at: Mapped[Optional[datetime]] = mapped_column(_TZDateTime(), nullable=True)
-    updated_at: Mapped[datetime] = mapped_column(_TZDateTime(), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(_TZDateTime(), default=_utcnow, onupdate=_utcnow)
 
 
 class TrackedEntry(Base):

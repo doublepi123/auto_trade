@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -47,6 +48,7 @@ class StrategyEngine:
         self.last_price: float = 0.0
         self.last_trigger_price: float = 0.0
         self.last_trigger_at: Optional[datetime] = None
+        self._last_trigger_monotonic: float = 0.0
         self._cooldown_seconds: int = settings.engine_cooldown_seconds
         self._lock = threading.Lock()
 
@@ -117,15 +119,12 @@ class StrategyEngine:
     def _mark_trigger(self, price: float) -> None:
         self.last_trigger_price = price
         self.last_trigger_at = datetime.now(timezone.utc)
+        self._last_trigger_monotonic = time.monotonic()
 
     def _in_cooldown(self) -> bool:
-        if self.last_trigger_at is None:
+        if self._last_trigger_monotonic <= 0:
             return False
-        now = datetime.now(timezone.utc)
-        last = self.last_trigger_at
-        if last.tzinfo is None:
-            last = last.replace(tzinfo=timezone.utc)
-        elapsed = (now - last).total_seconds()
+        elapsed = time.monotonic() - self._last_trigger_monotonic
         return elapsed < self._cooldown_seconds
 
     def sync_state(self, has_long_position: bool, has_short_position: bool) -> None:

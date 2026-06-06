@@ -1439,7 +1439,7 @@ class TestAppRunner:
         assert order_status.status == "REJECTED"
 
     @pytest.mark.parametrize("terminal_status", ["REJECTED", "CANCELLED"])
-    def test_execute_sell_records_terminal_status_timestamp(self, terminal_status: str) -> None:
+    def test_execute_sell_records_terminal_status_without_filled_at(self, terminal_status: str) -> None:
         runner = AppRunner()
         updates: list[tuple[str, str, object]] = []
 
@@ -1486,6 +1486,54 @@ class TestAppRunner:
         assert updates
         assert updates[-1][0] == "order-1"
         assert updates[-1][1] == terminal_status
+        assert updates[-1][2] is None
+
+    def test_execute_sell_filled_records_filled_at_timestamp(self) -> None:
+        runner = AppRunner()
+        updates: list[tuple[str, str, object]] = []
+
+        class Broker:
+            def get_positions(self) -> list[Position]:
+                return [Position(symbol="AAPL.US", side="LONG", quantity=Decimal("5"), avg_price=Decimal("150"))]
+
+            def submit_limit_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal) -> OrderResult:
+                return OrderResult(
+                    broker_order_id="order-1",
+                    symbol=symbol,
+                    side=side,
+                    quantity=quantity,
+                    price=price,
+                    status="SUBMITTED",
+                )
+
+            def get_order_status(self, order_id: str):
+                assert order_id == "order-1"
+                assert runner.risk.daily_pnl == 0.0
+                return SimpleNamespace(
+                    broker_order_id=order_id,
+                    status="FILLED",
+                    executed_quantity=Decimal("5"),
+                    executed_price=Decimal("201"),
+                )
+
+        runner.broker = Broker()
+        runner.notifier = _NoopNotifier()
+        self._stub_trade_callbacks(runner)
+        runner._trade_svc._update_order_status = lambda order_id, status, filled_at=None, executed_quantity=None, executed_price=None: updates.append((order_id, status, filled_at))
+        runner._trade_svc._order_status_poll_interval_seconds = 0
+        runner._trade_svc._order_status_timeout_seconds = 1
+
+        order_status = self._execute_sell(runner, "AAPL.US", Quote("AAPL.US", 201.0, 200.5, 201.5, ""))
+
+        assert order_status is not None
+        assert order_status.status == "SUBMITTED"
+        assert runner._trade_svc._pending_order is not None
+
+        runner._trade_svc.reconcile(runner.risk, runner.notifier, runner._restore_engine_snapshot, runner.notifier.notify_risk_event)
+
+        assert updates
+        assert updates[-1][0] == "order-1"
+        assert updates[-1][1] == "FILLED"
         assert updates[-1][2] is not None
 
     def test_execute_sell_without_fill_tracks_pending_without_pnl_or_filled_status(self) -> None:

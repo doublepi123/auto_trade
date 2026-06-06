@@ -73,6 +73,13 @@ def _sort_key(item: TimelineEventResponse) -> tuple[float, str, int]:
     return (-_to_utc_timestamp(item.created_at), item.source, -item.id)
 
 
+_MAX_MERGED_FETCH = 2000
+
+
+def _paginate_query(query, page: int, page_size: int):
+    return query.offset((page - 1) * page_size).limit(page_size).all()
+
+
 def list_timeline_events(
     db: Session,
     *,
@@ -85,30 +92,46 @@ def list_timeline_events(
     """Merge trade_events and audit_logs for the timeline API (spec §5.2)."""
     et = [e.strip() for e in (event_types or []) if e and e.strip()]
 
-    trade_total = 0
-    audit_total = 0
-    trade_rows: list[TradeEvent] = []
-    audit_rows: list[AuditLog] = []
-
-    fetch_n = page * page_size
-
-    if source in ("trade", "all"):
+    if source == "trade":
         tq = db.query(TradeEvent)
         if symbol:
             tq = tq.filter(TradeEvent.symbol == symbol)
         if et:
             tq = tq.filter(TradeEvent.event_type.in_(et))
-        trade_total = tq.count()
-        trade_rows = (
-            tq.order_by(TradeEvent.created_at.desc(), TradeEvent.id.desc()).limit(fetch_n).all()
-        )
+        total = tq.count()
+        rows = _paginate_query(tq.order_by(TradeEvent.created_at.desc(), TradeEvent.id.desc()), page, page_size)
+        return [_trade_row_to_out(r) for r in rows], total
 
-    if source in ("audit", "all") and not symbol:
+    if source == "audit":
+        aq = db.query(AuditLog)
+        if et:
+            aq = aq.filter(AuditLog.action.in_(et))
+        total = aq.count()
+        rows = _paginate_query(aq.order_by(AuditLog.created_at.desc(), AuditLog.id.desc()), page, page_size)
+        return [_audit_row_to_out(r) for r in rows], total
+
+    # source == "all": merge with capped fetch to avoid O(n²) deep pagination
+    trade_total = 0
+    audit_total = 0
+    trade_rows: list[TradeEvent] = []
+    audit_rows: list[AuditLog] = []
+
+    fetch_n = min(page * page_size, _MAX_MERGED_FETCH)
+
+    tq = db.query(TradeEvent)
+    if symbol:
+        tq = tq.filter(TradeEvent.symbol == symbol)
+    if et:
+        tq = tq.filter(TradeEvent.event_type.in_(et))
+    trade_total = tq.count()
+    trade_rows = tq.order_by(TradeEvent.created_at.desc(), TradeEvent.id.desc()).limit(fetch_n).all()
+
+    if not symbol:
         aq = db.query(AuditLog)
         if et:
             aq = aq.filter(AuditLog.action.in_(et))
         audit_total = aq.count()
-        audit_rows = aq.order_by(AuditLog.created_at.desc(), AuditLog.id.desc()).limit(fetch_n).all()
+        audit_rows = aq.order_by(AuditLog.created_at.desc(), AuditLog.created_at.desc()).limit(fetch_n).all()
 
     total = trade_total + audit_total
 
