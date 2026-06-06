@@ -146,7 +146,18 @@ export function useNotificationStream() {
     for (const item of items) {
       const id = item.id ?? 0
       if (id && knownEventIds.has(id)) continue
-      if (id) knownEventIds.add(id)
+      if (id) {
+        knownEventIds.add(id)
+        if (knownEventIds.size > 1000) {
+          const toRemove = knownEventIds.size - 1000
+          let removed = 0
+          for (const existingId of knownEventIds) {
+            knownEventIds.delete(existingId)
+            removed += 1
+            if (removed >= toRemove) break
+          }
+        }
+      }
 
       const severity = parseSeverity(item.severity)
       const title = item.action ?? item.event_type ?? 'Notification'

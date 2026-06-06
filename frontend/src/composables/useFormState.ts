@@ -16,12 +16,6 @@ export function useFormState<T extends Record<string, unknown>>(options: FormSta
 
   const isDirty = computed(() => JSON.stringify(form.value) !== savedSnapshot.value)
 
-  watch(form, () => {
-    if (isDirty.value) {
-      saved.value = false
-    }
-  }, { deep: true })
-
   async function load() {
     loading.value = true
     error.value = null

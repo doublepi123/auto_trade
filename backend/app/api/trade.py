@@ -476,16 +476,12 @@ def get_account() -> AccountResponse:
     if cached is not None:
         return cached
 
-    acquired = _account_refresh_lock.acquire(blocking=False)
+    acquired = _account_refresh_lock.acquire(timeout=30)
     if not acquired:
         cached = _cached_account_response(broker, _account_cache_now(), allow_stale=True)
         if cached is not None:
             return cached
-        _acquired = _account_refresh_lock.acquire(timeout=30)
-        if not _acquired:
-            raise HTTPException(status_code=503, detail="account refresh timeout")
-        acquired = True
-
+        raise HTTPException(status_code=503, detail="account refresh timeout")
     try:
         cached = _cached_account_response(broker, _account_cache_now(), allow_stale=False)
         if cached is not None:
@@ -498,8 +494,7 @@ def get_account() -> AccountResponse:
             return cached
         return _unavailable_account_response()
     finally:
-        if acquired:
-            _account_refresh_lock.release()
+        _account_refresh_lock.release()
 
     if not response.available:
         cached = _cached_account_response(broker, _account_cache_now(), allow_stale=True)

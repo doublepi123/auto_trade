@@ -87,6 +87,12 @@ class LLMRecommendationEvaluator:
             query = query.filter(LLMInteraction.created_at <= end)
         return query.all()
 
+    @staticmethod
+    def _extract_price(item: Any) -> float:
+        if isinstance(item, dict):
+            return float(item.get("last_price", 0) or 0)
+        return float(item) if item is not None else 0.0
+
     def _evaluate_single(
         self,
         interaction: LLMInteraction,
@@ -171,8 +177,8 @@ class LLMRecommendationEvaluator:
         recent_prices = context.get("recent_prices", [])
         too_late = False
         if recent_prices and len(recent_prices) >= 2:
-            first_price = recent_prices[0].get("last_price", 0) if isinstance(recent_prices[0], dict) else recent_prices[0]
-            last_price = recent_prices[-1].get("last_price", 0) if isinstance(recent_prices[-1], dict) else recent_prices[-1]
+            first_price = self._extract_price(recent_prices[0])
+            last_price = self._extract_price(recent_prices[-1])
             if first_price > 0:
                 if is_buy:
                     recent_change = (last_price - first_price) / first_price * 100

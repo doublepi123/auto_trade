@@ -142,7 +142,11 @@ def _interval_reference_quantity(position_context: dict[str, Any], account_conte
 
 @router.post("/strategy/llm-interval/preview", response_model=LLMAnalyzeResponse, dependencies=[Depends(require_api_key())])
 def preview_llm_interval(payload: LLMPreviewAnalyzeRequest) -> LLMAnalyzeResponse:
-    advisor = LLMAdvisorService(broker=get_runner().broker)
+    try:
+        runner = get_runner()
+    except Exception:
+        raise HTTPException(status_code=503, detail="runner not initialized") from None
+    advisor = LLMAdvisorService(broker=runner.broker)
     result = advisor.preview(
         symbol=payload.symbol,
         market=payload.market,
@@ -186,7 +190,10 @@ def analyze_llm_interval(
     if not config.symbol:
         raise HTTPException(status_code=400, detail="Strategy symbol not configured")
 
-    runner = get_runner()
+    try:
+        runner = get_runner()
+    except Exception:
+        raise HTTPException(status_code=503, detail="runner not initialized") from None
     last_price = runner.engine.last_price
     current_price = last_price if last_price is not None and last_price > 0 else config.buy_low
     position_context = _position_context(config.symbol, current_price)

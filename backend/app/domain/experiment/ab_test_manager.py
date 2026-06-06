@@ -61,10 +61,14 @@ class ABTestManager:
 
     def select_variant(self, symbol: str, experiment_name: str) -> PromptVersion | None:
         """Select a variant deterministically based on symbol hash."""
-        versions = self.list_versions()
+        versions = (
+            self.db.query(PromptVersion)
+            .filter(PromptVersion.is_active == True)  # noqa: E712
+            .all()
+        )
         if not versions:
             return None
-        hash_val = int(hashlib.md5(f"{experiment_name}:{symbol}".encode()).hexdigest(), 16)
+        hash_val = int(hashlib.sha256(f"{experiment_name}:{symbol}".encode()).hexdigest(), 16)
         idx = hash_val % len(versions)
         return versions[idx]
 

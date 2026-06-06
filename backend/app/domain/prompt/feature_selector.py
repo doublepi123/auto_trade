@@ -33,11 +33,10 @@ class FeatureSelector:
             if start >= 0 and end > start:
                 json_str = llm_response[start:end]
                 data = json.loads(json_str)
-                selected = data.get("selected_indicators", [])
+                selected = data.get("selected_indicators")
                 if isinstance(selected, list):
                     valid = [s for s in selected if s in AVAILABLE_INDICATORS]
-                    if valid:
-                        return valid
+                    return valid
         except (json.JSONDecodeError, KeyError, TypeError):
             logger.warning("Failed to parse LLM indicator selection")
 

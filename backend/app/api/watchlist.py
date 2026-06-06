@@ -50,6 +50,9 @@ def get_watchlist_snapshots(
     symbols = [item.symbol for item in items]
     try:
         broker = get_runner().broker
+    except Exception:
+        raise HTTPException(status_code=503, detail="runner not initialized") from None
+    try:
         quotes = broker.get_quotes(symbols)
     except Exception:
         logger.exception("failed to fetch watchlist snapshots")
@@ -127,6 +130,9 @@ def get_watchlist_quotes(
     symbols = [item.symbol for item in items]
     try:
         broker = get_runner().broker
+    except Exception:
+        raise HTTPException(status_code=503, detail="runner not initialized") from None
+    try:
         quotes = broker.get_quotes(symbols)
         return [
             WatchlistQuote(

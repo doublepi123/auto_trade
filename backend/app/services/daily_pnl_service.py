@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Callable
 
@@ -76,7 +76,13 @@ class DailyPnlService:
 
         resolve_day: ToTradeDay = to_trade_day or _utc_date
         target_day = trade_day or resolve_day(datetime.now(timezone.utc))
-        query = self._db.query(OrderRecord)
+        start_of_day = datetime(target_day.year, target_day.month, target_day.day, tzinfo=timezone.utc)
+        end_of_day = start_of_day + timedelta(days=1)
+        query = self._db.query(OrderRecord).filter(
+            OrderRecord.created_at >= start_of_day - timedelta(days=1)
+        ).filter(
+            OrderRecord.created_at < end_of_day + timedelta(days=1)
+        )
         if symbol:
             query = query.filter(OrderRecord.symbol == symbol)
 

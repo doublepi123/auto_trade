@@ -430,21 +430,23 @@ const formatTime = (iso: string | null) => {
 }
 
 const route = useRoute()
-// Apply draft experiment run parameters from query string
-const draftRunId = route.query.draftExperimentRunId
-if (draftRunId) {
-  const qb = route.query.buy_low
-  const qs = route.query.sell_high
-  const qf = route.query.fee_rate
-  if (qb) form.value.buy_low = Number(qb)
-  if (qs) form.value.sell_high = Number(qs)
-  if (qf) form.value.fee_rate_us = Number(qf) * 100
-  ElMessage.info(`已加载实验 Run #${draftRunId} 的草稿参数，请确认后保存`)
-}
 
-load()
-loadLLMStatus()
-loadLLMInteractions()
+onMounted(async () => {
+  await load()
+  // Apply draft experiment run parameters from query string after load() completes
+  const draftRunId = route.query.draftExperimentRunId
+  if (draftRunId) {
+    const qb = route.query.buy_low
+    const qs = route.query.sell_high
+    const qf = route.query.fee_rate
+    if (qb) form.value.buy_low = Number(qb)
+    if (qs) form.value.sell_high = Number(qs)
+    if (qf) form.value.fee_rate_us = Number(qf) * 100
+    ElMessage.info(`已加载实验 Run #${draftRunId} 的草稿参数，请确认后保存`)
+  }
+  loadLLMStatus()
+  loadLLMInteractions()
+})
 
 onBeforeRouteLeave(() => {
   if (!isDirty.value) return true

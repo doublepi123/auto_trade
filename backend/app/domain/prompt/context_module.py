@@ -98,7 +98,7 @@ class ContextModule(PromptModule):
 
         # RSI
         rsi = context.get("rsi", 0.0)
-        if (not selected_indicators or "rsi" in selected_indicators) and rsi > 0:
+        if (not selected_indicators or "rsi" in selected_indicators) and rsi is not None and rsi >= 0:
             lines.append(f"- RSI(14): {rsi:.2f}")
 
         # MACD

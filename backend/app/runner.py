@@ -1755,29 +1755,30 @@ class AppRunner:
                     del self._symbol_runtimes[symbol]
 
     def _remember_symbol_runtime_quote(self, quote: Quote, observed_at: datetime) -> None:
-        runtime = self._symbol_runtimes.get(quote.symbol)
-        if runtime is None:
-            runtime = self._build_symbol_runtime(quote.symbol, self.engine.params.market)
-            self._symbol_runtimes[quote.symbol] = runtime
-        runtime.engine.record_price(quote.last_price)
-        runtime.recent_quotes.append(
-            {
-                "symbol": quote.symbol,
-                "last_price": float(quote.last_price),
-                "bid": float(quote.bid),
-                "ask": float(quote.ask),
-                "timestamp": quote.timestamp,
-                "observed_at": observed_at,
-            }
-        )
-        cutoff = observed_at - timedelta(seconds=self._recent_quote_window_seconds)
-        runtime.recent_quotes = [
-            item
-            for item in runtime.recent_quotes
-            if isinstance(item.get("observed_at"), datetime) and item["observed_at"] >= cutoff
-        ]
-        if len(runtime.recent_quotes) > self._recent_quotes_cap:
-            runtime.recent_quotes = runtime.recent_quotes[-self._recent_quotes_cap:]
+        with self._state_lock:
+            runtime = self._symbol_runtimes.get(quote.symbol)
+            if runtime is None:
+                runtime = self._build_symbol_runtime(quote.symbol, self.engine.params.market)
+                self._symbol_runtimes[quote.symbol] = runtime
+            runtime.engine.record_price(quote.last_price)
+            runtime.recent_quotes.append(
+                {
+                    "symbol": quote.symbol,
+                    "last_price": float(quote.last_price),
+                    "bid": float(quote.bid),
+                    "ask": float(quote.ask),
+                    "timestamp": quote.timestamp,
+                    "observed_at": observed_at,
+                }
+            )
+            cutoff = observed_at - timedelta(seconds=self._recent_quote_window_seconds)
+            runtime.recent_quotes = [
+                item
+                for item in runtime.recent_quotes
+                if isinstance(item.get("observed_at"), datetime) and item["observed_at"] >= cutoff
+            ]
+            if len(runtime.recent_quotes) > self._recent_quotes_cap:
+                runtime.recent_quotes = runtime.recent_quotes[-self._recent_quotes_cap:]
 
     def _get_trading_session_mode(self) -> str:
         return self._trading_session_mode or "ANY"
