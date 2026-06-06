@@ -284,6 +284,7 @@ const running = ref(false)
 // ── Leaderboard state ──
 
 const currentExperimentId = ref<number | null>(null)
+const currentExperimentSymbol = ref('')
 const runs = ref<StrategyExperimentRun[]>([])
 const sortField = ref('total_return_pct')
 const sortOrder = ref<'asc' | 'desc'>('desc')
@@ -377,6 +378,7 @@ async function handleRun() {
       parameter_grid: buildParameterGrid(),
     })
     currentExperimentId.value = exp.id
+    currentExperimentSymbol.value = exp.symbol
     ElMessage.success(`实验已创建，预计 ${exp.estimated_runs} 次回测`)
 
     // 2) Run experiment
@@ -495,6 +497,8 @@ async function onExport(format: 'csv' | 'json') {
 }
 function onDraftToStrategy(row: StrategyExperimentRun) {
   const params = row.parameters
+  const sym = currentExperimentSymbol.value
+  const market = sym.toUpperCase().endsWith('.HK') ? 'HK' : 'US'
   router.push({
     path: '/strategy',
     query: {
@@ -504,6 +508,7 @@ function onDraftToStrategy(row: StrategyExperimentRun) {
       quantity: String(params.quantity ?? ''),
       fee_rate: String(params.fee_rate ?? ''),
       slippage_pct: String(params.slippage_pct ?? ''),
+      market,
     },
   })
 }

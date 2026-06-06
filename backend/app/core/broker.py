@@ -464,8 +464,21 @@ class BrokerGateway:
                 if not items:
                     raise RuntimeError(f"broker returned 0 quotes for {len(symbols)} symbols")
                 logger.warning("broker returned %d quotes for %d symbols", len(items), len(symbols))
+            item_by_symbol: dict[str, Any] = {}
+            for item in items:
+                sym = str(getattr(item, "symbol", ""))
+                if sym:
+                    item_by_symbol[sym] = item
+            # Fallback: if symbol-keyed lookup is empty (items lack symbol attr),
+            # use positional pairing (single item + single symbol case)
+            if not item_by_symbol and len(items) == len(symbols):
+                item_by_symbol = dict(zip(symbols, items))
             quotes: list[Quote] = []
-            for fallback_symbol, item in zip(symbols, items):
+            for fallback_symbol in symbols:
+                item = item_by_symbol.get(fallback_symbol)
+                if item is None:
+                    logger.warning("broker did not return quote for symbol %s", fallback_symbol)
+                    continue
                 quotes.append(Quote(
                     symbol=str(getattr(item, "symbol", fallback_symbol)),
                     last_price=float(getattr(item, "last_done", 0)),

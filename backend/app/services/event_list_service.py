@@ -80,12 +80,21 @@ def _paginate_query(query, page: int, page_size: int):
     return query.offset((page - 1) * page_size).limit(page_size).all()
 
 
+def _apply_skip_category_filter(query, skip_category: str | None):
+    if skip_category:
+        query = query.filter(
+            TradeEvent.payload_json.contains(f'"skip_category": "{skip_category}"')
+        )
+    return query
+
+
 def list_timeline_events(
     db: Session,
     *,
     source: SourceFilter = "all",
     event_types: list[str] | None,
     symbol: str | None,
+    skip_category: str | None = None,
     page: int,
     page_size: int,
 ) -> tuple[list[TimelineEventResponse], int]:
@@ -98,6 +107,7 @@ def list_timeline_events(
             tq = tq.filter(TradeEvent.symbol == symbol)
         if et:
             tq = tq.filter(TradeEvent.event_type.in_(et))
+        tq = _apply_skip_category_filter(tq, skip_category)
         total = tq.count()
         rows = _paginate_query(tq.order_by(TradeEvent.created_at.desc(), TradeEvent.id.desc()), page, page_size)
         return [_trade_row_to_out(r) for r in rows], total
@@ -123,6 +133,7 @@ def list_timeline_events(
         tq = tq.filter(TradeEvent.symbol == symbol)
     if et:
         tq = tq.filter(TradeEvent.event_type.in_(et))
+    tq = _apply_skip_category_filter(tq, skip_category)
     trade_total = tq.count()
     trade_rows = tq.order_by(TradeEvent.created_at.desc(), TradeEvent.id.desc()).limit(fetch_n).all()
 
@@ -133,7 +144,10 @@ def list_timeline_events(
         audit_total = aq.count()
         audit_rows = aq.order_by(AuditLog.created_at.desc(), AuditLog.id.desc()).limit(fetch_n).all()
 
-    total = min(trade_total + audit_total, _MAX_MERGED_FETCH)
+    if symbol:
+        total = trade_total
+    else:
+        total = min(trade_total + audit_total, _MAX_MERGED_FETCH)
 
     merged = [_trade_row_to_out(r) for r in trade_rows] + [_audit_row_to_out(r) for r in audit_rows]
     merged.sort(key=_sort_key)

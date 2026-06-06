@@ -381,7 +381,7 @@ def _compute_bollinger_bands(
     span = min(period, len(closes))
     recent_closes = closes[-span:]
     middle = statistics.mean(recent_closes)
-    std = statistics.stdev(recent_closes) if len(recent_closes) > 1 else 0.0
+    std = statistics.pstdev(recent_closes) if len(recent_closes) > 1 else 0.0
     upper = middle + std_dev * std
     lower = middle - std_dev * std
     return (upper, middle, lower)

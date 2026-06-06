@@ -237,13 +237,17 @@ def get_orders(
             scope=scope,
         )
 
-    today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    now_local = datetime.now().astimezone()
+    today_start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    today_start_utc = today_start_local.astimezone(timezone.utc)
     local_orders = (
         db.query(OrderRecord)
-        .filter(OrderRecord.created_at >= today_start)
+        .filter(OrderRecord.created_at >= today_start_utc)
         .order_by(OrderRecord.created_at.desc())
+        .limit(1000)
         .all()
     )
+    local_orders = [o for o in local_orders if _is_today(o.created_at)]
     items = sorted(
         (_local_order_response(order) for order in local_orders),
         key=_order_sort_key,
@@ -260,6 +264,7 @@ def get_trade_events(
     symbol: Optional[str] = Query(default=None, max_length=50),
     event_type: Optional[List[str]] = Query(default=None),
     source: str = Query(default="all", pattern="^(trade|audit|all)$"),
+    skip_category: Optional[str] = Query(default=None, max_length=20),
     db: Session = Depends(get_db),
 ) -> TradeEventPageResponse:
     """Trade + audit timeline. Repeat ``event_type`` for multi-filter ( OR within each row type )."""
@@ -271,6 +276,7 @@ def get_trade_events(
         source=source,  # pyright: ignore
         event_types=event_type,
         symbol=symbol,
+        skip_category=skip_category,
         page=page,
         page_size=page_size,
     )

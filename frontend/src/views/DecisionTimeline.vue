@@ -47,6 +47,7 @@
           placeholder="跳过原因"
           data-testid="skip-category-filter"
           style="width: 150px"
+          @change="onFilterChange"
         >
           <el-option label="成本不足" value="FEE" />
           <el-option label="改价不显著" value="REPRICING" />
@@ -162,15 +163,7 @@ const sourceFilter = ref<TimelineSource>('all')
 const selectedEventTypes = ref<string[]>([])
 const tableRefreshKey = ref(0)
 
-const visibleEvents = computed(() => {
-  let rows = events.value
-  if (selectedSkipCategory.value) {
-    rows = rows.filter(
-      (event) => event.payload?.skip_category === selectedSkipCategory.value,
-    )
-  }
-  return rows
-})
+const visibleEvents = computed(() => events.value)
 
 onMounted(loadEvents)
 
@@ -187,6 +180,7 @@ async function loadEvents() {
       page_size: pageSize.value,
       source: sourceFilter.value,
       event_type: et,
+      skip_category: selectedSkipCategory.value || undefined,
     })
     events.value = data.items.map((item) => ({
       ...item,

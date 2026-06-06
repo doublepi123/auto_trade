@@ -159,10 +159,7 @@ class IntervalApplicationService:
 
         if new_sell_high is not None:
             min_sell_high = current_price * (1 + settings.llm_interval_volatility_threshold_pct / 100)
-            if new_sell_high >= old_sell_high:
-                config.sell_high = new_sell_high
-            else:
-                config.sell_high = max(new_sell_high, min_sell_high)
+            config.sell_high = max(new_sell_high, min_sell_high)
 
         return config.buy_low != old_buy_low or config.sell_high != old_sell_high
 

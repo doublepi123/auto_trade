@@ -390,7 +390,7 @@ def get_llm_interval_status(db: Session = Depends(get_db)) -> LLMIntervalStatus:
     )
 
 
-@router.put("/strategy/llm-interval/enable", response_model=MessageResponse)
+@router.put("/strategy/llm-interval/enable", response_model=MessageResponse, dependencies=[Depends(require_api_key())])
 def enable_llm_interval(
     request: Request,
     db: Session = Depends(get_db),
@@ -412,7 +412,7 @@ def enable_llm_interval(
     return MessageResponse(message="LLM auto interval enabled")
 
 
-@router.put("/strategy/llm-interval/disable", response_model=MessageResponse)
+@router.put("/strategy/llm-interval/disable", response_model=MessageResponse, dependencies=[Depends(require_api_key())])
 def disable_llm_interval(
     request: Request,
     db: Session = Depends(get_db),

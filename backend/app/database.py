@@ -226,16 +226,17 @@ def _ensure_credential_config_notification_channels_column(db_engine: Engine) ->
     if "credential_config" not in inspector.get_table_names():
         return
     columns = {column["name"] for column in inspector.get_columns("credential_config")}
+    quoted_default = "'" + DEFAULT_NOTIFICATION_CHANNELS_JSON.replace("'", "''") + "'"
     with db_engine.begin() as connection:
         if "notification_channels" not in columns:
             connection.exec_driver_sql(
                 "ALTER TABLE credential_config ADD COLUMN notification_channels TEXT "
-                f"DEFAULT '{DEFAULT_NOTIFICATION_CHANNELS_JSON}' NOT NULL"
+                "DEFAULT " + quoted_default + " NOT NULL"
             )
             connection.exec_driver_sql(
-                "UPDATE credential_config SET notification_channels = "
-                f"'{DEFAULT_NOTIFICATION_CHANNELS_JSON}' "
-                "WHERE notification_channels IS NULL OR notification_channels = ''"
+                "UPDATE credential_config SET notification_channels = ? "
+                "WHERE notification_channels IS NULL OR notification_channels = ''",
+                (DEFAULT_NOTIFICATION_CHANNELS_JSON,),
             )
 
 

@@ -1,5 +1,6 @@
 import { ref, onUnmounted } from 'vue'
 import { ElNotification, ElMessage } from 'element-plus'
+import { api } from '../api/client'
 
 export type NotificationSeverity = 'INFO' | 'WARNING' | 'CRITICAL'
 
@@ -151,9 +152,8 @@ function handleEvent(evt: NotificationEvent) {
 
 async function fetchRecentEvents(limit = 20): Promise<EventItem[]> {
   try {
-    const res = await fetch(`/api/events?source=all&limit=${limit}`)
-    if (!res.ok) return []
-    const data = await res.json()
+    const resp = await api.get('/api/events', { params: { source: 'all', limit } })
+    const data = resp.data
     return data.items ?? data ?? []
   } catch {
     return []
@@ -182,20 +182,8 @@ function processEvents(items: EventItem[], isBackfill = false) {
     const message = detailHash(item.detail)
 
     if (isBackfill) {
-      // Backfill shows all events without throttle, but still respect CRITICAL limit
-      if (severity === 'CRITICAL') {
-        const now = Date.now()
-        if (now - sharedCriticalCount.windowStart > PERSISTENT_LIMIT_WINDOW_MS) {
-          sharedCriticalCount.count = 0
-          sharedCriticalCount.windowStart = now
-        }
-        if (sharedCriticalCount.count >= sharedPrefs.value.criticalPersistMaxPerMinute) {
-          continue
-        }
-        sharedCriticalCount.count += 1
-      }
-      emitBySeverity(severity, title, message)
-      playNotificationSound(severity)
+      // Backfill only marks events as known — no notification display
+      continue
     } else {
       handleEvent({
         type: item.event_type ? 'trade_event' : 'audit_log',

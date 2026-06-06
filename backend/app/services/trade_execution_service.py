@@ -1166,6 +1166,7 @@ class TradeExecutionService:
         tracked_covers_exit = tracked_qty >= exit_qty > 0
         if tracked_avg > 0 and tracked_covers_exit:
             if broker_avg_price is not None and broker_avg_price > 0 and abs(tracked_avg - broker_avg_price) / broker_avg_price > Decimal("0.02"):
+                # Divergence exceeds 2% tolerance: prefer tracked weighted entry for accurate pnl
                 logger.warning(
                     "avg_price mismatch for %s: tracked=%s vs broker=%s, using tracked weighted entry price for accurate pnl",
                     symbol,
@@ -1174,7 +1175,17 @@ class TradeExecutionService:
                 )
                 return tracked_avg
             if broker_avg_price is not None and broker_avg_price > 0:
+                # Divergence within tolerance (<=2%) or no divergence: use broker price
+                if tracked_avg != broker_avg_price:
+                    logger.debug(
+                        "avg_price within-tolerance divergence for %s: tracked=%s vs broker=%s (diff=%s), using broker price",
+                        symbol,
+                        tracked_avg,
+                        broker_avg_price,
+                        abs(tracked_avg - broker_avg_price),
+                    )
                 return broker_avg_price
+            # Broker price unavailable; fall back to tracked weighted entry
             return tracked_avg
 
         if broker_avg_price is not None and broker_avg_price > 0:

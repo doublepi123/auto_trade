@@ -89,6 +89,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
+import { ElMessage } from 'element-plus'
 import type { WatchlistItem, WatchlistQuote } from '../types'
 import {
   getWatchlist,
@@ -115,7 +116,7 @@ async function loadItems() {
   try {
     items.value = await getWatchlist()
   } catch (e: any) {
-    // ignore
+    ElMessage.error(e.response?.data?.detail || '加载观察列表失败')
   } finally {
     loading.value = false
   }
@@ -131,7 +132,7 @@ async function loadQuotes() {
     }
     quoteMap.value = map
   } catch (e: any) {
-    // ignore
+    ElMessage.error(e.response?.data?.detail || '加载行情失败')
   }
 }
 
@@ -163,7 +164,7 @@ async function handleRemove(id: number) {
     await loadItems()
     await loadQuotes()
   } catch (e: any) {
-    // ignore
+    ElMessage.error(e.response?.data?.detail || '删除失败')
   } finally {
     removingId.value = null
   }
@@ -175,7 +176,7 @@ async function handleActivate(id: number) {
     await activateWatchlistItem(id)
     await loadItems()
   } catch (e: any) {
-    // ignore
+    ElMessage.error(e.response?.data?.detail || '激活失败')
   } finally {
     activatingId.value = null
   }

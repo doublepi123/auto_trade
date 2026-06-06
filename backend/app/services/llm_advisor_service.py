@@ -308,17 +308,20 @@ class LLMAdvisorService:
                 "interaction_id": interaction_id,
             }
 
-        _LAST_ANALYSIS_TIMESTAMP = time.monotonic()  # pyright: ignore[reportConstantRedefinition]
-
         next_analysis_at = datetime.now(timezone.utc) + timedelta(minutes=interval_minutes)
+        _persist_succeeded = True
         if persist:
             db = SessionLocal()
             try:
                 next_analysis_at = self._record_analysis(db, result, interval_minutes)
             except Exception:
+                _persist_succeeded = False
                 logger.exception("failed to record LLM analysis")
             finally:
                 db.close()
+
+        if _persist_succeeded:
+            _LAST_ANALYSIS_TIMESTAMP = time.monotonic()  # pyright: ignore[reportConstantRedefinition]
 
         interaction_id = self._record_interaction(
             interaction_type="analyze",
