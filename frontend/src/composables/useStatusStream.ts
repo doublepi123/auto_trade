@@ -12,6 +12,7 @@ export function useStatusStream(status: { value: StatusData }) {
   let pollTimer: ReturnType<typeof setInterval> | null = null
   let reconnectAttempts = 0
   let useWebSocket = false
+  let wsErrorOccurred = false
   let lastWsStatusAt = 0
   const cypressWindow = window as CypressWindow
   const isCypress = Boolean(cypressWindow.Cypress)
@@ -62,13 +63,19 @@ export function useStatusStream(status: { value: StatusData }) {
 
     ws.onclose = () => {
       useWebSocket = false
-      realtimeStatus.value = 'reconnecting'
       ws = null
-      scheduleReconnect()
+      if (wsErrorOccurred) {
+        wsErrorOccurred = false
+        realtimeStatus.value = 'polling'
+      } else {
+        realtimeStatus.value = 'reconnecting'
+        scheduleReconnect()
+      }
     }
 
     ws.onerror = () => {
       useWebSocket = false
+      wsErrorOccurred = true
       realtimeStatus.value = 'polling'
     }
   }

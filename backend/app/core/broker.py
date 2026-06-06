@@ -461,7 +461,9 @@ class BrokerGateway:
             response = self._quote_ctx.quote(symbols)
             items = response if isinstance(response, list) else [response]
             if len(items) != len(symbols):
-                raise RuntimeError(f"broker returned {len(items)} quotes for {len(symbols)} symbols")
+                if not items:
+                    raise RuntimeError(f"broker returned 0 quotes for {len(symbols)} symbols")
+                logger.warning("broker returned %d quotes for %d symbols", len(items), len(symbols))
             quotes: list[Quote] = []
             for fallback_symbol, item in zip(symbols, items):
                 quotes.append(Quote(
@@ -544,8 +546,8 @@ class BrokerGateway:
 
             side_name = _SIDE_MAP.get(side, side)
             side_enum = getattr(OrderSide, side_name, side) if OrderSide else side
-            lo_type = getattr(OrderType, "LO") if OrderType else "LO"
-            day_tif = getattr(TimeInForceType, "Day") if TimeInForceType else "DAY"
+            lo_type = getattr(OrderType, "LO", "LO") if OrderType else "LO"
+            day_tif = getattr(TimeInForceType, "Day", "DAY") if TimeInForceType else "DAY"
 
             response = self._trade_ctx.submit_order(
                 symbol=symbol,
@@ -681,13 +683,14 @@ class BrokerGateway:
 
                 raw_side = str(_get_value(item, "side", "")).upper()
                 side = raw_side if raw_side in {"LONG", "SHORT"} else ("SHORT" if qty < 0 else "LONG")
-                raw_avg = (
-                    _get_value(item, "cost_price")
-                    or _get_value(item, "avg_price")
-                    or _get_value(item, "average_price")
-                    or _get_value(item, "avg_cost_price")
-                    or _get_value(item, "cost_price", "0")
-                )
+                raw_avg = None
+                for key in ("cost_price", "avg_price", "average_price", "avg_cost_price"):
+                    val = _get_value(item, key)
+                    if val is not None:
+                        raw_avg = val
+                        break
+                if raw_avg is None:
+                    raw_avg = "0"
                 try:
                     avg_price = Decimal(str(raw_avg))
                 except Exception:
@@ -717,7 +720,7 @@ class BrokerGateway:
                 if ctx is not None:
                     try:
                         ctx.close()
-                    except (AttributeError, TypeError):
+                    except Exception:
                         pass
             self._quote_ctx = None
             self._trade_ctx = None
@@ -769,7 +772,7 @@ class BrokerGateway:
 
             side_name = _SIDE_MAP.get(side, side)
             side_enum = getattr(OrderSide, side_name, side) if OrderSide else side
-            lo_type = getattr(OrderType, "LO") if OrderType else "LO"
+            lo_type = getattr(OrderType, "LO", "LO") if OrderType else "LO"
 
             response = self._trade_ctx.estimate_max_purchase_quantity(
                 symbol=symbol,

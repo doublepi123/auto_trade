@@ -626,7 +626,7 @@ class TestAPI:
         try:
             order = db.query(OrderRecord).filter(OrderRecord.broker_order_id == "manual-1").one()
             assert order.status == "CANCELLED"
-            assert order.filled_at is not None
+            assert order.filled_at is None
             event = db.query(TradeEvent).filter(TradeEvent.broker_order_id == "manual-1").one()
             assert event.event_type == "ORDER_CANCELLED"
             assert event.status == "CANCELLED"

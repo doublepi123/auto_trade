@@ -171,7 +171,7 @@ def _update_local_order_from_status(db: Session, order_id: str, status_result: A
         order.executed_quantity = executed_quantity
     if executed_price is not None:
         order.executed_price = executed_price
-    if status in _TERMINAL_ORDER_STATUSES:
+    if status == "FILLED":
         order.filled_at = datetime.now(timezone.utc)
     changed = (
         old_status != order.status
@@ -218,14 +218,34 @@ def get_orders(
         except Exception:
             logging.getLogger("auto_trade.trade").exception("force-refresh today orders failed")
 
-    local_orders = db.query(OrderRecord).order_by(OrderRecord.created_at.desc()).all()
     if scope == "history":
+        total = db.query(OrderRecord).count()
+        offset = (page - 1) * page_size
+        local_orders = (
+            db.query(OrderRecord)
+            .order_by(OrderRecord.created_at.desc())
+            .offset(offset)
+            .limit(page_size)
+            .all()
+        )
         items = [_local_order_response(order) for order in local_orders]
-        return _paginate_orders(items, page=page, page_size=page_size, scope=scope)
+        return OrderPageResponse(
+            items=items,
+            total=total,
+            page=page,
+            page_size=page_size,
+            scope=scope,
+        )
 
-    local_today = [order for order in local_orders if _is_today(order.created_at)]
+    today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    local_orders = (
+        db.query(OrderRecord)
+        .filter(OrderRecord.created_at >= today_start)
+        .order_by(OrderRecord.created_at.desc())
+        .all()
+    )
     items = sorted(
-        (_local_order_response(order) for order in local_today),
+        (_local_order_response(order) for order in local_orders),
         key=_order_sort_key,
         reverse=True,
     )

@@ -214,6 +214,9 @@ class IntervalApplicationService:
                 f"{minimum_width:.2f}"
             )
 
+        if current_price <= 0:
+            return "current_price must be positive"
+
         stripe_width_pct = (sell_high - buy_low) / current_price * 100
         if stripe_width_pct > settings.llm_max_stripe_width_pct:
             return f"interval width ({stripe_width_pct:.1f}%) exceeds max {settings.llm_max_stripe_width_pct}%"

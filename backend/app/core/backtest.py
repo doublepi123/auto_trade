@@ -144,7 +144,8 @@ class BacktestEngine:
             if bar.timestamp.date() != current_day:
                 current_day = bar.timestamp.date()
                 daily_pnl = 0.0
-                if paused_reason.startswith("daily loss limit"):
+                consecutive_losses = 0
+                if paused_reason.startswith("daily loss limit") or paused_reason.startswith("consecutive loss"):
                     paused_reason = ""
 
             if position is not None:

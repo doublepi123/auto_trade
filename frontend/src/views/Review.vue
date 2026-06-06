@@ -257,7 +257,7 @@ async function handleSearch() {
   searched.value = true
 
   try {
-    const [reviewResponse, history, diagnosticsResponse] = await Promise.all([
+    const [reviewResult, historyResult, diagnosticsResult] = await Promise.allSettled([
       getReview({
         symbol: form.value.symbol,
         from_date: form.value.from_date,
@@ -271,9 +271,25 @@ async function handleSearch() {
       }),
       loadDiagnostics(),
     ])
-    reviewData.value = reviewResponse.data
-    runtimeHistory.value = history
-    diagnostics.value = diagnosticsResponse
+
+    if (reviewResult.status === 'fulfilled') {
+      reviewData.value = reviewResult.value.data
+    } else {
+      reviewData.value = null
+      ElMessage.error('复盘数据加载失败')
+    }
+
+    if (historyResult.status === 'fulfilled') {
+      runtimeHistory.value = historyResult.value
+    } else {
+      resetRuntimeHistory()
+    }
+
+    if (diagnosticsResult.status === 'fulfilled') {
+      diagnostics.value = diagnosticsResult.value
+    } else {
+      resetDiagnostics()
+    }
   } catch {
     ElMessage.error('查询复盘数据失败')
     reviewData.value = null

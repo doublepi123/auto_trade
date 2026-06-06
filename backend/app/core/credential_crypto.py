@@ -67,7 +67,26 @@ def decrypt_secret(value: str) -> str:
     return AESGCM(data_key).decrypt(_decode(payload["n"]), _decode(payload["c"]), None).decode("utf-8")
 
 
-def _derive_kek() -> bytes | None:
+def _load_or_create_salt() -> bytes:
+    """Load or create a random per-installation PBKDF2 salt stored alongside the PEM key."""
+    salt_path = _KEY_PATH.parent / "credential_kek.salt"
+    if salt_path.exists():
+        return salt_path.read_bytes()
+    salt_path.parent.mkdir(parents=True, exist_ok=True)
+    salt = os.urandom(32)
+    try:
+        fd = os.open(salt_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(salt)
+    except FileExistsError:
+        return salt_path.read_bytes()
+    return salt
+
+
+_LEGACY_SALT = b"auto_trade_credential_kek"
+
+
+def _derive_kek(salt: bytes | None = None) -> bytes | None:
     """Derive a key-encrypting key from CREDENTIAL_MASTER_KEY env var via PBKDF2."""
     master_key = os.environ.get("CREDENTIAL_MASTER_KEY")
     if not master_key:
@@ -75,7 +94,7 @@ def _derive_kek() -> bytes | None:
     kdf = PBKDF2HMAC(
         algorithm=hashes.SHA256(),
         length=32,
-        salt=b"auto_trade_credential_kek",
+        salt=salt if salt is not None else _load_or_create_salt(),
         iterations=600_000,
     )
     return kdf.derive(master_key.encode("utf-8"))
@@ -90,6 +109,13 @@ def _load_private_key() -> rsa.RSAPrivateKey:
             try:
                 return _load_rsa_private_key(key_bytes, kek)
             except (ValueError, TypeError):
+                # Try legacy salt for backward compatibility with existing deployments
+                legacy_kek = _derive_kek(salt=_LEGACY_SALT)
+                if legacy_kek is not None and legacy_kek != kek:
+                    try:
+                        return _load_rsa_private_key(key_bytes, legacy_kek)
+                    except (ValueError, TypeError):
+                        pass
                 raise ValueError(
                     "CREDENTIAL_MASTER_KEY does not match the key file encryption. "
                     "If the master key was changed, delete data/credential_private_key.pem "

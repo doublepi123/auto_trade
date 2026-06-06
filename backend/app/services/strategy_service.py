@@ -71,8 +71,6 @@ class StrategyService:
             for k in STRATEGY_AUDIT_KEYS
             if before[k] != after[k]
         }
-        if "sct_key" in diff:
-            diff["sct_key"] = {"changed": True}
         return config, diff
 
     def resolve_primary_symbol(self) -> str:

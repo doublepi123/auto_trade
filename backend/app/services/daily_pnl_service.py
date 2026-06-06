@@ -78,10 +78,16 @@ class DailyPnlService:
         target_day = trade_day or resolve_day(datetime.now(timezone.utc))
         start_of_day = datetime(target_day.year, target_day.month, target_day.day, tzinfo=timezone.utc)
         end_of_day = start_of_day + timedelta(days=1)
+        from sqlalchemy import or_
+
         query = self._db.query(OrderRecord).filter(
-            OrderRecord.created_at >= start_of_day - timedelta(days=1)
-        ).filter(
-            OrderRecord.created_at < end_of_day + timedelta(days=1)
+            or_(
+                (OrderRecord.created_at >= start_of_day - timedelta(days=1))
+                & (OrderRecord.created_at < end_of_day + timedelta(days=1)),
+                (OrderRecord.filled_at.isnot(None))
+                & (OrderRecord.filled_at >= start_of_day)
+                & (OrderRecord.filled_at < end_of_day),
+            )
         )
         if symbol:
             query = query.filter(OrderRecord.symbol == symbol)

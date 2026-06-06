@@ -133,7 +133,7 @@ def list_timeline_events(
         audit_total = aq.count()
         audit_rows = aq.order_by(AuditLog.created_at.desc(), AuditLog.id.desc()).limit(fetch_n).all()
 
-    total = trade_total + audit_total
+    total = min(trade_total + audit_total, _MAX_MERGED_FETCH)
 
     merged = [_trade_row_to_out(r) for r in trade_rows] + [_audit_row_to_out(r) for r in audit_rows]
     merged.sort(key=_sort_key)

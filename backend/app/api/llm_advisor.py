@@ -5,10 +5,12 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, cast
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 
 from app.api.auth import require_api_key
+from app.api.deps import extract_actor, get_audit_logger
+from app.core.audit import AuditLogger
 from app.database import get_db
 from app.runner import get_runner
 from app.schemas import LLMAnalyzeRequest, LLMAnalyzeResponse, LLMInteractionResponse, LLMIntervalStatus, LLMPreviewAnalyzeRequest, LLMSuggestion, MessageResponse
@@ -179,7 +181,7 @@ def preview_llm_interval(payload: LLMPreviewAnalyzeRequest) -> LLMAnalyzeRespons
     )
 
 
-@router.post("/strategy/llm-interval/analyze", response_model=LLMAnalyzeResponse)
+@router.post("/strategy/llm-interval/analyze", response_model=LLMAnalyzeResponse, dependencies=[Depends(require_api_key())])
 def analyze_llm_interval(
     payload: LLMAnalyzeRequest,
     db: Session = Depends(get_db),
@@ -389,18 +391,44 @@ def get_llm_interval_status(db: Session = Depends(get_db)) -> LLMIntervalStatus:
 
 
 @router.put("/strategy/llm-interval/enable", response_model=MessageResponse)
-def enable_llm_interval(db: Session = Depends(get_db)) -> MessageResponse:
+def enable_llm_interval(
+    request: Request,
+    db: Session = Depends(get_db),
+    audit: AuditLogger = Depends(get_audit_logger),
+) -> MessageResponse:
     svc = StrategyService(db)
     config = svc.get_config()
     config.auto_interval_enabled = True
     db.commit()
+    actor_hash, source_ip = extract_actor(request)
+    audit.record(
+        "LLM_INTERVAL_ENABLE",
+        severity="INFO",
+        actor_hash=actor_hash,
+        source_ip=source_ip,
+        request_summary={"action": "enable"},
+        result="SUCCESS",
+    )
     return MessageResponse(message="LLM auto interval enabled")
 
 
 @router.put("/strategy/llm-interval/disable", response_model=MessageResponse)
-def disable_llm_interval(db: Session = Depends(get_db)) -> MessageResponse:
+def disable_llm_interval(
+    request: Request,
+    db: Session = Depends(get_db),
+    audit: AuditLogger = Depends(get_audit_logger),
+) -> MessageResponse:
     svc = StrategyService(db)
     config = svc.get_config()
     config.auto_interval_enabled = False
     db.commit()
+    actor_hash, source_ip = extract_actor(request)
+    audit.record(
+        "LLM_INTERVAL_DISABLE",
+        severity="INFO",
+        actor_hash=actor_hash,
+        source_ip=source_ip,
+        request_summary={"action": "disable"},
+        result="SUCCESS",
+    )
     return MessageResponse(message="LLM auto interval disabled")

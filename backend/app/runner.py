@@ -852,7 +852,8 @@ class AppRunner:
             quote = self.broker.get_quote(symbol)
         except Exception:
             logger.exception("failed to fetch quote for LLM order action")
-            fallback_price = override_price or self.engine.last_price
+            _, _, target_engine = self._runtime_for_symbol(symbol)
+            fallback_price = override_price or target_engine.last_price
             if fallback_price <= 0:
                 return None
             return Quote(symbol=symbol, last_price=fallback_price, bid=fallback_price, ask=fallback_price, timestamp="")

@@ -1165,7 +1165,7 @@ class TradeExecutionService:
 
         tracked_covers_exit = tracked_qty >= exit_qty > 0
         if tracked_avg > 0 and tracked_covers_exit:
-            if broker_avg_price is not None and broker_avg_price > 0 and abs(tracked_avg - broker_avg_price) > Decimal("2.0"):
+            if broker_avg_price is not None and broker_avg_price > 0 and abs(tracked_avg - broker_avg_price) / broker_avg_price > Decimal("0.02"):
                 logger.warning(
                     "avg_price mismatch for %s: tracked=%s vs broker=%s, using tracked weighted entry price for accurate pnl",
                     symbol,

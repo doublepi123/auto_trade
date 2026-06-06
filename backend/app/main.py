@@ -286,7 +286,7 @@ async def _llm_analysis_tick() -> None:
                     )
                 order_result = {"status": "NO_ACTION", "order_id": None}
                 if result.get("order_action") and result.get("order_action") != "NONE":
-                    order_result = runner.execute_llm_order_decision({**result, "symbol": symbol})
+                    order_result = await asyncio.to_thread(runner.execute_llm_order_decision, {**result, "symbol": symbol})
                 interaction_id = result.get("interaction_id")
                 if interaction_id is not None:
                     LLMInteractionService(db).update_outcome(

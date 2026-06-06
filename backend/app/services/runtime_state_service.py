@@ -100,7 +100,7 @@ class RuntimeStateService:
         engine.last_trigger_price = state.last_trigger_price
         engine.last_trigger_at = state.last_trigger_at
 
-    def persist_symbol(self, db: Any, engine: StrategyEngine, symbol: str | None = None) -> None:
+    def persist_symbol(self, db: Any, engine: StrategyEngine, symbol: str | None = None, risk: RiskController | None = None) -> None:
         from app.services.strategy_service import StrategyService
 
         runtime_symbol = (symbol if symbol is not None else engine.params.symbol or "").strip().upper()
@@ -111,7 +111,7 @@ class RuntimeStateService:
             last_trigger_price=engine.last_trigger_price,
             last_trigger_at=engine.last_trigger_at,
         )
-        self.record_snapshot(db, engine, RiskController(), symbol=runtime_symbol)
+        self.record_snapshot(db, engine, risk or RiskController(), symbol=runtime_symbol)
 
     def record_snapshot(self, db: Any, engine: StrategyEngine, risk: RiskController, *, symbol: str = "") -> None:
         from app.models import RuntimeStateSnapshot
