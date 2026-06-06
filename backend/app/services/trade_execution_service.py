@@ -1095,8 +1095,8 @@ class TradeExecutionService:
         return OrderStatus(
             broker_order_id=result.broker_order_id,
             status=status,
-            executed_quantity=getattr(result, "quantity", Decimal("0")) if status == "FILLED" else Decimal("0"),
-            executed_price=getattr(result, "price", Decimal("0")) if status == "FILLED" else Decimal("0"),
+            executed_quantity=getattr(result, "executed_quantity", getattr(result, "quantity", Decimal("0"))) if status == "FILLED" else Decimal("0"),
+            executed_price=getattr(result, "executed_price", getattr(result, "price", Decimal("0"))) if status == "FILLED" else Decimal("0"),
         )
 
     def _safe_notify_order(

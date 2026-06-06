@@ -131,7 +131,7 @@ def list_timeline_events(
         if et:
             aq = aq.filter(AuditLog.action.in_(et))
         audit_total = aq.count()
-        audit_rows = aq.order_by(AuditLog.created_at.desc(), AuditLog.created_at.desc()).limit(fetch_n).all()
+        audit_rows = aq.order_by(AuditLog.created_at.desc(), AuditLog.id.desc()).limit(fetch_n).all()
 
     total = trade_total + audit_total
 

@@ -25,6 +25,8 @@ class ExperimentGridService:
         r = item.range
         if r is None:
             return []
+        if r.step == 0:
+            raise ValueError("grid step cannot be zero")
         values: list[float] = []
         i = 0
         while True:

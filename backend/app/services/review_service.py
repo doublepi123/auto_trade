@@ -60,6 +60,7 @@ class ReviewService:
         snapshots = (
             self._db.query(RuntimeStateSnapshot)
             .filter(
+                RuntimeStateSnapshot.symbol == symbol,
                 RuntimeStateSnapshot.created_at >= datetime(from_d.year, from_d.month, from_d.day, tzinfo=timezone.utc),
                 RuntimeStateSnapshot.created_at < datetime(to_d.year, to_d.month, to_d.day, tzinfo=timezone.utc) + timedelta(days=1),
             )
@@ -100,7 +101,7 @@ class ReviewService:
 
         for d in sorted(days.keys()):
             day = days[d]
-            day["daily_pnl"] = sum(s.get("daily_pnl", 0) for s in day["snapshots"])
+            day["daily_pnl"] = (day["snapshots"][-1].get("daily_pnl", 0) if day["snapshots"] else 0.0)
             day["trade_count"] = len([o for o in day["orders"] if o["status"] in ("FILLED", "PARTIAL_FILLED")])
             day["error_tags"] = self._compute_error_tags(day, symbol)
             all_error_tags.update(day["error_tags"])

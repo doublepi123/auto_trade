@@ -418,7 +418,7 @@ class TestBrokerGateway:
                 return []
 
         gw._quote_ctx = EmptyQuoteContext()
-        with pytest.raises(ValueError, match="no quote data"):
+        with pytest.raises(RuntimeError, match="broker returned 0 quotes for 1 symbols"):
             gw.get_quote("AAPL.US")
 
     def test_get_candlesticks_returns_normalized_bars(self, monkeypatch) -> None:

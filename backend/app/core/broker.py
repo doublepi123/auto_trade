@@ -460,6 +460,8 @@ class BrokerGateway:
             self._init_clients()
             response = self._quote_ctx.quote(symbols)
             items = response if isinstance(response, list) else [response]
+            if len(items) != len(symbols):
+                raise RuntimeError(f"broker returned {len(items)} quotes for {len(symbols)} symbols")
             quotes: list[Quote] = []
             for fallback_symbol, item in zip(symbols, items):
                 quotes.append(Quote(
@@ -567,54 +569,68 @@ class BrokerGateway:
             )
 
     def get_order_status(self, order_id: str) -> OrderStatusResult:
-        with self._lock:
-            self._init_clients()
-            detail = self._trade_ctx.order_detail(order_id)
-            return OrderStatusResult(
-                broker_order_id=str(_get_value(detail, "order_id", order_id)),
-                status=_normalize_order_status(_get_value(detail, "status", "SUBMITTED")),
-                executed_quantity=_decimal_attr(detail, "executed_quantity", "filled_quantity", "quantity"),
-                executed_price=_decimal_attr(detail, "executed_price", "filled_price", "price"),
-            )
+        def _fetch() -> OrderStatusResult:
+            with self._lock:
+                self._init_clients()
+                detail = self._trade_ctx.order_detail(order_id)
+                return OrderStatusResult(
+                    broker_order_id=str(_get_value(detail, "order_id", order_id)),
+                    status=_normalize_order_status(_get_value(detail, "status", "SUBMITTED")),
+                    executed_quantity=_decimal_attr(detail, "executed_quantity", "filled_quantity", "quantity"),
+                    executed_price=_decimal_attr(detail, "executed_price", "filled_price", "price"),
+                )
+        return self._call_with_retry(
+            _fetch,
+            op="get_order_status",
+            max_retries=settings.broker_retry_max,
+            base_ms=settings.broker_retry_base_ms,
+        )
 
     def get_today_orders(self) -> list[BrokerOrder]:
-        with self._lock:
-            self._init_clients()
-            response = None
-            last_error: Exception | None = None
-            for method_name in ("today_orders", "order_list", "stock_order_list", "orders"):
-                method = getattr(self._trade_ctx, method_name, None)
-                if method is None:
-                    continue
-                try:
-                    response = method()
-                    break
-                except TypeError as exc:
-                    last_error = exc
-                    continue
-            if response is None:
-                if last_error is not None:
-                    raise last_error
-                raise RuntimeError("broker does not support listing today orders")
+        def _fetch() -> list[BrokerOrder]:
+            with self._lock:
+                self._init_clients()
+                response = None
+                last_error: Exception | None = None
+                for method_name in ("today_orders", "order_list", "stock_order_list", "orders"):
+                    method = getattr(self._trade_ctx, method_name, None)
+                    if method is None:
+                        continue
+                    try:
+                        response = method()
+                        break
+                    except TypeError as exc:
+                        last_error = exc
+                        continue
+                if response is None:
+                    if last_error is not None:
+                        raise last_error
+                    raise RuntimeError("broker does not support listing today orders")
 
-            orders: list[BrokerOrder] = []
-            for item in _iter_order_items(response):
-                order_id = str(_get_value(item, "order_id", _get_value(item, "broker_order_id", "")))
-                if not order_id:
-                    continue
-                orders.append(BrokerOrder(
-                    broker_order_id=order_id,
-                    symbol=str(_get_value(item, "symbol", "")),
-                    side=_normalize_order_side(_get_value(item, "side", "")),
-                    quantity=_decimal_attr(item, "submitted_quantity", "quantity"),
-                    price=_decimal_attr(item, "submitted_price", "price", "limit_price"),
-                    executed_quantity=_decimal_attr(item, "executed_quantity", "filled_quantity"),
-                    executed_price=_decimal_attr(item, "executed_price", "filled_price"),
-                    status=_normalize_order_status(_get_value(item, "status", "SUBMITTED")),
-                    created_at=_parse_datetime(_get_value(item, "created_at", _get_value(item, "submitted_at", None))),
-                    filled_at=_parse_datetime(_get_value(item, "filled_at", _get_value(item, "updated_at", None))),
-                ))
-            return orders
+                orders: list[BrokerOrder] = []
+                for item in _iter_order_items(response):
+                    order_id = str(_get_value(item, "order_id", _get_value(item, "broker_order_id", "")))
+                    if not order_id:
+                        continue
+                    orders.append(BrokerOrder(
+                        broker_order_id=order_id,
+                        symbol=str(_get_value(item, "symbol", "")),
+                        side=_normalize_order_side(_get_value(item, "side", "")),
+                        quantity=_decimal_attr(item, "submitted_quantity", "quantity"),
+                        price=_decimal_attr(item, "submitted_price", "price", "limit_price"),
+                        executed_quantity=_decimal_attr(item, "executed_quantity", "filled_quantity"),
+                        executed_price=_decimal_attr(item, "executed_price", "filled_price"),
+                        status=_normalize_order_status(_get_value(item, "status", "SUBMITTED")),
+                        created_at=_parse_datetime(_get_value(item, "created_at", _get_value(item, "submitted_at", None))),
+                        filled_at=_parse_datetime(_get_value(item, "filled_at", _get_value(item, "updated_at", None))),
+                    ))
+                return orders
+        return self._call_with_retry(
+            _fetch,
+            op="get_today_orders",
+            max_retries=settings.broker_retry_max,
+            base_ms=settings.broker_retry_base_ms,
+        )
 
     def cancel_order(self, order_id: str) -> OrderStatusResult:
         return self._call_with_retry(

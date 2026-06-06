@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.core.broker import BrokerGateway
 from app.database import get_db
+from app.runner import get_runner
 from app.models import StrategyConfig
 from app.schemas import WatchlistItemResponse, WatchlistItemSchema, MessageResponse, WatchlistQuote, WatchlistSnapshot
 from app.services.watchlist_service import WatchlistService
@@ -48,7 +49,7 @@ def get_watchlist_snapshots(
 
     symbols = [item.symbol for item in items]
     try:
-        broker = BrokerGateway()
+        broker = get_runner().broker
         quotes = broker.get_quotes(symbols)
     except Exception:
         logger.exception("failed to fetch watchlist snapshots")
@@ -125,7 +126,7 @@ def get_watchlist_quotes(
 
     symbols = [item.symbol for item in items]
     try:
-        broker = BrokerGateway()
+        broker = get_runner().broker
         quotes = broker.get_quotes(symbols)
         return [
             WatchlistQuote(

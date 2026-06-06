@@ -266,6 +266,9 @@ async def _llm_analysis_tick() -> None:
                 persist=is_primary,
             )
             analyzed_count += 1
+            now_mono = time.monotonic()
+            _prune_llm_analysis_timestamps(now_mono)
+            _llm_analysis_timestamps.append(now_mono)
             _llm_last_analysis_at_by_symbol[symbol] = now
 
             if result.get("success"):

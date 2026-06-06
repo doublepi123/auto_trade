@@ -53,10 +53,9 @@ class AuditLogger:
         else:
             text = str(summary)
         limit = settings.audit_request_summary_limit
-        encoded = text.encode("utf-8")
-        if len(encoded) <= limit:
+        if len(text) <= limit:
             return text
-        return encoded[:limit].decode("utf-8", errors="ignore") + "...truncated"
+        return text[:limit] + "...truncated"
 
     @staticmethod
     def hash_actor(api_key: str | None) -> str:

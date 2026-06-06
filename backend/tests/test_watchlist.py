@@ -172,7 +172,7 @@ class TestWatchlistApi:
                     ),
                 ]
 
-        monkeypatch.setattr(watchlist_api, "BrokerGateway", lambda: FakeBroker())
+        monkeypatch.setattr(watchlist_api, "get_runner", lambda: type("FakeRunner", (), {"broker": FakeBroker()})())
 
         resp = client.get("/api/watchlist/snapshots")
 
@@ -213,7 +213,7 @@ class TestWatchlistApi:
             def get_quotes(self, symbols):
                 raise RuntimeError("broker down")
 
-        monkeypatch.setattr(watchlist_api, "BrokerGateway", lambda: FakeBroker())
+        monkeypatch.setattr(watchlist_api, "get_runner", lambda: type("FakeRunner", (), {"broker": FakeBroker()})())
 
         resp = client.get("/api/watchlist/snapshots")
 

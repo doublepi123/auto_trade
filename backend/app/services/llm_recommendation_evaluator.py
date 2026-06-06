@@ -121,6 +121,7 @@ class LLMRecommendationEvaluator:
         window_end = interaction.created_at + timedelta(minutes=horizon_minutes)
         snapshots = (
             self.db.query(RuntimeStateSnapshot)
+            .filter(RuntimeStateSnapshot.symbol == interaction.symbol)
             .filter(RuntimeStateSnapshot.created_at >= interaction.created_at)
             .filter(RuntimeStateSnapshot.created_at <= window_end)
             .order_by(RuntimeStateSnapshot.created_at.asc())
@@ -170,8 +171,8 @@ class LLMRecommendationEvaluator:
         recent_prices = context.get("recent_prices", [])
         too_late = False
         if recent_prices and len(recent_prices) >= 2:
-            first_price = recent_prices[0]
-            last_price = recent_prices[-1]
+            first_price = recent_prices[0].get("last_price", 0) if isinstance(recent_prices[0], dict) else recent_prices[0]
+            last_price = recent_prices[-1].get("last_price", 0) if isinstance(recent_prices[-1], dict) else recent_prices[-1]
             if first_price > 0:
                 if is_buy:
                     recent_change = (last_price - first_price) / first_price * 100

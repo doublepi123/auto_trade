@@ -77,10 +77,12 @@ def _make_interaction(
 def _make_snapshot(
     db,
     *,
+    symbol: str = "AAPL.US",
     last_price: float,
     created_at: datetime,
 ) -> RuntimeStateSnapshot:
     record = RuntimeStateSnapshot(
+        symbol=symbol,
         engine_state="FLAT",
         paused=False,
         kill_switch=False,

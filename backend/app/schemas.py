@@ -7,7 +7,7 @@ from typing import Any, Literal, Optional
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
-_SYMBOL_RE = re.compile(r"^[A-Z0-9]{1,12}\.[A-Z]{2,4}$")
+_SYMBOL_RE = re.compile(r"^[A-Z0-9\-]{1,12}\.[A-Z]{2,4}$")
 
 
 def _normalize_symbol(value: str) -> str:
