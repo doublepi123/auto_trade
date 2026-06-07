@@ -27,6 +27,8 @@ class ExperimentGridService:
             return []
         if r.step == 0:
             raise ValueError("grid step cannot be zero")
+        if r.step < 0:
+            raise ValueError("grid step must be positive")
         values: list[float] = []
         i = 0
         while True:

@@ -1080,13 +1080,16 @@ class TradeExecutionService:
         status = getattr(result, "status", "SUBMITTED")
         if status == "SUBMITTED":
             return
+        broker_order_id = getattr(result, "broker_order_id", None)
+        executed_quantity = getattr(result, "executed_quantity", None)
+        executed_price = getattr(result, "executed_price", None)
         filled_at = datetime.now(timezone.utc) if status == "FILLED" else None
         self._safe_update_order_status(
-            getattr(result, "broker_order_id", ""),
+            broker_order_id or "",
             status,
             filled_at,
-            float(getattr(result, "executed_quantity", 0)) if getattr(result, "executed_quantity", 0) is not None else None,
-            float(getattr(result, "executed_price", 0)) if getattr(result, "executed_price", 0) is not None else None,
+            float(executed_quantity) if executed_quantity is not None else None,
+            float(executed_price) if executed_price is not None else None,
         )
 
     @staticmethod

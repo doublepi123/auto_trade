@@ -3,16 +3,15 @@ from __future__ import annotations
 from app.models import WatchlistItem
 from app.schemas import WatchlistItemSchema
 from sqlalchemy.orm import Session
-from typing import List, Optional
 
 class WatchlistService:
     def __init__(self, db: Session) -> None:
         self.db = db
 
-    def list_items(self) -> List[WatchlistItem]:
+    def list_items(self) -> list[WatchlistItem]:
         return self.db.query(WatchlistItem).order_by(WatchlistItem.created_at.desc()).all()
 
-    def get_item(self, item_id: int) -> Optional[WatchlistItem]:
+    def get_item(self, item_id: int) -> WatchlistItem | None:
         return self.db.query(WatchlistItem).filter(WatchlistItem.id == item_id).first()
 
     def add_item(self, data: WatchlistItemSchema) -> WatchlistItem:
@@ -51,5 +50,5 @@ class WatchlistService:
         self.db.refresh(item)
         return item
 
-    def get_active_item(self) -> Optional[WatchlistItem]:
-        return self.db.query(WatchlistItem).filter(WatchlistItem.is_active == True).first()
+    def get_active_item(self) -> WatchlistItem | None:
+        return self.db.query(WatchlistItem).filter(WatchlistItem.is_active.is_(True)).first()

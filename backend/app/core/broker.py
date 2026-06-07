@@ -165,7 +165,9 @@ def _iter_position_items(item: Any) -> list[Any]:
     if isinstance(item, dict):
         nested = item.get("data", item)
         if nested is not item:
-            return _iter_position_items(nested)
+            result = _iter_position_items(nested)
+            if result:
+                return result
         for key in ("list", "channels", "stock_info", "positions"):
             if key in item:
                 nested = item[key]
@@ -502,6 +504,26 @@ class BrokerGateway:
                 added_callback = True
             missing_symbols = [symbol for symbol in unique_symbols if symbol not in self._subscribed_symbols]
             if not missing_symbols:
+                # Even when no new symbols, re-register the composite handler
+                # so the newly appended callback is wired into set_on_quote.
+                self._init_clients()
+                quote_ctx = self._quote_ctx
+                if quote_ctx is not None:
+                    def _on_quote(_symbol: str, _event: Any) -> None:
+                        quote = Quote(
+                            symbol=str(getattr(_event, "symbol", _symbol)),
+                            last_price=float(getattr(_event, "last_done", 0)),
+                            bid=float(getattr(_event, "bid", 0)),
+                            ask=float(getattr(_event, "ask", 0)),
+                            timestamp=str(getattr(_event, "timestamp", "")),
+                        )
+                        for cb in list(self._quote_callbacks):
+                            try:
+                                cb(quote)
+                            except Exception:
+                                logger.exception("quote callback failed for %s", _symbol)
+
+                    quote_ctx.set_on_quote(_on_quote)
                 return
             self._init_clients()
             quote_ctx = self._quote_ctx

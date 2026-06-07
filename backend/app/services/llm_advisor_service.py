@@ -186,13 +186,15 @@ class LLMAdvisorService:
         try:
             from app.domain.experiment.ab_test_manager import ABTestManager
 
-            db = SessionLocal()
+            db = None
             try:
+                db = SessionLocal()
                 manager = ABTestManager(db)
                 active = manager.get_active_version()
                 return active.template if active else None
             finally:
-                db.close()
+                if db is not None:
+                    db.close()
         except Exception:
             logger.debug("no active experiment variant available")
             return None

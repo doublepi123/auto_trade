@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -72,8 +72,8 @@ def run_strategy_experiment(
 @router.get("/{experiment_id}/runs", response_model=StrategyExperimentRunPage)
 def list_strategy_experiment_runs(
     experiment_id: int,
-    sort: str = "total_return_pct",
-    order: str = "desc",
+    sort: str = Query("total_return_pct", pattern=r"^(total_return_pct|total_pnl|max_drawdown_pct|win_rate|trade_count|sharpe_ratio|profit_factor|profit_loss_ratio|created_at)$"),
+    order: str = Query("desc", pattern=r"^(asc|desc)$"),
     page: int = 1,
     page_size: int = 20,
     db: Session = Depends(get_db),

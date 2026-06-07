@@ -40,7 +40,7 @@ class MarketSession:
         if local.weekday() >= 5:
             return False
         current = local.time()
-        return self.rth_open <= current <= self.rth_close
+        return self.rth_open <= current < self.rth_close
 
 
 _US_SESSION = MarketSession(

@@ -58,14 +58,15 @@ class TestABTestManager:
 
     def test_select_variant_for_experiment(self, db_session: Session) -> None:
         manager = ABTestManager(db_session)
-        v1 = manager.create_version("baseline", "1.0", "", "template A")
-        manager.create_version("enhanced", "1.1", "", "template B")
+        # Create two versions under the same experiment name
+        v1 = manager.create_version("prompt_optimization", "1.0", "", "template A")
+        manager.create_version("prompt_optimization", "1.1", "", "template B")
         manager.activate_version(v1.id)
 
         # Deterministic selection based on symbol hash among active versions
         variant = manager.select_variant("AAPL.US", "prompt_optimization")
         assert variant is not None
-        assert variant.name == "baseline"
+        assert variant.name == "prompt_optimization"
 
     def test_record_result(self, db_session: Session) -> None:
         manager = ABTestManager(db_session)

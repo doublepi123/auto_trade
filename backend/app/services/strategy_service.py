@@ -105,12 +105,20 @@ class StrategyService:
 
         return self.get_runtime_state(symbol=symbol)
 
+    UPDATABLE_STATE_FIELDS = frozenset({
+        "engine_state", "paused", "pause_reason", "paused_at",
+        "pause_auto_resumable", "kill_switch", "daily_pnl",
+        "daily_pnl_date", "consecutive_losses", "last_price",
+        "last_trigger_price", "last_trigger_at",
+    })
+
     def update_runtime_state(self, symbol: str = "", **kwargs: object) -> RuntimeState:
         normalized = (symbol or "").strip().upper()
         state = self.get_runtime_state(symbol=normalized)
         for key, value in kwargs.items():
-            if hasattr(state, key):
-                setattr(state, key, value)
+            if key not in self.UPDATABLE_STATE_FIELDS:
+                raise AttributeError(f"Cannot update runtime state field: {key}")
+            setattr(state, key, value)
         state.updated_at = datetime.now(timezone.utc)
         self.db.add(state)
         self.db.commit()

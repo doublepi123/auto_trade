@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -51,7 +52,8 @@ def export_review(
         ]
         buf = svc.export_review(symbol, from_date, to_date, format, diagnostics=diagnostics)
         media_type = "application/json" if format == "json" else "text/csv"
-        filename = f"review_{symbol.replace('.', '_')}_{from_date}_{to_date}.{format}"
+        safe_symbol = re.sub(r'[^a-zA-Z0-9]', '', symbol.replace('.', '_'))
+        filename = f"review_{safe_symbol}_{from_date}_{to_date}.{format}"
         return StreamingResponse(
             buf,
             media_type=media_type,

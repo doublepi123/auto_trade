@@ -18,6 +18,6 @@ export async function exportReview(params: {
 }) {
   return api.get('/api/review/export', {
     params,
-    responseType: 'blob',
+    responseType: params.format === 'csv' ? 'blob' : 'json',
   })
 }

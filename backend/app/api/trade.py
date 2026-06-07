@@ -516,6 +516,15 @@ def get_account() -> AccountResponse:
         if cached is not None:
             return cached
         response = _fetch_account_response()
+
+        if not response.available:
+            cached = _cached_account_response(broker, _account_cache_now(), allow_stale=True)
+            if cached is not None:
+                return cached
+
+        if response.available:
+            _store_account_response(broker, _account_cache_now(), response)
+        return response
     except Exception:
         logger.exception("failed to refresh account snapshot")
         cached = _cached_account_response(broker, _account_cache_now(), allow_stale=True)
@@ -524,15 +533,6 @@ def get_account() -> AccountResponse:
         return _unavailable_account_response()
     finally:
         _account_refresh_lock.release()
-
-    if not response.available:
-        cached = _cached_account_response(broker, _account_cache_now(), allow_stale=True)
-        if cached is not None:
-            return cached
-
-    if response.available:
-        _store_account_response(broker, _account_cache_now(), response)
-    return response
 
 
 

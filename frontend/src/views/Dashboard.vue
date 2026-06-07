@@ -413,6 +413,7 @@ const llmStatus = ref<LLMIntervalStatus | null>(null)
 const recentOrders = ref<OrderRecord[]>([])
 const recentEvents = ref<TradeEventRecord[]>([])
 const llmStatusLoading = ref(true)
+const pollLoading = ref(false)
 const recentOrdersLoading = ref(true)
 const recentEventsLoading = ref(true)
 const {
@@ -665,10 +666,14 @@ onMounted(() => {
   loadDiagnostics()
   startMultiSymbols()
   llmStatusTimer = setInterval(() => {
-    loadLLMStatus()
-    loadRecentOrders()
-    loadRecentEvents()
-    loadDiagnostics()
+    if (pollLoading.value) return
+    pollLoading.value = true
+    Promise.all([
+      loadLLMStatus(),
+      loadRecentOrders(),
+      loadRecentEvents(),
+      loadDiagnostics(),
+    ]).finally(() => { pollLoading.value = false })
   }, 3000)
   load().catch(() => void 0)
   window.addEventListener('resize', handleResize)

@@ -31,10 +31,10 @@ class TestRSI:
         # Flat prices have no gains or losses; RSI defaults to 50
         assert rsi == 50.0
 
-    def test_rsi_returns_zero_for_insufficient_data(self) -> None:
+    def test_rsi_returns_none_for_insufficient_data(self) -> None:
         closes = [100.0, 101.0]
         rsi = TechnicalIndicators.calculate_rsi(closes, period=14)
-        assert rsi == 0.0
+        assert rsi is None
 
 
 class TestMACD:

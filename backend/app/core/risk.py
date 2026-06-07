@@ -62,13 +62,16 @@ class RiskController:
             self.consecutive_losses = 0
 
     def _check_limits(self) -> RiskResult:
+        if self.config.max_daily_loss < 0:
+            raise ValueError("max_daily_loss must be non-negative")
+
         today = self._trade_day_provider()
         if today != self._today:
             self.daily_pnl = 0.0
             self.consecutive_losses = 0
             self._today = today
 
-        if self.daily_pnl <= -abs(self.config.max_daily_loss):
+        if self.daily_pnl <= -self.config.max_daily_loss:
             return RiskResult(approved=False, reason=f"daily loss limit reached: {self.daily_pnl}")
 
         if self.consecutive_losses >= self.config.max_consecutive_losses:

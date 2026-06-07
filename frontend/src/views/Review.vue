@@ -192,7 +192,7 @@
       </div>
     </template>
 
-    <el-empty v-else-if="searched && !loading" description="No data for this period, please adjust filters" />
+    <el-empty v-else-if="searched && !loading" description="该时间段无数据，请调整筛选条件" />
   </div>
 </template>
 

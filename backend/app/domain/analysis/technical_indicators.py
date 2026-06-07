@@ -16,10 +16,10 @@ class TechnicalIndicators:
     """Compute RSI, MACD, and volume analysis from price/volume series."""
 
     @staticmethod
-    def calculate_rsi(closes: list[float], period: int = 14) -> float:
+    def calculate_rsi(closes: list[float], period: int = 14) -> float | None:
         """Calculate RSI using the standard smoothed method."""
         if len(closes) < period + 1:
-            return 0.0
+            return None
 
         deltas = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
         gains = [d if d > 0 else 0.0 for d in deltas]

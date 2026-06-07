@@ -91,11 +91,18 @@ function parseSeverity(raw: string | undefined): NotificationSeverity {
 }
 
 // --- Sound playback (gated by soundEnabled) ---
+let _audioCtx: AudioContext | null = null
+function getAudioContext(): AudioContext {
+  if (!_audioCtx) {
+    const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext
+    _audioCtx = new AudioCtx()
+  }
+  return _audioCtx
+}
 function playNotificationSound(severity: NotificationSeverity) {
   if (!sharedPrefs.value.soundEnabled) return
   try {
-    const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext
-    const ctx = new AudioCtx()
+    const ctx = getAudioContext()
     const osc = ctx.createOscillator()
     const gain = ctx.createGain()
     osc.connect(gain)

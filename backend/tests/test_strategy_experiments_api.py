@@ -224,4 +224,4 @@ class TestErrors:
             f"/api/strategy-experiments/{exp_id}/runs",
             params={"sort": "nonexistent", "order": "asc"},
         )
-        assert resp.status_code == 400
+        assert resp.status_code == 422

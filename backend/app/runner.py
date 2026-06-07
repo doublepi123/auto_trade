@@ -512,9 +512,9 @@ class AppRunner:
                 return
             self._set_last_action_message(result.description)
 
-            restore_engine_snapshot = lambda snapshot: self._restore_engine_snapshot_for(trigger_engine, snapshot)
+            restore_engine_snapshot = lambda snapshot, eng=trigger_engine: self._restore_engine_snapshot_for(eng, snapshot)
             restore_engine_state_preserve_trigger = (
-                lambda snapshot: self._restore_engine_state_preserve_trigger_for(trigger_engine, snapshot)
+                lambda snapshot, eng=trigger_engine: self._restore_engine_state_preserve_trigger_for(eng, snapshot)
             )
             risk_result = self.risk.check()
             if not risk_result.approved:
@@ -1235,7 +1235,8 @@ class AppRunner:
             return None
         try:
             return float(value)  # pyright: ignore[reportArgumentType]
-        except Exception:
+        except (TypeError, ValueError):
+            logger.debug("_coerce_optional_float failed for value %r", value)
             return None
 
     def _broker_order_payload(self, broker_order: object, *, old_status: str | None) -> dict[str, Any]:

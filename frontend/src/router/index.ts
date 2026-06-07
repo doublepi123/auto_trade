@@ -1,8 +1,7 @@
 import { createRouter, createWebHashHistory, type RouteRecordRaw } from 'vue-router'
-import Dashboard from '../views/Dashboard.vue'
 
 const routes: RouteRecordRaw[] = [
-  { path: '/', component: Dashboard },
+  { path: '/', component: () => import('../views/Dashboard.vue') },
   { path: '/backtest', component: () => import('../views/Backtest.vue') },
   { path: '/experiments', component: () => import('../views/Experiments.vue') },
   { path: '/strategy', component: () => import('../views/Strategy.vue') },

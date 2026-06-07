@@ -6,6 +6,8 @@ from typing import Any
 
 logger = logging.getLogger("auto_trade.feature_selector")
 
+MIN_INDICATORS_FOR_AGGREGATE = 5
+
 AVAILABLE_INDICATORS = {
     "rsi": "RSI",
     "macd": "MACD",
@@ -69,7 +71,7 @@ class FeatureSelector:
                 for field in fields:
                     filtered.pop(field, None)
 
-        if len(selected_indicators) < 5:
+        if len(selected_indicators) < MIN_INDICATORS_FOR_AGGREGATE:
             filtered.pop("aggregate_signals", None)
 
         # Bollinger Bands are always retained as fundamental reference data;

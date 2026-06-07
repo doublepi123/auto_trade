@@ -52,10 +52,10 @@ class ABTestManager:
         )
 
     def activate_version(self, version_id: int) -> None:
-        _ = self.db.query(PromptVersion).update({PromptVersion.is_active: False})
         version = self.db.get(PromptVersion, version_id)
         if version is None:
             raise ValueError(f"PromptVersion {version_id} not found")
+        self.db.query(PromptVersion).update({PromptVersion.is_active: False})
         version.is_active = True
         self.db.commit()
 
@@ -64,6 +64,7 @@ class ABTestManager:
         versions = (
             self.db.query(PromptVersion)
             .filter(PromptVersion.is_active == True)  # noqa: E712
+            .filter(PromptVersion.name == experiment_name)
             .all()
         )
         if not versions:

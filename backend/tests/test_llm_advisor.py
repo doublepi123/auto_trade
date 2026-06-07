@@ -33,7 +33,7 @@ def _candle(high: float, low: float, close: float, *, day: int = 1) -> BrokerCan
 def test_deepseek_chat_payload_defaults_to_v4_flash_thinking_max() -> None:
     payload = LLMAdvisorService._deepseek_chat_payload("analyze NVDA")
 
-    assert payload["model"] == "deepseek-v4-flash"
+    assert payload["model"] == "deepseek-v4-pro"
     assert payload["reasoning_effort"] == "max"
     payload = cast(dict[str, Any], payload)
     assert payload["messages"][1]["content"] == "analyze NVDA"
@@ -770,13 +770,14 @@ class TestABVariantSelection:
         db = SessionLocal()
         try:
             manager = ABTestManager(db)
-            manager.create_version("v1", "1.0", "first", "template v1")
+            manager.create_version("ab-test", "1.0", "first", "template v1")
             db.commit()
+            manager.activate_version(1)
 
             advisor = LLMAdvisorService()
             template, variant = advisor._select_variant("AAPL.US")
             assert template == "template v1"
-            assert variant == "v1:1.0"
+            assert variant == "ab-test:1.0"
         finally:
             db.close()
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -37,6 +38,7 @@ _last_llm_trigger_price_by_symbol: dict[str, float] = {}
 _llm_last_analysis_at_by_symbol: dict[str, datetime] = {}
 _llm_analysis_timestamps: list[float] = []
 _llm_analysis_lock = asyncio.Lock()
+_llm_globals_lock = threading.Lock()
 
 
 def _price_drift_pct(current_price: float, last_price: float) -> float:
@@ -188,12 +190,13 @@ async def _llm_analysis_tick() -> None:
                     continue
 
                 symbol_state = state_svc.get_state(symbol, market)
-                if is_primary:
-                    last_analysis_at = config.llm_last_analysis_at
-                    last_trigger_price = _last_llm_trigger_price
-                else:
-                    last_analysis_at = symbol_state.last_analysis_at
-                    last_trigger_price = _last_llm_trigger_price_by_symbol.get(symbol, 0.0)
+                with _llm_globals_lock:
+                    if is_primary:
+                        last_analysis_at = config.llm_last_analysis_at
+                        last_trigger_price = _last_llm_trigger_price
+                    else:
+                        last_analysis_at = symbol_state.last_analysis_at
+                        last_trigger_price = _last_llm_trigger_price_by_symbol.get(symbol, 0.0)
 
                 time_gate_passed, volatility_triggered = _should_run_llm_analysis(
                     current_price=current_price,
@@ -242,10 +245,11 @@ async def _llm_analysis_tick() -> None:
                     getattr(params, "short_selling", config.short_selling),
                 )
 
-                if is_primary:
-                    _last_llm_trigger_price = current_price
-                else:
-                    _last_llm_trigger_price_by_symbol[symbol] = current_price
+                with _llm_globals_lock:
+                    if is_primary:
+                        _last_llm_trigger_price = current_price
+                    else:
+                        _last_llm_trigger_price_by_symbol[symbol] = current_price
 
                 result = await asyncio.to_thread(
                     advisor.analyze,
@@ -269,9 +273,10 @@ async def _llm_analysis_tick() -> None:
                 )
                 analyzed_count += 1
                 now_mono = time.monotonic()
-                _prune_llm_analysis_timestamps(now_mono)
-                _llm_analysis_timestamps.append(now_mono)
-                _llm_last_analysis_at_by_symbol[symbol] = now
+                with _llm_globals_lock:
+                    _prune_llm_analysis_timestamps(now_mono)
+                    _llm_analysis_timestamps.append(now_mono)
+                    _llm_last_analysis_at_by_symbol[symbol] = now
 
                 if result.get("success"):
                     app_result = {"applied": False, "reason": "secondary symbol analysis does not update primary interval config"}
@@ -349,6 +354,7 @@ async def _llm_analysis_tick() -> None:
             except Exception:
                 db.rollback()
                 logger.exception("LLM analysis failed for symbol %s; skipping", symbol)
+                break
     finally:
         db.close()
 

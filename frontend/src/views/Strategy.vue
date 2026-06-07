@@ -278,6 +278,7 @@ const { form, loading, saving, saved, error, isDirty, load, save } = useFormStat
       patch.trading_session_mode = data.trading_session_mode === 'RTH_ONLY' ? 'RTH_ONLY' : 'ANY'
     }
     if (!previous || data.margin_safety_factor !== previous.margin_safety_factor) patch.margin_safety_factor = data.margin_safety_factor
+    if (Object.keys(patch).length === 0) return
     await updateStrategy(patch)
     loadedStrategy.value = {
       ...data,

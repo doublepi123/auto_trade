@@ -41,14 +41,14 @@ const pnlValues = computed(() => props.points.map((point) => point.daily_pnl))
 const latestPnl = computed(() => pnlValues.value.length > 0 ? pnlValues.value[pnlValues.value.length - 1] : 0)
 const minPnl = computed(() => {
   if (pnlValues.value.length === 0) return 0
-  const min = Math.min(...pnlValues.value, 0)
-  const max = Math.max(...pnlValues.value, 0)
+  const min = pnlValues.value.reduce((a, b) => Math.min(a, b), 0)
+  const max = pnlValues.value.reduce((a, b) => Math.max(a, b), 0)
   return min - Math.max((max - min) * 0.1, 1)
 })
 const maxPnl = computed(() => {
   if (pnlValues.value.length === 0) return 1
-  const min = Math.min(...pnlValues.value, 0)
-  const max = Math.max(...pnlValues.value, 0)
+  const min = pnlValues.value.reduce((a, b) => Math.min(a, b), 0)
+  const max = pnlValues.value.reduce((a, b) => Math.max(a, b), 0)
   return max + Math.max((max - min) * 0.1, 1)
 })
 

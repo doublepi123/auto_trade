@@ -47,7 +47,7 @@ export async function getTradeEvents(params: GetTradeEventsParams = {}): Promise
 export async function exportTradeEvents(format: 'csv' | 'json'): Promise<Blob> {
   const resp = await api.get('/api/events/export', {
     params: { format },
-    responseType: 'blob',
+    responseType: format === 'csv' ? 'blob' : 'json',
   })
   return resp.data
 }
