@@ -4,6 +4,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any, Literal
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models import AuditLog, TradeEvent
@@ -83,7 +84,7 @@ def _paginate_query(query, page: int, page_size: int):
 def _apply_skip_category_filter(query, skip_category: str | None):
     if skip_category:
         query = query.filter(
-            TradeEvent.payload_json.contains(f'"skip_category": "{skip_category}"')
+            func.json_extract(TradeEvent.payload_json, '$.skip_category') == skip_category
         )
     return query
 

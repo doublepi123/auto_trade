@@ -527,7 +527,14 @@ class BrokerGateway:
                         logger.exception("quote callback failed for %s", _symbol)
 
             quote_ctx.set_on_quote(_on_quote)
-            topics = [SubType.Quote] if SubType else []
+            if SubType is None:
+                if added_callback and callback in self._quote_callbacks:
+                    self._quote_callbacks.remove(callback)
+                raise RuntimeError(
+                    "longport SDK SubType not available — cannot subscribe to quotes. "
+                    "Install the longport package."
+                )
+            topics = [SubType.Quote]
             try:
                 quote_ctx.subscribe(missing_symbols, topics)
             except Exception:

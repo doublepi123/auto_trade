@@ -56,6 +56,14 @@ def decrypt_secret(value: str) -> str:
 
     private_key = _load_private_key()
     payload = json.loads(_decode(value[len(_PREFIX):]).decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("invalid encrypted payload: expected a JSON object")
+    required_keys = {"v", "k", "n", "c"}
+    missing = required_keys - set(payload.keys())
+    if missing:
+        raise ValueError(f"invalid encrypted payload: missing keys {sorted(missing)}")
+    if payload["v"] != 1:
+        raise ValueError(f"unsupported encrypted payload version: {payload['v']}")
     data_key = private_key.decrypt(
         _decode(payload["k"]),
         padding.OAEP(

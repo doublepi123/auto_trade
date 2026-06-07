@@ -145,6 +145,12 @@ function handleEvent(evt: NotificationEvent) {
     return
   }
   sharedLastEmittedAt.set(key, now)
+  if (sharedLastEmittedAt.size > 1000) {
+    const entries = [...sharedLastEmittedAt.entries()]
+    for (let i = 0; i < entries.length - 500; i++) {
+      sharedLastEmittedAt.delete(entries[i][0])
+    }
+  }
 
   emitBySeverity(severity, title, message)
   playNotificationSound(severity)

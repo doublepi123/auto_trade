@@ -406,53 +406,62 @@ class AppRunner:
         self._apply_credentials(self._load_credentials(), resubscribe=self._running)
 
     def reload_strategy(self) -> None:
-        with self._state_lock:
-            db = SessionLocal()
-            try:
-                svc = StrategyService(db)
-                config = svc.get_config()
-                old_symbol = self.engine.params.symbol
-                self.engine.params = StrategyParams(
-                    symbol=config.symbol,
-                    market=config.market,
-                    buy_low=config.buy_low,
-                    sell_high=config.sell_high,
-                    short_selling=config.short_selling,
-                    min_profit_amount=config.min_profit_amount,
-                    auto_resume_minutes=config.auto_resume_minutes,
-                    fee_rate_us=config.fee_rate_us,
-                    fee_rate_hk=config.fee_rate_hk,
-                    min_repricing_pct=config.min_repricing_pct,
-                    llm_action_cooldown_seconds=config.llm_action_cooldown_seconds,
-                )
-                self.risk.config = RiskConfig(
-                    max_daily_loss=config.max_daily_loss,
-                    max_consecutive_losses=config.max_consecutive_losses,
-                )
-                mode = getattr(config, "trading_session_mode", None)
-                self._trading_session_mode = mode if mode else "ANY"
-                self._trade_svc.margin_safety_factor = getattr(config, "margin_safety_factor", None)
+        db = SessionLocal()
+        try:
+            svc = StrategyService(db)
+            config = svc.get_config()
+            new_params = StrategyParams(
+                symbol=config.symbol,
+                market=config.market,
+                buy_low=config.buy_low,
+                sell_high=config.sell_high,
+                short_selling=config.short_selling,
+                min_profit_amount=config.min_profit_amount,
+                auto_resume_minutes=config.auto_resume_minutes,
+                fee_rate_us=config.fee_rate_us,
+                fee_rate_hk=config.fee_rate_hk,
+                min_repricing_pct=config.min_repricing_pct,
+                llm_action_cooldown_seconds=config.llm_action_cooldown_seconds,
+            )
+            new_risk_config = RiskConfig(
+                max_daily_loss=config.max_daily_loss,
+                max_consecutive_losses=config.max_consecutive_losses,
+            )
+            mode = getattr(config, "trading_session_mode", None)
+            new_session_mode = mode if mode else "ANY"
+            new_margin_safety_factor = getattr(config, "margin_safety_factor", None)
+
+            need_resubscribe = False
+            with self._state_lock:
+                self.engine.params = new_params
+                self.risk.config = new_risk_config
+                self._trading_session_mode = new_session_mode
+                self._trade_svc.margin_safety_factor = new_margin_safety_factor
                 self._sync_symbol_runtimes(db)
                 if self._running:
                     self._reset_quote_tracking(clear_history=True)
                     if self._quotes_subscribed:
-                        try:
-                            self.broker.unsubscribe_quotes()
-                        except Exception:
-                            logger.warning("failed to unsubscribe old symbols during strategy reload")
+                        need_resubscribe = True
                         self._quotes_subscribed = False
-                    with self._state_lock:
-                        symbols = self._desired_quote_symbols_locked()
-                    if symbols:
-                        try:
-                            self._subscribe_quote_symbols(self.broker, symbols)
+
+            if need_resubscribe:
+                try:
+                    self.broker.unsubscribe_quotes()
+                except Exception:
+                    logger.warning("failed to unsubscribe old symbols during strategy reload")
+                with self._state_lock:
+                    symbols = self._desired_quote_symbols_locked()
+                if symbols:
+                    try:
+                        self._subscribe_quote_symbols(self.broker, symbols)
+                        with self._state_lock:
                             self._quotes_subscribed = True
                             self._last_push_quote_at = time.monotonic()
-                            logger.info("re-subscribed to quote streams after strategy reload: %s", ", ".join(symbols))
-                        except Exception as exc:
-                            logger.error("quote subscription failed after strategy reload: %s", exc)
-            finally:
-                db.close()
+                        logger.info("re-subscribed to quote streams after strategy reload: %s", ", ".join(symbols))
+                    except Exception as exc:
+                        logger.error("quote subscription failed after strategy reload: %s", exc)
+        finally:
+            db.close()
 
     def _on_quote(self, quote: Quote, *, is_push: bool = True) -> None:
         processing_started = False
@@ -1431,8 +1440,7 @@ class AppRunner:
                 register(self._on_disconnect)
 
             if should_resubscribe:
-                with self._state_lock:
-                    symbols = self._desired_quote_symbols_locked()
+                symbols = self._desired_quote_symbols_locked()
                 try:
                     self._subscribe_quote_symbols(new_broker, symbols)
                 except Exception as exc:

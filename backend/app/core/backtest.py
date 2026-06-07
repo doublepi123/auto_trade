@@ -339,6 +339,8 @@ class BacktestEngine:
             raise ValueError("fee and slippage values cannot be negative")
         if self.params.stop_loss_pct < 0:
             raise ValueError("stop_loss_pct cannot be negative")
+        if self.params.stop_loss_pct > 100:
+            raise ValueError("stop_loss_pct cannot exceed 100")
 
     def _entry_signal(self, bar: BacktestBar) -> tuple[str, str, float, str] | None:
         buy_hit = bar.low <= self.params.buy_low

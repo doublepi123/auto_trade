@@ -910,6 +910,7 @@ class TestAPI:
 
     def test_llm_interval_status_includes_budget_and_symbol_statuses(self, monkeypatch) -> None:
         _clean_strategy()
+        _clean_llm_interactions()
         resp = client.put("/api/strategy", json={
             "symbol": "NVDA.US",
             "market": "US",

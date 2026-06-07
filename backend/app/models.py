@@ -6,7 +6,7 @@ from typing import Optional
 from sqlalchemy import Boolean, Date, DateTime, Float, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-_TZDateTime = lambda: DateTime(timezone=True)
+_TZDateTime = DateTime(timezone=True)
 
 
 def _utcnow() -> datetime:
@@ -31,7 +31,7 @@ class StrategyConfig(Base):
     max_daily_loss: Mapped[float] = mapped_column(Float, default=5000.0)
     max_consecutive_losses: Mapped[int] = mapped_column(Integer, default=3)
     sct_key: Mapped[str] = mapped_column(String(200), default="")
-    updated_at: Mapped[datetime] = mapped_column(_TZDateTime(), default=_utcnow, onupdate=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow, onupdate=_utcnow)
 
     fee_rate_us: Mapped[float] = mapped_column(Float, default=0.0005)
     fee_rate_hk: Mapped[float] = mapped_column(Float, default=0.003)
@@ -44,11 +44,11 @@ class StrategyConfig(Base):
     llm_suggested_sell_high: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     llm_confidence_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     llm_analysis: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    llm_last_analysis_at: Mapped[Optional[datetime]] = mapped_column(_TZDateTime(), nullable=True)
-    llm_next_analysis_at: Mapped[Optional[datetime]] = mapped_column(_TZDateTime(), nullable=True)
+    llm_last_analysis_at: Mapped[Optional[datetime]] = mapped_column(_TZDateTime, nullable=True)
+    llm_next_analysis_at: Mapped[Optional[datetime]] = mapped_column(_TZDateTime, nullable=True)
     llm_applied_buy_low: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     llm_applied_sell_high: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-    llm_applied_at: Mapped[Optional[datetime]] = mapped_column(_TZDateTime(), nullable=True)
+    llm_applied_at: Mapped[Optional[datetime]] = mapped_column(_TZDateTime, nullable=True)
     llm_reject_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     trading_session_mode: Mapped[str] = mapped_column(String(16), default="ANY", nullable=False)
     margin_safety_factor: Mapped[float | None] = mapped_column(Float, nullable=True, default=0.9)
@@ -67,7 +67,7 @@ class CredentialConfig(Base):
         default='[{"type":"serverchan","severity_floor":"INFO"}]',
         nullable=False,
     )
-    updated_at: Mapped[datetime] = mapped_column(_TZDateTime(), default=_utcnow, onupdate=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow, onupdate=_utcnow)
 
 
 class OrderRecord(Base):
@@ -82,8 +82,8 @@ class OrderRecord(Base):
     executed_quantity: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     executed_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="SUBMITTED")
-    created_at: Mapped[datetime] = mapped_column(_TZDateTime(), default=_utcnow)
-    filled_at: Mapped[Optional[datetime]] = mapped_column(_TZDateTime(), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow)
+    filled_at: Mapped[Optional[datetime]] = mapped_column(_TZDateTime, nullable=True)
     raw_response: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
 
@@ -98,7 +98,7 @@ class TradeEvent(Base):
     status: Mapped[str] = mapped_column(String(30), default="")
     message: Mapped[str] = mapped_column(Text, default="")
     payload_json: Mapped[str] = mapped_column(Text, default="{}")
-    created_at: Mapped[datetime] = mapped_column(_TZDateTime(), default=_utcnow)
+    created_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow)
 
 
 class RiskEvent(Base):
@@ -107,7 +107,7 @@ class RiskEvent(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     event_type: Mapped[str] = mapped_column(String(50))
     reason: Mapped[str] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(_TZDateTime(), default=_utcnow)
+    created_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow)
 
 
 class LLMInteraction(Base):
@@ -128,7 +128,7 @@ class LLMInteraction(Base):
     order_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     applied: Mapped[bool] = mapped_column(Boolean, default=False)
     prompt_variant: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(_TZDateTime(), default=_utcnow)
+    created_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow)
 
 
 class LLMSymbolScheduleState(Base):
@@ -137,11 +137,11 @@ class LLMSymbolScheduleState(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     symbol: Mapped[str] = mapped_column(String(50), default="", unique=True, index=True)
     market: Mapped[str] = mapped_column(String(10), default="US")
-    last_analysis_at: Mapped[Optional[datetime]] = mapped_column(_TZDateTime(), nullable=True)
-    next_analysis_at: Mapped[Optional[datetime]] = mapped_column(_TZDateTime(), nullable=True)
+    last_analysis_at: Mapped[Optional[datetime]] = mapped_column(_TZDateTime, nullable=True)
+    next_analysis_at: Mapped[Optional[datetime]] = mapped_column(_TZDateTime, nullable=True)
     last_status: Mapped[str] = mapped_column(String(20), default="")
     last_skip_reason: Mapped[str] = mapped_column(Text, default="")
-    updated_at: Mapped[datetime] = mapped_column(_TZDateTime(), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow)
 
 
 class RuntimeState(Base):
@@ -152,7 +152,7 @@ class RuntimeState(Base):
     engine_state: Mapped[str] = mapped_column(String(20), default="flat")
     paused: Mapped[bool] = mapped_column(Boolean, default=False)
     pause_reason: Mapped[str] = mapped_column(Text, default="")
-    paused_at: Mapped[Optional[datetime]] = mapped_column(_TZDateTime(), nullable=True)
+    paused_at: Mapped[Optional[datetime]] = mapped_column(_TZDateTime, nullable=True)
     pause_auto_resumable: Mapped[bool] = mapped_column(Boolean, default=False)
     kill_switch: Mapped[bool] = mapped_column(Boolean, default=False)
     daily_pnl: Mapped[float] = mapped_column(Float, default=0.0)
@@ -160,8 +160,8 @@ class RuntimeState(Base):
     consecutive_losses: Mapped[int] = mapped_column(Integer, default=0)
     last_price: Mapped[float] = mapped_column(Float, default=0.0)
     last_trigger_price: Mapped[float] = mapped_column(Float, default=0.0)
-    last_trigger_at: Mapped[Optional[datetime]] = mapped_column(_TZDateTime(), nullable=True)
-    updated_at: Mapped[datetime] = mapped_column(_TZDateTime(), default=_utcnow, onupdate=_utcnow)
+    last_trigger_at: Mapped[Optional[datetime]] = mapped_column(_TZDateTime, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow, onupdate=_utcnow)
 
 
 class TrackedEntry(Base):
@@ -176,7 +176,7 @@ class TrackedEntry(Base):
     symbol: Mapped[str] = mapped_column(String(50), primary_key=True)
     quantity: Mapped[float] = mapped_column(Float, default=0.0)
     cost: Mapped[float] = mapped_column(Float, default=0.0)
-    updated_at: Mapped[datetime] = mapped_column(_TZDateTime(), default=_utcnow, onupdate=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow, onupdate=_utcnow)
 
 
 class RuntimeStateSnapshot(Base):
@@ -191,7 +191,7 @@ class RuntimeStateSnapshot(Base):
     consecutive_losses: Mapped[int] = mapped_column(Integer, default=0)
     last_price: Mapped[float] = mapped_column(Float, default=0.0)
     last_trigger_price: Mapped[float] = mapped_column(Float, default=0.0)
-    created_at: Mapped[datetime] = mapped_column(_TZDateTime(), default=_utcnow)
+    created_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow)
 
 
 class AuditLog(Base):
@@ -204,7 +204,7 @@ class AuditLog(Base):
     source_ip: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     request_summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
     result: Mapped[str] = mapped_column(String(16), nullable=False, default="SUCCESS")
-    created_at: Mapped[datetime] = mapped_column(_TZDateTime(), default=_utcnow, index=True)
+    created_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow, index=True)
 
 
 class WatchlistItem(Base):
@@ -217,7 +217,7 @@ class WatchlistItem(Base):
     market: Mapped[str] = mapped_column(String(10), default="US", nullable=False)
     alias: Mapped[str] = mapped_column(String(100), default="", nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(_TZDateTime(), default=_utcnow)
+    created_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow)
 
     __table_args__ = (UniqueConstraint("symbol", name="uq_watchlist_symbol"),)
 
@@ -233,7 +233,7 @@ class PromptVersion(Base):
     description: Mapped[str] = mapped_column(Text, nullable=False, default="")
     template: Mapped[str] = mapped_column(Text, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(_TZDateTime(), default=_utcnow)
+    created_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow)
 
 
 class ExperimentResult(Base):
@@ -249,7 +249,7 @@ class ExperimentResult(Base):
     predicted_direction: Mapped[str] = mapped_column(String(32), nullable=False, default="")
     actual_pnl: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     was_profitable: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(_TZDateTime(), default=_utcnow)
+    created_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow)
 
 class StrategyExperiment(Base):
     __tablename__ = "strategy_experiments"
@@ -264,8 +264,8 @@ class StrategyExperiment(Base):
     completed_runs: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     failed_runs: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     error: Mapped[str] = mapped_column(Text, nullable=False, default="")
-    created_at: Mapped[datetime] = mapped_column(_TZDateTime(), default=_utcnow, index=True)
-    completed_at: Mapped[datetime | None] = mapped_column(_TZDateTime(), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow, index=True)
+    completed_at: Mapped[datetime | None] = mapped_column(_TZDateTime, nullable=True)
 
 
 class StrategyExperimentRun(Base):
@@ -286,4 +286,4 @@ class StrategyExperimentRun(Base):
     profit_loss_ratio: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     result_summary_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
     error: Mapped[str] = mapped_column(Text, nullable=False, default="")
-    created_at: Mapped[datetime] = mapped_column(_TZDateTime(), default=_utcnow, index=True)
+    created_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow, index=True)

@@ -400,6 +400,9 @@ def enable_llm_interval(
     config = svc.get_config()
     config.auto_interval_enabled = True
     db.commit()
+    db.refresh(config)
+    from app.api.strategy import _reload_strategy_after_save
+    _reload_strategy_after_save()
     actor_hash, source_ip = extract_actor(request)
     audit.record(
         "LLM_INTERVAL_ENABLE",
@@ -422,6 +425,9 @@ def disable_llm_interval(
     config = svc.get_config()
     config.auto_interval_enabled = False
     db.commit()
+    db.refresh(config)
+    from app.api.strategy import _reload_strategy_after_save
+    _reload_strategy_after_save()
     actor_hash, source_ip = extract_actor(request)
     audit.record(
         "LLM_INTERVAL_DISABLE",

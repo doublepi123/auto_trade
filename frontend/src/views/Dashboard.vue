@@ -181,13 +181,13 @@
         <el-table-column prop="alias" label="别名" min-width="120" />
         <el-table-column prop="market" label="市场" width="80" />
         <el-table-column label="最新价" width="110">
-          <template #default="{ row }">{{ row.last_price.toFixed(2) }}</template>
+          <template #default="{ row }">{{ formatNumber(row.last_price) }}</template>
         </el-table-column>
         <el-table-column label="买一" width="110">
-          <template #default="{ row }">{{ row.bid.toFixed(2) }}</template>
+          <template #default="{ row }">{{ formatNumber(row.bid) }}</template>
         </el-table-column>
         <el-table-column label="卖一" width="110">
-          <template #default="{ row }">{{ row.ask.toFixed(2) }}</template>
+          <template #default="{ row }">{{ formatNumber(row.ask) }}</template>
         </el-table-column>
         <el-table-column label="更新时间" width="120">
           <template #default="{ row }">{{ formatTime(row.timestamp) }}</template>

@@ -27,6 +27,10 @@ class ServerChanNotifier:
     def __init__(self, sct_key: str) -> None:
         self._sct_key = sct_key
 
+    @property
+    def sct_key(self) -> str:
+        return self._sct_key
+
     def send(self, title: str, content: str, severity: str = "INFO") -> bool:
         if not self._sct_key:
             return False

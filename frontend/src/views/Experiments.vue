@@ -480,7 +480,9 @@ async function onExport(format: 'csv' | 'json') {
       const a = document.createElement('a')
       a.href = url
       a.download = `experiment-${expId}.csv`
+      document.body.appendChild(a)
       a.click()
+      a.remove()
       window.URL.revokeObjectURL(url)
     } else if (format === 'json') {
       const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
@@ -488,7 +490,9 @@ async function onExport(format: 'csv' | 'json') {
       const a = document.createElement('a')
       a.href = url
       a.download = `experiment-${expId}.json`
+      document.body.appendChild(a)
       a.click()
+      a.remove()
       window.URL.revokeObjectURL(url)
     }
   } catch (e: unknown) {

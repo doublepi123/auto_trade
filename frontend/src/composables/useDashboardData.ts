@@ -57,6 +57,7 @@ export function useDashboardData() {
   async function refreshStatus() {
     if (statusRefreshInFlight) return
     statusRefreshInFlight = true
+    statusLoading.value = true
     try {
       status.value = await getStatus()
       loadError.value = false

@@ -35,6 +35,11 @@ def record_trade_event(
     message: str = "",
     payload: dict[str, Any] | None = None,
 ) -> TradeEvent:
+    """Create and add a TradeEvent to the session.
+
+    Note: The caller is responsible for committing the transaction
+    (e.g., ``db.commit()``).  This function only stages the event.
+    """
     event = TradeEvent(
         event_type=event_type,
         symbol=symbol or "",

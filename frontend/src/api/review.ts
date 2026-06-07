@@ -5,8 +5,9 @@ export async function getReview(params: {
   symbol: string
   from_date: string
   to_date: string
-}) {
-  return api.get<ReviewResponse>('/api/review', { params })
+}): Promise<ReviewResponse> {
+  const resp = await api.get<ReviewResponse>('/api/review', { params })
+  return resp.data
 }
 
 export async function exportReview(params: {

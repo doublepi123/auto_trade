@@ -59,6 +59,7 @@ def _record_control_trace(
         )
         db.commit()
     finally:
+        db.rollback()
         db.close()
 _TERMINAL_ORDER_STATUSES = {"FILLED", "REJECTED", "CANCELLED"}
 

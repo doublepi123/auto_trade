@@ -182,7 +182,8 @@ async function handleActivate(id: number) {
   }
 }
 
-function formatNumber(n: number) {
+function formatNumber(n: number | null | undefined) {
+  if (n == null) return '0.00'
   if (n === 0) return '0.00'
   return n.toFixed(2)
 }

@@ -164,14 +164,16 @@ class LLMAdvisorService:
         try:
             from app.domain.experiment.ab_test_manager import ABTestManager
 
-            db = SessionLocal()
+            db = None
             try:
+                db = SessionLocal()
                 manager = ABTestManager(db)
                 variant = manager.select_variant(symbol, experiment_name)
                 if variant:
                     return variant.template, f"{variant.name}:{variant.version}"
             finally:
-                db.close()
+                if db is not None:
+                    db.close()
         except Exception:
             logger.debug("failed to select A/B variant for %s", symbol, exc_info=True)
         return None, None
@@ -280,6 +282,7 @@ class LLMAdvisorService:
             "account_context": account_context or {},
         }
 
+        raw_response = ""
         try:
             raw_response = self._call_llm(prompt)
             result = self._parse_response(raw_response)
@@ -295,7 +298,7 @@ class LLMAdvisorService:
                 symbol=symbol,
                 market=market,
                 prompt=prompt,
-                raw_response=locals().get("raw_response", ""),
+                raw_response=raw_response,
                 result=None,
                 context_snapshot=context_snapshot,
                 success=False,
@@ -433,6 +436,7 @@ class LLMAdvisorService:
             "account_context": account_context or {},
         }
 
+        raw_response = ""
         try:
             raw_response = self._call_llm(prompt)
             result = self._parse_response(raw_response)
@@ -443,7 +447,7 @@ class LLMAdvisorService:
                 symbol=symbol,
                 market=market,
                 prompt=prompt,
-                raw_response=locals().get("raw_response", ""),
+                raw_response=raw_response,
                 result=None,
                 context_snapshot=context_snapshot,
                 success=False,

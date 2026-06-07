@@ -20,6 +20,8 @@ router = APIRouter(prefix="/api/backtest", tags=["backtest"])
 def run_backtest(payload: BacktestRunRequest) -> BacktestResult:
     try:
         bars = _load_bars(payload)
+        if not bars:
+            raise HTTPException(status_code=422, detail="at least one price bar is required")
         params = BacktestEngineParams(
             symbol=payload.params.symbol,
             buy_low=payload.params.buy_low,

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
@@ -9,6 +11,7 @@ from app.runner import get_runner
 from app.services.review_service import ReviewService
 
 router = APIRouter(prefix="/api/review", tags=["review"])
+logger = logging.getLogger(__name__)
 
 
 @router.get("")
@@ -25,7 +28,8 @@ def get_review(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Review aggregation failed: {exc}")
+        logger.exception("review aggregation failed")
+        raise HTTPException(status_code=500, detail="Review aggregation failed") from None
 
 
 @router.get("/export")
@@ -56,4 +60,5 @@ def export_review(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Review export failed: {exc}")
+        logger.exception("review export failed")
+        raise HTTPException(status_code=500, detail="Review export failed") from None

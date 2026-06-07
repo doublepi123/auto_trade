@@ -38,7 +38,7 @@ class MultiChannelNotifier:
 
         for notifier, _floor in self._channels:
             if isinstance(notifier, ServerChanNotifier):
-                return notifier._sct_key
+                return notifier.sct_key
         return ""
 
     def send(self, title: str, content: str, severity: str = "INFO") -> bool:

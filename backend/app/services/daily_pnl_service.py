@@ -184,16 +184,13 @@ class DailyPnlService:
     @staticmethod
     def _apply_fill(position: _LedgerPosition, fill: _Fill) -> tuple[Decimal, Decimal]:
         if fill.side == "BUY":
-            remaining, matched_quantity, pnl = DailyPnlService._close_short(position, fill.quantity, fill.price)
-            DailyPnlService._open_long(position, remaining, fill.price)
-            return matched_quantity, pnl
+            DailyPnlService._open_long(position, fill.quantity, fill.price)
+            return _ZERO, _ZERO
         if fill.side == "BUY_TO_COVER":
-            remaining, matched_quantity, pnl = DailyPnlService._close_short(position, fill.quantity, fill.price)
-            DailyPnlService._open_long(position, remaining, fill.price)
+            _, matched_quantity, pnl = DailyPnlService._close_short(position, fill.quantity, fill.price)
             return matched_quantity, pnl
         if fill.side == "SELL":
-            remaining, matched_quantity, pnl = DailyPnlService._close_long(position, fill.quantity, fill.price)
-            DailyPnlService._open_short(position, remaining, fill.price)
+            _, matched_quantity, pnl = DailyPnlService._close_long(position, fill.quantity, fill.price)
             return matched_quantity, pnl
         if fill.side == "SELL_SHORT":
             DailyPnlService._open_short(position, fill.quantity, fill.price)

@@ -224,7 +224,7 @@ async function handleExport(format: 'csv' | 'json') {
     document.body.appendChild(link)
     link.click()
     link.remove()
-    URL.revokeObjectURL(url)
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
     ElMessage.success('导出已开始（仅包含交易事件）')
   } catch (e) {
     console.error('导出决策时间线失败：', e)

@@ -285,7 +285,7 @@ class StrategyExperimentService:
             raise ValueError("strategy experiment run not found")
         return StrategyExperimentRunResponse.model_validate(run)
     def export_experiment(
-        self, experiment_id: int, format: str
+        self, experiment_id: int, fmt: str
     ) -> dict[str, object] | str:
         """Export experiment runs as JSON or CSV."""
         exp = (
@@ -301,7 +301,7 @@ class StrategyExperimentService:
             .order_by(StrategyExperimentRun.total_return_pct.desc())
             .all()
         )
-        if format.lower() == "json":
+        if fmt.lower() == "json":
             return {
                 "experiment": {
                     "id": exp.id,
@@ -329,7 +329,7 @@ class StrategyExperimentService:
                     for r in runs
                 ],
             }
-        if format.lower() == "csv":
+        if fmt.lower() == "csv":
             import csv
             import io
             output = io.StringIO()
@@ -381,7 +381,7 @@ class StrategyExperimentService:
                     ]
                 )
             return output.getvalue()
-        raise ValueError("format must be csv or json")
+        raise ValueError("fmt must be csv or json")
 
 
 # ── helpers ─────────────────────────────────────────────────────────────

@@ -273,7 +273,7 @@ async function handleSearch() {
     ])
 
     if (reviewResult.status === 'fulfilled') {
-      reviewData.value = reviewResult.value.data
+      reviewData.value = reviewResult.value
     } else {
       reviewData.value = null
       ElMessage.error('复盘数据加载失败')

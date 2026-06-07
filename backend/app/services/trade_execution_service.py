@@ -1025,9 +1025,9 @@ class TradeExecutionService:
             return fallback
         return decimal_value if decimal_value > 0 else fallback
 
-    def _persist_submitted_order(self, order_id: str, symbol: str, side: str, qty: float, price: float, status: str = "SUBMITTED") -> None:
+    def _persist_submitted_order(self, order_id: str, symbol: str, action: str, qty: float, price: float, status: str = "SUBMITTED") -> None:
         try:
-            self._record_order(order_id, symbol, side, qty, price, status)
+            self._record_order(order_id, symbol, action, qty, price, status)
         except Exception as exc:
             logger.exception("failed to record order %s for %s", order_id, symbol)
             raise OrderPersistenceError(f"failed to persist order {order_id}") from exc

@@ -167,62 +167,46 @@ async def _llm_analysis_tick() -> None:
 
         advisor = LLMAdvisorService(broker=runner.broker)
         for symbol, market, engine, is_primary in targets:
-            if analyzed_count >= cycle_budget:
-                state_svc.record_skip(
-                    symbol,
-                    market,
-                    "cycle budget exhausted",
-                    next_analysis_at=None,
-                )
-                db.commit()
-                continue
-
-            runtime = getattr(runner, "_symbol_runtimes", {}).get(symbol)
-            params = getattr(engine, "params", config)
-            current_price = float(getattr(engine, "last_price", 0.0) or 0.0)
-            if current_price <= 0:
-                current_price = config.buy_low if is_primary else float(getattr(params, "buy_low", 0.0) or 0.0)
-            if current_price <= 0:
-                continue
-
-            symbol_state = state_svc.get_state(symbol, market)
-            if is_primary:
-                last_analysis_at = config.llm_last_analysis_at
-                last_trigger_price = _last_llm_trigger_price
-            else:
-                last_analysis_at = symbol_state.last_analysis_at
-                last_trigger_price = _last_llm_trigger_price_by_symbol.get(symbol, 0.0)
-
-            time_gate_passed, volatility_triggered = _should_run_llm_analysis(
-                current_price=current_price,
-                last_trigger_price=last_trigger_price,
-                threshold_pct=settings.llm_interval_volatility_threshold_pct,
-                last_analysis_at=last_analysis_at,
-                interval_minutes=interval_minutes,
-                now=now,
-            )
-            if not time_gate_passed and not volatility_triggered:
-                state_svc.record_skip(
-                    symbol,
-                    market,
-                    "interval gate not passed",
-                    next_analysis_at=(
-                        last_analysis_at + timedelta(minutes=interval_minutes)
-                        if last_analysis_at is not None
-                        else None
-                    ),
-                )
-                db.commit()
-                continue
-
-            if config.trading_session_mode == "RTH_ONLY":
-                from app.core.market_calendar import is_trading_hours
-
-                if not is_trading_hours(market):
+            try:
+                if analyzed_count >= cycle_budget:
                     state_svc.record_skip(
                         symbol,
                         market,
-                        "non-RTH session",
+                        "cycle budget exhausted",
+                        next_analysis_at=None,
+                    )
+                    db.commit()
+                    continue
+
+                runtime = getattr(runner, "_symbol_runtimes", {}).get(symbol)
+                params = getattr(engine, "params", config)
+                current_price = float(getattr(engine, "last_price", 0.0) or 0.0)
+                if current_price <= 0:
+                    current_price = config.buy_low if is_primary else float(getattr(params, "buy_low", 0.0) or 0.0)
+                if current_price <= 0:
+                    continue
+
+                symbol_state = state_svc.get_state(symbol, market)
+                if is_primary:
+                    last_analysis_at = config.llm_last_analysis_at
+                    last_trigger_price = _last_llm_trigger_price
+                else:
+                    last_analysis_at = symbol_state.last_analysis_at
+                    last_trigger_price = _last_llm_trigger_price_by_symbol.get(symbol, 0.0)
+
+                time_gate_passed, volatility_triggered = _should_run_llm_analysis(
+                    current_price=current_price,
+                    last_trigger_price=last_trigger_price,
+                    threshold_pct=settings.llm_interval_volatility_threshold_pct,
+                    last_analysis_at=last_analysis_at,
+                    interval_minutes=interval_minutes,
+                    now=now,
+                )
+                if not time_gate_passed and not volatility_triggered:
+                    state_svc.record_skip(
+                        symbol,
+                        market,
+                        "interval gate not passed",
                         next_analysis_at=(
                             last_analysis_at + timedelta(minutes=interval_minutes)
                             if last_analysis_at is not None
@@ -232,118 +216,138 @@ async def _llm_analysis_tick() -> None:
                     db.commit()
                     continue
 
-            position_context = _position_context(symbol, current_price)
-            account_context = _account_context(
-                symbol,
-                market,
-                current_price,
-                getattr(params, "short_selling", config.short_selling),
-            )
+                if config.trading_session_mode == "RTH_ONLY":
+                    from app.core.market_calendar import is_trading_hours
 
-            if is_primary:
-                _last_llm_trigger_price = current_price
-            else:
-                _last_llm_trigger_price_by_symbol[symbol] = current_price
+                    if not is_trading_hours(market):
+                        state_svc.record_skip(
+                            symbol,
+                            market,
+                            "non-RTH session",
+                            next_analysis_at=(
+                                last_analysis_at + timedelta(minutes=interval_minutes)
+                                if last_analysis_at is not None
+                                else None
+                            ),
+                        )
+                        db.commit()
+                        continue
 
-            result = await asyncio.to_thread(
-                advisor.analyze,
-                symbol=symbol,
-                market=market,
-                current_price=current_price,
-                current_buy_low=config.buy_low if is_primary else float(getattr(params, "buy_low", 0.0) or 0.0),
-                current_sell_high=config.sell_high if is_primary else float(getattr(params, "sell_high", 0.0) or 0.0),
-                short_selling=getattr(params, "short_selling", config.short_selling),
-                current_position=str(position_context["side"]),
-                recent_trades=[],
-                position_quantity=float(position_context["quantity"]),
-                position_avg_price=float(position_context["avg_price"]),
-                unrealized_pnl_pct=float(position_context["unrealized_pnl_pct"]),
-                min_profit_amount=float(getattr(params, "min_profit_amount", config.min_profit_amount) or 0.0),
-                recent_prices=_recent_price_context_for_target(engine, runtime, symbol),
-                recent_analysis=build_recent_analysis_context(config) if is_primary else [],
-                account_context=account_context,
-                force=True,
-                persist=is_primary,
-            )
-            analyzed_count += 1
-            now_mono = time.monotonic()
-            _prune_llm_analysis_timestamps(now_mono)
-            _llm_analysis_timestamps.append(now_mono)
-            _llm_last_analysis_at_by_symbol[symbol] = now
+                position_context = _position_context(symbol, current_price)
+                account_context = _account_context(
+                    symbol,
+                    market,
+                    current_price,
+                    getattr(params, "short_selling", config.short_selling),
+                )
 
-            if result.get("success"):
-                app_result = {"applied": False, "reason": "secondary symbol analysis does not update primary interval config"}
                 if is_primary:
-                    app_result = IntervalApplicationService().apply_direct_suggestion(
-                        db=db,
-                        current_price=current_price or config.buy_low,
-                        suggestion={
+                    _last_llm_trigger_price = current_price
+                else:
+                    _last_llm_trigger_price_by_symbol[symbol] = current_price
+
+                result = await asyncio.to_thread(
+                    advisor.analyze,
+                    symbol=symbol,
+                    market=market,
+                    current_price=current_price,
+                    current_buy_low=config.buy_low if is_primary else float(getattr(params, "buy_low", 0.0) or 0.0),
+                    current_sell_high=config.sell_high if is_primary else float(getattr(params, "sell_high", 0.0) or 0.0),
+                    short_selling=getattr(params, "short_selling", config.short_selling),
+                    current_position=str(position_context["side"]),
+                    recent_trades=[],
+                    position_quantity=float(position_context["quantity"]),
+                    position_avg_price=float(position_context["avg_price"]),
+                    unrealized_pnl_pct=float(position_context["unrealized_pnl_pct"]),
+                    min_profit_amount=float(getattr(params, "min_profit_amount", config.min_profit_amount) or 0.0),
+                    recent_prices=_recent_price_context_for_target(engine, runtime, symbol),
+                    recent_analysis=build_recent_analysis_context(config) if is_primary else [],
+                    account_context=account_context,
+                    force=True,
+                    persist=is_primary,
+                )
+                analyzed_count += 1
+                now_mono = time.monotonic()
+                _prune_llm_analysis_timestamps(now_mono)
+                _llm_analysis_timestamps.append(now_mono)
+                _llm_last_analysis_at_by_symbol[symbol] = now
+
+                if result.get("success"):
+                    app_result = {"applied": False, "reason": "secondary symbol analysis does not update primary interval config"}
+                    if is_primary:
+                        app_result = IntervalApplicationService().apply_direct_suggestion(
+                            db=db,
+                            current_price=current_price if current_price > 0 else config.buy_low,
+                            suggestion={
+                                "suggested_buy_low": result.get("suggested_buy_low"),
+                                "suggested_sell_high": result.get("suggested_sell_high"),
+                                "confidence_score": result.get("confidence_score"),
+                            },
+                            reference_quantity=_interval_reference_quantity(position_context, account_context),
+                        )
+                    order_result = {"status": "NO_ACTION", "order_id": None}
+                    if result.get("order_action") and result.get("order_action") != "NONE":
+                        order_result = await asyncio.to_thread(runner.execute_llm_order_decision, {**result, "symbol": symbol})
+                    interaction_id = result.get("interaction_id")
+                    if interaction_id is not None:
+                        LLMInteractionService(db).update_outcome(
+                            interaction_id,
+                            applied=app_result["applied"],
+                            order_status=order_result.get("status"),
+                            order_id=order_result.get("order_id"),
+                        )
+                    record_trade_event(
+                        db,
+                        event_type="LLM_ANALYSIS",
+                        symbol=symbol,
+                        status="SUCCESS",
+                        message=result.get("analysis") or app_result["reason"],
+                        payload={
+                            "source": "cron",
+                            "interaction_id": interaction_id,
+                            "confidence_score": result.get("confidence_score"),
                             "suggested_buy_low": result.get("suggested_buy_low"),
                             "suggested_sell_high": result.get("suggested_sell_high"),
-                            "confidence_score": result.get("confidence_score"),
+                            "applied": app_result["applied"],
+                            "apply_reason": app_result["reason"],
+                            "order_action": result.get("order_action"),
+                            "order_status": order_result.get("status"),
+                            "order_id": order_result.get("order_id"),
+                            "symbol_budget_index": analyzed_count,
+                            "persisted_interval": is_primary,
                         },
-                        reference_quantity=_interval_reference_quantity(position_context, account_context),
                     )
-                order_result = {"status": "NO_ACTION", "order_id": None}
-                if result.get("order_action") and result.get("order_action") != "NONE":
-                    order_result = await asyncio.to_thread(runner.execute_llm_order_decision, {**result, "symbol": symbol})
-                interaction_id = result.get("interaction_id")
-                if interaction_id is not None:
-                    LLMInteractionService(db).update_outcome(
-                        interaction_id,
-                        applied=app_result["applied"],
-                        order_status=order_result.get("status"),
-                        order_id=order_result.get("order_id"),
+                    state_svc.record_analysis(
+                        symbol,
+                        market,
+                        analyzed_at=now,
+                        next_analysis_at=now + timedelta(minutes=interval_minutes),
                     )
-                record_trade_event(
-                    db,
-                    event_type="LLM_ANALYSIS",
-                    symbol=symbol,
-                    status="SUCCESS",
-                    message=result.get("analysis") or app_result["reason"],
-                    payload={
-                        "source": "cron",
-                        "interaction_id": interaction_id,
-                        "confidence_score": result.get("confidence_score"),
-                        "suggested_buy_low": result.get("suggested_buy_low"),
-                        "suggested_sell_high": result.get("suggested_sell_high"),
-                        "applied": app_result["applied"],
-                        "apply_reason": app_result["reason"],
-                        "order_action": result.get("order_action"),
-                        "order_status": order_result.get("status"),
-                        "order_id": order_result.get("order_id"),
-                        "symbol_budget_index": analyzed_count,
-                        "persisted_interval": is_primary,
-                    },
-                )
-                state_svc.record_analysis(
-                    symbol,
-                    market,
-                    analyzed_at=now,
-                    next_analysis_at=now + timedelta(minutes=interval_minutes),
-                )
-                db.commit()
-            else:
-                record_trade_event(
-                    db,
-                    event_type="LLM_ANALYSIS",
-                    symbol=symbol,
-                    status="FAILED",
-                    message=result.get("error", "Unknown error"),
-                    payload={
-                        "source": "cron",
-                        "error": result.get("error", "Unknown error"),
-                        "symbol_budget_index": analyzed_count,
-                        "persisted_interval": is_primary,
-                    },
-                )
-                state_svc.record_failure(
-                    symbol,
-                    market,
-                    result.get("error", "Unknown error"),
-                    next_analysis_at=now + timedelta(minutes=interval_minutes),
-                )
-                db.commit()
+                    db.commit()
+                else:
+                    record_trade_event(
+                        db,
+                        event_type="LLM_ANALYSIS",
+                        symbol=symbol,
+                        status="FAILED",
+                        message=result.get("error", "Unknown error"),
+                        payload={
+                            "source": "cron",
+                            "error": result.get("error", "Unknown error"),
+                            "symbol_budget_index": analyzed_count,
+                            "persisted_interval": is_primary,
+                        },
+                    )
+                    state_svc.record_failure(
+                        symbol,
+                        market,
+                        result.get("error", "Unknown error"),
+                        next_analysis_at=now + timedelta(minutes=interval_minutes),
+                    )
+                    db.commit()
+            except Exception:
+                db.rollback()
+                logger.exception("LLM analysis failed for symbol %s; skipping", symbol)
     finally:
         db.close()
 
@@ -372,6 +376,13 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     yield
     cleanup_task.cancel()
     llm_task.cancel()
+    for task in (cleanup_task, llm_task):
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.exception("error during task cleanup")
     await asyncio.to_thread(get_runner().stop)
 
 
