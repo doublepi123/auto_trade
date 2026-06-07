@@ -36,6 +36,7 @@ _last_llm_trigger_price: float = 0.0
 _last_llm_trigger_price_by_symbol: dict[str, float] = {}
 _llm_last_analysis_at_by_symbol: dict[str, datetime] = {}
 _llm_analysis_timestamps: list[float] = []
+_llm_analysis_lock = asyncio.Lock()
 
 
 def _price_drift_pct(current_price: float, last_price: float) -> float:
@@ -355,10 +356,11 @@ async def _llm_analysis_tick() -> None:
 async def _llm_analysis_cron() -> None:
     while True:
         await asyncio.sleep(60)
-        try:
-            await _llm_analysis_tick()
-        except Exception:
-            logger.exception("LLM analysis cron failed")
+        async with _llm_analysis_lock:
+            try:
+                await _llm_analysis_tick()
+            except Exception:
+                logger.exception("LLM analysis cron failed")
 
 
 @asynccontextmanager

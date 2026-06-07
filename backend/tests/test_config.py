@@ -116,9 +116,9 @@ class TestSettings:
 
         assert s.deepseek_api_key == "sk-test-key"
 
-    def test_deepseek_model_defaults_to_v4_flash_thinking_max_256k(self) -> None:
+    def test_deepseek_model_defaults_to_v4_pro_thinking_max_256k(self) -> None:
         s = Settings()
-        assert s.deepseek_model == "deepseek-v4-flash"
+        assert s.deepseek_model == "deepseek-v4-pro"
         assert s.deepseek_reasoning_effort == "max"
         assert s.deepseek_thinking_type == "enabled"
         assert s.deepseek_max_tokens == 262144

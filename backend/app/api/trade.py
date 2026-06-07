@@ -58,8 +58,10 @@ def _record_control_trace(
             payload=payload,
         )
         db.commit()
-    finally:
+    except Exception:
         db.rollback()
+        raise
+    finally:
         db.close()
 _TERMINAL_ORDER_STATUSES = {"FILLED", "REJECTED", "CANCELLED"}
 
