@@ -7,6 +7,7 @@
         <router-link to="/" class="app-menu-link" :class="{ active: route.path === '/' }">仪表盘</router-link>
         <router-link to="/watchlist" class="app-menu-link" :class="{ active: route.path === '/watchlist' }">观察列表</router-link>
         <router-link to="/review" class="app-menu-link" :class="{ active: route.path === '/review' }">复盘</router-link>
+        <router-link to="/reports" class="app-menu-link" :class="{ active: route.path === '/reports' }">交易报告</router-link>
         <router-link to="/backtest" class="app-menu-link" :class="{ active: route.path === '/backtest' }">回测</router-link>
         <router-link to="/experiments" class="app-menu-link" :class="{ active: route.path === '/experiments' }">策略实验</router-link>
         <router-link to="/strategy" class="app-menu-link" :class="{ active: route.path === '/strategy' }">策略配置</router-link>

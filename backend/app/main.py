@@ -17,6 +17,7 @@ from app.api.experiments import router as experiments_router
 from app.api.indicators import router as indicators_router
 from app.api.performance import router as performance_router
 from app.api.llm_advisor import router as llm_advisor_router
+from app.api.reports import router as reports_router
 from app.api.review import router as review_router
 from app.api.strategy import router as strategy_router
 from app.api.strategy_experiments import router as strategy_experiments_router
@@ -413,6 +414,7 @@ app.include_router(llm_advisor_router)
 app.include_router(backtest_router)
 app.include_router(experiments_router)
 app.include_router(performance_router)
+app.include_router(reports_router)
 app.include_router(indicators_router)
 app.include_router(review_router)
 app.include_router(ws_router)

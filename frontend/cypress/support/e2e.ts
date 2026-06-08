@@ -158,6 +158,42 @@ Cypress.Commands.add('stubApi', () => {
     },
   }).as('getEvents')
 
+  cy.intercept('GET', '/api/reports/range*', {
+    body: {
+      period_type: 'range',
+      symbol: 'AAPL.US',
+      start_date: '2026-05-01',
+      end_date: '2026-05-31',
+      metrics: {
+        total_pnl: 0,
+        total_trades: 0,
+        win_count: 0,
+        loss_count: 0,
+        win_rate: 0,
+        profit_loss_ratio: 0,
+        avg_pnl_per_trade: 0,
+        max_profit: 0,
+        max_loss: 0,
+        max_drawdown: 0,
+        llm_suggestions_count: 0,
+        llm_applied_count: 0,
+        llm_apply_rate: 0,
+        llm_profitable_count: 0,
+        llm_accuracy_rate: 0,
+      },
+      daily_points: [],
+      attribution: [],
+      details: [],
+    },
+  }).as('getReport')
+
+  cy.intercept('GET', '/api/reports/export*', {
+    body: 'date,symbol,pnl\n2026-05-01,AAPL.US,0\n',
+    headers: {
+      'content-type': 'text/csv',
+    },
+  }).as('exportReport')
+
   cy.intercept('GET', '/api/watchlist/snapshots', {
     body: [
       {

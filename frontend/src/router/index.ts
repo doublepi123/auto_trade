@@ -9,6 +9,7 @@ const routes: RouteRecordRaw[] = [
   { path: '/history', component: () => import('../views/TradeHistory.vue') },
   { path: '/events', component: () => import('../views/DecisionTimeline.vue') },
   { path: '/review', component: () => import('../views/Review.vue') },
+  { path: '/reports', component: () => import('../views/Reports.vue') },
   { path: '/watchlist', component: () => import('../views/Watchlist.vue') },
   { path: '/lab', component: () => import('../views/Lab.vue') },
   { path: '/:pathMatch(.*)*', redirect: '/' },

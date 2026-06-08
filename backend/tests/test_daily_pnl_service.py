@@ -73,6 +73,46 @@ class TestDailyPnlService:
         assert result.consecutive_losses == 0
         assert [(trade.broker_order_id, trade.pnl) for trade in result.trades] == [("sell-today", approx(40.0))]
 
+    def test_calculates_long_held_position_realized_pnl(self) -> None:
+        self._cleanup()
+        db = self._get_db()
+        buy_day = date(2026, 1, 1)
+        sell_day = date(2026, 1, 5)
+        db.add_all([
+            OrderRecord(
+                broker_order_id="aapl-buy-held",
+                symbol="AAPL.US",
+                side="BUY",
+                quantity=10,
+                price=100,
+                executed_quantity=10,
+                executed_price=100,
+                status="FILLED",
+                created_at=self._dt(buy_day, 14),
+                filled_at=self._dt(buy_day, 14, 1),
+            ),
+            OrderRecord(
+                broker_order_id="aapl-sell-held",
+                symbol="AAPL.US",
+                side="SELL",
+                quantity=10,
+                price=105,
+                executed_quantity=10,
+                executed_price=105,
+                status="FILLED",
+                created_at=self._dt(sell_day, 15),
+                filled_at=self._dt(sell_day, 15, 1),
+            ),
+        ])
+        db.commit()
+
+        result = DailyPnlService(db).calculate(trade_day=sell_day)
+        db.close()
+
+        assert result.realized_pnl == approx(50.0)
+        assert [trade.broker_order_id for trade in result.trades] == ["aapl-sell-held"]
+        assert result.trades[0].pnl == approx(50.0)
+
     def test_calculates_average_cost_for_same_day_round_trip(self) -> None:
         self._cleanup()
         trade_day = date(2026, 5, 22)

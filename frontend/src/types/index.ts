@@ -416,6 +416,68 @@ export interface ReviewResponse {
   all_error_tags: string[]
 }
 
+export interface ReportMetrics {
+  total_pnl: number
+  total_trades: number
+  win_count: number
+  loss_count: number
+  win_rate: number
+  profit_loss_ratio: number
+  avg_pnl_per_trade: number
+  max_profit: number
+  max_loss: number
+  max_drawdown: number
+  llm_suggestions_count: number
+  llm_applied_count: number
+  llm_apply_rate: number
+  llm_profitable_count: number
+  llm_accuracy_rate: number
+}
+
+export interface ReportDailyPoint {
+  date: string
+  pnl: number
+  cumulative_pnl: number
+  drawdown: number
+  trade_count: number
+  win_count: number
+}
+
+export interface ReportAttributionPoint {
+  key: string
+  label: string
+  trade_count: number
+  pnl: number
+  win_rate: number
+  share: number
+}
+
+export interface ReportOrderDetail {
+  broker_order_id: string
+  side: string
+  quantity: number
+  executed_price: number
+  status: string
+  filled_at: string | null
+  pnl: number
+}
+
+export interface ReportDayDetail {
+  date: string
+  orders: ReportOrderDetail[]
+}
+
+export interface ReportResponse {
+  period_type: string
+  symbol: string
+  start_date: string
+  end_date: string
+  metrics: ReportMetrics
+  daily_points: ReportDailyPoint[]
+  attribution: ReportAttributionPoint[]
+  details: ReportDayDetail[]
+}
+
 export interface WatchlistItem {
   id: number
   symbol: string

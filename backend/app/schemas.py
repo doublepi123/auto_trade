@@ -201,6 +201,80 @@ class StatusHistoryResponse(BaseModel):
     markers: list[TradeSignalMarker]
 
 
+class ReportMetrics(BaseModel):
+    total_pnl: float
+    total_trades: int
+    win_count: int
+    loss_count: int
+    win_rate: float
+    profit_loss_ratio: float
+    avg_pnl_per_trade: float
+    max_profit: float
+    max_loss: float
+    max_drawdown: float
+    llm_suggestions_count: int
+    llm_applied_count: int
+    llm_apply_rate: float
+    llm_profitable_count: int
+    llm_accuracy_rate: float
+
+    model_config = {"from_attributes": True}
+
+
+class ReportDailyPoint(BaseModel):
+    date: str
+    pnl: float
+    cumulative_pnl: float
+    drawdown: float
+    trade_count: int
+    win_count: int
+
+    model_config = {"from_attributes": True}
+
+
+class ReportAttributionPoint(BaseModel):
+    key: str
+    label: str
+    trade_count: int
+    pnl: float
+    win_rate: float
+    share: float
+
+    model_config = {"from_attributes": True}
+
+
+class ReportOrderDetail(BaseModel):
+    broker_order_id: str
+    side: str
+    quantity: float
+    executed_price: float
+    status: str
+    filled_at: datetime | None
+    pnl: float
+
+    model_config = {"from_attributes": True}
+
+
+class ReportDayDetail(BaseModel):
+    date: str
+    orders: list[ReportOrderDetail]
+
+    model_config = {"from_attributes": True}
+
+
+class ReportResponse(BaseModel):
+    period_type: str
+    symbol: str
+    start_date: str
+    end_date: str
+    metrics: ReportMetrics
+    daily_points: list[ReportDailyPoint]
+    attribution: list[ReportAttributionPoint] = Field(default_factory=list)
+    details: list[ReportDayDetail] = Field(default_factory=list)
+
+    model_config = {"from_attributes": True}
+
+
 class DiagnosticQuoteStream(BaseModel):
     last_push_age_seconds: float | None = None
     last_quote_age_seconds: float | None = None
