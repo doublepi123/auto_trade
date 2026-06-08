@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from typing import Optional
 
-from sqlalchemy import Boolean, Date, DateTime, Float, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Date, DateTime, Float, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 _TZDateTime = DateTime(timezone=True)
@@ -72,6 +72,11 @@ class CredentialConfig(Base):
 
 class OrderRecord(Base):
     __tablename__ = "orders"
+    __table_args__ = (
+        Index("ix_orders_symbol_filled_at", "symbol", "filled_at"),
+        Index("ix_orders_symbol_created_at", "symbol", "created_at"),
+        Index("ix_orders_status", "status"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     broker_order_id: Mapped[str] = mapped_column(String(100), default="")
@@ -89,6 +94,10 @@ class OrderRecord(Base):
 
 class TradeEvent(Base):
     __tablename__ = "trade_events"
+    __table_args__ = (
+        Index("ix_trade_events_symbol_created_at", "symbol", "created_at"),
+        Index("ix_trade_events_event_type", "event_type"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     event_type: Mapped[str] = mapped_column(String(50))
@@ -112,6 +121,9 @@ class RiskEvent(Base):
 
 class LLMInteraction(Base):
     __tablename__ = "llm_interactions"
+    __table_args__ = (
+        Index("ix_llm_interactions_symbol_created_at", "symbol", "created_at"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     interaction_type: Mapped[str] = mapped_column(String(20), default="analyze")

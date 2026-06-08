@@ -35,6 +35,7 @@ def init_db() -> None:
     _ensure_strategy_experiment_runs_extra_metrics(engine)
     _ensure_strategy_config_margin_safety_factor(engine)
     _ensure_llm_interaction_variant_column(engine)
+    _ensure_report_query_indexes(engine)
     db = SessionLocal()
     try:
         _bootstrap_credentials(db, CredentialConfig, StrategyConfig)
@@ -427,6 +428,43 @@ def _bootstrap_credentials(db: Session, credential_model: type, strategy_model: 
         legacy.sct_key = ""
         db.add(credential)
         db.commit()
+
+
+def _ensure_report_query_indexes(db_engine: Engine) -> None:
+    """Create indexes for report and query performance if they do not exist."""
+    inspector = inspect(db_engine)
+    table_names = set(inspector.get_table_names())
+    with db_engine.begin() as connection:
+        if "orders" in table_names:
+            existing_indexes = {i["name"] for i in inspector.get_indexes("orders")}
+            if "ix_orders_symbol_filled_at" not in existing_indexes:
+                connection.exec_driver_sql(
+                    "CREATE INDEX IF NOT EXISTS ix_orders_symbol_filled_at ON orders (symbol, filled_at)"
+                )
+            if "ix_orders_symbol_created_at" not in existing_indexes:
+                connection.exec_driver_sql(
+                    "CREATE INDEX IF NOT EXISTS ix_orders_symbol_created_at ON orders (symbol, created_at)"
+                )
+            if "ix_orders_status" not in existing_indexes:
+                connection.exec_driver_sql(
+                    "CREATE INDEX IF NOT EXISTS ix_orders_status ON orders (status)"
+                )
+        if "trade_events" in table_names:
+            existing_indexes = {i["name"] for i in inspector.get_indexes("trade_events")}
+            if "ix_trade_events_symbol_created_at" not in existing_indexes:
+                connection.exec_driver_sql(
+                    "CREATE INDEX IF NOT EXISTS ix_trade_events_symbol_created_at ON trade_events (symbol, created_at)"
+                )
+            if "ix_trade_events_event_type" not in existing_indexes:
+                connection.exec_driver_sql(
+                    "CREATE INDEX IF NOT EXISTS ix_trade_events_event_type ON trade_events (event_type)"
+                )
+        if "llm_interactions" in table_names:
+            existing_indexes = {i["name"] for i in inspector.get_indexes("llm_interactions")}
+            if "ix_llm_interactions_symbol_created_at" not in existing_indexes:
+                connection.exec_driver_sql(
+                    "CREATE INDEX IF NOT EXISTS ix_llm_interactions_symbol_created_at ON llm_interactions (symbol, created_at)"
+                )
 
 
 def get_db() -> Generator[Session, None, None]:

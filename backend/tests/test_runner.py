@@ -198,6 +198,45 @@ class TestAppRunner:
         assert by_symbol["AAPL.US"]["last_price"] == 199.5
         assert by_symbol["AAPL.US"]["recent_quote_count"] == 1
         assert by_symbol["AAPL.US"]["has_pending_order"] is True
+        # Quote quality: primary has no recent quotes; secondary has a quote with missing prices.
+        assert by_symbol["NVDA.US"]["quote_quality"]["has_quote"] is False
+        assert by_symbol["AAPL.US"]["quote_quality"]["has_quote"] is True
+        assert by_symbol["AAPL.US"]["quote_quality"]["price_positive"] is False
+
+    def test_quote_quality_evaluates_positive_prices_and_reasonable_spread(self) -> None:
+        runner = AppRunner()
+        good = {"last_price": 100.0, "bid": 99.9, "ask": 100.1}
+        assert runner._evaluate_quote_quality(good) == {
+            "has_quote": True,
+            "price_positive": True,
+            "spread_reasonable": True,
+            "last_price": 100.0,
+            "bid": 99.9,
+            "ask": 100.1,
+        }
+        zero_price = {"last_price": 0.0, "bid": 0.0, "ask": 0.0}
+        assert runner._evaluate_quote_quality(zero_price)["price_positive"] is False
+        wide_spread = {"last_price": 100.0, "bid": 90.0, "ask": 110.0}
+        assert runner._evaluate_quote_quality(wide_spread)["spread_reasonable"] is False
+        none_quote = None
+        assert runner._evaluate_quote_quality(none_quote) == {
+            "has_quote": False,
+            "price_positive": False,
+            "spread_reasonable": False,
+        }
+
+    def test_remember_quote_logs_warning_for_zero_or_wide_spread(self, caplog) -> None:
+        import logging
+        runner = AppRunner()
+        runner._running = True
+        with caplog.at_level(logging.WARNING):
+            runner._remember_quote(Quote(symbol="TSLA.US", last_price=0.0, bid=0.0, ask=0.0, timestamp=""))
+        assert "quote_quality: non-positive price" in caplog.text
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            runner._remember_quote(Quote(symbol="TSLA.US", last_price=100.0, bid=80.0, ask=130.0, timestamp=""))
+        assert "quote_quality: wide spread" in caplog.text
+
     def test_sync_symbol_runtimes_loads_persisted_secondary_engine_state(self, monkeypatch) -> None:
         runner = AppRunner()
         runner.engine.params = StrategyParams(symbol="NVDA.US", market="US", buy_low=100.0, sell_high=200.0)

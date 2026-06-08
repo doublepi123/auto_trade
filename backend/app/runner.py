@@ -309,6 +309,7 @@ class AppRunner:
                     "last_trigger_price": float(runtime.engine.last_trigger_price),
                     "recent_quote_count": len(runtime.recent_quotes),
                     "has_pending_order": self._trade_svc.pending_order_for(symbol) is not None,
+                    "quote_quality": self._quote_quality_for_runtime(runtime),
                 }
                 for symbol, runtime in sorted(self._symbol_runtimes.items())
             ]
@@ -324,6 +325,7 @@ class AppRunner:
                         "last_trigger_price": float(self.engine.last_trigger_price),
                         "recent_quote_count": len(self._recent_quotes),
                         "has_pending_order": self._trade_svc.pending_order_for(primary_symbol) is not None,
+                        "quote_quality": self._quote_quality_for_primary(),
                     },
                 )
             return {
@@ -958,6 +960,29 @@ class AppRunner:
         ]
         if len(self._recent_quotes) > self._recent_quotes_cap:
             self._recent_quotes = self._recent_quotes[-self._recent_quotes_cap:]
+        quality = self._evaluate_quote_quality(
+            {
+                "last_price": float(quote.last_price),
+                "bid": float(quote.bid),
+                "ask": float(quote.ask),
+            }
+        )
+        if quality["has_quote"] and not quality["price_positive"]:
+            logger.warning(
+                "quote_quality: non-positive price for %s: last=%s bid=%s ask=%s",
+                quote.symbol,
+                quote.last_price,
+                quote.bid,
+                quote.ask,
+            )
+        elif quality["has_quote"] and not quality["spread_reasonable"]:
+            logger.warning(
+                "quote_quality: wide spread for %s: last=%s bid=%s ask=%s",
+                quote.symbol,
+                quote.last_price,
+                quote.bid,
+                quote.ask,
+            )
 
     def recent_price_context(self, window_seconds: float = 300.0) -> list[dict[str, Any]]:
         now = datetime.now(timezone.utc)
@@ -982,6 +1007,35 @@ class AppRunner:
                 }
                 for item in entries
             ]
+
+    def _quote_quality_for_runtime(self, runtime: SymbolRuntime) -> dict[str, Any]:
+        recent = runtime.recent_quotes[-1] if runtime.recent_quotes else None
+        return self._evaluate_quote_quality(recent)
+
+    def _quote_quality_for_primary(self) -> dict[str, Any]:
+        recent = self._recent_quotes[-1] if self._recent_quotes else None
+        return self._evaluate_quote_quality(recent)
+
+    @staticmethod
+    def _evaluate_quote_quality(recent: dict[str, Any] | None) -> dict[str, Any]:
+        if recent is None:
+            return {"has_quote": False, "price_positive": False, "spread_reasonable": False}
+        last_price = float(recent.get("last_price", 0))
+        bid = float(recent.get("bid", 0))
+        ask = float(recent.get("ask", 0))
+        price_positive = last_price > 0 and bid > 0 and ask > 0
+        spread_reasonable = False
+        if price_positive and ask >= bid:
+            spread_pct = (ask - bid) / last_price
+            spread_reasonable = spread_pct < 0.05
+        return {
+            "has_quote": True,
+            "price_positive": price_positive,
+            "spread_reasonable": spread_reasonable,
+            "last_price": last_price,
+            "bid": bid,
+            "ask": ask,
+        }
 
     def _resubscribe_quotes_if_silent(self) -> bool:
         """If the quote stream has been silent past the threshold, drop and resubscribe.

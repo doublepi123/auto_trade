@@ -435,3 +435,26 @@ def test_init_db_creates_strategy_experiment_tables(tmp_path, monkeypatch) -> No
         "sharpe_ratio", "profit_factor", "profit_loss_ratio",
         "result_summary_json", "error", "created_at",
     }
+
+
+def test_init_db_creates_report_query_indexes(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "indexes.db"
+    monkeypatch.setenv("AUTO_TRADE_DATABASE_URL", f"sqlite:///{db_path}")
+    import importlib
+
+    from app import database
+
+    importlib.reload(database)
+    database.init_db()
+
+    with database.engine.connect() as conn:
+        orders_indexes = {r[0] for r in conn.exec_driver_sql("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='orders'")}
+        trade_events_indexes = {r[0] for r in conn.exec_driver_sql("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='trade_events'")}
+        llm_indexes = {r[0] for r in conn.exec_driver_sql("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='llm_interactions'")}
+
+    assert "ix_orders_symbol_filled_at" in orders_indexes
+    assert "ix_orders_symbol_created_at" in orders_indexes
+    assert "ix_orders_status" in orders_indexes
+    assert "ix_trade_events_symbol_created_at" in trade_events_indexes
+    assert "ix_trade_events_event_type" in trade_events_indexes
+    assert "ix_llm_interactions_symbol_created_at" in llm_indexes

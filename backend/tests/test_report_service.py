@@ -205,7 +205,17 @@ class TestReportService:
         try:
             report = service.get_range_report("AAPL.US", "2026-01-01", "2026-01-03")
 
-            assert report.details == []
+            assert len(report.details) == 3
+            assert report.details[0].date == "2026-01-01"
+            assert len(report.details[0].orders) == 1
+            assert report.details[0].orders[0].side == "SELL"
+            assert report.details[0].orders[0].pnl == 100.0
+            assert len(report.attribution) == 1
+            assert report.attribution[0].key == "SELL"
+            assert report.attribution[0].trade_count == 3
+            assert report.attribution[0].pnl == 56.0
+            assert report.attribution[0].win_rate == 0.6667
+            assert report.attribution[0].share == 1.0
             assert report.metrics.total_pnl == 56.0
             assert report.metrics.total_trades == 3
             assert report.metrics.win_count == 2

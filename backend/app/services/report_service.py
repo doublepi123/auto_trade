@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.core.market_calendar import trade_day_for
 from app.models import LLMInteraction
-from app.services.daily_pnl_service import DailyPnlService
+from app.services.daily_pnl_service import DailyPnlService, RealizedTrade
 
 
 _REPORT_SYMBOL_RE = re.compile(r"^[A-Z0-9\-]{1,12}\.(US|HK)$")
@@ -44,9 +44,20 @@ class ReportAttributionPoint:
 
 
 @dataclass(frozen=True)
+class _OrderDetail:
+    broker_order_id: str
+    side: str
+    quantity: float
+    executed_price: float
+    status: str
+    filled_at: datetime | None
+    pnl: float
+
+
+@dataclass(frozen=True)
 class ReportDayDetail:
     date: str
-    orders: list[dict[str, Any]]
+    orders: list[_OrderDetail]
 
 
 @dataclass(frozen=True)
@@ -169,7 +180,7 @@ class ReportService:
         pnl_service = DailyPnlService(self._db)
         market = "HK" if symbol.endswith(".HK") else "US"
         daily_points: list[DailyPnLPoint] = []
-        attribution: list[ReportAttributionPoint] = []
+        details: list[ReportDayDetail] = []
         total_pnl = 0.0
         total_trades = 0
         total_wins = 0
@@ -184,6 +195,7 @@ class ReportService:
         max_drawdown = 0.0
         current_day = start.date()
         end_day = (end - timedelta(days=1)).date()
+        attribution_buckets: dict[str, list[RealizedTrade]] = {}
         while current_day <= end_day:
             result = pnl_service.calculate(
                 trade_day=current_day,
@@ -208,6 +220,24 @@ class ReportService:
                         win_count=day_wins,
                     )
                 )
+            if result.trades:
+                details.append(
+                    ReportDayDetail(
+                        date=current_day.isoformat(),
+                        orders=[
+                            _OrderDetail(
+                                broker_order_id=t.broker_order_id,
+                                side=t.side,
+                                quantity=t.quantity,
+                                executed_price=t.price,
+                                status="FILLED",
+                                filled_at=t.filled_at,
+                                pnl=t.pnl,
+                            )
+                            for t in result.trades
+                        ],
+                    )
+                )
             total_pnl += day_pnl
             total_trades += day_trades
             total_wins += day_wins
@@ -220,6 +250,7 @@ class ReportService:
                 elif trade.pnl < 0:
                     total_loss_pnl += trade.pnl
                     loss_trade_count += 1
+                attribution_buckets.setdefault(trade.side, []).append(trade)
             current_day += timedelta(days=1)
 
         metrics = self._compute_metrics_from_trades(
@@ -235,6 +266,7 @@ class ReportService:
             loss_trade_count,
             llms,
         )
+        attribution = self._compute_attribution(attribution_buckets, total_pnl)
 
         return PeriodReport(
             period_type=period_type,
@@ -243,9 +275,8 @@ class ReportService:
             end_date=end_date_str,
             metrics=metrics,
             daily_points=daily_points,
-            # Phase 2/3 placeholders stay as stable empty arrays.
             attribution=attribution,
-            details=[],
+            details=details,
         )
 
     def _load_llm_interactions(
@@ -320,6 +351,29 @@ class ReportService:
             llm_profitable_count=0,
             llm_accuracy_rate=0.0,
         )
+
+    @staticmethod
+    def _compute_attribution(
+        buckets: dict[str, list[RealizedTrade]], total_pnl: float
+    ) -> list[ReportAttributionPoint]:
+        points: list[ReportAttributionPoint] = []
+        for side, trades in sorted(buckets.items()):
+            count = len(trades)
+            pnl = sum(t.pnl for t in trades)
+            wins = sum(1 for t in trades if t.pnl > 0)
+            win_rate = wins / count if count > 0 else 0.0
+            share = pnl / total_pnl if total_pnl != 0 else 0.0
+            points.append(
+                ReportAttributionPoint(
+                    key=side,
+                    label=side,
+                    trade_count=count,
+                    pnl=round(pnl, 2),
+                    win_rate=round(win_rate, 4),
+                    share=round(share, 4),
+                )
+            )
+        return points
 
     @staticmethod
     def _report_to_dict(report: PeriodReport) -> dict[str, Any]:
