@@ -422,4 +422,29 @@ app.include_router(ws_router)
 
 @app.get("/api/health")
 async def health() -> dict[str, Any]:
-    return {"ok": True, "env": settings.env}
+    from app.database import engine
+
+    from sqlalchemy import text
+
+    health_status: dict[str, Any] = {"ok": True, "env": settings.env}
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        health_status["database"] = "connected"
+    except Exception as exc:
+        health_status["database"] = f"error: {exc}"
+        health_status["ok"] = False
+
+    try:
+        runner = get_runner()
+        diag = runner.diagnostics()
+        health_status["runner"] = {
+            "running": diag.get("runner_running", False),
+            "quotes_subscribed": diag.get("quotes_subscribed", False),
+            "risk_paused": diag.get("risk", {}).get("paused", False),
+            "risk_kill_switch": diag.get("risk", {}).get("kill_switch", False),
+        }
+    except Exception as exc:
+        health_status["runner"] = f"error: {exc}"
+
+    return health_status

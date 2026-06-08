@@ -56,8 +56,8 @@ export function useStatusStream(status: { value: StatusData }) {
             is_trading_hours: data.is_trading_hours ?? status.value.is_trading_hours ?? true,
           }
         }
-      } catch {
-        // ignore
+      } catch (exc) {
+        console.warn('WebSocket message parse failed:', exc)
       }
     }
 
@@ -104,8 +104,8 @@ export function useStatusStream(status: { value: StatusData }) {
         if (!hasFreshWebSocketStatus()) {
           realtimeStatus.value = 'polling'
         }
-      } catch {
-        // silent
+      } catch (exc) {
+        console.warn('Status polling failed:', exc)
       }
     }, 3000)
   }

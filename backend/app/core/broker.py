@@ -762,8 +762,8 @@ class BrokerGateway:
                 if ctx is not None:
                     try:
                         ctx.close()
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.debug("broker context close error (ignored): %s", exc)
             self._quote_ctx = None
             self._trade_ctx = None
 
