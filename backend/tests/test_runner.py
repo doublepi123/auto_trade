@@ -12,7 +12,7 @@ import pytest
 
 from app import runner as runner_module
 from app.core.broker import OrderResult, Position, Quote
-from app.core.engine import EngineState, StrategyParams
+from app.core.engine import EngineSnapshot, EngineState, StrategyParams
 from app.runner import AppRunner, get_runner
 
 
@@ -383,7 +383,7 @@ class TestAppRunner:
             "SELL",
             OrderResult("order-pending", "NVDA.US", "SELL", Decimal("1"), Decimal("220"), "SUBMITTED"),
             Broker(),
-            runner._engine_snapshot(),
+            runner.engine.snapshot(),
         )
 
         changed = runner._sync_engine_state_with_positions()
@@ -457,7 +457,7 @@ class TestAppRunner:
             "BUY",
             OrderResult("order-pending", "NVDA.US", "BUY", Decimal("5"), Decimal("221"), "SUBMITTED"),
             broker,
-            runner._engine_snapshot(),
+            runner.engine.snapshot(),
         )
 
         result = runner.execute_llm_order_decision({
@@ -507,7 +507,7 @@ class TestAppRunner:
             "BUY",
             OrderResult("order-old-buy", "NVDA.US", "BUY", Decimal("10"), Decimal("221.0"), "SUBMITTED"),
             broker,
-            (EngineState.FLAT, 0.0, None),
+            EngineSnapshot(state=EngineState.FLAT, last_trigger_price=0.0, last_trigger_at=None),
         )
 
         result = runner.execute_llm_order_decision({
@@ -581,7 +581,7 @@ class TestAppRunner:
             "BUY",
             OrderResult("order-pending", "NVDA.US", "BUY", Decimal("5"), price, "SUBMITTED"),
             runner.broker,
-            runner._engine_snapshot(),
+            runner.engine.snapshot(),
         )
         return runner
 
@@ -1520,7 +1520,7 @@ class TestAppRunner:
         assert runner.risk.daily_pnl == 0.0
         assert runner._trade_svc._pending_order is not None
 
-        runner._trade_svc.reconcile(runner.risk, runner.notifier, runner._restore_engine_snapshot, runner.notifier.notify_risk_event)
+        runner._trade_svc.reconcile(runner.risk, runner.notifier, runner.engine.restore, runner.notifier.notify_risk_event)
 
         assert updates
         assert updates[-1][0] == "order-1"
@@ -1568,7 +1568,7 @@ class TestAppRunner:
         assert order_status.status == "SUBMITTED"
         assert runner._trade_svc._pending_order is not None
 
-        runner._trade_svc.reconcile(runner.risk, runner.notifier, runner._restore_engine_snapshot, runner.notifier.notify_risk_event)
+        runner._trade_svc.reconcile(runner.risk, runner.notifier, runner.engine.restore, runner.notifier.notify_risk_event)
 
         assert updates
         assert updates[-1][0] == "order-1"
@@ -2063,7 +2063,7 @@ class TestAppRunner:
         assert runner.risk.daily_pnl == 0.0
         assert runner._trade_svc._pending_order is not None
 
-        runner._trade_svc.reconcile(runner.risk, runner.notifier, runner._restore_engine_snapshot, runner.notifier.notify_risk_event)
+        runner._trade_svc.reconcile(runner.risk, runner.notifier, runner.engine.restore, runner.notifier.notify_risk_event)
 
         assert updates[-1][1] == "REJECTED"
 

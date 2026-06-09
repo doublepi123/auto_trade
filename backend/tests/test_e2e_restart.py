@@ -484,7 +484,7 @@ class TestE2EPendingOrderTimeout:
         runner._trade_svc.reconcile(
             runner.risk,
             recording_notifier,
-            runner._restore_engine_snapshot,
+            runner.engine.restore,
             recording_notifier.notify_risk_event,
         )
 

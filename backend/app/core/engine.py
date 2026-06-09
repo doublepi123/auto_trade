@@ -41,6 +41,22 @@ class TriggerResult:
     description: str = ""
 
 
+@dataclass(frozen=True)
+class EngineSnapshot:
+    """Immutable snapshot of engine state for save/restore.
+
+    Note: ``_last_trigger_monotonic`` is intentionally excluded to prevent
+    restoring a stale cooldown timer, which would either suppress a
+    legitimate re-trigger or, worse, create a tight retry loop when an
+    unprofitable exit is skipped (see
+    ``test_unprofitable_sell_skip_preserves_cooldown_to_avoid_position_polling_loop``).
+    """
+
+    state: EngineState
+    last_trigger_price: float
+    last_trigger_at: Optional[datetime]
+
+
 class StrategyEngine:
     def __init__(self, params: StrategyParams | None = None) -> None:
         self.params = params or StrategyParams()
@@ -137,6 +153,68 @@ class StrategyEngine:
                 self.state = EngineState.SHORT
             else:
                 self.state = EngineState.FLAT
+
+    # ------------------------------------------------------------------
+    # Snapshot / restore / state-machine transitions (owned by engine)
+    # ------------------------------------------------------------------
+
+    def snapshot(self) -> EngineSnapshot:
+        """Capture current mutable state as an immutable snapshot."""
+        with self._lock:
+            return EngineSnapshot(
+                state=self.state,
+                last_trigger_price=self.last_trigger_price,
+                last_trigger_at=self.last_trigger_at,
+            )
+
+    def restore(self, snap: EngineSnapshot) -> None:
+        """Restore engine state from a snapshot (full restore)."""
+        with self._lock:
+            self.state = snap.state
+            self.last_trigger_price = snap.last_trigger_price
+            self.last_trigger_at = snap.last_trigger_at
+
+    def restore_preserving_trigger(self, snap: EngineSnapshot) -> None:
+        """Restore only the ``state`` field, keeping trigger info unchanged.
+
+        Used when an unprofitable exit is skipped — the cooldown must remain
+        active to prevent a tight position-polling loop.
+        """
+        with self._lock:
+            self.state = snap.state
+
+    def transition_for_action(self, action: str) -> str:
+        """Attempt a state-machine transition for *action*.
+
+        Returns ``"OK"`` on success or an error status string:
+        ``"INCOMPATIBLE_STATE"``, ``"SHORT_SELLING_DISABLED"``,
+        ``"UNKNOWN_ACTION"``.
+        """
+        with self._lock:
+            current = self.state
+            if action == "BUY":
+                if current != EngineState.FLAT:
+                    return "INCOMPATIBLE_STATE"
+                self.state = EngineState.LONG
+                return "OK"
+            if action == "SELL":
+                if current != EngineState.LONG:
+                    return "INCOMPATIBLE_STATE"
+                self.state = EngineState.FLAT
+                return "OK"
+            if action == "SELL_SHORT":
+                if not self.params.short_selling:
+                    return "SHORT_SELLING_DISABLED"
+                if current != EngineState.FLAT:
+                    return "INCOMPATIBLE_STATE"
+                self.state = EngineState.SHORT
+                return "OK"
+            if action == "BUY_TO_COVER":
+                if current != EngineState.SHORT:
+                    return "INCOMPATIBLE_STATE"
+                self.state = EngineState.FLAT
+                return "OK"
+            return "UNKNOWN_ACTION"
 
     def to_dict(self) -> dict[str, Any]:
         with self._lock:

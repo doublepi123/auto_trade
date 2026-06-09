@@ -654,13 +654,13 @@ class TestTradeExecutionServiceBasics:
 
     def test_cancel_pending_order_calls_broker_and_restores_snapshot(self, svc: TradeExecutionService) -> None:
         from app.core.broker import OrderResult, OrderStatusResult
-        from app.core.engine import EngineState
+        from app.core.engine import EngineSnapshot, EngineState
 
         updates = []
         svc._update_order_status = lambda order_id, status, filled_at=None, executed_quantity=None, executed_price=None: updates.append((order_id, status))
         broker = MagicMock()
         broker.cancel_order.return_value = OrderStatusResult("order-1", "CANCELLED")
-        snapshot = (EngineState.LONG, 221.0, None)
+        snapshot = EngineSnapshot(state=EngineState.LONG, last_trigger_price=221.0, last_trigger_at=None)
         restored = []
         svc._track_pending_order(
             "BUY",

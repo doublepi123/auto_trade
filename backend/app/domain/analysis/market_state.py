@@ -3,6 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+_BB_SQUEEZE_WIDTH_THRESHOLD = 0.05  # Bollinger squeeze threshold
+_ATR_HIGH_VOLATILITY_THRESHOLD = 0.03  # High volatility ATR threshold
+
 
 @dataclass
 class MarketState:
@@ -53,7 +56,7 @@ class MarketStateDetector:
 
         # 2. Ranging market
         bb_width = (bb_upper - bb_lower) / bb_middle
-        if adx_value < 20 and bb_width < 0.05:
+        if adx_value < 20 and bb_width < _BB_SQUEEZE_WIDTH_THRESHOLD:
             return MarketState(
                 state="ranging",
                 confidence=1.0 - adx_value / 20,
@@ -63,7 +66,7 @@ class MarketStateDetector:
 
         # 3. Volatile market
         atr_pct = atr / current_price if current_price > 0 else 0
-        if atr_pct > 0.03:
+        if atr_pct > _ATR_HIGH_VOLATILITY_THRESHOLD:
             return MarketState(
                 state="volatile",
                 confidence=min(atr_pct / 0.05, 1.0),

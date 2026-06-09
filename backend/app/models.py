@@ -51,7 +51,7 @@ class StrategyConfig(Base):
     llm_applied_at: Mapped[Optional[datetime]] = mapped_column(_TZDateTime, nullable=True)
     llm_reject_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     trading_session_mode: Mapped[str] = mapped_column(String(16), default="ANY", nullable=False)
-    margin_safety_factor: Mapped[float | None] = mapped_column(Float, nullable=True, default=0.9)
+    margin_safety_factor: Mapped[Optional[float]] = mapped_column(Float, nullable=True, default=0.9)
 
 
 class CredentialConfig(Base):
@@ -139,7 +139,7 @@ class LLMInteraction(Base):
     order_status: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
     order_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     applied: Mapped[bool] = mapped_column(Boolean, default=False)
-    prompt_variant: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    prompt_variant: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     created_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow)
 
 
@@ -256,11 +256,11 @@ class ExperimentResult(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     experiment_name: Mapped[str] = mapped_column(String(100), nullable=False)
     variant_name: Mapped[str] = mapped_column(String(100), nullable=False)
-    interaction_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    interaction_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     order_action: Mapped[str] = mapped_column(String(32), nullable=False, default="NONE")
     predicted_direction: Mapped[str] = mapped_column(String(32), nullable=False, default="")
     actual_pnl: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
-    was_profitable: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    was_profitable: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
     created_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow)
 
 class StrategyExperiment(Base):
@@ -277,7 +277,7 @@ class StrategyExperiment(Base):
     failed_runs: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     error: Mapped[str] = mapped_column(Text, nullable=False, default="")
     created_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow, index=True)
-    completed_at: Mapped[datetime | None] = mapped_column(_TZDateTime, nullable=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(_TZDateTime, nullable=True)
 
 
 class StrategyExperimentRun(Base):
