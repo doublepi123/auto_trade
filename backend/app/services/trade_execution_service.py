@@ -81,6 +81,7 @@ class _PendingOrder:
     avg_price: Decimal | None = None
     next_status_check_at: float = 0.0
     submitted_at: float = 0.0
+    restore_engine_snapshot_fn: Callable[[EngineSnapshot], None] | None = None
 
 
 @dataclass
@@ -121,6 +122,7 @@ class TradeExecutionService:
         self._order_status_poll_interval_seconds = 1.0
         self._order_status_timeout_seconds = 30.0
         self._entry_positions: dict[str, _TrackedEntry] = {}
+        self._reconcile_in_flight: set[str] = set()
 
     def load_tracked_entries(self, entries: dict[str, tuple[Decimal, Decimal]]) -> None:
         """Restore tracked entry positions (typically at runner startup)."""
@@ -137,7 +139,18 @@ class TradeExecutionService:
                 pending.broker_order_id: pending
                 for pending in self._pending_orders.values()
             }
-            self._pending_orders.clear()
+            # Build new set from DB results. Preserve in-memory pendings that are NOT
+            # in the new list (e.g. just flipped to FILLED by sync) — they will be
+            # finalized by the next reconcile cycle rather than silently dropped.
+            new_ids: set[str] = {p.broker_order_id for p in pending_orders}
+            for broker_order_id, existing in existing_by_id.items():
+                if broker_order_id not in new_ids and existing.symbol not in {p.symbol for p in pending_orders}:
+                    self._pending_orders[existing.symbol] = existing
+                    logger.warning(
+                        "in-memory pending order %s for %s not in DB list, preserving for reconcile",
+                        broker_order_id, existing.symbol,
+                    )
+
             seen_ids: dict[str, str] = {}
             for pending in pending_orders:
                 existing = existing_by_id.get(pending.broker_order_id)
@@ -153,6 +166,7 @@ class TradeExecutionService:
                         avg_price=existing.avg_price if existing.avg_price is not None else pending.avg_price,
                         next_status_check_at=existing.next_status_check_at,
                         submitted_at=existing.submitted_at,
+                        restore_engine_snapshot_fn=existing.restore_engine_snapshot_fn if existing.restore_engine_snapshot_fn is not None else pending.restore_engine_snapshot_fn,
                     )
                 # If broker_order_id was already seen under a different symbol,
                 # remove the stale entry (broker ID reuse scenario).
@@ -209,20 +223,25 @@ class TradeExecutionService:
         with self._state_lock:
             pending_orders = list(self._pending_orders.values())
         for pending in pending_orders:
-            # Guard: skip if the pending was already cleared by a prior
-            # iteration (e.g., duplicate broker_order_id).
             with self._state_lock:
                 if pending.broker_order_id not in {
                     p.broker_order_id for p in self._pending_orders.values()
                 }:
                     continue
-            self._reconcile_pending_order(
-                pending,
-                risk=risk,
-                notifier=notifier,
-                restore_engine_snapshot=restore_engine_snapshot,
-                notify_risk_event=notify_risk_event,
-            )
+                if pending.broker_order_id in self._reconcile_in_flight:
+                    continue
+                self._reconcile_in_flight.add(pending.broker_order_id)
+            try:
+                self._reconcile_pending_order(
+                    pending,
+                    risk=risk,
+                    notifier=notifier,
+                    restore_engine_snapshot=restore_engine_snapshot,
+                    notify_risk_event=notify_risk_event,
+                )
+            finally:
+                with self._state_lock:
+                    self._reconcile_in_flight.discard(pending.broker_order_id)
 
     def cancel_pending_order(
         self,
@@ -259,9 +278,21 @@ class TradeExecutionService:
             return OrderStatus(pending.broker_order_id, "CANCEL_FAILED")
 
         self._safe_update_order_status_from_result(order_status)
+
+        # Handle partial fill before cancel completed
+        fill_qty = self._resolved_decimal(order_status, "executed_quantity", Decimal("0"))
+        if fill_qty > 0:
+            self._finalize_pending_fill(
+                pending, order_status,
+                fill_qty=fill_qty,
+            )
+
         self._clear_pending_order(pending.broker_order_id)
-        if restore_engine_snapshot is not None and pending.engine_snapshot is not None:
-            restore_engine_snapshot(pending.engine_snapshot)
+        effective_restore = pending.restore_engine_snapshot_fn or restore_engine_snapshot
+        if effective_restore is not None and pending.engine_snapshot is not None:
+            # Only restore if no fill (clean cancel) or partial exit fill
+            if fill_qty == 0 or self._should_restore_after_partial_terminal_fill(pending, fill_qty):
+                effective_restore(pending.engine_snapshot)
         logger.info("pending order cancelled: %s status=%s", pending.broker_order_id, order_status.status)
         return order_status
 
@@ -756,7 +787,7 @@ class TradeExecutionService:
         self._safe_update_order_status_from_result(order_status)
 
         if self._order_status_is_live(order_status):
-            self._track_pending_order(action, result, broker, engine_snapshot, avg_price=avg_price)
+            self._track_pending_order(action, result, broker, engine_snapshot, avg_price=avg_price, restore_engine_snapshot_fn=restore_engine_snapshot)
             logger.info("%s pending: %s status=%s", action, result.broker_order_id, order_status.status)
             return order_status
 
@@ -793,6 +824,7 @@ class TradeExecutionService:
         engine_snapshot: EngineSnapshot | None,
         *,
         avg_price: Decimal | None = None,
+        restore_engine_snapshot_fn: Callable[[EngineSnapshot], None] | None = None,
     ) -> None:
         pending = _PendingOrder(
             broker=broker,
@@ -805,6 +837,7 @@ class TradeExecutionService:
             avg_price=avg_price,
             next_status_check_at=time.monotonic() + self._order_status_poll_interval_seconds,
             submitted_at=time.monotonic(),
+            restore_engine_snapshot_fn=restore_engine_snapshot_fn,
         )
         with self._state_lock:
             existing = self._pending_orders.get(pending.symbol)
@@ -830,6 +863,7 @@ class TradeExecutionService:
         restore_engine_snapshot: Callable[[EngineSnapshot], None] | None = None,
         notify_risk_event: _NotifyRiskEvent | None = None,
     ) -> None:
+        effective_restore = pending.restore_engine_snapshot_fn or restore_engine_snapshot
         now = time.monotonic()
         if now < pending.next_status_check_at:
             return
@@ -881,13 +915,13 @@ class TradeExecutionService:
             if fill_qty > 0:
                 self._finalize_pending_fill(updated_pending, order_status, risk=risk, notifier=notifier, fill_qty=fill_qty, notify_risk_event=notify_risk_event)
                 self._clear_pending_order(updated_pending.broker_order_id)
-                if self._should_restore_after_partial_terminal_fill(updated_pending, fill_qty) and restore_engine_snapshot is not None and updated_pending.engine_snapshot is not None:
-                    restore_engine_snapshot(updated_pending.engine_snapshot)
+                if self._should_restore_after_partial_terminal_fill(updated_pending, fill_qty) and effective_restore is not None and updated_pending.engine_snapshot is not None:
+                    effective_restore(updated_pending.engine_snapshot)
                 return
             self._pause_after_failed_order(updated_pending.broker_order_id, status, risk, notify_risk_event)
             self._clear_pending_order(updated_pending.broker_order_id)
-            if restore_engine_snapshot is not None and updated_pending.engine_snapshot is not None:
-                restore_engine_snapshot(updated_pending.engine_snapshot)
+            if effective_restore is not None and updated_pending.engine_snapshot is not None:
+                effective_restore(updated_pending.engine_snapshot)
             return
         logger.debug("pending order still live: %s status=%s", updated_pending.broker_order_id, status)
 
@@ -900,6 +934,7 @@ class TradeExecutionService:
         restore_engine_snapshot: Callable[[EngineSnapshot], None] | None = None,
         notify_risk_event: _NotifyRiskEvent | None = None,
     ) -> None:
+        effective_restore = pending.restore_engine_snapshot_fn or restore_engine_snapshot
         reason = f"pending order {pending.broker_order_id} timed out after {self._order_status_timeout_seconds:.0f}s"
         logger.warning(reason)
         try:
@@ -926,11 +961,31 @@ class TradeExecutionService:
                 else:
                     self._pause_after_failed_order(pending.broker_order_id, order_status.status, risk, notify_risk_event)
                 self._clear_pending_order(pending.broker_order_id)
-                if restore_engine_snapshot is not None and pending.engine_snapshot is not None:
-                    restore_engine_snapshot(pending.engine_snapshot)
+                if effective_restore is not None and pending.engine_snapshot is not None:
+                    effective_restore(pending.engine_snapshot)
                 return
         except Exception:
             logger.exception("failed to query pending order status during timeout for %s", pending.broker_order_id)
+
+        # Attempt to cancel the live order before giving up.
+        try:
+            cancel_result = pending.broker.cancel_order(pending.broker_order_id)
+            cancel_status = self._coerce_order_status(cancel_result, pending.broker_order_id)
+            self._safe_update_order_status_from_result(cancel_status)
+            if cancel_status.status == "FILLED":
+                # Order filled between status check and cancel attempt
+                self._finalize_pending_fill(pending, cancel_status, risk=risk, notifier=notifier, notify_risk_event=notify_risk_event)
+                self._clear_pending_order(pending.broker_order_id)
+                return
+            if cancel_status.executed_quantity > 0:
+                # Partial fill before cancel — finalize the partial fill
+                self._finalize_pending_fill(pending, cancel_status, risk=risk, notifier=notifier, fill_qty=cancel_status.executed_quantity, notify_risk_event=notify_risk_event)
+                self._clear_pending_order(pending.broker_order_id)
+                if self._should_restore_after_partial_terminal_fill(pending, cancel_status.executed_quantity) and effective_restore is not None and pending.engine_snapshot is not None:
+                    effective_restore(pending.engine_snapshot)
+                return
+        except Exception:
+            logger.exception("failed to cancel timed-out order %s", pending.broker_order_id)
 
         if risk is not None:
             risk.pause(reason, auto_resumable=False)
@@ -945,8 +1000,8 @@ class TradeExecutionService:
                 logger.exception("failed to send pending-order timeout notification for %s", pending.broker_order_id)
 
         self._clear_pending_order(pending.broker_order_id)
-        if restore_engine_snapshot is not None and pending.engine_snapshot is not None:
-            restore_engine_snapshot(pending.engine_snapshot)
+        if effective_restore is not None and pending.engine_snapshot is not None:
+            effective_restore(pending.engine_snapshot)
 
     def _finalize_pending_fill(
         self,

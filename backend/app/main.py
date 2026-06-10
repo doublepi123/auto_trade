@@ -246,12 +246,6 @@ async def _llm_analysis_tick() -> None:
                     getattr(params, "short_selling", config.short_selling),
                 )
 
-                with _llm_globals_lock:
-                    if is_primary:
-                        _last_llm_trigger_price = current_price
-                    else:
-                        _last_llm_trigger_price_by_symbol[symbol] = current_price
-
                 result = await asyncio.to_thread(
                     advisor.analyze,
                     symbol=symbol,
@@ -280,6 +274,13 @@ async def _llm_analysis_tick() -> None:
                     _llm_last_analysis_at_by_symbol[symbol] = now
 
                 if result.get("success"):
+                    # Only update trigger reference price on successful analysis
+                    with _llm_globals_lock:
+                        if is_primary:
+                            _last_llm_trigger_price = current_price
+                        else:
+                            _last_llm_trigger_price_by_symbol[symbol] = current_price
+
                     app_result = {"applied": False, "reason": "secondary symbol analysis does not update primary interval config"}
                     if is_primary:
                         app_result = IntervalApplicationService().apply_direct_suggestion(
@@ -355,7 +356,7 @@ async def _llm_analysis_tick() -> None:
             except Exception:
                 db.rollback()
                 logger.exception("LLM analysis failed for symbol %s; skipping", symbol)
-                break
+                continue
     finally:
         db.close()
 

@@ -123,6 +123,7 @@ class AppRunner:
         self._recent_quotes: list[dict[str, Any]] = []
         self._last_action_message = ""
         self._last_llm_action_at: dict[tuple[str, str], float] = {}
+        self._last_fill_at: float = 0.0
 
     def _initialize_runner(self) -> None:
         with self._db_session() as db:
@@ -571,6 +572,10 @@ class AppRunner:
             else:
                 order_id = order_status.broker_order_id or "-"
                 self._set_last_action_message(f"{result.action} {order_status.status}: {order_id}")
+                # Record fill timestamp to protect position sync from stale snapshots
+                if order_status.status in {"FILLED", "SUBMITTED", "PARTIAL_FILLED"}:
+                    with self._state_lock:
+                        self._last_fill_at = time.monotonic()
             self._broadcast_status()
         except Exception as exc:
             if engine_snapshot is not None:
@@ -827,6 +832,8 @@ class AppRunner:
         if result["executed"]:
             side = self._broker_side_for_action(action)
             self._last_llm_action_at[(target_symbol, side)] = time.monotonic()
+            with self._state_lock:
+                self._last_fill_at = time.monotonic()
         return result
 
     def _quote_for_llm_order(self, symbol: str, price: Any = None) -> Quote | None:
@@ -995,9 +1002,9 @@ class AppRunner:
         last_price = float(recent.get("last_price", 0))
         bid = float(recent.get("bid", 0))
         ask = float(recent.get("ask", 0))
-        price_positive = last_price > 0 and bid > 0 and ask > 0
+        price_positive = last_price > 0
         spread_reasonable = False
-        if price_positive and ask >= bid:
+        if price_positive and bid > 0 and ask > 0 and ask >= bid:
             spread_pct = (ask - bid) / last_price
             spread_reasonable = spread_pct < _QUOTE_SPREAD_THRESHOLD_PCT
         return {
@@ -1124,9 +1131,24 @@ class AppRunner:
             )
             if not changed:
                 return False
+
+            # Guard: ledger replay may be incomplete (e.g., fills during downtime,
+            # manual trades not in ledger). Log a warning when the replay would
+            # overwrite real losses with more optimistic values so the operator
+            # can investigate, but still accept the ledger values — they represent
+            # the best available truth from the order record.
+            new_pnl = result.realized_pnl
+            new_losses = result.consecutive_losses
+            if new_pnl > old_daily_pnl + 1e-9 and old_daily_pnl < 0:
+                logger.warning(
+                    "ledger replay overwrites negative daily_pnl %s with positive %s; "
+                    "verify no fills were missed during downtime",
+                    old_daily_pnl, new_pnl,
+                )
+
             self.risk.replace_daily_pnl(
-                result.realized_pnl,
-                result.consecutive_losses,
+                new_pnl,
+                new_losses,
                 result.trade_day,
             )
 
@@ -1362,6 +1384,7 @@ class AppRunner:
             ):
                 return False
             self._last_position_sync_at = now
+            snapshot_time = now
 
         try:
             positions = self.broker.get_positions()
@@ -1386,6 +1409,14 @@ class AppRunner:
 
         with self._state_lock:
             if self._trigger_in_flight or self._trade_svc.has_pending_order:
+                return False
+            # If a fill was processed after we started the position query,
+            # the position snapshot is stale — skip this sync round.
+            if snapshot_time < self._last_fill_at:
+                logger.info(
+                    "position sync skipped: fill at %.3f is newer than snapshot at %.3f",
+                    self._last_fill_at, snapshot_time,
+                )
                 return False
             current_state = self.engine.state
             if current_state == desired_state:

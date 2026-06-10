@@ -27,7 +27,7 @@ class IntervalApplicationService:
 
         buy_low = suggestion.get("suggested_buy_low")
         sell_high = suggestion.get("suggested_sell_high")
-        confidence = suggestion.get("confidence_score", 0.0)
+        confidence = suggestion.get("confidence_score") or 0.0
 
         reject_reason = self._validate_guardrails(
             current_price,
@@ -90,7 +90,7 @@ class IntervalApplicationService:
 
         buy_low = suggestion.get("suggested_buy_low")
         sell_high = suggestion.get("suggested_sell_high")
-        confidence = suggestion.get("confidence_score", 0.0)
+        confidence = suggestion.get("confidence_score") or 0.0
 
         reject_reason = self._validate_guardrails(
             current_price,

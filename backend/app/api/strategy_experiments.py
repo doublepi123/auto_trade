@@ -45,6 +45,39 @@ def list_strategy_experiments(
     return service.list_experiments()
 
 
+@router.get("/llm-evaluations", response_model=LLMEvaluationResponse)
+def list_llm_evaluations(
+    symbol: str,
+    start: str | None = None,
+    end: str | None = None,
+    horizon_minutes: int = Query(default=60, ge=5, le=1440),
+    db: Session = Depends(get_db),
+) -> LLMEvaluationResponse:
+    from datetime import datetime
+
+    parsed_start: datetime | None = None
+    parsed_end: datetime | None = None
+    if start:
+        try:
+            parsed_start = datetime.fromisoformat(start.replace("Z", "+00:00"))
+        except ValueError:
+            raise HTTPException(status_code=422, detail="invalid start date format") from None
+    if end:
+        try:
+            parsed_end = datetime.fromisoformat(end.replace("Z", "+00:00"))
+        except ValueError:
+            raise HTTPException(status_code=422, detail="invalid end date format") from None
+
+    evaluator = LLMRecommendationEvaluator(db)
+    result = evaluator.evaluate(
+        symbol=symbol,
+        start=parsed_start,
+        end=parsed_end,
+        horizon_minutes=horizon_minutes,
+    )
+    return LLMEvaluationResponse.model_validate(result)
+
+
 @router.get("/{experiment_id}", response_model=StrategyExperimentResponse)
 def get_strategy_experiment(
     experiment_id: int,
@@ -120,36 +153,3 @@ def export_strategy_experiment(
         return JSONResponse(content=result)
     except ValueError as exc:
         raise _raise_on_value_error(exc) from exc
-
-
-@router.get("/llm-evaluations", response_model=LLMEvaluationResponse)
-def list_llm_evaluations(
-    symbol: str,
-    start: str | None = None,
-    end: str | None = None,
-    horizon_minutes: int = Query(default=60, ge=5, le=1440),
-    db: Session = Depends(get_db),
-) -> LLMEvaluationResponse:
-    from datetime import datetime
-
-    parsed_start: datetime | None = None
-    parsed_end: datetime | None = None
-    if start:
-        try:
-            parsed_start = datetime.fromisoformat(start.replace("Z", "+00:00"))
-        except ValueError:
-            raise HTTPException(status_code=422, detail="invalid start date format") from None
-    if end:
-        try:
-            parsed_end = datetime.fromisoformat(end.replace("Z", "+00:00"))
-        except ValueError:
-            raise HTTPException(status_code=422, detail="invalid end date format") from None
-
-    evaluator = LLMRecommendationEvaluator(db)
-    result = evaluator.evaluate(
-        symbol=symbol,
-        start=parsed_start,
-        end=parsed_end,
-        horizon_minutes=horizon_minutes,
-    )
-    return LLMEvaluationResponse.model_validate(result)

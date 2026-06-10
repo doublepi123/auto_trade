@@ -10,6 +10,7 @@ interface NotificationEvent {
   action?: string
   event_type?: string
   detail?: Record<string, unknown>
+  message?: string
 }
 
 interface UserPreferences {
@@ -19,10 +20,12 @@ interface UserPreferences {
 
 interface EventItem {
   id?: number
+  source?: 'trade' | 'audit'
   event_type?: string
   action?: string
   severity?: string
   detail?: Record<string, unknown>
+  message?: string
   created_at?: string
 }
 
@@ -124,15 +127,15 @@ function playNotificationSound(severity: NotificationSeverity) {
 const sharedPrefs = ref<UserPreferences>(loadPreferences())
 const sharedLastEmittedAt = new Map<string, number>()
 const sharedCriticalCount = { count: 0, windowStart: Date.now() }
-const sharedKnownEventIds = new Map<number, number>() // id -> timestamp
+const sharedKnownEventIds = new Map<string, number>() // `${source}:${id}` -> timestamp
 let sharedPollTimer: ReturnType<typeof setInterval> | null = null
 let sharedEnabled = false
 let refCount = 0
 
 function handleEvent(evt: NotificationEvent) {
   const severity = parseSeverity(evt.severity)
-  const title = evt.action ?? evt.event_type ?? 'Notification'
-  const message = detailHash(evt.detail)
+  const title = evt.event_type ?? 'Notification'
+  const message = evt.message ?? detailHash(evt.detail)
 
   // CRITICAL persistent limit
   if (severity === 'CRITICAL') {
@@ -180,22 +183,23 @@ function processEvents(items: EventItem[], isBackfill = false) {
   const now = Date.now()
   for (const item of items) {
     const id = item.id ?? 0
-    if (id && sharedKnownEventIds.has(id)) continue
+    const dedupKey = `${item.source ?? 'trade'}:${id}`
+    if (id && sharedKnownEventIds.has(dedupKey)) continue
     if (id) {
-      sharedKnownEventIds.set(id, now)
+      sharedKnownEventIds.set(dedupKey, now)
       if (sharedKnownEventIds.size > 1000) {
         // Evict oldest entries by timestamp (LRU-style)
         const entries = [...sharedKnownEventIds.entries()].sort((a, b) => a[1] - b[1])
         const toRemove = entries.slice(0, entries.length - 1000)
-        for (const [oldId] of toRemove) {
-          sharedKnownEventIds.delete(oldId)
+        for (const [oldKey] of toRemove) {
+          sharedKnownEventIds.delete(oldKey)
         }
       }
     }
 
     const severity = parseSeverity(item.severity)
-    const title = item.action ?? item.event_type ?? 'Notification'
-    const message = detailHash(item.detail)
+    const title = item.event_type ?? 'Notification'
+    const message = item.message ?? detailHash(item.detail)
 
     if (isBackfill) {
       // Backfill only marks events as known — no notification display
@@ -207,6 +211,7 @@ function processEvents(items: EventItem[], isBackfill = false) {
         action: item.action,
         event_type: item.event_type,
         detail: item.detail,
+        message,
       })
     }
   }

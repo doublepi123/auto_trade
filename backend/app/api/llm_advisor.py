@@ -245,7 +245,7 @@ def analyze_llm_interval(
         suggestion={
             "suggested_buy_low": result.get("suggested_buy_low"),
             "suggested_sell_high": result.get("suggested_sell_high"),
-            "confidence_score": result.get("confidence_score"),
+            "confidence_score": result.get("confidence_score") or 0.0,
         },
         reference_quantity=_interval_reference_quantity(position_context, account_context),
     )

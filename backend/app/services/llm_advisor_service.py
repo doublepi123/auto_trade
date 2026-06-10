@@ -388,7 +388,7 @@ class LLMAdvisorService:
         """
         global _LAST_PREVIEW_TIMESTAMP
 
-        if time.monotonic() - _LAST_PREVIEW_TIMESTAMP < _PREVIEW_THROTTLE_SECONDS:
+        if _LAST_PREVIEW_TIMESTAMP > 0 and time.monotonic() - _LAST_PREVIEW_TIMESTAMP < _PREVIEW_THROTTLE_SECONDS:
             return {
                 "success": False,
                 "applied": False,

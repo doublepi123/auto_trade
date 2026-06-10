@@ -576,12 +576,7 @@ class BrokerGateway:
                 raise
             self._subscribed_symbols.update(missing_symbols)
     def submit_limit_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal) -> OrderResult:
-        return self._call_with_retry(
-            lambda: self._submit_limit_order_inner(symbol, side, quantity, price),
-            op="submit_limit_order",
-            max_retries=settings.broker_retry_max,
-            base_ms=settings.broker_retry_base_ms,
-        )
+        return self._submit_limit_order_inner(symbol, side, quantity, price)
 
     def _submit_limit_order_inner(
         self,

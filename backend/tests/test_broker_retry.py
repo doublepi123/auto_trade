@@ -81,28 +81,26 @@ def test_call_with_retry_non_retryable_does_not_retry(gw, monkeypatch):
     assert len(calls) == 1
 
 
-def test_submit_limit_order_uses_order_retry_max(gw, monkeypatch):
-    monkeypatch.setattr("time.sleep", lambda s: None)
-    monkeypatch.setattr(settings, "broker_retry_max", 2)
+def test_submit_limit_order_does_not_retry_on_transient_error(gw, monkeypatch):
+    """submit_limit_order must NOT retry — a retry could create duplicate live orders."""
     monkeypatch.setattr(gw, "_init_clients", lambda: None)
     calls = []
 
     def fake_trade_ctx_submit(*a, **kw):
         calls.append(1)
-        if len(calls) < 2:
-            raise _TransientErr("rate limit")
-        return MagicMock(order_id="o1", status="SUBMITTED")
+        raise _TransientErr("rate limit")
 
     gw._quote_ctx = MagicMock()
     gw._trade_ctx = MagicMock(submit_order=fake_trade_ctx_submit)
-    res = gw.submit_limit_order(
-        symbol="AAPL.US",
-        side="BUY",
-        quantity=Decimal("10"),
-        price=Decimal("100.0"),
-    )
-    assert res.broker_order_id == "o1"
-    assert len(calls) == 2
+    with pytest.raises(_TransientErr):
+        gw.submit_limit_order(
+            symbol="AAPL.US",
+            side="BUY",
+            quantity=Decimal("10"),
+            price=Decimal("100.0"),
+        )
+    # Must be called exactly once — no retry
+    assert len(calls) == 1
 
 
 def test_get_quote_uses_quote_retry_max(gw, monkeypatch):

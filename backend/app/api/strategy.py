@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from app.api.auth import require_api_key
 from app.api.deps import extract_actor, get_audit_logger
 from app.core.audit import AuditLogger
-from app.core.market_calendar import is_trading_hours
+from app.core.market_calendar import is_trading_hours, trade_day_for
 from app.database import get_db
 from app.models import OrderRecord
 from app.runner import AppRunner, get_runner
@@ -110,8 +110,12 @@ def put_strategy(
 @router.get("/status", response_model=StatusResponse)
 def get_status(db: Session = Depends(get_db)) -> StatusResponse:
     svc = StrategyService(db)
+    config = svc.get_config()
     state = svc.get_primary_runtime_state()
-    pnl_result = DailyPnlService(db).calculate()
+    pnl_result = DailyPnlService(db).calculate(
+        trade_day=trade_day_for(config.market),
+        to_trade_day=lambda instant=None: trade_day_for(config.market, instant),
+    )
     if (
         abs(state.daily_pnl - pnl_result.realized_pnl) > 1e-9
         or state.consecutive_losses != pnl_result.consecutive_losses
@@ -127,7 +131,6 @@ def get_status(db: Session = Depends(get_db)) -> StatusResponse:
     runner = get_runner()
     response.runner_running = runner.is_running
     response.last_action_message = getattr(runner, "last_action_message", "")
-    config = svc.get_config()
     response.trading_session_mode = getattr(config, "trading_session_mode", "ANY") or "ANY"
     response.is_trading_hours = is_trading_hours(config.market)
     return response

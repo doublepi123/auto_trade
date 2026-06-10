@@ -26,6 +26,18 @@ def _audit_payload(request_summary: str) -> dict[str, Any]:
         return {"raw": request_summary}
 
 
+_EVENT_SEVERITY_MAP: dict[str, str] = {
+    "RISK_PAUSED": "WARNING",
+    "RISK_AUTO_RESUMED": "INFO",
+    "ORDER_REJECTED": "WARNING",
+    "ORDER_TIMEOUT": "CRITICAL",
+    "ORDER_FAILED": "CRITICAL",
+    "ORDER_PERSISTENCE_FAILED": "CRITICAL",
+    "KILL_SWITCH": "CRITICAL",
+    "TRACKED_ENTRY_DRIFT": "WARNING",
+}
+
+
 def _trade_row_to_out(event: TradeEvent) -> TimelineEventResponse:
     return TimelineEventResponse(
         source="trade",
@@ -40,7 +52,7 @@ def _trade_row_to_out(event: TradeEvent) -> TimelineEventResponse:
         created_at=event.created_at,
         actor_hash=None,
         source_ip=None,
-        severity=None,
+        severity=_EVENT_SEVERITY_MAP.get(event.event_type),
         result=None,
     )
 
@@ -138,18 +150,27 @@ def list_timeline_events(
     trade_total = tq.count()
     trade_rows = tq.order_by(TradeEvent.created_at.desc(), TradeEvent.id.desc()).limit(fetch_n).all()
 
-    aq = db.query(AuditLog)
-    if symbol:
-        aq = aq.filter(AuditLog.request_summary.contains(symbol))
-    if et:
-        aq = aq.filter(AuditLog.action.in_(et))
-    audit_total = aq.count()
-    audit_rows = aq.order_by(AuditLog.created_at.desc(), AuditLog.id.desc()).limit(fetch_n).all()
+    if skip_category:
+        # Audit has no skip_category — skip audit query entirely
+        audit_total = 0
+        audit_rows = []
+    else:
+        aq = db.query(AuditLog)
+        if symbol:
+            aq = aq.filter(AuditLog.request_summary.contains(symbol))
+        if et:
+            aq = aq.filter(AuditLog.action.in_(et))
+        audit_total = aq.count()
+        audit_rows = aq.order_by(AuditLog.created_at.desc(), AuditLog.id.desc()).limit(fetch_n).all()
 
     total = trade_total + audit_total
+    # Clamp total to what the merged set can actually deliver
+    total = min(total, _MAX_MERGED_FETCH)
 
     merged = [_trade_row_to_out(r) for r in trade_rows] + [_audit_row_to_out(r) for r in audit_rows]
     merged.sort(key=_sort_key)
 
     start = (page - 1) * page_size
+    if start >= len(merged):
+        return [], total
     return merged[start : start + page_size], total

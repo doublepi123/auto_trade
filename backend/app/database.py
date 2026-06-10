@@ -146,6 +146,9 @@ def _ensure_runtime_state_daily_pnl_date_column(db_engine: Engine) -> None:
     with db_engine.begin() as connection:
         if "daily_pnl_date" not in columns:
             connection.exec_driver_sql("ALTER TABLE runtime_state ADD COLUMN daily_pnl_date DATE")
+            connection.exec_driver_sql(
+                "UPDATE runtime_state SET daily_pnl = 0, consecutive_losses = 0, daily_pnl_date = DATE('now') WHERE daily_pnl_date IS NULL"
+            )
         if "pause_reason" not in columns:
             connection.exec_driver_sql("ALTER TABLE runtime_state ADD COLUMN pause_reason TEXT DEFAULT '' NOT NULL")
         if "paused_at" not in columns:
@@ -154,9 +157,6 @@ def _ensure_runtime_state_daily_pnl_date_column(db_engine: Engine) -> None:
             connection.exec_driver_sql(
                 "ALTER TABLE runtime_state ADD COLUMN pause_auto_resumable BOOLEAN DEFAULT 0 NOT NULL"
             )
-        connection.exec_driver_sql(
-            "UPDATE runtime_state SET daily_pnl = 0, consecutive_losses = 0, daily_pnl_date = DATE('now') WHERE daily_pnl_date IS NULL"
-        )
 
 
 def _ensure_runtime_state_symbol_columns(db_engine: Engine) -> None:
