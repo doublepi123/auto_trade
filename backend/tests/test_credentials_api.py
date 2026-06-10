@@ -1,38 +1,27 @@
-import os
-
-os.environ["AUTO_TRADE_DATABASE_URL"] = "sqlite:///data/test_credentials_api.db"
-
-
 from fastapi.testclient import TestClient
 
 from app.api import credentials as credentials_api
 from app.core.credential_crypto import decrypt_secret, is_encrypted
-from app.database import SessionLocal, engine as db_engine
-from app.models import AuditLog, Base, CredentialConfig, StrategyConfig
+from app.database import SessionLocal
+from app.models import AuditLog, CredentialConfig, StrategyConfig
 from app.main import app
-
-
 from app import database
 
-Base.metadata.create_all(bind=db_engine)
-database._ensure_audit_log_table(db_engine)
-database._ensure_strategy_config_margin_safety_factor(db_engine)
+database.init_db()
 
 client = TestClient(app)
 
 
 def _clean_credentials() -> None:
-    db = SessionLocal()
-    db.query(CredentialConfig).delete()
-    db.commit()
-    db.close()
+    with SessionLocal() as db:
+        db.query(CredentialConfig).delete()
+        db.commit()
 
 
 def _clean_audit_logs() -> None:
-    db = SessionLocal()
-    db.query(AuditLog).delete()
-    db.commit()
-    db.close()
+    with SessionLocal() as db:
+        db.query(AuditLog).delete()
+        db.commit()
 
 
 class TestCredentialsAPI:

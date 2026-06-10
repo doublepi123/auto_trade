@@ -198,14 +198,17 @@ def _make_broker_order(
 # ---------------------------------------------------------------------------
 @pytest.fixture(autouse=True)
 def _setup_db():
-    """Reset DB tables for a fresh test state.
+    """Truncate all tables for a fresh test state.
 
-    We drop+recreate on entry so each test starts with empty tables, and
+    We truncate on entry so each test starts with empty tables, and
     intentionally do **not** drop on teardown — sibling test modules rely
     on the schema being present (conftest shares a single per-PID DB).
     """
-    Base.metadata.drop_all(bind=engine)
-    Base.metadata.create_all(bind=engine)
+    from sqlalchemy import text
+
+    with engine.begin() as conn:
+        for table in reversed(Base.metadata.sorted_tables):
+            conn.execute(text(f"DELETE FROM {table.name}"))
     yield
 
 
@@ -660,7 +663,11 @@ class TestE2EBrokerDisconnectResubscribe:
             fake_broker.simulate_disconnect("test_network_drop")
             assert runner._quotes_subscribed is False
 
-            time.sleep(5.5)
+            # Poll for resubscribe instead of fixed sleep to avoid flakiness.
+            deadline = time.monotonic() + 10.0
+            while not runner._quotes_subscribed and time.monotonic() < deadline:
+                time.sleep(0.25)
+            assert runner._quotes_subscribed is True
 
             db = SessionLocal()
             try:

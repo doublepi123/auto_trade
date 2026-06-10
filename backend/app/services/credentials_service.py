@@ -91,8 +91,14 @@ class CredentialsService:
         if "notification_channels" in data and data["notification_channels"] is not None:
             channels = data["notification_channels"]
             if isinstance(channels, list):
+                def _to_dict(ch: Any) -> dict[str, Any]:
+                    if isinstance(ch, dict):
+                        return ch
+                    if hasattr(ch, "model_dump"):
+                        return ch.model_dump()
+                    raise ValueError(f"Unsupported notification channel type: {type(ch).__name__}")
                 config.notification_channels = json.dumps(
-                    [ch if isinstance(ch, dict) else ch.model_dump() for ch in channels],
+                    [_to_dict(ch) for ch in channels],
                     ensure_ascii=False,
                 )
             else:

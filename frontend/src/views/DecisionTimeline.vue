@@ -216,7 +216,13 @@ function handlePageSizeChange(nextPageSize: number) {
 async function handleExport(format: 'csv' | 'json') {
   exporting.value = format
   try {
-    const blob = await exportTradeEvents(format)
+    const data = await exportTradeEvents(format)
+    let blob: Blob
+    if (data instanceof Blob) {
+      blob = data
+    } else {
+      blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
+    }
     const url = URL.createObjectURL(blob)
     const link = document.createElement('a')
     link.href = url

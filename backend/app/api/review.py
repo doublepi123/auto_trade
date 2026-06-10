@@ -18,8 +18,8 @@ logger = logging.getLogger(__name__)
 @router.get("")
 def get_review(
     symbol: str = Query(..., description="Stock symbol, e.g. AAPL.US"),
-    from_date: str = Query(..., description="Start date (YYYY-MM-DD)"),
-    to_date: str = Query(..., description="End date (YYYY-MM-DD)"),
+    from_date: str = Query(..., description="Start date (YYYY-MM-DD)", pattern=r'^\d{4}-\d{2}-\d{2}$'),
+    to_date: str = Query(..., description="End date (YYYY-MM-DD)", pattern=r'^\d{4}-\d{2}-\d{2}$'),
     db: Session = Depends(get_db),
 ):
     try:
@@ -36,8 +36,8 @@ def get_review(
 @router.get("/export")
 def export_review(
     symbol: str = Query(..., description="Stock symbol, e.g. AAPL.US"),
-    from_date: str = Query(..., description="Start date (YYYY-MM-DD)"),
-    to_date: str = Query(..., description="End date (YYYY-MM-DD)"),
+    from_date: str = Query(..., description="Start date (YYYY-MM-DD)", pattern=r'^\d{4}-\d{2}-\d{2}$'),
+    to_date: str = Query(..., description="End date (YYYY-MM-DD)", pattern=r'^\d{4}-\d{2}-\d{2}$'),
     format: str = Query("json", description="Export format: json or csv"),
     db: Session = Depends(get_db),
 ):

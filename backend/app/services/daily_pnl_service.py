@@ -78,6 +78,9 @@ class DailyPnlService:
         target_day = trade_day or resolve_day(datetime.now(timezone.utc))
         start_of_day = datetime(target_day.year, target_day.month, target_day.day, tzinfo=timezone.utc)
         end_of_day = start_of_day + timedelta(days=1)
+        # The 2-day window (end_of_day + 1 day) accounts for timezone boundary
+        # handling: fills near midnight in the target timezone may have UTC
+        # timestamps that fall on the next calendar day.
         query_end = end_of_day + timedelta(days=1)
         query = self._db.query(OrderRecord)
         if symbol:

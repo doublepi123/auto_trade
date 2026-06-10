@@ -101,9 +101,16 @@ class LLMAdvisorService:
         market_data: dict[str, Any],
         prompt_template: str | None = None,
     ) -> str:
-        """Build LLM prompt using modular PromptBuilder or a custom template."""
+        """Build LLM prompt using modular PromptBuilder or a custom template.
+
+        When a custom ``prompt_template`` is supplied (e.g. from an A/B test
+        variant), the system role instructions from ``SystemModule`` are always
+        prepended so that the LLM's baseline safety directives cannot be fully
+        overridden by an untrusted template.
+        """
         if prompt_template:
-            return prompt_template
+            system_instructions = SystemModule().render({})
+            return f"{system_instructions}\n\n{prompt_template}"
         context: dict[str, Any] = {
             "symbol": symbol,
             "market": market,
@@ -233,7 +240,7 @@ class LLMAdvisorService:
             market_data = self._data_aggregator.fetch_market_data(symbol, market)
         except Exception:
             logger.exception("failed to fetch market data for LLM analysis")
-            market_data: dict[str, Any] = {
+            market_data = {
                 "daily_candles": [],
                 "minute_candles": [],
                 "current_price": current_price,
@@ -289,6 +296,9 @@ class LLMAdvisorService:
             raw_response = self._call_llm(prompt)
             result = self._parse_response(raw_response)
 
+            # NOTE: indicator selection is validated against AVAILABLE_INDICATORS
+            # whitelist inside FeatureSelector.parse_selection, so adversarial
+            # keys injected via prompt or market data are discarded.
             market_state = market_data.get("market_state", {})
             suggested = market_state.get("suggested_indicators", []) if market_state else []
             selected = FeatureSelector.parse_selection(raw_response, suggested)
@@ -389,7 +399,7 @@ class LLMAdvisorService:
             market_data = self._data_aggregator.fetch_market_data(symbol, market)
         except Exception:
             logger.exception("failed to fetch market data for LLM preview")
-            market_data: dict[str, Any] = {
+            market_data = {
                 "daily_candles": [],
                 "minute_candles": [],
                 "current_price": current_price,

@@ -132,7 +132,9 @@ class StrategyExperimentService:
         if not bars:
             raise ValueError("price data is required")
 
-        # Delete previous runs for this experiment.
+        # Delete previous runs for this experiment inside a savepoint so that
+        # a partial failure can be rolled back without losing the old runs.
+        savepoint = self.db.begin_nested()
         self.db.query(StrategyExperimentRun).filter(
             StrategyExperimentRun.experiment_id == experiment_id
         ).delete()
@@ -141,76 +143,80 @@ class StrategyExperimentService:
         completed = 0
         failed = 0
 
-        for params in param_combos:
-            engine_params = BacktestEngineParams(
-                symbol=params.symbol,
-                buy_low=params.buy_low,
-                sell_high=params.sell_high,
-                short_selling=params.short_selling,
-                min_profit_amount=params.min_profit_amount,
-                max_daily_loss=params.max_daily_loss,
-                max_consecutive_losses=params.max_consecutive_losses,
-                quantity=params.quantity,
-                initial_cash=params.initial_cash,
-                fee_rate=params.fee_rate,
-                fixed_fee=params.fixed_fee,
-                slippage_pct=params.slippage_pct,
-                stop_loss_pct=params.stop_loss_pct,
-            )
-            parameters_json = json.dumps(
-                params.model_dump(), ensure_ascii=False, separators=(",", ":")
-            )
-            try:
-                result: BacktestResultData = BacktestEngine(engine_params).run(bars)
-                run = StrategyExperimentRun(
-                    experiment_id=experiment_id,
-                    parameters_json=parameters_json,
-                    status="COMPLETED",
-                    total_pnl=result.metrics.total_pnl,
-                    total_return_pct=result.metrics.total_return_pct,
-                    max_drawdown_pct=result.metrics.max_drawdown_pct,
-                    win_rate=result.metrics.win_rate,
-                    trade_count=result.metrics.trade_count,
-                    closed_trade_count=result.metrics.closed_trade_count,
-                    sharpe_ratio=result.metrics.sharpe_ratio,
-                    profit_factor=result.metrics.profit_factor,
-                    profit_loss_ratio=result.metrics.profit_loss_ratio,
-                    result_summary_json=json.dumps(
-                        _build_result_summary(result),
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                    ),
-                    error="",
+        try:
+            for params in param_combos:
+                engine_params = BacktestEngineParams(
+                    symbol=params.symbol,
+                    buy_low=params.buy_low,
+                    sell_high=params.sell_high,
+                    short_selling=params.short_selling,
+                    min_profit_amount=params.min_profit_amount,
+                    max_daily_loss=params.max_daily_loss,
+                    max_consecutive_losses=params.max_consecutive_losses,
+                    quantity=params.quantity,
+                    initial_cash=params.initial_cash,
+                    fee_rate=params.fee_rate,
+                    fixed_fee=params.fixed_fee,
+                    slippage_pct=params.slippage_pct,
+                    stop_loss_pct=params.stop_loss_pct,
                 )
-                self.db.add(run)
-                completed += 1
-            except Exception as exc:
-                logger.exception(
-                    "Strategy experiment run failed",
-                    extra={
-                        "experiment_id": experiment_id,
-                        "symbol": exp.symbol,
-                        "parameters_json": parameters_json,
-                    },
+                parameters_json = json.dumps(
+                    params.model_dump(), ensure_ascii=False, separators=(",", ":")
                 )
-                run = StrategyExperimentRun(
-                    experiment_id=experiment_id,
-                    parameters_json=parameters_json,
-                    status="FAILED",
-                    total_pnl=0.0,
-                    total_return_pct=0.0,
-                    max_drawdown_pct=0.0,
-                    win_rate=0.0,
-                    trade_count=0,
-                    closed_trade_count=0,
-                    sharpe_ratio=None,
-                    profit_factor=None,
-                    profit_loss_ratio=None,
-                    result_summary_json="{}",
-                    error=str(exc),
-                )
-                self.db.add(run)
-                failed += 1
+                try:
+                    result: BacktestResultData = BacktestEngine(engine_params).run(bars)
+                    run = StrategyExperimentRun(
+                        experiment_id=experiment_id,
+                        parameters_json=parameters_json,
+                        status="COMPLETED",
+                        total_pnl=result.metrics.total_pnl,
+                        total_return_pct=result.metrics.total_return_pct,
+                        max_drawdown_pct=result.metrics.max_drawdown_pct,
+                        win_rate=result.metrics.win_rate,
+                        trade_count=result.metrics.trade_count,
+                        closed_trade_count=result.metrics.closed_trade_count,
+                        sharpe_ratio=result.metrics.sharpe_ratio,
+                        profit_factor=result.metrics.profit_factor,
+                        profit_loss_ratio=result.metrics.profit_loss_ratio,
+                        result_summary_json=json.dumps(
+                            _build_result_summary(result),
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ),
+                        error="",
+                    )
+                    self.db.add(run)
+                    completed += 1
+                except Exception as exc:
+                    logger.exception(
+                        "Strategy experiment run failed",
+                        extra={
+                            "experiment_id": experiment_id,
+                            "symbol": exp.symbol,
+                            "parameters_json": parameters_json,
+                        },
+                    )
+                    run = StrategyExperimentRun(
+                        experiment_id=experiment_id,
+                        parameters_json=parameters_json,
+                        status="FAILED",
+                        total_pnl=0.0,
+                        total_return_pct=0.0,
+                        max_drawdown_pct=0.0,
+                        win_rate=0.0,
+                        trade_count=0,
+                        closed_trade_count=0,
+                        sharpe_ratio=None,
+                        profit_factor=None,
+                        profit_loss_ratio=None,
+                        result_summary_json="{}",
+                        error=str(exc),
+                    )
+                    self.db.add(run)
+                    failed += 1
+        except Exception:
+            savepoint.rollback()
+            raise
         now = datetime.now(timezone.utc)
         if failed == len(param_combos):
             exp.status = "FAILED"
@@ -221,6 +227,7 @@ class StrategyExperimentService:
         exp.completed_runs = completed
         exp.failed_runs = failed
         exp.completed_at = now
+        savepoint.commit()
         self.db.commit()
         self.db.refresh(exp)
         return StrategyExperimentResponse.model_validate(exp)

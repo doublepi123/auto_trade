@@ -33,11 +33,13 @@ class MarketSentimentAnalyzer:
         total = len(price_changes)
 
         # Score: normalized average + direction bias
-        max_abs = max(abs(c) for c in price_changes)
-        if max_abs == 0:
+        # Use mean of absolute changes for more robust normalization than max,
+        # which can produce misleading scores when all changes are identical.
+        mean_abs = statistics.mean(abs(c) for c in price_changes)
+        if mean_abs == 0:
             normalized = 0.0
         else:
-            normalized = avg_change / max_abs
+            normalized = avg_change / mean_abs
 
         direction_bias = (positive_count - negative_count) / total
         score = (normalized * 0.6 + direction_bias * 0.4)

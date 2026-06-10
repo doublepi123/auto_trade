@@ -1,26 +1,14 @@
-import os
-
-from sqlalchemy import create_engine
-from sqlalchemy.orm import Session
-
-from app.models import Base, RuntimeState, StrategyConfig
+from app import database
+from app.models import RuntimeState, StrategyConfig
 from app.services.strategy_service import StrategyService
 
-os.environ["AUTO_TRADE_DATABASE_URL"] = "sqlite:///data/test_service.db"
 
-DB_URL = "sqlite:///data/test_service.db"
+database.init_db()
 
 
 class TestStrategyService:
-    @classmethod
-    def setup_class(cls) -> None:
-        engine = create_engine(DB_URL, connect_args={"check_same_thread": False})
-        Base.metadata.drop_all(bind=engine)
-        Base.metadata.create_all(bind=engine)
-        cls.engine = engine
-
-    def _get_db(self) -> Session:
-        return Session(bind=self.engine)
+    def _get_db(self):
+        return database.SessionLocal()
 
     def _cleanup(self) -> None:
         db = self._get_db()

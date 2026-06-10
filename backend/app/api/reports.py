@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
@@ -14,7 +16,7 @@ router = APIRouter(prefix="/api/reports", tags=["reports"])
 @router.get("/daily", response_model=ReportResponse)
 def get_daily_report(
     symbol: str = Query(..., description="Stock symbol, e.g. AAPL.US"),
-    date: str = Query(..., description="Target date (YYYY-MM-DD)"),
+    date: str = Query(..., description="Target date (YYYY-MM-DD)", pattern=r'^\d{4}-\d{2}-\d{2}$'),
     db: Session = Depends(get_db),
 ) -> ReportResponse:
     try:
@@ -30,7 +32,7 @@ def get_daily_report(
 @router.get("/weekly", response_model=ReportResponse)
 def get_weekly_report(
     symbol: str = Query(..., description="Stock symbol, e.g. AAPL.US"),
-    week_start: str = Query(..., description="Week start date (YYYY-MM-DD)"),
+    week_start: str = Query(..., description="Week start date (YYYY-MM-DD)", pattern=r'^\d{4}-\d{2}-\d{2}$'),
     db: Session = Depends(get_db),
 ) -> ReportResponse:
     try:
@@ -46,7 +48,7 @@ def get_weekly_report(
 @router.get("/monthly", response_model=ReportResponse)
 def get_monthly_report(
     symbol: str = Query(..., description="Stock symbol, e.g. AAPL.US"),
-    month: str = Query(..., description="Month (YYYY-MM)"),
+    month: str = Query(..., description="Month (YYYY-MM)", pattern=r'^\d{4}-\d{2}$'),
     db: Session = Depends(get_db),
 ) -> ReportResponse:
     try:
@@ -62,8 +64,8 @@ def get_monthly_report(
 @router.get("/range", response_model=ReportResponse)
 def get_range_report(
     symbol: str = Query(..., description="Stock symbol, e.g. AAPL.US"),
-    from_date: str = Query(..., description="Start date (YYYY-MM-DD)"),
-    to_date: str = Query(..., description="End date (YYYY-MM-DD)"),
+    from_date: str = Query(..., description="Start date (YYYY-MM-DD)", pattern=r'^\d{4}-\d{2}-\d{2}$'),
+    to_date: str = Query(..., description="End date (YYYY-MM-DD)", pattern=r'^\d{4}-\d{2}-\d{2}$'),
     db: Session = Depends(get_db),
 ) -> ReportResponse:
     try:
@@ -79,8 +81,8 @@ def get_range_report(
 @router.get("/export")
 def export_report(
     symbol: str = Query(..., description="Stock symbol, e.g. AAPL.US"),
-    from_date: str = Query(..., description="Start date (YYYY-MM-DD)"),
-    to_date: str = Query(..., description="End date (YYYY-MM-DD)"),
+    from_date: str = Query(..., description="Start date (YYYY-MM-DD)", pattern=r'^\d{4}-\d{2}-\d{2}$'),
+    to_date: str = Query(..., description="End date (YYYY-MM-DD)", pattern=r'^\d{4}-\d{2}-\d{2}$'),
     format: str = Query("json", description="Export format: json or csv"),
     db: Session = Depends(get_db),
 ):
@@ -94,9 +96,10 @@ def export_report(
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Report export failed: {exc}")
     media_type = "application/json" if format == "json" else "text/csv"
-    filename = f"report_{symbol.replace('.', '_')}_{from_date}_{to_date}.{format}"
+    safe_symbol = re.sub(r'[^a-zA-Z0-9]', '', symbol.replace('.', '_'))
+    filename = f"report_{safe_symbol}_{from_date}_{to_date}.{format}"
     return StreamingResponse(
         buf,
         media_type=media_type,
-        headers={"Content-Disposition": f"attachment; filename={filename}"},
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )

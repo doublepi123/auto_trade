@@ -39,11 +39,17 @@ class TechnicalIndicators:
 
     @staticmethod
     def _ema(values: list[float], period: int) -> list[float]:
-        """Compute Exponential Moving Average."""
+        """Compute Exponential Moving Average.
+
+        The initial EMA value is seeded with the SMA of the first ``period``
+        values (industry-standard seeding).  When fewer than ``period`` values
+        are available the simple mean of all values is used as the seed.
+        """
         if not values:
             return []
         multiplier = 2.0 / (period + 1)
-        ema = [values[0]]
+        seed = statistics.mean(values[:period])
+        ema = [seed]
         for i in range(1, len(values)):
             ema.append(values[i] * multiplier + ema[-1] * (1 - multiplier))
         return ema
@@ -75,7 +81,11 @@ class TechnicalIndicators:
 
     @staticmethod
     def analyze_volume(volumes: list[float], lookback: int = 20) -> VolumeAnalysis:
-        """Analyze volume relative to recent average."""
+        """Analyze volume relative to recent average.
+
+        Requires at least 2 data points for a meaningful ratio; with only 1
+        element the ratio will always be 1.0.
+        """
         if not volumes:
             return VolumeAnalysis(avg_volume=0.0, volume_ratio=0.0, trend="unknown")
 
@@ -197,6 +207,9 @@ class TechnicalIndicators:
             dx.append(100.0 * abs(dp - dm) / total if total > 0 else 0.0)
 
         if len(dx) < period:
+            # Short series: initial ADX is a simple average rather than the
+            # fully Wilder-smoothed value; this is acceptable for the use case
+            # but will differ slightly from standard implementations.
             adx_value = sum(dx) / len(dx) if dx else 0.0
         else:
             adx_value = sum(dx[:period]) / period

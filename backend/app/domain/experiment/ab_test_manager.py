@@ -55,7 +55,13 @@ class ABTestManager:
         version = self.db.get(PromptVersion, version_id)
         if version is None:
             raise ValueError(f"PromptVersion {version_id} not found")
-        self.db.query(PromptVersion).update({PromptVersion.is_active: False})
+        # Deactivate only versions belonging to the same experiment to avoid
+        # cross-experiment interference when multiple experiments coexist.
+        (
+            self.db.query(PromptVersion)
+            .filter(PromptVersion.name == version.name)
+            .update({PromptVersion.is_active: False})
+        )
         version.is_active = True
         self.db.commit()
 

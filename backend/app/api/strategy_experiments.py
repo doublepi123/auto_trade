@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy.orm import Session
 
+from app.api.auth import require_api_key
 from app.database import get_db
 from app.schemas import (
     LLMEvaluationResponse,
@@ -24,7 +25,7 @@ def _raise_on_value_error(exc: ValueError) -> HTTPException:
     return HTTPException(status_code=status_code, detail=msg)
 
 
-@router.post("", response_model=StrategyExperimentResponse)
+@router.post("", response_model=StrategyExperimentResponse, dependencies=[Depends(require_api_key())])
 def create_strategy_experiment(
     payload: StrategyExperimentCreate,
     db: Session = Depends(get_db),
@@ -56,7 +57,7 @@ def get_strategy_experiment(
         raise _raise_on_value_error(exc) from exc
 
 
-@router.post("/{experiment_id}/run", response_model=StrategyExperimentResponse)
+@router.post("/{experiment_id}/run", response_model=StrategyExperimentResponse, dependencies=[Depends(require_api_key())])
 def run_strategy_experiment(
     experiment_id: int,
     payload: StrategyExperimentRunRequest,
@@ -74,8 +75,8 @@ def list_strategy_experiment_runs(
     experiment_id: int,
     sort: str = Query("total_return_pct", pattern=r"^(total_return_pct|total_pnl|max_drawdown_pct|win_rate|trade_count|sharpe_ratio|profit_factor|profit_loss_ratio|created_at)$"),
     order: str = Query("desc", pattern=r"^(asc|desc)$"),
-    page: int = 1,
-    page_size: int = 20,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=200),
     db: Session = Depends(get_db),
 ) -> StrategyExperimentRunPage:
     service = StrategyExperimentService(db)
@@ -100,7 +101,7 @@ def get_strategy_experiment_run(
 @router.get("/{experiment_id}/export")
 def export_strategy_experiment(
     experiment_id: int,
-    format: str = "json",
+    format: str = Query(default="json", pattern=r'^(json|csv)$'),
     db: Session = Depends(get_db),
 ) -> Response:
     from fastapi.responses import JSONResponse, PlainTextResponse
@@ -126,7 +127,7 @@ def list_llm_evaluations(
     symbol: str,
     start: str | None = None,
     end: str | None = None,
-    horizon_minutes: int = 60,
+    horizon_minutes: int = Query(default=60, ge=5, le=1440),
     db: Session = Depends(get_db),
 ) -> LLMEvaluationResponse:
     from datetime import datetime

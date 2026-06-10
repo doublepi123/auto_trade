@@ -190,6 +190,9 @@ class IntervalApplicationService:
         reference_quantity: float = 1.0,
     ) -> str | None:
         """Validate suggestion against risk guardrails. Returns reject reason or None."""
+        if current_price <= 0:
+            return "current_price must be positive"
+
         if confidence < settings.llm_min_confidence:
             return f"confidence_score {confidence:.2f} below threshold {settings.llm_min_confidence}"
 
@@ -210,9 +213,6 @@ class IntervalApplicationService:
                 f"interval width ({interval_width:.2f}) below minimum profit width "
                 f"{minimum_width:.2f}"
             )
-
-        if current_price <= 0:
-            return "current_price must be positive"
 
         stripe_width_pct = (sell_high - buy_low) / current_price * 100
         if stripe_width_pct > settings.llm_max_stripe_width_pct:

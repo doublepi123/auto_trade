@@ -6,12 +6,12 @@ from decimal import Decimal
 
 from app.core.broker import BrokerOrder
 from app.core.market_calendar import trade_day_for
-from app.database import SessionLocal, engine as db_engine
-from app.models import Base, OrderRecord, TradeEvent
+from app.database import SessionLocal
+from app.models import OrderRecord, TradeEvent
 from app.runner import AppRunner
+from app import database
 
-
-Base.metadata.create_all(bind=db_engine)
+database.init_db()
 
 
 def _clean() -> None:

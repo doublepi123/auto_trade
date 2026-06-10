@@ -28,12 +28,12 @@ def get_indicator_broker() -> BrokerGateway | None:
 
 @router.get("/indicators", response_model=IndicatorsResponse)
 def get_indicators(
-    symbol: str | None = Query(default=None),
+    symbol: str | None = Query(default=None, pattern=r'^[A-Z0-9\-]{1,12}\.[A-Z]{2,4}$'),
     db: Session = Depends(get_db),
     broker: BrokerGateway | None = Depends(get_indicator_broker),
 ) -> IndicatorsResponse:
     config = db.query(StrategyConfig).first()
-    resolved_symbol = symbol or (config.symbol if config else None)
+    resolved_symbol = (symbol.strip().upper() if symbol else None) or (config.symbol if config else None)
     if not resolved_symbol:
         raise HTTPException(status_code=422, detail="symbol is required")
     market = config.market if config else "US"

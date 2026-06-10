@@ -134,6 +134,10 @@ class LLMRecommendationEvaluator:
             .all()
         )
 
+        # Filter out snapshots with missing or non-positive prices to avoid
+        # distorting min/max/end calculations.
+        snapshots = [s for s in snapshots if s.last_price is not None and s.last_price > 0]
+
         if len(snapshots) < 2:
             return self._make_sample(
                 interaction, parsed, "INSUFFICIENT_DATA", "insufficient snapshots"

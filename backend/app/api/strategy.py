@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
+from app.api.auth import require_api_key
 from app.api.deps import extract_actor, get_audit_logger
 from app.core.audit import AuditLogger
 from app.core.market_calendar import is_trading_hours
@@ -40,14 +41,14 @@ def _reload_strategy_after_save() -> None:
     _reload_strategy_safely(runner)
 
 
-@router.get("/strategy", response_model=StrategyResponse)
+@router.get("/strategy", response_model=StrategyResponse, dependencies=[Depends(require_api_key())])
 def get_strategy(db: Session = Depends(get_db)) -> StrategyResponse:
     svc = StrategyService(db)
     config = svc.get_config()
     return StrategyResponse.model_validate(config)
 
 
-@router.put("/strategy", response_model=StrategyResponse)
+@router.put("/strategy", response_model=StrategyResponse, dependencies=[Depends(require_api_key())])
 def put_strategy(
     request: Request,
     payload: StrategyConfigSchema,

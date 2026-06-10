@@ -111,12 +111,26 @@ const newMarket = ref<'US' | 'HK'>('US')
 const newAlias = ref('')
 let quoteTimer: ReturnType<typeof setInterval> | null = null
 
+function resolveErrorMessage(err: unknown, fallback: string): string {
+  if (err && typeof err === 'object' && 'response' in err) {
+    const resp = (err as Record<string, unknown>).response
+    if (resp && typeof resp === 'object' && 'data' in resp) {
+      const data = (resp as Record<string, unknown>).data
+      if (data && typeof data === 'object' && 'detail' in data) {
+        const detail = (data as Record<string, unknown>).detail
+        if (typeof detail === 'string') return detail
+      }
+    }
+  }
+  return fallback
+}
+
 async function loadItems() {
   loading.value = true
   try {
     items.value = await getWatchlist()
-  } catch (e: any) {
-    ElMessage.error(e.response?.data?.detail || '加载观察列表失败')
+  } catch (e: unknown) {
+    ElMessage.error(resolveErrorMessage(e, '加载观察列表失败'))
   } finally {
     loading.value = false
   }
@@ -131,8 +145,8 @@ async function loadQuotes() {
       map[q.symbol] = q
     }
     quoteMap.value = map
-  } catch (e: any) {
-    ElMessage.error(e.response?.data?.detail || '加载行情失败')
+  } catch (e: unknown) {
+    ElMessage.error(resolveErrorMessage(e, '加载行情失败'))
   }
 }
 
@@ -150,8 +164,8 @@ async function handleAdd() {
     newAlias.value = ''
     await loadItems()
     await loadQuotes()
-  } catch (e: any) {
-    addError.value = e.response?.data?.detail || '添加失败'
+  } catch (e: unknown) {
+    addError.value = resolveErrorMessage(e, '添加失败')
   } finally {
     adding.value = false
   }
@@ -163,8 +177,8 @@ async function handleRemove(id: number) {
     await removeWatchlistItem(id)
     await loadItems()
     await loadQuotes()
-  } catch (e: any) {
-    ElMessage.error(e.response?.data?.detail || '删除失败')
+  } catch (e: unknown) {
+    ElMessage.error(resolveErrorMessage(e, '删除失败'))
   } finally {
     removingId.value = null
   }
@@ -175,8 +189,8 @@ async function handleActivate(id: number) {
   try {
     await activateWatchlistItem(id)
     await loadItems()
-  } catch (e: any) {
-    ElMessage.error(e.response?.data?.detail || '激活失败')
+  } catch (e: unknown) {
+    ElMessage.error(resolveErrorMessage(e, '激活失败'))
   } finally {
     activatingId.value = null
   }

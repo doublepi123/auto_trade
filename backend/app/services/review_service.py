@@ -24,8 +24,12 @@ class ReviewService:
         self._db = db
 
     def get_review(self, symbol: str, from_date: str, to_date: str) -> dict[str, Any]:
+        from app.models import StrategyConfig
         from_d = _parse_date(from_date)
         to_d = _parse_date(to_date)
+
+        config = self._db.query(StrategyConfig).order_by(StrategyConfig.id.desc()).first()
+        max_daily_loss = float(config.max_daily_loss) if config and config.max_daily_loss else 0.0
 
         llm_interactions = (
             self._db.query(LLMInteraction)
@@ -64,6 +68,7 @@ class ReviewService:
                 RuntimeStateSnapshot.created_at >= datetime(from_d.year, from_d.month, from_d.day, tzinfo=timezone.utc),
                 RuntimeStateSnapshot.created_at < datetime(to_d.year, to_d.month, to_d.day, tzinfo=timezone.utc) + timedelta(days=1),
             )
+            .order_by(RuntimeStateSnapshot.created_at.asc(), RuntimeStateSnapshot.id.asc())
             .all()
         )
 
@@ -103,7 +108,7 @@ class ReviewService:
             day = days[d]
             day["daily_pnl"] = (day["snapshots"][-1].get("daily_pnl", 0) if day["snapshots"] else 0.0)
             day["trade_count"] = len([o for o in day["orders"] if o["status"] in ("FILLED", "PARTIAL_FILLED")])
-            day["error_tags"] = self._compute_error_tags(day, symbol)
+            day["error_tags"] = self._compute_error_tags(day, symbol, max_daily_loss)
             all_error_tags.update(day["error_tags"])
             total_pnl += day["daily_pnl"]
             total_trades += day["trade_count"]
@@ -331,7 +336,7 @@ class ReviewService:
         }
 
     @staticmethod
-    def _compute_error_tags(day: dict[str, Any], symbol: str) -> list[str]:
+    def _compute_error_tags(day: dict[str, Any], symbol: str, max_daily_loss: float = 0.0) -> list[str]:
         tags: set[str] = set()
         orders = day["orders"]
         events = day["events"]
@@ -376,7 +381,8 @@ class ReviewService:
         snapshots = day["snapshots"]
         if snapshots:
             max_daily_pnl = min(s["daily_pnl"] for s in snapshots)
-            if max_daily_pnl < -1000:  # 简化阈值
+            loss_threshold = -abs(max_daily_loss) if max_daily_loss else -1000
+            if max_daily_pnl < loss_threshold:
                 has_risk_pause = any(e["event_type"] == "RISK_PAUSED" for e in events)
                 if not has_risk_pause:
                     tags.add("错过止损")

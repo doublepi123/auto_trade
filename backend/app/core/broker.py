@@ -16,7 +16,12 @@ if TYPE_CHECKING:
 try:
     from longport.openapi import OpenApiException as _OpenApiException
 
-    _retryable_exc: tuple[type[BaseException], ...] = (_OpenApiException,)
+    _retryable_exc: tuple[type[BaseException], ...] = (
+        _OpenApiException,
+        OSError,
+        ConnectionError,
+        TimeoutError,
+    )
 except ImportError:
     _retryable_exc = (Exception,)
 RETRYABLE_EXC = _retryable_exc
@@ -45,7 +50,13 @@ def _is_retryable_message(exc: BaseException) -> bool:
     return any(marker in msg for marker in _RETRYABLE_MESSAGE_MARKERS)
 
 
+_NETWORK_EXC: tuple[type[BaseException], ...] = (OSError, ConnectionError, TimeoutError)
+
+
 def _is_retryable_exception(exc: BaseException) -> bool:
+    # Network-level errors are always retryable without message check
+    if isinstance(exc, _NETWORK_EXC):
+        return True
     if isinstance(exc, RETRYABLE_EXC):
         return _is_retryable_message(exc)
     return False
@@ -388,7 +399,7 @@ class BrokerGateway:
         return self._call_with_retry(
             lambda: self._get_candlesticks_inner(symbol, period, count),
             op="get_candlesticks",
-            max_retries=settings.broker_retry_max,
+            max_retries=settings.broker_quote_retry_max,
             base_ms=settings.broker_retry_base_ms,
         )
 

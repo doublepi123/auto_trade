@@ -5,6 +5,7 @@ from typing import Any, List
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from app.api.auth import require_api_key
 from app.database import get_db
 from app.domain.experiment.ab_test_manager import ABTestManager
 from app.schemas import (
@@ -29,7 +30,7 @@ def list_versions(db: Session = Depends(get_db)) -> list[PromptVersionResponse]:
     return [PromptVersionResponse.model_validate(v) for v in manager.list_versions()]
 
 
-@router.post("/versions", response_model=PromptVersionResponse)
+@router.post("/versions", response_model=PromptVersionResponse, dependencies=[Depends(require_api_key())])
 def create_version(
     payload: PromptVersionCreate,
     db: Session = Depends(get_db),
@@ -47,7 +48,7 @@ def create_version(
     return PromptVersionResponse.model_validate(version)
 
 
-@router.post("/versions/{version_id}/activate", response_model=MessageResponse)
+@router.post("/versions/{version_id}/activate", response_model=MessageResponse, dependencies=[Depends(require_api_key())])
 def activate_version(
     version_id: int,
     db: Session = Depends(get_db),

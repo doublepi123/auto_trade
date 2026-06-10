@@ -309,7 +309,7 @@ function handleExport(fmt: 'json' | 'csv') {
     format: fmt,
   })
     .then((res) => {
-      const blob = new Blob([res.data], { type: fmt === 'json' ? 'application/json' : 'text/csv' })
+      const blob: Blob = res instanceof Blob ? res : new Blob([JSON.stringify(res)], { type: fmt === 'json' ? 'application/json' : 'text/csv' })
       const url = URL.createObjectURL(blob)
       const link = document.createElement('a')
       link.href = url

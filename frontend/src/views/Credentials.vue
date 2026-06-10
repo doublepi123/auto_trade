@@ -214,7 +214,7 @@ async function handleSave() {
       if (c.type === 'serverchan') {
         return { type: 'serverchan' as const, severity_floor: c.severity_floor }
       }
-      return { type: 'webhook' as const, severity_floor: c.severity_floor, url: c.url!.trim() }
+      return { type: 'webhook' as const, severity_floor: c.severity_floor, url: c.url?.trim() ?? '' }
     })
     payload.notification_channels = channels
     const resp = await updateCredentials(payload)

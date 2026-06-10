@@ -42,6 +42,7 @@ class StrategyService:
 
     def update_config(self, data: dict[str, Any]) -> tuple[StrategyConfig, dict[str, Any]]:
         config = self.db.query(StrategyConfig).order_by(StrategyConfig.id.desc()).first()
+        is_new = config is None
         if config is None:
             config = StrategyConfig()
 
@@ -66,15 +67,26 @@ class StrategyService:
         self.db.refresh(config)
 
         after = {k: getattr(config, k, None) for k in STRATEGY_AUDIT_KEYS}
-        diff = {
-            k: {"old": before[k], "new": after[k]}
-            for k in STRATEGY_AUDIT_KEYS
-            if before[k] != after[k]
-        }
+        if is_new:
+            # When creating a new config, only report changes for fields
+            # explicitly provided in the update data (avoids spurious diffs
+            # from default values).
+            diff = {
+                k: {"old": before.get(k, None), "new": after[k]}
+                for k in STRATEGY_AUDIT_KEYS
+                if k in data and before.get(k) != after[k]
+            }
+        else:
+            diff = {
+                k: {"old": before[k], "new": after[k]}
+                for k in STRATEGY_AUDIT_KEYS
+                if before[k] != after[k]
+            }
         return config, diff
 
     def resolve_primary_symbol(self) -> str:
-        return (self.get_config().symbol or "").strip().upper()
+        config = self.db.query(StrategyConfig).order_by(StrategyConfig.id.desc()).first()
+        return (config.symbol or "").strip().upper() if config else ""
 
     def get_runtime_state(self, symbol: str = "") -> RuntimeState:
         normalized = (symbol or "").strip().upper()

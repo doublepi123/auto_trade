@@ -1,7 +1,3 @@
-import os
-
-os.environ["AUTO_TRADE_DATABASE_URL"] = "sqlite:///data/test_backtest.db"
-
 from datetime import datetime, timezone
 from typing import TypedDict, cast
 

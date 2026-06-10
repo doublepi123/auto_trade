@@ -674,7 +674,7 @@ onMounted(() => {
       loadRecentEvents(),
       loadDiagnostics(),
     ]).finally(() => { pollLoading.value = false })
-  }, 3000)
+  }, 5000)
   load().catch(() => void 0)
   window.addEventListener('resize', handleResize)
   notifications.enable()
@@ -816,11 +816,11 @@ function metricClass(value: number | null | undefined): string {
 
 function eventTagType(
   eventTypeValue: string,
-  status: string,
+  evtStatus: string,
   source?: TradeEventRecord['source'],
 ): string {
   if (source === 'audit') return eventTypeValue === 'KILL_SWITCH' ? 'danger' : 'info'
-  if (eventTypeValue === EVENT_TYPE.LLM_ANALYSIS) return status === 'FAILED' ? 'danger' : 'primary'
+  if (eventTypeValue === EVENT_TYPE.LLM_ANALYSIS) return evtStatus === 'FAILED' ? 'danger' : 'primary'
   if (eventTypeValue === 'RISK_PAUSED') return 'danger'
   if (eventTypeValue === 'RISK_AUTO_RESUMED') return 'success'
   if (eventTypeValue === 'ORDER_FILLED') return 'success'

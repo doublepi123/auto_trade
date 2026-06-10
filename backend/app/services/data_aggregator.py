@@ -49,15 +49,15 @@ class DataAggregator:
         daily_payload = [_candle_to_dict_daily(c) for c in daily_candles]
         minute_payload = [_candle_to_dict_minute(c) for c in minute_candles]
 
-        atr = _compute_atr(daily_candles) if len(daily_candles) >= 5 else 0.0
+        atr: float | None = _compute_atr(daily_candles) if len(daily_candles) >= 5 else None
         closes = [c.close for c in daily_candles]
         highs = [c.high for c in daily_candles]
         lows = [c.low for c in daily_candles]
         volumes = [c.volume for c in daily_candles]
         bb_upper, bb_middle, bb_lower = (
-            _compute_bollinger_bands(closes) if len(closes) >= 10 else (0.0, 0.0, 0.0)
+            _compute_bollinger_bands(closes) if len(closes) >= 10 else (None, None, None)
         )
-        rsi = TechnicalIndicators.calculate_rsi(closes) if len(closes) >= 15 else 0.0
+        rsi: float | None = TechnicalIndicators.calculate_rsi(closes) if len(closes) >= 15 else None
         macd = TechnicalIndicators.calculate_macd(closes)
         volume_analysis = TechnicalIndicators.analyze_volume(volumes)
 
@@ -88,10 +88,10 @@ class DataAggregator:
 
         market_state = MarketStateDetector.detect(
             adx=adx,
-            bb_upper=bb_upper,
-            bb_middle=bb_middle,
-            bb_lower=bb_lower,
-            atr=atr,
+            bb_upper=bb_upper or 0.0,
+            bb_middle=bb_middle or 0.0,
+            bb_lower=bb_lower or 0.0,
+            atr=atr or 0.0,
             current_price=current_price,
             volume_analysis=dict(volume_analysis),
         )
@@ -277,10 +277,10 @@ class DataAggregator:
         short_selling: bool,
         daily_candles: list[dict[str, Any]],
         minute_candles: list[dict[str, Any]],
-        atr: float,
-        bb_upper: float,
-        bb_middle: float,
-        bb_lower: float,
+        atr: float | None,
+        bb_upper: float | None,
+        bb_middle: float | None,
+        bb_lower: float | None,
         current_position: str,
         recent_trades: list[dict[str, Any]],
         position_quantity: float = 0.0,
@@ -290,7 +290,7 @@ class DataAggregator:
         recent_prices: list[dict[str, Any]] | None = None,
         recent_analysis: dict[str, Any] | None = None,
         account_context: dict[str, Any] | None = None,
-        rsi: float = 0.0,
+        rsi: float | None = None,
         macd: dict[str, float] | None = None,
         volume_analysis: dict[str, Any] | None = None,
         sentiment: dict[str, Any] | None = None,
@@ -381,7 +381,7 @@ def _compute_bollinger_bands(
     span = min(period, len(closes))
     recent_closes = closes[-span:]
     middle = statistics.mean(recent_closes)
-    std = statistics.pstdev(recent_closes) if len(recent_closes) > 1 else 0.0
+    std = statistics.stdev(recent_closes) if len(recent_closes) > 1 else 0.0
     upper = middle + std_dev * std
     lower = middle - std_dev * std
     return (upper, middle, lower)

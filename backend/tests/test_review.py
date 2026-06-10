@@ -1,22 +1,24 @@
 from __future__ import annotations
 
-import os
 from datetime import datetime, timezone
 
 import pytest
 
-DB_FILE = "data/test_review.db"
-os.environ["AUTO_TRADE_DATABASE_URL"] = f"sqlite:///{DB_FILE}"
-
 from app import database
-from app.models import Base, LLMInteraction, OrderRecord, RuntimeStateSnapshot, TradeEvent
+from app.models import LLMInteraction, OrderRecord, RuntimeStateSnapshot, TradeEvent
 from app.services.review_service import ReviewService
 
 
 @pytest.fixture(autouse=True)
 def fresh_db():
-    Base.metadata.drop_all(database.engine)
-    database.init_db()
+    # Truncate relevant tables instead of drop_all to avoid destroying schema
+    # shared with other test modules.
+    with database.SessionLocal() as db:
+        db.query(TradeEvent).delete()
+        db.query(OrderRecord).delete()
+        db.query(LLMInteraction).delete()
+        db.query(RuntimeStateSnapshot).delete()
+        db.commit()
     yield
 
 

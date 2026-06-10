@@ -6,6 +6,7 @@ from typing import List
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from app.api.auth import require_api_key
 from app.core.broker import BrokerGateway
 from app.database import get_db
 from app.runner import get_runner
@@ -24,7 +25,7 @@ def get_watchlist(db: Session = Depends(get_db)) -> List[WatchlistItemResponse]:
     return [WatchlistItemResponse.model_validate(item) for item in items]
 
 
-@router.post("", response_model=WatchlistItemResponse)
+@router.post("", response_model=WatchlistItemResponse, dependencies=[Depends(require_api_key())])
 def add_watchlist_item(
     payload: WatchlistItemSchema,
     db: Session = Depends(get_db),
@@ -80,7 +81,7 @@ def get_watchlist_snapshots(
             )
         )
     return snapshots
-@router.delete("/{item_id}", response_model=MessageResponse)
+@router.delete("/{item_id}", response_model=MessageResponse, dependencies=[Depends(require_api_key())])
 def remove_watchlist_item(
     item_id: int,
     db: Session = Depends(get_db),
@@ -92,13 +93,13 @@ def remove_watchlist_item(
     return MessageResponse(message="removed")
 
 
-@router.post("/{item_id}/set-trading", response_model=WatchlistItemResponse)
+@router.post("/{item_id}/set-trading", response_model=WatchlistItemResponse, dependencies=[Depends(require_api_key())])
 def set_trading_symbol(
     item_id: int,
     db: Session = Depends(get_db),
 ) -> WatchlistItemResponse:
-    from app.models import StrategyConfig
     from app.api.strategy import _reload_strategy_after_save
+    from app.services.strategy_service import StrategyService
 
     svc = WatchlistService(db)
     try:
@@ -106,13 +107,11 @@ def set_trading_symbol(
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    # Sync active symbol to StrategyConfig (single trading target bridge)
-    strategy = db.query(StrategyConfig).order_by(StrategyConfig.id.desc()).first()
-    if strategy is not None:
-        strategy.symbol = item.symbol
-        strategy.market = item.market
-        db.add(strategy)
-        db.commit()
+    # Sync active symbol to StrategyConfig via StrategyService for audit diff tracking
+    strategy_svc = StrategyService(db)
+    current = strategy_svc.get_config()
+    if current.symbol != item.symbol or current.market != item.market:
+        strategy_svc.update_config({"symbol": item.symbol, "market": item.market})
         _reload_strategy_after_save()
 
     return WatchlistItemResponse.model_validate(item)

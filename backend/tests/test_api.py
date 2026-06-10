@@ -1,10 +1,6 @@
-import os
 import time
 from datetime import datetime, time as datetime_time, timedelta, timezone
 from types import SimpleNamespace
-
-os.environ["AUTO_TRADE_DATABASE_URL"] = "sqlite:///data/test_api.db"
-
 
 from fastapi.testclient import TestClient
 from freezegun import freeze_time
@@ -14,88 +10,71 @@ from app.api import review as review_api
 from app.api import strategy as strategy_api
 from app.api import trade as trade_api
 from app import database
-from app.database import engine as db_engine, SessionLocal
-from app.models import AuditLog, Base, CredentialConfig, LLMInteraction, OrderRecord, RuntimeState, RuntimeStateSnapshot, StrategyConfig, TradeEvent
+from app.database import SessionLocal
+from app.models import AuditLog, CredentialConfig, LLMInteraction, OrderRecord, RuntimeState, RuntimeStateSnapshot, StrategyConfig, TradeEvent
 from app.main import app
 from app.services.strategy_service import StrategyService
 
 
-Base.metadata.create_all(bind=db_engine)
-database._ensure_strategy_config_llm_columns(db_engine)
-database._ensure_strategy_config_trade_safety_columns(db_engine)
-database._ensure_strategy_config_session_columns(db_engine)
-database._ensure_strategy_config_margin_safety_factor(db_engine)
-database._ensure_llm_interaction_variant_column(db_engine)
-database._ensure_runtime_state_daily_pnl_date_column(db_engine)
-database._ensure_runtime_state_symbol_columns(db_engine)
-database._ensure_audit_log_table(db_engine)
-database._ensure_credential_config_notification_channels_column(db_engine)
+database.init_db()
 client = TestClient(app)
 
 
 def _clean_strategy() -> None:
-    db = SessionLocal()
-    db.query(StrategyConfig).delete()
-    db.commit()
-    db.close()
+    with SessionLocal() as db:
+        db.query(StrategyConfig).delete()
+        db.commit()
 
 
 def _clean_credentials() -> None:
-    db = SessionLocal()
-    db.query(CredentialConfig).delete()
-    db.commit()
-    db.close()
+    with SessionLocal() as db:
+        db.query(CredentialConfig).delete()
+        db.commit()
 
 
 def _clean_llm_interactions() -> None:
-    db = SessionLocal()
-    db.query(LLMInteraction).delete()
-    db.commit()
-    db.close()
-
+    with SessionLocal() as db:
+        db.query(LLMInteraction).delete()
+        db.commit()
 
 
 def _clean_llm_symbol_schedule_state() -> None:
     from app.models import LLMSymbolScheduleState
 
-    db = SessionLocal()
-    db.query(LLMSymbolScheduleState).delete()
-    db.commit()
-    db.close()
+    with SessionLocal() as db:
+        db.query(LLMSymbolScheduleState).delete()
+        db.commit()
+
+
 def _clean_orders() -> None:
-    db = SessionLocal()
-    db.query(OrderRecord).delete()
-    db.commit()
-    db.close()
+    with SessionLocal() as db:
+        db.query(OrderRecord).delete()
+        db.commit()
 
 
 def _clean_status_history() -> None:
-    db = SessionLocal()
-    db.query(RuntimeStateSnapshot).delete()
-    db.query(OrderRecord).delete()
-    db.commit()
-    db.close()
+    with SessionLocal() as db:
+        db.query(RuntimeStateSnapshot).delete()
+        db.query(OrderRecord).delete()
+        db.commit()
 
 
 def _clean_runtime_state() -> None:
-    db = SessionLocal()
-    db.query(RuntimeState).delete()
-    db.commit()
-    db.close()
+    with SessionLocal() as db:
+        db.query(RuntimeState).delete()
+        db.commit()
 
 
 def _clean_trade_events() -> None:
-    db = SessionLocal()
-    db.query(TradeEvent).delete()
-    db.commit()
-    db.close()
+    with SessionLocal() as db:
+        db.query(TradeEvent).delete()
+        db.commit()
 
 
 def _clean_audit_logs() -> None:
-    db = SessionLocal()
-    db.query(AuditLog).delete()
-    db.commit()
-    db.close()
+    with SessionLocal() as db:
+        db.query(AuditLog).delete()
+        db.commit()
 
 
 class TestAPI:

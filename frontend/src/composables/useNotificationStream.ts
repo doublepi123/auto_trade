@@ -103,6 +103,9 @@ function playNotificationSound(severity: NotificationSeverity) {
   if (!sharedPrefs.value.soundEnabled) return
   try {
     const ctx = getAudioContext()
+    if (ctx.state === 'suspended') {
+      ctx.resume()
+    }
     const osc = ctx.createOscillator()
     const gain = ctx.createGain()
     osc.connect(gain)
@@ -121,7 +124,7 @@ function playNotificationSound(severity: NotificationSeverity) {
 const sharedPrefs = ref<UserPreferences>(loadPreferences())
 const sharedLastEmittedAt = new Map<string, number>()
 const sharedCriticalCount = { count: 0, windowStart: Date.now() }
-const sharedKnownEventIds = new Set<number>()
+const sharedKnownEventIds = new Map<number, number>() // id -> timestamp
 let sharedPollTimer: ReturnType<typeof setInterval> | null = null
 let sharedEnabled = false
 let refCount = 0
@@ -174,18 +177,18 @@ async function fetchRecentEvents(limit = 20): Promise<EventItem[]> {
 }
 
 function processEvents(items: EventItem[], isBackfill = false) {
+  const now = Date.now()
   for (const item of items) {
     const id = item.id ?? 0
     if (id && sharedKnownEventIds.has(id)) continue
     if (id) {
-      sharedKnownEventIds.add(id)
+      sharedKnownEventIds.set(id, now)
       if (sharedKnownEventIds.size > 1000) {
-        const toRemove = sharedKnownEventIds.size - 1000
-        let removed = 0
-        for (const existingId of sharedKnownEventIds) {
-          sharedKnownEventIds.delete(existingId)
-          removed += 1
-          if (removed >= toRemove) break
+        // Evict oldest entries by timestamp (LRU-style)
+        const entries = [...sharedKnownEventIds.entries()].sort((a, b) => a[1] - b[1])
+        const toRemove = entries.slice(0, entries.length - 1000)
+        for (const [oldId] of toRemove) {
+          sharedKnownEventIds.delete(oldId)
         }
       }
     }
@@ -245,7 +248,7 @@ export function useNotificationStream() {
   }
 
   onUnmounted(() => {
-    refCount--
+    refCount = Math.max(0, refCount - 1)
     if (refCount <= 0) {
       disable()
       refCount = 0

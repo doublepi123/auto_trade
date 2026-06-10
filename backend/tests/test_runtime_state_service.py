@@ -1,31 +1,20 @@
 # pyright: reportArgumentType=false, reportAttributeAccessIssue=false
 from __future__ import annotations
 
-import os
-
-os.environ["AUTO_TRADE_DATABASE_URL"] = "sqlite:///data/test_runtime_state.db"
-
-from sqlalchemy import create_engine
-from sqlalchemy.orm import Session
-
+from app import database
 from app.core.engine import StrategyEngine, EngineState, StrategyParams
 from app.core.risk import RiskController
-from app.models import Base
 from app.models import RuntimeState, RuntimeStateSnapshot, StrategyConfig
 from app.services.runtime_state_service import RuntimeStateService
 from app.services.strategy_service import StrategyService
 
 
-class TestRuntimeStateService:
-    @classmethod
-    def setup_class(cls) -> None:
-        engine = create_engine(os.environ["AUTO_TRADE_DATABASE_URL"], connect_args={"check_same_thread": False})
-        Base.metadata.drop_all(bind=engine)
-        Base.metadata.create_all(bind=engine)
-        cls.engine = engine
+database.init_db()
 
-    def _get_db(self) -> Session:
-        return Session(bind=self.engine)
+
+class TestRuntimeStateService:
+    def _get_db(self):
+        return database.SessionLocal()
 
     def _cleanup(self) -> None:
         db = self._get_db()

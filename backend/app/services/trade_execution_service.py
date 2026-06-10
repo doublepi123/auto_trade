@@ -138,6 +138,7 @@ class TradeExecutionService:
                 for pending in self._pending_orders.values()
             }
             self._pending_orders.clear()
+            seen_ids: dict[str, str] = {}
             for pending in pending_orders:
                 existing = existing_by_id.get(pending.broker_order_id)
                 if existing is not None:
@@ -153,6 +154,12 @@ class TradeExecutionService:
                         next_status_check_at=existing.next_status_check_at,
                         submitted_at=existing.submitted_at,
                     )
+                # If broker_order_id was already seen under a different symbol,
+                # remove the stale entry (broker ID reuse scenario).
+                prev_symbol = seen_ids.get(pending.broker_order_id)
+                if prev_symbol is not None and prev_symbol != pending.symbol:
+                    self._pending_orders.pop(prev_symbol, None)
+                seen_ids[pending.broker_order_id] = pending.symbol
                 self._pending_orders[pending.symbol] = pending
 
     def snapshot_tracked_entries(self) -> dict[str, tuple[Decimal, Decimal]]:
@@ -184,7 +191,11 @@ class TradeExecutionService:
     def _pending_order(self, pending: _PendingOrder | None) -> None:
         with self._state_lock:
             if pending is None:
-                self._pending_orders.clear()
+                # Only clear a single order (the first one) rather than all,
+                # consistent with the single-order getter semantics.
+                if self._pending_orders:
+                    first_symbol = next(iter(self._pending_orders))
+                    del self._pending_orders[first_symbol]
                 return
             self._pending_orders[pending.symbol] = pending
 
@@ -198,6 +209,13 @@ class TradeExecutionService:
         with self._state_lock:
             pending_orders = list(self._pending_orders.values())
         for pending in pending_orders:
+            # Guard: skip if the pending was already cleared by a prior
+            # iteration (e.g., duplicate broker_order_id).
+            with self._state_lock:
+                if pending.broker_order_id not in {
+                    p.broker_order_id for p in self._pending_orders.values()
+                }:
+                    continue
             self._reconcile_pending_order(
                 pending,
                 risk=risk,
@@ -789,6 +807,12 @@ class TradeExecutionService:
             submitted_at=time.monotonic(),
         )
         with self._state_lock:
+            existing = self._pending_orders.get(pending.symbol)
+            if existing is not None:
+                raise OrderPersistenceError(
+                    f"pending order {existing.broker_order_id} already tracked for {pending.symbol}; "
+                    f"cannot track new order {pending.broker_order_id}"
+                )
             self._pending_orders[pending.symbol] = pending
 
     def _clear_pending_order(self, order_id: str) -> None:
@@ -822,6 +846,15 @@ class TradeExecutionService:
             )
             return
 
+        try:
+            order_status = self._coerce_order_status(pending.broker.get_order_status(pending.broker_order_id), pending.broker_order_id)
+        except Exception:
+            logger.exception("failed to query pending order status for %s", pending.broker_order_id)
+            return
+
+        # Update the pending order's next check time only after a successful
+        # broker query, so a failed poll does not skip the order on the next
+        # reconciliation cycle.
         updated_pending = _PendingOrder(
             broker=pending.broker,
             broker_order_id=pending.broker_order_id,
@@ -836,12 +869,6 @@ class TradeExecutionService:
         )
         with self._state_lock:
             self._pending_orders[updated_pending.symbol] = updated_pending
-
-        try:
-            order_status = self._coerce_order_status(pending.broker.get_order_status(pending.broker_order_id), pending.broker_order_id)
-        except Exception:
-            logger.exception("failed to query pending order status for %s", pending.broker_order_id)
-            return
 
         self._safe_update_order_status_from_result(order_status)
         status = order_status.status
@@ -935,21 +962,27 @@ class TradeExecutionService:
         fill_qty = fill_qty if fill_qty is not None else self._resolved_decimal(order_status, "executed_quantity", pending.quantity)
         if pending.action == "SELL":
             avg_price = self._resolve_avg_price_for_exit(pending.symbol, pending.avg_price if pending.avg_price is not None and pending.avg_price > 0 else None, fill_qty)
-            pnl = float((fill_price - avg_price) * fill_qty)
             self._safe_notify_order(notifier, "SELL", pending.symbol, str(fill_qty), str(fill_price), pending.broker_order_id)
-            if risk is not None:
-                risk.record_trade(pnl)
+            if avg_price > 0:
+                pnl = float((fill_price - avg_price) * fill_qty)
+                if risk is not None:
+                    risk.record_trade(pnl)
+                logger.info("SELL filled: %s qty=%s price=%s avg_price=%s pnl=%s", pending.symbol, fill_qty, fill_price, avg_price, pnl)
+            else:
+                logger.warning("SELL filled with avg_price=0 for %s, skipping PnL recording to avoid inflated risk", pending.symbol)
             self._consume_entry_quantity(pending.symbol, fill_qty)
-            logger.info("SELL filled: %s qty=%s price=%s avg_price=%s pnl=%s", pending.symbol, fill_qty, fill_price, avg_price, pnl)
             return
         if pending.action == "BUY_TO_COVER":
             avg_price = self._resolve_avg_price_for_exit(pending.symbol, pending.avg_price if pending.avg_price is not None and pending.avg_price > 0 else None, fill_qty)
-            pnl = float((avg_price - fill_price) * fill_qty)
             self._safe_notify_order(notifier, "BUY_TO_COVER", pending.symbol, str(fill_qty), str(fill_price), pending.broker_order_id)
-            if risk is not None:
-                risk.record_trade(pnl)
+            if avg_price > 0:
+                pnl = float((avg_price - fill_price) * fill_qty)
+                if risk is not None:
+                    risk.record_trade(pnl)
+                logger.info("BUY_TO_COVER filled: %s qty=%s price=%s avg_price=%s pnl=%s", pending.symbol, fill_qty, fill_price, avg_price, pnl)
+            else:
+                logger.warning("BUY_TO_COVER filled with avg_price=0 for %s, skipping PnL recording to avoid inflated risk", pending.symbol)
             self._consume_entry_quantity(pending.symbol, fill_qty)
-            logger.info("BUY_TO_COVER filled: %s qty=%s price=%s avg_price=%s pnl=%s", pending.symbol, fill_qty, fill_price, avg_price, pnl)
             return
         self._safe_notify_order(notifier, pending.action, pending.symbol, str(fill_qty), str(fill_price), pending.broker_order_id)
         if pending.action in {"BUY", "SELL_SHORT"}:
@@ -1223,6 +1256,7 @@ class TradeExecutionService:
                 cleared = True
             else:
                 if entry.cost < 0:
+                    logger.warning("cost clamp for %s: cost went negative (%s), resetting to 0", symbol, entry.cost)
                     entry.cost = Decimal("0")
                 snapshot = (entry.quantity, entry.cost)
         if cleared:

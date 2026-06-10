@@ -401,8 +401,16 @@ def enable_llm_interval(
     config.auto_interval_enabled = True
     db.commit()
     db.refresh(config)
-    from app.api.strategy import _reload_strategy_after_save
-    _reload_strategy_after_save()
+    reload_warning = None
+    try:
+        from app.api.strategy import _reload_strategy_after_save
+        _reload_strategy_after_save()
+    except Exception:
+        logger.exception("strategy reload failed after enabling LLM interval")
+        reload_warning = (
+            "LLM interval enabled but live reload failed. "
+            "A restart may be required for changes to take effect."
+        )
     actor_hash, source_ip = extract_actor(request)
     audit.record(
         "LLM_INTERVAL_ENABLE",
@@ -412,7 +420,10 @@ def enable_llm_interval(
         request_summary={"action": "enable"},
         result="SUCCESS",
     )
-    return MessageResponse(message="LLM auto interval enabled")
+    msg = "LLM auto interval enabled"
+    if reload_warning:
+        msg = f"{msg}. {reload_warning}"
+    return MessageResponse(message=msg)
 
 
 @router.put("/strategy/llm-interval/disable", response_model=MessageResponse, dependencies=[Depends(require_api_key())])
@@ -426,8 +437,16 @@ def disable_llm_interval(
     config.auto_interval_enabled = False
     db.commit()
     db.refresh(config)
-    from app.api.strategy import _reload_strategy_after_save
-    _reload_strategy_after_save()
+    reload_warning = None
+    try:
+        from app.api.strategy import _reload_strategy_after_save
+        _reload_strategy_after_save()
+    except Exception:
+        logger.exception("strategy reload failed after disabling LLM interval")
+        reload_warning = (
+            "LLM interval disabled but live reload failed. "
+            "A restart may be required for changes to take effect."
+        )
     actor_hash, source_ip = extract_actor(request)
     audit.record(
         "LLM_INTERVAL_DISABLE",
@@ -437,4 +456,7 @@ def disable_llm_interval(
         request_summary={"action": "disable"},
         result="SUCCESS",
     )
-    return MessageResponse(message="LLM auto interval disabled")
+    msg = "LLM auto interval disabled"
+    if reload_warning:
+        msg = f"{msg}. {reload_warning}"
+    return MessageResponse(message=msg)

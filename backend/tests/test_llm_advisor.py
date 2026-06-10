@@ -1,10 +1,6 @@
 from __future__ import annotations
 from typing import Any, cast
 
-import os
-
-os.environ["AUTO_TRADE_DATABASE_URL"] = "sqlite:///data/test_llm.db"
-
 from datetime import datetime, timezone
 
 import pytest
@@ -451,12 +447,13 @@ class TestLLMAdvisorService:
     def test_analyze_records_llm_interaction_history(self, advisor: LLMAdvisorService, monkeypatch) -> None:
         from datetime import datetime, timezone
 
-        from app.database import SessionLocal, engine
-        from app.models import Base, LLMInteraction
+        from app.database import SessionLocal
+        from app.models import LLMInteraction
         import app.services.llm_advisor_service as service_module
 
-        Base.metadata.drop_all(bind=engine)
-        Base.metadata.create_all(bind=engine)
+        with SessionLocal() as db:
+            db.query(LLMInteraction).delete()
+            db.commit()
         monkeypatch.setattr(service_module, "_LAST_ANALYSIS_TIMESTAMP", 0.0)
         monkeypatch.setattr(
             advisor._data_aggregator,
@@ -735,7 +732,10 @@ class TestABVariantSelection:
             market_data={},
             prompt_template=custom,
         )
-        assert result == custom
+        # System instructions are always prepended to custom templates to
+        # prevent full override of safety directives.
+        assert result.startswith("你是一个专业量化交易顾问")
+        assert custom in result
     def test_build_prompt_uses_default_modules_when_no_template(self) -> None:
         advisor = LLMAdvisorService()
         result = advisor._build_prompt(
@@ -760,12 +760,13 @@ class TestABVariantSelection:
         assert "买入下限" in result or "buy_low" in result
     def test_select_variant_returns_template_from_existing_version(self, monkeypatch) -> None:
         import app.config
-        from app.database import SessionLocal, engine
+        from app.database import SessionLocal
         from app.domain.experiment.ab_test_manager import ABTestManager
-        from app.models import Base, PromptVersion
+        from app.models import PromptVersion
 
-        Base.metadata.drop_all(bind=engine)
-        Base.metadata.create_all(bind=engine)
+        with SessionLocal() as db:
+            db.query(PromptVersion).delete()
+            db.commit()
         monkeypatch.setattr(app.config.settings, "llm_experiment_name", "ab-test")
         db = SessionLocal()
         try:
@@ -922,12 +923,13 @@ class TestLLMAdvisorDegradation:
         and return success=False.
         """
         import app.config
-        from app.database import SessionLocal, engine
-        from app.models import Base, LLMInteraction
+        from app.database import SessionLocal
+        from app.models import LLMInteraction
         import app.services.llm_advisor_service as service_module
 
-        Base.metadata.drop_all(bind=engine)
-        Base.metadata.create_all(bind=engine)
+        with SessionLocal() as db:
+            db.query(LLMInteraction).delete()
+            db.commit()
         monkeypatch.setattr(service_module, "_LAST_ANALYSIS_TIMESTAMP", 0.0)
         monkeypatch.setattr(app.config.settings, "deepseek_api_key", "test-key")
         monkeypatch.setattr(
@@ -986,12 +988,13 @@ class TestLLMAdvisorDegradation:
         llm_interactions row (success=False, error contains underlying info, raw_response empty)
         and return success=False.
         """
-        from app.database import SessionLocal, engine
-        from app.models import Base, LLMInteraction
+        from app.database import SessionLocal
+        from app.models import LLMInteraction
         import app.services.llm_advisor_service as service_module
 
-        Base.metadata.drop_all(bind=engine)
-        Base.metadata.create_all(bind=engine)
+        with SessionLocal() as db:
+            db.query(LLMInteraction).delete()
+            db.commit()
         monkeypatch.setattr(service_module, "_LAST_PREVIEW_TIMESTAMP", 0.0)
         monkeypatch.setattr(
             advisor._data_aggregator,

@@ -1,31 +1,27 @@
-import os
-os.environ["AUTO_TRADE_DATABASE_URL"] = "sqlite:///data/test_watchlist.db"
-
-from app.database import engine as db_engine, SessionLocal
-from app.models import Base, StrategyConfig, WatchlistItem
+from app.database import SessionLocal
+from app.models import StrategyConfig, WatchlistItem
 from app.main import app
 from app.services.watchlist_service import WatchlistService
+from app import database
 from fastapi.testclient import TestClient
 import pytest
 
-Base.metadata.create_all(bind=db_engine)
+database.init_db()
 
 client = TestClient(app)
 
 
 @pytest.fixture
 def clean_db():
-    db = SessionLocal()
-    db.query(WatchlistItem).delete()
-    db.query(StrategyConfig).delete()
-    db.commit()
-    db.close()
+    with SessionLocal() as db:
+        db.query(WatchlistItem).delete()
+        db.query(StrategyConfig).delete()
+        db.commit()
     yield
-    db = SessionLocal()
-    db.query(WatchlistItem).delete()
-    db.query(StrategyConfig).delete()
-    db.commit()
-    db.close()
+    with SessionLocal() as db:
+        db.query(WatchlistItem).delete()
+        db.query(StrategyConfig).delete()
+        db.commit()
 
 
 class TestWatchlistApi:

@@ -99,10 +99,10 @@ class TestFetchMarketData:
         result = aggregator.fetch_market_data("0700.HK", "HK")
 
         assert result["current_price"] == pytest.approx(minute[-1].close)
-        assert result["atr"] == 0.0
-        assert result["bb_upper"] == 0.0
-        assert result["bb_middle"] == 0.0
-        assert result["bb_lower"] == 0.0
+        assert result["atr"] is None
+        assert result["bb_upper"] is None
+        assert result["bb_middle"] is None
+        assert result["bb_lower"] is None
 
     def test_returns_zero_indicators_when_broker_throws(self) -> None:
         broker = _FakeBroker(raise_on={"Day", "Min_1"}, quote_error=True)
@@ -113,8 +113,8 @@ class TestFetchMarketData:
         assert result["daily_candles"] == []
         assert result["minute_candles"] == []
         assert result["current_price"] == 0.0
-        assert result["atr"] == 0.0
-        assert result["bb_upper"] == 0.0
+        assert result["atr"] is None
+        assert result["bb_upper"] is None
 
     def test_prompt_renders_real_daily_table(self) -> None:
         daily = _build_candles(200.0, 7)

@@ -998,11 +998,12 @@ class TestAppRunner:
         assert events == []
 
     def test_persist_tracked_entry_writes_then_deletes(self) -> None:
-        from app.database import SessionLocal, engine
-        from app.models import Base, TrackedEntry
+        from app.database import SessionLocal
+        from app.models import TrackedEntry
 
-        Base.metadata.drop_all(bind=engine)
-        Base.metadata.create_all(bind=engine)
+        with SessionLocal() as db:
+            db.query(TrackedEntry).delete()
+            db.commit()
 
         runner = AppRunner()
         runner._persist_tracked_entry("AAPL.US", Decimal("10"), Decimal("1500"))

@@ -15,9 +15,10 @@ export async function exportReview(params: {
   from_date: string
   to_date: string
   format: 'json' | 'csv'
-}) {
-  return api.get('/api/review/export', {
+}): Promise<Blob | unknown> {
+  const resp = await api.get('/api/review/export', {
     params,
     responseType: params.format === 'csv' ? 'blob' : 'json',
   })
+  return resp.data
 }

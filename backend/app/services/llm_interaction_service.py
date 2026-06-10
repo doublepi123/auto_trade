@@ -70,7 +70,6 @@ class LLMInteractionService:
             record.order_status = order_status
         if order_id is not None:
             record.order_id = order_id
-        self.db.add(record)
         self.db.commit()
 
     def list_recent(self, limit: int = 50) -> list[LLMInteraction]:

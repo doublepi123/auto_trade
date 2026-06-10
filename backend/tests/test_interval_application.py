@@ -1,29 +1,19 @@
 from __future__ import annotations
 
-import os
-
-DB_URL = "sqlite:///data/test_interval.db"
-os.environ["AUTO_TRADE_DATABASE_URL"] = DB_URL
-
 import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import Session
 
-from app.models import Base, StrategyConfig
+from app import database
+from app.models import StrategyConfig
 from app.services.interval_application_service import IntervalApplicationService
 from app.services.strategy_service import StrategyService
 
 
-class TestIntervalApplicationService:
-    @classmethod
-    def setup_class(cls) -> None:
-        engine = create_engine(DB_URL, connect_args={"check_same_thread": False})
-        Base.metadata.drop_all(bind=engine)
-        Base.metadata.create_all(bind=engine)
-        cls.engine = engine
+database.init_db()
 
-    def _get_db(self) -> Session:
-        return Session(bind=self.engine)
+
+class TestIntervalApplicationService:
+    def _get_db(self):
+        return database.SessionLocal()
 
     def _cleanup(self) -> None:
         db = self._get_db()

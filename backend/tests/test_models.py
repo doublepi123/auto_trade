@@ -1,28 +1,17 @@
-import os
+from sqlalchemy.orm import Session
 
-from sqlalchemy import create_engine
-from sqlalchemy.orm import Session, sessionmaker
+from app import database
+from app.models import OrderRecord, RiskEvent, RuntimeState, StrategyConfig
 
-from app.models import Base, OrderRecord, RiskEvent, RuntimeState, StrategyConfig
 
-DB_URL = "sqlite:///data/test_models.db"
+database.init_db()
 
 
 class TestModels:
     @classmethod
     def setup_class(cls) -> None:
-        engine = create_engine(DB_URL, connect_args={"check_same_thread": False})
-        Base.metadata.drop_all(bind=engine)
-        Base.metadata.create_all(bind=engine)
-        cls.engine = engine
-        cls.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
-    @classmethod
-    def teardown_class(cls) -> None:
-        cls.engine.dispose()
-        db_path = "data/test_models.db"
-        if os.path.exists(db_path):
-            os.remove(db_path)
+        cls.engine = database.engine
+        cls.SessionLocal = database.SessionLocal
 
     def _get_db(self) -> Session:
         return self.SessionLocal()

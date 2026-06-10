@@ -41,7 +41,9 @@
           <el-tag :type="statusType(row.status)">{{ orderStatusLabel(row.status) }}</el-tag>
         </template>
       </el-table-column>
-      <el-table-column prop="created_at" label="创建时间" width="200" />
+      <el-table-column prop="created_at" label="创建时间" width="200">
+        <template #default="{ row }">{{ formatDateTime(row.created_at) }}</template>
+      </el-table-column>
       <el-table-column label="操作" width="120">
         <template #default="{ row }">
           <el-button
@@ -137,6 +139,17 @@ async function handleCancel(row: OrderRecord) {
   } finally {
     cancellingOrderId.value = ''
   }
+}
+
+function formatDateTime(value: string): string {
+  if (!value) return '-'
+  return new Date(value).toLocaleString([], {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
 }
 
 function statusType(status: string): string {

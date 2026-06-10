@@ -441,13 +441,16 @@ onMounted(async () => {
     const qs = route.query.sell_high
     const qf = route.query.fee_rate
     const qMarket = route.query.market
-    if (qb) form.value.buy_low = Number(qb)
-    if (qs) form.value.sell_high = Number(qs)
+    if (qb) { const parsed = Number(qb); if (!isNaN(parsed)) form.value.buy_low = parsed }
+    if (qs) { const parsed = Number(qs); if (!isNaN(parsed)) form.value.sell_high = parsed }
     if (qf) {
-      if (qMarket === 'HK') {
-        form.value.fee_rate_hk = Number(qf) * 100
-      } else {
-        form.value.fee_rate_us = Number(qf) * 100
+      const parsedFee = Number(qf)
+      if (!isNaN(parsedFee)) {
+        if (qMarket === 'HK') {
+          form.value.fee_rate_hk = parsedFee * 100
+        } else {
+          form.value.fee_rate_us = parsedFee * 100
+        }
       }
     }
     ElMessage.info(`已加载实验 Run #${draftRunId} 的草稿参数，请确认后保存`)

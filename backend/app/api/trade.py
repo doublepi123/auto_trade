@@ -13,6 +13,7 @@ from typing import Any, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy.orm import Session
 
+from app.api.auth import require_api_key
 from app.api.deps import extract_actor, get_audit_logger
 from app.core.audit import AuditLogger
 from app.database import SessionLocal, get_db
@@ -71,7 +72,8 @@ def _is_today(value: datetime | None) -> bool:
         return False
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
-    return value.astimezone().date() == datetime.now().astimezone().date()
+    # Use UTC consistently to match the DB query filter (today_start_utc).
+    return value.astimezone(timezone.utc).date() == datetime.now(timezone.utc).date()
 
 
 def _local_order_response(order: OrderRecord) -> OrderResponse:
@@ -240,9 +242,9 @@ def get_orders(
             scope=scope,
         )
 
-    now_local = datetime.now().astimezone()
-    today_start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
-    today_start_utc = today_start_local.astimezone(timezone.utc)
+    # Use UTC consistently for the DB filter to match _is_today().
+    now_utc = datetime.now(timezone.utc)
+    today_start_utc = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
     local_orders = (
         db.query(OrderRecord)
         .filter(OrderRecord.created_at >= today_start_utc)
@@ -265,7 +267,7 @@ def get_trade_events(
     page_size: int = Query(default=20, ge=1, le=200),
     limit: Optional[int] = Query(default=None, ge=1, le=200),
     symbol: Optional[str] = Query(default=None, max_length=50),
-    event_type: Optional[List[str]] = Query(default=None),
+    event_type: Optional[List[str]] = Query(default=None, max_length=50),
     source: str = Query(default="all", pattern="^(trade|audit|all)$"),
     skip_category: Optional[str] = Query(default=None, max_length=20),
     db: Session = Depends(get_db),
@@ -360,12 +362,18 @@ def cancel_order(
     summary: dict[str, Any] = {"order_id": order_id}
     try:
         order = db.query(OrderRecord).filter(OrderRecord.broker_order_id == order_id).first()
-        if order is not None:
-            summary = {
-                "symbol": order.symbol,
-                "quantity": order.quantity,
-                "side": order.side,
-            }
+        if order is None:
+            raise HTTPException(status_code=404, detail=f"order {order_id} not found in local records")
+        if order.status not in _LIVE_ORDER_STATUSES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"order {order_id} is in status '{order.status}' and cannot be cancelled",
+            )
+        summary = {
+            "symbol": order.symbol,
+            "quantity": order.quantity,
+            "side": order.side,
+        }
         runner = get_runner()
         try:
             cancel_by_id = getattr(runner, "cancel_order_by_id", None)
@@ -406,7 +414,7 @@ def cancel_order(
 
 ACCOUNT_CACHE_TTL_SECONDS = 5.0
 _account_cache_lock = threading.Lock()
-_account_snapshot_cache: tuple[int, float, AccountResponse] | None = None
+_account_snapshot_cache: tuple[object, float, AccountResponse] | None = None
 _account_refresh_lock = threading.Lock()
 
 
@@ -418,8 +426,8 @@ def _cached_account_response(broker: object, now: float, *, allow_stale: bool) -
     with _account_cache_lock:
         if _account_snapshot_cache is None:
             return None
-        broker_id, cached_at, response = _account_snapshot_cache
-        if broker_id == id(broker) and (allow_stale or now - cached_at <= ACCOUNT_CACHE_TTL_SECONDS):
+        cached_broker, cached_at, response = _account_snapshot_cache
+        if cached_broker is broker and (allow_stale or now - cached_at <= ACCOUNT_CACHE_TTL_SECONDS):
             return response.model_copy(deep=True)
     return None
 
@@ -427,7 +435,7 @@ def _cached_account_response(broker: object, now: float, *, allow_stale: bool) -
 def _store_account_response(broker: object, now: float, response: AccountResponse) -> None:
     with _account_cache_lock:
         global _account_snapshot_cache
-        _account_snapshot_cache = (id(broker), now, response.model_copy(deep=True))
+        _account_snapshot_cache = (broker, now, response.model_copy(deep=True))
 
 
 
@@ -536,7 +544,7 @@ def get_account() -> AccountResponse:
 
 
 
-@router.post("/control/start", response_model=MessageResponse)
+@router.post("/control/start", response_model=MessageResponse, dependencies=[Depends(require_api_key())])
 def start_runner(
     request: Request,
     db: Session = Depends(get_db),
@@ -588,7 +596,7 @@ def start_runner(
 
 
 
-@router.post("/control/stop", response_model=MessageResponse)
+@router.post("/control/stop", response_model=MessageResponse, dependencies=[Depends(require_api_key())])
 def stop_runner(
     request: Request,
     payload: ControlRequest,
@@ -642,7 +650,7 @@ def stop_runner(
             logger.exception("failed to record control stop trace")
 
 
-@router.post("/control/pause", response_model=MessageResponse)
+@router.post("/control/pause", response_model=MessageResponse, dependencies=[Depends(require_api_key())])
 def pause_trading(
     request: Request,
     payload: ControlRequest,
@@ -695,7 +703,7 @@ def pause_trading(
             logger.exception("failed to record control pause trace")
 
 
-@router.post("/control/resume", response_model=MessageResponse)
+@router.post("/control/resume", response_model=MessageResponse, dependencies=[Depends(require_api_key())])
 def resume_trading(
     request: Request,
     db: Session = Depends(get_db),
@@ -742,7 +750,7 @@ def resume_trading(
             logger.exception("failed to record control resume trace")
 
 
-@router.post("/control/kill-switch", response_model=MessageResponse)
+@router.post("/control/kill-switch", response_model=MessageResponse, dependencies=[Depends(require_api_key())])
 def kill_switch(
     request: Request,
     payload: ControlRequest,
@@ -801,7 +809,7 @@ def kill_switch(
             logger.exception("failed to record control kill-switch trace")
 
 
-@router.post("/control/disable-kill-switch", response_model=MessageResponse)
+@router.post("/control/disable-kill-switch", response_model=MessageResponse, dependencies=[Depends(require_api_key())])
 def disable_kill_switch(
     request: Request,
     db: Session = Depends(get_db),

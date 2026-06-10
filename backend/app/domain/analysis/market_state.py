@@ -32,7 +32,7 @@ class MarketStateDetector:
     ) -> MarketState:
         """Detect market state from indicators."""
         # Default for insufficient data
-        if not adx or bb_middle <= 0:
+        if not adx or bb_middle <= 0 or current_price <= 0:
             return MarketState(
                 state="neutral",
                 confidence=0.5,

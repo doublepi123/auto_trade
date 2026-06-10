@@ -1,28 +1,20 @@
 from __future__ import annotations
 
-import os
 from datetime import date, datetime, time, timezone
 
-os.environ["AUTO_TRADE_DATABASE_URL"] = "sqlite:///data/test_daily_pnl.db"
-
 from pytest import approx
-from sqlalchemy import create_engine
-from sqlalchemy.orm import Session
 
-from app.models import Base, OrderRecord
+from app import database
+from app.models import OrderRecord
 from app.services.daily_pnl_service import DailyPnlService
 
 
-class TestDailyPnlService:
-    @classmethod
-    def setup_class(cls) -> None:
-        engine = create_engine(os.environ["AUTO_TRADE_DATABASE_URL"], connect_args={"check_same_thread": False})
-        Base.metadata.drop_all(bind=engine)
-        Base.metadata.create_all(bind=engine)
-        cls.engine = engine
+database.init_db()
 
-    def _get_db(self) -> Session:
-        return Session(bind=self.engine)
+
+class TestDailyPnlService:
+    def _get_db(self):
+        return database.SessionLocal()
 
     def _cleanup(self) -> None:
         db = self._get_db()

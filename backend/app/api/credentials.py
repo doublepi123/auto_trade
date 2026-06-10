@@ -6,6 +6,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
+from app.api.auth import require_api_key
 from app.api.deps import extract_actor, get_audit_logger
 from app.core.audit import AuditLogger
 from app.database import get_db
@@ -49,7 +50,7 @@ def _mask_credentials_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-@router.get("/credentials", response_model=CredentialResponse)
+@router.get("/credentials", response_model=CredentialResponse, dependencies=[Depends(require_api_key())])
 def get_credentials(db: Session = Depends(get_db)) -> CredentialResponse:
     svc = CredentialsService(db)
     config = svc.get_config()

@@ -77,6 +77,11 @@ class Settings(BaseSettings):
     min_exit_profit_pct: float = 0.2
     engine_cooldown_seconds: int = Field(default=60, ge=0, le=3600, validation_alias="AUTO_TRADE_ENGINE_COOLDOWN_SECONDS")
 
+    cors_origins: str = Field(
+        default="http://localhost:3000,http://localhost:8080",
+        validation_alias="AUTO_TRADE_CORS_ORIGINS",
+    )
+
     default_strategy: dict[str, Any] = Field(default_factory=lambda: {
         "symbol": "",
         "market": "US",
@@ -106,6 +111,18 @@ class Settings(BaseSettings):
             logger.warning(
                 "AUTO_TRADE_API_KEY is empty — the API is running without authentication. "
                 "Set a non-empty API key via environment variable or .env file to secure the application."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def warn_misconfigured_deepseek_key(self) -> "Settings":
+        """Warn if the user set AUTO_TRADE_DEEPSEEK_API_KEY, which is silently ignored."""
+        import os
+
+        if os.environ.get("AUTO_TRADE_DEEPSEEK_API_KEY"):
+            logger.warning(
+                "AUTO_TRADE_DEEPSEEK_API_KEY is set but will be ignored. "
+                "The DeepSeek API key uses env var DEEPSEEK_API_KEY (no AUTO_TRADE_ prefix)."
             )
         return self
 

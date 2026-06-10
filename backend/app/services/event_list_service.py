@@ -138,17 +138,15 @@ def list_timeline_events(
     trade_total = tq.count()
     trade_rows = tq.order_by(TradeEvent.created_at.desc(), TradeEvent.id.desc()).limit(fetch_n).all()
 
-    if not symbol:
-        aq = db.query(AuditLog)
-        if et:
-            aq = aq.filter(AuditLog.action.in_(et))
-        audit_total = aq.count()
-        audit_rows = aq.order_by(AuditLog.created_at.desc(), AuditLog.id.desc()).limit(fetch_n).all()
-
+    aq = db.query(AuditLog)
     if symbol:
-        total = trade_total
-    else:
-        total = min(trade_total + audit_total, _MAX_MERGED_FETCH)
+        aq = aq.filter(AuditLog.request_summary.contains(symbol))
+    if et:
+        aq = aq.filter(AuditLog.action.in_(et))
+    audit_total = aq.count()
+    audit_rows = aq.order_by(AuditLog.created_at.desc(), AuditLog.id.desc()).limit(fetch_n).all()
+
+    total = trade_total + audit_total
 
     merged = [_trade_row_to_out(r) for r in trade_rows] + [_audit_row_to_out(r) for r in audit_rows]
     merged.sort(key=_sort_key)
