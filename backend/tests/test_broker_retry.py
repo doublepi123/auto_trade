@@ -18,6 +18,18 @@ def gw(monkeypatch):
     from app.core import broker as broker_mod
 
     monkeypatch.setattr(broker_mod, "RETRYABLE_EXC", (_TransientErr,))
+    class FakeModule:
+        class OrderSide:
+            Buy = "Buy"
+            Sell = "Sell"
+
+        class OrderType:
+            LO = "LO"
+
+        class TimeInForceType:
+            Day = "DAY"
+
+    monkeypatch.setattr(broker_mod, "_import_openapi", lambda: FakeModule)
     return BrokerGateway()
 
 

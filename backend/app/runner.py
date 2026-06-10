@@ -95,6 +95,7 @@ class AppRunner:
             record_risk_event=self._record_risk_event,
             record_order_skipped=self._record_order_skipped,
             persist_entry=self._persist_tracked_entry,
+            on_fill=self._mark_fill_processed,
             audit=self._audit,
             margin_safety_factor=None,
         )
@@ -124,6 +125,10 @@ class AppRunner:
         self._last_action_message = ""
         self._last_llm_action_at: dict[tuple[str, str], float] = {}
         self._last_fill_at: float = 0.0
+
+    def _mark_fill_processed(self) -> None:
+        with self._state_lock:
+            self._last_fill_at = time.monotonic()
 
     def _initialize_runner(self) -> None:
         with self._db_session() as db:
@@ -574,8 +579,7 @@ class AppRunner:
                 self._set_last_action_message(f"{result.action} {order_status.status}: {order_id}")
                 # Record fill timestamp to protect position sync from stale snapshots
                 if order_status.status in {"FILLED", "SUBMITTED", "PARTIAL_FILLED"}:
-                    with self._state_lock:
-                        self._last_fill_at = time.monotonic()
+                    self._mark_fill_processed()
             self._broadcast_status()
         except Exception as exc:
             if engine_snapshot is not None:
@@ -660,7 +664,10 @@ class AppRunner:
                 if action == "CANCEL_PENDING":
                     cancel_status = self._trade_svc.cancel_pending_order_for_symbol(
                         target_symbol,
+                        risk=self.risk,
+                        notifier=self.notifier,
                         restore_engine_snapshot=lambda snapshot: target_engine.restore(snapshot),
+                        notify_risk_event=self.notifier.notify_risk_event,
                     )
                     return {
                         "executed": cancel_status.status == "CANCELLED",
@@ -690,7 +697,10 @@ class AppRunner:
                     return session_skipped
                 cancel_status = self._trade_svc.cancel_pending_order_for_symbol(
                     target_symbol,
+                    risk=self.risk,
+                    notifier=self.notifier,
                     restore_engine_snapshot=lambda snapshot: target_engine.restore(snapshot),
+                    notify_risk_event=self.notifier.notify_risk_event,
                 )
                 if cancel_status.status not in {"CANCELLED", "NO_PENDING_ORDER"}:
                     return {
@@ -729,7 +739,10 @@ class AppRunner:
                     return session_skipped
                 cancel_status = self._trade_svc.cancel_pending_order_for_symbol(
                     target_symbol,
+                    risk=self.risk,
+                    notifier=self.notifier,
                     restore_engine_snapshot=lambda snapshot: target_engine.restore(snapshot),
+                    notify_risk_event=self.notifier.notify_risk_event,
                 )
                 replaced_order_id = cancel_status.broker_order_id or None
                 if cancel_status.status not in {"CANCELLED", "NO_PENDING_ORDER"}:
@@ -766,7 +779,10 @@ class AppRunner:
         return self._trade_svc.cancel_order_by_id(
             order_id,
             self.broker,
+            risk=self.risk,
+            notifier=self.notifier,
             restore_engine_snapshot=self.engine.restore,
+            notify_risk_event=self.notifier.notify_risk_event,
         )
 
     def _execute_llm_trade_action(
@@ -832,8 +848,7 @@ class AppRunner:
         if result["executed"]:
             side = self._broker_side_for_action(action)
             self._last_llm_action_at[(target_symbol, side)] = time.monotonic()
-            with self._state_lock:
-                self._last_fill_at = time.monotonic()
+            self._mark_fill_processed()
         return result
 
     def _quote_for_llm_order(self, symbol: str, price: Any = None) -> Quote | None:
@@ -1132,19 +1147,21 @@ class AppRunner:
             if not changed:
                 return False
 
-            # Guard: ledger replay may be incomplete (e.g., fills during downtime,
-            # manual trades not in ledger). Log a warning when the replay would
-            # overwrite real losses with more optimistic values so the operator
-            # can investigate, but still accept the ledger values — they represent
-            # the best available truth from the order record.
             new_pnl = result.realized_pnl
             new_losses = result.consecutive_losses
-            if new_pnl > old_daily_pnl + 1e-9 and old_daily_pnl < 0:
+            same_trade_day = old_daily_pnl_date == result.trade_day
+            optimistic_replay = new_pnl > old_daily_pnl + 1e-9 or new_losses < old_consecutive_losses
+            if same_trade_day and not result.trades and optimistic_replay:
                 logger.warning(
-                    "ledger replay overwrites negative daily_pnl %s with positive %s; "
-                    "verify no fills were missed during downtime",
-                    old_daily_pnl, new_pnl,
+                    "ledger replay produced no matched trades and would overwrite risk state "
+                    "pnl=%s/losses=%s with pnl=%s/losses=%s; keeping current risk state",
+                    old_daily_pnl,
+                    old_consecutive_losses,
+                    new_pnl,
+                    new_losses,
                 )
+                new_pnl = old_daily_pnl
+                new_losses = old_consecutive_losses
 
             self.risk.replace_daily_pnl(
                 new_pnl,

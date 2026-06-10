@@ -97,6 +97,7 @@ class _TrackedEntry:
 
 
 _EntryPersistCallback = Callable[[str, Decimal, Decimal], None]
+_FillCallback = Callable[[], None]
 
 
 class TradeExecutionService:
@@ -107,6 +108,7 @@ class TradeExecutionService:
         record_risk_event: Callable[[str], None],
         record_order_skipped: _RecordOrderSkipped | None = None,
         persist_entry: _EntryPersistCallback | None = None,
+        on_fill: _FillCallback | None = None,
         audit: AuditLogger | None = None,
         margin_safety_factor: float | None = None,
     ) -> None:
@@ -115,6 +117,7 @@ class TradeExecutionService:
         self._record_risk_event = record_risk_event
         self._record_order_skipped = record_order_skipped
         self._persist_entry = persist_entry
+        self._on_fill = on_fill
         self._audit = audit
         self.margin_safety_factor = margin_safety_factor
         self._state_lock = RLock()
@@ -261,7 +264,10 @@ class TradeExecutionService:
         self,
         symbol: str,
         *,
+        risk: RiskController | None = None,
+        notifier: "NotifierInterface | None" = None,
         restore_engine_snapshot: Callable[[EngineSnapshot], None] | None = None,
+        notify_risk_event: _NotifyRiskEvent | None = None,
     ) -> OrderStatus:
         with self._state_lock:
             pending = self._pending_orders.get(symbol)
@@ -284,7 +290,10 @@ class TradeExecutionService:
         if fill_qty > 0:
             self._finalize_pending_fill(
                 pending, order_status,
+                risk=risk,
+                notifier=notifier,
                 fill_qty=fill_qty,
+                notify_risk_event=notify_risk_event,
             )
 
         self._clear_pending_order(pending.broker_order_id)
@@ -301,7 +310,10 @@ class TradeExecutionService:
         order_id: str,
         broker: BrokerGateway,
         *,
+        risk: RiskController | None = None,
+        notifier: "NotifierInterface | None" = None,
         restore_engine_snapshot: Callable[[EngineSnapshot], None] | None = None,
+        notify_risk_event: _NotifyRiskEvent | None = None,
     ) -> OrderStatus:
         with self._state_lock:
             pending = next(
@@ -311,7 +323,10 @@ class TradeExecutionService:
         if pending is not None:
             return self.cancel_pending_order_for_symbol(
                 pending.symbol,
+                risk=risk,
+                notifier=notifier,
                 restore_engine_snapshot=restore_engine_snapshot,
+                notify_risk_event=notify_risk_event,
             )
 
         try:
@@ -1015,6 +1030,7 @@ class TradeExecutionService:
     ) -> None:
         fill_price = self._resolved_decimal(order_status, "executed_price", pending.price)
         fill_qty = fill_qty if fill_qty is not None else self._resolved_decimal(order_status, "executed_quantity", pending.quantity)
+        self._mark_fill_processed()
         if pending.action == "SELL":
             avg_price = self._resolve_avg_price_for_exit(pending.symbol, pending.avg_price if pending.avg_price is not None and pending.avg_price > 0 else None, fill_qty)
             self._safe_notify_order(notifier, "SELL", pending.symbol, str(fill_qty), str(fill_price), pending.broker_order_id)
@@ -1043,6 +1059,14 @@ class TradeExecutionService:
         if pending.action in {"BUY", "SELL_SHORT"}:
             self._record_entry_price(pending.symbol, fill_price, fill_qty)
         logger.info("%s filled: %s qty=%s price=%s", pending.action, pending.symbol, fill_qty, fill_price)
+
+    def _mark_fill_processed(self) -> None:
+        if self._on_fill is None:
+            return
+        try:
+            self._on_fill()
+        except Exception:
+            logger.exception("failed to run fill callback")
 
     @staticmethod
     def _should_restore_after_partial_terminal_fill(pending: _PendingOrder, fill_qty: Decimal) -> bool:

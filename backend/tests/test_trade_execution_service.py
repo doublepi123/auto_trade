@@ -768,6 +768,33 @@ class TestTradeExecutionServiceBasics:
         assert svc.pending_order_for("NVDA.US") is not None
         broker.cancel_order.assert_called_once_with("order-aapl")
 
+    def test_cancel_pending_order_for_symbol_records_partial_exit_pnl_in_risk(self, svc: TradeExecutionService) -> None:
+        from app.core.broker import OrderStatusResult
+        from app.core.risk import RiskController
+
+        broker = MagicMock()
+        broker.cancel_order.return_value = OrderStatusResult(
+            "order-sell",
+            "CANCELLED",
+            executed_quantity=Decimal("2"),
+            executed_price=Decimal("90"),
+        )
+        svc._record_entry_price("AAPL.US", Decimal("100"), Decimal("5"))
+        svc._track_pending_order(
+            "SELL",
+            OrderResult("order-sell", "AAPL.US", "SELL", Decimal("5"), Decimal("90"), "SUBMITTED"),
+            broker,
+            None,
+            avg_price=Decimal("100"),
+        )
+        risk = RiskController()
+
+        result = svc.cancel_pending_order_for_symbol("AAPL.US", risk=risk)
+
+        assert result.status == "CANCELLED"
+        assert risk.daily_pnl == -20.0
+        assert risk.consecutive_losses == 1
+
     def test_execute_sell_skips_when_fees_reduce_net_profit_below_minimum(self, monkeypatch) -> None:
         from app.config import settings
         from app.core.broker import OrderResult, Position, Quote

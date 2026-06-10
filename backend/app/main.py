@@ -6,7 +6,7 @@ import threading
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Any, AsyncGenerator
+from typing import Any, AsyncGenerator, cast
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -127,6 +127,19 @@ def _recent_price_context_for_target(runtime_engine: Any, runtime: Any | None, s
     return result
 
 
+def _collect_llm_contexts(
+    symbol: str,
+    market: str,
+    current_price: float,
+    short_selling: bool,
+) -> tuple[dict[str, float | str], dict[str, Any]]:
+    from app.api.llm_advisor import _account_context, _position_context
+
+    position_context = _position_context(symbol, current_price)
+    account_context = _account_context(symbol, market, current_price, short_selling)
+    return position_context, account_context
+
+
 async def _ws_cleanup_task() -> None:
     while True:
         await asyncio.sleep(60)
@@ -166,7 +179,7 @@ async def _llm_analysis_tick() -> None:
         cycle_budget = min(settings.llm_max_symbols_per_cycle, remaining_hour_budget)
         analyzed_count = 0
 
-        from app.api.llm_advisor import _account_context, _interval_reference_quantity, _position_context
+        from app.api.llm_advisor import _interval_reference_quantity
         from app.services.llm_interaction_service import LLMInteractionService
 
         advisor = LLMAdvisorService(broker=runner.broker)
@@ -238,8 +251,8 @@ async def _llm_analysis_tick() -> None:
                         db.commit()
                         continue
 
-                position_context = _position_context(symbol, current_price)
-                account_context = _account_context(
+                position_context, account_context = await asyncio.to_thread(
+                    _collect_llm_contexts,
                     symbol,
                     market,
                     current_price,
@@ -300,7 +313,7 @@ async def _llm_analysis_tick() -> None:
                     if interaction_id is not None:
                         LLMInteractionService(db).update_outcome(
                             interaction_id,
-                            applied=app_result["applied"],
+                            applied=bool(app_result["applied"]),
                             order_status=order_result.get("status"),
                             order_id=order_result.get("order_id"),
                         )
@@ -309,7 +322,7 @@ async def _llm_analysis_tick() -> None:
                         event_type="LLM_ANALYSIS",
                         symbol=symbol,
                         status="SUCCESS",
-                        message=result.get("analysis") or app_result["reason"],
+                        message=cast(str, result.get("analysis") or app_result["reason"]),
                         payload={
                             "source": "cron",
                             "interaction_id": interaction_id,

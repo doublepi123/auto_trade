@@ -188,3 +188,35 @@ class TestTradeEventSync:
 
         assert runner.risk.daily_pnl == 6.0
         assert runner.risk.consecutive_losses == 0
+
+    def test_sync_today_orders_does_not_clear_losses_when_ledger_has_unmatched_exit(self) -> None:
+        _clean()
+        trade_day = trade_day_for("US")
+        sell_fill = datetime.combine(trade_day, time(14, 5), tzinfo=timezone.utc)
+
+        class Broker:
+            def get_today_orders(self) -> list[BrokerOrder]:
+                return [
+                    BrokerOrder(
+                        broker_order_id="unmatched-loss-sell",
+                        symbol="NVDA.US",
+                        side="SELL",
+                        quantity=Decimal("2"),
+                        price=Decimal("90"),
+                        executed_quantity=Decimal("2"),
+                        executed_price=Decimal("90"),
+                        status="FILLED",
+                        created_at=sell_fill,
+                        filled_at=sell_fill,
+                    ),
+                ]
+
+        runner = AppRunner()
+        runner.broker = Broker()
+        runner.risk.daily_pnl = -100.0
+        runner.risk.consecutive_losses = 2
+
+        assert runner.sync_today_orders_from_broker(force=True) == 1
+
+        assert runner.risk.daily_pnl == -100.0
+        assert runner.risk.consecutive_losses == 2

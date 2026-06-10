@@ -1,7 +1,22 @@
 from __future__ import annotations
 
+import importlib.abc
 import os
+import sys
 import tempfile
+
+
+class _BlockBrokerSdkFinder(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname: str, path: object | None, target: object | None = None):
+        if fullname == "longport" or fullname.startswith("longport."):
+            raise ImportError("longport SDK imports are disabled in tests")
+        if fullname == "longbridge" or fullname.startswith("longbridge."):
+            raise ImportError("longbridge SDK imports are disabled in tests")
+        return None
+
+
+if os.environ.get("AUTO_TRADE_ALLOW_BROKER_SDK_IMPORTS") != "1":
+    sys.meta_path.insert(0, _BlockBrokerSdkFinder())
 
 
 os.environ["AUTO_TRADE_DATABASE_URL"] = os.environ.get(

@@ -265,6 +265,25 @@ class TestLLMAnalysisTick:
         assert calls[0]["current_price"] == 100.0
 
     @pytest.mark.asyncio
+    async def test_tick_collects_blocking_context_in_worker_thread(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        now = datetime.now(timezone.utc)
+        config = self._make_fake_config(llm_last_analysis_at=now - timedelta(minutes=3))
+        runner = self._make_fake_runner(last_price=100.0)
+        self._patch_tick_deps(monkeypatch, config, runner)
+        to_thread_calls: list[str] = []
+        original_to_thread = asyncio.to_thread
+
+        async def fake_to_thread(fn, /, *args, **kwargs):
+            to_thread_calls.append(getattr(fn, "__name__", str(fn)))
+            return await original_to_thread(fn, *args, **kwargs)
+
+        monkeypatch.setattr(main_module.asyncio, "to_thread", fake_to_thread)
+
+        await main_module._llm_analysis_tick()
+
+        assert "_collect_llm_contexts" in to_thread_calls
+
+    @pytest.mark.asyncio
     async def test_tick_skipped_when_time_gate_blocked_and_no_volatility(self, monkeypatch: pytest.MonkeyPatch) -> None:
         now = datetime.now(timezone.utc)
         config = self._make_fake_config(llm_last_analysis_at=now - timedelta(minutes=1))
