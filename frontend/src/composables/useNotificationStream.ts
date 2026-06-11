@@ -9,6 +9,7 @@ interface NotificationEvent {
   severity: NotificationSeverity
   action?: string
   event_type?: string
+  payload?: Record<string, unknown>
   detail?: Record<string, unknown>
   message?: string
 }
@@ -24,6 +25,7 @@ interface EventItem {
   event_type?: string
   action?: string
   severity?: string
+  payload?: Record<string, unknown>
   detail?: Record<string, unknown>
   message?: string
   created_at?: string
@@ -132,10 +134,14 @@ let sharedPollTimer: ReturnType<typeof setInterval> | null = null
 let sharedEnabled = false
 let refCount = 0
 
+function eventDetail(evt: { payload?: Record<string, unknown>; detail?: Record<string, unknown> }): unknown {
+  return evt.payload ?? evt.detail
+}
+
 function handleEvent(evt: NotificationEvent) {
   const severity = parseSeverity(evt.severity)
   const title = evt.event_type ?? 'Notification'
-  const message = evt.message ?? detailHash(evt.detail)
+  const message = evt.message ?? detailHash(eventDetail(evt))
 
   // CRITICAL persistent limit
   if (severity === 'CRITICAL') {
@@ -199,7 +205,7 @@ function processEvents(items: EventItem[], isBackfill = false) {
 
     const severity = parseSeverity(item.severity)
     const title = item.event_type ?? 'Notification'
-    const message = item.message ?? detailHash(item.detail)
+    const message = item.message ?? detailHash(eventDetail(item))
 
     if (isBackfill) {
       // Backfill only marks events as known — no notification display
@@ -210,6 +216,7 @@ function processEvents(items: EventItem[], isBackfill = false) {
         severity,
         action: item.action,
         event_type: item.event_type,
+        payload: item.payload,
         detail: item.detail,
         message,
       })

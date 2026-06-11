@@ -296,6 +296,15 @@ const llmStatus = ref<LLMIntervalStatus>({
   current_suggestion: null,
   applied_values: null,
   reject_reason: null,
+  budget: {
+    max_symbols_per_cycle: 0,
+    max_analyses_per_hour: 0,
+    tracked_symbol_count: 0,
+    effective_symbol_budget: 0,
+    used_analyses_last_hour: 0,
+    remaining_analyses_this_hour: 0,
+  },
+  symbol_statuses: [],
 })
 const llmInteractions = ref<LLMInteractionRecord[]>([])
 

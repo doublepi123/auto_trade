@@ -1,4 +1,5 @@
 import asyncio
+from collections.abc import Generator
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -130,7 +131,7 @@ class TestShouldRunLLMAnalysis:
 
 class TestLLMAnalysisTick:
     @pytest.fixture(autouse=True)
-    def reset_trigger_price(self) -> None:
+    def reset_trigger_price(self) -> Generator[None, None, None]:
         main_module._last_llm_trigger_price = 0.0
         main_module._last_llm_trigger_price_by_symbol = {}
         main_module._llm_last_analysis_at_by_symbol = {}
@@ -165,7 +166,7 @@ class TestLLMAnalysisTick:
         runner.execute_llm_order_decision.return_value = {"status": "NO_ACTION", "order_id": None}
         return runner
 
-    def _patch_tick_deps(self, monkeypatch: pytest.MonkeyPatch, config: SimpleNamespace, runner: MagicMock) -> MagicMock:
+    def _patch_tick_deps(self, monkeypatch: pytest.MonkeyPatch, config: SimpleNamespace, runner: MagicMock) -> list[dict[str, object]]:
         class FakeDB:
             def commit(self) -> None:
                 pass

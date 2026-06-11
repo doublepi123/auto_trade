@@ -17,12 +17,14 @@ class TestRSI:
         # Monotonically increasing prices → RSI should be high
         closes = [100.0 + i for i in range(20)]
         rsi = TechnicalIndicators.calculate_rsi(closes, period=14)
+        assert rsi is not None
         assert rsi > 70  # overbought territory
 
     def test_rsi_with_downtrend(self) -> None:
         # Monotonically decreasing prices → RSI should be low
         closes = [200.0 - i for i in range(20)]
         rsi = TechnicalIndicators.calculate_rsi(closes, period=14)
+        assert rsi is not None
         assert rsi < 30  # oversold territory
 
     def test_rsi_with_flat_prices(self) -> None:

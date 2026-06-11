@@ -10,6 +10,7 @@ from app.api import review as review_api
 from app.api import strategy as strategy_api
 from app.api import trade as trade_api
 from app import database
+from app.core.market_calendar import trade_day_for
 from app.database import SessionLocal
 from app.models import AuditLog, CredentialConfig, LLMInteraction, OrderRecord, RuntimeState, RuntimeStateSnapshot, StrategyConfig, TradeEvent
 from app.main import app
@@ -263,9 +264,17 @@ class TestAPI:
     def test_get_status_recomputes_daily_pnl_from_filled_orders(self) -> None:
         _clean_orders()
         _clean_runtime_state()
-        trade_day = datetime.now(timezone.utc).date()
-        first_fill = datetime.combine(trade_day, datetime_time(10, 0), tzinfo=timezone.utc)
-        second_fill = datetime.combine(trade_day, datetime_time(10, 5), tzinfo=timezone.utc)
+        _clean_strategy()
+        assert client.put("/api/strategy", json={
+            "symbol": "NVDA.US",
+            "market": "US",
+            "buy_low": 100.0,
+            "sell_high": 200.0,
+        }).status_code == 200
+
+        first_fill = datetime(2026, 6, 4, 17, 0, tzinfo=timezone.utc)
+        second_fill = datetime(2026, 6, 4, 17, 5, tzinfo=timezone.utc)
+        trade_day = trade_day_for("US", first_fill)
         db = SessionLocal()
         StrategyService(db).update_runtime_state(daily_pnl=999.0, daily_pnl_date=trade_day, consecutive_losses=3)
         db.add_all([
@@ -297,7 +306,8 @@ class TestAPI:
         db.commit()
         db.close()
 
-        resp = client.get("/api/status")
+        with freeze_time("2026-06-04 18:00:00", tz_offset=0):
+            resp = client.get("/api/status")
 
         assert resp.status_code == 200
         assert resp.json()["daily_pnl"] == 6.0

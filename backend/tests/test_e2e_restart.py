@@ -798,7 +798,9 @@ class TestE2EMultiSymbolPendingRestart:
         assert runner.risk.paused is True
         assert "unresolved live order" in runner.risk.pause_reason.lower()
         assert runner._trade_svc.pending_order_for("AAPL.US") is not None
-        assert runner._trade_svc.pending_order_for("AAPL.US").broker_order_id == "order-pending-aapl"
+        aapl_pending = runner._trade_svc.pending_order_for("AAPL.US")
+        assert aapl_pending is not None
+        assert aapl_pending.broker_order_id == "order-pending-aapl"
         assert runner._trade_svc.pending_order_for("NVDA.US") is None
         assert set(runner._symbol_runtimes) == {"AAPL.US", "NVDA.US"}
         assert runner._symbol_runtimes["NVDA.US"].engine.state.value == "long"

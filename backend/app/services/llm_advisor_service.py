@@ -299,8 +299,10 @@ class LLMAdvisorService:
             # NOTE: indicator selection is validated against AVAILABLE_INDICATORS
             # whitelist inside FeatureSelector.parse_selection, so adversarial
             # keys injected via prompt or market data are discarded.
-            market_state = market_data.get("market_state", {})
-            suggested = market_state.get("suggested_indicators", []) if market_state else []
+            market_state_raw = market_data.get("market_state")
+            market_state = market_state_raw if isinstance(market_state_raw, dict) else {}
+            suggested_raw = market_state.get("suggested_indicators", [])
+            suggested = suggested_raw if isinstance(suggested_raw, list) else []
             selected = FeatureSelector.parse_selection(raw_response, suggested)
             logger.info("LLM selected indicators: %s", selected)
         except Exception as exc:
@@ -413,7 +415,11 @@ class LLMAdvisorService:
                 "sentiment": {"sentiment": "neutral", "score": 0.0, "description": "无"},
             }
 
-        prompt_price = float(market_data.get("current_price") or current_price)
+        current_price_raw = market_data.get("current_price")
+        if isinstance(current_price_raw, (int, float)):
+            prompt_price = float(current_price_raw)
+        else:
+            prompt_price = float(current_price)
         if prompt_price <= 0:
             return {"success": False, "applied": False, "error": "Market data unavailable for preview"}
 

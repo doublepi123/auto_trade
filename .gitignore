@@ -39,7 +39,6 @@ frontend/cypress/screenshots/
 
 # Local LSP / agent configs (per-developer, not for the repo)
 oh-my-openagent.json
-pyrightconfig.json
 opencode.json
 
 # Docker

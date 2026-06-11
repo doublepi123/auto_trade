@@ -700,10 +700,12 @@ class TestTradeExecutionServiceBasics:
         assert svc.has_pending_order is True
         assert svc.pending_order is not None
         assert svc.pending_order.broker_order_id == "order-nvda"
-        assert svc.pending_order_for("NVDA.US") is not None
-        assert svc.pending_order_for("NVDA.US").broker_order_id == "order-nvda"
-        assert svc.pending_order_for("AAPL.US") is not None
-        assert svc.pending_order_for("AAPL.US").broker_order_id == "order-aapl"
+        nvda_pending = svc.pending_order_for("NVDA.US")
+        assert nvda_pending is not None
+        assert nvda_pending.broker_order_id == "order-nvda"
+        aapl_pending = svc.pending_order_for("AAPL.US")
+        assert aapl_pending is not None
+        assert aapl_pending.broker_order_id == "order-aapl"
 
     def test_execute_allows_different_symbol_when_another_symbol_is_pending(self) -> None:
         from app.core.broker import Quote

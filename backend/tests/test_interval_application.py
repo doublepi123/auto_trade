@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from sqlalchemy.orm import Session
 
 from app import database
 from app.models import StrategyConfig

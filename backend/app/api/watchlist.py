@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -68,6 +69,10 @@ def get_watchlist_snapshots(
         if quote is None:
             continue
         timestamp = quote.timestamp
+        if isinstance(timestamp, datetime):
+            timestamp_str = timestamp.isoformat()
+        else:
+            timestamp_str = str(timestamp)
         snapshots.append(
             WatchlistSnapshot(
                 symbol=item.symbol,
@@ -77,7 +82,7 @@ def get_watchlist_snapshots(
                 last_price=float(quote.last_price),
                 bid=float(quote.bid),
                 ask=float(quote.ask),
-                timestamp=timestamp.isoformat() if hasattr(timestamp, "isoformat") else str(timestamp),
+                timestamp=timestamp_str,
             )
         )
     return snapshots

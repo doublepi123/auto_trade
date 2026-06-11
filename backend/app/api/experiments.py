@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, List
+from typing import Any, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -61,7 +61,7 @@ def activate_version(
     return MessageResponse(message="activated")
 
 
-@router.get("/versions/active", response_model=PromptVersionResponse | None)
+@router.get("/versions/active", response_model=Optional[PromptVersionResponse])
 def get_active_version(db: Session = Depends(get_db)) -> PromptVersionResponse | None:
     manager = ABTestManager(db)
     version = manager.get_active_version()

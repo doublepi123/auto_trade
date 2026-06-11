@@ -289,6 +289,15 @@ class DiagnosticRiskState(BaseModel):
     consecutive_losses: int
 
 
+class QuoteQuality(BaseModel):
+    has_quote: bool
+    price_positive: bool
+    spread_reasonable: bool
+    last_price: float | None = None
+    bid: float | None = None
+    ask: float | None = None
+
+
 class DiagnosticSymbolRuntime(BaseModel):
     symbol: str
     market: str
@@ -298,6 +307,7 @@ class DiagnosticSymbolRuntime(BaseModel):
     last_trigger_price: float
     recent_quote_count: int
     has_pending_order: bool
+    quote_quality: QuoteQuality | None = None
 
 
 class DiagnosticsResponse(BaseModel):

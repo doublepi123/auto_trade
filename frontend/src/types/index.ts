@@ -96,6 +96,15 @@ export interface DiagnosticRiskState {
   consecutive_losses: number
 }
 
+export interface QuoteQuality {
+  has_quote: boolean
+  price_positive: boolean
+  spread_reasonable: boolean
+  last_price?: number | null
+  bid?: number | null
+  ask?: number | null
+}
+
 export interface DiagnosticSymbolRuntime {
   symbol: string
   market: string
@@ -105,6 +114,7 @@ export interface DiagnosticSymbolRuntime {
   last_trigger_price: number
   recent_quote_count: number
   has_pending_order: boolean
+  quote_quality?: QuoteQuality | null
 }
 
 export interface DiagnosticsResponse {
@@ -203,6 +213,28 @@ export interface LLMSuggestion {
   analysis: string
 }
 
+export interface LLMBudgetStatus {
+  max_symbols_per_cycle: number
+  max_analyses_per_hour: number
+  tracked_symbol_count: number
+  effective_symbol_budget: number
+  used_analyses_last_hour: number
+  remaining_analyses_this_hour: number
+}
+
+export interface LLMSymbolStatus {
+  symbol: string
+  market: string
+  is_primary: boolean
+  has_pending_order: boolean
+  buy_cooldown_remaining_seconds: number | null
+  sell_cooldown_remaining_seconds: number | null
+  last_analysis_at: string | null
+  next_analysis_at: string | null
+  last_status: string | null
+  last_skip_reason: string | null
+}
+
 export interface LLMIntervalStatus {
   enabled: boolean
   interval_minutes: number
@@ -214,6 +246,8 @@ export interface LLMIntervalStatus {
     sell_high: number
   } | null
   reject_reason: string | null
+  budget: LLMBudgetStatus
+  symbol_statuses: LLMSymbolStatus[]
 }
 
 export interface LLMPreviewAnalyzeRequest {
