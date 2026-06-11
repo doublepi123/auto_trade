@@ -779,12 +779,19 @@ class AppRunner:
                 self._trigger_in_flight = False
 
     def cancel_order_by_id(self, order_id: str):
+        pending = self._trade_svc.pending_order_by_broker_id(order_id)
+        restore_fn = self.engine.restore
+        if pending is not None:
+            runtime = self._runtime_for_symbol(pending.symbol)
+            if runtime is not None:
+                _, _, target_engine = runtime
+                restore_fn = lambda snapshot, eng=target_engine: eng.restore(snapshot)
         return self._trade_svc.cancel_order_by_id(
             order_id,
             self.broker,
             risk=self.risk,
             notifier=self.notifier,
-            restore_engine_snapshot=self.engine.restore,
+            restore_engine_snapshot=restore_fn,
             notify_risk_event=self.notifier.notify_risk_event,
         )
 
@@ -834,7 +841,7 @@ class AppRunner:
             cash_currency=self._cash_currency_for_market(target_market),
             market=target_market,
             trading_session_mode=self._get_trading_session_mode(),
-            min_profit_amount=target_engine.params.min_profit_amount,
+            min_profit_amount=self.engine.params.min_profit_amount,
             allow_loss_exit=allow_loss_exit,
             fee_rate=self._live_fee_rate_for_market(target_market),
             engine_snapshot=engine_snapshot,
@@ -979,7 +986,12 @@ class AppRunner:
                 quote.bid,
                 quote.ask,
             )
-        elif quality["has_quote"] and not quality["spread_reasonable"]:
+        elif (
+            quality["has_quote"]
+            and float(quote.bid) > 0
+            and float(quote.ask) > 0
+            and not quality["spread_reasonable"]
+        ):
             logger.warning(
                 "quote_quality: wide spread for %s: last=%s bid=%s ask=%s",
                 quote.symbol,
@@ -1240,9 +1252,14 @@ class AppRunner:
         old_executed_quantity = order.executed_quantity
         old_executed_price = order.executed_price
         changed = False
+        preserved_side = order.side
+        if preserved_side in {"SELL_SHORT", "BUY_TO_COVER"} and side in {"SELL", "BUY"}:
+            sync_side = preserved_side
+        else:
+            sync_side = side
         updates = {
             "symbol": symbol,
-            "side": side,
+            "side": sync_side,
             "quantity": quantity,
             "price": price,
             "status": status,
@@ -1555,6 +1572,7 @@ class AppRunner:
             old_broker.close()
             self.broker = new_broker
             self.notifier = new_notifier
+            self._trade_svc.refresh_pending_brokers(new_broker)
 
             if should_resubscribe:
                 self._quotes_subscribed = True
@@ -1768,9 +1786,14 @@ class AppRunner:
             return
         broker_qty: dict[str, Decimal] = {}
         for pos in positions:
+            side = str(pos.side).upper()
+            if side == "SHORT":
+                continue
             try:
-                qty = Decimal(str(pos.quantity))
+                qty = abs(Decimal(str(pos.quantity)))
             except Exception:
+                continue
+            if qty <= 0:
                 continue
             broker_qty[pos.symbol] = broker_qty.get(pos.symbol, Decimal("0")) + qty
         for symbol, (tracked_qty, tracked_cost) in snapshot.items():
@@ -1824,7 +1847,24 @@ class AppRunner:
         return "BUY" if action in {"BUY", "BUY_TO_COVER"} else "SELL"
 
     def _build_symbol_runtime(self, symbol: str, market: str, *, primary: bool = False) -> SymbolRuntime:
-        engine = self.engine if primary else StrategyEngine(StrategyParams(symbol=symbol, market=market))
+        if primary:
+            engine = self.engine
+        else:
+            primary_params = self.engine.params
+            engine = StrategyEngine(
+                StrategyParams(
+                    symbol=symbol,
+                    market=market,
+                    buy_low=primary_params.buy_low,
+                    sell_high=primary_params.sell_high,
+                    short_selling=primary_params.short_selling,
+                    min_profit_amount=primary_params.min_profit_amount,
+                    min_repricing_pct=primary_params.min_repricing_pct,
+                    llm_action_cooldown_seconds=primary_params.llm_action_cooldown_seconds,
+                    fee_rate_us=primary_params.fee_rate_us,
+                    fee_rate_hk=primary_params.fee_rate_hk,
+                )
+            )
         return SymbolRuntime(symbol=symbol, market=market, engine=engine, recent_quotes=[])
 
     def _sync_symbol_runtimes(self, db: Session) -> None:
@@ -1871,7 +1911,9 @@ class AppRunner:
         with self._state_lock:
             runtime = self._symbol_runtimes.get(quote.symbol)
             if runtime is None:
-                runtime = self._build_symbol_runtime(quote.symbol, self.engine.params.market)
+                from app.core.market_calendar import market_for_symbol
+
+                runtime = self._build_symbol_runtime(quote.symbol, market_for_symbol(quote.symbol))
                 self._symbol_runtimes[quote.symbol] = runtime
             runtime.engine.record_price(quote.last_price)
             runtime.recent_quotes.append(
@@ -1983,7 +2025,10 @@ class AppRunner:
                 return {"executed": False, "status": "NO_QUOTE", "order_id": None, "action": action}
             old_price = pending.price
             new_price = Decimal(str(normalized_price))
-            repricing_pct = abs(new_price - old_price) / old_price
+            if old_price <= 0:
+                repricing_pct = Decimal("1")
+            else:
+                repricing_pct = abs(new_price - old_price) / old_price
             if repricing_pct < Decimal(str(params.min_repricing_pct)):
                 return self._skip_llm_action(
                     action,

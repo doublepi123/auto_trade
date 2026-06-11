@@ -391,7 +391,6 @@ import { startTrading, stopTrading, pauseTrading, resumeTrading, activateKillSwi
 import type { LLMIntervalStatus, OrderRecord, Position, StatusHistoryPoint, TradeEventRecord } from '../types'
 import { engineStateLabel, auditActionLabel, marketLabel, positionSideLabel, skipCategoryLabel, tradeEventTypeLabel } from '../utils/labels'
 import { EVENT_TYPE } from '../utils/constants'
-import { useNotificationStream } from '../composables/useNotificationStream'
 
 type CypressWindow = Window & { Cypress?: unknown }
 const multiSymbols = useMultiSymbolSnapshots()
@@ -407,13 +406,13 @@ const accountRefreshIntervalMs = (window as CypressWindow).Cypress ? 500 : 10000
 const { strategy, status, strategyLoading, statusLoading, loadError, load, refreshStatus } = useDashboardData()
 const { realtimeStatus } = useStatusStream(status)
 const { account, accountError, accountLoading, accountRefreshing, refresh: refreshAccount } = useAccountRefresh(accountRefreshIntervalMs)
-const notifications = useNotificationStream()
 
 const llmStatus = ref<LLMIntervalStatus | null>(null)
 const recentOrders = ref<OrderRecord[]>([])
 const recentEvents = ref<TradeEventRecord[]>([])
 const llmStatusLoading = ref(true)
 const pollLoading = ref(false)
+const controlInFlight = ref(false)
 const recentOrdersLoading = ref(true)
 const recentEventsLoading = ref(true)
 const {
@@ -677,7 +676,6 @@ onMounted(() => {
   }, 5000)
   load().catch(() => void 0)
   window.addEventListener('resize', handleResize)
-  notifications.enable()
 })
 
 watch(
@@ -697,68 +695,55 @@ onUnmounted(() => {
     llmStatusTimer = null
   }
   window.removeEventListener('resize', handleResize)
-  notifications.disable()
 })
 
-async function handleStart() {
+async function runControlAction(action: () => Promise<unknown>, successMessage: string, errorMessage: string) {
+  if (controlInFlight.value) return
+  controlInFlight.value = true
   try {
-    await startTrading()
-    ElMessage.success('交易已启动')
+    await action()
+    ElMessage.success(successMessage)
     await Promise.all([refreshStatus(), loadDiagnostics()])
   } catch {
-    ElMessage.error('启动失败')
+    ElMessage.error(errorMessage)
+  } finally {
+    controlInFlight.value = false
   }
+}
+
+async function handleStart() {
+  await runControlAction(startTrading, '交易已启动', '启动失败')
 }
 
 async function handleStop() {
-  try {
-    await stopTrading()
-    ElMessage.success('交易已停止')
-    await Promise.all([refreshStatus(), loadDiagnostics()])
-  } catch {
-    ElMessage.error('停止失败')
-  }
+  await runControlAction(stopTrading, '交易已停止', '停止失败')
 }
 
 async function handlePause() {
-  try {
-    await pauseTrading()
-    ElMessage.success('交易已暂停')
-    await Promise.all([refreshStatus(), loadDiagnostics()])
-  } catch {
-    ElMessage.error('暂停失败')
-  }
+  await runControlAction(pauseTrading, '交易已暂停', '暂停失败')
 }
 
 async function handleResume() {
-  try {
-    await resumeTrading()
-    ElMessage.success('交易已恢复')
-    await Promise.all([refreshStatus(), loadDiagnostics()])
-  } catch {
-    ElMessage.error('恢复失败')
-  }
+  await runControlAction(resumeTrading, '交易已恢复', '恢复失败')
 }
 
 async function handleKillSwitch() {
   try {
     await ElMessageBox.confirm('确定要触发紧急停止吗？', '紧急停止', { type: 'warning' })
+  } catch {
+    return
+  }
+  try {
     await activateKillSwitch()
     ElMessage.success('紧急停止已触发')
     await Promise.all([refreshStatus(), loadDiagnostics()])
   } catch {
-    void 0
+    ElMessage.error('紧急停止触发失败')
   }
 }
 
 async function handleDisableKillSwitch() {
-  try {
-    await disableKillSwitch()
-    ElMessage.success('紧急停止已解除')
-    await Promise.all([refreshStatus(), loadDiagnostics()])
-  } catch {
-    ElMessage.error('解除失败')
-  }
+  await runControlAction(disableKillSwitch, '紧急停止已解除', '解除失败')
 }
 
 function formatAgeSeconds(value: number | null | undefined): string {

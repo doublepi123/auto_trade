@@ -194,6 +194,31 @@ Cypress.Commands.add('stubApi', () => {
     },
   }).as('exportReport')
 
+  cy.intercept('GET', '/api/watchlist', {
+    body: [
+      {
+        id: 1,
+        symbol: 'NVDA.US',
+        market: 'US',
+        alias: 'Nvidia',
+        is_active: true,
+        is_trading_target: true,
+      },
+      {
+        id: 2,
+        symbol: 'AAPL.US',
+        market: 'US',
+        alias: 'Apple',
+        is_active: true,
+        is_trading_target: false,
+      },
+    ],
+  }).as('getWatchlist')
+
+  cy.intercept('GET', '/api/watchlist/quotes*', {
+    body: [],
+  }).as('getWatchlistQuotes')
+
   cy.intercept('GET', '/api/watchlist/snapshots', {
     body: [
       {

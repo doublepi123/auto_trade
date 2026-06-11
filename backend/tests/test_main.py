@@ -162,7 +162,7 @@ class TestLLMAnalysisTick:
 
     def _make_fake_runner(self, last_price: float = 100.0) -> MagicMock:
         runner = MagicMock()
-        runner.engine = SimpleNamespace(last_price=last_price)
+        runner.engine = SimpleNamespace(last_price=last_price, state=SimpleNamespace(value="flat"))
         runner.broker = MagicMock()
         runner.recent_price_context.return_value = []
         runner.execute_llm_order_decision.return_value = {"status": "NO_ACTION", "order_id": None}
@@ -171,6 +171,9 @@ class TestLLMAnalysisTick:
     def _patch_tick_deps(self, monkeypatch: pytest.MonkeyPatch, config: SimpleNamespace, runner: MagicMock) -> list[dict[str, object]]:
         class FakeDB:
             def commit(self) -> None:
+                pass
+
+            def rollback(self) -> None:
                 pass
 
             def close(self) -> None:
@@ -249,9 +252,10 @@ class TestLLMAnalysisTick:
         monkeypatch.setattr(
             "app.main.IntervalApplicationService",
             lambda: MagicMock(
-                apply_direct_suggestion=lambda **kw: {"applied": True, "reason": "ok"}
+                apply_suggestion=lambda **kw: {"applied": True, "reason": "ok"}
             ),
         )
+        monkeypatch.setattr("app.api.strategy._reload_strategy_after_save", lambda: None)
 
         return analyze_calls
 
@@ -386,7 +390,7 @@ class TestLLMAnalysisTick:
         monkeypatch.setattr(main_module.settings, "llm_max_analyses_per_hour", 10)
         monkeypatch.setattr(
             "app.main.IntervalApplicationService",
-            lambda: MagicMock(apply_direct_suggestion=lambda **kw: apply_calls.append(kw) or {"applied": True, "reason": "ok"}),
+            lambda: MagicMock(apply_suggestion=lambda **kw: apply_calls.append(kw) or {"applied": True, "reason": "ok"}),
         )
 
         await main_module._llm_analysis_tick()
@@ -421,7 +425,7 @@ class TestLLMAnalysisTick:
         monkeypatch.setattr(main_module.settings, "llm_max_analyses_per_hour", 10)
         monkeypatch.setattr(
             "app.main.IntervalApplicationService",
-            lambda: MagicMock(apply_direct_suggestion=lambda **kw: {"applied": True, "reason": "ok"}),
+            lambda: MagicMock(apply_suggestion=lambda **kw: {"applied": True, "reason": "ok"}),
         )
 
         class FakeAdvisor:
@@ -602,7 +606,7 @@ async def test_llm_tick_persists_skip_state(monkeypatch: pytest.MonkeyPatch, tmp
     monkeypatch.setattr(
         main_module,
         "IntervalApplicationService",
-        lambda: MagicMock(apply_direct_suggestion=lambda **kwargs: {"applied": True, "reason": "ok"}),
+        lambda: MagicMock(apply_suggestion=lambda **kwargs: {"applied": True, "reason": "ok"}),
     )
     monkeypatch.setattr(main_module.settings, "llm_max_symbols_per_cycle", 1)
     monkeypatch.setattr(main_module.settings, "llm_max_analyses_per_hour", 10)

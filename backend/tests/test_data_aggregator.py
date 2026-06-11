@@ -9,7 +9,7 @@ os.environ.setdefault(
     f"sqlite:///{tempfile.gettempdir()}/auto_trade_test_data_aggregator.db",
 )
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -60,7 +60,7 @@ def _build_candles(base: float, count: int) -> list[BrokerCandle]:
         low = price - 2
         close = price + (1 if i % 2 == 0 else -1)
         bars.append(BrokerCandle(
-            timestamp=datetime(2026, 4, 1 + i, tzinfo=timezone.utc),
+            timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(days=i),
             open=price,
             high=high,
             low=low,
@@ -179,7 +179,7 @@ class TestFetchMarketData:
 class TestNewIndicators:
     def test_fetch_market_data_includes_rsi_macd_volume(self) -> None:
         broker = _FakeBroker(
-            daily=_build_candles(100.0, 30),
+            daily=_build_candles(100.0, 40),
             minute=_build_candles(100.0, 10),
             quote_price=101.5,
         )

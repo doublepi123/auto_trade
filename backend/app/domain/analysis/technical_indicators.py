@@ -64,7 +64,7 @@ class TechnicalIndicators:
     ) -> dict[str, float]:
         """Calculate MACD line, signal line, and histogram."""
         if len(closes) < slow + signal_period:
-            return {"macd": 0.0, "signal": 0.0, "histogram": 0.0}
+            return {}
 
         ema_fast = cls._ema(closes, fast)
         ema_slow = cls._ema(closes, slow)

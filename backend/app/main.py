@@ -264,27 +264,28 @@ async def _llm_analysis_tick() -> None:
                     symbol=symbol,
                     market=market,
                     current_price=current_price,
-                    current_buy_low=config.buy_low if is_primary else float(getattr(params, "buy_low", 0.0) or 0.0),
-                    current_sell_high=config.sell_high if is_primary else float(getattr(params, "sell_high", 0.0) or 0.0),
+                    current_buy_low=config.buy_low,
+                    current_sell_high=config.sell_high,
                     short_selling=getattr(params, "short_selling", config.short_selling),
                     current_position=str(position_context["side"]),
                     recent_trades=[],
                     position_quantity=float(position_context["quantity"]),
                     position_avg_price=float(position_context["avg_price"]),
                     unrealized_pnl_pct=float(position_context["unrealized_pnl_pct"]),
-                    min_profit_amount=float(getattr(params, "min_profit_amount", config.min_profit_amount) or 0.0),
+                    min_profit_amount=float(config.min_profit_amount or 0.0),
                     recent_prices=_recent_price_context_for_target(engine, runtime, symbol),
                     recent_analysis=build_recent_analysis_context(config) if is_primary else [],
                     account_context=account_context,
                     force=True,
                     persist=is_primary,
                 )
-                analyzed_count += 1
-                now_mono = time.monotonic()
-                with _llm_globals_lock:
-                    _prune_llm_analysis_timestamps(now_mono)
-                    _llm_analysis_timestamps.append(now_mono)
-                    _llm_last_analysis_at_by_symbol[symbol] = now
+                if result.get("success"):
+                    analyzed_count += 1
+                    now_mono = time.monotonic()
+                    with _llm_globals_lock:
+                        _prune_llm_analysis_timestamps(now_mono)
+                        _llm_analysis_timestamps.append(now_mono)
+                        _llm_last_analysis_at_by_symbol[symbol] = now
 
                 if result.get("success"):
                     # Only update trigger reference price on successful analysis
@@ -296,8 +297,9 @@ async def _llm_analysis_tick() -> None:
 
                     app_result = {"applied": False, "reason": "secondary symbol analysis does not update primary interval config"}
                     if is_primary:
-                        app_result = IntervalApplicationService().apply_direct_suggestion(
+                        app_result = IntervalApplicationService().apply_suggestion(
                             db=db,
+                            engine_state=engine.state.value.lower(),
                             current_price=current_price if current_price > 0 else config.buy_low,
                             suggestion={
                                 "suggested_buy_low": result.get("suggested_buy_low"),
@@ -345,6 +347,10 @@ async def _llm_analysis_tick() -> None:
                         next_analysis_at=now + timedelta(minutes=interval_minutes),
                     )
                     db.commit()
+                    if is_primary and app_result.get("applied"):
+                        from app.api.strategy import _reload_strategy_after_save
+
+                        _reload_strategy_after_save()
                 else:
                     record_trade_event(
                         db,

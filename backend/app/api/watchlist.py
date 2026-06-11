@@ -4,10 +4,12 @@ import logging
 from datetime import datetime
 from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from app.api.auth import require_api_key
+from app.api.deps import extract_actor, get_audit_logger
+from app.core.audit import AuditLogger
 from app.core.broker import BrokerGateway
 from app.database import get_db
 from app.runner import get_runner
@@ -101,25 +103,41 @@ def remove_watchlist_item(
 @router.post("/{item_id}/set-trading", response_model=WatchlistItemResponse, dependencies=[Depends(require_api_key())])
 def set_trading_symbol(
     item_id: int,
+    request: Request,
     db: Session = Depends(get_db),
+    audit: AuditLogger = Depends(get_audit_logger),
 ) -> WatchlistItemResponse:
     from app.api.strategy import _reload_strategy_after_save
     from app.services.strategy_service import StrategyService
 
+    actor_hash, source_ip = extract_actor(request)
+    result = "SUCCESS"
+    diff: dict[str, object] = {}
     svc = WatchlistService(db)
     try:
         item = svc.set_trading_symbol(item_id)
     except ValueError as exc:
+        result = "FAILED"
+        diff = {"detail": str(exc)}
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    # Sync active symbol to StrategyConfig via StrategyService for audit diff tracking
     strategy_svc = StrategyService(db)
     current = strategy_svc.get_config()
     if current.symbol != item.symbol or current.market != item.market:
-        strategy_svc.update_config({"symbol": item.symbol, "market": item.market})
+        _, diff = strategy_svc.update_config({"symbol": item.symbol, "market": item.market})
         _reload_strategy_after_save()
-
-    return WatchlistItemResponse.model_validate(item)
+    try:
+        return WatchlistItemResponse.model_validate(item)
+    finally:
+        if diff:
+            audit.record(
+                "STRATEGY_UPDATE",
+                severity="INFO",
+                actor_hash=actor_hash,
+                source_ip=source_ip,
+                request_summary={"changed": diff, "source": "watchlist_set_trading"},
+                result=result,
+            )
 
 
 @router.get("/quotes", response_model=List[WatchlistQuote], dependencies=[Depends(require_api_key())])

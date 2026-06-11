@@ -62,7 +62,7 @@ export function useDashboardData() {
       status.value = await getStatus()
       loadError.value = false
     } catch {
-      void 0
+      loadError.value = true
     } finally {
       statusRefreshInFlight = false
       statusLoading.value = false

@@ -56,6 +56,27 @@ class TestABTestManager:
         manager = ABTestManager(db_session)
         assert manager.get_active_version() is None
 
+    def test_enroll_version_allows_multiple_active_variants(self, db_session: Session) -> None:
+        manager = ABTestManager(db_session)
+        v1 = manager.create_version("prompt_optimization", "1.0", "", "template A")
+        v2 = manager.create_version("prompt_optimization", "1.1", "", "template B")
+        manager.enroll_version(v1.id)
+        manager.enroll_version(v2.id)
+
+        active = (
+            db_session.query(PromptVersion)
+            .filter(PromptVersion.is_active == True)  # noqa: E712
+            .filter(PromptVersion.name == "prompt_optimization")
+            .order_by(PromptVersion.id)
+            .all()
+        )
+        assert len(active) == 2
+
+        first = manager.select_variant("AAPL.US", "prompt_optimization")
+        second = manager.select_variant("AAPL.US", "prompt_optimization")
+        assert first is not None and second is not None
+        assert first.id == second.id
+
     def test_select_variant_for_experiment(self, db_session: Session) -> None:
         manager = ABTestManager(db_session)
         # Create two versions under the same experiment name

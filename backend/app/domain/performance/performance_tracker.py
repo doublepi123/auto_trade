@@ -23,12 +23,14 @@ class PerformanceTracker:
             return {"total_trades": 0, "win_rate": 0.0, "total_pnl": 0.0, "avg_pnl": 0.0}
 
         total = len(results)
-        profitable = sum(1 for r in results if r.was_profitable)
+        resolved = [r for r in results if r.was_profitable is not None]
+        profitable = sum(1 for r in resolved if r.was_profitable)
         total_pnl = sum(r.actual_pnl for r in results)
+        resolved_total = len(resolved)
 
         return {
             "total_trades": total,
-            "win_rate": profitable / total,
+            "win_rate": profitable / resolved_total if resolved_total > 0 else 0.0,
             "total_pnl": total_pnl,
             "avg_pnl": total_pnl / total,
         }
@@ -46,12 +48,14 @@ class PerformanceTracker:
         comparison = []
         for variant, items in by_variant.items():
             total = len(items)
-            profitable = sum(1 for i in items if i.was_profitable)
+            resolved = [i for i in items if i.was_profitable is not None]
+            profitable = sum(1 for i in resolved if i.was_profitable)
             total_pnl = sum(i.actual_pnl for i in items)
+            resolved_total = len(resolved)
             comparison.append({
                 "variant": variant,
                 "total_trades": total,
-                "win_rate": profitable / total if total > 0 else 0.0,
+                "win_rate": profitable / resolved_total if resolved_total > 0 else 0.0,
                 "total_pnl": total_pnl,
                 "avg_pnl": total_pnl / total if total > 0 else 0.0,
             })

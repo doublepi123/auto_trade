@@ -197,7 +197,8 @@ class LLMAdvisorService:
             try:
                 db = SessionLocal()
                 manager = ABTestManager(db)
-                active = manager.get_active_version()
+                experiment_name = settings.llm_experiment_name or None
+                active = manager.get_active_version(experiment_name)
                 return active.template if active else None
             finally:
                 if db is not None:

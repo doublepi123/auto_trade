@@ -707,7 +707,9 @@ class TestE2EMultiSymbolSubscriptions:
             fake_broker.simulate_disconnect("multi_symbol_drop")
             assert runner._quotes_subscribed is False
 
-            time.sleep(5.5)
+            deadline = time.monotonic() + 10.0
+            while not runner._quotes_subscribed and time.monotonic() < deadline:
+                time.sleep(0.25)
 
             assert runner._quotes_subscribed is True
             assert fake_broker.subscribed_to == ["AAPL.US", "NVDA.US"]

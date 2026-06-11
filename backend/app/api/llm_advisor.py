@@ -258,8 +258,9 @@ def analyze_llm_interval(
         )
 
     app_svc = IntervalApplicationService()
-    app_result = app_svc.apply_direct_suggestion(
+    app_result = app_svc.apply_suggestion(
         db=db,
+        engine_state=runner.engine.state.value.lower(),
         current_price=current_price,
         suggestion={
             "suggested_buy_low": result.get("suggested_buy_low"),
@@ -307,6 +308,10 @@ def analyze_llm_interval(
         },
     )
     db.commit()
+    if app_result.get("applied"):
+        from app.api.strategy import _reload_strategy_after_save
+
+        _reload_strategy_after_save()
 
     return LLMAnalyzeResponse(
         success=True,

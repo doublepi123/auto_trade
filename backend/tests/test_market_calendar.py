@@ -4,6 +4,8 @@ from datetime import date, datetime, timezone
 
 from freezegun import freeze_time
 
+from zoneinfo import ZoneInfo
+
 from app.core.market_calendar import (
     get_session,
     is_trading_hours,
@@ -60,6 +62,17 @@ class TestIsTradingHours:
     def test_hk_during_rth(self) -> None:
         # 2026-05-22 02:00 UTC = 10:00 HKT
         assert is_trading_hours("HK", datetime(2026, 5, 22, 2, 0, tzinfo=timezone.utc))
+
+    def test_hk_next_session_open_after_lunch_is_same_day_resume(self) -> None:
+        # 2026-05-22 04:30 UTC = 12:30 HKT (lunch break)
+        instant = datetime(2026, 5, 22, 4, 30, tzinfo=timezone.utc)
+        resume = next_session_open("HK", instant)
+        assert resume.astimezone(ZoneInfo("Asia/Hong_Kong")).hour == 13
+        assert resume.astimezone(ZoneInfo("Asia/Hong_Kong")).minute == 0
+
+    def test_hk_lunch_break_is_not_rth(self) -> None:
+        # 2026-05-22 04:30 UTC = 12:30 HKT (lunch break)
+        assert not is_trading_hours("HK", datetime(2026, 5, 22, 4, 30, tzinfo=timezone.utc))
 
 
 class TestNextSessionOpen:

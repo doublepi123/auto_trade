@@ -41,14 +41,14 @@ describe('Mobile smoke tests', { viewportWidth: 390, viewportHeight: 844 }, () =
   })
 
   it('Strategy page loads without horizontal overflow', () => {
-    cy.visit('/strategy')
+    cy.visit('/#/strategy')
     cy.get('body').then(($body) => {
       expect($body[0].scrollWidth).to.be.lte($body[0].clientWidth)
     })
   })
 
   it('Credentials page loads without horizontal overflow', () => {
-    cy.visit('/credentials')
+    cy.visit('/#/credentials')
     cy.get('body').then(($body) => {
       expect($body[0].scrollWidth).to.be.lte($body[0].clientWidth)
     })

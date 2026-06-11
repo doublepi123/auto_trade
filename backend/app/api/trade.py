@@ -561,8 +561,6 @@ def start_runner(
             result = "FAILED"
             detail = {**control_scope, "detail": "Kill switch is active — disable it before starting"}
             raise HTTPException(status_code=403, detail=detail["detail"])
-        svc = StrategyService(db)
-        svc.update_primary_runtime_state(paused=False, pause_reason="", paused_at=None, pause_auto_resumable=False)
         _record_control_trace(
             event_type="CONTROL_START",
             status="REQUESTED",
@@ -573,6 +571,13 @@ def start_runner(
         if not started:
             detail = {**control_scope, "detail": "runner is already running or failed to start"}
             return MessageResponse(message=detail["detail"])
+        svc = StrategyService(db)
+        svc.update_primary_runtime_state(
+            paused=runner.risk.paused,
+            pause_reason=runner.risk.pause_reason or "",
+            paused_at=runner.risk.paused_at,
+            pause_auto_resumable=runner.risk.pause_auto_resumable,
+        )
         detail = control_scope
         return MessageResponse(message="runner started")
     except HTTPException as exc:

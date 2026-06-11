@@ -193,6 +193,8 @@ class StrategyEngine:
         with self._lock:
             current = self.state
             if action == "BUY":
+                if current == EngineState.LONG:
+                    return "OK"
                 if current != EngineState.FLAT:
                     return "INCOMPATIBLE_STATE"
                 self.state = EngineState.LONG

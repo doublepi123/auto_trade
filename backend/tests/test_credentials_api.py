@@ -193,7 +193,7 @@ def test_update_persists_notification_channels() -> None:
             {"type": "serverchan", "severity_floor": "INFO"},
             {
                 "type": "webhook",
-                "url": "https://example.com/hook",
+                "url": "https://93.184.216.34/hook",
                 "severity_floor": "WARNING",
             },
         ]
@@ -201,7 +201,7 @@ def test_update_persists_notification_channels() -> None:
     resp = client.put("/api/credentials", json=payload)
     assert resp.status_code == 200
     body = client.get("/api/credentials").json()
-    assert body["notification_channels"][1]["url"] == "https://example.com/hook"
+    assert body["notification_channels"][1]["url"] == "https://93.184.216.34/hook"
 
 
 def test_credentials_update_audits_with_masked_payload() -> None:

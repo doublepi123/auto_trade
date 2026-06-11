@@ -13,12 +13,18 @@ export function useStatusHistorySeries() {
   const history = ref<StatusHistory>({ points: [], markers: [] })
   const loading = ref(false)
   const error = ref('')
+  let loadSeq = 0
 
   async function load(query: StatusHistoryQuery) {
+    const seq = ++loadSeq
     loading.value = true
     error.value = ''
     try {
-      history.value = await getStatusHistory(query)
+      const result = await getStatusHistory(query)
+      if (seq !== loadSeq) {
+        return history.value
+      }
+      history.value = result
       return history.value
     } catch (err) {
       history.value = { points: [], markers: [] }

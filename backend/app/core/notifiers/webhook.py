@@ -6,6 +6,7 @@ from typing import Optional
 
 import httpx
 
+from app.core.url_safety import validate_webhook_url
 from app.core.notifiers._messages import (
     render_fill_body,
     render_fill_title,
@@ -21,7 +22,7 @@ logger = logging.getLogger("auto_trade.notify.webhook")
 
 class WebhookNotifier:
     def __init__(self, url: str, *, timeout: float = 10.0) -> None:
-        self._url = url
+        self._url = validate_webhook_url(url) if (url or "").strip() else ""
         self._timeout = timeout
 
     def send(self, title: str, content: str, severity: str = "INFO") -> bool:
@@ -34,7 +35,7 @@ class WebhookNotifier:
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         try:
-            resp = httpx.post(self._url, json=payload, timeout=self._timeout)
+            resp = httpx.post(self._url, json=payload, timeout=self._timeout, follow_redirects=False)
             return 200 <= resp.status_code < 300
         except Exception as exc:
             logger.warning("webhook send failed (%s): %s", self._url, exc)

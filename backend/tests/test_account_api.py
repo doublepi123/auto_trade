@@ -1,6 +1,6 @@
 import os
 
-os.environ["AUTO_TRADE_DATABASE_URL"] = "sqlite:///data/test_account_api.db"
+os.environ["AUTO_TRADE_DATABASE_URL"] = f"sqlite:////tmp/auto_trade_test_account_api_{os.getpid()}.db"
 
 from decimal import Decimal
 from unittest.mock import MagicMock, patch

@@ -1182,7 +1182,8 @@ class TestAPI:
         assert data["suggested_sell_high"] == 205.0
 
         strategy = client.get("/api/strategy").json()
-        assert strategy["buy_low"] == 195.0
+        # LONG state: buy_low must not chase upward; sell_high may be raised.
+        assert strategy["buy_low"] == 100.0
         assert strategy["sell_high"] == 205.0
 
     def test_llm_analyze_passes_account_position_and_recent_price_context(self, monkeypatch) -> None:
@@ -1510,6 +1511,10 @@ def test_start_endpoint_writes_global_scope_to_audit_and_event(monkeypatch) -> N
 
     class Risk:
         kill_switch = False
+        paused = False
+        pause_reason = ""
+        paused_at = None
+        pause_auto_resumable = False
 
     runner = SimpleNamespace(
         risk=Risk(),

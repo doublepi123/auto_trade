@@ -63,11 +63,13 @@
 import { defineAsyncComponent, ref, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { Odometer, Setting, List, Clock, Key, TrendCharts } from '@element-plus/icons-vue'
+import { useNotificationStream } from './composables/useNotificationStream'
 
 const NotificationSettings = defineAsyncComponent(() => import('./components/NotificationSettings.vue'))
 
 const route = useRoute()
 const dialogVisible = ref(false)
+const notifications = useNotificationStream()
 const MOBILE_BREAKPOINT = 768
 const isMobile = ref(window.innerWidth <= MOBILE_BREAKPOINT)
 
@@ -77,10 +79,12 @@ function handleResize() {
 
 onMounted(() => {
   window.addEventListener('resize', handleResize)
+  notifications.enable()
 })
 
 onUnmounted(() => {
   window.removeEventListener('resize', handleResize)
+  notifications.disable()
 })
 </script>
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 from app import database
 from app.core.engine import StrategyEngine, EngineState, StrategyParams
 from app.core.risk import RiskController
-from app.models import RuntimeState, RuntimeStateSnapshot, StrategyConfig
+from app.models import RiskEvent, RuntimeState, RuntimeStateSnapshot, StrategyConfig
 from app.services.runtime_state_service import RuntimeStateService
 from app.services.strategy_service import StrategyService
 
@@ -21,6 +21,7 @@ class TestRuntimeStateService:
         db.query(StrategyConfig).delete()
         db.query(RuntimeStateSnapshot).delete()
         db.query(RuntimeState).delete()
+        db.query(RiskEvent).delete()
         db.commit()
         db.close()
 
@@ -305,10 +306,12 @@ class TestRuntimeStateService:
         db.close()
 
         db = self._get_db()
-        events = db.query(RuntimeState).all()
+        events = db.query(RiskEvent).all()
         db.close()
 
-        assert len([e for e in events if hasattr(e, 'event_type')]) >= 0
+        assert len(events) == 1
+        assert events[0].event_type == "RISK_REJECTION"
+        assert events[0].reason == "test risk reason"
 
     def test_load_resets_daily_pnl_when_day_changed(self) -> None:
         from datetime import datetime, timedelta, timezone

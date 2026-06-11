@@ -108,6 +108,18 @@ class NotificationChannelSchema(BaseModel):
     severity_floor: Literal["INFO", "WARNING", "CRITICAL"] = "INFO"
     url: Optional[str] = None
 
+    @field_validator("url")
+    @classmethod
+    def validate_webhook_url_field(cls, v: Optional[str], info: Any) -> Optional[str]:
+        if v is None or not str(v).strip():
+            return v
+        channel_type = info.data.get("type")
+        if channel_type != "webhook":
+            return v
+        from app.core.url_safety import validate_webhook_url
+
+        return validate_webhook_url(v)
+
 
 class CredentialConfigSchema(BaseModel):
     longbridge_app_key: str = Field(default="", max_length=4096)

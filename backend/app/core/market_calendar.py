@@ -27,6 +27,8 @@ class MarketSession:
     timezone: ZoneInfo
     rth_open: time
     rth_close: time
+    lunch_start: time | None = None
+    lunch_end: time | None = None
 
     def local(self, instant: datetime) -> datetime:
         return _ensure_utc(instant).astimezone(self.timezone)
@@ -40,7 +42,15 @@ class MarketSession:
         if local.weekday() >= 5:
             return False
         current = local.time()
-        return self.rth_open <= current < self.rth_close
+        if not (self.rth_open <= current < self.rth_close):
+            return False
+        if (
+            self.lunch_start is not None
+            and self.lunch_end is not None
+            and self.lunch_start <= current < self.lunch_end
+        ):
+            return False
+        return True
 
 
 _US_SESSION = MarketSession(
@@ -55,6 +65,8 @@ _HK_SESSION = MarketSession(
     timezone=ZoneInfo("Asia/Hong_Kong"),
     rth_open=time(9, 30),
     rth_close=time(16, 0),
+    lunch_start=time(12, 0),
+    lunch_end=time(13, 0),
 )
 
 
@@ -90,6 +102,14 @@ def is_trading_hours(market: str, instant: datetime | None = None) -> bool:
     return session.is_rth(instant or datetime.now(timezone.utc))
 
 
+def market_for_symbol(symbol: str) -> str:
+    """Infer market code from a broker symbol suffix."""
+    upper = (symbol or "").upper()
+    if upper.endswith(".HK"):
+        return "HK"
+    return "US"
+
+
 def next_session_open(market: str, instant: datetime | None = None) -> datetime:
     """Return the next RTH open in UTC after ``instant``.
 
@@ -98,6 +118,19 @@ def next_session_open(market: str, instant: datetime | None = None) -> datetime:
     """
     session = get_session(market)
     here = _ensure_utc(instant or datetime.now(timezone.utc)).astimezone(session.timezone)
+    if (
+        here.weekday() < 5
+        and session.lunch_start is not None
+        and session.lunch_end is not None
+        and session.lunch_start <= here.time() < session.lunch_end
+    ):
+        resume = here.replace(
+            hour=session.lunch_end.hour,
+            minute=session.lunch_end.minute,
+            second=0,
+            microsecond=0,
+        )
+        return resume.astimezone(timezone.utc)
     candidate = here.replace(hour=session.rth_open.hour, minute=session.rth_open.minute, second=0, microsecond=0)
     if here >= candidate or here.weekday() >= 5:
         candidate = candidate + timedelta(days=1)

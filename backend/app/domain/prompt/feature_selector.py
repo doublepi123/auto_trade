@@ -38,7 +38,8 @@ class FeatureSelector:
                 selected = data.get("selected_indicators")
                 if isinstance(selected, list):
                     valid = [s for s in selected if s in AVAILABLE_INDICATORS]
-                    return valid
+                    if valid:
+                        return valid
         except (json.JSONDecodeError, KeyError, TypeError):
             logger.warning("Failed to parse LLM indicator selection")
 

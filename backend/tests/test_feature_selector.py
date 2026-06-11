@@ -16,10 +16,10 @@ class TestFeatureSelector:
         result = FeatureSelector.parse_selection(response, ["rsi", "cci"])
         assert result == ["rsi", "cci"]
 
-    def test_parse_empty_selection(self) -> None:
+    def test_parse_empty_selection_falls_back_to_suggested(self) -> None:
         response = '{"selected_indicators": [], "reasoning": "none"}'
         result = FeatureSelector.parse_selection(response, ["rsi"])
-        assert result == []
+        assert result == ["rsi"]
 
     def test_parse_unknown_indicators(self) -> None:
         response = '{"selected_indicators": ["adx", "unknown", "macd"]}'

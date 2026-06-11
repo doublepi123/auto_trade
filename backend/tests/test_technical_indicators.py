@@ -52,12 +52,10 @@ class TestMACD:
         result = TechnicalIndicators.calculate_macd(closes)
         assert result["histogram"] == pytest.approx(result["macd"] - result["signal"], abs=0.01)
 
-    def test_macd_returns_zeros_for_insufficient_data(self) -> None:
+    def test_macd_returns_empty_for_insufficient_data(self) -> None:
         closes = [100.0, 101.0]
         result = TechnicalIndicators.calculate_macd(closes)
-        assert result["macd"] == 0.0
-        assert result["signal"] == 0.0
-        assert result["histogram"] == 0.0
+        assert result == {}
 
 
 class TestVolumeAnalysis:

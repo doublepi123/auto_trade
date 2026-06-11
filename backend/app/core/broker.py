@@ -607,7 +607,9 @@ class BrokerGateway:
                 remark="auto-trade",
             )
 
-            order_id = str(getattr(response, "order_id", getattr(response, "broker_order_id", "")))
+            order_id = str(getattr(response, "order_id", getattr(response, "broker_order_id", "")) or "").strip()
+            if not order_id:
+                raise RuntimeError("broker submit_order returned empty order_id")
             raw_status = getattr(response, "status", "SUBMITTED")
             return OrderResult(
                 broker_order_id=order_id,

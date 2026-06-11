@@ -136,6 +136,23 @@ class TradeExecutionService:
                     continue
                 self._entry_positions[symbol] = _TrackedEntry(quantity=quantity, cost=cost)
 
+    def refresh_pending_brokers(self, broker: BrokerGateway) -> None:
+        with self._state_lock:
+            for symbol, pending in self._pending_orders.items():
+                self._pending_orders[symbol] = _PendingOrder(
+                    broker=broker,
+                    broker_order_id=pending.broker_order_id,
+                    symbol=pending.symbol,
+                    action=pending.action,
+                    quantity=pending.quantity,
+                    price=pending.price,
+                    engine_snapshot=pending.engine_snapshot,
+                    avg_price=pending.avg_price,
+                    next_status_check_at=pending.next_status_check_at,
+                    submitted_at=pending.submitted_at,
+                    restore_engine_snapshot_fn=pending.restore_engine_snapshot_fn,
+                )
+
     def load_pending_orders(self, pending_orders: list[_PendingOrder]) -> None:
         with self._state_lock:
             existing_by_id = {
@@ -195,6 +212,13 @@ class TradeExecutionService:
     def pending_order(self) -> _PendingOrder | None:
         with self._state_lock:
             return next(iter(self._pending_orders.values()), None)
+
+    def pending_order_by_broker_id(self, order_id: str) -> _PendingOrder | None:
+        with self._state_lock:
+            return next(
+                (item for item in self._pending_orders.values() if item.broker_order_id == order_id),
+                None,
+            )
 
     def pending_order_for(self, symbol: str) -> _PendingOrder | None:
         with self._state_lock:
@@ -271,39 +295,44 @@ class TradeExecutionService:
     ) -> OrderStatus:
         with self._state_lock:
             pending = self._pending_orders.get(symbol)
-        if pending is None:
-            return OrderStatus("", "NO_PENDING_ORDER")
+            if pending is None:
+                return OrderStatus("", "NO_PENDING_ORDER")
+            if pending.broker_order_id in self._reconcile_in_flight:
+                return OrderStatus(pending.broker_order_id, "RECONCILE_IN_FLIGHT")
+            self._reconcile_in_flight.add(pending.broker_order_id)
 
         try:
-            order_status = self._coerce_order_status(
-                pending.broker.cancel_order(pending.broker_order_id),
-                pending.broker_order_id,
-            )
-        except Exception:
-            logger.exception("failed to cancel pending order %s", pending.broker_order_id)
-            return OrderStatus(pending.broker_order_id, "CANCEL_FAILED")
+            try:
+                order_status = self._coerce_order_status(
+                    pending.broker.cancel_order(pending.broker_order_id),
+                    pending.broker_order_id,
+                )
+            except Exception:
+                logger.exception("failed to cancel pending order %s", pending.broker_order_id)
+                return OrderStatus(pending.broker_order_id, "CANCEL_FAILED")
 
-        self._safe_update_order_status_from_result(order_status)
+            self._safe_update_order_status_from_result(order_status)
 
-        # Handle partial fill before cancel completed
-        fill_qty = self._resolved_decimal(order_status, "executed_quantity", Decimal("0"))
-        if fill_qty > 0:
-            self._finalize_pending_fill(
-                pending, order_status,
-                risk=risk,
-                notifier=notifier,
-                fill_qty=fill_qty,
-                notify_risk_event=notify_risk_event,
-            )
+            fill_qty = self._resolved_decimal(order_status, "executed_quantity", Decimal("0"))
+            if fill_qty > 0:
+                self._finalize_pending_fill(
+                    pending, order_status,
+                    risk=risk,
+                    notifier=notifier,
+                    fill_qty=fill_qty,
+                    notify_risk_event=notify_risk_event,
+                )
 
-        self._clear_pending_order(pending.broker_order_id)
-        effective_restore = pending.restore_engine_snapshot_fn or restore_engine_snapshot
-        if effective_restore is not None and pending.engine_snapshot is not None:
-            # Only restore if no fill (clean cancel) or partial exit fill
-            if fill_qty == 0 or self._should_restore_after_partial_terminal_fill(pending, fill_qty):
-                effective_restore(pending.engine_snapshot)
-        logger.info("pending order cancelled: %s status=%s", pending.broker_order_id, order_status.status)
-        return order_status
+            self._clear_pending_order(pending.broker_order_id)
+            effective_restore = pending.restore_engine_snapshot_fn or restore_engine_snapshot
+            if effective_restore is not None and pending.engine_snapshot is not None:
+                if fill_qty == 0 or self._should_restore_after_partial_terminal_fill(pending, fill_qty):
+                    effective_restore(pending.engine_snapshot)
+            logger.info("pending order cancelled: %s status=%s", pending.broker_order_id, order_status.status)
+            return order_status
+        finally:
+            with self._state_lock:
+                self._reconcile_in_flight.discard(pending.broker_order_id)
 
     def cancel_order_by_id(
         self,
@@ -932,6 +961,7 @@ class TradeExecutionService:
             avg_price=pending.avg_price,
             next_status_check_at=now + self._order_status_poll_interval_seconds,
             submitted_at=pending.submitted_at,
+            restore_engine_snapshot_fn=pending.restore_engine_snapshot_fn,
         )
         with self._state_lock:
             self._pending_orders[updated_pending.symbol] = updated_pending
@@ -993,12 +1023,16 @@ class TradeExecutionService:
                 else:
                     self._pause_after_failed_order(pending.broker_order_id, order_status.status, risk, notify_risk_event)
                 self._clear_pending_order(pending.broker_order_id)
-                if effective_restore is not None and pending.engine_snapshot is not None:
+                if (
+                    fill_qty == 0
+                    or self._should_restore_after_partial_terminal_fill(pending, fill_qty)
+                ) and effective_restore is not None and pending.engine_snapshot is not None:
                     effective_restore(pending.engine_snapshot)
                 return
         except Exception:
             logger.exception("failed to query pending order status during timeout for %s", pending.broker_order_id)
 
+        cancel_finalized = False
         # Attempt to cancel the live order before giving up.
         try:
             cancel_result = pending.broker.cancel_order(pending.broker_order_id)
@@ -1012,12 +1046,44 @@ class TradeExecutionService:
             if cancel_status.executed_quantity > 0:
                 # Partial fill before cancel — finalize the partial fill
                 self._finalize_pending_fill(pending, cancel_status, risk=risk, notifier=notifier, fill_qty=cancel_status.executed_quantity, notify_risk_event=notify_risk_event)
+                cancel_finalized = True
                 self._clear_pending_order(pending.broker_order_id)
                 if self._should_restore_after_partial_terminal_fill(pending, cancel_status.executed_quantity) and effective_restore is not None and pending.engine_snapshot is not None:
                     effective_restore(pending.engine_snapshot)
                 return
         except Exception:
             logger.exception("failed to cancel timed-out order %s", pending.broker_order_id)
+
+        if not cancel_finalized:
+            try:
+                recovery_status = self._coerce_order_status(
+                    pending.broker.get_order_status(pending.broker_order_id),
+                    pending.broker_order_id,
+                )
+                recovery_qty = self._resolved_decimal(recovery_status, "executed_quantity", Decimal("0"))
+                if recovery_qty > 0:
+                    self._finalize_pending_fill(
+                        pending,
+                        recovery_status,
+                        risk=risk,
+                        notifier=notifier,
+                        fill_qty=recovery_qty,
+                        notify_risk_event=notify_risk_event,
+                    )
+                    cancel_finalized = True
+                    self._clear_pending_order(pending.broker_order_id)
+                    if (
+                        self._should_restore_after_partial_terminal_fill(pending, recovery_qty)
+                        and effective_restore is not None
+                        and pending.engine_snapshot is not None
+                    ):
+                        effective_restore(pending.engine_snapshot)
+                    return
+            except Exception:
+                logger.exception(
+                    "failed to recover partial fill after timeout for %s",
+                    pending.broker_order_id,
+                )
 
         if risk is not None:
             risk.pause(reason, auto_resumable=False)
@@ -1296,27 +1362,17 @@ class TradeExecutionService:
 
         tracked_covers_exit = tracked_qty >= exit_qty > 0
         if tracked_avg > 0 and tracked_covers_exit:
-            if broker_avg_price is not None and broker_avg_price > 0 and abs(tracked_avg - broker_avg_price) / broker_avg_price > Decimal("0.02"):
-                # Divergence exceeds 2% tolerance: prefer tracked weighted entry for accurate pnl
+            if (
+                broker_avg_price is not None
+                and broker_avg_price > 0
+                and abs(tracked_avg - broker_avg_price) / broker_avg_price > Decimal("0.02")
+            ):
                 logger.warning(
                     "avg_price mismatch for %s: tracked=%s vs broker=%s, using tracked weighted entry price for accurate pnl",
                     symbol,
                     tracked_avg,
                     broker_avg_price,
                 )
-                return tracked_avg
-            if broker_avg_price is not None and broker_avg_price > 0:
-                # Divergence within tolerance (<=2%) or no divergence: use broker price
-                if tracked_avg != broker_avg_price:
-                    logger.debug(
-                        "avg_price within-tolerance divergence for %s: tracked=%s vs broker=%s (diff=%s), using broker price",
-                        symbol,
-                        tracked_avg,
-                        broker_avg_price,
-                        abs(tracked_avg - broker_avg_price),
-                    )
-                return broker_avg_price
-            # Broker price unavailable; fall back to tracked weighted entry
             return tracked_avg
 
         if broker_avg_price is not None and broker_avg_price > 0:

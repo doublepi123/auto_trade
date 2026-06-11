@@ -13,7 +13,8 @@ export function useStatusStream(status: { value: StatusData }) {
   let pollTimer: ReturnType<typeof setInterval> | null = null
   let reconnectAttempts = 0
   let useWebSocket = false
-  let wsErrorOccurred = false
+  let wsAuthRejected = false
+  let statusPollInFlight = false
   let lastWsStatusAt = 0
   const cypressWindow = window as CypressWindow
   const isCypress = Boolean(cypressWindow.Cypress)
@@ -58,7 +59,7 @@ export function useStatusStream(status: { value: StatusData }) {
             last_action_message: data.last_action_message ?? status.value.last_action_message,
             trading_session_mode:
               data.trading_session_mode ?? status.value.trading_session_mode ?? 'ANY',
-            is_trading_hours: data.is_trading_hours ?? status.value.is_trading_hours ?? true,
+            is_trading_hours: data.is_trading_hours ?? status.value.is_trading_hours ?? false,
           }
         }
       } catch (exc) {
@@ -66,22 +67,26 @@ export function useStatusStream(status: { value: StatusData }) {
       }
     }
 
-    ws.onclose = () => {
+    ws.onclose = (event) => {
       useWebSocket = false
       ws = null
-      if (wsErrorOccurred) {
-        wsErrorOccurred = false
+      const authRejected = event.code === 1008 || event.code === 4401 || event.code === 4403
+      if (authRejected) {
+        wsAuthRejected = true
         realtimeStatus.value = 'polling'
-      } else {
-        realtimeStatus.value = 'reconnecting'
-        scheduleReconnect()
+        return
       }
+      if (wsAuthRejected) {
+        realtimeStatus.value = 'polling'
+        return
+      }
+      realtimeStatus.value = 'reconnecting'
+      scheduleReconnect()
     }
 
     ws.onerror = () => {
       useWebSocket = false
-      wsErrorOccurred = true
-      realtimeStatus.value = 'polling'
+      realtimeStatus.value = 'reconnecting'
     }
   }
 
@@ -102,7 +107,8 @@ export function useStatusStream(status: { value: StatusData }) {
 
   function startPolling() {
     pollTimer = setInterval(async () => {
-      if (hasFreshWebSocketStatus()) return
+      if (hasFreshWebSocketStatus() || statusPollInFlight) return
+      statusPollInFlight = true
       try {
         const st = await getStatus()
         status.value = st
@@ -111,6 +117,8 @@ export function useStatusStream(status: { value: StatusData }) {
         }
       } catch (exc) {
         console.warn('Status polling failed:', exc)
+      } finally {
+        statusPollInFlight = false
       }
     }, 3000)
   }

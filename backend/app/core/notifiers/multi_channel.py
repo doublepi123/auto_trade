@@ -87,8 +87,14 @@ class MultiChannelNotifier:
         except Exception as exc:
             logger.warning("notification_channels invalid JSON, falling back: %s", exc)
             return cls([(ServerChanNotifier(cred.sct_key or ""), "INFO")])
+        if not isinstance(raw, list):
+            logger.warning("notification_channels must be a JSON array, falling back")
+            return cls([(ServerChanNotifier(cred.sct_key or ""), "INFO")])
         built: list[tuple[NotifierInterface, str]] = []
         for channel in raw:
+            if not isinstance(channel, dict):
+                logger.warning("notification_channels entry is not an object, skipping")
+                continue
             channel_type = channel.get("type")
             floor = channel.get("severity_floor", "INFO")
             if channel_type == "serverchan":

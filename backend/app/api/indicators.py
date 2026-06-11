@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.api.auth import require_api_key
 from app.core.broker import BrokerGateway
+from app.core.market_calendar import market_for_symbol
 from app.database import get_db
 from app.models import StrategyConfig
 from app.schemas import IndicatorsResponse
@@ -33,11 +34,11 @@ def get_indicators(
     db: Session = Depends(get_db),
     broker: BrokerGateway | None = Depends(get_indicator_broker),
 ) -> IndicatorsResponse:
-    config = db.query(StrategyConfig).first()
+    config = db.query(StrategyConfig).order_by(StrategyConfig.id.desc()).first()
     resolved_symbol = (symbol.strip().upper() if symbol else None) or (config.symbol if config else None)
     if not resolved_symbol:
         raise HTTPException(status_code=422, detail="symbol is required")
-    market = config.market if config else "US"
+    market = market_for_symbol(resolved_symbol)
 
     aggregator = DataAggregator(broker=broker)
     data = aggregator.fetch_market_data(resolved_symbol, market)

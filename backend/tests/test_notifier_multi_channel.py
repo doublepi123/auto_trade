@@ -100,7 +100,7 @@ def test_from_credential_config_builds_multiple_channels() -> None:
         notification_channels=json.dumps(
             [
                 {"type": "serverchan", "severity_floor": "INFO"},
-                {"type": "webhook", "url": "https://x", "severity_floor": "WARNING"},
+                {"type": "webhook", "url": "https://93.184.216.34/hook", "severity_floor": "WARNING"},
             ]
         ),
         sct_key="abc",

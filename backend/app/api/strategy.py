@@ -116,19 +116,30 @@ def get_status(db: Session = Depends(get_db)) -> StatusResponse:
         trade_day=trade_day_for(config.market),
         to_trade_day=lambda instant=None: trade_day_for(config.market, instant),
     )
+    runner = get_runner()
+    risk = getattr(runner, "risk", None)
+    old_daily_pnl = risk.daily_pnl if risk is not None else state.daily_pnl
+    old_consecutive_losses = risk.consecutive_losses if risk is not None else state.consecutive_losses
+    old_daily_pnl_date = risk.daily_pnl_date if risk is not None else state.daily_pnl_date
+    new_pnl = pnl_result.realized_pnl
+    new_losses = pnl_result.consecutive_losses
+    same_trade_day = old_daily_pnl_date == pnl_result.trade_day
+    optimistic_replay = new_pnl > old_daily_pnl + 1e-9 or new_losses < old_consecutive_losses
+    if risk is not None and same_trade_day and not pnl_result.trades and optimistic_replay:
+        new_pnl = old_daily_pnl
+        new_losses = old_consecutive_losses
     if (
-        abs(state.daily_pnl - pnl_result.realized_pnl) > 1e-9
-        or state.consecutive_losses != pnl_result.consecutive_losses
+        abs(state.daily_pnl - new_pnl) > 1e-9
+        or state.consecutive_losses != new_losses
         or state.daily_pnl_date != pnl_result.trade_day
     ):
         state = svc.update_runtime_state(
             symbol=state.symbol,
-            daily_pnl=pnl_result.realized_pnl,
+            daily_pnl=new_pnl,
             daily_pnl_date=pnl_result.trade_day,
-            consecutive_losses=pnl_result.consecutive_losses,
+            consecutive_losses=new_losses,
         )
     response = StatusResponse.model_validate(state)
-    runner = get_runner()
     response.runner_running = runner.is_running
     response.last_action_message = getattr(runner, "last_action_message", "")
     response.trading_session_mode = getattr(config, "trading_session_mode", "ANY") or "ANY"
