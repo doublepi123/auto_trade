@@ -7,11 +7,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
+from app.api.auth import require_api_key
 from app.database import get_db
 from app.runner import get_runner
 from app.services.review_service import ReviewService
 
-router = APIRouter(prefix="/api/review", tags=["review"])
+router = APIRouter(prefix="/api/review", tags=["review"], dependencies=[Depends(require_api_key())])
 logger = logging.getLogger(__name__)
 
 

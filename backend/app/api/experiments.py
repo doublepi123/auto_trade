@@ -15,7 +15,7 @@ from app.schemas import (
     PromptVersionResponse,
 )
 
-router = APIRouter(prefix="/api/experiments", tags=["experiments"])
+router = APIRouter(prefix="/api/experiments", tags=["experiments"], dependencies=[Depends(require_api_key())])
 
 
 @router.get("", response_model=List[str])
@@ -44,7 +44,7 @@ def create_version(
             template=payload.template,
         )
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Failed to create version: {exc}") from exc
+        raise HTTPException(status_code=400, detail="Failed to create version") from exc
     return PromptVersionResponse.model_validate(version)
 
 

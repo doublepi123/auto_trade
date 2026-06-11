@@ -6,11 +6,12 @@ from typing import Any
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
+from app.api.auth import require_api_key
 from app.database import get_db
 from app.domain.performance.performance_tracker import PerformanceTracker
 from app.schemas import PerformanceStats, PerformanceVariant
 
-router = APIRouter(prefix="/api/performance", tags=["performance"])
+router = APIRouter(prefix="/api/performance", tags=["performance"], dependencies=[Depends(require_api_key())])
 logger = logging.getLogger("auto_trade.performance")
 
 

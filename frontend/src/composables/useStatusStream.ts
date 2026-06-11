@@ -1,5 +1,6 @@
 import { ref, onMounted, onUnmounted } from 'vue'
 import { getStatus } from '../api'
+import { resolveApiKey } from '../config/apiKey'
 import type { StatusData } from '../types'
 
 type CypressWindow = Window & { Cypress?: unknown }
@@ -24,12 +25,14 @@ export function useStatusStream(status: { value: StatusData }) {
     }
     realtimeStatus.value = 'connecting'
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const apiKey = import.meta.env.VITE_AUTO_TRADE_API_KEY
-    const query = apiKey ? `?api_key=${encodeURIComponent(apiKey)}` : ''
-    const wsUrl = `${protocol}//${window.location.host}/ws${query}`
+    const wsUrl = `${protocol}//${window.location.host}/ws`
+    const apiKey = resolveApiKey()
     ws = new WebSocket(wsUrl)
 
     ws.onopen = () => {
+      if (apiKey) {
+        ws?.send(JSON.stringify({ type: 'auth', api_key: apiKey }))
+      }
       useWebSocket = true
       realtimeStatus.value = 'connected'
       reconnectAttempts = 0

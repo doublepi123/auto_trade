@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+import logging
 import re
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
+from app.api.auth import require_api_key
 from app.database import get_db
 from app.schemas import ReportResponse
 from app.services.report_service import ReportService
 
-router = APIRouter(prefix="/api/reports", tags=["reports"])
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/api/reports", tags=["reports"], dependencies=[Depends(require_api_key())])
 
 
 @router.get("/daily", response_model=ReportResponse)
@@ -25,7 +29,8 @@ def get_daily_report(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Report generation failed: {exc}")
+        logger.exception("daily report generation failed")
+        raise HTTPException(status_code=500, detail="Report generation failed") from exc
     return ReportResponse.model_validate(report)
 
 
@@ -41,7 +46,8 @@ def get_weekly_report(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Report generation failed: {exc}")
+        logger.exception("weekly report generation failed")
+        raise HTTPException(status_code=500, detail="Report generation failed") from exc
     return ReportResponse.model_validate(report)
 
 
@@ -57,7 +63,8 @@ def get_monthly_report(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Report generation failed: {exc}")
+        logger.exception("monthly report generation failed")
+        raise HTTPException(status_code=500, detail="Report generation failed") from exc
     return ReportResponse.model_validate(report)
 
 
@@ -74,7 +81,8 @@ def get_range_report(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Report generation failed: {exc}")
+        logger.exception("range report generation failed")
+        raise HTTPException(status_code=500, detail="Report generation failed") from exc
     return ReportResponse.model_validate(report)
 
 
@@ -94,7 +102,8 @@ def export_report(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Report export failed: {exc}")
+        logger.exception("report export failed")
+        raise HTTPException(status_code=500, detail="Report export failed") from exc
     media_type = "application/json" if format == "json" else "text/csv"
     safe_symbol = re.sub(r'[^a-zA-Z0-9]', '', symbol.replace('.', '_'))
     filename = f"report_{safe_symbol}_{from_date}_{to_date}.{format}"

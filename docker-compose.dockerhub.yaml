@@ -32,6 +32,8 @@ services:
   frontend:
     image: doublepi/auto-trade-frontend:${AUTO_TRADE_IMAGE_TAG:-latest}
     pull_policy: always
+    environment:
+      - AUTO_TRADE_API_KEY=${AUTO_TRADE_API_KEY:?Set AUTO_TRADE_API_KEY in .env before starting Docker Compose}
     ports:
       - '127.0.0.1:${AUTO_TRADE_FRONTEND_PORT:-8080}:80'
     depends_on:

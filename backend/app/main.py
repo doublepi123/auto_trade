@@ -440,13 +440,14 @@ async def health() -> dict[str, Any]:
 
     from sqlalchemy import text
 
-    health_status: dict[str, Any] = {"ok": True, "env": settings.env}
+    health_status: dict[str, Any] = {"ok": True}
     try:
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
         health_status["database"] = "connected"
-    except Exception as exc:
-        health_status["database"] = f"error: {exc}"
+    except Exception:
+        logger.exception("health check database probe failed")
+        health_status["database"] = "error"
         health_status["ok"] = False
 
     try:
@@ -455,10 +456,9 @@ async def health() -> dict[str, Any]:
         health_status["runner"] = {
             "running": diag.get("runner_running", False),
             "quotes_subscribed": diag.get("quotes_subscribed", False),
-            "risk_paused": diag.get("risk", {}).get("paused", False),
-            "risk_kill_switch": diag.get("risk", {}).get("kill_switch", False),
         }
-    except Exception as exc:
-        health_status["runner"] = f"error: {exc}"
+    except Exception:
+        logger.exception("health check runner probe failed")
+        health_status["runner"] = "unavailable"
 
     return health_status

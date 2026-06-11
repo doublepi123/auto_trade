@@ -474,8 +474,8 @@ class BacktestParams(BaseModel):
 
 class BacktestRunRequest(BaseModel):
     params: BacktestParams
-    csv_text: Optional[str] = None
-    price_points: list[BacktestPricePoint] = Field(default_factory=list)
+    csv_text: Optional[str] = Field(default=None, max_length=2_000_000)
+    price_points: list[BacktestPricePoint] = Field(default_factory=list, max_length=50_000)
 
     @model_validator(mode="after")
     def validate_price_source(self) -> "BacktestRunRequest":
@@ -626,8 +626,8 @@ class StrategyExperimentCreate(BaseModel):
 
 
 class StrategyExperimentRunRequest(BaseModel):
-    csv_text: Optional[str] = None
-    price_points: list[BacktestPricePoint] = Field(default_factory=list)
+    csv_text: Optional[str] = Field(default=None, max_length=2_000_000)
+    price_points: list[BacktestPricePoint] = Field(default_factory=list, max_length=50_000)
 
     @model_validator(mode="after")
     def validate_price_source(self) -> "StrategyExperimentRunRequest":

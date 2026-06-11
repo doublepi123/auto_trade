@@ -321,7 +321,7 @@ class LLMAdvisorService:
             )
             return {
                 "success": False,
-                "error": f"LLM analysis failed: {exc}",
+                "error": "LLM analysis failed",
                 "interaction_id": interaction_id,
             }
 

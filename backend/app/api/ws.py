@@ -70,19 +70,39 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
+_WS_AUTH_TIMEOUT_SECONDS = 5.0
 
-def _websocket_api_key_authorized(provided: str) -> bool:
+
+def _api_key_matches(provided: str) -> bool:
+    return bool(provided) and secrets.compare_digest(provided, settings.api_key)
+
+
+async def _authenticate_websocket(ws: WebSocket, query_api_key: str) -> bool:
     if not settings.api_key:
         return settings.env in ("dev", "test")
-    return bool(provided) and secrets.compare_digest(provided, settings.api_key)
+    if _api_key_matches(query_api_key):
+        return True
+    try:
+        raw = await asyncio.wait_for(ws.receive_text(), timeout=_WS_AUTH_TIMEOUT_SECONDS)
+    except (TimeoutError, asyncio.TimeoutError):
+        return False
+    if raw == "ping":
+        return False
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return False
+    if payload.get("type") != "auth":
+        return False
+    return _api_key_matches(str(payload.get("api_key") or ""))
 
 
 @router.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket, api_key: str = "") -> None:
-    if not _websocket_api_key_authorized(api_key):
+    await ws.accept()
+    if not await _authenticate_websocket(ws, api_key):
         await ws.close(code=1008, reason="Invalid or missing API key")
         return
-    await ws.accept()
     await manager.connect(ws)
     try:
         while True:

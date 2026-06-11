@@ -16,7 +16,7 @@ from app.schemas import (
 from app.services.llm_recommendation_evaluator import LLMRecommendationEvaluator
 from app.services.strategy_experiment_service import StrategyExperimentService
 
-router = APIRouter(prefix="/api/strategy-experiments", tags=["strategy-experiments"])
+router = APIRouter(prefix="/api/strategy-experiments", tags=["strategy-experiments"], dependencies=[Depends(require_api_key())])
 
 
 def _raise_on_value_error(exc: ValueError) -> HTTPException:
@@ -47,7 +47,7 @@ def list_strategy_experiments(
 
 @router.get("/llm-evaluations", response_model=LLMEvaluationResponse)
 def list_llm_evaluations(
-    symbol: str,
+    symbol: str = Query(..., pattern=r"^[A-Z0-9\-]{1,12}\.[A-Z]{2,4}$"),
     start: str | None = None,
     end: str | None = None,
     horizon_minutes: int = Query(default=60, ge=5, le=1440),

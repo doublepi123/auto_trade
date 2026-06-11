@@ -383,7 +383,7 @@ def cancel_order(
                 status_result = runner.broker.cancel_order(order_id)
         except Exception as exc:
             logging.getLogger("auto_trade.trade").exception("failed to cancel order %s", order_id)
-            raise HTTPException(status_code=400, detail=f"cancel order failed: {exc}") from exc
+            raise HTTPException(status_code=400, detail="cancel order failed") from exc
 
         _update_local_order_from_status(db, order_id, status_result)
         status = str(getattr(status_result, "status", "CANCELLED"))

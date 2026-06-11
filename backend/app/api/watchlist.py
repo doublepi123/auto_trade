@@ -15,7 +15,7 @@ from app.models import StrategyConfig
 from app.schemas import WatchlistItemResponse, WatchlistItemSchema, MessageResponse, WatchlistQuote, WatchlistSnapshot
 from app.services.watchlist_service import WatchlistService
 
-router = APIRouter(prefix="/api/watchlist", tags=["watchlist"])
+router = APIRouter(prefix="/api/watchlist", tags=["watchlist"], dependencies=[Depends(require_api_key())])
 logger = logging.getLogger("auto_trade.watchlist")
 
 

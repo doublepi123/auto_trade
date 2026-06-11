@@ -972,7 +972,7 @@ class TestLLMAdvisorDegradation:
         )
 
         assert result["success"] is False
-        assert "Simulated API outage" in result["error"]
+        assert result["error"] == "LLM analysis failed"
         assert result["interaction_id"] is not None
 
         db = SessionLocal()

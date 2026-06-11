@@ -56,8 +56,14 @@ def _position_context(symbol: str, current_price: float) -> dict[str, float | st
         positions = runner.broker.get_positions()
     except Exception:
         logger.exception("failed to load position context for LLM analysis")
+        runtime_for_symbol = getattr(runner, "_runtime_for_symbol", None)
+        if callable(runtime_for_symbol):
+            runtime = runtime_for_symbol(symbol)
+            fallback_side = runtime[2].state.value.upper() if runtime is not None else "FLAT"
+        else:
+            fallback_side = runner.engine.state.value.upper()
         return {
-            "side": runner.engine.state.value.upper(),
+            "side": fallback_side,
             "quantity": 0.0,
             "avg_price": 0.0,
             "unrealized_pnl_pct": 0.0,
@@ -323,7 +329,11 @@ def analyze_llm_interval(
     )
 
 
-@router.get("/strategy/llm-interval/interactions", response_model=list[LLMInteractionResponse])
+@router.get(
+    "/strategy/llm-interval/interactions",
+    response_model=list[LLMInteractionResponse],
+    dependencies=[Depends(require_api_key())],
+)
 def get_llm_interactions(
     limit: int = Query(default=50, ge=1, le=200),
     db: Session = Depends(get_db),
@@ -332,7 +342,11 @@ def get_llm_interactions(
     return [LLMInteractionResponse.model_validate(record) for record in records]
 
 
-@router.get("/strategy/llm-interval/status", response_model=LLMIntervalStatus)
+@router.get(
+    "/strategy/llm-interval/status",
+    response_model=LLMIntervalStatus,
+    dependencies=[Depends(require_api_key())],
+)
 def get_llm_interval_status(db: Session = Depends(get_db)) -> LLMIntervalStatus:
     svc = StrategyService(db)
     config = svc.get_config()

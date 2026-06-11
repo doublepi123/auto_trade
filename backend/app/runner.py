@@ -1398,14 +1398,7 @@ class AppRunner:
 
     def _sync_engine_state_with_positions(self, *, force: bool = False) -> bool:
         with self._state_lock:
-            symbol = self.engine.params.symbol
-            if (
-                not self._running
-                or self._trigger_in_flight
-                or self._trade_svc.pending_order_for(symbol) is not None
-            ):
-                return False
-            if not symbol:
+            if not self._running or self._trigger_in_flight:
                 return False
             now = time.monotonic()
             if (
@@ -1414,47 +1407,69 @@ class AppRunner:
                 and now - self._last_position_sync_at < self._position_sync_interval_seconds
             ):
                 return False
+
+            targets: list[tuple[str, StrategyEngine]] = []
+            primary_symbol = self.engine.params.symbol
+            if primary_symbol and self._trade_svc.pending_order_for(primary_symbol) is None:
+                targets.append((primary_symbol, self.engine))
+            for symbol, runtime in self._symbol_runtimes.items():
+                if symbol == primary_symbol:
+                    continue
+                if self._trade_svc.pending_order_for(symbol) is not None:
+                    continue
+                targets.append((symbol, runtime.engine))
+            if not targets:
+                return False
+
             self._last_position_sync_at = now
             snapshot_time = now
 
         try:
             positions = self.broker.get_positions()
         except Exception as exc:
-            logger.warning("position sync failed for %s: %s", symbol, exc)
+            logger.warning("position sync failed: %s", exc)
             return False
 
-        has_long_position = any(
-            position.symbol == symbol and position.side == "LONG" and position.quantity > 0
-            for position in positions
-        )
-        has_short_position = any(
-            position.symbol == symbol and position.side == "SHORT" and position.quantity > 0
-            for position in positions
-        )
-        if has_long_position:
-            desired_state = EngineState.LONG
-        elif has_short_position:
-            desired_state = EngineState.SHORT
-        else:
-            desired_state = EngineState.FLAT
+        any_changed = False
+        for symbol, engine in targets:
+            has_long_position = any(
+                position.symbol == symbol and position.side == "LONG" and position.quantity > 0
+                for position in positions
+            )
+            has_short_position = any(
+                position.symbol == symbol and position.side == "SHORT" and position.quantity > 0
+                for position in positions
+            )
+            if has_long_position:
+                desired_state = EngineState.LONG
+            elif has_short_position:
+                desired_state = EngineState.SHORT
+            else:
+                desired_state = EngineState.FLAT
 
-        with self._state_lock:
-            if self._trigger_in_flight or self._trade_svc.pending_order_for(symbol) is not None:
-                return False
-            # If a fill was processed after we started the position query,
-            # the position snapshot is stale — skip this sync round.
-            if snapshot_time < self._last_fill_at:
+            with self._state_lock:
+                if self._trigger_in_flight or self._trade_svc.pending_order_for(symbol) is not None:
+                    continue
+                if snapshot_time < self._last_fill_at:
+                    logger.info(
+                        "position sync skipped for %s: fill at %.3f is newer than snapshot at %.3f",
+                        symbol,
+                        self._last_fill_at,
+                        snapshot_time,
+                    )
+                    continue
+                current_state = engine.state
+                if current_state == desired_state:
+                    continue
+                engine.sync_state(has_long_position, has_short_position)
+                any_changed = True
                 logger.info(
-                    "position sync skipped: fill at %.3f is newer than snapshot at %.3f",
-                    self._last_fill_at, snapshot_time,
+                    "synced engine state from broker positions for %s: %s -> %s",
+                    symbol,
+                    current_state.value,
+                    desired_state.value,
                 )
-                return False
-            current_state = self.engine.state
-            if current_state == desired_state:
-                return False
-            self.engine.sync_state(has_long_position, has_short_position)
-        logger.info("synced engine state from broker positions: %s -> %s", current_state.value, desired_state.value)
-        return True
+        return any_changed
 
     def _auto_resume_pause_if_due(self, now: datetime | None = None) -> bool:
         now = now or datetime.now(timezone.utc)

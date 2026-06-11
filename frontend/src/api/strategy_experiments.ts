@@ -29,7 +29,7 @@ export async function runStrategyExperiment(
   id: number,
   payload: StrategyExperimentRunRequest,
 ): Promise<StrategyExperiment> {
-  const resp = await api.post(`/api/strategy-experiments/${id}/run`, payload)
+  const resp = await api.post(`/api/strategy-experiments/${id}/run`, payload, { timeout: 300000 })
   return resp.data
 }
 

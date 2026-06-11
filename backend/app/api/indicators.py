@@ -5,13 +5,14 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
+from app.api.auth import require_api_key
 from app.core.broker import BrokerGateway
 from app.database import get_db
 from app.models import StrategyConfig
 from app.schemas import IndicatorsResponse
 from app.services.data_aggregator import DataAggregator
 
-router = APIRouter(prefix="/api", tags=["indicators"])
+router = APIRouter(prefix="/api", tags=["indicators"], dependencies=[Depends(require_api_key())])
 logger = logging.getLogger("auto_trade.indicators")
 
 

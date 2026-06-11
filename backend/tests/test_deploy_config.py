@@ -23,6 +23,27 @@ def test_frontend_dockerfile_accepts_api_key_build_arg() -> None:
     assert "ARG VITE_AUTO_TRADE_API_KEY" in dockerfile
 
 
+def test_frontend_docker_entrypoint_writes_runtime_api_key() -> None:
+    entrypoint = (ROOT / "frontend" / "docker-entrypoint.sh").read_text(encoding="utf-8")
+
+    assert "runtime-config.js" in entrypoint
+    assert "AUTO_TRADE_API_KEY" in entrypoint
+
+
+def test_docker_compose_passes_api_key_to_frontend_runtime() -> None:
+    compose = (ROOT / "docker-compose.yaml").read_text(encoding="utf-8")
+    frontend_block = compose.split("\n  frontend:", maxsplit=1)[1]
+
+    assert "AUTO_TRADE_API_KEY=" in frontend_block
+
+
+def test_dockerhub_compose_passes_api_key_to_frontend_runtime() -> None:
+    compose = (ROOT / "docker-compose.dockerhub.yaml").read_text(encoding="utf-8")
+    frontend_block = compose.split("\n  frontend:", maxsplit=1)[1]
+
+    assert "AUTO_TRADE_API_KEY=" in frontend_block
+
+
 def test_docker_compose_passes_deepseek_key_to_backend() -> None:
     compose = (ROOT / "docker-compose.yaml").read_text(encoding="utf-8")
 

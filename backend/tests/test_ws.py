@@ -1,3 +1,4 @@
+import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -84,6 +85,40 @@ class TestWebSocketEndpoint:
     async def test_ws_accept_and_ping_pong(self) -> None:
         ws = AsyncMock()
         ws.receive_text.side_effect = ["ping", Exception("stop")]
+
+        with pytest.raises(Exception):
+            await websocket_endpoint(ws)
+
+        ws.accept.assert_awaited_once()
+        ws.send_text.assert_any_await(json.dumps({"type": "pong"}))
+        await manager.disconnect(ws)
+
+    @pytest.mark.asyncio
+    async def test_ws_rejects_when_api_key_required_and_auth_missing(self, monkeypatch) -> None:
+        from app.config import settings
+
+        monkeypatch.setattr(settings, "api_key", "secret-key")
+        monkeypatch.setattr(settings, "env", "prod")
+        ws = AsyncMock()
+        ws.receive_text.side_effect = asyncio.TimeoutError()
+
+        await websocket_endpoint(ws)
+
+        ws.accept.assert_awaited_once()
+        ws.close.assert_awaited_once_with(code=1008, reason="Invalid or missing API key")
+
+    @pytest.mark.asyncio
+    async def test_ws_accepts_post_connect_auth_message(self, monkeypatch) -> None:
+        from app.config import settings
+
+        monkeypatch.setattr(settings, "api_key", "secret-key")
+        monkeypatch.setattr(settings, "env", "prod")
+        ws = AsyncMock()
+        ws.receive_text.side_effect = [
+            json.dumps({"type": "auth", "api_key": "secret-key"}),
+            "ping",
+            Exception("stop"),
+        ]
 
         with pytest.raises(Exception):
             await websocket_endpoint(ws)
