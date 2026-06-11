@@ -205,7 +205,7 @@ def _update_local_order_from_status(db: Session, order_id: str, status_result: A
     db.commit()
 
 
-@router.get("/orders", response_model=OrderPageResponse)
+@router.get("/orders", response_model=OrderPageResponse, dependencies=[Depends(require_api_key())])
 def get_orders(
     scope: str = Query(default="today", pattern="^(today|history)$"),
     page: int = Query(default=1, ge=1),
@@ -261,7 +261,7 @@ def get_orders(
     return _paginate_orders(items, page=page, page_size=page_size, scope=scope)
 
 
-@router.get("/events", response_model=TradeEventPageResponse)
+@router.get("/events", response_model=TradeEventPageResponse, dependencies=[Depends(require_api_key())])
 def get_trade_events(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=200),
@@ -293,7 +293,7 @@ def get_trade_events(
     )
 
 
-@router.get("/events/export")
+@router.get("/events/export", dependencies=[Depends(require_api_key())])
 def export_trade_events(
     format: str = Query(default="csv", pattern="^(csv|json)$"),
     limit: int = Query(default=1000, ge=1, le=10000),
@@ -350,7 +350,7 @@ def export_trade_events(
     )
 
 
-@router.post("/orders/{order_id}/cancel", response_model=OrderCancelResponse)
+@router.post("/orders/{order_id}/cancel", response_model=OrderCancelResponse, dependencies=[Depends(require_api_key())])
 def cancel_order(
     order_id: str,
     request: Request,
@@ -506,7 +506,7 @@ def _unavailable_account_response() -> AccountResponse:
     )
 
 
-@router.get("/account", response_model=AccountResponse)
+@router.get("/account", response_model=AccountResponse, dependencies=[Depends(require_api_key())])
 def get_account() -> AccountResponse:
     broker = get_runner().broker
     cached = _cached_account_response(broker, _account_cache_now(), allow_stale=False)

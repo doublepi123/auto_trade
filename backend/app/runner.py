@@ -636,13 +636,13 @@ class AppRunner:
                 if close_broker:
                     self.broker.close()
 
-    def _runtime_for_symbol(self, symbol: str | None) -> tuple[str, str, StrategyEngine]:
+    def _runtime_for_symbol(self, symbol: str | None) -> tuple[str, str, StrategyEngine] | None:
         requested_symbol = str(symbol or "").upper()
         if not requested_symbol or requested_symbol == self.engine.params.symbol:
             return self.engine.params.symbol, self.engine.params.market, self.engine
         runtime = self._symbol_runtimes.get(requested_symbol)
         if runtime is None:
-            return self.engine.params.symbol, self.engine.params.market, self.engine
+            return None
         return runtime.symbol, runtime.market, runtime.engine
 
     def execute_llm_order_decision(self, decision: dict[str, Any]) -> dict[str, Any]:
@@ -652,7 +652,10 @@ class AppRunner:
         if not self._running:
             return {"executed": False, "status": "RUNNER_STOPPED", "order_id": None, "action": ""}
 
-        target_symbol, target_market, target_engine = self._runtime_for_symbol(cast(str | None, decision.get("symbol")))
+        runtime = self._runtime_for_symbol(decision.get("symbol") if isinstance(decision.get("symbol"), str) else None)
+        if runtime is None:
+            return {"executed": False, "status": "UNKNOWN_SYMBOL", "order_id": None, "action": ""}
+        target_symbol, target_market, target_engine = runtime
 
         with self._state_lock:
             if self._trigger_in_flight:
@@ -799,11 +802,15 @@ class AppRunner:
         if not risk_result.approved:
             return {"executed": False, "status": "RISK_REJECTED", "order_id": None, "action": action}
 
-        target_symbol, target_market, target_engine = (
-            (symbol, market or self.engine.params.market, engine)
-            if symbol is not None and engine is not None
-            else self._runtime_for_symbol(symbol)
-        )
+        if symbol is not None and engine is not None:
+            target_symbol = symbol
+            target_market = market or self.engine.params.market
+            target_engine = engine
+        else:
+            runtime = self._runtime_for_symbol(symbol)
+            if runtime is None:
+                return {"executed": False, "status": "UNKNOWN_SYMBOL", "order_id": None, "action": action}
+            target_symbol, target_market, target_engine = runtime
         if not target_symbol:
             return {"executed": False, "status": "NO_SYMBOL", "order_id": None, "action": action}
 
@@ -857,7 +864,10 @@ class AppRunner:
             quote = self.broker.get_quote(symbol)
         except Exception:
             logger.exception("failed to fetch quote for LLM order action")
-            _, _, target_engine = self._runtime_for_symbol(symbol)
+            runtime = self._runtime_for_symbol(symbol)
+            if runtime is None:
+                return None
+            _, _, target_engine = runtime
             fallback_price = override_price or target_engine.last_price
             if fallback_price <= 0:
                 return None
@@ -1388,9 +1398,13 @@ class AppRunner:
 
     def _sync_engine_state_with_positions(self, *, force: bool = False) -> bool:
         with self._state_lock:
-            if not self._running or self._trigger_in_flight or self._trade_svc.has_pending_order:
-                return False
             symbol = self.engine.params.symbol
+            if (
+                not self._running
+                or self._trigger_in_flight
+                or self._trade_svc.pending_order_for(symbol) is not None
+            ):
+                return False
             if not symbol:
                 return False
             now = time.monotonic()
@@ -1425,7 +1439,7 @@ class AppRunner:
             desired_state = EngineState.FLAT
 
         with self._state_lock:
-            if self._trigger_in_flight or self._trade_svc.has_pending_order:
+            if self._trigger_in_flight or self._trade_svc.pending_order_for(symbol) is not None:
                 return False
             # If a fill was processed after we started the position query,
             # the position snapshot is stale — skip this sync round.
@@ -1938,11 +1952,14 @@ class AppRunner:
         symbol: str | None = None,
         engine: StrategyEngine | None = None,
     ) -> dict[str, Any] | None:
-        target_symbol, _market, target_engine = (
-            (symbol, self.engine.params.market, engine)
-            if symbol is not None and engine is not None
-            else self._runtime_for_symbol(symbol)
-        )
+        if symbol is not None and engine is not None:
+            target_symbol = symbol
+            target_engine = engine
+        else:
+            runtime = self._runtime_for_symbol(symbol)
+            if runtime is None:
+                return {"executed": False, "status": "UNKNOWN_SYMBOL", "order_id": None, "action": action}
+            target_symbol, _, target_engine = runtime
         side = self._broker_side_for_action(action)
         params = target_engine.params
         if pending is not None and params.min_repricing_pct > 0:

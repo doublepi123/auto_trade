@@ -10,6 +10,19 @@ def test_docker_compose_passes_api_key_to_backend() -> None:
     assert "AUTO_TRADE_API_KEY=" in compose
 
 
+def test_docker_compose_passes_api_key_to_frontend_build() -> None:
+    compose = (ROOT / "docker-compose.yaml").read_text(encoding="utf-8")
+
+    assert "VITE_AUTO_TRADE_API_KEY:" in compose
+    assert "${AUTO_TRADE_API_KEY" in compose
+
+
+def test_frontend_dockerfile_accepts_api_key_build_arg() -> None:
+    dockerfile = (ROOT / "frontend" / "Dockerfile").read_text(encoding="utf-8")
+
+    assert "ARG VITE_AUTO_TRADE_API_KEY" in dockerfile
+
+
 def test_docker_compose_passes_deepseek_key_to_backend() -> None:
     compose = (ROOT / "docker-compose.yaml").read_text(encoding="utf-8")
 

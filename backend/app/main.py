@@ -146,7 +146,7 @@ async def _ws_cleanup_task() -> None:
         try:
             await ws_manager.cleanup_stale()
         except Exception:
-            pass
+            logger.exception("WebSocket cleanup failed")
 
 
 async def _llm_analysis_tick() -> None:

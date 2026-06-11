@@ -11,6 +11,8 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
+from app.config import settings
+
 logger = logging.getLogger(__name__)
 
 
@@ -137,6 +139,10 @@ def _load_private_key() -> rsa.RSAPrivateKey:
     if kek is not None:
         encryption_algorithm = serialization.BestAvailableEncryption(kek)
     else:
+        if settings.env not in ("dev", "test"):
+            raise ValueError(
+                "CREDENTIAL_MASTER_KEY must be set outside dev/test to encrypt the credential private key"
+            )
         logger.warning(
             "CREDENTIAL_MASTER_KEY not set – storing credential private key without encryption. "
             "Set the env var to protect stored credentials from filesystem read access."

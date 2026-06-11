@@ -24,7 +24,9 @@ export function useStatusStream(status: { value: StatusData }) {
     }
     realtimeStatus.value = 'connecting'
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const wsUrl = `${protocol}//${window.location.host}/ws`
+    const apiKey = import.meta.env.VITE_AUTO_TRADE_API_KEY
+    const query = apiKey ? `?api_key=${encodeURIComponent(apiKey)}` : ''
+    const wsUrl = `${protocol}//${window.location.host}/ws${query}`
     ws = new WebSocket(wsUrl)
 
     ws.onopen = () => {

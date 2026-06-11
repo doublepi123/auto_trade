@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
+
+from app.api.auth import require_api_key
 
 from app.core.backtest import BacktestBar, BacktestEngine, BacktestEngineParams, parse_backtest_csv
 from app.schemas import (
@@ -16,7 +18,7 @@ from app.schemas import (
 router = APIRouter(prefix="/api/backtest", tags=["backtest"])
 
 
-@router.post("/run", response_model=BacktestResult)
+@router.post("/run", response_model=BacktestResult, dependencies=[Depends(require_api_key())])
 def run_backtest(payload: BacktestRunRequest) -> BacktestResult:
     try:
         bars = _load_bars(payload)

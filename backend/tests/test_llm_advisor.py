@@ -691,8 +691,15 @@ def test_preview_endpoint_allows_missing_api_key_header_in_dev(monkeypatch) -> N
         json={"symbol": "AAPL.US", "market": "US", "current_buy_low": 0, "current_sell_high": 0},
     )
 
-    assert response.status_code == 200
-    assert response.json()["analysis"] == "preview"
+    assert response.status_code == 401
+
+    authed = client.post(
+        "/api/strategy/llm-interval/preview",
+        json={"symbol": "AAPL.US", "market": "US", "current_buy_low": 0, "current_sell_high": 0},
+        headers={"X-API-Key": "configured-local-key"},
+    )
+    assert authed.status_code == 200
+    assert authed.json()["analysis"] == "preview"
 
 
 class TestABVariantSelection:

@@ -57,7 +57,7 @@ def get_credentials(db: Session = Depends(get_db)) -> CredentialResponse:
     return CredentialResponse.model_validate(svc.to_response(config))
 
 
-@router.put("/credentials", response_model=CredentialResponse)
+@router.put("/credentials", response_model=CredentialResponse, dependencies=[Depends(require_api_key())])
 def update_credentials(
     request: Request,
     payload: CredentialConfigSchema,

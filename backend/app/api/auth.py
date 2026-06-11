@@ -26,8 +26,6 @@ def require_api_key() -> Callable[..., Any]:
         """
         global _auth_disabled_warned
         provided = request.headers.get("X-API-Key", "")
-        if settings.env in ("dev", "test") and not provided:
-            return
         if not settings.api_key:
             if settings.env not in ("dev", "test"):
                 logger.error("AUTO_TRADE_API_KEY not configured in %s environment — rejecting request", settings.env)

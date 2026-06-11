@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from typing import Any
-
 import asyncio
 import json
 import logging
+import secrets
+from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+
+from app.config import settings
 
 logger = logging.getLogger("auto_trade.ws")
 
@@ -69,8 +71,17 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 
+def _websocket_api_key_authorized(provided: str) -> bool:
+    if not settings.api_key:
+        return settings.env in ("dev", "test")
+    return bool(provided) and secrets.compare_digest(provided, settings.api_key)
+
+
 @router.websocket("/ws")
-async def websocket_endpoint(ws: WebSocket) -> None:
+async def websocket_endpoint(ws: WebSocket, api_key: str = "") -> None:
+    if not _websocket_api_key_authorized(api_key):
+        await ws.close(code=1008, reason="Invalid or missing API key")
+        return
     await ws.accept()
     await manager.connect(ws)
     try:

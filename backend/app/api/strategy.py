@@ -107,7 +107,7 @@ def put_strategy(
         )
 
 
-@router.get("/status", response_model=StatusResponse)
+@router.get("/status", response_model=StatusResponse, dependencies=[Depends(require_api_key())])
 def get_status(db: Session = Depends(get_db)) -> StatusResponse:
     svc = StrategyService(db)
     config = svc.get_config()
@@ -136,12 +136,12 @@ def get_status(db: Session = Depends(get_db)) -> StatusResponse:
     return response
 
 
-@router.get("/diagnostics", response_model=DiagnosticsResponse)
+@router.get("/diagnostics", response_model=DiagnosticsResponse, dependencies=[Depends(require_api_key())])
 def get_diagnostics() -> DiagnosticsResponse:
     return DiagnosticsResponse.model_validate(get_runner().diagnostics())
 
 
-@router.get("/status/history", response_model=StatusHistoryResponse)
+@router.get("/status/history", response_model=StatusHistoryResponse, dependencies=[Depends(require_api_key())])
 def get_status_history(
     from_: Optional[datetime] = Query(default=None, alias="from"),
     to: Optional[datetime] = Query(default=None),

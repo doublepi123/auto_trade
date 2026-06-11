@@ -40,7 +40,7 @@ def add_watchlist_item(
 
 
 
-@router.get("/snapshots", response_model=List[WatchlistSnapshot])
+@router.get("/snapshots", response_model=List[WatchlistSnapshot], dependencies=[Depends(require_api_key())])
 def get_watchlist_snapshots(
     db: Session = Depends(get_db),
 ) -> List[WatchlistSnapshot]:
@@ -122,7 +122,7 @@ def set_trading_symbol(
     return WatchlistItemResponse.model_validate(item)
 
 
-@router.get("/quotes", response_model=List[WatchlistQuote])
+@router.get("/quotes", response_model=List[WatchlistQuote], dependencies=[Depends(require_api_key())])
 def get_watchlist_quotes(
     db: Session = Depends(get_db),
 ) -> List[WatchlistQuote]:

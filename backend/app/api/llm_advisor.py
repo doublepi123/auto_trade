@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Any, cast
+from typing import Any, Optional, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
@@ -132,9 +132,9 @@ def _account_context(symbol: str, market: str, current_price: float, short_selli
     if trade_svc is not None:
         pending_for_symbol = getattr(trade_svc, "pending_order_for", None)
         if callable(pending_for_symbol):
-            pending = cast(_PendingOrder | None, pending_for_symbol(symbol))
+            pending = cast(Optional[_PendingOrder], pending_for_symbol(symbol))
         else:
-            pending = cast(_PendingOrder | None, getattr(trade_svc, "pending_order", None))
+            pending = cast(Optional[_PendingOrder], getattr(trade_svc, "pending_order", None))
     if pending is not None:
         context["pending_order"] = {
             "broker_order_id": pending.broker_order_id,
@@ -276,8 +276,8 @@ def analyze_llm_interval(
             LLMInteractionService(db).update_outcome(
                 interaction_id,
                 applied=app_result["applied"],
-                order_status=cast(str | None, order_result.get("status")),
-                order_id=cast(str | None, order_result.get("order_id")),
+                order_status=cast(Optional[str], order_result.get("status")),
+                order_id=cast(Optional[str], order_result.get("order_id")),
             )
         except Exception:
             logger.exception("failed to update LLM interaction outcome")
@@ -318,8 +318,8 @@ def analyze_llm_interval(
         replacement_action=result.get("replacement_action"),
         replacement_price=result.get("replacement_price"),
         order_reason=result.get("order_reason"),
-        order_status=cast(str | None, order_result.get("status")),
-        order_id=cast(str | None, order_result.get("order_id")),
+        order_status=cast(Optional[str], order_result.get("status")),
+        order_id=cast(Optional[str], order_result.get("order_id")),
     )
 
 

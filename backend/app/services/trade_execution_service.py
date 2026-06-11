@@ -802,7 +802,24 @@ class TradeExecutionService:
         self._safe_update_order_status_from_result(order_status)
 
         if self._order_status_is_live(order_status):
-            self._track_pending_order(action, result, broker, engine_snapshot, avg_price=avg_price, restore_engine_snapshot_fn=restore_engine_snapshot)
+            try:
+                self._track_pending_order(
+                    action,
+                    result,
+                    broker,
+                    engine_snapshot,
+                    avg_price=avg_price,
+                    restore_engine_snapshot_fn=restore_engine_snapshot,
+                )
+            except OrderPersistenceError:
+                return self._recover_from_missing_order_record(
+                    result,
+                    broker,
+                    risk,
+                    notify_risk_event=notify_risk_event,
+                    engine_snapshot=engine_snapshot,
+                    restore_engine_snapshot=restore_engine_snapshot,
+                )
             logger.info("%s pending: %s status=%s", action, result.broker_order_id, order_status.status)
             return order_status
 
