@@ -226,7 +226,8 @@ class IntervalApplicationService:
         min_profit_amount: float,
         reference_quantity: float,
     ) -> float:
-        pct_width = current_price * settings.min_exit_profit_pct / 100 if current_price > 0 else 0.0
+        min_exit_pct = settings.min_exit_profit_pct or 0.0
+        pct_width = current_price * min_exit_pct / 100 if current_price > 0 else 0.0
         try:
             quantity = float(reference_quantity)
         except (TypeError, ValueError):

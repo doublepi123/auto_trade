@@ -474,7 +474,7 @@ class TradeExecutionService:
         quantity: Decimal,
         min_profit_amount: Decimal | float | int,
     ) -> Decimal:
-        buffer_pct = Decimal(str(settings.min_exit_profit_pct)) / Decimal("100")
+        buffer_pct = Decimal(str(settings.min_exit_profit_pct or 0)) / Decimal("100")
         pct_profit_amount = avg_price * quantity * buffer_pct
         configured_amount = TradeExecutionService._coerce_non_negative_decimal(min_profit_amount)
         return max(pct_profit_amount, configured_amount)

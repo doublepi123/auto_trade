@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Optional
+from typing import Any
 
 from app.config import settings
 
@@ -54,7 +54,7 @@ class EngineSnapshot:
 
     state: EngineState
     last_trigger_price: float
-    last_trigger_at: Optional[datetime]
+    last_trigger_at: datetime | None
 
 
 class StrategyEngine:
@@ -63,7 +63,7 @@ class StrategyEngine:
         self.state: EngineState = EngineState.FLAT
         self.last_price: float = 0.0
         self.last_trigger_price: float = 0.0
-        self.last_trigger_at: Optional[datetime] = None
+        self.last_trigger_at: datetime | None = None
         self._last_trigger_monotonic: float = 0.0
         self._cooldown_seconds: int = settings.engine_cooldown_seconds
         self._lock = threading.Lock()
@@ -77,6 +77,9 @@ class StrategyEngine:
             self.last_price = price
 
     def _update_price_locked(self, price: float) -> TriggerResult:
+        if price <= 0:
+            logger.warning("engine received non-positive price %s for %s", price, self.params.symbol)
+            return TriggerResult(triggered=False)
         self.last_price = price
 
         if not self.params.symbol or self.params.buy_low <= 0 or self.params.sell_high <= 0 or self.params.buy_low >= self.params.sell_high:

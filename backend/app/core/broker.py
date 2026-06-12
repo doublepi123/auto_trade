@@ -696,58 +696,65 @@ class BrokerGateway:
             )
 
     def get_positions(self) -> list[Position]:
-        with self._lock:
-            self._init_clients()
-            response = self._trade_ctx.stock_positions()
-            positions: list[Position] = []
-            for item in _iter_position_items(response):
-                raw = _get_value(item, "quantity", None)
-                raw_available = _get_value(item, "available_quantity", None)
-                if raw is None:
-                    raw = raw_available if raw_available is not None else 0
-                try:
-                    qty = Decimal(str(raw)) if raw is not None else Decimal("0")
-                except Exception:
-                    qty = Decimal("0")
-                available_qty = None
-                if raw_available is not None:
+        def _fetch() -> list[Position]:
+            with self._lock:
+                self._init_clients()
+                response = self._trade_ctx.stock_positions()
+                positions: list[Position] = []
+                for item in _iter_position_items(response):
+                    raw = _get_value(item, "quantity", None)
+                    raw_available = _get_value(item, "available_quantity", None)
+                    if raw is None:
+                        raw = raw_available if raw_available is not None else 0
                     try:
-                        available_qty = abs(Decimal(str(raw_available)))
+                        qty = Decimal(str(raw)) if raw is not None else Decimal("0")
                     except Exception:
-                        available_qty = None
-                if qty == 0:
-                    continue
+                        qty = Decimal("0")
+                    available_qty = None
+                    if raw_available is not None:
+                        try:
+                            available_qty = abs(Decimal(str(raw_available)))
+                        except Exception:
+                            available_qty = None
+                    if qty == 0:
+                        continue
 
-                raw_side = str(_get_value(item, "side", "")).upper()
-                side = raw_side if raw_side in {"LONG", "SHORT"} else ("SHORT" if qty < 0 else "LONG")
-                raw_avg = None
-                for key in ("cost_price", "avg_price", "average_price", "avg_cost_price"):
-                    val = _get_value(item, key)
-                    if val is not None:
-                        raw_avg = val
-                        break
-                if raw_avg is None:
-                    raw_avg = "0"
-                try:
-                    avg_price = Decimal(str(raw_avg))
-                except Exception:
-                    avg_price = Decimal("0")
-                if avg_price <= 0:
-                    logger.warning(
-                        "position %s side=%s has avg_price=%s (raw=%s), pnl calculation may be inaccurate",
-                        _get_value(item, "symbol", ""),
-                        side,
-                        avg_price,
-                        raw_avg,
-                    )
-                positions.append(Position(
-                    symbol=str(_get_value(item, "symbol", "")),
-                    side=side,
-                    quantity=abs(qty),
-                    avg_price=avg_price,
-                    available_quantity=available_qty,
-                ))
-            return positions
+                    raw_side = str(_get_value(item, "side", "")).upper()
+                    side = raw_side if raw_side in {"LONG", "SHORT"} else ("SHORT" if qty < 0 else "LONG")
+                    raw_avg = None
+                    for key in ("cost_price", "avg_price", "average_price", "avg_cost_price"):
+                        val = _get_value(item, key)
+                        if val is not None:
+                            raw_avg = val
+                            break
+                    if raw_avg is None:
+                        raw_avg = "0"
+                    try:
+                        avg_price = Decimal(str(raw_avg))
+                    except Exception:
+                        avg_price = Decimal("0")
+                    if avg_price <= 0:
+                        logger.warning(
+                            "position %s side=%s has avg_price=%s (raw=%s), pnl calculation may be inaccurate",
+                            _get_value(item, "symbol", ""),
+                            side,
+                            avg_price,
+                            raw_avg,
+                        )
+                    positions.append(Position(
+                        symbol=str(_get_value(item, "symbol", "")),
+                        side=side,
+                        quantity=abs(qty),
+                        avg_price=avg_price,
+                        available_quantity=available_qty,
+                    ))
+                return positions
+        return self._call_with_retry(
+            _fetch,
+            op="get_positions",
+            max_retries=settings.broker_retry_max,
+            base_ms=settings.broker_retry_base_ms,
+        )
 
     def close(self) -> None:
         with self._lock:
@@ -781,9 +788,9 @@ class BrokerGateway:
         if the account holds both.  Pass ``currency`` explicitly to avoid
         ambiguity.
         """
-        with self._lock:
-            self._init_clients()
-            try:
+        def _fetch() -> Decimal:
+            with self._lock:
+                self._init_clients()
                 response = self._trade_ctx.account_balance()
                 items = response if isinstance(response, list) else [response]
                 target_currency = currency.upper() if currency else None
@@ -803,35 +810,45 @@ class BrokerGateway:
                         return Decimal(str(getattr(item, "total_cash", "0")))
                 logger.warning("get_cash: no %s item found in account_balance response", target_currency or "USD/HKD")
                 return Decimal("0")
-            except Exception:
-                logger.exception("failed to get account balance")
-                raise
+        return self._call_with_retry(
+            _fetch,
+            op="get_cash",
+            max_retries=settings.broker_retry_max,
+            base_ms=settings.broker_retry_base_ms,
+        )
 
     def estimate_margin_max_quantity(self, symbol: str, side: str, price: Decimal, currency: str | None = None) -> Decimal:
-        with self._lock:
-            self._init_clients()
-            module = _import_openapi()
-            OrderSide = getattr(module, "OrderSide", None)
-            OrderType = getattr(module, "OrderType", None)
+        def _fetch() -> Decimal:
+            with self._lock:
+                self._init_clients()
+                module = _import_openapi()
+                OrderSide = getattr(module, "OrderSide", None)
+                OrderType = getattr(module, "OrderType", None)
 
-            side_name = _SIDE_MAP.get(side, side)
-            side_enum = getattr(OrderSide, side_name, side) if OrderSide else side
-            lo_type = getattr(OrderType, "LO", "LO") if OrderType else "LO"
+                side_name = _SIDE_MAP.get(side, side)
+                side_enum = getattr(OrderSide, side_name, side) if OrderSide else side
+                lo_type = getattr(OrderType, "LO", "LO") if OrderType else "LO"
 
-            response = self._trade_ctx.estimate_max_purchase_quantity(
-                symbol=symbol,
-                order_type=lo_type,
-                side=side_enum,
-                price=price,
-                currency=currency,
-                fractional_shares=False,
-            )
-            return _decimal_attr(response, "margin_max_qty")
+                response = self._trade_ctx.estimate_max_purchase_quantity(
+                    symbol=symbol,
+                    order_type=lo_type,
+                    side=side_enum,
+                    price=price,
+                    currency=currency,
+                    fractional_shares=False,
+                )
+                return _decimal_attr(response, "margin_max_qty")
+        return self._call_with_retry(
+            _fetch,
+            op="estimate_margin_max_quantity",
+            max_retries=settings.broker_retry_max,
+            base_ms=settings.broker_retry_base_ms,
+        )
 
     def get_account(self) -> AccountInfo:
-        with self._lock:
-            self._init_clients()
-            try:
+        def _fetch() -> AccountInfo:
+            with self._lock:
+                self._init_clients()
                 response = self._trade_ctx.account_balance()
                 cash_balances: list[CashBalance] = []
                 net_assets: list[NetAsset] = []
@@ -880,6 +897,9 @@ class BrokerGateway:
                     cash_balances=cash_balances,
                     net_assets=net_assets,
                 )
-            except Exception:
-                logger.exception("failed to get account balance")
-                raise
+        return self._call_with_retry(
+            _fetch,
+            op="get_account",
+            max_retries=settings.broker_retry_max,
+            base_ms=settings.broker_retry_base_ms,
+        )

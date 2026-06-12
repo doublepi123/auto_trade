@@ -213,7 +213,7 @@ class LLMRecommendationEvaluator:
                 )
                 or (
                     is_sell
-                    and o.side == "SELL"
+                    and o.side in ("SELL", "SELL_SHORT")
                     and o.status in ("FILLED", "PARTIAL_FILLED")
                 )
                 for o in orders

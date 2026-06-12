@@ -112,7 +112,26 @@ class LLMAdvisorService:
         """
         if prompt_template:
             system_instructions = SystemModule().render({})
-            return f"{system_instructions}\n\n{prompt_template}"
+            context_for_template = self._build_template_context(
+                symbol=symbol,
+                market=market,
+                current_price=current_price,
+                current_buy_low=current_buy_low,
+                current_sell_high=current_sell_high,
+                short_selling=short_selling,
+                current_position=current_position,
+                recent_trades=recent_trades,
+                position_quantity=position_quantity,
+                position_avg_price=position_avg_price,
+                unrealized_pnl_pct=unrealized_pnl_pct,
+                min_profit_amount=min_profit_amount,
+                market_data=market_data,
+                account_context=account_context,
+                recent_prices=recent_prices,
+                recent_analysis=recent_analysis,
+            )
+            rendered_template = prompt_template.format(**context_for_template)
+            return f"{system_instructions}\n\n{rendered_template}"
         context: dict[str, Any] = {
             "symbol": symbol,
             "market": market,
@@ -156,6 +175,64 @@ class LLMAdvisorService:
         builder.add_module(StrategyModule())
         builder.add_module(OutputModule())
         return builder.build(context)
+
+    def _build_template_context(
+        self,
+        *,
+        symbol: str,
+        market: str,
+        current_price: float,
+        current_buy_low: float,
+        current_sell_high: float,
+        short_selling: bool,
+        current_position: str,
+        recent_trades: list[dict[str, Any]],
+        position_quantity: float,
+        position_avg_price: float,
+        unrealized_pnl_pct: float,
+        min_profit_amount: float,
+        market_data: dict[str, Any],
+        account_context: dict[str, Any] | None,
+        recent_prices: list[dict[str, Any]] | None,
+        recent_analysis: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Build the context dict used to render custom prompt templates."""
+        return {
+            "symbol": symbol,
+            "market": market,
+            "current_price": current_price,
+            "current_buy_low": current_buy_low,
+            "current_sell_high": current_sell_high,
+            "short_selling": short_selling,
+            "current_position": current_position,
+            "recent_trades": recent_trades,
+            "position_quantity": position_quantity,
+            "position_avg_price": position_avg_price,
+            "unrealized_pnl_pct": unrealized_pnl_pct,
+            "min_profit_amount": min_profit_amount,
+            "daily_candles": market_data.get("daily_candles", []),
+            "minute_candles": market_data.get("minute_candles", []),
+            "atr": market_data.get("atr", 0.0),
+            "bb_upper": market_data.get("bb_upper", 0.0),
+            "bb_middle": market_data.get("bb_middle", 0.0),
+            "bb_lower": market_data.get("bb_lower", 0.0),
+            "rsi": market_data.get("rsi", 0.0),
+            "macd": market_data.get("macd") or {"macd": 0.0, "signal": 0.0, "histogram": 0.0},
+            "volume_analysis": market_data.get("volume_analysis")
+            or {"avg_volume": 0.0, "volume_ratio": 0.0, "trend": "unknown"},
+            "sentiment": market_data.get("sentiment") or {"sentiment": "neutral", "score": 0.0, "description": "无"},
+            "market_state": market_data.get("market_state"),
+            "obv": market_data.get("obv"),
+            "adx": market_data.get("adx"),
+            "stochastic": market_data.get("stochastic"),
+            "cci": market_data.get("cci"),
+            "williams_r": market_data.get("williams_r"),
+            "vwap": market_data.get("vwap"),
+            "aggregate_signals": market_data.get("aggregate_signals"),
+            "account_context_text": DataAggregator._format_account_context(account_context),
+            "recent_price_context": DataAggregator._format_recent_prices(recent_prices),
+            "recent_analysis_context": DataAggregator._format_recent_analysis(recent_analysis),
+        }
 
     def _call_llm(self, prompt: str) -> str:
         """Call LLM API (delegates to _call_deepseek)."""

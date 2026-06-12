@@ -929,8 +929,8 @@ class AppRunner:
     def _live_fee_rate_for_market(self, market: str) -> Decimal:
         return one_side_fee_rate(
             market,
-            Decimal(str(self.engine.params.fee_rate_us)),
-            Decimal(str(self.engine.params.fee_rate_hk)),
+            Decimal(str(self.engine.params.fee_rate_us or 0)),
+            Decimal(str(self.engine.params.fee_rate_hk or 0)),
         )
 
     def _broadcast_status(self) -> None:
@@ -2052,7 +2052,7 @@ class AppRunner:
             target_symbol, _, target_engine = runtime
         side = self._broker_side_for_action(action)
         params = target_engine.params
-        if pending is not None and params.min_repricing_pct > 0:
+        if pending is not None and (params.min_repricing_pct or 0) > 0:
             normalized_price = self._coerce_positive_float(proposed_price)
             if normalized_price <= 0:
                 return {"executed": False, "status": "NO_QUOTE", "order_id": None, "action": action}
@@ -2062,7 +2062,8 @@ class AppRunner:
                 repricing_pct = Decimal("1")
             else:
                 repricing_pct = abs(new_price - old_price) / old_price
-            if repricing_pct < Decimal(str(params.min_repricing_pct)):
+            min_repricing = Decimal(str(params.min_repricing_pct or 0))
+            if min_repricing > 0 and repricing_pct < min_repricing:
                 return self._skip_llm_action(
                     action,
                     "replacement price movement is below minimum threshold",
@@ -2072,7 +2073,7 @@ class AppRunner:
                     new_price=float(new_price),
                     repricing_pct=float(repricing_pct),
                 )
-        cooldown = params.llm_action_cooldown_seconds
+        cooldown = params.llm_action_cooldown_seconds or 0
         last_at = self._last_llm_action_at.get((target_symbol, side))
         if cooldown > 0 and last_at is not None:
             remaining = cooldown - (time.monotonic() - last_at)

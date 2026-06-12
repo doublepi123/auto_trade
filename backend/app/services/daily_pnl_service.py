@@ -8,6 +8,7 @@ from typing import Any, Callable
 
 _ZERO = Decimal("0")
 _FILLED_STATUS = "FILLED"
+_PARTIAL_FILLED_STATUS = "PARTIAL_FILLED"
 
 ToTradeDay = Callable[[datetime], date]
 
@@ -155,7 +156,11 @@ class DailyPnlService:
         if not symbol or side not in {"BUY", "SELL", "SELL_SHORT", "BUY_TO_COVER"}:
             return None
 
-        filled_at = self._coerce_datetime(getattr(order, "filled_at", None) or getattr(order, "created_at", None))
+        status = str(getattr(order, "status", "") or "").upper()
+        filled_at_raw = getattr(order, "filled_at", None)
+        if status == _PARTIAL_FILLED_STATUS and not filled_at_raw:
+            return None
+        filled_at = self._coerce_datetime(filled_at_raw or getattr(order, "created_at", None))
         if filled_at is None:
             return None
 
@@ -175,7 +180,7 @@ class DailyPnlService:
         if executed_quantity > 0:
             return executed_quantity
         status = str(getattr(order, "status", "") or "").upper()
-        if status == _FILLED_STATUS:
+        if status in {_FILLED_STATUS, _PARTIAL_FILLED_STATUS}:
             return DailyPnlService._decimal(getattr(order, "quantity", None))
         return _ZERO
 

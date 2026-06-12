@@ -113,7 +113,13 @@ def _derive_kek(salt: bytes | None = None) -> bytes | None:
 
 def _load_private_key_once() -> rsa.RSAPrivateKey:
     """Load an existing private key from disk (no generation, no recursion)."""
-    _KEY_PATH.chmod(0o600)
+    try:
+        _KEY_PATH.chmod(0o600)
+    except PermissionError:
+        logger.warning(
+            "cannot chmod %s to 0o600 (file owner may differ); continuing with existing permissions",
+            _KEY_PATH,
+        )
     key_bytes = _KEY_PATH.read_bytes()
     kek = _derive_kek()
     if kek is not None:
@@ -140,7 +146,8 @@ def _load_private_key() -> rsa.RSAPrivateKey:
         return _load_private_key_once()
 
     _KEY_PATH.parent.mkdir(parents=True, exist_ok=True)
-    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=3072)
+    logger.info("generated new 3072-bit RSA credential key at %s", _KEY_PATH)
     kek = _derive_kek()
     if kek is not None:
         encryption_algorithm = serialization.BestAvailableEncryption(kek)
@@ -169,7 +176,7 @@ def _load_private_key() -> rsa.RSAPrivateKey:
         for _attempt in range(3):
             try:
                 return _load_private_key_once()
-            except (FileNotFoundError, ValueError):
+            except (FileNotFoundError, ValueError, PermissionError):
                 # Race condition: file may be briefly missing or partially
                 # written; wait briefly and retry.
                 time.sleep(0.1)
