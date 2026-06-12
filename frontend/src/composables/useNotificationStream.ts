@@ -1,4 +1,4 @@
-import { ref, onUnmounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import { ElNotification, ElMessage } from 'element-plus'
 import { api } from '../api/client'
 
@@ -163,6 +163,8 @@ function handleEvent(evt: NotificationEvent) {
   if (now - last < THROTTLE_MS) {
     return
   }
+  // Re-insert to maintain true LRU insertion order
+  sharedLastEmittedAt.delete(key)
   sharedLastEmittedAt.set(key, now)
   if (sharedLastEmittedAt.size > 1000) {
     const entries = [...sharedLastEmittedAt.entries()]
@@ -234,24 +236,41 @@ async function backfill(limit = 20) {
   processEvents(items, true)
 }
 
-export function useNotificationStream() {
-  refCount++
+function _enable() {
+  if (sharedEnabled) return
+  sharedEnabled = true
+  // Immediate backfill on enable
+  backfill()
+  // Start polling
+  sharedPollTimer = setInterval(poll, POLL_INTERVAL_MS)
+}
 
+function _disable() {
+  sharedEnabled = false
+  if (sharedPollTimer) {
+    clearInterval(sharedPollTimer)
+    sharedPollTimer = null
+  }
+}
+
+export function useNotificationStream() {
+  onMounted(() => {
+    refCount++
+    if (refCount === 1) {
+      _enable()
+    }
+  })
+
+  // enable() kept as a no-op for backward compatibility;
+  // lifecycle is now automatic via refCount transitions.
   function enable() {
-    if (sharedEnabled) return
-    sharedEnabled = true
-    // Immediate backfill on enable
-    backfill()
-    // Start polling
-    sharedPollTimer = setInterval(poll, POLL_INTERVAL_MS)
+    // Auto-managed — no-op
   }
 
+  // disable() kept for backward compatibility;
+  // lifecycle is now automatic via refCount transitions.
   function disable() {
-    sharedEnabled = false
-    if (sharedPollTimer) {
-      clearInterval(sharedPollTimer)
-      sharedPollTimer = null
-    }
+    // Auto-managed — no-op
   }
 
   function updatePreferences(patch: Partial<UserPreferences>) {
@@ -262,7 +281,9 @@ export function useNotificationStream() {
   onUnmounted(() => {
     refCount = Math.max(0, refCount - 1)
     if (refCount <= 0) {
-      disable()
+      _disable()
+      _audioCtx?.close()
+      _audioCtx = null
       refCount = 0
     }
   })

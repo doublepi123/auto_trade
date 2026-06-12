@@ -508,6 +508,21 @@ class BrokerGateway:
         unique_symbols = [symbol for symbol in dict.fromkeys(symbols) if symbol]
         if not unique_symbols:
             return
+
+        def _on_quote(_symbol: str, _event: Any) -> None:
+            quote = Quote(
+                symbol=str(getattr(_event, "symbol", _symbol)),
+                last_price=float(getattr(_event, "last_done", 0)),
+                bid=float(getattr(_event, "bid", 0)),
+                ask=float(getattr(_event, "ask", 0)),
+                timestamp=str(getattr(_event, "timestamp", "")),
+            )
+            for cb in list(self._quote_callbacks):
+                try:
+                    cb(quote)
+                except Exception:
+                    logger.exception("quote callback failed for %s", _symbol)
+
         with self._lock:
             added_callback = False
             if callback not in self._quote_callbacks:
@@ -520,20 +535,6 @@ class BrokerGateway:
                 self._init_clients()
                 quote_ctx = self._quote_ctx
                 if quote_ctx is not None:
-                    def _on_quote(_symbol: str, _event: Any) -> None:
-                        quote = Quote(
-                            symbol=str(getattr(_event, "symbol", _symbol)),
-                            last_price=float(getattr(_event, "last_done", 0)),
-                            bid=float(getattr(_event, "bid", 0)),
-                            ask=float(getattr(_event, "ask", 0)),
-                            timestamp=str(getattr(_event, "timestamp", "")),
-                        )
-                        for cb in list(self._quote_callbacks):
-                            try:
-                                cb(quote)
-                            except Exception:
-                                logger.exception("quote callback failed for %s", _symbol)
-
                     quote_ctx.set_on_quote(_on_quote)
                 return
             self._init_clients()
@@ -544,20 +545,6 @@ class BrokerGateway:
                 raise RuntimeError("quote context is not initialized")
             module = _import_openapi()
             SubType = getattr(module, "SubType", None)
-
-            def _on_quote(_symbol: str, _event: Any) -> None:
-                quote = Quote(
-                    symbol=str(getattr(_event, "symbol", _symbol)),
-                    last_price=float(getattr(_event, "last_done", 0)),
-                    bid=float(getattr(_event, "bid", 0)),
-                    ask=float(getattr(_event, "ask", 0)),
-                    timestamp=str(getattr(_event, "timestamp", "")),
-                )
-                for cb in list(self._quote_callbacks):
-                    try:
-                        cb(quote)
-                    except Exception:
-                        logger.exception("quote callback failed for %s", _symbol)
 
             quote_ctx.set_on_quote(_on_quote)
             if SubType is None:
@@ -787,6 +774,13 @@ class BrokerGateway:
             self._subscribed_symbols.clear()
 
     def get_cash(self, currency: str | None = None) -> Decimal:
+        """Return available cash for the given currency.
+
+        When ``currency`` is *None* (the default), returns the first USD or
+        HKD entry found in the broker response, which may be nondeterministic
+        if the account holds both.  Pass ``currency`` explicitly to avoid
+        ambiguity.
+        """
         with self._lock:
             self._init_clients()
             try:
@@ -845,6 +839,7 @@ class BrokerGateway:
                 items = response if isinstance(response, list) else [response]
                 primary_currency = ""
                 primary_total = Decimal("0")
+                fallback_total = Decimal("0")
 
                 for item in items:
                     currency = str(getattr(item, "currency", ""))
@@ -856,7 +851,7 @@ class BrokerGateway:
                     if currency in ("USD", "HKD") and not primary_currency:
                         primary_currency = currency
                         primary_total = net_amount
-                    total_assets += net_amount
+                    fallback_total += net_amount
 
                     cash_infos = getattr(item, "cash_infos", None)
                     if cash_infos:
@@ -870,8 +865,15 @@ class BrokerGateway:
                                 frozen_cash=ci_frozen,
                             ))
 
+                # total_assets uses the primary-currency (first USD/HKD) net
+                # asset figure rather than a cross-currency sum, which would be
+                # meaningless without FX conversion.  When no USD/HKD entry is
+                # present, fall back to the single-currency total (or naive sum
+                # if multiple non-primary currencies exist).
                 if primary_currency:
                     total_assets = primary_total
+                else:
+                    total_assets = fallback_total
 
                 return AccountInfo(
                     total_assets=total_assets,

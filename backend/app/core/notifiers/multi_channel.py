@@ -18,6 +18,7 @@ from app.core.notifiers._messages import (
 logger = logging.getLogger("auto_trade.notify")
 
 _SEVERITY_RANK = {"INFO": 0, "WARNING": 1, "CRITICAL": 2}
+_VALID_SEVERITY_FLOORS = set(_SEVERITY_RANK)
 
 
 class NotifierInterface(Protocol):
@@ -77,6 +78,16 @@ class MultiChannelNotifier:
             severity=resolve_risk_severity(event_type, severity),
         )
 
+    def close(self) -> None:
+        """Close all channel notifiers to release resources (e.g. httpx clients)."""
+        for notifier, _floor in self._channels:
+            close_fn = getattr(notifier, "close", None)
+            if callable(close_fn):
+                try:
+                    close_fn()
+                except Exception as exc:
+                    logger.warning("notifier %s close raised: %s", type(notifier).__name__, exc)
+
     @classmethod
     def from_credential_config(cls, cred) -> MultiChannelNotifier:
         from app.core.notifiers.serverchan import ServerChanNotifier
@@ -97,6 +108,9 @@ class MultiChannelNotifier:
                 continue
             channel_type = channel.get("type")
             floor = channel.get("severity_floor", "INFO")
+            if floor not in _VALID_SEVERITY_FLOORS:
+                logger.warning("notification_channels entry has invalid severity_floor=%r, defaulting to INFO", floor)
+                floor = "INFO"
             if channel_type == "serverchan":
                 built.append((ServerChanNotifier(cred.sct_key or ""), floor))
             elif channel_type == "webhook":

@@ -132,7 +132,7 @@ def next_session_open(market: str, instant: datetime | None = None) -> datetime:
         )
         return resume.astimezone(timezone.utc)
     candidate = here.replace(hour=session.rth_open.hour, minute=session.rth_open.minute, second=0, microsecond=0)
-    if here >= candidate or here.weekday() >= 5:
+    if here > candidate or here.weekday() >= 5:
         candidate = candidate + timedelta(days=1)
     while candidate.weekday() >= 5:
         candidate = candidate + timedelta(days=1)

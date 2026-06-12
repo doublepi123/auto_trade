@@ -4,9 +4,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Optional
 
-import httpx
-
-from app.core.url_safety import validate_webhook_url
+from app.core.url_safety import validated_httpx_client
 from app.core.notifiers._messages import (
     render_fill_body,
     render_fill_title,
@@ -22,11 +20,17 @@ logger = logging.getLogger("auto_trade.notify.webhook")
 
 class WebhookNotifier:
     def __init__(self, url: str, *, timeout: float = 10.0) -> None:
-        self._url = validate_webhook_url(url) if (url or "").strip() else ""
-        self._timeout = timeout
+        self._url = (url or "").strip()
+        self._client = None
+        if self._url:
+            try:
+                self._client = validated_httpx_client(self._url, timeout=timeout)
+            except ValueError as exc:
+                logger.error("webhook url validation failed: %s", exc)
+                self._url = ""
 
     def send(self, title: str, content: str, severity: str = "INFO") -> bool:
-        if not self._url:
+        if not self._url or self._client is None:
             return False
         payload = {
             "title": title,
@@ -35,7 +39,7 @@ class WebhookNotifier:
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         try:
-            resp = httpx.post(self._url, json=payload, timeout=self._timeout, follow_redirects=False)
+            resp = self._client.post(self._url, json=payload)
             return 200 <= resp.status_code < 300
         except Exception as exc:
             logger.warning("webhook send failed (%s): %s", self._url, exc)
@@ -61,3 +65,8 @@ class WebhookNotifier:
             render_risk_body(event_type, reason),
             severity=resolve_risk_severity(event_type, severity),
         )
+
+    def close(self) -> None:
+        """Close the underlying httpx client to release connections."""
+        if self._client is not None:
+            self._client.close()

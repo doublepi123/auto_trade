@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Optional
 
 import httpx
@@ -25,6 +26,8 @@ class ServerChanNotifier:
     BASE_URL: str = "https://sctapi.ftqq.com/"
 
     def __init__(self, sct_key: str) -> None:
+        if sct_key and not re.match(r"^[A-Za-z0-9]+$", sct_key):
+            raise ValueError(f"Invalid sct_key: must match ^[A-Za-z0-9]+$")
         self._sct_key = sct_key
 
     @property
@@ -42,7 +45,13 @@ class ServerChanNotifier:
                 data={"title": f"{prefix}{title}", "desp": content},
                 timeout=10,
             )
-            return resp.status_code == 200
+            if resp.status_code != 200:
+                return False
+            try:
+                data = resp.json()
+                return data.get("code") == 0
+            except Exception:
+                return False
         except Exception:
             logger.warning("ServerChan notification failed: title=%s", title)
             return False

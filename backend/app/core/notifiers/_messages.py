@@ -31,6 +31,10 @@ def severity_for_risk_event(event_type: str) -> str:
     return {
         "KILL_SWITCH": "CRITICAL",
         "ORDER_PERSISTENCE_FAILED": "CRITICAL",
+        "ORDER_FAILED": "WARNING",
+        "ORDER_TIMEOUT": "WARNING",
+        "REJECTED": "WARNING",
+        "DAILY_LOSS": "WARNING",
     }.get(event_type, "WARNING")
 
 

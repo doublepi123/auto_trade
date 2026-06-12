@@ -197,8 +197,11 @@ async function handleSave() {
   for (const ch of notificationChannels.value) {
     if (ch.type === 'webhook') {
       const u = ch.url?.trim() ?? ''
-      if (!u || !/^https?:\/\//i.test(u)) {
-        error.value = 'Webhook 必须填写以 http(s) 开头的 URL'
+      try {
+        const parsed = new URL(u)
+        if (!['http:', 'https:'].includes(parsed.protocol)) throw 0
+      } catch {
+        error.value = 'Webhook 必须填写有效的 http(s) URL'
         return
       }
     }

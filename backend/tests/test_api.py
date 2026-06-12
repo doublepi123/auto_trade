@@ -12,7 +12,7 @@ from app.api import trade as trade_api
 from app import database
 from app.core.market_calendar import trade_day_for
 from app.database import SessionLocal
-from app.models import AuditLog, CredentialConfig, LLMInteraction, OrderRecord, RuntimeState, RuntimeStateSnapshot, StrategyConfig, TradeEvent
+from app.models import AuditLog, CredentialConfig, LLMInteraction, LLMSymbolScheduleState, OrderRecord, RuntimeState, RuntimeStateSnapshot, StrategyConfig, TradeEvent
 from app.main import app
 from app.services.strategy_service import StrategyService
 
@@ -40,8 +40,6 @@ def _clean_llm_interactions() -> None:
 
 
 def _clean_llm_symbol_schedule_state() -> None:
-    from app.models import LLMSymbolScheduleState
-
     with SessionLocal() as db:
         db.query(LLMSymbolScheduleState).delete()
         db.commit()
@@ -966,7 +964,6 @@ class TestAPI:
         assert resp.status_code == 200
         _clean_llm_interactions()
         _clean_llm_symbol_schedule_state()
-        from app.models import LLMSymbolScheduleState
 
         db = SessionLocal()
         try:

@@ -19,7 +19,7 @@ router = APIRouter(prefix="/api/reports", tags=["reports"], dependencies=[Depend
 
 @router.get("/daily", response_model=ReportResponse)
 def get_daily_report(
-    symbol: str = Query(..., description="Stock symbol, e.g. AAPL.US"),
+    symbol: str = Query(..., description="Stock symbol, e.g. AAPL.US", pattern=r'^[A-Z0-9\-]{1,12}\.[A-Z]{2,4}$'),
     date: str = Query(..., description="Target date (YYYY-MM-DD)", pattern=r'^\d{4}-\d{2}-\d{2}$'),
     db: Session = Depends(get_db),
 ) -> ReportResponse:
@@ -36,7 +36,7 @@ def get_daily_report(
 
 @router.get("/weekly", response_model=ReportResponse)
 def get_weekly_report(
-    symbol: str = Query(..., description="Stock symbol, e.g. AAPL.US"),
+    symbol: str = Query(..., description="Stock symbol, e.g. AAPL.US", pattern=r'^[A-Z0-9\-]{1,12}\.[A-Z]{2,4}$'),
     week_start: str = Query(..., description="Week start date (YYYY-MM-DD)", pattern=r'^\d{4}-\d{2}-\d{2}$'),
     db: Session = Depends(get_db),
 ) -> ReportResponse:
@@ -53,7 +53,7 @@ def get_weekly_report(
 
 @router.get("/monthly", response_model=ReportResponse)
 def get_monthly_report(
-    symbol: str = Query(..., description="Stock symbol, e.g. AAPL.US"),
+    symbol: str = Query(..., description="Stock symbol, e.g. AAPL.US", pattern=r'^[A-Z0-9\-]{1,12}\.[A-Z]{2,4}$'),
     month: str = Query(..., description="Month (YYYY-MM)", pattern=r'^\d{4}-\d{2}$'),
     db: Session = Depends(get_db),
 ) -> ReportResponse:
@@ -70,7 +70,7 @@ def get_monthly_report(
 
 @router.get("/range", response_model=ReportResponse)
 def get_range_report(
-    symbol: str = Query(..., description="Stock symbol, e.g. AAPL.US"),
+    symbol: str = Query(..., description="Stock symbol, e.g. AAPL.US", pattern=r'^[A-Z0-9\-]{1,12}\.[A-Z]{2,4}$'),
     from_date: str = Query(..., description="Start date (YYYY-MM-DD)", pattern=r'^\d{4}-\d{2}-\d{2}$'),
     to_date: str = Query(..., description="End date (YYYY-MM-DD)", pattern=r'^\d{4}-\d{2}-\d{2}$'),
     db: Session = Depends(get_db),
@@ -88,7 +88,7 @@ def get_range_report(
 
 @router.get("/export")
 def export_report(
-    symbol: str = Query(..., description="Stock symbol, e.g. AAPL.US"),
+    symbol: str = Query(..., description="Stock symbol, e.g. AAPL.US", pattern=r'^[A-Z0-9\-]{1,12}\.[A-Z]{2,4}$'),
     from_date: str = Query(..., description="Start date (YYYY-MM-DD)", pattern=r'^\d{4}-\d{2}-\d{2}$'),
     to_date: str = Query(..., description="End date (YYYY-MM-DD)", pattern=r'^\d{4}-\d{2}-\d{2}$'),
     format: str = Query("json", description="Export format: json or csv"),

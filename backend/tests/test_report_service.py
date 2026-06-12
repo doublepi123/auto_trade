@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from datetime import date, datetime, time, timezone
 
-os.makedirs("data", exist_ok=True)
-os.environ["AUTO_TRADE_DATABASE_URL"] = f"sqlite:///data/test_report_service_{os.getpid()}.db"
+os.environ["AUTO_TRADE_DATABASE_URL"] = f"sqlite:///{tempfile.gettempdir()}/auto_trade_test_report_service_{os.getpid()}.db"
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session

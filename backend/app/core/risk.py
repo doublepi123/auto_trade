@@ -11,6 +11,10 @@ class RiskConfig:
     max_daily_loss: float = 5000.0
     max_consecutive_losses: int = 3
 
+    def __post_init__(self) -> None:
+        if self.max_daily_loss is not None and self.max_daily_loss < 0:
+            raise ValueError("max_daily_loss must be non-negative")
+
 
 @dataclass
 class RiskResult:
@@ -55,23 +59,36 @@ class RiskController:
                 if self._pause_reason:
                     reason = f"{reason}: {self._pause_reason}"
                 return RiskResult(approved=False, reason=reason)
+            # Day rollover is a mutating operation (resets daily_pnl and
+            # consecutive_losses) so it is performed explicitly here rather
+            # than hidden inside the read-only limit check.
+            self._maybe_rollover_day()
             return self._check_limits()
 
     def reset_consecutive_losses(self) -> None:
         with self._lock:
             self.consecutive_losses = 0
 
-    def _check_limits(self) -> RiskResult:
-        if self.config.max_daily_loss < 0:
-            raise ValueError("max_daily_loss must be non-negative")
+    def _maybe_rollover_day(self) -> None:
+        """Reset daily PnL and consecutive losses when the trade day changes.
 
+        This is a **mutating** operation — it must be called explicitly so
+        callers are aware that ``check()`` can reset state as a side effect.
+        """
         today = self._trade_day_provider()
         if today != self._today:
             self.daily_pnl = 0.0
             self.consecutive_losses = 0
             self._today = today
 
-        if self.daily_pnl <= -self.config.max_daily_loss:
+    def _check_limits(self) -> RiskResult:
+        if self.config.max_daily_loss < 0:
+            raise ValueError("max_daily_loss must be non-negative")
+
+        # max_daily_loss == 0 means "no limit" (disabled); only enforce when > 0.
+        # Without this guard, daily_pnl <= -0 is always True when daily_pnl == 0,
+        # which would permanently block trading.
+        if self.config.max_daily_loss > 0 and self.daily_pnl <= -self.config.max_daily_loss:
             return RiskResult(approved=False, reason=f"daily loss limit reached: {self.daily_pnl}")
 
         if self.consecutive_losses >= self.config.max_consecutive_losses:

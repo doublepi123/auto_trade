@@ -103,7 +103,7 @@ class FakeStrategyService:
             short_selling=False,
             max_daily_loss=5000.0,
             max_consecutive_losses=3,
-            sct_key="strategy-sct",
+            sct_key="strategysct",
         )
 
     def get_runtime_state(self) -> object:
@@ -126,7 +126,7 @@ class TestRunnerCredentials:
             longbridge_app_key="db-key",
             longbridge_app_secret="db-secret",
             longbridge_access_token="db-token",
-            sct_key="db-sct",
+            sct_key="dbsct",
         )
 
         monkeypatch.setattr(runner_module, "BrokerGateway", FakeBrokerGateway)
@@ -141,7 +141,7 @@ class TestRunnerCredentials:
         assert os.environ.get("LONGPORT_APP_KEY") == "db-key"
         assert os.environ.get("LONGPORT_APP_SECRET") == "db-secret"
         assert os.environ.get("LONGPORT_ACCESS_TOKEN") == "db-token"
-        assert runner.notifier.sct_key == "db-sct"
+        assert runner.notifier.sct_key == "dbsct"
 
         runner.stop()
 
@@ -151,7 +151,7 @@ class TestRunnerCredentials:
             longbridge_app_key="reload-key",
             longbridge_app_secret="reload-secret",
             longbridge_access_token="reload-token",
-            sct_key="reload-sct",
+            sct_key="reloadsct",
         )
 
         monkeypatch.setattr(runner_module, "BrokerGateway", FakeBrokerGateway)
@@ -170,7 +170,7 @@ class TestRunnerCredentials:
         assert os.environ.get("LONGPORT_APP_KEY") == "reload-key"
         assert os.environ.get("LONGPORT_APP_SECRET") == "reload-secret"
         assert os.environ.get("LONGPORT_ACCESS_TOKEN") == "reload-token"
-        assert runner.notifier.sct_key == "reload-sct"
+        assert runner.notifier.sct_key == "reloadsct"
         assert runner.broker.subscriptions[0][0] == "AAPL.US"
 
     def test_reload_credentials_keeps_broker_and_notifier_when_resubscribe_fails(self, monkeypatch) -> None:
@@ -178,7 +178,7 @@ class TestRunnerCredentials:
             longbridge_app_key="reload-key",
             longbridge_app_secret="reload-secret",
             longbridge_access_token="reload-token",
-            sct_key="reload-sct",
+            sct_key="reloadsct",
         )
 
         monkeypatch.setattr(runner_module, "BrokerGateway", FailingSubscribeBrokerGateway)
@@ -207,12 +207,12 @@ class TestRunnerCredentials:
         monkeypatch.setattr(runner_module, "BrokerGateway", FakeBrokerGateway)
         monkeypatch.setattr(runner_module, "ServerChanNotifier", FakeNotifier)
         monkeypatch.setattr(runner_module, "SessionLocal", lambda: FakeSession(credential))
-        monkeypatch.setattr(runner_module.settings, "sct_key", "env-sct", raising=False)
+        monkeypatch.setattr(runner_module.settings, "sct_key", "envsct", raising=False)
 
         runner = AppRunner()
         runner.reload_credentials()
 
-        assert runner.notifier.sct_key == "env-sct"
+        assert runner.notifier.sct_key == "envsct"
 
     def test_reload_credentials_removes_blank_longport_env_vars(self, monkeypatch) -> None:
         credential = CredentialConfig(

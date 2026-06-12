@@ -79,12 +79,10 @@ function handleResize() {
 
 onMounted(() => {
   window.addEventListener('resize', handleResize)
-  notifications.enable()
 })
 
 onUnmounted(() => {
   window.removeEventListener('resize', handleResize)
-  notifications.disable()
 })
 </script>
 

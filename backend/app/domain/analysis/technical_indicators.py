@@ -43,14 +43,16 @@ class TechnicalIndicators:
 
         The initial EMA value is seeded with the SMA of the first ``period``
         values (industry-standard seeding).  When fewer than ``period`` values
-        are available the simple mean of all values is used as the seed.
+        are available no valid EMA can be computed and an empty list is returned.
         """
         if not values:
+            return []
+        if len(values) < period:
             return []
         multiplier = 2.0 / (period + 1)
         seed = statistics.mean(values[:period])
         ema = [seed]
-        for i in range(1, len(values)):
+        for i in range(period, len(values)):
             ema.append(values[i] * multiplier + ema[-1] * (1 - multiplier))
         return ema
 
@@ -68,8 +70,12 @@ class TechnicalIndicators:
 
         ema_fast = cls._ema(closes, fast)
         ema_slow = cls._ema(closes, slow)
-        macd_line = [f - s for f, s in zip(ema_fast, ema_slow)]
+        if not ema_slow:
+            return {}
+        macd_line = [f - s for f, s in zip(ema_fast[-len(ema_slow):], ema_slow)]
         signal_line = cls._ema(macd_line, signal_period)
+        if not signal_line:
+            return {}
 
         macd_val = macd_line[-1]
         signal_val = signal_line[-1]
@@ -461,9 +467,9 @@ class TechnicalIndicators:
         # Generate summary
         signals = []
         if bullish_count > 0:
-            signals.append(f"{int(bullish_count)}个看涨")
+            signals.append(f"{int(bullish_count + 0.5)}个看涨")
         if bearish_count > 0:
-            signals.append(f"{int(bearish_count)}个看跌")
+            signals.append(f"{int(bearish_count + 0.5)}个看跌")
         summary = f"综合信号: {overall_signal}（{', '.join(signals)}，置信度 {confidence:.2f}）"
 
         return {

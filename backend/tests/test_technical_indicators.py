@@ -3,9 +3,8 @@ from __future__ import annotations
 import os
 import tempfile
 
-os.environ.setdefault(
-    "AUTO_TRADE_DATABASE_URL",
-    f"sqlite:///{tempfile.gettempdir()}/auto_trade_test_tech_indicators.db",
+os.environ["AUTO_TRADE_DATABASE_URL"] = (
+    f"sqlite:///{tempfile.gettempdir()}/auto_trade_test_tech_indicators_{os.getpid()}.db"
 )
 
 import pytest

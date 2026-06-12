@@ -53,10 +53,19 @@ class AuditLogger:
         else:
             text = str(summary)
         limit = settings.audit_request_summary_limit
+        suffix = "...truncated"
+        suffix_len = len(suffix.encode("utf-8"))
         text_bytes = text.encode("utf-8")
         if len(text_bytes) <= limit:
             return text
-        return text_bytes[:limit].decode("utf-8", errors="replace") + "...truncated"
+        # Account for the suffix length so the final result stays within the
+        # byte limit.  Trim character-by-character from the end until the
+        # encoded length fits within (limit - suffix_len) bytes.  This avoids
+        # slicing raw bytes which can split a multi-byte UTF-8 sequence.
+        target = limit - suffix_len
+        while text and len(text.encode("utf-8")) > target:
+            text = text[:-1]
+        return text + suffix
 
     @staticmethod
     def hash_actor(api_key: str | None) -> str:

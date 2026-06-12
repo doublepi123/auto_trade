@@ -4,6 +4,7 @@ import base64
 import json
 import logging
 import os
+import time
 from pathlib import Path
 
 from cryptography.hazmat.primitives import hashes, serialization
@@ -110,28 +111,33 @@ def _derive_kek(salt: bytes | None = None) -> bytes | None:
     return kdf.derive(master_key.encode("utf-8"))
 
 
+def _load_private_key_once() -> rsa.RSAPrivateKey:
+    """Load an existing private key from disk (no generation, no recursion)."""
+    _KEY_PATH.chmod(0o600)
+    key_bytes = _KEY_PATH.read_bytes()
+    kek = _derive_kek()
+    if kek is not None:
+        try:
+            return _load_rsa_private_key(key_bytes, kek)
+        except (ValueError, TypeError):
+            # Try legacy salt for backward compatibility with existing deployments
+            legacy_kek = _derive_kek(salt=_LEGACY_SALT)
+            if legacy_kek is not None and legacy_kek != kek:
+                try:
+                    return _load_rsa_private_key(key_bytes, legacy_kek)
+                except (ValueError, TypeError):
+                    pass
+            raise ValueError(
+                "CREDENTIAL_MASTER_KEY does not match the key file encryption. "
+                "If the master key was changed, delete data/credential_private_key.pem "
+                "and restart to regenerate (existing encrypted credentials will be lost)."
+            )
+    return _load_rsa_private_key(key_bytes, None)
+
+
 def _load_private_key() -> rsa.RSAPrivateKey:
     if _KEY_PATH.exists():
-        _KEY_PATH.chmod(0o600)
-        key_bytes = _KEY_PATH.read_bytes()
-        kek = _derive_kek()
-        if kek is not None:
-            try:
-                return _load_rsa_private_key(key_bytes, kek)
-            except (ValueError, TypeError):
-                # Try legacy salt for backward compatibility with existing deployments
-                legacy_kek = _derive_kek(salt=_LEGACY_SALT)
-                if legacy_kek is not None and legacy_kek != kek:
-                    try:
-                        return _load_rsa_private_key(key_bytes, legacy_kek)
-                    except (ValueError, TypeError):
-                        pass
-                raise ValueError(
-                    "CREDENTIAL_MASTER_KEY does not match the key file encryption. "
-                    "If the master key was changed, delete data/credential_private_key.pem "
-                    "and restart to regenerate (existing encrypted credentials will be lost)."
-                )
-        return _load_rsa_private_key(key_bytes, None)
+        return _load_private_key_once()
 
     _KEY_PATH.parent.mkdir(parents=True, exist_ok=True)
     private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -158,8 +164,18 @@ def _load_private_key() -> rsa.RSAPrivateKey:
         with os.fdopen(fd, "wb") as key_file:
             key_file.write(key_bytes)
     except FileExistsError:
-        # Another process already created the key file; reload it.
-        return _load_private_key()
+        # Another process already created the key file; reload it
+        # with a bounded retry loop instead of unbounded recursion.
+        for _attempt in range(3):
+            try:
+                return _load_private_key_once()
+            except (FileNotFoundError, ValueError):
+                # Race condition: file may be briefly missing or partially
+                # written; wait briefly and retry.
+                time.sleep(0.1)
+                continue
+        # After exhausting retries, fall through to a final attempt.
+        return _load_private_key_once()
     return private_key
 
 

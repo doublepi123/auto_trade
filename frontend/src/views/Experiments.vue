@@ -483,7 +483,7 @@ async function onExport(format: 'csv' | 'json') {
       document.body.appendChild(a)
       a.click()
       a.remove()
-      window.URL.revokeObjectURL(url)
+      setTimeout(() => window.URL.revokeObjectURL(url), 1000)
     } else if (format === 'json') {
       let content: string
       if (data instanceof Blob) {
@@ -499,7 +499,7 @@ async function onExport(format: 'csv' | 'json') {
       document.body.appendChild(a)
       a.click()
       a.remove()
-      window.URL.revokeObjectURL(url)
+      setTimeout(() => window.URL.revokeObjectURL(url), 1000)
     }
   } catch (e: unknown) {
     ElMessage.error(errorDetail(e) || '导出失败')

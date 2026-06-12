@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -27,6 +28,7 @@ logger = logging.getLogger("auto_trade.llm_advisor")
 
 _LAST_ANALYSIS_TIMESTAMP: float = 0.0
 _LAST_PREVIEW_TIMESTAMP: float = 0.0
+_throttle_lock = threading.Lock()
 _PREVIEW_THROTTLE_SECONDS = 60.0
 _ORDER_ACTIONS = {
     "NONE",
@@ -231,11 +233,13 @@ class LLMAdvisorService:
         global _LAST_ANALYSIS_TIMESTAMP
 
         interval_minutes = self._get_interval_minutes()
-        if not force and self._is_throttled(interval_minutes * 60):
-            return {
-                "success": False,
-                "error": f"Analysis throttled: please wait {interval_minutes} minutes between analyses",
-            }
+        with _throttle_lock:
+            if not force and self._is_throttled(interval_minutes * 60):
+                return {
+                    "success": False,
+                    "error": f"Analysis throttled: please wait {interval_minutes} minutes between analyses",
+                }
+            _LAST_ANALYSIS_TIMESTAMP = time.monotonic()
 
         try:
             market_data = self._data_aggregator.fetch_market_data(symbol, market)
@@ -327,19 +331,14 @@ class LLMAdvisorService:
             }
 
         next_analysis_at = datetime.now(timezone.utc) + timedelta(minutes=interval_minutes)
-        _persist_succeeded = True
         if persist:
             db = SessionLocal()
             try:
                 next_analysis_at = self._record_analysis(db, result, interval_minutes)
             except Exception:
-                _persist_succeeded = False
                 logger.exception("failed to record LLM analysis")
             finally:
                 db.close()
-
-        if _persist_succeeded:
-            _LAST_ANALYSIS_TIMESTAMP = time.monotonic()  # pyright: ignore[reportConstantRedefinition]
 
         interaction_id = self._record_interaction(
             interaction_type="analyze",
@@ -391,12 +390,16 @@ class LLMAdvisorService:
         """
         global _LAST_PREVIEW_TIMESTAMP
 
-        if _LAST_PREVIEW_TIMESTAMP > 0 and time.monotonic() - _LAST_PREVIEW_TIMESTAMP < _PREVIEW_THROTTLE_SECONDS:
-            return {
-                "success": False,
-                "applied": False,
-                "error": "Preview throttled: please wait before requesting another preview",
-            }
+        with _throttle_lock:
+            if _LAST_PREVIEW_TIMESTAMP <= 0:
+                pass  # cold-start bypass
+            elif time.monotonic() - _LAST_PREVIEW_TIMESTAMP < _PREVIEW_THROTTLE_SECONDS:
+                return {
+                    "success": False,
+                    "applied": False,
+                    "error": "Preview throttled: please wait before requesting another preview",
+                }
+            _LAST_PREVIEW_TIMESTAMP = time.monotonic()
 
         try:
             market_data = self._data_aggregator.fetch_market_data(symbol, market)
@@ -474,8 +477,6 @@ class LLMAdvisorService:
                 prompt_variant=prompt_variant,
             )
             return {"success": False, "applied": False, "error": "LLM preview failed"}
-
-        _LAST_PREVIEW_TIMESTAMP = time.monotonic()  # pyright: ignore[reportConstantRedefinition]
 
         interaction_id = self._record_interaction(
             interaction_type="preview",

@@ -60,8 +60,11 @@ def _record_control_trace(
         )
         db.commit()
     except Exception:
-        db.rollback()
-        raise
+        try:
+            db.rollback()
+        except Exception:
+            logger.exception("failed to rollback in control trace for %s", event_type)
+        logger.exception("failed to record control trace for %s", event_type)
     finally:
         db.close()
 _TERMINAL_ORDER_STATUSES = {"FILLED", "REJECTED", "CANCELLED"}

@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 
 from app.core.credential_crypto import decrypt_secret, encrypt_secret, is_encrypted
+from app.core.url_safety import validate_webhook_url
 from app.database import DEFAULT_NOTIFICATION_CHANNELS_JSON
 from app.models import CredentialConfig
 
@@ -91,6 +92,28 @@ class CredentialsService:
         if "notification_channels" in data and data["notification_channels"] is not None:
             channels = data["notification_channels"]
             if isinstance(channels, list):
+                _VALID_CHANNEL_TYPES = {"serverchan", "webhook"}
+                _VALID_SEVERITY_FLOORS = {"INFO", "WARNING", "CRITICAL"}
+                for idx, ch in enumerate(channels):
+                    if not isinstance(ch, dict):
+                        raise ValueError(f"notification_channels[{idx}] must be a dict, got {type(ch).__name__}")
+                    ch_type = ch.get("type")
+                    if ch_type not in _VALID_CHANNEL_TYPES:
+                        raise ValueError(
+                            f"notification_channels[{idx}].type must be one of {_VALID_CHANNEL_TYPES}, got {ch_type!r}"
+                        )
+                    severity_floor = ch.get("severity_floor")
+                    if severity_floor not in _VALID_SEVERITY_FLOORS:
+                        raise ValueError(
+                            f"notification_channels[{idx}].severity_floor must be one of {_VALID_SEVERITY_FLOORS}, got {severity_floor!r}"
+                        )
+                    if ch_type == "webhook":
+                        url = ch.get("url")
+                        if not url or not isinstance(url, str) or not url.strip():
+                            raise ValueError(
+                                f"notification_channels[{idx}].url is required and must be non-empty when type is 'webhook'"
+                            )
+                        validate_webhook_url(url)
                 def _to_dict(ch: Any) -> dict[str, Any]:
                     if isinstance(ch, dict):
                         return ch
@@ -102,7 +125,16 @@ class CredentialsService:
                     ensure_ascii=False,
                 )
             else:
-                config.notification_channels = str(channels)
+                if isinstance(channels, str):
+                    try:
+                        parsed = json.loads(channels)
+                    except json.JSONDecodeError:
+                        raise ValueError("notification_channels string is not valid JSON")
+                    if not isinstance(parsed, list):
+                        raise ValueError("notification_channels must be a list, got JSON type: %s" % type(parsed).__name__)
+                    config.notification_channels = json.dumps(parsed, ensure_ascii=False)
+                else:
+                    raise ValueError("notification_channels must be a list, got type: %s" % type(channels).__name__)
 
         config.updated_at = datetime.now(timezone.utc)
         self.db.add(config)

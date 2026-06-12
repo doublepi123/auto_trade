@@ -15,7 +15,7 @@ export function useStatusHistorySeries() {
   const error = ref('')
   let loadSeq = 0
 
-  async function load(query: StatusHistoryQuery) {
+  async function load(query: StatusHistoryQuery): Promise<StatusHistory> {
     const seq = ++loadSeq
     loading.value = true
     error.value = ''
@@ -25,13 +25,18 @@ export function useStatusHistorySeries() {
         return history.value
       }
       history.value = result
-      return history.value
+      return result
     } catch (err) {
+      if (seq !== loadSeq) {
+        throw err
+      }
       history.value = { points: [], markers: [] }
       error.value = err instanceof Error ? err.message : '加载运行时状态历史失败'
       throw err
     } finally {
-      loading.value = false
+      if (seq === loadSeq) {
+        loading.value = false
+      }
     }
   }
 

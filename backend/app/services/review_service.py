@@ -380,9 +380,9 @@ class ReviewService:
         # 错过止损: 日亏损超过阈值但无风控暂停
         snapshots = day["snapshots"]
         if snapshots:
-            max_daily_pnl = min(s["daily_pnl"] for s in snapshots)
+            worst_daily_pnl = min(s["daily_pnl"] for s in snapshots)
             loss_threshold = -abs(max_daily_loss) if max_daily_loss else -1000
-            if max_daily_pnl < loss_threshold:
+            if worst_daily_pnl < loss_threshold:
                 has_risk_pause = any(e["event_type"] == "RISK_PAUSED" for e in events)
                 if not has_risk_pause:
                     tags.add("错过止损")

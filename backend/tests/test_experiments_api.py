@@ -1,7 +1,7 @@
 import os
 import tempfile
 os.environ["AUTO_TRADE_DATABASE_URL"] = (
-    f"sqlite:///{tempfile.gettempdir()}/test_experiments_api_{os.getpid()}.db"
+    f"sqlite:///{tempfile.gettempdir()}/auto_trade_test_experiments_api_{os.getpid()}.db"
 )
 
 from app.database import engine as db_engine, SessionLocal

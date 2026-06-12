@@ -274,6 +274,10 @@ async function handleFileUpload(event: Event) {
   const input = event.target as HTMLInputElement
   const file = input.files?.[0]
   if (!file) return
+  if (file.size > 10 * 1024 * 1024) {
+    ElMessage.error('CSV 文件不能超过 10 MB')
+    return
+  }
   csvText.value = await file.text()
   input.value = ''
 }

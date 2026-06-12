@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
@@ -9,11 +9,15 @@ from app.core.notifiers.webhook import WebhookNotifier
 
 
 def test_webhook_sends_correct_payload() -> None:
-    with patch("app.core.notifiers.webhook.httpx.post") as mock_post:
-        mock_post.return_value.status_code = 200
+    mock_client = MagicMock()
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_client.post.return_value = mock_response
+
+    with patch("app.core.notifiers.webhook.validated_httpx_client", return_value=mock_client):
         notifier = WebhookNotifier("https://93.184.216.34/hook")
         assert notifier.send("hello", "world", severity="CRITICAL") is True
-        kwargs = mock_post.call_args.kwargs
+        kwargs = mock_client.post.call_args.kwargs
         body = kwargs["json"]
         assert body["title"] == "hello"
         assert body["content"] == "world"
@@ -22,14 +26,21 @@ def test_webhook_sends_correct_payload() -> None:
 
 
 def test_webhook_non_2xx_returns_false() -> None:
-    with patch("app.core.notifiers.webhook.httpx.post") as mock_post:
-        mock_post.return_value.status_code = 500
+    mock_client = MagicMock()
+    mock_response = MagicMock()
+    mock_response.status_code = 500
+    mock_client.post.return_value = mock_response
+
+    with patch("app.core.notifiers.webhook.validated_httpx_client", return_value=mock_client):
         notifier = WebhookNotifier("https://93.184.216.34/hook")
         assert notifier.send("t", "c") is False
 
 
 def test_webhook_timeout_returns_false() -> None:
-    with patch("app.core.notifiers.webhook.httpx.post", side_effect=httpx.ReadTimeout("timeout")):
+    mock_client = MagicMock()
+    mock_client.post.side_effect = httpx.ReadTimeout("timeout")
+
+    with patch("app.core.notifiers.webhook.validated_httpx_client", return_value=mock_client):
         notifier = WebhookNotifier("https://93.184.216.34/hook")
         assert notifier.send("t", "c") is False
 

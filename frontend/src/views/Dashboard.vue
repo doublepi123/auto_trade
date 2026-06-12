@@ -613,10 +613,10 @@ async function loadStatusHistory() {
     return
   }
   try {
-    const history = await loadChartHistory({ limit: MAX_CHART_POINTS, symbol })
+    const result = await loadChartHistory({ limit: MAX_CHART_POINTS, symbol })
     chartHistory.value = {
-      points: history.points.slice(-MAX_CHART_POINTS),
-      markers: history.markers,
+      points: result.points.slice(-MAX_CHART_POINTS),
+      markers: result.markers,
     }
   } catch {
     resetChartHistory()

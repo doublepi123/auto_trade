@@ -1325,15 +1325,26 @@ class TradeExecutionService:
     def _record_entry_price(self, symbol: str, fill_price: Decimal, fill_qty: Decimal) -> None:
         if fill_price <= 0 or fill_qty <= 0:
             return
+        # Compute new values under lock but do NOT update in-memory state yet
+        with self._state_lock:
+            entry = self._entry_positions.get(symbol)
+            current_quantity = entry.quantity if entry is not None else Decimal("0")
+            current_cost = entry.cost if entry is not None else Decimal("0")
+            new_quantity = current_quantity + fill_qty
+            new_cost = current_cost + fill_price * fill_qty
+            previous_avg = entry.avg_price if entry is not None else Decimal("0")
+
+        # Persist to DB first; if this fails, in-memory state stays unchanged
+        self._persist_entry_safe(symbol, new_quantity, new_cost)
+
+        # Update in-memory state only after successful persist
         with self._state_lock:
             entry = self._entry_positions.get(symbol)
             if entry is None:
                 entry = _TrackedEntry()
                 self._entry_positions[symbol] = entry
-            previous_avg = entry.avg_price
-            entry.quantity += fill_qty
-            entry.cost += fill_price * fill_qty
-            snapshot = (entry.quantity, entry.cost)
+            entry.quantity = new_quantity
+            entry.cost = new_cost
             if previous_avg <= 0:
                 logger.info("entry price recorded for %s: avg=%s qty=%s", symbol, entry.avg_price, entry.quantity)
             else:
@@ -1344,7 +1355,6 @@ class TradeExecutionService:
                     entry.avg_price,
                     entry.quantity,
                 )
-        self._persist_entry_safe(symbol, snapshot[0], snapshot[1])
 
     def _persist_entry_safe(self, symbol: str, quantity: Decimal, cost: Decimal) -> None:
         if self._persist_entry is None:

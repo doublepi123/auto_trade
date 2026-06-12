@@ -298,9 +298,8 @@ class AppRunner:
                 logger.exception("runner initialization failed")
                 return False
             self._running = True
-
-        self._thread = threading.Thread(target=self._run_loop, daemon=True)
-        self._thread.start()
+            self._thread = threading.Thread(target=self._run_loop, daemon=True)
+            self._thread.start()
         logger.info("runner started")
         return True
 
@@ -612,10 +611,30 @@ class AppRunner:
                 return
 
             if self._trade_svc.has_pending_order and processing_started and decision.result is None:
+                pending = self._trade_svc.pending_order_for(quote.symbol)
+                if pending is not None:
+                    runtime = self._runtime_for_symbol(pending.symbol)
+                    restore_fn = self.engine.restore
+                    if runtime is not None:
+                        _, _, target_engine = runtime
+                        restore_fn = target_engine.restore
+                else:
+                    # Quote arrived for a secondary symbol; find the symbol
+                    # that actually has the pending order so we restore the
+                    # correct engine snapshot.
+                    restore_fn = self.engine.restore
+                    for sym in self._symbol_runtimes:
+                        p = self._trade_svc.pending_order_for(sym)
+                        if p is not None:
+                            rt = self._runtime_for_symbol(p.symbol)
+                            if rt is not None:
+                                _, _, target_engine = rt
+                                restore_fn = target_engine.restore
+                            break
                 self._trade_svc.reconcile(
                     self.risk,
                     self.notifier,
-                    self.engine.restore,
+                    restore_fn,
                     self.notifier.notify_risk_event,
                 )
                 self._broadcast_status()
@@ -1349,10 +1368,20 @@ class AppRunner:
                 logger.exception("error resubscribing after broker disconnect")
             try:
                 if self._trade_svc.has_pending_order:
+                    # Use the correct engine restore for each symbol's pending order
+                    def _restore_for_pending(snapshot):
+                        """Resolve the engine that owns the pending order and restore its snapshot."""
+                        for sym, rt in self._symbol_runtimes.items():
+                            if self._trade_svc.pending_order_for(sym) is not None:
+                                rt.engine.restore(snapshot)
+                                return
+                        # Fallback: no symbol-specific pending order found
+                        self.engine.restore(snapshot)
+
                     self._trade_svc.reconcile(
                         self.risk,
                         self.notifier,
-                        self.engine.restore,
+                        _restore_for_pending,
                         self.notifier.notify_risk_event,
                     )
                     self._broadcast_status()
@@ -1570,6 +1599,10 @@ class AppRunner:
                     return
             old_broker = self.broker
             old_broker.close()
+            old_notifier = self.notifier
+            _close_notifier = getattr(old_notifier, "close", None)
+            if callable(_close_notifier):
+                _close_notifier()
             self.broker = new_broker
             self.notifier = new_notifier
             self._trade_svc.refresh_pending_brokers(new_broker)

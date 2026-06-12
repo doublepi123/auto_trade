@@ -173,6 +173,7 @@ def list_timeline_events(
     merged = [_trade_row_to_out(r) for r in trade_rows] + [_audit_row_to_out(r) for r in audit_rows]
     merged.sort(key=_sort_key)
 
+
     start = (page - 1) * page_size
     if start >= len(merged):
         return [], total

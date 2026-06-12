@@ -123,19 +123,28 @@ def set_trading_symbol(
 
     strategy_svc = StrategyService(db)
     current = strategy_svc.get_config()
+    reload_warning = False
     if current.symbol != item.symbol or current.market != item.market:
         _, diff = strategy_svc.update_config({"symbol": item.symbol, "market": item.market})
-        _reload_strategy_after_save()
+        try:
+            _reload_strategy_after_save()
+        except Exception as reload_exc:
+            logger.exception("failed to reload strategy after watchlist set-trading")
+            reload_warning = True
+            result = "PARTIAL"
     try:
         return WatchlistItemResponse.model_validate(item)
     finally:
         if diff:
+            summary: dict[str, object] = {"changed": diff, "source": "watchlist_set_trading"}
+            if reload_warning:
+                summary["reload_warning"] = True
             audit.record(
                 "STRATEGY_UPDATE",
                 severity="INFO",
                 actor_hash=actor_hash,
                 source_ip=source_ip,
-                request_summary={"changed": diff, "source": "watchlist_set_trading"},
+                request_summary=summary,
                 result=result,
             )
 

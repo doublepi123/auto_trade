@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from typing import Any, List, Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api.auth import require_api_key
@@ -43,8 +44,10 @@ def create_version(
             description=payload.description,
             template=payload.template,
         )
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail="Failed to create version") from exc
+    except IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="Version already exists") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return PromptVersionResponse.model_validate(version)
 
 
@@ -74,6 +77,6 @@ def get_active_version(db: Session = Depends(get_db)) -> PromptVersionResponse |
 def get_experiment_summary(
     experiment_name: str,
     db: Session = Depends(get_db),
-) -> list[dict[str, Any]]:
+) -> list[ExperimentSummary]:
     manager = ABTestManager(db)
     return manager.get_experiment_summary(experiment_name)

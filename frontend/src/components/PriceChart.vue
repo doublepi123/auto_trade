@@ -66,15 +66,15 @@ const latestPrice = computed(() => prices.value.length > 0 ? prices.value[prices
 const minPrice = computed(() => {
   const candidates = [...prices.value, props.buyLow, props.sellHigh].filter((price) => price > 0)
   if (candidates.length === 0) return 0
-  const min = candidates.reduce((a, b) => Math.min(a, b))
-  const max = candidates.reduce((a, b) => Math.max(a, b))
+  const min = candidates.reduce((a, b) => Math.min(a, b), candidates[0])
+  const max = candidates.reduce((a, b) => Math.max(a, b), candidates[0])
   return min - Math.max((max - min) * 0.08, 0.01)
 })
 const maxPrice = computed(() => {
   const candidates = [...prices.value, props.buyLow, props.sellHigh].filter((price) => price > 0)
   if (candidates.length === 0) return 1
-  const min = candidates.reduce((a, b) => Math.min(a, b))
-  const max = candidates.reduce((a, b) => Math.max(a, b))
+  const min = candidates.reduce((a, b) => Math.min(a, b), candidates[0])
+  const max = candidates.reduce((a, b) => Math.max(a, b), candidates[0])
   return max + Math.max((max - min) * 0.08, 0.01)
 })
 

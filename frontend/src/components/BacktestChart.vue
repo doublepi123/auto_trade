@@ -126,15 +126,15 @@ const markerPositions = computed(() => {
 
 function paddedMin(values: number[]): number {
   if (values.length === 0) return 0
-  const min = values.reduce((a, b) => Math.min(a, b))
-  const max = values.reduce((a, b) => Math.max(a, b))
+  const min = values.reduce((a, b) => Math.min(a, b), values[0])
+  const max = values.reduce((a, b) => Math.max(a, b), values[0])
   return min - Math.max((max - min) * 0.08, 0.01)
 }
 
 function paddedMax(values: number[]): number {
   if (values.length === 0) return 1
-  const min = values.reduce((a, b) => Math.min(a, b))
-  const max = values.reduce((a, b) => Math.max(a, b))
+  const min = values.reduce((a, b) => Math.min(a, b), values[0])
+  const max = values.reduce((a, b) => Math.max(a, b), values[0])
   return max + Math.max((max - min) * 0.08, 0.01)
 }
 

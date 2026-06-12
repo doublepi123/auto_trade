@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timezone
 from typing import TYPE_CHECKING, Any
 
 from app.core.engine import EngineState, StrategyEngine, StrategyParams
@@ -178,6 +178,13 @@ class RuntimeStateService:
 def _coerce_date(value: object) -> date | None:
     if value is None:
         return None
+    if isinstance(value, str):
+        try:
+            return date.fromisoformat(value)
+        except (ValueError, TypeError):
+            return None
+    if isinstance(value, datetime):
+        return value.date()
     if isinstance(value, date):
         return value
     return None
@@ -186,8 +193,16 @@ def _coerce_date(value: object) -> date | None:
 def _coerce_datetime(value: object) -> datetime | None:
     if value is None:
         return None
-    if not isinstance(value, datetime):
-        return None
-    if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value
+    if isinstance(value, str):
+        try:
+            dt = datetime.fromisoformat(value)
+            return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
+        except (ValueError, TypeError):
+            return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value
+    if isinstance(value, date):
+        return datetime.combine(value, time(0, 0, 0), tzinfo=timezone.utc)
+    return None

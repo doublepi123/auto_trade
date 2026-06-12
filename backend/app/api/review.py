@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 @router.get("")
 def get_review(
-    symbol: str = Query(..., description="Stock symbol, e.g. AAPL.US"),
+    symbol: str = Query(..., description="Stock symbol, e.g. AAPL.US", pattern=r'^[A-Z0-9\-]{1,12}\.[A-Z]{2,4}$'),
     from_date: str = Query(..., description="Start date (YYYY-MM-DD)", pattern=r'^\d{4}-\d{2}-\d{2}$'),
     to_date: str = Query(..., description="End date (YYYY-MM-DD)", pattern=r'^\d{4}-\d{2}-\d{2}$'),
     db: Session = Depends(get_db),
@@ -36,7 +36,7 @@ def get_review(
 
 @router.get("/export")
 def export_review(
-    symbol: str = Query(..., description="Stock symbol, e.g. AAPL.US"),
+    symbol: str = Query(..., description="Stock symbol, e.g. AAPL.US", pattern=r'^[A-Z0-9\-]{1,12}\.[A-Z]{2,4}$'),
     from_date: str = Query(..., description="Start date (YYYY-MM-DD)", pattern=r'^\d{4}-\d{2}-\d{2}$'),
     to_date: str = Query(..., description="End date (YYYY-MM-DD)", pattern=r'^\d{4}-\d{2}-\d{2}$'),
     format: str = Query("json", description="Export format: json or csv"),
@@ -53,12 +53,13 @@ def export_review(
         ]
         buf = svc.export_review(symbol, from_date, to_date, format, diagnostics=diagnostics)
         media_type = "application/json" if format == "json" else "text/csv"
-        safe_symbol = re.sub(r'[^a-zA-Z0-9]', '', symbol.replace('.', '_'))
+        sanitized_symbol = re.sub(r'[\r\n]', '', symbol)
+        safe_symbol = re.sub(r'[^a-zA-Z0-9]', '', sanitized_symbol.replace('.', '_'))
         filename = f"review_{safe_symbol}_{from_date}_{to_date}.{format}"
         return StreamingResponse(
             buf,
             media_type=media_type,
-            headers={"Content-Disposition": f"attachment; filename={filename}"},
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))

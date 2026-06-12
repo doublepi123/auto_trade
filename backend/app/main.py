@@ -375,6 +375,13 @@ async def _llm_analysis_tick() -> None:
             except Exception:
                 db.rollback()
                 logger.exception("LLM analysis failed for symbol %s; skipping", symbol)
+                # Session may have stale state after rollback; close it and
+                # create a fresh session for remaining symbols.
+                db.close()
+                db = SessionLocal()
+                svc = StrategyService(db)
+                config = svc.get_config()
+                state_svc = LLMSymbolStateService(db)
                 continue
     finally:
         db.close()

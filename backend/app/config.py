@@ -4,7 +4,7 @@ import logging
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
@@ -19,6 +19,24 @@ class Settings(BaseSettings):
     )
 
     env: str = "dev"
+
+    @field_validator("env")
+    @classmethod
+    def _validate_env(cls, v: str) -> str:
+        allowed = {"dev", "test", "prod"}
+        if v not in allowed:
+            raise ValueError(f"env must be one of {allowed}, got '{v}'")
+        return v
+
+    @model_validator(mode="after")
+    def _warn_non_prod_with_api_key(self) -> "Settings":
+        if self.api_key and self.env != "prod":
+            logger.warning(
+                "AUTO_TRADE_API_KEY is set but env='%s' (not 'prod'). "
+                "Consider setting env='prod' for production deployments.",
+                self.env,
+            )
+        return self
     database_url: str = "sqlite:///data/auto_trade.db"
 
     longbridge_app_key: str = ""

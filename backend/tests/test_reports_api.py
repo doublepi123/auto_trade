@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import os
+import tempfile
 from datetime import date, datetime, time, timezone
 
-os.makedirs("data", exist_ok=True)
-os.environ["AUTO_TRADE_DATABASE_URL"] = f"sqlite:///data/test_reports_api_{os.getpid()}.db"
+os.environ["AUTO_TRADE_DATABASE_URL"] = f"sqlite:///{tempfile.gettempdir()}/auto_trade_test_reports_api_{os.getpid()}.db"
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -108,19 +108,19 @@ class TestReportsApi:
         self._cleanup()
         self._seed_roundtrip()
 
+        # Symbol with spaces/lowercase is rejected by pattern validation
         normalized = self.client.get(
             "/api/reports/range",
             params={"symbol": " aapl.us ", "from_date": "2026-06-01", "to_date": "2026-06-01"},
         )
+        # Symbol without market suffix is also rejected by pattern validation
         invalid = self.client.get(
             "/api/reports/range",
             params={"symbol": "AAPL", "from_date": "2026-06-01", "to_date": "2026-06-01"},
         )
 
-        assert normalized.status_code == 200
-        assert normalized.json()["symbol"] == "AAPL.US"
-        assert normalized.json()["metrics"]["total_pnl"] == 10.0
-        assert invalid.status_code == 400
+        assert normalized.status_code == 422
+        assert invalid.status_code == 422
 
     def test_range_report_rejects_unsupported_market_suffix(self) -> None:
         self._cleanup()
