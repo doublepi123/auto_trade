@@ -42,19 +42,19 @@
         </el-col>
         <el-col :xs="12" :sm="6">
           <el-card class="summary-card">
-            <div class="summary-value">{{ reportData.metrics.total_trades }}</div>
+            <div class="summary-value">{{ reportData.metrics.total_trades ?? 0 }}</div>
             <div class="summary-label">总交易次数</div>
           </el-card>
         </el-col>
         <el-col :xs="12" :sm="6">
           <el-card class="summary-card">
-            <div class="summary-value" :class="winRateClass">{{ (reportData.metrics.win_rate * 100).toFixed(1) }}%</div>
+            <div class="summary-value" :class="winRateClass">{{ ((reportData.metrics.win_rate ?? 0) * 100).toFixed(1) }}%</div>
             <div class="summary-label">胜率</div>
           </el-card>
         </el-col>
         <el-col :xs="12" :sm="6">
           <el-card class="summary-card">
-            <div class="summary-value">{{ reportData.metrics.avg_pnl_per_trade.toFixed(2) }}</div>
+            <div class="summary-value">{{ (reportData.metrics.avg_pnl_per_trade ?? 0).toFixed(2) }}</div>
             <div class="summary-label">均笔盈亏</div>
           </el-card>
         </el-col>
@@ -63,19 +63,19 @@
       <el-row :gutter="12" class="summary-row">
         <el-col :xs="12" :sm="6">
           <el-card class="summary-card">
-            <div class="summary-value positive">+{{ reportData.metrics.max_profit.toFixed(2) }}</div>
+            <div class="summary-value positive">+{{ (reportData.metrics.max_profit ?? 0).toFixed(2) }}</div>
             <div class="summary-label">最大盈利</div>
           </el-card>
         </el-col>
         <el-col :xs="12" :sm="6">
           <el-card class="summary-card">
-            <div class="summary-value negative">{{ reportData.metrics.max_loss.toFixed(2) }}</div>
+            <div class="summary-value negative">{{ (reportData.metrics.max_loss ?? 0).toFixed(2) }}</div>
             <div class="summary-label">最大亏损</div>
           </el-card>
         </el-col>
         <el-col :xs="12" :sm="6">
           <el-card class="summary-card">
-            <div class="summary-value">{{ (reportData.metrics.llm_apply_rate * 100).toFixed(1) }}% / {{ (reportData.metrics.llm_accuracy_rate * 100).toFixed(1) }}%</div>
+            <div class="summary-value">{{ ((reportData.metrics.llm_apply_rate ?? 0) * 100).toFixed(1) }}% / {{ ((reportData.metrics.llm_accuracy_rate ?? 0) * 100).toFixed(1) }}%</div>
             <div class="summary-label">LLM 采纳率 / 准确率</div>
           </el-card>
         </el-col>
@@ -84,7 +84,7 @@
       <el-row :gutter="12" class="summary-row">
         <el-col :xs="12" :sm="6">
           <el-card class="summary-card">
-            <div class="summary-value negative">{{ reportData.metrics.max_drawdown.toFixed(2) }}</div>
+            <div class="summary-value negative">{{ (reportData.metrics.max_drawdown ?? 0).toFixed(2) }}</div>
             <div class="summary-label">最大回撤</div>
           </el-card>
         </el-col>
@@ -126,22 +126,22 @@
           <el-table-column prop="win_count" label="盈利次数" width="100" />
           <el-table-column label="盈亏" width="120">
             <template #default="{ row }">
-              <span :class="row.pnl >= 0 ? 'positive' : 'negative'">{{ signedCurrency(row.pnl) }}</span>
+              <span :class="(row.pnl ?? 0) >= 0 ? 'positive' : 'negative'">{{ signedCurrency(row.pnl ?? 0) }}</span>
             </template>
           </el-table-column>
           <el-table-column label="累计盈亏" width="120">
             <template #default="{ row }">
-              <span :class="row.cumulative_pnl >= 0 ? 'positive' : 'negative'">{{ signedCurrency(row.cumulative_pnl) }}</span>
+              <span :class="(row.cumulative_pnl ?? 0) >= 0 ? 'positive' : 'negative'">{{ signedCurrency(row.cumulative_pnl ?? 0) }}</span>
             </template>
           </el-table-column>
           <el-table-column label="回撤" width="120">
             <template #default="{ row }">
-              <span :class="row.drawdown > 0 ? 'negative' : ''">{{ row.drawdown.toFixed(2) }}</span>
+              <span :class="(row.drawdown ?? 0) > 0 ? 'negative' : ''">{{ (row.drawdown ?? 0).toFixed(2) }}</span>
             </template>
           </el-table-column>
           <el-table-column label="胜率">
             <template #default="{ row }">
-              <span>{{ row.trade_count > 0 ? ((row.win_count / row.trade_count) * 100).toFixed(1) : '0' }}%</span>
+              <span>{{ row.trade_count > 0 ? (((row.win_count ?? 0) / row.trade_count) * 100).toFixed(1) : '0' }}%</span>
             </template>
           </el-table-column>
         </el-table>
@@ -285,9 +285,17 @@ function handleExport(fmt: 'json' | 'csv') {
       link.href = url
       link.download = `report_${form.value.symbol.split('.').join('_')}_${form.value.from_date}_${form.value.to_date}.${fmt}`
       document.body.appendChild(link)
+      // Revoke the object URL on click rather than after a 1-second timer to
+      // avoid races when the user fires several exports in quick succession
+      // (each link was previously holding its URL alive for a full second).
+      const cleanup = () => {
+        URL.revokeObjectURL(url)
+        link.removeEventListener('click', cleanup)
+        if (link.parentNode) link.parentNode.removeChild(link)
+      }
+      link.addEventListener('click', cleanup)
       link.click()
-      link.remove()
-      setTimeout(() => URL.revokeObjectURL(url), 1000)
+      setTimeout(cleanup, 1000)
       ElMessage.success(`导出 ${fmt.toUpperCase()} 成功`)
     })
     .catch(() => {

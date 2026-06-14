@@ -118,8 +118,8 @@
                 </el-tag>
               </div>
               <div class="item-row">
-                <span>最近价格 ${{ selectedRuntimeDiagnostics.last_price.toFixed(2) }}</span>
-                <span>触发价 {{ selectedRuntimeDiagnostics.last_trigger_price > 0 ? `$${selectedRuntimeDiagnostics.last_trigger_price.toFixed(2)}` : '-' }}</span>
+                <span>最近价格 {{ formatCurrency(selectedRuntimeDiagnostics.last_price ?? null, diagnosticsMarket) }}</span>
+                <span>触发价 {{ selectedRuntimeDiagnostics.last_trigger_price > 0 ? formatCurrency(selectedRuntimeDiagnostics.last_trigger_price ?? null, diagnosticsMarket) : '-' }}</span>
               </div>
             </div>
 
@@ -164,7 +164,7 @@
               <div class="section-title">订单执行</div>
               <div v-for="order in day.orders" :key="order.id" class="item-row">
                 <el-tag :type="order.side === 'BUY' || order.side === 'BUY_TO_COVER' ? 'success' : 'danger'" size="small">{{ order.side }}</el-tag>
-                <span>{{ order.quantity.toFixed(0) }} 股 @ ${{ order.executed_price ?? order.price }}</span>
+                <span>{{ order.quantity.toFixed(0) }} 股 @ {{ formatCurrency(order.executed_price ?? order.price, diagnosticsMarket) }}</span>
                 <el-tag :type="order.status === ORDER_STATUS.FILLED ? 'success' : 'warning'" size="small">{{ order.status }}</el-tag>
                 <span class="muted">{{ formatTime(order.created_at) }}</span>
               </div>
@@ -182,7 +182,7 @@
             <div v-if="day.snapshots.length > 0" class="section-block">
               <div class="section-title">行情快照</div>
               <div v-for="snap in day.snapshots" :key="snap.id" class="item-row">
-                <span>价格 ${{ snap.last_price }}</span>
+                <span>价格 {{ formatCurrency(snap.last_price, diagnosticsMarket) }}</span>
                 <span v-if="snap.daily_pnl !== 0" :class="snap.daily_pnl >= 0 ? 'positive' : 'negative'">{{ signedCurrency(snap.daily_pnl) }}</span>
                 <span class="muted">{{ formatTime(snap.created_at) }}</span>
               </div>
@@ -206,6 +206,7 @@ import { useStatusHistorySeries } from '../composables/useStatusHistorySeries'
 import { useDiagnosticsSnapshot } from '../composables/useDiagnosticsSnapshot'
 import type { ReviewResponse } from '../types'
 import { ORDER_STATUS } from '../utils/constants'
+import { formatCurrency, marketFromSymbol } from '../utils/format'
 
 const form = ref({
   symbol: 'AAPL.US',
@@ -247,6 +248,8 @@ const diagnosticsSymbolLabel = computed(() => {
   }
   return form.value.symbol || '未选择标的'
 })
+
+const diagnosticsMarket = computed(() => marketFromSymbol(form.value.symbol))
 
 async function handleSearch() {
   if (!form.value.symbol || !form.value.from_date || !form.value.to_date) {
@@ -315,9 +318,21 @@ function handleExport(fmt: 'json' | 'csv') {
       link.href = url
       link.download = `review_${form.value.symbol.split('.').join('_')}_${form.value.from_date}_${form.value.to_date}.${fmt}`
       document.body.appendChild(link)
+      // Revoke the object URL as soon as the browser has had a chance to
+      // process the click — listening for `click` is more deterministic than
+      // setTimeout and avoids races when the user fires several exports in
+      // quick succession (each link was previously holding its URL alive for
+      // a full second, which leaks memory and can collide with later URLs).
+      const cleanup = () => {
+        URL.revokeObjectURL(url)
+        link.removeEventListener('click', cleanup)
+        if (link.parentNode) link.parentNode.removeChild(link)
+      }
+      link.addEventListener('click', cleanup)
       link.click()
-      link.remove()
-      setTimeout(() => URL.revokeObjectURL(url), 1000)
+      // Fallback: if the click event has already fired (synchronous dispatch
+      // path), still schedule a short revoke to ensure the URL is freed.
+      setTimeout(cleanup, 1000)
       ElMessage.success(`导出 ${fmt.toUpperCase()} 成功`)
     })
     .catch(() => {

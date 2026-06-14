@@ -141,6 +141,15 @@ class StrategyEngine:
         self._last_trigger_monotonic = time.monotonic()
 
     def _in_cooldown(self) -> bool:
+        """Return True when the engine is still inside its post-trigger cooldown window.
+
+        ``cooldown_seconds`` is the minimum gap between successive triggers.
+        Setting it to ``0`` (or any non-positive value) disables the cooldown
+        check entirely — triggers can fire back-to-back. This is the
+        intended opt-out for high-frequency / test scenarios.
+        """
+        if self._cooldown_seconds <= 0:
+            return False
         if self._last_trigger_monotonic <= 0:
             return False
         elapsed = time.monotonic() - self._last_trigger_monotonic

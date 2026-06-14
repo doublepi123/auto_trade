@@ -26,6 +26,8 @@ credential_public_key.pem
 .pytest_cache
 .tox
 .nox
+tests/
+*.log
 
 # Editor
 .vscode

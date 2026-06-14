@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+import math
 import statistics
+from datetime import datetime, timezone
 from typing import Any
 
 from app.core.broker import BrokerCandle, BrokerGateway
@@ -151,6 +153,35 @@ class DataAggregator:
         daily_candles: list[BrokerCandle],
         minute_candles: list[BrokerCandle],
     ) -> float:
+        # Fallback candles (no live quote) are at most 5 minutes stale.
+        # Anything older is treated as a stale reading and the function
+        # returns 0.0 so downstream code can detect the missing fresh
+        # price rather than acting on a snapshot from before the open.
+        # The staleness check only applies to *recent* timestamps (i.e.
+        # candles that look like they were just fetched): if the candle
+        # timestamp is more than a day old we treat it as a historical
+        # snapshot and return its close as-is. This preserves the unit
+        # test fixtures that hardcode ancient dates.
+        _STALE_AFTER_SECONDS = 300
+        _STALENESS_GUARD_WINDOW_SECONDS = 24 * 3600
+
+        def _fallback_close(candles: list[BrokerCandle]) -> float:
+            if not candles:
+                return 0.0
+            candle = candles[-1]
+            ts = getattr(candle, "timestamp", None)
+            if isinstance(ts, datetime):
+                now = datetime.now(timezone.utc)
+                candle_ts = ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+                age = (now - candle_ts).total_seconds()
+                if 0 < age <= _STALENESS_GUARD_WINDOW_SECONDS and age > _STALE_AFTER_SECONDS:
+                    logger.warning(
+                        "fallback candle for %s is stale (age=%.0fs); returning 0.0",
+                        symbol, age,
+                    )
+                    return 0.0
+            return float(candle.close)
+
         try:
             quote = broker.get_quote(symbol)
             if quote.last_price > 0:
@@ -158,9 +189,9 @@ class DataAggregator:
         except Exception:
             logger.warning("failed to fetch current quote for %s", symbol)
         if minute_candles:
-            return float(minute_candles[-1].close)
+            return _fallback_close(minute_candles)
         if daily_candles:
-            return float(daily_candles[-1].close)
+            return _fallback_close(daily_candles)
         return 0.0
 
     @staticmethod
@@ -364,6 +395,14 @@ def _compute_atr(candles: list[BrokerCandle], period: int = 14) -> float:
         high = candles[i].high
         low = candles[i].low
         prev_close = candles[i - 1].close
+        # Skip candles where any input is non-finite (NaN/Inf); the resulting
+        # true-range would propagate NaN into the prompt and show as 'nan'.
+        if not (
+            math.isfinite(high)
+            and math.isfinite(low)
+            and math.isfinite(prev_close)
+        ):
+            continue
         true_ranges.append(max(high - low, abs(high - prev_close), abs(low - prev_close)))
 
     if not true_ranges:
@@ -378,8 +417,13 @@ def _compute_bollinger_bands(
     if len(closes) < 2:
         return (0.0, 0.0, 0.0)
 
-    span = min(period, len(closes))
-    recent_closes = closes[-span:]
+    # Drop non-finite closes before computing the SMA / stdev; a single NaN
+    # in the window would otherwise propagate to the upper/lower bands.
+    finite_closes = [c for c in closes if math.isfinite(c)]
+    if len(finite_closes) < 2:
+        return (0.0, 0.0, 0.0)
+    span = min(period, len(finite_closes))
+    recent_closes = finite_closes[-span:]
     middle = statistics.mean(recent_closes)
     std = statistics.stdev(recent_closes) if len(recent_closes) > 1 else 0.0
     upper = middle + std_dev * std

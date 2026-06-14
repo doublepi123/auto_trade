@@ -202,9 +202,11 @@ cd backend
 python3 -m venv .venv && source .venv/bin/activate  # 推荐使用 venv 锁定 Python 3.11+
 pip3 install -r requirements.txt
 pip3 install -r requirements-dev.txt  # LSP/type-check/test development dependencies
-cp ../.env.example ../.env  # 或手动创建 backend/.env
+cp ../.env.example ../.env  # 本机 .env 默认 sqlite:///./data/auto_trade.db，cwd=repo 根即可
 uvicorn app.main:app --reload --port 8000
 ```
+
+> 本机路径 (`./data/...`) 与 Docker 路径 (`/app/data/...`) 不一致：compose 启动时通过环境变量 `AUTO_TRADE_DATABASE_URL=sqlite:////app/data/auto_trade.db` 覆盖，本机 `uvicorn` 直接用相对路径即可，**不要**把容器绝对路径写进 `.env.example`。
 
 ### 前端
 
@@ -403,7 +405,7 @@ auto_trade/
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
 | `AUTO_TRADE_ENV` | 运行环境 | `dev` |
-| `AUTO_TRADE_DATABASE_URL` | SQLite 数据库路径 | `sqlite:///data/auto_trade.db` |
+| `AUTO_TRADE_DATABASE_URL` | SQLite 数据库路径（**本机** `sqlite:///./data/auto_trade.db`，**Docker** `sqlite:////app/data/auto_trade.db`，compose 自动覆盖） | `sqlite:///./data/auto_trade.db` |
 | `AUTO_TRADE_FRONTEND_PORT` | Docker 前端映射端口（绑定 `0.0.0.0`） | `8080` |
 | `LONGPORT_APP_KEY` | 长桥 App Key | - |
 | `LONGPORT_APP_SECRET` | 长桥 App Secret | - |

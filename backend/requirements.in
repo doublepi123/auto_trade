@@ -7,7 +7,7 @@ sqlalchemy
 alembic
 pydantic
 pydantic-settings
-longport
+longport~=3.0.0
 httpx
 cryptography
 apscheduler

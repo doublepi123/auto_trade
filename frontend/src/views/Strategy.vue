@@ -14,11 +14,11 @@
       </div>
       <div v-if="llmStatus.current_suggestion" style="margin-top: 12px">
         <p>置信度: {{ llmStatus.current_suggestion.confidence_score }}</p>
-        <p>建议区间: {{ llmStatus.current_suggestion.buy_low.toFixed(2) }} ~ {{ llmStatus.current_suggestion.sell_high.toFixed(2) }}</p>
+        <p>建议区间: {{ formatCurrency(llmStatus.current_suggestion.buy_low, form.market) }} ~ {{ formatCurrency(llmStatus.current_suggestion.sell_high, form.market) }}</p>
         <p>分析: {{ llmStatus.current_suggestion.analysis }}</p>
       </div>
       <div v-if="llmStatus.applied_values" style="margin-top: 8px">
-        <p>已应用: {{ llmStatus.applied_values.buy_low.toFixed(2) }} ~ {{ llmStatus.applied_values.sell_high.toFixed(2) }}</p>
+        <p>已应用: {{ formatCurrency(llmStatus.applied_values.buy_low, form.market) }} ~ {{ formatCurrency(llmStatus.applied_values.sell_high, form.market) }}</p>
       </div>
       <div v-if="llmStatus.reject_reason" style="margin-top: 8px; color: #f56c6c">
         <p>上次被拒: {{ llmStatus.reject_reason }}</p>
@@ -191,6 +191,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { getStrategy, updateStrategy, getLLMIntervalStatus, analyzeLLMInterval, previewLLMInterval, enableLLMInterval, disableLLMInterval, getLLMInteractions } from '../api'
 import { useFormState } from '../composables/useFormState'
 import type { LLMIntervalStatus, LLMAnalyzeResponse, LLMInteractionRecord } from '../types'
+import { formatCurrency } from '../utils/format'
 
 interface StrategyForm {
   symbol: string
@@ -436,7 +437,12 @@ const applyPreview = async () => {
 
 const formatTime = (iso: string | null) => {
   if (!iso) return '-'
-  return new Date(iso).toLocaleString('zh-CN')
+  const date = new Date(iso)
+  // Guard against malformed strings (`new Date('garbage')` returns a Date
+  // object whose getTime() is NaN; toLocaleString would then yield the
+  // platform-specific "Invalid Date" string).
+  if (isNaN(date.getTime())) return '-'
+  return date.toLocaleString('zh-CN')
 }
 
 const route = useRoute()
@@ -450,11 +456,21 @@ onMounted(async () => {
     const qs = route.query.sell_high
     const qf = route.query.fee_rate
     const qMarket = route.query.market
-    if (qb) { const parsed = Number(qb); if (!isNaN(parsed)) form.value.buy_low = parsed }
-    if (qs) { const parsed = Number(qs); if (!isNaN(parsed)) form.value.sell_high = parsed }
-    if (qf) {
+    // Reject empty strings and the literal '0' — `Number('0')` is `0` and
+    // would silently clobber the loaded strategy value.
+    const isMeaningful = (v: unknown): v is string | number =>
+      v != null && v !== '' && String(v) !== '0'
+    if (isMeaningful(qb)) {
+      const parsed = Number(qb)
+      if (!isNaN(parsed) && parsed !== 0) form.value.buy_low = parsed
+    }
+    if (isMeaningful(qs)) {
+      const parsed = Number(qs)
+      if (!isNaN(parsed) && parsed !== 0) form.value.sell_high = parsed
+    }
+    if (isMeaningful(qf)) {
       const parsedFee = Number(qf)
-      if (!isNaN(parsedFee)) {
+      if (!isNaN(parsedFee) && parsedFee !== 0) {
         if (qMarket === 'HK') {
           form.value.fee_rate_hk = parsedFee * 100
         } else {

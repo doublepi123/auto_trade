@@ -26,7 +26,10 @@ check ``closure_label(...)`` which returns ``None`` for out-of-range days.
 
 from __future__ import annotations
 
-from datetime import date
+import logging
+from datetime import date, datetime
+
+logger = logging.getLogger("auto_trade.holiday_calendar")
 
 # Full-day closures. Each tuple: (date, market, label).
 _FULL_DAY_CLOSURES: tuple[tuple[date, str, str], ...] = (
@@ -193,6 +196,20 @@ def is_market_closed(market: str, day: date) -> bool:
     _build_indices()
     assert _CLOSURE_INDEX is not None
     return (day, (market or "US").upper()) in _CLOSURE_INDEX
+
+
+# Emit a one-shot warning at import time when the static calendar is past
+# its coverage window. ``is_market_closed`` silently returns False for
+# out-of-range dates, so without this warning operators would not notice
+# the gap until the first missed closure.
+_current_year = datetime.now().year
+if _current_year >= COVERAGE_END_YEAR:
+    logger.warning(
+        "holiday_calendar coverage ends in %d (current year=%d). "
+        "Days in %d+ will be treated as open unless the calendar is updated. "
+        "See COVERAGE_END_YEAR in app/core/holiday_calendar.py.",
+        COVERAGE_END_YEAR, _current_year, COVERAGE_END_YEAR,
+    )
 
 
 def is_half_day(market: str, day: date) -> bool:

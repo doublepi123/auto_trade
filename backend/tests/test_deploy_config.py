@@ -62,7 +62,10 @@ def test_docker_compose_publishes_frontend_publicly_and_keeps_backend_private() 
 
     assert "\n    ports:" not in backend_block
     assert "127.0.0.1:8000:8000" not in compose
-    assert "0.0.0.0:${AUTO_TRADE_FRONTEND_PORT:-8080}:80" in compose
+    # BIND is env-driven; default is 0.0.0.0 so the rendered value exposes the UI on
+    # the LAN. Operators can override AUTO_TRADE_FRONTEND_BIND=127.0.0.1 for
+    # loopback-only access.
+    assert "${AUTO_TRADE_FRONTEND_BIND:-0.0.0.0}:${AUTO_TRADE_FRONTEND_PORT:-8080}:80" in compose
 
 
 def test_frontend_healthcheck_uses_ipv4_loopback() -> None:

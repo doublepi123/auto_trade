@@ -28,7 +28,11 @@ router = APIRouter(prefix="/api", tags=["calendar"])
     dependencies=[Depends(require_api_key())],
 )
 def calendar_today(
-    market: str = Query("US", description="Market code: US or HK"),
+    market: str = Query(
+        "US",
+        pattern="^(US|HK)$",
+        description="Market code: US or HK",
+    ),
 ) -> dict[str, object]:
     """Snapshot of the current trading-session state for a market.
 
@@ -63,7 +67,11 @@ def calendar_today(
     dependencies=[Depends(require_api_key())],
 )
 def calendar_closures(
-    market: str = Query("US", description="Market code: US or HK"),
+    market: str = Query(
+        "US",
+        pattern="^(US|HK)$",
+        description="Market code: US or HK",
+    ),
     year: int = Query(
         ...,
         ge=COVERAGE_START_YEAR,
@@ -90,7 +98,11 @@ def calendar_closures(
     dependencies=[Depends(require_api_key())],
 )
 def calendar_lookup(
-    symbol: str = Query(..., description="Symbol, e.g. AAPL.US or 700.HK"),
+    symbol: str = Query(
+        ...,
+        pattern=r"^[A-Z0-9\-]{1,12}\.[A-Z]{2,4}$",
+        description="Symbol, e.g. AAPL.US or 700.HK",
+    ),
     instant: str | None = Query(None, description="ISO 8601 instant; defaults to now"),
 ) -> dict[str, object]:
     """Resolve a symbol + instant to its trade day, market, and RTH status."""

@@ -114,6 +114,10 @@ class AppRunner:
         self._defer_broker_close = False
         self._last_quote_at = 0.0
         self._last_push_quote_at = 0.0
+        # Per-pending reconcile tracking. Set just before each pending is
+        # reconciled so the restore_engine_snapshot closure can resolve the
+        # correct per-symbol engine. Best-effort — see TODO in _run_loop.
+        self._current_reconcile_symbol: str | None = None
         self._last_active_quote_refresh_at = 0.0
         self._active_quote_refresh_interval_seconds = 15.0
         self._quote_resubscribe_threshold_seconds = 90.0
@@ -126,11 +130,33 @@ class AppRunner:
         self._recent_quotes: Deque[dict[str, Any]] = deque(maxlen=self._recent_quotes_cap)
         self._last_action_message = ""
         self._last_llm_action_at: dict[tuple[str, str], float] = {}
-        self._last_fill_at: float = 0.0
+        # Per-symbol last fill timestamp. Previously a single float, which
+        # caused a fill on symbol B to skip a position sync on symbol A
+        # even though they are unrelated.
+        self._last_fill_at: dict[str, float] = {}
 
-    def _mark_fill_processed(self) -> None:
+    def _mark_fill_processed(self, symbol: str = "") -> None:
         with self._state_lock:
-            self._last_fill_at = time.monotonic()
+            fill_symbol = symbol or self.engine.params.symbol
+            if fill_symbol:
+                self._last_fill_at[fill_symbol] = time.monotonic()
+        # Persist immediately on fill so a crash before the 5s snapshot loop
+        # does not lose the new engine state, tracked entry, or risk counters.
+        # We do this in a best-effort fire-and-forget path because the
+        # caller (trade_execution_service._finalize_pending_fill) is already
+        # running under tight latency constraints.
+        def _persist_async() -> None:
+            try:
+                with self._db_session() as db:
+                    self._state_svc.persist(db, self.engine, self.risk)
+                    if fill_symbol:
+                        runtime = self._symbol_runtimes.get(fill_symbol)
+                        if runtime is not None and runtime.engine is not self.engine:
+                            self._state_svc.persist_symbol(db, runtime.engine, fill_symbol)
+            except Exception:
+                logger.exception("post-fill persist failed for %s", fill_symbol)
+
+        threading.Thread(target=_persist_async, name="post-fill-persist", daemon=True).start()
 
     def _initialize_runner(self) -> None:
         with self._db_session() as db:
@@ -149,6 +175,15 @@ class AppRunner:
         with self._db_session() as db:
             self._pause_if_unresolved_live_order_exists(db)
             self._reconcile_tracked_entries_with_broker(db)
+        # Force an engine-vs-broker position sync BEFORE the quote
+        # subscription is set up below. Without this, the engine state we
+        # just loaded from DB can be stale (positions opened or closed
+        # outside the service) for the first ~15s of quote-driven
+        # decisions, leading to spurious buys/sells.
+        try:
+            self._sync_engine_state_with_positions(force=True)
+        except Exception:
+            logger.exception("initial engine state sync with broker positions failed")
 
         try:
             self._loop = asyncio.get_running_loop()
@@ -420,11 +455,27 @@ class AppRunner:
             if self._trigger_in_flight:
                 self._defer_broker_close = True
                 defer_broker_close = True
-        if self._thread is not None and self._thread.is_alive():
-            self._thread.join(timeout=10)
+        # The trigger thread is the only writer of ``_trigger_in_flight``,
+        # but if the broker SDK call is blocked we may never observe it flip
+        # back. Wait the polite timeout first; if the thread is still alive
+        # the broker is hung, so we have to fall back to force-closing.
+        trigger_thread = self._thread
+        if trigger_thread is not None and trigger_thread.is_alive():
+            trigger_thread.join(timeout=10)
+            if trigger_thread.is_alive():
+                logger.warning(
+                    "trigger thread did not exit within 10s of stop(); "
+                    "broker is likely blocked — forcing broker.close()"
+                )
+                with self._state_lock:
+                    self._trigger_in_flight = False
+                defer_broker_close = False
         if defer_broker_close:
             return
-        self.broker.close()
+        try:
+            self.broker.close()
+        except Exception as exc:
+            logger.warning("broker.close() during stop raised: %s", exc)
 
     def reload_credentials(self) -> None:
         try:
@@ -634,30 +685,23 @@ class AppRunner:
                 return
 
             if self._trade_svc.has_pending_order and processing_started and decision.result is None:
-                pending = self._trade_svc.pending_order_for(quote.symbol)
-                if pending is not None:
-                    runtime = self._runtime_for_symbol(pending.symbol)
-                    restore_fn = self.engine.restore
-                    if runtime is not None:
-                        _, _, target_engine = runtime
-                        restore_fn = target_engine.restore
-                else:
-                    # Quote arrived for a secondary symbol; find the symbol
-                    # that actually has the pending order so we restore the
-                    # correct engine snapshot.
-                    restore_fn = self.engine.restore
-                    for sym in self._symbol_runtimes:
-                        p = self._trade_svc.pending_order_for(sym)
-                        if p is not None:
-                            rt = self._runtime_for_symbol(p.symbol)
-                            if rt is not None:
-                                _, _, target_engine = rt
-                                restore_fn = target_engine.restore
-                            break
+                # Each _PendingOrder already carries its own
+                # ``restore_engine_snapshot_fn`` bound to the per-symbol
+                # engine at track time. We only need a fallback for any
+                # pending that lacked that binding — that restores the
+                # primary engine. The single call to ``reconcile()``
+                # iterates ALL pending orders internally; wrapping it in
+                # a runner-level loop would be a double-iteration and
+                # would also misattribute the restore callback across
+                # symbols (the prior _drive_reconcile_per_pending helper
+                # had this exact bug — see review 2026-06-14).
+                def _fallback_restore(snapshot):
+                    self.engine.restore(snapshot)
+
                 self._trade_svc.reconcile(
                     self.risk,
                     self.notifier,
-                    restore_fn,
+                    _fallback_restore,
                     self.notifier.notify_risk_event,
                 )
                 self._broadcast_status()
@@ -925,6 +969,14 @@ class AppRunner:
                 return None
             return Quote(symbol=symbol, last_price=fallback_price, bid=fallback_price, ask=fallback_price, timestamp="")
         if override_price > 0:
+            if quote is None:
+                return Quote(
+                    symbol=symbol,
+                    last_price=override_price,
+                    bid=override_price,
+                    ask=override_price,
+                    timestamp="",
+                )
             return Quote(
                 symbol=quote.symbol,
                 last_price=override_price,
@@ -1114,25 +1166,45 @@ class AppRunner:
             symbols = self._desired_quote_symbols_locked()
             if not symbols or not self._quotes_subscribed:
                 return False
-            if not is_trading_hours(self.engine.params.market):
-                return False
             if self._last_push_quote_at <= 0:
                 return False
             silence = time.monotonic() - self._last_push_quote_at
             if silence < self._quote_resubscribe_threshold_seconds:
                 return False
+            # Multi-market guard: only resubscribe symbols whose market is
+            # currently in trading hours. The previous implementation
+            # short-circuited on the primary market only, which meant a
+            # silent US stream would skip resubscribe on a busy HK symbol
+            # (or vice versa).
+            from app.core.market_calendar import market_for_symbol
+
+            in_session_symbols: list[str] = []
+            for sym in symbols:
+                market = market_for_symbol(sym) or self.engine.params.market
+                if is_trading_hours(market):
+                    in_session_symbols.append(sym)
+            if not in_session_symbols:
+                return False
 
         try:
-            self._resubscribe_quote_symbols(self.broker, symbols)
+            self._resubscribe_quote_symbols(self.broker, in_session_symbols)
         except Exception as exc:
-            logger.error("quote resubscribe failed for %s: %s", ", ".join(symbols), exc)
+            logger.error(
+                "quote resubscribe failed for %s: %s",
+                ", ".join(in_session_symbols),
+                exc,
+            )
             with self._state_lock:
                 self._quotes_subscribed = False
             return False
         with self._state_lock:
             self._quotes_subscribed = True
             self._last_push_quote_at = time.monotonic()
-        logger.warning("resubscribed quotes for %s after %.0fs silence", ", ".join(symbols), silence)
+        logger.warning(
+            "resubscribed quotes for %s after %.0fs silence",
+            ", ".join(in_session_symbols),
+            silence,
+        )
         return True
 
     def _refresh_quote_if_stale(self) -> None:
@@ -1399,20 +1471,23 @@ class AppRunner:
                 logger.exception("error resubscribing after broker disconnect")
             try:
                 if self._trade_svc.has_pending_order:
-                    # Use the correct engine restore for each symbol's pending order
-                    def _restore_for_pending(snapshot):
-                        """Resolve the engine that owns the pending order and restore its snapshot."""
-                        for sym, rt in self._symbol_runtimes.items():
-                            if self._trade_svc.pending_order_for(sym) is not None:
-                                rt.engine.restore(snapshot)
-                                return
-                        # Fallback: no symbol-specific pending order found
+                    # Each _PendingOrder already carries its own
+                    # ``restore_engine_snapshot_fn`` bound to the per-symbol
+                    # engine at track time. We only need a fallback for any
+                    # pending that lacked that binding — that restores the
+                    # primary engine. The single call to ``reconcile()``
+                    # iterates ALL pending orders internally; wrapping it in
+                    # a runner-level loop would be a double-iteration and
+                    # would also misattribute the restore callback across
+                    # symbols (the prior _drive_reconcile_per_pending helper
+                    # had this exact bug — see review 2026-06-14).
+                    def _fallback_restore(snapshot):
                         self.engine.restore(snapshot)
 
                     self._trade_svc.reconcile(
                         self.risk,
                         self.notifier,
-                        _restore_for_pending,
+                        _fallback_restore,
                         self.notifier.notify_risk_event,
                     )
                     self._broadcast_status()
@@ -1470,6 +1545,15 @@ class AppRunner:
             "限流",
             "频率",
             "请求过于频繁",
+            # Network/broker transient timeouts. The bare word "timeout" is
+            # intentionally NOT included here — too many persistence/lifecycle
+            # pauses contain that substring (e.g. ``order status timeout``,
+            # ``pending order timed out``) and must NOT auto-resume.
+            "rate limit timeout",
+            "broker timeout",
+            "request timeout",
+            "read timeout",
+            "connect timeout",
         )
         return any(marker in normalized for marker in transient_markers)
 
@@ -1527,11 +1611,12 @@ class AppRunner:
             with self._state_lock:
                 if self._trigger_in_flight or self._trade_svc.pending_order_for(symbol) is not None:
                     continue
-                if snapshot_time < self._last_fill_at:
+                last_fill_at = self._last_fill_at.get(symbol, 0.0)
+                if snapshot_time < last_fill_at:
                     logger.info(
                         "position sync skipped for %s: fill at %.3f is newer than snapshot at %.3f",
                         symbol,
-                        self._last_fill_at,
+                        last_fill_at,
                         snapshot_time,
                     )
                     continue
@@ -1600,7 +1685,27 @@ class AppRunner:
                 raise
 
     def _apply_credentials(self, credentials: PlainCredentials, *, resubscribe: bool) -> None:
+        # DESIGN LIMITATION: this method swaps the broker and notifier while
+        # in-flight pending orders may still be tracked against the previous
+        # broker. Calling this while a pending order is open is unsafe — the
+        # reconciliation loop in ``_run_loop`` will issue broker calls on a
+        # gateway that no longer matches the order's submit broker. The
+        # ``refresh_pending_brokers`` call below rebinds the pending's broker
+        # reference to the new gateway, but the order ID semantics may not
+        # match. Callers should only invoke this from admin paths when there
+        # is no pending order. ``reload_credentials`` is the supported path.
         with self._state_lock:
+            if self._trade_svc.has_pending_order:
+                pending_symbols = sorted(
+                    pending.broker_order_id
+                    for pending in self._trade_svc._pending_orders.values()
+                    if pending.broker_order_id
+                )
+                logger.warning(
+                    "applying credentials while pending orders are tracked: %s — "
+                    "this is a design limitation; ensure the broker switch is safe",
+                    ", ".join(pending_symbols),
+                )
             symbol = self.engine.params.symbol
             should_resubscribe = resubscribe and bool(symbol)
             sct_key = credentials.sct_key if credentials.sct_key else settings.sct_key
@@ -1988,6 +2093,19 @@ class AppRunner:
                         logger.warning("failed to load symbol runtime state for %s", symbol, exc_info=True)
             for symbol in list(self._symbol_runtimes):
                 if symbol not in symbol_markets:
+                    # Refuse to drop a runtime that is still tied to an
+                    # in-flight pending order — the reconcile loop needs the
+                    # engine to restore snapshots for that symbol. The
+                    # pending will eventually clear (or the order will be
+                    # cancelled by hand) and the next sync will then drop
+                    # the runtime.
+                    if self._trade_svc.pending_order_for(symbol) is not None:
+                        logger.warning(
+                            "skipping removal of symbol runtime for %s: "
+                            "pending order still in flight",
+                            symbol,
+                        )
+                        continue
                     del self._symbol_runtimes[symbol]
 
     def _remember_symbol_runtime_quote(self, quote: Quote, observed_at: datetime) -> None:

@@ -188,7 +188,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { exportTradeEvents, getTradeEvents } from '../api'
 import type { TimelineSource, TradeEventRecord } from '../types'
@@ -338,8 +338,24 @@ async function loadEvents() {
 
 function onFilterChange() {
   page.value = 1
-  loadEvents()
+  // Coalesce rapid filter changes (e.g. typing in the search box and hitting
+  // Enter quickly, or clicking multiple filter chips in a row) so we only
+  // fire one request per debounce window. The previous version fired one
+  // request per keystroke / click, which the backend struggled to keep up
+  // with on slow connections.
+  if (filterDebounceTimer != null) {
+    clearTimeout(filterDebounceTimer)
+  }
+  filterDebounceTimer = setTimeout(() => {
+    filterDebounceTimer = null
+    loadEvents()
+  }, 200)
 }
+let filterDebounceTimer: ReturnType<typeof setTimeout> | null = null
+
+onUnmounted(() => {
+  if (filterDebounceTimer != null) clearTimeout(filterDebounceTimer)
+})
 
 function handlePageChange(nextPage: number) {
   page.value = nextPage
@@ -367,9 +383,20 @@ async function handleExport(format: 'csv' | 'json') {
     link.href = url
     link.download = `trade-events.${format}`
     document.body.appendChild(link)
+    // Revoke the object URL on click rather than after a 1-second timer to
+    // avoid races when the user fires several exports in quick succession
+    // (each link was previously holding its URL alive for a full second).
+    const cleanup = () => {
+      URL.revokeObjectURL(url)
+      link.removeEventListener('click', cleanup)
+      // Detach the link element so the DOM does not accumulate hidden
+      // <a> nodes (one per export). The previous implementation forgot
+      // link.remove() and left a stale node behind on every export.
+      if (link.parentNode) link.parentNode.removeChild(link)
+    }
+    link.addEventListener('click', cleanup)
     link.click()
-    link.remove()
-    setTimeout(() => URL.revokeObjectURL(url), 1000)
+    setTimeout(cleanup, 1000)
     ElMessage.success('导出已开始（仅包含交易事件）')
   } catch (e) {
     console.error('导出决策时间线失败：', e)

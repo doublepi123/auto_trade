@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import statistics
 from typing import Any, TypedDict
 
@@ -32,8 +33,15 @@ class TechnicalIndicators:
             avg_gain = (avg_gain * (period - 1) + gains[i]) / period
             avg_loss = (avg_loss * (period - 1) + losses[i]) / period
 
-        if avg_loss == 0:
-            return 100.0 if avg_gain > 0 else 50.0
+        # ``avg_loss`` can be 0 either because every delta was non-negative
+        # (a steady uptrend, RSI → 100) or because the rounding error from
+        # a sideways market left it at exactly 0. The exact-``==`` check
+        # conflates those two cases; the epsilon treats the "neither side
+        # moved meaningfully" case as RSI=50 (neutral) and reserves 100 for
+        # genuine all-up moves.
+        _RSI_LOSS_EPSILON = 1e-9
+        if avg_loss < _RSI_LOSS_EPSILON:
+            return 100.0 if avg_gain >= _RSI_LOSS_EPSILON else 50.0
         rs = avg_gain / avg_loss
         return 100.0 - (100.0 / (1.0 + rs))
 
@@ -122,12 +130,24 @@ class TechnicalIndicators:
         if not closes or not volumes or len(closes) != len(volumes):
             return {"obv_values": [], "obv_trend": "flat", "price_obv_divergence": "none"}
 
+        # Drop samples with non-finite prices or volumes; otherwise NaN
+        # propagates into the OBV series and the prompt shows 'nan'.
+        filtered: list[tuple[float, float]] = [
+            (c, v)
+            for c, v in zip(closes, volumes)
+            if math.isfinite(c) and math.isfinite(v)
+        ]
+        if not filtered:
+            return {"obv_values": [], "obv_trend": "flat", "price_obv_divergence": "none"}
+        filtered_closes = [c for c, _ in filtered]
+        filtered_volumes = [v for _, v in filtered]
+
         obv_values: list[float] = [0.0]
-        for i in range(1, len(closes)):
-            if closes[i] > closes[i - 1]:
-                obv_values.append(obv_values[-1] + volumes[i])
-            elif closes[i] < closes[i - 1]:
-                obv_values.append(obv_values[-1] - volumes[i])
+        for i in range(1, len(filtered_closes)):
+            if filtered_closes[i] > filtered_closes[i - 1]:
+                obv_values.append(obv_values[-1] + filtered_volumes[i])
+            elif filtered_closes[i] < filtered_closes[i - 1]:
+                obv_values.append(obv_values[-1] - filtered_volumes[i])
             else:
                 obv_values.append(obv_values[-1])
 
@@ -145,8 +165,8 @@ class TechnicalIndicators:
                 obv_trend = "flat"
 
         price_obv_divergence = "none"
-        if len(closes) >= 5:
-            price_trend = "up" if closes[-1] > closes[-5] else "down" if closes[-1] < closes[-5] else "flat"
+        if len(filtered_closes) >= 5:
+            price_trend = "up" if filtered_closes[-1] > filtered_closes[-5] else "down" if filtered_closes[-1] < filtered_closes[-5] else "flat"
             if price_trend == "up" and obv_trend == "falling":
                 price_obv_divergence = "bearish"
             elif price_trend == "down" and obv_trend == "rising":

@@ -35,8 +35,12 @@ services:
         VITE_AUTO_TRADE_API_KEY: ${AUTO_TRADE_API_KEY:-}
     environment:
       - AUTO_TRADE_API_KEY=${AUTO_TRADE_API_KEY:-}
+    # AUTO_TRADE_FRONTEND_BIND 控制宿主机上的绑定地址：
+    #   - 0.0.0.0  → 暴露给所有网卡（默认；内网/演示环境，方便其他设备访问）
+    #   - 127.0.0.1 → 仅本机访问（更安全，公网/共享网络请改为 127.0.0.1）
+    # 端口映射写成 `${BIND}:${PORT}:80`：宿主机 ${BIND}:${PORT} 映射到容器 80。
     ports:
-      - '0.0.0.0:${AUTO_TRADE_FRONTEND_PORT:-8080}:80'
+      - '${AUTO_TRADE_FRONTEND_BIND:-0.0.0.0}:${AUTO_TRADE_FRONTEND_PORT:-8080}:80'
     depends_on:
       backend:
         condition: service_healthy

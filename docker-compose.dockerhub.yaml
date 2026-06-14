@@ -34,8 +34,11 @@ services:
     pull_policy: always
     environment:
       - AUTO_TRADE_API_KEY=${AUTO_TRADE_API_KEY:?Set AUTO_TRADE_API_KEY in .env before starting Docker Compose}
+    # DockerHub 镜像默认仅本机访问（127.0.0.1），公网/共享网络请保留此绑定；
+    # 若需要局域网访问，在 .env 里覆盖 AUTO_TRADE_FRONTEND_BIND=0.0.0.0。
+    # 端口映射写成 `${BIND}:${PORT}:80`：宿主机 ${BIND}:${PORT} 映射到容器 80。
     ports:
-      - '127.0.0.1:${AUTO_TRADE_FRONTEND_PORT:-8080}:80'
+      - '${AUTO_TRADE_FRONTEND_BIND:-127.0.0.1}:${AUTO_TRADE_FRONTEND_PORT:-8080}:80'
     depends_on:
       backend:
         condition: service_healthy

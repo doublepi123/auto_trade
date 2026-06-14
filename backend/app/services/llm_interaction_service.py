@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -9,8 +10,30 @@ from sqlalchemy.orm import Session
 from app.models import LLMInteraction
 
 
+def _json_default(obj: Any) -> Any:
+    """JSON serializer for types ``json.dumps`` cannot encode natively.
+
+    Order matters: more specific types (Decimal, datetime) are handled
+    first so we never fall through to ``str()``, which would render e.g.
+    ``Decimal("123.45")`` as ``'Decimal("123.45")'`` — surprising and
+    impossible to round-trip. Unknown objects are coerced via ``str()`` as
+    a last resort; callers that need stricter behaviour should pre-serialize
+    their data.
+    """
+    if isinstance(obj, Decimal):
+        return float(obj)
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    if hasattr(obj, "model_dump"):
+        try:
+            return obj.model_dump()
+        except Exception:
+            return str(obj)
+    return str(obj)
+
+
 def _json_dumps(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, default=str)
+    return json.dumps(value, ensure_ascii=False, default=_json_default)
 
 
 class LLMInteractionService:

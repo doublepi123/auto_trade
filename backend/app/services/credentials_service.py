@@ -12,6 +12,14 @@ from app.core.url_safety import validate_webhook_url
 from app.database import DEFAULT_NOTIFICATION_CHANNELS_JSON
 from app.models import CredentialConfig
 
+#: Process-wide guard so that the legacy-plaintext re-encryption pass
+#: runs at most once per process. ``get_config`` is called on every
+#: high-frequency read path (status, control, WS), and the migration is
+#: idempotent — once the row has been re-encrypted a single time, every
+#: subsequent invocation can skip the per-field ``is_encrypted`` check
+#: and the associated write amplification.
+_LEGACY_ENCRYPTION_DONE: bool = False
+
 
 @dataclass(frozen=True)
 class PlainCredentials:
@@ -71,6 +79,24 @@ class CredentialsService:
         }
 
     def update_config(self, data: dict[str, Any]) -> CredentialConfig:
+        """Apply a partial update to the credential row.
+
+        Field update semantics for credential fields
+        (``longbridge_app_key``, ``longbridge_app_secret``,
+        ``longbridge_access_token``, ``sct_key``):
+
+        * **key missing from ``data``** → field is left unchanged.
+        * **key present with value ``None``** → field is left unchanged
+          (``None`` means "no opinion from the caller"). Callers that want
+          to *clear* a credential must explicitly pass an empty string.
+        * **key present with value ``""``** → field is cleared (stored as
+          an empty string, treated as "no credential configured").
+        * **key present with any other string** → stored encrypted.
+
+        This is the contract documented in :class:`Credentials`; new
+        clients should follow ``None = no change, '' = clear`` rather
+        than relying on Pydantic's default ``None`` skip behaviour.
+        """
         config = self.db.query(CredentialConfig).order_by(CredentialConfig.id.desc()).first()
         if config is None:
             config = CredentialConfig()
@@ -143,6 +169,14 @@ class CredentialsService:
         return config
 
     def _encrypt_plaintext_fields(self, config: CredentialConfig) -> None:
+        global _LEGACY_ENCRYPTION_DONE
+        # Once the migration has run for the process, all rows must already
+        # hold ciphertext (the migration is idempotent and any subsequent
+        # write goes through ``update_config`` → ``encrypt_secret``). Skipping
+        # the per-field check avoids a write-amplification loop on every
+        # high-frequency ``get_config`` call.
+        if _LEGACY_ENCRYPTION_DONE:
+            return
         changed = False
         for field in ("longbridge_app_key", "longbridge_app_secret", "longbridge_access_token", "sct_key"):
             value = getattr(config, field)
@@ -153,3 +187,4 @@ class CredentialsService:
             self.db.add(config)
             self.db.commit()
             self.db.refresh(config)
+        _LEGACY_ENCRYPTION_DONE = True

@@ -108,7 +108,7 @@ class _TrackedEntry:
 
 
 _EntryPersistCallback = Callable[[str, Decimal, Decimal], None]
-_FillCallback = Callable[[], None]
+_FillCallback = Callable[[str], None]
 
 
 class TradeExecutionService:
@@ -133,6 +133,10 @@ class TradeExecutionService:
         self.margin_safety_factor = margin_safety_factor
         self._state_lock = RLock()
         self._pending_orders: dict[str, _PendingOrder] = {}
+        # Symbol of the most recent fill — passed to the on_fill callback so
+        # the runner can track per-symbol fill timestamps. Held under
+        # ``_state_lock`` to avoid races with concurrent finalization.
+        self._last_fill_symbol: str | None = None
         self._order_status_poll_interval_seconds = 1.0
         self._order_status_timeout_seconds = 30.0
         self._entry_positions: dict[str, _TrackedEntry] = {}
@@ -1125,6 +1129,8 @@ class TradeExecutionService:
     ) -> None:
         fill_price = self._resolved_decimal(order_status, "executed_price", pending.price)
         fill_qty = fill_qty if fill_qty is not None else self._resolved_decimal(order_status, "executed_quantity", pending.quantity)
+        with self._state_lock:
+            self._last_fill_symbol = pending.symbol
         self._mark_fill_processed()
         if pending.action == "SELL":
             avg_price = self._resolve_avg_price_for_exit(pending.symbol, pending.avg_price if pending.avg_price is not None and pending.avg_price > 0 else None, fill_qty)
@@ -1159,12 +1165,19 @@ class TradeExecutionService:
         if self._on_fill is None:
             return
         try:
-            self._on_fill()
+            self._on_fill(self._last_fill_symbol or "")
         except Exception:
             logger.exception("failed to run fill callback")
 
     @staticmethod
     def _should_restore_after_partial_terminal_fill(pending: _PendingOrder, fill_qty: Decimal) -> bool:
+        # Entry orders (BUY / SELL_SHORT) that partial-fill then go terminal
+        # leave the engine in LONG/SHORT with a tracked qty smaller than
+        # requested — restoring the snapshot keeps the strategy consistent
+        # with the broker position. Exit orders (SELL / BUY_TO_COVER) only
+        # need restore when fill < requested (otherwise full exit succeeded).
+        if pending.action in {"BUY", "SELL_SHORT"}:
+            return fill_qty < pending.quantity
         return pending.action in {"SELL", "BUY_TO_COVER"} and fill_qty < pending.quantity
 
     def _handle_terminal_fill_result(
@@ -1250,10 +1263,12 @@ class TradeExecutionService:
     ) -> OrderStatus:
         reason = f"order {result.broker_order_id} submitted but local record failed"
         logger.error(reason)
+        cancel_failed = False
         if self._order_status_is_live(result):
             try:
                 broker.cancel_order(result.broker_order_id)
             except Exception:
+                cancel_failed = True
                 logger.exception("failed to cancel orphan order %s after persistence failure", result.broker_order_id)
         risk.pause(reason, auto_resumable=False)
         try:
@@ -1267,6 +1282,15 @@ class TradeExecutionService:
                 logger.exception("failed to send orphan-order notification for %s", result.broker_order_id)
         if restore_engine_snapshot is not None and engine_snapshot is not None:
             restore_engine_snapshot(engine_snapshot)
+        if cancel_failed:
+            # The order is live on the broker and we could not cancel it.
+            # Surface the persistence gap so the caller (and operators) see
+            # the inconsistency instead of silently returning a REJECTED
+            # status that would let the system proceed as if the order never
+            # existed.
+            raise OrderPersistenceError(
+                f"order {result.broker_order_id} live on broker and cancel failed: {reason}"
+            )
         return OrderStatus(result.broker_order_id, "REJECTED", reason=reason)
 
     def _safe_update_order_status(
@@ -1357,7 +1381,13 @@ class TradeExecutionService:
     def _record_entry_price(self, symbol: str, fill_price: Decimal, fill_qty: Decimal) -> None:
         if fill_price <= 0 or fill_qty <= 0:
             return
-        # Compute new values under lock but do NOT update in-memory state yet
+        # Do the whole read-compute-persist-write under a single lock
+        # so concurrent fills for the same symbol cannot race. The
+        # previous implementation read the entry under the lock,
+        # released the lock, persisted, then re-acquired the lock to
+        # apply the changes — which meant a second fill landing in
+        # between could overwrite the first one's quantity/cost
+        # (lost update).
         with self._state_lock:
             entry = self._entry_positions.get(symbol)
             current_quantity = entry.quantity if entry is not None else Decimal("0")
@@ -1366,12 +1396,15 @@ class TradeExecutionService:
             new_cost = current_cost + fill_price * fill_qty
             previous_avg = entry.avg_price if entry is not None else Decimal("0")
 
-        # Persist to DB first; if this fails, in-memory state stays unchanged
-        self._persist_entry_safe(symbol, new_quantity, new_cost)
+            # Persist inside the same critical section. _persist_entry_safe
+            # swallows the underlying error so the lock is always
+            # released and we never raise from this path; if persist
+            # fails we still apply the in-memory update so the
+            # engine's tracked state stays consistent with the
+            # immediate broker fill (the next reconciliation will
+            # re-derive from broker truth).
+            self._persist_entry_safe(symbol, new_quantity, new_cost)
 
-        # Update in-memory state only after successful persist
-        with self._state_lock:
-            entry = self._entry_positions.get(symbol)
             if entry is None:
                 entry = _TrackedEntry()
                 self._entry_positions[symbol] = entry

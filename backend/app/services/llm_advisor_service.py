@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+import math
+import re
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -41,6 +43,41 @@ _ORDER_ACTIONS = {
     "CANCEL_PENDING",
     "CANCEL_REPLACE",
 }
+
+
+_PLACEHOLDER_NAME = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)(?:![ars])?(?::[^}]*)?\}")
+
+
+def _escape_orphan_braces(template: str, allowed_keys: set[str]) -> str:
+    """Escape braces in a ``str.format`` template that are NOT valid placeholders.
+
+    The danger is when a custom prompt template (admin-curated, A/B-tested
+    variant) includes literal braces that ``str.format`` would either
+    interpret as missing-key placeholders (``KeyError``) or as
+    non-placeholder syntax errors (``ValueError``). Example: a markdown
+    table inside a comment, or a JSON example illustrating the expected
+    output shape.
+
+    We must NOT escape braces that ARE valid placeholders for the context
+    we will pass (e.g. ``{symbol}``), or the LLM will receive the literal
+    token instead of the substituted value. So we walk the template with
+    a regex that recognises ``str.format`` placeholder grammar (identifier
+    plus optional ``!conversion`` plus optional ``:format_spec``) and only
+    double the braces that are not in ``allowed_keys``.
+    """
+
+    def _repl(match: "re.Match[str]") -> str:
+        key = match.group(1)
+        if key in allowed_keys:
+            return match.group(0)
+        # Convert literal { and } to {{ and }} (only in the captured
+        # braces, not the whole match) so a real placeholder can still
+        # resolve on the next format() pass.
+        return "{{" + key + "}}"
+
+    return _PLACEHOLDER_NAME.sub(_repl, template)
+
+
 _REPLACEMENT_ACTIONS = {
     "NONE",
     "BUY_NOW",
@@ -130,7 +167,9 @@ class LLMAdvisorService:
                 recent_prices=recent_prices,
                 recent_analysis=recent_analysis,
             )
-            rendered_template = prompt_template.format(**context_for_template)
+            rendered_template = _escape_orphan_braces(
+                prompt_template, set(context_for_template.keys())
+            ).format(**context_for_template)
             return f"{system_instructions}\n\n{rendered_template}"
         context: dict[str, Any] = {
             "symbol": symbol,
@@ -316,7 +355,6 @@ class LLMAdvisorService:
                     "success": False,
                     "error": f"Analysis throttled: please wait {interval_minutes} minutes between analyses",
                 }
-            _LAST_ANALYSIS_TIMESTAMP = time.monotonic()
 
         try:
             market_data = self._data_aggregator.fetch_market_data(symbol, market)
@@ -377,6 +415,12 @@ class LLMAdvisorService:
         try:
             raw_response = self._call_llm(prompt)
             result = self._parse_response(raw_response)
+            # Only consume the throttle budget on a fully successful LLM
+            # call (transport + parse). If either step fails, the timestamp
+            # stays at its previous value so the next retry is not
+            # artificially delayed. Mirrors the preview() branch above.
+            with _throttle_lock:
+                _LAST_ANALYSIS_TIMESTAMP = time.monotonic()
 
             # NOTE: indicator selection is validated against AVAILABLE_INDICATORS
             # whitelist inside FeatureSelector.parse_selection, so adversarial
@@ -411,7 +455,9 @@ class LLMAdvisorService:
         if persist:
             db = SessionLocal()
             try:
-                next_analysis_at = self._record_analysis(db, result, interval_minutes)
+                next_analysis_at = self._record_analysis(
+                    db, result, interval_minutes, current_price=current_price,
+                )
             except Exception:
                 logger.exception("failed to record LLM analysis")
             finally:
@@ -476,7 +522,10 @@ class LLMAdvisorService:
                     "applied": False,
                     "error": "Preview throttled: please wait before requesting another preview",
                 }
-            _LAST_PREVIEW_TIMESTAMP = time.monotonic()
+            # NOTE: timestamp is updated ONLY on success, further down after
+            # _call_llm + _parse_response complete. Updating it here would
+            # consume the throttle budget on a failed LLM call, leaving the
+            # next caller needlessly blocked.
 
         try:
             market_data = self._data_aggregator.fetch_market_data(symbol, market)
@@ -539,6 +588,9 @@ class LLMAdvisorService:
         try:
             raw_response = self._call_llm(prompt)
             result = self._parse_response(raw_response)
+            # Successful preview — now consume the throttle budget.
+            with _throttle_lock:
+                _LAST_PREVIEW_TIMESTAMP = time.monotonic()
         except Exception as exc:
             logger.exception("LLM preview failed")
             self._record_interaction(
@@ -688,6 +740,14 @@ class LLMAdvisorService:
         result.setdefault("order_price", None)
         result.setdefault("replacement_price", None)
         result.setdefault("order_reason", "")
+        # Reject non-positive or non-finite order/replacement prices. The
+        # execution layer cannot accept ``<= 0`` or NaN/Inf; treat them as
+        # "no price provided" so downstream guards fall back to a market
+        # order or skip the action altogether.
+        if not LLMAdvisorService._is_finite_positive(result.get("order_price")):
+            result["order_price"] = None
+        if not LLMAdvisorService._is_finite_positive(result.get("replacement_price")):
+            result["replacement_price"] = None
         return result
 
     @staticmethod
@@ -709,20 +769,61 @@ class LLMAdvisorService:
         finally:
             db.close()
 
-    def _record_analysis(self, db: Any, result: dict[str, Any], interval_minutes: int) -> datetime:
-        """Record LLM analysis result to database."""
+    def _record_analysis(
+        self,
+        db: Any,
+        result: dict[str, Any],
+        interval_minutes: int,
+        current_price: float | None = None,
+    ) -> datetime:
+        """Record LLM analysis result to database.
+
+        ``suggested_buy_low`` / ``suggested_sell_high`` are clipped to
+        ``[current_price * 0.5, current_price * 2]`` to reject pathological
+        values (a hallucinated negative price, or a price an order of
+        magnitude away from the market). Out-of-range or non-finite values
+        are dropped (stored as ``None``) so downstream consumers can detect
+        the missing signal.
+        """
         svc = StrategyService(db)
         config = svc.get_config()
         now = datetime.now(timezone.utc)
         next_analysis_at = now + timedelta(minutes=interval_minutes)
-        config.llm_suggested_buy_low = result.get("suggested_buy_low")
-        config.llm_suggested_sell_high = result.get("suggested_sell_high")
+        buy_low_raw = result.get("suggested_buy_low")
+        sell_high_raw = result.get("suggested_sell_high")
+        if current_price is not None and current_price > 0:
+            low_floor = current_price * 0.5
+            high_ceiling = current_price * 2.0
+            buy_low = self._clip_to_range(buy_low_raw, low_floor, high_ceiling)
+            sell_high = self._clip_to_range(sell_high_raw, low_floor, high_ceiling)
+        else:
+            buy_low = buy_low_raw if self._is_finite_positive(buy_low_raw) else None
+            sell_high = sell_high_raw if self._is_finite_positive(sell_high_raw) else None
+        config.llm_suggested_buy_low = buy_low
+        config.llm_suggested_sell_high = sell_high
         config.llm_confidence_score = result.get("confidence_score")
         config.llm_analysis = result.get("analysis")
         config.llm_last_analysis_at = now
         config.llm_next_analysis_at = next_analysis_at
         db.commit()
         return next_analysis_at
+
+    @staticmethod
+    def _is_finite_positive(value: Any) -> bool:
+        return isinstance(value, (int, float)) and math.isfinite(float(value)) and value > 0
+
+    @staticmethod
+    def _clip_to_range(value: Any, low: float, high: float) -> float | None:
+        if not isinstance(value, (int, float)):
+            return None
+        v = float(value)
+        if not math.isfinite(v) or v <= 0:
+            return None
+        if v < low:
+            return low
+        if v > high:
+            return high
+        return v
 
     @staticmethod
     def _record_interaction(

@@ -10,6 +10,7 @@ from typing import Any, AsyncGenerator, cast
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.api.backtest import router as backtest_router
 from app.api.calendar import router as calendar_router
@@ -33,6 +34,7 @@ from app.runner import get_runner
 from app.services.interval_application_service import IntervalApplicationService
 from app.services.llm_symbol_state_service import LLMSymbolStateService
 from app.services.trade_event_service import record_trade_event
+from app import __version__ as APP_VERSION
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 logger = logging.getLogger("auto_trade.main")
@@ -447,6 +449,10 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
 
     init_db()
     init_audit_logger()
+    # Log the active CORS allowlist so operators can confirm allowed origins
+    # in the runtime log (Issue 5: helps diagnose CORS rejections in prod).
+    allowed_origins = [o.strip() for o in settings.cors_origins.split(",") if o.strip()]
+    logger.info("CORS allowlist: %s", allowed_origins)
     runner = get_runner()
     started = await asyncio.to_thread(runner.start, loop=asyncio.get_running_loop())
     if not started:
@@ -466,7 +472,29 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     await asyncio.to_thread(get_runner().stop)
 
 
-app = FastAPI(title="Auto Trade", version="0.1.0", lifespan=lifespan)
+_OPENAPI_TAGS: list[dict[str, str]] = [
+    {"name": "strategy", "description": "区间策略配置、状态与历史。"},
+    {"name": "trade", "description": "订单、账户、事件与交易控制。"},
+    {"name": "credentials", "description": "长桥凭据与多渠道通知。"},
+    {"name": "llm", "description": "DeepSeek LLM 顾问区间建议。"},
+    {"name": "backtest", "description": "离线 CSV 回测。"},
+    {"name": "indicators", "description": "实时技术指标快照（只读）。"},
+    {"name": "lab", "description": "实验 / 性能 A/B 统计 / 指标（只读）。"},
+    {"name": "websocket", "description": "实时状态推送。"},
+    {"name": "system", "description": "健康 / 就绪检查与 OpenAPI 元数据。"},
+]
+
+
+app = FastAPI(
+    title="Auto Trade",
+    version=APP_VERSION,
+    description=(
+        "基于长桥 OpenAPI 的自动化区间交易系统。"
+        "提供策略、订单、事件、LLM 顾问、回测、实验与多渠道通知等能力。"
+    ),
+    openapi_tags=_OPENAPI_TAGS,
+    lifespan=lifespan,
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -491,6 +519,20 @@ app.include_router(review_router)
 app.include_router(calendar_router)
 app.include_router(metrics_router)
 app.include_router(ws_router)
+
+
+# Global exception handler: log unhandled exceptions and return a generic 500 JSON
+# response. Avoids leaking internal tracebacks to clients while still preserving
+# the full stack in the server log for debugging (Issue 4).
+async def _handle_unhandled_exception(request: Any, exc: Exception) -> JSONResponse:
+    logger.exception("unhandled exception on %s %s", request.method, request.url.path)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error", "error_type": type(exc).__name__},
+    )
+
+
+app.add_exception_handler(Exception, _handle_unhandled_exception)
 
 
 @app.get("/api/health")
@@ -521,3 +563,48 @@ async def health() -> dict[str, Any]:
         health_status["runner"] = "unavailable"
 
     return health_status
+
+
+@app.get("/api/ready", response_model=None)
+async def ready() -> JSONResponse | dict[str, Any]:
+    """Readiness probe: DB queryable + runner initialized (Issue 7).
+
+    Returns 200 with ``ready: true`` when the process is ready to serve
+    traffic. Returns 503 when DB is unreachable or runner failed to start.
+
+    Note: ``response_model=None`` is required because FastAPI cannot
+    construct a Pydantic model for the union ``JSONResponse | dict``;
+    we want both branches to pass through verbatim.
+    """
+    from app.database import engine
+
+    from sqlalchemy import text
+
+    ready_status: dict[str, Any] = {"ready": True, "checks": {}}
+    db_ok = False
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        ready_status["checks"]["database"] = "ok"
+        db_ok = True
+    except Exception:
+        logger.exception("readiness check database probe failed")
+        ready_status["checks"]["database"] = "error"
+
+    runner_ok = False
+    try:
+        runner = get_runner()
+        diag = runner.diagnostics()
+        runner_ok = bool(diag.get("runner_running", False))
+        ready_status["checks"]["runner"] = {
+            "initialized": runner_ok,
+            "quotes_subscribed": diag.get("quotes_subscribed", False),
+        }
+    except Exception:
+        logger.exception("readiness check runner probe failed")
+        ready_status["checks"]["runner"] = "unavailable"
+
+    if not (db_ok and runner_ok):
+        ready_status["ready"] = False
+        return JSONResponse(status_code=503, content=ready_status)
+    return ready_status

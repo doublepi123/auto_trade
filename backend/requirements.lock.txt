@@ -20,10 +20,12 @@
 #
 # Last regenerated baseline: 2026-06-14 (P47 — known good for current main)
 #
-# NOTE: `longport~=0.1.0` is intentionally kept as `~=` only because longport
-# has not yet reached a stable 1.x release; pinning to a single pre-release
-# version would freeze us to a SDK version that may itself be abandoned.
-# Revisit once longport publishes 1.0.0.
+# NOTE: longport is the Longport OpenAPI SDK (行情 + 下单). It is a hard
+# runtime dependency — without it, the backend cannot subscribe to quotes
+# or submit orders (the runner logs "Longbridge SDK not installed" at
+# startup and every broker call is skipped). The version below is the
+# latest stable as of the lock's last regeneration; bump on each
+# `pip-compile` run rather than carrying `~=` through the lock.
 
 fastapi==0.115.6
 uvicorn[standard]==0.32.1
@@ -32,6 +34,7 @@ alembic==1.14.0
 pydantic==2.10.4
 pydantic-settings==2.7.0
 httpx==0.28.1
+longport==3.0.23
 cryptography==44.0.0
 apscheduler==3.11.0
 pytest==8.3.4

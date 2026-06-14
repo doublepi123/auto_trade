@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models import RuntimeState, StrategyConfig
@@ -98,7 +99,19 @@ class StrategyService:
         if state is None:
             state = RuntimeState(symbol=normalized)
             self.db.add(state)
-            self.db.commit()
+            # Two concurrent callers can both see ``state is None`` and try
+            # to INSERT the same primary key; catch the IntegrityError and
+            # re-query so the loser gets the winner's row instead of
+            # surfacing a 500 to the caller.
+            try:
+                self.db.commit()
+            except IntegrityError:
+                self.db.rollback()
+                state = self.db.query(RuntimeState).filter(
+                    RuntimeState.symbol == normalized
+                ).first()
+                if state is None:
+                    raise
         return state
 
     def get_primary_runtime_state(self) -> RuntimeState:

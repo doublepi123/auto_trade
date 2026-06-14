@@ -62,5 +62,14 @@ export async function scoreWatchlistSymbol(data: { symbol: string; market: 'US' 
 
 export async function getWatchlistScores(): Promise<WatchlistScore[]> {
   const resp = await api.get('/api/watchlist/scores')
-  return resp.data.scores ?? []
+  // The previous `resp.data.scores ?? []` silently swallowed shape changes
+  // (typos in the backend, accidental rename, missing field after a deploy).
+  // Surface the discrepancy explicitly so the caller can react instead of
+  // rendering an empty list with no clue why.
+  if (!Array.isArray(resp.data.scores)) {
+    throw new Error(
+      `Unexpected /api/watchlist/scores response: scores field is ${typeof resp.data.scores}`
+    )
+  }
+  return resp.data.scores as WatchlistScore[]
 }

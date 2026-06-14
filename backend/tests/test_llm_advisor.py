@@ -268,7 +268,16 @@ class TestDataAggregator:
 
 class TestLLMAdvisorService:
     @pytest.fixture
-    def advisor(self) -> LLMAdvisorService:
+    def advisor(self, request: pytest.FixtureRequest) -> LLMAdvisorService:
+        # LLM advisor writes to llm_interactions / prompt_versions tables;
+        # init_db() must run before any test that exercises analyze() /
+        # preview() (the conftest-managed conftest.db already does this for
+        # the test_db fixture, but some tests construct LLMAdvisorService
+        # without a fixture chain, so we make sure the schema is up to date
+        # here as well).
+        from app.database import init_db
+
+        init_db()
         return LLMAdvisorService()
 
     def test_parse_response_plain_json(self, advisor: LLMAdvisorService) -> None:
@@ -793,6 +802,12 @@ class TestABVariantSelection:
 class TestLLMAdvisorDegradation:
     @pytest.fixture
     def advisor(self) -> LLMAdvisorService:
+        # Same schema-bring-up as TestLLMAdvisorService.advisor — these
+        # tests also exercise analyze()/preview() which write to
+        # llm_interactions.
+        from app.database import init_db
+
+        init_db()
         return LLMAdvisorService()
 
     def test_call_deepseek_timeout_raises_runtime_error(self, advisor: LLMAdvisorService, monkeypatch) -> None:

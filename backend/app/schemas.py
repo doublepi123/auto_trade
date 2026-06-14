@@ -4,7 +4,7 @@ import re
 from datetime import datetime
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 _SYMBOL_RE = re.compile(r"^[A-Z0-9\-]{1,12}\.[A-Z]{2,4}$")
@@ -22,6 +22,11 @@ def _normalize_symbol(value: str) -> str:
 
 
 class StrategyConfigSchema(BaseModel):
+    # Reject unknown keys so the API surface stays closed: a typo
+    # such as ``buyLown`` (camelCase) is a 422 instead of a silent
+    # no-op. Strategy update audit diffs also stay clean because
+    # Pydantic only forwards known fields to model_dump.
+    model_config = ConfigDict(extra="forbid")
     symbol: str = Field(default="", max_length=50)
     market: str = Field(default="US")
     buy_low: Optional[float] = Field(default=None, gt=0)
@@ -485,6 +490,7 @@ class BacktestParams(BaseModel):
 
 
 class BacktestRunRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     params: BacktestParams
     csv_text: Optional[str] = Field(default=None, max_length=2_000_000)
     price_points: list[BacktestPricePoint] = Field(default_factory=list, max_length=50_000)
@@ -707,6 +713,7 @@ class StrategyExperimentRunPage(BaseModel):
     total: int
 
 class LLMAnalyzeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     force: bool = Field(default=False)
 
 
@@ -859,6 +866,7 @@ class ReviewExportQuery(BaseModel):
 
 
 class WatchlistItemSchema(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     symbol: str = Field(max_length=50)
     market: str = Field(default="US")
     alias: str = Field(default="", max_length=100)

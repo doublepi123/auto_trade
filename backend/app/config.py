@@ -37,7 +37,7 @@ class Settings(BaseSettings):
                 self.env,
             )
         return self
-    database_url: str = "sqlite:///data/auto_trade.db"
+    database_url: str = "sqlite:///./data/auto_trade.db"
 
     longbridge_app_key: str = ""
     longbridge_app_secret: str = ""
@@ -75,7 +75,10 @@ class Settings(BaseSettings):
         default="enabled",
         validation_alias="DEEPSEEK_THINKING_TYPE",
     )
-    llm_interval_cron_minutes: int = 2
+    llm_interval_cron_minutes: int = Field(
+        default=2,
+        validation_alias="AUTO_TRADE_LLM_INTERVAL_MINUTES",
+    )
     llm_max_symbols_per_cycle: int = Field(
         default=1,
         ge=1,
@@ -88,9 +91,18 @@ class Settings(BaseSettings):
         le=10000,
         validation_alias="AUTO_TRADE_LLM_MAX_ANALYSES_PER_HOUR",
     )
-    llm_interval_volatility_threshold_pct: float = 1.0
-    llm_min_confidence: float = 0.7
-    llm_max_stripe_width_pct: float = 8.0
+    llm_interval_volatility_threshold_pct: float = Field(
+        default=1.0,
+        validation_alias="AUTO_TRADE_LLM_VOLATILITY_THRESHOLD_PCT",
+    )
+    llm_min_confidence: float = Field(
+        default=0.7,
+        validation_alias="AUTO_TRADE_LLM_MIN_CONFIDENCE",
+    )
+    llm_max_stripe_width_pct: float = Field(
+        default=8.0,
+        validation_alias="AUTO_TRADE_LLM_MAX_STRIPE_WIDTH_PCT",
+    )
     llm_experiment_name: str = Field(default="", validation_alias="AUTO_TRADE_LLM_EXPERIMENT_NAME")
     min_exit_profit_pct: float = 0.2
     engine_cooldown_seconds: int = Field(default=60, ge=0, le=3600, validation_alias="AUTO_TRADE_ENGINE_COOLDOWN_SECONDS")

@@ -66,7 +66,12 @@ if [ "$USE_LOCK" = "1" ]; then
     exit 1
   fi
   echo "Installing pinned deps from requirements.lock.txt..."
-  python -m pip install --require-hashes -r requirements.lock.txt
+  # NOTE: requirements.lock.txt currently pins exact versions but does NOT
+  # include hashes, so --require-hashes would fail. Once the CI regenerates
+  # the lock file with `--generate-hashes`, flip this to
+  # `python -m pip install --require-hashes -r requirements.lock.txt`.
+  # For now we install without hash verification (exact versions only).
+  python -m pip install -r requirements.lock.txt
 else
   echo "Installing range-pinned deps from requirements.txt..."
   python -m pip install -r requirements.txt

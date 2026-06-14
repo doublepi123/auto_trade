@@ -109,6 +109,7 @@ import type {
   PromptVersion, ExperimentSummary, PerformanceStats,
   PerformanceVariant, IndicatorsResponse,
 } from '../types'
+import { resolveErrorMessage } from '../utils/error'
 
 const activeTab = ref('experiments')
 
@@ -212,20 +213,6 @@ async function loadIndicators() {
 }
 
 function pct(v: number): string { return `${(v * 100).toFixed(1)}%` }
-
-function resolveErrorMessage(err: unknown, fallback: string): string {
-  if (err && typeof err === 'object' && 'response' in err) {
-    const resp = (err as Record<string, unknown>).response
-    if (resp && typeof resp === 'object' && 'data' in resp) {
-      const data = (resp as Record<string, unknown>).data
-      if (data && typeof data === 'object' && 'detail' in data) {
-        const detail = (data as Record<string, unknown>).detail
-        if (typeof detail === 'string') return detail
-      }
-    }
-  }
-  return fallback
-}
 
 onMounted(async () => {
   await Promise.all([loadVersions(), loadExperimentNames()])

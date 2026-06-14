@@ -119,7 +119,7 @@
       </div>
       <div class="metric-item">
         <span>费用</span>
-        <strong>${{ formatNumber(result.metrics.fees_paid) }}</strong>
+        <strong>{{ formatCurrency(result.metrics.fees_paid, marketFromSymbol(form.symbol)) }}</strong>
         <small>{{ result.fee_sensitivity.length }} 档敏感性</small>
       </div>
       <div class="metric-item">
@@ -147,13 +147,13 @@
             </template>
           </el-table-column>
           <el-table-column prop="price" label="价格" min-width="100">
-            <template #default="{ row }">${{ formatNumber(row.price) }}</template>
+            <template #default="{ row }">{{ formatCurrency(row.price, marketFromSymbol(form.symbol)) }}</template>
           </el-table-column>
           <el-table-column prop="quantity" label="数量" min-width="80">
             <template #default="{ row }">{{ row.quantity.toFixed(0) }}</template>
           </el-table-column>
           <el-table-column prop="fee" label="费用" min-width="90">
-            <template #default="{ row }">${{ formatNumber(row.fee) }}</template>
+            <template #default="{ row }">{{ formatCurrency(row.fee, marketFromSymbol(form.symbol)) }}</template>
           </el-table-column>
           <el-table-column prop="pnl" label="盈亏" min-width="100">
             <template #default="{ row }">
@@ -170,7 +170,7 @@
         </div>
         <div v-if="result.skipped_signals.length > 0" class="skip-list">
           <div v-for="signal in result.skipped_signals" :key="`${signal.timestamp}-${signal.action}`" class="skip-row">
-            <strong>{{ actionLabel(signal.action) }} · ${{ formatNumber(signal.price) }}</strong>
+            <strong>{{ actionLabel(signal.action) }} · {{ formatCurrency(signal.price, marketFromSymbol(form.symbol)) }}</strong>
             <span>{{ formatDateTime(signal.timestamp) }}</span>
             <el-tag v-if="signal.category" size="small" type="warning" effect="plain">
               {{ skipCategoryLabel(signal.category) }}
@@ -206,6 +206,8 @@ import BacktestChart from '../components/BacktestChart.vue'
 import { getStrategy, runBacktest } from '../api'
 import type { BacktestParams, BacktestResult } from '../types'
 import { skipCategoryLabel } from '../utils/labels'
+import { formatCurrency, marketFromSymbol } from '../utils/format'
+import { resolveErrorMessage } from '../utils/error'
 
 const defaultParams: BacktestParams = {
   symbol: '',
@@ -334,21 +336,10 @@ async function handleRun() {
     })
     ElMessage.success('回测完成')
   } catch (err) {
-    error.value = resolveErrorMessage(err)
+    error.value = resolveErrorMessage(err, '回测请求失败')
   } finally {
     running.value = false
   }
-}
-
-function resolveErrorMessage(err: unknown): string {
-  const response = (err as { response?: { data?: { detail?: unknown } } }).response
-  const detail = response?.data?.detail
-  if (typeof detail === 'string') return detail
-  if (Array.isArray(detail) && detail.length > 0) {
-    const first = detail[0] as { msg?: string }
-    if (first.msg) return first.msg
-  }
-  return '回测请求失败'
 }
 
 function formatNumber(value: number | null | undefined): string {

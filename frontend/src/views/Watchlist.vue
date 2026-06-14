@@ -62,9 +62,9 @@
         <el-table-column label="行情" width="180">
           <template #default="{ row }">
             <div v-if="quoteMap[row.symbol]">
-              <div>${{ formatNumber(quoteMap[row.symbol].last_price) }}</div>
+              <div>{{ formatCurrency(quoteMap[row.symbol].last_price, row.market) }}</div>
               <small style="color: #909399">
-                Bid {{ formatNumber(quoteMap[row.symbol].bid) }} / Ask {{ formatNumber(quoteMap[row.symbol].ask) }}
+                Bid {{ formatCurrency(quoteMap[row.symbol].bid, row.market) }} / Ask {{ formatCurrency(quoteMap[row.symbol].ask, row.market) }}
               </small>
             </div>
             <div v-else style="color: #909399">-</div>
@@ -127,6 +127,8 @@ import {
   scoreWatchlistSymbol,
   type WatchlistScore,
 } from '../api/watchlist'
+import { formatCurrency } from '../utils/format'
+import { resolveErrorMessage } from '../utils/error'
 
 const items = ref<WatchlistItem[]>([])
 const quoteMap = ref<Record<string, WatchlistQuote>>({})
@@ -141,6 +143,12 @@ const newSymbol = ref('')
 const newMarket = ref<'US' | 'HK'>('US')
 const newAlias = ref('')
 let quoteTimer: ReturnType<typeof setInterval> | null = null
+// Consecutive quote-fetch failure count. After QUOTE_FAILURE_TOAST_THRESHOLD
+// consecutive failures we stop spamming ElMessage.error to avoid drowning the UI.
+let quoteFailureStreak = 0
+const QUOTE_FAILURE_TOAST_THRESHOLD = 3
+const QUOTE_FAILURE_TOAST_COOLDOWN_MS = 60_000
+let lastQuoteFailureToastAt = 0
 
 function scoreTagType(score: number): 'success' | 'warning' | 'info' | 'danger' {
   if (score >= 70) return 'success'
@@ -158,20 +166,6 @@ function scoreActionLabel(action: string): string {
     default:
       return '观望'
   }
-}
-
-function resolveErrorMessage(err: unknown, fallback: string): string {
-  if (err && typeof err === 'object' && 'response' in err) {
-    const resp = (err as Record<string, unknown>).response
-    if (resp && typeof resp === 'object' && 'data' in resp) {
-      const data = (resp as Record<string, unknown>).data
-      if (data && typeof data === 'object' && 'detail' in data) {
-        const detail = (data as Record<string, unknown>).detail
-        if (typeof detail === 'string') return detail
-      }
-    }
-  }
-  return fallback
 }
 
 async function loadItems() {
@@ -194,8 +188,22 @@ async function loadQuotes() {
       map[q.symbol] = q
     }
     quoteMap.value = map
+    quoteFailureStreak = 0
   } catch (e: unknown) {
-    ElMessage.error(resolveErrorMessage(e, '加载行情失败'))
+    quoteFailureStreak += 1
+    // Throttle the user-visible toast: only show it for the first 3 consecutive
+    // failures, then suppress further toasts for a cooldown window. The streak
+    // counter resets on the next successful fetch.
+    const now = Date.now()
+    const inCooldown = now - lastQuoteFailureToastAt < QUOTE_FAILURE_TOAST_COOLDOWN_MS
+    if (quoteFailureStreak <= QUOTE_FAILURE_TOAST_THRESHOLD && !inCooldown) {
+      ElMessage.error(resolveErrorMessage(e, '加载行情失败'))
+      lastQuoteFailureToastAt = now
+    }
+    if (quoteFailureStreak === QUOTE_FAILURE_TOAST_THRESHOLD) {
+      // One final warning so the user knows the silent mode has kicked in.
+      ElMessage.warning('行情连续加载失败，已暂停错误提示，下次成功后将恢复')
+    }
   }
 }
 
@@ -270,12 +278,6 @@ async function handleScore(symbol: string, market: 'US' | 'HK') {
   } finally {
     scoringSymbol.value = null
   }
-}
-
-function formatNumber(n: number | null | undefined) {
-  if (n == null) return '0.00'
-  if (n === 0) return '0.00'
-  return n.toFixed(2)
 }
 
 onMounted(() => {
