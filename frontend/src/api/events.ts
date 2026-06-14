@@ -12,6 +12,8 @@ export interface GetTradeEventsParams {
   event_type?: string | string[]
   source?: TimelineSource
   skip_category?: string
+  /** Case-insensitive substring search over message / symbol / action. */
+  q?: string
 }
 
 function buildEventsQuery(params: GetTradeEventsParams): string {
@@ -22,6 +24,7 @@ function buildEventsQuery(params: GetTradeEventsParams): string {
   if (params.symbol) sp.set('symbol', params.symbol)
   if (params.source && params.source !== 'all') sp.set('source', params.source)
   if (params.skip_category) sp.set('skip_category', params.skip_category)
+  if (params.q && params.q.trim()) sp.set('q', params.q.trim())
 
   const et = params.event_type
   if (Array.isArray(et)) {

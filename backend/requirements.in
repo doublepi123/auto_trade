@@ -1,0 +1,13 @@
+# Source file for pip-compile / pip-tools.
+# Regenerate requirements.lock.txt with:
+#   pip-compile requirements.in --generate-hashes --output-file=requirements.lock.txt
+fastapi
+uvicorn[standard]
+sqlalchemy
+alembic
+pydantic
+pydantic-settings
+longport
+httpx
+cryptography
+apscheduler

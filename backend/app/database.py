@@ -1,17 +1,42 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Generator
 
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, event, inspect
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import settings
 
+logger = logging.getLogger("auto_trade.database")
+
 _connect_args: dict[str, object] = {}
 if settings.database_url.startswith("sqlite"):
     _connect_args["check_same_thread"] = False
 engine = create_engine(settings.database_url, connect_args=_connect_args)
+
+
+if settings.database_url.startswith("sqlite"):
+    @event.listens_for(engine, "connect")
+    def _set_sqlite_pragmas(dbapi_connection, _connection_record) -> None:
+        """Enable SQLite pragmas for concurrent writes from runner thread + FastAPI handlers.
+
+        - journal_mode=WAL: allows concurrent readers + a single writer
+        - synchronous=NORMAL: WAL mode default; durable enough for our workload
+          (we are not a financial exchange; one fsync per checkpoint is fine)
+        - busy_timeout=5000: wait up to 5s for the writer lock instead of raising
+          "database is locked" immediately
+        - foreign_keys=ON: SQLite ships with FK enforcement disabled by default
+        """
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA synchronous=NORMAL")
+            cursor.execute("PRAGMA busy_timeout=5000")
+            cursor.execute("PRAGMA foreign_keys=ON")
+        finally:
+            cursor.close()
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
@@ -31,6 +56,7 @@ def init_db() -> None:
     _ensure_audit_log_table(engine)
     _ensure_credential_config_notification_channels_column(engine)
     _ensure_watchlist_items_table(engine)
+    _ensure_watchlist_scores_table(engine)
     _ensure_prompt_versions_table(engine)
     _ensure_experiment_results_table(engine)
     _ensure_strategy_experiments_table(engine)
@@ -146,9 +172,11 @@ def _ensure_runtime_state_daily_pnl_date_column(db_engine: Engine) -> None:
     with db_engine.begin() as connection:
         if "daily_pnl_date" not in columns:
             connection.exec_driver_sql("ALTER TABLE runtime_state ADD COLUMN daily_pnl_date DATE")
-            connection.exec_driver_sql(
-                "UPDATE runtime_state SET daily_pnl = 0, consecutive_losses = 0, daily_pnl_date = DATE('now') WHERE daily_pnl_date IS NULL"
-            )
+        # Backfill any NULL daily_pnl_date rows regardless of whether the
+        # column was just added (a partial migration may have left NULLs).
+        connection.exec_driver_sql(
+            "UPDATE runtime_state SET daily_pnl = 0, consecutive_losses = 0, daily_pnl_date = DATE('now') WHERE daily_pnl_date IS NULL"
+        )
         if "pause_reason" not in columns:
             connection.exec_driver_sql("ALTER TABLE runtime_state ADD COLUMN pause_reason TEXT DEFAULT '' NOT NULL")
         if "paused_at" not in columns:
@@ -275,6 +303,33 @@ def _ensure_watchlist_items_table(db_engine: Engine) -> None:
                 created_at DATETIME
             )
             """
+        )
+
+
+def _ensure_watchlist_scores_table(db_engine: Engine) -> None:
+    inspector = inspect(db_engine)
+    if "watchlist_scores" in inspector.get_table_names():
+        return
+    with db_engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS watchlist_scores (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol VARCHAR(50) NOT NULL,
+                market VARCHAR(10) DEFAULT 'US' NOT NULL,
+                score FLOAT DEFAULT 0.0 NOT NULL,
+                rationale TEXT DEFAULT '' NOT NULL,
+                confidence FLOAT DEFAULT 0.0 NOT NULL,
+                recommended_action VARCHAR(16) DEFAULT 'HOLD' NOT NULL,
+                source VARCHAR(32) DEFAULT 'llm' NOT NULL,
+                created_at DATETIME NOT NULL,
+                expires_at DATETIME NOT NULL
+            )
+            """
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_watchlist_scores_symbol_created_at "
+            "ON watchlist_scores (symbol, created_at)"
         )
 
 

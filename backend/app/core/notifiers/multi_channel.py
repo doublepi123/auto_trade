@@ -29,8 +29,16 @@ class NotifierInterface(Protocol):
 
 
 class MultiChannelNotifier:
-    def __init__(self, channels: list[tuple[NotifierInterface, str]]) -> None:
+    def __init__(
+        self,
+        channels: list[tuple[NotifierInterface, str]],
+        *,
+        retry_queue: Optional["_RetryQueueProtocol"] = None,
+    ) -> None:
         self._channels = channels
+        # Optional retry queue; when present, failed sends are rescheduled
+        # with exponential backoff. See retry_queue.NotificationRetryQueue.
+        self._retry_queue = retry_queue
 
     @property
     def sct_key(self) -> str:
@@ -45,6 +53,7 @@ class MultiChannelNotifier:
     def send(self, title: str, content: str, severity: str = "INFO") -> bool:
         target_rank = _SEVERITY_RANK.get(severity, 0)
         success_any = False
+        last_error = ""
         for notifier, floor in self._channels:
             if _SEVERITY_RANK.get(floor, 0) > target_rank:
                 continue
@@ -52,9 +61,12 @@ class MultiChannelNotifier:
                 if notifier.send(title, content, severity):
                     success_any = True
             except Exception as exc:
+                last_error = f"{type(notifier).__name__}: {exc}"
                 logger.warning("notifier %s send raised: %s", type(notifier).__name__, exc)
         if not success_any:
             logger.warning("all notifier channels failed: title=%s severity=%s", title, severity)
+            if self._retry_queue is not None:
+                self._retry_queue.enqueue(title, content, severity, error=last_error)
         return success_any
 
     def notify_order(self, side: str, symbol: str, quantity: str, price: str, order_id: str) -> bool:
@@ -89,7 +101,12 @@ class MultiChannelNotifier:
                     logger.warning("notifier %s close raised: %s", type(notifier).__name__, exc)
 
     @classmethod
-    def from_credential_config(cls, cred) -> MultiChannelNotifier:
+    def from_credential_config(
+        cls,
+        cred,
+        *,
+        retry_queue: Optional["_RetryQueueProtocol"] = None,
+    ) -> "MultiChannelNotifier":
         from app.core.notifiers.serverchan import ServerChanNotifier
         from app.core.notifiers.webhook import WebhookNotifier
 
@@ -97,10 +114,10 @@ class MultiChannelNotifier:
             raw = json.loads(cred.notification_channels or "[]")
         except Exception as exc:
             logger.warning("notification_channels invalid JSON, falling back: %s", exc)
-            return cls([(ServerChanNotifier(cred.sct_key or ""), "INFO")])
+            return cls([(ServerChanNotifier(cred.sct_key or ""), "INFO")], retry_queue=retry_queue)
         if not isinstance(raw, list):
             logger.warning("notification_channels must be a JSON array, falling back")
-            return cls([(ServerChanNotifier(cred.sct_key or ""), "INFO")])
+            return cls([(ServerChanNotifier(cred.sct_key or ""), "INFO")], retry_queue=retry_queue)
         built: list[tuple[NotifierInterface, str]] = []
         for channel in raw:
             if not isinstance(channel, dict):
@@ -116,10 +133,19 @@ class MultiChannelNotifier:
             elif channel_type == "webhook":
                 url = channel.get("url", "")
                 if url:
-                    built.append((WebhookNotifier(url), floor))
+                    template = channel.get("template")
+                    built.append((WebhookNotifier(url, template=template), floor))
         if not built:
             built = [(ServerChanNotifier(cred.sct_key or ""), "INFO")]
-        return cls(built)
+        return cls(built, retry_queue=retry_queue)
+
+
+# Module-level (not nested inside MultiChannelNotifier) protocol declared
+# at import time so it can be referenced in type annotations and runtime
+# isinstance checks. The retry queue module imports this protocol to
+# break the import cycle.
+class _RetryQueueProtocol(Protocol):
+    def enqueue(self, title: str, content: str, severity: str, error: str = "") -> bool: ...
 
 
 _severity_for_risk_event = severity_for_risk_event

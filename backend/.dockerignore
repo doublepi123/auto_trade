@@ -1,0 +1,45 @@
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+.coverage.*
+htmlcov
+coverage.xml
+*.egg-info
+.venv
+venv
+env
+
+# Local data
+data/
+*.db
+*.sqlite
+*.sqlite3
+credential_private_key.pem
+credential_public_key.pem
+
+# Tests outputs
+.pytest_cache
+.tox
+.nox
+
+# Editor
+.vscode
+.idea
+.DS_Store
+
+# Git
+.git
+.gitignore
+
+# Docs
+docs/
+*.md
+
+# Frontend artifacts leaking in
+node_modules
+dist

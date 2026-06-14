@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy.orm import Session
 
 from app.models import RuntimeState, StrategyConfig
+
+logger = logging.getLogger("auto_trade.strategy_service")
 
 STRATEGY_AUDIT_KEYS = (
     "symbol",
@@ -140,3 +144,76 @@ class StrategyService:
     def update_primary_runtime_state(self, **kwargs: object) -> RuntimeState:
         state = self.get_primary_runtime_state()
         return self.update_runtime_state(symbol=state.symbol, **kwargs)
+
+
+def validate_strategy_consistency(config: StrategyConfig) -> list[dict[str, str]]:
+    """Cross-field validation: surface config combinations that will silently
+    prevent profitable exits.
+
+    Currently checks:
+      * ``min_profit_amount`` vs the round-trip fee on a notional 1-share
+        exit. If fees alone exceed the configured floor, every exit will
+        be skipped with ``skip_category=FEE`` and the strategy cannot
+        realise any profit.
+      * ``max_daily_loss`` vs ``min_profit_amount`` — a daily-loss limit
+        that is smaller than a single-round profit floor makes the
+        strategy impossible to honour under any trade.
+
+    The returned list contains one entry per detected issue, with a
+    ``field`` (the offending config key), a ``level`` (``warning`` or
+    ``error``), and a human-readable ``message``. Callers should log the
+    warnings; errors block startup in stricter deployments.
+    """
+    issues: list[dict[str, str]] = []
+    market = (config.market or "US").upper()
+    fee_rate_field = "fee_rate_hk" if market == "HK" else "fee_rate_us"
+    fee_rate = Decimal(str(getattr(config, fee_rate_field, 0) or 0))
+    min_profit = Decimal(str(config.min_profit_amount or 0))
+    if min_profit > 0 and fee_rate > 0:
+        # Per-share round-trip fee (entry + exit) at the configured rate.
+        per_share_fee = fee_rate * 2
+        if per_share_fee > min_profit:
+            issues.append(
+                {
+                    "field": "min_profit_amount",
+                    "level": "warning",
+                    "message": (
+                        f"min_profit_amount={min_profit} is below the per-share "
+                        f"round-trip fee ({per_share_fee}). Exits will be "
+                        f"skipped with skip_category=FEE. Lower {fee_rate_field} "
+                        f"or raise min_profit_amount."
+                    ),
+                }
+            )
+    max_daily_loss = Decimal(str(config.max_daily_loss or 0))
+    if min_profit > 0 and 0 < max_daily_loss < min_profit:
+        issues.append(
+            {
+                "field": "max_daily_loss",
+                "level": "warning",
+                "message": (
+                    f"max_daily_loss={max_daily_loss} is smaller than "
+                    f"min_profit_amount={min_profit}. A single profitable "
+                    f"trade would trip the daily-loss limit."
+                ),
+            }
+        )
+    if config.buy_low > 0 and config.sell_high > 0 and config.sell_high <= config.buy_low:
+        issues.append(
+            {
+                "field": "sell_high",
+                "level": "error",
+                "message": (
+                    f"sell_high ({config.sell_high}) must be greater than "
+                    f"buy_low ({config.buy_low}). The strategy cannot trigger."
+                ),
+            }
+        )
+    for issue in issues:
+        logger.warning(
+            "strategy config consistency: %s [%s] %s",
+            issue["field"],
+            issue["level"],
+            issue["message"],
+        )
+    return issues

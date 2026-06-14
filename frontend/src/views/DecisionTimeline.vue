@@ -57,9 +57,54 @@
           <el-option label="可用持仓不足" value="POSITION" />
           <el-option label="非交易时段" value="SESSION" />
         </el-select>
+        <el-input
+          v-model="searchTerm"
+          placeholder="搜索消息 / 标的 / 事件类型"
+          clearable
+          data-testid="timeline-search"
+          aria-label="搜索决策时间线"
+          style="width: 240px"
+          @keyup.enter="onFilterChange"
+          @clear="onFilterChange"
+        >
+          <template #append>
+            <el-button @click="onFilterChange" aria-label="执行搜索">搜索</el-button>
+          </template>
+        </el-input>
         <el-button :loading="exporting === 'csv'" @click="handleExport('csv')">导出 CSV</el-button>
         <el-button :loading="exporting === 'json'" @click="handleExport('json')">导出 JSON</el-button>
         <el-button type="primary" :loading="loading" @click="loadEvents">刷新</el-button>
+      </div>
+    </div>
+
+    <div v-if="bookmarks.length" class="timeline-bookmarks" role="region" aria-labelledby="timeline-bookmarks-heading">
+      <div class="bookmarks-header">
+        <span id="timeline-bookmarks-heading">书签：</span>
+        <el-button size="small" link @click="clearBookmarks">清空</el-button>
+      </div>
+      <div class="bookmark-list">
+        <el-tag
+          v-for="b in bookmarks"
+          :key="b.id"
+          :type="b.id === activeBookmarkId ? 'primary' : 'info'"
+          class="bookmark-tag"
+          @click="applyBookmark(b)"
+        >
+          <span class="bookmark-label">{{ b.label }}</span>
+          <el-button
+            size="small"
+            link
+            class="bookmark-remove"
+            :aria-label="`移除书签 ${b.label}`"
+            @click.stop="removeBookmark(b.id)"
+          >×</el-button>
+        </el-tag>
+        <el-button
+          v-if="canSaveBookmark"
+          size="small"
+          type="success"
+          @click="saveCurrentAsBookmark"
+        >保存当前筛选为书签</el-button>
       </div>
     </div>
 
@@ -161,14 +206,107 @@ const pageSize = ref(20)
 const selectedSkipCategory = ref('')
 const sourceFilter = ref<TimelineSource>('all')
 const selectedEventTypes = ref<string[]>([])
+const searchTerm = ref('')
 const tableRefreshKey = ref(0)
+
+interface Bookmark {
+  id: string
+  label: string
+  source: TimelineSource
+  event_types: string[]
+  skip_category: string
+  q: string
+  created_at: number
+}
+
+const BOOKMARKS_KEY = 'auto_trade.timeline.bookmarks.v1'
+
+const bookmarks = ref<Bookmark[]>(loadBookmarks())
+const activeBookmarkId = ref<string>('')
+
+const canSaveBookmark = computed(() => {
+  return Boolean(searchTerm.value.trim() || selectedEventTypes.value.length || selectedSkipCategory.value)
+})
+
+function loadBookmarks(): Bookmark[] {
+  try {
+    const raw = localStorage.getItem(BOOKMARKS_KEY)
+    if (!raw) return []
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    return parsed.filter((item) =>
+      item && typeof item === 'object' && typeof item.id === 'string' && typeof item.label === 'string'
+    )
+  } catch {
+    return []
+  }
+}
+
+function persistBookmarks() {
+  try {
+    localStorage.setItem(BOOKMARKS_KEY, JSON.stringify(bookmarks.value))
+  } catch (e) {
+    console.warn('persist bookmarks failed', e)
+  }
+}
+
+function makeBookmarkId(): string {
+  return `bm_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`
+}
+
+function saveCurrentAsBookmark() {
+  const label = `筛选 @ ${new Date().toLocaleTimeString()}`
+  const bookmark: Bookmark = {
+    id: makeBookmarkId(),
+    label,
+    source: sourceFilter.value,
+    event_types: [...selectedEventTypes.value],
+    skip_category: selectedSkipCategory.value,
+    q: searchTerm.value.trim(),
+    created_at: Date.now(),
+  }
+  bookmarks.value = [bookmark, ...bookmarks.value].slice(0, 20)
+  persistBookmarks()
+  activeBookmarkId.value = bookmark.id
+  ElMessage.success('书签已保存')
+}
+
+function applyBookmark(bookmark: Bookmark) {
+  sourceFilter.value = bookmark.source
+  selectedEventTypes.value = [...bookmark.event_types]
+  selectedSkipCategory.value = bookmark.skip_category
+  searchTerm.value = bookmark.q
+  activeBookmarkId.value = bookmark.id
+  page.value = 1
+  loadEvents()
+}
+
+function removeBookmark(id: string) {
+  bookmarks.value = bookmarks.value.filter((b) => b.id !== id)
+  if (activeBookmarkId.value === id) activeBookmarkId.value = ''
+  persistBookmarks()
+}
+
+function clearBookmarks() {
+  bookmarks.value = []
+  activeBookmarkId.value = ''
+  persistBookmarks()
+}
 
 const visibleEvents = computed(() => events.value)
 
-onMounted(loadEvents)
+onMounted(() => {
+  loadEvents()
+})
 
 watch(sourceFilter, () => {
   selectedEventTypes.value = []
+  activeBookmarkId.value = ''
+})
+
+watch([searchTerm, selectedEventTypes, selectedSkipCategory], () => {
+  // If user manually edits filters, the active bookmark no longer matches.
+  activeBookmarkId.value = ''
 })
 
 async function loadEvents() {
@@ -181,6 +319,7 @@ async function loadEvents() {
       source: sourceFilter.value,
       event_type: et,
       skip_category: selectedSkipCategory.value || undefined,
+      q: searchTerm.value.trim() || undefined,
     })
     events.value = data.items.map((item) => ({
       ...item,
@@ -340,6 +479,45 @@ function formatDateTime(value: string): string {
 
 .responsive-table {
   width: 100%;
+}
+
+.timeline-bookmarks {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid #ebeef5;
+  border-radius: 6px;
+  background: #fafbfc;
+}
+
+.bookmarks-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 13px;
+  color: #606266;
+}
+
+.bookmark-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.bookmark-tag {
+  cursor: pointer;
+  user-select: none;
+}
+
+.bookmark-label {
+  margin-right: 4px;
+}
+
+.bookmark-remove {
+  margin-left: 2px;
+  padding: 0 2px;
 }
 
 @media (max-width: 720px) {

@@ -313,7 +313,7 @@ function handleExport(fmt: 'json' | 'csv') {
       const url = URL.createObjectURL(blob)
       const link = document.createElement('a')
       link.href = url
-      link.download = `review_${form.value.symbol.replace('.', '_')}_${form.value.from_date}_${form.value.to_date}.${fmt}`
+      link.download = `review_${form.value.symbol.split('.').join('_')}_${form.value.from_date}_${form.value.to_date}.${fmt}`
       document.body.appendChild(link)
       link.click()
       link.remove()

@@ -77,11 +77,21 @@ class TestIsTradingHours:
 
 class TestNextSessionOpen:
     def test_next_open_skips_weekend(self) -> None:
+        # 2026-05-22 is a Friday; Mon 2026-05-25 is Memorial Day (US holiday);
+        # so the next open is Tuesday 2026-05-26 at 09:30 ET = 13:30 UTC.
         friday_close = datetime(2026, 5, 22, 21, 0, tzinfo=timezone.utc)  # ~17:00 ET Fri
         next_open = next_session_open("US", friday_close)
-        # Should land Monday 2026-05-25 at 09:30 ET = 13:30 UTC (DST)
-        assert next_open.weekday() == 0
+        assert next_open.weekday() == 1  # Tuesday
         assert next_open.hour == 13 and next_open.minute == 30
+        assert next_open.date().isoformat() == "2026-05-26"
+
+    def test_next_open_skips_weekend_plain(self) -> None:
+        # Use a holiday-free weekend for a pure "skip Sat/Sun" assertion.
+        # 2024-12-13 is a Friday with no adjacent holidays.
+        friday_close = datetime(2024, 12, 13, 21, 0, tzinfo=timezone.utc)
+        next_open = next_session_open("US", friday_close)
+        assert next_open.weekday() == 0  # Monday
+        assert next_open.date().isoformat() == "2024-12-16"
 
     def test_next_open_within_session_advances_to_next_day(self) -> None:
         rth_instant = datetime(2026, 5, 22, 14, 30, tzinfo=timezone.utc)

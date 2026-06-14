@@ -5,11 +5,12 @@ import logging
 import os
 import threading
 import time
+from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass, replace as dataclass_replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Any, Generator, Optional, cast
+from typing import Any, Deque, Generator, Optional, cast
 from sqlalchemy.orm import Session
 
 from app.api.deps import init_audit_logger
@@ -26,6 +27,7 @@ from app.core.risk import RiskConfig, RiskController
 from app.database import SessionLocal
 from app.models import OrderRecord, TrackedEntry
 from app.services.daily_pnl_service import DailyPnlService
+from app.core.credential_crypto import CredentialIntegrityError
 from app.services.credentials_service import CredentialsService, PlainCredentials
 from app.services.runtime_state_service import RuntimeStateService
 from app.services.strategy_service import StrategyService
@@ -58,7 +60,7 @@ class SymbolRuntime:
     symbol: str
     market: str
     engine: StrategyEngine
-    recent_quotes: list[dict[str, Any]]
+    recent_quotes: Deque[dict[str, Any]]
 
 
 @dataclass
@@ -121,7 +123,7 @@ class AppRunner:
         self._order_sync_interval_seconds = 15.0
         self._recent_quote_window_seconds = 300.0
         self._recent_quotes_cap = 500
-        self._recent_quotes: list[dict[str, Any]] = []
+        self._recent_quotes: Deque[dict[str, Any]] = deque(maxlen=self._recent_quotes_cap)
         self._last_action_message = ""
         self._last_llm_action_at: dict[tuple[str, str], float] = {}
         self._last_fill_at: float = 0.0
@@ -425,7 +427,15 @@ class AppRunner:
         self.broker.close()
 
     def reload_credentials(self) -> None:
-        self._apply_credentials(self._load_credentials(), resubscribe=self._running)
+        try:
+            credentials = self._load_credentials()
+        except CredentialIntegrityError as exc:
+            logger.error(
+                "skipping credential reload: %s — broker/notifier unchanged",
+                exc,
+            )
+            return
+        self._apply_credentials(credentials, resubscribe=self._running)
 
     def reload_strategy(self) -> None:
         db = SessionLocal()
@@ -494,8 +504,21 @@ class AppRunner:
             self._remember_quote(quote)
             runtime = self._symbol_runtimes.get(quote.symbol)
             is_primary_symbol = quote.symbol == self.engine.params.symbol
-            active_engine = self.engine if is_primary_symbol or runtime is None else runtime.engine
-            active_market = self.engine.params.market if is_primary_symbol or runtime is None else runtime.market
+            if runtime is None and not is_primary_symbol:
+                decision.early_return = True
+                logger.debug(
+                    "ignoring quote for unrecognised symbol %s (no symbol runtime registered)",
+                    quote.symbol,
+                )
+                return decision
+            if is_primary_symbol:
+                active_engine: StrategyEngine = self.engine
+                active_market: str = self.engine.params.market
+            else:
+                # runtime is non-None here: the early-return above already
+                # excluded the case where the symbol has no registered runtime.
+                active_engine = cast("SymbolRuntime", runtime).engine
+                active_market = cast("SymbolRuntime", runtime).market
             if not self._running or self._trigger_in_flight:
                 decision.early_return = True
                 return decision
@@ -887,7 +910,10 @@ class AppRunner:
     def _quote_for_llm_order(self, symbol: str, price: Any = None) -> Quote | None:
         override_price = self._coerce_positive_float(price)
         try:
-            quote = self.broker.get_quote(symbol)
+            # Use the batch path even for one symbol so the broker round-trip
+            # shares its retry/quote context with other quote consumers.
+            quotes = self.broker.get_quotes([symbol])
+            quote = quotes[0] if quotes else None
         except Exception:
             logger.exception("failed to fetch quote for LLM order action")
             runtime = self._runtime_for_symbol(symbol)
@@ -966,35 +992,38 @@ class AppRunner:
             self._last_push_quote_at = 0.0
             self._last_active_quote_refresh_at = 0.0
             if clear_history:
-                self._recent_quotes = []
+                self._recent_quotes = deque(maxlen=self._recent_quotes_cap)
 
     def _remember_quote(self, quote: Quote) -> None:
         now = datetime.now(timezone.utc)
         self._remember_symbol_runtime_quote(quote, now)
         self._last_quote_at = time.monotonic()
+        last_price = float(quote.last_price)
+        bid = float(quote.bid)
+        ask = float(quote.ask)
         self._recent_quotes.append(
             {
                 "symbol": quote.symbol,
-                "last_price": float(quote.last_price),
-                "bid": float(quote.bid),
-                "ask": float(quote.ask),
+                "last_price": last_price,
+                "bid": bid,
+                "ask": ask,
                 "timestamp": quote.timestamp,
                 "observed_at": now,
             }
         )
+        # Sliding-window prune: deque is already capped by maxlen, so the
+        # only remaining work is dropping entries older than the window.
+        # We popleft until the head is fresh — amortised O(1) when traffic
+        # is steady (most calls do zero pops).
         cutoff = now - timedelta(seconds=self._recent_quote_window_seconds)
-        self._recent_quotes = [
-            item
-            for item in self._recent_quotes
-            if isinstance(item.get("observed_at"), datetime) and item["observed_at"] >= cutoff
-        ]
-        if len(self._recent_quotes) > self._recent_quotes_cap:
-            self._recent_quotes = self._recent_quotes[-self._recent_quotes_cap:]
+        recent = self._recent_quotes
+        while recent and isinstance(recent[0].get("observed_at"), datetime) and recent[0]["observed_at"] < cutoff:
+            recent.popleft()
         quality = self._evaluate_quote_quality(
             {
-                "last_price": float(quote.last_price),
-                "bid": float(quote.bid),
-                "ask": float(quote.ask),
+                "last_price": last_price,
+                "bid": bid,
+                "ask": ask,
             }
         )
         if quality["has_quote"] and not quality["price_positive"]:
@@ -1030,7 +1059,7 @@ class AppRunner:
                 if item.get("symbol") == symbol
                 and isinstance(item.get("observed_at"), datetime)
                 and item["observed_at"] >= cutoff
-            ]
+            ]  # _recent_quotes is a deque; linear scan is fine for n ≪ 500
             return [
                 {
                     "symbol": item["symbol"],
@@ -1125,11 +1154,13 @@ class AppRunner:
             self._last_active_quote_refresh_at = now
 
         try:
-            quote = self.broker.get_quote(symbol)
+            quotes = self.broker.get_quotes([symbol])
         except Exception as exc:
             logger.warning("active quote refresh failed for %s: %s", symbol, exc)
             return
-        self._on_quote(quote, is_push=False)
+        if not quotes:
+            return
+        self._on_quote(quotes[0], is_push=False)
 
     def sync_today_orders_from_broker(self, *, force: bool = False) -> int:
         with self._state_lock:
@@ -1558,7 +1589,15 @@ class AppRunner:
 
     def _load_credentials(self) -> PlainCredentials:
         with self._db_session() as db:
-            return CredentialsService(db).get_plain_credentials()
+            try:
+                return CredentialsService(db).get_plain_credentials()
+            except CredentialIntegrityError as exc:
+                logger.error(
+                    "credential integrity check failed: %s — refusing to apply "
+                    "credentials until the master key is restored",
+                    exc,
+                )
+                raise
 
     def _apply_credentials(self, credentials: PlainCredentials, *, resubscribe: bool) -> None:
         with self._state_lock:
@@ -1598,14 +1637,20 @@ class AppRunner:
                     new_broker.close()
                     return
             old_broker = self.broker
-            old_broker.close()
             old_notifier = self.notifier
-            _close_notifier = getattr(old_notifier, "close", None)
-            if callable(_close_notifier):
-                _close_notifier()
             self.broker = new_broker
             self.notifier = new_notifier
             self._trade_svc.refresh_pending_brokers(new_broker)
+            try:
+                old_broker.close()
+            except Exception as exc:
+                logger.warning("error closing previous broker: %s", exc)
+            _close_notifier = getattr(old_notifier, "close", None)
+            if callable(_close_notifier):
+                try:
+                    _close_notifier()
+                except Exception as exc:
+                    logger.warning("error closing previous notifier: %s", exc)
 
             if should_resubscribe:
                 self._quotes_subscribed = True
@@ -1898,7 +1943,12 @@ class AppRunner:
                     fee_rate_hk=primary_params.fee_rate_hk,
                 )
             )
-        return SymbolRuntime(symbol=symbol, market=market, engine=engine, recent_quotes=[])
+        return SymbolRuntime(
+            symbol=symbol,
+            market=market,
+            engine=engine,
+            recent_quotes=deque(maxlen=self._recent_quotes_cap),
+        )
 
     def _sync_symbol_runtimes(self, db: Session) -> None:
         primary_symbol = self.engine.params.symbol
@@ -1949,7 +1999,8 @@ class AppRunner:
                 runtime = self._build_symbol_runtime(quote.symbol, market_for_symbol(quote.symbol))
                 self._symbol_runtimes[quote.symbol] = runtime
             runtime.engine.record_price(quote.last_price)
-            runtime.recent_quotes.append(
+            recent = runtime.recent_quotes
+            recent.append(
                 {
                     "symbol": quote.symbol,
                     "last_price": float(quote.last_price),
@@ -1959,14 +2010,11 @@ class AppRunner:
                     "observed_at": observed_at,
                 }
             )
+            # Sliding-window prune: deque is bounded by maxlen, so we only
+            # need to drop entries that are *stale by time*. Amortised O(1).
             cutoff = observed_at - timedelta(seconds=self._recent_quote_window_seconds)
-            runtime.recent_quotes = [
-                item
-                for item in runtime.recent_quotes
-                if isinstance(item.get("observed_at"), datetime) and item["observed_at"] >= cutoff
-            ]
-            if len(runtime.recent_quotes) > self._recent_quotes_cap:
-                runtime.recent_quotes = runtime.recent_quotes[-self._recent_quotes_cap:]
+            while recent and isinstance(recent[0].get("observed_at"), datetime) and recent[0]["observed_at"] < cutoff:
+                recent.popleft()
 
     def _get_trading_session_mode(self) -> str:
         return self._trading_session_mode or "ANY"

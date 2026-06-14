@@ -234,6 +234,30 @@ class WatchlistItem(Base):
     __table_args__ = (UniqueConstraint("symbol", name="uq_watchlist_symbol"),)
 
 
+class WatchlistScore(Base):
+    """Cached LLM scoring for watchlist items. The score is a 0..100 trade
+    attractiveness rating produced by the LLM advisor when explicitly asked
+    via POST /api/watchlist/score. Caching avoids re-prompting on every
+    snapshot render."""
+
+    __tablename__ = "watchlist_scores"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(50), nullable=False)
+    market: Mapped[str] = mapped_column(String(10), default="US", nullable=False)
+    score: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    rationale: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    recommended_action: Mapped[str] = mapped_column(String(16), default="HOLD", nullable=False)
+    source: Mapped[str] = mapped_column(String(32), default="llm", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow, nullable=False)
+
+    __table_args__ = (
+        Index("ix_watchlist_scores_symbol_created_at", "symbol", "created_at"),
+    )
+
+
 class PromptVersion(Base):
     """Versioned prompt templates for A/B testing."""
 

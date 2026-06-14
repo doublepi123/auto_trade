@@ -13,19 +13,27 @@
 | **API 覆盖** | ✅ 完备。策略配置、凭证管理、订单查询、状态获取、状态历史、事件时间线、运行时控制（启停/暂停/Kill Switch）。 |
 | **WebSocket 推送** | ✅ 就绪。实时状态同步。 |
 | **本地部署** | ✅ 就绪。Docker Compose 一键启动。 |
-| **测试** | ✅ 就绪。Backend pytest **692** 项、Frontend Cypress E2E **80** 项。 |
+| **测试** | ✅ 就绪。Backend pytest **903** 项、pytest-cov 覆盖率 **87%**、Frontend Cypress E2E **80** 项。 |
 | **凭证安全** | ✅ 就绪。主密钥 + AES-GCM 加密存储，前端不回显明文。 |
-| **数据库** | ✅ 就位。SQLite，含运行状态、状态快照、订单、`tracked_entries`、LLM 交互、交易事件和凭证配置。 |
+| **数据库** | ✅ 就位。SQLite，含运行状态、状态快照、订单、`tracked_entries`、LLM 交互、交易事件、审计日志和凭证配置。 |
 | **LLM 行情数据** | ✅ 真实 K 线（日 K + 1 分钟 K），ATR/布林带有效。 |
-| **多市场切日** | ✅ US/HK 交易所本地日历日驱动风控与日 PnL。 |
+| **多市场切日** | ✅ US/HK 交易所本地日历日驱动风控与日 PnL，含静态节假日历。 |
 | **入场成本** | ✅ `tracked_entries` 持久化 + 启动对账。 |
-| **操作审计** | ✅ `audit_logs` 表 + `AuditLogger` + 9 个写端点接入（控制 / 策略 / 凭证 / 撤单）。 |
-| **多渠道通知** | ✅ `MultiChannelNotifier` + Server 酱 + Webhook + `severity_floor` 分级。 |
+| **操作审计** | ✅ `audit_logs` 表 + `AuditLogger` + 9 个写端点接入（控制 / 策略 / 凭证 / 撤单），可 CSV/JSON 导出。 |
+| **多渠道通知** | ✅ `MultiChannelNotifier` + Server 酱 + Webhook（含 token 白名单模板） + 失败重试队列 + `severity_floor` 分级。 |
 | **交易时段守卫** | ✅ `trading_session_mode` 双层 gate（runner + execute 服务），`SESSION` skip 与 `TRADING_SESSION_BLOCKED` 审计。 |
 | **券商韧性** | ✅ `BrokerGateway._call_with_retry` 分档退避（订单 vs 行情），`BROKER_RETRY` 审计。 |
 | **LONG 加仓** | ✅ LONG 状态下 `price <= buy_low` 触发 BUY，保持 LONG；60s 冷却对齐。 |
 | **保证金下单量** | ✅ `margin_safety_factor` 可配置，BrokerGateway margin 路径已验证。 |
 | **LLM 持仓成本** | ✅ `ContextModule` 输出持仓方向/数量/均价/浮盈%；无持仓显示"当前无持仓"。 |
+| **回测指标** | ✅ Sharpe / Sortino / Calmar / Profit Factor / 盈亏比 / 最大回撤。 |
+| **绩效仪表盘** | ✅ 6 项关键指标（trade_count / win_rate / profit_factor / sharpe / max_drawdown / avg_pnl）。 |
+| **指标快照** | ✅ `GET /api/indicators` 实时技术指标（ATR/RSI/MACD/布林带/成交量/多时间框架）。 |
+| **日历端点** | ✅ `GET /api/calendar/{today,closures,lookup}` 节假日历查询。 |
+| **观察列表评分** | ✅ LLM 评分 + 排序（`WatchlistScore` + `scored-snapshots`）。 |
+| **决策时间线搜索** | ✅ 全文搜索（消息/标的/事件类型）+ 书签（localStorage 持久化）。 |
+| **后端热路径** | ✅ `recent_quotes` 改 `deque(maxlen=...)` + 单边窗口淘汰；`broker.get_quotes([symbol])` 批量复用。 |
+| **Docker 镜像** | ✅ 多阶段构建（`builder → runtime`），剥离 toolchain；tini 转发信号。 |
 
 ---
 
@@ -49,6 +57,59 @@
 **新增环境变量**：`AUTO_TRADE_BROKER_RETRY_MAX`、`AUTO_TRADE_BROKER_QUOTE_RETRY_MAX`、`AUTO_TRADE_BROKER_RETRY_BASE_MS`、`AUTO_TRADE_AUDIT_REQUEST_SUMMARY_LIMIT`。
 
 **显式 YAGNI 未做**（仍在 Roadmap 边缘）：节假日历、审计 CSV/JSON 导出、Webhook 模板编辑器、通知重发队列。
+
+---
+
+## 近期已完成迭代 (2026-06-14) — 20 轮自主迭代
+
+> 用户指令："对这个项目你自主进行20轮迭代，迭代方向自定，可以使用 subagent"。本批次由主循环驱动 + 子 agent 做专项审计，**全部 commit 在 worktree**。
+> 起点 `pytest 692 passed` → 终点 `pytest 903 passed`（**+211 项**），pytest-cov 覆盖率 **87%**，前端 `vue-tsc --noEmit` 0 error。
+
+| # | 主题 | 关键交付 |
+|---|------|----------|
+| **01** | 全项目 review-fix 续篇 | broker 交换 race、unknown symbol fallback、CORS、audit O(n²)、daily_pnl NULL、CSV BOM、symbol replace、runner XFF 等 8 项修复 |
+| **02** | Backtest CSV BOM / UX | `parse_backtest_csv` 去 BOM、Backtest.vue dirty 检测 + 覆盖前确认 |
+| **03** | 交易日历增强 | `holiday_calendar.py`（NYSE + HKEX 2024-2026 静态闭市日）+ `GET /api/calendar/{today,closures,lookup}` |
+| **04** | 审计日志导出 | `GET /api/audit-logs/export?format=csv\|json&action=&severity=` |
+| **05** | Webhook 模板编辑器 | token 白名单（`title/content/severity/timestamp/source`）+ JSON 解析后字符串注入 |
+| **06** | 通知重发队列 | `NotificationRetryQueue`（daemon 线程 + 指数退避 cap 60s + max_attempts 4） |
+| **07** | 仪表盘关键指标 | Sharpe / Profit Factor / 盈亏比 / 最大回撤 / 平均 PnL / 交易笔数 |
+| **08** | 凭证管理 UX | 脱敏 toggle + "测试连接" 按钮（`POST /api/credentials/test`） |
+| **09** | 风控参数一致性 | `validate_strategy_consistency`（min_profit vs fee、max_daily_loss vs min_profit、sell_high vs buy_low）|
+| **10** | 错误处理一致性 | `CredentialIntegrityError` 等自定义异常 + 全链路 try/except |
+| **11** | 前端类型契约 | `utils/validator.ts`（`object/string/number/...` + `safeValidate`）+ WS schema 校验 |
+| **12** | 覆盖率 | pytest-cov + `.coveragerc` omit 启动入口 + `CLAUDE.md` 基线记录（87%） |
+| **13** | 内存泄漏审计 | `_recent_quotes` 与 `runtime.recent_quotes` 改 `deque(maxlen=...)` + 单边窗口淘汰；`_prune_llm_per_symbol_caches` 周期清理 |
+| **14** | 前端 a11y | `aria-label` / `aria-pressed` / `role="region"` / `aria-labelledby` 覆盖控制按钮、kill switch、quick-actions 面板 |
+| **15** | Backtest 风险调整指标 | `_calc_sortino_ratio` + `_calc_calmar_ratio` 接入 `BacktestMetrics` + 4 个测试 |
+| **16** | Docker 多阶段 | `backend/Dockerfile`：`builder` 编 wheel 进 venv → `runtime` 仅复制 venv + tini；根 + 后端双层 `.dockerignore` |
+| **17** | 观察列表 LLM 评分 | `WatchlistScore` 模型 + `WatchlistScoreService`（fallback 4 源）+ 3 个端点 + 前端可排序评分列 + 操作按钮 |
+| **18** | 决策时间线搜索 + 书签 | `q` 查询参数（OR ILIKE 4 列）+ 前端搜索框 + localStorage 书签（最多 20） |
+| **19** | 后端性能热点 | subagent 审计 22 项；实施 3 项（deque bound、broker 批量、单边窗口淘汰）；903/903 测试通过 |
+| **20** | 总结 | 本节 + 状态快照表更新 |
+
+**新增端点**：
+- `GET /api/calendar/today` / `closures` / `lookup`
+- `GET /api/audit-logs/export`
+- `GET /api/metrics/summary?days=`
+- `POST /api/credentials/test`
+- `POST /api/watchlist/score` / `GET /api/watchlist/scores` / `GET /api/watchlist/scored-snapshots`
+- `GET /api/events?q=`（OR 全文搜索）
+
+**新增数据表**：`watchlist_scores`（symbol, score, rationale, confidence, recommended_action, source, created_at, expires_at + 复合索引）
+
+**新增服务**：`WatchlistScoreService` / `NotificationRetryQueue` / `metrics.py`
+
+**关键修复（性能）**：
+- `_remember_quote` / `_remember_symbol_runtime_quote` 改用 `deque(maxlen=_recent_quotes_cap)`，O(n) 列表重建 → O(1) 摊销单边淘汰
+- `_quote_for_llm_order` / `_refresh_quote_if_stale` 改用 `broker.get_quotes([symbol])` 复用单次往返
+- `float(quote.last_price)` 在 `_remember_quote` 内只计算一次（原两次）
+
+**未做（YAGNI 显式排除）**：
+- 观察列表评分 cron 自动周期打分（手动触发即可，LLM 配额不允许）
+- 全局多设备书签同步（localStorage 即可）
+- FTS5 全文索引（搜索量级尚未触发）
+- AsyncIO retry（当前 retry 仍在 worker 线程，可接受）
 
 ---
 

@@ -114,6 +114,60 @@
           <p v-else class="empty-note">暂无持仓</p>
         </section>
 
+        <section class="cockpit-panel metrics-panel" data-testid="metrics-panel" v-loading="metricsLoading">
+          <div class="panel-heading">
+            <span>近 {{ metricsWindowDays }} 日交易指标</span>
+            <el-button
+              link
+              size="small"
+              @click="loadMetrics"
+              data-testid="metrics-refresh"
+            >刷新</el-button>
+          </div>
+          <div class="metrics-grid">
+            <div class="metric-cell">
+              <span class="metric-label">交易笔数</span>
+              <strong data-testid="metric-trade-count">{{ metrics.trade_count }}</strong>
+            </div>
+            <div class="metric-cell">
+              <span class="metric-label">胜率</span>
+              <strong
+                :class="metrics.win_rate >= 50 ? 'metric-positive' : 'metric-negative'"
+                data-testid="metric-win-rate"
+              >{{ metrics.win_rate.toFixed(1) }}%</strong>
+            </div>
+            <div class="metric-cell">
+              <span class="metric-label">盈亏比</span>
+              <strong
+                :class="(metrics.profit_factor ?? 0) >= 1 ? 'metric-positive' : 'metric-negative'"
+                data-testid="metric-profit-factor"
+              >{{ metrics.profit_factor === null ? '—' : metrics.profit_factor.toFixed(2) }}</strong>
+            </div>
+            <div class="metric-cell">
+              <span class="metric-label">Sharpe</span>
+              <strong
+                :class="(metrics.sharpe_ratio ?? 0) >= 0 ? 'metric-positive' : 'metric-negative'"
+                data-testid="metric-sharpe"
+              >{{ metrics.sharpe_ratio === null ? '—' : metrics.sharpe_ratio.toFixed(2) }}</strong>
+            </div>
+            <div class="metric-cell">
+              <span class="metric-label">最大回撤</span>
+              <strong
+                :class="metrics.max_drawdown > 20 ? 'metric-negative' : ''"
+                data-testid="metric-max-drawdown"
+              >{{ metrics.max_drawdown.toFixed(1) }}%</strong>
+            </div>
+            <div class="metric-cell">
+              <span class="metric-label">均 PnL</span>
+              <strong
+                :class="metrics.avg_pnl >= 0 ? 'metric-positive' : 'metric-negative'"
+                data-testid="metric-avg-pnl"
+              >${{ formatNumber(metrics.avg_pnl) }}</strong>
+            </div>
+          </div>
+          <p v-if="metrics.trade_count === 0 && !metricsLoading" class="empty-note">尚无成交记录</p>
+        </section>
+
         <section class="cockpit-panel llm-panel" data-testid="llm-panel" v-loading="llmStatusLoading">
           <div class="panel-heading">
             <span>LLM 智能区间</span>
@@ -139,10 +193,16 @@
           <p v-else class="empty-note">暂无 LLM 建议</p>
         </section>
 
-        <section class="cockpit-panel action-panel" data-testid="quick-actions" v-loading="statusLoading">
+        <section
+          class="cockpit-panel action-panel"
+          data-testid="quick-actions"
+          role="region"
+          aria-labelledby="quick-actions-heading"
+          v-loading="statusLoading"
+        >
           <div class="panel-heading">
             <div>
-              <span>操作控制</span>
+              <span id="quick-actions-heading">操作控制</span>
               <p class="panel-caption">全局控制，作用于全部标的运行时</p>
             </div>
             <el-tag :type="status.kill_switch ? 'danger' : status.paused ? 'warning' : 'success'" effect="plain">
@@ -150,12 +210,50 @@
             </el-tag>
           </div>
           <div class="action-grid">
-            <el-button type="primary" @click="handleStart" :disabled="status.kill_switch || status.runner_running" data-testid="dashboard-start-btn">启动</el-button>
-            <el-button type="success" @click="handleResume" :disabled="!status.paused || status.kill_switch" data-testid="dashboard-resume-btn">恢复</el-button>
-            <el-button type="warning" @click="handlePause" :disabled="status.paused || status.kill_switch" data-testid="dashboard-pause-btn">暂停</el-button>
-            <el-button type="danger" @click="handleStop" data-testid="dashboard-stop-btn">停止</el-button>
-            <el-button class="kill-button" type="danger" plain @click="handleKillSwitch" data-testid="dashboard-kill-btn">紧急停止</el-button>
-            <el-button v-if="status.kill_switch" type="success" plain @click="handleDisableKillSwitch" data-testid="dashboard-disable-kill-btn">解除紧急停止</el-button>
+            <el-button
+              type="primary"
+              @click="handleStart"
+              :disabled="status.kill_switch || status.runner_running"
+              data-testid="dashboard-start-btn"
+              :aria-label="`启动交易${status.kill_switch ? '（当前紧急停止已启用）' : ''}`"
+            >启动</el-button>
+            <el-button
+              type="success"
+              @click="handleResume"
+              :disabled="!status.paused || status.kill_switch"
+              data-testid="dashboard-resume-btn"
+              aria-label="恢复交易"
+            >恢复</el-button>
+            <el-button
+              type="warning"
+              @click="handlePause"
+              :disabled="status.paused || status.kill_switch"
+              data-testid="dashboard-pause-btn"
+              aria-label="暂停交易"
+            >暂停</el-button>
+            <el-button
+              type="danger"
+              @click="handleStop"
+              data-testid="dashboard-stop-btn"
+              aria-label="停止交易"
+            >停止</el-button>
+            <el-button
+              class="kill-button"
+              type="danger"
+              plain
+              @click="handleKillSwitch"
+              data-testid="dashboard-kill-btn"
+              :aria-pressed="status.kill_switch"
+              aria-label="紧急停止：立即暂停所有交易并要求人工解除"
+            >紧急停止</el-button>
+            <el-button
+              v-if="status.kill_switch"
+              type="success"
+              plain
+              @click="handleDisableKillSwitch"
+              data-testid="dashboard-disable-kill-btn"
+              aria-label="解除紧急停止"
+            >解除紧急停止</el-button>
           </div>
         </section>
       </div>
@@ -387,7 +485,7 @@ import { useAccountRefresh } from '../composables/useAccountRefresh'
 import { useMultiSymbolSnapshots } from '../composables/useMultiSymbolSnapshots'
 import { useStatusHistorySeries } from '../composables/useStatusHistorySeries'
 import { useDiagnosticsSnapshot } from '../composables/useDiagnosticsSnapshot'
-import { startTrading, stopTrading, pauseTrading, resumeTrading, activateKillSwitch, disableKillSwitch, getLLMIntervalStatus, getOrders, getTradeEvents } from '../api'
+import { startTrading, stopTrading, pauseTrading, resumeTrading, activateKillSwitch, disableKillSwitch, getLLMIntervalStatus, getOrders, getTradeEvents, getMetricsSummary } from '../api'
 import type { LLMIntervalStatus, OrderRecord, Position, StatusHistoryPoint, TradeEventRecord } from '../types'
 import { engineStateLabel, auditActionLabel, marketLabel, positionSideLabel, skipCategoryLabel, tradeEventTypeLabel } from '../utils/labels'
 import { EVENT_TYPE } from '../utils/constants'
@@ -623,6 +721,45 @@ async function loadStatusHistory() {
   }
 }
 
+const metricsWindowDays = ref(30)
+const metricsLoading = ref(false)
+interface DashboardMetrics {
+  trade_count: number
+  win_rate: number
+  profit_factor: number | null
+  sharpe_ratio: number | null
+  avg_pnl: number
+  max_drawdown: number
+}
+const metrics = ref<DashboardMetrics>({
+  trade_count: 0,
+  win_rate: 0,
+  profit_factor: null,
+  sharpe_ratio: null,
+  avg_pnl: 0,
+  max_drawdown: 0,
+})
+
+async function loadMetrics() {
+  metricsLoading.value = true
+  try {
+    const data = await getMetricsSummary({ days: metricsWindowDays.value })
+    metrics.value = {
+      trade_count: data.trade_count ?? 0,
+      win_rate: data.win_rate ?? 0,
+      profit_factor: data.profit_factor ?? null,
+      sharpe_ratio: data.sharpe_ratio ?? null,
+      avg_pnl: data.avg_pnl ?? 0,
+      max_drawdown: data.max_drawdown ?? 0,
+    }
+  } catch {
+    // Leave previous values in place; the panel shows a load error via
+    // the section's v-loading state.
+  } finally {
+    metricsLoading.value = false
+  }
+}
+
 function appendStatusPoint() {
   const primarySymbol = strategy.value.symbol || ''
   if (!primarySymbol || selectedChartSymbol.value !== primarySymbol) {
@@ -662,6 +799,7 @@ onMounted(() => {
   loadRecentOrders()
   loadRecentEvents()
   loadStatusHistory()
+  loadMetrics()
   loadDiagnostics()
   startMultiSymbols()
   llmStatusTimer = setInterval(() => {

@@ -41,6 +41,24 @@
         <el-table-column prop="alias" label="别名" width="140">
           <template #default="{ row }">{{ row.alias || '-' }}</template>
         </el-table-column>
+        <el-table-column
+          label="LLM 评分"
+          width="160"
+          sortable
+          :sort-by="(row: WatchlistItem) => scoreMap[row.symbol]?.score ?? -1"
+        >
+          <template #default="{ row }">
+            <div v-if="scoreMap[row.symbol]">
+              <el-tag :type="scoreTagType(scoreMap[row.symbol].score)" size="small">
+                {{ scoreMap[row.symbol].score.toFixed(0) }}
+              </el-tag>
+              <small style="color: #909399; margin-left: 6px">
+                {{ scoreActionLabel(scoreMap[row.symbol].recommended_action) }}
+              </small>
+            </div>
+            <div v-else style="color: #909399">未评分</div>
+          </template>
+        </el-table-column>
         <el-table-column label="行情" width="180">
           <template #default="{ row }">
             <div v-if="quoteMap[row.symbol]">
@@ -70,6 +88,14 @@
               设为交易
             </el-button>
             <el-button
+              size="small"
+              :loading="scoringSymbol === row.symbol"
+              :aria-label="`对 ${row.symbol} 进行 LLM 评分`"
+              @click="handleScore(row.symbol, row.market)"
+            >
+              LLM 评分
+            </el-button>
+            <el-button
               type="danger"
               size="small"
               :loading="removingId === row.id"
@@ -97,19 +123,42 @@ import {
   removeWatchlistItem,
   activateWatchlistItem,
   getWatchlistQuotes,
+  getWatchlistScores,
+  scoreWatchlistSymbol,
+  type WatchlistScore,
 } from '../api/watchlist'
 
 const items = ref<WatchlistItem[]>([])
 const quoteMap = ref<Record<string, WatchlistQuote>>({})
+const scoreMap = ref<Record<string, WatchlistScore>>({})
 const loading = ref(false)
 const adding = ref(false)
 const addError = ref('')
 const activatingId = ref<number | null>(null)
 const removingId = ref<number | null>(null)
+const scoringSymbol = ref<string | null>(null)
 const newSymbol = ref('')
 const newMarket = ref<'US' | 'HK'>('US')
 const newAlias = ref('')
 let quoteTimer: ReturnType<typeof setInterval> | null = null
+
+function scoreTagType(score: number): 'success' | 'warning' | 'info' | 'danger' {
+  if (score >= 70) return 'success'
+  if (score >= 40) return 'warning'
+  if (score > 0) return 'info'
+  return 'danger'
+}
+
+function scoreActionLabel(action: string): string {
+  switch (action) {
+    case 'BUY': return '买入'
+    case 'SELL': return '卖出'
+    case 'AVOID': return '回避'
+    case 'HOLD':
+    default:
+      return '观望'
+  }
+}
 
 function resolveErrorMessage(err: unknown, fallback: string): string {
   if (err && typeof err === 'object' && 'response' in err) {
@@ -196,6 +245,33 @@ async function handleActivate(id: number) {
   }
 }
 
+async function loadScores() {
+  try {
+    const list = await getWatchlistScores()
+    const map: Record<string, WatchlistScore> = {}
+    for (const row of list) {
+      map[row.symbol] = row
+    }
+    scoreMap.value = map
+  } catch (e: unknown) {
+    // Non-fatal: the UI still works without scores. Just log via the toast.
+    ElMessage.warning(resolveErrorMessage(e, '加载评分失败'))
+  }
+}
+
+async function handleScore(symbol: string, market: 'US' | 'HK') {
+  scoringSymbol.value = symbol
+  try {
+    const score = await scoreWatchlistSymbol({ symbol, market, ttl_minutes: 60 })
+    scoreMap.value = { ...scoreMap.value, [symbol]: score }
+    ElMessage.success(`${symbol} 评分 ${score.score.toFixed(0)}（${scoreActionLabel(score.recommended_action)}）`)
+  } catch (e: unknown) {
+    ElMessage.error(resolveErrorMessage(e, '评分请求失败'))
+  } finally {
+    scoringSymbol.value = null
+  }
+}
+
 function formatNumber(n: number | null | undefined) {
   if (n == null) return '0.00'
   if (n === 0) return '0.00'
@@ -203,7 +279,10 @@ function formatNumber(n: number | null | undefined) {
 }
 
 onMounted(() => {
-  loadItems().then(() => loadQuotes())
+  loadItems().then(() => {
+    loadQuotes()
+    loadScores()
+  })
   quoteTimer = setInterval(loadQuotes, 15000)
 })
 

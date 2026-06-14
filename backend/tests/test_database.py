@@ -458,3 +458,34 @@ def test_init_db_creates_report_query_indexes(tmp_path, monkeypatch) -> None:
     assert "ix_trade_events_symbol_created_at" in trade_events_indexes
     assert "ix_trade_events_event_type" in trade_events_indexes
     assert "ix_llm_interactions_symbol_created_at" in llm_indexes
+
+
+
+def test_sqlite_wal_and_busy_timeout_enabled(tmp_path, monkeypatch) -> None:
+    """P0-2: SQLite connection must enable WAL, busy_timeout, and FK enforcement.
+
+    The runner thread, FastAPI handlers, and asyncio.to_thread tasks all write
+    concurrently. Without WAL + busy_timeout, any sustained write load surfaces
+    as OperationalError: database is locked and tracked_entries silently drifts
+    because _persist_entry_safe swallows the error.
+    """
+    import importlib
+    from sqlalchemy import text
+
+    db_file = tmp_path / "wal.db"
+    monkeypatch.setenv("AUTO_TRADE_DATABASE_URL", f"sqlite:///{db_file}")
+    # database.engine is bound at import time to settings.database_url; reload
+    # the module so the WAL PRAGMA listener attaches to our test engine.
+    from app import database as _db_module
+    importlib.reload(_db_module)
+    database = _db_module
+
+    engine = database.engine
+    with engine.connect() as conn:
+        journal_mode = conn.execute(text("PRAGMA journal_mode")).scalar()
+        busy_timeout_ms = conn.execute(text("PRAGMA busy_timeout")).scalar()
+        fk_enabled = conn.execute(text("PRAGMA foreign_keys")).scalar()
+
+    assert str(journal_mode).lower() == "wal", f"journal_mode was {journal_mode!r}"
+    assert busy_timeout_ms >= 5000, f"busy_timeout was {busy_timeout_ms}"
+    assert int(fk_enabled) == 1, f"foreign_keys was {fk_enabled}"

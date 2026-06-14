@@ -58,14 +58,15 @@ class AuditLogger:
         text_bytes = text.encode("utf-8")
         if len(text_bytes) <= limit:
             return text
-        # Account for the suffix length so the final result stays within the
-        # byte limit.  Trim character-by-character from the end until the
-        # encoded length fits within (limit - suffix_len) bytes.  This avoids
-        # slicing raw bytes which can split a multi-byte UTF-8 sequence.
+        # Single-shot UTF-8-safe truncation. Slicing raw bytes by the target
+        # length can split a multi-byte sequence, so we decode with
+        # errors="ignore" to drop the truncated tail bytes. Avoids the
+        # O(n^2) re-encode cost of trimming character-by-character.
         target = limit - suffix_len
-        while text and len(text.encode("utf-8")) > target:
-            text = text[:-1]
-        return text + suffix
+        if target <= 0:
+            return suffix[:limit]
+        truncated = text_bytes[:target].decode("utf-8", errors="ignore")
+        return truncated + suffix
 
     @staticmethod
     def hash_actor(api_key: str | None) -> str:
@@ -76,9 +77,15 @@ class AuditLogger:
 
     @staticmethod
     def extract_ip(request: Request) -> str:
-        xff = request.headers.get("x-forwarded-for", "")
-        if xff:
-            return xff.split(",")[0].strip()
+        """Resolve the request source IP for the audit log.
+
+        The deployment runs backend-on-container with no reverse proxy in the
+        current docker-compose (frontend is a separate service that proxies
+        /api and /ws). X-Forwarded-For is therefore attacker-controlled and
+        must NOT be trusted for source attribution. We use the real socket
+        peer. If a reverse proxy is later added, gate XFF on a configured
+        trusted-proxy list and fall back to client.host.
+        """
         if request.client:
             return request.client.host
         return ""

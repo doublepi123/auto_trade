@@ -88,6 +88,13 @@ docker compose up --build -d
 # UI + API: http://<host>:8080  （/api、/ws 经 Nginx 反代）
 ```
 
+### Docker 镜像（P23+）
+
+- **后端** `backend/Dockerfile` 多阶段：`builder` 阶段（带 `build-essential`）→ 编 wheel 进 `/opt/venv`；`runtime` 阶段基于 `python:3.11-slim` 仅复制 venv + app 代码，无 toolchain。runtime 阶段 `apt-get install` 后立即 `rm -rf /var/lib/apt/lists/*`；build 阶段同理后 `apt-get purge build-essential`。
+- 入口：tini 转发信号，exec `docker-entrypoint.sh`（alembic stamp + upgrade + `init_db()` + uvicorn）。
+- `.dockerignore`：根目录 + `backend/.dockerignore` 双重排除 `data/`、`*.db`、`.venv`、`.pytest_cache`、`.coverage*`、`.git`、`*.md`、`docs/`、`node_modules`、`dist` 等。
+- 前端 `frontend/Dockerfile` 已是 `node:20-alpine builder → nginx:alpine` 两阶段。
+
 ### 后端（本地开发）
 
 ```bash
@@ -114,6 +121,10 @@ cd backend && python3 -m pytest tests/ -v
 python3 -m basedpyright          # 需仓库根 pyrightconfig.json（本地可能 gitignore）
 cd frontend && npm run type-check
 ```
+
+### 覆盖率（coverage）
+
+`pytest.ini` 已挂上 `pytest-cov`，运行 `pytest` 时自动生成 terminal 报告。`.coveragerc` 排除 `app/main.py` / `app/runner.py` / `app/database.py` / `app/config.py` / `app/api/ws.py`（这些是启动/事件循环粘合层，单测覆盖成本高）。当前基线：**总覆盖率 87%**（878 passed）。提交 PR 时如改动某模块覆盖率下降超过 5%，请在描述里说明。
 
 ## API 速查
 

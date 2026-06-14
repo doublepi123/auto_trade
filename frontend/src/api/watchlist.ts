@@ -1,6 +1,20 @@
 import { api } from './client'
 import type { WatchlistItem, WatchlistQuote, WatchlistSnapshot } from '../types'
 
+export interface WatchlistScore {
+  id: number
+  symbol: string
+  market: string
+  score: number
+  rationale: string
+  confidence: number
+  recommended_action: 'BUY' | 'SELL' | 'HOLD' | 'AVOID' | string
+  source: string
+  created_at: string
+  expires_at: string
+  is_stale: boolean
+}
+
 export async function getWatchlist(): Promise<WatchlistItem[]> {
   const resp = await api.get('/api/watchlist')
   return resp.data
@@ -29,4 +43,24 @@ export async function getWatchlistQuotes(): Promise<WatchlistQuote[]> {
 export async function getWatchlistSnapshots(): Promise<WatchlistSnapshot[]> {
   const resp = await api.get('/api/watchlist/snapshots')
   return resp.data
+}
+
+export interface ScoredWatchlistSnapshot extends WatchlistSnapshot {
+  score: number
+  is_stale: boolean
+}
+
+export async function getWatchlistScoredSnapshots(): Promise<ScoredWatchlistSnapshot[]> {
+  const resp = await api.get('/api/watchlist/scored-snapshots')
+  return resp.data
+}
+
+export async function scoreWatchlistSymbol(data: { symbol: string; market: 'US' | 'HK'; ttl_minutes?: number }): Promise<WatchlistScore> {
+  const resp = await api.post('/api/watchlist/score', data)
+  return resp.data
+}
+
+export async function getWatchlistScores(): Promise<WatchlistScore[]> {
+  const resp = await api.get('/api/watchlist/scores')
+  return resp.data.scores ?? []
 }

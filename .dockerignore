@@ -1,0 +1,51 @@
+# Don't send the whole monorepo to backend/frontend Docker contexts.
+# Service-level .dockerignore handles its own subtree.
+
+# VCS
+.git
+.gitignore
+.gitattributes
+
+# Editor / IDE
+.vscode
+.idea
+.DS_Store
+*.swp
+
+# Local data
+data/
+*.db
+*.sqlite
+*.sqlite3
+credential_private_key.pem
+credential_public_key.pem
+
+# Test + coverage
+**/.coverage
+**/.coverage.*
+**/htmlcov
+**/coverage.xml
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+
+# Python
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/.venv
+**/venv
+**/env
+
+# Node
+**/node_modules
+**/dist
+**/.vite
+
+# CI
+.github
+
+# Docs
+docs/
+*.md
+LICENSE

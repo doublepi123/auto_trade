@@ -398,8 +398,8 @@ class TestAppRunner:
             def __init__(self) -> None:
                 self.submitted = []
 
-            def get_quote(self, symbol: str) -> Quote:
-                return Quote(symbol, 222.0, 221.9, 222.1, "")
+            def get_quotes(self, symbols: list[str]) -> list[Quote]:
+                return [Quote(s, 222.0, 221.9, 222.1, "") for s in symbols]
 
             def estimate_margin_max_quantity(self, symbol: str, side: str, price: Decimal, currency=None) -> Decimal:
                 return Decimal("10")
@@ -437,8 +437,8 @@ class TestAppRunner:
                 self.cancelled.append(order_id)
                 return OrderStatusResult(order_id, "CANCELLED")
 
-            def get_quote(self, symbol: str) -> Quote:
-                return Quote(symbol, 225.0, 224.9, 225.1, "")
+            def get_quotes(self, symbols: list[str]) -> list[Quote]:
+                return [Quote(s, 225.0, 225.0-0.1, 225.0+0.1, "") for s in symbols]
 
             def get_positions(self) -> list[Position]:
                 return [Position("NVDA.US", "LONG", Decimal("5"), Decimal("220"))]
@@ -487,8 +487,8 @@ class TestAppRunner:
                 self.cancelled.append(order_id)
                 return OrderStatusResult(order_id, "CANCELLED")
 
-            def get_quote(self, symbol: str) -> Quote:
-                return Quote(symbol, 222.0, 221.9, 222.1, "")
+            def get_quotes(self, symbols: list[str]) -> list[Quote]:
+                return [Quote(s, 222.0, 222.0-0.1, 222.0+0.1, "") for s in symbols]
 
             def estimate_margin_max_quantity(self, symbol: str, side: str, price: Decimal, currency=None) -> Decimal:
                 return Decimal("12")
@@ -535,8 +535,8 @@ class TestAppRunner:
             def __init__(self) -> None:
                 self.submitted = []
 
-            def get_quote(self, symbol: str) -> Quote:
-                return Quote(symbol, 215.0, 214.9, 215.1, "")
+            def get_quotes(self, symbols: list[str]) -> list[Quote]:
+                return [Quote(s, 215.0, 215.0-0.1, 215.0+0.1, "") for s in symbols]
 
             def get_positions(self) -> list[Position]:
                 return [Position("NVDA.US", "LONG", Decimal("8"), Decimal("220"))]
@@ -622,8 +622,8 @@ class TestAppRunner:
 
     def test_successful_llm_submission_records_broker_side_cooldown(self, monkeypatch) -> None:
         class Broker:
-            def get_quote(self, symbol: str) -> Quote:
-                return Quote(symbol, 222.0, 221.9, 222.1, "")
+            def get_quotes(self, symbols: list[str]) -> list[Quote]:
+                return [Quote(s, 222.0, 222.0-0.1, 222.0+0.1, "") for s in symbols]
 
             def estimate_margin_max_quantity(self, symbol: str, side: str, price: Decimal, currency=None) -> Decimal:
                 return Decimal("10")
@@ -647,8 +647,8 @@ class TestAppRunner:
             def __init__(self) -> None:
                 self.submitted = []
 
-            def get_quote(self, symbol: str) -> Quote:
-                return Quote(symbol, 199.0, 198.9, 199.1, "")
+            def get_quotes(self, symbols: list[str]) -> list[Quote]:
+                return [Quote(s, 199.0, 199.0-0.1, 199.0+0.1, "") for s in symbols]
 
             def estimate_margin_max_quantity(self, symbol: str, side: str, price: Decimal, currency=None) -> Decimal:
                 return Decimal("10")
@@ -683,8 +683,8 @@ class TestAppRunner:
 
     def test_llm_cooldown_is_scoped_to_decision_symbol(self, monkeypatch) -> None:
         class Broker:
-            def get_quote(self, symbol: str) -> Quote:
-                return Quote(symbol, 199.0, 198.9, 199.1, "")
+            def get_quotes(self, symbols: list[str]) -> list[Quote]:
+                return [Quote(s, 199.0, 199.0-0.1, 199.0+0.1, "") for s in symbols]
 
             def estimate_margin_max_quantity(self, symbol: str, side: str, price: Decimal, currency=None) -> Decimal:
                 return Decimal("10")
@@ -1086,8 +1086,8 @@ class TestAppRunner:
                 self.unsubscribed = False
                 self.subscribed_to: str | None = None
 
-            def get_quote(self, symbol: str) -> Quote:
-                return Quote(symbol=symbol, last_price=123.45, bid=123.4, ask=123.5, timestamp="")
+            def get_quotes(self, symbols: list[str]) -> list[Quote]:
+                return [Quote(symbol=s, last_price=123.45, bid=123.4, ask=123.5, timestamp="") for s in symbols]
 
             def unsubscribe_quotes(self) -> None:
                 self.unsubscribed = True
@@ -1173,11 +1173,11 @@ class TestAppRunner:
     def test_active_quote_refresh_fetches_quote_when_push_is_stale(self) -> None:
         class Broker:
             def __init__(self) -> None:
-                self.calls: list[str] = []
+                self.calls: list[list[str]] = []
 
-            def get_quote(self, symbol: str) -> Quote:
-                self.calls.append(symbol)
-                return Quote(symbol=symbol, last_price=123.45, bid=123.4, ask=123.5, timestamp="")
+            def get_quotes(self, symbols: list[str]) -> list[Quote]:
+                self.calls.append(list(symbols))
+                return [Quote(symbol=s, last_price=123.45, bid=123.4, ask=123.5, timestamp="") for s in symbols]
 
         runner = AppRunner()
         broker = Broker()
@@ -1188,7 +1188,7 @@ class TestAppRunner:
 
         runner._refresh_quote_if_stale()
 
-        assert broker.calls == ["AAPL.US"]
+        assert broker.calls == [["AAPL.US"]]
         assert runner.engine.last_price == 123.45
         assert runner._last_quote_at > 0
 
@@ -2168,3 +2168,65 @@ class TestTradingSessionGuard:
         assert runner._get_trading_session_mode() == "ANY"
         runner._refresh_trading_session_mode()
         assert runner._get_trading_session_mode() == "RTH_ONLY"
+
+
+class TestRecentQuotesDequeBound:
+    """The hot-path recent-quotes list is now a bounded deque with O(1)
+    amortised sliding-window pruning. These tests pin the contract."""
+
+    def test_recent_quotes_is_bounded_deque(self) -> None:
+        from collections import deque
+
+        runner = AppRunner()
+        assert isinstance(runner._recent_quotes, deque)
+        assert runner._recent_quotes.maxlen == runner._recent_quotes_cap
+
+    def test_symbol_runtime_recent_quotes_is_bounded_deque(self) -> None:
+        from collections import deque
+
+        runner = AppRunner()
+        runtime = runner._build_symbol_runtime("AAPL.US", "US")
+        assert isinstance(runtime.recent_quotes, deque)
+        assert runtime.recent_quotes.maxlen == runner._recent_quotes_cap
+
+    def test_remember_quote_caps_at_maxlen(self) -> None:
+        runner = AppRunner()
+        runner._running = True
+        cap = runner._recent_quotes_cap
+        for i in range(cap + 100):
+            runner._remember_quote(Quote(
+                symbol="AAPL.US",
+                last_price=100.0 + i,
+                bid=99.5 + i,
+                ask=100.5 + i,
+                timestamp="",
+            ))
+        assert len(runner._recent_quotes) == cap
+
+    def test_window_prune_drops_stale_entries(self) -> None:
+        runner = AppRunner()
+        runner._running = True
+        # Lower the window for fast testing.
+        runner._recent_quote_window_seconds = 0.1
+        for i in range(5):
+            runner._remember_quote(Quote(
+                symbol="AAPL.US",
+                last_price=100.0 + i,
+                bid=99.5,
+                ask=100.5,
+                timestamp="",
+            ))
+        assert len(runner._recent_quotes) == 5
+        import time as _time
+        _time.sleep(0.2)
+        runner._remember_quote(Quote(
+            symbol="AAPL.US",
+            last_price=200.0,
+            bid=199.5,
+            ask=200.5,
+            timestamp="",
+        ))
+        # All earlier entries were older than 0.1s when this new one arrived.
+        # Only the new entry should survive.
+        assert len(runner._recent_quotes) == 1
+        assert runner._recent_quotes[0]["last_price"] == 200.0

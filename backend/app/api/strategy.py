@@ -19,7 +19,7 @@ from app.runner import AppRunner, get_runner
 from app.schemas import DiagnosticsResponse, StatusHistoryPoint, StatusHistoryResponse, StatusResponse, StrategyConfigSchema, StrategyMergedSchema, StrategyResponse, TradeSignalMarker
 from app.services.daily_pnl_service import DailyPnlService
 from app.services.runtime_state_service import RuntimeStateService
-from app.services.strategy_service import StrategyService
+from app.services.strategy_service import StrategyService, validate_strategy_consistency
 
 logger = logging.getLogger("auto_trade.strategy")
 
@@ -48,7 +48,7 @@ def get_strategy(db: Session = Depends(get_db)) -> StrategyResponse:
     return StrategyResponse.model_validate(config)
 
 
-@router.put("/strategy", response_model=StrategyResponse, dependencies=[Depends(require_api_key())])
+@router.put("/strategy", dependencies=[Depends(require_api_key())])
 def put_strategy(
     request: Request,
     payload: StrategyConfigSchema,
@@ -85,8 +85,23 @@ def put_strategy(
         except ValidationError as e:
             raise HTTPException(status_code=422, detail=str(e)) from e
         config, diff = svc.update_config(merged)
+        # Surface cross-field inconsistencies (e.g. min_profit < round-trip
+        # fee) as warnings returned in the response so the UI can flag
+        # them. Error-level issues (e.g. sell_high <= buy_low) still
+        # raise a 422 above via Pydantic validation; this is a softer
+        # check for the fee/profit relationship that does not fail the
+        # save outright — the user may have a good reason.
+        consistency_issues = validate_strategy_consistency(config)
+        if consistency_issues:
+            logger.warning(
+                "strategy config has %d consistency issue(s)",
+                len(consistency_issues),
+            )
         _reload_strategy_after_save()
-        return StrategyResponse.model_validate(config)
+        response = StrategyResponse.model_validate(config)
+        response_dict = response.model_dump()
+        response_dict["consistency_warnings"] = consistency_issues
+        return response_dict
     except HTTPException as exc:
         result = "FAILED"
         diff = {"detail": str(exc.detail)}

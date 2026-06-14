@@ -1,5 +1,9 @@
 from fastapi.testclient import TestClient
 
+import json
+
+import pytest
+
 from app.api import credentials as credentials_api
 from app.core.credential_crypto import decrypt_secret, is_encrypted
 from app.database import SessionLocal
@@ -237,3 +241,39 @@ def test_credentials_update_audits_with_masked_payload() -> None:
             assert changed.get(key) == "***"
     finally:
         db.close()
+
+
+def test_decrypt_tampered_ciphertext_raises_credential_integrity_error(tmp_path, monkeypatch):
+    """Tampered ciphertext must surface as CredentialIntegrityError, not raw InvalidTag.
+
+    AESGCM raises ``cryptography.exceptions.InvalidTag`` on any tamper. Before
+    the fix, that exception leaked to callers; the API layer would render it
+    as a 500 with a cryptography-internal stack trace. After the fix, the
+    caller observes a single named exception that can be mapped to a 4xx/5xx
+    response with a sanitized message.
+    """
+    from app.core import credential_crypto
+    from app.core.credential_crypto import CredentialIntegrityError, encrypt_secret
+
+    monkeypatch.setenv("AUTO_TRADE_CREDENTIAL_KEY_PATH", str(tmp_path / "k.pem"))
+
+    ciphertext = encrypt_secret("super-secret-value")
+    assert credential_crypto.is_encrypted(ciphertext)
+
+    # Replace the entire encrypted blob with a valid-shape but tampered
+    # payload. We rebuild a known-good encryption structure, then mutate
+    # the ciphertext ("c") field so AES-GCM's tag check fails on decrypt.
+    body = ciphertext[len("enc:"):]
+    decoded = credential_crypto._decode(body)
+    payload = json.loads(decoded.decode("utf-8"))
+    # Mutate a single byte of the ciphertext — base64 round-trip preserves
+    # the JSON shape but invalidates the AES-GCM authentication tag.
+    raw_ciphertext = credential_crypto._decode(payload["c"])
+    tampered = bytes([raw_ciphertext[0] ^ 0x01]) + raw_ciphertext[1:]
+    payload["c"] = credential_crypto._encode(tampered)
+    tampered_body = credential_crypto._encode(
+        json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    )
+
+    with pytest.raises(CredentialIntegrityError):
+        decrypt_secret("enc:" + tampered_body)

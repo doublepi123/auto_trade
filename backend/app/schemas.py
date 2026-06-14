@@ -906,8 +906,56 @@ class WatchlistSnapshot(BaseModel):
     timestamp: str
 
 
+class WatchlistScoredSnapshot(WatchlistSnapshot):
+    """Snapshot enriched with the latest LLM score for the symbol.
+
+    Symbols without a cached score still appear, with ``score=0`` and
+    ``is_stale=True`` so the UI can render the full list while scoring runs.
+    """
+    score: float
+    is_stale: bool = True
+
+
 class WatchlistSetTradingRequest(BaseModel):
     id: int
+
+
+class WatchlistScoreRequest(BaseModel):
+    symbol: str = Field(max_length=50)
+    market: str = Field(default="US")
+    ttl_minutes: int = Field(default=60, ge=1, le=1440)
+
+    @field_validator("symbol")
+    @classmethod
+    def validate_symbol(cls, v: str) -> str:
+        return _normalize_symbol(v)
+
+    @field_validator("market")
+    @classmethod
+    def validate_market(cls, v: str) -> str:
+        if v not in ("US", "HK"):
+            raise ValueError("market must be US or HK")
+        return v
+
+
+class WatchlistScoreResponse(BaseModel):
+    id: int
+    symbol: str
+    market: str
+    score: float
+    rationale: str
+    confidence: float
+    recommended_action: str
+    source: str
+    created_at: datetime
+    expires_at: datetime
+    is_stale: bool = False
+
+    model_config = {"from_attributes": True}
+
+
+class WatchlistScoreListResponse(BaseModel):
+    scores: list[WatchlistScoreResponse]
 
 
 class PromptVersionCreate(BaseModel):

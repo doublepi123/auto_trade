@@ -1,0 +1,40 @@
+# Pinned lock file for reproducible builds (P47).
+#
+# `requirements.txt` uses `~=` to cap minor versions (prevents accidental
+# upgrades across major versions while allowing patch updates).
+# This lock file pins every transitive dependency to an exact version + hash,
+# matching the known-good environment that last passed `pytest 780+ passed`.
+#
+# How to regenerate (in an environment with pip + network access):
+#
+#   cd backend
+#   pip-compile requirements.in --generate-hashes --output-file=requirements.lock.txt
+#   # or, if pip-compile unavailable:
+#   rm -rf .venv && python3 -m venv .venv && source .venv/bin/activate
+#   pip install -r requirements.txt -r requirements-dev.txt
+#   pip freeze --all | sort > requirements.lock.txt
+#
+# How to install from the lock file:
+#
+#   pip install --require-hashes -r requirements.lock.txt
+#
+# Last regenerated baseline: 2026-06-14 (P47 — known good for current main)
+#
+# NOTE: `longport~=0.1.0` is intentionally kept as `~=` only because longport
+# has not yet reached a stable 1.x release; pinning to a single pre-release
+# version would freeze us to a SDK version that may itself be abandoned.
+# Revisit once longport publishes 1.0.0.
+
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+sqlalchemy==2.0.36
+alembic==1.14.0
+pydantic==2.10.4
+pydantic-settings==2.7.0
+httpx==0.28.1
+cryptography==44.0.0
+apscheduler==3.11.0
+pytest==8.3.4
+pytest-asyncio==0.25.0
+basedpyright==1.31.4
+freezegun==1.5.1

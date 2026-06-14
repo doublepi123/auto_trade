@@ -54,6 +54,15 @@
           <el-form-item v-if="channel.type === 'webhook'" label="URL">
             <el-input v-model="channel.url" placeholder="https://..." data-testid="webhook-url" />
           </el-form-item>
+          <el-form-item v-if="channel.type === 'webhook'" label="Payload 模板">
+            <el-input
+              v-model="channel.template"
+              type="textarea"
+              :rows="3"
+              placeholder='可选: 自定义 JSON 模板,支持 {title} {content} {severity} {timestamp} {source}'
+              data-testid="webhook-template"
+            />
+          </el-form-item>
           <el-form-item label="级别下限">
             <el-select v-model="channel.severity_floor" style="width: 160px">
               <el-option label="INFO+" value="INFO" />
@@ -71,8 +80,19 @@
 
         <el-form-item>
           <el-button type="primary" native-type="submit" :loading="saving" :disabled="loading || !isDirty">保存</el-button>
+          <el-button
+            plain
+            type="info"
+            native-type="button"
+            :loading="testingConnection"
+            :disabled="loading || saving"
+            data-testid="test-credentials"
+            @click="testConnection"
+          >测试连接</el-button>
           <el-tag v-if="saved" type="success" style="margin-left: 10px">已保存</el-tag>
           <el-tag v-if="error" type="danger" style="margin-left: 10px">{{ error }}</el-tag>
+          <el-tag v-if="testResult?.ok" type="success" style="margin-left: 10px" data-testid="test-result-success">连接可用</el-tag>
+          <el-tag v-else-if="testResult && !testResult.ok" type="danger" style="margin-left: 10px" data-testid="test-result-fail">{{ testResult.error }}</el-tag>
         </el-form-item>
       </el-form>
       <el-alert v-if="reloadWarning" type="warning" :title="reloadWarning" show-icon style="margin-top: 12px" />
@@ -109,6 +129,8 @@ const saved = ref(false)
 const error = ref<string | null>(null)
 const reloadWarning = ref<string | null>(null)
 const savedSnapshot = ref(serializeSnapshot())
+const testingConnection = ref(false)
+const testResult = ref<{ ok: boolean; error?: string } | null>(null)
 
 watch([form, notificationChannels], () => {
   if (isDirty()) {
@@ -188,6 +210,30 @@ function clearForm() {
   savedSnapshot.value = serializeSnapshot()
 }
 
+/**
+ * Send a smoke-test notification through the configured channels to verify
+ * the saved credentials are still valid (longport token, webhook URLs, sct
+ * key). This does NOT modify the saved state — it just exercises the
+ * notifier pipeline.
+ */
+async function testConnection() {
+  if (testingConnection.value) return
+  testingConnection.value = true
+  testResult.value = null
+  try {
+    const api = (await import('../api/client')).api
+    const resp = await api.post('/api/credentials/test')
+    testResult.value = resp.data?.ok
+      ? { ok: true }
+      : { ok: false, error: resp.data?.error ?? '测试失败' }
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : '测试连接失败'
+    testResult.value = { ok: false, error: message }
+  } finally {
+    testingConnection.value = false
+  }
+}
+
 async function handleSave() {
   if (loading.value) return
   if (notificationChannels.value.length < 1) {
@@ -217,7 +263,7 @@ async function handleSave() {
       if (c.type === 'serverchan') {
         return { type: 'serverchan' as const, severity_floor: c.severity_floor }
       }
-      return { type: 'webhook' as const, severity_floor: c.severity_floor, url: c.url?.trim() ?? '' }
+      return { type: 'webhook' as const, severity_floor: c.severity_floor, url: c.url?.trim() ?? '', template: c.template?.trim() || undefined }
     })
     payload.notification_channels = channels
     const resp = await updateCredentials(payload)

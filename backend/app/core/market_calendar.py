@@ -18,6 +18,8 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import Iterable
 from zoneinfo import ZoneInfo
 
+from app.core.holiday_calendar import closure_label, is_market_closed
+
 
 @dataclass(frozen=True)
 class MarketSession:
@@ -40,6 +42,8 @@ class MarketSession:
     def is_rth(self, instant: datetime) -> bool:
         local = self.local(instant)
         if local.weekday() >= 5:
+            return False
+        if is_market_closed(self.code, local.date()):
             return False
         current = local.time()
         if not (self.rth_open <= current < self.rth_close):
@@ -113,8 +117,10 @@ def market_for_symbol(symbol: str) -> str:
 def next_session_open(market: str, instant: datetime | None = None) -> datetime:
     """Return the next RTH open in UTC after ``instant``.
 
-    Useful for diagnostic UI ("trading resumes at ...") — does not consult
-    holiday calendars.
+    Skips weekends and full-day market closures. If the lookup overflows the
+    holiday calendar's coverage window (data ends 2026 currently), the
+    function falls back to skipping weekends only — it never returns a date
+    that ``is_market_closed`` would mark as closed within the covered range.
     """
     session = get_session(market)
     here = _ensure_utc(instant or datetime.now(timezone.utc)).astimezone(session.timezone)
@@ -134,7 +140,10 @@ def next_session_open(market: str, instant: datetime | None = None) -> datetime:
     candidate = here.replace(hour=session.rth_open.hour, minute=session.rth_open.minute, second=0, microsecond=0)
     if here > candidate or here.weekday() >= 5:
         candidate = candidate + timedelta(days=1)
-    while candidate.weekday() >= 5:
+    # Bound the search to avoid infinite loops on misconfigured clocks.
+    for _ in range(14):
+        if candidate.weekday() < 5 and not is_market_closed(session.code, candidate.date()):
+            return candidate.astimezone(timezone.utc)
         candidate = candidate + timedelta(days=1)
     return candidate.astimezone(timezone.utc)
 

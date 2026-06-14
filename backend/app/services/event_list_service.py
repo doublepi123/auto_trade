@@ -113,9 +113,19 @@ def list_timeline_events(
     skip_category: str | None = None,
     page: int,
     page_size: int,
+    query: str | None = None,
 ) -> tuple[list[TimelineEventResponse], int]:
-    """Merge trade_events and audit_logs for the timeline API (spec §5.2)."""
+    """Merge trade_events and audit_logs for the timeline API (spec §5.2).
+
+    ``query`` performs a case-insensitive substring match on the user-facing
+    text columns (TradeEvent.message, AuditLog.action, both sides' symbol).
+    It is intentionally a narrow OR-of-columns search so it stays cheap on
+    SQLite and easy to reason about for the UI.
+    """
     et = [e.strip() for e in (event_types or []) if e and e.strip()]
+    query_term = (query or "").strip()
+    if query_term:
+        like = f"%{query_term}%"
 
     if source == "trade":
         tq = db.query(TradeEvent)
@@ -123,6 +133,12 @@ def list_timeline_events(
             tq = tq.filter(TradeEvent.symbol == symbol)
         if et:
             tq = tq.filter(TradeEvent.event_type.in_(et))
+        if query_term:
+            tq = tq.filter(
+                (TradeEvent.message.ilike(like))
+                | (TradeEvent.symbol.ilike(like))
+                | (TradeEvent.event_type.ilike(like))
+            )
         tq = _apply_skip_category_filter(tq, skip_category)
         total = tq.count()
         rows = _paginate_query(tq.order_by(TradeEvent.created_at.desc(), TradeEvent.id.desc()), page, page_size)
@@ -132,6 +148,11 @@ def list_timeline_events(
         aq = db.query(AuditLog)
         if et:
             aq = aq.filter(AuditLog.action.in_(et))
+        if query_term:
+            aq = aq.filter(
+                (AuditLog.action.ilike(like))
+                | (AuditLog.request_summary.ilike(like))
+            )
         total = aq.count()
         rows = _paginate_query(aq.order_by(AuditLog.created_at.desc(), AuditLog.id.desc()), page, page_size)
         return [_audit_row_to_out(r) for r in rows], total
@@ -149,6 +170,12 @@ def list_timeline_events(
         tq = tq.filter(TradeEvent.symbol == symbol)
     if et:
         tq = tq.filter(TradeEvent.event_type.in_(et))
+    if query_term:
+        tq = tq.filter(
+            (TradeEvent.message.ilike(like))
+            | (TradeEvent.symbol.ilike(like))
+            | (TradeEvent.event_type.ilike(like))
+        )
     tq = _apply_skip_category_filter(tq, skip_category)
     trade_total = tq.count()
     trade_rows = tq.order_by(TradeEvent.created_at.desc(), TradeEvent.id.desc()).limit(fetch_n).all()
@@ -163,6 +190,11 @@ def list_timeline_events(
             aq = aq.filter(AuditLog.request_summary.contains(symbol))
         if et:
             aq = aq.filter(AuditLog.action.in_(et))
+        if query_term:
+            aq = aq.filter(
+                (AuditLog.action.ilike(like))
+                | (AuditLog.request_summary.ilike(like))
+            )
         audit_total = aq.count()
         audit_rows = aq.order_by(AuditLog.created_at.desc(), AuditLog.id.desc()).limit(fetch_n).all()
 

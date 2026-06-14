@@ -114,3 +114,149 @@ def test_severity_for_risk_event_mapping() -> None:
     assert _severity_for_risk_event("KILL_SWITCH") == "CRITICAL"
     assert _severity_for_risk_event("ORDER_PERSISTENCE_FAILED") == "CRITICAL"
     assert _severity_for_risk_event("ORDER_FAILED") == "WARNING"
+
+
+def test_webhook_template_substitutes_known_tokens():
+    from app.core.notifiers.webhook import (
+        _render_template,
+        _validate_template,
+    )
+
+    template = '{"text": "[{severity}] {title}: {content}", "ts": "{timestamp}"}'
+    validated = _validate_template(template)
+    payload = _render_template(
+        validated, title="ORDER", content="BUY 100 AAPL", severity="INFO"
+    )
+    assert payload["text"].startswith("[INFO] ORDER: BUY 100 AAPL")
+    assert "ts" in payload
+
+
+def test_webhook_template_rejects_unknown_token():
+    from app.core.notifiers.webhook import _TemplateError, _validate_template
+
+    bad = '{"leak": "{api_key}"}'
+    with pytest.raises(_TemplateError):
+        _validate_template(bad)
+
+
+def test_webhook_template_must_be_json_object_shape():
+    from app.core.notifiers.webhook import _TemplateError, _validate_template
+
+    # Bare strings and arrays are valid JSON but useless as a webhook
+    # payload. The validator must require the template to start with '{'
+    # so the rendered output is unambiguously an object.
+    with pytest.raises(_TemplateError):
+        _validate_template('"hello"')
+    with pytest.raises(_TemplateError):
+        _validate_template("[1, 2, 3]")
+
+
+def test_webhook_template_render_surfaces_json_errors():
+    from app.core.notifiers.webhook import _render_template
+
+    # Template that doesn't survive substitution (mismatched brace) should
+    # raise so the notifier falls back to the default payload.
+    with pytest.raises(Exception):
+        _render_template('{"a": "}', title="x", content="y", severity="INFO")
+
+
+def test_webhook_notifier_falls_back_when_template_invalid():
+    from app.core.notifiers.webhook import WebhookNotifier
+
+    # Template with unknown token must be rejected at construction.
+    n = WebhookNotifier(
+        "https://example.invalid/hook",
+        template='{"x": "{api_key}"}',
+    )
+    assert n._template is None
+
+
+def test_retry_queue_succeeds_on_second_attempt():
+    from app.core.notifiers.retry_queue import NotificationRetryQueue
+
+    calls: list[int] = []
+
+    def flaky_send(title, content, severity):
+        calls.append(1)
+        return len(calls) >= 2  # fail the first time, succeed the second
+
+    q = NotificationRetryQueue(flaky_send, initial_backoff=0.01, max_backoff=0.05)
+    q.start()
+    q.enqueue("title", "body", "WARNING")
+    delivered = q.drain()
+    q.stop()
+    assert delivered == 1
+    assert len(calls) >= 2
+
+
+def test_retry_queue_exhausts_after_max_attempts():
+    from app.core.notifiers.retry_queue import NotificationRetryQueue
+
+    calls: list[int] = []
+
+    def always_fail(title, content, severity):
+        calls.append(1)
+        return False
+
+    q = NotificationRetryQueue(
+        always_fail, max_attempts=3, initial_backoff=0.01, max_backoff=0.05
+    )
+    q.enqueue("t", "c", "INFO")
+    q.drain()
+    q.stop()
+    assert len(calls) == 3
+    metrics = q.metrics()
+    assert metrics["exhausted"] == 1
+
+
+def test_retry_queue_drops_when_full():
+    from app.core.notifiers.retry_queue import NotificationRetryQueue
+
+    def always_fail(title, content, severity):
+        return False
+
+    q = NotificationRetryQueue(always_fail, capacity=2, initial_backoff=0.01)
+    assert q.enqueue("t1", "c", "INFO") is True
+    assert q.enqueue("t2", "c", "INFO") is True
+    assert q.enqueue("t3", "c", "INFO") is False
+    q.stop()
+    assert q.metrics()["dropped_capacity"] == 1
+
+
+def test_multi_channel_enqueues_to_retry_on_full_failure():
+    from app.core.notifiers.multi_channel import MultiChannelNotifier
+    from app.core.notifiers.retry_queue import NotificationRetryQueue
+
+    class FailingChannel:
+        def __init__(self):
+            self.attempts = 0
+
+        def send(self, title, content, severity="INFO"):
+            self.attempts += 1
+            return False
+
+        def notify_order(self, *args, **kwargs):
+            return False
+
+        def notify_fill(self, *args, **kwargs):
+            return False
+
+        def notify_risk_event(self, *args, **kwargs):
+            return False
+
+    captured = []
+
+    def send_fn(title, content, severity):
+        captured.append((title, content, severity))
+        return True
+
+    queue = NotificationRetryQueue(send_fn, initial_backoff=0.01)
+    failing = FailingChannel()
+    notifier = MultiChannelNotifier([(failing, "INFO")], retry_queue=queue)
+    assert notifier.send("alert", "body", severity="CRITICAL") is False
+    assert failing.attempts == 1
+    # Drain should re-dispatch the failed message.
+    delivered = queue.drain()
+    queue.stop()
+    assert delivered == 1
+    assert captured == [("alert", "body", "CRITICAL")]

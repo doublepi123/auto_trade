@@ -7,6 +7,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.core.audit import AuditLogger
+from app.config import settings
 from app.models import AuditLog, Base
 
 
@@ -69,6 +70,9 @@ def test_hash_actor_consistent_and_anonymous_when_missing():
 
 
 def test_extract_ip_prefers_x_forwarded_for():
+    # X-Forwarded-For is attacker-controlled in the current deployment (no
+    # reverse proxy in front of the backend). Audit must use the real socket
+    # peer instead. This test pins the secure behavior.
     from starlette.requests import Request
 
     scope = {
@@ -77,7 +81,7 @@ def test_extract_ip_prefers_x_forwarded_for():
         "client": ("127.0.0.1", 12345),
     }
     req = Request(scope)
-    assert AuditLogger.extract_ip(req) == "203.0.113.5"
+    assert AuditLogger.extract_ip(req) == "127.0.0.1"
 
 
 def test_extract_ip_falls_back_to_client_host():
@@ -108,7 +112,8 @@ def test_extract_actor_returns_hash_and_ip():
     }
     actor, ip = extract_actor(Request(scope))
     assert actor == AuditLogger.hash_actor("key-abc")
-    assert ip == "203.0.113.5"
+    # Audit uses the real socket peer, not the (attacker-controlled) XFF header.
+    assert ip == "127.0.0.1"
 
 
 def test_extract_actor_anonymous_when_no_header():
@@ -119,3 +124,76 @@ def test_extract_actor_anonymous_when_no_header():
     actor, ip = extract_actor(Request(scope))
     assert actor == "anonymous"
     assert ip == "127.0.0.1"
+
+
+def test_normalize_summary_truncates_multibyte_safely(logger):
+    """Long summaries should be truncated at the byte limit without splitting
+    a multi-byte UTF-8 sequence. Regression test for the O(n^2) re-encode
+    loop that the previous implementation used.
+    """
+    # Build a string that exceeds the configured limit. Use a mix of ASCII
+    # and 3-byte CJK characters so the truncation point falls in the middle
+    # of a multi-byte sequence.
+    big = "中" * 5000
+    truncated = logger._normalize_summary(big)
+    assert len(truncated.encode("utf-8")) <= settings.audit_request_summary_limit
+    assert truncated.endswith("...truncated")
+    # The first character must survive (no off-by-one trimming).
+    assert truncated.startswith("中")
+
+
+def test_export_audit_logs_csv_includes_all_fields():
+    from fastapi.testclient import TestClient
+    from app.main import app
+    from app.api.deps import get_audit_logger
+    from app import database
+
+    database.init_db()
+    client = TestClient(app)
+    audit = get_audit_logger()
+    audit.record("EXPORT_TEST_START", severity="INFO", actor_hash="actor-1", source_ip="10.0.0.1")
+    audit.record("EXPORT_TEST_PAUSE", severity="WARNING", actor_hash="actor-2", source_ip="10.0.0.2")
+    resp = client.get("/api/audit-logs/export?format=csv&limit=1000")
+    assert resp.status_code == 200
+    body = resp.text
+    assert "id,action,severity" in body
+    assert "EXPORT_TEST_START" in body
+    assert "EXPORT_TEST_PAUSE" in body
+
+
+def test_export_audit_logs_json_filter_by_action():
+    from fastapi.testclient import TestClient
+    from app.main import app
+    from app.api.deps import get_audit_logger
+    from app import database
+
+    database.init_db()
+    client = TestClient(app)
+    audit = get_audit_logger()
+    audit.record("EXPORT_STRATEGY_UPDATE", severity="INFO", actor_hash="x")
+    audit.record("EXPORT_CREDENTIALS_UPDATE", severity="INFO", actor_hash="x")
+    resp = client.get(
+        "/api/audit-logs/export?format=json&action=EXPORT_STRATEGY_UPDATE&limit=1000"
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert all(row["action"] == "EXPORT_STRATEGY_UPDATE" for row in data)
+
+
+def test_export_audit_logs_severity_filter():
+    from fastapi.testclient import TestClient
+    from app.main import app
+    from app.api.deps import get_audit_logger
+    from app import database
+
+    database.init_db()
+    client = TestClient(app)
+    audit = get_audit_logger()
+    audit.record("EXPORT_KILL", severity="CRITICAL", actor_hash="x")
+    audit.record("EXPORT_PAUSE", severity="WARNING", actor_hash="x")
+    resp = client.get(
+        "/api/audit-logs/export?format=json&severity=critical&limit=1000"
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert all(row["severity"] == "CRITICAL" for row in data)

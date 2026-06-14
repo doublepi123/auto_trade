@@ -7,6 +7,7 @@ import os
 import time
 from pathlib import Path
 
+from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -15,6 +16,10 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+class CredentialIntegrityError(Exception):
+    """Raised when an encrypted credential cannot be decrypted (tampered or wrong key)."""
 
 
 _PREFIX = "enc:"
@@ -75,7 +80,13 @@ def decrypt_secret(value: str) -> str:
             label=None,
         ),
     )
-    return AESGCM(data_key).decrypt(_decode(payload["n"]), _decode(payload["c"]), None).decode("utf-8")
+    try:
+        plaintext = AESGCM(data_key).decrypt(_decode(payload["n"]), _decode(payload["c"]), None)
+    except InvalidTag as exc:
+        raise CredentialIntegrityError(
+            "encrypted credential integrity check failed (ciphertext tampered or key changed)"
+        ) from exc
+    return plaintext.decode("utf-8")
 
 
 def _load_or_create_salt() -> bytes:
@@ -96,19 +107,27 @@ def _load_or_create_salt() -> bytes:
 
 _LEGACY_SALT = b"auto_trade_credential_kek"
 
+_KEK_CACHE: dict[tuple[str, bytes | None], bytes] = {}
+
 
 def _derive_kek(salt: bytes | None = None) -> bytes | None:
     """Derive a key-encrypting key from CREDENTIAL_MASTER_KEY env var via PBKDF2."""
     master_key = os.environ.get("CREDENTIAL_MASTER_KEY")
     if not master_key:
         return None
+    cache_key = (master_key, salt)
+    cached = _KEK_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
     kdf = PBKDF2HMAC(
         algorithm=hashes.SHA256(),
         length=32,
         salt=salt if salt is not None else _load_or_create_salt(),
         iterations=600_000,
     )
-    return kdf.derive(master_key.encode("utf-8"))
+    derived = kdf.derive(master_key.encode("utf-8"))
+    _KEK_CACHE[cache_key] = derived
+    return derived
 
 
 def _load_private_key_once() -> rsa.RSAPrivateKey:

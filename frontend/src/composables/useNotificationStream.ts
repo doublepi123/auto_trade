@@ -236,12 +236,20 @@ async function backfill(limit = 20) {
   processEvents(items, true)
 }
 
-function _enable() {
+async function _enable() {
   if (sharedEnabled) return
   sharedEnabled = true
-  // Immediate backfill on enable
-  backfill()
-  // Start polling
+  // Await backfill so the first poll() does not race against an in-flight
+  // backfill and re-emit already-known events as fresh notifications.
+  try {
+    await backfill()
+  } catch (exc) {
+    console.warn('notification backfill failed:', exc)
+  }
+  // Re-check after the await: _disable() may have run during the backfill
+  // (e.g. last consuming component unmounted). Without this guard we would
+  // start a polling timer that never gets cleared.
+  if (!sharedEnabled) return
   sharedPollTimer = setInterval(poll, POLL_INTERVAL_MS)
 }
 

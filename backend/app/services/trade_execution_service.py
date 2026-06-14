@@ -64,9 +64,20 @@ _RecordOrderSkipped = Callable[[str, str, str, dict[str, object]], None]
 class OrderStatus:
     broker_order_id: str
     status: str
-    executed_quantity: Decimal = Decimal("0")
-    executed_price: Decimal = Decimal("0")
+    executed_quantity: Optional[Decimal] = None
+    executed_price: Optional[Decimal] = None
     reason: str = ""
+
+    @staticmethod
+    def _positive(value: Optional[Decimal]) -> Decimal:
+        """Return ``value`` if it is a positive Decimal, else ``Decimal(0)``.
+
+        Use this everywhere a downstream comparison or multiplication would
+        otherwise raise ``TypeError`` against ``None`` (the natural state
+        when the broker hasn't reported a fill yet)."""
+        if value is None:
+            return Decimal("0")
+        return value if value > 0 else Decimal("0")
 
 
 @dataclass(frozen=True)
@@ -600,8 +611,8 @@ class TradeExecutionService:
         if order_status is None or order_status.status != "FILLED":
             return order_status
 
-        fill_price = order_status.executed_price if order_status.executed_price > 0 else price
-        fill_qty = order_status.executed_quantity if order_status.executed_quantity > 0 else Decimal(qty)
+        fill_price = OrderStatus._positive(order_status.executed_price) or price
+        fill_qty = OrderStatus._positive(order_status.executed_quantity) or Decimal(qty)
         self._record_entry_price(symbol, fill_price, fill_qty)
         self._safe_notify_order(notifier, "BUY", symbol, str(fill_qty), str(fill_price), order_status.broker_order_id)
         logger.info("BUY: %s qty=%s price=%s", symbol, fill_qty, fill_price)
@@ -667,8 +678,8 @@ class TradeExecutionService:
         if order_status is None or order_status.status != "FILLED":
             return order_status
 
-        fill_price = order_status.executed_price if order_status.executed_price > 0 else price
-        fill_qty = order_status.executed_quantity if order_status.executed_quantity > 0 else qty
+        fill_price = OrderStatus._positive(order_status.executed_price) or price
+        fill_qty = OrderStatus._positive(order_status.executed_quantity) or qty
         pnl = float((fill_price - pos_avg_price) * fill_qty)
         self._safe_notify_order(notifier, "SELL", symbol, str(fill_qty), str(fill_price), order_status.broker_order_id)
         risk.record_trade(pnl)
@@ -714,8 +725,8 @@ class TradeExecutionService:
         if order_status is None or order_status.status != "FILLED":
             return order_status
 
-        fill_price = order_status.executed_price if order_status.executed_price > 0 else price
-        fill_qty = order_status.executed_quantity if order_status.executed_quantity > 0 else Decimal(qty)
+        fill_price = OrderStatus._positive(order_status.executed_price) or price
+        fill_qty = OrderStatus._positive(order_status.executed_quantity) or Decimal(qty)
         self._record_entry_price(symbol, fill_price, fill_qty)
         self._safe_notify_order(notifier, "SELL_SHORT", symbol, str(fill_qty), str(fill_price), order_status.broker_order_id)
         logger.info("SELL_SHORT: %s qty=%s price=%s", symbol, fill_qty, fill_price)
@@ -781,8 +792,8 @@ class TradeExecutionService:
         if order_status is None or order_status.status != "FILLED":
             return order_status
 
-        fill_price = order_status.executed_price if order_status.executed_price > 0 else price
-        fill_qty = order_status.executed_quantity if order_status.executed_quantity > 0 else qty
+        fill_price = OrderStatus._positive(order_status.executed_price) or price
+        fill_qty = OrderStatus._positive(order_status.executed_quantity) or qty
         pnl = float((pos_avg_price - fill_price) * fill_qty)
         self._safe_notify_order(notifier, "BUY_TO_COVER", symbol, str(fill_qty), str(fill_price), order_status.broker_order_id)
         risk.record_trade(pnl)
@@ -1043,12 +1054,13 @@ class TradeExecutionService:
                 self._finalize_pending_fill(pending, cancel_status, risk=risk, notifier=notifier, notify_risk_event=notify_risk_event)
                 self._clear_pending_order(pending.broker_order_id)
                 return
-            if cancel_status.executed_quantity > 0:
+            fill_qty = OrderStatus._positive(cancel_status.executed_quantity)
+            if fill_qty > 0:
                 # Partial fill before cancel — finalize the partial fill
-                self._finalize_pending_fill(pending, cancel_status, risk=risk, notifier=notifier, fill_qty=cancel_status.executed_quantity, notify_risk_event=notify_risk_event)
+                self._finalize_pending_fill(pending, cancel_status, risk=risk, notifier=notifier, fill_qty=fill_qty, notify_risk_event=notify_risk_event)
                 cancel_finalized = True
                 self._clear_pending_order(pending.broker_order_id)
-                if self._should_restore_after_partial_terminal_fill(pending, cancel_status.executed_quantity) and effective_restore is not None and pending.engine_snapshot is not None:
+                if self._should_restore_after_partial_terminal_fill(pending, fill_qty) and effective_restore is not None and pending.engine_snapshot is not None:
                     effective_restore(pending.engine_snapshot)
                 return
         except Exception:
@@ -1315,11 +1327,31 @@ class TradeExecutionService:
     @staticmethod
     def _coerce_order_status(result: object, default_order_id: str) -> OrderStatus:
         status = getattr(result, "status", "SUBMITTED")
+        # Use None (not 0) when the broker did not report a fill. The runner's
+        # _update_order_status only overwrites executed_* when the new value
+        # is non-None, so passing 0 would clobber a previously-recorded partial
+        # fill and drop the order from daily PnL.
+        raw_qty = getattr(result, "executed_quantity", None)
+        raw_price = getattr(result, "executed_price", None)
+        # Use None (not 0) when the broker did not report a fill. The runner's
+        # _update_order_status only overwrites executed_* when the new value
+        # is non-None, so passing 0 would clobber a previously-recorded partial
+        # fill and drop the order from daily PnL.
+        executed_qty: Decimal | None
+        if raw_qty is None or raw_qty == 0:
+            executed_qty = None
+        else:
+            executed_qty = TradeExecutionService._resolved_decimal(result, "executed_quantity", Decimal("0"))
+        executed_price: Decimal | None
+        if raw_price is None or raw_price == 0:
+            executed_price = None
+        else:
+            executed_price = TradeExecutionService._resolved_decimal(result, "executed_price", Decimal("0"))
         return OrderStatus(
             broker_order_id=str(getattr(result, "broker_order_id", default_order_id)),
             status=status,
-            executed_quantity=TradeExecutionService._resolved_decimal(result, "executed_quantity", Decimal("0")),
-            executed_price=TradeExecutionService._resolved_decimal(result, "executed_price", Decimal("0")),
+            executed_quantity=executed_qty,
+            executed_price=executed_price,
         )
 
     def _record_entry_price(self, symbol: str, fill_price: Decimal, fill_qty: Decimal) -> None:

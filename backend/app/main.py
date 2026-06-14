@@ -12,8 +12,10 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.backtest import router as backtest_router
+from app.api.calendar import router as calendar_router
 from app.api.credentials import router as credentials_router
 from app.api.experiments import router as experiments_router
+from app.api.metrics import router as metrics_router
 from app.api.indicators import router as indicators_router
 from app.api.performance import router as performance_router
 from app.api.llm_advisor import router as llm_advisor_router
@@ -80,6 +82,43 @@ def _prune_llm_analysis_timestamps(now_monotonic: float) -> int:
     global _llm_analysis_timestamps
     _llm_analysis_timestamps = [ts for ts in _llm_analysis_timestamps if ts >= cutoff]
     return len(_llm_analysis_timestamps)
+
+
+def _prune_llm_per_symbol_caches() -> int:
+    """Drop per-symbol cache entries for symbols the runner no longer tracks.
+
+    Called once at the top of every ``_llm_analysis_tick``. Returns the
+    number of entries removed across the two module-level dicts.
+    """
+    from app.runner import get_runner
+
+    runner = get_runner()
+    # Symbols the runner currently cares about (either primary or in the
+    # symbol_runtimes dict). Lazy-created rts for unknown symbols are not
+    # queried here so they accumulate in the dict; the next sync of the
+    # watchlist will evict them.
+    known: set[str] = set()
+    engine = getattr(runner, "engine", None)
+    primary = ""
+    if engine is not None:
+        params = getattr(engine, "params", None)
+        if params is not None:
+            primary = getattr(params, "symbol", "") or ""
+    if primary:
+        known.add(primary)
+    known.update(getattr(runner, "_symbol_runtimes", {}).keys())
+
+    removed = 0
+    with _llm_globals_lock:
+        for stale in [k for k in _last_llm_trigger_price_by_symbol if k not in known]:
+            del _last_llm_trigger_price_by_symbol[stale]
+            removed += 1
+        for stale in [k for k in _llm_last_analysis_at_by_symbol if k not in known]:
+            del _llm_last_analysis_at_by_symbol[stale]
+            removed += 1
+    if removed:
+        logger.debug("pruned %d stale LLM per-symbol cache entries", removed)
+    return removed
 
 
 def _llm_runtime_targets(runner: Any, primary_symbol: str, primary_market: str) -> list[tuple[str, str, Any, bool]]:
@@ -155,6 +194,11 @@ async def _llm_analysis_tick() -> None:
     from app.services.strategy_service import StrategyService
     from app.runner import get_runner
     global _last_llm_trigger_price
+
+    # Periodically prune the per-symbol LLM caches so they cannot grow
+    # unboundedly as the watchlist churns. We keep the most recent
+    # entry for every symbol the runner currently knows about.
+    _prune_llm_per_symbol_caches()
 
     db = SessionLocal()
     try:
@@ -428,8 +472,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[o.strip() for o in settings.cors_origins.split(",") if o.strip()],
     allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "X-API-Key", "Content-Type", "Accept"],
 )
 
 app.include_router(strategy_router)
@@ -444,6 +488,8 @@ app.include_router(performance_router)
 app.include_router(reports_router)
 app.include_router(indicators_router)
 app.include_router(review_router)
+app.include_router(calendar_router)
+app.include_router(metrics_router)
 app.include_router(ws_router)
 
 

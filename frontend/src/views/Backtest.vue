@@ -201,7 +201,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import BacktestChart from '../components/BacktestChart.vue'
 import { getStrategy, runBacktest } from '../api'
 import type { BacktestParams, BacktestResult } from '../types'
@@ -222,6 +222,11 @@ const defaultParams: BacktestParams = {
   slippage_pct: 0,
   stop_loss_pct: 0,
 }
+
+// Snapshot used by loadCurrentStrategy() to detect whether the user has
+// modified any of the strategy-mirrored fields since the page was opened.
+// Compared field-by-field so a re-sync of the same values is not flagged.
+const initialForm: BacktestParams = { ...defaultParams }
 
 const sampleCsv = `timestamp,open,high,low,close,volume
 2026-05-22T10:00:00Z,150,160,99,105,1000
@@ -247,6 +252,28 @@ const canRun = computed(() => (
 ))
 
 async function loadCurrentStrategy() {
+  // Detect unsaved edits to avoid silently clobbering the user's input.
+  const baseline = initialForm
+  const isDirty = (
+    form.value.symbol !== baseline.symbol
+    || form.value.buy_low !== baseline.buy_low
+    || form.value.sell_high !== baseline.sell_high
+    || form.value.short_selling !== baseline.short_selling
+    || form.value.min_profit_amount !== baseline.min_profit_amount
+    || form.value.max_daily_loss !== baseline.max_daily_loss
+    || form.value.max_consecutive_losses !== baseline.max_consecutive_losses
+  )
+  if (isDirty) {
+    try {
+      await ElMessageBox.confirm(
+        '当前表单有未保存的编辑，同步策略将覆盖这些修改。是否继续？',
+        '同步当前策略',
+        { confirmButtonText: '覆盖并同步', cancelButtonText: '取消', type: 'warning' }
+      )
+    } catch {
+      return
+    }
+  }
   try {
     const strategy = await getStrategy()
     form.value = {
@@ -259,6 +286,17 @@ async function loadCurrentStrategy() {
       max_daily_loss: strategy.max_daily_loss,
       max_consecutive_losses: strategy.max_consecutive_losses,
     }
+    // Refresh the baseline so the next "sync" doesn't re-flag the values
+    // we just pulled from the live strategy. Without this, the second
+    // click of the button always asks "覆盖并同步" even when nothing has
+    // actually changed.
+    initialForm.symbol = form.value.symbol
+    initialForm.buy_low = form.value.buy_low
+    initialForm.sell_high = form.value.sell_high
+    initialForm.short_selling = form.value.short_selling
+    initialForm.min_profit_amount = form.value.min_profit_amount
+    initialForm.max_daily_loss = form.value.max_daily_loss
+    initialForm.max_consecutive_losses = form.value.max_consecutive_losses
     ElMessage.success('已同步当前策略')
   } catch {
     ElMessage.error('同步失败')

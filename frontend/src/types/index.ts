@@ -23,6 +23,12 @@ export interface NotificationChannel {
   type: 'serverchan' | 'webhook'
   severity_floor: 'INFO' | 'WARNING' | 'CRITICAL'
   url?: string
+  /** Optional JSON payload template for webhook channels.
+   *  Supports the tokens {title} {content} {severity} {timestamp} {source}.
+   *  Must be a JSON object string starting with '{'. Unknown tokens
+   *  are rejected at the backend and the channel falls back to the
+   *  default payload. */
+  template?: string
 }
 
 export interface CredentialsConfig {

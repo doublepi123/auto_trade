@@ -108,6 +108,58 @@ class TestWebSocketEndpoint:
         ws.close.assert_awaited_once_with(code=1008, reason="Invalid or missing API key")
 
     @pytest.mark.asyncio
+    async def test_ws_rejects_in_prod_when_api_key_unset(self, monkeypatch) -> None:
+        """P0-1: prod environment + empty api_key must reject (not silently accept).
+
+        Previously the WS path used `return settings.env in ("dev","test")`,
+        diverging from auth.py:require_api_key which rejects the same config
+        over HTTP. This test pins the aligned behavior.
+        """
+        from app.config import settings
+
+        monkeypatch.setattr(settings, "api_key", "")
+        monkeypatch.setattr(settings, "env", "prod")
+        ws = AsyncMock()
+
+        await websocket_endpoint(ws)
+
+        ws.accept.assert_awaited_once()
+        ws.close.assert_awaited_once_with(code=1008, reason="Invalid or missing API key")
+
+    @pytest.mark.asyncio
+    async def test_ws_accepts_in_dev_when_api_key_unset(self, monkeypatch) -> None:
+        """dev environment + empty api_key must accept (backwards compatible)."""
+        from app.config import settings
+        import app.api.ws as ws_module
+
+        ws_module._auth_disabled_warned = False  # reset warning latch
+        monkeypatch.setattr(settings, "api_key", "")
+        monkeypatch.setattr(settings, "env", "dev")
+        ws = AsyncMock()
+        ws.receive_text.side_effect = ["ping", Exception("stop")]
+
+        with pytest.raises(Exception):
+            await websocket_endpoint(ws)
+
+        ws.accept.assert_awaited_once()
+        ws.send_text.assert_any_await(json.dumps({"type": "pong"}))
+        await manager.disconnect(ws)
+
+    @pytest.mark.asyncio
+    async def test_ws_rejects_in_staging_when_api_key_unset(self, monkeypatch) -> None:
+        """Any non-dev/non-test env must reject when api_key is unset."""
+        from app.config import settings
+
+        monkeypatch.setattr(settings, "api_key", "")
+        monkeypatch.setattr(settings, "env", "staging")
+        ws = AsyncMock()
+
+        await websocket_endpoint(ws)
+
+        ws.accept.assert_awaited_once()
+        ws.close.assert_awaited_once_with(code=1008, reason="Invalid or missing API key")
+
+    @pytest.mark.asyncio
     async def test_ws_accepts_post_connect_auth_message(self, monkeypatch) -> None:
         from app.config import settings
 

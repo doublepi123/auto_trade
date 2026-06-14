@@ -63,3 +63,22 @@ export async function stopTrading(reason = 'manual'): Promise<{ message: string 
   const resp = await api.post('/api/control/stop', { reason })
   return resp.data
 }
+
+export interface MetricsSummary {
+  trade_count: number
+  win_rate: number
+  profit_factor: number | null
+  sharpe_ratio: number | null
+  avg_pnl: number
+  max_drawdown: number
+  window_days: number
+}
+
+export interface GetMetricsParams {
+  days?: number
+}
+
+export async function getMetricsSummary(params: GetMetricsParams = {}): Promise<MetricsSummary> {
+  const resp = await api.get('/api/metrics/summary', { params })
+  return resp.data
+}

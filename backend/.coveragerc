@@ -1,0 +1,20 @@
+[run]
+source = app
+omit =
+    app/main.py
+    app/__init__.py
+    app/api/ws.py
+    app/runner.py
+    app/database.py
+    app/config.py
+
+[report]
+show_missing = True
+skip_covered = False
+sort = -Cover
+exclude_lines =
+    pragma: no cover
+    if __name__ == .__main__.:
+    if TYPE_CHECKING:
+    raise NotImplementedError
+    \.\.\.

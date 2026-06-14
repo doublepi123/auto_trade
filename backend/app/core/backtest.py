@@ -84,6 +84,8 @@ class BacktestMetrics:
     skipped_signals: int
     final_state: str
     sharpe_ratio: Optional[float] = None
+    sortino_ratio: Optional[float] = None
+    calmar_ratio: Optional[float] = None
     profit_factor: Optional[float] = None
     profit_loss_ratio: Optional[float] = None
 
@@ -252,6 +254,8 @@ class BacktestEngine:
         losing_trades = len([pnl for pnl in closed_trade_pnls if pnl < 0])
         closed_trade_count = len(closed_trade_pnls)
         sharpe = self._calc_sharpe_ratio(equity_curve)
+        sortino = self._calc_sortino_ratio(equity_curve)
+        calmar = self._calc_calmar_ratio(equity_curve)
         profit_factor = self._calc_profit_factor(closed_trade_pnls)
         profit_loss_ratio = self._calc_profit_loss_ratio(closed_trade_pnls)
         metrics = BacktestMetrics(
@@ -270,6 +274,8 @@ class BacktestEngine:
             skipped_signals=len(skipped),
             final_state=position.side if position else "flat",
             sharpe_ratio=sharpe,
+            sortino_ratio=sortino,
+            calmar_ratio=calmar,
             profit_factor=profit_factor,
             profit_loss_ratio=profit_loss_ratio,
         )
@@ -300,6 +306,58 @@ class BacktestEngine:
         if std == 0:
             return None
         return mean_ret / std
+
+    @staticmethod
+    def _calc_sortino_ratio(equity_curve: list[BacktestEquityPoint]) -> Optional[float]:
+        """Like Sharpe, but only penalises downside volatility.
+
+        A common "is my strategy earning enough for the risk I'm taking"
+        metric. Returns None when fewer than 2 returns or no downside
+        deviation (i.e. every return is >= 0).
+        """
+        if len(equity_curve) < 2:
+            return None
+        returns: list[float] = []
+        for i in range(1, len(equity_curve)):
+            prev = equity_curve[i - 1].equity
+            if prev > 0:
+                returns.append((equity_curve[i].equity - prev) / prev)
+            else:
+                returns.append(0.0)
+        if len(returns) < 2:
+            return None
+        mean_ret = sum(returns) / len(returns)
+        downside = [r for r in returns if r < 0]
+        if not downside:
+            return None
+        downside_dev = (sum(r ** 2 for r in downside) / len(downside)) ** 0.5
+        if downside_dev == 0:
+            return None
+        return mean_ret / downside_dev
+
+    @staticmethod
+    def _calc_calmar_ratio(equity_curve: list[BacktestEquityPoint]) -> Optional[float]:
+        """Annualised return / |max drawdown|. None when drawdown is 0."""
+        if len(equity_curve) < 2:
+            return None
+        initial = equity_curve[0].equity
+        final = equity_curve[-1].equity
+        if initial <= 0:
+            return None
+        total_return = (final - initial) / initial
+        # Compute peak-to-trough drawdown in pct.
+        peak = initial
+        max_dd = 0.0
+        for point in equity_curve:
+            if point.equity > peak:
+                peak = point.equity
+            if peak > 0:
+                dd = (peak - point.equity) / peak
+                if dd > max_dd:
+                    max_dd = dd
+        if max_dd == 0:
+            return None
+        return total_return / max_dd
 
     @staticmethod
     def _calc_profit_factor(closed_trade_pnls: list[float]) -> Optional[float]:
@@ -442,11 +500,15 @@ class BacktestEngine:
 def parse_backtest_csv(csv_text: str) -> list[BacktestBar]:
     if not csv_text.strip():
         raise ValueError("csv_text is required")
-    reader = csv.DictReader(io.StringIO(csv_text.strip()))
+    # Strip UTF-8 BOM that Excel/Numbers prepend when exporting as "CSV UTF-8";
+    # otherwise the first column header becomes "﻿timestamp" and fails
+    # the required-columns check below with a misleading error.
+    csv_text = csv_text.lstrip("﻿").strip()
+    reader = csv.DictReader(io.StringIO(csv_text))
     required = {"timestamp", "open", "high", "low", "close", "volume"}
     if reader.fieldnames is None:
         raise ValueError("CSV header is required")
-    normalized_headers = {name.strip().lower() for name in reader.fieldnames}
+    normalized_headers = {name.strip().lstrip("﻿").lower() for name in reader.fieldnames}
     missing = required - normalized_headers
     if missing:
         raise ValueError(f"CSV is missing required columns: {', '.join(sorted(missing))}")

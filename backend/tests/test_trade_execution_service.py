@@ -22,8 +22,11 @@ class TestOrderStatus:
 
     def test_defaults(self) -> None:
         s = OrderStatus(broker_order_id="456", status="SUBMITTED")
-        assert s.executed_quantity == Decimal("0")
-        assert s.executed_price == Decimal("0")
+        # Default is None (no fill reported); downstream consumers must go
+        # through OrderStatus._positive to compare or compute.
+        assert s.executed_quantity is None
+        assert s.executed_price is None
+        assert OrderStatus._positive(s.executed_quantity) == Decimal("0")
 
 
 class TestTradeExecutionServiceBasics:
@@ -1003,3 +1006,34 @@ class TestTradeExecutionServiceBasics:
         assert payload["skip_category"] == "FEE"
         assert abs(float(payload["estimated_fees"]) - 2.03) < 0.001
         broker.submit_limit_order.assert_not_called()
+
+
+class TestOrderStatusNoneSafety:
+    """Regression tests for the broker-doesn't-report-fill path.
+
+    Before the fix, ``_coerce_order_status`` returned ``None`` for the
+    executed_* fields and consumers did ``if x.executed_quantity > 0``,
+    which raised ``TypeError`` against ``None``."""
+
+    def test_coerce_status_with_missing_fills_returns_none(self) -> None:
+        class FakeResult:
+            broker_order_id = "x"
+            status = "CANCELLED"
+        s = TradeExecutionService._coerce_order_status(FakeResult(), "x")
+        assert s.executed_quantity is None
+        assert s.executed_price is None
+
+    def test_positive_helper_handles_none(self) -> None:
+        assert OrderStatus._positive(None) == Decimal("0")
+        assert OrderStatus._positive(Decimal("5")) == Decimal("5")
+        assert OrderStatus._positive(Decimal("0")) == Decimal("0")
+        assert OrderStatus._positive(Decimal("-1")) == Decimal("0")
+
+    def test_compare_via_positive_does_not_raise(self) -> None:
+        class FakeResult:
+            broker_order_id = "x"
+            status = "CANCELLED"
+        s = TradeExecutionService._coerce_order_status(FakeResult(), "x")
+        # Old form would raise TypeError; new form must not.
+        if OrderStatus._positive(s.executed_quantity) > 0:
+            pass

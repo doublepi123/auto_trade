@@ -17,7 +17,7 @@ from app.api.auth import require_api_key
 from app.api.deps import extract_actor, get_audit_logger
 from app.core.audit import AuditLogger
 from app.database import SessionLocal, get_db
-from app.models import OrderRecord, TradeEvent
+from app.models import AuditLog, OrderRecord, TradeEvent
 from app.runner import get_runner
 from app.schemas import AccountResponse, CashBalanceSchema, ControlRequest, MessageResponse, OrderCancelResponse, OrderPageResponse, OrderResponse, PositionSchema, TradeEventPageResponse
 from app.services.event_list_service import list_timeline_events
@@ -273,6 +273,7 @@ def get_trade_events(
     event_type: Optional[List[str]] = Query(default=None, max_length=50),
     source: str = Query(default="all", pattern="^(trade|audit|all)$"),
     skip_category: Optional[str] = Query(default=None, max_length=20),
+    q: Optional[str] = Query(default=None, max_length=100, description="Substring search over message, symbol, action"),
     db: Session = Depends(get_db),
 ) -> TradeEventPageResponse:
     """Trade + audit timeline. Repeat ``event_type`` for multi-filter ( OR within each row type )."""
@@ -287,6 +288,7 @@ def get_trade_events(
         skip_category=skip_category,
         page=page,
         page_size=page_size,
+        query=q,
     )
     return TradeEventPageResponse(
         items=items,
@@ -346,6 +348,73 @@ def export_trade_events(
     for row in rows:
         csv_row = {**row, "payload": json.dumps(row["payload"], ensure_ascii=False, default=str)}
         writer.writerow(csv_row)
+    return Response(
+        content=output.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/audit-logs/export", dependencies=[Depends(require_api_key())])
+def export_audit_logs(
+    format: str = Query(default="csv", pattern="^(csv|json)$"),
+    limit: int = Query(default=1000, ge=1, le=10000),
+    action: Optional[str] = Query(default=None, description="Filter by action, e.g. STRATEGY_UPDATE"),
+    severity: Optional[str] = Query(default=None, description="Filter by severity: INFO/WARNING/CRITICAL"),
+    db: Session = Depends(get_db),
+) -> Response:
+    """Export audit log rows for compliance / forensic review.
+
+    Mirrors the trade-events export shape: csv by default, json on demand,
+    capped at ``limit`` rows. Optional ``action`` and ``severity`` filters
+    narrow the result set without requiring a separate list endpoint.
+    """
+    query = db.query(AuditLog)
+    if action:
+        query = query.filter(AuditLog.action == action)
+    if severity:
+        query = query.filter(AuditLog.severity == severity.upper())
+    rows_query = query.order_by(AuditLog.id.desc()).limit(limit)
+    events = rows_query.all()
+
+    rows = [
+        {
+            "id": event.id,
+            "action": event.action,
+            "severity": event.severity,
+            "actor_hash": event.actor_hash,
+            "source_ip": event.source_ip,
+            "result": event.result,
+            "request_summary": event.request_summary,
+            "created_at": event.created_at.isoformat(),
+        }
+        for event in events
+    ]
+    filename = f"audit-logs-{datetime.now().strftime('%Y%m%d-%H%M%S')}.{format}"
+    if format == "json":
+        return Response(
+            content=json.dumps(rows, ensure_ascii=False, default=str),
+            media_type="application/json",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    output = io.StringIO()
+    writer = csv.DictWriter(
+        output,
+        fieldnames=[
+            "id",
+            "action",
+            "severity",
+            "actor_hash",
+            "source_ip",
+            "result",
+            "request_summary",
+            "created_at",
+        ],
+    )
+    writer.writeheader()
+    for row in rows:
+        writer.writerow(row)
     return Response(
         content=output.getvalue(),
         media_type="text/csv; charset=utf-8",

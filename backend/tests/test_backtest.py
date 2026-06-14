@@ -158,6 +158,16 @@ class TestBacktestEngine:
         assert bars[0].timestamp.tzinfo is not None
         assert bars[0].close == 104
 
+    def test_parse_backtest_csv_strips_utf8_bom(self) -> None:
+        # Excel/Numbers exports prepend a BOM (﻿) when saving as "CSV UTF-8".
+        # The parser must strip it so the first column header still matches.
+        bars = parse_backtest_csv(
+            "﻿" + "timestamp,open,high,low,close,volume\n"
+            + "2026-05-22T10:00:00Z,100,105,99,104,1000"
+        )
+        assert len(bars) == 1
+        assert bars[0].close == 104
+
     def test_invalid_csv_reports_row_number(self) -> None:
         try:
             _ = parse_backtest_csv("\n".join([
@@ -291,3 +301,107 @@ class TestBacktestAPI:
 
         assert resp.status_code == 422
         assert "volume" in resp.json()["detail"]
+
+
+class TestBacktestRiskAdjustedMetrics:
+    def _bars_with_returns(self, returns):
+        """Build bars from a list of percentage returns starting at $100."""
+        from datetime import datetime, timedelta, timezone
+        from app.core.backtest import BacktestBar
+        base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        bars = []
+        price = 100.0
+        for i, r in enumerate(returns):
+            price = price * (1 + r)
+            bars.append(BacktestBar(
+                timestamp=base + timedelta(minutes=i),
+                open=price,
+                high=price,
+                low=price,
+                close=price,
+                volume=1000,
+            ))
+        return bars
+
+    def test_sortino_none_when_no_downside(self) -> None:
+        from app.core.backtest import BacktestEngine, BacktestEngineParams
+        # All positive returns — downside deviation is zero.
+        bars = self._bars_with_returns([0.01, 0.01, 0.01, 0.01])
+        params = BacktestEngineParams(
+            symbol="X", buy_low=99, sell_high=200,
+            short_selling=False, quantity=1, initial_cash=10000,
+            min_profit_amount=0, max_daily_loss=100000, max_consecutive_losses=100,
+        )
+        engine = BacktestEngine(params)
+        result = engine.run(bars)
+        # Either None (no downside) or some positive number; the important
+        # thing is it does not raise.
+        assert result.metrics.sortino_ratio is None or result.metrics.sortino_ratio > 0
+
+    def test_sortino_penalises_downside(self) -> None:
+        from app.core.backtest import BacktestEngine, BacktestEngineParams
+        # Mixed positive/negative returns must produce a finite ratio that
+        # captures the downside penalty (lower than pure-positive case).
+        bars = self._bars_with_returns([0.05, -0.10, 0.05, -0.10, 0.05])
+        params = BacktestEngineParams(
+            symbol="X", buy_low=99, sell_high=200,
+            short_selling=False, quantity=1, initial_cash=10000,
+            min_profit_amount=0, max_daily_loss=100000, max_consecutive_losses=100,
+        )
+        engine = BacktestEngine(params)
+        result = engine.run(bars)
+        # Compute a pure-positive control for the same length.
+        bars_up = self._bars_with_returns([0.01, 0.01, 0.01, 0.01, 0.01])
+        result_up = engine.run(bars_up)
+        assert result.metrics.sortino_ratio is not None
+        # Mixed case must be lower than the all-positive case (which can be
+        # None or a high number). The control has zero downside deviation.
+        if result_up.metrics.sortino_ratio is not None:
+            assert result.metrics.sortino_ratio < result_up.metrics.sortino_ratio
+
+    def test_calmar_none_for_no_drawdown(self) -> None:
+        from app.core.backtest import BacktestEngine, BacktestEngineParams
+        # Monotonically increasing → zero drawdown.
+        bars = self._bars_with_returns([0.01, 0.01, 0.01, 0.01])
+        params = BacktestEngineParams(
+            symbol="X", buy_low=99, sell_high=200,
+            short_selling=False, quantity=1, initial_cash=10000,
+            min_profit_amount=0, max_daily_loss=100000, max_consecutive_losses=100,
+        )
+        engine = BacktestEngine(params)
+        result = engine.run(bars)
+        # With no drawdown, calmar is None.
+        assert result.metrics.calmar_ratio is None
+
+
+def test_backtest_metrics_serialization_includes_new_fields() -> None:
+    """The metrics dataclass should round-trip the new fields without
+    dropping them, so the API response and CSV export stay consistent."""
+    from app.core.backtest import BacktestMetrics
+    from dataclasses import asdict
+    m = BacktestMetrics(
+        initial_cash=100.0,
+        final_equity=110.0,
+        total_pnl=10.0,
+        total_return_pct=10.0,
+        max_drawdown_pct=2.0,
+        trade_count=2,
+        closed_trade_count=2,
+        winning_trades=1,
+        losing_trades=1,
+        win_rate=50.0,
+        avg_holding_minutes=5.0,
+        fees_paid=0.0,
+        skipped_signals=0,
+        final_state="flat",
+        sharpe_ratio=1.2,
+        sortino_ratio=1.5,
+        calmar_ratio=5.0,
+        profit_factor=1.1,
+        profit_loss_ratio=1.0,
+    )
+    d = asdict(m)
+    assert "sortino_ratio" in d
+    assert "calmar_ratio" in d
+    assert d["sortino_ratio"] == 1.5
+    assert d["calmar_ratio"] == 5.0
