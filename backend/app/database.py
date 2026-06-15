@@ -174,8 +174,11 @@ def _ensure_runtime_state_daily_pnl_date_column(db_engine: Engine) -> None:
             connection.exec_driver_sql("ALTER TABLE runtime_state ADD COLUMN daily_pnl_date DATE")
         # Backfill any NULL daily_pnl_date rows regardless of whether the
         # column was just added (a partial migration may have left NULLs).
+        # NOTE: only set the date — do NOT reset daily_pnl / consecutive_losses,
+        # which would silently wipe accumulated P&L and the consecutive-loss
+        # counter (possibly resuming a strategy that should stay paused).
         connection.exec_driver_sql(
-            "UPDATE runtime_state SET daily_pnl = 0, consecutive_losses = 0, daily_pnl_date = DATE('now') WHERE daily_pnl_date IS NULL"
+            "UPDATE runtime_state SET daily_pnl_date = DATE('now') WHERE daily_pnl_date IS NULL"
         )
         if "pause_reason" not in columns:
             connection.exec_driver_sql("ALTER TABLE runtime_state ADD COLUMN pause_reason TEXT DEFAULT '' NOT NULL")

@@ -88,6 +88,9 @@ class TestIntervalApplicationService:
         db = self._get_db()
         config = self._create_config(db)
         config.min_profit_amount = 1.5
+        # Set previous applied values to ensure they get cleared on rejection
+        config.llm_applied_buy_low = 195.0
+        config.llm_applied_sell_high = 205.0
         db.commit()
 
         result = service.apply_direct_suggestion(
@@ -106,6 +109,9 @@ class TestIntervalApplicationService:
         assert "minimum profit" in result["reason"].lower()
         assert config.buy_low == 180.0
         assert config.sell_high == 220.0
+        # G2-2: guardrail rejection must clear applied fields
+        assert config.llm_applied_buy_low is None
+        assert config.llm_applied_sell_high is None
 
     def test_apply_direct_uses_reference_quantity_for_min_profit_amount(self, service: IntervalApplicationService) -> None:
         self._cleanup()
@@ -274,6 +280,10 @@ class TestIntervalApplicationService:
         self._cleanup()
         db = self._get_db()
         config = self._create_config(db)
+        # Set previous applied values to ensure they get cleared on rejection
+        config.llm_applied_buy_low = 190.0
+        config.llm_applied_sell_high = 210.0
+        db.commit()
 
         result = service.apply_suggestion(
             db,
@@ -288,6 +298,10 @@ class TestIntervalApplicationService:
 
         assert result["success"] is False
         assert "confidence" in result["reason"].lower()
+        # G2-2: guardrail rejection must clear applied fields
+        db.refresh(config)
+        assert config.llm_applied_buy_low is None
+        assert config.llm_applied_sell_high is None
 
     def test_reject_interval_too_wide_before_state_application(self, service: IntervalApplicationService) -> None:
         self._cleanup()

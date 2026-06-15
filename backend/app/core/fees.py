@@ -18,6 +18,8 @@ def estimate_round_trip_fee(
     one_side_rate: Decimal,
 ) -> Decimal:
     if quantity <= 0 or one_side_rate <= 0:
+        if quantity <= 0:
+            logger.warning("estimate_round_trip_fee called with quantity=%s; returning 0", quantity)
         if one_side_rate <= 0:
             logger.warning("estimate_round_trip_fee called with one_side_rate=%s; returning 0 (possible config error)", one_side_rate)
         return Decimal("0")

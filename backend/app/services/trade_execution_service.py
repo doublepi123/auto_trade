@@ -33,14 +33,14 @@ ENTRY_BUYING_POWER_USAGE = Decimal("0.9")
 US_PRICE_TICK = Decimal("0.01")
 
 # HKEX stepped tick table (https://www.hkex.com.hk/Services/Trading/Securities/Overview/Trading-Mechanism)
+# Phase 2 tick sizes (effective 2019-07); the 20–100 band merged to 0.050.
 # Ordered ascending by upper bound; the matching tier is the first whose
 # upper bound is strictly greater than the price.
 _HK_TICK_TABLE: list[tuple[Decimal, Decimal]] = [
     (Decimal("0.25"), Decimal("0.001")),
     (Decimal("0.50"), Decimal("0.005")),
     (Decimal("10.00"), Decimal("0.010")),
-    (Decimal("20.00"), Decimal("0.010")),
-    (Decimal("50.00"), Decimal("0.020")),
+    (Decimal("20.00"), Decimal("0.020")),
     (Decimal("100.00"), Decimal("0.050")),
     (Decimal("200.00"), Decimal("0.100")),
     (Decimal("500.00"), Decimal("0.200")),

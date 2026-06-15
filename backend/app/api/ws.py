@@ -116,7 +116,7 @@ async def _authenticate_websocket(ws: WebSocket, query_api_key: str) -> bool:
         return True
     try:
         raw = await asyncio.wait_for(ws.receive_text(), timeout=_WS_AUTH_TIMEOUT_SECONDS)
-    except (TimeoutError, asyncio.TimeoutError):
+    except (TimeoutError, asyncio.TimeoutError, WebSocketDisconnect):
         return False
     if len(raw.encode("utf-8")) > _WS_AUTH_MAX_FRAME_BYTES:
         logger.warning("WS auth frame exceeds %d bytes; rejecting", _WS_AUTH_MAX_FRAME_BYTES)

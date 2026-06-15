@@ -1706,3 +1706,108 @@ def test_strategy_update_no_change_still_writes_audit() -> None:
         assert json.loads(row.request_summary)["changed"] == {}
     finally:
         db.close()
+
+
+def test_strategy_update_returns_consistency_warnings() -> None:
+    """Verify consistency_warnings field is present in strategy update response."""
+    _clean_strategy()
+    # min_profit_amount below round-trip fee triggers a consistency warning.
+    resp = client.put("/api/strategy", json={
+        "symbol": "AAPL.US",
+        "market": "US",
+        "buy_low": 100.0,
+        "sell_high": 200.0,
+        "min_profit_amount": 0.0001,
+        "fee_rate_us": 0.005,
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "consistency_warnings" in data
+    assert len(data["consistency_warnings"]) > 0
+    assert any(w["field"] == "min_profit_amount" for w in data["consistency_warnings"])
+
+
+def test_cancel_order_returns_200_when_local_db_update_fails(monkeypatch) -> None:
+    """Broker-side cancel succeeded; local DB update failure should still return 200."""
+    _clean_orders()
+    _clean_trade_events()
+    _clean_audit_logs()
+    db = SessionLocal()
+    db.add(OrderRecord(
+        broker_order_id="cancel-dbfail-1",
+        symbol="NVDA.US",
+        side="BUY",
+        quantity=10,
+        price=220.1,
+        status="SUBMITTED",
+    ))
+    db.commit()
+    db.close()
+
+    class Broker:
+        def cancel_order(self, order_id: str):
+            return SimpleNamespace(
+                broker_order_id=order_id,
+                status="CANCELLED",
+                executed_quantity=0,
+                executed_price=0,
+            )
+
+    class Runner:
+        broker = Broker()
+        def cancel_order_by_id(self, order_id: str):
+            return self.broker.cancel_order(order_id)
+
+    monkeypatch.setattr(trade_api, "get_runner", lambda: Runner())
+
+    def _failing_update(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("DB unavailable")
+
+    monkeypatch.setattr(trade_api, "_update_local_order_from_status", _failing_update)
+
+    resp = client.post("/api/orders/cancel-dbfail-1/cancel")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["broker_order_id"] == "cancel-dbfail-1"
+    assert data["status"] == "CANCELLED"
+
+
+def test_llm_analyze_returns_400_when_price_unavailable(monkeypatch) -> None:
+    """When last_price is 0/None and buy_low is not set, return 400."""
+    _clean_strategy()
+    setup = client.put("/api/strategy", json={
+        "symbol": "AAPL.US",
+        "market": "US",
+        "buy_low": 100.0,
+        "sell_high": 200.0,
+    })
+    assert setup.status_code == 200
+
+    # Override strategy to have buy_low = 0 (must be >0 to avoid the 400,
+    # but setting it to 0 makes the guard trigger since current_price <= 0).
+    db = SessionLocal()
+    try:
+        config = db.query(StrategyConfig).first()
+        config.buy_low = 0.0
+        db.commit()
+    finally:
+        db.close()
+
+    class Engine:
+        last_price = 0.0
+        class State:
+            value = "flat"
+        state = State()
+
+    runner = SimpleNamespace(
+        engine=Engine(),
+        broker=object(),
+    )
+    monkeypatch.setattr(llm_api, "get_runner", lambda: runner)
+
+    resp = client.post("/api/strategy/llm-interval/analyze", json={"force": True})
+
+    assert resp.status_code == 400
+    data = resp.json()
+    assert "current price unavailable" in data["detail"]

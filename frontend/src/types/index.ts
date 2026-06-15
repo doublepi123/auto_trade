@@ -464,8 +464,8 @@ export interface ReportMetrics {
   win_rate: number
   profit_loss_ratio: number
   avg_pnl_per_trade: number
-  max_profit: number
-  max_loss: number
+  max_profit: number | null
+  max_loss: number | null
   max_drawdown: number
   llm_suggestions_count: number
   llm_applied_count: number

@@ -140,3 +140,29 @@ def test_metrics_summary_respects_window(metrics_db):
     resp = client.get("/api/metrics/summary?days=30")
     data = resp.json()
     assert data["trade_count"] == 0
+
+
+def test_metrics_summary_does_not_mutate_orm(metrics_db):
+    """Issue I2-1: The GET handler must not modify OrderRecord.executed_quantity
+    on ORM instances (which would dirty the session).
+    """
+    SessionLocal = metrics_db
+    with SessionLocal() as db:
+        db.add(_make_order("AAPL.US", "BUY", 100.0, 10, hours_ago=3))
+        db.add(_make_order("AAPL.US", "SELL", 110.0, 5, hours_ago=2))
+        db.add(_make_order("AAPL.US", "SELL", 105.0, 3, hours_ago=1))
+        db.commit()
+        buy = db.query(OrderRecord).filter(OrderRecord.side == "BUY").first()
+        assert buy is not None
+        original_qty = buy.executed_quantity
+
+    # Hit the metrics endpoint — it reads inside a separate session.
+    client = TestClient(app)
+    resp = client.get("/api/metrics/summary?days=30")
+    assert resp.status_code == 200
+
+    # Verify the BUY record's executed_quantity was NOT touched.
+    with SessionLocal() as db:
+        buy = db.query(OrderRecord).filter(OrderRecord.side == "BUY").first()
+        assert buy is not None
+        assert buy.executed_quantity == original_qty

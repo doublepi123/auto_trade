@@ -243,6 +243,30 @@ def test_credentials_update_audits_with_masked_payload() -> None:
         db.close()
 
 
+def test_test_credentials_sanitizes_exception(monkeypatch):
+    """Issue I2-2: The /api/credentials/test endpoint must not leak
+    the raw exception message (e.g. webhook URL / token) to the API consumer.
+    """
+    _clean_credentials()
+    from app.api import credentials as credentials_api
+
+    class FailingNotifier:
+        def send(self, title, content, severity="INFO"):
+            raise RuntimeError("secret-token-abc123 leaked in exception")
+
+    class FakeRunner:
+        notifier = FailingNotifier()
+
+    monkeypatch.setattr(credentials_api, "get_runner", lambda: FakeRunner())
+
+    resp = client.post("/api/credentials/test")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["ok"] is False
+    assert "secret-token-abc123" not in data["error"]
+    assert data["error"] == "notification send failed — see server logs for details"
+
+
 def test_decrypt_tampered_ciphertext_raises_credential_integrity_error(tmp_path, monkeypatch):
     """Tampered ciphertext must surface as CredentialIntegrityError, not raw InvalidTag.
 
@@ -277,3 +301,101 @@ def test_decrypt_tampered_ciphertext_raises_credential_integrity_error(tmp_path,
 
     with pytest.raises(CredentialIntegrityError):
         decrypt_secret("enc:" + tampered_body)
+
+
+def test_update_notification_channels_str_rejects_malicious_webhook() -> None:
+    """G2-1: str branch must validate each channel (incl. webhook URL safety)."""
+    _clean_credentials()
+    from app.services.credentials_service import CredentialsService
+
+    db = SessionLocal()
+    try:
+        svc = CredentialsService(db)
+        malicious = json.dumps([
+            {"type": "webhook", "url": "http://127.0.0.1:8080/hack", "severity_floor": "INFO"},
+        ])
+        with pytest.raises(ValueError, match="webhook url must use https"):
+            svc.update_config({"notification_channels": malicious})
+    finally:
+        db.close()
+
+
+def test_update_notification_channels_str_rejects_invalid_type() -> None:
+    """G2-1: str branch must validate channel type."""
+    _clean_credentials()
+    from app.services.credentials_service import CredentialsService
+
+    db = SessionLocal()
+    try:
+        svc = CredentialsService(db)
+        payload = json.dumps([
+            {"type": "sms", "severity_floor": "INFO"},
+        ])
+        with pytest.raises(ValueError, match="notification_channels\\[0\\]\\.type"):
+            svc.update_config({"notification_channels": payload})
+    finally:
+        db.close()
+
+
+def test_update_notification_channels_str_rejects_invalid_severity_floor() -> None:
+    """G2-1: str branch must validate severity_floor."""
+    _clean_credentials()
+    from app.services.credentials_service import CredentialsService
+
+    db = SessionLocal()
+    try:
+        svc = CredentialsService(db)
+        payload = json.dumps([
+            {"type": "serverchan", "severity_floor": "DEBUG"},
+        ])
+        with pytest.raises(ValueError, match="notification_channels\\[0\\]\\.severity_floor"):
+            svc.update_config({"notification_channels": payload})
+    finally:
+        db.close()
+
+
+def test_update_notification_channels_str_valid() -> None:
+    """G2-1: str branch accepts valid channels."""
+    _clean_credentials()
+    from app.services.credentials_service import CredentialsService
+
+    db = SessionLocal()
+    try:
+        svc = CredentialsService(db)
+        valid = json.dumps([
+            {"type": "serverchan", "severity_floor": "INFO"},
+        ])
+        result = svc.update_config({"notification_channels": valid})
+        assert result is not None
+        channels = json.loads(result.notification_channels)
+        assert channels[0]["type"] == "serverchan"
+    finally:
+        db.close()
+
+
+def test_update_notification_channels_str_rejects_non_list_json() -> None:
+    """G2-1: str branch rejects non-list JSON."""
+    _clean_credentials()
+    from app.services.credentials_service import CredentialsService
+
+    db = SessionLocal()
+    try:
+        svc = CredentialsService(db)
+        with pytest.raises(ValueError, match="must be a list"):
+            svc.update_config({"notification_channels": json.dumps({"type": "serverchan"})})
+    finally:
+        db.close()
+
+
+def test_update_notification_channels_str_rejects_invalid_json() -> None:
+    """G2-1: str branch rejects invalid JSON."""
+    _clean_credentials()
+    from app.services.credentials_service import CredentialsService
+
+    db = SessionLocal()
+    try:
+        svc = CredentialsService(db)
+        with pytest.raises(ValueError, match="not valid JSON"):
+            svc.update_config({"notification_channels": "not-json"})
+    finally:
+        db.close()

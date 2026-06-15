@@ -137,8 +137,9 @@ def test_credentials(
     content = "这是一条凭证连通性测试消息。如果您看到它，说明通知渠道配置正确。"
     try:
         ok = notifier.send(title, content, severity="INFO")
-    except Exception as exc:  # noqa: BLE001 — surface any notifier failure
+    except Exception as exc:  # noqa: BLE001
         ok = False
+        logger.error("notification send failed", exc_info=exc)
         audit.record(
             "CREDENTIALS_TEST",
             severity="WARNING",
@@ -147,7 +148,7 @@ def test_credentials(
             request_summary={"error": str(exc)[:200]},
             result="FAILED",
         )
-        return {"ok": False, "error": str(exc)}
+        return {"ok": False, "error": "notification send failed — see server logs for details"}
 
     audit.record(
         "CREDENTIALS_TEST",

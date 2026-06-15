@@ -5,7 +5,7 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation as _DecimalInvalidOp
 from typing import TYPE_CHECKING, Any, Callable
 
 from app.config import settings
@@ -23,7 +23,7 @@ try:
         TimeoutError,
     )
 except ImportError:
-    _retryable_exc = (Exception,)
+    _retryable_exc = (OSError, ConnectionError, TimeoutError)
 RETRYABLE_EXC = _retryable_exc
 
 logger = logging.getLogger("auto_trade.broker")
@@ -247,7 +247,7 @@ def _decimal_attr(item: Any, *names: str) -> Decimal:
         if value is not None:
             try:
                 return Decimal(str(value))
-            except Exception:
+            except (ValueError, TypeError, AttributeError, _DecimalInvalidOp):
                 return Decimal("0")
     return Decimal("0")
 
@@ -369,7 +369,7 @@ class BrokerGateway:
                     raise
                 if attempt >= max_retries:
                     raise
-                delay_s = (base_ms / 1000.0) * (2 ** attempt)
+                delay_s = (base_ms / 1000.0) * (2 ** (attempt - 1))
                 if self._audit:
                     self._audit.record(
                         "BROKER_RETRY",
@@ -417,7 +417,9 @@ class BrokerGateway:
             period_enum = getattr(Period, _normalize_period_name(period), None)
             if period_enum is None:
                 raise ValueError(f"unsupported candlestick period: {period}")
-            adjust_enum = getattr(AdjustType, "NoAdjust", AdjustType)
+            adjust_enum = getattr(AdjustType, "NoAdjust", None)
+            if adjust_enum is None:
+                raise RuntimeError("AdjustType.NoAdjust not found in SDK")
 
             quote_ctx = self._quote_ctx
             if quote_ctx is None:
@@ -563,6 +565,10 @@ class BrokerGateway:
                 raise
             self._subscribed_symbols.update(missing_symbols)
     def submit_limit_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal) -> OrderResult:
+        # NOTE: submit_limit_order 故意不使用 _call_with_retry。
+        # 下单是 non-idempotent 操作 — 网络重试可能导致重复下单(双倍仓位)。
+        # 网络失败由调用方(AppRunner)在下一循环重新决策,而非 broker 层重试。
+        # 对比:cancel_order 用了重试,因为取消是幂等的(取消已取消订单无害)。
         return self._submit_limit_order_inner(symbol, side, quantity, price)
 
     def _submit_limit_order_inner(
@@ -708,13 +714,13 @@ class BrokerGateway:
                         raw = raw_available if raw_available is not None else 0
                     try:
                         qty = Decimal(str(raw)) if raw is not None else Decimal("0")
-                    except Exception:
+                    except (ValueError, TypeError, _DecimalInvalidOp):
                         qty = Decimal("0")
                     available_qty = None
                     if raw_available is not None:
                         try:
                             available_qty = abs(Decimal(str(raw_available)))
-                        except Exception:
+                        except (ValueError, TypeError, _DecimalInvalidOp):
                             available_qty = None
                     if qty == 0:
                         continue
@@ -731,7 +737,7 @@ class BrokerGateway:
                         raw_avg = "0"
                     try:
                         avg_price = Decimal(str(raw_avg))
-                    except Exception:
+                    except (ValueError, TypeError, _DecimalInvalidOp):
                         avg_price = Decimal("0")
                     if avg_price <= 0:
                         logger.warning(

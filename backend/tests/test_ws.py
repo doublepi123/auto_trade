@@ -190,6 +190,24 @@ class TestWebSocketEndpoint:
         await manager.disconnect(ws)
 
     @pytest.mark.asyncio
+    async def test_ws_auth_handles_websocket_disconnect(self, monkeypatch) -> None:
+        """Issue I2-3: WebSocketDisconnect during auth must be caught
+        gracefully (not crash with an unhandled exception).
+        """
+        from app.config import settings
+        from starlette.websockets import WebSocketDisconnect
+
+        monkeypatch.setattr(settings, "api_key", "secret-key")
+        monkeypatch.setattr(settings, "env", "prod")
+        ws = AsyncMock()
+        ws.receive_text.side_effect = WebSocketDisconnect()
+
+        await websocket_endpoint(ws)
+
+        ws.accept.assert_awaited_once()
+        ws.close.assert_awaited_once_with(code=1008, reason="Invalid or missing API key")
+
+    @pytest.mark.asyncio
     async def test_broadcast_to_multiple_connections(self) -> None:
         mgr = ConnectionManager()
         ws1 = AsyncMock()

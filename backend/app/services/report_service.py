@@ -69,9 +69,9 @@ class ReportMetrics:
     win_rate: float
     profit_loss_ratio: float
     avg_pnl_per_trade: float
-    max_profit: float
-    max_loss: float
     max_drawdown: float
+    max_profit: float | None
+    max_loss: float | None
     llm_suggestions_count: int
     llm_applied_count: int
     llm_apply_rate: float
@@ -184,8 +184,8 @@ class ReportService:
         total_pnl = 0.0
         total_trades = 0
         total_wins = 0
-        max_profit = 0.0
-        max_loss = 0.0
+        max_profit: float | None = None
+        max_loss: float | None = None
         total_win_pnl = 0.0
         total_loss_pnl = 0.0
         win_trade_count = 0
@@ -242,12 +242,12 @@ class ReportService:
             total_trades += day_trades
             total_wins += day_wins
             for trade in result.trades:
-                max_profit = max(max_profit, trade.pnl)
-                max_loss = min(max_loss, trade.pnl)
                 if trade.pnl > 0:
+                    max_profit = max(max_profit, trade.pnl) if max_profit is not None else trade.pnl
                     total_win_pnl += trade.pnl
                     win_trade_count += 1
                 elif trade.pnl < 0:
+                    max_loss = min(max_loss, trade.pnl) if max_loss is not None else trade.pnl
                     total_loss_pnl += trade.pnl
                     loss_trade_count += 1
                 attribution_buckets.setdefault(trade.side, []).append(trade)
@@ -310,8 +310,8 @@ class ReportService:
         total_pnl: float,
         total_trades: int,
         win_count: int,
-        max_profit: float,
-        max_loss: float,
+        max_profit: float | None,
+        max_loss: float | None,
         max_drawdown: float,
         total_win_pnl: float,
         win_trade_count: int,
@@ -340,8 +340,8 @@ class ReportService:
             win_rate=round(win_rate, 4),
             profit_loss_ratio=round(profit_loss_ratio, 2),
             avg_pnl_per_trade=round(avg_pnl, 2),
-            max_profit=round(max_profit, 2),
-            max_loss=round(max_loss, 2),
+            max_profit=round(max_profit, 2) if max_profit is not None else None,
+            max_loss=round(max_loss, 2) if max_loss is not None else None,
             max_drawdown=round(max_drawdown, 2),
             llm_suggestions_count=llm_total,
             llm_applied_count=llm_applied,

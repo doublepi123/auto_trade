@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Callable
+
+
+logger = logging.getLogger(__name__)
 
 
 _ZERO = Decimal("0")
@@ -77,8 +81,7 @@ class DailyPnlService:
 
         resolve_day: ToTradeDay = to_trade_day or _utc_date
         target_day = trade_day or resolve_day(datetime.now(timezone.utc))
-        start_of_day = datetime(target_day.year, target_day.month, target_day.day, tzinfo=timezone.utc)
-        end_of_day = start_of_day + timedelta(days=1)
+        end_of_day = datetime(target_day.year, target_day.month, target_day.day, tzinfo=timezone.utc) + timedelta(days=1)
         # The 2-day window (end_of_day + 1 day) accounts for timezone boundary
         # handling: fills near midnight in the target timezone may have UTC
         # timestamps that fall on the next calendar day.
@@ -189,7 +192,12 @@ class DailyPnlService:
         executed_price = DailyPnlService._decimal(getattr(order, "executed_price", None))
         if executed_price > 0:
             return executed_price
-        return DailyPnlService._decimal(getattr(order, "price", None))
+        price = DailyPnlService._decimal(getattr(order, "price", None))
+        logger.warning(
+            "order %s has no executed_price, falling back to limit price %s — PnL may be inaccurate until broker sync",
+            getattr(order, "id", "?"), price,
+        )
+        return price
 
     @staticmethod
     def _apply_fill(position: _LedgerPosition, fill: _Fill) -> tuple[Decimal, Decimal]:
@@ -197,10 +205,14 @@ class DailyPnlService:
             DailyPnlService._open_long(position, fill.quantity, fill.price)
             return _ZERO, _ZERO
         if fill.side == "BUY_TO_COVER":
-            _, matched_quantity, pnl = DailyPnlService._close_short(position, fill.quantity, fill.price)
+            unclosed, matched_quantity, pnl = DailyPnlService._close_short(position, fill.quantity, fill.price)
+            if unclosed > _ZERO:
+                logger.warning("close quantity exceeds tracked position by %s for %s — possible data inconsistency or unhandled split/dividend", unclosed, fill.symbol)
             return matched_quantity, pnl
         if fill.side == "SELL":
-            _, matched_quantity, pnl = DailyPnlService._close_long(position, fill.quantity, fill.price)
+            unclosed, matched_quantity, pnl = DailyPnlService._close_long(position, fill.quantity, fill.price)
+            if unclosed > _ZERO:
+                logger.warning("close quantity exceeds tracked position by %s for %s — possible data inconsistency or unhandled split/dividend", unclosed, fill.symbol)
             return matched_quantity, pnl
         if fill.side == "SELL_SHORT":
             DailyPnlService._open_short(position, fill.quantity, fill.price)

@@ -104,23 +104,27 @@ def metrics_summary(
         .all()
     )
     # Pair each SELL with the most recent BUY on the same symbol.
-    buy_queue: dict[str, list[OrderRecord]] = {}
+    # Track remaining buy quantity in a side-car float instead of mutating the
+    # ORM instance, which would dirty the session and risk a spurious flush.
+    buy_queue: dict[str, list[tuple[OrderRecord, float]]] = {}
     pnls: list[float] = []
     for order in orders:
         if order.side == "BUY" and order.executed_price is not None and order.executed_quantity is not None:
-            buy_queue.setdefault(order.symbol, []).append(order)
+            buy_queue.setdefault(order.symbol, []).append((order, float(order.executed_quantity)))
         elif order.side == "SELL" and order.executed_price is not None and order.executed_quantity is not None:
             symbol_queue = buy_queue.get(order.symbol, [])
             if not symbol_queue:
                 continue
             # Consume from the head of the queue to approximate FIFO.
-            matched_buy = symbol_queue[0]
-            qty = min(float(matched_buy.executed_quantity), float(order.executed_quantity))
+            matched_buy, remaining_qty = symbol_queue[0]
+            qty = min(remaining_qty, float(order.executed_quantity))
             pnl = (float(order.executed_price) - float(matched_buy.executed_price)) * qty
             pnls.append(pnl)
-            matched_buy.executed_quantity = float(matched_buy.executed_quantity) - qty
-            if matched_buy.executed_quantity <= 0:
+            remaining_qty -= qty
+            if remaining_qty <= 0:
                 symbol_queue.pop(0)
+            else:
+                symbol_queue[0] = (matched_buy, remaining_qty)
 
     metrics = _compute_metrics(pnls)
     metrics["window_days"] = days

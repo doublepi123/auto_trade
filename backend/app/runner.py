@@ -135,7 +135,7 @@ class AppRunner:
         # even though they are unrelated.
         self._last_fill_at: dict[str, float] = {}
 
-    def _mark_fill_processed(self, symbol: str = "") -> None:
+    def _mark_fill_processed(self, symbol: str) -> None:
         with self._state_lock:
             fill_symbol = symbol or self.engine.params.symbol
             if fill_symbol:
@@ -652,7 +652,7 @@ class AppRunner:
                 self._set_last_action_message(f"{result.action} {order_status.status}: {order_id}")
                 # Record fill timestamp to protect position sync from stale snapshots
                 if order_status.status in {"FILLED", "SUBMITTED", "PARTIAL_FILLED"}:
-                    self._mark_fill_processed()
+                    self._mark_fill_processed(symbol=decision.trigger_symbol or quote.symbol)
             self._broadcast_status()
         except Exception as exc:
             if engine_snapshot is not None:
@@ -948,7 +948,7 @@ class AppRunner:
         if result["executed"]:
             side = self._broker_side_for_action(action)
             self._last_llm_action_at[(target_symbol, side)] = time.monotonic()
-            self._mark_fill_processed()
+            self._mark_fill_processed(symbol=target_symbol)
         return result
 
     def _quote_for_llm_order(self, symbol: str, price: Any = None) -> Quote | None:
@@ -1971,6 +1971,7 @@ class AppRunner:
         for pos in positions:
             side = str(pos.side).upper()
             if side == "SHORT":
+                # NOTE: 不对账 SHORT 持仓 — 当前 tracked_entries 仅追踪 LONG 成本 basis
                 continue
             try:
                 qty = abs(Decimal(str(pos.quantity)))

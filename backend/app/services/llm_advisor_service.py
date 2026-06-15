@@ -45,7 +45,12 @@ _ORDER_ACTIONS = {
 }
 
 
-_PLACEHOLDER_NAME = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)(?:![ars])?(?::[^}]*)?\}")
+# Match an already-escaped placeholder {{identifier}}, {{identifier!s}},
+# {{identifier:format}}, etc. so we can restore known ones back to
+# single-brace for str.format substitution.
+_ESCAPED_PLACEHOLDER = re.compile(
+    r"\{\{([A-Za-z_][A-Za-z0-9_]*)(?:![ars])?(?::[^}]*)?\}\}"
+)
 
 
 def _escape_orphan_braces(template: str, allowed_keys: set[str]) -> str:
@@ -58,24 +63,28 @@ def _escape_orphan_braces(template: str, allowed_keys: set[str]) -> str:
     table inside a comment, or a JSON example illustrating the expected
     output shape.
 
-    We must NOT escape braces that ARE valid placeholders for the context
-    we will pass (e.g. ``{symbol}``), or the LLM will receive the literal
-    token instead of the substituted value. So we walk the template with
-    a regex that recognises ``str.format`` placeholder grammar (identifier
-    plus optional ``!conversion`` plus optional ``:format_spec``) and only
-    double the braces that are not in ``allowed_keys``.
+    Strategy: first *fully* escape ALL braces (``{`` → ``{{``, ``}`` →
+    ``}}``), then restore known placeholders from ``{{key}}`` back to
+    ``{key}`` so they are substituted by ``str.format``.  This handles
+    identifiers, format specs (``{key:.2f}``), conversions (``{key!s}``),
+    auto-numbered ``{}``, positional ``{0}``, and JSON examples like
+    ``{"buy_low": 100}`` — nested JSON is handled correctly because all
+    braces are escaped first.
     """
 
-    def _repl(match: "re.Match[str]") -> str:
+    # Step 1: fully escape ALL braces
+    escaped = template.replace("{", "{{").replace("}", "}}")
+
+    # Step 2: restore known placeholders from {{key}} back to {key}
+    def _restore(match: "re.Match[str]") -> str:
         key = match.group(1)
         if key in allowed_keys:
-            return match.group(0)
-        # Convert literal { and } to {{ and }} (only in the captured
-        # braces, not the whole match) so a real placeholder can still
-        # resolve on the next format() pass.
-        return "{{" + key + "}}"
+            full = match.group(0)
+            # Remove one level of escaping: {{key...}} -> {key...}
+            return "{" + full[2:-2] + "}"
+        return match.group(0)
 
-    return _PLACEHOLDER_NAME.sub(_repl, template)
+    return _ESCAPED_PLACEHOLDER.sub(_restore, escaped)
 
 
 _REPLACEMENT_ACTIONS = {
@@ -355,6 +364,10 @@ class LLMAdvisorService:
                     "success": False,
                     "error": f"Analysis throttled: please wait {interval_minutes} minutes between analyses",
                 }
+            # Reserve slot: set to inf so no concurrent request can pass
+            # the throttle check while the LLM call is in flight.
+            _prev_analysis_ts = _LAST_ANALYSIS_TIMESTAMP
+            _LAST_ANALYSIS_TIMESTAMP = float("inf")
 
         try:
             market_data = self._data_aggregator.fetch_market_data(symbol, market)
@@ -374,26 +387,33 @@ class LLMAdvisorService:
                 "sentiment": {"sentiment": "neutral", "score": 0.0, "description": "无"},
             }
 
-        prompt_template, prompt_variant = self._select_variant(symbol)
-        prompt = self._build_prompt(
-            symbol=symbol,
-            market=market,
-            current_price=current_price,
-            current_buy_low=current_buy_low,
-            current_sell_high=current_sell_high,
-            short_selling=short_selling,
-            current_position=current_position,
-            recent_trades=recent_trades,
-            position_quantity=position_quantity,
-            position_avg_price=position_avg_price,
-            unrealized_pnl_pct=unrealized_pnl_pct,
-            min_profit_amount=min_profit_amount,
-            recent_prices=recent_prices,
-            recent_analysis=recent_analysis,
-            account_context=account_context,
-            market_data=market_data,
-            prompt_template=prompt_template,
-        )
+        try:
+            prompt_template, prompt_variant = self._select_variant(symbol)
+            prompt = self._build_prompt(
+                symbol=symbol,
+                market=market,
+                current_price=current_price,
+                current_buy_low=current_buy_low,
+                current_sell_high=current_sell_high,
+                short_selling=short_selling,
+                current_position=current_position,
+                recent_trades=recent_trades,
+                position_quantity=position_quantity,
+                position_avg_price=position_avg_price,
+                unrealized_pnl_pct=unrealized_pnl_pct,
+                min_profit_amount=min_profit_amount,
+                recent_prices=recent_prices,
+                recent_analysis=recent_analysis,
+                account_context=account_context,
+                market_data=market_data,
+                prompt_template=prompt_template,
+            )
+        except Exception:
+            # _select_variant or _build_prompt failed — release the reserved
+            # slot so the throttle is not permanently locked at inf.
+            with _throttle_lock:
+                _LAST_ANALYSIS_TIMESTAMP = _prev_analysis_ts
+            raise
         context_snapshot = {
             "symbol": symbol,
             "market": market,
@@ -415,10 +435,7 @@ class LLMAdvisorService:
         try:
             raw_response = self._call_llm(prompt)
             result = self._parse_response(raw_response)
-            # Only consume the throttle budget on a fully successful LLM
-            # call (transport + parse). If either step fails, the timestamp
-            # stays at its previous value so the next retry is not
-            # artificially delayed. Mirrors the preview() branch above.
+            # LLM succeeded — consume the throttle budget.
             with _throttle_lock:
                 _LAST_ANALYSIS_TIMESTAMP = time.monotonic()
 
@@ -432,6 +449,10 @@ class LLMAdvisorService:
             selected = FeatureSelector.parse_selection(raw_response, suggested)
             logger.info("LLM selected indicators: %s", selected)
         except Exception as exc:
+            # LLM call or parse failed — release the reserved slot so the
+            # next caller is not needlessly blocked.
+            with _throttle_lock:
+                _LAST_ANALYSIS_TIMESTAMP = _prev_analysis_ts
             logger.exception("LLM analysis failed")
             interaction_id = self._record_interaction(
                 interaction_type="analyze",
@@ -522,10 +543,10 @@ class LLMAdvisorService:
                     "applied": False,
                     "error": "Preview throttled: please wait before requesting another preview",
                 }
-            # NOTE: timestamp is updated ONLY on success, further down after
-            # _call_llm + _parse_response complete. Updating it here would
-            # consume the throttle budget on a failed LLM call, leaving the
-            # next caller needlessly blocked.
+            # Reserve slot: set to inf so no concurrent request can pass
+            # the throttle check while the LLM call is in flight.
+            _prev_preview_ts = _LAST_PREVIEW_TIMESTAMP
+            _LAST_PREVIEW_TIMESTAMP = float("inf")
 
         try:
             market_data = self._data_aggregator.fetch_market_data(symbol, market)
@@ -551,28 +572,38 @@ class LLMAdvisorService:
         else:
             prompt_price = float(current_price)
         if prompt_price <= 0:
+            # Market data unavailable — release the reserved slot.
+            with _throttle_lock:
+                _LAST_PREVIEW_TIMESTAMP = _prev_preview_ts
             return {"success": False, "applied": False, "error": "Market data unavailable for preview"}
 
-        prompt_template, prompt_variant = self._select_variant(symbol)
-        prompt = self._build_prompt(
-            symbol=symbol,
-            market=market,
-            current_price=prompt_price,
-            current_buy_low=current_buy_low,
-            current_sell_high=current_sell_high,
-            short_selling=short_selling,
-            current_position="FLAT",
-            recent_trades=[],
-            position_quantity=0.0,
-            position_avg_price=0.0,
-            unrealized_pnl_pct=0.0,
-            min_profit_amount=min_profit_amount,
-            recent_prices=None,
-            recent_analysis=None,
-            account_context=account_context,
-            market_data=market_data,
-            prompt_template=prompt_template,
-        )
+        try:
+            prompt_template, prompt_variant = self._select_variant(symbol)
+            prompt = self._build_prompt(
+                symbol=symbol,
+                market=market,
+                current_price=prompt_price,
+                current_buy_low=current_buy_low,
+                current_sell_high=current_sell_high,
+                short_selling=short_selling,
+                current_position="FLAT",
+                recent_trades=[],
+                position_quantity=0.0,
+                position_avg_price=0.0,
+                unrealized_pnl_pct=0.0,
+                min_profit_amount=min_profit_amount,
+                recent_prices=None,
+                recent_analysis=None,
+                account_context=account_context,
+                market_data=market_data,
+                prompt_template=prompt_template,
+            )
+        except Exception:
+            # _select_variant or _build_prompt failed — release the reserved
+            # slot so the throttle is not permanently locked at inf.
+            with _throttle_lock:
+                _LAST_PREVIEW_TIMESTAMP = _prev_preview_ts
+            raise
         context_snapshot = {
             "symbol": symbol,
             "market": market,
@@ -588,10 +619,13 @@ class LLMAdvisorService:
         try:
             raw_response = self._call_llm(prompt)
             result = self._parse_response(raw_response)
-            # Successful preview — now consume the throttle budget.
+            # LLM succeeded — consume the throttle budget.
             with _throttle_lock:
                 _LAST_PREVIEW_TIMESTAMP = time.monotonic()
         except Exception as exc:
+            # LLM call or parse failed — release the reserved slot.
+            with _throttle_lock:
+                _LAST_PREVIEW_TIMESTAMP = _prev_preview_ts
             logger.exception("LLM preview failed")
             self._record_interaction(
                 interaction_type="preview",

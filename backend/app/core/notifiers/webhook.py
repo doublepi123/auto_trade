@@ -5,6 +5,7 @@ import logging
 import re
 from datetime import datetime, timezone
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 from app.core.url_safety import validated_httpx_client
 from app.core.notifiers._messages import (
@@ -171,7 +172,13 @@ class WebhookNotifier:
             resp = self._client.post(self._url, json=payload)
             return 200 <= resp.status_code < 300
         except Exception as exc:
-            logger.warning("webhook send failed (%s): %s", self._url, exc)
+            # Log only the hostname — webhook URLs may embed credentials
+            # (e.g. Slack tokens in the path) that must not leak to logs.
+            try:
+                host = urlparse(self._url).hostname or "unknown"
+            except Exception:
+                host = "unknown"
+            logger.warning("webhook send failed (host=%s): %s", host, exc)
             return False
 
     def notify_order(self, side: str, symbol: str, quantity: str, price: str, order_id: str) -> bool:

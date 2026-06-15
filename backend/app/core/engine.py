@@ -132,6 +132,7 @@ class StrategyEngine:
                     action="BUY_TO_COVER",
                     description=f"Price {price} <= buy_low {self.params.buy_low}, cover SHORT",
                 )
+            # NOTE: SHORT 状态不追加做空 — 有意限制空头敞口,与 LONG 的 add-on 不对称
 
         return TriggerResult(triggered=False)
 

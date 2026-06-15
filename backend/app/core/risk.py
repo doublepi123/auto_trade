@@ -12,6 +12,8 @@ class RiskConfig:
     max_consecutive_losses: int = 3
 
     def __post_init__(self) -> None:
+        # ``is not None`` guard is required: runtime_state_service.load() may
+        # pass None when the DB column is NULL — this is NOT dead code.
         if self.max_daily_loss is not None and self.max_daily_loss < 0:
             raise ValueError("max_daily_loss must be non-negative")
 

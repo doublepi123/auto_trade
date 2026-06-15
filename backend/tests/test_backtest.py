@@ -359,6 +359,30 @@ class TestBacktestRiskAdjustedMetrics:
         if result_up.metrics.sortino_ratio is not None:
             assert result.metrics.sortino_ratio < result_up.metrics.sortino_ratio
 
+    def test_sortino_downside_dev_uses_total_observations(self) -> None:
+        """Verify downside_dev = sqrt(sum(r^2 for r in downside) / len(returns))."""
+        from app.core.backtest import BacktestEngine, BacktestEquityPoint
+        from datetime import datetime, timezone
+        import math
+
+        t = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        # 4 equity points → 3 returns: [0.0, -0.10, 0.0]
+        # mean_ret = -0.10/3
+        # downside = [-0.10]
+        # downside_dev (new) = sqrt(0.01 / 3)
+        # sortino = (-0.10/3) / sqrt(0.01/3) = -sqrt(3)/3
+        # (old formula would use / 1, giving -0.333... instead)
+        equity_curve = [
+            BacktestEquityPoint(t, 100, 100, 0, 0, 0, "flat"),
+            BacktestEquityPoint(t, 100, 100, 0, 0, 0, "flat"),
+            BacktestEquityPoint(t, 90, 90, 0, 0, 0, "flat"),
+            BacktestEquityPoint(t, 90, 90, 0, 0, 0, "flat"),
+        ]
+        sortino = BacktestEngine._calc_sortino_ratio(equity_curve)
+        assert sortino is not None
+        expected = (-0.10 / 3) / math.sqrt(0.01 / 3)
+        assert abs(sortino - expected) < 1e-10
+
     def test_calmar_none_for_no_drawdown(self) -> None:
         from app.core.backtest import BacktestEngine, BacktestEngineParams
         # Monotonically increasing → zero drawdown.

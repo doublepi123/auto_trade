@@ -184,6 +184,14 @@ class TestStrategyEngine:
         assert result.triggered is False
         assert engine.last_price == 50.0
 
+    def test_short_state_no_add_on_when_price_above_sell_high(self) -> None:
+        """SHORT 状态不追加做空 — 有意限制空头敞口,与 LONG 的 add-on 不对称"""
+        engine = StrategyEngine(make_params(100, 200, short_selling=True))
+        engine.state = EngineState.SHORT
+        result = engine.update_price(201.0)
+        assert result.triggered is False
+        assert engine.state == EngineState.SHORT
+
     def test_sync_state_from_engine_no_position(self) -> None:
         engine = StrategyEngine(make_params(100, 200))
         engine.state = EngineState.LONG

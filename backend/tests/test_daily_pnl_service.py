@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime, time, timezone
 
 from pytest import approx
+from pytest import LogCaptureFixture
 
 from app import database
 from app.models import OrderRecord
@@ -321,3 +322,65 @@ class TestDailyPnlService:
 
         assert result.realized_pnl == approx(50.0)
         assert result.consecutive_losses == 0
+
+    def test_executed_price_fallback_logs_warning(self, caplog: LogCaptureFixture) -> None:
+        """G1-2: _executed_price logs warning when falling back to limit price."""
+        self._cleanup()
+        trade_day = date(2026, 5, 22)
+        db = self._get_db()
+        db.add_all([
+            OrderRecord(
+                broker_order_id="buy-no-exec-price",
+                symbol="AAPL.US",
+                side="BUY",
+                quantity=5,
+                price=100,
+                executed_quantity=5,
+                executed_price=None,
+                status="FILLED",
+                created_at=self._dt(trade_day, 10),
+                filled_at=self._dt(trade_day, 10, 1),
+            ),
+        ])
+        db.commit()
+
+        import logging
+        caplog.set_level(logging.WARNING)
+        _ = DailyPnlService(db).calculate(trade_day=trade_day)
+        db.close()
+
+        assert any(
+            "has no executed_price, falling back to limit price" in rec.message
+            for rec in caplog.records
+        )
+
+    def test_unclosed_remainder_logs_warning(self, caplog: LogCaptureFixture) -> None:
+        """G1-3: _apply_fill logs warning when close exceeds tracked position."""
+        self._cleanup()
+        trade_day = date(2026, 5, 22)
+        db = self._get_db()
+        db.add_all([
+            OrderRecord(
+                broker_order_id="sell-without-holding",
+                symbol="AAPL.US",
+                side="SELL",
+                quantity=10,
+                price=110,
+                executed_quantity=10,
+                executed_price=110,
+                status="FILLED",
+                created_at=self._dt(trade_day, 10),
+                filled_at=self._dt(trade_day, 10, 1),
+            ),
+        ])
+        db.commit()
+
+        import logging
+        caplog.set_level(logging.WARNING)
+        _ = DailyPnlService(db).calculate(trade_day=trade_day)
+        db.close()
+
+        assert any(
+            "close quantity exceeds tracked position by" in rec.message
+            for rec in caplog.records
+        )

@@ -217,6 +217,8 @@ def analyze_llm_interval(
         raise HTTPException(status_code=503, detail="runner not initialized") from None
     last_price = runner.engine.last_price
     current_price = last_price if last_price is not None and last_price > 0 else config.buy_low
+    if current_price is None or current_price <= 0:
+        raise HTTPException(status_code=400, detail="current price unavailable and strategy buy_low not configured")
     position_context = _position_context(config.symbol, current_price)
     recent_price_context = getattr(runner, "recent_price_context", None)
     account_context = _account_context(config.symbol, config.market, current_price, config.short_selling)

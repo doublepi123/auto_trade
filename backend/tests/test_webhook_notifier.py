@@ -48,3 +48,21 @@ def test_webhook_timeout_returns_false() -> None:
 def test_webhook_empty_url_returns_false() -> None:
     notifier = WebhookNotifier("")
     assert notifier.send("t", "c") is False
+
+
+def test_webhook_log_omits_url_on_failure(caplog) -> None:
+    """The full webhook URL (which may embed credentials) must not leak to logs."""
+    import logging
+
+    sensitive_url = "https://hooks.slack.com/services/T000/B000/SECRETTOKEN123"
+    mock_client = MagicMock()
+    mock_client.post.side_effect = httpx.ConnectError("connection refused")
+
+    with patch("app.core.notifiers.webhook.validated_httpx_client", return_value=mock_client):
+        notifier = WebhookNotifier(sensitive_url)
+        with caplog.at_level(logging.WARNING, logger="auto_trade.notify.webhook"):
+            assert notifier.send("t", "c") is False
+
+    full_log = caplog.text
+    assert "SECRETTOKEN123" not in full_log
+    assert "hooks.slack.com" in full_log  # hostname is safe to log

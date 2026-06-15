@@ -20,6 +20,9 @@ from app.models import CredentialConfig
 #: and the associated write amplification.
 _LEGACY_ENCRYPTION_DONE: bool = False
 
+_VALID_CHANNEL_TYPES = {"serverchan", "webhook"}
+_VALID_SEVERITY_FLOORS = {"INFO", "WARNING", "CRITICAL"}
+
 
 @dataclass(frozen=True)
 class PlainCredentials:
@@ -53,6 +56,29 @@ class CredentialsService:
             sct_key=decrypt_secret(config.sct_key),
             notification_channels=config.notification_channels or DEFAULT_NOTIFICATION_CHANNELS_JSON,
         )
+
+    @staticmethod
+    def _validate_channel(ch: Any, idx: int) -> None:
+        """Validate a single notification channel entry. Raises ValueError on failure."""
+        if not isinstance(ch, dict):
+            raise ValueError(f"notification_channels[{idx}] must be a dict, got {type(ch).__name__}")
+        ch_type = ch.get("type")
+        if ch_type not in _VALID_CHANNEL_TYPES:
+            raise ValueError(
+                f"notification_channels[{idx}].type must be one of {_VALID_CHANNEL_TYPES}, got {ch_type!r}"
+            )
+        severity_floor = ch.get("severity_floor")
+        if severity_floor not in _VALID_SEVERITY_FLOORS:
+            raise ValueError(
+                f"notification_channels[{idx}].severity_floor must be one of {_VALID_SEVERITY_FLOORS}, got {severity_floor!r}"
+            )
+        if ch_type == "webhook":
+            url = ch.get("url")
+            if not url or not isinstance(url, str) or not url.strip():
+                raise ValueError(
+                    f"notification_channels[{idx}].url is required and must be non-empty when type is 'webhook'"
+                )
+            validate_webhook_url(url)
 
     def _parse_notification_channels(self, config: CredentialConfig) -> list[dict[str, Any]]:
         try:
@@ -118,28 +144,8 @@ class CredentialsService:
         if "notification_channels" in data and data["notification_channels"] is not None:
             channels = data["notification_channels"]
             if isinstance(channels, list):
-                _VALID_CHANNEL_TYPES = {"serverchan", "webhook"}
-                _VALID_SEVERITY_FLOORS = {"INFO", "WARNING", "CRITICAL"}
                 for idx, ch in enumerate(channels):
-                    if not isinstance(ch, dict):
-                        raise ValueError(f"notification_channels[{idx}] must be a dict, got {type(ch).__name__}")
-                    ch_type = ch.get("type")
-                    if ch_type not in _VALID_CHANNEL_TYPES:
-                        raise ValueError(
-                            f"notification_channels[{idx}].type must be one of {_VALID_CHANNEL_TYPES}, got {ch_type!r}"
-                        )
-                    severity_floor = ch.get("severity_floor")
-                    if severity_floor not in _VALID_SEVERITY_FLOORS:
-                        raise ValueError(
-                            f"notification_channels[{idx}].severity_floor must be one of {_VALID_SEVERITY_FLOORS}, got {severity_floor!r}"
-                        )
-                    if ch_type == "webhook":
-                        url = ch.get("url")
-                        if not url or not isinstance(url, str) or not url.strip():
-                            raise ValueError(
-                                f"notification_channels[{idx}].url is required and must be non-empty when type is 'webhook'"
-                            )
-                        validate_webhook_url(url)
+                    self._validate_channel(ch, idx)
                 def _to_dict(ch: Any) -> dict[str, Any]:
                     if isinstance(ch, dict):
                         return ch
@@ -158,6 +164,8 @@ class CredentialsService:
                         raise ValueError("notification_channels string is not valid JSON")
                     if not isinstance(parsed, list):
                         raise ValueError("notification_channels must be a list, got JSON type: %s" % type(parsed).__name__)
+                    for idx, ch in enumerate(parsed):
+                        self._validate_channel(ch, idx)
                     config.notification_channels = json.dumps(parsed, ensure_ascii=False)
                 else:
                     raise ValueError("notification_channels must be a list, got type: %s" % type(channels).__name__)

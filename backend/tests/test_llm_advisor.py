@@ -11,7 +11,7 @@ from app.services.data_aggregator import (
     _compute_atr,
     _compute_bollinger_bands,
 )
-from app.services.llm_advisor_service import LLMAdvisorService
+from app.services.llm_advisor_service import LLMAdvisorService, _escape_orphan_braces
 from app.schemas import LLMPreviewAnalyzeRequest
 
 
@@ -1124,3 +1124,275 @@ class TestLLMAdvisorDegradation:
 
         assert result["success"] is False
         assert "unavailable" in result.get("error", "").lower()
+
+
+class TestEscapeOrphanBraces:
+    """Issue F2: _escape_orphan_braces must handle all {…} content, not just identifiers."""
+
+    def test_json_example_does_not_crash(self) -> None:
+        """JSON-like content {'buy_low': 100} must not cause ValueError when formatted."""
+        template = '请以JSON格式输出: {"buy_low": 100}, 当前: {symbol}'
+        result = _escape_orphan_braces(template, {"symbol"})
+        # Should not raise when .format() is called
+        formatted = result.format(symbol="AAPL")
+        assert '"buy_low"' in formatted
+        assert "100" in formatted
+        # Valid placeholder {symbol} must still be substituted
+        assert "AAPL" in formatted
+
+    def test_valid_placeholders_preserved(self) -> None:
+        template = "当前价格: {current_price}, 建议买入: {buy_low}"
+        result = _escape_orphan_braces(template, {"current_price", "buy_low"})
+        # Valid placeholders stay as single-brace
+        assert "{current_price}" in result
+        assert "{buy_low}" in result
+        formatted = result.format(current_price=150.0, buy_low=140.0)
+        assert "150.0" in formatted
+        assert "140.0" in formatted
+
+    def test_unknown_identifier_escaped(self) -> None:
+        template = "未知变量: {unknown_var}"
+        result = _escape_orphan_braces(template, {"symbol"})
+        # The entire content is double-escaped ({{unknown_var}}), but we
+        # check the substring {{unknown_var}} is present (the raw string
+        # contains it).
+        assert "{{unknown_var}}" in result
+        formatted = result.format(symbol="AAPL")
+        assert "{unknown_var}" in formatted  # literal output after format
+
+    def test_auto_numbered_braces_escaped(self) -> None:
+        """Auto-numbered {} must be escaped to avoid ValueError."""
+        template = "空占位符: {}"
+        result = _escape_orphan_braces(template, {"symbol"})
+        assert "{{}}" in result
+        # After format() the double-braces collapse to literal {}
+        formatted = result.format(symbol="AAPL")
+        assert "{}" in formatted
+
+    def test_positional_placeholder_escaped(self) -> None:
+        """Positional {0} must be escaped (not a valid named key)."""
+        template = "位置参数: {0}"
+        result = _escape_orphan_braces(template, {"symbol"})
+        assert "{{0}}" in result
+        formatted = result.format(symbol="AAPL")
+        assert "{0}" in formatted
+
+    def test_format_spec_preserved_for_known_key(self) -> None:
+        """Format spec after known key (e.g. {symbol:.2f}) must be preserved."""
+        template = "价格: {symbol:.2f}"
+        result = _escape_orphan_braces(template, {"symbol"})
+        assert "{symbol:.2f}" in result
+        formatted = result.format(symbol=150.0)
+        assert "150.00" in formatted
+
+    def test_conversion_preserved_for_known_key(self) -> None:
+        """Conversion !s after known key must be preserved."""
+        template = "名称: {symbol!s}"
+        result = _escape_orphan_braces(template, {"symbol"})
+        assert "{symbol!s}" in result
+        formatted = result.format(symbol=42)
+        assert "42" in formatted
+
+    def test_mixed_json_and_placeholders(self) -> None:
+        """Template with both JSON example and valid placeholders must render both correctly."""
+        template = "分析 {symbol}: 示例输出 {\"buy_low\": 100, \"sell_high\": 200}"
+        result = _escape_orphan_braces(template, {"symbol"})
+        # format should succeed
+        formatted = result.format(symbol="AAPL")
+        assert "AAPL" in formatted
+        assert '"buy_low"' in formatted
+        assert "100" in formatted
+
+    def test_nested_braces_json_example(self) -> None:
+        """JSON with nested objects must not crash."""
+        template = '嵌套示例: {"data": {"price": 100, "qty": 5}} 当前: {symbol}'
+        result = _escape_orphan_braces(template, {"symbol"})
+        formatted = result.format(symbol="AAPL")
+        assert "AAPL" in formatted
+        assert '"data"' in formatted
+        assert '"price"' in formatted
+
+    def test_empty_template(self) -> None:
+        assert _escape_orphan_braces("", {"symbol"}) == ""
+        assert _escape_orphan_braces("纯文本", set()).format() == "纯文本"
+
+
+class TestThrottleReserveSlot:
+    """Issue F1: reserve-slot pattern prevents TOCTOU race on throttle timestamp."""
+
+    @pytest.fixture
+    def advisor(self) -> LLMAdvisorService:
+        from app.database import init_db
+
+        init_db()
+        return LLMAdvisorService()
+
+    def test_analyze_reserves_slot_blocks_concurrent(self, advisor: LLMAdvisorService, monkeypatch) -> None:
+        """After throttle check passes, _LAST_ANALYSIS_TIMESTAMP must be inf,
+        blocking any concurrent request."""
+        import app.services.llm_advisor_service as service_module
+
+        call_count = 0
+
+        def slow_call_deepseek(prompt: str) -> str:
+            nonlocal call_count
+            call_count += 1
+            # While inside the LLM call, a concurrent request would see inf
+            # and be throttled.
+            assert service_module._LAST_ANALYSIS_TIMESTAMP == float("inf"), (
+                "Slot not reserved during LLM call"
+            )
+            return '{"suggested_buy_low": 95.0, "suggested_sell_high": 105.0, "confidence_score": 0.8, "analysis": "ok"}'
+
+        monkeypatch.setattr(service_module, "_LAST_ANALYSIS_TIMESTAMP", 0.0)
+        monkeypatch.setattr(
+            advisor._data_aggregator,
+            "fetch_market_data",
+            lambda symbol, market: {
+                "daily_candles": [],
+                "minute_candles": [],
+                "current_price": 100.0,
+                "atr": 3.0,
+                "bb_upper": 110.0,
+                "bb_middle": 100.0,
+                "bb_lower": 90.0,
+            },
+        )
+        monkeypatch.setattr(advisor, "_call_deepseek", slow_call_deepseek)
+        monkeypatch.setattr(
+            service_module.LLMAdvisorService,
+            "_record_analysis",
+            lambda self, db, result, interval, **kw: datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc),
+        )
+        monkeypatch.setattr(
+            service_module.LLMAdvisorService,
+            "_record_interaction",
+            staticmethod(lambda **kwargs: 1),
+        )
+
+        result = advisor.analyze(
+            symbol="AAPL.US",
+            market="US",
+            current_price=100.0,
+            current_buy_low=90.0,
+            current_sell_high=110.0,
+            short_selling=False,
+            current_position="FLAT",
+            recent_trades=[],
+            force=True,
+        )
+
+        assert result["success"] is True
+        # After success, timestamp should be set to a real monotonic value (not inf)
+        assert service_module._LAST_ANALYSIS_TIMESTAMP != float("inf")
+        assert service_module._LAST_ANALYSIS_TIMESTAMP > 0
+        assert call_count == 1
+
+    def test_analyze_failure_releases_slot(self, advisor: LLMAdvisorService, monkeypatch) -> None:
+        """When LLM call fails, _LAST_ANALYSIS_TIMESTAMP must be restored to
+        its previous value so the next caller can retry immediately."""
+        import app.config
+        import app.services.llm_advisor_service as service_module
+
+        monkeypatch.setattr(service_module, "_LAST_ANALYSIS_TIMESTAMP", 0.0)
+        monkeypatch.setattr(app.config.settings, "deepseek_api_key", "test-key")
+        monkeypatch.setattr(
+            advisor._data_aggregator,
+            "fetch_market_data",
+            lambda symbol, market: {
+                "daily_candles": [],
+                "minute_candles": [],
+                "current_price": 100.0,
+            },
+        )
+
+        def fail_call(prompt: str) -> str:
+            raise RuntimeError("Simulated failure for TOCTOU test")
+
+        monkeypatch.setattr(advisor, "_call_deepseek", fail_call)
+
+        result = advisor.analyze(
+            symbol="AAPL.US",
+            market="US",
+            current_price=100.0,
+            current_buy_low=90.0,
+            current_sell_high=110.0,
+            short_selling=False,
+            current_position="FLAT",
+            recent_trades=[],
+            force=True,
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "LLM analysis failed"
+        # Slot must be released: timestamp restored to 0.0 (original value)
+        assert service_module._LAST_ANALYSIS_TIMESTAMP == 0.0, (
+            "Timestamp was not restored after failure"
+        )
+
+    def test_preview_failure_releases_slot(self, advisor: LLMAdvisorService, monkeypatch) -> None:
+        """When preview LLM call fails, _LAST_PREVIEW_TIMESTAMP must be restored."""
+        import app.services.llm_advisor_service as service_module
+
+        monkeypatch.setattr(service_module, "_LAST_PREVIEW_TIMESTAMP", 42.0)
+        monkeypatch.setattr(
+            advisor._data_aggregator,
+            "fetch_market_data",
+            lambda symbol, market: {
+                "current_price": 100.0,
+            },
+        )
+
+        def fail_call(prompt: str) -> str:
+            raise RuntimeError("Preview failure")
+
+        monkeypatch.setattr(advisor, "_call_deepseek", fail_call)
+
+        result = advisor.preview(
+            symbol="AAPL.US",
+            market="US",
+            current_price=100.0,
+            current_buy_low=90.0,
+            current_sell_high=110.0,
+            short_selling=False,
+        )
+
+        assert result["success"] is False
+        # Slot must be restored to original value (42.0)
+        assert service_module._LAST_PREVIEW_TIMESTAMP == 42.0, (
+            "Preview timestamp was not restored after failure"
+        )
+
+    def test_preview_early_return_releases_slot(self, advisor: LLMAdvisorService, monkeypatch) -> None:
+        """When preview returns early due to unavailable price, slot must be released."""
+        import app.services.llm_advisor_service as service_module
+
+        monkeypatch.setattr(service_module, "_LAST_PREVIEW_TIMESTAMP", 42.0)
+        monkeypatch.setattr(
+            advisor._data_aggregator,
+            "fetch_market_data",
+            lambda symbol, market: {
+                "current_price": 0.0,  # triggers early return
+            },
+        )
+
+        def fail_call(prompt: str) -> str:
+            raise AssertionError("must not call LLM when price is 0")
+
+        monkeypatch.setattr(advisor, "_call_deepseek", fail_call)
+
+        result = advisor.preview(
+            symbol="AAPL.US",
+            market="US",
+            current_price=0.0,
+            current_buy_low=90.0,
+            current_sell_high=110.0,
+            short_selling=False,
+        )
+
+        assert result["success"] is False
+        assert "unavailable" in result.get("error", "").lower()
+        # Slot must be restored to original value
+        assert service_module._LAST_PREVIEW_TIMESTAMP == 42.0, (
+            "Preview timestamp not restored on early return"
+        )

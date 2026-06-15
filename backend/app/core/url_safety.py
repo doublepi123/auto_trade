@@ -10,9 +10,17 @@ import httpx
 
 
 _CLOUD_METADATA_IP = ipaddress.ip_address("169.254.169.254")
+_CLOUD_METADATA_IP_V6 = ipaddress.ip_address("::ffff:169.254.169.254")
 
 
 def _reject_ip(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> None:
+    # IPv4-mapped IPv6 addresses (e.g. ::ffff:169.254.169.254) can bypass
+    # the IPv4 _CLOUD_METADATA_IP comparison.  Extract the mapped IPv4 for
+    # comparison when the address has an ipv4_mapped attribute.
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+        v4_part: ipaddress.IPv4Address | None = addr.ipv4_mapped
+    else:
+        v4_part = None
     if (
         addr.is_private
         or addr.is_loopback
@@ -21,6 +29,8 @@ def _reject_ip(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> None:
         or addr.is_multicast
         or addr.is_unspecified
         or addr == _CLOUD_METADATA_IP
+        or addr == _CLOUD_METADATA_IP_V6
+        or (v4_part is not None and v4_part == _CLOUD_METADATA_IP)
     ):
         raise ValueError("webhook url must not target private or link-local addresses")
 

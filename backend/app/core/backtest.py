@@ -330,14 +330,14 @@ class BacktestEngine:
         downside = [r for r in returns if r < 0]
         if not downside:
             return None
-        downside_dev = (sum(r ** 2 for r in downside) / len(downside)) ** 0.5
+        downside_dev = (sum(r ** 2 for r in downside) / len(returns)) ** 0.5
         if downside_dev == 0:
             return None
         return mean_ret / downside_dev
 
     @staticmethod
     def _calc_calmar_ratio(equity_curve: list[BacktestEquityPoint]) -> Optional[float]:
-        """Annualised return / |max drawdown|. None when drawdown is 0."""
+        """累计收益率 / 最大回撤 (Total return / |max drawdown|). None when drawdown is 0."""
         if len(equity_curve) < 2:
             return None
         initial = equity_curve[0].equity

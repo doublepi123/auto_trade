@@ -40,6 +40,8 @@ class IntervalApplicationService:
         if reject_reason:
             config.llm_reject_reason = reject_reason
             config.llm_applied_at = datetime.now(timezone.utc)
+            config.llm_applied_buy_low = None
+            config.llm_applied_sell_high = None
             db.commit()
             return {
                 "success": False,
@@ -104,6 +106,8 @@ class IntervalApplicationService:
         if reject_reason:
             config.llm_reject_reason = reject_reason
             config.llm_applied_at = now
+            config.llm_applied_buy_low = None
+            config.llm_applied_sell_high = None
             db.commit()
             return {
                 "success": False,

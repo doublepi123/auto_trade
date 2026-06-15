@@ -5,6 +5,21 @@ import pytest
 from app.core.risk import RiskConfig, RiskController
 
 
+class TestRiskConfig:
+    def test_negative_max_daily_loss_raises(self) -> None:
+        with pytest.raises(ValueError, match="max_daily_loss must be non-negative"):
+            RiskConfig(max_daily_loss=-100.0)
+
+    def test_zero_max_daily_loss_ok(self) -> None:
+        config = RiskConfig(max_daily_loss=0.0)
+        assert config.max_daily_loss == 0.0
+
+    def test_none_max_daily_loss_ok(self) -> None:
+        # runtime_state_service.load() may pass None when the DB column is NULL.
+        config = RiskConfig(max_daily_loss=None)  # type: ignore[arg-type]
+        assert config.max_daily_loss is None
+
+
 class TestRiskController:
     def test_default_approved(self) -> None:
         ctrl = RiskController()

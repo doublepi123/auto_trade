@@ -130,3 +130,32 @@ def test_get_quote_uses_quote_retry_max(gw, monkeypatch):
     with pytest.raises(_TransientErr):
         gw.get_quote("AAPL.US")
     assert len(calls) == 2
+
+
+def test_call_with_retry_exponential_backoff_values(gw, monkeypatch):
+    """B6: Verify the exponential backoff delay sequence.
+
+    With base_ms=1000 and max_retries=3, the delay sequence (attempt=0,1,2)
+    should be [500ms, 1000ms, 2000ms] = [0.5s, 1s, 2s].
+    """
+    delays: list[float] = []
+
+    def fake_sleep(delay: float) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr("time.sleep", fake_sleep)
+
+    calls = []
+
+    def always_fail():
+        calls.append(1)
+        raise _TransientErr("rate limit")
+
+    with pytest.raises(_TransientErr):
+        gw._call_with_retry(always_fail, op="test", max_retries=3, base_ms=1000)
+
+    # attempt=0: 2^(0-1)=0.5s, attempt=1: 2^(1-1)=1s, attempt=2: 2^(2-1)=2s
+    assert len(delays) == 3
+    assert delays[0] == pytest.approx(0.5, rel=1e-9)
+    assert delays[1] == pytest.approx(1.0, rel=1e-9)
+    assert delays[2] == pytest.approx(2.0, rel=1e-9)

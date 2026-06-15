@@ -186,12 +186,12 @@ class TestTradeExecutionServiceBasics:
         # 5.00 → 0.01 tick tier (>=0.5 and <10)
         assert TradeExecutionService._normalize_limit_price("0700.HK", "BUY", Decimal("5.005")) == Decimal("5.00")
         assert TradeExecutionService._normalize_limit_price("0700.HK", "SELL", Decimal("5.005")) == Decimal("5.01")
-        # Phase 1: 10-20 now trades in 0.01 ticks.
-        assert TradeExecutionService._normalize_limit_price("0700.HK", "BUY", Decimal("15.017")) == Decimal("15.01")
-        assert TradeExecutionService._normalize_limit_price("0700.HK", "SELL", Decimal("15.011")) == Decimal("15.02")
-        # Phase 1: 20-50 now trades in 0.02 ticks.
-        assert TradeExecutionService._normalize_limit_price("0700.HK", "BUY", Decimal("25.037")) == Decimal("25.02")
-        assert TradeExecutionService._normalize_limit_price("0700.HK", "SELL", Decimal("25.037")) == Decimal("25.04")
+        # Phase 2: 10-20 trades in 0.02 ticks (was 0.01 in Phase 1).
+        assert TradeExecutionService._normalize_limit_price("0700.HK", "BUY", Decimal("15.017")) == Decimal("15.000")
+        assert TradeExecutionService._normalize_limit_price("0700.HK", "SELL", Decimal("15.011")) == Decimal("15.020")
+        # Phase 2: 20-100 merged to 0.05 ticks (was 0.02 for 20-50 in Phase 1).
+        assert TradeExecutionService._normalize_limit_price("0700.HK", "BUY", Decimal("25.037")) == Decimal("25.000")
+        assert TradeExecutionService._normalize_limit_price("0700.HK", "SELL", Decimal("25.037")) == Decimal("25.050")
         # 150.04 -> 0.10 tick tier (>=100 and <200): BUY floors to 150.00, SELL ceils to 150.10.
         assert TradeExecutionService._normalize_limit_price("0700.HK", "BUY", Decimal("150.04")) == Decimal("150.00")
         assert TradeExecutionService._normalize_limit_price("0700.HK", "SELL", Decimal("150.01")) == Decimal("150.10")

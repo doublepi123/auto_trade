@@ -118,7 +118,7 @@ def next_session_open(market: str, instant: datetime | None = None) -> datetime:
     """Return the next RTH open in UTC after ``instant``.
 
     Skips weekends and full-day market closures. If the lookup overflows the
-    holiday calendar's coverage window (data ends 2026 currently), the
+    holiday calendar's coverage window (data ends 2027 currently), the
     function falls back to skipping weekends only — it never returns a date
     that ``is_market_closed`` would mark as closed within the covered range.
     """

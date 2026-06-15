@@ -170,6 +170,7 @@ class StrategyResponse(BaseModel):
     trading_session_mode: str = "ANY"
     margin_safety_factor: float = 0.9
     updated_at: datetime
+    consistency_warnings: list[dict[str, str]] = Field(default_factory=list)
 
     model_config = {"from_attributes": True}
 
@@ -226,8 +227,8 @@ class ReportMetrics(BaseModel):
     win_rate: float
     profit_loss_ratio: float
     avg_pnl_per_trade: float
-    max_profit: float
-    max_loss: float
+    max_profit: float | None = None
+    max_loss: float | None = None
     max_drawdown: float
     llm_suggestions_count: int
     llm_applied_count: int

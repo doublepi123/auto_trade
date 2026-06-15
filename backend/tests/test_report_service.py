@@ -172,8 +172,8 @@ class TestReportService:
             assert report.metrics.loss_count == 0
             assert report.metrics.win_rate == 0.0
             assert report.metrics.avg_pnl_per_trade == 0.0
-            assert report.metrics.max_profit == 0.0
-            assert report.metrics.max_loss == 0.0
+            assert report.metrics.max_profit is None
+            assert report.metrics.max_loss is None
             assert report.metrics.max_drawdown == 0.0
             assert report.metrics.llm_suggestions_count == 0
             assert report.metrics.llm_applied_count == 0

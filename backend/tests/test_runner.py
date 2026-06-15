@@ -2230,3 +2230,32 @@ class TestRecentQuotesDequeBound:
         # Only the new entry should survive.
         assert len(runner._recent_quotes) == 1
         assert runner._recent_quotes[0]["last_price"] == 200.0
+
+
+class TestMarkFillProcessed:
+    """_mark_fill_processed 现在要求 symbol 为必填参数,并按不同 symbol 分别记录时间戳。"""
+
+    def test_requires_symbol_argument(self) -> None:
+        runner = AppRunner()
+        with pytest.raises(TypeError):
+            runner._mark_fill_processed()  # type: ignore[call-arg]
+
+    def test_stores_timestamp_per_symbol(self) -> None:
+        runner = AppRunner()
+        runner._mark_fill_processed(symbol="AAPL.US")
+        assert "AAPL.US" in runner._last_fill_at
+        assert "NVDA.US" not in runner._last_fill_at
+
+        ts_aapl = runner._last_fill_at["AAPL.US"]
+        runner._mark_fill_processed(symbol="NVDA.US")
+        assert "NVDA.US" in runner._last_fill_at
+        # Two different symbols have independent timestamps
+        assert runner._last_fill_at["AAPL.US"] == ts_aapl
+        assert runner._last_fill_at["NVDA.US"] >= ts_aapl
+
+    def test_empty_symbol_falls_back_to_main_engine(self) -> None:
+        """传递空字符串时仍回退到主引擎 symbol (防御性兼容)."""
+        runner = AppRunner()
+        runner.engine.params = StrategyParams(symbol="NVDA.US", market="US")
+        runner._mark_fill_processed(symbol="")
+        assert "NVDA.US" in runner._last_fill_at

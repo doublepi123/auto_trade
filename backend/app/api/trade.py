@@ -457,7 +457,13 @@ def cancel_order(
             logging.getLogger("auto_trade.trade").exception("failed to cancel order %s", order_id)
             raise HTTPException(status_code=400, detail="cancel order failed") from exc
 
-        _update_local_order_from_status(db, order_id, status_result)
+        try:
+            _update_local_order_from_status(db, order_id, status_result)
+        except Exception as exc:
+            logger.error(
+                "broker cancel succeeded for order %s but local DB update failed: %s — will self-heal on next broker sync",
+                order_id, exc,
+            )
         status = str(getattr(status_result, "status", "CANCELLED"))
         return OrderCancelResponse(
             broker_order_id=str(getattr(status_result, "broker_order_id", order_id)),

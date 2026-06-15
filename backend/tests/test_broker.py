@@ -486,6 +486,22 @@ class TestBrokerGateway:
         with pytest.raises(ValueError, match="unsupported candlestick period"):
             gw.get_candlesticks("AAPL.US", "Tick_1", 1)
 
+    def test_get_candlesticks_raises_when_no_adjust_missing(self, monkeypatch) -> None:
+        """B4: getattr(AdjustType, \"NoAdjust\", None) must raise RuntimeError when NoAdjust is absent."""
+        class FakeModule:
+            class Period:
+                Day = "DAY"
+
+            class AdjustType:
+                pass  # No NoAdjust attribute
+
+        monkeypatch.setattr(broker_module, "_import_openapi", lambda: FakeModule)
+        gw = BrokerGateway()
+        gw._quote_ctx = object()
+        gw._trade_ctx = object()
+        with pytest.raises(RuntimeError, match="AdjustType.NoAdjust not found in SDK"):
+            gw.get_candlesticks("AAPL.US", "Day", 1)
+
     def test_normalize_period_name(self) -> None:
         assert _normalize_period_name("Day") == "Day"
         assert _normalize_period_name("MIN_1") == "Min_1"
@@ -1170,6 +1186,30 @@ class TestIterPositionItems:
 
 
 class TestDecimalAttr:
+    def test_does_not_catch_keyboard_interrupt(self) -> None:
+        """B3: _decimal_attr must not swallow KeyboardInterrupt."""
+        class RaisesOnStr:
+            def __str__(self) -> str:
+                raise KeyboardInterrupt()
+
+        class Item:
+            qty = RaisesOnStr()
+
+        with pytest.raises(KeyboardInterrupt):
+            _decimal_attr(Item(), "qty")
+
+    def test_does_not_catch_system_exit(self) -> None:
+        """B3: _decimal_attr must not swallow SystemExit."""
+        class RaisesOnStr:
+            def __str__(self) -> str:
+                raise SystemExit(1)
+
+        class Item:
+            qty = RaisesOnStr()
+
+        with pytest.raises(SystemExit):
+            _decimal_attr(Item(), "qty")
+
     def test_first_name_found(self) -> None:
         assert _decimal_attr({"qty": "10"}, "qty") == Decimal("10")
 

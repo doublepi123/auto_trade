@@ -319,6 +319,14 @@ def test_init_db_adds_missing_runtime_state_daily_pnl_date_column(tmp_path, monk
             )
             """
         )
+        # Seed a pre-existing row with non-zero P&L and losses to verify the
+        # migration does NOT reset them when backfilling daily_pnl_date.
+        connection.execute(
+            "INSERT INTO runtime_state "
+            "(engine_state, paused, kill_switch, daily_pnl, consecutive_losses, "
+            "last_price, last_trigger_price, last_trigger_at, updated_at) "
+            "VALUES ('LONG', 0, 0, 1234.56, 5, 100.0, 99.5, NULL, '2026-01-01 00:00:00')"
+        )
         connection.commit()
     finally:
         connection.close()
@@ -336,6 +344,16 @@ def test_init_db_adds_missing_runtime_state_daily_pnl_date_column(tmp_path, monk
     assert "pause_reason" in columns
     assert "paused_at" in columns
     assert "pause_auto_resumable" in columns
+
+    # The migration must backfill daily_pnl_date WITHOUT resetting P&L/losses.
+    with engine.connect() as db:
+        row = db.exec_driver_sql(
+            "SELECT daily_pnl, consecutive_losses, daily_pnl_date FROM runtime_state WHERE id = 1"
+        ).fetchone()
+    assert row is not None
+    assert row[0] == 1234.56  # daily_pnl preserved
+    assert row[1] == 5  # consecutive_losses preserved
+    assert row[2] is not None  # daily_pnl_date backfilled
 
     Base.metadata.drop_all(bind=engine)
 
