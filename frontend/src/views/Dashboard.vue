@@ -358,6 +358,8 @@
     <section class="detail-panel" data-testid="position-pnl-section">
       <PositionPnlPanel />
       <RiskHistoryPanel />
+      <EquityCurvePanel />
+      <SymbolAttributionPanel />
       <SessionClockPanel :symbol="strategy.symbol" />
     </section>
 
@@ -487,6 +489,8 @@ import PriceChart from '../components/PriceChart.vue'
 import PnLChart from '../components/PnLChart.vue'
 import PositionPnlPanel from '../components/PositionPnlPanel.vue'
 import RiskHistoryPanel from '../components/RiskHistoryPanel.vue'
+import EquityCurvePanel from '../components/EquityCurvePanel.vue'
+import SymbolAttributionPanel from '../components/SymbolAttributionPanel.vue'
 import SessionClockPanel from '../components/SessionClockPanel.vue'
 import { useDashboardData } from '../composables/useDashboardData'
 import { useStatusStream } from '../composables/useStatusStream'

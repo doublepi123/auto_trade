@@ -4,6 +4,7 @@ import type {
   AlertRuleCreate,
   AlertRulePage,
   AlertEvaluateResult,
+  AlertFiringPage,
 } from '../types'
 
 export async function listAlertRules(enabled?: boolean): Promise<AlertRulePage> {
@@ -29,5 +30,20 @@ export async function deleteAlertRule(id: number): Promise<void> {
 
 export async function evaluateAlertRules(): Promise<AlertEvaluateResult> {
   const resp = await api.post('/api/alert-rules/evaluate')
+  return resp.data
+}
+
+export async function getAlertRuleHistory(
+  id: number,
+  params: { limit?: number } = {},
+): Promise<AlertFiringPage> {
+  const resp = await api.get(`/api/alert-rules/${id}/history`, { params })
+  return resp.data
+}
+
+export async function listAlertFirings(
+  params: { rule_id?: number; limit?: number } = {},
+): Promise<AlertFiringPage> {
+  const resp = await api.get('/api/alert-firings', { params })
   return resp.data
 }

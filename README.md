@@ -388,6 +388,17 @@ auto_trade/
 
 > Web UI：仪表盘「持仓浮盈」面板（独立组件 `PositionPnlPanel`）。
 
+### 已实现盈亏分析（Closed Trades / Stats / Equity / Attribution）
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/trades` | lot 级 FIFO entry↔exit 配对的已实现成交：每笔平仓 fill 一行，含 `entry_price`（加权均价）/`exit_price`/`quantity`/`gross_pnl`/`est_fees`/`net_pnl`/`holding_seconds`；`?symbol=&from_date=&to_date=&limit=`（最多 500，按平仓时间倒序） |
+| `GET` | `/api/trades/stats` | 往返成交统计：`win_rate`/`profit_factor`/`payoff_ratio`/`expectancy`/`largest_win`/`largest_loss`/当前与最长连胜连败/`avg_hold_seconds`；`?symbol=&days=`（默认 30）；win/loss 按 `net_pnl` 分类 |
+| `GET` | `/api/equity/curve` | 账户级累计已实现 PnL 曲线（净，按日）：每日 `realized_pnl`/`cumulative_pnl`/`drawdown`/`trade_count` + 汇总；`?symbol=&days=`（默认 90） |
+| `GET` | `/api/pnl/by-symbol` | 组合级按标的归因：每标的 `realized_pnl`/`trade_count`/`win_rate`/`contribution_share`/`largest_win`/`largest_loss`，按绝对盈亏排序；`?symbol=&days=`（默认 30） |
+
+> 共享只读基础 `DailyPnlService.pair_round_trips()`（复用既有 FIFO 配对，不触碰风控路径）。Web UI：交易历史「已实现成交」折叠表 + 统计条；仪表盘 `EquityCurvePanel`（累计 PnL + 回撤 SVG）+ `SymbolAttributionPanel`（按标的表格）。
+
 ### 风险历史（Risk History）
 
 | Method | Path | Description |
@@ -428,8 +439,10 @@ auto_trade/
 | `POST` | `/api/alert-rules` | 新建规则（写审计 `ALERT_RULE_CREATE`） |
 | `PUT` / `DELETE` | `/api/alert-rules/{id}` | 更新 / 删除（写审计） |
 | `POST` | `/api/alert-rules/evaluate` | 立即评估一次（后台也每 60s 自动评估） |
+| `GET` | `/api/alert-rules/{id}/history` | 该规则的 append-only 触发历史（`rule_id`/`trigger_value`/`threshold`/`severity`/`message`/`fired_at`，最近优先）；`?from_date=&to_date=&limit=`（最多 500） |
+| `GET` | `/api/alert-firings` | 跨规则触发时间线（最近优先）；`?rule_id=&limit=` |
 
-> 规则类型：`price_above` / `price_below`（实时行情）、`daily_loss`（`runtime_state.daily_pnl`）。触发经 `MultiChannelNotifier` 推送，按 `cooldown_seconds` 节流（`last_fired_at`）。**只读评估 + 通知，不发单。** Web UI：「告警规则」页（新建/编辑/启停/立即评估）。
+> 规则类型：`price_above` / `price_below`（实时行情）、`daily_loss`（`runtime_state.daily_pnl`）。触发经 `MultiChannelNotifier` 推送，按 `cooldown_seconds` 节流（`last_fired_at`）。每次成功触发同步 append 一行到 `alert_firings`（无 FK，删规则留历史）。**只读评估 + 通知，不发单。** Web UI：「告警规则」页（新建/编辑/启停/立即评估/触发历史弹窗）。
 
 ### 策略预设（Strategy Presets）
 

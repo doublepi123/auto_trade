@@ -15,8 +15,12 @@ from fastapi.responses import JSONResponse
 from app.api.backtest import router as backtest_router
 from app.api.calendar import router as calendar_router
 from app.api.trade_notes import router as trade_notes_router
+from app.api.trades import router as trades_router
+from app.api.equity import router as equity_router
+from app.api.pnl import router as pnl_router
 from app.api.positions import router as positions_router
 from app.api.alert_rules import router as alert_rules_router
+from app.api.alert_rules import alert_firings_router
 from app.api.strategy_presets import router as strategy_presets_router
 from app.api.risk import router as risk_router
 from app.api.broker import router as broker_router
@@ -571,8 +575,12 @@ app.include_router(watchlist_router)
 app.include_router(llm_advisor_router)
 app.include_router(backtest_router)
 app.include_router(trade_notes_router)
+app.include_router(trades_router)
+app.include_router(equity_router)
+app.include_router(pnl_router)
 app.include_router(positions_router)
 app.include_router(alert_rules_router)
+app.include_router(alert_firings_router)
 app.include_router(strategy_presets_router)
 app.include_router(risk_router)
 app.include_router(broker_router)

@@ -69,6 +69,7 @@ def init_db() -> None:
     _ensure_trade_notes_table(engine)
     _ensure_backtest_runs_table(engine)
     _ensure_alert_rules_table(engine)
+    _ensure_alert_firings_table(engine)
     _ensure_strategy_presets_table(engine)
     _ensure_notifications_table(engine)
     db = SessionLocal()
@@ -376,6 +377,35 @@ def _ensure_alert_rules_table(db_engine: Engine) -> None:
         )
         connection.exec_driver_sql(
             "CREATE INDEX IF NOT EXISTS ix_alert_rules_enabled ON alert_rules (enabled)"
+        )
+
+
+def _ensure_alert_firings_table(db_engine: Engine) -> None:
+    """Defensive explicit create for alert_firings (append-only firing log).
+
+    No FK to alert_rules so a deleted rule's firing history survives.
+    """
+    inspector = inspect(db_engine)
+    if "alert_firings" in inspector.get_table_names():
+        return
+    with db_engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS alert_firings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                rule_id INTEGER NOT NULL,
+                symbol VARCHAR(50) NOT NULL DEFAULT '',
+                rule_type VARCHAR(24) NOT NULL DEFAULT '',
+                threshold FLOAT NOT NULL DEFAULT 0,
+                trigger_value FLOAT NOT NULL DEFAULT 0,
+                severity VARCHAR(16) NOT NULL DEFAULT 'WARNING',
+                message TEXT NOT NULL DEFAULT '',
+                fired_at DATETIME NOT NULL
+            )
+            """
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_alert_firings_rule_fired_at ON alert_firings (rule_id, fired_at)"
         )
 
 

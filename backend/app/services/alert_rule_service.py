@@ -14,7 +14,7 @@ from typing import Any, Protocol
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import AlertRule, RuntimeState
+from app.models import AlertFiring, AlertRule, RuntimeState
 from app.schemas import AlertEvaluateResult, AlertRuleCreate, AlertRuleOut
 
 logger = logging.getLogger(__name__)
@@ -93,6 +93,10 @@ class AlertRuleService:
 
         fired = 0
         skipped_cooldown = 0
+        # Capture firing payloads (scalars only) as rules fire; persisted after
+        # the main commit so a firing-log write can never poison the
+        # last_fired_at update transaction.
+        firing_payloads: list[dict[str, Any]] = []
         for rule in rules:
             # Isolate each rule: one bad rule (DB error, unexpected value) must
             # not abort the whole tick or drop earlier rules' last_fired_at
@@ -115,11 +119,61 @@ class AlertRuleService:
                     if ok:
                         rule.last_fired_at = now
                         fired += 1
+                        firing_payloads.append({
+                            "rule_id": int(rule.id),
+                            "symbol": str(rule.symbol or ""),
+                            "rule_type": str(rule.rule_type or ""),
+                            "threshold": float(rule.threshold),
+                            "trigger_value": float(value),
+                            "severity": str(rule.severity or "WARNING"),
+                            "message": str(message or ""),
+                            "fired_at": now,
+                        })
             except Exception:
                 logger.exception("alert rule %s evaluation failed; skipping", rule.id)
                 continue
         self._db.commit()
+        for payload in firing_payloads:
+            self._record_firing(payload)
         return AlertEvaluateResult(evaluated=len(rules), fired=fired, skipped_cooldown=skipped_cooldown)
+
+    def _record_firing(self, payload: dict[str, Any]) -> None:
+        """Persist one firing row. Best-effort: a failure here never affects the
+        rule's ``last_fired_at`` (already committed) or other firings."""
+        try:
+            self._db.add(AlertFiring(**payload))
+            self._db.commit()
+        except Exception:
+            logger.exception("alert firing record failed for rule %s", payload.get("rule_id"))
+            try:
+                self._db.rollback()
+            except Exception:  # noqa: BLE001 — rollback must never mask the original error
+                pass
+
+    def history(
+        self,
+        rule_id: int,
+        *,
+        from_dt: datetime | None = None,
+        to_dt: datetime | None = None,
+        limit: int = 100,
+    ) -> list[AlertFiring]:
+        """Most-recent-first firing timeline for one rule."""
+        stmt = select(AlertFiring).where(AlertFiring.rule_id == rule_id)
+        if from_dt is not None:
+            stmt = stmt.where(AlertFiring.fired_at >= from_dt)
+        if to_dt is not None:
+            stmt = stmt.where(AlertFiring.fired_at <= to_dt)
+        stmt = stmt.order_by(AlertFiring.fired_at.desc()).limit(max(1, int(limit)))
+        return list(self._db.scalars(stmt))
+
+    def list_firings(self, rule_id: int | None = None, *, limit: int = 100) -> list[AlertFiring]:
+        """Most-recent-first firing timeline across all (or one) rules."""
+        stmt = select(AlertFiring)
+        if rule_id is not None:
+            stmt = stmt.where(AlertFiring.rule_id == rule_id)
+        stmt = stmt.order_by(AlertFiring.fired_at.desc()).limit(max(1, int(limit)))
+        return list(self._db.scalars(stmt))
 
     def _current_value(self, rule: AlertRule, quote_map: dict[str, float]) -> float | None:
         if rule.rule_type in PRICE_RULES:
@@ -130,8 +184,11 @@ class AlertRuleService:
                 .where(RuntimeState.symbol == rule.symbol)
                 .order_by(RuntimeState.id.desc())
             )
-            if state is None and rule.symbol:
-                # fall back to the latest row regardless of symbol
+            if state is None and not rule.symbol:
+                # Account-wide (symbol-less) rule: fall back to the latest row
+                # regardless of symbol. A symbol-specific rule with no matching
+                # state row returns None (data unavailable) rather than firing on
+                # an unrelated symbol's daily_pnl.
                 state = self._db.scalar(select(RuntimeState).order_by(RuntimeState.id.desc()))
             return float(state.daily_pnl) if state is not None else None
         return None

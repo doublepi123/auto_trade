@@ -566,6 +566,79 @@ export interface PositionPnlResult {
   error: string | null
 }
 
+export interface ClosedTrade {
+  symbol: string
+  side: string
+  entry_order_id: number
+  exit_order_id: number
+  entry_at: string
+  exit_at: string
+  entry_price: number
+  exit_price: number
+  quantity: number
+  gross_pnl: number
+  est_fees: number
+  net_pnl: number
+  holding_seconds: number
+}
+
+export interface ClosedTradePage {
+  items: ClosedTrade[]
+  total: number
+}
+
+export interface TradeStats {
+  total_trades: number
+  win_count: number
+  loss_count: number
+  breakeven_count: number
+  win_rate: number
+  total_gross_pnl: number
+  total_net_pnl: number
+  avg_win: number | null
+  avg_loss: number | null
+  expectancy: number
+  profit_factor: number | null
+  payoff_ratio: number | null
+  largest_win: number | null
+  largest_loss: number | null
+  current_streak_type: string
+  current_streak_count: number
+  max_win_streak: number
+  max_loss_streak: number
+  avg_hold_seconds: number | null
+}
+
+export interface EquityCurvePoint {
+  date: string
+  realized_pnl: number
+  cumulative_pnl: number
+  drawdown: number
+  trade_count: number
+}
+
+export interface EquityCurveResponse {
+  points: EquityCurvePoint[]
+  total_realized_pnl: number
+  max_drawdown: number
+}
+
+export interface SymbolAttributionRow {
+  symbol: string
+  realized_pnl: number
+  trade_count: number
+  win_count: number
+  win_rate: number
+  contribution_share: number
+  largest_win: number | null
+  largest_loss: number | null
+}
+
+export interface SymbolAttributionResponse {
+  rows: SymbolAttributionRow[]
+  total_realized_pnl: number
+}
+
 export interface StressTestResult {
   scenarios_run: number
   baseline_return_pct: number | null
@@ -649,6 +722,23 @@ export interface AlertEvaluateResult {
   evaluated: number
   fired: number
   skipped_cooldown: number
+}
+
+export interface AlertFiring {
+  id: number
+  rule_id: number
+  symbol: string
+  rule_type: string
+  threshold: number
+  trigger_value: number
+  severity: string
+  message: string
+  fired_at: string
+}
+
+export interface AlertFiringPage {
+  items: AlertFiring[]
+  total: number
 }
 
 export interface StrategyPreset {

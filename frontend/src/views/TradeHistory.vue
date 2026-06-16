@@ -102,6 +102,63 @@
       />
     </div>
 
+    <el-collapse class="roundtrips-collapse">
+      <el-collapse-item name="roundtrips">
+        <template #title>
+          <span>已实现成交（往返配对 · 净/毛盈亏）</span>
+          <span class="muted roundtrips-count">共 {{ rtTotal }} 笔</span>
+        </template>
+        <div v-if="tradeStats && tradeStats.total_trades > 0" class="stats-card" data-testid="trade-stats">
+          <div class="stat"><span>往返</span><strong>{{ tradeStats.total_trades }}</strong></div>
+          <div class="stat"><span>胜率</span><strong>{{ tradeStats.win_rate.toFixed(1) }}%</strong></div>
+          <div class="stat"><span>盈亏比</span><strong>{{ tradeStats.profit_factor != null ? tradeStats.profit_factor.toFixed(2) : '—' }}</strong></div>
+          <div class="stat"><span>期望(净)</span><strong :class="pnlClass(tradeStats.expectancy)">{{ formatPnl(tradeStats.expectancy) }}</strong></div>
+          <div class="stat"><span>当前连续</span><strong>{{ streakLabel(tradeStats) }}</strong></div>
+          <div class="stat"><span>最长胜/败</span><strong>{{ tradeStats.max_win_streak }} / {{ tradeStats.max_loss_streak }}</strong></div>
+          <div class="stat"><span>近30天净盈亏</span><strong :class="pnlClass(tradeStats.total_net_pnl)">{{ formatPnl(tradeStats.total_net_pnl) }}</strong></div>
+        </div>
+        <div class="roundtrips-controls">
+          <el-date-picker v-model="rtFromDate" type="date" value-format="YYYY-MM-DD" placeholder="开始日期" size="small" />
+          <el-date-picker v-model="rtToDate" type="date" value-format="YYYY-MM-DD" placeholder="结束日期" size="small" />
+          <el-button size="small" type="primary" :loading="rtLoading" data-testid="load-roundtrips" @click="loadClosedTrades">拉取</el-button>
+          <span class="muted">按平仓时间，最近优先</span>
+        </div>
+        <el-table :data="closedTrades" stripe size="small" v-loading="rtLoading" data-testid="roundtrips-table">
+          <el-table-column prop="symbol" label="标的" width="110" />
+          <el-table-column prop="side" label="方向" width="70">
+            <template #default="{ row }">
+              <el-tag size="small" :type="row.side === 'long' ? 'success' : 'danger'">{{ row.side === 'long' ? '多' : '空' }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="入场" width="150">
+            <template #default="{ row }">{{ row.entry_price.toFixed(2) }} × {{ row.quantity }}</template>
+          </el-table-column>
+          <el-table-column label="出场" width="150">
+            <template #default="{ row }">{{ row.exit_price.toFixed(2) }} × {{ row.quantity }}</template>
+          </el-table-column>
+          <el-table-column label="毛盈亏" width="100">
+            <template #default="{ row }">
+              <span :class="pnlClass(row.gross_pnl)">{{ formatPnl(row.gross_pnl) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="估算费用" width="90">
+            <template #default="{ row }">{{ row.est_fees.toFixed(2) }}</template>
+          </el-table-column>
+          <el-table-column label="净盈亏" width="100">
+            <template #default="{ row }">
+              <span :class="pnlClass(row.net_pnl)">{{ formatPnl(row.net_pnl) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="持仓时长" width="100">
+            <template #default="{ row }">{{ formatHold(row.holding_seconds) }}</template>
+          </el-table-column>
+          <el-table-column label="平仓时间" width="180">
+            <template #default="{ row }">{{ formatDateTime(row.exit_at) }}</template>
+          </el-table-column>
+        </el-table>
+      </el-collapse-item>
+    </el-collapse>
+
     <el-dialog
       v-model="noteDialog.visible"
       :title="`交易笔记 · ${noteDialog.symbol} #${noteDialog.orderId}`"
@@ -154,8 +211,8 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
-import { cancelOrder, getOrders, getTradeNotes, getTradeNoteAnalytics, upsertTradeNote, deleteTradeNote } from '../api'
-import type { OrderRecord, TradeNote, TradeNoteAnalytics } from '../types'
+import { cancelOrder, getOrders, getTradeNotes, getTradeNoteAnalytics, upsertTradeNote, deleteTradeNote, getClosedTrades, getTradeStats } from '../api'
+import type { OrderRecord, TradeNote, TradeNoteAnalytics, ClosedTrade, TradeStats } from '../types'
 import { orderSideLabel, orderStatusLabel } from '../utils/labels'
 import { resolveErrorMessage } from '../utils/error'
 
@@ -170,6 +227,14 @@ const total = ref(0)
 // ---- Trade journal (notes/tags/rating per order) ----
 const notesByOrder = ref<Map<number, TradeNote>>(new Map())
 const noteAnalytics = ref<TradeNoteAnalytics | null>(null)
+
+// ---- Closed round-trip trades (entry <-> exit pairing) ----
+const closedTrades = ref<ClosedTrade[]>([])
+const rtLoading = ref(false)
+const rtFromDate = ref('')
+const rtToDate = ref('')
+const rtTotal = ref(0)
+const tradeStats = ref<TradeStats | null>(null)
 const noteDialog = reactive({
   visible: false,
   orderId: 0,
@@ -204,7 +269,58 @@ async function loadOrders(refresh = false) {
 onMounted(() => {
   loadOrders()
   loadNotes()
+  loadClosedTrades()
+  loadTradeStats()
 })
+
+async function loadTradeStats() {
+  try {
+    tradeStats.value = await getTradeStats({ days: 30 })
+  } catch {
+    // Stats are supplementary; never block the page on them.
+  }
+}
+
+function streakLabel(s: TradeStats): string {
+  if (s.current_streak_type === 'none' || s.current_streak_count === 0) return '—'
+  return `${s.current_streak_count}${s.current_streak_type === 'win' ? '胜' : '败'}`
+}
+
+async function loadClosedTrades() {
+  rtLoading.value = true
+  try {
+    const data = await getClosedTrades({
+      ...(rtFromDate.value ? { from_date: rtFromDate.value } : {}),
+      ...(rtToDate.value ? { to_date: rtToDate.value } : {}),
+      limit: 200,
+    })
+    closedTrades.value = data.items
+    rtTotal.value = data.total
+  } catch {
+    // Round-trip view is supplementary; never block the page on it.
+  } finally {
+    rtLoading.value = false
+  }
+}
+
+function formatPnl(v: number): string {
+  return (v >= 0 ? '+' : '') + v.toFixed(2)
+}
+
+function pnlClass(v: number): string {
+  return v > 0 ? 'pnl-pos' : v < 0 ? 'pnl-neg' : ''
+}
+
+function formatHold(seconds: number): string {
+  if (!seconds || seconds < 0) return '-'
+  const totalMinutes = Math.floor(seconds / 60)
+  const days = Math.floor(totalMinutes / 1440)
+  const hours = Math.floor((totalMinutes % 1440) / 60)
+  const mins = totalMinutes % 60
+  if (days > 0) return `${days}d ${hours}h`
+  if (hours > 0) return `${hours}h ${mins}m`
+  return `${mins}m`
+}
 
 function handleScopeChange() {
   page.value = 1
@@ -387,6 +503,55 @@ function statusType(status: string): string {
 
 .analytics-tags div {
   margin-top: 2px;
+}
+
+.roundtrips-collapse {
+  width: 100%;
+}
+
+.roundtrips-count {
+  margin-left: 8px;
+  font-size: 12px;
+}
+
+.roundtrips-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.pnl-pos {
+  color: #16a34a;
+  font-weight: 600;
+}
+
+.pnl-neg {
+  color: #dc2626;
+  font-weight: 600;
+}
+
+.stats-card {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 20px;
+  padding: 10px 14px;
+  margin-bottom: 10px;
+  border: 1px solid #e1e7f0;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.stats-card .stat span {
+  display: block;
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.stats-card .stat strong {
+  font-size: 16px;
+  color: #172033;
 }
 
 @media (max-width: 720px) {

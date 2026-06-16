@@ -852,6 +852,25 @@ class AlertEvaluateResult(BaseModel):
     skipped_cooldown: int
 
 
+class AlertFiringOut(BaseModel):
+    id: int
+    rule_id: int
+    symbol: str
+    rule_type: str
+    threshold: float
+    trigger_value: float
+    severity: str
+    message: str
+    fired_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class AlertFiringPage(BaseModel):
+    items: list[AlertFiringOut]
+    total: int
+
+
 # ---------------------------------------------------------------------------
 # Strategy presets (named param snapshots)
 # ---------------------------------------------------------------------------
@@ -1493,5 +1512,97 @@ class PositionPnlResult(BaseModel):
     total_unrealized_pnl_pct: Optional[float] = None
     available: bool = True
     error: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Closed round-trip trades (entry <-> exit pairing)
+# ---------------------------------------------------------------------------
+
+
+class ClosedTrade(BaseModel):
+    """A paired entry<->exit round trip with realized PnL and hold duration."""
+
+    symbol: str
+    side: str
+    entry_order_id: int
+    exit_order_id: int
+    entry_at: datetime
+    exit_at: datetime
+    entry_price: float
+    exit_price: float
+    quantity: float
+    gross_pnl: float
+    est_fees: float
+    net_pnl: float
+    holding_seconds: float
+
+
+class ClosedTradePage(BaseModel):
+    items: list[ClosedTrade]
+    total: int
+
+
+class TradeStats(BaseModel):
+    """Per-trade performance stats over closed round trips (streaks, expectancy)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    total_trades: int
+    win_count: int
+    loss_count: int
+    breakeven_count: int
+    win_rate: float
+    total_gross_pnl: float
+    total_net_pnl: float
+    avg_win: Optional[float] = None
+    avg_loss: Optional[float] = None
+    expectancy: float
+    profit_factor: Optional[float] = None
+    payoff_ratio: Optional[float] = None
+    largest_win: Optional[float] = None
+    largest_loss: Optional[float] = None
+    current_streak_type: str
+    current_streak_count: int
+    max_win_streak: int
+    max_loss_streak: int
+    avg_hold_seconds: Optional[float] = None
+
+
+class EquityCurvePoint(BaseModel):
+    date: str
+    realized_pnl: float
+    cumulative_pnl: float
+    drawdown: float
+    trade_count: int
+
+
+class EquityCurveResponse(BaseModel):
+    """Account-wide cumulative realized PnL curve (net), day-granularity."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    points: list[EquityCurvePoint]
+    total_realized_pnl: float
+    max_drawdown: float
+
+
+class SymbolAttributionRow(BaseModel):
+    symbol: str
+    realized_pnl: float
+    trade_count: int
+    win_count: int
+    win_rate: float
+    contribution_share: float
+    largest_win: Optional[float] = None
+    largest_loss: Optional[float] = None
+
+
+class SymbolAttributionResponse(BaseModel):
+    """Portfolio-level realized PnL grouped by symbol (net)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    rows: list[SymbolAttributionRow]
+    total_realized_pnl: float
 
 

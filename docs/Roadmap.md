@@ -37,6 +37,33 @@
 
 ---
 
+## 近期已完成迭代 (2026-06-16) — 已实现盈亏分析簇 + 告警触发历史（5 轮 P59–P63）
+
+> 自主 feature 迭代第 4 批（5 轮）。judge-panel workflow（4 只读探索 agent + 打分）选型；偏离两处以降风险：① 往返成交改**只读**（不落库透写缓存，遵循本仓库「读时重算」约定）② 第 5 轮用**告警触发历史**替换「净/毛切换」（更独立、零实盘风险；净 PnL 已内建进配对服务）。基线 `pytest 1091 passed` → 交付后 `pytest 1143 passed`（**+52，0 回归**），`basedpyright` 新增代码 0/0/0，`vue-tsc` 0，build pass，chunk 预算不退步。规格：[2026-06-16-realized-pnl-analytics-cluster-design.md](superpowers/specs/2026-06-16-realized-pnl-analytics-cluster-design.md)。
+
+**共享基础：** `DailyPnlService.pair_round_trips()` —— 复用既有 `_fill_from_order` 的 FIFO entry↔exit 配对（**不触碰** `calculate()`/`_apply_fill`，零风控回归），每笔平仓 fill 产出一个 `ClosedRoundTrip`（加权入场均价 / 首入场时间 / `est_fees` via `app/core/fees.py` / `net_pnl` / `holding_seconds`）。P60–P62 全在此返回上做纯聚合。只读、不落库、不下单。
+
+| 代号 | 主题 | 端点 | 状态 |
+|------|------|------|------|
+| **P59** | 往返成交（lot 级 FIFO entry↔exit 配对 + 净/毛 + 持仓时长） | `GET /api/trades` | ✅ |
+| **P60** | 交易统计 + 连胜/连亏 / 期望 / 盈亏比 / 最长连胜败 | `GET /api/trades/stats` | ✅ |
+| **P61** | 权益曲线（账户级累计已实现 PnL + 回撤，常驻 Dashboard） | `GET /api/equity/curve` | ✅ |
+| **P62** | 按标的归因（组合级已实现 PnL / 胜率 / 贡献占比） | `GET /api/pnl/by-symbol` | ✅ |
+| **P63** | 告警触发历史（append-only `alert_firings` + 每规则时间线） | `GET /api/alert-rules/{id}/history`、`GET /api/alert-firings` | ✅ |
+
+**新增端点：** `GET /api/trades`、`/api/trades/stats`、`/api/equity/curve`、`/api/pnl/by-symbol`、`/api/alert-rules/{id}/history`、`/api/alert-firings`。**新增表：** `alert_firings`（`_ensure_alert_firings_table`，无 FK，删规则留历史）。**新增纯聚合服务：** `trade_stats_service` / `equity_curve_service` / `symbol_attribution_service`。**新增前端：** TradeHistory 往返表 + 统计条、Dashboard `EquityCurvePanel` + `SymbolAttributionPanel`、AlertRules 触发历史弹窗。
+
+**设计要点：**
+- **读时重算不落库**：`pair_round_trips` 每次请求 replay fills（个人交易量级，微秒级），避免写透缓存的一致性负担与 fill 路径风险；与 `DailyPnlService.calculate` / `/api/metrics/summary` 同约定。
+- **净/毛内建**：`ClosedRoundTrip` 同时带 `gross_pnl`/`est_fees`/`net_pnl`；费率读活跃 `StrategyConfig`（`_active_fee_rates`），**修复一处 falsy-or bug**：`getattr(x,"fee_rate_us",None) or 0.0005` 会把合法 `0.0`（禁用费率）当 falsy 折成默认 0.0005，改为仅在 `None` 时回退。
+- **win/loss 按 net_pnl 分类**：streak 在平仓时间序列上跑 run；breakeven（恰好 0）既非胜也非败、打断当前 run。
+- **告警触发记录隔离**：`evaluate` 先提交 `last_fired_at`（主事务），再逐条 best-effort `_record_firing`（独立 commit+rollback），firing 写失败绝不污染规则更新事务。
+- **去重**：`/api/trades` 粗代理 metrics/summary 无逐笔行；`/api/reports` 单标的按 side；`/api/equity/curve` 账户级常驻（vs Reports 单标的查询态）；`/api/pnl/by-symbol` 组合级 symbol 维度（vs 报告 side 维度）。
+
+**显式 YAGNI 未做：** 往返成交落库（透写缓存）、按渠道分别记录通知、walk-forward 落库、净值曲线含未实现浮盈叠加、告警规则复合条件、Cypress 本机 headless 运行（spec 已编写，仅类型/构建校验）。
+
+---
+
 ## 近期已完成迭代 (2026-06-16) — 回测参数扫描 (P43)
 
 > 自主 feature 迭代（ultracode judge-panel 选型：trader-value 10 / eng-fit 10 / 36 分胜出）。基线 `pytest 954 passed, 2 failed`（pre-existing `test_watchlist_score`）→ 交付后 `pytest 988 passed, 2 failed`（**+34，0 回归**），`basedpyright` 0/0/0，`vue-tsc` 0，build pass，chunk 预算不退步。规格：[2026-06-16-backtest-parameter-sweep-design.md](superpowers/specs/2026-06-16-backtest-parameter-sweep-design.md)。

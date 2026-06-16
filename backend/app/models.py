@@ -413,6 +413,26 @@ class AlertRule(Base):
     created_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow)
 
 
+class AlertFiring(Base):
+    """Append-only record of an alert rule firing (one row per dispatched
+    notification). Lets a trader answer 'how many times did this rule fire and
+    when' — ``AlertRule.last_fired_at`` only keeps the latest and is overwritten
+    on each fire. Has no FK so a deleted rule's history remains intact."""
+
+    __tablename__ = "alert_firings"
+    __table_args__ = (Index("ix_alert_firings_rule_fired_at", "rule_id", "fired_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    rule_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    symbol: Mapped[str] = mapped_column(String(50), default="", nullable=False)
+    rule_type: Mapped[str] = mapped_column(String(24), default="", nullable=False)
+    threshold: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    trigger_value: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    severity: Mapped[str] = mapped_column(String(16), default="WARNING", nullable=False)
+    message: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    fired_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow, nullable=False)
+
+
 class StrategyPreset(Base):
     """A named snapshot of strategy params for one-click re-application.
 

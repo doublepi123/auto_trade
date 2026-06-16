@@ -33,6 +33,33 @@ class RealizedTrade:
 
 
 @dataclass(frozen=True)
+class ClosedRoundTrip:
+    """A paired entry<->exit round trip (one per closing fill).
+
+    Aggregate view of the FIFO entry lots a single closing fill consumed:
+    ``entry_price`` is the quantity-weighted average of the matched entry lots
+    and ``entry_at`` is the earliest matched lot's fill time. ``est_fees`` uses
+    the *currently configured* fee schedule (a close approximation for
+    historical trades — the only rate we persist), so ``net_pnl`` reflects
+    take-home while ``gross_pnl`` stays comparable to the risk controller.
+    """
+
+    symbol: str
+    side: str  # "long" | "short"
+    entry_order_id: int
+    exit_order_id: int
+    entry_at: datetime
+    exit_at: datetime
+    entry_price: float
+    exit_price: float
+    quantity: float
+    gross_pnl: float
+    est_fees: float
+    net_pnl: float
+    holding_seconds: float
+
+
+@dataclass(frozen=True)
 class DailyPnlResult:
     trade_day: date
     realized_pnl: float
@@ -57,6 +84,17 @@ class _LedgerPosition:
     long_cost: Decimal = _ZERO
     short_quantity: Decimal = _ZERO
     short_proceeds: Decimal = _ZERO
+
+
+@dataclass
+class _Lot:
+    """A single entry lot in a FIFO queue (mutable: quantity decremented as it
+    is consumed by closing fills)."""
+
+    order_id: int
+    quantity: Decimal
+    price: Decimal
+    filled_at: datetime
 
 
 class DailyPnlService:
@@ -147,6 +185,159 @@ class DailyPnlService:
             consecutive_losses=consecutive_losses,
             trades=trades,
         )
+
+    def pair_round_trips(
+        self,
+        *,
+        symbol: str | None = None,
+        from_dt: datetime | None = None,
+        to_dt: datetime | None = None,
+        fee_rate_us: float = 0.0005,
+        fee_rate_hk: float = 0.003,
+    ) -> list[ClosedRoundTrip]:
+        """Pair recorded fills into closed entry<->exit round trips.
+
+        Read-only FIFO lot ledger that generalizes ``calculate`` across all days
+        and symbols. Emits one ``ClosedRoundTrip`` per closing fill (``SELL``
+        closes a long lot queue; ``BUY_TO_COVER`` closes a short lot queue),
+        carrying the matched entry lots' weighted-average price, earliest entry
+        time, and an estimated round-trip fee from the current fee schedule.
+
+        Date filtering is on the *exit* fill time: a round trip that closed
+        inside ``[from_dt, to_dt]`` is included even when its entry pre-dates the
+        window. This method writes nothing and never calls ``calculate`` /
+        ``_apply_fill``, so the risk controller's source of truth is untouched.
+        """
+        from app.models import OrderRecord
+
+        query = self._db.query(OrderRecord)
+        if symbol:
+            query = query.filter(OrderRecord.symbol == symbol.strip().upper())
+        if to_dt is not None:
+            # Upper-bound the fills we load: an exit after to_dt cannot be in the
+            # window. Entries before from_dt are still needed (no lower bound) so
+            # window-closing round trips stay fully paired.
+            query = query.filter(
+                (
+                    (OrderRecord.filled_at.isnot(None))
+                    & (OrderRecord.filled_at <= to_dt)
+                )
+                | (
+                    (OrderRecord.filled_at.is_(None))
+                    & (OrderRecord.created_at <= to_dt)
+                )
+            )
+
+        latest_orders: dict[str, Any] = {}
+        for order in query.all():
+            key = order.broker_order_id or f"local:{order.id}"
+            existing = latest_orders.get(key)
+            if existing is None or order.id > existing.id:
+                latest_orders[key] = order
+
+        fills = [
+            fill
+            for order in latest_orders.values()
+            if (fill := self._fill_from_order(order)) is not None
+        ]
+        fills.sort(key=lambda item: (item.filled_at, item.id))
+
+        lots: dict[str, dict[str, list[_Lot]]] = {}
+        trades: list[ClosedRoundTrip] = []
+        for fill in fills:
+            book = lots.setdefault(fill.symbol, {"long": [], "short": []})
+            if fill.side == "BUY":
+                book["long"].append(_Lot(fill.id, fill.quantity, fill.price, fill.filled_at))
+            elif fill.side == "SELL_SHORT":
+                book["short"].append(_Lot(fill.id, fill.quantity, fill.price, fill.filled_at))
+            elif fill.side == "SELL":
+                trades.extend(self._close_lots(book["long"], fill, "long", fee_rate_us, fee_rate_hk))
+            elif fill.side == "BUY_TO_COVER":
+                trades.extend(self._close_lots(book["short"], fill, "short", fee_rate_us, fee_rate_hk))
+
+        return [
+            t for t in trades
+            if (from_dt is None or t.exit_at >= from_dt)
+            and (to_dt is None or t.exit_at <= to_dt)
+        ]
+
+    @staticmethod
+    def _close_lots(
+        lot_queue: list[_Lot],
+        exit_fill: _Fill,
+        side: str,
+        fee_rate_us: float,
+        fee_rate_hk: float,
+    ) -> list[ClosedRoundTrip]:
+        from app.core.fees import estimate_round_trip_fee, one_side_fee_rate
+
+        remaining = exit_fill.quantity
+        matched_quantity = _ZERO
+        cost_basis = _ZERO
+        entry_order_id = 0
+        first_entry_at: datetime | None = None
+        while remaining > 0 and lot_queue:
+            lot = lot_queue[0]
+            if lot.quantity <= 0:
+                lot_queue.pop(0)
+                continue
+            take = min(remaining, lot.quantity)
+            matched_quantity += take
+            cost_basis += take * lot.price
+            if entry_order_id == 0:
+                entry_order_id = lot.order_id
+            if first_entry_at is None or lot.filled_at < first_entry_at:
+                first_entry_at = lot.filled_at
+            lot.quantity -= take
+            remaining -= take
+            if lot.quantity <= 0:
+                lot_queue.pop(0)
+
+        if remaining > 0:
+            # A close that exceeds the available entry lots (data inconsistency,
+            # an unhandled split/dividend, or a short opened outside this ledger).
+            # Mirrors the warning _close_long/_close_short emit in calculate().
+            logger.warning(
+                "round-trip close of %s for %s exceeds matched entry lots by %s — possible data inconsistency",
+                exit_fill.quantity, exit_fill.symbol, remaining,
+            )
+
+        if matched_quantity <= 0 or first_entry_at is None:
+            return []
+
+        avg_entry = cost_basis / matched_quantity
+        exit_price = exit_fill.price
+        if side == "long":
+            gross = (exit_price - avg_entry) * matched_quantity
+        else:
+            gross = (avg_entry - exit_price) * matched_quantity
+
+        market = "HK" if exit_fill.symbol.endswith(".HK") else "US"
+        one_side = one_side_fee_rate(
+            market, Decimal(str(fee_rate_us)), Decimal(str(fee_rate_hk))
+        )
+        est_fees = estimate_round_trip_fee(
+            entry_price=avg_entry,
+            exit_price=exit_price,
+            quantity=matched_quantity,
+            one_side_rate=one_side,
+        )
+        holding_seconds = (exit_fill.filled_at - first_entry_at).total_seconds()
+        return [ClosedRoundTrip(
+            symbol=exit_fill.symbol,
+            side=side,
+            entry_order_id=entry_order_id,
+            exit_order_id=exit_fill.id,
+            entry_at=first_entry_at,
+            exit_at=exit_fill.filled_at,
+            entry_price=float(avg_entry),
+            exit_price=float(exit_price),
+            quantity=float(matched_quantity),
+            gross_pnl=float(gross),
+            est_fees=float(est_fees),
+            net_pnl=float(gross - est_fees),
+            holding_seconds=holding_seconds,
+        )]
 
     def _fill_from_order(self, order: Any) -> _Fill | None:
         quantity = self._executed_quantity(order)

@@ -38,8 +38,9 @@
       <el-table-column label="上次触发" min-width="140">
         <template #default="{ row }">{{ row.last_fired_at ? formatDateTime(row.last_fired_at) : '—' }}</template>
       </el-table-column>
-      <el-table-column label="" width="120">
+      <el-table-column label="" width="160">
         <template #default="{ row }">
+          <el-button link size="small" data-testid="alert-history" @click="openHistory(row)">历史</el-button>
           <el-button link size="small" @click="openEdit(row)">编辑</el-button>
           <el-button link type="danger" size="small" @click="remove(row.id)">删除</el-button>
         </template>
@@ -83,6 +84,39 @@
         <el-button type="primary" :loading="dialog.saving" data-testid="alert-save" @click="save">保存</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog
+      v-model="historyDialog.visible"
+      :title="`触发历史 · ${historyDialog.ruleName}`"
+      width="640px"
+      data-testid="alert-history-dialog"
+    >
+      <div v-loading="historyDialog.loading">
+        <p class="eval-note">共 {{ historyDialog.items.length }} 次触发（最近优先）</p>
+        <el-table :data="historyDialog.items" size="small" max-height="360">
+          <el-table-column label="时间" width="150">
+            <template #default="{ row }">{{ formatDateTime(row.fired_at) }}</template>
+          </el-table-column>
+          <el-table-column label="触发值" width="100">
+            <template #default="{ row }">{{ row.trigger_value }}</template>
+          </el-table-column>
+          <el-table-column label="阈值" width="90">
+            <template #default="{ row }">{{ row.threshold }}</template>
+          </el-table-column>
+          <el-table-column label="严重度" width="90">
+            <template #default="{ row }">
+              <el-tag size="small" :type="severityType(row.severity)">{{ row.severity }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="消息" prop="message" />
+        </el-table>
+        <p v-if="!historyDialog.loading && historyDialog.items.length === 0" class="hint">该规则尚未触发过。</p>
+      </div>
+      <template #footer>
+        <el-button plain :loading="historyDialog.loading" @click="reloadHistory">刷新</el-button>
+        <el-button @click="historyDialog.visible = false">关闭</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -95,14 +129,23 @@ import {
   updateAlertRule,
   deleteAlertRule,
   evaluateAlertRules,
+  getAlertRuleHistory,
 } from '../api'
-import type { AlertRule, AlertRuleCreate, AlertEvaluateResult, AlertRuleType, AlertSeverity } from '../types'
+import type { AlertRule, AlertRuleCreate, AlertEvaluateResult, AlertRuleType, AlertSeverity, AlertFiring } from '../types'
 import { resolveErrorMessage } from '../utils/error'
 
 const rules = ref<AlertRule[]>([])
 const loading = ref(false)
 const evaluating = ref(false)
 const evalResult = ref<AlertEvaluateResult | null>(null)
+
+const historyDialog = reactive({
+  visible: false,
+  loading: false,
+  ruleId: 0,
+  ruleName: '',
+  items: [] as AlertFiring[],
+})
 
 const dialog = reactive({
   visible: false,
@@ -237,6 +280,27 @@ async function evaluate() {
     ElMessage.error(resolveErrorMessage(e, '评估失败'))
   } finally {
     evaluating.value = false
+  }
+}
+
+async function openHistory(row: AlertRule) {
+  historyDialog.ruleId = row.id
+  historyDialog.ruleName = row.name
+  historyDialog.items = []
+  historyDialog.visible = true
+  await reloadHistory()
+}
+
+async function reloadHistory() {
+  if (!historyDialog.ruleId) return
+  historyDialog.loading = true
+  try {
+    const page = await getAlertRuleHistory(historyDialog.ruleId, { limit: 100 })
+    historyDialog.items = page.items
+  } catch (e) {
+    ElMessage.error(resolveErrorMessage(e, '加载触发历史失败'))
+  } finally {
+    historyDialog.loading = false
   }
 }
 
