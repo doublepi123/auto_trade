@@ -75,7 +75,7 @@
 - 多渠道通知：[Server酱](https://sct.ftqq.com/) + 自定义 Webhook，按 `severity_floor` 分级（`INFO` / `WARNING` / `CRITICAL`）路由
 - `notify_risk_event` 自带 severity 映射：`KILL_SWITCH` / `ORDER_PERSISTENCE_FAILED` → `CRITICAL`；`REJECTED` / `ORDER_FAILED` / `ORDER_TIMEOUT` / `DAILY_LOSS` → `WARNING`
 - 操作审计：策略修改、凭证修改、启停、暂停/恢复、Kill Switch、撤单都会写入 `audit_logs` 表，含 `actor_hash`（SHA-256 X-API-Key 前 16 hex）、`source_ip`、脱敏 `request_summary`、`severity`、`result`
-- Decision Timeline 支持 `source=trade|audit|all` 切换查看交易事件与审计事件，`event_type` 多选筛选
+- Decision Timeline 支持 `source=trade|audit|llm|risk|all` 统一查看交易 / 审计 / LLM / 风控事件，`event_type` 多选筛选
 
 ### 交易时段守卫
 - `trading_session_mode = RTH_ONLY` 时仅在常规交易时段允许新下单与 LLM 撤单重挂；非交易时段记录 `ORDER_SKIPPED` + `skip_category=SESSION` 与 `TRADING_SESSION_BLOCKED` 审计
@@ -88,7 +88,8 @@
 
 ### 回测
 - CSV 历史价格回测（`POST /api/backtest/run`），验证区间参数与风控规则
-- Web UI **Backtest** 页：上传/粘贴 CSV、查看收益曲线与交易明细
+- **参数扫描**（`POST /api/backtest/sweep`）：在当前 CSV 上对 `buy_low` / `sell_high` / `min_profit_amount`（可选 `quantity` / `fee_rate` / `slippage_pct` / `stop_loss_pct`）做网格搜索，按 Sharpe / Sortino / Calmar / 盈亏比 / 总回报 排名，返回 Top-N 结果表 + `(buy_low, sell_high)` 热力图；`buy_low ≥ sell_high` 的无效组合自动跳过。即时、离线、纯内存，与「实验」页的保存式批量回测不同。
+- Web UI **Backtest** 页：上传/粘贴 CSV、查看收益曲线与交易明细、参数扫描（点击结果行可把最优配置回填表单）
 
 ### 策略复盘（规划中 — P7）
 
@@ -340,7 +341,7 @@ auto_trade/
 |--------|------|-------------|
 | `GET` | `/api/orders` | 分页订单；`scope=today\|history`，`page`，`page_size`（或兼容 `limit`）；`refresh=true` 时（仅 `scope=today`）先强制从券商同步再返回本地库 |
 | `POST` | `/api/orders/{order_id}/cancel` | 撤销指定券商订单 |
-| `GET` | `/api/events` | 决策时间线分页；`page`，`page_size`，可选 `symbol`、`event_type`（支持重复 query 或逗号分隔多选）、`source=trade\|audit\|all`（默认 `all`） |
+| `GET` | `/api/events` | 决策时间线分页；`page`，`page_size`，可选 `symbol`、`event_type`（支持重复 query 或逗号分隔多选）、`source=trade\|audit\|llm\|risk\|all`（默认 `all`，跨 trade_events + audit_logs + llm_interactions + risk_events 四表 union） |
 | `GET` | `/api/events/export` | 导出事件；`format=csv\|json`，`limit`（仅 `trade_events`，不含审计） |
 
 ### 运行时控制
@@ -362,6 +363,7 @@ auto_trade/
 | `POST` | `/api/strategy/llm-interval/analyze` | 分析并可应用区间 / 触发 LLM 下单建议 |
 | `GET` | `/api/strategy/llm-interval/status` | 当前 LLM 区间状态与最近建议 |
 | `GET` | `/api/strategy/llm-interval/interactions` | 历史交互记录；`limit` |
+| `GET` | `/api/llm-interactions/{id}` | 单条 LLM 交互完整详情（prompt / 原始响应 / 解析结果 / 上下文快照）；不存在 404 |
 | `PUT` | `/api/strategy/llm-interval/enable` | 开启自动定时分析 |
 | `PUT` | `/api/strategy/llm-interval/disable` | 关闭自动定时分析 |
 
@@ -370,6 +372,95 @@ auto_trade/
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/api/backtest/run` | 运行回测；body：`csv_text` 或 `price_points[]` + `params` |
+| `POST` | `/api/backtest/sweep` | 参数扫描：`base` + `grid`（`buy_low`/`sell_high`/`min_profit_amount`/...，复用实验网格 `value`/`values`/`range`）+ `sort_by` + `max_combinations`（默认 2000、上限 10000）→ 排名表 + 热力图；422 表示网格超限 / 参数非法 |
+| `POST` | `/api/backtest/walk-forward` | Walk-Forward 滚动窗口：`base` + 可选 `grid` + `train_size`/`test_size`/`step`/`sort_by` → 逐窗口样本外表现 + 稳定性汇总（均值/中位回报、盈利窗口占比、回报标准差）；空 `grid` = 纯滚动评估当前参数 |
+| `POST` | `/api/backtest/stress` | What-If 压力测试：`base` + `scenarios`/`jitter_pct`/`seed` → 对每根 K 线 OHLC 做确定性随机缩放后重跑 N 次，返回收益分布（基线/中位/P5/P95/最差/最大回撤/盈利场景占比）；422 = 参数非法 |
+| `POST` | `/api/backtest/runs` | 保存一条命名回测快照（`name` + `params` + `metrics`）用于对比 |
+| `GET` | `/api/backtest/runs` | 已保存快照列表（分页） |
+| `GET` | `/api/backtest/runs/compare` | 横向对比：`?ids=1&ids=2&...`（最多 8）→ 返回选中快照 |
+| `GET` / `DELETE` | `/api/backtest/runs/{id}` | 取一条 / 删除一条 |
+
+### 持仓浮盈（实时未实现 P&L）
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/positions/pnl` | 用 `tracked_entries` 的加权成本 × 实时行情计算每持仓的未实现盈亏（symbol/数量/均价/现价/浮盈/浮盈%）+ 汇总（总浮盈、成本基础、总回报%）；行情不可用时 `available=false` 仅展示成本 |
+
+> Web UI：仪表盘「持仓浮盈」面板（独立组件 `PositionPnlPanel`）。
+
+### 风险历史（Risk History）
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/risk/history` | `runtime_state_snapshots` 的时序快照（`created_at`/`engine_state`/`paused`/`kill_switch`/`daily_pnl`/`consecutive_losses`）；`?symbol=&limit=`（默认 100，上限 500），按时间正序 + `latest` |
+
+> Web UI：仪表盘「风险历史」面板（独立组件 `RiskHistoryPanel`，含日内盈亏 SVG 趋势线 + 最新值 + 暂停/熔断标签）。
+
+### 行情 K 线拉取（Broker Candles）
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/broker/candles` | 从券商拉取最近 K 线：`symbol` + `period`（`DAY`/`WEEK`/`MIN_1`/`MIN_5`/`MIN_15`/`MIN_30`/`MIN_60`）+ `count`（1-1000）→ `{bars, csv_text}`；无效 K 线自动过滤；422=非法 period，503=券商不可用 |
+
+> Web UI：回测页「从行情拉取」——填标的 / 周期 / 数量，一键把真实 K 线填入 CSV 框（连接实盘行情与离线回测）。
+
+### 交易时段（Market Session Clock）
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/calendar/session` | 标的所在市场的当前时段：`status` ∈ `rth`/`pre`/`post`/`lunch`/`closed` + `is_trading` + 交易所本地时间 + 下次开盘（UTC）；`?symbol=` 推断市场（`.HK` → HK，否则 US） |
+
+> Web UI：仪表盘「交易时段」面板（独立组件 `SessionClockPanel`，每 60s 刷新，彩色状态徽章）。
+
+### 定时报告（Scheduled Reports）
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/reports/schedule/run` | 立即推送一次日报到已配置通知渠道（也作 UI「测试」按钮）；写审计 `REPORT_SCHEDULE_SEND` |
+
+> 后台 cron（`StrategyConfig.report_schedule_enabled` + `report_schedule_interval_hours` + `report_schedule_symbol`，默认关）周期构建日报（复用 `ReportService`）经 `MultiChannelNotifier` 推送；每标的有内存单调时钟节流，重启后等一个间隔再发。Web UI：策略页「定时报告」开关 + 间隔 + 「立即发送测试」。
+
+### 告警规则（Conditional Alerts）
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/alert-rules` | 规则列表（`?enabled=true` 过滤） |
+| `POST` | `/api/alert-rules` | 新建规则（写审计 `ALERT_RULE_CREATE`） |
+| `PUT` / `DELETE` | `/api/alert-rules/{id}` | 更新 / 删除（写审计） |
+| `POST` | `/api/alert-rules/evaluate` | 立即评估一次（后台也每 60s 自动评估） |
+
+> 规则类型：`price_above` / `price_below`（实时行情）、`daily_loss`（`runtime_state.daily_pnl`）。触发经 `MultiChannelNotifier` 推送，按 `cooldown_seconds` 节流（`last_fired_at`）。**只读评估 + 通知，不发单。** Web UI：「告警规则」页（新建/编辑/启停/立即评估）。
+
+### 策略预设（Strategy Presets）
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/strategy-presets` | 预设列表 |
+| `POST` | `/api/strategy-presets` | 存为预设（`name` + `params` dict） |
+| `GET` / `DELETE` | `/api/strategy-presets/{id}` | 取一条 / 删除 |
+| `POST` | `/api/strategy-presets/{id}/apply` | 应用预设到当前策略配置（写审计 `STRATEGY_PRESET_APPLY`，返回变更字段） |
+
+> Web UI：策略页「参数预设」——存当前表单为命名快照，下拉选择一键应用（如「保守 / 激进」）。
+
+### 通知中心（Notification Log）
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/notifications` | 已发送通知的分发日志；`?severity=&page=&page_size=`（按时间倒序） |
+
+> 后台每条通知（风控 / 告警 / 日报）经 `MultiChannelNotifier.send` 时由可选 sink 落库 `notifications`（best-effort，失败不阻断通知）。Web UI：「通知中心」页（级别筛选 + 分页）。
+
+### 交易笔记（Trade Journal）
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/trade-notes` | 笔记列表；`?symbol=&page=&page_size=`（每单一条，按 `updated_at` 倒序） |
+| `GET` | `/api/trade-notes/analytics` | 笔记聚合：总数 / 已评分数 / 平均评分 / 评分分布 / 热门标签 / 标的数 |
+| `GET` | `/api/trade-notes/{order_id}` | 取某订单的笔记；无笔记返回 `404` |
+| `PUT` | `/api/trade-notes/{order_id}` | upsert 笔记（note/tags/rating 1-5）；订单不存在返回 `404`；写审计 `TRADE_NOTE_UPSERT` |
+| `DELETE` | `/api/trade-notes/{order_id}` | 幂等删除；始终 `204`；写审计 `TRADE_NOTE_DELETE` |
+
+> Web UI：交易历史页每行「笔记」按钮（已有笔记显示 📝）打开编辑弹窗（笔记 / 标签 / 1-5 星评分）。仅持久化订单（`id>0`）可附笔记。
 
 ### LLM 优化工作台（P12）
 

@@ -46,3 +46,16 @@ export async function exportReport(params: {
   })
   return resp.data
 }
+
+export interface ScheduledReportRunResult {
+  sent: boolean
+  symbol: string
+  title: string
+  error: string | null
+}
+
+export async function runScheduledReportNow(): Promise<ScheduledReportRunResult> {
+  const resp = await api.post<ScheduledReportRunResult>('/api/reports/schedule/run')
+  return resp.data
+}
+

@@ -63,8 +63,14 @@ def init_db() -> None:
     _ensure_strategy_experiment_runs_table(engine)
     _ensure_strategy_experiment_runs_extra_metrics(engine)
     _ensure_strategy_config_margin_safety_factor(engine)
+    _ensure_strategy_config_report_schedule_columns(engine)
     _ensure_llm_interaction_variant_column(engine)
     _ensure_report_query_indexes(engine)
+    _ensure_trade_notes_table(engine)
+    _ensure_backtest_runs_table(engine)
+    _ensure_alert_rules_table(engine)
+    _ensure_strategy_presets_table(engine)
+    _ensure_notifications_table(engine)
     db = SessionLocal()
     try:
         _bootstrap_credentials(db, CredentialConfig, StrategyConfig)
@@ -290,6 +296,134 @@ def _ensure_tracked_entries_table(db_engine: Engine) -> None:
         )
 
 
+def _ensure_trade_notes_table(db_engine: Engine) -> None:
+    """Defensive explicit create for trade_notes.
+
+    ``Base.metadata.create_all`` already creates new tables, but the project
+    keeps an explicit ``_ensure_*`` per table/column for runtime migration
+    parity (alembic is not used in prod). Idempotent via IF NOT EXISTS.
+    """
+    inspector = inspect(db_engine)
+    if "trade_notes" in inspector.get_table_names():
+        return
+    with db_engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS trade_notes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                order_id INTEGER NOT NULL,
+                symbol VARCHAR(50) NOT NULL DEFAULT '',
+                note TEXT NOT NULL DEFAULT '',
+                tags_json TEXT NOT NULL DEFAULT '[]',
+                rating INTEGER,
+                created_at DATETIME,
+                updated_at DATETIME
+            )
+            """
+        )
+        connection.exec_driver_sql(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ix_trade_notes_order_id ON trade_notes (order_id)"
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_trade_notes_symbol_updated ON trade_notes (symbol, updated_at)"
+        )
+
+
+def _ensure_backtest_runs_table(db_engine: Engine) -> None:
+    """Defensive explicit create for backtest_runs (saved runs for comparison)."""
+    inspector = inspect(db_engine)
+    if "backtest_runs" in inspector.get_table_names():
+        return
+    with db_engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS backtest_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name VARCHAR(128) NOT NULL,
+                symbol VARCHAR(50) NOT NULL DEFAULT '',
+                params_json TEXT NOT NULL DEFAULT '{}',
+                metrics_json TEXT NOT NULL DEFAULT '{}',
+                created_at DATETIME
+            )
+            """
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_backtest_runs_created_at ON backtest_runs (created_at)"
+        )
+
+
+def _ensure_alert_rules_table(db_engine: Engine) -> None:
+    """Defensive explicit create for alert_rules (user-defined alert rules)."""
+    inspector = inspect(db_engine)
+    if "alert_rules" in inspector.get_table_names():
+        return
+    with db_engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS alert_rules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name VARCHAR(128) NOT NULL,
+                symbol VARCHAR(50) NOT NULL DEFAULT '',
+                rule_type VARCHAR(24) NOT NULL,
+                threshold FLOAT NOT NULL DEFAULT 0,
+                severity VARCHAR(16) NOT NULL DEFAULT 'WARNING',
+                enabled BOOLEAN NOT NULL DEFAULT 1,
+                cooldown_seconds INTEGER NOT NULL DEFAULT 300,
+                last_fired_at DATETIME,
+                created_at DATETIME
+            )
+            """
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_alert_rules_enabled ON alert_rules (enabled)"
+        )
+
+
+def _ensure_strategy_presets_table(db_engine: Engine) -> None:
+    """Defensive explicit create for strategy_presets."""
+    inspector = inspect(db_engine)
+    if "strategy_presets" in inspector.get_table_names():
+        return
+    with db_engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS strategy_presets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name VARCHAR(128) NOT NULL,
+                params_json TEXT NOT NULL DEFAULT '{}',
+                created_at DATETIME
+            )
+            """
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_strategy_presets_name ON strategy_presets (name)"
+        )
+
+
+def _ensure_notifications_table(db_engine: Engine) -> None:
+    """Defensive explicit create for notifications (dispatch-log)."""
+    inspector = inspect(db_engine)
+    if "notifications" in inspector.get_table_names():
+        return
+    with db_engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS notifications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title VARCHAR(200) NOT NULL DEFAULT '',
+                content TEXT NOT NULL DEFAULT '',
+                severity VARCHAR(16) NOT NULL DEFAULT 'INFO',
+                success BOOLEAN NOT NULL DEFAULT 0,
+                error TEXT NOT NULL DEFAULT '',
+                created_at DATETIME
+            )
+            """
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_notifications_created_at ON notifications (created_at)"
+        )
+
+
 def _ensure_watchlist_items_table(db_engine: Engine) -> None:
     inspector = inspect(db_engine)
     if "watchlist_items" in inspector.get_table_names():
@@ -455,6 +589,27 @@ def _ensure_strategy_config_margin_safety_factor(db_engine: Engine) -> None:
         if "margin_safety_factor" not in columns:
             connection.exec_driver_sql(
                 "ALTER TABLE strategy_config ADD COLUMN margin_safety_factor FLOAT DEFAULT 0.9"
+            )
+
+
+def _ensure_strategy_config_report_schedule_columns(db_engine: Engine) -> None:
+    """Add the scheduled-report config columns to strategy_config if missing."""
+    inspector = inspect(db_engine)
+    if "strategy_config" not in inspector.get_table_names():
+        return
+    columns = {column["name"] for column in inspector.get_columns("strategy_config")}
+    with db_engine.begin() as connection:
+        if "report_schedule_enabled" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE strategy_config ADD COLUMN report_schedule_enabled BOOLEAN NOT NULL DEFAULT 0"
+            )
+        if "report_schedule_interval_hours" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE strategy_config ADD COLUMN report_schedule_interval_hours INTEGER NOT NULL DEFAULT 24"
+            )
+        if "report_schedule_symbol" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE strategy_config ADD COLUMN report_schedule_symbol VARCHAR(50) NOT NULL DEFAULT ''"
             )
 
 def _ensure_llm_interaction_variant_column(db_engine: Engine) -> None:

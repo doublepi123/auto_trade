@@ -14,6 +14,9 @@ const defaultStrategy: StrategyConfig = {
   llm_action_cooldown_seconds: 60,
   trading_session_mode: 'ANY',
   margin_safety_factor: 0.9,
+  report_schedule_enabled: false,
+  report_schedule_interval_hours: 24,
+  report_schedule_symbol: '',
   updated_at: '',
 }
 

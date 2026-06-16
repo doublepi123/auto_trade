@@ -16,9 +16,11 @@ from app.core.market_calendar import (
     is_trading_hours,
     market_for_symbol,
     next_session_open,
+    session_status,
     trade_day_for,
 )
 from app.api.auth import require_api_key
+from app.schemas import MarketSessionStatus
 
 router = APIRouter(prefix="/api", tags=["calendar"])
 
@@ -60,6 +62,33 @@ def calendar_today(
             "rth_close": session.rth_close.isoformat(),
         },
     }
+
+
+@router.get(
+    "/calendar/session",
+    dependencies=[Depends(require_api_key())],
+    response_model=MarketSessionStatus,
+)
+def calendar_session(
+    symbol: str = Query(default="", max_length=50),
+) -> MarketSessionStatus:
+    """Granular session phase (pre/RTH/post/lunch/closed) for a symbol's market.
+
+    Infers the market from the symbol suffix (``.HK`` -> HK, else US). Read-only.
+    """
+    market = market_for_symbol(symbol) if symbol else "US"
+    now = datetime.now(timezone.utc)
+    session = get_session(market)
+    status = session_status(market, now)
+    return MarketSessionStatus(
+        market=market,
+        symbol=symbol,
+        status=status,
+        is_trading=(status == "rth"),
+        local_time=session.local(now).strftime("%Y-%m-%d %H:%M:%S %Z"),
+        utc_time=now,
+        next_open=next_session_open(market, now),
+    )
 
 
 @router.get(

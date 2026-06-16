@@ -70,4 +70,18 @@ describe('Strategy', () => {
     cy.contains('button', /^保存$/).click()
     cy.wait('@saveSafetySettings')
   })
+
+  it('renders the scheduled-report section and sends on demand', () => {
+    cy.contains('定时报告').should('be.visible')
+    cy.get('[data-testid="report-schedule-test"]').click()
+    cy.wait('@runScheduledReport')
+    cy.contains('已发送').should('be.visible')
+  })
+
+  it('saves and lists a strategy preset', () => {
+    cy.get('[data-testid="preset-name"] input').type('保守')
+    cy.get('[data-testid="preset-save"]').click()
+    cy.wait('@createStrategyPreset')
+    cy.contains('预设已保存').should('be.visible')
+  })
 })

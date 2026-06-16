@@ -76,4 +76,69 @@ describe('History', () => {
     cy.wait('@cancelOrder')
     cy.contains('撤单成功').should('be.visible')
   })
+
+  it('renders trade-note analytics when notes exist', () => {
+    cy.stubApi()
+    cy.intercept('GET', '/api/trade-notes', {
+      body: { items: [], total: 0, page: 1, page_size: 50 },
+    }).as('tn')
+    cy.intercept('GET', '/api/trade-notes/analytics', {
+      body: { total: 2, rated_count: 2, avg_rating: 4, rating_distribution: { 1: 0, 2: 0, 3: 1, 4: 0, 5: 1 }, top_tags: [{ tag: 'good', count: 2 }], distinct_symbols: 1 },
+    }).as('tna')
+    cy.visit('/#/history')
+    cy.wait('@tna')
+    cy.get('[data-testid="note-analytics"]').should('be.visible')
+    cy.contains('热门标签').should('be.visible')
+  })
+
+  it('attaches a journal note to a persisted order', () => {
+    cy.stubApi()
+    cy.intercept('GET', '/api/orders*', {
+      body: {
+        items: [
+          {
+            id: 42,
+            broker_order_id: 'ord-42',
+            symbol: 'AAPL.US',
+            side: 'BUY',
+            quantity: 10,
+            price: 100,
+            executed_quantity: 10,
+            executed_price: 100,
+            status: 'FILLED',
+            created_at: '2026-05-22T13:00:00Z',
+            filled_at: '2026-05-22T13:00:05Z',
+            source: 'broker',
+            cancellable: false,
+          },
+        ],
+        total: 1,
+        page: 1,
+        page_size: 10,
+        scope: 'today',
+      },
+    }).as('todayOrders')
+    cy.intercept('PUT', '/api/trade-notes/42', {
+      body: {
+        id: 1,
+        order_id: 42,
+        symbol: 'AAPL.US',
+        note: 'good entry',
+        tags: ['momentum'],
+        rating: 4,
+        created_at: '2026-05-22T13:01:00Z',
+        updated_at: '2026-05-22T13:01:00Z',
+      },
+    }).as('saveTradeNote')
+
+    cy.visit('/#/history')
+    cy.wait('@todayOrders')
+
+    cy.contains('button', '＋ 添加').click()
+    cy.get('[data-testid="trade-note-dialog"]').should('be.visible')
+    cy.get('[data-testid="trade-note-input"] textarea').type('good entry')
+    cy.get('[data-testid="trade-note-save"]').click()
+    cy.wait('@saveTradeNote')
+    cy.contains('笔记已保存').should('be.visible')
+  })
 })

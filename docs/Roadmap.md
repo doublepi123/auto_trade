@@ -37,6 +37,395 @@
 
 ---
 
+## 近期已完成迭代 (2026-06-16) — 回测参数扫描 (P43)
+
+> 自主 feature 迭代（ultracode judge-panel 选型：trader-value 10 / eng-fit 10 / 36 分胜出）。基线 `pytest 954 passed, 2 failed`（pre-existing `test_watchlist_score`）→ 交付后 `pytest 988 passed, 2 failed`（**+34，0 回归**），`basedpyright` 0/0/0，`vue-tsc` 0，build pass，chunk 预算不退步。规格：[2026-06-16-backtest-parameter-sweep-design.md](superpowers/specs/2026-06-16-backtest-parameter-sweep-design.md)。
+
+**目标：** 把回测从「验证单一配置」升级为「找到好配置」——在当前 CSV 上对区间/盈利参数做网格搜索，按风险调整收益排名，直接回答「该用什么 `buy_low` / `sell_high` / `min_profit`」。
+
+| Task | 主题 | 状态 |
+|------|------|------|
+| **T1** | `sweep_backtest()` 纯函数：Cartesian product 网格搜索，复用 `BacktestEngine._validate_params` 跳过无效组合，按 Sharpe/Sortino/Calmar/PF/总回报 排名（`None` 排末），生成 `(buy_low, sell_high)` 最优热力图 | ✅ |
+| **T2** | `POST /api/backtest/sweep` + schemas；`BacktestMetrics` 补齐 `sortino_ratio`/`calmar_ratio`；`/run` 与 `/sweep` 统一返回完整 5 项比率指标 | ✅ |
+| **T3** | 前端 Backtest.vue 参数扫描区：网格输入 + 排名表（Top-20）+ 热力图，点击行回填表单；`runBacktestSweep` + TS 类型 | ✅ |
+| **T4** | 测试：`test_backtest_sweep.py`（引擎 + API + schema，31 项）+ Cypress `backtest.cy.ts` 扫描用例 | ✅ |
+
+**新增端点：**
+- `POST /api/backtest/sweep` —— 即时、离线、纯内存参数扫描；`base` + `grid`（复用实验网格 `value`/`values`/`range`）+ `sort_by` + `max_combinations`（默认 2000、上限 10000）。422 = 网格超限 / 参数非法。
+
+**设计要点：**
+- **纯离线**：`app/core/backtest.py` 仅引入 `csv/io/dataclasses/datetime/typing/itertools`，零 SQLAlchemy / broker / runner 耦合，零实盘下单风险。
+- **无新表 / 无迁移**：扫描结果是响应体瞬态分析，不落库（区别于 DB 持久化、异步轮询的「实验」系统）。
+- **无效组合静默跳过**：`buy_low ≥ sell_high` 等组合经 `_validate_params` 拒绝后计入 `skipped_count`，不报错（镜像 `ExperimentGridService.expand` 策略）。
+- **行 `params` 返回原始 dict**：网格可能把 `fee_rate`/`slippage_pct` 推到 `BacktestParams` 显示上限之外（引擎接受、schema 拒绝），故返回引擎实际执行的原始值。
+
+**与「实验（StrategyExperiment）」区分：** 扫描 = 即时扫描当前 CSV（in-memory）；实验 = 保存并批量回测（DB-backed、异步、可跨日）。
+
+**显式 YAGNI 未做：** 持久化「最优配置」、Bayesian/SMAC 代理模型优化、并发内层循环、walk-forward 样本外验证、每组合 equity_curve（点击行走 `/run` 取完整曲线）。
+
+---
+
+## 近期已完成迭代 (2026-06-16) — 通知中心 / 通知分发日志 (Notification Log) (P58)
+
+> 自主 feature 迭代第 16 轮（第三批 5 轮最后）。让 P5/P9/P47 的通知可审计。`pytest +7`（1084→1091），`basedpyright` 0/0/0，`vue-tsc` 0，build pass。
+
+**目标：** 每条发出的通知（风控 / 告警 / 日报）都留痕——回答「系统到底推过哪些通知、哪些失败了」。
+
+| Task | 主题 | 状态 |
+|------|------|------|
+| **T1** | `NotificationLog` 模型 + `_ensure_notifications_table` + `NotificationLogService`（list + severity 过滤分页）+ `NotificationLogSink`（session_factory，best-effort 吞异常）+ `get_notification_sink` 单例 | ✅ |
+| **T2** | `MultiChannelNotifier` 加可选 `sink`（`__init__`/`from_credential_config` 透传，`send` 后调用）；runner 构建 notifier 时注入 `sink=get_notification_sink().record` | ✅ |
+| **T3** | `GET /api/notifications` + 前端新页「通知中心」（`/notifications` 路由 + 导航，级别筛选 + 分页）+ api + 类型 + Cypress | ✅ |
+
+**新增端点：** `GET /api/notifications`。**新增表：** `notifications`。
+
+**设计要点：**
+- **单一切点**：sink 挂在 `MultiChannelNotifier.send`（所有通知的唯一出口），runner 注入一次即覆盖风控/告警/日报全部来源。
+- **best-effort 不阻断**：sink 写库失败仅 `logger.debug`，绝不影响真实通知发送（通知 > 日志）。
+- **core 不依赖 DB**：sink 以 `Callable` 注入，`MultiChannelNotifier` 仍零 SQLAlchemy 耦合。
+- **失败也记录**：`success=False` + `error`，方便排查渠道故障。
+
+**显式 YAGNI 未做：** 按渠道分别记录、通知重发按钮、保留期自动清理、WebSocket 实时推送通知、按标的过滤。
+
+---
+
+## 近期已完成迭代 (2026-06-16) — 交易时段时钟 (Market Session Clock) (P57)
+
+> 自主 feature 迭代第 15 轮（第三批 5 轮之一）。`pytest +8`（1076→1084），`basedpyright` 0/0/0，`vue-tsc` 0，build pass。
+
+**目标：** 一眼看清当前是 RTH / 盘前 / 盘后 / 午休 / 休市——避免在非交易时段误判策略为何不动。
+
+| Task | 主题 | 状态 |
+|------|------|------|
+| **T1** | `market_calendar.session_status(market, instant)`（`rth`/`pre`/`post`/`lunch`/`closed`，复用 `is_rth` + 节假日 + 午休） | ✅ |
+| **T2** | `GET /api/calendar/session?symbol=`（按后缀推断市场，返回 status + 本地时间 + 下次开盘）+ `MarketSessionStatus` schema | ✅ |
+| **T3** | 前端独立组件 `SessionClockPanel`（彩色状态徽章 + 本地时间 + 下次开盘，每 60s 刷新，`symbol` prop）嵌入 Dashboard + api + 类型 + Cypress | ✅ |
+
+**新增端点：** `GET /api/calendar/session`。**无新表**（纯计算）。
+
+**设计要点：**
+- **复用既有日历**：`is_rth`（已含午休/节假日/周末）+ `next_session_open`，零新日历逻辑。
+- **状态优先级**：休市日 → rth → 午休 → 盘前 → 盘后；HK 午休窗口 `[12:00,13:00)`，13:00 即恢复 RTH。
+- **市场推断**：`.HK` → HK，否则 US（与 `market_for_symbol` 一致）。
+- **轮询 60s**：时段变化慢，低频刷新省请求。
+
+**显式 YAGNI 未做：** 多市场并排时钟、精确扩展交易时段（4:00-9:30/16:00-20:00）窗口、到开盘倒计时、节假日名称展示。
+
+---
+
+## 近期已完成迭代 (2026-06-16) — LLM 交互详情 (LLM Interaction Detail) (P56)
+
+> 自主 feature 迭代第 14 轮（第三批 5 轮之一）。`pytest +4`（1072→1076），`basedpyright` 0/0/0，`vue-tsc` 0，build pass。
+
+**目标：** 决策时间线里看到 LLM 事件后，一键查看完整 prompt / 原始响应 / 解析结果 / 上下文快照，便于调优 prompt。
+
+| Task | 主题 | 状态 |
+|------|------|------|
+| **T1** | `LLMInteractionService.get_detail(id)`（含 JSON 文本列防御式解析）+ `LLMInteractionDetail` schema（含 prompt/raw_response/parsed/context） | ✅ |
+| **T2** | `GET /api/llm-interactions/{id}`（404 缺失） | ✅ |
+| **T3** | 前端 DecisionTimeline llm 行「详情」按钮 + 弹窗（`<details>` 折叠 prompt/响应/解析/上下文）+ `getLLMInteraction` + 类型 + Cypress | ✅ |
+
+**新增端点：** `GET /api/llm-interactions/{id}`。**无新表**（读既有 `llm_interactions`）。
+
+**设计要点：**
+- **轻量列表 vs 重详情分离**：列表响应（`LLMInteractionResponse`）仍不带 prompt/响应（省带宽），仅详情端点返回重字段。
+- **JSON 文本列防御解析**：`parsed_response`/`context_snapshot` 存为 Text，`_json_loads_dict` 解析失败回退 `{}`。
+- **`<details>` 折叠**：默认只展开 prompt，原始响应/解析/上下文按需展开，避免长内容撑爆弹窗。
+
+**显式 YAGNI 未做：** prompt diff（版本对比）、重新执行、token 用量统计、导出。
+
+---
+
+## 近期已完成迭代 (2026-06-16) — 交易笔记分析 (Trade Journal Analytics) (P55)
+
+> 自主 feature 迭代第 13 轮（第三批 5 轮之一）。基于 P44 交易笔记做只读聚合。`pytest +1`（1071→1072），`basedpyright` 0/0/0，`vue-tsc` 0，build pass。
+
+**目标：** 把零散的交易笔记变成可读的复盘信号——笔记数、平均评分、评分分布、热门标签、覆盖标的数。
+
+| Task | 主题 | 状态 |
+|------|------|------|
+| **T1** | `TradeNoteService.analytics()`（总数 / 已评分 / 平均评分 / 评分分布 1-5 / 热门标签 top10 / 标的数）+ `TradeNoteAnalytics/TagCount` schema | ✅ |
+| **T2** | `GET /api/trade-notes/analytics`（路由置于 `/{order_id}` 之前避免被 int 路径吞掉） | ✅ |
+| **T3** | 前端 TradeHistory.vue 分析卡片（总数 / `el-rate` 平均 / 热门标签），保存/删除后自动刷新 + Cypress | ✅ |
+
+**新增端点：** `GET /api/trade-notes/analytics`。**无新表**（读 P44 的 `trade_notes`）。
+
+**设计要点：**
+- **纯只读、内存聚合**：笔记量级小（个人交易），全表加载后 Python 聚合，零复杂 SQL。
+- **路由顺序**：`/analytics` 必须声明在 `/{order_id}`（int）之前，否则被路径参数拦截。
+- **保存/删除即刷新**：前端 upsert/delete 后重载笔记 + 分析，卡片始终最新。
+
+**显式 YAGNI 未做：** 按标的/时段细分、评分与盈亏相关性、标签云可视化、笔记导出。
+
+---
+
+## 近期已完成迭代 (2026-06-16) — 行情 K 线拉取 (Broker Candles → Backtest) (P54)
+
+> 自主 feature 迭代第 12 轮（第三批 5 轮之一）。连接实盘行情与离线回测。`pytest +5`（1066→1071），`basedpyright` 0/0/0，`vue-tsc` 0，build pass。
+
+**目标：** 回测不再依赖手填 CSV——直接从券商拉真实 K 线填入回测框，回答「这段真实历史上我的策略会怎样」。
+
+| Task | 主题 | 状态 |
+|------|------|------|
+| **T1** | `GET /api/broker/candles`（`BrokerGateway.get_candlesticks` → 过滤无效 K 线 → `BacktestPricePoint[]` + 预格式化 `csv_text`）；period 白名单 + 422/503 语义 | ✅ |
+| **T2** | 前端 Backtest.vue「从行情拉取」控件（标的 / 周期 / 数量 + 一键填入 CSV）+ `getBrokerCandles` + 类型 + Cypress | ✅ |
+
+**新增端点：** `GET /api/broker/candles`。**无新表。**
+
+**设计要点：**
+- **复用 `BrokerGateway.get_candlesticks`**（含分档重试），零新券商代码。
+- **无效 K 线过滤**：`close<=0` 或 `high<low` 等直接丢弃，保证返回结果可直接喂回 `parse_backtest_csv`。
+- **broker 不可用降级**：`runner.broker is None` 或 `get_candlesticks` 抛错 → 503（前端提示「券商可能未连接」）。
+- **UTC CSV**：时间统一 `%Y-%m-%dT%H:%M:%SZ`，与示例 CSV 一致。
+
+**显式 YAGNI 未做：** 调整方式（前复权/后复权）、跨周期合成、缓存、直接 `POST /backtest/from-broker`（当前拉取后由用户点「运行回测」）。
+
+---
+
+## 近期已完成迭代 (2026-06-16) — 每日风险历史 (Daily Risk History) (P53)
+
+> 自主 feature 迭代第 11 轮（第二批 5 轮最后）。`pytest +5`（1061→1066），`basedpyright` 0/0/0，`vue-tsc` 0，build pass。
+
+**目标：** 把风控状态可视化到时间轴——读 `runtime_state_snapshots`，展示日内盈亏趋势 + 连续亏损 + 暂停/熔断事件，回答「最近风控状态怎么走的」。
+
+| Task | 主题 | 状态 |
+|------|------|------|
+| **T1** | `RiskHistoryService`（读 `runtime_state_snapshots`，时序正序 + `latest`，limit 上限 500）+ `RiskHistoryPoint/Response` schema | ✅ |
+| **T2** | `GET /api/risk/history?symbol=&limit=`（只读） | ✅ |
+| **T3** | 前端独立组件 `RiskHistoryPanel`（日内盈亏 SVG 趋势线 + 最新值卡片 + 暂停/熔断标签）嵌入 Dashboard + api + 类型 + Cypress | ✅ |
+
+**新增端点：** `GET /api/risk/history`。**无新表**（读既有 `runtime_state_snapshots`）。
+
+**设计要点：**
+- **纯只读、无新表**：直接查既有快照表，零写入、零实盘风险。
+- **SVG 趋势线自绘**：不引图表库，`viewBox` 内用 polyline + 零轴，轻量；`Math.min/max` 含 0 保证零线可见。
+- **时序正序**：服务端按 `created_at desc` 取最近 N 条后 `reversed`，前端直接画。
+
+**显式 YAGNI 未做：** 风险事件（暂停/熔断）独立时间线、回撤曲线、按交易聚合的风险归因、WebSocket 实时风险推送。
+
+---
+
+## 近期已完成迭代 (2026-06-16) — 策略参数预设 (Strategy Presets) (P52)
+
+> 自主 feature 迭代第 10 轮（第二批 5 轮之一）。`pytest +4`（1057→1061），`basedpyright` 0/0/0，`vue-tsc` 0，build pass。
+
+**目标：** 把常用策略配置存为命名预设（如「保守 / 激进」），一键切换，免去重复改表单。
+
+| Task | 主题 | 状态 |
+|------|------|------|
+| **T1** | `StrategyPreset` 模型 + `_ensure_strategy_presets_table`（name + params_json） | ✅ |
+| **T2** | `StrategyPresetService`（create/list/get/get_params/delete，JSON 防御式解析）+ schema | ✅ |
+| **T3** | `/api/strategy-presets` CRUD + `POST /{id}/apply`（取预设 params → `StrategyService.update_config`，写审计 `STRATEGY_PRESET_APPLY`，返回变更字段） | ✅ |
+| **T4** | 前端 Strategy 页「参数预设」区（存当前表单 / 下拉选择应用 / 删除）+ api + 类型 + Cypress | ✅ |
+
+**新增端点：** `/api/strategy-presets` CRUD + `/{id}/apply`。**新增表：** `strategy_presets`。
+
+**设计要点：**
+- **复用 `update_config`**：apply 直接把预设 params 喂给既有 `StrategyService.update_config`（含审计 diff、updatable_fields 校验），无新校验逻辑。
+- **params 通用 dict**：存可更新策略字段子集（费率等已在客户端按 API 格式缩放），apply 端按字段名落库。
+- **前端缩放一致**：存预设时按策略 PUT 同款 `/100` 缩放费率，避免精度错位。
+
+**显式 YAGNI 未做：** 预设导入/导出、预设分类/标签、默认预设、跨账户同步。
+
+---
+
+## 近期已完成迭代 (2026-06-16) — 条件告警规则 (Conditional Alert Rules) (P51)
+
+> 自主 feature 迭代第 9 轮（第二批 5 轮之一）。差异化维度 judge 第一（10/10）。`pytest +9`（1048→1057），`basedpyright` 0/0/0，`vue-tsc` 0，build pass。
+
+**目标：** 让用户自定义阈值告警——价格上/下穿、日内亏损，触发后经既有通知渠道推送，无需手动盯盘。
+
+| Task | 主题 | 状态 |
+|------|------|------|
+| **T1** | `AlertRule` 模型 + `_ensure_alert_rules_table`（`rule_type`/`threshold`/`severity`/`cooldown_seconds`/`last_fired_at`） | ✅ |
+| **T2** | `AlertRuleService`（CRUD + `evaluate(runner)`：价格类读 broker 行情、`daily_loss` 读 `runtime_state.daily_pnl`，冷却节流，broker/notifier 注入可测）+ schema | ✅ |
+| **T3** | `/api/alert-rules` CRUD + `/evaluate`（写审计）+ `_alert_rules_cron` 后台任务（每 60s，镜像 LLM/报告 cron，挂 lifespan） | ✅ |
+| **T4** | 前端新页「告警规则」（`/alerts` 路由 + 导航）：表格 + 新建/编辑弹窗 + 启停开关 + 立即评估 + Cypress | ✅ |
+
+**新增端点：** `/api/alert-rules` CRUD + `/evaluate`。**新增表：** `alert_rules`。**新增 cron：** `_alert_rules_cron`（60s）。
+
+**设计要点：**
+- **避开热路径**：评估跑在独立后台 cron（非 `_on_quote`），只读 + 通知，不发单；judge eng-fit 原本因热路径扣分，此方案化解。
+- **可测**：`evaluate` 注入 `runner`（broker + notifier），测试用 `FakeBroker`/`FakeNotifier`，无需真实行情。
+- **冷却**：`last_fired_at + cooldown_seconds` 防刷屏；`evaluate` 返回 `evaluated/fired/skipped_cooldown` 计数。
+- **行情缺失降级**：取不到 quote/state 时静默跳过（不抛、不触发）。
+
+**显式 YAGNI 未做：** 复合条件（AND/OR）、跨标的组合、移动平均/技术指标触发器、告警历史落库（当前只记 `last_fired_at`）、WebSocket 实时推送告警。
+
+---
+
+## 近期已完成迭代 (2026-06-16) — 回测结果对比 (Backtest Run Comparison) (P50)
+
+> 自主 feature 迭代第 8 轮（第二批 5 轮之一）。`pytest +6`（1042→1048），`basedpyright` 0/0/0，`vue-tsc` 0，build pass。
+
+**目标：** 把不同参数的回测结果存为命名快照，多选后横向对比——回答「这几组参数谁更好」。
+
+| Task | 主题 | 状态 |
+|------|------|------|
+| **T1** | `BacktestRun` 模型 + `_ensure_backtest_runs_table`（name/symbol/params_json/metrics_json，不存 equity 曲线） | ✅ |
+| **T2** | `BacktestRunService`（save/list/get/delete/compare，JSON 防御式回填）+ `BacktestRunSaveRequest/Out/Page/Compare` schema | ✅ |
+| **T3** | `/api/backtest/runs` CRUD + `/runs/compare?ids=`（去重保序、上限 8）+ 前端 Backtest.vue「结果对比」区（保存/多选/转置表）+ Cypress | ✅ |
+
+**新增端点：** `POST/GET /api/backtest/runs`、`GET /runs/compare`、`GET/DELETE /runs/{id}`。**新增表：** `backtest_runs`。
+
+**设计要点：**
+- **只存 params + metrics**：equity 曲线不持久化（要细节就再 `/run`），行体积小。
+- **转置对比表**：前端 metric × run 横向表，后端只回原始 run，前端格式化。
+- **compare 去重保序 + 上限 8**：避免重复 id 与过大对比表。
+- **JSON 防御式回填**：`_to_out` 解析失败时回退默认 params/metrics，不抛。
+
+**显式 YAGNI 未做：** equity 曲线叠加对比图、自动选最优快照、跨 symbol 对比、快照标签/分组。
+
+---
+
+## 近期已完成迭代 (2026-06-16) — 运维统一时间线 (Ops Unified Timeline) (P49)
+
+> 自主 feature 迭代第 7 轮（第二批 5 轮之一）。`pytest +8`（1034→1042），`basedpyright` 0/0/0，`vue-tsc` 0，build pass。
+
+**目标：** 单一时间线看全部运维事件——把 `llm_interactions` 与 `risk_events` 并入既有 `trade_events ∪ audit_logs` union，前端一键切换 5 个来源。
+
+| Task | 主题 | 状态 |
+|------|------|------|
+| **T1** | `event_list_service`：`SourceFilter` 扩展 `llm`/`risk`；`_llm_row_to_out` / `_risk_row_to_out` mapper；单源分支 + `all` 四表合并（沿用 fetch_n 上限防深翻页） | ✅ |
+| **T2** | `TimelineEventResponse.source` Literal 扩展；`GET /api/events` 的 `source` pattern 扩展 `^(trade\|audit\|llm\|risk\|all)$` | ✅ |
+| **T3** | 前端 DecisionTimeline 增 LLM / 风控 来源按钮 + `sourceLabel`/`sourceTagType` 着色；`TimelineSource` 类型扩展 + 测试 | ✅ |
+
+**改动端点：** `GET /api/events`（`source` 新增 `llm`/`risk`）。**无新表。**
+
+**设计要点：**
+- **纯只读、纯增量**：复用既有 union 分页/搜索/skip_category 逻辑；`skip_category`（交易专属）置位时跳过其他三源，与原 audit 行为一致。
+- **严重度映射**：LLM `success`→INFO / 失败→WARNING；风控事件默认 WARNING；`result` 反映 LLM `applied`。
+- **fetch_n 上限不变**（`_MAX_MERGED_FETCH=2000`），四表合并仍 O(1) 深翻页安全。
+
+**显式 YAGNI 未做：** 通知发送记录入表（当前通知只发不存）、跨源去重、FTS5 全文索引。
+
+---
+
+## 近期已完成迭代 (2026-06-16) — What-If 压力测试 / 蒙特卡洛 (P48)
+
+> 自主 feature 迭代第 6 轮（补充第 6 个 feature）。完成「回测分析三部曲」（参数扫描 P43 / 时序稳定性 P45 / 路径敏感性 P48）。`pytest +8`（1026→1034），`basedpyright` 0/0/0，`vue-tsc` 0，build pass。
+
+**目标：** 回答「若实际价格路径略不同于历史，结果会多差？」——对当前 CSV 做确定性蒙特卡洛扰动（每根 K 线 OHLC 按幅度随机缩放），重跑 N 次，给出收益分布与尾部风险。
+
+| Task | 主题 | 状态 |
+|------|------|------|
+| **T1** | `stress_test()` 纯函数：seeded `random.Random` 对 OHLC 做均匀缩放扰动（保 high≥low 不变性），收集 N 个 `total_return_pct`/`max_drawdown_pct`，汇总基线/中位/P5/P95/最差/盈利场景占比；`_percentile`/`_jitter_bars` 辅助 | ✅ |
+| **T2** | `POST /api/backtest/stress` + `StressTestRequest/Result` schema（scenarios 1-1000、jitter 0-20、seed≥0） | ✅ |
+| **T3** | 前端 Backtest.vue「What-If 压力测试」折叠区（场景数/扰动%/种子 + 6 项分布卡片）+ `runStressTest` + 类型 + Cypress | ✅ |
+
+**新增端点：** `POST /api/backtest/stress`。
+
+**设计要点：**
+- **确定性**：固定 `seed` → 同输入同输出（`random.Random(seed)`）；测试无需 sleep。
+- **扰动保不变性**：OHLC 同乘正因子 `1+uniform(-j,j)`，保持 high≥low、high≥open/close，不会产生非法 bar。
+- **零扰动 = 基线**：`jitter_pct=0` 时每个场景恒等于基线回报（可验证）。
+- **与 sweep/walk-forward 正交**：sweep=参数寻优，walk-forward=时序稳定，stress=路径敏感（模型不确定性），三者互不重叠。
+- **纯离线**：同源 `app/core/backtest.py`，零 DB/broker/runner 耦合。
+
+**显式 YAGNI 未做：** 偏向性扰动（adverse-only）、波动率聚类（GARCH 式）、参数×扰动联合扫描、分布直方图可视化（当前仅 P5/P50/P95/最差）、并发场景（顺序即可）。
+
+---
+
+## 近期已完成迭代 (2026-06-16) — 定时绩效报告 (P47)
+
+> 自主 feature 迭代第 5 轮（5 轮计划最后一轮）。`pytest +7`（1019→1026），`basedpyright` 0/0/0，`vue-tsc` 0，build pass。
+
+**目标：** 让绩效自动找上门——后台 cron 按 `StrategyConfig.report_schedule_*` 周期构建日报（复用 `ReportService`）经 `MultiChannelNotifier` 推送，无需手动打开页面。
+
+| Task | 主题 | 状态 |
+|------|------|------|
+| **T1** | `StrategyConfig` 3 列（`report_schedule_enabled`/`interval_hours`/`symbol`）+ `_ensure_strategy_config_report_schedule_columns` + schema（input/merged/response）+ `strategy_service.updatable_fields` | ✅ |
+| **T2** | `ReportScheduleService`：`build_summary`（日报 → 通知文案，不抛）+ `maybe_send`（读配置、内存单调时钟节流、注入 `clock`/`state`/notifier 可测） | ✅ |
+| **T3** | `POST /api/reports/schedule/run`（手动触发 / 测试按钮，写审计 `REPORT_SCHEDULE_SEND`）+ `_report_schedule_cron` 后台任务（镜像 `_llm_analysis_cron`，挂 lifespan） | ✅ |
+| **T4** | 前端 Strategy 页「定时报告」区（开关 + 标的 + 间隔 + 立即发送测试）+ `runScheduledReportNow` + Cypress | ✅ |
+
+**新增端点：** `POST /api/reports/schedule/run`。**新增配置列：** `StrategyConfig.report_schedule_{enabled,interval_hours,symbol}`。
+
+**设计要点：**
+- **复用既有基础设施**：`ReportService.get_daily_report`（日报）+ `MultiChannelNotifier.send`（推送）+ `_llm_analysis_cron` 模式（后台任务），无新依赖。
+- **节流可测**：`maybe_send(clock=..., state=...)` 注入单调时钟与状态字典，测试无需 `time.sleep`。
+- **重启安全**：内存节流在进程重启后「等一个间隔再发」（state 为空时首次不立即发），避免重启刷屏。
+- **只读分析 + 通知**：不发单、不改策略；`build_summary` 失败仅记录并回退为「报告生成失败」文案。
+
+**显式 YAGNI 未做：** 报告落库历史、多渠道分别调度、按周/月cron 表达式（当前固定间隔小时）、PDF/图表附件、失败重试队列（已有 `NotificationRetryQueue` 通用兜底）。
+
+---
+
+## 近期已完成迭代 (2026-06-16) — 持仓浮盈 / 实时未实现 P&L (P46)
+
+> 自主 feature 迭代第 4 轮（5 轮计划之一）。`pytest +7`（1012→1019），`basedpyright` 0/0/0，`vue-tsc` 0，build pass。
+
+**目标：** 让用户看见实时敞口——用 `tracked_entries` 的加权入场成本（比券商 `avg_price` 准，CLAUDE.md 已述）× 实时行情，计算每持仓与总未实现盈亏。
+
+| Task | 主题 | 状态 |
+|------|------|------|
+| **T1** | `PositionPnlService(db, quote_provider)`：broker 无关（注入 `QuoteProvider` 协议，可离线 mock）；读 `tracked_entries`（`quantity!=0`），多/空盈亏，行情缺失时仅展示成本基础 | ✅ |
+| **T2** | `GET /api/positions/pnl`（`api/positions.py`）+ `PositionPnlRow/Result` schema；行情失败 `available=false` 不抛 | ✅ |
+| **T3** | 前端独立组件 `PositionPnlPanel.vue`（汇总卡片 + 持仓表）嵌入 Dashboard；`getPositionPnl` + 类型 + Cypress | ✅ |
+
+**新增端点：** `GET /api/positions/pnl`。
+
+**设计要点：**
+- **成本来源**：`tracked_entries.cost`（加权均价），非券商 `avg_price`（partial fill / 拆股会偏）。
+- **broker 无关**：service 注入 `QuoteProvider`；endpoint 用 `get_runner().broker`，测试用 `FakeBroker`。
+- **行情缺失降级**：`has_quote=False`、`unrealized=0`、`available=false`，UI 展示 warning + 成本基础。
+- **做空**：`quantity<0` 时 `pnl=(cost-last)*|qty|`。
+- **只读**：不写审计、不下单。
+
+**显式 YAGNI 未做：** 按券商 `get_positions()` 对账 tracked（已有 `TRACKED_ENTRY_DRIFT` 审计）、已实现+未实现合并的总权益、浮盈历史曲线、WebSocket 推送浮盈。
+
+---
+
+## 近期已完成迭代 (2026-06-16) — Walk-Forward 滚动窗口回测 (P45)
+
+> 自主 feature 迭代第 3 轮（5 轮计划之一）。复用 P43 的 `sweep_backtest`。`pytest +12`（1000→1012），`basedpyright` 0/0/0，`vue-tsc` 0，build pass。
+
+**目标：** 检测过拟合——把数据切成连续「训练 / 测试」窗口，每个训练窗口用扫描网格寻优，再在紧随其后的测试窗口（样本外）评估，汇总跨窗口稳定性。全段好看但跨窗口回报方差大 / 盈利窗口占比低 = 配置脆弱。
+
+| Task | 主题 | 状态 |
+|------|------|------|
+| **T1** | `walk_forward_backtest()` 纯函数：滚动 `(train, test)` 窗口，每窗口 `sweep_backtest` 寻优 → `BacktestEngine` 样本外评估；空 grid 退化为纯滚动评估；汇总（均值/中位回报、均值指标、盈利窗口占比、回报标准差） | ✅ |
+| **T2** | `POST /api/backtest/walk-forward` + `WalkForwardRequest/Result/Window/Summary` schema；`step` 默认 = `test_size`（不重叠） | ✅ |
+| **T3** | 前端 Backtest.vue 「Walk-Forward」折叠区：窗口/步长/指标/寻优开关 + 稳定性卡片 + 逐窗口表；`runWalkForward` + 类型 + Cypress | ✅ |
+
+**新增端点：** `POST /api/backtest/walk-forward`。
+
+**设计要点：**
+- **纯离线**：与 sweep 同源（`app/core/backtest.py`），零 DB / broker / runner 耦合，零实盘风险。
+- **复用 P43 sweep**：每训练窗口调用 `sweep_backtest` 取最优 params，`best` 为 None 时该窗口样本外指标置 None。
+- **稳定性指标**：`profitable_window_pct`（盈利窗口占比）、`test_return_std_pct`（回报标准差）直接量化「跨窗口一致性」。
+- **步长语义**：`step=None`/`0` → 不重叠（= `test_size`）；`step<test_size` → 重叠训练窗口。
+- **样本外窗口数不足**：返回 `window_count=0`（不报错），前端展示空态。
+
+**显式 YAGNI 未做：** 多参数联合 walk-forward 元优化、按窗口变化的 `train/test` 比例、蒙特卡洛扰动窗口、walk-forward 结果落库。
+
+---
+
+## 近期已完成迭代 (2026-06-16) — 交易笔记 / 复盘日志 (P44)
+
+> 自主 feature 迭代第 2 轮（5 轮计划之一）。`pytest +12`（988→1000），`basedpyright` 0/0/0，`vue-tsc` 0，build pass。
+
+**目标：** 闭环「复盘/学习」——给订单（每单一笔记）挂上自由笔记、标签、1-5 评分，交易历史页内联编辑。
+
+| Task | 主题 | 状态 |
+|------|------|------|
+| **T1** | `TradeNote` 模型 + `_ensure_trade_notes_table`（唯一 `order_id`、`tags_json` JSON 文本、`symbol,updated_at` 索引） | ✅ |
+| **T2** | `TradeNoteService`（list/get/upsert/delete，tags 防御式解析）+ `TradeNoteUpsert/Out/Page` schema（tags 去重/trim/上限） | ✅ |
+| **T3** | `/api/trade-notes` CRUD：GET 列表(分页/`symbol`)、GET/PUT/DELETE `/{order_id}`；PUT/DELETE 写审计 `TRADE_NOTE_*`；订单不存在 404；DELETE 幂等 204 | ✅ |
+| **T4** | 前端 TradeHistory.vue：「笔记」列（已有笔记显示 📝）+ 编辑弹窗（textarea / 多选标签 / `el-rate` 1-5）+ api/tradeNotes.ts + 类型 + Cypress | ✅ |
+
+**新增端点：** `GET /api/trade-notes`、`GET|PUT|DELETE /api/trade-notes/{order_id}`。
+
+**设计要点：**
+- **挂载到订单 DB `id`**（非 `broker_order_id`）：`OrderResponse.id` 已暴露；仅持久化订单（`id>0`）可附笔记，broker-only 订单（`id=0`）PUT 自然 404。
+- **每单一笔记（upsert）**：`order_id` 唯一；PUT 创建或更新。
+- **tags 存 JSON 文本**：项目不用 SQLAlchemy JSON 类型，统一 Text + `json.dumps`（镜像 `parameter_grid_json`）。
+- **审计**：`TRADE_NOTE_UPSERT` / `TRADE_NOTE_DELETE` 写 `audit_logs`（复用 `get_audit_logger` + `extract_actor`），失败仅 warning 不抛。
+
+**显式 YAGNI 未做：** 按「往返回合」（BUY+SELL 配对）聚合笔记（当前挂单粒度更简单明确）、笔记全文搜索、笔记附件/图片、跨设备同步。
+
+---
+
 ## 近期已完成迭代 (2026-05-26)
 
 > 对应 commit `323743b feat: add audit notifications and trading safety`。基线 `pytest 485 passed`，`basedpyright` 0/0。规格：[2026-05-26-audit-notification-trading-safety-design.md](superpowers/specs/2026-05-26-audit-notification-trading-safety-design.md)，实施计划：[2026-05-26-audit-notification-trading-safety.md](superpowers/plans/2026-05-26-audit-notification-trading-safety.md)。

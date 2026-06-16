@@ -11,6 +11,8 @@ const routes: RouteRecordRaw[] = [
   { path: '/review', component: () => import('../views/Review.vue') },
   { path: '/reports', component: () => import('../views/Reports.vue') },
   { path: '/watchlist', component: () => import('../views/Watchlist.vue') },
+  { path: '/alerts', component: () => import('../views/AlertRules.vue') },
+  { path: '/notifications', component: () => import('../views/NotificationCenter.vue') },
   { path: '/lab', component: () => import('../views/Lab.vue') },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ]

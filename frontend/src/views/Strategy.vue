@@ -174,6 +174,36 @@
             RTH 仅按工作日 + 开市窗口判断，<strong>不含交易所节假日</strong>；设为「任意」则与旧版行为一致。
           </div>
         </el-form-item>
+        <el-divider content-position="left">定时报告</el-divider>
+        <el-form-item label="启用定时报告">
+          <el-switch v-model="form.report_schedule_enabled" data-testid="report-schedule-enabled" />
+          <span style="margin-left: 10px; color: #909399; font-size: 12px">按周期把日报推送到已配置的通知渠道</span>
+        </el-form-item>
+        <el-form-item label="报告标的">
+          <el-input v-model="form.report_schedule_symbol" placeholder="留空则用当前策略标的" data-testid="report-schedule-symbol" />
+        </el-form-item>
+        <el-form-item label="推送间隔（小时）">
+          <el-input-number v-model="form.report_schedule_interval_hours" :min="1" :max="720" :step="1" data-testid="report-schedule-interval" />
+        </el-form-item>
+        <el-form-item label="立即发送测试">
+          <el-button plain :loading="reportSending" data-testid="report-schedule-test" @click="sendReportNow">发送一次</el-button>
+          <span v-if="reportSendResult" style="margin-left: 10px; font-size: 12px" :style="{ color: reportSendResult.sent ? '#14884f' : '#c43838' }">
+            {{ reportSendResult.sent ? '已发送' : '发送失败' }}{{ reportSendResult.error ? `：${reportSendResult.error}` : '' }}
+          </span>
+        </el-form-item>
+        <el-divider content-position="left">参数预设</el-divider>
+        <el-form-item label="存为预设">
+          <el-input v-model="presetName" placeholder="如：保守 / 激进" style="max-width: 200px" data-testid="preset-name" />
+          <el-button type="primary" plain style="margin-left: 8px" :loading="presetBusy" :disabled="!presetName.trim()" data-testid="preset-save" @click="savePreset">存为预设</el-button>
+          <span style="margin-left: 8px; color: #909399; font-size: 12px">保存当前表单为命名快照</span>
+        </el-form-item>
+        <el-form-item v-if="presets.length" label="应用预设">
+          <el-select v-model="selectedPresetId" placeholder="选择预设" style="max-width: 200px" data-testid="preset-select">
+            <el-option v-for="p in presets" :key="p.id" :label="p.name" :value="p.id" />
+          </el-select>
+          <el-button type="primary" plain style="margin-left: 8px" :disabled="!selectedPresetId" :loading="presetBusy" data-testid="preset-apply" @click="selectedPresetId && applyPreset(selectedPresetId)">应用</el-button>
+          <el-button plain :disabled="!selectedPresetId" :loading="presetBusy" data-testid="preset-delete" @click="selectedPresetId && removePreset(selectedPresetId)">删除</el-button>
+        </el-form-item>
         <el-form-item>
           <el-button type="primary" native-type="submit" :loading="saving" :disabled="loading || !isDirty">保存</el-button>
           <el-tag v-if="saved" type="success" style="margin-left: 10px">已保存</el-tag>
@@ -188,9 +218,10 @@
 import { computed, ref, onMounted } from 'vue'
 import { onBeforeRouteLeave, useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { getStrategy, updateStrategy, getLLMIntervalStatus, analyzeLLMInterval, previewLLMInterval, enableLLMInterval, disableLLMInterval, getLLMInteractions } from '../api'
+import { getStrategy, updateStrategy, getLLMIntervalStatus, analyzeLLMInterval, previewLLMInterval, enableLLMInterval, disableLLMInterval, getLLMInteractions, listStrategyPresets, createStrategyPreset, deleteStrategyPreset, applyStrategyPreset } from '../api'
+import { runScheduledReportNow } from '../api/reports'
 import { useFormState } from '../composables/useFormState'
-import type { LLMIntervalStatus, LLMAnalyzeResponse, LLMInteractionRecord } from '../types'
+import type { LLMIntervalStatus, LLMAnalyzeResponse, LLMInteractionRecord, StrategyPreset } from '../types'
 import { formatCurrency } from '../utils/format'
 
 interface StrategyForm {
@@ -210,6 +241,9 @@ interface StrategyForm {
   llm_action_cooldown_seconds: number
   trading_session_mode: 'ANY' | 'RTH_ONLY'
   margin_safety_factor: number
+  report_schedule_enabled: boolean
+  report_schedule_interval_hours: number
+  report_schedule_symbol: string
 }
 
 const loadedStrategy = ref<StrategyForm | null>(null)
@@ -232,6 +266,9 @@ const { form, loading, saving, saved, error, isDirty, load, save } = useFormStat
     llm_action_cooldown_seconds: 60,
     margin_safety_factor: 0.9,
     trading_session_mode: 'ANY',
+    report_schedule_enabled: false,
+    report_schedule_interval_hours: 24,
+    report_schedule_symbol: '',
   },
   load: async () => {
     const s = await getStrategy()
@@ -252,6 +289,9 @@ const { form, loading, saving, saved, error, isDirty, load, save } = useFormStat
       llm_action_cooldown_seconds: s.llm_action_cooldown_seconds,
       margin_safety_factor: s.margin_safety_factor ?? 0.9,
       trading_session_mode: s.trading_session_mode === 'RTH_ONLY' ? 'RTH_ONLY' : 'ANY',
+      report_schedule_enabled: s.report_schedule_enabled ?? false,
+      report_schedule_interval_hours: s.report_schedule_interval_hours ?? 24,
+      report_schedule_symbol: s.report_schedule_symbol ?? '',
     }
     loadedStrategy.value = loaded
     return loaded
@@ -279,6 +319,9 @@ const { form, loading, saving, saved, error, isDirty, load, save } = useFormStat
       patch.trading_session_mode = data.trading_session_mode === 'RTH_ONLY' ? 'RTH_ONLY' : 'ANY'
     }
     if (!previous || data.margin_safety_factor !== previous.margin_safety_factor) patch.margin_safety_factor = data.margin_safety_factor
+    if (!previous || data.report_schedule_enabled !== previous.report_schedule_enabled) patch.report_schedule_enabled = data.report_schedule_enabled
+    if (!previous || data.report_schedule_interval_hours !== previous.report_schedule_interval_hours) patch.report_schedule_interval_hours = data.report_schedule_interval_hours
+    if (!previous || data.report_schedule_symbol !== previous.report_schedule_symbol) patch.report_schedule_symbol = data.report_schedule_symbol
     if (Object.keys(patch).length === 0) return
     await updateStrategy(patch)
     loadedStrategy.value = {
@@ -288,6 +331,104 @@ const { form, loading, saving, saved, error, isDirty, load, save } = useFormStat
     await loadLLMStatus()
   },
 })
+
+const reportSending = ref(false)
+const reportSendResult = ref<{ sent: boolean; error: string | null } | null>(null)
+
+async function sendReportNow() {
+  reportSending.value = true
+  reportSendResult.value = null
+  try {
+    const res = await runScheduledReportNow()
+    reportSendResult.value = { sent: res.sent, error: res.error }
+    if (res.sent) ElMessage.success('定时报告已发送')
+    else ElMessage.warning('发送失败，请检查通知渠道配置')
+  } catch (e) {
+    reportSendResult.value = { sent: false, error: '请求失败' }
+    ElMessage.error('发送请求失败')
+  } finally {
+    reportSending.value = false
+  }
+}
+
+// ---- Strategy presets ----
+const presets = ref<StrategyPreset[]>([])
+const presetName = ref('')
+const selectedPresetId = ref<number | null>(null)
+const presetBusy = ref(false)
+
+function buildPresetParams(): Record<string, unknown> {
+  return {
+    symbol: form.value.symbol,
+    market: form.value.market,
+    buy_low: form.value.buy_low,
+    sell_high: form.value.sell_high,
+    short_selling: form.value.short_selling,
+    min_profit_amount: form.value.min_profit_amount,
+    auto_resume_minutes: form.value.auto_resume_minutes,
+    max_daily_loss: form.value.max_daily_loss,
+    max_consecutive_losses: form.value.max_consecutive_losses,
+    fee_rate_us: form.value.fee_rate_us / 100,
+    fee_rate_hk: form.value.fee_rate_hk / 100,
+    min_repricing_pct: form.value.min_repricing_pct / 100,
+    llm_action_cooldown_seconds: form.value.llm_action_cooldown_seconds,
+    trading_session_mode: form.value.trading_session_mode,
+    margin_safety_factor: form.value.margin_safety_factor,
+  }
+}
+
+async function loadPresets() {
+  try {
+    presets.value = (await listStrategyPresets()).items
+  } catch {
+    // non-fatal
+  }
+}
+
+async function savePreset() {
+  if (!presetName.value.trim()) {
+    ElMessage.warning('请填写预设名称')
+    return
+  }
+  presetBusy.value = true
+  try {
+    await createStrategyPreset({ name: presetName.value.trim(), params: buildPresetParams() })
+    presetName.value = ''
+    await loadPresets()
+    ElMessage.success('预设已保存')
+  } catch {
+    ElMessage.error('保存预设失败')
+  } finally {
+    presetBusy.value = false
+  }
+}
+
+async function applyPreset(id: number) {
+  presetBusy.value = true
+  try {
+    const res = await applyStrategyPreset(id)
+    ElMessage.success(`已应用预设（变更 ${res.changed.length} 项）`)
+    await load()
+  } catch {
+    ElMessage.error('应用预设失败')
+  } finally {
+    presetBusy.value = false
+  }
+}
+
+async function removePreset(id: number) {
+  try {
+    await ElMessageBox.confirm('删除该预设？', '确认', { type: 'warning' })
+  } catch {
+    return
+  }
+  try {
+    await deleteStrategyPreset(id)
+    await loadPresets()
+  } catch {
+    ElMessage.error('删除失败')
+  }
+}
 
 const llmStatus = ref<LLMIntervalStatus>({
   enabled: false,
@@ -449,6 +590,7 @@ const route = useRoute()
 
 onMounted(async () => {
   await load()
+  loadPresets()
   // Apply draft experiment run parameters from query string after load() completes
   const draftRunId = route.query.draftExperimentRunId
   if (draftRunId) {

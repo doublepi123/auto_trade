@@ -61,6 +61,9 @@ class StrategyService:
             "fee_rate_us", "fee_rate_hk", "min_repricing_pct", "llm_action_cooldown_seconds",
             "trading_session_mode",
             "margin_safety_factor",
+            "report_schedule_enabled",
+            "report_schedule_interval_hours",
+            "report_schedule_symbol",
         ]
         for field in updatable_fields:
             if field in data:

@@ -43,6 +43,9 @@ class StrategyConfigSchema(BaseModel):
     llm_action_cooldown_seconds: Optional[int] = Field(default=None, ge=0, le=3600)
     trading_session_mode: Literal["RTH_ONLY", "ANY"] = "ANY"
     margin_safety_factor: Optional[float] = Field(default=None, ge=0, le=1)
+    report_schedule_enabled: Optional[bool] = None
+    report_schedule_interval_hours: Optional[int] = Field(default=None, ge=1, le=720)
+    report_schedule_symbol: Optional[str] = Field(default=None, max_length=50)
 
     @field_validator("market")
     @classmethod
@@ -84,6 +87,9 @@ class StrategyMergedSchema(BaseModel):
     llm_action_cooldown_seconds: int = Field(default=60, ge=0, le=3600)
     trading_session_mode: Literal["RTH_ONLY", "ANY"] = "ANY"
     margin_safety_factor: float = Field(default=0.9, ge=0, le=1)
+    report_schedule_enabled: bool = False
+    report_schedule_interval_hours: int = Field(default=24, ge=1, le=720)
+    report_schedule_symbol: str = Field(default="", max_length=50)
 
     @field_validator("market")
     @classmethod
@@ -169,6 +175,9 @@ class StrategyResponse(BaseModel):
     llm_action_cooldown_seconds: int
     trading_session_mode: str = "ANY"
     margin_safety_factor: float = 0.9
+    report_schedule_enabled: bool = False
+    report_schedule_interval_hours: int = 24
+    report_schedule_symbol: str = ""
     updated_at: datetime
     consistency_warnings: list[dict[str, str]] = Field(default_factory=list)
 
@@ -384,9 +393,10 @@ class TradeEventResponse(BaseModel):
 
 
 class TimelineEventResponse(BaseModel):
-    """Unified row for ``GET /api/events`` (trade_events ∪ audit_logs)."""
+    """Unified row for ``GET /api/events`` (trade_events ∪ audit_logs ∪
+    llm_interactions ∪ risk_events)."""
 
-    source: Literal["trade", "audit"]
+    source: Literal["trade", "audit", "llm", "risk"]
     id: int
     event_type: str
     symbol: str = ""
@@ -456,6 +466,17 @@ class BacktestPricePoint(BaseModel):
         if self.low > min(self.open, self.close):
             raise ValueError("low must be less than or equal to open and close")
         return self
+
+
+class BrokerCandlesResponse(BaseModel):
+    """Recent candlesticks from the broker, usable directly as backtest input."""
+
+    symbol: str
+    period: str
+    count: int
+    bars: list[BacktestPricePoint]
+    csv_text: str
+
 
 
 class BacktestParams(BaseModel):
@@ -550,6 +571,8 @@ class BacktestMetrics(BaseModel):
     skipped_signals: int
     final_state: str
     sharpe_ratio: Optional[float] = None
+    sortino_ratio: Optional[float] = None
+    calmar_ratio: Optional[float] = None
     profit_factor: Optional[float] = None
     profit_loss_ratio: Optional[float] = None
 
@@ -607,6 +630,288 @@ class StrategyExperimentGridItem(BaseModel):
         if self.values is not None and len(self.values) == 0:
             raise ValueError("values must not be empty")
         return self
+
+
+class BacktestSweepHeatmapCell(BaseModel):
+    buy_low: float
+    sell_high: float
+    value: Optional[float] = None
+
+
+class BacktestSweepHeatmap(BaseModel):
+    x_axis: str
+    y_axis: str
+    z_metric: str
+    cells: list[BacktestSweepHeatmapCell]
+
+
+class BacktestSweepRow(BaseModel):
+    # The raw engine params actually run for this combination. A grid may push a
+    # value past BacktestParams' display bounds (e.g. an exploratory fee_rate
+    # above 0.1) that the engine accepts but BacktestParams would reject, so the
+    # params are surfaced as a plain dict rather than re-validated.
+    params: dict[str, Any]
+    metrics: BacktestMetrics
+    rank: int
+
+
+class BacktestSweepResult(BaseModel):
+    rows: list[BacktestSweepRow]
+    best: Optional[BacktestSweepRow] = None
+    heatmap: BacktestSweepHeatmap
+    evaluated_count: int
+    skipped_count: int
+    sort_by: str
+
+
+class BacktestSweepRequest(BaseModel):
+    """Synchronous parameter sweep: run BacktestEngine over the Cartesian
+    product of ``grid`` and rank by ``sort_by``. Instant + in-memory, distinct
+    from the persisted, async StrategyExperiment system."""
+
+    model_config = ConfigDict(extra="forbid")
+    base: BacktestParams
+    grid: dict[str, StrategyExperimentGridItem] = Field(min_length=1)
+    sort_by: Literal[
+        "sharpe_ratio", "sortino_ratio", "calmar_ratio", "profit_factor", "total_return_pct"
+    ] = "sharpe_ratio"
+    max_combinations: int = Field(default=2000, ge=1, le=10000)
+    csv_text: Optional[str] = Field(default=None, max_length=2_000_000)
+    price_points: list[BacktestPricePoint] = Field(default_factory=list, max_length=50_000)
+
+    @model_validator(mode="after")
+    def validate_price_source(self) -> "BacktestSweepRequest":
+        if not (self.csv_text and self.csv_text.strip()) and not self.price_points:
+            raise ValueError("either csv_text or price_points is required")
+        return self
+
+
+class WalkForwardWindowOut(BaseModel):
+    index: int
+    start: datetime
+    end: datetime
+    train_size: int
+    test_size: int
+    best_params: Optional[dict[str, Any]] = None
+    test_metrics: Optional[BacktestMetrics] = None
+
+
+class WalkForwardSummaryOut(BaseModel):
+    window_count: int
+    evaluated_window_count: int
+    mean_test_return_pct: Optional[float] = None
+    median_test_return_pct: Optional[float] = None
+    mean_test_metric: Optional[float] = None
+    profitable_window_pct: Optional[float] = None
+    test_return_std_pct: Optional[float] = None
+
+
+class WalkForwardResultOut(BaseModel):
+    windows: list[WalkForwardWindowOut]
+    summary: WalkForwardSummaryOut
+    sort_by: str
+    train_size: int
+    test_size: int
+    step: int
+
+
+class WalkForwardRequest(BaseModel):
+    """Walk-forward rolling-window backtest: optimize on each train window,
+    evaluate out-of-sample on the next test window. Empty ``grid`` = plain
+    rolling-window evaluation of ``base`` (consistency only)."""
+
+    model_config = ConfigDict(extra="forbid")
+    base: BacktestParams
+    grid: dict[str, StrategyExperimentGridItem] = Field(default_factory=dict)
+    train_size: int = Field(ge=2)
+    test_size: int = Field(ge=1)
+    step: Optional[int] = Field(default=None, ge=1)
+    sort_by: Literal[
+        "sharpe_ratio", "sortino_ratio", "calmar_ratio", "profit_factor", "total_return_pct"
+    ] = "sharpe_ratio"
+    max_combinations: int = Field(default=2000, ge=1, le=10000)
+    csv_text: Optional[str] = Field(default=None, max_length=2_000_000)
+    price_points: list[BacktestPricePoint] = Field(default_factory=list, max_length=50_000)
+
+    @model_validator(mode="after")
+    def validate_price_source(self) -> "WalkForwardRequest":
+        if not (self.csv_text and self.csv_text.strip()) and not self.price_points:
+            raise ValueError("either csv_text or price_points is required")
+        return self
+
+
+class StressTestResult(BaseModel):
+    scenarios_run: int
+    baseline_return_pct: Optional[float] = None
+    median_return_pct: Optional[float] = None
+    p5_return_pct: Optional[float] = None
+    p95_return_pct: Optional[float] = None
+    worst_return_pct: Optional[float] = None
+    worst_drawdown_pct: Optional[float] = None
+    profitable_scenario_pct: Optional[float] = None
+    jitter_pct: float
+    seed: int
+    returns: list[float]
+
+
+class StressTestRequest(BaseModel):
+    """What-If stress ensemble: re-run the engine over N jittered price paths."""
+
+    model_config = ConfigDict(extra="forbid")
+    base: BacktestParams
+    scenarios: int = Field(default=50, ge=1, le=1000)
+    jitter_pct: float = Field(default=1.0, ge=0, le=20)
+    seed: int = Field(default=42, ge=0)
+    csv_text: Optional[str] = Field(default=None, max_length=2_000_000)
+    price_points: list[BacktestPricePoint] = Field(default_factory=list, max_length=50_000)
+
+    @model_validator(mode="after")
+    def validate_price_source(self) -> "StressTestRequest":
+        if not (self.csv_text and self.csv_text.strip()) and not self.price_points:
+            raise ValueError("either csv_text or price_points is required")
+        return self
+
+
+class BacktestRunSaveRequest(BaseModel):
+    """Save a backtest run (params + metrics) for side-by-side comparison."""
+
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=128)
+    params: BacktestParams
+    metrics: BacktestMetrics
+
+
+class BacktestRunOut(BaseModel):
+    id: int
+    name: str
+    symbol: str
+    params: BacktestParams
+    metrics: BacktestMetrics
+    created_at: datetime
+
+
+class BacktestRunPage(BaseModel):
+    items: list[BacktestRunOut]
+    total: int
+    page: int
+    page_size: int
+
+
+class BacktestRunCompare(BaseModel):
+    runs: list[BacktestRunOut]
+
+
+# ---------------------------------------------------------------------------
+# Conditional Alert Rules (user-defined, cron-evaluated)
+# ---------------------------------------------------------------------------
+
+
+class AlertRuleCreate(BaseModel):
+    """Create or fully replace an alert rule."""
+
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=128)
+    symbol: str = Field(default="", max_length=50)
+    rule_type: Literal["price_above", "price_below", "daily_loss"]
+    threshold: float
+    severity: Literal["INFO", "WARNING", "CRITICAL"] = "WARNING"
+    enabled: bool = True
+    cooldown_seconds: int = Field(default=300, ge=0, le=86400)
+
+
+class AlertRuleOut(BaseModel):
+    id: int
+    name: str
+    symbol: str
+    rule_type: str
+    threshold: float
+    severity: str
+    enabled: bool
+    cooldown_seconds: int
+    last_fired_at: Optional[datetime] = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class AlertRulePage(BaseModel):
+    items: list[AlertRuleOut]
+    total: int
+
+
+class AlertEvaluateResult(BaseModel):
+    evaluated: int
+    fired: int
+    skipped_cooldown: int
+
+
+# ---------------------------------------------------------------------------
+# Strategy presets (named param snapshots)
+# ---------------------------------------------------------------------------
+
+
+class StrategyPresetCreate(BaseModel):
+    """Save a named snapshot of strategy params."""
+
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=128)
+    params: dict[str, Any]
+
+
+class StrategyPresetOut(BaseModel):
+    id: int
+    name: str
+    params: dict[str, Any]
+    created_at: datetime
+
+
+class StrategyPresetPage(BaseModel):
+    items: list[StrategyPresetOut]
+    total: int
+
+
+class StrategyPresetApplyResult(BaseModel):
+    applied: bool
+    changed: list[str]
+
+
+class NotificationLogOut(BaseModel):
+    id: int
+    title: str
+    content: str
+    severity: str
+    success: bool
+    error: str
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class NotificationLogPage(BaseModel):
+    items: list[NotificationLogOut]
+    total: int
+    page: int
+    page_size: int
+
+
+# ---------------------------------------------------------------------------
+# Daily risk history (runtime_state_snapshots)
+# ---------------------------------------------------------------------------
+
+
+class RiskHistoryPoint(BaseModel):
+    created_at: datetime
+    engine_state: str
+    paused: bool
+    kill_switch: bool
+    daily_pnl: float
+    consecutive_losses: int
+
+
+class RiskHistoryResponse(BaseModel):
+    points: list[RiskHistoryPoint]
+    latest: Optional[RiskHistoryPoint] = None
+
 
 
 class StrategyExperimentCreate(BaseModel):
@@ -774,6 +1079,40 @@ class LLMInteractionResponse(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class LLMInteractionDetail(BaseModel):
+    """Full LLM interaction record incl. prompt / raw response / parsed /
+    context snapshot (omitted from the lightweight list response)."""
+
+    id: int
+    interaction_type: str
+    symbol: str
+    market: str
+    prompt: str
+    raw_response: str
+    parsed_response: dict[str, Any]
+    context_snapshot: dict[str, Any]
+    success: bool
+    error: str
+    order_action: str
+    order_status: Optional[str] = None
+    order_id: Optional[str] = None
+    applied: bool
+    prompt_variant: Optional[str] = None
+    created_at: datetime
+
+
+class MarketSessionStatus(BaseModel):
+    """Granular market session phase for the session-clock widget."""
+
+    market: str
+    symbol: str
+    status: str  # rth | pre | post | lunch | closed
+    is_trading: bool
+    local_time: str
+    utc_time: datetime
+    next_open: datetime
 
 
 class LLMSuggestion(BaseModel):
@@ -1061,3 +1400,91 @@ class IndicatorsResponse(BaseModel):
     bb_upper: float | None = None
     bb_middle: float | None = None
     bb_lower: float | None = None
+
+
+# ---------------------------------------------------------------------------
+# Trade Journal (post-trade notes / tags / rating attached to an order)
+# ---------------------------------------------------------------------------
+
+
+class TradeNoteUpsert(BaseModel):
+    """Body for PUT /api/trade-notes/{order_id} (upsert)."""
+
+    model_config = ConfigDict(extra="forbid")
+    note: str = Field(default="", max_length=8000)
+    tags: list[str] = Field(default_factory=list, max_length=20)
+    rating: Optional[int] = Field(default=None, ge=1, le=5)
+
+    @field_validator("tags")
+    @classmethod
+    def normalize_tags(cls, value: list[str]) -> list[str]:
+        seen: set[str] = set()
+        cleaned: list[str] = []
+        for tag in value:
+            tag = tag.strip()
+            if not tag or len(tag) > 32 or tag in seen:
+                continue
+            seen.add(tag)
+            cleaned.append(tag)
+        return cleaned
+
+
+class TradeNoteOut(BaseModel):
+    id: int
+    order_id: int
+    symbol: str
+    note: str
+    tags: list[str]
+    rating: Optional[int] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class TradeNotePage(BaseModel):
+    items: list[TradeNoteOut]
+    total: int
+    page: int
+    page_size: int
+
+
+class TradeNoteTagCount(BaseModel):
+    tag: str
+    count: int
+
+
+class TradeNoteAnalytics(BaseModel):
+    total: int
+    rated_count: int
+    avg_rating: Optional[float] = None
+    rating_distribution: dict[int, int]
+    top_tags: list[TradeNoteTagCount]
+    distinct_symbols: int
+
+
+
+# ---------------------------------------------------------------------------
+# Live unrealized PnL (positions) — joins tracked_entries cost with live quotes
+# ---------------------------------------------------------------------------
+
+
+class PositionPnlRow(BaseModel):
+    symbol: str
+    quantity: float
+    avg_entry_cost: float
+    last_price: Optional[float] = None
+    unrealized_pnl: float
+    unrealized_pnl_pct: Optional[float] = None
+    market_value: float
+    cost_value: float
+    has_quote: bool = True
+
+
+class PositionPnlResult(BaseModel):
+    positions: list[PositionPnlRow]
+    total_unrealized_pnl: float
+    total_cost_basis: float
+    total_unrealized_pnl_pct: Optional[float] = None
+    available: bool = True
+    error: Optional[str] = None
+
+

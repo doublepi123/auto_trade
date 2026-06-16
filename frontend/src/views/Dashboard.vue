@@ -355,6 +355,12 @@
       <p v-else class="empty-note">暂无诊断数据</p>
     </section>
 
+    <section class="detail-panel" data-testid="position-pnl-section">
+      <PositionPnlPanel />
+      <RiskHistoryPanel />
+      <SessionClockPanel :symbol="strategy.symbol" />
+    </section>
+
     <section class="chart-grid" data-testid="dashboard-charts">
       <div class="chart-controls">
         <div class="chart-symbol-controls">
@@ -479,6 +485,9 @@ import { computed, ref, onMounted, onUnmounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import PriceChart from '../components/PriceChart.vue'
 import PnLChart from '../components/PnLChart.vue'
+import PositionPnlPanel from '../components/PositionPnlPanel.vue'
+import RiskHistoryPanel from '../components/RiskHistoryPanel.vue'
+import SessionClockPanel from '../components/SessionClockPanel.vue'
 import { useDashboardData } from '../composables/useDashboardData'
 import { useStatusStream } from '../composables/useStatusStream'
 import { useAccountRefresh } from '../composables/useAccountRefresh'

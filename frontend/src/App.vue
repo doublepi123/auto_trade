@@ -14,6 +14,8 @@
         <router-link to="/credentials" class="app-menu-link" :class="{ active: route.path === '/credentials' }">凭证设置</router-link>
         <router-link to="/history" class="app-menu-link" :class="{ active: route.path === '/history' }">交易历史</router-link>
         <router-link to="/events" class="app-menu-link" :class="{ active: route.path === '/events' }">决策时间线</router-link>
+        <router-link to="/alerts" class="app-menu-link" :class="{ active: route.path === '/alerts' }">告警规则</router-link>
+        <router-link to="/notifications" class="app-menu-link" :class="{ active: route.path === '/notifications' }">通知中心</router-link>
         <router-link to="/lab" class="app-menu-link" :class="{ active: route.path === '/lab' }">优化工作台</router-link>
       </nav>
       <el-button size="small" text @click="dialogVisible = true" data-testid="nav-notification-settings"

@@ -27,6 +27,7 @@ from app.core.risk import RiskConfig, RiskController
 from app.database import SessionLocal
 from app.models import OrderRecord, TrackedEntry
 from app.services.daily_pnl_service import DailyPnlService
+from app.services.notification_log_service import get_notification_sink
 from app.core.credential_crypto import CredentialIntegrityError
 from app.services.credentials_service import CredentialsService, PlainCredentials
 from app.services.runtime_state_service import RuntimeStateService
@@ -1713,7 +1714,10 @@ class AppRunner:
                 credentials if credentials.sct_key == sct_key
                 else dataclass_replace(credentials, sct_key=sct_key)
             )
-            new_notifier = MultiChannelNotifier.from_credential_config(effective_credentials)
+            new_notifier = MultiChannelNotifier.from_credential_config(
+                effective_credentials,
+                sink=get_notification_sink().record,
+            )
 
             self._set_or_clear_env(
                 "LONGPORT_APP_KEY",

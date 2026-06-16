@@ -271,7 +271,7 @@ def get_trade_events(
     limit: Optional[int] = Query(default=None, ge=1, le=200),
     symbol: Optional[str] = Query(default=None, max_length=50),
     event_type: Optional[List[str]] = Query(default=None, max_length=50),
-    source: str = Query(default="all", pattern="^(trade|audit|all)$"),
+    source: str = Query(default="all", pattern="^(trade|audit|llm|risk|all)$"),
     skip_category: Optional[str] = Query(default=None, max_length=20),
     q: Optional[str] = Query(default=None, max_length=100, description="Substring search over message, symbol, action"),
     db: Session = Depends(get_db),

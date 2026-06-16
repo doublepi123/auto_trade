@@ -16,6 +16,9 @@ export interface StrategyConfig {
   llm_action_cooldown_seconds: number
   trading_session_mode: 'ANY' | 'RTH_ONLY'
   margin_safety_factor: number
+  report_schedule_enabled: boolean
+  report_schedule_interval_hours: number
+  report_schedule_symbol: string
   updated_at: string
 }
 
@@ -150,6 +153,63 @@ export interface OrderRecord {
   cancellable: boolean
 }
 
+export interface TradeNote {
+  id: number
+  order_id: number
+  symbol: string
+  note: string
+  tags: string[]
+  rating: number | null
+  created_at: string
+  updated_at: string
+}
+
+export interface TradeNoteUpsert {
+  note: string
+  tags: string[]
+  rating: number | null
+}
+
+export interface TradeNotePage {
+  items: TradeNote[]
+  total: number
+  page: number
+  page_size: number
+}
+
+export interface TradeNoteTagCount {
+  tag: string
+  count: number
+}
+
+export interface TradeNoteAnalytics {
+  total: number
+  rated_count: number
+  avg_rating: number | null
+  rating_distribution: Record<number, number>
+  top_tags: TradeNoteTagCount[]
+  distinct_symbols: number
+}
+
+export interface LLMInteractionDetail {
+  id: number
+  interaction_type: string
+  symbol: string
+  market: string
+  prompt: string
+  raw_response: string
+  parsed_response: Record<string, unknown>
+  context_snapshot: Record<string, unknown>
+  success: boolean
+  error: string
+  order_action: string
+  order_status: string | null
+  order_id: string | null
+  applied: boolean
+  prompt_variant: string | null
+  created_at: string
+}
+
 export interface OrderPage {
   items: OrderRecord[]
   total: number
@@ -188,7 +248,7 @@ export interface TradeEventPage {
   page_size: number
 }
 
-export type TimelineSource = 'all' | 'trade' | 'audit'
+export type TimelineSource = 'all' | 'trade' | 'audit' | 'llm' | 'risk'
 
 export interface CashBalance {
   currency: string
@@ -367,6 +427,11 @@ export interface BacktestMetrics {
   fees_paid: number
   skipped_signals: number
   final_state: string
+  sharpe_ratio: number | null
+  sortino_ratio: number | null
+  calmar_ratio: number | null
+  profit_factor: number | null
+  profit_loss_ratio: number | null
 }
 
 export interface BacktestFeeSensitivityPoint {
@@ -383,6 +448,289 @@ export interface BacktestResult {
   trades: BacktestTradeLog[]
   skipped_signals: BacktestSkippedSignal[]
   fee_sensitivity: BacktestFeeSensitivityPoint[]
+}
+
+/** Parameter axes a sweep may explore (mirrors backend SWEEP_ALLOWED_GRID_KEYS). */
+export type BacktestSweepAxis =
+  | 'buy_low'
+  | 'sell_high'
+  | 'min_profit_amount'
+  | 'quantity'
+  | 'fee_rate'
+  | 'slippage_pct'
+  | 'stop_loss_pct'
+
+export type BacktestSweepGrid = Partial<Record<BacktestSweepAxis, StrategyExperimentGridItem>>
+
+export type BacktestSweepSortBy =
+  | 'sharpe_ratio'
+  | 'sortino_ratio'
+  | 'calmar_ratio'
+  | 'profit_factor'
+  | 'total_return_pct'
+
+export interface BacktestSweepHeatmapCell {
+  buy_low: number
+  sell_high: number
+  value: number | null
+}
+
+export interface BacktestSweepHeatmap {
+  x_axis: string
+  y_axis: string
+  z_metric: string
+  cells: BacktestSweepHeatmapCell[]
+}
+
+export interface BacktestSweepRow {
+  params: BacktestParams
+  metrics: BacktestMetrics
+  rank: number
+}
+
+export interface BacktestSweepResult {
+  rows: BacktestSweepRow[]
+  best: BacktestSweepRow | null
+  heatmap: BacktestSweepHeatmap
+  evaluated_count: number
+  skipped_count: number
+  sort_by: string
+}
+
+export interface BacktestSweepRequest {
+  base: BacktestParams
+  grid: BacktestSweepGrid
+  sort_by: BacktestSweepSortBy
+  max_combinations: number
+  csv_text?: string | null
+}
+
+export interface WalkForwardWindow {
+  index: number
+  start: string
+  end: string
+  train_size: number
+  test_size: number
+  best_params: BacktestParams | null
+  test_metrics: BacktestMetrics | null
+}
+
+export interface WalkForwardSummary {
+  window_count: number
+  evaluated_window_count: number
+  mean_test_return_pct: number | null
+  median_test_return_pct: number | null
+  mean_test_metric: number | null
+  profitable_window_pct: number | null
+  test_return_std_pct: number | null
+}
+
+export interface WalkForwardResult {
+  windows: WalkForwardWindow[]
+  summary: WalkForwardSummary
+  sort_by: string
+  train_size: number
+  test_size: number
+  step: number
+}
+
+export interface WalkForwardRequest {
+  base: BacktestParams
+  grid: BacktestSweepGrid
+  train_size: number
+  test_size: number
+  step?: number | null
+  sort_by: BacktestSweepSortBy
+  max_combinations: number
+  csv_text?: string | null
+}
+
+export interface PositionPnlRow {
+  symbol: string
+  quantity: number
+  avg_entry_cost: number
+  last_price: number | null
+  unrealized_pnl: number
+  unrealized_pnl_pct: number | null
+  market_value: number
+  cost_value: number
+  has_quote: boolean
+}
+
+export interface PositionPnlResult {
+  positions: PositionPnlRow[]
+  total_unrealized_pnl: number
+  total_cost_basis: number
+  total_unrealized_pnl_pct: number | null
+  available: boolean
+  error: string | null
+}
+
+export interface StressTestResult {
+  scenarios_run: number
+  baseline_return_pct: number | null
+  median_return_pct: number | null
+  p5_return_pct: number | null
+  p95_return_pct: number | null
+  worst_return_pct: number | null
+  worst_drawdown_pct: number | null
+  profitable_scenario_pct: number | null
+  jitter_pct: number
+  seed: number
+  returns: number[]
+}
+
+export interface StressTestRequest {
+  base: BacktestParams
+  scenarios: number
+  jitter_pct: number
+  seed: number
+  csv_text?: string | null
+}
+
+export interface BacktestRunOut {
+  id: number
+  name: string
+  symbol: string
+  params: BacktestParams
+  metrics: BacktestMetrics
+  created_at: string
+}
+
+export interface BacktestRunPage {
+  items: BacktestRunOut[]
+  total: number
+  page: number
+  page_size: number
+}
+
+export interface BacktestRunSaveRequest {
+  name: string
+  params: BacktestParams
+  metrics: BacktestMetrics
+}
+
+export interface BacktestRunCompare {
+  runs: BacktestRunOut[]
+}
+
+export type AlertRuleType = 'price_above' | 'price_below' | 'daily_loss'
+export type AlertSeverity = 'INFO' | 'WARNING' | 'CRITICAL'
+
+export interface AlertRule {
+  id: number
+  name: string
+  symbol: string
+  rule_type: AlertRuleType
+  threshold: number
+  severity: AlertSeverity
+  enabled: boolean
+  cooldown_seconds: number
+  last_fired_at: string | null
+  created_at: string
+}
+
+export interface AlertRuleCreate {
+  name: string
+  symbol: string
+  rule_type: AlertRuleType
+  threshold: number
+  severity: AlertSeverity
+  enabled: boolean
+  cooldown_seconds: number
+}
+
+export interface AlertRulePage {
+  items: AlertRule[]
+  total: number
+}
+
+export interface AlertEvaluateResult {
+  evaluated: number
+  fired: number
+  skipped_cooldown: number
+}
+
+export interface StrategyPreset {
+  id: number
+  name: string
+  params: Record<string, unknown>
+  created_at: string
+}
+
+export interface StrategyPresetCreate {
+  name: string
+  params: Record<string, unknown>
+}
+
+export interface StrategyPresetPage {
+  items: StrategyPreset[]
+  total: number
+}
+
+export interface StrategyPresetApplyResult {
+  applied: boolean
+  changed: string[]
+}
+
+export interface NotificationLogOut {
+  id: number
+  title: string
+  content: string
+  severity: string
+  success: boolean
+  error: string
+  created_at: string
+}
+
+export interface NotificationLogPage {
+  items: NotificationLogOut[]
+  total: number
+  page: number
+  page_size: number
+}
+
+export interface RiskHistoryPoint {
+  created_at: string
+  engine_state: string
+  paused: boolean
+  kill_switch: boolean
+  daily_pnl: number
+  consecutive_losses: number
+}
+
+export interface RiskHistoryResponse {
+  points: RiskHistoryPoint[]
+  latest: RiskHistoryPoint | null
+}
+
+export interface BrokerCandleBar {
+  timestamp: string
+  open: number
+  high: number
+  low: number
+  close: number
+  volume: number
+}
+
+export interface BrokerCandlesResponse {
+  symbol: string
+  period: string
+  count: number
+  bars: BrokerCandleBar[]
+  csv_text: string
+}
+
+export type MarketSessionPhase = 'rth' | 'pre' | 'post' | 'lunch' | 'closed'
+
+export interface MarketSessionStatus {
+  market: string
+  symbol: string
+  status: MarketSessionPhase
+  is_trading: boolean
+  local_time: string
+  utc_time: string
+  next_open: string
 }
 
 export interface ReviewLLMInteraction {

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import csv
 import io
+import itertools
+import random
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Optional
@@ -570,3 +572,476 @@ def _validate_bar(bar: BacktestBar) -> None:
         raise ValueError("high must be greater than or equal to open and close")
     if bar.low > min(bar.open, bar.close):
         raise ValueError("low must be less than or equal to open and close")
+
+
+# ---------------------------------------------------------------------------
+# Parameter sweep — run BacktestEngine over a numeric grid and rank results.
+#
+# Pure / deterministic / offline: imports no SQLAlchemy, broker, or pydantic.
+# Reuses BacktestEngine._validate_params as the per-combo validity gate and
+# mirrors ExperimentGridService._expand_item's float tolerance in
+# expand_numeric_range so the core never depends on the pydantic grid service.
+# ---------------------------------------------------------------------------
+
+#: Parameter axes a sweep may explore. Focused on the interval/profit/risk
+#: knobs that actually change a range-trading backtest's behaviour; ``symbol``
+#: and ``short_selling`` are non-numeric and intentionally excluded.
+SWEEP_ALLOWED_GRID_KEYS: frozenset[str] = frozenset({
+    "buy_low", "sell_high", "min_profit_amount",
+    "quantity", "fee_rate", "slippage_pct", "stop_loss_pct",
+})
+
+#: Metrics the sweep may rank by. Each is a (possibly-None) attribute of
+#: BacktestMetrics computed by BacktestEngine.run.
+SWEEP_SORT_KEYS: tuple[str, ...] = (
+    "sharpe_ratio", "sortino_ratio", "calmar_ratio", "profit_factor", "total_return_pct",
+)
+
+SWEEP_DEFAULT_MAX_COMBINATIONS = 2000
+SWEEP_ABSOLUTE_MAX_COMBINATIONS = 10_000
+_SWEEP_GRID_PRECISION = 10
+_SWEEP_EPS = 1e-12
+
+
+def expand_numeric_range(start: float, step: float, end: float) -> list[float]:
+    """Expand the inclusive range ``[start, end]`` by ``step``.
+
+    Mirrors ``ExperimentGridService._expand_item`` (``round(v, 10)`` + epsilon)
+    so a pure-core caller does not pull in the pydantic-bound grid service.
+    """
+    if step == 0:
+        raise ValueError("grid step cannot be zero")
+    if step < 0:
+        raise ValueError("grid step must be positive")
+    values: list[float] = []
+    i = 0
+    while True:
+        v = round(start + i * step, _SWEEP_GRID_PRECISION)
+        if v > end + _SWEEP_EPS:
+            break
+        values.append(v)
+        i += 1
+    return values
+
+
+@dataclass(frozen=True)
+class SweepResultRow:
+    params: BacktestEngineParams
+    metrics: BacktestMetrics
+    rank: int = 0
+
+
+@dataclass(frozen=True)
+class SweepHeatmapCell:
+    buy_low: float
+    sell_high: float
+    value: float | None
+
+
+@dataclass(frozen=True)
+class SweepHeatmap:
+    x_axis: str
+    y_axis: str
+    z_metric: str
+    cells: list[SweepHeatmapCell]
+
+
+@dataclass(frozen=True)
+class SweepResult:
+    rows: list[SweepResultRow]
+    best: SweepResultRow | None
+    heatmap: SweepHeatmap
+    evaluated_count: int
+    skipped_count: int
+    sort_by: str
+
+
+def _sweep_sort_value(metrics: BacktestMetrics, sort_by: str) -> float:
+    """Ranking metric value; ``None`` -> ``-inf`` so never-trading combinations
+    sort below every real value under descending order."""
+    raw = getattr(metrics, sort_by)
+    if raw is None:
+        return float("-inf")
+    return float(raw)
+
+
+def _build_sweep_heatmap(rows: list[SweepResultRow], z_metric: str) -> SweepHeatmap:
+    """Collapse rows to the best ``z_metric`` per ``(buy_low, sell_high)`` cell.
+
+    A third swept axis (e.g. ``min_profit_amount``) therefore collapses to the
+    best variant per cell. ``None`` never improves a cell that already holds a
+    real value, and a cell whose every row is ``None`` stays ``None``.
+    """
+    best: dict[tuple[float, float], float | None] = {}
+    for r in rows:
+        key = (r.params.buy_low, r.params.sell_high)
+        val = getattr(r.metrics, z_metric)
+        if key not in best:
+            best[key] = val
+            continue
+        cur = best[key]
+        if val is None:
+            continue
+        if cur is None or val > cur:
+            best[key] = val
+    cells = [
+        SweepHeatmapCell(buy_low=k[0], sell_high=k[1], value=v)
+        for k, v in sorted(best.items())
+    ]
+    return SweepHeatmap(x_axis="sell_high", y_axis="buy_low", z_metric=z_metric, cells=cells)
+
+
+def sweep_backtest(
+    base_params: BacktestEngineParams,
+    param_grid: dict[str, list[float]],
+    bars: list[BacktestBar],
+    *,
+    sort_by: str = "sharpe_ratio",
+    max_combinations: int = SWEEP_DEFAULT_MAX_COMBINATIONS,
+) -> SweepResult:
+    """Run ``BacktestEngine`` over the Cartesian product of ``param_grid`` and
+    return the combinations ranked by ``sort_by`` plus a best-per-cell heatmap.
+
+    Invalid combinations (e.g. ``buy_low >= sell_high``) are silently skipped
+    via the existing ``BacktestEngine`` validation gate and counted in
+    ``skipped_count`` rather than raising — matching ``ExperimentGridService``.
+    """
+    if not bars:
+        raise ValueError("at least one price bar is required")
+    if sort_by not in SWEEP_SORT_KEYS:
+        raise ValueError(f"sort_by must be one of {SWEEP_SORT_KEYS}")
+    if max_combinations < 1:
+        raise ValueError("max_combinations must be at least 1")
+    if max_combinations > SWEEP_ABSOLUTE_MAX_COMBINATIONS:
+        raise ValueError(
+            f"max_combinations cannot exceed {SWEEP_ABSOLUTE_MAX_COMBINATIONS}"
+        )
+
+    unknown = set(param_grid) - SWEEP_ALLOWED_GRID_KEYS
+    if unknown:
+        raise ValueError(f"unknown grid keys: {sorted(unknown)}")
+    keys = list(param_grid.keys())
+    for key in keys:
+        if not param_grid[key]:
+            raise ValueError(f"grid for {key} must not be empty")
+
+    total = 1
+    for key in keys:
+        total *= len(param_grid[key])
+    if total > max_combinations:
+        raise ValueError(
+            f"parameter grid produced {total} combinations, "
+            f"max_combinations is {max_combinations}"
+        )
+
+    rows: list[SweepResultRow] = []
+    skipped = 0
+    for combo in itertools.product(*[param_grid[k] for k in keys]):
+        overrides = {k: float(v) for k, v in zip(keys, combo)}
+        try:
+            params = replace(base_params, **overrides)
+            result = BacktestEngine(params).run(bars, include_fee_sensitivity=False)
+        except ValueError:
+            skipped += 1
+            continue
+        rows.append(SweepResultRow(params=params, metrics=result.metrics, rank=0))
+
+    rows.sort(
+        key=lambda r: (
+            _sweep_sort_value(r.metrics, sort_by),
+            r.metrics.total_return_pct,
+            r.metrics.total_pnl,
+        ),
+        reverse=True,
+    )
+    ranked = [replace(r, rank=idx + 1) for idx, r in enumerate(rows)]
+    heatmap = _build_sweep_heatmap(ranked, sort_by)
+    return SweepResult(
+        rows=ranked,
+        best=ranked[0] if ranked else None,
+        heatmap=heatmap,
+        evaluated_count=len(ranked),
+        skipped_count=skipped,
+        sort_by=sort_by,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Walk-forward rolling-window evaluation — optimize on each train window,
+# evaluate out-of-sample on the following test window. Reuses sweep_backtest.
+# Surfaces overfitting: a config that looks great on the full period but is
+# inconsistent (high return std, low profitable-window %) across windows is
+# fragile. With an empty grid it degrades to plain rolling-window evaluation
+# of base_params (consistency only, no per-window optimization).
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class WalkForwardWindow:
+    index: int
+    start: datetime
+    end: datetime
+    train_size: int
+    test_size: int
+    best_params: BacktestEngineParams | None
+    test_metrics: BacktestMetrics | None
+
+
+@dataclass(frozen=True)
+class WalkForwardSummary:
+    window_count: int
+    evaluated_window_count: int
+    mean_test_return_pct: float | None
+    median_test_return_pct: float | None
+    mean_test_metric: float | None
+    profitable_window_pct: float | None
+    test_return_std_pct: float | None
+
+
+@dataclass(frozen=True)
+class WalkForwardResult:
+    windows: list[WalkForwardWindow]
+    summary: WalkForwardSummary
+    sort_by: str
+    train_size: int
+    test_size: int
+    step: int
+
+
+def _median(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    n = len(ordered)
+    mid = n // 2
+    if n % 2 == 1:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) / 2
+
+
+def _stddev(values: list[float]) -> float:
+    if len(values) < 2:
+        return 0.0
+    mean = sum(values) / len(values)
+    variance = sum((v - mean) ** 2 for v in values) / (len(values) - 1)
+    return variance ** 0.5
+
+
+def walk_forward_backtest(
+    base_params: BacktestEngineParams,
+    param_grid: dict[str, list[float]],
+    bars: list[BacktestBar],
+    *,
+    train_size: int,
+    test_size: int,
+    step: int | None = None,
+    sort_by: str = "sharpe_ratio",
+    max_combinations: int = SWEEP_DEFAULT_MAX_COMBINATIONS,
+) -> WalkForwardResult:
+    """Walk-forward optimization over rolling windows.
+
+    For each anchor the in-sample ``train`` window optimizes params via
+    :func:`sweep_backtest` (or just reuses ``base_params`` when the grid is
+    empty), and the following ``test`` window evaluates those params
+    out-of-sample. Returns per-window results plus an aggregate summary that
+    flags consistency / overfitting.
+    """
+    if not bars:
+        raise ValueError("at least one price bar is required")
+    if train_size < 2:
+        raise ValueError("train_size must be at least 2")
+    if test_size < 1:
+        raise ValueError("test_size must be at least 1")
+    if step is not None and step < 1:
+        raise ValueError("step must be at least 1")
+    if sort_by not in SWEEP_SORT_KEYS:
+        raise ValueError(f"sort_by must be one of {SWEEP_SORT_KEYS}")
+    actual_step = test_size if step is None else step
+
+    ordered = sorted(bars, key=lambda b: b.timestamp)
+    windows: list[WalkForwardWindow] = []
+    anchor = 0
+    index = 0
+    while anchor + train_size + test_size <= len(ordered):
+        train_bars = ordered[anchor:anchor + train_size]
+        test_bars = ordered[anchor + train_size:anchor + train_size + test_size]
+
+        if param_grid:
+            sweep = sweep_backtest(
+                base_params,
+                param_grid,
+                train_bars,
+                sort_by=sort_by,
+                max_combinations=max_combinations,
+            )
+            best_params = sweep.best.params if sweep.best is not None else None
+        else:
+            best_params = base_params
+
+        test_metrics: BacktestMetrics | None = None
+        if best_params is not None:
+            try:
+                test_metrics = BacktestEngine(best_params).run(
+                    test_bars, include_fee_sensitivity=False
+                ).metrics
+            except ValueError:
+                test_metrics = None
+
+        windows.append(WalkForwardWindow(
+            index=index,
+            start=train_bars[0].timestamp,
+            end=test_bars[-1].timestamp,
+            train_size=train_size,
+            test_size=test_size,
+            best_params=best_params,
+            test_metrics=test_metrics,
+        ))
+        index += 1
+        anchor += actual_step
+
+    return WalkForwardResult(
+        windows=windows,
+        summary=_summarize_walk_forward(windows, sort_by),
+        sort_by=sort_by,
+        train_size=train_size,
+        test_size=test_size,
+        step=actual_step,
+    )
+
+
+def _summarize_walk_forward(
+    windows: list[WalkForwardWindow], sort_by: str
+) -> WalkForwardSummary:
+    evaluated = [w.test_metrics for w in windows if w.test_metrics is not None]
+    returns = [m.total_return_pct for m in evaluated]
+    metric_vals = [
+        v for v in (getattr(m, sort_by) for m in evaluated) if v is not None
+    ]
+    profitable = sum(1 for m in evaluated if m.total_pnl > 0)
+    return WalkForwardSummary(
+        window_count=len(windows),
+        evaluated_window_count=len(evaluated),
+        mean_test_return_pct=(sum(returns) / len(returns)) if returns else None,
+        median_test_return_pct=_median(returns) if returns else None,
+        mean_test_metric=(sum(metric_vals) / len(metric_vals)) if metric_vals else None,
+        profitable_window_pct=(profitable / len(evaluated) * 100) if evaluated else None,
+        test_return_std_pct=_stddev(returns) if returns else None,
+    )
+
+
+# ---------------------------------------------------------------------------
+# What-If / Stress — Monte-Carlo ensemble over jittered price paths.
+#
+# Distinct from sweep (param search) and walk-forward (temporal): this answers
+# "how sensitive is my result to the exact price path?" by re-running the
+# engine over N deterministically jittered copies of the input bars and
+# reporting the return distribution. Deterministic via a seeded RNG.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class StressResult:
+    scenarios_run: int
+    baseline_return_pct: float | None
+    median_return_pct: float | None
+    p5_return_pct: float | None
+    p95_return_pct: float | None
+    worst_return_pct: float | None
+    worst_drawdown_pct: float | None
+    profitable_scenario_pct: float | None
+    jitter_pct: float
+    seed: int
+    returns: list[float]
+
+
+def _percentile(values: list[float], pct: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return ordered[0]
+    k = (len(ordered) - 1) * (pct / 100)
+    lower = int(k)
+    upper = min(lower + 1, len(ordered) - 1)
+    return ordered[lower] + (ordered[upper] - ordered[lower]) * (k - lower)
+
+
+def _jitter_bars(
+    bars: list[BacktestBar], rng: random.Random, jitter_pct: float
+) -> list[BacktestBar]:
+    """Return a copy of *bars* with every OHLC scaled by a per-bar uniform
+    factor in ``[1 - jitter, 1 + jitter]``. Uniform positive scaling preserves
+    the high>=low / high>=open,close invariants, so no bar becomes invalid."""
+    if jitter_pct <= 0:
+        return list(bars)
+    factor = jitter_pct / 100
+    out: list[BacktestBar] = []
+    for b in bars:
+        m = 1 + rng.uniform(-factor, factor)
+        out.append(BacktestBar(
+            timestamp=b.timestamp,
+            open=b.open * m,
+            high=b.high * m,
+            low=b.low * m,
+            close=b.close * m,
+            volume=b.volume,
+        ))
+    return out
+
+
+def stress_test(
+    base_params: BacktestEngineParams,
+    bars: list[BacktestBar],
+    *,
+    scenarios: int = 50,
+    jitter_pct: float = 1.0,
+    seed: int = 42,
+) -> StressResult:
+    """Run the engine over *scenarios* jittered price paths and summarise the
+    return distribution. Pure / deterministic / offline."""
+    if not bars:
+        raise ValueError("at least one price bar is required")
+    if scenarios < 1:
+        raise ValueError("scenarios must be at least 1")
+    if scenarios > 1000:
+        raise ValueError("scenarios cannot exceed 1000")
+    if jitter_pct < 0:
+        raise ValueError("jitter_pct cannot be negative")
+
+    ordered = sorted(bars, key=lambda b: b.timestamp)
+    try:
+        baseline = BacktestEngine(base_params).run(
+            ordered, include_fee_sensitivity=False
+        ).metrics.total_return_pct
+    except ValueError:
+        baseline = None
+
+    rng = random.Random(seed)
+    returns: list[float] = []
+    drawdowns: list[float] = []
+    for _ in range(scenarios):
+        perturbed = _jitter_bars(ordered, rng, jitter_pct)
+        try:
+            metrics = BacktestEngine(base_params).run(
+                perturbed, include_fee_sensitivity=False
+            ).metrics
+        except ValueError:
+            continue
+        returns.append(metrics.total_return_pct)
+        drawdowns.append(metrics.max_drawdown_pct)
+
+    return StressResult(
+        scenarios_run=len(returns),
+        baseline_return_pct=baseline,
+        median_return_pct=_percentile(returns, 50),
+        p5_return_pct=_percentile(returns, 5),
+        p95_return_pct=_percentile(returns, 95),
+        worst_return_pct=(min(returns) if returns else None),
+        worst_drawdown_pct=(max(drawdowns) if drawdowns else None),
+        profitable_scenario_pct=(
+            (sum(1 for r in returns if r > 0) / len(returns) * 100) if returns else None
+        ),
+        jitter_pct=jitter_pct,
+        seed=seed,
+        returns=sorted(returns),
+    )

@@ -52,6 +52,9 @@ class StrategyConfig(Base):
     llm_reject_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     trading_session_mode: Mapped[str] = mapped_column(String(16), default="ANY", nullable=False)
     margin_safety_factor: Mapped[Optional[float]] = mapped_column(Float, nullable=True, default=0.9)
+    report_schedule_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    report_schedule_interval_hours: Mapped[int] = mapped_column(Integer, default=24, nullable=False)
+    report_schedule_symbol: Mapped[str] = mapped_column(String(50), default="", nullable=False)
 
 
 class CredentialConfig(Base):
@@ -323,3 +326,102 @@ class StrategyExperimentRun(Base):
     result_summary_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
     error: Mapped[str] = mapped_column(Text, nullable=False, default="")
     created_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow, index=True)
+
+
+class TradeNote(Base):
+    """A user-authored journal entry attached to a filled/submitted order.
+
+    Closes the post-trade review loop: freeform note + tags + a 1-5 rating,
+    keyed one-per-order so the TradeHistory view can show "has note" indicators
+    and open an editor. ``tags`` is stored as a JSON text column (the project
+    stores all JSON-like data as Text rather than the SQLAlchemy JSON type).
+    """
+
+    __tablename__ = "trade_notes"
+    __table_args__ = (Index("ix_trade_notes_symbol_updated", "symbol", "updated_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    order_id: Mapped[int] = mapped_column(Integer, index=True, unique=True, nullable=False)
+    symbol: Mapped[str] = mapped_column(String(50), default="", nullable=False)
+    note: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    tags_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    rating: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow, onupdate=_utcnow)
+
+
+class BacktestRun(Base):
+    """A saved backtest run for side-by-side comparison.
+
+    Stores the params + metrics (JSON text) the user chose to keep; the full
+    equity curve / trades are NOT persisted (re-run /run to see them) to keep
+    rows small.
+    """
+
+    __tablename__ = "backtest_runs"
+    __table_args__ = (Index("ix_backtest_runs_created_at", "created_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(50), default="", nullable=False)
+    params_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    metrics_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    created_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow)
+
+
+class NotificationLog(Base):
+    """A persisted record of a dispatched notification (any channel/source).
+
+    Populated by an optional sink attached to MultiChannelNotifier.send, so
+    every risk/alert/report notification is auditable after the fact.
+    """
+
+    __tablename__ = "notifications"
+    __table_args__ = (Index("ix_notifications_created_at", "created_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    title: Mapped[str] = mapped_column(String(200), nullable=False, default="")
+    content: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    severity: Mapped[str] = mapped_column(String(16), nullable=False, default="INFO")
+    success: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    error: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow)
+
+
+class AlertRule(Base):
+    """User-defined alert rule evaluated by a background cron.
+
+    ``rule_type`` ∈ {price_above, price_below, daily_loss_pct}. Price rules
+    use live quotes; daily_loss_pct reads the active runtime_state. A per-rule
+    ``cooldown_seconds`` (vs ``last_fired_at``) prevents spam.
+    """
+
+    __tablename__ = "alert_rules"
+    __table_args__ = (Index("ix_alert_rules_enabled", "enabled"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(50), default="", nullable=False)
+    rule_type: Mapped[str] = mapped_column(String(24), nullable=False)
+    threshold: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    severity: Mapped[str] = mapped_column(String(16), default="WARNING", nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    cooldown_seconds: Mapped[int] = mapped_column(Integer, default=300, nullable=False)
+    last_fired_at: Mapped[Optional[datetime]] = mapped_column(_TZDateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow)
+
+
+class StrategyPreset(Base):
+    """A named snapshot of strategy params for one-click re-application.
+
+    Stores the updatable strategy fields as a JSON text column; ``apply`` feeds
+    them straight into ``StrategyService.update_config``.
+    """
+
+    __tablename__ = "strategy_presets"
+    __table_args__ = (Index("ix_strategy_presets_name", "name"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    params_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    created_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow)

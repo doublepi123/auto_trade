@@ -33,7 +33,7 @@ auto_trade/
 │   │   │   ├── trade.py                    # 订单、账户、事件（跨表 union）、/api/control/*
 │   │   │   ├── credentials.py              # 加密凭证 CRUD + notification_channels
 │   │   │   ├── llm_advisor.py              # LLM 区间 analyze/preview/status
-│   │   │   ├── backtest.py                 # POST /api/backtest/run
+│   │   │   ├── backtest.py                 # POST /api/backtest/{run,sweep,walk-forward,stress} + /runs (saved-run CRUD + compare)
 │   │   │   ├── indicators.py               # GET /api/indicators（实时技术指标快照，只读）
 │   │   │   ├── ws.py                       # WebSocket /ws
 │   │   │   ├── auth.py                     # require_api_key（可选；preview 可挂依赖）
@@ -135,10 +135,21 @@ cd frontend && npm run type-check
 | 策略 | `GET/PUT /api/strategy`（含 `trading_session_mode`、`fee_rate_*`、`llm_*`），`GET /api/status`，`GET /api/status/history` |
 | 控制 | `POST /api/control/{start,stop,pause,resume,kill-switch,disable-kill-switch}`（全部写审计） |
 | 交易 | `GET /api/orders`（`refresh=true` 强制同步今日订单），`POST /api/orders/{id}/cancel`（写审计），`GET /api/account`（批量 quote） |
-| 事件 | `GET /api/events`（`source=trade\|audit\|all`，`event_type` 重复参数多选），`GET /api/events/export`（仅 `trade_events`） |
+| 交易笔记 | `GET /api/trade-notes`（`?symbol=`）、`GET /api/trade-notes/analytics`（聚合），`GET/PUT/DELETE /api/trade-notes/{order_id}`（每单一笔记 note/tags/rating 1-5；PUT/DELETE 写审计 `TRADE_NOTE_*`；订单不存在 404） |
+| 持仓浮盈 | `GET /api/positions/pnl`（`tracked_entries` 成本 × 实时行情 → 未实现 P&L；只读） |
+| 风险历史 | `GET /api/risk/history`（`runtime_state_snapshots` 时序快照：daily_pnl/连续亏损/暂停/熔断；只读） |
+| 行情 K 线 | `GET /api/broker/candles`（`BrokerGateway.get_candlesticks` → `{bars, csv_text}`，回测用；422 非法 period / 503 券商不可用） |
+| 交易时段 | `GET /api/calendar/session`（`session_status` → `rth`/`pre`/`post`/`lunch`/`closed` + 本地时间 + 下次开盘；只读） |
+| 通知中心 | `GET /api/notifications`（已发送通知分发日志，`notifications` 表；`MultiChannelNotifier` sink 落库；只读） |
+| LLM 详情 | `GET /api/llm-interactions/{id}`（单条交互完整 prompt/响应/解析/上下文；只读） |
+| 笔记分析 | `GET /api/trade-notes/analytics`（笔记聚合：评分分布/热门标签；只读） |
+| 定时报告 | `POST /api/reports/schedule/run`（立即推送日报；写审计）；后台 cron 按 `StrategyConfig.report_schedule_*` 周期推送 |
+| 告警规则 | `GET/POST /api/alert-rules`、`PUT/DELETE /api/alert-rules/{id}`、`POST /api/alert-rules/evaluate`（`price_above`/`price_below`/`daily_loss`；后台每 60s 评估；触发经 `MultiChannelNotifier`；只读评估不发单） |
+| 策略预设 | `GET/POST /api/strategy-presets`、`GET/DELETE /{id}`、`POST /{id}/apply`（应用到当前策略配置，写审计 `STRATEGY_PRESET_APPLY`） |
+| 事件 | `GET /api/events`（`source=trade\|audit\|llm\|risk\|all` 跨四表 union：trade_events + audit_logs + llm_interactions + risk_events；`event_type` 重复参数多选），`GET /api/events/export`（仅 `trade_events`） |
 | 凭证 | `GET/PUT /api/credentials`（含 `notification_channels`，写审计） |
 | LLM | `POST /api/strategy/llm-interval/{preview,analyze}`，`GET …/status`，`PUT …/enable\|disable` |
-| 回测 | `POST /api/backtest/run` |
+| 回测 | `POST /api/backtest/run`、`POST /api/backtest/sweep`（即时网格参数扫描，返回排名表+热力图）、`POST /api/backtest/walk-forward`（滚动窗口样本外稳定性评估）、`POST /api/backtest/stress`（What-If 蒙特卡洛压力分布） |
 | 实验 | `GET /api/experiments`（实验名称列表），`GET /api/experiments/{name}/summary`（变体摘要） |
 | 指标 | `GET /api/indicators?symbol=`（实时技术指标快照：ATR/RSI/MACD/布林带/成交量/情绪/多时间框架；只读，不触发 LLM） |
 | 性能 | `GET /api/performance/stats?experiment=`，`GET /api/performance/compare?experiment=`，`GET /api/performance/recommendations?experiment=`（A/B 统计；只读） |
@@ -161,7 +172,7 @@ cd frontend && npm run type-check
 
 ### 数据库迁移
 
-- 运行时通过 `init_db()` 顺序执行：`_ensure_order_execution_columns`、`_ensure_order_raw_response_column`、`_ensure_strategy_config_llm_columns`、`_ensure_strategy_config_trade_safety_columns`（P4：`fee_rate_us`、`fee_rate_hk`、`min_repricing_pct`、`llm_action_cooldown_seconds`）、`_ensure_strategy_config_session_columns`（P5+：`trading_session_mode`）、`_ensure_runtime_state_daily_pnl_date_column`、`_ensure_audit_log_table`（P5+）、`_ensure_credential_config_notification_channels_column`（P5+，回填默认 `[{"type":"serverchan","severity_floor":"INFO"}]`）、`_ensure_tracked_entries_table`。
+- 运行时通过 `init_db()` 顺序执行：`_ensure_order_execution_columns`、`_ensure_order_raw_response_column`、`_ensure_strategy_config_llm_columns`、`_ensure_strategy_config_trade_safety_columns`（P4：`fee_rate_us`、`fee_rate_hk`、`min_repricing_pct`、`llm_action_cooldown_seconds`）、`_ensure_strategy_config_session_columns`（P5+：`trading_session_mode`）、`_ensure_runtime_state_daily_pnl_date_column`、`_ensure_audit_log_table`（P5+）、`_ensure_credential_config_notification_channels_column`（P5+，回填默认 `[{"type":"serverchan","severity_floor":"INFO"}]`）、`_ensure_tracked_entries_table`、`_ensure_trade_notes_table`（P43+，交易笔记：每单一笔记 `note`/`tags_json`/`rating 1-5`，唯一 `order_id`）、`_ensure_strategy_config_report_schedule_columns`（P46+：`report_schedule_enabled`/`report_schedule_interval_hours`/`report_schedule_symbol`）、`_ensure_backtest_runs_table`（P50+）、`_ensure_alert_rules_table`（P51+：`rule_type`/`threshold`/`severity`/`cooldown_seconds`/`last_fired_at`）、`_ensure_strategy_presets_table`（P52+：name + params_json）、`_ensure_notifications_table`（P58+：title/content/severity/success/error）。
 - **`alembic/` 不用于生产**；加列须同步新增 `_ensure_*`。
 - 首次补 `daily_pnl_date` 时会把 NULL 行的 `daily_pnl`/`consecutive_losses` 置 0（一次性）。
 

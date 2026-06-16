@@ -28,6 +28,21 @@ describe('Dashboard', () => {
     cy.contains('持仓明细').should('be.visible')
   })
 
+  it('renders the unrealized-PnL panel', () => {
+    cy.get('[data-testid="position-pnl-panel"]').should('be.visible')
+    cy.contains('持仓浮盈').should('be.visible')
+  })
+
+  it('renders the risk-history sparkline', () => {
+    cy.get('[data-testid="risk-history-panel"]').should('be.visible')
+    cy.get('[data-testid="risk-sparkline"]').should('exist')
+  })
+
+  it('renders the market session clock', () => {
+    cy.get('[data-testid="session-panel"]').should('be.visible')
+    cy.get('[data-testid="session-status"]').should('contain', '交易中')
+  })
+
   it('shows strategy info section', () => {
     cy.contains('行情信息').should('be.visible')
   })

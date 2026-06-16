@@ -8,6 +8,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.models import LLMInteraction
+from app.schemas import LLMInteractionDetail
 
 
 def _json_default(obj: Any) -> Any:
@@ -34,6 +35,17 @@ def _json_default(obj: Any) -> Any:
 
 def _json_dumps(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, default=_json_default)
+
+
+def _json_loads_dict(value: str | None) -> dict[str, Any]:
+    """Parse a JSON text column to a dict; never raises (returns {} on failure)."""
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+    except (ValueError, TypeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {"value": parsed}
 
 
 class LLMInteractionService:
@@ -101,4 +113,27 @@ class LLMInteractionService:
             .order_by(LLMInteraction.created_at.desc(), LLMInteraction.id.desc())
             .limit(limit)
             .all()
+        )
+
+    def get_detail(self, interaction_id: int) -> LLMInteractionDetail | None:
+        record = self.db.get(LLMInteraction, interaction_id)
+        if record is None:
+            return None
+        return LLMInteractionDetail(
+            id=record.id,
+            interaction_type=record.interaction_type,
+            symbol=record.symbol,
+            market=record.market,
+            prompt=record.prompt,
+            raw_response=record.raw_response,
+            parsed_response=_json_loads_dict(record.parsed_response),
+            context_snapshot=_json_loads_dict(record.context_snapshot),
+            success=bool(record.success),
+            error=record.error,
+            order_action=record.order_action,
+            order_status=record.order_status,
+            order_id=record.order_id,
+            applied=bool(record.applied),
+            prompt_variant=record.prompt_variant,
+            created_at=record.created_at,
         )

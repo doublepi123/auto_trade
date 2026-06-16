@@ -99,6 +99,88 @@ Cypress.Commands.add('stubApi', () => {
     },
   }).as('getStatusHistory')
 
+  cy.intercept('GET', '/api/positions/pnl', {
+    body: {
+      positions: [],
+      total_unrealized_pnl: 0,
+      total_cost_basis: 0,
+      total_unrealized_pnl_pct: null,
+      available: true,
+      error: null,
+    },
+  }).as('getPositionPnl')
+
+  cy.intercept('GET', '/api/risk/history*', {
+    body: {
+      points: [
+        { created_at: '2026-06-16T10:00:00Z', engine_state: 'flat', paused: false, kill_switch: false, daily_pnl: -100, consecutive_losses: 1 },
+        { created_at: '2026-06-16T10:05:00Z', engine_state: 'flat', paused: false, kill_switch: false, daily_pnl: 50, consecutive_losses: 0 },
+        { created_at: '2026-06-16T10:10:00Z', engine_state: 'flat', paused: true, kill_switch: false, daily_pnl: -200, consecutive_losses: 2 },
+      ],
+      latest: { created_at: '2026-06-16T10:10:00Z', engine_state: 'flat', paused: true, kill_switch: false, daily_pnl: -200, consecutive_losses: 2 },
+    },
+  }).as('getRiskHistory')
+
+  cy.intercept('GET', '/api/broker/candles*', {
+    body: {
+      symbol: 'AAPL.US',
+      period: 'DAY',
+      count: 2,
+      bars: [
+        { timestamp: '2026-06-14T13:30:00Z', open: 100, high: 110, low: 95, close: 105, volume: 1000 },
+        { timestamp: '2026-06-15T13:30:00Z', open: 105, high: 120, low: 100, close: 115, volume: 1200 },
+      ],
+      csv_text: 'timestamp,open,high,low,close,volume\n2026-06-14T13:30:00Z,100,110,95,105,1000\n2026-06-15T13:30:00Z,105,120,100,115,1200',
+    },
+  }).as('getBrokerCandles')
+
+  cy.intercept('GET', '/api/llm-interactions/*', {
+    body: {
+      id: 1,
+      interaction_type: 'analyze',
+      symbol: 'AAPL.US',
+      market: 'US',
+      prompt: 'suggest interval',
+      raw_response: '{"buy_low": 90, "sell_high": 190}',
+      parsed_response: { buy_low: 90, sell_high: 190 },
+      context_snapshot: { price: 120 },
+      success: true,
+      error: '',
+      order_action: 'BUY',
+      order_status: null,
+      order_id: null,
+      applied: true,
+      prompt_variant: null,
+      created_at: '2026-06-16T12:00:00Z',
+    },
+  }).as('getLLMInteraction')
+
+  cy.intercept('GET', '/api/calendar/session*', {
+    body: {
+      market: 'US',
+      symbol: 'AAPL.US',
+      status: 'rth',
+      is_trading: true,
+      local_time: '2026-06-16 10:30:00 EDT',
+      utc_time: '2026-06-16T14:30:00Z',
+      next_open: '2026-06-17T13:30:00Z',
+    },
+  }).as('getMarketSession')
+
+  cy.intercept('GET', '/api/notifications*', {
+    body: {
+      items: [
+        { id: 1, title: '风控熔断', content: 'kill switch triggered', severity: 'CRITICAL', success: true, error: '', created_at: '2026-06-16T12:00:00Z' },
+        { id: 2, title: '日报', content: 'AAPL.US +200', severity: 'INFO', success: true, error: '', created_at: '2026-06-16T11:00:00Z' },
+      ],
+      total: 2, page: 1, page_size: 50,
+    },
+  }).as('getNotifications')
+
+  cy.intercept('POST', '/api/reports/schedule/run', {
+    body: { sent: true, symbol: 'AAPL.US', title: '交易日报 · AAPL.US', error: null },
+  }).as('runScheduledReport')
+
   cy.intercept('GET', '/api/account', {
     body: { total_assets: 0, cash_balances: [], positions: [], available: true, error: null },
   }).as('getAccount')
@@ -123,6 +205,21 @@ Cypress.Commands.add('stubApi', () => {
       scope: 'today',
     },
   }).as('getOrders')
+
+  cy.intercept('GET', '/api/trade-notes', {
+    body: { items: [], total: 0, page: 1, page_size: 50 },
+  }).as('getTradeNotes')
+
+  cy.intercept('GET', '/api/trade-notes/analytics', {
+    body: {
+      total: 2,
+      rated_count: 2,
+      avg_rating: 4.0,
+      rating_distribution: { 1: 0, 2: 0, 3: 1, 4: 0, 5: 1 },
+      top_tags: [{ tag: 'good', count: 2 }],
+      distinct_symbols: 1,
+    },
+  }).as('getTradeNoteAnalytics')
 
   cy.intercept('GET', '/api/events*', {
     body: {
@@ -414,6 +511,177 @@ Cypress.Commands.add('stubApi', () => {
       ],
     },
   }).as('runBacktest')
+
+  cy.intercept('POST', '/api/backtest/sweep', {
+    body: {
+      rows: [
+        {
+          rank: 1,
+          params: { buy_low: 100, sell_high: 210, min_profit_amount: 0 },
+          metrics: {
+            total_pnl: 220, total_return_pct: 2.2, max_drawdown_pct: 0, win_rate: 100,
+            sharpe_ratio: 1.8, sortino_ratio: 1.9, calmar_ratio: 6.0,
+            profit_factor: null, profit_loss_ratio: null,
+          },
+        },
+        {
+          rank: 2,
+          params: { buy_low: 100, sell_high: 200, min_profit_amount: 0 },
+          metrics: {
+            total_pnl: 200, total_return_pct: 2, max_drawdown_pct: 0.2, win_rate: 100,
+            sharpe_ratio: 1.55, sortino_ratio: 1.6, calmar_ratio: 5.0,
+            profit_factor: null, profit_loss_ratio: null,
+          },
+        },
+        {
+          rank: 3,
+          params: { buy_low: 110, sell_high: 210, min_profit_amount: 0 },
+          metrics: {
+            total_pnl: 160, total_return_pct: 1.6, max_drawdown_pct: 0.8, win_rate: 100,
+            sharpe_ratio: 1.3, sortino_ratio: 1.4, calmar_ratio: 2.8,
+            profit_factor: null, profit_loss_ratio: null,
+          },
+        },
+        {
+          rank: 4,
+          params: { buy_low: 110, sell_high: 200, min_profit_amount: 0 },
+          metrics: {
+            total_pnl: 90, total_return_pct: 0.9, max_drawdown_pct: 1.3, win_rate: 100,
+            sharpe_ratio: 0.9, sortino_ratio: 1.0, calmar_ratio: 1.2,
+            profit_factor: null, profit_loss_ratio: null,
+          },
+        },
+      ],
+      best: {
+        rank: 1,
+        params: { buy_low: 100, sell_high: 210, min_profit_amount: 0 },
+        metrics: {
+          total_pnl: 220, total_return_pct: 2.2, max_drawdown_pct: 0, win_rate: 100,
+          sharpe_ratio: 1.8, sortino_ratio: 1.9, calmar_ratio: 6.0,
+          profit_factor: null, profit_loss_ratio: null,
+        },
+      },
+      heatmap: {
+        x_axis: 'sell_high',
+        y_axis: 'buy_low',
+        z_metric: 'sharpe_ratio',
+        cells: [
+          { buy_low: 100, sell_high: 200, value: 1.55 },
+          { buy_low: 100, sell_high: 210, value: 1.8 },
+          { buy_low: 110, sell_high: 200, value: 0.9 },
+          { buy_low: 110, sell_high: 210, value: 1.3 },
+        ],
+      },
+      evaluated_count: 4,
+      skipped_count: 0,
+      sort_by: 'sharpe_ratio',
+    },
+  }).as('runBacktestSweep')
+
+  cy.intercept('POST', '/api/backtest/walk-forward', {
+    body: {
+      windows: [
+        {
+          index: 0,
+          start: '2026-05-22T10:00:00Z',
+          end: '2026-05-22T10:09:00Z',
+          train_size: 6,
+          test_size: 4,
+          best_params: { buy_low: 95, sell_high: 200, min_profit_amount: 0 },
+          test_metrics: {
+            initial_cash: 100000, final_equity: 102100, total_pnl: 2100,
+            total_return_pct: 2.1, max_drawdown_pct: 0.5, trade_count: 4,
+            closed_trade_count: 2, winning_trades: 2, losing_trades: 0, win_rate: 100,
+            avg_holding_minutes: 2, fees_paid: 0, skipped_signals: 0, final_state: 'flat',
+            sharpe_ratio: 1.2, sortino_ratio: 1.3, calmar_ratio: 4.2,
+            profit_factor: null, profit_loss_ratio: null,
+          },
+        },
+      ],
+      summary: {
+        window_count: 1, evaluated_window_count: 1,
+        mean_test_return_pct: 2.1, median_test_return_pct: 2.1, mean_test_metric: 1.2,
+        profitable_window_pct: 100, test_return_std_pct: 0,
+      },
+      sort_by: 'sharpe_ratio', train_size: 6, test_size: 4, step: 4,
+    },
+  }).as('runWalkForward')
+
+  cy.intercept('POST', '/api/backtest/stress', {
+    body: {
+      scenarios_run: 20,
+      baseline_return_pct: 2.0,
+      median_return_pct: 1.8,
+      p5_return_pct: -1.2,
+      p95_return_pct: 4.5,
+      worst_return_pct: -3.0,
+      worst_drawdown_pct: 5.0,
+      profitable_scenario_pct: 75,
+      jitter_pct: 2.0,
+      seed: 7,
+      returns: [-3.0, -1.2, 1.8, 2.0, 4.5],
+    },
+  }).as('runStressTest')
+
+  cy.intercept('GET', '/api/backtest/runs', {
+    body: { items: [], total: 0, page: 1, page_size: 50 },
+  }).as('listBacktestRuns')
+
+  cy.intercept('POST', '/api/backtest/runs', (req) => {
+    req.reply({
+      body: {
+        id: 1,
+        name: req.body.name,
+        symbol: 'AAPL.US',
+        params: req.body.params,
+        metrics: req.body.metrics,
+        created_at: '2026-06-16T12:00:00Z',
+      },
+    })
+  }).as('saveBacktestRun')
+
+  cy.intercept('GET', '/api/backtest/runs/compare*', {
+    body: {
+      runs: [
+        { id: 1, name: 'A', symbol: 'AAPL.US', params: { buy_low: 100, sell_high: 200 }, metrics: { total_pnl: 100, total_return_pct: 1, max_drawdown_pct: 0.5, trade_count: 2, win_rate: 100, sharpe_ratio: 1.2 } },
+        { id: 2, name: 'B', symbol: 'AAPL.US', params: { buy_low: 110, sell_high: 200 }, metrics: { total_pnl: 80, total_return_pct: 0.8, max_drawdown_pct: 0.7, trade_count: 2, win_rate: 100, sharpe_ratio: 1.0 } },
+      ],
+    },
+  }).as('compareBacktestRuns')
+
+  cy.intercept('GET', '/api/alert-rules*', {
+    body: { items: [], total: 0 },
+  }).as('listAlertRules')
+
+  cy.intercept('POST', '/api/alert-rules', (req) => {
+    req.reply({
+      body: {
+        id: 1, name: req.body.name, symbol: req.body.symbol || 'AAPL.US',
+        rule_type: req.body.rule_type, threshold: req.body.threshold,
+        severity: req.body.severity || 'WARNING', enabled: true,
+        cooldown_seconds: req.body.cooldown_seconds || 300,
+        last_fired_at: null, created_at: '2026-06-16T12:00:00Z',
+      },
+    })
+  }).as('createAlertRule')
+
+  cy.intercept('POST', '/api/alert-rules/evaluate', {
+    body: { evaluated: 0, fired: 0, skipped_cooldown: 0 },
+  }).as('evaluateAlertRules')
+
+  cy.intercept('GET', '/api/strategy-presets', {
+    body: { items: [], total: 0 },
+  }).as('listStrategyPresets')
+
+  cy.intercept('POST', '/api/strategy-presets', (req) => {
+    req.reply({
+      body: { id: 1, name: req.body.name, params: req.body.params, created_at: '2026-06-16T12:00:00Z' },
+    })
+  }).as('createStrategyPreset')
+
+  cy.intercept('POST', '/api/strategy-presets/*/apply', {
+    body: { applied: true, changed: ['buy_low', 'sell_high'] },
+  }).as('applyStrategyPreset')
 
   cy.intercept('POST', '/api/control/start', (req) => {
     status = { ...status, paused: false, kill_switch: false }

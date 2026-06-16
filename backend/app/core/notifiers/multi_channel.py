@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Optional, Protocol
+from typing import Callable, Optional, Protocol
 
 from app.core.notifiers._messages import (
     render_fill_body,
@@ -34,11 +34,16 @@ class MultiChannelNotifier:
         channels: list[tuple[NotifierInterface, str]],
         *,
         retry_queue: Optional["_RetryQueueProtocol"] = None,
+        sink: Optional[Callable[[str, str, str, bool, str], None]] = None,
     ) -> None:
         self._channels = channels
         # Optional retry queue; when present, failed sends are rescheduled
         # with exponential backoff. See retry_queue.NotificationRetryQueue.
         self._retry_queue = retry_queue
+        # Optional dispatch-log sink: (title, content, severity, success, error).
+        # The runner attaches a NotificationLogSink so every notification is
+        # auditable. Best-effort — the sink itself swallows errors.
+        self._sink = sink
 
     @property
     def sct_key(self) -> str:
@@ -63,6 +68,11 @@ class MultiChannelNotifier:
             except Exception as exc:
                 last_error = f"{type(notifier).__name__}: {exc}"
                 logger.warning("notifier %s send raised: %s", type(notifier).__name__, exc)
+        if self._sink is not None:
+            try:
+                self._sink(title, content, severity, success_any, last_error)
+            except Exception:
+                logger.debug("notification sink raised", exc_info=True)
         if not success_any:
             logger.warning("all notifier channels failed: title=%s severity=%s", title, severity)
             if self._retry_queue is not None:
@@ -106,6 +116,7 @@ class MultiChannelNotifier:
         cred,
         *,
         retry_queue: Optional["_RetryQueueProtocol"] = None,
+        sink: Optional[Callable[[str, str, str, bool, str], None]] = None,
     ) -> "MultiChannelNotifier":
         from app.core.notifiers.serverchan import ServerChanNotifier
         from app.core.notifiers.webhook import WebhookNotifier
@@ -114,10 +125,10 @@ class MultiChannelNotifier:
             raw = json.loads(cred.notification_channels or "[]")
         except Exception as exc:
             logger.warning("notification_channels invalid JSON, falling back: %s", exc)
-            return cls([(ServerChanNotifier(cred.sct_key or ""), "INFO")], retry_queue=retry_queue)
+            return cls([(ServerChanNotifier(cred.sct_key or ""), "INFO")], retry_queue=retry_queue, sink=sink)
         if not isinstance(raw, list):
             logger.warning("notification_channels must be a JSON array, falling back")
-            return cls([(ServerChanNotifier(cred.sct_key or ""), "INFO")], retry_queue=retry_queue)
+            return cls([(ServerChanNotifier(cred.sct_key or ""), "INFO")], retry_queue=retry_queue, sink=sink)
         built: list[tuple[NotifierInterface, str]] = []
         for channel in raw:
             if not isinstance(channel, dict):
@@ -137,7 +148,7 @@ class MultiChannelNotifier:
                     built.append((WebhookNotifier(url, template=template), floor))
         if not built:
             built = [(ServerChanNotifier(cred.sct_key or ""), "INFO")]
-        return cls(built, retry_queue=retry_queue)
+        return cls(built, retry_queue=retry_queue, sink=sink)
 
 
 # Module-level (not nested inside MultiChannelNotifier) protocol declared

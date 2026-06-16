@@ -1,0 +1,290 @@
+<template>
+  <div class="alerts-page">
+    <div class="alerts-header">
+      <h3>告警规则</h3>
+      <div class="alerts-actions">
+        <el-button :loading="loading" @click="loadRules">刷新</el-button>
+        <el-button type="primary" plain :loading="evaluating" data-testid="alert-evaluate" @click="evaluate">立即评估</el-button>
+        <el-button type="primary" data-testid="alert-create" @click="openCreate">新建规则</el-button>
+      </div>
+    </div>
+
+    <p v-if="evalResult" class="eval-note">
+      已评估 {{ evalResult.evaluated }} 条，触发 {{ evalResult.fired }} 条（{{ evalResult.skipped_cooldown }} 条冷却中跳过）。
+    </p>
+    <p class="hint">
+      后台每 60 秒评估一次启用规则：价格类用实时行情，日内亏损类读 <code>runtime_state.daily_pnl</code>；触发后按冷却时间节流，经已配置通知渠道推送。
+    </p>
+
+    <el-table :data="rules" size="small" class="responsive-table" v-loading="loading">
+      <el-table-column prop="name" label="名称" min-width="120" />
+      <el-table-column prop="symbol" label="标的" min-width="90" />
+      <el-table-column label="条件" min-width="130">
+        <template #default="{ row }">{{ ruleTypeLabel(row.rule_type) }} {{ row.threshold }}</template>
+      </el-table-column>
+      <el-table-column label="严重度" min-width="90">
+        <template #default="{ row }">
+          <el-tag size="small" :type="severityType(row.severity)">{{ row.severity }}</el-tag>
+        </template>
+      </el-table-column>
+      <el-table-column label="启用" min-width="70">
+        <template #default="{ row }">
+          <el-switch :model-value="row.enabled" @change="(v: boolean | string | number) => toggleEnabled(row, v)" />
+        </template>
+      </el-table-column>
+      <el-table-column label="冷却(秒)" min-width="80">
+        <template #default="{ row }">{{ row.cooldown_seconds }}</template>
+      </el-table-column>
+      <el-table-column label="上次触发" min-width="140">
+        <template #default="{ row }">{{ row.last_fired_at ? formatDateTime(row.last_fired_at) : '—' }}</template>
+      </el-table-column>
+      <el-table-column label="" width="120">
+        <template #default="{ row }">
+          <el-button link size="small" @click="openEdit(row)">编辑</el-button>
+          <el-button link type="danger" size="small" @click="remove(row.id)">删除</el-button>
+        </template>
+      </el-table-column>
+    </el-table>
+
+    <el-dialog v-model="dialog.visible" :title="dialog.id ? '编辑规则' : '新建规则'" width="480px" data-testid="alert-dialog">
+      <el-form label-width="90px">
+        <el-form-item label="名称">
+          <el-input v-model="dialog.name" data-testid="alert-name" />
+        </el-form-item>
+        <el-form-item label="标的">
+          <el-input v-model="dialog.symbol" placeholder="AAPL.US" />
+        </el-form-item>
+        <el-form-item label="类型">
+          <el-select v-model="dialog.rule_type" data-testid="alert-rule-type" style="width: 100%">
+            <el-option label="价格上穿 ≥" value="price_above" />
+            <el-option label="价格下穿 ≤" value="price_below" />
+            <el-option label="日内亏损 ≤" value="daily_loss" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="阈值">
+          <el-input-number v-model="dialog.threshold" :precision="2" :step="1" />
+        </el-form-item>
+        <el-form-item label="严重度">
+          <el-select v-model="dialog.severity" style="width: 100%">
+            <el-option label="INFO" value="INFO" />
+            <el-option label="WARNING" value="WARNING" />
+            <el-option label="CRITICAL" value="CRITICAL" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="冷却(秒)">
+          <el-input-number v-model="dialog.cooldown_seconds" :min="0" :max="86400" :step="60" />
+        </el-form-item>
+        <el-form-item label="启用">
+          <el-switch v-model="dialog.enabled" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="dialog.visible = false">取消</el-button>
+        <el-button type="primary" :loading="dialog.saving" data-testid="alert-save" @click="save">保存</el-button>
+      </template>
+    </el-dialog>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { onMounted, reactive, ref } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import {
+  listAlertRules,
+  createAlertRule,
+  updateAlertRule,
+  deleteAlertRule,
+  evaluateAlertRules,
+} from '../api'
+import type { AlertRule, AlertRuleCreate, AlertEvaluateResult, AlertRuleType, AlertSeverity } from '../types'
+import { resolveErrorMessage } from '../utils/error'
+
+const rules = ref<AlertRule[]>([])
+const loading = ref(false)
+const evaluating = ref(false)
+const evalResult = ref<AlertEvaluateResult | null>(null)
+
+const dialog = reactive({
+  visible: false,
+  saving: false,
+  id: 0,
+  name: '',
+  symbol: '',
+  rule_type: 'price_above' as AlertRuleType,
+  threshold: 150,
+  severity: 'WARNING' as AlertSeverity,
+  enabled: true,
+  cooldown_seconds: 300,
+})
+
+async function loadRules() {
+  loading.value = true
+  try {
+    rules.value = (await listAlertRules()).items
+  } catch (e) {
+    ElMessage.error(resolveErrorMessage(e, '加载失败'))
+  } finally {
+    loading.value = false
+  }
+}
+
+function ruleTypeLabel(t: string): string {
+  if (t === 'price_above') return '价格上穿 ≥'
+  if (t === 'price_below') return '价格下穿 ≤'
+  if (t === 'daily_loss') return '日内亏损 ≤'
+  return t
+}
+
+function severityType(s: string): string {
+  if (s === 'CRITICAL') return 'danger'
+  if (s === 'WARNING') return 'warning'
+  return 'info'
+}
+
+function formatDateTime(v: string): string {
+  return new Date(v).toLocaleString([], { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+}
+
+function openCreate() {
+  Object.assign(dialog, {
+    visible: true, saving: false, id: 0, name: '', symbol: '',
+    rule_type: 'price_above', threshold: 150, severity: 'WARNING', enabled: true, cooldown_seconds: 300,
+  })
+}
+
+function openEdit(row: AlertRule) {
+  Object.assign(dialog, {
+    visible: true, saving: false, id: row.id, name: row.name, symbol: row.symbol,
+    rule_type: row.rule_type, threshold: row.threshold, severity: row.severity,
+    enabled: row.enabled, cooldown_seconds: row.cooldown_seconds,
+  })
+}
+
+function payload(): AlertRuleCreate {
+  return {
+    name: dialog.name.trim(),
+    symbol: dialog.symbol.trim().toUpperCase(),
+    rule_type: dialog.rule_type,
+    threshold: dialog.threshold,
+    severity: dialog.severity,
+    enabled: dialog.enabled,
+    cooldown_seconds: dialog.cooldown_seconds,
+  }
+}
+
+async function save() {
+  if (!dialog.name.trim()) {
+    ElMessage.warning('请填写名称')
+    return
+  }
+  dialog.saving = true
+  try {
+    if (dialog.id) {
+      await updateAlertRule(dialog.id, payload())
+    } else {
+      await createAlertRule(payload())
+    }
+    dialog.visible = false
+    await loadRules()
+    ElMessage.success('已保存')
+  } catch (e) {
+    ElMessage.error(resolveErrorMessage(e, '保存失败'))
+  } finally {
+    dialog.saving = false
+  }
+}
+
+async function remove(id: number) {
+  try {
+    await ElMessageBox.confirm('删除该告警规则？', '确认', { type: 'warning' })
+  } catch {
+    return
+  }
+  try {
+    await deleteAlertRule(id)
+    await loadRules()
+  } catch {
+    ElMessage.error('删除失败')
+  }
+}
+
+async function toggleEnabled(row: AlertRule, value: boolean | string | number) {
+  try {
+    await updateAlertRule(row.id, { ...row, enabled: !!value })
+    await loadRules()
+  } catch {
+    ElMessage.error('更新失败')
+  }
+}
+
+async function evaluate() {
+  evaluating.value = true
+  try {
+    evalResult.value = await evaluateAlertRules()
+    ElMessage.success('评估完成')
+  } catch (e) {
+    ElMessage.error(resolveErrorMessage(e, '评估失败'))
+  } finally {
+    evaluating.value = false
+  }
+}
+
+onMounted(loadRules)
+</script>
+
+<style scoped>
+.alerts-page {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  background: #fff;
+  min-height: calc(100vh - 120px);
+}
+
+.alerts-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.alerts-header h3 {
+  margin: 0;
+}
+
+.alerts-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.responsive-table {
+  width: 100%;
+}
+
+.eval-note {
+  margin: 0;
+  color: #6b7280;
+  font-size: 13px;
+}
+
+.hint {
+  margin: 0;
+  color: #909399;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.hint code {
+  background: #f1f3f5;
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
+@media (max-width: 640px) {
+  .alerts-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}
+</style>

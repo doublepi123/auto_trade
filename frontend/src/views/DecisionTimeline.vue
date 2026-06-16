@@ -10,6 +10,8 @@
           <el-radio-button value="all">全部</el-radio-button>
           <el-radio-button value="trade">交易</el-radio-button>
           <el-radio-button value="audit">审计</el-radio-button>
+          <el-radio-button value="llm">LLM</el-radio-button>
+          <el-radio-button value="risk">风控</el-radio-button>
         </el-radio-group>
         <el-select
           v-model="selectedEventTypes"
@@ -118,8 +120,8 @@
     >
       <el-table-column label="类型" width="72">
         <template #default="{ row }">
-          <el-tag :type="row.source === 'audit' ? 'info' : 'primary'" effect="plain" size="small">
-            {{ row.source === 'audit' ? '审计' : '交易' }}
+          <el-tag :type="sourceTagType(row.source)" effect="plain" size="small">
+            {{ sourceLabel(row.source) }}
           </el-tag>
         </template>
       </el-table-column>
@@ -170,7 +172,28 @@
       <el-table-column prop="created_at" label="时间" min-width="190">
         <template #default="{ row }">{{ formatDateTime(row.created_at) }}</template>
       </el-table-column>
+      <el-table-column label="操作" width="84">
+        <template #default="{ row }">
+          <el-button v-if="row.source === 'llm'" link size="small" data-testid="llm-detail-button" @click="openLLMDetail(row.id)">详情</el-button>
+          <span v-else>-</span>
+        </template>
+      </el-table-column>
     </el-table>
+
+    <el-dialog v-model="llmDetail.visible" :title="`LLM 详情 #${llmDetail.id}`" width="720px" data-testid="llm-detail-dialog">
+      <div v-if="llmDetail.loading" v-loading="true" style="min-height: 120px" />
+      <template v-else-if="llmDetail.data">
+        <p class="llm-meta">
+          标的 {{ llmDetail.data.symbol }} · {{ llmDetail.data.interaction_type }} · {{ llmDetail.data.order_action }}
+          <el-tag size="small" :type="llmDetail.data.success ? 'success' : 'danger'">{{ llmDetail.data.success ? '成功' : '失败' }}</el-tag>
+          <el-tag v-if="llmDetail.data.applied" size="small" type="info" style="margin-left: 4px">已应用</el-tag>
+        </p>
+        <details open><summary>Prompt</summary><pre class="llm-pre">{{ llmDetail.data.prompt }}</pre></details>
+        <details><summary>原始响应</summary><pre class="llm-pre">{{ llmDetail.data.raw_response }}</pre></details>
+        <details><summary>解析结果</summary><pre class="llm-pre">{{ JSON.stringify(llmDetail.data.parsed_response, null, 2) }}</pre></details>
+        <details><summary>上下文快照</summary><pre class="llm-pre">{{ JSON.stringify(llmDetail.data.context_snapshot, null, 2) }}</pre></details>
+      </template>
+    </el-dialog>
 
     <div class="timeline-footer">
       <el-pagination
@@ -188,10 +211,10 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { exportTradeEvents, getTradeEvents } from '../api'
-import type { TimelineSource, TradeEventRecord } from '../types'
+import { exportTradeEvents, getTradeEvents, getLLMInteraction } from '../api'
+import type { TimelineSource, TradeEventRecord, LLMInteractionDetail } from '../types'
 import { auditActionLabel, orderSideLabel, skipCategoryLabel, tradeEventTypeLabel } from '../utils/labels'
 import { EVENT_TYPE } from '../utils/constants'
 
@@ -205,6 +228,46 @@ const page = ref(1)
 const pageSize = ref(20)
 const selectedSkipCategory = ref('')
 const sourceFilter = ref<TimelineSource>('all')
+
+function sourceLabel(source: string): string {
+  switch (source) {
+    case 'audit': return '审计'
+    case 'llm': return 'LLM'
+    case 'risk': return '风控'
+    default: return '交易'
+  }
+}
+
+function sourceTagType(source: string): string {
+  switch (source) {
+    case 'audit': return 'info'
+    case 'llm': return 'success'
+    case 'risk': return 'warning'
+    default: return 'primary'
+  }
+}
+
+// ---- LLM interaction detail dialog ----
+const llmDetail = reactive({
+  visible: false,
+  id: 0,
+  loading: false,
+  data: null as LLMInteractionDetail | null,
+})
+
+async function openLLMDetail(id: number) {
+  llmDetail.id = id
+  llmDetail.visible = true
+  llmDetail.loading = true
+  llmDetail.data = null
+  try {
+    llmDetail.data = await getLLMInteraction(id)
+  } catch {
+    ElMessage.error('加载 LLM 详情失败')
+  } finally {
+    llmDetail.loading = false
+  }
+}
 const selectedEventTypes = ref<string[]>([])
 const searchTerm = ref('')
 const tableRefreshKey = ref(0)
@@ -580,5 +643,25 @@ function formatDateTime(value: string): string {
   .timeline-actions :deep(.el-select) {
     width: 140px !important;
   }
+}
+
+.llm-meta {
+  margin: 0 0 10px;
+  color: #4b5563;
+  font-size: 13px;
+}
+
+.llm-pre {
+  max-height: 280px;
+  overflow: auto;
+  margin: 6px 0 12px;
+  padding: 10px;
+  background: #f8fafc;
+  border: 1px solid #e1e7f0;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 </style>

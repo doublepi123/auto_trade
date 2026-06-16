@@ -7,13 +7,13 @@ from typing import Any, Literal
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.models import AuditLog, TradeEvent
+from app.models import AuditLog, LLMInteraction, RiskEvent, TradeEvent
 from app.schemas import TimelineEventResponse
 from app.services.trade_event_service import decode_event_payload
 
 
 
-SourceFilter = Literal["trade", "audit", "all"]
+SourceFilter = Literal["trade", "audit", "llm", "risk", "all"]
 
 
 def _audit_payload(request_summary: str) -> dict[str, Any]:
@@ -76,6 +76,49 @@ def _audit_row_to_out(row: AuditLog) -> TimelineEventResponse:
         source_ip=row.source_ip,
         severity=row.severity,
         result=row.result,
+    )
+
+
+def _llm_row_to_out(row: LLMInteraction) -> TimelineEventResponse:
+    action = row.order_action or "NONE"
+    message = row.error[:200] if (not row.success and row.error) else f"LLM {row.interaction_type} · {row.symbol} · {action}"
+    return TimelineEventResponse(
+        source="llm",
+        id=row.id,
+        event_type=row.interaction_type or "analyze",
+        symbol=row.symbol or "",
+        broker_order_id=row.order_id or "",
+        side=action,
+        status="SUCCESS" if row.success else "FAILED",
+        message=message,
+        payload={
+            "success": bool(row.success),
+            "applied": bool(row.applied),
+            "order_action": action,
+            "order_status": row.order_status,
+            "error": row.error or "",
+            "prompt_variant": row.prompt_variant,
+        },
+        created_at=row.created_at,
+        severity="INFO" if row.success else "WARNING",
+        result=("APPLIED" if row.applied else "VIEWED"),
+    )
+
+
+def _risk_row_to_out(row: RiskEvent) -> TimelineEventResponse:
+    return TimelineEventResponse(
+        source="risk",
+        id=row.id,
+        event_type=row.event_type,
+        symbol="",
+        broker_order_id="",
+        side="",
+        status="",
+        message=(row.reason[:200] if row.reason else row.event_type),
+        payload={"reason": row.reason or ""},
+        created_at=row.created_at,
+        severity="WARNING",
+        result=None,
     )
 
 
@@ -157,6 +200,37 @@ def list_timeline_events(
         rows = _paginate_query(aq.order_by(AuditLog.created_at.desc(), AuditLog.id.desc()), page, page_size)
         return [_audit_row_to_out(r) for r in rows], total
 
+    if source == "llm":
+        lq = db.query(LLMInteraction)
+        if symbol:
+            lq = lq.filter(LLMInteraction.symbol == symbol)
+        if et:
+            lq = lq.filter(LLMInteraction.interaction_type.in_(et))
+        if query_term:
+            lq = lq.filter(
+                (LLMInteraction.symbol.ilike(like))
+                | (LLMInteraction.interaction_type.ilike(like))
+                | (LLMInteraction.error.ilike(like))
+            )
+        total = lq.count()
+        rows = _paginate_query(lq.order_by(LLMInteraction.created_at.desc(), LLMInteraction.id.desc()), page, page_size)
+        return [_llm_row_to_out(r) for r in rows], total
+
+    if source == "risk":
+        rq = db.query(RiskEvent)
+        if et:
+            rq = rq.filter(RiskEvent.event_type.in_(et))
+        if symbol:
+            rq = rq.filter(RiskEvent.reason.contains(symbol))
+        if query_term:
+            rq = rq.filter(
+                (RiskEvent.event_type.ilike(like))
+                | (RiskEvent.reason.ilike(like))
+            )
+        total = rq.count()
+        rows = _paginate_query(rq.order_by(RiskEvent.created_at.desc(), RiskEvent.id.desc()), page, page_size)
+        return [_risk_row_to_out(r) for r in rows], total
+
     # source == "all": merge with capped fetch to avoid O(n²) deep pagination
     trade_total = 0
     audit_total = 0
@@ -180,8 +254,12 @@ def list_timeline_events(
     trade_total = tq.count()
     trade_rows = tq.order_by(TradeEvent.created_at.desc(), TradeEvent.id.desc()).limit(fetch_n).all()
 
+    llm_total = 0
+    risk_total = 0
+    llm_rows: list[LLMInteraction] = []
+    risk_rows: list[RiskEvent] = []
     if skip_category:
-        # Audit has no skip_category — skip audit query entirely
+        # skip_category is trade-specific — skip the other sources entirely
         audit_total = 0
         audit_rows = []
     else:
@@ -198,11 +276,43 @@ def list_timeline_events(
         audit_total = aq.count()
         audit_rows = aq.order_by(AuditLog.created_at.desc(), AuditLog.id.desc()).limit(fetch_n).all()
 
-    total = trade_total + audit_total
+        lq = db.query(LLMInteraction)
+        if symbol:
+            lq = lq.filter(LLMInteraction.symbol == symbol)
+        if et:
+            lq = lq.filter(LLMInteraction.interaction_type.in_(et))
+        if query_term:
+            lq = lq.filter(
+                (LLMInteraction.symbol.ilike(like))
+                | (LLMInteraction.interaction_type.ilike(like))
+                | (LLMInteraction.error.ilike(like))
+            )
+        llm_total = lq.count()
+        llm_rows = lq.order_by(LLMInteraction.created_at.desc(), LLMInteraction.id.desc()).limit(fetch_n).all()
+
+        rq = db.query(RiskEvent)
+        if et:
+            rq = rq.filter(RiskEvent.event_type.in_(et))
+        if symbol:
+            rq = rq.filter(RiskEvent.reason.contains(symbol))
+        if query_term:
+            rq = rq.filter(
+                (RiskEvent.event_type.ilike(like))
+                | (RiskEvent.reason.ilike(like))
+            )
+        risk_total = rq.count()
+        risk_rows = rq.order_by(RiskEvent.created_at.desc(), RiskEvent.id.desc()).limit(fetch_n).all()
+
+    total = trade_total + audit_total + llm_total + risk_total
     # Clamp total to what the merged set can actually deliver
     total = min(total, _MAX_MERGED_FETCH)
 
-    merged = [_trade_row_to_out(r) for r in trade_rows] + [_audit_row_to_out(r) for r in audit_rows]
+    merged = (
+        [_trade_row_to_out(r) for r in trade_rows]
+        + [_audit_row_to_out(r) for r in audit_rows]
+        + [_llm_row_to_out(r) for r in llm_rows]
+        + [_risk_row_to_out(r) for r in risk_rows]
+    )
     merged.sort(key=_sort_key)
 
 

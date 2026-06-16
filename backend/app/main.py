@@ -14,6 +14,14 @@ from fastapi.responses import JSONResponse
 
 from app.api.backtest import router as backtest_router
 from app.api.calendar import router as calendar_router
+from app.api.trade_notes import router as trade_notes_router
+from app.api.positions import router as positions_router
+from app.api.alert_rules import router as alert_rules_router
+from app.api.strategy_presets import router as strategy_presets_router
+from app.api.risk import router as risk_router
+from app.api.broker import router as broker_router
+from app.api.llm_interactions import router as llm_interactions_router
+from app.api.notifications import router as notifications_router
 from app.api.credentials import router as credentials_router
 from app.api.experiments import router as experiments_router
 from app.api.metrics import router as metrics_router
@@ -43,6 +51,8 @@ _last_llm_trigger_price_by_symbol: dict[str, float] = {}
 _llm_last_analysis_at_by_symbol: dict[str, datetime] = {}
 _llm_analysis_timestamps: list[float] = []
 _llm_analysis_lock = asyncio.Lock()
+_report_schedule_lock = asyncio.Lock()
+_alert_rules_lock = asyncio.Lock()
 _llm_globals_lock = threading.Lock()
 
 
@@ -443,6 +453,51 @@ async def _llm_analysis_cron() -> None:
                 logger.exception("LLM analysis cron failed")
 
 
+async def _report_schedule_cron() -> None:
+    """Periodically push a scheduled performance report (if enabled in config).
+
+    Mirrors the LLM cron pattern: off-thread work, never crashes the loop.
+    Read-only analysis + notification dispatch; no order path.
+    """
+    from app.database import SessionLocal
+    from app.services.report_schedule_service import ReportScheduleService
+
+    while True:
+        await asyncio.sleep(300)
+        async with _report_schedule_lock:
+            try:
+                runner = get_runner()
+                db = SessionLocal()
+                try:
+                    ReportScheduleService(db).maybe_send(runner)
+                finally:
+                    db.close()
+            except Exception:
+                logger.exception("report schedule cron failed")
+
+
+async def _alert_rules_cron() -> None:
+    """Periodically evaluate user-defined alert rules (if any enabled).
+
+    Read-only evaluation + notification dispatch; never touches the order path.
+    """
+    from app.database import SessionLocal
+    from app.services.alert_rule_service import AlertRuleService
+
+    while True:
+        await asyncio.sleep(60)
+        async with _alert_rules_lock:
+            try:
+                runner = get_runner()
+                db = SessionLocal()
+                try:
+                    AlertRuleService(db).evaluate(runner)
+                finally:
+                    db.close()
+            except Exception:
+                logger.exception("alert rules cron failed")
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     from app.api.deps import init_audit_logger
@@ -459,10 +514,14 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         logger.warning("runner failed to start during app lifespan — trading engine is not running")
     cleanup_task = asyncio.create_task(_ws_cleanup_task())
     llm_task = asyncio.create_task(_llm_analysis_cron())
+    report_task = asyncio.create_task(_report_schedule_cron())
+    alert_task = asyncio.create_task(_alert_rules_cron())
     yield
     cleanup_task.cancel()
     llm_task.cancel()
-    for task in (cleanup_task, llm_task):
+    report_task.cancel()
+    alert_task.cancel()
+    for task in (cleanup_task, llm_task, report_task, alert_task):
         try:
             await task
         except asyncio.CancelledError:
@@ -511,6 +570,14 @@ app.include_router(trade_router)
 app.include_router(watchlist_router)
 app.include_router(llm_advisor_router)
 app.include_router(backtest_router)
+app.include_router(trade_notes_router)
+app.include_router(positions_router)
+app.include_router(alert_rules_router)
+app.include_router(strategy_presets_router)
+app.include_router(risk_router)
+app.include_router(broker_router)
+app.include_router(llm_interactions_router)
+app.include_router(notifications_router)
 app.include_router(experiments_router)
 app.include_router(performance_router)
 app.include_router(reports_router)

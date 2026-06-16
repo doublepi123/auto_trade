@@ -106,6 +106,33 @@ def is_trading_hours(market: str, instant: datetime | None = None) -> bool:
     return session.is_rth(instant or datetime.now(timezone.utc))
 
 
+def session_status(market: str, instant: datetime | None = None) -> str:
+    """Granular session phase: ``rth`` / ``pre`` / ``post`` / ``lunch`` / ``closed``.
+
+    ``closed`` covers weekends, holidays, and anything outside a trading day's
+    pre/RTH/post windows. ``lunch`` is the mid-day break inside RTH (HK only).
+    """
+    session = get_session(market)
+    now = _ensure_utc(instant or datetime.now(timezone.utc))
+    local = session.local(now)
+    if local.weekday() >= 5 or is_market_closed(session.code, local.date()):
+        return "closed"
+    if session.is_rth(now):
+        return "rth"
+    current = local.time()
+    if (
+        session.lunch_start is not None
+        and session.lunch_end is not None
+        and session.lunch_start <= current < session.lunch_end
+    ):
+        return "lunch"
+    if current < session.rth_open:
+        return "pre"
+    if current >= session.rth_close:
+        return "post"
+    return "closed"
+
+
 def market_for_symbol(symbol: str) -> str:
     """Infer market code from a broker symbol suffix."""
     upper = (symbol or "").upper()
