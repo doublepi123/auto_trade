@@ -80,7 +80,10 @@ class BacktestRunService:
         try:
             params = BacktestParams.model_validate_json(run.params_json)
         except Exception:
-            params = BacktestParams(buy_low=0, sell_high=0)  # noqa: TRY002 — defensive
+            # Graceful degradation for corrupt/legacy rows. Must use values that
+            # satisfy BacktestParams' gt=0 constraints (buy_low/sell_high) or the
+            # fallback itself raises — defeating the purpose.
+            params = BacktestParams(buy_low=1.0, sell_high=2.0)
         try:
             metrics = BacktestMetrics.model_validate_json(run.metrics_json)
         except Exception:

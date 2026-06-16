@@ -391,9 +391,11 @@ class NotificationLog(Base):
 class AlertRule(Base):
     """User-defined alert rule evaluated by a background cron.
 
-    ``rule_type`` ∈ {price_above, price_below, daily_loss_pct}. Price rules
-    use live quotes; daily_loss_pct reads the active runtime_state. A per-rule
-    ``cooldown_seconds`` (vs ``last_fired_at``) prevents spam.
+    ``rule_type`` ∈ {price_above, price_below, daily_loss}. Price rules
+    use live quotes; ``daily_loss`` fires when the active runtime_state's
+    ``daily_pnl`` <= ``threshold`` (threshold is signed P&L, typically
+    negative, e.g. -500 = "down 500"). A per-rule ``cooldown_seconds``
+    (vs ``last_fired_at``) prevents spam.
     """
 
     __tablename__ = "alert_rules"

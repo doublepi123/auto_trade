@@ -94,23 +94,30 @@ class AlertRuleService:
         fired = 0
         skipped_cooldown = 0
         for rule in rules:
-            if not _eligible(rule, now):
-                skipped_cooldown += 1
+            # Isolate each rule: one bad rule (DB error, unexpected value) must
+            # not abort the whole tick or drop earlier rules' last_fired_at
+            # updates. The trailing commit still runs so successful rules persist.
+            try:
+                if not _eligible(rule, now):
+                    skipped_cooldown += 1
+                    continue
+                value = self._current_value(rule, quote_map)
+                if value is None:
+                    continue  # data unavailable (no quote / no state) — skip silently
+                triggered, message = _check(rule, value)
+                if triggered and notifier is not None:
+                    title = f"告警 · {rule.name}"
+                    try:
+                        ok = bool(notifier.send(title, message, severity=rule.severity or "WARNING"))
+                    except Exception:
+                        logger.exception("alert rule %s notification failed", rule.id)
+                        ok = False
+                    if ok:
+                        rule.last_fired_at = now
+                        fired += 1
+            except Exception:
+                logger.exception("alert rule %s evaluation failed; skipping", rule.id)
                 continue
-            value = self._current_value(rule, quote_map)
-            if value is None:
-                continue  # data unavailable (no quote / no state) — skip silently
-            triggered, message = _check(rule, value)
-            if triggered and notifier is not None:
-                title = f"告警 · {rule.name}"
-                try:
-                    ok = bool(notifier.send(title, message, severity=rule.severity or "WARNING"))
-                except Exception:
-                    logger.exception("alert rule %s notification failed", rule.id)
-                    ok = False
-                if ok:
-                    rule.last_fired_at = now
-                    fired += 1
         self._db.commit()
         return AlertEvaluateResult(evaluated=len(rules), fired=fired, skipped_cooldown=skipped_cooldown)
 
@@ -162,6 +169,10 @@ def _fetch_quotes(quote_provider: Any, symbols: list[str]) -> dict[str, float]:
     try:
         quotes = quote_provider.get_quotes(symbols)
     except Exception:
+        # A persistent broker outage is indistinguishable from "no rules
+        # triggered" unless we log it — surface it so operators notice price
+        # alerts stopped working.
+        logger.warning("alert-rule quote fetch failed for %d symbols", len(symbols), exc_info=True)
         return {}
     out: dict[str, float] = {}
     for q in quotes:

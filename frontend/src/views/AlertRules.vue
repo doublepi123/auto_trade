@@ -209,8 +209,19 @@ async function remove(id: number) {
 }
 
 async function toggleEnabled(row: AlertRule, value: boolean | string | number) {
+  // Build a clean AlertRuleCreate payload — the backend schema is
+  // extra="forbid", so spreading the whole row (incl. id/last_fired_at/
+  // created_at) would 422. Only the 7 updatable fields are accepted.
   try {
-    await updateAlertRule(row.id, { ...row, enabled: !!value })
+    await updateAlertRule(row.id, {
+      name: row.name,
+      symbol: row.symbol,
+      rule_type: row.rule_type,
+      threshold: row.threshold,
+      severity: row.severity,
+      enabled: !!value,
+      cooldown_seconds: row.cooldown_seconds,
+    })
     await loadRules()
   } catch {
     ElMessage.error('更新失败')

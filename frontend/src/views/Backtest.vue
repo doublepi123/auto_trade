@@ -907,6 +907,16 @@ function findHeatmapCell(buyLow: number, sellHigh: number): BacktestSweepHeatmap
   return sweepResult.value?.heatmap.cells.find(c => c.buy_low === buyLow && c.sell_high === sellHigh)
 }
 
+// Precompute the min/max once per sweep result so heatmapCellStyle is O(1) per
+// cell instead of re-scanning every cell (O(n^2) over the whole grid).
+const heatmapRange = computed(() => {
+  const values = (sweepResult.value?.heatmap.cells ?? [])
+    .map(c => c.value)
+    .filter((v): v is number => v !== null)
+  if (!values.length) return null
+  return { min: Math.min(...values), max: Math.max(...values) }
+})
+
 function formatHeatmapCell(buyLow: number, sellHigh: number): string {
   const cell = findHeatmapCell(buyLow, sellHigh)
   if (!cell || cell.value === null) return '—'
@@ -915,13 +925,9 @@ function formatHeatmapCell(buyLow: number, sellHigh: number): string {
 
 function heatmapCellStyle(buyLow: number, sellHigh: number): CSSProperties {
   const cell = findHeatmapCell(buyLow, sellHigh)
-  const values = sweepResult.value?.heatmap.cells
-    .map(c => c.value)
-    .filter((v): v is number => v !== null) ?? []
-  if (!cell || cell.value === null || values.length === 0) return {}
-  const min = Math.min(...values)
-  const max = Math.max(...values)
-  const t = max === min ? 0.5 : (cell.value - min) / (max - min)
+  const range = heatmapRange.value
+  if (!cell || cell.value === null || range === null) return {}
+  const t = range.max === range.min ? 0.5 : (cell.value - range.min) / (range.max - range.min)
   const hue = Math.round(t * 120) // red (0, low) -> green (120, high)
   return { backgroundColor: `hsl(${hue}, 65%, 88%)` }
 }

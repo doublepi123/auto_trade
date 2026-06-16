@@ -780,6 +780,13 @@ class BacktestRunSaveRequest(BaseModel):
     params: BacktestParams
     metrics: BacktestMetrics
 
+    @field_validator("name")
+    @classmethod
+    def _non_blank_name(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("name must not be blank")
+        return v
+
 
 class BacktestRunOut(BaseModel):
     id: int

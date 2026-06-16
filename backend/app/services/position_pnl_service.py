@@ -39,9 +39,10 @@ class PositionPnlService:
         available = True
         quote_map = self._fetch_quotes(symbols)
         if symbols and not quote_map:
-            # Quotes unavailable (broker down / SDK missing) — still show
-            # cost basis; mark unavailable so the UI can say so.
-            available = self._quote_provider is None
+            # Quotes unavailable (broker down / not configured / SDK missing).
+            # Any of those means unrealized PnL can't be computed live — mark
+            # unavailable so the UI distinguishes "no quote" from a genuine 0.
+            available = False
 
         rows: list[PositionPnlRow] = []
         for entry in sorted(entries, key=lambda e: e.symbol):
@@ -68,7 +69,7 @@ class PositionPnlService:
             total_unrealized_pnl=total_unrealized,
             total_cost_basis=total_cost,
             total_unrealized_pnl_pct=(
-                (total_unrealized / total_cost * 100) if total_cost > 0 and total_unrealized != 0 else None
+                (total_unrealized / total_cost * 100) if total_cost > 0 else None
             ),
             available=available,
             error=None if available else "live quotes unavailable; showing cost basis only",

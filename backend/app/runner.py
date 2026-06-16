@@ -91,7 +91,10 @@ class AppRunner:
         self.engine = StrategyEngine()
         self._symbol_runtimes: dict[str, SymbolRuntime] = {}
         self.risk = RiskController(trade_day_provider=self._market_trade_day)
-        self.notifier = MultiChannelNotifier([(ServerChanNotifier(""), "INFO")])
+        self.notifier = MultiChannelNotifier(
+            [(ServerChanNotifier(""), "INFO")],
+            sink=get_notification_sink().record,
+        )
         self._trade_svc = TradeExecutionService(
             record_order=self._record_order,
             update_order_status=self._update_order_status,
