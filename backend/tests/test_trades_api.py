@@ -236,3 +236,62 @@ class TestTradesStatsAPI(_Base):
         data = self.client.get("/api/trades/stats", params={"days": 30}).json()
         assert data["total_trades"] == 1  # only today's trade within 30 days
 
+
+class TestTradesAnalyticsAPI(_Base):
+    def _seed_trips(self) -> None:
+        db = self._db()
+        db.add_all([
+            self._order("b1", "AAPL.US", "BUY", 10, 100, date(2026, 1, 5), 9),
+            self._order("s1", "AAPL.US", "SELL", 10, 110, date(2026, 1, 5), 10),
+            self._order("b2", "AAPL.US", "BUY", 10, 100, date(2026, 1, 7), 9),
+            self._order("s2", "AAPL.US", "SELL", 10, 95, date(2026, 1, 7), 10),
+            self._order("b3", "MSFT.US", "BUY", 10, 20, date(2026, 2, 2), 9),
+            self._order("s3", "MSFT.US", "SELL", 10, 25, date(2026, 2, 2), 11),
+        ])
+        db.commit()
+        db.close()
+
+    def test_calendar_endpoint_returns_daily_rows(self) -> None:
+        self._seed_trips()
+
+        resp = self.client.get("/api/trades/analytics/calendar")
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert [row["date"] for row in data["items"]] == ["2026-01-05", "2026-01-07", "2026-02-02"]
+        assert data["items"][0]["trade_count"] == 1
+        assert data["items"][0]["net_pnl"] > 0
+
+    def test_distribution_endpoint_supports_symbol_filter(self) -> None:
+        self._seed_trips()
+
+        resp = self.client.get("/api/trades/analytics/pnl-distribution", params={"symbol": "MSFT.US"})
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert sum(row["trade_count"] for row in data["items"]) == 1
+        assert data["total_trades"] == 1
+
+    def test_monthly_endpoint_returns_cumulative_rows(self) -> None:
+        self._seed_trips()
+
+        resp = self.client.get("/api/trades/analytics/monthly")
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert [row["month"] for row in data["items"]] == ["2026-01", "2026-02"]
+        assert data["items"][1]["cumulative_pnl"] == data["total_net_pnl"]
+
+    def test_weekday_endpoint_uses_exit_weekday(self) -> None:
+        self._seed_trips()
+
+        resp = self.client.get("/api/trades/analytics/weekday")
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert [row["label"] for row in data["items"]] == ["Mon", "Wed"]
+        assert data["items"][0]["trade_count"] == 2
+
+    def test_hold_duration_endpoint_returns_all_buckets(self) -> None:
+        self._seed_trips()
+
+        resp = self.client.get("/api/trades/analytics/hold-duration")
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert [row["bucket"] for row in data["items"]] == ["<5m", "5m-1h", "1h-1d", "1d-1w", ">=1w"]

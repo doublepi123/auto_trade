@@ -515,6 +515,32 @@ class LLMAdvisorService:
             "order_reason": result.get("order_reason"),
         }
 
+    def _preview_market_data(self, symbol: str, market: str, current_price: float) -> dict[str, Any]:
+        try:
+            return self._data_aggregator.fetch_market_data(symbol, market)
+        except Exception:
+            logger.exception("failed to fetch market data for LLM preview")
+            return {
+                "daily_candles": [],
+                "minute_candles": [],
+                "current_price": current_price,
+                "atr": 0.0,
+                "bb_upper": 0.0,
+                "bb_middle": 0.0,
+                "bb_lower": 0.0,
+                "rsi": 0.0,
+                "macd": {"macd": 0.0, "signal": 0.0, "histogram": 0.0},
+                "volume_analysis": {"avg_volume": 0.0, "volume_ratio": 0.0, "trend": "unknown"},
+                "sentiment": {"sentiment": "neutral", "score": 0.0, "description": "无"},
+            }
+
+    @staticmethod
+    def _preview_prompt_price(market_data: dict[str, Any], current_price: float) -> float:
+        current_price_raw = market_data.get("current_price")
+        if isinstance(current_price_raw, (int, float)):
+            return float(current_price_raw)
+        return float(current_price)
+
     def preview(
         self,
         symbol: str,
@@ -534,10 +560,22 @@ class LLMAdvisorService:
         """
         global _LAST_PREVIEW_TIMESTAMP
 
+        market_data: dict[str, Any] | None = None
+        prompt_price = float(current_price)
+        if prompt_price <= 0:
+            market_data = self._preview_market_data(symbol, market, current_price)
+            prompt_price = self._preview_prompt_price(market_data, current_price)
+            if prompt_price <= 0:
+                return {"success": False, "applied": False, "error": "Market data unavailable for preview"}
+
         with _throttle_lock:
+            now_monotonic = time.monotonic()
             if _LAST_PREVIEW_TIMESTAMP <= 0:
                 pass  # cold-start bypass
-            elif time.monotonic() - _LAST_PREVIEW_TIMESTAMP < _PREVIEW_THROTTLE_SECONDS:
+            elif _LAST_PREVIEW_TIMESTAMP == float("inf") or (
+                now_monotonic >= _LAST_PREVIEW_TIMESTAMP
+                and now_monotonic - _LAST_PREVIEW_TIMESTAMP < _PREVIEW_THROTTLE_SECONDS
+            ):
                 return {
                     "success": False,
                     "applied": False,
@@ -548,34 +586,14 @@ class LLMAdvisorService:
             _prev_preview_ts = _LAST_PREVIEW_TIMESTAMP
             _LAST_PREVIEW_TIMESTAMP = float("inf")
 
-        try:
-            market_data = self._data_aggregator.fetch_market_data(symbol, market)
-        except Exception:
-            logger.exception("failed to fetch market data for LLM preview")
-            market_data = {
-                "daily_candles": [],
-                "minute_candles": [],
-                "current_price": current_price,
-                "atr": 0.0,
-                "bb_upper": 0.0,
-                "bb_middle": 0.0,
-                "bb_lower": 0.0,
-                "rsi": 0.0,
-                "macd": {"macd": 0.0, "signal": 0.0, "histogram": 0.0},
-                "volume_analysis": {"avg_volume": 0.0, "volume_ratio": 0.0, "trend": "unknown"},
-                "sentiment": {"sentiment": "neutral", "score": 0.0, "description": "无"},
-            }
-
-        current_price_raw = market_data.get("current_price")
-        if isinstance(current_price_raw, (int, float)):
-            prompt_price = float(current_price_raw)
-        else:
-            prompt_price = float(current_price)
-        if prompt_price <= 0:
-            # Market data unavailable — release the reserved slot.
-            with _throttle_lock:
-                _LAST_PREVIEW_TIMESTAMP = _prev_preview_ts
-            return {"success": False, "applied": False, "error": "Market data unavailable for preview"}
+        if market_data is None:
+            market_data = self._preview_market_data(symbol, market, current_price)
+            prompt_price = self._preview_prompt_price(market_data, current_price)
+            if prompt_price <= 0:
+                # Market data unavailable — release the reserved slot.
+                with _throttle_lock:
+                    _LAST_PREVIEW_TIMESTAMP = _prev_preview_ts
+                return {"success": False, "applied": False, "error": "Market data unavailable for preview"}
 
         try:
             prompt_template, prompt_variant = self._select_variant(symbol)

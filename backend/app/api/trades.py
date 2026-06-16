@@ -8,8 +8,29 @@ from sqlalchemy.orm import Session
 from app.api.auth import require_api_key
 from app.database import get_db
 from app.models import StrategyConfig
-from app.schemas import ClosedTrade, ClosedTradePage, TradeStats
+from app.schemas import (
+    ClosedTrade,
+    ClosedTradePage,
+    TradeCalendarDay,
+    TradeCalendarResponse,
+    TradeHoldDurationBucket,
+    TradeHoldDurationResponse,
+    TradeMonthlySummaryRow,
+    TradeMonthlySummaryResponse,
+    TradePnlDistributionBucket,
+    TradePnlDistributionResponse,
+    TradeStats,
+    TradeWeekdayAttributionRow,
+    TradeWeekdayAttributionResponse,
+)
 from app.services.daily_pnl_service import DailyPnlService
+from app.services.trade_analytics_service import (
+    compute_hold_duration_buckets,
+    compute_monthly_summary,
+    compute_pnl_distribution,
+    compute_trade_calendar,
+    compute_weekday_attribution,
+)
 from app.services.trade_stats_service import compute_trade_stats
 
 router = APIRouter(
@@ -40,6 +61,99 @@ def _day_bound(value: str | None, *, end_of_day: bool) -> datetime | None:
     d = datetime.strptime(value, "%Y-%m-%d").date()
     dt = datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
     return dt + timedelta(days=1) if end_of_day else dt
+
+
+def _closed_trips(
+    db: Session,
+    *,
+    symbol: str | None = None,
+    from_date: str | None = None,
+    to_date: str | None = None,
+):
+    fee_rate_us, fee_rate_hk = _active_fee_rates(db)
+    return DailyPnlService(db).pair_round_trips(
+        symbol=symbol,
+        from_dt=_day_bound(from_date, end_of_day=False),
+        to_dt=_day_bound(to_date, end_of_day=True),
+        fee_rate_us=fee_rate_us,
+        fee_rate_hk=fee_rate_hk,
+    )
+
+
+@router.get("/analytics/calendar", response_model=TradeCalendarResponse)
+def trade_calendar(
+    symbol: str | None = Query(default=None, description="Filter by symbol (e.g. AAPL.US)"),
+    from_date: str | None = Query(default=None, description="Exit-time lower bound (YYYY-MM-DD)", pattern=_DATE_PATTERN),
+    to_date: str | None = Query(default=None, description="Exit-time upper bound (YYYY-MM-DD)", pattern=_DATE_PATTERN),
+    db: Session = Depends(get_db),
+) -> TradeCalendarResponse:
+    trips = _closed_trips(db, symbol=symbol, from_date=from_date, to_date=to_date)
+    rows = compute_trade_calendar(trips)
+    return TradeCalendarResponse(
+        items=[TradeCalendarDay.model_validate(row) for row in rows],
+        total_trades=len(trips),
+        total_net_pnl=round(sum(trip.net_pnl for trip in trips), 2),
+    )
+
+
+@router.get("/analytics/hold-duration", response_model=TradeHoldDurationResponse)
+def trade_hold_duration(
+    symbol: str | None = Query(default=None, description="Filter by symbol (e.g. AAPL.US)"),
+    from_date: str | None = Query(default=None, description="Exit-time lower bound (YYYY-MM-DD)", pattern=_DATE_PATTERN),
+    to_date: str | None = Query(default=None, description="Exit-time upper bound (YYYY-MM-DD)", pattern=_DATE_PATTERN),
+    db: Session = Depends(get_db),
+) -> TradeHoldDurationResponse:
+    trips = _closed_trips(db, symbol=symbol, from_date=from_date, to_date=to_date)
+    return TradeHoldDurationResponse(
+        items=[TradeHoldDurationBucket.model_validate(row) for row in compute_hold_duration_buckets(trips)],
+        total_trades=len(trips),
+    )
+
+
+@router.get("/analytics/pnl-distribution", response_model=TradePnlDistributionResponse)
+def trade_pnl_distribution(
+    symbol: str | None = Query(default=None, description="Filter by symbol (e.g. AAPL.US)"),
+    from_date: str | None = Query(default=None, description="Exit-time lower bound (YYYY-MM-DD)", pattern=_DATE_PATTERN),
+    to_date: str | None = Query(default=None, description="Exit-time upper bound (YYYY-MM-DD)", pattern=_DATE_PATTERN),
+    db: Session = Depends(get_db),
+) -> TradePnlDistributionResponse:
+    trips = _closed_trips(db, symbol=symbol, from_date=from_date, to_date=to_date)
+    return TradePnlDistributionResponse(
+        items=[TradePnlDistributionBucket.model_validate(row) for row in compute_pnl_distribution(trips)],
+        total_trades=len(trips),
+        total_net_pnl=round(sum(trip.net_pnl for trip in trips), 2),
+    )
+
+
+@router.get("/analytics/monthly", response_model=TradeMonthlySummaryResponse)
+def trade_monthly_summary(
+    symbol: str | None = Query(default=None, description="Filter by symbol (e.g. AAPL.US)"),
+    from_date: str | None = Query(default=None, description="Exit-time lower bound (YYYY-MM-DD)", pattern=_DATE_PATTERN),
+    to_date: str | None = Query(default=None, description="Exit-time upper bound (YYYY-MM-DD)", pattern=_DATE_PATTERN),
+    db: Session = Depends(get_db),
+) -> TradeMonthlySummaryResponse:
+    trips = _closed_trips(db, symbol=symbol, from_date=from_date, to_date=to_date)
+    rows = compute_monthly_summary(trips)
+    return TradeMonthlySummaryResponse(
+        items=[TradeMonthlySummaryRow.model_validate(row) for row in rows],
+        total_trades=len(trips),
+        total_net_pnl=round(sum(trip.net_pnl for trip in trips), 2),
+    )
+
+
+@router.get("/analytics/weekday", response_model=TradeWeekdayAttributionResponse)
+def trade_weekday_attribution(
+    symbol: str | None = Query(default=None, description="Filter by symbol (e.g. AAPL.US)"),
+    from_date: str | None = Query(default=None, description="Exit-time lower bound (YYYY-MM-DD)", pattern=_DATE_PATTERN),
+    to_date: str | None = Query(default=None, description="Exit-time upper bound (YYYY-MM-DD)", pattern=_DATE_PATTERN),
+    db: Session = Depends(get_db),
+) -> TradeWeekdayAttributionResponse:
+    trips = _closed_trips(db, symbol=symbol, from_date=from_date, to_date=to_date)
+    return TradeWeekdayAttributionResponse(
+        items=[TradeWeekdayAttributionRow.model_validate(row) for row in compute_weekday_attribution(trips)],
+        total_trades=len(trips),
+        total_net_pnl=round(sum(trip.net_pnl for trip in trips), 2),
+    )
 
 
 @router.get("/stats", response_model=TradeStats)
@@ -112,4 +226,3 @@ def list_closed_trades(
         ],
         total=total,
     )
-

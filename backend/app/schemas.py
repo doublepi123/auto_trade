@@ -1568,6 +1568,108 @@ class TradeStats(BaseModel):
     avg_hold_seconds: Optional[float] = None
 
 
+class TradeCalendarDay(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    date: str
+    trade_count: int
+    win_count: int
+    loss_count: int
+    net_pnl: float
+    gross_pnl: float
+    symbols: list[str]
+
+
+class TradeCalendarResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    items: list[TradeCalendarDay]
+    total_trades: int
+    total_net_pnl: float
+
+
+class TradeHoldDurationBucket(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    bucket: str
+    min_seconds: Optional[float] = None
+    max_seconds: Optional[float] = None
+    trade_count: int
+    win_count: int
+    loss_count: int
+    win_rate: float
+    net_pnl: float
+    avg_net_pnl: Optional[float] = None
+
+
+class TradeHoldDurationResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    items: list[TradeHoldDurationBucket]
+    total_trades: int
+
+
+class TradePnlDistributionBucket(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    bucket: str
+    min_pnl: Optional[float] = None
+    max_pnl: Optional[float] = None
+    trade_count: int
+    net_pnl: float
+
+
+class TradePnlDistributionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    items: list[TradePnlDistributionBucket]
+    total_trades: int
+    total_net_pnl: float
+
+
+class TradeMonthlySummaryRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    month: str
+    trade_count: int
+    win_count: int
+    loss_count: int
+    win_rate: float
+    net_pnl: float
+    gross_pnl: float
+    cumulative_pnl: float
+    drawdown: float
+
+
+class TradeMonthlySummaryResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    items: list[TradeMonthlySummaryRow]
+    total_trades: int
+    total_net_pnl: float
+
+
+class TradeWeekdayAttributionRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    weekday: int
+    label: str
+    trade_count: int
+    win_count: int
+    loss_count: int
+    win_rate: float
+    net_pnl: float
+    avg_net_pnl: Optional[float] = None
+
+
+class TradeWeekdayAttributionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    items: list[TradeWeekdayAttributionRow]
+    total_trades: int
+    total_net_pnl: float
+
+
 class EquityCurvePoint(BaseModel):
     date: str
     realized_pnl: float
@@ -1604,5 +1706,3 @@ class SymbolAttributionResponse(BaseModel):
 
     rows: list[SymbolAttributionRow]
     total_realized_pnl: float
-
-
