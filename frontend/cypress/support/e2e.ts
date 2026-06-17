@@ -447,6 +447,28 @@ Cypress.Commands.add('stubApi', () => {
       },
       applied_values: { buy_low: 220.42, sell_high: 221.42 },
       reject_reason: null,
+      budget: {
+        max_symbols_per_cycle: 3,
+        max_analyses_per_hour: 12,
+        tracked_symbol_count: 2,
+        effective_symbol_budget: 2,
+        used_analyses_last_hour: 3,
+        remaining_analyses_this_hour: 9,
+      },
+      symbol_statuses: [
+        {
+          symbol: 'AAPL.US',
+          market: 'US',
+          is_primary: true,
+          has_pending_order: false,
+          buy_cooldown_remaining_seconds: null,
+          sell_cooldown_remaining_seconds: null,
+          last_analysis_at: '2026-05-19T19:52:03.545862Z',
+          next_analysis_at: '2026-05-19T19:53:03.545862Z',
+          last_status: 'APPLIED',
+          last_skip_reason: null,
+        },
+      ],
     },
   }).as('getLLMIntervalStatus')
 

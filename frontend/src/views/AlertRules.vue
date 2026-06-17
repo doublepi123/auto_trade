@@ -16,7 +16,37 @@
       后台每 60 秒评估一次启用规则：价格类用实时行情，日内亏损类读 <code>runtime_state.daily_pnl</code>；触发后按冷却时间节流，经已配置通知渠道推送。
     </p>
 
-    <el-table :data="rules" size="small" class="responsive-table" v-loading="loading">
+    <div class="summary-grid">
+      <div class="summary-card" data-testid="alert-rule-health">
+        <div class="summary-title">规则健康</div>
+        <div class="summary-items">
+          <span>总计 {{ rules.length }}</span>
+          <span>启用 {{ enabledRules.length }}</span>
+          <span>停用 {{ disabledRules.length }}</span>
+          <span>有触发记录 {{ recentlyFiredRules.length }}</span>
+          <span>从未触发 {{ neverFiredRules.length }}</span>
+        </div>
+      </div>
+      <div class="summary-card" data-testid="alert-recent-firings">
+        <div class="summary-title">上次触发规则</div>
+        <div v-if="recentlyFiredRules.length" class="summary-items">
+          <span v-for="rule in recentlyFiredRules" :key="rule.id">
+            {{ rule.name }} · {{ formatDateTime(rule.last_fired_at ?? '') }}
+          </span>
+        </div>
+        <div v-else class="summary-empty">暂无触发记录</div>
+      </div>
+    </div>
+
+    <div class="filter-row">
+      <el-button size="small" :type="activeFilter === 'all' ? 'primary' : 'default'" data-testid="alert-filter-all" @click="activeFilter = 'all'">全部</el-button>
+      <el-button size="small" :type="activeFilter === 'enabled' ? 'primary' : 'default'" data-testid="alert-filter-enabled" @click="activeFilter = 'enabled'">启用</el-button>
+      <el-button size="small" :type="activeFilter === 'disabled' ? 'primary' : 'default'" data-testid="alert-filter-disabled" @click="activeFilter = 'disabled'">停用</el-button>
+      <el-button size="small" :type="activeFilter === 'recent-fired' ? 'primary' : 'default'" data-testid="alert-filter-recent-fired" @click="activeFilter = 'recent-fired'">最近触发</el-button>
+      <el-button size="small" :type="activeFilter === 'never-fired' ? 'primary' : 'default'" data-testid="alert-filter-never-fired" @click="activeFilter = 'never-fired'">从未触发</el-button>
+    </div>
+
+    <el-table :data="filteredRules" size="small" class="responsive-table" v-loading="loading">
       <el-table-column prop="name" label="名称" min-width="120" />
       <el-table-column prop="symbol" label="标的" min-width="90" />
       <el-table-column label="条件" min-width="130">
@@ -92,7 +122,15 @@
       data-testid="alert-history-dialog"
     >
       <div v-loading="historyDialog.loading">
-        <p class="eval-note">共 {{ historyDialog.items.length }} 次触发（最近优先）</p>
+        <div class="history-summary" data-testid="alert-history-summary">
+          <span>最近 100 条 · 共 {{ historyDialog.items.length }} 次触发</span>
+          <span>最新触发值 {{ historyLatestTriggerValue }}</span>
+          <span>平均触发值 {{ historyAverageTriggerValue }}</span>
+          <span>最大触发值 {{ historyMaxTriggerValue }}</span>
+        </div>
+        <div class="history-severity" data-testid="alert-history-severity">
+          <span v-for="item in historySeveritySummary" :key="item.label">{{ item.label }} {{ item.count }}</span>
+        </div>
         <el-table :data="historyDialog.items" size="small" max-height="360">
           <el-table-column label="时间" width="150">
             <template #default="{ row }">{{ formatDateTime(row.fired_at) }}</template>
@@ -121,7 +159,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   listAlertRules,
@@ -138,6 +176,7 @@ const rules = ref<AlertRule[]>([])
 const loading = ref(false)
 const evaluating = ref(false)
 const evalResult = ref<AlertEvaluateResult | null>(null)
+const activeFilter = ref<'all' | 'enabled' | 'disabled' | 'recent-fired' | 'never-fired'>('all')
 
 const historyDialog = reactive({
   visible: false,
@@ -158,6 +197,43 @@ const dialog = reactive({
   severity: 'WARNING' as AlertSeverity,
   enabled: true,
   cooldown_seconds: 300,
+})
+
+const filteredRules = computed(() => {
+  const current = rules.value
+  if (activeFilter.value === 'enabled') return current.filter((rule) => rule.enabled)
+  if (activeFilter.value === 'disabled') return current.filter((rule) => !rule.enabled)
+  if (activeFilter.value === 'recent-fired') return current.filter((rule) => rule.last_fired_at !== null)
+  if (activeFilter.value === 'never-fired') return current.filter((rule) => rule.last_fired_at === null)
+  return current
+})
+
+const enabledRules = computed(() => rules.value.filter((rule) => rule.enabled))
+const disabledRules = computed(() => rules.value.filter((rule) => !rule.enabled))
+const recentlyFiredRules = computed(() =>
+  [...rules.value]
+    .filter((rule) => rule.last_fired_at !== null)
+    .sort((a, b) => new Date(b.last_fired_at ?? '').getTime() - new Date(a.last_fired_at ?? '').getTime()),
+)
+const neverFiredRules = computed(() => rules.value.filter((rule) => rule.last_fired_at === null))
+
+const historyLatestTriggerValue = computed(() => historyDialog.items[0]?.trigger_value ?? '—')
+const historyAverageTriggerValue = computed(() => {
+  if (!historyDialog.items.length) return '—'
+  const values = historyDialog.items.map((item) => item.trigger_value)
+  const sum = values.reduce((total, value) => total + value, 0)
+  return (sum / values.length).toFixed(2)
+})
+const historyMaxTriggerValue = computed(() => {
+  if (!historyDialog.items.length) return '—'
+  return Math.max(...historyDialog.items.map((item) => item.trigger_value)).toFixed(2)
+})
+const historySeveritySummary = computed(() => {
+  const counts = new Map<string, number>()
+  for (const item of historyDialog.items) {
+    counts.set(item.severity, (counts.get(item.severity) ?? 0) + 1)
+  }
+  return [...counts.entries()].map(([label, count]) => ({ label, count }))
 })
 
 async function loadRules() {
@@ -331,6 +407,58 @@ onMounted(loadRules)
 .alerts-actions {
   display: flex;
   gap: 8px;
+}
+
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 12px;
+}
+
+.summary-card {
+  border: 1px solid #ebeef5;
+  border-radius: 8px;
+  padding: 12px;
+  background: #fafafa;
+}
+
+.summary-title {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.summary-items,
+.history-summary,
+.history-severity,
+.filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.summary-items span,
+.history-summary span,
+.history-severity span {
+  font-size: 12px;
+  color: #606266;
+}
+
+.summary-empty {
+  font-size: 12px;
+  color: #909399;
+}
+
+.filter-row {
+  align-items: center;
+}
+
+.history-summary {
+  margin-bottom: 8px;
+}
+
+.history-severity {
+  margin-bottom: 12px;
 }
 
 .responsive-table {

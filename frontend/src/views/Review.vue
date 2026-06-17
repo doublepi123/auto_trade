@@ -150,6 +150,27 @@
             </div>
           </div>
 
+          <div class="day-meta">
+            <div data-testid="review-day-composition" class="day-meta-row">
+              <span>LLM {{ day.llm_interactions.length }}</span>
+              <span>订单 {{ day.orders.length }}</span>
+              <span>事件 {{ day.events.length }}</span>
+              <span>快照 {{ day.snapshots.length }}</span>
+              <span>错误 {{ day.error_tags.length }}</span>
+            </div>
+            <div data-testid="review-day-state" class="day-meta-row">
+              <el-tag :type="day.daily_pnl > 0 ? 'success' : day.daily_pnl < 0 ? 'danger' : 'info'" size="small" effect="plain">
+                {{ day.daily_pnl > 0 ? '盈利' : day.daily_pnl < 0 ? '亏损' : '打平' }}
+              </el-tag>
+              <el-tag :type="day.trade_count > 0 ? 'success' : 'info'" size="small" effect="plain">
+                {{ day.trade_count > 0 ? '有交易' : '无交易' }}
+              </el-tag>
+              <el-tag :type="day.error_tags.length > 0 ? 'warning' : 'success'" size="small" effect="plain">
+                {{ day.error_tags.length > 0 ? '有错误' : '无错误' }}
+              </el-tag>
+            </div>
+          </div>
+
           <div class="day-body">
             <div v-if="day.llm_interactions.length > 0" class="section-block">
               <div class="section-title">LLM 建议</div>
@@ -162,27 +183,34 @@
 
             <div v-if="day.orders.length > 0" class="section-block">
               <div class="section-title">订单执行</div>
-              <div v-for="order in day.orders" :key="order.id" class="item-row">
+              <div v-for="order in day.orders" :key="order.id" class="item-row" data-testid="review-order-detail">
                 <el-tag :type="order.side === 'BUY' || order.side === 'BUY_TO_COVER' ? 'success' : 'danger'" size="small">{{ order.side }}</el-tag>
-                <span>{{ order.quantity.toFixed(0) }} 股 @ {{ formatCurrency(order.executed_price ?? order.price, diagnosticsMarket) }}</span>
+                <span>{{ order.broker_order_id }}</span>
+                <span>{{ formatOrderIntent(order.quantity, order.price, diagnosticsMarket || 'US') }}</span>
+                <span>{{ formatFilledQuantity(order.executed_quantity) }}</span>
+                <span>{{ formatExecutedPrice(order.executed_price, diagnosticsMarket || 'US') }}</span>
                 <el-tag :type="order.status === ORDER_STATUS.FILLED ? 'success' : 'warning'" size="small">{{ order.status }}</el-tag>
+                <span class="muted">成交时间 {{ formatTime(order.filled_at) }}</span>
                 <span class="muted">{{ formatTime(order.created_at) }}</span>
               </div>
             </div>
 
             <div v-if="day.events.length > 0" class="section-block">
               <div class="section-title">交易事件</div>
-              <div v-for="event in day.events" :key="event.id" class="item-row">
+              <div v-for="event in day.events" :key="event.id" class="item-row" data-testid="review-event-payload">
                 <el-tag :type="eventType(event.event_type)" size="small">{{ event.event_type }}</el-tag>
                 <span>{{ event.message || '-' }}</span>
+                <span>{{ payloadPreview(event.payload_json) }}</span>
                 <span class="muted">{{ formatTime(event.created_at) }}</span>
               </div>
             </div>
 
             <div v-if="day.snapshots.length > 0" class="section-block">
               <div class="section-title">行情快照</div>
-              <div v-for="snap in day.snapshots" :key="snap.id" class="item-row">
+              <div v-for="snap in day.snapshots" :key="snap.id" class="item-row" data-testid="review-snapshot-detail">
                 <span>价格 {{ formatCurrency(snap.last_price, diagnosticsMarket) }}</span>
+                <span>{{ triggerDeltaText(snap.last_price, snap.last_trigger_price, diagnosticsMarket || 'US') }}</span>
+                <span>连亏 {{ snap.consecutive_losses }}</span>
                 <span v-if="snap.daily_pnl !== 0" :class="snap.daily_pnl >= 0 ? 'positive' : 'negative'">{{ signedCurrency(snap.daily_pnl) }}</span>
                 <span class="muted">{{ formatTime(snap.created_at) }}</span>
               </div>
@@ -360,13 +388,63 @@ function signedCurrency(value: number): string {
   return `$${amount}`
 }
 
-function formatTime(value: string): string {
+function formatTime(value: string | null | undefined): string {
+  if (!value) return '-'
   return new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 }
 
 function formatAgeSeconds(value: number | null | undefined): string {
   if (value == null) return '-'
   return `${value.toFixed(1)}s`
+}
+
+function formatFilledQuantity(value: number | null): string {
+  return value != null ? `成交 ${value.toFixed(0)}` : '成交 -'
+}
+
+function formatOrderIntent(quantity: number, price: number, market: string): string {
+  return `委托 ${quantity.toFixed(0)} 股 @ ${formatCurrency(price, market)}`
+}
+
+function formatExecutedPrice(value: number | null, market: string): string {
+  return value != null ? `成交价 ${formatCurrency(value, market)}` : '成交价 -'
+}
+
+function payloadPreview(payloadJson: string | null | undefined): string {
+  if (!payloadJson?.trim()) return 'payload -'
+  try {
+    const parsed: unknown = JSON.parse(payloadJson)
+    if (parsed == null) return 'payload -'
+    if (typeof parsed === 'string') return `payload ${truncateText(parsed)}`
+    if (typeof parsed === 'number' || typeof parsed === 'boolean') return `payload ${String(parsed)}`
+    if (Array.isArray(parsed)) return `payload [${parsed.slice(0, 3).map((item) => stringifyPreviewValue(item)).join(', ')}${parsed.length > 3 ? ', …' : ''}]`
+    if (typeof parsed === 'object') {
+      const entries = Object.entries(parsed as Record<string, unknown>).slice(0, 3)
+      const preview = entries.map(([key, value]) => `${key}: ${stringifyPreviewValue(value)}`).join(', ')
+      return preview ? `payload {${preview}${Object.keys(parsed as Record<string, unknown>).length > 3 ? ', …' : ''}}` : 'payload -'
+    }
+    return 'payload -'
+  } catch {
+    return 'payload -'
+  }
+}
+
+function stringifyPreviewValue(value: unknown): string {
+  if (value == null) return 'null'
+  if (typeof value === 'string') return truncateText(value)
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  return Array.isArray(value) ? '[…]' : '{…}'
+}
+
+function truncateText(value: string): string {
+  return value.length > 12 ? `${value.slice(0, 12)}…` : value
+}
+
+function triggerDeltaText(lastPrice: number, lastTriggerPrice: number, market: string): string {
+  if (lastTriggerPrice <= 0) return 'Δ触发 -'
+  const delta = lastPrice - lastTriggerPrice
+  const sign = delta > 0 ? '+' : delta < 0 ? '-' : ''
+  return `触发价 ${formatCurrency(lastTriggerPrice, market)} · Δ触发 ${sign}${Math.abs(delta).toFixed(2)}`
 }
 </script>
 
@@ -502,6 +580,22 @@ function formatAgeSeconds(value: number | null | undefined): string {
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+.day-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.day-meta-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  color: #4b5563;
+  font-size: 12px;
 }
 
 .section-block {
