@@ -13,7 +13,7 @@
 | **API 覆盖** | ✅ 完备。策略配置、凭证管理、订单查询、状态获取、状态历史、事件时间线、运行时控制（启停/暂停/Kill Switch）。 |
 | **WebSocket 推送** | ✅ 就绪。实时状态同步。 |
 | **本地部署** | ✅ 就绪。Docker Compose 一键启动。 |
-| **测试** | ✅ 就绪。Backend pytest **903** 项、pytest-cov 覆盖率 **87%**、Frontend Cypress E2E **82** 项。 |
+| **测试** | ✅ 就绪。Backend pytest **903** 项、pytest-cov 覆盖率 **87%**、Frontend Cypress E2E **83** 项。 |
 | **凭证安全** | ✅ 就绪。主密钥 + AES-GCM 加密存储，前端不回显明文。 |
 | **数据库** | ✅ 就位。SQLite，含运行状态、状态快照、订单、`tracked_entries`、LLM 交互、交易事件、审计日志和凭证配置。 |
 | **LLM 行情数据** | ✅ 真实 K 线（日 K + 1 分钟 K），ATR/布林带有效。 |
@@ -34,6 +34,35 @@
 | **决策时间线搜索** | ✅ 全文搜索（消息/标的/事件类型）+ 书签（localStorage 持久化）。 |
 | **后端热路径** | ✅ `recent_quotes` 改 `deque(maxlen=...)` + 单边窗口淘汰；`broker.get_quotes([symbol])` 批量复用。 |
 | **Docker 镜像** | ✅ 多阶段构建（`builder → runtime`），剥离 toolchain；tini 转发信号。 |
+
+---
+
+## 近期已完成迭代 (2026-06-17) — TradeHistory 分析复盘增强（10 轮 P94–P103）
+
+> 自主 feature 迭代第 10 批（10 轮）。继续只读前端增强：复用既有 `/api/trades` 与 `/api/trades/analytics/*` 响应，不新增后端 API、不新增表、不触碰 broker/order/runner/risk 写路径。规格：[2026-06-17-p94-p103-tradehistory-analytics-polish-design.md](superpowers/specs/2026-06-17-p94-p103-tradehistory-analytics-polish-design.md)。计划：[2026-06-17-p94-p103-tradehistory-analytics-polish.md](superpowers/plans/2026-06-17-p94-p103-tradehistory-analytics-polish.md)。
+
+| 代号 | 主题 | 状态 |
+|------|------|------|
+| **P94** | 往返摘要：当前筛选结果、胜/败、净盈亏、费用、平均净盈亏 | ✅ |
+| **P95** | 往返快捷过滤：全部、胜、败、多、空 | ✅ |
+| **P96** | 往返 symbol 搜索：当前加载 round trips 本地过滤 | ✅ |
+| **P97** | 往返洞察：最佳/最差 filtered round trip | ✅ |
+| **P98** | 往返展开详情：entry/exit order id、时间、gross/net、费用拖累 | ✅ |
+| **P99** | 交易日历洞察：最佳日、最差日、最活跃日 | ✅ |
+| **P100** | 持仓时长洞察：最佳/最差非空 bucket | ✅ |
+| **P101** | 盈亏分布平衡：亏损/盈利 bucket 数与净 PnL 平衡 | ✅ |
+| **P102** | 月度趋势洞察：最新月、最佳月、最大回撤月 | ✅ |
+| **P103** | 星期归因洞察：最佳/最差星期 | ✅ |
+
+**设计要点：**
+- **当前加载数据语义**：round-trip filters/search/summary 只作用于当前已加载的 200 条往返数据，避免暗示全量聚合。
+- **只读派生**：全部新增值由已加载 response `computed` 派生，无新请求、无写操作。
+- **渐进增强**：保留既有 round-trip 表格和 5 个 analytics 卡片，只新增上方摘要/洞察与展开详情。
+- **TDD 覆盖**：先新增 Cypress RED，再实现 GREEN；覆盖 filters/search/empty match/expand detail 与 5 类 analytics insights。
+
+**验证：** `npm run cypress:run -- --config baseUrl=http://127.0.0.1:3000 --spec cypress/e2e/trade_roundtrips.cy.ts,cypress/e2e/history.cy.ts` 11 passed；`npm run type-check` 通过。
+
+**显式 YAGNI 未做：** 后端聚合、跨页全量搜索、导出 analytics、图表库、持久化筛选、修改配对算法。
 
 ---
 
