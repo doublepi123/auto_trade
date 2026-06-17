@@ -37,6 +37,56 @@
 
 ---
 
+## 近期已完成迭代 (2026-06-17) — Reports 只读增强（5 轮 P69–P73）
+
+> 自主 feature 迭代第 6 批（5 轮）。延续低风险前端增强路线：复用既有 `/api/reports/range` 的 `metrics` / `daily_points` / `attribution` / `details` 响应，不改后端、不新增表、不触碰 broker/order path。规格：[2026-06-17-p69-p73-reports-readonly-enhancement-design.md](superpowers/specs/2026-06-17-p69-p73-reports-readonly-enhancement-design.md)。计划：[2026-06-17-p69-p73-reports-readonly-enhancement.md](superpowers/plans/2026-06-17-p69-p73-reports-readonly-enhancement.md)。
+
+| 代号 | 主题 | 状态 |
+|------|------|------|
+| **P69** | 快捷区间：Reports 增加近 7/30/90 天快捷查询 | ✅ |
+| **P70** | 交易归因：展示归因标签、交易数、PnL、胜率、占比 | ✅ |
+| **P71** | 每日 drill-down：每日明细可展开订单行 | ✅ |
+| **P72** | 报告洞察：最佳日、最差日、盈利/亏损日、最大回撤日 | ✅ |
+| **P73** | 导出/空状态 polish：当前查询范围、导出文件名预览、归因/明细空状态 | ✅ |
+
+**设计要点：**
+- **只读派生**：所有新增 UI 均由 `ReportResponse` 已有字段派生，无新增请求。
+- **快捷查询不绕过校验**：快捷区间复用 `handleSearch()`，保持现有表单校验和错误反馈。
+- **明细按日展开**：每日表通过 Element Plus expandable row 展示 `details[].orders`，空日显示明确空状态。
+- **轻量复盘摘要**：洞察卡片用 `computed` 从 `daily_points` 派生，不引入图表库。
+
+**验证：** `npm run cypress:run -- --config baseUrl=http://127.0.0.1:3000 --spec cypress/e2e/reports.cy.ts` 6 passed；`npm run type-check` 通过；`npm run build` 通过。
+
+**显式 YAGNI 未做：** 后端 CSV 明细模式、报表模板保存、跨标的组合报告、独立 BI 页面、通知推送。
+
+---
+
+## 近期已完成迭代 (2026-06-17) — Trade Analytics 前端补齐（5 轮 P64–P68）
+
+> 自主 feature 迭代第 5 批（5 轮）。选型为低风险前端补齐：后端 `/api/trades/analytics/*` 只读端点已存在，本批不改后端、不碰 runner/order/risk、不新增表。规格：[2026-06-17-p64-p68-trade-analytics-frontend-design.md](superpowers/specs/2026-06-17-p64-p68-trade-analytics-frontend-design.md)。计划：[2026-06-17-p64-p68-trade-analytics-frontend.md](superpowers/plans/2026-06-17-p64-p68-trade-analytics-frontend.md)。
+
+| 代号 | 主题 | 状态 |
+|------|------|------|
+| **P64** | 交易日历：按平仓日展示交易数、标的、净 PnL | ✅ |
+| **P65** | 持仓时长分布：按 `<5m / 5m-1h / 1h-1d / 1d-1w / >=1w` 展示交易数、胜率、净 PnL | ✅ |
+| **P66** | 盈亏分布：按亏损/打平/盈利区间展示交易数和净 PnL | ✅ |
+| **P67** | 月度汇总：展示月度交易数、胜率、累计 PnL、回撤 | ✅ |
+| **P68** | 星期归因：展示 Mon–Sun 的交易数、胜率、净 PnL | ✅ |
+
+**新增前端能力：** `frontend/src/api/trades.ts` 增加 5 个 typed API client；`frontend/src/types/index.ts` 增加对应响应类型；TradeHistory 新增默认折叠的「交易分析（只读）」区；Cypress `history.cy.ts` 覆盖 5 个卡片。
+
+**设计要点：**
+- **默认折叠 + lazy-load**：History 首屏不立即触发 5 个聚合请求；用户展开「交易分析（只读）」时再加载。
+- **辅助信息不阻塞主表**：「拉取」按钮只跟随往返成交表 loading；analytics 有独立 loading，且只在分析区展开时刷新。
+- **局部容错**：5 个 analytics 请求用 `Promise.allSettled` 独立更新，一个端点失败不影响其他卡片。
+- **轻量 UI**：不引入图表库；使用 Element Plus + CSS grid + 简短列表，保持 TradeHistory 主订单表优先级。
+
+**验证：** `npm run cypress:run -- --config baseUrl=http://127.0.0.1:3000 --spec cypress/e2e/history.cy.ts` 7 passed；`npm run type-check` 通过；`npm run build` 通过。
+
+**显式 YAGNI 未做：** 独立导航页、高级图表库、导出、实时 WebSocket 推送、后端聚合算法调整、跨页面共享筛选状态。
+
+---
+
 ## 近期已完成迭代 (2026-06-16) — 已实现盈亏分析簇 + 告警触发历史（5 轮 P59–P63）
 
 > 自主 feature 迭代第 4 批（5 轮）。judge-panel workflow（4 只读探索 agent + 打分）选型；偏离两处以降风险：① 往返成交改**只读**（不落库透写缓存，遵循本仓库「读时重算」约定）② 第 5 轮用**告警触发历史**替换「净/毛切换」（更独立、零实盘风险；净 PnL 已内建进配对服务）。基线 `pytest 1091 passed` → 交付后 `pytest 1143 passed`（**+52，0 回归**），`basedpyright` 新增代码 0/0/0，`vue-tsc` 0，build pass，chunk 预算不退步。规格：[2026-06-16-realized-pnl-analytics-cluster-design.md](superpowers/specs/2026-06-16-realized-pnl-analytics-cluster-design.md)。

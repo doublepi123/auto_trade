@@ -1,4 +1,17 @@
 describe('Reports Page', () => {
+  function formatDate(date: Date): string {
+    const year = date.getFullYear()
+    const month = String(date.getMonth() + 1).padStart(2, '0')
+    const day = String(date.getDate()).padStart(2, '0')
+    return `${year}-${month}-${day}`
+  }
+
+  function daysAgo(days: number): string {
+    const date = new Date()
+    date.setDate(date.getDate() - days)
+    return formatDate(date)
+  }
+
   beforeEach(() => {
     cy.stubApi()
     cy.visit('/#/reports')
@@ -103,6 +116,71 @@ describe('Reports Page', () => {
     cy.get('[data-testid="reports-view"]').contains('回撤').should('be.visible')
     cy.get('[data-testid="reports-view"]').contains('2024-01-15').should('be.visible')
     cy.get('[data-testid="reports-view"]').contains('+$300.00').should('be.visible')
+  })
+
+  it('renders readonly report enhancements', () => {
+    cy.intercept('GET', '/api/reports/range*', {
+      statusCode: 200,
+      body: makeReport({
+        metrics: {
+          total_pnl: 425,
+          total_trades: 4,
+          win_count: 3,
+          loss_count: 1,
+          win_rate: 0.75,
+          profit_loss_ratio: 3.2,
+          avg_pnl_per_trade: 106.25,
+          max_profit: 500,
+          max_loss: -120,
+          max_drawdown: 120,
+          llm_suggestions_count: 4,
+          llm_applied_count: 2,
+          llm_apply_rate: 0.5,
+          llm_profitable_count: 1,
+          llm_accuracy_rate: 0.5,
+        },
+        daily_points: [
+          { date: '2024-01-15', pnl: 300, cumulative_pnl: 300, drawdown: 0, trade_count: 2, win_count: 2 },
+          { date: '2024-01-16', pnl: -120, cumulative_pnl: 180, drawdown: 120, trade_count: 1, win_count: 0 },
+          { date: '2024-01-17', pnl: 245, cumulative_pnl: 425, drawdown: 0, trade_count: 1, win_count: 1 },
+        ],
+        attribution: [
+          { key: 'SELL', label: '平多', trade_count: 3, pnl: 545, win_rate: 0.6667, share: 0.75 },
+          { key: 'BUY_TO_COVER', label: '平空', trade_count: 1, pnl: -120, win_rate: 0, share: 0.25 },
+        ],
+        details: [
+          {
+            date: '2024-01-15',
+            orders: [
+              { broker_order_id: 'ord-1', side: 'SELL', quantity: 10, executed_price: 130, status: 'FILLED', filled_at: '2024-01-15T15:00:00Z', pnl: 300 },
+            ],
+          },
+        ],
+      }),
+    }).as('getEnhancedReport')
+
+    cy.get('[data-testid="reports-preset-7d"]').click()
+    cy.wait('@getEnhancedReport').then(({ request }) => {
+      expect(request.query.from_date).to.eq(daysAgo(6))
+      expect(request.query.to_date).to.eq(formatDate(new Date()))
+    })
+    cy.get('[data-testid="reports-preset-30d"]').click()
+    cy.wait('@getEnhancedReport').then(({ request }) => {
+      expect(request.query.from_date).to.eq(daysAgo(29))
+    })
+    cy.get('[data-testid="reports-preset-90d"]').click()
+    cy.wait('@getEnhancedReport').then(({ request }) => {
+      expect(request.query.from_date).to.eq(daysAgo(89))
+    })
+
+    cy.get('[data-testid="reports-query-summary"]').should('contain', 'AAPL.US')
+    cy.get('[data-testid="reports-export-preview"]').should('contain', 'report_AAPL_US')
+    cy.get('[data-testid="reports-insights"]').should('contain', '最佳日').and('contain', '2024-01-15').and('contain', '+$300.00')
+    cy.get('[data-testid="reports-insights"]').should('contain', '最差日').and('contain', '2024-01-16').and('contain', '-$120.00')
+    cy.get('[data-testid="reports-insights"]').should('contain', '盈利日/亏损日').and('contain', '2 / 1')
+    cy.get('[data-testid="reports-attribution-table"]').should('contain', '平多').and('contain', '+$545.00').and('contain', '75.0%')
+    cy.get('[data-testid="reports-daily-table"] .el-table__expand-icon').first().click()
+    cy.get('[data-testid="reports-order-details"]').should('contain', 'ord-1').and('contain', 'SELL').and('contain', '+$300.00')
   })
 
   it('should validate query conditions', () => {

@@ -221,6 +221,54 @@ Cypress.Commands.add('stubApi', () => {
     },
   }).as('getTradeNoteAnalytics')
 
+  cy.intercept('GET', '/api/trades?*', {
+    body: { items: [], total: 0 },
+  }).as('getClosedTrades')
+
+  cy.intercept('GET', '/api/trades/stats*', {
+    body: {
+      total_trades: 0,
+      win_count: 0,
+      loss_count: 0,
+      breakeven_count: 0,
+      win_rate: 0,
+      total_gross_pnl: 0,
+      total_net_pnl: 0,
+      avg_win: null,
+      avg_loss: null,
+      expectancy: 0,
+      profit_factor: null,
+      payoff_ratio: null,
+      largest_win: null,
+      largest_loss: null,
+      current_streak_type: 'none',
+      current_streak_count: 0,
+      max_win_streak: 0,
+      max_loss_streak: 0,
+      avg_hold_seconds: null,
+    },
+  }).as('getTradeStats')
+
+  cy.intercept('GET', '/api/trades/analytics/calendar*', {
+    body: { items: [], total_trades: 0, total_net_pnl: 0 },
+  }).as('getTradeCalendar')
+
+  cy.intercept('GET', '/api/trades/analytics/hold-duration*', {
+    body: { items: [], total_trades: 0 },
+  }).as('getTradeHoldDuration')
+
+  cy.intercept('GET', '/api/trades/analytics/pnl-distribution*', {
+    body: { items: [], total_trades: 0, total_net_pnl: 0 },
+  }).as('getTradePnlDistribution')
+
+  cy.intercept('GET', '/api/trades/analytics/monthly*', {
+    body: { items: [], total_trades: 0, total_net_pnl: 0 },
+  }).as('getTradeMonthlySummary')
+
+  cy.intercept('GET', '/api/trades/analytics/weekday*', {
+    body: { items: [], total_trades: 0, total_net_pnl: 0 },
+  }).as('getTradeWeekdayAttribution')
+
   cy.intercept('GET', '/api/events*', {
     body: {
       items: [
