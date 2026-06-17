@@ -120,7 +120,7 @@
         <div class="roundtrips-controls">
           <el-date-picker v-model="rtFromDate" type="date" value-format="YYYY-MM-DD" placeholder="开始日期" size="small" />
           <el-date-picker v-model="rtToDate" type="date" value-format="YYYY-MM-DD" placeholder="结束日期" size="small" />
-          <el-button size="small" type="primary" :loading="rtLoading" data-testid="load-roundtrips" @click="loadClosedTrades">拉取</el-button>
+          <el-button size="small" type="primary" :loading="rtLoading" data-testid="load-roundtrips" @click="loadTradeData">拉取</el-button>
           <span class="muted">按平仓时间，最近优先</span>
         </div>
         <el-table :data="closedTrades" stripe size="small" v-loading="rtLoading" data-testid="roundtrips-table">
@@ -156,6 +156,90 @@
             <template #default="{ row }">{{ formatDateTime(row.exit_at) }}</template>
           </el-table-column>
         </el-table>
+      </el-collapse-item>
+    </el-collapse>
+
+    <el-collapse
+      v-model="analyticsCollapse"
+      class="trade-analytics-collapse"
+      data-testid="trade-analytics-section"
+      @change="handleAnalyticsCollapseChange"
+    >
+      <el-collapse-item name="trade-analytics">
+        <template #title>
+          <span>交易分析（只读）</span>
+          <span class="muted roundtrips-count">按平仓时间聚合</span>
+        </template>
+        <div class="trade-analytics-grid" v-loading="analyticsLoading">
+          <section class="trade-analytics-card wide" data-testid="trade-analytics-calendar-card">
+            <header>
+              <span>交易日历</span>
+              <strong :class="pnlClass(tradeCalendar?.total_net_pnl ?? 0)">{{ formatPnl(tradeCalendar?.total_net_pnl ?? 0) }}</strong>
+            </header>
+            <div v-if="tradeCalendar && tradeCalendar.items.length" class="analytics-list" data-testid="trade-analytics-calendar-chart">
+              <div v-for="day in tradeCalendar.items.slice(-7)" :key="day.date" class="analytics-row">
+                <span>{{ day.date }}</span>
+                <span>{{ day.trade_count }} 笔 · {{ day.symbols.join(', ') }}</span>
+                <strong :class="pnlClass(day.net_pnl)">{{ formatPnl(day.net_pnl) }}</strong>
+              </div>
+            </div>
+            <div v-else class="empty-analytics">暂无交易日历数据</div>
+          </section>
+
+          <section class="trade-analytics-card" data-testid="trade-analytics-hold-duration-card">
+            <header><span>持仓时长</span><strong>{{ tradeHoldDuration?.total_trades ?? 0 }} 笔</strong></header>
+            <div v-if="tradeHoldDuration" class="analytics-list" data-testid="trade-analytics-hold-duration-chart">
+              <div v-for="bucket in nonEmptyHoldBuckets" :key="bucket.bucket" class="analytics-row">
+                <span>{{ bucket.bucket }}</span>
+                <span>{{ bucket.trade_count }} 笔 · 胜率 {{ formatPercent(bucket.win_rate) }}</span>
+                <strong :class="pnlClass(bucket.net_pnl)">{{ formatPnl(bucket.net_pnl) }}</strong>
+              </div>
+              <div v-if="nonEmptyHoldBuckets.length === 0" class="empty-analytics">暂无持仓时长数据</div>
+            </div>
+          </section>
+
+          <section class="trade-analytics-card" data-testid="trade-analytics-pnl-distribution-card">
+            <header>
+              <span>盈亏分布</span>
+              <strong :class="pnlClass(tradePnlDistribution?.total_net_pnl ?? 0)">{{ formatPnl(tradePnlDistribution?.total_net_pnl ?? 0) }}</strong>
+            </header>
+            <div v-if="tradePnlDistribution" class="analytics-list" data-testid="trade-analytics-pnl-distribution-chart">
+              <div v-for="bucket in nonEmptyPnlBuckets" :key="bucket.bucket" class="analytics-row">
+                <span>{{ bucket.bucket }}</span>
+                <span>{{ bucket.trade_count }} 笔</span>
+                <strong :class="pnlClass(bucket.net_pnl)">{{ formatPnl(bucket.net_pnl) }}</strong>
+              </div>
+              <div v-if="nonEmptyPnlBuckets.length === 0" class="empty-analytics">暂无盈亏分布数据</div>
+            </div>
+          </section>
+
+          <section class="trade-analytics-card" data-testid="trade-analytics-monthly-card">
+            <header><span>月度盈亏</span><strong>{{ tradeMonthlySummary?.total_trades ?? 0 }} 笔</strong></header>
+            <div v-if="tradeMonthlySummary" class="analytics-list" data-testid="trade-analytics-monthly-chart">
+              <div v-for="month in tradeMonthlySummary.items.slice(-6)" :key="month.month" class="analytics-row">
+                <span>{{ month.month }}</span>
+                <span>胜率 {{ formatPercent(month.win_rate) }} · 回撤 {{ month.drawdown.toFixed(2) }}</span>
+                <strong :class="pnlClass(month.cumulative_pnl)">{{ formatPnl(month.cumulative_pnl) }}</strong>
+              </div>
+              <div v-if="tradeMonthlySummary.items.length === 0" class="empty-analytics">暂无月度数据</div>
+            </div>
+          </section>
+
+          <section class="trade-analytics-card" data-testid="trade-analytics-weekday-card">
+            <header>
+              <span>星期归因</span>
+              <strong :class="pnlClass(tradeWeekdayAttribution?.total_net_pnl ?? 0)">{{ formatPnl(tradeWeekdayAttribution?.total_net_pnl ?? 0) }}</strong>
+            </header>
+            <div v-if="tradeWeekdayAttribution" class="analytics-list" data-testid="trade-analytics-weekday-chart">
+              <div v-for="day in tradeWeekdayAttribution.items" :key="day.weekday" class="analytics-row">
+                <span>{{ day.label }}</span>
+                <span>{{ day.trade_count }} 笔 · 胜率 {{ formatPercent(day.win_rate) }}</span>
+                <strong :class="pnlClass(day.net_pnl)">{{ formatPnl(day.net_pnl) }}</strong>
+              </div>
+              <div v-if="tradeWeekdayAttribution.items.length === 0" class="empty-analytics">暂无星期归因数据</div>
+            </div>
+          </section>
+        </div>
       </el-collapse-item>
     </el-collapse>
 
@@ -209,10 +293,35 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, onMounted, computed } from 'vue'
 import { ElMessage } from 'element-plus'
-import { cancelOrder, getOrders, getTradeNotes, getTradeNoteAnalytics, upsertTradeNote, deleteTradeNote, getClosedTrades, getTradeStats } from '../api'
-import type { OrderRecord, TradeNote, TradeNoteAnalytics, ClosedTrade, TradeStats } from '../types'
+import {
+  cancelOrder,
+  deleteTradeNote,
+  getClosedTrades,
+  getOrders,
+  getTradeCalendar,
+  getTradeHoldDuration,
+  getTradeMonthlySummary,
+  getTradeNotes,
+  getTradeNoteAnalytics,
+  getTradePnlDistribution,
+  getTradeStats,
+  getTradeWeekdayAttribution,
+  upsertTradeNote,
+} from '../api'
+import type {
+  ClosedTrade,
+  OrderRecord,
+  TradeCalendarResponse,
+  TradeHoldDurationResponse,
+  TradeMonthlySummaryResponse,
+  TradeNote,
+  TradeNoteAnalytics,
+  TradePnlDistributionResponse,
+  TradeStats,
+  TradeWeekdayAttributionResponse,
+} from '../types'
 import { orderSideLabel, orderStatusLabel } from '../utils/labels'
 import { resolveErrorMessage } from '../utils/error'
 
@@ -235,6 +344,13 @@ const rtFromDate = ref('')
 const rtToDate = ref('')
 const rtTotal = ref(0)
 const tradeStats = ref<TradeStats | null>(null)
+const analyticsLoading = ref(false)
+const analyticsCollapse = ref<string[]>([])
+const tradeCalendar = ref<TradeCalendarResponse | null>(null)
+const tradeHoldDuration = ref<TradeHoldDurationResponse | null>(null)
+const tradePnlDistribution = ref<TradePnlDistributionResponse | null>(null)
+const tradeMonthlySummary = ref<TradeMonthlySummaryResponse | null>(null)
+const tradeWeekdayAttribution = ref<TradeWeekdayAttributionResponse | null>(null)
 const noteDialog = reactive({
   visible: false,
   orderId: 0,
@@ -273,6 +389,10 @@ onMounted(() => {
   loadTradeStats()
 })
 
+const nonEmptyHoldBuckets = computed(() => tradeHoldDuration.value?.items.filter((bucket) => bucket.trade_count > 0) ?? [])
+const nonEmptyPnlBuckets = computed(() => tradePnlDistribution.value?.items.filter((bucket) => bucket.trade_count > 0) ?? [])
+const analyticsOpen = computed(() => analyticsCollapse.value.includes('trade-analytics'))
+
 async function loadTradeStats() {
   try {
     tradeStats.value = await getTradeStats({ days: 30 })
@@ -303,8 +423,46 @@ async function loadClosedTrades() {
   }
 }
 
+async function loadTradeAnalytics() {
+  analyticsLoading.value = true
+  const params = {
+    ...(rtFromDate.value ? { from_date: rtFromDate.value } : {}),
+    ...(rtToDate.value ? { to_date: rtToDate.value } : {}),
+  }
+  const [calendar, holdDuration, pnlDistribution, monthlySummary, weekdayAttribution] = await Promise.allSettled([
+    getTradeCalendar(params),
+    getTradeHoldDuration(params),
+    getTradePnlDistribution(params),
+    getTradeMonthlySummary(params),
+    getTradeWeekdayAttribution(params),
+  ])
+  if (calendar.status === 'fulfilled') tradeCalendar.value = calendar.value
+  if (holdDuration.status === 'fulfilled') tradeHoldDuration.value = holdDuration.value
+  if (pnlDistribution.status === 'fulfilled') tradePnlDistribution.value = pnlDistribution.value
+  if (monthlySummary.status === 'fulfilled') tradeMonthlySummary.value = monthlySummary.value
+  if (weekdayAttribution.status === 'fulfilled') tradeWeekdayAttribution.value = weekdayAttribution.value
+  analyticsLoading.value = false
+}
+
+async function loadTradeData() {
+  const closedTradesPromise = loadClosedTrades()
+  if (analyticsOpen.value) void loadTradeAnalytics()
+  await closedTradesPromise
+}
+
+function handleAnalyticsCollapseChange(activeNames: string | string[]) {
+  const names = Array.isArray(activeNames) ? activeNames : [activeNames]
+  if (names.includes('trade-analytics') && tradeCalendar.value === null && !analyticsLoading.value) {
+    void loadTradeAnalytics()
+  }
+}
+
 function formatPnl(v: number): string {
   return (v >= 0 ? '+' : '') + v.toFixed(2)
+}
+
+function formatPercent(v: number): string {
+  return `${v.toFixed(1)}%`
 }
 
 function pnlClass(v: number): string {
@@ -509,6 +667,10 @@ function statusType(status: string): string {
   width: 100%;
 }
 
+.trade-analytics-collapse {
+  width: 100%;
+}
+
 .roundtrips-count {
   margin-left: 8px;
   font-size: 12px;
@@ -554,11 +716,83 @@ function statusType(status: string): string {
   color: #172033;
 }
 
+.trade-analytics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 12px;
+}
+
+.trade-analytics-card {
+  min-height: 130px;
+  padding: 12px 14px;
+  border: 1px solid #e1e7f0;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.trade-analytics-card.wide {
+  grid-column: 1 / -1;
+}
+
+.trade-analytics-card header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.trade-analytics-card header span {
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.trade-analytics-card header strong {
+  color: #172033;
+  font-size: 16px;
+}
+
+.analytics-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.analytics-row {
+  display: grid;
+  grid-template-columns: minmax(72px, 1fr) minmax(120px, 2fr) minmax(72px, auto);
+  gap: 8px;
+  align-items: center;
+  color: #374151;
+  font-size: 12px;
+}
+
+.analytics-row span:nth-child(2) {
+  color: #6b7280;
+}
+
+.analytics-row strong {
+  text-align: right;
+}
+
+.empty-analytics {
+  color: #9ca3af;
+  font-size: 12px;
+}
+
 @media (max-width: 720px) {
   .orders-header,
   .orders-footer {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .analytics-row {
+    grid-template-columns: 1fr;
+  }
+
+  .analytics-row strong {
+    text-align: left;
   }
 }
 

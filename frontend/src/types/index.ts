@@ -609,6 +609,88 @@ export interface TradeStats {
   avg_hold_seconds: number | null
 }
 
+export interface TradeCalendarDay {
+  date: string
+  trade_count: number
+  win_count: number
+  loss_count: number
+  net_pnl: number
+  gross_pnl: number
+  symbols: string[]
+}
+
+export interface TradeCalendarResponse {
+  items: TradeCalendarDay[]
+  total_trades: number
+  total_net_pnl: number
+}
+
+export interface TradeHoldDurationBucket {
+  bucket: string
+  min_seconds: number | null
+  max_seconds: number | null
+  trade_count: number
+  win_count: number
+  loss_count: number
+  win_rate: number
+  net_pnl: number
+  avg_net_pnl: number | null
+}
+
+export interface TradeHoldDurationResponse {
+  items: TradeHoldDurationBucket[]
+  total_trades: number
+}
+
+export interface TradePnlDistributionBucket {
+  bucket: string
+  min_pnl: number | null
+  max_pnl: number | null
+  trade_count: number
+  net_pnl: number
+}
+
+export interface TradePnlDistributionResponse {
+  items: TradePnlDistributionBucket[]
+  total_trades: number
+  total_net_pnl: number
+}
+
+export interface TradeMonthlySummaryRow {
+  month: string
+  trade_count: number
+  win_count: number
+  loss_count: number
+  win_rate: number
+  net_pnl: number
+  gross_pnl: number
+  cumulative_pnl: number
+  drawdown: number
+}
+
+export interface TradeMonthlySummaryResponse {
+  items: TradeMonthlySummaryRow[]
+  total_trades: number
+  total_net_pnl: number
+}
+
+export interface TradeWeekdayAttributionRow {
+  weekday: number
+  label: string
+  trade_count: number
+  win_count: number
+  loss_count: number
+  win_rate: number
+  net_pnl: number
+  avg_net_pnl: number | null
+}
+
+export interface TradeWeekdayAttributionResponse {
+  items: TradeWeekdayAttributionRow[]
+  total_trades: number
+  total_net_pnl: number
+}
+
 export interface EquityCurvePoint {
   date: string
   realized_pnl: number

@@ -136,9 +136,72 @@ describe('History', () => {
 
     cy.contains('button', '＋ 添加').click()
     cy.get('[data-testid="trade-note-dialog"]').should('be.visible')
-    cy.get('[data-testid="trade-note-input"] textarea').type('good entry')
+    cy.get('[data-testid="trade-note-input"]').type('good entry')
     cy.get('[data-testid="trade-note-save"]').click()
     cy.wait('@saveTradeNote')
     cy.contains('笔记已保存').should('be.visible')
+  })
+
+  it('renders read-only trade analytics panels', () => {
+    cy.stubApi()
+    cy.intercept('GET', '/api/trades/analytics/calendar*', {
+      body: {
+        items: [
+          { date: '2026-06-15', trade_count: 2, win_count: 1, loss_count: 1, net_pnl: 128.5, gross_pnl: 140, symbols: ['AAPL.US', 'MSFT.US'] },
+        ],
+        total_trades: 2,
+        total_net_pnl: 128.5,
+      },
+    }).as('tradeCalendar')
+    cy.intercept('GET', '/api/trades/analytics/hold-duration*', {
+      body: {
+        items: [
+          { bucket: '<5m', min_seconds: null, max_seconds: 300, trade_count: 1, win_count: 1, loss_count: 0, win_rate: 100, net_pnl: 40, avg_net_pnl: 40 },
+          { bucket: '1h-1d', min_seconds: 3600, max_seconds: 86400, trade_count: 1, win_count: 0, loss_count: 1, win_rate: 0, net_pnl: -12, avg_net_pnl: -12 },
+        ],
+        total_trades: 2,
+      },
+    }).as('holdDuration')
+    cy.intercept('GET', '/api/trades/analytics/pnl-distribution*', {
+      body: {
+        items: [
+          { bucket: '-50-0', min_pnl: -50, max_pnl: 0, trade_count: 1, net_pnl: -12 },
+          { bucket: '0-200', min_pnl: 0, max_pnl: 200, trade_count: 2, net_pnl: 188 },
+        ],
+        total_trades: 3,
+        total_net_pnl: 176,
+      },
+    }).as('pnlDistribution')
+    cy.intercept('GET', '/api/trades/analytics/monthly*', {
+      body: {
+        items: [
+          { month: '2026-06', trade_count: 3, win_count: 2, loss_count: 1, win_rate: 66.6667, net_pnl: 176, gross_pnl: 190, cumulative_pnl: 176, drawdown: 12 },
+        ],
+        total_trades: 3,
+        total_net_pnl: 176,
+      },
+    }).as('monthlySummary')
+    cy.intercept('GET', '/api/trades/analytics/weekday*', {
+      body: {
+        items: [
+          { weekday: 0, label: 'Mon', trade_count: 2, win_count: 1, loss_count: 1, win_rate: 50, net_pnl: 128.5, avg_net_pnl: 64.25 },
+        ],
+        total_trades: 2,
+        total_net_pnl: 128.5,
+      },
+    }).as('weekdayAttribution')
+
+    cy.visit('/#/history')
+    cy.get('@tradeCalendar.all').should('have.length', 0)
+    cy.get('@holdDuration.all').should('have.length', 0)
+    cy.contains('交易分析（只读）').click()
+    cy.wait(['@tradeCalendar', '@holdDuration', '@pnlDistribution', '@monthlySummary', '@weekdayAttribution'])
+
+    cy.get('[data-testid="trade-analytics-section"]').should('be.visible')
+    cy.get('[data-testid="trade-analytics-calendar-card"]').should('contain', '2026-06-15').and('contain', '+128.50')
+    cy.get('[data-testid="trade-analytics-hold-duration-card"]').should('contain', '<5m').and('contain', '100.0%')
+    cy.get('[data-testid="trade-analytics-pnl-distribution-card"]').should('contain', '0-200').and('contain', '+188.00')
+    cy.get('[data-testid="trade-analytics-monthly-card"]').should('contain', '2026-06').and('contain', '回撤 12.00')
+    cy.get('[data-testid="trade-analytics-weekday-card"]').should('contain', 'Mon').and('contain', '+128.50')
   })
 })
