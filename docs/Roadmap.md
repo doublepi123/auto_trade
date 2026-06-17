@@ -37,6 +37,30 @@
 
 ---
 
+## 近期已完成迭代 (2026-06-17) — Reports 只读增强（5 轮 P69–P73）
+
+> 自主 feature 迭代第 6 批（5 轮）。延续低风险前端增强路线：复用既有 `/api/reports/range` 的 `metrics` / `daily_points` / `attribution` / `details` 响应，不改后端、不新增表、不触碰 broker/order path。规格：[2026-06-17-p69-p73-reports-readonly-enhancement-design.md](superpowers/specs/2026-06-17-p69-p73-reports-readonly-enhancement-design.md)。计划：[2026-06-17-p69-p73-reports-readonly-enhancement.md](superpowers/plans/2026-06-17-p69-p73-reports-readonly-enhancement.md)。
+
+| 代号 | 主题 | 状态 |
+|------|------|------|
+| **P69** | 快捷区间：Reports 增加近 7/30/90 天快捷查询 | ✅ |
+| **P70** | 交易归因：展示归因标签、交易数、PnL、胜率、占比 | ✅ |
+| **P71** | 每日 drill-down：每日明细可展开订单行 | ✅ |
+| **P72** | 报告洞察：最佳日、最差日、盈利/亏损日、最大回撤日 | ✅ |
+| **P73** | 导出/空状态 polish：当前查询范围、导出文件名预览、归因/明细空状态 | ✅ |
+
+**设计要点：**
+- **只读派生**：所有新增 UI 均由 `ReportResponse` 已有字段派生，无新增请求。
+- **快捷查询不绕过校验**：快捷区间复用 `handleSearch()`，保持现有表单校验和错误反馈。
+- **明细按日展开**：每日表通过 Element Plus expandable row 展示 `details[].orders`，空日显示明确空状态。
+- **轻量复盘摘要**：洞察卡片用 `computed` 从 `daily_points` 派生，不引入图表库。
+
+**验证：** `npm run cypress:run -- --config baseUrl=http://127.0.0.1:3000 --spec cypress/e2e/reports.cy.ts` 6 passed；`npm run type-check` 通过；`npm run build` 通过。
+
+**显式 YAGNI 未做：** 后端 CSV 明细模式、报表模板保存、跨标的组合报告、独立 BI 页面、通知推送。
+
+---
+
 ## 近期已完成迭代 (2026-06-17) — Trade Analytics 前端补齐（5 轮 P64–P68）
 
 > 自主 feature 迭代第 5 批（5 轮）。选型为低风险前端补齐：后端 `/api/trades/analytics/*` 只读端点已存在，本批不改后端、不碰 runner/order/risk、不新增表。规格：[2026-06-17-p64-p68-trade-analytics-frontend-design.md](superpowers/specs/2026-06-17-p64-p68-trade-analytics-frontend-design.md)。计划：[2026-06-17-p64-p68-trade-analytics-frontend.md](superpowers/plans/2026-06-17-p64-p68-trade-analytics-frontend.md)。

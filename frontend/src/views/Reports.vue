@@ -26,6 +26,9 @@
         </el-form-item>
         <el-form-item>
           <el-button type="primary" :loading="loading" @click="handleSearch" data-testid="reports-search">查询</el-button>
+          <el-button size="small" plain :disabled="loading" data-testid="reports-preset-7d" @click="applyRangePreset(7)">近 7 天</el-button>
+          <el-button size="small" plain :disabled="loading" data-testid="reports-preset-30d" @click="applyRangePreset(30)">近 30 天</el-button>
+          <el-button size="small" plain :disabled="loading" data-testid="reports-preset-90d" @click="applyRangePreset(90)">近 90 天</el-button>
           <el-button plain :disabled="!reportData" @click="handleExport('json')" data-testid="reports-export-json">导出 JSON</el-button>
           <el-button plain :disabled="!reportData" @click="handleExport('csv')" data-testid="reports-export-csv">导出 CSV</el-button>
         </el-form-item>
@@ -33,6 +36,11 @@
     </el-card>
 
     <template v-if="reportData">
+      <div class="report-context-card">
+        <span data-testid="reports-query-summary">当前报告：{{ reportData.symbol }} · {{ reportData.start_date }} 至 {{ reportData.end_date }}</span>
+        <span class="muted" data-testid="reports-export-preview">导出文件：{{ exportBaseName }}.json / .csv</span>
+      </div>
+
       <el-row :gutter="12" class="summary-row">
         <el-col :xs="12" :sm="6">
           <el-card class="summary-card">
@@ -90,6 +98,30 @@
         </el-col>
       </el-row>
 
+      <el-card v-if="reportInsights" class="insights-card" data-testid="reports-insights">
+        <template #header>
+          <span>报告洞察</span>
+        </template>
+        <div class="insights-grid">
+          <div class="insight-item">
+            <span>最佳日</span>
+            <strong :class="reportInsights.bestDay.pnl >= 0 ? 'positive' : 'negative'">{{ reportInsights.bestDay.date }} · {{ signedCurrency(reportInsights.bestDay.pnl) }}</strong>
+          </div>
+          <div class="insight-item">
+            <span>最差日</span>
+            <strong :class="reportInsights.worstDay.pnl >= 0 ? 'positive' : 'negative'">{{ reportInsights.worstDay.date }} · {{ signedCurrency(reportInsights.worstDay.pnl) }}</strong>
+          </div>
+          <div class="insight-item">
+            <span>盈利日/亏损日</span>
+            <strong>{{ reportInsights.profitableDays }} / {{ reportInsights.losingDays }}</strong>
+          </div>
+          <div class="insight-item">
+            <span>最大回撤日</span>
+            <strong :class="reportInsights.maxDrawdownDay.drawdown > 0 ? 'negative' : ''">{{ reportInsights.maxDrawdownDay.date }} · {{ reportInsights.maxDrawdownDay.drawdown.toFixed(2) }}</strong>
+          </div>
+        </div>
+      </el-card>
+
       <el-card v-if="reportData.daily_points.length > 0" class="chart-card">
         <template #header>
           <span>每日盈亏趋势</span>
@@ -116,11 +148,57 @@
         </div>
       </el-card>
 
+      <el-card class="table-card">
+        <template #header>
+          <span>交易归因</span>
+        </template>
+        <el-table v-if="reportData.attribution.length > 0" :data="reportData.attribution" style="width: 100%" data-testid="reports-attribution-table">
+          <el-table-column prop="label" label="归因" min-width="120" />
+          <el-table-column prop="trade_count" label="交易次数" width="100" />
+          <el-table-column label="盈亏" width="120">
+            <template #default="{ row }">
+              <span :class="(row.pnl ?? 0) >= 0 ? 'positive' : 'negative'">{{ signedCurrency(row.pnl ?? 0) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="胜率" width="100">
+            <template #default="{ row }">{{ (((row.win_rate ?? 0) * 100)).toFixed(1) }}%</template>
+          </el-table-column>
+          <el-table-column label="占比" width="100">
+            <template #default="{ row }">{{ (((row.share ?? 0) * 100)).toFixed(1) }}%</template>
+          </el-table-column>
+        </el-table>
+        <el-empty v-else description="该报告区间暂无归因数据" />
+      </el-card>
+
       <el-card v-if="reportData.daily_points.length > 0" class="table-card">
         <template #header>
           <span>每日明细</span>
         </template>
-        <el-table :data="reportData.daily_points" style="width: 100%">
+        <el-table :data="reportData.daily_points" style="width: 100%" data-testid="reports-daily-table">
+          <el-table-column type="expand" width="48">
+            <template #default="{ row }">
+              <div class="order-details" data-testid="reports-order-details">
+                <el-table v-if="ordersForDate(row.date).length > 0" :data="ordersForDate(row.date)" size="small" style="width: 100%">
+                  <el-table-column prop="broker_order_id" label="订单号" min-width="120" />
+                  <el-table-column prop="side" label="方向" width="110" />
+                  <el-table-column prop="quantity" label="数量" width="90" />
+                  <el-table-column label="成交价" width="100">
+                    <template #default="{ row: order }">{{ order.executed_price.toFixed(2) }}</template>
+                  </el-table-column>
+                  <el-table-column prop="status" label="状态" width="100" />
+                  <el-table-column label="成交时间" min-width="160">
+                    <template #default="{ row: order }">{{ order.filled_at ?? '-' }}</template>
+                  </el-table-column>
+                  <el-table-column label="盈亏" width="110">
+                    <template #default="{ row: order }">
+                      <span :class="(order.pnl ?? 0) >= 0 ? 'positive' : 'negative'">{{ signedCurrency(order.pnl ?? 0) }}</span>
+                    </template>
+                  </el-table-column>
+                </el-table>
+                <el-empty v-else description="该日暂无订单明细" />
+              </div>
+            </template>
+          </el-table-column>
           <el-table-column prop="date" label="日期" width="120" />
           <el-table-column prop="trade_count" label="交易次数" width="100" />
           <el-table-column prop="win_count" label="盈利次数" width="100" />
@@ -158,7 +236,21 @@
 import { ref, computed } from 'vue'
 import { ElMessage } from 'element-plus'
 import { getRangeReport, exportReport } from '../api/reports'
-import type { ReportResponse } from '../types'
+import type { ReportDailyPoint, ReportOrderDetail, ReportResponse } from '../types'
+
+interface ReportInsights {
+  bestDay: ReportDailyPoint
+  worstDay: ReportDailyPoint
+  maxDrawdownDay: ReportDailyPoint
+  profitableDays: number
+  losingDays: number
+}
+
+interface ReportQuery {
+  symbol: string
+  from_date: string
+  to_date: string
+}
 
 const form = ref({
   symbol: 'AAPL.US',
@@ -169,6 +261,7 @@ const form = ref({
 const loading = ref(false)
 const searched = ref(false)
 const reportData = ref<ReportResponse | null>(null)
+const submittedQuery = ref<ReportQuery | null>(null)
 
 const pnlClass = computed(() => {
   if (!reportData.value) return ''
@@ -178,6 +271,27 @@ const pnlClass = computed(() => {
 const winRateClass = computed(() => {
   if (!reportData.value) return ''
   return reportData.value.metrics.win_rate >= 0.5 ? 'positive' : 'negative'
+})
+
+const exportQuery = computed<ReportQuery | null>(() => submittedQuery.value)
+const exportBaseName = computed(() => {
+  const query = exportQuery.value ?? form.value
+  return `report_${query.symbol.split('.').join('_')}_${query.from_date}_${query.to_date}`
+})
+
+const reportInsights = computed<ReportInsights | null>(() => {
+  const points = reportData.value?.daily_points ?? []
+  if (points.length === 0) return null
+  const bestDay = points.reduce((best, point) => point.pnl > best.pnl ? point : best, points[0])
+  const worstDay = points.reduce((worst, point) => point.pnl < worst.pnl ? point : worst, points[0])
+  const maxDrawdownDay = points.reduce((worst, point) => point.drawdown > worst.drawdown ? point : worst, points[0])
+  return {
+    bestDay,
+    worstDay,
+    maxDrawdownDay,
+    profitableDays: points.filter((point) => point.pnl > 0).length,
+    losingDays: points.filter((point) => point.pnl < 0).length,
+  }
 })
 
 const chartWidth = 800
@@ -253,29 +367,39 @@ function handleSearch() {
   }
   loading.value = true
   searched.value = true
-  getRangeReport({
+  const query: ReportQuery = {
     symbol: form.value.symbol,
     from_date: form.value.from_date,
     to_date: form.value.to_date,
-  })
+  }
+  getRangeReport(query)
     .then((res) => {
       reportData.value = res
+      submittedQuery.value = query
     })
     .catch(() => {
       ElMessage.error('查询报告数据失败')
       reportData.value = null
+      submittedQuery.value = null
     })
     .finally(() => {
       loading.value = false
     })
 }
 
+function applyRangePreset(days: number) {
+  form.value.from_date = daysAgo(Math.max(0, days - 1))
+  form.value.to_date = formatDate(new Date())
+  handleSearch()
+}
+
 function handleExport(fmt: 'json' | 'csv') {
-  if (!form.value.symbol || !form.value.from_date || !form.value.to_date) return
+  const query = exportQuery.value
+  if (!query) return
   exportReport({
-    symbol: form.value.symbol,
-    from_date: form.value.from_date,
-    to_date: form.value.to_date,
+    symbol: query.symbol,
+    from_date: query.from_date,
+    to_date: query.to_date,
     format: fmt,
   })
     .then((res) => {
@@ -283,7 +407,7 @@ function handleExport(fmt: 'json' | 'csv') {
       const url = URL.createObjectURL(blob)
       const link = document.createElement('a')
       link.href = url
-      link.download = `report_${form.value.symbol.split('.').join('_')}_${form.value.from_date}_${form.value.to_date}.${fmt}`
+      link.download = `${exportBaseName.value}.${fmt}`
       document.body.appendChild(link)
       // Revoke the object URL on click rather than after a 1-second timer to
       // avoid races when the user fires several exports in quick succession
@@ -309,6 +433,10 @@ function signedCurrency(value: number): string {
   if (normalized > 0) return `+$${amount}`
   if (normalized < 0) return `-$${amount}`
   return `$${amount}`
+}
+
+function ordersForDate(date: string): ReportOrderDetail[] {
+  return reportData.value?.details.find((detail) => detail.date === date)?.orders ?? []
 }
 
 function validateForm(): boolean {
@@ -361,6 +489,23 @@ function daysAgo(days: number): string {
   margin-bottom: 0;
 }
 
+.report-context-card {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border: 1px solid #e1e7f0;
+  border-radius: 8px;
+  background: #f8fafc;
+  color: #374151;
+  font-size: 13px;
+}
+
+.muted {
+  color: #6b7280;
+}
+
 .summary-row {
   margin-bottom: 8px;
 }
@@ -394,6 +539,41 @@ function daysAgo(days: number): string {
   margin-bottom: 8px;
 }
 
+.insights-card {
+  margin-bottom: 8px;
+}
+
+.insights-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+}
+
+.insight-item {
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.insight-item span {
+  display: block;
+  margin-bottom: 4px;
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.insight-item strong {
+  color: #172033;
+}
+
+.insight-item strong.positive {
+  color: #14884f;
+}
+
+.insight-item strong.negative {
+  color: #c43838;
+}
+
 .chart-container {
   overflow-x: auto;
 }
@@ -409,6 +589,11 @@ function daysAgo(days: number): string {
 
 .table-card {
   margin-bottom: 8px;
+}
+
+.order-details {
+  padding: 8px 16px;
+  background: #f8fafc;
 }
 
 .positive {
