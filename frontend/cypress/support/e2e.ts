@@ -167,14 +167,37 @@ Cypress.Commands.add('stubApi', () => {
     },
   }).as('getMarketSession')
 
-  cy.intercept('GET', '/api/notifications*', {
-    body: {
-      items: [
-        { id: 1, title: '风控熔断', content: 'kill switch triggered', severity: 'CRITICAL', success: true, error: '', created_at: '2026-06-16T12:00:00Z' },
-        { id: 2, title: '日报', content: 'AAPL.US +200', severity: 'INFO', success: true, error: '', created_at: '2026-06-16T11:00:00Z' },
-      ],
-      total: 2, page: 1, page_size: 50,
-    },
+  cy.intercept('GET', '/api/notifications*', (req) => {
+    let items = [
+      { id: 1, title: '风控熔断', content: 'kill switch triggered', severity: 'CRITICAL', success: true, error: '', created_at: '2026-06-16T12:00:00Z' },
+      { id: 2, title: '日报', content: 'AAPL.US +200', severity: 'INFO', success: true, error: '', created_at: '2026-06-16T11:00:00Z' },
+      { id: 3, title: '发送失败', content: 'webhook timeout', severity: 'WARNING', success: false, error: 'connection refused', created_at: '2026-06-15T10:00:00Z' },
+    ]
+    const params = req.query
+    if (params.severity) {
+      items = items.filter((i) => i.severity === params.severity)
+    }
+    if (params.success !== undefined) {
+      items = items.filter((i) => String(i.success) === params.success)
+    }
+    if (params.q) {
+      const q = String(params.q).toLowerCase()
+      items = items.filter((i) =>
+        i.title.toLowerCase().includes(q) ||
+        i.content.toLowerCase().includes(q) ||
+        i.error.toLowerCase().includes(q)
+      )
+    }
+    if (params.from_date) {
+      items = items.filter((i) => i.created_at >= String(params.from_date))
+    }
+    if (params.to_date) {
+      const end = String(params.to_date) + 'T23:59:59Z'
+      items = items.filter((i) => i.created_at <= end)
+    }
+    req.reply({
+      body: { items, total: items.length, page: 1, page_size: 50 },
+    })
   }).as('getNotifications')
 
   cy.intercept('POST', '/api/reports/schedule/run', {

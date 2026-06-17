@@ -8,7 +8,28 @@
           <el-option label="WARNING" value="WARNING" />
           <el-option label="CRITICAL" value="CRITICAL" />
         </el-select>
-        <el-input v-model="searchText" placeholder="搜索标题/内容/错误" clearable style="width: 220px" data-testid="notif-search" />
+        <el-select v-model="successFilter" placeholder="全部结果" clearable style="width: 120px" data-testid="notif-success">
+          <el-option label="成功" value="true" />
+          <el-option label="失败" value="false" />
+        </el-select>
+        <el-date-picker
+          v-model="dateRange"
+          type="daterange"
+          range-separator="至"
+          start-placeholder="开始日期"
+          end-placeholder="结束日期"
+          value-format="YYYY-MM-DD"
+          clearable
+          style="width: 260px"
+          data-testid="notif-date-range"
+        />
+        <el-input
+          v-model="searchText"
+          placeholder="搜索标题/内容/错误"
+          clearable
+          style="width: 220px"
+          data-testid="notif-search"
+        />
         <el-button-group>
           <el-button :type="quickFilter === 'all' ? 'primary' : ''" data-testid="notif-filter-all" @click="setQuickFilter('all')">全部</el-button>
           <el-button :type="quickFilter === 'failed' ? 'primary' : ''" data-testid="notif-filter-failed" @click="setQuickFilter('failed')">失败</el-button>
@@ -26,7 +47,7 @@
 
     <div class="notif-summary" data-testid="notif-summary">
       <el-space wrap :size="8">
-        <el-tag type="info">当前页 {{ filteredItems.length }}/{{ items.length }}</el-tag>
+        <el-tag type="info">当前页 {{ items.length }}/{{ total }}</el-tag>
         <el-tag type="success">成功 {{ summary.success }}</el-tag>
         <el-tag type="danger">失败 {{ summary.failure }}</el-tag>
         <el-tag type="danger">CRITICAL {{ summary.critical }}</el-tag>
@@ -35,7 +56,7 @@
       </el-space>
     </div>
 
-    <div v-if="filteredItems.length === 0" class="notif-empty">
+    <div v-if="items.length === 0" class="notif-empty">
       <el-empty description="没有匹配的通知" />
     </div>
 
@@ -64,7 +85,7 @@
       </div>
     </div>
 
-    <el-table v-else :data="filteredItems" size="small" class="responsive-table" v-loading="loading" data-testid="notif-list">
+    <el-table v-else :data="items" size="small" class="responsive-table" v-loading="loading" data-testid="notif-list">
       <el-table-column prop="created_at" label="时间" min-width="170">
         <template #default="{ row }">{{ formatDateTime(row.created_at) }}</template>
       </el-table-column>
@@ -109,28 +130,12 @@ const page = ref(1)
 const pageSize = ref(50)
 const loading = ref(false)
 const severityFilter = ref<string>('')
+const successFilter = ref<string>('')
+const dateRange = ref<string[] | null>(null)
 const searchText = ref('')
 const quickFilter = ref<'all' | 'failed' | 'critical' | 'warning' | 'info'>('all')
 const viewMode = ref<'cards' | 'table'>('cards')
-
-const filteredItems = computed(() => {
-  const keyword = searchText.value.trim().toLowerCase()
-  return items.value.filter((item) => {
-    const severityMatch = !severityFilter.value || item.severity === severityFilter.value
-    const quickMatch =
-      quickFilter.value === 'all'
-        ? true
-        : quickFilter.value === 'failed'
-          ? !item.success
-          : item.severity === quickFilter.value.toUpperCase()
-    const textMatch =
-      !keyword ||
-      item.title.toLowerCase().includes(keyword) ||
-      item.content.toLowerCase().includes(keyword) ||
-      (item.error || '').toLowerCase().includes(keyword)
-    return severityMatch && quickMatch && textMatch
-  })
-})
+let searchDebounceTimer: number | undefined
 
 const summary = computed(() => {
   let success = 0
@@ -150,7 +155,7 @@ const summary = computed(() => {
 
 const dayGroups = computed(() => {
   const groups = new Map<string, NotificationLogOut[]>()
-  for (const item of filteredItems.value) {
+  for (const item of items.value) {
     const day = new Date(item.created_at).toLocaleDateString([], { year: 'numeric', month: '2-digit', day: '2-digit' })
     const list = groups.get(day)
     if (list) list.push(item)
@@ -162,11 +167,17 @@ const dayGroups = computed(() => {
 async function load() {
   loading.value = true
   try {
-    const data = await getNotifications({
+    const params: Record<string, unknown> = {
       page: page.value,
       page_size: pageSize.value,
-      ...(severityFilter.value ? { severity: severityFilter.value } : {}),
-    })
+    }
+    if (severityFilter.value) params.severity = severityFilter.value
+    if (successFilter.value) params.success = successFilter.value === 'true'
+    if (dateRange.value?.[0]) params.from_date = dateRange.value[0]
+    if (dateRange.value?.[1]) params.to_date = dateRange.value[1]
+    if (searchText.value.trim()) params.q = searchText.value.trim()
+
+    const data = await getNotifications(params)
     items.value = data.items
     total.value = data.total
   } catch (e) {
@@ -183,6 +194,26 @@ function handlePage(next: number) {
 
 function setQuickFilter(value: typeof quickFilter.value) {
   quickFilter.value = value
+  if (value === 'all') {
+    severityFilter.value = ''
+    successFilter.value = ''
+  } else if (value === 'failed') {
+    severityFilter.value = ''
+    successFilter.value = 'false'
+  } else {
+    severityFilter.value = value.toUpperCase()
+    successFilter.value = ''
+  }
+  page.value = 1
+  load()
+}
+
+function debouncedLoad() {
+  window.clearTimeout(searchDebounceTimer)
+  searchDebounceTimer = window.setTimeout(() => {
+    page.value = 1
+    load()
+  }, 300)
 }
 
 function severityType(s: string): string {
@@ -197,7 +228,10 @@ function formatDateTime(v: string): string {
   })
 }
 
-watch(severityFilter, () => { page.value = 1; load() })
+watch(severityFilter, () => { quickFilter.value = 'all'; page.value = 1; load() })
+watch(successFilter, () => { quickFilter.value = 'all'; page.value = 1; load() })
+watch(dateRange, () => { page.value = 1; load() }, { deep: true })
+watch(searchText, debouncedLoad)
 onMounted(load)
 </script>
 
@@ -312,7 +346,8 @@ onMounted(load)
   }
 
   .notif-actions .el-input,
-  .notif-actions .el-select {
+  .notif-actions .el-select,
+  .notif-actions .el-date-editor {
     width: 100% !important;
   }
 }

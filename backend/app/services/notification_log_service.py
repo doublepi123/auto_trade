@@ -7,9 +7,10 @@ sink never raises, so a logging failure can never block a real notification.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, time, timezone
 from typing import Callable, Optional
 
-from sqlalchemy import desc, func, select
+from sqlalchemy import desc, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.models import NotificationLog
@@ -21,6 +22,11 @@ logger = logging.getLogger(__name__)
 NotificationSink = Callable[[str, str, str, bool, str], None]
 
 
+def _parse_date(value: str) -> datetime:
+    """Parse a YYYY-MM-DD string into a UTC datetime."""
+    return datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+
+
 class NotificationLogService:
     def __init__(self, db: Session) -> None:
         self._db = db
@@ -29,6 +35,10 @@ class NotificationLogService:
         self,
         *,
         severity: str | None = None,
+        q: str | None = None,
+        success: bool | None = None,
+        from_date: str | None = None,
+        to_date: str | None = None,
         page: int = 1,
         page_size: int = 50,
     ) -> NotificationLogPage:
@@ -36,9 +46,31 @@ class NotificationLogService:
         page_size = max(1, min(page_size, 200))
         stmt = select(NotificationLog)
         count_stmt = select(func.count()).select_from(NotificationLog)
-        if severity:
-            stmt = stmt.where(NotificationLog.severity == severity)
-            count_stmt = count_stmt.where(NotificationLog.severity == severity)
+
+        def _apply_filters(statement):  # noqa: ANN202
+            s = statement
+            if severity:
+                s = s.where(NotificationLog.severity == severity)
+            if q:
+                pattern = f"%{q}%"
+                s = s.where(
+                    or_(
+                        NotificationLog.title.ilike(pattern),
+                        NotificationLog.content.ilike(pattern),
+                        NotificationLog.error.ilike(pattern),
+                    )
+                )
+            if success is not None:
+                s = s.where(NotificationLog.success.is_(success))
+            if from_date:
+                s = s.where(NotificationLog.created_at >= _parse_date(from_date))
+            if to_date:
+                end = datetime.combine(_parse_date(to_date).date(), time.max, tzinfo=timezone.utc)
+                s = s.where(NotificationLog.created_at <= end)
+            return s
+
+        stmt = _apply_filters(stmt)
+        count_stmt = _apply_filters(count_stmt)
         total = self._db.scalar(count_stmt) or 0
         stmt = (
             stmt.order_by(desc(NotificationLog.created_at), desc(NotificationLog.id))

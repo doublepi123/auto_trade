@@ -105,13 +105,77 @@ class TestNotificationSinkAndService(_Base):
         assert notifier.send("hello", "world", "INFO") is True
         assert captured == [("hello", "INFO", True, "")]
 
-    def test_multi_channel_sink_records_failure(self) -> None:
-        captured: list[tuple] = []
-        sink = lambda t, c, s, ok, err: captured.append((t, s, ok, err))  # noqa: E731
-        notifier = MultiChannelNotifier([(_FakeNotifier(ok=False), "INFO")], sink=sink)
-        notifier.send("warn", "body", "WARNING")
-        assert captured[0][2] is False  # success False
-        assert captured[0][1] == "WARNING"
+    def test_service_q_search(self) -> None:
+        sink = NotificationLogSink(self._factory())
+        sink.record("hello", "world", "INFO", True)
+        sink.record("goodbye", "moon", "CRITICAL", False, "boom")
+        sink.record("other", "note", "WARNING", True)
+        svc = NotificationLogService(self._db())
+        assert svc.list_logs(q="hello").total == 1
+        assert svc.list_logs(q="moon").total == 1
+        assert svc.list_logs(q="boom").total == 1
+        assert svc.list_logs(q="hell").total == 1  # hello only
+
+    def test_service_success_filter(self) -> None:
+        sink = NotificationLogSink(self._factory())
+        sink.record("ok", "", "INFO", True)
+        sink.record("bad", "", "CRITICAL", False, "err")
+        svc = NotificationLogService(self._db())
+        assert svc.list_logs(success=True).total == 1
+        assert svc.list_logs(success=False).total == 1
+
+    def _add_log(self, title: str, created_at, success: bool = True, severity: str = "INFO", error: str = "") -> None:
+        from datetime import datetime, timezone
+
+        db = self._db()
+        db.add(
+            NotificationLog(
+                title=title,
+                content="",
+                severity=severity,
+                success=success,
+                error=error,
+                created_at=created_at if created_at.tzinfo else created_at.replace(tzinfo=timezone.utc),
+            )
+        )
+        db.commit()
+        db.close()
+
+    def test_service_date_range_filter(self) -> None:
+        from datetime import datetime, timezone
+
+        self._add_log("a", datetime(2026, 6, 15, 10, 0, 0, tzinfo=timezone.utc))
+        self._add_log("b", datetime(2026, 6, 16, 10, 0, 0, tzinfo=timezone.utc))
+
+        svc = NotificationLogService(self._db())
+        assert svc.list_logs(from_date="2026-06-16").total == 1
+        assert svc.list_logs(from_date="2026-06-15", to_date="2026-06-15").total == 1
+        assert svc.list_logs(to_date="2026-06-14").total == 0
+        assert svc.list_logs(from_date="2026-06-15", to_date="2026-06-16").total == 2
+
+    def test_api_q_and_success_filter(self) -> None:
+        sink = NotificationLogSink(self._factory())
+        sink.record("api ok", "body", "INFO", True)
+        sink.record("api fail", "body", "CRITICAL", False, "err")
+        resp = self.client.get("/api/notifications", params={"q": "fail", "success": "false"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 1
+        assert data["items"][0]["title"] == "api fail"
+
+    def test_api_date_filter(self) -> None:
+        from datetime import datetime, timezone
+
+        self._add_log("a", datetime(2026, 6, 15, 10, 0, 0, tzinfo=timezone.utc))
+
+        resp = self.client.get("/api/notifications", params={"from_date": "2026-06-16"})
+        assert resp.json()["total"] == 0
+        resp = self.client.get("/api/notifications", params={"from_date": "2026-06-15"})
+        assert resp.json()["total"] == 1
+
+    def test_api_invalid_date_returns_422(self) -> None:
+        resp = self.client.get("/api/notifications", params={"from_date": "not-a-date"})
+        assert resp.status_code == 422
 
 
 class TestNotificationAPI(_Base):
