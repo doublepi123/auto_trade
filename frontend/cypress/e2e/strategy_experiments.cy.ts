@@ -198,7 +198,7 @@ describe('Strategy Experiments', () => {
     cy.intercept('GET', '/api/strategy-experiments/1/runs*', {
       body: {
         items: [
-          { id: 1, experiment_id: 1, parameters: { buy_low: 178.0, sell_high: 190.0, fee_rate: 0.0005 }, status: 'COMPLETED', total_pnl: 120.5, total_return_pct: 0.12, max_drawdown_pct: 0.02, win_rate: 0.5, trade_count: 2, closed_trade_count: 2 },
+          { id: 1, experiment_id: 1, parameters: { buy_low: 178.0, sell_high: 190.0, fee_rate: 0.0005 }, status: 'COMPLETED', total_pnl: 120.5, total_return_pct: 0.12, max_drawdown_pct: 0.02, win_rate: 0.5, trade_count: 2, closed_trade_count: 2, sharpe_ratio: 0.55, profit_factor: 1.2, profit_loss_ratio: 1.5, error: null, created_at: '2026-05-01T10:00:00Z' },
         ],
         total: 1,
         page: 1,

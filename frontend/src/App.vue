@@ -15,7 +15,9 @@
         <router-link to="/history" class="app-menu-link" :class="{ active: route.path === '/history' }">交易历史</router-link>
         <router-link to="/events" class="app-menu-link" :class="{ active: route.path === '/events' }">决策时间线</router-link>
         <router-link to="/alerts" class="app-menu-link" :class="{ active: route.path === '/alerts' }">告警规则</router-link>
-        <router-link to="/notifications" class="app-menu-link" :class="{ active: route.path === '/notifications' }">通知中心</router-link>
+        <el-badge :value="unreadCount" :max="99" :hidden="unreadCount === 0" data-testid="nav-notif-badge">
+          <router-link to="/notifications" class="app-menu-link" :class="{ active: route.path === '/notifications' }">通知中心</router-link>
+        </el-badge>
         <router-link to="/lab" class="app-menu-link" :class="{ active: route.path === '/lab' }">优化工作台</router-link>
       </nav>
       <el-button size="small" text @click="dialogVisible = true" data-testid="nav-notification-settings"
@@ -66,12 +68,14 @@ import { defineAsyncComponent, ref, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { Odometer, Setting, List, Clock, Key, TrendCharts } from '@element-plus/icons-vue'
 import { useNotificationStream } from './composables/useNotificationStream'
+import { useNotificationBadge } from './composables/useNotificationBadge'
 
 const NotificationSettings = defineAsyncComponent(() => import('./components/NotificationSettings.vue'))
 
 const route = useRoute()
 const dialogVisible = ref(false)
 const notifications = useNotificationStream()
+const { unreadCount } = useNotificationBadge()
 const MOBILE_BREAKPOINT = 768
 const isMobile = ref(window.innerWidth <= MOBILE_BREAKPOINT)
 

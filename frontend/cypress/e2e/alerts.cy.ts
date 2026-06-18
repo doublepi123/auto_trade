@@ -5,7 +5,7 @@ describe('Alert Rules', () => {
 
     cy.get('[data-testid="alert-create"]').click()
     cy.get('[data-testid="alert-dialog"]').should('be.visible')
-    cy.get('[data-testid="alert-name"] input').type('NVDA 高点')
+    cy.get('input[placeholder="规则名称"]').type('NVDA 高点')
     cy.get('[data-testid="alert-save"]').click()
     cy.wait('@createAlertRule')
 

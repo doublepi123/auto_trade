@@ -429,3 +429,118 @@ def test_backtest_metrics_serialization_includes_new_fields() -> None:
     assert "calmar_ratio" in d
     assert d["sortino_ratio"] == 1.5
     assert d["calmar_ratio"] == 5.0
+
+
+class TestBacktestExport:
+    """CSV export endpoint for backtest results."""
+
+    @staticmethod
+    def _sample_result() -> dict:
+        return {
+            "result": {
+                "params": {
+                    "symbol": "AAPL.US",
+                    "buy_low": 100,
+                    "sell_high": 200,
+                    "short_selling": False,
+                    "min_profit_amount": 0,
+                    "max_daily_loss": 5000,
+                    "max_consecutive_losses": 3,
+                    "quantity": 2,
+                    "initial_cash": 10000,
+                    "fee_rate": 0,
+                    "fixed_fee": 0,
+                    "slippage_pct": 0,
+                    "stop_loss_pct": 0,
+                },
+                "metrics": {
+                    "initial_cash": 10000,
+                    "final_equity": 10200,
+                    "total_pnl": 200,
+                    "total_return_pct": 2,
+                    "max_drawdown_pct": 0,
+                    "trade_count": 2,
+                    "closed_trade_count": 1,
+                    "winning_trades": 1,
+                    "losing_trades": 0,
+                    "win_rate": 100,
+                    "avg_holding_minutes": 1,
+                    "fees_paid": 0,
+                    "skipped_signals": 0,
+                    "final_state": "flat",
+                },
+                "equity_curve": [
+                    {
+                        "timestamp": "2026-05-22T10:00:00Z",
+                        "close": 105,
+                        "equity": 10010,
+                        "realized_pnl": 0,
+                        "unrealized_pnl": 10,
+                        "drawdown_pct": 0,
+                        "position": "long",
+                    },
+                    {
+                        "timestamp": "2026-05-22T10:01:00Z",
+                        "close": 200,
+                        "equity": 10200,
+                        "realized_pnl": 200,
+                        "unrealized_pnl": 0,
+                        "drawdown_pct": 0,
+                        "position": "flat",
+                    },
+                ],
+                "trades": [
+                    {
+                        "timestamp": "2026-05-22T10:00:00Z",
+                        "action": "BUY",
+                        "price": 100,
+                        "quantity": 2,
+                        "fee": 0,
+                        "pnl": 0,
+                        "state_after": "long",
+                        "reason": "low reached buy_low",
+                        "holding_minutes": None,
+                    },
+                    {
+                        "timestamp": "2026-05-22T10:01:00Z",
+                        "action": "SELL",
+                        "price": 200,
+                        "quantity": 2,
+                        "fee": 0,
+                        "pnl": 200,
+                        "state_after": "flat",
+                        "reason": "exit threshold reached",
+                        "holding_minutes": 1,
+                    },
+                ],
+                "skipped_signals": [],
+                "fee_sensitivity": [
+                    {"fee_rate": 0, "total_pnl": 200, "total_return_pct": 2, "max_drawdown_pct": 0},
+                ],
+            },
+        }
+
+    def test_export_returns_csv_with_all_sections(self) -> None:
+        resp = client.post("/api/backtest/export", json=self._sample_result())
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "text/csv; charset=utf-8"
+        assert "Content-Disposition" in resp.headers
+        assert 'attachment; filename="backtest_AAPL_US_' in resp.headers["Content-Disposition"]
+        body = resp.text
+        assert "# Backtest Result Export" in body
+        assert "trades" in body
+        assert "BUY" in body
+        assert "SELL" in body
+        assert "equity_curve" in body
+        assert "fee_sensitivity" in body
+
+    def test_export_respects_sections_filter(self) -> None:
+        payload = self._sample_result()
+        payload["sections"] = ["params", "trades"]
+        resp = client.post("/api/backtest/export", json=payload)
+        assert resp.status_code == 200
+        body = resp.text
+        assert "trades" in body
+        assert "equity_curve" not in body
+        assert "fee_sensitivity" not in body
+

@@ -62,6 +62,13 @@
               placeholder='可选: 自定义 JSON 模板,支持 {title} {content} {severity} {timestamp} {source}'
               data-testid="webhook-template"
             />
+            <div class="template-hint">
+              可用变量：{title} {content} {severity} {timestamp} {source}
+            </div>
+            <div v-if="channel.template" class="template-preview" data-testid="webhook-template-preview">
+              <div class="template-preview-title">预览</div>
+              <pre>{{ previewTemplate(channel.template) }}</pre>
+            </div>
           </el-form-item>
           <el-form-item label="级别下限">
             <el-select v-model="channel.severity_floor" style="width: 160px">
@@ -70,9 +77,14 @@
               <el-option label="仅 CRITICAL" value="CRITICAL" />
             </el-select>
           </el-form-item>
-          <el-button type="danger" link native-type="button" @click="removeChannel(idx)" :disabled="notificationChannels.length <= 1">
-            删除
-          </el-button>
+          <div class="channel-actions">
+            <el-button plain size="small" :loading="channelTesting[idx]" data-testid="channel-test-btn" @click="testChannel(idx)">测试</el-button>
+            <el-tag v-if="channelTestResults[idx]?.ok" type="success" size="small" data-testid="channel-test-success">通过</el-tag>
+            <el-tag v-else-if="channelTestResults[idx]" type="danger" size="small" data-testid="channel-test-fail">{{ channelTestResults[idx]?.error }}</el-tag>
+            <el-button type="danger" link native-type="button" @click="removeChannel(idx)" :disabled="notificationChannels.length <= 1">
+              删除
+            </el-button>
+          </div>
         </div>
         <el-button plain type="primary" native-type="button" style="margin-bottom: 16px" data-testid="add-notification-channel" @click="addChannel">
           + 添加渠道
@@ -101,10 +113,10 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref, watch } from 'vue'
+import { onMounted, ref, watch, computed } from 'vue'
 import { onBeforeRouteLeave } from 'vue-router'
-import { ElMessageBox } from 'element-plus'
-import { getCredentials, updateCredentials } from '../api'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { getCredentials, updateCredentials, testNotificationChannel } from '../api'
 import type { NotificationChannel } from '../types'
 
 const form = ref({
@@ -131,6 +143,8 @@ const reloadWarning = ref<string | null>(null)
 const savedSnapshot = ref(serializeSnapshot())
 const testingConnection = ref(false)
 const testResult = ref<{ ok: boolean; error?: string } | null>(null)
+const channelTesting = ref<boolean[]>([])
+const channelTestResults = ref<Array<{ ok: boolean; error?: string } | null>>([])
 
 watch([form, notificationChannels], () => {
   if (isDirty()) {
@@ -153,6 +167,8 @@ onMounted(async () => {
       ? JSON.parse(JSON.stringify(list)) as NotificationChannel[]
       : [{ type: 'serverchan', severity_floor: 'INFO' }]
     normalizeChannels(notificationChannels.value)
+    channelTesting.value = notificationChannels.value.map(() => false)
+    channelTestResults.value = notificationChannels.value.map(() => null)
     savedSnapshot.value = serializeSnapshot()
   } catch (e) {
     console.error('加载凭证失败：', e)
@@ -176,17 +192,38 @@ function normalizeChannels(rows: NotificationChannel[]) {
   })
 }
 
+function previewTemplate(template: string | undefined): string {
+  if (!template) return ''
+  const sample = {
+    title: 'Auto Trade: 测试消息',
+    content: '这是一条测试通知内容',
+    severity: 'WARNING',
+    timestamp: new Date().toISOString(),
+    source: 'auto_trade',
+  }
+  return template
+    .replace(/\{title\}/g, sample.title)
+    .replace(/\{content\}/g, sample.content)
+    .replace(/\{severity\}/g, sample.severity)
+    .replace(/\{timestamp\}/g, sample.timestamp)
+    .replace(/\{source\}/g, sample.source)
+}
+
 function onChannelTypeChange(ch: NotificationChannel) {
   if (ch.type === 'serverchan') delete ch.url
 }
 
 function addChannel() {
   notificationChannels.value.push({ type: 'serverchan', severity_floor: 'INFO' })
+  channelTesting.value.push(false)
+  channelTestResults.value.push(null)
 }
 
 function removeChannel(idx: number) {
   if (notificationChannels.value.length <= 1) return
   notificationChannels.value.splice(idx, 1)
+  channelTesting.value.splice(idx, 1)
+  channelTestResults.value.splice(idx, 1)
 }
 
 function serializeSnapshot(): string {
@@ -231,6 +268,28 @@ async function testConnection() {
     testResult.value = { ok: false, error: message }
   } finally {
     testingConnection.value = false
+  }
+}
+
+async function testChannel(idx: number) {
+  const channel = notificationChannels.value[idx]
+  if (!channel || channelTesting.value[idx]) return
+  channelTesting.value[idx] = true
+  channelTestResults.value[idx] = null
+  try {
+    const result = await testNotificationChannel(channel)
+    channelTestResults.value[idx] = result
+    if (result.ok) {
+      ElMessage.success('渠道测试通过')
+    } else {
+      ElMessage.error(result.error ?? '渠道测试失败')
+    }
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : '渠道测试请求失败'
+    channelTestResults.value[idx] = { ok: false, error: message }
+    ElMessage.error(message)
+  } finally {
+    channelTesting.value[idx] = false
   }
 }
 
@@ -319,6 +378,40 @@ async function handleSave() {
   position: absolute;
   top: 8px;
   right: 8px;
+}
+
+.channel-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.template-hint {
+  margin-top: 6px;
+  color: #909399;
+  font-size: 12px;
+}
+
+.template-preview {
+  margin-top: 8px;
+  border-radius: 4px;
+  background: #f5f7fa;
+  padding: 10px;
+}
+
+.template-preview-title {
+  margin-bottom: 6px;
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.template-preview pre {
+  margin: 0;
+  color: #172033;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 @media (max-width: 520px) {

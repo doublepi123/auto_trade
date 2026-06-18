@@ -459,9 +459,10 @@ auto_trade/
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/api/notifications` | 已发送通知的分发日志；`?severity=&page=&page_size=`（按时间倒序） |
+| `GET` | `/api/notifications` | 已发送通知的分发日志；`?severity=&q=&success=&from_date=&to_date=&page=&page_size=`（按时间倒序） |
+| `GET` | `/api/notifications/export` | 导出过滤后的通知；`?format=csv|json&severity=&q=&success=&from_date=&to_date=`（无分页） |
 
-> 后台每条通知（风控 / 告警 / 日报）经 `MultiChannelNotifier.send` 时由可选 sink 落库 `notifications`（best-effort，失败不阻断通知）。Web UI：「通知中心」页（级别筛选 + 分页）。
+> 后台每条通知（风控 / 告警 / 日报）经 `MultiChannelNotifier.send` 时由可选 sink 落库 `notifications`（best-effort，失败不阻断通知）。Web UI：「通知中心」页（卡片 / 表格 / 运维时间线三视图、搜索过滤、CSV/JSON 导出）。
 
 ### 交易笔记（Trade Journal）
 

@@ -93,4 +93,53 @@ describe('Notification Center', () => {
     cy.get('[data-testid="notif-card-2"]').should('not.exist')
     cy.get('[data-testid="notif-card-3"]').should('not.exist')
   })
+
+  it('switches to timeline view', () => {
+    cy.get('[data-testid="notif-view-timeline"]').click()
+    cy.get('[data-testid="notif-timeline"]').should('be.visible')
+    cy.get('[data-testid="notif-timeline-item-1"]').should('be.visible')
+    cy.get('[data-testid="notif-day-groups"]').should('not.exist')
+    cy.get('[data-testid="notif-list"]').should('not.exist')
+  })
+
+  it('exports notifications as CSV', () => {
+    cy.get('[data-testid="notif-export-csv"]').click()
+    cy.wait('@exportNotifications')
+    cy.get('@exportNotifications').its('request.query.format').should('equal', 'csv')
+  })
+
+  it('exports notifications as JSON', () => {
+    cy.get('[data-testid="notif-export-json"]').click()
+    cy.wait('@exportNotifications')
+    cy.get('@exportNotifications').its('request.query.format').should('equal', 'json')
+  })
+
+  it('passes current filters to CSV export', () => {
+    cy.get('[data-testid="notif-severity"]').click()
+    cy.get('.el-select-dropdown__item').contains('CRITICAL').click()
+    cy.wait('@getNotifications')
+
+    cy.get('[data-testid="notif-export-csv"]').click()
+    cy.wait('@exportNotifications')
+    cy.get('@exportNotifications').its('request.query.severity').should('equal', 'CRITICAL')
+    cy.get('@exportNotifications').its('request.query.format').should('equal', 'csv')
+  })
+
+  it('opens notification detail dialog from card view', () => {
+    cy.get('[data-testid="notif-card-3"]').click()
+    cy.get('[data-testid="notif-detail-dialog"]').should('be.visible')
+    cy.contains('发送失败').should('be.visible')
+    cy.contains('connection refused').should('be.visible')
+  })
+
+  it('opens notification detail dialog from table view', () => {
+    cy.get('[data-testid="notif-view-table"]').click()
+    cy.get('[data-testid="notif-list"] tbody tr').first().click()
+    cy.get('[data-testid="notif-detail-dialog"]').should('be.visible')
+  })
+
+  it('shows copy error button for failed notification', () => {
+    cy.get('[data-testid="notif-card-3"]').click()
+    cy.get('[data-testid="notif-copy-error"]').should('be.visible')
+  })
 })

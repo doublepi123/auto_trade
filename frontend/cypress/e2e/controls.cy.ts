@@ -11,20 +11,25 @@ describe('Controls', () => {
   })
 
   it('can stop and start the runner', () => {
-    cy.get('button').contains('停止').click({ force: true })
+    cy.get('[data-testid="dashboard-stop-btn"]').click({ force: true })
     cy.wait('@stopAction')
+    cy.wait('@getStatus')
+    cy.wait('@getDiagnostics')
+    cy.wait(500)
     cy.contains('已暂停').should('be.visible')
 
-    cy.get('button').contains('启动').click({ force: true })
+    cy.get('[data-testid="dashboard-start-btn"]').should('not.be.disabled').click({ force: true })
     cy.wait('@startAction')
     cy.contains('运行中').should('be.visible')
   })
 
   it('can resume trading after pause', () => {
-    cy.get('button').contains('暂停').click({ force: true })
+    cy.get('[data-testid="dashboard-pause-btn"]').click({ force: true })
     cy.wait('@pauseAction')
+    cy.wait('@getStatus')
+    cy.wait('@getDiagnostics')
     cy.contains('已暂停').should('be.visible')
-    cy.get('button').contains('恢复').click({ force: true })
+    cy.get('[data-testid="dashboard-resume-btn"]').should('not.be.disabled').click({ force: true })
     cy.wait('@resumeAction')
     cy.contains('运行中').should('be.visible')
   })

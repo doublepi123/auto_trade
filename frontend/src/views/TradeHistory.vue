@@ -21,7 +21,7 @@
         </div>
       </div>
     </div>
-    <el-table :data="orders" stripe style="width: 100%" v-loading="loading">
+    <el-table :data="orders" stripe style="width: 100%" v-loading="loading" @row-click="openOrderDrawer">
       <el-table-column prop="broker_order_id" label="订单号" width="180" />
       <el-table-column prop="symbol" label="股票代码" width="120" />
       <el-table-column prop="source" label="来源" width="90">
@@ -66,7 +66,7 @@
             link
             :type="notesByOrder.has(row.id) ? 'primary' : ''"
             data-testid="trade-note-button"
-            @click="openNoteDialog(row)"
+            @click.stop="openNoteDialog(row)"
           >
             {{ notesByOrder.has(row.id) ? '📝 查看' : '＋ 添加' }}
           </el-button>
@@ -80,7 +80,7 @@
             type="danger"
             size="small"
             :loading="cancellingOrderId === row.broker_order_id"
-            @click="handleCancel(row)"
+            @click.stop="handleCancel(row)"
           >
             撤单
           </el-button>
@@ -243,6 +243,76 @@
       </el-collapse-item>
     </el-collapse>
 
+    <el-drawer
+      v-model="orderDrawer.visible"
+      :title="`订单详情 · ${orderDrawer.order?.symbol || ''}`"
+      size="400px"
+      data-testid="order-detail-drawer"
+    >
+      <template v-if="orderDrawer.order">
+        <div class="detail-section">
+          <div class="detail-label">订单号</div>
+          <div class="detail-value">{{ orderDrawer.order.broker_order_id }}</div>
+        </div>
+        <div class="detail-section">
+          <div class="detail-label">标的</div>
+          <div class="detail-value">{{ orderDrawer.order.symbol }}</div>
+        </div>
+        <div class="detail-section">
+          <div class="detail-label">方向</div>
+          <el-tag :type="orderDrawer.order.side === 'BUY' || orderDrawer.order.side === 'BUY_TO_COVER' ? 'success' : 'danger'">
+            {{ orderSideLabel(orderDrawer.order.side) }}
+          </el-tag>
+        </div>
+        <div class="detail-section">
+          <div class="detail-label">数量</div>
+          <div class="detail-value">
+            {{ orderDrawer.order.quantity }}
+            <span v-if="orderDrawer.order.executed_quantity !== null && orderDrawer.order.executed_quantity !== orderDrawer.order.quantity" class="muted">
+              （成交 {{ orderDrawer.order.executed_quantity }}）
+            </span>
+          </div>
+        </div>
+        <div class="detail-section">
+          <div class="detail-label">价格</div>
+          <div class="detail-value">
+            ${{ orderDrawer.order.price }}
+            <span v-if="orderDrawer.order.executed_price !== null && orderDrawer.order.executed_price !== orderDrawer.order.price" class="muted">
+              （成交 ${{ orderDrawer.order.executed_price }}）
+            </span>
+          </div>
+        </div>
+        <div class="detail-section">
+          <div class="detail-label">状态</div>
+          <el-tag :type="statusType(orderDrawer.order.status)">{{ orderStatusLabel(orderDrawer.order.status) }}</el-tag>
+        </div>
+        <div class="detail-section">
+          <div class="detail-label">来源</div>
+          <el-tag size="small" :type="orderDrawer.order.source === 'broker' ? 'primary' : 'info'">{{ orderDrawer.order.source }}</el-tag>
+        </div>
+        <div class="detail-section">
+          <div class="detail-label">创建时间</div>
+          <div class="detail-value">{{ formatDateTime(orderDrawer.order.created_at) }}</div>
+        </div>
+        <div v-if="orderDrawer.order.filled_at" class="detail-section">
+          <div class="detail-label">成交时间</div>
+          <div class="detail-value">{{ formatDateTime(orderDrawer.order.filled_at) }}</div>
+        </div>
+        <div class="detail-section">
+          <el-button
+            v-if="orderDrawer.order.id > 0"
+            type="primary"
+            plain
+            size="small"
+            data-testid="order-detail-note-btn"
+            @click="openNoteDialog(orderDrawer.order); orderDrawer.visible = false"
+          >
+            {{ notesByOrder.has(orderDrawer.order.id) ? '查看笔记' : '添加笔记' }}
+          </el-button>
+        </div>
+      </template>
+    </el-drawer>
+
     <el-dialog
       v-model="noteDialog.visible"
       :title="`交易笔记 · ${noteDialog.symbol} #${noteDialog.orderId}`"
@@ -361,6 +431,11 @@ const noteDialog = reactive({
   exists: false,
   saving: false,
   deleting: false,
+})
+
+const orderDrawer = reactive({
+  visible: false,
+  order: null as OrderRecord | null,
 })
 
 async function loadOrders(refresh = false) {
@@ -549,6 +624,11 @@ async function openNoteDialog(row: OrderRecord) {
     noteDialog.exists = false
   }
   noteDialog.visible = true
+}
+
+function openOrderDrawer(row: OrderRecord) {
+  orderDrawer.order = row
+  orderDrawer.visible = true
 }
 
 async function handleSaveNote() {
@@ -778,6 +858,22 @@ function statusType(status: string): string {
 .empty-analytics {
   color: #9ca3af;
   font-size: 12px;
+}
+
+.detail-section {
+  margin-bottom: 16px;
+}
+
+.detail-label {
+  margin-bottom: 4px;
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.detail-value {
+  color: #172033;
+  font-size: 15px;
+  font-weight: 600;
 }
 
 @media (max-width: 720px) {

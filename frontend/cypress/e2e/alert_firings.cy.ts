@@ -1,7 +1,7 @@
 describe('Alert firing history', () => {
   it('opens a rule and shows its firing timeline', () => {
     cy.stubApi()
-    cy.intercept('GET', '/api/alert-rules', {
+    cy.intercept('GET', '/api/alert-rules*', {
       body: {
         items: [
           {
@@ -20,7 +20,7 @@ describe('Alert firing history', () => {
         total: 1,
       },
     }).as('rules')
-    cy.intercept('GET', '/api/alert-rules/7/history', {
+    cy.intercept('GET', '/api/alert-rules/7/history*', {
       body: {
         items: [
           {
@@ -51,7 +51,7 @@ describe('Alert firing history', () => {
 
   it('shows empty note when a rule has never fired', () => {
     cy.stubApi()
-    cy.intercept('GET', '/api/alert-rules', {
+    cy.intercept('GET', '/api/alert-rules*', {
       body: {
         items: [
           {
@@ -63,7 +63,7 @@ describe('Alert firing history', () => {
         total: 1,
       },
     }).as('rules')
-    cy.intercept('GET', '/api/alert-rules/9/history', { body: { items: [], total: 0 } }).as('history')
+    cy.intercept('GET', '/api/alert-rules/9/history*', { body: { items: [], total: 0 } }).as('history')
 
     cy.visit('/#/alerts')
     cy.wait('@rules')

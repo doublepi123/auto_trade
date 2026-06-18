@@ -267,6 +267,59 @@ def test_test_credentials_sanitizes_exception(monkeypatch):
     assert data["error"] == "notification send failed — see server logs for details"
 
 
+def test_test_notification_channel_serverchan_ok(monkeypatch):
+    """The per-channel test endpoint should exercise a single channel without
+    requiring the channel to be saved first.
+    """
+    _clean_credentials()
+    client.put("/api/credentials", json={"sct_key": "testsctkey"})
+    from app.core.notifiers import serverchan as sc
+
+    def fake_send(self, title, content, severity="INFO"):
+        return True
+
+    monkeypatch.setattr(sc.ServerChanNotifier, "send", fake_send)
+
+    resp = client.post(
+        "/api/credentials/notification-channels/test",
+        json={"type": "serverchan", "severity_floor": "INFO"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["ok"] is True
+    assert data["error"] is None
+
+
+def test_test_notification_channel_webhook_ok(monkeypatch):
+    _clean_credentials()
+    from app.core.notifiers import webhook as wh
+
+    def fake_send(self, title, content, severity="INFO"):
+        return True
+
+    monkeypatch.setattr(wh.WebhookNotifier, "send", fake_send)
+
+    resp = client.post(
+        "/api/credentials/notification-channels/test",
+        json={"type": "webhook", "severity_floor": "INFO", "url": "https://93.184.216.34/hook"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["ok"] is True
+
+
+def test_test_notification_channel_invalid_config():
+    _clean_credentials()
+    resp = client.post(
+        "/api/credentials/notification-channels/test",
+        json={"type": "webhook", "severity_floor": "INFO", "url": ""},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["ok"] is False
+    assert data["error"] == "invalid channel configuration"
+
+
 def test_decrypt_tampered_ciphertext_raises_credential_integrity_error(tmp_path, monkeypatch):
     """Tampered ciphertext must surface as CredentialIntegrityError, not raw InvalidTag.
 

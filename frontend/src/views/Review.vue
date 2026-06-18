@@ -20,10 +20,93 @@
         </el-form-item>
         <el-form-item>
           <el-button type="primary" :loading="loading" @click="handleSearch">查询</el-button>
+          <el-button-group>
+            <el-button data-testid="review-quick-7d" @click="setQuickRange(7)">近7天</el-button>
+            <el-button data-testid="review-quick-30d" @click="setQuickRange(30)">近30天</el-button>
+            <el-button data-testid="review-quick-90d" @click="setQuickRange(90)">近90天</el-button>
+          </el-button-group>
           <el-button plain :disabled="!reviewData || reviewData.days.length === 0" @click="handleExport('json')">导出 JSON</el-button>
           <el-button plain :disabled="!reviewData || reviewData.days.length === 0" @click="handleExport('csv')">导出 CSV</el-button>
         </el-form-item>
       </el-form>
+    </el-card>
+
+    <el-card class="llm-status-card" data-testid="review-llm-status-card" v-loading="llmStatusLoading">
+      <template #header>
+        <div class="llm-status-header">
+          <div>
+            <strong>LLM 实时状态</strong>
+            <p>{{ form.symbol || '当前标的' }}</p>
+          </div>
+          <el-tag v-if="llmStatus" :type="llmStatus.enabled ? 'success' : 'info'" effect="plain">
+            {{ llmStatus.enabled ? '已启用' : '已禁用' }}
+          </el-tag>
+        </div>
+      </template>
+
+      <template v-if="llmStatus">
+        <div class="llm-status-meta">
+          <span>分析间隔：{{ llmStatus.interval_minutes }} 分钟</span>
+          <span>下次分析：{{ llmStatus.next_analysis_at ? formatDateTime(llmStatus.next_analysis_at) : '-' }}</span>
+        </div>
+        <div class="llm-budget-bar" data-testid="review-llm-budget-bar">
+          <div class="budget-cell" data-testid="review-llm-budget-tracked">
+            <span>本周期标的</span>
+            <strong>{{ (llmStatus.budget?.tracked_symbol_count ?? 0) }}/{{ (llmStatus.budget?.max_symbols_per_cycle ?? 0) }}</strong>
+          </div>
+          <div class="budget-cell" data-testid="review-llm-budget-hourly">
+            <span>小时分析</span>
+            <strong>{{ (llmStatus.budget?.used_analyses_last_hour ?? 0) }}/{{ (llmStatus.budget?.max_analyses_per_hour ?? 0) }}</strong>
+          </div>
+          <div class="budget-cell" data-testid="review-llm-budget-remaining">
+            <span>剩余次数</span>
+            <strong>{{ llmStatus.budget?.remaining_analyses_this_hour ?? 0 }}</strong>
+          </div>
+        </div>
+
+        <div v-if="selectedSymbolLLMStatus" class="selected-symbol-llm-status" data-testid="review-selected-symbol-llm-status">
+          <div class="section-title">{{ selectedSymbolLLMStatus.symbol }} 调度状态</div>
+          <div class="item-row">
+            <span>角色</span>
+            <el-tag :type="selectedSymbolLLMStatus.is_primary ? 'success' : 'info'" size="small">
+              {{ selectedSymbolLLMStatus.is_primary ? '主标的' : '观察标的' }}
+            </el-tag>
+          </div>
+          <div class="item-row">
+            <span>挂单</span>
+            <strong>{{ selectedSymbolLLMStatus.has_pending_order ? '存在' : '无' }}</strong>
+          </div>
+          <div class="item-row">
+            <span>下次分析</span>
+            <strong>{{ selectedSymbolLLMStatus.next_analysis_at ? formatDateTime(selectedSymbolLLMStatus.next_analysis_at) : '-' }}</strong>
+          </div>
+          <div class="item-row">
+            <span>买入冷却</span>
+            <strong>{{ formatCooldown(selectedSymbolLLMStatus.buy_cooldown_remaining_seconds) }}</strong>
+          </div>
+          <div class="item-row">
+            <span>卖出冷却</span>
+            <strong>{{ formatCooldown(selectedSymbolLLMStatus.sell_cooldown_remaining_seconds) }}</strong>
+          </div>
+          <div v-if="selectedSymbolLLMStatus.last_skip_reason" class="item-row">
+            <span>最近跳过</span>
+            <small class="skip-reason">{{ selectedSymbolLLMStatus.last_status }}：{{ selectedSymbolLLMStatus.last_skip_reason }}</small>
+          </div>
+        </div>
+      </template>
+      <p v-else class="empty-note">暂无 LLM 状态</p>
+    </el-card>
+
+    <el-card class="risk-history-card" data-testid="review-risk-history">
+      <template #header>
+        <div class="runtime-history-header">
+          <div>
+            <strong>风险历史</strong>
+            <p>日内盈亏与连续亏损趋势</p>
+          </div>
+        </div>
+      </template>
+      <RiskHistoryPanel />
     </el-card>
 
     <template v-if="reviewData && reviewData.days.length > 0">
@@ -197,14 +280,16 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import PriceChart from '../components/PriceChart.vue'
 import PnLChart from '../components/PnLChart.vue'
+import RiskHistoryPanel from '../components/RiskHistoryPanel.vue'
 import { getReview, exportReview } from '../api/review'
+import { getLLMIntervalStatus } from '../api'
 import { useStatusHistorySeries } from '../composables/useStatusHistorySeries'
 import { useDiagnosticsSnapshot } from '../composables/useDiagnosticsSnapshot'
-import type { ReviewResponse } from '../types'
+import type { LLMIntervalStatus, ReviewResponse } from '../types'
 import { ORDER_STATUS } from '../utils/constants'
 import { formatCurrency, marketFromSymbol } from '../utils/format'
 
@@ -250,6 +335,28 @@ const diagnosticsSymbolLabel = computed(() => {
 })
 
 const diagnosticsMarket = computed(() => marketFromSymbol(form.value.symbol))
+
+const llmStatus = ref<LLMIntervalStatus | null>(null)
+const llmStatusLoading = ref(false)
+const selectedSymbolLLMStatus = computed(() => {
+  if (!llmStatus.value) return null
+  return llmStatus.value.symbol_statuses.find((s) => s.symbol === form.value.symbol) || null
+})
+
+async function loadLLMStatus() {
+  llmStatusLoading.value = true
+  try {
+    llmStatus.value = await getLLMIntervalStatus()
+  } catch {
+    llmStatus.value = null
+  } finally {
+    llmStatusLoading.value = false
+  }
+}
+
+onMounted(() => {
+  loadLLMStatus()
+})
 
 async function handleSearch() {
   if (!form.value.symbol || !form.value.from_date || !form.value.to_date) {
@@ -364,9 +471,37 @@ function formatTime(value: string): string {
   return new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 }
 
+function formatDateTime(value: string): string {
+  return new Date(value).toLocaleString([], {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+
+function formatCooldown(seconds: number | null | undefined): string {
+  if (seconds == null || seconds <= 0) return '-'
+  return `${Math.ceil(seconds)}s`
+}
+
 function formatAgeSeconds(value: number | null | undefined): string {
   if (value == null) return '-'
   return `${value.toFixed(1)}s`
+}
+
+function formatDate(d: Date): string {
+  return d.toISOString().slice(0, 10)
+}
+
+function setQuickRange(days: number) {
+  const end = new Date()
+  const start = new Date()
+  start.setDate(end.getDate() - days + 1)
+  form.value.to_date = formatDate(end)
+  form.value.from_date = formatDate(start)
+  handleSearch()
 }
 </script>
 
@@ -436,7 +571,77 @@ function formatAgeSeconds(value: number | null | undefined): string {
   font-size: 12px;
 }
 
+.llm-status-card {
+  margin-bottom: 8px;
+}
+
+.llm-status-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.llm-status-header p {
+  margin: 4px 0 0;
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.llm-status-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 12px;
+  color: #4b5563;
+  font-size: 13px;
+}
+
+.llm-budget-bar {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.budget-cell {
+  border-radius: 6px;
+  padding: 8px;
+  background: #f8fafc;
+  text-align: center;
+}
+
+.budget-cell span {
+  display: block;
+  color: #6b7280;
+  font-size: 11px;
+}
+
+.budget-cell strong {
+  display: block;
+  margin-top: 3px;
+  color: #172033;
+  font-size: 16px;
+}
+
+.selected-symbol-llm-status .section-title {
+  margin-bottom: 8px;
+}
+
+.selected-symbol-llm-status .item-row {
+  padding: 5px 0;
+}
+
+.skip-reason {
+  color: #f59e0b;
+  font-size: 12px;
+}
+
 .runtime-history-card {
+  margin-bottom: 8px;
+}
+
+.risk-history-card {
   margin-bottom: 8px;
 }
 

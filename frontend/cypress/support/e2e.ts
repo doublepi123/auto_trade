@@ -167,7 +167,7 @@ Cypress.Commands.add('stubApi', () => {
     },
   }).as('getMarketSession')
 
-  cy.intercept('GET', '/api/notifications*', (req) => {
+  cy.intercept('GET', '/api/notifications?*', (req) => {
     let items = [
       { id: 1, title: '风控熔断', content: 'kill switch triggered', severity: 'CRITICAL', success: true, error: '', created_at: '2026-06-16T12:00:00Z' },
       { id: 2, title: '日报', content: 'AAPL.US +200', severity: 'INFO', success: true, error: '', created_at: '2026-06-16T11:00:00Z' },
@@ -200,6 +200,26 @@ Cypress.Commands.add('stubApi', () => {
     })
   }).as('getNotifications')
 
+  cy.intercept('GET', '/api/notifications/export*', (req) => {
+    const format = req.query.format === 'json' ? 'json' : 'csv'
+    const rows = [
+      { id: 1, created_at: '2026-06-16T12:00:00Z', severity: 'CRITICAL', success: true, title: '风控熔断', content: 'kill switch triggered', error: '' },
+      { id: 2, created_at: '2026-06-16T11:00:00Z', severity: 'INFO', success: true, title: '日报', content: 'AAPL.US +200', error: '' },
+      { id: 3, created_at: '2026-06-15T10:00:00Z', severity: 'WARNING', success: false, title: '发送失败', content: 'webhook timeout', error: 'connection refused' },
+    ]
+    if (format === 'json') {
+      req.reply({ body: rows })
+    } else {
+      const lines = rows.map((r) =>
+        `${r.id},${r.created_at},${r.severity},${r.success},${r.title},${r.content},${r.error}`
+      )
+      req.reply({
+        body: ['id,created_at,severity,success,title,content,error', ...lines].join('\n'),
+        headers: { 'content-type': 'text/csv' },
+      })
+    }
+  }).as('exportNotifications')
+
   cy.intercept('POST', '/api/reports/schedule/run', {
     body: { sent: true, symbol: 'AAPL.US', title: '交易日报 · AAPL.US', error: null },
   }).as('runScheduledReport')
@@ -221,8 +241,25 @@ Cypress.Commands.add('stubApi', () => {
 
   cy.intercept('GET', '/api/orders*', {
     body: {
-      items: [],
-      total: 0,
+      items: [
+        {
+          id: 1,
+          broker_order_id: 'order-1',
+          symbol: 'AAPL.US',
+          market: 'US',
+          source: 'broker',
+          side: 'BUY',
+          quantity: 10,
+          executed_quantity: 10,
+          price: 150,
+          executed_price: 149.5,
+          status: 'FILLED',
+          created_at: '2026-06-16T10:00:00Z',
+          filled_at: '2026-06-16T10:01:00Z',
+          cancellable: false,
+        },
+      ],
+      total: 1,
       page: 1,
       page_size: 10,
       scope: 'today',
@@ -292,38 +329,44 @@ Cypress.Commands.add('stubApi', () => {
     body: { items: [], total_trades: 0, total_net_pnl: 0 },
   }).as('getTradeWeekdayAttribution')
 
-  cy.intercept('GET', '/api/events*', {
-    body: {
-      items: [
-        {
-          id: 1,
-          source: 'trade',
-          event_type: 'LLM_ANALYSIS',
-          symbol: 'NVDA.US',
-          broker_order_id: '',
-          side: '',
-          status: 'SUCCESS',
-          message: '区间测试',
-          payload: { confidence_score: 0.75 },
-          created_at: '2026-05-19T19:52:03.545862Z',
-        },
-        {
-          id: 2,
-          source: 'trade',
-          event_type: 'ORDER_SKIPPED',
-          symbol: 'NVDA.US',
-          broker_order_id: '',
-          side: 'SELL',
-          status: 'SKIPPED',
-          message: 'expected profit 4.00 is below required minimum profit 5.00',
-          payload: { skip_category: 'FEE', expected_profit: 4, estimated_fees: 1, required_profit: 5 },
-          created_at: '2026-05-19T19:53:03.545862Z',
-        },
-      ],
-      total: 2,
-      page: 1,
-      page_size: 20,
-    },
+  cy.intercept('GET', '/api/events*', (req) => {
+    const items = [
+      {
+        id: 1,
+        source: 'trade',
+        event_type: 'LLM_ANALYSIS',
+        symbol: 'NVDA.US',
+        broker_order_id: '',
+        side: '',
+        status: 'SUCCESS',
+        message: '区间测试',
+        payload: { confidence_score: 0.75 },
+        created_at: '2026-05-19T19:52:03.545862Z',
+      },
+      {
+        id: 2,
+        source: 'trade',
+        event_type: 'ORDER_SKIPPED',
+        symbol: 'NVDA.US',
+        broker_order_id: '',
+        side: 'SELL',
+        status: 'SKIPPED',
+        message: 'expected profit 4.00 is below required minimum profit 5.00',
+        payload: { skip_category: 'FEE', expected_profit: 4, estimated_fees: 1, required_profit: 5 },
+        created_at: '2026-05-19T19:53:03.545862Z',
+      },
+    ]
+    const params = req.query
+    let filtered = items
+    if (params.event_type) {
+      const types = Array.isArray(params.event_type) ? params.event_type : [params.event_type]
+      filtered = filtered.filter((i) => types.includes(i.event_type))
+    }
+    if (params.skip_category) {
+      const cats = Array.isArray(params.skip_category) ? params.skip_category : [params.skip_category]
+      filtered = filtered.filter((i) => cats.includes(i.payload?.skip_category))
+    }
+    req.reply({ body: { items: filtered, total: filtered.length, page: 1, page_size: 20 } })
   }).as('getEvents')
 
   cy.intercept('GET', '/api/reports/range*', {
@@ -361,6 +404,50 @@ Cypress.Commands.add('stubApi', () => {
       'content-type': 'text/csv',
     },
   }).as('exportReport')
+
+  cy.intercept('GET', '/api/review?*', {
+    body: {
+      symbol: 'AAPL.US',
+      from_date: '2026-05-01',
+      to_date: '2026-05-31',
+      days: [
+        {
+          date: '2026-05-19',
+          symbol: 'AAPL.US',
+          llm_interactions: [
+            {
+              id: 1,
+              interaction_type: 'analyze',
+              symbol: 'AAPL.US',
+              market: 'US',
+              success: true,
+              order_action: 'BUY',
+              order_status: null,
+              order_id: null,
+              applied: true,
+              created_at: '2026-05-19T19:52:03.545862Z',
+            },
+          ],
+          orders: [],
+          events: [],
+          snapshots: [],
+          daily_pnl: 12.5,
+          trade_count: 0,
+          error_tags: [],
+        },
+      ],
+      total_pnl: 12.5,
+      total_trades: 0,
+      all_error_tags: [],
+    },
+  }).as('getReview')
+
+  cy.intercept('GET', '/api/review/export*', {
+    body: 'date,symbol,pnl\n2026-05-19,AAPL.US,12.5\n',
+    headers: {
+      'content-type': 'text/csv',
+    },
+  }).as('exportReview')
 
   cy.intercept('GET', '/api/watchlist', {
     body: [
@@ -411,6 +498,55 @@ Cypress.Commands.add('stubApi', () => {
       },
     ],
   }).as('getWatchlistSnapshots')
+
+  cy.intercept('GET', '/api/watchlist/scores', {
+    body: {
+      scores: [
+        {
+          id: 1,
+          symbol: 'NVDA.US',
+          market: 'US',
+          score: 82,
+          rationale: '价格处于布林带中轨上方，成交量放大，短期动能偏强。',
+          confidence: 0.85,
+          recommended_action: 'BUY',
+          source: 'llm',
+          created_at: '2026-06-18T10:00:00Z',
+          expires_at: '2026-06-18T11:00:00Z',
+          is_stale: false,
+        },
+        {
+          id: 2,
+          symbol: 'AAPL.US',
+          market: 'US',
+          score: 45,
+          rationale: 'MACD 死叉后横盘，观望为主。',
+          confidence: 0.62,
+          recommended_action: 'HOLD',
+          source: 'fallback_rule',
+          created_at: '2026-06-18T10:00:00Z',
+          expires_at: '2026-06-18T11:00:00Z',
+          is_stale: false,
+        },
+      ],
+    },
+  }).as('getWatchlistScores')
+
+  cy.intercept('POST', '/api/watchlist/score', {
+    body: {
+      id: 3,
+      symbol: 'NVDA.US',
+      market: 'US',
+      score: 88,
+      rationale: '实时评分：突破近期高点，量价配合。',
+      confidence: 0.9,
+      recommended_action: 'BUY',
+      source: 'llm',
+      created_at: '2026-06-18T10:05:00Z',
+      expires_at: '2026-06-18T11:05:00Z',
+      is_stale: false,
+    },
+  }).as('scoreWatchlistSymbol')
 
   cy.intercept('GET', '/api/diagnostics', {
     body: {
@@ -470,6 +606,40 @@ Cypress.Commands.add('stubApi', () => {
       },
       applied_values: { buy_low: 220.42, sell_high: 221.42 },
       reject_reason: null,
+      budget: {
+        max_symbols_per_cycle: 5,
+        max_analyses_per_hour: 60,
+        tracked_symbol_count: 2,
+        effective_symbol_budget: 2,
+        used_analyses_last_hour: 12,
+        remaining_analyses_this_hour: 48,
+      },
+      symbol_statuses: [
+        {
+          symbol: 'AAPL.US',
+          market: 'US',
+          is_primary: true,
+          has_pending_order: false,
+          buy_cooldown_remaining_seconds: 0,
+          sell_cooldown_remaining_seconds: 45,
+          last_analysis_at: '2026-05-19T19:52:03.545862Z',
+          next_analysis_at: '2026-05-19T19:53:03.545862Z',
+          last_status: 'COOLDOWN',
+          last_skip_reason: '同方向冷却中',
+        },
+        {
+          symbol: 'NVDA.US',
+          market: 'US',
+          is_primary: false,
+          has_pending_order: true,
+          buy_cooldown_remaining_seconds: 120,
+          sell_cooldown_remaining_seconds: 0,
+          last_analysis_at: '2026-05-19T19:51:03.545862Z',
+          next_analysis_at: '2026-05-19T19:54:03.545862Z',
+          last_status: 'PENDING_ORDER',
+          last_skip_reason: null,
+        },
+      ],
     },
   }).as('getLLMIntervalStatus')
 
@@ -740,14 +910,33 @@ Cypress.Commands.add('stubApi', () => {
     body: { evaluated: 0, fired: 0, skipped_cooldown: 0 },
   }).as('evaluateAlertRules')
 
-  cy.intercept('GET', '/api/strategy-presets', {
-    body: { items: [], total: 0 },
+  cy.intercept('GET', '/api/alert-rules/*/history*', {
+    body: {
+      items: [
+        { id: 1, rule_id: 1, fired_at: '2026-06-16T10:00:00Z', trigger_value: 180, threshold: 175, severity: 'WARNING', message: 'price above 175' },
+        { id: 2, rule_id: 1, fired_at: '2026-06-16T10:05:00Z', trigger_value: 185, threshold: 175, severity: 'WARNING', message: 'price above 175' },
+        { id: 3, rule_id: 1, fired_at: '2026-06-16T10:10:00Z', trigger_value: 182, threshold: 175, severity: 'WARNING', message: 'price above 175' },
+        { id: 4, rule_id: 1, fired_at: '2026-06-16T10:15:00Z', trigger_value: 190, threshold: 175, severity: 'WARNING', message: 'price above 175' },
+      ],
+      total: 4,
+    },
+  }).as('getAlertRuleHistory')
+
+  let strategyPresets: Array<{ id: number; name: string; params: Record<string, unknown>; created_at: string }> = []
+
+  cy.intercept('GET', '/api/strategy-presets', (req) => {
+    req.reply({ body: { items: strategyPresets, total: strategyPresets.length } })
   }).as('listStrategyPresets')
 
   cy.intercept('POST', '/api/strategy-presets', (req) => {
-    req.reply({
-      body: { id: 1, name: req.body.name, params: req.body.params, created_at: '2026-06-16T12:00:00Z' },
-    })
+    const preset = {
+      id: strategyPresets.length + 1,
+      name: req.body.name,
+      params: req.body.params,
+      created_at: '2026-06-16T12:00:00Z',
+    }
+    strategyPresets.push(preset)
+    req.reply({ body: preset })
   }).as('createStrategyPreset')
 
   cy.intercept('POST', '/api/strategy-presets/*/apply', {
@@ -820,6 +1009,14 @@ Cypress.Commands.add('stubApi', () => {
       updated_at: '2026-01-01T00:00:00Z', reload_warning: null,
     },
   }).as('saveCredentials')
+
+  cy.intercept('POST', '/api/credentials/test', {
+    body: { ok: true, error: null },
+  }).as('testCredentials')
+
+  cy.intercept('POST', '/api/credentials/notification-channels/test', (req) => {
+    req.reply({ body: { ok: true, error: null } })
+  }).as('testNotificationChannel')
 
   cy.intercept('GET', '/api/strategy-experiments', { body: [] }).as('listStrategyExperiments')
   cy.intercept('GET', '/api/strategy-experiments/*/runs*', {

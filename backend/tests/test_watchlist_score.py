@@ -116,9 +116,15 @@ class TestWatchlistScoreService:
         db_session.commit()
         assert not svc.is_fresh(fresh)
 
-    def test_fallback_when_llm_unconfigured(self, db_session) -> None:
+    def test_fallback_when_llm_unconfigured(self, db_session, monkeypatch) -> None:
         """With no DEEPSEEK_API_KEY the service must return a deterministic
         fallback rather than raising — the UI must keep working."""
+        from types import SimpleNamespace
+
+        monkeypatch.setattr(
+            "app.config.settings",
+            SimpleNamespace(deepseek_api_key=""),
+        )
         svc = WatchlistScoreService(db_session)
         row = svc.score_from_llm_or_fallback(symbol="AAPL.US", market="US", ttl_minutes=5)
         assert row.source.startswith("fallback_")
@@ -131,7 +137,13 @@ class TestWatchlistScoreService:
 
 
 class TestWatchlistScoreAPI:
-    def test_post_score_endpoint_returns_fallback(self, client: TestClient) -> None:
+    def test_post_score_endpoint_returns_fallback(self, client: TestClient, monkeypatch) -> None:
+        from types import SimpleNamespace
+
+        monkeypatch.setattr(
+            "app.config.settings",
+            SimpleNamespace(deepseek_api_key=""),
+        )
         resp = client.post(
             "/api/watchlist/score",
             json={"symbol": "AAPL.US", "market": "US", "ttl_minutes": 5},

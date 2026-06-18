@@ -450,6 +450,11 @@ export interface BacktestResult {
   fee_sensitivity: BacktestFeeSensitivityPoint[]
 }
 
+export interface BacktestExportRequest {
+  result: BacktestResult
+  sections?: string[]
+}
+
 /** Parameter axes a sweep may explore (mirrors backend SWEEP_ALLOWED_GRID_KEYS). */
 export type BacktestSweepAxis =
   | 'buy_low'

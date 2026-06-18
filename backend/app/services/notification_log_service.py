@@ -85,6 +85,41 @@ class NotificationLogService:
             page_size=page_size,
         )
 
+    def export_logs(
+        self,
+        *,
+        severity: str | None = None,
+        q: str | None = None,
+        success: bool | None = None,
+        from_date: str | None = None,
+        to_date: str | None = None,
+    ) -> list[NotificationLogOut]:
+        """Return all matching notification rows for export (no pagination)."""
+        stmt = select(NotificationLog)
+
+        if severity:
+            stmt = stmt.where(NotificationLog.severity == severity)
+        if q:
+            pattern = f"%{q}%"
+            stmt = stmt.where(
+                or_(
+                    NotificationLog.title.ilike(pattern),
+                    NotificationLog.content.ilike(pattern),
+                    NotificationLog.error.ilike(pattern),
+                )
+            )
+        if success is not None:
+            stmt = stmt.where(NotificationLog.success.is_(success))
+        if from_date:
+            stmt = stmt.where(NotificationLog.created_at >= _parse_date(from_date))
+        if to_date:
+            end = datetime.combine(_parse_date(to_date).date(), time.max, tzinfo=timezone.utc)
+            stmt = stmt.where(NotificationLog.created_at <= end)
+
+        stmt = stmt.order_by(desc(NotificationLog.created_at), desc(NotificationLog.id))
+        rows = list(self._db.scalars(stmt))
+        return [NotificationLogOut.model_validate(r) for r in rows]
+
 
 class NotificationLogSink:
     """Best-effort persister attached to the notifier."""

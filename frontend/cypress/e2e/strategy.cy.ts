@@ -79,7 +79,7 @@ describe('Strategy', () => {
   })
 
   it('saves and lists a strategy preset', () => {
-    cy.get('[data-testid="preset-name"] input').type('保守')
+    cy.get('input[placeholder="如：保守 / 激进"]').type('保守')
     cy.get('[data-testid="preset-save"]').click()
     cy.wait('@createStrategyPreset')
     cy.contains('预设已保存').should('be.visible')

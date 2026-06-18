@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.api.auth import require_api_key
@@ -159,3 +160,60 @@ def test_credentials(
         result="SUCCESS" if ok else "FAILED",
     )
     return {"ok": ok, "error": None if ok else "all channels failed"}
+
+
+class NotificationChannelTestSchema(BaseModel):
+    type: Literal["serverchan", "webhook"]
+    severity_floor: Literal["INFO", "WARNING", "CRITICAL"] = "INFO"
+    url: Optional[str] = Field(default=None, max_length=4096)
+    template: Optional[str] = Field(default=None, max_length=8192)
+
+
+@router.post("/credentials/notification-channels/test", dependencies=[Depends(require_api_key())])
+def test_notification_channel(
+    request: Request,
+    payload: NotificationChannelTestSchema,
+    db: Session = Depends(get_db),
+    audit: AuditLogger = Depends(get_audit_logger),
+) -> dict[str, Any]:
+    """Send a test notification through a single notification channel.
+
+    Uses the saved Server酱 key for ``serverchan`` channels and the provided
+    URL/template for ``webhook`` channels. The channel config does not need
+    to be saved first, so users can verify a new channel before committing it.
+    """
+    actor_hash, source_ip = extract_actor(request)
+    svc = CredentialsService(db)
+    config = svc.get_config()
+    from app.core.credential_crypto import decrypt_secret
+    from app.core.notifiers.multi_channel import MultiChannelNotifier
+    from app.core.notifiers.serverchan import ServerChanNotifier
+    from app.core.notifiers.webhook import WebhookNotifier
+
+    built: list[tuple[Any, str]] = []
+    if payload.type == "serverchan":
+        built.append((ServerChanNotifier(decrypt_secret(config.sct_key or "")), payload.severity_floor))
+    elif payload.type == "webhook" and payload.url:
+        built.append((WebhookNotifier(payload.url, template=payload.template), payload.severity_floor))
+
+    if not built:
+        return {"ok": False, "error": "invalid channel configuration"}
+
+    notifier = MultiChannelNotifier(built)
+    try:
+        ok = notifier.send("Auto Trade: 渠道测试", "这是一条单渠道连通性测试消息。", severity="INFO")
+    except Exception as exc:  # noqa: BLE001
+        ok = False
+        logger.error("single channel test failed", exc_info=exc)
+    finally:
+        notifier.close()
+
+    audit.record(
+        "CREDENTIALS_CHANNEL_TEST",
+        severity="INFO",
+        actor_hash=actor_hash,
+        source_ip=source_ip,
+        request_summary={"type": payload.type, "delivered": ok},
+        result="SUCCESS" if ok else "FAILED",
+    )
+    return {"ok": ok, "error": None if ok else "channel test failed"}

@@ -113,7 +113,7 @@
     <el-card style="max-width: 600px" v-loading="loading">
       <el-form data-testid="strategy-config-form" :model="form" label-width="180px" @submit.prevent="save" :disabled="loading">
         <el-form-item label="股票代码">
-          <el-input v-model="form.symbol" placeholder="例如 AAPL.US" />
+          <el-input v-model="form.symbol" placeholder="例如 AAPL.US" data-testid="strategy-symbol" />
         </el-form-item>
         <el-form-item label="市场">
           <el-radio-group v-model="form.market">
@@ -203,6 +203,18 @@
           </el-select>
           <el-button type="primary" plain style="margin-left: 8px" :disabled="!selectedPresetId" :loading="presetBusy" data-testid="preset-apply" @click="selectedPresetId && applyPreset(selectedPresetId)">应用</el-button>
           <el-button plain :disabled="!selectedPresetId" :loading="presetBusy" data-testid="preset-delete" @click="selectedPresetId && removePreset(selectedPresetId)">删除</el-button>
+        </el-form-item>
+        <el-form-item label="JSON 预设">
+          <el-button plain data-testid="preset-export-current" @click="exportCurrentPreset">导出当前参数</el-button>
+          <el-button plain data-testid="preset-import" @click="triggerImport">导入 JSON</el-button>
+          <input ref="importInput" type="file" accept=".json,application/json" style="display: none" data-testid="preset-import-input" @change="handleImport" />
+          <span style="margin-left: 8px; color: #909399; font-size: 12px">支持单条或数组 { name, params }</span>
+        </el-form-item>
+        <el-form-item label="完整配置">
+          <el-button plain data-testid="strategy-export-config" @click="exportStrategyConfig">导出完整配置</el-button>
+          <el-button plain data-testid="strategy-import-config" @click="triggerImportConfig">导入配置</el-button>
+          <input ref="configImportInput" type="file" accept=".json,application/json" style="display: none" data-testid="strategy-import-config-input" @change="handleImportConfig" />
+          <span style="margin-left: 8px; color: #909399; font-size: 12px">下载/上传完整策略配置 JSON</span>
         </el-form-item>
         <el-form-item>
           <el-button type="primary" native-type="submit" :loading="saving" :disabled="loading || !isDirty">保存</el-button>
@@ -356,6 +368,8 @@ const presets = ref<StrategyPreset[]>([])
 const presetName = ref('')
 const selectedPresetId = ref<number | null>(null)
 const presetBusy = ref(false)
+const importInput = ref<HTMLInputElement | null>(null)
+const configImportInput = ref<HTMLInputElement | null>(null)
 
 function buildPresetParams(): Record<string, unknown> {
   return {
@@ -427,6 +441,142 @@ async function removePreset(id: number) {
     await loadPresets()
   } catch {
     ElMessage.error('删除失败')
+  }
+}
+
+function downloadJson(filename: string, payload: unknown) {
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  URL.revokeObjectURL(url)
+}
+
+function exportCurrentPreset() {
+  const payload = {
+    name: `${form.value.symbol || 'strategy'}-config`,
+    params: buildPresetParams(),
+  }
+  downloadJson(`${payload.name}.json`, payload)
+  ElMessage.success('已导出当前参数')
+}
+
+function triggerImport() {
+  importInput.value?.click()
+}
+
+async function handleImport(evt: Event) {
+  const target = evt.target as HTMLInputElement
+  const file = target.files?.[0]
+  if (!file) return
+  try {
+    const text = await file.text()
+    const parsed = JSON.parse(text)
+    const list: Array<{ name: string; params: Record<string, unknown> }> = Array.isArray(parsed) ? parsed : [parsed]
+    let created = 0
+    for (const item of list) {
+      if (!item.name || typeof item.name !== 'string' || !item.params || typeof item.params !== 'object') {
+        ElMessage.warning('跳过格式不正确的条目')
+        continue
+      }
+      await createStrategyPreset({ name: item.name.trim(), params: item.params as Record<string, unknown> })
+      created += 1
+    }
+    await loadPresets()
+    ElMessage.success(`成功导入 ${created} 条预设`)
+  } catch {
+    ElMessage.error('导入失败：请检查 JSON 格式')
+  } finally {
+    target.value = ''
+  }
+}
+
+function buildStrategyConfig(): Record<string, unknown> {
+  return {
+    symbol: form.value.symbol,
+    market: form.value.market,
+    buy_low: form.value.buy_low,
+    sell_high: form.value.sell_high,
+    short_selling: form.value.short_selling,
+    min_profit_amount: form.value.min_profit_amount,
+    auto_resume_minutes: form.value.auto_resume_minutes,
+    max_daily_loss: form.value.max_daily_loss,
+    max_consecutive_losses: form.value.max_consecutive_losses,
+    llm_interval_minutes: form.value.llm_interval_minutes,
+    fee_rate_us: form.value.fee_rate_us / 100,
+    fee_rate_hk: form.value.fee_rate_hk / 100,
+    min_repricing_pct: form.value.min_repricing_pct / 100,
+    llm_action_cooldown_seconds: form.value.llm_action_cooldown_seconds,
+    trading_session_mode: form.value.trading_session_mode,
+    margin_safety_factor: form.value.margin_safety_factor,
+    report_schedule_enabled: form.value.report_schedule_enabled,
+    report_schedule_interval_hours: form.value.report_schedule_interval_hours,
+    report_schedule_symbol: form.value.report_schedule_symbol,
+  }
+}
+
+function exportStrategyConfig() {
+  const payload = buildStrategyConfig()
+  downloadJson(`strategy-config-${form.value.symbol || 'default'}.json`, payload)
+  ElMessage.success('已导出完整配置')
+}
+
+function triggerImportConfig() {
+  configImportInput.value?.click()
+}
+
+async function handleImportConfig(evt: Event) {
+  const target = evt.target as HTMLInputElement
+  const file = target.files?.[0]
+  if (!file) return
+  try {
+    const text = await file.text()
+    const parsed = JSON.parse(text)
+    if (!parsed || typeof parsed !== 'object') {
+      ElMessage.error('导入失败：配置格式不正确')
+      return
+    }
+    const numeric = (v: unknown): number | undefined => {
+      if (v === undefined) return undefined
+      const n = Number(v)
+      return Number.isNaN(n) ? undefined : n
+    }
+    const bool = (v: unknown): boolean | undefined => {
+      if (typeof v === 'boolean') return v
+      return undefined
+    }
+    const str = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined)
+    const patch: Partial<StrategyForm> = {}
+    if (str(parsed.symbol) !== undefined) patch.symbol = str(parsed.symbol)
+    if (str(parsed.market) !== undefined) patch.market = parsed.market as 'US' | 'HK'
+    if (numeric(parsed.buy_low) !== undefined) patch.buy_low = numeric(parsed.buy_low)!
+    if (numeric(parsed.sell_high) !== undefined) patch.sell_high = numeric(parsed.sell_high)!
+    if (bool(parsed.short_selling) !== undefined) patch.short_selling = bool(parsed.short_selling)!
+    if (numeric(parsed.min_profit_amount) !== undefined) patch.min_profit_amount = numeric(parsed.min_profit_amount)!
+    if (numeric(parsed.auto_resume_minutes) !== undefined) patch.auto_resume_minutes = numeric(parsed.auto_resume_minutes)!
+    if (numeric(parsed.max_daily_loss) !== undefined) patch.max_daily_loss = numeric(parsed.max_daily_loss)!
+    if (numeric(parsed.max_consecutive_losses) !== undefined) patch.max_consecutive_losses = numeric(parsed.max_consecutive_losses)!
+    if (numeric(parsed.llm_interval_minutes) !== undefined) patch.llm_interval_minutes = numeric(parsed.llm_interval_minutes)!
+    if (numeric(parsed.fee_rate_us) !== undefined) patch.fee_rate_us = numeric(parsed.fee_rate_us)! * 100
+    if (numeric(parsed.fee_rate_hk) !== undefined) patch.fee_rate_hk = numeric(parsed.fee_rate_hk)! * 100
+    if (numeric(parsed.min_repricing_pct) !== undefined) patch.min_repricing_pct = numeric(parsed.min_repricing_pct)! * 100
+    if (numeric(parsed.llm_action_cooldown_seconds) !== undefined) patch.llm_action_cooldown_seconds = numeric(parsed.llm_action_cooldown_seconds)!
+    if (str(parsed.trading_session_mode) !== undefined) patch.trading_session_mode = parsed.trading_session_mode as 'ANY' | 'RTH_ONLY'
+    if (numeric(parsed.margin_safety_factor) !== undefined) patch.margin_safety_factor = numeric(parsed.margin_safety_factor)!
+    if (bool(parsed.report_schedule_enabled) !== undefined) patch.report_schedule_enabled = bool(parsed.report_schedule_enabled)!
+    if (numeric(parsed.report_schedule_interval_hours) !== undefined) patch.report_schedule_interval_hours = numeric(parsed.report_schedule_interval_hours)!
+    if (str(parsed.report_schedule_symbol) !== undefined) patch.report_schedule_symbol = str(parsed.report_schedule_symbol)
+
+    form.value = { ...form.value, ...patch }
+    ElMessage.success('配置已导入，请确认后保存')
+  } catch {
+    ElMessage.error('导入失败：请检查 JSON 格式')
+  } finally {
+    target.value = ''
   }
 }
 

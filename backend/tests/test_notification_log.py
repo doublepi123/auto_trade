@@ -201,3 +201,86 @@ class TestNotificationAPI(_Base):
         resp = self.client.get("/api/notifications", params={"severity": "info"})
         assert resp.json()["total"] == 1
         assert resp.json()["items"][0]["severity"] == "INFO"
+
+    def test_export_csv(self) -> None:
+        sink = NotificationLogSink(self._factory())
+        sink.record("hello", "world", "INFO", True)
+        sink.record("goodbye", "moon", "CRITICAL", False, "boom")
+        resp = self.client.get("/api/notifications/export", params={"format": "csv"})
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("text/csv")
+        body = resp.text
+        assert "id,created_at,severity,success,title,content,error" in body
+        assert "hello" in body
+        assert "goodbye" in body
+
+    def test_export_json(self) -> None:
+        sink = NotificationLogSink(self._factory())
+        sink.record("hello", "world", "INFO", True)
+        resp = self.client.get("/api/notifications/export", params={"format": "json"})
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("application/json")
+        data = resp.json()
+        assert len(data) == 1
+        assert data[0]["title"] == "hello"
+
+    def test_export_respects_filters(self) -> None:
+        sink = NotificationLogSink(self._factory())
+        sink.record("hello", "world", "INFO", True)
+        sink.record("goodbye", "moon", "CRITICAL", False, "boom")
+        resp = self.client.get("/api/notifications/export", params={"format": "json", "severity": "CRITICAL"})
+        data = resp.json()
+        assert len(data) == 1
+        assert data[0]["severity"] == "CRITICAL"
+
+    def test_export_invalid_date_returns_422(self) -> None:
+        resp = self.client.get("/api/notifications/export", params={"format": "csv", "from_date": "bad"})
+        assert resp.status_code == 422
+
+    def test_retry_failed_notification_succeeds(self, monkeypatch) -> None:
+        sink = NotificationLogSink(self._factory())
+        sink.record("fail", "body", "CRITICAL", False, "boom")
+        log_id = self._db().query(NotificationLog).first().id
+
+        fake_notifier = _FakeNotifier(ok=True)
+
+        def fake_from_config(cls, *a, **k):
+            return MultiChannelNotifier([(fake_notifier, "INFO")])
+
+        monkeypatch.setattr(MultiChannelNotifier, "from_credential_config", classmethod(fake_from_config))
+
+        resp = self.client.post(f"/api/notifications/{log_id}/retry")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["success"] is True
+        assert data["error"] == ""
+        assert self._db().query(NotificationLog).count() == 1
+
+    def test_retry_failed_notification_still_fails(self, monkeypatch) -> None:
+        sink = NotificationLogSink(self._factory())
+        sink.record("fail", "body", "CRITICAL", False, "boom")
+        log_id = self._db().query(NotificationLog).first().id
+
+        fake_notifier = _FakeNotifier(ok=False)
+
+        def fake_from_config(cls, *a, **k):
+            return MultiChannelNotifier([(fake_notifier, "INFO")])
+
+        monkeypatch.setattr(MultiChannelNotifier, "from_credential_config", classmethod(fake_from_config))
+
+        resp = self.client.post(f"/api/notifications/{log_id}/retry")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["success"] is False
+        assert data["error"] == "retry failed"
+
+    def test_retry_notification_not_found(self, monkeypatch) -> None:
+        fake_notifier = _FakeNotifier(ok=True)
+
+        def fake_from_config(cls, *a, **k):
+            return MultiChannelNotifier([(fake_notifier, "INFO")])
+
+        monkeypatch.setattr(MultiChannelNotifier, "from_credential_config", classmethod(fake_from_config))
+
+        resp = self.client.post("/api/notifications/999/retry")
+        assert resp.status_code == 404

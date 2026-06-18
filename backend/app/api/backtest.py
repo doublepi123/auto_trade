@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import csv
+import io
 from dataclasses import asdict
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
@@ -22,6 +25,7 @@ from app.core.backtest import (
 )
 from app.schemas import (
     BacktestEquityPoint,
+    BacktestExportRequest,
     BacktestFeeSensitivityPoint,
     BacktestMetrics,
     BacktestParams,
@@ -204,6 +208,113 @@ def stress_test_endpoint(payload: StressTestRequest) -> StressTestResult:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     return StressTestResult(**asdict(result))
+
+
+# ---------------------------------------------------------------------------
+# Export result as CSV
+# ---------------------------------------------------------------------------
+
+
+@router.post("/export", dependencies=[Depends(require_api_key())])
+def export_backtest_result(payload: BacktestExportRequest) -> Response:
+    """Export a backtest result as a multi-section CSV file.
+
+    The CSV contains comment/header rows for params and metrics, followed by
+    dedicated sections for trades, equity curve, skipped signals and fee
+    sensitivity. This keeps everything in one file while remaining readable by
+    spreadsheets and analysis tools.
+    """
+    result = payload.result
+    sections = set(payload.sections)
+    output = io.StringIO()
+    writer = csv.writer(output)
+
+    writer.writerow(["# Backtest Result Export"])
+
+    if "params" in sections:
+        writer.writerow(["# params"])
+        for key, value in result.params.model_dump().items():
+            writer.writerow([key, value])
+        writer.writerow(["# metrics"])
+        for key, value in result.metrics.model_dump().items():
+            writer.writerow([key, value])
+
+    if "trades" in sections and result.trades:
+        writer.writerow([])
+        writer.writerow(["trades"])
+        writer.writerow([
+            "timestamp", "action", "price", "quantity", "fee", "pnl",
+            "state_after", "reason", "holding_minutes",
+        ])
+        for trade in result.trades:
+            writer.writerow([
+                trade.timestamp.isoformat(),
+                trade.action,
+                trade.price,
+                trade.quantity,
+                trade.fee,
+                trade.pnl,
+                trade.state_after,
+                trade.reason,
+                trade.holding_minutes,
+            ])
+
+    if "equity_curve" in sections and result.equity_curve:
+        writer.writerow([])
+        writer.writerow(["equity_curve"])
+        writer.writerow([
+            "timestamp", "close", "equity", "realized_pnl", "unrealized_pnl",
+            "drawdown_pct", "position",
+        ])
+        for point in result.equity_curve:
+            writer.writerow([
+                point.timestamp.isoformat(),
+                point.close,
+                point.equity,
+                point.realized_pnl,
+                point.unrealized_pnl,
+                point.drawdown_pct,
+                point.position,
+            ])
+
+    if "skipped_signals" in sections and result.skipped_signals:
+        writer.writerow([])
+        writer.writerow(["skipped_signals"])
+        writer.writerow([
+            "timestamp", "action", "price", "reason", "state", "category",
+        ])
+        for signal in result.skipped_signals:
+            writer.writerow([
+                signal.timestamp.isoformat(),
+                signal.action,
+                signal.price,
+                signal.reason,
+                signal.state,
+                signal.category,
+            ])
+
+    if "fee_sensitivity" in sections and result.fee_sensitivity:
+        writer.writerow([])
+        writer.writerow(["fee_sensitivity"])
+        writer.writerow(["fee_rate", "total_pnl", "total_return_pct", "max_drawdown_pct"])
+        for point in result.fee_sensitivity:
+            writer.writerow([
+                point.fee_rate,
+                point.total_pnl,
+                point.total_return_pct,
+                point.max_drawdown_pct,
+            ])
+
+    symbol = result.params.symbol.strip().upper() or "UNKNOWN"
+    safe_symbol = symbol.replace(".", "_")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    filename = f"backtest_{safe_symbol}_{timestamp}.csv"
+    csv_bytes = output.getvalue().encode("utf-8-sig")
+    return Response(
+        content=csv_bytes,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 # ---------------------------------------------------------------------------

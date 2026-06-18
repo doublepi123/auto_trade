@@ -1,7 +1,9 @@
 <template>
   <div class="notif-page">
     <div class="notif-header">
-      <h3>通知中心</h3>
+      <el-badge :value="unreadCount" :max="99" :hidden="unreadCount === 0" data-testid="notif-unread-badge">
+        <h3>通知中心</h3>
+      </el-badge>
       <div class="notif-actions">
         <el-select v-model="severityFilter" placeholder="全部级别" clearable style="width: 140px" data-testid="notif-severity">
           <el-option label="INFO" value="INFO" />
@@ -37,17 +39,22 @@
           <el-button :type="quickFilter === 'warning' ? 'primary' : ''" data-testid="notif-filter-warning" @click="setQuickFilter('warning')">WARNING</el-button>
           <el-button :type="quickFilter === 'info' ? 'primary' : ''" data-testid="notif-filter-info" @click="setQuickFilter('info')">INFO</el-button>
         </el-button-group>
+        <el-button :loading="exportingCsv" data-testid="notif-export-csv" @click="handleExport('csv')">导出 CSV</el-button>
+        <el-button :loading="exportingJson" data-testid="notif-export-json" @click="handleExport('json')">导出 JSON</el-button>
         <el-button-group>
           <el-button :type="viewMode === 'cards' ? 'primary' : ''" data-testid="notif-view-cards" @click="viewMode = 'cards'">卡片</el-button>
           <el-button :type="viewMode === 'table' ? 'primary' : ''" data-testid="notif-view-table" @click="viewMode = 'table'">表格</el-button>
+          <el-button :type="viewMode === 'timeline' ? 'primary' : ''" data-testid="notif-view-timeline" @click="viewMode = 'timeline'">时间线</el-button>
         </el-button-group>
-        <el-button :loading="loading" @click="load">刷新</el-button>
+        <el-button data-testid="notif-mark-all-read" @click="handleMarkAllRead">全部已读</el-button>
+        <el-button :loading="loading" data-testid="notif-refresh" @click="load">刷新</el-button>
       </div>
     </div>
 
     <div class="notif-summary" data-testid="notif-summary">
       <el-space wrap :size="8">
         <el-tag type="info">当前页 {{ items.length }}/{{ total }}</el-tag>
+        <el-tag v-if="unreadCount > 0" type="danger" data-testid="notif-unread-count">未读 {{ unreadCount }}</el-tag>
         <el-tag type="success">成功 {{ summary.success }}</el-tag>
         <el-tag type="danger">失败 {{ summary.failure }}</el-tag>
         <el-tag type="danger">CRITICAL {{ summary.critical }}</el-tag>
@@ -69,25 +76,39 @@
             :key="item.id"
             :data-testid="`notif-card-${item.id}`"
             class="day-item-wrapper"
+            @click="openDetail(item)"
           >
             <el-card shadow="never" class="day-item">
               <div class="day-item-main">
                 <span class="day-item-time">{{ formatDateTime(item.created_at) }}</span>
+                <span v-if="isItemUnread(item)" class="unread-dot" />
                 <el-tag size="small" :type="severityType(item.severity)">{{ item.severity }}</el-tag>
                 <el-tag size="small" :type="item.success ? 'success' : 'danger'">{{ item.success ? '成功' : '失败' }}</el-tag>
               </div>
               <div class="day-item-title">{{ item.title }}</div>
               <div class="day-item-content">{{ item.content }}</div>
               <div v-if="item.error" class="day-item-error">{{ item.error }}</div>
+              <div v-if="!item.success" style="margin-top: 8px">
+                <el-button
+                  size="small"
+                  text
+                  :loading="retryingMap[item.id]"
+                  data-testid="notif-retry-btn"
+                  @click.stop="handleRetry(item)"
+                >重试发送</el-button>
+              </div>
             </el-card>
           </div>
         </el-space>
       </div>
     </div>
 
-    <el-table v-else :data="items" size="small" class="responsive-table" v-loading="loading" data-testid="notif-list">
+    <el-table v-else-if="viewMode === 'table'" :data="items" size="small" class="responsive-table" v-loading="loading" data-testid="notif-list" @row-click="openDetail">
       <el-table-column prop="created_at" label="时间" min-width="170">
-        <template #default="{ row }">{{ formatDateTime(row.created_at) }}</template>
+        <template #default="{ row }">
+          <span v-if="isItemUnread(row)" class="unread-dot" />
+          {{ formatDateTime(row.created_at) }}
+        </template>
       </el-table-column>
       <el-table-column label="级别" min-width="100">
         <template #default="{ row }">
@@ -104,6 +125,26 @@
       <el-table-column prop="error" label="错误" min-width="160" show-overflow-tooltip />
     </el-table>
 
+    <div v-else-if="viewMode === 'timeline'" class="notif-timeline" data-testid="notif-timeline">
+      <el-timeline>
+        <el-timeline-item
+          v-for="item in items"
+          :key="item.id"
+          :type="timelineType(item.severity)"
+          :timestamp="formatDateTime(item.created_at)"
+          :data-testid="`notif-timeline-item-${item.id}`"
+        >
+          <div class="timeline-title">
+            <span v-if="isItemUnread(item)" class="unread-dot" />
+            {{ item.title }}
+          </div>
+          <div class="timeline-content">{{ item.content }}</div>
+          <el-tag size="small" :type="item.success ? 'success' : 'danger'">{{ item.success ? '成功' : '失败' }}</el-tag>
+          <div v-if="item.error" class="timeline-error">{{ item.error }}</div>
+        </el-timeline-item>
+      </el-timeline>
+    </div>
+
     <div class="notif-footer">
       <el-pagination
         background
@@ -114,28 +155,74 @@
         @current-change="handlePage"
       />
     </div>
+
+    <el-dialog
+      v-model="detailDialog.visible"
+      :title="detailDialog.item?.title || '通知详情'"
+      width="520px"
+      data-testid="notif-detail-dialog"
+    >
+      <template v-if="detailDialog.item">
+        <div class="detail-meta">
+          <el-tag size="small" :type="severityType(detailDialog.item.severity)">{{ detailDialog.item.severity }}</el-tag>
+          <el-tag size="small" :type="detailDialog.item.success ? 'success' : 'danger'">{{ detailDialog.item.success ? '成功' : '失败' }}</el-tag>
+          <span>{{ formatDateTime(detailDialog.item.created_at) }}</span>
+        </div>
+        <h4 class="detail-title">{{ detailDialog.item.title }}</h4>
+        <p class="detail-content">{{ detailDialog.item.content }}</p>
+        <div v-if="detailDialog.item.error" class="detail-error">
+          <div class="detail-error-header">
+            <span>错误信息</span>
+            <el-button size="small" text data-testid="notif-copy-error" @click="copyError(detailDialog.item.error)">复制</el-button>
+          </div>
+          <pre>{{ detailDialog.item.error }}</pre>
+        </div>
+        <div v-if="!detailDialog.item.success" style="margin-top: 12px">
+          <el-button
+            type="primary"
+            size="small"
+            :loading="retryingMap[detailDialog.item.id]"
+            data-testid="notif-retry-btn"
+            @click="handleRetry(detailDialog.item)"
+          >重试发送</el-button>
+        </div>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch, onMounted } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { getNotifications } from '../api'
+import { exportNotifications, getNotifications, retryNotification } from '../api'
+import { useNotificationBadge } from '../composables/useNotificationBadge'
 import type { NotificationLogOut } from '../types'
 import { resolveErrorMessage } from '../utils/error'
+
+const POLL_INTERVAL_MS = 10000
+const { unreadCount, markAllRead, isItemUnread, refresh: refreshBadge } = useNotificationBadge()
+let pollTimer: ReturnType<typeof setInterval> | null = null
 
 const items = ref<NotificationLogOut[]>([])
 const total = ref(0)
 const page = ref(1)
 const pageSize = ref(50)
 const loading = ref(false)
+const exportingCsv = ref(false)
+const exportingJson = ref(false)
 const severityFilter = ref<string>('')
 const successFilter = ref<string>('')
 const dateRange = ref<string[] | null>(null)
 const searchText = ref('')
 const quickFilter = ref<'all' | 'failed' | 'critical' | 'warning' | 'info'>('all')
-const viewMode = ref<'cards' | 'table'>('cards')
+const viewMode = ref<'cards' | 'table' | 'timeline'>('cards')
+const detailDialog = reactive({
+  visible: false,
+  item: null as NotificationLogOut | null,
+})
 let searchDebounceTimer: number | undefined
+
+const retryingMap = reactive<Record<number, boolean>>({})
 
 const summary = computed(() => {
   let success = 0
@@ -216,9 +303,89 @@ function debouncedLoad() {
   }, 300)
 }
 
+async function handleMarkAllRead() {
+  await markAllRead()
+  ElMessage.success('已全部标记为已读')
+}
+
+async function handleExport(format: 'csv' | 'json') {
+  const loadingRef = format === 'csv' ? exportingCsv : exportingJson
+  loadingRef.value = true
+  try {
+    const params: Record<string, unknown> = {}
+    if (severityFilter.value) params.severity = severityFilter.value
+    if (successFilter.value) params.success = successFilter.value === 'true'
+    if (dateRange.value?.[0]) params.from_date = dateRange.value[0]
+    if (dateRange.value?.[1]) params.to_date = dateRange.value[1]
+    if (searchText.value.trim()) params.q = searchText.value.trim()
+
+    const blob = await exportNotifications(format, params)
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `notifications_${new Date().toISOString().slice(0, 10)}.${format}`
+    document.body.appendChild(link)
+    const cleanup = () => {
+      URL.revokeObjectURL(url)
+      link.removeEventListener('click', cleanup)
+      if (link.parentNode) link.parentNode.removeChild(link)
+    }
+    link.addEventListener('click', cleanup)
+    link.click()
+    setTimeout(cleanup, 1000)
+    ElMessage.success(`导出 ${format.toUpperCase()} 成功`)
+  } catch (e) {
+    ElMessage.error(resolveErrorMessage(e, `导出 ${format.toUpperCase()} 失败`))
+  } finally {
+    ;(format === 'csv' ? exportingCsv : exportingJson).value = false
+  }
+}
+
+function openDetail(item: NotificationLogOut) {
+  detailDialog.item = item
+  detailDialog.visible = true
+}
+
+async function copyError(text: string) {
+  try {
+    await navigator.clipboard.writeText(text)
+    ElMessage.success('已复制到剪贴板')
+  } catch {
+    ElMessage.error('复制失败')
+  }
+}
+
+async function handleRetry(item: NotificationLogOut) {
+  if (retryingMap[item.id]) return
+  retryingMap[item.id] = true
+  try {
+    const updated = await retryNotification(item.id)
+    const idx = items.value.findIndex((i) => i.id === item.id)
+    if (idx !== -1) {
+      items.value[idx] = updated
+    }
+    if (detailDialog.item?.id === item.id) {
+      detailDialog.item = updated
+    }
+    ElMessage.success(updated.success ? '重试成功' : '重试失败，请检查通知渠道配置')
+    refreshBadge()
+  } catch (e) {
+    ElMessage.error(resolveErrorMessage(e, '重试失败'))
+  } finally {
+    retryingMap[item.id] = false
+  }
+}
+
 function severityType(s: string): string {
   if (s === 'CRITICAL') return 'danger'
   if (s === 'WARNING') return 'warning'
+  return 'info'
+}
+
+function timelineType(s: string): 'primary' | 'success' | 'warning' | 'danger' | 'info' {
+  const t = severityType(s)
+  if (t === 'danger') return 'danger'
+  if (t === 'warning') return 'warning'
   return 'info'
 }
 
@@ -228,11 +395,30 @@ function formatDateTime(v: string): string {
   })
 }
 
+function startPoll() {
+  stopPoll()
+  pollTimer = setInterval(() => {
+    load()
+    refreshBadge()
+  }, POLL_INTERVAL_MS)
+}
+
+function stopPoll() {
+  if (pollTimer) {
+    clearInterval(pollTimer)
+    pollTimer = null
+  }
+}
+
 watch(severityFilter, () => { quickFilter.value = 'all'; page.value = 1; load() })
 watch(successFilter, () => { quickFilter.value = 'all'; page.value = 1; load() })
 watch(dateRange, () => { page.value = 1; load() }, { deep: true })
 watch(searchText, debouncedLoad)
-onMounted(load)
+onMounted(() => {
+  load()
+  startPoll()
+})
+onUnmounted(stopPoll)
 </script>
 
 <style scoped>
@@ -289,6 +475,19 @@ onMounted(load)
   margin-bottom: 8px;
 }
 
+.unread-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--el-color-danger);
+  margin-right: 6px;
+}
+
+.day-item-wrapper {
+  cursor: pointer;
+}
+
 .day-item {
   width: 100%;
 }
@@ -329,6 +528,79 @@ onMounted(load)
   background: var(--el-color-danger-light-9);
   padding: 6px 8px;
   border-radius: 4px;
+}
+
+.notif-timeline {
+  padding: 8px 0;
+}
+
+.timeline-title {
+  font-weight: 600;
+  font-size: 14px;
+  margin-bottom: 4px;
+}
+
+.timeline-content {
+  font-size: 13px;
+  color: var(--el-text-color-regular);
+  margin-bottom: 6px;
+  word-break: break-word;
+}
+
+.timeline-error {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--el-color-danger);
+  background: var(--el-color-danger-light-9);
+  padding: 6px 8px;
+  border-radius: 4px;
+}
+
+.detail-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  color: #6b7280;
+  font-size: 13px;
+}
+
+.detail-title {
+  margin: 0 0 8px;
+  color: #172033;
+  font-size: 16px;
+}
+
+.detail-content {
+  margin: 0 0 12px;
+  color: #4b5563;
+  font-size: 14px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.detail-error {
+  border-radius: 6px;
+  background: var(--el-color-danger-light-9);
+  padding: 10px;
+}
+
+.detail-error-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.detail-error pre {
+  margin: 0;
+  color: var(--el-color-danger);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .responsive-table {

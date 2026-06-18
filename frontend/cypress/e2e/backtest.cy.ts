@@ -73,7 +73,7 @@ describe('Backtest', () => {
   })
 
   it('fetches candles from the market into the CSV box', () => {
-    cy.get('[data-testid="candle-symbol"] input').clear().type('AAPL.US')
+    cy.get('.broker-fetch input').first().clear().type('AAPL.US')
     cy.get('[data-testid="candle-fetch"]').click()
     cy.wait('@getBrokerCandles')
     cy.get('[data-testid="backtest-csv-input"]').should('contain.value', '2026-06-14T13:30:00Z')

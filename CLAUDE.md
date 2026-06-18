@@ -140,16 +140,16 @@ cd frontend && npm run type-check
 | 风险历史 | `GET /api/risk/history`（`runtime_state_snapshots` 时序快照：daily_pnl/连续亏损/暂停/熔断；只读） |
 | 行情 K 线 | `GET /api/broker/candles`（`BrokerGateway.get_candlesticks` → `{bars, csv_text}`，回测用；422 非法 period / 503 券商不可用） |
 | 交易时段 | `GET /api/calendar/session`（`session_status` → `rth`/`pre`/`post`/`lunch`/`closed` + 本地时间 + 下次开盘；只读） |
-| 通知中心 | `GET /api/notifications`（已发送通知分发日志，`notifications` 表；`MultiChannelNotifier` sink 落库；只读） |
+| 通知中心 | `GET /api/notifications`（已发送通知分发日志，`notifications` 表；`MultiChannelNotifier` sink 落库；只读）；`GET /api/notifications/export?format=csv|json`（同过滤条件无分页导出）；`POST /api/notifications/{id}/retry`（失败通知使用当前凭证重发并更新原记录） |
 | LLM 详情 | `GET /api/llm-interactions/{id}`（单条交互完整 prompt/响应/解析/上下文；只读） |
 | 笔记分析 | `GET /api/trade-notes/analytics`（笔记聚合：评分分布/热门标签；只读） |
 | 定时报告 | `POST /api/reports/schedule/run`（立即推送日报；写审计）；后台 cron 按 `StrategyConfig.report_schedule_*` 周期推送 |
 | 告警规则 | `GET/POST /api/alert-rules`、`PUT/DELETE /api/alert-rules/{id}`、`POST /api/alert-rules/evaluate`（`price_above`/`price_below`/`daily_loss`；后台每 60s 评估；触发经 `MultiChannelNotifier`；只读评估不发单） |
 | 策略预设 | `GET/POST /api/strategy-presets`、`GET/DELETE /{id}`、`POST /{id}/apply`（应用到当前策略配置，写审计 `STRATEGY_PRESET_APPLY`） |
 | 事件 | `GET /api/events`（`source=trade\|audit\|llm\|risk\|all` 跨四表 union：trade_events + audit_logs + llm_interactions + risk_events；`event_type` 重复参数多选），`GET /api/events/export`（仅 `trade_events`） |
-| 凭证 | `GET/PUT /api/credentials`（含 `notification_channels`，写审计） |
+| 凭证 | `GET/PUT /api/credentials`（含 `notification_channels`，写审计），`POST /api/credentials/test`（全渠道冒烟测试），`POST /api/credentials/notification-channels/test`（单渠道连通性诊断） |
 | LLM | `POST /api/strategy/llm-interval/{preview,analyze}`，`GET …/status`，`PUT …/enable\|disable` |
-| 回测 | `POST /api/backtest/run`、`POST /api/backtest/sweep`（即时网格参数扫描，返回排名表+热力图）、`POST /api/backtest/walk-forward`（滚动窗口样本外稳定性评估）、`POST /api/backtest/stress`（What-If 蒙特卡洛压力分布） |
+| 回测 | `POST /api/backtest/run`、`POST /api/backtest/sweep`（即时网格参数扫描，返回排名表+热力图）、`POST /api/backtest/walk-forward`（滚动窗口样本外稳定性评估）、`POST /api/backtest/stress`（What-If 蒙特卡洛压力分布）、`POST /api/backtest/export`（多 section CSV 导出结果） |
 | 实验 | `GET /api/experiments`（实验名称列表），`GET /api/experiments/{name}/summary`（变体摘要） |
 | 指标 | `GET /api/indicators?symbol=`（实时技术指标快照：ATR/RSI/MACD/布林带/成交量/情绪/多时间框架；只读，不触发 LLM） |
 | 性能 | `GET /api/performance/stats?experiment=`，`GET /api/performance/compare?experiment=`，`GET /api/performance/recommendations?experiment=`（A/B 统计；只读） |

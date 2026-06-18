@@ -49,7 +49,13 @@
         >
           <template #default="{ row }">
             <div v-if="scoreMap[row.symbol]">
-              <el-tag :type="scoreTagType(scoreMap[row.symbol].score)" size="small">
+              <el-tag
+                :type="scoreTagType(scoreMap[row.symbol].score)"
+                size="small"
+                class="score-tag"
+                data-testid="watchlist-score-tag"
+                @click="openScoreDrawer(scoreMap[row.symbol])"
+              >
                 {{ scoreMap[row.symbol].score.toFixed(0) }}
               </el-tag>
               <small style="color: #909399; margin-left: 6px">
@@ -110,11 +116,45 @@
         暂无观察标的，请添加股票代码
       </div>
     </el-card>
+
+    <el-drawer
+      v-model="scoreDrawer.visible"
+      :title="`${scoreDrawer.score?.symbol || ''} LLM 评分详情`"
+      size="380px"
+      data-testid="watchlist-score-drawer"
+    >
+      <template v-if="scoreDrawer.score">
+        <div class="score-detail-header">
+          <div class="score-detail-score" :class="scoreDetailClass">{{ scoreDrawer.score.score.toFixed(0) }}</div>
+          <el-tag :type="scoreTagType(scoreDrawer.score.score)" size="small">{{ scoreActionLabel(scoreDrawer.score.recommended_action) }}</el-tag>
+        </div>
+        <div class="score-detail-section">
+          <div class="score-detail-label">评分依据</div>
+          <p class="score-detail-rationale">{{ scoreDrawer.score.rationale || '暂无说明' }}</p>
+        </div>
+        <div class="score-detail-section">
+          <div class="score-detail-label">置信度</div>
+          <strong>{{ (scoreDrawer.score.confidence * 100).toFixed(0) }}%</strong>
+        </div>
+        <div class="score-detail-section">
+          <div class="score-detail-label">来源</div>
+          <el-tag :type="scoreDrawer.score.source.startsWith('fallback') ? 'info' : 'success'" size="small">
+            {{ scoreDrawer.score.source }}
+          </el-tag>
+          <el-tag v-if="scoreDrawer.score.is_stale" type="warning" size="small">已过期</el-tag>
+        </div>
+        <div class="score-detail-section">
+          <div class="score-detail-label">时间</div>
+          <div>生成：{{ formatDateTime(scoreDrawer.score.created_at) }}</div>
+          <div>过期：{{ formatDateTime(scoreDrawer.score.expires_at) }}</div>
+        </div>
+      </template>
+    </el-drawer>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue'
+import { computed, ref, onMounted, onUnmounted, reactive } from 'vue'
 import { ElMessage } from 'element-plus'
 import type { WatchlistItem, WatchlistQuote } from '../types'
 import {
@@ -149,6 +189,34 @@ let quoteFailureStreak = 0
 const QUOTE_FAILURE_TOAST_THRESHOLD = 3
 const QUOTE_FAILURE_TOAST_COOLDOWN_MS = 60_000
 let lastQuoteFailureToastAt = 0
+
+const scoreDrawer = reactive({
+  visible: false,
+  score: null as WatchlistScore | null,
+})
+
+const scoreDetailClass = computed(() => {
+  const s = scoreDrawer.score?.score ?? 0
+  if (s >= 70) return 'score-high'
+  if (s >= 40) return 'score-mid'
+  if (s > 0) return 'score-low'
+  return 'score-none'
+})
+
+function openScoreDrawer(score: WatchlistScore) {
+  scoreDrawer.score = score
+  scoreDrawer.visible = true
+}
+
+function formatDateTime(value: string): string {
+  return new Date(value).toLocaleString([], {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
 
 function scoreTagType(score: number): 'success' | 'warning' | 'info' | 'danger' {
   if (score >= 70) return 'success'
@@ -312,5 +380,57 @@ onUnmounted(() => {
   margin: 0;
   color: #909399;
   font-size: 13px;
+}
+
+.score-tag {
+  cursor: pointer;
+}
+
+.score-detail-header {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.score-detail-score {
+  font-size: 48px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.score-high {
+  color: #14884f;
+}
+
+.score-mid {
+  color: #e6a23c;
+}
+
+.score-low {
+  color: #409eff;
+}
+
+.score-none {
+  color: #909399;
+}
+
+.score-detail-section {
+  margin-bottom: 16px;
+}
+
+.score-detail-label {
+  margin-bottom: 6px;
+  color: #909399;
+  font-size: 12px;
+}
+
+.score-detail-rationale {
+  margin: 0;
+  color: #4b5563;
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 </style>

@@ -529,7 +529,10 @@
       <div class="result-panel" data-testid="backtest-trades">
         <div class="section-title">
           <h4>交易明细</h4>
-          <span>{{ result.trades.length }} 条</span>
+          <div class="panel-actions">
+            <el-button size="small" plain data-testid="export-backtest-csv" @click="handleExportCsv">导出 CSV</el-button>
+            <span>{{ result.trades.length }} 条</span>
+          </div>
         </div>
         <el-table :data="result.trades" size="small" class="responsive-table">
           <el-table-column prop="timestamp" label="时间" min-width="160">
@@ -597,7 +600,7 @@
 import { computed, onMounted, ref, type CSSProperties } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import BacktestChart from '../components/BacktestChart.vue'
-import { getStrategy, runBacktest, runBacktestSweep, runWalkForward, runStressTest, saveBacktestRun, listBacktestRuns, compareBacktestRuns, deleteBacktestRun, getBrokerCandles } from '../api'
+import { getStrategy, runBacktest, exportBacktestResult, runBacktestSweep, runWalkForward, runStressTest, saveBacktestRun, listBacktestRuns, compareBacktestRuns, deleteBacktestRun, getBrokerCandles } from '../api'
 import type {
   BacktestMetrics,
   BacktestParams,
@@ -770,6 +773,24 @@ async function handleRun() {
     error.value = resolveErrorMessage(err, '回测请求失败')
   } finally {
     running.value = false
+  }
+}
+
+async function handleExportCsv() {
+  if (!result.value) return
+  try {
+    const { blob, filename } = await exportBacktestResult({ result: result.value })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+    ElMessage.success(`已导出 ${filename}`)
+  } catch (err) {
+    ElMessage.error(resolveErrorMessage(err, '导出 CSV 失败'))
   }
 }
 

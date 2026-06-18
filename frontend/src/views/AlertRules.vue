@@ -50,7 +50,7 @@
     <el-dialog v-model="dialog.visible" :title="dialog.id ? '编辑规则' : '新建规则'" width="480px" data-testid="alert-dialog">
       <el-form label-width="90px">
         <el-form-item label="名称">
-          <el-input v-model="dialog.name" data-testid="alert-name" />
+          <el-input v-model="dialog.name" placeholder="规则名称" data-testid="alert-name" />
         </el-form-item>
         <el-form-item label="标的">
           <el-input v-model="dialog.symbol" placeholder="AAPL.US" />
@@ -93,6 +93,27 @@
     >
       <div v-loading="historyDialog.loading">
         <p class="eval-note">共 {{ historyDialog.items.length }} 次触发（最近优先）</p>
+
+        <div class="history-chart" data-testid="alert-history-chart">
+          <svg
+            v-if="historySparkline.points.length > 1"
+            viewBox="0 0 560 120"
+            preserveAspectRatio="none"
+            class="history-chart-svg"
+          >
+            <polyline fill="none" stroke="#409eff" stroke-width="2" :points="historySparkline.polyline" />
+            <line
+              :x1="0"
+              :y1="historySparkline.thresholdY"
+              :x2="560"
+              :y2="historySparkline.thresholdY"
+              stroke="#f56c6c"
+              stroke-dasharray="4 4"
+            />
+          </svg>
+          <p v-else class="hint">触发次数不足，无法绘制趋势</p>
+        </div>
+
         <el-table :data="historyDialog.items" size="small" max-height="360">
           <el-table-column label="时间" width="150">
             <template #default="{ row }">{{ formatDateTime(row.fired_at) }}</template>
@@ -121,7 +142,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   listAlertRules,
@@ -145,6 +166,33 @@ const historyDialog = reactive({
   ruleId: 0,
   ruleName: '',
   items: [] as AlertFiring[],
+})
+
+const historySparkline = computed(() => {
+  const sorted = [...historyDialog.items].sort(
+    (a, b) => new Date(a.fired_at).getTime() - new Date(b.fired_at).getTime(),
+  )
+  if (sorted.length < 2) {
+    return { points: [] as AlertFiring[], polyline: '', thresholdY: 0 }
+  }
+  const values = sorted.map((i) => Number(i.trigger_value))
+  const threshold = Number(sorted[0].threshold)
+  const min = Math.min(threshold, ...values)
+  const max = Math.max(threshold, ...values)
+  const range = max - min || 1
+  const width = 560
+  const height = 120
+  const padding = 20
+  const plotHeight = height - padding * 2
+  const points = sorted
+    .map((item, idx) => {
+      const x = (idx / (sorted.length - 1)) * width
+      const y = padding + plotHeight - ((Number(item.trigger_value) - min) / range) * plotHeight
+      return `${x},${y}`
+    })
+    .join(' ')
+  const thresholdY = padding + plotHeight - ((threshold - min) / range) * plotHeight
+  return { points: sorted, polyline: points, thresholdY }
 })
 
 const dialog = reactive({
@@ -354,6 +402,20 @@ onMounted(loadRules)
   background: #f1f3f5;
   padding: 1px 4px;
   border-radius: 3px;
+}
+
+.history-chart {
+  margin-bottom: 16px;
+  border: 1px solid #e1e7f0;
+  border-radius: 6px;
+  padding: 12px;
+  background: #f8fafc;
+}
+
+.history-chart-svg {
+  display: block;
+  width: 100%;
+  height: 120px;
 }
 
 @media (max-width: 640px) {

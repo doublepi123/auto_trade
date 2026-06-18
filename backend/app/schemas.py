@@ -593,6 +593,14 @@ class BacktestResult(BaseModel):
     fee_sensitivity: list[BacktestFeeSensitivityPoint]
 
 
+class BacktestExportRequest(BaseModel):
+    """Export a backtest result as a multi-section CSV file."""
+
+    result: BacktestResult
+    sections: list[str] = Field(
+        default_factory=lambda: ["params", "trades", "equity_curve", "skipped_signals", "fee_sensitivity"],
+    )
+
 
 class StrategyExperimentGridValue(BaseModel):
     value: float

@@ -1,5 +1,6 @@
 import { api } from './client'
 import type {
+  BacktestExportRequest,
   BacktestResult,
   BacktestRunRequest,
   BacktestSweepRequest,
@@ -17,6 +18,22 @@ import type {
 export async function runBacktest(payload: BacktestRunRequest): Promise<BacktestResult> {
   const resp = await api.post('/api/backtest/run', payload, { timeout: 120000 })
   return resp.data
+}
+
+function parseContentDisposition(header: string | undefined): string | null {
+  if (!header) return null
+  const match = /filename\*?=["']?([^"';]+)["']?/.exec(header)
+  return match ? decodeURIComponent(match[1]) : null
+}
+
+export async function exportBacktestResult(payload: BacktestExportRequest): Promise<{ blob: Blob; filename: string }> {
+  const resp = await api.post('/api/backtest/export', payload, {
+    responseType: 'blob',
+    timeout: 60000,
+  })
+  const filename = parseContentDisposition(resp.headers['content-disposition'] as string | undefined)
+    ?? `backtest_export_${Date.now()}.csv`
+  return { blob: resp.data as Blob, filename }
 }
 
 export async function runBacktestSweep(payload: BacktestSweepRequest): Promise<BacktestSweepResult> {

@@ -13,7 +13,7 @@
 | **API 覆盖** | ✅ 完备。策略配置、凭证管理、订单查询、状态获取、状态历史、事件时间线、运行时控制（启停/暂停/Kill Switch）。 |
 | **WebSocket 推送** | ✅ 就绪。实时状态同步。 |
 | **本地部署** | ✅ 就绪。Docker Compose 一键启动。 |
-| **测试** | ✅ 就绪。Backend pytest **903** 项、pytest-cov 覆盖率 **87%**、Frontend Cypress E2E **80** 项。 |
+| **测试** | ✅ 就绪。Backend pytest **1178** 项、pytest-cov 覆盖率 **89%**、Frontend Cypress E2E **168** 项。 |
 | **凭证安全** | ✅ 就绪。主密钥 + AES-GCM 加密存储，前端不回显明文。 |
 | **数据库** | ✅ 就位。SQLite，含运行状态、状态快照、订单、`tracked_entries`、LLM 交互、交易事件、审计日志和凭证配置。 |
 | **LLM 行情数据** | ✅ 真实 K 线（日 K + 1 分钟 K），ATR/布林带有效。 |
@@ -34,6 +34,110 @@
 | **决策时间线搜索** | ✅ 全文搜索（消息/标的/事件类型）+ 书签（localStorage 持久化）。 |
 | **后端热路径** | ✅ `recent_quotes` 改 `deque(maxlen=...)` + 单边窗口淘汰；`broker.get_quotes([symbol])` 批量复用。 |
 | **Docker 镜像** | ✅ 多阶段构建（`builder → runtime`），剥离 toolchain；tini 转发信号。 |
+
+---
+
+## 近期已完成迭代 (2026-06-18) — 复盘/回测/通知闭环（5 轮 P89–P93）
+
+> 自主 feature 迭代第 10 批（5 轮）。覆盖复盘风险可视化、策略配置完整互通、凭证模板提示、回测结果导出、通知失败重试，前后端各新增一个端点，不改动 runner/order/risk。
+
+| 代号 | 主题 | 页面 / 端点 | 状态 |
+|------|------|-------------|------|
+| **P89** | Review 风险历史趋势图：风险历史 sparkline + 关键状态标注 | Review | ✅ |
+| **P90** | Strategy 完整配置 JSON 导入导出：导出全部可配字段、导入后一键保存 | Strategy | ✅ |
+| **P91** | Credentials Webhook Payload 模板变量提示与实时预览 | Credentials | ✅ |
+| **P92** | Backtest 结果 CSV 导出：多 section CSV（参数/指标/交易/权益/跳过/费用敏感性） | `POST /api/backtest/export` | ✅ |
+| **P93** | NotificationCenter 失败通知重试按钮：详情弹窗 + 卡片一键重发 | `POST /api/notifications/{id}/retry` | ✅ |
+
+**新增端点：** `POST /api/backtest/export`（回测结果多 section CSV 导出）、`POST /api/notifications/{id}/retry`（使用当前凭证重发并原地更新状态）。
+
+**设计要点：**
+- **Review 风险历史**：复用 `RiskHistoryPanel`，在复盘页以卡片形式展示风险指标时序与 sparkline。
+- **完整策略配置 JSON**：`buildStrategyConfig` 聚合表单全部字段，导入后通过深拷贝替换表单并触发保存可用状态。
+- **Webhook 模板预览**：`previewTemplate` 替换 `{title}/{content}/{severity}/{timestamp}/{source}`，实时渲染示例，Cypress 通过预置 webhook 渠道模板绕过 `el-textarea` 输入事件转发问题。
+- **回测 CSV 导出**：后端用标准 `csv` 模块生成含 BOM 的多 section CSV；前端通过 Blob + Content-Disposition 解析文件名触发下载。
+- **通知重试**：后端用当前 `CredentialConfig` 构造 `MultiChannelNotifier`，重发后原地更新原 `NotificationLog` 的 `success`/`error`/`created_at`；前端在卡片与详情弹窗均提供重试入口，成功后刷新列表与未读 badge。
+
+**验证：** `vue-tsc` 0 errors、`npm run type-check` 通过；`pytest tests/` **1178 passed, 1 skipped**，覆盖率 **89%**；Cypress 全量 **168** 项全部通过。
+
+**显式 YAGNI 未做：** 通知重试审计日志、回测导出为 Excel/多 sheet、webhook 模板服务端语法校验、策略配置 JSON Schema 版本号。
+
+---
+
+## 近期已完成迭代 (2026-06-18) — 通知实时化 + 预设/凭证运维（5 轮 P84–P88）
+
+> 自主 feature 迭代第 9 批（5 轮）。围绕通知实时感知、策略预设 JSON 互通、凭证单渠道测试，前端为主、后端新增一个诊断端点，不改动 runner/order/risk。
+
+| 代号 | 主题 | 页面 / 端点 | 状态 |
+|------|------|-------------|------|
+| **P84** | Dashboard 实时通知 ticker：最近 3 条通知轮播，点击跳转通知中心 | Dashboard | ✅ |
+| **P85** | NotificationCenter 自动轮询与未读提示：10s 轮询、未读 badge、未读红点、全部已读 | NotificationCenter / App 导航 | ✅ |
+| **P86** | Strategy 参数预设 JSON 导入导出：导出当前参数、导入单条/数组为预设 | Strategy | ✅ |
+| **P87** | Credentials 通知渠道测试按钮：每条渠道独立测试，隔离校验 | `POST /api/credentials/notification-channels/test` | ✅ |
+| **P88** | Backtest walk-forward / stress 分析面板：滚动窗口样本外稳定性 + 蒙特卡洛压力分布 | Backtest | ✅ |
+
+**新增端点：** `POST /api/credentials/notification-channels/test`（单渠道连通性诊断，不依赖已保存配置）。
+
+**设计要点：**
+- **共享未读状态**：`useNotificationBadge` composable 在 App 导航与通知中心之间共享轮询与 `localStorage` 最后已读时间。
+- **低耦合轮询**：NotificationCenter 保留当前过滤器的独立轮询，同时复用 badge 的最近未读计数。
+- **JSON 预设兼容**：导入支持单条 `{name, params}` 或数组；创建失败跳过并提示，成功后刷新下拉列表。
+- **单渠道测试**：后端用保存的 `sct_key` 解密后构造临时 `MultiChannelNotifier`，webhook 用传入 URL，不污染 runner 全局 notifier。
+- **回归修复**：Backtest 行情拉取测试用例因 Element Plus `el-input` 不转发 `data-testid` 而失败，改为 `.broker-fetch input:first` 选择器。
+
+**验证：** `vue-tsc` 0、`npm run type-check` 通过、Cypress 全量 **161** 项全部通过；`pytest tests/test_credentials_api.py` 20 passed、`basedpyright app/api/credentials.py` 0 errors；全量 `pytest tests/` 1171 passed（2 个 watchlist_score 预存失败未引入回归）。
+
+**显式 YAGNI 未做：** 通知服务端已读状态持久化、跨设备未读同步、JSON 预设 Schema 强校验、webhook 单渠道模板预渲染预览。
+
+---
+
+## 近期已完成迭代 (2026-06-18) — 前端可观测性补强（5 轮 P79–P83）
+
+> 自主 feature 迭代第 8 批（5 轮）。延续低风险前端增强路线，全部为只读 UI 改进，不新增后端端点、不改动 runner/order/risk。
+
+| 代号 | 主题 | 页面 | 状态 |
+|------|------|------|------|
+| **P79** | Watchlist 评分详情抽屉：展示 LLM 评分依据 / 置信度 / 来源 / 过期时间 | Watchlist | ✅ |
+| **P80** | AlertRules 触发历史趋势图：触发值折线 + 阈值虚线 | AlertRules | ✅ |
+| **P81** | NotificationCenter 通知详情弹窗：完整字段 + 错误一键复制 | NotificationCenter | ✅ |
+| **P82** | Review 页面快捷日期区间：近 7/30/90 天一键查询 | Review | ✅ |
+| **P83** | TradeHistory 订单详情抽屉：完整订单字段 + 笔记入口 | TradeHistory | ✅ |
+
+**设计要点：**
+- **零后端改动**：复用现有 `WatchlistScoreResponse`、`AlertFiring`、`NotificationLogOut`、`OrderRecord` 等类型与端点。
+- **点击触发**：卡片 / 表格行 / 评分标签均可打开详情，按钮通过 `@click.stop` 避免误触。
+- **轻量图表**：AlertRules 趋势图使用内联 SVG polyline，不引入图表库。
+- ** Cypress 覆盖**：每个新交互都有独立 spec，关键旧 spec（dashboard、history、notifications）无回归。
+
+**验证：** `vue-tsc` 0、`npm run build` 通过；9 个相关 Cypress spec 共 62 项全部通过；backend 无变更。
+
+**显式 YAGNI 未做：** 服务端持久化抽屉状态、跨页面共享筛选、抽屉内嵌编辑表单、PDF/图片导出。
+
+---
+
+## 近期已完成迭代 (2026-06-18) — 通知中心增强 + LLM 调度可见性（5 轮 P74–P78）
+
+> 自主 feature 迭代第 7 批（5 轮）。围绕通知中心的可观测性与 LLM 多标的状态透传，前端为主、后端新增只读导出，不触碰 runner/order/risk。
+
+| 代号 | 主题 | 端点 / 页面 | 状态 |
+|------|------|-------------|------|
+| **P74** | 通知中心前端增强：搜索、日期范围、快速过滤、卡片/表格切换、汇总标签 | `GET /api/notifications` | ✅ |
+| **P75** | 通知中心后端搜索与过滤：q / success / from_date / to_date | `GET /api/notifications` | ✅ |
+| **P76** | Dashboard LLM 调度面板：预算计数器 + 标的调度状态表 | `GET /api/strategy/llm-interval/status` | ✅ |
+| **P77** | Review 页 LLM 状态卡片：当前标的的实时 LLM 状态 | `GET /api/strategy/llm-interval/status` | ✅ |
+| **P78** | 通知导出与运维时间线：CSV/JSON 导出 + el-timeline 三视图 | `GET /api/notifications/export` | ✅ |
+
+**新增端点：** `GET /api/notifications/export?format=csv|json`（复用现有过滤条件，无分页）。
+
+**设计要点：**
+- **后端过滤复用**：导出端点复用 `NotificationLogService` 的过滤逻辑，避免 SQL 漂移。
+- **前端向后兼容**：Dashboard / Review 的 LLM 状态 UI 对旧响应（无 `budget`/`symbol_statuses`）做空值兜底。
+- **路由隔离**：Cypress stub 将列表 `/api/notifications?*` 与导出 `/api/notifications/export*` 分开，避免通配冲突。
+- **轻量时间线**：Element Plus `el-timeline` 作为第三视图，与卡片/表格共享同一组过滤与分页数据。
+
+**验证：** `notifications.cy.ts` 13 passed、`dashboard_llm.cy.ts` 6 passed、`review_llm.cy.ts` 4 passed、`dashboard.cy.ts` 20 passed；`vue-tsc` 0、`npm run build` 通过；`pytest tests/test_notification_log.py` 17 passed；`basedpyright` 0 errors（后台变更文件）。
+
+**显式 YAGNI 未做：** 通知批量删除/归档、服务端 PDF 导出、LLM 状态写入控制、跨页面筛选状态同步。
 
 ---
 

@@ -18,6 +18,28 @@
         </div>
       </div>
 
+      <div
+        v-if="recentNotifications.length > 0"
+        class="notif-ticker"
+        data-testid="dashboard-notif-ticker"
+        v-loading="recentNotificationsLoading"
+      >
+        <span class="ticker-label">通知</span>
+        <div class="ticker-items">
+          <div
+            v-for="n in recentNotifications.slice(0, 3)"
+            :key="n.id"
+            class="ticker-item"
+            @click="router.push('/notifications')"
+          >
+            <el-tag size="small" :type="severityType(n.severity)">{{ n.severity }}</el-tag>
+            <span class="ticker-title">{{ n.title }}</span>
+            <small>{{ formatTime(n.created_at) }}</small>
+          </div>
+        </div>
+        <el-button link size="small" @click="router.push('/notifications')">查看全部</el-button>
+      </div>
+
       <div class="status-strip" data-testid="status-strip" v-loading="statusLoading || strategyLoading">
         <div class="strip-item">
           <span>标的</span>
@@ -173,24 +195,80 @@
             <span>LLM 智能区间</span>
             <el-tag :type="llmStatus?.enabled ? 'success' : 'info'" effect="plain">{{ llmStatus?.enabled ? '已启用' : '已禁用' }}</el-tag>
           </div>
-          <template v-if="llmStatus?.current_suggestion">
-            <div class="llm-decision">
-              <strong>{{ llmStatus.current_suggestion.confidence_score.toFixed(2) }}</strong>
-              <span>置信度</span>
-            </div>
-            <p class="llm-range">建议区间 {{ llmStatus.current_suggestion.buy_low.toFixed(2) }} ~ {{ llmStatus.current_suggestion.sell_high.toFixed(2) }}</p>
-            <p class="llm-analysis">{{ llmStatus.current_suggestion.analysis }}</p>
-            <div class="llm-meta">
-              <span>最近刷新：{{ llmStatus.last_analysis_at ? formatDateTime(llmStatus.last_analysis_at) : '-' }}</span>
-              <span>下次分析：{{ llmStatus.next_analysis_at ? formatDateTime(llmStatus.next_analysis_at) : '-' }}</span>
-            </div>
-            <div class="llm-apply-state">
-              <el-tag v-if="llmStatus.applied_values" type="success" effect="plain">已应用</el-tag>
-              <span v-if="llmStatus.applied_values">当前 {{ llmStatus.applied_values.buy_low.toFixed(2) }} ~ {{ llmStatus.applied_values.sell_high.toFixed(2) }}</span>
-              <span v-else-if="llmStatus.reject_reason">未应用：{{ llmStatus.reject_reason }}</span>
+          <template v-if="llmStatus">
+            <template v-if="llmStatus.current_suggestion">
+              <div class="llm-decision">
+                <strong>{{ llmStatus.current_suggestion.confidence_score.toFixed(2) }}</strong>
+                <span>置信度</span>
+              </div>
+              <p class="llm-range">建议区间 {{ llmStatus.current_suggestion.buy_low.toFixed(2) }} ~ {{ llmStatus.current_suggestion.sell_high.toFixed(2) }}</p>
+              <p class="llm-analysis">{{ llmStatus.current_suggestion.analysis }}</p>
+              <div class="llm-meta">
+                <span>最近刷新：{{ llmStatus.last_analysis_at ? formatDateTime(llmStatus.last_analysis_at) : '-' }}</span>
+                <span>下次分析：{{ llmStatus.next_analysis_at ? formatDateTime(llmStatus.next_analysis_at) : '-' }}</span>
+              </div>
+              <div class="llm-apply-state">
+                <el-tag v-if="llmStatus.applied_values" type="success" effect="plain">已应用</el-tag>
+                <span v-if="llmStatus.applied_values">当前 {{ llmStatus.applied_values.buy_low.toFixed(2) }} ~ {{ llmStatus.applied_values.sell_high.toFixed(2) }}</span>
+                <span v-else-if="llmStatus.reject_reason">未应用：{{ llmStatus.reject_reason }}</span>
+              </div>
+            </template>
+            <p v-else class="empty-note">暂无 LLM 建议</p>
+
+            <div class="llm-schedule" data-testid="llm-schedule">
+              <div class="llm-budget-bar" data-testid="llm-budget-bar">
+                <div class="budget-cell" data-testid="llm-budget-tracked">
+                  <span>本周期标的</span>
+                  <strong>{{ (llmStatus.budget?.tracked_symbol_count ?? 0) }}/{{ (llmStatus.budget?.max_symbols_per_cycle ?? 0) }}</strong>
+                </div>
+                <div class="budget-cell" data-testid="llm-budget-hourly">
+                  <span>小时分析</span>
+                  <strong>{{ (llmStatus.budget?.used_analyses_last_hour ?? 0) }}/{{ (llmStatus.budget?.max_analyses_per_hour ?? 0) }}</strong>
+                </div>
+                <div class="budget-cell" data-testid="llm-budget-remaining">
+                  <span>剩余次数</span>
+                  <strong>{{ llmStatus.budget?.remaining_analyses_this_hour ?? 0 }}</strong>
+                </div>
+              </div>
+
+              <div class="llm-symbol-status" data-testid="llm-symbol-status">
+                <h5 class="subsection-title">标的调度状态</h5>
+                <el-table
+                  :data="llmStatus.symbol_statuses || []"
+                  size="small"
+                  class="responsive-table"
+                  data-testid="llm-symbol-status-table"
+                  empty-text="暂无标的调度状态"
+                >
+                  <el-table-column prop="symbol" label="标的" min-width="110" />
+                  <el-table-column label="角色" min-width="80">
+                    <template #default="{ row }">
+                      <el-tag :type="row.is_primary ? 'success' : 'info'" size="small">{{ row.is_primary ? '主标的' : '观察' }}</el-tag>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="挂单" min-width="70">
+                    <template #default="{ row }">{{ row.has_pending_order ? '有' : '无' }}</template>
+                  </el-table-column>
+                  <el-table-column label="下次分析" min-width="130">
+                    <template #default="{ row }">{{ row.next_analysis_at ? formatDateTime(row.next_analysis_at) : '-' }}</template>
+                  </el-table-column>
+                  <el-table-column label="买入冷却" min-width="90">
+                    <template #default="{ row }">{{ formatCooldown(row.buy_cooldown_remaining_seconds) }}</template>
+                  </el-table-column>
+                  <el-table-column label="卖出冷却" min-width="90">
+                    <template #default="{ row }">{{ formatCooldown(row.sell_cooldown_remaining_seconds) }}</template>
+                  </el-table-column>
+                  <el-table-column label="最近状态" min-width="120" show-overflow-tooltip>
+                    <template #default="{ row }">
+                      <span>{{ row.last_status || '-' }}</span>
+                      <small v-if="row.last_skip_reason" class="llm-skip-reason">（{{ row.last_skip_reason }}）</small>
+                    </template>
+                  </el-table-column>
+                </el-table>
+              </div>
             </div>
           </template>
-          <p v-else class="empty-note">暂无 LLM 建议</p>
+          <p v-else class="empty-note">暂无 LLM 状态</p>
         </section>
 
         <section
@@ -485,6 +563,7 @@
 <script setup lang="ts">
 import { computed, ref, onMounted, onUnmounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { useRouter } from 'vue-router'
 import PriceChart from '../components/PriceChart.vue'
 import PnLChart from '../components/PnLChart.vue'
 import PositionPnlPanel from '../components/PositionPnlPanel.vue'
@@ -498,8 +577,8 @@ import { useAccountRefresh } from '../composables/useAccountRefresh'
 import { useMultiSymbolSnapshots } from '../composables/useMultiSymbolSnapshots'
 import { useStatusHistorySeries } from '../composables/useStatusHistorySeries'
 import { useDiagnosticsSnapshot } from '../composables/useDiagnosticsSnapshot'
-import { startTrading, stopTrading, pauseTrading, resumeTrading, activateKillSwitch, disableKillSwitch, getLLMIntervalStatus, getOrders, getTradeEvents, getMetricsSummary } from '../api'
-import type { LLMIntervalStatus, OrderRecord, Position, StatusHistoryPoint, TradeEventRecord } from '../types'
+import { startTrading, stopTrading, pauseTrading, resumeTrading, activateKillSwitch, disableKillSwitch, getLLMIntervalStatus, getNotifications, getOrders, getTradeEvents, getMetricsSummary } from '../api'
+import type { LLMIntervalStatus, NotificationLogOut, OrderRecord, Position, StatusHistoryPoint, TradeEventRecord } from '../types'
 import { engineStateLabel, auditActionLabel, marketLabel, positionSideLabel, skipCategoryLabel, tradeEventTypeLabel } from '../utils/labels'
 import { EVENT_TYPE } from '../utils/constants'
 
@@ -518,9 +597,12 @@ const { strategy, status, strategyLoading, statusLoading, loadError, load, refre
 const { realtimeStatus } = useStatusStream(status)
 const { account, accountError, accountLoading, accountRefreshing, refresh: refreshAccount } = useAccountRefresh(accountRefreshIntervalMs)
 
+const router = useRouter()
 const llmStatus = ref<LLMIntervalStatus | null>(null)
 const recentOrders = ref<OrderRecord[]>([])
 const recentEvents = ref<TradeEventRecord[]>([])
+const recentNotifications = ref<NotificationLogOut[]>([])
+const recentNotificationsLoading = ref(false)
 const llmStatusLoading = ref(true)
 const pollLoading = ref(false)
 const controlInFlight = ref(false)
@@ -677,7 +759,7 @@ async function handleRetry() {
   loadError.value = false
   try {
     await load()
-    await Promise.all([refreshAccount(), loadLLMStatus(), loadRecentOrders(), loadRecentEvents(), loadDiagnostics()])
+    await Promise.all([refreshAccount(), loadLLMStatus(), loadRecentOrders(), loadRecentEvents(), loadRecentNotifications(), loadDiagnostics()])
     await loadStatusHistory()
   } catch {
     void 0
@@ -714,6 +796,18 @@ async function loadRecentEvents() {
     recentEvents.value = []
   } finally {
     recentEventsLoading.value = false
+  }
+}
+
+async function loadRecentNotifications() {
+  recentNotificationsLoading.value = true
+  try {
+    const data = await getNotifications({ page: 1, page_size: 5 })
+    recentNotifications.value = data.items.slice(0, 5)
+  } catch {
+    recentNotifications.value = []
+  } finally {
+    recentNotificationsLoading.value = false
   }
 }
 
@@ -811,6 +905,7 @@ onMounted(() => {
   loadLLMStatus()
   loadRecentOrders()
   loadRecentEvents()
+  loadRecentNotifications()
   loadStatusHistory()
   loadMetrics()
   loadDiagnostics()
@@ -822,6 +917,7 @@ onMounted(() => {
       loadLLMStatus(),
       loadRecentOrders(),
       loadRecentEvents(),
+      loadRecentNotifications(),
       loadDiagnostics(),
     ]).finally(() => { pollLoading.value = false })
   }, 5000)
@@ -920,6 +1016,11 @@ function formatDateTime(value: string): string {
   })
 }
 
+function formatCooldown(seconds: number | null | undefined): string {
+  if (seconds == null || seconds <= 0) return '-'
+  return `${Math.ceil(seconds)}s`
+}
+
 function signedCurrency(value: number | null | undefined): string {
   const normalized = value ?? 0
   const amount = Math.abs(normalized).toFixed(2)
@@ -965,6 +1066,12 @@ function eventTagType(
   if (eventTypeValue === 'ORDER_SKIPPED') return 'warning'
   return 'warning'
 }
+
+function severityType(s: string): string {
+  if (s === 'CRITICAL') return 'danger'
+  if (s === 'WARNING') return 'warning'
+  return 'info'
+}
 </script>
 
 <style scoped>
@@ -1001,6 +1108,49 @@ function eventTagType(
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 8px;
+}
+
+.notif-ticker {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 12px 0;
+  border-radius: 6px;
+  padding: 8px 12px;
+  background: #fff;
+  border: 1px solid #e1e7f0;
+}
+
+.ticker-label {
+  flex-shrink: 0;
+  color: #6b7280;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.ticker-items {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.ticker-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.ticker-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 220px;
+  color: #172033;
+  font-size: 13px;
 }
 
 .dashboard-cockpit {
@@ -1283,6 +1433,52 @@ function eventTagType(
 
 .llm-apply-state span {
   line-height: 1.4;
+}
+
+.llm-schedule {
+  margin-top: 14px;
+  border-top: 1px solid #e1e7f0;
+  padding-top: 12px;
+}
+
+.llm-budget-bar {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.budget-cell {
+  border-radius: 6px;
+  padding: 8px;
+  background: #f8fafc;
+  text-align: center;
+}
+
+.budget-cell span {
+  display: block;
+  color: #6b7280;
+  font-size: 11px;
+}
+
+.budget-cell strong {
+  display: block;
+  margin-top: 3px;
+  color: #172033;
+  font-size: 16px;
+}
+
+.llm-symbol-status .subsection-title {
+  margin-top: 0;
+  margin-bottom: 8px;
+}
+
+.llm-skip-reason {
+  display: block;
+  margin-top: 2px;
+  color: #f59e0b;
+  font-size: 11px;
+  line-height: 1.3;
 }
 
 .action-grid {
