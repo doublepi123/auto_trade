@@ -37,17 +37,17 @@
 
 ---
 
-## 近期已完成迭代 (2026-06-18) — 复盘/回测/通知闭环（5 轮 P89–P93）
+## 近期已完成迭代 (2026-06-18) — 复盘/回测/通知闭环（5 轮 P104–P108）
 
-> 自主 feature 迭代第 10 批（5 轮）。覆盖复盘风险可视化、策略配置完整互通、凭证模板提示、回测结果导出、通知失败重试，前后端各新增一个端点，不改动 runner/order/risk。
+> 自主 feature 迭代第 11 批（5 轮）。覆盖复盘风险可视化、策略配置完整互通、凭证模板提示、回测结果导出、通知失败重试，前后端各新增一个端点，不改动 runner/order/risk。
 
 | 代号 | 主题 | 页面 / 端点 | 状态 |
 |------|------|-------------|------|
-| **P89** | Review 风险历史趋势图：风险历史 sparkline + 关键状态标注 | Review | ✅ |
-| **P90** | Strategy 完整配置 JSON 导入导出：导出全部可配字段、导入后一键保存 | Strategy | ✅ |
-| **P91** | Credentials Webhook Payload 模板变量提示与实时预览 | Credentials | ✅ |
-| **P92** | Backtest 结果 CSV 导出：多 section CSV（参数/指标/交易/权益/跳过/费用敏感性） | `POST /api/backtest/export` | ✅ |
-| **P93** | NotificationCenter 失败通知重试按钮：详情弹窗 + 卡片一键重发 | `POST /api/notifications/{id}/retry` | ✅ |
+| **P104** | Review 风险历史趋势图：风险历史 sparkline + 关键状态标注 | Review | ✅ |
+| **P105** | Strategy 完整配置 JSON 导入导出：导出全部可配字段、导入后一键保存 | Strategy | ✅ |
+| **P106** | Credentials Webhook Payload 模板变量提示与实时预览 | Credentials | ✅ |
+| **P107** | Backtest 结果 CSV 导出：多 section CSV（参数/指标/交易/权益/跳过/费用敏感性） | `POST /api/backtest/export` | ✅ |
+| **P108** | NotificationCenter 失败通知重试按钮：详情弹窗 + 卡片一键重发 | `POST /api/notifications/{id}/retry` | ✅ |
 
 **新增端点：** `POST /api/backtest/export`（回测结果多 section CSV 导出）、`POST /api/notifications/{id}/retry`（使用当前凭证重发并原地更新状态）。
 
@@ -64,80 +64,109 @@
 
 ---
 
-## 近期已完成迭代 (2026-06-18) — 通知实时化 + 预设/凭证运维（5 轮 P84–P88）
+## 近期已完成迭代 (2026-06-17) — TradeHistory 分析复盘增强（10 轮 P94–P103）
 
-> 自主 feature 迭代第 9 批（5 轮）。围绕通知实时感知、策略预设 JSON 互通、凭证单渠道测试，前端为主、后端新增一个诊断端点，不改动 runner/order/risk。
+> 自主 feature 迭代第 10 批（10 轮）。继续只读前端增强：复用既有 `/api/trades` 与 `/api/trades/analytics/*` 响应，不新增后端 API、不新增表、不触碰 broker/order/runner/risk 写路径。规格：[2026-06-17-p94-p103-tradehistory-analytics-polish-design.md](superpowers/specs/2026-06-17-p94-p103-tradehistory-analytics-polish-design.md)。计划：[2026-06-17-p94-p103-tradehistory-analytics-polish.md](superpowers/plans/2026-06-17-p94-p103-tradehistory-analytics-polish.md)。
 
-| 代号 | 主题 | 页面 / 端点 | 状态 |
-|------|------|-------------|------|
-| **P84** | Dashboard 实时通知 ticker：最近 3 条通知轮播，点击跳转通知中心 | Dashboard | ✅ |
-| **P85** | NotificationCenter 自动轮询与未读提示：10s 轮询、未读 badge、未读红点、全部已读 | NotificationCenter / App 导航 | ✅ |
-| **P86** | Strategy 参数预设 JSON 导入导出：导出当前参数、导入单条/数组为预设 | Strategy | ✅ |
-| **P87** | Credentials 通知渠道测试按钮：每条渠道独立测试，隔离校验 | `POST /api/credentials/notification-channels/test` | ✅ |
-| **P88** | Backtest walk-forward / stress 分析面板：滚动窗口样本外稳定性 + 蒙特卡洛压力分布 | Backtest | ✅ |
-
-**新增端点：** `POST /api/credentials/notification-channels/test`（单渠道连通性诊断，不依赖已保存配置）。
+| 代号 | 主题 | 状态 |
+|------|------|------|
+| **P94** | 往返摘要：当前筛选结果、胜/败、净盈亏、费用、平均净盈亏 | ✅ |
+| **P95** | 往返快捷过滤：全部、胜、败、多、空 | ✅ |
+| **P96** | 往返 symbol 搜索：当前加载 round trips 本地过滤 | ✅ |
+| **P97** | 往返洞察：最佳/最差 filtered round trip | ✅ |
+| **P98** | 往返展开详情：entry/exit order id、时间、gross/net、费用拖累 | ✅ |
+| **P99** | 交易日历洞察：最佳日、最差日、最活跃日 | ✅ |
+| **P100** | 持仓时长洞察：最佳/最差非空 bucket | ✅ |
+| **P101** | 盈亏分布平衡：亏损/盈利 bucket 数与净 PnL 平衡 | ✅ |
+| **P102** | 月度趋势洞察：最新月、最佳月、最大回撤月 | ✅ |
+| **P103** | 星期归因洞察：最佳/最差星期 | ✅ |
 
 **设计要点：**
-- **共享未读状态**：`useNotificationBadge` composable 在 App 导航与通知中心之间共享轮询与 `localStorage` 最后已读时间。
-- **低耦合轮询**：NotificationCenter 保留当前过滤器的独立轮询，同时复用 badge 的最近未读计数。
-- **JSON 预设兼容**：导入支持单条 `{name, params}` 或数组；创建失败跳过并提示，成功后刷新下拉列表。
-- **单渠道测试**：后端用保存的 `sct_key` 解密后构造临时 `MultiChannelNotifier`，webhook 用传入 URL，不污染 runner 全局 notifier。
-- **回归修复**：Backtest 行情拉取测试用例因 Element Plus `el-input` 不转发 `data-testid` 而失败，改为 `.broker-fetch input:first` 选择器。
+- **当前加载数据语义**：round-trip filters/search/summary 只作用于当前已加载的 200 条往返数据，避免暗示全量聚合。
+- **只读派生**：全部新增值由已加载 response `computed` 派生，无新请求、无写操作。
+- **渐进增强**：保留既有 round-trip 表格和 5 个 analytics 卡片，只新增上方摘要/洞察与展开详情。
+- **TDD 覆盖**：先新增 Cypress RED，再实现 GREEN；覆盖 filters/search/empty match/expand detail 与 5 类 analytics insights。
 
-**验证：** `vue-tsc` 0、`npm run type-check` 通过、Cypress 全量 **161** 项全部通过；`pytest tests/test_credentials_api.py` 20 passed、`basedpyright app/api/credentials.py` 0 errors；全量 `pytest tests/` 1171 passed（2 个 watchlist_score 预存失败未引入回归）。
+**验证：** `npm run cypress:run -- --config baseUrl=http://127.0.0.1:3000 --spec cypress/e2e/trade_roundtrips.cy.ts,cypress/e2e/history.cy.ts` 11 passed；`npm run type-check` 通过。
 
-**显式 YAGNI 未做：** 通知服务端已读状态持久化、跨设备未读同步、JSON 预设 Schema 强校验、webhook 单渠道模板预渲染预览。
+**显式 YAGNI 未做：** 后端聚合、跨页全量搜索、导出 analytics、图表库、持久化筛选、修改配对算法。
 
 ---
 
-## 近期已完成迭代 (2026-06-18) — 前端可观测性补强（5 轮 P79–P83）
+## 近期已完成迭代 (2026-06-17) — Review 复盘明细可观测性（5 轮 P89–P93）
 
-> 自主 feature 迭代第 8 批（5 轮）。延续低风险前端增强路线，全部为只读 UI 改进，不新增后端端点、不改动 runner/order/risk。
+> 自主 feature 迭代第 9 批（5 轮）。继续只读前端增强：复用既有 `/api/review` 响应中的 day/order/event/snapshot 字段，不新增后端 API、不改导出、不触碰 broker/order/runner/risk 写路径。规格：[2026-06-17-p89-p93-review-detail-observability-design.md](superpowers/specs/2026-06-17-p89-p93-review-detail-observability-design.md)。计划：[2026-06-17-p89-p93-review-detail-observability.md](superpowers/plans/2026-06-17-p89-p93-review-detail-observability.md)。
 
-| 代号 | 主题 | 页面 | 状态 |
-|------|------|------|------|
-| **P79** | Watchlist 评分详情抽屉：展示 LLM 评分依据 / 置信度 / 来源 / 过期时间 | Watchlist | ✅ |
-| **P80** | AlertRules 触发历史趋势图：触发值折线 + 阈值虚线 | AlertRules | ✅ |
-| **P81** | NotificationCenter 通知详情弹窗：完整字段 + 错误一键复制 | NotificationCenter | ✅ |
-| **P82** | Review 页面快捷日期区间：近 7/30/90 天一键查询 | Review | ✅ |
-| **P83** | TradeHistory 订单详情抽屉：完整订单字段 + 笔记入口 | TradeHistory | ✅ |
+| 代号 | 主题 | 状态 |
+|------|------|------|
+| **P89** | Day composition strip：每日 LLM / 订单 / 事件 / 快照 / 错误计数 | ✅ |
+| **P90** | Day state badges：盈利/亏损/打平、有交易/无交易、有错误/无错误 | ✅ |
+| **P91** | Order fill detail：broker id、成交数量、成交价、成交时间 | ✅ |
+| **P92** | Event payload preview：从 `payload_json` 派生紧凑 payload 摘要 | ✅ |
+| **P93** | Snapshot delta context：触发价、价格相对触发价 delta、连亏次数、快照时间 | ✅ |
 
 **设计要点：**
-- **零后端改动**：复用现有 `WatchlistScoreResponse`、`AlertFiring`、`NotificationLogOut`、`OrderRecord` 等类型与端点。
-- **点击触发**：卡片 / 表格行 / 评分标签均可打开详情，按钮通过 `@click.stop` 避免误触。
-- **轻量图表**：AlertRules 趋势图使用内联 SVG polyline，不引入图表库。
-- ** Cypress 覆盖**：每个新交互都有独立 spec，关键旧 spec（dashboard、history、notifications）无回归。
+- **只读派生**：所有新增信息来自 `ReviewResponse` 已有字段，无新增请求。
+- **行内增强**：保留原有 Review timeline 结构，只补充 day-level 与 row-level 可解释细节。
+- **防御展示**：缺失成交/无效 payload/无触发价时显示 `-` 或 `payload -`，不阻断页面。
+- **时区稳定测试**：成交时间在新详情中用 ISO 分钟片段展示，避免本地时区导致 E2E 不稳定。
 
-**验证：** `vue-tsc` 0、`npm run build` 通过；9 个相关 Cypress spec 共 62 项全部通过；backend 无变更。
+**验证：** `npm run cypress:run -- --config baseUrl=http://127.0.0.1:3000 --spec cypress/e2e/review_runtime_history.cy.ts` 3 passed；`npm run type-check` 通过；`npm run build` 通过。
 
-**显式 YAGNI 未做：** 服务端持久化抽屉状态、跨页面共享筛选、抽屉内嵌编辑表单、PDF/图片导出。
+**显式 YAGNI 未做：** 新后端复盘聚合、payload JSON 展开编辑器、订单详情弹窗、跨日排序/筛选、图表改造。
 
 ---
 
-## 近期已完成迭代 (2026-06-18) — 通知中心增强 + LLM 调度可见性（5 轮 P74–P78）
+## 近期已完成迭代 (2026-06-17) — 告警与通知运维可观测性（10 轮 P79–P88）
 
-> 自主 feature 迭代第 7 批（5 轮）。围绕通知中心的可观测性与 LLM 多标的状态透传，前端为主、后端新增只读导出，不触碰 runner/order/risk。
+> 自主 feature 迭代第 8 批（10 轮）。继续低风险只读前端增强：复用既有 `/api/notifications`、`/api/alert-rules` 与 `/api/alert-rules/{id}/history`，不新增后端 API、不新增表、不改通知发送/告警评估/交易路径。规格：[2026-06-17-p79-p88-alerts-notifications-observability-design.md](superpowers/specs/2026-06-17-p79-p88-alerts-notifications-observability-design.md)。计划：[2026-06-17-p79-p88-alerts-notifications-observability.md](superpowers/plans/2026-06-17-p79-p88-alerts-notifications-observability.md)。
 
-| 代号 | 主题 | 端点 / 页面 | 状态 |
-|------|------|-------------|------|
-| **P74** | 通知中心前端增强：搜索、日期范围、快速过滤、卡片/表格切换、汇总标签 | `GET /api/notifications` | ✅ |
-| **P75** | 通知中心后端搜索与过滤：q / success / from_date / to_date | `GET /api/notifications` | ✅ |
-| **P76** | Dashboard LLM 调度面板：预算计数器 + 标的调度状态表 | `GET /api/strategy/llm-interval/status` | ✅ |
-| **P77** | Review 页 LLM 状态卡片：当前标的的实时 LLM 状态 | `GET /api/strategy/llm-interval/status` | ✅ |
-| **P78** | 通知导出与运维时间线：CSV/JSON 导出 + el-timeline 三视图 | `GET /api/notifications/export` | ✅ |
-
-**新增端点：** `GET /api/notifications/export?format=csv|json`（复用现有过滤条件，无分页）。
+| 代号 | 主题 | 状态 |
+|------|------|------|
+| **P79** | 通知级别摘要：当前页总数、成功/失败、INFO/WARNING/CRITICAL 计数 | ✅ |
+| **P80** | 通知搜索：标题/内容/错误/级别的本地关键字过滤 | ✅ |
+| **P81** | 通知快捷过滤：全部、失败、CRITICAL、WARNING、INFO | ✅ |
+| **P82** | 通知按日分组：当前筛选结果按 API 日期归组展示 | ✅ |
+| **P83** | 通知空状态/结果文案：显示当前页与筛选后数量，空结果可解释 | ✅ |
+| **P84** | 告警规则健康卡：总数、启用、停用、最近触发、从未触发 | ✅ |
+| **P85** | 告警规则快捷过滤：启用/停用/最近触发/从未触发 | ✅ |
+| **P86** | 最近触发规则摘要：按 `last_fired_at` 展示最近触发规则 | ✅ |
+| **P87** | 触发历史统计：次数、最新触发值、平均触发值、最大触发值 | ✅ |
+| **P88** | 触发历史严重度摘要：按严重度计数并保留消息上下文 | ✅ |
 
 **设计要点：**
-- **后端过滤复用**：导出端点复用 `NotificationLogService` 的过滤逻辑，避免 SQL 漂移。
-- **前端向后兼容**：Dashboard / Review 的 LLM 状态 UI 对旧响应（无 `budget`/`symbol_statuses`）做空值兜底。
-- **路由隔离**：Cypress stub 将列表 `/api/notifications?*` 与导出 `/api/notifications/export*` 分开，避免通配冲突。
-- **轻量时间线**：Element Plus `el-timeline` 作为第三视图，与卡片/表格共享同一组过滤与分页数据。
+- **只读派生**：全部新增能力在前端从已加载数据 `computed` 派生，不发写请求。
+- **分页语义明确**：通知统计标注为当前页/当前筛选结果，避免暗示全量聚合。
+- **测试驱动**：先写 Cypress RED，确认缺失 UI 失败，再实现 GREEN。
+- **时区稳定**：通知按 API 日期前缀归组，避免本地时区让 UTC 晚间通知跨日。
 
-**验证：** `notifications.cy.ts` 13 passed、`dashboard_llm.cy.ts` 6 passed、`review_llm.cy.ts` 4 passed、`dashboard.cy.ts` 20 passed；`vue-tsc` 0、`npm run build` 通过；`pytest tests/test_notification_log.py` 17 passed；`basedpyright` 0 errors（后台变更文件）。
+**验证：** `npm run cypress:run -- --config baseUrl=http://127.0.0.1:3000 --spec cypress/e2e/notification_center.cy.ts,cypress/e2e/alert_firings.cy.ts` 4 passed；`npm run type-check` 通过；`npm run build` 通过。
 
-**显式 YAGNI 未做：** 通知批量删除/归档、服务端 PDF 导出、LLM 状态写入控制、跨页面筛选状态同步。
+**显式 YAGNI 未做：** 通知重发、通知确认/删除、告警静音、后端聚合统计、WebSocket 实时推送、跨页全量通知统计。
+
+---
+
+## 近期已完成迭代 (2026-06-17) — Lab LLM 运维可观测性（5 轮 P74–P78）
+
+> 自主 feature 迭代第 7 批（5 轮）。延续低风险只读前端路线：复用既有 `/api/strategy/llm-interval/status` 与 `/api/strategy/llm-interval/interactions`，不新增后端 API、不改调度/预算算法、不触发 analyze/preview/enable/disable。规格：[2026-06-17-p74-p78-llm-observability-design.md](superpowers/specs/2026-06-17-p74-p78-llm-observability-design.md)。计划：[2026-06-17-p74-p78-llm-observability.md](superpowers/plans/2026-06-17-p74-p78-llm-observability.md)。
+
+| 代号 | 主题 | 状态 |
+|------|------|------|
+| **P74** | 运行总览：启用状态、分析间隔、最近/下次分析时间、当前建议与应用值 | ✅ |
+| **P75** | 预算仪表：每轮 symbol、每小时上限、跟踪标的、有效预算、已用/剩余次数 | ✅ |
+| **P76** | Symbol 状态：主标的、挂单、最近/下次分析、最近状态与跳过原因 | ✅ |
+| **P77** | 最近交互：analyze/preview 记录、成功/失败、应用状态、订单动作、错误信息 | ✅ |
+| **P78** | 健康提示：预算耗尽、未启用、缺少下次分析、symbol 跳过/挂单等只读提醒 | ✅ |
+
+**设计要点：**
+- **Lab 新页签 + lazy-load**：新增「运行状态」tab，只有用户打开时才请求 LLM runtime 数据。
+- **只读可观测性**：全部信息来自现有 status/interactions 响应；不暴露写操作，不改变 LLM 调度。
+- **运维优先信息架构**：总览/预算/健康提示优先，symbol 明细与最近交互向下展开，便于排查「为什么没分析/没下单」。
+- **无新依赖**：Element Plus 表格、统计卡、alert；不引入图表库或全局状态。
+
+**验证：** `npm run cypress:run -- --config baseUrl=http://127.0.0.1:3000 --spec cypress/e2e/lab.cy.ts` 5 passed；`npm run type-check` 通过；`npm run build` 通过。
+
+**显式 YAGNI 未做：** 新后端 API、WebSocket 实时推送、prompt diff、重新执行 LLM、预算算法调整、跨页面共享运行状态。
 
 ---
 

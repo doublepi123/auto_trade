@@ -43,6 +43,7 @@ describe('Closed round-trip trades', () => {
     cy.contains('已实现成交（往返配对').click()
     cy.get('[data-testid="roundtrips-table"]').should('be.visible')
     cy.contains('共 0 笔').should('be.visible')
+    cy.get('[data-testid="roundtrips-table"]').should('contain', '暂无往返成交')
   })
 
   it('renders the trade-stats strip (win rate / streaks / expectancy)', () => {
@@ -77,5 +78,57 @@ describe('Closed round-trip trades', () => {
     cy.get('[data-testid="trade-stats"]').should('be.visible')
     cy.contains('75.0%').should('be.visible')
     cy.contains('2胜').should('be.visible')
+  })
+
+  it('shows round-trip filters, summary, insights, and expandable details', () => {
+    cy.stubApi()
+    cy.intercept('GET', '/api/trades*', {
+      body: {
+        items: [
+          {
+            symbol: 'AAPL.US', side: 'long', entry_order_id: 11, exit_order_id: 12,
+            entry_at: '2026-06-17T10:00:00Z', exit_at: '2026-06-17T11:00:00Z',
+            entry_price: 100, exit_price: 103, quantity: 10,
+            gross_pnl: 30, est_fees: 1.2, net_pnl: 28.8, holding_seconds: 3600,
+          },
+          {
+            symbol: 'TSLA.US', side: 'short', entry_order_id: 21, exit_order_id: 22,
+            entry_at: '2026-06-16T10:00:00Z', exit_at: '2026-06-16T10:30:00Z',
+            entry_price: 210, exit_price: 214, quantity: 5,
+            gross_pnl: -20, est_fees: 1.5, net_pnl: -21.5, holding_seconds: 1800,
+          },
+          {
+            symbol: 'MSFT.US', side: 'long', entry_order_id: 31, exit_order_id: 32,
+            entry_at: '2026-06-15T10:00:00Z', exit_at: '2026-06-15T10:10:00Z',
+            entry_price: 300, exit_price: 300.5, quantity: 2,
+            gross_pnl: 1, est_fees: 0.6, net_pnl: 0.4, holding_seconds: 600,
+          },
+        ],
+        total: 5,
+      },
+    }).as('trades')
+
+    cy.visit('/#/history')
+    cy.wait('@trades')
+    cy.contains('已实现成交（往返配对').click()
+
+    cy.get('[data-testid="roundtrip-summary"]')
+      .should('contain', '当前已加载 3 / 5')
+      .and('contain', '当前筛选 3')
+      .and('contain', '胜 2')
+      .and('contain', '败 1')
+      .and('contain', '+7.70')
+    cy.get('[data-testid="roundtrip-insights"]').should('contain', '最佳 AAPL.US +28.80').and('contain', '最差 TSLA.US -21.50')
+    cy.get('[data-testid="roundtrip-symbol-search"]').type('TSLA')
+    cy.get('[data-testid="roundtrips-table"]').should('contain', 'TSLA.US').and('not.contain', 'AAPL.US')
+    cy.get('[data-testid="roundtrip-filter-winners"]').click()
+    cy.get('[data-testid="roundtrips-table"]').should('contain', '暂无匹配的往返成交')
+    cy.get('[data-testid="roundtrip-filter-all"]').click()
+    cy.get('[data-testid="roundtrip-symbol-search"]').clear()
+    cy.get('[data-testid="roundtrip-filter-losers"]').click()
+    cy.get('[data-testid="roundtrips-table"]').should('contain', 'TSLA.US').and('not.contain', 'AAPL.US')
+    cy.get('[data-testid="roundtrip-filter-all"]').click()
+    cy.get('.el-table__expand-icon').first().click()
+    cy.get('[data-testid="roundtrip-detail"]').should('contain', 'entry #11').and('contain', 'exit #12').and('contain', '费用拖累 1.20')
   })
 })

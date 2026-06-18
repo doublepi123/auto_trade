@@ -156,6 +156,7 @@ describe('History', () => {
     cy.intercept('GET', '/api/trades/analytics/hold-duration*', {
       body: {
         items: [
+          { bucket: '5m-1h', min_seconds: 300, max_seconds: 3600, trade_count: 0, win_count: 0, loss_count: 0, win_rate: 0, net_pnl: 999, avg_net_pnl: 0 },
           { bucket: '<5m', min_seconds: null, max_seconds: 300, trade_count: 1, win_count: 1, loss_count: 0, win_rate: 100, net_pnl: 40, avg_net_pnl: 40 },
           { bucket: '1h-1d', min_seconds: 3600, max_seconds: 86400, trade_count: 1, win_count: 0, loss_count: 1, win_rate: 0, net_pnl: -12, avg_net_pnl: -12 },
         ],
@@ -165,6 +166,7 @@ describe('History', () => {
     cy.intercept('GET', '/api/trades/analytics/pnl-distribution*', {
       body: {
         items: [
+          { bucket: '<-200', min_pnl: null, max_pnl: -200, trade_count: 0, net_pnl: -999 },
           { bucket: '-50-0', min_pnl: -50, max_pnl: 0, trade_count: 1, net_pnl: -12 },
           { bucket: '0-200', min_pnl: 0, max_pnl: 200, trade_count: 2, net_pnl: 188 },
         ],
@@ -175,7 +177,7 @@ describe('History', () => {
     cy.intercept('GET', '/api/trades/analytics/monthly*', {
       body: {
         items: [
-          { month: '2026-06', trade_count: 3, win_count: 2, loss_count: 1, win_rate: 66.6667, net_pnl: 176, gross_pnl: 190, cumulative_pnl: 176, drawdown: 12 },
+          { month: '2026-06', trade_count: 3, win_count: 2, loss_count: 1, win_rate: 66.6667, net_pnl: 50, gross_pnl: 64, cumulative_pnl: 176, drawdown: 12 },
         ],
         total_trades: 3,
         total_net_pnl: 176,
@@ -203,5 +205,19 @@ describe('History', () => {
     cy.get('[data-testid="trade-analytics-pnl-distribution-card"]').should('contain', '0-200').and('contain', '+188.00')
     cy.get('[data-testid="trade-analytics-monthly-card"]').should('contain', '2026-06').and('contain', '回撤 12.00')
     cy.get('[data-testid="trade-analytics-weekday-card"]').should('contain', 'Mon').and('contain', '+128.50')
+    cy.get('[data-testid="trade-analytics-insights"]')
+      .should('contain', '最佳日 2026-06-15 +128.50')
+      .and('contain', '最差日 2026-06-15 +128.50')
+      .and('contain', '最活跃日 2026-06-15 2笔')
+      .and('contain', '最佳持仓 <5m +40.00')
+      .and('contain', '最差持仓 1h-1d -12.00')
+      .and('contain', '亏损桶 1')
+      .and('contain', '盈利桶 1')
+      .and('contain', '分布净盈亏 +176.00')
+      .and('contain', '最新月 2026-06 +50.00')
+      .and('contain', '最佳月 2026-06 +50.00')
+      .and('contain', '最大回撤月 2026-06 12.00')
+      .and('contain', '最佳星期 Mon +128.50')
+      .and('contain', '最差星期 Mon +128.50')
   })
 })

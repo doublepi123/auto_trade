@@ -92,12 +92,122 @@
           </el-row>
         </div>
       </el-tab-pane>
+
+      <el-tab-pane label="运行状态" name="runtime">
+        <div data-testid="tab-runtime" v-loading="runtimeLoading">
+          <div class="runtime-toolbar">
+            <span class="muted">只读监控：LLM 调度状态、预算、symbol 状态与最近交互</span>
+            <el-button type="primary" size="small" :loading="runtimeLoading" @click="loadRuntimeStatus">刷新</el-button>
+          </div>
+
+          <el-row v-if="runtimeStatus" :gutter="12" class="runtime-grid" data-testid="llm-runtime-overview">
+            <el-col :xs="24" :sm="8">
+              <el-card header="总览">
+                <p><el-tag :type="runtimeStatus.enabled ? 'success' : 'info'">{{ runtimeStatus.enabled ? '已启用' : '未启用' }}</el-tag></p>
+                <p>间隔：{{ runtimeStatus.interval_minutes }} 分钟</p>
+                <p>最近分析：{{ formatDateTime(runtimeStatus.last_analysis_at) }}</p>
+                <p>下次分析：{{ formatDateTime(runtimeStatus.next_analysis_at) }}</p>
+              </el-card>
+            </el-col>
+            <el-col :xs="24" :sm="8">
+              <el-card header="当前建议">
+                <template v-if="runtimeStatus.current_suggestion">
+                  <p>买入下沿 {{ runtimeStatus.current_suggestion.buy_low.toFixed(2) }}</p>
+                  <p>卖出上沿 {{ runtimeStatus.current_suggestion.sell_high.toFixed(2) }}</p>
+                  <p>置信度 {{ pct(runtimeStatus.current_suggestion.confidence_score) }}</p>
+                  <p v-if="runtimeStatus.current_suggestion.analysis" class="runtime-analysis">{{ runtimeStatus.current_suggestion.analysis }}</p>
+                </template>
+                <el-empty v-else description="暂无建议" />
+              </el-card>
+            </el-col>
+            <el-col :xs="24" :sm="8">
+              <el-card header="应用值">
+                <template v-if="runtimeStatus.applied_values">
+                  <p>buy_low {{ runtimeStatus.applied_values.buy_low.toFixed(2) }}</p>
+                  <p>sell_high {{ runtimeStatus.applied_values.sell_high.toFixed(2) }}</p>
+                </template>
+                <p v-if="runtimeStatus.reject_reason" class="negative">拒绝：{{ runtimeStatus.reject_reason }}</p>
+                <el-empty v-if="!runtimeStatus.applied_values && !runtimeStatus.reject_reason" description="暂无应用记录" />
+              </el-card>
+            </el-col>
+          </el-row>
+
+          <el-card v-if="runtimeStatus" header="预算" class="runtime-card" data-testid="llm-runtime-budget">
+            <el-row :gutter="12">
+              <el-col :xs="12" :sm="4"><el-statistic title="每轮 symbol" :value="runtimeStatus.budget.max_symbols_per_cycle" /></el-col>
+              <el-col :xs="12" :sm="4"><el-statistic title="每小时上限" :value="runtimeStatus.budget.max_analyses_per_hour" /></el-col>
+              <el-col :xs="12" :sm="4"><el-statistic title="跟踪标的" :value="runtimeStatus.budget.tracked_symbol_count" /></el-col>
+              <el-col :xs="12" :sm="4"><el-statistic title="有效预算" :value="runtimeStatus.budget.effective_symbol_budget" /></el-col>
+              <el-col :xs="12" :sm="4"><el-statistic title="已用" :value="runtimeStatus.budget.used_analyses_last_hour" /></el-col>
+              <el-col :xs="12" :sm="4"><el-statistic title="剩余" :value="runtimeStatus.budget.remaining_analyses_this_hour" /></el-col>
+            </el-row>
+          </el-card>
+
+          <el-card v-if="runtimeHealthHints.length" header="健康提示" class="runtime-card" data-testid="llm-runtime-health">
+            <el-alert
+              v-for="hint in runtimeHealthHints"
+              :key="hint"
+              :title="hint"
+              type="warning"
+              show-icon
+              :closable="false"
+              class="runtime-alert"
+            />
+          </el-card>
+
+          <el-card v-if="runtimeStatus" header="Symbol 状态" class="runtime-card" data-testid="llm-runtime-symbols">
+            <el-table :data="runtimeStatus.symbol_statuses" size="small">
+              <el-table-column prop="symbol" label="标的" min-width="110">
+                <template #default="{ row }">
+                  <strong>{{ row.symbol }}</strong>
+                  <el-tag v-if="row.is_primary" size="small" type="primary" style="margin-left: 4px">主</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column prop="market" label="市场" width="80" />
+              <el-table-column label="挂单" width="80">
+                <template #default="{ row }">{{ row.has_pending_order ? '有' : '无' }}</template>
+              </el-table-column>
+              <el-table-column label="最近分析" min-width="170">
+                <template #default="{ row }">{{ formatDateTime(row.last_analysis_at) }}</template>
+              </el-table-column>
+              <el-table-column label="下次分析" min-width="170">
+                <template #default="{ row }">{{ formatDateTime(row.next_analysis_at) }}</template>
+              </el-table-column>
+              <el-table-column prop="last_status" label="状态" min-width="100" />
+              <el-table-column prop="last_skip_reason" label="跳过原因" min-width="180">
+                <template #default="{ row }">{{ row.last_skip_reason || '-' }}</template>
+              </el-table-column>
+            </el-table>
+          </el-card>
+
+          <el-card header="最近交互" class="runtime-card" data-testid="llm-runtime-interactions">
+            <el-table :data="runtimeInteractions" size="small">
+              <el-table-column prop="id" label="ID" width="70" />
+              <el-table-column prop="interaction_type" label="类型" width="100" />
+              <el-table-column prop="symbol" label="标的" width="110" />
+              <el-table-column label="结果" width="100">
+                <template #default="{ row }"><el-tag :type="row.success ? 'success' : 'danger'">{{ row.success ? '成功' : '失败' }}</el-tag></template>
+              </el-table-column>
+              <el-table-column label="应用" width="90">
+                <template #default="{ row }"><el-tag :type="row.applied ? 'primary' : 'info'">{{ row.applied ? '已应用' : '未应用' }}</el-tag></template>
+              </el-table-column>
+              <el-table-column prop="order_action" label="动作" width="100" />
+              <el-table-column prop="error" label="错误" min-width="160">
+                <template #default="{ row }">{{ row.error || '-' }}</template>
+              </el-table-column>
+              <el-table-column label="时间" min-width="170">
+                <template #default="{ row }">{{ formatDateTime(row.created_at) }}</template>
+              </el-table-column>
+            </el-table>
+          </el-card>
+        </div>
+      </el-tab-pane>
     </el-tabs>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue'
+import { computed, ref, reactive, onMounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   listPromptVersions, createPromptVersion, activatePromptVersion,
@@ -105,9 +215,10 @@ import {
   getPerformanceStats, comparePerformanceVariants, getPerformanceRecommendations,
   getIndicators,
 } from '../api/lab'
+import { getLLMInteractions, getLLMIntervalStatus } from '../api/llm_advisor'
 import type {
   PromptVersion, ExperimentSummary, PerformanceStats,
-  PerformanceVariant, IndicatorsResponse,
+  PerformanceVariant, IndicatorsResponse, LLMInteractionRecord, LLMIntervalStatus,
 } from '../types'
 import { resolveErrorMessage } from '../utils/error'
 
@@ -214,6 +325,54 @@ async function loadIndicators() {
 
 function pct(v: number): string { return `${(v * 100).toFixed(1)}%` }
 
+// --- Tab 4: LLM runtime observability ---
+const runtimeStatus = ref<LLMIntervalStatus | null>(null)
+const runtimeInteractions = ref<LLMInteractionRecord[]>([])
+const runtimeLoading = ref(false)
+const runtimeLoaded = ref(false)
+
+const runtimeHealthHints = computed(() => {
+  const status = runtimeStatus.value
+  if (!status) return []
+  const hints: string[] = []
+  if (!status.enabled) hints.push('LLM 区间分析未启用')
+  if (status.budget.remaining_analyses_this_hour <= 0) hints.push('预算已耗尽')
+  if (!status.next_analysis_at) hints.push('暂无下一次分析时间')
+  for (const row of status.symbol_statuses) {
+    if (row.last_skip_reason) hints.push(`${row.symbol}: ${row.last_skip_reason}`)
+    if (row.has_pending_order) hints.push(`${row.symbol}: 存在挂单，可能跳过分析或交易动作`)
+  }
+  return hints
+})
+
+async function loadRuntimeStatus() {
+  runtimeLoading.value = true
+  try {
+    const [status, interactions] = await Promise.all([
+      getLLMIntervalStatus(),
+      getLLMInteractions(20),
+    ])
+    runtimeStatus.value = status
+    runtimeInteractions.value = interactions
+    runtimeLoaded.value = true
+  } catch (e: unknown) {
+    ElMessage.error(resolveErrorMessage(e, '加载 LLM 运行状态失败'))
+  } finally {
+    runtimeLoading.value = false
+  }
+}
+
+function formatDateTime(value: string | null): string {
+  if (!value) return '-'
+  return new Date(value).toLocaleString([], {
+    month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+  })
+}
+
+watch(activeTab, (tab) => {
+  if (tab === 'runtime' && !runtimeLoaded.value && !runtimeLoading.value) void loadRuntimeStatus()
+})
+
 onMounted(async () => {
   await Promise.all([loadVersions(), loadExperimentNames()])
 })
@@ -222,5 +381,39 @@ onMounted(async () => {
 <style scoped>
 .lab-page {
   padding: 16px;
+}
+
+.runtime-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.muted {
+  color: #6b7280;
+  font-size: 13px;
+}
+
+.runtime-grid {
+  margin-bottom: 12px;
+}
+
+.runtime-card {
+  margin-top: 12px;
+}
+
+.runtime-alert + .runtime-alert {
+  margin-top: 8px;
+}
+
+.negative {
+  color: #c43838;
+}
+
+.runtime-analysis {
+  color: #4b5563;
+  line-height: 1.5;
 }
 </style>

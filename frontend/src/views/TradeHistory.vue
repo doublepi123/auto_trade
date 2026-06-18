@@ -118,12 +118,44 @@
           <div class="stat"><span>近30天净盈亏</span><strong :class="pnlClass(tradeStats.total_net_pnl)">{{ formatPnl(tradeStats.total_net_pnl) }}</strong></div>
         </div>
         <div class="roundtrips-controls">
+          <el-input
+            v-model="roundTripSymbolSearch"
+            class="roundtrips-symbol-search"
+            clearable
+            placeholder="股票代码筛选"
+            size="small"
+            data-testid="roundtrip-symbol-search"
+          />
+          <el-button-group>
+            <el-button size="small" :type="roundTripFilter === 'all' ? 'primary' : ''" data-testid="roundtrip-filter-all" @click="roundTripFilter = 'all'">全部</el-button>
+            <el-button size="small" :type="roundTripFilter === 'winners' ? 'primary' : ''" data-testid="roundtrip-filter-winners" @click="roundTripFilter = 'winners'">胜</el-button>
+            <el-button size="small" :type="roundTripFilter === 'losers' ? 'primary' : ''" data-testid="roundtrip-filter-losers" @click="roundTripFilter = 'losers'">败</el-button>
+            <el-button size="small" :type="roundTripFilter === 'long' ? 'primary' : ''" data-testid="roundtrip-filter-long" @click="roundTripFilter = 'long'">多</el-button>
+            <el-button size="small" :type="roundTripFilter === 'short' ? 'primary' : ''" data-testid="roundtrip-filter-short" @click="roundTripFilter = 'short'">空</el-button>
+          </el-button-group>
           <el-date-picker v-model="rtFromDate" type="date" value-format="YYYY-MM-DD" placeholder="开始日期" size="small" />
           <el-date-picker v-model="rtToDate" type="date" value-format="YYYY-MM-DD" placeholder="结束日期" size="small" />
           <el-button size="small" type="primary" :loading="rtLoading" data-testid="load-roundtrips" @click="loadTradeData">拉取</el-button>
-          <span class="muted">按平仓时间，最近优先</span>
+          <span class="muted">按平仓时间，最近优先；筛选仅作用于当前已加载前 200 条</span>
         </div>
-        <el-table :data="closedTrades" stripe size="small" v-loading="rtLoading" data-testid="roundtrips-table">
+        <div class="roundtrips-summary" data-testid="roundtrip-summary">{{ roundTripSummaryText }}</div>
+        <div v-if="roundTripInsights.length" class="roundtrips-insights" data-testid="roundtrip-insights">
+          <span v-for="insight in roundTripInsights" :key="insight">{{ insight }}</span>
+        </div>
+        <el-table :data="filteredClosedTrades" stripe size="small" v-loading="rtLoading" data-testid="roundtrips-table" :empty-text="roundTripEmptyText">
+          <el-table-column type="expand">
+            <template #default="{ row }">
+              <div class="roundtrip-detail" data-testid="roundtrip-detail">
+                <span>entry #{{ row.entry_order_id }}</span>
+                <span>exit #{{ row.exit_order_id }}</span>
+                <span>entry time {{ formatDateTime(row.entry_at) }}</span>
+                <span>exit time {{ formatDateTime(row.exit_at) }}</span>
+                <span>gross pnl {{ formatPnl(row.gross_pnl) }}</span>
+                <span>net pnl {{ formatPnl(row.net_pnl) }}</span>
+                <span>费用拖累 {{ row.est_fees.toFixed(2) }}</span>
+              </div>
+            </template>
+          </el-table-column>
           <el-table-column prop="symbol" label="标的" width="110" />
           <el-table-column prop="side" label="方向" width="70">
             <template #default="{ row }">
@@ -170,6 +202,9 @@
           <span>交易分析（只读）</span>
           <span class="muted roundtrips-count">按平仓时间聚合</span>
         </template>
+        <div v-if="tradeAnalyticsInsights.length" class="trade-analytics-insights" data-testid="trade-analytics-insights">
+          <span v-for="insight in tradeAnalyticsInsights" :key="insight">{{ insight }}</span>
+        </div>
         <div class="trade-analytics-grid" v-loading="analyticsLoading">
           <section class="trade-analytics-card wide" data-testid="trade-analytics-calendar-card">
             <header>
@@ -413,6 +448,8 @@ const rtLoading = ref(false)
 const rtFromDate = ref('')
 const rtToDate = ref('')
 const rtTotal = ref(0)
+const roundTripFilter = ref<'all' | 'winners' | 'losers' | 'long' | 'short'>('all')
+const roundTripSymbolSearch = ref('')
 const tradeStats = ref<TradeStats | null>(null)
 const analyticsLoading = ref(false)
 const analyticsCollapse = ref<string[]>([])
@@ -467,6 +504,85 @@ onMounted(() => {
 const nonEmptyHoldBuckets = computed(() => tradeHoldDuration.value?.items.filter((bucket) => bucket.trade_count > 0) ?? [])
 const nonEmptyPnlBuckets = computed(() => tradePnlDistribution.value?.items.filter((bucket) => bucket.trade_count > 0) ?? [])
 const analyticsOpen = computed(() => analyticsCollapse.value.includes('trade-analytics'))
+const filteredClosedTrades = computed(() => {
+  const search = roundTripSymbolSearch.value.trim().toLowerCase()
+  return closedTrades.value.filter((trade) => {
+    if (roundTripFilter.value === 'winners' && trade.net_pnl <= 0) return false
+    if (roundTripFilter.value === 'losers' && trade.net_pnl >= 0) return false
+    if (roundTripFilter.value === 'long' && trade.side !== 'long') return false
+    if (roundTripFilter.value === 'short' && trade.side !== 'short') return false
+    if (search && !trade.symbol.toLowerCase().includes(search)) return false
+    return true
+  })
+})
+const roundTripSummaryText = computed(() => {
+  const rows = filteredClosedTrades.value
+  const loadedCount = closedTrades.value.length
+  const wins = rows.filter((trade) => trade.net_pnl > 0).length
+  const losses = rows.filter((trade) => trade.net_pnl < 0).length
+  const totalNetPnl = rows.reduce((sum, trade) => sum + trade.net_pnl, 0)
+  const totalFees = rows.reduce((sum, trade) => sum + trade.est_fees, 0)
+  const averageNetPnl = rows.length > 0 ? totalNetPnl / rows.length : 0
+  const loadedText = rtTotal.value > loadedCount ? `当前已加载 ${loadedCount} / ${rtTotal.value}` : `当前已加载 ${loadedCount}`
+  return `${loadedText}，当前筛选 ${rows.length}，胜 ${wins}，败 ${losses}，净盈亏 ${formatPnl(totalNetPnl)}，费用 ${totalFees.toFixed(2)}，平均 ${formatPnl(averageNetPnl)}`
+})
+const roundTripEmptyText = computed(() => {
+  if (closedTrades.value.length === 0 && rtTotal.value > 0) return '当前已加载范围内暂无往返成交'
+  if (closedTrades.value.length === 0) return '暂无往返成交'
+  return filteredClosedTrades.value.length === 0 ? '暂无匹配的往返成交' : '暂无往返成交'
+})
+const roundTripInsights = computed(() => {
+  const rows = filteredClosedTrades.value
+  if (rows.length === 0) return []
+  const best = [...rows].sort((a, b) => b.net_pnl - a.net_pnl)[0]
+  const worst = [...rows].sort((a, b) => a.net_pnl - b.net_pnl)[0]
+  return [`最佳 ${best.symbol} ${formatPnl(best.net_pnl)}`, `最差 ${worst.symbol} ${formatPnl(worst.net_pnl)}`]
+})
+const tradeAnalyticsInsights = computed(() => {
+  const insights: string[] = []
+  const calendarItems = tradeCalendar.value?.items ?? []
+  if (calendarItems.length > 0) {
+    const bestDay = [...calendarItems].sort((a, b) => b.net_pnl - a.net_pnl)[0]
+    const worstDay = [...calendarItems].sort((a, b) => a.net_pnl - b.net_pnl)[0]
+    const mostActiveDay = [...calendarItems].sort((a, b) => b.trade_count - a.trade_count)[0]
+    insights.push(`最佳日 ${bestDay.date} ${formatPnl(bestDay.net_pnl)}`)
+    insights.push(`最差日 ${worstDay.date} ${formatPnl(worstDay.net_pnl)}`)
+    insights.push(`最活跃日 ${mostActiveDay.date} ${mostActiveDay.trade_count}笔`)
+  }
+  const holdBuckets = nonEmptyHoldBuckets.value
+  if (holdBuckets.length > 0) {
+    const bestHold = [...holdBuckets].sort((a, b) => b.net_pnl - a.net_pnl)[0]
+    const worstHold = [...holdBuckets].sort((a, b) => a.net_pnl - b.net_pnl)[0]
+    insights.push(`最佳持仓 ${bestHold.bucket} ${formatPnl(bestHold.net_pnl)}`)
+    insights.push(`最差持仓 ${worstHold.bucket} ${formatPnl(worstHold.net_pnl)}`)
+  }
+  const pnlBuckets = nonEmptyPnlBuckets.value
+  if (pnlBuckets.length > 0) {
+    const lossCount = pnlBuckets.filter((bucket) => bucket.net_pnl < 0).length
+    const profitCount = pnlBuckets.filter((bucket) => bucket.net_pnl > 0).length
+    const totalBucketPnl = pnlBuckets.reduce((sum, bucket) => sum + bucket.net_pnl, 0)
+    insights.push(`亏损桶 ${lossCount}`)
+    insights.push(`盈利桶 ${profitCount}`)
+    insights.push(`分布净盈亏 ${formatPnl(totalBucketPnl)}`)
+  }
+  const monthlyItems = tradeMonthlySummary.value?.items ?? []
+  if (monthlyItems.length > 0) {
+    const latestMonth = [...monthlyItems].sort((a, b) => b.month.localeCompare(a.month))[0]
+    const bestMonth = [...monthlyItems].sort((a, b) => b.net_pnl - a.net_pnl)[0]
+    const maxDrawdownMonth = [...monthlyItems].sort((a, b) => b.drawdown - a.drawdown)[0]
+    insights.push(`最新月 ${latestMonth.month} ${formatPnl(latestMonth.net_pnl)}`)
+    insights.push(`最佳月 ${bestMonth.month} ${formatPnl(bestMonth.net_pnl)}`)
+    insights.push(`最大回撤月 ${maxDrawdownMonth.month} ${maxDrawdownMonth.drawdown.toFixed(2)}`)
+  }
+  const weekdayItems = tradeWeekdayAttribution.value?.items ?? []
+  if (weekdayItems.length > 0) {
+    const bestWeekday = [...weekdayItems].sort((a, b) => b.net_pnl - a.net_pnl)[0]
+    const worstWeekday = [...weekdayItems].sort((a, b) => a.net_pnl - b.net_pnl)[0]
+    insights.push(`最佳星期 ${bestWeekday.label} ${formatPnl(bestWeekday.net_pnl)}`)
+    insights.push(`最差星期 ${worstWeekday.label} ${formatPnl(worstWeekday.net_pnl)}`)
+  }
+  return insights
+})
 
 async function loadTradeStats() {
   try {
@@ -762,6 +878,42 @@ function statusType(status: string): string {
   flex-wrap: wrap;
   gap: 8px;
   margin-bottom: 8px;
+}
+
+.roundtrips-symbol-search {
+  width: 160px;
+}
+
+.roundtrips-summary,
+.roundtrips-insights,
+.trade-analytics-insights {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 8px 12px;
+  border: 1px solid #e1e7f0;
+  border-radius: 8px;
+  background: #f8fafc;
+  color: #374151;
+  font-size: 12px;
+}
+
+.roundtrips-summary {
+  margin-bottom: 8px;
+}
+
+.roundtrips-insights,
+.trade-analytics-insights {
+  margin-bottom: 8px;
+}
+
+.roundtrip-detail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  padding: 8px 12px;
+  color: #374151;
+  font-size: 12px;
 }
 
 .pnl-pos {
