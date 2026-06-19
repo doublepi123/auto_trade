@@ -291,6 +291,7 @@ function setQuickFilter(value: typeof quickFilter.value) {
     severityFilter.value = value.toUpperCase()
     successFilter.value = ''
   }
+  window.clearTimeout(searchDebounceTimer)
   page.value = 1
   load()
 }
