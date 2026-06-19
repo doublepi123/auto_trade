@@ -13,7 +13,7 @@
 | **API 覆盖** | ✅ 完备。策略配置、凭证管理、订单查询、状态获取、状态历史、事件时间线、运行时控制（启停/暂停/Kill Switch）。 |
 | **WebSocket 推送** | ✅ 就绪。实时状态同步。 |
 | **本地部署** | ✅ 就绪。Docker Compose 一键启动。 |
-| **测试** | ✅ 就绪。Backend pytest **1178** 项、pytest-cov 覆盖率 **89%**、Frontend Cypress E2E **168** 项。 |
+| **测试** | ✅ 就绪。Backend pytest **1178** 项、pytest-cov 覆盖率 **89%**、Frontend Cypress E2E **197** 项。 |
 | **凭证安全** | ✅ 就绪。主密钥 + AES-GCM 加密存储，前端不回显明文。 |
 | **数据库** | ✅ 就位。SQLite，含运行状态、状态快照、订单、`tracked_entries`、LLM 交互、交易事件、审计日志和凭证配置。 |
 | **LLM 行情数据** | ✅ 真实 K 线（日 K + 1 分钟 K），ATR/布林带有效。 |
@@ -34,6 +34,37 @@
 | **决策时间线搜索** | ✅ 全文搜索（消息/标的/事件类型）+ 书签（localStorage 持久化）。 |
 | **后端热路径** | ✅ `recent_quotes` 改 `deque(maxlen=...)` + 单边窗口淘汰；`broker.get_quotes([symbol])` 批量复用。 |
 | **Docker 镜像** | ✅ 多阶段构建（`builder → runtime`），剥离 toolchain；tini 转发信号。 |
+
+---
+
+## 近期已完成迭代 (2026-06-19) — 全域只读可观测性与本地导出（10 轮 P109–P118）
+
+> 自主 feature 迭代第 12 批（10 轮）。延续低风险前端路线：全部为复用既有 API 响应字段的客户端派生增强，**不新增后端端点、不新增表、不触碰 broker/order/runner/risk 写路径**。新增共享 `utils/csv.ts`（无依赖 CSV 构造 + UTF-8 BOM 下载）。
+
+| 代号 | 主题 | 页面 | 状态 |
+|------|------|------|------|
+| **P109** | Watchlist 派生价差列 + 评分过期徽标 + 当前快照 CSV 导出 | Watchlist | ✅ |
+| **P110** | Experiments 展开 run 完整参数/错误 + 状态(完成/失败)页内过滤 + 当前页 CSV | Experiments | ✅ |
+| **P111** | Lab 预算用量进度条 + Symbol 状态/LLM 交互客户端 CSV 导出 | Lab | ✅ |
+| **P112** | Reports 每日明细列排序 + 日 PnL 一致性(均值/标准差/稳定性) + 本地 CSV 导出 | Reports | ✅ |
+| **P113** | DecisionTimeline 本页汇总 chips + payload 展开行 + 列排序 + 按行标的快速过滤 | DecisionTimeline | ✅ |
+| **P114** | TradeHistory 往返 CSV 导出 + 成交质量滑点标签 + 「仅看有笔记」过滤 | TradeHistory | ✅ |
+| **P115** | Strategy LLM 建议/应用/配置一致性提示 + 区间毛利-费用估算 + LLM 交互 CSV/成功率 | Strategy | ✅ |
+| **P116** | Credentials 严重度覆盖矩阵 + 通知渠道 JSON 导入导出 + dirty diff 摘要 | Credentials | ✅ |
+| **P117** | AlertRules 规则 JSON 导出/批量导入（复用 create 端点，只增不删） | AlertRules | ✅ |
+| **P118** | NotificationCenter 严重度分布柱图 + 成功/失败比率（当前页派生） | NotificationCenter | ✅ |
+
+**设计要点：**
+- **只读派生**：所有新增信息来自已加载响应的 `computed`，不发写请求、不发新请求；分页语义明确标注「当前页/当前已加载」。
+- **共享 CSV 工具**：`utils/csv.ts` 的 `buildCsv`/`downloadCsv` 被 6 个页面复用，统一 RFC 4180 转义 + CJK BOM。
+- **覆盖矩阵**：按 `severity_floor` 推导 INFO/WARNING/CRITICAL 是否有渠道接收，缺失级别显示告警，避免某级告警静默丢失。
+- **一致性提示**：Strategy 比对 LLM `current_suggestion` / `applied_values` / 表单三态，显式「建议未应用 / 配置已偏离」。
+- **导入语义**：AlertRules/通知渠道 JSON 导入为只增合并，逐条报错不中断，不覆盖既有规则。
+- **滑点归一**：TradeHistory 滑点按买卖方向归一为「正=不利」，跨方向颜色一致。
+
+**验证：** `vue-tsc` 0 errors、`npm run type-check` 通过；Cypress 全量 **197** 项全部通过；`pytest tests/` **1178 passed, 1 skipped**（覆盖率 **89%**，无回归）。
+
+**显式 YAGNI 未做：** 新后端聚合端点、跨页全量统计、服务端 PDF 导出、规则导入冲突合并策略、Webhook 模板服务端校验。
 
 ---
 

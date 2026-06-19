@@ -267,7 +267,14 @@ Cypress.Commands.add('stubApi', () => {
   }).as('getOrders')
 
   cy.intercept('GET', '/api/trade-notes', {
-    body: { items: [], total: 0, page: 1, page_size: 50 },
+    body: {
+      items: [
+        { order_id: 1, note: 'scalp', tags: ['momentum'], rating: 4, created_at: '2026-06-16T10:00:00Z', updated_at: '2026-06-16T10:00:00Z' },
+      ],
+      total: 1,
+      page: 1,
+      page_size: 50,
+    },
   }).as('getTradeNotes')
 
   cy.intercept('GET', '/api/trade-notes/analytics', {
@@ -471,7 +478,10 @@ Cypress.Commands.add('stubApi', () => {
   }).as('getWatchlist')
 
   cy.intercept('GET', '/api/watchlist/quotes*', {
-    body: [],
+    body: [
+      { symbol: 'NVDA.US', last_price: 180.5, bid: 180.4, ask: 180.6, timestamp: '2026-06-04T10:00:00Z' },
+      { symbol: 'AAPL.US', last_price: 199.5, bid: 199.4, ask: 199.6, timestamp: '2026-06-04T10:00:00Z' },
+    ],
   }).as('getWatchlistQuotes')
 
   cy.intercept('GET', '/api/watchlist/snapshots', {
@@ -526,7 +536,7 @@ Cypress.Commands.add('stubApi', () => {
           source: 'fallback_rule',
           created_at: '2026-06-18T10:00:00Z',
           expires_at: '2026-06-18T11:00:00Z',
-          is_stale: false,
+          is_stale: true,
         },
       ],
     },

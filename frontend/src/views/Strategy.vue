@@ -23,6 +23,9 @@
       <div v-if="llmStatus.reject_reason" style="margin-top: 8px; color: #f56c6c">
         <p>上次被拒: {{ llmStatus.reject_reason }}</p>
       </div>
+      <div v-if="llmConsistencyHint" style="margin-top: 8px" data-testid="llm-consistency-hint">
+        <el-tag :type="llmConsistencyHint.type" size="small" effect="plain">{{ llmConsistencyHint.text }}</el-tag>
+      </div>
       <div style="margin-top: 12px">
         <p style="margin-bottom: 8px">
           刷新间隔：{{ llmStatus.interval_minutes }} 分钟
@@ -39,7 +42,15 @@
       </div>
       <div v-if="llmInteractions.length > 0" style="margin-top: 16px">
         <el-divider />
-        <h4 style="margin: 0 0 8px">最近 LLM 交互</h4>
+        <div style="display: flex; align-items: center; justify-content: space-between; margin: 0 0 8px">
+          <h4 style="margin: 0">最近 LLM 交互</h4>
+          <div>
+            <el-tag size="small" type="info" data-testid="llm-interaction-summary">
+              成功率 {{ llmInteractionSuccessRate.toFixed(0) }}% ({{ llmInteractionSuccessCount }}/{{ llmInteractions.length }})
+            </el-tag>
+            <el-button size="small" link data-testid="llm-interactions-export" @click="exportLLMInteractions">导出 CSV</el-button>
+          </div>
+        </div>
         <el-table :data="llmInteractions" size="small" style="width: 100%">
           <el-table-column prop="created_at" label="时间" min-width="150">
             <template #default="{ row }">{{ formatTime(row.created_at) }}</template>
@@ -126,6 +137,15 @@
         </el-form-item>
         <el-form-item label="卖出价上限">
           <el-input-number v-model="form.sell_high" :precision="2" :step="0.01" />
+        </el-form-item>
+        <el-form-item v-if="rangeReadout" label="区间毛利估算">
+          <div data-testid="range-readout" class="range-readout">
+            <span>价差 {{ formatCurrency(rangeReadout.spread, form.market) }}</span>
+            <span>· 估算往返费用 {{ formatCurrency(rangeReadout.estRoundTripFee, form.market) }}</span>
+            <span :class="rangeReadout.net >= 0 ? 'positive' : 'negative'">
+              · 净利 {{ formatCurrency(rangeReadout.net, form.market) }}
+            </span>
+          </div>
         </el-form-item>
         <el-form-item label="做空">
           <el-switch v-model="form.short_selling" />
@@ -235,6 +255,7 @@ import { runScheduledReportNow } from '../api/reports'
 import { useFormState } from '../composables/useFormState'
 import type { LLMIntervalStatus, LLMAnalyzeResponse, LLMInteractionRecord, StrategyPreset } from '../types'
 import { formatCurrency } from '../utils/format'
+import { downloadCsv } from '../utils/csv'
 
 interface StrategyForm {
   symbol: string
@@ -600,6 +621,68 @@ const llmStatus = ref<LLMIntervalStatus>({
 })
 const llmInteractions = ref<LLMInteractionRecord[]>([])
 
+/** Derived consistency between the LLM suggestion, the last applied values, and
+ * the live form. Surfaces "建议未应用" / "配置已偏离建议" so the user can spot drift
+ * without comparing numbers by eye. Reuses only already-loaded fields. */
+const llmConsistencyHint = computed<{ text: string; type: 'warning' | 'info' | 'success' } | null>(() => {
+  const sug = llmStatus.value.current_suggestion
+  const applied = llmStatus.value.applied_values
+  if (!sug) return null
+  const sugMatchesApplied = applied && applied.buy_low === sug.buy_low && applied.sell_high === sug.sell_high
+  if (applied && !sugMatchesApplied) {
+    return { text: '建议未应用：最新建议与已应用值不一致', type: 'warning' }
+  }
+  if (applied && (applied.buy_low !== form.value.buy_low || applied.sell_high !== form.value.sell_high)) {
+    return { text: '配置已偏离已应用区间', type: 'info' }
+  }
+  if (applied && sugMatchesApplied) {
+    return { text: '建议已应用且与当前配置一致', type: 'success' }
+  }
+  return { text: '有新建议待应用', type: 'warning' }
+})
+
+const llmInteractionSuccessCount = computed(() => llmInteractions.value.filter((i) => i.success).length)
+const llmInteractionSuccessRate = computed(() => {
+  if (llmInteractions.value.length === 0) return 0
+  return (llmInteractionSuccessCount.value / llmInteractions.value.length) * 100
+})
+
+/** Range gross-margin readout: spread minus an estimated round-trip fee using the
+ * configured per-side fee rate for the current market. Purely advisory — the
+ * real fee gate lives in TradeExecutionService; this just previews the math. */
+const rangeReadout = computed<{ spread: number; estRoundTripFee: number; net: number } | null>(() => {
+  const bl = form.value.buy_low
+  const sh = form.value.sell_high
+  if (!(bl > 0) || !(sh > bl)) return null
+  const spread = sh - bl
+  const sideRate = (form.value.market === 'HK' ? form.value.fee_rate_hk : form.value.fee_rate_us) / 100
+  // Two sides (buy + sell), each rate * notional; notional approximated by the
+  // midpoint price so the estimate is order-agnostic.
+  const mid = (bl + sh) / 2
+  const estRoundTripFee = sideRate * mid * 2
+  return { spread, estRoundTripFee, net: spread - estRoundTripFee }
+})
+
+function exportLLMInteractions() {
+  const rows = llmInteractions.value.map((r) => ({
+    created_at: r.created_at,
+    success: r.success ? 'yes' : 'no',
+    order_action: r.order_action ?? '',
+    order_status: r.order_status ?? '',
+    applied: r.applied ? 'yes' : 'no',
+    error: r.error ?? '',
+  }))
+  downloadCsv('llm_interactions.csv', [
+    { key: 'created_at', label: 'created_at' },
+    { key: 'success', label: 'success' },
+    { key: 'order_action', label: 'order_action' },
+    { key: 'order_status', label: 'order_status' },
+    { key: 'applied', label: 'applied' },
+    { key: 'error', label: 'error' },
+  ], rows)
+  ElMessage.success(`已导出 ${rows.length} 条 LLM 交互`)
+}
+
 const analyzing = ref(false)
 
 const previewSymbol = ref('')
@@ -785,6 +868,23 @@ onBeforeRouteLeave(() => {
 </script>
 
 <style scoped>
+.range-readout {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 13px;
+  color: #606266;
+  line-height: 32px;
+}
+
+.range-readout .positive {
+  color: #14884f;
+}
+
+.range-readout .negative {
+  color: #c43838;
+}
+
 @media (max-width: 520px) {
   :deep(.el-form-item__label) {
     float: none;

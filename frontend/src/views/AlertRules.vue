@@ -5,6 +5,9 @@
       <div class="alerts-actions">
         <el-button :loading="loading" @click="loadRules">刷新</el-button>
         <el-button type="primary" plain :loading="evaluating" data-testid="alert-evaluate" @click="evaluate">立即评估</el-button>
+        <el-button plain size="small" :disabled="rules.length === 0" data-testid="alert-export-json" @click="exportRulesJson">导出 JSON</el-button>
+        <el-button plain size="small" data-testid="alert-import-json" @click="triggerImportRulesJson">导入 JSON</el-button>
+        <input ref="rulesImportInput" type="file" accept=".json,application/json" style="display: none" data-testid="alert-import-input" @change="handleImportRulesJson" />
         <el-button type="primary" data-testid="alert-create" @click="openCreate">新建规则</el-button>
       </div>
     </div>
@@ -373,6 +376,87 @@ async function remove(id: number) {
     await loadRules()
   } catch {
     ElMessage.error('删除失败')
+  }
+}
+
+const rulesImportInput = ref<HTMLInputElement | null>(null)
+
+/** Export the currently loaded rules as JSON (offline backup). Strips server-
+ * side bookkeeping fields (id, last_fired_at, created_at) so the file only
+ * carries user-editable config. */
+function exportRulesJson() {
+  const portable = rules.value.map((r) => ({
+    name: r.name,
+    symbol: r.symbol,
+    rule_type: r.rule_type,
+    threshold: r.threshold,
+    severity: r.severity,
+    enabled: r.enabled,
+    cooldown_seconds: r.cooldown_seconds,
+  }))
+  const blob = new Blob([JSON.stringify(portable, null, 2)], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = 'alert_rules.json'
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
+  ElMessage.success(`已导出 ${portable.length} 条规则`)
+}
+
+function triggerImportRulesJson() {
+  rulesImportInput.value?.click()
+}
+
+/** Bulk-create rules from an exported JSON file by reusing createAlertRule
+ * per entry. Importing never deletes or overwrites existing rules; failures
+ * are reported per-entry without aborting the rest. */
+async function handleImportRulesJson(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(await file.text())
+  } catch {
+    ElMessage.error('JSON 解析失败')
+    return
+  }
+  if (!Array.isArray(parsed)) {
+    ElMessage.error('规则 JSON 必须是数组')
+    return
+  }
+  let created = 0
+  let failed = 0
+  for (const entry of parsed) {
+    if (!entry || typeof entry !== 'object' || typeof (entry as AlertRuleCreate).name !== 'string') {
+      failed += 1
+      continue
+    }
+    const e = entry as AlertRuleCreate
+    try {
+      await createAlertRule({
+        name: e.name,
+        symbol: (e.symbol ?? '').toUpperCase(),
+        rule_type: e.rule_type,
+        threshold: e.threshold,
+        severity: e.severity,
+        enabled: e.enabled ?? true,
+        cooldown_seconds: e.cooldown_seconds ?? 300,
+      })
+      created += 1
+    } catch {
+      failed += 1
+    }
+  }
+  await loadRules()
+  if (failed > 0) {
+    ElMessage.warning(`导入完成：成功 ${created}，失败 ${failed}`)
+  } else {
+    ElMessage.success(`已导入 ${created} 条规则`)
   }
 }
 

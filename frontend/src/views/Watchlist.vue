@@ -31,6 +31,18 @@
     </el-card>
 
     <el-card>
+      <div class="watchlist-toolbar">
+        <span class="watchlist-toolbar-note">{{ items.length }} 个标的 · 行情每 15s 刷新</span>
+        <el-button
+          size="small"
+          plain
+          :disabled="items.length === 0"
+          data-testid="watchlist-export-csv"
+          @click="exportSnapshot"
+        >
+          导出快照 CSV
+        </el-button>
+      </div>
       <el-table :data="items" v-loading="loading" style="width: 100%">
         <el-table-column prop="symbol" label="代码" width="120" />
         <el-table-column prop="market" label="市场" width="80">
@@ -61,6 +73,15 @@
               <small style="color: #909399; margin-left: 6px">
                 {{ scoreActionLabel(scoreMap[row.symbol].recommended_action) }}
               </small>
+              <el-tag
+                v-if="scoreMap[row.symbol].is_stale"
+                type="warning"
+                size="small"
+                data-testid="watchlist-stale-badge"
+                style="margin-left: 6px"
+              >
+                评分过期
+              </el-tag>
             </div>
             <div v-else style="color: #909399">未评分</div>
           </template>
@@ -74,6 +95,19 @@
               </small>
             </div>
             <div v-else style="color: #909399">-</div>
+          </template>
+        </el-table-column>
+        <el-table-column
+          label="价差"
+          width="110"
+          :sort-method="(a: WatchlistItem, b: WatchlistItem) => (spreadFor(a) ?? -1) - (spreadFor(b) ?? -1)"
+          sortable
+        >
+          <template #default="{ row }">
+            <span v-if="quoteMap[row.symbol] && spreadFor(row) !== null" data-testid="watchlist-spread">
+              {{ formatCurrency(spreadFor(row), row.market) }}
+            </span>
+            <span v-else style="color: #909399">-</span>
           </template>
         </el-table-column>
         <el-table-column label="状态" width="120">
@@ -169,6 +203,7 @@ import {
 } from '../api/watchlist'
 import { formatCurrency } from '../utils/format'
 import { resolveErrorMessage } from '../utils/error'
+import { downloadCsv } from '../utils/csv'
 
 const items = ref<WatchlistItem[]>([])
 const quoteMap = ref<Record<string, WatchlistQuote>>({})
@@ -348,6 +383,50 @@ async function handleScore(symbol: string, market: 'US' | 'HK') {
   }
 }
 
+/** ask - bid for a row, or null when quotes are missing/invalid. */
+function spreadFor(row: WatchlistItem): number | null {
+  const q = quoteMap.value[row.symbol]
+  if (!q || q.ask == null || q.bid == null) return null
+  const spread = q.ask - q.bid
+  return Number.isFinite(spread) ? spread : null
+}
+
+function exportSnapshot() {
+  const rows = items.value.map((row) => {
+    const q = quoteMap.value[row.symbol]
+    const s = scoreMap.value[row.symbol]
+    return {
+      symbol: row.symbol,
+      market: row.market,
+      alias: row.alias || '',
+      last_price: q?.last_price ?? '',
+      bid: q?.bid ?? '',
+      ask: q?.ask ?? '',
+      spread: spreadFor(row) ?? '',
+      score: s?.score ?? '',
+      recommended_action: s ? scoreActionLabel(s.recommended_action) : '',
+      confidence: s ? s.confidence : '',
+      score_stale: s ? (s.is_stale ? 'yes' : 'no') : '',
+      is_active: row.is_active ? 'yes' : 'no',
+    }
+  })
+  downloadCsv('watchlist_snapshot.csv', [
+    { key: 'symbol', label: 'symbol' },
+    { key: 'market', label: 'market' },
+    { key: 'alias', label: 'alias' },
+    { key: 'last_price', label: 'last_price' },
+    { key: 'bid', label: 'bid' },
+    { key: 'ask', label: 'ask' },
+    { key: 'spread', label: 'spread' },
+    { key: 'score', label: 'score' },
+    { key: 'recommended_action', label: 'recommended_action' },
+    { key: 'confidence', label: 'confidence' },
+    { key: 'score_stale', label: 'score_stale' },
+    { key: 'is_active', label: 'is_active' },
+  ], rows)
+  ElMessage.success('已导出观察列表快照')
+}
+
 onMounted(() => {
   loadItems().then(() => {
     loadQuotes()
@@ -384,6 +463,19 @@ onUnmounted(() => {
 
 .score-tag {
   cursor: pointer;
+}
+
+.watchlist-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.watchlist-toolbar-note {
+  color: #909399;
+  font-size: 12px;
 }
 
 .score-detail-header {

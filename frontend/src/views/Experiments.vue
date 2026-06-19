@@ -120,14 +120,48 @@
           <el-option label="降序" value="desc" />
           <el-option label="升序" value="asc" />
         </el-select>
+        <el-button-group style="margin-left: 16px">
+          <el-button
+            size="small"
+            :type="statusFilter === 'all' ? 'primary' : ''"
+            data-testid="exp-status-all"
+            @click="statusFilter = 'all'"
+          >全部 {{ runs.length }}</el-button>
+          <el-button
+            size="small"
+            :type="statusFilter === 'COMPLETED' ? 'primary' : ''"
+            data-testid="exp-status-done"
+            @click="statusFilter = 'COMPLETED'"
+          >完成 {{ completedCount }}</el-button>
+          <el-button
+            size="small"
+            :type="statusFilter === 'FAILED' ? 'primary' : ''"
+            data-testid="exp-status-failed"
+            @click="statusFilter = 'FAILED'"
+          >失败 {{ failedCount }}</el-button>
+        </el-button-group>
       </div>
 
       <el-table
-        :data="runs"
+        :data="filteredRuns"
         v-loading="loadingRuns"
         style="margin-top: 12px"
         data-testid="leaderboard-table"
       >
+        <el-table-column type="expand">
+          <template #default="{ row }">
+            <div class="run-detail" data-testid="run-detail">
+              <div class="run-detail-section">
+                <div class="run-detail-label">完整参数</div>
+                <pre>{{ JSON.stringify(row.parameters, null, 2) }}</pre>
+              </div>
+              <div v-if="row.error" class="run-detail-section">
+                <div class="run-detail-label">错误信息</div>
+                <pre class="run-detail-error">{{ row.error }}</pre>
+              </div>
+            </div>
+          </template>
+        </el-table-column>
         <el-table-column label="参数" min-width="200">
           <template #default="{ row }">
             <span data-testid="run-params">{{ formatParams(row.parameters) }}</span>
@@ -241,15 +275,25 @@
     <div v-if="currentExperimentId !== null" style="margin-top: 16px">
       <el-button size="small" @click="onExport('json')" data-testid="exp-export-json">导出 JSON</el-button>
       <el-button size="small" @click="onExport('csv')" data-testid="exp-export-csv">导出 CSV</el-button>
+      <el-button
+        size="small"
+        plain
+        :disabled="runs.length === 0"
+        data-testid="exp-export-page-csv"
+        @click="onExportCurrentPage"
+      >
+        导出当前页 CSV
+      </el-button>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { RUNNER_STATUS } from '../utils/constants'
+import { downloadCsv } from '../utils/csv'
 import {
   createStrategyExperiment,
   exportStrategyExperiment,
@@ -290,6 +334,17 @@ const sortField = ref('total_return_pct')
 const sortOrder = ref<'asc' | 'desc'>('desc')
 const totalRuns = ref(0)
 const loadingRuns = ref(false)
+// Client-side status filter over the currently loaded page only. The leaderboard
+// is server-paginated + server-sorted, so this is a within-page view toggle, not
+// a full re-query.
+const statusFilter = ref<'all' | 'COMPLETED' | 'FAILED'>('all')
+
+const completedCount = computed(() => runs.value.filter((r) => r.status === RUNNER_STATUS.COMPLETED).length)
+const failedCount = computed(() => runs.value.filter((r) => r.status === RUNNER_STATUS.FAILED).length)
+const filteredRuns = computed(() => {
+  if (statusFilter.value === 'all') return runs.value
+  return runs.value.filter((r) => r.status === statusFilter.value)
+})
 
 // ── Helpers ──
 
@@ -522,6 +577,48 @@ function onDraftToStrategy(row: StrategyExperimentRun) {
     },
   })
 }
+
+/** Client-side export of the currently loaded leaderboard page only.
+ * Distinct from the server-side exportStrategyExperiment which dumps every
+ * run in the experiment. Useful for quickly grabbing the visible ranking. */
+function onExportCurrentPage() {
+  if (runs.value.length === 0) return
+  const rows = filteredRuns.value.map((r) => ({
+    status: r.status,
+    total_pnl: r.total_pnl?.toFixed(2) ?? '',
+    total_return_pct: r.total_return_pct != null ? (r.total_return_pct * 100).toFixed(3) : '',
+    max_drawdown_pct: r.max_drawdown_pct != null ? (r.max_drawdown_pct * 100).toFixed(3) : '',
+    win_rate: r.win_rate != null ? (r.win_rate * 100).toFixed(1) : '',
+    sharpe_ratio: r.sharpe_ratio?.toFixed(3) ?? '',
+    profit_factor: r.profit_factor?.toFixed(3) ?? '',
+    profit_loss_ratio: r.profit_loss_ratio?.toFixed(3) ?? '',
+    trade_count: r.trade_count,
+    buy_low: r.parameters?.buy_low ?? '',
+    sell_high: r.parameters?.sell_high ?? '',
+    quantity: r.parameters?.quantity ?? '',
+    fee_rate: r.parameters?.fee_rate ?? '',
+    slippage_pct: r.parameters?.slippage_pct ?? '',
+    error: r.error ?? '',
+  }))
+  downloadCsv(`experiment_${currentExperimentId.value ?? 'x'}_page_${currentPage.value}.csv`, [
+    { key: 'status', label: 'status' },
+    { key: 'total_pnl', label: 'total_pnl' },
+    { key: 'total_return_pct', label: 'total_return_pct' },
+    { key: 'max_drawdown_pct', label: 'max_drawdown_pct' },
+    { key: 'win_rate', label: 'win_rate' },
+    { key: 'sharpe_ratio', label: 'sharpe_ratio' },
+    { key: 'profit_factor', label: 'profit_factor' },
+    { key: 'profit_loss_ratio', label: 'profit_loss_ratio' },
+    { key: 'trade_count', label: 'trade_count' },
+    { key: 'buy_low', label: 'buy_low' },
+    { key: 'sell_high', label: 'sell_high' },
+    { key: 'quantity', label: 'quantity' },
+    { key: 'fee_rate', label: 'fee_rate' },
+    { key: 'slippage_pct', label: 'slippage_pct' },
+    { key: 'error', label: 'error' },
+  ], rows)
+  ElMessage.success(`已导出当前页 ${rows.length} 条`)
+}
 </script>
 
 <style scoped>
@@ -532,5 +629,33 @@ function onDraftToStrategy(row: StrategyExperimentRun) {
 .sort-controls {
   display: flex;
   align-items: center;
+}
+
+.run-detail {
+  padding: 8px 16px;
+}
+
+.run-detail-section {
+  margin-bottom: 12px;
+}
+
+.run-detail-label {
+  margin-bottom: 6px;
+  color: #909399;
+  font-size: 12px;
+}
+
+.run-detail pre {
+  margin: 0;
+  padding: 10px;
+  background: #f5f7fa;
+  border-radius: 4px;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.run-detail-error {
+  color: #c43838;
 }
 </style>

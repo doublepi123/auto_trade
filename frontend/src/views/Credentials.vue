@@ -89,6 +89,34 @@
         <el-button plain type="primary" native-type="button" style="margin-bottom: 16px" data-testid="add-notification-channel" @click="addChannel">
           + 添加渠道
         </el-button>
+        <el-button plain size="small" data-testid="channels-export-json" @click="exportChannelsJson">导出渠道 JSON</el-button>
+        <el-button plain size="small" data-testid="channels-import-json" @click="triggerImportChannelsJson">导入渠道 JSON</el-button>
+        <input ref="channelsImportInput" type="file" accept=".json,application/json" style="display: none" data-testid="channels-import-input" @change="handleImportChannelsJson" />
+
+        <div class="coverage-matrix" data-testid="coverage-matrix">
+          <span class="coverage-title">严重度覆盖</span>
+          <el-tag v-for="tier in coverageTiers" :key="tier.level" :type="tier.covered ? 'success' : 'danger'" size="small" effect="plain">
+            {{ tier.level }} {{ tier.covered ? '已覆盖' : '未覆盖' }}
+          </el-tag>
+          <el-alert
+            v-if="!allTiersCovered"
+            type="warning"
+            :title="`以下严重度未配置任何渠道：${uncoveredTiers.join(' / ')}，可能导致该级别告警丢失`"
+            :closable="false"
+            show-icon
+            style="margin-top: 6px"
+          />
+        </div>
+
+        <el-alert
+          v-if="dirtyDiff.length"
+          type="info"
+          :title="`本次将更新：${dirtyDiff.join('、')}`"
+          :closable="false"
+          show-icon
+          style="margin-top: 12px"
+          data-testid="credentials-dirty-diff"
+        />
 
         <el-form-item>
           <el-button type="primary" native-type="submit" :loading="saving" :disabled="loading || !isDirty">保存</el-button>
@@ -145,6 +173,48 @@ const testingConnection = ref(false)
 const testResult = ref<{ ok: boolean; error?: string } | null>(null)
 const channelTesting = ref<boolean[]>([])
 const channelTestResults = ref<Array<{ ok: boolean; error?: string } | null>>([])
+const channelsImportInput = ref<HTMLInputElement | null>(null)
+
+/**
+ * Severity coverage derived from the configured channels. A channel with
+ * severity_floor INFO delivers INFO + WARNING + CRITICAL; WARNING delivers
+ * WARNING + CRITICAL; CRITICAL delivers CRITICAL only. Reuses the live
+ * notificationChannels state only — no backend call.
+ */
+const _SEVERITY_RANK: Record<string, number> = { INFO: 0, WARNING: 1, CRITICAL: 2 }
+const coverageTiers = computed(() => {
+  const levels = ['CRITICAL', 'WARNING', 'INFO']
+  return levels.map((level) => {
+    const rank = _SEVERITY_RANK[level]
+    const covered = notificationChannels.value.some((ch) => _SEVERITY_RANK[ch.severity_floor] <= rank)
+    return { level, covered }
+  })
+})
+const uncoveredTiers = computed(() => coverageTiers.value.filter((t) => !t.covered).map((t) => t.level))
+const allTiersCovered = computed(() => uncoveredTiers.value.length === 0)
+
+/** Human-readable list of what differs from the last saved snapshot, so the
+ * user sees exactly what a Save will change before committing. */
+const dirtyDiff = computed<string[]>(() => {
+  const diffs: string[] = []
+  for (const [key, value] of Object.entries(form.value)) {
+    const snap = (JSON.parse(savedSnapshot.value) as { form: Record<string, string> }).form
+    if ((snap[key] ?? '') !== value && value.trim() !== '') {
+      const labels: Record<string, string> = {
+        longbridge_app_key: '长桥应用标识',
+        longbridge_app_secret: '长桥应用密钥',
+        longbridge_access_token: '长桥访问令牌',
+        sct_key: 'Server酱密钥',
+      }
+      diffs.push(labels[key] ?? key)
+    }
+  }
+  const snapChannels = (JSON.parse(savedSnapshot.value) as { channels: NotificationChannel[] }).channels
+  if (JSON.stringify(snapChannels) !== JSON.stringify(notificationChannels.value)) {
+    diffs.push('通知渠道配置')
+  }
+  return diffs
+})
 
 watch([form, notificationChannels], () => {
   if (isDirty()) {
@@ -217,6 +287,61 @@ function addChannel() {
   notificationChannels.value.push({ type: 'serverchan', severity_floor: 'INFO' })
   channelTesting.value.push(false)
   channelTestResults.value.push(null)
+}
+
+function exportChannelsJson() {
+  const blob = new Blob([JSON.stringify(notificationChannels.value, null, 2)], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = 'notification_channels.json'
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
+  ElMessage.success('已导出通知渠道配置')
+}
+
+function triggerImportChannelsJson() {
+  channelsImportInput.value?.click()
+}
+
+async function handleImportChannelsJson(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+  try {
+    const text = await file.text()
+    const parsed = JSON.parse(text) as unknown
+    if (!Array.isArray(parsed)) {
+      ElMessage.error('渠道 JSON 必须是数组')
+      return
+    }
+    const valid = parsed.every((c) => c && typeof c === 'object' && typeof (c as NotificationChannel).type === 'string')
+    if (!valid) {
+      ElMessage.error('渠道条目缺少 type 字段')
+      return
+    }
+    const imported = (parsed as NotificationChannel[]).map((c): NotificationChannel => {
+      const type: 'serverchan' | 'webhook' = c.type === 'webhook' ? 'webhook' : 'serverchan'
+      const severity_floor: NotificationChannel['severity_floor'] = ['INFO', 'WARNING', 'CRITICAL'].includes(c.severity_floor) ? c.severity_floor : 'INFO'
+      if (type === 'webhook') {
+        return { type, severity_floor, url: c.url ?? '', template: c.template }
+      }
+      return { type, severity_floor }
+    })
+    if (imported.length === 0) {
+      ElMessage.error('至少需要一条通知渠道')
+      return
+    }
+    notificationChannels.value = imported
+    channelTesting.value = imported.map(() => false)
+    channelTestResults.value = imported.map(() => null)
+    ElMessage.success(`已导入 ${imported.length} 条渠道`)
+  } catch {
+    ElMessage.error('渠道 JSON 解析失败')
+  }
 }
 
 function removeChannel(idx: number) {
@@ -350,6 +475,23 @@ async function handleSave() {
 </script>
 
 <style scoped>
+.coverage-matrix {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 12px 0;
+  padding: 10px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 8px;
+  background: #fafbfc;
+}
+
+.coverage-title {
+  color: #606266;
+  font-size: 13px;
+}
+
 .credential-row {
   display: flex;
   align-items: center;

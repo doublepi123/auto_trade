@@ -21,7 +21,10 @@
         </div>
       </div>
     </div>
-    <el-table :data="orders" stripe style="width: 100%" v-loading="loading" @row-click="openOrderDrawer">
+    <div class="orders-toolbar">
+      <el-checkbox v-model="onlyWithNotes" data-testid="orders-only-notes">仅看有笔记 ({{ notesByOrder.size }})</el-checkbox>
+    </div>
+    <el-table :data="filteredOrders" stripe style="width: 100%" v-loading="loading" @row-click="openOrderDrawer">
       <el-table-column prop="broker_order_id" label="订单号" width="180" />
       <el-table-column prop="symbol" label="股票代码" width="120" />
       <el-table-column prop="source" label="来源" width="90">
@@ -48,6 +51,16 @@
           <span v-if="row.executed_price !== null && row.executed_price !== row.price" style="color: #e6a23c; font-size: 12px; margin-left: 4px">
             成交 ${{ row.executed_price }}
           </span>
+          <el-tag
+            v-if="slippageHint(row) !== null"
+            size="small"
+            :type="slippageHint(row)! >= 0 ? 'danger' : 'success'"
+            effect="plain"
+            style="margin-left: 4px"
+            data-testid="order-slippage"
+          >
+            {{ slippageHint(row)! >= 0 ? '+' : '' }}{{ slippageHint(row)!.toFixed(2) }}
+          </el-tag>
         </template>
       </el-table-column>
       <el-table-column prop="status" label="状态" width="120">
@@ -136,6 +149,13 @@
           <el-date-picker v-model="rtFromDate" type="date" value-format="YYYY-MM-DD" placeholder="开始日期" size="small" />
           <el-date-picker v-model="rtToDate" type="date" value-format="YYYY-MM-DD" placeholder="结束日期" size="small" />
           <el-button size="small" type="primary" :loading="rtLoading" data-testid="load-roundtrips" @click="loadTradeData">拉取</el-button>
+          <el-button
+            size="small"
+            plain
+            :disabled="filteredClosedTrades.length === 0"
+            data-testid="roundtrips-export-csv"
+            @click="exportRoundTrips"
+          >导出 CSV</el-button>
           <span class="muted">按平仓时间，最近优先；筛选仅作用于当前已加载前 200 条</span>
         </div>
         <div class="roundtrips-summary" data-testid="roundtrip-summary">{{ roundTripSummaryText }}</div>
@@ -429,6 +449,7 @@ import type {
 } from '../types'
 import { orderSideLabel, orderStatusLabel } from '../utils/labels'
 import { resolveErrorMessage } from '../utils/error'
+import { downloadCsv } from '../utils/csv'
 
 const orders = ref<OrderRecord[]>([])
 const loading = ref(false)
@@ -437,6 +458,26 @@ const scope = ref<'today' | 'history'>('today')
 const page = ref(1)
 const pageSize = ref(10)
 const total = ref(0)
+// Client-side toggle: show only orders that have a journal note attached.
+const onlyWithNotes = ref(false)
+const filteredOrders = computed(() => {
+  if (!onlyWithNotes.value) return orders.value
+  return orders.value.filter((o) => notesByOrder.value.has(o.id))
+})
+
+/** Signed fill-quality slippage, normalized so POSITIVE = adverse for the side:
+ * a BUY filling above its limit, or a SELL filling below. Negative = favorable.
+ * Returns null when there is no executed price or the fill matched the quote. */
+function slippageHint(row: OrderRecord): number | null {
+  if (row.executed_price == null || row.price == null) return null
+  if (row.executed_price === row.price) return null
+  const delta = row.executed_price - row.price
+  if (!Number.isFinite(delta)) return null
+  // Sell-side fills are adverse when executed below the limit (negative delta),
+  // so flip the sign so adverse is always positive for coloring.
+  const isSell = row.side === 'SELL' || row.side === 'SELL_SHORT'
+  return isSell ? -delta : delta
+}
 
 // ---- Trade journal (notes/tags/rating per order) ----
 const notesByOrder = ref<Map<number, TradeNote>>(new Map())
@@ -650,6 +691,41 @@ function handleAnalyticsCollapseChange(activeNames: string | string[]) {
 
 function formatPnl(v: number): string {
   return (v >= 0 ? '+' : '') + v.toFixed(2)
+}
+
+/** Client-side export of the currently filtered round-trip trades only. */
+function exportRoundTrips() {
+  const rows = filteredClosedTrades.value.map((t) => ({
+    symbol: t.symbol,
+    side: t.side,
+    entry_price: t.entry_price.toFixed(4),
+    exit_price: t.exit_price.toFixed(4),
+    quantity: t.quantity,
+    gross_pnl: t.gross_pnl.toFixed(2),
+    est_fees: t.est_fees.toFixed(2),
+    net_pnl: t.net_pnl.toFixed(2),
+    holding_seconds: t.holding_seconds,
+    entry_at: t.entry_at,
+    exit_at: t.exit_at,
+    entry_order_id: t.entry_order_id,
+    exit_order_id: t.exit_order_id,
+  }))
+  downloadCsv('round_trips.csv', [
+    { key: 'symbol', label: 'symbol' },
+    { key: 'side', label: 'side' },
+    { key: 'entry_price', label: 'entry_price' },
+    { key: 'exit_price', label: 'exit_price' },
+    { key: 'quantity', label: 'quantity' },
+    { key: 'gross_pnl', label: 'gross_pnl' },
+    { key: 'est_fees', label: 'est_fees' },
+    { key: 'net_pnl', label: 'net_pnl' },
+    { key: 'holding_seconds', label: 'holding_seconds' },
+    { key: 'entry_at', label: 'entry_at' },
+    { key: 'exit_at', label: 'exit_at' },
+    { key: 'entry_order_id', label: 'entry_order_id' },
+    { key: 'exit_order_id', label: 'exit_order_id' },
+  ], rows)
+  ElMessage.success(`已导出 ${rows.length} 条往返`)
 }
 
 function formatPercent(v: number): string {

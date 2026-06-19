@@ -63,6 +63,32 @@
       </el-space>
     </div>
 
+    <div v-if="items.length > 0" class="notif-distribution" data-testid="notif-distribution">
+      <div class="dist-block">
+        <div class="dist-label">严重度分布（当前页）</div>
+        <div class="dist-bars">
+          <div v-for="bar in severityBars" :key="bar.label" class="dist-bar-item">
+            <div class="dist-bar-track">
+              <div
+                class="dist-bar-fill"
+                :style="{ width: bar.pct + '%', background: bar.color }"
+                :data-testid="`dist-bar-${bar.key}`"
+              />
+            </div>
+            <span class="dist-bar-text">{{ bar.label }} {{ bar.count }}</span>
+          </div>
+        </div>
+      </div>
+      <div class="dist-block">
+        <div class="dist-label">成功 / 失败</div>
+        <div class="dist-ratio">
+          <div class="dist-ratio-success" :style="{ width: successRatioPct + '%' }"><span v-if="summary.success">{{ summary.success }}</span></div>
+          <div class="dist-ratio-failure" :style="{ width: (100 - successRatioPct) + '%' }"><span v-if="summary.failure">{{ summary.failure }}</span></div>
+        </div>
+        <small class="dist-ratio-note">成功率 {{ successRatioPct }}%</small>
+      </div>
+    </div>
+
     <div v-if="items.length === 0" class="notif-empty">
       <el-empty description="没有匹配的通知" />
     </div>
@@ -238,6 +264,25 @@ const summary = computed(() => {
     else info += 1
   }
   return { success, failure, critical, warning, info }
+})
+
+/** Severity distribution bars for the currently loaded page. Pure client-side
+ * derivation from `items` — no extra request. */
+const severityBars = computed(() => {
+  const s = summary.value
+  const rows = [
+    { key: 'critical', label: 'CRITICAL', count: s.critical, color: '#c43838' },
+    { key: 'warning', label: 'WARNING', count: s.warning, color: '#e6a23c' },
+    { key: 'info', label: 'INFO', count: s.info, color: '#909399' },
+  ]
+  const max = Math.max(1, ...rows.map((r) => r.count))
+  return rows.map((r) => ({ ...r, pct: Math.round((r.count / max) * 100) }))
+})
+
+const successRatioPct = computed(() => {
+  const total = summary.value.success + summary.value.failure
+  if (total === 0) return 0
+  return Math.round((summary.value.success / total) * 100)
 })
 
 const dayGroups = computed(() => {
@@ -452,6 +497,96 @@ onUnmounted(stopPoll)
 
 .notif-summary {
   padding: 8px 0;
+}
+
+.notif-distribution {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 24px;
+  padding: 12px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 8px;
+  background: #fafbfc;
+}
+
+.dist-block {
+  flex: 1 1 240px;
+  min-width: 220px;
+}
+
+.dist-label {
+  margin-bottom: 8px;
+  color: #606266;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.dist-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.dist-bar-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dist-bar-track {
+  flex: 1;
+  height: 14px;
+  background: #eef0f4;
+  border-radius: 7px;
+  overflow: hidden;
+}
+
+.dist-bar-fill {
+  height: 100%;
+  border-radius: 7px;
+  transition: width 0.2s ease;
+  min-width: 2px;
+}
+
+.dist-bar-text {
+  flex: 0 0 auto;
+  width: 110px;
+  color: #606266;
+  font-size: 12px;
+}
+
+.dist-ratio {
+  display: flex;
+  height: 22px;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.dist-ratio-success {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #14884f;
+  color: #fff;
+  font-size: 12px;
+  min-width: 2px;
+}
+
+.dist-ratio-failure {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #c43838;
+  color: #fff;
+  font-size: 12px;
+  min-width: 2px;
+}
+
+.dist-ratio-note {
+  display: block;
+  margin-top: 6px;
+  color: #909399;
+  font-size: 12px;
 }
 
 .notif-empty {

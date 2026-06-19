@@ -141,6 +141,15 @@
               <el-col :xs="12" :sm="4"><el-statistic title="已用" :value="runtimeStatus.budget.used_analyses_last_hour" /></el-col>
               <el-col :xs="12" :sm="4"><el-statistic title="剩余" :value="runtimeStatus.budget.remaining_analyses_this_hour" /></el-col>
             </el-row>
+            <div class="budget-bar" data-testid="llm-budget-progress">
+              <div class="budget-bar-label">每小时用量</div>
+              <el-progress
+                :percentage="budgetUsagePct"
+                :status="budgetUsagePct >= 90 ? 'exception' : budgetUsagePct >= 70 ? 'warning' : 'success'"
+                :stroke-width="14"
+              />
+              <small class="budget-bar-note">{{ runtimeStatus.budget.used_analyses_last_hour }} / {{ runtimeStatus.budget.max_analyses_per_hour }} 次</small>
+            </div>
           </el-card>
 
           <el-card v-if="runtimeHealthHints.length" header="健康提示" class="runtime-card" data-testid="llm-runtime-health">
@@ -181,6 +190,15 @@
           </el-card>
 
           <el-card header="最近交互" class="runtime-card" data-testid="llm-runtime-interactions">
+            <template #header>
+              <div class="runtime-card-header">
+                <span>最近交互</span>
+                <div>
+                  <el-button size="small" plain :disabled="runtimeStatus == null" data-testid="lab-export-symbols" @click="exportSymbolStatus">导出 Symbol 状态</el-button>
+                  <el-button size="small" plain :disabled="runtimeInteractions.length === 0" data-testid="lab-export-interactions" @click="exportInteractions">导出交互 CSV</el-button>
+                </div>
+              </div>
+            </template>
             <el-table :data="runtimeInteractions" size="small">
               <el-table-column prop="id" label="ID" width="70" />
               <el-table-column prop="interaction_type" label="类型" width="100" />
@@ -221,6 +239,7 @@ import type {
   PerformanceVariant, IndicatorsResponse, LLMInteractionRecord, LLMIntervalStatus,
 } from '../types'
 import { resolveErrorMessage } from '../utils/error'
+import { downloadCsv } from '../utils/csv'
 
 const activeTab = ref('experiments')
 
@@ -345,6 +364,12 @@ const runtimeHealthHints = computed(() => {
   return hints
 })
 
+const budgetUsagePct = computed(() => {
+  const b = runtimeStatus.value?.budget
+  if (!b || !b.max_analyses_per_hour) return 0
+  return Math.min(100, Math.round((b.used_analyses_last_hour / b.max_analyses_per_hour) * 100))
+})
+
 async function loadRuntimeStatus() {
   runtimeLoading.value = true
   try {
@@ -360,6 +385,56 @@ async function loadRuntimeStatus() {
   } finally {
     runtimeLoading.value = false
   }
+}
+
+function exportSymbolStatus() {
+  const rows = (runtimeStatus.value?.symbol_statuses ?? []).map((s) => ({
+    symbol: s.symbol,
+    market: s.market,
+    is_primary: s.is_primary ? 'yes' : 'no',
+    has_pending_order: s.has_pending_order ? 'yes' : 'no',
+    last_analysis_at: s.last_analysis_at ?? '',
+    next_analysis_at: s.next_analysis_at ?? '',
+    last_status: s.last_status ?? '',
+    last_skip_reason: s.last_skip_reason ?? '',
+  }))
+  downloadCsv('llm_symbol_status.csv', [
+    { key: 'symbol', label: 'symbol' },
+    { key: 'market', label: 'market' },
+    { key: 'is_primary', label: 'is_primary' },
+    { key: 'has_pending_order', label: 'has_pending_order' },
+    { key: 'last_analysis_at', label: 'last_analysis_at' },
+    { key: 'next_analysis_at', label: 'next_analysis_at' },
+    { key: 'last_status', label: 'last_status' },
+    { key: 'last_skip_reason', label: 'last_skip_reason' },
+  ], rows)
+  ElMessage.success('已导出 Symbol 状态')
+}
+
+function exportInteractions() {
+  const rows = runtimeInteractions.value.map((r) => ({
+    id: r.id,
+    interaction_type: r.interaction_type,
+    symbol: r.symbol,
+    success: r.success ? 'yes' : 'no',
+    applied: r.applied ? 'yes' : 'no',
+    order_action: r.order_action ?? '',
+    order_status: r.order_status ?? '',
+    error: r.error ?? '',
+    created_at: r.created_at,
+  }))
+  downloadCsv('llm_interactions.csv', [
+    { key: 'id', label: 'id' },
+    { key: 'interaction_type', label: 'interaction_type' },
+    { key: 'symbol', label: 'symbol' },
+    { key: 'success', label: 'success' },
+    { key: 'applied', label: 'applied' },
+    { key: 'order_action', label: 'order_action' },
+    { key: 'order_status', label: 'order_status' },
+    { key: 'error', label: 'error' },
+    { key: 'created_at', label: 'created_at' },
+  ], rows)
+  ElMessage.success(`已导出 ${rows.length} 条交互`)
 }
 
 function formatDateTime(value: string | null): string {
@@ -415,5 +490,29 @@ onMounted(async () => {
 .runtime-analysis {
   color: #4b5563;
   line-height: 1.5;
+}
+
+.runtime-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.budget-bar {
+  margin-top: 12px;
+}
+
+.budget-bar-label {
+  margin-bottom: 6px;
+  color: #909399;
+  font-size: 12px;
+}
+
+.budget-bar-note {
+  display: block;
+  margin-top: 4px;
+  color: #909399;
+  font-size: 12px;
 }
 </style>

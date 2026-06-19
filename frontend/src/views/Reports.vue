@@ -31,6 +31,14 @@
           <el-button size="small" plain :disabled="loading" data-testid="reports-preset-90d" @click="applyRangePreset(90)">近 90 天</el-button>
           <el-button plain :disabled="!reportData" @click="handleExport('json')" data-testid="reports-export-json">导出 JSON</el-button>
           <el-button plain :disabled="!reportData" @click="handleExport('csv')" data-testid="reports-export-csv">导出 CSV</el-button>
+          <el-button
+            plain
+            :disabled="!reportData || reportData.daily_points.length === 0"
+            data-testid="reports-export-local-csv"
+            @click="handleExportLocalCsv"
+          >
+            本地导出明细 CSV
+          </el-button>
         </el-form-item>
       </el-form>
     </el-card>
@@ -119,6 +127,13 @@
             <span>最大回撤日</span>
             <strong :class="reportInsights.maxDrawdownDay.drawdown > 0 ? 'negative' : ''">{{ reportInsights.maxDrawdownDay.date }} · {{ reportInsights.maxDrawdownDay.drawdown.toFixed(2) }}</strong>
           </div>
+          <div v-if="pnlConsistency" class="insight-item" data-testid="reports-consistency">
+            <span>日均 / 波动</span>
+            <strong :class="pnlConsistency.mean >= 0 ? 'positive' : 'negative'">
+              {{ signedCurrency(pnlConsistency.mean) }} / ±{{ pnlConsistency.std.toFixed(2) }}
+            </strong>
+            <small>稳定性 {{ pnlConsistency.ratio === null ? '—' : pnlConsistency.ratio.toFixed(2) }}</small>
+          </div>
         </div>
       </el-card>
 
@@ -199,20 +214,20 @@
               </div>
             </template>
           </el-table-column>
-          <el-table-column prop="date" label="日期" width="120" />
-          <el-table-column prop="trade_count" label="交易次数" width="100" />
-          <el-table-column prop="win_count" label="盈利次数" width="100" />
-          <el-table-column label="盈亏" width="120">
+          <el-table-column prop="date" label="日期" width="120" sortable />
+          <el-table-column prop="trade_count" label="交易次数" width="100" sortable />
+          <el-table-column prop="win_count" label="盈利次数" width="100" sortable />
+          <el-table-column label="盈亏" width="120" sortable :sort-by="(row: ReportDailyPoint) => row.pnl ?? 0">
             <template #default="{ row }">
               <span :class="(row.pnl ?? 0) >= 0 ? 'positive' : 'negative'">{{ signedCurrency(row.pnl ?? 0) }}</span>
             </template>
           </el-table-column>
-          <el-table-column label="累计盈亏" width="120">
+          <el-table-column label="累计盈亏" width="120" sortable :sort-by="(row: ReportDailyPoint) => row.cumulative_pnl ?? 0">
             <template #default="{ row }">
               <span :class="(row.cumulative_pnl ?? 0) >= 0 ? 'positive' : 'negative'">{{ signedCurrency(row.cumulative_pnl ?? 0) }}</span>
             </template>
           </el-table-column>
-          <el-table-column label="回撤" width="120">
+          <el-table-column label="回撤" width="120" sortable :sort-by="(row: ReportDailyPoint) => row.drawdown ?? 0">
             <template #default="{ row }">
               <span :class="(row.drawdown ?? 0) > 0 ? 'negative' : ''">{{ (row.drawdown ?? 0).toFixed(2) }}</span>
             </template>
@@ -236,6 +251,7 @@
 import { ref, computed } from 'vue'
 import { ElMessage } from 'element-plus'
 import { getRangeReport, exportReport } from '../api/reports'
+import { downloadCsv } from '../utils/csv'
 import type { ReportDailyPoint, ReportOrderDetail, ReportResponse } from '../types'
 
 interface ReportInsights {
@@ -292,6 +308,19 @@ const reportInsights = computed<ReportInsights | null>(() => {
     profitableDays: points.filter((point) => point.pnl > 0).length,
     losingDays: points.filter((point) => point.pnl < 0).length,
   }
+})
+
+/** Daily-PnL consistency derived client-side: mean, population std-dev, and a
+ * mean/std stability ratio (higher = more consistent daily outcome). Reuses
+ * already-loaded daily_points only — no extra request. */
+const pnlConsistency = computed<{ mean: number; std: number; ratio: number | null } | null>(() => {
+  const points = reportData.value?.daily_points ?? []
+  if (points.length < 2) return null
+  const pnls = points.map((p) => p.pnl)
+  const mean = pnls.reduce((a, b) => a + b, 0) / pnls.length
+  const variance = pnls.reduce((a, b) => a + (b - mean) ** 2, 0) / pnls.length
+  const std = Math.sqrt(variance)
+  return { mean, std, ratio: std > 0 ? mean / std : null }
 })
 
 const chartWidth = 800
@@ -391,6 +420,30 @@ function applyRangePreset(days: number) {
   form.value.from_date = daysAgo(Math.max(0, days - 1))
   form.value.to_date = formatDate(new Date())
   handleSearch()
+}
+
+function handleExportLocalCsv() {
+  const data = reportData.value
+  if (!data || data.daily_points.length === 0) return
+  const rows = data.daily_points.map((p) => ({
+    date: p.date,
+    trade_count: p.trade_count,
+    win_count: p.win_count,
+    pnl: (p.pnl ?? 0).toFixed(2),
+    cumulative_pnl: (p.cumulative_pnl ?? 0).toFixed(2),
+    drawdown: (p.drawdown ?? 0).toFixed(2),
+    win_rate: p.trade_count > 0 ? (((p.win_count ?? 0) / p.trade_count) * 100).toFixed(1) : '0',
+  }))
+  downloadCsv(`${exportBaseName.value}_daily.csv`, [
+    { key: 'date', label: 'date' },
+    { key: 'trade_count', label: 'trade_count' },
+    { key: 'win_count', label: 'win_count' },
+    { key: 'pnl', label: 'pnl' },
+    { key: 'cumulative_pnl', label: 'cumulative_pnl' },
+    { key: 'drawdown', label: 'drawdown' },
+    { key: 'win_rate', label: 'win_rate(%)' },
+  ], rows)
+  ElMessage.success('已本地导出每日明细')
 }
 
 function handleExport(fmt: 'json' | 'csv') {

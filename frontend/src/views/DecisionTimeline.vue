@@ -110,6 +110,16 @@
       </div>
     </div>
 
+    <div v-if="events.length" class="timeline-summary" data-testid="timeline-summary">
+      <el-tag type="info">本页 {{ events.length }}</el-tag>
+      <el-tag v-if="pageSummary.skipped" type="warning">跳过 {{ pageSummary.skipped }}</el-tag>
+      <el-tag v-if="pageSummary.filled" type="success">成交 {{ pageSummary.filled }}</el-tag>
+      <el-tag v-if="pageSummary.failed" type="danger">失败 {{ pageSummary.failed }}</el-tag>
+      <el-tag v-if="pageSummary.topSkipCategory" type="warning">
+        主跳过 {{ skipCategoryLabel(pageSummary.topSkipCategory) }} ({{ pageSummary.topSkipCategoryCount }})
+      </el-tag>
+    </div>
+
     <el-table
       :key="tableRefreshKey"
       :data="visibleEvents"
@@ -118,6 +128,20 @@
       v-loading="loading"
       row-key="row_uid"
     >
+      <el-table-column type="expand">
+        <template #default="{ row }">
+          <div class="payload-detail" data-testid="timeline-payload">
+            <div class="payload-detail-label">完整 payload</div>
+            <pre>{{ JSON.stringify(row.payload ?? {}, null, 2) }}</pre>
+            <template v-if="row.source === 'audit'">
+              <div class="payload-detail-label">审计上下文</div>
+              <pre>actor: {{ row.actor_hash || 'anon' }}
+ip: {{ row.source_ip || '-' }}
+result: {{ row.result || '-' }}</pre>
+            </template>
+          </div>
+        </template>
+      </el-table-column>
       <el-table-column label="类型" width="72">
         <template #default="{ row }">
           <el-tag :type="sourceTagType(row.source)" effect="plain" size="small">
@@ -132,7 +156,7 @@
           </el-tag>
         </template>
       </el-table-column>
-      <el-table-column prop="symbol" label="标的" min-width="110">
+      <el-table-column prop="symbol" label="标的" min-width="110" sortable>
         <template #default="{ row }">{{ row.symbol || '-' }}</template>
       </el-table-column>
       <el-table-column prop="broker_order_id" label="订单号" min-width="180">
@@ -169,13 +193,20 @@
         </template>
       </el-table-column>
       <el-table-column prop="message" label="摘要" min-width="220" show-overflow-tooltip />
-      <el-table-column prop="created_at" label="时间" min-width="190">
+      <el-table-column prop="created_at" label="时间" min-width="190" sortable>
         <template #default="{ row }">{{ formatDateTime(row.created_at) }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="84">
+      <el-table-column label="操作" width="140">
         <template #default="{ row }">
           <el-button v-if="row.source === 'llm'" link size="small" data-testid="llm-detail-button" @click="openLLMDetail(row.id)">详情</el-button>
-          <span v-else>-</span>
+          <el-button
+            v-if="row.symbol"
+            link
+            size="small"
+            data-testid="timeline-filter-symbol"
+            @click="filterBySymbol(row.symbol)"
+          >按此标的</el-button>
+          <span v-if="row.source !== 'llm' && !row.symbol">-</span>
         </template>
       </el-table-column>
     </el-table>
@@ -357,6 +388,37 @@ function clearBookmarks() {
 }
 
 const visibleEvents = computed(() => events.value)
+
+/** Within-page derived summary. The timeline is server-paginated, so these
+ * counts describe the currently loaded page only — not the full dataset. */
+const pageSummary = computed(() => {
+  const rows = events.value
+  const counts = { skipped: 0, filled: 0, failed: 0 }
+  const skipCats = new Map<string, number>()
+  for (const r of rows) {
+    if (r.event_type === 'ORDER_SKIPPED') counts.skipped += 1
+    if (r.event_type === 'ORDER_FILLED' || r.status === 'FILLED') counts.filled += 1
+    if (r.status === 'FAILED' || r.status === 'REJECTED') counts.failed += 1
+    const cat = r.payload?.skip_category
+    if (typeof cat === 'string' && cat) {
+      skipCats.set(cat, (skipCats.get(cat) ?? 0) + 1)
+    }
+  }
+  let topSkipCategory = ''
+  let topSkipCategoryCount = 0
+  for (const [cat, n] of skipCats) {
+    if (n > topSkipCategoryCount) {
+      topSkipCategory = cat
+      topSkipCategoryCount = n
+    }
+  }
+  return { ...counts, topSkipCategory, topSkipCategoryCount }
+})
+
+function filterBySymbol(symbol: string) {
+  searchTerm.value = symbol
+  onFilterChange()
+}
 
 onMounted(() => {
   loadEvents()
@@ -569,6 +631,32 @@ function formatDateTime(value: string): string {
 
 .responsive-table {
   width: 100%;
+}
+
+.timeline-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.payload-detail {
+  padding: 4px 12px;
+}
+
+.payload-detail-label {
+  margin: 6px 0;
+  color: #909399;
+  font-size: 12px;
+}
+
+.payload-detail pre {
+  margin: 0 0 8px;
+  padding: 10px;
+  background: #f5f7fa;
+  border-radius: 4px;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .timeline-bookmarks {
