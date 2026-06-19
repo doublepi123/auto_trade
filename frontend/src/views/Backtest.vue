@@ -441,7 +441,11 @@
             <el-button plain @click="loadSavedRuns">刷新列表</el-button>
           </div>
 
-          <el-table v-if="savedRuns.length" :data="savedRuns" size="small" class="responsive-table" @selection-change="onSelectionChange">
+          <div v-if="savedRuns.length" class="run-row" style="justify-content: flex-start; margin: 8px 0">
+            <el-input v-model="savedRunsSearch" placeholder="搜索名称/标的" clearable style="max-width: 180px" data-testid="saved-runs-search" />
+          </div>
+
+          <el-table v-if="savedRuns.length" :data="filteredSavedRuns" size="small" class="responsive-table" @selection-change="onSelectionChange">
             <el-table-column type="selection" width="42" />
             <el-table-column prop="name" label="名称" min-width="120" />
             <el-table-column prop="symbol" label="标的" min-width="90" />
@@ -470,7 +474,10 @@
           </div>
 
           <div v-if="compareRuns.length" class="result-panel" data-testid="compare-table">
-            <div class="section-title"><h4>横向对比</h4></div>
+            <div class="section-title">
+              <h4>横向对比</h4>
+              <el-button size="small" plain data-testid="compare-export-csv" @click="exportCompareTable">导出对比 CSV</el-button>
+            </div>
             <table class="heatmap-table compare-table">
               <thead>
                 <tr>
@@ -578,6 +585,9 @@
         <p v-else class="empty-note">暂无跳过信号</p>
 
         <h4 class="subsection-title">费用敏感性</h4>
+        <p v-if="breakEvenFeeRate !== null" class="fee-bredeven-note" data-testid="fee-breakeven">
+          盈亏平衡费率 ≈ {{ (breakEvenFeeRate * 100).toFixed(4) }}%（线性插值：收益跨零处）
+        </p>
         <el-table :data="result.fee_sensitivity" size="small" class="responsive-table">
           <el-table-column prop="fee_rate" label="费率" min-width="90">
             <template #default="{ row }">{{ (row.fee_rate * 100).toFixed(3) }}%</template>
@@ -617,6 +627,7 @@ import type {
 import { skipCategoryLabel } from '../utils/labels'
 import { formatCurrency, marketFromSymbol } from '../utils/format'
 import { resolveErrorMessage } from '../utils/error'
+import { downloadCsv } from '../utils/csv'
 
 const defaultParams: BacktestParams = {
   symbol: '',
@@ -1065,6 +1076,34 @@ const saveName = ref('')
 const savingRun = ref(false)
 const selectedRunIds = ref<number[]>([])
 const compareRuns = ref<BacktestRunOut[]>([])
+// Client-side filter over the loaded saved-run list (name or symbol substring).
+const savedRunsSearch = ref('')
+const filteredSavedRuns = computed(() => {
+  const q = savedRunsSearch.value.trim().toLowerCase()
+  if (!q) return savedRuns.value
+  return savedRuns.value.filter((r) =>
+    r.name.toLowerCase().includes(q) || (r.symbol ?? '').toLowerCase().includes(q),
+  )
+})
+
+/** Fee rate at which total pnl crosses zero, by linear interpolation between
+ * adjacent fee_sensitivity points. null when no sign change is present. */
+const breakEvenFeeRate = computed(() => {
+  const pts = result.value?.fee_sensitivity ?? []
+  if (pts.length < 2) return null
+  // fee_sensitivity is ordered ascending by fee_rate (engine probes from 0 up).
+  for (let i = 1; i < pts.length; i++) {
+    const a = pts[i - 1]
+    const b = pts[i]
+    if ((a.total_pnl <= 0 && b.total_pnl >= 0) || (a.total_pnl >= 0 && b.total_pnl <= 0)) {
+      const denom = b.total_pnl - a.total_pnl
+      if (denom === 0) return a.fee_rate
+      const t = (0 - a.total_pnl) / denom
+      return a.fee_rate + t * (b.fee_rate - a.fee_rate)
+    }
+  }
+  return null
+})
 
 const compareMetricRows: { key: string; label: string; format: (r: BacktestRunOut) => string }[] = [
   { key: 'total_pnl', label: '总收益', format: r => signedCurrency(r.metrics.total_pnl) },
@@ -1124,6 +1163,23 @@ async function handleCompare() {
   } catch (e) {
     ElMessage.error(resolveErrorMessage(e, '对比失败'))
   }
+}
+
+/** Export the transposed compare table (metrics as rows, runs as columns) to
+ * CSV directly from the loaded compareRuns — no backend call. */
+function exportCompareTable() {
+  if (compareRuns.value.length === 0) return
+  const rows = compareMetricRows.map((m) => {
+    const row: Record<string, string> = { metric: m.label }
+    for (const r of compareRuns.value) row[r.name] = m.format(r)
+    return row
+  })
+  const headers = [
+    { key: 'metric', label: 'metric' },
+    ...compareRuns.value.map((r) => ({ key: r.name, label: r.name })),
+  ]
+  downloadCsv('backtest_compare.csv', headers, rows)
+  ElMessage.success('已导出对比表')
 }
 
 function signedCurrency(value: number | null | undefined): string {
@@ -1377,6 +1433,12 @@ onMounted(() => {
 
 .subsection-title {
   margin: 16px 0 10px;
+}
+
+.fee-bredeven-note {
+  margin: 0 0 8px;
+  color: #6b7280;
+  font-size: 12px;
 }
 
 .empty-note {

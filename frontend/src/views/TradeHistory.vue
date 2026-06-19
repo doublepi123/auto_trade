@@ -418,7 +418,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, computed } from 'vue'
+import { ref, reactive, onMounted, computed, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import {
   cancelOrder,
@@ -535,7 +536,45 @@ async function loadOrders(refresh = false) {
   }
 }
 
+// ---- URL deep-linking of round-trip filters (shareable / reload-stable) ----
+const route = useRoute()
+const router = useRouter()
+
+function hydrateFiltersFromQuery() {
+  const q = route.query
+  if (typeof q.scope === 'string' && (q.scope === 'today' || q.scope === 'history')) scope.value = q.scope
+  if (typeof q.from === 'string') rtFromDate.value = q.from
+  if (typeof q.to === 'string') rtToDate.value = q.to
+  if (typeof q.filter === 'string') {
+    const allowed = ['all', 'winners', 'losers', 'long', 'short'] as const
+    if ((allowed as readonly string[]).includes(q.filter)) roundTripFilter.value = q.filter as typeof roundTripFilter.value
+  }
+  if (typeof q.symbol === 'string') roundTripSymbolSearch.value = q.symbol
+  if (q.notes === '1') onlyWithNotes.value = true
+}
+
+let syncTimer: ReturnType<typeof setTimeout> | null = null
+// Debounced push of current filter state into the URL query. Drops empty/
+// default values to keep the URL clean and uses replace() to avoid polluting
+// browser history on every keystroke.
+function syncFiltersToQuery() {
+  if (syncTimer) clearTimeout(syncTimer)
+  syncTimer = setTimeout(() => {
+    const next: Record<string, string> = {}
+    if (scope.value !== 'today') next.scope = scope.value
+    if (rtFromDate.value) next.from = rtFromDate.value
+    if (rtToDate.value) next.to = rtToDate.value
+    if (roundTripFilter.value !== 'all') next.filter = roundTripFilter.value
+    if (roundTripSymbolSearch.value.trim()) next.symbol = roundTripSymbolSearch.value.trim()
+    if (onlyWithNotes.value) next.notes = '1'
+    router.replace({ query: next })
+  }, 300)
+}
+
+watch([scope, rtFromDate, rtToDate, roundTripFilter, roundTripSymbolSearch, onlyWithNotes], syncFiltersToQuery)
+
 onMounted(() => {
+  hydrateFiltersFromQuery()
   loadOrders()
   loadNotes()
   loadClosedTrades()

@@ -30,6 +30,20 @@
       </div>
     </div>
 
+    <div v-if="derivedStats" class="equity-derived" data-testid="equity-derived">
+      <el-tag size="small" type="success">峰值 +{{ derivedStats.peak.toFixed(2) }}</el-tag>
+      <el-tag size="small" type="danger">谷值 {{ derivedStats.trough.toFixed(2) }}</el-tag>
+      <el-tag size="small" :type="derivedStats.periodReturn >= 0 ? 'success' : 'danger'">
+        区间回报 {{ signed(derivedStats.periodReturn) }}
+      </el-tag>
+      <el-tag v-if="derivedStats.bestDayDelta !== null" size="small" type="success">
+        最佳日 +{{ derivedStats.bestDayDelta.toFixed(2) }}
+      </el-tag>
+      <el-tag v-if="derivedStats.worstDayDelta !== null" size="small" type="danger">
+        最差日 {{ derivedStats.worstDayDelta.toFixed(2) }}
+      </el-tag>
+    </div>
+
     <svg
       v-if="result && result.points.length > 1"
       class="equity-chart"
@@ -72,6 +86,25 @@ async function load() {
 }
 
 const cumValues = computed(() => (result.value?.points ?? []).map(p => p.cumulative_pnl))
+
+/** Derived peak/trough/period-return/best-worst-day from loaded points. */
+const derivedStats = computed(() => {
+  const pts = result.value?.points ?? []
+  if (pts.length === 0) return null
+  const vals = pts.map((p) => p.cumulative_pnl)
+  const peak = Math.max(...vals)
+  const trough = Math.min(...vals)
+  const periodReturn = vals[vals.length - 1] - vals[0]
+  // Per-day delta = current cumulative - previous cumulative.
+  let bestDayDelta: number | null = null
+  let worstDayDelta: number | null = null
+  for (let i = 1; i < pts.length; i++) {
+    const delta = pts[i].cumulative_pnl - pts[i - 1].cumulative_pnl
+    if (bestDayDelta === null || delta > bestDayDelta) bestDayDelta = delta
+    if (worstDayDelta === null || delta < worstDayDelta) worstDayDelta = delta
+  }
+  return { peak, trough, periodReturn, bestDayDelta, worstDayDelta }
+})
 
 // Scale across cumulative values AND 0 so the zero baseline is always visible.
 const scale = computed(() => {
@@ -162,6 +195,12 @@ defineExpose({ load })
   display: flex;
   flex-wrap: wrap;
   gap: 24px;
+}
+
+.equity-derived {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .equity-stat span {

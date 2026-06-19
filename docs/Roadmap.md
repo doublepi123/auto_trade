@@ -13,7 +13,7 @@
 | **API 覆盖** | ✅ 完备。策略配置、凭证管理、订单查询、状态获取、状态历史、事件时间线、运行时控制（启停/暂停/Kill Switch）。 |
 | **WebSocket 推送** | ✅ 就绪。实时状态同步。 |
 | **本地部署** | ✅ 就绪。Docker Compose 一键启动。 |
-| **测试** | ✅ 就绪。Backend pytest **1178** 项、pytest-cov 覆盖率 **89%**、Frontend Cypress E2E **197** 项。 |
+| **测试** | ✅ 就绪。Backend pytest **1178** 项、pytest-cov 覆盖率 **89%**、Frontend Cypress E2E **216** 项。 |
 | **凭证安全** | ✅ 就绪。主密钥 + AES-GCM 加密存储，前端不回显明文。 |
 | **数据库** | ✅ 就位。SQLite，含运行状态、状态快照、订单、`tracked_entries`、LLM 交互、交易事件、审计日志和凭证配置。 |
 | **LLM 行情数据** | ✅ 真实 K 线（日 K + 1 分钟 K），ATR/布林带有效。 |
@@ -34,6 +34,38 @@
 | **决策时间线搜索** | ✅ 全文搜索（消息/标的/事件类型）+ 书签（localStorage 持久化）。 |
 | **后端热路径** | ✅ `recent_quotes` 改 `deque(maxlen=...)` + 单边窗口淘汰；`broker.get_quotes([symbol])` 批量复用。 |
 | **Docker 镜像** | ✅ 多阶段构建（`builder → runtime`），剥离 toolchain；tini 转发信号。 |
+
+---
+
+## 近期已完成迭代 (2026-06-19) — Dashboard 深度 + 跨页 UX（10 轮 P119–P128）
+
+> 自主 feature 迭代第 13 批（10 轮）。混合 Dashboard 面板派生统计、Backtest 深度与跨页 UX（快捷键 / 深色模式 / URL 深链接 / 书签备份）。全部纯前端，复用既有 API 响应字段，**不新增后端端点、不新增表、不触碰 broker/order/runner/risk 写路径**。
+
+| 代号 | 主题 | 页面 / 组件 | 状态 |
+|------|------|-------------|------|
+| **P119** | Dashboard 运行诊断快照 CSV 导出 | Dashboard | ✅ |
+| **P120** | 持仓浮盈派生统计（盈/亏数、最大贡献、集中度）+ 持仓 CSV | PositionPnlPanel | ✅ |
+| **P121** | 交易时段下次开盘 1s 实时倒计时 | SessionClockPanel | ✅ |
+| **P122** | 权益曲线派生统计（峰值/谷值/区间回报/最佳最差日） | EquityCurvePanel | ✅ |
+| **P123** | 标的归因派生期望（realized/笔数）+ 盈亏表现标注 | SymbolAttributionPanel | ✅ |
+| **P124** | 回测对比表 CSV 导出 + 保存 run 搜索 + 盈亏平衡费率插值 | Backtest | ✅ |
+| **P125** | 全局键盘快捷键导航（字母键切路由 + ? 帮助，输入框聚焦时忽略） | App | ✅ |
+| **P126** | 决策时间线书签 JSON 导入导出（localStorage 备份/合并） | DecisionTimeline | ✅ |
+| **P127** | 深色模式切换（Element Plus dark css-vars + localStorage 持久化） | App | ✅ |
+| **P128** | 交易历史往返筛选 URL 深链接（query 同步/水合，可分享） | TradeHistory | ✅ |
+
+**设计要点：**
+- **派生统计**：四个 Dashboard 面板（持仓/时段/权益/归因）全部新增客户端 `computed`，复用已加载响应字段，不发新请求。
+- **共享 CSV 工具**：继续复用 `utils/csv.ts`，Dashboard 诊断、持仓、对比表均走同一导出路径。
+- **盈亏平衡费率**：对 `fee_sensitivity` 相邻点线性插值求 pnl 跨零处，纯客户端。
+- **全局快捷键**：`window` keydown 监听，输入框/textarea/select/contenteditable 聚焦或带修饰键时跳过，`?` 打开帮助；路由用 hash。
+- **深色模式**：`main.ts` 显式导入 `element-plus/theme-chalk/dark/css-vars.css`，切换 `html.dark` 并持久化。
+- **URL 深链接**：TradeHistory 筛选状态防抖写入 `route.query`，挂载时水合；hash 路由下 query 在 hash 内。
+- **回归修复**：新增全局 equity/pnl-by-symbol stub 使面板在测试中常显数据；App 导航栏改 `flex-wrap + height:auto`，避免窄视口下操作按钮被 `el-main` 遮挡 / 末位菜单链接被按钮覆盖。
+
+**验证：** `vue-tsc` 0 errors、`npm run type-check` 通过；Cypress 全量 **216** 项全部通过（5:12）；`pytest tests/` **1178 passed, 1 skipped**（覆盖率 **89%**，无回归）。
+
+**显式 YAGNI 未做：** 服务端主题偏好同步、快捷键自定义、列显示/隐藏持久化、深色模式图表配色微调、URL 深链接覆盖更多页面。
 
 ---
 

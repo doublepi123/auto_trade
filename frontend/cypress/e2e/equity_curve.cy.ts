@@ -30,6 +30,7 @@ describe('Equity curve panel', () => {
     cy.visit('/#/dashboard')
     cy.wait('@equity')
     cy.get('[data-testid="equity-curve-panel"]').should('be.visible')
-    cy.contains('暂无已实现成交').should('be.visible')
+    // No curve should render when there are fewer than 2 points.
+    cy.get('[data-testid="equity-curve-chart"]').should('not.exist')
   })
 })

@@ -2,7 +2,10 @@
   <section class="position-pnl-panel" data-testid="position-pnl-panel">
     <div class="panel-heading">
       <h4>持仓浮盈（未实现 P&amp;L）</h4>
-      <el-button size="small" plain :loading="loading" @click="load">刷新</el-button>
+      <div>
+        <el-button size="small" plain :disabled="!result || result.positions.length === 0" data-testid="position-pnl-export" @click="exportPositions">导出 CSV</el-button>
+        <el-button size="small" plain :loading="loading" @click="load">刷新</el-button>
+      </div>
     </div>
 
     <el-alert v-if="error" :title="error" type="error" show-icon :closable="false" />
@@ -27,6 +30,17 @@
         <span>成本基础</span>
         <strong>{{ money(result.total_cost_basis) }}</strong>
       </div>
+    </div>
+
+    <div v-if="derivedStats" class="pnl-derived" data-testid="position-pnl-derived">
+      <el-tag size="small" type="success">盈利 {{ derivedStats.winners }}</el-tag>
+      <el-tag size="small" type="danger">亏损 {{ derivedStats.losers }}</el-tag>
+      <el-tag size="small" :type="derivedStats.maxContributor.unrealized_pnl >= 0 ? 'success' : 'danger'">
+        最大贡献 {{ derivedStats.maxContributor.symbol }} {{ signed(derivedStats.maxContributor.unrealized_pnl) }}
+      </el-tag>
+      <el-tag size="small" type="info">
+        集中度 {{ derivedStats.largestHolding.symbol }} {{ derivedStats.concentrationPct.toFixed(0) }}%
+      </el-tag>
     </div>
 
     <el-table
@@ -60,15 +74,31 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { onMounted, ref, computed } from 'vue'
+import { ElMessage } from 'element-plus'
 import { getPositionPnl } from '../api'
 import type { PositionPnlResult } from '../types'
 import { formatCurrency, marketFromSymbol } from '../utils/format'
 import { resolveErrorMessage } from '../utils/error'
+import { downloadCsv } from '../utils/csv'
 
 const result = ref<PositionPnlResult | null>(null)
 const loading = ref(false)
 const error = ref('')
+
+/** Client-side derived concentration & contribution stats from the already-
+ * loaded positions. No extra request. */
+const derivedStats = computed(() => {
+  const positions = result.value?.positions ?? []
+  if (positions.length === 0) return null
+  const winners = positions.filter((p) => p.unrealized_pnl > 0).length
+  const losers = positions.filter((p) => p.unrealized_pnl < 0).length
+  const maxContributor = positions.reduce((a, b) => Math.abs(b.unrealized_pnl) > Math.abs(a.unrealized_pnl) ? b : a, positions[0])
+  const totalCost = positions.reduce((a, p) => a + (p.cost_value ?? 0), 0) || 1
+  const largestHolding = positions.reduce((a, b) => (b.cost_value ?? 0) > (a.cost_value ?? 0) ? b : a, positions[0])
+  const concentrationPct = totalCost > 0 ? ((largestHolding.cost_value ?? 0) / totalCost) * 100 : 0
+  return { winners, losers, maxContributor, largestHolding, concentrationPct, count: positions.length }
+})
 
 async function load() {
   loading.value = true
@@ -107,6 +137,32 @@ function pnlClass(v: number): string {
   return ''
 }
 
+function exportPositions() {
+  const rows = (result.value?.positions ?? []).map((p) => ({
+    symbol: p.symbol,
+    quantity: p.quantity,
+    avg_entry_cost: p.avg_entry_cost.toFixed(4),
+    last_price: p.last_price ?? '',
+    unrealized_pnl: p.unrealized_pnl.toFixed(2),
+    unrealized_pnl_pct: p.unrealized_pnl_pct ?? '',
+    market_value: p.market_value.toFixed(2),
+    cost_value: p.cost_value.toFixed(2),
+    has_quote: p.has_quote ? 'yes' : 'no',
+  }))
+  downloadCsv('positions_pnl.csv', [
+    { key: 'symbol', label: 'symbol' },
+    { key: 'quantity', label: 'quantity' },
+    { key: 'avg_entry_cost', label: 'avg_entry_cost' },
+    { key: 'last_price', label: 'last_price' },
+    { key: 'unrealized_pnl', label: 'unrealized_pnl' },
+    { key: 'unrealized_pnl_pct', label: 'unrealized_pnl_pct' },
+    { key: 'market_value', label: 'market_value' },
+    { key: 'cost_value', label: 'cost_value' },
+    { key: 'has_quote', label: 'has_quote' },
+  ], rows)
+  ElMessage.success(`已导出 ${rows.length} 个持仓`)
+}
+
 onMounted(load)
 defineExpose({ load })
 </script>
@@ -134,6 +190,12 @@ defineExpose({ load })
   display: flex;
   flex-wrap: wrap;
   gap: 24px;
+}
+
+.pnl-derived {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .pnl-stat span {

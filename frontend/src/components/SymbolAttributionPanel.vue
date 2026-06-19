@@ -30,8 +30,22 @@
         <template #default="{ row }">{{ (row.contribution_share * 100).toFixed(1) }}%</template>
       </el-table-column>
       <el-table-column prop="trade_count" label="往返" width="70" />
+      <el-table-column label="期望" width="100">
+        <template #default="{ row }">
+          <span :class="pnlClass(expectancy(row))" data-testid="attribution-expectancy">
+            {{ signed(expectancy(row)) }}
+          </span>
+        </template>
+      </el-table-column>
       <el-table-column label="胜率" width="80">
         <template #default="{ row }">{{ row.win_rate.toFixed(0) }}%</template>
+      </el-table-column>
+      <el-table-column label="表现" width="90">
+        <template #default="{ row }">
+          <el-tag v-if="row.realized_pnl > 0" type="success" size="small">盈利</el-tag>
+          <el-tag v-else-if="row.realized_pnl < 0" type="danger" size="small">亏损</el-tag>
+          <el-tag v-else type="info" size="small">打平</el-tag>
+        </template>
       </el-table-column>
       <el-table-column label="最佳/最差" width="160">
         <template #default="{ row }">
@@ -71,6 +85,13 @@ async function load() {
 function signed(v: number): string {
   const a = Math.abs(v).toFixed(2)
   return v > 0 ? `+$${a}` : v < 0 ? `-$${a}` : `$${a}`
+}
+
+/** Per-symbol expectancy = realized PnL per round trip. Reuses already-loaded
+ * row fields only; returns 0 when there are no trades. */
+function expectancy(row: { realized_pnl: number; trade_count: number }): number {
+  if (!row.trade_count || row.trade_count <= 0) return 0
+  return row.realized_pnl / row.trade_count
 }
 
 function pnlClass(v: number): string {

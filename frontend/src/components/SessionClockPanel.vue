@@ -5,6 +5,7 @@
       <el-tag :type="statusType" effect="dark" size="large" data-testid="session-status">{{ statusLabel }}</el-tag>
       <div class="session-time">{{ data.local_time }} <small>{{ data.market }}</small></div>
       <div class="session-next">下次开盘：{{ formatTime(data.next_open) }}</div>
+      <div v-if="countdownText" class="session-countdown" data-testid="session-countdown">距开盘 {{ countdownText }}</div>
     </div>
     <p v-else-if="!error" class="muted">加载中…</p>
     <p v-else class="muted">交易时段不可用</p>
@@ -20,6 +21,10 @@ const props = defineProps<{ symbol: string }>()
 const data = ref<MarketSessionStatus | null>(null)
 const error = ref('')
 let timer: number | undefined
+// Live 1s ticking "now" so the next-open countdown updates without re-fetching
+// the session endpoint (which only polls every 60s).
+const now = ref(Date.now())
+let countdownTimer: number | undefined
 
 async function load() {
   try {
@@ -55,12 +60,29 @@ function formatTime(v: string): string {
   })
 }
 
+/** HH:MM:SS until next_open, or '' when market is already open / no next_open /
+ * next_open already passed. Derived purely from the loaded `data` + ticking now. */
+const countdownText = computed(() => {
+  const d = data.value
+  if (!d || !d.next_open || d.status === 'rth') return ''
+  const ms = new Date(d.next_open).getTime() - now.value
+  if (!Number.isFinite(ms) || ms <= 0) return ''
+  const totalSec = Math.floor(ms / 1000)
+  const h = Math.floor(totalSec / 3600)
+  const m = Math.floor((totalSec % 3600) / 60)
+  const s = totalSec % 60
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${pad(h)}:${pad(m)}:${pad(s)}`
+})
+
 onMounted(() => {
   load()
   timer = window.setInterval(load, 60000)
+  countdownTimer = window.setInterval(() => { now.value = Date.now() }, 1000)
 })
 onUnmounted(() => {
   if (timer) clearInterval(timer)
+  if (countdownTimer) clearInterval(countdownTimer)
 })
 watch(() => props.symbol, load)
 </script>
@@ -103,6 +125,13 @@ watch(() => props.symbol, load)
 .session-next {
   color: #6b7280;
   font-size: 12px;
+}
+
+.session-countdown {
+  color: var(--el-color-primary);
+  font-size: 14px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
 }
 
 .muted {

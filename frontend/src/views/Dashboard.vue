@@ -380,7 +380,10 @@
     <section class="detail-panel diagnostics-panel" data-testid="dashboard-diagnostics" v-loading="diagnosticsLoading">
       <div class="section-title">
         <h4>运行诊断</h4>
-        <el-button size="small" plain @click="loadDiagnostics">刷新</el-button>
+        <div>
+          <el-button size="small" plain :disabled="!diagnostics" data-testid="dash-diagnostics-export" @click="exportDiagnostics">导出 CSV</el-button>
+          <el-button size="small" plain @click="loadDiagnostics">刷新</el-button>
+        </div>
       </div>
       <template v-if="diagnostics">
         <div class="diagnostics-grid">
@@ -581,6 +584,7 @@ import { startTrading, stopTrading, pauseTrading, resumeTrading, activateKillSwi
 import type { LLMIntervalStatus, NotificationLogOut, OrderRecord, Position, StatusHistoryPoint, TradeEventRecord } from '../types'
 import { engineStateLabel, auditActionLabel, marketLabel, positionSideLabel, skipCategoryLabel, tradeEventTypeLabel } from '../utils/labels'
 import { EVENT_TYPE } from '../utils/constants'
+import { downloadCsv } from '../utils/csv'
 
 type CypressWindow = Window & { Cypress?: unknown }
 const multiSymbols = useMultiSymbolSnapshots()
@@ -996,6 +1000,34 @@ async function handleDisableKillSwitch() {
 function formatAgeSeconds(value: number | null | undefined): string {
   if (value == null) return '-'
   return `${value.toFixed(1)}s`
+}
+
+/** Dump the in-memory diagnostics snapshot (runtime table + stream health) to
+ * CSV for incident review. Reuses the already-polled diagnostics state only. */
+function exportDiagnostics() {
+  const d = diagnostics.value
+  if (!d) return
+  const rows = d.symbol_runtimes.map((r) => ({
+    symbol: r.symbol,
+    market: r.market,
+    is_primary: r.is_primary ? 'yes' : 'no',
+    engine_state: r.engine_state,
+    last_price: r.last_price,
+    last_trigger_price: r.last_trigger_price,
+    recent_quote_count: r.recent_quote_count,
+    has_pending_order: r.has_pending_order ? 'yes' : 'no',
+  }))
+  downloadCsv('diagnostics_snapshot.csv', [
+    { key: 'symbol', label: 'symbol' },
+    { key: 'market', label: 'market' },
+    { key: 'is_primary', label: 'is_primary' },
+    { key: 'engine_state', label: 'engine_state' },
+    { key: 'last_price', label: 'last_price' },
+    { key: 'last_trigger_price', label: 'last_trigger_price' },
+    { key: 'recent_quote_count', label: 'recent_quote_count' },
+    { key: 'has_pending_order', label: 'has_pending_order' },
+  ], rows)
+  ElMessage.success(`已导出 ${rows.length} 个运行时诊断`)
 }
 
 function formatNumber(value: number | null | undefined): string {

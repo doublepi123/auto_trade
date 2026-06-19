@@ -75,6 +75,9 @@
         </el-input>
         <el-button :loading="exporting === 'csv'" @click="handleExport('csv')">导出 CSV</el-button>
         <el-button :loading="exporting === 'json'" @click="handleExport('json')">导出 JSON</el-button>
+        <el-button size="small" plain data-testid="timeline-bookmarks-export" @click="exportBookmarks">导出书签</el-button>
+        <el-button size="small" plain data-testid="timeline-bookmarks-import" @click="triggerImportBookmarks">导入书签</el-button>
+        <input ref="bookmarksImportInput" type="file" accept=".json,application/json" style="display: none" data-testid="timeline-bookmarks-input" @change="handleImportBookmarks" />
         <el-button type="primary" :loading="loading" @click="loadEvents">刷新</el-button>
       </div>
     </div>
@@ -317,6 +320,7 @@ const BOOKMARKS_KEY = 'auto_trade.timeline.bookmarks.v1'
 
 const bookmarks = ref<Bookmark[]>(loadBookmarks())
 const activeBookmarkId = ref<string>('')
+const bookmarksImportInput = ref<HTMLInputElement | null>(null)
 
 const canSaveBookmark = computed(() => {
   return Boolean(searchTerm.value.trim() || selectedEventTypes.value.length || selectedSkipCategory.value)
@@ -385,6 +389,66 @@ function clearBookmarks() {
   bookmarks.value = []
   activeBookmarkId.value = ''
   persistBookmarks()
+}
+
+/** Backup the localStorage bookmark set as JSON. Pure client-side; restores on
+ * any browser via the matching import. */
+function exportBookmarks() {
+  const blob = new Blob([JSON.stringify(bookmarks.value, null, 2)], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = 'timeline_bookmarks.json'
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
+  ElMessage.success(`已导出 ${bookmarks.value.length} 个书签`)
+}
+
+function triggerImportBookmarks() {
+  bookmarksImportInput.value?.click()
+}
+
+async function handleImportBookmarks(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(await file.text())
+  } catch {
+    ElMessage.error('书签 JSON 解析失败')
+    return
+  }
+  if (!Array.isArray(parsed)) {
+    ElMessage.error('书签 JSON 必须是数组')
+    return
+  }
+  // Merge by id (imported entries override same-id locals), cap at 20.
+  const byId = new Map<string, Bookmark>()
+  for (const b of bookmarks.value) byId.set(b.id, b)
+  let added = 0
+  for (const entry of parsed) {
+    if (!entry || typeof entry !== 'object' || typeof (entry as Bookmark).id !== 'string') continue
+    const e = entry as Bookmark
+    if (!byId.has(e.id)) added += 1
+    byId.set(e.id, {
+      id: e.id,
+      label: typeof e.label === 'string' ? e.label : '导入书签',
+      source: e.source ?? 'all',
+      event_types: Array.isArray(e.event_types) ? e.event_types : [],
+      skip_category: typeof e.skip_category === 'string' ? e.skip_category : '',
+      q: typeof e.q === 'string' ? e.q : '',
+      created_at: typeof e.created_at === 'number' ? e.created_at : Date.now(),
+    })
+  }
+  bookmarks.value = Array.from(byId.values())
+    .sort((a, b) => b.created_at - a.created_at)
+    .slice(0, 20)
+  persistBookmarks()
+  ElMessage.success(`已导入书签（新增 ${added}，共 ${bookmarks.value.length}）`)
 }
 
 const visibleEvents = computed(() => events.value)

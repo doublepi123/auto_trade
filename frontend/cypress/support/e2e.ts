@@ -110,6 +110,29 @@ Cypress.Commands.add('stubApi', () => {
     },
   }).as('getPositionPnl')
 
+  cy.intercept('GET', '/api/equity/curve*', {
+    body: {
+      points: [
+        { date: '2026-06-10', realized_pnl: 0, cumulative_pnl: 0, drawdown: 0, trade_count: 0 },
+        { date: '2026-06-11', realized_pnl: 120, cumulative_pnl: 120, drawdown: 0, trade_count: 2 },
+        { date: '2026-06-12', realized_pnl: -60, cumulative_pnl: 60, drawdown: 60, trade_count: 1 },
+        { date: '2026-06-13', realized_pnl: 200, cumulative_pnl: 260, drawdown: 0, trade_count: 3 },
+      ],
+      total_realized_pnl: 260,
+      max_drawdown: 60,
+    },
+  }).as('getEquityCurve')
+
+  cy.intercept('GET', '/api/pnl/by-symbol*', {
+    body: {
+      rows: [
+        { symbol: 'AAPL.US', realized_pnl: 300, trade_count: 6, win_count: 4, win_rate: 66.7, contribution_share: 0.75, largest_win: 120, largest_loss: -40 },
+        { symbol: 'NVDA.US', realized_pnl: -50, trade_count: 2, win_count: 0, win_rate: 0, contribution_share: -0.125, largest_win: 0, largest_loss: -50 },
+      ],
+      total_realized_pnl: 250,
+    },
+  }).as('getPnlBySymbol')
+
   cy.intercept('GET', '/api/risk/history*', {
     body: {
       points: [
