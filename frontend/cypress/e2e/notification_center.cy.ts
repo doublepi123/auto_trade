@@ -117,4 +117,64 @@ describe('Notification Center (P79-P83 Observability)', () => {
     cy.get('[data-testid="notif-copy-content"]').click()
     cy.get('@writeClipboard').should('have.been.calledWith', 'kill switch triggered')
   })
+
+  it('supports second-wave triage helpers', () => {
+    cy.window().then((win) => {
+      cy.stub(win.navigator.clipboard, 'writeText').as('writeClipboard')
+    })
+
+    cy.get('[data-testid="notif-error-rate"]').should('contain', '失败率 25%')
+
+    cy.get('[data-testid="notif-unread-only"]').click()
+    cy.get('[data-testid="notif-active-filters"]').should('contain', '仅未读')
+    cy.get('[data-testid="notif-day-groups"]').should('contain', '风控熔断')
+
+    cy.get('[data-testid="notif-copy-page"]').click()
+    cy.get('@writeClipboard').should('have.been.calledWithMatch', '风控熔断')
+      .and('have.been.calledWithMatch', 'Webhook失败')
+
+    cy.get('[data-testid="notif-category-filter"]').click()
+    cy.contains('.el-select-dropdown__item', 'Webhook').click()
+    cy.get('[data-testid="notif-active-filters"]').should('contain', '推断类别 Webhook')
+    cy.get('[data-testid="notif-day-groups"]').should('contain', 'Webhook失败')
+      .and('not.contain', '日报')
+
+    cy.get('[data-testid="notif-category-filter"]').click()
+    cy.contains('.el-select-dropdown__item', '全部类别').click()
+    cy.get('[data-testid="notif-group-result"]').click()
+    cy.get('[data-testid="notif-result-groups"]').should('contain', '成功通知')
+      .and('contain', '失败通知')
+      .and('contain', '重试发送')
+
+    cy.get('[data-testid="notif-quick-recent-days"]').click()
+    cy.get('[data-testid="notif-active-filters"]').should('contain', '最近日期范围')
+    cy.get('@getNotifications.all').should('have.length.greaterThan', 1)
+
+    cy.get('[data-testid="notif-search"]').clear().type('Webhook')
+    cy.get('[data-testid="notif-highlight"]').should('contain', 'Webhook')
+    cy.get('[data-testid="notif-highlight-match"]').should('contain', 'Webhook')
+
+    cy.get('[data-testid="notif-view-table"]').click()
+    cy.get('[data-testid="notif-page-size"]').click()
+    cy.contains('.el-select-dropdown__item', '20 / 页').click()
+    cy.reload()
+    cy.wait('@getNotifications')
+    cy.window().then((win) => {
+      cy.stub(win.navigator.clipboard, 'writeText').as('writeClipboardAfterReload')
+    })
+    cy.get('[data-testid="notif-list"]').should('be.visible')
+    cy.get('[data-testid="notif-page-size-note"]').should('contain', '每页 20 条')
+
+    cy.get('[data-testid="notif-reset-filters"]').click()
+    cy.wait('@getNotifications')
+    cy.get('[data-testid="notif-view-cards"]').click()
+    cy.get('[data-testid="notif-card-1"]').click({ force: true })
+    cy.get('[data-testid="notif-detail-dialog"]').should('be.visible')
+    cy.get('[data-testid="notif-copy-title"]').click()
+    cy.get('@writeClipboardAfterReload').should('have.been.calledWith', '风控熔断')
+    cy.get('[data-testid="notif-detail-next"]').click()
+    cy.get('[data-testid="notif-detail-meta-extra"]').should('contain', '#2')
+    cy.get('[data-testid="notif-detail-prev"]').click()
+    cy.get('[data-testid="notif-detail-meta-extra"]').should('contain', '#1')
+  })
 })

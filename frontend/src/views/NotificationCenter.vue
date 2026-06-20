@@ -35,6 +35,10 @@
         <el-select v-model="symbolFilter" placeholder="当前页标的" clearable style="width: 140px" data-testid="notif-symbol-filter">
           <el-option v-for="symbol in symbolOptions" :key="symbol" :label="symbol" :value="symbol" />
         </el-select>
+        <el-select v-model="sourceFilter" placeholder="推断类别" clearable style="width: 130px" data-testid="notif-category-filter">
+          <el-option label="全部类别" value="" />
+          <el-option v-for="source in sourceOptions" :key="source" :label="source" :value="source" />
+        </el-select>
         <el-select v-model="pageSize" style="width: 110px" data-testid="notif-page-size" @change="handlePageSizeChange">
           <el-option label="10 / 页" :value="10" />
           <el-option label="20 / 页" :value="20" />
@@ -51,8 +55,15 @@
           <el-button :type="quickFilter === 'warning' ? 'primary' : ''" data-testid="notif-filter-warning" @click="setQuickFilter('warning')">WARNING</el-button>
           <el-button :type="quickFilter === 'info' ? 'primary' : ''" data-testid="notif-filter-info" @click="setQuickFilter('info')">INFO</el-button>
         </el-button-group>
+        <el-button :type="unreadOnly ? 'primary' : ''" data-testid="notif-unread-only" @click="unreadOnly = !unreadOnly">仅未读</el-button>
+        <el-button-group>
+          <el-button :type="groupMode === 'day' ? 'primary' : ''" data-testid="notif-group-day" @click="groupMode = 'day'">按日期</el-button>
+          <el-button :type="groupMode === 'result' ? 'primary' : ''" data-testid="notif-group-result" @click="groupMode = 'result'">按结果</el-button>
+        </el-button-group>
+        <el-button data-testid="notif-quick-recent-days" @click="setQuickRange('recent-days')">最近日期范围</el-button>
         <el-button :loading="exportingCsv" data-testid="notif-export-csv" @click="handleExport('csv')">导出 CSV</el-button>
         <el-button :loading="exportingJson" data-testid="notif-export-json" @click="handleExport('json')">导出 JSON</el-button>
+        <el-button data-testid="notif-copy-page" @click="copyCurrentPage">复制当前页</el-button>
         <el-button data-testid="notif-reset-filters" @click="resetFilters">重置筛选</el-button>
         <el-button-group>
           <el-button :type="viewMode === 'cards' ? 'primary' : ''" data-testid="notif-view-cards" @click="viewMode = 'cards'">卡片</el-button>
@@ -71,12 +82,17 @@
         <el-tag type="success">成功 {{ summary.success }}</el-tag>
         <el-tag type="danger">失败 {{ summary.failure }}</el-tag>
         <el-tag type="success" data-testid="notif-success-rate">成功率 {{ successRatioPct }}%</el-tag>
+        <el-tag type="danger" data-testid="notif-error-rate">失败率 {{ failureRatioPct }}%</el-tag>
         <el-tag type="danger">CRITICAL {{ summary.critical }}</el-tag>
         <el-tag type="warning">WARNING {{ summary.warning }}</el-tag>
         <el-tag type="info">INFO {{ summary.info }}</el-tag>
         <el-tag type="info" data-testid="notif-time-span">{{ timeSpanLabel }}</el-tag>
         <el-tag type="info" data-testid="notif-page-size-note">每页 {{ pageSize }} 条</el-tag>
       </el-space>
+    </div>
+
+    <div v-if="searchText.trim()" class="notif-highlight" data-testid="notif-highlight">
+      搜索词：<mark data-testid="notif-highlight-match">{{ searchText.trim() }}</mark>
     </div>
 
     <div class="notif-active-filters" data-testid="notif-active-filters">
@@ -125,6 +141,43 @@
       <el-empty description="没有匹配的通知" />
     </div>
 
+    <div v-else-if="viewMode === 'cards' && groupMode === 'result'" class="notif-result-groups" data-testid="notif-result-groups">
+      <div v-for="group in resultGroups" :key="group.label" class="day-group">
+        <div class="day-group-title">{{ group.label }}</div>
+        <el-space direction="vertical" fill :size="6">
+          <div
+            v-for="item in group.items"
+            :key="item.id"
+            :data-testid="`notif-card-${item.id}`"
+            class="day-item-wrapper"
+            @click="openDetail(item)"
+          >
+            <el-card shadow="never" class="day-item">
+              <div class="day-item-main">
+                <span class="day-item-time">{{ formatDateTime(item.created_at) }}</span>
+                <span v-if="isItemUnread(item)" class="unread-dot" />
+                <el-tag size="small" :type="severityType(item.severity)">{{ item.severity }}</el-tag>
+                <el-tag size="small" :type="item.success ? 'success' : 'danger'">{{ item.success ? '成功' : '失败' }}</el-tag>
+                <el-tag size="small" type="info">推断 {{ sourceLabel(item) }}</el-tag>
+              </div>
+              <div class="day-item-title"><template v-for="(part, idx) in highlightParts(item.title)" :key="idx"><mark v-if="part.hit" data-testid="notif-highlight-match">{{ part.text }}</mark><span v-else>{{ part.text }}</span></template></div>
+              <div class="day-item-content"><template v-for="(part, idx) in highlightParts(item.content)" :key="idx"><mark v-if="part.hit" data-testid="notif-highlight-match">{{ part.text }}</mark><span v-else>{{ part.text }}</span></template></div>
+              <div v-if="item.error" class="day-item-error">{{ item.error }}</div>
+              <div v-if="!item.success" style="margin-top: 8px">
+                <el-button
+                  size="small"
+                  text
+                  :loading="retryingMap[item.id]"
+                  data-testid="notif-retry-btn"
+                  @click.stop="handleRetry(item)"
+                >重试发送</el-button>
+              </div>
+            </el-card>
+          </div>
+        </el-space>
+      </div>
+    </div>
+
     <div v-else-if="viewMode === 'cards'" class="notif-day-groups" data-testid="notif-day-groups">
       <div v-for="group in dayGroups" :key="group.day" class="day-group">
         <div class="day-group-title">{{ group.day }}</div>
@@ -142,10 +195,11 @@
                 <span v-if="isItemUnread(item)" class="unread-dot" />
                 <el-tag size="small" :type="severityType(item.severity)">{{ item.severity }}</el-tag>
                 <el-tag size="small" :type="item.success ? 'success' : 'danger'">{{ item.success ? '成功' : '失败' }}</el-tag>
+                <el-tag size="small" type="info">推断 {{ sourceLabel(item) }}</el-tag>
               </div>
-              <div class="day-item-title">{{ item.title }}</div>
-              <div class="day-item-content">{{ item.content }}</div>
-              <div v-if="item.error" class="day-item-error">{{ item.error }}</div>
+              <div class="day-item-title"><template v-for="(part, idx) in highlightParts(item.title)" :key="idx"><mark v-if="part.hit" data-testid="notif-highlight-match">{{ part.text }}</mark><span v-else>{{ part.text }}</span></template></div>
+              <div class="day-item-content"><template v-for="(part, idx) in highlightParts(item.content)" :key="idx"><mark v-if="part.hit" data-testid="notif-highlight-match">{{ part.text }}</mark><span v-else>{{ part.text }}</span></template></div>
+              <div v-if="item.error" class="day-item-error"><template v-for="(part, idx) in highlightParts(item.error)" :key="idx"><mark v-if="part.hit" data-testid="notif-highlight-match">{{ part.text }}</mark><span v-else>{{ part.text }}</span></template></div>
               <div v-if="!item.success" style="margin-top: 8px">
                 <el-button
                   size="small"
@@ -224,6 +278,7 @@
         <div class="detail-meta">
           <el-tag size="small" :type="severityType(detailDialog.item.severity)">{{ detailDialog.item.severity }}</el-tag>
           <el-tag size="small" :type="detailDialog.item.success ? 'success' : 'danger'">{{ detailDialog.item.success ? '成功' : '失败' }}</el-tag>
+          <el-tag size="small" type="info">推断 {{ sourceLabel(detailDialog.item) }}</el-tag>
           <span>{{ formatDateTime(detailDialog.item.created_at) }}</span>
         </div>
         <div class="detail-meta-extra" data-testid="notif-detail-meta-extra">
@@ -231,7 +286,12 @@
         </div>
         <h4 class="detail-title">{{ detailDialog.item.title }}</h4>
         <p class="detail-content">{{ detailDialog.item.content }}</p>
+        <el-button size="small" text data-testid="notif-copy-title" @click="copyContent(detailDialog.item.title)">复制标题</el-button>
         <el-button size="small" text data-testid="notif-copy-content" @click="copyContent(detailDialog.item.content)">复制内容</el-button>
+        <div class="detail-nav">
+          <el-button size="small" data-testid="notif-detail-prev" :disabled="detailIndex <= 0" @click="moveDetail(-1)">上一条</el-button>
+          <el-button size="small" data-testid="notif-detail-next" :disabled="detailIndex >= displayedItems.length - 1" @click="moveDetail(1)">下一条</el-button>
+        </div>
         <div v-if="detailDialog.item.error" class="detail-error">
           <div class="detail-error-header">
             <span>错误信息</span>
@@ -277,9 +337,13 @@ const successFilter = ref<string>('')
 const dateRange = ref<string[] | null>(null)
 const searchText = ref('')
 const symbolFilter = ref('')
+const sourceFilter = ref('')
+const unreadOnly = ref(false)
 const quickFilter = ref<'all' | 'failed' | 'critical' | 'warning' | 'info'>('all')
 const viewMode = ref<'cards' | 'table' | 'timeline'>('cards')
+const groupMode = ref<'day' | 'result'>('day')
 const sortOrder = ref<'newest' | 'oldest'>('newest')
+const quickRangeLabel = ref('')
 const detailDialog = reactive({
   visible: false,
   item: null as NotificationLogOut | null,
@@ -288,6 +352,30 @@ let searchDebounceTimer: number | undefined
 let loadRequestId = 0
 
 const retryingMap = reactive<Record<number, boolean>>({})
+const PREF_KEY = 'auto_trade_notification_center_prefs_v2'
+
+function sourceLabel(item: NotificationLogOut): string {
+  const text = `${item.title} ${item.content} ${item.error || ''}`.toLowerCase()
+  if (text.includes('webhook')) return 'Webhook'
+  if (text.includes('风控') || text.includes('risk') || text.includes('kill switch')) return 'Risk'
+  if (text.includes('日报') || text.includes('report')) return 'Report'
+  if (text.includes('价格') || text.includes('alert')) return 'Alert'
+  return 'System'
+}
+
+function highlightParts(text: string): Array<{ text: string; hit: boolean }> {
+  const query = searchText.value.trim()
+  if (!query) return [{ text, hit: false }]
+  const lowerText = text.toLowerCase()
+  const lowerQuery = query.toLowerCase()
+  const idx = lowerText.indexOf(lowerQuery)
+  if (idx === -1) return [{ text, hit: false }]
+  return [
+    { text: text.slice(0, idx), hit: false },
+    { text: text.slice(idx, idx + query.length), hit: true },
+    { text: text.slice(idx + query.length), hit: false },
+  ].filter((part) => part.text.length > 0)
+}
 
 function matchesSymbol(item: NotificationLogOut, symbol: string): boolean {
   const haystack = `${item.title} ${item.content} ${item.error || ''}`.toUpperCase()
@@ -307,10 +395,19 @@ const symbolOptions = computed(() => {
   return Array.from(symbols).sort((a, b) => a.localeCompare(b))
 })
 
+const sourceOptions = computed(() => {
+  const sources = new Set<string>()
+  for (const item of items.value) sources.add(sourceLabel(item))
+  return Array.from(sources).sort((a, b) => a.localeCompare(b))
+})
+
 const displayedItems = computed(() => {
-  const filtered = symbolFilter.value
-    ? items.value.filter((item) => matchesSymbol(item, symbolFilter.value))
-    : [...items.value]
+  const filtered = items.value.filter((item) => {
+    if (symbolFilter.value && !matchesSymbol(item, symbolFilter.value)) return false
+    if (sourceFilter.value && sourceLabel(item) !== sourceFilter.value) return false
+    if (unreadOnly.value && !isItemUnread(item)) return false
+    return true
+  })
   return filtered.sort((a, b) => {
     const delta = new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
     return sortOrder.value === 'newest' ? delta : -delta
@@ -352,6 +449,12 @@ const successRatioPct = computed(() => {
   return Math.round((summary.value.success / total) * 100)
 })
 
+const failureRatioPct = computed(() => {
+  const total = summary.value.success + summary.value.failure
+  if (total === 0) return 0
+  return Math.round((summary.value.failure / total) * 100)
+})
+
 const dayGroups = computed(() => {
   const groups = new Map<string, NotificationLogOut[]>()
   for (const item of displayedItems.value) {
@@ -361,6 +464,20 @@ const dayGroups = computed(() => {
     else groups.set(day, [item])
   }
   return Array.from(groups.entries()).map(([day, groupItems]) => ({ day, items: groupItems }))
+})
+
+const resultGroups = computed(() => {
+  const successItems = displayedItems.value.filter((item) => item.success)
+  const failedItems = displayedItems.value.filter((item) => !item.success)
+  return [
+    { label: `成功通知 ${successItems.length}`, items: successItems },
+    { label: `失败通知 ${failedItems.length}`, items: failedItems },
+  ].filter((group) => group.items.length > 0)
+})
+
+const detailIndex = computed(() => {
+  if (!detailDialog.item) return -1
+  return displayedItems.value.findIndex((item) => item.id === detailDialog.item?.id)
 })
 
 const timeSpanLabel = computed(() => {
@@ -379,8 +496,32 @@ const activeFilterLabels = computed(() => {
   if (dateRange.value?.[0] || dateRange.value?.[1]) labels.push('日期范围')
   if (searchText.value.trim()) labels.push(`搜索 ${searchText.value.trim()}`)
   if (symbolFilter.value) labels.push(`当前页标的 ${symbolFilter.value}`)
+  if (sourceFilter.value) labels.push(`推断类别 ${sourceFilter.value}`)
+  if (unreadOnly.value) labels.push('仅未读')
+  if (quickRangeLabel.value) labels.push(quickRangeLabel.value)
   return labels
 })
+
+function savePrefs() {
+  try {
+    localStorage.setItem(PREF_KEY, JSON.stringify({ viewMode: viewMode.value, pageSize: pageSize.value, sortOrder: sortOrder.value }))
+  } catch {
+    // Preference persistence is non-critical; keep interaction working when storage is unavailable.
+  }
+}
+
+function loadPrefs() {
+  try {
+    const raw = localStorage.getItem(PREF_KEY)
+    if (!raw) return
+    const prefs = JSON.parse(raw) as { viewMode?: string; pageSize?: number; sortOrder?: string }
+    if (prefs.viewMode === 'cards' || prefs.viewMode === 'table' || prefs.viewMode === 'timeline') viewMode.value = prefs.viewMode
+    if (prefs.pageSize === 10 || prefs.pageSize === 20 || prefs.pageSize === 50) pageSize.value = prefs.pageSize
+    if (prefs.sortOrder === 'newest' || prefs.sortOrder === 'oldest') sortOrder.value = prefs.sortOrder
+  } catch {
+    localStorage.removeItem(PREF_KEY)
+  }
+}
 
 async function load() {
   const requestId = ++loadRequestId
@@ -424,10 +565,22 @@ function resetFilters() {
   dateRange.value = null
   searchText.value = ''
   symbolFilter.value = ''
+  sourceFilter.value = ''
+  unreadOnly.value = false
+  quickRangeLabel.value = ''
+  groupMode.value = 'day'
   quickFilter.value = 'all'
   page.value = 1
   window.clearTimeout(searchDebounceTimer)
   load()
+}
+
+function setQuickRange(range: 'recent-days') {
+  const now = new Date()
+  const from = new Date(now.getTime() - 24 * 60 * 60 * 1000)
+  dateRange.value = [from.toISOString().slice(0, 10), now.toISOString().slice(0, 10)]
+  quickRangeLabel.value = range === 'recent-days' ? '最近日期范围' : ''
+  page.value = 1
 }
 
 function setQuickFilter(value: typeof quickFilter.value) {
@@ -496,6 +649,19 @@ async function handleExport(format: 'csv' | 'json') {
 function openDetail(item: NotificationLogOut) {
   detailDialog.item = item
   detailDialog.visible = true
+}
+
+function moveDetail(delta: number) {
+  const next = detailIndex.value + delta
+  const item = displayedItems.value[next]
+  if (item) detailDialog.item = item
+}
+
+async function copyCurrentPage() {
+  const text = displayedItems.value.map((item) => {
+    return `#${item.id} [${item.severity}] ${item.success ? '成功' : '失败'} ${item.title} — ${item.content}`
+  }).join('\n')
+  await copyContent(text)
 }
 
 async function copyError(text: string) {
@@ -578,8 +744,12 @@ function stopPoll() {
 watch(severityFilter, () => { quickFilter.value = 'all'; page.value = 1; load() })
 watch(successFilter, () => { quickFilter.value = 'all'; page.value = 1; load() })
 watch(dateRange, () => { page.value = 1; load() }, { deep: true })
+watch(sourceFilter, () => { page.value = 1 })
+watch(unreadOnly, () => { page.value = 1 })
 watch(searchText, debouncedLoad)
+watch([viewMode, pageSize, sortOrder], savePrefs)
 onMounted(() => {
+  loadPrefs()
   load()
   startPoll()
 })
