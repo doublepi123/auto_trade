@@ -32,6 +32,18 @@
           style="width: 220px"
           data-testid="notif-search"
         />
+        <el-select v-model="symbolFilter" placeholder="当前页标的" clearable style="width: 140px" data-testid="notif-symbol-filter">
+          <el-option v-for="symbol in symbolOptions" :key="symbol" :label="symbol" :value="symbol" />
+        </el-select>
+        <el-select v-model="pageSize" style="width: 110px" data-testid="notif-page-size" @change="handlePageSizeChange">
+          <el-option label="10 / 页" :value="10" />
+          <el-option label="20 / 页" :value="20" />
+          <el-option label="50 / 页" :value="50" />
+        </el-select>
+        <el-select v-model="sortOrder" style="width: 120px" data-testid="notif-sort-order">
+          <el-option label="当前页最新优先" value="newest" />
+          <el-option label="当前页最早优先" value="oldest" />
+        </el-select>
         <el-button-group>
           <el-button :type="quickFilter === 'all' ? 'primary' : ''" data-testid="notif-filter-all" @click="setQuickFilter('all')">全部</el-button>
           <el-button :type="quickFilter === 'failed' ? 'primary' : ''" data-testid="notif-filter-failed" @click="setQuickFilter('failed')">失败</el-button>
@@ -41,6 +53,7 @@
         </el-button-group>
         <el-button :loading="exportingCsv" data-testid="notif-export-csv" @click="handleExport('csv')">导出 CSV</el-button>
         <el-button :loading="exportingJson" data-testid="notif-export-json" @click="handleExport('json')">导出 JSON</el-button>
+        <el-button data-testid="notif-reset-filters" @click="resetFilters">重置筛选</el-button>
         <el-button-group>
           <el-button :type="viewMode === 'cards' ? 'primary' : ''" data-testid="notif-view-cards" @click="viewMode = 'cards'">卡片</el-button>
           <el-button :type="viewMode === 'table' ? 'primary' : ''" data-testid="notif-view-table" @click="viewMode = 'table'">表格</el-button>
@@ -53,17 +66,36 @@
 
     <div class="notif-summary" data-testid="notif-summary">
       <el-space wrap :size="8">
-        <el-tag type="info">当前页 {{ items.length }}/{{ total }}</el-tag>
+        <el-tag type="info">当前页 {{ displayedItems.length }}/{{ total }}</el-tag>
         <el-tag v-if="unreadCount > 0" type="danger" data-testid="notif-unread-count">未读 {{ unreadCount }}</el-tag>
         <el-tag type="success">成功 {{ summary.success }}</el-tag>
         <el-tag type="danger">失败 {{ summary.failure }}</el-tag>
+        <el-tag type="success" data-testid="notif-success-rate">成功率 {{ successRatioPct }}%</el-tag>
         <el-tag type="danger">CRITICAL {{ summary.critical }}</el-tag>
         <el-tag type="warning">WARNING {{ summary.warning }}</el-tag>
         <el-tag type="info">INFO {{ summary.info }}</el-tag>
+        <el-tag type="info" data-testid="notif-time-span">{{ timeSpanLabel }}</el-tag>
+        <el-tag type="info" data-testid="notif-page-size-note">每页 {{ pageSize }} 条</el-tag>
       </el-space>
     </div>
 
-    <div v-if="items.length > 0" class="notif-distribution" data-testid="notif-distribution">
+    <div class="notif-active-filters" data-testid="notif-active-filters">
+      <el-space wrap :size="6">
+        <el-tag v-if="activeFilterLabels.length === 0" type="info">无筛选</el-tag>
+        <el-tag v-for="label in activeFilterLabels" :key="label" type="warning">{{ label }}</el-tag>
+      </el-space>
+    </div>
+
+    <el-alert
+      v-if="successFilter === 'false'"
+      title="当前仅查看失败通知，可打开详情复制错误或重试发送。"
+      type="warning"
+      show-icon
+      :closable="false"
+      data-testid="notif-failure-note"
+    />
+
+    <div v-if="displayedItems.length > 0" class="notif-distribution" data-testid="notif-distribution">
       <div class="dist-block">
         <div class="dist-label">严重度分布（当前页）</div>
         <div class="dist-bars">
@@ -89,7 +121,7 @@
       </div>
     </div>
 
-    <div v-if="items.length === 0" class="notif-empty">
+    <div v-if="displayedItems.length === 0" class="notif-empty">
       <el-empty description="没有匹配的通知" />
     </div>
 
@@ -129,7 +161,7 @@
       </div>
     </div>
 
-    <el-table v-else-if="viewMode === 'table'" :data="items" size="small" class="responsive-table" v-loading="loading" data-testid="notif-list" @row-click="openDetail">
+    <el-table v-else-if="viewMode === 'table'" :data="displayedItems" size="small" class="responsive-table" v-loading="loading" data-testid="notif-list" @row-click="openDetail">
       <el-table-column prop="created_at" label="时间" min-width="170">
         <template #default="{ row }">
           <span v-if="isItemUnread(row)" class="unread-dot" />
@@ -154,7 +186,7 @@
     <div v-else-if="viewMode === 'timeline'" class="notif-timeline" data-testid="notif-timeline">
       <el-timeline>
         <el-timeline-item
-          v-for="item in items"
+          v-for="item in displayedItems"
           :key="item.id"
           :type="timelineType(item.severity)"
           :timestamp="formatDateTime(item.created_at)"
@@ -194,8 +226,12 @@
           <el-tag size="small" :type="detailDialog.item.success ? 'success' : 'danger'">{{ detailDialog.item.success ? '成功' : '失败' }}</el-tag>
           <span>{{ formatDateTime(detailDialog.item.created_at) }}</span>
         </div>
+        <div class="detail-meta-extra" data-testid="notif-detail-meta-extra">
+          #{{ detailDialog.item.id }} · {{ detailDialog.item.title }} · {{ detailDialog.item.severity }}
+        </div>
         <h4 class="detail-title">{{ detailDialog.item.title }}</h4>
         <p class="detail-content">{{ detailDialog.item.content }}</p>
+        <el-button size="small" text data-testid="notif-copy-content" @click="copyContent(detailDialog.item.content)">复制内容</el-button>
         <div v-if="detailDialog.item.error" class="detail-error">
           <div class="detail-error-header">
             <span>错误信息</span>
@@ -240,15 +276,46 @@ const severityFilter = ref<string>('')
 const successFilter = ref<string>('')
 const dateRange = ref<string[] | null>(null)
 const searchText = ref('')
+const symbolFilter = ref('')
 const quickFilter = ref<'all' | 'failed' | 'critical' | 'warning' | 'info'>('all')
 const viewMode = ref<'cards' | 'table' | 'timeline'>('cards')
+const sortOrder = ref<'newest' | 'oldest'>('newest')
 const detailDialog = reactive({
   visible: false,
   item: null as NotificationLogOut | null,
 })
 let searchDebounceTimer: number | undefined
+let loadRequestId = 0
 
 const retryingMap = reactive<Record<number, boolean>>({})
+
+function matchesSymbol(item: NotificationLogOut, symbol: string): boolean {
+  const haystack = `${item.title} ${item.content} ${item.error || ''}`.toUpperCase()
+  return haystack.includes(symbol.toUpperCase())
+}
+
+function extractSymbols(item: NotificationLogOut): string[] {
+  const text = `${item.title} ${item.content} ${item.error || ''}`
+  return Array.from(text.matchAll(/\b[A-Z0-9]{1,8}\.(?:US|HK|SH|SZ|SG)\b/g)).map((match) => match[0])
+}
+
+const symbolOptions = computed(() => {
+  const symbols = new Set<string>()
+  for (const item of items.value) {
+    for (const symbol of extractSymbols(item)) symbols.add(symbol)
+  }
+  return Array.from(symbols).sort((a, b) => a.localeCompare(b))
+})
+
+const displayedItems = computed(() => {
+  const filtered = symbolFilter.value
+    ? items.value.filter((item) => matchesSymbol(item, symbolFilter.value))
+    : [...items.value]
+  return filtered.sort((a, b) => {
+    const delta = new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+    return sortOrder.value === 'newest' ? delta : -delta
+  })
+})
 
 const summary = computed(() => {
   let success = 0
@@ -256,7 +323,7 @@ const summary = computed(() => {
   let critical = 0
   let warning = 0
   let info = 0
-  for (const item of items.value) {
+  for (const item of displayedItems.value) {
     if (item.success) success += 1
     else failure += 1
     if (item.severity === 'CRITICAL') critical += 1
@@ -287,7 +354,7 @@ const successRatioPct = computed(() => {
 
 const dayGroups = computed(() => {
   const groups = new Map<string, NotificationLogOut[]>()
-  for (const item of items.value) {
+  for (const item of displayedItems.value) {
     const day = new Date(item.created_at).toLocaleDateString([], { year: 'numeric', month: '2-digit', day: '2-digit' })
     const list = groups.get(day)
     if (list) list.push(item)
@@ -296,7 +363,27 @@ const dayGroups = computed(() => {
   return Array.from(groups.entries()).map(([day, groupItems]) => ({ day, items: groupItems }))
 })
 
+const timeSpanLabel = computed(() => {
+  if (displayedItems.value.length === 0) return '时间范围 --'
+  const times = displayedItems.value.map((item) => new Date(item.created_at).getTime())
+  const start = new Date(Math.min(...times))
+  const end = new Date(Math.max(...times))
+  return `时间 ${formatShortDate(start)} - ${formatShortDate(end)}`
+})
+
+const activeFilterLabels = computed(() => {
+  const labels: string[] = []
+  if (severityFilter.value) labels.push(`级别 ${severityFilter.value}`)
+  if (successFilter.value === 'true') labels.push('成功')
+  if (successFilter.value === 'false') labels.push('失败')
+  if (dateRange.value?.[0] || dateRange.value?.[1]) labels.push('日期范围')
+  if (searchText.value.trim()) labels.push(`搜索 ${searchText.value.trim()}`)
+  if (symbolFilter.value) labels.push(`当前页标的 ${symbolFilter.value}`)
+  return labels
+})
+
 async function load() {
+  const requestId = ++loadRequestId
   loading.value = true
   try {
     const params: Record<string, unknown> = {
@@ -310,17 +397,36 @@ async function load() {
     if (searchText.value.trim()) params.q = searchText.value.trim()
 
     const data = await getNotifications(params)
+    if (requestId !== loadRequestId) return
     items.value = data.items
     total.value = data.total
   } catch (e) {
+    if (requestId !== loadRequestId) return
     ElMessage.error(resolveErrorMessage(e, '加载通知失败'))
   } finally {
-    loading.value = false
+    if (requestId === loadRequestId) loading.value = false
   }
 }
 
 function handlePage(next: number) {
   page.value = next
+  load()
+}
+
+function handlePageSizeChange() {
+  page.value = 1
+  load()
+}
+
+function resetFilters() {
+  severityFilter.value = ''
+  successFilter.value = ''
+  dateRange.value = null
+  searchText.value = ''
+  symbolFilter.value = ''
+  quickFilter.value = 'all'
+  page.value = 1
+  window.clearTimeout(searchDebounceTimer)
   load()
 }
 
@@ -401,6 +507,15 @@ async function copyError(text: string) {
   }
 }
 
+async function copyContent(text: string) {
+  try {
+    await navigator.clipboard.writeText(text)
+    ElMessage.success('已复制通知内容')
+  } catch {
+    ElMessage.error('复制失败')
+  }
+}
+
 async function handleRetry(item: NotificationLogOut) {
   if (retryingMap[item.id]) return
   retryingMap[item.id] = true
@@ -439,6 +554,10 @@ function formatDateTime(v: string): string {
   return new Date(v).toLocaleString([], {
     month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit',
   })
+}
+
+function formatShortDate(v: Date): string {
+  return `${String(v.getMonth() + 1).padStart(2, '0')}/${String(v.getDate()).padStart(2, '0')}`
 }
 
 function startPoll() {

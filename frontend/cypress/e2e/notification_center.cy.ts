@@ -1,5 +1,8 @@
 describe('Notification Center (P79-P83 Observability)', () => {
+  let requestedPageSizes: string[] = []
+
   beforeEach(() => {
+    requestedPageSizes = []
     cy.stubApi()
     cy.intercept('GET', '/api/notifications?*', (req) => {
       let items = [
@@ -9,6 +12,7 @@ describe('Notification Center (P79-P83 Observability)', () => {
         { id: 4, severity: 'WARNING', success: true, title: '价格提醒', content: 'TSLA.US touched range', error: '', created_at: '2026-06-16T21:00:00Z' },
       ]
       const params = req.query
+      requestedPageSizes.push(String(params.page_size || ''))
       if (params.severity) {
         items = items.filter((i) => i.severity === params.severity)
       }
@@ -65,5 +69,52 @@ describe('Notification Center (P79-P83 Observability)', () => {
     cy.contains('button', 'CRITICAL').click()
     cy.get('[data-testid="notif-list"]').should('contain', '风控熔断')
       .and('not.contain', '日报')
+  })
+
+  it('supports page-level triage helpers', () => {
+    cy.get('[data-testid="notif-success-rate"]').should('contain', '成功率 75%')
+    cy.get('[data-testid="notif-time-span"]').should('contain', '时间 ')
+      .and('contain', ' - ')
+
+    cy.get('[data-testid="notif-view-table"]').click()
+    cy.get('[data-testid="notif-filter-failed"]').click()
+    cy.get('[data-testid="notif-active-filters"]').should('contain', '失败')
+    cy.get('[data-testid="notif-failure-note"]').should('contain', '当前仅查看失败通知')
+
+    cy.get('[data-testid="notif-reset-filters"]').click()
+    cy.get('[data-testid="notif-active-filters"]').should('contain', '无筛选')
+    cy.get('[data-testid="notif-list"]').should('contain', '风控熔断')
+      .and('contain', '价格提醒')
+
+    cy.get('[data-testid="notif-symbol-filter"]').click()
+    cy.contains('.el-select-dropdown__item', 'TSLA.US').click()
+    cy.get('[data-testid="notif-list"]').should('contain', '价格提醒')
+      .and('not.contain', 'AAPL.US alert')
+    cy.get('[data-testid="notif-active-filters"]').should('contain', '标的 TSLA.US')
+
+    cy.get('[data-testid="notif-page-size"]').click()
+    cy.contains('.el-select-dropdown__item', '10 / 页').click()
+    cy.wrap(null).should(() => {
+      expect(requestedPageSizes).to.include('10')
+    })
+    cy.get('[data-testid="notif-page-size-note"]').should('contain', '每页 10 条')
+
+    cy.get('[data-testid="notif-reset-filters"]').click()
+    cy.get('[data-testid="notif-sort-order"]').click()
+    cy.contains('.el-select-dropdown__item', '最早优先').click()
+    cy.get('[data-testid="notif-list"] tbody tr').first().should('contain', '价格提醒')
+    cy.get('[data-testid="notif-sort-order"]').click()
+    cy.contains('.el-select-dropdown__item', '最新优先').click()
+    cy.get('[data-testid="notif-list"] tbody tr').first().should('contain', '风控熔断')
+
+    cy.get('[data-testid="notif-view-cards"]').click()
+    cy.get('[data-testid="notif-card-1"]').click({ force: true })
+    cy.get('[data-testid="notif-detail-meta-extra"]').should('contain', '#1')
+      .and('contain', '风控熔断')
+    cy.window().then((win) => {
+      cy.stub(win.navigator.clipboard, 'writeText').as('writeClipboard')
+    })
+    cy.get('[data-testid="notif-copy-content"]').click()
+    cy.get('@writeClipboard').should('have.been.calledWith', 'kill switch triggered')
   })
 })
