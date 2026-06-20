@@ -16,6 +16,11 @@ describe('Decision Timeline Bookmarks JSON Import/Export', () => {
     cy.document().its('body').should('contain', '已导出 1 个书签')
   })
 
+  it('keeps the applied bookmark visually active', () => {
+    cy.get('.bookmark-tag').contains('种子书签').click()
+    cy.get('[data-testid="timeline-active-bookmark"]').should('be.visible')
+  })
+
   it('imports bookmarks from a JSON file and merges into the list', () => {
     const incoming = [
       { id: 'bm_new', label: '导入的书签', source: 'llm', event_types: [], skip_category: '', q: 'NVDA', created_at: 1718000000001 },

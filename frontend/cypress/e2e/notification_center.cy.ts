@@ -69,6 +69,7 @@ describe('Notification Center (P79-P83 Observability)', () => {
     cy.contains('button', 'CRITICAL').click()
     cy.get('[data-testid="notif-list"]').should('contain', '风控熔断')
       .and('not.contain', '日报')
+    cy.get('[data-testid="notif-filter-critical"]').should('have.attr', 'aria-pressed', 'true')
   })
 
   it('supports page-level triage helpers', () => {

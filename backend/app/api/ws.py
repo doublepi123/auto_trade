@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import secrets
+from collections.abc import Mapping
 from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -113,6 +114,10 @@ async def _authenticate_websocket(ws: WebSocket, query_api_key: str) -> bool:
             _auth_disabled_warned = True
         return True
     if _api_key_matches(query_api_key):
+        return True
+    headers = getattr(ws, "headers", {})
+    header_api_key = headers.get("x-api-key", "") if isinstance(headers, Mapping) else ""
+    if _api_key_matches(header_api_key):
         return True
     try:
         raw = await asyncio.wait_for(ws.receive_text(), timeout=_WS_AUTH_TIMEOUT_SECONDS)

@@ -4,5 +4,13 @@ dist
 .vue-global-types
 cypress/screenshots
 cypress/videos
+cypress/downloads
 npm-debug.log*
 *.log
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+runtime-config.js

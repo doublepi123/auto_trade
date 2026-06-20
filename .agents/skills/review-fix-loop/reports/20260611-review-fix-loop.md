@@ -89,9 +89,9 @@
 ## 最终建议（需手动关注）
 
 1. **多标的仓位同步**: `_sync_engine_state_with_positions()` 仍只同步主 engine；secondary watchlist 引擎在重启/手动交易后可能漂移。需单独迭代扩展为多标的循环同步。
-2. **Docker Hub 预构建镜像**: CI 推送的 `doublepi/auto-trade-frontend:latest` 不会内置用户 API key。使用 `docker-compose.dockerhub.yaml` 且配置了 `AUTO_TRADE_API_KEY` 时，应改用 `docker compose up --build` 从源码构建前端，或自行 rebuild 并传入 `VITE_AUTO_TRADE_API_KEY` build-arg。
+2. **Docker Hub 预构建镜像**: 当前版本由 nginx 在服务端注入 `X-API-Key`，不再需要也不应通过 `VITE_AUTO_TRADE_API_KEY` 把密钥写入前端 bundle。
 3. **WebSocket 鉴权方式**: 当前使用 `?api_key=` query param，可能被反向代理日志记录。若部署在不可信网络，可后续改为握手后首条 auth 消息或短期 ticket。
-4. **本地开发**: 若设置了 `AUTO_TRADE_API_KEY`，需在 `frontend/.env.local` 配置 `VITE_AUTO_TRADE_API_KEY` 相同值，否则 Dashboard 轮询/WS 会 401。
+4. **本地开发**: 若设置了 `AUTO_TRADE_API_KEY`，从同一 shell 启动 Vite，代理会在服务端注入 `X-API-Key`，浏览器端不需要密钥。
 
 ## 验证
 

@@ -319,13 +319,15 @@ async def _llm_analysis_tick() -> None:
                     getattr(params, "short_selling", config.short_selling),
                 )
 
+                target_buy_low = getattr(params, "buy_low", config.buy_low)
+                target_sell_high = getattr(params, "sell_high", config.sell_high)
                 result = await asyncio.to_thread(
                     advisor.analyze,
                     symbol=symbol,
                     market=market,
                     current_price=current_price,
-                    current_buy_low=config.buy_low,
-                    current_sell_high=config.sell_high,
+                    current_buy_low=target_buy_low,
+                    current_sell_high=target_sell_high,
                     short_selling=getattr(params, "short_selling", config.short_selling),
                     current_position=str(position_context["side"]),
                     recent_trades=[],

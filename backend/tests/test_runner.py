@@ -268,6 +268,54 @@ class TestAppRunner:
         assert secondary.engine.last_price == 199.5
         assert loaded == [("AAPL.US", "AAPL.US")]
 
+    def test_sync_symbol_runtimes_refreshes_secondary_strategy_params(self, monkeypatch) -> None:
+        runner = AppRunner()
+        runner.engine.params = StrategyParams(
+            symbol="NVDA.US",
+            market="US",
+            buy_low=100.0,
+            sell_high=200.0,
+            short_selling=True,
+            min_profit_amount=5.0,
+            fee_rate_us=0.001,
+            fee_rate_hk=0.004,
+            min_repricing_pct=0.01,
+            llm_action_cooldown_seconds=120,
+        )
+
+        class FakeWatchlistService:
+            def __init__(self, db) -> None:
+                pass
+
+            def list_items(self):
+                return [SimpleNamespace(symbol="AAPL.US", market="HK")]
+
+        monkeypatch.setattr("app.runner.WatchlistService", FakeWatchlistService)
+
+        runner._sync_symbol_runtimes(object())
+
+        secondary = runner._symbol_runtimes["AAPL.US"]
+        assert secondary.market == "HK"
+        assert secondary.engine.params.market == "HK"
+        assert secondary.engine.params.buy_low == 100.0
+        assert secondary.engine.params.sell_high == 200.0
+        assert secondary.engine.params.short_selling is True
+        assert secondary.engine.params.min_profit_amount == 5.0
+        assert secondary.engine.params.fee_rate_us == 0.001
+        assert secondary.engine.params.fee_rate_hk == 0.004
+        assert secondary.engine.params.min_repricing_pct == 0.01
+        assert secondary.engine.params.llm_action_cooldown_seconds == 120
+
+    def test_remember_symbol_runtime_quote_does_not_create_unknown_runtime(self) -> None:
+        runner = AppRunner()
+
+        runner._remember_symbol_runtime_quote(
+            Quote(symbol="UNKNOWN.US", last_price=10.0, bid=9.9, ask=10.1, timestamp=""),
+            datetime.now(timezone.utc),
+        )
+
+        assert "UNKNOWN.US" not in runner._symbol_runtimes
+
     def _execute_sell(self, runner: AppRunner, symbol: str, quote: Quote):
         return runner._trade_svc._execute_sell(
             symbol,

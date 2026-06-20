@@ -79,6 +79,9 @@ def put_strategy(
             "llm_action_cooldown_seconds": data["llm_action_cooldown_seconds"] if "llm_action_cooldown_seconds" in data and data["llm_action_cooldown_seconds"] is not None else current.llm_action_cooldown_seconds,
             "trading_session_mode": data["trading_session_mode"] if "trading_session_mode" in data and data["trading_session_mode"] is not None else getattr(current, "trading_session_mode", "ANY"),
             "margin_safety_factor": data["margin_safety_factor"] if "margin_safety_factor" in data and data["margin_safety_factor"] is not None else getattr(current, "margin_safety_factor", None),
+            "report_schedule_enabled": data["report_schedule_enabled"] if "report_schedule_enabled" in data and data["report_schedule_enabled"] is not None else getattr(current, "report_schedule_enabled", False),
+            "report_schedule_interval_hours": data["report_schedule_interval_hours"] if "report_schedule_interval_hours" in data and data["report_schedule_interval_hours"] is not None else getattr(current, "report_schedule_interval_hours", 24),
+            "report_schedule_symbol": data["report_schedule_symbol"] if "report_schedule_symbol" in data and data["report_schedule_symbol"] is not None else getattr(current, "report_schedule_symbol", ""),
         }
         try:
             StrategyMergedSchema.model_validate(merged)

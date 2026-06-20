@@ -2,8 +2,8 @@
 #
 # `requirements.txt` uses `~=` to cap minor versions (prevents accidental
 # upgrades across major versions while allowing patch updates).
-# This lock file pins every transitive dependency to an exact version + hash,
-# matching the known-good environment that last passed `pytest 780+ passed`.
+# This lock file pins the direct/runtime + test dependencies used by the repo.
+# It is maintained manually and should stay aligned with requirements*.txt.
 #
 # How to regenerate (in an environment with pip + network access):
 #
@@ -16,7 +16,7 @@
 #
 # How to install from the lock file:
 #
-#   pip install --require-hashes -r requirements.lock.txt
+#   pip install -r requirements.lock.txt
 #
 # Last regenerated baseline: 2026-06-14 (P47 — known good for current main)
 #
@@ -39,5 +39,7 @@ cryptography==44.0.0
 apscheduler==3.11.0
 pytest==8.3.4
 pytest-asyncio==0.25.0
+pytest-cov==6.0.0
 basedpyright==1.31.4
 freezegun==1.5.1
+coverage==7.6.10

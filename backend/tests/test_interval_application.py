@@ -137,6 +137,25 @@ class TestIntervalApplicationService:
         assert config.buy_low == 199.75
         assert config.sell_high == 200.25
 
+    def test_apply_direct_rejects_non_finite_suggestion_values(self, service: IntervalApplicationService) -> None:
+        self._cleanup()
+        db = self._get_db()
+        self._create_config(db)
+
+        result = service.apply_direct_suggestion(
+            db,
+            current_price=200.0,
+            suggestion={
+                "suggested_buy_low": float("nan"),
+                "suggested_sell_high": 200.25,
+                "confidence_score": 0.85,
+            },
+        )
+
+        assert result["success"] is False
+        assert result["applied"] is False
+        assert "finite" in result["reason"].lower()
+
     def test_apply_long_sell_higher(self, service: IntervalApplicationService) -> None:
         self._cleanup()
         db = self._get_db()

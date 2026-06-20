@@ -5,7 +5,7 @@ services:
     volumes:
       - ./data:/app/data
     environment:
-      - AUTO_TRADE_ENV=${AUTO_TRADE_ENV:-dev}
+      - AUTO_TRADE_ENV=${AUTO_TRADE_ENV:-prod}
       - AUTO_TRADE_DATABASE_URL=sqlite:////app/data/auto_trade.db
       - LONGPORT_APP_KEY=${LONGPORT_APP_KEY:-}
       - LONGPORT_APP_SECRET=${LONGPORT_APP_SECRET:-}

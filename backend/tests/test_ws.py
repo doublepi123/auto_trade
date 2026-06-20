@@ -180,6 +180,23 @@ class TestWebSocketEndpoint:
         await manager.disconnect(ws)
 
     @pytest.mark.asyncio
+    async def test_ws_accepts_proxy_header_api_key(self, monkeypatch) -> None:
+        from app.config import settings
+
+        monkeypatch.setattr(settings, "api_key", "secret-key")
+        monkeypatch.setattr(settings, "env", "prod")
+        ws = AsyncMock()
+        ws.headers = {"x-api-key": "secret-key"}
+        ws.receive_text.side_effect = ["ping", Exception("stop")]
+
+        with pytest.raises(Exception):
+            await websocket_endpoint(ws)
+
+        ws.accept.assert_awaited_once()
+        ws.send_text.assert_any_await(json.dumps({"type": "pong"}))
+        await manager.disconnect(ws)
+
+    @pytest.mark.asyncio
     async def test_disconnect_handling(self) -> None:
         ws = AsyncMock()
         from starlette.websockets import WebSocketDisconnect

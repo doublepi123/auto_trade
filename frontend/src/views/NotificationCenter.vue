@@ -49,11 +49,11 @@
           <el-option label="当前页最早优先" value="oldest" />
         </el-select>
         <el-button-group>
-          <el-button :type="quickFilter === 'all' ? 'primary' : ''" data-testid="notif-filter-all" @click="setQuickFilter('all')">全部</el-button>
-          <el-button :type="quickFilter === 'failed' ? 'primary' : ''" data-testid="notif-filter-failed" @click="setQuickFilter('failed')">失败</el-button>
-          <el-button :type="quickFilter === 'critical' ? 'primary' : ''" data-testid="notif-filter-critical" @click="setQuickFilter('critical')">CRITICAL</el-button>
-          <el-button :type="quickFilter === 'warning' ? 'primary' : ''" data-testid="notif-filter-warning" @click="setQuickFilter('warning')">WARNING</el-button>
-          <el-button :type="quickFilter === 'info' ? 'primary' : ''" data-testid="notif-filter-info" @click="setQuickFilter('info')">INFO</el-button>
+          <el-button :type="quickFilter === 'all' ? 'primary' : ''" :aria-pressed="quickFilter === 'all'" data-testid="notif-filter-all" @click="setQuickFilter('all')">全部</el-button>
+          <el-button :type="quickFilter === 'failed' ? 'primary' : ''" :aria-pressed="quickFilter === 'failed'" data-testid="notif-filter-failed" @click="setQuickFilter('failed')">失败</el-button>
+          <el-button :type="quickFilter === 'critical' ? 'primary' : ''" :aria-pressed="quickFilter === 'critical'" data-testid="notif-filter-critical" @click="setQuickFilter('critical')">CRITICAL</el-button>
+          <el-button :type="quickFilter === 'warning' ? 'primary' : ''" :aria-pressed="quickFilter === 'warning'" data-testid="notif-filter-warning" @click="setQuickFilter('warning')">WARNING</el-button>
+          <el-button :type="quickFilter === 'info' ? 'primary' : ''" :aria-pressed="quickFilter === 'info'" data-testid="notif-filter-info" @click="setQuickFilter('info')">INFO</el-button>
         </el-button-group>
         <el-button :type="unreadOnly ? 'primary' : ''" data-testid="notif-unread-only" @click="unreadOnly = !unreadOnly">仅未读</el-button>
         <el-button-group>
@@ -314,7 +314,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { exportNotifications, getNotifications, retryNotification } from '../api'
 import { useNotificationBadge } from '../composables/useNotificationBadge'
@@ -340,6 +340,7 @@ const symbolFilter = ref('')
 const sourceFilter = ref('')
 const unreadOnly = ref(false)
 const quickFilter = ref<'all' | 'failed' | 'critical' | 'warning' | 'info'>('all')
+let applyingQuickFilter = false
 const viewMode = ref<'cards' | 'table' | 'timeline'>('cards')
 const groupMode = ref<'day' | 'result'>('day')
 const sortOrder = ref<'newest' | 'oldest'>('newest')
@@ -584,6 +585,7 @@ function setQuickRange(range: 'recent-days') {
 }
 
 function setQuickFilter(value: typeof quickFilter.value) {
+  applyingQuickFilter = true
   quickFilter.value = value
   if (value === 'all') {
     severityFilter.value = ''
@@ -598,6 +600,9 @@ function setQuickFilter(value: typeof quickFilter.value) {
   window.clearTimeout(searchDebounceTimer)
   page.value = 1
   load()
+  void nextTick(() => {
+    applyingQuickFilter = false
+  })
 }
 
 function debouncedLoad() {
@@ -741,8 +746,18 @@ function stopPoll() {
   }
 }
 
-watch(severityFilter, () => { quickFilter.value = 'all'; page.value = 1; load() })
-watch(successFilter, () => { quickFilter.value = 'all'; page.value = 1; load() })
+watch(severityFilter, () => {
+  if (applyingQuickFilter) return
+  quickFilter.value = 'all'
+  page.value = 1
+  load()
+})
+watch(successFilter, () => {
+  if (applyingQuickFilter) return
+  quickFilter.value = 'all'
+  page.value = 1
+  load()
+})
 watch(dateRange, () => { page.value = 1; load() }, { deep: true })
 watch(sourceFilter, () => { page.value = 1 })
 watch(unreadOnly, () => { page.value = 1 })

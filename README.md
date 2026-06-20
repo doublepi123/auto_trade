@@ -126,7 +126,7 @@
 ## 前置条件
 
 - Docker 和 Docker Compose（推荐部署方式）
-- 或 Python 3.11+ / Node.js 18+（本地开发）
+- 或 Python 3.11+ / Node.js 20.19+（本地开发）
 - 长桥账户：需获取 App Key、App Secret、Access Token
 - （可选）Server酱 SendKey：用于微信通知
 
@@ -147,8 +147,8 @@ LONGPORT_ACCESS_TOKEN=你的AccessToken
 AUTO_TRADE_SCT_KEY=你的Server酱SendKey          # 可选
 CREDENTIAL_MASTER_KEY=你的凭证加密主密钥           # 建议设置（Web UI 保存凭证前）
 DEEPSEEK_API_KEY=你的DeepSeek密钥                # 可选，启用 LLM 区间顾问时需要
-AUTO_TRADE_API_KEY=                              # 可选；内网部署可留空
-AUTO_TRADE_FRONTEND_PORT=8080                    # Docker 前端监听端口（绑定 0.0.0.0）
+AUTO_TRADE_API_KEY=                              # 仅 dev/test 可留空；prod 需要设置
+AUTO_TRADE_FRONTEND_PORT=8080                    # Docker 前端监听端口（默认绑定 127.0.0.1）
 ```
 
 长桥凭证获取：<https://open.longbridge.com/>
@@ -161,7 +161,7 @@ docker compose up --build -d
 
 - 前端 Web UI（含 API 反向代理）: http://localhost:8080
 - 健康检查: http://localhost:8080/api/health
-- 局域网访问: `http://<本机IP>:8080`（Compose 将前端绑定到 `0.0.0.0`）
+- 局域网访问: 如需手动暴露，请在 `.env` 里显式设置 `AUTO_TRADE_FRONTEND_BIND=0.0.0.0`
 
 ### 3. 配置策略
 
@@ -194,7 +194,7 @@ docker compose down
 ### 前置要求
 
 - Python 3.11+（与 `pyrightconfig.json` 中的 `pythonVersion` 保持一致；`tests/test_ws.py` 依赖 3.10+ 的 `asyncio` 行为）
-- Node.js 18+
+- Node.js 20.19+
 
 ### 后端
 
@@ -501,7 +501,7 @@ auto_trade/
 |----------|------|-------------|
 | `WS` | `/ws` | 实时推送引擎状态、价格、风控标志等 JSON |
 
-> **说明：** `POST /api/strategy/llm-interval/preview` 在配置了 `AUTO_TRADE_API_KEY` 且非 dev/test 时可要求 `X-API-Key`；内网部署通常留空该变量即可。
+> **说明：** 受保护 API 在配置了 `AUTO_TRADE_API_KEY` 时要求 `X-API-Key`；`AUTO_TRADE_API_KEY` 为空仅 `dev/test` 放行，`prod` 会返回 401。Docker/nginx 与 Vite 代理会在服务端注入该 header，避免把密钥下发到 SPA。
 
 ## 配置参考
 
@@ -511,12 +511,12 @@ auto_trade/
 |------|------|--------|
 | `AUTO_TRADE_ENV` | 运行环境 | `dev` |
 | `AUTO_TRADE_DATABASE_URL` | SQLite 数据库路径（**本机** `sqlite:///./data/auto_trade.db`，**Docker** `sqlite:////app/data/auto_trade.db`，compose 自动覆盖） | `sqlite:///./data/auto_trade.db` |
-| `AUTO_TRADE_FRONTEND_PORT` | Docker 前端映射端口（绑定 `0.0.0.0`） | `8080` |
+| `AUTO_TRADE_FRONTEND_PORT` | Docker 前端映射端口（默认绑定 `127.0.0.1`） | `8080` |
 | `LONGPORT_APP_KEY` | 长桥 App Key | - |
 | `LONGPORT_APP_SECRET` | 长桥 App Secret | - |
 | `LONGPORT_ACCESS_TOKEN` | 长桥 Access Token | - |
 | `AUTO_TRADE_SCT_KEY` | Server酱 SendKey | - |
-| `AUTO_TRADE_API_KEY` | 可选 API 密钥（内网可留空） | - |
+| `AUTO_TRADE_API_KEY` | API 密钥（`dev/test` 可留空；`prod` 必填） | - |
 | `CREDENTIAL_MASTER_KEY` | 凭证加密主密钥；保护 `data/credential_private_key.pem` | - |
 | `AUTO_TRADE_CREDENTIAL_KEY_PATH` | RSA 私钥文件路径（测试/多实例可覆盖） | `data/credential_private_key.pem` |
 | `DEEPSEEK_API_KEY` | DeepSeek API 密钥（LLM 顾问） | - |
@@ -535,8 +535,8 @@ auto_trade/
 
 - **绝不提交** `.env`、API 凭证到代码仓库（已加入 `.gitignore`）
 - 长桥凭证可通过环境变量注入，也可通过加密的凭证 API / Web UI 保存到本地；前端不会回显或输出明文凭证
-- **部署假设：仅在内网使用。** Docker Compose 将前端绑定到 `0.0.0.0:${AUTO_TRADE_FRONTEND_PORT:-8080}`，便于局域网内其它设备访问；请确保网络边界可信（防火墙/VLAN），不要将服务直接暴露到公网
-- `AUTO_TRADE_API_KEY` 为可选配置项（内网部署可不启用 API 鉴权）
+- **部署假设：仅在受控网络使用。** Docker Compose 默认将前端绑定到 `127.0.0.1:${AUTO_TRADE_FRONTEND_PORT:-8080}`；如需局域网访问请显式覆盖绑定地址
+- `AUTO_TRADE_API_KEY` 在 `dev/test` 可留空；`prod` 会强制要求配置
 - 生产环境建议通过 Docker secrets 或外部密钥管理服务注入敏感信息
 
 ## 限制

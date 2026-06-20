@@ -4,7 +4,7 @@ services:
     volumes:
       - ./data:/app/data
     environment:
-      - AUTO_TRADE_ENV=${AUTO_TRADE_ENV:-dev}
+      - AUTO_TRADE_ENV=${AUTO_TRADE_ENV:-prod}
       - AUTO_TRADE_DATABASE_URL=sqlite:////app/data/auto_trade.db
       - LONGPORT_APP_KEY=${LONGPORT_APP_KEY:-}
       - LONGPORT_APP_SECRET=${LONGPORT_APP_SECRET:-}
@@ -13,7 +13,7 @@ services:
       - LONGBRIDGE_APP_SECRET=${LONGBRIDGE_APP_SECRET:-}
       - LONGBRIDGE_ACCESS_TOKEN=${LONGBRIDGE_ACCESS_TOKEN:-}
       - AUTO_TRADE_SCT_KEY=${AUTO_TRADE_SCT_KEY:-}
-      - AUTO_TRADE_API_KEY=${AUTO_TRADE_API_KEY:-}
+      - AUTO_TRADE_API_KEY=${AUTO_TRADE_API_KEY:?Set AUTO_TRADE_API_KEY before starting Docker Compose}
       - CREDENTIAL_MASTER_KEY=${CREDENTIAL_MASTER_KEY:-}
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
     healthcheck:
@@ -31,16 +31,14 @@ services:
   frontend:
     build:
       context: ./frontend
-      args:
-        VITE_AUTO_TRADE_API_KEY: ${AUTO_TRADE_API_KEY:-}
     environment:
-      - AUTO_TRADE_API_KEY=${AUTO_TRADE_API_KEY:-}
+      - AUTO_TRADE_API_KEY=${AUTO_TRADE_API_KEY:?Set AUTO_TRADE_API_KEY before starting Docker Compose}
     # AUTO_TRADE_FRONTEND_BIND 控制宿主机上的绑定地址：
-    #   - 0.0.0.0  → 暴露给所有网卡（默认；内网/演示环境，方便其他设备访问）
-    #   - 127.0.0.1 → 仅本机访问（更安全，公网/共享网络请改为 127.0.0.1）
+    #   - 127.0.0.1 → 仅本机访问（默认；更安全）
+    #   - 0.0.0.0  → 暴露给所有网卡（如需局域网访问再手动覆盖）
     # 端口映射写成 `${BIND}:${PORT}:80`：宿主机 ${BIND}:${PORT} 映射到容器 80。
     ports:
-      - '${AUTO_TRADE_FRONTEND_BIND:-0.0.0.0}:${AUTO_TRADE_FRONTEND_PORT:-8080}:80'
+      - '${AUTO_TRADE_FRONTEND_BIND:-127.0.0.1}:${AUTO_TRADE_FRONTEND_PORT:-8080}:80'
     depends_on:
       backend:
         condition: service_healthy

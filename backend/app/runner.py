@@ -2092,6 +2092,18 @@ class AppRunner:
                 else:
                     runtime.market = market
                     runtime.engine.params.market = market
+                    if symbol != primary_symbol:
+                        runtime_params = runtime.engine.params
+                        primary_params = self.engine.params
+                        runtime_params.buy_low = primary_params.buy_low
+                        runtime_params.sell_high = primary_params.sell_high
+                        runtime_params.short_selling = primary_params.short_selling
+                        runtime_params.min_profit_amount = primary_params.min_profit_amount
+                        runtime_params.auto_resume_minutes = primary_params.auto_resume_minutes
+                        runtime_params.fee_rate_us = primary_params.fee_rate_us
+                        runtime_params.fee_rate_hk = primary_params.fee_rate_hk
+                        runtime_params.min_repricing_pct = primary_params.min_repricing_pct
+                        runtime_params.llm_action_cooldown_seconds = primary_params.llm_action_cooldown_seconds
                     if symbol == primary_symbol:
                         runtime.engine = self.engine
                 if symbol != primary_symbol:
@@ -2120,10 +2132,8 @@ class AppRunner:
         with self._state_lock:
             runtime = self._symbol_runtimes.get(quote.symbol)
             if runtime is None:
-                from app.core.market_calendar import market_for_symbol
-
-                runtime = self._build_symbol_runtime(quote.symbol, market_for_symbol(quote.symbol))
-                self._symbol_runtimes[quote.symbol] = runtime
+                logger.warning("ignoring quote for unknown symbol %s", quote.symbol)
+                return
             runtime.engine.record_price(quote.last_price)
             recent = runtime.recent_quotes
             recent.append(

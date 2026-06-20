@@ -18,6 +18,15 @@ describe('Dashboard Notification Ticker', () => {
     cy.url().should('include', '/notifications')
   })
 
+  it('navigates to notification center on keyboard activation', () => {
+    cy.get('[data-testid="dashboard-notif-ticker"]')
+      .find('.ticker-item')
+      .first()
+      .focus()
+      .type('{enter}')
+    cy.url().should('include', '/notifications')
+  })
+
   it('navigates to notification center on view all button click', () => {
     cy.get('[data-testid="dashboard-notif-ticker"]')
       .contains('查看全部')

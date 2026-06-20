@@ -85,6 +85,7 @@
     <div v-if="bookmarks.length" class="timeline-bookmarks" role="region" aria-labelledby="timeline-bookmarks-heading">
       <div class="bookmarks-header">
         <span id="timeline-bookmarks-heading">书签：</span>
+        <el-tag v-if="activeBookmarkId" type="success" data-testid="timeline-active-bookmark">当前激活</el-tag>
         <el-button size="small" link @click="clearBookmarks">清空</el-button>
       </div>
       <div class="bookmark-list">
@@ -92,7 +93,8 @@
           v-for="b in bookmarks"
           :key="b.id"
           :type="b.id === activeBookmarkId ? 'primary' : 'info'"
-          class="bookmark-tag"
+          :data-testid="b.id === activeBookmarkId ? 'timeline-bookmark-active' : undefined"
+          :class="['bookmark-tag', { 'bookmark-tag-active': b.id === activeBookmarkId }]"
           @click="applyBookmark(b)"
         >
           <span class="bookmark-label">{{ b.label }}</span>
@@ -245,7 +247,7 @@ result: {{ row.result || '-' }}</pre>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { exportTradeEvents, getTradeEvents, getLLMInteraction } from '../api'
 import type { TimelineSource, TradeEventRecord, LLMInteractionDetail } from '../types'
@@ -320,6 +322,7 @@ const BOOKMARKS_KEY = 'auto_trade.timeline.bookmarks.v1'
 
 const bookmarks = ref<Bookmark[]>(loadBookmarks())
 const activeBookmarkId = ref<string>('')
+let applyingBookmark = false
 const bookmarksImportInput = ref<HTMLInputElement | null>(null)
 
 const canSaveBookmark = computed(() => {
@@ -370,6 +373,7 @@ function saveCurrentAsBookmark() {
 }
 
 function applyBookmark(bookmark: Bookmark) {
+  applyingBookmark = true
   sourceFilter.value = bookmark.source
   selectedEventTypes.value = [...bookmark.event_types]
   selectedSkipCategory.value = bookmark.skip_category
@@ -377,6 +381,9 @@ function applyBookmark(bookmark: Bookmark) {
   activeBookmarkId.value = bookmark.id
   page.value = 1
   loadEvents()
+  void nextTick(() => {
+    applyingBookmark = false
+  })
 }
 
 function removeBookmark(id: string) {
@@ -489,11 +496,13 @@ onMounted(() => {
 })
 
 watch(sourceFilter, () => {
+  if (applyingBookmark) return
   selectedEventTypes.value = []
   activeBookmarkId.value = ''
 })
 
 watch([searchTerm, selectedEventTypes, selectedSkipCategory], () => {
+  if (applyingBookmark) return
   // If user manually edits filters, the active bookmark no longer matches.
   activeBookmarkId.value = ''
 })

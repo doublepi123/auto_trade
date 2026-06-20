@@ -14,11 +14,19 @@
 
 # Local data
 data/
+.env
+.env.*
+!.env.example
 *.db
 *.sqlite
 *.sqlite3
+*.db-wal
+*.db-shm
 credential_private_key.pem
 credential_public_key.pem
+*.pem
+*.key
+*.crt
 
 # Test + coverage
 **/.coverage

@@ -8,6 +8,10 @@ dist/
 
 # SQLite
 *.db
+*.sqlite
+*.sqlite3
+*.db-wal
+*.db-shm
 
 # Data
 data/
@@ -24,7 +28,11 @@ frontend/cypress/screenshots/
 
 # Environment
 .env
+.env.*
 !.env.example
+*.pem
+*.key
+*.crt
 
 # IDE
 .idea/

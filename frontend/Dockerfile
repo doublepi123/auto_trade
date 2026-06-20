@@ -1,7 +1,5 @@
 FROM node:20-alpine AS builder
 WORKDIR /app
-ARG VITE_AUTO_TRADE_API_KEY=
-ENV VITE_AUTO_TRADE_API_KEY=$VITE_AUTO_TRADE_API_KEY
 COPY package.json package-lock.json ./
 RUN npm ci
 COPY . .

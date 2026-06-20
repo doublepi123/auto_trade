@@ -110,6 +110,16 @@ Cypress.Commands.add('stubApi', () => {
     },
   }).as('getPositionPnl')
 
+  cy.intercept('GET', '/api/metrics/summary*', {
+    body: {
+      total_trades: 8,
+      win_rate: 62.5,
+      total_pnl: 250,
+      max_drawdown: 60,
+      profit_factor: 1.8,
+    },
+  }).as('getMetricsSummary')
+
   cy.intercept('GET', '/api/equity/curve*', {
     body: {
       points: [

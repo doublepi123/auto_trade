@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime, timezone
 from typing import Any
 
@@ -199,6 +200,9 @@ class IntervalApplicationService:
 
         if confidence < settings.llm_min_confidence:
             return f"confidence_score {confidence:.2f} below threshold {settings.llm_min_confidence}"
+
+        if buy_low is None or sell_high is None or not all(math.isfinite(float(value)) for value in (buy_low, sell_high, confidence)):
+            return "buy_low, sell_high, and confidence_score must be finite"
 
         if buy_low is None or sell_high is None:
             return "missing buy_low or sell_high in suggestion"

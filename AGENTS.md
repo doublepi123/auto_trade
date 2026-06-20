@@ -227,7 +227,7 @@ docker compose -f docker-compose.dockerhub.yaml up
 | Requirement | Version / Tool |
 |---|---|
 | Python | 3.11+ (3.11-slim in Docker) |
-| Node.js | 20.x (20-alpine in Docker) |
+| Node.js | 20.19+ (20-alpine in Docker) |
 | Python package manager | pip (no `pyproject.toml` — `backend/requirements.txt` + `backend/requirements-dev.txt`) |
 | Node package manager | npm (uses `npm ci` in Docker, `npm install` local) |
 | Python type checker | `basedpyright` (not mypy) |
@@ -242,7 +242,7 @@ docker compose -f docker-compose.dockerhub.yaml up
 
 - `pyrightconfig.json` is in `.gitignore` (developer-local). Project targets zero `basedpyright` errors.
 - Frontend Docker build includes type-check (`vue-tsc + vite build`); a TS error blocks the production build.
-- CI has **no test step** — quality gates are local only. (P21 added CI quality gates via `.github/workflows/dockerhub.yml` — see below.)
+- CI gates DockerHub publish with backend tests + frontend type/build checks; local验证仍需按仓库命令执行。
 - Docker Hub images use `latest` tag promiscuously (pushed on every default-branch commit).
 - No multi-arch Docker builds.
 - `docker-entrypoint.sh` mutates `alembic.ini` at runtime via `sed`.
@@ -252,7 +252,7 @@ docker compose -f docker-compose.dockerhub.yaml up
 - **No `pyproject.toml`.** Backend deps split into `backend/requirements.txt` + `backend/requirements-dev.txt`; pytest config in `backend/pytest.ini`. Deliberate minimal-tooling choice.
 - **No `.editorconfig` / `.prettierrc` / `.eslintrc`** at any level. Python style: `basedpyright` only. Frontend style: `vue-tsc` only. No auto-formatter.
 - **Cypress `baseUrl` defaults to `http://localhost:8080`** (Docker/nginx) not `:3000` (Vite dev) — E2E tests target the deployed path.
-- **`docker-compose.dockerhub.yaml` is the prebuilt-image variant** — binds `127.0.0.1:8080`, sets `AUTO_TRADE_API_KEY` as required env, uses `pull_policy: always`. The main `docker-compose.yaml` is build-from-source + `0.0.0.0:8080` (LAN-friendly).
+- **`docker-compose.dockerhub.yaml` is the prebuilt-image variant** — binds `127.0.0.1:8080`, sets `AUTO_TRADE_API_KEY` as required env, uses `pull_policy: always`. The main `docker-compose.yaml` is build-from-source + `127.0.0.1:8080` by default; LAN exposure requires explicit override.
 - **`LONGPORT_*` is canonical**, but `LONGBRIDGE_*` is silently accepted via `merge_longbridge_credentials()` in `app/config.py`. Both old + new deploy scripts work.
 - **`.worktrees/`** in repo root is leftover from `using-git-worktrees` skill usage; **not part of main**, ignore in file counts / glob patterns.
 

@@ -401,6 +401,49 @@ class TestLLMAnalysisTick:
         assert apply_calls and apply_calls[0]["reference_quantity"] == 1.0
 
     @pytest.mark.asyncio
+    async def test_tick_uses_secondary_symbol_interval_bounds(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        now = datetime.now(timezone.utc)
+        config = self._make_fake_config(symbol="AAPL.US", market="US", llm_last_analysis_at=now - timedelta(minutes=3))
+        runner = self._make_fake_runner(last_price=101.0)
+        runner.engine.params = StrategyParams(symbol="AAPL.US", market="US", buy_low=100.0, sell_high=110.0)
+        runner._symbol_runtimes = {
+            "AAPL.US": SimpleNamespace(symbol="AAPL.US", market="US", engine=runner.engine),
+            "NVDA.US": SimpleNamespace(
+                symbol="NVDA.US",
+                market="US",
+                engine=SimpleNamespace(
+                    last_price=220.0,
+                    params=StrategyParams(symbol="NVDA.US", market="US", buy_low=190.0, sell_high=230.0),
+                ),
+            ),
+        }
+        runner.recent_price_context.side_effect = lambda symbol=None: []
+        calls = self._patch_tick_deps(monkeypatch, config, runner)
+
+        class FakeAdvisor:
+            def __init__(self, broker: object = None) -> None:
+                pass
+
+            def analyze(self, **kwargs: object) -> dict[str, object]:
+                calls.append(kwargs)
+                assert kwargs["current_buy_low"] == 190.0
+                assert kwargs["current_sell_high"] == 230.0
+                return {
+                    "success": True,
+                    "suggested_buy_low": 188.0,
+                    "suggested_sell_high": 232.0,
+                    "confidence_score": 0.9,
+                    "order_action": "NONE",
+                    "interaction_id": 44,
+                }
+
+        monkeypatch.setattr("app.services.llm_advisor_service.LLMAdvisorService", FakeAdvisor)
+
+        await main_module._llm_analysis_tick()
+
+        assert any(call["symbol"] == "NVDA.US" for call in calls)
+
+    @pytest.mark.asyncio
     async def test_tick_executes_secondary_symbol_order_action_with_budgeted_symbol(self, monkeypatch: pytest.MonkeyPatch) -> None:
         now = datetime.now(timezone.utc)
         config = self._make_fake_config(symbol="AAPL.US", market="US", llm_last_analysis_at=now - timedelta(minutes=3))

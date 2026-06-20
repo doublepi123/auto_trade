@@ -14,7 +14,7 @@
 - 可选：DeepSeek LLM 顾问，建议并应用 `buy_low` / `sell_high` 区间。
 - 离线：CSV 回测（`BacktestEngine`，不发真实订单）。
 
-**部署假设：** 仅内网使用。Docker Compose 将前端绑定 `0.0.0.0:${AUTO_TRADE_FRONTEND_PORT:-8080}`，API 经 Nginx 反代；`AUTO_TRADE_API_KEY` 可选（内网通常留空）。
+**部署假设：** 仅内网/受控网络使用。Docker Compose 默认将前端绑定 `127.0.0.1:${AUTO_TRADE_FRONTEND_PORT:-8080}`，API 经 Nginx 反代；`AUTO_TRADE_API_KEY` 在 `dev/test` 可留空，`prod` 必填。
 
 ## 目录结构
 
@@ -36,7 +36,7 @@ auto_trade/
 │   │   │   ├── backtest.py                 # POST /api/backtest/{run,sweep,walk-forward,stress} + /runs (saved-run CRUD + compare)
 │   │   │   ├── indicators.py               # GET /api/indicators（实时技术指标快照，只读）
 │   │   │   ├── ws.py                       # WebSocket /ws
-│   │   │   ├── auth.py                     # require_api_key（可选；preview 可挂依赖）
+│   │   │   ├── auth.py                     # require_api_key（dev/test 可空；prod 必填）
 │   │   │   └── deps.py                     # get_audit_logger / extract_actor DI helpers
 │   │   ├── core/
 │   │   │   ├── broker.py                   # BrokerGateway：quote(s)、candlesticks、下单 + _call_with_retry 分档
@@ -73,7 +73,7 @@ auto_trade/
 │   │   ├── views/                          # Dashboard、Strategy、TradeHistory、DecisionTimeline、Backtest、Credentials、Lab.vue
 │   │   └── types/index.ts
 │   └── cypress/e2e/                        # E2E（stub API）
-├── docker-compose.yaml                     # frontend 0.0.0.0:8080；backend 仅容器内网
+├── docker-compose.yaml                     # frontend 默认 127.0.0.1:8080；backend 仅容器内网
 ├── docs/Roadmap.md
 └── README.md                               # 完整 API 表与部署说明
 ```
@@ -186,7 +186,7 @@ cd frontend && npm run type-check
 - `DEEPSEEK_MODEL` / `DEEPSEEK_REASONING_EFFORT` / `DEEPSEEK_THINKING_TYPE`：默认 `deepseek-v4-pro` + thinking `max`（`enabled`）。
 - `AUTO_TRADE_BROKER_RETRY_MAX`（默认 3，订单全量）、`AUTO_TRADE_BROKER_QUOTE_RETRY_MAX`（默认 1，行情）、`AUTO_TRADE_BROKER_RETRY_BASE_MS`（默认 1000）：`BrokerGateway._call_with_retry` 分档退避；`max_retries=0` 表示只调 1 次，无 sleep。
 - `AUTO_TRADE_AUDIT_REQUEST_SUMMARY_LIMIT`（默认 2048）：审计 `request_summary` 截断字节数；超出会附加 `...truncated`。
-- **API 鉴权增强不在 Roadmap 内**（owner decision 2026-05-25）：当前仅可信内网部署，`AUTO_TRADE_API_KEY` 可留空；若部署到不可信网络，必须重新评估所有写端点与 WebSocket 的访问控制。
+- **API 鉴权行为**：`require_api_key()` 读取 `X-API-Key`；`AUTO_TRADE_API_KEY` 为空时仅 `dev/test` 放行，`prod` 返回 401。Docker/nginx 与 Vite 代理在服务端注入 header，前端 SPA 不持有该密钥。
 
 ### 交易执行（TradeExecutionService）
 
@@ -219,7 +219,7 @@ cd frontend && npm run type-check
 
 ### 交易日历（market_calendar）
 
-- `trade_day_for(market, instant)`：交易所本地**日历日**（非节假日历）；`AppRunner` 注入 `RiskController` 与 `DailyPnlService.to_trade_day`。
+- `trade_day_for(market, instant)`：交易所本地**日历日**（不含节假日历）；`AppRunner` 注入 `RiskController` 与 `DailyPnlService.to_trade_day`。
 - `is_trading_hours`：周末 + RTH 窗口；用于行情重订守卫，**不**阻止盘前盘后下单。
 
 ### LLM 顾问

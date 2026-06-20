@@ -12,7 +12,7 @@ from app.api import trade as trade_api
 from app import database
 from app.core.market_calendar import trade_day_for
 from app.database import SessionLocal
-from app.models import AuditLog, CredentialConfig, LLMInteraction, LLMSymbolScheduleState, OrderRecord, RuntimeState, RuntimeStateSnapshot, StrategyConfig, TradeEvent
+from app.models import AuditLog, CredentialConfig, LLMInteraction, LLMSymbolScheduleState, OrderRecord, RiskEvent, RuntimeState, RuntimeStateSnapshot, StrategyConfig, TradeEvent
 from app.main import app
 from app.services.strategy_service import StrategyService
 
@@ -73,6 +73,12 @@ def _clean_trade_events() -> None:
 def _clean_audit_logs() -> None:
     with SessionLocal() as db:
         db.query(AuditLog).delete()
+        db.commit()
+
+
+def _clean_risk_events() -> None:
+    with SessionLocal() as db:
+        db.query(RiskEvent).delete()
         db.commit()
 
 
@@ -174,6 +180,30 @@ class TestAPI:
         resp2 = client.get("/api/strategy")
         assert resp2.status_code == 200
         assert resp2.json()["margin_safety_factor"] == 0.75
+
+    def test_update_strategy_persists_report_schedule_fields(self) -> None:
+        _clean_strategy()
+        resp = client.put("/api/strategy", json={
+            "symbol": "AAPL.US",
+            "market": "US",
+            "buy_low": 100.0,
+            "sell_high": 200.0,
+            "report_schedule_enabled": True,
+            "report_schedule_interval_hours": 6,
+            "report_schedule_symbol": "MSFT.US",
+        })
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["report_schedule_enabled"] is True
+        assert data["report_schedule_interval_hours"] == 6
+        assert data["report_schedule_symbol"] == "MSFT.US"
+
+        resp2 = client.get("/api/strategy")
+        assert resp2.status_code == 200
+        assert resp2.json()["report_schedule_enabled"] is True
+        assert resp2.json()["report_schedule_interval_hours"] == 6
+        assert resp2.json()["report_schedule_symbol"] == "MSFT.US"
 
     def test_update_strategy_rejects_invalid_llm_interval_minutes(self) -> None:
         _clean_strategy()
@@ -648,6 +678,8 @@ class TestAPI:
     def test_timeline_endpoint_merges_audit_and_trade(self) -> None:
         _clean_trade_events()
         _clean_audit_logs()
+        _clean_llm_interactions()
+        _clean_risk_events()
         db = SessionLocal()
         db.add(
             TradeEvent(

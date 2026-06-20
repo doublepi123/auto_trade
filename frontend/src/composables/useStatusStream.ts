@@ -1,6 +1,5 @@
 import { ref, onMounted, onUnmounted } from 'vue'
 import { getStatus } from '../api'
-import { resolveApiKey } from '../config/apiKey'
 import { object, optionalBoolean, optionalNumber, optionalObject, optionalString, safeValidate, string } from '../utils/validator'
 import type { StatusData } from '../types'
 
@@ -49,13 +48,9 @@ export function useStatusStream(status: { value: StatusData }) {
     realtimeStatus.value = 'connecting'
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const wsUrl = `${protocol}//${window.location.host}/ws`
-    const apiKey = resolveApiKey()
     ws = new WebSocket(wsUrl)
 
     ws.onopen = () => {
-      if (apiKey) {
-        ws?.send(JSON.stringify({ type: 'auth', api_key: apiKey }))
-      }
       useWebSocket = true
       realtimeStatus.value = 'connected'
       reconnectAttempts = 0

@@ -1,4 +1,4 @@
-import { defineConfig } from 'vite'
+import { defineConfig, loadEnv } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import AutoImport from 'unplugin-auto-import/vite'
 import Components from 'unplugin-vue-components/vite'
@@ -37,7 +37,13 @@ function manualChunks(id: string): string | undefined {
   return undefined
 }
 
-export default defineConfig({
+export default defineConfig(({ mode }) => {
+  const env = loadEnv(mode, process.cwd(), '')
+  const proxyHeaders = env.AUTO_TRADE_API_KEY
+    ? { 'X-API-Key': env.AUTO_TRADE_API_KEY }
+    : undefined
+
+  return {
   plugins: [
     vue(),
     AutoImport({
@@ -53,10 +59,14 @@ export default defineConfig({
   server: {
     port: 3000,
     proxy: {
-      '/api': 'http://localhost:8000',
+      '/api': {
+        target: 'http://localhost:8000',
+        headers: proxyHeaders,
+      },
       '/ws': {
         target: 'ws://localhost:8000',
         ws: true,
+        headers: proxyHeaders,
       },
     },
   },
@@ -68,4 +78,5 @@ export default defineConfig({
       },
     },
   },
+  }
 })

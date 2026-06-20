@@ -30,7 +30,11 @@
             v-for="n in recentNotifications.slice(0, 3)"
             :key="n.id"
             class="ticker-item"
+            role="button"
+            tabindex="0"
             @click="router.push('/notifications')"
+            @keydown.enter.prevent="router.push('/notifications')"
+            @keydown.space.prevent="router.push('/notifications')"
           >
             <el-tag size="small" :type="severityType(n.severity)">{{ n.severity }}</el-tag>
             <span class="ticker-title">{{ n.title }}</span>
