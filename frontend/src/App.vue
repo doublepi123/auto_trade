@@ -98,12 +98,47 @@
         </el-button>
       </div>
     </el-header>
-    <el-dialog v-model="shortcutsVisible" title="键盘快捷键" width="420px" data-testid="shortcuts-dialog">
-      <p class="shortcut-hint">在非输入框聚焦时按下字母键即可切换页面（按 <kbd>?</kbd> 也可打开此帮助）。</p>
-      <ul class="shortcut-list">
-        <li v-for="s in shortcutList" :key="s.key"><kbd>{{ s.key.toUpperCase() }}</kbd> — {{ s.label }}</li>
-      </ul>
-    </el-dialog>
+    <el-drawer
+      v-model="shortcutsVisible"
+      title="键盘快捷键与帮助"
+      direction="rtl"
+      size="380px"
+      data-testid="shortcuts-dialog"
+    >
+      <div class="help-section">
+        <h4 class="help-title">全局</h4>
+        <ul class="shortcut-list">
+          <li><kbd>Cmd/Ctrl</kbd>+<kbd>K</kbd> — 命令面板</li>
+          <li><kbd>?</kbd> — 打开本帮助</li>
+          <li><kbd>/</kbd> — 聚焦当前页搜索</li>
+          <li><kbd>Esc</kbd> — 取消搜索聚焦 / 关闭弹窗</li>
+        </ul>
+      </div>
+      <div class="help-section">
+        <h4 class="help-title">切换页面（字母键）</h4>
+        <ul class="shortcut-list">
+          <li v-for="s in shortcutList" :key="s.key">
+            <kbd>{{ s.key.toUpperCase() }}</kbd> — {{ s.label }}
+          </li>
+        </ul>
+      </div>
+      <div class="help-section">
+        <h4 class="help-title">页面内</h4>
+        <ul class="shortcut-list">
+          <li><kbd>↑</kbd>/<kbd>↓</kbd> 或 <kbd>j</kbd>/<kbd>k</kbd> — 决策时间线移动行</li>
+          <li><kbd>Enter</kbd> — 查看 LLM 详情（时间线）</li>
+        </ul>
+      </div>
+      <div class="help-section">
+        <h4 class="help-title">提示</h4>
+        <ul class="tip-list">
+          <li>命令面板可快速跳转页面、执行控制动作、按标的查看图表。</li>
+          <li>仪表盘 📌 固定标的后可一键切换图表。</li>
+          <li>顶栏健康徽标超过 10s 变黄、30s 变红，提示行情可能延迟。</li>
+          <li>顶栏「密度」可切换紧凑 / 标准 / 宽松。</li>
+        </ul>
+      </div>
+    </el-drawer>
     <el-dialog v-model="dialogVisible" title="通知偏好" width="400px">
       <NotificationSettings />
     </el-dialog>
@@ -524,6 +559,26 @@ onUnmounted(() => {
 
 .shortcut-list li {
   color: #4b5563;
+  font-size: 13px;
+}
+
+.help-section {
+  margin-bottom: 18px;
+}
+.help-title {
+  margin: 0 0 8px;
+  color: #303133;
+  font-size: 14px;
+  font-weight: 600;
+}
+.tip-list {
+  list-style: disc;
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: #6b7280;
   font-size: 13px;
 }
 
