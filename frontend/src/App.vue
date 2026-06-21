@@ -516,10 +516,6 @@ onUnmounted(() => {
 .health-row span {
   color: #6b7280;
 }
-.health-reconnect {
-  align-self: flex-start;
-}
-
 .health-actions {
   display: flex;
   flex-wrap: wrap;

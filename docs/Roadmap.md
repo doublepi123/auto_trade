@@ -37,6 +37,37 @@
 
 ---
 
+## 近期已完成迭代 (2026-06-21) — 运营健康与数据可信度（10 轮 P129–P138）
+
+> 自主 feature 迭代第 14 批（10 轮）。主题：把「数据可信度 / 连接健康」显式化、全局化。全部**纯前端**，复用既有 `/api/status`、`/api/calendar/session` 等只读响应，**不新增后端端点、不新增表、不触碰 broker/order/runner/risk 写路径**。规格：[2026-06-21-p129-p138-operational-health-data-trust-design.md](superpowers/specs/2026-06-21-p129-p138-operational-health-data-trust-design.md)。
+
+| 代号 | 主题 | 页面 / 组件 | 状态 |
+|------|------|-------------|------|
+| **P129** | 实时连接上提为 App 级单例 + 全局 header 健康徽标 | `useConnectionHealth` + App.vue | ✅ |
+| **P130** | 相对时间工具 + 徽标显示数据年龄（>10s 琥珀 / >30s 红） | `utils/time.ts` + App.vue | ✅ |
+| **P131** | Dashboard 过期数据水印（≥15s 琥珀告警 + 价格面板标签 + 一键重连） | Dashboard | ✅ |
+| **P132** | 交易时段感知横幅（非 RTH 全局可关闭 alert，按阶段 dismiss） | `useMarketSession` + App.vue | ✅ |
+| **P133** | 共享 `<DataState>` 组件（loading/error/empty）+ 接入 NotificationCenter / Watchlist | components + 2 views | ✅ |
+| **P134** | 数字/百分比格式工具扩展 + `<MetricStat>` 组件 + Dashboard 格式函数收敛 | `utils/format.ts` + Dashboard | ✅ |
+| **P135** | 剪贴板工具 + `<CopyButton>` + 订单号复制（TradeHistory / DecisionTimeline） | `utils/clipboard.ts` + 2 views | ✅ |
+| **P136** | 断连/恢复反馈 toast（`realtimeStatus` 转换 watcher） | App.vue | ✅ |
+| **P137** | 各页「更新于」刷新时间戳（Dashboard 行情 / Reports 报告） | Dashboard + Reports | ✅ |
+| **P138** | 复制健康快照（报障）按钮 | App.vue 健康弹窗 | ✅ |
+
+**设计要点：**
+- **连接上提**：`useStatusStream` 的 WS/轮询所有权从 Dashboard 组件上提到 `useConnectionHealth` 模块单例，在 App shell 启动、全页常驻；Dashboard 改为消费单例。保留 Cypress `polling` 短路与 3s 轮询回退、`realtimeStatus` 枚举不变。删除 `useStatusStream.ts`。
+- **数据年龄**：单例 `lastDataAt`（WS 帧 / 成功轮询 / 手动刷新时更新）+ 1s ticker 派生 `ageSeconds`，P130 徽标 / P131 水印 / P138 快照共用。
+- **会话横幅 vs SessionClockPanel**：后者展示下次开盘倒计时；前者仅在非 RTH 提示「行情可能延迟」，可关闭，dismiss 按阶段存 localStorage（阶段变化会重新弹出）。
+- **共享基础件**：`DataState` / `MetricStat` / `CopyButton` 为受控展示件，无新依赖；数字格式函数收敛进 `utils/format.ts`（输出与 Dashboard 原本地实现逐字一致）。
+- **剪贴板降级**：`navigator.clipboard` 不可用时回退 `execCommand`，失败不抛。
+- **toast 防抖**：仅在 `realtimeStatus` 真正转换时触发（掉线→warning，恢复→success），且仅在发生过掉线后才报恢复；`polling` 稳态静默。
+
+**验证：** `vue-tsc` 0 errors、`npm run build` 通过；`build:check-chunks`（38 chunks，max 512 KB）、`build:check-element-plus`（7 chunks）均不退步；新增 3 个 Cypress spec（`connection_health` / `session_banner` / `clipboard_copy`）。后端 `pytest` 不受影响（纯前端）。本机无法 headless 运行 Cypress，按既有约定仅类型/构建校验，spec 交 CI。
+
+**显式 YAGNI 未做：** WS 消息级 QoS / 丢帧检测、按渠道分别健康、健康历史落库、PWA 离线健康缓存、跨设备健康同步。
+
+---
+
 ## 近期已完成迭代 (2026-06-19) — Dashboard 深度 + 跨页 UX（10 轮 P119–P128）
 
 > 自主 feature 迭代第 13 批（10 轮）。混合 Dashboard 面板派生统计、Backtest 深度与跨页 UX（快捷键 / 深色模式 / URL 深链接 / 书签备份）。全部纯前端，复用既有 API 响应字段，**不新增后端端点、不新增表、不触碰 broker/order/runner/risk 写路径**。
