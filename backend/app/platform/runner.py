@@ -58,7 +58,7 @@ class PlatformRunner:
             clock=self.clock,
         )
 
-    def _emit(self, event: Any) -> None:
+    def _emit(self, event: Event) -> None:
         self.bus.publish(event)
         if self.store is not None:
             self.store.append(event)

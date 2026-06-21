@@ -530,9 +530,8 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         try:
             strategy_config = StrategyService(db).get_config()
             registry = get_default_registry()
-            from typing import Any
-            strategy_cls: Any = registry.get("interval")
-            strategy = strategy_cls(params={
+            strategy_cls = registry.get("interval")
+            strategy = cast(Any, strategy_cls)(params={
                 "buy_low": Decimal(str(strategy_config.buy_low or 0)),
                 "sell_high": Decimal(str(strategy_config.sell_high or 0)),
                 "quantity": int(getattr(strategy_config, "quantity", 0) or 0),
@@ -542,15 +541,15 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
                 strategy=strategy,
                 mode="live",
             )
-            app.state.platform_runner = platform_runner
+            _app.state.platform_runner = platform_runner
             logger.info("platform runner enabled for symbol=%s", strategy_config.symbol)
         except Exception:
             logger.exception("failed to initialize platform runner")
-            app.state.platform_runner = None
+            _app.state.platform_runner = None
         finally:
             db.close()
     else:
-        app.state.platform_runner = None
+        _app.state.platform_runner = None
 
     cleanup_task = asyncio.create_task(_ws_cleanup_task())
     llm_task = asyncio.create_task(_llm_analysis_cron())
