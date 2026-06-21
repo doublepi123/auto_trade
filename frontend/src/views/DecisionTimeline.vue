@@ -129,9 +129,13 @@
       :key="tableRefreshKey"
       :data="visibleEvents"
       stripe
-      class="responsive-table"
+      class="responsive-table timeline-table"
       v-loading="loading"
       row-key="row_uid"
+      tabindex="0"
+      title="聚焦后可用 ↑/↓ 或 j/k 移动，Enter 查看 LLM 详情"
+      :row-class-name="timelineRowClass"
+      @keydown="onTableKeydown"
     >
       <el-table-column type="expand">
         <template #default="{ row }">
@@ -469,6 +473,30 @@ async function handleImportBookmarks(event: Event) {
 
 const visibleEvents = computed(() => events.value)
 
+// Row keyboard navigation: when the events table is focused, ↑/↓ (or j/k)
+// move the highlighted row and Enter opens the LLM detail for llm rows.
+const focusedRowIndex = ref(-1)
+function timelineRowClass({ rowIndex }: { row: unknown; rowIndex: number }): string {
+  return rowIndex === focusedRowIndex.value ? 'timeline-row-focused' : ''
+}
+function onTableKeydown(ev: KeyboardEvent): void {
+  const rows = visibleEvents.value
+  if (rows.length === 0) return
+  if (ev.key === 'ArrowDown' || ev.key === 'j') {
+    ev.preventDefault()
+    focusedRowIndex.value = Math.min(focusedRowIndex.value + 1, rows.length - 1)
+  } else if (ev.key === 'ArrowUp' || ev.key === 'k') {
+    ev.preventDefault()
+    focusedRowIndex.value = Math.max(focusedRowIndex.value - 1, 0)
+  } else if (ev.key === 'Enter') {
+    const row = rows[focusedRowIndex.value]
+    if (row && (row.source as string) === 'llm') {
+      ev.preventDefault()
+      void openLLMDetail(row.id)
+    }
+  }
+}
+
 /** Within-page derived summary. The timeline is server-paginated, so these
  * counts describe the currently loaded page only — not the full dataset. */
 const pageSummary = computed(() => {
@@ -713,6 +741,14 @@ function formatDateTime(value: string): string {
 
 .responsive-table {
   width: 100%;
+}
+
+.timeline-table :deep(.timeline-row-focused td) {
+  background: #ecf5ff !important;
+}
+.timeline-table:focus {
+  outline: thin solid #409eff;
+  outline-offset: -2px;
 }
 
 .timeline-summary {
