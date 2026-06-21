@@ -607,6 +607,7 @@ import { useConnectionHealth } from '../composables/useConnectionHealth'
 import { useAccountRefresh } from '../composables/useAccountRefresh'
 import { useMultiSymbolSnapshots } from '../composables/useMultiSymbolSnapshots'
 import { useStatusHistorySeries } from '../composables/useStatusHistorySeries'
+import { useSymbolStore } from '../composables/useSymbolStore'
 import { useDiagnosticsSnapshot } from '../composables/useDiagnosticsSnapshot'
 import { startTrading, stopTrading, pauseTrading, resumeTrading, activateKillSwitch, disableKillSwitch, getLLMIntervalStatus, getNotifications, getOrders, getTradeEvents, getMetricsSummary } from '../api'
 import type { LLMIntervalStatus, NotificationLogOut, OrderRecord, Position, StatusHistoryPoint, TradeEventRecord } from '../types'
@@ -626,6 +627,7 @@ const {
   start: startMultiSymbols,
 } = multiSymbols
 const selectedChartSymbol = ref('')
+const { consumeRequestedSymbol, requestedSymbol } = useSymbolStore()
 const accountRefreshIntervalMs = (window as CypressWindow).Cypress ? 500 : 10000
 const { strategy, status, strategyLoading, statusLoading, loadError, load, refreshStatus } = useDashboardData()
 const {
@@ -751,6 +753,12 @@ function syncSelectedChartSymbol() {
     selectedChartSymbol.value = strategy.value.symbol || ''
     return
   }
+  // Honour a one-shot symbol request from the command palette / pinned bar.
+  const requested = consumeRequestedSymbol()
+  if (requested && options.some((option) => option.symbol === requested)) {
+    selectedChartSymbol.value = requested
+    return
+  }
   if (!selectedChartSymbol.value || !options.some((option) => option.symbol === selectedChartSymbol.value)) {
     selectedChartSymbol.value = options[0].symbol
   }
@@ -758,6 +766,12 @@ function syncSelectedChartSymbol() {
 
 watch(chartSymbolOptions, () => {
   syncSelectedChartSymbol()
+})
+
+// React to a live symbol request (command palette / pinned bar) even when the
+// Dashboard is already mounted and the options list hasn't changed.
+watch(requestedSymbol, (sym) => {
+  if (sym) syncSelectedChartSymbol()
 })
 
 watch(

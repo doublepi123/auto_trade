@@ -22,4 +22,17 @@ describe('Command palette', () => {
     cy.get('[data-testid="command-palette"]').should('not.exist')
     cy.contains('告警规则', { timeout: 10000 }).should('be.visible')
   })
+
+  it('offers per-symbol chart jumps', () => {
+    cy.get('[data-testid="nav-command-palette"]').click()
+    cy.get('[data-testid="command-palette-input"]').type('AAPL')
+    cy.get('[data-testid="command-list"]').should('contain', '在仪表盘查看 AAPL.US')
+    cy.get('[data-testid="command-palette-input"]').type('{enter}')
+    // Default chart symbol is the first option (NVDA.US); jumping to AAPL.US
+    // proves the request was honoured.
+    cy.get('[data-testid="chart-symbol-current"]', { timeout: 10000 }).should(
+      'contain',
+      'AAPL.US',
+    )
+  })
 })

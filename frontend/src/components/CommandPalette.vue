@@ -48,6 +48,8 @@ import { Search } from '@element-plus/icons-vue'
 import {
   activateKillSwitch,
   disableKillSwitch,
+  getStrategy,
+  getWatchlist,
   pauseTrading,
   resumeTrading,
   startTrading,
@@ -55,6 +57,7 @@ import {
 } from '../api'
 import { useCommandPalette } from '../composables/useCommandPalette'
 import { useConnectionHealth } from '../composables/useConnectionHealth'
+import { useSymbolStore } from '../composables/useSymbolStore'
 import { resolveErrorMessage } from '../utils/error'
 
 interface Command {
@@ -68,7 +71,28 @@ interface Command {
 const router = useRouter()
 const { open, query, activeIndex, recentIds, recordRecent, closePalette } = useCommandPalette()
 const { reconnectNow, refreshNow } = useConnectionHealth()
+const { requestSymbol } = useSymbolStore()
 const inputRef = ref<{ focus: () => void } | null>(null)
+const symbols = ref<string[]>([])
+let symbolsLoaded = false
+
+// Lazily index known symbols (primary strategy + watchlist) so the palette can
+// offer a per-symbol "view on dashboard" jump. Fetched on first open.
+async function loadSymbols(): Promise<void> {
+  if (symbolsLoaded) return
+  symbolsLoaded = true
+  try {
+    const [strategyResp, watchlist] = await Promise.all([getStrategy(), getWatchlist()])
+    const set = new Set<string>()
+    if (strategyResp.symbol) set.add(strategyResp.symbol)
+    for (const item of watchlist) {
+      if (item.symbol) set.add(item.symbol)
+    }
+    symbols.value = [...set]
+  } catch {
+    // Non-fatal: symbol commands simply won't appear.
+  }
+}
 
 const NAV_ITEMS: Array<{ id: string; label: string; path: string }> = [
   { id: 'nav-dashboard', label: '仪表盘', path: '/' },
@@ -174,7 +198,17 @@ const commands = computed<Command[]>(() => {
       },
     },
   ]
-  return [...nav, ...control, ...utility]
+  const symbolCmds: Command[] = symbols.value.map((sym) => ({
+    id: `symbol-${sym}`,
+    label: `在仪表盘查看 ${sym}`,
+    group: '标的',
+    keywords: `symbol chart view ${sym}`,
+    run: () => {
+      requestSymbol(sym)
+      void router.push('/')
+    },
+  }))
+  return [...nav, ...control, ...symbolCmds, ...utility]
 })
 
 function scoreCommand(cmd: Command, q: string): number | null {
@@ -237,6 +271,7 @@ function onKeydown(ev: KeyboardEvent): void {
 function onOpen(): void {
   query.value = ''
   activeIndex.value = 0
+  void loadSymbols()
   nextTick(() => inputRef.value?.focus())
 }
 </script>
