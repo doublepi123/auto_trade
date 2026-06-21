@@ -21,6 +21,14 @@
         <router-link to="/lab" class="app-menu-link" :class="{ active: route.path === '/lab' }">优化工作台</router-link>
       </nav>
       <div class="header-actions">
+        <el-button
+          size="small"
+          text
+          data-testid="nav-command-palette"
+          title="命令面板 (Cmd/Ctrl+K)"
+          @click="palette.openPalette()"
+          >⌘K</el-button
+        >
         <el-popover placement="bottom" :width="260" trigger="click" data-testid="nav-health-popover">
           <template #reference>
             <el-button size="small" text data-testid="nav-health">
@@ -91,6 +99,8 @@
       <NotificationSettings />
     </el-dialog>
 
+    <CommandPalette />
+
     <!-- 主内容区 -->
     <el-main :class="{ 'mobile-main': isMobile }">
       <el-alert
@@ -149,7 +159,9 @@ import { useNotificationStream } from './composables/useNotificationStream'
 import { useNotificationBadge } from './composables/useNotificationBadge'
 import { useConnectionHealth } from './composables/useConnectionHealth'
 import { useMarketSession } from './composables/useMarketSession'
+import { useCommandPalette } from './composables/useCommandPalette'
 import MetricStat from './components/MetricStat.vue'
+import CommandPalette from './components/CommandPalette.vue'
 import { engineStateLabel } from './utils/labels'
 import { ageFreshnessClass, relativeAgeLabel } from './utils/time'
 import { copyText } from './utils/clipboard'
@@ -164,6 +176,7 @@ const { unreadCount } = useNotificationBadge()
 // Boot the app-wide realtime connection here so the health badge is accurate
 // on every page, not only when the Dashboard is mounted.
 const health = useConnectionHealth()
+const palette = useCommandPalette()
 
 // Short badge label + coloured dot derived from the shared connection state.
 const healthLabel = computed(() => {
@@ -302,6 +315,13 @@ function isTypingTarget(el: EventTarget | null): boolean {
 }
 
 function handleKeydown(ev: KeyboardEvent) {
+  // Command palette: Cmd/Ctrl+K opens it anywhere. Handled before the
+  // modifier-guard below so the combo isn't silently dropped.
+  if ((ev.metaKey || ev.ctrlKey) && !ev.shiftKey && !ev.altKey && ev.key.toLowerCase() === 'k') {
+    ev.preventDefault()
+    palette.openPalette()
+    return
+  }
   if (ev.ctrlKey || ev.metaKey || ev.altKey) return
   if (isTypingTarget(ev.target)) return
   const key = ev.key.toLowerCase()
