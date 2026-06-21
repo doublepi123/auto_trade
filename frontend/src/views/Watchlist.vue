@@ -269,6 +269,7 @@ import {
 import { formatCurrency } from '../utils/format'
 import { resolveErrorMessage } from '../utils/error'
 import DataState from '../components/DataState.vue'
+import { useRegisterViewRefresh } from '../composables/useViewRefreshRegistry'
 import { downloadCsv } from '../utils/csv'
 
 const items = ref<WatchlistItem[]>([])
@@ -635,6 +636,10 @@ function exportSnapshot() {
   ], rows)
   ElMessage.success('已导出观察列表快照')
 }
+
+useRegisterViewRefresh(() => {
+  void loadItems()
+})
 
 onMounted(() => {
   loadItems().then(() => {

@@ -59,6 +59,7 @@ import { useCommandPalette } from '../composables/useCommandPalette'
 import { useConnectionHealth } from '../composables/useConnectionHealth'
 import { useSymbolStore } from '../composables/useSymbolStore'
 import { useRecentPages } from '../composables/useRecentPages'
+import { useViewRefreshRegistry } from '../composables/useViewRefreshRegistry'
 import { resolveErrorMessage } from '../utils/error'
 
 interface Command {
@@ -74,6 +75,7 @@ const { open, query, activeIndex, recentIds, recordRecent, closePalette } = useC
 const { reconnectNow, refreshNow } = useConnectionHealth()
 const { requestSymbol } = useSymbolStore()
 const { recencyRank } = useRecentPages()
+const { currentRefresh } = useViewRefreshRegistry()
 const inputRef = ref<{ focus: () => void } | null>(null)
 const symbols = ref<string[]>([])
 let symbolsLoaded = false
@@ -200,6 +202,28 @@ const commands = computed<Command[]>(() => {
       },
     },
   ]
+  // "Refresh current page" only appears when the active view registered a
+  // reload function (Dashboard / Watchlist / Reports).
+  const refreshCmds: Command[] = currentRefresh.value
+    ? [
+        {
+          id: 'util-refresh-view',
+          label: '刷新当前页',
+          group: '工具',
+          keywords: 'reload refresh page',
+          run: () => {
+            const fn = currentRefresh.value
+            if (fn) {
+              try {
+                void fn()
+              } catch (e: unknown) {
+                ElMessage.error(resolveErrorMessage(e, '刷新失败'))
+              }
+            }
+          },
+        },
+      ]
+    : []
   const symbolCmds: Command[] = symbols.value.map((sym) => ({
     id: `symbol-${sym}`,
     label: `在仪表盘查看 ${sym}`,
@@ -210,7 +234,7 @@ const commands = computed<Command[]>(() => {
       void router.push('/')
     },
   }))
-  return [...nav, ...control, ...symbolCmds, ...utility]
+  return [...nav, ...control, ...symbolCmds, ...utility, ...refreshCmds]
 })
 
 function scoreCommand(cmd: Command, q: string): number | null {

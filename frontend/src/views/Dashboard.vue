@@ -633,6 +633,7 @@ import { useMultiSymbolSnapshots } from '../composables/useMultiSymbolSnapshots'
 import { useStatusHistorySeries } from '../composables/useStatusHistorySeries'
 import { useSymbolStore } from '../composables/useSymbolStore'
 import { usePinnedSymbols } from '../composables/usePinnedSymbols'
+import { useRegisterViewRefresh } from '../composables/useViewRefreshRegistry'
 import { useDiagnosticsSnapshot } from '../composables/useDiagnosticsSnapshot'
 import { startTrading, stopTrading, pauseTrading, resumeTrading, activateKillSwitch, disableKillSwitch, getLLMIntervalStatus, getNotifications, getOrders, getTradeEvents, getMetricsSummary } from '../api'
 import type { LLMIntervalStatus, NotificationLogOut, OrderRecord, Position, StatusHistoryPoint, TradeEventRecord } from '../types'
@@ -669,6 +670,10 @@ const {
   lastDataAt,
   reconnectNow,
 } = useConnectionHealth()
+// Expose the cockpit status refresh to the command palette's "refresh page".
+useRegisterViewRefresh(() => {
+  void refreshStatus()
+})
 const { account, accountError, accountLoading, accountRefreshing, refresh: refreshAccount } = useAccountRefresh(accountRefreshIntervalMs)
 
 const router = useRouter()

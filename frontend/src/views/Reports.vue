@@ -250,6 +250,7 @@
 
 <script setup lang="ts">
 import { ref, computed } from 'vue'
+import { useRegisterViewRefresh } from '../composables/useViewRefreshRegistry'
 import { ElMessage } from 'element-plus'
 import { getRangeReport, exportReport } from '../api/reports'
 import { downloadCsv } from '../utils/csv'
@@ -288,6 +289,11 @@ const lastRefreshedLabel = computed(() => {
   })
 })
 const submittedQuery = ref<ReportQuery | null>(null)
+// Register a refresh that re-runs the current report query (if any) for the
+// command palette's "refresh page".
+useRegisterViewRefresh(() => {
+  if (submittedQuery.value) handleSearch()
+})
 
 const pnlClass = computed(() => {
   if (!reportData.value) return ''
