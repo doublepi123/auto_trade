@@ -4,7 +4,7 @@ import importlib
 import inspect
 import pkgutil
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from app.platform.sdk import Strategy
 
@@ -17,12 +17,21 @@ class StrategyMeta:
     strategy_class: type[Strategy]
 
 
+def _instantiate_strategy(strategy_class: type[Strategy]) -> Strategy:
+    """Create a strategy instance, tolerating both params and no-params constructors."""
+    cls: Any = strategy_class
+    try:
+        return cls()
+    except TypeError:
+        return cls(params={})
+
+
 class StrategyRegistry:
     def __init__(self) -> None:
         self._strategies: dict[str, type[Strategy]] = {}
 
     def register(self, strategy_class: type[Strategy]) -> None:
-        instance = strategy_class(params={})
+        instance = _instantiate_strategy(strategy_class)
         name = instance.name
         if name in self._strategies:
             raise ValueError(f"Strategy '{name}' already registered")
@@ -36,7 +45,7 @@ class StrategyRegistry:
     def list(self) -> list[StrategyMeta]:
         result = []
         for name, cls in self._strategies.items():
-            instance = cls(params={})
+            instance = _instantiate_strategy(cls)
             result.append(
                 StrategyMeta(
                     name=instance.name,
@@ -63,7 +72,7 @@ class StrategyRegistry:
                 if not all(hasattr(obj, attr) for attr in required):
                     continue
                 try:
-                    instance = obj(params={})
+                    instance = _instantiate_strategy(obj)
                     if not isinstance(instance, Strategy):
                         continue
                 except Exception:
