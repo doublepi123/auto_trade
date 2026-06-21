@@ -1,4 +1,5 @@
 <template>
+  <el-config-provider :size="densitySize">
   <el-container class="app-container">
     <!-- 桌面端顶部导航 -->
     <el-header v-if="!isMobile" class="app-header" data-testid="desktop-nav">
@@ -28,6 +29,14 @@
           title="命令面板 (Cmd/Ctrl+K)"
           @click="palette.openPalette()"
           >⌘K</el-button
+        >
+        <el-button
+          size="small"
+          text
+          data-testid="nav-density"
+          title="切换界面密度"
+          @click="cycleDensity"
+          >密度：{{ densityLabel }}</el-button
         >
         <el-popover placement="bottom" :width="260" trigger="click" data-testid="nav-health-popover">
           <template #reference>
@@ -148,6 +157,7 @@
       </router-link>
     </nav>
   </el-container>
+  </el-config-provider>
 </template>
 
 <script setup lang="ts">
@@ -161,6 +171,7 @@ import { useConnectionHealth } from './composables/useConnectionHealth'
 import { useMarketSession } from './composables/useMarketSession'
 import { useCommandPalette } from './composables/useCommandPalette'
 import { useRecentPages } from './composables/useRecentPages'
+import { useDensity } from './composables/useDensity'
 import MetricStat from './components/MetricStat.vue'
 import CommandPalette from './components/CommandPalette.vue'
 import { engineStateLabel } from './utils/labels'
@@ -179,6 +190,17 @@ const { unreadCount } = useNotificationBadge()
 const health = useConnectionHealth()
 const palette = useCommandPalette()
 const { recordVisit } = useRecentPages()
+const { size: densitySize, cycleDensity } = useDensity()
+const densityLabel = computed(() => {
+  switch (densitySize.value) {
+    case 'small':
+      return '紧凑'
+    case 'large':
+      return '宽松'
+    default:
+      return '标准'
+  }
+})
 // Track page visits for the command palette's "recent" ordering.
 watch(
   () => route.path,
