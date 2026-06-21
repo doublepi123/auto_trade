@@ -137,9 +137,12 @@
       </div>
     </div>
 
-    <div v-if="displayedItems.length === 0" class="notif-empty">
-      <el-empty description="没有匹配的通知" />
-    </div>
+    <DataState
+      v-if="displayedItems.length === 0"
+      class="notif-empty"
+      empty
+      empty-text="没有匹配的通知"
+    />
 
     <div v-else-if="viewMode === 'cards' && groupMode === 'result'" class="notif-result-groups" data-testid="notif-result-groups">
       <div v-for="group in resultGroups" :key="group.label" class="day-group">
@@ -320,6 +323,7 @@ import { exportNotifications, getNotifications, retryNotification } from '../api
 import { useNotificationBadge } from '../composables/useNotificationBadge'
 import type { NotificationLogOut } from '../types'
 import { resolveErrorMessage } from '../utils/error'
+import DataState from '../components/DataState.vue'
 
 const POLL_INTERVAL_MS = 10000
 const { unreadCount, markAllRead, isItemUnread, refresh: refreshBadge } = useNotificationBadge()

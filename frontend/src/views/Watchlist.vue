@@ -200,9 +200,11 @@
       <div v-if="items.length > 0 && filteredItems.length === 0 && !loading" data-testid="watchlist-filter-empty" style="text-align: center; color: #909399; padding: 32px">
         没有匹配的观察标的，请调整筛选条件
       </div>
-      <div v-if="items.length === 0 && !loading" style="text-align: center; color: #909399; padding: 32px">
-        暂无观察标的，请添加股票代码
-      </div>
+      <DataState
+        v-if="items.length === 0 && !loading"
+        empty
+        empty-text="暂无观察标的，请添加股票代码"
+      />
     </el-card>
 
     <el-dialog v-model="bulkDeleteDialog" title="确认批量删除" width="360px">
@@ -266,6 +268,7 @@ import {
 } from '../api/watchlist'
 import { formatCurrency } from '../utils/format'
 import { resolveErrorMessage } from '../utils/error'
+import DataState from '../components/DataState.vue'
 import { downloadCsv } from '../utils/csv'
 
 const items = ref<WatchlistItem[]>([])
