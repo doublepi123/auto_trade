@@ -133,8 +133,9 @@
 </template>
 
 <script setup lang="ts">
-import { defineAsyncComponent, computed, ref, onMounted, onUnmounted } from 'vue'
+import { defineAsyncComponent, computed, ref, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { ElMessage } from 'element-plus'
 import { Odometer, Setting, List, Clock, Key, TrendCharts } from '@element-plus/icons-vue'
 import { useNotificationStream } from './composables/useNotificationStream'
 import { useNotificationBadge } from './composables/useNotificationBadge'
@@ -194,6 +195,24 @@ const healthAgeLabel = computed(() =>
   hasFreshData.value ? relativeAgeLabel(health.ageSeconds.value) : '—',
 )
 const healthAgeClass = computed(() => `health-age-${ageFreshnessClass(health.ageSeconds.value)}`)
+
+// Reconnection feedback: warn the user when the realtime stream drops to
+// 'reconnecting' and confirm when it recovers to 'connected'. Only fires on
+// genuine state transitions (debounced by the watcher itself), and only
+// reports recovery after an actual drop — not the initial connect. 'polling'
+// is a steady degraded state, not a transient drop, so it is left silent.
+let prevHealthState = health.realtimeStatus.value
+let healthDropped = false
+watch(health.realtimeStatus, (next) => {
+  if (next === 'reconnecting' && prevHealthState !== 'reconnecting') {
+    healthDropped = true
+    ElMessage.warning({ message: '实时连接断开，正在重连…', duration: 3000 })
+  } else if (next === 'connected' && prevHealthState !== 'connected' && healthDropped) {
+    ElMessage.success({ message: '实时连接已恢复', duration: 2000 })
+    healthDropped = false
+  }
+  prevHealthState = next
+})
 
 // Global market-session awareness banner: surfaces a dismissible warning when
 // the primary symbol's market is outside regular trading hours, so the user
