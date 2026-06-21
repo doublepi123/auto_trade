@@ -164,8 +164,16 @@ result: {{ row.result || '-' }}</pre>
       <el-table-column prop="symbol" label="标的" min-width="110" sortable>
         <template #default="{ row }">{{ row.symbol || '-' }}</template>
       </el-table-column>
-      <el-table-column prop="broker_order_id" label="订单号" min-width="180">
-        <template #default="{ row }">{{ row.broker_order_id || '-' }}</template>
+      <el-table-column prop="broker_order_id" label="订单号" min-width="200">
+        <template #default="{ row }">
+          <span>{{ row.broker_order_id || '-' }}</span>
+          <CopyButton
+            v-if="row.broker_order_id"
+            :value="row.broker_order_id"
+            test-id="timeline-order-copy"
+            :feedback="false"
+          />
+        </template>
       </el-table-column>
       <el-table-column prop="side" label="方向" min-width="100">
         <template #default="{ row }">{{ row.side ? orderSideLabel(row.side) : '-' }}</template>
@@ -253,6 +261,7 @@ import { exportTradeEvents, getTradeEvents, getLLMInteraction } from '../api'
 import type { TimelineSource, TradeEventRecord, LLMInteractionDetail } from '../types'
 import { auditActionLabel, orderSideLabel, skipCategoryLabel, tradeEventTypeLabel } from '../utils/labels'
 import { EVENT_TYPE } from '../utils/constants'
+import CopyButton from '../components/CopyButton.vue'
 
 type Row = TradeEventRecord & { row_uid: string }
 

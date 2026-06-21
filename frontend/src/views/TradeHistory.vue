@@ -25,7 +25,14 @@
       <el-checkbox v-model="onlyWithNotes" data-testid="orders-only-notes">仅看有笔记 ({{ notesByOrder.size }})</el-checkbox>
     </div>
     <el-table :data="filteredOrders" stripe style="width: 100%" v-loading="loading" @row-click="openOrderDrawer">
-      <el-table-column prop="broker_order_id" label="订单号" width="180" />
+      <el-table-column prop="broker_order_id" label="订单号" width="210">
+        <template #default="{ row }">
+          <span>{{ row.broker_order_id || '-' }}</span>
+          <span v-if="row.broker_order_id" class="order-id-copy" @click.stop>
+            <CopyButton :value="row.broker_order_id" test-id="order-copy" :feedback="false" />
+          </span>
+        </template>
+      </el-table-column>
       <el-table-column prop="symbol" label="股票代码" width="120" />
       <el-table-column prop="source" label="来源" width="90">
         <template #default="{ row }">
@@ -451,6 +458,7 @@ import type {
 import { orderSideLabel, orderStatusLabel } from '../utils/labels'
 import { resolveErrorMessage } from '../utils/error'
 import { downloadCsv } from '../utils/csv'
+import CopyButton from '../components/CopyButton.vue'
 
 const orders = ref<OrderRecord[]>([])
 const loading = ref(false)
