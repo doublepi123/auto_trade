@@ -124,6 +124,8 @@ class Settings(BaseSettings):
         "max_consecutive_losses": 3,
     })
 
+    platform_mode: bool = Field(default=False, validation_alias="AUTO_TRADE_PLATFORM_MODE")
+
     @model_validator(mode="after")
     def merge_longbridge_credentials(self) -> "Settings":
         self.longbridge_app_key = self.longbridge_app_key or self.longport_app_key or self.legacy_longbridge_app_key

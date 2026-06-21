@@ -22,7 +22,7 @@ class StrategyRegistry:
         self._strategies: dict[str, type[Strategy]] = {}
 
     def register(self, strategy_class: type[Strategy]) -> None:
-        instance = strategy_class()
+        instance = strategy_class(params={})
         name = instance.name
         if name in self._strategies:
             raise ValueError(f"Strategy '{name}' already registered")
@@ -36,7 +36,7 @@ class StrategyRegistry:
     def list(self) -> list[StrategyMeta]:
         result = []
         for name, cls in self._strategies.items():
-            instance = cls()
+            instance = cls(params={})
             result.append(
                 StrategyMeta(
                     name=instance.name,
@@ -57,8 +57,18 @@ class StrategyRegistry:
             for _, obj in inspect.getmembers(module, inspect.isclass):
                 if obj is Strategy:
                     continue
-                if issubclass(obj, Strategy):
-                    self.register(obj)
+                if not inspect.isclass(obj):
+                    continue
+                required = ("name", "version", "parameter_schema", "on_bar", "on_quote", "on_fill")
+                if not all(hasattr(obj, attr) for attr in required):
+                    continue
+                try:
+                    instance = obj(params={})
+                    if not isinstance(instance, Strategy):
+                        continue
+                except Exception:
+                    continue
+                self.register(obj)
 
 
 def get_default_registry() -> StrategyRegistry:
