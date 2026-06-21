@@ -44,6 +44,28 @@
         <el-button link size="small" @click="router.push('/notifications')">查看全部</el-button>
       </div>
 
+      <el-alert
+        v-if="statusStale"
+        class="cockpit-stale-alert"
+        data-testid="dashboard-stale-alert"
+        type="warning"
+        :closable="false"
+        show-icon
+        @click="reconnectNow()"
+      >
+        <template #title>
+          行情数据已 {{ staleAgeLabel }} 未更新，显示可能延迟
+          <el-button
+            link
+            type="primary"
+            size="small"
+            data-testid="stale-reconnect"
+            @click.stop="reconnectNow()"
+            >立即重连</el-button
+          >
+        </template>
+      </el-alert>
+
       <div class="status-strip" data-testid="status-strip" v-loading="statusLoading || strategyLoading">
         <div class="strip-item">
           <span>标的</span>
@@ -84,6 +106,7 @@
         <section class="cockpit-panel price-panel" data-testid="price-panel" v-loading="statusLoading || strategyLoading">
           <div class="panel-heading">
             <span>最新价格</span>
+            <el-tag v-if="statusStale" type="warning" size="small" data-testid="price-stale-tag">{{ staleAgeLabel }}</el-tag>
             <el-tag :type="stateTagType">{{ engineStateLabel(status.engine_state) }}</el-tag>
           </div>
           <div class="price-value">${{ formatNumber(status.last_price) }}</div>
@@ -589,6 +612,7 @@ import type { LLMIntervalStatus, NotificationLogOut, OrderRecord, Position, Stat
 import { engineStateLabel, auditActionLabel, marketLabel, positionSideLabel, skipCategoryLabel, tradeEventTypeLabel } from '../utils/labels'
 import { EVENT_TYPE } from '../utils/constants'
 import { downloadCsv } from '../utils/csv'
+import { relativeAgeLabel } from '../utils/time'
 
 type CypressWindow = Window & { Cypress?: unknown }
 const multiSymbols = useMultiSymbolSnapshots()
@@ -606,6 +630,9 @@ const {
   realtimeStatus,
   connectionLabel: realtimeStatusLabel,
   connectionTagType: realtimeStatusType,
+  ageSeconds,
+  lastDataAt,
+  reconnectNow,
 } = useConnectionHealth()
 const { account, accountError, accountLoading, accountRefreshing, refresh: refreshAccount } = useAccountRefresh(accountRefreshIntervalMs)
 
@@ -655,6 +682,16 @@ const stateTagType = computed(() => {
     default: return 'info'
   }
 })
+
+// Data-staleness watermark: once we have heard from the server at all, flag the
+// cockpit when the shared status stream has gone quiet long enough that the
+// displayed price / PnL may no longer reflect reality. Surfaces the same age
+// the global badge uses, but inline where the numbers live.
+const STALE_DATA_THRESHOLD_SECONDS = 15
+const statusStale = computed(
+  () => lastDataAt.value > 0 && ageSeconds.value >= STALE_DATA_THRESHOLD_SECONDS,
+)
+const staleAgeLabel = computed(() => relativeAgeLabel(ageSeconds.value))
 
 const primaryPosition = computed<Position | null>(() => {
   if (account.value.positions.length === 0) return null
@@ -1256,6 +1293,11 @@ function severityType(s: string): string {
 
 .session-dot-neutral {
   background: #cbd5e1;
+}
+
+.cockpit-stale-alert {
+  margin-bottom: 12px;
+  cursor: pointer;
 }
 
 .cockpit-grid {
