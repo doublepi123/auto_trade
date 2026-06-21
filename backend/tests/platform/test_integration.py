@@ -57,3 +57,7 @@ def test_full_backtest_round_trip():
     replayer.replay(bus=replay_bus)
 
     assert len(replay_fills) == len(fills)
+    assert replay_fills[0].side == "BUY"
+    assert replay_fills[1].side == "SELL"
+    assert replay_fills[0].quantity == fills[0].quantity
+    assert replay_fills[0].price == fills[0].price
