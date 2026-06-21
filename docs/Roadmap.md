@@ -37,6 +37,36 @@
 
 ---
 
+## 近期已完成迭代 (2026-06-21) — 运维效率与个性化（10 轮 P139–P148）
+
+> 自主 feature 迭代第 15 批（10 轮）。主题：高级用户效率层 + 可持久化个性化。承接 P129–P138 的运营健康基础（复用 `useConnectionHealth`、`useSymbolStore`、`utils/clipboard.ts`）。全部**纯前端**，复用既有 API，**不新增后端端点、不新增表、不触碰 broker/order/runner/risk 写路径**。规格：[2026-06-21-p139-p148-power-user-productivity-design.md](superpowers/specs/2026-06-21-p139-p148-power-user-productivity-design.md)。
+
+| 代号 | 主题 | 页面 / 组件 | 状态 |
+|------|------|-------------|------|
+| **P139** | 命令面板 shell（Cmd/Ctrl+K）：分组命令 / fuzzy / 键盘导航 / 最近使用 | `CommandPalette.vue` + App.vue | ✅ |
+| **P140** | 面板：标的速跳（strategy + watchlist → 仪表盘图表） | `useSymbolStore` + Dashboard | ✅ |
+| **P141** | 面板：最近访问页面排序（路由访问驱动） | `useRecentPages` + App.vue | ✅ |
+| **P142** | 全局密度切换（el-config-provider，持久化） | `useDensity` + App.vue | ✅ |
+| **P143** | NotificationCenter 表格列显隐（级别/结果/错误，持久化） | `usePersistedColumns` + NotificationCenter | ✅ |
+| **P144** | DecisionTimeline 行键盘导航（↑/↓/j/k + Enter 详情） | DecisionTimeline | ✅ |
+| **P145** | `/` 聚焦搜索快捷键（跨视图）+ Esc 失焦 | App.vue + 4 视图 | ✅ |
+| **P146** | 仪表盘固定标的速跳栏（📌 + chip） | `usePinnedSymbols` + Dashboard | ✅ |
+| **P147** | 面板「刷新当前页」命令（视图刷新注册表） | `useViewRefreshRegistry` + Dashboard/Watchlist/Reports | ✅ |
+| **P148** | 统一帮助抽屉（快捷键 + tips，取代旧 dialog） | App.vue | ✅ |
+
+**设计要点：**
+- **命令面板**：模块单例 `useCommandPalette`；`Cmd/Ctrl+K` 在 App.vue 的 `handleKeydown` 修饰键守卫之前拦截；纯前端 fuzzy 子串评分（无新依赖）；导航/控制/标的/工具分组；最近使用持久化。控制命令复用既有 `api` 客户端（破坏性动作 ElMessageBox 确认）+ `useConnectionHealth.refreshNow()` 同步状态。
+- **个性化持久化**：密度、列显隐、固定标的、最近页面、最近命令 → 统一 `auto_trade.*` localStorage 命名空间。
+- **跨视图刷新**：因 provide/inject 只能父→子，而面板在视图祖先，改用 `useViewRefreshRegistry` 模块单例桥接（视图 mount 注册、unmount 仅在仍持有者时清空）。
+- **键盘守卫**：`/`、`j/k`、单字母导航仅在非输入框聚焦时生效（复用 `isTypingTarget`）；面板内部键由其自身处理。
+- **回归保护**：列显隐默认全显；帮助抽屉保留 `nav-shortcuts` / `shortcuts-dialog` testid + 页面导航列表（含「仪表盘」），既有 `keyboard_shortcuts.cy.ts` 不受影响。
+
+**验证：** `vue-tsc` 0 errors、`npm run build` 通过；`build:check-chunks`（35 chunks，max 512 KB）、`build:check-element-plus`（7 chunks）均不退步；新增 `command_palette.cy.ts`。后端 `pytest` 不受影响（纯前端）。本机无法 headless 运行 Cypress，按既有约定仅类型/构建校验，spec 交 CI。
+
+**显式 YAGNI 未做：** 自定义快捷键绑定、命令面板插件化、i18n、服务端用户偏好同步、列拖拽重排、面板命令历史撤销、图表主题随密度联动。
+
+---
+
 ## 近期已完成迭代 (2026-06-21) — 运营健康与数据可信度（10 轮 P129–P138）
 
 > 自主 feature 迭代第 14 批（10 轮）。主题：把「数据可信度 / 连接健康」显式化、全局化。全部**纯前端**，复用既有 `/api/status`、`/api/calendar/session` 等只读响应，**不新增后端端点、不新增表、不触碰 broker/order/runner/risk 写路径**。规格：[2026-06-21-p129-p138-operational-health-data-trust-design.md](superpowers/specs/2026-06-21-p129-p138-operational-health-data-trust-design.md)。
