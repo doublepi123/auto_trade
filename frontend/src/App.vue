@@ -85,6 +85,20 @@
 
     <!-- 主内容区 -->
     <el-main :class="{ 'mobile-main': isMobile }">
+      <el-alert
+        v-if="sessionBannerVisible"
+        class="session-banner"
+        data-testid="session-banner"
+        type="warning"
+        show-icon
+        :closable="true"
+        :title="sessionBannerTitle"
+        @close="dismissSession()"
+      >
+        <span class="session-banner-desc">
+          当前处于{{ sessionPhaseLabel }}时段，行情推送与策略动作可能受限（仅含常规 RTH 窗口，不含节假日历）。
+        </span>
+      </el-alert>
       <router-view />
     </el-main>
 
@@ -125,6 +139,7 @@ import { Odometer, Setting, List, Clock, Key, TrendCharts } from '@element-plus/
 import { useNotificationStream } from './composables/useNotificationStream'
 import { useNotificationBadge } from './composables/useNotificationBadge'
 import { useConnectionHealth } from './composables/useConnectionHealth'
+import { useMarketSession } from './composables/useMarketSession'
 import { engineStateLabel } from './utils/labels'
 import { ageFreshnessClass, relativeAgeLabel } from './utils/time'
 
@@ -178,6 +193,17 @@ const healthAgeLabel = computed(() =>
   hasFreshData.value ? relativeAgeLabel(health.ageSeconds.value) : '—',
 )
 const healthAgeClass = computed(() => `health-age-${ageFreshnessClass(health.ageSeconds.value)}`)
+
+// Global market-session awareness banner: surfaces a dismissible warning when
+// the primary symbol's market is outside regular trading hours, so the user
+// knows quote pushes / strategy actions may be limited. Distinct from the
+// Dashboard SessionClockPanel (which shows the next-open countdown).
+const {
+  showBanner: sessionBannerVisible,
+  phaseLabel: sessionPhaseLabel,
+  dismiss: dismissSession,
+} = useMarketSession()
+const sessionBannerTitle = computed(() => `当前为${sessionPhaseLabel.value}，非常规交易时段`)
 const MOBILE_BREAKPOINT = 768
 const isMobile = ref(window.innerWidth <= MOBILE_BREAKPOINT)
 
@@ -437,5 +463,13 @@ onUnmounted(() => {
 }
 .health-reconnect {
   align-self: flex-start;
+}
+
+.session-banner {
+  margin-bottom: 12px;
+}
+.session-banner-desc {
+  font-size: 12px;
+  color: #6b7280;
 }
 </style>
