@@ -579,7 +579,7 @@ import EquityCurvePanel from '../components/EquityCurvePanel.vue'
 import SymbolAttributionPanel from '../components/SymbolAttributionPanel.vue'
 import SessionClockPanel from '../components/SessionClockPanel.vue'
 import { useDashboardData } from '../composables/useDashboardData'
-import { useStatusStream } from '../composables/useStatusStream'
+import { useConnectionHealth } from '../composables/useConnectionHealth'
 import { useAccountRefresh } from '../composables/useAccountRefresh'
 import { useMultiSymbolSnapshots } from '../composables/useMultiSymbolSnapshots'
 import { useStatusHistorySeries } from '../composables/useStatusHistorySeries'
@@ -602,7 +602,11 @@ const {
 const selectedChartSymbol = ref('')
 const accountRefreshIntervalMs = (window as CypressWindow).Cypress ? 500 : 10000
 const { strategy, status, strategyLoading, statusLoading, loadError, load, refreshStatus } = useDashboardData()
-const { realtimeStatus } = useStatusStream(status)
+const {
+  realtimeStatus,
+  connectionLabel: realtimeStatusLabel,
+  connectionTagType: realtimeStatusType,
+} = useConnectionHealth()
 const { account, accountError, accountLoading, accountRefreshing, refresh: refreshAccount } = useAccountRefresh(accountRefreshIntervalMs)
 
 const router = useRouter()
@@ -648,24 +652,6 @@ const stateTagType = computed(() => {
   switch (status.value.engine_state) {
     case 'long': return 'success'
     case 'short': return 'danger'
-    default: return 'info'
-  }
-})
-
-const realtimeStatusLabel = computed(() => {
-  switch (realtimeStatus.value) {
-    case 'connected': return '实时连接正常'
-    case 'reconnecting': return '实时重连中'
-    case 'polling': return '轮询兜底'
-    default: return '实时连接中'
-  }
-})
-
-const realtimeStatusType = computed(() => {
-  switch (realtimeStatus.value) {
-    case 'connected': return 'success'
-    case 'reconnecting': return 'warning'
-    case 'polling': return 'info'
     default: return 'info'
   }
 })

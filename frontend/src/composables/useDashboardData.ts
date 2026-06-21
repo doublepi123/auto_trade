@@ -1,7 +1,8 @@
 import { ref } from 'vue'
 import { getStrategy, getStatus } from '../api'
-import type { StrategyConfig, StatusData } from '../types'
+import type { StrategyConfig } from '../types'
 import { PROMISE_STATUS } from '../utils/constants'
+import { useConnectionHealth } from './useConnectionHealth'
 
 const defaultStrategy: StrategyConfig = {
   id: 0, symbol: '', market: 'US', buy_low: 0, sell_high: 0,
@@ -20,17 +21,12 @@ const defaultStrategy: StrategyConfig = {
   updated_at: '',
 }
 
-const defaultStatus: StatusData = {
-  engine_state: 'flat', paused: false, kill_switch: false, runner_running: false,
-  daily_pnl: 0, consecutive_losses: 0,
-  last_price: 0, last_trigger_price: 0, last_trigger_at: null, last_action_message: '',
-  trading_session_mode: 'ANY',
-  is_trading_hours: true,
-}
-
 export function useDashboardData() {
+  // `status` is the app-wide singleton owned by useConnectionHealth so the
+  // global health badge and the Dashboard cockpit always agree, and a REST
+  // refresh here marks the shared stream fresh.
+  const { status, markFresh } = useConnectionHealth()
   const strategy = ref<StrategyConfig>({ ...defaultStrategy })
-  const status = ref<StatusData>({ ...defaultStatus })
   const initialLoading = ref(true)
   const loadError = ref(false)
   const strategyLoading = ref(true)
@@ -46,7 +42,7 @@ export function useDashboardData() {
       .then((s) => { strategy.value = s })
       .finally(() => { strategyLoading.value = false })
     const statusPromise = getStatus()
-      .then((st) => { status.value = st })
+      .then((st) => { status.value = st; markFresh() })
       .finally(() => { statusLoading.value = false })
 
     const results = await Promise.allSettled([strategyPromise, statusPromise])
@@ -63,6 +59,7 @@ export function useDashboardData() {
     statusLoading.value = true
     try {
       status.value = await getStatus()
+      markFresh()
       loadError.value = false
     } catch {
       loadError.value = true

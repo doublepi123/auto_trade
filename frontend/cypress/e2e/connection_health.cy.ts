@@ -1,0 +1,32 @@
+describe('Global connection health', () => {
+  beforeEach(() => {
+    cy.visitApp('/')
+    cy.contains('仪表盘', { timeout: 10000 }).should('be.visible')
+  })
+
+  it('shows the health badge in the desktop header', () => {
+    cy.get('[data-testid="desktop-nav"]').should('be.visible')
+    cy.get('[data-testid="nav-health"]').should('be.visible').and('contain', '轮询')
+  })
+
+  it('opens a health popover with connection + runner state', () => {
+    cy.get('[data-testid="nav-health"]').click()
+    cy.get('[data-testid="health-panel"]').should('be.visible')
+    cy.get('[data-testid="health-panel"]').should('contain', '实时连接')
+    cy.get('[data-testid="health-panel"]').should('contain', '运行器')
+    cy.get('[data-testid="health-reconnect"]').should('be.visible')
+  })
+
+  it('keeps polling mode after clicking reconnect under Cypress', () => {
+    cy.get('[data-testid="nav-health"]').click()
+    cy.get('[data-testid="health-reconnect"]').click()
+    cy.get('[data-testid="nav-health"]').should('contain', '轮询')
+  })
+
+  it('keeps the badge visible after navigating away from the dashboard', () => {
+    cy.get('[data-testid="nav-health"]').should('contain', '轮询')
+    cy.contains('a', '观察列表').click()
+    cy.contains('观察列表', { timeout: 10000 }).should('be.visible')
+    cy.get('[data-testid="nav-health"]').should('be.visible').and('contain', '轮询')
+  })
+})

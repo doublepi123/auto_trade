@@ -21,6 +21,37 @@
         <router-link to="/lab" class="app-menu-link" :class="{ active: route.path === '/lab' }">优化工作台</router-link>
       </nav>
       <div class="header-actions">
+        <el-popover placement="bottom" :width="260" trigger="click" data-testid="nav-health-popover">
+          <template #reference>
+            <el-button size="small" text data-testid="nav-health">
+              <span class="health-dot" :class="healthDotClass" />
+              {{ healthLabel }}
+            </el-button>
+          </template>
+          <div class="health-panel" data-testid="health-panel">
+            <div class="health-row">
+              <span>实时连接</span>
+              <strong>{{ health.connectionLabel.value }}</strong>
+            </div>
+            <div class="health-row">
+              <span>运行器</span>
+              <strong>{{ health.status.value.runner_running ? '运行中' : '未启动' }}</strong>
+            </div>
+            <div class="health-row">
+              <span>引擎状态</span>
+              <strong>{{ engineStateLabel(health.status.value.engine_state) }}</strong>
+            </div>
+            <el-button
+              size="small"
+              type="primary"
+              plain
+              class="health-reconnect"
+              data-testid="health-reconnect"
+              @click="health.reconnectNow()"
+              >重新连接</el-button
+            >
+          </div>
+        </el-popover>
         <el-button size="small" text @click="dialogVisible = true" data-testid="nav-notification-settings"
           >通知偏好</el-button
         >
@@ -76,11 +107,13 @@
 </template>
 
 <script setup lang="ts">
-import { defineAsyncComponent, ref, onMounted, onUnmounted } from 'vue'
+import { defineAsyncComponent, computed, ref, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Odometer, Setting, List, Clock, Key, TrendCharts } from '@element-plus/icons-vue'
 import { useNotificationStream } from './composables/useNotificationStream'
 import { useNotificationBadge } from './composables/useNotificationBadge'
+import { useConnectionHealth } from './composables/useConnectionHealth'
+import { engineStateLabel } from './utils/labels'
 
 const NotificationSettings = defineAsyncComponent(() => import('./components/NotificationSettings.vue'))
 
@@ -89,6 +122,33 @@ const router = useRouter()
 const dialogVisible = ref(false)
 const notifications = useNotificationStream()
 const { unreadCount } = useNotificationBadge()
+// Boot the app-wide realtime connection here so the health badge is accurate
+// on every page, not only when the Dashboard is mounted.
+const health = useConnectionHealth()
+
+// Short badge label + coloured dot derived from the shared connection state.
+const healthLabel = computed(() => {
+  switch (health.realtimeStatus.value) {
+    case 'connected':
+      return '实时'
+    case 'reconnecting':
+      return '重连中'
+    case 'polling':
+      return '轮询'
+    default:
+      return '连接中'
+  }
+})
+const healthDotClass = computed(() => {
+  switch (health.realtimeStatus.value) {
+    case 'connected':
+      return 'health-dot-ok'
+    case 'reconnecting':
+      return 'health-dot-warn'
+    default:
+      return 'health-dot-info'
+  }
+})
 const MOBILE_BREAKPOINT = 768
 const isMobile = ref(window.innerWidth <= MOBILE_BREAKPOINT)
 
@@ -295,5 +355,42 @@ onUnmounted(() => {
   border-radius: 4px;
   font-family: ui-monospace, monospace;
   font-size: 12px;
+}
+
+.health-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: #909399;
+}
+.health-dot-ok {
+  background: #67c23a;
+}
+.health-dot-warn {
+  background: #e6a23c;
+}
+.health-dot-info {
+  background: #409eff;
+}
+
+.health-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 13px;
+}
+.health-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.health-row span {
+  color: #6b7280;
+}
+.health-reconnect {
+  align-self: flex-start;
 }
 </style>
