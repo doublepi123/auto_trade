@@ -33,8 +33,8 @@ class IntervalStrategy:
             "type": "object",
             "required": ["buy_low", "sell_high", "quantity"],
             "properties": {
-                "buy_low": {"type": "string"},
-                "sell_high": {"type": "string"},
+                "buy_low": {"type": "number"},
+                "sell_high": {"type": "number"},
                 "quantity": {"type": "integer"},
             },
         }
