@@ -25,13 +25,25 @@
           <template #reference>
             <el-button size="small" text data-testid="nav-health">
               <span class="health-dot" :class="healthDotClass" />
-              {{ healthLabel }}
+              {{ healthLabel }}<span
+                v-if="healthAgeSuffix"
+                class="health-age"
+                :class="healthAgeClass"
+                data-testid="nav-health-age"
+                >{{ healthAgeSuffix }}</span
+              >
             </el-button>
           </template>
           <div class="health-panel" data-testid="health-panel">
             <div class="health-row">
               <span>实时连接</span>
               <strong>{{ health.connectionLabel.value }}</strong>
+            </div>
+            <div class="health-row">
+              <span>数据年龄</span>
+              <strong :class="healthAgeClass" data-testid="health-age">{{
+                healthAgeLabel
+              }}</strong>
             </div>
             <div class="health-row">
               <span>运行器</span>
@@ -114,6 +126,7 @@ import { useNotificationStream } from './composables/useNotificationStream'
 import { useNotificationBadge } from './composables/useNotificationBadge'
 import { useConnectionHealth } from './composables/useConnectionHealth'
 import { engineStateLabel } from './utils/labels'
+import { ageFreshnessClass, relativeAgeLabel } from './utils/time'
 
 const NotificationSettings = defineAsyncComponent(() => import('./components/NotificationSettings.vue'))
 
@@ -149,6 +162,22 @@ const healthDotClass = computed(() => {
       return 'health-dot-info'
   }
 })
+
+// Data-age signal: only meaningful once we've actually heard from the server,
+// and suppressed while (re)connecting so the badge doesn't flash a stale age.
+const hasFreshData = computed(() => health.lastDataAt.value > 0)
+const showAge = computed(() => {
+  if (!hasFreshData.value) return false
+  const st = health.realtimeStatus.value
+  return st === 'connected' || st === 'polling'
+})
+const healthAgeSuffix = computed(() =>
+  showAge.value ? ` · ${relativeAgeLabel(health.ageSeconds.value)}` : '',
+)
+const healthAgeLabel = computed(() =>
+  hasFreshData.value ? relativeAgeLabel(health.ageSeconds.value) : '—',
+)
+const healthAgeClass = computed(() => `health-age-${ageFreshnessClass(health.ageSeconds.value)}`)
 const MOBILE_BREAKPOINT = 768
 const isMobile = ref(window.innerWidth <= MOBILE_BREAKPOINT)
 
@@ -373,6 +402,22 @@ onUnmounted(() => {
 }
 .health-dot-info {
   background: #409eff;
+}
+
+/* Data-age freshness colour coding (ok < 10s, warn 10–30s, danger > 30s). */
+.health-age {
+  margin-left: 2px;
+  font-size: 12px;
+  color: #909399;
+}
+.health-age-ok {
+  color: #909399;
+}
+.health-age-warn {
+  color: #e6a23c;
+}
+.health-age-danger {
+  color: #f56c6c;
 }
 
 .health-panel {

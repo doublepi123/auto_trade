@@ -29,4 +29,12 @@ describe('Global connection health', () => {
     cy.contains('观察列表', { timeout: 10000 }).should('be.visible')
     cy.get('[data-testid="nav-health"]').should('be.visible').and('contain', '轮询')
   })
+
+  it('surfaces data age in the badge and popover once a poll lands', () => {
+    // The 3s poll marks the stream fresh on success; the age suffix + popover
+    // age row then appear.
+    cy.get('[data-testid="nav-health-age"]', { timeout: 12000 }).should('exist')
+    cy.get('[data-testid="nav-health"]').click()
+    cy.get('[data-testid="health-age"]').should('not.contain', '—')
+  })
 })
