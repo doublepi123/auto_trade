@@ -53,15 +53,23 @@
               label="引擎状态"
               :value="engineStateLabel(health.status.value.engine_state)"
             />
-            <el-button
-              size="small"
-              type="primary"
-              plain
-              class="health-reconnect"
-              data-testid="health-reconnect"
-              @click="health.reconnectNow()"
-              >重新连接</el-button
-            >
+            <div class="health-actions">
+              <el-button
+                size="small"
+                type="primary"
+                plain
+                data-testid="health-reconnect"
+                @click="health.reconnectNow()"
+                >重新连接</el-button
+              >
+              <el-button
+                size="small"
+                plain
+                data-testid="health-copy-snapshot"
+                @click="copyHealthSnapshot"
+                >复制健康快照</el-button
+              >
+            </div>
           </div>
         </el-popover>
         <el-button size="small" text @click="dialogVisible = true" data-testid="nav-notification-settings"
@@ -144,6 +152,7 @@ import { useMarketSession } from './composables/useMarketSession'
 import MetricStat from './components/MetricStat.vue'
 import { engineStateLabel } from './utils/labels'
 import { ageFreshnessClass, relativeAgeLabel } from './utils/time'
+import { copyText } from './utils/clipboard'
 
 const NotificationSettings = defineAsyncComponent(() => import('./components/NotificationSettings.vue'))
 
@@ -221,9 +230,35 @@ watch(health.realtimeStatus, (next) => {
 const {
   showBanner: sessionBannerVisible,
   phaseLabel: sessionPhaseLabel,
+  session: sessionData,
   dismiss: dismissSession,
 } = useMarketSession()
 const sessionBannerTitle = computed(() => `当前为${sessionPhaseLabel.value}，非常规交易时段`)
+
+// One-click bug-report helper: copy a plain-text snapshot of the live
+// connection / runner / engine / session state so it can be pasted into a
+// support ticket. Reads the same shared signals the badge and popover show.
+async function copyHealthSnapshot(): Promise<void> {
+  const lines = [
+    'Auto Trade 健康快照',
+    `时间: ${new Date().toLocaleString()}`,
+    `实时连接: ${health.connectionLabel.value}`,
+    `数据年龄: ${healthAgeLabel.value}`,
+    `运行器: ${health.status.value.runner_running ? '运行中' : '未启动'}`,
+    `引擎状态: ${engineStateLabel(health.status.value.engine_state)}`,
+  ]
+  const sess = sessionData.value
+  if (sess) {
+    lines.push(`交易时段: ${sessionPhaseLabel.value || sess.status}`)
+    lines.push(`标的: ${sess.symbol || '-'} (${sess.market})`)
+  }
+  const ok = await copyText(lines.join('\n'))
+  if (ok) {
+    ElMessage.success('健康快照已复制')
+  } else {
+    ElMessage.error('复制失败，请手动选择文本')
+  }
+}
 const MOBILE_BREAKPOINT = 768
 const isMobile = ref(window.innerWidth <= MOBILE_BREAKPOINT)
 
@@ -483,6 +518,13 @@ onUnmounted(() => {
 }
 .health-reconnect {
   align-self: flex-start;
+}
+
+.health-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
 }
 
 .session-banner {

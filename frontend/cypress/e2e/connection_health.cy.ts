@@ -30,6 +30,11 @@ describe('Global connection health', () => {
     cy.get('[data-testid="nav-health"]').should('be.visible').and('contain', '轮询')
   })
 
+  it('offers a copy-health-snapshot action in the popover', () => {
+    cy.get('[data-testid="nav-health"]').click()
+    cy.get('[data-testid="health-copy-snapshot"]').should('be.visible').and('contain', '复制健康快照')
+  })
+
   it('surfaces data age in the badge and popover once a poll lands', () => {
     // The 3s poll marks the stream fresh on success; the age suffix + popover
     // age row then appear.
