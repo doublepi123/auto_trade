@@ -490,6 +490,30 @@
               :value="option.symbol"
             />
           </el-select>
+          <el-button
+            size="small"
+            text
+            :disabled="!selectedChartSymbol"
+            :data-testid="symbolIsPinned(selectedChartSymbol) ? 'chart-symbol-pinned' : 'chart-symbol-pin'"
+            @click="pinSymbol(selectedChartSymbol)"
+            >{{ symbolIsPinned(selectedChartSymbol) ? '已固定' : '📌 固定' }}</el-button
+          >
+        </div>
+        <div v-if="pinnedSymbols.length" class="pinned-symbols" data-testid="pinned-symbols-bar">
+          <span class="pinned-label">固定：</span>
+          <el-tag
+            v-for="sym in pinnedSymbols"
+            :key="sym"
+            :type="sym === selectedChartSymbol ? 'primary' : 'info'"
+            size="small"
+            class="pinned-chip"
+            closable
+            data-testid="pinned-chip"
+            @close="unpinSymbol(sym)"
+            @click="requestSymbol(sym)"
+          >
+            {{ sym }}
+          </el-tag>
         </div>
         <el-button v-if="isMobile" size="small" text @click="chartExpanded = !chartExpanded"
           >{{ chartExpanded ? '收起图表' : '展开图表' }}</el-button
@@ -608,6 +632,7 @@ import { useAccountRefresh } from '../composables/useAccountRefresh'
 import { useMultiSymbolSnapshots } from '../composables/useMultiSymbolSnapshots'
 import { useStatusHistorySeries } from '../composables/useStatusHistorySeries'
 import { useSymbolStore } from '../composables/useSymbolStore'
+import { usePinnedSymbols } from '../composables/usePinnedSymbols'
 import { useDiagnosticsSnapshot } from '../composables/useDiagnosticsSnapshot'
 import { startTrading, stopTrading, pauseTrading, resumeTrading, activateKillSwitch, disableKillSwitch, getLLMIntervalStatus, getNotifications, getOrders, getTradeEvents, getMetricsSummary } from '../api'
 import type { LLMIntervalStatus, NotificationLogOut, OrderRecord, Position, StatusHistoryPoint, TradeEventRecord } from '../types'
@@ -627,7 +652,13 @@ const {
   start: startMultiSymbols,
 } = multiSymbols
 const selectedChartSymbol = ref('')
-const { consumeRequestedSymbol, requestedSymbol } = useSymbolStore()
+const { consumeRequestedSymbol, requestedSymbol, requestSymbol } = useSymbolStore()
+const {
+  pinned: pinnedSymbols,
+  isPinned: symbolIsPinned,
+  pin: pinSymbol,
+  unpin: unpinSymbol,
+} = usePinnedSymbols()
 const accountRefreshIntervalMs = (window as CypressWindow).Cypress ? 500 : 10000
 const { strategy, status, strategyLoading, statusLoading, loadError, load, refreshStatus } = useDashboardData()
 const {
@@ -1312,6 +1343,21 @@ function severityType(s: string): string {
   color: #909399;
   font-size: 12px;
   white-space: nowrap;
+}
+
+.pinned-symbols {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+.pinned-label {
+  color: #909399;
+  font-size: 12px;
+}
+.pinned-chip {
+  cursor: pointer;
 }
 
 .cockpit-grid {
