@@ -1,5 +1,5 @@
 <template>
-  <div class="review-page">
+  <div data-testid="review-page-root" class="review-page" :class="{ 'review-compact': compactReviewMode }">
     <div class="review-header">
       <div>
         <h3>复盘工作台</h3>
@@ -27,6 +27,15 @@
           </el-button-group>
           <el-button plain :disabled="!reviewData || reviewData.days.length === 0" @click="handleExport('json')">导出 JSON</el-button>
           <el-button plain :disabled="!reviewData || reviewData.days.length === 0" @click="handleExport('csv')">导出 CSV</el-button>
+          <el-button
+            data-testid="review-export-visible-csv"
+            plain
+            :disabled="visibleTimelineRows.length === 0"
+            @click="exportVisibleTimelineCsv"
+          >
+            导出当前筛选 CSV
+          </el-button>
+          <el-button data-testid="review-copy-brief" plain :disabled="!reviewBriefText" @click="copyReviewBrief">复制摘要</el-button>
         </el-form-item>
       </el-form>
     </el-card>
@@ -140,6 +149,26 @@
         </el-col>
       </el-row>
 
+      <el-card class="review-health-card" data-testid="review-health-score">
+        <template #header>
+          <div class="runtime-history-header">
+            <div>
+              <strong>复盘健康</strong>
+              <p>当前查询结果 · 诊断分，不是交易建议</p>
+            </div>
+            <el-tag :type="reviewHealth.tagType" effect="plain">{{ reviewHealth.label }}</el-tag>
+          </div>
+        </template>
+
+        <div class="review-health-body">
+          <div class="review-health-score-value">{{ reviewHealth.score }}</div>
+          <div class="review-health-score-label">{{ reviewHealth.label }}</div>
+          <div v-if="reviewHealth.reasons.length > 0" data-testid="review-health-reasons" class="review-health-reasons">
+            <el-tag v-for="reason in reviewHealth.reasons" :key="reason" size="small" effect="plain">{{ reason }}</el-tag>
+          </div>
+        </div>
+      </el-card>
+
       <el-card class="runtime-history-card" data-testid="review-runtime-history">
         <template #header>
           <div class="runtime-history-header">
@@ -222,8 +251,169 @@
         <p v-else class="empty-note">当前 symbol 暂无运行诊断快照</p>
       </el-card>
 
+      <el-card class="runtime-history-card" data-testid="review-snapshot-strip">
+        <template #header>
+          <div class="runtime-history-header">
+            <div>
+              <strong>快照波动（当前筛选结果）</strong>
+              <p>基于当前可见复盘日统计</p>
+            </div>
+            <el-tag size="small" type="info">{{ snapshotSummary.count }} 样本</el-tag>
+          </div>
+        </template>
+
+        <template v-if="snapshotSummary.count > 0">
+          <div class="chart-grid diagnostics-summary-grid">
+            <div class="section-block">
+              <div class="section-title">价格区间</div>
+              <div class="item-row">
+                <span>样本 {{ snapshotSummary.count }}</span>
+                <span>最低 {{ snapshotSummary.minPrice ?? '-' }}</span>
+                <span>最高 {{ snapshotSummary.maxPrice ?? '-' }}</span>
+              </div>
+            </div>
+
+            <div class="section-block">
+              <div class="section-title">波动与状态</div>
+              <div class="item-row">
+                <span>最新状态 {{ snapshotSummary.latestState || '-' }}</span>
+                <span>最大连亏 {{ snapshotSummary.maxConsecutiveLosses ?? '-' }}</span>
+                <span>触发距离 {{ snapshotSummary.maxTriggerDistance ?? '-' }}</span>
+              </div>
+            </div>
+          </div>
+        </template>
+        <p v-else class="empty-note">无快照样本</p>
+      </el-card>
+
+      <el-card class="runtime-history-card" data-testid="review-llm-action-summary">
+        <template #header>
+          <div class="runtime-history-header">
+            <div>
+              <strong>LLM 动作摘要（当前筛选结果）</strong>
+              <p>基于当前可见复盘日统计</p>
+            </div>
+            <el-tag size="small" type="info">{{ llmActionSummary.total }} 条</el-tag>
+          </div>
+        </template>
+
+        <div class="chart-grid diagnostics-summary-grid">
+          <div class="section-block">
+            <div class="section-title">动作分布</div>
+            <div class="item-row">
+              <el-tag v-for="action in llmActionSummary.actions" :key="action" size="small" effect="plain">
+                {{ action }} {{ llmActionSummary.actionCounts[action] }}
+              </el-tag>
+            </div>
+          </div>
+
+          <div class="section-block">
+            <div class="section-title">结果统计</div>
+            <div class="item-row">
+              <span>成功 {{ llmActionSummary.success }}/{{ llmActionSummary.total }}</span>
+              <span>已应用 {{ llmActionSummary.applied }}</span>
+              <span>关联订单 {{ llmActionSummary.linked }}</span>
+            </div>
+          </div>
+        </div>
+      </el-card>
+
+      <el-card class="runtime-history-card" data-testid="review-event-buckets">
+        <template #header>
+          <div class="runtime-history-header">
+            <div>
+              <strong>事件分桶（当前筛选结果）</strong>
+              <p>基于当前可见复盘日统计</p>
+            </div>
+            <el-tag size="small" type="info">总计 {{ eventBucketSummary.total }} 条</el-tag>
+          </div>
+        </template>
+
+        <div class="chart-grid diagnostics-summary-grid">
+          <div class="section-block">
+            <div class="section-title">分桶分布</div>
+            <div class="item-row">
+              <span v-for="bucket in EVENT_BUCKETS" :key="bucket">{{ EVENT_BUCKET_LABELS[bucket] }} {{ eventBucketSummary[bucket] }}</span>
+            </div>
+          </div>
+
+          <div class="section-block">
+            <div class="section-title">总计</div>
+            <div class="item-row">
+              <span>总计 {{ eventBucketSummary.total }}</span>
+            </div>
+          </div>
+        </div>
+      </el-card>
+
+      <el-card class="runtime-history-card" data-testid="review-execution-quality">
+        <template #header>
+          <div class="runtime-history-header">
+            <div>
+              <strong>订单执行质量（当前筛选结果）</strong>
+              <p>基于当前可见复盘日统计</p>
+            </div>
+            <el-tag size="small" type="info">{{ executionQuality.slippageSamples }} 个滑点样本</el-tag>
+          </div>
+        </template>
+
+        <div class="chart-grid diagnostics-summary-grid">
+          <div class="section-block">
+            <div class="section-title">状态分布</div>
+            <div class="item-row">
+              <span>成交 {{ executionQuality.filled }}</span>
+              <span>部分 {{ executionQuality.partial }}</span>
+              <span>挂起 {{ executionQuality.open }}</span>
+              <span>异常 {{ executionQuality.failed }}</span>
+            </div>
+          </div>
+
+          <div class="section-block">
+            <div class="section-title">滑点统计</div>
+            <div class="item-row">
+              <span>平均价差(成交-委托) {{ executionQuality.avgSlippage }}</span>
+              <span>样本 {{ executionQuality.slippageSamples }}</span>
+            </div>
+          </div>
+        </div>
+      </el-card>
+
       <div class="timeline-section">
-        <div v-for="day in reviewData.days" :key="day.date" class="day-card">
+        <div data-testid="review-workbench-toolbar" class="review-workbench-toolbar">
+          <div class="workbench-toolbar-summary">
+            <strong>可见复盘日</strong>
+            <span data-testid="review-visible-day-count">
+              当前筛选结果：{{ filteredReviewDays.length }} / {{ reviewData?.days.length ?? 0 }} 天
+            </span>
+          </div>
+          <el-input
+            v-model="timelineKeyword"
+            data-testid="review-keyword-filter"
+            placeholder="搜索当前复盘：订单/事件/LLM/快照"
+            clearable
+            style="width: 260px"
+          />
+          <el-button data-testid="review-compact-mode" :type="compactReviewMode ? 'primary' : ''" @click="compactReviewMode = !compactReviewMode">
+            紧凑模式
+          </el-button>
+          <el-button-group>
+            <el-button data-testid="review-day-filter-all" :type="dayFilter === 'all' ? 'primary' : ''" @click="dayFilter = 'all'">all</el-button>
+            <el-button data-testid="review-day-filter-losing" :type="dayFilter === 'losing' ? 'primary' : ''" @click="dayFilter = 'losing'">losing</el-button>
+            <el-button data-testid="review-day-filter-winning" :type="dayFilter === 'winning' ? 'primary' : ''" @click="dayFilter = 'winning'">winning</el-button>
+            <el-button data-testid="review-day-filter-error" :type="dayFilter === 'error' ? 'primary' : ''" @click="dayFilter = 'error'">error</el-button>
+            <el-button data-testid="review-day-filter-traded" :type="dayFilter === 'traded' ? 'primary' : ''" @click="dayFilter = 'traded'">traded</el-button>
+            <el-button data-testid="review-day-filter-no-trade" :type="dayFilter === 'no_trade' ? 'primary' : ''" @click="dayFilter = 'no_trade'">no_trade</el-button>
+            <el-button data-testid="review-day-filter-llm" :type="dayFilter === 'llm' ? 'primary' : ''" @click="dayFilter = 'llm'">llm</el-button>
+            <el-button data-testid="review-day-filter-event" :type="dayFilter === 'event' ? 'primary' : ''" @click="dayFilter = 'event'">event</el-button>
+          </el-button-group>
+          <el-button data-testid="review-reset-workbench-filters" @click="resetWorkbenchFilters">reset</el-button>
+        </div>
+
+        <el-empty v-if="filteredReviewDays.length === 0" data-testid="review-filtered-empty">
+          <template #description>当前筛选条件下无复盘日</template>
+        </el-empty>
+
+        <div v-for="day in filteredReviewDays" :key="day.date" class="day-card" :data-testid="`review-day-card-${day.date}`">
           <div class="day-header">
             <strong>{{ day.date }}</strong>
             <el-tag :type="day.daily_pnl >= 0 ? 'success' : 'danger'" effect="plain">{{ signedCurrency(day.daily_pnl) }}</el-tag>
@@ -308,7 +498,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import PriceChart from '../components/PriceChart.vue'
 import PnLChart from '../components/PnLChart.vue'
@@ -319,6 +509,7 @@ import { useStatusHistorySeries } from '../composables/useStatusHistorySeries'
 import { useDiagnosticsSnapshot } from '../composables/useDiagnosticsSnapshot'
 import type { LLMIntervalStatus, ReviewResponse } from '../types'
 import { ORDER_STATUS } from '../utils/constants'
+import { downloadCsv } from '../utils/csv'
 import { formatCurrency, marketFromSymbol } from '../utils/format'
 
 const form = ref({
@@ -327,9 +518,16 @@ const form = ref({
   to_date: '',
 })
 
+type ReviewDayFilter = 'all' | 'losing' | 'winning' | 'error' | 'traded' | 'no_trade' | 'llm' | 'event'
+
 const loading = ref(false)
 const searched = ref(false)
 const reviewData = ref<ReviewResponse | null>(null)
+const dayFilter = ref<ReviewDayFilter>('all')
+const timelineKeyword = ref('')
+const compactReviewMode = ref(false)
+const REVIEW_WORKBENCH_PREFS_KEY = 'auto_trade.review.workbench.v1'
+const VALID_REVIEW_DAY_FILTERS: ReviewDayFilter[] = ['all', 'losing', 'winning', 'error', 'traded', 'no_trade', 'llm', 'event']
 const {
   history: runtimeHistory,
   loading: runtimeHistoryLoading,
@@ -349,6 +547,515 @@ const pnlClass = computed(() => {
   if (!reviewData.value) return ''
   return reviewData.value.total_pnl >= 0 ? 'positive' : 'negative'
 })
+
+const eventSearchText = (day: ReviewResponse['days'][number]) =>
+  [
+    day.date,
+    day.symbol,
+    day.daily_pnl,
+    day.trade_count,
+    ...day.error_tags,
+    ...day.llm_interactions.map((llm) => `${llm.order_action} ${llm.symbol} ${llm.order_status} ${llm.interaction_type}`),
+    ...day.events.map((event) => `${event.event_type} ${event.message ?? ''} ${event.payload_json ?? ''}`),
+    ...day.orders.map(
+      (order) =>
+        `${order.side} ${order.status} ${order.broker_order_id} ${order.quantity} ${order.price} ${order.executed_quantity ?? ''} ${order.executed_price ?? ''} ${order.created_at ?? ''} ${order.filled_at ?? ''}`,
+    ),
+    ...day.snapshots.map(
+      (snapshot) =>
+        `${snapshot.engine_state} ${snapshot.daily_pnl} ${snapshot.consecutive_losses} ${snapshot.last_price ?? ''} ${snapshot.last_trigger_price ?? ''} ${snapshot.created_at ?? ''}`,
+    ),
+  ]
+    .join(' ')
+    .toLowerCase()
+
+const dayMatchesQuickFilter = (day: ReviewResponse['days'][number], filter: ReviewDayFilter) => {
+  if (filter === 'all') return true
+  if (filter === 'losing') return day.daily_pnl < 0
+  if (filter === 'winning') return day.daily_pnl > 0
+  if (filter === 'error') return day.error_tags.length > 0
+  if (filter === 'traded') return day.trade_count > 0
+  if (filter === 'no_trade') return day.trade_count === 0
+  if (filter === 'llm') return day.llm_interactions.length > 0
+  if (filter === 'event') return day.events.length > 0
+  return true
+}
+
+const filteredReviewDays = computed(() => {
+  if (!reviewData.value) return []
+  const keyword = timelineKeyword.value.trim().toLowerCase()
+  return reviewData.value.days.filter((day) => dayMatchesQuickFilter(day, dayFilter.value) && (keyword === '' || eventSearchText(day).includes(keyword)))
+})
+
+const visibleSnapshots = computed(() => filteredReviewDays.value.flatMap((day) => day.snapshots))
+
+const visibleOrders = computed(() => filteredReviewDays.value.flatMap((day) => day.orders))
+
+const visibleLlmInteractions = computed(() => filteredReviewDays.value.flatMap((day) => day.llm_interactions))
+
+const visibleEvents = computed(() => filteredReviewDays.value.flatMap((day) => day.events))
+
+type ReviewTimelineRow = {
+  date: string
+  source: string
+  symbol: string
+  type: string
+  status: string
+  side: string
+  message: string
+  pnl: string
+  created_at: string
+  broker_order_id: string
+}
+
+const visibleTimelineRows = computed<ReviewTimelineRow[]>(() => {
+  const rows: ReviewTimelineRow[] = []
+
+  for (const day of filteredReviewDays.value) {
+    for (const llm of day.llm_interactions) {
+      rows.push({
+        date: day.date,
+        source: 'llm',
+        symbol: llm.symbol ?? day.symbol ?? '',
+        type: llm.interaction_type ?? '',
+        status: llm.order_status ?? '',
+        side: llm.order_action ?? '',
+        message: llm.success ? 'success' : 'failed',
+        pnl: '',
+        created_at: llm.created_at ?? '',
+        broker_order_id: llm.order_id ?? '',
+      })
+    }
+
+    for (const order of day.orders) {
+      rows.push({
+        date: day.date,
+        source: 'order',
+        symbol: order.symbol ?? day.symbol ?? '',
+        type: 'order',
+        status: order.status ?? '',
+        side: order.side ?? '',
+        message: `${formatOrderIntent(order.quantity, order.price, diagnosticsMarket.value || 'US')} ${formatFilledQuantity(order.executed_quantity)} ${formatExecutedPrice(order.executed_price, diagnosticsMarket.value || 'US')}`.trim(),
+        pnl: '',
+        created_at: order.created_at ?? '',
+        broker_order_id: order.broker_order_id ?? '',
+      })
+    }
+
+    for (const event of day.events) {
+      rows.push({
+        date: day.date,
+        source: 'event',
+        symbol: event.symbol ?? day.symbol ?? '',
+        type: event.event_type ?? '',
+        status: event.status ?? '',
+        side: event.side ?? '',
+        message: [event.message, payloadExportText(event.payload_json)].filter((value) => value !== '').join(' '),
+        pnl: '',
+        created_at: event.created_at ?? '',
+        broker_order_id: event.broker_order_id ?? '',
+      })
+    }
+
+    for (const snapshot of day.snapshots) {
+      rows.push({
+        date: day.date,
+        source: 'snapshot',
+        symbol: day.symbol ?? '',
+        type: snapshot.engine_state ?? '',
+        status: snapshot.daily_pnl >= 0 ? 'positive' : 'negative',
+        side: '',
+        message: `last_price=${snapshot.last_price ?? ''} trigger=${snapshot.last_trigger_price ?? ''} losses=${snapshot.consecutive_losses ?? ''}`,
+        pnl: signedCurrency(snapshot.daily_pnl ?? 0),
+        created_at: snapshot.created_at ?? '',
+        broker_order_id: '',
+      })
+    }
+  }
+
+  return rows.sort(compareTimelineRows)
+})
+
+function compareTimelineRows(a: ReviewTimelineRow, b: ReviewTimelineRow): number {
+  const dateOrder = compareStrings(a.date, b.date)
+  if (dateOrder !== 0) return dateOrder
+
+  const createdAtOrder = compareStrings(a.created_at, b.created_at)
+  if (createdAtOrder !== 0) return createdAtOrder
+
+  const sourceOrder = compareStrings(a.source, b.source)
+  if (sourceOrder !== 0) return sourceOrder
+
+  const typeOrder = compareStrings(a.type, b.type)
+  if (typeOrder !== 0) return typeOrder
+
+  const statusOrder = compareStrings(a.status, b.status)
+  if (statusOrder !== 0) return statusOrder
+
+  const brokerOrderIdOrder = compareStrings(a.broker_order_id, b.broker_order_id)
+  if (brokerOrderIdOrder !== 0) return brokerOrderIdOrder
+
+  return compareStrings(a.symbol, b.symbol)
+}
+
+function compareStrings(a: string, b: string): number {
+  return a.localeCompare(b, 'zh-Hans-CN-u-co-compat', { numeric: true, sensitivity: 'base' })
+}
+
+const snapshotSummary = computed(() => {
+  const snapshots = visibleSnapshots.value
+
+  if (snapshots.length === 0) {
+    return {
+      count: 0,
+      minPrice: null as string | null,
+      maxPrice: null as string | null,
+      latestState: '',
+      maxConsecutiveLosses: null as string | null,
+      maxTriggerDistance: null as string | null,
+    }
+  }
+
+  let minPrice: number | null = null
+  let maxPrice: number | null = null
+  let latestSnapshot = snapshots[0]
+  let latestSnapshotTime = parseSnapshotTime(snapshots[0].created_at)
+  let latestSnapshotIndex = 0
+  let maxConsecutiveLosses: number | null = null
+  let maxTriggerDistance: number | null = null
+
+  snapshots.forEach((snapshot, index) => {
+    const lastPrice = toFiniteNumber(snapshot.last_price)
+    const triggerPrice = toFiniteNumber(snapshot.last_trigger_price)
+
+    if (lastPrice !== null) {
+      minPrice = minPrice === null ? lastPrice : Math.min(minPrice, lastPrice)
+      maxPrice = maxPrice === null ? lastPrice : Math.max(maxPrice, lastPrice)
+    }
+
+    const snapshotTime = parseSnapshotTime(snapshot.created_at)
+    if (snapshotTime > latestSnapshotTime || (snapshotTime === latestSnapshotTime && index > latestSnapshotIndex)) {
+      latestSnapshot = snapshot
+      latestSnapshotTime = snapshotTime
+      latestSnapshotIndex = index
+    }
+
+    const consecutiveLosses = toFiniteNumber(snapshot.consecutive_losses)
+    if (consecutiveLosses !== null) {
+      maxConsecutiveLosses = maxConsecutiveLosses === null ? consecutiveLosses : Math.max(maxConsecutiveLosses, consecutiveLosses)
+    }
+    if (lastPrice !== null && triggerPrice !== null && triggerPrice > 0) {
+      const triggerDistance = Math.abs(lastPrice - triggerPrice)
+      maxTriggerDistance = maxTriggerDistance === null ? triggerDistance : Math.max(maxTriggerDistance, triggerDistance)
+    }
+  })
+
+  return {
+    count: snapshots.length,
+    minPrice: formatSnapshotNumber(minPrice),
+    maxPrice: formatSnapshotNumber(maxPrice),
+    latestState: latestSnapshot.engine_state,
+    maxConsecutiveLosses: formatSnapshotNumber(maxConsecutiveLosses),
+    maxTriggerDistance: maxTriggerDistance === null ? null : formatSnapshotNumber(maxTriggerDistance, 2),
+  }
+})
+
+const LLM_ACTIONS = ['BUY', 'SELL', 'SHORT', 'COVER', 'NONE', 'other'] as const
+type LlmAction = (typeof LLM_ACTIONS)[number]
+
+function normalizeLlmAction(action: string | null | undefined): LlmAction {
+  const normalized = (action ?? '').trim().toUpperCase()
+  if (normalized === '' || normalized === 'NONE') return 'NONE'
+  if (LLM_ACTIONS.includes(normalized as LlmAction)) return normalized as Exclude<LlmAction, 'other'>
+  return 'other'
+}
+
+const llmActionSummary = computed(() => {
+  const actionCounts = LLM_ACTIONS.reduce<Record<LlmAction, number>>((counts, action) => {
+    counts[action] = 0
+    return counts
+  }, {} as Record<LlmAction, number>)
+
+  let success = 0
+  let applied = 0
+  let linked = 0
+
+  for (const llm of visibleLlmInteractions.value) {
+    const action = normalizeLlmAction(llm.order_action)
+    actionCounts[action] += 1
+    if (llm.success) success += 1
+    if (llm.applied) applied += 1
+    if (Boolean(llm.order_id)) linked += 1
+  }
+
+  return {
+    actions: LLM_ACTIONS,
+    actionCounts,
+    total: visibleLlmInteractions.value.length,
+    success,
+    applied,
+    linked,
+  }
+})
+
+const EVENT_BUCKETS = ['risk', 'order', 'session', 'broker', 'llm', 'other'] as const
+type EventBucket = (typeof EVENT_BUCKETS)[number]
+
+const EVENT_BUCKET_LABELS: Record<EventBucket, string> = {
+  risk: '风险',
+  order: '订单',
+  session: '时段',
+  broker: '券商',
+  llm: 'LLM',
+  other: '其他',
+}
+
+const EVENT_BUCKET_PATTERNS: Record<Exclude<EventBucket, 'other'>, RegExp> = {
+  risk: /RISK|LOSS|KILL|PAUSE/,
+  order: /ORDER|FILLED|REJECT|CANCEL|TIMEOUT/,
+  session: /SESSION|RTH|MARKET/,
+  broker: /BROKER|QUOTE|LONGPORT|STREAM/,
+  llm: /LLM|ADVISOR|INTERVAL/,
+}
+
+function eventBucketText(value: string | null | undefined): string {
+  return (value ?? '').toUpperCase()
+}
+
+function classifyEventBucket(event: ReviewResponse['days'][number]['events'][number]): EventBucket {
+  const text = [event.event_type, event.status, event.message, event.payload_json].map(eventBucketText).join(' ')
+  if (EVENT_BUCKET_PATTERNS.risk.test(text)) return 'risk'
+  if (EVENT_BUCKET_PATTERNS.order.test(text)) return 'order'
+  if (EVENT_BUCKET_PATTERNS.session.test(text)) return 'session'
+  if (EVENT_BUCKET_PATTERNS.broker.test(text)) return 'broker'
+  if (EVENT_BUCKET_PATTERNS.llm.test(text)) return 'llm'
+  return 'other'
+}
+
+const eventBucketSummary = computed(() => {
+  const counts: Record<EventBucket, number> = {
+    risk: 0,
+    order: 0,
+    session: 0,
+    broker: 0,
+    llm: 0,
+    other: 0,
+  }
+
+  for (const event of visibleEvents.value) {
+    counts[classifyEventBucket(event)] += 1
+  }
+
+  return { total: visibleEvents.value.length, ...counts }
+})
+
+const EXECUTION_FAILED_STATUSES = ['REJECT', 'FAIL', 'CANCEL', 'TIMEOUT', 'ERROR'] as const
+
+const executionQuality = computed(() => {
+  let filled = 0
+  let partial = 0
+  let open = 0
+  let failed = 0
+  let slippageTotal = 0
+  let slippageSamples = 0
+
+  for (const order of visibleOrders.value) {
+    const status = statusText(order.status)
+    const executedQuantity = order.executed_quantity ?? 0
+    const quantity = order.quantity ?? 0
+    const isFailed = EXECUTION_FAILED_STATUSES.some((failedStatus) => status.includes(failedStatus))
+    const isPartial = status.includes('PARTIAL') || (executedQuantity > 0 && executedQuantity < quantity)
+    const isFilled = status === 'FILLED' || executedQuantity >= quantity
+    const isOpen = /SUBMIT|NEW|PENDING|OPEN/.test(status) || status === ''
+
+    if (isPartial) {
+      partial += 1
+    } else if (isFailed) {
+      failed += 1
+    } else if (isFilled) {
+      filled += 1
+    } else if (isOpen) {
+      open += 1
+    } else {
+      open += 1
+    }
+
+    if (typeof order.executed_price === 'number' && Number.isFinite(order.executed_price) && typeof order.price === 'number' && Number.isFinite(order.price)) {
+      slippageTotal += order.executed_price - order.price
+      slippageSamples += 1
+    }
+  }
+
+  const avgSlippage = slippageSamples > 0 ? `${(slippageTotal / slippageSamples).toFixed(2)}` : '-'
+
+  return { filled, partial, open, failed, slippageSamples, avgSlippage }
+})
+
+const resetWorkbenchFilters = () => {
+  dayFilter.value = 'all'
+  timelineKeyword.value = ''
+}
+
+function isReviewDayFilter(value: unknown): value is ReviewDayFilter {
+  return typeof value === 'string' && VALID_REVIEW_DAY_FILTERS.includes(value as ReviewDayFilter)
+}
+
+function loadWorkbenchPrefs() {
+  try {
+    const raw = localStorage.getItem(REVIEW_WORKBENCH_PREFS_KEY)
+    if (!raw) return
+
+    const parsed: unknown = JSON.parse(raw)
+    if (parsed == null || typeof parsed !== 'object') return
+
+    const prefs = parsed as { dayFilter?: unknown; timelineKeyword?: unknown; compactReviewMode?: unknown }
+    if (isReviewDayFilter(prefs.dayFilter)) {
+      dayFilter.value = prefs.dayFilter
+    }
+    if (typeof prefs.timelineKeyword === 'string') {
+      timelineKeyword.value = prefs.timelineKeyword
+    }
+    if (typeof prefs.compactReviewMode === 'boolean') {
+      compactReviewMode.value = prefs.compactReviewMode
+    }
+  } catch {
+    // Weak dependency: localStorage is best-effort client state only; invalid JSON or browser storage errors must not block the page.
+  }
+}
+
+watch([dayFilter, timelineKeyword, compactReviewMode], () => {
+  try {
+    localStorage.setItem(
+      REVIEW_WORKBENCH_PREFS_KEY,
+      JSON.stringify({
+        dayFilter: dayFilter.value,
+        timelineKeyword: timelineKeyword.value,
+        compactReviewMode: compactReviewMode.value,
+      }),
+    )
+  } catch {
+    // Weak dependency: persistence is optional and should never prevent review workbench interaction.
+  }
+})
+
+type ReviewHealth = {
+  score: number
+  label: string
+  tagType: 'success' | 'warning' | 'danger'
+  reasons: string[]
+}
+
+const reviewHealth = computed<ReviewHealth>(() => {
+  if (!reviewData.value || reviewData.value.days.length === 0) {
+    return { score: 100, label: '健康', tagType: 'success', reasons: [] }
+  }
+
+  let score = 100
+  const reasons: string[] = []
+  const hasProfitLoss = reviewData.value.total_pnl < 0
+  const errorTags = reviewData.value.all_error_tags.length
+  let hasOrderIssue = false
+  let failedLlmCount = 0
+  let maxConsecutiveLosses = 0
+  for (const day of reviewData.value.days) {
+    if (!hasOrderIssue && day.orders.some((order) => /REJECT|FAIL|CANCEL|TIMEOUT/.test(statusText(order.status)))) {
+      hasOrderIssue = true
+    }
+    failedLlmCount += day.llm_interactions.filter((llm) => !llm.success).length
+    for (const snapshot of day.snapshots) {
+      maxConsecutiveLosses = Math.max(maxConsecutiveLosses, snapshot.consecutive_losses)
+    }
+  }
+
+  if (hasProfitLoss) {
+    score -= 25
+    reasons.push('区间亏损')
+  }
+  if (errorTags > 0) {
+    score -= Math.min(25, errorTags * 10)
+    reasons.push('存在错误')
+  }
+
+  if (hasOrderIssue) {
+    score -= 15
+    reasons.push('订单异常')
+  }
+  if (failedLlmCount > 0) {
+    score -= Math.min(failedLlmCount * 5, 15)
+    reasons.push('LLM 失败')
+  }
+  if (maxConsecutiveLosses >= 2) {
+    score -= 10
+    reasons.push('连亏压力')
+  }
+
+  score = Math.max(0, Math.min(100, score))
+
+  const label = score >= 80 ? '健康' : score >= 50 ? '需关注' : '高风险'
+  const tagType = score >= 80 ? 'success' : score >= 50 ? 'warning' : 'danger'
+
+  return { score, label, tagType, reasons: reasons.slice(0, 3) }
+})
+
+const reviewBriefText = computed(() => {
+  if (!reviewData.value || reviewData.value.days.length === 0) return ''
+
+  const health = reviewHealth.value
+  const errorTags = reviewData.value.all_error_tags.length > 0 ? reviewData.value.all_error_tags.join('、') : '无'
+  const llmActions = llmActionSummary.value.actions
+    .filter((action) => llmActionSummary.value.actionCounts[action] > 0)
+    .map((action) => `${action} ${llmActionSummary.value.actionCounts[action]}`)
+    .join('，') || '无'
+  const orderQuality = `成交 ${executionQuality.value.filled}，部分 ${executionQuality.value.partial}，挂起 ${executionQuality.value.open}，异常 ${executionQuality.value.failed}，平均滑点 ${executionQuality.value.avgSlippage}`
+
+  return [
+    `摘要：${reviewData.value.symbol} · ${reviewData.value.from_date} ~ ${reviewData.value.to_date}`,
+    `复盘健康：${health.label} ${health.score}`,
+    `总盈亏：${signedCurrency(reviewData.value.total_pnl)} · 交易：${reviewData.value.total_trades} · 当前筛选天数：${filteredReviewDays.value.length}`,
+    `错误标签：${errorTags}`,
+    `LLM 动作：${llmActions}（成功 ${llmActionSummary.value.success}/${llmActionSummary.value.total}，已应用 ${llmActionSummary.value.applied}）`,
+    `订单质量：${orderQuality}`,
+  ].join('\n')
+})
+
+function statusText(value: string | null | undefined): string {
+  return (value ?? '').toUpperCase()
+}
+
+function exportVisibleTimelineCsv() {
+  if (visibleTimelineRows.value.length === 0) {
+    ElMessage.warning('当前筛选结果无可导出的复盘行')
+    return
+  }
+
+  downloadCsv(
+    `review_visible_timeline.csv`,
+    [
+      { key: 'date', label: '日期' },
+      { key: 'source', label: '来源' },
+      { key: 'symbol', label: '标的' },
+      { key: 'type', label: '类型' },
+      { key: 'status', label: '状态' },
+      { key: 'side', label: '方向' },
+      { key: 'message', label: '消息' },
+      { key: 'pnl', label: '盈亏' },
+      { key: 'created_at', label: '时间' },
+      { key: 'broker_order_id', label: '订单号' },
+    ],
+    visibleTimelineRows.value,
+  )
+  ElMessage.success('已导出当前筛选复盘 CSV')
+}
+
+async function copyReviewBrief() {
+  if (!reviewBriefText.value) return
+  try {
+    await navigator.clipboard.writeText(reviewBriefText.value)
+    ElMessage.success('复盘摘要已复制')
+  } catch {
+    ElMessage.error('复制失败，请检查浏览器剪贴板权限')
+  }
+}
 
 const reviewSymbolLabel = computed(() => {
   if (runtimeHistory.value.points.length === 0) return form.value.symbol || '未选择标的'
@@ -383,6 +1090,7 @@ async function loadLLMStatus() {
 }
 
 onMounted(() => {
+  loadWorkbenchPrefs()
   loadLLMStatus()
 })
 
@@ -560,7 +1268,17 @@ function payloadPreview(payloadJson: string | null | undefined): string {
     }
     return 'payload -'
   } catch {
-    return 'payload -'
+    return `payload ${truncateText(payloadJson.trim())}`
+  }
+}
+
+function payloadExportText(payloadJson: string | null | undefined): string {
+  if (!payloadJson?.trim()) return ''
+  try {
+    JSON.parse(payloadJson)
+    return payloadPreview(payloadJson)
+  } catch {
+    return payloadJson.trim()
   }
 }
 
@@ -581,6 +1299,32 @@ function triggerDeltaText(lastPrice: number, lastTriggerPrice: number, market: s
   const sign = delta > 0 ? '+' : delta < 0 ? '-' : ''
   return `触发价 ${formatCurrency(lastTriggerPrice, market)} · Δ触发 ${sign}${Math.abs(delta).toFixed(2)}`
 }
+
+function toFiniteNumber(value: number | string | null | undefined): number | null {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    if (trimmed === '') return null
+    const parsed = Number(trimmed)
+    return Number.isFinite(parsed) ? parsed : null
+  }
+  return null
+}
+
+function parseSnapshotTime(value: string | null | undefined): number {
+  if (!value) return Number.NEGATIVE_INFINITY
+  const parsed = Date.parse(value)
+  return Number.isFinite(parsed) ? parsed : Number.NEGATIVE_INFINITY
+}
+
+function formatSnapshotNumber(value: number | null, fractionDigits = 2): string | null {
+  if (value === null) return null
+  if (Number.isInteger(value)) return value.toFixed(0)
+  const factor = 10 ** fractionDigits
+  const truncated = Math.trunc(value * factor) / factor
+  const fixed = truncated.toFixed(fractionDigits)
+  return fixed.replace(/\.0+$/, '').replace(/(\.[0-9]*?)0+$/, '$1')
+}
 </script>
 
 <style scoped>
@@ -591,6 +1335,33 @@ function triggerDeltaText(lastPrice: number, lastTriggerPrice: number, market: s
   min-height: calc(100vh - 120px);
   padding: 16px;
   background: #fff;
+}
+
+.review-page.review-compact {
+  gap: 10px;
+  padding: 10px;
+}
+
+.review-page.review-compact .review-workbench-toolbar,
+.review-page.review-compact .filter-card,
+.review-page.review-compact .llm-status-card,
+.review-page.review-compact .risk-history-card,
+.review-page.review-compact .review-health-card,
+.review-page.review-compact .runtime-history-card {
+  margin-bottom: 4px;
+}
+
+.review-page.review-compact .day-card {
+  padding: 10px;
+}
+
+.review-page.review-compact .section-block {
+  padding: 8px;
+}
+
+.review-page.review-compact .item-row {
+  padding: 4px 0;
+  gap: 6px;
 }
 
 .review-header h3 {
@@ -717,6 +1488,37 @@ function triggerDeltaText(lastPrice: number, lastTriggerPrice: number, market: s
 
 .runtime-history-card {
   margin-bottom: 8px;
+}
+
+.review-health-card {
+  margin-bottom: 8px;
+}
+
+.review-health-body {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  text-align: center;
+}
+
+.review-health-score-value {
+  color: #172033;
+  font-size: 32px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.review-health-score-label {
+  color: #6b7280;
+  font-size: 13px;
+}
+
+.review-health-reasons {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
 }
 
 .risk-history-card {

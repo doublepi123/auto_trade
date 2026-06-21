@@ -7,12 +7,14 @@
 function escapeCell(value: unknown): string {
   if (value == null) return ''
   const text = typeof value === 'object' ? JSON.stringify(value) : String(value)
+  const trimmed = text.trimStart()
+  const sanitized = /^[=+\-@]/.test(trimmed) ? `'${text}` : text
   // Quote whenever the cell contains a delimiter, quote, or newline; double
   // embedded quotes per RFC 4180.
-  if (/[",\n\r]/.test(text)) {
-    return `"${text.replace(/"/g, '""')}"`
+  if (/[",\n\r]/.test(sanitized)) {
+    return `"${sanitized.replace(/"/g, '""')}"`
   }
-  return text
+  return sanitized
 }
 
 export function buildCsv<T extends Record<string, unknown>>(
