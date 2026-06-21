@@ -70,6 +70,16 @@
           <el-button :type="viewMode === 'table' ? 'primary' : ''" data-testid="notif-view-table" @click="viewMode = 'table'">表格</el-button>
           <el-button :type="viewMode === 'timeline' ? 'primary' : ''" data-testid="notif-view-timeline" @click="viewMode = 'timeline'">时间线</el-button>
         </el-button-group>
+        <el-popover v-if="viewMode === 'table'" :width="160" trigger="click" placement="bottom">
+          <template #reference>
+            <el-button data-testid="notif-columns-toggle">列</el-button>
+          </template>
+          <div class="col-toggle" data-testid="notif-columns-menu">
+            <el-checkbox v-model="colVisible.severity">级别</el-checkbox>
+            <el-checkbox v-model="colVisible.success">结果</el-checkbox>
+            <el-checkbox v-model="colVisible.error">错误</el-checkbox>
+          </div>
+        </el-popover>
         <el-button data-testid="notif-mark-all-read" @click="handleMarkAllRead">全部已读</el-button>
         <el-button :loading="loading" data-testid="notif-refresh" @click="load">刷新</el-button>
       </div>
@@ -225,19 +235,19 @@
           {{ formatDateTime(row.created_at) }}
         </template>
       </el-table-column>
-      <el-table-column label="级别" min-width="100">
+      <el-table-column v-if="colVisible.severity" label="级别" min-width="100">
         <template #default="{ row }">
           <el-tag size="small" :type="severityType(row.severity)">{{ row.severity }}</el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="结果" min-width="80">
+      <el-table-column v-if="colVisible.success" label="结果" min-width="80">
         <template #default="{ row }">
           <el-tag size="small" :type="row.success ? 'success' : 'danger'">{{ row.success ? '成功' : '失败' }}</el-tag>
         </template>
       </el-table-column>
       <el-table-column prop="title" label="标题" min-width="140" show-overflow-tooltip />
       <el-table-column prop="content" label="内容" min-width="240" show-overflow-tooltip />
-      <el-table-column prop="error" label="错误" min-width="160" show-overflow-tooltip />
+      <el-table-column v-if="colVisible.error" prop="error" label="错误" min-width="160" show-overflow-tooltip />
     </el-table>
 
     <div v-else-if="viewMode === 'timeline'" class="notif-timeline" data-testid="notif-timeline">
@@ -324,6 +334,7 @@ import { useNotificationBadge } from '../composables/useNotificationBadge'
 import type { NotificationLogOut } from '../types'
 import { resolveErrorMessage } from '../utils/error'
 import DataState from '../components/DataState.vue'
+import { usePersistedColumns } from '../composables/usePersistedColumns'
 
 const POLL_INTERVAL_MS = 10000
 const { unreadCount, markAllRead, isItemUnread, refresh: refreshBadge } = useNotificationBadge()
@@ -347,6 +358,13 @@ const quickFilter = ref<'all' | 'failed' | 'critical' | 'warning' | 'info'>('all
 let applyingQuickFilter = false
 const viewMode = ref<'cards' | 'table' | 'timeline'>('cards')
 const groupMode = ref<'day' | 'result'>('day')
+// Toggleable table columns (defaults visible so existing behaviour/tests
+// are unaffected; user can hide 级别/结果/错误 in the table view).
+const { visible: colVisible } = usePersistedColumns('auto_trade.notif.columns', {
+  severity: true,
+  success: true,
+  error: true,
+})
 const sortOrder = ref<'newest' | 'oldest'>('newest')
 const quickRangeLabel = ref('')
 const detailDialog = reactive({
@@ -776,6 +794,12 @@ onUnmounted(stopPoll)
 </script>
 
 <style scoped>
+.col-toggle {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
 .notif-page {
   display: flex;
   flex-direction: column;
