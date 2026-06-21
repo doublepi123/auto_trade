@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from decimal import Decimal
+from typing import Any
 
 from app.platform.context import StrategyContext
 from app.platform.events import BarEvent, EventSource, FillEvent, QuoteEvent
@@ -12,6 +13,7 @@ class DummyStrategy:
     name = "dummy"
     version = "1.0.0"
     parameter_schema = {"type": "object", "properties": {}}
+    params: dict[str, Any] = {}
 
     def on_bar(self, ctx: StrategyContext, bar: BarEvent) -> list[OrderIntent]:
         assert bar.symbol is not None
