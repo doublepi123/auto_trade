@@ -25,11 +25,11 @@ class SimBroker:
         self._orders: dict[str, _PendingOrder] = {}
         self._clock = clock or (lambda: datetime.now(timezone.utc))
 
-    def submit(self, intent: OrderIntent) -> OrderEvent:
+    def submit(self, intent: OrderIntent, timestamp: datetime | None = None) -> OrderEvent:
         order_id = f"sim-{uuid4().hex[:8]}"
         self._orders[order_id] = _PendingOrder(order_id=order_id, intent=intent)
         return OrderEvent(
-            timestamp=self._clock(),
+            timestamp=timestamp or self._clock(),
             source=EventSource.BROKER,
             symbol=intent.symbol,
             broker_order_id=order_id,

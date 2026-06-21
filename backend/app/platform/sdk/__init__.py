@@ -20,6 +20,8 @@ class OrderIntent:
 
 @runtime_checkable
 class Strategy(Protocol):
+    params: dict[str, Any]
+
     @property
     def name(self) -> str: ...
 
