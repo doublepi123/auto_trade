@@ -120,10 +120,11 @@ class SignalEvent(Event):
     price: Decimal | None = None
     quantity: int | None = None
     reason: str
-    params: dict = None  # type: ignore[assignment]
+    params: dict | None = None
 
     def __post_init__(self):
-        object.__setattr__(self, "params", self.params or {})
+        if self.params is None:
+            object.__setattr__(self, "params", {})
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SignalEvent:
@@ -137,7 +138,7 @@ class SignalEvent(Event):
             price=Decimal(data["price"]) if data.get("price") is not None else None,
             quantity=data.get("quantity"),
             reason=data["reason"],
-            params=data.get("params", {}),
+            params=data.get("params"),
         )
 
 
