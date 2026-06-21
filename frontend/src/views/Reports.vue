@@ -47,6 +47,7 @@
       <div class="report-context-card">
         <span data-testid="reports-query-summary">当前报告：{{ reportData.symbol }} · {{ reportData.start_date }} 至 {{ reportData.end_date }}</span>
         <span class="muted" data-testid="reports-export-preview">导出文件：{{ exportBaseName }}.json / .csv</span>
+        <span class="muted" data-testid="reports-last-refresh">更新于 {{ lastRefreshedLabel }}</span>
       </div>
 
       <el-row :gutter="12" class="summary-row">
@@ -277,6 +278,15 @@ const form = ref({
 const loading = ref(false)
 const searched = ref(false)
 const reportData = ref<ReportResponse | null>(null)
+const lastRefreshedAt = ref<Date | null>(null)
+const lastRefreshedLabel = computed(() => {
+  if (!lastRefreshedAt.value) return '未刷新'
+  return lastRefreshedAt.value.toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  })
+})
 const submittedQuery = ref<ReportQuery | null>(null)
 
 const pnlClass = computed(() => {
@@ -405,6 +415,7 @@ function handleSearch() {
     .then((res) => {
       reportData.value = res
       submittedQuery.value = query
+      lastRefreshedAt.value = new Date()
     })
     .catch(() => {
       ElMessage.error('查询报告数据失败')

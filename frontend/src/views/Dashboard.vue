@@ -15,6 +15,7 @@
         <div class="heading-tags">
           <el-tag :type="realtimeStatusType" effect="plain">{{ realtimeStatusLabel }}</el-tag>
           <el-tag :type="status.runner_running ? 'success' : 'info'" effect="plain">{{ status.runner_running ? '运行器运行中' : '运行器未启动' }}</el-tag>
+          <span class="heading-updated" data-testid="cockpit-updated">更新 {{ statusUpdatedAtLabel }}</span>
         </div>
       </div>
 
@@ -693,6 +694,18 @@ const statusStale = computed(
   () => lastDataAt.value > 0 && ageSeconds.value >= STALE_DATA_THRESHOLD_SECONDS,
 )
 const staleAgeLabel = computed(() => relativeAgeLabel(ageSeconds.value))
+// Wall-clock time of the last fresh status observation (WS frame or REST
+// refresh) — the shared singleton already tracks it; surface it so the user
+// can tell at a glance when the cockpit numbers were last current.
+const statusUpdatedAtLabel = computed(() =>
+  lastDataAt.value > 0
+    ? new Date(lastDataAt.value).toLocaleTimeString([], {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      })
+    : '—',
+)
 
 const primaryPosition = computed<Position | null>(() => {
   if (account.value.positions.length === 0) return null
@@ -1279,6 +1292,12 @@ function severityType(s: string): string {
 .cockpit-stale-alert {
   margin-bottom: 12px;
   cursor: pointer;
+}
+
+.heading-updated {
+  color: #909399;
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 .cockpit-grid {
