@@ -6,7 +6,7 @@ and restorable from dict via the EVENT_REGISTRY.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
@@ -32,7 +32,7 @@ class Event:
     timestamp: datetime
     source: EventSource
     symbol: str | None = None
-    event_id: UUID = uuid4()
+    event_id: UUID = field(default_factory=uuid4)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict with JSON-friendly types."""
