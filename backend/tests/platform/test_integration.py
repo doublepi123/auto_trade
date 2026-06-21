@@ -57,7 +57,7 @@ def test_full_backtest_round_trip():
     replayer.replay(bus=replay_bus)
 
     assert len(replay_fills) == len(fills)
-    assert replay_fills[0].side == "BUY"
-    assert replay_fills[1].side == "SELL"
-    assert replay_fills[0].quantity == fills[0].quantity
-    assert replay_fills[0].price == fills[0].price
+    for original, replayed in zip(fills, replay_fills, strict=True):
+        assert replayed.side == original.side
+        assert replayed.quantity == original.quantity
+        assert replayed.price == original.price
