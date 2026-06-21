@@ -160,6 +160,7 @@ import { useNotificationBadge } from './composables/useNotificationBadge'
 import { useConnectionHealth } from './composables/useConnectionHealth'
 import { useMarketSession } from './composables/useMarketSession'
 import { useCommandPalette } from './composables/useCommandPalette'
+import { useRecentPages } from './composables/useRecentPages'
 import MetricStat from './components/MetricStat.vue'
 import CommandPalette from './components/CommandPalette.vue'
 import { engineStateLabel } from './utils/labels'
@@ -177,6 +178,13 @@ const { unreadCount } = useNotificationBadge()
 // on every page, not only when the Dashboard is mounted.
 const health = useConnectionHealth()
 const palette = useCommandPalette()
+const { recordVisit } = useRecentPages()
+// Track page visits for the command palette's "recent" ordering.
+watch(
+  () => route.path,
+  (path) => recordVisit(path),
+  { immediate: true },
+)
 
 // Short badge label + coloured dot derived from the shared connection state.
 const healthLabel = computed(() => {

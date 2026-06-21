@@ -58,6 +58,7 @@ import {
 import { useCommandPalette } from '../composables/useCommandPalette'
 import { useConnectionHealth } from '../composables/useConnectionHealth'
 import { useSymbolStore } from '../composables/useSymbolStore'
+import { useRecentPages } from '../composables/useRecentPages'
 import { resolveErrorMessage } from '../utils/error'
 
 interface Command {
@@ -72,6 +73,7 @@ const router = useRouter()
 const { open, query, activeIndex, recentIds, recordRecent, closePalette } = useCommandPalette()
 const { reconnectNow, refreshNow } = useConnectionHealth()
 const { requestSymbol } = useSymbolStore()
+const { recencyRank } = useRecentPages()
 const inputRef = ref<{ focus: () => void } | null>(null)
 const symbols = ref<string[]>([])
 let symbolsLoaded = false
@@ -227,12 +229,15 @@ const filtered = computed<Command[]>(() => {
   const all = commands.value
   const q = query.value.trim().toLowerCase()
   if (!q) {
-    const recent = recentIds.value
-      .map((id) => all.find((c) => c.id === id))
-      .filter((c): c is Command => Boolean(c))
-    const seen = new Set(recent.map((c) => c.id))
-    const rest = all.filter((c) => !seen.has(c.id))
-    return [...recent, ...rest]
+    // Order by combined recency: nav commands by actual page-visit recency
+    // (more accurate than command-use), other commands by command-use recency.
+    const navPath = (id: string) => NAV_ITEMS.find((n) => n.id === id)?.path ?? ''
+    const rank = (cmd: Command): number => {
+      if (cmd.id.startsWith('nav-')) return recencyRank(navPath(cmd.id))
+      const idx = recentIds.value.indexOf(cmd.id)
+      return idx === -1 ? Number.MAX_SAFE_INTEGER : idx
+    }
+    return [...all].sort((a, b) => rank(a) - rank(b))
   }
   return all
     .map((c) => ({ c, s: scoreCommand(c, q) as number | null }))
