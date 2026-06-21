@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 from app.platform.context import StrategyContext
 from app.platform.events import BarEvent, FillEvent, QuoteEvent
@@ -18,6 +18,7 @@ class OrderIntent:
     reason: str = ""
 
 
+@runtime_checkable
 class Strategy(Protocol):
     @property
     def name(self) -> str: ...

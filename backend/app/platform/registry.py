@@ -4,7 +4,7 @@ import importlib
 import inspect
 import pkgutil
 from dataclasses import dataclass
-from typing import Any, Type
+from typing import Any
 
 from app.platform.sdk import Strategy
 
@@ -14,21 +14,21 @@ class StrategyMeta:
     name: str
     version: str
     parameter_schema: dict[str, Any]
-    strategy_class: Type[Strategy]
+    strategy_class: type[Strategy]
 
 
 class StrategyRegistry:
     def __init__(self) -> None:
-        self._strategies: dict[str, Type[Strategy]] = {}
+        self._strategies: dict[str, type[Strategy]] = {}
 
-    def register(self, strategy_class: Type[Strategy]) -> None:
+    def register(self, strategy_class: type[Strategy]) -> None:
         instance = strategy_class()
         name = instance.name
         if name in self._strategies:
             raise ValueError(f"Strategy '{name}' already registered")
         self._strategies[name] = strategy_class
 
-    def get(self, name: str) -> Type[Strategy]:
+    def get(self, name: str) -> type[Strategy]:
         if name not in self._strategies:
             raise KeyError(f"Strategy '{name}' not found")
         return self._strategies[name]
