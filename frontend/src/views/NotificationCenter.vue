@@ -31,6 +31,7 @@
           clearable
           style="width: 220px"
           data-testid="notif-search"
+          data-view-search="true"
         />
         <el-select v-model="symbolFilter" placeholder="当前页标的" clearable style="width: 140px" data-testid="notif-symbol-filter">
           <el-option v-for="symbol in symbolOptions" :key="symbol" :label="symbol" :value="symbol" />

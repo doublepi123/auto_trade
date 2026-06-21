@@ -46,7 +46,7 @@
         </el-button>
       </div>
       <div class="watchlist-filters">
-        <el-input v-model="searchText" placeholder="搜索代码/别名" clearable style="width: 180px" data-testid="watchlist-search" />
+        <el-input v-model="searchText" placeholder="搜索代码/别名" clearable style="width: 180px" data-testid="watchlist-search" data-view-search="true" />
         <el-select v-model="marketFilter" placeholder="全部市场" clearable style="width: 120px" data-testid="watchlist-market-filter">
           <el-option label="US" value="US" />
           <el-option label="HK" value="HK" />

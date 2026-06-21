@@ -360,11 +360,34 @@ function handleKeydown(ev: KeyboardEvent) {
     shortcutsVisible.value = true
     return
   }
+  // '/' focuses the active view's search input (marked data-view-search);
+  // Esc blurs it. Lets users reach search from the keyboard on any page.
+  if (key === '/') {
+    ev.preventDefault()
+    focusViewSearch()
+    return
+  }
+  if (key === 'escape') {
+    const active = document.activeElement
+    if (active instanceof HTMLElement && active.closest('[data-view-search]')) {
+      active.blur()
+    }
+    return
+  }
   const path = shortcutMap.get(key)
   if (path) {
     ev.preventDefault()
     router.push(path)
   }
+}
+
+function focusViewSearch(): void {
+  const wrap = document.querySelector<HTMLElement>('[data-view-search]')
+  if (!wrap) return
+  const input = wrap.matches('input')
+    ? wrap
+    : wrap.querySelector<HTMLInputElement>('input')
+  input?.focus()
 }
 
 function handleResize() {

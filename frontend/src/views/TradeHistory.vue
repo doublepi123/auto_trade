@@ -145,6 +145,7 @@
             placeholder="股票代码筛选"
             size="small"
             data-testid="roundtrip-symbol-search"
+            data-view-search="true"
           />
           <el-button-group>
             <el-button size="small" :type="roundTripFilter === 'all' ? 'primary' : ''" data-testid="roundtrip-filter-all" @click="roundTripFilter = 'all'">全部</el-button>

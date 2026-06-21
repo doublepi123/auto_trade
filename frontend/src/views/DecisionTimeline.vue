@@ -64,6 +64,7 @@
           placeholder="搜索消息 / 标的 / 事件类型"
           clearable
           data-testid="timeline-search"
+          data-view-search="true"
           aria-label="搜索决策时间线"
           style="width: 240px"
           @keyup.enter="onFilterChange"
