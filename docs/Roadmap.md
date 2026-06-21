@@ -37,6 +37,29 @@
 
 ---
 
+## 近期已完成迭代 (2026-06-22) — 平台基础（P149–P150）
+
+> 策略插件 SDK + 统一事件回放与实盘语义。新增 `app/platform/` 层，现有区间策略迁移为首个插件；`PlatformRunner` 支持 backtest/live 模式，事件流可持久化、可回放。规格：[2026-06-22-p149-p158-quant-platform-design.md](superpowers/specs/2026-06-22-p149-p158-quant-platform-design.md)。
+
+| 代号 | 主题 | 状态 |
+|------|------|------|
+| **P149** | 策略插件 SDK（Strategy Protocol、OrderIntent、StrategyContext、StrategyRegistry） | ✅ |
+| **P150** | 统一事件回放与实盘语义（EventBus、EventStore、SimBroker、PlatformRunner、EventReplayer） | ✅ |
+
+**设计要点：**
+- **统一事件模型**：`app/platform/events.py` 定义冻结 dataclass 事件，支持 `to_dict` / `from_dict` 与 `EVENT_REGISTRY` 反序列化。
+- **策略插件化**：`Strategy` Protocol + `@runtime_checkable`；`IntervalStrategy` 作为首个插件接入 `app/strategies/`。
+- **事件总线与持久化**：`EventBus` 内存 pub/sub；`EventStore` 写入 `event_log` 表；`EventReplayer` 可从 store 回放事件到任意 bus。
+- **回测撮合**：`SimBroker` 在 backtest 模式下按 bar 触发 LIMIT 单全部成交，fill 时间戳继承触发 bar。
+- **特性开关**：`AUTO_TRADE_PLATFORM_MODE` 默认关闭；开启后在 lifespan 中初始化 `PlatformRunner`（live 模式），并挂载到 `app.state.platform_runner`。
+- **平台 API**：`GET /api/platform/strategies` 返回已注册策略及其 `parameter_schema`。
+
+**验证：** `pytest tests/platform/` **41 passed**；`python3 -m basedpyright app/platform/ tests/platform/` 0 errors；`tests/test_platform_api.py` 覆盖平台 API 与 lifespan 开关行为。
+
+**显式 YAGNI 未做：** `SimBroker` 部分成交/滑点/延迟、live 模式与 `TradeExecutionService` 完整下单接线、多策略并发运行、跨品种组合风险、portfolio 级 attribution。
+
+---
+
 ## 近期已完成迭代 (2026-06-21) — 运维效率与个性化（10 轮 P139–P148）
 
 > 自主 feature 迭代第 15 批（10 轮）。主题：高级用户效率层 + 可持久化个性化。承接 P129–P138 的运营健康基础（复用 `useConnectionHealth`、`useSymbolStore`、`utils/clipboard.ts`）。全部**纯前端**，复用既有 API，**不新增后端端点、不新增表、不触碰 broker/order/runner/risk 写路径**。规格：[2026-06-21-p139-p148-power-user-productivity-design.md](superpowers/specs/2026-06-21-p139-p148-power-user-productivity-design.md)。

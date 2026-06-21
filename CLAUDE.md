@@ -48,6 +48,21 @@ auto_trade/
 │   │   │   ├── notifiers/                  # NotifierInterface / MultiChannelNotifier / ServerChan / Webhook
 │   │   │   ├── audit.py                    # AuditLogger：审计写表、actor_hash、IP 提取
 │   │   │   └── credential_crypto.py        # RSA + AES-GCM（AUTO_TRADE_CREDENTIAL_KEY_PATH）
+│   │   ├── platform/                       # P149+P150：策略插件 SDK + 统一事件流平台层
+│   │   │   ├── __init__.py
+│   │   │   ├── events.py                   # 统一事件基类与具体事件类型（bar/quote/fill/order/signal/risk/control）
+│   │   │   ├── sdk/                        # Strategy Protocol、OrderIntent、StrategyContext
+│   │   │   ├── context.py
+│   │   │   ├── registry.py                 # 策略插件注册表与自动发现
+│   │   │   ├── bus.py                      # 内存事件总线
+│   │   │   ├── store.py                    # EventLog 持久化仓库
+│   │   │   ├── runner.py                   # PlatformRunner（backtest/live 模式）
+│   │   │   ├── replay.py                   # EventReplayer 事件回放
+│   │   │   ├── simbroker.py                # 简化回测撮合器
+│   │   │   └── api.py                      # /api/platform/* 路由
+│   │   ├── strategies/                     # 策略插件包（IntervalStrategy 首个插件）
+│   │   │   ├── __init__.py
+│   │   │   └── interval_strategy.py        # 区间策略插件化实现
 │   │   └── services/
 │   │       ├── trade_execution_service.py  # 下单、pending 对账、tracked 入场成本持久化、HK tick、层 B 时段守卫
 │   │       ├── strategy_service.py         # update_config 返回审计 diff
@@ -60,7 +75,7 @@ auto_trade/
 │   │       ├── trade_event_service.py
 │   │       ├── event_list_service.py       # 跨表 union（trade_events + audit_logs）分页
 │   │       └── data_aggregator.py          # 真实 K 线 → LLM prompt / ATR / 布林带
-│   ├── tests/                              # pytest（见「测试约定」）
+│   ├── tests/                              # pytest（见「测试约定」），含 tests/platform/ 平台层测试
 │   ├── alembic/                            # 历史迁移；运行时以 database._ensure_* 为准
 │   ├── requirements.txt
 │   └── requirements-dev.txt                # pytest / basedpyright
@@ -132,6 +147,7 @@ cd frontend && npm run type-check
 
 | 域 | 代表路径 |
 |----|----------|
+| 平台插件 | `GET /api/platform/strategies`（已注册策略插件列表，含 parameter_schema） |
 | 策略 | `GET/PUT /api/strategy`（含 `trading_session_mode`、`fee_rate_*`、`llm_*`），`GET /api/status`，`GET /api/status/history` |
 | 控制 | `POST /api/control/{start,stop,pause,resume,kill-switch,disable-kill-switch}`（全部写审计） |
 | 交易 | `GET /api/orders`（`refresh=true` 强制同步今日订单），`POST /api/orders/{id}/cancel`（写审计），`GET /api/account`（批量 quote） |
@@ -187,6 +203,14 @@ cd frontend && npm run type-check
 - `AUTO_TRADE_BROKER_RETRY_MAX`（默认 3，订单全量）、`AUTO_TRADE_BROKER_QUOTE_RETRY_MAX`（默认 1，行情）、`AUTO_TRADE_BROKER_RETRY_BASE_MS`（默认 1000）：`BrokerGateway._call_with_retry` 分档退避；`max_retries=0` 表示只调 1 次，无 sleep。
 - `AUTO_TRADE_AUDIT_REQUEST_SUMMARY_LIMIT`（默认 2048）：审计 `request_summary` 截断字节数；超出会附加 `...truncated`。
 - **API 鉴权行为**：`require_api_key()` 读取 `X-API-Key`；`AUTO_TRADE_API_KEY` 为空时仅 `dev/test` 放行，`prod` 返回 401。Docker/nginx 与 Vite 代理在服务端注入 header，前端 SPA 不持有该密钥。
+
+### 平台模式（P149+P150）
+
+- `AUTO_TRADE_PLATFORM_MODE=false`（默认）使用旧 `AppRunner`，新平台层仅暴露 `/api/platform/strategies` 等只读端点。
+- `AUTO_TRADE_PLATFORM_MODE=true` 在 lifespan 中额外初始化 `PlatformRunner` 并挂到 `app.state.platform_runner`；`PlatformRunner` 通过统一事件流驱动策略插件。
+- 新增 `app/platform/` 目录：`events.py`、`sdk/`、`context.py`、`registry.py`、`bus.py`、`store.py`、`runner.py`、`replay.py`、`simbroker.py`、`api.py`。
+- 现有区间策略已迁移为 `app/strategies/interval_strategy.py`，作为首个策略插件。
+- Phase 1 已知简化：`SimBroker` 仅支持 LIMIT 单全部成交；`PlatformRunner` live 模式仅预留 `live_order_handler` 回调，未与 `TradeExecutionService` 完整接线。
 
 ### 交易执行（TradeExecutionService）
 
