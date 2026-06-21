@@ -613,6 +613,7 @@ import { engineStateLabel, auditActionLabel, marketLabel, positionSideLabel, ski
 import { EVENT_TYPE } from '../utils/constants'
 import { downloadCsv } from '../utils/csv'
 import { relativeAgeLabel } from '../utils/time'
+import { formatNumber, signedCurrency, signedPercent } from '../utils/format'
 
 type CypressWindow = Window & { Cypress?: unknown }
 const multiSymbols = useMultiSymbolSnapshots()
@@ -1057,10 +1058,6 @@ function exportDiagnostics() {
   ElMessage.success(`已导出 ${rows.length} 个运行时诊断`)
 }
 
-function formatNumber(value: number | null | undefined): string {
-  return (value ?? 0).toFixed(2)
-}
-
 function formatTime(value: string): string {
   return new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 }
@@ -1078,22 +1075,6 @@ function formatDateTime(value: string): string {
 function formatCooldown(seconds: number | null | undefined): string {
   if (seconds == null || seconds <= 0) return '-'
   return `${Math.ceil(seconds)}s`
-}
-
-function signedCurrency(value: number | null | undefined): string {
-  const normalized = value ?? 0
-  const amount = Math.abs(normalized).toFixed(2)
-  if (normalized > 0) return `+$${amount}`
-  if (normalized < 0) return `-$${amount}`
-  return `$${amount}`
-}
-
-function signedPercent(value: number | null | undefined): string {
-  const normalized = value ?? 0
-  const amount = Math.abs(normalized).toFixed(2)
-  if (normalized > 0) return `+${amount}%`
-  if (normalized < 0) return `-${amount}%`
-  return `${amount}%`
 }
 
 function pnlLabel(value: number | null | undefined): string {

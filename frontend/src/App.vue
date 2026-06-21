@@ -35,24 +35,24 @@
             </el-button>
           </template>
           <div class="health-panel" data-testid="health-panel">
-            <div class="health-row">
-              <span>实时连接</span>
-              <strong>{{ health.connectionLabel.value }}</strong>
-            </div>
-            <div class="health-row">
-              <span>数据年龄</span>
-              <strong :class="healthAgeClass" data-testid="health-age">{{
-                healthAgeLabel
-              }}</strong>
-            </div>
-            <div class="health-row">
-              <span>运行器</span>
-              <strong>{{ health.status.value.runner_running ? '运行中' : '未启动' }}</strong>
-            </div>
-            <div class="health-row">
-              <span>引擎状态</span>
-              <strong>{{ engineStateLabel(health.status.value.engine_state) }}</strong>
-            </div>
+            <MetricStat spread label="实时连接" :value="health.connectionLabel.value" />
+            <MetricStat
+              spread
+              label="数据年龄"
+              :value="healthAgeLabel"
+              :value-class="healthAgeClass"
+              value-testid="health-age"
+            />
+            <MetricStat
+              spread
+              label="运行器"
+              :value="health.status.value.runner_running ? '运行中' : '未启动'"
+            />
+            <MetricStat
+              spread
+              label="引擎状态"
+              :value="engineStateLabel(health.status.value.engine_state)"
+            />
             <el-button
               size="small"
               type="primary"
@@ -140,6 +140,7 @@ import { useNotificationStream } from './composables/useNotificationStream'
 import { useNotificationBadge } from './composables/useNotificationBadge'
 import { useConnectionHealth } from './composables/useConnectionHealth'
 import { useMarketSession } from './composables/useMarketSession'
+import MetricStat from './components/MetricStat.vue'
 import { engineStateLabel } from './utils/labels'
 import { ageFreshnessClass, relativeAgeLabel } from './utils/time'
 
