@@ -57,3 +57,20 @@ def test_portfolio_attribution_404_for_unknown(patched_app) -> None:
     with TestClient(app) as client:
         resp = client.get("/api/portfolio/attribution", params={"name": "missing"})
     assert resp.status_code == 404
+
+
+def test_kill_switch_endpoints(patched_app) -> None:
+    from app.platform import portfolio_runner as prm
+
+    Base.metadata.drop_all(bind=database.engine)
+    Base.metadata.create_all(bind=database.engine)
+    prm.reset_kill_switch_for_tests()
+    with TestClient(app) as client:
+        status0 = client.get("/api/portfolio/kill-switch").json()
+        assert status0["armed"] is False
+        armed = client.post("/api/portfolio/kill-switch").json()
+        assert armed["armed"] is True
+        assert client.get("/api/portfolio/kill-switch").json()["armed"] is True
+        disarmed = client.post("/api/portfolio/kill-switch/disable").json()
+        assert disarmed["armed"] is False
+    prm.reset_kill_switch_for_tests()

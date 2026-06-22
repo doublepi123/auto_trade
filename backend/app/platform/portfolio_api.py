@@ -3,11 +3,14 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from app.api.auth import require_api_key
+from app.api.deps import extract_actor, get_audit_logger
+from app.core.audit import AuditLogger
 from app.database import get_db
 from app.platform.attribution_service import AttributionService
+from app.platform import portfolio_runner as portfolio_runner_module
 from app.platform.portfolio_config import PortfolioConfig
 from app.platform.portfolio_service import PortfolioService
 
@@ -73,3 +76,44 @@ def portfolio_attribution(name: str, db=Depends(get_db)) -> dict[str, Any]:
         )
     attribution = AttributionService().attribute(config)
     return attribution
+
+
+@router.get("/kill-switch")
+def kill_switch_status() -> dict[str, Any]:
+    return {"armed": portfolio_runner_module.is_kill_switch_armed()}
+
+
+@router.post("/kill-switch")
+def arm_kill_switch(
+    request: Request,
+    audit: AuditLogger = Depends(get_audit_logger),
+) -> dict[str, Any]:
+    actor_hash, source_ip = extract_actor(request)
+    portfolio_runner_module.arm_kill_switch()
+    audit.record(
+        "PORTFOLIO_KILL_SWITCH",
+        severity="WARNING",
+        actor_hash=actor_hash,
+        source_ip=source_ip,
+        request_summary={"action": "arm"},
+        result="SUCCESS",
+    )
+    return {"armed": True}
+
+
+@router.post("/kill-switch/disable")
+def disarm_kill_switch(
+    request: Request,
+    audit: AuditLogger = Depends(get_audit_logger),
+) -> dict[str, Any]:
+    actor_hash, source_ip = extract_actor(request)
+    portfolio_runner_module.disarm_kill_switch()
+    audit.record(
+        "PORTFOLIO_KILL_SWITCH",
+        severity="INFO",
+        actor_hash=actor_hash,
+        source_ip=source_ip,
+        request_summary={"action": "disarm"},
+        result="SUCCESS",
+    )
+    return {"armed": False}
