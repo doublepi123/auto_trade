@@ -73,3 +73,58 @@ def test_platform_mode_disabled_leaves_runner_unset(patched_app, monkeypatch) ->
         response = client.get("/api/platform/strategies")
     assert response.status_code == 200
     assert app.state.platform_runner is None
+
+
+def test_platform_backtest_endpoint_runs(patched_app) -> None:
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/platform/backtest",
+            json={
+                "strategy": "interval",
+                "params": {"buy_low": 145, "sell_high": 155, "quantity": 10},
+                "symbols": ["AAPL.US"],
+                "initial_cash": 10000,
+                "bars": [
+                    {"timestamp": "2026-06-22T10:00:00+00:00", "symbol": "AAPL.US", "open": 150, "high": 160, "low": 140, "close": 144, "volume": 1000},
+                    {"timestamp": "2026-06-22T10:01:00+00:00", "symbol": "AAPL.US", "open": 150, "high": 160, "low": 140, "close": 156, "volume": 1000},
+                ],
+            },
+        )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["fills"]) == 2
+    assert data["stats"]["num_bars"] == 2
+    assert data["stats"]["num_fills"] == 2
+    assert data["final_positions"]["AAPL.US"] == 0
+    assert len(data["equity_curve"]) == 2
+
+
+def test_platform_backtest_missing_fields_returns_422(patched_app) -> None:
+    with TestClient(app) as client:
+        resp = client.post("/api/platform/backtest", json={"strategy": "interval"})
+    assert resp.status_code == 422
+
+
+def test_platform_backtest_unknown_strategy_returns_404(patched_app) -> None:
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/platform/backtest",
+            json={
+                "strategy": "nope",
+                "params": {},
+                "symbols": ["AAPL.US"],
+                "bars": [
+                    {"timestamp": "2026-06-22T10:00:00+00:00", "symbol": "AAPL.US", "open": 1, "high": 2, "low": 0, "close": 1, "volume": 1},
+                ],
+            },
+        )
+    assert resp.status_code == 404
+
+
+def test_platform_backtest_empty_symbols_or_bars_returns_422(patched_app) -> None:
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/platform/backtest",
+            json={"strategy": "interval", "params": {}, "symbols": [], "bars": []},
+        )
+    assert resp.status_code == 422
