@@ -173,3 +173,96 @@ def test_platform_snapshot_reports_positions_and_open_orders(patched_app, monkey
     assert data["mode"] == "paper"
     assert data["symbols"] == ["AAPL.US"]
     assert any(p["symbol"] == "AAPL.US" and p["quantity"] == 10 for p in data["positions"])
+
+
+def test_platform_events_endpoint_returns_stored_events(patched_app) -> None:
+    from datetime import datetime, timezone
+    from decimal import Decimal
+
+    from app import database
+    from app.models import Base
+    from app.platform.events import BarEvent, EventSource
+    from app.platform.store import EventStore
+
+    Base.metadata.drop_all(bind=database.engine)
+    Base.metadata.create_all(bind=database.engine)
+    store = EventStore()
+    store.clear()
+    store.append(
+        BarEvent(
+            timestamp=datetime(2026, 6, 22, 10, 0, tzinfo=timezone.utc),
+            source=EventSource.MARKET,
+            symbol="AAPL.US",
+            open=Decimal("150"),
+            high=Decimal("151"),
+            low=Decimal("149"),
+            close=Decimal("150.5"),
+            volume=100,
+        )
+    )
+    with TestClient(app) as client:
+        resp = client.get("/api/platform/events", params={"symbol": "AAPL.US", "limit": 10})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["count"] >= 1
+    assert data["events"][0]["event_type"] == "bar"
+
+
+def test_platform_events_limit_validation(patched_app) -> None:
+    with TestClient(app) as client:
+        resp = client.get("/api/platform/events", params={"limit": 0})
+    assert resp.status_code == 422
+
+
+def test_platform_replay_reconstructs_positions(patched_app) -> None:
+    from datetime import datetime, timezone
+    from decimal import Decimal
+
+    from app import database
+    from app.models import Base
+    from app.platform.events import BarEvent, EventSource
+    from app.platform.store import EventStore
+
+    Base.metadata.drop_all(bind=database.engine)
+    Base.metadata.create_all(bind=database.engine)
+    store = EventStore()
+    store.clear()
+    # persist two bars that trigger interval BUY then SELL
+    store.append(
+        BarEvent(
+            timestamp=datetime(2026, 6, 22, 10, 0, tzinfo=timezone.utc),
+            source=EventSource.MARKET,
+            symbol="AAPL.US",
+            open=Decimal("150"),
+            high=Decimal("160"),
+            low=Decimal("140"),
+            close=Decimal("144"),
+            volume=1000,
+        )
+    )
+    store.append(
+        BarEvent(
+            timestamp=datetime(2026, 6, 22, 10, 1, tzinfo=timezone.utc),
+            source=EventSource.MARKET,
+            symbol="AAPL.US",
+            open=Decimal("150"),
+            high=Decimal("160"),
+            low=Decimal("140"),
+            close=Decimal("156"),
+            volume=1000,
+        )
+    )
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/platform/replay",
+            json={
+                "strategy": "interval",
+                "params": {"buy_low": 145, "sell_high": 155, "quantity": 10},
+                "symbols": ["AAPL.US"],
+                "symbol": "AAPL.US",
+            },
+        )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["bars_replayed"] == 2
+    assert data["reconstructed_positions"] == []  # round-trip: flat
