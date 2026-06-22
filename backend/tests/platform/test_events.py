@@ -349,3 +349,40 @@ def test_full_json_serialization_roundtrip():
     assert restored.signal_type == "buy_low"
     assert restored.price == Decimal("149.00")
     assert restored.params == {"threshold": "150.00"}
+
+
+def test_fill_event_roundtrips_with_slippage_commission_and_partial():
+    event = FillEvent(
+        timestamp=datetime(2026, 6, 22, 10, 1, 0, tzinfo=timezone.utc),
+        source=EventSource.BROKER,
+        symbol="AAPL.US",
+        broker_order_id="order-3",
+        side="BUY",
+        quantity=50,
+        price=Decimal("150.00"),
+        fee=Decimal("0.25"),
+        slippage=Decimal("0.02"),
+        commission=Decimal("0.75"),
+        partial=True,
+    )
+    data = event.to_dict()
+    restored = FillEvent.from_dict(data)
+    assert restored.slippage == Decimal("0.02")
+    assert restored.commission == Decimal("0.75")
+    assert restored.partial is True
+
+
+def test_order_event_roundtrips_with_reason():
+    event = OrderEvent(
+        timestamp=datetime(2026, 6, 22, 10, 15, 0, tzinfo=timezone.utc),
+        source=EventSource.BROKER,
+        symbol="AAPL.US",
+        broker_order_id="bo-124",
+        status="REJECTED",
+        filled_quantity=0,
+        avg_price=None,
+        reason="insufficient funds",
+    )
+    data = event.to_dict()
+    restored = OrderEvent.from_dict(data)
+    assert restored.reason == "insufficient funds"

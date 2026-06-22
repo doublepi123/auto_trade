@@ -179,6 +179,7 @@ class OrderEvent(Event):
     status: str
     filled_quantity: int = 0
     avg_price: Decimal | None = None
+    reason: str = ""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> OrderEvent:
@@ -191,6 +192,7 @@ class OrderEvent(Event):
             status=data["status"],
             filled_quantity=data.get("filled_quantity", 0),
             avg_price=Decimal(data["avg_price"]) if data.get("avg_price") is not None else None,
+            reason=data.get("reason", ""),
         )
 
 
@@ -205,6 +207,9 @@ class FillEvent(Event):
     quantity: int
     price: Decimal
     fee: Decimal = Decimal("0")
+    slippage: Decimal = Decimal("0")
+    commission: Decimal = Decimal("0")
+    partial: bool = False
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> FillEvent:
@@ -218,6 +223,9 @@ class FillEvent(Event):
             quantity=data["quantity"],
             price=Decimal(data["price"]),
             fee=Decimal(data.get("fee", "0")),
+            slippage=Decimal(data.get("slippage", "0")),
+            commission=Decimal(data.get("commission", "0")),
+            partial=data.get("partial", False),
         )
 
 
