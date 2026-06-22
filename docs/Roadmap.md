@@ -83,6 +83,35 @@
 
 ---
 
+## 近期已完成迭代 (2026-06-23) — 平台能力闭环与扩展（10 轮 P153–P162）
+
+> 自主 feature 迭代第 17 批（10 轮）。承接 P149–P152 + P156 平台地基，把平台从「地基可用」推进到「研究/执行/归因/部署可观测闭环」。全部后端、`pytest` 可验、特性开关兼容。规格：[2026-06-22-p153-p162-platform-completion-design.md](superpowers/specs/2026-06-22-p153-p162-platform-completion-design.md)。
+
+| 代号 | 主题 | 状态 |
+|------|------|------|
+| **P153** | 平台回测 API（`POST /api/platform/backtest`：任意已注册策略在 K 线上跑 PaperBroker → equity/fills/positions） | ✅ |
+| **P154** | Paper 订单持久化（`PaperBroker` 同步写 `paper_orders`、`from_db` 重载未结订单） | ✅ |
+| **P155** | 止损 / 追踪止损 / OCO 订单意图（`OrderIntent.stop_price/trailing_offset/linked_order_id`） | ✅ |
+| **P156+** | 集中度与相关性风控（`CONCENTRATION_BREACH`/`CORRELATION_BREACH`，滚动 Pearson） | ✅ |
+| **P157** | 组合归因 API（`GET /api/portfolio/attribution`：FIFO realized + unrealized PnL） | ✅ |
+| **P158** | 策略参数版本化与回滚（`strategy_param_versions` + `GET /versions` + `POST /{id}/rollback` 写审计） | ✅ |
+| **P159** | 平台诊断快照（`GET /api/platform/snapshot`：mode/symbols/持仓/未结 paper 订单） | ✅ |
+| **P160** | 事件日志查询与确定性回放（`GET /api/platform/events` + `POST /api/platform/replay`） | ✅ |
+| **P161** | 组合运行器（`PortfolioRunner`：allocator 再平衡 → `PlatformRunner.submit_intent`） | ✅ |
+| **P162** | 风控 gate 与组合 kill-switch（CRITICAL 即跳过；模块级 `arm/disarm` + API 写审计） | ✅ |
+
+**设计要点：**
+- **复用既有抽象**：所有新功能复用 `PlatformRunner`/`PaperBroker`/`EventBus`/`EventStore`/`PortfolioConfig`/`RiskEngine`，不另起并行栈；`PlatformRunner` 仅新增公开 `submit_intent`。
+- **事件先行**：归因从 `event_log` 成本基础推导；回放只喂 `BarEvent` 让 runner 自行撮合，避免 fill 双计。
+- **特性开关兼容**：`AUTO_TRADE_PLATFORM_MODE=false` 时新只读端点（events/snapshot 404、attribution/backtest 自建 runner）不依赖全局 runner。
+- **风控 gate**：`PortfolioRunner.rebalance` 先查 kill-switch，再查 `risk_engine.controller.check` 的 CRITICAL 违规，命中即跳过下单。
+
+**验证：** `pytest tests/` **1299 passed**（基线 1260 → +39）；平台层 `basedpyright` 0 真实错误（仅 sqlalchemy/pytest/fastapi 的 `reportMissingImports` venv 误报）；`tests/platform/` 覆盖 backtest/paper_broker（含 STOP/TRAILING/OCO + 持久化）/portfolio_risk（集中度+相关性）/attribution/portfolio_runner（kill-switch + CRITICAL gate）/portfolio_kill_switch；`tests/test_platform_api.py` 覆盖 backtest/snapshot/events/replay；`tests/test_portfolio_api.py` 覆盖 attribution + kill-switch；`tests/test_strategy_versions.py` 覆盖版本化 + rollback。
+
+**显式 YAGNI 未做：** live↔`TradeExecutionService` 完整下单接线、TWAP/VWAP 全量执行算法、ML/LLM 训练闭环、因子研究仓、灰度部署管控台、前端组合/平台 UI、多策略并发、portfolio 级 attribution 的 Brinson 分解。
+
+---
+
 ## 近期已完成迭代 (2026-06-21) — 运维效率与个性化（10 轮 P139–P148）
 
 > 自主 feature 迭代第 15 批（10 轮）。主题：高级用户效率层 + 可持久化个性化。承接 P129–P138 的运营健康基础（复用 `useConnectionHealth`、`useSymbolStore`、`utils/clipboard.ts`）。全部**纯前端**，复用既有 API，**不新增后端端点、不新增表、不触碰 broker/order/runner/risk 写路径**。规格：[2026-06-21-p139-p148-power-user-productivity-design.md](superpowers/specs/2026-06-21-p139-p148-power-user-productivity-design.md)。
