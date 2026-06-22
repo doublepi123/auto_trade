@@ -93,6 +93,10 @@ class PlatformRunner:
         elif self.mode == "live" and self.live_order_handler is not None:
             self.live_order_handler(intent)
 
+    def submit_intent(self, intent: OrderIntent, timestamp: datetime | None = None) -> None:
+        """Public entry point for external drivers (e.g. PortfolioRunner) to submit an OrderIntent."""
+        self._execute_intent(intent, timestamp=timestamp)
+
     def on_bar(self, bar: BarEvent) -> None:
         self._emit(bar)
         if not self.symbols or bar.symbol in self.symbols:
