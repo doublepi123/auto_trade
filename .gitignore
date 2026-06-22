@@ -17,6 +17,7 @@ dist/
 data/
 .superpowers/
 .worktrees/
+.claude/
 .firecrawl/
 
 # Frontend
