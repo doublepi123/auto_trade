@@ -13,9 +13,12 @@ class OrderIntent:
     symbol: str
     side: str  # "BUY" or "SELL"
     quantity: int
-    order_type: str  # "MARKET" or "LIMIT" initially
+    order_type: str  # "MARKET", "LIMIT", "STOP", or "TRAILING"
     limit_price: Decimal | None = None
     reason: str = ""
+    stop_price: Decimal | None = None
+    trailing_offset: Decimal | None = None
+    linked_order_id: str | None = None
 
 
 @runtime_checkable

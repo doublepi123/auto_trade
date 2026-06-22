@@ -24,6 +24,9 @@ def _intent_to_json(intent: OrderIntent) -> str:
             "order_type": intent.order_type,
             "limit_price": str(intent.limit_price) if intent.limit_price is not None else None,
             "reason": intent.reason,
+            "stop_price": str(intent.stop_price) if intent.stop_price is not None else None,
+            "trailing_offset": str(intent.trailing_offset) if intent.trailing_offset is not None else None,
+            "linked_order_id": intent.linked_order_id,
         }
     )
 
@@ -37,6 +40,9 @@ def _intent_from_json(raw: str) -> OrderIntent:
         order_type=data["order_type"],
         limit_price=Decimal(data["limit_price"]) if data.get("limit_price") is not None else None,
         reason=data.get("reason", ""),
+        stop_price=Decimal(data["stop_price"]) if data.get("stop_price") is not None else None,
+        trailing_offset=Decimal(data["trailing_offset"]) if data.get("trailing_offset") is not None else None,
+        linked_order_id=data.get("linked_order_id"),
     )
 
 
@@ -61,6 +67,7 @@ class PaperBroker:
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._config = config or PaperBrokerConfig()
         self._session = session
+        self._trailing_stops: dict[str, Decimal] = {}
 
     def _persist(self, order: PaperOrderState) -> None:
         if self._session is None:
@@ -168,25 +175,25 @@ class PaperBroker:
 
     def on_bar(self, bar: BarEvent) -> list[FillEvent]:
         fills: list[FillEvent] = []
+        cancelled_partners: list[str] = []
         for order in list(self._orders.values()):
             if order.status not in ("SUBMITTED", "PARTIAL_FILLED"):
                 continue
             intent = order.intent
             if intent.symbol != bar.symbol:
                 continue
-            if intent.order_type != "LIMIT" or intent.limit_price is None:
+            trigger_price = self._match_price(order, bar)
+            if trigger_price is None:
+                # update trailing stop even when not triggered
+                self._update_trailing(order, bar)
                 continue
-
-            if intent.side == "BUY" and bar.low <= intent.limit_price:
-                fill_price = min(bar.open, intent.limit_price) + self._config.slippage_ticks
-            elif intent.side == "SELL" and bar.high >= intent.limit_price:
-                fill_price = max(bar.open, intent.limit_price) - self._config.slippage_ticks
-            else:
-                continue
-
             fill_qty = self._compute_fill_quantity(order, bar)
             if fill_qty <= 0:
                 continue
+            if intent.side == "BUY":
+                fill_price = trigger_price + self._config.slippage_ticks
+            else:
+                fill_price = trigger_price - self._config.slippage_ticks
             commission = fill_price * Decimal(fill_qty) * self._config.commission_rate
             order.fill(fill_qty, fill_price, slippage=self._config.slippage_ticks, commission=commission)
             self._persist(order)
@@ -204,7 +211,48 @@ class PaperBroker:
                     partial=order.status == "PARTIAL_FILLED",
                 )
             )
+            if order.status == "FILLED" and intent.linked_order_id:
+                cancelled_partners.append(intent.linked_order_id)
+        for partner_id in cancelled_partners:
+            partner = self._orders.get(partner_id)
+            if partner and partner.status in ("SUBMITTED", "PARTIAL_FILLED"):
+                partner.status = "CANCELLED"
+                self._persist(partner)
         return fills
+
+    def _match_price(self, order: PaperOrderState, bar: BarEvent) -> Decimal | None:
+        """Return the fill trigger price for LIMIT/STOP/TRAILING, or None if not triggered."""
+        intent = order.intent
+        if intent.order_type == "LIMIT" and intent.limit_price is not None:
+            if intent.side == "BUY" and bar.low <= intent.limit_price:
+                return min(bar.open, intent.limit_price)
+            if intent.side == "SELL" and bar.high >= intent.limit_price:
+                return max(bar.open, intent.limit_price)
+            return None
+        if intent.order_type == "STOP" and intent.stop_price is not None:
+            if intent.side == "BUY" and bar.high >= intent.stop_price:
+                return max(bar.open, intent.stop_price)
+            if intent.side == "SELL" and bar.low <= intent.stop_price:
+                return min(bar.open, intent.stop_price)
+            return None
+        if intent.order_type == "TRAILING" and intent.trailing_offset is not None:
+            stop = self._trailing_stops.get(order.order_id)
+            if stop is None:
+                return None
+            if intent.side == "SELL" and bar.low <= stop:
+                return min(bar.open, stop)
+            return None
+        return None
+
+    def _update_trailing(self, order: PaperOrderState, bar: BarEvent) -> None:
+        intent = order.intent
+        if intent.order_type != "TRAILING" or intent.trailing_offset is None:
+            return
+        # SELL trailing stop ratchets up as price rises; anchor = high - offset
+        candidate = bar.high - intent.trailing_offset
+        current = self._trailing_stops.get(order.order_id)
+        if current is None or candidate > current:
+            self._trailing_stops[order.order_id] = candidate
 
     def _compute_fill_quantity(self, order: PaperOrderState, bar: BarEvent) -> int:
         remaining = order.remaining_quantity
