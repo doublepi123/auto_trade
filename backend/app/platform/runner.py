@@ -12,8 +12,10 @@ from app.platform.events import (
     FillEvent,
     OrderIntentEvent,
     QuoteEvent,
+    RiskEvent,
 )
 from app.platform.paper_broker import PaperBroker
+from app.platform.risk_engine import RiskEngine
 from app.platform.sdk import OrderIntent, Strategy
 from app.platform.store import EventStore
 
@@ -37,6 +39,7 @@ class PlatformRunner:
         live_order_handler: Callable[[OrderIntent], None] | None = None,
         symbols: list[str] | None = None,
         broker: PaperBroker | None = None,
+        risk_engine: RiskEngine | None = None,
     ) -> None:
         self.symbols = list(symbols) if symbols else [symbol]
         self.strategy = strategy
@@ -50,6 +53,8 @@ class PlatformRunner:
         if mode in ("backtest", "paper"):
             self._broker = broker or PaperBroker(clock=self.clock)
             self.bus.subscribe("fill", self._on_fill)
+        self.risk_engine = risk_engine or RiskEngine()
+        self.bus.subscribe("fill", self._on_risk_fill)
 
     @property
     def symbol(self) -> str | None:
@@ -98,6 +103,11 @@ class PlatformRunner:
             fills = self._broker.on_bar(bar)
             for fill in fills:
                 self._emit(fill)
+        if self.risk_engine is not None and self.mode in ("backtest", "paper"):
+            symbol = bar.symbol or ""
+            risk_events = self.risk_engine.evaluate({symbol: bar.close}, timestamp=bar.timestamp)
+            for evt in risk_events:
+                self._emit(evt)
 
     def on_quote(self, quote: QuoteEvent) -> None:
         self._emit(quote)
@@ -121,3 +131,9 @@ class PlatformRunner:
         follow_up = self.strategy.on_fill(self._context(symbol), fill)
         for intent in follow_up:
             self._execute_intent(intent, timestamp=fill.timestamp)
+
+    def _on_risk_fill(self, event: Event) -> None:
+        """Adapter: 转发 fill 给 RiskEngine 更新持仓（返回值忽略）。"""
+        if not isinstance(event, FillEvent):
+            return
+        self.risk_engine.on_fill(event)

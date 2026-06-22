@@ -106,3 +106,35 @@ def test_runner_multi_symbol_routes_bars():
     # AAPL buy trigger (close 144 < buy_low 145)
     runner.on_bar(make_named_bar("AAPL.US", "144", t0))
     assert any(f.symbol == "AAPL.US" for f in fills)
+
+
+from app.platform.risk_engine import RiskEngine
+from app.platform.portfolio_config import PortfolioConfig
+
+
+def test_runner_feeds_risk_engine_with_fills():
+    _ensure_tables()
+    bus = EventBus()
+    store = EventStore()
+    store.clear()
+
+    config = PortfolioConfig(
+        name="test",
+        symbols=["AAPL.US"],
+        allocations={"AAPL.US": Decimal("1")},
+    )
+    risk_engine = RiskEngine(config=config)
+    strategy = IntervalStrategy(params={"buy_low": Decimal("145"), "sell_high": Decimal("155"), "quantity": 10})
+    runner = PlatformRunner(
+        symbols=["AAPL.US"],
+        strategy=strategy,
+        mode="backtest",
+        bus=bus,
+        store=store,
+        risk_engine=risk_engine,
+    )
+
+    t0 = datetime(2026, 6, 22, 10, 0, tzinfo=timezone.utc)
+    runner.on_bar(make_bar("144", t0))
+
+    assert risk_engine._positions.get("AAPL.US", {}).get("quantity") == 10
