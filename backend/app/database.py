@@ -74,6 +74,7 @@ def init_db() -> None:
     _ensure_notifications_table(engine)
     _ensure_event_log_table(engine)
     _ensure_portfolio_config_table(engine)
+    _ensure_paper_orders_table(engine)
     db = SessionLocal()
     try:
         _bootstrap_credentials(db, CredentialConfig, StrategyConfig)
@@ -511,6 +512,33 @@ def _ensure_portfolio_config_table(db_engine: Engine) -> None:
                 updated_at DATETIME
             )
             """
+        )
+
+
+def _ensure_paper_orders_table(db_engine: Engine) -> None:
+    inspector = inspect(db_engine)
+    if "paper_orders" in inspector.get_table_names():
+        return
+    with db_engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS paper_orders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                broker_order_id VARCHAR(50) NOT NULL,
+                symbol VARCHAR(50) NOT NULL,
+                side VARCHAR(20) NOT NULL,
+                quantity INTEGER NOT NULL,
+                filled_quantity INTEGER NOT NULL DEFAULT 0,
+                limit_price FLOAT,
+                status VARCHAR(30) NOT NULL DEFAULT 'SUBMITTED',
+                intent_json TEXT NOT NULL DEFAULT '{}',
+                created_at DATETIME,
+                updated_at DATETIME
+            )
+            """
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_paper_orders_broker_order_id ON paper_orders (broker_order_id)"
         )
 
 

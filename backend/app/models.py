@@ -73,6 +73,22 @@ class PortfolioConfig(Base):
     updated_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow, onupdate=_utcnow)
 
 
+class PaperOrder(Base):
+    __tablename__ = "paper_orders"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    broker_order_id: Mapped[str] = mapped_column(String(50), index=True)
+    symbol: Mapped[str] = mapped_column(String(50))
+    side: Mapped[str] = mapped_column(String(20))
+    quantity: Mapped[int] = mapped_column(Integer)
+    filled_quantity: Mapped[int] = mapped_column(Integer, default=0)
+    limit_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    status: Mapped[str] = mapped_column(String(30), default="SUBMITTED")
+    intent_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow, onupdate=_utcnow)
+
+
 class CredentialConfig(Base):
     __tablename__ = "credential_config"
 
