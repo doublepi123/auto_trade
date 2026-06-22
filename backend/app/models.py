@@ -57,6 +57,22 @@ class StrategyConfig(Base):
     report_schedule_symbol: Mapped[str] = mapped_column(String(50), default="", nullable=False)
 
 
+class PortfolioConfig(Base):
+    __tablename__ = "portfolio_config"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
+    symbols_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    allocations_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    per_symbol_risk_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    rebalance_threshold_pct: Mapped[float] = mapped_column(Float, default=5.0)
+    max_gross_exposure: Mapped[float] = mapped_column(Float, default=1.0)
+    max_net_exposure: Mapped[float] = mapped_column(Float, default=0.5)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow, onupdate=_utcnow)
+
+
 class CredentialConfig(Base):
     __tablename__ = "credential_config"
 

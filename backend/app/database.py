@@ -73,6 +73,7 @@ def init_db() -> None:
     _ensure_strategy_presets_table(engine)
     _ensure_notifications_table(engine)
     _ensure_event_log_table(engine)
+    _ensure_portfolio_config_table(engine)
     db = SessionLocal()
     try:
         _bootstrap_credentials(db, CredentialConfig, StrategyConfig)
@@ -486,6 +487,30 @@ def _ensure_event_log_table(db_engine: Engine) -> None:
         )
         connection.exec_driver_sql(
             "CREATE INDEX IF NOT EXISTS ix_event_log_timestamp ON event_log (timestamp)"
+        )
+
+
+def _ensure_portfolio_config_table(db_engine: Engine) -> None:
+    inspector = inspect(db_engine)
+    if "portfolio_config" in inspector.get_table_names():
+        return
+    with db_engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS portfolio_config (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name VARCHAR(100) NOT NULL UNIQUE,
+                symbols_json TEXT NOT NULL DEFAULT '[]',
+                allocations_json TEXT NOT NULL DEFAULT '{}',
+                per_symbol_risk_json TEXT NOT NULL DEFAULT '{}',
+                rebalance_threshold_pct FLOAT NOT NULL DEFAULT 5.0,
+                max_gross_exposure FLOAT NOT NULL DEFAULT 1.0,
+                max_net_exposure FLOAT NOT NULL DEFAULT 0.5,
+                enabled BOOLEAN NOT NULL DEFAULT 1,
+                created_at DATETIME,
+                updated_at DATETIME
+            )
+            """
         )
 
 
