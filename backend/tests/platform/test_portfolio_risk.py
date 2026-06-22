@@ -43,7 +43,9 @@ def test_risk_controller_no_breach_when_within_limits():
         max_gross_exposure=Decimal("2.0"),
         max_net_exposure=Decimal("2.0"),
     )
-    controller = PortfolioRiskController(config)
+    # max_concentration defaults to 0.4; this single-name position has 0.5 weight,
+    # so raise the cap to keep the test focused on gross/net limits only.
+    controller = PortfolioRiskController(config, max_concentration=Decimal("1.0"))
     prices = {"AAPL.US": Decimal("100")}
     positions = {"AAPL.US": {"quantity": 5}}
     nav = Decimal("1000")  # gross = 500/1000 = 0.5 < 2.0
@@ -64,3 +66,53 @@ def test_risk_controller_detects_drawdown():
     # NAV drops to 8000 => 20% drawdown > 10%
     events = controller.drawdown(Decimal("8000"), timestamp=ts)
     assert any(e.risk_type == "DRAWDOWN_BREACH" for e in events)
+
+
+def test_risk_controller_detects_concentration_breach():
+    config = PortfolioConfig(
+        name="test",
+        symbols=["AAPL.US", "TSLA.US"],
+        allocations={"AAPL.US": Decimal("0.5"), "TSLA.US": Decimal("0.5")},
+    )
+    controller = PortfolioRiskController(config, max_concentration=Decimal("0.3"))
+    prices = {"AAPL.US": Decimal("150"), "TSLA.US": Decimal("0")}
+    positions = {"AAPL.US": {"quantity": 10}, "TSLA.US": {"quantity": 0}}
+    nav = Decimal("1000")  # AAPL weight = 1500/1000 = 1.5 > 0.3
+    events = controller.check(prices, positions, nav, timestamp=datetime(2026, 6, 22, 10, 0, tzinfo=timezone.utc))
+    assert any(e.risk_type == "CONCENTRATION_BREACH" for e in events)
+
+
+def test_risk_controller_detects_correlation_breach():
+    config = PortfolioConfig(
+        name="test",
+        symbols=["A.US", "B.US"],
+        allocations={"A.US": Decimal("0.5"), "B.US": Decimal("0.5")},
+    )
+    controller = PortfolioRiskController(config, max_avg_correlation=Decimal("0.5"))
+    prices = {"A.US": Decimal("100"), "B.US": Decimal("100")}
+    positions = {"A.US": {"quantity": 1}, "B.US": {"quantity": 1}}
+    nav = Decimal("1000")
+    # perfectly correlated identical return series
+    returns = [Decimal("0.01"), Decimal("0.02"), Decimal("-0.01")]
+    events = controller.check(
+        prices, positions, nav,
+        timestamp=datetime(2026, 6, 22, 10, 0, tzinfo=timezone.utc),
+        returns_history={"A.US": returns, "B.US": returns},
+    )
+    assert any(e.risk_type == "CORRELATION_BREACH" for e in events)
+
+
+def test_risk_controller_no_correlation_event_without_history():
+    config = PortfolioConfig(
+        name="test",
+        symbols=["A.US", "B.US"],
+        allocations={"A.US": Decimal("0.5"), "B.US": Decimal("0.5")},
+        max_gross_exposure=Decimal("2.0"),
+        max_net_exposure=Decimal("2.0"),
+    )
+    controller = PortfolioRiskController(config)
+    prices = {"A.US": Decimal("100"), "B.US": Decimal("100")}
+    positions = {"A.US": {"quantity": 1}, "B.US": {"quantity": 1}}
+    nav = Decimal("1000")
+    events = controller.check(prices, positions, nav, timestamp=datetime(2026, 6, 22, 10, 0, tzinfo=timezone.utc))
+    assert not any(e.risk_type == "CORRELATION_BREACH" for e in events)
