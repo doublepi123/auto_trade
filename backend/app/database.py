@@ -75,6 +75,7 @@ def init_db() -> None:
     _ensure_event_log_table(engine)
     _ensure_portfolio_config_table(engine)
     _ensure_paper_orders_table(engine)
+    _ensure_strategy_param_versions_table(engine)
     db = SessionLocal()
     try:
         _bootstrap_credentials(db, CredentialConfig, StrategyConfig)
@@ -539,6 +540,29 @@ def _ensure_paper_orders_table(db_engine: Engine) -> None:
         )
         connection.exec_driver_sql(
             "CREATE INDEX IF NOT EXISTS ix_paper_orders_broker_order_id ON paper_orders (broker_order_id)"
+        )
+
+
+def _ensure_strategy_param_versions_table(db_engine: Engine) -> None:
+    """Defensive explicit create for strategy_param_versions.
+
+    Snapshots the tunable strategy params after each successful config save
+    so the user can list/rollback. Created explicitly (rather than only via
+    metadata.create_all) for parity with the other _ensure_* tables.
+    """
+    inspector = inspect(db_engine)
+    if "strategy_param_versions" in inspector.get_table_names():
+        return
+    with db_engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS strategy_param_versions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                params_json TEXT NOT NULL DEFAULT '{}',
+                actor_hash VARCHAR(64),
+                created_at DATETIME
+            )
+            """
         )
 
 

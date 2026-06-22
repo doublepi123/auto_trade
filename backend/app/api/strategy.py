@@ -20,6 +20,7 @@ from app.schemas import DiagnosticsResponse, StatusHistoryPoint, StatusHistoryRe
 from app.services.daily_pnl_service import DailyPnlService
 from app.services.runtime_state_service import RuntimeStateService
 from app.services.strategy_service import StrategyService, validate_strategy_consistency
+from app.services.strategy_version_service import StrategyVersionService
 
 logger = logging.getLogger("auto_trade.strategy")
 
@@ -88,6 +89,11 @@ def put_strategy(
         except ValidationError as e:
             raise HTTPException(status_code=422, detail=str(e)) from e
         config, diff = svc.update_config(merged)
+        # Record an immutable snapshot of the current params so the user
+        # can later list/rollback. Only done on the successful path — if
+        # update_config raises, the diff=... branch below catches it and
+        # this line never runs, so failed saves don't pollute history.
+        StrategyVersionService(db).record_version(config, actor_hash=actor_hash)
         # Surface cross-field inconsistencies (e.g. min_profit < round-trip
         # fee) as warnings returned in the response so the UI can flag
         # them. Error-level issues (e.g. sell_high <= buy_low) still
@@ -121,6 +127,55 @@ def put_strategy(
             actor_hash=actor_hash,
             source_ip=source_ip,
             request_summary={"changed": diff},
+            result=result,
+        )
+
+
+@router.get("/strategy/versions", dependencies=[Depends(require_api_key())])
+def list_strategy_versions(db: Session = Depends(get_db)) -> list[dict[str, Any]]:
+    return StrategyVersionService(db).list_versions()
+
+
+@router.post("/strategy/versions/{version_id}/rollback", dependencies=[Depends(require_api_key())])
+def rollback_strategy_version(
+    version_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    audit: AuditLogger = Depends(get_audit_logger),
+) -> dict[str, Any]:
+    actor_hash, source_ip = extract_actor(request)
+    result = "SUCCESS"
+    try:
+        version_svc = StrategyVersionService(db)
+        params = version_svc.get_version(version_id)
+        if params is None:
+            raise HTTPException(status_code=404, detail=f"version {version_id} not found")
+        svc = StrategyService(db)
+        config, _ = svc.update_config(params)
+        # Snapshot the post-rollback state so the rollback itself has a
+        # traceable version entry (lets a user undo an accidental rollback).
+        version_svc.record_version(config, actor_hash=actor_hash)
+        _reload_strategy_after_save()
+        return {
+            "rolled_back_to": version_id,
+            "symbol": config.symbol,
+            "buy_low": config.buy_low,
+            "sell_high": config.sell_high,
+        }
+    except HTTPException:
+        result = "FAILED"
+        raise
+    except Exception as exc:
+        result = "FAILED"
+        logger.exception("strategy rollback failure")
+        raise HTTPException(status_code=500, detail="rollback failed") from exc
+    finally:
+        audit.record(
+            "STRATEGY_ROLLBACK",
+            severity="INFO",
+            actor_hash=actor_hash,
+            source_ip=source_ip,
+            request_summary={"version_id": version_id},
             result=result,
         )
 

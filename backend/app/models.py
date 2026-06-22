@@ -57,6 +57,21 @@ class StrategyConfig(Base):
     report_schedule_symbol: Mapped[str] = mapped_column(String(50), default="", nullable=False)
 
 
+class StrategyParamVersion(Base):
+    """Immutable snapshot of the tunable strategy params at a point in time.
+
+    Each successful ``PUT /api/strategy`` (and explicit rollback) records one
+    row; the user can later list versions and roll back to a prior snapshot.
+    """
+
+    __tablename__ = "strategy_param_versions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    params_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    actor_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow)
+
+
 class PortfolioConfig(Base):
     __tablename__ = "portfolio_config"
 
