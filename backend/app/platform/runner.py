@@ -14,6 +14,7 @@ from app.platform.events import (
     QuoteEvent,
     RiskEvent,
 )
+from app.platform.indicators import IndicatorService
 from app.platform.paper_broker import PaperBroker
 from app.platform.risk_engine import RiskEngine
 from app.platform.sdk import OrderIntent, Strategy
@@ -40,6 +41,7 @@ class PlatformRunner:
         symbols: list[str] | None = None,
         broker: PaperBroker | None = None,
         risk_engine: RiskEngine | None = None,
+        indicators: IndicatorService | None = None,
     ) -> None:
         self.symbols = list(symbols) if symbols else [symbol]
         self.strategy = strategy
@@ -55,6 +57,7 @@ class PlatformRunner:
             self.bus.subscribe("fill", self._on_fill)
         self.risk_engine = risk_engine or RiskEngine()
         self.bus.subscribe("fill", self._on_risk_fill)
+        self.indicators = indicators
 
     @property
     def symbol(self) -> str | None:
@@ -66,6 +69,7 @@ class PlatformRunner:
             positions=self._positions,
             params=self.strategy.params,
             clock=self.clock,
+            indicators=self.indicators,
         )
 
     def _emit(self, event: Event) -> None:
@@ -99,6 +103,8 @@ class PlatformRunner:
 
     def on_bar(self, bar: BarEvent) -> None:
         self._emit(bar)
+        if self.indicators is not None:
+            self.indicators.on_bar(bar)
         if not self.symbols or bar.symbol in self.symbols:
             intents = self.strategy.on_bar(self._context(bar.symbol), bar)
             for intent in intents:
