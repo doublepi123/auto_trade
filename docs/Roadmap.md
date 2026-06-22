@@ -60,6 +60,29 @@
 
 ---
 
+## 近期已完成迭代 (2026-06-22) — 组合、仿真与风控（P151–P152 + P156）
+
+> 在平台事件流基础上实现多标的组合配置、Paper Broker 真实成交仿真（partial fill / 滑点 / 费用 / 撤改单）、组合级敞口与回撤风控，并通过 `PlatformRunner` 串成多标的闭环。规格：[2026-06-22-p149-p158-quant-platform-design.md](superpowers/specs/2026-06-22-p149-p158-quant-platform-design.md)；计划：[2026-06-22-p151-p156-portfolio-paper-risk.md](superpowers/plans/2026-06-22-p151-p156-portfolio-paper-risk.md)。
+
+| 代号 | 主题 | 状态 |
+|------|------|------|
+| **P151** | 组合级多标的交易（`PortfolioConfig` 模型/dataclass 校验、`PortfolioAllocator` 再平衡、`PortfolioService` CRUD + `/api/portfolio/*`） | ✅ |
+| **P152** | Paper Broker 真实成交仿真（partial fill、滑点、费用、撤改单状态机、`PaperOrder` 持久化；`PlatformRunner` 切换至 PaperBroker 并支持多 symbol） | ✅ |
+| **P156** | 组合级风控与熔断（`PortfolioRiskController` 敞口/回撤、`RiskEngine` 事件驱动接入 `PlatformRunner`） | ✅ |
+
+**设计要点：**
+- **组合配置**：`PortfolioConfig` 既是 SQLAlchemy 模型（`portfolio_config` 表 + `_ensure_portfolio_config_table`）又是领域 dataclass（`__post_init__` 校验权重和=1、keys 匹配、阈值/敞口为正）；`PortfolioAllocator.rebalance()` 由目标权重 × 总市值反推目标持仓，产出 `OrderIntent` 列表。
+- **Paper Broker**：`PaperBroker`（+`PaperOrderState`）按 bar OHLC 撮合 LIMIT 单，支持可配置 `slippage_ticks` / `commission_rate` / `partial_fill_probability`，区分 BUY/SELL 触发方向；`FillEvent` 扩展 `slippage`/`commission`/`partial`，`OrderEvent` 扩展 `reason`。`PaperOrder` 模型持久化留作后续接线（Phase 1 内存撮合为主）。
+- **多标的 runner**：`PlatformRunner` 改用 `symbols: list[str]`，保留 `symbol` 参数与只读 `symbol` 属性以兼容 `main.py`/平台 API 测试；backtest/paper 模式注入 `PaperBroker`，bar/quote 按 symbol 路由；`SimBroker` 保留但 runner 不再使用。
+- **组合风控**：`PortfolioRiskController.check()` 计算 gross/net 敞口比，超限发 `MAX_GROSS/NET_EXPOSURE_BREACH`（CRITICAL），`drawdown()` 跟踪峰值 NAV 发 `DRAWDOWN_BREACH`（WARNING，阈值 10%）；`RiskEngine` 订阅 fill 更新持仓、每根 bar 调 `evaluate` 经由 runner `_emit` 发出 `RiskEvent`。
+- **API**：`GET /api/portfolio/config`、`PUT /api/portfolio/config/{name}`（写审计友好：400 name 不匹配、422 校验/缺字段），router 带 `require_api_key` + `tags=["portfolio"]`。
+
+**验证：** `pytest tests/` **1260 passed, 1 skipped**；平台层 `basedpyright` 0 errors；`tests/platform/test_portfolio_*.py`、`test_paper_broker.py`、`test_portfolio_risk.py`、`test_runner.py`（含多标的 + RiskEngine 接线）与 `tests/test_portfolio_api.py`（CRUD + 400/422）全覆盖。
+
+**显式 YAGNI 未做：** live 模式与 `TradeExecutionService` 完整下单接线、`PaperOrder` 持久化与 broker 全量同步、组合相关性风控、portfolio 级 attribution、多策略并发、前端组合配置 UI（P153–P155/P157/P158 见后续计划）。
+
+---
+
 ## 近期已完成迭代 (2026-06-21) — 运维效率与个性化（10 轮 P139–P148）
 
 > 自主 feature 迭代第 15 批（10 轮）。主题：高级用户效率层 + 可持久化个性化。承接 P129–P138 的运营健康基础（复用 `useConnectionHealth`、`useSymbolStore`、`utils/clipboard.ts`）。全部**纯前端**，复用既有 API，**不新增后端端点、不新增表、不触碰 broker/order/runner/risk 写路径**。规格：[2026-06-21-p139-p148-power-user-productivity-design.md](superpowers/specs/2026-06-21-p139-p148-power-user-productivity-design.md)。
