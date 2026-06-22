@@ -14,6 +14,7 @@ from app.platform.events import (
     QuoteEvent,
     RiskEvent,
 )
+from app.platform.execution import ExecutionClient, LiveExecutionClient
 from app.platform.indicators import IndicatorService
 from app.platform.paper_broker import PaperBroker
 from app.platform.risk_engine import RiskEngine
@@ -40,7 +41,7 @@ class PlatformRunner:
         clock: Callable[[], datetime] | None = None,
         live_order_handler: Callable[[OrderIntent], None] | None = None,
         symbols: list[str] | None = None,
-        broker: PaperBroker | None = None,
+        broker: ExecutionClient | None = None,
         risk_engine: RiskEngine | None = None,
         indicators: IndicatorService | None = None,
         universe: Universe | None = None,
@@ -53,10 +54,15 @@ class PlatformRunner:
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.live_order_handler = live_order_handler
         self._positions: dict[str, dict[str, Any]] = {}
-        self._broker: PaperBroker | None = broker
+        self._broker: ExecutionClient | None = broker
         if mode in ("backtest", "paper"):
             self._broker = broker or PaperBroker(clock=self.clock)
             self.bus.subscribe("fill", self._on_fill)
+        elif mode == "live" and self.live_order_handler is not None and self._broker is None:
+            # Live runner with a handler but no explicit broker: adapt the handler
+            # into the ExecutionClient shape so _execute_intent can go through a
+            # uniform code path and also emit an OrderEvent for live submissions.
+            self._broker = LiveExecutionClient(self.live_order_handler, clock=self.clock)
         self.risk_engine = risk_engine or RiskEngine()
         self.bus.subscribe("fill", self._on_risk_fill)
         self.indicators = indicators
@@ -94,10 +100,12 @@ class PlatformRunner:
                 reason=intent.reason,
             )
         )
-        if self.mode in ("backtest", "paper") and self._broker is not None:
+        if self._broker is not None:
             order_event = self._broker.submit(intent, timestamp=ts)
             self._emit(order_event)
         elif self.mode == "live" and self.live_order_handler is not None:
+            # Backward-compat fallback: live runner constructed without a broker
+            # (e.g. main.py lifespan). Real broker fills arrive async via broker.
             self.live_order_handler(intent)
 
     def submit_intent(self, intent: OrderIntent, timestamp: datetime | None = None) -> None:

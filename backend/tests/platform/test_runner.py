@@ -184,3 +184,57 @@ def test_runner_universe_gates_strategy_routing():
         )
     )
     assert any(f.symbol == "AAPL.US" for f in fills)
+
+
+def test_runner_live_mode_uses_live_execution_client():
+    """Live runner with a handler should construct a LiveExecutionClient broker
+    so submit emits an OrderEvent in addition to forwarding the intent."""
+    _ensure_tables()
+    bus = EventBus()
+    strategy = IntervalStrategy(
+        params={"buy_low": Decimal("145"), "sell_high": Decimal("155"), "quantity": 10}
+    )
+    handled: list = []
+    runner = PlatformRunner(
+        symbols=["AAPL.US"],
+        strategy=strategy,
+        mode="live",
+        bus=bus,
+        live_order_handler=lambda intent: handled.append(intent),
+    )
+    assert runner._broker is not None  # LiveExecutionClient auto-attached
+    orders_emitted: list = []
+    bus.subscribe("order", lambda e: orders_emitted.append(e))
+    runner.on_bar(
+        BarEvent(
+            timestamp=datetime(2026, 6, 23, 10, 0, tzinfo=timezone.utc),
+            source=EventSource.MARKET,
+            symbol="AAPL.US",
+            open=Decimal("150"),
+            high=Decimal("160"),
+            low=Decimal("140"),
+            close=Decimal("144"),
+            volume=1000,
+        )
+    )
+    assert len(handled) == 1
+    assert len(orders_emitted) == 1
+    assert orders_emitted[0].broker_order_id.startswith("live-")
+
+
+def test_runner_live_mode_without_handler_stays_brokerless():
+    """main.py lifespan builds a live runner with no handler — must remain broker-less
+    so the historical `_execute_intent` fallback path is preserved."""
+    _ensure_tables()
+    bus = EventBus()
+    strategy = IntervalStrategy(
+        params={"buy_low": Decimal("145"), "sell_high": Decimal("155"), "quantity": 10}
+    )
+    runner = PlatformRunner(
+        symbols=["AAPL.US"],
+        strategy=strategy,
+        mode="live",
+        bus=bus,
+    )
+    assert runner._broker is None
+    assert runner.live_order_handler is None
