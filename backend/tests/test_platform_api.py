@@ -302,3 +302,46 @@ def test_platform_backtest_includes_analytics(patched_app) -> None:
     assert resp.status_code == 200
     assert "analytics" in resp.json()
     assert "sharpe" in resp.json()["analytics"]
+
+
+def test_platform_bars_endpoint(patched_app) -> None:
+    from datetime import datetime, timezone
+    from decimal import Decimal
+
+    from app import database
+    from app.models import Base
+    from app.platform.events import BarEvent, EventSource
+    from app.platform.store import EventStore
+
+    Base.metadata.drop_all(bind=database.engine)
+    Base.metadata.create_all(bind=database.engine)
+    store = EventStore()
+    store.clear()
+    for m in range(6):
+        store.append(
+            BarEvent(
+                timestamp=datetime(2026, 6, 23, 10, m, tzinfo=timezone.utc),
+                source=EventSource.MARKET,
+                symbol="A",
+                open=Decimal("10"),
+                high=Decimal("11"),
+                low=Decimal("9"),
+                close=Decimal("10"),
+                volume=100,
+            )
+        )
+    with TestClient(app) as client:
+        resp = client.get(
+            "/api/platform/bars",
+            params={"symbol": "A", "resolution_minutes": 5, "limit": 100},
+        )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["count"] == 2
+    assert data["bars"][0]["high"] == "11"
+
+
+def test_platform_bars_symbol_required(patched_app) -> None:
+    with TestClient(app) as client:
+        resp = client.get("/api/platform/bars", params={"symbol": ""})
+    assert resp.status_code == 422

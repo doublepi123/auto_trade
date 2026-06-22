@@ -10,6 +10,7 @@ from app.api.auth import require_api_key
 from app.platform.analytics import PerformanceAnalytics
 from app.platform.backtest_service import PlatformBacktestService
 from app.platform.bus import EventBus
+from app.platform.data_catalog import DataCatalog
 from app.platform.events import BarEvent
 from app.platform.registry import get_default_registry
 from app.platform.replay import EventReplayer
@@ -142,6 +143,48 @@ def list_platform_events(
     return {
         "events": [e.to_dict() for e in events],
         "count": len(events),
+    }
+
+
+@router.get("/bars", dependencies=[Depends(require_api_key())])
+def list_platform_bars(
+    symbol: str,
+    resolution_minutes: int = 1,
+    limit: int = 500,
+) -> dict[str, Any]:
+    """Load historical BarEvents for a symbol with optional time-bucketed resampling."""
+    if not symbol:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="symbol required",
+        )
+    if limit < 1 or limit > 10000:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="limit must be in [1, 10000]",
+        )
+    if resolution_minutes < 1:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="resolution_minutes must be >= 1",
+        )
+    bars = DataCatalog().load_bars(symbol=symbol, limit=limit, resolution_minutes=resolution_minutes)
+    return {
+        "symbol": symbol,
+        "resolution_minutes": resolution_minutes,
+        "count": len(bars),
+        "bars": [
+            {
+                "timestamp": b.timestamp.isoformat(),
+                "symbol": b.symbol,
+                "open": str(b.open),
+                "high": str(b.high),
+                "low": str(b.low),
+                "close": str(b.close),
+                "volume": b.volume,
+            }
+            for b in bars
+        ],
     }
 
 
