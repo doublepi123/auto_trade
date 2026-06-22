@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.api.auth import require_api_key
 from app.database import get_db
+from app.platform.attribution_service import AttributionService
 from app.platform.portfolio_config import PortfolioConfig
 from app.platform.portfolio_service import PortfolioService
 
@@ -59,3 +60,16 @@ def save_portfolio_config(name: str, payload: dict[str, Any], db=Depends(get_db)
     svc = PortfolioService(db)
     saved = svc.save_config(config)
     return {"name": saved.name, "status": "saved"}
+
+
+@router.get("/attribution")
+def portfolio_attribution(name: str, db=Depends(get_db)) -> dict[str, Any]:
+    svc = PortfolioService(db)
+    config = svc.get_config(name)
+    if config is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"portfolio '{name}' not found",
+        )
+    attribution = AttributionService().attribute(config)
+    return attribution

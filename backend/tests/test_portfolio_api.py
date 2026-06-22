@@ -49,3 +49,11 @@ def test_portfolio_config_invalid_allocations_returns_422(patched_app) -> None:
             },
         )
     assert resp.status_code == 422
+
+
+def test_portfolio_attribution_404_for_unknown(patched_app) -> None:
+    Base.metadata.drop_all(bind=database.engine)
+    Base.metadata.create_all(bind=database.engine)
+    with TestClient(app) as client:
+        resp = client.get("/api/portfolio/attribution", params={"name": "missing"})
+    assert resp.status_code == 404
