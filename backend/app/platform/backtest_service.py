@@ -6,18 +6,21 @@ from typing import Any
 from app.platform.analytics import PerformanceAnalytics
 from app.platform.bus import EventBus
 from app.platform.events import BarEvent, Event, EventSource, FillEvent
+from app.platform.portfolio import Portfolio
 from app.platform.registry import get_default_registry
 from app.platform.runner import PlatformRunner
 from app.platform.sdk import Strategy
 
 
 class _BacktestCollector:
-    """Subscribe to fills; track cash, positions (qty), last close per symbol, fills, equity curve."""
+    """Subscribe to fills; track cash, positions (qty), last close per symbol, fills, equity curve.
+
+    Cash / positions / realized PnL are delegated to a central :class:`Portfolio` instance.
+    """
 
     def __init__(self, initial_cash: Decimal, symbols: list[str]) -> None:
-        self.cash = initial_cash
+        self.portfolio = Portfolio(initial_cash=initial_cash)
         self.symbols = symbols
-        self.positions: dict[str, int] = {s: 0 for s in symbols}
         self.last_close: dict[str, Decimal] = {}
         self.fills: list[FillEvent] = []
         self.equity_curve: list[dict[str, Any]] = []
@@ -25,25 +28,14 @@ class _BacktestCollector:
     def on_fill(self, event: Event) -> None:
         if not isinstance(event, FillEvent):
             return
-        cost = event.price * Decimal(event.quantity)
-        commission = event.commission
-        symbol = event.symbol or ""
-        if event.side == "BUY":
-            self.cash -= cost + commission
-            self.positions[symbol] = self.positions.get(symbol, 0) + event.quantity
-        else:
-            self.cash += cost - commission
-            self.positions[symbol] = self.positions.get(symbol, 0) - event.quantity
+        self.portfolio.on_fill(event)
         self.fills.append(event)
 
     def update_price(self, symbol: str, close: Decimal) -> None:
         self.last_close[symbol] = close
 
     def nav(self) -> Decimal:
-        total = self.cash
-        for symbol, qty in self.positions.items():
-            total += Decimal(qty) * self.last_close.get(symbol, Decimal("0"))
-        return total
+        return self.portfolio.nav(self.last_close)
 
     def snapshot(self, timestamp: Any) -> dict[str, Any]:
         nav = self.nav()
@@ -97,11 +89,12 @@ class PlatformBacktestService:
         return {
             "equity_curve": collector.equity_curve,
             "fills": [f.to_dict() for f in collector.fills],
-            "final_positions": {s: q for s, q in collector.positions.items()},
+            "final_positions": {sym: collector.portfolio.quantities().get(sym, 0) for sym in symbols},
             "stats": {
                 "initial_cash": float(initial_cash),
                 "final_nav": float(final_nav),
                 "pnl": float(final_nav - initial_cash),
+                "realized_pnl": float(collector.portfolio.realized_pnl),
                 "num_fills": len(collector.fills),
                 "num_bars": len(bars),
             },

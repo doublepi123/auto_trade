@@ -84,3 +84,21 @@ def test_backtest_records_equity_snapshot_per_bar():
     # Equity-curve nav values are floats.
     for snap in result["equity_curve"]:
         assert isinstance(snap["nav"], float)
+
+
+def test_backtest_reports_realized_pnl():
+    service = PlatformBacktestService()
+    result = service.run(
+        strategy_name="interval",
+        params={"buy_low": Decimal("145"), "sell_high": Decimal("155"), "quantity": 10},
+        symbols=["AAPL.US"],
+        bars=[
+            {"timestamp": datetime(2026, 6, 23, 10, 0, tzinfo=timezone.utc), "symbol": "AAPL.US", "open": Decimal("150"), "high": Decimal("160"), "low": Decimal("140"), "close": Decimal("144"), "volume": 1000},
+            {"timestamp": datetime(2026, 6, 23, 10, 1, tzinfo=timezone.utc), "symbol": "AAPL.US", "open": Decimal("150"), "high": Decimal("160"), "low": Decimal("140"), "close": Decimal("156"), "volume": 1000},
+        ],
+        initial_cash=Decimal("10000"),
+    )
+    assert "realized_pnl" in result["stats"]
+    # round-trip realized should be positive (buy ~144, sell ~156)
+    assert result["stats"]["realized_pnl"] > 0
+    assert result["final_positions"]["AAPL.US"] == 0
