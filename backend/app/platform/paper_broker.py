@@ -1,14 +1,43 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Callable
 from uuid import uuid4
 
+from sqlalchemy.orm import Session
+
+from app.models import PaperOrder as PaperOrderModel
 from app.platform.events import BarEvent, EventSource, FillEvent, OrderEvent, QuoteEvent
 from app.platform.paper_order_state import PaperOrderState
 from app.platform.sdk import OrderIntent
+
+
+def _intent_to_json(intent: OrderIntent) -> str:
+    return json.dumps(
+        {
+            "symbol": intent.symbol,
+            "side": intent.side,
+            "quantity": intent.quantity,
+            "order_type": intent.order_type,
+            "limit_price": str(intent.limit_price) if intent.limit_price is not None else None,
+            "reason": intent.reason,
+        }
+    )
+
+
+def _intent_from_json(raw: str) -> OrderIntent:
+    data = json.loads(raw)
+    return OrderIntent(
+        symbol=data["symbol"],
+        side=data["side"],
+        quantity=int(data["quantity"]),
+        order_type=data["order_type"],
+        limit_price=Decimal(data["limit_price"]) if data.get("limit_price") is not None else None,
+        reason=data.get("reason", ""),
+    )
 
 
 @dataclass
@@ -26,14 +55,67 @@ class PaperBroker:
         self,
         clock: Callable[[], datetime] | None = None,
         config: PaperBrokerConfig | None = None,
+        session: Session | None = None,
     ) -> None:
         self._orders: dict[str, PaperOrderState] = {}
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._config = config or PaperBrokerConfig()
+        self._session = session
+
+    def _persist(self, order: PaperOrderState) -> None:
+        if self._session is None:
+            return
+        intent = order.intent
+        row = self._session.query(PaperOrderModel).filter_by(broker_order_id=order.order_id).first()
+        if row is None:
+            row = PaperOrderModel(
+                broker_order_id=order.order_id,
+                symbol=intent.symbol,
+                side=intent.side,
+                quantity=intent.quantity,
+                filled_quantity=order.filled_quantity,
+                limit_price=float(intent.limit_price) if intent.limit_price is not None else None,
+                status=order.status,
+                intent_json=_intent_to_json(intent),
+            )
+            self._session.add(row)
+        else:
+            row.filled_quantity = order.filled_quantity
+            row.status = order.status
+            row.limit_price = float(intent.limit_price) if intent.limit_price is not None else None
+            row.symbol = intent.symbol
+            row.side = intent.side
+            row.quantity = intent.quantity
+            row.intent_json = _intent_to_json(intent)
+        self._session.commit()
+
+    @classmethod
+    def from_db(
+        cls,
+        session: Session,
+        clock: Callable[[], datetime] | None = None,
+        config: PaperBrokerConfig | None = None,
+    ) -> PaperBroker:
+        broker = cls(clock=clock, config=config, session=session)
+        rows = session.query(PaperOrderModel).filter(
+            PaperOrderModel.status.in_(("SUBMITTED", "PARTIAL_FILLED"))
+        ).all()
+        for row in rows:
+            intent = _intent_from_json(row.intent_json)
+            state = PaperOrderState(
+                order_id=row.broker_order_id,
+                intent=intent,
+                status=row.status,
+                filled_quantity=row.filled_quantity,
+            )
+            broker._orders[row.broker_order_id] = state
+        return broker
 
     def submit(self, intent: OrderIntent, timestamp: datetime | None = None) -> OrderEvent:
         order_id = f"paper-{uuid4().hex[:8]}"
-        self._orders[order_id] = PaperOrderState(order_id=order_id, intent=intent)
+        state = PaperOrderState(order_id=order_id, intent=intent)
+        self._orders[order_id] = state
+        self._persist(state)
         return OrderEvent(
             timestamp=timestamp or self._clock(),
             source=EventSource.BROKER,
@@ -46,6 +128,7 @@ class PaperBroker:
         order = self._orders.get(order_id)
         if order and order.status in ("SUBMITTED", "PARTIAL_FILLED"):
             order.status = "CANCELLED"
+            self._persist(order)
             return OrderEvent(
                 timestamp=timestamp or self._clock(),
                 source=EventSource.BROKER,
@@ -66,6 +149,7 @@ class PaperBroker:
         order = self._orders.get(order_id)
         if order and order.status in ("SUBMITTED", "PARTIAL_FILLED"):
             order.intent = intent
+            self._persist(order)
             return OrderEvent(
                 timestamp=timestamp or self._clock(),
                 source=EventSource.BROKER,
@@ -105,6 +189,7 @@ class PaperBroker:
                 continue
             commission = fill_price * Decimal(fill_qty) * self._config.commission_rate
             order.fill(fill_qty, fill_price, slippage=self._config.slippage_ticks, commission=commission)
+            self._persist(order)
             fills.append(
                 FillEvent(
                     timestamp=bar.timestamp,
