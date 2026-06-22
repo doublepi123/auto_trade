@@ -3,6 +3,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any
 
+from app.platform.analytics import PerformanceAnalytics
 from app.platform.bus import EventBus
 from app.platform.events import BarEvent, Event, EventSource, FillEvent
 from app.platform.registry import get_default_registry
@@ -91,6 +92,8 @@ class PlatformBacktestService:
             collector.snapshot(bar.timestamp)
 
         final_nav = collector.nav()
+        equity = [pt["nav"] for pt in collector.equity_curve]
+        analytics = PerformanceAnalytics().analyze(equity, collector.fills)
         return {
             "equity_curve": collector.equity_curve,
             "fills": [f.to_dict() for f in collector.fills],
@@ -102,4 +105,5 @@ class PlatformBacktestService:
                 "num_fills": len(collector.fills),
                 "num_bars": len(bars),
             },
+            "analytics": analytics,
         }

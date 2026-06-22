@@ -7,6 +7,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from app.api.auth import require_api_key
+from app.platform.analytics import PerformanceAnalytics
 from app.platform.backtest_service import PlatformBacktestService
 from app.platform.bus import EventBus
 from app.platform.events import BarEvent
@@ -110,6 +111,18 @@ def run_platform_backtest(payload: dict[str, Any]) -> dict[str, Any]:
         bars=payload["bars"],
         initial_cash=initial_cash,
     )
+
+
+@router.post("/analyze", dependencies=[Depends(require_api_key())])
+def analyze_equity(payload: dict[str, Any]) -> dict[str, Any]:
+    if "equity_curve" not in payload:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="missing equity_curve")
+    equity_raw = payload["equity_curve"]
+    if not isinstance(equity_raw, list) or not equity_raw:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="equity_curve must be a non-empty list")
+    equity = [float(pt["nav"]) for pt in equity_raw]
+    periods = int(payload.get("periods_per_year", 252))
+    return PerformanceAnalytics(periods_per_year=periods).analyze(equity)
 
 
 @router.get("/events", dependencies=[Depends(require_api_key())])

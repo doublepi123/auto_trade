@@ -266,3 +266,39 @@ def test_platform_replay_reconstructs_positions(patched_app) -> None:
     data = resp.json()
     assert data["bars_replayed"] == 2
     assert data["reconstructed_positions"] == []  # round-trip: flat
+
+
+def test_platform_analyze_endpoint(patched_app) -> None:
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/platform/analyze",
+            json={"equity_curve": [{"nav": 10000}, {"nav": 10500}, {"nav": 10200}], "periods_per_year": 252},
+        )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "sharpe" in data and "max_drawdown" in data and "total_return" in data
+
+
+def test_platform_analyze_missing_equity_422(patched_app) -> None:
+    with TestClient(app) as client:
+        resp = client.post("/api/platform/analyze", json={})
+    assert resp.status_code == 422
+
+
+def test_platform_backtest_includes_analytics(patched_app) -> None:
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/platform/backtest",
+            json={
+                "strategy": "interval", "params": {"buy_low": 145, "sell_high": 155, "quantity": 10},
+                "symbols": ["AAPL.US"],
+                "initial_cash": 10000,
+                "bars": [
+                    {"timestamp": "2026-06-22T10:00:00+00:00", "symbol": "AAPL.US", "open": 150, "high": 160, "low": 140, "close": 144, "volume": 1000},
+                    {"timestamp": "2026-06-22T10:01:00+00:00", "symbol": "AAPL.US", "open": 150, "high": 160, "low": 140, "close": 156, "volume": 1000},
+                ],
+            },
+        )
+    assert resp.status_code == 200
+    assert "analytics" in resp.json()
+    assert "sharpe" in resp.json()["analytics"]
