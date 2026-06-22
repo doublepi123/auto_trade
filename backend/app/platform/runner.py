@@ -10,34 +10,35 @@ from app.platform.events import (
     Event,
     EventSource,
     FillEvent,
-    OrderEvent,
     OrderIntentEvent,
     QuoteEvent,
 )
+from app.platform.paper_broker import PaperBroker
 from app.platform.sdk import OrderIntent, Strategy
-from app.platform.simbroker import SimBroker
 from app.platform.store import EventStore
 
 
 class PlatformRunner:
     """平台级运行器：用统一事件流驱动策略插件。
 
-    Phase 1 支持两种模式：
-    - backtest: 使用 SimBroker 撮合，从外部喂入 bar/quote 事件。
+    支持三种模式：
+    - backtest / paper: 使用 PaperBroker 撮合（partial fill、滑点、费用），从外部喂入 bar/quote。
     - live: 策略产生 OrderIntent，通过回调交给现有 TradeExecutionService。
     """
 
     def __init__(
         self,
-        symbol: str,
-        strategy: Strategy,
-        mode: str,
+        symbol: str = "",
+        strategy: Strategy = None,  # type: ignore[assignment]
+        mode: str = "",
         bus: EventBus | None = None,
         store: EventStore | None = None,
         clock: Callable[[], datetime] | None = None,
         live_order_handler: Callable[[OrderIntent], None] | None = None,
+        symbols: list[str] | None = None,
+        broker: PaperBroker | None = None,
     ) -> None:
-        self.symbol = symbol
+        self.symbols = list(symbols) if symbols else [symbol]
         self.strategy = strategy
         self.mode = mode
         self.bus = bus or EventBus()
@@ -45,14 +46,18 @@ class PlatformRunner:
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.live_order_handler = live_order_handler
         self._positions: dict[str, dict[str, Any]] = {}
-        self._sim_broker: SimBroker | None = None
-        if mode == "backtest":
-            self._sim_broker = SimBroker(clock=self.clock)
+        self._broker: PaperBroker | None = broker
+        if mode in ("backtest", "paper"):
+            self._broker = broker or PaperBroker(clock=self.clock)
             self.bus.subscribe("fill", self._on_fill)
 
-    def _context(self) -> StrategyContext:
+    @property
+    def symbol(self) -> str | None:
+        return self.symbols[0] if self.symbols else None
+
+    def _context(self, symbol: str | None = None) -> StrategyContext:
         return StrategyContext(
-            symbol=self.symbol,
+            symbol=symbol or (self.symbols[0] if self.symbols else ""),
             positions=self._positions,
             params=self.strategy.params,
             clock=self.clock,
@@ -77,33 +82,35 @@ class PlatformRunner:
                 reason=intent.reason,
             )
         )
-        if self.mode == "backtest" and self._sim_broker is not None:
-            order_event = self._sim_broker.submit(intent, timestamp=ts)
+        if self.mode in ("backtest", "paper") and self._broker is not None:
+            order_event = self._broker.submit(intent, timestamp=ts)
             self._emit(order_event)
         elif self.mode == "live" and self.live_order_handler is not None:
             self.live_order_handler(intent)
 
     def on_bar(self, bar: BarEvent) -> None:
         self._emit(bar)
-        intents = self.strategy.on_bar(self._context(), bar)
-        for intent in intents:
-            self._execute_intent(intent, timestamp=bar.timestamp)
-        if self.mode == "backtest" and self._sim_broker is not None:
-            fills = self._sim_broker.on_bar(bar)
+        if not self.symbols or bar.symbol in self.symbols:
+            intents = self.strategy.on_bar(self._context(bar.symbol), bar)
+            for intent in intents:
+                self._execute_intent(intent, timestamp=bar.timestamp)
+        if self.mode in ("backtest", "paper") and self._broker is not None:
+            fills = self._broker.on_bar(bar)
             for fill in fills:
                 self._emit(fill)
 
     def on_quote(self, quote: QuoteEvent) -> None:
         self._emit(quote)
-        intents = self.strategy.on_quote(self._context(), quote)
-        for intent in intents:
-            self._execute_intent(intent, timestamp=quote.timestamp)
+        if not self.symbols or quote.symbol in self.symbols:
+            intents = self.strategy.on_quote(self._context(quote.symbol), quote)
+            for intent in intents:
+                self._execute_intent(intent, timestamp=quote.timestamp)
 
     def _on_fill(self, event: Event) -> None:
         if not isinstance(event, FillEvent):
             return
         fill = event
-        symbol = fill.symbol or self.symbol
+        symbol = fill.symbol or (self.symbols[0] if self.symbols else "")
         pos = self._positions.get(symbol, {"quantity": 0})
         qty = pos["quantity"]
         if fill.side == "BUY":
@@ -111,6 +118,6 @@ class PlatformRunner:
         else:
             qty -= fill.quantity
         self._positions[symbol] = {"quantity": qty}
-        follow_up = self.strategy.on_fill(self._context(), fill)
+        follow_up = self.strategy.on_fill(self._context(symbol), fill)
         for intent in follow_up:
             self._execute_intent(intent, timestamp=fill.timestamp)

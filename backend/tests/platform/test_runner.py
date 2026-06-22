@@ -68,3 +68,41 @@ def test_runner_persists_events_to_store():
 
     events = store.load(since=datetime(2026, 6, 22, 9, 0, tzinfo=timezone.utc))
     assert len(events) >= 3  # bar, order_intent, fill
+
+
+def test_runner_multi_symbol_routes_bars():
+    _ensure_tables()
+    bus = EventBus()
+    store = EventStore()
+    store.clear()
+
+    strategy = IntervalStrategy(params={"buy_low": Decimal("145"), "sell_high": Decimal("155"), "quantity": 10})
+    runner = PlatformRunner(
+        symbols=["AAPL.US", "TSLA.US"],
+        strategy=strategy,
+        mode="backtest",
+        bus=bus,
+        store=store,
+    )
+    assert runner.symbol == "AAPL.US"
+    assert runner.symbols == ["AAPL.US", "TSLA.US"]
+
+    fills = []
+    bus.subscribe("fill", lambda e: fills.append(e))
+
+    def make_named_bar(symbol: str, close: str, ts: datetime) -> BarEvent:
+        return BarEvent(
+            timestamp=ts,
+            source=EventSource.MARKET,
+            symbol=symbol,
+            open=Decimal("150"),
+            high=Decimal("160"),
+            low=Decimal("140"),
+            close=Decimal(close),
+            volume=100,
+        )
+
+    t0 = datetime(2026, 6, 22, 10, 0, tzinfo=timezone.utc)
+    # AAPL buy trigger (close 144 < buy_low 145)
+    runner.on_bar(make_named_bar("AAPL.US", "144", t0))
+    assert any(f.symbol == "AAPL.US" for f in fills)
