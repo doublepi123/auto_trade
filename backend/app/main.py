@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse
 
 from decimal import Decimal
 from app.platform.api import router as platform_router
+from app.platform.portfolio_api import router as portfolio_router
 from app.platform.registry import get_default_registry
 from app.platform.runner import PlatformRunner
 from app.services.strategy_service import StrategyService
@@ -603,6 +604,7 @@ app.add_middleware(
 )
 
 app.include_router(platform_router, prefix="/api/platform")
+app.include_router(portfolio_router, prefix="/api/portfolio")
 app.include_router(strategy_router)
 app.include_router(strategy_experiments_router)
 app.include_router(credentials_router)

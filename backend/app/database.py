@@ -505,7 +505,7 @@ def _ensure_portfolio_config_table(db_engine: Engine) -> None:
                 per_symbol_risk_json TEXT NOT NULL DEFAULT '{}',
                 rebalance_threshold_pct FLOAT NOT NULL DEFAULT 5.0,
                 max_gross_exposure FLOAT NOT NULL DEFAULT 1.0,
-                max_net_exposure FLOAT NOT NULL DEFAULT 0.5,
+                max_net_exposure FLOAT NOT NULL DEFAULT 1.0,
                 enabled BOOLEAN NOT NULL DEFAULT 1,
                 created_at DATETIME,
                 updated_at DATETIME
