@@ -128,3 +128,48 @@ def test_platform_backtest_empty_symbols_or_bars_returns_422(patched_app) -> Non
             json={"strategy": "interval", "params": {}, "symbols": [], "bars": []},
         )
     assert resp.status_code == 422
+
+
+def test_platform_snapshot_404_when_runner_disabled(patched_app, monkeypatch) -> None:
+    monkeypatch.setattr(main_module.settings, "platform_mode", False)
+    with TestClient(app) as client:
+        resp = client.get("/api/platform/snapshot")
+    assert resp.status_code == 404
+
+
+def test_platform_snapshot_reports_positions_and_open_orders(patched_app, monkeypatch) -> None:
+    from datetime import datetime, timezone
+    from decimal import Decimal
+
+    from app.platform.bus import EventBus
+    from app.platform.events import BarEvent, EventSource
+    from app.platform.runner import PlatformRunner
+    from app.strategies.interval_strategy import IntervalStrategy
+
+    monkeypatch.setattr(main_module.settings, "platform_mode", True)
+    strategy = IntervalStrategy(
+        params={"buy_low": Decimal("145"), "sell_high": Decimal("155"), "quantity": 10}
+    )
+    runner = PlatformRunner(symbols=["AAPL.US"], strategy=strategy, mode="paper", bus=EventBus())
+    # drive a bar to create a BUY fill -> position 10
+    runner.on_bar(
+        BarEvent(
+            timestamp=datetime(2026, 6, 22, 10, 0, tzinfo=timezone.utc),
+            source=EventSource.MARKET,
+            symbol="AAPL.US",
+            open=Decimal("150"),
+            high=Decimal("160"),
+            low=Decimal("140"),
+            close=Decimal("144"),
+            volume=1000,
+        )
+    )
+    with TestClient(app) as client:
+        # Override the runner set by lifespan with our instrumented paper runner.
+        app.state.platform_runner = runner
+        resp = client.get("/api/platform/snapshot")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["mode"] == "paper"
+    assert data["symbols"] == ["AAPL.US"]
+    assert any(p["symbol"] == "AAPL.US" and p["quantity"] == 10 for p in data["positions"])
