@@ -112,6 +112,34 @@
 
 ---
 
+## 近期已完成迭代 (2026-06-23) — 参考开源量化平台核心能力的深度迭代（10 轮 P163–P172）
+
+> 自主 feature 迭代第 18 批（10 轮）。参考 Nautilus Trader、QuantConnect Lean、Backtrader、pyfolio/empyrical、vectorbt 的核心能力，把平台从「可跑回测/可归因」推进到「研究级分析 + 工程化执行抽象」。全部后端、`pytest` 可验、加法不破坏默认路径。规格：[2026-06-23-p163-p172-quant-depth-design.md](superpowers/specs/2026-06-23-p163-p172-quant-depth-design.md)。
+
+| 代号 | 主题 | 参考 | 状态 |
+|------|------|------|------|
+| **P163** | 绩效分析（Sharpe/Sortino/maxDD/Calmar/win-rate/profit-factor，并入回测 + `/analyze`） | pyfolio、empyrical、QuantStats | ✅ |
+| **P164** | 中央 `Portfolio`（cash/positions/NAV/realized 单一真相源，回测+风控从其读取） | Nautilus `Portfolio`/`Cache` | ✅ |
+| **P165** | 仓位定尺 `Sizer`（FixedFractional/FullEquity/ATR + 注册表 + `intent_from_signal`） | Backtrader `Sizer`、Lean `IPortfolioConstructionModel` | ✅ |
+| **P166** | 指标即服务 `IndicatorService`（SMA/EMA/RSI/ATR 滚动缓冲+缓存，经 `StrategyContext` 取用） | Backtrader `Indicator`、TA-Lib | ✅ |
+| **P167** | 标的全集 `Universe`（Static/TopNByVolume，runner 路由前 gating） | Lean `Universe`、Nautilus `Universe` | ✅ |
+| **P168** | `ExecutionClient` Protocol + `LiveExecutionClient`（runner 解耦具体 PaperBroker） | Nautilus `ExecutionClient` | ✅ |
+| **P169** | 数据目录 `DataCatalog` + 时间桶重采样（1m→Nm）+ `/bars` | Nautilus `DataEngine`、Lean `History` | ✅ |
+| **P170** | 参数寻优 `OptimizerService`（grid + walk-forward IS/OOS）+ `/optimize` | Lean `IOptimizer`、vectorbt | ✅ |
+| **P171** | Trade/DrawDown/Returns 分析器（per-trade + underwater + 分布） | Backtrader `Analyzer`、pyfolio | ✅ |
+| **P172** | 可插拔成交模型 `FillModel`（Slippage/Commission Protocol，PaperBroker 可选注入） | Nautilus `FillModel`/`CostModel` | ✅ |
+
+**设计要点：**
+- **参考而不照抄**：借鉴开源抽象形态（Protocol/注册表/事件订阅/滚动缓冲），实现贴合本仓既有事件流与 `PlatformRunner`，零新依赖。
+- **加法不破坏**：Portfolio/ExecutionClient/FillModel/Universe/IndicatorService 均为可选注入；默认路径行为不变（PaperBroker 仍按固定系数撮合，main.py live runner 仍 broker-less）。
+- **复用**：回测响应统一含 `analytics`+`realized_pnl`；`OptimizerService` 与 `analyze_backtest` 复用 `PlatformBacktestService`/`PerformanceAnalytics`。
+
+**验证：** `pytest tests/` **1356 passed**（基线 1299 → +57）；平台层 `basedpyright` 0 真实错误（仅 sqlalchemy/pytest/fastapi 的 `reportMissingImports` venv 误报）；新增 `tests/platform/test_{analytics,portfolio,sizers,indicators,universe,execution,data_catalog,optimizer_service,analyzers,fill_model}.py` 全覆盖，`tests/test_platform_api.py` 覆盖 analyze/bars/optimize。
+
+**显式 YAGNI 未做：** TWAP/VWAP/Iceberg 全量执行算法、ML/LLM 训练闭环与因子研究仓、灰度部署管控台、前端组合/平台 UI、多策略并发、portfolio 级 Brinson 归因、跨进程事件总线（当前 `EventBus` 仅内存）。
+
+---
+
 ## 近期已完成迭代 (2026-06-21) — 运维效率与个性化（10 轮 P139–P148）
 
 > 自主 feature 迭代第 15 批（10 轮）。主题：高级用户效率层 + 可持久化个性化。承接 P129–P138 的运营健康基础（复用 `useConnectionHealth`、`useSymbolStore`、`utils/clipboard.ts`）。全部**纯前端**，复用既有 API，**不新增后端端点、不新增表、不触碰 broker/order/runner/risk 写路径**。规格：[2026-06-21-p139-p148-power-user-productivity-design.md](superpowers/specs/2026-06-21-p139-p148-power-user-productivity-design.md)。
