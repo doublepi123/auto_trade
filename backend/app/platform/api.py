@@ -12,6 +12,7 @@ from app.platform.backtest_service import PlatformBacktestService
 from app.platform.bus import EventBus
 from app.platform.data_catalog import DataCatalog
 from app.platform.events import BarEvent
+from app.platform.optimizer_service import OptimizerService
 from app.platform.registry import get_default_registry
 from app.platform.replay import EventReplayer
 from app.platform.runner import PlatformRunner
@@ -110,6 +111,54 @@ def run_platform_backtest(payload: dict[str, Any]) -> dict[str, Any]:
         params=payload["params"],
         symbols=payload["symbols"],
         bars=payload["bars"],
+        initial_cash=initial_cash,
+    )
+
+
+@router.post("/optimize", dependencies=[Depends(require_api_key())])
+def optimize_strategy(payload: dict[str, Any]) -> dict[str, Any]:
+    required = {"strategy", "param_grid", "symbols", "bars"}
+    missing = required - set(payload.keys())
+    if missing:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"missing fields: {missing}",
+        )
+    registry = get_default_registry()
+    if payload["strategy"] not in {m.name for m in registry.list()}:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"strategy '{payload['strategy']}' not found",
+        )
+    try:
+        initial_cash = Decimal(str(payload.get("initial_cash", 100000)))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="invalid initial_cash",
+        ) from exc
+    metric = str(payload.get("metric", "sharpe"))
+    top_k = int(payload.get("top_k", 10))
+    mode = str(payload.get("mode", "grid"))
+    svc = OptimizerService()
+    if mode == "walk-forward":
+        return svc.walk_forward(
+            strategy_name=payload["strategy"],
+            param_grid=payload["param_grid"],
+            symbols=payload["symbols"],
+            bars=payload["bars"],
+            split_fraction=float(payload.get("split_fraction", 0.5)),
+            top_k=top_k,
+            metric=metric,
+            initial_cash=initial_cash,
+        )
+    return svc.grid_search(
+        strategy_name=payload["strategy"],
+        param_grid=payload["param_grid"],
+        symbols=payload["symbols"],
+        bars=payload["bars"],
+        metric=metric,
+        top_k=top_k,
         initial_cash=initial_cash,
     )
 

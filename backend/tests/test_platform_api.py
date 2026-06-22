@@ -345,3 +345,31 @@ def test_platform_bars_symbol_required(patched_app) -> None:
     with TestClient(app) as client:
         resp = client.get("/api/platform/bars", params={"symbol": ""})
     assert resp.status_code == 422
+
+
+def test_platform_optimize_endpoint(patched_app) -> None:
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/platform/optimize",
+            json={
+                "strategy": "interval",
+                "param_grid": {"buy_low": [145, 146], "sell_high": [154, 155], "quantity": [10]},
+                "symbols": ["AAPL.US"],
+                "bars": [
+                    {"timestamp": "2026-06-23T10:00:00+00:00", "symbol": "AAPL.US", "open": 150, "high": 160, "low": 140, "close": 144, "volume": 1000},
+                    {"timestamp": "2026-06-23T10:01:00+00:00", "symbol": "AAPL.US", "open": 150, "high": 160, "low": 140, "close": 156, "volume": 1000},
+                ],
+                "metric": "sharpe",
+                "top_k": 3,
+            },
+        )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["total_combos"] == 4
+    assert len(data["ranked"]) <= 3
+
+
+def test_platform_optimize_missing_fields_422(patched_app) -> None:
+    with TestClient(app) as client:
+        resp = client.post("/api/platform/optimize", json={"strategy": "interval"})
+    assert resp.status_code == 422
