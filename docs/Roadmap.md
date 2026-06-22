@@ -13,7 +13,7 @@
 | **API 覆盖** | ✅ 完备。策略配置、凭证管理、订单查询、状态获取、状态历史、事件时间线、运行时控制（启停/暂停/Kill Switch）。 |
 | **WebSocket 推送** | ✅ 就绪。实时状态同步。 |
 | **本地部署** | ✅ 就绪。Docker Compose 一键启动。 |
-| **测试** | ✅ 就绪。Backend pytest **1178** 项、pytest-cov 覆盖率 **89%**、Frontend Cypress E2E **216** 项。 |
+| **测试** | ✅ 就绪。Backend pytest **1228** 项、pytest-cov 覆盖率 **89%**、Frontend Cypress E2E **216** 项。 |
 | **凭证安全** | ✅ 就绪。主密钥 + AES-GCM 加密存储，前端不回显明文。 |
 | **数据库** | ✅ 就位。SQLite，含运行状态、状态快照、订单、`tracked_entries`、LLM 交互、交易事件、审计日志和凭证配置。 |
 | **LLM 行情数据** | ✅ 真实 K 线（日 K + 1 分钟 K），ATR/布林带有效。 |
@@ -34,6 +34,29 @@
 | **决策时间线搜索** | ✅ 全文搜索（消息/标的/事件类型）+ 书签（localStorage 持久化）。 |
 | **后端热路径** | ✅ `recent_quotes` 改 `deque(maxlen=...)` + 单边窗口淘汰；`broker.get_quotes([symbol])` 批量复用。 |
 | **Docker 镜像** | ✅ 多阶段构建（`builder → runtime`），剥离 toolchain；tini 转发信号。 |
+
+---
+
+## 近期已完成迭代 (2026-06-22) — 平台基础（P149–P150）
+
+> 策略插件 SDK + 统一事件回放与实盘语义。新增 `app/platform/` 层，现有区间策略迁移为首个插件；`PlatformRunner` 支持 backtest/live 模式，事件流可持久化、可回放。规格：[2026-06-22-p149-p158-quant-platform-design.md](superpowers/specs/2026-06-22-p149-p158-quant-platform-design.md)。
+
+| 代号 | 主题 | 状态 |
+|------|------|------|
+| **P149** | 策略插件 SDK（Strategy Protocol、OrderIntent、StrategyContext、StrategyRegistry） | ✅ |
+| **P150** | 统一事件回放与实盘语义（EventBus、EventStore、SimBroker、PlatformRunner、EventReplayer） | ✅ |
+
+**设计要点：**
+- **统一事件模型**：`app/platform/events.py` 定义冻结 dataclass 事件，支持 `to_dict` / `from_dict` 与 `EVENT_REGISTRY` 反序列化。
+- **策略插件化**：`Strategy` Protocol + `@runtime_checkable`；`IntervalStrategy` 作为首个插件接入 `app/strategies/`。
+- **事件总线与持久化**：`EventBus` 内存 pub/sub；`EventStore` 写入 `event_log` 表；`EventReplayer` 可从 store 回放事件到任意 bus。
+- **回测撮合**：`SimBroker` 在 backtest 模式下按 bar 触发 LIMIT 单全部成交，fill 时间戳继承触发 bar。
+- **特性开关**：`AUTO_TRADE_PLATFORM_MODE` 默认关闭；开启后在 lifespan 中初始化 `PlatformRunner`（live 模式），并挂载到 `app.state.platform_runner`。
+- **平台 API**：`GET /api/platform/strategies` 返回已注册策略及其 `parameter_schema`。
+
+**验证：** `pytest tests/` **1228 passed**；`python3 -m basedpyright app/platform/ tests/platform/` 0 errors；`tests/test_platform_api.py` 覆盖平台 API 与 lifespan 开关行为。非平台模块存在若干预存在类型告警，本次未改动。
+
+**显式 YAGNI 未做：** `SimBroker` 部分成交/滑点/延迟、live 模式与 `TradeExecutionService` 完整下单接线、多策略并发运行、跨品种组合风险、portfolio 级 attribution。
 
 ---
 

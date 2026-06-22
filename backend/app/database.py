@@ -72,6 +72,7 @@ def init_db() -> None:
     _ensure_alert_firings_table(engine)
     _ensure_strategy_presets_table(engine)
     _ensure_notifications_table(engine)
+    _ensure_event_log_table(engine)
     db = SessionLocal()
     try:
         _bootstrap_credentials(db, CredentialConfig, StrategyConfig)
@@ -451,6 +452,40 @@ def _ensure_notifications_table(db_engine: Engine) -> None:
         )
         connection.exec_driver_sql(
             "CREATE INDEX IF NOT EXISTS ix_notifications_created_at ON notifications (created_at)"
+        )
+
+
+def _ensure_event_log_table(db_engine: Engine) -> None:
+    """Defensive explicit create for event_log (platform event store)."""
+    inspector = inspect(db_engine)
+    if "event_log" in inspector.get_table_names():
+        return
+    with db_engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS event_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id VARCHAR(36) NOT NULL,
+                event_type VARCHAR(32) NOT NULL,
+                source VARCHAR(32) NOT NULL,
+                symbol VARCHAR(32),
+                timestamp DATETIME NOT NULL,
+                payload_json TEXT NOT NULL,
+                created_at DATETIME
+            )
+            """
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_event_log_event_id ON event_log (event_id)"
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_event_log_event_type ON event_log (event_type)"
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_event_log_symbol ON event_log (symbol)"
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_event_log_timestamp ON event_log (timestamp)"
         )
 
 

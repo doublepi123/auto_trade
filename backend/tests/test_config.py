@@ -8,7 +8,7 @@ class TestSettings:
         monkeypatch.delenv("AUTO_TRADE_DATABASE_URL", raising=False)
         s = Settings()
         assert s.env == "dev"
-        assert s.database_url == "sqlite:///data/auto_trade.db"
+        assert s.database_url == "sqlite:///./data/auto_trade.db"
 
     def test_default_strategy_empty(self) -> None:
         s = Settings()

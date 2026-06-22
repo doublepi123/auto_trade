@@ -12,6 +12,12 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from decimal import Decimal
+from app.platform.api import router as platform_router
+from app.platform.registry import get_default_registry
+from app.platform.runner import PlatformRunner
+from app.services.strategy_service import StrategyService
+from app.database import SessionLocal
 from app.api.backtest import router as backtest_router
 from app.api.calendar import router as calendar_router
 from app.api.trade_notes import router as trade_notes_router
@@ -518,6 +524,33 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     started = await asyncio.to_thread(runner.start, loop=asyncio.get_running_loop())
     if not started:
         logger.warning("runner failed to start during app lifespan — trading engine is not running")
+
+    if settings.platform_mode:
+        db = SessionLocal()
+        try:
+            strategy_config = StrategyService(db).get_config()
+            registry = get_default_registry()
+            strategy_cls = registry.get("interval")
+            strategy = cast(Any, strategy_cls)(params={
+                "buy_low": Decimal(str(strategy_config.buy_low or 0)),
+                "sell_high": Decimal(str(strategy_config.sell_high or 0)),
+                "quantity": int(getattr(strategy_config, "quantity", 0) or 0),
+            })
+            platform_runner = PlatformRunner(
+                symbol=strategy_config.symbol or "",
+                strategy=strategy,
+                mode="live",
+            )
+            _app.state.platform_runner = platform_runner
+            logger.info("platform runner enabled for symbol=%s", strategy_config.symbol)
+        except Exception:
+            logger.exception("failed to initialize platform runner")
+            _app.state.platform_runner = None
+        finally:
+            db.close()
+    else:
+        _app.state.platform_runner = None
+
     cleanup_task = asyncio.create_task(_ws_cleanup_task())
     llm_task = asyncio.create_task(_llm_analysis_cron())
     report_task = asyncio.create_task(_report_schedule_cron())
@@ -569,6 +602,7 @@ app.add_middleware(
     allow_headers=["Authorization", "X-API-Key", "Content-Type", "Accept"],
 )
 
+app.include_router(platform_router, prefix="/api/platform")
 app.include_router(strategy_router)
 app.include_router(strategy_experiments_router)
 app.include_router(credentials_router)

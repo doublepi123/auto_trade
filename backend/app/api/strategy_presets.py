@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 
 from app.api.auth import require_api_key
 from app.api.deps import extract_actor, get_audit_logger
@@ -42,8 +42,9 @@ def get_preset(preset_id: int, db=Depends(get_db)) -> StrategyPresetOut:
 
 
 @router.delete("/{preset_id}", status_code=204)
-def delete_preset(preset_id: int, db=Depends(get_db)) -> None:
+def delete_preset(preset_id: int, db=Depends(get_db)) -> Response:
     StrategyPresetService(db).delete(preset_id)
+    return Response(status_code=204)
 
 
 @router.post("/{preset_id}/apply", response_model=StrategyPresetApplyResult)

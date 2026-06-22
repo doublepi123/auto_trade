@@ -447,3 +447,16 @@ class StrategyPreset(Base):
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     params_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
     created_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow)
+
+
+class EventLog(Base):
+    __tablename__ = "event_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    event_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    event_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    source: Mapped[str] = mapped_column(String(32), nullable=False)
+    symbol: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    timestamp: Mapped[datetime] = mapped_column(_TZDateTime, nullable=False, index=True)
+    payload_json: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow)
