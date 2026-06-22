@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.models import PaperOrder as PaperOrderModel
 from app.platform.events import BarEvent, EventSource, FillEvent, OrderEvent, QuoteEvent
+from app.platform.fill_model import FillModel
 from app.platform.paper_order_state import PaperOrderState
 from app.platform.sdk import OrderIntent
 
@@ -52,6 +53,7 @@ class PaperBrokerConfig:
     commission_rate: Decimal = Decimal("0.0005")
     partial_fill_probability: float = 1.0
     latency_ms: int = 0
+    fill_model: FillModel | None = None
 
 
 class PaperBroker:
@@ -190,12 +192,20 @@ class PaperBroker:
             fill_qty = self._compute_fill_quantity(order, bar)
             if fill_qty <= 0:
                 continue
-            if intent.side == "BUY":
-                fill_price = trigger_price + self._config.slippage_ticks
+            fm = self._config.fill_model
+            if fm is not None:
+                slip = fm.slippage_model.slippage(intent.side, trigger_price, bar, fill_qty)
+                fill_price = (trigger_price + slip) if intent.side == "BUY" else (trigger_price - slip)
+                commission = fm.commission_model.commission(fill_qty, fill_price)
+                slip_reported = slip
             else:
-                fill_price = trigger_price - self._config.slippage_ticks
-            commission = fill_price * Decimal(fill_qty) * self._config.commission_rate
-            order.fill(fill_qty, fill_price, slippage=self._config.slippage_ticks, commission=commission)
+                slip_reported = self._config.slippage_ticks
+                if intent.side == "BUY":
+                    fill_price = trigger_price + slip_reported
+                else:
+                    fill_price = trigger_price - slip_reported
+                commission = fill_price * Decimal(fill_qty) * self._config.commission_rate
+            order.fill(fill_qty, fill_price, slippage=slip_reported, commission=commission)
             self._persist(order)
             fills.append(
                 FillEvent(
@@ -206,7 +216,7 @@ class PaperBroker:
                     side=intent.side,
                     quantity=fill_qty,
                     price=fill_price,
-                    slippage=self._config.slippage_ticks,
+                    slippage=slip_reported,
                     commission=commission,
                     partial=order.status == "PARTIAL_FILLED",
                 )
