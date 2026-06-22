@@ -138,3 +138,49 @@ def test_runner_feeds_risk_engine_with_fills():
     runner.on_bar(make_bar("144", t0))
 
     assert risk_engine._positions.get("AAPL.US", {}).get("quantity") == 10
+
+
+def test_runner_universe_gates_strategy_routing():
+    from app.platform.universe import StaticUniverse
+
+    _ensure_tables()
+    bus = EventBus()
+    strategy = IntervalStrategy(params={"buy_low": Decimal("145"), "sell_high": Decimal("155"), "quantity": 10})
+    runner = PlatformRunner(
+        symbols=["AAPL.US", "TSLA.US"],
+        strategy=strategy,
+        mode="backtest",
+        bus=bus,
+        universe=StaticUniverse(["AAPL.US"]),
+    )
+    fills = []
+    bus.subscribe("fill", lambda e: fills.append(e))
+    t0 = datetime(2026, 6, 23, 10, 0, tzinfo=timezone.utc)
+    # TSLA bar below buy_low but universe excludes it -> no strategy intent -> no fill
+    runner.on_bar(
+        BarEvent(
+            timestamp=t0,
+            source=EventSource.MARKET,
+            symbol="TSLA.US",
+            open=Decimal("150"),
+            high=Decimal("160"),
+            low=Decimal("140"),
+            close=Decimal("144"),
+            volume=1000,
+        )
+    )
+    assert fills == []
+    # AAPL bar below buy_low and in universe -> BUY fill
+    runner.on_bar(
+        BarEvent(
+            timestamp=datetime(2026, 6, 23, 10, 1, tzinfo=timezone.utc),
+            source=EventSource.MARKET,
+            symbol="AAPL.US",
+            open=Decimal("150"),
+            high=Decimal("160"),
+            low=Decimal("140"),
+            close=Decimal("144"),
+            volume=1000,
+        )
+    )
+    assert any(f.symbol == "AAPL.US" for f in fills)

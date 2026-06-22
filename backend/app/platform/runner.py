@@ -19,6 +19,7 @@ from app.platform.paper_broker import PaperBroker
 from app.platform.risk_engine import RiskEngine
 from app.platform.sdk import OrderIntent, Strategy
 from app.platform.store import EventStore
+from app.platform.universe import Universe
 
 
 class PlatformRunner:
@@ -42,6 +43,7 @@ class PlatformRunner:
         broker: PaperBroker | None = None,
         risk_engine: RiskEngine | None = None,
         indicators: IndicatorService | None = None,
+        universe: Universe | None = None,
     ) -> None:
         self.symbols = list(symbols) if symbols else [symbol]
         self.strategy = strategy
@@ -58,6 +60,7 @@ class PlatformRunner:
         self.risk_engine = risk_engine or RiskEngine()
         self.bus.subscribe("fill", self._on_risk_fill)
         self.indicators = indicators
+        self.universe = universe
 
     @property
     def symbol(self) -> str | None:
@@ -105,8 +108,12 @@ class PlatformRunner:
         self._emit(bar)
         if self.indicators is not None:
             self.indicators.on_bar(bar)
-        if not self.symbols or bar.symbol in self.symbols:
-            intents = self.strategy.on_bar(self._context(bar.symbol), bar)
+        symbol = bar.symbol or ""
+        route = (not self.symbols or symbol in self.symbols)
+        if self.universe is not None:
+            route = route and self.universe.contains(symbol, bar)
+        if route:
+            intents = self.strategy.on_bar(self._context(symbol), bar)
             for intent in intents:
                 self._execute_intent(intent, timestamp=bar.timestamp)
         if self.mode in ("backtest", "paper") and self._broker is not None:
@@ -114,15 +121,19 @@ class PlatformRunner:
             for fill in fills:
                 self._emit(fill)
         if self.risk_engine is not None and self.mode in ("backtest", "paper"):
-            symbol = bar.symbol or ""
-            risk_events = self.risk_engine.evaluate({symbol: bar.close}, timestamp=bar.timestamp)
+            risk_symbol = bar.symbol or ""
+            risk_events = self.risk_engine.evaluate({risk_symbol: bar.close}, timestamp=bar.timestamp)
             for evt in risk_events:
                 self._emit(evt)
 
     def on_quote(self, quote: QuoteEvent) -> None:
         self._emit(quote)
-        if not self.symbols or quote.symbol in self.symbols:
-            intents = self.strategy.on_quote(self._context(quote.symbol), quote)
+        symbol = quote.symbol or ""
+        route = (not self.symbols or symbol in self.symbols)
+        if self.universe is not None:
+            route = route and self.universe.contains(symbol, None)
+        if route:
+            intents = self.strategy.on_quote(self._context(symbol), quote)
             for intent in intents:
                 self._execute_intent(intent, timestamp=quote.timestamp)
 
