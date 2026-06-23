@@ -14,6 +14,10 @@ class PaperOrderState:
     status: str = "SUBMITTED"
     filled_quantity: int = 0
     fills: list[dict[str, Any]] = field(default_factory=list)
+    # P192 latency-model fields (additive; default 0/None preserves old behavior)
+    submit_due: int = 0   # bars remaining before QUEUED -> SUBMITTED
+    fill_due: int = 0     # bars remaining before a held fill emits
+    pending_fill_price: Decimal | None = None  # held fill trigger price
 
     @property
     def remaining_quantity(self) -> int:
