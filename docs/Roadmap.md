@@ -169,6 +169,34 @@
 
 ---
 
+## 近期已完成迭代 (2026-06-24) — 执行算法与研究层（10 轮 P183–P192）
+
+> 自主 feature 迭代第 20 批（10 轮）。参考 Nautilus ExecutionAlgorithm/TradingSession/MarginModel/LatencyModel、WorldQuant Alpha101/alphalens、Brinson、Optuna/Hyperband、pyfolio/QuantStats，补齐算法执行、因子研究、多策略组合、Brinson 归因、回测运行持久化、智能参数搜索、交易时段过滤、保证金/杠杆、tearsheet 导出、订单延迟。全部后端、`pytest` 可验、加法不破坏默认路径。规格：[2026-06-23-p183-p192-exec-research-design.md](superpowers/specs/2026-06-23-p183-p192-exec-research-design.md)。
+
+| 代号 | 主题 | 参考 | 状态 |
+|------|------|------|------|
+| **P183** | 算法执行（TWAP/VWAP/Iceberg 父单拆子切片 + 注册表） | Nautilus `ExecutionAlgorithm` | ✅ |
+| **P184** | 因子库（momentum/volatility/meanrev）+ 横截面信息系数 IC | Alpha101、alphalens、Qlib | ✅ |
+| **P185** | 多策略组合 `StrategyCombinator`（加权 alpha 合流，实现 Strategy） | Nautilus 多策略、Lean `AlphaModel` | ✅ |
+| **P186** | Brinson-Fachler 归因（allocation/selection/interaction 分解） | Brinson-Fachler | ✅ |
+| **P187** | 平台回测运行持久化（`platform_backtest_runs` + list/get/compare） | Lean saved runs | ✅ |
+| **P188** | 智能参数搜索（准随机采样 + successive-halving 中位剪枝） | Optuna TPE / Hyperband | ✅ |
+| **P189** | 交易时段过滤（pre/rth/post/closed，runner 路由前 gate） | Nautilus `TradingSession`、Lean `MarketHoursDatabase` | ✅ |
+| **P190** | 保证金/杠杆模型（FixedMarginModel + LeverageGuard） | Nautilus `MarginModel`、Lean `BuyingPowerModel` | ✅ |
+| **P191** | tearsheet 构建与 CSV/JSON 导出端点 | pyfolio、QuantStats | ✅ |
+| **P192** | 订单延迟仿真（PaperBroker submit/fill 延迟队列） | Nautilus `LatencyModel` | ✅ |
+
+**设计要点：**
+- **参考而不照抄**：借鉴开源抽象形态，实现贴合本仓事件流与既有原语，零新依赖。
+- **加法不破坏**：执行算法/会话过滤/保证金/延迟/智能搜索均为可选注入或新模块；PaperBroker 的延迟经 `QUEUED` 状态 + held-fill 队列实现，无延迟时行为完全不变。
+- **确定性**：SmartOptimizer/MonteCarlo 用 seeded `random.Random`；延迟以 bar 计可精确测试。
+
+**验证：** `pytest tests/` **1455 passed, 1 skipped**（基线 1405 → +50，覆盖率 ~90%）；平台层 `basedpyright` 0 真实错误（仅 sqlalchemy/pytest/fastapi 的 `reportMissingImports` venv 误报）；新增 `tests/platform/test_{execution_algorithms,factors,strategy_combinator,brinson,backtest_run_service,smart_optimizer,session_filter,margin,tearsheet,latency}.py` 全覆盖。
+
+**显式 YAGNI 未做：** 真 ML/LLM 训练闭环与因子研究仓、灰度部署管控台、前端组合/平台 UI、跨进程事件总线、暗池 L2 撮合、连续合约换月。
+
+---
+
 ## 近期已完成迭代 (2026-06-21) — 运维效率与个性化（10 轮 P139–P148）
 
 > 自主 feature 迭代第 15 批（10 轮）。主题：高级用户效率层 + 可持久化个性化。承接 P129–P138 的运营健康基础（复用 `useConnectionHealth`、`useSymbolStore`、`utils/clipboard.ts`）。全部**纯前端**，复用既有 API，**不新增后端端点、不新增表、不触碰 broker/order/runner/risk 写路径**。规格：[2026-06-21-p139-p148-power-user-productivity-design.md](superpowers/specs/2026-06-21-p139-p148-power-user-productivity-design.md)。
