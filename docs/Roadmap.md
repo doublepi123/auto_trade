@@ -197,6 +197,35 @@
 
 ---
 
+## 近期已完成迭代 (2026-06-24) — 参考开源量化核心能力的纵深补齐（10 轮 P193–P202）
+
+> 自主 feature 迭代第 21 批（10 轮）。承接 P183–P192 执行算法与研究层，把平台里反复出现的 YAGNI（跨进程事件总线、L2 撮合、连续合约换月、因子研究仓、多策略隔离、在线信号衰减、TCA、宏观压力、回测过拟合诊断、多期 Brinson）逐条补齐。参考 Nautilus `MessageBus`/`OrderBook`/`ContinuousContract`/`StrategyPool`/`CostModel`、Lean `MessagingBus`/`ContinuousContract`/`FillMatrix`、WorldQuant/alphalens/Qlib 因子研究、RiskMetrics 场景压力、López de Prado 回测过拟合（PBO + Deflated Sharpe）、Brinson-Ibbotson/Frongello 多期链接。全部后端、`pytest` 可验、加法不破坏默认路径（新模块均为可选注入或独立函数，零新依赖）。
+
+| 代号 | 主题 | 参考 | 状态 |
+|------|------|------|------|
+| **P193** | 跨进程事件总线（`Transport` Protocol + `DistributedEventBus` + Redis/InMemory/Null 适配 + 远端订阅回放） | Nautilus `MessageBus`、Lean `MessagingBus` | ✅ |
+| **P194** | L2 订单簿撮合（`OrderBook` 价格层 FIFO 队列 + MARKET/LIMIT 跨层 partial + 撮合后挂单余量回挂） | Nautilus `OrderBook`、Lean `FillMatrix` | ✅ |
+| **P195** | 连续合约换月 + 调整因子（RATIO/BACKWARD/NONE 三法，按换月点缝合，最近段不调整、历史累计调整） | Nautilus `ContinuousContract`、Lean `ContractDepthOffset` | ✅ |
+| **P196** | 因子研究仓库（`factor_snapshots` + `factor_ic_series` 表 + `FactorResearchService` 持久化/排名/IC 时序 + `/api/platform/factors/*`） | alphalens `FactorData`、Qlib `FactorEngine` | ✅ |
+| **P197** | 多策略并发执行隔离（`StrategyIsolationManager`：每策略独立 `Portfolio` + 资本预留 + 按 order 路由 fill + 聚合 NAV 与归因） | Nautilus `StrategyPool`、Lean per-portfolio allocation | ✅ |
+| **P198** | 在线学习信号衰减（`ExponentialDecay` 半衰期权重 + `RollingWindowDecay` 在线窗口 + `reweight_combinator_weights` 静态×衰减再平衡） | zipline 在线控制、vectorbt 信号再权 | ✅ |
+| **P199** | TCA 交易成本分析（`TcaAnalyzer` 按 symbol/side/source/time-bucket 归因已实现滑点+佣金，签约滑点正=不利，参考价可注入 + `/api/platform/tca`） | Nautilus `CostModel` TCA、Lean slippage analysis | ✅ |
+| **P200** | 宏观压力场景库（`ScenarioLibrary`：equity_crash/volatility_spike/correlation_breakdown/liquidity_discount 确定性场景 + 按 beta 缩放 + summary 序列化） | RiskMetrics 场景压力、监管宏观情景 | ✅ |
+| **P201** | 回测过拟合诊断（PBO CSCV 组合对称交叉验证 + Deflated Sharpe Ratio 多试验/非正态校正，闭式 erf CDF，无 RNG） | Bailey/López de Prado PBO 与 DSR | ✅ |
+| **P202** | 多期 Brinson 链接与对账（`brinson_multi_period`：算术 BHB 链接 + Frongello 几何链接 + residual 对账 + `link_arithmetic`/`link_geometric`） | Brinson-Hood-Beebower、Frongello 几何链接 | ✅ |
+
+**设计要点：**
+- **参考而不照抄**：借鉴开源抽象形态（Transport Protocol、价格层 FIFO、半衰期衰减、CSCV 组合枚举），实现贴合本仓既有事件流与 `PlatformRunner`，零新依赖。
+- **加法不破坏**：10 个模块全部为可选注入或独立纯函数；`DistributedEventBus` 继承 `EventBus` 且无 transport 时行为不变；`OrderBook`/`StrategyIsolationManager`/`TcaAnalyzer`/`ScenarioLibrary` 均不接入默认 runner 路径；`FactorResearchService`/TCA/因子 API 走新 `/api/platform/factors`、`/api/platform/tca` 端点，不影响既有路由。
+- **确定性**：PBO 用精确 CSCV 枚举、DSR 用闭式 erf CDF、连续合约按固定换月点缝合、信号衰减无 RNG、压力场景纯函数——全部可精确复现。
+- **复用**：因子研究复用 `factors.py` 的 `pearson`（提升为公开 helper）；多策略隔离复用 `Portfolio`；TCA 复用 `transactions` 表；多期 Brinson 复用单期 `brinson_attribution`。
+
+**新增表：** `factor_snapshots`（`_ensure_factor_snapshots_table`）、`factor_ic_series`（同 ensure 内创建）。**新增端点：** `GET/POST /api/platform/factors/snapshots`、`GET /api/platform/factors/ic`、`GET /api/platform/tca`。**新增模块：** `app/platform/{distributed_bus,order_book,continuous_contract,factor_research_service,strategy_isolation,signal_decay,tca,stress_scenarios,overfitting,brinson_multiperiod}.py`。
+
+**显式 YAGNI 未做：** 真 ML 训练闭环、灰度部署管控台、前端组合/平台 UI、L2 暗池行情订阅接入实盘、Redis 生产部署配置（factory 已就绪但默认 Null）。
+
+---
+
 ## 近期已完成迭代 (2026-06-21) — 运维效率与个性化（10 轮 P139–P148）
 
 > 自主 feature 迭代第 15 批（10 轮）。主题：高级用户效率层 + 可持久化个性化。承接 P129–P138 的运营健康基础（复用 `useConnectionHealth`、`useSymbolStore`、`utils/clipboard.ts`）。全部**纯前端**，复用既有 API，**不新增后端端点、不新增表、不触碰 broker/order/runner/risk 写路径**。规格：[2026-06-21-p139-p148-power-user-productivity-design.md](superpowers/specs/2026-06-21-p139-p148-power-user-productivity-design.md)。

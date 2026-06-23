@@ -15,12 +15,14 @@ from app.platform.backtest_service import PlatformBacktestService
 from app.platform.bus import EventBus
 from app.platform.data_catalog import DataCatalog
 from app.platform.events import BarEvent
+from app.platform.factor_research_service import FactorResearchService
 from app.platform.montecarlo import MonteCarloAnalyzer
 from app.platform.optimizer_service import OptimizerService
 from app.platform.registry import get_default_registry
 from app.platform.replay import EventReplayer
 from app.platform.runner import PlatformRunner
 from app.platform.store import EventStore
+from app.platform.tca import ConstReferencePriceProvider, TcaAnalyzer
 from app.platform.tearsheet import TearsheetBuilder, TearsheetExporter
 from app.platform.transaction_service import TransactionService
 
@@ -457,3 +459,119 @@ def list_transactions(
     until_dt = datetime.fromisoformat(until) if until else None
     rows = TransactionService().list(symbol=symbol, since=since_dt, until=until_dt, limit=limit)
     return {"transactions": rows, "count": len(rows)}
+
+
+@router.get("/factors/snapshots", dependencies=[Depends(require_api_key())])
+def list_factor_snapshots(
+    factor_name: str | None = None,
+    symbol: str | None = None,
+    since: str | None = None,
+    until: str | None = None,
+    limit: int = 500,
+) -> dict[str, Any]:
+    """Query the factor research warehouse (P196)."""
+    if limit < 1 or limit > 10000:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="limit must be in [1, 10000]",
+        )
+    since_dt = datetime.fromisoformat(since) if since else None
+    until_dt = datetime.fromisoformat(until) if until else None
+    rows = FactorResearchService().list_snapshots(
+        factor_name=factor_name,
+        symbol=symbol,
+        since=since_dt,
+        until=until_dt,
+        limit=limit,
+    )
+    return {"snapshots": rows, "count": len(rows)}
+
+
+@router.get("/factors/ic", dependencies=[Depends(require_api_key())])
+def compute_factor_ic(
+    factor_name: str,
+    since: str | None = None,
+    until: str | None = None,
+) -> dict[str, Any]:
+    """Compute + persist the IC time series for a factor (P196)."""
+    if not factor_name:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="factor_name is required",
+        )
+    since_dt = datetime.fromisoformat(since) if since else None
+    until_dt = datetime.fromisoformat(until) if until else None
+    return FactorResearchService().compute_ic_series(
+        factor_name=factor_name, since=since_dt, until=until_dt
+    )
+
+
+@router.post("/factors/snapshots", dependencies=[Depends(require_api_key())])
+def record_factor_snapshots(payload: dict[str, Any]) -> dict[str, Any]:
+    """Persist a batch of factor snapshots (P196).
+
+    Body: ``{"rows": [{factor_name, symbol, as_of, factor_value,
+    forward_return?, horizon_bars?, rank?, context?}, ...]}``.
+    """
+    rows_raw = payload.get("rows")
+    if not isinstance(rows_raw, list) or not rows_raw:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="rows must be a non-empty list",
+        )
+    from app.platform.factor_research_service import FactorSnapshotData
+
+    parsed: list[FactorSnapshotData] = []
+    for i, item in enumerate(rows_raw):
+        if not isinstance(item, dict):
+            raise HTTPException(status_code=422, detail=f"rows[{i}] must be an object")
+        for key in ("factor_name", "symbol", "as_of", "factor_value"):
+            if key not in item:
+                raise HTTPException(status_code=422, detail=f"rows[{i}] missing {key}")
+        try:
+            parsed.append(
+                FactorSnapshotData(
+                    factor_name=item["factor_name"],
+                    symbol=item["symbol"],
+                    as_of=datetime.fromisoformat(item["as_of"]),
+                    factor_value=float(item["factor_value"]),
+                    forward_return=float(item["forward_return"]) if item.get("forward_return") is not None else None,
+                    horizon_bars=int(item.get("horizon_bars", 1)),
+                    rank=item.get("rank"),
+                    context=item.get("context"),
+                )
+            )
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(status_code=422, detail=f"rows[{i}] invalid: {exc}") from exc
+    count = FactorResearchService().record_many(parsed)
+    return {"recorded": count}
+
+
+@router.get("/tca", dependencies=[Depends(require_api_key())])
+def transaction_cost_analysis(
+    symbol: str | None = None,
+    since: str | None = None,
+    until: str | None = None,
+    reference_price: float | None = None,
+    bucket: str = "day",
+) -> dict[str, Any]:
+    """Realized execution-cost (TCA) attribution over the transaction ledger (P199).
+
+    If ``reference_price`` is supplied, every fill is benchmarked against that
+    constant (useful for a single-symbol analysis); otherwise slippage against
+    an unknown reference is treated as 0 (commission-only).
+    """
+    if bucket not in ("day", "hour", "none"):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="bucket must be one of day|hour|none",
+        )
+    since_dt = datetime.fromisoformat(since) if since else None
+    until_dt = datetime.fromisoformat(until) if until else None
+    provider: ConstReferencePriceProvider | None = None
+    if reference_price is not None:
+        prices = {symbol or "ALL": Decimal(str(reference_price))} if symbol else {}
+        provider = ConstReferencePriceProvider(prices)
+    analyzer = TcaAnalyzer(reference_provider=provider, bucket=bucket)
+    attr = analyzer.analyze(symbol=symbol, since=since_dt, until=until_dt)
+    return TcaAnalyzer.to_dict(attr)

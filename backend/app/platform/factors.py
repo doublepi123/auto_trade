@@ -14,6 +14,7 @@ __all__ = [
     "FactorRegistry",
     "get_default_registry",
     "information_coefficient",
+    "pearson",
 ]
 
 
@@ -126,6 +127,11 @@ def get_default_registry() -> FactorRegistry:
 
 
 def _pearson(xs: list[float], ys: list[float]) -> float:
+    return pearson(xs, ys)
+
+
+def pearson(xs: list[float], ys: list[float]) -> float:
+    """Pearson correlation between two equal-position series (public helper)."""
     n = min(len(xs), len(ys))
     if n < 2:
         return 0.0

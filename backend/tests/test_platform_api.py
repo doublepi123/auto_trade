@@ -214,6 +214,89 @@ def test_platform_events_limit_validation(patched_app) -> None:
     assert resp.status_code == 422
 
 
+def test_platform_factor_snapshots_round_trip(patched_app) -> None:
+    from datetime import datetime, timezone
+
+    from app import database
+    from app.models import Base
+
+    Base.metadata.drop_all(bind=database.engine)
+    Base.metadata.create_all(bind=database.engine)
+    database.init_db()
+
+    with TestClient(app) as client:
+        body = {
+            "rows": [
+                {"factor_name": "m", "symbol": "A.US", "as_of": "2026-06-01T00:00:00+00:00",
+                 "factor_value": 0.05, "forward_return": 0.02},
+                {"factor_name": "m", "symbol": "B.US", "as_of": "2026-06-01T00:00:00+00:00",
+                 "factor_value": 0.10, "forward_return": 0.04},
+            ]
+        }
+        post_resp = client.post("/api/platform/factors/snapshots", json=body)
+        assert post_resp.status_code == 200
+        assert post_resp.json()["recorded"] == 2
+
+        list_resp = client.get("/api/platform/factors/snapshots", params={"factor_name": "m"})
+        assert list_resp.status_code == 200
+        data = list_resp.json()
+        assert data["count"] == 2
+
+        ic_resp = client.get("/api/platform/factors/ic", params={"factor_name": "m"})
+        assert ic_resp.status_code == 200
+        ic = ic_resp.json()
+        assert ic["num_periods"] == 1
+        assert ic["per_period"][0]["num_symbols"] == 2
+
+
+def test_platform_factor_snapshots_rejects_empty_rows(patched_app) -> None:
+    with TestClient(app) as client:
+        resp = client.post("/api/platform/factors/snapshots", json={"rows": []})
+    assert resp.status_code == 422
+
+
+def test_platform_factor_ic_requires_factor_name(patched_app) -> None:
+    with TestClient(app) as client:
+        resp = client.get("/api/platform/factors/ic")
+    assert resp.status_code == 422
+
+
+def test_platform_tca_endpoint(patched_app) -> None:
+    from datetime import datetime, timezone
+
+    from app import database
+    from app.models import Base, Transaction
+
+    Base.metadata.drop_all(bind=database.engine)
+    Base.metadata.create_all(bind=database.engine)
+    database.init_db()
+
+    with TestClient(app) as client:
+        # seed a transaction
+        with database.SessionLocal() as db:
+            db.add(Transaction(broker_order_id="o1", symbol="A.US", side="BUY",
+                               quantity=100, price=101.0, commission=1.0,
+                               source="paper",
+                               timestamp=datetime(2026, 6, 24, 10, 0, tzinfo=timezone.utc)))
+            db.commit()
+
+        resp = client.get(
+            "/api/platform/tca",
+            params={"symbol": "A.US", "reference_price": 100.0, "bucket": "day"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["totals"]["fills"] == 1
+        assert data["by_symbol"]["A.US"]["slippage_cost"] == 100.0
+        assert data["by_side"]["BUY"]["commission"] == 1.0
+
+
+def test_platform_tca_rejects_bad_bucket(patched_app) -> None:
+    with TestClient(app) as client:
+        resp = client.get("/api/platform/tca", params={"bucket": "minute"})
+    assert resp.status_code == 422
+
+
 def test_platform_replay_reconstructs_positions(patched_app) -> None:
     from datetime import datetime, timezone
     from decimal import Decimal

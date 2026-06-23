@@ -552,3 +552,42 @@ class EventLog(Base):
     timestamp: Mapped[datetime] = mapped_column(_TZDateTime, nullable=False, index=True)
     payload_json: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow)
+
+
+class FactorSnapshot(Base):
+    """Factor research warehouse row (P196).
+
+    One row per (as_of date, symbol, factor name). Stores the computed factor
+    value, the forward return observed over the holding horizon, and a
+    JSON-encoded snapshot of cross-sectional context (decile rank, etc.). This
+    is the alphalens/Qlib-style factor panel: query by factor + date range to
+    build an IC time series or a factor-decile backtest.
+    """
+
+    __tablename__ = "factor_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    factor_name: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    symbol: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    as_of: Mapped[datetime] = mapped_column(_TZDateTime, nullable=False, index=True)
+    factor_value: Mapped[float] = mapped_column(Float, nullable=False)
+    forward_return: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    horizon_bars: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    rank: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    context_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    created_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow)
+
+
+class FactorICSeries(Base):
+    """Aggregated IC data point per (factor_name, as_of) for an IC time series."""
+
+    __tablename__ = "factor_ic_series"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    factor_name: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    as_of: Mapped[datetime] = mapped_column(_TZDateTime, nullable=False, index=True)
+    mean_ic: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    std_ic: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    ic_ir: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    num_symbols: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow)
