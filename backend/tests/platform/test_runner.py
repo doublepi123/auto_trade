@@ -238,3 +238,36 @@ def test_runner_live_mode_without_handler_stays_brokerless():
     )
     assert runner._broker is None
     assert runner.live_order_handler is None
+
+
+def test_runner_invokes_scheduler_on_bar():
+    from app.platform.scheduler import Scheduler
+
+    _ensure_tables()
+    bus = EventBus()
+    strategy = IntervalStrategy(
+        params={"buy_low": Decimal("145"), "sell_high": Decimal("155"), "quantity": 10}
+    )
+    sched = Scheduler()
+    fired: list = []
+    sched.every_bars(1, lambda b: fired.append(b))
+    runner = PlatformRunner(
+        symbols=["AAPL.US"],
+        strategy=strategy,
+        mode="backtest",
+        bus=bus,
+        scheduler=sched,
+    )
+    runner.on_bar(
+        BarEvent(
+            timestamp=datetime(2026, 6, 23, 10, 0, tzinfo=timezone.utc),
+            source=EventSource.MARKET,
+            symbol="AAPL.US",
+            open=Decimal("150"),
+            high=Decimal("160"),
+            low=Decimal("140"),
+            close=Decimal("144"),
+            volume=1000,
+        )
+    )
+    assert len(fired) == 1

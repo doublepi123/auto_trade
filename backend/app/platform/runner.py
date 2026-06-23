@@ -18,6 +18,7 @@ from app.platform.execution import ExecutionClient, LiveExecutionClient
 from app.platform.indicators import IndicatorService
 from app.platform.paper_broker import PaperBroker
 from app.platform.risk_engine import RiskEngine
+from app.platform.scheduler import Scheduler
 from app.platform.sdk import OrderIntent, Strategy
 from app.platform.store import EventStore
 from app.platform.universe import Universe
@@ -45,6 +46,7 @@ class PlatformRunner:
         risk_engine: RiskEngine | None = None,
         indicators: IndicatorService | None = None,
         universe: Universe | None = None,
+        scheduler: Scheduler | None = None,
     ) -> None:
         self.symbols = list(symbols) if symbols else [symbol]
         self.strategy = strategy
@@ -67,6 +69,7 @@ class PlatformRunner:
         self.bus.subscribe("fill", self._on_risk_fill)
         self.indicators = indicators
         self.universe = universe
+        self.scheduler = scheduler
         self._warming_up: bool = False
 
     @property
@@ -119,6 +122,8 @@ class PlatformRunner:
         self._emit(bar)
         if self.indicators is not None:
             self.indicators.on_bar(bar)
+        if self.scheduler is not None:
+            self.scheduler.on_bar(bar)
         symbol = bar.symbol or ""
         route = (not self.symbols or symbol in self.symbols)
         if self.universe is not None:
