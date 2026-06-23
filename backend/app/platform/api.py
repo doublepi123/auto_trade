@@ -21,6 +21,7 @@ from app.platform.registry import get_default_registry
 from app.platform.replay import EventReplayer
 from app.platform.runner import PlatformRunner
 from app.platform.store import EventStore
+from app.platform.tearsheet import TearsheetBuilder, TearsheetExporter
 from app.platform.transaction_service import TransactionService
 
 router = APIRouter()
@@ -118,6 +119,48 @@ def run_platform_backtest(payload: dict[str, Any]) -> dict[str, Any]:
         bars=payload["bars"],
         initial_cash=initial_cash,
     )
+
+
+@router.post("/tearsheet", dependencies=[Depends(require_api_key())])
+def build_tearsheet(payload: dict[str, Any]) -> dict[str, Any]:
+    """Aggregate a backtest run into a full tearsheet (pyfolio / QuantStats style).
+
+    Accepts the same ``{strategy, params, symbols, bars, initial_cash?}`` shape as
+    ``POST /backtest`` plus an optional ``format`` (``json`` default or ``csv``).
+    JSON returns the full tearsheet dict; CSV returns ``{"format": "csv", "csv": ...}``.
+    """
+    required = {"strategy", "params", "symbols", "bars"}
+    missing = required - set(payload.keys())
+    if missing:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"missing fields: {missing}",
+        )
+    registry = get_default_registry()
+    if payload["strategy"] not in {m.name for m in registry.list()}:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"strategy '{payload['strategy']}' not found",
+        )
+    try:
+        initial_cash = Decimal(str(payload.get("initial_cash", 100000)))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="invalid initial_cash",
+        ) from exc
+    fmt = str(payload.get("format", "json")).lower()
+    result = PlatformBacktestService().run(
+        strategy_name=payload["strategy"],
+        params=payload["params"],
+        symbols=payload["symbols"],
+        bars=payload["bars"],
+        initial_cash=initial_cash,
+    )
+    tearsheet = TearsheetBuilder().build(result)
+    if fmt == "csv":
+        return {"format": "csv", "csv": TearsheetExporter.to_csv(tearsheet)}
+    return tearsheet
 
 
 @router.post("/backtest/runs", dependencies=[Depends(require_api_key())])

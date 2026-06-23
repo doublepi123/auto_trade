@@ -497,3 +497,57 @@ def test_platform_backtest_run_unknown_404(patched_app) -> None:
     with TestClient(app) as client:
         resp = client.get("/api/platform/backtest/runs/9999")
     assert resp.status_code == 404
+
+
+def test_platform_tearsheet_endpoint(patched_app) -> None:
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/platform/tearsheet",
+            json={
+                "strategy": "interval",
+                "params": {"buy_low": 145, "sell_high": 155, "quantity": 10},
+                "symbols": ["AAPL.US"],
+                "bars": [
+                    {
+                        "timestamp": "2026-06-23T10:00:00+00:00",
+                        "symbol": "AAPL.US",
+                        "open": 150,
+                        "high": 160,
+                        "low": 140,
+                        "close": 144,
+                        "volume": 1000,
+                    }
+                ],
+            },
+        )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "summary" in data and "equity_curve" in data
+
+
+def test_platform_tearsheet_csv_format(patched_app) -> None:
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/platform/tearsheet",
+            json={
+                "strategy": "interval",
+                "params": {"buy_low": 145, "sell_high": 155, "quantity": 10},
+                "symbols": ["AAPL.US"],
+                "format": "csv",
+                "bars": [
+                    {
+                        "timestamp": "2026-06-23T10:00:00+00:00",
+                        "symbol": "AAPL.US",
+                        "open": 150,
+                        "high": 160,
+                        "low": 140,
+                        "close": 144,
+                        "volume": 1000,
+                    }
+                ],
+            },
+        )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["format"] == "csv"
+    assert "csv" in data and "summary" in data["csv"]
