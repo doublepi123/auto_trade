@@ -20,6 +20,7 @@ from app.platform.paper_broker import PaperBroker
 from app.platform.risk_engine import RiskEngine
 from app.platform.scheduler import Scheduler
 from app.platform.sdk import OrderIntent, Strategy
+from app.platform.session_filter import MarketSessionFilter
 from app.platform.store import EventStore
 from app.platform.universe import Universe
 
@@ -47,6 +48,8 @@ class PlatformRunner:
         indicators: IndicatorService | None = None,
         universe: Universe | None = None,
         scheduler: Scheduler | None = None,
+        session_filter: MarketSessionFilter | None = None,
+        allowed_sessions: tuple[str, ...] = ("rth", "pre", "post"),
     ) -> None:
         self.symbols = list(symbols) if symbols else [symbol]
         self.strategy = strategy
@@ -70,6 +73,8 @@ class PlatformRunner:
         self.indicators = indicators
         self.universe = universe
         self.scheduler = scheduler
+        self.session_filter = session_filter
+        self.allowed_sessions = allowed_sessions
         self._warming_up: bool = False
 
     @property
@@ -128,6 +133,8 @@ class PlatformRunner:
         route = (not self.symbols or symbol in self.symbols)
         if self.universe is not None:
             route = route and self.universe.contains(symbol, bar)
+        if self.session_filter is not None:
+            route = route and self.session_filter.allows(bar.timestamp, self.allowed_sessions)
         if route:
             intents = self.strategy.on_bar(self._context(symbol), bar)
             for intent in intents:

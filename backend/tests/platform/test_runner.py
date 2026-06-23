@@ -271,3 +271,54 @@ def test_runner_invokes_scheduler_on_bar():
         )
     )
     assert len(fired) == 1
+
+
+def test_runner_session_filter_gates_routing():
+    from datetime import time
+
+    from app.platform.session_filter import MarketSessionFilter
+
+    _ensure_tables()
+    bus = EventBus()
+    strategy = IntervalStrategy(
+        params={"buy_low": Decimal("145"), "sell_high": Decimal("155"), "quantity": 10}
+    )
+    sf = MarketSessionFilter(rth_window=(time(9, 30), time(16, 0)))
+    runner = PlatformRunner(
+        symbols=["AAPL.US"],
+        strategy=strategy,
+        mode="backtest",
+        bus=bus,
+        session_filter=sf,
+        allowed_sessions=("rth",),
+    )
+    fills: list = []
+    bus.subscribe("fill", lambda e: fills.append(e))
+    # bar at 03:00 (outside rth window -> "closed") -> no routing -> no fill
+    runner.on_bar(
+        BarEvent(
+            timestamp=datetime(2026, 6, 22, 3, 0, tzinfo=timezone.utc),
+            source=EventSource.MARKET,
+            symbol="AAPL.US",
+            open=Decimal("150"),
+            high=Decimal("160"),
+            low=Decimal("140"),
+            close=Decimal("144"),
+            volume=1000,
+        )
+    )
+    assert fills == []
+    # bar at 10:00 (rth) -> strategy fires BUY -> fill
+    runner.on_bar(
+        BarEvent(
+            timestamp=datetime(2026, 6, 22, 10, 0, tzinfo=timezone.utc),
+            source=EventSource.MARKET,
+            symbol="AAPL.US",
+            open=Decimal("150"),
+            high=Decimal("160"),
+            low=Decimal("140"),
+            close=Decimal("144"),
+            volume=1000,
+        )
+    )
+    assert any(f.symbol == "AAPL.US" for f in fills)
