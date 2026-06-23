@@ -127,6 +127,28 @@ class Transaction(Base):
     timestamp: Mapped[datetime] = mapped_column(_TZDateTime, index=True)
 
 
+class PlatformBacktestRun(Base):
+    """Saved platform backtest run (Lean-style persisted runs).
+
+    One row per ``POST /api/platform/backtest/runs`` execution. The full
+    ``PlatformBacktestService.run`` result (equity curve, fills, positions,
+    stats, analytics) is JSON-serialized into ``result_json``; ``final_nav``
+    and ``sharpe`` are denormalized for cheap list/compare queries.
+    """
+
+    __tablename__ = "platform_backtest_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(100), default="")
+    strategy: Mapped[str] = mapped_column(String(50))
+    params_json: Mapped[str] = mapped_column(Text, default="{}")
+    symbols_json: Mapped[str] = mapped_column(Text, default="[]")
+    result_json: Mapped[str] = mapped_column(Text, default="{}")
+    final_nav: Mapped[float] = mapped_column(Float, default=0.0)
+    sharpe: Mapped[float] = mapped_column(Float, default=0.0)
+    created_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow)
+
+
 class CredentialConfig(Base):
     __tablename__ = "credential_config"
 

@@ -5,9 +5,12 @@ from decimal import Decimal
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from sqlalchemy.orm import Session
 
 from app.api.auth import require_api_key
+from app.database import get_db
 from app.platform.analytics import PerformanceAnalytics
+from app.platform.backtest_run_service import BacktestRunService
 from app.platform.backtest_service import PlatformBacktestService
 from app.platform.bus import EventBus
 from app.platform.data_catalog import DataCatalog
@@ -115,6 +118,78 @@ def run_platform_backtest(payload: dict[str, Any]) -> dict[str, Any]:
         bars=payload["bars"],
         initial_cash=initial_cash,
     )
+
+
+@router.post("/backtest/runs", dependencies=[Depends(require_api_key())])
+def create_backtest_run(payload: dict[str, Any], db: Session = Depends(get_db)) -> dict[str, Any]:
+    required = {"name", "strategy", "params", "symbols", "bars"}
+    missing = required - set(payload.keys())
+    if missing:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"missing fields: {missing}",
+        )
+    registry = get_default_registry()
+    if payload["strategy"] not in {m.name for m in registry.list()}:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"strategy '{payload['strategy']}' not found",
+        )
+    try:
+        initial_cash = Decimal(str(payload.get("initial_cash", 100000)))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="invalid initial_cash",
+        ) from exc
+    row = BacktestRunService(db).create(
+        name=payload["name"],
+        strategy_name=payload["strategy"],
+        params=payload["params"],
+        symbols=payload["symbols"],
+        bars=payload["bars"],
+        initial_cash=initial_cash,
+    )
+    return {
+        "id": row.id,
+        "name": row.name,
+        "strategy": row.strategy,
+        "final_nav": row.final_nav,
+        "sharpe": row.sharpe,
+    }
+
+
+@router.get("/backtest/runs", dependencies=[Depends(require_api_key())])
+def list_backtest_runs(limit: int = 50, db: Session = Depends(get_db)) -> dict[str, Any]:
+    return {"runs": BacktestRunService(db).list_runs(limit=limit)}
+
+
+@router.get("/backtest/runs/compare", dependencies=[Depends(require_api_key())])
+def compare_backtest_runs(ids: str, db: Session = Depends(get_db)) -> dict[str, Any]:
+    try:
+        run_ids = [int(x) for x in ids.split(",") if x.strip()]
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="ids must be comma-separated integers",
+        ) from exc
+    if not run_ids:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="ids required",
+        )
+    return {"comparison": BacktestRunService(db).compare(run_ids)}
+
+
+@router.get("/backtest/runs/{run_id}", dependencies=[Depends(require_api_key())])
+def get_backtest_run(run_id: int, db: Session = Depends(get_db)) -> dict[str, Any]:
+    run = BacktestRunService(db).get_run(run_id)
+    if run is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"run {run_id} not found",
+        )
+    return run
 
 
 @router.post("/optimize", dependencies=[Depends(require_api_key())])

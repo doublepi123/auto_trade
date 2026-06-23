@@ -451,3 +451,49 @@ def test_platform_montecarlo_missing_pnls_422(patched_app) -> None:
     with TestClient(app) as client:
         resp = client.post("/api/platform/montecarlo", json={})
     assert resp.status_code == 422
+
+
+def test_platform_backtest_runs_crud(patched_app) -> None:
+    from app import database
+    from app.models import Base
+
+    Base.metadata.drop_all(bind=database.engine)
+    Base.metadata.create_all(bind=database.engine)
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/platform/backtest/runs",
+            json={
+                "name": "r1",
+                "strategy": "interval",
+                "params": {"buy_low": 145, "sell_high": 155, "quantity": 10},
+                "symbols": ["AAPL.US"],
+                "bars": [
+                    {
+                        "timestamp": "2026-06-23T10:00:00+00:00",
+                        "symbol": "AAPL.US",
+                        "open": 150,
+                        "high": 160,
+                        "low": 140,
+                        "close": 144,
+                        "volume": 1000,
+                    }
+                ],
+            },
+        )
+    assert created.status_code == 200
+    rid = created.json()["id"]
+    with TestClient(app) as client:
+        listed = client.get("/api/platform/backtest/runs").json()
+        assert any(r["id"] == rid for r in listed["runs"])
+        got = client.get(f"/api/platform/backtest/runs/{rid}").json()
+    assert got["id"] == rid
+    assert "result" in got
+    with TestClient(app) as client:
+        cmp = client.get("/api/platform/backtest/runs/compare", params={"ids": str(rid)}).json()
+    assert len(cmp["comparison"]) == 1
+
+
+def test_platform_backtest_run_unknown_404(patched_app) -> None:
+    with TestClient(app) as client:
+        resp = client.get("/api/platform/backtest/runs/9999")
+    assert resp.status_code == 404

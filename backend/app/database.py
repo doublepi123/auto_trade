@@ -77,6 +77,7 @@ def init_db() -> None:
     _ensure_paper_orders_table(engine)
     _ensure_strategy_param_versions_table(engine)
     _ensure_transactions_table(engine)
+    _ensure_platform_backtest_runs_table(engine)
     db = SessionLocal()
     try:
         _bootstrap_credentials(db, CredentialConfig, StrategyConfig)
@@ -601,6 +602,29 @@ def _ensure_transactions_table(db_engine: Engine) -> None:
         )
         connection.exec_driver_sql(
             "CREATE INDEX IF NOT EXISTS ix_transactions_timestamp ON transactions (timestamp)"
+        )
+
+
+def _ensure_platform_backtest_runs_table(db_engine: Engine) -> None:
+    """Defensive explicit create for platform_backtest_runs (saved runs)."""
+    inspector = inspect(db_engine)
+    if "platform_backtest_runs" in inspector.get_table_names():
+        return
+    with db_engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS platform_backtest_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name VARCHAR(100) NOT NULL DEFAULT '',
+                strategy VARCHAR(50) NOT NULL,
+                params_json TEXT NOT NULL DEFAULT '{}',
+                symbols_json TEXT NOT NULL DEFAULT '[]',
+                result_json TEXT NOT NULL DEFAULT '{}',
+                final_nav FLOAT NOT NULL DEFAULT 0.0,
+                sharpe FLOAT NOT NULL DEFAULT 0.0,
+                created_at DATETIME
+            )
+            """
         )
 
 
