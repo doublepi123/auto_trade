@@ -67,6 +67,7 @@ class PlatformRunner:
         self.bus.subscribe("fill", self._on_risk_fill)
         self.indicators = indicators
         self.universe = universe
+        self._warming_up: bool = False
 
     @property
     def symbol(self) -> str | None:
@@ -87,6 +88,8 @@ class PlatformRunner:
             self.store.append(event)
 
     def _execute_intent(self, intent: OrderIntent, timestamp: datetime | None = None) -> None:
+        if self._warming_up:
+            return
         ts = timestamp or self.clock()
         self._emit(
             OrderIntentEvent(
@@ -133,6 +136,24 @@ class PlatformRunner:
             risk_events = self.risk_engine.evaluate({risk_symbol: bar.close}, timestamp=bar.timestamp)
             for evt in risk_events:
                 self._emit(evt)
+
+    def warmup(self, bars: list[BarEvent]) -> None:
+        """参考 Lean SetWarmup：喂入历史 bar 预热指标/策略状态，不产生真实订单。"""
+        self._warming_up = True
+        try:
+            for bar in bars:
+                self._emit(bar)
+                if self.indicators is not None:
+                    self.indicators.on_bar(bar)
+                symbol = bar.symbol or ""
+                route = (not self.symbols or symbol in self.symbols)
+                if self.universe is not None:
+                    route = route and self.universe.contains(symbol, bar)
+                if route:
+                    # 调用策略以预热其内部状态；产生的 intent 由 _warming_up 守卫丢弃。
+                    self.strategy.on_bar(self._context(symbol), bar)
+        finally:
+            self._warming_up = False
 
     def on_quote(self, quote: QuoteEvent) -> None:
         self._emit(quote)
