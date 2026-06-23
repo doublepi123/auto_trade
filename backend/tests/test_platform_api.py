@@ -390,3 +390,41 @@ def test_platform_analyze_with_benchmark(patched_app) -> None:
     assert "benchmark" in data
     assert "beta" in data["benchmark"]
     assert "excess_return" in data["benchmark"]
+
+
+def test_platform_transactions_endpoint(patched_app) -> None:
+    from datetime import datetime, timezone
+    from decimal import Decimal
+
+    from app import database
+    from app.models import Base
+    from app.platform.events import EventSource, FillEvent
+    from app.platform.transaction_service import TransactionService
+
+    Base.metadata.drop_all(bind=database.engine)
+    Base.metadata.create_all(bind=database.engine)
+    svc = TransactionService()
+    svc.record(
+        FillEvent(
+            timestamp=datetime(2026, 6, 23, 10, 0, tzinfo=timezone.utc),
+            source=EventSource.BROKER,
+            symbol="A",
+            broker_order_id="o",
+            side="BUY",
+            quantity=10,
+            price=Decimal("100"),
+            commission=Decimal("0"),
+        )
+    )
+    with TestClient(app) as client:
+        resp = client.get("/api/platform/transactions", params={"symbol": "A", "limit": 10})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["count"] == 1
+    assert data["transactions"][0]["symbol"] == "A"
+
+
+def test_platform_transactions_limit_validation(patched_app) -> None:
+    with TestClient(app) as client:
+        resp = client.get("/api/platform/transactions", params={"limit": 0})
+    assert resp.status_code == 422

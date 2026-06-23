@@ -17,6 +17,7 @@ from app.platform.registry import get_default_registry
 from app.platform.replay import EventReplayer
 from app.platform.runner import PlatformRunner
 from app.platform.store import EventStore
+from app.platform.transaction_service import TransactionService
 
 router = APIRouter()
 
@@ -296,3 +297,22 @@ def replay_platform_events(payload: dict[str, Any]) -> dict[str, Any]:
         "fills_in_window": fill_count,
         "reconstructed_positions": positions,
     }
+
+
+@router.get("/transactions", dependencies=[Depends(require_api_key())])
+def list_transactions(
+    symbol: str | None = None,
+    since: str | None = None,
+    until: str | None = None,
+    limit: int = 500,
+) -> dict[str, Any]:
+    """Query the per-fill transaction ledger (pyfolio ``transactions``)."""
+    if limit < 1 or limit > 10000:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="limit must be in [1, 10000]",
+        )
+    since_dt = datetime.fromisoformat(since) if since else None
+    until_dt = datetime.fromisoformat(until) if until else None
+    rows = TransactionService().list(symbol=symbol, since=since_dt, until=until_dt, limit=limit)
+    return {"transactions": rows, "count": len(rows)}

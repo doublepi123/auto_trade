@@ -104,6 +104,29 @@ class PaperOrder(Base):
     updated_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow, onupdate=_utcnow)
 
 
+class Transaction(Base):
+    """Transaction ledger (one row per fill, pyfolio-style).
+
+    Populated by ``TransactionService.record`` (called from the
+    ``TransactionLogger`` bus subscriber on each FillEvent). Each row captures
+    the broker order id, symbol, side, signed-quantity, price, commission,
+    provenance (``source``), and the fill timestamp — the columns pyfolio's
+    ``transactions`` expects for tearsheet analysis.
+    """
+
+    __tablename__ = "transactions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    broker_order_id: Mapped[str] = mapped_column(String(50), index=True)
+    symbol: Mapped[str] = mapped_column(String(50), index=True)
+    side: Mapped[str] = mapped_column(String(20))
+    quantity: Mapped[int] = mapped_column(Integer)
+    price: Mapped[float] = mapped_column(Float)
+    commission: Mapped[float] = mapped_column(Float, default=0.0)
+    source: Mapped[str] = mapped_column(String(20), default="paper")
+    timestamp: Mapped[datetime] = mapped_column(_TZDateTime, index=True)
+
+
 class CredentialConfig(Base):
     __tablename__ = "credential_config"
 

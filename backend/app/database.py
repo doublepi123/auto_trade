@@ -76,6 +76,7 @@ def init_db() -> None:
     _ensure_portfolio_config_table(engine)
     _ensure_paper_orders_table(engine)
     _ensure_strategy_param_versions_table(engine)
+    _ensure_transactions_table(engine)
     db = SessionLocal()
     try:
         _bootstrap_credentials(db, CredentialConfig, StrategyConfig)
@@ -563,6 +564,43 @@ def _ensure_strategy_param_versions_table(db_engine: Engine) -> None:
                 created_at DATETIME
             )
             """
+        )
+
+
+def _ensure_transactions_table(db_engine: Engine) -> None:
+    """Defensive explicit create for transactions (per-fill ledger).
+
+    Each FillEvent observed by ``TransactionLogger`` becomes one row here;
+    the schema mirrors the pyfolio ``transactions`` contract (one row per
+    fill with broker id / symbol / side / quantity / price / commission).
+    """
+    inspector = inspect(db_engine)
+    if "transactions" in inspector.get_table_names():
+        return
+    with db_engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS transactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                broker_order_id VARCHAR(50) NOT NULL,
+                symbol VARCHAR(50) NOT NULL,
+                side VARCHAR(20) NOT NULL,
+                quantity INTEGER NOT NULL,
+                price FLOAT NOT NULL,
+                commission FLOAT NOT NULL DEFAULT 0.0,
+                source VARCHAR(20) NOT NULL DEFAULT 'paper',
+                timestamp DATETIME NOT NULL
+            )
+            """
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_transactions_symbol ON transactions (symbol)"
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_transactions_broker_order_id ON transactions (broker_order_id)"
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_transactions_timestamp ON transactions (timestamp)"
         )
 
 
