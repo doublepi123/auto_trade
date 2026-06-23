@@ -373,3 +373,20 @@ def test_platform_optimize_missing_fields_422(patched_app) -> None:
     with TestClient(app) as client:
         resp = client.post("/api/platform/optimize", json={"strategy": "interval"})
     assert resp.status_code == 422
+
+
+def test_platform_analyze_with_benchmark(patched_app) -> None:
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/platform/analyze",
+            json={
+                "equity_curve": [{"nav": 10000 * (1.005 ** i)} for i in range(20)],
+                "benchmark_equity": [{"nav": 10000 * (1.002 ** i)} for i in range(20)],
+                "periods_per_year": 252,
+            },
+        )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "benchmark" in data
+    assert "beta" in data["benchmark"]
+    assert "excess_return" in data["benchmark"]

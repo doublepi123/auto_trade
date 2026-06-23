@@ -172,7 +172,14 @@ def analyze_equity(payload: dict[str, Any]) -> dict[str, Any]:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="equity_curve must be a non-empty list")
     equity = [float(pt["nav"]) for pt in equity_raw]
     periods = int(payload.get("periods_per_year", 252))
-    return PerformanceAnalytics(periods_per_year=periods).analyze(equity)
+    result = PerformanceAnalytics(periods_per_year=periods).analyze(equity)
+    bench_raw = payload.get("benchmark_equity")
+    if isinstance(bench_raw, list) and len(bench_raw) >= 2:
+        bench = [float(pt["nav"]) for pt in bench_raw]
+        from app.platform.benchmark import BenchmarkAnalytics
+
+        result["benchmark"] = BenchmarkAnalytics(periods_per_year=periods).relative(equity, bench)
+    return result
 
 
 @router.get("/events", dependencies=[Depends(require_api_key())])
