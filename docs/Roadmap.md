@@ -140,6 +140,35 @@
 
 ---
 
+## 近期已完成迭代 (2026-06-23) — 机构级编排核心能力（10 轮 P173–P182）
+
+> 自主 feature 迭代第 19 批（10 轮）。参考 Nautilus OMS/Position、QuantConnect Lean（构造/调度/CashBook/Transactions）、事件溯源 CQRS、vectorbt/QuantStats，补齐订单管理、持仓引擎、基准相对绩效、组合构造、预热、交易账本、调度器、蒙特卡洛稳健性、事件投影、多币种。全部后端、`pytest` 可验、加法不破坏默认路径。规格：[2026-06-23-p173-p182-platform-depth-design.md](superpowers/specs/2026-06-23-p173-p182-platform-depth-design.md)。
+
+| 代号 | 主题 | 参考 | 状态 |
+|------|------|------|------|
+| **P173** | 中央订单管理 OMS（订阅 order_intent/order/fill，加权均价 fill，按状态查询） | Nautilus `OMS` | ✅ |
+| **P174** | 持仓引擎（typed FLAT/LONG/SHORT 净额 + 多空翻转 + 每仓 realized） | Nautilus `Position`/`PositionEngine` | ✅ |
+| **P175** | 基准 alpha/beta/tracking-error/information-ratio/up-down capture（`/analyze` 接 benchmark） | pyfolio `benchmark`、empyrical | ✅ |
+| **P176** | 组合构造模型（EqualWeight/RiskParity 反波动 + `weights_to_intents`） | Lean `IPortfolioConstructionModel` | ✅ |
+| **P177** | 历史预热 WarmupProvider（Lean SetWarmup 语义：预热期不发单） | Lean `SetWarmup`、Backtrader preload | ✅ |
+| **P178** | 交易账本（`transactions` 表 per-fill + `GET /transactions` + bus recorder） | pyfolio `transactions` | ✅ |
+| **P179** | 调度器（every-N-bars + daily-at-time，runner 自动 tick） | Lean `ScheduledEvent`、Backtrader timer | ✅ |
+| **P180** | 蒙特卡洛稳健性（seeded bootstrap 重采样 → 分位/破产概率/路径）+ `/montecarlo` | vectorbt、QuantStats rolling | ✅ |
+| **P181** | 事件投影（NavProjection/DailyReturnsProjection + ProjectionEngine，CQRS 读模型） | 事件溯源 CQRS、Lean `Consolidator` | ✅ |
+| **P182** | 多币种 CashBook（按币种记账 + FX 聚合基币 NAV，fill 按标的币种路由） | Nautilus currencies、Lean `CashBook` | ✅ |
+
+**设计要点：**
+- **参考而不照抄**：借鉴开源抽象形态（Protocol/事件订阅/CQRS 投影），实现贴合本仓事件流与既有原语，零新依赖。
+- **加法不破坏**：OMS/PositionEngine/Scheduler/CashBook/Projection 均为可选注入；runner 仅新增 `scheduler`/`warmup` 可选 kwarg，默认路径不变。
+- **确定性**：`MonteCarloAnalyzer` 用注入 seed 的 `random.Random`；预热/调度在 runner 上可测试。
+- **复用**：投影复用 `Portfolio`；构造/账本复用 `OrderIntent`/事件类型。
+
+**验证：** `pytest tests/` **1405 passed, 1 skipped**（基线 1356 → +49，覆盖率 ~90%）；平台层 `basedpyright` 0 真实错误（仅 sqlalchemy/pytest/fastapi 的 `reportMissingImports` venv 误报）；新增 `tests/platform/test_{oms,position_engine,benchmark,construction,warmup,transaction_service,scheduler,montecarlo,projections,cashbook}.py` 全覆盖。
+
+**显式 YAGNI 未做：** TWAP/VWAP/Iceberg 全量执行算法、ML/LLM 训练闭环与因子研究仓、灰度部署管控台、前端组合/平台 UI、多策略并发、portfolio 级 Brinson 归因、跨进程事件总线。
+
+---
+
 ## 近期已完成迭代 (2026-06-21) — 运维效率与个性化（10 轮 P139–P148）
 
 > 自主 feature 迭代第 15 批（10 轮）。主题：高级用户效率层 + 可持久化个性化。承接 P129–P138 的运营健康基础（复用 `useConnectionHealth`、`useSymbolStore`、`utils/clipboard.ts`）。全部**纯前端**，复用既有 API，**不新增后端端点、不新增表、不触碰 broker/order/runner/risk 写路径**。规格：[2026-06-21-p139-p148-power-user-productivity-design.md](superpowers/specs/2026-06-21-p139-p148-power-user-productivity-design.md)。
