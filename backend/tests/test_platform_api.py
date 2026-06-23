@@ -428,3 +428,26 @@ def test_platform_transactions_limit_validation(patched_app) -> None:
     with TestClient(app) as client:
         resp = client.get("/api/platform/transactions", params={"limit": 0})
     assert resp.status_code == 422
+
+
+def test_platform_montecarlo_endpoint(patched_app) -> None:
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/platform/montecarlo",
+            json={
+                "trade_pnls": [10, -5, 20, -8, 15],
+                "num_simulations": 100,
+                "seed": 7,
+                "horizon": 5,
+            },
+        )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "final_pnl" in data and "prob_loss" in data
+    assert data["num_simulations"] == 100
+
+
+def test_platform_montecarlo_missing_pnls_422(patched_app) -> None:
+    with TestClient(app) as client:
+        resp = client.post("/api/platform/montecarlo", json={})
+    assert resp.status_code == 422

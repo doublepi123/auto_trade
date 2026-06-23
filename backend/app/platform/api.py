@@ -12,6 +12,7 @@ from app.platform.backtest_service import PlatformBacktestService
 from app.platform.bus import EventBus
 from app.platform.data_catalog import DataCatalog
 from app.platform.events import BarEvent
+from app.platform.montecarlo import MonteCarloAnalyzer
 from app.platform.optimizer_service import OptimizerService
 from app.platform.registry import get_default_registry
 from app.platform.replay import EventReplayer
@@ -181,6 +182,28 @@ def analyze_equity(payload: dict[str, Any]) -> dict[str, Any]:
 
         result["benchmark"] = BenchmarkAnalytics(periods_per_year=periods).relative(equity, bench)
     return result
+
+
+@router.post("/montecarlo", dependencies=[Depends(require_api_key())])
+def run_montecarlo(payload: dict[str, Any]) -> dict[str, Any]:
+    if "trade_pnls" not in payload or not isinstance(payload["trade_pnls"], list):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="missing trade_pnls list",
+        )
+    pnls = [float(x) for x in payload["trade_pnls"]]
+    seed = int(payload.get("seed", 42))
+    num_simulations = int(payload.get("num_simulations", 1000))
+    horizon = payload.get("horizon")
+    horizon_i = int(horizon) if horizon is not None else None
+    rt = payload.get("ruin_threshold")
+    ruin_threshold = float(rt) if rt is not None else None
+    return MonteCarloAnalyzer(seed=seed).analyze(
+        pnls,
+        num_simulations=num_simulations,
+        horizon=horizon_i,
+        ruin_threshold=ruin_threshold,
+    )
 
 
 @router.get("/events", dependencies=[Depends(require_api_key())])
