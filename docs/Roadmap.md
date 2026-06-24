@@ -226,6 +226,39 @@
 
 ---
 
+## 近期已完成迭代 (2026-06-24) — 风险科学与投资组合优化（10 轮 P203–P212）
+
+> 自主 feature 迭代第 22 批（10 轮）。承接 P193–P202 平台纵深，把投资组合学（PyPortfolioOpt / 风险科学 / Brinson 之外的两根支柱）补齐：协方差收缩（统计稳健性）、Markowitz + 风险平价 + Black-Litterman + HRP（组合优化四大经典）、VaR/CVaR + 完整风险比率族 + Pain/Ulcer（风险度量）、肥尾稳定分布（分布形态）。参考 PyPortfolioOpt `risk_models` / `efficient_frontier` / `BlackLittermanModel`、Jorion《Value at Risk》、López de Prado《Advances in Financial Machine Learning》、Burke《Ulcer Index》、Kestner / Pedar / Sedlacek、Hill (1975) tail-index estimator、McCulloch 稳定分布方法矩。全部后端、`pytest` 可验、加法不破坏默认路径（10 个新模块均为可选注入或独立纯函数，零新依赖；2 个新 `/api/platform/*` 端点不影响既有路由）。
+
+| 代号 | 主题 | 参考 | 状态 |
+|------|------|------|------|
+| **P203** | VaR/CVaR 历史与参数化（`historical_var/cvar` + `parametric_var/cvar` + Acklam 高精度正态逆 CDF + 多资产 `portfolio_var` + `risk_metrics` 一键报告） | Jorion VaR (2007)、McNeil Frey Embrechts (2015)、empyrical | ✅ |
+| **P204** | 高级回撤分析（`drawdown_events` 含 start/trough/end/duration/recovery_time + `drawdown_summary` + `rolling_calmar` + `drawdown_acceleration` 二阶导 + `underwater_curve`） | Magdon-Ismail Atiya (2004)、Chekhlov Uryasev Young (2005) | ✅ |
+| **P205** | 完整风险比率族（Sharpe / Sortino / Information / Treynor / Modigliani M² / Omega + 滚动 `rolling_sharpe`） | Sharpe (1966)、Sortino (1991)、Treynor (1965)、Modigliani (1997)、Keating Shadwick Omega (2002) | ✅ |
+| **P206** | Markowitz mean-variance + 有效前沿（`min_variance_weights` 闭式 Σ⁻¹·1 + `max_sharpe_weights` + `efficient_frontier` 网格采样 + `MeanVarianceModel` 实现 Protocol，可接 `cov`） | Markowitz (1952)、PyPortfolioOpt `EfficientFrontier` | ✅ |
+| **P207** | Black-Litterman 投资组合（`market_implied_returns` 反优化 prior + `View` dataclass + `black_litterman` posterior 闭式 + `BlackLittermanModel` 实现 Protocol） | Black & Litterman (1991)、PyPortfolioOpt `BlackLittermanModel` | ✅ |
+| **P208** | Ledoit-Wolf 协方差收缩（`sample_covariance` + `covariance_to_correlation` + `ledoit_wolf_shrinkage` 常相关目标 + 强度 δ ∈ [0,1] + `portfolio_variance`） | Ledoit & Wolf (2004) "Honey, I Shrunk the Sample Covariance Matrix"、PyPortfolioOpt `risk_models` | ✅ |
+| **P209** | 层次风险平价 HRP（`correlation_distance` + 单链 quasi-diagonalize + `recursive_bisection` 反方差加权 + `HRPModel` 实现 Protocol） | López de Prado HRP (2016)、PyHRP | ✅ |
+| **P210** | Pain / Ulcer / MAR / Kestner（`pain_index` 均值水下 + `ulcer_index` RMS 水下 + `mar_ratio` CAGR/|maxDD| + `kestner_ratio` CAGR/UI + `pain_metrics_report` 一键报告） | Pedar PI (1989)、Burke UI (1994)、Sedlacek MAR、Kestner (1996) | ✅ |
+| **P211** | 收益分布稳定分布拟合与肥尾（`excess_kurtosis` + `skewness` + `hill_estimator` 尾部指数 α + `tail_ratio` 实证/Gaussian VaR + `stable_fit` 4 参数 + `fat_tail_report`） | Hill (1975)、McCulloch (1986)、Fama-Roll (1968/1971) | ✅ |
+| **P212** | 风险科学 + 投资组合优化 API（`POST /api/platform/risk-metrics` 统一入口接 VaR/CVaR/drawdown/pain/tail/ratios；`POST /api/platform/portfolio-optimize` 4 种 method：`min_variance`/`max_sharpe`/`hrp`/`black_litterman`，接 `returns_panel` + 可选 `market_weights`/`views`） | 平台 `/api/platform/*` 一致端点约定 | ✅ |
+
+**设计要点：**
+- **参考开源成熟形态但零新依赖**：借鉴 PyPortfolioOpt 抽象（`risk_models`/`efficient_frontier`/`BlackLittermanModel`）、Jorion/López de Prado/Burke/Kestner/Hill/McCulloch 论文，全部用纯 Python + `math` 实现，`dict` 键值 I/O 与平台事件流对齐。
+- **加法不破坏**：10 个模块全部为可选注入或独立纯函数；`MeanVarianceModel` / `BlackLittermanModel` / `HRPModel` 接入既有 `PortfolioConstructionModel` Protocol，与 `EqualWeight`/`RiskParity` 并列可热插拔；风险指标纯函数（`risk_metrics(returns)` / `drawdown_summary(equity)` / `pain_metrics_report(equity)` / `fat_tail_report(returns)`）可独立调用、与 runner 解耦。
+- **确定性**：所有方法为纯函数（`ledoit_wolf_shrinkage` / `min_variance_weights` / `hrp_weights` / `black_litterman` / `hill_estimator` / `omega_ratio`）—— 零 RNG、给定输入恒定输出，可精确测试与回放。
+- **复用**：组合优化全部走 `ledoit_wolf_shrinkage` 得到稳定协方差；`portfolio_variance` 复用同一协方差计算；`portfolio_optimize` 端点统一返回 `weights` + `expected_return` + `volatility` + `sharpe` + `shrinkage_intensity`，便于跨方法对比。
+- **正态逆 CDF**：P203 闭式 Acklam 多段式算法（`0.02425` / `0.97575` 分段），无 `statistics.NormalDist` 之外的新依赖，准确度 ~1e-9。
+- **风险比率族完备**：Sharpe / Sortino / Information / Treynor / Modigliani M² / Omega 6 个比率一次 `all_ratios()` 拿全；Modigliani 用 `(Sharpe_p × σ_b + rf) × periods_per_year` 年化，与标准定义一致。
+
+**新增端点：** `POST /api/platform/risk-metrics`（统一风险入口；`returns` 或 `equity_curve` 两种入参；422 缺字段）、`POST /api/platform/portfolio-optimize`（4 method；`returns_panel` 必填；`black_litterman` 必填 `market_weights`；422 校验）。**新增模块：** `app/platform/{covariance,mean_variance,black_litterman,hrp,risk_metrics,drawdown_analysis,risk_ratios,pain_metrics,fat_tail}.py`。**无新表**（纯计算），**无新 runner 接线**（纯函数 + 端点暴露）。
+
+**验证：** `pytest tests/` **1700 passed, 1 skipped**（基线 1565 → +135，含 2 个 pre-existing `test_config.py` 失败，与本批无关）；平台层 `basedpyright` 0 真实错误（仅 sqlalchemy/pytest/fastapi 的 `reportMissingImports` venv 误报，与本批无关）；新增 12 个 `tests/platform/test_*.py` 全覆盖；`tests/platform/test_api_risk_portfolio.py` 覆盖 2 个新端点（含 4 method × 4 payload 形态 + 422 缺字段）。
+
+**显式 YAGNI 未做：** Black-Litterman 多视图（Omega 矩阵非对角线）— 当前实现走对角 Ω 假设；HRP 完整 linkage（scipy 风格）— 当前用单链 greedy 简化；稳定分布 MLE 拟合（McCulloch quantile method）— 当前是方法矩；多期肥尾（time-varying α）— 当前单期；前端口径展示（tearsheet 视图）— 后续轮次；CVaR optimization（Rockafellar-Uryasev）— 当前只度量不优化。
+
+---
+
 ## 近期已完成迭代 (2026-06-21) — 运维效率与个性化（10 轮 P139–P148）
 
 > 自主 feature 迭代第 15 批（10 轮）。主题：高级用户效率层 + 可持久化个性化。承接 P129–P138 的运营健康基础（复用 `useConnectionHealth`、`useSymbolStore`、`utils/clipboard.ts`）。全部**纯前端**，复用既有 API，**不新增后端端点、不新增表、不触碰 broker/order/runner/risk 写路径**。规格：[2026-06-21-p139-p148-power-user-productivity-design.md](superpowers/specs/2026-06-21-p139-p148-power-user-productivity-design.md)。
