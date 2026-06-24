@@ -62,6 +62,29 @@ def test_ledoit_wolf_with_tiny_sample_gives_no_shrinkage():
     assert delta == 0.0
 
 
+def test_ledoit_wolf_intensity_is_data_dependent_not_always_one():
+    # P203-P212 review fix: the old implementation dropped the ρ̂ cross-term and
+    # summed π̂/γ̂ over the diagonal too, which over-estimated δ and clamped it
+    # to 1.0 for essentially every input. With the off-diagonal-only π̂/γ̂ and
+    # the ρ̂ term included, δ must be a genuine function of the data — a mixed-
+    # correlation panel (some correlated, some independent) should produce a
+    # δ strictly inside (0, 1), not pinned at 1.0.
+    import random
+
+    random.seed(2024)
+    n = 200
+    z = [random.gauss(0, 1) for _ in range(n)]
+    # A,B driven by the same factor (correlated); C,D independent of A,B and each other.
+    panel = {
+        "A": [0.01 * x + random.gauss(0, 0.005) for x in z],
+        "B": [0.01 * x + random.gauss(0, 0.005) for x in z],
+        "C": [0.01 * random.gauss(0, 1) + random.gauss(0, 0.005) for _ in range(n)],
+        "D": [0.01 * random.gauss(0, 1) + random.gauss(0, 0.005) for _ in range(n)],
+    }
+    _, delta = ledoit_wolf_shrinkage(panel)
+    assert 0.0 < delta < 1.0
+
+
 def test_ledoit_wolf_shrunk_matrix_between_sample_and_target():
     # With enough noisy data, shrunk cov should be finite and symmetric, and the
     # diagonal close to (but not necessarily equal to) sample variance.

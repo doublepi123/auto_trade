@@ -758,11 +758,27 @@ def optimize_portfolio(payload: dict[str, Any]) -> dict[str, Any]:
         cov_active = {(a, b): cov.get((a, b), 0.0) for a in active for b in active}
         weights = max_sharpe_weights(mean_returns, cov_active, risk_free=risk_free)
 
-    # Diagnostics
+    # Diagnostics: expected return / volatility / Sharpe of the chosen portfolio.
+    # For BL we use the posterior expected returns (consistent with the weights,
+    # which were derived from posterior μ); for the other methods we use the
+    # sample mean that drove the optimization. The volatility always comes from
+    # the (shrunk) covariance used throughout.
     port_var = portfolio_variance(cov, weights)
     port_vol = math.sqrt(max(port_var, 0.0)) if port_var is not None else 0.0
     symbols = list(returns_panel.keys())
-    port_return = sum(weights.get(s, 0.0) * (sum(returns_panel[s]) / len(returns_panel[s])) for s in symbols if returns_panel[s])
+    if method == "black_litterman":
+        diag_mu = {
+            s: posterior_returns.get(s, prior.get(s, sum(returns_panel[s]) / len(returns_panel[s])))
+            for s in symbols
+            if returns_panel[s]
+        }
+    else:
+        diag_mu = {
+            s: (mean_returns.get(s, 0.0) if mean_returns else sum(returns_panel[s]) / len(returns_panel[s]))
+            for s in symbols
+            if returns_panel[s]
+        }
+    port_return = sum(weights.get(s, 0.0) * diag_mu.get(s, 0.0) for s in symbols)
     sharpe = (port_return - risk_free) / port_vol if port_vol > 0 else 0.0
 
     return {

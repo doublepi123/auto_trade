@@ -34,7 +34,12 @@ __all__ = [
 
 @dataclass(frozen=True)
 class View:
-    """An investor view: the weighted combination of ``assets`` earns ``expected_return``."""
+    """An investor view: the weighted combination of ``assets`` earns ``expected_return``.
+
+    ``confidence`` ∈ (0, 1] scales the view's uncertainty row in Ω via Idzorek-style
+    scaling: ``Ω_r = ((1−c)/c) · (P τΣ Pᵀ)_rr``. ``c=1`` ⇒ the view binds exactly
+    (Ω→0); ``c→0`` ⇒ the view is ignored (Ω→∞). Values outside (0, 1] are clamped.
+    """
 
     assets: dict[str, float]
     expected_return: float
@@ -89,25 +94,31 @@ def black_litterman(
 
     idx = {s: i for i, s in enumerate(symbols)}
     k = len(views)
-    # P (k x n), Q (k), Omega diagonal
+    # P (k x n), Q (k)
     P = [[0.0] * n for _ in range(k)]
     Q = [0.0] * k
-    omega_diag = [0.0] * k
     for r, view in enumerate(views):
         for asset, weight in view.assets.items():
             if asset in idx:
                 P[r][idx[asset]] = weight
         Q[r] = view.expected_return
-        # Ω_r = (1 - confidence) * (P τΣ Pᵀ)_rr when confidence ∈ (0,1]; a fully
-        # certain view (confidence=1) shrinks Ω_r toward 0. Floor at a tiny ε
-        # so the matrix stays invertible.
-        omega_diag[r] = max(1e-12, (1.0 - view.confidence))
 
     tau_sigma = {(s_i, s_j): tau * cov.get((s_i, s_j), 0.0)
                  for s_i in symbols for s_j in symbols}
 
-    # P @ tau_sigma @ P^T  (k x k)
+    # P @ tau_sigma @ P^T  (k x k) — the per-view uncertainty scale.
     PtSP = _matmul_mat_diag(P, tau_sigma, symbols)
+
+    # Ω (view-uncertainty diagonal). Scaled to the same units as ``P τΣ Pᵀ`` so
+    # that ``confidence`` has a real, dimensionally-consistent effect: a view
+    # with confidence ``c`` gets Ω_r = ((1−c)/c) · (P τΣ Pᵀ)_rr (Idzorek-style
+    # confidence scaling). c→1 ⇒ Ω→0 (view binds exactly); c→0 ⇒ Ω→∞ (view
+    # ignored). Floor at a tiny ε so the matrix stays invertible.
+    omega_diag = [0.0] * k
+    for r, view in enumerate(views):
+        c = max(1e-6, min(1.0, view.confidence))
+        base = PtSP[r][r] if PtSP[r][r] > 0 else 1e-12
+        omega_diag[r] = max(1e-18, (1.0 - c) / c * base)
     for r in range(k):
         PtSP[r][r] += omega_diag[r]
 
@@ -172,7 +183,6 @@ class BlackLittermanModel:
     ) -> dict[str, Decimal]:
         prior = market_implied_returns(self.market_weights, self.cov, self.risk_aversion)
         posterior, _ = black_litterman(prior, self.cov, self.views, tau=self.tau)
-        active = [s for s in signals if s != 0 or True]  # all symbols in signals
         active = [s for s, v in signals.items() if v != 0]
         if not active:
             return {}

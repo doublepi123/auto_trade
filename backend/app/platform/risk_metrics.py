@@ -28,7 +28,6 @@ __all__ = [
     "parametric_var",
     "parametric_cvar",
     "portfolio_var",
-    "RiskMetricsReport",
     "risk_metrics",
 ]
 

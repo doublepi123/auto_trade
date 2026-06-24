@@ -69,6 +69,32 @@ def test_low_confidence_view_has_smaller_effect():
     assert high[0]["A"] - prior["A"] > low[0]["A"] - prior["A"]
 
 
+def test_view_confidence_scales_posterior_meaningfully():
+    # P203-P212 review fix: the old Ω = (1-confidence) was dimensionless and
+    # dwarfed PτΣPᵀ (returns are ~1e-2), so even a confidence=0.9 view barely
+    # moved the posterior. With Idzorek-scaled Ω = ((1-c)/c)·(PτΣPᵀ)_rr the
+    # confidence now has a real, comparable-magnitude effect: a 0.9-confidence
+    # view should pull the posterior a sizable fraction of the way from prior
+    # to the view.
+    prior = {"A": 0.05, "B": 0.05}
+    cov = _cov2(0.2, 0.2, rho=0.0)
+    post = black_litterman(prior, cov, [View({"A": 1.0}, 0.20, confidence=0.9)], tau=0.05)
+    shift = post[0]["A"] - prior["A"]
+    view_gap = 0.20 - prior["A"]
+    # a 0.9-confidence view should move the posterior > 50% of the way to the
+    # view (the old code moved it < 2% of the way).
+    assert shift > 0.5 * view_gap
+
+
+def test_certain_absolute_view_binds_to_view_value():
+    # confidence=1.0 ⇒ Ω→0 ⇒ the posterior mean for the viewed asset equals
+    # the view's expected return exactly.
+    prior = {"A": 0.05, "B": 0.05}
+    cov = _cov2(0.2, 0.2, rho=0.0)
+    post = black_litterman(prior, cov, [View({"A": 1.0}, 0.15, confidence=1.0)], tau=0.05)
+    assert abs(post[0]["A"] - 0.15) < 1e-6
+
+
 def test_posterior_cov_diagonal_decreases_or_equals_with_certain_view():
     prior = {"A": 0.05, "B": 0.05}
     cov = _cov2(0.2, 0.2, rho=0.0)

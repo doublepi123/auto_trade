@@ -127,7 +127,10 @@ def tail_ratio(returns: list[float], confidence: float = 0.95) -> float:
     """Ratio of empirical VaR to Gaussian VaR at the same confidence.
 
     > 1 means the empirical tail is fatter than Gaussian's; < 1 means
-    thinner. NaN-safe (returns 1.0 when Gaussian std is zero).
+    thinner. NaN-safe (returns 1.0 when Gaussian std is zero). Uses the same
+    high-precision Acklam inverse-normal-CDF as :mod:`app.platform.risk_metrics`
+    so the Gaussian benchmark is consistent across modules (no hardcoded
+    z-table that diverges at off-the-grid confidence levels).
     """
     if not returns or not 0.0 < confidence < 1.0:
         return 1.0
@@ -140,10 +143,10 @@ def tail_ratio(returns: list[float], confidence: float = 0.95) -> float:
     sigma = _std(returns)
     if sigma <= 0:
         return 1.0
-    # Approximate Gaussian VaR using z=1.645 (95%) / 2.326 (99%) / 1.282 (90%)
-    z_table = {0.90: 1.2816, 0.95: 1.6449, 0.99: 2.3263}
-    z = z_table.get(confidence, 1.6449)
-    gaussian_loss = -(mu - sigma * z)  # loss magnitude
+    from app.platform.risk_metrics import _normal_quantile
+
+    z = _normal_quantile(1.0 - confidence)  # negative
+    gaussian_loss = -(mu + sigma * z)  # loss magnitude, matches parametric_var
     if gaussian_loss <= 0:
         return 1.0
     return empirical_loss / gaussian_loss

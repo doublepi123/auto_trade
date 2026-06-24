@@ -18,7 +18,6 @@ import math
 from typing import Any
 
 __all__ = [
-    "DrawdownEvent",
     "drawdown_events",
     "drawdown_summary",
     "rolling_calmar",
@@ -166,6 +165,7 @@ def drawdown_summary(equity: list[float]) -> dict[str, Any]:
 
 
 def _annualized_return(equity_window: list[float]) -> float:
+    """Window total return (unused for rolling Calmar, kept for callers)."""
     if len(equity_window) < 2 or equity_window[0] <= 0:
         return 0.0
     return (equity_window[-1] / equity_window[0]) - 1.0
@@ -174,14 +174,16 @@ def _annualized_return(equity_window: list[float]) -> float:
 def rolling_calmar(equity: list[float], window: int) -> list[float]:
     """Rolling Calmar ratio (annualized return / |max drawdown|) over ``window`` ticks.
 
-    Returns a series the same length as ``equity`` with ``None`` represented
-    as ``0.0`` for tick positions where the window isn't yet full. We use a
-    *gross* 252-tick annualization — caller is responsible for mapping their
-    data frequency to a sensible annualization factor (252 for daily bars,
-    52 for weekly, etc.).
+    Returns a series the same length as ``equity`` with ``0.0`` for tick positions
+    where the window isn't yet full. The window return is annualized *geometrically*
+    — ``(1 + r) ^ (252 / window) − 1`` — so large window returns no longer produce
+    the absurd linear-scaled values the previous ``r · 252/window`` produced.
+    ``252`` is the daily-bar annualization factor; for other frequencies pass a
+    ``window`` consistent with that frequency (52 for weekly, 12 for monthly, etc.).
     """
     if window < 1 or not equity:
         return []
+    annualization_factor = 252.0 / window
     out: list[float] = []
     for i in range(len(equity)):
         if i + 1 < window:
@@ -191,7 +193,9 @@ def rolling_calmar(equity: list[float], window: int) -> list[float]:
         if seg[0] <= 0:
             out.append(0.0)
             continue
-        ann_ret = _annualized_return(seg) * (252.0 / window)
+        total_ret = (seg[-1] / seg[0]) - 1.0
+        # geometric annualization; (1+r)^a - 1, with a = 252/window
+        ann_ret = (1.0 + total_ret) ** annualization_factor - 1.0
         dd = min(_drawdown_series(seg)) if seg else 0.0
         if dd >= 0:
             out.append(0.0)
