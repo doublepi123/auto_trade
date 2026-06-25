@@ -2368,3 +2368,38 @@ def loess_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     return res.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P251 — smart order routing endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/smart-order-routing", dependencies=[Depends(require_api_key())])
+def smart_order_routing_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P251: plan a multi-venue best-execution order routing.
+
+    Body: ``{"side": "buy"|"sell", "quantity": Q, "venues": [
+    {"venue", "bid", "bid_size", "ask", "ask_size", "fee_per_share"?, "tick_size"?},
+    ...]}``. 422 on missing/invalid inputs.
+    """
+    from app.platform.smart_order_routing import route_order
+
+    side = payload.get("side")
+    if side not in ("buy", "sell"):
+        raise HTTPException(status_code=422, detail="side must be 'buy' or 'sell'")
+    qty = payload.get("quantity")
+    venues = payload.get("venues")
+    if not isinstance(venues, list) or not venues:
+        raise HTTPException(status_code=422, detail="venues must be a non-empty list")
+    if qty is None:
+        raise HTTPException(status_code=422, detail="quantity must be an integer")
+    try:
+        quantity = int(qty)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="quantity must be an integer")
+    try:
+        res = route_order(side, quantity, venues)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return res.to_dict()

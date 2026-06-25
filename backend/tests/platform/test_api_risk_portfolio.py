@@ -1150,3 +1150,89 @@ def test_loess_endpoint_422_bad_bandwidth():
     client = _request()
     r = client.post("/api/platform/loess", json={"x": [1, 2, 3], "y": [1, 2, 3], "bandwidth": 0.0})
     assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# P251 — smart order routing endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_smart_order_routing_endpoint_buy_200():
+    client = _request()
+    r = client.post("/api/platform/smart-order-routing", json={
+        "side": "buy", "quantity": 100,
+        "venues": [
+            {"venue": "A", "bid": 99.8, "bid_size": 200, "ask": 100.1, "ask_size": 100},
+            {"venue": "C", "bid": 99.7, "bid_size": 500, "ask": 100.05, "ask_size": 200},
+        ],
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["child_orders"][0]["venue"] == "C"
+    assert body["filled_quantity"] == 100
+
+
+def test_smart_order_routing_endpoint_422_bad_side():
+    client = _request()
+    r = client.post("/api/platform/smart-order-routing", json={
+        "side": "hold", "quantity": 100, "venues": [{"venue": "A", "bid": 99, "bid_size": 10, "ask": 100, "ask_size": 10}],
+    })
+    assert r.status_code == 422
+
+
+def test_smart_order_routing_endpoint_422_empty_venues():
+    client = _request()
+    r = client.post("/api/platform/smart-order-routing", json={"side": "buy", "quantity": 100, "venues": []})
+    assert r.status_code == 422
+
+
+def test_smart_order_routing_endpoint_422_missing_qty():
+    client = _request()
+    r = client.post("/api/platform/smart-order-routing", json={
+        "side": "buy", "venues": [{"venue": "A", "bid": 99, "bid_size": 10, "ask": 100, "ask_size": 10}],
+    })
+    assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# P251 — smart order routing endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_smart_order_routing_endpoint_buy_200():
+    client = _request()
+    r = client.post("/api/platform/smart-order-routing", json={
+        "side": "buy", "quantity": 100,
+        "venues": [
+            {"venue": "A", "bid": 99.8, "bid_size": 200, "ask": 100.1, "ask_size": 100},
+            {"venue": "C", "bid": 99.7, "bid_size": 500, "ask": 100.05, "ask_size": 200},
+        ],
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["child_orders"][0]["venue"] == "C"
+    assert body["filled_quantity"] == 100
+
+
+def test_smart_order_routing_endpoint_422_bad_side():
+    client = _request()
+    r = client.post("/api/platform/smart-order-routing", json={
+        "side": "hold", "quantity": 100,
+        "venues": [{"venue": "A", "bid": 99, "bid_size": 10, "ask": 100, "ask_size": 10}],
+    })
+    assert r.status_code == 422
+
+
+def test_smart_order_routing_endpoint_422_empty_venues():
+    client = _request()
+    r = client.post("/api/platform/smart-order-routing", json={"side": "buy", "quantity": 100, "venues": []})
+    assert r.status_code == 422
+
+
+def test_smart_order_routing_endpoint_422_missing_qty():
+    client = _request()
+    r = client.post("/api/platform/smart-order-routing", json={
+        "side": "buy",
+        "venues": [{"venue": "A", "bid": 99, "bid_size": 10, "ask": 100, "ask_size": 10}],
+    })
+    assert r.status_code == 422
