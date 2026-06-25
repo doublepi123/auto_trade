@@ -290,9 +290,10 @@ def test_event_registry_contains_all_event_types():
         "fill",
         "risk",
         "control",
+        "regime",
     }
     assert set(EVENT_REGISTRY.keys()) == expected
-    assert len(EVENT_REGISTRY) == 8
+    assert len(EVENT_REGISTRY) == 9
 
 
 def test_to_dict_converts_event_id_to_string():

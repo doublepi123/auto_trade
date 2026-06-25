@@ -271,6 +271,40 @@ class ControlEvent(Event):
         )
 
 
+@dataclass(frozen=True, kw_only=True)
+class RegimeEvent(Event):
+    """P213: market-regime change emitted by the RegimeModel."""
+
+    event_type: ClassVar[str] = "regime"
+
+    regime: str
+    slope: float
+    realized_vol: float
+    adx: float | None
+    sma_short: float
+    sma_long: float
+    confidence: float
+    reason: str = ""
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> RegimeEvent:
+        adx = data.get("adx")
+        return cls(
+            timestamp=datetime.fromisoformat(data["timestamp"]),
+            source=EventSource(data["source"]),
+            symbol=data.get("symbol"),
+            event_id=UUID(data.get("event_id", str(uuid4()))),
+            regime=data["regime"],
+            slope=float(data["slope"]),
+            realized_vol=float(data["realized_vol"]),
+            adx=float(adx) if adx is not None else None,
+            sma_short=float(data["sma_short"]),
+            sma_long=float(data["sma_long"]),
+            confidence=float(data["confidence"]),
+            reason=data.get("reason", ""),
+        )
+
+
 EVENT_REGISTRY: dict[str, type[Event]] = {
     QuoteEvent.event_type: QuoteEvent,
     BarEvent.event_type: BarEvent,
@@ -280,6 +314,7 @@ EVENT_REGISTRY: dict[str, type[Event]] = {
     FillEvent.event_type: FillEvent,
     RiskEvent.event_type: RiskEvent,
     ControlEvent.event_type: ControlEvent,
+    RegimeEvent.event_type: RegimeEvent,
 }
 
 

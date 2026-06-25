@@ -259,6 +259,38 @@
 
 ---
 
+## 近期已完成迭代 (2026-06-25) — 风险研究 + 执行深度 II（10 轮 P213–P222）
+
+> 自主 feature 迭代第 23 批（10 轮）。承接 P203–P212 风险科学与投资组合优化，补齐机构级风险研究 + 执行分析的剩余支柱：市场状态识别、组合交叉验证防泄漏、收益风格归因、换手感知再平衡、凸风险预算 ERC、单笔交易 MFE/MAE、Implementation Shortfall、收益日历热力图、压力场景报告聚合、walk-forward 参数稳定性。参考 Nautilus `MarketRegimeModel`、López de Prado CPCV、Sharpe 1992 Style Analysis、PyPortfolioOpt turnover constraint、Maillard-Roncalli/Spinu ERC、vectorbt MFE/MAE、Perold Implementation Shortfall、pyfolio returns calendar、FRB CCAR stress、Optuna parameter stability。全部后端、`pytest` 可验、加法不破坏默认路径（10 个新模块均为可选注入或独立纯函数，零新依赖；8 个新 `/api/platform/*` 端点不影响既有路由，2 个扩展现有 `portfolio-optimize` method）。
+
+| 代号 | 主题 | 参考 | 状态 |
+|------|------|------|------|
+| **P213** | 市场状态识别（`Regime` BULL/BEAR/SIDEWAYS：SMA 交叉斜率 + Wilder ADX + 实现波动 + slope/vol fallback；`RegimeModel` 流式喂 BarEvent 状态变化发 `RegimeEvent` + `rolling_regime`/`regime_report`） | Nautilus `MarketRegimeModel`、RiskMetrics/MSCI regime | ✅ |
+| **P214** | 组合交叉验证分割器 CPCV（`C(N,k)` 组合枚举 + purge 对称 + embargo 后置 + `cpcv_oos_paths` 贪心不交集 + `cpcv_pbo` 复用 `overfitting` PBO） | López de Prado《Advances in Financial Machine Learning》Ch.7/Ch.11 | ✅ |
+| **P215** | 收益风格分析 Sharpe 1992（纯 Python Lawson-Hanson active-set NNLS + 等式约束 simplex KKT，`none`/`sum_le_one`/`sum_eq_one` 三模式 + R²/tracking_error/annualized + `StyleAnalysisModel`） | Sharpe 1992、pyfolio `style_analysis`、Lawson-Hanson 1974 | ✅ |
+| **P216** | 换手感知组合优化（`wᵀΣw − λμᵀw + γ·L1turnover`，projected subgradient + Duchi simplex 投影 + 可选 `delta_cap` L1 上限 proximal 投影，`TurnoverAwareModel` 实现 Protocol） | PyPortfolioOpt turnover constraint、Mitchell-Braun transaction-cost Markowitz | ✅ |
+| **P217** | 凸风险预算/ERC（Maillard-Roncalli/Spinu Newton 迭代 log-barrier 目标 `f(y)=½yᵀΣy − Σb·ln(y)`，Hessian 对角障碍项恒 PD 即使 Σ 奇异，`risk_contributions`/`relative_risk_contributions`，`RiskBudgetingModel`） | Maillard-Roncalli-Taiïletche (2010)、Spinu (2013)、riskfolio-Lib | ✅ |
+| **P218** | 单笔交易 MFE/MAE + 持仓周期（per-trade Max Favorable/Adverse Excursion + holding_bars + entry/exit timing rank + `trades_from_fills` FIFO 配对 + 百分位汇总 + mfe_mae_ratio） | vectorbt `portfolio.trades`、Nautilus `PositionAnalysis`、pyfolio trade table | ✅ |
+| **P219** | Implementation Shortfall TCA（Perold 1988：realized/opportunity/timing/fees + VWAP/arrival/close benchmark + bps + participation_rate + `shortfall_from_tca` 复用 `TcaFill` + `ShortfallAnalyzer` 读 transactions 账本） | Perold 1988 "Implementation Shortfall"、Nautilus `CostModel`、Kissell cost decomposition | ✅ |
+| **P220** | 收益日历热力图（monthly/yearly/weekday/streaks + 合成日历 epoch 2000-01-03 Mon + `monthly_returns_table` 透视 + NaN/inf drop + win_rate/best/worst） | pyfolio `timeseries.returns_table`、QuantStats `stats.distribution` | ✅ |
+| **P221** | 压力场景报告聚合（聚合 `stress_scenarios`+`risk_metrics`+`drawdown_analysis`：per-scenario PnL/VaR + worst-scenario + capital adequacy ratio + `StressReportBuilder`） | RiskMetrics scenario aggregation、FRB CCAR stress summary | ✅ |
+| **P222** | walk-forward 参数稳定性（IS/OOS 退化比 clip + IS-vs-OOS Spearman rank-corr + 邻域稳定性 Hamming-1 + 最优参数漂移 numeric stddev/range、categorical modal mismatch） | Optuna parameter importance/stability、Lean walk-forward、López de Prado stability matrix | ✅ |
+
+**设计要点：**
+- **参考开源成熟形态但零新依赖**：借鉴 Nautilus/López de Prado/Sharpe/PyPortfolioOpt/Spinu/vectorbt/Perold/pyfolio/CCAR/Optuna 的抽象与算法，全部用纯 Python + `math` 实现（**numpy 仍未引入**，与 P203–P212 一致）；`dict` 键值 I/O 与平台事件流对齐。
+- **加法不破坏**：10 个模块全部为可选注入或独立纯函数；`RegimeModel` 可选注入 `PlatformRunner`（默认 None，零行为变更）；`TurnoverAwareModel`/`RiskBudgetingModel`/`StyleAnalysisModel` 接入既有 `PortfolioConstructionModel` Protocol，与 `MeanVarianceModel`/`HRPModel` 并列可热插拔；`ShortfallAnalyzer` 复用 `transactions` 表（P178）与 `ReferencePriceProvider`。
+- **确定性**：全部纯函数 + 确定性起始点 + 固定迭代（Newton/subgradient/active-set），零 RNG，给定输入恒定输出，可精确测试与回放。
+- **复用**：`cpcv_pbo` 复用 `overfitting.probability_of_backtest_overfitting`；`shortfall_from_tca` 复用 `TcaFill`；`stress_report` 复用 `stress_scenarios`+`risk_metrics.historical_var`+`drawdown_analysis`；`stability_analysis` 消费 `OptimizerService.walk_forward` 输出 shape。
+- **事件流扩展**：`events.py` 新增 `RegimeEvent`（`event_type='regime'`）并注册进 `EVENT_REGISTRY`（9 → 含 regime）；`RegimeModel.on_bar` 在状态变化时经 `EventBus.publish` 发出，供 OMS/风控订阅。
+
+**新增端点：** `POST /api/platform/regime` + `POST /api/platform/cpcv` + `POST /api/platform/style-analysis` + `POST /api/platform/trade-excursion` + `POST /api/platform/shortfall` + `POST /api/platform/returns-calendar` + `POST /api/platform/stress-report` + `POST /api/platform/stability`，并扩展 `POST /api/platform/portfolio-optimize` 新增 `turnover`/`risk_budgeting` method（含 `risk_contributions`/`turnover` 诊断字段）。**新增模块：** `app/platform/{regime,cpcv,style_analysis,turnover_optimization,risk_budgeting,trade_excursion,shortfall,returns_analysis,stress_report,stability_analysis}.py`。**无新表**（纯计算 + 读既有 transactions）。**无新 runner 接线**（`RegimeModel` 注入点预留但默认 None）。
+
+**验证：** `pytest tests/` **1863 passed**（平台层 P149–P222 全部已并入，基线 1700 → +163，含 10 个新 `tests/platform/test_*.py` 全覆盖 + `test_api_risk_portfolio.py` 覆盖 8 个新端点 + 2 个新 method × 4 payload 形态 + 422 缺字段）；新增 11 个模块全部纯 Python（numpy 仍未引入），零新依赖；`basedpyright` 0 真实错误（仅 sqlalchemy/pytest/fastapi 的 `reportMissingImports` venv 误报，与本批无关）。
+
+**显式 YAGNI 未做：** regime 隐马尔可夫多状态模型（当前是规则阈值）— 当前实现走 SMA+ADX+vol 规则分类；CPCV 滚动回测集成（当前是分割器 + PBO）— 未把 CPCV splits 接入 `OptimizerService.walk_forward`（可选注入点已预留，默认路径不变）；风格分析动态因子暴露时序（当前是单期截面）— 未做滚动窗口时变暴露；turnover 多周期成本模型（当前单期 L1）— 未建模多周期累积成本；risk budgeting 多资产带负债/约束（当前长 only 全额）— 未做带 liabilities 的 ERC；MFE/MAE 与止损策略联合回测（当前只分析不优化）— 未做 MFE/MAE 驱动的自适应止损；Implementation Shortfall 多日父单 VWAP 执行回放（当前单 order）— 未做跨日父单；returns calendar 季度/滚动 12 月视图（当前 monthly/yearly/weekday）— 未做滚动窗口；stress report 反向压力测试（当前正向场景）— 未做"找使 VaR 突破的临界场景"；stability analysis Bayesian 参数后验（当前频率派 rank/drift）— 未做贝叶斯参数分布。前端 UI 口径展示（tearsheet 视图）— 后续轮次。
+
+---
+
 ## 近期已完成迭代 (2026-06-21) — 运维效率与个性化（10 轮 P139–P148）
 
 > 自主 feature 迭代第 15 批（10 轮）。主题：高级用户效率层 + 可持久化个性化。承接 P129–P138 的运营健康基础（复用 `useConnectionHealth`、`useSymbolStore`、`utils/clipboard.ts`）。全部**纯前端**，复用既有 API，**不新增后端端点、不新增表、不触碰 broker/order/runner/risk 写路径**。规格：[2026-06-21-p139-p148-power-user-productivity-design.md](superpowers/specs/2026-06-21-p139-p148-power-user-productivity-design.md)。
