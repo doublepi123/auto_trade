@@ -1972,3 +1972,37 @@ def diversification_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     return rep.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P243 — European option pricing + Greeks endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/options-pricing", dependencies=[Depends(require_api_key())])
+def options_pricing_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P243: Black-Scholes-Merton European call/put price + full Greeks.
+
+    Body: ``{"option_type": "call"|"put", "spot": S, "strike": K,
+    "time_to_expiry": T, "risk_free": r, "volatility": sigma,
+    "dividend_yield": q?}``. 422 on missing/invalid inputs.
+    """
+    from app.platform.options_pricing import option_price
+
+    ot = payload.get("option_type")
+    if ot not in ("call", "put"):
+        raise HTTPException(status_code=422, detail="option_type must be 'call' or 'put'")
+    try:
+        spot = float(payload["spot"])
+        strike = float(payload["strike"])
+        t = float(payload["time_to_expiry"])
+        r = float(payload["risk_free"])
+        sigma = float(payload["volatility"])
+        q = float(payload.get("dividend_yield", 0.0))
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="spot/strike/time_to_expiry/risk_free/volatility must be numbers")
+    try:
+        res = option_price(ot, spot, strike, t, r, sigma, q)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return res.to_dict()

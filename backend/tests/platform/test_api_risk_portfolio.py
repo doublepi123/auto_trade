@@ -778,3 +778,56 @@ def test_evt_endpoint_422_empty():
     client = _request()
     r = client.post("/api/platform/evt", json={"losses": [], "threshold": 0.5})
     assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# P243 — options pricing + Greeks endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_options_pricing_endpoint_call_200():
+    client = _request()
+    r = client.post("/api/platform/options-pricing", json={
+        "option_type": "call", "spot": 100.0, "strike": 100.0,
+        "time_to_expiry": 1.0, "risk_free": 0.05, "volatility": 0.2,
+        "dividend_yield": 0.0,
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert abs(body["price"] - 10.450583572185565) < 1e-9
+    assert "delta" in body and "gamma" in body and "vanna" in body and "volga" in body
+
+
+def test_options_pricing_endpoint_put_200():
+    client = _request()
+    r = client.post("/api/platform/options-pricing", json={
+        "option_type": "put", "spot": 100.0, "strike": 100.0,
+        "time_to_expiry": 1.0, "risk_free": 0.05, "volatility": 0.2,
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert abs(body["price"] - 5.573526023256497) < 1e-9
+
+
+def test_options_pricing_endpoint_422_bad_type():
+    client = _request()
+    r = client.post("/api/platform/options-pricing", json={
+        "option_type": "straddle", "spot": 100.0, "strike": 100.0,
+        "time_to_expiry": 1.0, "risk_free": 0.05, "volatility": 0.2,
+    })
+    assert r.status_code == 422
+
+
+def test_options_pricing_endpoint_422_missing():
+    client = _request()
+    r = client.post("/api/platform/options-pricing", json={"option_type": "call", "spot": 100.0})
+    assert r.status_code == 422
+
+
+def test_options_pricing_endpoint_422_nonpositive_vol():
+    client = _request()
+    r = client.post("/api/platform/options-pricing", json={
+        "option_type": "call", "spot": 100.0, "strike": 100.0,
+        "time_to_expiry": 1.0, "risk_free": 0.05, "volatility": 0.0,
+    })
+    assert r.status_code == 422
