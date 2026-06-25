@@ -2147,3 +2147,68 @@ def kalman_filter_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
         out["smoothed_means"] = sm.smoothed_means
         out["smoothed_covs"] = sm.smoothed_covs
     return out
+
+
+# ---------------------------------------------------------------------------
+# P246 — stochastic processes / SDE endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/stochastic-processes", dependencies=[Depends(require_api_key())])
+def stochastic_processes_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P246: simulate GBM / OU / CIR / Merton-JD and return analytic moments.
+
+    Body: ``{"process": "gbm"|"ou"|"cir"|"merton_jd", ...params, "horizon": T,
+    "n_steps": N, "seed": s?, "include_moments": bool?}``. 422 on invalid.
+    """
+    from app.platform import stochastic_processes as sp
+
+    proc = payload.get("process")
+    if proc not in ("gbm", "ou", "cir", "merton_jd"):
+        raise HTTPException(status_code=422, detail="process must be one of gbm/ou/cir/merton_jd")
+    try:
+        horizon = float(payload["horizon"])
+        n_steps = int(payload["n_steps"])
+        seed = int(payload.get("seed", 0))
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="horizon/n_steps/seed must be numbers")
+    try:
+        if proc == "gbm":
+            res = sp.gbm_simulate(
+                float(payload["s0"]), float(payload["mu"]), float(payload["sigma"]),
+                horizon, n_steps, seed=seed,
+            )
+            mom = sp.gbm_moments(float(payload["s0"]), float(payload["mu"]), float(payload["sigma"]), horizon)
+        elif proc == "ou":
+            res = sp.ou_simulate(
+                float(payload["x0"]), float(payload["kappa"]), float(payload["theta"]),
+                float(payload["sigma"]), horizon, n_steps, seed=seed,
+            )
+            mom = sp.ou_moments(float(payload["x0"]), float(payload["kappa"]), float(payload["theta"]),
+                                float(payload["sigma"]), horizon)
+        elif proc == "cir":
+            res = sp.cir_simulate(
+                float(payload["r0"]), float(payload["kappa"]), float(payload["theta"]),
+                float(payload["sigma"]), horizon, n_steps, seed=seed,
+            )
+            mom = sp.cir_moments(float(payload["r0"]), float(payload["kappa"]), float(payload["theta"]),
+                                 float(payload["sigma"]), horizon)
+        else:  # merton_jd
+            res = sp.merton_jd_simulate(
+                float(payload["s0"]), float(payload["mu"]), float(payload["sigma"]),
+                float(payload["jump_lambda"]), float(payload["jump_mean"]),
+                float(payload["jump_std"]), horizon, n_steps, seed=seed,
+            )
+            mom = sp.merton_jd_moments(
+                float(payload["s0"]), float(payload["mu"]), float(payload["sigma"]),
+                float(payload["jump_lambda"]), float(payload["jump_mean"]),
+                float(payload["jump_std"]), horizon,
+            )
+    except KeyError as exc:
+        raise HTTPException(status_code=422, detail=f"missing parameter: {exc.args[0]}")
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    out = res.to_dict()
+    if payload.get("include_moments", True):
+        out["moments"] = mom
+    return out

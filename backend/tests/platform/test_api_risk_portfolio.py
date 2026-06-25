@@ -937,3 +937,58 @@ def test_kalman_filter_endpoint_422_singular():
         "x0": [0.0], "P0": [[0.0]],
     })
     assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# P246 — stochastic processes endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_stochastic_processes_gbm_200():
+    client = _request()
+    r = client.post("/api/platform/stochastic-processes", json={
+        "process": "gbm", "s0": 100.0, "mu": 0.05, "sigma": 0.2,
+        "horizon": 1.0, "n_steps": 50, "seed": 1,
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["process"] == "gbm"
+    assert len(body["path"]) == 51
+    assert body["path"][0] == 100.0
+    assert "moments" in body
+
+
+def test_stochastic_processes_cir_200_positive():
+    client = _request()
+    r = client.post("/api/platform/stochastic-processes", json={
+        "process": "cir", "r0": 0.05, "kappa": 2.0, "theta": 0.05, "sigma": 0.1,
+        "horizon": 5.0, "n_steps": 500, "seed": 11,
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert all(v >= 0.0 for v in body["path"])
+
+
+def test_stochastic_processes_422_bad_process():
+    client = _request()
+    r = client.post("/api/platform/stochastic-processes", json={
+        "process": "heston", "horizon": 1.0, "n_steps": 10,
+    })
+    assert r.status_code == 422
+
+
+def test_stochastic_processes_422_missing_param():
+    client = _request()
+    r = client.post("/api/platform/stochastic-processes", json={
+        "process": "gbm", "s0": 100.0, "horizon": 1.0, "n_steps": 10,
+    })
+    assert r.status_code == 422
+
+
+def test_stochastic_processes_422_invalid_sigma():
+    client = _request()
+    r = client.post("/api/platform/stochastic-processes", json={
+        "process": "gbm", "s0": 100.0, "mu": 0.05, "sigma": 0.0,
+        "horizon": 1.0, "n_steps": 10,
+    })
+    assert r.status_code == 422
