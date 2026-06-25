@@ -1116,3 +1116,37 @@ def test_bandits_endpoint_422_thompson_gaussian_no_sigmas():
         "algorithm": "thompson_gaussian", "true_means": [0.1, 0.9], "n_steps": 10,
     })
     assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# P250 — LOESS endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_loess_endpoint_200_linear():
+    client = _request()
+    x = [float(i) for i in range(10)]
+    y = [2.0 + 3.0 * xi for xi in x]
+    r = client.post("/api/platform/loess", json={"x": x, "y": y, "bandwidth": 0.5, "iterations": 0})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    for xv, yv, sv in zip(x, y, body["smoothed"]):
+        assert abs(sv - yv) < 1e-6
+
+
+def test_loess_endpoint_422_mismatch():
+    client = _request()
+    r = client.post("/api/platform/loess", json={"x": [1, 2, 3], "y": [1, 2]})
+    assert r.status_code == 422
+
+
+def test_loess_endpoint_422_empty():
+    client = _request()
+    r = client.post("/api/platform/loess", json={"x": [], "y": []})
+    assert r.status_code == 422
+
+
+def test_loess_endpoint_422_bad_bandwidth():
+    client = _request()
+    r = client.post("/api/platform/loess", json={"x": [1, 2, 3], "y": [1, 2, 3], "bandwidth": 0.0})
+    assert r.status_code == 422

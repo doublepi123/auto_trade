@@ -2333,3 +2333,38 @@ def bandits_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     return res.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P250 — LOESS / LOWESS endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/loess", dependencies=[Depends(require_api_key())])
+def loess_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P250: locally-weighted linear regression (LOWESS) with robust iterations.
+
+    Body: ``{"x": [...], "y": [...], "bandwidth": 0.3?, "iterations": 2?}``.
+    422 on missing/unequal/empty/invalid bandwidth.
+    """
+    from app.platform.loess import lowess
+
+    x = payload.get("x")
+    y = payload.get("y")
+    if not isinstance(x, list) or not isinstance(y, list):
+        raise HTTPException(status_code=422, detail="x and y must be lists")
+    if len(x) != len(y):
+        raise HTTPException(status_code=422, detail="x and y must have equal length")
+    if len(x) < 2:
+        raise HTTPException(status_code=422, detail="need at least 2 points")
+    try:
+        bandwidth = float(payload.get("bandwidth", 0.3))
+        iterations = int(payload.get("iterations", 2))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="bandwidth/iterations must be numbers")
+    try:
+        res = lowess([float(v) for v in x], [float(v) for v in y],
+                     bandwidth=bandwidth, iterations=iterations)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return res.to_dict()
