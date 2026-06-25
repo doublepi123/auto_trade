@@ -1424,3 +1424,43 @@ def test_yield_curve_endpoint_422_missing():
     client = _request()
     r = client.post("/api/platform/yield-curve", json={"yields": [0.03, 0.04]})
     assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# P256 — fixed-income analytics endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_fixed_income_endpoint_200():
+    client = _request()
+    r = client.post("/api/platform/fixed-income", json={
+        "price": 95.0, "face": 100.0, "coupon": 4.0, "periods": 10,
+        "spot_short": 0.03, "spot_long": 0.04, "short_maturity": 1.0, "long_maturity": 2.0,
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ytm"] > 0.04
+    assert body["macaulay_duration"] > 0.0
+    assert "forward_rate" in body
+
+
+def test_fixed_income_endpoint_422_missing():
+    client = _request()
+    r = client.post("/api/platform/fixed-income", json={"price": 95.0, "face": 100.0})
+    assert r.status_code == 422
+
+
+def test_fixed_income_endpoint_422_bad_price():
+    client = _request()
+    r = client.post("/api/platform/fixed-income", json={
+        "price": -1.0, "face": 100.0, "coupon": 4.0, "periods": 10,
+    })
+    assert r.status_code == 422
+
+
+def test_fixed_income_endpoint_422_periods():
+    client = _request()
+    r = client.post("/api/platform/fixed-income", json={
+        "price": 95.0, "face": 100.0, "coupon": 4.0, "periods": 0,
+    })
+    assert r.status_code == 422

@@ -2562,3 +2562,42 @@ def yield_curve_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
         for m in eval_ms
     ]
     return out
+
+
+# ---------------------------------------------------------------------------
+# P256 — fixed-income analytics endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/fixed-income", dependencies=[Depends(require_api_key())])
+def fixed_income_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P256: bond analytics (YTM / duration / convexity) + optional forward rate.
+
+    Body: ``{"price", "face", "coupon", "periods"}`` plus optional
+    ``{"spot_short", "spot_long", "short_maturity", "long_maturity"}`` for a
+    forward rate. 422 on invalid inputs.
+    """
+    from app.platform.fixed_income import bond_analytics, forward_rate
+
+    try:
+        price = float(payload["price"])
+        face = float(payload["face"])
+        coupon = float(payload["coupon"])
+        periods = int(payload["periods"])
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="price/face/coupon/periods must be numbers")
+    try:
+        res = bond_analytics(price, face, coupon, periods)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    out = res.to_dict()
+    if "spot_short" in payload and "spot_long" in payload:
+        try:
+            ss = float(payload["spot_short"])
+            sl = float(payload["spot_long"])
+            sm = float(payload["short_maturity"])
+            lm = float(payload["long_maturity"])
+            out["forward_rate"] = forward_rate(ss, sl, sm, lm)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+    return out
