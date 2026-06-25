@@ -2035,6 +2035,8 @@ def implied_volatility_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
             raise HTTPException(status_code=422, detail="log_moneyness and implied_vols must be equal-length lists")
         if len(ks) < 5:
             raise HTTPException(status_code=422, detail="at least 5 points required to fit SVI")
+        if t is None:
+            raise HTTPException(status_code=422, detail="time_to_expiry must be a number")
         try:
             t = float(t)
         except (TypeError, ValueError):
@@ -2072,3 +2074,76 @@ def implied_volatility_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
         "risk_free": r,
         "dividend_yield": q,
     }
+
+
+# ---------------------------------------------------------------------------
+# P245 — Kalman filter + RTS smoother endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/kalman-filter", dependencies=[Depends(require_api_key())])
+def kalman_filter_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P245: forward Kalman filter + optional RTS smoother.
+
+    Body: ``{"observations": [[z], ...], "F": [[...]], "H": [[...]],
+    "Q": [[...]], "R": [[...]], "x0": [...], "P0": [[...]],
+    "smooth": bool?, "B": [[...]]?, "u": [[...]]?}``. 422 on invalid inputs.
+    """
+    from app.platform.kalman_filter import kalman_filter, rts_smoother
+
+    obs = payload.get("observations")
+    if not isinstance(obs, list) or not obs:
+        raise HTTPException(status_code=422, detail="observations must be a non-empty list of vectors")
+    for row in obs:
+        if not isinstance(row, list):
+            raise HTTPException(status_code=422, detail="each observation must be a list")
+    F = payload.get("F")
+    H = payload.get("H")
+    Q = payload.get("Q")
+    R = payload.get("R")
+    x0 = payload.get("x0")
+    P0 = payload.get("P0")
+    for name, val in (("F", F), ("H", H), ("Q", Q), ("R", R), ("P0", P0)):
+        if not isinstance(val, list) or not val or not isinstance(val[0], list):
+            raise HTTPException(status_code=422, detail=f"{name} must be a non-empty matrix")
+    if not isinstance(x0, list) or not x0:
+        raise HTTPException(status_code=422, detail="x0 must be a non-empty vector")
+    B = payload.get("B")
+    u = payload.get("u")
+    if (B is None) != (u is None):
+        raise HTTPException(status_code=422, detail="B and u must be supplied together")
+    if not isinstance(F, list) or not isinstance(H, list) or not isinstance(Q, list) \
+            or not isinstance(R, list) or not isinstance(x0, list) or not isinstance(P0, list):
+        raise HTTPException(status_code=422, detail="F/H/Q/R/x0/P0 must be lists")
+    F_: list[list[float]] = F  # type: ignore[assignment]
+    H_: list[list[float]] = H  # type: ignore[assignment]
+    Q_: list[list[float]] = Q  # type: ignore[assignment]
+    R_: list[list[float]] = R  # type: ignore[assignment]
+    P0_: list[list[float]] = P0  # type: ignore[assignment]
+    x0_: list[float] = x0  # type: ignore[assignment]
+    obs_: list[list[float]] = obs  # type: ignore[assignment]
+    try:
+        Fm = [[float(x) for x in row] for row in F_]
+        Hm = [[float(x) for x in row] for row in H_]
+        Qm = [[float(x) for x in row] for row in Q_]
+        Rm = [[float(x) for x in row] for row in R_]
+        x0v = [float(x) for x in x0_]
+        P0m = [[float(x) for x in row] for row in P0_]
+        obsv = [[float(x) for x in row] for row in obs_]
+        Bm = [[float(x) for x in row] for row in B] if B is not None else None
+        uv = [[float(x) for x in row] for row in u] if u is not None else None
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="matrix/vector entries must be numeric")
+    try:
+        res = kalman_filter(obsv, Fm, Hm, Qm, Rm, x0v, P0m, B=Bm, u=uv)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    out = res.to_dict()
+    if payload.get("smooth"):
+        try:
+            sm = rts_smoother(res, Fm)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        out["smoothed_means"] = sm.smoothed_means
+        out["smoothed_covs"] = sm.smoothed_covs
+    return out

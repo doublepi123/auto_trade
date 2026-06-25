@@ -895,3 +895,45 @@ def test_implied_volatility_endpoint_422_svi_few_points():
         "implied_vols": [0.2, 0.21, 0.22], "time_to_expiry": 1.0,
     })
     assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# P245 — Kalman filter endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_kalman_filter_endpoint_200():
+    client = _request()
+    obs = [[5.0 + 0.1 * (i % 3 - 1)] for i in range(20)]
+    r = client.post("/api/platform/kalman-filter", json={
+        "observations": obs, "F": [[1.0]], "H": [[1.0]], "Q": [[0.0]], "R": [[1.0]],
+        "x0": [0.0], "P0": [[100.0]], "smooth": True,
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "filtered_means" in body and "smoothed_means" in body
+    assert abs(body["filtered_means"][-1][0] - 5.0) < 0.5
+
+
+def test_kalman_filter_endpoint_422_missing():
+    client = _request()
+    r = client.post("/api/platform/kalman-filter", json={"observations": [[1.0]]})
+    assert r.status_code == 422
+
+
+def test_kalman_filter_endpoint_422_empty():
+    client = _request()
+    r = client.post("/api/platform/kalman-filter", json={
+        "observations": [], "F": [[1.0]], "H": [[1.0]], "Q": [[0.0]], "R": [[1.0]],
+        "x0": [0.0], "P0": [[1.0]],
+    })
+    assert r.status_code == 422
+
+
+def test_kalman_filter_endpoint_422_singular():
+    client = _request()
+    r = client.post("/api/platform/kalman-filter", json={
+        "observations": [[1.0]], "F": [[1.0]], "H": [[1.0]], "Q": [[0.0]], "R": [[0.0]],
+        "x0": [0.0], "P0": [[0.0]],
+    })
+    assert r.status_code == 422
