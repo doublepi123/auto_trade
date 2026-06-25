@@ -1584,3 +1584,391 @@ def evt_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     return rep.to_dict()
+
+
+# ===========================================================================
+# P233-P242 — risk-research IV + causal/diagnostics endpoints
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# P233 — causal discovery endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/causal-analysis", dependencies=[Depends(require_api_key())])
+def causal_analysis_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P233: Granger causality + PCMCI-style lag screening for two series.
+
+    Body: ``{"x": [...], "y": [...], "max_lag": int, "z"?: [...],
+    "mode"?: "granger"|"partial"|"lead_lag"}`` (default ``"lead_lag"``).
+    422 on missing/empty/mismatched/bad inputs.
+    """
+    from app.platform.causal_analysis import (
+        granger_causality,
+        lead_lag_summary,
+        partial_correlation_lag,
+    )
+
+    x = payload.get("x")
+    y = payload.get("y")
+    if not isinstance(x, list) or not isinstance(y, list):
+        raise HTTPException(status_code=422, detail="x and y must be lists")
+    if not x or not y:
+        raise HTTPException(status_code=422, detail="x and y must be non-empty")
+    if len(x) != len(y):
+        raise HTTPException(status_code=422, detail="x and y must be equal-length")
+    if "max_lag" not in payload:
+        raise HTTPException(status_code=422, detail="max_lag is required")
+    try:
+        max_lag = int(payload["max_lag"])
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="max_lag must be an integer")
+    z = payload.get("z")
+    if z is not None:
+        if not isinstance(z, list):
+            raise HTTPException(status_code=422, detail="z must be a list")
+        if len(z) != len(x):
+            raise HTTPException(status_code=422, detail="z must match x/y length")
+    mode = str(payload.get("mode", "lead_lag"))
+    try:
+        if mode == "granger":
+            rep = granger_causality([float(v) for v in x], [float(v) for v in y], max_lag)
+            return rep.to_dict()
+        if mode == "partial":
+            out = partial_correlation_lag(
+                [float(v) for v in x],
+                [float(v) for v in y],
+                [float(v) for v in z] if z is not None else None,
+                max_lag,
+            )
+            return {"max_lag": max_lag, "partial_correlations": {str(k): v for k, v in out.items()}}
+        rep = lead_lag_summary([float(v) for v in x], [float(v) for v in y], max_lag)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return rep.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P234 — HMM regime endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/regime-hmm", dependencies=[Depends(require_api_key())])
+def regime_hmm_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P234: Gaussian-emission Hidden Markov regime (Baum-Welch + Viterbi).
+
+    Body: ``{"returns": [...], "n_states"?: 2, "n_iter"?: 50, "tol"?: 1e-5}``.
+    422 on missing/empty/bad inputs.
+    """
+    from app.platform.regime_hmm import fit_hmm
+
+    rs = payload.get("returns")
+    if not isinstance(rs, list) or not rs:
+        raise HTTPException(status_code=422, detail="returns must be a non-empty list")
+    try:
+        n_states = int(payload.get("n_states", 2))
+        n_iter = int(payload.get("n_iter", 50))
+        tol = float(payload.get("tol", 1e-5))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="n_states/n_iter/tol must be numeric")
+    try:
+        rep = fit_hmm(
+            [float(v) for v in rs],
+            n_states=n_states,
+            n_iter=n_iter,
+            tol=tol,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return rep.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P235 — copula tail-dependence endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/copula", dependencies=[Depends(require_api_key())])
+def copula_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P235: empirical + Gumbel/Clayton copula tail-dependence for two series.
+
+    Body: ``{"x": [...], "y": [...]}`` (>=10 paired samples, non-constant).
+    422 on missing/empty/mismatched inputs.
+    """
+    from app.platform.copula import tail_dependence_coeffs
+
+    x = payload.get("x")
+    y = payload.get("y")
+    if not isinstance(x, list) or not isinstance(y, list):
+        raise HTTPException(status_code=422, detail="x and y must be lists")
+    if not x or not y:
+        raise HTTPException(status_code=422, detail="x and y must be non-empty")
+    if len(x) != len(y):
+        raise HTTPException(status_code=422, detail="x and y must be equal-length")
+    try:
+        rep = tail_dependence_coeffs([float(v) for v in x], [float(v) for v in y])
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return rep.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P236 — drawdown forecast endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/drawdown-forecast", dependencies=[Depends(require_api_key())])
+def drawdown_forecast_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P236: drawdown forecast + recovery-time distribution (Burke/Johansen).
+
+    Body: ``{"series": [...], "horizon_bars": int, "confidence"?: 0.95,
+    "input_mode"?: "equity"|"returns"}``. 422 on missing/empty/bad inputs.
+    """
+    from app.platform.drawdown_forecast import drawdown_forecast_report
+
+    series = payload.get("series")
+    if not isinstance(series, list) or not series:
+        raise HTTPException(status_code=422, detail="series must be a non-empty list")
+    if "horizon_bars" not in payload:
+        raise HTTPException(status_code=422, detail="horizon_bars is required")
+    try:
+        horizon = int(payload["horizon_bars"])
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="horizon_bars must be an integer")
+    input_mode = str(payload.get("input_mode", "equity"))
+    if input_mode not in ("equity", "returns"):
+        raise HTTPException(status_code=422, detail="input_mode must be 'equity' or 'returns'")
+    try:
+        conf = float(payload.get("confidence", 0.95))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="confidence must be numeric")
+    try:
+        rep = drawdown_forecast_report(
+            [float(v) for v in series],
+            horizon_bars=horizon,
+            confidence=conf,
+            input_mode=input_mode,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return rep.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P237 — liquidity metrics endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/liquidity-metrics", dependencies=[Depends(require_api_key())])
+def liquidity_metrics_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P237: Amihud illiquidity + Roll spread + Pastor-Stambaugh (+ Corwin-Schultz).
+
+    Body: ``{"returns": [...], "volumes"?: [...], "market_returns"?: [...],
+    "highs"?: [...], "lows"?: [...]}``. 422 on missing/empty returns.
+    """
+    from app.platform.liquidity_metrics import liquidity_report
+
+    rs = payload.get("returns")
+    if not isinstance(rs, list) or not rs:
+        raise HTTPException(status_code=422, detail="returns must be a non-empty list")
+    extras: dict[str, Any] = {}
+    for key in ("volumes", "market_returns", "highs", "lows"):
+        v = payload.get(key)
+        if v is not None:
+            if not isinstance(v, list):
+                raise HTTPException(status_code=422, detail=f"{key} must be a list")
+            if len(v) != len(rs):
+                raise HTTPException(status_code=422, detail=f"{key} must match returns length")
+            extras[key] = [float(x) for x in v]
+    try:
+        rep = liquidity_report([float(x) for x in rs], **extras)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return rep.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P238 — momentum / reversal factor endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/momentum-factors", dependencies=[Depends(require_api_key())])
+def momentum_factors_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P238: Jegadeesh-Titman momentum / De-Bondt reversal factor library.
+
+    Body: ``{"price_panel": {asset: [...]}}, "mode"?: "momentum"|"reversal",
+    "lookback"?: int, "holding"?: int, "n_long"?: int, "n_short"?: int}``.
+    422 on missing/empty/bad inputs.
+    """
+    from app.platform.momentum_factors import momentum_factor, reversal_factor
+
+    pp = payload.get("price_panel")
+    if not isinstance(pp, dict) or not pp:
+        raise HTTPException(status_code=422, detail="price_panel must be a non-empty dict")
+    try:
+        lookback = int(payload.get("lookback", 12))
+        holding = int(payload.get("holding", 1))
+        n_long = int(payload.get("n_long", 3))
+        n_short = int(payload.get("n_short", 3))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="lookback/holding/n_long/n_short must be integers")
+    panel = {k: [float(v) for v in vs] for k, vs in pp.items()}
+    mode = str(payload.get("mode", "momentum"))
+    try:
+        if mode == "reversal":
+            rep = reversal_factor(panel, lookback=lookback, holding=holding, n_long=n_long, n_short=n_short)
+        else:
+            rep = momentum_factor(panel, lookback=lookback, holding=holding, n_long=n_long, n_short=n_short)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return rep.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P239 — portfolio decomposition endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/portfolio-decomposition", dependencies=[Depends(require_api_key())])
+def portfolio_decomposition_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P239: regress portfolio returns onto factor returns (contribution attribution).
+
+    Body: ``{"returns": [...], "factor_returns": {factor: [...]}}``.
+    422 on missing/empty/mismatched inputs.
+    """
+    from app.platform.portfolio_decomposition import returns_to_factors
+
+    rs = payload.get("returns")
+    fr = payload.get("factor_returns")
+    if not isinstance(rs, list) or not rs:
+        raise HTTPException(status_code=422, detail="returns must be a non-empty list")
+    if not isinstance(fr, dict) or not fr:
+        raise HTTPException(status_code=422, detail="factor_returns must be a non-empty dict")
+    factor_returns = {k: [float(v) for v in vs] for k, vs in fr.items()}
+    try:
+        rep = returns_to_factors([float(v) for v in rs], factor_returns)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return rep.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P240 — Superior Predictive Ability test endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/spa-test", dependencies=[Depends(require_api_key())])
+def spa_test_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P240: Hansen-White Superior Predictive Ability test (deterministic block bootstrap).
+
+    Body: ``{"benchmark_lf": [...], "model_lfs": [[...], ...], "B"?: 100,
+    "block_length"?: 5}``. 422 on missing/empty/mismatched inputs.
+    """
+    from app.platform.spa_test import spa_test
+
+    blf = payload.get("benchmark_lf")
+    mlf = payload.get("model_lfs")
+    if not isinstance(blf, list) or not blf:
+        raise HTTPException(status_code=422, detail="benchmark_lf must be a non-empty list")
+    if not isinstance(mlf, list) or not mlf:
+        raise HTTPException(status_code=422, detail="model_lfs must be a non-empty list")
+    n = len(blf)
+    model_lfs: list[list[float]] = []
+    for i, m in enumerate(mlf):
+        if not isinstance(m, list) or not m:
+            raise HTTPException(status_code=422, detail=f"model_lfs[{i}] must be a non-empty list")
+        if len(m) != n:
+            raise HTTPException(status_code=422, detail=f"model_lfs[{i}] length must match benchmark_lf")
+        model_lfs.append([float(v) for v in m])
+    try:
+        B = int(payload.get("B", 100))
+        block_length = int(payload.get("block_length", 5))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="B and block_length must be integers")
+    try:
+        rep = spa_test([float(v) for v in blf], model_lfs, B=B, block_length=block_length)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return rep.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P241 — execution quality scorecard endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/execution-quality", dependencies=[Depends(require_api_key())])
+def execution_quality_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P241: execution-quality scorecard (fill ratio, slippage dist, reversion).
+
+    Body: ``{"fills": [{price, benchmark_price, quantity, ...}],
+    "benchmark_prices"?: [...], "post_fill_prices"?: [[...]],
+    "window"?: 5, "adverse_threshold_bps"?: 5.0}``. 422 on missing/empty inputs.
+    """
+    from app.platform.execution_quality import execution_scorecard
+
+    fills = payload.get("fills")
+    if not isinstance(fills, list) or not fills:
+        raise HTTPException(status_code=422, detail="fills must be a non-empty list")
+    bps = payload.get("benchmark_prices")
+    pfp = payload.get("post_fill_prices")
+    if bps is not None:
+        if not isinstance(bps, list) or len(bps) != len(fills):
+            raise HTTPException(status_code=422, detail="benchmark_prices must match fills length")
+    if pfp is not None:
+        if not isinstance(pfp, list) or len(pfp) != len(fills):
+            raise HTTPException(status_code=422, detail="post_fill_prices must match fills length")
+    try:
+        window = int(payload.get("window", 5))
+        adverse_threshold_bps = float(payload.get("adverse_threshold_bps", 5.0))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="window/adverse_threshold_bps must be numeric")
+    try:
+        rep = execution_scorecard(
+            fills,
+            benchmark_prices=bps,
+            post_fill_prices=pfp,
+            window=window,
+            adverse_threshold_bps=adverse_threshold_bps,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return rep.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P242 — portfolio diversification metrics endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/diversification", dependencies=[Depends(require_api_key())])
+def diversification_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P242: portfolio diversification metrics (effective N, diversification ratio, DR).
+
+    Body: ``{"weights": [...], "sigmas": [...], "cov": [[...], ...]}``.
+    422 on missing/empty/mismatched inputs.
+    """
+    from app.platform.diversification import diversification_report
+
+    w = payload.get("weights")
+    s = payload.get("sigmas")
+    cov = payload.get("cov")
+    if not isinstance(w, list) or not w:
+        raise HTTPException(status_code=422, detail="weights must be a non-empty list")
+    if not isinstance(s, list) or len(s) != len(w):
+        raise HTTPException(status_code=422, detail="sigmas must match weights length")
+    if not isinstance(cov, list) or len(cov) != len(w):
+        raise HTTPException(status_code=422, detail="cov must be a square matrix matching weights length")
+    for row in cov:
+        if not isinstance(row, list) or len(row) != len(w):
+            raise HTTPException(status_code=422, detail="cov must be a square matrix matching weights length")
+    try:
+        rep = diversification_report(
+            [float(x) for x in w],
+            [float(x) for x in s],
+            [[float(x) for x in row] for row in cov],
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return rep.to_dict()
