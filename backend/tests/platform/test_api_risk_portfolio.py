@@ -1285,3 +1285,59 @@ def test_vine_copula_endpoint_422_ragged():
         "data": [[1.0, 2.0, 3.0], [1.0, 2.0]],
     })
     assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# P253 — American options endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_american_options_endpoint_put_200():
+    client = _request()
+    r = client.post("/api/platform/american-options", json={
+        "option_type": "put", "spot": 100.0, "strike": 100.0,
+        "time_to_expiry": 1.0, "risk_free": 0.05, "volatility": 0.2,
+        "steps": 200, "exercise": "american",
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["exercise"] == "american"
+    assert body["price"] > 0.0
+    assert body["risk_neutral_prob"] > 0.0
+
+
+def test_american_options_endpoint_european_converges():
+    client = _request()
+    r = client.post("/api/platform/american-options", json={
+        "option_type": "call", "spot": 100.0, "strike": 100.0,
+        "time_to_expiry": 1.0, "risk_free": 0.05, "volatility": 0.2,
+        "steps": 500, "exercise": "european",
+    })
+    assert r.status_code == 200, r.text
+    # European binomial ≈ 10.45 (BS)
+    assert abs(r.json()["price"] - 10.450583572185565) < 0.05
+
+
+def test_american_options_endpoint_422_bad_type():
+    client = _request()
+    r = client.post("/api/platform/american-options", json={
+        "option_type": "straddle", "spot": 100.0, "strike": 100.0,
+        "time_to_expiry": 1.0, "risk_free": 0.05, "volatility": 0.2,
+    })
+    assert r.status_code == 422
+
+
+def test_american_options_endpoint_422_missing():
+    client = _request()
+    r = client.post("/api/platform/american-options", json={"option_type": "call", "spot": 100.0})
+    assert r.status_code == 422
+
+
+def test_american_options_endpoint_422_bad_exercise():
+    client = _request()
+    r = client.post("/api/platform/american-options", json={
+        "option_type": "call", "spot": 100.0, "strike": 100.0,
+        "time_to_expiry": 1.0, "risk_free": 0.05, "volatility": 0.2,
+        "exercise": "bermudan",
+    })
+    assert r.status_code == 422

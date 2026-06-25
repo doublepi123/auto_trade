@@ -2440,3 +2440,42 @@ def vine_copula_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     return res.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P253 — American options (CRR binomial tree) endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/american-options", dependencies=[Depends(require_api_key())])
+def american_options_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P253: American/European option via the CRR binomial tree.
+
+    Body: ``{"option_type": "call"|"put", "spot": S, "strike": K,
+    "time_to_expiry": T, "risk_free": r, "volatility": sigma, "steps": N?,
+    "dividend_yield": q?, "exercise": "american"|"european"?}``. 422 on invalid.
+    """
+    from app.platform.american_options import binomial_price
+
+    ot = payload.get("option_type")
+    if ot not in ("call", "put"):
+        raise HTTPException(status_code=422, detail="option_type must be 'call' or 'put'")
+    try:
+        spot = float(payload["spot"])
+        strike = float(payload["strike"])
+        t = float(payload["time_to_expiry"])
+        r = float(payload["risk_free"])
+        sigma = float(payload["volatility"])
+        q = float(payload.get("dividend_yield", 0.0))
+        steps = int(payload.get("steps", 200))
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="spot/strike/time_to_expiry/risk_free/volatility must be numbers")
+    exercise = payload.get("exercise", "american")
+    if exercise not in ("american", "european"):
+        raise HTTPException(status_code=422, detail="exercise must be 'american' or 'european'")
+    try:
+        res = binomial_price(ot, spot, strike, t, r, sigma, steps=steps,
+                             dividend_yield=q, exercise=exercise)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return res.to_dict()
