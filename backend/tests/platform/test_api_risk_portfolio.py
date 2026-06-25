@@ -1341,3 +1341,49 @@ def test_american_options_endpoint_422_bad_exercise():
         "exercise": "bermudan",
     })
     assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# P254 — Heston endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_heston_endpoint_200():
+    client = _request()
+    r = client.post("/api/platform/heston", json={
+        "option_type": "call", "spot": 100.0, "strike": 100.0,
+        "time_to_expiry": 1.0, "risk_free": 0.05,
+        "v0": 0.04, "kappa": 2.0, "theta": 0.04, "sigma": 0.3, "rho": -0.5,
+        "n_paths": 5000, "n_steps": 32, "seed": 1,
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["price"] > 0.0
+    assert body["standard_error"] > 0.0
+    assert body["n_paths"] == 5000
+
+
+def test_heston_endpoint_422_bad_type():
+    client = _request()
+    r = client.post("/api/platform/heston", json={
+        "option_type": "straddle", "spot": 100.0, "strike": 100.0,
+        "time_to_expiry": 1.0, "risk_free": 0.05,
+        "v0": 0.04, "kappa": 2.0, "theta": 0.04, "sigma": 0.3, "rho": -0.5,
+    })
+    assert r.status_code == 422
+
+
+def test_heston_endpoint_422_missing():
+    client = _request()
+    r = client.post("/api/platform/heston", json={"option_type": "call", "spot": 100.0})
+    assert r.status_code == 422
+
+
+def test_heston_endpoint_422_bad_rho():
+    client = _request()
+    r = client.post("/api/platform/heston", json={
+        "option_type": "call", "spot": 100.0, "strike": 100.0,
+        "time_to_expiry": 1.0, "risk_free": 0.05,
+        "v0": 0.04, "kappa": 2.0, "theta": 0.04, "sigma": 0.3, "rho": 2.0,
+    })
+    assert r.status_code == 422

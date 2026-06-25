@@ -2479,3 +2479,47 @@ def american_options_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     return res.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P254 — Heston stochastic volatility (moment-matched QMC) endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/heston", dependencies=[Depends(require_api_key())])
+def heston_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P254: price a European option under the Heston SV model (QMC).
+
+    Body: ``{"option_type": "call"|"put", "spot", "strike", "time_to_expiry",
+    "risk_free", "v0", "kappa", "theta", "sigma", "rho",
+    "n_paths"?, "n_steps"?, "seed"?, "moment_match"?}``. 422 on invalid.
+    """
+    from app.platform.heston import heston_quasi_monte_carlo
+
+    ot = payload.get("option_type")
+    if ot not in ("call", "put"):
+        raise HTTPException(status_code=422, detail="option_type must be 'call' or 'put'")
+    try:
+        spot = float(payload["spot"])
+        strike = float(payload["strike"])
+        t = float(payload["time_to_expiry"])
+        r = float(payload["risk_free"])
+        v0 = float(payload["v0"])
+        kappa = float(payload["kappa"])
+        theta = float(payload["theta"])
+        sigma = float(payload["sigma"])
+        rho = float(payload["rho"])
+        n_paths = int(payload.get("n_paths", 20000))
+        n_steps = int(payload.get("n_steps", 64))
+        seed = int(payload.get("seed", 0))
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="numeric parameters required (spot/strike/time_to_expiry/risk_free/v0/kappa/theta/sigma/rho)")
+    mm = payload.get("moment_match", True)
+    try:
+        res = heston_quasi_monte_carlo(
+            ot, spot, strike, t, r, v0, kappa, theta, sigma, rho,
+            n_paths=n_paths, n_steps=n_steps, seed=seed, moment_match=bool(mm),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return res.to_dict()
