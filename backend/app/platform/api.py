@@ -2403,3 +2403,40 @@ def smart_order_routing_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     return res.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P252 — vine copula endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/vine-copula", dependencies=[Depends(require_api_key())])
+def vine_copula_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P252: fit a vine copula (C-vine / D-vine) to a multi-asset panel.
+
+    Body: ``{"data": [[asset0], [asset1], ...], "structure": "c-vine"|"d-vine"?,
+    "family": "gaussian"|"gumbel"|"clayton"?}``. 422 on invalid.
+    """
+    from app.platform.vine_copula import vine_copula
+
+    data = payload.get("data")
+    if not isinstance(data, list) or not data:
+        raise HTTPException(status_code=422, detail="data must be a non-empty list of series")
+    for s in data:
+        if not isinstance(s, list):
+            raise HTTPException(status_code=422, detail="each series must be a list")
+    structure = payload.get("structure", "c-vine")
+    if structure not in ("c-vine", "d-vine"):
+        raise HTTPException(status_code=422, detail="structure must be 'c-vine' or 'd-vine'")
+    family = payload.get("family")
+    if family is not None and family not in ("gaussian", "gumbel", "clayton"):
+        raise HTTPException(status_code=422, detail="family must be gaussian/gumbel/clayton or omitted")
+    try:
+        res = vine_copula(
+            [[float(v) for v in s] for s in data],
+            structure=structure,
+            family=family,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return res.to_dict()

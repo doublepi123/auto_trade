@@ -1236,3 +1236,52 @@ def test_smart_order_routing_endpoint_422_missing_qty():
         "venues": [{"venue": "A", "bid": 99, "bid_size": 10, "ask": 100, "ask_size": 10}],
     })
     assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# P252 — vine copula endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_vine_copula_endpoint_200():
+    client = _request()
+    import math, random
+    rng = random.Random(1)
+    data = [[], [], []]
+    for _ in range(150):
+        z0 = rng.gauss(0.0, 1.0)
+        z1 = rng.gauss(0.0, 1.0)
+        z2 = rng.gauss(0.0, 1.0)
+        data[0].append(z0)
+        data[1].append(0.6 * z0 + 0.8 * z1)
+        data[2].append(0.6 * z0 + 0.8 * z2)
+    r = client.post("/api/platform/vine-copula", json={
+        "data": data, "structure": "c-vine", "family": "gaussian",
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["n_assets"] == 3
+    assert "aic" in body and "bic" in body
+
+
+def test_vine_copula_endpoint_422_empty():
+    client = _request()
+    r = client.post("/api/platform/vine-copula", json={"data": []})
+    assert r.status_code == 422
+
+
+def test_vine_copula_endpoint_422_bad_structure():
+    client = _request()
+    r = client.post("/api/platform/vine-copula", json={
+        "data": [[1.0, 2.0, 3.0], [2.0, 3.0, 1.0], [3.0, 1.0, 2.0]],
+        "structure": "r-vine",
+    })
+    assert r.status_code == 422
+
+
+def test_vine_copula_endpoint_422_ragged():
+    client = _request()
+    r = client.post("/api/platform/vine-copula", json={
+        "data": [[1.0, 2.0, 3.0], [1.0, 2.0]],
+    })
+    assert r.status_code == 422
