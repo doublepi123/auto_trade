@@ -261,6 +261,33 @@
 
 ## 近期已完成迭代 (2026-06-25) — 风险研究 + 执行深度 II（10 轮 P213–P222）
 
+## 近期已完成迭代 (2026-06-25) — 配对/微观/执行/风险研究 III（10 轮 P223–P232）
+
+> 自主 feature 迭代第 24 批（10 轮）。承接 P203–P222 风险研究，补齐剩余支柱：统计套利地基（协整/配对）、仓位定尺（Kelly）、波动率预测、市场微观结构（VPIN/OFI）、最优执行（Almgren-Chriss）、自激发事件（Hawkes）、历史场景压力、Barra 式因子风险分解、参数重要性（Saltelli Sobol）、极值理论尾部外推。参考 Engle-Granger 协整、Thorp/Kelly 仓位管理、RiskMetrics/Bollerslev GARCH、Easley-López de Prado-O'Hara VPIN、Cont-Kukanov-Stoikov OFI、Almgren-Chriss 最优执行、Hawkes 自激发过程、FRB CCAR 历史场景、Barra/Axioma 因子风险、Saltelli fANOVA、McNeil-Frey EVT/GPD。全部后端、`pytest` 可验、加法不破坏默认路径（10 个新模块均为可选注入或独立纯函数，零新依赖；10 个新 `/api/platform/*` 端点不影响既有路由）。
+
+| 代号 | 主题 | 参考 | 状态 |
+|------|------|------|------|
+| **P223** | 协整与配对交易诊断（Engle-Granger OLS 对冲比 + OU 半衰期 + z-score + Durbin-Watson） | Engle-Granger、Vidyamurthy/Chan pairs | ✅ |
+| **P224** | Kelly 仓位定尺（binary/continuous Kelly + 分数 Kelly + 期望对数增长 + 破产概率） | Thorp、Kelly、Vince | ✅ |
+| **P225** | 波动率预测（EWMA RiskMetrics + GARCH(1,1) + Parkinson 高低价） | RiskMetrics、Bollerslev、Parkinson | ✅ |
+| **P226** | 微观结构（VPIN 等量分桶 + OFI 订单流不平衡 + Kyle λ 价格冲击） | Easley-LdP-O'Hara、Cont et al.、Kyle | ✅ |
+| **P227** | Almgren-Chriss 最优执行（风险厌恶轨迹 + 成本/风险 + 执行有效前沿） | Almgren-Chriss (2000) | ✅ |
+| **P228** | Hawkes 自激发过程（branching ratio + 递归对数似然 + 强度路径） | Hawkes、Lewis/Ozaki、Filimonov-Sornette | ✅ |
+| **P229** | 历史场景压力（episode 库 + apply_scenario + 资本充足率） | FRB CCAR、Basel ICAAP | ✅ |
+| **P230** | 因子风险分解（Barra 式 wᵀBF Bᵀw + 特质 + per-factor 贡献） | Barra、Menchero、Grinold-Kahn | ✅ |
+| **P231** | 参数重要性（Saltelli 一阶/全阶 Sobol + 交互 + 排名） | Saltelli、Optuna fANOVA、Hutter | ✅ |
+| **P232** | 极值理论（POT + GPD MoM 拟合 + 尾部 VaR/CVaR 外推） | McNeil-Frey、Davison-Smith、Embrechts | ✅ |
+
+**设计要点：**
+- **参考而不照抄**：借鉴开源文献与库的数学形态（Engle-Granger 2-step、Lewis 2011 递归 Hawkes 似然、Hosking-Wallis GPD MoM、Almgren-Chriss sinh 轨迹、Saltelli 全方差分解），实现贴合本仓既有事件流与 `PlatformRunner`，零新依赖、确定性（无 RNG/优化器）。
+- **加法不破坏**：10 个新模块均为可选注入或独立纯函数；10 个新 `/api/platform/*` 端点全部带 `require_api_key`、422 守卫、与既有路由互不冲突；`AUTO_TRADE_PLATFORM_MODE=false` 默认路径行为不变。
+- **复用**：`kelly` 复用 `risk_ratios` 的年化口径思路、`historical_scenarios` 与 P200/P221 parametric stress 互补、`sensitivity` 复用 `stability_analysis` 的 records 形状、`extreme_value` 与 `risk_metrics` VaR 互补。
+
+**验证：** `pytest tests/` **2014 passed**（基线 1863 → +151，含 10 个新 `tests/platform/test_*.py` 全覆盖（共 119 个新用例）+ `test_api_risk_portfolio.py` 覆盖 10 个新端点的 200/422 路径）；新增 10 个模块全部纯 Python（numpy 仍未引入），零新依赖；`basedpyright` 对 10 个新模块 0 errors（预存在的 `trade_excursion.py`/`shortfall.py`/`stability_analysis.py` 类型告警与本批无关）。
+
+**显式 YAGNI 未做：** 协整 Johansen 多方程 / 协整向量的 VECM 预测（当前 Engle-Granger 2-step 单方程）；Kelly 多资产（multi-asset Kelly 需协方差，当前单资产/单序列）；GARCH(p,q)/EGARCH/DCC（当前 GARCH(1,1) 单序列）；VPIN 的 VPIN-v1 体积时钟 + tick-rule 分类（当前用 bar close/open bulk-classification）；Almgren-Chriss 永久冲击 + 非线性冲击（当前线性临时冲击）；Hawkes MLE 网格寻优 + 标记点过程（当前矩估计默认）；历史场景因子叠加 / 反向场景搜索（当前单层应用）；因子风险时变暴露 + 条件协方差（当前单期截面）；Saltelli 蒙特卡洛抽样估计（当前 grid 方差分解）；EVT 的 Hill 估计器 + 稳定分布（当前 GPD MoM）。前端 UI 口径展示（tearsheet 视图）— 后续轮次。
+
+
 > 自主 feature 迭代第 23 批（10 轮）。承接 P203–P212 风险科学与投资组合优化，补齐机构级风险研究 + 执行分析的剩余支柱：市场状态识别、组合交叉验证防泄漏、收益风格归因、换手感知再平衡、凸风险预算 ERC、单笔交易 MFE/MAE、Implementation Shortfall、收益日历热力图、压力场景报告聚合、walk-forward 参数稳定性。参考 Nautilus `MarketRegimeModel`、López de Prado CPCV、Sharpe 1992 Style Analysis、PyPortfolioOpt turnover constraint、Maillard-Roncalli/Spinu ERC、vectorbt MFE/MAE、Perold Implementation Shortfall、pyfolio returns calendar、FRB CCAR stress、Optuna parameter stability。全部后端、`pytest` 可验、加法不破坏默认路径（10 个新模块均为可选注入或独立纯函数，零新依赖；8 个新 `/api/platform/*` 端点不影响既有路由，2 个扩展现有 `portfolio-optimize` method）。
 
 | 代号 | 主题 | 参考 | 状态 |

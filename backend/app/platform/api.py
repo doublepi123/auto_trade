@@ -1201,3 +1201,386 @@ def stability_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
                                   ratio_cap=ratio_cap, ratio_floor=ratio_floor)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+
+
+# ---------------------------------------------------------------------------
+# P223 — cointegration & pairs trading diagnostics endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/cointegration", dependencies=[Depends(require_api_key())])
+def cointegration_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P223: Engle-Granger cointegration + OU half-life + z-score for two series.
+
+    Body: ``{"y": [...], "x": [...], "zscore_window"?: int}``.
+    422 if y/x missing, length mismatch, or <2 points.
+    """
+    from app.platform.cointegration import cointegration_analysis
+
+    y = payload.get("y")
+    x = payload.get("x")
+    if not isinstance(y, list) or not isinstance(x, list):
+        raise HTTPException(status_code=422, detail="y and x must be lists")
+    if len(y) != len(x) or len(y) < 2:
+        raise HTTPException(status_code=422, detail="y and x must be equal-length lists with >=2 points")
+    zsw = payload.get("zscore_window")
+    zsw_int = int(zsw) if zsw is not None else None
+    try:
+        res = cointegration_analysis([float(v) for v in y], [float(v) for v in x], zscore_window=zsw_int)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return res.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P224 — Kelly criterion & bet-sizing endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/kelly", dependencies=[Depends(require_api_key())])
+def kelly_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P224: Kelly-optimal bet sizing.
+
+    Body either ``{"win_prob", "win_size", "loss_size"}`` (binary bet) or
+    ``{"returns": [...]}`` (continuous Kelly from a return series).
+    Optional ``bankroll_units`` adds a risk-of-ruin estimate. 422 on bad inputs.
+    """
+    from app.platform.kelly import (
+        fractional_kelly,
+        kelly_binary,
+        kelly_from_returns,
+        risk_of_ruin,
+    )
+
+    if "returns" in payload:
+        rs = payload["returns"]
+        if not isinstance(rs, list) or len(rs) < 2:
+            raise HTTPException(status_code=422, detail="returns must be a list with >=2 points")
+        try:
+            f = kelly_from_returns([float(x) for x in rs])
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        return {"method": "continuous", "full_kelly": f, "half_kelly": 0.5 * f}
+
+    wp = payload.get("win_prob")
+    ws = payload.get("win_size")
+    ls = payload.get("loss_size")
+    if wp is None or ws is None or ls is None:
+        raise HTTPException(status_code=422, detail="provide (win_prob, win_size, loss_size) or returns")
+    try:
+        wp_f, ws_f, ls_f = float(wp), float(ws), float(ls)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="win_prob/win_size/loss_size must be numeric")
+    try:
+        rep = fractional_kelly(wp_f, ws_f, ls_f)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    out = rep.to_dict()
+    bu = payload.get("bankroll_units")
+    if bu is not None:
+        try:
+            out["risk_of_ruin"] = risk_of_ruin(wp_f, ws_f, ls_f, bankroll_units=float(bu))
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# P225 — volatility forecasting endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/volatility", dependencies=[Depends(require_api_key())])
+def volatility_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P225: EWMA + GARCH(1,1) (+ Parkinson) volatility forecast.
+
+    Body: ``{"returns": [...], "highs"?: [...], "lows"?: [...],
+    "lam"?: 0.94, "alpha"?: 0.10, "beta"?: 0.85}``. 422 if returns missing/short.
+    """
+    from app.platform.volatility_models import volatility_report
+
+    rs = payload.get("returns")
+    if not isinstance(rs, list) or len(rs) < 2:
+        raise HTTPException(status_code=422, detail="returns must be a list with >=2 points")
+    highs = payload.get("highs")
+    lows = payload.get("lows")
+    if (highs is None) != (lows is None):
+        raise HTTPException(status_code=422, detail="highs and lows must be provided together")
+    try:
+        rep = volatility_report(
+            [float(x) for x in rs],
+            highs=[float(x) for x in highs] if highs is not None else None,
+            lows=[float(x) for x in lows] if lows is not None else None,
+            lam=float(payload.get("lam", 0.94)),
+            alpha=float(payload.get("alpha", 0.10)),
+            beta=float(payload.get("beta", 0.85)),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return rep.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P226 — microstructure VPIN / OFI endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/microstructure", dependencies=[Depends(require_api_key())])
+def microstructure_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P226: VPIN + order-flow imbalance + Kyle's lambda from bar data.
+
+    Body: ``{"volumes": [...], "opens": [...], "closes": [...],
+    "bucket_size"?: float, "window"?: int}``. 422 on missing/mismatched/empty.
+    """
+    from app.platform.microstructure import kyle_lambda, order_flow_imbalance, vpin
+
+    vols = payload.get("volumes")
+    opens = payload.get("opens")
+    closes = payload.get("closes")
+    if not isinstance(vols, list) or not isinstance(opens, list) or not isinstance(closes, list):
+        raise HTTPException(status_code=422, detail="volumes, opens, closes must be lists")
+    n = len(vols)
+    if n == 0 or n != len(opens) or n != len(closes):
+        raise HTTPException(status_code=422, detail="volumes/opens/closes must be equal-length non-empty")
+    bs = payload.get("bucket_size")
+    win = int(payload.get("window", 50))
+    try:
+        v = vpin(
+            [float(x) for x in vols],
+            [float(x) for x in opens],
+            [float(x) for x in closes],
+            bucket_size=float(bs) if bs is not None else None,
+            window=win,
+        )
+        ofi = order_flow_imbalance(
+            [float(x) for x in vols],
+            [float(x) for x in opens],
+            [float(x) for x in closes],
+        )
+        lam = kyle_lambda(
+            [float(x) for x in vols],
+            [float(x) for x in opens],
+            [float(x) for x in closes],
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return {
+        "vpin": v.to_dict(),
+        "ofi": ofi,
+        "latest_ofi": ofi[-1] if ofi else 0.0,
+        "kyle_lambda": lam,
+    }
+
+
+# ---------------------------------------------------------------------------
+# P227 — Almgren-Chriss optimal execution endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/execution-cost", dependencies=[Depends(require_api_key())])
+def execution_cost_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P227: Almgren-Chriss optimal execution trajectory + cost/risk.
+
+    Body: ``{"total_shares": float, "n_slices": int, "eta"?: 0.1,
+    "sigma"?: 0.3, "risk_aversion"?: 0.0}``. 422 on missing/bad inputs.
+    """
+    from app.platform.execution_cost import almgren_chriss, efficient_frontier
+
+    if "total_shares" not in payload or "n_slices" not in payload:
+        raise HTTPException(status_code=422, detail="total_shares and n_slices are required")
+    try:
+        ts = float(payload["total_shares"])
+        ns = int(payload["n_slices"])
+        eta = float(payload.get("eta", 0.1))
+        sigma = float(payload.get("sigma", 0.3))
+        ra = float(payload.get("risk_aversion", 0.0))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="invalid numeric inputs")
+    try:
+        res = almgren_chriss(ts, ns, eta=eta, sigma=sigma, risk_aversion=ra)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    out = res.to_dict()
+    if payload.get("frontier"):
+        try:
+            out["frontier"] = efficient_frontier(ts, ns, eta=eta, sigma=sigma)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# P228 — Hawkes self-exciting process endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/hawkes", dependencies=[Depends(require_api_key())])
+def hawkes_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P228: Hawkes process branching ratio + log-likelihood from event times.
+
+    Body: ``{"events": [t1, t2, ...], "mu"?: float, "kappa"?: float,
+    "beta"?: float}``. Defaults estimated from the event times. 422 on bad input.
+    """
+    from app.platform.hawkes import fit_hawkes
+
+    events = payload.get("events")
+    if not isinstance(events, list) or not events:
+        raise HTTPException(status_code=422, detail="events must be a non-empty list")
+    mu = payload.get("mu")
+    kappa = payload.get("kappa")
+    beta = payload.get("beta")
+    try:
+        fit = fit_hawkes(
+            [float(t) for t in events],
+            mu=float(mu) if mu is not None else None,
+            kappa=float(kappa) if kappa is not None else None,
+            beta=float(beta) if beta is not None else None,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return fit.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P229 — historical scenario stress endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/historical-stress", dependencies=[Depends(require_api_key())])
+def historical_stress_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P229: apply historical episode library to the current book.
+
+    Body: ``{"positions": {symbol: [qty, price]}, "episodes"?: [{name, returns, description?}],
+    "capital_buffer"?: float, "confidence"?: 0.95}``. 422 on missing/empty positions.
+    """
+    from app.platform.historical_scenarios import (
+        HistoricalEpisode,
+        HistoricalScenarioLibrary,
+        historical_stress_report,
+    )
+
+    positions = payload.get("positions")
+    if not isinstance(positions, dict) or not positions:
+        raise HTTPException(status_code=422, detail="positions must be a non-empty dict")
+    pos: dict[str, tuple[float, float]] = {}
+    for sym, vp in positions.items():
+        if not isinstance(vp, (list, tuple)) or len(vp) != 2:
+            raise HTTPException(status_code=422, detail="each position must be [qty, price]")
+        pos[sym] = (float(vp[0]), float(vp[1]))
+    eps_raw = payload.get("episodes")
+    if eps_raw:
+        lib = HistoricalScenarioLibrary()
+        for ep in eps_raw:
+            if not isinstance(ep, dict) or "name" not in ep or "returns" not in ep:
+                raise HTTPException(status_code=422, detail="each episode needs name and returns")
+            lib.add_episode(HistoricalEpisode(
+                name=str(ep["name"]),
+                returns={k: float(v) for k, v in ep["returns"].items()},
+                description=str(ep.get("description", "")),
+            ))
+    else:
+        lib = HistoricalScenarioLibrary.with_defaults()
+    try:
+        rep = historical_stress_report(
+            pos,
+            library=lib,
+            capital_buffer=float(payload.get("capital_buffer", 0.0)),
+            confidence=float(payload.get("confidence", 0.95)),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return rep.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P230 — factor risk decomposition endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/factor-risk", dependencies=[Depends(require_api_key())])
+def factor_risk_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P230: cross-sectional factor risk decomposition (Barra-style).
+
+    Body: ``{"weights": {sym: w}, "exposures": {sym: {factor: beta}},
+    "factor_cov": {fi: {fj: cov}}, "idio_var": {sym: var}}``. 422 on missing/empty.
+    """
+    from app.platform.factor_risk import factor_risk_decomposition
+
+    w = payload.get("weights")
+    exp = payload.get("exposures")
+    fc = payload.get("factor_cov")
+    iv = payload.get("idio_var")
+    if not isinstance(w, dict) or not w:
+        raise HTTPException(status_code=422, detail="weights must be a non-empty dict")
+    if not isinstance(fc, dict) or not fc:
+        raise HTTPException(status_code=422, detail="factor_cov must be a non-empty dict")
+    try:
+        res = factor_risk_decomposition(
+            weights={k: float(v) for k, v in w.items()},
+            exposures={k: {fk: float(fv) for fk, fv in (v or {}).items()}
+                       for k, v in (exp or {}).items()},
+            factor_cov={fi: {fj: float(x) for fj, x in (row or {}).items()}
+                        for fi, row in fc.items()},
+            idio_var={k: float(v) for k, v in (iv or {}).items()},
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return res.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P231 — parameter importance & sensitivity endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/sensitivity", dependencies=[Depends(require_api_key())])
+def sensitivity_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P231: fANOVA-style parameter importance from grid/walk-forward records.
+
+    Body: ``{"records": [{"params": {axis: value}, "metric": float}]}``. 422 on
+    missing/empty/not-list.
+    """
+    from app.platform.sensitivity import parameter_importance
+
+    records = payload.get("records")
+    if not isinstance(records, list) or not records:
+        raise HTTPException(status_code=422, detail="records must be a non-empty list")
+    try:
+        rep = parameter_importance(records)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return rep.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P232 — extreme value theory endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/evt", dependencies=[Depends(require_api_key())])
+def evt_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P232: GPD peaks-over-threshold tail VaR/CVaR.
+
+    Body: ``{"losses": [...], "threshold": float, "confidence_levels"?: [0.99, 0.999]}``.
+    422 on missing/empty/bad inputs.
+    """
+    from app.platform.extreme_value import evt_report
+
+    losses = payload.get("losses")
+    if not isinstance(losses, list) or not losses:
+        raise HTTPException(status_code=422, detail="losses must be a non-empty list")
+    if "threshold" not in payload:
+        raise HTTPException(status_code=422, detail="threshold is required")
+    try:
+        thr = float(payload["threshold"])
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="threshold must be numeric")
+    cls_raw = payload.get("confidence_levels", [0.99, 0.999])
+    if not isinstance(cls_raw, list) or not cls_raw:
+        raise HTTPException(status_code=422, detail="confidence_levels must be a non-empty list")
+    cls = [float(c) for c in cls_raw]
+    try:
+        rep = evt_report([float(l) for l in losses], threshold=thr, confidence_levels=cls)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return rep.to_dict()

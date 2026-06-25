@@ -10,21 +10,6 @@ os.environ.setdefault("AUTO_TRADE_ENV", "test")
 os.environ.setdefault("AUTO_TRADE_CREDENTIAL_KEY_PATH", "./data/test_cred_p211.pem")
 os.environ.setdefault("AUTO_TRADE_API_KEY", "test-key")
 
-import sys
-
-# Force the worktree to be the first source for `app.*` so the new endpoints
-# (added in this iteration) are actually loaded. The main backend path is
-# appended for shared utilities (FastAPI, etc.) only.
-WORKTREE = "/Users/lcy/code/auto_trade/.claude/worktrees/p203-p212-risk-science/backend"
-if WORKTREE in sys.path:
-    sys.path.remove(WORKTREE)
-sys.path.insert(0, WORKTREE)
-
-# Remove cached modules so they re-import from the worktree
-for k in list(sys.modules.keys()):
-    if k == "app" or k.startswith("app."):
-        del sys.modules[k]
-
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -516,3 +501,280 @@ def test_stability_endpoint_422_missing():
     r = client.post("/api/platform/stability", json={})
     assert r.status_code == 422
 
+
+
+# ---------------------------------------------------------------------------
+# P223 — cointegration endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_cointegration_endpoint_200():
+    client = _request()
+    n = 200
+    import math as _math
+    x = [100.0 + 0.3 * i for i in range(n)]
+    spread_truth = [0.5 * _math.sin(2 * _math.pi * 5 * i / n) for i in range(n)]
+    y = [2.0 * xi + 1.0 + s for xi, s in zip(x, spread_truth)]
+    r = client.post("/api/platform/cointegration", json={"y": y, "x": x})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "beta" in body and "alpha" in body and "spread" in body
+    assert "current_zscore" in body and "half_life" in body and "durbin_watson" in body
+
+
+def test_cointegration_endpoint_422_mismatch():
+    client = _request()
+    r = client.post("/api/platform/cointegration", json={"y": [1.0, 2.0], "x": [1.0]})
+    assert r.status_code == 422
+
+
+def test_cointegration_endpoint_422_missing():
+    client = _request()
+    r = client.post("/api/platform/cointegration", json={"y": [1.0, 2.0]})
+    assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# P224 — Kelly endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_kelly_endpoint_binary_200():
+    client = _request()
+    r = client.post("/api/platform/kelly", json={"win_prob": 0.55, "win_size": 1.0, "loss_size": 1.0})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert abs(body["full_kelly"] - 0.1) < 1e-9
+    assert "half_kelly" in body and "has_edge" in body
+
+
+def test_kelly_endpoint_continuous_200():
+    client = _request()
+    rs = [0.01, -0.02, 0.03, 0.0, 0.02, -0.01, 0.04, 0.01]
+    r = client.post("/api/platform/kelly", json={"returns": rs})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["method"] == "continuous"
+
+
+def test_kelly_endpoint_422_missing():
+    client = _request()
+    r = client.post("/api/platform/kelly", json={})
+    assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# P225 — volatility endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_volatility_endpoint_200():
+    client = _request()
+    rs = [0.01, -0.02, 0.03, -0.01, 0.02, 0.0, -0.01, 0.015]
+    r = client.post("/api/platform/volatility", json={"returns": rs})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "ewma" in body and "garch" in body and body["parkinson"] is None
+
+
+def test_volatility_endpoint_with_highs_lows():
+    client = _request()
+    rs = [0.01, -0.02, 0.03, -0.01, 0.02]
+    r = client.post(
+        "/api/platform/volatility",
+        json={"returns": rs, "highs": [101, 99, 103, 100, 102], "lows": [99, 97, 100, 98, 100]},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["parkinson"] is not None
+
+
+def test_volatility_endpoint_422_short():
+    client = _request()
+    r = client.post("/api/platform/volatility", json={"returns": [0.01]})
+    assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# P226 — microstructure endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_microstructure_endpoint_200():
+    client = _request()
+    vols = [100.0] * 6
+    opens = [10.0] * 6
+    closes = [11.0, 10.5, 9.5, 9.0, 11.0, 10.5]
+    r = client.post(
+        "/api/platform/microstructure",
+        json={"volumes": vols, "opens": opens, "closes": closes, "bucket_size": 100.0},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "vpin" in body and "ofi" in body and "kyle_lambda" in body
+
+
+def test_microstructure_endpoint_422_mismatch():
+    client = _request()
+    r = client.post(
+        "/api/platform/microstructure",
+        json={"volumes": [100.0], "opens": [10.0], "closes": [11.0, 12.0]},
+    )
+    assert r.status_code == 422
+
+
+def test_microstructure_endpoint_422_missing():
+    client = _request()
+    r = client.post("/api/platform/microstructure", json={"volumes": [100.0]})
+    assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# P227 — Almgren-Chriss endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_execution_cost_endpoint_200():
+    client = _request()
+    r = client.post("/api/platform/execution-cost",
+                    json={"total_shares": 1000.0, "n_slices": 5, "risk_aversion": 0.0})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "trajectory" in body and "expected_cost" in body and "risk" in body
+
+
+def test_execution_cost_endpoint_frontier():
+    client = _request()
+    r = client.post("/api/platform/execution-cost",
+                    json={"total_shares": 1000.0, "n_slices": 10, "frontier": True})
+    assert r.status_code == 200, r.text
+    assert "frontier" in r.json()
+
+
+def test_execution_cost_endpoint_422_missing():
+    client = _request()
+    r = client.post("/api/platform/execution-cost", json={"total_shares": 100.0})
+    assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# P228 — Hawkes endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_hawkes_endpoint_200():
+    client = _request()
+    r = client.post("/api/platform/hawkes", json={"events": [1.0, 1.5, 2.0, 2.2, 3.0, 4.0]})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "branching_ratio" in body and "log_likelihood" in body
+
+
+def test_hawkes_endpoint_422_empty():
+    client = _request()
+    r = client.post("/api/platform/hawkes", json={"events": []})
+    assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# P229 — historical stress endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_historical_stress_endpoint_200():
+    client = _request()
+    r = client.post("/api/platform/historical-stress",
+                    json={"positions": {"A.US": [100, 100.0], "B.US": [200, 50.0]}})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "worst_episode" in body and "per_episode" in body
+
+
+def test_historical_stress_endpoint_custom_episodes():
+    client = _request()
+    r = client.post("/api/platform/historical-stress",
+                    json={"positions": {"A.US": [100, 100.0]},
+                          "episodes": [{"name": "crash", "returns": {"A.US": -0.5}}]})
+    assert r.status_code == 200, r.text
+    assert r.json()["worst_episode"] == "crash"
+
+
+def test_historical_stress_endpoint_422_missing():
+    client = _request()
+    r = client.post("/api/platform/historical-stress", json={})
+    assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# P230 — factor risk endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_factor_risk_endpoint_200():
+    client = _request()
+    r = client.post("/api/platform/factor-risk",
+                    json={
+                        "weights": {"A": 0.5, "B": 0.5},
+                        "exposures": {"A": {"MKT": 1.2}, "B": {"MKT": 0.8}},
+                        "factor_cov": {"MKT": {"MKT": 0.04}},
+                        "idio_var": {"A": 0.01, "B": 0.01},
+                    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "factor_variance" in body and "idiosyncratic_variance" in body
+
+
+def test_factor_risk_endpoint_422_missing():
+    client = _request()
+    r = client.post("/api/platform/factor-risk", json={})
+    assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# P231 — sensitivity endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_sensitivity_endpoint_200():
+    client = _request()
+    records = []
+    for a in [1, 2, 3, 4]:
+        for b in [1, 2, 3]:
+            records.append({"params": {"a": a, "b": b}, "metric": float(a * 10 + b)})
+    r = client.post("/api/platform/sensitivity", json={"records": records})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "importance_ranking" in body and "first_order" in body
+
+
+def test_sensitivity_endpoint_422_empty():
+    client = _request()
+    r = client.post("/api/platform/sensitivity", json={"records": []})
+    assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# P232 — EVT endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_evt_endpoint_200():
+    client = _request()
+    losses = [float(abs(i - 25)) * 0.1 for i in range(50)]
+    r = client.post("/api/platform/evt",
+                    json={"losses": losses, "threshold": 1.5, "confidence_levels": [0.95, 0.99]})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "gpd" in body and "var" in body and "cvar" in body
+
+
+def test_evt_endpoint_422_missing():
+    client = _request()
+    r = client.post("/api/platform/evt", json={"losses": [0.1, 0.2]})
+    assert r.status_code == 422
+
+
+def test_evt_endpoint_422_empty():
+    client = _request()
+    r = client.post("/api/platform/evt", json={"losses": [], "threshold": 0.5})
+    assert r.status_code == 422
