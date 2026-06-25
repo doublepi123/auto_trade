@@ -1464,3 +1464,37 @@ def test_fixed_income_endpoint_422_periods():
         "price": 95.0, "face": 100.0, "coupon": 4.0, "periods": 0,
     })
     assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# P257 — PCA endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_pca_endpoint_200():
+    client = _request()
+    data = [[float(i), float(i * 2), float(i + j)] for i in range(10) for j in range(3)]
+    r = client.post("/api/platform/pca", json={"data": data[:10], "n_components": 2})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert len(body["eigenvalues"]) == 2
+    assert len(body["projection"][0]) == 2
+    assert abs(sum(body["explained_variance_ratio"]) - body["cumulative_variance_ratio"][-1]) < 1e-9
+
+
+def test_pca_endpoint_422_ragged():
+    client = _request()
+    r = client.post("/api/platform/pca", json={"data": [[1.0, 2.0], [3.0]]})
+    assert r.status_code == 422
+
+
+def test_pca_endpoint_422_empty():
+    client = _request()
+    r = client.post("/api/platform/pca", json={"data": []})
+    assert r.status_code == 422
+
+
+def test_pca_endpoint_422_too_few_samples():
+    client = _request()
+    r = client.post("/api/platform/pca", json={"data": [[1.0, 2.0]]})
+    assert r.status_code == 422

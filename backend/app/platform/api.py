@@ -2601,3 +2601,39 @@ def fixed_income_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
         except (TypeError, ValueError) as exc:
             raise HTTPException(status_code=422, detail=str(exc))
     return out
+
+
+# ---------------------------------------------------------------------------
+# P257 — PCA (cyclic Jacobi) endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/pca", dependencies=[Depends(require_api_key())])
+def pca_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P257: principal component analysis (Jacobi eigen-decomposition).
+
+    Body: ``{"data": [[...], ...]}`` (rows = samples, equal-length features),
+    optional ``"n_components": k``. Returns eigenvalues, eigenvectors,
+    explained/cumulative variance ratios, and the projection. 422 on invalid.
+    """
+    from app.platform.pca import pca
+
+    data = payload.get("data")
+    if not isinstance(data, list) or not data:
+        raise HTTPException(status_code=422, detail="data must be a non-empty matrix (list of rows)")
+    p = len(data[0])
+    for row in data:
+        if not isinstance(row, list) or len(row) != p:
+            raise HTTPException(status_code=422, detail="all rows must be equal-length lists")
+    n_components = payload.get("n_components")
+    k = None
+    if n_components is not None:
+        try:
+            k = int(n_components)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail="n_components must be an integer")
+    try:
+        res = pca([[float(v) for v in row] for row in data], n_components=k)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return res.to_dict()
