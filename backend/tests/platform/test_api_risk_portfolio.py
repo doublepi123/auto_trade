@@ -1387,3 +1387,40 @@ def test_heston_endpoint_422_bad_rho():
         "v0": 0.04, "kappa": 2.0, "theta": 0.04, "sigma": 0.3, "rho": 2.0,
     })
     assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# P255 — Nelson-Siegel-Svensson endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_yield_curve_endpoint_200():
+    client = _request()
+    r = client.post("/api/platform/yield-curve", json={
+        "maturities": [0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 30.0],
+        "yields": [0.02, 0.025, 0.03, 0.033, 0.038, 0.042, 0.045, 0.046],
+        "evaluate_maturities": [1.0, 5.0, 10.0],
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "beta0" in body and "tau1" in body and "rms" in body
+    assert len(body["curve"]) == 3
+    assert all(0.0 < c["zero_rate"] < 0.1 for c in body["curve"])
+
+
+def test_yield_curve_endpoint_422_mismatch():
+    client = _request()
+    r = client.post("/api/platform/yield-curve", json={"maturities": [1.0, 2.0], "yields": [0.03]})
+    assert r.status_code == 422
+
+
+def test_yield_curve_endpoint_422_too_few():
+    client = _request()
+    r = client.post("/api/platform/yield-curve", json={"maturities": [1.0], "yields": [0.03]})
+    assert r.status_code == 422
+
+
+def test_yield_curve_endpoint_422_missing():
+    client = _request()
+    r = client.post("/api/platform/yield-curve", json={"yields": [0.03, 0.04]})
+    assert r.status_code == 422

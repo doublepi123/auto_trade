@@ -2523,3 +2523,42 @@ def heston_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     return res.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P255 — Nelson-Siegel-Svensson yield curve endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/yield-curve", dependencies=[Depends(require_api_key())])
+def yield_curve_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P255: fit a Nelson-Siegel-Svensson yield curve + evaluate at requested maturities.
+
+    Body: ``{"maturities": [...], "yields": [...], "evaluate_maturities": [...]?}``.
+    Returns the NSS fit params + rms + the curve sampled at ``evaluate_maturities``
+    (defaults to ``maturities``). 422 on invalid inputs.
+    """
+    from app.platform.nelson_siegel import fit_nss, nelson_siegel_svensson_rate
+
+    ms = payload.get("maturities")
+    ys = payload.get("yields")
+    if not isinstance(ms, list) or not isinstance(ys, list) or len(ms) != len(ys):
+        raise HTTPException(status_code=422, detail="maturities and yields must be equal-length lists")
+    if len(ms) < 2:
+        raise HTTPException(status_code=422, detail="need at least 2 points")
+    if any((not isinstance(m, (int, float))) or m < 0 for m in ms):
+        raise HTTPException(status_code=422, detail="maturities must be non-negative numbers")
+    try:
+        fit = fit_nss([float(m) for m in ms], [float(y) for y in ys])
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    out = fit.to_dict()
+    eval_ms = payload.get("evaluate_maturities", ms)
+    if not isinstance(eval_ms, list):
+        raise HTTPException(status_code=422, detail="evaluate_maturities must be a list")
+    out["curve"] = [
+        {"maturity": float(m),
+         "zero_rate": nelson_siegel_svensson_rate(float(m), fit.beta0, fit.beta1, fit.beta2, fit.beta3, fit.tau1, fit.tau2)}
+        for m in eval_ms
+    ]
+    return out
