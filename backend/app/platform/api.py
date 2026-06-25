@@ -2006,3 +2006,69 @@ def options_pricing_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     return res.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P244 — implied volatility + SVI endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/implied-volatility", dependencies=[Depends(require_api_key())])
+def implied_volatility_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P244: invert Black-Scholes for σ, or fit a raw-SVI slice.
+
+    Mode 1 (single IV): ``{"mode": "iv", "option_type", "price", "spot",
+    "strike", "time_to_expiry", "risk_free", "dividend_yield"?}`` →
+    ``implied_vol``.
+    Mode 2 (SVI fit): ``{"mode": "svi", "log_moneyness": [...],
+    "implied_vols": [...], "time_to_expiry": T}`` → SVI params + rms.
+    422 on missing/invalid inputs.
+    """
+    from app.platform.implied_volatility import implied_volatility, svi_fit
+
+    mode = payload.get("mode", "iv")
+    if mode == "svi":
+        ks = payload.get("log_moneyness")
+        ivs = payload.get("implied_vols")
+        t = payload.get("time_to_expiry")
+        if not isinstance(ks, list) or not isinstance(ivs, list) or len(ks) != len(ivs):
+            raise HTTPException(status_code=422, detail="log_moneyness and implied_vols must be equal-length lists")
+        if len(ks) < 5:
+            raise HTTPException(status_code=422, detail="at least 5 points required to fit SVI")
+        try:
+            t = float(t)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail="time_to_expiry must be a number")
+        try:
+            fit = svi_fit([float(x) for x in ks], [float(x) for x in ivs], t)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        return {"mode": "svi", **fit.to_dict()}
+    # default: single IV
+    ot = payload.get("option_type")
+    if ot not in ("call", "put"):
+        raise HTTPException(status_code=422, detail="option_type must be 'call' or 'put'")
+    try:
+        price = float(payload["price"])
+        spot = float(payload["spot"])
+        strike = float(payload["strike"])
+        t = float(payload["time_to_expiry"])
+        r = float(payload["risk_free"])
+        q = float(payload.get("dividend_yield", 0.0))
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="price/spot/strike/time_to_expiry/risk_free must be numbers")
+    try:
+        iv = implied_volatility(ot, price, spot, strike, t, r, q)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return {
+        "mode": "iv",
+        "option_type": ot,
+        "price": price,
+        "implied_vol": iv,
+        "spot": spot,
+        "strike": strike,
+        "time_to_expiry": t,
+        "risk_free": r,
+        "dividend_yield": q,
+    }

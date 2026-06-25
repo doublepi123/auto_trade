@@ -831,3 +831,67 @@ def test_options_pricing_endpoint_422_nonpositive_vol():
         "time_to_expiry": 1.0, "risk_free": 0.05, "volatility": 0.0,
     })
     assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# P244 — implied volatility + SVI endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_implied_volatility_endpoint_iv_mode_200():
+    client = _request()
+    # First price a call, then invert.
+    r = client.post("/api/platform/options-pricing", json={
+        "option_type": "call", "spot": 100.0, "strike": 100.0,
+        "time_to_expiry": 1.0, "risk_free": 0.05, "volatility": 0.2,
+    })
+    price = r.json()["price"]
+    r2 = client.post("/api/platform/implied-volatility", json={
+        "mode": "iv", "option_type": "call", "price": price,
+        "spot": 100.0, "strike": 100.0, "time_to_expiry": 1.0, "risk_free": 0.05,
+    })
+    assert r2.status_code == 200, r2.text
+    body = r2.json()
+    assert abs(body["implied_vol"] - 0.2) < 1e-7
+
+
+def test_implied_volatility_endpoint_svi_mode_200():
+    client = _request()
+    ks = [k * 0.1 for k in range(-20, 21)]
+    ivs = [0.2 + 0.01 * abs(k) for k in ks]
+    r = client.post("/api/platform/implied-volatility", json={
+        "mode": "svi", "log_moneyness": ks, "implied_vols": ivs, "time_to_expiry": 1.0,
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["mode"] == "svi"
+    assert "a" in body and "b" in body and "rho" in body and "m" in body and "sigma" in body
+    assert body["sigma"] > 0.0
+    assert -1.0 <= body["rho"] <= 1.0
+
+
+def test_implied_volatility_endpoint_422_bad_type():
+    client = _request()
+    r = client.post("/api/platform/implied-volatility", json={
+        "mode": "iv", "option_type": "straddle", "price": 5.0,
+        "spot": 100.0, "strike": 100.0, "time_to_expiry": 1.0, "risk_free": 0.05,
+    })
+    assert r.status_code == 422
+
+
+def test_implied_volatility_endpoint_422_missing_price():
+    client = _request()
+    r = client.post("/api/platform/implied-volatility", json={
+        "mode": "iv", "option_type": "call",
+        "spot": 100.0, "strike": 100.0, "time_to_expiry": 1.0, "risk_free": 0.05,
+    })
+    assert r.status_code == 422
+
+
+def test_implied_volatility_endpoint_422_svi_few_points():
+    client = _request()
+    r = client.post("/api/platform/implied-volatility", json={
+        "mode": "svi", "log_moneyness": [0.0, 0.1, 0.2],
+        "implied_vols": [0.2, 0.21, 0.22], "time_to_expiry": 1.0,
+    })
+    assert r.status_code == 422
