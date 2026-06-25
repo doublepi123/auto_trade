@@ -2290,3 +2290,46 @@ def robust_statistics_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     return res.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P249 — bandit strategy selection endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/bandits", dependencies=[Depends(require_api_key())])
+def bandits_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P249: simulate a multi-armed bandit over K arms.
+
+    Body: ``{"algorithm": "epsilon_greedy"|"ucb1"|"thompson_beta"|
+    "thompson_gaussian", "true_means": [...], "n_steps": N, "seed": s?,
+    "epsilon": 0.1?, "sigmas": [...]?}``. 422 on invalid.
+    """
+    from app.platform.bandits import simulate
+
+    alg = payload.get("algorithm")
+    if alg not in ("epsilon_greedy", "ucb1", "thompson_beta", "thompson_gaussian"):
+        raise HTTPException(status_code=422, detail="algorithm must be epsilon_greedy/ucb1/thompson_beta/thompson_gaussian")
+    means = payload.get("true_means")
+    if not isinstance(means, list) or not means:
+        raise HTTPException(status_code=422, detail="true_means must be a non-empty list")
+    try:
+        n_steps = int(payload["n_steps"])
+        seed = int(payload.get("seed", 0))
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="n_steps/seed must be integers")
+    try:
+        epsilon = float(payload.get("epsilon", 0.1))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="epsilon must be a number")
+    sigmas = payload.get("sigmas")
+    try:
+        sigmas_f = [float(s) for s in sigmas] if sigmas is not None else None
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="sigmas must be numeric")
+    try:
+        res = simulate(alg, [float(m) for m in means], n_steps, seed=seed,
+                       epsilon=epsilon, sigmas=sigmas_f)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return res.to_dict()

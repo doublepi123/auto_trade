@@ -1068,3 +1068,51 @@ def test_robust_statistics_endpoint_422_partial_regression():
     client = _request()
     r = client.post("/api/platform/robust-statistics", json={"xs": [1.0, 2.0], "y": [1.0, 2.0]})
     assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# P249 — bandits endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_bandits_endpoint_ucb1_200():
+    client = _request()
+    r = client.post("/api/platform/bandits", json={
+        "algorithm": "ucb1", "true_means": [0.1, 0.9, 0.2], "n_steps": 500, "seed": 42,
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["algorithm"] == "ucb1"
+    assert body["arm_counts"][1] > body["arm_counts"][0]
+    assert "cumulative_regret" in body
+
+
+def test_bandits_endpoint_thompson_gaussian_200():
+    client = _request()
+    r = client.post("/api/platform/bandits", json={
+        "algorithm": "thompson_gaussian", "true_means": [0.1, 0.9],
+        "sigmas": [0.1, 0.1], "n_steps": 200, "seed": 3,
+    })
+    assert r.status_code == 200, r.text
+
+
+def test_bandits_endpoint_422_bad_algorithm():
+    client = _request()
+    r = client.post("/api/platform/bandits", json={
+        "algorithm": "softmax", "true_means": [0.5], "n_steps": 10,
+    })
+    assert r.status_code == 422
+
+
+def test_bandits_endpoint_422_missing_means():
+    client = _request()
+    r = client.post("/api/platform/bandits", json={"algorithm": "ucb1", "n_steps": 10})
+    assert r.status_code == 422
+
+
+def test_bandits_endpoint_422_thompson_gaussian_no_sigmas():
+    client = _request()
+    r = client.post("/api/platform/bandits", json={
+        "algorithm": "thompson_gaussian", "true_means": [0.1, 0.9], "n_steps": 10,
+    })
+    assert r.status_code == 422
