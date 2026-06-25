@@ -1905,6 +1905,38 @@
 | 3 | 日志审计与报警 | 待后续实施 | 排在 P4 之后 |
 | 4 | 响应式与移动端适配 | 待后续实施 | 排在 P4 之后 |
 
+## P149+ 平台/量化深度迭代（自主 10 轮 × 多批）
+
+| 批次 | 范围 | 状态 | 备注 |
+|------|------|------|------|
+| P149–P158 | 平台插件 SDK + 事件流 + 组合/Paper/风控基础 | ✅ 已交付 | PlatformRunner + PaperBroker + Portfolio |
+| P159–P172 | 研究级分析 + 执行深度（Sizer/指标/Universe/优化器/OMS/持仓/构造/账本/调度/MC） | ✅ 已交付 | 参考 Nautilus/Lean |
+| P173–P182 | 机构级编排（OMS/持仓/构造/预热/账本/调度/MC/投影/多币种） | ✅ 已交付 | 事件溯源 CQRS |
+| P183–P192 | 算法执行 + 研究层 + tearsheet + 延迟 | ✅ 已交付 | TWAP/VWAP/Brinson/智能寻优 |
+| P193–P202 | 分布式总线 / 订单簿 / 连续合约 / 因子研究 / 隔离 / 衰减 / TCA / SVI / PBO/DSR / 多期 Brinson | ✅ 已交付 | 纵深补齐 |
+| P203–P212 | 风险科学 + 投资组合优化（LW 收缩 / Markowitz / BL / HRP / VaR / 回撤 / 比率族 / Pain / 肥尾） | ✅ 已交付 | 参考 PyPortfolioOpt/Jorion |
+| P213–P222 | 风险研究 II（regime/CPCV/风格分析/换手优化/风险预算/MFE-MAE/IS/收益日历/压力报告/稳定性） | ✅ 已交付 | 参考 Nautilus/López de Prado |
+| P223–P232 | 配对/微观/执行/风险 III（协整/Kelly/GARCH/VPIN/Almgren-Chriss/Hawkes/历史压力/因子风险/Sobol/EVT） | ✅ 已交付 | 参考 Engle-Granger/McNeil-Frey |
+| P233–P242 | 因果/诊断 IV（Granger-PCMCI/HMM/copula/回撤预测/流动性/动量因子/组合分解/SPA/执行质量/分散度） | ✅ 已交付 | 参考 Hamilton/Sklar/Hansen-White |
+| P243–P252 | 期权/随机过程/鲁棒/路由/多元相依 V（期权定价+Greeks/IV+SVI/Kalman+RTS/GBM-OU-CIR-Merton/统计套利/鲁棒统计/Bandit/LOESS/SOR/Vine Copula） | ✅ 已交付（2026-06-26） | 参考 QuantLib/filterpy/SMPyBandits/pyvinecopulib |
+
+### P243–P252 交付详情（2026-06-26）
+
+10 个新 `app/platform/` 模块 + 10 个新 `/api/platform/*` 端点，纯 Python、零新依赖、确定性（`random.Random(seed)`）、可选注入、默认路径零行为变更：
+
+- **P243** `options_pricing.py` — Black-Scholes-Merton 欧式 call/put 闭式 + 全 Greeks（Δ/Γ/ν/Θ/ρ/vanna/volga）+ Merton 连续分红；`POST /api/platform/options-pricing`。
+- **P244** `implied_volatility.py` — BS 隐含波动率（Brenner-Subrahmanyam 初值 + Newton-Raphson + bisection 回退 + 无套利边界）+ Gatheral raw-SVI 5 参 NLSQ 拟合（Gauss-Newton/LM + 投影约束）；`POST /api/platform/implied-volatility`（`mode=iv`/`mode=svi`）。
+- **P245** `kalman_filter.py` — 线性 Kalman 滤波（Joseph 形式）+ RTS 固定区间平滑 + 静态/逐步矩阵 + 可选控制输入；`POST /api/platform/kalman-filter`（`smooth?`）。
+- **P246** `stochastic_processes.py` — GBM/OU/CIR/Merton 跳跃扩散 Euler 仿真（Box-Muller + Knuth 泊松）+ 解析矩；`POST /api/platform/stochastic-processes`。
+- **P247** `stat_arb_signals.py` — 距离法 spread + z-score 进出场（LONG/SHORT/FLAT + 滞回）+ 复用 P223 OU 半衰期；`POST /api/platform/stat-arb-signals`。
+- **P248** `robust_statistics.py` — MAD/winsorize/trimmed mean/Theil-Sen/Huber IRLS；`POST /api/platform/robust-statistics`。
+- **P249** `bandits.py` — ε-greedy/UCB1/Thompson Beta+Gaussian + regret；`POST /api/platform/bandits`。
+- **P250** `loess.py` — Cleveland LOWESS（tricube + 鲁棒 bisquare 迭代）；`POST /api/platform/loess`。
+- **P251** `smart_order_routing.py` — 多 venue L1 最优价贪婪 + tick 量化 + 拆单 + WAP/费用；`POST /api/platform/smart-order-routing`。
+- **P252** `vine_copula.py` — C-vine/D-vine 逐对 copula（Gaussian/Gumbel/Clayton，复用 P235）+ 对数似然 + AIC/BIC；`POST /api/platform/vine-copula`。
+
+新增共享数学 `_math_utils.py`（`norm_cdf`/`norm_inv` Acklam/`norm_pdf`，无 scipy），供 P243/P244/P246/P252 复用。全量回归 2431 passed（基线 +417 新增）；`basedpyright app/platform/` 0/0/0。下一批 P253+ 留待后续。
+
 ---
 
 ## 实施建议

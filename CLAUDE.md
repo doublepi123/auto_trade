@@ -149,7 +149,18 @@ auto_trade/
 │   │   │   ├── spa_test.py                # P240：SPA 检验（Hansen-White superior predictive ability + 确定性 stationary block bootstrap）
 │   │   │   ├── execution_quality.py       # P241：执行质量计分卡（fill 统计 + 滑点分布 + 反转 adverse-selection + A/B/C/D 评级）
 │   │   │   ├── diversification.py         # P242：分散度（effective N + Choueifaty-Coignard DR + 分散收益 + HHI 集中度）
-│   │   │   └── api.py                      # /api/platform/*（strategies/backtest/runs/tearsheet/analyze/bars/optimize/montecarlo/snapshot/events/transactions/replay/factors/tca/risk-metrics/portfolio-optimize/regime/cpcv/style-analysis/trade-excursion/shortfall/returns-calendar/stress-report/stability/cointegration/kelly/volatility/microstructure/execution-cost/hawkes/historical-stress/factor-risk/sensitivity/evt/causal-analysis/regime-hmm/copula/drawdown-forecast/liquidity-metrics/momentum-factors/portfolio-decomposition/spa-test/execution-quality/diversification）
+│   │   │   ├── _math_utils.py             # P243：共享数学（norm_cdf/norm_inv Acklam/norm_pdf，无 scipy）
+│   │   │   ├── options_pricing.py         # P243：欧式期权 BSM 闭式定价 + Greeks（Δ/Γ/ν/Θ/ρ/vanna/volga）
+│   │   │   ├── implied_volatility.py      # P244：BS 隐含波动率（Newton+bisection）+ Gatheral SVI 5 参原始参数化拟合
+│   │   │   ├── kalman_filter.py           # P245：线性 Kalman 滤波（Joseph 形式）+ RTS 固定区间平滑
+│   │   │   ├── stochastic_processes.py    # P246：随机过程（GBM/OU/CIR/Merton-JD Euler 仿真 + 解析矩）
+│   │   │   ├── stat_arb_signals.py        # P247：统计套利信号（距离法 spread + z-score 阈值 + 复用 P223 OU 半衰期）
+│   │   │   ├── robust_statistics.py       # P248：鲁棒统计（MAD/winsorize/trimmed mean/Theil-Sen/Huber IRLS）
+│   │   │   ├── bandits.py                 # P249：多臂 Bandit（ε-greedy/UCB1/Thompson Beta+Gaussian + regret）
+│   │   │   ├── loess.py                   # P250：LOESS/LOWESS（Cleveland tricube + 鲁棒 bisquare 迭代）
+│   │   │   ├── smart_order_routing.py     # P251：智能订单路由（多 venue 最优价 + tick 量化 + 拆单计划）
+│   │   │   ├── vine_copula.py             # P252：Vine Copula（C-vine/D-vine 逐对 copula 构造 + AIC/BIC）
+│   │   │   └── api.py                      # /api/platform/*（strategies/backtest/runs/tearsheet/analyze/bars/optimize/montecarlo/snapshot/events/transactions/replay/factors/tca/risk-metrics/portfolio-optimize/regime/cpcv/style-analysis/trade-excursion/shortfall/returns-calendar/stress-report/stability/cointegration/kelly/volatility/microstructure/execution-cost/hawkes/historical-stress/factor-risk/sensitivity/evt/causal-analysis/regime-hmm/copula/drawdown-forecast/liquidity-metrics/momentum-factors/portfolio-decomposition/spa-test/execution-quality/diversification/options-pricing/implied-volatility/kalman-filter/stochastic-processes/stat-arb-signals/robust-statistics/bandits/loess/smart-order-routing/vine-copula）
 │   │   ├── strategies/                     # 策略插件包（IntervalStrategy 首个插件）
 │   │   │   ├── __init__.py
 │   │   │   └── interval_strategy.py        # 区间策略插件化实现
@@ -229,7 +240,7 @@ cd frontend && npm run type-check
 
 ### 覆盖率（coverage）
 
-`pytest.ini` 已挂上 `pytest-cov`，运行 `pytest` 时自动生成 terminal 报告。`.coveragerc` 排除 `app/main.py` / `app/runner.py` / `app/database.py` / `app/config.py` / `app/api/ws.py`（这些是启动/事件循环粘合层，单测覆盖成本高）。当前基线：**2014 passed**（平台层 P149–P222 全部已并入，含 P203–P212 风险科学 + 投资组合优化 10 个模块，P213–P222 10 个新模块与 10 个新端点：regime/cpcv/style-analysis/trade-excursion/shortfall/returns-calendar/stress-report/stability + turnover/risk_budgeting portfolio-optimize 方法，及 P223–P232 第二批 10 个新模块与 10 个新端点：cointegration/kelly/volatility/microstructure/execution-cost/hawkes/historical-stress/factor-risk/sensitivity/evt，及 P233–P242 第三批 10 个新模块与 10 个新端点：causal-analysis/regime-hmm/copula/drawdown-forecast/liquidity-metrics/momentum-factors/portfolio-decomposition/spa-test/execution-quality/diversification，覆盖率 ~90%）。提交 PR 时如改动某模块覆盖率下降超过 5%，请在描述里说明。
+`pytest.ini` 已挂上 `pytest-cov`，运行 `pytest` 时自动生成 terminal 报告。`.coveragerc` 排除 `app/main.py` / `app/runner.py` / `app/database.py` / `app/config.py` / `app/api/ws.py`（这些是启动/事件循环粘合层，单测覆盖成本高）。当前基线：**2431 passed**（平台层 P149–P252 全部已并入，含 P203–P212 风险科学 + 投资组合优化 10 个模块，P213–P222 10 个新模块与 10 个新端点，P223–P232 第二批 10 个新模块与 10 个新端点，P233–P242 第三批 10 个新模块与 10 个新端点，及 P243–P252 第四批 10 个新模块与 10 个新端点：options_pricing/implied_volatility/kalman_filter/stochastic_processes/stat_arb_signals/robust_statistics/bandits/loess/smart_order_routing/vine_copula，覆盖率 ~90%；已知 4 项 pre-existing 浮点边界失败：`test_fat_tail.stable_fit_handles_constant_returns` / `test_risk_ratios.sharpe_zero_when_constant_returns`（常返序列 std≈1e-18 ≠ 0）+ `test_config` 两项 env-file 顺序敏感，与本批无关）。提交 PR 时如改动某模块覆盖率下降超过 5%，请在描述里说明。
 
 ## API 速查
 
@@ -279,6 +290,16 @@ cd frontend && npm run type-check
 | 平台 SPA 检验 | `POST /api/platform/spa-test`（`benchmark_lf` + `model_lfs` + 可选 `B`/`block_length` → Hansen-White SPA p-value + 逐模型 p；422 缺/空；带 API key） |
 | 平台执行质量 | `POST /api/platform/execution-quality`（`fills` + 可选 `benchmark_prices`/`post_fill_prices` → 统计 + 滑点分布 + adverse-selection + 评级；422 缺/空；带 API key） |
 | 平台分散度 | `POST /api/platform/diversification`（`weights` + `sigmas` + `cov` → effective N + DR + 分散收益 + HHI；422 缺/空；带 API key） |
+| 平台期权定价 | `POST /api/platform/options-pricing`（BSM 欧式 call/put price + Δ/Γ/ν/Θ/ρ/vanna/volga；422 缺/非正；带 API key） |
+| 平台隐含波动率 | `POST /api/platform/implied-volatility`（`mode=iv`：Newton+bisection 反演 σ；`mode=svi`：Gatheral SVI 5 参原始参数化 NLSQ 拟合；422 缺/越界；带 API key） |
+| 平台 Kalman 滤波 | `POST /api/platform/kalman-filter`（线性 Kalman predict/update（Joseph 形式）+ 可选 RTS 平滑；`observations`/`F`/`H`/`Q`/`R`/`x0`/`P0` + `smooth?`/`B`?/`u`?；422 缺/奇异；带 API key） |
+| 平台随机过程 | `POST /api/platform/stochastic-processes`（`process` gbm/ou/cir/merton_jd Euler 仿真 + 解析矩；422 缺/非法；带 API key） |
+| 平台统计套利 | `POST /api/platform/stat-arb-signals`（距离法 spread + z-score 进出场（LONG/SHORT/FLAT）+ 复用 P223 OU 半衰期；422 缺/不等长/非法阈值；带 API key） |
+| 平台鲁棒统计 | `POST /api/platform/robust-statistics`（MAD/winsorize/trimmed mean/Huber IRLS + 可选 Theil-Sen 回归；422 缺/空；带 API key） |
+| 平台 Bandit | `POST /api/platform/bandits`（ε-greedy/UCB1/Thompson Beta+Gaussian 仿真 + regret；422 缺/非法算法；带 API key） |
+| 平台 LOESS | `POST /api/platform/loess`（Cleveland tricube 局部线性 + 鲁棒 bisquare 迭代；422 缺/不等长/非法带宽；带 API key） |
+| 平台订单路由 | `POST /api/platform/smart-order-routing`（多 venue L1 最优价贪婪 + tick 量化 + 拆单 + WAP/费用；422 缺/空/非法 side；带 API key） |
+| 平台 Vine Copula | `POST /api/platform/vine-copula`（C-vine/D-vine 逐对 copula（Gaussian/Gumbel/Clayton，复用 P235）+ 对数似然 + AIC/BIC；422 缺/空/常数列；带 API key） |
 | 组合配置 | `GET /api/portfolio/config`（组合配置列表）、`PUT /api/portfolio/config/{name}`（保存/更新组合配置；400 name 不匹配、422 校验/缺字段；带 API key） |
 | 组合归因 | `GET /api/portfolio/attribution?name=`（按标的 FIFO realized + unrealized PnL 与贡献；未知组合 404；带 API key） |
 | 组合 kill-switch | `GET/POST /api/portfolio/kill-switch`、`POST /api/portfolio/kill-switch/disable`（模块级熔断；arm 写审计 `PORTFOLIO_KILL_SWITCH`；arm 后 `PortfolioRunner.rebalance` 跳过） |
@@ -416,3 +437,5 @@ cd frontend && npm run type-check
 - 已交付迭代的规格文档保存在 `docs/superpowers/specs/`；实施计划在 `docs/superpowers/plans/`。
 - **子目录 AGENTS.md**（仅 `backend/app/domain/prompt/AGENTS.md`，涵盖 LLM 插件架构契约）。其他子目录知识已在根文档完整覆盖，不再重复。
 - 当前下一迭代（P23 前端实时通知中心，Roadmap 建议拆 P23a WS 事件流 + P23b 通知中心 UI）。
+
+- **期权/随机过程/鲁棒/路由/多元相依 V（P243–P252，参考 QuantLib BlackScholesProcess、Gatheral SVI、filterpy/pykalman、QuantLib StochasticProcess、Avellaneda-Lee、statsmodels.robust、SMPyBandits、statsmodels.lowess、Nautilus OrderRouting/FIX、pyvinecopulib/Bedford-Cooke-Aas）**：`_math_utils.py`（共享 `norm_cdf`（erf）/`norm_inv`（Acklam 逆正态）/`norm_pdf`，无 scipy，供 P243/P244/P246/P252 复用）+ `options_pricing.py`（Black-Scholes-Merton 1973 欧式 call/put 闭式 + Merton 连续分红 + 全 Greeks Δ/Γ/ν/Θ/ρ/vanna/volga，`OptionsResult`）+ `implied_volatility.py`（Brenner-Subrahmanyam 初值 + Newton-Raphson 反演 σ（bisection 回退 + 无套利边界校验）+ Gatheral 2004 raw-SVI 5 参原始参数化 `w(k)=a+b(ρ(k−m)+√((k−m)²+σ²))` Gauss-Newton/LM NLSQ 拟合（`a≥0,b≥0,|ρ|≤1,σ>0` 投影约束 + 5×5 高斯消元），`ImpliedVolResult`/`SviFit`）+ `kalman_filter.py`（线性 Kalman predict/update + Joseph 形式协方差稳定更新 + 静态/逐步矩阵 + 可选控制输入 B/u + 记录逐步 predicted mean/cov 供 RTS，`rts_smoother` Rauch-Tung-Striebel 1965 固定区间后向平滑，`KalmanResult`）+ `stochastic_processes.py`（GBM 精确 log-Euler + OU Euler-Maruyama + CIR 全截断/反射零 Euler + Merton 1976 复合泊松跳扩散（Box-Muller 正态 + Knuth 泊松，`random.Random(seed)` 确定性）+ 各过程解析矩 `E[ln S]`/`Var`/OU 平稳方差/CIR Feller 标志/Merton 跳计数，`ProcessResult`）+ `stat_arb_signals.py`（Gatev-Goetzmann-Rouwenhorst 2006 距离法 spread（归一化起价 1.0）+ Avellaneda-Lee 2008 z-score 进出场阈值（SHORT_SPREAD/LONG_SPREAD/FLAT + 滞回保持）+ 复用 P223 `half_life_ou` OU 半衰期，`StatArbResult`）+ `robust_statistics.py`（MAD `median(|x−median|)·1.4826` + winsorize α 分位裁剪 + α-trimmed mean + Theil 1950/Sen 1968 中位斜率回归（O(n²) 配对斜率）+ Huber 1964 M-estimator IRLS（MAD 尺度 + bisquare 风格权重）+ `RobustStatsResult` 聚合）+ `bandits.py`（ε-greedy / Auer 2002 UCB1 `mean+√(2 ln t/n_i)` / Thompson 1933 Beta 共轭（Marsaglia-Tsang Gamma 采样，shape<1 boosting）/ Thompson Gaussian 共轭后验 + `simulate` 伯努利/高斯奖励 + `regret` 累计后悔，`BanditResult`，全程 `random.Random(seed)`）+ `loess.py`（Cleveland 1979 LOWESS：tricube 核 `(1−|u|³)³` + k 近邻 + 加权 2×2 局部线性正规方程 + 鲁棒 bisquare 迭代重加权（残差/MAD 缩放）+ 零权重回退非鲁棒拟合，`LowessResult`）+ `smart_order_routing.py`（多 venue L1 最优价贪婪路由：buy 取最低有效 ask（`ask+fee`）/sell 取最高有效 bid（`bid−fee`）+ 逐 venue 深度上限拆单 + tick 量化（buy 向下/sell 向上）+ WAP/总费用/未成交余量，纯计算不接 broker，`VenueQuote`/`SorResult`）+ `vine_copula.py`（Bedford-Cooke 2001/Aas 2009 vine：C-vine（中心资产树，全配对）与 D-vine（链式相邻）level-1 逐对 copula 拟合，复用 P235 `kendall_tau`/`gumbel_fit`/`clayton_fit` + Gaussian `ρ=sin(πτ/2)` + 经验 CDF rank 伪观测 + 闭式 pair 对数似然 + AIC/BIC，`PairCopula`/`VineCopulaResult`）。**新增端点：** `POST /api/platform/options-pricing` + `POST /api/platform/implied-volatility`（`mode=iv`/`mode=svi`）+ `POST /api/platform/kalman-filter`（`smooth?`）+ `POST /api/platform/stochastic-processes` + `POST /api/platform/stat-arb-signals` + `POST /api/platform/robust-statistics` + `POST /api/platform/bandits` + `POST /api/platform/loess` + `POST /api/platform/smart-order-routing` + `POST /api/platform/vine-copula`。全部**零新依赖**、确定性、纯 Python（numpy 仍未引入；RNG 一律 `random.Random(seed)`），可选注入、默认路径零行为变更。

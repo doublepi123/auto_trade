@@ -501,6 +501,67 @@ auto_trade/
 |----------|------|-------------|
 | `WS` | `/ws` | 实时推送引擎状态、价格、风控标志等 JSON |
 
+### 平台层（/api/platform/*）— P149+ 量化深度
+
+> 全部需 `X-API-Key`（`AUTO_TRADE_API_KEY` 为空时仅 `dev/test` 放行）；422 表示缺参/非法输入。
+
+| Method | Path | 描述 |
+|--------|------|------|
+| `GET` | `/api/platform/strategies` | 已注册策略插件列表（含 parameter_schema） |
+| `POST` | `/api/platform/backtest` | 平台回测（任一插件在 K 线上跑 PaperBroker） |
+| `POST` | `/api/platform/tearsheet` | 完整 tearsheet（`format=csv\|json`） |
+| `POST` | `/api/platform/backtest/runs` | 命名保存回测运行；`GET /runs`、`GET /runs/{id}`、`GET /runs/compare?ids=` |
+| `POST` | `/api/platform/optimize` | grid / walk-forward 参数寻优 |
+| `POST` | `/api/platform/analyze` | 权益曲线绩效分析（Sharpe/Sortino/maxDD/Calmar + 可选 benchmark alpha/beta） |
+| `POST` | `/api/platform/montecarlo` | bootstrap 蒙特卡洛稳健性（分位 + 破产概率） |
+| `GET` | `/api/platform/events` | `event_log` 分页（`symbol`/`since`/`limit∈[1,10000]`） |
+| `GET` | `/api/platform/bars` | 历史 bar 重采样（`symbol`/`resolution_minutes`/`limit`） |
+| `POST` | `/api/platform/replay` | 确定性窗口回放 |
+| `GET` | `/api/platform/transactions` | per-fill 交易账本查询 |
+| `GET` | `/api/platform/snapshot` | 运行中 PlatformRunner 快照 |
+| `GET` | `/api/platform/factors/snapshots` · `POST` · `GET /factors/ic` | 因子快照 + IC 时序 |
+| `GET` | `/api/platform/tca` | TCA 交易成本分析 |
+| `POST` | `/api/platform/risk-metrics` | VaR/CVaR + drawdown + pain + tail + ratios 统一入口 |
+| `POST` | `/api/platform/portfolio-optimize` | `min_variance`/`max_sharpe`/`hrp`/`black_litterman`/`turnover`/`risk_budgeting` |
+| `POST` | `/api/platform/regime` | 市场状态（BULL/BEAR/SIDEWAYS） |
+| `POST` | `/api/platform/cpcv` | 组合交叉验证枚举 |
+| `POST` | `/api/platform/style-analysis` | Sharpe 1992 风格分析 |
+| `POST` | `/api/platform/trade-excursion` | per-trade MFE/MAE + holding_bars |
+| `POST` | `/api/platform/shortfall` | Perold implementation shortfall |
+| `POST` | `/api/platform/returns-calendar` | 收益日历热力图 |
+| `POST` | `/api/platform/stress-report` | 压力场景报告聚合 |
+| `POST` | `/api/platform/stability` | walk-forward 参数稳定性 |
+| `POST` | `/api/platform/cointegration` | Engle-Granger 协整 + OU 半衰期 |
+| `POST` | `/api/platform/kelly` | Kelly 仓位定尺 |
+| `POST` | `/api/platform/volatility` | EWMA + GARCH(1,1) + Parkinson |
+| `POST` | `/api/platform/microstructure` | VPIN + OFI + Kyle λ |
+| `POST` | `/api/platform/execution-cost` | Almgren-Chriss 最优执行 |
+| `POST` | `/api/platform/hawkes` | Hawkes 自激发过程 |
+| `POST` | `/api/platform/historical-stress` | 历史压力场景 |
+| `POST` | `/api/platform/factor-risk` | Barra 因子风险分解 |
+| `POST` | `/api/platform/sensitivity` | Saltelli Sobol 参数敏感度 |
+| `POST` | `/api/platform/evt` | 极值理论（GPD + 尾 VaR/CVaR） |
+| `POST` | `/api/platform/causal-analysis` | Granger + PCMCI 因果发现 |
+| `POST` | `/api/platform/regime-hmm` | HMM 隐状态识别 |
+| `POST` | `/api/platform/copula` | 双变量 Copula 尾相依 |
+| `POST` | `/api/platform/drawdown-forecast` | 回撤预测 |
+| `POST` | `/api/platform/liquidity-metrics` | Amihud/Roll/Pastor/Corwin-Schultz |
+| `POST` | `/api/platform/momentum-factors` | Jegadeesh-Titman / De-Bondt / TSMOM |
+| `POST` | `/api/platform/portfolio-decomposition` | 收益→因子分解 |
+| `POST` | `/api/platform/spa-test` | Hansen-White SPA 检验 |
+| `POST` | `/api/platform/execution-quality` | 执行质量计分卡 |
+| `POST` | `/api/platform/diversification` | 有效 N + DR + HHI |
+| `POST` | `/api/platform/options-pricing` | BSM 欧式 call/put price + 全 Greeks |
+| `POST` | `/api/platform/implied-volatility` | `mode=iv` 隐含波动率 / `mode=svi` SVI 拟合 |
+| `POST` | `/api/platform/kalman-filter` | 线性 Kalman + 可选 RTS 平滑 |
+| `POST` | `/api/platform/stochastic-processes` | GBM/OU/CIR/Merton-JD 仿真 + 矩 |
+| `POST` | `/api/platform/stat-arb-signals` | 距离法 stat-arb 信号 + z-score |
+| `POST` | `/api/platform/robust-statistics` | MAD/winsorize/trimmed/Theil-Sen/Huber |
+| `POST` | `/api/platform/bandits` | ε-greedy/UCB1/Thompson 仿真 |
+| `POST` | `/api/platform/loess` | LOESS/LOWESS 局部回归 |
+| `POST` | `/api/platform/smart-order-routing` | 多 venue 最优价路由 + 拆单 |
+| `POST` | `/api/platform/vine-copula` | C-vine/D-vine 多元 copula + AIC/BIC |
+
 > **说明：** 受保护 API 在配置了 `AUTO_TRADE_API_KEY` 时要求 `X-API-Key`；`AUTO_TRADE_API_KEY` 为空仅 `dev/test` 放行，`prod` 会返回 401。Docker/nginx 与 Vite 代理会在服务端注入该 header，避免把密钥下发到 SPA。
 
 ## 配置参考
