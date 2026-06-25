@@ -2212,3 +2212,42 @@ def stochastic_processes_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
     if payload.get("include_moments", True):
         out["moments"] = mom
     return out
+
+
+# ---------------------------------------------------------------------------
+# P247 — statistical-arbitrage signals endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/stat-arb-signals", dependencies=[Depends(require_api_key())])
+def stat_arb_signals_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P247: distance-method stat-arb signals + z-score + OU half-life.
+
+    Body: ``{"y": [...], "x": [...], "entry": 2.0?, "exit": 0.5?,
+    "window": int?}``. 422 on missing/unequal/empty/invalid thresholds.
+    """
+    from app.platform.stat_arb_signals import stat_arb_signals
+
+    y = payload.get("y")
+    x = payload.get("x")
+    if not isinstance(y, list) or not isinstance(x, list):
+        raise HTTPException(status_code=422, detail="y and x must be lists")
+    if len(y) != len(x):
+        raise HTTPException(status_code=422, detail="y and x must have equal length")
+    if not y:
+        raise HTTPException(status_code=422, detail="y and x must be non-empty")
+    try:
+        entry = float(payload.get("entry", 2.0))
+        exit_ = float(payload.get("exit", 0.5))
+        window = payload.get("window")
+        window_i = int(window) if window is not None else None
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="entry/exit/window must be numbers")
+    try:
+        res = stat_arb_signals(
+            [float(v) for v in y], [float(v) for v in x],
+            entry=entry, exit=exit_, window=window_i,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return res.to_dict()

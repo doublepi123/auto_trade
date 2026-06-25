@@ -992,3 +992,42 @@ def test_stochastic_processes_422_invalid_sigma():
         "horizon": 1.0, "n_steps": 10,
     })
     assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# P247 — stat-arb signals endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_stat_arb_signals_endpoint_200():
+    client = _request()
+    base = [100.0 + i for i in range(60)]
+    y = [b + 10.0 * (i % 7 - 3) * 0.3 for i, b in enumerate(base)]
+    x = base
+    r = client.post("/api/platform/stat-arb-signals", json={
+        "y": y, "x": x, "entry": 1.0, "exit": 0.3,
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "spread" in body and "signals" in body and "half_life" in body
+    assert len(body["signals"]) == 60
+
+
+def test_stat_arb_signals_endpoint_422_mismatch():
+    client = _request()
+    r = client.post("/api/platform/stat-arb-signals", json={"y": [1, 2], "x": [1]})
+    assert r.status_code == 422
+
+
+def test_stat_arb_signals_endpoint_422_empty():
+    client = _request()
+    r = client.post("/api/platform/stat-arb-signals", json={"y": [], "x": []})
+    assert r.status_code == 422
+
+
+def test_stat_arb_signals_endpoint_422_bad_thresholds():
+    client = _request()
+    r = client.post("/api/platform/stat-arb-signals", json={
+        "y": [100.0, 101.0], "x": [100.0, 100.0], "entry": 0.3, "exit": 0.5,
+    })
+    assert r.status_code == 422
