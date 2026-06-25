@@ -1031,3 +1031,40 @@ def test_stat_arb_signals_endpoint_422_bad_thresholds():
         "y": [100.0, 101.0], "x": [100.0, 100.0], "entry": 0.3, "exit": 0.5,
     })
     assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# P248 — robust statistics endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_robust_statistics_endpoint_200():
+    client = _request()
+    r = client.post("/api/platform/robust-statistics", json={
+        "xs": [1.0, 2.0, 3.0, 4.0, 5.0],
+        "y": [2.0 + 3.0 * v for v in [1.0, 2.0, 3.0, 4.0, 5.0]],
+        "x": [1.0, 2.0, 3.0, 4.0, 5.0],
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert abs(body["median"] - 3.0) < 1e-9
+    assert body["theil_sen_slope"] == 3.0
+    assert "huber_location" in body
+
+
+def test_robust_statistics_endpoint_422_empty():
+    client = _request()
+    r = client.post("/api/platform/robust-statistics", json={"xs": []})
+    assert r.status_code == 422
+
+
+def test_robust_statistics_endpoint_422_missing():
+    client = _request()
+    r = client.post("/api/platform/robust-statistics", json={})
+    assert r.status_code == 422
+
+
+def test_robust_statistics_endpoint_422_partial_regression():
+    client = _request()
+    r = client.post("/api/platform/robust-statistics", json={"xs": [1.0, 2.0], "y": [1.0, 2.0]})
+    assert r.status_code == 422

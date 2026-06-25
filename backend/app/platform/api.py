@@ -2251,3 +2251,42 @@ def stat_arb_signals_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     return res.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P248 — robust statistics endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/robust-statistics", dependencies=[Depends(require_api_key())])
+def robust_statistics_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P248: robust location/scale + optional Theil-Sen regression.
+
+    Body: ``{"xs": [...]}`` plus optional ``{"y": [...], "x": [...]}`` for
+    Theil-Sen, and ``alpha?``, ``huber_k?``. 422 on missing/empty/invalid.
+    """
+    from app.platform.robust_statistics import robust_stats
+
+    xs = payload.get("xs")
+    if not isinstance(xs, list) or not xs:
+        raise HTTPException(status_code=422, detail="xs must be a non-empty list")
+    y = payload.get("y")
+    x = payload.get("x")
+    if (y is None) != (x is None):
+        raise HTTPException(status_code=422, detail="y and x must be supplied together")
+    try:
+        alpha = float(payload.get("alpha", 0.1))
+        huber_k = float(payload.get("huber_k", 1.345))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="alpha/huber_k must be numbers")
+    try:
+        xs_f = [float(v) for v in xs]
+        y_f = [float(v) for v in y] if y is not None else None
+        x_f = [float(v) for v in x] if x is not None else None
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="inputs must be numeric")
+    try:
+        res = robust_stats(xs_f, y=y_f, x=x_f, alpha=alpha, huber_k=huber_k)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return res.to_dict()
