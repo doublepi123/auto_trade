@@ -5,6 +5,7 @@ from app.config import Settings
 
 class TestSettings:
     def test_default_values(self, monkeypatch) -> None:
+        monkeypatch.delenv("AUTO_TRADE_ENV", raising=False)
         monkeypatch.delenv("AUTO_TRADE_DATABASE_URL", raising=False)
         s = Settings()
         assert s.env == "dev"
@@ -84,6 +85,7 @@ class TestSettings:
         assert s.longbridge_access_token == "legacy-token"
 
     def test_ignores_credential_master_key_from_parent_env_file(self, monkeypatch, tmp_path) -> None:
+        monkeypatch.delenv("AUTO_TRADE_ENV", raising=False)
         monkeypatch.delenv("CREDENTIAL_MASTER_KEY", raising=False)
 
         root = tmp_path / "project"

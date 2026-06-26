@@ -96,7 +96,7 @@ def sharpe_ratio(
         return 0.0
     excess = _mean(returns) - risk_free
     sigma = _std(returns)
-    if sigma <= 0:
+    if sigma <= 1e-12:
         return 0.0
     return _annualize(excess / sigma, periods_per_year)
 

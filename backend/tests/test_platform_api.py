@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -634,3 +635,255 @@ def test_platform_tearsheet_csv_format(patched_app) -> None:
     data = resp.json()
     assert data["format"] == "csv"
     assert "csv" in data and "summary" in data["csv"]
+
+
+# ---------------------------------------------------------------------------
+# P258 — fractional differencing endpoint
+# ---------------------------------------------------------------------------
+
+
+def _fd_series() -> list[float]:
+    """Deterministic [1..80] input series used by the fractional-diff tests."""
+    return [float(i) for i in range(1, 81)]
+
+
+def test_platform_fractional_differencing_ffd_success(patched_app) -> None:
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/platform/fractional-differencing",
+            json={"series": _fd_series(), "d": 0.4, "threshold": 1e-3, "mode": "ffd"},
+        )
+    assert resp.status_code == 200
+    data = resp.json()
+    # Required contract fields.
+    for key in ("d", "n_weights", "n_output", "adf_stat", "output", "first_valid_index", "weights"):
+        assert key in data, f"missing field {key!r}"
+    assert data["d"] == 0.4
+    assert data["n_weights"] == len(data["weights"])
+    # Output length matches input length (warm-up entries are null).
+    assert len(data["output"]) == 80
+    fvi = data["first_valid_index"]
+    assert isinstance(fvi, int)
+    assert 0 <= fvi < 80
+    assert data["output"][:fvi] == [None] * fvi
+    assert all(v is not None for v in data["output"][fvi:])
+    assert data["n_output"] == 80 - fvi
+    assert isinstance(data["adf_stat"], (int, float))
+
+
+def test_platform_fractional_differencing_expanding_success(patched_app) -> None:
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/platform/fractional-differencing",
+            json={"series": _fd_series(), "d": 0.4, "threshold": 1e-3, "mode": "expanding"},
+        )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["mode"] == "expanding"
+    assert len(data["output"]) == 80
+    assert isinstance(data["first_valid_index"], int)
+    assert data["n_output"] == 80 - data["first_valid_index"]
+
+
+def test_platform_fractional_differencing_empty_series_422(patched_app) -> None:
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/platform/fractional-differencing",
+            json={"series": [], "d": 0.4, "threshold": 1e-3, "mode": "ffd"},
+        )
+    assert resp.status_code == 422
+
+
+def test_platform_fractional_differencing_invalid_params_422(patched_app) -> None:
+    base = {"series": _fd_series(), "threshold": 1e-3, "mode": "ffd"}
+    with TestClient(app) as client:
+        # invalid d (outside (0, 1))
+        r1 = client.post("/api/platform/fractional-differencing", json={**base, "d": 1.5})
+        # invalid d (lower bound, 0 is not in (0,1))
+        r2 = client.post("/api/platform/fractional-differencing", json={**base, "d": 0.0})
+        # invalid threshold (out of (0, 1))
+        r3 = client.post(
+            "/api/platform/fractional-differencing",
+            json={"series": _fd_series(), "d": 0.4, "threshold": 0.0, "mode": "ffd"},
+        )
+        # invalid mode
+        r4 = client.post(
+            "/api/platform/fractional-differencing",
+            json={"series": _fd_series(), "d": 0.4, "threshold": 1e-3, "mode": "bogus"},
+        )
+    for r in (r1, r2, r3, r4):
+        assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Additional fractional-differencing contract tests.
+#
+# These tests pin down API/algorithm behaviour: sensible defaults, NaN/inf
+# rejection, and expanding-window semantics distinct from FFD.
+# ---------------------------------------------------------------------------
+
+
+def test_platform_fractional_differencing_threshold_defaults_to_0_01(patched_app) -> None:
+    """Omitting ``threshold`` should fall back to the documented practical
+    default of ``0.01`` (not a micro-default like ``1e-5`` that yields an empty
+    window for short series).
+
+    With ``threshold=0.01`` the binomial window for ``d=0.4`` is ~12 weights,
+    so an 80-point series must produce a meaningful number of valid outputs.
+    """
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/platform/fractional-differencing",
+            json={"series": _fd_series(), "d": 0.4, "mode": "ffd"},
+        )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["threshold"] == 0.01
+    # Window small enough that an 80-point series yields real output.
+    assert data["n_output"] > 0
+    assert data["n_output"] >= 60  # >=75% of the sample present
+    assert data["first_valid_index"] is not None
+
+
+def test_platform_fractional_differencing_mode_defaults_to_ffd(patched_app) -> None:
+    """Omitting ``mode`` must default to ``"ffd"``."""
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/platform/fractional-differencing",
+            json={"series": _fd_series(), "d": 0.4, "threshold": 1e-3},
+        )
+    assert resp.status_code == 200
+    assert resp.json()["mode"] == "ffd"
+
+
+def test_platform_fractional_differencing_expanding_first_valid_zero(patched_app) -> None:
+    """``mode=expanding`` is the *expanding-window* estimator: at every index
+    ``t`` it uses all available history (truncating the weight sum at the start
+    of the sample). Therefore:
+
+    * ``first_valid_index`` is exactly ``0`` (no warm-up gap);
+    * the output length equals the input length;
+    * the output is NOT identical to FFD's constant-width window.
+    """
+    with TestClient(app) as client:
+        exp_resp = client.post(
+            "/api/platform/fractional-differencing",
+            json={"series": _fd_series(), "d": 0.4, "threshold": 1e-3, "mode": "expanding"},
+        )
+        ffd_resp = client.post(
+            "/api/platform/fractional-differencing",
+            json={"series": _fd_series(), "d": 0.4, "threshold": 1e-3, "mode": "ffd"},
+        )
+    assert exp_resp.status_code == 200
+    assert ffd_resp.status_code == 200
+    exp_data = exp_resp.json()
+    ffd_data = ffd_resp.json()
+    assert exp_data["first_valid_index"] == 0
+    assert len(exp_data["output"]) == 80
+    assert all(v is not None for v in exp_data["output"])
+    assert exp_data["n_output"] == 80
+    # Expanding and FFD are distinct estimators — their outputs must differ.
+    assert exp_data["output"] != ffd_data["output"]
+
+
+def test_platform_fractional_differencing_non_numeric_series_422(patched_app) -> None:
+    """``series`` entries must be numeric. Strings / dicts / nested objects
+    are not coercible to floats and must be rejected with 422."""
+    with TestClient(app) as client:
+        # string element
+        r_str = client.post(
+            "/api/platform/fractional-differencing",
+            json={"series": ["1", "2", "3"], "d": 0.4, "threshold": 1e-3, "mode": "ffd"},
+        )
+        # dict element
+        r_dict = client.post(
+            "/api/platform/fractional-differencing",
+            json={"series": [{"x": 1}], "d": 0.4, "threshold": 1e-3, "mode": "ffd"},
+        )
+        # nested list
+        r_list = client.post(
+            "/api/platform/fractional-differencing",
+            json={"series": [[1, 2]], "d": 0.4, "threshold": 1e-3, "mode": "ffd"},
+        )
+    assert r_str.status_code == 422
+    assert r_dict.status_code == 422
+    assert r_list.status_code == 422
+
+
+def test_platform_fractional_differencing_nan_inf_series_422(patched_app) -> None:
+    """NaN / inf in the series are not valid inputs for fractional differencing
+    (they poison every subsequent weighted sum) and must be rejected with 422."""
+    series = _fd_series()
+    with TestClient(app) as client:
+        # NaN in the middle of the series.
+        nan_series = series[:30] + [float("nan")] + series[30:]
+        r_nan = client.post(
+            "/api/platform/fractional-differencing",
+            json={"series": nan_series, "d": 0.4, "threshold": 1e-3, "mode": "ffd"},
+        )
+        # +inf.
+        inf_series = series[:30] + [float("inf")] + series[30:]
+        r_inf = client.post(
+            "/api/platform/fractional-differencing",
+            json={"series": inf_series, "d": 0.4, "threshold": 1e-3, "mode": "ffd"},
+        )
+        # -inf.
+        ninf_series = series[:30] + [float("-inf")] + series[30:]
+        r_ninf = client.post(
+            "/api/platform/fractional-differencing",
+            json={"series": ninf_series, "d": 0.4, "threshold": 1e-3, "mode": "ffd"},
+        )
+    assert r_nan.status_code == 422
+    assert r_inf.status_code == 422
+    assert r_ninf.status_code == 422
+
+
+def test_platform_fractional_differencing_nan_inf_params_422(patched_app) -> None:
+    """``d`` or ``threshold`` being NaN/inf must be rejected with 422
+    (otherwise the weight loop silently produces garbage or never terminates)."""
+    series = _fd_series()
+    with TestClient(app) as client:
+        # NaN d
+        r_d_nan = client.post(
+            "/api/platform/fractional-differencing",
+            json={"series": series, "d": float("nan"), "threshold": 1e-3, "mode": "ffd"},
+        )
+        # inf d
+        r_d_inf = client.post(
+            "/api/platform/fractional-differencing",
+            json={"series": series, "d": float("inf"), "threshold": 1e-3, "mode": "ffd"},
+        )
+        # NaN threshold
+        r_thr_nan = client.post(
+            "/api/platform/fractional-differencing",
+            json={"series": series, "d": 0.4, "threshold": float("nan"), "mode": "ffd"},
+        )
+        # inf threshold
+        r_thr_inf = client.post(
+            "/api/platform/fractional-differencing",
+            json={"series": series, "d": 0.4, "threshold": float("inf"), "mode": "ffd"},
+        )
+    assert r_d_nan.status_code == 422
+    assert r_d_inf.status_code == 422
+    assert r_thr_nan.status_code == 422
+    assert r_thr_inf.status_code == 422
+
+
+def test_platform_fractional_differencing_tiny_threshold_too_many_weights_422(patched_app) -> None:
+    """An absurdly small ``threshold`` causes the binomial weight window to
+    explode (the |wₖ| decay is slow for ``d`` close to 0). The endpoint must
+    reject such requests with 422 rather than silently building a window of
+    tens of thousands of weights or running the 100k safety cap.
+    """
+    series = _fd_series()
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/platform/fractional-differencing",
+            json={
+                "series": series,
+                "d": 0.1,
+                "threshold": 1e-300,
+                "mode": "ffd",
+            },
+        )
+    assert resp.status_code == 422

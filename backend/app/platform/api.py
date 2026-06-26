@@ -17,6 +17,12 @@ from app.platform.bus import EventBus
 from app.platform.data_catalog import DataCatalog
 from app.platform.events import BarEvent
 from app.platform.factor_research_service import FactorResearchService
+from app.platform.fractional_differencing import (
+    fractional_adf_stat,
+    fractional_difference,
+    fractional_difference_ffd,
+    fractional_weights,
+)
 from app.platform.montecarlo import MonteCarloAnalyzer
 from app.platform.optimizer_service import OptimizerService
 from app.platform.registry import get_default_registry
@@ -85,6 +91,69 @@ def platform_snapshot(request: Request) -> dict[str, Any]:
             detail="platform runner not enabled",
         )
     return _runner_snapshot(runner)
+
+
+def _first_valid_index(values: list[float | None]) -> int | None:
+    for idx, value in enumerate(values):
+        if value is not None:
+            return idx
+    return None
+
+
+def _finite_number(value: Any, field_name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{field_name} must be a finite number")
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError(f"{field_name} must be a finite number")
+    return number
+
+
+def _fractional_series(payload: dict[str, Any]) -> list[float]:
+    raw_series = payload.get("series")
+    if not isinstance(raw_series, list):
+        raise ValueError("series must be a non-empty list of finite numbers")
+    series = [_finite_number(value, "series entries") for value in raw_series]
+    if not series:
+        raise ValueError("series must be non-empty")
+    if len(series) > 5000:
+        raise ValueError("series must contain at most 5000 values")
+    return series
+
+
+@router.post("/fractional-differencing", dependencies=[Depends(require_api_key())])
+def run_fractional_differencing(payload: dict[str, Any]) -> dict[str, Any]:
+    """Fractionally difference a numeric series for feature engineering."""
+    mode = str(payload.get("mode", "ffd")).lower()
+    if mode not in {"ffd", "expanding"}:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="mode must be 'ffd' or 'expanding'",
+        )
+    try:
+        series = _fractional_series(payload)
+        d = _finite_number(payload.get("d", 0.4), "d")
+        threshold = _finite_number(payload.get("threshold", 1e-2), "threshold")
+        weights = fractional_weights(d, threshold)
+        output = fractional_difference_ffd(series, d, threshold) if mode == "ffd" else fractional_difference(series, d, threshold)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    first_valid = _first_valid_index(output)
+    present = [value for value in output if value is not None]
+    return {
+        "mode": mode,
+        "d": d,
+        "threshold": threshold,
+        "n_weights": len(weights),
+        "n_output": len(present),
+        "adf_stat": fractional_adf_stat(present),
+        "first_valid_index": first_valid,
+        "weights": weights,
+        "output": output,
+    }
 
 
 @router.post("/backtest", dependencies=[Depends(require_api_key())])

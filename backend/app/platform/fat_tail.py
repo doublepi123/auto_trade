@@ -176,6 +176,8 @@ def stable_fit(returns: list[float]) -> dict[str, float]:
     """
     if len(returns) < 5:
         return {"alpha": 0.0, "beta": 0.0, "sigma": 0.0, "mu": 0.0}
+    if max(returns) - min(returns) <= 1e-12:
+        return {"alpha": 2.0, "beta": 0.0, "sigma": 0.0, "mu": returns[0]}
     alpha = hill_estimator(returns)
     # Clamp α to (0, 2]; pure Pareto/α<1 case we cap at 1.0 for a stable law
     alpha = max(0.5, min(2.0, alpha))
