@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import json
+import math
 import os
+
+import pytest
 
 # Set test DB and credential key BEFORE app imports.
 os.environ.setdefault("AUTO_TRADE_DATABASE_URL", "sqlite:///./data/test_p211_p212.db")
@@ -1498,3 +1502,881 @@ def test_pca_endpoint_422_too_few_samples():
     client = _request()
     r = client.post("/api/platform/pca", json={"data": [[1.0, 2.0]]})
     assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# P259 — Spectral analysis (naive DFT periodogram) endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_spectral_analysis_endpoint_200():
+    client = _request()
+    # [0,1,0,-1]*4 ⇒ 4-sample cycle; at sample_rate=16 the dominant bin sits
+    # near 4 Hz.
+    series = [0.0, 1.0, 0.0, -1.0] * 4
+    r = client.post(
+        "/api/platform/spectral-analysis",
+        json={"series": series, "sample_rate": 16.0, "bands": [[0.0, 2.0], [2.0, 8.0]]},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    for key in ("dominant_frequency", "dominant_bin", "spectral_entropy",
+                "frequencies", "periodogram", "band_labels", "band_energy", "n", "sample_rate"):
+        assert key in body, f"missing field {key!r}"
+    assert 3.0 <= body["dominant_frequency"] <= 5.0
+    assert 0.0 <= body["spectral_entropy"] <= 1.0
+    assert len(body["band_energy"]) == 2
+
+
+def test_spectral_analysis_endpoint_422_empty_series():
+    client = _request()
+    r = client.post("/api/platform/spectral-analysis", json={"series": []})
+    assert r.status_code == 422
+
+
+def test_spectral_analysis_endpoint_422_bad_sample_rate():
+    client = _request()
+    r = client.post(
+        "/api/platform/spectral-analysis",
+        json={"series": [1.0, 2.0, 3.0], "sample_rate": 0.0},
+    )
+    assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# P260 — Cycle detection (autocorrelation / Ljung-Box / seasonal strength)
+# ---------------------------------------------------------------------------
+
+
+def test_cycle_detection_endpoint_200():
+    client = _request()
+    # Clean period-5 sinusoid across 10 cycles ⇒ a strong candidate at lag 5.
+    series = [
+        math.sin(2.0 * math.pi * i / 5.0)
+        for i in range(50)
+    ]
+    r = client.post(
+        "/api/platform/cycle-detection",
+        json={"series": series, "min_period": 2, "max_period": 12},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    for key in ("candidates", "seasonal_strength", "ljung_box_stat", "n", "max_period"):
+        assert key in body, f"missing field {key!r}"
+    assert isinstance(body["candidates"], list)
+    assert body["candidates"], "expected at least one candidate"
+    for cand in body["candidates"]:
+        assert set(cand.keys()) == {"period", "autocorrelation", "score"}
+    assert 0.0 <= body["seasonal_strength"] <= 1.0
+    assert body["ljung_box_stat"] >= 0.0
+    # Top candidate should align with the true period 5.
+    assert body["candidates"][0]["period"] == 5
+
+
+def test_cycle_detection_endpoint_422_empty_series():
+    client = _request()
+    r = client.post("/api/platform/cycle-detection", json={"series": []})
+    assert r.status_code == 422
+
+
+def test_cycle_detection_endpoint_422_invalid_period():
+    client = _request()
+    r = client.post(
+        "/api/platform/cycle-detection",
+        json={"series": [1.0] * 20, "min_period": 0, "max_period": 5},
+    )
+    assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# P261 — change-point detection endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_change_point_endpoint_200_step_series():
+    client = _request()
+    series = [1.0] * 20 + [5.0] * 20
+    r = client.post("/api/platform/change-point", json={"series": series})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    for key in ("change_points", "best_index", "confidence", "mean_score", "variance_score", "segments"):
+        assert key in body, f"missing field {key!r}"
+    assert body["best_index"] is not None
+    assert abs(body["best_index"] - 20) <= 2
+    assert 0.0 <= body["confidence"] <= 1.0
+    assert body["change_points"], "expected at least one change point for a step series"
+    for cp in body["change_points"]:
+        assert set(cp.keys()) == {"index", "mean_shift_score", "variance_shift_score", "score"}
+    assert body["segments"][0]["start"] == 0
+    assert body["segments"][-1]["end"] == len(series)
+
+
+def test_change_point_endpoint_200_with_params():
+    client = _request()
+    series = [1.0] * 15 + [5.0] * 15 + [9.0] * 15
+    r = client.post(
+        "/api/platform/change-point",
+        json={"series": series, "min_size": 5, "max_points": 3, "threshold": 0.0},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert len(body["change_points"]) <= 3
+
+
+def test_change_point_endpoint_422_empty_series():
+    client = _request()
+    r = client.post("/api/platform/change-point", json={"series": []})
+    assert r.status_code == 422
+
+
+def test_change_point_endpoint_422_missing_series():
+    client = _request()
+    r = client.post("/api/platform/change-point", json={})
+    assert r.status_code == 422
+
+
+def test_change_point_endpoint_422_too_short():
+    client = _request()
+    r = client.post("/api/platform/change-point", json={"series": [1.0, 2.0]})
+    assert r.status_code == 422
+
+
+def test_change_point_endpoint_422_invalid_min_size():
+    client = _request()
+    r = client.post("/api/platform/change-point", json={"series": [1.0] * 20, "min_size": 1})
+    assert r.status_code == 422
+
+
+def test_change_point_endpoint_422_invalid_max_points():
+    client = _request()
+    r = client.post("/api/platform/change-point", json={"series": [1.0] * 20, "max_points": 0})
+    assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# P262 — entropy & complexity endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_entropy_complexity_endpoint_200():
+    series = [float(i) + 0.1 * ((i * 7) % 11) for i in range(150)]
+    client = _request()
+    r = client.post("/api/platform/entropy-complexity", json={"series": series})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    for key in (
+        "shannon_entropy",
+        "sample_entropy",
+        "permutation_entropy",
+        "hurst_exponent",
+        "approximation",
+        "n",
+    ):
+        assert key in body, f"missing {key!r}"
+    assert body["n"] == len(series)
+
+
+def test_entropy_complexity_endpoint_422_empty_series():
+    client = _request()
+    r = client.post("/api/platform/entropy-complexity", json={"series": []})
+    assert r.status_code == 422
+
+
+def test_entropy_complexity_endpoint_422_missing_series():
+    client = _request()
+    r = client.post("/api/platform/entropy-complexity", json={})
+    assert r.status_code == 422
+
+
+def test_entropy_complexity_endpoint_422_invalid_bins():
+    client = _request()
+    r = client.post(
+        "/api/platform/entropy-complexity",
+        json={"series": [1.0] * 50, "bins": 1},
+    )
+    assert r.status_code == 422
+
+
+def test_entropy_complexity_endpoint_422_invalid_params():
+    client = _request()
+    r = client.post(
+        "/api/platform/entropy-complexity",
+        json={"series": [1.0] * 50, "permutation_order": 1},
+    )
+    assert r.status_code == 422
+
+
+def test_entropy_complexity_endpoint_200_all_metrics_in_unit_range():
+    # P262 contract: every numeric metric returned by the endpoint lies in [0, 1].
+    series = [float(i) + 0.1 * ((i * 7) % 11) for i in range(150)]
+    client = _request()
+    r = client.post("/api/platform/entropy-complexity", json={"series": series})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    for key in (
+        "shannon_entropy",
+        "sample_entropy",
+        "permutation_entropy",
+        "hurst_exponent",
+    ):
+        assert key in body, f"missing {key!r}"
+        value = body[key]
+        assert 0.0 <= value <= 1.0, f"{key}={value} out of [0, 1]"
+
+
+# ---------------------------------------------------------------------------
+# P263 — rolling feature report endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_rolling_features_endpoint_200_with_benchmark():
+    series = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+    client = _request()
+    r = client.post(
+        "/api/platform/rolling-features",
+        json={"series": series, "window": 3, "alpha": 0.3, "benchmark": series},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    for key in ("mean", "std", "zscore", "skew", "kurtosis", "ewma", "beta"):
+        assert key in body, f"missing field {key!r}"
+    assert len(body["mean"]) == len(series)
+    # First window-1 entries of the rolling stats are None.
+    assert body["mean"][0] is None and body["mean"][1] is None
+    assert body["std"][0] is None and body["std"][1] is None
+    assert body["zscore"][0] is None and body["zscore"][1] is None
+    # ewma has no warm-up.
+    assert body["ewma"][0] == pytest.approx(1.0)
+    # beta is populated (benchmark provided) and first window-1 are None.
+    assert body["beta"] is not None
+    assert body["beta"][2] == pytest.approx(1.0, rel=1e-9, abs=1e-9)
+
+
+def test_rolling_features_endpoint_200_no_benchmark():
+    series = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+    client = _request()
+    r = client.post(
+        "/api/platform/rolling-features",
+        json={"series": series, "window": 3},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    # No benchmark ⇒ beta is None.
+    assert body["beta"] is None
+    # mean / std / zscore / ewma keys all present.
+    for key in ("mean", "std", "zscore", "ewma"):
+        assert key in body and len(body[key]) == len(series)
+
+
+def test_rolling_features_endpoint_422_empty_series():
+    client = _request()
+    r = client.post("/api/platform/rolling-features", json={"series": []})
+    assert r.status_code == 422
+
+
+def test_rolling_features_endpoint_422_missing_series():
+    client = _request()
+    r = client.post("/api/platform/rolling-features", json={})
+    assert r.status_code == 422
+
+
+def test_rolling_features_endpoint_422_invalid_window():
+    client = _request()
+    r = client.post(
+        "/api/platform/rolling-features",
+        json={"series": [1.0, 2.0, 3.0], "window": 1},
+    )
+    assert r.status_code == 422
+
+
+def test_rolling_features_endpoint_422_window_too_large():
+    client = _request()
+    r = client.post(
+        "/api/platform/rolling-features",
+        json={"series": [1.0, 2.0, 3.0], "window": 10},
+    )
+    assert r.status_code == 422
+
+
+def test_rolling_features_endpoint_422_invalid_alpha():
+    client = _request()
+    r = client.post(
+        "/api/platform/rolling-features",
+        json={"series": [1.0, 2.0, 3.0], "alpha": 0.0},
+    )
+    assert r.status_code == 422
+
+
+def test_rolling_features_endpoint_422_benchmark_length_mismatch():
+    client = _request()
+    r = client.post(
+        "/api/platform/rolling-features",
+        json={"series": [1.0, 2.0, 3.0], "benchmark": [1.0, 2.0]},
+    )
+    assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# P264 — factor IC endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_factor_ic_endpoint_200():
+    client = _request()
+    n = 20
+    factor = [float(i) for i in range(n)]
+    forward_returns = [0.001 * i + 1e-6 * (i % 3) for i in range(n)]
+    r = client.post(
+        "/api/platform/factor-ic",
+        json={"factor": factor, "forward_returns": forward_returns, "n_quantiles": 5},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "pearson_ic" in body and "spearman_ic" in body
+    assert "buckets" in body and "quantile_spread" in body
+    assert len(body["buckets"]) == 5
+    assert body["pearson_ic"] > 0.95
+    assert body["quantile_spread"] > 0.0
+
+
+def test_factor_ic_endpoint_422_length_mismatch():
+    client = _request()
+    r = client.post(
+        "/api/platform/factor-ic",
+        json={"factor": [1.0, 2.0, 3.0], "forward_returns": [0.01, 0.02]},
+    )
+    assert r.status_code == 422
+
+
+def test_factor_ic_endpoint_422_missing_factor():
+    client = _request()
+    r = client.post(
+        "/api/platform/factor-ic",
+        json={"forward_returns": [0.01, 0.02, 0.03]},
+    )
+    assert r.status_code == 422
+
+
+def test_factor_ic_endpoint_422_invalid_n_quantiles():
+    client = _request()
+    r = client.post(
+        "/api/platform/factor-ic",
+        json={
+            "factor": [1.0, 2.0, 3.0],
+            "forward_returns": [0.01, 0.02, 0.03],
+            "n_quantiles": 5,
+        },
+    )
+    assert r.status_code == 422
+
+
+def test_factor_ic_endpoint_422_empty():
+    client = _request()
+    r = client.post(
+        "/api/platform/factor-ic",
+        json={"factor": [], "forward_returns": []},
+    )
+    assert r.status_code == 422
+
+
+def test_factor_ic_endpoint_422_bool_entry():
+    client = _request()
+    r = client.post(
+        "/api/platform/factor-ic",
+        json={"factor": [1.0, 2.0, True], "forward_returns": [0.01, 0.02, 0.03]},
+    )
+    assert r.status_code == 422
+
+
+def test_factor_ic_endpoint_422_non_finite():
+    client = _request()
+    # httpx's TestClient rejects NaN/inf at request-serialization time
+    # (allow_nan=False), so emit the body via json.dumps(allow_nan=True) —
+    # which writes a raw ``NaN`` token — and post it as content. The
+    # server's validator must reject it with 422.
+    payload = {
+        "factor": [1.0, float("nan"), 3.0],
+        "forward_returns": [0.01, 0.02, 0.03],
+    }
+    r = client.post(
+        "/api/platform/factor-ic",
+        content=json.dumps(payload, allow_nan=True),
+        headers={"Content-Type": "application/json"},
+    )
+    assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# P265 — feature orthogonalization endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_feature_orthogonalization_endpoint_200():
+    payload = {
+        "panel": {
+            "A": [1.0, 2.0, 3.0, 4.0, 5.0],
+            "B": [2.0, 4.0, 6.0, 8.0, 10.0],  # dup of A → dropped
+            "C": [1.0, -1.0, 1.0, -1.0, 1.0],
+        },
+        "threshold": 0.95,
+    }
+    client = _request()
+    r = client.post("/api/platform/feature-orthogonalization", json=payload)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "kept_features" in body and "dropped_features" in body
+    assert "A" in body["kept_features"]
+    assert "C" in body["kept_features"]
+    assert body["dropped_features"] == ["B"]
+    assert "A" in body["vif_scores"]
+    assert "B" in body["vif_scores"]
+    # correlations has pair labels like "A|B".
+    assert any("|" in label for label in body["correlations"].keys())
+    assert body["residualized"] is None
+
+
+def test_feature_orthogonalization_endpoint_200_with_target():
+    payload = {
+        "panel": {"A": [1.0, 2.0, 3.0, 4.0, 5.0], "B": [1.0, -1.0, 1.0, -1.0, 1.0]},
+        "target": [2.0, 4.0, 6.0, 8.0, 10.0],
+        "threshold": 0.95,
+    }
+    client = _request()
+    r = client.post("/api/platform/feature-orthogonalization", json=payload)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["residualized"] is not None
+    assert len(body["residualized"]) == 5
+
+
+def test_feature_orthogonalization_endpoint_422_empty_panel():
+    client = _request()
+    r = client.post("/api/platform/feature-orthogonalization", json={"panel": {}})
+    assert r.status_code == 422
+
+
+def test_feature_orthogonalization_endpoint_422_missing_panel():
+    client = _request()
+    r = client.post("/api/platform/feature-orthogonalization", json={})
+    assert r.status_code == 422
+
+
+def test_feature_orthogonalization_endpoint_422_invalid_threshold():
+    payload = {"panel": {"A": [1.0, 2.0, 3.0]}, "threshold": 1.5}
+    client = _request()
+    r = client.post("/api/platform/feature-orthogonalization", json=payload)
+    assert r.status_code == 422
+
+
+def test_feature_orthogonalization_endpoint_422_bool_entry():
+    payload = {
+        "panel": {"A": [1.0, True, 3.0], "B": [1.0, 2.0, 3.0]},
+    }
+    client = _request()
+    r = client.post("/api/platform/feature-orthogonalization", json=payload)
+    assert r.status_code == 422
+
+
+def test_feature_orthogonalization_endpoint_422_length_mismatch():
+    payload = {
+        "panel": {"A": [1.0, 2.0], "B": [1.0, 2.0, 3.0]},
+    }
+    client = _request()
+    r = client.post("/api/platform/feature-orthogonalization", json=payload)
+    assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# P266 — signal-combination endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_signal_combination_endpoint_200_zscore_default():
+    payload = {
+        "signals": {
+            "a": [1.0, 2.0, 3.0, 4.0, 5.0],
+            "b": [5.0, 4.0, 3.0, 2.0, 1.0],
+        },
+    }
+    client = _request()
+    r = client.post("/api/platform/signal-combination", json=payload)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert set(body.keys()) == {"combined", "weights", "standardized", "method", "n_signals"}
+    assert body["method"] == "zscore"
+    assert body["n_signals"] == 2
+    assert len(body["combined"]) == 5
+    assert set(body["weights"].keys()) == {"a", "b"}
+    assert set(body["standardized"].keys()) == {"a", "b"}
+    # equal weights → |w| sums to 1
+    assert abs(sum(abs(v) for v in body["weights"].values()) - 1.0) < 1e-9
+
+
+def test_signal_combination_endpoint_200_explicit_weights_and_rank():
+    payload = {
+        "signals": {"a": [1.0, 2.0, 3.0], "b": [3.0, 2.0, 1.0]},
+        "weights": {"a": 2.0, "b": -2.0},
+        "method": "raw",
+    }
+    client = _request()
+    r = client.post("/api/platform/signal-combination", json=payload)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["method"] == "raw"
+    assert abs(body["weights"]["a"] - 0.5) < 1e-9
+    assert abs(body["weights"]["b"] + 0.5) < 1e-9
+
+
+def test_signal_combination_endpoint_422_empty_signals():
+    client = _request()
+    r = client.post("/api/platform/signal-combination", json={"signals": {}})
+    assert r.status_code == 422
+
+
+def test_signal_combination_endpoint_422_invalid_method():
+    payload = {"signals": {"a": [1.0, 2.0]}, "method": "bogus"}
+    client = _request()
+    r = client.post("/api/platform/signal-combination", json=payload)
+    assert r.status_code == 422
+
+
+def test_signal_combination_endpoint_422_weights_mismatch():
+    payload = {
+        "signals": {"a": [1.0, 2.0], "b": [3.0, 4.0]},
+        "weights": {"a": 1.0},  # missing 'b'
+    }
+    client = _request()
+    r = client.post("/api/platform/signal-combination", json=payload)
+    assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# P267 — backtest diagnostics
+# ---------------------------------------------------------------------------
+
+
+def test_backtest_diagnostics_endpoint_200_returns_full_report():
+    payload = {
+        "trades": [1.0, -0.5, 2.0, -1.5, 0.5, 0.8, -0.3, 1.2, -0.7, 0.4],
+        "n_bootstrap": 200,
+        "seed": 42,
+    }
+    client = _request()
+    r = client.post("/api/platform/backtest-diagnostics", json=payload)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    for key in (
+        "expectancy",
+        "profit_factor",
+        "payoff_ratio",
+        "win_rate",
+        "loss_rate",
+        "max_win_streak",
+        "max_loss_streak",
+        "bootstrap_expectancy_ci",
+        "n_trades",
+    ):
+        assert key in body
+    # expectancy / profit_factor / bootstrap_expectancy_ci must be populated.
+    assert isinstance(body["expectancy"], float)
+    assert isinstance(body["profit_factor"], (int, float))
+    bsci = body["bootstrap_expectancy_ci"]
+    assert set(bsci.keys()) == {"low", "high", "seed", "n_bootstrap"}
+    assert bsci["seed"] == 42
+    assert bsci["n_bootstrap"] == 200
+    assert bsci["low"] <= bsci["high"]
+    assert body["n_trades"] == len(payload["trades"])
+
+
+def test_backtest_diagnostics_endpoint_422_empty_trades():
+    client = _request()
+    r = client.post("/api/platform/backtest-diagnostics", json={"trades": []})
+    assert r.status_code == 422
+
+
+def test_backtest_diagnostics_endpoint_422_missing_trades():
+    client = _request()
+    r = client.post("/api/platform/backtest-diagnostics", json={})
+    assert r.status_code == 422
+
+
+def test_backtest_diagnostics_endpoint_422_invalid_n_bootstrap():
+    client = _request()
+    r = client.post(
+        "/api/platform/backtest-diagnostics",
+        json={"trades": [1.0, -0.5], "n_bootstrap": True},
+    )
+    assert r.status_code == 422
+
+
+def test_backtest_diagnostics_endpoint_422_invalid_seed():
+    client = _request()
+    r = client.post(
+        "/api/platform/backtest-diagnostics",
+        json={"trades": [1.0, -0.5], "seed": True},
+    )
+    assert r.status_code == 422
+
+
+def test_backtest_diagnostics_endpoint_no_loss_trades_returns_json_safe_infinity():
+    # Legitimate "no-loss" edge: every trade is a win, so profit_factor and
+    # payoff_ratio are math.inf in the pure function. The HTTP layer must NOT
+    # 500 — FastAPI's default JSON encoder rejects non-finite floats. The
+    # contract is that the endpoint serializes these to the JSON convention
+    # string "Infinity" so the response body remains valid JSON.
+    client = _request()
+    r = client.post(
+        "/api/platform/backtest-diagnostics",
+        json={"trades": [1.0, 2.0], "n_bootstrap": 10, "seed": 0},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    # profit_factor / payoff_ratio are the non-finite fields on a no-loss edge.
+    assert body["profit_factor"] == "Infinity"
+    assert body["payoff_ratio"] == "Infinity"
+    # Sanity: the finite fields are still plain JSON numbers.
+    assert isinstance(body["expectancy"], float)
+    assert body["expectancy"] == pytest.approx(1.5)
+    assert body["n_trades"] == 2
+
+
+# ---------------------------------------------------------------------------
+# P268 — OHLCV data-quality diagnostics endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_data_quality_endpoint_200_clean():
+    client = _request()
+    bars = [
+        {"timestamp": 1_700_000_000 + i * 60, "open": 100.0 + i, "high": 101.0 + i,
+         "low": 99.0 + i, "close": 100.5 + i, "volume": 1000}
+        for i in range(5)
+    ]
+    r = client.post("/api/platform/data-quality", json={"bars": bars})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["n_bars"] == 5
+    assert body["issue_count"] == 0
+    assert body["critical_count"] == 0
+    assert body["warning_count"] == 0
+    assert body["issues"] == []
+    assert body["is_clean"] is True
+
+
+def test_data_quality_endpoint_200_with_issues():
+    client = _request()
+    base = 1_700_000_000
+    bars = [
+        {"timestamp": base, "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0},
+        {"timestamp": base + 60, "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0},
+        {"timestamp": base + 60, "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0},
+        {"timestamp": base + 120, "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0},
+        {"timestamp": base + 180, "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0},
+    ]
+    r = client.post(
+        "/api/platform/data-quality",
+        json={"bars": bars, "stale_window": 3, "jump_threshold": 0.2},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["is_clean"] is False
+    assert body["issue_count"] == len(body["issues"])
+    assert body["issue_count"] > 0
+    assert body["critical_count"] >= 1  # duplicate timestamp
+    assert all(
+        set(i.keys()) == {"index", "field", "severity", "message"} for i in body["issues"]
+    )
+
+
+def test_data_quality_endpoint_422_bars_not_list():
+    client = _request()
+    r = client.post("/api/platform/data-quality", json={"bars": "not a list"})
+    assert r.status_code == 422
+
+
+def test_data_quality_endpoint_422_bars_empty():
+    client = _request()
+    r = client.post("/api/platform/data-quality", json={"bars": []})
+    assert r.status_code == 422
+
+
+def test_data_quality_endpoint_422_missing_bars():
+    client = _request()
+    r = client.post("/api/platform/data-quality", json={})
+    assert r.status_code == 422
+
+
+def test_data_quality_endpoint_422_bar_missing_field():
+    client = _request()
+    r = client.post(
+        "/api/platform/data-quality",
+        json={"bars": [{"open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5}]},
+    )
+    assert r.status_code == 422
+
+
+def test_data_quality_endpoint_422_non_finite_price():
+    client = _request()
+    # httpx's TestClient rejects NaN/inf at request-serialization time
+    # (allow_nan=False), so emit the body as a raw JSON literal with a ``NaN``
+    # token and post it as content. The server's validator must reject it.
+    body = (
+        '{"bars": [{"timestamp": 1.0, "open": 1.0, "high": 2.0, '
+        '"low": 0.5, "close": NaN}]}'
+    )
+    r = client.post(
+        "/api/platform/data-quality",
+        content=body,
+        headers={"Content-Type": "application/json"},
+    )
+    assert r.status_code == 422
+
+
+def test_data_quality_endpoint_422_invalid_stale_window():
+    client = _request()
+    bars = [
+        {"timestamp": 1.0, "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5},
+        {"timestamp": 2.0, "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5},
+    ]
+    r = client.post("/api/platform/data-quality", json={"bars": bars, "stale_window": 0})
+    assert r.status_code == 422
+
+
+def test_data_quality_endpoint_422_invalid_jump_threshold():
+    client = _request()
+    bars = [
+        {"timestamp": 1.0, "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5},
+        {"timestamp": 2.0, "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5},
+    ]
+    r = client.post("/api/platform/data-quality", json={"bars": bars, "jump_threshold": -0.1})
+    assert r.status_code == 422
+
+
+def test_data_quality_endpoint_422_bar_not_dict():
+    # A bar shaped as a JSON array of key/value pairs is NOT a dict. The old
+    # implementation coerced it with ``dict(b)``, silently producing a valid
+    # bar dict and bypassing the strict-schema validation. The endpoint must
+    # reject any non-dict bar with 422.
+    client = _request()
+    bars = [
+        [
+            ["timestamp", 1],
+            ["open", 1],
+            ["high", 1],
+            ["low", 1],
+            ["close", 1],
+        ]
+    ]
+    r = client.post("/api/platform/data-quality", json={"bars": bars})
+    assert r.status_code == 422, r.text
+
+
+def test_data_quality_endpoint_422_invalid_expected_interval():
+    client = _request()
+    bars = [
+        {"timestamp": 1.0, "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5},
+        {"timestamp": 2.0, "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5},
+    ]
+    r = client.post(
+        "/api/platform/data-quality",
+        json={"bars": bars, "expected_interval_seconds": -1.0},
+    )
+    assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# P269–P278 — factor research and strategy diagnostics endpoints
+# ---------------------------------------------------------------------------
+
+
+def test_factor_turnover_endpoint_200_and_422():
+    client = _request()
+    r = client.post(
+        "/api/platform/factor-turnover",
+        json={"snapshots": [{"A": 4.0, "B": 3.0, "C": 2.0, "D": 1.0}, {"A": 4.2, "B": 2.8, "C": 2.1, "D": 1.2}], "bucket_fraction": 0.5},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["bucket_size"] == 2
+    assert client.post("/api/platform/factor-turnover", json={"snapshots": []}).status_code == 422
+
+
+def test_factor_decay_endpoint_200_and_422():
+    client = _request()
+    r = client.post("/api/platform/factor-decay", json={"factor": [1, 2, 3], "forward_returns": {"1": [0.1, 0.2, 0.3], "2": [0.3, 0.2, 0.1]}})
+    assert r.status_code == 200, r.text
+    assert r.json()["best_horizon"] == "1"
+    assert client.post("/api/platform/factor-decay", json={"factor": [1], "forward_returns": {}}).status_code == 422
+
+
+def test_factor_quantiles_endpoint_200_and_422():
+    client = _request()
+    r = client.post("/api/platform/factor-quantiles", json={"factor": [1, 2, 3, 4], "forward_returns": [0.1, 0.2, 0.3, 0.4], "n_quantiles": 2})
+    assert r.status_code == 200, r.text
+    assert r.json()["top_bottom_spread"] > 0
+    assert client.post("/api/platform/factor-quantiles", json={"factor": [1], "forward_returns": [1]}).status_code == 422
+
+
+def test_ic_diagnostics_endpoint_200_and_422():
+    client = _request()
+    r = client.post("/api/platform/ic-diagnostics", json={"ic_series": [0.1, -0.05, 0.02]})
+    assert r.status_code == 200, r.text
+    assert "mean_ic" in r.json()
+    assert client.post("/api/platform/ic-diagnostics", json={"ic_series": [0.1]}).status_code == 422
+
+
+def test_factor_data_quality_endpoint_200_and_422():
+    client = _request()
+    r = client.post("/api/platform/factor-data-quality", json={"panel": {"value": [1.0, None, 2.0], "quality": [1.0, 1.0, 1.0]}})
+    assert r.status_code == 200, r.text
+    assert r.json()["feature_count"] == 2
+    assert client.post("/api/platform/factor-data-quality", json={"panel": {}}).status_code == 422
+
+
+def test_signal_persistence_endpoint_200_and_422():
+    client = _request()
+    r = client.post("/api/platform/signal-persistence", json={"signal": [1, 1, 0.9, 0.8], "max_lag": 2})
+    assert r.status_code == 200, r.text
+    assert "autocorrelation" in r.json()
+    assert client.post("/api/platform/signal-persistence", json={"signal": [1, 2]}).status_code == 422
+
+
+def test_strategy_quality_endpoint_200_and_422():
+    client = _request()
+    r = client.post("/api/platform/strategy-quality", json={"trades": [1.0, -0.5, 2.0]})
+    assert r.status_code == 200, r.text
+    assert "sqn" in r.json()
+    assert client.post("/api/platform/strategy-quality", json={"trades": []}).status_code == 422
+
+
+def test_regime_performance_endpoint_200_and_422():
+    client = _request()
+    r = client.post("/api/platform/regime-performance", json={"returns": [0.1, -0.1], "regimes": ["bull", "bear"]})
+    assert r.status_code == 200, r.text
+    assert set(r.json()["regimes"].keys()) == {"bull", "bear"}
+    assert client.post("/api/platform/regime-performance", json={"returns": [0.1], "regimes": []}).status_code == 422
+    assert client.post("/api/platform/regime-performance", json={"returns": [0.1], "regimes": [1]}).status_code == 422
+
+
+def test_strategy_diversification_endpoint_200_and_422():
+    client = _request()
+    r = client.post("/api/platform/strategy-diversification", json={"strategies": {"A": [0.1, -0.1, 0.2], "B": [0.1, -0.1, 0.2]}})
+    assert r.status_code == 200, r.text
+    assert ["A", "B"] in r.json()["redundant_pairs"]
+    assert client.post("/api/platform/strategy-diversification", json={"strategies": {"A": [1]}}).status_code == 422
+
+
+def test_backtest_confidence_endpoint_200_and_422():
+    client = _request()
+    r = client.post("/api/platform/backtest-confidence", json={"returns": [0.01, 0.02, -0.01, 0.03], "n_bootstrap": 20, "seed": 3, "window": 2})
+    assert r.status_code == 200, r.text
+    assert r.json()["ci_low"] <= r.json()["mean_return"] <= r.json()["ci_high"]
+    assert client.post("/api/platform/backtest-confidence", json={"returns": [0.1], "window": 2}).status_code == 422
+    assert client.post("/api/platform/backtest-confidence", json={"returns": [0.1, 0.2], "n_bootstrap": 10001, "window": 2}).status_code == 422
+
+
+def test_strategy_quality_endpoint_serializes_non_finite_as_null():
+    client = _request()
+    r = client.post("/api/platform/strategy-quality", json={"trades": [1.0, 1.0, 1.0]})
+    assert r.status_code == 200, r.text
+    assert r.json()["sqn"] is None
+    assert r.json()["payoff_ratio"] is None

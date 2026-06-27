@@ -37,6 +37,56 @@
 
 ---
 
+## 近期已完成迭代 (2026-06-27) — 因子研究闭环与策略诊断（10 轮 P269–P278）
+
+> 自主 feature 迭代：承接 P259–P268 平台研究层，新增 10 个纯 Python / 零新依赖的因子研究、信号持续性、策略质量与回测置信模块；全部通过 `/api/platform/*` 只读计算端点暴露，不接入实盘 runner 默认路径。规格：[2026-06-27-p269-p278-factor-research-diagnostics-design.md](superpowers/specs/2026-06-27-p269-p278-factor-research-diagnostics-design.md)；计划：[2026-06-27-p269-p278-factor-research-diagnostics.md](superpowers/plans/2026-06-27-p269-p278-factor-research-diagnostics.md)。
+
+| 代号 | 主题 | 状态 |
+|------|------|------|
+| **P269** | 因子换手率：rank turnover、Top/Bottom bucket 保留率、rank autocorrelation | ✅ |
+| **P270** | 因子衰减：多 horizon IC/RankIC、best horizon、half-life horizon | ✅ |
+| **P271** | 分组收益：quantile forward return、top-bottom spread、monotonicity | ✅ |
+| **P272** | IC 诊断：mean/std、positive ratio、t-like score、cumulative IC drawdown | ✅ |
+| **P273** | 因子数据质量：coverage、missing、constant、outlier、stale run | ✅ |
+| **P274** | 信号持续性：autocorrelation decay、half-life lag、turnover proxy | ✅ |
+| **P275** | 策略质量：SQN、expectancy、win-rate、payoff ratio、sample confidence | ✅ |
+| **P276** | Regime 切片绩效：按状态分桶统计 returns / volatility / contribution | ✅ |
+| **P277** | 多策略分散化：相关矩阵、平均相关、冗余对、diversification score | ✅ |
+| **P278** | 回测置信：bootstrap CI、rolling Sharpe 稳定性、fragility score | ✅ |
+
+**新增端点：** `POST /api/platform/factor-turnover`、`/factor-decay`、`/factor-quantiles`、`/ic-diagnostics`、`/factor-data-quality`、`/signal-persistence`、`/strategy-quality`、`/regime-performance`、`/strategy-diversification`、`/backtest-confidence`。
+
+**验证：** 新增纯单元测试 + `tests/platform/test_api_risk_portfolio.py` 可 `--no-cov` 定向运行；`python3 -m pytest --no-cov ...` 当前 223 passed。
+
+**显式 YAGNI 未做：** 不做前端 UI / Cypress，不新增数据库表，不接真实 broker / runner，不引入 numpy/scipy/pandas/sklearn，不实现完整 alphalens/Qlib DSL。
+
+---
+
+## 近期已完成迭代 (2026-06-26) — 时间序列研究与信号稳健性（10 轮 P259–P268）
+
+> 自主 feature 迭代：承接 P243–P258 平台研究层，新增 10 个纯 Python / 零新依赖的时间序列、信号诊断与数据质量模块；全部通过 `/api/platform/*` 只读计算端点暴露，不接入实盘 runner 默认路径。规格：[2026-06-26-p259-p268-time-series-research-design.md](superpowers/specs/2026-06-26-p259-p268-time-series-research-design.md)；计划：[2026-06-26-p259-p268-time-series-research.md](superpowers/plans/2026-06-26-p259-p268-time-series-research.md)。
+
+| 代号 | 主题 | 状态 |
+|------|------|------|
+| **P259** | 谱分析：DFT periodogram、正半谱主频、谱熵、频段能量 | ✅ |
+| **P260** | 周期检测：自相关周期候选、Ljung-Box 近似、seasonal_strength | ✅ |
+| **P261** | 变点检测：均值/方差漂移、best-first binary segmentation | ✅ |
+| **P262** | 熵与复杂度：Shannon/sample/permutation entropy、Hurst R/S | ✅ |
+| **P263** | 滚动特征：mean/std/zscore/skew/kurtosis、EWMA、rolling beta | ✅ |
+| **P264** | 因子 IC：Pearson/Spearman rank IC、quantile buckets、ICIR | ✅ |
+| **P265** | 特征正交化：Gram-Schmidt、residualize、correlation prune、VIF | ✅ |
+| **P266** | 信号组合：zscore/rank/raw 合成、权重归一、风险预算权重 | ✅ |
+| **P267** | 回测诊断：expectancy、profit/payoff、streak、bootstrap CI | ✅ |
+| **P268** | 数据质量：timestamp/price/OHLC 质量诊断 | ✅ |
+
+**新增端点：** `POST /api/platform/spectral-analysis`、`/cycle-detection`、`/change-point`、`/entropy-complexity`、`/rolling-features`、`/factor-ic`、`/feature-orthogonalization`、`/signal-combination`、`/backtest-diagnostics`、`/data-quality`。
+
+**验证：** 新增纯单元测试均可 `--no-cov` 定向运行；`tests/platform/test_api_risk_portfolio.py` 当前 192 passed。全量回归见本批最终验证记录。
+
+**显式 YAGNI 未做：** 不做前端 UI / Cypress，不新增数据库表，不接真实 broker / runner，不引入 numpy/scipy/pandas/sklearn。
+
+---
+
 ## 近期已完成迭代 (2026-06-22) — 平台基础（P149–P150）
 
 > 策略插件 SDK + 统一事件回放与实盘语义。新增 `app/platform/` 层，现有区间策略迁移为首个插件；`PlatformRunner` 支持 backtest/live 模式，事件流可持久化、可回放。规格：[2026-06-22-p149-p158-quant-platform-design.md](superpowers/specs/2026-06-22-p149-p158-quant-platform-design.md)。

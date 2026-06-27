@@ -14,8 +14,11 @@ from app.platform.analytics import PerformanceAnalytics
 from app.platform.backtest_run_service import BacktestRunService
 from app.platform.backtest_service import PlatformBacktestService
 from app.platform.bus import EventBus
+from app.platform.change_point import detect_change_points
+from app.platform.cycle_detection import detect_cycles
 from app.platform.data_catalog import DataCatalog
 from app.platform.events import BarEvent
+from app.platform.factor_ic import factor_ic_report
 from app.platform.factor_research_service import FactorResearchService
 from app.platform.fractional_differencing import (
     fractional_adf_stat,
@@ -27,7 +30,9 @@ from app.platform.montecarlo import MonteCarloAnalyzer
 from app.platform.optimizer_service import OptimizerService
 from app.platform.registry import get_default_registry
 from app.platform.replay import EventReplayer
+from app.platform.rolling_features import rolling_feature_report
 from app.platform.runner import PlatformRunner
+from app.platform.spectral_analysis import spectral_report
 from app.platform.store import EventStore
 from app.platform.tca import ConstReferencePriceProvider, TcaAnalyzer
 from app.platform.tearsheet import TearsheetBuilder, TearsheetExporter
@@ -110,15 +115,9 @@ def _finite_number(value: Any, field_name: str) -> float:
 
 
 def _fractional_series(payload: dict[str, Any]) -> list[float]:
-    raw_series = payload.get("series")
-    if not isinstance(raw_series, list):
-        raise ValueError("series must be a non-empty list of finite numbers")
-    series = [_finite_number(value, "series entries") for value in raw_series]
-    if not series:
-        raise ValueError("series must be non-empty")
-    if len(series) > 5000:
-        raise ValueError("series must contain at most 5000 values")
-    return series
+    # Kept as a thin alias for backward readability at the fractional endpoint;
+    # the validation logic lives in :func:`_numeric_series`.
+    return _numeric_series(payload)
 
 
 @router.post("/fractional-differencing", dependencies=[Depends(require_api_key())])
@@ -2706,3 +2705,680 @@ def pca_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     return res.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P259 — Spectral analysis (naive DFT periodogram) endpoint
+# ---------------------------------------------------------------------------
+
+
+def _numeric_series(payload: dict[str, Any], *, field: str = "series") -> list[float]:
+    """Validate a ``field`` payload entry as a non-empty finite-number list.
+
+    Mirrors :func:`_fractional_series` for any numeric-series endpoint. Raises
+    ``ValueError`` / ``TypeError`` which the caller converts into HTTP 422.
+    """
+    raw_series = payload.get(field)
+    if not isinstance(raw_series, list):
+        raise ValueError(f"{field} must be a non-empty list of finite numbers")
+    series = [_finite_number(value, f"{field} entries") for value in raw_series]
+    if not series:
+        raise ValueError(f"{field} must be non-empty")
+    if len(series) > 5000:
+        raise ValueError(f"{field} must contain at most 5000 values")
+    return series
+
+
+@router.post("/spectral-analysis", dependencies=[Depends(require_api_key())])
+def spectral_analysis_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P259: naive DFT periodogram, spectral entropy, and band-energy share.
+
+    Body: ``{"series": [...], "sample_rate": float, "bands": [[low, high], ...]}``
+    where ``bands`` is optional. Returns the dominant non-DC frequency, the
+    Shannon spectral entropy (normalised to ``[0, 1]``), per-band energy share,
+    and the full periodogram / frequency grid. HTTP 422 on invalid input.
+    """
+    try:
+        series = _numeric_series(payload)
+        sample_rate = _finite_number(payload.get("sample_rate", 1.0), "sample_rate")
+        bands_raw = payload.get("bands")
+        bands: list[tuple[float, float]] | None = None
+        if bands_raw is not None:
+            if not isinstance(bands_raw, list):
+                raise ValueError("bands must be a list of [low, high] pairs")
+            bands = []
+            for idx, pair in enumerate(bands_raw):
+                if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+                    raise ValueError(f"bands[{idx}] must be a [low, high] pair")
+                bands.append((
+                    _finite_number(pair[0], f"bands[{idx}] low"),
+                    _finite_number(pair[1], f"bands[{idx}] high"),
+                ))
+        report = spectral_report(series, sample_rate=sample_rate, bands=bands)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return report.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P260 — Cycle detection (autocorrelation / Ljung-Box / seasonal strength)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/cycle-detection", dependencies=[Depends(require_api_key())])
+def cycle_detection_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P260: detect candidate cycle periods via autocorrelation.
+
+    Body: ``{"series": [...], "min_period": int, "max_period": int}`` where
+    ``min_period`` (default 2) and ``max_period`` (default ``min(N//2, 24)``)
+    bound the scanned lag range. Returns cycle candidates ranked by composite
+    score, a normalised ``seasonal_strength`` in ``[0, 1]``, and the
+    Ljung-Box portmanteau statistic. HTTP 422 on invalid input.
+    """
+    try:
+        series = _numeric_series(payload)
+        min_period_raw = payload.get("min_period", 2)
+        max_period_raw = payload.get("max_period")
+        # Validate the optional int bounds. Booleans are a subclass of int in
+        # Python; reject them explicitly so ``True`` is not silently accepted
+        # as period 1.
+        if isinstance(min_period_raw, bool):
+            raise TypeError("min_period must be an int")
+        if not isinstance(min_period_raw, int):
+            raise TypeError("min_period must be an int")
+        if max_period_raw is not None:
+            if isinstance(max_period_raw, bool) or not isinstance(max_period_raw, int):
+                raise TypeError("max_period must be an int or null")
+        result = detect_cycles(
+            series,
+            min_period=min_period_raw,
+            max_period=max_period_raw,
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P261 — Change-point detection (binary segmentation) endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/change-point", dependencies=[Depends(require_api_key())])
+def change_point_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P261: detect change points via recursive binary segmentation.
+
+    Body: ``{"series": [...], "min_size": int, "max_points": int,
+    "threshold": float}`` where ``min_size`` (default 5), ``max_points``
+    (default 3) and ``threshold`` (default 0.0) are optional. Returns the
+    ranked change points (mean/variance effect sizes + combined score), the
+    strongest change index, a normalised ``confidence`` in ``[0, 1]``, and
+    the contiguous ``segments`` implied by the detected change points. HTTP
+    422 on invalid input.
+    """
+    try:
+        series = _numeric_series(payload)
+        min_size_raw = payload.get("min_size", 5)
+        max_points_raw = payload.get("max_points", 3)
+        threshold_raw = payload.get("threshold", 0.0)
+        # Validate the optional int parameters; booleans are a subclass of int
+        # in Python and are rejected explicitly so ``True`` is not silently
+        # accepted as ``min_size=1``.
+        if isinstance(min_size_raw, bool) or not isinstance(min_size_raw, int):
+            raise TypeError("min_size must be an int")
+        if isinstance(max_points_raw, bool) or not isinstance(max_points_raw, int):
+            raise TypeError("max_points must be an int")
+        threshold = _finite_number(threshold_raw, "threshold")
+        result = detect_change_points(
+            series,
+            min_size=min_size_raw,
+            max_points=max_points_raw,
+            threshold=threshold,
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P262 — Entropy & complexity diagnostics endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/entropy-complexity", dependencies=[Depends(require_api_key())])
+def entropy_complexity_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P262: Shannon / sample / permutation entropies plus a Hurst exponent.
+
+    Body: ``{"series": [...], "bins"?: int, "sample_m"?: int,
+    "permutation_order"?: int}`` where ``bins`` (default 10) bounds the Shannon
+    histogram, ``sample_m`` (default 2) is the sample-entropy template length,
+    and ``permutation_order`` (default 3) is the ordinal-pattern order. Returns
+    the four metrics, ``n`` (series length), and ``approximation`` (estimator
+    family). HTTP 422 on invalid input.
+    """
+    from app.platform.entropy_complexity import entropy_complexity_report
+
+    try:
+        series = _numeric_series(payload)
+        bins_raw = payload.get("bins", 10)
+        if isinstance(bins_raw, bool) or not isinstance(bins_raw, int):
+            raise TypeError("bins must be an int")
+        sample_m_raw = payload.get("sample_m", 2)
+        if isinstance(sample_m_raw, bool) or not isinstance(sample_m_raw, int):
+            raise TypeError("sample_m must be an int")
+        permutation_order_raw = payload.get("permutation_order", 3)
+        if isinstance(permutation_order_raw, bool) or not isinstance(permutation_order_raw, int):
+            raise TypeError("permutation_order must be an int")
+        result = entropy_complexity_report(
+            series,
+            bins=bins_raw,
+            sample_m=sample_m_raw,
+            permutation_order=permutation_order_raw,
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P263 — Rolling feature report (mean / std / zscore / skew / kurtosis / ewma / beta)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/rolling-features", dependencies=[Depends(require_api_key())])
+def rolling_features_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P263: trailing-window rolling statistics for a scalar series.
+
+    Body: ``{"series": [...], "window"?: int, "alpha"?: float,
+    "benchmark"?: [...]}`` where ``window`` (default 5) is the trailing
+    window size, ``alpha`` (default 0.2) is the EWMA smoothing factor in
+    ``(0, 1]``, and ``benchmark`` (optional) is a same-length series used
+    to compute a rolling regression beta. Returns length-``N`` lists for
+    ``mean``, ``std``, ``zscore``, ``skew``, ``kurtosis`` and ``ewma``
+    (with leading ``None`` warm-up entries for the rolling stats), plus
+    ``beta`` — either a length-``N`` list or ``None`` when no benchmark
+    was supplied. HTTP 422 on invalid input.
+    """
+    try:
+        series = _numeric_series(payload)
+        window_raw = payload.get("window", 5)
+        # Reject booleans explicitly: bool subclasses int in Python and
+        # ``True`` would otherwise be silently accepted as ``window=1``.
+        if isinstance(window_raw, bool) or not isinstance(window_raw, int):
+            raise TypeError("window must be an int")
+        alpha = _finite_number(payload.get("alpha", 0.2), "alpha")
+        benchmark_raw = payload.get("benchmark")
+        benchmark: list[float] | None = None
+        if benchmark_raw is not None:
+            if not isinstance(benchmark_raw, list):
+                raise ValueError("benchmark must be a list of finite numbers")
+            benchmark = [
+                _finite_number(value, "benchmark entries")
+                for value in benchmark_raw
+            ]
+            if not benchmark:
+                raise ValueError("benchmark must be non-empty")
+        result = rolling_feature_report(
+            series,
+            window=window_raw,
+            alpha=alpha,
+            benchmark=benchmark,
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P264 — factor IC analysis endpoint
+# ---------------------------------------------------------------------------
+
+
+def _factor_ic_series(payload: dict[str, Any], field: str) -> list[float]:
+    """Validate a ``field`` payload entry as a finite-number list (P264 helper).
+
+    Reuses the platform's shared :func:`_finite_number` so the bool / NaN
+    rejection contract matches every other numeric-series endpoint. Raises
+    ``ValueError`` / ``TypeError`` which the caller converts into HTTP 422.
+    """
+    raw = payload.get(field)
+    if not isinstance(raw, list):
+        raise ValueError(f"{field} must be a non-empty list of finite numbers")
+    if not raw:
+        raise ValueError(f"{field} must be a non-empty list")
+    return [_finite_number(v, f"{field} entries") for v in raw]
+
+
+@router.post("/factor-ic", dependencies=[Depends(require_api_key())])
+def factor_ic_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P264: single-period cross-sectional factor IC analysis.
+
+    Body: ``{"factor": [...], "forward_returns": [...], "n_quantiles"?: int}``
+    where ``factor`` and ``forward_returns`` are aligned 1-to-1 and
+    ``n_quantiles`` (default 5) is in ``[2, len]``. Returns the Pearson IC,
+    Spearman / rank IC, single-period ICIR approximation, per-quantile
+    bucket decomposition (count + mean return), and the top-minus-bottom
+    quantile spread. HTTP 422 on invalid input.
+    """
+    try:
+        factor = _factor_ic_series(payload, "factor")
+        forward_returns = _factor_ic_series(payload, "forward_returns")
+        n_quantiles_raw = payload.get("n_quantiles", 5)
+        # Reject booleans explicitly: bool subclasses int in Python and ``True``
+        # would otherwise be silently accepted as ``n_quantiles=1``.
+        if isinstance(n_quantiles_raw, bool) or not isinstance(n_quantiles_raw, int):
+            raise TypeError("n_quantiles must be an int")
+        result = factor_ic_report(
+            factor, forward_returns, n_quantiles=n_quantiles_raw
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P265 — feature orthogonalization endpoint
+# ---------------------------------------------------------------------------
+
+
+def _panel_field(payload: dict[str, Any], *, field: str = "panel") -> dict[str, list[float]]:
+    """Validate a ``{feature: series}`` panel payload entry.
+
+    By default reads ``payload["panel"]``; pass ``field`` to reuse the same
+    validator for a differently-named panel entry (e.g. ``"signals"``).
+    Mirrors :func:`_finite_number`'s bool / non-finite rejection so the
+    panel-validation contract matches every other numeric-series endpoint.
+    Raises :class:`ValueError` / :class:`TypeError` which the caller converts
+    into HTTP 422.
+    """
+    raw = payload.get(field)
+    if not isinstance(raw, dict) or not raw:
+        raise ValueError(f"{field} must be a non-empty dict of feature series")
+    validated: dict[str, list[float]] = {}
+    length: int | None = None
+    for name, series in raw.items():
+        if isinstance(series, (str, dict)) or not isinstance(series, list):
+            raise ValueError(f"{field}['{name}'] must be a list of finite numbers")
+        vector = [_finite_number(v, f"{field}['{name}'] entries") for v in series]
+        if not vector:
+            raise ValueError(f"{field}['{name}'] must be a non-empty series")
+        if length is None:
+            length = len(vector)
+        elif len(vector) != length:
+            raise ValueError(f"{field} feature series must have equal length")
+        validated[str(name)] = vector
+    return validated
+
+
+@router.post("/feature-orthogonalization", dependencies=[Depends(require_api_key())])
+def feature_orthogonalization_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P265: Gram-Schmidt + correlation-prune + VIF de-correlation report.
+
+    Body: ``{"panel": {feature: [floats]}, "target"?: [floats],
+    "threshold"?: float}`` where ``threshold`` (default ``0.95``) bounds
+    correlation pruning in ``[0, 1]``. Returns the orthogonalized features
+    for the kept set, the kept/dropped partition, simplified VIF scores over
+    the full panel, pairwise Pearson correlations (labelled ``"A|B"``), and
+    ``residualized`` (the target residualized against the kept features, or
+    ``null`` when no target was supplied). HTTP 422 on invalid input.
+    """
+    from app.platform.feature_orthogonalization import orthogonalization_report
+
+    try:
+        panel = _panel_field(payload)
+        target_raw = payload.get("target")
+        target: list[float] | None = None
+        if target_raw is not None:
+            if isinstance(target_raw, (str, dict)) or not isinstance(target_raw, list):
+                raise ValueError("target must be a list of finite numbers")
+            target = [_finite_number(v, "target entries") for v in target_raw]
+            if not target:
+                raise ValueError("target must be a non-empty series")
+        threshold = _finite_number(payload.get("threshold", 0.95), "threshold")
+        result = orthogonalization_report(panel, target=target, threshold=threshold)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P266 — Signal combination
+# ---------------------------------------------------------------------------
+
+
+@router.post("/signal-combination", dependencies=[Depends(require_api_key())])
+def signal_combination_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P266: combine a panel of equal-length signals into a single composite.
+
+    Body: ``{"signals": {name: [floats]}, "weights"?: {name: float},
+    "method"?: "zscore"|"rank"|"raw"}`` where ``signals`` is a non-empty dict
+    of equal-length finite numeric series. ``weights`` (optional) keys must
+    match the signal names and have a positive absolute sum; when omitted
+    equal weights are used (``|w|`` summing to 1). ``method`` defaults to
+    ``"zscore"``. Returns the combined series, the normalized weights, the
+    per-signal transformed (standardized) series, the method and the signal
+    count. HTTP 422 on invalid input.
+    """
+    from app.platform.signal_combination import combine_signals
+
+    try:
+        signals = _panel_field(payload, field="signals")
+        method = str(payload.get("method", "zscore"))
+        weights_raw = payload.get("weights")
+        weights: dict[str, float] | None = None
+        if weights_raw is not None:
+            if not isinstance(weights_raw, dict):
+                raise ValueError("weights must be a mapping of name to number")
+            weights = {}
+            for name, value in weights_raw.items():
+                weights[str(name)] = _finite_number(value, f"weights['{name}']")
+        result = combine_signals(signals, weights=weights, method=method)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P267 — Backtest diagnostics
+# ---------------------------------------------------------------------------
+
+
+@router.post("/backtest-diagnostics", dependencies=[Depends(require_api_key())])
+def backtest_diagnostics_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P267: trade-level diagnostics (expectancy, payoff, streaks, bootstrap CI).
+
+    Body: ``{"trades": [float, ...], "n_bootstrap"?: int, "seed"?: int}`` where
+    ``trades`` is a non-empty list of per-trade PnL values. A trade ``> 0`` is a
+    win, ``< 0`` a loss, and ``== 0`` a neutral (counted in ``expectancy`` /
+    ``n_trades`` but excluded from win/loss tallies and resetting any active
+    streak). Returns expectancy, profit factor, payoff ratio, win/loss rates,
+    max win/loss streaks, a deterministic percentile-bootstrap 95 % CI on
+    expectancy, and the trade count. HTTP 422 on invalid input.
+    """
+    from app.platform.backtest_diagnostics import backtest_diagnostics_report
+
+    try:
+        trades_raw = payload.get("trades")
+        if isinstance(trades_raw, (str, dict)) or not isinstance(trades_raw, list):
+            raise ValueError("trades must be a non-empty list of finite numbers")
+        trades = [_finite_number(v, "trades entries") for v in trades_raw]
+        if not trades:
+            raise ValueError("trades must be a non-empty list of finite numbers")
+        n_bootstrap_raw = payload.get("n_bootstrap", 1000)
+        if isinstance(n_bootstrap_raw, bool) or not isinstance(n_bootstrap_raw, int):
+            raise ValueError("n_bootstrap must be an int >= 1")
+        n_bootstrap = n_bootstrap_raw
+        seed_raw = payload.get("seed")
+        if seed_raw is not None and (isinstance(seed_raw, bool) or not isinstance(seed_raw, int)):
+            raise ValueError("seed must be None or an int")
+        seed: int | None = seed_raw
+        result = backtest_diagnostics_report(trades, n_bootstrap=n_bootstrap, seed=seed)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P268 — OHLCV data-quality diagnostics endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/data-quality", dependencies=[Depends(require_api_key())])
+def data_quality_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P268: OHLCV bar data-quality diagnostics.
+
+    Body: ``{"bars": [{timestamp, open, high, low, close, volume?}, ...],
+    "expected_interval_seconds"?: float, "stale_window"?: int,
+    "jump_threshold"?: float}``. Returns ``n_bars``, ``issue_count``,
+    ``critical_count``, ``warning_count``, ``issues`` (each with
+    ``index``/``field``/``severity``/``message``) and ``is_clean``.
+    HTTP 422 on missing/empty/invalid bars or parameters.
+    """
+    from app.platform.data_quality import data_quality_report
+
+    try:
+        bars_raw = payload.get("bars")
+        # Reject dicts / strings / scalars up front: dict is iterable but
+        # iterating yields keys, which would silently produce nonsense. bool
+        # subclasses int and is clearly not a bar list.
+        if (
+            isinstance(bars_raw, (dict, str, bytes))
+            or isinstance(bars_raw, bool)
+            or not isinstance(bars_raw, (list, tuple))
+        ):
+            raise ValueError("bars must be a non-empty list of bar dicts")
+        bars: list[dict[str, Any]] = []
+        for i, raw in enumerate(bars_raw):
+            # Each bar MUST be a dict. Never coerce (e.g. ``dict(b)``):
+            # that would accept JSON arrays of key/value pairs (or any other
+            # iterable of pairs) as if they were valid bars, silently bypassing
+            # the strict schema enforced by data_quality_report.
+            if not isinstance(raw, dict) or isinstance(raw, (str, bytes)):
+                raise ValueError(f"bars[{i}] must be a dict")
+            bars.append(raw)
+        expected_interval = payload.get("expected_interval_seconds")
+        stale_window_raw = payload.get("stale_window", 3)
+        # Reject booleans explicitly: bool subclasses int in Python and
+        # ``True`` would otherwise be silently accepted as ``stale_window=1``.
+        if isinstance(stale_window_raw, bool) or not isinstance(stale_window_raw, int):
+            raise ValueError("stale_window must be a positive int")
+        jump_threshold_raw = payload.get("jump_threshold", 0.2)
+        result = data_quality_report(
+            bars,
+            expected_interval_seconds=expected_interval,
+            stale_window=stale_window_raw,
+            jump_threshold=jump_threshold_raw,
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P269–P278 — factor research and strategy diagnostics endpoints
+# ---------------------------------------------------------------------------
+
+
+def _nullable_numeric_panel(payload: dict[str, Any], *, field: str = "panel") -> dict[str, list[float | None]]:
+    raw = payload.get(field)
+    if not isinstance(raw, dict) or not raw:
+        raise ValueError(f"{field} must be a non-empty dict of feature series")
+    out: dict[str, list[float | None]] = {}
+    for name, series in raw.items():
+        if isinstance(series, (str, dict)) or not isinstance(series, list) or not series:
+            raise ValueError(f"{field}['{name}'] must be a non-empty list")
+        values: list[float | None] = []
+        for value in series:
+            values.append(None if value is None else _finite_number(value, f"{field}['{name}'] entries"))
+        out[str(name)] = values
+    return out
+
+
+@router.post("/factor-turnover", dependencies=[Depends(require_api_key())])
+def factor_turnover_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.platform.factor_turnover import factor_turnover_report
+
+    try:
+        snapshots_raw = payload.get("snapshots")
+        if not isinstance(snapshots_raw, list):
+            raise ValueError("snapshots must be a list of factor snapshots")
+        snapshots: list[dict[str, float]] = []
+        for i, snapshot in enumerate(snapshots_raw):
+            if not isinstance(snapshot, dict):
+                raise ValueError(f"snapshots[{i}] must be a dict")
+            snapshots.append({str(name): _finite_number(value, f"snapshots[{i}]['{name}']") for name, value in snapshot.items()})
+        result = factor_turnover_report(snapshots, bucket_fraction=_finite_number(payload.get("bucket_fraction", 0.2), "bucket_fraction"))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return result.to_dict()
+
+
+@router.post("/factor-decay", dependencies=[Depends(require_api_key())])
+def factor_decay_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.platform.factor_decay import factor_decay_report
+
+    try:
+        factor = _factor_ic_series(payload, "factor")
+        forward_returns = _panel_field(payload, field="forward_returns")
+        result = factor_decay_report(factor, forward_returns)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return result.to_dict()
+
+
+@router.post("/factor-quantiles", dependencies=[Depends(require_api_key())])
+def factor_quantiles_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.platform.factor_quantiles import factor_quantile_report
+
+    try:
+        n_quantiles_raw = payload.get("n_quantiles", 5)
+        if isinstance(n_quantiles_raw, bool) or not isinstance(n_quantiles_raw, int):
+            raise ValueError("n_quantiles must be an int")
+        result = factor_quantile_report(
+            _factor_ic_series(payload, "factor"),
+            _factor_ic_series(payload, "forward_returns"),
+            n_quantiles=n_quantiles_raw,
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return result.to_dict()
+
+
+@router.post("/ic-diagnostics", dependencies=[Depends(require_api_key())])
+def ic_diagnostics_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.platform.ic_diagnostics import ic_diagnostics_report
+
+    try:
+        result = ic_diagnostics_report(_factor_ic_series(payload, "ic_series"))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return result.to_dict()
+
+
+@router.post("/factor-data-quality", dependencies=[Depends(require_api_key())])
+def factor_data_quality_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.platform.factor_data_quality import factor_data_quality_report
+
+    try:
+        stale_window_raw = payload.get("stale_window", 3)
+        if isinstance(stale_window_raw, bool) or not isinstance(stale_window_raw, int):
+            raise ValueError("stale_window must be an int")
+        result = factor_data_quality_report(
+            _nullable_numeric_panel(payload),
+            stale_window=stale_window_raw,
+            outlier_z=_finite_number(payload.get("outlier_z", 3.0), "outlier_z"),
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return result.to_dict()
+
+
+@router.post("/signal-persistence", dependencies=[Depends(require_api_key())])
+def signal_persistence_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.platform.signal_persistence import signal_persistence_report
+
+    try:
+        max_lag_raw = payload.get("max_lag", 5)
+        if isinstance(max_lag_raw, bool) or not isinstance(max_lag_raw, int):
+            raise ValueError("max_lag must be an int")
+        signal = _numeric_series(payload, field="signal")
+        if len(signal) < 3:
+            raise ValueError("signal must contain at least 3 values")
+        result = signal_persistence_report(signal, max_lag=max_lag_raw)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return result.to_dict()
+
+
+@router.post("/strategy-quality", dependencies=[Depends(require_api_key())])
+def strategy_quality_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.platform.strategy_quality import strategy_quality_report
+
+    try:
+        result = strategy_quality_report(_numeric_series(payload, field="trades"))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return result.to_dict()
+
+
+@router.post("/regime-performance", dependencies=[Depends(require_api_key())])
+def regime_performance_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.platform.regime_performance import regime_performance_report
+
+    try:
+        regimes = payload.get("regimes")
+        if not isinstance(regimes, list):
+            raise ValueError("regimes must be a list")
+        result = regime_performance_report(_numeric_series(payload, field="returns"), regimes)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return result.to_dict()
+
+
+@router.post("/strategy-diversification", dependencies=[Depends(require_api_key())])
+def strategy_diversification_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.platform.strategy_diversification import strategy_diversification_report
+
+    try:
+        result = strategy_diversification_report(
+            _panel_field(payload, field="strategies"),
+            redundancy_threshold=_finite_number(payload.get("redundancy_threshold", 0.9), "redundancy_threshold"),
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return result.to_dict()
+
+
+@router.post("/backtest-confidence", dependencies=[Depends(require_api_key())])
+def backtest_confidence_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.platform.backtest_confidence import backtest_confidence_report
+
+    try:
+        n_bootstrap_raw = payload.get("n_bootstrap", 1000)
+        window_raw = payload.get("window", 20)
+        seed_raw = payload.get("seed")
+        if isinstance(n_bootstrap_raw, bool) or not isinstance(n_bootstrap_raw, int):
+            raise ValueError("n_bootstrap must be an int")
+        if isinstance(window_raw, bool) or not isinstance(window_raw, int):
+            raise ValueError("window must be an int")
+        if seed_raw is not None and (isinstance(seed_raw, bool) or not isinstance(seed_raw, int)):
+            raise ValueError("seed must be None or an int")
+        result = backtest_confidence_report(
+            _numeric_series(payload, field="returns"),
+            n_bootstrap=n_bootstrap_raw,
+            seed=seed_raw,
+            window=window_raw,
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return result.to_dict()

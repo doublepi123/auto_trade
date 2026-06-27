@@ -160,7 +160,17 @@ auto_trade/
 │   │   │   ├── loess.py                   # P250：LOESS/LOWESS（Cleveland tricube + 鲁棒 bisquare 迭代）
 │   │   │   ├── smart_order_routing.py     # P251：智能订单路由（多 venue 最优价 + tick 量化 + 拆单计划）
 │   │   │   ├── vine_copula.py             # P252：Vine Copula（C-vine/D-vine 逐对 copula 构造 + AIC/BIC）
-│   │   │   └── api.py                      # /api/platform/*（strategies/backtest/runs/tearsheet/analyze/bars/optimize/montecarlo/snapshot/events/transactions/replay/factors/tca/risk-metrics/portfolio-optimize/regime/cpcv/style-analysis/trade-excursion/shortfall/returns-calendar/stress-report/stability/cointegration/kelly/volatility/microstructure/execution-cost/hawkes/historical-stress/factor-risk/sensitivity/evt/causal-analysis/regime-hmm/copula/drawdown-forecast/liquidity-metrics/momentum-factors/portfolio-decomposition/spa-test/execution-quality/diversification/options-pricing/implied-volatility/kalman-filter/stochastic-processes/stat-arb-signals/robust-statistics/bandits/loess/smart-order-routing/vine-copula）
+│   │   │   ├── factor_turnover.py         # P269：因子换手率（rank turnover + bucket retention + rank autocorrelation）
+│   │   │   ├── factor_decay.py            # P270：因子 IC/RankIC 多 horizon 衰减 + half-life horizon
+│   │   │   ├── factor_quantiles.py        # P271：quantile forward return + top-bottom spread + monotonicity
+│   │   │   ├── ic_diagnostics.py          # P272：IC 时序诊断（positive ratio / t-like / cumulative drawdown）
+│   │   │   ├── factor_data_quality.py     # P273：因子面板质量（coverage/missing/constant/outlier/stale）
+│   │   │   ├── signal_persistence.py      # P274：信号持续性（autocorrelation decay + half-life + turnover proxy）
+│   │   │   ├── strategy_quality.py        # P275：策略 SQN / expectancy / payoff / sample confidence
+│   │   │   ├── regime_performance.py      # P276：按 regime 切片收益、波动、胜率、贡献
+│   │   │   ├── strategy_diversification.py # P277：多策略相关矩阵、冗余对、分散化得分
+│   │   │   ├── backtest_confidence.py     # P278：bootstrap CI + rolling Sharpe 稳定性 + fragility
+│   │   │   └── api.py                      # /api/platform/*（含 P269-P278 因子研究闭环与策略诊断端点）
 │   │   ├── strategies/                     # 策略插件包（IntervalStrategy 首个插件）
 │   │   │   ├── __init__.py
 │   │   │   └── interval_strategy.py        # 区间策略插件化实现
@@ -300,6 +310,16 @@ cd frontend && npm run type-check
 | 平台 LOESS | `POST /api/platform/loess`（Cleveland tricube 局部线性 + 鲁棒 bisquare 迭代；422 缺/不等长/非法带宽；带 API key） |
 | 平台订单路由 | `POST /api/platform/smart-order-routing`（多 venue L1 最优价贪婪 + tick 量化 + 拆单 + WAP/费用；422 缺/空/非法 side；带 API key） |
 | 平台 Vine Copula | `POST /api/platform/vine-copula`（C-vine/D-vine 逐对 copula（Gaussian/Gumbel/Clayton，复用 P235）+ 对数似然 + AIC/BIC；422 缺/空/常数列；带 API key） |
+| 平台谱分析 | `POST /api/platform/spectral-analysis`（DFT periodogram + 主频/谱熵/频段能量；422 缺/非法；带 API key） |
+| 平台周期检测 | `POST /api/platform/cycle-detection`（自相关周期候选 + Ljung-Box 近似 + seasonal_strength；422 缺/非法周期；带 API key） |
+| 平台变点检测 | `POST /api/platform/change-point`（均值/方差漂移 + best-first binary segmentation；422 缺/非法；带 API key） |
+| 平台熵复杂度 | `POST /api/platform/entropy-complexity`（Shannon/sample/permutation entropy + Hurst R/S；422 缺/非法；带 API key） |
+| 平台滚动特征 | `POST /api/platform/rolling-features`（rolling mean/std/zscore/skew/kurtosis + EWMA + rolling beta；422 缺/非法；带 API key） |
+| 平台因子 IC | `POST /api/platform/factor-ic`（Pearson/Spearman rank IC + quantile buckets + ICIR；422 缺/不等长；带 API key） |
+| 平台特征正交化 | `POST /api/platform/feature-orthogonalization`（Gram-Schmidt、residualize、correlation prune、VIF；422 缺/非法 panel；带 API key） |
+| 平台信号组合 | `POST /api/platform/signal-combination`（zscore/rank/raw 合成 + 显式/等权 weights；模块函数支持 risk-budget weights；422 缺/非法 method/weights；带 API key） |
+| 平台回测诊断 | `POST /api/platform/backtest-diagnostics`（expectancy/profit-factor/payoff/streak/bootstrap CI；无亏损比率以 `"Infinity"` JSON-safe 输出；422 缺/非法；带 API key） |
+| 平台数据质量 | `POST /api/platform/data-quality`（timestamp gap/duplicate/order + stale/jump/non-positive close + OHLC 一致性；422 缺/非法 schema；带 API key） |
 | 组合配置 | `GET /api/portfolio/config`（组合配置列表）、`PUT /api/portfolio/config/{name}`（保存/更新组合配置；400 name 不匹配、422 校验/缺字段；带 API key） |
 | 组合归因 | `GET /api/portfolio/attribution?name=`（按标的 FIFO realized + unrealized PnL 与贡献；未知组合 404；带 API key） |
 | 组合 kill-switch | `GET/POST /api/portfolio/kill-switch`、`POST /api/portfolio/kill-switch/disable`（模块级熔断；arm 写审计 `PORTFOLIO_KILL_SWITCH`；arm 后 `PortfolioRunner.rebalance` 跳过） |

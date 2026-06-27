@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import json
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -819,19 +820,22 @@ def test_platform_fractional_differencing_nan_inf_series_422(patched_app) -> Non
         nan_series = series[:30] + [float("nan")] + series[30:]
         r_nan = client.post(
             "/api/platform/fractional-differencing",
-            json={"series": nan_series, "d": 0.4, "threshold": 1e-3, "mode": "ffd"},
+            content=json.dumps({"series": nan_series, "d": 0.4, "threshold": 1e-3, "mode": "ffd"}, allow_nan=True),
+            headers={"Content-Type": "application/json"},
         )
         # +inf.
         inf_series = series[:30] + [float("inf")] + series[30:]
         r_inf = client.post(
             "/api/platform/fractional-differencing",
-            json={"series": inf_series, "d": 0.4, "threshold": 1e-3, "mode": "ffd"},
+            content=json.dumps({"series": inf_series, "d": 0.4, "threshold": 1e-3, "mode": "ffd"}, allow_nan=True),
+            headers={"Content-Type": "application/json"},
         )
         # -inf.
         ninf_series = series[:30] + [float("-inf")] + series[30:]
         r_ninf = client.post(
             "/api/platform/fractional-differencing",
-            json={"series": ninf_series, "d": 0.4, "threshold": 1e-3, "mode": "ffd"},
+            content=json.dumps({"series": ninf_series, "d": 0.4, "threshold": 1e-3, "mode": "ffd"}, allow_nan=True),
+            headers={"Content-Type": "application/json"},
         )
     assert r_nan.status_code == 422
     assert r_inf.status_code == 422
@@ -846,22 +850,26 @@ def test_platform_fractional_differencing_nan_inf_params_422(patched_app) -> Non
         # NaN d
         r_d_nan = client.post(
             "/api/platform/fractional-differencing",
-            json={"series": series, "d": float("nan"), "threshold": 1e-3, "mode": "ffd"},
+            content=json.dumps({"series": series, "d": float("nan"), "threshold": 1e-3, "mode": "ffd"}, allow_nan=True),
+            headers={"Content-Type": "application/json"},
         )
         # inf d
         r_d_inf = client.post(
             "/api/platform/fractional-differencing",
-            json={"series": series, "d": float("inf"), "threshold": 1e-3, "mode": "ffd"},
+            content=json.dumps({"series": series, "d": float("inf"), "threshold": 1e-3, "mode": "ffd"}, allow_nan=True),
+            headers={"Content-Type": "application/json"},
         )
         # NaN threshold
         r_thr_nan = client.post(
             "/api/platform/fractional-differencing",
-            json={"series": series, "d": 0.4, "threshold": float("nan"), "mode": "ffd"},
+            content=json.dumps({"series": series, "d": 0.4, "threshold": float("nan"), "mode": "ffd"}, allow_nan=True),
+            headers={"Content-Type": "application/json"},
         )
         # inf threshold
         r_thr_inf = client.post(
             "/api/platform/fractional-differencing",
-            json={"series": series, "d": 0.4, "threshold": float("inf"), "mode": "ffd"},
+            content=json.dumps({"series": series, "d": 0.4, "threshold": float("inf"), "mode": "ffd"}, allow_nan=True),
+            headers={"Content-Type": "application/json"},
         )
     assert r_d_nan.status_code == 422
     assert r_d_inf.status_code == 422

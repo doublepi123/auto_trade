@@ -561,6 +561,26 @@ auto_trade/
 | `POST` | `/api/platform/loess` | LOESS/LOWESS 局部回归 |
 | `POST` | `/api/platform/smart-order-routing` | 多 venue 最优价路由 + 拆单 |
 | `POST` | `/api/platform/vine-copula` | C-vine/D-vine 多元 copula + AIC/BIC |
+| `POST` | `/api/platform/spectral-analysis` | DFT periodogram + 主频/谱熵/频段能量 |
+| `POST` | `/api/platform/cycle-detection` | 自相关周期候选 + Ljung-Box 近似 + 季节性强度 |
+| `POST` | `/api/platform/change-point` | 均值/方差漂移变点 + best-first binary segmentation |
+| `POST` | `/api/platform/entropy-complexity` | Shannon/sample/permutation entropy + Hurst R/S |
+| `POST` | `/api/platform/rolling-features` | rolling mean/std/z-score/skew/kurtosis + EWMA/beta |
+| `POST` | `/api/platform/factor-ic` | Pearson/Spearman IC + quantile buckets + ICIR |
+| `POST` | `/api/platform/feature-orthogonalization` | Gram-Schmidt / residualize / prune / VIF |
+| `POST` | `/api/platform/signal-combination` | z-score/rank/raw 信号融合 + 显式/等权权重 |
+| `POST` | `/api/platform/backtest-diagnostics` | expectancy/profit-factor/payoff/streak/bootstrap CI |
+| `POST` | `/api/platform/data-quality` | timestamp/price/OHLC 数据质量诊断 |
+| `POST` | `/api/platform/factor-turnover` | 因子 rank turnover + bucket 保留率 + rank autocorrelation |
+| `POST` | `/api/platform/factor-decay` | 多 horizon IC/RankIC 衰减 + best/half-life horizon |
+| `POST` | `/api/platform/factor-quantiles` | quantile forward return + top-bottom spread + monotonicity |
+| `POST` | `/api/platform/ic-diagnostics` | IC 时序 mean/std、正 IC 比率、t-like score、累计 IC 回撤 |
+| `POST` | `/api/platform/factor-data-quality` | 因子面板 coverage/missing/constant/outlier/stale 质量报告 |
+| `POST` | `/api/platform/signal-persistence` | 信号 autocorrelation decay、half-life lag、turnover proxy |
+| `POST` | `/api/platform/strategy-quality` | SQN、expectancy、win-rate、payoff ratio、样本置信等级 |
+| `POST` | `/api/platform/regime-performance` | 按市场状态切片收益、波动、胜率与贡献 |
+| `POST` | `/api/platform/strategy-diversification` | 多策略相关矩阵、冗余对与分散化得分 |
+| `POST` | `/api/platform/backtest-confidence` | bootstrap return CI、rolling Sharpe 稳定性、fragility score |
 
 > **说明：** 受保护 API 在配置了 `AUTO_TRADE_API_KEY` 时要求 `X-API-Key`；`AUTO_TRADE_API_KEY` 为空仅 `dev/test` 放行，`prod` 会返回 401。Docker/nginx 与 Vite 代理会在服务端注入该 header，避免把密钥下发到 SPA。
 
