@@ -3382,3 +3382,186 @@ def backtest_confidence_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
     except (TypeError, ValueError) as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
     return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P279–P288 — ML research pipeline endpoints
+# ---------------------------------------------------------------------------
+
+
+@router.post("/forecast-diagnostics", dependencies=[Depends(require_api_key())])
+def forecast_diagnostics_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.platform.forecast_diagnostics import forecast_diagnostics_report
+
+    try:
+        benchmark = payload.get("benchmark")
+        if benchmark is not None:
+            benchmark = [_finite_number(v, "benchmark entries") for v in benchmark]
+        n_buckets_raw = payload.get("n_buckets", 5)
+        if isinstance(n_buckets_raw, bool) or not isinstance(n_buckets_raw, int):
+            raise ValueError("n_buckets must be an int")
+        result = forecast_diagnostics_report(_numeric_series(payload, field="predictions"), _numeric_series(payload, field="actuals"), benchmark=benchmark, n_buckets=n_buckets_raw)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return result.to_dict()
+
+
+@router.post("/triple-barrier-labels", dependencies=[Depends(require_api_key())])
+def triple_barrier_labels_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.platform.triple_barrier import triple_barrier_report
+
+    try:
+        events = payload.get("events")
+        if not isinstance(events, list):
+            raise ValueError("events must be a list")
+        max_holding = payload.get("max_holding_bars", 5)
+        if isinstance(max_holding, bool) or not isinstance(max_holding, int):
+            raise ValueError("max_holding_bars must be an int")
+        result = triple_barrier_report(_numeric_series(payload, field="prices"), events, profit_take_pct=_finite_number(payload.get("profit_take_pct", 0.02), "profit_take_pct"), stop_loss_pct=_finite_number(payload.get("stop_loss_pct", 0.01), "stop_loss_pct"), max_holding_bars=max_holding)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return result.to_dict()
+
+
+@router.post("/sample-uniqueness", dependencies=[Depends(require_api_key())])
+def sample_uniqueness_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.platform.sample_uniqueness import sample_uniqueness_report
+
+    try:
+        events = payload.get("events")
+        if not isinstance(events, list):
+            raise ValueError("events must be a list")
+        result = sample_uniqueness_report(events, time_decay=_finite_number(payload.get("time_decay", 1.0), "time_decay"))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return result.to_dict()
+
+
+@router.post("/bar-builder", dependencies=[Depends(require_api_key())])
+def bar_builder_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.platform.bar_builder import build_bars
+
+    try:
+        ticks = payload.get("ticks")
+        if not isinstance(ticks, list):
+            raise ValueError("ticks must be a list")
+        result = build_bars(ticks, mode=str(payload.get("mode", "tick")), threshold=_finite_number(payload.get("threshold", 100), "threshold"))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return result.to_dict()
+
+
+@router.post("/factor-neutralization", dependencies=[Depends(require_api_key())])
+def factor_neutralization_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.platform.factor_neutralization import neutralize_factor
+
+    try:
+        factor = _dict_float_field(payload, "factor")
+        groups = payload.get("groups")
+        if groups is not None and not isinstance(groups, dict):
+            raise ValueError("groups must be a dict")
+        exposures = payload.get("exposures")
+        result = neutralize_factor(factor, method=str(payload.get("method", "market_demean")), groups=groups, exposures=exposures)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return result.to_dict()
+
+
+@router.post("/factor-tearsheet", dependencies=[Depends(require_api_key())])
+def factor_tearsheet_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.platform.factor_tearsheet import factor_tearsheet_report
+
+    try:
+        records = payload.get("records")
+        if not isinstance(records, list):
+            raise ValueError("records must be a list")
+        n_quantiles = payload.get("n_quantiles", 5)
+        if isinstance(n_quantiles, bool) or not isinstance(n_quantiles, int):
+            raise ValueError("n_quantiles must be an int")
+        result = factor_tearsheet_report(records, n_quantiles=n_quantiles, bucket_fraction=_finite_number(payload.get("bucket_fraction", 0.2), "bucket_fraction"))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return result.to_dict()
+
+
+@router.post("/feature-pipeline", dependencies=[Depends(require_api_key())])
+def feature_pipeline_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.platform.feature_pipeline import run_feature_pipeline
+
+    try:
+        price_panel = _panel_field(payload, field="price_panel")
+        features = payload.get("features")
+        if not isinstance(features, list):
+            raise ValueError("features must be a list")
+        result = run_feature_pipeline(price_panel, features)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return result.to_dict()
+
+
+@router.post("/signal-backtest", dependencies=[Depends(require_api_key())])
+def signal_backtest_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.platform.signal_backtest import signal_backtest_report
+
+    try:
+        entries = payload.get("entries")
+        exits = payload.get("exits")
+        targets = payload.get("target_positions")
+        result = signal_backtest_report(_numeric_series(payload, field="prices"), entries=entries, exits=exits, target_positions=targets, size=_finite_number(payload.get("size", 1.0), "size"), initial_cash=_finite_number(payload.get("initial_cash", 10000.0), "initial_cash"), fee_bps=_finite_number(payload.get("fee_bps", 0.0), "fee_bps"), slippage_bps=_finite_number(payload.get("slippage_bps", 0.0), "slippage_bps"))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return result.to_dict()
+
+
+@router.post("/rolling-tearsheet", dependencies=[Depends(require_api_key())])
+def rolling_tearsheet_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.platform.rolling_tearsheet import rolling_tearsheet_report
+
+    try:
+        benchmark_raw = payload.get("benchmark")
+        benchmark = None if benchmark_raw is None else [_finite_number(v, "benchmark entries") for v in benchmark_raw]
+        windows_raw = payload.get("windows")
+        if windows_raw is None:
+            windows = None
+        else:
+            if not isinstance(windows_raw, list):
+                raise ValueError("windows must be a list")
+            windows = []
+            for value in windows_raw:
+                if isinstance(value, bool) or not isinstance(value, int):
+                    raise ValueError("windows must contain ints")
+                windows.append(value)
+        periods_raw = payload.get("periods_per_year", 252)
+        if isinstance(periods_raw, bool) or not isinstance(periods_raw, int):
+            raise ValueError("periods_per_year must be an int")
+        periods_per_year = periods_raw
+        result = rolling_tearsheet_report(_numeric_series(payload, field="returns"), benchmark=benchmark, windows=windows, periods_per_year=periods_per_year)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return result.to_dict()
+
+
+@router.post("/portfolio-constraints", dependencies=[Depends(require_api_key())])
+def portfolio_constraints_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.platform.portfolio_constraints import portfolio_constraints_report
+
+    try:
+        result = portfolio_constraints_report(_dict_float_field(payload, "weights"), prev_weights=_optional_float_dict(payload.get("prev_weights")), groups=payload.get("groups"), adv=_optional_float_dict(payload.get("adv")), nav=_finite_number(payload.get("nav", 1.0), "nav"), constraints=_optional_float_dict(payload.get("constraints")))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return result.to_dict()
+
+
+def _dict_float_field(payload: dict[str, Any], field: str) -> dict[str, float]:
+    raw = payload.get(field)
+    if not isinstance(raw, dict) or not raw:
+        raise ValueError(f"{field} must be a non-empty dict")
+    return {str(k): _finite_number(v, f"{field}['{k}']") for k, v in raw.items()}
+
+
+def _optional_float_dict(raw: Any) -> dict[str, float] | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("optional mapping fields must be dicts")
+    return {str(k): _finite_number(v, f"mapping['{k}']") for k, v in raw.items()}

@@ -170,7 +170,17 @@ auto_trade/
 │   │   │   ├── regime_performance.py      # P276：按 regime 切片收益、波动、胜率、贡献
 │   │   │   ├── strategy_diversification.py # P277：多策略相关矩阵、冗余对、分散化得分
 │   │   │   ├── backtest_confidence.py     # P278：bootstrap CI + rolling Sharpe 稳定性 + fragility
-│   │   │   └── api.py                      # /api/platform/*（含 P269-P278 因子研究闭环与策略诊断端点）
+│   │   │   ├── forecast_diagnostics.py    # P279：预测诊断（MSE/MAE/bias/directional accuracy/IC/bucket spread）
+│   │   │   ├── triple_barrier.py          # P280：三重障碍标签（profit/stop/time）
+│   │   │   ├── sample_uniqueness.py       # P281：样本唯一性与事件并发权重
+│   │   │   ├── bar_builder.py             # P282：tick/volume/dollar research bar 构造
+│   │   │   ├── factor_neutralization.py   # P283：market/group 中性化 + OLS residualize
+│   │   │   ├── factor_tearsheet.py        # P284：因子 IC/quantile/turnover/quality 聚合报告
+│   │   │   ├── feature_pipeline.py        # P285：白名单声明式特征管道（无 eval）
+│   │   │   ├── signal_backtest.py         # P286：entry/exit 或 target position 数组快速回测
+│   │   │   ├── rolling_tearsheet.py       # P287：rolling Sharpe/MDD/beta/alpha 多窗口报告
+│   │   │   ├── portfolio_constraints.py   # P288：组合 exposure/turnover/group/capacity 约束诊断
+│   │   │   └── api.py                      # /api/platform/*（含 P279-P288 ML 研究流水线端点）
 │   │   ├── strategies/                     # 策略插件包（IntervalStrategy 首个插件）
 │   │   │   ├── __init__.py
 │   │   │   └── interval_strategy.py        # 区间策略插件化实现

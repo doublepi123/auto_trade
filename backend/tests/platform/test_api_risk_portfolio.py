@@ -2380,3 +2380,112 @@ def test_strategy_quality_endpoint_serializes_non_finite_as_null():
     assert r.status_code == 200, r.text
     assert r.json()["sqn"] is None
     assert r.json()["payoff_ratio"] is None
+
+
+# ---------------------------------------------------------------------------
+# P279–P288 — ML research pipeline endpoints
+# ---------------------------------------------------------------------------
+
+
+def test_forecast_diagnostics_endpoint_200_and_422():
+    client = _request()
+    r = client.post("/api/platform/forecast-diagnostics", json={"predictions": [0.1, -0.2, 0.3], "actuals": [0.1, -0.1, 0.2], "n_buckets": 2})
+    assert r.status_code == 200, r.text
+    assert "mse" in r.json()
+    assert client.post("/api/platform/forecast-diagnostics", json={"predictions": [1], "actuals": [1, 2]}).status_code == 422
+
+
+def test_triple_barrier_endpoint_200_and_422():
+    client = _request()
+    r = client.post("/api/platform/triple-barrier-labels", json={"prices": [100, 103], "events": [{"index": 0, "side": "long"}], "profit_take_pct": 0.02, "stop_loss_pct": 0.01, "max_holding_bars": 1})
+    assert r.status_code == 200, r.text
+    assert r.json()["labels"][0]["label"] == 1
+    assert client.post("/api/platform/triple-barrier-labels", json={"prices": [], "events": []}).status_code == 422
+    assert client.post("/api/platform/triple-barrier-labels", json={"prices": [0, 1], "events": [{"index": 0}]}).status_code == 422
+
+
+def test_sample_uniqueness_endpoint_200_and_422():
+    client = _request()
+    r = client.post("/api/platform/sample-uniqueness", json={"events": [{"id": "a", "start": 0, "end": 1}, {"id": "b", "start": 1, "end": 2}]})
+    assert r.status_code == 200, r.text
+    assert r.json()["average_uniqueness"] < 1.0
+    assert client.post("/api/platform/sample-uniqueness", json={"events": [{"start": 2, "end": 1}]}).status_code == 422
+    assert client.post("/api/platform/sample-uniqueness", json={"events": ["bad"]}).status_code == 422
+
+
+def test_bar_builder_endpoint_200_and_422():
+    client = _request()
+    r = client.post("/api/platform/bar-builder", json={"mode": "tick", "threshold": 2, "ticks": [{"timestamp": "t1", "price": 1, "volume": 1}, {"timestamp": "t2", "price": 2, "volume": 1}]})
+    assert r.status_code == 200, r.text
+    assert r.json()["bar_count"] == 1
+    assert client.post("/api/platform/bar-builder", json={"mode": "tick", "threshold": 0, "ticks": []}).status_code == 422
+
+
+def test_factor_neutralization_endpoint_200_and_422():
+    client = _request()
+    r = client.post("/api/platform/factor-neutralization", json={"factor": {"A": 1, "B": 3}, "method": "market_demean"})
+    assert r.status_code == 200, r.text
+    assert r.json()["neutralized"]["A"] == -1
+    assert client.post("/api/platform/factor-neutralization", json={"factor": {"A": 1}, "method": "group_demean"}).status_code == 422
+    assert client.post("/api/platform/factor-neutralization", json={"factor": {"A": 1, "B": 2}, "method": "residualize", "exposures": "AB"}).status_code == 422
+    assert client.post("/api/platform/factor-neutralization", json={"factor": {"A": 1, "B": 2}, "method": "residualize", "exposures": {"A": 1, "B": {"x": 2}}}).status_code == 422
+    assert client.post("/api/platform/factor-neutralization", json={"factor": {"A": 1, "B": 2}, "method": "residualize", "exposures": {"A": {"x": "nan"}, "B": {"x": 2}}}).status_code == 422
+
+
+def test_factor_tearsheet_endpoint_200_and_422():
+    client = _request()
+    records = [{"date": "d1", "symbol": "A", "factor": 1, "forward_return": 0.1}, {"date": "d1", "symbol": "B", "factor": -1, "forward_return": -0.1}]
+    r = client.post("/api/platform/factor-tearsheet", json={"records": records, "n_quantiles": 2})
+    assert r.status_code == 200, r.text
+    assert r.json()["summary"]["mean_rank_ic"] == 1
+    assert client.post("/api/platform/factor-tearsheet", json={"records": []}).status_code == 422
+    assert client.post("/api/platform/factor-tearsheet", json={"records": [{"date": "d1"}]}).status_code == 422
+
+
+def test_feature_pipeline_endpoint_200_and_422():
+    client = _request()
+    r = client.post("/api/platform/feature-pipeline", json={"price_panel": {"A": [1, 2], "B": [2, 1]}, "features": [{"name": "ret", "op": "return", "window": 1}]})
+    assert r.status_code == 200, r.text
+    assert r.json()["feature_count"] == 1
+    assert client.post("/api/platform/feature-pipeline", json={"price_panel": {"A": [1]}, "features": [{"name": "x", "op": "eval"}]}).status_code == 422
+    assert client.post("/api/platform/feature-pipeline", json={"price_panel": {"A": [1, 2]}, "features": ["bad"]}).status_code == 422
+    assert client.post("/api/platform/feature-pipeline", json={"price_panel": {"A": [1, 2]}, "features": [{"name": "x", "op": "return", "window": 0}]}).status_code == 422
+
+
+def test_signal_backtest_endpoint_200_and_422():
+    client = _request()
+    r = client.post("/api/platform/signal-backtest", json={"prices": [100, 105], "entries": [True, False], "exits": [False, True], "size": 1, "initial_cash": 1000})
+    assert r.status_code == 200, r.text
+    assert r.json()["stats"]["num_trades"] == 1
+    assert client.post("/api/platform/signal-backtest", json={"prices": [1, 2], "entries": [True], "exits": [False, True]}).status_code == 422
+    assert client.post("/api/platform/signal-backtest", json={"prices": [0, 1], "entries": [True, False], "exits": [False, True]}).status_code == 422
+    assert client.post("/api/platform/signal-backtest", json={"prices": [1, 2], "entries": [1, 0], "exits": [False, True]}).status_code == 422
+    assert client.post("/api/platform/signal-backtest", json={"prices": [1, 2], "entries": [True, False], "exits": [False, True], "initial_cash": 0}).status_code == 422
+
+
+def test_rolling_tearsheet_endpoint_200_and_422():
+    client = _request()
+    r = client.post("/api/platform/rolling-tearsheet", json={"returns": [0.01, -0.01, 0.02], "windows": [2]})
+    assert r.status_code == 200, r.text
+    assert "2" in r.json()["windows"]
+    daily = client.post("/api/platform/rolling-tearsheet", json={"returns": [0.01, 0.02, 0.03], "windows": [3], "periods_per_year": 252})
+    raw = client.post("/api/platform/rolling-tearsheet", json={"returns": [0.01, 0.02, 0.03], "windows": [3], "periods_per_year": 1})
+    assert daily.status_code == 200 and raw.status_code == 200
+    assert daily.json()["windows"]["3"]["rolling_sharpe"][2] > raw.json()["windows"]["3"]["rolling_sharpe"][2]
+    daily_alpha = client.post("/api/platform/rolling-tearsheet", json={"returns": [0.02, 0.025, 0.04], "benchmark": [0.005, 0.01, 0.015], "windows": [3], "periods_per_year": 252})
+    raw_alpha = client.post("/api/platform/rolling-tearsheet", json={"returns": [0.02, 0.025, 0.04], "benchmark": [0.005, 0.01, 0.015], "windows": [3], "periods_per_year": 1})
+    assert daily_alpha.status_code == 200 and raw_alpha.status_code == 200
+    assert abs(raw_alpha.json()["windows"]["3"]["rolling_alpha"][2]) > 1e-9
+    assert daily_alpha.json()["windows"]["3"]["rolling_alpha"][2] == pytest.approx(raw_alpha.json()["windows"]["3"]["rolling_alpha"][2] * 252)
+    assert client.post("/api/platform/rolling-tearsheet", json={"returns": [0.01], "windows": [2]}).status_code == 422
+    assert client.post("/api/platform/rolling-tearsheet", json={"returns": [0.01, 0.02], "windows": [2], "periods_per_year": 0}).status_code == 422
+    assert client.post("/api/platform/rolling-tearsheet", json={"returns": [0.01, 0.02], "windows": [2.9]}).status_code == 422
+
+
+def test_portfolio_constraints_endpoint_200_and_422():
+    client = _request()
+    r = client.post("/api/platform/portfolio-constraints", json={"weights": {"A": 0.7}, "constraints": {"max_position_weight": 0.6}})
+    assert r.status_code == 200, r.text
+    assert r.json()["passed"] is False
+    assert client.post("/api/platform/portfolio-constraints", json={"weights": {}}).status_code == 422
+    assert client.post("/api/platform/portfolio-constraints", json={"weights": {"A": 0.5}, "groups": "bad"}).status_code == 422

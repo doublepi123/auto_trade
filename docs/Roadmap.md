@@ -37,6 +37,31 @@
 
 ---
 
+## 近期已完成迭代 (2026-06-27) — ML 研究流水线与快速信号验证（10 轮 P279–P288）
+
+> 自主 feature 迭代：承接 P269–P278 因子研究闭环，新增 10 个纯 Python / 零新依赖的预测评估、监督标签、样本权重、研究 bar、因子中性化、特征管道与快速信号回测模块；全部通过 `/api/platform/*` 只读计算端点暴露，不接入实盘 runner 默认路径。规格：[2026-06-27-p279-p288-ml-research-pipeline-design.md](superpowers/specs/2026-06-27-p279-p288-ml-research-pipeline-design.md)；计划：[2026-06-27-p279-p288-ml-research-pipeline.md](superpowers/plans/2026-06-27-p279-p288-ml-research-pipeline.md)。
+
+| 代号 | 主题 | 状态 |
+|------|------|------|
+| **P279** | Forecast Diagnostics：MSE/MAE/bias/directional accuracy/IC/bucket spread | ✅ |
+| **P280** | Triple Barrier Labels：profit/stop/time 三重障碍监督标签 | ✅ |
+| **P281** | Sample Uniqueness：事件并发度、唯一性、time-decay 权重 | ✅ |
+| **P282** | Bar Builder：tick/volume/dollar research bar 构造 | ✅ |
+| **P283** | Factor Neutralization：market/group demean、group zscore、OLS residualize | ✅ |
+| **P284** | Factor Tearsheet：IC、quantile、turnover、quality 聚合报告 | ✅ |
+| **P285** | Feature Pipeline：白名单声明式 return/sma/lag/delta/zscore/rank 特征 | ✅ |
+| **P286** | Signal Backtest：entry/exit 或 target position 数组快速回测 | ✅ |
+| **P287** | Rolling Tearsheet：多窗口 rolling Sharpe/MDD/beta/alpha | ✅ |
+| **P288** | Portfolio Constraints：exposure、turnover、group/capacity violations | ✅ |
+
+**新增端点：** `POST /api/platform/forecast-diagnostics`、`/triple-barrier-labels`、`/sample-uniqueness`、`/bar-builder`、`/factor-neutralization`、`/factor-tearsheet`、`/feature-pipeline`、`/signal-backtest`、`/rolling-tearsheet`、`/portfolio-constraints`。
+
+**验证：** 新增纯单元测试 + `tests/platform/test_api_risk_portfolio.py` 可 `--no-cov` 定向运行；当前新增批次验证 233 passed。
+
+**显式 YAGNI 未做：** 不做前端 UI / Cypress，不新增数据库表，不接真实 broker / runner，不引入 numpy/scipy/pandas/sklearn，不实现完整 Qlib/Zipline/vectorbt/mlfinlab。
+
+---
+
 ## 近期已完成迭代 (2026-06-27) — 因子研究闭环与策略诊断（10 轮 P269–P278）
 
 > 自主 feature 迭代：承接 P259–P268 平台研究层，新增 10 个纯 Python / 零新依赖的因子研究、信号持续性、策略质量与回测置信模块；全部通过 `/api/platform/*` 只读计算端点暴露，不接入实盘 runner 默认路径。规格：[2026-06-27-p269-p278-factor-research-diagnostics-design.md](superpowers/specs/2026-06-27-p269-p278-factor-research-diagnostics-design.md)；计划：[2026-06-27-p269-p278-factor-research-diagnostics.md](superpowers/plans/2026-06-27-p269-p278-factor-research-diagnostics.md)。

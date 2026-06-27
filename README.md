@@ -581,6 +581,16 @@ auto_trade/
 | `POST` | `/api/platform/regime-performance` | 按市场状态切片收益、波动、胜率与贡献 |
 | `POST` | `/api/platform/strategy-diversification` | 多策略相关矩阵、冗余对与分散化得分 |
 | `POST` | `/api/platform/backtest-confidence` | bootstrap return CI、rolling Sharpe 稳定性、fragility score |
+| `POST` | `/api/platform/forecast-diagnostics` | 预测 vs 实际收益的 MSE/MAE/bias/方向准确率/IC/bucket spread |
+| `POST` | `/api/platform/triple-barrier-labels` | profit/stop/time 三重障碍监督标签 |
+| `POST` | `/api/platform/sample-uniqueness` | 事件并发度、平均唯一性、time-decay 样本权重 |
+| `POST` | `/api/platform/bar-builder` | tick/volume/dollar research bar 构造 |
+| `POST` | `/api/platform/factor-neutralization` | market/group 中性化、group zscore、OLS residualize |
+| `POST` | `/api/platform/factor-tearsheet` | 因子 IC/quantile/turnover/quality 聚合报告 |
+| `POST` | `/api/platform/feature-pipeline` | 白名单声明式特征管道（return/sma/lag/delta/zscore/rank） |
+| `POST` | `/api/platform/signal-backtest` | entry/exit 或 target position 数组快速回测 |
+| `POST` | `/api/platform/rolling-tearsheet` | rolling Sharpe/MDD/beta/alpha 多窗口报告 |
+| `POST` | `/api/platform/portfolio-constraints` | 组合 exposure、turnover、group/capacity 约束诊断 |
 
 > **说明：** 受保护 API 在配置了 `AUTO_TRADE_API_KEY` 时要求 `X-API-Key`；`AUTO_TRADE_API_KEY` 为空仅 `dev/test` 放行，`prod` 会返回 401。Docker/nginx 与 Vite 代理会在服务端注入该 header，避免把密钥下发到 SPA。
 
