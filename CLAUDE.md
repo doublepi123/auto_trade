@@ -180,7 +180,17 @@ auto_trade/
 │   │   │   ├── signal_backtest.py         # P286：entry/exit 或 target position 数组快速回测
 │   │   │   ├── rolling_tearsheet.py       # P287：rolling Sharpe/MDD/beta/alpha 多窗口报告
 │   │   │   ├── portfolio_constraints.py   # P288：组合 exposure/turnover/group/capacity 约束诊断
-│   │   │   └── api.py                      # /api/platform/*（含 P279-P288 ML 研究流水线端点）
+│   │   │   ├── cross_sectional_dispersion.py # P289：横截面分散度/Gini/机会评分
+│   │   │   ├── variance_risk_premium.py   # P290：realized/implied variance 与 VRP
+│   │   │   ├── pretrade_cost.py           # P291：事前 spread/impact/timing 成本估计
+│   │   │   ├── ensemble_blending.py       # P292：多预测器融合权重/OOS R²/冗余检测
+│   │   │   ├── option_implied_moments.py  # P293：IV smile/skew/term 与隐含矩
+│   │   │   ├── correlation_regime.py      # P294：多资产相关体制与最大特征值近似
+│   │   │   ├── factor_crowding.py         # P295：因子拥挤度（信号/估值/流量）
+│   │   │   ├── curve_spread.py            # P296：曲线 spread/carry/roll-down/z-score
+│   │   │   ├── turnover_attribution.py    # P297：组合换手漂移/再平衡归因
+│   │   │   ├── signal_information_ratio.py # P298：信号 IR/SNR/稳定性/分桶质量
+│   │   │   └── api.py                      # /api/platform/*（含 P289-P298 跨资产研究端点）
 │   │   ├── strategies/                     # 策略插件包（IntervalStrategy 首个插件）
 │   │   │   ├── __init__.py
 │   │   │   └── interval_strategy.py        # 区间策略插件化实现

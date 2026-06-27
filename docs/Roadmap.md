@@ -37,6 +37,31 @@
 
 ---
 
+## 近期已完成迭代 (2026-06-27) — 跨资产洞察、交易前智能与信号诊断（10 轮 P289–P298）
+
+> 自主 feature 迭代：承接 P279–P288 ML 研究流水线，新增 10 个纯 Python / 零新依赖的跨资产环境识别、交易前成本估计、模型融合、期权隐含矩、相关性体制、因子拥挤、曲线价差、换手归因与信号 IR 模块；全部通过 `/api/platform/*` 只读计算端点暴露，不接入实盘 runner 默认路径。规格：[2026-06-27-p289-p298-cross-asset-research-design.md](superpowers/specs/2026-06-27-p289-p298-cross-asset-research-design.md)；计划：[2026-06-27-p289-p298-cross-asset-research.md](superpowers/plans/2026-06-27-p289-p298-cross-asset-research.md)。
+
+| 代号 | 主题 | 状态 |
+|------|------|------|
+| **P289** | Cross-Sectional Dispersion：横截面 std/IQR/MAD/Gini 与机会评分 | ✅ |
+| **P290** | Variance Risk Premium：realized/implied variance、VRP、z-score | ✅ |
+| **P291** | Pretrade Cost：spread/impact/volatility/participation 事前成本估计 | ✅ |
+| **P292** | Ensemble Blending：多预测器融合权重、OOS R²、冗余检测 | ✅ |
+| **P293** | Option Implied Moments：IV smile/skew/term 与风险中性矩近似 | ✅ |
+| **P294** | Correlation Regime：多资产相关矩阵、最大特征值与体制标签 | ✅ |
+| **P295** | Factor Crowding：因子信号/估值/流量拥挤诊断 | ✅ |
+| **P296** | Curve Spread：曲线 spread、carry、roll-down、z-score | ✅ |
+| **P297** | Turnover Attribution：换手漂移、再平衡、进出资产拆解 | ✅ |
+| **P298** | Signal Information Ratio：信号 IR、SNR、稳定性与分桶质量 | ✅ |
+
+**新增端点：** `POST /api/platform/cross-sectional-dispersion`、`/variance-risk-premium`、`/pretrade-cost`、`/ensemble-blending`、`/option-implied-moments`、`/correlation-regime`、`/factor-crowding`、`/curve-spread`、`/turnover-attribution`、`/signal-information-ratio`。
+
+**验证：** 新增纯单元测试 + `tests/platform/test_api_risk_portfolio.py` 可 `--no-cov` 定向运行；当前新增批次验证 243 passed。
+
+**显式 YAGNI 未做：** 不做前端 UI / Cypress，不新增数据库表，不接真实 broker / runner，不引入 numpy/scipy/pandas/sklearn，不实现完整 Alphalens/Qlib/Zipline/vectorbt/mlfinlab。
+
+---
+
 ## 近期已完成迭代 (2026-06-27) — ML 研究流水线与快速信号验证（10 轮 P279–P288）
 
 > 自主 feature 迭代：承接 P269–P278 因子研究闭环，新增 10 个纯 Python / 零新依赖的预测评估、监督标签、样本权重、研究 bar、因子中性化、特征管道与快速信号回测模块；全部通过 `/api/platform/*` 只读计算端点暴露，不接入实盘 runner 默认路径。规格：[2026-06-27-p279-p288-ml-research-pipeline-design.md](superpowers/specs/2026-06-27-p279-p288-ml-research-pipeline-design.md)；计划：[2026-06-27-p279-p288-ml-research-pipeline.md](superpowers/plans/2026-06-27-p279-p288-ml-research-pipeline.md)。

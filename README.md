@@ -591,6 +591,16 @@ auto_trade/
 | `POST` | `/api/platform/signal-backtest` | entry/exit 或 target position 数组快速回测 |
 | `POST` | `/api/platform/rolling-tearsheet` | rolling Sharpe/MDD/beta/alpha 多窗口报告 |
 | `POST` | `/api/platform/portfolio-constraints` | 组合 exposure、turnover、group/capacity 约束诊断 |
+| `POST` | `/api/platform/cross-sectional-dispersion` | 横截面收益分散度、Gini、机会评分 |
+| `POST` | `/api/platform/variance-risk-premium` | realized/implied variance、VRP、z-score |
+| `POST` | `/api/platform/pretrade-cost` | spread/impact/volatility/participation 事前成本估计 |
+| `POST` | `/api/platform/ensemble-blending` | 多预测器融合权重、OOS R²、冗余检测 |
+| `POST` | `/api/platform/option-implied-moments` | IV smile/skew/term 与风险中性矩近似 |
+| `POST` | `/api/platform/correlation-regime` | 多资产相关矩阵、最大特征值与体制标签 |
+| `POST` | `/api/platform/factor-crowding` | 因子信号/估值/流量拥挤诊断 |
+| `POST` | `/api/platform/curve-spread` | 曲线 spread、carry、roll-down、z-score |
+| `POST` | `/api/platform/turnover-attribution` | 换手拆解：漂移、再平衡、进出资产 |
+| `POST` | `/api/platform/signal-information-ratio` | 信号 IR、SNR、稳定性与分桶质量 |
 
 > **说明：** 受保护 API 在配置了 `AUTO_TRADE_API_KEY` 时要求 `X-API-Key`；`AUTO_TRADE_API_KEY` 为空仅 `dev/test` 放行，`prod` 会返回 401。Docker/nginx 与 Vite 代理会在服务端注入该 header，避免把密钥下发到 SPA。
 

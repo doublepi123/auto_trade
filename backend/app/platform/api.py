@@ -3552,6 +3552,135 @@ def portfolio_constraints_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
     return result.to_dict()
 
 
+# ---------------------------------------------------------------------------
+# P289–P298 — cross-asset research endpoints
+# ---------------------------------------------------------------------------
+
+
+@router.post("/cross-sectional-dispersion", dependencies=[Depends(require_api_key())])
+def cross_sectional_dispersion_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.platform.cross_sectional_dispersion import cross_sectional_dispersion_report
+
+    try:
+        result = cross_sectional_dispersion_report(_dict_float_field(payload, "returns"))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return result.to_dict()
+
+
+@router.post("/variance-risk-premium", dependencies=[Depends(require_api_key())])
+def variance_risk_premium_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.platform.variance_risk_premium import variance_risk_premium_report
+
+    try:
+        periods = payload.get("periods_per_year", 252)
+        if isinstance(periods, bool) or not isinstance(periods, int):
+            raise ValueError("periods_per_year must be an int")
+        result = variance_risk_premium_report(_numeric_series(payload, field="returns"), _numeric_series(payload, field="implied_vols"), periods_per_year=periods)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return result.to_dict()
+
+
+@router.post("/pretrade-cost", dependencies=[Depends(require_api_key())])
+def pretrade_cost_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.platform.pretrade_cost import pretrade_cost_report
+
+    try:
+        result = pretrade_cost_report(order_qty=_finite_number(payload.get("order_qty"), "order_qty"), adv=_finite_number(payload.get("adv"), "adv"), price=_finite_number(payload.get("price"), "price"), spread_bps=_finite_number(payload.get("spread_bps", 0.0), "spread_bps"), volatility=_finite_number(payload.get("volatility", 0.0), "volatility"), impact_coefficient=_finite_number(payload.get("impact_coefficient", 0.1), "impact_coefficient"))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return result.to_dict()
+
+
+@router.post("/ensemble-blending", dependencies=[Depends(require_api_key())])
+def ensemble_blending_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.platform.ensemble_blending import ensemble_blending_report
+
+    try:
+        result = ensemble_blending_report(_panel_field(payload, field="predictions_panel"), _numeric_series(payload, field="actuals"), redundancy_threshold=_finite_number(payload.get("redundancy_threshold", 0.95), "redundancy_threshold"))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return result.to_dict()
+
+
+@router.post("/option-implied-moments", dependencies=[Depends(require_api_key())])
+def option_implied_moments_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.platform.option_implied_moments import option_implied_moments_report
+
+    try:
+        options = payload.get("options")
+        if not isinstance(options, list):
+            raise ValueError("options must be a list")
+        result = option_implied_moments_report(options, spot=_finite_number(payload.get("spot"), "spot"))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return result.to_dict()
+
+
+@router.post("/correlation-regime", dependencies=[Depends(require_api_key())])
+def correlation_regime_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.platform.correlation_regime import correlation_regime_report
+
+    try:
+        result = correlation_regime_report(_panel_field(payload, field="returns_panel"))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return result.to_dict()
+
+
+@router.post("/factor-crowding", dependencies=[Depends(require_api_key())])
+def factor_crowding_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.platform.factor_crowding import factor_crowding_report
+
+    try:
+        result = factor_crowding_report(_dict_float_field(payload, "factor"), valuations=_optional_float_dict(payload.get("valuations")), flows=_optional_float_dict(payload.get("flows")))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return result.to_dict()
+
+
+@router.post("/curve-spread", dependencies=[Depends(require_api_key())])
+def curve_spread_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.platform.curve_spread import curve_spread_report
+
+    try:
+        history_raw = payload.get("history")
+        history = None if history_raw is None else [_finite_number(value, "history entries") for value in history_raw]
+        result = curve_spread_report(_curve_float_field(payload, "curve"), short_tenor=_finite_number(payload.get("short_tenor"), "short_tenor"), long_tenor=_finite_number(payload.get("long_tenor"), "long_tenor"), history=history)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return result.to_dict()
+
+
+@router.post("/turnover-attribution", dependencies=[Depends(require_api_key())])
+def turnover_attribution_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.platform.turnover_attribution import turnover_attribution_report
+
+    try:
+        result = turnover_attribution_report(_dict_float_field(payload, "prev_weights"), _dict_float_field(payload, "current_weights"), drifted_weights=_optional_float_dict(payload.get("drifted_weights")))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return result.to_dict()
+
+
+@router.post("/signal-information-ratio", dependencies=[Depends(require_api_key())])
+def signal_information_ratio_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.platform.signal_information_ratio import signal_information_ratio_report
+
+    try:
+        periods = payload.get("periods_per_year", 252)
+        buckets = payload.get("n_buckets", 5)
+        if isinstance(periods, bool) or not isinstance(periods, int):
+            raise ValueError("periods_per_year must be an int")
+        if isinstance(buckets, bool) or not isinstance(buckets, int):
+            raise ValueError("n_buckets must be an int")
+        result = signal_information_ratio_report(_numeric_series(payload, field="signals"), _numeric_series(payload, field="forward_returns"), periods_per_year=periods, n_buckets=buckets)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return result.to_dict()
+
+
 def _dict_float_field(payload: dict[str, Any], field: str) -> dict[str, float]:
     raw = payload.get(field)
     if not isinstance(raw, dict) or not raw:
@@ -3565,3 +3694,17 @@ def _optional_float_dict(raw: Any) -> dict[str, float] | None:
     if not isinstance(raw, dict):
         raise ValueError("optional mapping fields must be dicts")
     return {str(k): _finite_number(v, f"mapping['{k}']") for k, v in raw.items()}
+
+
+def _curve_float_field(payload: dict[str, Any], field: str) -> dict[float, float]:
+    raw = payload.get(field)
+    if not isinstance(raw, dict) or not raw:
+        raise ValueError(f"{field} must be a non-empty dict")
+    out: dict[float, float] = {}
+    for key, value in raw.items():
+        try:
+            tenor = float(key)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("curve tenor keys must be numeric") from exc
+        out[_finite_number(tenor, "curve tenor")] = _finite_number(value, f"{field}['{key}']")
+    return out

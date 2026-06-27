@@ -2489,3 +2489,92 @@ def test_portfolio_constraints_endpoint_200_and_422():
     assert r.json()["passed"] is False
     assert client.post("/api/platform/portfolio-constraints", json={"weights": {}}).status_code == 422
     assert client.post("/api/platform/portfolio-constraints", json={"weights": {"A": 0.5}, "groups": "bad"}).status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# P289–P298 — cross-asset research endpoints
+# ---------------------------------------------------------------------------
+
+
+def test_cross_sectional_dispersion_endpoint_200_and_422():
+    client = _request()
+    r = client.post("/api/platform/cross-sectional-dispersion", json={"returns": {"A": 0.01, "B": -0.02, "C": 0.04}})
+    assert r.status_code == 200, r.text
+    assert r.json()["dispersion"]["range"] == pytest.approx(0.06)
+    assert client.post("/api/platform/cross-sectional-dispersion", json={"returns": {"A": 0.01}}).status_code == 422
+
+
+def test_variance_risk_premium_endpoint_200_and_422():
+    client = _request()
+    r = client.post("/api/platform/variance-risk-premium", json={"returns": [0.01, -0.02, 0.015], "implied_vols": [0.25, 0.24, 0.26]})
+    assert r.status_code == 200, r.text
+    assert r.json()["latest"]["vrp"] > 0
+    assert client.post("/api/platform/variance-risk-premium", json={"returns": [0.01], "implied_vols": [0.2, 0.3]}).status_code == 422
+
+
+def test_pretrade_cost_endpoint_200_and_422():
+    client = _request()
+    r = client.post("/api/platform/pretrade-cost", json={"order_qty": 100, "adv": 10000, "price": 10, "spread_bps": 5, "volatility": 0.2})
+    assert r.status_code == 200, r.text
+    assert r.json()["notional"] == 1000
+    assert client.post("/api/platform/pretrade-cost", json={"order_qty": 0, "adv": 10000, "price": 10}).status_code == 422
+
+
+def test_ensemble_blending_endpoint_200_and_422():
+    client = _request()
+    r = client.post("/api/platform/ensemble-blending", json={"predictions_panel": {"good": [1, 2, 3], "bad": [3, 2, 1]}, "actuals": [1, 2, 3]})
+    assert r.status_code == 200, r.text
+    assert r.json()["weights"]["good"] > r.json()["weights"]["bad"]
+    assert client.post("/api/platform/ensemble-blending", json={"predictions_panel": {"m": [1]}, "actuals": [1, 2]}).status_code == 422
+
+
+def test_option_implied_moments_endpoint_200_and_422():
+    client = _request()
+    options = [{"strike": 90, "iv": 0.30, "expiry": 30}, {"strike": 100, "iv": 0.22, "expiry": 30}, {"strike": 110, "iv": 0.20, "expiry": 30}, {"strike": 100, "iv": 0.25, "expiry": 60}]
+    r = client.post("/api/platform/option-implied-moments", json={"options": options, "spot": 100})
+    assert r.status_code == 200, r.text
+    assert r.json()["smile"]["skew"] < 0
+    assert client.post("/api/platform/option-implied-moments", json={"options": [{"strike": 0, "iv": 0.2, "expiry": 30}], "spot": 100}).status_code == 422
+
+
+def test_correlation_regime_endpoint_200_and_422():
+    client = _request()
+    panel = {"A": [0.01, 0.02, 0.03], "B": [0.02, 0.04, 0.06], "C": [-0.01, -0.02, -0.03]}
+    r = client.post("/api/platform/correlation-regime", json={"returns_panel": panel})
+    assert r.status_code == 200, r.text
+    assert "average_correlation" in r.json()
+    assert client.post("/api/platform/correlation-regime", json={"returns_panel": {"A": [1, 2]}}).status_code == 422
+    large = {f"A{i}": [0.01, 0.02] for i in range(51)}
+    assert client.post("/api/platform/correlation-regime", json={"returns_panel": large}).status_code == 422
+
+
+def test_factor_crowding_endpoint_200_and_422():
+    client = _request()
+    r = client.post("/api/platform/factor-crowding", json={"factor": {"A": 10, "B": 1, "C": 0.5}, "valuations": {"A": 50, "B": 10, "C": 8}, "flows": {"A": 5, "B": 1, "C": 0}})
+    assert r.status_code == 200, r.text
+    assert r.json()["crowding_score"] > 0
+    assert client.post("/api/platform/factor-crowding", json={"factor": {"A": 1, "B": 2}, "valuations": {"A": 10}}).status_code == 422
+
+
+def test_curve_spread_endpoint_200_and_422():
+    client = _request()
+    r = client.post("/api/platform/curve-spread", json={"curve": {"1": 0.03, "5": 0.04, "10": 0.045}, "short_tenor": 1, "long_tenor": 10, "history": [0.01, 0.012, 0.015]})
+    assert r.status_code == 200, r.text
+    assert r.json()["spread"] == pytest.approx(0.015)
+    assert client.post("/api/platform/curve-spread", json={"curve": {"1": 0.03}, "short_tenor": 1, "long_tenor": 10}).status_code == 422
+
+
+def test_turnover_attribution_endpoint_200_and_422():
+    client = _request()
+    r = client.post("/api/platform/turnover-attribution", json={"prev_weights": {"A": 0.5, "B": 0.5}, "current_weights": {"A": 0.7, "B": 0.3}, "drifted_weights": {"A": 0.6, "B": 0.4}})
+    assert r.status_code == 200, r.text
+    assert r.json()["total_turnover"] == pytest.approx(0.2)
+    assert client.post("/api/platform/turnover-attribution", json={"prev_weights": {"A": 1}, "current_weights": {}}).status_code == 422
+
+
+def test_signal_information_ratio_endpoint_200_and_422():
+    client = _request()
+    r = client.post("/api/platform/signal-information-ratio", json={"signals": [0.1, 0.2, 0.3, 0.4], "forward_returns": [0.01, 0.02, 0.03, 0.04], "n_buckets": 2})
+    assert r.status_code == 200, r.text
+    assert r.json()["information_ratio"] > 0
+    assert client.post("/api/platform/signal-information-ratio", json={"signals": [1, 2], "forward_returns": [0.1, 0.2], "n_buckets": 3}).status_code == 422
