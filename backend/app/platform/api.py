@@ -15,11 +15,15 @@ from app.platform.backtest_run_service import BacktestRunService
 from app.platform.backtest_service import PlatformBacktestService
 from app.platform.bus import EventBus
 from app.platform.change_point import detect_change_points
+from app.platform.concept_drift import concept_drift_report
 from app.platform.cycle_detection import detect_cycles
 from app.platform.data_catalog import DataCatalog
 from app.platform.events import BarEvent
 from app.platform.factor_ic import factor_ic_report
+from app.platform.factor_momentum import factor_momentum_report
 from app.platform.factor_research_service import FactorResearchService
+from app.platform.feature_extraction import feature_extraction_report
+from app.platform.feature_orthogonalization import orthogonalization_report
 from app.platform.fractional_differencing import (
     fractional_adf_stat,
     fractional_difference,
@@ -27,6 +31,7 @@ from app.platform.fractional_differencing import (
     fractional_weights,
 )
 from app.platform.montecarlo import MonteCarloAnalyzer
+from app.platform.multitimeframe_coherence import multitimeframe_coherence_report
 from app.platform.optimizer_service import OptimizerService
 from app.platform.registry import get_default_registry
 from app.platform.replay import EventReplayer
@@ -3854,4 +3859,588 @@ def tail_dependence_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
         result = tail_dependence_report(_numeric_series(payload, field="x"), _numeric_series(payload, field="y"), threshold=threshold)
     except (TypeError, ValueError) as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P313 – drawdown surface (depth × duration joint distribution)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/drawdown-surface", dependencies=[Depends(require_api_key())])
+def drawdown_surface_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.platform.drawdown_surface import drawdown_surface_report
+
+    try:
+        depth_bins = payload.get("depth_bins", 5)
+        duration_bins = payload.get("duration_bins", 5)
+        if isinstance(depth_bins, bool) or not isinstance(depth_bins, int):
+            raise ValueError("depth_bins must be an int")
+        if isinstance(duration_bins, bool) or not isinstance(duration_bins, int):
+            raise ValueError("duration_bins must be an int")
+        result = drawdown_surface_report(
+            _numeric_series(payload, field="equity_curve"),
+            depth_bins=depth_bins,
+            duration_bins=duration_bins,
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P314 – tail hedge cost (Hill estimator + CVaR-based put protection cost)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/tail-hedge-cost", dependencies=[Depends(require_api_key())])
+def tail_hedge_cost_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.platform.tail_hedge_cost import tail_hedge_cost_report
+
+    try:
+        confidence = _finite_number(payload.get("confidence", 0.95), "confidence")
+        result = tail_hedge_cost_report(
+            _numeric_series(payload, field="returns"),
+            confidence=confidence,
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P315 – correlation risk premium (implied vs realized correlation spread)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/correlation-risk-premium", dependencies=[Depends(require_api_key())])
+def correlation_risk_premium_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.platform.correlation_risk_premium import correlation_risk_premium_report
+
+    try:
+        result = correlation_risk_premium_report(
+            _numeric_series(payload, field="realized_corr"),
+            _numeric_series(payload, field="implied_corr"),
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P316 – volatility term structure (ATM IV slope + contango/backwardation)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/vol-term-structure", dependencies=[Depends(require_api_key())])
+def vol_term_structure_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.platform.vol_term_structure import vol_term_structure_report
+
+    try:
+        spot = _finite_number(payload.get("spot"), "spot")
+        options_raw = payload.get("options")
+        if not isinstance(options_raw, list):
+            raise ValueError("options must be a non-empty list")
+        result = vol_term_structure_report(
+            options_raw,
+            spot=spot,
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P321 — causal impact endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/causal-impact", dependencies=[Depends(require_api_key())])
+def causal_impact_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P321: estimate causal effect of an intervention via OLS counterfactual.
+
+    Body: ``{"target": [...], "control": [...], "intervention_index": int}``.
+    422 on missing/unequal/invalid inputs.
+    """
+    from app.platform.causal_impact import causal_impact_report
+
+    try:
+        target = _numeric_series(payload, field="target")
+        control = _numeric_series(payload, field="control")
+        intervention_index_raw = payload.get("intervention_index")
+        if isinstance(intervention_index_raw, bool) or not isinstance(intervention_index_raw, int):
+            raise ValueError("intervention_index must be an int")
+        result = causal_impact_report(target, control, intervention_index=intervention_index_raw)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P322 — spread stability endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/spread-stability", dependencies=[Depends(require_api_key())])
+def spread_stability_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P322: rolling-window hedge ratio stability + half-life diagnostics.
+
+    Body: ``{"y": [...], "x": [...], "window"?: int}``. 422 on invalid.
+    """
+    from app.platform.spread_stability import spread_stability_report
+
+    try:
+        y = _numeric_series(payload, field="y")
+        x = _numeric_series(payload, field="x")
+        window_raw = payload.get("window", 20)
+        if isinstance(window_raw, bool) or not isinstance(window_raw, int):
+            raise ValueError("window must be an int")
+        result = spread_stability_report(y, x, window=window_raw)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P323 — regime transitions endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/regime-transitions", dependencies=[Depends(require_api_key())])
+def regime_transitions_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P323: transition matrix + expected duration + steady state from regime labels.
+
+    Body: ``{"regimes": [...]}``. 422 on invalid.
+    """
+    from app.platform.regime_transitions import regime_transitions_report
+
+    try:
+        regimes_raw = payload.get("regimes")
+        if not isinstance(regimes_raw, list) or not regimes_raw:
+            raise ValueError("regimes must be a non-empty list")
+        regimes = [str(r) for r in regimes_raw]
+        result = regime_transitions_report(regimes)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P324 — regime backtest diagnostics endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/regime-backtest-diagnostics", dependencies=[Depends(require_api_key())])
+def regime_backtest_diagnostics_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P324: per-regime Sharpe/win_rate/mean/std + optional trade PnL attribution.
+
+    Body: ``{"returns": [...], "regimes": [...], "trade_outcomes"?: [...]}``.
+    422 on invalid.
+    """
+    from app.platform.regime_backtest_diagnostics import regime_backtest_diagnostics_report
+
+    try:
+        returns = _numeric_series(payload, field="returns")
+        regimes_raw = payload.get("regimes")
+        if not isinstance(regimes_raw, list) or not regimes_raw:
+            raise ValueError("regimes must be a non-empty list")
+        regimes = [str(r) for r in regimes_raw]
+        trade_outcomes_raw = payload.get("trade_outcomes")
+        trade_outcomes: list[float] | None = None
+        if trade_outcomes_raw is not None:
+            if not isinstance(trade_outcomes_raw, list):
+                raise ValueError("trade_outcomes must be a list")
+            trade_outcomes = [_finite_number(v, "trade_outcomes entries") for v in trade_outcomes_raw]
+        result = regime_backtest_diagnostics_report(returns, regimes, trade_outcomes=trade_outcomes)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P325 — capacity frontier endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/capacity-frontier", dependencies=[Depends(require_api_key())])
+def capacity_frontier_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P325: AUM impact-degraded Sharpe curve and optimal capacity.
+
+    Body: ``{"base_sharpe": float, "signal_autocorr": float, "adv": float,
+    "turnover": float, "aum_levels"?: [float]}``. Returns per-level degraded
+    Sharpe, impact penalty, and optimal_aum. HTTP 422 on invalid input.
+    """
+    from app.platform.capacity_frontier import capacity_frontier_report
+
+    try:
+        aum_levels_raw = payload.get("aum_levels")
+        aum_levels: list[float] | None = None
+        if aum_levels_raw is not None:
+            if not isinstance(aum_levels_raw, list):
+                raise ValueError("aum_levels must be a list")
+            aum_levels = [_finite_number(v, f"aum_levels[{i}]") for i, v in enumerate(aum_levels_raw)]
+        result = capacity_frontier_report(
+            base_sharpe=_finite_number(payload.get("base_sharpe"), "base_sharpe"),
+            signal_autocorr=_finite_number(payload.get("signal_autocorr"), "signal_autocorr"),
+            adv=_finite_number(payload.get("adv"), "adv"),
+            turnover=_finite_number(payload.get("turnover"), "turnover"),
+            aum_levels=aum_levels,
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P326 — regime attribution endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/regime-attribution", dependencies=[Depends(require_api_key())])
+def regime_attribution_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P326: decompose returns by market regime (alpha, beta, contribution).
+
+    Body: ``{"returns": [...], "regimes": [...], "benchmark"?: [...]}``.
+    Returns per-regime alpha, beta, contribution, volatility. HTTP 422
+    on invalid/length-mismatched input.
+    """
+    from app.platform.regime_attribution import regime_attribution_report
+
+    try:
+        returns_raw = payload.get("returns")
+        regimes_raw = payload.get("regimes")
+        if not isinstance(returns_raw, list) or not returns_raw:
+            raise ValueError("returns must be a non-empty list")
+        if not isinstance(regimes_raw, list) or not regimes_raw:
+            raise ValueError("regimes must be a non-empty list")
+        returns = [_finite_number(v, "returns entries") for v in returns_raw]
+        regimes = [str(r) for r in regimes_raw]
+        benchmark_raw = payload.get("benchmark")
+        benchmark: list[float] | None = None
+        if benchmark_raw is not None:
+            if not isinstance(benchmark_raw, list):
+                raise ValueError("benchmark must be a list")
+            benchmark = [_finite_number(v, "benchmark entries") for v in benchmark_raw]
+        result = regime_attribution_report(returns, regimes, benchmark=benchmark)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P327 — distribution shape endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/distribution-shape", dependencies=[Depends(require_api_key())])
+def distribution_shape_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P327: rolling skew, kurtosis, tail-index, fat-tail clusters.
+
+    Body: ``{"returns": [...], "window"?: int}`` (default window=20).
+    Returns per-bar shape stats and fat_tail_clusters. HTTP 422 on
+    invalid input.
+    """
+    from app.platform.distribution_shape import distribution_shape_report
+
+    try:
+        series = _numeric_series(payload, field="returns")
+        window_raw = payload.get("window", 20)
+        if isinstance(window_raw, bool) or not isinstance(window_raw, int):
+            raise ValueError("window must be an int")
+        window = int(window_raw)
+        result = distribution_shape_report(series, window=window)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P328 — walk-forward surface endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/walk-forward-surface", dependencies=[Depends(require_api_key())])
+def walk_forward_surface_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P328: rolling IS/OOS Sharpe degradation surface.
+
+    Body: ``{"returns": [...], "train_window"?: int, "test_window"?: int}``
+    (defaults 20/10). Returns per-segment is_sharpe, oos_sharpe, degradation
+    and summary. HTTP 422 on invalid input.
+    """
+    from app.platform.walk_forward_surface import walk_forward_surface_report
+
+    try:
+        series = _numeric_series(payload, field="returns")
+        train_raw = payload.get("train_window", 20)
+        test_raw = payload.get("test_window", 10)
+        if isinstance(train_raw, bool) or not isinstance(train_raw, int):
+            raise ValueError("train_window must be an int")
+        if isinstance(test_raw, bool) or not isinstance(test_raw, int):
+            raise ValueError("test_window must be an int")
+        train_window = int(train_raw)
+        test_window = int(test_raw)
+        result = walk_forward_surface_report(
+            series, train_window=train_window, test_window=test_window
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P309 – pareto optimization endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/pareto-optimize", dependencies=[Depends(require_api_key())])
+def pareto_optimize_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.platform.pareto_optimization import pareto_optimize_report
+
+    try:
+        configs_raw = payload.get("configs")
+        if not isinstance(configs_raw, list) or not configs_raw:
+            raise ValueError("configs must be a non-empty list")
+        objectives_raw = payload.get("objectives")
+        if not isinstance(objectives_raw, list) or not objectives_raw:
+            raise ValueError("objectives must be a non-empty list of strings")
+        objectives = [str(o) for o in objectives_raw]
+        result = pareto_optimize_report(configs_raw, objectives=objectives)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P310 – volume profile endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/volume-profile", dependencies=[Depends(require_api_key())])
+def volume_profile_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.platform.volume_profile import volume_profile_report
+
+    try:
+        bins_raw = payload.get("bins", 10)
+        if isinstance(bins_raw, bool) or not isinstance(bins_raw, int):
+            raise ValueError("bins must be a positive integer")
+        result = volume_profile_report(
+            _numeric_series(payload, field="prices"),
+            _numeric_series(payload, field="volumes"),
+            bins=bins_raw,
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P311 – cost surface endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/cost-surface", dependencies=[Depends(require_api_key())])
+def cost_surface_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.platform.cost_surface import cost_surface_report
+
+    try:
+        adv = _finite_number(payload.get("adv"), "adv")
+        volatility = _finite_number(payload.get("volatility"), "volatility")
+        participation_raw = payload.get("participation_levels")
+        participation_levels: list[float] | None = None
+        if participation_raw is not None:
+            if not isinstance(participation_raw, list):
+                raise ValueError("participation_levels must be a list")
+            participation_levels = [
+                _finite_number(v, "participation_levels entries") for v in participation_raw
+            ]
+        qty_raw = payload.get("qty_levels")
+        qty_levels: list[float] | None = None
+        if qty_raw is not None:
+            if not isinstance(qty_raw, list):
+                raise ValueError("qty_levels must be a list")
+            qty_levels = [_finite_number(v, "qty_levels entries") for v in qty_raw]
+        result = cost_surface_report(
+            adv=adv,
+            volatility=volatility,
+            participation_levels=participation_levels,
+            qty_levels=qty_levels,
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P312 – liquidity-adjusted returns endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/liquidity-adjusted-returns", dependencies=[Depends(require_api_key())])
+def liquidity_adjusted_returns_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.platform.liquidity_adjusted_returns import liquidity_adjusted_returns_report
+
+    try:
+        method = str(payload.get("method", "amihud"))
+        result = liquidity_adjusted_returns_report(
+            _numeric_series(payload, field="returns"),
+            _numeric_series(payload, field="volumes"),
+            method=method,
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P317 — Concept drift detection (rolling-window mean-shift)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/concept-drift", dependencies=[Depends(require_api_key())])
+def concept_drift_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P317: detect concept drift via non-overlapping window mean-shift scoring.
+
+    Body: ``{"series": [...], "window"?: int, "threshold"?: float}`` where
+    ``window`` (default 20) is the non-overlapping window size and
+    ``threshold`` (default 2.0) is the z-score threshold for flagging drift.
+    Returns ``drift_points`` (list of indices in drifting windows) and
+    per-bar ``drift_scores``. HTTP 422 on invalid input.
+    """
+    try:
+        series = _numeric_series(payload)
+        window_raw = payload.get("window", 20)
+        if isinstance(window_raw, bool) or not isinstance(window_raw, int):
+            raise ValueError("window must be an int >= 2")
+        threshold_raw = payload.get("threshold", 2.0)
+        threshold = _finite_number(threshold_raw, "threshold")
+        result = concept_drift_report(series, window=window_raw, threshold=threshold)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P318 — Multi-timeframe coherence
+# ---------------------------------------------------------------------------
+
+
+@router.post("/multitimeframe-coherence", dependencies=[Depends(require_api_key())])
+def multitimeframe_coherence_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P318: compute coherence across multi-timeframe signal vectors.
+
+    Body: ``{"signals": {tf: [floats]}, "weights"?: {tf: float}}`` where
+    ``signals`` is a non-empty dict of equal-length signal series keyed by
+    timeframe name and ``weights`` (optional) assigns a weight per timeframe
+    (uniform when omitted). Returns per-bar ``coherence_scores`` and a scalar
+    ``agreement_ratio`` in ``[0, 1]``. HTTP 422 on invalid input.
+    """
+    try:
+        signals = _panel_field(payload, field="signals")
+        weights_raw = payload.get("weights")
+        weights: dict[str, float] | None = None
+        if weights_raw is not None:
+            if not isinstance(weights_raw, dict) or not weights_raw:
+                raise ValueError("weights must be a non-empty dict")
+            weights = {str(k): _finite_number(v, f"weights['{k}']") for k, v in weights_raw.items()}
+        result = multitimeframe_coherence_report(signals, weights=weights)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P319 — Feature extraction
+# ---------------------------------------------------------------------------
+
+
+@router.post("/feature-extraction", dependencies=[Depends(require_api_key())])
+def feature_extraction_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P319: extract statistical features from a single numeric series.
+
+    Body: ``{"series": [...]}`` where ``series`` is a non-empty list of
+    finite numbers (length >= 2). Returns ``features`` dict with mean, std,
+    skew, kurt, min, max, range, autocorr_lag1, trend_slope,
+    volatility_clustering, and max_drawdown. HTTP 422 on invalid input.
+    """
+    try:
+        series = _numeric_series(payload)
+        if len(series) < 2:
+            raise ValueError("series must contain at least 2 values")
+        result = feature_extraction_report(series)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P320 — Factor momentum
+# ---------------------------------------------------------------------------
+
+
+@router.post("/factor-momentum", dependencies=[Depends(require_api_key())])
+def factor_momentum_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P320: compute factor momentum ranking from a panel of factor returns.
+
+    Body: ``{"factor_returns": {name: [floats]}, "lookback"?: int}`` where
+    ``factor_returns`` is a non-empty dict of equal-length factor return
+    series and ``lookback`` (default 12) is the trailing window size.
+    Returns per-factor ``momentum``, descending ``ranking``, and
+    ``long_short_signal``. HTTP 422 on invalid input.
+    """
+    try:
+        factor_returns = _panel_field(payload, field="factor_returns")
+        lookback_raw = payload.get("lookback", 12)
+        if isinstance(lookback_raw, bool) or not isinstance(lookback_raw, int):
+            raise ValueError("lookback must be an int >= 2")
+        result = factor_momentum_report(factor_returns, lookback=lookback_raw)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
     return result.to_dict()

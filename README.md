@@ -663,3 +663,23 @@ auto_trade/
 ## License
 
 MIT
+| `POST` | `/api/platform/pareto-optimize` | 多目标 Pareto 前沿筛选 |
+| `POST` | `/api/platform/volume-profile` | 成交量剖面 POC/价值区间 |
+| `POST` | `/api/platform/cost-surface` | 交易成本三维曲面 |
+| `POST` | `/api/platform/liquidity-adjusted-returns` | Amihud/Roll 流动性调整收益 |
+| `POST` | `/api/platform/drawdown-surface` | 回撤深度-持续时间联合分布 |
+| `POST` | `/api/platform/tail-hedge-cost` | EVT 尾部对冲成本 |
+| `POST` | `/api/platform/correlation-risk-premium` | 隐含-已实现相关性溢价 |
+| `POST` | `/api/platform/vol-term-structure` | IV 期限结构 contango/backwardation |
+| `POST` | `/api/platform/concept-drift` | ADWIN/EDFM 概念漂移检测 |
+| `POST` | `/api/platform/multitimeframe-coherence` | 多时间框架信号一致性 |
+| `POST` | `/api/platform/feature-extraction` | 自动统计特征提取 |
+| `POST` | `/api/platform/factor-momentum` | 因子时序动量排名 |
+| `POST` | `/api/platform/causal-impact` | 贝叶斯结构时序因果推断 |
+| `POST` | `/api/platform/spread-stability` | 滚动对冲比/半衰期时变/协整断裂 |
+| `POST` | `/api/platform/regime-transitions` | 转移概率/期望持续/稳态分布 |
+| `POST` | `/api/platform/regime-backtest-diagnostics` | regime 条件回测诊断 |
+| `POST` | `/api/platform/capacity-frontier` | 容量退化曲线/最优容量点 |
+| `POST` | `/api/platform/regime-attribution` | regime-specific alpha/beta 归因 |
+| `POST` | `/api/platform/distribution-shape` | 滚动偏度/峰度/尾部聚类 |
+| `POST` | `/api/platform/walk-forward-surface` | IS/OOS 退化曲面 |

@@ -37,7 +37,42 @@
 
 ---
 
-+## 近期已完成迭代 (2026-06-28) — 策略验证与自适应智能（10 轮 P299–P308）
+## 近期已完成迭代 (2026-06-28) — 深度分析、条件模型与元研究（20 轮 P309–P328）
+
+> 自主 feature 迭代：承接 P299–P308 策略验证，参考 NautilusTrader/Qlib/vectorbt/mlfinlab/pyfolio/Optuna/River/CausalImpact/tsfresh 等，新增 20 个纯 Python / 零新依赖的深度分析、条件模型与元研究模块；全部通过 `/api/platform/*` 只读计算端点暴露，不接入实盘 runner 默认路径。规格：[2026-06-28-p309-p328-deep-analytics-design.md](superpowers/specs/2026-06-28-p309-p328-deep-analytics-design.md)。
+
+| 代号 | 主题 | 状态 |
+|------|------|------|
+| **P309** | Pareto Optimization：多目标 Pareto 前沿筛选 | ✅ |
+| **P310** | Volume Profile：成交量剖面 POC/价值区间 | ✅ |
+| **P311** | Cost Surface：交易成本三维曲面 | ✅ |
+| **P312** | Liquidity Adjusted Returns：Amihud/Roll 流动性调整收益 | ✅ |
+| **P313** | Drawdown Surface：回撤深度-持续时间联合分布 | ✅ |
+| **P314** | Tail Hedge Cost：EVT 尾部对冲成本 | ✅ |
+| **P315** | Correlation Risk Premium：隐含-已实现相关性溢价 | ✅ |
+| **P316** | Vol Term Structure：IV 期限结构 contango/backwardation | ✅ |
+| **P317** | Concept Drift：概念漂移检测 | ✅ |
+| **P318** | Multitimeframe Coherence：多时间框架信号一致性 | ✅ |
+| **P319** | Feature Extraction：自动统计特征提取 | ✅ |
+| **P320** | Factor Momentum：因子时序动量排名 | ✅ |
+| **P321** | Causal Impact：贝叶斯结构时序因果推断 | ✅ |
+| **P322** | Spread Stability：滚动对冲比/半衰期时变/协整断裂 | ✅ |
+| **P323** | Regime Transitions：转移概率/期望持续/稳态分布 | ✅ |
+| **P324** | Regime Backtest Diagnostics：regime 条件回测诊断 | ✅ |
+| **P325** | Capacity Frontier：容量退化曲线/最优容量点 | ✅ |
+| **P326** | Regime Attribution：regime-specific alpha/beta 归因 | ✅ |
+| **P327** | Distribution Shape：滚动偏度/峰度/尾部聚类 | ✅ |
+| **P328** | Walk Forward Surface：IS/OOS 退化曲面 | ✅ |
+
+**新增端点：** `POST /api/platform/pareto-optimize`、`/volume-profile`、`/cost-surface`、`/liquidity-adjusted-returns`、`/drawdown-surface`、`/tail-hedge-cost`、`/correlation-risk-premium`、`/vol-term-structure`、`/concept-drift`、`/multitimeframe-coherence`、`/feature-extraction`、`/factor-momentum`、`/causal-impact`、`/spread-stability`、`/regime-transitions`、`/regime-backtest-diagnostics`、`/capacity-frontier`、`/regime-attribution`、`/distribution-shape`、`/walk-forward-surface`。
+
+**验证：** 新增纯单元测试 + `tests/platform/test_api_risk_portfolio.py`；当前新增批次验证 368 passed。
+
+**显式 YAGNI 未做：** 不做前端 UI / Cypress，不新增数据库表，不接真实 broker / runner，不引入 numpy/scipy/pandas/sklearn/statsmodels/tsfresh，不实现完整 Nautilus/Qlib/Zipline/vectorbt/pyfolio/CausalImpact。
+
+---
+
+## 近期已完成迭代 (2026-06-28) — 策略验证与自适应智能（10 轮 P299–P308）
 +
 +> 自主 feature 迭代：承接 P289–P298 跨资产洞察，新增 10 个纯 Python / 零新依赖的策略验证、自适应行为、市场冲击容量与统计显著性模块；全部通过 `/api/platform/*` 只读计算端点暴露，不接入实盘 runner 默认路径。规格：[2026-06-28-p299-p308-strategy-validation-design.md](superpowers/specs/2026-06-28-p299-p308-strategy-validation-design.md)；计划：[2026-06-28-p299-p308-strategy-validation.md](superpowers/plans/2026-06-28-p299-p308-strategy-validation.md)。
 +

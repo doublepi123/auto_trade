@@ -200,7 +200,27 @@ auto_trade/
 +│   │   │   ├── strategy_capacity.py      # P306：信号自相关/深度/换手→容量拐点
 +│   │   │   ├── momentum_spillover.py     # P307：跨资产动量 Granger/脉冲/领先-滞后
 +│   │   │   ├── tail_dependence.py        # P308：经验/参数上下尾相依系数
- │   │   │   └── api.py                      # /api/platform/*（含 P299-P308 策略验证与自适应智能端点）
++│   │   │   ├── pareto_optimization.py   # P309：多目标 Pareto 前沿筛选
++│   │   │   ├── volume_profile.py        # P310：成交量剖面 POC/价值区间
++│   │   │   ├── cost_surface.py          # P311：交易成本三维曲面
++│   │   │   ├── liquidity_adjusted_returns.py # P312：Amihud/Roll 流动性调整收益
++│   │   │   ├── drawdown_surface.py      # P313：回撤深度-持续时间联合分布
++│   │   │   ├── tail_hedge_cost.py       # P314：EVT 尾部对冲成本
++│   │   │   ├── correlation_risk_premium.py # P315：隐含-已实现相关性溢价
++│   │   │   ├── vol_term_structure.py    # P316：IV 期限结构 contango/backwardation
++│   │   │   ├── concept_drift.py         # P317：概念漂移检测
++│   │   │   ├── multitimeframe_coherence.py # P318：多时间框架信号一致性
++│   │   │   ├── feature_extraction.py    # P319：自动统计特征提取
++│   │   │   ├── factor_momentum.py       # P320：因子时序动量排名
++│   │   │   ├── causal_impact.py         # P321：贝叶斯结构时序因果推断
++│   │   │   ├── spread_stability.py      # P322：滚动对冲比/半衰期时变/协整断裂
++│   │   │   ├── regime_transitions.py    # P323：转移概率/期望持续/稳态分布
++│   │   │   ├── regime_backtest_diagnostics.py # P324：regime 条件回测诊断
++│   │   │   ├── capacity_frontier.py     # P325：容量退化曲线/最优容量点
++│   │   │   ├── regime_attribution.py    # P326：regime-specific alpha/beta 归因
++│   │   │   ├── distribution_shape.py    # P327：滚动偏度/峰度/尾部聚类
++│   │   │   ├── walk_forward_surface.py  # P328：IS/OOS 退化曲面
+ │   │   │   └── api.py                      # /api/platform/*（含 P309-P328 深度分析与元研究端点）
 │   │   ├── strategies/                     # 策略插件包（IntervalStrategy 首个插件）
 │   │   │   ├── __init__.py
 │   │   │   └── interval_strategy.py        # 区间策略插件化实现
