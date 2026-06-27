@@ -3708,3 +3708,150 @@ def _curve_float_field(payload: dict[str, Any], field: str) -> dict[float, float
             raise ValueError("curve tenor keys must be numeric") from exc
         out[_finite_number(tenor, "curve tenor")] = _finite_number(value, f"{field}['{key}']")
     return out
+
+
+# ---------------------------------------------------------------------------
+# P299–P308 — strategy validation & adaptive intelligence endpoints
+# ---------------------------------------------------------------------------
+
+
+@router.post("/regime-factor-returns", dependencies=[Depends(require_api_key())])
+def regime_factor_returns_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.platform.regime_factor_returns import regime_factor_returns_report
+
+    try:
+        regimes = payload.get("regimes")
+        if not isinstance(regimes, list):
+            raise ValueError("regimes must be a list")
+        result = regime_factor_returns_report(_dict_float_field(payload, "factor"), _dict_float_field(payload, "returns"), regimes)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return result.to_dict()
+
+
+@router.post("/transfer-entropy", dependencies=[Depends(require_api_key())])
+def transfer_entropy_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.platform.transfer_entropy import transfer_entropy_report
+
+    try:
+        lag = payload.get("lag", 1)
+        if isinstance(lag, bool) or not isinstance(lag, int):
+            raise ValueError("lag must be an int")
+        bins = payload.get("bins", 10)
+        if isinstance(bins, bool) or not isinstance(bins, int):
+            raise ValueError("bins must be an int")
+        result = transfer_entropy_report(_numeric_series(payload, field="source"), _numeric_series(payload, field="target"), lag=lag, bins=bins)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return result.to_dict()
+
+
+@router.post("/event-study", dependencies=[Depends(require_api_key())])
+def event_study_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.platform.event_study import event_study_report
+
+    try:
+        event_indices = payload.get("event_indices")
+        if not isinstance(event_indices, list):
+            raise ValueError("event_indices must be a list")
+        window_before = payload.get("window_before", 5)
+        window_after = payload.get("window_after", 5)
+        if isinstance(window_before, bool) or not isinstance(window_before, int):
+            raise ValueError("window_before must be an int")
+        if isinstance(window_after, bool) or not isinstance(window_after, int):
+            raise ValueError("window_after must be an int")
+        result = event_study_report(_numeric_series(payload, field="market_returns"), _numeric_series(payload, field="stock_returns"), event_indices, window_before=window_before, window_after=window_after)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return result.to_dict()
+
+
+@router.post("/bootstrap-significance", dependencies=[Depends(require_api_key())])
+def bootstrap_significance_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.platform.bootstrap_strategy_significance import bootstrap_strategy_significance_report
+
+    try:
+        n_bootstrap = payload.get("n_bootstrap", 1000)
+        seed = payload.get("seed", 42)
+        if isinstance(n_bootstrap, bool) or not isinstance(n_bootstrap, int):
+            raise ValueError("n_bootstrap must be an int")
+        if isinstance(seed, bool) or not isinstance(seed, int):
+            raise ValueError("seed must be an int")
+        result = bootstrap_strategy_significance_report(_numeric_series(payload, field="returns"), n_bootstrap=n_bootstrap, seed=seed)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return result.to_dict()
+
+
+@router.post("/dynamic-factor-exposure", dependencies=[Depends(require_api_key())])
+def dynamic_factor_exposure_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.platform.dynamic_factor_exposure import dynamic_factor_exposure_report
+
+    try:
+        window = payload.get("window", 20)
+        if isinstance(window, bool) or not isinstance(window, int):
+            raise ValueError("window must be an int")
+        result = dynamic_factor_exposure_report(_numeric_series(payload, field="strategy_returns"), _panel_field(payload, field="factor_panel"), window=window)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return result.to_dict()
+
+
+@router.post("/market-impact", dependencies=[Depends(require_api_key())])
+def market_impact_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.platform.market_impact_model import market_impact_model_report
+
+    try:
+        model = str(payload.get("model", "square_root"))
+        result = market_impact_model_report(order_qty=_finite_number(payload.get("order_qty"), "order_qty"), adv=_finite_number(payload.get("adv"), "adv"), volatility=_finite_number(payload.get("volatility"), "volatility"), participation=_finite_number(payload.get("participation", 0.1), "participation"), model=model, permanent_fraction=_finite_number(payload.get("permanent_fraction", 0.5), "permanent_fraction"), price=_finite_number(payload.get("price", 1.0), "price"))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return result.to_dict()
+
+
+@router.post("/vol-forecast-comparison", dependencies=[Depends(require_api_key())])
+def vol_forecast_comparison_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.platform.vol_forecast_comparison import vol_forecast_comparison_report
+
+    try:
+        result = vol_forecast_comparison_report(_numeric_series(payload, field="realized_vol"), _panel_field(payload, field="forecasts_panel"))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return result.to_dict()
+
+
+@router.post("/strategy-capacity", dependencies=[Depends(require_api_key())])
+def strategy_capacity_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.platform.strategy_capacity import strategy_capacity_report
+
+    try:
+        result = strategy_capacity_report(signal_autocorr=_finite_number(payload.get("signal_autocorr"), "signal_autocorr"), adv=_finite_number(payload.get("adv"), "adv"), turnover=_finite_number(payload.get("turnover"), "turnover"), impact_threshold_bps=_finite_number(payload.get("impact_threshold_bps", 10.0), "impact_threshold_bps"))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return result.to_dict()
+
+
+@router.post("/momentum-spillover", dependencies=[Depends(require_api_key())])
+def momentum_spillover_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.platform.momentum_spillover import momentum_spillover_report
+
+    try:
+        max_lag = payload.get("max_lag", 5)
+        if isinstance(max_lag, bool) or not isinstance(max_lag, int):
+            raise ValueError("max_lag must be an int")
+        result = momentum_spillover_report(_numeric_series(payload, field="leader_returns"), _numeric_series(payload, field="lagger_returns"), max_lag=max_lag)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return result.to_dict()
+
+
+@router.post("/tail-dependence", dependencies=[Depends(require_api_key())])
+def tail_dependence_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.platform.tail_dependence import tail_dependence_report
+
+    try:
+        threshold = _finite_number(payload.get("threshold", 0.1), "threshold")
+        result = tail_dependence_report(_numeric_series(payload, field="x"), _numeric_series(payload, field="y"), threshold=threshold)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return result.to_dict()

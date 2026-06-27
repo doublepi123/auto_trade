@@ -190,7 +190,17 @@ auto_trade/
 │   │   │   ├── curve_spread.py            # P296：曲线 spread/carry/roll-down/z-score
 │   │   │   ├── turnover_attribution.py    # P297：组合换手漂移/再平衡归因
 │   │   │   ├── signal_information_ratio.py # P298：信号 IR/SNR/稳定性/分桶质量
-│   │   │   └── api.py                      # /api/platform/*（含 P289-P298 跨资产研究端点）
++│   │   │   ├── regime_factor_returns.py  # P299：按 regime 切片因子 IC/收益/胜率
++│   │   │   ├── transfer_entropy.py       # P300：双序列信息流方向与强度
++│   │   │   ├── event_study.py            # P301：AR/CAR/检验统计量/事件窗口显著性
++│   │   │   ├── bootstrap_strategy_significance.py # P302：零 alpha 下 Sharpe bootstrap p 值与 CI
++│   │   │   ├── dynamic_factor_exposure.py # P303：滚动/EW 因子暴露时序与漂移检测
++│   │   │   ├── market_impact_model.py    # P304：幂律/平方根临时+永久冲击函数
++│   │   │   ├── vol_forecast_comparison.py # P305：RMSE/QLIKE/方向准确率模型对比
++│   │   │   ├── strategy_capacity.py      # P306：信号自相关/深度/换手→容量拐点
++│   │   │   ├── momentum_spillover.py     # P307：跨资产动量 Granger/脉冲/领先-滞后
++│   │   │   ├── tail_dependence.py        # P308：经验/参数上下尾相依系数
+ │   │   │   └── api.py                      # /api/platform/*（含 P299-P308 策略验证与自适应智能端点）
 │   │   ├── strategies/                     # 策略插件包（IntervalStrategy 首个插件）
 │   │   │   ├── __init__.py
 │   │   │   └── interval_strategy.py        # 区间策略插件化实现

@@ -2578,3 +2578,99 @@ def test_signal_information_ratio_endpoint_200_and_422():
     assert r.status_code == 200, r.text
     assert r.json()["information_ratio"] > 0
     assert client.post("/api/platform/signal-information-ratio", json={"signals": [1, 2], "forward_returns": [0.1, 0.2], "n_buckets": 3}).status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# P299–P308 — strategy validation & adaptive intelligence endpoints
+# ---------------------------------------------------------------------------
+
+
+def test_regime_factor_returns_endpoint_200_and_422():
+    client = _request()
+    r = client.post("/api/platform/regime-factor-returns", json={"factor": {"A": 1.0, "B": -1.0, "C": 2.0, "D": -2.0}, "returns": {"A": 0.02, "B": -0.02, "C": 0.04, "D": -0.04}, "regimes": ["bull", "bear", "bull", "bear"]})
+    assert r.status_code == 200, r.text
+    assert set(r.json()["regimes"].keys()) == {"bull", "bear"}
+    assert client.post("/api/platform/regime-factor-returns", json={"factor": {"A": 1.0}, "returns": {"A": 0.1}, "regimes": ["bull", "bear"]}).status_code == 422
+
+
+def test_transfer_entropy_endpoint_200_and_422():
+    client = _request()
+    r = client.post("/api/platform/transfer-entropy", json={"source": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], "target": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9], "lag": 1, "bins": 2})
+    assert r.status_code == 200, r.text
+    assert r.json()["forward_te"] > 0
+    assert client.post("/api/platform/transfer-entropy", json={"source": [1, 2], "target": [1], "lag": 1}).status_code == 422
+
+
+def test_event_study_endpoint_200_and_422():
+    client = _request()
+    market = [0.001, 0.002, -0.001, 0.0, 0.002, 0.001, -0.002, 0.001, 0.0, 0.001, 0.002, -0.001]
+    stock = [0.001, 0.002, -0.001, 0.0, 0.01, 0.02, 0.015, 0.001, 0.0, 0.001, 0.002, -0.001]
+    r = client.post("/api/platform/event-study", json={"market_returns": market, "stock_returns": stock, "event_indices": [5], "window_before": 2, "window_after": 2})
+    assert r.status_code == 200, r.text
+    assert r.json()["events"][0]["car"] > 0
+    assert client.post("/api/platform/event-study", json={"market_returns": [0.01], "stock_returns": [0.01, 0.02], "event_indices": [0]}).status_code == 422
+
+
+def test_bootstrap_significance_endpoint_200_and_422():
+    client = _request()
+    returns = [0.01, -0.02, 0.03, 0.015, -0.01, 0.025, -0.015, 0.02, -0.005, 0.012, -0.008, 0.018]
+    r = client.post("/api/platform/bootstrap-significance", json={"returns": returns, "n_bootstrap": 200, "seed": 7})
+    assert r.status_code == 200, r.text
+    assert 0.0 <= r.json()["p_value"] <= 1.0
+    assert client.post("/api/platform/bootstrap-significance", json={"returns": [0.01]}).status_code == 422
+
+
+def test_dynamic_factor_exposure_endpoint_200_and_422():
+    client = _request()
+    strategy = [0.01, 0.02, -0.005, 0.015, -0.01, 0.025, 0.005, -0.008, 0.012, -0.003]
+    panel = {"momentum": [0.008, 0.018, -0.004, 0.012, -0.008, 0.022, 0.004, -0.006, 0.01, -0.002]}
+    r = client.post("/api/platform/dynamic-factor-exposure", json={"strategy_returns": strategy, "factor_panel": panel, "window": 4})
+    assert r.status_code == 200, r.text
+    assert "momentum" in r.json()["betas"]
+    assert client.post("/api/platform/dynamic-factor-exposure", json={"strategy_returns": [0.01, 0.02], "factor_panel": {"f": [0.01]}, "window": 2}).status_code == 422
+
+
+def test_market_impact_endpoint_200_and_422():
+    client = _request()
+    r = client.post("/api/platform/market-impact", json={"order_qty": 100, "adv": 10000, "volatility": 0.2, "participation": 0.1})
+    assert r.status_code == 200, r.text
+    assert "total_impact_bps" in r.json()
+    assert client.post("/api/platform/market-impact", json={"order_qty": 0, "adv": 10000, "volatility": 0.2}).status_code == 422
+
+
+def test_vol_forecast_comparison_endpoint_200_and_422():
+    client = _request()
+    realized = [0.15, 0.16, 0.14, 0.17, 0.15, 0.16, 0.15, 0.17, 0.16, 0.15]
+    forecasts = {"ewma": [0.14, 0.15, 0.15, 0.16, 0.15, 0.16, 0.15, 0.16, 0.16, 0.15], "bad": [0.30, 0.05, 0.40, 0.02, 0.35, 0.01, 0.38, 0.03, 0.33, 0.02]}
+    r = client.post("/api/platform/vol-forecast-comparison", json={"realized_vol": realized, "forecasts_panel": forecasts})
+    assert r.status_code == 200, r.text
+    assert r.json()["best_model"] == "ewma"
+    assert client.post("/api/platform/vol-forecast-comparison", json={"realized_vol": [0.1, 0.2], "forecasts_panel": {"m": [0.1]}}).status_code == 422
+
+
+def test_strategy_capacity_endpoint_200_and_422():
+    client = _request()
+    r = client.post("/api/platform/strategy-capacity", json={"signal_autocorr": 0.5, "adv": 1000000, "turnover": 0.2, "impact_threshold_bps": 10})
+    assert r.status_code == 200, r.text
+    assert r.json()["max_aum"] > 0
+    assert client.post("/api/platform/strategy-capacity", json={"signal_autocorr": 1.5, "adv": 1000000, "turnover": 0.2}).status_code == 422
+
+
+def test_momentum_spillover_endpoint_200_and_422():
+    client = _request()
+    leader = [0.01, 0.02, -0.01, 0.03, 0.0, -0.02, 0.04, 0.01, 0.02, -0.01]
+    lagger = [0.0, 0.01, 0.02, -0.01, 0.03, 0.0, -0.02, 0.04, 0.01, 0.02]
+    r = client.post("/api/platform/momentum-spillover", json={"leader_returns": leader, "lagger_returns": lagger, "max_lag": 3})
+    assert r.status_code == 200, r.text
+    assert r.json()["best_lag"] >= 1
+    assert client.post("/api/platform/momentum-spillover", json={"leader_returns": [0.01, 0.02], "lagger_returns": [0.01], "max_lag": 1}).status_code == 422
+
+
+def test_tail_dependence_endpoint_200_and_422():
+    client = _request()
+    x = [-0.05, -0.04, -0.02, 0.0, 0.01, 0.02, 0.04, 0.05, -0.06, 0.07]
+    y = [-0.04, -0.03, -0.01, 0.0, 0.02, 0.01, 0.05, 0.06, -0.05, 0.08]
+    r = client.post("/api/platform/tail-dependence", json={"x": x, "y": y, "threshold": 0.2})
+    assert r.status_code == 200, r.text
+    assert "upper" in r.json()["empirical"]
+    assert client.post("/api/platform/tail-dependence", json={"x": [0.1, 0.2], "y": [0.1], "threshold": 0.1}).status_code == 422

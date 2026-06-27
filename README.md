@@ -601,6 +601,16 @@ auto_trade/
 | `POST` | `/api/platform/curve-spread` | 曲线 spread、carry、roll-down、z-score |
 | `POST` | `/api/platform/turnover-attribution` | 换手拆解：漂移、再平衡、进出资产 |
 | `POST` | `/api/platform/signal-information-ratio` | 信号 IR、SNR、稳定性与分桶质量 |
++| `POST` | `/api/platform/regime-factor-returns` | 按 regime 切片因子 IC/收益/胜率 |
++| `POST` | `/api/platform/transfer-entropy` | 双序列信息流方向与强度 |
++| `POST` | `/api/platform/event-study` | AR/CAR/检验统计量/事件窗口显著性 |
++| `POST` | `/api/platform/bootstrap-significance` | 零 alpha 下 Sharpe bootstrap p 值与 CI |
++| `POST` | `/api/platform/dynamic-factor-exposure` | 滚动/EW 因子暴露时序与漂移检测 |
++| `POST` | `/api/platform/market-impact` | 幂律/平方根临时+永久冲击函数 |
++| `POST` | `/api/platform/vol-forecast-comparison` | RMSE/QLIKE/方向准确率模型对比 |
++| `POST` | `/api/platform/strategy-capacity` | 信号自相关/深度/换手→容量拐点 |
++| `POST` | `/api/platform/momentum-spillover` | 跨资产动量 Granger/脉冲/领先-滞后 |
++| `POST` | `/api/platform/tail-dependence` | 经验/参数上下尾相依系数 |
 
 > **说明：** 受保护 API 在配置了 `AUTO_TRADE_API_KEY` 时要求 `X-API-Key`；`AUTO_TRADE_API_KEY` 为空仅 `dev/test` 放行，`prod` 会返回 401。Docker/nginx 与 Vite 代理会在服务端注入该 header，避免把密钥下发到 SPA。
 

@@ -37,7 +37,32 @@
 
 ---
 
-## 近期已完成迭代 (2026-06-27) — 跨资产洞察、交易前智能与信号诊断（10 轮 P289–P298）
++## 近期已完成迭代 (2026-06-28) — 策略验证与自适应智能（10 轮 P299–P308）
++
++> 自主 feature 迭代：承接 P289–P298 跨资产洞察，新增 10 个纯 Python / 零新依赖的策略验证、自适应行为、市场冲击容量与统计显著性模块；全部通过 `/api/platform/*` 只读计算端点暴露，不接入实盘 runner 默认路径。规格：[2026-06-28-p299-p308-strategy-validation-design.md](superpowers/specs/2026-06-28-p299-p308-strategy-validation-design.md)；计划：[2026-06-28-p299-p308-strategy-validation.md](superpowers/plans/2026-06-28-p299-p308-strategy-validation.md)。
++
++| 代号 | 主题 | 状态 |
++|------|------|------|
++| **P299** | Regime Factor Returns：按 regime 切片因子 IC/收益/胜率 | ✅ |
++| **P300** | Transfer Entropy：双序列信息流方向与强度 | ✅ |
++| **P301** | Event Study：AR/CAR/检验统计量/事件窗口显著性 | ✅ |
++| **P302** | Bootstrap Strategy Significance：零 alpha Sharpe bootstrap p 值与 CI | ✅ |
++| **P303** | Dynamic Factor Exposure：滚动/EW 因子暴露时序与漂移检测 | ✅ |
++| **P304** | Market Impact Model：幂律/平方根临时+永久冲击函数 | ✅ |
++| **P305** | Vol Forecast Comparison：RMSE/QLIKE/方向准确率模型对比 | ✅ |
++| **P306** | Strategy Capacity：信号自相关/深度/换手→容量拐点 | ✅ |
++| **P307** | Momentum Spillover：跨资产动量 Granger/脉冲/领先-滞后 | ✅ |
++| **P308** | Tail Dependence：经验/参数上下尾相依系数 | ✅ |
++
++**新增端点：** `POST /api/platform/regime-factor-returns`、`/transfer-entropy`、`/event-study`、`/bootstrap-significance`、`/dynamic-factor-exposure`、`/market-impact`、`/vol-forecast-comparison`、`/strategy-capacity`、`/momentum-spillover`、`/tail-dependence`。
++
++**验证：** 新增纯单元测试 + `tests/platform/test_api_risk_portfolio.py` 可 `--no-cov` 定向运行；当前新增批次验证 255 passed。
++
++**显式 YAGNI 未做：** 不做前端 UI / Cypress，不新增数据库表，不接真实 broker / runner，不引入 numpy/scipy/pandas/sklearn/statsmodels，不实现完整 Nautilus/Qlib/Zipline/vectorbt/pyfolio。
++
++---
++
+ ## 近期已完成迭代 (2026-06-27) — 跨资产洞察、交易前智能与信号诊断（10 轮 P289–P298）
 
 > 自主 feature 迭代：承接 P279–P288 ML 研究流水线，新增 10 个纯 Python / 零新依赖的跨资产环境识别、交易前成本估计、模型融合、期权隐含矩、相关性体制、因子拥挤、曲线价差、换手归因与信号 IR 模块；全部通过 `/api/platform/*` 只读计算端点暴露，不接入实盘 runner 默认路径。规格：[2026-06-27-p289-p298-cross-asset-research-design.md](superpowers/specs/2026-06-27-p289-p298-cross-asset-research-design.md)；计划：[2026-06-27-p289-p298-cross-asset-research.md](superpowers/plans/2026-06-27-p289-p298-cross-asset-research.md)。
 
