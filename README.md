@@ -713,3 +713,13 @@ MIT
 | `POST` | `/api/platform/implied-correlation` | 个股 IV 推导隐含相关 |
 | `POST` | `/api/platform/pair-screening` | 互信息+距离相关配对筛选 |
 | `POST` | `/api/platform/active-attribution` | Grinold-Kahn 活跃归因 |
+| `POST` | `/api/platform/volatility-regime` | 波动率体制检测+持续期 |
+| `POST` | `/api/platform/information-trades` | 成交自信息+知情交易概率 |
+| `POST` | `/api/platform/systematic-risk-decomposition` | PCA 协方差系统性风险占比 |
+| `POST` | `/api/platform/factor-timing` | 因子估值/拥挤/动量 timing |
+| `POST` | `/api/platform/rebalancing-optimization` | 再平衡路径优化+前沿 |
+| `POST` | `/api/platform/capacity-scaling` | AUM 缩放衰减曲线 |
+| `POST` | `/api/platform/variance-break` | ICSS 方差结构突变 |
+| `POST` | `/api/platform/regime-switching-correlation` | 双状态相关切换 |
+| `POST` | `/api/platform/trade-size-distribution` | 成交分布幂律+Hurst |
+| `POST` | `/api/platform/liquidity-adjusted-ir` | 流动性调整信息比率 |

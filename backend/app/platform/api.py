@@ -5466,3 +5466,384 @@ def active_attribution_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
             detail=str(exc),
         ) from exc
     return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P359 — volatility regime endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/volatility-regime", dependencies=[Depends(require_api_key())])
+def volatility_regime_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P359: rolling-volatility regime classification and switch detection.
+
+    Body: ``{"returns": [...], "window"?: int, "n_quantiles"?: int}``
+    (defaults 20/3). Returns regime_labels, switch_points, regime_stats,
+    and persistence. HTTP 422 on invalid input.
+    """
+    from app.platform.volatility_regime import volatility_regime_report
+
+    try:
+        series = _numeric_series(payload, field="returns")
+        window_raw = payload.get("window", 20)
+        if isinstance(window_raw, bool) or not isinstance(window_raw, int):
+            raise ValueError("window must be an int")
+        window = int(window_raw)
+        n_quantiles_raw = payload.get("n_quantiles", 3)
+        if isinstance(n_quantiles_raw, bool) or not isinstance(n_quantiles_raw, int):
+            raise ValueError("n_quantiles must be an int")
+        n_quantiles = int(n_quantiles_raw)
+        result = volatility_regime_report(series, window=window, n_quantiles=n_quantiles)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P360 — information trades endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/information-trades", dependencies=[Depends(require_api_key())])
+def information_trades_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P360: information-based trade classification from volume and direction.
+
+    Body: ``{"volumes": [...], "direction"?: [...], "window"?: int}``
+    (default window=20). Returns self_information, information_asymmetry,
+    informed_trade_prob, and entropy_decomposition. HTTP 422 on invalid input.
+    """
+    from app.platform.information_trades import information_trades_report
+
+    try:
+        volumes = _numeric_series(payload, field="volumes")
+        direction_raw = payload.get("direction")
+        direction: list[float] | None = None
+        if direction_raw is not None:
+            if isinstance(direction_raw, (str, dict)) or not isinstance(direction_raw, list):
+                raise ValueError("direction must be a list of finite numbers")
+            direction = [_finite_number(v, "direction entries") for v in direction_raw]
+            if not direction:
+                raise ValueError("direction must be non-empty")
+        window_raw = payload.get("window", 20)
+        if isinstance(window_raw, bool) or not isinstance(window_raw, int):
+            raise ValueError("window must be an int")
+        window = int(window_raw)
+        result = information_trades_report(volumes, direction=direction, window=window)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P361 — systematic risk decomposition endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/systematic-risk-decomposition", dependencies=[Depends(require_api_key())])
+def systematic_risk_decomposition_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P361: systematic vs idiosyncratic risk decomposition via eigenvalue analysis.
+
+    Body: ``{"returns_panel": {asset: [returns]}, "n_components"?: int}``.
+    Panel ≤ 50 assets, series ≥ 2 observations each. Returns systematic_ratio,
+    eigenvalue_spectrum, concentration_hhi, explained_variance_ratio, and
+    suggested_k. HTTP 422 on invalid input.
+    """
+    from app.platform.systematic_risk_decomposition import (
+        systematic_risk_decomposition_report,
+    )
+
+    try:
+        panel = _panel_field(payload, field="returns_panel")
+        n_components_raw = payload.get("n_components")
+        n_components: int | None = None
+        if n_components_raw is not None:
+            if isinstance(n_components_raw, bool) or not isinstance(n_components_raw, int):
+                raise ValueError("n_components must be an int")
+            n_components = int(n_components_raw)
+        result = systematic_risk_decomposition_report(panel, n_components=n_components)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P365 — variance break (ICSS) endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/variance-break", dependencies=[Depends(require_api_key())])
+def variance_break_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P365: detect variance change points via ICSS binary segmentation.
+
+    Body: ``{"returns": [...], "min_segment"?: 10}`` where ``returns`` is a
+    non-empty list of finite period returns and ``min_segment`` (default 10)
+    is the minimum segment size for detection. Returns ``break_points``,
+    ``variance_ratios``, ``icss_statistics``, ``pre_post_stats``, and
+    ``n_observations``. HTTP 422 on invalid input.
+    """
+    from app.platform.variance_break import variance_break_report
+
+    try:
+        returns = _numeric_series(payload, field="returns")
+        min_segment_raw = payload.get("min_segment", 10)
+        if isinstance(min_segment_raw, bool) or not isinstance(min_segment_raw, int):
+            raise ValueError("min_segment must be an int >= 2")
+        min_segment = int(min_segment_raw)
+        result = variance_break_report(returns, min_segment=min_segment)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P366 — regime-switching correlation endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/regime-switching-correlation", dependencies=[Depends(require_api_key())])
+def regime_switching_correlation_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P366: rolling-window average pairwise correlation with low/high regime split.
+
+    Body: ``{"returns_panel": {asset: [returns]}, "window"?: 20}`` where
+    ``returns_panel`` is a non-empty dict of equal-length return series
+    (2–50 assets). Returns ``regime_path``, ``avg_correlation_series``,
+    ``high_regime_stats``, ``low_regime_stats``, and ``diversification_premium``.
+    HTTP 422 on invalid input.
+    """
+    from app.platform.regime_switching_correlation import (
+        regime_switching_correlation_report,
+    )
+
+    try:
+        returns_panel = _panel_field(payload, field="returns_panel")
+        window_raw = payload.get("window", 20)
+        if isinstance(window_raw, bool) or not isinstance(window_raw, int):
+            raise ValueError("window must be an int >= 2")
+        window = int(window_raw)
+        result = regime_switching_correlation_report(returns_panel, window=window)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P367 — trade-size distribution endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/trade-size-distribution", dependencies=[Depends(require_api_key())])
+def trade_size_distribution_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P367: trade-size distribution statistics + Pareto tail + Hurst + Gini.
+
+    Body: ``{"volumes": [...], "round_lot"?: 100.0}`` where ``volumes`` is a
+    non-empty list of finite positive trade volumes. Returns
+    ``distribution_stats``, ``pareto_alpha``, ``hurst_exponent``,
+    ``round_lot_ratio``, ``size_autocorr_lag1``, and ``concentration_gini``.
+    HTTP 422 on invalid input.
+    """
+    from app.platform.trade_size_distribution import trade_size_distribution_report
+
+    try:
+        volumes = _numeric_series(payload, field="volumes")
+        round_lot_raw = payload.get("round_lot", 100.0)
+        round_lot = _finite_number(round_lot_raw, "round_lot")
+        result = trade_size_distribution_report(volumes, round_lot=round_lot)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P368 — liquidity-adjusted IR endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/liquidity-adjusted-ir", dependencies=[Depends(require_api_key())])
+def liquidity_adjusted_ir_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P368: traditional vs liquidity-adjusted Information Ratio.
+
+    Body: ``{"returns": [...], "volumes": [...], "spread_bps"?: 5.0,
+    "turnover"?: 0.1, "periods_per_year"?: 252}`` where ``returns`` and
+    ``volumes`` are equal-length non-empty lists of finite numbers. Returns
+    ``traditional_ir``, ``liquidity_adjusted_ir``, ``liquidity_drag``, and
+    ``cost_decomposition``. HTTP 422 on invalid input.
+    """
+    from app.platform.liquidity_adjusted_ir import liquidity_adjusted_ir_report
+
+    try:
+        returns = _numeric_series(payload, field="returns")
+        volumes = _numeric_series(payload, field="volumes")
+        spread_bps = _finite_number(payload.get("spread_bps", 5.0), "spread_bps")
+        turnover = _finite_number(payload.get("turnover", 0.1), "turnover")
+        periods_per_year_raw = payload.get("periods_per_year", 252)
+        if isinstance(periods_per_year_raw, bool) or not isinstance(periods_per_year_raw, int):
+            raise ValueError("periods_per_year must be an int >= 1")
+        periods_per_year = int(periods_per_year_raw)
+        result = liquidity_adjusted_ir_report(
+            returns,
+            volumes,
+            spread_bps=spread_bps,
+            turnover=turnover,
+            periods_per_year=periods_per_year,
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P362 – Factor timing endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/factor-timing", dependencies=[Depends(require_api_key())])
+def factor_timing_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P362: factor timing signal — valuation, crowding, momentum composite.
+
+    Body: ``{"factor_ic": {name: [floats]}, "factor_returns": {name: [floats]},
+    "lookback"?: int}`` where both dicts share the same factor names and
+    equal-length series, and ``lookback`` (default 12) is the trailing window.
+    Returns per-factor ``valuation_z``, ``crowding``, ``momentum``,
+    ``timing_score``, ``tilt``, and descending ``ranking``.
+    HTTP 422 on invalid input.
+    """
+    from app.platform.factor_timing import factor_timing_report
+
+    try:
+        factor_ic = _panel_field(payload, field="factor_ic")
+        factor_returns = _panel_field(payload, field="factor_returns")
+        lookback_raw = payload.get("lookback", 12)
+        if isinstance(lookback_raw, bool) or not isinstance(lookback_raw, int):
+            raise ValueError("lookback must be an int >= 2")
+        result = factor_timing_report(factor_ic, factor_returns, lookback=lookback_raw)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P363 – Rebalancing optimization endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/rebalancing-optimization", dependencies=[Depends(require_api_key())])
+def rebalancing_optimization_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P363: step-by-step rebalancing cost / tracking-error frontier.
+
+    Body: ``{"current_weights": {asset: float}, "target_weights": {asset: float},
+    "covariance": {asset: {asset: float}}, "cost_rate"?: float,
+    "max_steps"?: int}`` where both weight dicts share the same asset keys,
+    and ``covariance`` is a nested dict. ``cost_rate`` defaults to 0.001
+    and ``max_steps`` defaults to 10. Returns ``frontier``,
+    ``optimal_steps``, ``current_tracking_error``, and ``immediate_cost``.
+    HTTP 422 on invalid input.
+    """
+    from app.platform.rebalancing_optimization import rebalancing_optimization_report
+
+    try:
+        current_weights = _dict_float_field(payload, "current_weights")
+        target_weights = _dict_float_field(payload, "target_weights")
+        covariance_raw = payload.get("covariance")
+        if not isinstance(covariance_raw, dict) or not covariance_raw:
+            raise ValueError("covariance must be a non-empty dict")
+        covariance: dict[str, dict[str, float]] = {}
+        for asset, row in covariance_raw.items():
+            if not isinstance(row, dict):
+                raise ValueError(f"covariance['{asset}'] must be a dict")
+            covariance[str(asset)] = {
+                str(k): _finite_number(v, f"covariance['{asset}']['{k}']")
+                for k, v in row.items()
+            }
+        cost_rate_raw = payload.get("cost_rate", 0.001)
+        cost_rate = _finite_number(cost_rate_raw, "cost_rate")
+        max_steps_raw = payload.get("max_steps", 10)
+        if isinstance(max_steps_raw, bool) or not isinstance(max_steps_raw, int):
+            raise ValueError("max_steps must be a positive int")
+        result = rebalancing_optimization_report(
+            current_weights,
+            target_weights,
+            covariance,
+            cost_rate=cost_rate,
+            max_steps=max_steps_raw,
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P364 – Capacity scaling endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/capacity-scaling", dependencies=[Depends(require_api_key())])
+def capacity_scaling_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P364: AUM capacity scaling — Sharpe degradation from market impact.
+
+    Body: ``{"returns": [floats], "adv": float, "turnover": float,
+    "aum_multipliers"?: [float], "periods_per_year"?: int}`` where
+    ``adv`` and ``turnover`` are finite positive numbers,
+    ``aum_multipliers`` (optional) is a list of AUM/ADV ratios,
+    and ``periods_per_year`` defaults to 252. Returns ``scaling_curve``
+    (per-level aum, gross_sharpe, impact_cost, net_sharpe),
+    ``capacity_limit``, and ``sharpe_decay_rate``.
+    HTTP 422 on invalid input.
+    """
+    from app.platform.capacity_scaling import capacity_scaling_report
+
+    try:
+        returns = _numeric_series(payload, field="returns")
+        adv = _finite_number(payload.get("adv"), "adv")
+        turnover = _finite_number(payload.get("turnover"), "turnover")
+        aum_multipliers_raw = payload.get("aum_multipliers")
+        aum_multipliers: list[float] | None = None
+        if aum_multipliers_raw is not None:
+            if not isinstance(aum_multipliers_raw, list):
+                raise ValueError("aum_multipliers must be a list")
+            aum_multipliers = [
+                _finite_number(v, f"aum_multipliers[{i}]")
+                for i, v in enumerate(aum_multipliers_raw)
+            ]
+        periods_per_year_raw = payload.get("periods_per_year", 252)
+        if isinstance(periods_per_year_raw, bool) or not isinstance(periods_per_year_raw, int):
+            raise ValueError("periods_per_year must be an int >= 1")
+        result = capacity_scaling_report(
+            returns,
+            adv=adv,
+            turnover=turnover,
+            aum_multipliers=aum_multipliers,
+            periods_per_year=periods_per_year_raw,
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
