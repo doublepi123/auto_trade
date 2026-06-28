@@ -693,3 +693,13 @@ MIT
 | `POST` | `/api/platform/vol-of-vol` | VoV term structure |
 | `POST` | `/api/platform/regime-cointegration` | regime 内协整 + 断裂检测 |
 | `POST` | `/api/platform/turnover-frontier` | 换手 vs 净 Sharpe 前沿 |
+| `POST` | `/api/platform/cvar-optimize` | Rockafellar-Uryasev CVaR 约束组合优化 |
+| `POST` | `/api/platform/systemic-risk` | ΔCoVaR + MES 系统性风险传染 |
+| `POST` | `/api/platform/granger-network` | 多资产 Granger 因果有向网络 |
+| `POST` | `/api/platform/regime-allocation` | regime 驱动自适应配置权重 |
+| `POST` | `/api/platform/greeks-surface` | BS Greeks 跨 strike×expiry 敏感度面 |
+| `POST` | `/api/platform/rebalancing-intelligence` | 再平衡频率成本-收益决策 |
+| `POST` | `/api/platform/dynamic-risk-contribution` | 时变风险贡献分解 |
+| `POST` | `/api/platform/option-strategy-payoff` | 多腿期权组合损益 + 盈亏平衡 |
+| `POST` | `/api/platform/network-centrality` | 度/介数/特征向量/PageRank 中心性 |
+| `POST` | `/api/platform/vol-surface-arbitrage` | IV 面日历/蝶式/PCP 套利检测 |

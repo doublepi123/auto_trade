@@ -4843,3 +4843,229 @@ def turnover_frontier_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
             detail=str(exc),
         ) from exc
     return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P343 — Greeks surface endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/greeks-surface", dependencies=[Depends(require_api_key())])
+def greeks_surface_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P343: Black-Scholes Greeks surface across strikes and expiries.
+
+    Body: ``{"options": [{strike, expiry_days, iv, option_type}, ...],
+    "spot": float, "risk_free"?: float}``. Returns per-option delta/gamma/
+    vega/theta and surface summary (atm_delta, total_gamma, total_vega).
+    HTTP 422 on invalid input.
+    """
+    from app.platform.greeks_surface import greeks_surface_report
+
+    try:
+        options_raw = payload.get("options")
+        if not isinstance(options_raw, list):
+            raise ValueError("options must be a non-empty list")
+        spot = _finite_number(payload.get("spot"), "spot")
+        risk_free_raw = payload.get("risk_free", 0.02)
+        risk_free = _finite_number(risk_free_raw, "risk_free")
+        result = greeks_surface_report(options_raw, spot=spot, risk_free=risk_free)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P344 — Rebalancing intelligence endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/rebalancing-intelligence", dependencies=[Depends(require_api_key())])
+def rebalancing_intelligence_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P344: compare rebalance-frequency strategies on a returns panel.
+
+    Body: ``{"returns_panel": {asset: [returns]}, "target_weights":
+    {asset: weight}, "cost_per_turnover"?: float, "periods_per_year"?:
+    int}``. Returns per-frequency stats (sharpe, turnover, tracking_error,
+    cost_drag) and optimal_frequency. HTTP 422 on invalid input.
+    """
+    from app.platform.rebalancing_intelligence import rebalancing_intelligence_report
+
+    try:
+        returns_panel = _panel_field(payload, field="returns_panel")
+        target_weights = _dict_float_field(payload, "target_weights")
+        cost = _finite_number(payload.get("cost_per_turnover", 0.001), "cost_per_turnover")
+        periods_per_year_raw = payload.get("periods_per_year", 252)
+        if isinstance(periods_per_year_raw, bool) or not isinstance(periods_per_year_raw, int):
+            raise ValueError("periods_per_year must be an int >= 1")
+        result = rebalancing_intelligence_report(
+            returns_panel,
+            target_weights,
+            cost_per_turnover=cost,
+            periods_per_year=periods_per_year_raw,
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P345 — Dynamic risk contribution endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/dynamic-risk-contribution", dependencies=[Depends(require_api_key())])
+def dynamic_risk_contribution_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P345: rolling-window risk contribution time series per asset.
+
+    Body: ``{"returns_panel": {asset: [returns]}, "weights": {asset: weight},
+    "window"?: int, "periods_per_year"?: int}``. Returns per-asset rolling
+    risk contributions, drift flags, and summary. Panel ≤ 50 assets.
+    HTTP 422 on invalid input.
+    """
+    from app.platform.dynamic_risk_contribution import dynamic_risk_contribution_report
+
+    try:
+        returns_panel = _panel_field(payload, field="returns_panel")
+        target_weights = _dict_float_field(payload, "weights")
+        window_raw = payload.get("window", 20)
+        if isinstance(window_raw, bool) or not isinstance(window_raw, int):
+            raise ValueError("window must be an int >= 2")
+        periods_per_year_raw = payload.get("periods_per_year", 252)
+        if isinstance(periods_per_year_raw, bool) or not isinstance(periods_per_year_raw, int):
+            raise ValueError("periods_per_year must be an int >= 1")
+        result = dynamic_risk_contribution_report(
+            returns_panel,
+            target_weights,
+            window=window_raw,
+            periods_per_year=periods_per_year_raw,
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P339–P342 — systemic risk, network intelligence, regime allocation
+# ---------------------------------------------------------------------------
+
+
+@router.post("/cvar-optimize", dependencies=[Depends(require_api_key())])
+def cvar_optimize_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.platform.cvar_optimization import cvar_optimization_report
+
+    try:
+        confidence = _finite_number(payload.get("confidence", 0.95), "confidence")
+        target_return_raw = payload.get("target_return")
+        target_return = _finite_number(target_return_raw, "target_return") if target_return_raw is not None else None
+        result = cvar_optimization_report(_panel_field(payload, field="returns_panel"), confidence=confidence, target_return=target_return)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return result.to_dict()
+
+
+@router.post("/systemic-risk", dependencies=[Depends(require_api_key())])
+def systemic_risk_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.platform.systemic_risk import systemic_risk_report
+
+    try:
+        confidence = _finite_number(payload.get("confidence", 0.95), "confidence")
+        result = systemic_risk_report(_numeric_series(payload, field="target_returns"), _numeric_series(payload, field="market_returns"), confidence=confidence)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return result.to_dict()
+
+
+@router.post("/granger-network", dependencies=[Depends(require_api_key())])
+def granger_network_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.platform.granger_network import granger_network_report
+
+    try:
+        max_lag = payload.get("max_lag", 3)
+        if isinstance(max_lag, bool) or not isinstance(max_lag, int):
+            raise ValueError("max_lag must be an int")
+        significance = _finite_number(payload.get("significance", 0.1), "significance")
+        result = granger_network_report(_panel_field(payload, field="returns_panel"), max_lag=max_lag, significance=significance)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return result.to_dict()
+
+
+@router.post("/regime-allocation", dependencies=[Depends(require_api_key())])
+def regime_allocation_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.platform.regime_allocation import regime_allocation_report
+
+    try:
+        regimes = payload.get("regimes")
+        if not isinstance(regimes, list):
+            raise ValueError("regimes must be a list")
+        current_regime = str(payload.get("current_regime", ""))
+        if not current_regime:
+            raise ValueError("current_regime must be non-empty")
+        result = regime_allocation_report(_panel_field(payload, field="returns_panel"), regimes, current_regime=current_regime)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P346–P348 — option strategy payoff, network centrality, vol surface arbitrage
+# ---------------------------------------------------------------------------
+
+
+@router.post("/option-strategy-payoff", dependencies=[Depends(require_api_key())])
+def option_strategy_payoff_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.platform.option_strategy_payoff import option_strategy_payoff_report
+
+    try:
+        legs = payload.get("legs")
+        if not isinstance(legs, list):
+            raise ValueError("legs must be a list")
+        spot_range_raw = payload.get("spot_range")
+        spot_range = [_finite_number(v, "spot_range entries") for v in spot_range_raw] if spot_range_raw is not None else None
+        result = option_strategy_payoff_report(legs, spot_range=spot_range)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return result.to_dict()
+
+
+@router.post("/network-centrality", dependencies=[Depends(require_api_key())])
+def network_centrality_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.platform.network_centrality import network_centrality_report
+
+    try:
+        adjacency_raw = payload.get("adjacency_matrix")
+        if not isinstance(adjacency_raw, dict):
+            raise ValueError("adjacency_matrix must be a dict")
+        adjacency: dict[str, dict[str, float]] = {}
+        for src, targets in adjacency_raw.items():
+            if not isinstance(targets, dict):
+                raise ValueError("adjacency_matrix values must be dicts")
+            adjacency[str(src)] = {str(k): _finite_number(v, f"edge['{k}']") for k, v in targets.items()}
+        result = network_centrality_report(adjacency)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return result.to_dict()
+
+
+@router.post("/vol-surface-arbitrage", dependencies=[Depends(require_api_key())])
+def vol_surface_arbitrage_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    from app.platform.vol_surface_arbitrage import vol_surface_arbitrage_report
+
+    try:
+        options = payload.get("options")
+        if not isinstance(options, list):
+            raise ValueError("options must be a list")
+        spot = _finite_number(payload.get("spot"), "spot")
+        result = vol_surface_arbitrage_report(options, spot=spot)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return result.to_dict()
