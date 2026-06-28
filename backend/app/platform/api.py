@@ -36,8 +36,11 @@ from app.platform.optimizer_service import OptimizerService
 from app.platform.registry import get_default_registry
 from app.platform.replay import EventReplayer
 from app.platform.rolling_features import rolling_feature_report
+from app.platform.relative_rotation import relative_rotation_report
 from app.platform.runner import PlatformRunner
+from app.platform.seasonality import seasonality_report
 from app.platform.spectral_analysis import spectral_report
+from app.platform.squeeze_detection import squeeze_detection_report
 from app.platform.store import EventStore
 from app.platform.tca import ConstReferencePriceProvider, TcaAnalyzer
 from app.platform.tearsheet import TearsheetBuilder, TearsheetExporter
@@ -5068,4 +5071,398 @@ def vol_surface_arbitrage_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
         result = vol_surface_arbitrage_report(options, spot=spot)
     except (TypeError, ValueError) as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P349 — Levy process option pricing endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/levy-processes", dependencies=[Depends(require_api_key())])
+def levy_processes_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P349: VG / CGMY Levy process option pricing.
+
+    Body: ``{"model": "vg", "spot": S, "strike": K,
+    "expiry": T, "sigma": σ, "nu": ν, "theta": θ,
+    "risk_free"?: r}``. 422 on invalid inputs.
+    """
+    from app.platform.levy_processes import levy_process_report
+
+    try:
+        model = str(payload.get("model", "vg"))
+        spot = _finite_number(payload.get("spot"), "spot")
+        strike = _finite_number(payload.get("strike"), "strike")
+        expiry = _finite_number(payload.get("expiry"), "expiry")
+        sigma = _finite_number(payload.get("sigma"), "sigma")
+        nu = _finite_number(payload.get("nu"), "nu")
+        theta = _finite_number(payload.get("theta"), "theta")
+        risk_free = _finite_number(payload.get("risk_free", 0.02), "risk_free")
+        result = levy_process_report(
+            model=model, spot=spot, strike=strike, expiry=expiry,
+            sigma=sigma, nu=nu, theta=theta, risk_free=risk_free,
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P350 — Penalized regression endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/penalized-regression", dependencies=[Depends(require_api_key())])
+def penalized_regression_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P350: Ridge / Lasso penalized regression.
+
+    Body: ``{"y": [...], "x": [[...], ...], "method"?: "ridge"|"lasso",
+    "alpha"?: float, "max_iter"?: int}``. 422 on invalid inputs.
+    """
+    from app.platform.penalized_regression import penalized_regression_report
+
+    try:
+        y_raw = payload.get("y")
+        x_raw = payload.get("x")
+        if not isinstance(y_raw, list) or not y_raw:
+            raise ValueError("y must be a non-empty list")
+        if not isinstance(x_raw, list) or not x_raw:
+            raise ValueError("x must be a non-empty list of series")
+        y = [_finite_number(v, "y entries") for v in y_raw]
+        x: list[list[float]] = []
+        for i, series in enumerate(x_raw):
+            if not isinstance(series, list) or not series:
+                raise ValueError(f"x[{i}] must be a non-empty list")
+            x.append([_finite_number(v, f"x[{i}] entries") for v in series])
+        method = str(payload.get("method", "ridge"))
+        alpha = _finite_number(payload.get("alpha", 1.0), "alpha")
+        max_iter_raw = payload.get("max_iter", 100)
+        if isinstance(max_iter_raw, bool) or not isinstance(max_iter_raw, int):
+            raise ValueError("max_iter must be an int")
+        result = penalized_regression_report(
+            y=y, x=x, method=method, alpha=alpha, max_iter=max_iter_raw,
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P351 — Multi-asset Kelly allocation endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/multi-kelly", dependencies=[Depends(require_api_key())])
+def multi_kelly_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P351: Multi-asset Kelly portfolio allocation.
+
+    Body: ``{"returns_panel": {symbol: [returns]},
+    "fraction"?: float}``. 422 on invalid inputs.
+    """
+    from app.platform.multi_asset_kelly import multi_asset_kelly_report
+
+    try:
+        returns_panel = _panel_field(payload, field="returns_panel")
+        fraction = _finite_number(payload.get("fraction", 1.0), "fraction")
+        result = multi_asset_kelly_report(returns_panel, fraction=fraction)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P352 — Squeeze detection (Bollinger Bands vs Keltner Channel)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/squeeze-detection", dependencies=[Depends(require_api_key())])
+def squeeze_detection_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P352: detect BB/KC squeeze — low-volatility compression before breakout.
+
+    Body: ``{"series": [floats], "bb_window"?: int, "kc_window"?: int,
+    "bb_mult"?: float, "kc_mult"?: float}``. Returns squeeze_on,
+    squeeze_points, band series (bb_upper/lower, kc_upper/lower), and
+    post-squeeze direction. HTTP 422 on invalid input.
+    """
+    try:
+        series = _numeric_series(payload)
+        bb_window = payload.get("bb_window", 20)
+        if isinstance(bb_window, bool) or not isinstance(bb_window, int):
+            raise ValueError("bb_window must be an int")
+        kc_window = payload.get("kc_window", 20)
+        if isinstance(kc_window, bool) or not isinstance(kc_window, int):
+            raise ValueError("kc_window must be an int")
+        bb_mult = payload.get("bb_mult", 2.0)
+        if isinstance(bb_mult, bool) or not isinstance(bb_mult, (int, float)):
+            raise ValueError("bb_mult must be a finite number")
+        kc_mult = payload.get("kc_mult", 1.5)
+        if isinstance(kc_mult, bool) or not isinstance(kc_mult, (int, float)):
+            raise ValueError("kc_mult must be a finite number")
+        result = squeeze_detection_report(
+            series,
+            bb_window=bb_window,
+            kc_window=kc_window,
+            bb_mult=float(bb_mult),
+            kc_mult=float(kc_mult),
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P353 — Relative Rotation Graph (RRG)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/relative-rotation", dependencies=[Depends(require_api_key())])
+def relative_rotation_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P353: RRG quadrant classification for a panel of assets vs. benchmark.
+
+    Body: ``{"assets": {symbol: [prices]}, "benchmark": [prices],
+    "tail"?: int}``. Returns per_asset ``{rs_ratio, rs_momentum, quadrant}``
+    and ``latest_quadrants`` snapshot. HTTP 422 on invalid input.
+    """
+    assets_raw = payload.get("assets")
+    if not isinstance(assets_raw, dict) or not assets_raw:
+        raise HTTPException(status_code=422, detail="assets must be a non-empty dict")
+    if len(assets_raw) > 50:
+        raise HTTPException(status_code=422, detail="assets must contain at most 50 entries")
+    benchmark_raw = payload.get("benchmark")
+    if not isinstance(benchmark_raw, list):
+        raise HTTPException(status_code=422, detail="benchmark must be a list")
+    try:
+        assets: dict[str, list[float]] = {}
+        for name, series in assets_raw.items():
+            if not isinstance(series, list) or not series:
+                raise ValueError(f"assets['{name}'] must be a non-empty list")
+            assets[str(name)] = [_finite_number(v, f"assets['{name}'] entries") for v in series]
+        benchmark = [_finite_number(v, "benchmark entries") for v in benchmark_raw]
+        tail_raw = payload.get("tail", 10)
+        if isinstance(tail_raw, bool) or not isinstance(tail_raw, int):
+            raise ValueError("tail must be an int")
+        result = relative_rotation_report(assets, benchmark, tail=tail_raw)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P354 — Seasonality analysis
+# ---------------------------------------------------------------------------
+
+
+@router.post("/seasonality", dependencies=[Depends(require_api_key())])
+def seasonality_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P354: day-of-week and month seasonality in a return series.
+
+    Body: ``{"returns": [floats], "day_of_week"?: [ints],
+    "months"?: [ints]}``. Returns per-group ``{mean, std, t_stat, n}``
+    and ``significant_effects`` (|t_stat| > 2). HTTP 422 on invalid input.
+    """
+    returns_raw = payload.get("returns")
+    if not isinstance(returns_raw, list) or not returns_raw:
+        raise HTTPException(status_code=422, detail="returns must be a non-empty list")
+    try:
+        returns = [_finite_number(v, "returns entries") for v in returns_raw]
+        dow_raw = payload.get("day_of_week")
+        months_raw = payload.get("months")
+        dow: list[int] | None = None
+        months: list[int] | None = None
+        if dow_raw is not None:
+            if not isinstance(dow_raw, list):
+                raise ValueError("day_of_week must be a list of ints")
+            dow = []
+            for v in dow_raw:
+                if isinstance(v, bool) or not isinstance(v, int):
+                    raise ValueError("day_of_week entries must be ints")
+                dow.append(v)
+        if months_raw is not None:
+            if not isinstance(months_raw, list):
+                raise ValueError("months must be a list of ints")
+            months = []
+            for v in months_raw:
+                if isinstance(v, bool) or not isinstance(v, int):
+                    raise ValueError("months entries must be ints")
+                months.append(v)
+        result = seasonality_report(returns, day_of_week=dow, months=months)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P355–P358 — Bayesian Model Averaging, Implied Correlation, Pair Screening,
+#            Active Attribution
+# ---------------------------------------------------------------------------
+
+
+@router.post("/bayesian-model-averaging", dependencies=[Depends(require_api_key())])
+def bayesian_model_averaging_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P355: Bayesian Model Averaging for forecast combination.
+
+    Body: ``{"predictions": {model_name: [values]}, "actuals": [values]}``.
+    Returns per-model weights, BMA ensemble predictions, BMA SSE, and per-model BICs.
+    HTTP 422 on invalid input.
+    """
+    from app.platform.bayesian_model_averaging import bayesian_model_averaging_report
+
+    try:
+        predictions_raw = payload.get("predictions")
+        if not isinstance(predictions_raw, dict) or not predictions_raw:
+            raise ValueError("predictions must be a non-empty dict")
+        predictions: dict[str, list[float]] = {}
+        for name, values in predictions_raw.items():
+            if not isinstance(values, list):
+                raise ValueError(f"predictions['{name}'] must be a list")
+            predictions[str(name)] = [
+                _finite_number(v, f"predictions['{name}'] entries") for v in values
+            ]
+        actuals_raw = payload.get("actuals")
+        if not isinstance(actuals_raw, list):
+            raise ValueError("actuals must be a list")
+        actuals = [_finite_number(v, "actuals entries") for v in actuals_raw]
+        result = bayesian_model_averaging_report(predictions, actuals)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+@router.post("/implied-correlation", dependencies=[Depends(require_api_key())])
+def implied_correlation_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P356: Implied correlation from index IV and constituent stock IVs.
+
+    Body: ``{"index_iv": float, "stock_ivs": {ticker: iv}, "equal_weighted"?: bool}``.
+    Returns implied correlation, variance decomposition into idiosyncratic and
+    systematic components. HTTP 422 on invalid input.
+    """
+    from app.platform.implied_correlation import implied_correlation_report
+
+    try:
+        index_iv = _finite_number(payload.get("index_iv"), "index_iv")
+        stock_ivs_raw = payload.get("stock_ivs")
+        if not isinstance(stock_ivs_raw, dict) or not stock_ivs_raw:
+            raise ValueError("stock_ivs must be a non-empty dict")
+        stock_ivs = {
+            str(k): _finite_number(v, f"stock_ivs['{k}']")
+            for k, v in stock_ivs_raw.items()
+        }
+        equal_weighted = payload.get("equal_weighted", True)
+        if not isinstance(equal_weighted, bool):
+            raise ValueError("equal_weighted must be a boolean")
+        result = implied_correlation_report(index_iv, stock_ivs, equal_weighted=equal_weighted)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+@router.post("/pair-screening", dependencies=[Depends(require_api_key())])
+def pair_screening_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P357: Pair screening by pairwise dependence over a returns panel.
+
+    Body: ``{"panel": {asset: [returns]}, "top_n"?: int, "method"?: str}``.
+    ``method`` is ``"mutual_info"`` (default) or ``"distance_corr"``.
+    Panel ≤ 50 assets. Returns ranked pairs, method used, and total pairs screened.
+    HTTP 422 on invalid input.
+    """
+    from app.platform.pair_screening import pair_screening_report
+
+    try:
+        panel = _panel_field(payload, field="panel")
+        top_n_raw = payload.get("top_n", 10)
+        if isinstance(top_n_raw, bool) or not isinstance(top_n_raw, int):
+            raise ValueError("top_n must be an int")
+        method = str(payload.get("method", "mutual_info")).lower()
+        result = pair_screening_report(panel, top_n=top_n_raw, method=method)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+@router.post("/active-attribution", dependencies=[Depends(require_api_key())])
+def active_attribution_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P358: Active return attribution and factor decomposition.
+
+    Body: ``{"returns": [values], "benchmark": [values],
+    "factor_exposures"?: {factor: [values]},
+    "factor_returns"?: {factor: [values]}}``.
+    Returns active return statistics (mean, t_stat, information_ratio) and
+    optional factor decomposition. HTTP 422 on invalid input.
+    """
+    from app.platform.active_attribution import active_attribution_report
+
+    try:
+        returns_raw = payload.get("returns")
+        if not isinstance(returns_raw, list):
+            raise ValueError("returns must be a list")
+        returns = [_finite_number(v, "returns entries") for v in returns_raw]
+        benchmark_raw = payload.get("benchmark")
+        if not isinstance(benchmark_raw, list):
+            raise ValueError("benchmark must be a list")
+        benchmark = [_finite_number(v, "benchmark entries") for v in benchmark_raw]
+
+        factor_exposures_raw = payload.get("factor_exposures")
+        factor_exposures: dict[str, list[float]] | None = None
+        if factor_exposures_raw is not None:
+            if not isinstance(factor_exposures_raw, dict):
+                raise ValueError("factor_exposures must be a dict")
+            factor_exposures = {}
+            for k, v in factor_exposures_raw.items():
+                if not isinstance(v, list):
+                    raise ValueError(f"factor_exposures['{k}'] must be a list")
+                factor_exposures[str(k)] = [
+                    _finite_number(x, f"factor_exposures['{k}'] entries") for x in v
+                ]
+
+        factor_returns_raw = payload.get("factor_returns")
+        factor_returns: dict[str, list[float]] | None = None
+        if factor_returns_raw is not None:
+            if not isinstance(factor_returns_raw, dict):
+                raise ValueError("factor_returns must be a dict")
+            factor_returns = {}
+            for k, v in factor_returns_raw.items():
+                if not isinstance(v, list):
+                    raise ValueError(f"factor_returns['{k}'] must be a list")
+                factor_returns[str(k)] = [
+                    _finite_number(x, f"factor_returns['{k}'] entries") for x in v
+                ]
+
+        result = active_attribution_report(
+            returns,
+            benchmark,
+            factor_exposures=factor_exposures,
+            factor_returns=factor_returns,
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
     return result.to_dict()

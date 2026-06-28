@@ -703,3 +703,13 @@ MIT
 | `POST` | `/api/platform/option-strategy-payoff` | 多腿期权组合损益 + 盈亏平衡 |
 | `POST` | `/api/platform/network-centrality` | 度/介数/特征向量/PageRank 中心性 |
 | `POST` | `/api/platform/vol-surface-arbitrage` | IV 面日历/蝶式/PCP 套利检测 |
+| `POST` | `/api/platform/levy-processes` | VG Lévy 过程期权定价 |
+| `POST` | `/api/platform/penalized-regression` | Ridge/LASSO 坐标下降回归 |
+| `POST` | `/api/platform/multi-kelly` | 多资产 Kelly 最优配置 |
+| `POST` | `/api/platform/squeeze-detection` | BB+Keltner 波动率压缩检测 |
+| `POST` | `/api/platform/relative-rotation` | RRG 四象限评分 |
+| `POST` | `/api/platform/seasonality` | 日历效应统计检验 |
+| `POST` | `/api/platform/bayesian-model-averaging` | BIC 后验 BMA 融合 |
+| `POST` | `/api/platform/implied-correlation` | 个股 IV 推导隐含相关 |
+| `POST` | `/api/platform/pair-screening` | 互信息+距离相关配对筛选 |
+| `POST` | `/api/platform/active-attribution` | Grinold-Kahn 活跃归因 |
