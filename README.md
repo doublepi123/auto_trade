@@ -683,3 +683,13 @@ MIT
 | `POST` | `/api/platform/regime-attribution` | regime-specific alpha/beta 归因 |
 | `POST` | `/api/platform/distribution-shape` | 滚动偏度/峰度/尾部聚类 |
 | `POST` | `/api/platform/walk-forward-surface` | IS/OOS 退化曲面 |
+| `POST` | `/api/platform/correlation-network` | MST 相关网络 + 节点中心性 |
+| `POST` | `/api/platform/hac-statistics` | Newey-West HAC 标准误 |
+| `POST` | `/api/platform/adjusted-sharpe` | 自相关/偏度/峰度校正 Sharpe |
+| `POST` | `/api/platform/reverse-stress` | 逆向 VaR 突破场景搜索 |
+| `POST` | `/api/platform/dynamic-style-analysis` | 滚动 NNLS 风格分析 |
+| `POST` | `/api/platform/online-covariance` | EWMA 递推协方差 + 条件数 |
+| `POST` | `/api/platform/multi-strategy-risk` | 策略级风险贡献 + HHI |
+| `POST` | `/api/platform/vol-of-vol` | VoV term structure |
+| `POST` | `/api/platform/regime-cointegration` | regime 内协整 + 断裂检测 |
+| `POST` | `/api/platform/turnover-frontier` | 换手 vs 净 Sharpe 前沿 |

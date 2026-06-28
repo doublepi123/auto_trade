@@ -220,7 +220,17 @@ auto_trade/
 +│   │   │   ├── regime_attribution.py    # P326：regime-specific alpha/beta 归因
 +│   │   │   ├── distribution_shape.py    # P327：滚动偏度/峰度/尾部聚类
 +│   │   │   ├── walk_forward_surface.py  # P328：IS/OOS 退化曲面
- │   │   │   └── api.py                      # /api/platform/*（含 P309-P328 深度分析与元研究端点）
++│   │   │   ├── correlation_network.py  # P329：MST 相关网络 + 节点中心性
++│   │   │   ├── hac_statistics.py       # P330：Newey-West HAC 标准误
++│   │   │   ├── adjusted_sharpe.py      # P331：自相关/偏度/峰度校正 Sharpe
++│   │   │   ├── reverse_stress.py       # P332：逆向 VaR 突破场景搜索
++│   │   │   ├── dynamic_style.py        # P333：滚动 NNLS 风格分析
++│   │   │   ├── online_covariance.py    # P334：EWMA 递推协方差
++│   │   │   ├── multi_strategy_risk.py  # P335：策略级风险贡献 + HHI
++│   │   │   ├── vol_of_vol.py           # P336：VoV term structure
++│   │   │   ├── regime_cointegration.py # P337：regime 内协整 + 断裂检测
++│   │   │   ├── turnover_frontier.py    # P338：换手 vs 净 Sharpe 前沿
+ │   │   │   └── api.py                      # /api/platform/*（含 P329-P338 高级统计与动态风险端点）
 │   │   ├── strategies/                     # 策略插件包（IntervalStrategy 首个插件）
 │   │   │   ├── __init__.py
 │   │   │   └── interval_strategy.py        # 区间策略插件化实现
