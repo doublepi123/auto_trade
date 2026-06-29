@@ -36,12 +36,16 @@ class FeatureSelector:
                 json_str = llm_response[start:end]
                 data = json.loads(json_str)
                 selected = data.get("selected_indicators")
-                if isinstance(selected, list):
+                if isinstance(selected, list) and all(isinstance(x, str) for x in selected):
                     valid = [s for s in selected if s in AVAILABLE_INDICATORS]
                     if valid:
                         return valid
-        except (json.JSONDecodeError, KeyError, TypeError):
-            logger.warning("Failed to parse LLM indicator selection")
+        except (json.JSONDecodeError, KeyError, TypeError) as exc:
+            logger.warning(
+                "Failed to parse LLM indicator selection: %s  response=%.200r",
+                exc,
+                llm_response,
+            )
 
         if suggested:
             return [s for s in suggested if s in AVAILABLE_INDICATORS]

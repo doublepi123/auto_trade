@@ -68,6 +68,10 @@ def _compute_metrics(pnls: list[float]) -> dict[str, Any]:
     for c in cumulative:
         if c > peak:
             peak = c
+        # Drawdown is a percentage drop from the high-water mark. Only
+        # meaningful when the peak is strictly positive; if the entire curve
+        # is below zero (never recovered above the starting point) there is no
+        # positive reference to measure a percentage drop from, so skip.
         if peak > 0:
             dd = (peak - c) / peak
             if dd > max_dd:

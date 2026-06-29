@@ -71,7 +71,6 @@ def retry_notification(id: int, db=Depends(get_db)) -> NotificationLogOut:
 
     log.success = success
     log.error = "" if success else "retry failed"
-    log.created_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(log)
     return NotificationLogOut.model_validate(log)

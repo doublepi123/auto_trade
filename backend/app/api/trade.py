@@ -433,7 +433,7 @@ def cancel_order(
     result = "SUCCESS"
     summary: dict[str, Any] = {"order_id": order_id}
     try:
-        order = db.query(OrderRecord).filter(OrderRecord.broker_order_id == order_id).first()
+        order = db.query(OrderRecord).filter(OrderRecord.broker_order_id == order_id).order_by(OrderRecord.id.desc()).first()
         if order is None:
             raise HTTPException(status_code=404, detail=f"order {order_id} not found in local records")
         if order.status not in _LIVE_ORDER_STATUSES:

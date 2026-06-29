@@ -52,7 +52,7 @@ def _intent_from_json(raw: str) -> OrderIntent:
 class PaperBrokerConfig:
     slippage_ticks: Decimal = Decimal("0.01")
     commission_rate: Decimal = Decimal("0.0005")
-    partial_fill_probability: float = 1.0
+    partial_fill_probability: float = 1.0  # portion of remaining quantity to fill per bar (0.0-1.0), not a true probability
     latency_ms: int = 0
     fill_model: FillModel | None = None
     latency_model: LatencyModel | None = None
@@ -178,7 +178,12 @@ class PaperBroker:
     def modify(self, order_id: str, intent: OrderIntent, timestamp: datetime | None = None) -> OrderEvent:
         order = self._orders.get(order_id)
         if order and order.status in ("SUBMITTED", "PARTIAL_FILLED"):
+            old_type = order.intent.order_type
             order.intent = intent
+            # Reset trailing stop state when switching to (or reconfiguring) a
+            # TRAILING order so the ratchet starts fresh from the current bar.
+            if intent.order_type == "TRAILING" or old_type == "TRAILING":
+                self._trailing_stops.pop(order_id, None)
             self._persist(order)
             return OrderEvent(
                 timestamp=timestamp or self._clock(),
@@ -224,6 +229,8 @@ class PaperBroker:
                 continue
             if order.intent.symbol != symbol:
                 continue
+            # update trailing stop even while fill is held
+            self._update_trailing(order, bar)
             order.fill_due -= 1
             if order.fill_due <= 0:
                 trigger_price = order.pending_fill_price
@@ -341,6 +348,9 @@ class PaperBroker:
             self._trailing_stops[order.order_id] = candidate
 
     def _compute_fill_quantity(self, order: PaperOrderState, bar: BarEvent) -> int:
+        """Determine fill quantity per bar.  ``partial_fill_probability`` is a
+        deterministic portion (0-1) of the remaining quantity, not a true
+        probability — it fills ``portion * remaining`` (min 1) each bar."""
         remaining = order.remaining_quantity
         if self._config.partial_fill_probability >= 1.0:
             return remaining

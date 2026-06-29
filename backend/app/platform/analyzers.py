@@ -24,25 +24,62 @@ class TradeAnalyzer:
 
     def analyze(self, fills: list[Any]) -> dict[str, Any]:
         events = _coerce_fills(fills)
-        lots: dict[str, deque[tuple[int, Decimal]]] = {}
+        # Long and short lots are tracked in separate deques so that a SELL
+        # opening a short position is never conflated with a BUY lot (and
+        # vice-versa).  Each lot is (quantity, price).
+        long_lots: dict[str, deque[tuple[Any, Decimal]]] = {}
+        short_lots: dict[str, deque[tuple[Any, Decimal]]] = {}
         trades: list[dict[str, Any]] = []
         for fill in events:
             sym = fill.symbol or ""
-            q = lots.setdefault(sym, deque())
+            comm_per_unit = (
+                fill.commission / Decimal(fill.quantity) if fill.quantity > 0 else Decimal("0")
+            )
             if fill.side == "BUY":
-                q.append((fill.quantity, fill.price))
-            else:
+                # First close any open short lots (cover), then open/add long.
+                short_q = short_lots.setdefault(sym, deque())
                 remaining = fill.quantity
-                while remaining > 0 and q:
-                    lot_qty, lot_price = q[0]
+                while remaining > 0 and short_q:
+                    lot_qty, lot_price = short_q[0]
                     matched = min(remaining, lot_qty)
-                    pnl = (fill.price - lot_price) * Decimal(matched) - fill.commission
+                    allocated_comm = comm_per_unit * Decimal(matched)
+                    # Covering a short: PnL is (entry_short - cover_buy).
+                    pnl = (lot_price - fill.price) * Decimal(matched) - allocated_comm
+                    trades.append({"symbol": sym, "quantity": matched, "pnl": float(pnl), "note": "cover_short"})
+                    remaining -= matched
+                    if matched == lot_qty:
+                        short_q.popleft()
+                    else:
+                        short_q[0] = (lot_qty - matched, lot_price)
+                if remaining > 0:
+                    long_lots.setdefault(sym, deque()).append((remaining, fill.price))
+            else:
+                # SELL: first close open long lots, then open/add short.
+                long_q = long_lots.setdefault(sym, deque())
+                remaining = fill.quantity
+                while remaining > 0 and long_q:
+                    lot_qty, lot_price = long_q[0]
+                    matched = min(remaining, lot_qty)
+                    allocated_comm = comm_per_unit * Decimal(matched)
+                    pnl = (fill.price - lot_price) * Decimal(matched) - allocated_comm
                     trades.append({"symbol": sym, "quantity": matched, "pnl": float(pnl)})
                     remaining -= matched
                     if matched == lot_qty:
-                        q.popleft()
+                        long_q.popleft()
                     else:
-                        q[0] = (lot_qty - matched, lot_price)
+                        long_q[0] = (lot_qty - matched, lot_price)
+                if remaining > 0:
+                    # SELL quantity exceeds all available long lots — opening a
+                    # short position. Record it in the short deque for later
+                    # cover matching; attribute the proportional commission as
+                    # a cost (negative PnL) at open time.
+                    short_lots.setdefault(sym, deque()).append((remaining, fill.price))
+                    trades.append({
+                        "symbol": sym,
+                        "quantity": remaining,
+                        "pnl": float(-fill.commission * Decimal(remaining) / Decimal(fill.quantity)) if fill.quantity > 0 else 0.0,
+                        "note": "open_short",
+                    })
         pnls = [t["pnl"] for t in trades]
         wins = [p for p in pnls if p > 0]
         losses = [p for p in pnls if p < 0]

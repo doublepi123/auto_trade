@@ -632,48 +632,52 @@ def _ensure_platform_backtest_runs_table(db_engine: Engine) -> None:
 def _ensure_factor_snapshots_table(db_engine: Engine) -> None:
     """Defensive explicit create for factor_snapshots + factor_ic_series (P196)."""
     inspector = inspect(db_engine)
-    for stmt in (
-        """
-        CREATE TABLE IF NOT EXISTS factor_snapshots (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            factor_name VARCHAR(64) NOT NULL,
-            symbol VARCHAR(50) NOT NULL,
-            as_of DATETIME NOT NULL,
-            factor_value FLOAT NOT NULL,
-            forward_return FLOAT,
-            horizon_bars INTEGER NOT NULL DEFAULT 1,
-            rank INTEGER,
-            context_json TEXT NOT NULL DEFAULT '{}',
-            created_at DATETIME
+    existing = inspector.get_table_names()
+    if "factor_snapshots" in existing and "factor_ic_series" in existing:
+        return
+    with db_engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS factor_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                factor_name VARCHAR(64) NOT NULL,
+                symbol VARCHAR(50) NOT NULL,
+                as_of DATETIME NOT NULL,
+                factor_value FLOAT NOT NULL,
+                forward_return FLOAT,
+                horizon_bars INTEGER NOT NULL DEFAULT 1,
+                rank INTEGER,
+                context_json TEXT NOT NULL DEFAULT '{}',
+                created_at DATETIME
+            )
+            """
         )
-        """,
-        """
-        CREATE INDEX IF NOT EXISTS ix_factor_snapshots_factor_name ON factor_snapshots (factor_name)
-        """,
-        """
-        CREATE INDEX IF NOT EXISTS ix_factor_snapshots_symbol ON factor_snapshots (symbol)
-        """,
-        """
-        CREATE INDEX IF NOT EXISTS ix_factor_snapshots_as_of ON factor_snapshots (as_of)
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS factor_ic_series (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            factor_name VARCHAR(64) NOT NULL,
-            as_of DATETIME NOT NULL,
-            mean_ic FLOAT NOT NULL DEFAULT 0.0,
-            std_ic FLOAT NOT NULL DEFAULT 0.0,
-            ic_ir FLOAT NOT NULL DEFAULT 0.0,
-            num_symbols INTEGER NOT NULL DEFAULT 0,
-            created_at DATETIME
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_factor_snapshots_factor_name ON factor_snapshots (factor_name)"
         )
-        """,
-        """
-        CREATE INDEX IF NOT EXISTS ix_factor_ic_series_factor_name ON factor_ic_series (factor_name)
-        """,
-    ):
-        with db_engine.begin() as connection:
-            connection.exec_driver_sql(stmt)
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_factor_snapshots_symbol ON factor_snapshots (symbol)"
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_factor_snapshots_as_of ON factor_snapshots (as_of)"
+        )
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS factor_ic_series (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                factor_name VARCHAR(64) NOT NULL,
+                as_of DATETIME NOT NULL,
+                mean_ic FLOAT NOT NULL DEFAULT 0.0,
+                std_ic FLOAT NOT NULL DEFAULT 0.0,
+                ic_ir FLOAT NOT NULL DEFAULT 0.0,
+                num_symbols INTEGER NOT NULL DEFAULT 0,
+                created_at DATETIME
+            )
+            """
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_factor_ic_series_factor_name ON factor_ic_series (factor_name)"
+        )
 
 
 def _ensure_watchlist_items_table(db_engine: Engine) -> None:

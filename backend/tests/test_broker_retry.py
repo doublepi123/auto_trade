@@ -154,8 +154,8 @@ def test_call_with_retry_exponential_backoff_values(gw, monkeypatch):
     with pytest.raises(_TransientErr):
         gw._call_with_retry(always_fail, op="test", max_retries=3, base_ms=1000)
 
-    # attempt=0: 2^(0-1)=0.5s, attempt=1: 2^(1-1)=1s, attempt=2: 2^(2-1)=2s
+    # attempt=0: 2^0=1s, attempt=1: 2^1=2s, attempt=2: 2^2=4s
     assert len(delays) == 3
-    assert delays[0] == pytest.approx(0.5, rel=1e-9)
-    assert delays[1] == pytest.approx(1.0, rel=1e-9)
-    assert delays[2] == pytest.approx(2.0, rel=1e-9)
+    assert delays[0] == pytest.approx(1.0, rel=1e-9)
+    assert delays[1] == pytest.approx(2.0, rel=1e-9)
+    assert delays[2] == pytest.approx(4.0, rel=1e-9)

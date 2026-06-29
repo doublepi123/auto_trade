@@ -133,10 +133,6 @@ class TradeExecutionService:
         self.margin_safety_factor = margin_safety_factor
         self._state_lock = RLock()
         self._pending_orders: dict[str, _PendingOrder] = {}
-        # Symbol of the most recent fill — passed to the on_fill callback so
-        # the runner can track per-symbol fill timestamps. Held under
-        # ``_state_lock`` to avoid races with concurrent finalization.
-        self._last_fill_symbol: str | None = None
         self._order_status_poll_interval_seconds = 1.0
         self._order_status_timeout_seconds = 30.0
         self._entry_positions: dict[str, _TrackedEntry] = {}
@@ -179,7 +175,7 @@ class TradeExecutionService:
             # finalized by the next reconcile cycle rather than silently dropped.
             new_ids: set[str] = {p.broker_order_id for p in pending_orders}
             for broker_order_id, existing in existing_by_id.items():
-                if broker_order_id not in new_ids and existing.symbol not in {p.symbol for p in pending_orders}:
+                if broker_order_id not in new_ids:
                     self._pending_orders[existing.symbol] = existing
                     logger.warning(
                         "in-memory pending order %s for %s not in DB list, preserving for reconcile",
@@ -684,11 +680,14 @@ class TradeExecutionService:
 
         fill_price = OrderStatus._positive(order_status.executed_price) or price
         fill_qty = OrderStatus._positive(order_status.executed_quantity) or qty
-        pnl = float((fill_price - pos_avg_price) * fill_qty)
-        self._safe_notify_order(notifier, "SELL", symbol, str(fill_qty), str(fill_price), order_status.broker_order_id)
-        risk.record_trade(pnl)
-        self._consume_entry_quantity(symbol, fill_qty)
-        logger.info("SELL: %s qty=%s price=%s avg_price=%s pnl=%s", symbol, fill_qty, fill_price, pos_avg_price, pnl)
+        if pos_avg_price > 0:
+            pnl = float((fill_price - pos_avg_price) * fill_qty)
+            self._safe_notify_order(notifier, "SELL", symbol, str(fill_qty), str(fill_price), order_status.broker_order_id)
+            risk.record_trade(pnl)
+            self._consume_entry_quantity(symbol, fill_qty)
+            logger.info("SELL: %s qty=%s price=%s avg_price=%s pnl=%s", symbol, fill_qty, fill_price, pos_avg_price, pnl)
+        else:
+            logger.warning("SELL: %s qty=%s price=%s avg_price=%s, skipping PnL recording to avoid inflated risk", symbol, fill_qty, fill_price, pos_avg_price)
         return order_status
 
     def _execute_sell_short(
@@ -798,11 +797,14 @@ class TradeExecutionService:
 
         fill_price = OrderStatus._positive(order_status.executed_price) or price
         fill_qty = OrderStatus._positive(order_status.executed_quantity) or qty
-        pnl = float((pos_avg_price - fill_price) * fill_qty)
-        self._safe_notify_order(notifier, "BUY_TO_COVER", symbol, str(fill_qty), str(fill_price), order_status.broker_order_id)
-        risk.record_trade(pnl)
-        self._consume_entry_quantity(symbol, fill_qty)
-        logger.info("BUY_TO_COVER: %s qty=%s price=%s avg_price=%s pnl=%s", symbol, fill_qty, fill_price, pos_avg_price, pnl)
+        if pos_avg_price > 0:
+            pnl = float((pos_avg_price - fill_price) * fill_qty)
+            self._safe_notify_order(notifier, "BUY_TO_COVER", symbol, str(fill_qty), str(fill_price), order_status.broker_order_id)
+            risk.record_trade(pnl)
+            self._consume_entry_quantity(symbol, fill_qty)
+            logger.info("BUY_TO_COVER: %s qty=%s price=%s avg_price=%s pnl=%s", symbol, fill_qty, fill_price, pos_avg_price, pnl)
+        else:
+            logger.warning("BUY_TO_COVER: %s qty=%s price=%s avg_price=%s, skipping PnL recording to avoid inflated risk", symbol, fill_qty, fill_price, pos_avg_price)
         return order_status
 
     def _submit_limit_order(
@@ -1129,9 +1131,7 @@ class TradeExecutionService:
     ) -> None:
         fill_price = self._resolved_decimal(order_status, "executed_price", pending.price)
         fill_qty = fill_qty if fill_qty is not None else self._resolved_decimal(order_status, "executed_quantity", pending.quantity)
-        with self._state_lock:
-            self._last_fill_symbol = pending.symbol
-        self._mark_fill_processed()
+        self._mark_fill_processed(pending.symbol)
         if pending.action == "SELL":
             avg_price = self._resolve_avg_price_for_exit(pending.symbol, pending.avg_price if pending.avg_price is not None and pending.avg_price > 0 else None, fill_qty)
             self._safe_notify_order(notifier, "SELL", pending.symbol, str(fill_qty), str(fill_price), pending.broker_order_id)
@@ -1161,11 +1161,11 @@ class TradeExecutionService:
             self._record_entry_price(pending.symbol, fill_price, fill_qty)
         logger.info("%s filled: %s qty=%s price=%s", pending.action, pending.symbol, fill_qty, fill_price)
 
-    def _mark_fill_processed(self) -> None:
+    def _mark_fill_processed(self, symbol: str) -> None:
         if self._on_fill is None:
             return
         try:
-            self._on_fill(self._last_fill_symbol or "")
+            self._on_fill(symbol)
         except Exception:
             logger.exception("failed to run fill callback")
 

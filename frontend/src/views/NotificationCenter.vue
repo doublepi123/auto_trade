@@ -791,7 +791,10 @@ onMounted(() => {
   load()
   startPoll()
 })
-onUnmounted(stopPoll)
+onUnmounted(() => {
+  window.clearTimeout(searchDebounceTimer)
+  stopPoll()
+})
 </script>
 
 <style scoped>

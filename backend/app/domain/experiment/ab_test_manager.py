@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 from typing import Any
 
 from sqlalchemy.orm import Session
 
 from app.models import ExperimentResult, PromptVersion
+
+logger = logging.getLogger("auto_trade.ab_test_manager")
 
 
 class ABTestManager:
@@ -52,6 +55,12 @@ class ABTestManager:
         actives = query.order_by(PromptVersion.id).all()
         if len(actives) == 1:
             return actives[0]
+        if len(actives) > 1:
+            logger.warning(
+                "get_active_version: %d active versions, returning None. "
+                "Caller should use select_variant() or activate a single version.",
+                len(actives),
+            )
         return None
 
     def activate_version(self, version_id: int) -> None:

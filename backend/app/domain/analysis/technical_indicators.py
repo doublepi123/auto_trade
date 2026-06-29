@@ -97,10 +97,10 @@ class TechnicalIndicators:
     def analyze_volume(volumes: list[float], lookback: int = 20) -> VolumeAnalysis:
         """Analyze volume relative to recent average.
 
-        Requires at least 2 data points for a meaningful ratio; with only 1
-        element the ratio will always be 1.0.
+        Requires at least 2 data points for a meaningful ratio; fewer than 2
+        samples return trend='unknown'.
         """
-        if not volumes:
+        if not volumes or len(volumes) < 2:
             return VolumeAnalysis(avg_volume=0.0, volume_ratio=0.0, trend="unknown")
 
         recent = volumes[-lookback:] if len(volumes) >= lookback else volumes
@@ -210,7 +210,7 @@ class TechnicalIndicators:
         def _smooth(values: list[float], p: int) -> list[float]:
             if len(values) < p:
                 return []
-            result = [sum(values[:p])]
+            result = [sum(values[:p]) / p]
             for i in range(p, len(values)):
                 result.append(result[-1] - result[-1] / p + values[i])
             return result

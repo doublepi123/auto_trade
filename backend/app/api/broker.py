@@ -52,7 +52,7 @@ def get_broker_candles(
     try:
         candles = broker.get_candlesticks(symbol, period, count)
     except Exception as exc:  # noqa: BLE001 — surface any broker failure as 503
-        raise HTTPException(status_code=503, detail=f"failed to fetch candles: {exc}") from exc
+        raise HTTPException(status_code=503, detail="failed to fetch candles") from exc
 
     bars: list[BacktestPricePoint] = []
     for c in candles:

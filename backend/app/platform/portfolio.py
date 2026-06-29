@@ -35,18 +35,65 @@ class Portfolio:
         qty = fill.quantity
         price = fill.price
         if fill.side == "BUY":
-            new_qty = pos.quantity + qty
-            if new_qty > 0:
-                pos.avg_cost = (Decimal(pos.quantity) * pos.avg_cost + Decimal(qty) * price) / Decimal(new_qty)
-            pos.quantity = new_qty
+            old_qty = pos.quantity
+            new_qty = old_qty + qty
+            if old_qty < 0 and new_qty > 0:
+                # Closing a short position — realize on the covered portion first,
+                # then reset cost basis for the new long position.
+                covered = min(qty, -old_qty)
+                self.realized_pnl += (pos.avg_cost - price) * Decimal(covered) - fill.commission
+                remaining = qty - covered
+                if remaining > 0:
+                    pos.quantity = remaining
+                    pos.avg_cost = price
+                else:
+                    pos.quantity = 0
+                    pos.avg_cost = Decimal("0")
+            elif old_qty < 0 and new_qty <= 0:
+                # Still short — only add to the short position cost basis.
+                self.realized_pnl -= fill.commission
+                if new_qty != 0:
+                    pos.avg_cost = (
+                        Decimal(old_qty) * pos.avg_cost + Decimal(qty) * price
+                    ) / Decimal(new_qty)
+                pos.quantity = new_qty
+            else:
+                # Old position long or zero — standard long cost averaging.
+                if new_qty > 0:
+                    pos.avg_cost = (
+                        Decimal(old_qty) * pos.avg_cost + Decimal(qty) * price
+                    ) / Decimal(new_qty)
+                pos.quantity = new_qty
             self.cash -= Decimal(qty) * price + fill.commission
         else:  # SELL
-            realized = (price - pos.avg_cost) * Decimal(qty) - fill.commission
-            self.realized_pnl += realized
-            pos.quantity -= qty
+            old_qty = pos.quantity
+            new_qty = old_qty - qty
+            if old_qty > 0 and new_qty < 0:
+                # Closing a long position and flipping to short.
+                covered = min(qty, old_qty)
+                self.realized_pnl += (price - pos.avg_cost) * Decimal(covered) - fill.commission
+                remaining = qty - covered
+                if remaining > 0:
+                    pos.quantity = -remaining
+                    pos.avg_cost = price
+                else:
+                    pos.quantity = 0
+                    pos.avg_cost = Decimal("0")
+            elif old_qty > 0 and new_qty >= 0:
+                # Still long — standard long realized PnL.
+                self.realized_pnl += (price - pos.avg_cost) * Decimal(qty) - fill.commission
+                pos.quantity = new_qty
+                if new_qty == 0:
+                    pos.avg_cost = Decimal("0")
+            else:
+                # Already short or zero — add to short position.
+                self.realized_pnl -= fill.commission
+                if new_qty != 0:
+                    pos.avg_cost = (
+                        Decimal(old_qty) * pos.avg_cost - Decimal(qty) * price
+                    ) / Decimal(new_qty)
+                pos.quantity = new_qty
             self.cash += Decimal(qty) * price - fill.commission
-            if pos.quantity == 0:
-                pos.avg_cost = Decimal("0")
 
     def quantities(self) -> dict[str, int]:
         return {sym: pos.quantity for sym, pos in self.positions.items() if pos.quantity != 0}

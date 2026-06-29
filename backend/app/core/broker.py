@@ -369,7 +369,7 @@ class BrokerGateway:
                     raise
                 if attempt >= max_retries:
                     raise
-                delay_s = (base_ms / 1000.0) * (2 ** (attempt - 1))
+                delay_s = (base_ms / 1000.0) * (2 ** attempt)
                 if self._audit:
                     self._audit.record(
                         "BROKER_RETRY",

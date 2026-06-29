@@ -35,7 +35,13 @@ class _BacktestCollector:
         self.last_close[symbol] = close
 
     def nav(self) -> Decimal:
-        return self.portfolio.nav(self.last_close)
+        # Fill missing prices with avg_cost to avoid silently valuing
+        # positions at zero.
+        prices = dict(self.last_close)
+        for sym, pos in self.portfolio.positions.items():
+            if pos.quantity != 0 and sym not in prices:
+                prices[sym] = pos.avg_cost
+        return self.portfolio.nav(prices)
 
     def snapshot(self, timestamp: Any) -> dict[str, Any]:
         nav = self.nav()
@@ -67,11 +73,15 @@ class PlatformBacktestService:
             bus=bus,
         )
 
+        symbol_set = frozenset(symbols)
         for raw in bars:
+            bar_symbol = raw.get("symbol", "")
+            if bar_symbol and bar_symbol not in symbol_set:
+                raise ValueError(f"Bar symbol '{bar_symbol}' not in strategy symbols {symbols}")
             bar = BarEvent(
                 timestamp=raw["timestamp"],
                 source=EventSource.MARKET,
-                symbol=raw["symbol"],
+                symbol=bar_symbol,
                 open=Decimal(str(raw["open"])),
                 high=Decimal(str(raw["high"])),
                 low=Decimal(str(raw["low"])),

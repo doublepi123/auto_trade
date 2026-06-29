@@ -380,12 +380,20 @@ class DailyPnlService:
 
     @staticmethod
     def _executed_price(order: Any) -> Decimal:
+        """Return the executed price of an order.
+
+        When the order has no executed_price, this method falls back to the
+        limit price as a best-effort approximation.  This can produce
+        inaccurate PnL when the actual fill deviates significantly from the
+        limit — callers should treat such entries as estimates and reconcile
+        against broker fill data as soon as it becomes available.
+        """
         executed_price = DailyPnlService._decimal(getattr(order, "executed_price", None))
         if executed_price > 0:
             return executed_price
         price = DailyPnlService._decimal(getattr(order, "price", None))
-        logger.warning(
-            "order %s has no executed_price, falling back to limit price %s — PnL may be inaccurate until broker sync",
+        logger.error(
+            "order %s has no executed_price, falling back to limit price %s — PnL may be severely inaccurate until broker sync. Consider flagging this fill as estimated.",
             getattr(order, "id", "?"), price,
         )
         return price

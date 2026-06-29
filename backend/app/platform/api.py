@@ -86,7 +86,7 @@ def _runner_snapshot(runner: PlatformRunner) -> dict[str, Any]:
     }
 
 
-@router.get("/strategies")
+@router.get("/strategies", dependencies=[Depends(require_api_key())])
 def list_strategies() -> list[dict[str, Any]]:
     registry = get_default_registry()
     return [
@@ -366,15 +366,12 @@ def optimize_strategy(payload: dict[str, Any]) -> dict[str, Any]:
 def analyze_equity(payload: dict[str, Any]) -> dict[str, Any]:
     if "equity_curve" not in payload:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="missing equity_curve")
-    equity_raw = payload["equity_curve"]
-    if not isinstance(equity_raw, list) or not equity_raw:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="equity_curve must be a non-empty list")
-    equity = [float(pt["nav"]) for pt in equity_raw]
+    equity = _to_equity(payload["equity_curve"])
     periods = int(payload.get("periods_per_year", 252))
     result = PerformanceAnalytics(periods_per_year=periods).analyze(equity)
     bench_raw = payload.get("benchmark_equity")
     if isinstance(bench_raw, list) and len(bench_raw) >= 2:
-        bench = [float(pt["nav"]) for pt in bench_raw]
+        bench = _to_equity(bench_raw)
         from app.platform.benchmark import BenchmarkAnalytics
 
         result["benchmark"] = BenchmarkAnalytics(periods_per_year=periods).relative(equity, bench)
@@ -682,6 +679,16 @@ def _to_equity(payload: Any) -> list[float]:
     return [float(x) for x in payload]
 
 
+def _equity_to_returns(equity: list[float]) -> list[float]:
+    """Convert an equity curve to a period-return series with zero-division protection."""
+    if len(equity) < 2:
+        raise HTTPException(status_code=422, detail="equity_curve too short")
+    return [
+        (equity[i] / equity[i - 1] - 1.0) if equity[i - 1] != 0 else 0.0
+        for i in range(1, len(equity))
+    ]
+
+
 @router.post("/risk-metrics", dependencies=[Depends(require_api_key())])
 def compute_risk_metrics(payload: dict[str, Any]) -> dict[str, Any]:
     """P211: VaR/CVaR + drawdown + pain + fat-tail diagnostics on a return series.
@@ -693,9 +700,7 @@ def compute_risk_metrics(payload: dict[str, Any]) -> dict[str, Any]:
         returns = _to_returns(payload["returns"])
     elif "equity_curve" in payload:
         equity = _to_equity(payload["equity_curve"])
-        if len(equity) < 2:
-            raise HTTPException(status_code=422, detail="equity_curve too short")
-        returns = [(equity[i] / equity[i - 1]) - 1.0 for i in range(1, len(equity))]
+        returns = _equity_to_returns(equity)
     else:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -1200,9 +1205,7 @@ def returns_calendar_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
         returns = _to_returns(payload["returns"])
     elif "equity_curve" in payload:
         equity = _to_equity(payload["equity_curve"])
-        if len(equity) < 2:
-            raise HTTPException(status_code=422, detail="equity_curve too short")
-        returns = [(equity[i] / equity[i - 1]) - 1.0 for i in range(1, len(equity))]
+        returns = _equity_to_returns(equity)
     else:
         raise HTTPException(status_code=422, detail="missing 'returns' or 'equity_curve'")
     dates = payload.get("dates")
@@ -4058,11 +4061,18 @@ def regime_backtest_diagnostics_endpoint(payload: dict[str, Any]) -> dict[str, A
             raise ValueError("regimes must be a non-empty list")
         regimes = [str(r) for r in regimes_raw]
         trade_outcomes_raw = payload.get("trade_outcomes")
-        trade_outcomes: list[float] | None = None
+        trade_outcomes: list[tuple[int, float]] | None = None
         if trade_outcomes_raw is not None:
             if not isinstance(trade_outcomes_raw, list):
                 raise ValueError("trade_outcomes must be a list")
-            trade_outcomes = [_finite_number(v, "trade_outcomes entries") for v in trade_outcomes_raw]
+            trade_outcomes = []
+            for entry in trade_outcomes_raw:
+                if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+                    raise ValueError("trade_outcomes entries must be (period_index, pnl) pairs")
+                idx = entry[0]
+                if isinstance(idx, bool) or not isinstance(idx, int):
+                    raise ValueError("trade_outcomes period_index must be int")
+                trade_outcomes.append((idx, _finite_number(entry[1], "trade_outcomes pnl")))
         result = regime_backtest_diagnostics_report(returns, regimes, trade_outcomes=trade_outcomes)
     except (TypeError, ValueError) as exc:
         raise HTTPException(

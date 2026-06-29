@@ -304,8 +304,9 @@ def list_timeline_events(
         risk_rows = rq.order_by(RiskEvent.created_at.desc(), RiskEvent.id.desc()).limit(fetch_n).all()
 
     total = trade_total + audit_total + llm_total + risk_total
-    # Clamp total to what the merged set can actually deliver
-    total = min(total, _MAX_MERGED_FETCH)
+    # Each source query is already individually capped via .limit(fetch_n),
+    # so the merged list below is bounded; report the true total so the
+    # frontend pagination control is accurate (not clamped to _MAX_MERGED_FETCH).
 
     merged = (
         [_trade_row_to_out(r) for r in trade_rows]

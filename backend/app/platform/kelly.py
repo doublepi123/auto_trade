@@ -118,11 +118,13 @@ def fractional_kelly(win_prob: float, win_size: float, loss_size: float) -> Kell
     half = 0.5 * full
     quarter = 0.25 * full
     three_q = 0.75 * full
-    # log-growth needs absolute fraction clamped to avoid bankruptcy; use the
-    # raw f_star as the "full" stake (may exceed 1 → clamp for log only).
+    # log-growth needs absolute fraction clamped to avoid bankruptcy.  For a
+    # binary bet where the worst-case loss per unit is loss_size, the maximum
+    # safe fraction is 0.999 / loss_size (otherwise a single loss wipes the
+    # account).  Apply this cap once — the previous double-min was redundant.
     full_for_log = min(full, 0.999 / max(loss_size, 1e-9)) if loss_size > 0 else full
-    g_full = expected_log_growth(min(full_for_log, 0.999), win_prob, win_size, loss_size)
-    g_half = expected_log_growth(min(half, 0.999), win_prob, win_size, loss_size)
+    g_full = expected_log_growth(full_for_log, win_prob, win_size, loss_size)
+    g_half = expected_log_growth(min(half, 0.999 / max(loss_size, 1e-9)) if loss_size > 0 else half, win_prob, win_size, loss_size)
     return KellyReport(
         full_kelly=full,
         half_kelly=half,

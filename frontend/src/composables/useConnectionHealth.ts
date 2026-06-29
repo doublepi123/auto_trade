@@ -281,6 +281,35 @@ const connectionTagType = computed(() => {
   }
 })
 
+// HMR teardown: prevent accumulation of WebSocket connections / timers in dev.
+if (import.meta.hot) {
+  import.meta.hot.dispose(() => {
+    started = false
+    if (ws) {
+      ws.onclose = null
+      ws.onmessage = null
+      ws.onerror = null
+      ws.close()
+      ws = null
+    }
+    useWebSocket = false
+    wsAuthRejected = false
+    reconnectAttempts = 0
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer)
+      reconnectTimer = null
+    }
+    if (pollTimer) {
+      clearInterval(pollTimer)
+      pollTimer = null
+    }
+    if (tickerTimer) {
+      clearInterval(tickerTimer)
+      tickerTimer = null
+    }
+  })
+}
+
 export function useConnectionHealth() {
   ensureStarted()
   return {

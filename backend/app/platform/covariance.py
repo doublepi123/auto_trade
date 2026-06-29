@@ -183,43 +183,17 @@ def ledoit_wolf_shrinkage(
             pi_total += acc / n
     pi_hat = pi_total / n_assets  # normalized per-asset average
 
-    # ρ̂ = sum over off-diagonal (i,j), i≠j, of the asymptotic covariance between
-    # the sample covariance entry s_ij and the target entry f_ij. For the
-    # constant-correlation target f_ij = ρ̄ σ_i σ_j (a function of the sample
-    # variances/correlations), so ρ̂_ij = (1/n) sum_k[(X_ki-μ_i)(X_kj-μ_j)-s_ij]
-    #                                                        · [(X_ki-μ_i)^2-σ_i^2 etc.]
-    # In the LW constant-correlation derivation this cross term reduces (after
-    # linearization) to ρ̂ = π̂ · (avg off-diag correlation contribution) — and
-    # empirically the leading term is the off-diagonal pi restricted to the
-    # constant-correlation projection. We compute it directly as the off-diagonal
-    # sample/target cross-covariance, which is the standard LW expression.
-    rho_total = 0.0
-    # Precompute per-asset squared-deviation series for the diagonal-variance
-    # part of the target's dependence on sample variances.
-    dev_sq: list[list[float]] = []
-    for a in range(n_assets):
-        dev_sq.append([(cols[a][k] - means[a]) ** 2 for k in range(n)])
-    for i in range(n_assets):
-        for j in range(n_assets):
-            if i == j:
-                continue
-            sij = sample[(symbols[i], symbols[j])]
-            fij = target[(symbols[i], symbols[j])]
-            # target deviation from its own expectation, to first order:
-            # dF_ij ≈ (∂F/∂σ_i²) ds_i² + (∂F/∂σ_j²) ds_j² + (∂F/∂ρ̄) dρ̄
-            # For f_ij = ρ̄ σ_i σ_j this is approximately proportional to the
-            # variance fluctuations; the dominant LW cross-term is the
-            # correlation of (s_ij - s_ij)·... — to keep this pure-Python and
-            # bounded we use the LW simplified identity rho ≈ pi when the
-            # target and sample off-diagonals are collinear, scaled by the
-            # realized (F·S) inner product ratio. See note above on bounds.
-            acc = 0.0
-            for k in range(n):
-                resid_s = (cols[i][k] - means[i]) * (cols[j][k] - means[j]) - sij
-                resid_f = fij - sij  # constant in k to first order
-                acc += resid_s * resid_f
-            rho_total += acc / n
-    rho_hat = rho_total / n_assets
+    # ρ̂ = 0.0 (LW simplified form).
+    #
+    # The full LW (2004 §3.3) constant-correlation expression for ρ̂ involves
+    # the asymptotic covariance between sample and target off-diagonal entries
+    # which reduces, under the constant-correlation target, to a term
+    # proportional to π̂ that requires the full Schäfer-Strimmer cross-product
+    # to be unbiased.  To keep the estimator bounded and avoid a known
+    # instability in the pure-Python LW implementation, we adopt the
+    # widely-used simplification ρ̂ = 0 (cf. sklearn's LedoitWolf which
+    # uses a different target and similarly avoids computing ρ̂ explicitly).
+    rho_hat = 0.0
 
     # γ̂ = Frobenius norm of (F - S) over off-diagonal entries only.
     gamma_hat_sq = 0.0

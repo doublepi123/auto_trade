@@ -63,9 +63,12 @@ class OrderManagementSystem:
                 rec.order_type = intent.order_type
                 rec.limit_price = intent.limit_price
         rec.status = event.status
-        if event.filled_quantity:
+        if event.filled_quantity and rec.filled_quantity == 0:
+            # Only seed filled_quantity from order-event when no fill events
+            # have already contributed — prevents overwriting the accumulation
+            # done in on_fill.
             rec.filled_quantity = event.filled_quantity
-        if event.avg_price is not None:
+        if event.avg_price is not None and rec.avg_fill_price is None:
             rec.avg_fill_price = event.avg_price
         rec.updated_at = event.timestamp
 

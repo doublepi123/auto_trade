@@ -198,14 +198,17 @@ class IntervalApplicationService:
         if current_price <= 0:
             return "current_price must be positive"
 
+        if not isinstance(confidence, (int, float)) or not math.isfinite(float(confidence)):
+            return "confidence_score must be finite"
+
         if confidence < settings.llm_min_confidence:
             return f"confidence_score {confidence:.2f} below threshold {settings.llm_min_confidence}"
 
-        if buy_low is None or sell_high is None or not all(math.isfinite(float(value)) for value in (buy_low, sell_high, confidence)):
-            return "buy_low, sell_high, and confidence_score must be finite"
-
         if buy_low is None or sell_high is None:
             return "missing buy_low or sell_high in suggestion"
+
+        if not all(math.isfinite(float(value)) for value in (buy_low, sell_high)):
+            return "buy_low and sell_high must be finite"
 
         if sell_high <= buy_low:
             return f"sell_high ({sell_high:.2f}) must be greater than buy_low ({buy_low:.2f})"

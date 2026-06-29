@@ -63,12 +63,7 @@ def min_variance_weights(
     n = len(symbols)
     if n == 1:
         return {symbols[0]: 1.0}
-    ones = [1.0] * n
-    sigma_mat = matrix_from_pairs(sigma, symbols)
-    inv = _try_solve(sigma_mat, ones)
-    if inv is None:
-        return _equal_weights(symbols)
-    return _long_only_min_variance(symbols, sigma, ones)
+    return _long_only_min_variance(symbols, sigma, [1.0] * n)
 
 
 def max_sharpe_weights(

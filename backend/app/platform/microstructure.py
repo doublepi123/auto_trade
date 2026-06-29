@@ -66,9 +66,19 @@ def _bucketize(
     closes: Sequence[float],
     bucket_size: float,
 ) -> list[tuple[float, float]]:
-    """Accumulate bar-classified buy/sell volume into fixed-size volume buckets."""
+    """Accumulate bar-classified buy/sell volume into fixed-size volume buckets.
+
+    Unlike the naive sequential fill, we fill buy and sell proportionally
+    (at the same ratio as the bar's classification) into each bucket to
+    preserve the VPIN bulk-classification semantics.
+    """
     if bucket_size <= 0:
         raise ValueError("bucket_size must be > 0")
+    if bucket_size < 1e-9:
+        # Pathological bucket size would cause an effective infinite loop (each
+        # fill step advances by ~bucket_size, so consuming a normal bar volume
+        # requires ~volume/bucket_size iterations). Reject up front.
+        raise ValueError("bucket_size must be >= 1e-9")
     buckets: list[tuple[float, float]] = []
     cur_buy = 0.0
     cur_sell = 0.0
@@ -81,11 +91,22 @@ def _bucketize(
                 buckets.append((cur_buy, cur_sell))
                 cur_buy, cur_sell = 0.0, 0.0
                 space = bucket_size
-            take_buy = min(remaining_buy, space)
+            # fill buy and sell proportionally into the remaining space
+            total_remaining = remaining_buy + remaining_sell
+            if total_remaining <= 0:
+                break
+            buy_ratio = remaining_buy / total_remaining
+            sell_ratio = remaining_sell / total_remaining
+            take_buy = min(remaining_buy, space * buy_ratio)
+            take_sell = min(remaining_sell, space * sell_ratio)
+            # Guard against floating-point underflow: if both takes rounded to
+            # zero we cannot make progress, so fall back to the naive sequential
+            # fill (matches pre-P359 behaviour) to avoid an infinite loop.
+            if take_buy <= 0 and take_sell <= 0:
+                take_buy = min(remaining_buy, space)
+                take_sell = min(max(space - take_buy, 0.0), remaining_sell)
             cur_buy += take_buy
             remaining_buy -= take_buy
-            space -= take_buy
-            take_sell = min(remaining_sell, space)
             cur_sell += take_sell
             remaining_sell -= take_sell
     # flush the final partial bucket

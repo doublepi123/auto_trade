@@ -370,150 +370,157 @@ class LLMAdvisorService:
             _LAST_ANALYSIS_TIMESTAMP = float("inf")
 
         try:
-            market_data = self._data_aggregator.fetch_market_data(symbol, market)
-        except Exception:
-            logger.exception("failed to fetch market data for LLM analysis")
-            market_data = {
-                "daily_candles": [],
-                "minute_candles": [],
+            try:
+                market_data = self._data_aggregator.fetch_market_data(symbol, market)
+            except Exception:
+                logger.exception("failed to fetch market data for LLM analysis")
+                market_data = {
+                    "daily_candles": [],
+                    "minute_candles": [],
+                    "current_price": current_price,
+                    "atr": 0.0,
+                    "bb_upper": 0.0,
+                    "bb_middle": 0.0,
+                    "bb_lower": 0.0,
+                    "rsi": 0.0,
+                    "macd": {"macd": 0.0, "signal": 0.0, "histogram": 0.0},
+                    "volume_analysis": {"avg_volume": 0.0, "volume_ratio": 0.0, "trend": "unknown"},
+                    "sentiment": {"sentiment": "neutral", "score": 0.0, "description": "无"},
+                }
+
+            try:
+                prompt_template, prompt_variant = self._select_variant(symbol)
+                prompt = self._build_prompt(
+                    symbol=symbol,
+                    market=market,
+                    current_price=current_price,
+                    current_buy_low=current_buy_low,
+                    current_sell_high=current_sell_high,
+                    short_selling=short_selling,
+                    current_position=current_position,
+                    recent_trades=recent_trades,
+                    position_quantity=position_quantity,
+                    position_avg_price=position_avg_price,
+                    unrealized_pnl_pct=unrealized_pnl_pct,
+                    min_profit_amount=min_profit_amount,
+                    recent_prices=recent_prices,
+                    recent_analysis=recent_analysis,
+                    account_context=account_context,
+                    market_data=market_data,
+                    prompt_template=prompt_template,
+                )
+            except Exception:
+                # _select_variant or _build_prompt failed — release the reserved
+                # slot so the throttle is not permanently locked at inf.
+                with _throttle_lock:
+                    _LAST_ANALYSIS_TIMESTAMP = _prev_analysis_ts
+                raise
+            context_snapshot = {
+                "symbol": symbol,
+                "market": market,
                 "current_price": current_price,
-                "atr": 0.0,
-                "bb_upper": 0.0,
-                "bb_middle": 0.0,
-                "bb_lower": 0.0,
-                "rsi": 0.0,
-                "macd": {"macd": 0.0, "signal": 0.0, "histogram": 0.0},
-                "volume_analysis": {"avg_volume": 0.0, "volume_ratio": 0.0, "trend": "unknown"},
-                "sentiment": {"sentiment": "neutral", "score": 0.0, "description": "无"},
+                "current_buy_low": current_buy_low,
+                "current_sell_high": current_sell_high,
+                "short_selling": short_selling,
+                "current_position": current_position,
+                "position_quantity": position_quantity,
+                "position_avg_price": position_avg_price,
+                "unrealized_pnl_pct": unrealized_pnl_pct,
+                "min_profit_amount": min_profit_amount,
+                "recent_prices": recent_prices or [],
+                "recent_analysis": recent_analysis or {},
+                "account_context": account_context or {},
             }
 
-        try:
-            prompt_template, prompt_variant = self._select_variant(symbol)
-            prompt = self._build_prompt(
-                symbol=symbol,
-                market=market,
-                current_price=current_price,
-                current_buy_low=current_buy_low,
-                current_sell_high=current_sell_high,
-                short_selling=short_selling,
-                current_position=current_position,
-                recent_trades=recent_trades,
-                position_quantity=position_quantity,
-                position_avg_price=position_avg_price,
-                unrealized_pnl_pct=unrealized_pnl_pct,
-                min_profit_amount=min_profit_amount,
-                recent_prices=recent_prices,
-                recent_analysis=recent_analysis,
-                account_context=account_context,
-                market_data=market_data,
-                prompt_template=prompt_template,
-            )
-        except Exception:
-            # _select_variant or _build_prompt failed — release the reserved
-            # slot so the throttle is not permanently locked at inf.
-            with _throttle_lock:
-                _LAST_ANALYSIS_TIMESTAMP = _prev_analysis_ts
-            raise
-        context_snapshot = {
-            "symbol": symbol,
-            "market": market,
-            "current_price": current_price,
-            "current_buy_low": current_buy_low,
-            "current_sell_high": current_sell_high,
-            "short_selling": short_selling,
-            "current_position": current_position,
-            "position_quantity": position_quantity,
-            "position_avg_price": position_avg_price,
-            "unrealized_pnl_pct": unrealized_pnl_pct,
-            "min_profit_amount": min_profit_amount,
-            "recent_prices": recent_prices or [],
-            "recent_analysis": recent_analysis or {},
-            "account_context": account_context or {},
-        }
+            raw_response = ""
+            try:
+                raw_response = self._call_llm(prompt)
+                result = self._parse_response(raw_response)
+                # LLM succeeded — consume the throttle budget.
+                with _throttle_lock:
+                    _LAST_ANALYSIS_TIMESTAMP = time.monotonic()
 
-        raw_response = ""
-        try:
-            raw_response = self._call_llm(prompt)
-            result = self._parse_response(raw_response)
-            # LLM succeeded — consume the throttle budget.
-            with _throttle_lock:
-                _LAST_ANALYSIS_TIMESTAMP = time.monotonic()
+                # NOTE: indicator selection is validated against AVAILABLE_INDICATORS
+                # whitelist inside FeatureSelector.parse_selection, so adversarial
+                # keys injected via prompt or market data are discarded.
+                market_state_raw = market_data.get("market_state")
+                market_state = market_state_raw if isinstance(market_state_raw, dict) else {}
+                suggested_raw = market_state.get("suggested_indicators", [])
+                suggested = suggested_raw if isinstance(suggested_raw, list) else []
+                selected = FeatureSelector.parse_selection(raw_response, suggested)
+                logger.info("LLM selected indicators: %s", selected)
+            except Exception as exc:
+                # LLM call or parse failed — release the reserved slot so the
+                # next caller is not needlessly blocked.
+                with _throttle_lock:
+                    _LAST_ANALYSIS_TIMESTAMP = _prev_analysis_ts
+                logger.exception("LLM analysis failed")
+                interaction_id = self._record_interaction(
+                    interaction_type="analyze",
+                    symbol=symbol,
+                    market=market,
+                    prompt=prompt,
+                    raw_response=raw_response,
+                    result=None,
+                    context_snapshot=context_snapshot,
+                    success=False,
+                    error=f"LLM analysis failed: {exc}",
+                    prompt_variant=prompt_variant,
+                )
+                return {
+                    "success": False,
+                    "error": "LLM analysis failed",
+                    "interaction_id": interaction_id,
+                }
 
-            # NOTE: indicator selection is validated against AVAILABLE_INDICATORS
-            # whitelist inside FeatureSelector.parse_selection, so adversarial
-            # keys injected via prompt or market data are discarded.
-            market_state_raw = market_data.get("market_state")
-            market_state = market_state_raw if isinstance(market_state_raw, dict) else {}
-            suggested_raw = market_state.get("suggested_indicators", [])
-            suggested = suggested_raw if isinstance(suggested_raw, list) else []
-            selected = FeatureSelector.parse_selection(raw_response, suggested)
-            logger.info("LLM selected indicators: %s", selected)
-        except Exception as exc:
-            # LLM call or parse failed — release the reserved slot so the
-            # next caller is not needlessly blocked.
-            with _throttle_lock:
-                _LAST_ANALYSIS_TIMESTAMP = _prev_analysis_ts
-            logger.exception("LLM analysis failed")
+            next_analysis_at = datetime.now(timezone.utc) + timedelta(minutes=interval_minutes)
+            if persist:
+                db = SessionLocal()
+                try:
+                    next_analysis_at = self._record_analysis(
+                        db, result, interval_minutes, current_price=current_price,
+                    )
+                except Exception:
+                    logger.exception("failed to record LLM analysis")
+                finally:
+                    db.close()
+
             interaction_id = self._record_interaction(
                 interaction_type="analyze",
                 symbol=symbol,
                 market=market,
                 prompt=prompt,
                 raw_response=raw_response,
-                result=None,
+                result=result,
                 context_snapshot=context_snapshot,
-                success=False,
-                error=f"LLM analysis failed: {exc}",
+                success=True,
+                error="",
                 prompt_variant=prompt_variant,
             )
+
             return {
-                "success": False,
-                "error": "LLM analysis failed",
+                "success": True,
+                "applied": False,
+                "reason": "Analysis completed. Use IntervalApplicationService to apply.",
                 "interaction_id": interaction_id,
+                "suggested_buy_low": result.get("suggested_buy_low"),
+                "suggested_sell_high": result.get("suggested_sell_high"),
+                "confidence_score": result.get("confidence_score"),
+                "analysis": result.get("analysis"),
+                "next_analysis_at": next_analysis_at.isoformat(),
+                "applied_at": None,
+                "order_action": result.get("order_action"),
+                "order_price": result.get("order_price"),
+                "replacement_action": result.get("replacement_action"),
+                "replacement_price": result.get("replacement_price"),
+                "order_reason": result.get("order_reason"),
             }
-
-        next_analysis_at = datetime.now(timezone.utc) + timedelta(minutes=interval_minutes)
-        if persist:
-            db = SessionLocal()
-            try:
-                next_analysis_at = self._record_analysis(
-                    db, result, interval_minutes, current_price=current_price,
-                )
-            except Exception:
-                logger.exception("failed to record LLM analysis")
-            finally:
-                db.close()
-
-        interaction_id = self._record_interaction(
-            interaction_type="analyze",
-            symbol=symbol,
-            market=market,
-            prompt=prompt,
-            raw_response=raw_response,
-            result=result,
-            context_snapshot=context_snapshot,
-            success=True,
-            error="",
-            prompt_variant=prompt_variant,
-        )
-
-        return {
-            "success": True,
-            "applied": False,
-            "reason": "Analysis completed. Use IntervalApplicationService to apply.",
-            "interaction_id": interaction_id,
-            "suggested_buy_low": result.get("suggested_buy_low"),
-            "suggested_sell_high": result.get("suggested_sell_high"),
-            "confidence_score": result.get("confidence_score"),
-            "analysis": result.get("analysis"),
-            "next_analysis_at": next_analysis_at.isoformat(),
-            "applied_at": None,
-            "order_action": result.get("order_action"),
-            "order_price": result.get("order_price"),
-            "replacement_action": result.get("replacement_action"),
-            "replacement_price": result.get("replacement_price"),
-            "order_reason": result.get("order_reason"),
-        }
+        finally:
+            # Ensure the throttle slot is always released after an
+            # unhandled exception, preventing permanent throttle blockage.
+            with _throttle_lock:
+                if _LAST_ANALYSIS_TIMESTAMP == float("inf"):
+                    _LAST_ANALYSIS_TIMESTAMP = _prev_analysis_ts
 
     def _preview_market_data(self, symbol: str, market: str, current_price: float) -> dict[str, Any]:
         try:
@@ -586,105 +593,112 @@ class LLMAdvisorService:
             _prev_preview_ts = _LAST_PREVIEW_TIMESTAMP
             _LAST_PREVIEW_TIMESTAMP = float("inf")
 
-        if market_data is None:
-            market_data = self._preview_market_data(symbol, market, current_price)
-            prompt_price = self._preview_prompt_price(market_data, current_price)
-            if prompt_price <= 0:
-                # Market data unavailable — release the reserved slot.
+        try:
+            if market_data is None:
+                market_data = self._preview_market_data(symbol, market, current_price)
+                prompt_price = self._preview_prompt_price(market_data, current_price)
+                if prompt_price <= 0:
+                    # Market data unavailable — release the reserved slot.
+                    with _throttle_lock:
+                        _LAST_PREVIEW_TIMESTAMP = _prev_preview_ts
+                    return {"success": False, "applied": False, "error": "Market data unavailable for preview"}
+
+            try:
+                prompt_template, prompt_variant = self._select_variant(symbol)
+                prompt = self._build_prompt(
+                    symbol=symbol,
+                    market=market,
+                    current_price=prompt_price,
+                    current_buy_low=current_buy_low,
+                    current_sell_high=current_sell_high,
+                    short_selling=short_selling,
+                    current_position="FLAT",
+                    recent_trades=[],
+                    position_quantity=0.0,
+                    position_avg_price=0.0,
+                    unrealized_pnl_pct=0.0,
+                    min_profit_amount=min_profit_amount,
+                    recent_prices=None,
+                    recent_analysis=None,
+                    account_context=account_context,
+                    market_data=market_data,
+                    prompt_template=prompt_template,
+                )
+            except Exception:
+                # _select_variant or _build_prompt failed — release the reserved
+                # slot so the throttle is not permanently locked at inf.
                 with _throttle_lock:
                     _LAST_PREVIEW_TIMESTAMP = _prev_preview_ts
-                return {"success": False, "applied": False, "error": "Market data unavailable for preview"}
+                raise
+            context_snapshot = {
+                "symbol": symbol,
+                "market": market,
+                "current_price": prompt_price,
+                "current_buy_low": current_buy_low,
+                "current_sell_high": current_sell_high,
+                "short_selling": short_selling,
+                "min_profit_amount": min_profit_amount,
+                "account_context": account_context or {},
+            }
 
-        try:
-            prompt_template, prompt_variant = self._select_variant(symbol)
-            prompt = self._build_prompt(
-                symbol=symbol,
-                market=market,
-                current_price=prompt_price,
-                current_buy_low=current_buy_low,
-                current_sell_high=current_sell_high,
-                short_selling=short_selling,
-                current_position="FLAT",
-                recent_trades=[],
-                position_quantity=0.0,
-                position_avg_price=0.0,
-                unrealized_pnl_pct=0.0,
-                min_profit_amount=min_profit_amount,
-                recent_prices=None,
-                recent_analysis=None,
-                account_context=account_context,
-                market_data=market_data,
-                prompt_template=prompt_template,
-            )
-        except Exception:
-            # _select_variant or _build_prompt failed — release the reserved
-            # slot so the throttle is not permanently locked at inf.
-            with _throttle_lock:
-                _LAST_PREVIEW_TIMESTAMP = _prev_preview_ts
-            raise
-        context_snapshot = {
-            "symbol": symbol,
-            "market": market,
-            "current_price": prompt_price,
-            "current_buy_low": current_buy_low,
-            "current_sell_high": current_sell_high,
-            "short_selling": short_selling,
-            "min_profit_amount": min_profit_amount,
-            "account_context": account_context or {},
-        }
+            raw_response = ""
+            try:
+                raw_response = self._call_llm(prompt)
+                result = self._parse_response(raw_response)
+                # LLM succeeded — consume the throttle budget.
+                with _throttle_lock:
+                    _LAST_PREVIEW_TIMESTAMP = time.monotonic()
+            except Exception as exc:
+                # LLM call or parse failed — release the reserved slot.
+                with _throttle_lock:
+                    _LAST_PREVIEW_TIMESTAMP = _prev_preview_ts
+                logger.exception("LLM preview failed")
+                self._record_interaction(
+                    interaction_type="preview",
+                    symbol=symbol,
+                    market=market,
+                    prompt=prompt,
+                    raw_response=raw_response,
+                    result=None,
+                    context_snapshot=context_snapshot,
+                    success=False,
+                    error=f"LLM preview failed: {exc}",
+                    prompt_variant=prompt_variant,
+                )
+                return {"success": False, "applied": False, "error": "LLM preview failed"}
 
-        raw_response = ""
-        try:
-            raw_response = self._call_llm(prompt)
-            result = self._parse_response(raw_response)
-            # LLM succeeded — consume the throttle budget.
-            with _throttle_lock:
-                _LAST_PREVIEW_TIMESTAMP = time.monotonic()
-        except Exception as exc:
-            # LLM call or parse failed — release the reserved slot.
-            with _throttle_lock:
-                _LAST_PREVIEW_TIMESTAMP = _prev_preview_ts
-            logger.exception("LLM preview failed")
-            self._record_interaction(
+            interaction_id = self._record_interaction(
                 interaction_type="preview",
                 symbol=symbol,
                 market=market,
                 prompt=prompt,
                 raw_response=raw_response,
-                result=None,
+                result=result,
                 context_snapshot=context_snapshot,
-                success=False,
-                error=f"LLM preview failed: {exc}",
+                success=True,
+                error="",
                 prompt_variant=prompt_variant,
             )
-            return {"success": False, "applied": False, "error": "LLM preview failed"}
 
-        interaction_id = self._record_interaction(
-            interaction_type="preview",
-            symbol=symbol,
-            market=market,
-            prompt=prompt,
-            raw_response=raw_response,
-            result=result,
-            context_snapshot=context_snapshot,
-            success=True,
-            error="",
-            prompt_variant=prompt_variant,
-        )
-
-        return {
-            "success": True,
-            "applied": False,
-            "reason": "Preview completed. Confirm to save and apply.",
-            "interaction_id": interaction_id,
-            "suggested_buy_low": result.get("suggested_buy_low"),
-            "suggested_sell_high": result.get("suggested_sell_high"),
-            "confidence_score": result.get("confidence_score"),
-            "analysis": result.get("analysis"),
-            "next_analysis_at": None,
-            "applied_at": None,
-            "order_action": result.get("order_action"),
-        }
+            return {
+                "success": True,
+                "applied": False,
+                "reason": "Preview completed. Confirm to save and apply.",
+                "interaction_id": interaction_id,
+                "suggested_buy_low": result.get("suggested_buy_low"),
+                "suggested_sell_high": result.get("suggested_sell_high"),
+                "confidence_score": result.get("confidence_score"),
+                "analysis": result.get("analysis"),
+                "next_analysis_at": None,
+                "applied_at": None,
+                "order_action": result.get("order_action"),
+            }
+        finally:
+            # Ensure the throttle slot is always released after an
+            # unhandled exception, preventing permanent throttle blockage.
+            with _throttle_lock:
+                if _LAST_PREVIEW_TIMESTAMP == float("inf"):
+                    _LAST_PREVIEW_TIMESTAMP = _prev_preview_ts
 
     @staticmethod
     def _deepseek_chat_payload(prompt: str) -> dict[str, object]:
@@ -739,6 +753,8 @@ class LLMAdvisorService:
         try:
             choice = data["choices"][0]
             message = choice["message"]
+            if not isinstance(message, dict):
+                raise RuntimeError(f"invalid message payload type: {type(message).__name__}")
             content = message.get("content") or ""
         except (KeyError, IndexError, TypeError) as exc:
             raise RuntimeError(f"DeepSeek response missing message content: {exc}") from exc
