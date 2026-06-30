@@ -178,6 +178,15 @@ class PairCopula:
 
 @dataclass(frozen=True)
 class VineCopulaResult:
+    """Result of a vine copula fit.
+
+    .. warning::
+       ``log_likelihood`` for non-Gaussian families (Gumbel, Clayton) is a
+       **ranking proxy** (log C(u,v) of the copula CDF) rather than the true
+       copula density log-likelihood.  Consequently ``aic`` and ``bic`` are
+       internally-consistent ranking scores but **not** valid for strict
+       AIC/BIC model comparison across families.
+    """
     structure: str  # "c-vine" | "d-vine"
     n_assets: int
     n_observations: int
@@ -212,7 +221,8 @@ def vine_copula(
     rank-transformed to uniform margins, then pair copulas are fit along the
     tree implied by ``structure`` ("c-vine" or "d-vine"). Returns
     :class:`VineCopulaResult` with per-pair fits, total log-likelihood, and
-    AIC/BIC (one parameter per pair). Raises ``ValueError`` on empty / ragged
+    AIC/BIC proxies (one parameter per pair; see :class:`VineCopulaResult`
+    for caveats). Raises ``ValueError`` on empty / ragged
     input / unknown structure / fewer than 2 assets.
     """
     if structure not in ("c-vine", "d-vine"):
@@ -264,6 +274,8 @@ def vine_copula(
         # pairs only (the dominant dependence), documented as a simplification.
 
     n_params = len(pairs)
+    # NOTE: aic/bic are ranking proxies (log-likelihood is log C(u,v) for
+    # non-Gaussian families), not valid for cross-family model comparison.
     aic = -2.0 * total_ll + 2.0 * n_params
     bic = -2.0 * total_ll + math.log(max(n_obs, 1)) * n_params
     return VineCopulaResult(

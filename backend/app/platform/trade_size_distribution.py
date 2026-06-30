@@ -43,6 +43,8 @@ def _validate_volumes(volumes: list[float]) -> list[float]:
         f = float(v)
         if not math.isfinite(f):
             raise ValueError("volumes entries must be finite numbers")
+        if f <= 0:
+            raise ValueError("volumes entries must be positive")
         validated.append(f)
     return validated
 
@@ -52,7 +54,7 @@ def _mean(xs: list[float]) -> float:
 
 
 def _std(xs: list[float]) -> float:
-    """Sample standard deviation."""
+    """Sample standard deviation (n-1 denominator)."""
     n = len(xs)
     if n < 2:
         return 0.0
@@ -60,13 +62,22 @@ def _std(xs: list[float]) -> float:
     return math.sqrt(sum((x - m) ** 2 for x in xs) / (n - 1))
 
 
+def _pop_std(xs: list[float]) -> float:
+    """Population standard deviation (n denominator)."""
+    n = len(xs)
+    if n < 2:
+        return 0.0
+    m = _mean(xs)
+    return math.sqrt(sum((x - m) ** 2 for x in xs) / n)
+
+
 def _skewness(xs: list[float]) -> float:
-    """Sample skewness (adjusted Fisher-Pearson)."""
+    """Sample skewness (adjusted Fisher-Pearson), using population std."""
     n = len(xs)
     if n < 3:
         return 0.0
     m = _mean(xs)
-    s = _std(xs)
+    s = _pop_std(xs)
     if s == 0.0:
         return 0.0
     skew = sum((x - m) ** 3 for x in xs) / n
@@ -74,12 +85,12 @@ def _skewness(xs: list[float]) -> float:
 
 
 def _kurtosis(xs: list[float]) -> float:
-    """Sample excess kurtosis."""
+    """Sample excess kurtosis, using population std."""
     n = len(xs)
     if n < 4:
         return 0.0
     m = _mean(xs)
-    s = _std(xs)
+    s = _pop_std(xs)
     if s == 0.0:
         return 0.0
     kurt = sum((x - m) ** 4 for x in xs) / n
@@ -154,6 +165,8 @@ def _hurst_rs(series: list[float]) -> float | None:
         if not rs_values:
             continue
         mean_rs = sum(rs_values) / len(rs_values)
+        if mean_rs <= 0:
+            continue
         log_k.append(math.log(size))
         log_rs.append(math.log(mean_rs))
 

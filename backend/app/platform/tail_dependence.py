@@ -53,7 +53,7 @@ def _kendall_tau(rx: list[float], ry: list[float]) -> float:
             if (rx[i] - rx[j]) * (ry[i] - ry[j]) > 0:
                 concordant += 1
     total = n * (n - 1) / 2
-    return concordant / total if total > 0 else 0.0
+    return (2 * concordant - total) / total if total > 0 else 0.0
 
 
 def _gumbel_upper(tau: float) -> float:

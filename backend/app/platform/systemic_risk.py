@@ -53,7 +53,7 @@ def _conditional_var(returns: list[float], condition_returns: list[float],
     tail = [r for r, c in zip(returns, condition_returns) if c <= threshold]
     if not tail:
         tail = returns[:]
-    return -_quantile(tail, 1.0 - threshold_quantile)  # VaR of returns in tail
+    return -_quantile(tail, threshold_quantile)  # VaR of returns in tail (lower quantile)
 
 
 def systemic_risk_report(

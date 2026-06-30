@@ -132,7 +132,7 @@ def nnls(A: list[list[float]], b: list[float], *, max_iter: int = 3000, tol: flo
         for i in range(k):
             w[i] = Atb[i] - sum(AtA[i][j] * x[j] for j in range(k))
     # clip tiny negatives from float arithmetic
-    return [max(0.0, v) if v > -1e-9 else v for v in x]
+    return [max(0.0, v) for v in x]
 
 
 def nnls_simplex(A: list[list[float]], b: list[float], *, max_iter: int = 3000, tol: float = 1e-10) -> list[float]:

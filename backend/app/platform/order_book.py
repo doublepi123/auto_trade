@@ -185,7 +185,7 @@ class OrderBook:
                     quantity=take,
                     price=level_price,
                     commission=commission,
-                    partial=(take < remaining) or remaining - take > 0 or bool(level.queue),
+                    partial=(take < remaining),
                 )
             )
             remaining -= take

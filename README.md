@@ -723,3 +723,23 @@ MIT
 | `POST` | `/api/platform/regime-switching-correlation` | 双状态相关切换 |
 | `POST` | `/api/platform/trade-size-distribution` | 成交分布幂律+Hurst |
 | `POST` | `/api/platform/liquidity-adjusted-ir` | 流动性调整信息比率 |
+| `POST` | `/api/platform/volatility-signature` | 波动率签名图+微结构噪声 |
+| `POST` | `/api/platform/distance-correlation` | 距离相关性（非线性依赖） |
+| `POST` | `/api/platform/fama-macbeth` | Fama-MacBeth 截面回归 |
+| `POST` | `/api/platform/news-impact-curve` | Engle-Ng 新闻冲击不对称性 |
+| `POST` | `/api/platform/variance-ratio-test` | Lo-MacKinlay 方差比检验 |
+| `POST` | `/api/platform/multivariate-normality` | Mardia 多元正态性检验 |
+| `POST` | `/api/platform/implied-risk-free-rate` | PCP 隐含无风险利率 |
+| `POST` | `/api/platform/price-discovery` | Hasbrouck 信息份额 |
+| `POST` | `/api/platform/hedge-ratio-comparison` | 多方法对冲比比较 |
+| `POST` | `/api/platform/copula-stress` | Copula 联合尾部压力场景 |
+| `POST` | `/api/platform/backtest-overlap` | 回测重叠检测 |
+| `POST` | `/api/platform/information-criteria` | AIC/BIC/HQIC 模型选择 |
+| `POST` | `/api/platform/intraday-volume-profile` | 日内成交量 U 型分布 |
+| `POST` | `/api/platform/microstructure-noise` | 微结构噪声方差估计 |
+| `POST` | `/api/platform/quadratic-factor-model` | 非线性因子模型 |
+| `POST` | `/api/platform/higher-moment-forecast` | 高阶矩预测 |
+| `POST` | `/api/platform/bds-test` | BDS 非线性独立性检验 |
+| `POST` | `/api/platform/regime-factor-betas` | Regime 条件因子 Beta |
+| `POST` | `/api/platform/strategy-correlation-bootstrap` | 策略相关 Bootstrap CI |
+| `POST` | `/api/platform/tail-diversification` | 尾部分散化度量 |

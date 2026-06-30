@@ -203,11 +203,20 @@ def _setup_db():
     We truncate on entry so each test starts with empty tables, and
     intentionally do **not** drop on teardown — sibling test modules rely
     on the schema being present (conftest shares a single per-PID DB).
-    """
-    from sqlalchemy import text
 
+    We also ensure the schema exists via ``create_all``: tests that use the
+    ``client`` fixture trigger the FastAPI lifespan (which calls ``init_db``),
+    but tests that exercise the runner directly skip the lifespan and would
+    otherwise hit "no such table" on the first insert.
+    """
+    from sqlalchemy import inspect, text
+
+    Base.metadata.create_all(bind=engine)
     with engine.begin() as conn:
+        existing = set(inspect(conn).get_table_names())
         for table in reversed(Base.metadata.sorted_tables):
+            if table.name not in existing:
+                continue
             conn.execute(text(f"DELETE FROM {table.name}"))
     yield
 

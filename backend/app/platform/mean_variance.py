@@ -105,6 +105,7 @@ def efficient_frontier(
     mean_returns: dict[str, float],
     cov: dict[tuple[str, str], float],
     n_points: int = 50,
+    risk_free: float = 0.0,
 ) -> list[dict[str, Any]]:
     """Sample the long-only efficient frontier.
 
@@ -127,7 +128,7 @@ def efficient_frontier(
         return [{
             "return": port_ret,
             "volatility": math.sqrt(max(port_var, 0.0)),
-            "sharpe": (port_ret / math.sqrt(port_var)) if port_var > 0 else 0.0,
+            "sharpe": ((port_ret - risk_free) / math.sqrt(port_var)) if port_var > 0 else 0.0,
             "weights": w,
         }]
 
@@ -138,7 +139,7 @@ def efficient_frontier(
         port_ret = sum(w[s] * mean_returns[s] for s in symbols)
         port_var = portfolio_variance(cov, w)
         vol = math.sqrt(max(port_var, 0.0))
-        sharpe = (port_ret / vol) if vol > 0 else 0.0
+        sharpe = ((port_ret - risk_free) / vol) if vol > 0 else 0.0
         points.append({"return": port_ret, "volatility": vol, "sharpe": sharpe, "weights": w})
     return points
 

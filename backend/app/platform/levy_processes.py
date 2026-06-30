@@ -76,7 +76,7 @@ def _gamma_lanczos(z: complex) -> complex:
     for i in range(1, g + 2):
         x = x + p[i] / (z + float(i))
     t = z + float(g) + 0.5
-    sqrt2pi = 2.5056282746310002  # sqrt(2*pi)
+    sqrt2pi = math.sqrt(2.0 * math.pi)
     return sqrt2pi * (t ** (z + 0.5)) * cmath.exp(-t) * x
 
 
@@ -283,8 +283,8 @@ def levy_process_report(
         Frozen dataclass with model, price, delta, and CF at u=1.
     """
     # Validate model
-    if model not in ("vg",):
-        raise ValueError("model must be 'vg'")
+    if model not in ("vg", "cgmy"):
+        raise ValueError("model must be 'vg' or 'cgmy'")
 
     # Validate all numeric inputs
     for name, val in [

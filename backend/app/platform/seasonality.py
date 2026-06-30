@@ -95,7 +95,7 @@ def _group_stats(
         mean = sum(values) / n
         if n >= 2:
             var_sum = sum((v - mean) ** 2 for v in values)
-            std = math.sqrt(var_sum / n)  # population std
+            std = math.sqrt(var_sum / (n - 1))  # sample std
         else:
             std = 0.0
         # t-stat = mean / (std / sqrt(n))  (two-sided test against zero)

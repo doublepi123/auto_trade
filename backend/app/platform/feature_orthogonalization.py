@@ -50,6 +50,7 @@ __all__ = [
 
 
 _EPS = 1e-12
+_RIDGE = 1e-10
 
 
 # ---------------------------------------------------------------------------
@@ -201,7 +202,7 @@ def residualize(
         for i in range(k)
     ]
     xty = [sum(x_matrix[i][t] * y[t] for t in range(n)) for i in range(k)]
-    ridge = _EPS
+    ridge = _RIDGE
     for i in range(k):
         xtx[i][i] += ridge
     beta = _solve_linear(xtx, xty)

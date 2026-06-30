@@ -89,19 +89,19 @@ def test_levy_process_report_vg_characteristic_at_u1():
     assert abs(cf) <= 1.0 + 1e-9
 
 
-def test_levy_process_report_rejects_cgmy_model():
-    """CGMY model is not yet correctly implemented and should be rejected."""
-    with pytest.raises(ValueError):
-        levy_process_report(
-            model="cgmy",
-            spot=100.0,
-            strike=100.0,
-            expiry=1.0,
-            sigma=0.15,
-            nu=0.1,
-            theta=-0.05,
-            risk_free=0.02,
-        )
+def test_levy_process_report_accepts_cgmy_model():
+    """CGMY model is implemented and should be accepted."""
+    result = levy_process_report(
+        model="cgmy",
+        spot=100.0,
+        strike=100.0,
+        expiry=1.0,
+        sigma=0.15,
+        nu=0.1,
+        theta=-0.05,
+        risk_free=0.02,
+    )
+    assert result.model == "cgmy"
 
 
 def test_levy_process_report_invalid_model():

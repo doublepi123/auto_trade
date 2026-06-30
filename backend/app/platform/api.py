@@ -5857,3 +5857,733 @@ def capacity_scaling_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
             detail=str(exc),
         ) from exc
     return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P381 – Intraday Volume Profile endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/intraday-volume-profile", dependencies=[Depends(require_api_key())])
+def intraday_volume_profile_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P381: intraday volume distribution across time buckets.
+
+    Body: ``{"volumes_by_time": {"09:30": [vol1, vol2, ...], ...}}``.
+    Returns per-bucket avg/pct, U-shape score, peak/lull times.
+    HTTP 422 on invalid input.
+    """
+    from app.platform.intraday_volume_profile import intraday_volume_profile_report
+
+    raw = payload.get("volumes_by_time")
+    if not isinstance(raw, dict):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="volumes_by_time must be a non-empty dict",
+        )
+    try:
+        result = intraday_volume_profile_report(raw)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P382 – Microstructure Noise endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/microstructure-noise", dependencies=[Depends(require_api_key())])
+def microstructure_noise_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P382: microstructure noise estimation from price series.
+
+    Body: ``{"prices": [...], "frequencies"?: [1, 2, ...]}``.
+    Returns noise/signal variance, SNR, optimal sampling freq, noise ratio.
+    HTTP 422 on invalid input.
+    """
+    from app.platform.microstructure_noise import microstructure_noise_report
+
+    prices_raw = payload.get("prices")
+    if not isinstance(prices_raw, list):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="prices must be a non-empty list",
+        )
+    frequencies_raw = payload.get("frequencies")
+    try:
+        result = microstructure_noise_report(prices_raw, frequencies=frequencies_raw)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P383 – Quadratic Factor Model endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/quadratic-factor-model", dependencies=[Depends(require_api_key())])
+def quadratic_factor_model_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P383: quadratic factor model OLS regression.
+
+    Body: ``{"returns": [...], "factors": {name: [...]}}``.
+    Returns coefficients, R², nonlinear significance (F-stat), linear vs quadratic comparison.
+    HTTP 422 on invalid input.
+    """
+    from app.platform.quadratic_factor_model import quadratic_factor_model_report
+
+    returns_raw = payload.get("returns")
+    factors_raw = payload.get("factors")
+    if not isinstance(returns_raw, list):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="returns must be a non-empty list",
+        )
+    if not isinstance(factors_raw, dict):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="factors must be a non-empty dict",
+        )
+    try:
+        result = quadratic_factor_model_report(returns_raw, factors_raw)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P384 – Higher Moment Forecast endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/higher-moment-forecast", dependencies=[Depends(require_api_key())])
+def higher_moment_forecast_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P384: forecast future skewness/kurtosis via rolling AR(1).
+
+    Body: ``{"returns": [...], "window"?: 20, "forecast_horizon"?: 1}``.
+    Returns skewness/kurtosis forecasts, persistence coefficients, predictability flag.
+    HTTP 422 on invalid input.
+    """
+    from app.platform.higher_moment_forecast import higher_moment_forecast_report
+
+    returns_raw = payload.get("returns")
+    if not isinstance(returns_raw, list):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="returns must be a non-empty list",
+        )
+    window_raw = payload.get("window", 20)
+    horizon_raw = payload.get("forecast_horizon", 1)
+    try:
+        result = higher_moment_forecast_report(
+            returns_raw,
+            window=window_raw,
+            forecast_horizon=horizon_raw,
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P369 – Volatility Signature endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/volatility-signature", dependencies=[Depends(require_api_key())])
+def volatility_signature_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P369: Volatility signature — realised variance by aggregation frequency.
+
+    Body: ``{"returns": [floats], "frequencies"?: [ints]}`` where
+    ``frequencies`` defaults to ``[1, 2, 5, 10, 20]``.
+    Returns ``signature`` (per-frequency RV), ``noise_variance_estimate``,
+    and ``optimal_frequency``. HTTP 422 on invalid input.
+    """
+    from app.platform.volatility_signature import volatility_signature_report
+
+    try:
+        returns = _numeric_series(payload, field="returns")
+        frequencies_raw = payload.get("frequencies")
+        frequencies: list[int] | None = None
+        if frequencies_raw is not None:
+            if not isinstance(frequencies_raw, list):
+                raise ValueError("frequencies must be a list of positive integers")
+            frequencies = []
+            for i, f in enumerate(frequencies_raw):
+                if isinstance(f, bool) or not isinstance(f, int) or f < 1:
+                    raise ValueError(f"frequencies[{i}] must be a positive integer")
+                frequencies.append(f)
+        result = volatility_signature_report(returns, frequencies=frequencies)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P370 – Distance Correlation endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/distance-correlation", dependencies=[Depends(require_api_key())])
+def distance_correlation_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P370: Distance correlation — Székely non-linear dependence measure.
+
+    Body: ``{"x": [floats], "y": [floats]}`` with equal-length finite series.
+    Returns ``distance_correlation`` ∈ [0,1], ``distance_covariance``,
+    ``distance_variance_x``, ``distance_variance_y``.
+    HTTP 422 on invalid input.
+    """
+    from app.platform.distance_correlation import distance_correlation_report
+
+    try:
+        x = _numeric_series(payload, field="x")
+        y = _numeric_series(payload, field="y")
+        result = distance_correlation_report(x, y)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P371 – Fama-MacBeth endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/fama-macbeth", dependencies=[Depends(require_api_key())])
+def fama_macbeth_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P371: Fama-MacBeth two-pass cross-sectional regression.
+
+    Body: ``{"returns_panel": {asset: [floats]}, "factor_panel": {factor: [floats]}}``
+    where all series have equal length and ≤50 assets.
+    Returns ``per_period_premiums`` and ``summary`` with mean, std, t-stat, significance.
+    HTTP 422 on invalid input.
+    """
+    from app.platform.fama_macbeth import fama_macbeth_report
+
+    try:
+        returns_panel = _panel_field(payload, field="returns_panel")
+        factor_panel = _panel_field(payload, field="factor_panel")
+        result = fama_macbeth_report(returns_panel, factor_panel)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P372 – News Impact Curve endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/news-impact-curve", dependencies=[Depends(require_api_key())])
+def news_impact_curve_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P372: News impact curve — conditional variance response to return shocks.
+
+    Body: ``{"returns": [floats], "lags"?: int}`` where ``lags`` defaults to 1.
+    Returns ``symmetric_curve``, ``asymmetric_curve``, ``leverage_effect``,
+    and ``asymmetry_ratio``. HTTP 422 on invalid input.
+    """
+    from app.platform.news_impact_curve import news_impact_curve_report
+
+    try:
+        returns = _numeric_series(payload, field="returns")
+        lags_raw = payload.get("lags", 1)
+        if isinstance(lags_raw, bool) or not isinstance(lags_raw, int):
+            raise ValueError("lags must be a positive integer")
+        if lags_raw < 1:
+            raise ValueError("lags must be a positive integer")
+        result = news_impact_curve_report(returns, lags=lags_raw)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P373 — Variance ratio test endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/variance-ratio-test", dependencies=[Depends(require_api_key())])
+def variance_ratio_test_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P373: Lo-MacKinlay variance ratio test for random walk hypothesis.
+
+    Body: ``{"prices": [...], "lags"?: [int]}`` where ``prices`` is a
+    non-empty list of positive prices (≥3 values) and ``lags`` (optional,
+    default [2,5,10,20]) is a list of lag parameters for VR computation.
+    Each lag must be ≥2 and < len(prices). Returns per-lag VR, z-statistic,
+    p-value, and ``is_random_walk`` (True if all |z|<1.96). HTTP 422 on
+    invalid input.
+    """
+    from app.platform.variance_ratio_test import variance_ratio_test_report
+
+    try:
+        prices = _numeric_series(payload, field="prices")
+        lags_raw = payload.get("lags")
+        lags: list[int] | None = None
+        if lags_raw is not None:
+            if not isinstance(lags_raw, list):
+                raise ValueError("lags must be a list of ints")
+            lags = []
+            for idx, v in enumerate(lags_raw):
+                if isinstance(v, bool) or not isinstance(v, int):
+                    raise ValueError(f"lags[{idx}] must be an int")
+                lags.append(v)
+        result = variance_ratio_test_report(prices, lags=lags)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P374 — Multivariate normality endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/multivariate-normality", dependencies=[Depends(require_api_key())])
+def multivariate_normality_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P374: Mardia multivariate normality test on a returns panel.
+
+    Body: ``{"returns_panel": {asset: [returns]}}`` where ``returns_panel``
+    is a non-empty dict of equal-length return series (≤50 assets, ≥3 obs).
+    Returns Mardia skewness, kurtosis, p-values, and ``is_multivariate_normal``
+    (True if both p>0.05). HTTP 422 on invalid input.
+    """
+    from app.platform.multivariate_normality import multivariate_normality_report
+
+    try:
+        returns_panel = _panel_field(payload, field="returns_panel")
+        result = multivariate_normality_report(returns_panel)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P375 — Implied risk-free rate endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/implied-risk-free-rate", dependencies=[Depends(require_api_key())])
+def implied_risk_free_rate_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P375: implied risk-free rate from put-call parity.
+
+    Body: ``{"call_prices": {strike: price}, "put_prices": {strike: price},
+    "spot": float, "expiry": float}`` where ``call_prices`` and ``put_prices``
+    share at least one common strike, ``spot`` is the underlying price, and
+    ``expiry`` is time-to-expiry in years. Returns per-strike implied rates,
+    median, mean, consensus (outlier-trimmed) and outlier strikes. HTTP 422
+    on invalid input.
+    """
+    from app.platform.implied_risk_free_rate import implied_risk_free_rate_report
+
+    try:
+        call_raw = payload.get("call_prices")
+        put_raw = payload.get("put_prices")
+        if not isinstance(call_raw, dict) or not isinstance(put_raw, dict):
+            raise ValueError("call_prices and put_prices must be dicts")
+        call_prices: dict[float, float] = {}
+        for k, v in call_raw.items():
+            call_prices[_finite_number(float(k), "call_prices key")] = _finite_number(v, f"call_prices['{k}']")
+        put_prices: dict[float, float] = {}
+        for k, v in put_raw.items():
+            put_prices[_finite_number(float(k), "put_prices key")] = _finite_number(v, f"put_prices['{k}']")
+        spot = _finite_number(payload.get("spot"), "spot")
+        expiry = _finite_number(payload.get("expiry"), "expiry")
+        result = implied_risk_free_rate_report(
+            call_prices, put_prices, spot=spot, expiry=expiry
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P376 — Price discovery endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/price-discovery", dependencies=[Depends(require_api_key())])
+def price_discovery_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P376: price discovery metrics via Hasbrouck / Gonzalo-Granger approximation.
+
+    Body: ``{"venues": {venue_name: [prices]}}`` where ``venues`` is a
+    non-empty dict of equal-length positive price series (2–50 venues, ≥2 obs).
+    Returns Hasbrouck information shares (variance contribution of each venue),
+    ``dominant_venue``, and ``price_discovery_ratio``. HTTP 422 on invalid input.
+    """
+    from app.platform.price_discovery import price_discovery_report
+
+    try:
+        venues_raw = payload.get("venues")
+        if not isinstance(venues_raw, dict) or not venues_raw:
+            raise ValueError("venues must be a non-empty dict")
+        venues: dict[str, list[float]] = {}
+        for name, series in venues_raw.items():
+            if not isinstance(series, list) or not series:
+                raise ValueError(f"venues['{name}'] must be a non-empty list")
+            venues[str(name)] = [_finite_number(v, f"venues['{name}'] entries") for v in series]
+        result = price_discovery_report(venues)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P385–P388 — platform research endpoints (BDS test, regime factor betas,
+# strategy correlation bootstrap, tail diversification)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/bds-test", dependencies=[Depends(require_api_key())])
+def bds_test_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P385: BDS test for independence on a univariate series.
+
+    Body: ``{"series": [...], "embedding_dimension"?: 2, "epsilon"?: float}``.
+    Returns BDS statistic, correlation integrals, p-value, and independence flag.
+    HTTP 422 on invalid input.
+    """
+    from app.platform.bds_test import bds_test_report
+
+    try:
+        series = _numeric_series(payload)
+        embedding_dimension_raw = payload.get("embedding_dimension", 2)
+        if isinstance(embedding_dimension_raw, bool) or not isinstance(embedding_dimension_raw, int):
+            raise TypeError("embedding_dimension must be an int")
+        epsilon_raw = payload.get("epsilon")
+        epsilon = float(epsilon_raw) if epsilon_raw is not None else None
+        result = bds_test_report(
+            series,
+            embedding_dimension=embedding_dimension_raw,
+            epsilon=epsilon,
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+@router.post("/regime-factor-betas", dependencies=[Depends(require_api_key())])
+def regime_factor_betas_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P386: per-regime factor beta analysis via OLS regression.
+
+    Body: ``{"returns": [...], "factor_returns": {name: [...]}, "regimes": [...]}``.
+    All three must be aligned. Returns per-regime betas, R², n, plus
+    cross-regime beta stability (CV) and spread (max-min).
+    HTTP 422 on invalid input.
+    """
+    from app.platform.regime_factor_betas import regime_factor_betas_report
+
+    try:
+        returns_raw = payload.get("returns")
+        if not isinstance(returns_raw, list) or not returns_raw:
+            raise ValueError("returns must be a non-empty list")
+        returns = [_finite_number(v, "returns entries") for v in returns_raw]
+
+        fr_raw = payload.get("factor_returns")
+        if not isinstance(fr_raw, dict) or not fr_raw:
+            raise ValueError("factor_returns must be a non-empty dict")
+        factor_returns: dict[str, list[float]] = {}
+        for name, series in fr_raw.items():
+            if not isinstance(series, list) or not series:
+                raise ValueError(f"factor_returns['{name}'] must be a non-empty list")
+            factor_returns[str(name)] = [
+                _finite_number(v, f"factor_returns['{name}'] entries") for v in series
+            ]
+
+        regimes_raw = payload.get("regimes")
+        if not isinstance(regimes_raw, list) or not regimes_raw:
+            raise ValueError("regimes must be a non-empty list")
+
+        result = regime_factor_betas_report(returns, factor_returns, regimes_raw)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+@router.post("/strategy-correlation-bootstrap", dependencies=[Depends(require_api_key())])
+def strategy_correlation_bootstrap_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P387: strategy pairwise correlation bootstrap (stationary block).
+
+    Body: ``{"strategy_returns": {name: [...]}, "n_bootstrap"?: 500,
+    "seed"?: 42, "block_size"?: 5}``. Returns correlation matrix with 95 %
+    CIs, significant pairs, and diversification flag.
+    HTTP 422 on invalid input.
+    """
+    from app.platform.strategy_correlation_bootstrap import (
+        strategy_correlation_bootstrap_report,
+    )
+
+    try:
+        sr_raw = payload.get("strategy_returns")
+        if not isinstance(sr_raw, dict) or not sr_raw:
+            raise ValueError("strategy_returns must be a non-empty dict")
+        strategy_returns: dict[str, list[float]] = {}
+        for name, series in sr_raw.items():
+            if not isinstance(series, list) or not series:
+                raise ValueError(f"strategy_returns['{name}'] must be a non-empty list")
+            strategy_returns[str(name)] = [
+                _finite_number(v, f"strategy_returns['{name}'] entries") for v in series
+            ]
+
+        n_bootstrap_raw = payload.get("n_bootstrap", 500)
+        if isinstance(n_bootstrap_raw, bool) or not isinstance(n_bootstrap_raw, int):
+            raise ValueError("n_bootstrap must be an int")
+        seed_raw = payload.get("seed", 42)
+        if isinstance(seed_raw, bool) or not isinstance(seed_raw, int):
+            raise ValueError("seed must be an int")
+        block_size_raw = payload.get("block_size", 5)
+        if isinstance(block_size_raw, bool) or not isinstance(block_size_raw, int):
+            raise ValueError("block_size must be an int")
+
+        result = strategy_correlation_bootstrap_report(
+            strategy_returns,
+            n_bootstrap=n_bootstrap_raw,
+            seed=seed_raw,
+            block_size=block_size_raw,
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+@router.post("/tail-diversification", dependencies=[Depends(require_api_key())])
+def tail_diversification_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P388: tail diversification analysis.
+
+    Body: ``{"returns_panel": {asset: [...]}, "weights": {asset: w},
+    "threshold"?: 0.05}``. Returns tail VaR, benchmark VaR,
+    diversification benefit, and tail vs normal correlation.
+    HTTP 422 on invalid input.
+    """
+    from app.platform.tail_diversification import tail_diversification_report
+
+    try:
+        rp_raw = payload.get("returns_panel")
+        if not isinstance(rp_raw, dict) or not rp_raw:
+            raise ValueError("returns_panel must be a non-empty dict")
+        returns_panel: dict[str, list[float]] = {}
+        for name, series in rp_raw.items():
+            if not isinstance(series, list) or not series:
+                raise ValueError(f"returns_panel['{name}'] must be a non-empty list")
+            returns_panel[str(name)] = [
+                _finite_number(v, f"returns_panel['{name}'] entries") for v in series
+            ]
+
+        weights_raw = payload.get("weights")
+        if not isinstance(weights_raw, dict) or not weights_raw:
+            raise ValueError("weights must be a non-empty dict")
+        weights: dict[str, float] = {}
+        for name, w in weights_raw.items():
+            weights[str(name)] = _finite_number(w, f"weights['{name}']")
+
+        threshold_raw = payload.get("threshold", 0.05)
+        threshold = _finite_number(threshold_raw, "threshold")
+
+        result = tail_diversification_report(
+            returns_panel, weights, threshold=threshold
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P377 – Hedge Ratio Comparison endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/hedge-ratio-comparison", dependencies=[Depends(require_api_key())])
+def hedge_ratio_comparison_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P377: compare time-varying hedge ratio estimation methods.
+
+    Body: ``{"y": [...], "x": [...], "window"?: 20}`` where ``y`` and ``x``
+    are equal-length finite number series (≥2 observations, ≤5000). Returns
+    per-method ``{hedge_ratio, residual_vol, effectiveness}``, ``best_method``,
+    and ``ratios_over_time`` for OLS, rolling_ols, ewma. HTTP 422 on invalid
+    input.
+    """
+    from app.platform.hedge_ratio_comparison import hedge_ratio_comparison_report
+
+    try:
+        y = _numeric_series(payload, field="y")
+        x = _numeric_series(payload, field="x")
+        if len(y) != len(x):
+            raise ValueError("y and x must have the same length")
+        window_raw = payload.get("window", 20)
+        if isinstance(window_raw, bool) or not isinstance(window_raw, int):
+            raise ValueError("window must be an int")
+        result = hedge_ratio_comparison_report(y, x, window=window_raw)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P378 – Copula Stress endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/copula-stress", dependencies=[Depends(require_api_key())])
+def copula_stress_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P378: empirical copula stress test from returns panel.
+
+    Body: ``{"returns_panel": {asset: [returns]}}`` where ``returns_panel``
+    is a non-empty dict of equal-length return series (≤50 assets, ≥2 obs).
+    Optional ``quantile`` (default 0.05), ``n_scenarios`` (default 100),
+    ``seed`` (default 42). Returns ``scenarios`` (list of per-asset stressed
+    returns), ``tail_correlation``, ``systemic_loss``, and
+    ``worst_scenario_index``. HTTP 422 on invalid input.
+    """
+    from app.platform.copula_stress import copula_stress_report
+
+    try:
+        returns_panel = _panel_field(payload, field="returns_panel")
+        quantile = float(payload.get("quantile", 0.05))
+        n_scenarios_raw = payload.get("n_scenarios", 100)
+        if isinstance(n_scenarios_raw, bool) or not isinstance(n_scenarios_raw, int):
+            raise ValueError("n_scenarios must be an int")
+        seed_raw = payload.get("seed", 42)
+        if isinstance(seed_raw, bool) or not isinstance(seed_raw, int):
+            raise ValueError("seed must be an int")
+        result = copula_stress_report(
+            returns_panel,
+            quantile=quantile,
+            n_scenarios=n_scenarios_raw,
+            seed=seed_raw,
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P379 – Backtest Overlap endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/backtest-overlap", dependencies=[Depends(require_api_key())])
+def backtest_overlap_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P379: backtest overlap diagnostics for rolling-window design.
+
+    Body: ``{"train_window": int, "test_window": int, "total_periods": int,
+    "step"?: 1}``. All values must be positive ints, and
+    ``train_window + test_window ≤ total_periods``. Returns ``n_trials``,
+    ``overlap_rate``, ``effective_sample_size``, and ``bias_adjustment``.
+    HTTP 422 on invalid input.
+    """
+    from app.platform.backtest_overlap import backtest_overlap_report
+
+    for key in ("train_window", "test_window", "total_periods"):
+        if key not in payload:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"{key} is required",
+            )
+    try:
+        train_window = int(payload["train_window"])
+        test_window = int(payload["test_window"])
+        total_periods = int(payload["total_periods"])
+        step_raw = payload.get("step", 1)
+        step = int(step_raw)
+        result = backtest_overlap_report(
+            train_window=train_window,
+            test_window=test_window,
+            total_periods=total_periods,
+            step=step,
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# P380 – Information Criteria endpoint
+# ---------------------------------------------------------------------------
+
+
+@router.post("/information-criteria", dependencies=[Depends(require_api_key())])
+def information_criteria_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """P380: compute AIC, BIC, HQIC for a set of candidate models.
+
+    Body: ``{"models": [{"name": str, "log_likelihood": float, "n_params": int},
+    ...], "n": int}`` where ``n`` is the number of observations (≥1). Returns
+    ``per_model`` (dict of {aic, bic, hqic}), ``best_aic_model``, and
+    ``best_bic_model``. HTTP 422 on invalid input.
+    """
+    from app.platform.information_criteria import information_criteria_report
+
+    models = payload.get("models")
+    n_raw = payload.get("n")
+    if not isinstance(models, list) or not models:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="models must be a non-empty list",
+        )
+    if n_raw is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="n is required",
+        )
+    try:
+        n = int(n_raw)
+        result = information_criteria_report(models, n=n)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    return result.to_dict()

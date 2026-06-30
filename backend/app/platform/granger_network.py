@@ -104,10 +104,11 @@ def _ols_coefficients(y: list[float], x: list[list[float]]) -> list[float] | Non
     return _ols_solve(y, X)
 
 
-def _f_distribution_cdf(f_stat: float, df1: int, df2: int) -> float:
-    """Approximate CDF of F-distribution using beta incomplete regularised function.
+def _f_test_p_value(f_stat: float, df1: int, df2: int) -> float:
+    """Approximate upper-tail p-value of the F-distribution.
 
-    Uses a simple approximation — for p-value computation we check F > threshold.
+    Returns P(F > f_stat) via the Wilson-Hilferty normal approximation; small
+    values indicate Granger-causality significance.
     """
     # Wilson-Hilferty approximation for chi-square → normal
     # F(d1,d2) → approximation
@@ -346,7 +347,8 @@ def granger_network_report(
     for a in assets:
         for b in assets:
             f_val = adj[a][b]
-            if f_val > 0 and _f_distribution_cdf(f_val, max_lag, len(series_map[a]) - 2 * max_lag - 1) > 1.0 - significance:
+            p_value = _f_test_p_value(f_val, max_lag, len(series_map[a]) - 2 * max_lag - 1)
+            if f_val > 0 and p_value < significance:
                 significant_edges.append({"from": a, "to": b, "f_stat": f_val})
 
     # PageRank on significant edges graph

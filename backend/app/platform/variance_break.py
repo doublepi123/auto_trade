@@ -204,8 +204,12 @@ def variance_break_report(
             "variance": seg_var,
         }
 
-    # Sort break_points in increasing order
-    break_points.sort()
+    # Sort break_points, variance_ratios, and icss_statistics together
+    paired = list(zip(break_points, variance_ratios, icss_statistics))
+    paired.sort()
+    break_points = [p[0] for p in paired]
+    variance_ratios = [p[1] for p in paired]
+    icss_statistics = [p[2] for p in paired]
 
     return VarianceBreakResult(
         break_points=break_points,

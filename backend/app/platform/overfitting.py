@@ -148,7 +148,7 @@ def deflated_sharpe_ratio(
 
     Given an ``observed_sharpe`` from the best of ``n_trials`` strategy trials,
     a return ``sample_size`` (number of observations), and the return series'
-    ``skewness``/excess ``kurtosis`` (defaults assume Normality), compute:
+    ``skewness``/raw ``kurtosis`` (defaults assume Normality, K=3), compute:
 
     * the expected maximum Sharpe under the null (zero true Sharpe) across
       ``n_trials`` trials — the multiple-testing benchmark;

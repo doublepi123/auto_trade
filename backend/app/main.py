@@ -639,9 +639,12 @@ app.include_router(ws_router)
 # the full stack in the server log for debugging (Issue 4).
 async def _handle_unhandled_exception(request: Any, exc: Exception) -> JSONResponse:
     logger.exception("unhandled exception on %s %s", request.method, request.url.path)
+    body: dict[str, Any] = {"detail": "Internal server error"}
+    if settings.env in ("dev", "test"):
+        body["error_type"] = type(exc).__name__
     return JSONResponse(
         status_code=500,
-        content={"detail": "Internal server error", "error_type": type(exc).__name__},
+        content=body,
     )
 
 

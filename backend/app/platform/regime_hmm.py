@@ -229,7 +229,7 @@ def backward_probs(returns: Sequence[float], params: HMMParams, c: Sequence[floa
     N = params.n_states
     beta: list[list[float]] = [[0.0] * N for _ in range(T)]
     for j in range(N):
-        beta[T - 1][j] = 1.0 / (c[T - 1] if c[T - 1] > 0 else 1e-300)
+        beta[T - 1][j] = 1.0
     for t in range(T - 2, -1, -1):
         for j in range(N):
             ssum = 0.0
@@ -239,7 +239,7 @@ def backward_probs(returns: Sequence[float], params: HMMParams, c: Sequence[floa
                     * math.exp(_gaussian_log_pdf(returns[t + 1], params.means[i], params.stds[i]))
                     * beta[t + 1][i]
                 )
-            beta[t][j] = ssum / (c[t] if c[t] > 0 else 1e-300)
+            beta[t][j] = ssum / (c[t + 1] if c[t + 1] > 0 else 1e-300)
     return beta
 
 

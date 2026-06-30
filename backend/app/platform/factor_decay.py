@@ -42,7 +42,7 @@ def factor_decay_report(factor: list[float], forward_returns: dict[str, list[flo
         best_index = ordered_horizons.index(best_horizon)
         for horizon in ordered_horizons[best_index + 1 :]:
             current_ic = decay[horizon]["ic"]
-            if (best_ic >= 0 and current_ic <= best_ic * 0.5) or (best_ic < 0 and current_ic >= best_ic * 0.5):
+            if abs(current_ic) <= abs(best_ic) * 0.5:
                 half_life = horizon
                 break
     return FactorDecayResult(decay=decay, best_horizon=best_horizon, half_life_horizon=half_life)

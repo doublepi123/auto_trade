@@ -162,10 +162,13 @@ def risk_budgeting(
         # backtracking line search keeping y > 0
         alpha = 1.0
         while alpha > 1e-12:
-            new_y = [max(y[i] + alpha * dy[i], 1e-12) for i in range(k)]
-            if all(new_y[i] > 0 for i in range(k)):
+            candidate = [y[i] + alpha * dy[i] for i in range(k)]
+            if all(c > 0 for c in candidate):
+                new_y = candidate
                 break
             alpha *= 0.5
+        else:
+            new_y = [max(y[i] + alpha * dy[i], 1e-12) for i in range(k)]
         y = new_y
         # convergence: gradient norm small
         gnorm = math.sqrt(sum(g * g for g in grad))

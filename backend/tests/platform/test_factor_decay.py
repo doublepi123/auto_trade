@@ -26,6 +26,23 @@ def test_factor_decay_rejects_length_mismatch():
 
 
 def test_factor_decay_half_life_is_after_best_horizon():
+    # horizon "3" has a weak IC (magnitude well below half of horizon "2"'s
+    # IC of 1.0), so the half-life search correctly identifies it.
+    report = factor_decay_report(
+        [1, 2, 3, 4, 5],
+        {
+            "1": [0.01, 0.01, 0.02, 0.02, 0.03],
+            "2": [0.01, 0.02, 0.03, 0.04, 0.05],
+            "3": [0.03, 0.01, 0.02, 0.04, 0.015],
+        },
+    )
+    assert report.to_dict()["best_horizon"] == "2"
+    assert report.to_dict()["half_life_horizon"] == "3"
+
+
+def test_factor_decay_half_life_ignores_sign_flip():
+    # An IC that flips sign but retains full magnitude has NOT decayed — the
+    # half-life search must use magnitude, not signed comparison.
     report = factor_decay_report(
         [1, 2, 3, 4, 5],
         {
@@ -35,7 +52,7 @@ def test_factor_decay_half_life_is_after_best_horizon():
         },
     )
     assert report.to_dict()["best_horizon"] == "2"
-    assert report.to_dict()["half_life_horizon"] == "3"
+    assert report.to_dict()["half_life_horizon"] is None
 
 
 def test_factor_decay_rejects_mixed_unordered_horizon_labels():

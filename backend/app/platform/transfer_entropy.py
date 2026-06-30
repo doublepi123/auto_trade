@@ -39,7 +39,7 @@ def _te(source: list[float], target: list[float], lag: int, bins: int) -> float:
     p_next = _hist([_bucket(target[i + lag], tgt_edges) for i in range(n)], bins)
     p_curr_next: dict[int, float] = {}
     for i in range(n):
-        key = _bucket(target[i + lag], tgt_edges) * bins + _bucket(target[i], tgt_edges)
+        key = _bucket(target[i], tgt_edges) * bins + _bucket(target[i + lag], tgt_edges)
         p_curr_next[key] = p_curr_next.get(key, 0.0) + 1.0 / n
     p_src_next: dict[tuple[int, int, int], float] = {}
     for i in range(n):

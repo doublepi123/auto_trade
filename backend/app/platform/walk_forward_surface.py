@@ -56,6 +56,18 @@ def _mean(xs: list[float]) -> float:
     return sum(xs) / len(xs) if xs else 0.0
 
 
+def _median(xs: list[float]) -> float:
+    """Standard median: middle element (odd) or average of two middle (even)."""
+    n = len(xs)
+    if n == 0:
+        return 0.0
+    s = sorted(xs)
+    mid = n // 2
+    if n % 2 == 1:
+        return s[mid]
+    return (s[mid - 1] + s[mid]) / 2.0
+
+
 def _std(xs: list[float]) -> float:
     n = len(xs)
     if n < 2:
@@ -147,7 +159,7 @@ def walk_forward_surface_report(
         summary = {
             "n_segments": len(segments),
             "mean_degradation": _mean(degradations),
-            "median_degradation": sorted(degradations)[len(degradations) // 2],
+            "median_degradation": _median(degradations),
             "mean_is_sharpe": _mean(is_sharpes),
             "mean_oos_sharpe": _mean(oos_sharpes),
             "min_degradation": min(degradations),
