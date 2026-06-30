@@ -206,7 +206,7 @@ def copula_stress_report(
         for i, name in enumerate(asset_names):
             ret = returns_matrix[i][idx]
             scenario[name] = float(ret)
-            loss += abs(ret)
+            loss += max(0.0, -ret)
         scenarios.append(scenario)
         systemic_loss_list.append(float(loss))
 

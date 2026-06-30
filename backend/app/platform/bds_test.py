@@ -130,13 +130,7 @@ def _normal_cdf(x: float) -> float:
     a4 = -1.453152027
     a5 = 1.061405429
     p = 0.3275911
-
     sign = 1.0 if x >= 0.0 else -1.0
-    t = 1.0 / (1.0 + p * abs(x))
-    y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * math.exp(-x * x / 2.0) / math.sqrt(2.0 * math.pi)
-    # above is pdf * (a1*t + ...) which approximates the tail part
-    # Actually let's use a simpler approach: erf approximation
-    # Use the standard formula:
     # Phi(x) = 0.5 * (1 + erf(x / sqrt(2)))
     x_div = x / math.sqrt(2.0)
     t = 1.0 / (1.0 + p * abs(x_div))
@@ -170,6 +164,8 @@ def bds_test_report(
     """
     validated = validate_series(series, name="series", min_len=10)
     n = len(validated)
+    if n > 300:
+        raise ValueError(f"BDS test series too long: {n} > 300")
     if isinstance(embedding_dimension, bool) or not isinstance(embedding_dimension, int):
         raise ValueError("embedding_dimension must be an int")
     if embedding_dimension < 2:

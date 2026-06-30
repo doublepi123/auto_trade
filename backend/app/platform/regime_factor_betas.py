@@ -61,8 +61,8 @@ def _ols(
                 max_val = abs(aug[row][col])
                 max_row = row
         if max_val < 1e-15:
-            # Singular — skip
-            continue
+            # Singular — design matrix is not invertible
+            return {}, 0.0, n
         if max_row != col:
             aug[col], aug[max_row] = aug[max_row], aug[col]
 

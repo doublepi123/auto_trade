@@ -240,7 +240,9 @@ def quadratic_factor_model_report(
     coefficients = {term_names[j]: beta[j] for j in range(len(beta))}
 
     # Linear-only model for comparison
-    linear_term_indices = [j for j, tn in enumerate(term_names) if tn == "const" or (not tn.endswith("^2") and "*" not in tn and tn != "const")]
+    # Use explicit indices based on construction order: const + linear terms
+    num_factors = len(factor_names)
+    linear_term_indices = [0] + list(range(1, 1 + num_factors))
     linear_names = [term_names[j] for j in linear_term_indices]
     X_linear = [[X_cols[j][i] for j in linear_term_indices] for i in range(n)]
     beta_linear, r_squared_linear = _ols(X_linear, returns_v)

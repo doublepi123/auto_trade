@@ -162,7 +162,7 @@ def tail_diversification_report(
 
     # Portfolio tail loss
     port_tail_losses = [port_returns[i] for i in tail_indices]
-    portfolio_tail_var = -(sum(port_tail_losses) / len(port_tail_losses))
+    portfolio_tail_var = max(0.0, -(sum(port_tail_losses) / len(port_tail_losses)))
 
     # Benchmark tail loss (same tail windows as portfolio)
     bench_tail_losses = [bench_returns[i] for i in tail_indices]

@@ -96,7 +96,7 @@ def _autocov(series: list[float], lag: int) -> float:
 def _z_statistic(returns: list[float], q: int) -> tuple[float, float, float]:
     """Compute VR(q), z-statistic, and p-value for given lag q.
 
-    Uses the heteroskedasticity-robust variance estimator.
+    Uses the homoskedastic (Lo-MacKinlay 1988 M1 statistic) variance estimator.
     """
     T = len(returns)
     if T < q + 1:
@@ -117,24 +117,7 @@ def _z_statistic(returns: list[float], q: int) -> tuple[float, float, float]:
 
     vr = varq / (q * var1)
 
-    # Compute the heteroskedasticity-robust phi estimator
-    nk = T - q + 1
-    # Weighted sum of autocovariances
-    theta = 0.0
-    for j in range(1, q):
-        weight = (2.0 * (q - j) / q) ** 2
-        # Delta_j: numerator of heteroskedasticity-robust variance
-        num = 0.0
-        denom = 0.0
-        for t in range(j + 1, T + 1):
-            diff = (returns[t - 1] - sum(returns) / T) ** 2
-            if t - j - 1 >= 0:
-                num += (returns[t - 1] - sum(returns) / T) ** 2 * (returns[t - j - 1] - sum(returns) / T) ** 2
-        # Simpler approach: use asymptotic variance formula
-        # phi = 2(2q-1)(q-1) / (3q)
-        pass
-
-    # Use simplified asymptotic variance: var(VR-1) = 2(2q-1)(q-1)/(3q*T)
+    # Use asymptotic variance: var(VR-1) = 2(2q-1)(q-1)/(3q*T)
     asymptotic_var = 2.0 * (2.0 * q - 1.0) * (q - 1.0) / (3.0 * q * T)
     if asymptotic_var <= 0:
         z_stat = 0.0
@@ -196,6 +179,12 @@ def variance_ratio_test_report(
         if lag >= n:
             continue  # skip lags too large for the series
         effective_lags.append(lag)
+
+    if not effective_lags:
+        raise ValueError(
+            f"all requested lags {lags} are >= series length {n}; "
+            f"no effective lags remain"
+        )
 
     per_lag: list[LagResult] = []
     all_non_significant = True

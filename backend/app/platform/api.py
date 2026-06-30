@@ -6284,7 +6284,7 @@ def bds_test_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
         if isinstance(embedding_dimension_raw, bool) or not isinstance(embedding_dimension_raw, int):
             raise TypeError("embedding_dimension must be an int")
         epsilon_raw = payload.get("epsilon")
-        epsilon = float(epsilon_raw) if epsilon_raw is not None else None
+        epsilon = _finite_number(epsilon_raw, "epsilon") if epsilon_raw is not None else None
         result = bds_test_report(
             series,
             embedding_dimension=embedding_dimension_raw,
@@ -6486,7 +6486,7 @@ def copula_stress_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
 
     try:
         returns_panel = _panel_field(payload, field="returns_panel")
-        quantile = float(payload.get("quantile", 0.05))
+        quantile = _finite_number(payload.get("quantile", 0.05), "quantile")
         n_scenarios_raw = payload.get("n_scenarios", 100)
         if isinstance(n_scenarios_raw, bool) or not isinstance(n_scenarios_raw, int):
             raise ValueError("n_scenarios must be an int")

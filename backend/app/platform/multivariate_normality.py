@@ -234,14 +234,8 @@ def multivariate_normality_report(
     cov_inv = _chol_inv_2x2_or_3x3(cov)
     if cov_inv is None:
         # Covariance matrix is singular — cannot assess normality
-        return MultivariateNormalityResult(
-            mardia_skewness=float("inf"),
-            mardia_kurtosis=float("inf"),
-            skewness_p_value=0.0,
-            kurtosis_p_value=0.0,
-            is_multivariate_normal=False,
-            n_observations=n,
-            n_assets=p,
+        raise ValueError(
+            "covariance matrix is singular; cannot assess normality with given sample size"
         )
 
     b1p = _mardia_skewness(matrix, cov_inv)

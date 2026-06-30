@@ -1,17 +1,36 @@
-"""P371: Fama-MacBeth — two-pass cross-sectional regression.
+"""P371: Fama-MacBeth — single-factor mean proxy.
 
-Classic two-stage procedure for estimating factor risk premiums:
+**NOT a true Fama-MacBeth two-pass cross-sectional regression.**
 
-1. **First pass** (time-series): For each asset, regress returns on factor(s)
-   to obtain factor loadings (betas). Simplification: use per-period
-   cross-sectional regression directly.
-2. **Second pass** (cross-section): For each period, regress asset returns on
-   factor loadings to obtain the factor premium for that period.
-3. **Summary**: Compute the mean premium, standard error, and t-statistic.
+This module implements a simplified single-factor mean-proxy estimator, NOT the
+classic Fama & MacBeth (1973) two-stage procedure. Key limitations:
+
+- **Single factor only**: Uses the first factor's value at each period as a
+  constant regressor across all assets in cross-section. True Fama-MacBeth
+  requires per-asset time-series betas estimated in a first pass.
+- **Constant regressor**: Because the factor value ``f_t`` is constant across
+  all assets at a given period ``t``, the cross-sectional regression cannot
+  separately identify an intercept and slope — the premium estimate is
+  ``mean(y_t) / f_t``, which conflates a genuine risk premium with the
+  cross-sectional mean return.
+- **R² is identically zero**: With a constant regressor per period, all
+  cross-sectional variation in returns is unexplained, so per-period R² = 0.
+- **t-statistic is meaningless**: The t-stat derived from time-series variation
+  of per-period premiums does not have the correct null distribution under the
+  Fama-MacBeth procedure, because the first-pass beta estimation step is
+  omitted entirely.
+
+The computed ``mean_premium`` may be interpreted as a rough average return
+per unit of factor exposure, but it is **not a risk premium** in the
+Fama-MacBeth sense. Use with caution for exploratory purposes only.
+
+Procedure used here:
+
+1. For each period ``t``, compute ``premium_t = mean(asset_returns[:, t]) / f_t``.
+2. Compute the time-series mean of ``premium_t`` over all periods.
+3. Report a (non-standard) standard error and t-statistic.
 
 Pure Python, no scipy/numpy.
-
-Reference: Fama & MacBeth (1973) "Risk, Return, and Equilibrium: Empirical Tests".
 """
 
 from __future__ import annotations
@@ -189,7 +208,12 @@ def fama_macbeth_report(
     returns_panel: dict[str, list[float]],
     factor_panel: dict[str, list[float]],
 ) -> FamaMacbethResult:
-    """Estimate factor risk premiums via Fama-MacBeth two-pass regression.
+    """Single-factor mean proxy (NOT true Fama-MacBeth two-pass regression).
+
+    This is a simplified estimator that computes per-period ``mean(y_t) / f_t``
+    and averages across periods. It does NOT perform the classic two-stage
+    Fama-MacBeth procedure (time-series betas → cross-sectional premiums).
+    See module docstring for full limitations.
 
     Parameters
     ----------

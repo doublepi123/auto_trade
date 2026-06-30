@@ -200,9 +200,7 @@ def higher_moment_forecast_report(
     # Rolling moments
     skew_series, kurt_series = _rolling_moments(returns_v, window)
 
-    # AR(1) forecast on the moment series (skip leading zeros)
-    valid_skew = [s for s in skew_series if s != 0.0 or skew_series.index(s) < window - 1]
-    # Actually, take the full series starting from when we have values
+    # AR(1) forecast on the moment series starting from when we have values
     skew_valid = skew_series[window - 1 :]
     kurt_valid = kurt_series[window - 1 :]
 

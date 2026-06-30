@@ -119,7 +119,7 @@ def _fit_asymmetric_garch(returns: list[float], lags: int) -> tuple[float, float
     y = r_sq[1:]  # h_t proxy
     x1 = r_sq[:-1]  # eps_{t-1}^2
     returns_lag = returns[:-1]
-    x2 = [r_sq[i] if returns_lag[i] < 0 else 0.0 for i in range(len(returns_lag))]
+    x2 = [x1[i] if returns_lag[i] < 0 else 0.0 for i in range(len(returns_lag))]
     # x2: eps^2 * I(eps<0)
 
     # Simple double OLS (not multivariate — we'll do sequential estimation)
@@ -127,15 +127,7 @@ def _fit_asymmetric_garch(returns: list[float], lags: int) -> tuple[float, float
     n = len(y)
     mean_y = sum(y) / n
 
-    # For simplicity, use a simpler estimator:
-    # omega = unconditional variance scaled down
-    # alpha from autocorrelation of squared returns
-    # gamma from negative-shock asymmetry
-
-    # Compute unconditional variance
-    omega = sum(r_sq) / len(r_sq) * 0.5  # starting point
-
-    # Alpha: autocorrelation of squared returns
+    # Alpha: OLS regression of squared returns on lagged squared returns
     mean_x1 = sum(x1) / n
     num_a = 0.0
     den_a = 0.0
@@ -147,6 +139,10 @@ def _fit_asymmetric_garch(returns: list[float], lags: int) -> tuple[float, float
 
     alpha = num_a / den_a if den_a > 1e-15 else 0.01
     alpha = max(0.0, min(0.5, alpha))
+
+    # Omega: OLS intercept (consistent with _fit_symmetric_garch)
+    omega = mean_y - alpha * mean_x1
+    omega = max(0.0, omega)
 
     # Compute residuals after symmetric model
     residuals = [yi - (omega + alpha * x1i) for yi, x1i in zip(y, x1)]

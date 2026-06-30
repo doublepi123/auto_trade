@@ -127,7 +127,7 @@ def price_discovery_report(venues: dict[str, list[float]]) -> PriceDiscoveryResu
 
     T = n - 1  # number of differences
 
-    # Hasbrouck information share approximation:
+    # Naive variance-share approximation (not true Hasbrouck IS):
     # Compute the variance of each venue's price innovations
     # and the sum of all variances.
     # IS_i = variance(diff_i) / sum_all(variance(diff_j))
@@ -149,12 +149,12 @@ def price_discovery_report(venues: dict[str, list[float]]) -> PriceDiscoveryResu
     # Dominant venue: max IS
     dominant_venue = max(information_shares, key=lambda k: information_shares[k])
 
-    # Gonzalo-Granger permanent component proxy:
+    # Naive variance-share proxy (not true Gonzalo-Granger PT):
     # The permanent component of the price is approximated by
     # the common factor derived from the first venue's variance
     # contribution. Price discovery ratio = first_venue_variance / (sum of all variances).
     first_venue_share = variances[0] / total_var if total_var > 0 else 1.0 / m
-    price_discovery_ratio = first_venue_share
+    price_discovery_ratio = first_venue_share  # Note: this is a naive variance-share, not GG PT
 
     return PriceDiscoveryResult(
         information_shares=information_shares,

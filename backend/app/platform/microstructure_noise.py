@@ -66,13 +66,16 @@ def _log_returns(prices: list[float]) -> list[float]:
 
 
 def _realized_variance(returns: list[float], freq: int) -> float:
-    """Compute RV at the given sampling frequency (every *freq* ticks)."""
-    sampled = returns[::freq]
-    # Accumulate RV as overlapping block sums to approximate the Bandi-Russell estimator
-    # Use the standard approach: sum of squared returns at the specified frequency
-    if not sampled:
-        return 0.0
-    return sum(r * r for r in sampled)
+    """Compute RV as sum of squared block-aggregated returns (Bandi-Russell estimator).
+
+    Returns are aggregated into non-overlapping blocks of size *freq*.
+    Only complete blocks are used.
+    """
+    rv = 0.0
+    for i in range(0, len(returns) - freq + 1, freq):
+        block_return = sum(returns[i : i + freq])
+        rv += block_return * block_return
+    return rv
 
 
 def microstructure_noise_report(

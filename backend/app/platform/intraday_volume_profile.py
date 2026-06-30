@@ -48,10 +48,10 @@ def _validate_time_key(key: str) -> str:
 def _validate_volumes(values: Any, bucket: str) -> list[float]:
     if not isinstance(values, list):
         raise ValueError(f"volumes for '{bucket}' must be a non-empty list of finite numbers")
-    if len(values) > 5000:
-        raise ValueError(f"volumes for '{bucket}' must contain at most 5000 values")
     if not values:
         raise ValueError(f"volumes for '{bucket}' must be a non-empty list of finite numbers")
+    if len(values) > 5000:
+        raise ValueError(f"volumes for '{bucket}' must contain at most 5000 values")
     out: list[float] = []
     for value in values:
         if isinstance(value, bool) or not isinstance(value, (int, float)):
