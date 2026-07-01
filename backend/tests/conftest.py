@@ -31,6 +31,8 @@ os.environ["AUTO_TRADE_CREDENTIAL_KEY_PATH"] = os.path.join(
 for name in (
     "AUTO_TRADE_API_KEY",
     "CREDENTIAL_MASTER_KEY",
+    "DEEPSEEK_API_KEY",
+    "MINIMAX_API_KEY",
     "LONGPORT_APP_KEY",
     "LONGPORT_APP_SECRET",
     "LONGPORT_ACCESS_TOKEN",
@@ -39,3 +41,10 @@ for name in (
     "LONGBRIDGE_ACCESS_TOKEN",
 ):
     os.environ[name] = ""
+
+os.environ["AUTO_TRADE_LLM_PROVIDER"] = "deepseek"
+os.environ["MINIMAX_BASE_URL"] = "https://api.minimaxi.com/v1"
+os.environ["MINIMAX_API_URL"] = ""
+os.environ["MINIMAX_MODEL"] = "MiniMax-M3"
+os.environ["MINIMAX_THINKING_TYPE"] = "adaptive"
+os.environ["MINIMAX_MAX_COMPLETION_TOKENS"] = "8192"

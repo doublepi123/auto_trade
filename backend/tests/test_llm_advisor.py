@@ -42,6 +42,16 @@ def test_deepseek_chat_payload_uses_256k_completion_budget_for_thinking() -> Non
     assert payload["max_tokens"] == 262144
 
 
+def test_minimax_chat_payload_defaults_to_m3_adaptive_thinking() -> None:
+    payload = LLMAdvisorService._minimax_chat_payload("analyze NVDA")
+
+    assert payload["model"] == "MiniMax-M3"
+    assert payload["max_completion_tokens"] == 8192
+    assert payload["thinking"] == {"type": "adaptive"}
+    payload = cast(dict[str, Any], payload)
+    assert payload["messages"][1]["content"] == "analyze NVDA"
+
+
 def test_preview_request_normalizes_symbol() -> None:
     payload = LLMPreviewAnalyzeRequest(symbol=" aapl.us ", market="US")
 
@@ -390,6 +400,14 @@ class TestLLMAdvisorService:
         )
         assert result["success"] is False
         assert "DEEPSEEK_API_KEY" in result["error"] or "failed" in result["error"]
+
+    def test_call_llm_routes_to_minimax_provider(self, advisor: LLMAdvisorService, monkeypatch) -> None:
+        import app.config
+
+        monkeypatch.setattr(app.config.settings, "llm_provider", "minimax", raising=False)
+        monkeypatch.setattr(advisor, "_call_minimax", lambda prompt: f"minimax:{prompt}")
+
+        assert advisor._call_llm("analyze NVDA") == "minimax:analyze NVDA"
 
     def test_preview_does_not_record_or_update_analysis_throttle(self, advisor: LLMAdvisorService, monkeypatch) -> None:
         import app.services.llm_advisor_service as service_module
@@ -937,6 +955,80 @@ class TestLLMAdvisorDegradation:
 
         msg = str(excinfo.value).lower()
         assert any(keyword in msg for keyword in ("empty", "content", "choice"))
+
+    def test_call_minimax_posts_openai_compatible_payload(self, advisor: LLMAdvisorService, monkeypatch) -> None:
+        import app.config
+        import app.services.llm_advisor_service as service_module
+
+        captured: dict[str, Any] = {}
+
+        class FakeResponse:
+            text = '{"choices":[{"message":{"content":"ok"}}]}'
+
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict[str, object]:
+                return {"choices": [{"message": {"content": "ok"}}]}
+
+        def fake_post(*args, **kwargs) -> FakeResponse:
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+            return FakeResponse()
+
+        monkeypatch.setattr(app.config.settings, "minimax_api_key", "mm-test-key", raising=False)
+        monkeypatch.setattr(app.config.settings, "minimax_base_url", "https://api.minimaxi.com/v1", raising=False)
+        monkeypatch.setattr(app.config.settings, "minimax_api_url", "", raising=False)
+        monkeypatch.setattr(app.config.settings, "minimax_model", "MiniMax-M3", raising=False)
+        monkeypatch.setattr(app.config.settings, "minimax_max_completion_tokens", 4096, raising=False)
+        monkeypatch.setattr(app.config.settings, "minimax_thinking_type", "adaptive", raising=False)
+        monkeypatch.setattr(service_module.httpx, "post", fake_post)
+
+        assert advisor._call_minimax("analyze NVDA") == "ok"
+
+        assert captured["args"][0] == "https://api.minimaxi.com/v1/chat/completions"
+        headers = captured["kwargs"]["headers"]
+        assert headers["Authorization"] == "Bearer mm-test-key"
+        payload = captured["kwargs"]["json"]
+        assert payload["model"] == "MiniMax-M3"
+        assert payload["messages"][1]["content"] == "analyze NVDA"
+        assert payload["max_completion_tokens"] == 4096
+        assert payload["thinking"] == {"type": "adaptive"}
+
+    def test_call_minimax_accepts_legacy_full_api_url(self, advisor: LLMAdvisorService, monkeypatch) -> None:
+        import app.config
+        import app.services.llm_advisor_service as service_module
+
+        captured: dict[str, Any] = {}
+
+        class FakeResponse:
+            text = '{"choices":[{"message":{"content":"ok"}}]}'
+
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict[str, object]:
+                return {"choices": [{"message": {"content": "ok"}}]}
+
+        def fake_post(*args, **kwargs) -> FakeResponse:
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+            return FakeResponse()
+
+        monkeypatch.setattr(app.config.settings, "minimax_api_key", "mm-test-key", raising=False)
+        monkeypatch.setattr(app.config.settings, "minimax_api_url", "https://api.minimax.io/v1/chat/completions", raising=False)
+        monkeypatch.setattr(service_module.httpx, "post", fake_post)
+
+        assert advisor._call_minimax("analyze NVDA") == "ok"
+        assert captured["args"][0] == "https://api.minimax.io/v1/chat/completions"
+
+    def test_call_minimax_without_key_raises_runtime_error(self, advisor: LLMAdvisorService, monkeypatch) -> None:
+        import app.config
+
+        monkeypatch.setattr(app.config.settings, "minimax_api_key", "", raising=False)
+
+        with pytest.raises(RuntimeError, match="MINIMAX_API_KEY"):
+            advisor._call_minimax("analyze NVDA")
 
     def test_analyze_records_failed_interaction_on_runtime_error(
         self,

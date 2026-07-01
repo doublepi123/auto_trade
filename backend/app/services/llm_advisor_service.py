@@ -283,8 +283,12 @@ class LLMAdvisorService:
         }
 
     def _call_llm(self, prompt: str) -> str:
-        """Call LLM API (delegates to _call_deepseek)."""
-        return self._call_deepseek(prompt)
+        """Call the configured LLM provider."""
+        if settings.llm_provider == "minimax":
+            return self._call_minimax(prompt)
+        if settings.llm_provider == "deepseek":
+            return self._call_deepseek(prompt)
+        raise RuntimeError(f"Unsupported LLM provider: {settings.llm_provider}")
 
     def _select_variant(self, symbol: str) -> tuple[str | None, str | None]:
         """Select A/B prompt variant for the given symbol.
@@ -716,6 +720,33 @@ class LLMAdvisorService:
             payload["reasoning_effort"] = settings.deepseek_reasoning_effort
         return payload
 
+    @staticmethod
+    def _minimax_chat_payload(prompt: str) -> dict[str, object]:
+        return {
+            "model": settings.minimax_model,
+            "messages": [
+                {"role": "system", "content": "You are a professional quantitative trading advisor."},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.3,
+            "max_completion_tokens": settings.minimax_max_completion_tokens,
+            "thinking": {"type": settings.minimax_thinking_type},
+        }
+
+    @staticmethod
+    def _minimax_chat_url() -> str:
+        api_url = settings.minimax_api_url.strip()
+        if api_url:
+            normalized = api_url.rstrip("/")
+            if normalized.endswith("/v1"):
+                return f"{normalized}/chat/completions"
+            return api_url
+
+        base_url = settings.minimax_base_url.strip().rstrip("/")
+        if base_url.endswith("/chat/completions"):
+            return base_url
+        return f"{base_url}/chat/completions"
+
     def _call_deepseek(self, prompt: str) -> str:
         """Call DeepSeek API with the prompt."""
         if not settings.deepseek_api_key:
@@ -773,6 +804,58 @@ class LLMAdvisorService:
                 f" (finish_reason={finish_reason}, reasoning_tokens={reasoning_tokens},"
                 f" reasoning_chars={reasoning_len}, max_tokens={settings.deepseek_max_tokens})."
                 " Increase DEEPSEEK_MAX_TOKENS or lower/disable DeepSeek thinking."
+            )
+        return content
+
+    def _call_minimax(self, prompt: str) -> str:
+        """Call MiniMax OpenAI-compatible Chat Completions API with the prompt."""
+        if not settings.minimax_api_key:
+            raise RuntimeError("MINIMAX_API_KEY is not configured")
+
+        try:
+            response = httpx.post(
+                self._minimax_chat_url(),
+                headers={
+                    "Authorization": f"Bearer {settings.minimax_api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=self._minimax_chat_payload(prompt),
+                timeout=120.0,
+            )
+        except httpx.TimeoutException as exc:
+            raise RuntimeError(f"MiniMax request timeout: {exc}") from exc
+        except httpx.RequestError as exc:
+            raise RuntimeError(f"MiniMax request failed: {exc}") from exc
+
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise RuntimeError(
+                f"MiniMax HTTP {exc.response.status_code}: {exc.response.text[:200]}"
+            ) from exc
+
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise RuntimeError(
+                f"MiniMax returned non-JSON response: {response.text[:200]}"
+            ) from exc
+
+        try:
+            choice = data["choices"][0]
+            message = choice["message"]
+            if not isinstance(message, dict):
+                raise RuntimeError(f"invalid message payload type: {type(message).__name__}")
+            content = message.get("content") or ""
+        except (KeyError, IndexError, TypeError) as exc:
+            raise RuntimeError(f"MiniMax response missing message content: {exc}") from exc
+        if not content.strip():
+            finish_reason = choice.get("finish_reason")
+            usage = data.get("usage") or {}
+            raise RuntimeError(
+                "MiniMax returned empty content"
+                f" (finish_reason={finish_reason}, usage={usage},"
+                f" max_completion_tokens={settings.minimax_max_completion_tokens})."
             )
         return content
 

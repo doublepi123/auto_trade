@@ -118,9 +118,36 @@ class TestSettings:
 
         assert s.deepseek_api_key == "sk-test-key"
 
+    def test_reads_minimax_api_key_from_unprefixed_env_var(self, monkeypatch, tmp_path) -> None:
+        monkeypatch.delenv("MINIMAX_API_KEY", raising=False)
+        monkeypatch.delenv("AUTO_TRADE_MINIMAX_API_KEY", raising=False)
+
+        root = tmp_path / "project"
+        backend = root / "backend"
+        backend.mkdir(parents=True)
+        (root / ".env").write_text(
+            "MINIMAX_API_KEY=mm-test-key\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.chdir(backend)
+        s = Settings()
+
+        assert s.minimax_api_key == "mm-test-key"
+
     def test_deepseek_model_defaults_to_v4_pro_thinking_max_256k(self) -> None:
         s = Settings()
         assert s.deepseek_model == "deepseek-v4-pro"
         assert s.deepseek_reasoning_effort == "max"
         assert s.deepseek_thinking_type == "enabled"
         assert s.deepseek_max_tokens == 262144
+
+    def test_llm_provider_defaults_to_deepseek_and_minimax_defaults_are_available(self) -> None:
+        s = Settings()
+
+        assert s.llm_provider == "deepseek"
+        assert s.minimax_base_url == "https://api.minimaxi.com/v1"
+        assert s.minimax_api_url == ""
+        assert s.minimax_model == "MiniMax-M3"
+        assert s.minimax_thinking_type == "adaptive"
+        assert s.minimax_max_completion_tokens == 8192

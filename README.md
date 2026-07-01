@@ -146,7 +146,10 @@ LONGPORT_APP_SECRET=你的AppSecret
 LONGPORT_ACCESS_TOKEN=你的AccessToken
 AUTO_TRADE_SCT_KEY=你的Server酱SendKey          # 可选
 CREDENTIAL_MASTER_KEY=你的凭证加密主密钥           # 建议设置（Web UI 保存凭证前）
+AUTO_TRADE_LLM_PROVIDER=deepseek                  # deepseek 或 minimax；默认 deepseek
 DEEPSEEK_API_KEY=你的DeepSeek密钥                # 可选，启用 LLM 区间顾问时需要
+MINIMAX_API_KEY=你的MiniMax密钥                  # provider=minimax 时需要
+MINIMAX_BASE_URL=https://api.minimaxi.com/v1      # Token Plan base URL
 AUTO_TRADE_API_KEY=                              # 仅 dev/test 可留空；prod 需要设置
 AUTO_TRADE_FRONTEND_PORT=8080                    # Docker 前端监听端口（默认绑定 127.0.0.1）
 ```
@@ -630,10 +633,17 @@ auto_trade/
 | `AUTO_TRADE_API_KEY` | API 密钥（`dev/test` 可留空；`prod` 必填） | - |
 | `CREDENTIAL_MASTER_KEY` | 凭证加密主密钥；保护 `data/credential_private_key.pem` | - |
 | `AUTO_TRADE_CREDENTIAL_KEY_PATH` | RSA 私钥文件路径（测试/多实例可覆盖） | `data/credential_private_key.pem` |
+| `AUTO_TRADE_LLM_PROVIDER` | LLM provider（`deepseek` / `minimax`） | `deepseek` |
 | `DEEPSEEK_API_KEY` | DeepSeek API 密钥（LLM 顾问） | - |
 | `DEEPSEEK_MODEL` | LLM 模型 ID | `deepseek-v4-pro` |
 | `DEEPSEEK_REASONING_EFFORT` | Thinking 力度（`high` / `max`） | `max` |
 | `DEEPSEEK_THINKING_TYPE` | 是否启用 thinking（`enabled` / `disabled`） | `enabled` |
+| `MINIMAX_API_KEY` | MiniMax API 密钥（`AUTO_TRADE_LLM_PROVIDER=minimax` 时使用） | - |
+| `MINIMAX_BASE_URL` | MiniMax Token Plan base URL；OpenAI-compatible 客户端会拼 `/chat/completions` | `https://api.minimaxi.com/v1` |
+| `MINIMAX_API_URL` | 兼容旧配置：完整 MiniMax Chat Completions endpoint；设置后优先于 `MINIMAX_BASE_URL` | - |
+| `MINIMAX_MODEL` | MiniMax 模型 ID | `MiniMax-M3` |
+| `MINIMAX_THINKING_TYPE` | MiniMax thinking 模式（`adaptive` / `disabled`） | `adaptive` |
+| `MINIMAX_MAX_COMPLETION_TOKENS` | MiniMax 单次响应 completion token 上限 | `8192` |
 | `AUTO_TRADE_MIN_EXIT_PROFIT_PCT` | 平仓最低盈利百分比缓冲 | `0.2` |
 | `AUTO_TRADE_BROKER_RETRY_MAX` | 订单类券商调用最大重试次数（0 = 不重试，共 1 次调用） | `3` |
 | `AUTO_TRADE_BROKER_QUOTE_RETRY_MAX` | 行情类券商调用最大重试次数 | `1` |

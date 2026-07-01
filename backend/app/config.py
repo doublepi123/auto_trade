@@ -28,6 +28,11 @@ class Settings(BaseSettings):
             raise ValueError(f"env must be one of {allowed}, got '{v}'")
         return v
 
+    @field_validator("llm_provider", mode="before")
+    @classmethod
+    def _normalize_llm_provider(cls, v: Any) -> str:
+        return str(v).strip().lower()
+
     @model_validator(mode="after")
     def _warn_non_prod_with_api_key(self) -> "Settings":
         if self.api_key and self.env != "prod":
@@ -74,6 +79,30 @@ class Settings(BaseSettings):
     deepseek_thinking_type: Literal["enabled", "disabled"] = Field(
         default="enabled",
         validation_alias="DEEPSEEK_THINKING_TYPE",
+    )
+    llm_provider: Literal["deepseek", "minimax"] = Field(
+        default="deepseek",
+        validation_alias="AUTO_TRADE_LLM_PROVIDER",
+    )
+    minimax_api_key: str = Field(default="", validation_alias="MINIMAX_API_KEY")
+    minimax_base_url: str = Field(
+        default="https://api.minimaxi.com/v1",
+        validation_alias="MINIMAX_BASE_URL",
+    )
+    minimax_api_url: str = Field(
+        default="",
+        validation_alias="MINIMAX_API_URL",
+    )
+    minimax_model: str = Field(default="MiniMax-M3", validation_alias="MINIMAX_MODEL")
+    minimax_thinking_type: Literal["adaptive", "disabled"] = Field(
+        default="adaptive",
+        validation_alias="MINIMAX_THINKING_TYPE",
+    )
+    minimax_max_completion_tokens: int = Field(
+        default=8192,
+        ge=1,
+        le=131072,
+        validation_alias="MINIMAX_MAX_COMPLETION_TOKENS",
     )
     llm_interval_cron_minutes: int = Field(
         default=2,
@@ -155,6 +184,18 @@ class Settings(BaseSettings):
             logger.warning(
                 "AUTO_TRADE_DEEPSEEK_API_KEY is set but will be ignored. "
                 "The DeepSeek API key uses env var DEEPSEEK_API_KEY (no AUTO_TRADE_ prefix)."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def warn_misconfigured_minimax_key(self) -> "Settings":
+        """Warn if the user set AUTO_TRADE_MINIMAX_API_KEY, which is silently ignored."""
+        import os
+
+        if os.environ.get("AUTO_TRADE_MINIMAX_API_KEY"):
+            logger.warning(
+                "AUTO_TRADE_MINIMAX_API_KEY is set but will be ignored. "
+                "The MiniMax API key uses env var MINIMAX_API_KEY (no AUTO_TRADE_ prefix)."
             )
         return self
 

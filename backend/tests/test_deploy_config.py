@@ -52,10 +52,31 @@ def test_docker_compose_passes_deepseek_key_to_backend() -> None:
     assert "DEEPSEEK_API_KEY=" in compose
 
 
-def test_env_example_documents_deepseek_key() -> None:
+def test_docker_compose_passes_minimax_key_and_provider_to_backend() -> None:
+    compose = (ROOT / "docker-compose.yaml").read_text(encoding="utf-8")
+    dockerhub_compose = (ROOT / "docker-compose.dockerhub.yaml").read_text(encoding="utf-8")
+
+    assert "AUTO_TRADE_LLM_PROVIDER=" in compose
+    assert "MINIMAX_BASE_URL=" in compose
+    assert "MINIMAX_API_KEY=" in compose
+    assert "MINIMAX_MODEL=" in compose
+    assert "MINIMAX_THINKING_TYPE=" in compose
+    assert "MINIMAX_MAX_COMPLETION_TOKENS=" in compose
+    assert "AUTO_TRADE_LLM_PROVIDER=" in dockerhub_compose
+    assert "MINIMAX_BASE_URL=" in dockerhub_compose
+    assert "MINIMAX_API_KEY=" in dockerhub_compose
+    assert "MINIMAX_MODEL=" in dockerhub_compose
+    assert "MINIMAX_THINKING_TYPE=" in dockerhub_compose
+    assert "MINIMAX_MAX_COMPLETION_TOKENS=" in dockerhub_compose
+
+
+def test_env_example_documents_llm_provider_keys() -> None:
     env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
 
+    assert "AUTO_TRADE_LLM_PROVIDER=" in env_example
     assert "DEEPSEEK_API_KEY=" in env_example
+    assert "MINIMAX_BASE_URL=" in env_example
+    assert "MINIMAX_API_KEY=" in env_example
 
 
 def test_docker_compose_publishes_frontend_loopback_by_default_and_keeps_backend_private() -> None:
