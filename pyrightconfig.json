@@ -5,7 +5,8 @@
     "**/node_modules",
     "backend/.venv",
     "backend/.venv312",
-    "backend/.pytest_cache"
+    "backend/.pytest_cache",
+    "backend/alembic"
   ],
   "pythonVersion": "3.11",
   "typeCheckingMode": "basic",

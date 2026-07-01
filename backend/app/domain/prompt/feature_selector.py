@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 logger = logging.getLogger("auto_trade.feature_selector")
@@ -21,6 +22,7 @@ AVAILABLE_INDICATORS = {
 }
 
 DEFAULT_INDICATORS = ["rsi", "macd", "atr", "vwap"]
+_REASONING_BLOCK_RE = re.compile(r"<think>.*?</think>", re.IGNORECASE | re.DOTALL)
 
 
 class FeatureSelector:
@@ -29,21 +31,22 @@ class FeatureSelector:
     @staticmethod
     def parse_selection(llm_response: str, suggested: list[str]) -> list[str]:
         """Parse LLM response to extract selected indicators."""
-        try:
-            start = llm_response.find("{")
-            end = llm_response.rfind("}") + 1
-            if start >= 0 and end > start:
-                json_str = llm_response[start:end]
+        parse_error: Exception | None = None
+        cleaned_response = _REASONING_BLOCK_RE.sub("", llm_response)
+        for json_str in reversed(_json_object_candidates(cleaned_response)):
+            try:
                 data = json.loads(json_str)
                 selected = data.get("selected_indicators")
                 if isinstance(selected, list) and all(isinstance(x, str) for x in selected):
                     valid = [s for s in selected if s in AVAILABLE_INDICATORS]
                     if valid:
                         return valid
-        except (json.JSONDecodeError, KeyError, TypeError) as exc:
+            except (json.JSONDecodeError, KeyError, TypeError) as exc:
+                parse_error = exc
+        if parse_error is not None:
             logger.warning(
                 "Failed to parse LLM indicator selection: %s  response=%.200r",
-                exc,
+                parse_error,
                 llm_response,
             )
 
@@ -86,3 +89,35 @@ class FeatureSelector:
             filtered.pop("volume_analysis", None)
 
         return filtered
+
+
+def _json_object_candidates(text: str) -> list[str]:
+    candidates: list[str] = []
+    start: int | None = None
+    depth = 0
+    in_string = False
+    escaped = False
+
+    for index, char in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            if depth == 0:
+                start = index
+            depth += 1
+        elif char == "}" and depth > 0:
+            depth -= 1
+            if depth == 0 and start is not None:
+                candidates.append(text[start:index + 1])
+                start = None
+
+    return candidates

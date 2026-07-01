@@ -77,7 +77,7 @@ class _Base:
 
 class TestPositionPnlService(_Base):
     def test_long_position_pnl(self) -> None:
-        self._add("AAPL.US", 10, 100.0)
+        self._add("AAPL.US", 10, 1000.0)
         result = PositionPnlService(self._db(), FakeBroker({"AAPL.US": 120.0})).get_positions_pnl()
         assert len(result.positions) == 1
         row = result.positions[0]
@@ -88,7 +88,7 @@ class TestPositionPnlService(_Base):
         assert row.unrealized_pnl_pct == pytest.approx(20.0)
 
     def test_short_position_pnl(self) -> None:
-        self._add("AAPL.US", -10, 100.0)
+        self._add("AAPL.US", -10, 1000.0)
         result = PositionPnlService(self._db(), FakeBroker({"AAPL.US": 80.0})).get_positions_pnl()
         row = result.positions[0]
         # short: profit when price falls below cost
@@ -96,7 +96,7 @@ class TestPositionPnlService(_Base):
         assert row.unrealized_pnl_pct == pytest.approx(20.0)
 
     def test_no_quote_provider(self) -> None:
-        self._add("AAPL.US", 10, 100.0)
+        self._add("AAPL.US", 10, 1000.0)
         result = PositionPnlService(self._db(), None).get_positions_pnl()
         row = result.positions[0]
         assert row.has_quote is False
@@ -113,14 +113,14 @@ class TestPositionPnlService(_Base):
 
     def test_zero_quantity_excluded(self) -> None:
         self._add("AAPL.US", 0, 100.0)
-        self._add("MSFT.US", 5, 200.0)
+        self._add("MSFT.US", 5, 1000.0)
         result = PositionPnlService(self._db(), FakeBroker({"MSFT.US": 210.0})).get_positions_pnl()
         assert len(result.positions) == 1
         assert result.positions[0].symbol == "MSFT.US"
 
     def test_totals_and_unavailable_on_quote_failure(self) -> None:
-        self._add("AAPL.US", 10, 100.0)
-        self._add("MSFT.US", 5, 200.0)
+        self._add("AAPL.US", 10, 1000.0)
+        self._add("MSFT.US", 5, 1000.0)
         broker = FakeBroker({"AAPL.US": 120.0, "MSFT.US": 180.0})
         broker.raising = True
         result = PositionPnlService(self._db(), broker).get_positions_pnl()
@@ -131,7 +131,7 @@ class TestPositionPnlService(_Base):
 
 class TestPositionPnlAPI(_Base):
     def test_endpoint_returns_positions(self, monkeypatch) -> None:
-        self._add("AAPL.US", 10, 100.0)
+        self._add("AAPL.US", 10, 1000.0)
 
         class FakeRunner:
             def __init__(self) -> None:

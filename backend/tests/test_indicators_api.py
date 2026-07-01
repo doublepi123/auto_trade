@@ -97,6 +97,33 @@ class TestIndicatorsApi:
         assert body["rsi"] is None
         assert body["macd"] is None
 
+    def test_sparse_nested_indicator_payload_is_omitted(self, clean_db, monkeypatch):
+        _set_config()
+
+        class SparseAggregator:
+            def __init__(self, broker):
+                pass
+
+            def fetch_market_data(self, symbol, market):
+                return {
+                    "daily_candles": [_FakeCandle(100.0)],
+                    "rsi": 50.0,
+                    "macd": {},
+                    "volume_analysis": {},
+                    "sentiment": {},
+                    "multi_timeframe": {},
+                }
+
+        monkeypatch.setattr("app.api.indicators.DataAggregator", SparseAggregator)
+        resp = client.get("/api/indicators", params={"symbol": "AAPL.US"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["available"] is True
+        assert body["macd"] is None
+        assert body["volume_analysis"] is None
+        assert body["sentiment"] is None
+        assert body["multi_timeframe"] is None
+
     def test_symbol_defaults_to_config(self, clean_db):
         _set_config(symbol="TSLA.US")
         app.dependency_overrides[get_indicator_broker] = lambda: _FakeBroker()

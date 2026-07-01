@@ -1,8 +1,8 @@
 """Live unrealized PnL over open positions.
 
-Joins the persisted weighted-average entry cost (``tracked_entries``, kept
-because the broker's ``avg_price`` drifts on partial fills / corporate actions)
-with live quotes to show per-position and total unrealized P&L.
+Joins the persisted entry quantity and total cost basis (``tracked_entries``,
+kept because the broker's ``avg_price`` drifts on partial fills / corporate
+actions) with live quotes to show per-position and total unrealized P&L.
 
 Broker-agnostic and offline-testable: quotes come from an injected
 ``quote_provider`` (the runner's broker in production, a fake in tests).
@@ -47,18 +47,19 @@ class PositionPnlService:
         rows: list[PositionPnlRow] = []
         for entry in sorted(entries, key=lambda e: e.symbol):
             qty = float(entry.quantity)
-            cost = float(entry.cost)
+            total_cost = abs(float(entry.cost))
+            avg_entry_cost = (total_cost / abs(qty)) if qty else 0.0
             last = quote_map.get(entry.symbol) if entry.symbol else None
-            unrealized, unrealized_pct = _unrealized(qty, cost, last)
+            unrealized, unrealized_pct = _unrealized(qty, avg_entry_cost, last)
             rows.append(PositionPnlRow(
                 symbol=entry.symbol,
                 quantity=qty,
-                avg_entry_cost=cost,
+                avg_entry_cost=avg_entry_cost,
                 last_price=last,
                 unrealized_pnl=unrealized,
                 unrealized_pnl_pct=unrealized_pct,
                 market_value=(last or 0.0) * abs(qty),
-                cost_value=cost * abs(qty),
+                cost_value=total_cost,
                 has_quote=last is not None,
             ))
 
@@ -91,15 +92,15 @@ class PositionPnlService:
         return result
 
 
-def _unrealized(quantity: float, cost: float, last: float | None) -> tuple[float, float | None]:
+def _unrealized(quantity: float, avg_cost: float, last: float | None) -> tuple[float, float | None]:
     """Unrealized P&L for one position. ``None`` pct when it cannot be computed."""
-    if last is None or last <= 0 or cost <= 0:
+    if last is None or last <= 0 or avg_cost <= 0:
         return (0.0, None)
     if quantity >= 0:
-        pnl = (last - cost) * quantity
+        pnl = (last - avg_cost) * quantity
     else:
-        # Short: entry (sell) at cost, profit when last < cost.
-        pnl = (cost - last) * (-quantity)
-    basis = cost * abs(quantity)
+        # Short: entry (sell) at avg_cost, profit when last < avg_cost.
+        pnl = (avg_cost - last) * (-quantity)
+    basis = avg_cost * abs(quantity)
     pct = (pnl / basis * 100) if basis > 0 else None
     return (pnl, pct)

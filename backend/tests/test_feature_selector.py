@@ -26,6 +26,14 @@ class TestFeatureSelector:
         result = FeatureSelector.parse_selection(response, [])
         assert result == ["adx", "macd"]
 
+    def test_parse_uses_final_json_after_reasoning_block(self) -> None:
+        response = (
+            '<think>{"selected_indicators": ["rsi"], "reasoning": "draft"}</think>\n'
+            '{"selected_indicators": ["adx", "macd"], "reasoning": "final"}'
+        )
+        result = FeatureSelector.parse_selection(response, [])
+        assert result == ["adx", "macd"]
+
     def test_parse_fallback_to_default(self) -> None:
         response = "no json here"
         result = FeatureSelector.parse_selection(response, [])
