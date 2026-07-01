@@ -79,4 +79,4 @@ def get_experiment_summary(
     db: Session = Depends(get_db),
 ) -> list[ExperimentSummary]:
     manager = ABTestManager(db)
-    return manager.get_experiment_summary(experiment_name)
+    return [ExperimentSummary.model_validate(row) for row in manager.get_experiment_summary(experiment_name)]

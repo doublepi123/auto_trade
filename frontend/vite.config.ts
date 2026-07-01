@@ -12,22 +12,8 @@ function manualChunks(id: string): string | undefined {
   }
 
   if (id.includes('node_modules/element-plus/')) {
-    if (id.includes('/date-picker') || id.includes('/time-picker') || id.includes('/time-select') || id.includes('/calendar')) {
-      return 'el-date'
-    }
-    if (id.includes('/table') || id.includes('/table-v2')) {
-      return 'el-table'
-    }
-    if (id.includes('/select') || id.includes('/select-v2') || id.includes('/tree-select') || id.includes('/cascader') || id.includes('/autocomplete')) {
-      return 'el-select'
-    }
-    if (id.includes('/form') || id.includes('/input') || id.includes('/checkbox') || id.includes('/radio') || id.includes('/switch')) {
-      return 'el-form'
-    }
-    if (id.includes('/dialog') || id.includes('/drawer') || id.includes('/popper') || id.includes('/tooltip') || id.includes('/popover') || id.includes('/message') || id.includes('/notification')) {
-      return 'el-overlay'
-    }
-    return 'el-core'
+    // Element Plus internals have circular imports; Rollup must own their chunk boundaries.
+    return undefined
   }
   if (id.includes('node_modules/vue-router/')) return 'vue-router'
   if (id.includes('node_modules/vue/') || id.includes('node_modules/@vue/')) return 'vue-core'

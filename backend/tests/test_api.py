@@ -1821,6 +1821,7 @@ def test_llm_analyze_returns_400_when_price_unavailable(monkeypatch) -> None:
     db = SessionLocal()
     try:
         config = db.query(StrategyConfig).first()
+        assert config is not None
         config.buy_low = 0.0
         db.commit()
     finally:

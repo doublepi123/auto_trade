@@ -220,6 +220,7 @@
       v-model="scoreDrawer.visible"
       :title="`${scoreDrawer.score?.symbol || ''} LLM 评分详情`"
       size="380px"
+      destroy-on-close
       data-testid="watchlist-score-drawer"
     >
       <template v-if="scoreDrawer.score">

@@ -5,6 +5,7 @@
     width="560px"
     class="command-palette-dialog"
     append-to-body
+    destroy-on-close
     align-center
     @open="onOpen"
     data-testid="command-palette-dialog"

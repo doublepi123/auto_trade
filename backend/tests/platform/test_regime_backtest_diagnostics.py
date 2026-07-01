@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from typing import Any, cast
 
 import pytest
 
@@ -102,4 +103,4 @@ class TestRegimeBacktestDiagnostics:
 
 def test_regime_backtest_rejects_trade_outcomes_without_indices():
     with pytest.raises(ValueError):
-        regime_backtest_diagnostics_report([0.01, 0.02], ["bull", "bear"], trade_outcomes=[0.01])
+        regime_backtest_diagnostics_report([0.01, 0.02], ["bull", "bear"], trade_outcomes=cast(Any, [0.01]))

@@ -343,7 +343,7 @@ async def _llm_analysis_tick() -> None:
                     unrealized_pnl_pct=float(position_context["unrealized_pnl_pct"]),
                     min_profit_amount=float(config.min_profit_amount or 0.0),
                     recent_prices=_recent_price_context_for_target(engine, runtime, symbol),
-                    recent_analysis=build_recent_analysis_context(config) if is_primary else [],
+                    recent_analysis=build_recent_analysis_context(config) if is_primary else None,
                     account_context=account_context,
                     force=True,
                     persist=is_primary,

@@ -120,7 +120,7 @@ def validated_httpx_client(url: str, *, timeout: float = 10.0) -> httpx.Client:
     except ValueError:
         for family in (socket.AF_INET, socket.AF_INET6):
             for resolved in socket.getaddrinfo(host, None, family, socket.SOCK_STREAM):
-                addr_str = resolved[4][0]
+                addr_str = str(resolved[4][0])
                 try:
                     parsed_addr = ipaddress.ip_address(addr_str)
                 except ValueError:

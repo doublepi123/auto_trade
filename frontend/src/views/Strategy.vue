@@ -237,7 +237,13 @@
           <span style="margin-left: 8px; color: #909399; font-size: 12px">下载/上传完整策略配置 JSON</span>
         </el-form-item>
         <el-form-item>
-          <el-button type="primary" native-type="submit" :loading="saving" :disabled="loading || !isDirty">保存</el-button>
+          <el-button
+            type="primary"
+            native-type="submit"
+            :loading="saving"
+            :disabled="loading || !isDirty"
+            data-testid="strategy-save"
+          >保存</el-button>
           <el-tag v-if="saved" type="success" style="margin-left: 10px">已保存</el-tag>
           <el-tag v-if="error" type="danger" style="margin-left: 10px">{{ error }}</el-tag>
         </el-form-item>

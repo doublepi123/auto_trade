@@ -15,6 +15,7 @@ we re-derive from the same equity curve to keep both views consistent.
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from typing import Any
 
 __all__ = [
@@ -31,7 +32,7 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 
-def _running_peak(equity: list[float]) -> list[float]:
+def _running_peak(equity: Sequence[float]) -> list[float]:
     """Cumulative running maximum of ``equity`` (length-equivalent)."""
     if not equity:
         return []
@@ -41,7 +42,7 @@ def _running_peak(equity: list[float]) -> list[float]:
     return out
 
 
-def _drawdown_series(equity: list[float]) -> list[float]:
+def _drawdown_series(equity: Sequence[float]) -> list[float]:
     """Per-tick drawdown: (equity - peak) / peak. Negative or zero."""
     if not equity:
         return []
@@ -54,7 +55,7 @@ def _drawdown_series(equity: list[float]) -> list[float]:
 # ---------------------------------------------------------------------------
 
 
-def _drawdown_events(equity: list[float]) -> list[dict[str, Any]]:
+def _drawdown_events(equity: Sequence[float]) -> list[dict[str, Any]]:
     """Detect drawdown episodes: each returns ``{start, trough, end, depth, duration, recovery_time}``.
 
     A drawdown begins when the equity falls below the prior running peak, hits
@@ -105,12 +106,12 @@ def _drawdown_events(equity: list[float]) -> list[dict[str, Any]]:
     return events
 
 
-def drawdown_events(equity: list[float]) -> list[dict[str, Any]]:
+def drawdown_events(equity: Sequence[float]) -> list[dict[str, Any]]:
     """Public alias: list of drawdown episodes with depth/duration/recovery_time."""
     return _drawdown_events(equity)
 
 
-def underwater_curve(equity: list[float]) -> list[float]:
+def underwater_curve(equity: Sequence[float]) -> list[float]:
     """Per-tick underwater depth: (equity − peak) / peak. Negative or zero."""
     return _drawdown_series(equity)
 
@@ -120,7 +121,7 @@ def underwater_curve(equity: list[float]) -> list[float]:
 # ---------------------------------------------------------------------------
 
 
-def drawdown_summary(equity: list[float]) -> dict[str, Any]:
+def drawdown_summary(equity: Sequence[float]) -> dict[str, Any]:
     """Aggregate drawdown statistics over the whole curve.
 
     Returns: ``max_drawdown`` (≤0), ``max_drawdown_duration`` (longest single
@@ -164,14 +165,14 @@ def drawdown_summary(equity: list[float]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _annualized_return(equity_window: list[float]) -> float:
+def _annualized_return(equity_window: Sequence[float]) -> float:
     """Window total return (unused for rolling Calmar, kept for callers)."""
     if len(equity_window) < 2 or equity_window[0] <= 0:
         return 0.0
     return (equity_window[-1] / equity_window[0]) - 1.0
 
 
-def rolling_calmar(equity: list[float], window: int) -> list[float]:
+def rolling_calmar(equity: Sequence[float], window: int) -> list[float]:
     """Rolling Calmar ratio (annualized return / |max drawdown|) over ``window`` ticks.
 
     Returns a series the same length as ``equity`` with ``0.0`` for tick positions
@@ -209,7 +210,7 @@ def rolling_calmar(equity: list[float], window: int) -> list[float]:
 # ---------------------------------------------------------------------------
 
 
-def drawdown_acceleration(equity: list[float]) -> list[float]:
+def drawdown_acceleration(equity: Sequence[float]) -> list[float]:
     """Second derivative of the underwater curve.
 
     Positive values mean the drawdown is *accelerating* (getting worse faster);

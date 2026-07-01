@@ -59,7 +59,9 @@ class TestStrategyPresetService(_Base):
         assert out.id > 0
         assert out.params == {"buy_low": 90, "sell_high": 190}
         assert len(svc.list_presets()) == 1
-        assert svc.get(out.id).name == "aggressive"
+        got = svc.get(out.id)
+        assert got is not None
+        assert got.name == "aggressive"
         assert svc.delete(out.id) is True
         assert svc.delete(out.id) is False
 

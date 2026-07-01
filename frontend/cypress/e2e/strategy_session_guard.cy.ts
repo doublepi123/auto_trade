@@ -39,10 +39,10 @@ describe('Strategy trading session mode', () => {
     cy.wait('@getStrategySession')
 
     cy.get('[data-testid="trading-session-mode"]')
-      .find('input[value="RTH_ONLY"]')
-      .click({ force: true })
+      .contains('.el-radio', '仅常规交易时段')
+      .click()
 
-    cy.contains('.el-card button', '保存').click()
+    cy.get('[data-testid="strategy-save"]').should('not.be.disabled').click()
     cy.wait('@saveStrategySession')
   })
 })

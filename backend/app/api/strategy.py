@@ -108,9 +108,8 @@ def put_strategy(
             )
         _reload_strategy_after_save()
         response = StrategyResponse.model_validate(config)
-        response_dict = response.model_dump()
-        response_dict["consistency_warnings"] = consistency_issues
-        return response_dict
+        response.consistency_warnings = consistency_issues
+        return response
     except HTTPException as exc:
         result = "FAILED"
         diff = {"detail": str(exc.detail)}

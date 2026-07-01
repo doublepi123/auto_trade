@@ -505,5 +505,7 @@ def test_sqlite_wal_and_busy_timeout_enabled(tmp_path, monkeypatch) -> None:
         fk_enabled = conn.execute(text("PRAGMA foreign_keys")).scalar()
 
     assert str(journal_mode).lower() == "wal", f"journal_mode was {journal_mode!r}"
+    assert busy_timeout_ms is not None
     assert busy_timeout_ms >= 5000, f"busy_timeout was {busy_timeout_ms}"
+    assert fk_enabled is not None
     assert int(fk_enabled) == 1, f"foreign_keys was {fk_enabled}"

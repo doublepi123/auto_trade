@@ -121,6 +121,8 @@ def metrics_summary(
                 continue
             # Consume from the head of the queue to approximate FIFO.
             matched_buy, remaining_qty = symbol_queue[0]
+            if matched_buy.executed_price is None:
+                continue
             qty = min(remaining_qty, float(order.executed_quantity))
             pnl = (float(order.executed_price) - float(matched_buy.executed_price)) * qty
             pnls.append(pnl)

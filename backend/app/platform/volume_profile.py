@@ -9,6 +9,7 @@ Deterministic, pure Python. Reference: Steidlmayer (1984) Market Profile.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 import math
 from dataclasses import dataclass
 from typing import Any
@@ -54,8 +55,8 @@ class VolumeProfileResult:
 
 
 def volume_profile_report(
-    prices: list[float],
-    volumes: list[float],
+    prices: Sequence[float],
+    volumes: Sequence[float],
     *,
     bins: int = 10,
 ) -> VolumeProfileResult:

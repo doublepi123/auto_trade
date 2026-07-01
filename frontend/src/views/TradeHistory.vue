@@ -924,6 +924,7 @@ function statusType(status: string): string {
     case 'FILLED': return 'success'
     case 'PARTIAL_FILLED': return 'warning'
     case 'SUBMITTED': return 'warning'
+    case 'SKIPPED': return 'warning'
     case 'REJECTED': return 'danger'
     case 'CANCELLED': return 'info'
     default: return ''

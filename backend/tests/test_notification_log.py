@@ -240,7 +240,9 @@ class TestNotificationAPI(_Base):
     def test_retry_failed_notification_succeeds(self, monkeypatch) -> None:
         sink = NotificationLogSink(self._factory())
         sink.record("fail", "body", "CRITICAL", False, "boom")
-        log_id = self._db().query(NotificationLog).first().id
+        log = self._db().query(NotificationLog).first()
+        assert log is not None
+        log_id = log.id
 
         fake_notifier = _FakeNotifier(ok=True)
 
@@ -259,7 +261,9 @@ class TestNotificationAPI(_Base):
     def test_retry_failed_notification_still_fails(self, monkeypatch) -> None:
         sink = NotificationLogSink(self._factory())
         sink.record("fail", "body", "CRITICAL", False, "boom")
-        log_id = self._db().query(NotificationLog).first().id
+        log = self._db().query(NotificationLog).first()
+        assert log is not None
+        log_id = log.id
 
         fake_notifier = _FakeNotifier(ok=False)
 

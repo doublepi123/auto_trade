@@ -1,4 +1,5 @@
 from __future__ import annotations
+import logging
 from typing import Any, cast
 
 from datetime import datetime, timezone
@@ -938,7 +939,10 @@ class TestLLMAdvisorDegradation:
         assert any(keyword in msg for keyword in ("empty", "content", "choice"))
 
     def test_analyze_records_failed_interaction_on_runtime_error(
-        self, advisor: LLMAdvisorService, monkeypatch
+        self,
+        advisor: LLMAdvisorService,
+        monkeypatch,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         """When _call_deepseek raises RuntimeError, analyze() must record a failed
         llm_interactions row (success=False, error contains underlying info, raw_response empty)
@@ -972,6 +976,7 @@ class TestLLMAdvisorDegradation:
             raise RuntimeError("Simulated API outage")
 
         monkeypatch.setattr(advisor, "_call_deepseek", raise_runtime_error)
+        caplog.set_level(logging.WARNING, logger="auto_trade.llm_advisor")
 
         result = advisor.analyze(
             symbol="NVDA.US",
@@ -989,6 +994,9 @@ class TestLLMAdvisorDegradation:
         assert result["success"] is False
         assert result["error"] == "LLM analysis failed"
         assert result["interaction_id"] is not None
+        records = [rec for rec in caplog.records if "LLM analysis failed" in rec.message]
+        assert records
+        assert not any(rec.levelno >= logging.ERROR for rec in caplog.records)
 
         db = SessionLocal()
         try:
@@ -1004,7 +1012,7 @@ class TestLLMAdvisorDegradation:
             db.close()
 
     def test_preview_records_failed_interaction_on_runtime_error(
-        self, advisor: LLMAdvisorService, monkeypatch
+        self, advisor: LLMAdvisorService, monkeypatch, caplog: pytest.LogCaptureFixture
     ) -> None:
         """When _call_deepseek raises RuntimeError, preview() must record a failed
         llm_interactions row (success=False, error contains underlying info, raw_response empty)
@@ -1036,6 +1044,7 @@ class TestLLMAdvisorDegradation:
             raise RuntimeError("Simulated API outage")
 
         monkeypatch.setattr(advisor, "_call_deepseek", raise_runtime_error)
+        caplog.set_level(logging.WARNING, logger="auto_trade.llm_advisor")
 
         result = advisor.preview(
             symbol="AAPL.US",
@@ -1048,6 +1057,9 @@ class TestLLMAdvisorDegradation:
 
         assert result["success"] is False
         assert "interaction_id" not in result or result.get("interaction_id") is None
+        records = [rec for rec in caplog.records if "LLM preview failed" in rec.message]
+        assert records
+        assert not any(rec.levelno >= logging.ERROR for rec in caplog.records)
 
         db = SessionLocal()
         try:

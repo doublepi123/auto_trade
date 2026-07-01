@@ -454,7 +454,7 @@ class LLMAdvisorService:
                 # next caller is not needlessly blocked.
                 with _throttle_lock:
                     _LAST_ANALYSIS_TIMESTAMP = _prev_analysis_ts
-                logger.exception("LLM analysis failed")
+                logger.warning("LLM analysis failed: %s", exc)
                 interaction_id = self._record_interaction(
                     interaction_type="analyze",
                     symbol=symbol,
@@ -652,7 +652,7 @@ class LLMAdvisorService:
                 # LLM call or parse failed — release the reserved slot.
                 with _throttle_lock:
                     _LAST_PREVIEW_TIMESTAMP = _prev_preview_ts
-                logger.exception("LLM preview failed")
+                logger.warning("LLM preview failed: %s", exc)
                 self._record_interaction(
                     interaction_type="preview",
                     symbol=symbol,

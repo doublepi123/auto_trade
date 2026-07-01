@@ -10,18 +10,20 @@ Pure Python, no numpy/scipy.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 import math
 from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass(frozen=True)
 class RegimeCointegrationResult:
     """Regime-conditional cointegration diagnostics."""
-    per_regime: dict[str, dict[str, object]]
+    per_regime: dict[str, dict[str, Any]]
     stability_score: float | None
     breakdown_regimes: list[str]
 
-    def to_dict(self) -> dict[str, object]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "per_regime": self.per_regime,
             "stability_score": self.stability_score,
@@ -29,7 +31,7 @@ class RegimeCointegrationResult:
         }
 
 
-def _validate_inputs(y: list[float], x: list[float], regime_labels: list[str]) -> None:
+def _validate_inputs(y: Sequence[float], x: Sequence[float], regime_labels: Sequence[str]) -> None:
     if not y or not x or not regime_labels:
         raise ValueError("y, x, and regime_labels must be non-empty")
     if len(y) != len(x) or len(y) != len(regime_labels):
@@ -80,9 +82,9 @@ def _half_life(rho: float) -> float:
 
 
 def regime_cointegration_report(
-    y: list[float],
-    x: list[float],
-    regime_labels: list[str],
+    y: Sequence[float],
+    x: Sequence[float],
+    regime_labels: Sequence[str],
     *,
     min_regime_samples: int = 10,
 ) -> RegimeCointegrationResult:
@@ -109,7 +111,7 @@ def regime_cointegration_report(
             regime_indices[label_str] = []
         regime_indices[label_str].append(idx)
 
-    per_regime: dict[str, dict[str, object]] = {}
+    per_regime: dict[str, dict[str, Any]] = {}
     hedge_ratios: list[float] = []
     breakdown_regimes: list[str] = []
 

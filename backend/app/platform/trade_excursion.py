@@ -294,7 +294,7 @@ def _empty_summary() -> ExcursionSummary:
 def _summarize(per_trade: list[TradeExcursion], percentiles: Sequence[float]) -> ExcursionSummary:
     if not per_trade:
         return _empty_summary()
-    holdings = sorted(t.holding_bars for t in per_trade)
+    holdings = sorted(float(t.holding_bars) for t in per_trade)
     mfes = sorted(t.mfe_pct for t in per_trade)
     maes = sorted(t.mae_pct for t in per_trade)
     closed = [t for t in per_trade if t.realized_pnl_pct is not None]
@@ -311,7 +311,8 @@ def _summarize(per_trade: list[TradeExcursion], percentiles: Sequence[float]) ->
     p95_mfe = _percentile(mfes, 0.95)
     median_mae_abs = abs(med_mae)
     ratio = (med_mfe / median_mae_abs) if median_mae_abs > 1e-12 else None
-    avg_pnl = (sum(t.realized_pnl_pct for t in closed) / len(closed)) if closed else None
+    realized_pnls = [float(t.realized_pnl_pct) for t in closed if t.realized_pnl_pct is not None]
+    avg_pnl = (sum(realized_pnls) / len(realized_pnls)) if realized_pnls else None
     expectancy = avg_pnl  # per-trade expected return %
     return ExcursionSummary(
         num_trades=len(per_trade),

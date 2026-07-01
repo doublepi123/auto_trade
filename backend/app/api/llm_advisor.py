@@ -59,7 +59,7 @@ def _position_context(symbol: str, current_price: float) -> dict[str, float | st
         runtime_for_symbol = getattr(runner, "_runtime_for_symbol", None)
         if callable(runtime_for_symbol):
             runtime = runtime_for_symbol(symbol)
-            fallback_side = runtime[2].state.value.upper() if runtime is not None else "FLAT"
+            fallback_side = runtime[2].state.value.upper() if isinstance(runtime, tuple) and len(runtime) >= 3 else "FLAT"
         else:
             fallback_side = runner.engine.state.value.upper()
         return {

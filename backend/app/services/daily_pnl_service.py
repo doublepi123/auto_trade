@@ -4,6 +4,7 @@ import logging
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from threading import Lock
 from typing import Any, Callable
 
 
@@ -104,6 +105,9 @@ class DailyPnlService:
     can discover fills after the fact. Replaying the order ledger makes P&L
     idempotent across restarts and late status updates.
     """
+
+    _missing_executed_price_warned_keys: set[str] = set()
+    _missing_executed_price_warn_lock = Lock()
 
     def __init__(self, db: Any) -> None:
         self._db = db
@@ -392,10 +396,18 @@ class DailyPnlService:
         if executed_price > 0:
             return executed_price
         price = DailyPnlService._decimal(getattr(order, "price", None))
-        logger.error(
-            "order %s has no executed_price, falling back to limit price %s — PnL may be severely inaccurate until broker sync. Consider flagging this fill as estimated.",
-            getattr(order, "id", "?"), price,
-        )
+        order_id = str(getattr(order, "id", "?") or "?")
+        broker_order_id = str(getattr(order, "broker_order_id", "") or "")
+        warning_key = broker_order_id or f"local:{order_id}"
+        with DailyPnlService._missing_executed_price_warn_lock:
+            should_warn = warning_key not in DailyPnlService._missing_executed_price_warned_keys
+            if should_warn:
+                DailyPnlService._missing_executed_price_warned_keys.add(warning_key)
+        if should_warn:
+            logger.warning(
+                "order %s has no executed_price, falling back to limit price %s — PnL may be inaccurate until broker sync. Consider flagging this fill as estimated.",
+                order_id, price,
+            )
         return price
 
     @staticmethod

@@ -347,10 +347,18 @@ class TestDailyPnlService:
         import logging
         caplog.set_level(logging.WARNING)
         _ = DailyPnlService(db).calculate(trade_day=trade_day)
+        _ = DailyPnlService(db).calculate(trade_day=trade_day)
         db.close()
 
-        assert any(
-            "has no executed_price, falling back to limit price" in rec.message
+        records = [
+            rec
+            for rec in caplog.records
+            if "has no executed_price, falling back to limit price" in rec.message
+        ]
+        assert len(records) == 1
+        assert records[0].levelno == logging.WARNING
+        assert not any(
+            rec.levelno >= logging.ERROR
             for rec in caplog.records
         )
 

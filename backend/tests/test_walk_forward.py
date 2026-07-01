@@ -65,10 +65,15 @@ class TestWalkForwardEngine:
             sort_by="total_return_pct",
         )
         s = result.summary
-        returns = [w.test_metrics.total_return_pct for w in result.windows if w.test_metrics]  # type: ignore[union-attr]
+        returns = [
+            w.test_metrics.total_return_pct
+            for w in result.windows
+            if w.test_metrics is not None and w.test_metrics.total_return_pct is not None
+        ]
         if returns:
             assert s.mean_test_return_pct == pytest.approx(sum(returns) / len(returns))
             assert s.test_return_std_pct is not None
+            assert s.profitable_window_pct is not None
             assert 0 <= s.profitable_window_pct <= 100
 
     def test_too_few_bars_yields_zero_windows(self) -> None:

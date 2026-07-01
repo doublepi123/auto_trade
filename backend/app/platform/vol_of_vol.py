@@ -13,6 +13,9 @@ import math
 from dataclasses import dataclass, field
 
 
+_ZERO_VARIANCE_TOL = 1e-30
+
+
 @dataclass(frozen=True)
 class VolOfVolResult:
     """Volatility-of-volatility report for a single return series."""
@@ -51,7 +54,10 @@ def _std(values: list[float]) -> float:
     if len(values) < 2:
         return 0.0
     m = _mean(values)
-    return math.sqrt(sum((v - m) ** 2 for v in values) / (len(values) - 1))
+    variance = sum((v - m) ** 2 for v in values) / (len(values) - 1)
+    if variance <= _ZERO_VARIANCE_TOL:
+        return 0.0
+    return math.sqrt(variance)
 
 
 def _autocorr_lag1(values: list[float]) -> float:

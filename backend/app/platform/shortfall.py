@@ -166,11 +166,17 @@ def implementation_shortfall(
             raise ValueError("close benchmark requires explicit benchmark_price")
         else:
             raise ValueError(f"unknown benchmark: {bench}")
+    assert bench_price is not None
+    resolved_bench_price = bench_price
 
     # Perold components (signed: positive = cost vs decision).
-    realized_cost = sign * (vwap - arrival) * filled_qty if filled_qty > 0 else Decimal("0")
-    timing_cost = sign * (bench_price - arrival) * filled_qty if filled_qty > 0 else Decimal("0")
-    opportunity_cost = sign * (bench_price - arrival) * unfilled_qty if unfilled_qty > 0 else Decimal("0")
+    if filled_qty > 0:
+        assert vwap is not None
+        realized_cost = sign * (vwap - arrival) * filled_qty
+    else:
+        realized_cost = Decimal("0")
+    timing_cost = sign * (resolved_bench_price - arrival) * filled_qty if filled_qty > 0 else Decimal("0")
+    opportunity_cost = sign * (resolved_bench_price - arrival) * unfilled_qty if unfilled_qty > 0 else Decimal("0")
     total = realized_cost + opportunity_cost + timing_cost + fees
     # Wait — realized already uses vwap; timing uses benchmark. Under the
     # arrival benchmark timing==0 and realized captures vwap-arrival. Under

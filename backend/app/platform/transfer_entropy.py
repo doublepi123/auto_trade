@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 import math
 from typing import Any
@@ -19,7 +20,7 @@ class TransferEntropyResult:
         return {"forward_te": self.forward_te, "reverse_te": self.reverse_te, "net_te": self.net_te}
 
 
-def transfer_entropy_report(source: list[float], target: list[float], *, lag: int = 1, bins: int = 10) -> TransferEntropyResult:
+def transfer_entropy_report(source: Sequence[float], target: Sequence[float], *, lag: int = 1, bins: int = 10) -> TransferEntropyResult:
     src, tgt = validate_pair(source, target, x_name="source", y_name="target")
     if isinstance(lag, bool) or not isinstance(lag, int) or lag < 1:
         raise ValueError("lag must be a positive int")

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import dataclasses
 import math
+from typing import Any, cast
 
 import pytest
 
@@ -211,12 +212,12 @@ def test_bool_in_trades_rejected():
 
 def test_string_in_trades_rejected():
     with pytest.raises(ValueError):
-        trade_expectancy(["a", "b"])
+        trade_expectancy(cast(Any, ["a", "b"]))
 
 
 def test_dict_in_trades_rejected():
     with pytest.raises(ValueError):
-        trade_expectancy([{"x": 1.0}])
+        trade_expectancy(cast(Any, [{"x": 1.0}]))
 
 
 def test_non_sequence_trades_rejected():

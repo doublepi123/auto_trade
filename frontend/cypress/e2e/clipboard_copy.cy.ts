@@ -1,6 +1,6 @@
 describe('Copy-to-clipboard affordance', () => {
   it('renders a copy button next to broker order ids in trade history', () => {
-    cy.visitApp('/history')
+    cy.visitApp('/#/history')
     cy.contains('今日订单', { timeout: 10000 }).should('be.visible')
     // Order number text is preserved and a copy button appears alongside it.
     cy.contains('order-1').should('be.visible')
@@ -31,7 +31,7 @@ describe('Copy-to-clipboard affordance', () => {
         page_size: 20,
       },
     }).as('eventsWithId')
-    cy.visit('/events')
+    cy.visit('/#/events')
     cy.contains('决策时间线', { timeout: 10000 }).should('be.visible')
     cy.contains('broker-99').should('be.visible')
     cy.get('[data-testid="timeline-order-copy"]').should('exist')

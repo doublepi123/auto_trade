@@ -16,6 +16,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
+_ZERO_VARIANCE_TOL = 1e-30
+
+
 @dataclass(frozen=True)
 class WalkForwardSegment:
     start_idx: int
@@ -73,7 +76,10 @@ def _std(xs: list[float]) -> float:
     if n < 2:
         return 0.0
     m = _mean(xs)
-    return math.sqrt(sum((x - m) ** 2 for x in xs) / (n - 1))
+    variance = sum((x - m) ** 2 for x in xs) / (n - 1)
+    if variance <= _ZERO_VARIANCE_TOL:
+        return 0.0
+    return math.sqrt(variance)
 
 
 def _sharpe(returns: list[float], periods_per_year: int = 1) -> float:

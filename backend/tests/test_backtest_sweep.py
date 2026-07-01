@@ -66,6 +66,7 @@ class TestSweepEngine:
         assert len(result.rows) == 3
         assert [row.rank for row in result.rows] == [1, 2, 3]
         assert result.best is result.rows[0]
+        assert result.best is not None
         assert result.best.rank == 1
 
     def test_best_has_highest_metric_none_last(self) -> None:

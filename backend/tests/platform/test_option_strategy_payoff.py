@@ -23,6 +23,7 @@ class TestOptionStrategyPayoff:
         # max_profit is unlimited for a long call — should be None or large
         assert result.max_profit is None or (isinstance(result.max_profit, float) and result.max_profit > 1e6)
         # max_loss = premium paid = -5
+        assert result.max_loss is not None
         assert abs(result.max_loss - (-5.0)) < 1e-9
         # total_premium = -5 (paid)
         assert abs(result.total_premium - (-5.0)) < 1e-9
@@ -38,6 +39,7 @@ class TestOptionStrategyPayoff:
         # max_profit for long put: strike - premium at spot=0 = 97
         assert result.max_profit is not None
         assert abs(result.max_profit - 97.0) < 1.0
+        assert result.max_loss is not None
         assert abs(result.max_loss - (-3.0)) < 1e-9
         assert abs(result.total_premium - (-3.0)) < 1e-9
 
@@ -57,6 +59,7 @@ class TestOptionStrategyPayoff:
         # max_profit unlimited
         assert result.max_profit is None or result.max_profit > 1e6
         # max_loss = total premium paid
+        assert result.max_loss is not None
         assert abs(result.max_loss - (-9.0)) < 1e-9
 
     def test_bull_call_spread(self):
@@ -74,6 +77,7 @@ class TestOptionStrategyPayoff:
         assert result.max_profit is not None
         assert abs(result.max_profit - 7.0) < 1e-9
         # max_loss = net premium = -3
+        assert result.max_loss is not None
         assert abs(result.max_loss - (-3.0)) < 1e-9
 
     def test_custom_spot_range(self):

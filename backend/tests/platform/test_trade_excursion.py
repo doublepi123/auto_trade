@@ -48,6 +48,7 @@ def test_long_trade_mfe_mae_basic():
     assert abs(t.mfe_pct - 0.08) < 1e-9
     assert abs(t.mae_pct - (-0.02)) < 1e-9
     assert t.holding_bars == 4
+    assert t.realized_pnl_pct is not None
     assert abs(t.realized_pnl_pct - 0.08) < 1e-9
 
 
@@ -67,6 +68,7 @@ def test_short_trade_flips_mfe_mae():
     # mae from max(high)=108 → mae=(108-100)*-1=-8.0 (worst high reached against the short)
     assert t.mae_price == 108.0
     assert abs(t.mae - (-8.0)) < 1e-9
+    assert t.realized_pnl_pct is not None
     assert abs(t.realized_pnl_pct - 0.08) < 1e-9  # (92-100)*-1/100
 
 
@@ -125,7 +127,8 @@ def test_entry_exit_timing_rank():
     ]
     per, summary = analyze_trades(trades, bars)
     # earliest entry rank 0.0, latest 1.0, middle 0.5
-    ranks = [t.entry_timing_rank for t in per]
+    ranks = [t.entry_timing_rank for t in per if t.entry_timing_rank is not None]
+    assert len(ranks) == 3
     assert min(ranks) == 0.0
     assert max(ranks) == 1.0
     assert any(abs(r - 0.5) < 1e-9 for r in ranks)

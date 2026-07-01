@@ -1,6 +1,7 @@
 # pyright: reportArgumentType=false, reportAttributeAccessIssue=false
 from __future__ import annotations
 
+import logging
 import time
 from decimal import Decimal
 from types import SimpleNamespace
@@ -108,6 +109,82 @@ class TestTradeExecutionServiceBasics:
 
         assert risk.paused is True
         assert svc.has_pending_order is False
+
+    def test_reconcile_pending_order_query_failure_is_throttled_and_warned(
+        self,
+        svc: TradeExecutionService,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        broker = MagicMock()
+        broker.get_order_status.side_effect = RuntimeError("broker detail temporarily unavailable")
+        pending = _PendingOrder(
+            broker=broker,
+            broker_order_id="order-query-fails",
+            symbol="AAPL.US",
+            action="BUY",
+            quantity=Decimal("10"),
+            price=Decimal("100"),
+            engine_snapshot=None,
+            next_status_check_at=0.0,
+            submitted_at=time.monotonic(),
+        )
+        svc._order_status_timeout_seconds = 30
+        svc._order_status_poll_interval_seconds = 10
+        svc.load_pending_orders([pending])
+
+        caplog.set_level(logging.WARNING, logger="auto_trade.services.trade_execution_service")
+        svc.reconcile()
+        svc.reconcile()
+
+        assert broker.get_order_status.call_count == 1
+        assert svc.pending_order_for("AAPL.US") is not None
+        records = [
+            rec
+            for rec in caplog.records
+            if "failed to query pending order status for order-query-fails" in rec.message
+        ]
+        assert len(records) == 1
+        assert records[0].levelno == logging.WARNING
+        assert not any(rec.levelno >= logging.ERROR for rec in caplog.records)
+
+    def test_pending_timeout_broker_failures_pause_without_error_logs(
+        self,
+        svc: TradeExecutionService,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        from app.core.risk import RiskController
+
+        broker = MagicMock()
+        broker.get_order_status.side_effect = RuntimeError("broker order detail unavailable")
+        broker.cancel_order.side_effect = RuntimeError("broker cancel unavailable")
+        pending = _PendingOrder(
+            broker=broker,
+            broker_order_id="order-timeout-fails",
+            symbol="AAPL.US",
+            action="BUY",
+            quantity=Decimal("10"),
+            price=Decimal("100"),
+            engine_snapshot=None,
+            next_status_check_at=0.0,
+            submitted_at=time.monotonic() - 60,
+        )
+        risk = RiskController()
+        updates: list[tuple[str, str]] = []
+        svc._update_order_status = lambda order_id, status, filled_at=None, executed_quantity=None, executed_price=None: updates.append((order_id, status))
+        svc._order_status_timeout_seconds = 30
+        svc.load_pending_orders([pending])
+
+        caplog.set_level(logging.WARNING, logger="auto_trade.services.trade_execution_service")
+        svc.reconcile(risk=risk)
+
+        assert risk.paused is True
+        assert svc.has_pending_order is False
+        assert updates == [("order-timeout-fails", "SKIPPED")]
+        messages = [rec.message for rec in caplog.records]
+        assert any("failed to query pending order status during timeout for order-timeout-fails" in msg for msg in messages)
+        assert any("failed to cancel timed-out order order-timeout-fails" in msg for msg in messages)
+        assert any("failed to recover partial fill after timeout for order-timeout-fails" in msg for msg in messages)
+        assert not any(rec.levelno >= logging.ERROR for rec in caplog.records)
 
     def test_persist_failure_pauses_and_attempts_cancel(self, svc: TradeExecutionService) -> None:
         from app.core.broker import BrokerGateway

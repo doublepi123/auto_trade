@@ -21,6 +21,7 @@ adds the *distribution* of drawdowns and the ratios that depend on it.
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from typing import Any
 
 __all__ = [
@@ -32,7 +33,7 @@ __all__ = [
 ]
 
 
-def _underwater(equity: list[float]) -> list[float]:
+def _underwater(equity: Sequence[float]) -> list[float]:
     if not equity:
         return []
     peak = equity[0]
@@ -44,7 +45,7 @@ def _underwater(equity: list[float]) -> list[float]:
     return out
 
 
-def pain_index(equity: list[float]) -> float:
+def pain_index(equity: Sequence[float]) -> float:
     """Mean of the underwater curve: average % drawdown over the run.
 
     A 5 % Pain Index means the portfolio spent, on average, 5 % below its
@@ -56,7 +57,7 @@ def pain_index(equity: list[float]) -> float:
     return -sum(uw) / len(uw)  # positive number
 
 
-def ulcer_index(equity: list[float]) -> float:
+def ulcer_index(equity: Sequence[float]) -> float:
     """RMS of the underwater curve: sqrt(mean(underwater^2)).
 
     Weights deeper drawdowns quadratically, so UI ≥ PI in every case and
@@ -68,7 +69,7 @@ def ulcer_index(equity: list[float]) -> float:
     return math.sqrt(sum(u * u for u in uw) / len(uw))
 
 
-def _cagr(equity: list[float], periods_per_year: int = 252) -> float:
+def _cagr(equity: Sequence[float], periods_per_year: int = 252) -> float:
     if len(equity) < 2 or equity[0] <= 0 or equity[-1] <= 0:
         return 0.0
     n_periods = len(equity) - 1
@@ -78,7 +79,7 @@ def _cagr(equity: list[float], periods_per_year: int = 252) -> float:
     return (equity[-1] / equity[0]) ** (1.0 / years) - 1.0
 
 
-def mar_ratio(equity: list[float], periods_per_year: int = 252) -> float:
+def mar_ratio(equity: Sequence[float], periods_per_year: int = 252) -> float:
     """MAR = CAGR / |max drawdown| (with drawdown as a positive loss)."""
     cagr = _cagr(equity, periods_per_year)
     uw = _underwater(equity)
@@ -90,7 +91,7 @@ def mar_ratio(equity: list[float], periods_per_year: int = 252) -> float:
     return cagr / max_dd
 
 
-def kestner_ratio(equity: list[float], periods_per_year: int = 252) -> float:
+def kestner_ratio(equity: Sequence[float], periods_per_year: int = 252) -> float:
     """Kestner = CAGR / Ulcer Index.  More sensitive to drawdown distribution than MAR."""
     cagr = _cagr(equity, periods_per_year)
     ui = ulcer_index(equity)
@@ -100,7 +101,7 @@ def kestner_ratio(equity: list[float], periods_per_year: int = 252) -> float:
 
 
 def pain_metrics_report(
-    equity: list[float], periods_per_year: int = 252
+    equity: Sequence[float], periods_per_year: int = 252
 ) -> dict[str, Any]:
     """One-stop report: PI, UI, MAR, Kestner, plus underlying drawdown stats."""
     if not equity:

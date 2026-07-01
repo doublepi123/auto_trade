@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any, cast
+
 import pytest
 
 from app.platform.pareto_optimization import pareto_optimize_report
@@ -65,9 +67,9 @@ def test_pareto_frontier_all_non_dominated():
 
 def test_pareto_rejects_non_dict_config():
     with pytest.raises(ValueError):
-        pareto_optimize_report([[1.0, 2.0]], objectives=["ret"])
+        pareto_optimize_report(cast(Any, [[1.0, 2.0]]), objectives=["ret"])
     with pytest.raises(ValueError):
-        pareto_optimize_report([{"ret": 1.0}, "bad"], objectives=["ret"])  # type: ignore[list-item]
+        pareto_optimize_report(cast(Any, [{"ret": 1.0}, "bad"]), objectives=["ret"])
 
 
 def test_pareto_rejects_too_many_configs():

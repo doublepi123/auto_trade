@@ -24,7 +24,10 @@ describe('Watchlist Score Detail', () => {
   it('closes the drawer', () => {
     cy.get('[data-testid="watchlist-score-tag"]').first().click()
     cy.get('[data-testid="watchlist-score-drawer"]').should('be.visible')
-    cy.get('.el-drawer__close-btn').click()
+    cy.get('[data-testid="watchlist-score-drawer"]')
+      .filter(':visible')
+      .find('.el-drawer__close-btn')
+      .click()
     cy.get('[data-testid="watchlist-score-drawer"]').should('not.be.visible')
   })
 })

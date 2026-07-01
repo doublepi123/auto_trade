@@ -58,9 +58,9 @@ class ParetoOptimizeResult:
 
 
 def pareto_optimize_report(
-    configs: list[dict[str, Any]],
+    configs: Sequence[Any],
     *,
-    objectives: list[str],
+    objectives: Sequence[str],
 ) -> ParetoOptimizeResult:
     """Return the Pareto-optimal subset of *configs* under *objectives* (maximise).
 

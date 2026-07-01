@@ -49,6 +49,8 @@ export function orderStatusLabel(status?: string | null): string {
       return '已拒绝'
     case 'CANCELLED':
       return '已取消'
+    case 'SKIPPED':
+      return '已跳过'
     default:
       return '未知状态'
   }

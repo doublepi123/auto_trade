@@ -58,7 +58,7 @@
               label="数据年龄"
               :value="healthAgeLabel"
               :value-class="healthAgeClass"
-              value-testid="health-age"
+              value-test-id="health-age"
             />
             <MetricStat
               spread

@@ -188,11 +188,14 @@ def optimal_param_drift(
         for axis in param_axes:
             v = entry.get(axis)
             if isinstance(v, (int, float)) and not isinstance(v, bool):
-                vals = [e.get(axis) for e in per_window_best
-                        if isinstance(e.get(axis), (int, float)) and not isinstance(e.get(axis), bool)]
+                vals = [
+                    float(e[axis])
+                    for e in per_window_best
+                    if isinstance(e.get(axis), (int, float)) and not isinstance(e.get(axis), bool)
+                ]
                 if len(vals) >= 2:
                     rng = max(vals) - min(vals)
-                    std = _std([float(x) for x in vals])
+                    std = _std(vals)
                     per_axis[axis] = std / rng if rng > 0 else 0.0
                 else:
                     per_axis[axis] = 0.0
@@ -271,7 +274,7 @@ def analyze_stability(
     first_window_rows = next(iter(windows.values()), [])
     if first_window_rows:
         for axis in param_axes:
-            vals = sorted({r.params.get(axis) for r in first_window_rows})
+            vals = sorted({value for r in first_window_rows if (value := r.params.get(axis)) is not None})
             param_order.append(vals)
     matrix = {_param_tuple_key(r.params, param_axes): (r.out_of_sample if r.out_of_sample is not None else r.in_sample or 0.0)
               for r in first_window_rows}

@@ -137,6 +137,7 @@ class TradeExecutionService:
         self._order_status_timeout_seconds = 30.0
         self._entry_positions: dict[str, _TrackedEntry] = {}
         self._reconcile_in_flight: set[str] = set()
+        self._pending_status_query_warned_ids: set[str] = set()
 
     def load_tracked_entries(self, entries: dict[str, tuple[Decimal, Decimal]]) -> None:
         """Restore tracked entry positions (typically at runner startup)."""
@@ -931,7 +932,27 @@ class TradeExecutionService:
             for symbol, pending in list(self._pending_orders.items()):
                 if pending.broker_order_id == order_id:
                     del self._pending_orders[symbol]
+                    self._pending_status_query_warned_ids.discard(order_id)
                     return
+
+    def _defer_pending_status_retry(self, pending: _PendingOrder, now: float) -> None:
+        updated_pending = _PendingOrder(
+            broker=pending.broker,
+            broker_order_id=pending.broker_order_id,
+            symbol=pending.symbol,
+            action=pending.action,
+            quantity=pending.quantity,
+            price=pending.price,
+            engine_snapshot=pending.engine_snapshot,
+            avg_price=pending.avg_price,
+            next_status_check_at=now + self._order_status_poll_interval_seconds,
+            submitted_at=pending.submitted_at,
+            restore_engine_snapshot_fn=pending.restore_engine_snapshot_fn,
+        )
+        with self._state_lock:
+            current = self._pending_orders.get(updated_pending.symbol)
+            if current is not None and current.broker_order_id == updated_pending.broker_order_id:
+                self._pending_orders[updated_pending.symbol] = updated_pending
 
     def _reconcile_pending_order(
         self,
@@ -960,13 +981,31 @@ class TradeExecutionService:
 
         try:
             order_status = self._coerce_order_status(pending.broker.get_order_status(pending.broker_order_id), pending.broker_order_id)
-        except Exception:
-            logger.exception("failed to query pending order status for %s", pending.broker_order_id)
+        except Exception as exc:
+            self._defer_pending_status_retry(pending, now)
+            with self._state_lock:
+                first_failure = pending.broker_order_id not in self._pending_status_query_warned_ids
+                if first_failure:
+                    self._pending_status_query_warned_ids.add(pending.broker_order_id)
+            if first_failure:
+                logger.warning(
+                    "failed to query pending order status for %s; will retry after %.1fs: %s",
+                    pending.broker_order_id,
+                    self._order_status_poll_interval_seconds,
+                    exc,
+                )
+            else:
+                logger.debug(
+                    "failed to query pending order status for %s; will retry after %.1fs",
+                    pending.broker_order_id,
+                    self._order_status_poll_interval_seconds,
+                    exc_info=True,
+                )
             return
 
-        # Update the pending order's next check time only after a successful
-        # broker query, so a failed poll does not skip the order on the next
-        # reconciliation cycle.
+        # Successful broker queries use the normal poll interval. Failed queries
+        # are deferred in the exception path above so a transient broker detail
+        # outage does not spin on every runner tick.
         updated_pending = _PendingOrder(
             broker=pending.broker,
             broker_order_id=pending.broker_order_id,
@@ -982,6 +1021,7 @@ class TradeExecutionService:
         )
         with self._state_lock:
             self._pending_orders[updated_pending.symbol] = updated_pending
+            self._pending_status_query_warned_ids.discard(updated_pending.broker_order_id)
 
         self._safe_update_order_status_from_result(order_status)
         status = order_status.status
@@ -1046,8 +1086,12 @@ class TradeExecutionService:
                 ) and effective_restore is not None and pending.engine_snapshot is not None:
                     effective_restore(pending.engine_snapshot)
                 return
-        except Exception:
-            logger.exception("failed to query pending order status during timeout for %s", pending.broker_order_id)
+        except Exception as exc:
+            logger.warning(
+                "failed to query pending order status during timeout for %s: %s",
+                pending.broker_order_id,
+                exc,
+            )
 
         cancel_finalized = False
         # Attempt to cancel the live order before giving up.
@@ -1069,8 +1113,8 @@ class TradeExecutionService:
                 if self._should_restore_after_partial_terminal_fill(pending, fill_qty) and effective_restore is not None and pending.engine_snapshot is not None:
                     effective_restore(pending.engine_snapshot)
                 return
-        except Exception:
-            logger.exception("failed to cancel timed-out order %s", pending.broker_order_id)
+        except Exception as exc:
+            logger.warning("failed to cancel timed-out order %s: %s", pending.broker_order_id, exc)
 
         if not cancel_finalized:
             try:
@@ -1097,12 +1141,14 @@ class TradeExecutionService:
                     ):
                         effective_restore(pending.engine_snapshot)
                     return
-            except Exception:
-                logger.exception(
-                    "failed to recover partial fill after timeout for %s",
+            except Exception as exc:
+                logger.warning(
+                    "failed to recover partial fill after timeout for %s: %s",
                     pending.broker_order_id,
+                    exc,
                 )
 
+        self._safe_update_order_status(pending.broker_order_id, _SKIPPED_ORDER_STATUS)
         if risk is not None:
             risk.pause(reason, auto_resumable=False)
         try:

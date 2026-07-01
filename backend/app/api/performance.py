@@ -20,7 +20,7 @@ def get_stats(
     db: Session = Depends(get_db),
 ) -> PerformanceStats:
     tracker = PerformanceTracker(db)
-    return tracker.get_overall_stats(experiment)
+    return PerformanceStats.model_validate(tracker.get_overall_stats(experiment))
 
 
 @router.get("/compare", response_model=list[PerformanceVariant])
@@ -29,7 +29,7 @@ def compare_variants(
     db: Session = Depends(get_db),
 ) -> list[PerformanceVariant]:
     tracker = PerformanceTracker(db)
-    return tracker.compare_variants(experiment)
+    return [PerformanceVariant.model_validate(row) for row in tracker.compare_variants(experiment)]
 
 
 @router.get("/recommendations", response_model=list[str])

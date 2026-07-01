@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from typing import Any, cast
 
 import pytest
 
@@ -274,7 +275,7 @@ def test_copula_result_frozen():
     x, y = _near_perfect_positive(n)
     res = tail_dependence_coeffs(x, y)
     with pytest.raises(Exception):
-        res.kendall_tau = 0.5  # frozen dataclass
+        cast(Any, res).kendall_tau = 0.5  # frozen dataclass
 
 
 def test_gumbel_tail_dependence_increases_with_correlation():

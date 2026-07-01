@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+from typing import Any
 
 os.environ["AUTO_TRADE_DATABASE_URL"] = (
     f"sqlite:///{tempfile.gettempdir()}/auto_trade_test_backtest_runs_{os.getpid()}.db"
@@ -52,11 +53,11 @@ class _Base:
     def _db(self) -> Session:
         return Session(bind=self.engine)
 
-    def _params(self, **kw) -> BacktestParams:
+    def _params(self, **kw: Any) -> BacktestParams:
         return BacktestParams(buy_low=kw.get("buy_low", 100), sell_high=kw.get("sell_high", 200), **{k: v for k, v in kw.items() if k not in ("buy_low", "sell_high")})
 
-    def _metrics(self, **kw) -> BacktestMetrics:
-        base = dict(
+    def _metrics(self, **kw: Any) -> BacktestMetrics:
+        base: dict[str, Any] = dict(
             initial_cash=100000, final_equity=10100, total_pnl=100, total_return_pct=0.1,
             max_drawdown_pct=1.0, trade_count=2, closed_trade_count=1, winning_trades=1,
             losing_trades=0, win_rate=100, avg_holding_minutes=5, fees_paid=0,

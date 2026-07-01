@@ -213,6 +213,10 @@ class WatchlistScoreService:
             parsed = _parse_llm_payload(str(raw))
             score_value = parsed.get("score", DEFAULT_SCORE)
             confidence_value = parsed.get("confidence", DEFAULT_CONFIDENCE)
+            if not isinstance(score_value, (int, float, str)):
+                score_value = DEFAULT_SCORE
+            if not isinstance(confidence_value, (int, float, str)):
+                confidence_value = DEFAULT_CONFIDENCE
             action_value = str(parsed.get("recommended_action", DEFAULT_ACTION)).upper()
             if action_value not in ("BUY", "SELL", "HOLD", "AVOID"):
                 action_value = DEFAULT_ACTION
