@@ -43,6 +43,9 @@ class SelectionModule(PromptModule):
             lines.append(f"基于当前市场状态，建议优先考虑：{', '.join(suggested)}")
 
         lines.append("")
-        lines.append('请以 JSON 格式返回：{"selected_indicators": ["adx", "macd", "obv"], "reasoning": "选择理由"}')
+        lines.append(
+            "请在最终交易建议 JSON 的 selected_indicators 字段中给出选择结果，"
+            "不要单独输出指标选择 JSON。"
+        )
 
         return "\n".join(lines)

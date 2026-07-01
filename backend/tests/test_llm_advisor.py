@@ -309,6 +309,33 @@ class TestLLMAdvisorService:
         result = advisor._parse_response(raw)
         assert result["suggested_buy_low"] == 200.0
 
+    def test_parse_response_minimax_thinking_prefix(self, advisor: LLMAdvisorService) -> None:
+        raw = (
+            '<think>先推理一下，里面可能提到 {"suggested_buy_low": 1}</think>\n'
+            '{"suggested_buy_low": 201.0, "suggested_sell_high": 241.0, '
+            '"confidence_score": 0.76, "analysis": "minimax"}'
+        )
+        result = advisor._parse_response(raw)
+        assert result["suggested_buy_low"] == 201.0
+        assert result["confidence_score"] == 0.76
+
+    def test_parse_response_prose_wrapped_json_object(self, advisor: LLMAdvisorService) -> None:
+        raw = (
+            "分析如下：\n"
+            '{"suggested_buy_low": 202.0, "suggested_sell_high": 242.0, '
+            '"confidence_score": 0.77, "analysis": "wrapped"}\n'
+            "以上。"
+        )
+        result = advisor._parse_response(raw)
+        assert result["suggested_buy_low"] == 202.0
+        assert result["confidence_score"] == 0.77
+
+    def test_parse_response_requires_interval_recommendation(self, advisor: LLMAdvisorService) -> None:
+        raw = '{"selected_indicators": ["rsi", "macd"], "reasoning": "only selection"}'
+
+        with pytest.raises(ValueError, match="suggested_buy_low"):
+            advisor._parse_response(raw)
+
     def test_parse_response_preserves_immediate_order_action(self, advisor: LLMAdvisorService) -> None:
         raw = """
         {

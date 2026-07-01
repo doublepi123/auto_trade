@@ -212,6 +212,7 @@ class TestOutputModule:
         module = OutputModule()
         context = {"current_price": 200.0}
         result = module.render(context)
+        assert "selected_indicators" in result
         assert "suggested_buy_low" in result
         assert "suggested_sell_high" in result
         assert "confidence_score" in result
@@ -247,6 +248,7 @@ class TestSelectionModule:
         assert "上升趋势" in result
         assert "ADX" in result
         assert "建议优先考虑" in result
+        assert "不要单独输出指标选择 JSON" in result
 
     def test_empty_without_market_state(self) -> None:
         """SelectionModule should return empty without market state."""

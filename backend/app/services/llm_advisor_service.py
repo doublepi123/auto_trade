@@ -51,6 +51,7 @@ _ORDER_ACTIONS = {
 _ESCAPED_PLACEHOLDER = re.compile(
     r"\{\{([A-Za-z_][A-Za-z0-9_]*)(?:![ars])?(?::[^}]*)?\}\}"
 )
+_THINK_BLOCK = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 
 
 def _escape_orphan_braces(template: str, allowed_keys: set[str]) -> str:
@@ -862,20 +863,64 @@ class LLMAdvisorService:
     @staticmethod
     def _parse_response(raw: str) -> dict[str, Any]:
         """Parse JSON from LLM response."""
-        raw = raw.strip()
+        raw = LLMAdvisorService._strip_response_wrappers(raw)
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            json_object = LLMAdvisorService._extract_first_json_object(raw)
+            if json_object is None:
+                raise
+            parsed = json.loads(json_object)
+        if not isinstance(parsed, dict):
+            raise TypeError(
+                f"LLM response must be a JSON object, got {type(parsed).__name__}"
+            )
+        result = LLMAdvisorService._normalize_response(parsed)
+        LLMAdvisorService._validate_interval_response(result)
+        return result
+
+    @staticmethod
+    def _strip_response_wrappers(raw: str) -> str:
+        """Remove common non-JSON wrappers while preserving the model payload."""
+        raw = _THINK_BLOCK.sub("", raw).strip()
         if raw.startswith("```json"):
             raw = raw[7:]
         if raw.startswith("```"):
             raw = raw[3:]
         if raw.endswith("```"):
             raw = raw[:-3]
-        raw = raw.strip()
-        parsed = json.loads(raw)
-        if not isinstance(parsed, dict):
-            raise TypeError(
-                f"LLM response must be a JSON object, got {type(parsed).__name__}"
-            )
-        return LLMAdvisorService._normalize_response(parsed)
+        return raw.strip()
+
+    @staticmethod
+    def _extract_first_json_object(raw: str) -> str | None:
+        """Extract the first balanced JSON object from prose-wrapped LLM output."""
+        start: int | None = None
+        depth = 0
+        in_string = False
+        escaped = False
+        for index, char in enumerate(raw):
+            if start is None:
+                if char == "{":
+                    start = index
+                    depth = 1
+                continue
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+                continue
+            if char == '"':
+                in_string = True
+            elif char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    return raw[start : index + 1]
+        return None
 
     @staticmethod
     def _normalize_response(parsed: dict[str, Any]) -> dict[str, Any]:
@@ -900,6 +945,36 @@ class LLMAdvisorService:
         if not LLMAdvisorService._is_finite_positive(result.get("replacement_price")):
             result["replacement_price"] = None
         return result
+
+    @staticmethod
+    def _validate_interval_response(result: dict[str, Any]) -> None:
+        buy_low = LLMAdvisorService._coerce_required_float(result, "suggested_buy_low")
+        sell_high = LLMAdvisorService._coerce_required_float(result, "suggested_sell_high")
+        confidence = LLMAdvisorService._coerce_required_float(result, "confidence_score")
+        if buy_low <= 0:
+            raise ValueError("LLM response suggested_buy_low must be positive")
+        if sell_high <= 0:
+            raise ValueError("LLM response suggested_sell_high must be positive")
+        if sell_high <= buy_low:
+            raise ValueError("LLM response suggested_sell_high must be greater than suggested_buy_low")
+        if confidence < 0 or confidence > 1:
+            raise ValueError("LLM response confidence_score must be between 0 and 1")
+        result["suggested_buy_low"] = buy_low
+        result["suggested_sell_high"] = sell_high
+        result["confidence_score"] = confidence
+
+    @staticmethod
+    def _coerce_required_float(result: dict[str, Any], field_name: str) -> float:
+        value = result.get(field_name)
+        if isinstance(value, bool) or value is None:
+            raise ValueError(f"LLM response missing valid {field_name}")
+        try:
+            number = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"LLM response missing valid {field_name}") from exc
+        if not math.isfinite(number):
+            raise ValueError(f"LLM response missing valid {field_name}")
+        return number
 
     @staticmethod
     def _is_throttled(interval_seconds: float = 1800.0) -> bool:

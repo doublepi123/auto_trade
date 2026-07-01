@@ -13,6 +13,7 @@ class OutputModule(PromptModule):
 
         return f"""## 请输出以下 JSON 格式：
 {{
+  "selected_indicators": ["rsi", "macd", "atr"],
   "analysis": "简短的市场分析（50字以内）",
   "suggested_buy_low": 具体价格,
   "suggested_sell_high": 具体价格,
@@ -41,4 +42,5 @@ class OutputModule(PromptModule):
 13. 必须主动评估止损：若 LONG 持仓下最近5分钟价格连续下破关键支撑、跌幅扩大、买盘无法支撑或出现开始崩盘迹象，应输出 STOP_LOSS_SELL_NOW 及时卖出；若 SHORT 持仓出现相反方向的逼空风险，应输出 STOP_LOSS_COVER_NOW
 14. 止损动作允许以控制亏损为优先目标，但必须在 order_reason 中明确写出支撑失效、崩盘、量价恶化或逼空风险等依据
 15. 默认 order_action 使用 NONE；只有当最近5分钟累次数据、购买力、持仓成本和风险收益都支持"立即行动"时，才输出 BUY_NOW/SELL_NOW/STOP_LOSS_SELL_NOW 等动作
-16. 不允许输出 JSON 以外的解释文本"""
+16. 不允许输出 JSON 以外的解释文本
+17. 最终 JSON 必须同时包含 selected_indicators、suggested_buy_low、suggested_sell_high、confidence_score；不要只输出指标选择结果"""
