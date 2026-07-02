@@ -736,6 +736,11 @@ class AppRunner:
         return runtime.symbol, runtime.market, runtime.engine
 
     def execute_llm_order_decision(self, decision: dict[str, Any]) -> dict[str, Any]:
+        result = self._execute_llm_order_decision(decision)
+        self._record_llm_order_result(result)
+        return result
+
+    def _execute_llm_order_decision(self, decision: dict[str, Any]) -> dict[str, Any]:
         action = str(decision.get("order_action") or "NONE").upper()
         if action == "NONE":
             return {"executed": False, "status": "NO_ACTION", "order_id": None, "action": ""}
@@ -954,6 +959,19 @@ class AppRunner:
             self._last_llm_action_at[(target_symbol, side)] = time.monotonic()
             self._mark_fill_processed(symbol=target_symbol)
         return result
+
+    def _record_llm_order_result(self, result: dict[str, Any]) -> None:
+        action = str(result.get("action") or "").upper()
+        if not action:
+            return
+        status = str(result.get("status") or "UNKNOWN").upper()
+        order_id = result.get("order_id")
+        if order_id:
+            message = f"LLM {action} {status}: {order_id}"
+        else:
+            message = f"LLM {action} {status}"
+        self._set_last_action_message(message)
+        self._broadcast_status()
 
     def _quote_for_llm_order(self, symbol: str, price: Any = None) -> Quote | None:
         override_price = self._coerce_positive_float(price)

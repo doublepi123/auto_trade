@@ -1353,6 +1353,63 @@ class TestAPI:
         assert data["order_status"] == "FILLED"
         assert data["order_id"] == "order-llm-1"
 
+    def test_llm_analyze_rejects_low_confidence_immediate_order_action(self, monkeypatch) -> None:
+        _clean_strategy()
+        setup = client.put("/api/strategy", json={
+            "symbol": "NVDA.US",
+            "market": "US",
+            "buy_low": 218.0,
+            "sell_high": 225.0,
+        })
+        assert setup.status_code == 200
+
+        class Advisor:
+            def __init__(self, **_kwargs): pass
+            def analyze(self, **_kwargs):
+                return {
+                    "success": True,
+                    "interaction_id": 103,
+                    "suggested_buy_low": 219.0,
+                    "suggested_sell_high": 224.0,
+                    "confidence_score": 0.30,
+                    "analysis": "panic sell",
+                    "next_analysis_at": "2026-05-22T10:03:00+00:00",
+                    "order_action": "STOP_LOSS_SELL_NOW",
+                    "order_price": 215.0,
+                    "order_reason": "support failed",
+                }
+
+        class Runner:
+            class Engine:
+                last_price = 221.5
+
+                class State:
+                    value = "long"
+
+                state = State()
+
+            engine = Engine()
+            broker = object()
+
+            def recent_price_context(self):
+                return []
+
+            def execute_llm_order_decision(self, _decision):
+                raise AssertionError("low-confidence order action must not execute")
+
+        monkeypatch.setattr(llm_api, "LLMAdvisorService", Advisor)
+        monkeypatch.setattr(llm_api, "get_runner", lambda: Runner())
+
+        resp = client.post("/api/strategy/llm-interval/analyze", json={"force": True})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["success"] is True
+        assert data["applied"] is False
+        assert data["order_action"] == "STOP_LOSS_SELL_NOW"
+        assert data["order_status"] == "CONFIDENCE_REJECTED"
+        assert data["order_id"] is None
+
     def test_llm_interaction_history_endpoint_returns_recent_records(self) -> None:
         from datetime import datetime, timezone
 

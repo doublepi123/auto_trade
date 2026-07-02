@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Optional, cast
@@ -48,6 +49,24 @@ def _coerce_recent_prices(source: Any) -> list[dict[str, Any]]:
     if isinstance(result, list):
         return [item for item in result if isinstance(item, dict)]
     return []
+
+
+def _reject_llm_order_action_reason(result: dict[str, Any]) -> str | None:
+    action = str(result.get("order_action") or "NONE").upper()
+    if action == "NONE":
+        return None
+    try:
+        confidence = float(result.get("confidence_score") or 0.0)
+    except (TypeError, ValueError):
+        return "order action rejected: confidence_score is not a number"
+    if not math.isfinite(confidence):
+        return "order action rejected: confidence_score is not finite"
+    if confidence < settings.llm_min_confidence:
+        return (
+            f"order action {action} rejected: confidence_score {confidence:.2f} "
+            f"below threshold {settings.llm_min_confidence}"
+        )
+    return None
 
 
 def _position_context(symbol: str, current_price: float) -> dict[str, float | str]:
@@ -273,11 +292,20 @@ def analyze_llm_interval(
     )
     order_result = {"executed": False, "status": "NO_ACTION", "order_id": None}
     if result.get("order_action") and result.get("order_action") != "NONE":
-        try:
-            order_result = runner.execute_llm_order_decision(result)
-        except Exception:
-            logger.exception("failed to execute LLM order action")
-            order_result = {"executed": False, "status": "ERROR", "order_id": None}
+        reject_reason = _reject_llm_order_action_reason(result)
+        if reject_reason is not None:
+            order_result = {
+                "executed": False,
+                "status": "CONFIDENCE_REJECTED",
+                "order_id": None,
+                "reason": reject_reason,
+            }
+        else:
+            try:
+                order_result = runner.execute_llm_order_decision(result)
+            except Exception:
+                logger.exception("failed to execute LLM order action")
+                order_result = {"executed": False, "status": "ERROR", "order_id": None}
 
     interaction_id = result.get("interaction_id")
     if interaction_id is not None:
@@ -307,6 +335,7 @@ def analyze_llm_interval(
             "order_action": result.get("order_action"),
             "order_status": order_result.get("status"),
             "order_id": order_result.get("order_id"),
+            "order_reject_reason": order_result.get("reason"),
         },
     )
     db.commit()

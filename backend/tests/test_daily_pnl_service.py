@@ -392,3 +392,36 @@ class TestDailyPnlService:
             "close quantity exceeds tracked position by" in rec.message
             for rec in caplog.records
         )
+
+    def test_unclosed_remainder_warning_is_logged_once(self, caplog: LogCaptureFixture) -> None:
+        self._cleanup()
+        trade_day = date(2026, 5, 22)
+        db = self._get_db()
+        db.add_all([
+            OrderRecord(
+                broker_order_id="sell-without-holding-once",
+                symbol="AAPL.US",
+                side="SELL",
+                quantity=10,
+                price=110,
+                executed_quantity=10,
+                executed_price=110,
+                status="FILLED",
+                created_at=self._dt(trade_day, 10),
+                filled_at=self._dt(trade_day, 10, 1),
+            ),
+        ])
+        db.commit()
+
+        import logging
+        caplog.set_level(logging.WARNING)
+        _ = DailyPnlService(db).calculate(trade_day=trade_day)
+        _ = DailyPnlService(db).calculate(trade_day=trade_day)
+        db.close()
+
+        records = [
+            rec
+            for rec in caplog.records
+            if "close quantity exceeds tracked position by" in rec.message
+        ]
+        assert len(records) == 1

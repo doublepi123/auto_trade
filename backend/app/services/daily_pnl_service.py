@@ -108,6 +108,8 @@ class DailyPnlService:
 
     _missing_executed_price_warned_keys: set[str] = set()
     _missing_executed_price_warn_lock = Lock()
+    _unclosed_remainder_warned_keys: set[str] = set()
+    _unclosed_remainder_warn_lock = Lock()
 
     def __init__(self, db: Any) -> None:
         self._db = db
@@ -418,17 +420,32 @@ class DailyPnlService:
         if fill.side == "BUY_TO_COVER":
             unclosed, matched_quantity, pnl = DailyPnlService._close_short(position, fill.quantity, fill.price)
             if unclosed > _ZERO:
-                logger.warning("close quantity exceeds tracked position by %s for %s — possible data inconsistency or unhandled split/dividend", unclosed, fill.symbol)
+                DailyPnlService._warn_unclosed_remainder_once(fill, unclosed)
             return matched_quantity, pnl
         if fill.side == "SELL":
             unclosed, matched_quantity, pnl = DailyPnlService._close_long(position, fill.quantity, fill.price)
             if unclosed > _ZERO:
-                logger.warning("close quantity exceeds tracked position by %s for %s — possible data inconsistency or unhandled split/dividend", unclosed, fill.symbol)
+                DailyPnlService._warn_unclosed_remainder_once(fill, unclosed)
             return matched_quantity, pnl
         if fill.side == "SELL_SHORT":
             DailyPnlService._open_short(position, fill.quantity, fill.price)
             return _ZERO, _ZERO
         return _ZERO, _ZERO
+
+    @staticmethod
+    def _warn_unclosed_remainder_once(fill: _Fill, unclosed: Decimal) -> None:
+        fill_key = fill.broker_order_id or f"local:{fill.id}"
+        warning_key = f"{fill_key}:{fill.symbol}:{fill.side}:{unclosed}"
+        with DailyPnlService._unclosed_remainder_warn_lock:
+            should_warn = warning_key not in DailyPnlService._unclosed_remainder_warned_keys
+            if should_warn:
+                DailyPnlService._unclosed_remainder_warned_keys.add(warning_key)
+        if should_warn:
+            logger.warning(
+                "close quantity exceeds tracked position by %s for %s — possible data inconsistency or unhandled split/dividend",
+                unclosed,
+                fill.symbol,
+            )
 
     @staticmethod
     def _open_long(position: _LedgerPosition, quantity: Decimal, price: Decimal) -> None:

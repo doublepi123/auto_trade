@@ -610,6 +610,7 @@ class TestAppRunner:
         assert result == {"executed": True, "status": "FILLED", "order_id": "order-stop-loss", "action": "SELL"}
         assert runner.broker.submitted == [("NVDA.US", "SELL", Decimal("8"), Decimal("215.00"))]
         assert runner.engine.state == EngineState.FLAT
+        assert runner.last_action_message == "LLM SELL FILLED: order-stop-loss"
 
     def _runner_with_pending_buy(self, price: Decimal) -> AppRunner:
         from app.core.broker import OrderStatusResult
