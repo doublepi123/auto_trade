@@ -106,6 +106,19 @@ def is_trading_hours(market: str, instant: datetime | None = None) -> bool:
     return session.is_rth(instant or datetime.now(timezone.utc))
 
 
+def is_opening_warmup(market: str, minutes: int, instant: datetime | None = None) -> bool:
+    """Whether ``instant`` is inside the first ``minutes`` of regular trading."""
+    if minutes <= 0:
+        return False
+    session = get_session(market)
+    now = _ensure_utc(instant or datetime.now(timezone.utc))
+    if not session.is_rth(now):
+        return False
+    local = session.local(now)
+    open_at = datetime.combine(local.date(), session.rth_open, tzinfo=session.timezone)
+    return open_at <= local < open_at + timedelta(minutes=minutes)
+
+
 def session_status(market: str, instant: datetime | None = None) -> str:
     """Granular session phase: ``rth`` / ``pre`` / ``post`` / ``lunch`` / ``closed``.
 

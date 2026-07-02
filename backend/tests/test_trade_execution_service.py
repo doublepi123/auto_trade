@@ -9,7 +9,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from app.core.broker import OrderResult
+from app.core.broker import OrderResult, Quote
+from app.core.notify import ServerChanNotifier
+from app.core.risk import RiskController
+from app.services import trade_execution_service as trade_svc_module
 from app.services.trade_execution_service import TradeExecutionService, OrderStatus, _PendingOrder
 
 
@@ -949,10 +952,6 @@ class TestTradeExecutionServiceBasics:
         broker.submit_limit_order.assert_called_once()
 
     def test_execute_risk_rejection_records_risk_skip_category(self) -> None:
-        from app.core.broker import Quote
-        from app.core.risk import RiskController
-        from app.core.notify import ServerChanNotifier
-
         skipped: list[tuple[str, str, str, dict[str, object]]] = []
         svc = TradeExecutionService(
             record_order=lambda *args: None,
@@ -977,6 +976,102 @@ class TestTradeExecutionServiceBasics:
         assert status.status == "SKIPPED"
         assert skipped, "expected record_order_skipped to be called for risk rejection"
         assert skipped[0][3]["skip_category"] == "RISK"
+
+    def test_paused_risk_allows_position_reducing_sell(self) -> None:
+        class Broker:
+            def get_positions(self):
+                return [SimpleNamespace(symbol="NVDA.US", side="LONG", quantity=Decimal("10"), avg_price=Decimal("220"))]
+
+            def submit_limit_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal):
+                return OrderResult("order-exit", symbol, side, quantity, price, "FILLED")
+
+        svc = TradeExecutionService(
+            record_order=lambda *args: None,
+            update_order_status=lambda *args: None,
+            record_risk_event=lambda *args: None,
+        )
+        risk = RiskController()
+        risk.pause("pending order order-entry timed out after 30s")
+
+        status = svc.execute(
+            "SELL",
+            "NVDA.US",
+            Quote("NVDA.US", 215, 214.9, 215.1, ""),
+            Broker(),
+            risk,
+            ServerChanNotifier(""),
+            "USD",
+            allow_loss_exit=True,
+        )
+
+        assert status is not None
+        assert status.status == "FILLED"
+
+    def test_opening_warmup_blocks_new_entry_orders(self, monkeypatch) -> None:
+        skipped: list[tuple[str, str, str, dict[str, object]]] = []
+        svc = TradeExecutionService(
+            record_order=lambda *args: None,
+            update_order_status=lambda *args: None,
+            record_risk_event=lambda *args: None,
+            record_order_skipped=lambda symbol, action, reason, payload: skipped.append((symbol, action, reason, payload)),
+        )
+        monkeypatch.setattr(trade_svc_module, "is_trading_hours", lambda market: True)
+        monkeypatch.setattr(trade_svc_module, "is_opening_warmup", lambda market, minutes: True, raising=False)
+
+        class Broker:
+            def estimate_margin_max_quantity(self, symbol: str, side: str, price: Decimal, currency=None) -> Decimal:
+                return Decimal("10")
+
+            def submit_limit_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal):
+                return OrderResult("order-entry", symbol, side, quantity, price, "FILLED")
+
+        status = svc.execute(
+            "BUY",
+            "NVDA.US",
+            Quote("NVDA.US", 197, 196.9, 197.1, ""),
+            Broker(),
+            RiskController(),
+            ServerChanNotifier(""),
+            "USD",
+            trading_session_mode="RTH_ONLY",
+        )
+
+        assert status is not None
+        assert status.status == "SKIPPED"
+        assert skipped[0][3]["skip_category"] == "SESSION"
+        assert "opening warmup" in skipped[0][2]
+
+    def test_buy_add_on_is_skipped_when_existing_long_is_losing(self) -> None:
+        skipped: list[tuple[str, str, str, dict[str, object]]] = []
+        svc = TradeExecutionService(
+            record_order=lambda *args: None,
+            update_order_status=lambda *args: None,
+            record_risk_event=lambda *args: None,
+            record_order_skipped=lambda symbol, action, reason, payload: skipped.append((symbol, action, reason, payload)),
+        )
+        svc.load_tracked_entries({"NVDA.US": (Decimal("100"), Decimal("20000"))})
+
+        class Broker:
+            def estimate_margin_max_quantity(self, symbol: str, side: str, price: Decimal, currency=None) -> Decimal:
+                return Decimal("10")
+
+            def submit_limit_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal):
+                return OrderResult("order-add-on", symbol, side, quantity, price, "FILLED")
+
+        status = svc.execute(
+            "BUY",
+            "NVDA.US",
+            Quote("NVDA.US", 193, 192.9, 193.1, ""),
+            Broker(),
+            RiskController(),
+            ServerChanNotifier(""),
+            "USD",
+        )
+
+        assert status is not None
+        assert status.status == "SKIPPED"
+        assert skipped[0][3]["skip_category"] == "POSITION"
+        assert "losing long" in skipped[0][2]
 
     def test_execute_pending_rejection_records_pending_skip_category(self) -> None:
         from app.core.broker import OrderResult, Quote

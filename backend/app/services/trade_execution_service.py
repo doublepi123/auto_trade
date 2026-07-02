@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Callable, Optional
 
 from app.config import settings
 from app.core.fees import estimate_round_trip_fee
-from app.core.market_calendar import is_trading_hours
+from app.core.market_calendar import is_opening_warmup, is_trading_hours
 
 if TYPE_CHECKING:
     from app.core.audit import AuditLogger
@@ -29,6 +29,8 @@ class OrderPersistenceError(RuntimeError):
 _LIVE_ORDER_STATUSES = {"SUBMITTED", "PARTIAL_FILLED"}
 _FAILED_ORDER_STATUSES = {"REJECTED", "CANCELLED"}
 _SKIPPED_ORDER_STATUS = "SKIPPED"
+_ENTRY_ACTIONS = {"BUY", "SELL_SHORT"}
+_POSITION_REDUCING_ACTIONS = {"SELL", "BUY_TO_COVER"}
 ENTRY_BUYING_POWER_USAGE = Decimal("0.9")
 US_PRICE_TICK = Decimal("0.01")
 
@@ -398,19 +400,37 @@ class TradeExecutionService:
         restore_engine_snapshot: Callable[[EngineSnapshot], None] | None = None,
         notify_risk_event: _NotifyRiskEvent | None = None,
     ) -> OrderStatus | None:
-        if trading_session_mode == "RTH_ONLY" and not is_trading_hours(market):
-            # SESSION skip records ORDER_SKIPPED only; TRADING_SESSION_BLOCKED is layer A.
+        if trading_session_mode == "RTH_ONLY":
+            if not is_trading_hours(market):
+                # SESSION skip records ORDER_SKIPPED only; TRADING_SESSION_BLOCKED is layer A.
+                return self._skip_order(
+                    symbol,
+                    action,
+                    f"non-RTH for {market}",
+                    skip_category="SESSION",
+                )
+            if action in _ENTRY_ACTIONS and is_opening_warmup(market, settings.trading_open_warmup_minutes):
+                return self._skip_order(
+                    symbol,
+                    action,
+                    f"opening warmup for {market}",
+                    skip_category="SESSION",
+                )
+
+        risk_result = risk.check()
+        if not risk_result.approved and not self._risk_rejection_allows_action(action, risk):
+            logger.warning("execute rejected by risk: %s", risk_result.reason)
+            return self._skip_order(symbol, action, risk_result.reason, skip_category="RISK")
+        if not risk_result.approved:
+            logger.info("allowing position-reducing %s despite risk rejection: %s", action, risk_result.reason)
+
+        if action == "BUY" and self._is_losing_long_add_on(symbol, Decimal(str(quote.last_price))):
             return self._skip_order(
                 symbol,
                 action,
-                f"non-RTH for {market}",
-                skip_category="SESSION",
+                "existing losing long position blocks add-on buy",
+                skip_category="POSITION",
             )
-
-        risk_result = risk.check()
-        if not risk_result.approved:
-            logger.warning("execute rejected by risk: %s", risk_result.reason)
-            return self._skip_order(symbol, action, risk_result.reason, skip_category="RISK")
 
         with self._state_lock:
             pending = self._pending_orders.get(symbol)
@@ -428,6 +448,18 @@ class TradeExecutionService:
             return self._execute_buy_to_cover(symbol, quote, broker, risk, notifier, min_profit_amount=min_profit_amount, allow_loss_exit=allow_loss_exit, fee_rate=fee_rate, engine_snapshot=engine_snapshot, restore_engine_snapshot=restore_engine_snapshot, notify_risk_event=notify_risk_event)
         logger.warning("unknown action: %s", action)
         return None
+
+    @staticmethod
+    def _risk_rejection_allows_action(action: str, risk: RiskController) -> bool:
+        return action in _POSITION_REDUCING_ACTIONS and not risk.kill_switch
+
+    def _is_losing_long_add_on(self, symbol: str, price: Decimal) -> bool:
+        with self._state_lock:
+            entry = self._entry_positions.get(symbol)
+            if entry is None or entry.quantity <= 0:
+                return False
+            avg_price = entry.avg_price
+        return avg_price > 0 and price < avg_price
 
     def _entry_quantity_from_margin_power(
         self,

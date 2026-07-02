@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import threading
 import time
 from collections import deque
@@ -20,7 +21,7 @@ from app.core.audit import AuditLogger
 from app.core.broker import BrokerGateway, Quote
 from app.core.engine import EngineSnapshot, EngineState, StrategyEngine, StrategyParams, TriggerResult
 from app.core.fees import one_side_fee_rate
-from app.core.market_calendar import is_trading_hours, trade_day_for
+from app.core.market_calendar import is_opening_warmup, is_trading_hours, trade_day_for
 from app.core.notifiers.multi_channel import MultiChannelNotifier
 from app.core.notifiers.serverchan import ServerChanNotifier
 from app.core.risk import RiskConfig, RiskController
@@ -49,6 +50,9 @@ _LLM_ORDER_ACTION_MAP = {
 _LLM_STOP_LOSS_ACTIONS = {"STOP_LOSS_SELL_NOW", "STOP_LOSS_COVER_NOW"}
 _LIVE_ORDER_STATUSES = {"SUBMITTED", "PARTIAL_FILLED"}
 _TERMINAL_ORDER_STATUSES = {"FILLED", "REJECTED", "CANCELLED"}
+_ENTRY_ACTIONS = {"BUY", "SELL_SHORT"}
+_POSITION_REDUCING_ACTIONS = {"SELL", "BUY_TO_COVER"}
+_PENDING_TIMEOUT_PAUSE_RE = re.compile(r"pending order (?P<order_id>\S+) timed out after")
 DISCONNECT_RETRY_EXHAUSTED_THRESHOLD = 3
 
 _QUOTE_SPREAD_THRESHOLD_PCT = 0.05  # Reject quotes with >5% bid-ask spread
@@ -175,6 +179,7 @@ class AppRunner:
         self.sync_today_orders_from_broker(force=True)
         with self._db_session() as db:
             self._load_pending_orders(db)
+            self._resume_pending_timeout_pause_if_filled(db)
         self._sync_risk_from_order_ledger()
         with self._db_session() as db:
             self._pause_if_unresolved_live_order_exists(db)
@@ -577,15 +582,27 @@ class AppRunner:
             if not self._running or self._trigger_in_flight:
                 decision.early_return = True
                 return decision
+            risk_result = self.risk.check()
             if self._trade_svc.pending_order_for(quote.symbol) is not None:
                 self._trigger_in_flight = True
                 decision.processing_started = True
-            elif not self.risk.check().approved:
+            elif not risk_result.approved and not self._should_evaluate_reducing_trigger(
+                active_engine,
+                float(quote.last_price),
+            ):
                 active_engine.record_price(quote.last_price)
             else:
                 decision.engine_snapshot = active_engine.snapshot()
                 decision.result = active_engine.update_price(quote.last_price)
                 if decision.result.triggered:
+                    if (
+                        not risk_result.approved
+                        and not self._risk_rejection_allows_action(decision.result.action)
+                    ):
+                        active_engine.restore(decision.engine_snapshot)
+                        active_engine.record_price(quote.last_price)
+                        decision.result = None
+                        return decision
                     decision.trigger_symbol = active_engine.params.symbol or quote.symbol
                     decision.trigger_engine = active_engine
                     decision.trigger_market = active_market
@@ -611,7 +628,7 @@ class AppRunner:
         )
         engine_snapshot = decision.engine_snapshot
         risk_result = self.risk.check()
-        if not risk_result.approved:
+        if not risk_result.approved and not self._risk_rejection_allows_action(result.action):
             logger.warning("risk rejected: %s", risk_result.reason)
             self._set_last_action_message(f"{result.action} rejected by risk: {risk_result.reason}")
             self._record_risk_event(risk_result.reason)
@@ -682,6 +699,7 @@ class AppRunner:
     def _on_quote(self, quote: Quote, *, is_push: bool = True) -> None:
         processing_started = False
         try:
+            self._pause_if_unrealized_loss_limit_reached(quote.symbol, float(quote.last_price))
             decision = self._evaluate_quote_trigger(quote, is_push=is_push)
             processing_started = decision.processing_started
 
@@ -901,8 +919,10 @@ class AppRunner:
         engine: StrategyEngine | None = None,
     ) -> dict[str, Any]:
         risk_result = self.risk.check()
-        if not risk_result.approved:
+        if not risk_result.approved and not self._risk_rejection_allows_action(action):
             return {"executed": False, "status": "RISK_REJECTED", "order_id": None, "action": action}
+        if not risk_result.approved:
+            logger.info("allowing LLM position-reducing %s despite risk rejection: %s", action, risk_result.reason)
 
         if symbol is not None and engine is not None:
             target_symbol = symbol
@@ -1279,6 +1299,8 @@ class AppRunner:
                 if self._upsert_broker_order(db, broker_order):
                     changed += 1
             self._load_pending_orders(db)
+            if self._resume_pending_timeout_pause_if_filled(db):
+                changed += 1
             if changed:
                 db.commit()
         self._sync_risk_from_order_ledger()
@@ -1684,6 +1706,93 @@ class AppRunner:
             db.commit()
         self._broadcast_status()
         return True
+
+    def _resume_pending_timeout_pause_if_filled(self, db: Session) -> bool:
+        with self._state_lock:
+            if not self.risk.paused or self.risk.kill_switch:
+                return False
+            pause_reason = self.risk.pause_reason
+        match = _PENDING_TIMEOUT_PAUSE_RE.search(pause_reason)
+        if match is None:
+            return False
+        order_id = match.group("order_id")
+        order = db.query(OrderRecord).filter(OrderRecord.broker_order_id == order_id).first()
+        if order is None or order.status != "FILLED" or float(order.executed_quantity or 0) <= 0:
+            return False
+
+        with self._state_lock:
+            if self.risk.pause_reason != pause_reason:
+                return False
+            self.risk.resume()
+        message = f"pending timeout resolved by broker fill {order_id}"
+        logger.info(message)
+        self._state_svc.persist(db, self.engine, self.risk)
+        record_trade_event(
+            db,
+            event_type="RISK_AUTO_RESUMED",
+            status="RUNNING",
+            message=message,
+            payload={"source": "pending_timeout_fill_reconcile", "order_id": order_id},
+        )
+        db.commit()
+        self._broadcast_status()
+        return True
+
+    def _pause_if_unrealized_loss_limit_reached(self, symbol: str, last_price: float) -> bool:
+        if last_price <= 0:
+            return False
+        with self._state_lock:
+            if self.risk.paused or self.risk.kill_switch:
+                return False
+            max_daily_loss = Decimal(str(self.risk.config.max_daily_loss or 0))
+            realized_pnl = Decimal(str(self.risk.daily_pnl))
+        if max_daily_loss <= 0:
+            return False
+
+        tracked = self._trade_svc.snapshot_tracked_entries().get(symbol)
+        if tracked is None:
+            return False
+        quantity, cost = tracked
+        if quantity <= 0 or cost <= 0:
+            return False
+        avg_price = cost / quantity
+        unrealized_pnl = (Decimal(str(last_price)) - avg_price) * quantity
+        combined_pnl = realized_pnl + unrealized_pnl
+        if combined_pnl > -max_daily_loss:
+            return False
+
+        reason = (
+            "unrealized daily loss limit reached: "
+            f"realized={float(realized_pnl):.2f}, "
+            f"unrealized={float(unrealized_pnl):.2f}, "
+            f"combined={float(combined_pnl):.2f}, "
+            f"limit={float(max_daily_loss):.2f}"
+        )
+        self.risk.pause(reason, auto_resumable=False)
+        try:
+            self._record_risk_event(reason)
+        except Exception:
+            logger.exception("failed to record unrealized loss risk event")
+        try:
+            self.notifier.notify_risk_event("UNREALIZED_LOSS_LIMIT", reason)
+        except Exception:
+            logger.exception("failed to send unrealized loss risk notification")
+        with self._db_session() as db:
+            self._state_svc.persist(db, self.engine, self.risk)
+        self._broadcast_status()
+        return True
+
+    def _risk_rejection_allows_action(self, action: str) -> bool:
+        return action in _POSITION_REDUCING_ACTIONS and not self.risk.kill_switch
+
+    def _should_evaluate_reducing_trigger(self, engine: StrategyEngine, price: float) -> bool:
+        if self.risk.kill_switch or price <= 0:
+            return False
+        if engine.state == EngineState.LONG:
+            return engine.params.sell_high > 0 and price >= engine.params.sell_high
+        if engine.state == EngineState.SHORT:
+            return engine.params.buy_low > 0 and price <= engine.params.buy_low
+        return False
 
     @staticmethod
     @contextmanager
@@ -2195,10 +2304,13 @@ class AppRunner:
         if self._get_trading_session_mode() != "RTH_ONLY":
             return None
         target_market = market or self.engine.params.market
-        if is_trading_hours(target_market):
-            return None
         target_symbol = symbol or self.engine.params.symbol
-        reason = f"non-RTH for {target_market}"
+        if not is_trading_hours(target_market):
+            reason = f"non-RTH for {target_market}"
+        elif action in _ENTRY_ACTIONS and is_opening_warmup(target_market, settings.trading_open_warmup_minutes):
+            reason = f"opening warmup for {target_market}"
+        else:
+            return None
         self._record_order_skipped(
             target_symbol,
             action,

@@ -110,6 +110,8 @@ class DailyPnlService:
     _missing_executed_price_warn_lock = Lock()
     _unclosed_remainder_warned_keys: set[str] = set()
     _unclosed_remainder_warn_lock = Lock()
+    _round_trip_overclose_warned_keys: set[str] = set()
+    _round_trip_overclose_warn_lock = Lock()
 
     def __init__(self, db: Any) -> None:
         self._db = db
@@ -303,10 +305,7 @@ class DailyPnlService:
             # A close that exceeds the available entry lots (data inconsistency,
             # an unhandled split/dividend, or a short opened outside this ledger).
             # Mirrors the warning _close_long/_close_short emit in calculate().
-            logger.warning(
-                "round-trip close of %s for %s exceeds matched entry lots by %s — possible data inconsistency",
-                exit_fill.quantity, exit_fill.symbol, remaining,
-            )
+            DailyPnlService._warn_round_trip_overclose_once(exit_fill, remaining)
 
         if matched_quantity <= 0 or first_entry_at is None:
             return []
@@ -344,6 +343,22 @@ class DailyPnlService:
             net_pnl=float(gross - est_fees),
             holding_seconds=holding_seconds,
         )]
+
+    @staticmethod
+    def _warn_round_trip_overclose_once(exit_fill: _Fill, remaining: Decimal) -> None:
+        fill_key = exit_fill.broker_order_id or f"local:{exit_fill.id}"
+        warning_key = f"{fill_key}:{exit_fill.symbol}:{exit_fill.side}:{remaining}"
+        with DailyPnlService._round_trip_overclose_warn_lock:
+            should_warn = warning_key not in DailyPnlService._round_trip_overclose_warned_keys
+            if should_warn:
+                DailyPnlService._round_trip_overclose_warned_keys.add(warning_key)
+        if should_warn:
+            logger.warning(
+                "round-trip close of %s for %s exceeds matched entry lots by %s — possible data inconsistency",
+                exit_fill.quantity,
+                exit_fill.symbol,
+                remaining,
+            )
 
     def _fill_from_order(self, order: Any) -> _Fill | None:
         quantity = self._executed_quantity(order)

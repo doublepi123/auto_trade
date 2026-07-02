@@ -135,6 +135,12 @@ class Settings(BaseSettings):
     llm_experiment_name: str = Field(default="", validation_alias="AUTO_TRADE_LLM_EXPERIMENT_NAME")
     min_exit_profit_pct: float = 0.2
     engine_cooldown_seconds: int = Field(default=60, ge=0, le=3600, validation_alias="AUTO_TRADE_ENGINE_COOLDOWN_SECONDS")
+    trading_open_warmup_minutes: int = Field(
+        default=5,
+        ge=0,
+        le=60,
+        validation_alias="AUTO_TRADE_TRADING_OPEN_WARMUP_MINUTES",
+    )
 
     cors_origins: str = Field(
         default="http://localhost:3000,http://localhost:8080",

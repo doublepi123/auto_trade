@@ -612,6 +612,40 @@ class TestAppRunner:
         assert runner.engine.state == EngineState.FLAT
         assert runner.last_action_message == "LLM SELL FILLED: order-stop-loss"
 
+    def test_execute_llm_stop_loss_sell_allowed_while_paused(self) -> None:
+        class Broker:
+            def __init__(self) -> None:
+                self.submitted = []
+
+            def get_quotes(self, symbols: list[str]) -> list[Quote]:
+                return [Quote(s, 193.0, 192.9, 193.1, "") for s in symbols]
+
+            def get_positions(self) -> list[Position]:
+                return [Position("NVDA.US", "LONG", Decimal("10"), Decimal("197.74"))]
+
+            def submit_limit_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal) -> OrderResult:
+                self.submitted.append((symbol, side, quantity, price))
+                return OrderResult("order-stop-loss-paused", symbol, side, quantity, price, "FILLED")
+
+        runner = AppRunner()
+        runner._running = True
+        runner.engine.params = StrategyParams(symbol="NVDA.US", market="US", buy_low=196, sell_high=199)
+        runner.engine.state = EngineState.LONG
+        runner.broker = Broker()
+        runner.notifier = _NoopNotifier()
+        runner.risk.pause("pending order order-entry timed out after 30s")
+        self._stub_trade_callbacks(runner)
+
+        result = runner.execute_llm_order_decision({
+            "order_action": "STOP_LOSS_SELL_NOW",
+            "order_price": 193.0,
+            "order_reason": "跌破支撑，先减风险",
+        })
+
+        assert result == {"executed": True, "status": "FILLED", "order_id": "order-stop-loss-paused", "action": "SELL"}
+        assert runner.broker.submitted == [("NVDA.US", "SELL", Decimal("10"), Decimal("193.00"))]
+        assert runner.engine.state == EngineState.FLAT
+
     def _runner_with_pending_buy(self, price: Decimal) -> AppRunner:
         from app.core.broker import OrderStatusResult
 
@@ -1386,6 +1420,55 @@ class TestAppRunner:
 
         assert resumed is False
         assert runner.risk.paused is True
+
+    def test_auto_resume_pending_timeout_pause_after_broker_fill(self) -> None:
+        from app import database
+        from app.models import OrderRecord, RuntimeState, RuntimeStateSnapshot, TradeEvent
+
+        database.init_db()
+        with database.SessionLocal() as db:
+            db.query(TradeEvent).delete()
+            db.query(RuntimeStateSnapshot).delete()
+            db.query(RuntimeState).delete()
+            db.query(OrderRecord).delete()
+            db.add(OrderRecord(
+                broker_order_id="order-late-fill",
+                symbol="NVDA.US",
+                side="BUY",
+                quantity=10,
+                price=197.76,
+                executed_quantity=10,
+                executed_price=197.74,
+                status="FILLED",
+                created_at=datetime(2026, 7, 2, 13, 30, tzinfo=timezone.utc),
+                filled_at=datetime(2026, 7, 2, 13, 31, tzinfo=timezone.utc),
+            ))
+            db.commit()
+
+            runner = AppRunner()
+            runner.engine.params = StrategyParams(symbol="NVDA.US", market="US", buy_low=196, sell_high=199)
+            runner.risk.pause("pending order order-late-fill timed out after 30s")
+
+            resumed = runner._resume_pending_timeout_pause_if_filled(db)
+
+            assert resumed is True
+            assert runner.risk.paused is False
+            event = db.query(TradeEvent).filter(TradeEvent.event_type == "RISK_AUTO_RESUMED").first()
+            assert event is not None
+            assert "order-late-fill" in event.message
+
+    def test_unrealized_loss_guard_pauses_when_combined_daily_loss_reaches_limit(self) -> None:
+        runner = AppRunner()
+        runner.engine.params = StrategyParams(symbol="NVDA.US", market="US", buy_low=196, sell_high=199)
+        runner.risk.config.max_daily_loss = 5000
+        runner.risk.daily_pnl = -200
+        runner._trade_svc.load_tracked_entries({"NVDA.US": (Decimal("100"), Decimal("10000"))})
+
+        paused = runner._pause_if_unrealized_loss_limit_reached("NVDA.US", 52.0)
+
+        assert paused is True
+        assert runner.risk.paused is True
+        assert "unrealized daily loss limit reached" in runner.risk.pause_reason
 
     def test_paused_runner_updates_price_without_repeated_risk_notification(self) -> None:
         class Notifier:
@@ -2163,7 +2246,20 @@ class TestTradingSessionGuard:
     def test_returns_none_when_rth_only_and_in_hours(self, monkeypatch) -> None:
         runner = self._make_runner(mode="RTH_ONLY")
         monkeypatch.setattr(runner_module, "is_trading_hours", lambda market: True)
+        monkeypatch.setattr(runner_module, "is_opening_warmup", lambda market, minutes: False, raising=False)
         assert runner._check_trading_session("BUY") is None
+
+    def test_blocks_entry_during_opening_warmup(self, monkeypatch) -> None:
+        runner = self._make_runner(mode="RTH_ONLY")
+        monkeypatch.setattr(runner_module, "is_trading_hours", lambda market: True)
+        monkeypatch.setattr(runner_module, "is_opening_warmup", lambda market, minutes: True, raising=False)
+
+        result = runner._check_trading_session("BUY")
+
+        assert isinstance(result, dict)
+        assert result.get("status") == "SKIPPED"
+        assert result.get("skip_category") == "SESSION"
+        assert "opening warmup" in result.get("reason", "")
 
     def test_cancel_pending_action_bypasses_gate_outside_hours(self, monkeypatch) -> None:
         runner = self._make_runner(mode="RTH_ONLY")

@@ -425,3 +425,48 @@ class TestDailyPnlService:
             if "close quantity exceeds tracked position by" in rec.message
         ]
         assert len(records) == 1
+
+    def test_round_trip_overclose_warning_is_logged_once(self, caplog: LogCaptureFixture) -> None:
+        self._cleanup()
+        trade_day = date(2026, 5, 22)
+        db = self._get_db()
+        db.add_all([
+            OrderRecord(
+                broker_order_id="buy-before-overclose",
+                symbol="AAPL.US",
+                side="BUY",
+                quantity=10,
+                price=100,
+                executed_quantity=10,
+                executed_price=100,
+                status="FILLED",
+                created_at=self._dt(trade_day, 10),
+                filled_at=self._dt(trade_day, 10, 1),
+            ),
+            OrderRecord(
+                broker_order_id="sell-overclose-once",
+                symbol="AAPL.US",
+                side="SELL",
+                quantity=12,
+                price=110,
+                executed_quantity=12,
+                executed_price=110,
+                status="FILLED",
+                created_at=self._dt(trade_day, 11),
+                filled_at=self._dt(trade_day, 11, 1),
+            ),
+        ])
+        db.commit()
+
+        import logging
+        caplog.set_level(logging.WARNING)
+        _ = DailyPnlService(db).pair_round_trips()
+        _ = DailyPnlService(db).pair_round_trips()
+        db.close()
+
+        records = [
+            rec
+            for rec in caplog.records
+            if "round-trip close of" in rec.message
+        ]
+        assert len(records) == 1
