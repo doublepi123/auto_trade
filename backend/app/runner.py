@@ -137,6 +137,7 @@ class AppRunner:
         self._recent_quotes_cap = 500
         self._recent_quotes: Deque[dict[str, Any]] = deque(maxlen=self._recent_quotes_cap)
         self._last_action_message = ""
+        self._last_guarded_ledger_replay: tuple[object, ...] | None = None
         self._last_llm_action_at: dict[tuple[str, str], float] = {}
         # Per-symbol last fill timestamp. Previously a single float, which
         # caused a fill on symbol B to skip a position sync on symbol A
@@ -1332,32 +1333,43 @@ class AppRunner:
             old_daily_pnl = self.risk.daily_pnl
             old_consecutive_losses = self.risk.consecutive_losses
             old_daily_pnl_date = self.risk.daily_pnl_date
-            changed = (
-                abs(old_daily_pnl - result.realized_pnl) > 1e-9
-                or old_consecutive_losses != result.consecutive_losses
-                or old_daily_pnl_date != result.trade_day
-            )
-            if not changed:
-                return False
-
             new_pnl, new_losses = DailyPnlService.reconcile_risk_state(
                 old_daily_pnl,
                 old_consecutive_losses,
                 old_daily_pnl_date,
                 result,
             )
-            if new_pnl != result.realized_pnl or new_losses != result.consecutive_losses:
-                logger.warning(
-                    "ledger replay would make same-day risk state more optimistic: "
-                    "current pnl=%s/losses=%s, ledger pnl=%s/losses=%s; "
-                    "applying pnl=%s/losses=%s",
+            guarded_replay = new_pnl != result.realized_pnl or new_losses != result.consecutive_losses
+            if guarded_replay:
+                warning_key = (
+                    result.trade_day,
                     old_daily_pnl,
                     old_consecutive_losses,
                     result.realized_pnl,
                     result.consecutive_losses,
-                    new_pnl,
-                    new_losses,
                 )
+                if self._last_guarded_ledger_replay != warning_key:
+                    logger.warning(
+                        "ledger replay would make same-day risk state more optimistic: "
+                        "current pnl=%s/losses=%s, ledger pnl=%s/losses=%s; "
+                        "applying pnl=%s/losses=%s",
+                        old_daily_pnl,
+                        old_consecutive_losses,
+                        result.realized_pnl,
+                        result.consecutive_losses,
+                        new_pnl,
+                        new_losses,
+                    )
+                    self._last_guarded_ledger_replay = warning_key
+            else:
+                self._last_guarded_ledger_replay = None
+            changed = (
+                abs(old_daily_pnl - new_pnl) > 1e-9
+                or old_consecutive_losses != new_losses
+                or old_daily_pnl_date != result.trade_day
+            )
+            if not changed:
+                return False
 
             self.risk.replace_daily_pnl(
                 new_pnl,

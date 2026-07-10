@@ -255,6 +255,7 @@ class TestTradeEventSync:
 
         assert runner.risk.daily_pnl == 6.0
         assert runner.risk.consecutive_losses == 0
+        assert runner._sync_risk_from_order_ledger() is False
 
     def test_sync_today_orders_does_not_clear_losses_when_ledger_has_unmatched_exit(self) -> None:
         _clean()
