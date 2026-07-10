@@ -193,13 +193,16 @@ def get_status(db: Session = Depends(get_db)) -> StatusResponse:
     old_daily_pnl = risk.daily_pnl if risk is not None else state.daily_pnl
     old_consecutive_losses = risk.consecutive_losses if risk is not None else state.consecutive_losses
     old_daily_pnl_date = risk.daily_pnl_date if risk is not None else state.daily_pnl_date
-    new_pnl = pnl_result.realized_pnl
-    new_losses = pnl_result.consecutive_losses
-    same_trade_day = old_daily_pnl_date == pnl_result.trade_day
-    optimistic_replay = new_pnl > old_daily_pnl + 1e-9 or new_losses < old_consecutive_losses
-    if risk is not None and same_trade_day and not pnl_result.trades and optimistic_replay:
-        new_pnl = old_daily_pnl
-        new_losses = old_consecutive_losses
+    if risk is not None:
+        new_pnl, new_losses = DailyPnlService.reconcile_risk_state(
+            old_daily_pnl,
+            old_consecutive_losses,
+            old_daily_pnl_date,
+            pnl_result,
+        )
+    else:
+        new_pnl = pnl_result.realized_pnl
+        new_losses = pnl_result.consecutive_losses
     if (
         abs(state.daily_pnl - new_pnl) > 1e-9
         or state.consecutive_losses != new_losses

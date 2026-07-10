@@ -1340,21 +1340,24 @@ class AppRunner:
             if not changed:
                 return False
 
-            new_pnl = result.realized_pnl
-            new_losses = result.consecutive_losses
-            same_trade_day = old_daily_pnl_date == result.trade_day
-            optimistic_replay = new_pnl > old_daily_pnl + 1e-9 or new_losses < old_consecutive_losses
-            if same_trade_day and not result.trades and optimistic_replay:
+            new_pnl, new_losses = DailyPnlService.reconcile_risk_state(
+                old_daily_pnl,
+                old_consecutive_losses,
+                old_daily_pnl_date,
+                result,
+            )
+            if new_pnl != result.realized_pnl or new_losses != result.consecutive_losses:
                 logger.warning(
-                    "ledger replay produced no matched trades and would overwrite risk state "
-                    "pnl=%s/losses=%s with pnl=%s/losses=%s; keeping current risk state",
+                    "ledger replay would make same-day risk state more optimistic: "
+                    "current pnl=%s/losses=%s, ledger pnl=%s/losses=%s; "
+                    "applying pnl=%s/losses=%s",
                     old_daily_pnl,
                     old_consecutive_losses,
+                    result.realized_pnl,
+                    result.consecutive_losses,
                     new_pnl,
                     new_losses,
                 )
-                new_pnl = old_daily_pnl
-                new_losses = old_consecutive_losses
 
             self.risk.replace_daily_pnl(
                 new_pnl,
@@ -1365,9 +1368,11 @@ class AppRunner:
         with self._db_session() as db:
             self._state_svc.persist_risk(db, self.risk, symbol=self.engine.params.symbol)
         logger.info(
-            "synced realized daily pnl from order ledger: pnl=%s consecutive_losses=%s trades=%s",
+            "synced realized daily pnl from order ledger: "
+            "ledger_pnl=%s applied_pnl=%s consecutive_losses=%s trades=%s",
             result.realized_pnl,
-            result.consecutive_losses,
+            new_pnl,
+            new_losses,
             len(result.trades),
         )
         return True

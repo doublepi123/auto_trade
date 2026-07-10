@@ -1,7 +1,7 @@
 # pyright: reportArgumentType=false, reportAttributeAccessIssue=false
 from __future__ import annotations
 
-from datetime import datetime, time, timezone
+from datetime import datetime, time, timedelta, timezone
 from decimal import Decimal
 
 from app.core.broker import BrokerOrder
@@ -183,6 +183,73 @@ class TestTradeEventSync:
         runner.broker = Broker()
         runner.risk.daily_pnl = 999.0
         runner.risk.consecutive_losses = 3
+
+        assert runner.sync_today_orders_from_broker(force=True) == 2
+
+        assert runner.risk.daily_pnl == 6.0
+        assert runner.risk.consecutive_losses == 0
+
+    def test_sync_today_orders_keeps_less_optimistic_live_pnl(self) -> None:
+        _clean()
+        trade_day = trade_day_for("US")
+        historical_fill = datetime.combine(
+            trade_day - timedelta(days=1),
+            time(14, 0),
+            tzinfo=timezone.utc,
+        )
+        buy_fill = datetime.combine(trade_day, time(14, 0), tzinfo=timezone.utc)
+        sell_fill = datetime.combine(trade_day, time(14, 5), tzinfo=timezone.utc)
+
+        db = SessionLocal()
+        try:
+            db.add(OrderRecord(
+                broker_order_id="phantom-historical-buy",
+                symbol="NVDA.US",
+                side="BUY",
+                quantity=1,
+                price=50,
+                executed_quantity=1,
+                executed_price=50,
+                status="FILLED",
+                created_at=historical_fill,
+                filled_at=historical_fill,
+            ))
+            db.commit()
+        finally:
+            db.close()
+
+        class Broker:
+            def get_today_orders(self) -> list[BrokerOrder]:
+                return [
+                    BrokerOrder(
+                        broker_order_id="live-pnl-buy",
+                        symbol="NVDA.US",
+                        side="BUY",
+                        quantity=Decimal("2"),
+                        price=Decimal("100"),
+                        executed_quantity=Decimal("2"),
+                        executed_price=Decimal("100"),
+                        status="FILLED",
+                        created_at=buy_fill,
+                        filled_at=buy_fill,
+                    ),
+                    BrokerOrder(
+                        broker_order_id="live-pnl-sell",
+                        symbol="NVDA.US",
+                        side="SELL",
+                        quantity=Decimal("2"),
+                        price=Decimal("103"),
+                        executed_quantity=Decimal("2"),
+                        executed_price=Decimal("103"),
+                        status="FILLED",
+                        created_at=sell_fill,
+                        filled_at=sell_fill,
+                    ),
+                ]
+
+        runner = AppRunner()
+        runner.broker = Broker()
+        runner.risk.replace_daily_pnl(6.0, 0, trade_day)
 
         assert runner.sync_today_orders_from_broker(force=True) == 2
 

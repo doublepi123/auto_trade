@@ -116,6 +116,31 @@ class DailyPnlService:
     def __init__(self, db: Any) -> None:
         self._db = db
 
+    @staticmethod
+    def reconcile_risk_state(
+        current_pnl: float,
+        current_consecutive_losses: int,
+        current_trade_day: date | None,
+        result: DailyPnlResult,
+    ) -> tuple[float, int]:
+        """Apply a ledger replay without making same-day risk more optimistic.
+
+        Historical inventory drift can make a valid closing fill match stale
+        entry lots and overstate profit. Live fill accounting has the exact
+        tracked entry cost, so a same-day replay may replace it only when the
+        replay is equally or more conservative. A newly discovered loss is
+        still accepted immediately.
+        """
+        replay_pnl = result.realized_pnl
+        replay_losses = result.consecutive_losses
+        if current_trade_day != result.trade_day:
+            return replay_pnl, replay_losses
+        if replay_pnl > current_pnl + 1e-9:
+            return current_pnl, max(current_consecutive_losses, replay_losses)
+        if not result.trades and replay_losses < current_consecutive_losses:
+            replay_losses = current_consecutive_losses
+        return replay_pnl, replay_losses
+
     def calculate(
         self,
         *,
