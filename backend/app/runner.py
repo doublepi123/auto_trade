@@ -524,13 +524,17 @@ class AppRunner:
             new_margin_safety_factor = getattr(config, "margin_safety_factor", None)
 
             need_resubscribe = False
+            resubscribe_symbols: list[str] = []
             with self._state_lock:
+                previous_quote_symbols = set(self._desired_quote_symbols_locked())
                 self.engine.params = new_params
                 self.risk.config = new_risk_config
                 self._trading_session_mode = new_session_mode
                 self._trade_svc.margin_safety_factor = new_margin_safety_factor
                 self._sync_symbol_runtimes(db)
-                if self._running:
+                resubscribe_symbols = self._desired_quote_symbols_locked()
+                quote_symbols_changed = previous_quote_symbols != set(resubscribe_symbols)
+                if self._running and quote_symbols_changed:
                     self._reset_quote_tracking(clear_history=True)
                     if self._quotes_subscribed:
                         need_resubscribe = True
@@ -541,15 +545,16 @@ class AppRunner:
                     self.broker.unsubscribe_quotes()
                 except Exception:
                     logger.warning("failed to unsubscribe old symbols during strategy reload")
-                with self._state_lock:
-                    symbols = self._desired_quote_symbols_locked()
-                if symbols:
+                if resubscribe_symbols:
                     try:
-                        self._subscribe_quote_symbols(self.broker, symbols)
+                        self._subscribe_quote_symbols(self.broker, resubscribe_symbols)
                         with self._state_lock:
                             self._quotes_subscribed = True
                             self._last_push_quote_at = time.monotonic()
-                        logger.info("re-subscribed to quote streams after strategy reload: %s", ", ".join(symbols))
+                        logger.info(
+                            "re-subscribed to quote streams after strategy reload: %s",
+                            ", ".join(resubscribe_symbols),
+                        )
                     except Exception as exc:
                         logger.error("quote subscription failed after strategy reload: %s", exc)
         finally:

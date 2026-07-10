@@ -372,6 +372,121 @@ class TestAppRunner:
         runner.reload_strategy()
         assert runner._trade_svc.margin_safety_factor == 0.75
 
+    def test_reload_strategy_keeps_quote_subscription_when_symbols_unchanged(self, monkeypatch) -> None:
+        from app.services.strategy_service import StrategyService
+
+        runner = AppRunner()
+        runner._running = True
+        runner._quotes_subscribed = True
+        runner.engine.params = StrategyParams(
+            symbol="AAPL.US",
+            market="US",
+            buy_low=100.0,
+            sell_high=110.0,
+        )
+        runner._last_quote_at = 123.0
+        runner._last_push_quote_at = 122.0
+        runner._recent_quotes.append({"symbol": "AAPL.US", "last_price": 105.0})
+
+        class FakeConfig:
+            symbol = "AAPL.US"
+            market = "US"
+            buy_low = 101.0
+            sell_high = 111.0
+            short_selling = False
+            min_profit_amount = 0.0
+            auto_resume_minutes = 3
+            max_daily_loss = 4000.0
+            max_consecutive_losses = 4
+            fee_rate_us = 0.0005
+            fee_rate_hk = 0.003
+            min_repricing_pct = 0.003
+            llm_action_cooldown_seconds = 60
+            trading_session_mode = "RTH_ONLY"
+            margin_safety_factor = 0.35
+
+        class FakeSvc:
+            def get_config(self):
+                return FakeConfig()
+
+        monkeypatch.setattr(StrategyService, "__init__", lambda self, db: None)
+        monkeypatch.setattr(StrategyService, "get_config", FakeSvc().get_config)
+        monkeypatch.setattr(runner, "_sync_symbol_runtimes", lambda _db: None)
+        monkeypatch.setattr(
+            runner.broker,
+            "unsubscribe_quotes",
+            lambda: pytest.fail("unchanged symbols must not unsubscribe quotes"),
+        )
+        monkeypatch.setattr(
+            runner.broker,
+            "subscribe_quotes",
+            lambda _symbol, _callback: pytest.fail("unchanged symbols must not subscribe quotes"),
+        )
+
+        runner.reload_strategy()
+
+        assert runner._quotes_subscribed is True
+        assert runner._last_quote_at == 123.0
+        assert runner._last_push_quote_at == 122.0
+        assert list(runner._recent_quotes) == [{"symbol": "AAPL.US", "last_price": 105.0}]
+        assert runner.engine.params.buy_low == 101.0
+        assert runner.engine.params.sell_high == 111.0
+
+    def test_reload_strategy_resubscribes_when_primary_symbol_changes(self, monkeypatch) -> None:
+        from app.services.strategy_service import StrategyService
+
+        runner = AppRunner()
+        runner._running = True
+        runner._quotes_subscribed = True
+        runner.engine.params = StrategyParams(
+            symbol="AAPL.US",
+            market="US",
+            buy_low=100.0,
+            sell_high=110.0,
+        )
+        broker_calls: list[tuple[str, str]] = []
+
+        class FakeConfig:
+            symbol = "MSFT.US"
+            market = "US"
+            buy_low = 400.0
+            sell_high = 410.0
+            short_selling = False
+            min_profit_amount = 0.0
+            auto_resume_minutes = 3
+            max_daily_loss = 5000.0
+            max_consecutive_losses = 3
+            fee_rate_us = 0.0005
+            fee_rate_hk = 0.003
+            min_repricing_pct = 0.003
+            llm_action_cooldown_seconds = 60
+            trading_session_mode = "RTH_ONLY"
+            margin_safety_factor = 0.35
+
+        class FakeSvc:
+            def get_config(self):
+                return FakeConfig()
+
+        monkeypatch.setattr(StrategyService, "__init__", lambda self, db: None)
+        monkeypatch.setattr(StrategyService, "get_config", FakeSvc().get_config)
+        monkeypatch.setattr(runner, "_sync_symbol_runtimes", lambda _db: None)
+        monkeypatch.setattr(
+            runner.broker,
+            "unsubscribe_quotes",
+            lambda: broker_calls.append(("unsubscribe", "AAPL.US")),
+        )
+        monkeypatch.setattr(
+            runner.broker,
+            "subscribe_quotes",
+            lambda symbol, _callback: broker_calls.append(("subscribe", symbol)),
+        )
+
+        runner.reload_strategy()
+
+        assert broker_calls == [("unsubscribe", "AAPL.US"), ("subscribe", "MSFT.US")]
+        assert runner._quotes_subscribed is True
+        assert runner.engine.params.symbol == "MSFT.US"
+
     def test_initialize_runner_loads_margin_safety_factor(self, monkeypatch) -> None:
         from contextlib import contextmanager
 
