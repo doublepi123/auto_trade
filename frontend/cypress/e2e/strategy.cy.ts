@@ -16,6 +16,14 @@ describe('Strategy', () => {
     cy.get('.el-button--primary').should('be.visible')
   })
 
+  it('keeps default live-safety limits valid for native form submission', () => {
+    for (const testId of ['max-position-notional', 'max-risk-per-trade', 'stop-loss-pct', 'max-holding-minutes']) {
+      cy.get(`[data-testid="${testId}"] input`).then(($input) => {
+        expect(($input[0] as HTMLInputElement).checkValidity(), testId).to.equal(true)
+      })
+    }
+  })
+
   it('accepts cent-level decimal prices without native number validation errors', () => {
     cy.contains('.el-form-item', '买入价下限')
       .find('input')

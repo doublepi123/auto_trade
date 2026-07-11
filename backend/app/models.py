@@ -66,6 +66,42 @@ class StrategyConfig(Base):
     report_schedule_symbol: Mapped[str] = mapped_column(String(50), default="", nullable=False)
 
 
+class StrategyV2ShadowConfig(Base):
+    """Forward-test configuration for the P2 strategy.
+
+    This configuration deliberately has no live-execution mode.  The shadow
+    service owns only virtual state and never writes to the real order ledger.
+    """
+
+    __tablename__ = "strategy_v2_shadow_config"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(50), unique=True, index=True, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    zscore_window_1m_bars: Mapped[int] = mapped_column(Integer, default=30, nullable=False)
+    zscore_window_5m_bars: Mapped[int] = mapped_column(Integer, default=12, nullable=False)
+    breach_zscore: Mapped[float] = mapped_column(Float, default=-2.0, nullable=False)
+    reclaim_zscore: Mapped[float] = mapped_column(Float, default=-1.0, nullable=False)
+    five_minute_zscore_max: Mapped[float] = mapped_column(Float, default=-0.5, nullable=False)
+    adx_period: Mapped[int] = mapped_column(Integer, default=14, nullable=False)
+    max_adx: Mapped[float] = mapped_column(Float, default=20.0, nullable=False)
+    realized_vol_window_bars: Mapped[int] = mapped_column(Integer, default=30, nullable=False)
+    min_realized_vol: Mapped[float] = mapped_column(Float, default=0.10, nullable=False)
+    max_realized_vol: Mapped[float] = mapped_column(Float, default=0.80, nullable=False)
+    stop_loss_pct: Mapped[float] = mapped_column(Float, default=0.75, nullable=False)
+    profit_target_pct: Mapped[float] = mapped_column(Float, default=0.50, nullable=False)
+    max_holding_minutes: Mapped[int] = mapped_column(Integer, default=60, nullable=False)
+    entry_cutoff_minutes_before_close: Mapped[int] = mapped_column(Integer, default=45, nullable=False)
+    flatten_minutes_before_close: Mapped[int] = mapped_column(Integer, default=15, nullable=False)
+    arm_ttl_bars: Mapped[int] = mapped_column(Integer, default=10, nullable=False)
+    max_entries_per_day: Mapped[int] = mapped_column(Integer, default=2, nullable=False)
+    entry_cooldown_minutes: Mapped[int] = mapped_column(Integer, default=15, nullable=False)
+    slippage_bps: Mapped[float] = mapped_column(Float, default=2.0, nullable=False)
+    estimated_fee_rate_us: Mapped[float] = mapped_column(Float, default=0.0005, nullable=False)
+    estimated_fee_rate_hk: Mapped[float] = mapped_column(Float, default=0.003, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow, onupdate=_utcnow)
+
+
 class StrategyParamVersion(Base):
     """Immutable snapshot of the tunable strategy params at a point in time.
 
@@ -357,6 +393,122 @@ class RuntimeStateSnapshot(Base):
     execution_state: Mapped[str] = mapped_column(String(20), default="IDLE", nullable=False)
     reduction_reason: Mapped[str] = mapped_column(Text, default="", nullable=False)
     created_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow)
+
+
+class StrategyV2ShadowState(Base):
+    """Crash-safe state for the forward-only P2 shadow state machine."""
+
+    __tablename__ = "strategy_v2_shadow_state"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(50), unique=True, index=True, nullable=False)
+    config_version: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    session_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    phase: Mapped[str] = mapped_column(String(24), default="COLD", nullable=False)
+    last_bar_at: Mapped[Optional[datetime]] = mapped_column(_TZDateTime, nullable=True)
+    last_polled_at: Mapped[Optional[datetime]] = mapped_column(_TZDateTime, nullable=True)
+    last_poll_error: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    armed_at: Mapped[Optional[datetime]] = mapped_column(_TZDateTime, nullable=True)
+    armed_zscore: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    entries_today: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_entry_at: Mapped[Optional[datetime]] = mapped_column(_TZDateTime, nullable=True)
+    open_trade_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    state_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow, onupdate=_utcnow)
+
+
+class StrategyV2ShadowDecision(Base):
+    """Append-only decision and feature snapshot for every completed 1m bar."""
+
+    __tablename__ = "strategy_v2_shadow_decisions"
+    __table_args__ = (
+        Index("ix_strategy_v2_shadow_decisions_symbol_bar", "symbol", "bar_at"),
+        Index("ix_strategy_v2_shadow_decisions_action", "action"),
+        UniqueConstraint("idempotency_key", name="uq_strategy_v2_shadow_decision_key"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    idempotency_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(50), nullable=False)
+    market: Mapped[str] = mapped_column(String(10), default="US", nullable=False)
+    config_version: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    session_date: Mapped[date] = mapped_column(Date, nullable=False)
+    bar_at: Mapped[datetime] = mapped_column(_TZDateTime, nullable=False)
+    bar_at_5m: Mapped[Optional[datetime]] = mapped_column(_TZDateTime, nullable=True)
+    observed_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow, nullable=False)
+    action: Mapped[str] = mapped_column(String(24), default="WAIT", nullable=False)
+    reason: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    state_before: Mapped[str] = mapped_column(String(24), default="FLAT", nullable=False)
+    state_after: Mapped[str] = mapped_column(String(24), default="FLAT", nullable=False)
+    close_price: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    vwap_1m: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    zscore_1m: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    vwap_5m: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    zscore_5m: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    adx_5m: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    realized_vol_1m: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    gate_passed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    breach_armed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    virtual_position: Mapped[str] = mapped_column(String(16), default="FLAT", nullable=False)
+    reference_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    quantity: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    gross_pnl: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    fee: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    net_pnl: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    exit_reason: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    holding_minutes: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    mae_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    mfe_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    gate_reasons_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    features_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow)
+
+
+class StrategyV2ShadowTrade(Base):
+    """Virtual P2 round trip; fees are always estimates, never broker charges."""
+
+    __tablename__ = "strategy_v2_shadow_trades"
+    __table_args__ = (
+        Index("ix_strategy_v2_shadow_trades_symbol_exit", "symbol", "exit_at"),
+        Index(
+            "ux_strategy_v2_shadow_trade_open_symbol",
+            "symbol",
+            unique=True,
+            sqlite_where=text("status = 'OPEN'"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(50), nullable=False)
+    config_version: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    entry_decision_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    exit_decision_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="OPEN", nullable=False)
+    entry_at: Mapped[datetime] = mapped_column(_TZDateTime, nullable=False)
+    exit_at: Mapped[Optional[datetime]] = mapped_column(_TZDateTime, nullable=True)
+    entry_price: Mapped[float] = mapped_column(Float, nullable=False)
+    exit_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    quantity: Mapped[float] = mapped_column(Float, default=1.0, nullable=False)
+    stop_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    target_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    signal_vwap: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    holding_deadline: Mapped[Optional[datetime]] = mapped_column(_TZDateTime, nullable=True)
+    entry_reason: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    exit_reason: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    gross_pnl: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    estimated_fees: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    net_pnl: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    highest_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    lowest_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    mfe_amount: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    mae_amount: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    mfe_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    mae_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    holding_seconds: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    fee_source: Mapped[str] = mapped_column(String(20), default="ESTIMATED", nullable=False)
+    estimated_fee_rate: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow, onupdate=_utcnow)
 
 
 class AuditLog(Base):

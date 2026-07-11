@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -254,6 +254,256 @@ class StrategyResponse(BaseModel):
     consistency_warnings: list[dict[str, str]] = Field(default_factory=list)
 
     model_config = {"from_attributes": True}
+
+
+class StrategyV2ShadowConfigValues(BaseModel):
+    """Validated P2 values shared by API updates and the shadow service."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    symbol: str
+    zscore_window_1m_bars: int = Field(default=30, ge=10, le=240)
+    zscore_window_5m_bars: int = Field(default=12, ge=5, le=120)
+    breach_zscore: float = Field(default=-2.0, ge=-6.0, lt=-0.1, allow_inf_nan=False)
+    reclaim_zscore: float = Field(default=-1.0, ge=-5.0, le=0.0, allow_inf_nan=False)
+    five_minute_zscore_max: float = Field(default=-0.5, ge=-5.0, le=0.0, allow_inf_nan=False)
+    adx_period: int = Field(default=14, ge=5, le=50)
+    max_adx: float = Field(default=20.0, ge=1.0, le=40.0, allow_inf_nan=False)
+    realized_vol_window_bars: int = Field(default=30, ge=10, le=240)
+    min_realized_vol: float = Field(default=0.10, ge=0.0, le=3.0, allow_inf_nan=False)
+    max_realized_vol: float = Field(default=0.80, gt=0.0, le=3.0, allow_inf_nan=False)
+    stop_loss_pct: float = Field(default=0.75, gt=0.0, le=0.75, allow_inf_nan=False)
+    profit_target_pct: float = Field(default=0.50, gt=0.0, le=5.0, allow_inf_nan=False)
+    max_holding_minutes: int = Field(default=60, ge=1, le=60)
+    entry_cutoff_minutes_before_close: int = Field(default=45, ge=45, le=180)
+    flatten_minutes_before_close: int = Field(default=15, ge=15, le=180)
+    arm_ttl_bars: int = Field(default=10, ge=1, le=60)
+    max_entries_per_day: int = Field(default=2, ge=1, le=2)
+    entry_cooldown_minutes: int = Field(default=15, ge=15, le=240)
+    slippage_bps: float = Field(default=2.0, ge=0.0, le=50.0, allow_inf_nan=False)
+    estimated_fee_rate_us: float = Field(
+        default=0.0005,
+        ge=0.0,
+        le=0.1,
+        allow_inf_nan=False,
+    )
+    estimated_fee_rate_hk: float = Field(
+        default=0.003,
+        ge=0.0,
+        le=0.1,
+        allow_inf_nan=False,
+    )
+    algorithm_version: Literal["strategy-v2-rth-mr-v1"] = "strategy-v2-rth-mr-v1"
+    mode: Literal["SHADOW"] = "SHADOW"
+    order_submission_allowed: Literal[False] = False
+    allow_position_addons: Literal[False] = False
+    short_entries_enabled: Literal[False] = False
+
+    @field_validator("symbol")
+    @classmethod
+    def validate_shadow_symbol(cls, value: str) -> str:
+        return _normalize_symbol(value)
+
+    @model_validator(mode="after")
+    def validate_shadow_thresholds(self) -> "StrategyV2ShadowConfigValues":
+        if self.breach_zscore >= self.reclaim_zscore:
+            raise ValueError("breach_zscore must be less than reclaim_zscore")
+        if self.min_realized_vol >= self.max_realized_vol:
+            raise ValueError("min_realized_vol must be less than max_realized_vol")
+        if self.flatten_minutes_before_close > self.entry_cutoff_minutes_before_close:
+            raise ValueError(
+                "flatten_minutes_before_close must not exceed "
+                "entry_cutoff_minutes_before_close"
+            )
+        return self
+
+
+class StrategyV2ShadowConfigUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: Optional[bool] = None
+    zscore_window_1m_bars: Optional[int] = Field(default=None, ge=10, le=240)
+    zscore_window_5m_bars: Optional[int] = Field(default=None, ge=5, le=120)
+    breach_zscore: Optional[float] = Field(default=None, ge=-6.0, lt=-0.1, allow_inf_nan=False)
+    reclaim_zscore: Optional[float] = Field(default=None, ge=-5.0, le=0.0, allow_inf_nan=False)
+    five_minute_zscore_max: Optional[float] = Field(default=None, ge=-5.0, le=0.0, allow_inf_nan=False)
+    adx_period: Optional[int] = Field(default=None, ge=5, le=50)
+    max_adx: Optional[float] = Field(default=None, ge=1.0, le=40.0, allow_inf_nan=False)
+    realized_vol_window_bars: Optional[int] = Field(default=None, ge=10, le=240)
+    min_realized_vol: Optional[float] = Field(default=None, ge=0.0, le=3.0, allow_inf_nan=False)
+    max_realized_vol: Optional[float] = Field(default=None, gt=0.0, le=3.0, allow_inf_nan=False)
+    stop_loss_pct: Optional[float] = Field(default=None, gt=0.0, le=0.75, allow_inf_nan=False)
+    profit_target_pct: Optional[float] = Field(default=None, gt=0.0, le=5.0, allow_inf_nan=False)
+
+
+class StrategyV2ShadowConfigResponse(StrategyV2ShadowConfigValues):
+    config_version: str
+    updated_at: datetime
+
+
+class StrategyV2ShadowDecisionResponse(BaseModel):
+    id: int
+    idempotency_key: str
+    symbol: str
+    market: str
+    config_version: str
+    observed_at: datetime
+    bar_timestamp_1m: datetime
+    bar_timestamp_5m: Optional[datetime] = None
+    price: float
+    vwap_1m: Optional[float] = None
+    zscore_1m: Optional[float] = None
+    vwap_5m: Optional[float] = None
+    zscore_5m: Optional[float] = None
+    adx: Optional[float] = None
+    realized_vol: Optional[float] = None
+    regime_eligible: bool
+    breach_armed: bool
+    action: str
+    reason: str
+    virtual_position: str
+    reference_price: Optional[float] = None
+    quantity: float = 0.0
+    gross_pnl: Optional[float] = None
+    fee: Optional[float] = None
+    net_pnl: Optional[float] = None
+    exit_reason: str = ""
+    holding_minutes: Optional[float] = None
+    mae_pct: Optional[float] = None
+    mfe_pct: Optional[float] = None
+    gate_reasons: list[str] = Field(default_factory=list)
+
+
+class StrategyV2ShadowLatestResponse(BaseModel):
+    observed_at: datetime
+    data_age_seconds: float
+    bar_timestamp_1m: Optional[datetime] = None
+    bar_timestamp_5m: Optional[datetime] = None
+    price: float
+    vwap_1m: Optional[float] = None
+    zscore_1m: Optional[float] = None
+    vwap_5m: Optional[float] = None
+    zscore_5m: Optional[float] = None
+    adx: Optional[float] = None
+    realized_vol: Optional[float] = None
+    regime_eligible: bool
+    breach_armed: bool
+    virtual_position: Literal["FLAT", "LONG"]
+    virtual_entry_price: Optional[float] = None
+    virtual_entry_at: Optional[datetime] = None
+    last_action: str
+    last_reason: str
+
+
+class StrategyV2ShadowDecisionPage(BaseModel):
+    items: list[StrategyV2ShadowDecisionResponse]
+    total: int
+    page: int
+    page_size: int
+
+
+class StrategyV2ShadowTradeResponse(BaseModel):
+    id: int
+    symbol: str
+    config_version: str
+    status: str
+    entry_at: datetime
+    exit_at: Optional[datetime] = None
+    entry_price: float
+    exit_price: Optional[float] = None
+    quantity: float
+    stop_price: Optional[float] = None
+    target_price: Optional[float] = None
+    signal_vwap: Optional[float] = None
+    holding_deadline: Optional[datetime] = None
+    entry_reason: str
+    exit_reason: str
+    gross_pnl: Optional[float] = None
+    estimated_fees: Optional[float] = None
+    net_pnl: Optional[float] = None
+    mfe_amount: Optional[float] = None
+    mae_amount: Optional[float] = None
+    mfe_pct: Optional[float] = None
+    mae_pct: Optional[float] = None
+    holding_seconds: Optional[float] = None
+    fee_source: Literal["ESTIMATED"] = "ESTIMATED"
+    estimated_fee_rate: Optional[float] = None
+
+    model_config = {"from_attributes": True}
+
+
+class StrategyV2ShadowMetrics(BaseModel):
+    bars: int = 0
+    eligible_bars: int = 0
+    breaches: int = 0
+    reclaims: int = 0
+    entries: int = 0
+    exits: int = 0
+    closed_trades: int = 0
+    win_rate: float = 0.0
+    gross_pnl: float = 0.0
+    fees: float = 0.0
+    net_pnl: float = 0.0
+    max_drawdown: float = 0.0
+    avg_holding_minutes: float = 0.0
+    avg_mae_pct: float = 0.0
+    avg_mfe_pct: float = 0.0
+    live_action_count: int = 0
+    action_agreement_rate: float = 0.0
+    net_pnl_delta_vs_live: float = 0.0
+
+
+class StrategyV2ShadowStatusResponse(BaseModel):
+    config: StrategyV2ShadowConfigResponse
+    latest: Optional[StrategyV2ShadowLatestResponse] = None
+    metrics: StrategyV2ShadowMetrics
+    gate_counts: dict[str, int] = Field(default_factory=dict)
+    phase: str = "COLD"
+    last_polled_at: Optional[datetime] = None
+    last_poll_error: str = ""
+
+
+class StrategyV2ReplayBar(BaseModel):
+    timestamp: datetime
+    open: float = Field(gt=0, allow_inf_nan=False)
+    high: float = Field(gt=0, allow_inf_nan=False)
+    low: float = Field(gt=0, allow_inf_nan=False)
+    close: float = Field(gt=0, allow_inf_nan=False)
+    volume: float = Field(default=0.0, ge=0, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def validate_ohlc(self) -> "StrategyV2ReplayBar":
+        if self.high < max(self.open, self.close, self.low):
+            raise ValueError("high must be at least open, low, and close")
+        if self.low > min(self.open, self.close, self.high):
+            raise ValueError("low must be at most open, high, and close")
+        return self
+
+
+class StrategyV2ShadowReplayRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    symbol: str
+    market: Literal["US", "HK"]
+    bars: list[StrategyV2ReplayBar] = Field(min_length=2, max_length=20_000)
+
+    @field_validator("symbol")
+    @classmethod
+    def validate_replay_symbol(cls, value: str) -> str:
+        return _normalize_symbol(value)
+
+    @model_validator(mode="after")
+    def validate_replay_market(self) -> "StrategyV2ShadowReplayRequest":
+        _validate_symbol_market_pair(self.symbol, self.market)
+        return self
+
+
+class StrategyV2ShadowReplayResponse(BaseModel):
+    persisted: Literal[False] = False
+    config_version: str
+    decisions: list[dict[str, Any]] = Field(default_factory=list)
+    trades: list[dict[str, Any]] = Field(default_factory=list)
+    metrics: StrategyV2ShadowMetrics = Field(default_factory=StrategyV2ShadowMetrics)
 
 
 class StatusResponse(BaseModel):

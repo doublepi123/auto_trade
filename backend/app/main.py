@@ -43,6 +43,7 @@ from app.api.llm_advisor import router as llm_advisor_router
 from app.api.reports import router as reports_router
 from app.api.review import router as review_router
 from app.api.strategy import router as strategy_router
+from app.api.strategy_shadow import router as strategy_shadow_router
 from app.api.strategy_experiments import router as strategy_experiments_router
 from app.api.trade import router as trade_router
 from app.api.watchlist import router as watchlist_router
@@ -65,6 +66,7 @@ _llm_analysis_timestamps: list[float] = []
 _llm_analysis_lock = asyncio.Lock()
 _report_schedule_lock = asyncio.Lock()
 _alert_rules_lock = asyncio.Lock()
+_strategy_v2_shadow_lock = asyncio.Lock()
 _llm_globals_lock = threading.Lock()
 
 
@@ -541,6 +543,51 @@ async def _alert_rules_cron() -> None:
                 logger.exception("alert rules cron failed")
 
 
+def _strategy_v2_shadow_tick_sync() -> None:
+    """Advance every active Strategy v2 simulator without touching orders."""
+    from app.core.market_calendar import market_for_symbol
+    from app.models import StrategyV2ShadowConfig, StrategyV2ShadowTrade
+    from app.services.strategy_v2_shadow_service import StrategyV2ShadowService
+
+    db = SessionLocal()
+    try:
+        strategy = StrategyService(db).get_config()
+        targets: dict[str, str] = {}
+        if strategy.symbol:
+            targets[strategy.symbol] = strategy.market
+        enabled_symbols = db.query(StrategyV2ShadowConfig.symbol).filter(
+            StrategyV2ShadowConfig.enabled.is_(True)
+        ).all()
+        open_symbols = db.query(StrategyV2ShadowTrade.symbol).filter(
+            StrategyV2ShadowTrade.status == "OPEN"
+        ).distinct().all()
+        for (symbol,) in (*enabled_symbols, *open_symbols):
+            targets.setdefault(symbol, market_for_symbol(symbol))
+        if not targets:
+            return
+
+        shadow = StrategyV2ShadowService(db, get_runner().broker)
+        for symbol, market in sorted(targets.items()):
+            try:
+                shadow.tick(symbol=symbol, market=market)
+            except Exception:
+                db.rollback()
+                logger.exception("Strategy v2 shadow tick failed for symbol=%s", symbol)
+    finally:
+        db.close()
+
+
+async def _strategy_v2_shadow_cron() -> None:
+    """Poll completed minute bars for the isolated Strategy v2 shadow."""
+    while True:
+        await asyncio.sleep(15)
+        async with _strategy_v2_shadow_lock:
+            try:
+                await asyncio.to_thread(_strategy_v2_shadow_tick_sync)
+            except Exception:
+                logger.exception("Strategy v2 shadow cron failed")
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     from app.api.deps import init_audit_logger
@@ -588,12 +635,20 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     llm_task = asyncio.create_task(_llm_analysis_cron())
     report_task = asyncio.create_task(_report_schedule_cron())
     alert_task = asyncio.create_task(_alert_rules_cron())
+    strategy_v2_shadow_task = asyncio.create_task(_strategy_v2_shadow_cron())
     yield
     cleanup_task.cancel()
     llm_task.cancel()
     report_task.cancel()
     alert_task.cancel()
-    for task in (cleanup_task, llm_task, report_task, alert_task):
+    strategy_v2_shadow_task.cancel()
+    for task in (
+        cleanup_task,
+        llm_task,
+        report_task,
+        alert_task,
+        strategy_v2_shadow_task,
+    ):
         try:
             await task
         except asyncio.CancelledError:
@@ -605,6 +660,7 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
 
 _OPENAPI_TAGS: list[dict[str, str]] = [
     {"name": "strategy", "description": "区间策略配置、状态与历史。"},
+    {"name": "strategy-v2-shadow", "description": "Strategy v2 前向影子决策与回放。"},
     {"name": "trade", "description": "订单、账户、事件与交易控制。"},
     {"name": "credentials", "description": "长桥凭据与多渠道通知。"},
     {"name": "llm", "description": "DeepSeek LLM 顾问区间建议。"},
@@ -638,6 +694,7 @@ app.add_middleware(
 app.include_router(platform_router, prefix="/api/platform")
 app.include_router(portfolio_router, prefix="/api/portfolio")
 app.include_router(strategy_router)
+app.include_router(strategy_shadow_router)
 app.include_router(strategy_experiments_router)
 app.include_router(credentials_router)
 app.include_router(trade_router)

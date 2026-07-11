@@ -70,6 +70,10 @@ describe('Closed round-trip trades', () => {
         max_win_streak: 3,
         max_loss_streak: 1,
         avg_hold_seconds: 5400,
+        total_fees: 10,
+        actual_fee_coverage_pct: 75,
+        avg_slippage_bps: null,
+        avg_ack_latency_ms: null,
       },
     }).as('stats')
     cy.visit('/#/history')
@@ -90,6 +94,7 @@ describe('Closed round-trip trades', () => {
             entry_at: '2026-06-17T10:00:00Z', exit_at: '2026-06-17T11:00:00Z',
             entry_price: 100, exit_price: 103, quantity: 10,
             gross_pnl: 30, est_fees: 1.2, net_pnl: 28.8, holding_seconds: 3600,
+            fee_source: 'ESTIMATED',
           },
           {
             symbol: 'TSLA.US', side: 'short', entry_order_id: 21, exit_order_id: 22,
@@ -129,6 +134,6 @@ describe('Closed round-trip trades', () => {
     cy.get('[data-testid="roundtrips-table"]').should('contain', 'TSLA.US').and('not.contain', 'AAPL.US')
     cy.get('[data-testid="roundtrip-filter-all"]').click()
     cy.get('.el-table__expand-icon').first().click()
-    cy.get('[data-testid="roundtrip-detail"]').should('contain', 'entry #11').and('contain', 'exit #12').and('contain', '费用拖累 1.20')
+    cy.get('[data-testid="roundtrip-detail"]').should('contain', 'entry #11').and('contain', 'exit #12').and('contain', '费用 1.20（估算）')
   })
 })

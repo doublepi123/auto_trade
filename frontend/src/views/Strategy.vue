@@ -165,7 +165,7 @@
           <el-input-number v-model="form.auto_resume_minutes" :min="0" :max="1440" :step="1" />
         </el-form-item>
         <el-form-item label="单日最大亏损">
-          <el-input-number v-model="form.max_daily_loss" :min="1" :precision="2" />
+          <el-input-number v-model="form.max_daily_loss" :min="1" :precision="2" :step="0.01" />
         </el-form-item>
         <el-form-item label="连续亏损暂停阈值">
           <el-input-number v-model="form.max_consecutive_losses" :min="1" />
@@ -175,19 +175,19 @@
         </el-form-item>
         <el-divider content-position="left">成本与执行保护</el-divider>
         <el-form-item label="美股单边预估费率（%）">
-          <el-input-number v-model="form.fee_rate_us" :min="0" :max="1" :precision="3" :step="0.01" />
+          <el-input-number v-model="form.fee_rate_us" :min="0" :max="1" :precision="3" :step="0.001" />
         </el-form-item>
         <el-form-item label="港股单边预估费率（%）">
-          <el-input-number v-model="form.fee_rate_hk" :min="0" :max="2" :precision="3" :step="0.01" />
+          <el-input-number v-model="form.fee_rate_hk" :min="0" :max="2" :precision="3" :step="0.001" />
         </el-form-item>
         <el-form-item label="LLM 最小改价（%）">
-          <el-input-number v-model="form.min_repricing_pct" :min="0" :max="5" :precision="3" :step="0.01" />
+          <el-input-number v-model="form.min_repricing_pct" :min="0" :max="5" :precision="3" :step="0.001" />
         </el-form-item>
         <el-form-item label="LLM 同向冷却（秒）">
           <el-input-number v-model="form.llm_action_cooldown_seconds" :min="0" :max="3600" :step="1" />
         </el-form-item>
         <el-form-item label="买入保证金安全系数">
-          <el-input-number v-model="form.margin_safety_factor" :min="0" :max="1" :precision="2" :step="0.05" />
+          <el-input-number v-model="form.margin_safety_factor" :min="0" :max="1" :precision="2" :step="0.01" />
           <div style="margin-left: 8px; color: #909399; font-size: 12px;">
             从券商获取的最大买入量的乘数。0.9 = 使用 90% 的保证金购买力。
           </div>
@@ -200,16 +200,16 @@
           <el-input-number v-model="form.max_position_quantity" :min="1" :max="100" :step="1" data-testid="max-position-quantity" />
         </el-form-item>
         <el-form-item label="最大仓位名义金额">
-          <el-input-number v-model="form.max_position_notional" :min="1" :max="5000" :precision="2" :step="100" data-testid="max-position-notional" />
+          <el-input-number v-model="form.max_position_notional" :min="1" :max="5000" :precision="2" :step="0.01" data-testid="max-position-notional" />
         </el-form-item>
         <el-form-item label="单笔最大风险金额">
-          <el-input-number v-model="form.max_risk_per_trade" :min="1" :max="250" :precision="2" :step="10" data-testid="max-risk-per-trade" />
+          <el-input-number v-model="form.max_risk_per_trade" :min="1" :max="250" :precision="2" :step="0.01" data-testid="max-risk-per-trade" />
         </el-form-item>
         <el-form-item label="硬止损（%）">
-          <el-input-number v-model="form.stop_loss_pct" :min="0.01" :max="1" :precision="2" :step="0.1" data-testid="stop-loss-pct" />
+          <el-input-number v-model="form.stop_loss_pct" :min="0.01" :max="1" :precision="2" :step="0.01" data-testid="stop-loss-pct" />
         </el-form-item>
         <el-form-item label="最长持仓（分钟）">
-          <el-input-number v-model="form.max_holding_minutes" :min="1" :max="60" :step="5" data-testid="max-holding-minutes" />
+          <el-input-number v-model="form.max_holding_minutes" :min="1" :max="60" :step="1" data-testid="max-holding-minutes" />
         </el-form-item>
         <el-form-item label="收盘前停止开仓（分钟）">
           <el-input-number v-model="form.entry_cutoff_minutes_before_close" :min="45" :max="180" :step="5" data-testid="entry-cutoff-minutes" />

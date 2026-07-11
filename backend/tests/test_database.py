@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
@@ -117,6 +117,58 @@ def test_init_db_creates_llm_interactions_table(tmp_path, monkeypatch) -> None:
         session.close()
 
     Base.metadata.drop_all(bind=engine)
+
+
+def test_strategy_v2_shadow_table_migration_is_complete_and_idempotent(tmp_path) -> None:
+    db_path = tmp_path / "strategy_v2_shadow.db"
+    engine = create_engine(f"sqlite:///{db_path}")
+
+    database._ensure_strategy_v2_shadow_tables(engine)
+    database._ensure_strategy_v2_shadow_tables(engine)
+
+    inspector = inspect(engine)
+    expected_tables = {
+        "strategy_v2_shadow_config",
+        "strategy_v2_shadow_state",
+        "strategy_v2_shadow_decisions",
+        "strategy_v2_shadow_trades",
+    }
+    assert expected_tables <= set(inspector.get_table_names())
+    assert {
+        "symbol",
+        "enabled",
+        "breach_zscore",
+        "reclaim_zscore",
+        "estimated_fee_rate_us",
+        "estimated_fee_rate_hk",
+        "updated_at",
+    } <= {
+        column["name"]
+        for column in inspector.get_columns("strategy_v2_shadow_config")
+    }
+    assert {
+        "idempotency_key",
+        "config_version",
+        "bar_at",
+        "action",
+        "features_json",
+    } <= {
+        column["name"]
+        for column in inspector.get_columns("strategy_v2_shadow_decisions")
+    }
+    assert {constraint["name"] for constraint in inspector.get_unique_constraints(
+        "strategy_v2_shadow_decisions"
+    )} == {"uq_strategy_v2_shadow_decision_key"}
+    assert "ux_strategy_v2_shadow_trade_open_symbol" in {
+        index["name"] for index in inspector.get_indexes("strategy_v2_shadow_trades")
+    }
+    assert {"holding_deadline", "estimated_fee_rate"} <= {
+        column["name"]
+        for column in inspector.get_columns("strategy_v2_shadow_trades")
+    }
+
+    Base.metadata.drop_all(bind=engine)
+    engine.dispose()
 
 
 def test_init_db_adds_missing_strategy_llm_columns(tmp_path, monkeypatch) -> None:

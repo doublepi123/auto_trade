@@ -1321,3 +1321,144 @@ export interface LLMEvaluationResponse {
   hit_rate: number
   samples: LLMEvaluationSample[]
 }
+
+export type StrategyShadowMode = 'SHADOW'
+export type StrategyShadowPosition = 'FLAT' | 'LONG'
+
+export interface StrategyShadowConfig {
+  enabled: boolean
+  symbol: string
+  zscore_window_1m_bars: number
+  zscore_window_5m_bars: number
+  breach_zscore: number
+  reclaim_zscore: number
+  five_minute_zscore_max: number
+  adx_period: number
+  max_adx: number
+  realized_vol_window_bars: number
+  min_realized_vol: number
+  max_realized_vol: number
+  stop_loss_pct: number
+  profit_target_pct: number
+  max_holding_minutes: number
+  entry_cutoff_minutes_before_close: number
+  flatten_minutes_before_close: number
+  arm_ttl_bars: number
+  max_entries_per_day: number
+  entry_cooldown_minutes: number
+  slippage_bps: number
+  estimated_fee_rate_us: number
+  estimated_fee_rate_hk: number
+  algorithm_version: 'strategy-v2-rth-mr-v1'
+  mode: StrategyShadowMode
+  order_submission_allowed: boolean
+  allow_position_addons: boolean
+  short_entries_enabled: boolean
+  config_version: string
+  updated_at: string
+}
+
+export interface StrategyShadowConfigUpdate {
+  enabled: boolean
+  zscore_window_1m_bars: number
+  zscore_window_5m_bars: number
+  breach_zscore: number
+  reclaim_zscore: number
+  five_minute_zscore_max: number
+  adx_period: number
+  max_adx: number
+  realized_vol_window_bars: number
+  min_realized_vol: number
+  max_realized_vol: number
+  stop_loss_pct: number
+  profit_target_pct: number
+}
+
+export interface StrategyShadowLatest {
+  observed_at: string
+  data_age_seconds: number
+  bar_timestamp_1m: string | null
+  bar_timestamp_5m: string | null
+  price: number
+  vwap_1m: number | null
+  zscore_1m: number | null
+  vwap_5m: number | null
+  zscore_5m: number | null
+  adx: number | null
+  realized_vol: number | null
+  regime_eligible: boolean
+  breach_armed: boolean
+  virtual_position: StrategyShadowPosition
+  virtual_entry_price: number | null
+  virtual_entry_at: string | null
+  last_action: string
+  last_reason: string
+}
+
+export interface StrategyShadowMetrics {
+  bars: number
+  eligible_bars: number
+  breaches: number
+  reclaims: number
+  entries: number
+  exits: number
+  closed_trades: number
+  win_rate: number
+  gross_pnl: number
+  fees: number
+  net_pnl: number
+  max_drawdown: number
+  avg_holding_minutes: number
+  avg_mae_pct: number
+  avg_mfe_pct: number
+  live_action_count: number
+  action_agreement_rate: number
+  net_pnl_delta_vs_live: number
+}
+
+export interface StrategyShadowStatus {
+  config: StrategyShadowConfig
+  latest: StrategyShadowLatest | null
+  metrics: StrategyShadowMetrics
+  gate_counts: Record<string, number>
+  phase: string
+  last_polled_at: string | null
+  last_poll_error: string
+}
+
+export interface StrategyShadowDecision {
+  id: number
+  symbol: string
+  config_version: string
+  observed_at: string
+  bar_timestamp_1m: string | null
+  bar_timestamp_5m: string | null
+  price: number
+  vwap_1m: number | null
+  zscore_1m: number | null
+  vwap_5m: number | null
+  zscore_5m: number | null
+  adx: number | null
+  realized_vol: number | null
+  regime_eligible: boolean
+  breach_armed: boolean
+  action: string
+  reason: string
+  virtual_position: StrategyShadowPosition
+  reference_price: number | null
+  quantity: number
+  gross_pnl: number | null
+  fee: number | null
+  net_pnl: number | null
+  exit_reason: string | null
+  holding_minutes: number | null
+  mae_pct: number | null
+  mfe_pct: number | null
+}
+
+export interface StrategyShadowDecisionPage {
+  items: StrategyShadowDecision[]
+  total: number
+  page: number
+  page_size: number
+}

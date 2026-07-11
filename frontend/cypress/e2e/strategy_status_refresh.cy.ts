@@ -15,6 +15,10 @@ describe('Strategy status refresh', () => {
         max_daily_loss: 5000,
         max_consecutive_losses: 3,
         llm_interval_minutes: intervalMinutes,
+        fee_rate_us: 0.0005,
+        fee_rate_hk: 0.003,
+        min_repricing_pct: 0.003,
+        llm_action_cooldown_seconds: 60,
         updated_at: '2026-01-01T00:00:00Z',
       },
     }).as('getStrategy')
@@ -48,6 +52,7 @@ describe('Strategy status refresh', () => {
     }).as('getLLMStatus')
 
     cy.intercept('PUT', '/api/strategy', (req) => {
+      expect(req.body).to.deep.equal({ llm_interval_minutes: 3 })
       intervalMinutes = req.body.llm_interval_minutes
       req.reply({
         body: {

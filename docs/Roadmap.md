@@ -4,6 +4,24 @@
 
 ---
 
+## 近期已完成迭代 (2026-07-12) — P2 Strategy v2 前向影子
+
+> 在 P0 实盘安全路径旁新增完全隔离的 RTH 低频日内均值回归观察器。P2 只记录因果特征、虚拟决策与估算净收益，没有 broker 订单能力；设计口径见 [2026-07-12-strategy-v2-shadow-design.md](superpowers/specs/2026-07-12-strategy-v2-shadow-design.md)。
+
+| 交付 | 状态 |
+|------|------|
+| 已结算 1m session VWAP / leave-one-out residual z-score，同源完整 5m VWAP / z-score / Wilder ADX | ✅ |
+| 实现波动率 regime gate、先跌破后收复、下一根连续 bar 开盘虚拟成交 | ✅ |
+| long-only、无加仓、stop-first、60m max hold、收盘前 45m cutoff / 15m flatten | ✅ |
+| 独立 config/state/decision/trade 四表，配置版本隔离、重启恢复、逐 bar 幂等 | ✅ |
+| 冻结费率 + 不利滑点的 gross/fee/net 账本，holding/MAE/MFE/exit reason | ✅ |
+| `/api/strategy-shadow/*` 配置、状态、决策、交易与零写入 replay | ✅ |
+| Lab 观测页、CSV 导出、桌面/移动端布局与 Cypress 覆盖 | ✅ |
+
+**运行口径：** 默认关闭；部署后显式启用才从启用时刻向前采样，不补写历史决策。P3/P4 晋级评审至少等待 20 个交易日且累计 50 个闭环虚拟交易。
+
+---
+
 ## 项目当前状态快照
 
 | 维度 | 状态 |

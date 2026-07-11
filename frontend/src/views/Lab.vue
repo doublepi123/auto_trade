@@ -220,6 +220,236 @@
           </el-card>
         </div>
       </el-tab-pane>
+
+      <el-tab-pane label="策略 v2 影子" name="strategy-shadow">
+        <div data-testid="tab-strategy-shadow" v-loading="shadowLoading">
+          <div class="shadow-toolbar">
+            <div class="shadow-tags" data-testid="shadow-safety-tags">
+              <el-tag type="warning">影子观察</el-tag>
+              <el-tag type="danger" effect="plain">永不下单</el-tag>
+              <el-tag :type="shadowConfig?.enabled ? 'success' : 'info'">
+                {{ shadowConfig?.enabled ? '采集中' : '已停用' }}
+              </el-tag>
+              <el-tag effect="plain">1m 触发</el-tag>
+              <el-tag effect="plain">5m 确认</el-tag>
+            </div>
+            <div class="shadow-toolbar-actions">
+              <el-select
+                v-model="selectedShadowSymbol"
+                size="small"
+                placeholder="选择标的"
+                data-testid="shadow-symbol-select"
+                @change="loadStrategyShadow"
+              >
+                <el-option
+                  v-for="item in shadowConfigs"
+                  :key="item.symbol"
+                  :label="`${item.symbol} · ${item.enabled ? '采集中' : '已停用'}`"
+                  :value="item.symbol"
+                />
+              </el-select>
+              <el-button
+                type="primary"
+                size="small"
+                :loading="shadowLoading"
+                data-testid="shadow-refresh"
+                @click="loadStrategyShadow()"
+              >刷新</el-button>
+            </div>
+          </div>
+
+          <el-alert
+            v-if="shadowLoadError"
+            :title="shadowLoadError"
+            type="error"
+            :closable="false"
+            show-icon
+            data-testid="shadow-load-error"
+          />
+
+          <el-alert
+            v-if="shadowStatus?.last_poll_error"
+            :title="`最近轮询失败：${shadowStatus.last_poll_error}`"
+            type="warning"
+            :closable="false"
+            show-icon
+            data-testid="shadow-poll-error"
+          />
+
+          <template v-if="shadowConfig && shadowStatus">
+            <section class="shadow-section" data-testid="shadow-config-section">
+              <div class="shadow-section-header">
+                <div>
+                  <h3>采集配置</h3>
+                  <small>
+                    {{ shadowConfig.symbol || '-' }} · {{ shortVersion(shadowConfig.config_version) }} ·
+                    {{ shadowStatus.phase }} · 轮询 {{ formatDateTime(shadowStatus.last_polled_at) }}
+                  </small>
+                </div>
+                <el-button
+                  type="primary"
+                  :loading="shadowSaving"
+                  data-testid="shadow-save-config"
+                  @click="saveShadowConfig"
+                >保存配置</el-button>
+              </div>
+
+              <el-form label-position="top" class="shadow-form">
+                <el-form-item label="采集">
+                  <el-switch
+                    v-model="shadowForm.enabled"
+                    active-text="启用"
+                    inactive-text="停用"
+                    data-testid="shadow-enabled"
+                  />
+                </el-form-item>
+                <el-form-item label="1m z-score 窗口">
+                  <el-input-number v-model="shadowForm.zscore_window_1m_bars" :min="10" :max="240" :step="5" data-testid="shadow-window-1m" />
+                </el-form-item>
+                <el-form-item label="5m z-score 窗口">
+                  <el-input-number v-model="shadowForm.zscore_window_5m_bars" :min="5" :max="120" :step="5" data-testid="shadow-window-5m" />
+                </el-form-item>
+                <el-form-item label="跌破阈值">
+                  <el-input-number v-model="shadowForm.breach_zscore" :min="-5" :max="-0.5" :step="0.1" :precision="2" data-testid="shadow-breach-z" />
+                </el-form-item>
+                <el-form-item label="收复阈值">
+                  <el-input-number v-model="shadowForm.reclaim_zscore" :min="-3" :max="0" :step="0.1" :precision="2" data-testid="shadow-reclaim-z" />
+                </el-form-item>
+                <el-form-item label="5m z-score 上限">
+                  <el-input-number v-model="shadowForm.five_minute_zscore_max" :min="-5" :max="0" :step="0.1" :precision="2" data-testid="shadow-five-minute-z" />
+                </el-form-item>
+                <el-form-item label="ADX 周期">
+                  <el-input-number v-model="shadowForm.adx_period" :min="5" :max="50" data-testid="shadow-adx-period" />
+                </el-form-item>
+                <el-form-item label="ADX 上限">
+                  <el-input-number v-model="shadowForm.max_adx" :min="1" :max="40" :step="1" :precision="1" data-testid="shadow-max-adx" />
+                </el-form-item>
+                <el-form-item label="波动率窗口">
+                  <el-input-number v-model="shadowForm.realized_vol_window_bars" :min="10" :max="240" :step="5" data-testid="shadow-vol-window" />
+                </el-form-item>
+                <el-form-item label="波动率下限">
+                  <el-input-number v-model="shadowForm.min_realized_vol" :min="0" :max="3" :step="0.001" :precision="4" data-testid="shadow-min-vol" />
+                </el-form-item>
+                <el-form-item label="波动率上限">
+                  <el-input-number v-model="shadowForm.max_realized_vol" :min="0" :max="3" :step="0.001" :precision="4" data-testid="shadow-max-vol" />
+                </el-form-item>
+                <el-form-item label="止损">
+                  <el-input-number v-model="shadowForm.stop_loss_pct" :min="0.05" :max="0.75" :step="0.05" :precision="2" data-testid="shadow-stop-loss" />
+                </el-form-item>
+                <el-form-item label="止盈">
+                  <el-input-number v-model="shadowForm.profit_target_pct" :min="0.05" :max="5" :step="0.05" :precision="2" data-testid="shadow-profit-target" />
+                </el-form-item>
+              </el-form>
+            </section>
+
+            <section class="shadow-section" data-testid="shadow-hard-safety">
+              <div class="shadow-section-header"><h3>硬安全线</h3></div>
+              <div class="shadow-facts">
+                <div><span>最长持仓</span><strong>{{ shadowConfig.max_holding_minutes }} 分钟</strong></div>
+                <div><span>停止开仓</span><strong>收盘前 {{ shadowConfig.entry_cutoff_minutes_before_close }} 分钟</strong></div>
+                <div><span>强制平仓</span><strong>收盘前 {{ shadowConfig.flatten_minutes_before_close }} 分钟</strong></div>
+                <div><span>单日上限</span><strong>{{ shadowConfig.max_entries_per_day }} 次</strong></div>
+                <div><span>退出冷却</span><strong>{{ shadowConfig.entry_cooldown_minutes }} 分钟</strong></div>
+                <div><span>武装有效期</span><strong>{{ shadowConfig.arm_ttl_bars }} bars</strong></div>
+                <div><span>虚拟滑点</span><strong>{{ shadowConfig.slippage_bps.toFixed(1) }} bps</strong></div>
+                <div><span>美股单边费率</span><strong>{{ formatPercent(shadowConfig.estimated_fee_rate_us) }}</strong></div>
+                <div><span>港股单边费率</span><strong>{{ formatPercent(shadowConfig.estimated_fee_rate_hk) }}</strong></div>
+                <div><span>加仓</span><strong>{{ shadowConfig.allow_position_addons ? '允许' : '禁止' }}</strong></div>
+                <div><span>做空</span><strong>{{ shadowConfig.short_entries_enabled ? '允许' : '禁止' }}</strong></div>
+                <div><span>订单提交</span><strong>{{ shadowConfig.order_submission_allowed ? '允许' : '禁止' }}</strong></div>
+                <div><span>算法版本</span><strong>{{ shadowConfig.algorithm_version }}</strong></div>
+              </div>
+            </section>
+
+            <section class="shadow-section" data-testid="shadow-latest-signal">
+              <div class="shadow-section-header">
+                <h3>当前信号</h3>
+                <el-tag v-if="shadowStatus.latest" :type="shadowFreshnessType" effect="plain">{{ shadowFreshnessLabel }}</el-tag>
+              </div>
+              <el-empty v-if="!shadowStatus.latest" description="暂无影子信号" />
+              <template v-else>
+                <div class="shadow-facts shadow-signal-grid">
+                  <div><span>价格</span><strong>{{ formatNullable(shadowStatus.latest.price) }}</strong></div>
+                  <div><span>1m VWAP / z</span><strong>{{ formatNullable(shadowStatus.latest.vwap_1m) }} / {{ formatNullable(shadowStatus.latest.zscore_1m) }}</strong></div>
+                  <div><span>5m VWAP / z</span><strong>{{ formatNullable(shadowStatus.latest.vwap_5m) }} / {{ formatNullable(shadowStatus.latest.zscore_5m) }}</strong></div>
+                  <div><span>ADX</span><strong>{{ formatNullable(shadowStatus.latest.adx) }}</strong></div>
+                  <div><span>实现波动率</span><strong>{{ formatNullable(shadowStatus.latest.realized_vol, 4) }}</strong></div>
+                  <div><span>Regime</span><strong>{{ shadowStatus.latest.regime_eligible ? '通过' : '拦截' }}</strong></div>
+                  <div><span>跌破状态</span><strong>{{ shadowStatus.latest.breach_armed ? '已武装' : '未触发' }}</strong></div>
+                  <div><span>虚拟持仓</span><strong>{{ shadowPositionLabel(shadowStatus.latest.virtual_position) }}</strong></div>
+                  <div><span>最近动作</span><strong>{{ shadowStatus.latest.last_action || '-' }}</strong></div>
+                </div>
+                <p class="shadow-reason" data-testid="shadow-latest-reason">{{ shadowStatus.latest.last_reason || '-' }}</p>
+              </template>
+            </section>
+
+            <section class="shadow-section" data-testid="shadow-metrics">
+              <div class="shadow-section-header"><h3>影子表现</h3></div>
+              <div class="shadow-metrics-grid">
+                <el-statistic title="闭环交易" :value="shadowStatus.metrics.closed_trades" />
+                <el-statistic title="净收益" :value="shadowStatus.metrics.net_pnl" :precision="2" />
+                <el-statistic title="胜率" :value="shadowStatus.metrics.win_rate * 100" suffix="%" :precision="1" />
+                <el-statistic title="最大回撤" :value="shadowStatus.metrics.max_drawdown" :precision="2" />
+                <el-statistic title="平均持仓" :value="shadowStatus.metrics.avg_holding_minutes" suffix="m" :precision="1" />
+                <el-statistic title="动作一致率" :value="shadowStatus.metrics.action_agreement_rate * 100" suffix="%" :precision="1" />
+                <el-statistic title="相对实盘净收益" :value="shadowStatus.metrics.net_pnl_delta_vs_live" :precision="2" />
+                <el-statistic title="有效 bar" :value="shadowStatus.metrics.eligible_bars" />
+              </div>
+              <div class="shadow-excursions">
+                <span>平均 MAE {{ formatPercent(shadowStatus.metrics.avg_mae_pct) }}</span>
+                <span>平均 MFE {{ formatPercent(shadowStatus.metrics.avg_mfe_pct) }}</span>
+                <span>费用 {{ shadowStatus.metrics.fees.toFixed(2) }}</span>
+                <span>跌破 / 收复 {{ shadowStatus.metrics.breaches }} / {{ shadowStatus.metrics.reclaims }}</span>
+              </div>
+            </section>
+
+            <section class="shadow-section" data-testid="shadow-gates">
+              <div class="shadow-section-header"><h3>Gate 统计</h3></div>
+              <el-table :data="shadowGateRows" size="small" empty-text="暂无 Gate 记录">
+                <el-table-column prop="gate" label="Gate" min-width="180" />
+                <el-table-column prop="count" label="次数" width="120" />
+                <el-table-column label="占比" width="120">
+                  <template #default="{ row }">{{ gateShare(row.count) }}</template>
+                </el-table-column>
+              </el-table>
+            </section>
+
+            <section class="shadow-section" data-testid="shadow-decisions">
+              <div class="shadow-section-header">
+                <h3>影子决策</h3>
+                <el-button size="small" plain :disabled="shadowDecisions.length === 0" data-testid="shadow-export-decisions" @click="exportShadowDecisions">导出当前页</el-button>
+              </div>
+              <el-table :data="shadowDecisions" size="small" empty-text="暂无影子决策">
+                <el-table-column label="时间" min-width="155">
+                  <template #default="{ row }">{{ formatDateTime(row.observed_at) }}</template>
+                </el-table-column>
+                <el-table-column prop="action" label="动作" width="100">
+                  <template #default="{ row }"><el-tag :type="shadowActionTagType(row.action)" effect="plain">{{ row.action }}</el-tag></template>
+                </el-table-column>
+                <el-table-column prop="reason" label="原因" min-width="210" show-overflow-tooltip />
+                <el-table-column label="1m z" width="90"><template #default="{ row }">{{ formatNullable(row.zscore_1m) }}</template></el-table-column>
+                <el-table-column label="5m z" width="90"><template #default="{ row }">{{ formatNullable(row.zscore_5m) }}</template></el-table-column>
+                <el-table-column label="ADX" width="85"><template #default="{ row }">{{ formatNullable(row.adx) }}</template></el-table-column>
+                <el-table-column label="波动率" width="100"><template #default="{ row }">{{ formatNullable(row.realized_vol, 4) }}</template></el-table-column>
+                <el-table-column label="虚拟仓位" width="100"><template #default="{ row }">{{ shadowPositionLabel(row.virtual_position) }}</template></el-table-column>
+                <el-table-column label="净收益" width="100"><template #default="{ row }">{{ formatNullable(row.net_pnl) }}</template></el-table-column>
+              </el-table>
+              <el-pagination
+                v-if="shadowDecisionTotal > shadowDecisionPageSize"
+                v-model:current-page="shadowDecisionPage"
+                :page-size="shadowDecisionPageSize"
+                :total="shadowDecisionTotal"
+                layout="prev, pager, next, total"
+                class="shadow-pagination"
+                data-testid="shadow-decisions-pagination"
+                @current-change="loadShadowDecisions"
+              />
+            </section>
+          </template>
+
+          <el-empty v-else-if="!shadowLoading && !shadowLoadError" description="暂无策略 v2 配置" />
+        </div>
+      </el-tab-pane>
     </el-tabs>
   </div>
 </template>
@@ -234,9 +464,18 @@ import {
   getIndicators,
 } from '../api/lab'
 import { getLLMInteractions, getLLMIntervalStatus } from '../api/llm_advisor'
+import {
+  getStrategyShadowConfig,
+  getStrategyShadowConfigs,
+  getStrategyShadowDecisions,
+  getStrategyShadowStatus,
+  updateStrategyShadowConfig,
+} from '../api/strategy_shadow'
 import type {
   PromptVersion, ExperimentSummary, PerformanceStats,
   PerformanceVariant, IndicatorsResponse, LLMInteractionRecord, LLMIntervalStatus,
+  StrategyShadowConfig, StrategyShadowConfigUpdate, StrategyShadowDecision,
+  StrategyShadowStatus,
 } from '../types'
 import { resolveErrorMessage } from '../utils/error'
 import { downloadCsv } from '../utils/csv'
@@ -444,8 +683,239 @@ function formatDateTime(value: string | null): string {
   })
 }
 
+// --- Tab 5: strategy v2 shadow observability ---
+const shadowConfig = ref<StrategyShadowConfig | null>(null)
+const shadowConfigs = ref<StrategyShadowConfig[]>([])
+const selectedShadowSymbol = ref('')
+const shadowStatus = ref<StrategyShadowStatus | null>(null)
+const shadowDecisions = ref<StrategyShadowDecision[]>([])
+const shadowDecisionTotal = ref(0)
+const shadowDecisionPage = ref(1)
+const shadowDecisionPageSize = 20
+const shadowLoading = ref(false)
+const shadowSaving = ref(false)
+const shadowLoaded = ref(false)
+const shadowLoadError = ref('')
+const shadowForm = reactive<StrategyShadowConfigUpdate>({
+  enabled: false,
+  zscore_window_1m_bars: 30,
+  zscore_window_5m_bars: 20,
+  breach_zscore: -2,
+  reclaim_zscore: -1,
+  five_minute_zscore_max: -0.5,
+  adx_period: 14,
+  max_adx: 25,
+  realized_vol_window_bars: 20,
+  min_realized_vol: 0.001,
+  max_realized_vol: 0.04,
+  stop_loss_pct: 0.5,
+  profit_target_pct: 0.5,
+})
+
+function applyShadowConfig(config: StrategyShadowConfig) {
+  shadowConfig.value = config
+  Object.assign(shadowForm, {
+    enabled: config.enabled,
+    zscore_window_1m_bars: config.zscore_window_1m_bars,
+    zscore_window_5m_bars: config.zscore_window_5m_bars,
+    breach_zscore: config.breach_zscore,
+    reclaim_zscore: config.reclaim_zscore,
+    five_minute_zscore_max: config.five_minute_zscore_max,
+    adx_period: config.adx_period,
+    max_adx: config.max_adx,
+    realized_vol_window_bars: config.realized_vol_window_bars,
+    min_realized_vol: config.min_realized_vol,
+    max_realized_vol: config.max_realized_vol,
+    stop_loss_pct: config.stop_loss_pct,
+    profit_target_pct: config.profit_target_pct,
+  })
+}
+
+async function loadStrategyShadow(symbol = selectedShadowSymbol.value || undefined) {
+  shadowLoading.value = true
+  shadowLoadError.value = ''
+  try {
+    const configs = await getStrategyShadowConfigs()
+    shadowConfigs.value = configs
+    const requestedSymbol = symbol || configs[0]?.symbol
+    const config = await getStrategyShadowConfig(requestedSymbol)
+    const [status, decisions] = await Promise.all([
+      getStrategyShadowStatus(config.symbol),
+      getStrategyShadowDecisions({
+        symbol: config.symbol,
+        page: 1,
+        page_size: shadowDecisionPageSize,
+      }),
+    ])
+    applyShadowConfig(config)
+    selectedShadowSymbol.value = config.symbol
+    shadowStatus.value = status
+    shadowDecisions.value = decisions.items
+    shadowDecisionTotal.value = decisions.total
+    shadowDecisionPage.value = decisions.page
+    shadowLoaded.value = true
+  } catch (error: unknown) {
+    shadowLoadError.value = resolveErrorMessage(error, '加载策略 v2 影子状态失败')
+    shadowLoaded.value = false
+  } finally {
+    shadowLoading.value = false
+  }
+}
+
+async function loadShadowDecisions(page: number) {
+  shadowDecisionPage.value = page
+  try {
+    const result = await getStrategyShadowDecisions({
+      symbol: shadowConfig.value?.symbol || undefined,
+      page,
+      page_size: shadowDecisionPageSize,
+    })
+    shadowDecisions.value = result.items
+    shadowDecisionTotal.value = result.total
+    shadowDecisionPage.value = result.page
+  } catch (error: unknown) {
+    ElMessage.error(resolveErrorMessage(error, '加载影子决策失败'))
+  }
+}
+
+function validateShadowForm(): string | null {
+  if (shadowForm.breach_zscore >= shadowForm.reclaim_zscore) {
+    return '跌破阈值必须小于收复阈值'
+  }
+  if (shadowForm.min_realized_vol >= shadowForm.max_realized_vol) {
+    return '波动率下限必须小于上限'
+  }
+  return null
+}
+
+async function saveShadowConfig() {
+  const validationError = validateShadowForm()
+  if (validationError) {
+    ElMessage.warning(validationError)
+    return
+  }
+  try {
+    await ElMessageBox.confirm('确认更新策略 v2 的影子采集配置？', '确认保存')
+  } catch {
+    return
+  }
+  shadowSaving.value = true
+  try {
+    const config = await updateStrategyShadowConfig(
+      { ...shadowForm },
+      shadowConfig.value?.symbol,
+    )
+    applyShadowConfig(config)
+    ElMessage.success('影子配置已更新')
+    await loadStrategyShadow()
+  } catch (error: unknown) {
+    ElMessage.error(resolveErrorMessage(error, '影子配置保存失败'))
+  } finally {
+    shadowSaving.value = false
+  }
+}
+
+const shadowGateRows = computed(() => {
+  const counts = shadowStatus.value?.gate_counts ?? {}
+  return Object.entries(counts)
+    .map(([gate, count]) => ({ gate, count }))
+    .sort((a, b) => b.count - a.count || a.gate.localeCompare(b.gate))
+})
+
+const shadowFreshnessLabel = computed(() => {
+  const age = shadowStatus.value?.latest?.data_age_seconds
+  if (age == null) return '无数据'
+  if (age < 1) return '刚刚更新'
+  return `${Math.round(age)} 秒前`
+})
+
+const shadowFreshnessType = computed<'success' | 'warning' | 'danger'>(() => {
+  const age = shadowStatus.value?.latest?.data_age_seconds ?? Number.POSITIVE_INFINITY
+  if (age <= 15) return 'success'
+  if (age <= 60) return 'warning'
+  return 'danger'
+})
+
+function gateShare(count: number): string {
+  const total = shadowGateRows.value.reduce((sum, row) => sum + row.count, 0)
+  return total > 0 ? `${((count / total) * 100).toFixed(1)}%` : '0.0%'
+}
+
+function formatNullable(value: number | null, precision = 2): string {
+  return value == null || !Number.isFinite(value) ? '-' : value.toFixed(precision)
+}
+
+function formatPercent(value: number): string {
+  return Number.isFinite(value) ? `${(value * 100).toFixed(2)}%` : '-'
+}
+
+function shortVersion(version: string): string {
+  return version ? `配置 ${version.slice(0, 8)}` : '配置未版本化'
+}
+
+function shadowPositionLabel(position: string): string {
+  return position === 'LONG' ? '虚拟多仓' : '空仓'
+}
+
+function shadowActionTagType(action: string): 'success' | 'warning' | 'danger' | 'info' {
+  const normalized = action.toUpperCase()
+  if (normalized === 'FILL_ENTRY') return 'success'
+  if (normalized === 'EXIT_LONG') return 'danger'
+  if (normalized === 'ARM_LONG' || normalized === 'SUBMIT_ENTRY' || normalized.startsWith('CANCEL_')) return 'warning'
+  return 'info'
+}
+
+function exportShadowDecisions() {
+  const rows = shadowDecisions.value.map((row) => ({
+    observed_at: row.observed_at,
+    symbol: row.symbol,
+    action: row.action,
+    reason: row.reason,
+    price: row.price,
+    vwap_1m: row.vwap_1m ?? '',
+    zscore_1m: row.zscore_1m ?? '',
+    vwap_5m: row.vwap_5m ?? '',
+    zscore_5m: row.zscore_5m ?? '',
+    adx: row.adx ?? '',
+    realized_vol: row.realized_vol ?? '',
+    regime_eligible: row.regime_eligible ? 'yes' : 'no',
+    breach_armed: row.breach_armed ? 'yes' : 'no',
+    virtual_position: row.virtual_position,
+    net_pnl: row.net_pnl ?? '',
+    exit_reason: row.exit_reason ?? '',
+    holding_minutes: row.holding_minutes ?? '',
+    mae_pct: row.mae_pct ?? '',
+    mfe_pct: row.mfe_pct ?? '',
+    config_version: row.config_version,
+  }))
+  downloadCsv(`strategy_v2_shadow_page_${shadowDecisionPage.value}.csv`, [
+    { key: 'observed_at', label: 'observed_at' },
+    { key: 'symbol', label: 'symbol' },
+    { key: 'action', label: 'action' },
+    { key: 'reason', label: 'reason' },
+    { key: 'price', label: 'price' },
+    { key: 'vwap_1m', label: 'vwap_1m' },
+    { key: 'zscore_1m', label: 'zscore_1m' },
+    { key: 'vwap_5m', label: 'vwap_5m' },
+    { key: 'zscore_5m', label: 'zscore_5m' },
+    { key: 'adx', label: 'adx' },
+    { key: 'realized_vol', label: 'realized_vol' },
+    { key: 'regime_eligible', label: 'regime_eligible' },
+    { key: 'breach_armed', label: 'breach_armed' },
+    { key: 'virtual_position', label: 'virtual_position' },
+    { key: 'net_pnl', label: 'net_pnl' },
+    { key: 'exit_reason', label: 'exit_reason' },
+    { key: 'holding_minutes', label: 'holding_minutes' },
+    { key: 'mae_pct', label: 'mae_pct' },
+    { key: 'mfe_pct', label: 'mfe_pct' },
+    { key: 'config_version', label: 'config_version' },
+  ], rows)
+  ElMessage.success(`已导出 ${rows.length} 条影子决策`)
+}
+
 watch(activeTab, (tab) => {
   if (tab === 'runtime' && !runtimeLoaded.value && !runtimeLoading.value) void loadRuntimeStatus()
+  if (tab === 'strategy-shadow' && !shadowLoaded.value && !shadowLoading.value) void loadStrategyShadow()
 })
 
 onMounted(async () => {
@@ -514,5 +984,159 @@ onMounted(async () => {
   margin-top: 4px;
   color: #909399;
   font-size: 12px;
+}
+
+.shadow-toolbar,
+.shadow-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.shadow-toolbar {
+  margin-bottom: 12px;
+}
+
+.shadow-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.shadow-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.shadow-toolbar-actions :deep(.el-select) {
+  width: 190px;
+}
+
+.shadow-section {
+  width: 100%;
+  padding: 16px 0;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.shadow-section:last-child {
+  border-bottom: 0;
+}
+
+.shadow-section-header {
+  margin-bottom: 12px;
+}
+
+.shadow-section-header h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.shadow-section-header small {
+  display: block;
+  margin-top: 4px;
+  color: #6b7280;
+}
+
+.shadow-form {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0 16px;
+}
+
+.shadow-form :deep(.el-input-number) {
+  width: 100%;
+}
+
+.shadow-facts,
+.shadow-metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.shadow-facts > div {
+  min-width: 0;
+  padding: 10px 12px;
+  background: #f5f7fa;
+  border: 1px solid #e5e7eb;
+  border-radius: 4px;
+}
+
+.shadow-facts span,
+.shadow-facts strong {
+  display: block;
+}
+
+.shadow-facts span {
+  margin-bottom: 5px;
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.shadow-facts strong {
+  overflow-wrap: anywhere;
+}
+
+.shadow-metrics-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.shadow-metrics-grid :deep(.el-statistic) {
+  min-width: 0;
+  padding: 10px 12px;
+  border-left: 3px solid #409eff;
+}
+
+.shadow-excursions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+  margin-top: 12px;
+  color: #4b5563;
+  font-size: 13px;
+}
+
+.shadow-reason {
+  margin: 12px 0 0;
+  padding-left: 10px;
+  border-left: 3px solid #909399;
+  color: #4b5563;
+}
+
+.shadow-pagination {
+  justify-content: flex-end;
+  margin-top: 12px;
+}
+
+@media (max-width: 900px) {
+  .shadow-form,
+  .shadow-metrics-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 600px) {
+  .shadow-toolbar,
+  .shadow-section-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .shadow-toolbar-actions {
+    width: 100%;
+  }
+
+  .shadow-toolbar-actions :deep(.el-select) {
+    flex: 1;
+    width: auto;
+  }
+
+  .shadow-form,
+  .shadow-facts,
+  .shadow-metrics-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 </style>

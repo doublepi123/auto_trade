@@ -71,6 +71,7 @@ def init_db() -> None:
     _ensure_strategy_config_margin_safety_factor(engine)
     _ensure_strategy_config_p0_safety_columns(engine)
     _ensure_strategy_config_report_schedule_columns(engine)
+    _ensure_strategy_v2_shadow_tables(engine)
     _ensure_llm_interaction_variant_column(engine)
     _ensure_report_query_indexes(engine)
     _ensure_trade_notes_table(engine)
@@ -1253,6 +1254,49 @@ def _ensure_strategy_config_report_schedule_columns(db_engine: Engine) -> None:
             connection.exec_driver_sql(
                 "ALTER TABLE strategy_config ADD COLUMN report_schedule_symbol VARCHAR(50) NOT NULL DEFAULT ''"
             )
+
+
+def _ensure_strategy_v2_shadow_tables(db_engine: Engine) -> None:
+    """Create the isolated P2 forward-shadow tables when upgrading in place."""
+    from app.models import Base
+
+    for table_name in (
+        "strategy_v2_shadow_config",
+        "strategy_v2_shadow_state",
+        "strategy_v2_shadow_decisions",
+        "strategy_v2_shadow_trades",
+    ):
+        Base.metadata.tables[table_name].create(db_engine, checkfirst=True)
+
+    inspector = inspect(db_engine)
+    config_columns = {
+        column["name"]
+        for column in inspector.get_columns("strategy_v2_shadow_config")
+    }
+    trade_columns = {
+        column["name"]
+        for column in inspector.get_columns("strategy_v2_shadow_trades")
+    }
+    with db_engine.begin() as connection:
+        if "estimated_fee_rate_us" not in config_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE strategy_v2_shadow_config "
+                "ADD COLUMN estimated_fee_rate_us FLOAT NOT NULL DEFAULT 0.0005"
+            )
+        if "estimated_fee_rate_hk" not in config_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE strategy_v2_shadow_config "
+                "ADD COLUMN estimated_fee_rate_hk FLOAT NOT NULL DEFAULT 0.003"
+            )
+        if "holding_deadline" not in trade_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE strategy_v2_shadow_trades ADD COLUMN holding_deadline DATETIME"
+            )
+        if "estimated_fee_rate" not in trade_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE strategy_v2_shadow_trades ADD COLUMN estimated_fee_rate FLOAT"
+            )
+
 
 def _ensure_llm_interaction_variant_column(db_engine: Engine) -> None:
     """Add prompt_variant column to llm_interactions if missing."""

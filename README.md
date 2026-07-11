@@ -105,6 +105,13 @@
 - P0 永久禁用 LLM 实盘下单，不能通过策略字段、API 或环境变量开启
 - `CANCEL_REPLACE`、订单价格偏离和发单冷却参数仅保留兼容性；P0 不会进入对应的券商下单路径
 
+### Strategy v2 前向影子（P2）
+- RTH 内使用已结算 1 分钟 bar 计算 session VWAP、因果 residual z-score，并从同一数据流聚合完整 5 分钟确认信号
+- ADX 与实现波动率过滤趋势/异常波动环境；只有“先跌破、后收复”才生成下一根 bar 开盘的虚拟入场
+- 固定 long-only、禁止加仓，虚拟成交采用不利滑点与冻结费率估算净收益，记录 stop / target / 最大持仓 / 收盘前强平、MAE 与 MFE
+- 硬安全线为最长持仓 60 分钟、实际收盘前 45 分钟停止入场、前 15 分钟强制虚拟平仓；默认关闭，且服务没有订单执行依赖或真实下单模式
+- Lab 的「策略 v2 影子」页展示当前因果特征、gate、状态、虚拟绩效与决策导出；离线 replay 永不写数据库
+
 ### 交易执行安全
 - 普通平仓（非止损）在满足 `min_profit_amount` 之前，还需扣除按 `fee_rate_us` / `fee_rate_hk` 估算的双边手续费；费用后净收益仍不足时跳过并记录 `FEE` 原因
 - 止损路径（`allow_loss_exit=True`）完全绕过费用门槛与改价/冷却限制，确保止损优先
@@ -316,7 +323,7 @@ auto_trade/
 | `/#/events` | Decision Timeline — 交易与 LLM 决策事件 + 审计事件（`source` 切换） |
 | `/#/backtest` | Backtest — CSV 回测 |
 | `/#/credentials` | Credentials — 长桥凭证 + 多渠道通知（Server 酱 / Webhook） |
-| `/#/lab` | LLM 优化工作台 — 三页签：实验与版本（Prompt 版本管理 + 实验摘要）、性能看板（A/B 统计与优化建议）、指标面板（实时技术指标快照） |
+| `/#/lab` | 研究与观测工作台 — Prompt 实验、性能、指标、LLM 运行状态与 Strategy v2 前向影子 |
 
 ## API 参考
 
@@ -371,6 +378,17 @@ auto_trade/
 | `GET` | `/api/llm-interactions/{id}` | 单条 LLM 交互完整详情（prompt / 原始响应 / 解析结果 / 上下文快照）；不存在 404 |
 | `PUT` | `/api/strategy/llm-interval/enable` | 开启自动定时分析 |
 | `PUT` | `/api/strategy/llm-interval/disable` | 关闭自动定时分析 |
+
+### Strategy v2 前向影子
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` / `PUT` | `/api/strategy-shadow/config` | 获取或更新指定 `symbol` 的影子开关与可调阈值；硬安全字段不可写 |
+| `GET` | `/api/strategy-shadow/configs` | 列出全部影子标的配置，包含已切离主策略但仍需管理的标的 |
+| `GET` | `/api/strategy-shadow/status` | 当前因果特征、状态、gate 计数与虚拟净收益指标 |
+| `GET` | `/api/strategy-shadow/decisions` | 当前配置版本的分页逐 bar 决策；支持 symbol/action/from/to |
+| `GET` | `/api/strategy-shadow/trades` | 当前配置版本的虚拟闭环交易与估算费用 |
+| `POST` | `/api/strategy-shadow/replay` | 对调用方提供的 1 分钟 bars 做确定性零写入回放 |
 
 ### 回测
 

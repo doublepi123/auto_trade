@@ -44,6 +44,38 @@ Cypress.Commands.add('setupApp', () => {
 
 Cypress.Commands.add('stubApi', () => {
   let status = initialStatus()
+  let strategyShadowConfig = {
+    enabled: true,
+    symbol: 'NVDA.US',
+    zscore_window_1m_bars: 30,
+    zscore_window_5m_bars: 20,
+    breach_zscore: -2,
+    reclaim_zscore: -1,
+    five_minute_zscore_max: -0.5,
+    adx_period: 14,
+    max_adx: 25,
+    realized_vol_window_bars: 20,
+    min_realized_vol: 0.001,
+    max_realized_vol: 0.04,
+    stop_loss_pct: 0.5,
+    profit_target_pct: 0.6,
+    max_holding_minutes: 60,
+    entry_cutoff_minutes_before_close: 45,
+    flatten_minutes_before_close: 15,
+    arm_ttl_bars: 10,
+    max_entries_per_day: 2,
+    entry_cooldown_minutes: 15,
+    slippage_bps: 2,
+    estimated_fee_rate_us: 0.0005,
+    estimated_fee_rate_hk: 0.003,
+    algorithm_version: 'strategy-v2-rth-mr-v1',
+    mode: 'SHADOW',
+    order_submission_allowed: false,
+    allow_position_addons: false,
+    short_entries_enabled: false,
+    config_version: 'shadow-stub-v1',
+    updated_at: '2026-07-12T02:00:00Z',
+  }
 
   cy.intercept('GET', '/api/strategy', {
     body: {
@@ -361,6 +393,10 @@ Cypress.Commands.add('stubApi', () => {
       max_win_streak: 0,
       max_loss_streak: 0,
       avg_hold_seconds: null,
+      total_fees: 0,
+      actual_fee_coverage_pct: 0,
+      avg_slippage_bps: null,
+      avg_ack_latency_ms: null,
     },
   }).as('getTradeStats')
 
@@ -1091,6 +1127,119 @@ Cypress.Commands.add('stubApi', () => {
   cy.intercept('POST', '/api/credentials/notification-channels/test', (req) => {
     req.reply({ body: { ok: true, error: null } })
   }).as('testNotificationChannel')
+
+  cy.intercept({ method: 'GET', pathname: '/api/strategy-shadow/config' }, (req) => {
+    req.reply({ body: strategyShadowConfig })
+  }).as('getStrategyShadowConfig')
+
+  cy.intercept('GET', '/api/strategy-shadow/configs', (req) => {
+    req.reply({ body: [strategyShadowConfig] })
+  }).as('getStrategyShadowConfigs')
+
+  cy.intercept({ method: 'PUT', pathname: '/api/strategy-shadow/config' }, (req) => {
+    strategyShadowConfig = {
+      ...strategyShadowConfig,
+      ...req.body,
+      config_version: 'shadow-stub-v2',
+      updated_at: '2026-07-12T02:05:00Z',
+    }
+    req.reply({ body: strategyShadowConfig })
+  }).as('saveStrategyShadowConfig')
+
+  cy.intercept('GET', '/api/strategy-shadow/status*', (req) => {
+    req.reply({
+      body: {
+        config: strategyShadowConfig,
+        latest: {
+          observed_at: '2026-07-12T02:04:58Z',
+          data_age_seconds: 2,
+          bar_timestamp_1m: '2026-07-12T02:04:00Z',
+          bar_timestamp_5m: '2026-07-12T02:00:00Z',
+          price: 210.25,
+          vwap_1m: 210.8,
+          zscore_1m: -1.15,
+          vwap_5m: 211.1,
+          zscore_5m: -0.42,
+          adx: 18.4,
+          realized_vol: 0.0123,
+          regime_eligible: true,
+          breach_armed: true,
+          virtual_position: 'FLAT',
+          virtual_entry_price: null,
+          virtual_entry_at: null,
+          last_action: 'WAIT_RECLAIM',
+          last_reason: '等待 1m 价格重新收复 VWAP 残差阈值',
+        },
+        metrics: {
+          bars: 120,
+          eligible_bars: 76,
+          breaches: 8,
+          reclaims: 5,
+          entries: 5,
+          exits: 4,
+          closed_trades: 4,
+          win_rate: 0.75,
+          gross_pnl: 38.4,
+          fees: 4.2,
+          net_pnl: 34.2,
+          max_drawdown: 7.8,
+          avg_holding_minutes: 21.5,
+          avg_mae_pct: 0.0032,
+          avg_mfe_pct: 0.0078,
+          live_action_count: 3,
+          action_agreement_rate: 0.6667,
+          net_pnl_delta_vs_live: 12.6,
+        },
+        gate_counts: {
+          WAIT_BREACH: 32,
+          ADX: 15,
+          VOL_HIGH: 7,
+        },
+        phase: 'ARMED_LONG',
+        last_polled_at: '2026-07-12T02:04:58Z',
+        last_poll_error: '',
+      },
+    })
+  }).as('getStrategyShadowStatus')
+
+  cy.intercept('GET', '/api/strategy-shadow/decisions*', {
+    body: {
+      items: [
+        {
+          id: 1,
+          symbol: 'NVDA.US',
+          config_version: 'shadow-stub-v1',
+          observed_at: '2026-07-12T02:04:58Z',
+          bar_timestamp_1m: '2026-07-12T02:04:00Z',
+          bar_timestamp_5m: '2026-07-12T02:00:00Z',
+          price: 210.25,
+          vwap_1m: 210.8,
+          zscore_1m: -1.15,
+          vwap_5m: 211.1,
+          zscore_5m: -0.42,
+          adx: 18.4,
+          realized_vol: 0.0123,
+          regime_eligible: true,
+          breach_armed: true,
+          action: 'WAIT_RECLAIM',
+          reason: '等待收复',
+          virtual_position: 'FLAT',
+          reference_price: 210.25,
+          quantity: 0,
+          gross_pnl: null,
+          fee: null,
+          net_pnl: null,
+          exit_reason: null,
+          holding_minutes: null,
+          mae_pct: null,
+          mfe_pct: null,
+        },
+      ],
+      total: 1,
+      page: 1,
+      page_size: 20,
+    },
+  }).as('getStrategyShadowDecisions')
 
   cy.intercept('GET', '/api/strategy-experiments', { body: [] }).as('listStrategyExperiments')
   cy.intercept('GET', '/api/strategy-experiments/*/runs*', {

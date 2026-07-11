@@ -51,6 +51,127 @@ async def test_lifespan_passes_application_loop_to_runner(monkeypatch) -> None:
     assert started_with == [current_loop]
 
 
+def test_strategy_v2_shadow_tick_is_isolated_from_execution(monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    class FakeQuery:
+        def __init__(self, values: list[tuple[str]]) -> None:
+            self.values = values
+
+        def filter(self, *_args: object) -> "FakeQuery":
+            return self
+
+        def distinct(self) -> "FakeQuery":
+            return self
+
+        def all(self) -> list[tuple[str]]:
+            return self.values
+
+    class FakeDB:
+        closed = False
+        rolled_back = 0
+
+        def __init__(self) -> None:
+            self.query_count = 0
+
+        def query(self, *_args: object) -> FakeQuery:
+            self.query_count += 1
+            return FakeQuery(
+                [("0700.HK",), ("NVDA.US",)]
+                if self.query_count == 1
+                else [("MSFT.US",)]
+            )
+
+        def rollback(self) -> None:
+            self.rolled_back += 1
+
+        def close(self) -> None:
+            self.closed = True
+
+    db = FakeDB()
+    broker = object()
+    runner = SimpleNamespace(broker=broker, _trade_svc=MagicMock())
+
+    class FakeStrategyService:
+        def __init__(self, received_db: object) -> None:
+            assert received_db is db
+
+        def get_config(self) -> SimpleNamespace:
+            return SimpleNamespace(symbol="NVDA.US", market="US")
+
+    class FakeShadowService:
+        def __init__(self, received_db: object, candle_provider: object) -> None:
+            assert received_db is db
+            assert candle_provider is broker
+
+        def tick(self, **kwargs: object) -> None:
+            calls.append(kwargs)
+            if kwargs["symbol"] == "MSFT.US":
+                raise RuntimeError("isolated symbol failure")
+
+    monkeypatch.setattr(main_module, "SessionLocal", lambda: db)
+    monkeypatch.setattr(main_module, "StrategyService", FakeStrategyService)
+    monkeypatch.setattr(main_module, "get_runner", lambda: runner)
+    monkeypatch.setattr(
+        "app.services.strategy_v2_shadow_service.StrategyV2ShadowService",
+        FakeShadowService,
+    )
+
+    main_module._strategy_v2_shadow_tick_sync()
+
+    assert calls == [
+        {"symbol": "0700.HK", "market": "HK"},
+        {"symbol": "MSFT.US", "market": "US"},
+        {"symbol": "NVDA.US", "market": "US"},
+    ]
+    assert db.rolled_back == 1
+    assert db.closed is True
+    runner._trade_svc.execute.assert_not_called()
+
+
+def test_strategy_v2_shadow_tick_skips_without_primary_symbol(monkeypatch) -> None:
+    class FakeQuery:
+        def filter(self, *_args: object) -> "FakeQuery":
+            return self
+
+        def distinct(self) -> "FakeQuery":
+            return self
+
+        def all(self) -> list[tuple[str]]:
+            return []
+
+    class FakeDB:
+        closed = False
+
+        def query(self, *_args: object) -> FakeQuery:
+            return FakeQuery()
+
+        def close(self) -> None:
+            self.closed = True
+
+    db = FakeDB()
+
+    class FakeStrategyService:
+        def __init__(self, _db: object) -> None:
+            pass
+
+        def get_config(self) -> SimpleNamespace:
+            return SimpleNamespace(symbol="", market="US")
+
+    shadow_service = MagicMock()
+    monkeypatch.setattr(main_module, "SessionLocal", lambda: db)
+    monkeypatch.setattr(main_module, "StrategyService", FakeStrategyService)
+    monkeypatch.setattr(
+        "app.services.strategy_v2_shadow_service.StrategyV2ShadowService",
+        shadow_service,
+    )
+
+    main_module._strategy_v2_shadow_tick_sync()
+
+    shadow_service.assert_not_called()
+    assert db.closed is True
+
+
 class TestPriceDriftPct:
     def test_zero_baseline_returns_zero(self) -> None:
         assert main_module._price_drift_pct(110.0, 0.0) == 0.0
