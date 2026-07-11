@@ -303,6 +303,10 @@ class TestStrategyV2ShadowApi:
         assert body["metrics"]["closed_trades"] == 1
         assert body["metrics"]["win_rate"] == 1.0
         assert body["metrics"]["net_pnl"] == 0.8995
+        assert body["metrics"]["comparison_available"] is False
+        assert body["metrics"]["live_action_count"] is None
+        assert body["metrics"]["action_agreement_rate"] is None
+        assert body["metrics"]["net_pnl_delta_vs_live"] is None
         assert body["gate_counts"] == {"ADX_TOO_HIGH": 1}
 
         decisions = self.client.get(

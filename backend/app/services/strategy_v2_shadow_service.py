@@ -1516,9 +1516,6 @@ class StrategyV2ShadowService:
             avg_holding_minutes=sum(holding) / len(holding) if holding else 0.0,
             avg_mae_pct=sum(mae) / len(mae) if mae else 0.0,
             avg_mfe_pct=sum(mfe) / len(mfe) if mfe else 0.0,
-            live_action_count=0,
-            action_agreement_rate=0.0,
-            net_pnl_delta_vs_live=0.0,
         )
 
     def _gate_counts(self, symbol: str, config_version: str) -> dict[str, int]:
