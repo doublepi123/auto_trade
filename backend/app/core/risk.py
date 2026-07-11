@@ -6,6 +6,17 @@ from datetime import date, datetime, timezone
 from typing import Callable, Optional
 
 
+_OPERATIONAL_PAUSE_PREFIXES = (
+    "ORDER_SUBMISSION_UNCERTAIN:",
+    "POSITION_RECONCILIATION_UNCERTAIN:",
+    "REDUCTION_SETTLEMENT_UNCERTAIN:",
+    "ORDER_RECONCILIATION_UNCERTAIN:",
+    "ORDER_EXECUTION_BLOCKED:",
+    "ORDER_PERSISTENCE_UNCERTAIN:",
+    "ORDER_STATUS_PERSISTENCE_UNCERTAIN:",
+)
+
+
 @dataclass
 class RiskConfig:
     max_daily_loss: float = 5000.0
@@ -126,6 +137,12 @@ class RiskController:
         paused_at: datetime | None = None,
     ) -> None:
         with self._lock:
+            if (
+                self.paused
+                and self._pause_reason.startswith(_OPERATIONAL_PAUSE_PREFIXES)
+                and not reason.startswith(_OPERATIONAL_PAUSE_PREFIXES)
+            ):
+                return
             self.paused = True
             self._pause_reason = reason
             self._paused_at = paused_at or datetime.now(timezone.utc)

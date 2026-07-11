@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Generator
+from typing import Any
 
-from sqlalchemy import create_engine, event, inspect
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -51,8 +52,12 @@ def init_db() -> None:
     _ensure_strategy_config_session_columns(engine)
     _ensure_runtime_state_daily_pnl_date_column(engine)
     _ensure_runtime_state_symbol_columns(engine)
+    _ensure_runtime_reduction_columns(engine)
     _backfill_primary_runtime_state_symbols(engine)
+    _ensure_runtime_state_symbol_uniqueness(engine)
+    _ensure_order_broker_id_uniqueness(engine)
     _ensure_tracked_entries_table(engine)
+    _ensure_tracked_entry_metadata_columns(engine)
     _ensure_audit_log_table(engine)
     _ensure_credential_config_notification_channels_column(engine)
     _ensure_watchlist_items_table(engine)
@@ -63,6 +68,7 @@ def init_db() -> None:
     _ensure_strategy_experiment_runs_table(engine)
     _ensure_strategy_experiment_runs_extra_metrics(engine)
     _ensure_strategy_config_margin_safety_factor(engine)
+    _ensure_strategy_config_p0_safety_columns(engine)
     _ensure_strategy_config_report_schedule_columns(engine)
     _ensure_llm_interaction_variant_column(engine)
     _ensure_report_query_indexes(engine)
@@ -229,6 +235,42 @@ def _ensure_runtime_state_symbol_columns(db_engine: Engine) -> None:
                 )
 
 
+def _ensure_runtime_reduction_columns(db_engine: Engine) -> None:
+    inspector = inspect(db_engine)
+    table_names = set(inspector.get_table_names())
+    if "runtime_state" in table_names:
+        columns = {column["name"] for column in inspector.get_columns("runtime_state")}
+        missing = {
+            "execution_state": "VARCHAR(20) NOT NULL DEFAULT 'IDLE'",
+            "reduction_action": "VARCHAR(20) NOT NULL DEFAULT ''",
+            "reduction_cause": "VARCHAR(30) NOT NULL DEFAULT ''",
+            "reduction_reason": "TEXT NOT NULL DEFAULT ''",
+            "reduction_started_at": "DATETIME",
+            "reduction_trigger_price": "FLOAT",
+        }
+        with db_engine.begin() as connection:
+            for name, column_type in missing.items():
+                if name not in columns:
+                    connection.exec_driver_sql(
+                        f"ALTER TABLE runtime_state ADD COLUMN {name} {column_type}"
+                    )
+    if "runtime_state_snapshots" in table_names:
+        columns = {
+            column["name"] for column in inspector.get_columns("runtime_state_snapshots")
+        }
+        with db_engine.begin() as connection:
+            if "execution_state" not in columns:
+                connection.exec_driver_sql(
+                    "ALTER TABLE runtime_state_snapshots ADD COLUMN "
+                    "execution_state VARCHAR(20) NOT NULL DEFAULT 'IDLE'"
+                )
+            if "reduction_reason" not in columns:
+                connection.exec_driver_sql(
+                    "ALTER TABLE runtime_state_snapshots ADD COLUMN "
+                    "reduction_reason TEXT NOT NULL DEFAULT ''"
+                )
+
+
 def _backfill_primary_runtime_state_symbols(db_engine: Engine) -> None:
     inspector = inspect(db_engine)
     if "runtime_state" not in inspector.get_table_names():
@@ -255,6 +297,206 @@ def _backfill_primary_runtime_state_symbols(db_engine: Engine) -> None:
               )
             """,
             (primary_symbol, primary_symbol),
+        )
+
+
+def _ensure_runtime_state_symbol_uniqueness(db_engine: Engine) -> None:
+    inspector = inspect(db_engine)
+    if "runtime_state" not in inspector.get_table_names():
+        return
+    with db_engine.begin() as connection:
+        duplicate_symbols = connection.execute(
+            text(
+                "SELECT symbol FROM runtime_state GROUP BY symbol HAVING COUNT(*) > 1"
+            )
+        ).scalars().all()
+        for symbol in duplicate_symbols:
+            rows = connection.execute(
+                text("SELECT * FROM runtime_state WHERE symbol = :symbol ORDER BY id"),
+                {"symbol": symbol},
+            ).mappings().all()
+            if not rows:
+                continue
+
+            def row_key(mapped: Any) -> tuple[int, int, int, str, int]:
+                return (
+                    int(str(mapped["execution_state"]).upper() == "REDUCING"),
+                    int(bool(mapped["kill_switch"])),
+                    int(bool(mapped["paused"])),
+                    str(mapped["updated_at"] or ""),
+                    int(mapped["id"]),
+                )
+
+            keeper = max(rows, key=row_key)
+            reduction_rows = [
+                row for row in rows if str(row["execution_state"]).upper() == "REDUCING"
+            ]
+            reduction = max(reduction_rows, key=row_key) if reduction_rows else None
+            latest = max(rows, key=lambda row: (str(row["updated_at"] or ""), int(row["id"])))
+            nonflat_states = {
+                str(row["engine_state"]).lower()
+                for row in rows
+                if str(row["engine_state"]).lower() != "flat"
+            }
+            paused = any(bool(row["paused"]) for row in rows)
+            pause_reason = str(keeper["pause_reason"] or "")
+            if len(nonflat_states) > 1:
+                paused = True
+                pause_reason = (
+                    "POSITION_RECONCILIATION_UNCERTAIN: conflicting duplicate "
+                    f"runtime states for {symbol}"
+                )
+            update_values = {
+                "id": int(keeper["id"]),
+                "engine_state": str(keeper["engine_state"]),
+                "paused": int(paused),
+                "pause_reason": pause_reason,
+                "paused_at": keeper["paused_at"],
+                "pause_auto_resumable": int(
+                    paused
+                    and all(
+                        bool(row["pause_auto_resumable"])
+                        for row in rows
+                        if bool(row["paused"])
+                    )
+                ),
+                "kill_switch": int(any(bool(row["kill_switch"]) for row in rows)),
+                "daily_pnl": min(float(row["daily_pnl"] or 0) for row in rows),
+                "daily_pnl_date": max(
+                    (row["daily_pnl_date"] for row in rows if row["daily_pnl_date"] is not None),
+                    default=None,
+                ),
+                "consecutive_losses": max(int(row["consecutive_losses"] or 0) for row in rows),
+                "last_price": float(latest["last_price"] or 0),
+                "last_trigger_price": float(latest["last_trigger_price"] or 0),
+                "last_trigger_at": latest["last_trigger_at"],
+                "execution_state": str(reduction["execution_state"] if reduction else "IDLE"),
+                "reduction_action": str(reduction["reduction_action"] if reduction else ""),
+                "reduction_cause": str(reduction["reduction_cause"] if reduction else ""),
+                "reduction_reason": str(reduction["reduction_reason"] if reduction else ""),
+                "reduction_started_at": reduction["reduction_started_at"] if reduction else None,
+                "reduction_trigger_price": reduction["reduction_trigger_price"] if reduction else None,
+                "updated_at": latest["updated_at"],
+            }
+            connection.execute(
+                text(
+                    """
+                    UPDATE runtime_state SET
+                        engine_state=:engine_state, paused=:paused,
+                        pause_reason=:pause_reason, paused_at=:paused_at,
+                        pause_auto_resumable=:pause_auto_resumable,
+                        kill_switch=:kill_switch, daily_pnl=:daily_pnl,
+                        daily_pnl_date=:daily_pnl_date,
+                        consecutive_losses=:consecutive_losses,
+                        last_price=:last_price,
+                        last_trigger_price=:last_trigger_price,
+                        last_trigger_at=:last_trigger_at,
+                        execution_state=:execution_state,
+                        reduction_action=:reduction_action,
+                        reduction_cause=:reduction_cause,
+                        reduction_reason=:reduction_reason,
+                        reduction_started_at=:reduction_started_at,
+                        reduction_trigger_price=:reduction_trigger_price,
+                        updated_at=:updated_at
+                    WHERE id=:id
+                    """
+                ),
+                update_values,
+            )
+            for row in rows:
+                if int(row["id"]) != int(keeper["id"]):
+                    connection.execute(
+                        text("DELETE FROM runtime_state WHERE id = :id"),
+                        {"id": int(row["id"])},
+                    )
+        connection.exec_driver_sql(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_runtime_state_symbol "
+            "ON runtime_state (symbol)"
+        )
+
+
+def _ensure_order_broker_id_uniqueness(db_engine: Engine) -> None:
+    inspector = inspect(db_engine)
+    if "orders" not in inspector.get_table_names():
+        return
+    with db_engine.begin() as connection:
+        duplicate_ids = connection.execute(
+            text(
+                "SELECT broker_order_id FROM orders WHERE broker_order_id <> '' "
+                "GROUP BY broker_order_id HAVING COUNT(*) > 1"
+            )
+        ).scalars().all()
+        status_rank = {
+            "FILLED": 5,
+            "CANCELLED": 4,
+            "REJECTED": 4,
+            "PARTIAL_FILLED": 3,
+            "SUBMITTED": 2,
+        }
+        for broker_order_id in duplicate_ids:
+            rows = connection.execute(
+                text("SELECT * FROM orders WHERE broker_order_id = :order_id ORDER BY id"),
+                {"order_id": broker_order_id},
+            ).mappings().all()
+            if not rows:
+                continue
+            keeper = max(
+                rows,
+                key=lambda row: (
+                    status_rank.get(str(row["status"]).upper(), 1),
+                    float(row["executed_quantity"] or 0),
+                    int(row["id"]),
+                ),
+            )
+            fill_row = max(
+                rows,
+                key=lambda row: (float(row["executed_quantity"] or 0), int(row["id"])),
+            )
+            merged = {
+                "id": int(keeper["id"]),
+                "symbol": str(keeper["symbol"]),
+                "side": str(keeper["side"]),
+                "quantity": max(float(row["quantity"] or 0) for row in rows),
+                "price": float(keeper["price"] or 0),
+                "executed_quantity": max(
+                    (float(row["executed_quantity"] or 0) for row in rows),
+                    default=0.0,
+                ) or None,
+                "executed_price": float(fill_row["executed_price"] or 0) or None,
+                "status": str(keeper["status"]),
+                "created_at": min(
+                    (row["created_at"] for row in rows if row["created_at"] is not None),
+                    default=None,
+                ),
+                "filled_at": max(
+                    (row["filled_at"] for row in rows if row["filled_at"] is not None),
+                    default=None,
+                ),
+                "raw_response": keeper["raw_response"],
+            }
+            connection.execute(
+                text(
+                    """
+                    UPDATE orders SET symbol=:symbol, side=:side,
+                        quantity=:quantity, price=:price,
+                        executed_quantity=:executed_quantity,
+                        executed_price=:executed_price, status=:status,
+                        created_at=:created_at, filled_at=:filled_at,
+                        raw_response=:raw_response
+                    WHERE id=:id
+                    """
+                ),
+                merged,
+            )
+            for row in rows:
+                if int(row["id"]) != int(keeper["id"]):
+                    connection.execute(
+                        text("DELETE FROM orders WHERE id = :id"),
+                        {"id": int(row["id"])},
+                    )
+        connection.exec_driver_sql(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_orders_broker_order_id_nonempty "
+            "ON orders (broker_order_id) WHERE broker_order_id <> ''"
         )
 
 
@@ -296,11 +538,33 @@ def _ensure_tracked_entries_table(db_engine: Engine) -> None:
             """
             CREATE TABLE IF NOT EXISTS tracked_entries (
                 symbol VARCHAR(50) PRIMARY KEY,
+                side VARCHAR(10) NOT NULL DEFAULT 'LONG',
                 quantity FLOAT NOT NULL DEFAULT 0,
                 cost FLOAT NOT NULL DEFAULT 0,
+                opened_at DATETIME,
                 updated_at DATETIME
             )
             """
+        )
+
+
+def _ensure_tracked_entry_metadata_columns(db_engine: Engine) -> None:
+    inspector = inspect(db_engine)
+    if "tracked_entries" not in inspector.get_table_names():
+        return
+    columns = {column["name"] for column in inspector.get_columns("tracked_entries")}
+    with db_engine.begin() as connection:
+        if "side" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE tracked_entries ADD COLUMN side VARCHAR(10) NOT NULL DEFAULT ''"
+            )
+        if "opened_at" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE tracked_entries ADD COLUMN opened_at DATETIME"
+            )
+        connection.exec_driver_sql(
+            "UPDATE tracked_entries SET opened_at = updated_at "
+            "WHERE opened_at IS NULL AND updated_at IS NOT NULL"
         )
 
 
@@ -845,6 +1109,45 @@ def _ensure_strategy_config_margin_safety_factor(db_engine: Engine) -> None:
         if "margin_safety_factor" not in columns:
             connection.exec_driver_sql(
                 "ALTER TABLE strategy_config ADD COLUMN margin_safety_factor FLOAT DEFAULT 0.9"
+            )
+
+
+def _ensure_strategy_config_p0_safety_columns(db_engine: Engine) -> None:
+    """Install the fail-safe live trading controls on existing SQLite databases."""
+    inspector = inspect(db_engine)
+    if "strategy_config" not in inspector.get_table_names():
+        return
+    columns = {column["name"] for column in inspector.get_columns("strategy_config")}
+    missing = {
+        "allow_position_addons": "BOOLEAN NOT NULL DEFAULT 0",
+        "max_position_quantity": "INTEGER NOT NULL DEFAULT 100",
+        "max_position_notional": "FLOAT NOT NULL DEFAULT 5000",
+        "max_risk_per_trade": "FLOAT NOT NULL DEFAULT 250",
+        "stop_loss_pct": "FLOAT NOT NULL DEFAULT 1",
+        "max_holding_minutes": "INTEGER NOT NULL DEFAULT 60",
+        "entry_cutoff_minutes_before_close": "INTEGER NOT NULL DEFAULT 45",
+        "flatten_minutes_before_close": "INTEGER NOT NULL DEFAULT 15",
+        "llm_order_execution_enabled": "BOOLEAN NOT NULL DEFAULT 0",
+    }
+    with db_engine.begin() as connection:
+        for name, column_type in missing.items():
+            if name not in columns:
+                connection.exec_driver_sql(
+                    f"ALTER TABLE strategy_config ADD COLUMN {name} {column_type}"
+                )
+        available_columns = columns | set(missing)
+        assignments = [
+            f"{name} = 0"
+            for name in (
+                "short_selling",
+                "allow_position_addons",
+                "llm_order_execution_enabled",
+            )
+            if name in available_columns
+        ]
+        if assignments:
+            connection.exec_driver_sql(
+                "UPDATE strategy_config SET " + ", ".join(assignments)
             )
 
 

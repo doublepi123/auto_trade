@@ -203,6 +203,19 @@ describe('Dashboard', () => {
         quotes_subscribed: true,
         trigger_in_flight: false,
         pending_order_symbols: ['AAPL.US'],
+        live_safety: {
+          short_entries_enabled: false,
+          allow_position_addons: false,
+          max_position_quantity: 80,
+          max_position_notional: 4000,
+          max_risk_per_trade: 200,
+          stop_loss_pct: 0.8,
+          max_holding_minutes: 45,
+          entry_cutoff_minutes_before_close: 50,
+          flatten_minutes_before_close: 20,
+          llm_shadow_mode: true,
+          llm_order_execution_enabled: false,
+        },
         quote_stream: {
           last_push_age_seconds: 3,
           last_quote_age_seconds: 1,
@@ -248,6 +261,14 @@ describe('Dashboard', () => {
     cy.contains('AAPL.US').should('be.visible')
     cy.contains('线程存活').should('be.visible')
     cy.contains('最近推送 3.0s').should('be.visible')
+    cy.get('[data-testid="dashboard-live-safety"]')
+      .should('contain', '实时安全参数')
+      .and('contain', '做空开仓')
+      .and('contain', '关闭')
+      .and('contain', '4000.00')
+      .and('contain', '45 分钟')
+      .and('contain', '影子')
+      .and('contain', '禁下单')
   })
 
   it('clarifies that control actions apply globally across symbol runtimes', () => {

@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from dataclasses import dataclass, replace as dataclass_replace
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from threading import RLock
-from typing import TYPE_CHECKING, Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional, cast
 
 from app.config import settings
 from app.core.fees import estimate_round_trip_fee
-from app.core.market_calendar import is_opening_warmup, is_trading_hours
+from app.core.market_calendar import is_closing_window, is_opening_warmup, is_trading_hours
 
 if TYPE_CHECKING:
     from app.core.audit import AuditLogger
@@ -28,6 +30,18 @@ class OrderPersistenceError(RuntimeError):
 
 _LIVE_ORDER_STATUSES = {"SUBMITTED", "PARTIAL_FILLED"}
 _FAILED_ORDER_STATUSES = {"REJECTED", "CANCELLED"}
+ORDER_EXECUTION_BLOCKED_PREFIX = "ORDER_EXECUTION_BLOCKED:"
+ORDER_PERSISTENCE_UNCERTAIN_PREFIX = "ORDER_PERSISTENCE_UNCERTAIN:"
+ORDER_STATUS_PERSISTENCE_UNCERTAIN_PREFIX = "ORDER_STATUS_PERSISTENCE_UNCERTAIN:"
+_OPERATIONAL_PAUSE_PREFIXES = (
+    "ORDER_SUBMISSION_UNCERTAIN:",
+    "POSITION_RECONCILIATION_UNCERTAIN:",
+    "REDUCTION_SETTLEMENT_UNCERTAIN:",
+    "ORDER_RECONCILIATION_UNCERTAIN:",
+    ORDER_EXECUTION_BLOCKED_PREFIX,
+    ORDER_PERSISTENCE_UNCERTAIN_PREFIX,
+    ORDER_STATUS_PERSISTENCE_UNCERTAIN_PREFIX,
+)
 _SKIPPED_ORDER_STATUS = "SKIPPED"
 _ENTRY_ACTIONS = {"BUY", "SELL_SHORT"}
 _POSITION_REDUCING_ACTIONS = {"SELL", "BUY_TO_COVER"}
@@ -69,6 +83,7 @@ class OrderStatus:
     executed_quantity: Optional[Decimal] = None
     executed_price: Optional[Decimal] = None
     reason: str = ""
+    fill_finalized: bool = False
 
     @staticmethod
     def _positive(value: Optional[Decimal]) -> Decimal:
@@ -95,12 +110,15 @@ class _PendingOrder:
     next_status_check_at: float = 0.0
     submitted_at: float = 0.0
     restore_engine_snapshot_fn: Callable[[EngineSnapshot], None] | None = None
+    timeout_recovery_attempted: bool = False
 
 
 @dataclass
 class _TrackedEntry:
     quantity: Decimal = Decimal("0")
     cost: Decimal = Decimal("0")
+    side: str = "LONG"
+    opened_at: datetime | None = None
 
     @property
     def avg_price(self) -> Decimal:
@@ -109,21 +127,66 @@ class _TrackedEntry:
         return self.cost / self.quantity
 
 
+@dataclass(frozen=True)
+class TrackedPositionSnapshot:
+    symbol: str
+    side: str
+    quantity: Decimal
+    cost: Decimal
+    opened_at: datetime | None
+
+    @property
+    def avg_price(self) -> Decimal:
+        if self.quantity <= 0:
+            return Decimal("0")
+        return self.cost / self.quantity
+
+
+@dataclass(frozen=True)
+class _EntryPositionCheck:
+    current_quantity: Decimal
+    conflicting_symbol: str = ""
+
+
 _EntryPersistCallback = Callable[[str, Decimal, Decimal], None]
 _FillCallback = Callable[[str], None]
+_ReductionFillCallback = Callable[[str, str, Decimal], None]
+_FinalOrderQuoteCheck = Callable[["BrokerGateway", str, str, Decimal], str | None]
 
 
 class TradeExecutionService:
     def __init__(
         self,
-        record_order: Callable[[str, str, str, float, float, str], None],
+        record_order: Callable[
+            [
+                str,
+                str,
+                str,
+                float,
+                float,
+                str,
+                datetime | None,
+                float | None,
+                float | None,
+            ],
+            None,
+        ],
         update_order_status: Callable[[str, str, datetime | None, float | None, float | None], None],
         record_risk_event: Callable[[str], None],
         record_order_skipped: _RecordOrderSkipped | None = None,
         persist_entry: _EntryPersistCallback | None = None,
         on_fill: _FillCallback | None = None,
+        on_reduction_fill: _ReductionFillCallback | None = None,
         audit: AuditLogger | None = None,
         margin_safety_factor: float | None = None,
+        allow_position_addons: bool = False,
+        short_entries_enabled: bool = False,
+        max_position_quantity: int | None = None,
+        max_position_notional: float | None = None,
+        max_risk_per_trade: float | None = None,
+        stop_loss_pct: float | None = None,
+        entry_cutoff_minutes_before_close: int = 0,
+        final_order_quote_check: _FinalOrderQuoteCheck | None = None,
     ) -> None:
         self._record_order = record_order
         self._update_order_status = update_order_status
@@ -131,29 +194,63 @@ class TradeExecutionService:
         self._record_order_skipped = record_order_skipped
         self._persist_entry = persist_entry
         self._on_fill = on_fill
+        self._on_reduction_fill = on_reduction_fill
         self._audit = audit
         self.margin_safety_factor = margin_safety_factor
+        self.allow_position_addons = allow_position_addons
+        self.short_entries_enabled = short_entries_enabled
+        self.max_position_quantity = max_position_quantity
+        self.max_position_notional = max_position_notional
+        self.max_risk_per_trade = max_risk_per_trade
+        self.stop_loss_pct = stop_loss_pct
+        self.entry_cutoff_minutes_before_close = entry_cutoff_minutes_before_close
+        self._final_order_quote_check = final_order_quote_check
         self._state_lock = RLock()
+        self._submission_lock = RLock()
         self._pending_orders: dict[str, _PendingOrder] = {}
+        self._pending_orders_by_id: dict[str, _PendingOrder] = {}
         self._order_status_poll_interval_seconds = 1.0
         self._order_status_timeout_seconds = 30.0
         self._entry_positions: dict[str, _TrackedEntry] = {}
         self._reconcile_in_flight: set[str] = set()
         self._pending_status_query_warned_ids: set[str] = set()
+        self._fill_finalization_in_flight: set[str] = set()
+        self._finalized_order_ids: set[str] = set()
 
-    def load_tracked_entries(self, entries: dict[str, tuple[Decimal, Decimal]]) -> None:
+    @contextmanager
+    def submission_guard(self) -> Iterator[None]:
+        """Serialize external broker synchronization with order submission."""
+        with self._submission_lock:
+            yield
+
+    def load_tracked_entries(
+        self,
+        entries: Mapping[
+            str,
+            tuple[Decimal, Decimal] | tuple[Decimal, Decimal, str, datetime | None],
+        ],
+    ) -> None:
         """Restore tracked entry positions (typically at runner startup)."""
         with self._state_lock:
             self._entry_positions.clear()
-            for symbol, (quantity, cost) in entries.items():
+            for symbol, values in entries.items():
+                quantity, cost = values[0], values[1]
                 if quantity <= 0 or cost <= 0:
                     continue
-                self._entry_positions[symbol] = _TrackedEntry(quantity=quantity, cost=cost)
+                side = values[2] if len(values) >= 3 else "LONG"
+                opened_at = values[3] if len(values) >= 4 else None
+                self._entry_positions[symbol] = _TrackedEntry(
+                    quantity=quantity,
+                    cost=cost,
+                    side=str(side or "").upper(),
+                    opened_at=opened_at,
+                )
 
     def refresh_pending_brokers(self, broker: BrokerGateway) -> None:
         with self._state_lock:
-            for symbol, pending in self._pending_orders.items():
-                self._pending_orders[symbol] = _PendingOrder(
+            refreshed: dict[str, _PendingOrder] = {}
+            for order_id, pending in self._pending_orders_by_id.items():
+                refreshed[order_id] = _PendingOrder(
                     broker=broker,
                     broker_order_id=pending.broker_order_id,
                     symbol=pending.symbol,
@@ -165,27 +262,23 @@ class TradeExecutionService:
                     next_status_check_at=pending.next_status_check_at,
                     submitted_at=pending.submitted_at,
                     restore_engine_snapshot_fn=pending.restore_engine_snapshot_fn,
+                    timeout_recovery_attempted=pending.timeout_recovery_attempted,
                 )
+            self._pending_orders_by_id = refreshed
+            self._rebuild_pending_orders_by_symbol_locked()
+
+    def _rebuild_pending_orders_by_symbol_locked(self) -> None:
+        self._pending_orders = {}
+        for pending in self._pending_orders_by_id.values():
+            self._pending_orders.setdefault(pending.symbol, pending)
 
     def load_pending_orders(self, pending_orders: list[_PendingOrder]) -> None:
         with self._state_lock:
-            existing_by_id = {
-                pending.broker_order_id: pending
-                for pending in self._pending_orders.values()
-            }
+            existing_by_id = dict(self._pending_orders_by_id)
             # Build new set from DB results. Preserve in-memory pendings that are NOT
             # in the new list (e.g. just flipped to FILLED by sync) — they will be
             # finalized by the next reconcile cycle rather than silently dropped.
-            new_ids: set[str] = {p.broker_order_id for p in pending_orders}
-            for broker_order_id, existing in existing_by_id.items():
-                if broker_order_id not in new_ids:
-                    self._pending_orders[existing.symbol] = existing
-                    logger.warning(
-                        "in-memory pending order %s for %s not in DB list, preserving for reconcile",
-                        broker_order_id, existing.symbol,
-                    )
-
-            seen_ids: dict[str, str] = {}
+            merged_by_id: dict[str, _PendingOrder] = {}
             for pending in pending_orders:
                 existing = existing_by_id.get(pending.broker_order_id)
                 if existing is not None:
@@ -201,14 +294,21 @@ class TradeExecutionService:
                         next_status_check_at=existing.next_status_check_at,
                         submitted_at=existing.submitted_at,
                         restore_engine_snapshot_fn=existing.restore_engine_snapshot_fn if existing.restore_engine_snapshot_fn is not None else pending.restore_engine_snapshot_fn,
+                        timeout_recovery_attempted=existing.timeout_recovery_attempted,
                     )
-                # If broker_order_id was already seen under a different symbol,
-                # remove the stale entry (broker ID reuse scenario).
-                prev_symbol = seen_ids.get(pending.broker_order_id)
-                if prev_symbol is not None and prev_symbol != pending.symbol:
-                    self._pending_orders.pop(prev_symbol, None)
-                seen_ids[pending.broker_order_id] = pending.symbol
-                self._pending_orders[pending.symbol] = pending
+                merged_by_id[pending.broker_order_id] = pending
+
+            for broker_order_id, existing in existing_by_id.items():
+                if broker_order_id not in merged_by_id:
+                    merged_by_id[broker_order_id] = existing
+                    logger.warning(
+                        "in-memory pending order %s for %s not in DB list, preserving for reconcile",
+                        broker_order_id,
+                        existing.symbol,
+                    )
+
+            self._pending_orders_by_id = merged_by_id
+            self._rebuild_pending_orders_by_symbol_locked()
 
     def snapshot_tracked_entries(self) -> dict[str, tuple[Decimal, Decimal]]:
         with self._state_lock:
@@ -217,22 +317,72 @@ class TradeExecutionService:
                 for symbol, entry in self._entry_positions.items()
             }
 
+    def tracked_position(self, symbol: str) -> TrackedPositionSnapshot | None:
+        with self._state_lock:
+            entry = self._entry_positions.get(symbol)
+            if entry is None or entry.quantity <= 0 or entry.cost <= 0:
+                return None
+            return TrackedPositionSnapshot(
+                symbol=symbol,
+                side=entry.side,
+                quantity=entry.quantity,
+                cost=entry.cost,
+                opened_at=entry.opened_at,
+            )
+
+    def update_tracked_position_metadata(
+        self,
+        symbol: str,
+        *,
+        side: str,
+        opened_at: datetime | None = None,
+    ) -> None:
+        normalized_side = str(side or "").upper()
+        if normalized_side not in {"LONG", "SHORT"}:
+            return
+        with self._state_lock:
+            entry = self._entry_positions.get(symbol)
+            if entry is None:
+                return
+            entry.side = normalized_side
+            if entry.opened_at is None and opened_at is not None:
+                entry.opened_at = opened_at
+
     @property
     def has_pending_order(self) -> bool:
         with self._state_lock:
-            return bool(self._pending_orders)
+            return bool(self._pending_orders_by_id)
 
     @property
     def pending_order(self) -> _PendingOrder | None:
         with self._state_lock:
-            return next(iter(self._pending_orders.values()), None)
+            return next(iter(self._pending_orders_by_id.values()), None)
+
+    def pending_order_ids(self) -> list[str]:
+        with self._state_lock:
+            return sorted(self._pending_orders_by_id)
+
+    def pending_order_inventory(self) -> dict[str, list[str]]:
+        with self._state_lock:
+            inventory: dict[str, list[str]] = {}
+            for pending in self._pending_orders_by_id.values():
+                inventory.setdefault(pending.symbol, []).append(pending.broker_order_id)
+            return {
+                symbol: sorted(set(order_ids))
+                for symbol, order_ids in sorted(inventory.items())
+            }
+
+    def pending_orders_for(self, symbol: str) -> list[_PendingOrder]:
+        with self._state_lock:
+            return [
+                pending
+                for pending in self._pending_orders_by_id.values()
+                if pending.symbol == symbol
+            ]
 
     def pending_order_by_broker_id(self, order_id: str) -> _PendingOrder | None:
         with self._state_lock:
-            return next(
-                (item for item in self._pending_orders.values() if item.broker_order_id == order_id),
-                None,
-            )
+            return self._pending_orders_by_id.get(order_id)
 
     def pending_order_for(self, symbol: str) -> _PendingOrder | None:
         with self._state_lock:
@@ -248,11 +398,16 @@ class TradeExecutionService:
             if pending is None:
                 # Only clear a single order (the first one) rather than all,
                 # consistent with the single-order getter semantics.
-                if self._pending_orders:
-                    first_symbol = next(iter(self._pending_orders))
-                    del self._pending_orders[first_symbol]
+                first_order_id = next(iter(self._pending_orders_by_id), None)
+                if first_order_id is not None:
+                    self._pending_orders_by_id.pop(first_order_id, None)
+                    self._rebuild_pending_orders_by_symbol_locked()
                 return
-            self._pending_orders[pending.symbol] = pending
+            for order_id, existing in list(self._pending_orders_by_id.items()):
+                if existing.symbol == pending.symbol:
+                    self._pending_orders_by_id.pop(order_id, None)
+            self._pending_orders_by_id[pending.broker_order_id] = pending
+            self._rebuild_pending_orders_by_symbol_locked()
 
     def reconcile(
         self,
@@ -261,13 +416,26 @@ class TradeExecutionService:
         restore_engine_snapshot: Callable[[EngineSnapshot], None] | None = None,
         notify_risk_event: _NotifyRiskEvent | None = None,
     ) -> None:
+        with self._submission_lock:
+            self._reconcile_under_submission_guard(
+                risk=risk,
+                notifier=notifier,
+                restore_engine_snapshot=restore_engine_snapshot,
+                notify_risk_event=notify_risk_event,
+            )
+
+    def _reconcile_under_submission_guard(
+        self,
+        risk: RiskController | None = None,
+        notifier: "NotifierInterface | None" = None,
+        restore_engine_snapshot: Callable[[EngineSnapshot], None] | None = None,
+        notify_risk_event: _NotifyRiskEvent | None = None,
+    ) -> None:
         with self._state_lock:
-            pending_orders = list(self._pending_orders.values())
+            pending_orders = list(self._pending_orders_by_id.values())
         for pending in pending_orders:
             with self._state_lock:
-                if pending.broker_order_id not in {
-                    p.broker_order_id for p in self._pending_orders.values()
-                }:
+                if pending.broker_order_id not in self._pending_orders_by_id:
                     continue
                 if pending.broker_order_id in self._reconcile_in_flight:
                     continue
@@ -289,26 +457,54 @@ class TradeExecutionService:
         *,
         restore_engine_snapshot: Callable[[EngineSnapshot], None] | None = None,
     ) -> OrderStatus:
-        with self._state_lock:
-            pending = next(iter(self._pending_orders.values()), None)
-        if pending is None:
-            return OrderStatus("", "NO_PENDING_ORDER")
-        return self.cancel_pending_order_for_symbol(
-            pending.symbol,
-            restore_engine_snapshot=restore_engine_snapshot,
-        )
+        with self._submission_lock:
+            with self._state_lock:
+                pending = next(iter(self._pending_orders_by_id.values()), None)
+            if pending is None:
+                return OrderStatus("", "NO_PENDING_ORDER")
+            return self.cancel_pending_order_for_symbol(
+                pending.symbol,
+                restore_engine_snapshot=restore_engine_snapshot,
+            )
 
     def cancel_pending_order_for_symbol(
         self,
         symbol: str,
         *,
+        broker_order_id: str | None = None,
+        risk: RiskController | None = None,
+        notifier: "NotifierInterface | None" = None,
+        restore_engine_snapshot: Callable[[EngineSnapshot], None] | None = None,
+        notify_risk_event: _NotifyRiskEvent | None = None,
+    ) -> OrderStatus:
+        with self._submission_lock:
+            return self._cancel_pending_order_for_symbol_under_submission_guard(
+                symbol,
+                broker_order_id=broker_order_id,
+                risk=risk,
+                notifier=notifier,
+                restore_engine_snapshot=restore_engine_snapshot,
+                notify_risk_event=notify_risk_event,
+            )
+
+    def _cancel_pending_order_for_symbol_under_submission_guard(
+        self,
+        symbol: str,
+        *,
+        broker_order_id: str | None = None,
         risk: RiskController | None = None,
         notifier: "NotifierInterface | None" = None,
         restore_engine_snapshot: Callable[[EngineSnapshot], None] | None = None,
         notify_risk_event: _NotifyRiskEvent | None = None,
     ) -> OrderStatus:
         with self._state_lock:
-            pending = self._pending_orders.get(symbol)
+            pending = (
+                self._pending_orders_by_id.get(broker_order_id)
+                if broker_order_id is not None
+                else self._pending_orders.get(symbol)
+            )
+            if pending is not None and pending.symbol != symbol:
+                pending = None
             if pending is None:
                 return OrderStatus("", "NO_PENDING_ORDER")
             if pending.broker_order_id in self._reconcile_in_flight:
@@ -325,7 +521,30 @@ class TradeExecutionService:
                 logger.exception("failed to cancel pending order %s", pending.broker_order_id)
                 return OrderStatus(pending.broker_order_id, "CANCEL_FAILED")
 
-            self._safe_update_order_status_from_result(order_status)
+            status_persisted = self._safe_update_order_status_from_result(order_status)
+            if (
+                order_status.status in {"FILLED", *_FAILED_ORDER_STATUSES}
+                and not status_persisted
+            ):
+                self._pause_for_order_status_persistence_failure(
+                    pending,
+                    order_status.status,
+                    risk=risk,
+                    notify_risk_event=notify_risk_event,
+                )
+                return order_status
+
+            if order_status.status not in {"FILLED", *_FAILED_ORDER_STATUSES}:
+                # A cancel request may be accepted asynchronously. Until the
+                # broker reports a terminal state, the original order can still
+                # fill and must remain the sole pending order for this symbol.
+                self._defer_pending_status_retry(pending, time.monotonic())
+                logger.warning(
+                    "cancel not terminal for %s: status=%s; keeping pending",
+                    pending.broker_order_id,
+                    order_status.status,
+                )
+                return order_status
 
             fill_qty = self._resolved_decimal(order_status, "executed_quantity", Decimal("0"))
             if fill_qty > 0:
@@ -339,7 +558,11 @@ class TradeExecutionService:
 
             self._clear_pending_order(pending.broker_order_id)
             effective_restore = pending.restore_engine_snapshot_fn or restore_engine_snapshot
-            if effective_restore is not None and pending.engine_snapshot is not None:
+            if (
+                order_status.status != "FILLED"
+                and effective_restore is not None
+                and pending.engine_snapshot is not None
+            ):
                 if fill_qty == 0 or self._should_restore_after_partial_terminal_fill(pending, fill_qty):
                     effective_restore(pending.engine_snapshot)
             logger.info("pending order cancelled: %s status=%s", pending.broker_order_id, order_status.status)
@@ -358,14 +581,32 @@ class TradeExecutionService:
         restore_engine_snapshot: Callable[[EngineSnapshot], None] | None = None,
         notify_risk_event: _NotifyRiskEvent | None = None,
     ) -> OrderStatus:
-        with self._state_lock:
-            pending = next(
-                (item for item in self._pending_orders.values() if item.broker_order_id == order_id),
-                None,
+        with self._submission_lock:
+            return self._cancel_order_by_id_under_submission_guard(
+                order_id,
+                broker,
+                risk=risk,
+                notifier=notifier,
+                restore_engine_snapshot=restore_engine_snapshot,
+                notify_risk_event=notify_risk_event,
             )
+
+    def _cancel_order_by_id_under_submission_guard(
+        self,
+        order_id: str,
+        broker: BrokerGateway,
+        *,
+        risk: RiskController | None = None,
+        notifier: "NotifierInterface | None" = None,
+        restore_engine_snapshot: Callable[[EngineSnapshot], None] | None = None,
+        notify_risk_event: _NotifyRiskEvent | None = None,
+    ) -> OrderStatus:
+        with self._state_lock:
+            pending = self._pending_orders_by_id.get(order_id)
         if pending is not None:
             return self.cancel_pending_order_for_symbol(
                 pending.symbol,
+                broker_order_id=order_id,
                 risk=risk,
                 notifier=notifier,
                 restore_engine_snapshot=restore_engine_snapshot,
@@ -399,7 +640,73 @@ class TradeExecutionService:
         engine_snapshot: EngineSnapshot | None = None,
         restore_engine_snapshot: Callable[[EngineSnapshot], None] | None = None,
         notify_risk_event: _NotifyRiskEvent | None = None,
+        reduce_only: bool = False,
     ) -> OrderStatus | None:
+        with self._submission_lock:
+            return self._execute_under_submission_guard(
+                action,
+                symbol,
+                quote,
+                broker,
+                risk,
+                notifier,
+                cash_currency,
+                market=market,
+                trading_session_mode=trading_session_mode,
+                min_profit_amount=min_profit_amount,
+                allow_loss_exit=allow_loss_exit,
+                fee_rate=fee_rate,
+                engine_snapshot=engine_snapshot,
+                restore_engine_snapshot=restore_engine_snapshot,
+                notify_risk_event=notify_risk_event,
+                reduce_only=reduce_only,
+            )
+
+    def _execute_under_submission_guard(
+        self,
+        action: str,
+        symbol: str,
+        quote: Quote,
+        broker: BrokerGateway,
+        risk: RiskController,
+        notifier: "NotifierInterface",
+        cash_currency: str,
+        *,
+        market: str = "US",
+        trading_session_mode: str = "ANY",
+        min_profit_amount: Decimal | float | int = Decimal("0"),
+        allow_loss_exit: bool = False,
+        fee_rate: Decimal | float | int = Decimal("0"),
+        engine_snapshot: EngineSnapshot | None = None,
+        restore_engine_snapshot: Callable[[EngineSnapshot], None] | None = None,
+        notify_risk_event: _NotifyRiskEvent | None = None,
+        reduce_only: bool = False,
+    ) -> OrderStatus | None:
+        if reduce_only and action not in _POSITION_REDUCING_ACTIONS:
+            return self._skip_order(
+                symbol,
+                action,
+                "reduce-only execution rejects position-increasing action",
+                skip_category="POSITION",
+            )
+        if action == "SELL_SHORT" and not self.short_entries_enabled:
+            return self._skip_order(
+                symbol,
+                action,
+                "short entries are disabled by the live safety policy",
+                skip_category="RISK",
+            )
+        if (
+            action == "BUY"
+            and trading_session_mode == "ANY"
+            and not is_trading_hours(market)
+        ):
+            return self._skip_order(
+                symbol,
+                action,
+                f"non-trading hours for {market}; ANY mode cannot open a long position",
+                skip_category="SESSION",
+            )
         if trading_session_mode == "RTH_ONLY":
             if not is_trading_hours(market):
                 # SESSION skip records ORDER_SKIPPED only; TRADING_SESSION_BLOCKED is layer A.
@@ -409,13 +716,26 @@ class TradeExecutionService:
                     f"non-RTH for {market}",
                     skip_category="SESSION",
                 )
-            if action in _ENTRY_ACTIONS and is_opening_warmup(market, settings.trading_open_warmup_minutes):
+            if action in _ENTRY_ACTIONS and is_opening_warmup(
+                market,
+                settings.trading_open_warmup_minutes,
+            ):
                 return self._skip_order(
                     symbol,
                     action,
                     f"opening warmup for {market}",
                     skip_category="SESSION",
                 )
+        if action in _ENTRY_ACTIONS and is_closing_window(
+            market,
+            self.entry_cutoff_minutes_before_close,
+        ):
+            return self._skip_order(
+                symbol,
+                action,
+                f"entry cutoff within {self.entry_cutoff_minutes_before_close} minutes of close",
+                skip_category="SESSION",
+            )
 
         risk_result = risk.check()
         if not risk_result.approved and not self._risk_rejection_allows_action(action, risk):
@@ -424,13 +744,59 @@ class TradeExecutionService:
         if not risk_result.approved:
             logger.info("allowing position-reducing %s despite risk rejection: %s", action, risk_result.reason)
 
-        if action == "BUY" and self._is_losing_long_add_on(symbol, Decimal(str(quote.last_price))):
-            return self._skip_order(
-                symbol,
-                action,
-                "existing losing long position blocks add-on buy",
-                skip_category="POSITION",
-            )
+        if action in _ENTRY_ACTIONS:
+            unresolved_order_ids = self.pending_order_ids()
+            if unresolved_order_ids:
+                return self._skip_order(
+                    symbol,
+                    action,
+                    "live or unresolved broker orders block all new entries: "
+                    + ", ".join(unresolved_order_ids),
+                    skip_category="PENDING",
+                )
+            safety_error = self._entry_safety_configuration_error()
+            if safety_error is not None:
+                return self._skip_order(
+                    symbol,
+                    action,
+                    safety_error,
+                    skip_category="RISK",
+                )
+
+            position_check = self._entry_position_check(broker, symbol, action)
+            if position_check is None:
+                return self._skip_order(
+                    symbol,
+                    action,
+                    "broker position lookup unavailable; entry denied by live safety policy",
+                    skip_category="RISK",
+                )
+            if position_check.conflicting_symbol:
+                return self._skip_order(
+                    symbol,
+                    action,
+                    (
+                        f"cross-symbol broker position {position_check.conflicting_symbol} "
+                        "blocks new entry"
+                    ),
+                    skip_category="POSITION",
+                )
+            if not self.allow_position_addons and position_check.current_quantity > 0:
+                return self._skip_order(
+                    symbol,
+                    action,
+                    "existing broker or tracked position blocks entry while add-ons are disabled",
+                    skip_category="POSITION",
+                )
+
+        if action == "BUY":
+            if self._is_losing_long_add_on(symbol, Decimal(str(quote.last_price))):
+                return self._skip_order(
+                    symbol,
+                    action,
+                    "existing losing long position blocks add-on buy",
+                    skip_category="POSITION",
+                )
 
         with self._state_lock:
             pending = self._pending_orders.get(symbol)
@@ -451,7 +817,11 @@ class TradeExecutionService:
 
     @staticmethod
     def _risk_rejection_allows_action(action: str, risk: RiskController) -> bool:
-        return action in _POSITION_REDUCING_ACTIONS and not risk.kill_switch
+        if action not in _POSITION_REDUCING_ACTIONS or risk.kill_switch:
+            return False
+        return not (
+            risk.paused and risk.pause_reason.startswith(_OPERATIONAL_PAUSE_PREFIXES)
+        )
 
     def _is_losing_long_add_on(self, symbol: str, price: Decimal) -> bool:
         with self._state_lock:
@@ -460,6 +830,70 @@ class TradeExecutionService:
                 return False
             avg_price = entry.avg_price
         return avg_price > 0 and price < avg_price
+
+    def _entry_safety_configuration_error(self) -> str | None:
+        with self._state_lock:
+            limits = (
+                ("max_position_quantity", self.max_position_quantity),
+                ("max_position_notional", self.max_position_notional),
+                ("max_risk_per_trade", self.max_risk_per_trade),
+                ("stop_loss_pct", self.stop_loss_pct),
+            )
+        for name, raw_value in limits:
+            if raw_value is None:
+                continue
+            try:
+                value = Decimal(str(raw_value))
+            except Exception:
+                return f"invalid live safety limit: {name} must be finite and greater than zero"
+            if not value.is_finite() or value <= 0:
+                return f"invalid live safety limit: {name} must be finite and greater than zero"
+        if self.max_risk_per_trade is not None and self.stop_loss_pct is None:
+            return "invalid live safety limit: stop_loss_pct is required when max_risk_per_trade is set"
+        return None
+
+    def _entry_position_check(
+        self,
+        broker: BrokerGateway,
+        symbol: str,
+        action: str,
+    ) -> _EntryPositionCheck | None:
+        tracked = self.tracked_position(symbol)
+        current_quantity = tracked.quantity if tracked is not None else Decimal("0")
+        position_reader = getattr(broker, "get_positions", None)
+        if not callable(position_reader):
+            logger.error("%s: broker position lookup is unavailable", action)
+            return None
+
+        try:
+            broker_quantity = Decimal("0")
+            positions = cast("list[object]", position_reader())
+            for position in positions:
+                quantity = abs(Decimal(str(getattr(position, "quantity", 0))))
+                if not quantity.is_finite():
+                    raise ValueError("broker position quantity is not finite")
+                if quantity <= 0:
+                    continue
+                position_symbol = str(getattr(position, "symbol", "")).upper()
+                if position_symbol != symbol.upper():
+                    conflicting_symbol = position_symbol or "<unknown>"
+                    logger.error(
+                        "%s: cross-symbol broker position %s blocks entry for %s",
+                        action,
+                        conflicting_symbol,
+                        symbol,
+                    )
+                    return _EntryPositionCheck(
+                        current_quantity=current_quantity,
+                        conflicting_symbol=conflicting_symbol,
+                    )
+                broker_quantity += quantity
+        except Exception:
+            logger.exception("%s: failed to load broker position for live safety checks", action)
+            return None
+        return _EntryPositionCheck(
+            current_quantity=max(current_quantity, broker_quantity),
+        )
 
     def _entry_quantity_from_margin_power(
         self,
@@ -471,6 +905,33 @@ class TradeExecutionService:
         *,
         safety_factor: float | None = None,
     ) -> int:
+        safety_error = self._entry_safety_configuration_error()
+        if safety_error is not None:
+            logger.error("%s: %s", side, safety_error)
+            return 0
+
+        position_check = self._entry_position_check(
+            broker,
+            symbol,
+            "SELL_SHORT" if side == "SELL" else "BUY",
+        )
+        if position_check is None:
+            return 0
+        if position_check.conflicting_symbol:
+            logger.warning(
+                "%s: cross-symbol position %s appeared during final sizing; entry denied",
+                side,
+                position_check.conflicting_symbol,
+            )
+            return 0
+        current_qty = position_check.current_quantity
+        if not self.allow_position_addons and current_qty > 0:
+            logger.warning(
+                "%s: position appeared during final sizing; add-on denied",
+                side,
+            )
+            return 0
+
         max_qty = broker.estimate_margin_max_quantity(symbol, side, price, cash_currency)
         if safety_factor is not None:
             factor = Decimal(str(safety_factor))
@@ -478,15 +939,44 @@ class TradeExecutionService:
             factor = Decimal(str(self.margin_safety_factor))
         else:
             factor = ENTRY_BUYING_POWER_USAGE
-        qty = int(max_qty * factor)
+        candidate = max_qty * factor
+        if self.max_position_quantity is not None and self.max_position_quantity > 0:
+            remaining_qty = Decimal(self.max_position_quantity) - current_qty
+            candidate = min(candidate, max(Decimal("0"), remaining_qty))
+
+        if self.max_position_notional is not None and self.max_position_notional > 0 and price > 0:
+            current_notional = current_qty * price
+            remaining_notional = Decimal(str(self.max_position_notional)) - current_notional
+            notional_qty = max(Decimal("0"), remaining_notional) / price
+            candidate = min(candidate, notional_qty)
+
+        if (
+            self.max_risk_per_trade is not None
+            and self.max_risk_per_trade > 0
+            and self.stop_loss_pct is not None
+            and self.stop_loss_pct > 0
+            and price > 0
+        ):
+            stop_distance = price * Decimal(str(self.stop_loss_pct)) / Decimal("100")
+            if stop_distance > 0:
+                remaining_risk = max(
+                    Decimal("0"),
+                    Decimal(str(self.max_risk_per_trade)) - current_qty * stop_distance,
+                )
+                risk_qty = remaining_risk / stop_distance
+                candidate = min(candidate, risk_qty)
+
+        qty = int(candidate)
         if qty <= 0:
             logger.warning(
-                "%s: qty <= 0, margin_max_qty=%s price=%s currency=%s factor=%s",
+                "%s: qty <= 0 after live safety caps, margin_max_qty=%s "
+                "price=%s currency=%s factor=%s current_qty=%s",
                 side,
                 max_qty,
                 price,
                 cash_currency,
                 factor,
+                current_qty,
             )
         return qty
 
@@ -626,7 +1116,12 @@ class TradeExecutionService:
             return None
         qty = self._entry_quantity_from_margin_power(broker, symbol, "BUY", price, cash_currency)
         if qty <= 0:
-            return None
+            return self._skip_order(
+                symbol,
+                "BUY",
+                "entry quantity is zero after position and risk caps",
+                skip_category="POSITION",
+            )
 
         order_status = self._submit_limit_order(
             "BUY",
@@ -641,12 +1136,17 @@ class TradeExecutionService:
             restore_engine_snapshot=restore_engine_snapshot,
             notify_risk_event=notify_risk_event,
         )
-        if order_status is None or order_status.status != "FILLED":
+        if (
+            order_status is None
+            or order_status.status != "FILLED"
+            or order_status.fill_finalized
+        ):
             return order_status
 
         fill_price = OrderStatus._positive(order_status.executed_price) or price
         fill_qty = OrderStatus._positive(order_status.executed_quantity) or Decimal(qty)
-        self._record_entry_price(symbol, fill_price, fill_qty)
+        self._record_entry_price(symbol, fill_price, fill_qty, side="LONG")
+        self._mark_fill_processed(symbol)
         self._safe_notify_order(notifier, "BUY", symbol, str(fill_qty), str(fill_price), order_status.broker_order_id)
         logger.info("BUY: %s qty=%s price=%s", symbol, fill_qty, fill_price)
         return order_status
@@ -708,19 +1208,24 @@ class TradeExecutionService:
             notify_risk_event=notify_risk_event,
             avg_price=pos_avg_price,
         )
-        if order_status is None or order_status.status != "FILLED":
+        if (
+            order_status is None
+            or order_status.status != "FILLED"
+            or order_status.fill_finalized
+        ):
             return order_status
 
         fill_price = OrderStatus._positive(order_status.executed_price) or price
         fill_qty = OrderStatus._positive(order_status.executed_quantity) or qty
+        self._safe_notify_order(notifier, "SELL", symbol, str(fill_qty), str(fill_price), order_status.broker_order_id)
         if pos_avg_price > 0:
             pnl = float((fill_price - pos_avg_price) * fill_qty)
-            self._safe_notify_order(notifier, "SELL", symbol, str(fill_qty), str(fill_price), order_status.broker_order_id)
             risk.record_trade(pnl)
-            self._consume_entry_quantity(symbol, fill_qty)
             logger.info("SELL: %s qty=%s price=%s avg_price=%s pnl=%s", symbol, fill_qty, fill_price, pos_avg_price, pnl)
         else:
             logger.warning("SELL: %s qty=%s price=%s avg_price=%s, skipping PnL recording to avoid inflated risk", symbol, fill_qty, fill_price, pos_avg_price)
+        self._consume_entry_quantity(symbol, fill_qty)
+        self._mark_fill_processed(symbol)
         return order_status
 
     def _execute_sell_short(
@@ -743,7 +1248,12 @@ class TradeExecutionService:
 
         qty = self._entry_quantity_from_margin_power(broker, symbol, "SELL", price, cash_currency)
         if qty <= 0:
-            return None
+            return self._skip_order(
+                symbol,
+                "SELL_SHORT",
+                "entry quantity is zero after position and risk caps",
+                skip_category="POSITION",
+            )
 
         order_status = self._submit_limit_order(
             "SELL_SHORT",
@@ -758,12 +1268,17 @@ class TradeExecutionService:
             restore_engine_snapshot=restore_engine_snapshot,
             notify_risk_event=notify_risk_event,
         )
-        if order_status is None or order_status.status != "FILLED":
+        if (
+            order_status is None
+            or order_status.status != "FILLED"
+            or order_status.fill_finalized
+        ):
             return order_status
 
         fill_price = OrderStatus._positive(order_status.executed_price) or price
         fill_qty = OrderStatus._positive(order_status.executed_quantity) or Decimal(qty)
-        self._record_entry_price(symbol, fill_price, fill_qty)
+        self._record_entry_price(symbol, fill_price, fill_qty, side="SHORT")
+        self._mark_fill_processed(symbol)
         self._safe_notify_order(notifier, "SELL_SHORT", symbol, str(fill_qty), str(fill_price), order_status.broker_order_id)
         logger.info("SELL_SHORT: %s qty=%s price=%s", symbol, fill_qty, fill_price)
         return order_status
@@ -825,19 +1340,24 @@ class TradeExecutionService:
             notify_risk_event=notify_risk_event,
             avg_price=pos_avg_price,
         )
-        if order_status is None or order_status.status != "FILLED":
+        if (
+            order_status is None
+            or order_status.status != "FILLED"
+            or order_status.fill_finalized
+        ):
             return order_status
 
         fill_price = OrderStatus._positive(order_status.executed_price) or price
         fill_qty = OrderStatus._positive(order_status.executed_quantity) or qty
+        self._safe_notify_order(notifier, "BUY_TO_COVER", symbol, str(fill_qty), str(fill_price), order_status.broker_order_id)
         if pos_avg_price > 0:
             pnl = float((pos_avg_price - fill_price) * fill_qty)
-            self._safe_notify_order(notifier, "BUY_TO_COVER", symbol, str(fill_qty), str(fill_price), order_status.broker_order_id)
             risk.record_trade(pnl)
-            self._consume_entry_quantity(symbol, fill_qty)
             logger.info("BUY_TO_COVER: %s qty=%s price=%s avg_price=%s pnl=%s", symbol, fill_qty, fill_price, pos_avg_price, pnl)
         else:
             logger.warning("BUY_TO_COVER: %s qty=%s price=%s avg_price=%s, skipping PnL recording to avoid inflated risk", symbol, fill_qty, fill_price, pos_avg_price)
+        self._consume_entry_quantity(symbol, fill_qty)
+        self._mark_fill_processed(symbol)
         return order_status
 
     def _submit_limit_order(
@@ -862,22 +1382,318 @@ class TradeExecutionService:
         need post-fill bookkeeping (entry recording, PnL, position consumption)
         should inspect ``status == "FILLED"`` and perform their own tail logic.
         """
+        with self._submission_lock:
+            blocked = self._final_submission_precheck(
+                action,
+                symbol,
+                qty,
+                price,
+                broker,
+                risk,
+            )
+            if blocked is not None:
+                return blocked
+            return self._submit_limit_order_after_precheck(
+                action,
+                symbol,
+                side,
+                qty,
+                price,
+                broker,
+                risk,
+                notifier,
+                engine_snapshot=engine_snapshot,
+                restore_engine_snapshot=restore_engine_snapshot,
+                notify_risk_event=notify_risk_event,
+                avg_price=avg_price,
+            )
+
+    def _final_submission_precheck(
+        self,
+        action: str,
+        symbol: str,
+        qty: Decimal,
+        price: Decimal,
+        broker: BrokerGateway,
+        risk: RiskController,
+    ) -> OrderStatus | None:
+        if action in _ENTRY_ACTIONS:
+            position_check = self._entry_position_check(broker, symbol, action)
+            if position_check is None:
+                return self._skip_order(
+                    symbol,
+                    action,
+                    "broker position lookup unavailable immediately before submission",
+                    skip_category="RISK",
+                )
+            if position_check.conflicting_symbol:
+                return self._skip_order(
+                    symbol,
+                    action,
+                    (
+                        f"cross-symbol broker position {position_check.conflicting_symbol} "
+                        "blocks submission"
+                    ),
+                    skip_category="POSITION",
+                )
+            if not self.allow_position_addons and position_check.current_quantity > 0:
+                return self._skip_order(
+                    symbol,
+                    action,
+                    "position appeared immediately before submission while add-ons are disabled",
+                    skip_category="POSITION",
+                )
+
+        risk_result = risk.check()
+        if not risk_result.approved and not self._risk_rejection_allows_action(action, risk):
+            logger.warning(
+                "submission rejected by final risk check for %s %s: %s",
+                action,
+                symbol,
+                risk_result.reason,
+            )
+            return self._skip_order(
+                symbol,
+                action,
+                risk_result.reason,
+                skip_category="RISK",
+            )
+        if not risk_result.approved:
+            logger.info(
+                "allowing position-reducing %s despite final risk rejection: %s",
+                action,
+                risk_result.reason,
+            )
+
+        with self._state_lock:
+            unresolved_order_ids = (
+                sorted(self._pending_orders_by_id)
+                if action in _ENTRY_ACTIONS
+                else []
+            )
+            pending = self._pending_orders.get(symbol)
+        if unresolved_order_ids:
+            return self._skip_order(
+                symbol,
+                action,
+                "live or unresolved broker orders appeared before submission: "
+                + ", ".join(unresolved_order_ids),
+                skip_category="PENDING",
+            )
+        if pending is not None:
+            logger.warning(
+                "submission skipped: pending order %s appeared for %s",
+                pending.broker_order_id,
+                symbol,
+            )
+            return self._skip_order(
+                symbol,
+                action,
+                "pending order appeared before submission",
+                skip_category="PENDING",
+            )
+        if action in _POSITION_REDUCING_ACTIONS:
+            position_issue = self._final_reduction_position_issue(
+                broker,
+                symbol,
+                action,
+                qty,
+            )
+            if position_issue is not None:
+                return self._pause_for_final_position_uncertainty(
+                    symbol,
+                    action,
+                    position_issue,
+                    risk,
+                )
+        if self._final_order_quote_check is not None:
+            try:
+                quote_issue = self._final_order_quote_check(
+                    broker,
+                    symbol,
+                    action,
+                    price,
+                )
+            except Exception:
+                logger.exception(
+                    "final quote validation failed for %s %s",
+                    action,
+                    symbol,
+                )
+                quote_issue = "fresh executable quote could not be verified"
+            if quote_issue:
+                return self._skip_order(
+                    symbol,
+                    action,
+                    quote_issue,
+                    skip_category="RISK",
+                )
+        return None
+
+    @staticmethod
+    def _final_reduction_position_issue(
+        broker: BrokerGateway,
+        symbol: str,
+        action: str,
+        requested_quantity: Decimal,
+    ) -> str | None:
+        expected_side = "LONG" if action == "SELL" else "SHORT"
+        position_reader = getattr(broker, "get_positions", None)
+        if not callable(position_reader):
+            return "broker position lookup is unavailable immediately before submission"
+        try:
+            positions = cast("list[object]", position_reader())
+        except Exception as exc:
+            logger.error(
+                "%s: final broker position lookup failed for %s: %s",
+                action,
+                symbol,
+                exc,
+            )
+            return "broker position lookup failed immediately before submission"
+
+        target_sides: set[str] = set()
+        total_quantity = Decimal("0")
+        total_available = Decimal("0")
+        try:
+            for position in positions:
+                if str(getattr(position, "symbol", "")).upper() != symbol.upper():
+                    continue
+                position_quantity = Decimal(str(getattr(position, "quantity", 0)))
+                if not position_quantity.is_finite() or position_quantity < 0:
+                    return "broker returned an invalid target position quantity"
+                if position_quantity == 0:
+                    continue
+                position_side = str(getattr(position, "side", "")).upper()
+                target_sides.add(position_side)
+                raw_available = getattr(position, "available_quantity", None)
+                available_quantity = (
+                    position_quantity
+                    if raw_available is None
+                    else Decimal(str(raw_available))
+                )
+                if (
+                    not available_quantity.is_finite()
+                    or available_quantity < 0
+                    or available_quantity > position_quantity
+                ):
+                    return "broker returned an invalid available position quantity"
+                total_quantity += position_quantity
+                total_available += available_quantity
+        except Exception:
+            return "broker position data could not be validated immediately before submission"
+
+        if target_sides != {expected_side}:
+            actual_sides = ", ".join(sorted(target_sides)) or "FLAT"
+            return (
+                f"expected {expected_side} position for reduce-only {action}, "
+                f"broker reported {actual_sides}"
+            )
+        if total_quantity < requested_quantity:
+            return (
+                f"broker position quantity {total_quantity} is below requested "
+                f"reduce-only quantity {requested_quantity}"
+            )
+        if total_available != requested_quantity:
+            return (
+                f"broker available quantity changed from requested "
+                f"{requested_quantity} to {total_available}"
+            )
+        return None
+
+    def _pause_for_final_position_uncertainty(
+        self,
+        symbol: str,
+        action: str,
+        detail: str,
+        risk: RiskController,
+    ) -> OrderStatus:
+        reason = (
+            f"{ORDER_EXECUTION_BLOCKED_PREFIX} cannot prove reduce-only {action} "
+            f"position for {symbol}: {detail}"
+        )
+        risk.pause(reason, auto_resumable=False)
+        try:
+            self._record_risk_event(reason)
+        except Exception:
+            logger.exception(
+                "failed to record final position validation failure for %s %s",
+                action,
+                symbol,
+            )
+        return self._skip_order(
+            symbol,
+            action,
+            reason,
+            skip_category="RISK",
+        )
+
+    def _submit_limit_order_after_precheck(
+        self,
+        action: str,
+        symbol: str,
+        side: str,
+        qty: Decimal,
+        price: Decimal,
+        broker: BrokerGateway,
+        risk: RiskController,
+        notifier: "NotifierInterface",
+        *,
+        engine_snapshot: EngineSnapshot | None = None,
+        restore_engine_snapshot: Callable[[EngineSnapshot], None] | None = None,
+        notify_risk_event: _NotifyRiskEvent | None = None,
+        avg_price: Decimal | None = None,
+    ) -> OrderStatus | None:
         result = broker.submit_limit_order(symbol, side, qty, price)
         status = getattr(result, "status", "SUBMITTED")
+        order_status = self._order_status_from_submit_result(result)
+        initial_executed_quantity = self._resolved_decimal(
+            order_status,
+            "executed_quantity",
+            Decimal("0"),
+        )
+        initial_executed_price = self._resolved_decimal(
+            order_status,
+            "executed_price",
+            Decimal("0"),
+        )
+        initial_execution_at = (
+            datetime.now(timezone.utc)
+            if str(status).upper() == "FILLED" or initial_executed_quantity > 0
+            else None
+        )
         try:
             self._persist_submitted_order(
-                result.broker_order_id, symbol, action, float(qty), float(price), status
+                result.broker_order_id,
+                symbol,
+                action,
+                float(qty),
+                float(price),
+                status,
+                filled_at=initial_execution_at,
+                executed_quantity=(
+                    float(initial_executed_quantity)
+                    if initial_executed_quantity > 0
+                    else None
+                ),
+                executed_price=(
+                    float(initial_executed_price)
+                    if initial_executed_price > 0
+                    else None
+                ),
             )
         except OrderPersistenceError:
             return self._recover_from_missing_order_record(
                 result,
                 broker,
                 risk,
+                action=action,
+                notifier=notifier,
                 notify_risk_event=notify_risk_event,
                 engine_snapshot=engine_snapshot,
                 restore_engine_snapshot=restore_engine_snapshot,
+                avg_price=avg_price,
             )
-        order_status = self._order_status_from_submit_result(result)
         self._safe_update_order_status_from_result(order_status)
 
         if self._order_status_is_live(order_status):
@@ -895,9 +1711,12 @@ class TradeExecutionService:
                     result,
                     broker,
                     risk,
+                    action=action,
+                    notifier=notifier,
                     notify_risk_event=notify_risk_event,
                     engine_snapshot=engine_snapshot,
                     restore_engine_snapshot=restore_engine_snapshot,
+                    avg_price=avg_price,
                 )
             logger.info("%s pending: %s status=%s", action, result.broker_order_id, order_status.status)
             return order_status
@@ -951,21 +1770,69 @@ class TradeExecutionService:
             restore_engine_snapshot_fn=restore_engine_snapshot_fn,
         )
         with self._state_lock:
-            existing = self._pending_orders.get(pending.symbol)
-            if existing is not None:
+            existing_by_id = self._pending_orders_by_id.get(
+                pending.broker_order_id
+            )
+            conflicting_orders = [
+                existing
+                for existing in self._pending_orders_by_id.values()
+                if existing.broker_order_id != pending.broker_order_id
+                and existing.symbol.upper() == pending.symbol.upper()
+            ]
+            if conflicting_orders:
+                existing = conflicting_orders[0]
                 raise OrderPersistenceError(
                     f"pending order {existing.broker_order_id} already tracked for {pending.symbol}; "
                     f"cannot track new order {pending.broker_order_id}"
                 )
-            self._pending_orders[pending.symbol] = pending
+            if existing_by_id is not None:
+                if existing_by_id.symbol.upper() != pending.symbol.upper():
+                    raise OrderPersistenceError(
+                        f"pending order {pending.broker_order_id} is already tracked for "
+                        f"{existing_by_id.symbol}; cannot merge symbol {pending.symbol}"
+                    )
+                pending = _PendingOrder(
+                    broker=pending.broker,
+                    broker_order_id=pending.broker_order_id,
+                    symbol=pending.symbol,
+                    action=pending.action or existing_by_id.action,
+                    quantity=pending.quantity,
+                    price=pending.price,
+                    engine_snapshot=(
+                        pending.engine_snapshot
+                        if pending.engine_snapshot is not None
+                        else existing_by_id.engine_snapshot
+                    ),
+                    avg_price=(
+                        pending.avg_price
+                        if pending.avg_price is not None
+                        else existing_by_id.avg_price
+                    ),
+                    next_status_check_at=pending.next_status_check_at,
+                    submitted_at=(
+                        existing_by_id.submitted_at
+                        if existing_by_id.submitted_at > 0
+                        else pending.submitted_at
+                    ),
+                    restore_engine_snapshot_fn=(
+                        pending.restore_engine_snapshot_fn
+                        if pending.restore_engine_snapshot_fn is not None
+                        else existing_by_id.restore_engine_snapshot_fn
+                    ),
+                    timeout_recovery_attempted=(
+                        existing_by_id.timeout_recovery_attempted
+                        or pending.timeout_recovery_attempted
+                    ),
+                )
+            self._pending_orders_by_id[pending.broker_order_id] = pending
+            self._rebuild_pending_orders_by_symbol_locked()
 
     def _clear_pending_order(self, order_id: str) -> None:
         with self._state_lock:
-            for symbol, pending in list(self._pending_orders.items()):
-                if pending.broker_order_id == order_id:
-                    del self._pending_orders[symbol]
-                    self._pending_status_query_warned_ids.discard(order_id)
-                    return
+            removed = self._pending_orders_by_id.pop(order_id, None)
+            if removed is not None:
+                self._rebuild_pending_orders_by_symbol_locked()
+                self._pending_status_query_warned_ids.discard(order_id)
 
     def _defer_pending_status_retry(self, pending: _PendingOrder, now: float) -> None:
         updated_pending = _PendingOrder(
@@ -980,11 +1847,12 @@ class TradeExecutionService:
             next_status_check_at=now + self._order_status_poll_interval_seconds,
             submitted_at=pending.submitted_at,
             restore_engine_snapshot_fn=pending.restore_engine_snapshot_fn,
+            timeout_recovery_attempted=pending.timeout_recovery_attempted,
         )
         with self._state_lock:
-            current = self._pending_orders.get(updated_pending.symbol)
-            if current is not None and current.broker_order_id == updated_pending.broker_order_id:
-                self._pending_orders[updated_pending.symbol] = updated_pending
+            if updated_pending.broker_order_id in self._pending_orders_by_id:
+                self._pending_orders_by_id[updated_pending.broker_order_id] = updated_pending
+                self._rebuild_pending_orders_by_symbol_locked()
 
     def _reconcile_pending_order(
         self,
@@ -1001,6 +1869,7 @@ class TradeExecutionService:
         if (
             self._order_status_timeout_seconds > 0
             and now - pending.submitted_at >= self._order_status_timeout_seconds
+            and not pending.timeout_recovery_attempted
         ):
             self._handle_pending_order_timeout(
                 pending,
@@ -1050,13 +1919,23 @@ class TradeExecutionService:
             next_status_check_at=now + self._order_status_poll_interval_seconds,
             submitted_at=pending.submitted_at,
             restore_engine_snapshot_fn=pending.restore_engine_snapshot_fn,
+            timeout_recovery_attempted=pending.timeout_recovery_attempted,
         )
         with self._state_lock:
-            self._pending_orders[updated_pending.symbol] = updated_pending
+            self._pending_orders_by_id[updated_pending.broker_order_id] = updated_pending
+            self._rebuild_pending_orders_by_symbol_locked()
             self._pending_status_query_warned_ids.discard(updated_pending.broker_order_id)
 
-        self._safe_update_order_status_from_result(order_status)
+        status_persisted = self._safe_update_order_status_from_result(order_status)
         status = order_status.status
+        if status in {"FILLED", *_FAILED_ORDER_STATUSES} and not status_persisted:
+            self._pause_for_order_status_persistence_failure(
+                updated_pending,
+                status,
+                risk=risk,
+                notify_risk_event=notify_risk_event,
+            )
+            return
         if status == "FILLED":
             self._finalize_pending_fill(updated_pending, order_status, risk=risk, notifier=notifier, notify_risk_event=notify_risk_event)
             self._clear_pending_order(updated_pending.broker_order_id)
@@ -1085,15 +1964,35 @@ class TradeExecutionService:
         restore_engine_snapshot: Callable[[EngineSnapshot], None] | None = None,
         notify_risk_event: _NotifyRiskEvent | None = None,
     ) -> None:
+        pending = dataclass_replace(pending, timeout_recovery_attempted=True)
+        with self._state_lock:
+            if pending.broker_order_id in self._pending_orders_by_id:
+                self._pending_orders_by_id[pending.broker_order_id] = pending
+                self._rebuild_pending_orders_by_symbol_locked()
         effective_restore = pending.restore_engine_snapshot_fn or restore_engine_snapshot
-        reason = f"pending order {pending.broker_order_id} timed out after {self._order_status_timeout_seconds:.0f}s"
+        reason = (
+            "ORDER_RECONCILIATION_UNCERTAIN: pending order "
+            f"{pending.broker_order_id} timed out after "
+            f"{self._order_status_timeout_seconds:.0f}s"
+        )
         logger.warning(reason)
         try:
             order_status = self._coerce_order_status(
                 pending.broker.get_order_status(pending.broker_order_id),
                 pending.broker_order_id,
             )
-            self._safe_update_order_status_from_result(order_status)
+            status_persisted = self._safe_update_order_status_from_result(order_status)
+            if (
+                order_status.status in {"FILLED", *_FAILED_ORDER_STATUSES}
+                and not status_persisted
+            ):
+                self._pause_for_order_status_persistence_failure(
+                    pending,
+                    order_status.status,
+                    risk=risk,
+                    notify_risk_event=notify_risk_event,
+                )
+                return
             if order_status.status == "FILLED":
                 self._finalize_pending_fill(pending, order_status, risk=risk, notifier=notifier, notify_risk_event=notify_risk_event)
                 self._clear_pending_order(pending.broker_order_id)
@@ -1110,7 +2009,13 @@ class TradeExecutionService:
                         notify_risk_event=notify_risk_event,
                     )
                 else:
-                    self._pause_after_failed_order(pending.broker_order_id, order_status.status, risk, notify_risk_event)
+                    self._pause_after_timed_out_terminal_order(
+                        pending.broker_order_id,
+                        order_status.status,
+                        reason,
+                        risk,
+                        notify_risk_event,
+                    )
                 self._clear_pending_order(pending.broker_order_id)
                 if (
                     fill_qty == 0
@@ -1130,19 +2035,50 @@ class TradeExecutionService:
         try:
             cancel_result = pending.broker.cancel_order(pending.broker_order_id)
             cancel_status = self._coerce_order_status(cancel_result, pending.broker_order_id)
-            self._safe_update_order_status_from_result(cancel_status)
+            cancel_persisted = self._safe_update_order_status_from_result(cancel_status)
+            if (
+                cancel_status.status in {"FILLED", *_FAILED_ORDER_STATUSES}
+                and not cancel_persisted
+            ):
+                self._pause_for_order_status_persistence_failure(
+                    pending,
+                    cancel_status.status,
+                    risk=risk,
+                    notify_risk_event=notify_risk_event,
+                )
+                return
             if cancel_status.status == "FILLED":
                 # Order filled between status check and cancel attempt
                 self._finalize_pending_fill(pending, cancel_status, risk=risk, notifier=notifier, notify_risk_event=notify_risk_event)
                 self._clear_pending_order(pending.broker_order_id)
                 return
             fill_qty = OrderStatus._positive(cancel_status.executed_quantity)
-            if fill_qty > 0:
+            if cancel_status.status in _FAILED_ORDER_STATUSES:
                 # Partial fill before cancel — finalize the partial fill
-                self._finalize_pending_fill(pending, cancel_status, risk=risk, notifier=notifier, fill_qty=fill_qty, notify_risk_event=notify_risk_event)
+                if fill_qty > 0:
+                    self._finalize_pending_fill(
+                        pending,
+                        cancel_status,
+                        risk=risk,
+                        notifier=notifier,
+                        fill_qty=fill_qty,
+                        notify_risk_event=notify_risk_event,
+                    )
+                else:
+                    self._pause_after_timed_out_terminal_order(
+                        pending.broker_order_id,
+                        cancel_status.status,
+                        reason,
+                        risk,
+                        notify_risk_event,
+                    )
                 cancel_finalized = True
                 self._clear_pending_order(pending.broker_order_id)
-                if self._should_restore_after_partial_terminal_fill(pending, fill_qty) and effective_restore is not None and pending.engine_snapshot is not None:
+                if (
+                    (fill_qty == 0 or self._should_restore_after_partial_terminal_fill(pending, fill_qty))
+                    and effective_restore is not None
+                    and pending.engine_snapshot is not None
+                ):
                     effective_restore(pending.engine_snapshot)
                 return
         except Exception as exc:
@@ -1154,20 +2090,59 @@ class TradeExecutionService:
                     pending.broker.get_order_status(pending.broker_order_id),
                     pending.broker_order_id,
                 )
-                recovery_qty = self._resolved_decimal(recovery_status, "executed_quantity", Decimal("0"))
-                if recovery_qty > 0:
-                    self._finalize_pending_fill(
+                recovery_persisted = self._safe_update_order_status_from_result(
+                    recovery_status
+                )
+                if (
+                    recovery_status.status in {"FILLED", *_FAILED_ORDER_STATUSES}
+                    and not recovery_persisted
+                ):
+                    self._pause_for_order_status_persistence_failure(
                         pending,
-                        recovery_status,
+                        recovery_status.status,
                         risk=risk,
-                        notifier=notifier,
-                        fill_qty=recovery_qty,
                         notify_risk_event=notify_risk_event,
                     )
+                    return
+                recovery_qty = self._resolved_decimal(recovery_status, "executed_quantity", Decimal("0"))
+                if recovery_status.status == "FILLED" or recovery_status.status in _FAILED_ORDER_STATUSES:
+                    if recovery_qty > 0:
+                        self._finalize_pending_fill(
+                            pending,
+                            recovery_status,
+                            risk=risk,
+                            notifier=notifier,
+                            fill_qty=recovery_qty,
+                            notify_risk_event=notify_risk_event,
+                        )
+                    elif recovery_status.status in _FAILED_ORDER_STATUSES:
+                        self._pause_after_timed_out_terminal_order(
+                            pending.broker_order_id,
+                            recovery_status.status,
+                            reason,
+                            risk,
+                            notify_risk_event,
+                        )
+                    else:
+                        # FILLED without a broker quantity uses the submitted
+                        # quantity, matching the normal terminal-fill path.
+                        self._finalize_pending_fill(
+                            pending,
+                            recovery_status,
+                            risk=risk,
+                            notifier=notifier,
+                            notify_risk_event=notify_risk_event,
+                        )
                     cancel_finalized = True
                     self._clear_pending_order(pending.broker_order_id)
                     if (
-                        self._should_restore_after_partial_terminal_fill(pending, recovery_qty)
+                        recovery_status.status != "FILLED"
+                        and (
+                            recovery_qty == 0
+                            or self._should_restore_after_partial_terminal_fill(
+                                pending, recovery_qty
+                            )
+                        )
                         and effective_restore is not None
                         and pending.engine_snapshot is not None
                     ):
@@ -1180,7 +2155,6 @@ class TradeExecutionService:
                     exc,
                 )
 
-        self._safe_update_order_status(pending.broker_order_id, _SKIPPED_ORDER_STATUS)
         if risk is not None:
             risk.pause(reason, auto_resumable=False)
         try:
@@ -1193,9 +2167,9 @@ class TradeExecutionService:
             except Exception:
                 logger.exception("failed to send pending-order timeout notification for %s", pending.broker_order_id)
 
-        self._clear_pending_order(pending.broker_order_id)
-        if effective_restore is not None and pending.engine_snapshot is not None:
-            effective_restore(pending.engine_snapshot)
+        # Broker truth is still unknown. Keep the live order tracked and leave
+        # its engine transition intact so no replacement order can be emitted.
+        self._defer_pending_status_retry(pending, time.monotonic())
 
     def _finalize_pending_fill(
         self,
@@ -1207,9 +2181,57 @@ class TradeExecutionService:
         fill_qty: Decimal | None = None,
         notify_risk_event: _NotifyRiskEvent | None = None,
     ) -> None:
+        order_id = str(pending.broker_order_id or "")
+        if not order_id:
+            self._finalize_pending_fill_once(
+                pending,
+                order_status,
+                risk=risk,
+                notifier=notifier,
+                fill_qty=fill_qty,
+                notify_risk_event=notify_risk_event,
+            )
+            return
+
+        with self._state_lock:
+            if order_id in self._finalized_order_ids:
+                logger.debug("fill already finalized for order %s", order_id)
+                return
+            if order_id in self._fill_finalization_in_flight:
+                logger.debug("fill finalization already in flight for order %s", order_id)
+                return
+            self._fill_finalization_in_flight.add(order_id)
+
+        try:
+            self._finalize_pending_fill_once(
+                pending,
+                order_status,
+                risk=risk,
+                notifier=notifier,
+                fill_qty=fill_qty,
+                notify_risk_event=notify_risk_event,
+            )
+        except BaseException:
+            with self._state_lock:
+                self._fill_finalization_in_flight.discard(order_id)
+            raise
+        else:
+            with self._state_lock:
+                self._fill_finalization_in_flight.discard(order_id)
+                self._finalized_order_ids.add(order_id)
+
+    def _finalize_pending_fill_once(
+        self,
+        pending: _PendingOrder,
+        order_status: OrderStatus,
+        *,
+        risk: RiskController | None = None,
+        notifier: "NotifierInterface | None" = None,
+        fill_qty: Decimal | None = None,
+        notify_risk_event: _NotifyRiskEvent | None = None,
+    ) -> None:
         fill_price = self._resolved_decimal(order_status, "executed_price", pending.price)
         fill_qty = fill_qty if fill_qty is not None else self._resolved_decimal(order_status, "executed_quantity", pending.quantity)
-        self._mark_fill_processed(pending.symbol)
         if pending.action == "SELL":
             avg_price = self._resolve_avg_price_for_exit(pending.symbol, pending.avg_price if pending.avg_price is not None and pending.avg_price > 0 else None, fill_qty)
             self._safe_notify_order(notifier, "SELL", pending.symbol, str(fill_qty), str(fill_price), pending.broker_order_id)
@@ -1221,6 +2243,8 @@ class TradeExecutionService:
             else:
                 logger.warning("SELL filled with avg_price=0 for %s, skipping PnL recording to avoid inflated risk", pending.symbol)
             self._consume_entry_quantity(pending.symbol, fill_qty)
+            self._mark_fill_processed(pending.symbol)
+            self._notify_reduction_fill(pending.symbol, pending.action, fill_qty)
             return
         if pending.action == "BUY_TO_COVER":
             avg_price = self._resolve_avg_price_for_exit(pending.symbol, pending.avg_price if pending.avg_price is not None and pending.avg_price > 0 else None, fill_qty)
@@ -1233,11 +2257,27 @@ class TradeExecutionService:
             else:
                 logger.warning("BUY_TO_COVER filled with avg_price=0 for %s, skipping PnL recording to avoid inflated risk", pending.symbol)
             self._consume_entry_quantity(pending.symbol, fill_qty)
+            self._mark_fill_processed(pending.symbol)
+            self._notify_reduction_fill(pending.symbol, pending.action, fill_qty)
             return
         self._safe_notify_order(notifier, pending.action, pending.symbol, str(fill_qty), str(fill_price), pending.broker_order_id)
         if pending.action in {"BUY", "SELL_SHORT"}:
-            self._record_entry_price(pending.symbol, fill_price, fill_qty)
+            self._record_entry_price(
+                pending.symbol,
+                fill_price,
+                fill_qty,
+                side="SHORT" if pending.action == "SELL_SHORT" else "LONG",
+            )
+        self._mark_fill_processed(pending.symbol)
         logger.info("%s filled: %s qty=%s price=%s", pending.action, pending.symbol, fill_qty, fill_price)
+
+    def _notify_reduction_fill(self, symbol: str, action: str, fill_qty: Decimal) -> None:
+        if self._on_reduction_fill is None:
+            return
+        try:
+            self._on_reduction_fill(symbol, action, fill_qty)
+        except Exception:
+            logger.exception("failed to finalize reduction fill for %s %s", action, symbol)
 
     def _mark_fill_processed(self, symbol: str) -> None:
         if self._on_fill is None:
@@ -1249,13 +2289,11 @@ class TradeExecutionService:
 
     @staticmethod
     def _should_restore_after_partial_terminal_fill(pending: _PendingOrder, fill_qty: Decimal) -> bool:
-        # Entry orders (BUY / SELL_SHORT) that partial-fill then go terminal
-        # leave the engine in LONG/SHORT with a tracked qty smaller than
-        # requested — restoring the snapshot keeps the strategy consistent
-        # with the broker position. Exit orders (SELL / BUY_TO_COVER) only
-        # need restore when fill < requested (otherwise full exit succeeded).
+        # A partially-filled entry owns a real position, so its transitioned
+        # LONG/SHORT state must remain. A partially-filled exit leaves shares
+        # behind and therefore restores the pre-submit LONG/SHORT snapshot.
         if pending.action in {"BUY", "SELL_SHORT"}:
-            return fill_qty < pending.quantity
+            return False
         return pending.action in {"SELL", "BUY_TO_COVER"} and fill_qty < pending.quantity
 
     def _handle_terminal_fill_result(
@@ -1300,7 +2338,7 @@ class TradeExecutionService:
         risk: RiskController | None = None,
         notify_risk_event: _NotifyRiskEvent | None = None,
     ) -> None:
-        reason = f"order {order_id} ended with status {status}"
+        reason = f"{ORDER_EXECUTION_BLOCKED_PREFIX} order {order_id} ended with status {status}"
         if risk is not None:
             risk.pause(reason)
         try:
@@ -1313,6 +2351,31 @@ class TradeExecutionService:
             except Exception:
                 logger.exception("failed to send order failure notification for %s", order_id)
 
+    def _pause_after_timed_out_terminal_order(
+        self,
+        order_id: str,
+        status: str,
+        timeout_reason: str,
+        risk: RiskController | None,
+        notify_risk_event: _NotifyRiskEvent | None,
+    ) -> None:
+        detail = timeout_reason.split(":", 1)[-1].strip()
+        reason = (
+            f"{ORDER_EXECUTION_BLOCKED_PREFIX} {detail}; "
+            f"terminal status {status}"
+        )
+        if risk is not None:
+            risk.pause(reason, auto_resumable=False)
+        try:
+            self._record_risk_event(reason)
+        except Exception:
+            logger.exception("failed to record timed-out order %s", order_id)
+        if notify_risk_event is not None:
+            try:
+                notify_risk_event("ORDER_TIMEOUT", reason)
+            except Exception:
+                logger.exception("failed to send timeout notification for %s", order_id)
+
     @staticmethod
     def _resolved_decimal(item: object, name: str, fallback: Decimal) -> Decimal:
         value = getattr(item, name, Decimal("0"))
@@ -1322,9 +2385,31 @@ class TradeExecutionService:
             return fallback
         return decimal_value if decimal_value > 0 else fallback
 
-    def _persist_submitted_order(self, order_id: str, symbol: str, action: str, qty: float, price: float, status: str = "SUBMITTED") -> None:
+    def _persist_submitted_order(
+        self,
+        order_id: str,
+        symbol: str,
+        action: str,
+        qty: float,
+        price: float,
+        status: str = "SUBMITTED",
+        *,
+        filled_at: datetime | None = None,
+        executed_quantity: float | None = None,
+        executed_price: float | None = None,
+    ) -> None:
         try:
-            self._record_order(order_id, symbol, action, qty, price, status)
+            self._record_order(
+                order_id,
+                symbol,
+                action,
+                qty,
+                price,
+                status,
+                filled_at,
+                executed_quantity,
+                executed_price,
+            )
         except Exception as exc:
             logger.exception("failed to record order %s for %s", order_id, symbol)
             raise OrderPersistenceError(f"failed to persist order {order_id}") from exc
@@ -1335,18 +2420,27 @@ class TradeExecutionService:
         broker: BrokerGateway,
         risk: RiskController,
         *,
+        action: str | None = None,
+        notifier: "NotifierInterface | None" = None,
         notify_risk_event: _NotifyRiskEvent | None = None,
         engine_snapshot: EngineSnapshot | None = None,
         restore_engine_snapshot: Callable[[EngineSnapshot], None] | None = None,
+        avg_price: Decimal | None = None,
     ) -> OrderStatus:
-        reason = f"order {result.broker_order_id} submitted but local record failed"
+        reason = (
+            f"{ORDER_PERSISTENCE_UNCERTAIN_PREFIX} order {result.broker_order_id} "
+            "submitted but local record failed"
+        )
         logger.error(reason)
-        cancel_failed = False
+        resolved_action = str(action or result.side).upper()
+        cancel_status: OrderStatus | None = None
         if self._order_status_is_live(result):
             try:
-                broker.cancel_order(result.broker_order_id)
+                cancel_status = self._coerce_order_status(
+                    broker.cancel_order(result.broker_order_id),
+                    result.broker_order_id,
+                )
             except Exception:
-                cancel_failed = True
                 logger.exception("failed to cancel orphan order %s after persistence failure", result.broker_order_id)
         risk.pause(reason, auto_resumable=False)
         try:
@@ -1358,18 +2452,105 @@ class TradeExecutionService:
                 notify_risk_event("ORDER_PERSISTENCE_FAILED", reason)
             except Exception:
                 logger.exception("failed to send orphan-order notification for %s", result.broker_order_id)
-        if restore_engine_snapshot is not None and engine_snapshot is not None:
-            restore_engine_snapshot(engine_snapshot)
-        if cancel_failed:
-            # The order is live on the broker and we could not cancel it.
-            # Surface the persistence gap so the caller (and operators) see
-            # the inconsistency instead of silently returning a REJECTED
-            # status that would let the system proceed as if the order never
-            # existed.
-            raise OrderPersistenceError(
-                f"order {result.broker_order_id} live on broker and cancel failed: {reason}"
+        pending = _PendingOrder(
+            broker=broker,
+            broker_order_id=result.broker_order_id,
+            symbol=result.symbol,
+            action=resolved_action,
+            quantity=result.quantity,
+            price=result.price,
+            engine_snapshot=engine_snapshot,
+            avg_price=avg_price,
+            next_status_check_at=time.monotonic() + self._order_status_poll_interval_seconds,
+            submitted_at=time.monotonic(),
+            restore_engine_snapshot_fn=restore_engine_snapshot,
+        )
+
+        if cancel_status is not None:
+            fill_qty = OrderStatus._positive(cancel_status.executed_quantity)
+            if cancel_status.status in {"FILLED", *_FAILED_ORDER_STATUSES}:
+                if not self._ensure_recovered_terminal_order_record(
+                    result,
+                    resolved_action,
+                    cancel_status,
+                ):
+                    with self._state_lock:
+                        self._pending_orders_by_id.setdefault(
+                            pending.broker_order_id,
+                            pending,
+                        )
+                        self._rebuild_pending_orders_by_symbol_locked()
+                    return OrderStatus(
+                        result.broker_order_id,
+                        "SUBMITTED",
+                        reason=reason,
+                    )
+            if cancel_status.status == "FILLED" or (
+                cancel_status.status in _FAILED_ORDER_STATUSES and fill_qty > 0
+            ):
+                finalized_fill_qty = fill_qty or pending.quantity
+                self._finalize_pending_fill(
+                    pending,
+                    cancel_status,
+                    risk=risk,
+                    notifier=notifier,
+                    fill_qty=finalized_fill_qty,
+                    notify_risk_event=notify_risk_event,
+                )
+                if (
+                    self._should_restore_after_partial_terminal_fill(
+                        pending,
+                        finalized_fill_qty,
+                    )
+                    and restore_engine_snapshot is not None
+                    and engine_snapshot is not None
+                ):
+                    restore_engine_snapshot(engine_snapshot)
+                return OrderStatus(
+                    broker_order_id=cancel_status.broker_order_id,
+                    status=cancel_status.status,
+                    executed_quantity=cancel_status.executed_quantity,
+                    executed_price=cancel_status.executed_price,
+                    reason=cancel_status.reason,
+                    fill_finalized=True,
+                )
+            if cancel_status.status in _FAILED_ORDER_STATUSES:
+                if restore_engine_snapshot is not None and engine_snapshot is not None:
+                    restore_engine_snapshot(engine_snapshot)
+                return OrderStatus(
+                    result.broker_order_id,
+                    cancel_status.status,
+                    reason=reason,
+                )
+
+        # No explicit terminal broker result: retain an in-memory unresolved
+        # order and the transitioned engine state. The operational pause is
+        # persisted by the runner and blocks automatic resubmission.
+        with self._state_lock:
+            self._pending_orders_by_id.setdefault(pending.broker_order_id, pending)
+            self._rebuild_pending_orders_by_symbol_locked()
+        return OrderStatus(result.broker_order_id, "SUBMITTED", reason=reason)
+
+    def _ensure_recovered_terminal_order_record(
+        self,
+        result: OrderResult,
+        action: str,
+        terminal_status: OrderStatus,
+    ) -> bool:
+        if self._safe_update_order_status_from_result(terminal_status):
+            return True
+        try:
+            self._persist_submitted_order(
+                result.broker_order_id,
+                result.symbol,
+                action,
+                float(result.quantity),
+                float(result.price),
+                "SUBMITTED",
             )
-        return OrderStatus(result.broker_order_id, "REJECTED", reason=reason)
+        except OrderPersistenceError:
+            return False
+        return self._safe_update_order_status_from_result(terminal_status)
 
     def _safe_update_order_status(
         self,
@@ -1378,27 +2559,69 @@ class TradeExecutionService:
         filled_at: datetime | None = None,
         executed_quantity: float | None = None,
         executed_price: float | None = None,
-    ) -> None:
+    ) -> bool:
         try:
             self._update_order_status(order_id, status, filled_at, executed_quantity, executed_price)
         except Exception:
             logger.exception("failed to update order %s to status %s", order_id, status)
+            return False
+        return True
 
-    def _safe_update_order_status_from_result(self, result: object) -> None:
+    def _safe_update_order_status_from_result(self, result: object) -> bool:
         status = getattr(result, "status", "SUBMITTED")
         if status == "SUBMITTED":
-            return
+            return True
         broker_order_id = getattr(result, "broker_order_id", None)
         executed_quantity = getattr(result, "executed_quantity", None)
         executed_price = getattr(result, "executed_price", None)
-        filled_at = datetime.now(timezone.utc) if status == "FILLED" else None
-        self._safe_update_order_status(
+        resolved_quantity = self._resolved_decimal(
+            result,
+            "executed_quantity",
+            Decimal("0"),
+        )
+        filled_at = (
+            datetime.now(timezone.utc)
+            if status == "FILLED" or resolved_quantity > 0
+            else None
+        )
+        return self._safe_update_order_status(
             broker_order_id or "",
             status,
             filled_at,
             float(executed_quantity) if executed_quantity is not None else None,
             float(executed_price) if executed_price is not None else None,
         )
+
+    def _pause_for_order_status_persistence_failure(
+        self,
+        pending: _PendingOrder,
+        status: str,
+        *,
+        risk: RiskController | None,
+        notify_risk_event: _NotifyRiskEvent | None,
+    ) -> None:
+        reason = (
+            f"{ORDER_STATUS_PERSISTENCE_UNCERTAIN_PREFIX} cannot persist terminal "
+            f"status {status} for order {pending.broker_order_id}"
+        )
+        self._defer_pending_status_retry(pending, time.monotonic())
+        if risk is not None:
+            risk.pause(reason, auto_resumable=False)
+        try:
+            self._record_risk_event(reason)
+        except Exception:
+            logger.exception(
+                "failed to record terminal-status persistence risk for %s",
+                pending.broker_order_id,
+            )
+        if notify_risk_event is not None:
+            try:
+                notify_risk_event("ORDER_STATUS_PERSISTENCE_FAILED", reason)
+            except Exception:
+                logger.exception(
+                    "failed to notify terminal-status persistence risk for %s",
+                    pending.broker_order_id,
+                )
 
     @staticmethod
     def _order_status_from_submit_result(result: OrderResult) -> OrderStatus:
@@ -1428,6 +2651,15 @@ class TradeExecutionService:
 
     @staticmethod
     def _coerce_order_status(result: object, default_order_id: str) -> OrderStatus:
+        raw_order_id = getattr(result, "broker_order_id", None)
+        broker_order_id = str(raw_order_id or "").strip()
+        if not broker_order_id:
+            raise ValueError("broker order status response is missing order_id")
+        if broker_order_id != default_order_id:
+            raise ValueError(
+                "broker order status response id mismatch: "
+                f"expected {default_order_id}, got {broker_order_id}"
+            )
         status = getattr(result, "status", "SUBMITTED")
         # Use None (not 0) when the broker did not report a fill. The runner's
         # _update_order_status only overwrites executed_* when the new value
@@ -1450,13 +2682,20 @@ class TradeExecutionService:
         else:
             executed_price = TradeExecutionService._resolved_decimal(result, "executed_price", Decimal("0"))
         return OrderStatus(
-            broker_order_id=str(getattr(result, "broker_order_id", default_order_id)),
+            broker_order_id=broker_order_id,
             status=status,
             executed_quantity=executed_qty,
             executed_price=executed_price,
         )
 
-    def _record_entry_price(self, symbol: str, fill_price: Decimal, fill_qty: Decimal) -> None:
+    def _record_entry_price(
+        self,
+        symbol: str,
+        fill_price: Decimal,
+        fill_qty: Decimal,
+        *,
+        side: str = "LONG",
+    ) -> None:
         if fill_price <= 0 or fill_qty <= 0:
             return
         # Do the whole read-compute-persist-write under a single lock
@@ -1473,6 +2712,7 @@ class TradeExecutionService:
             new_quantity = current_quantity + fill_qty
             new_cost = current_cost + fill_price * fill_qty
             previous_avg = entry.avg_price if entry is not None else Decimal("0")
+            opened_at = entry.opened_at if entry is not None else datetime.now(timezone.utc)
 
             # Persist inside the same critical section. _persist_entry_safe
             # swallows the underlying error so the lock is always
@@ -1488,6 +2728,8 @@ class TradeExecutionService:
                 self._entry_positions[symbol] = entry
             entry.quantity = new_quantity
             entry.cost = new_cost
+            entry.side = str(side or "LONG").upper()
+            entry.opened_at = opened_at
             if previous_avg <= 0:
                 logger.info("entry price recorded for %s: avg=%s qty=%s", symbol, entry.avg_price, entry.quantity)
             else:

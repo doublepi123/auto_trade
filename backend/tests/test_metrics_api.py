@@ -38,7 +38,7 @@ def metrics_db(tmp_path, monkeypatch):
 
 def _make_order(symbol, side, price, qty, hours_ago=1, status="FILLED"):
     return OrderRecord(
-        broker_order_id=f"ord-{side}-{symbol}-{price}-{qty}",
+        broker_order_id=f"ord-{side}-{symbol}-{price}-{qty}-{hours_ago}-{status}",
         symbol=symbol,
         side=side,
         price=price,

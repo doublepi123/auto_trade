@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -14,8 +13,12 @@ from app.api.deps import extract_actor, get_audit_logger
 from app.core.audit import AuditLogger
 from app.core.market_calendar import is_trading_hours, trade_day_for
 from app.database import get_db
-from app.models import OrderRecord
-from app.runner import AppRunner, get_runner
+from app.models import OrderRecord, StrategyConfig
+from app.runner import (
+    PrimarySwitchBlockedError,
+    PrimarySwitchCheckError,
+    get_runner,
+)
 from app.schemas import DiagnosticsResponse, StatusHistoryPoint, StatusHistoryResponse, StatusResponse, StrategyConfigSchema, StrategyMergedSchema, StrategyResponse, TradeSignalMarker
 from app.services.daily_pnl_service import DailyPnlService
 from app.services.runtime_state_service import RuntimeStateService
@@ -27,19 +30,100 @@ logger = logging.getLogger("auto_trade.strategy")
 router = APIRouter(prefix="/api", tags=["strategy"])
 
 
-def _reload_strategy_safely(runner: AppRunner) -> None:
+def _reload_strategy_after_save() -> None:
+    runner = get_runner()
     try:
         runner.reload_strategy()
     except Exception:
-        logger.exception("failed to reload strategy into running engine")
+        pause_preserving_operational = getattr(
+            runner,
+            "pause_for_manual_control",
+            None,
+        )
+        if callable(pause_preserving_operational):
+            pause_preserving_operational("strategy runtime reload failed")
+        else:
+            risk = getattr(runner, "risk", None)
+            if risk is not None:
+                risk.pause("strategy runtime reload failed", auto_resumable=False)
+        raise
 
 
-def _reload_strategy_after_save() -> None:
+def merge_and_validate_strategy_update(
+    current: object,
+    data: dict[str, Any],
+) -> dict[str, Any]:
+    """Merge a partial write with the active config through one validation path."""
+    merged: dict[str, Any] = {}
+    for field_name, field_info in StrategyMergedSchema.model_fields.items():
+        if field_name in data and data[field_name] is not None:
+            merged[field_name] = data[field_name]
+        else:
+            merged[field_name] = getattr(current, field_name, field_info.default)
+    try:
+        return StrategyMergedSchema.model_validate(merged).model_dump()
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+def update_strategy_with_runtime_reload(
+    svc: StrategyService,
+    current: object,
+    data: dict[str, Any],
+) -> tuple[StrategyConfig, dict[str, Any]]:
+    """Validate, persist, and synchronously confirm the live runner update."""
+    merged = merge_and_validate_strategy_update(current, data)
     runner = get_runner()
-    if runner.is_running:
-        threading.Thread(target=_reload_strategy_safely, args=(runner,), daemon=True).start()
-        return
-    _reload_strategy_safely(runner)
+    new_symbol = str(merged["symbol"])
+    new_market = str(merged["market"])
+    old_symbol = str(getattr(current, "symbol", ""))
+    old_market = str(getattr(current, "market", ""))
+    if new_symbol != old_symbol or new_market != old_market:
+        try:
+            runner.assert_primary_switch_safe(new_symbol, new_market)
+        except PrimarySwitchBlockedError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except PrimarySwitchCheckError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    previous = {
+        field_name: getattr(current, field_name, field_info.default)
+        for field_name, field_info in StrategyMergedSchema.model_fields.items()
+    }
+    config, diff = svc.update_config(merged)
+    try:
+        _reload_strategy_after_save()
+    except Exception as exc:
+        logger.exception("failed to confirm strategy update in the live runner; rolling back")
+        rollback_error: Exception | None = None
+        try:
+            svc.update_config(previous)
+            _reload_strategy_after_save()
+        except Exception as rollback_exc:
+            rollback_error = rollback_exc
+            logger.critical("failed to roll back strategy after live reload failure", exc_info=True)
+            try:
+                pause_preserving_operational = getattr(
+                    runner,
+                    "pause_for_manual_control",
+                    None,
+                )
+                if callable(pause_preserving_operational):
+                    pause_preserving_operational(
+                        "strategy reload and rollback failed"
+                    )
+                else:
+                    runner.risk.pause(
+                        "strategy reload and rollback failed",
+                        auto_resumable=False,
+                    )
+            except Exception:
+                logger.critical("failed to pause runner after strategy reload failure", exc_info=True)
+        detail = "strategy saved state could not be activated and was rolled back"
+        if rollback_error is not None:
+            detail = "strategy activation failed and rollback could not be confirmed; trading paused"
+        raise HTTPException(status_code=503, detail=detail) from exc
+    return config, diff
 
 
 @router.get("/strategy", response_model=StrategyResponse, dependencies=[Depends(require_api_key())])
@@ -63,32 +147,7 @@ def put_strategy(
         svc = StrategyService(db)
         current = svc.get_config()
         data = payload.model_dump(exclude_unset=True)
-        merged = {
-            "symbol": data["symbol"] if "symbol" in data and data["symbol"] is not None else current.symbol,
-            "market": data["market"] if "market" in data and data["market"] is not None else current.market,
-            "buy_low": data["buy_low"] if "buy_low" in data and data["buy_low"] is not None else current.buy_low,
-            "sell_high": data["sell_high"] if "sell_high" in data and data["sell_high"] is not None else current.sell_high,
-            "short_selling": data["short_selling"] if "short_selling" in data and data["short_selling"] is not None else current.short_selling,
-            "min_profit_amount": data["min_profit_amount"] if "min_profit_amount" in data and data["min_profit_amount"] is not None else current.min_profit_amount,
-            "auto_resume_minutes": data["auto_resume_minutes"] if "auto_resume_minutes" in data and data["auto_resume_minutes"] is not None else current.auto_resume_minutes,
-            "max_daily_loss": data["max_daily_loss"] if "max_daily_loss" in data and data["max_daily_loss"] is not None else current.max_daily_loss,
-            "max_consecutive_losses": data["max_consecutive_losses"] if "max_consecutive_losses" in data and data["max_consecutive_losses"] is not None else current.max_consecutive_losses,
-            "llm_interval_minutes": data["llm_interval_minutes"] if "llm_interval_minutes" in data and data["llm_interval_minutes"] is not None else current.llm_interval_minutes,
-            "fee_rate_us": data["fee_rate_us"] if "fee_rate_us" in data and data["fee_rate_us"] is not None else current.fee_rate_us,
-            "fee_rate_hk": data["fee_rate_hk"] if "fee_rate_hk" in data and data["fee_rate_hk"] is not None else current.fee_rate_hk,
-            "min_repricing_pct": data["min_repricing_pct"] if "min_repricing_pct" in data and data["min_repricing_pct"] is not None else current.min_repricing_pct,
-            "llm_action_cooldown_seconds": data["llm_action_cooldown_seconds"] if "llm_action_cooldown_seconds" in data and data["llm_action_cooldown_seconds"] is not None else current.llm_action_cooldown_seconds,
-            "trading_session_mode": data["trading_session_mode"] if "trading_session_mode" in data and data["trading_session_mode"] is not None else getattr(current, "trading_session_mode", "ANY"),
-            "margin_safety_factor": data["margin_safety_factor"] if "margin_safety_factor" in data and data["margin_safety_factor"] is not None else getattr(current, "margin_safety_factor", None),
-            "report_schedule_enabled": data["report_schedule_enabled"] if "report_schedule_enabled" in data and data["report_schedule_enabled"] is not None else getattr(current, "report_schedule_enabled", False),
-            "report_schedule_interval_hours": data["report_schedule_interval_hours"] if "report_schedule_interval_hours" in data and data["report_schedule_interval_hours"] is not None else getattr(current, "report_schedule_interval_hours", 24),
-            "report_schedule_symbol": data["report_schedule_symbol"] if "report_schedule_symbol" in data and data["report_schedule_symbol"] is not None else getattr(current, "report_schedule_symbol", ""),
-        }
-        try:
-            StrategyMergedSchema.model_validate(merged)
-        except ValidationError as e:
-            raise HTTPException(status_code=422, detail=str(e)) from e
-        config, diff = svc.update_config(merged)
+        config, diff = update_strategy_with_runtime_reload(svc, current, data)
         # Record an immutable snapshot of the current params so the user
         # can later list/rollback. Only done on the successful path — if
         # update_config raises, the diff=... branch below catches it and
@@ -106,7 +165,6 @@ def put_strategy(
                 "strategy config has %d consistency issue(s)",
                 len(consistency_issues),
             )
-        _reload_strategy_after_save()
         response = StrategyResponse.model_validate(config)
         response.consistency_warnings = consistency_issues
         return response
@@ -150,11 +208,11 @@ def rollback_strategy_version(
         if params is None:
             raise HTTPException(status_code=404, detail=f"version {version_id} not found")
         svc = StrategyService(db)
-        config, _ = svc.update_config(params)
+        current = svc.get_config()
+        config, _ = update_strategy_with_runtime_reload(svc, current, params)
         # Snapshot the post-rollback state so the rollback itself has a
         # traceable version entry (lets a user undo an accidental rollback).
         version_svc.record_version(config, actor_hash=actor_hash)
-        _reload_strategy_after_save()
         return {
             "rolled_back_to": version_id,
             "symbol": config.symbol,

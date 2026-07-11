@@ -16,6 +16,15 @@ database.init_db()
 client = TestClient(app)
 
 
+@pytest.fixture(autouse=True)
+def _stub_safe_runtime_credential_reload(monkeypatch) -> None:
+    class SafeRunner:
+        def reload_credentials(self, *, broker_identity_change: bool = True) -> None:
+            del broker_identity_change
+
+    monkeypatch.setattr(credentials_api, "get_runner", lambda: SafeRunner())
+
+
 def _clean_credentials() -> None:
     with SessionLocal() as db:
         db.query(CredentialConfig).delete()
@@ -172,9 +181,10 @@ class TestCredentialsAPI:
         finally:
             db.close()
 
-    def test_update_credentials_ignores_reload_failure(self, monkeypatch) -> None:
+    def test_update_credentials_rolls_back_on_reload_failure(self, monkeypatch) -> None:
         class FailingRunner:
-            def reload_credentials(self) -> None:
+            def reload_credentials(self, *, broker_identity_change: bool = True) -> None:
+                del broker_identity_change
                 raise RuntimeError("reload failed")
 
         monkeypatch.setattr(credentials_api, "get_runner", lambda: FailingRunner())
@@ -187,7 +197,11 @@ class TestCredentialsAPI:
             "sct_key": "sct",
         })
 
-        assert resp.status_code == 200
+        assert resp.status_code == 503
+        saved = client.get("/api/credentials").json()
+        assert saved["has_longbridge_app_key"] is False
+        assert saved["has_longbridge_app_secret"] is False
+        assert saved["has_longbridge_access_token"] is False
 
 
 def test_update_persists_notification_channels() -> None:

@@ -25,6 +25,9 @@ const wsStatusMessageSchema = object({
   last_action_message: optionalString,
   trading_session_mode: optionalString,
   is_trading_hours: optionalBoolean,
+  execution_state: optionalString,
+  reduction_reason: optionalString,
+  reduction_started_at: optionalString,
 })
 
 type RealtimeStatus = 'connecting' | 'connected' | 'reconnecting' | 'polling'
@@ -43,6 +46,9 @@ export const defaultStatus: StatusData = {
   last_action_message: '',
   trading_session_mode: 'ANY',
   is_trading_hours: true,
+  execution_state: 'IDLE',
+  reduction_reason: '',
+  reduction_started_at: null,
 }
 
 // ---------------------------------------------------------------------------
@@ -130,6 +136,12 @@ function connectWebSocket(): void {
             status.value.trading_session_mode ??
             'ANY',
           is_trading_hours: data.is_trading_hours ?? status.value.is_trading_hours ?? false,
+          execution_state:
+            (data.execution_state as StatusData['execution_state'] | undefined) ??
+            status.value.execution_state,
+          reduction_reason: data.reduction_reason ?? status.value.reduction_reason,
+          reduction_started_at:
+            data.reduction_started_at ?? status.value.reduction_started_at,
         }
         markFresh()
       }

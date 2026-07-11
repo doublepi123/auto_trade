@@ -1,13 +1,47 @@
 from __future__ import annotations
 
 import logging
+import math
 from datetime import date, datetime, time, timezone
 from typing import TYPE_CHECKING, Any
 
 from app.core.engine import EngineState, StrategyEngine, StrategyParams
 from app.core.risk import RiskConfig, RiskController
+from app.config import settings
 
 logger = logging.getLogger("auto_trade.runtime_state")
+
+
+def hard_ceiling_float(value: object, hard_value: float) -> float:
+    """Return a positive finite value no less restrictive than the hard cap."""
+    try:
+        candidate = float(value)  # pyright: ignore[reportArgumentType]
+    except (TypeError, ValueError, OverflowError):
+        return hard_value
+    if not math.isfinite(candidate) or candidate <= 0:
+        return hard_value
+    return min(candidate, hard_value)
+
+
+def hard_ceiling_int(value: object, hard_value: int) -> int:
+    try:
+        candidate = int(value)  # pyright: ignore[reportArgumentType]
+    except (TypeError, ValueError, OverflowError):
+        return hard_value
+    if candidate <= 0:
+        return hard_value
+    return min(candidate, hard_value)
+
+
+def hard_floor_int(value: object, hard_value: int) -> int:
+    try:
+        candidate = int(value)  # pyright: ignore[reportArgumentType]
+    except (TypeError, ValueError, OverflowError):
+        return hard_value
+    if candidate <= 0:
+        return hard_value
+    return max(candidate, hard_value)
+
 
 class RuntimeStateService:
     def load(self, db: Any, engine: StrategyEngine, risk: RiskController) -> Any:
@@ -22,13 +56,45 @@ class RuntimeStateService:
             market=config.market,
             buy_low=config.buy_low,
             sell_high=config.sell_high,
-            short_selling=config.short_selling,
+            short_selling=bool(config.short_selling and settings.allow_short_entries),
             min_profit_amount=config.min_profit_amount,
             auto_resume_minutes=config.auto_resume_minutes,
             fee_rate_us=config.fee_rate_us,
             fee_rate_hk=config.fee_rate_hk,
             min_repricing_pct=config.min_repricing_pct,
             llm_action_cooldown_seconds=config.llm_action_cooldown_seconds,
+            allow_position_addons=bool(
+                getattr(config, "allow_position_addons", False)
+                and settings.hard_allow_position_addons
+            ),
+            stop_loss_pct=hard_ceiling_float(
+                getattr(config, "stop_loss_pct", settings.hard_stop_loss_pct),
+                settings.hard_stop_loss_pct,
+            ),
+            max_holding_minutes=hard_ceiling_int(
+                getattr(
+                    config,
+                    "max_holding_minutes",
+                    settings.hard_max_holding_minutes,
+                ),
+                settings.hard_max_holding_minutes,
+            ),
+            entry_cutoff_minutes_before_close=hard_floor_int(
+                getattr(
+                    config,
+                    "entry_cutoff_minutes_before_close",
+                    settings.hard_entry_cutoff_minutes_before_close,
+                ),
+                settings.hard_entry_cutoff_minutes_before_close,
+            ),
+            flatten_minutes_before_close=hard_floor_int(
+                getattr(
+                    config,
+                    "flatten_minutes_before_close",
+                    settings.hard_flatten_minutes_before_close,
+                ),
+                settings.hard_flatten_minutes_before_close,
+            ),
         )
         engine.state = self._coerce_engine_state(state.engine_state)
         engine.last_price = state.last_price
@@ -115,6 +181,9 @@ class RuntimeStateService:
 
     def record_snapshot(self, db: Any, engine: StrategyEngine, risk: RiskController, *, symbol: str = "") -> None:
         from app.models import RuntimeStateSnapshot
+        from app.services.strategy_service import StrategyService
+
+        runtime_state = StrategyService(db).get_runtime_state(symbol=symbol)
 
         snapshot = RuntimeStateSnapshot(
             symbol=symbol,
@@ -125,9 +194,61 @@ class RuntimeStateService:
             consecutive_losses=risk.consecutive_losses,
             last_price=engine.last_price,
             last_trigger_price=engine.last_trigger_price,
+            execution_state=getattr(runtime_state, "execution_state", "IDLE"),
+            reduction_reason=getattr(runtime_state, "reduction_reason", ""),
         )
         db.add(snapshot)
         db.commit()
+
+    def load_reduction(self, db: Any, *, symbol: str) -> dict[str, Any] | None:
+        from app.services.strategy_service import StrategyService
+
+        state = StrategyService(db).get_runtime_state(symbol=symbol)
+        if getattr(state, "execution_state", "IDLE") != "REDUCING":
+            return None
+        return {
+            "action": getattr(state, "reduction_action", ""),
+            "cause": getattr(state, "reduction_cause", ""),
+            "reason": getattr(state, "reduction_reason", ""),
+            "started_at": getattr(state, "reduction_started_at", None),
+            "trigger_price": getattr(state, "reduction_trigger_price", None),
+        }
+
+    def persist_reduction(
+        self,
+        db: Any,
+        *,
+        symbol: str,
+        action: str,
+        cause: str,
+        reason: str,
+        started_at: datetime,
+        trigger_price: float,
+    ) -> None:
+        from app.services.strategy_service import StrategyService
+
+        StrategyService(db).update_runtime_state(
+            symbol=symbol,
+            execution_state="REDUCING",
+            reduction_action=action,
+            reduction_cause=cause,
+            reduction_reason=reason,
+            reduction_started_at=started_at,
+            reduction_trigger_price=trigger_price,
+        )
+
+    def clear_reduction(self, db: Any, *, symbol: str) -> None:
+        from app.services.strategy_service import StrategyService
+
+        StrategyService(db).update_runtime_state(
+            symbol=symbol,
+            execution_state="IDLE",
+            reduction_action="",
+            reduction_cause="",
+            reduction_reason="",
+            reduction_started_at=None,
+            reduction_trigger_price=None,
+        )
 
     def query_history(
         self,

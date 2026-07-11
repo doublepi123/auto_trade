@@ -68,3 +68,34 @@ def test_rollback_unknown_version_404(monkeypatch):
     with TestClient(app) as client:
         resp = client.post("/api/strategy/versions/9999/rollback")
     assert resp.status_code == 404
+
+
+def test_rollback_revalidates_legacy_unsafe_version(monkeypatch):
+    _patched(monkeypatch)
+    Base.metadata.drop_all(bind=database.engine)
+    Base.metadata.create_all(bind=database.engine)
+    with Session(database.engine) as db:
+        cfg = _seed_strategy(db)
+        row = StrategyParamVersion(
+            params_json=json.dumps(
+                {
+                    "symbol": cfg.symbol,
+                    "market": cfg.market,
+                    "buy_low": cfg.buy_low,
+                    "sell_high": cfg.sell_high,
+                    "short_selling": True,
+                }
+            )
+        )
+        db.add(row)
+        db.commit()
+        version_id = row.id
+
+    with TestClient(app) as client:
+        response = client.post(f"/api/strategy/versions/{version_id}/rollback")
+
+    assert response.status_code == 422
+    with Session(database.engine) as db:
+        cfg = db.query(StrategyConfig).first()
+        assert cfg is not None
+        assert cfg.short_selling is False

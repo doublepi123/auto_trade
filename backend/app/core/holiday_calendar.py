@@ -6,13 +6,16 @@ intentionally avoids pulling in a large third-party library (e.g.
 ``exchange_calendars``) for the handful of fixed dates per year.
 
 Sources of truth:
-  * NYSE: https://www.nyse.com/markets/hours-calendars
+  * NYSE: https://www.nyse.com/trade/hours-calendars
+  * ICE announcement: https://ir.theice.com/press/news-details/2025/
+    NYSE-Group-Announces-2026-2027-and-2028-Holiday-and-Early-Closings-Calendar/
+    default.aspx
   * HKEX: https://www.hkex.com.hk/-/media/HKEX-Market/Services/Trading-Calendar
 
 Half-day sessions (e.g. Christmas Eve, NYE on HKEX) are recorded separately
 so the calendar can still mark the day as "open" while flagging reduced
-hours — the trading engine does not currently adjust for half-day closes,
-so this metadata is exported but not enforced.
+hours. ``market_calendar`` uses this metadata to shorten RTH and closing
+windows on those dates.
 
 The data is intentionally a flat tuple of dates for fast O(1) lookup. We
 do not attempt to handle ad-hoc closures (weather, technical outages) — the
@@ -156,9 +159,7 @@ COVERAGE_START_YEAR: int = 2024
 COVERAGE_END_YEAR: int = 2027
 
 # Half-day sessions: market closes at lunch on these days. The trading
-# engine does not currently adjust execution, so this set is informational
-# (exposed via /api/calendar) and can be used by a future iteration to
-# restrict RTH windows.
+# calendar uses this set to shorten RTH and closing windows.
 _HALF_DAY_SESSIONS: tuple[tuple[date, str, str], ...] = (
     (date(2024, 12, 24), "HK", "Christmas Eve"),
     (date(2024, 12, 31), "HK", "New Year's Eve"),
@@ -175,6 +176,7 @@ _HALF_DAY_SESSIONS: tuple[tuple[date, str, str], ...] = (
     (date(2025, 12, 24), "US", "Christmas Eve (early close 13:00)"),
     (date(2026, 11, 27), "US", "Black Friday (early close 13:00)"),
     (date(2026, 12, 24), "US", "Christmas Eve (early close 13:00)"),
+    (date(2027, 11, 26), "US", "Black Friday (early close 13:00)"),
 )
 
 

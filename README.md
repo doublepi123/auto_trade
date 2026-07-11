@@ -39,9 +39,9 @@
 
 ### 区间交易策略
 - 设定最低价 `buy_low` 和最高价 `sell_high`
-- 价格 ≤ 最低价 → 全仓买入（做多）或平空（回补）
-- 价格 ≥ 最高价 → 全仓卖出（平多）或开空
-- 可选启用做空：卖出后反向开空，触底回补
+- 空仓且价格 ≤ `buy_low` 时买入开多；持有多仓且价格 ≥ `sell_high` 时卖出平仓
+- P0 安全策略固定禁用做空开仓和已有持仓加仓，策略、API 与部署配置均不能开启
+- 新开仓受数量、名义金额、单笔风险和收盘前截止等硬上限约束
 - 价格在区间内时观望，不操作
 - 60 秒冷却期，防止阈值附近抖动触发连续下单
 
@@ -49,14 +49,12 @@
 
 ```
 空仓(flat) ──价格≤buy_low──► 持仓(long) ──价格≥sell_high──► 空仓(flat)
-     │                                                      │
-     │                     (做空开启时)                       │
-     └──价格≥sell_high──► 做空(short) ──价格≤buy_low──┘
 ```
 
 ### 风控
 - 单日最大亏损限制（默认 $5000）
 - 连续亏损 N 次自动暂停（默认 3 次）
+- 持仓按价格止损、最长持有时间和收盘前清仓规则强制减仓
 - **按交易所本地日历日**切日（US 用美东、HK 用香港时间），避免 UTC 午夜误重置日盈亏与连损计数
 - 手动暂停/恢复交易
 - Kill Switch 紧急停止
@@ -78,9 +76,9 @@
 - Decision Timeline 支持 `source=trade|audit|llm|risk|all` 统一查看交易 / 审计 / LLM / 风控事件，`event_type` 多选筛选
 
 ### 交易时段守卫
-- `trading_session_mode = RTH_ONLY` 时仅在常规交易时段允许新下单与 LLM 撤单重挂；非交易时段记录 `ORDER_SKIPPED` + `skip_category=SESSION` 与 `TRADING_SESSION_BLOCKED` 审计
+- `trading_session_mode = RTH_ONLY` 时仅在常规交易时段允许策略新下单；非交易时段记录 `ORDER_SKIPPED` + `skip_category=SESSION` 与 `TRADING_SESSION_BLOCKED` 审计。P0 的 LLM 实盘下单始终关闭
 - `CANCEL_PENDING` 撤单不受时段守卫限制（允许非 RTH 清理挂单）
-- 默认 `ANY`，上线零行为变更；用户主动切到 `RTH_ONLY` 才生效；**不含节假日历**（仅周末 + 常规 RTH 时段）
+- 默认 `ANY`，用户主动切到 `RTH_ONLY` 才生效；RTH 判定包含 2024–2027 年 NYSE / HKEX 静态休市日历和提前收盘时间
 
 ### 券商韧性
 - `BrokerGateway._call_with_retry` 分档退避：订单（默认 3 次）全量指数退避；行情（默认 1 次）轻量重试
@@ -101,17 +99,16 @@
 - 规划详情见 `docs/superpowers/specs/2026-05-26-replay-llm-workshop-design.md`
 
 ### LLM 区间顾问（可选）
-- DeepSeek 分析建议 `buy_low` / `sell_high`，支持预览与应用
-- 可配置定时自动分析与区间调整
+- DeepSeek 或 MiniMax 分析建议 `buy_low` / `sell_high`；预览接口仅读，不应用区间、不下单
+- 手动与定时分析统一经过置信度、区间宽度和相对现价偏离守卫；P0 固定为影子模式，仅记录建议
 - Prompt 使用长桥真实日 K / 1 分钟 K（`BrokerGateway.get_candlesticks`），ATR(14) 与布林带基于历史 K 线计算
-- 持仓状态下允许 LLM **下调** `buy_low`（追价加仓）或 **上抬** `sell_high`（抬高目标），见 `docs/Roadmap.md` P7'
-- LLM 撤单重挂（`CANCEL_REPLACE`）仅在新旧价格差达到 `min_repricing_pct` 阈值时执行；否则保留原挂单并记录 `REPRICING` 跳过原因
-- LLM 同方向（买/卖）发单受 `llm_action_cooldown_seconds` 独立冷却，未到期时记录 `COOLDOWN` 跳过原因；`CANCEL_PENDING` 撤单操作不受冷却影响
+- P0 永久禁用 LLM 实盘下单，不能通过策略字段、API 或环境变量开启
+- `CANCEL_REPLACE`、订单价格偏离和发单冷却参数仅保留兼容性；P0 不会进入对应的券商下单路径
 
 ### 交易执行安全
 - 普通平仓（非止损）在满足 `min_profit_amount` 之前，还需扣除按 `fee_rate_us` / `fee_rate_hk` 估算的双边手续费；费用后净收益仍不足时跳过并记录 `FEE` 原因
 - 止损路径（`allow_loss_exit=True`）完全绕过费用门槛与改价/冷却限制，确保止损优先
-- Decision Timeline 与 Dashboard 最近动作按分类展示跳过原因：`FEE` / `REPRICING` / `COOLDOWN` / `RISK` / `PENDING` / `POSITION`
+- Decision Timeline 与 Dashboard 最近动作按分类展示跳过原因：`FEE` / `RISK` / `PENDING` / `POSITION`；`REPRICING` / `COOLDOWN` 为保留的 LLM 订单事件类型，P0 不执行 LLM 实盘订单
 - 回测引擎拥有独立的 `fee_rate` / `fixed_fee` / `slippage_pct`，不读取实盘的市场费率配置，离线模拟结果与实盘独立
 
 ## 技术栈
@@ -163,7 +160,7 @@ docker compose up --build -d
 ```
 
 - 前端 Web UI（含 API 反向代理）: http://localhost:8080
-- 健康检查: http://localhost:8080/api/health
+- 就绪检查: http://localhost:8080/api/ready
 - 局域网访问: 如需手动暴露，请在 `.env` 里显式设置 `AUTO_TRADE_FRONTEND_BIND=0.0.0.0`
 
 ### 3. 配置策略
@@ -176,13 +173,18 @@ docker compose up --build -d
 | Market | 市场 | `US` / `HK` |
 | Buy Low Price | 触发买入的最低价 | `150.00` |
 | Sell High Price | 触发卖出的最高价 | `200.00` |
-| Short Selling | 是否启用做空 | `false` |
+| Position Add-ons | 兼容字段；P0 固定关闭，不能通过部署或策略配置开启 | `false` |
+| Max Position Quantity | 单标的最大持仓数量 | `100` |
+| Max Position Notional | 单标的最大名义金额（报价币种） | `5000` |
+| Max Risk Per Trade | 单笔最大价格风险（报价币种） | `250` |
+| Stop Loss | 持仓价格止损上限 | `1.0%` |
+| Max Holding Minutes | 最长持有时间 | `60m` |
 | Max Daily Loss | 单日最大亏损额度 | `5000` |
 | Max Consecutive Losses | 连续亏损暂停阈值 | `3` |
 | US Estimated Fee Rate (`fee_rate_us`) | 美股单边预估费率，用于实盘普通平仓的费用后收益门槛 | `0.05%` |
 | HK Estimated Fee Rate (`fee_rate_hk`) | 港股单边预估费率，用于实盘普通平仓的费用后收益门槛 | `0.30%` |
-| LLM Repricing Threshold (`min_repricing_pct`) | LLM 撤单重挂所需的最小改价百分比；未达阈值时保留原挂单 | `0.30%` |
-| LLM Action Cooldown (`llm_action_cooldown_seconds`) | LLM 同方向（买/卖）发单的最小间隔；到期前跳过并记录原因 | `60s` |
+| LLM Repricing Threshold (`min_repricing_pct`) | 保留的 LLM 订单参数；P0 不执行撤单重挂 | `0.30%` |
+| LLM Action Cooldown (`llm_action_cooldown_seconds`) | 保留的 LLM 订单参数；P0 不执行 LLM 实盘发单 | `60s` |
 
 保存后在 **Dashboard** 点击 **Start** 启动策略运行。
 
@@ -363,7 +365,7 @@ auto_trade/
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/api/strategy/llm-interval/preview` | 预览分析（不应用、不下单） |
-| `POST` | `/api/strategy/llm-interval/analyze` | 分析并可应用区间 / 触发 LLM 下单建议 |
+| `POST` | `/api/strategy/llm-interval/analyze` | 分析并记录区间/订单建议；P0 不执行 LLM 实盘订单 |
 | `GET` | `/api/strategy/llm-interval/status` | 当前 LLM 区间状态与最近建议 |
 | `GET` | `/api/strategy/llm-interval/interactions` | 历史交互记录；`limit` |
 | `GET` | `/api/llm-interactions/{id}` | 单条 LLM 交互完整详情（prompt / 原始响应 / 解析结果 / 上下文快照）；不存在 404 |
@@ -644,6 +646,20 @@ auto_trade/
 | `MINIMAX_MODEL` | MiniMax 模型 ID | `MiniMax-M3` |
 | `MINIMAX_THINKING_TYPE` | MiniMax thinking 模式（`adaptive` / `disabled`） | `adaptive` |
 | `MINIMAX_MAX_COMPLETION_TOKENS` | MiniMax 单次响应 completion token 上限 | `8192` |
+| `AUTO_TRADE_LLM_MIN_CONFIDENCE` | 允许应用 LLM 建议的最低置信度 | `0.7` |
+| `AUTO_TRADE_LLM_MAX_STRIPE_WIDTH_PCT` | LLM 区间最大宽度 | `8.0` |
+| `AUTO_TRADE_LLM_MAX_INTERVAL_BOUND_DEVIATION_PCT` | LLM 区间上下界相对实时现价的最大偏离 | `5.0` |
+| `AUTO_TRADE_LLM_SHADOW_MODE` | 兼容字段；P0 固定为 `true`，设置为 `false` 也不会启用 LLM 实盘下单 | `true` |
+| `AUTO_TRADE_LLM_MAX_ORDER_PRICE_DEVIATION_PCT` | 保留的 LLM 订单守卫；P0 不执行 LLM 实盘订单 | `1.0` |
+| `AUTO_TRADE_ALLOW_SHORT_ENTRIES` | 兼容字段；P0 固定为 `false`，不能启用做空开仓 | `false` |
+| `AUTO_TRADE_HARD_ALLOW_POSITION_ADDONS` | 兼容字段；P0 固定为 `false`，不能启用持仓加仓 | `false` |
+| `AUTO_TRADE_HARD_MAX_POSITION_QUANTITY` | 单标的最大持仓数量硬上限 | `100` |
+| `AUTO_TRADE_HARD_MAX_POSITION_NOTIONAL` | 单标的最大名义金额硬上限（报价币种） | `5000` |
+| `AUTO_TRADE_HARD_MAX_RISK_PER_TRADE` | 单笔最大价格风险硬上限（报价币种） | `250` |
+| `AUTO_TRADE_HARD_STOP_LOSS_PCT` | 硬止损百分比上限 | `1.0` |
+| `AUTO_TRADE_HARD_MAX_HOLDING_MINUTES` | 最长持仓分钟数硬上限 | `60` |
+| `AUTO_TRADE_HARD_ENTRY_CUTOFF_MINUTES_BEFORE_CLOSE` | 收盘前停止开仓分钟数下限 | `45` |
+| `AUTO_TRADE_HARD_FLATTEN_MINUTES_BEFORE_CLOSE` | 收盘前清仓分钟数下限 | `15` |
 | `AUTO_TRADE_MIN_EXIT_PROFIT_PCT` | 平仓最低盈利百分比缓冲 | `0.2` |
 | `AUTO_TRADE_BROKER_RETRY_MAX` | 订单类券商调用最大重试次数（0 = 不重试，共 1 次调用） | `3` |
 | `AUTO_TRADE_BROKER_QUOTE_RETRY_MAX` | 行情类券商调用最大重试次数 | `1` |
@@ -662,11 +678,11 @@ auto_trade/
 
 ## 限制
 
-- 仅支持单标的策略，不支持组合交易
+- 实盘只允许主策略标的下单；观察列表标的仅订阅行情和运行分析
 - 长桥 SDK 不适合高频交易，请控制下单频率
 - 行情权限、交易权限和可交易品种以长桥账户实际开通为准
 - 交易时段、费率以长桥 App 和官网实时展示为准
-- `market_calendar` 按交易所**本地日历日**与周末 RTH 判断，**不含节假日历**；休市日仍可能计入当日风控窗口
+- `market_calendar` 按交易所**本地日历日**判定 RTH，包含 2024–2027 年 NYSE / HKEX 静态休市与提前收盘日历；超出覆盖范围的日期默认按非休市处理，升级年份时需同步更新日历
 - 今日订单列表默认读 SQLite；Dashboard 最近订单最多落后 runner 后台同步间隔（约 15s），需最新数据请在订单页点「刷新」
 - 回测为离线 CSV 模拟，与实盘滑点/成交可能有差异
 

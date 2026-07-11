@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from app import database
+from app.config import settings
 from app.core.engine import StrategyEngine, EngineState, StrategyParams
 from app.core.risk import RiskController
 from app.models import RiskEvent, RuntimeState, RuntimeStateSnapshot, StrategyConfig
@@ -81,6 +82,39 @@ class TestRuntimeStateService:
         assert risk.pause_reason == "429 too many requests"
         assert risk.paused_at == paused_at
         assert risk.pause_auto_resumable is True
+
+    def test_load_invalid_safety_values_uses_deployment_hard_limits(self) -> None:
+        self._cleanup()
+        db = self._get_db()
+        svc = StrategyService(db)
+        svc.update_config({
+            "symbol": "AAPL.US",
+            "market": "US",
+            "buy_low": 100.0,
+            "sell_high": 200.0,
+            "stop_loss_pct": float("inf"),
+            "max_holding_minutes": 0,
+            "entry_cutoff_minutes_before_close": -10,
+            "flatten_minutes_before_close": 0,
+        })
+        db.close()
+
+        engine = StrategyEngine()
+        risk = RiskController()
+        db = self._get_db()
+        RuntimeStateService().load(db, engine, risk)
+        db.close()
+
+        assert engine.params.stop_loss_pct == settings.hard_stop_loss_pct
+        assert engine.params.max_holding_minutes == settings.hard_max_holding_minutes
+        assert (
+            engine.params.entry_cutoff_minutes_before_close
+            == settings.hard_entry_cutoff_minutes_before_close
+        )
+        assert (
+            engine.params.flatten_minutes_before_close
+            == settings.hard_flatten_minutes_before_close
+        )
 
     def test_load_defaults_on_invalid_engine_state(self) -> None:
         self._cleanup()

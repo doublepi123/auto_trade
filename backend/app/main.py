@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import threading
 import time
 from contextlib import asynccontextmanager
@@ -247,7 +248,10 @@ async def _llm_analysis_tick() -> None:
         analyzed_count = 0
 
         from app.api.llm_advisor import _interval_reference_quantity
-        from app.services.llm_interaction_service import LLMInteractionService
+        from app.services.llm_interaction_service import (
+            LLMInteractionService,
+            build_order_policy_outcome,
+        )
 
         advisor = LLMAdvisorService(broker=runner.broker)
         for symbol, market, engine, is_primary in targets:
@@ -264,10 +268,19 @@ async def _llm_analysis_tick() -> None:
 
                 runtime = getattr(runner, "_symbol_runtimes", {}).get(symbol)
                 params = getattr(engine, "params", config)
-                current_price = float(getattr(engine, "last_price", 0.0) or 0.0)
-                if current_price <= 0:
-                    current_price = config.buy_low if is_primary else float(getattr(params, "buy_low", 0.0) or 0.0)
-                if current_price <= 0:
+                current_price = runner.fresh_market_price(symbol)
+                if (
+                    current_price is None
+                    or not math.isfinite(current_price)
+                    or current_price <= 0
+                ):
+                    state_svc.record_skip(
+                        symbol,
+                        market,
+                        "current market price unavailable",
+                        next_analysis_at=None,
+                    )
+                    db.commit()
                     continue
 
                 symbol_state = state_svc.get_state(symbol, market)
@@ -366,20 +379,39 @@ async def _llm_analysis_tick() -> None:
 
                     app_result = {"applied": False, "reason": "secondary symbol analysis does not update primary interval config"}
                     if is_primary:
+                        from app.api.strategy import _reload_strategy_after_save
+
                         app_result = IntervalApplicationService().apply_suggestion(
                             db=db,
                             engine_state=engine.state.value.lower(),
-                            current_price=current_price if current_price > 0 else config.buy_low,
+                            current_price=current_price,
                             suggestion={
                                 "suggested_buy_low": result.get("suggested_buy_low"),
                                 "suggested_sell_high": result.get("suggested_sell_high"),
                                 "confidence_score": result.get("confidence_score"),
                             },
-                            reference_quantity=_interval_reference_quantity(position_context, account_context),
+                            reference_quantity=_interval_reference_quantity(
+                                position_context,
+                                account_context,
+                                current_price=current_price,
+                                trade_service=getattr(runner, "_trade_svc", None),
+                            ),
+                            runtime_reload=_reload_strategy_after_save,
                         )
                     order_result = {"status": "NO_ACTION", "order_id": None}
-                    if result.get("order_action") and result.get("order_action") != "NONE":
+                    if (
+                        is_primary
+                        and result.get("order_action")
+                        and result.get("order_action") != "NONE"
+                    ):
                         order_result = await asyncio.to_thread(runner.execute_llm_order_decision, {**result, "symbol": symbol})
+                    elif not is_primary and result.get("order_action") not in {None, "NONE"}:
+                        order_result = {
+                            "status": "WATCHLIST_READ_ONLY",
+                            "order_id": None,
+                            "reason": "secondary symbols are analysis-only",
+                        }
+                    policy_outcome = build_order_policy_outcome(result, order_result)
                     interaction_id = result.get("interaction_id")
                     if interaction_id is not None:
                         LLMInteractionService(db).update_outcome(
@@ -387,6 +419,7 @@ async def _llm_analysis_tick() -> None:
                             applied=bool(app_result["applied"]),
                             order_status=order_result.get("status"),
                             order_id=order_result.get("order_id"),
+                            policy_outcome=policy_outcome,
                         )
                     record_trade_event(
                         db,
@@ -405,6 +438,7 @@ async def _llm_analysis_tick() -> None:
                             "order_action": result.get("order_action"),
                             "order_status": order_result.get("status"),
                             "order_id": order_result.get("order_id"),
+                            "policy_outcome": policy_outcome,
                             "symbol_budget_index": analyzed_count,
                             "persisted_interval": is_primary,
                         },
@@ -416,10 +450,6 @@ async def _llm_analysis_tick() -> None:
                         next_analysis_at=now + timedelta(minutes=interval_minutes),
                     )
                     db.commit()
-                    if is_primary and app_result.get("applied"):
-                        from app.api.strategy import _reload_strategy_after_save
-
-                        _reload_strategy_after_save()
                 else:
                     record_trade_event(
                         db,
@@ -524,7 +554,9 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     runner = get_runner()
     started = await asyncio.to_thread(runner.start, loop=asyncio.get_running_loop())
     if not started:
-        logger.warning("runner failed to start during app lifespan — trading engine is not running")
+        message = "runner failed to start during app lifespan"
+        logger.critical(message)
+        raise RuntimeError(message)
 
     if settings.platform_mode:
         db = SessionLocal()

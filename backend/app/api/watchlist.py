@@ -226,38 +226,33 @@ def set_trading_symbol(
     db: Session = Depends(get_db),
     audit: AuditLogger = Depends(get_audit_logger),
 ) -> WatchlistItemResponse:
-    from app.api.strategy import _reload_strategy_after_save
+    from app.api.strategy import update_strategy_with_runtime_reload
     from app.services.strategy_service import StrategyService
 
     actor_hash, source_ip = extract_actor(request)
     result = "SUCCESS"
     diff: dict[str, object] = {}
     svc = WatchlistService(db)
-    try:
-        item = svc.set_trading_symbol(item_id)
-    except ValueError as exc:
+    item = svc.get_item(item_id)
+    if item is None:
         result = "FAILED"
-        diff = {"detail": str(exc)}
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        diff = {"detail": "Watchlist item not found"}
+        raise HTTPException(status_code=404, detail="Watchlist item not found")
 
     strategy_svc = StrategyService(db)
     current = strategy_svc.get_config()
-    reload_warning = False
     if current.symbol != item.symbol or current.market != item.market:
-        _, diff = strategy_svc.update_config({"symbol": item.symbol, "market": item.market})
-        try:
-            _reload_strategy_after_save()
-        except Exception as reload_exc:
-            logger.exception("failed to reload strategy after watchlist set-trading")
-            reload_warning = True
-            result = "PARTIAL"
+        _, diff = update_strategy_with_runtime_reload(
+            strategy_svc,
+            current,
+            {"symbol": item.symbol, "market": item.market},
+        )
+    item = svc.set_trading_symbol(item_id)
     try:
         return WatchlistItemResponse.model_validate(item)
     finally:
         if diff:
             summary: dict[str, object] = {"changed": diff, "source": "watchlist_set_trading"}
-            if reload_warning:
-                summary["reload_warning"] = True
             audit.record(
                 "STRATEGY_UPDATE",
                 severity="INFO",

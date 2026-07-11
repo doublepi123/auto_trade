@@ -28,7 +28,10 @@ from app.schemas import (
 from app.services.trade_execution_service import _PendingOrder
 from app.config import settings
 from app.services.llm_advisor_service import LLMAdvisorService, build_recent_analysis_context
-from app.services.llm_interaction_service import LLMInteractionService
+from app.services.llm_interaction_service import (
+    LLMInteractionService,
+    build_order_policy_outcome,
+)
 from app.services.interval_application_service import IntervalApplicationService
 from app.services.strategy_service import StrategyService
 from app.services.llm_symbol_state_service import LLMSymbolStateService
@@ -49,24 +52,6 @@ def _coerce_recent_prices(source: Any) -> list[dict[str, Any]]:
     if isinstance(result, list):
         return [item for item in result if isinstance(item, dict)]
     return []
-
-
-def _reject_llm_order_action_reason(result: dict[str, Any]) -> str | None:
-    action = str(result.get("order_action") or "NONE").upper()
-    if action == "NONE":
-        return None
-    try:
-        confidence = float(result.get("confidence_score") or 0.0)
-    except (TypeError, ValueError):
-        return "order action rejected: confidence_score is not a number"
-    if not math.isfinite(confidence):
-        return "order action rejected: confidence_score is not finite"
-    if confidence < settings.llm_min_confidence:
-        return (
-            f"order action {action} rejected: confidence_score {confidence:.2f} "
-            f"below threshold {settings.llm_min_confidence}"
-        )
-    return None
 
 
 def _position_context(symbol: str, current_price: float) -> dict[str, float | str]:
@@ -170,14 +155,52 @@ def _account_context(symbol: str, market: str, current_price: float, short_selli
     return context
 
 
-def _interval_reference_quantity(position_context: dict[str, Any], account_context: dict[str, Any]) -> float:
+def _interval_reference_quantity(
+    position_context: dict[str, Any],
+    account_context: dict[str, Any],
+    *,
+    current_price: float = 0.0,
+    trade_service: Any = None,
+) -> float:
     position_quantity = float(position_context.get("quantity") or 0.0)
     if position_quantity > 0:
         return position_quantity
     max_buy_quantity = float(account_context.get("max_buy_quantity") or 0.0)
-    if max_buy_quantity > 0:
-        return max(max_buy_quantity * 0.9, 1.0)
-    return 1.0
+    if not math.isfinite(max_buy_quantity) or max_buy_quantity <= 0:
+        return 1.0
+
+    factor = getattr(trade_service, "margin_safety_factor", None)
+    if factor is None:
+        factor = 0.9
+    try:
+        candidate = max_buy_quantity * float(factor)
+    except (TypeError, ValueError):
+        candidate = 0.0
+    if not math.isfinite(candidate) or candidate <= 0:
+        return 1.0
+
+    quantity_cap = getattr(trade_service, "max_position_quantity", None)
+    if isinstance(quantity_cap, int) and quantity_cap > 0:
+        candidate = min(candidate, float(quantity_cap))
+
+    if math.isfinite(current_price) and current_price > 0:
+        notional_cap = getattr(trade_service, "max_position_notional", None)
+        if isinstance(notional_cap, (int, float)) and math.isfinite(float(notional_cap)) and float(notional_cap) > 0:
+            candidate = min(candidate, float(notional_cap) / current_price)
+        risk_cap = getattr(trade_service, "max_risk_per_trade", None)
+        stop_loss_pct = getattr(trade_service, "stop_loss_pct", None)
+        if (
+            isinstance(risk_cap, (int, float))
+            and isinstance(stop_loss_pct, (int, float))
+            and math.isfinite(float(risk_cap))
+            and math.isfinite(float(stop_loss_pct))
+            and float(risk_cap) > 0
+            and float(stop_loss_pct) > 0
+        ):
+            stop_distance = current_price * float(stop_loss_pct) / 100
+            candidate = min(candidate, float(risk_cap) / stop_distance)
+
+    return max(float(math.floor(candidate)), 1.0)
 
 
 @router.post("/strategy/llm-interval/preview", response_model=LLMAnalyzeResponse, dependencies=[Depends(require_api_key())])
@@ -234,10 +257,9 @@ def analyze_llm_interval(
         runner = get_runner()
     except Exception:
         raise HTTPException(status_code=503, detail="runner not initialized") from None
-    last_price = runner.engine.last_price
-    current_price = last_price if last_price is not None and last_price > 0 else config.buy_low
-    if current_price is None or current_price <= 0:
-        raise HTTPException(status_code=400, detail="current price unavailable and strategy buy_low not configured")
+    current_price = runner.fresh_market_price(config.symbol)
+    if current_price is None or not math.isfinite(current_price) or current_price <= 0:
+        raise HTTPException(status_code=400, detail="current price unavailable")
     position_context = _position_context(config.symbol, current_price)
     recent_price_context = getattr(runner, "recent_price_context", None)
     account_context = _account_context(config.symbol, config.market, current_price, config.short_selling)
@@ -278,6 +300,8 @@ def analyze_llm_interval(
             interaction_id=result.get("interaction_id"),
         )
 
+    from app.api.strategy import _reload_strategy_after_save
+
     app_svc = IntervalApplicationService()
     app_result = app_svc.apply_suggestion(
         db=db,
@@ -286,26 +310,24 @@ def analyze_llm_interval(
         suggestion={
             "suggested_buy_low": result.get("suggested_buy_low"),
             "suggested_sell_high": result.get("suggested_sell_high"),
-            "confidence_score": result.get("confidence_score") or 0.0,
+            "confidence_score": result.get("confidence_score"),
         },
-        reference_quantity=_interval_reference_quantity(position_context, account_context),
+        reference_quantity=_interval_reference_quantity(
+            position_context,
+            account_context,
+            current_price=current_price,
+            trade_service=getattr(runner, "_trade_svc", None),
+        ),
+        runtime_reload=_reload_strategy_after_save,
     )
     order_result = {"executed": False, "status": "NO_ACTION", "order_id": None}
     if result.get("order_action") and result.get("order_action") != "NONE":
-        reject_reason = _reject_llm_order_action_reason(result)
-        if reject_reason is not None:
-            order_result = {
-                "executed": False,
-                "status": "CONFIDENCE_REJECTED",
-                "order_id": None,
-                "reason": reject_reason,
-            }
-        else:
-            try:
-                order_result = runner.execute_llm_order_decision(result)
-            except Exception:
-                logger.exception("failed to execute LLM order action")
-                order_result = {"executed": False, "status": "ERROR", "order_id": None}
+        try:
+            order_result = runner.execute_llm_order_decision(result)
+        except Exception:
+            logger.exception("failed to execute LLM order action")
+            order_result = {"executed": False, "status": "ERROR", "order_id": None}
+    policy_outcome = build_order_policy_outcome(result, order_result)
 
     interaction_id = result.get("interaction_id")
     if interaction_id is not None:
@@ -315,6 +337,7 @@ def analyze_llm_interval(
                 applied=app_result["applied"],
                 order_status=cast(Optional[str], order_result.get("status")),
                 order_id=cast(Optional[str], order_result.get("order_id")),
+                policy_outcome=policy_outcome,
             )
         except Exception:
             logger.exception("failed to update LLM interaction outcome")
@@ -336,14 +359,10 @@ def analyze_llm_interval(
             "order_status": order_result.get("status"),
             "order_id": order_result.get("order_id"),
             "order_reject_reason": order_result.get("reason"),
+            "policy_outcome": policy_outcome,
         },
     )
     db.commit()
-    if app_result.get("applied"):
-        from app.api.strategy import _reload_strategy_after_save
-
-        _reload_strategy_after_save()
-
     return LLMAnalyzeResponse(
         success=True,
         applied=app_result["applied"],
@@ -396,12 +415,13 @@ def get_llm_interval_status(db: Session = Depends(get_db)) -> LLMIntervalStatus:
             analysis=config.llm_analysis or "",
         )
 
-    applied_values = None
+    last_applied_values = None
     if config.llm_applied_buy_low is not None and config.llm_applied_sell_high is not None:
-        applied_values = {
+        last_applied_values = {
             "buy_low": config.llm_applied_buy_low,
             "sell_high": config.llm_applied_sell_high,
         }
+    applied_values = None if settings.llm_shadow_mode else last_applied_values
 
     next_analysis_at = config.llm_next_analysis_at
     if config.llm_last_analysis_at is not None:
@@ -431,11 +451,14 @@ def get_llm_interval_status(db: Session = Depends(get_db)) -> LLMIntervalStatus:
 
     return LLMIntervalStatus(
         enabled=config.auto_interval_enabled,
+        shadow_mode=settings.llm_shadow_mode,
+        policy_status="SHADOW" if settings.llm_shadow_mode else "LIVE",
         interval_minutes=config.llm_interval_minutes,
         last_analysis_at=config.llm_last_analysis_at.isoformat() if config.llm_last_analysis_at else None,
         next_analysis_at=next_analysis_at.isoformat() if next_analysis_at else None,
         current_suggestion=current_suggestion,
         applied_values=applied_values,
+        last_applied_values=last_applied_values,
         reject_reason=config.llm_reject_reason,
         budget=LLMBudgetStatus(
             max_symbols_per_cycle=settings.llm_max_symbols_per_cycle,

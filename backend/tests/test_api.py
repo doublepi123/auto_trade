@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from fastapi.testclient import TestClient
 from freezegun import freeze_time
 
+from app.api import credentials as credentials_api
 from app.api import llm_advisor as llm_api
 from app.api import review as review_api
 from app.api import strategy as strategy_api
@@ -21,7 +22,30 @@ database.init_db()
 client = TestClient(app)
 
 
+def teardown_module() -> None:
+    runner = trade_api.get_runner()
+    if runner._thread is not None and runner._thread.is_alive():
+        runner.stop()
+    else:
+        runner._running = False
+
+
 def _clean_strategy() -> None:
+    runner = trade_api.get_runner()
+    runner._running = True
+    runner._trigger_in_flight = False
+    runner._reduction_intents.clear()
+    runner._post_fill_expectations.clear()
+    for order_id in runner._trade_svc.pending_order_ids():
+        runner._trade_svc._clear_pending_order(order_id)
+    runner._unresolved_live_order_ids.clear()
+    runner._unrepresentable_live_order_issues.clear()
+    runner._last_order_sync_succeeded = False
+    runner._trade_svc.load_tracked_entries({})
+    runner.risk.disable_kill_switch()
+    runner.risk.resume()
+    runner.engine.sync_state(False, False)
+    runner.broker.get_positions = lambda: []
     with SessionLocal() as db:
         db.query(StrategyConfig).delete()
         db.commit()
@@ -140,11 +164,14 @@ class TestAPI:
         assert resp.status_code == 200
         assert resp.json()["llm_interval_minutes"] == 1
 
-    def test_update_strategy_does_not_wait_for_running_runner_reload(self, monkeypatch) -> None:
+    def test_update_strategy_waits_for_runtime_reload_confirmation(self, monkeypatch) -> None:
         _clean_strategy()
 
         class SlowRunner:
             is_running = True
+
+            def assert_primary_switch_safe(self, _symbol: str, _market: str) -> None:
+                return None
 
             def reload_strategy(self) -> None:
                 time.sleep(0.2)
@@ -161,7 +188,87 @@ class TestAPI:
         elapsed = time.perf_counter() - started_at
 
         assert resp.status_code == 200
-        assert elapsed < 0.15
+        assert elapsed >= 0.2
+
+    def test_update_strategy_rolls_back_when_runtime_reload_fails(self, monkeypatch) -> None:
+        _clean_strategy()
+        with SessionLocal() as db:
+            db.add(
+                StrategyConfig(
+                    symbol="AAPL.US",
+                    market="US",
+                    buy_low=100.0,
+                    sell_high=110.0,
+                )
+            )
+            db.commit()
+
+        pauses: list[tuple[str, bool]] = []
+
+        class Risk:
+            def pause(self, reason: str, *, auto_resumable: bool) -> None:
+                pauses.append((reason, auto_resumable))
+
+        class FlakyRunner:
+            risk = Risk()
+
+            def __init__(self) -> None:
+                self.reload_calls = 0
+
+            def reload_strategy(self) -> None:
+                self.reload_calls += 1
+                if self.reload_calls == 1:
+                    raise RuntimeError("reload failed")
+
+            def assert_primary_switch_safe(self, _symbol: str, _market: str) -> None:
+                return None
+
+        runner = FlakyRunner()
+        monkeypatch.setattr(strategy_api, "get_runner", lambda: runner)
+
+        response = client.put(
+            "/api/strategy",
+            json={"buy_low": 101.0, "sell_high": 111.0},
+        )
+
+        assert response.status_code == 503
+        assert runner.reload_calls == 2
+        assert pauses == [("strategy runtime reload failed", False)]
+        with SessionLocal() as db:
+            config = db.query(StrategyConfig).first()
+            assert config is not None
+            assert config.buy_low == 100.0
+            assert config.sell_high == 110.0
+
+    def test_update_strategy_rejects_primary_switch_with_exposure(self, monkeypatch) -> None:
+        _clean_strategy()
+        with SessionLocal() as db:
+            db.add(
+                StrategyConfig(
+                    symbol="AAPL.US",
+                    market="US",
+                    buy_low=100.0,
+                    sell_high=110.0,
+                )
+            )
+            db.commit()
+
+        class ExposedRunner:
+            def assert_primary_switch_safe(self, _symbol: str, _market: str) -> None:
+                raise strategy_api.PrimarySwitchBlockedError("position exists")
+
+        monkeypatch.setattr(strategy_api, "get_runner", lambda: ExposedRunner())
+
+        response = client.put(
+            "/api/strategy",
+            json={"symbol": "MSFT.US", "market": "US"},
+        )
+
+        assert response.status_code == 409
+        with SessionLocal() as db:
+            config = db.query(StrategyConfig).first()
+            assert config is not None
+            assert config.symbol == "AAPL.US"
 
     def test_update_strategy_persists_margin_safety_factor(self) -> None:
         _clean_strategy()
@@ -180,6 +287,56 @@ class TestAPI:
         resp2 = client.get("/api/strategy")
         assert resp2.status_code == 200
         assert resp2.json()["margin_safety_factor"] == 0.75
+
+    def test_update_strategy_persists_p0_live_safety_fields(self) -> None:
+        _clean_strategy()
+        resp = client.put("/api/strategy", json={
+            "symbol": "AAPL.US",
+            "market": "US",
+            "buy_low": 100.0,
+            "sell_high": 200.0,
+            "allow_position_addons": False,
+            "max_position_quantity": 25,
+            "max_position_notional": 5000,
+            "max_risk_per_trade": 100,
+            "stop_loss_pct": 0.8,
+            "max_holding_minutes": 45,
+            "entry_cutoff_minutes_before_close": 45,
+            "flatten_minutes_before_close": 15,
+            "llm_order_execution_enabled": False,
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["allow_position_addons"] is False
+        assert data["max_position_quantity"] == 25
+        assert data["max_position_notional"] == 5000
+        assert data["max_risk_per_trade"] == 100
+        assert data["stop_loss_pct"] == 0.8
+        assert data["max_holding_minutes"] == 45
+        assert data["entry_cutoff_minutes_before_close"] == 45
+        assert data["flatten_minutes_before_close"] == 15
+        assert data["llm_order_execution_enabled"] is False
+
+    def test_update_strategy_rejects_short_entries_and_invalid_safety_window(self) -> None:
+        _clean_strategy()
+        short = client.put("/api/strategy", json={
+            "symbol": "AAPL.US",
+            "market": "US",
+            "buy_low": 100.0,
+            "sell_high": 200.0,
+            "short_selling": True,
+        })
+        assert short.status_code == 422
+
+        invalid_window = client.put("/api/strategy", json={
+            "symbol": "AAPL.US",
+            "market": "US",
+            "buy_low": 100.0,
+            "sell_high": 200.0,
+            "entry_cutoff_minutes_before_close": 15,
+            "flatten_minutes_before_close": 30,
+        })
+        assert invalid_window.status_code == 422
 
     def test_update_strategy_persists_report_schedule_fields(self) -> None:
         _clean_strategy()
@@ -450,10 +607,87 @@ class TestAPI:
         assert resp.status_code == 200
         assert resp.json()["message"] == "trading paused"
 
-    def test_resume_trading(self) -> None:
+    def test_resume_trading(self, monkeypatch) -> None:
+        runner = trade_api.get_runner()
+        for order_id in runner._trade_svc.pending_order_ids():
+            runner._trade_svc._clear_pending_order(order_id)
+        monkeypatch.setattr(runner.broker, "get_today_orders", lambda: [])
+        monkeypatch.setattr(runner.broker, "get_positions", lambda: [])
         resp = client.post("/api/control/resume")
         assert resp.status_code == 200
         assert resp.json()["message"] == "trading resumed"
+
+    def test_manual_resume_cannot_bypass_unknown_live_order(self, monkeypatch) -> None:
+        from decimal import Decimal
+
+        from app.core.broker import BrokerOrder
+        from app.core.engine import StrategyParams
+        from app.runner import AppRunner
+
+        _clean_orders()
+        _clean_trade_events()
+        global_runner = trade_api.get_runner()
+        runner = AppRunner()
+        runner.engine.params = StrategyParams(symbol="AAPL.US", market="US")
+        runner.risk.pause("manual review")
+
+        class Broker:
+            def get_today_orders(self):
+                return [
+                    BrokerOrder(
+                        broker_order_id="unknown-nvda-live-1",
+                        symbol="NVDA.US",
+                        side="BUY",
+                        quantity=Decimal("1"),
+                        price=Decimal("220"),
+                        executed_quantity=Decimal("0"),
+                        executed_price=Decimal("0"),
+                        status="SUBMITTED",
+                        created_at=datetime.now(timezone.utc),
+                        filled_at=None,
+                    )
+                ]
+
+            def get_positions(self):
+                return []
+
+        monkeypatch.setattr(runner, "broker", Broker())
+        monkeypatch.setattr(trade_api, "get_runner", lambda: runner)
+
+        try:
+            resp = client.post("/api/control/resume")
+
+            assert resp.status_code == 409
+            assert "unknown-nvda-live-1" in resp.json()["detail"]
+            assert runner.risk.paused is True
+            assert runner.risk.pause_reason.startswith("ORDER_RECONCILIATION_UNCERTAIN:")
+        finally:
+            _clean_orders()
+            runner._trade_svc._clear_pending_order("unknown-nvda-live-1")
+            global_runner._trade_svc._clear_pending_order("unknown-nvda-live-1")
+
+    def test_manual_pause_and_kill_switch_preserve_operational_latch(self, monkeypatch) -> None:
+        from app.runner import AppRunner
+
+        runner = AppRunner()
+        operational_reason = (
+            "ORDER_RECONCILIATION_UNCERTAIN: live_orders=AAPL.US=[latched-1]"
+        )
+        runner.risk.pause(operational_reason, auto_resumable=False)
+        monkeypatch.setattr(
+            runner,
+            "notifier",
+            SimpleNamespace(notify_risk_event=lambda *_args, **_kwargs: None),
+        )
+        monkeypatch.setattr(trade_api, "get_runner", lambda: runner)
+
+        pause_resp = client.post("/api/control/pause", json={"reason": "operator pause"})
+        kill_resp = client.post("/api/control/kill-switch", json={"reason": "panic"})
+
+        assert pause_resp.status_code == 200
+        assert kill_resp.status_code == 200
+        assert runner.risk.pause_reason == operational_reason
+        assert runner.risk.kill_switch is True
 
     def test_kill_switch(self) -> None:
         resp = client.post("/api/control/kill-switch", json={"reason": "testing"})
@@ -508,7 +742,12 @@ class TestAPI:
         assert resp.status_code == 200
         assert "kill switch disabled" in resp.json()["message"]
 
-    def test_put_credentials(self) -> None:
+    def test_put_credentials(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            credentials_api,
+            "get_runner",
+            lambda: SimpleNamespace(reload_credentials=lambda **_kwargs: None),
+        )
         _clean_credentials()
         resp = client.put("/api/credentials", json={
             "longbridge_app_key": "test_key",
@@ -647,6 +886,123 @@ class TestAPI:
             event = db.query(TradeEvent).filter(TradeEvent.broker_order_id == "manual-1").one()
             assert event.event_type == "ORDER_CANCELLED"
             assert event.status == "CANCELLED"
+        finally:
+            db.close()
+
+    def test_cancel_order_does_not_regress_partial_fill_from_stale_submitted(self, monkeypatch) -> None:
+        _clean_orders()
+        _clean_trade_events()
+        db = SessionLocal()
+        db.add(OrderRecord(
+            broker_order_id="partial-stale-1",
+            symbol="NVDA.US",
+            side="BUY",
+            quantity=10,
+            price=220.1,
+            executed_quantity=3,
+            executed_price=220.05,
+            status="PARTIAL_FILLED",
+        ))
+        db.commit()
+        db.close()
+
+        class Runner:
+            broker = object()
+
+            def cancel_order_by_id(self, order_id: str):
+                return SimpleNamespace(
+                    broker_order_id=order_id,
+                    status="SUBMITTED",
+                    executed_quantity=0,
+                    executed_price=0,
+                )
+
+        monkeypatch.setattr(trade_api, "get_runner", lambda: Runner())
+
+        resp = client.post("/api/orders/partial-stale-1/cancel")
+
+        assert resp.status_code == 200
+        db = SessionLocal()
+        try:
+            order = db.query(OrderRecord).filter_by(broker_order_id="partial-stale-1").one()
+            assert order.status == "PARTIAL_FILLED"
+            assert order.executed_quantity == 3
+            assert order.executed_price == 220.05
+            assert db.query(TradeEvent).filter_by(broker_order_id="partial-stale-1").count() == 0
+        finally:
+            db.close()
+
+    def test_cancel_order_terminal_status_preserves_existing_partial_fill(self, monkeypatch) -> None:
+        _clean_orders()
+        _clean_trade_events()
+        with SessionLocal() as db:
+            db.add(OrderRecord(
+                broker_order_id="partial-cancelled-1",
+                symbol="NVDA.US",
+                side="BUY",
+                quantity=10,
+                price=220.1,
+                executed_quantity=3,
+                executed_price=220.05,
+                status="PARTIAL_FILLED",
+            ))
+            db.commit()
+
+        class Runner:
+            broker = object()
+
+            def cancel_order_by_id(self, order_id: str):
+                return SimpleNamespace(
+                    broker_order_id=order_id,
+                    status="CANCELLED",
+                    executed_quantity=0,
+                    executed_price=0,
+                )
+
+        monkeypatch.setattr(trade_api, "get_runner", lambda: Runner())
+
+        resp = client.post("/api/orders/partial-cancelled-1/cancel")
+
+        assert resp.status_code == 200
+        with SessionLocal() as db:
+            order = db.query(OrderRecord).filter_by(broker_order_id="partial-cancelled-1").one()
+            assert order.status == "CANCELLED"
+            assert order.executed_quantity == 3
+            assert order.executed_price == 220.05
+            event = db.query(TradeEvent).filter_by(broker_order_id="partial-cancelled-1").one()
+            assert event.event_type == "ORDER_CANCELLED"
+            assert event.status == "CANCELLED"
+
+    def test_local_order_status_merge_does_not_regress_terminal_fill(self) -> None:
+        _clean_orders()
+        _clean_trade_events()
+        filled_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+        db = SessionLocal()
+        db.add(OrderRecord(
+            broker_order_id="filled-stale-1",
+            symbol="NVDA.US",
+            side="BUY",
+            quantity=10,
+            price=220.1,
+            executed_quantity=10,
+            executed_price=220.08,
+            status="FILLED",
+            filled_at=filled_at,
+        ))
+        db.commit()
+        try:
+            trade_api._update_local_order_from_status(
+                db,
+                "filled-stale-1",
+                SimpleNamespace(status="SUBMITTED", executed_quantity=None, executed_price=None),
+            )
+
+            order = db.query(OrderRecord).filter_by(broker_order_id="filled-stale-1").one()
+            assert order.status == "FILLED"
+            assert order.executed_quantity == 10
+            assert order.executed_price == 220.08
+            assert order.filled_at == filled_at.replace(tzinfo=None)
+            assert db.query(TradeEvent).filter_by(broker_order_id="filled-stale-1").count() == 0
         finally:
             db.close()
 
@@ -839,6 +1195,19 @@ class TestAPI:
                     "quotes_subscribed": True,
                     "trigger_in_flight": False,
                     "pending_order_symbols": ["AAPL.US"],
+                    "live_safety": {
+                        "short_entries_enabled": False,
+                        "allow_position_addons": False,
+                        "max_position_quantity": 100,
+                        "max_position_notional": 5000.0,
+                        "max_risk_per_trade": 250.0,
+                        "stop_loss_pct": 1.0,
+                        "max_holding_minutes": 60,
+                        "entry_cutoff_minutes_before_close": 45,
+                        "flatten_minutes_before_close": 15,
+                        "llm_shadow_mode": True,
+                        "llm_order_execution_enabled": False,
+                    },
                     "quote_stream": {
                         "last_push_age_seconds": 3.0,
                         "last_quote_age_seconds": 2.0,
@@ -885,6 +1254,9 @@ class TestAPI:
         assert data["pending_order_symbols"] == ["AAPL.US"]
         assert data["quote_stream"]["recent_quote_count"] == 4
         assert data["risk"]["daily_pnl"] == 12.5
+        assert data["live_safety"]["short_entries_enabled"] is False
+        assert data["live_safety"]["max_position_notional"] == 5000.0
+        assert data["live_safety"]["llm_shadow_mode"] is True
         assert data["symbol_runtimes"][1]["symbol"] == "AAPL.US"
         assert data["symbol_runtimes"][1]["has_pending_order"] is True
 
@@ -927,6 +1299,30 @@ class TestAPI:
             "quantity": 3.0,
         }
 
+    def test_interval_reference_quantity_uses_effective_live_caps(self) -> None:
+        trade_service = SimpleNamespace(
+            margin_safety_factor=0.9,
+            max_position_quantity=100,
+            max_position_notional=5000.0,
+            max_risk_per_trade=250.0,
+            stop_loss_pct=1.0,
+        )
+
+        quantity = llm_api._interval_reference_quantity(
+            {"quantity": 0},
+            {"max_buy_quantity": 1000},
+            current_price=200.0,
+            trade_service=trade_service,
+        )
+
+        assert quantity == 25.0
+        assert llm_api._interval_reference_quantity(
+            {"quantity": 7},
+            {"max_buy_quantity": 1000},
+            current_price=200.0,
+            trade_service=trade_service,
+        ) == 7.0
+
     def test_llm_interval_status_includes_budget_and_symbol_statuses(self, monkeypatch) -> None:
         _clean_strategy()
         _clean_llm_interactions()
@@ -968,6 +1364,8 @@ class TestAPI:
 
         assert resp.status_code == 200
         data = resp.json()
+        assert data["shadow_mode"] is True
+        assert data["policy_status"] == "SHADOW"
         assert data["budget"] == {
             "max_symbols_per_cycle": 2,
             "max_analyses_per_hour": 40,
@@ -980,6 +1378,29 @@ class TestAPI:
         assert data["symbol_statuses"][0]["buy_cooldown_remaining_seconds"] == 12.0
         assert data["symbol_statuses"][1]["symbol"] == "AAPL.US"
         assert data["symbol_statuses"][1]["has_pending_order"] is True
+
+    def test_llm_shadow_status_never_presents_stale_values_as_current(self, monkeypatch) -> None:
+        _clean_strategy()
+        with SessionLocal() as db:
+            config = StrategyService(db).get_config()
+            config.llm_applied_buy_low = 100.0
+            config.llm_applied_sell_high = 101.0
+            db.commit()
+
+        class Runner:
+            def llm_symbol_statuses(self):
+                return []
+
+        monkeypatch.setattr(llm_api, "get_runner", lambda: Runner())
+        monkeypatch.setattr(llm_api.settings, "llm_shadow_mode", True)
+
+        resp = client.get("/api/strategy/llm-interval/status")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["policy_status"] == "SHADOW"
+        assert data["applied_values"] is None
+        assert data["last_applied_values"] == {"buy_low": 100.0, "sell_high": 101.0}
 
     def test_llm_interval_status_includes_persisted_schedule_state_and_usage(self, monkeypatch) -> None:
         _clean_strategy()
@@ -1153,6 +1574,11 @@ class TestAPI:
                 }
 
         monkeypatch.setattr(llm_api, "LLMAdvisorService", MissingKeyAdvisor)
+        monkeypatch.setattr(
+            llm_api.get_runner(),
+            "fresh_market_price",
+            lambda _symbol: 100.0,
+        )
 
         resp = client.post("/api/strategy/llm-interval/analyze", json={"force": True})
 
@@ -1198,8 +1624,13 @@ class TestAPI:
             engine = Engine()
             broker = None
 
+            @staticmethod
+            def fresh_market_price(_symbol):
+                return 200.0
+
         monkeypatch.setattr(llm_api, "LLMAdvisorService", SuccessfulAdvisor)
         monkeypatch.setattr(llm_api, "get_runner", lambda: Runner())
+        monkeypatch.setattr(llm_api.settings, "llm_shadow_mode", False)
 
         resp = client.post("/api/strategy/llm-interval/analyze", json={"force": True})
 
@@ -1226,7 +1657,7 @@ class TestAPI:
             "market": "US",
             "buy_low": 218.0,
             "sell_high": 225.0,
-            "short_selling": True,
+            "short_selling": False,
             "min_profit_amount": 12.5,
         })
         assert setup.status_code == 200
@@ -1274,6 +1705,10 @@ class TestAPI:
             engine = Engine()
             broker = Broker()
 
+            @staticmethod
+            def fresh_market_price(_symbol):
+                return 221.5
+
             def recent_price_context(self):
                 return [{"last_price": 221.5, "bid": 221.4, "ask": 221.6, "observed_at": "2026-05-22T10:00:00Z"}]
 
@@ -1293,9 +1728,9 @@ class TestAPI:
         assert captured["account_context"]["cash_currency"] == "USD"
         assert captured["account_context"]["available_cash"] == 12345.67
         assert captured["account_context"]["buying_power"] == 42 * 221.5
-        assert captured["account_context"]["max_short_quantity"] == 8.0
+        assert captured["account_context"]["max_short_quantity"] == 0.0
 
-    def test_llm_analyze_executes_immediate_order_action(self, monkeypatch) -> None:
+    def test_llm_analyze_records_immediate_order_action_in_shadow(self, monkeypatch) -> None:
         _clean_strategy()
         setup = client.put("/api/strategy", json={
             "symbol": "NVDA.US",
@@ -1304,6 +1739,15 @@ class TestAPI:
             "sell_high": 225.0,
         })
         assert setup.status_code == 200
+        outcome_updates: list[dict[str, object]] = []
+        analysis_events: list[dict[str, object]] = []
+
+        class InteractionService:
+            def __init__(self, _db):
+                pass
+
+            def update_outcome(self, interaction_id, **kwargs):
+                outcome_updates.append({"interaction_id": interaction_id, **kwargs})
 
         class Advisor:
             def __init__(self, **_kwargs): pass
@@ -1333,16 +1777,36 @@ class TestAPI:
             engine = Engine()
             broker = object()
 
+            @staticmethod
+            def fresh_market_price(_symbol):
+                return 221.5
+
             def recent_price_context(self):
                 return []
 
             def execute_llm_order_decision(self, decision):
                 assert decision["order_action"] == "BUY_NOW"
                 assert decision["order_price"] == 221.5
-                return {"executed": True, "status": "FILLED", "order_id": "order-llm-1"}
+                return {
+                    "executed": False,
+                    "status": "SHADOW_ONLY",
+                    "order_id": None,
+                    "policy_code": "SHADOW_MODE",
+                    "policy_disposition": "SHADOW",
+                    "confidence": 0.82,
+                    "reference_price": 221.4,
+                    "candidate_price": 221.5,
+                    "deviation_pct": 0.045,
+                }
 
         monkeypatch.setattr(llm_api, "LLMAdvisorService", Advisor)
         monkeypatch.setattr(llm_api, "get_runner", lambda: Runner())
+        monkeypatch.setattr(llm_api, "LLMInteractionService", InteractionService)
+        monkeypatch.setattr(
+            llm_api,
+            "record_trade_event",
+            lambda *_args, **kwargs: analysis_events.append(kwargs),
+        )
 
         resp = client.post("/api/strategy/llm-interval/analyze", json={"force": True})
 
@@ -1350,8 +1814,29 @@ class TestAPI:
         data = resp.json()
         assert data["success"] is True
         assert data["order_action"] == "BUY_NOW"
-        assert data["order_status"] == "FILLED"
-        assert data["order_id"] == "order-llm-1"
+        assert data["order_status"] == "SHADOW_ONLY"
+        assert data["order_id"] is None
+        assert "shadow mode" in data["reason"].lower()
+        expected_policy_outcome = {
+            "code": "SHADOW_MODE",
+            "reference_price": 221.4,
+            "candidate_price": 221.5,
+            "deviation_pct": 0.045,
+            "confidence": 0.82,
+            "disposition": "SHADOW",
+        }
+        assert outcome_updates[0]["policy_outcome"] == expected_policy_outcome
+        event_payload = analysis_events[0]["payload"]
+        assert isinstance(event_payload, dict)
+        assert event_payload["policy_outcome"] == expected_policy_outcome
+        db = SessionLocal()
+        try:
+            config = StrategyService(db).get_config()
+            assert config.buy_low == 218.0
+            assert config.sell_high == 225.0
+            assert config.llm_reject_reason is None
+        finally:
+            db.close()
 
     def test_llm_analyze_rejects_low_confidence_immediate_order_action(self, monkeypatch) -> None:
         _clean_strategy()
@@ -1391,11 +1876,21 @@ class TestAPI:
             engine = Engine()
             broker = object()
 
+            @staticmethod
+            def fresh_market_price(_symbol):
+                return 221.5
+
             def recent_price_context(self):
                 return []
 
-            def execute_llm_order_decision(self, _decision):
-                raise AssertionError("low-confidence order action must not execute")
+            def execute_llm_order_decision(self, decision):
+                assert decision["confidence_score"] == 0.30
+                return {
+                    "executed": False,
+                    "status": "POLICY_REJECTED",
+                    "order_id": None,
+                    "reason": "confidence below threshold",
+                }
 
         monkeypatch.setattr(llm_api, "LLMAdvisorService", Advisor)
         monkeypatch.setattr(llm_api, "get_runner", lambda: Runner())
@@ -1407,7 +1902,7 @@ class TestAPI:
         assert data["success"] is True
         assert data["applied"] is False
         assert data["order_action"] == "STOP_LOSS_SELL_NOW"
-        assert data["order_status"] == "CONFIDENCE_REJECTED"
+        assert data["order_status"] == "POLICY_REJECTED"
         assert data["order_id"] is None
 
     def test_llm_interaction_history_endpoint_returns_recent_records(self) -> None:
@@ -1499,7 +1994,12 @@ class TestAPI:
 
         assert resp.status_code == 422
 
-    def test_credentials_response_hides_values(self) -> None:
+    def test_credentials_response_hides_values(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            credentials_api,
+            "get_runner",
+            lambda: SimpleNamespace(reload_credentials=lambda **_kwargs: None),
+        )
         _clean_credentials()
         client.put("/api/credentials", json={
             "longbridge_app_key": "secret_key",
@@ -1893,6 +2393,7 @@ def test_llm_analyze_returns_400_when_price_unavailable(monkeypatch) -> None:
     runner = SimpleNamespace(
         engine=Engine(),
         broker=object(),
+        fresh_market_price=lambda _symbol: None,
     )
     monkeypatch.setattr(llm_api, "get_runner", lambda: runner)
 
@@ -1901,3 +2402,36 @@ def test_llm_analyze_returns_400_when_price_unavailable(monkeypatch) -> None:
     assert resp.status_code == 400
     data = resp.json()
     assert "current price unavailable" in data["detail"]
+
+
+def test_llm_analyze_rejects_positive_but_stale_persisted_price(monkeypatch) -> None:
+    _clean_strategy()
+    with SessionLocal() as db:
+        db.add(
+            StrategyConfig(
+                symbol="AAPL.US",
+                market="US",
+                buy_low=100.0,
+                sell_high=200.0,
+            )
+        )
+        db.commit()
+
+    engine = SimpleNamespace(
+        last_price=150.0,
+        state=SimpleNamespace(value="flat"),
+    )
+    runner = SimpleNamespace(
+        engine=engine,
+        broker=object(),
+        fresh_market_price=lambda _symbol: None,
+    )
+    monkeypatch.setattr(llm_api, "get_runner", lambda: runner)
+
+    response = client.post(
+        "/api/strategy/llm-interval/analyze",
+        json={"force": True},
+    )
+
+    assert response.status_code == 400
+    assert "current price unavailable" in response.json()["detail"]

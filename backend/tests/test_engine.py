@@ -25,6 +25,17 @@ class TestStrategyEngine:
         assert result.action == "BUY"
         assert engine.state == EngineState.LONG
 
+    def test_position_addon_policy_does_not_block_initial_buy(self) -> None:
+        params = make_params(100, 200)
+        params.allow_position_addons = False
+        engine = StrategyEngine(params)
+
+        result = engine.update_price(99.0)
+
+        assert result.triggered is True
+        assert result.action == "BUY"
+        assert engine.state == EngineState.LONG
+
     def test_price_above_sell_high_from_long_triggers_sell(self) -> None:
         engine = StrategyEngine(make_params(100, 200))
         engine.state = EngineState.LONG
@@ -57,6 +68,17 @@ class TestStrategyEngine:
         result = engine.update_price(100.0)
         assert result.triggered is True
         assert result.action == "BUY"
+        assert engine.state == EngineState.LONG
+
+    def test_position_addon_policy_blocks_buy_while_long(self) -> None:
+        params = make_params(100, 200)
+        params.allow_position_addons = False
+        engine = StrategyEngine(params)
+        engine.state = EngineState.LONG
+
+        result = engine.update_price(99.0)
+
+        assert result.triggered is False
         assert engine.state == EngineState.LONG
 
     def test_sell_priority_over_add_on_buy_in_long(self) -> None:

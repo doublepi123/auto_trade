@@ -3,8 +3,10 @@ from __future__ import annotations
 
 from datetime import datetime, time, timedelta, timezone
 from decimal import Decimal
+from types import SimpleNamespace
 
 from app.core.broker import BrokerOrder
+from app.core.engine import StrategyParams
 from app.core.market_calendar import trade_day_for
 from app.database import SessionLocal
 from app.models import OrderRecord, TradeEvent
@@ -88,6 +90,202 @@ class TestTradeEventSync:
             assert event.status == "SUBMITTED"
         finally:
             db.close()
+
+    def test_terminal_sync_replaces_pre_execution_timestamp(self) -> None:
+        _clean()
+        submitted_at = datetime.now(timezone.utc) - timedelta(minutes=3)
+        executed_at = submitted_at + timedelta(minutes=2)
+        with SessionLocal() as db:
+            db.add(
+                OrderRecord(
+                    broker_order_id="late-fill",
+                    symbol="NVDA.US",
+                    side="BUY",
+                    quantity=10.0,
+                    price=220.0,
+                    executed_quantity=None,
+                    executed_price=None,
+                    status="SUBMITTED",
+                    created_at=submitted_at,
+                    # Simulates the legacy parser bug that treated updated_at
+                    # from an unfilled order as its fill timestamp.
+                    filled_at=submitted_at,
+                )
+            )
+            db.commit()
+
+        class Broker:
+            def get_today_orders(self) -> list[BrokerOrder]:
+                return [
+                    BrokerOrder(
+                        broker_order_id="late-fill",
+                        symbol="NVDA.US",
+                        side="BUY",
+                        quantity=Decimal("10"),
+                        price=Decimal("220"),
+                        executed_quantity=Decimal("10"),
+                        executed_price=Decimal("221"),
+                        status="FILLED",
+                        created_at=submitted_at,
+                        filled_at=executed_at,
+                    )
+                ]
+
+        runner = AppRunner()
+        runner.broker = Broker()
+
+        assert runner.sync_today_orders_from_broker(force=True) == 1
+
+        with SessionLocal() as db:
+            order = (
+                db.query(OrderRecord)
+                .filter(OrderRecord.broker_order_id == "late-fill")
+                .one()
+            )
+            normalized = order.filled_at
+            assert normalized is not None
+            if normalized.tzinfo is None:
+                normalized = normalized.replace(tzinfo=timezone.utc)
+            assert normalized == executed_at
+
+    def test_periodic_sync_latches_non_primary_live_order_globally(self) -> None:
+        _clean()
+        created_at = datetime.now(timezone.utc)
+
+        class Broker:
+            def get_today_orders(self) -> list[BrokerOrder]:
+                return [
+                    BrokerOrder(
+                        broker_order_id="external-nvda-1",
+                        symbol="NVDA.US",
+                        side="BUY",
+                        quantity=Decimal("2"),
+                        price=Decimal("220"),
+                        executed_quantity=Decimal("0"),
+                        executed_price=Decimal("0"),
+                        status="SUBMITTED",
+                        created_at=created_at,
+                        filled_at=None,
+                    )
+                ]
+
+        runner = AppRunner()
+        runner.engine.params = StrategyParams(symbol="AAPL.US", market="US")
+        runner.broker = Broker()
+
+        assert runner.sync_today_orders_from_broker() == 1
+
+        assert runner.risk.paused is True
+        assert runner.risk.pause_reason.startswith("ORDER_RECONCILIATION_UNCERTAIN:")
+        assert "NVDA.US=[external-nvda-1]" in runner.risk.pause_reason
+        assert runner.risk.check().approved is False
+        # Broker-only orders are globally latched but never promoted into a
+        # manageable pending order without local submission provenance.
+        assert runner._trade_svc.pending_order_ids() == []
+        assert runner.diagnostics()["pending_order_ids"] == ["external-nvda-1"]
+
+    def test_periodic_sync_preserves_and_latches_two_live_ids_for_same_symbol(self) -> None:
+        _clean()
+        created_at = datetime.now(timezone.utc)
+
+        class Broker:
+            def get_today_orders(self) -> list[BrokerOrder]:
+                return [
+                    BrokerOrder(
+                        broker_order_id=order_id,
+                        symbol="AAPL.US",
+                        side="BUY",
+                        quantity=Decimal("2"),
+                        price=Decimal("100"),
+                        executed_quantity=Decimal("0"),
+                        executed_price=Decimal("0"),
+                        status="SUBMITTED",
+                        created_at=created_at,
+                        filled_at=None,
+                    )
+                    for order_id in ("double-live-1", "double-live-2")
+                ]
+
+        runner = AppRunner()
+        runner.engine.params = StrategyParams(symbol="AAPL.US", market="US")
+        runner.broker = Broker()
+
+        assert runner.sync_today_orders_from_broker() == 2
+
+        assert runner.risk.paused is True
+        assert runner.risk.pause_reason.startswith("ORDER_RECONCILIATION_UNCERTAIN:")
+        assert "double-live-1" in runner.risk.pause_reason
+        assert "double-live-2" in runner.risk.pause_reason
+        assert runner._trade_svc.pending_order_ids() == []
+        assert runner._trade_svc.pending_order_inventory() == {}
+        assert runner.diagnostics()["pending_order_ids"] == [
+            "double-live-1",
+            "double-live-2",
+        ]
+
+    def test_sync_latches_live_order_that_cannot_be_represented(self) -> None:
+        _clean()
+
+        class Broker:
+            def get_today_orders(self) -> list[object]:
+                return [
+                    SimpleNamespace(
+                        broker_order_id="bad-live-1",
+                        symbol="AAPL.US",
+                        side="BUY",
+                        quantity=0,
+                        price=float("nan"),
+                        executed_quantity=0,
+                        executed_price=0,
+                        status="SUBMITTED",
+                    )
+                ]
+
+        runner = AppRunner()
+        runner.engine.params = StrategyParams(symbol="AAPL.US", market="US")
+        runner.broker = Broker()
+
+        assert runner.sync_today_orders_from_broker() == 0
+
+        assert runner.risk.paused is True
+        assert runner.risk.pause_reason.startswith("ORDER_RECONCILIATION_UNCERTAIN:")
+        assert "bad-live-1" in runner.risk.pause_reason
+        assert "invalid quantity" in runner.risk.pause_reason
+        assert "invalid price" in runner.risk.pause_reason
+        diagnostics = runner.diagnostics()
+        assert diagnostics["pending_order_ids"] == ["bad-live-1"]
+        assert diagnostics["unrepresentable_live_order_issues"]
+
+    def test_sync_latches_unrepresentable_live_row_already_in_database(self) -> None:
+        _clean()
+        with SessionLocal() as db:
+            db.add(
+                OrderRecord(
+                    broker_order_id="db-bad-live-1",
+                    symbol="AAPL.US",
+                    side="BUY",
+                    quantity=0,
+                    price=100,
+                    status="SUBMITTED",
+                )
+            )
+            db.commit()
+
+        class Broker:
+            def get_today_orders(self) -> list[BrokerOrder]:
+                return []
+
+        runner = AppRunner()
+        runner.engine.params = StrategyParams(symbol="AAPL.US", market="US")
+        runner.broker = Broker()
+
+        assert runner.sync_today_orders_from_broker() == 0
+
+        assert runner.risk.paused is True
+        assert "db-bad-live-1" in runner.risk.pause_reason
+        assert "invalid quantity" in runner.risk.pause_reason
+        assert runner._trade_svc.pending_order_ids() == []
+        assert runner.diagnostics()["pending_order_ids"] == ["db-bad-live-1"]
 
     def test_sync_today_orders_records_terminal_status_change_event(self) -> None:
         _clean()

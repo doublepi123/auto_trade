@@ -4,9 +4,11 @@ from __future__ import annotations
 import os
 from types import SimpleNamespace
 
+import pytest
+
 from app import runner as runner_module
 from app.models import CredentialConfig
-from app.runner import AppRunner
+from app.runner import AppRunner, CredentialSwitchBlockedError
 
 
 class FakeSession:
@@ -63,10 +65,11 @@ class FakeBrokerGateway:
     def unsubscribe_quotes(self) -> None:
         self.subscriptions.clear()
 
+    def get_positions(self) -> list[object]:
+        return []
 
-class FailingSubscribeBrokerGateway(FakeBrokerGateway):
-    def subscribe_quotes(self, symbol: str, callback: object) -> None:
-        raise RuntimeError("subscribe failed")
+    def get_today_orders(self) -> list[object]:
+        return []
 
 
 class FakeNotifier:
@@ -160,7 +163,6 @@ class TestRunnerCredentials:
 
         runner = AppRunner()
         old_broker = runner.broker
-        runner._running = True
         runner._quotes_subscribed = False
         runner.engine.params.symbol = "AAPL.US"
 
@@ -171,9 +173,9 @@ class TestRunnerCredentials:
         assert os.environ.get("LONGPORT_APP_SECRET") == "reload-secret"
         assert os.environ.get("LONGPORT_ACCESS_TOKEN") == "reload-token"
         assert runner.notifier.sct_key == "reloadsct"
-        assert runner.broker.subscriptions[0][0] == "AAPL.US"
+        assert runner._quotes_subscribed is False
 
-    def test_reload_credentials_keeps_broker_and_notifier_when_resubscribe_fails(self, monkeypatch) -> None:
+    def test_reload_credentials_rejects_identity_change_while_running(self, monkeypatch) -> None:
         credential = CredentialConfig(
             longbridge_app_key="reload-key",
             longbridge_app_secret="reload-secret",
@@ -181,7 +183,7 @@ class TestRunnerCredentials:
             sct_key="reloadsct",
         )
 
-        monkeypatch.setattr(runner_module, "BrokerGateway", FailingSubscribeBrokerGateway)
+        monkeypatch.setattr(runner_module, "BrokerGateway", FakeBrokerGateway)
         monkeypatch.setattr(runner_module, "ServerChanNotifier", FakeNotifier)
         monkeypatch.setattr(runner_module, "SessionLocal", lambda: FakeSession(credential))
 
@@ -191,7 +193,8 @@ class TestRunnerCredentials:
         runner._running = True
         runner.engine.params.symbol = "AAPL.US"
 
-        runner.reload_credentials()
+        with pytest.raises(CredentialSwitchBlockedError, match="runner must be stopped"):
+            runner.reload_credentials()
 
         assert runner.broker is old_broker
         assert runner.notifier is old_notifier

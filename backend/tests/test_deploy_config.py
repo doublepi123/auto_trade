@@ -79,6 +79,52 @@ def test_env_example_documents_llm_provider_keys() -> None:
     assert "MINIMAX_API_KEY=" in env_example
 
 
+def test_deploy_files_expose_p0_hard_safety_controls() -> None:
+    compose = (ROOT / "docker-compose.yaml").read_text(encoding="utf-8")
+    dockerhub = (ROOT / "docker-compose.dockerhub.yaml").read_text(encoding="utf-8")
+    env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
+    keys = {
+        "AUTO_TRADE_LLM_SHADOW_MODE",
+        "AUTO_TRADE_LLM_MAX_ORDER_PRICE_DEVIATION_PCT",
+        "AUTO_TRADE_LLM_MAX_INTERVAL_BOUND_DEVIATION_PCT",
+        "AUTO_TRADE_HARD_ALLOW_POSITION_ADDONS",
+        "AUTO_TRADE_HARD_MAX_POSITION_QUANTITY",
+        "AUTO_TRADE_HARD_MAX_POSITION_NOTIONAL",
+        "AUTO_TRADE_HARD_MAX_RISK_PER_TRADE",
+        "AUTO_TRADE_HARD_STOP_LOSS_PCT",
+        "AUTO_TRADE_HARD_MAX_HOLDING_MINUTES",
+        "AUTO_TRADE_HARD_ENTRY_CUTOFF_MINUTES_BEFORE_CLOSE",
+        "AUTO_TRADE_HARD_FLATTEN_MINUTES_BEFORE_CLOSE",
+    }
+    for key in keys:
+        assert f"{key}=" in compose
+        assert f"{key}=" in dockerhub
+        assert f"{key}=" in env_example
+
+    # The backend keeps a false-by-default defence-in-depth flag, but P0
+    # schema and migration policy unconditionally disable short entries. Do
+    # not advertise this internal flag as an operator-supported bypass.
+    assert "AUTO_TRADE_ALLOW_SHORT_ENTRIES=" in compose
+    assert "AUTO_TRADE_ALLOW_SHORT_ENTRIES=" in dockerhub
+    assert "AUTO_TRADE_ALLOW_SHORT_ENTRIES=" not in env_example
+
+
+def test_compose_healthchecks_use_strict_readiness_endpoint() -> None:
+    for filename in ("docker-compose.yaml", "docker-compose.dockerhub.yaml"):
+        compose = (ROOT / filename).read_text(encoding="utf-8")
+        healthcheck = compose.split("healthcheck:", maxsplit=1)[1].split(
+            "restart:", maxsplit=1
+        )[0]
+        assert "/api/ready" in healthcheck
+        assert "/api/health" not in healthcheck
+
+
+def test_env_example_defaults_deployments_to_production_mode() -> None:
+    env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
+
+    assert env_example.startswith("AUTO_TRADE_ENV=prod\n")
+
+
 def test_docker_compose_publishes_frontend_loopback_by_default_and_keeps_backend_private() -> None:
     compose = (ROOT / "docker-compose.yaml").read_text(encoding="utf-8")
     backend_block = compose.split("\n  frontend:", maxsplit=1)[0]

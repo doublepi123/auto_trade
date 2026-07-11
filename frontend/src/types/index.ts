@@ -16,6 +16,15 @@ export interface StrategyConfig {
   llm_action_cooldown_seconds: number
   trading_session_mode: 'ANY' | 'RTH_ONLY'
   margin_safety_factor: number
+  allow_position_addons: boolean
+  max_position_quantity: number
+  max_position_notional: number
+  max_risk_per_trade: number
+  stop_loss_pct: number
+  max_holding_minutes: number
+  entry_cutoff_minutes_before_close: number
+  flatten_minutes_before_close: number
+  llm_order_execution_enabled: boolean
   report_schedule_enabled: boolean
   report_schedule_interval_hours: number
   report_schedule_symbol: string
@@ -62,6 +71,9 @@ export interface StatusData {
   last_action_message: string
   trading_session_mode: 'ANY' | 'RTH_ONLY'
   is_trading_hours: boolean
+  execution_state: 'IDLE' | 'REDUCING'
+  reduction_reason: string
+  reduction_started_at: string | null
 }
 
 export interface StatusHistoryPoint {
@@ -109,6 +121,8 @@ export interface QuoteQuality {
   has_quote: boolean
   price_positive: boolean
   spread_reasonable: boolean
+  last_bbo_consistent: boolean
+  source_timestamp_fresh: boolean
   last_price?: number | null
   bid?: number | null
   ask?: number | null
@@ -118,6 +132,7 @@ export interface DiagnosticSymbolRuntime {
   symbol: string
   market: string
   is_primary: boolean
+  trading_enabled: boolean
   engine_state: string
   last_price: number
   last_trigger_price: number
@@ -126,12 +141,32 @@ export interface DiagnosticSymbolRuntime {
   quote_quality?: QuoteQuality | null
 }
 
+export interface DiagnosticLiveSafety {
+  short_entries_enabled: boolean
+  allow_position_addons: boolean
+  max_position_quantity: number
+  max_position_notional: number
+  max_risk_per_trade: number
+  stop_loss_pct: number
+  max_holding_minutes: number
+  entry_cutoff_minutes_before_close: number
+  flatten_minutes_before_close: number
+  llm_shadow_mode: boolean
+  llm_order_execution_enabled: boolean
+}
+
 export interface DiagnosticsResponse {
   runner_running: boolean
   thread_alive: boolean
   quotes_subscribed: boolean
   trigger_in_flight: boolean
   pending_order_symbols: string[]
+  pending_order_ids: string[]
+  unrepresentable_live_order_issues: string[]
+  order_sync_succeeded: boolean
+  execution_state: 'IDLE' | 'REDUCING'
+  reduction_reason: string
+  live_safety: DiagnosticLiveSafety
   quote_stream: DiagnosticQuoteStream
   risk: DiagnosticRiskState
   symbol_runtimes: DiagnosticSymbolRuntime[]
@@ -303,11 +338,17 @@ export interface LLMSymbolStatus {
 
 export interface LLMIntervalStatus {
   enabled: boolean
+  shadow_mode: boolean
+  policy_status: 'SHADOW' | 'LIVE'
   interval_minutes: number
   last_analysis_at: string | null
   next_analysis_at: string | null
   current_suggestion: LLMSuggestion | null
   applied_values: {
+    buy_low: number
+    sell_high: number
+  } | null
+  last_applied_values: {
     buy_low: number
     sell_high: number
   } | null

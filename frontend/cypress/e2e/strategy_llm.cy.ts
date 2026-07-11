@@ -42,20 +42,11 @@ describe('Strategy LLM Card', () => {
     cy.contains('198.80').should('be.visible')
   })
 
-  it('shows apply button after successful preview', () => {
+  it('keeps successful preview read-only', () => {
     cy.get('input[placeholder="例如 AAPL.US"]').first().clear().type('AAPL.US')
     cy.contains('button', '预览分析').click()
     cy.wait('@previewLLMInterval')
-    cy.contains('应用到策略并保存').should('be.visible')
-  })
-
-  it('applies preview result to strategy form on confirm', () => {
-    cy.get('input[placeholder="例如 AAPL.US"]').first().clear().type('AAPL.US')
-    cy.contains('button', '预览分析').click()
-    cy.wait('@previewLLMInterval')
-    cy.contains('应用到策略并保存').click()
-    cy.wait('@saveStrategy')
-    cy.contains('已保存').should('be.visible')
+    cy.contains('应用到策略并保存').should('not.exist')
   })
 
   it('shows error on preview failure', () => {
@@ -78,16 +69,4 @@ describe('Strategy LLM Card', () => {
     cy.contains('无法获取行情数据').should('be.visible')
   })
 
-  it('does not report success when applying preview save fails', () => {
-    cy.intercept('PUT', '/api/strategy', { statusCode: 500, body: { detail: 'save failed' } }).as('saveStrategyFail')
-
-    cy.get('input[placeholder="例如 AAPL.US"]').first().clear().type('AAPL.US')
-    cy.contains('button', '预览分析').click()
-    cy.wait('@previewLLMInterval')
-    cy.contains('应用到策略并保存').click()
-    cy.wait('@saveStrategyFail')
-    cy.contains('已将 LLM 建议应用到策略并保存').should('not.exist')
-    cy.contains('保存失败').should('be.visible')
-    cy.contains('应用到策略并保存').should('be.visible')
-  })
 })

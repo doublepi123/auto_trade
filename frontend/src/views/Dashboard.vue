@@ -75,8 +75,8 @@
         </div>
         <div class="strip-item">
           <span>交易状态</span>
-          <strong>{{ status.paused ? '已暂停' : '运行中' }}</strong>
-          <small>{{ status.kill_switch ? '紧急停止开启' : '紧急停止关闭' }}</small>
+          <strong>{{ status.kill_switch ? '紧急停止' : status.execution_state === 'REDUCING' ? '减仓中' : status.paused ? '已暂停' : '运行中' }}</strong>
+          <small :title="status.reduction_reason">{{ status.kill_switch ? '紧急停止开启' : status.execution_state === 'REDUCING' ? '保护性退出处理中' : '紧急停止关闭' }}</small>
         </div>
         <div class="strip-item">
           <span>引擎状态</span>
@@ -85,7 +85,7 @@
         </div>
         <div class="strip-item">
           <span>LLM</span>
-          <strong>{{ llmStatus?.enabled ? `${llmStatus.interval_minutes}m 自动` : '未启用' }}</strong>
+          <strong>{{ llmStatus?.enabled ? `${llmStatus.interval_minutes}m ${llmStatus.shadow_mode ? '影子' : '自动'}` : '未启用' }}</strong>
           <small>{{ llmStatus?.last_analysis_at ? formatTime(llmStatus.last_analysis_at) : '暂无刷新' }}</small>
         </div>
         <div class="strip-item">
@@ -221,7 +221,12 @@
         <section class="cockpit-panel llm-panel" data-testid="llm-panel" v-loading="llmStatusLoading">
           <div class="panel-heading">
             <span>LLM 智能区间</span>
-            <el-tag :type="llmStatus?.enabled ? 'success' : 'info'" effect="plain">{{ llmStatus?.enabled ? '已启用' : '已禁用' }}</el-tag>
+            <div style="display: flex; align-items: center; gap: 8px">
+              <el-tag v-if="llmStatus" data-testid="llm-policy-mode" :type="llmStatus.shadow_mode ? 'warning' : 'success'" effect="plain">
+                {{ llmStatus.shadow_mode ? '影子观察' : '实盘应用' }}
+              </el-tag>
+              <el-tag :type="llmStatus?.enabled ? 'success' : 'info'" effect="plain">{{ llmStatus?.enabled ? '已启用' : '已禁用' }}</el-tag>
+            </div>
           </div>
           <template v-if="llmStatus">
             <template v-if="llmStatus.current_suggestion">
@@ -238,6 +243,7 @@
               <div class="llm-apply-state">
                 <el-tag v-if="llmStatus.applied_values" type="success" effect="plain">已应用</el-tag>
                 <span v-if="llmStatus.applied_values">当前 {{ llmStatus.applied_values.buy_low.toFixed(2) }} ~ {{ llmStatus.applied_values.sell_high.toFixed(2) }}</span>
+                <span v-else-if="llmStatus.shadow_mode && llmStatus.last_applied_values">历史实盘应用 {{ llmStatus.last_applied_values.buy_low.toFixed(2) }} ~ {{ llmStatus.last_applied_values.sell_high.toFixed(2) }}</span>
                 <span v-else-if="llmStatus.reject_reason">未应用：{{ llmStatus.reject_reason }}</span>
               </div>
             </template>
@@ -311,8 +317,8 @@
               <span id="quick-actions-heading">操作控制</span>
               <p class="panel-caption">全局控制，作用于全部标的运行时</p>
             </div>
-            <el-tag :type="status.kill_switch ? 'danger' : status.paused ? 'warning' : 'success'" effect="plain">
-              {{ status.kill_switch ? '紧急停止' : status.paused ? '暂停中' : '可交易' }}
+            <el-tag :type="status.kill_switch ? 'danger' : status.execution_state === 'REDUCING' || status.paused ? 'warning' : 'success'" effect="plain">
+              {{ status.kill_switch ? '紧急停止' : status.execution_state === 'REDUCING' ? '减仓中' : status.paused ? '暂停中' : '可交易' }}
             </el-tag>
           </div>
           <div class="action-grid">
@@ -435,6 +441,51 @@
             <small>运行时总数 {{ diagnostics.symbol_runtimes.length }} 个</small>
             <small>{{ diagnostics.trigger_in_flight ? '触发处理中' : '空闲' }}</small>
           </div>
+        </div>
+
+        <div class="live-safety" data-testid="dashboard-live-safety">
+          <h5>实时安全参数</h5>
+          <el-descriptions :column="isMobile ? 1 : 3" border size="small">
+            <el-descriptions-item label="做空开仓">
+              <el-tag :type="diagnostics.live_safety.short_entries_enabled ? 'danger' : 'success'" size="small">
+                {{ diagnostics.live_safety.short_entries_enabled ? '允许' : '关闭' }}
+              </el-tag>
+            </el-descriptions-item>
+            <el-descriptions-item label="持仓加码">
+              <el-tag :type="diagnostics.live_safety.allow_position_addons ? 'warning' : 'success'" size="small">
+                {{ diagnostics.live_safety.allow_position_addons ? '允许' : '关闭' }}
+              </el-tag>
+            </el-descriptions-item>
+            <el-descriptions-item label="LLM 模式">
+              <el-tag :type="diagnostics.live_safety.llm_shadow_mode ? 'info' : 'warning'" size="small">
+                {{ diagnostics.live_safety.llm_shadow_mode ? '影子' : '实时' }}
+              </el-tag>
+              <span class="safety-inline-note">
+                {{ diagnostics.live_safety.llm_order_execution_enabled ? '可下单' : '禁下单' }}
+              </span>
+            </el-descriptions-item>
+            <el-descriptions-item label="最大持仓数量">
+              {{ formatNumber(diagnostics.live_safety.max_position_quantity) }}
+            </el-descriptions-item>
+            <el-descriptions-item label="最大持仓市值">
+              ${{ formatNumber(diagnostics.live_safety.max_position_notional) }}
+            </el-descriptions-item>
+            <el-descriptions-item label="单笔最大风险">
+              ${{ formatNumber(diagnostics.live_safety.max_risk_per_trade) }}
+            </el-descriptions-item>
+            <el-descriptions-item label="止损阈值">
+              {{ formatNumber(diagnostics.live_safety.stop_loss_pct) }}%
+            </el-descriptions-item>
+            <el-descriptions-item label="最长持仓">
+              {{ diagnostics.live_safety.max_holding_minutes }} 分钟
+            </el-descriptions-item>
+            <el-descriptions-item label="停止开仓">
+              收盘前 {{ diagnostics.live_safety.entry_cutoff_minutes_before_close }} 分钟
+            </el-descriptions-item>
+            <el-descriptions-item label="强制平仓">
+              收盘前 {{ diagnostics.live_safety.flatten_minutes_before_close }} 分钟
+            </el-descriptions-item>
+          </el-descriptions>
         </div>
 
         <el-table :data="diagnostics.symbol_runtimes" size="small" class="responsive-table">
@@ -1460,6 +1511,23 @@ function severityType(s: string): string {
   margin-top: 4px;
   color: #172033;
   font-size: 16px;
+}
+
+.live-safety {
+  margin-bottom: 14px;
+}
+
+.live-safety h5 {
+  margin: 0 0 8px;
+  color: #334155;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.safety-inline-note {
+  margin-left: 8px;
+  color: #64748b;
+  font-size: 12px;
 }
 
 .mini-grid,

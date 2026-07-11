@@ -51,6 +51,17 @@ def test_half_day_flags_christmas_eve_hk():
     assert is_half_day("HK", date(2024, 7, 2)) is False
 
 
+def test_nyse_2026_and_2027_early_closes_match_official_calendar():
+    # NYSE/ICE publishes only these 2026/2027 cash-equity early closes.
+    assert is_half_day("US", date(2026, 11, 27)) is True
+    assert is_half_day("US", date(2026, 12, 24)) is True
+    assert is_half_day("US", date(2027, 11, 26)) is True
+
+    # 2026-07-02 is a regular cash-equity session. The 14:00 early close
+    # announced for that date applies to the bond market, not NYSE equities.
+    assert is_half_day("US", date(2026, 7, 2)) is False
+
+
 def test_list_closures_filters_by_market_and_year():
     items = list_closures("US", 2025)
     assert all(item["market"] == "US" for item in items)
@@ -87,11 +98,23 @@ def test_next_session_open_skips_holidays():
 
 
 def test_2027_holidays_loaded():
-    """2027 data must be present so the API bound is honest."""
+    """The complete official NYSE 2027 closure set backs the API bound."""
     from app.core.holiday_calendar import COVERAGE_END_YEAR, list_closures
+
     assert COVERAGE_END_YEAR == 2027
     us_2027 = list_closures("US", 2027)
-    assert len(us_2027) >= 9, f"expected at least 9 NYSE closures in 2027, got {len(us_2027)}"
+    assert {item["date"] for item in us_2027} == {
+        "2027-01-01",
+        "2027-01-18",
+        "2027-02-15",
+        "2027-03-26",
+        "2027-05-31",
+        "2027-06-18",
+        "2027-07-05",
+        "2027-09-06",
+        "2027-11-25",
+        "2027-12-24",
+    }
     hk_2027 = list_closures("HK", 2027)
     assert len(hk_2027) >= 10, f"expected at least 10 HKEX closures in 2027, got {len(hk_2027)}"
 

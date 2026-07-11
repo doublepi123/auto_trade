@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 from app.core.market_calendar import (
     get_session,
+    is_closing_window,
     is_trading_hours,
     next_session_open,
     trade_day_for,
@@ -98,6 +99,60 @@ class TestNextSessionOpen:
         next_open = next_session_open("US", rth_instant)
         # Next open is the following business day 09:30 ET
         assert next_open.date() > rth_instant.date()
+
+
+class TestClosingWindow:
+    def test_us_regular_session_boundary(self) -> None:
+        assert not is_closing_window(
+            "US",
+            15,
+            datetime(2026, 5, 22, 19, 44, tzinfo=timezone.utc),
+        )
+        assert is_closing_window(
+            "US",
+            15,
+            datetime(2026, 5, 22, 19, 45, tzinfo=timezone.utc),
+        )
+
+    def test_us_half_day_uses_one_pm_close(self) -> None:
+        assert is_closing_window(
+            "US",
+            15,
+            datetime(2026, 11, 27, 17, 50, tzinfo=timezone.utc),
+        )
+        assert not is_trading_hours(
+            "US",
+            datetime(2026, 11, 27, 18, 0, tzinfo=timezone.utc),
+        )
+
+    def test_us_2027_half_day_uses_one_pm_close(self) -> None:
+        assert is_closing_window(
+            "US",
+            15,
+            datetime(2027, 11, 26, 17, 50, tzinfo=timezone.utc),
+        )
+        assert not is_trading_hours(
+            "US",
+            datetime(2027, 11, 26, 18, 0, tzinfo=timezone.utc),
+        )
+
+    def test_us_july_2_2026_remains_a_regular_session(self) -> None:
+        assert is_trading_hours(
+            "US",
+            datetime(2026, 7, 2, 17, 30, tzinfo=timezone.utc),
+        )
+        assert not is_closing_window(
+            "US",
+            15,
+            datetime(2026, 7, 2, 17, 30, tzinfo=timezone.utc),
+        )
+
+    def test_hk_lunch_is_not_closing_window(self) -> None:
+        assert not is_closing_window(
+            "HK",
+            15,
+            datetime(2026, 5, 22, 4, 0, tzinfo=timezone.utc),
+        )
 
 
 def test_session_metadata() -> None:

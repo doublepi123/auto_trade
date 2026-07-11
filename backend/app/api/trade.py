@@ -6,9 +6,10 @@ import threading
 import time
 import json
 import logging
+import math
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any, List, Optional
+from typing import Any, List, Optional, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy.orm import Session
@@ -28,6 +29,26 @@ router = APIRouter(prefix="/api", tags=["trade"])
 logger = logging.getLogger("auto_trade.trade")
 
 _LIVE_ORDER_STATUSES = {"SUBMITTED", "PARTIAL_FILLED"}
+_TERMINAL_ORDER_STATUSES = {"FILLED", "REJECTED", "CANCELLED"}
+_ORDER_STATUS_RANK = {
+    "SUBMITTED": 1,
+    "PARTIAL_FILLED": 2,
+    "REJECTED": 3,
+    "CANCELLED": 3,
+    "FILLED": 4,
+}
+
+
+def _merge_order_status(current_status: str, incoming_status: str) -> str:
+    current = str(current_status or "").upper()
+    incoming = str(incoming_status or "").upper()
+    if (
+        incoming == current
+        or _ORDER_STATUS_RANK.get(incoming, 0) > _ORDER_STATUS_RANK.get(current, 0)
+    ):
+        return incoming
+    return current
+
 
 def _control_scope_snapshot(runner: Any) -> dict[str, Any]:
     primary_symbol = getattr(getattr(getattr(runner, "engine", None), "params", None), "symbol", "") or ""
@@ -39,6 +60,14 @@ def _control_scope_snapshot(runner: Any) -> dict[str, Any]:
         "affected_symbols": symbols,
         "runtime_count": len(symbols),
     }
+
+
+def _pause_for_manual_control(runner: Any, reason: str) -> None:
+    pause_without_overwrite = getattr(runner, "pause_for_manual_control", None)
+    if callable(pause_without_overwrite):
+        pause_without_overwrite(reason)
+        return
+    runner.risk.pause(reason)
 
 
 def _record_control_trace(
@@ -67,7 +96,6 @@ def _record_control_trace(
         logger.exception("failed to record control trace for %s", event_type)
     finally:
         db.close()
-_TERMINAL_ORDER_STATUSES = {"FILLED", "REJECTED", "CANCELLED"}
 
 
 def _is_today(value: datetime | None) -> bool:
@@ -147,7 +175,7 @@ def _order_event_type_for_status(status: str) -> str:
 
 
 def _update_local_order_from_status(db: Session, order_id: str, status_result: Any) -> None:
-    status = str(getattr(status_result, "status", "CANCELLED"))
+    incoming_status = str(getattr(status_result, "status", "") or "").upper()
     order = (
         db.query(OrderRecord)
         .filter(OrderRecord.broker_order_id == order_id)
@@ -155,12 +183,13 @@ def _update_local_order_from_status(db: Session, order_id: str, status_result: A
         .first()
     )
     if order is None:
+        event_status = incoming_status or "UNKNOWN"
         record_trade_event(
             db,
-            event_type=_order_event_type_for_status(status),
+            event_type=_order_event_type_for_status(event_status),
             broker_order_id=order_id,
-            status=status,
-            message=f"broker order cancel returned status {status}",
+            status=event_status,
+            message=f"broker order cancel returned status {event_status}",
             payload={
                 "source": "order_cancel_api",
                 "executed_quantity": _float_attr(status_result, "executed_quantity"),
@@ -169,17 +198,37 @@ def _update_local_order_from_status(db: Session, order_id: str, status_result: A
         )
         db.commit()
         return
-    old_status = order.status
+    old_status = str(order.status or "").upper()
     old_executed_quantity = order.executed_quantity
     old_executed_price = order.executed_price
-    order.status = status
+    effective_status = _merge_order_status(old_status, incoming_status)
+    order.status = effective_status
     executed_quantity = _float_attr(status_result, "executed_quantity")
     executed_price = _float_attr(status_result, "executed_price")
-    if executed_quantity is not None:
-        order.executed_quantity = executed_quantity
-    if executed_price is not None:
+    current_executed_quantity = float(old_executed_quantity or 0)
+    valid_executed_quantity = (
+        executed_quantity
+        if executed_quantity is not None
+        and math.isfinite(executed_quantity)
+        and executed_quantity >= 0
+        else 0.0
+    )
+    merged_executed_quantity = max(current_executed_quantity, valid_executed_quantity)
+    if merged_executed_quantity > 0 or old_executed_quantity is not None:
+        order.executed_quantity = merged_executed_quantity
+
+    quantity_advanced = valid_executed_quantity > current_executed_quantity
+    incoming_status_not_regressed = incoming_status == effective_status
+    if (
+        executed_price is not None
+        and math.isfinite(executed_price)
+        and executed_price > 0
+        and valid_executed_quantity > 0
+        and valid_executed_quantity >= current_executed_quantity
+        and (quantity_advanced or incoming_status_not_regressed)
+    ):
         order.executed_price = executed_price
-    if status == "FILLED":
+    if effective_status == "FILLED" and order.filled_at is None:
         order.filled_at = datetime.now(timezone.utc)
     changed = (
         old_status != order.status
@@ -189,15 +238,20 @@ def _update_local_order_from_status(db: Session, order_id: str, status_result: A
     if changed:
         record_trade_event(
             db,
-            event_type=_order_event_type_for_status(status),
+            event_type=_order_event_type_for_status(effective_status),
             symbol=order.symbol,
             broker_order_id=order_id,
             side=order.side,
-            status=status,
-            message=f"order status changed from {old_status} to {status}",
+            status=effective_status,
+            message=(
+                f"order status changed from {old_status} to {effective_status}"
+                if old_status != effective_status
+                else f"order execution changed while status remained {effective_status}"
+            ),
             payload={
                 "source": "order_cancel_api",
                 "old_status": old_status,
+                "incoming_status": incoming_status,
                 "old_executed_quantity": old_executed_quantity,
                 "old_executed_price": old_executed_price,
                 "executed_quantity": order.executed_quantity,
@@ -693,8 +747,12 @@ def stop_runner(
     try:
         runner = get_runner()
         control_scope = _control_scope_snapshot(runner)
-        runner.risk.pause("manual")
-        get_runner().stop()
+        prepare_stop = getattr(runner, "prepare_stop", None)
+        if callable(prepare_stop):
+            prepare_stop(payload.reason or "manual")
+        else:
+            _pause_for_manual_control(runner, payload.reason or "manual")
+        runner.stop()
         svc = StrategyService(db)
         svc.update_primary_runtime_state(
             paused=True,
@@ -747,7 +805,7 @@ def pause_trading(
     try:
         runner = get_runner()
         control_scope = _control_scope_snapshot(runner)
-        runner.risk.pause(payload.reason)
+        _pause_for_manual_control(runner, payload.reason)
         svc = StrategyService(db)
         svc.update_primary_runtime_state(
             paused=True,
@@ -799,7 +857,15 @@ def resume_trading(
     try:
         runner = get_runner()
         control_scope = _control_scope_snapshot(runner)
-        runner.risk.resume()
+        resume_with_gate = getattr(runner, "resume_after_verification", None)
+        if callable(resume_with_gate):
+            resume_safe, resume_error = cast(tuple[bool, str], resume_with_gate())
+        else:
+            resume_safe, resume_error = runner.verify_operational_resume()
+        if not resume_safe:
+            raise HTTPException(status_code=409, detail=resume_error)
+        if not callable(resume_with_gate):
+            runner.risk.resume()
         svc = StrategyService(db)
         svc.update_primary_runtime_state(paused=False, pause_reason="", paused_at=None, pause_auto_resumable=False)
         detail = control_scope
@@ -847,8 +913,12 @@ def kill_switch(
     try:
         runner = get_runner()
         control_scope = _control_scope_snapshot(runner)
-        runner.risk.pause(payload.reason)
-        runner.risk.enable_kill_switch(payload.reason)
+        activate_kill = getattr(runner, "activate_kill_switch", None)
+        if callable(activate_kill):
+            activate_kill(payload.reason)
+        else:
+            _pause_for_manual_control(runner, payload.reason)
+            runner.risk.enable_kill_switch(payload.reason)
         try:
             runner.notifier.notify_risk_event("KILL_SWITCH", payload.reason, severity="CRITICAL")
         except Exception as exc:

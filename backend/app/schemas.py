@@ -21,6 +21,14 @@ def _normalize_symbol(value: str) -> str:
     return symbol
 
 
+def _validate_symbol_market_pair(symbol: str, market: str) -> None:
+    suffix = symbol.rsplit(".", 1)[-1]
+    if suffix != market:
+        raise ValueError(
+            f"symbol suffix .{suffix} does not match market {market}"
+        )
+
+
 class StrategyConfigSchema(BaseModel):
     # Reject unknown keys so the API surface stays closed: a typo
     # such as ``buyLown`` (camelCase) is a 422 instead of a silent
@@ -29,13 +37,13 @@ class StrategyConfigSchema(BaseModel):
     model_config = ConfigDict(extra="forbid")
     symbol: str = Field(default="", max_length=50)
     market: str = Field(default="US")
-    buy_low: Optional[float] = Field(default=None, gt=0)
-    sell_high: Optional[float] = Field(default=None, gt=0)
+    buy_low: Optional[float] = Field(default=None, gt=0, allow_inf_nan=False)
+    sell_high: Optional[float] = Field(default=None, gt=0, allow_inf_nan=False)
     short_selling: bool = Field(default=False)
-    min_profit_amount: Optional[float] = Field(default=None, ge=0)
+    min_profit_amount: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
     auto_resume_minutes: Optional[int] = Field(default=None, ge=0, le=1440)
-    max_daily_loss: float = Field(default=5000.0, gt=0)
-    max_consecutive_losses: int = Field(default=3, ge=1)
+    max_daily_loss: float = Field(default=5000.0, gt=0, allow_inf_nan=False)
+    max_consecutive_losses: int = Field(default=3, ge=1, le=100)
     llm_interval_minutes: Optional[int] = Field(default=None, ge=1, le=1440)
     fee_rate_us: Optional[float] = Field(default=None, ge=0, le=0.01)
     fee_rate_hk: Optional[float] = Field(default=None, ge=0, le=0.02)
@@ -43,6 +51,15 @@ class StrategyConfigSchema(BaseModel):
     llm_action_cooldown_seconds: Optional[int] = Field(default=None, ge=0, le=3600)
     trading_session_mode: Literal["RTH_ONLY", "ANY"] = "ANY"
     margin_safety_factor: Optional[float] = Field(default=None, ge=0, le=1)
+    allow_position_addons: Optional[bool] = None
+    max_position_quantity: Optional[int] = Field(default=None, ge=1, le=1_000_000)
+    max_position_notional: Optional[float] = Field(default=None, gt=0, allow_inf_nan=False)
+    max_risk_per_trade: Optional[float] = Field(default=None, gt=0, allow_inf_nan=False)
+    stop_loss_pct: Optional[float] = Field(default=None, gt=0, le=20, allow_inf_nan=False)
+    max_holding_minutes: Optional[int] = Field(default=None, ge=1, le=10_080)
+    entry_cutoff_minutes_before_close: Optional[int] = Field(default=None, ge=1, le=180)
+    flatten_minutes_before_close: Optional[int] = Field(default=None, ge=1, le=180)
+    llm_order_execution_enabled: Optional[bool] = None
     report_schedule_enabled: Optional[bool] = None
     report_schedule_interval_hours: Optional[int] = Field(default=None, ge=1, le=720)
     report_schedule_symbol: Optional[str] = Field(default=None, max_length=50)
@@ -69,17 +86,39 @@ class StrategyConfigSchema(BaseModel):
             raise ValueError("sell_high must be greater than buy_low")
         return v
 
+    @model_validator(mode="after")
+    def validate_partial_p0_safety(self) -> "StrategyConfigSchema":
+        if self.short_selling:
+            raise ValueError("short selling is disabled by the P0 live safety policy")
+        if self.allow_position_addons:
+            raise ValueError("position add-ons are disabled by the P0 live safety policy")
+        if self.llm_order_execution_enabled:
+            raise ValueError("LLM live orders are disabled by the P0 live safety policy")
+        if (
+            self.entry_cutoff_minutes_before_close is not None
+            and self.flatten_minutes_before_close is not None
+            and self.flatten_minutes_before_close
+            > self.entry_cutoff_minutes_before_close
+        ):
+            raise ValueError(
+                "flatten_minutes_before_close must not exceed "
+                "entry_cutoff_minutes_before_close"
+            )
+        if {"symbol", "market"}.issubset(self.model_fields_set):
+            _validate_symbol_market_pair(self.symbol, self.market)
+        return self
+
 
 class StrategyMergedSchema(BaseModel):
     symbol: str = Field(default="", max_length=50)
     market: str = Field(default="US")
-    buy_low: Optional[float] = Field(default=None)
-    sell_high: Optional[float] = Field(default=None)
+    buy_low: Optional[float] = Field(default=None, gt=0, allow_inf_nan=False)
+    sell_high: Optional[float] = Field(default=None, gt=0, allow_inf_nan=False)
     short_selling: bool = Field(default=False)
-    min_profit_amount: float = Field(default=0.0, ge=0)
+    min_profit_amount: float = Field(default=0.0, ge=0, allow_inf_nan=False)
     auto_resume_minutes: int = Field(default=3, ge=0, le=1440)
-    max_daily_loss: float = Field(default=5000.0, gt=0)
-    max_consecutive_losses: int = Field(default=3, ge=1)
+    max_daily_loss: float = Field(default=5000.0, gt=0, allow_inf_nan=False)
+    max_consecutive_losses: int = Field(default=3, ge=1, le=100)
     llm_interval_minutes: int = Field(default=2, ge=1, le=1440)
     fee_rate_us: float = Field(default=0.0005, ge=0, le=0.01)
     fee_rate_hk: float = Field(default=0.003, ge=0, le=0.02)
@@ -87,6 +126,15 @@ class StrategyMergedSchema(BaseModel):
     llm_action_cooldown_seconds: int = Field(default=60, ge=0, le=3600)
     trading_session_mode: Literal["RTH_ONLY", "ANY"] = "ANY"
     margin_safety_factor: float = Field(default=0.9, ge=0, le=1)
+    allow_position_addons: bool = False
+    max_position_quantity: int = Field(default=100, ge=1, le=1_000_000)
+    max_position_notional: float = Field(default=5000.0, gt=0, allow_inf_nan=False)
+    max_risk_per_trade: float = Field(default=250.0, gt=0, allow_inf_nan=False)
+    stop_loss_pct: float = Field(default=1.0, gt=0, le=20, allow_inf_nan=False)
+    max_holding_minutes: int = Field(default=60, ge=1, le=10_080)
+    entry_cutoff_minutes_before_close: int = Field(default=45, ge=1, le=180)
+    flatten_minutes_before_close: int = Field(default=15, ge=1, le=180)
+    llm_order_execution_enabled: bool = False
     report_schedule_enabled: bool = False
     report_schedule_interval_hours: int = Field(default=24, ge=1, le=720)
     report_schedule_symbol: str = Field(default="", max_length=50)
@@ -112,6 +160,21 @@ class StrategyMergedSchema(BaseModel):
         if buy_low is not None and buy_low > 0 and v <= buy_low:
             raise ValueError("sell_high must be greater than buy_low")
         return v
+
+    @model_validator(mode="after")
+    def validate_safety_windows(self) -> "StrategyMergedSchema":
+        _validate_symbol_market_pair(self.symbol, self.market)
+        if self.flatten_minutes_before_close > self.entry_cutoff_minutes_before_close:
+            raise ValueError(
+                "flatten_minutes_before_close must not exceed entry_cutoff_minutes_before_close"
+            )
+        if self.short_selling:
+            raise ValueError("short selling is disabled by the P0 live safety policy")
+        if self.allow_position_addons:
+            raise ValueError("position add-ons are disabled by the P0 live safety policy")
+        if self.llm_order_execution_enabled:
+            raise ValueError("LLM live orders are disabled by the P0 live safety policy")
+        return self
 
 
 class NotificationChannelSchema(BaseModel):
@@ -175,6 +238,15 @@ class StrategyResponse(BaseModel):
     llm_action_cooldown_seconds: int
     trading_session_mode: str = "ANY"
     margin_safety_factor: float = 0.9
+    allow_position_addons: bool = False
+    max_position_quantity: int = 100
+    max_position_notional: float = 5000.0
+    max_risk_per_trade: float = 250.0
+    stop_loss_pct: float = 1.0
+    max_holding_minutes: int = 60
+    entry_cutoff_minutes_before_close: int = 45
+    flatten_minutes_before_close: int = 15
+    llm_order_execution_enabled: bool = False
     report_schedule_enabled: bool = False
     report_schedule_interval_hours: int = 24
     report_schedule_symbol: str = ""
@@ -197,6 +269,9 @@ class StatusResponse(BaseModel):
     last_action_message: str = ""
     trading_session_mode: str = "ANY"
     is_trading_hours: bool = True
+    execution_state: str = "IDLE"
+    reduction_reason: str = ""
+    reduction_started_at: Optional[datetime] = None
 
     model_config = {"from_attributes": True}
 
@@ -320,6 +395,8 @@ class QuoteQuality(BaseModel):
     has_quote: bool
     price_positive: bool
     spread_reasonable: bool
+    last_bbo_consistent: bool = False
+    source_timestamp_fresh: bool = False
     last_price: float | None = None
     bid: float | None = None
     ask: float | None = None
@@ -329,6 +406,7 @@ class DiagnosticSymbolRuntime(BaseModel):
     symbol: str
     market: str
     is_primary: bool
+    trading_enabled: bool = False
     engine_state: str
     last_price: float
     last_trigger_price: float
@@ -337,12 +415,32 @@ class DiagnosticSymbolRuntime(BaseModel):
     quote_quality: QuoteQuality | None = None
 
 
+class DiagnosticLiveSafety(BaseModel):
+    short_entries_enabled: bool
+    allow_position_addons: bool
+    max_position_quantity: int
+    max_position_notional: float
+    max_risk_per_trade: float
+    stop_loss_pct: float
+    max_holding_minutes: int
+    entry_cutoff_minutes_before_close: int
+    flatten_minutes_before_close: int
+    llm_shadow_mode: bool
+    llm_order_execution_enabled: bool
+
+
 class DiagnosticsResponse(BaseModel):
     runner_running: bool
     thread_alive: bool
     quotes_subscribed: bool
     trigger_in_flight: bool
     pending_order_symbols: list[str]
+    pending_order_ids: list[str] = Field(default_factory=list)
+    unrepresentable_live_order_issues: list[str] = Field(default_factory=list)
+    order_sync_succeeded: bool = False
+    execution_state: str = "IDLE"
+    reduction_reason: str = ""
+    live_safety: DiagnosticLiveSafety
     quote_stream: DiagnosticQuoteStream
     risk: DiagnosticRiskState
     symbol_runtimes: list[DiagnosticSymbolRuntime]
@@ -889,7 +987,7 @@ class StrategyPresetCreate(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     name: str = Field(min_length=1, max_length=128)
-    params: dict[str, Any]
+    params: StrategyConfigSchema
 
 
 class StrategyPresetOut(BaseModel):
@@ -1180,11 +1278,14 @@ class LLMSymbolStatus(BaseModel):
 
 class LLMIntervalStatus(BaseModel):
     enabled: bool
+    shadow_mode: bool
+    policy_status: Literal["SHADOW", "LIVE"]
     interval_minutes: int
     last_analysis_at: Optional[str] = None
     next_analysis_at: Optional[str] = None
     current_suggestion: Optional[LLMSuggestion] = None
     applied_values: Optional[dict[str, Any]] = None
+    last_applied_values: Optional[dict[str, Any]] = None
     reject_reason: Optional[str] = None
     budget: LLMBudgetStatus
     symbol_statuses: list[LLMSymbolStatus] = Field(default_factory=list)
@@ -1257,6 +1358,11 @@ class WatchlistItemSchema(BaseModel):
             raise ValueError("market must be US or HK")
         return v
 
+    @model_validator(mode="after")
+    def validate_symbol_market(self) -> "WatchlistItemSchema":
+        _validate_symbol_market_pair(self.symbol, self.market)
+        return self
+
 
 class WatchlistItemResponse(BaseModel):
     id: int
@@ -1318,6 +1424,11 @@ class WatchlistScoreRequest(BaseModel):
         if v not in ("US", "HK"):
             raise ValueError("market must be US or HK")
         return v
+
+    @model_validator(mode="after")
+    def validate_symbol_market(self) -> "WatchlistScoreRequest":
+        _validate_symbol_market_pair(self.symbol, self.market)
+        return self
 
 
 class WatchlistScoreResponse(BaseModel):

@@ -5,12 +5,17 @@
     <el-card style="max-width: 600px; margin-bottom: 20px">
       <div style="display: flex; justify-content: space-between; align-items: center">
         <h4>LLM 智能区间</h4>
-        <el-switch
-          v-model="llmStatus.enabled"
-          active-text="启用"
-          inactive-text="禁用"
-          @change="toggleLLM"
-        />
+        <div style="display: flex; align-items: center; gap: 10px">
+          <el-tag data-testid="llm-policy-mode" :type="llmStatus.shadow_mode ? 'warning' : 'success'" effect="plain">
+            {{ llmStatus.shadow_mode ? '影子观察' : '实盘应用' }}
+          </el-tag>
+          <el-switch
+            v-model="llmStatus.enabled"
+            active-text="启用"
+            inactive-text="禁用"
+            @change="toggleLLM"
+          />
+        </div>
       </div>
       <div v-if="llmStatus.current_suggestion" style="margin-top: 12px">
         <p>置信度: {{ llmStatus.current_suggestion.confidence_score }}</p>
@@ -19,6 +24,9 @@
       </div>
       <div v-if="llmStatus.applied_values" style="margin-top: 8px">
         <p>已应用: {{ formatCurrency(llmStatus.applied_values.buy_low, form.market) }} ~ {{ formatCurrency(llmStatus.applied_values.sell_high, form.market) }}</p>
+      </div>
+      <div v-else-if="llmStatus.shadow_mode && llmStatus.last_applied_values" style="margin-top: 8px; color: #909399">
+        <p>历史实盘应用: {{ formatCurrency(llmStatus.last_applied_values.buy_low, form.market) }} ~ {{ formatCurrency(llmStatus.last_applied_values.sell_high, form.market) }}</p>
       </div>
       <div v-if="llmStatus.reject_reason" style="margin-top: 8px; color: #f56c6c">
         <p>上次被拒: {{ llmStatus.reject_reason }}</p>
@@ -70,9 +78,6 @@
 
     <el-card style="max-width: 600px; margin-bottom: 20px">
       <h4>LLM 预览分析</h4>
-      <p style="color: #909399; font-size: 13px; margin-bottom: 12px">
-        输入股票代码后预览 LLM 建议区间，确认后再保存到策略。
-      </p>
       <el-form :inline="true" @submit.prevent="handlePreview">
         <el-form-item label="股票代码">
           <el-input v-model="previewSymbol" placeholder="例如 AAPL.US" style="width: 180px" />
@@ -84,7 +89,7 @@
           </el-radio-group>
         </el-form-item>
         <el-form-item label="做空">
-          <el-switch v-model="previewShortSelling" />
+          <el-switch v-model="previewShortSelling" disabled />
         </el-form-item>
         <el-form-item>
           <el-button type="primary" :loading="previewing" :disabled="!previewSymbol.trim()" @click="handlePreview">
@@ -110,11 +115,14 @@
             <p>{{ previewResult.reason }}</p>
           </template>
         </el-alert>
-        <div v-if="canApplyPreview" style="margin-top: 12px; text-align: right">
-          <el-button type="success" :loading="savingPreview" @click="applyPreview">
-            应用到策略并保存
-          </el-button>
-        </div>
+        <el-alert
+          v-if="previewResult.success && llmStatus.shadow_mode"
+          title="影子观察模式仅记录建议，不会写入实盘策略"
+          type="warning"
+          :closable="false"
+          show-icon
+          style="margin-top: 12px"
+        />
       </div>
       <div v-if="previewError" style="margin-top: 12px">
         <el-alert :title="previewError" type="error" :closable="false" show-icon />
@@ -148,7 +156,7 @@
           </div>
         </el-form-item>
         <el-form-item label="做空">
-          <el-switch v-model="form.short_selling" />
+          <el-switch v-model="form.short_selling" disabled />
         </el-form-item>
         <el-form-item label="单笔最低盈利金额">
           <el-input-number v-model="form.min_profit_amount" :min="0" :precision="2" :step="0.01" />
@@ -184,6 +192,34 @@
             从券商获取的最大买入量的乘数。0.9 = 使用 90% 的保证金购买力。
           </div>
         </el-form-item>
+        <el-divider content-position="left">P0 实盘安全边界</el-divider>
+        <el-form-item label="允许持仓加仓">
+          <el-switch v-model="form.allow_position_addons" disabled data-testid="allow-position-addons" />
+        </el-form-item>
+        <el-form-item label="最大持仓数量">
+          <el-input-number v-model="form.max_position_quantity" :min="1" :max="100" :step="1" data-testid="max-position-quantity" />
+        </el-form-item>
+        <el-form-item label="最大仓位名义金额">
+          <el-input-number v-model="form.max_position_notional" :min="1" :max="5000" :precision="2" :step="100" data-testid="max-position-notional" />
+        </el-form-item>
+        <el-form-item label="单笔最大风险金额">
+          <el-input-number v-model="form.max_risk_per_trade" :min="1" :max="250" :precision="2" :step="10" data-testid="max-risk-per-trade" />
+        </el-form-item>
+        <el-form-item label="硬止损（%）">
+          <el-input-number v-model="form.stop_loss_pct" :min="0.01" :max="1" :precision="2" :step="0.1" data-testid="stop-loss-pct" />
+        </el-form-item>
+        <el-form-item label="最长持仓（分钟）">
+          <el-input-number v-model="form.max_holding_minutes" :min="1" :max="60" :step="5" data-testid="max-holding-minutes" />
+        </el-form-item>
+        <el-form-item label="收盘前停止开仓（分钟）">
+          <el-input-number v-model="form.entry_cutoff_minutes_before_close" :min="45" :max="180" :step="5" data-testid="entry-cutoff-minutes" />
+        </el-form-item>
+        <el-form-item label="收盘前清仓（分钟）">
+          <el-input-number v-model="form.flatten_minutes_before_close" :min="15" :max="form.entry_cutoff_minutes_before_close" :step="5" data-testid="flatten-minutes" />
+        </el-form-item>
+        <el-form-item label="LLM 实盘订单">
+          <el-switch v-model="form.llm_order_execution_enabled" disabled data-testid="llm-order-execution" />
+        </el-form-item>
         <el-divider content-position="left">交易时段</el-divider>
         <el-form-item label="新单时段">
           <el-radio-group v-model="form.trading_session_mode" data-testid="trading-session-mode">
@@ -191,7 +227,7 @@
             <el-radio value="RTH_ONLY">仅常规交易时段（RTH）</el-radio>
           </el-radio-group>
           <div style="margin-top: 8px; color: #909399; font-size: 12px; line-height: 1.4">
-            RTH 仅按工作日 + 开市窗口判断，<strong>不含交易所节假日</strong>；设为「任意」则与旧版行为一致。
+            RTH 按交易所开市日、半日市和常规交易窗口判断；设为「任意」则与旧版行为一致。
           </div>
         </el-form-item>
         <el-divider content-position="left">定时报告</el-divider>
@@ -280,6 +316,15 @@ interface StrategyForm {
   llm_action_cooldown_seconds: number
   trading_session_mode: 'ANY' | 'RTH_ONLY'
   margin_safety_factor: number
+  allow_position_addons: boolean
+  max_position_quantity: number
+  max_position_notional: number
+  max_risk_per_trade: number
+  stop_loss_pct: number
+  max_holding_minutes: number
+  entry_cutoff_minutes_before_close: number
+  flatten_minutes_before_close: number
+  llm_order_execution_enabled: boolean
   report_schedule_enabled: boolean
   report_schedule_interval_hours: number
   report_schedule_symbol: string
@@ -304,6 +349,15 @@ const { form, loading, saving, saved, error, isDirty, load, save } = useFormStat
     min_repricing_pct: 0.30,
     llm_action_cooldown_seconds: 60,
     margin_safety_factor: 0.9,
+    allow_position_addons: false,
+    max_position_quantity: 100,
+    max_position_notional: 5000,
+    max_risk_per_trade: 250,
+    stop_loss_pct: 1,
+    max_holding_minutes: 60,
+    entry_cutoff_minutes_before_close: 45,
+    flatten_minutes_before_close: 15,
+    llm_order_execution_enabled: false,
     trading_session_mode: 'ANY',
     report_schedule_enabled: false,
     report_schedule_interval_hours: 24,
@@ -327,6 +381,15 @@ const { form, loading, saving, saved, error, isDirty, load, save } = useFormStat
       min_repricing_pct: s.min_repricing_pct * 100,
       llm_action_cooldown_seconds: s.llm_action_cooldown_seconds,
       margin_safety_factor: s.margin_safety_factor ?? 0.9,
+      allow_position_addons: s.allow_position_addons ?? false,
+      max_position_quantity: s.max_position_quantity ?? 100,
+      max_position_notional: s.max_position_notional ?? 5000,
+      max_risk_per_trade: s.max_risk_per_trade ?? 250,
+      stop_loss_pct: s.stop_loss_pct ?? 1,
+      max_holding_minutes: s.max_holding_minutes ?? 60,
+      entry_cutoff_minutes_before_close: s.entry_cutoff_minutes_before_close ?? 45,
+      flatten_minutes_before_close: s.flatten_minutes_before_close ?? 15,
+      llm_order_execution_enabled: s.llm_order_execution_enabled ?? false,
       trading_session_mode: s.trading_session_mode === 'RTH_ONLY' ? 'RTH_ONLY' : 'ANY',
       report_schedule_enabled: s.report_schedule_enabled ?? false,
       report_schedule_interval_hours: s.report_schedule_interval_hours ?? 24,
@@ -358,6 +421,15 @@ const { form, loading, saving, saved, error, isDirty, load, save } = useFormStat
       patch.trading_session_mode = data.trading_session_mode === 'RTH_ONLY' ? 'RTH_ONLY' : 'ANY'
     }
     if (!previous || data.margin_safety_factor !== previous.margin_safety_factor) patch.margin_safety_factor = data.margin_safety_factor
+    if (!previous || data.allow_position_addons !== previous.allow_position_addons) patch.allow_position_addons = data.allow_position_addons
+    if (!previous || data.max_position_quantity !== previous.max_position_quantity) patch.max_position_quantity = data.max_position_quantity
+    if (!previous || data.max_position_notional !== previous.max_position_notional) patch.max_position_notional = data.max_position_notional
+    if (!previous || data.max_risk_per_trade !== previous.max_risk_per_trade) patch.max_risk_per_trade = data.max_risk_per_trade
+    if (!previous || data.stop_loss_pct !== previous.stop_loss_pct) patch.stop_loss_pct = data.stop_loss_pct
+    if (!previous || data.max_holding_minutes !== previous.max_holding_minutes) patch.max_holding_minutes = data.max_holding_minutes
+    if (!previous || data.entry_cutoff_minutes_before_close !== previous.entry_cutoff_minutes_before_close) patch.entry_cutoff_minutes_before_close = data.entry_cutoff_minutes_before_close
+    if (!previous || data.flatten_minutes_before_close !== previous.flatten_minutes_before_close) patch.flatten_minutes_before_close = data.flatten_minutes_before_close
+    if (!previous || data.llm_order_execution_enabled !== previous.llm_order_execution_enabled) patch.llm_order_execution_enabled = data.llm_order_execution_enabled
     if (!previous || data.report_schedule_enabled !== previous.report_schedule_enabled) patch.report_schedule_enabled = data.report_schedule_enabled
     if (!previous || data.report_schedule_interval_hours !== previous.report_schedule_interval_hours) patch.report_schedule_interval_hours = data.report_schedule_interval_hours
     if (!previous || data.report_schedule_symbol !== previous.report_schedule_symbol) patch.report_schedule_symbol = data.report_schedule_symbol
@@ -415,6 +487,15 @@ function buildPresetParams(): Record<string, unknown> {
     llm_action_cooldown_seconds: form.value.llm_action_cooldown_seconds,
     trading_session_mode: form.value.trading_session_mode,
     margin_safety_factor: form.value.margin_safety_factor,
+    allow_position_addons: form.value.allow_position_addons,
+    max_position_quantity: form.value.max_position_quantity,
+    max_position_notional: form.value.max_position_notional,
+    max_risk_per_trade: form.value.max_risk_per_trade,
+    stop_loss_pct: form.value.stop_loss_pct,
+    max_holding_minutes: form.value.max_holding_minutes,
+    entry_cutoff_minutes_before_close: form.value.entry_cutoff_minutes_before_close,
+    flatten_minutes_before_close: form.value.flatten_minutes_before_close,
+    llm_order_execution_enabled: form.value.llm_order_execution_enabled,
   }
 }
 
@@ -540,6 +621,15 @@ function buildStrategyConfig(): Record<string, unknown> {
     llm_action_cooldown_seconds: form.value.llm_action_cooldown_seconds,
     trading_session_mode: form.value.trading_session_mode,
     margin_safety_factor: form.value.margin_safety_factor,
+    allow_position_addons: form.value.allow_position_addons,
+    max_position_quantity: form.value.max_position_quantity,
+    max_position_notional: form.value.max_position_notional,
+    max_risk_per_trade: form.value.max_risk_per_trade,
+    stop_loss_pct: form.value.stop_loss_pct,
+    max_holding_minutes: form.value.max_holding_minutes,
+    entry_cutoff_minutes_before_close: form.value.entry_cutoff_minutes_before_close,
+    flatten_minutes_before_close: form.value.flatten_minutes_before_close,
+    llm_order_execution_enabled: form.value.llm_order_execution_enabled,
     report_schedule_enabled: form.value.report_schedule_enabled,
     report_schedule_interval_hours: form.value.report_schedule_interval_hours,
     report_schedule_symbol: form.value.report_schedule_symbol,
@@ -594,6 +684,15 @@ async function handleImportConfig(evt: Event) {
     if (numeric(parsed.llm_action_cooldown_seconds) !== undefined) patch.llm_action_cooldown_seconds = numeric(parsed.llm_action_cooldown_seconds)!
     if (str(parsed.trading_session_mode) !== undefined) patch.trading_session_mode = parsed.trading_session_mode as 'ANY' | 'RTH_ONLY'
     if (numeric(parsed.margin_safety_factor) !== undefined) patch.margin_safety_factor = numeric(parsed.margin_safety_factor)!
+    if (bool(parsed.allow_position_addons) !== undefined) patch.allow_position_addons = bool(parsed.allow_position_addons)!
+    if (numeric(parsed.max_position_quantity) !== undefined) patch.max_position_quantity = numeric(parsed.max_position_quantity)!
+    if (numeric(parsed.max_position_notional) !== undefined) patch.max_position_notional = numeric(parsed.max_position_notional)!
+    if (numeric(parsed.max_risk_per_trade) !== undefined) patch.max_risk_per_trade = numeric(parsed.max_risk_per_trade)!
+    if (numeric(parsed.stop_loss_pct) !== undefined) patch.stop_loss_pct = numeric(parsed.stop_loss_pct)!
+    if (numeric(parsed.max_holding_minutes) !== undefined) patch.max_holding_minutes = numeric(parsed.max_holding_minutes)!
+    if (numeric(parsed.entry_cutoff_minutes_before_close) !== undefined) patch.entry_cutoff_minutes_before_close = numeric(parsed.entry_cutoff_minutes_before_close)!
+    if (numeric(parsed.flatten_minutes_before_close) !== undefined) patch.flatten_minutes_before_close = numeric(parsed.flatten_minutes_before_close)!
+    if (bool(parsed.llm_order_execution_enabled) !== undefined) patch.llm_order_execution_enabled = bool(parsed.llm_order_execution_enabled)!
     if (bool(parsed.report_schedule_enabled) !== undefined) patch.report_schedule_enabled = bool(parsed.report_schedule_enabled)!
     if (numeric(parsed.report_schedule_interval_hours) !== undefined) patch.report_schedule_interval_hours = numeric(parsed.report_schedule_interval_hours)!
     if (str(parsed.report_schedule_symbol) !== undefined) patch.report_schedule_symbol = str(parsed.report_schedule_symbol)
@@ -609,11 +708,14 @@ async function handleImportConfig(evt: Event) {
 
 const llmStatus = ref<LLMIntervalStatus>({
   enabled: false,
+  shadow_mode: true,
+  policy_status: 'SHADOW',
   interval_minutes: 2,
   last_analysis_at: null,
   next_analysis_at: null,
   current_suggestion: null,
   applied_values: null,
+  last_applied_values: null,
   reject_reason: null,
   budget: {
     max_symbols_per_cycle: 0,
@@ -697,13 +799,6 @@ const previewShortSelling = ref(false)
 const previewing = ref(false)
 const previewResult = ref<LLMAnalyzeResponse | null>(null)
 const previewError = ref<string | null>(null)
-const savingPreview = ref(false)
-
-const canApplyPreview = computed(() => (
-  previewResult.value?.success === true
-  && previewResult.value.suggested_buy_low != null
-  && previewResult.value.suggested_sell_high != null
-))
 
 const loadLLMStatus = async () => {
   try {
@@ -784,34 +879,6 @@ const handlePreview = async () => {
     previewError.value = '预览分析请求失败'
   } finally {
     previewing.value = false
-  }
-}
-
-const applyPreview = async () => {
-  if (!canApplyPreview.value || !previewResult.value) return
-  const suggestedBuyLow = previewResult.value.suggested_buy_low
-  const suggestedSellHigh = previewResult.value.suggested_sell_high
-  if (suggestedBuyLow == null || suggestedSellHigh == null) return
-
-  savingPreview.value = true
-  try {
-    form.value.symbol = previewSymbol.value.trim()
-    form.value.buy_low = suggestedBuyLow
-    form.value.sell_high = suggestedSellHigh
-    form.value.market = previewMarket.value
-    form.value.short_selling = previewShortSelling.value
-    await save()
-    if (error.value) {
-      ElMessage.error('保存失败')
-      return
-    }
-    ElMessage.success('已将 LLM 建议应用到策略并保存')
-    previewResult.value = null
-    await loadLLMStatus()
-  } catch {
-    ElMessage.error('保存失败')
-  } finally {
-    savingPreview.value = false
   }
 }
 

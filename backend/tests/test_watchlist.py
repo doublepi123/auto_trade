@@ -1,6 +1,7 @@
 from app.database import SessionLocal
 from app.models import StrategyConfig, WatchlistItem
 from app.main import app
+from app.api import strategy as strategy_api
 from app.services.watchlist_service import WatchlistService
 from app import database
 from fastapi.testclient import TestClient
@@ -55,10 +56,19 @@ class TestWatchlistApi:
         resp = client.delete("/api/watchlist/9999")
         assert resp.status_code == 404
 
-    def test_activate_sets_single_trading(self, clean_db):
+    def test_activate_sets_single_trading(self, clean_db, monkeypatch):
+        class FlatRunner:
+            def assert_primary_switch_safe(self, _symbol: str, _market: str) -> None:
+                pass
+
+            def reload_strategy(self) -> None:
+                pass
+
+        monkeypatch.setattr(strategy_api, "get_runner", lambda: FlatRunner())
+
         # Create strategy config first
         db = SessionLocal()
-        strategy = StrategyConfig(symbol="", market="US")
+        strategy = StrategyConfig(symbol="", market="US", buy_low=100, sell_high=200)
         db.add(strategy)
         db.commit()
         db.close()
@@ -95,9 +105,23 @@ class TestWatchlistApi:
         assert item2.is_active is True
         db.close()
 
-    def test_activate_syncs_strategy_config(self, clean_db):
+    def test_activate_syncs_strategy_config(self, clean_db, monkeypatch):
+        class FlatRunner:
+            def assert_primary_switch_safe(self, _symbol: str, _market: str) -> None:
+                pass
+
+            def reload_strategy(self) -> None:
+                pass
+
+        monkeypatch.setattr(strategy_api, "get_runner", lambda: FlatRunner())
+
         db = SessionLocal()
-        strategy = StrategyConfig(symbol="OLD.US", market="US")
+        strategy = StrategyConfig(
+            symbol="OLD.US",
+            market="US",
+            buy_low=100,
+            sell_high=200,
+        )
         db.add(strategy)
         db.commit()
         db.close()

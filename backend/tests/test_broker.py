@@ -20,6 +20,7 @@ from app.core.broker import (
     Quote,
     _decimal_attr,
     _get_value,
+    _iter_order_items,
     _import_openapi,
     _iter_position_items,
     _normalize_order_status,
@@ -266,7 +267,7 @@ class TestBrokerGateway:
 
         class Channel:
             stock_info = [
-                StockInfo("700.HK", "650", "-450", "457.53"),
+                StockInfo("700.HK", "650", "450", "457.53"),
                 StockInfo("AAPL.US", "-12", "-12", "180.00"),
             ]
 
@@ -312,6 +313,27 @@ class TestBrokerGateway:
         assert result.executed_quantity == Decimal("3")
         assert result.executed_price == Decimal("201.5")
 
+    def test_cancelled_order_does_not_treat_submitted_fields_as_fill(self) -> None:
+        class Detail:
+            order_id = "order-cancelled"
+            status = "Cancelled"
+            quantity = "10"
+            price = "100"
+
+        class TradeContext:
+            def order_detail(self, _order_id: str) -> Detail:
+                return Detail()
+
+        gw = BrokerGateway()
+        gw._quote_ctx = object()
+        gw._trade_ctx = TradeContext()
+
+        result = gw.get_order_status("order-cancelled")
+
+        assert result.status == "CANCELLED"
+        assert result.executed_quantity == Decimal("0")
+        assert result.executed_price == Decimal("0")
+
     def test_get_today_orders_normalizes_trade_context_orders(self) -> None:
         class Detail:
             def __init__(self, order_id: str, symbol: str) -> None:
@@ -344,6 +366,141 @@ class TestBrokerGateway:
         assert orders[0].executed_quantity == Decimal("2")
         assert orders[0].status == "PARTIAL_FILLED"
 
+    def test_get_today_orders_rejects_order_without_id(self) -> None:
+        class TradeContext:
+            def today_orders(self):
+                return [
+                    {
+                        "symbol": "NVDA.US",
+                        "side": "Sell",
+                        "status": "Filled",
+                        "submitted_quantity": "5",
+                        "submitted_price": "100",
+                        "executed_quantity": "5",
+                    }
+                ]
+
+        gw = BrokerGateway()
+        gw._quote_ctx = object()
+        gw._trade_ctx = TradeContext()
+
+        with pytest.raises(ValueError, match="without broker_order_id"):
+            gw.get_today_orders()
+
+    @pytest.mark.parametrize("value", ["invalid", "nan", "inf", "-1"])
+    def test_get_today_orders_rejects_invalid_executed_quantity(
+        self,
+        value: str,
+    ) -> None:
+        class TradeContext:
+            def today_orders(self):
+                return [
+                    {
+                        "order_id": "bad-execution",
+                        "symbol": "NVDA.US",
+                        "side": "Sell",
+                        "status": "Cancelled",
+                        "submitted_quantity": "5",
+                        "submitted_price": "100",
+                        "executed_quantity": value,
+                    }
+                ]
+
+        gw = BrokerGateway()
+        gw._quote_ctx = object()
+        gw._trade_ctx = TradeContext()
+
+        with pytest.raises(ValueError, match="invalid executed_quantity"):
+            gw.get_today_orders()
+
+    def test_get_order_status_rejects_invalid_execution_fields(self) -> None:
+        class TradeContext:
+            def order_detail(self, _order_id: str):
+                return {
+                    "order_id": "bad-detail",
+                    "status": "Filled",
+                    "executed_quantity": "5",
+                    "executed_price": "nan",
+                }
+
+        gw = BrokerGateway()
+        gw._quote_ctx = object()
+        gw._trade_ctx = TradeContext()
+
+        with pytest.raises(ValueError, match="invalid executed_price"):
+            gw.get_order_status("bad-detail")
+
+    @pytest.mark.parametrize("response_id", [None, "", "another-order"])
+    def test_get_order_status_rejects_missing_or_mismatched_id(
+        self,
+        response_id: str | None,
+    ) -> None:
+        class TradeContext:
+            def order_detail(self, _order_id: str):
+                return {
+                    "order_id": response_id,
+                    "status": "Filled",
+                    "executed_quantity": "5",
+                    "executed_price": "100",
+                }
+
+        gw = BrokerGateway()
+        gw._quote_ctx = object()
+        gw._trade_ctx = TradeContext()
+
+        with pytest.raises(ValueError, match="missing order_id|id mismatch"):
+            gw.get_order_status("expected-order")
+
+    def test_cancel_order_rejects_mismatched_detail_id(self) -> None:
+        class TradeContext:
+            def cancel_order(self, _order_id: str):
+                return None
+
+            def order_detail(self, _order_id: str):
+                return {
+                    "order_id": "another-order",
+                    "status": "Cancelled",
+                }
+
+        gw = BrokerGateway()
+        gw._quote_ctx = object()
+        gw._trade_ctx = TradeContext()
+
+        with pytest.raises(ValueError, match="id mismatch"):
+            gw.cancel_order("expected-order")
+
+    def test_today_order_updated_at_is_only_used_after_execution(self) -> None:
+        updated_at = "2026-05-22T13:05:00Z"
+
+        class Detail:
+            def __init__(self, order_id: str, status: str, executed: str) -> None:
+                self.order_id = order_id
+                self.symbol = "NVDA.US"
+                self.side = "Buy"
+                self.submitted_quantity = "7"
+                self.submitted_price = "225.5"
+                self.executed_quantity = executed
+                self.executed_price = "225.6" if executed != "0" else "0"
+                self.status = status
+                self.created_at = "2026-05-22T13:00:00Z"
+                self.updated_at = updated_at
+
+        class TradeContext:
+            def today_orders(self):
+                return [
+                    Detail("pending", "Submitted", "0"),
+                    Detail("filled", "Filled", "7"),
+                ]
+
+        gw = BrokerGateway()
+        gw._quote_ctx = object()
+        gw._trade_ctx = TradeContext()
+
+        orders = gw.get_today_orders()
+
+        assert orders[0].filled_at is None
+        assert orders[1].filled_at == datetime(2026, 5, 22, 13, 5, tzinfo=timezone.utc)
+
     def test_cancel_order_uses_trade_context_cancel_order(self) -> None:
         called = {}
 
@@ -354,6 +511,10 @@ class TestBrokerGateway:
         class TradeContext:
             def cancel_order(self, order_id: str):
                 called["order_id"] = order_id
+                return None
+
+            def order_detail(self, order_id: str):
+                assert order_id == "order-1"
                 return Response()
 
         gw = BrokerGateway()
@@ -376,6 +537,10 @@ class TestBrokerGateway:
         class TradeContext:
             def withdraw_order(self, order_id: str):
                 called["order_id"] = order_id
+                return None
+
+            def order_detail(self, order_id: str):
+                assert order_id == "order-2"
                 return Response()
 
         gw = BrokerGateway()
@@ -386,6 +551,24 @@ class TestBrokerGateway:
 
         assert called["order_id"] == "order-2"
         assert result.status == "CANCELLED"
+
+    def test_cancel_order_without_terminal_confirmation_remains_live(self) -> None:
+        class TradeContext:
+            def cancel_order(self, _order_id: str):
+                return None
+
+            def order_detail(self, _order_id: str):
+                raise TimeoutError("status unavailable")
+
+        gw = BrokerGateway()
+        gw._quote_ctx = object()
+        gw._trade_ctx = TradeContext()
+
+        result = gw.cancel_order("order-3")
+
+        assert result.broker_order_id == "order-3"
+        assert result.status == "SUBMITTED"
+        assert result.executed_quantity == Decimal("0")
 
     def test_get_quote_with_single_item(self) -> None:
         class QuoteItem:
@@ -850,6 +1033,80 @@ class TestBrokerGateway:
         assert len(positions) == 1
         assert positions[0].symbol == "TSLA.US"
 
+    @pytest.mark.parametrize("quantity", ["invalid", "nan", "inf"])
+    def test_get_positions_rejects_invalid_quantity(self, quantity: str) -> None:
+        class TradeContext:
+            def stock_positions(self):
+                return [
+                    {
+                        "symbol": "AAPL.US",
+                        "quantity": quantity,
+                        "available_quantity": "1",
+                        "cost_price": "100",
+                    }
+                ]
+
+        gw = BrokerGateway()
+        gw._quote_ctx = object()
+        gw._trade_ctx = TradeContext()
+
+        with pytest.raises(ValueError, match="invalid quantity"):
+            gw.get_positions()
+
+    @pytest.mark.parametrize("available", ["invalid", "nan", "inf", "11"])
+    def test_get_positions_rejects_invalid_available_quantity(
+        self,
+        available: str,
+    ) -> None:
+        class TradeContext:
+            def stock_positions(self):
+                return [
+                    {
+                        "symbol": "AAPL.US",
+                        "quantity": "10",
+                        "available_quantity": available,
+                        "cost_price": "100",
+                    }
+                ]
+
+        gw = BrokerGateway()
+        gw._quote_ctx = object()
+        gw._trade_ctx = TradeContext()
+
+        with pytest.raises(ValueError, match="available quantity"):
+            gw.get_positions()
+
+    def test_get_positions_rejects_missing_symbol(self) -> None:
+        class TradeContext:
+            def stock_positions(self):
+                return [{"quantity": "1", "cost_price": "100"}]
+
+        gw = BrokerGateway()
+        gw._quote_ctx = object()
+        gw._trade_ctx = TradeContext()
+
+        with pytest.raises(ValueError, match="without symbol"):
+            gw.get_positions()
+
+    def test_get_positions_rejects_invalid_present_average_price(self) -> None:
+        class TradeContext:
+            def stock_positions(self):
+                return [
+                    {
+                        "symbol": "AAPL.US",
+                        "quantity": "1",
+                        "available_quantity": "1",
+                        "cost_price": "0",
+                    }
+                ]
+
+        gw = BrokerGateway()
+        gw._quote_ctx = object()
+        gw._trade_ctx = TradeContext()
+
+        with pytest.raises(ValueError, match="invalid average price"):
+            gw.get_positions()
+
     def test_get_positions_with_explicit_side(self) -> None:
         class StockInfo:
             def __init__(self, symbol, side):
@@ -879,6 +1136,45 @@ class TestBrokerGateway:
         positions = gw.get_positions()
         assert positions[0].side == "LONG"
         assert positions[1].side == "SHORT"
+
+    def test_get_positions_rejects_unknown_explicit_side(self) -> None:
+        class TradeContext:
+            def stock_positions(self):
+                return [
+                    {
+                        "symbol": "AAPL.US",
+                        "side": "UNKNOWN",
+                        "quantity": "10",
+                        "available_quantity": "10",
+                        "cost_price": "100",
+                    }
+                ]
+
+        gw = BrokerGateway()
+        gw._quote_ctx = object()
+        gw._trade_ctx = TradeContext()
+
+        with pytest.raises(ValueError, match="invalid side"):
+            gw.get_positions()
+
+    def test_get_positions_rejects_conflicting_quantity_signs(self) -> None:
+        class TradeContext:
+            def stock_positions(self):
+                return [
+                    {
+                        "symbol": "AAPL.US",
+                        "quantity": "10",
+                        "available_quantity": "-10",
+                        "cost_price": "100",
+                    }
+                ]
+
+        gw = BrokerGateway()
+        gw._quote_ctx = object()
+        gw._trade_ctx = TradeContext()
+
+        with pytest.raises(ValueError, match="conflicting signs"):
+            gw.get_positions()
 
 
 class TestBrokerImports:
@@ -1176,13 +1472,38 @@ class TestIterPositionItems:
         assert len(result) == 1
         assert result[0].symbol == "AAPL.US"
 
-    def test_dict_without_symbol_skipped(self) -> None:
-        assert _iter_position_items({"other": "value"}) == []
+    def test_dict_without_position_schema_rejected(self) -> None:
+        with pytest.raises(ValueError, match="unrecognized position response"):
+            _iter_position_items({"other": "value"})
 
-    def test_object_without_symbol_skipped(self) -> None:
+    def test_object_without_position_schema_rejected(self) -> None:
         class NoSymbol:
             pass
-        assert _iter_position_items(NoSymbol()) == []
+
+        with pytest.raises(ValueError, match="unrecognized position response"):
+            _iter_position_items(NoSymbol())
+
+    @pytest.mark.parametrize(
+        "payload",
+        [{"data": None}, {"positions": None}, {"channels": None}],
+    )
+    def test_null_position_container_is_rejected(self, payload) -> None:
+        with pytest.raises(ValueError, match="null position"):
+            _iter_position_items(payload)
+
+
+class TestIterOrderItems:
+    def test_unknown_nonempty_order_response_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="unrecognized order response"):
+            _iter_order_items({"unexpected": "value"})
+
+    @pytest.mark.parametrize(
+        "payload",
+        [{"data": None}, {"orders": None}, {"items": None}],
+    )
+    def test_null_order_container_is_rejected(self, payload) -> None:
+        with pytest.raises(ValueError, match="null order"):
+            _iter_order_items(payload)
 
 
 class TestDecimalAttr:

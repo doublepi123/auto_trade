@@ -13,6 +13,9 @@ interface StatusStub {
   last_action_message: string
   trading_session_mode: 'ANY' | 'RTH_ONLY'
   is_trading_hours: boolean
+  execution_state: 'IDLE' | 'REDUCING'
+  reduction_reason: string
+  reduction_started_at: string | null
 }
 
 function initialStatus(): StatusStub {
@@ -29,6 +32,9 @@ function initialStatus(): StatusStub {
     last_action_message: '',
     trading_session_mode: 'ANY',
     is_trading_hours: true,
+    execution_state: 'IDLE',
+    reduction_reason: '',
+    reduction_started_at: null,
   }
 }
 
@@ -51,6 +57,15 @@ Cypress.Commands.add('stubApi', () => {
       min_repricing_pct: 0.003,
       llm_action_cooldown_seconds: 60,
       trading_session_mode: 'ANY',
+      allow_position_addons: false,
+      max_position_quantity: 100,
+      max_position_notional: 5000,
+      max_risk_per_trade: 250,
+      stop_loss_pct: 1,
+      max_holding_minutes: 60,
+      entry_cutoff_minutes_before_close: 45,
+      flatten_minutes_before_close: 15,
+      llm_order_execution_enabled: false,
       updated_at: '2026-01-01T00:00:00Z',
     },
   }).as('getStrategy')
@@ -598,6 +613,19 @@ Cypress.Commands.add('stubApi', () => {
       quotes_subscribed: true,
       trigger_in_flight: false,
       pending_order_symbols: ['AAPL.US'],
+      live_safety: {
+        short_entries_enabled: false,
+        allow_position_addons: false,
+        max_position_quantity: 100,
+        max_position_notional: 5000,
+        max_risk_per_trade: 250,
+        stop_loss_pct: 1,
+        max_holding_minutes: 60,
+        entry_cutoff_minutes_before_close: 45,
+        flatten_minutes_before_close: 15,
+        llm_shadow_mode: true,
+        llm_order_execution_enabled: false,
+      },
       quote_stream: {
         last_push_age_seconds: 3,
         last_quote_age_seconds: 1,
@@ -638,6 +666,8 @@ Cypress.Commands.add('stubApi', () => {
   cy.intercept('GET', '/api/strategy/llm-interval/status', {
     body: {
       enabled: true,
+      shadow_mode: false,
+      policy_status: 'LIVE',
       interval_minutes: 1,
       last_analysis_at: '2026-05-19T19:52:03.545862Z',
       next_analysis_at: '2026-05-19T19:53:03.545862Z',
@@ -648,6 +678,7 @@ Cypress.Commands.add('stubApi', () => {
         analysis: '区间测试',
       },
       applied_values: { buy_low: 220.42, sell_high: 221.42 },
+      last_applied_values: { buy_low: 220.42, sell_high: 221.42 },
       reject_reason: null,
       budget: {
         max_symbols_per_cycle: 5,

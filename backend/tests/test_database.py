@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import sqlite3
 
+import pytest
 from sqlalchemy import create_engine
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
 from app import database
@@ -298,6 +300,306 @@ def test_init_db_adds_missing_strategy_margin_safety_factor_column(tmp_path, mon
     finally:
         session.close()
     Base.metadata.drop_all(bind=engine)
+
+
+def test_init_db_adds_p0_strategy_safety_columns(tmp_path, monkeypatch) -> None:
+    db_path = tmp_path / "legacy_p0_safety.db"
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(
+            "CREATE TABLE strategy_config (id INTEGER PRIMARY KEY AUTOINCREMENT)"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    engine = create_engine(f"sqlite:///{db_path}")
+
+    database._ensure_strategy_config_p0_safety_columns(engine)
+    database._ensure_strategy_config_p0_safety_columns(engine)
+
+    with engine.connect() as db:
+        columns = {row[1] for row in db.exec_driver_sql("PRAGMA table_info(strategy_config)")}
+    assert {
+        "allow_position_addons",
+        "max_position_quantity",
+        "max_position_notional",
+        "max_risk_per_trade",
+        "stop_loss_pct",
+        "max_holding_minutes",
+        "entry_cutoff_minutes_before_close",
+        "flatten_minutes_before_close",
+        "llm_order_execution_enabled",
+    } <= columns
+
+
+def test_init_db_adds_tracked_entry_and_reduction_metadata(tmp_path) -> None:
+    db_path = tmp_path / "legacy_reduction.db"
+    engine = create_engine(f"sqlite:///{db_path}")
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "CREATE TABLE tracked_entries ("
+            "symbol VARCHAR(50) PRIMARY KEY, quantity FLOAT, cost FLOAT, updated_at DATETIME)"
+        )
+        connection.exec_driver_sql(
+            "CREATE TABLE runtime_state (id INTEGER PRIMARY KEY AUTOINCREMENT)"
+        )
+        connection.exec_driver_sql(
+            "CREATE TABLE runtime_state_snapshots (id INTEGER PRIMARY KEY AUTOINCREMENT)"
+        )
+
+    database._ensure_tracked_entry_metadata_columns(engine)
+    database._ensure_runtime_reduction_columns(engine)
+
+    with engine.connect() as db:
+        tracked_columns = {
+            row[1] for row in db.exec_driver_sql("PRAGMA table_info(tracked_entries)")
+        }
+        runtime_columns = {
+            row[1] for row in db.exec_driver_sql("PRAGMA table_info(runtime_state)")
+        }
+    assert {"side", "opened_at"} <= tracked_columns
+    assert {
+        "execution_state",
+        "reduction_action",
+        "reduction_cause",
+        "reduction_reason",
+        "reduction_started_at",
+        "reduction_trigger_price",
+    } <= runtime_columns
+
+
+def test_runtime_state_duplicate_migration_merges_safety_state_and_enforces_uniqueness(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "legacy_duplicate_runtime_state.db"
+    engine = create_engine(f"sqlite:///{db_path}")
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE runtime_state (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol VARCHAR(50) NOT NULL DEFAULT '',
+                engine_state VARCHAR(20) NOT NULL DEFAULT 'flat',
+                paused BOOLEAN NOT NULL DEFAULT 0,
+                pause_reason TEXT NOT NULL DEFAULT '',
+                paused_at DATETIME,
+                pause_auto_resumable BOOLEAN NOT NULL DEFAULT 0,
+                kill_switch BOOLEAN NOT NULL DEFAULT 0,
+                daily_pnl FLOAT NOT NULL DEFAULT 0,
+                daily_pnl_date DATE,
+                consecutive_losses INTEGER NOT NULL DEFAULT 0,
+                last_price FLOAT NOT NULL DEFAULT 0,
+                last_trigger_price FLOAT NOT NULL DEFAULT 0,
+                last_trigger_at DATETIME,
+                execution_state VARCHAR(20) NOT NULL DEFAULT 'IDLE',
+                reduction_action VARCHAR(20) NOT NULL DEFAULT '',
+                reduction_cause VARCHAR(30) NOT NULL DEFAULT '',
+                reduction_reason TEXT NOT NULL DEFAULT '',
+                reduction_started_at DATETIME,
+                reduction_trigger_price FLOAT,
+                updated_at DATETIME NOT NULL
+            )
+            """
+        )
+        connection.exec_driver_sql(
+            """
+            INSERT INTO runtime_state (
+                symbol, engine_state, paused, pause_reason, paused_at,
+                pause_auto_resumable, kill_switch, daily_pnl, daily_pnl_date,
+                consecutive_losses, last_price, last_trigger_price,
+                last_trigger_at, execution_state, reduction_action,
+                reduction_cause, reduction_reason, reduction_started_at,
+                reduction_trigger_price, updated_at
+            ) VALUES (
+                'NVDA.US', 'long', 1, 'protective exit in progress',
+                '2026-07-10 15:00:00', 0, 0, -120.0, '2026-07-10',
+                2, 200.0, 199.0, '2026-07-10 14:59:00', 'REDUCING',
+                'SELL', 'STOP_LOSS', 'hard stop reached',
+                '2026-07-10 15:00:00', 198.0, '2026-07-10 15:01:00'
+            )
+            """
+        )
+        connection.exec_driver_sql(
+            """
+            INSERT INTO runtime_state (
+                symbol, engine_state, paused, pause_reason, paused_at,
+                pause_auto_resumable, kill_switch, daily_pnl, daily_pnl_date,
+                consecutive_losses, last_price, last_trigger_price,
+                last_trigger_at, execution_state, reduction_action,
+                reduction_cause, reduction_reason, reduction_started_at,
+                reduction_trigger_price, updated_at
+            ) VALUES (
+                'NVDA.US', 'long', 0, '', NULL, 0, 1, -20.0,
+                '2026-07-10', 4, 201.0, 200.0,
+                '2026-07-10 15:02:00', 'IDLE', '', '', '', NULL, NULL,
+                '2026-07-10 15:02:00'
+            )
+            """
+        )
+
+    testing_session = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    monkeypatch.setattr(database, "engine", engine)
+    monkeypatch.setattr(database, "SessionLocal", testing_session)
+
+    database.init_db()
+    database.init_db()
+
+    with engine.connect() as connection:
+        rows = connection.exec_driver_sql(
+            """
+            SELECT symbol, engine_state, paused, pause_reason, kill_switch,
+                   daily_pnl, consecutive_losses, last_price,
+                   execution_state, reduction_action, reduction_cause,
+                   reduction_reason, reduction_started_at,
+                   reduction_trigger_price, updated_at
+            FROM runtime_state WHERE symbol = 'NVDA.US'
+            """
+        ).fetchall()
+        indexes = {
+            row[1]
+            for row in connection.exec_driver_sql(
+                "PRAGMA index_list(runtime_state)"
+            ).fetchall()
+        }
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row[0] == "NVDA.US"
+    assert row[1] == "long"
+    assert row[2] == 1
+    assert row[3] == "protective exit in progress"
+    assert row[4] == 1
+    assert row[5] == -120.0
+    assert row[6] == 4
+    assert row[7] == 201.0
+    assert row[8] == "REDUCING"
+    assert row[9] == "SELL"
+    assert row[10] == "STOP_LOSS"
+    assert row[11] == "hard stop reached"
+    assert str(row[12]).startswith("2026-07-10 15:00:00")
+    assert row[13] == 198.0
+    assert str(row[14]).startswith("2026-07-10 15:02:00")
+    assert "ux_runtime_state_symbol" in indexes
+
+    with pytest.raises(IntegrityError):
+        with engine.begin() as connection:
+            connection.exec_driver_sql(
+                """
+                INSERT INTO runtime_state (symbol, updated_at)
+                VALUES ('NVDA.US', '2026-07-10 15:03:00')
+                """
+            )
+
+
+def test_order_duplicate_migration_preserves_terminal_fill_and_allows_empty_ids(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "legacy_duplicate_orders.db"
+    engine = create_engine(f"sqlite:///{db_path}")
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE orders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                broker_order_id VARCHAR(100) NOT NULL,
+                symbol VARCHAR(50) NOT NULL,
+                side VARCHAR(20) NOT NULL,
+                quantity FLOAT NOT NULL,
+                price FLOAT NOT NULL,
+                executed_quantity FLOAT,
+                executed_price FLOAT,
+                status VARCHAR(20) NOT NULL,
+                created_at DATETIME,
+                filled_at DATETIME,
+                raw_response TEXT
+            )
+            """
+        )
+        connection.exec_driver_sql(
+            """
+            INSERT INTO orders (
+                broker_order_id, symbol, side, quantity, price,
+                executed_quantity, executed_price, status, created_at,
+                filled_at, raw_response
+            ) VALUES
+                ('order-duplicate', 'NVDA.US', 'BUY', 10, 100, NULL, NULL,
+                 'SUBMITTED', '2026-07-10 10:00:00', NULL, 'submitted'),
+                ('order-duplicate', 'NVDA.US', 'BUY', 10, 100, 4, 101.5,
+                 'PARTIAL_FILLED', '2026-07-10 10:01:00',
+                 '2026-07-10 10:02:00', 'partial'),
+                ('order-duplicate', 'NVDA.US', 'BUY', 10, 100, 0, NULL,
+                 'CANCELLED', '2026-07-10 10:02:00',
+                 '2026-07-10 10:03:00', 'cancelled'),
+                ('', 'AAPL.US', 'BUY', 1, 200, NULL, NULL, 'SUBMITTED',
+                 '2026-07-10 11:00:00', NULL, 'local-one'),
+                ('', 'MSFT.US', 'SELL', 2, 300, NULL, NULL, 'REJECTED',
+                 '2026-07-10 11:01:00', NULL, 'local-two')
+            """
+        )
+
+    testing_session = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    monkeypatch.setattr(database, "engine", engine)
+    monkeypatch.setattr(database, "SessionLocal", testing_session)
+
+    database.init_db()
+    database.init_db()
+
+    with engine.connect() as connection:
+        merged = connection.exec_driver_sql(
+            """
+            SELECT status, quantity, executed_quantity, executed_price,
+                   created_at, filled_at, raw_response
+            FROM orders WHERE broker_order_id = 'order-duplicate'
+            """
+        ).fetchall()
+        empty_count = connection.exec_driver_sql(
+            "SELECT COUNT(*) FROM orders WHERE broker_order_id = ''"
+        ).scalar_one()
+        indexes = {
+            row[1]
+            for row in connection.exec_driver_sql("PRAGMA index_list(orders)").fetchall()
+        }
+
+    assert len(merged) == 1
+    row = merged[0]
+    assert row[0] == "CANCELLED"
+    assert row[1] == 10.0
+    assert row[2] == 4.0
+    assert row[3] == 101.5
+    assert str(row[4]).startswith("2026-07-10 10:00:00")
+    assert str(row[5]).startswith("2026-07-10 10:03:00")
+    assert row[6] == "cancelled"
+    assert empty_count == 2
+    assert "ux_orders_broker_order_id_nonempty" in indexes
+
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            INSERT INTO orders (
+                broker_order_id, symbol, side, quantity, price, status, created_at
+            ) VALUES ('', 'TSLA.US', 'BUY', 1, 250, 'SUBMITTED',
+                      '2026-07-10 11:02:00')
+            """
+        )
+    with engine.connect() as connection:
+        assert connection.exec_driver_sql(
+            "SELECT COUNT(*) FROM orders WHERE broker_order_id = ''"
+        ).scalar_one() == 3
+
+    with pytest.raises(IntegrityError):
+        with engine.begin() as connection:
+            connection.exec_driver_sql(
+                """
+                INSERT INTO orders (
+                    broker_order_id, symbol, side, quantity, price, status,
+                    created_at
+                ) VALUES ('order-duplicate', 'NVDA.US', 'BUY', 1, 100,
+                          'SUBMITTED', '2026-07-10 11:03:00')
+                """
+            )
+
 
 def test_init_db_adds_missing_runtime_state_daily_pnl_date_column(tmp_path, monkeypatch) -> None:
     db_path = tmp_path / "legacy_runtime_state.db"

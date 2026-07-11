@@ -69,6 +69,30 @@ class TestLLMInteractionDetailService(_Base):
     def test_get_detail_missing(self) -> None:
         assert LLMInteractionService(self._db()).get_detail(999999) is None
 
+    def test_update_outcome_merges_policy_audit_into_parsed_response(self) -> None:
+        rid = self._make()
+        policy_outcome = {
+            "code": "PRICE_DEVIATION",
+            "reference_price": 100.0,
+            "candidate_price": 102.0,
+            "deviation_pct": 2.0,
+            "confidence": 0.84,
+            "disposition": "REJECT",
+        }
+
+        LLMInteractionService(self._db()).update_outcome(
+            rid,
+            applied=False,
+            order_status="POLICY_REJECTED",
+            policy_outcome=policy_outcome,
+        )
+
+        out = LLMInteractionService(self._db()).get_detail(rid)
+        assert out is not None
+        assert out.parsed_response["buy_low"] == 90
+        assert out.parsed_response["policy_outcome"] == policy_outcome
+        assert out.order_status == "POLICY_REJECTED"
+
 
 class TestLLMInteractionDetailAPI(_Base):
     def test_endpoint(self) -> None:

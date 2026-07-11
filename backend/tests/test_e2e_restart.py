@@ -329,11 +329,12 @@ class TestE2EStartupRestoresTrackedEntries:
         runner = get_runner()
         runner._initialize_runner()
 
-        # Tracked entries must be restored in the trade service.
+        # Broker position is startup truth: the stale local quantity is repaired
+        # while its weighted average entry price is preserved.
         snapshot = runner._trade_svc.snapshot_tracked_entries()
         assert "AAPL.US" in snapshot
-        assert snapshot["AAPL.US"][0] == Decimal("100.0")
-        assert snapshot["AAPL.US"][1] == Decimal("15000.0")
+        assert snapshot["AAPL.US"][0] == Decimal("80.0")
+        assert snapshot["AAPL.US"][1] == Decimal("12000.0")
 
         # Broker should have been queried for positions and the symbol subscribed.
         assert fake_broker.get_positions_calls >= 1
@@ -353,8 +354,902 @@ class TestE2EStartupRestoresTrackedEntries:
             assert payload["tracked_quantity"] == 100.0
             assert payload["broker_quantity"] == 80.0
             assert payload["source"] == "startup_tracked_entry_reconcile"
+            assert payload["repaired"] is True
         finally:
             db.close()
+
+    def test_recent_terminal_fill_with_missing_symbol_latches_reconciliation(
+        self, fresh_runner, monkeypatch
+    ) -> None:
+        _seed_strategy(symbol="AAPL.US")
+        malformed_fill = _make_broker_order(
+            "terminal-missing-symbol",
+            symbol="",
+            side="BUY",
+            quantity=5.0,
+            price=100.0,
+            status="FILLED",
+            executed_quantity=5.0,
+            executed_price=100.0,
+            filled_at=datetime.now(timezone.utc) - timedelta(seconds=5),
+        )
+        fake_broker = _FakeBroker(today_orders=[malformed_fill], positions=[])
+        _install_fake_broker(monkeypatch, fake_broker)
+
+        runner = get_runner()
+        runner._initialize_runner()
+
+        assert runner.risk.paused is True
+        assert runner.risk.pause_reason.startswith(
+            "ORDER_RECONCILIATION_UNCERTAIN:"
+        )
+        assert "missing symbol" in runner.risk.pause_reason
+
+        pause_reason = runner.risk.pause_reason
+        fake_broker.today_orders = []
+        runner.risk.pause(
+            pause_reason,
+            auto_resumable=False,
+            paused_at=datetime.now(timezone.utc) - timedelta(seconds=61),
+        )
+        safe, error = runner.verify_operational_resume()
+        assert safe is False
+        assert "first coherent empty broker proof" in error
+
+        runner._unknown_submission_proof_at -= 6
+        safe, error = runner.verify_operational_resume()
+        assert safe is True
+        assert error == ""
+
+    def test_recent_terminal_fill_with_unknown_side_latches_reconciliation(
+        self, fresh_runner, monkeypatch
+    ) -> None:
+        _seed_strategy(symbol="AAPL.US")
+        malformed_fill = _make_broker_order(
+            "terminal-unknown-side",
+            symbol="AAPL.US",
+            side="UNKNOWN",
+            quantity=5.0,
+            price=100.0,
+            status="FILLED",
+            executed_quantity=5.0,
+            executed_price=100.0,
+            filled_at=datetime.now(timezone.utc) - timedelta(seconds=5),
+        )
+        fake_broker = _FakeBroker(today_orders=[malformed_fill], positions=[])
+        _install_fake_broker(monkeypatch, fake_broker)
+
+        runner = get_runner()
+        runner._initialize_runner()
+
+        assert runner.risk.paused is True
+        assert runner.risk.pause_reason.startswith(
+            "ORDER_RECONCILIATION_UNCERTAIN:"
+        )
+        assert "invalid side" in runner.risk.pause_reason
+
+    def test_unknown_submission_resume_requires_grace_and_two_empty_proofs(
+        self, fresh_runner, monkeypatch
+    ) -> None:
+        _seed_strategy(symbol="AAPL.US")
+        fake_broker = _FakeBroker(today_orders=[], positions=[])
+        _install_fake_broker(monkeypatch, fake_broker)
+        runner = get_runner()
+        runner._initialize_runner()
+        pause_reason = (
+            "ORDER_SUBMISSION_UNCERTAIN: symbol=AAPL.US action=BUY "
+            "broker response was lost"
+        )
+        runner.risk.pause(pause_reason, auto_resumable=False)
+
+        safe, error = runner.verify_operational_resume()
+        assert safe is False
+        assert "grace period" in error
+
+        runner.risk.pause(
+            pause_reason,
+            auto_resumable=False,
+            paused_at=datetime.now(timezone.utc) - timedelta(seconds=61),
+        )
+        safe, error = runner.verify_operational_resume()
+        assert safe is False
+        assert "first coherent empty broker proof" in error
+
+        runner._unknown_submission_proof_at -= 6
+        safe, error = runner.verify_operational_resume()
+        assert safe is True
+        assert error == ""
+
+
+class TestE2EOfflineFillRecovery:
+    def test_restart_rebuilds_tracked_entry_for_fill_completed_while_down(
+        self, fresh_runner, monkeypatch
+    ) -> None:
+        _seed_strategy(symbol="AAPL.US")
+        submitted_at = datetime.now(timezone.utc) - timedelta(minutes=2)
+        filled_at = submitted_at + timedelta(seconds=20)
+        db = SessionLocal()
+        try:
+            db.add(
+                OrderRecord(
+                    broker_order_id="offline-entry",
+                    symbol="AAPL.US",
+                    side="BUY",
+                    quantity=10.0,
+                    price=150.0,
+                    status="SUBMITTED",
+                    created_at=submitted_at,
+                )
+            )
+            db.add(
+                TradeEvent(
+                    event_type="ORDER_SUBMITTED",
+                    symbol="AAPL.US",
+                    broker_order_id="offline-entry",
+                    side="BUY",
+                    status="SUBMITTED",
+                    message="locally submitted entry",
+                    created_at=submitted_at,
+                )
+            )
+            db.add(RuntimeState(symbol="AAPL.US", engine_state="flat"))
+            db.commit()
+        finally:
+            db.close()
+
+        fake_broker = _FakeBroker(
+            today_orders=[
+                _make_broker_order(
+                    "offline-entry",
+                    symbol="AAPL.US",
+                    side="BUY",
+                    quantity=10.0,
+                    price=150.0,
+                    status="FILLED",
+                    executed_quantity=10.0,
+                    executed_price=151.0,
+                    created_at=submitted_at,
+                    filled_at=filled_at,
+                )
+            ],
+            positions=[
+                Position(
+                    symbol="AAPL.US",
+                    side="LONG",
+                    quantity=Decimal("10"),
+                    avg_price=Decimal("151"),
+                )
+            ],
+        )
+        _install_fake_broker(monkeypatch, fake_broker)
+
+        runner = get_runner()
+        runner._initialize_runner()
+
+        tracked = runner._trade_svc.tracked_position("AAPL.US")
+        assert tracked is not None
+        assert tracked.side == "LONG"
+        assert tracked.quantity == Decimal("10.0")
+        assert tracked.cost == Decimal("1510.0")
+        assert tracked.opened_at is not None
+        restored_opened_at = tracked.opened_at
+        if restored_opened_at.tzinfo is None:
+            restored_opened_at = restored_opened_at.replace(tzinfo=timezone.utc)
+        assert restored_opened_at == filled_at
+        assert runner.engine.state.value == "long"
+
+        db = SessionLocal()
+        try:
+            rows = db.query(TrackedEntry).filter(TrackedEntry.symbol == "AAPL.US").all()
+            assert len(rows) == 1
+            assert rows[0].quantity == 10.0
+            assert rows[0].cost == 1510.0
+        finally:
+            db.close()
+
+    def test_restart_clears_stale_tracked_and_completes_offline_reduction_fill(
+        self, fresh_runner, monkeypatch
+    ) -> None:
+        _seed_strategy(symbol="AAPL.US")
+        submitted_at = datetime.now(timezone.utc) - timedelta(minutes=2)
+        filled_at = submitted_at + timedelta(seconds=20)
+        db = SessionLocal()
+        try:
+            db.add(
+                TrackedEntry(
+                    symbol="AAPL.US",
+                    side="LONG",
+                    quantity=10.0,
+                    cost=1500.0,
+                    opened_at=submitted_at - timedelta(minutes=20),
+                    updated_at=submitted_at - timedelta(seconds=1),
+                )
+            )
+            db.add(
+                RuntimeState(
+                    symbol="AAPL.US",
+                    engine_state="flat",
+                    execution_state="REDUCING",
+                    reduction_action="SELL",
+                    reduction_cause="PRICE_STOP",
+                    reduction_reason="offline protective exit",
+                    reduction_started_at=submitted_at,
+                    reduction_trigger_price=148.0,
+                )
+            )
+            db.add(
+                OrderRecord(
+                    broker_order_id="offline-exit",
+                    symbol="AAPL.US",
+                    side="SELL",
+                    quantity=10.0,
+                    price=148.0,
+                    status="SUBMITTED",
+                    created_at=submitted_at,
+                )
+            )
+            db.add(
+                TradeEvent(
+                    event_type="ORDER_SUBMITTED",
+                    symbol="AAPL.US",
+                    broker_order_id="offline-exit",
+                    side="SELL",
+                    status="SUBMITTED",
+                    message="locally submitted exit",
+                    created_at=submitted_at,
+                )
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        fake_broker = _FakeBroker(
+            today_orders=[
+                _make_broker_order(
+                    "offline-exit",
+                    symbol="AAPL.US",
+                    side="SELL",
+                    quantity=10.0,
+                    price=148.0,
+                    status="FILLED",
+                    executed_quantity=10.0,
+                    executed_price=147.5,
+                    created_at=submitted_at,
+                    filled_at=filled_at,
+                )
+            ],
+            positions=[],
+        )
+        _install_fake_broker(monkeypatch, fake_broker)
+
+        runner = get_runner()
+        runner._initialize_runner()
+
+        assert runner._trade_svc.tracked_position("AAPL.US") is None
+        assert runner.execution_state()[0] == "IDLE"
+        assert runner.engine.state.value == "flat"
+        assert runner.risk.paused is True
+        assert runner.risk.pause_reason == "offline protective exit"
+
+        db = SessionLocal()
+        try:
+            assert db.query(TrackedEntry).filter(TrackedEntry.symbol == "AAPL.US").first() is None
+            state = db.query(RuntimeState).filter(RuntimeState.symbol == "AAPL.US").one()
+            assert state.execution_state == "IDLE"
+        finally:
+            db.close()
+
+    def test_restart_does_not_resurrect_position_while_filled_exit_settles(
+        self, fresh_runner, monkeypatch
+    ) -> None:
+        _seed_strategy(symbol="AAPL.US")
+        filled_at = datetime.now(timezone.utc) - timedelta(seconds=5)
+        db = SessionLocal()
+        try:
+            db.add(
+                OrderRecord(
+                    broker_order_id="settling-exit",
+                    symbol="AAPL.US",
+                    side="SELL",
+                    quantity=10.0,
+                    price=151.0,
+                    executed_quantity=10.0,
+                    executed_price=151.0,
+                    status="FILLED",
+                    created_at=filled_at - timedelta(seconds=2),
+                    filled_at=filled_at,
+                )
+            )
+            db.add(
+                TradeEvent(
+                    event_type="ORDER_SUBMITTED",
+                    symbol="AAPL.US",
+                    broker_order_id="settling-exit",
+                    side="SELL",
+                    status="FILLED",
+                    message="locally submitted exit",
+                )
+            )
+            db.add(RuntimeState(symbol="AAPL.US", engine_state="flat"))
+            db.commit()
+        finally:
+            db.close()
+
+        filled_order = _make_broker_order(
+            "settling-exit",
+            symbol="AAPL.US",
+            side="SELL",
+            quantity=10.0,
+            price=151.0,
+            status="FILLED",
+            executed_quantity=10.0,
+            executed_price=151.0,
+            filled_at=filled_at,
+        )
+        fake_broker = _FakeBroker(
+            today_orders=[filled_order],
+            positions=[
+                Position(
+                    symbol="AAPL.US",
+                    side="LONG",
+                    quantity=Decimal("10"),
+                    avg_price=Decimal("150"),
+                )
+            ],
+        )
+        _install_fake_broker(monkeypatch, fake_broker)
+
+        runner = get_runner()
+        runner._initialize_runner()
+
+        assert runner._trade_svc.tracked_position("AAPL.US") is None
+        assert runner.engine.state.value == "flat"
+        assert runner.risk.paused is True
+        assert runner.risk.pause_reason.startswith(
+            "POSITION_RECONCILIATION_UNCERTAIN:"
+        )
+        expectation = runner._post_fill_expectations["AAPL.US"]
+        assert expectation.side == ""
+        assert expectation.quantity == Decimal("0")
+
+        fake_broker.positions = []
+        db = SessionLocal()
+        try:
+            runner._reconcile_tracked_entries_with_broker(
+                db,
+                source="test_exit_settlement_confirmed",
+            )
+        finally:
+            db.close()
+        assert "AAPL.US" not in runner._post_fill_expectations
+        assert runner._trade_svc.tracked_position("AAPL.US") is None
+
+    def test_restart_blocks_resume_before_filled_exit_consumes_tracked_entry(
+        self, fresh_runner, monkeypatch
+    ) -> None:
+        _seed_strategy(symbol="AAPL.US")
+        filled_at = datetime.now(timezone.utc) - timedelta(seconds=5)
+        opened_at = filled_at - timedelta(minutes=30)
+        db = SessionLocal()
+        try:
+            db.add(
+                TrackedEntry(
+                    symbol="AAPL.US",
+                    side="LONG",
+                    quantity=10.0,
+                    cost=1500.0,
+                    opened_at=opened_at,
+                    updated_at=filled_at - timedelta(seconds=1),
+                )
+            )
+            db.add(
+                OrderRecord(
+                    broker_order_id="pre-cleanup-exit",
+                    symbol="AAPL.US",
+                    side="SELL",
+                    quantity=10.0,
+                    price=151.0,
+                    executed_quantity=10.0,
+                    executed_price=151.0,
+                    status="FILLED",
+                    created_at=filled_at - timedelta(seconds=2),
+                    filled_at=filled_at,
+                )
+            )
+            db.add(
+                TradeEvent(
+                    event_type="ORDER_SUBMITTED",
+                    symbol="AAPL.US",
+                    broker_order_id="pre-cleanup-exit",
+                    side="SELL",
+                    status="FILLED",
+                    message="locally submitted exit",
+                )
+            )
+            db.add(RuntimeState(symbol="AAPL.US", engine_state="flat"))
+            db.commit()
+        finally:
+            db.close()
+
+        filled_order = _make_broker_order(
+            "pre-cleanup-exit",
+            symbol="AAPL.US",
+            side="SELL",
+            quantity=10.0,
+            price=151.0,
+            status="FILLED",
+            executed_quantity=10.0,
+            executed_price=151.0,
+            filled_at=filled_at,
+        )
+        fake_broker = _FakeBroker(
+            today_orders=[filled_order],
+            positions=[
+                Position("AAPL.US", "LONG", Decimal("10"), Decimal("150"))
+            ],
+        )
+        _install_fake_broker(monkeypatch, fake_broker)
+
+        runner = get_runner()
+        runner._initialize_runner()
+
+        assert runner.engine.state.value == "flat"
+        assert runner._post_fill_expectations["AAPL.US"].quantity == Decimal("0")
+        safe, error = runner.verify_operational_resume()
+        assert safe is False
+        assert "settlement" in error
+
+        fake_broker.positions = []
+        safe, error = runner.verify_operational_resume()
+        assert safe is True
+        assert error == ""
+        assert runner._trade_svc.tracked_position("AAPL.US") is None
+        assert "AAPL.US" not in runner._post_fill_expectations
+
+    def test_restart_rebuilds_expected_entry_before_tracked_entry_is_written(
+        self, fresh_runner, monkeypatch
+    ) -> None:
+        _seed_strategy(symbol="AAPL.US")
+        filled_at = datetime.now(timezone.utc) - timedelta(seconds=5)
+        db = SessionLocal()
+        try:
+            db.add(
+                OrderRecord(
+                    broker_order_id="pre-tracked-entry",
+                    symbol="AAPL.US",
+                    side="BUY",
+                    quantity=5.0,
+                    price=100.0,
+                    executed_quantity=5.0,
+                    executed_price=100.0,
+                    status="FILLED",
+                    created_at=filled_at - timedelta(seconds=2),
+                    filled_at=filled_at,
+                )
+            )
+            db.add(
+                TradeEvent(
+                    event_type="ORDER_SUBMITTED",
+                    symbol="AAPL.US",
+                    broker_order_id="pre-tracked-entry",
+                    side="BUY",
+                    status="FILLED",
+                    message="locally submitted entry",
+                )
+            )
+            db.add(RuntimeState(symbol="AAPL.US", engine_state="flat"))
+            db.commit()
+        finally:
+            db.close()
+
+        filled_order = _make_broker_order(
+            "pre-tracked-entry",
+            symbol="AAPL.US",
+            side="BUY",
+            quantity=5.0,
+            price=100.0,
+            status="FILLED",
+            executed_quantity=5.0,
+            executed_price=100.0,
+            filled_at=filled_at,
+        )
+        fake_broker = _FakeBroker(today_orders=[filled_order], positions=[])
+        _install_fake_broker(monkeypatch, fake_broker)
+
+        runner = get_runner()
+        runner._initialize_runner()
+
+        expectation = runner._post_fill_expectations["AAPL.US"]
+        assert expectation.side == "LONG"
+        assert expectation.quantity == Decimal("5")
+        assert runner.engine.state.value == "long"
+        safe, error = runner.verify_operational_resume()
+        assert safe is False
+        assert "settlement" in error
+
+        fake_broker.positions = [
+            Position("AAPL.US", "LONG", Decimal("5"), Decimal("100"))
+        ]
+        safe, error = runner.verify_operational_resume()
+        assert safe is True
+        assert error == ""
+        tracked = runner._trade_svc.tracked_position("AAPL.US")
+        assert tracked is not None
+        assert tracked.quantity == Decimal("5.0")
+        assert tracked.cost == Decimal("500.0")
+        assert runner.engine.state.value == "long"
+
+    def test_restart_pauses_recent_fill_when_first_position_lookup_fails(
+        self, fresh_runner, monkeypatch
+    ) -> None:
+        _seed_strategy(symbol="AAPL.US")
+        filled_at = datetime.now(timezone.utc) - timedelta(seconds=5)
+        db = SessionLocal()
+        try:
+            db.add(
+                OrderRecord(
+                    broker_order_id="entry-before-position-timeout",
+                    symbol="AAPL.US",
+                    side="BUY",
+                    quantity=5.0,
+                    price=100.0,
+                    executed_quantity=5.0,
+                    executed_price=100.0,
+                    status="FILLED",
+                    created_at=filled_at - timedelta(seconds=2),
+                    filled_at=filled_at,
+                )
+            )
+            db.add(
+                TradeEvent(
+                    event_type="ORDER_SUBMITTED",
+                    symbol="AAPL.US",
+                    broker_order_id="entry-before-position-timeout",
+                    side="BUY",
+                    status="FILLED",
+                    message="locally submitted entry",
+                )
+            )
+            db.add(RuntimeState(symbol="AAPL.US", engine_state="flat"))
+            db.commit()
+        finally:
+            db.close()
+
+        filled_order = _make_broker_order(
+            "entry-before-position-timeout",
+            symbol="AAPL.US",
+            side="BUY",
+            quantity=5.0,
+            price=100.0,
+            status="FILLED",
+            executed_quantity=5.0,
+            executed_price=100.0,
+            filled_at=filled_at,
+        )
+
+        class FailFirstPositionBroker(_FakeBroker):
+            def __init__(self) -> None:
+                super().__init__(today_orders=[filled_order], positions=[])
+                self.remaining_failures = 1
+
+            def get_positions(self) -> list[Position]:
+                if self.remaining_failures > 0:
+                    self.remaining_failures -= 1
+                    raise RuntimeError("temporary position timeout")
+                return super().get_positions()
+
+        fake_broker = FailFirstPositionBroker()
+        _install_fake_broker(monkeypatch, fake_broker)
+
+        runner = get_runner()
+        runner._initialize_runner()
+
+        assert runner.risk.paused is True
+        assert runner.risk.pause_reason.startswith(
+            "POSITION_RECONCILIATION_UNCERTAIN:"
+        )
+        assert runner._unsettled_position_symbols == {"AAPL.US"}
+        assert runner.engine.state.value == "flat"
+        safe, error = runner.verify_operational_resume()
+        assert safe is False
+        assert "settlement" in error
+
+    def test_restart_recovers_cancelled_partial_entry_before_tracked_write(
+        self, fresh_runner, monkeypatch
+    ) -> None:
+        _seed_strategy(symbol="AAPL.US")
+        executed_at = datetime.now(timezone.utc) - timedelta(seconds=5)
+        db = SessionLocal()
+        try:
+            db.add(
+                OrderRecord(
+                    broker_order_id="cancelled-partial-entry",
+                    symbol="AAPL.US",
+                    side="BUY",
+                    quantity=10.0,
+                    price=100.0,
+                    executed_quantity=5.0,
+                    executed_price=100.0,
+                    status="CANCELLED",
+                    created_at=executed_at - timedelta(seconds=2),
+                    filled_at=executed_at,
+                )
+            )
+            db.add(
+                TradeEvent(
+                    event_type="ORDER_SUBMITTED",
+                    symbol="AAPL.US",
+                    broker_order_id="cancelled-partial-entry",
+                    side="BUY",
+                    status="CANCELLED",
+                    message="locally submitted partial entry",
+                )
+            )
+            db.add(RuntimeState(symbol="AAPL.US", engine_state="flat"))
+            db.commit()
+        finally:
+            db.close()
+
+        cancelled_order = _make_broker_order(
+            "cancelled-partial-entry",
+            symbol="AAPL.US",
+            side="BUY",
+            quantity=10.0,
+            price=100.0,
+            status="CANCELLED",
+            executed_quantity=5.0,
+            executed_price=100.0,
+            filled_at=executed_at,
+        )
+        fake_broker = _FakeBroker(today_orders=[cancelled_order], positions=[])
+        _install_fake_broker(monkeypatch, fake_broker)
+
+        runner = get_runner()
+        runner._initialize_runner()
+
+        expectation = runner._post_fill_expectations["AAPL.US"]
+        assert expectation.side == "LONG"
+        assert expectation.quantity == Decimal("5")
+        assert runner.engine.state.value == "long"
+        assert runner.risk.paused is True
+        safe, error = runner.verify_operational_resume()
+        assert safe is False
+        assert "settlement" in error
+
+    def test_old_exit_fill_does_not_mask_new_broker_exposure(
+        self, fresh_runner, monkeypatch
+    ) -> None:
+        _seed_strategy(symbol="AAPL.US")
+        filled_at = datetime.now(timezone.utc) - timedelta(minutes=5)
+        db = SessionLocal()
+        try:
+            db.add(
+                OrderRecord(
+                    broker_order_id="old-exit",
+                    symbol="AAPL.US",
+                    side="SELL",
+                    quantity=5.0,
+                    price=110.0,
+                    executed_quantity=5.0,
+                    executed_price=110.0,
+                    status="FILLED",
+                    created_at=filled_at - timedelta(seconds=2),
+                    filled_at=filled_at,
+                )
+            )
+            db.add(
+                TradeEvent(
+                    event_type="ORDER_SUBMITTED",
+                    symbol="AAPL.US",
+                    broker_order_id="old-exit",
+                    side="SELL",
+                    status="FILLED",
+                    message="old local exit",
+                )
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        fake_broker = _FakeBroker(
+            positions=[
+                Position("AAPL.US", "LONG", Decimal("4"), Decimal("120"))
+            ]
+        )
+        _install_fake_broker(monkeypatch, fake_broker)
+
+        runner = get_runner()
+        runner._initialize_runner()
+
+        tracked = runner._trade_svc.tracked_position("AAPL.US")
+        assert tracked is not None
+        assert tracked.quantity == Decimal("4.0")
+        assert tracked.cost == Decimal("480.0")
+        assert runner.engine.state.value == "long"
+        assert "AAPL.US" not in runner._post_fill_expectations
+        assert "AAPL.US" not in runner._unsettled_position_symbols
+
+    def test_recent_terminal_transition_recovers_old_partial_fill(
+        self, fresh_runner, monkeypatch
+    ) -> None:
+        _seed_strategy(symbol="AAPL.US")
+        partial_filled_at = datetime.now(timezone.utc) - timedelta(minutes=2)
+        terminal_observed_at = datetime.now(timezone.utc) - timedelta(seconds=5)
+        db = SessionLocal()
+        try:
+            db.add(
+                OrderRecord(
+                    broker_order_id="old-partial-recent-terminal",
+                    symbol="AAPL.US",
+                    side="BUY",
+                    quantity=10.0,
+                    price=100.0,
+                    executed_quantity=5.0,
+                    executed_price=100.0,
+                    status="CANCELLED",
+                    created_at=partial_filled_at - timedelta(seconds=2),
+                    filled_at=partial_filled_at,
+                )
+            )
+            db.add_all(
+                [
+                    TradeEvent(
+                        event_type="ORDER_SUBMITTED",
+                        symbol="AAPL.US",
+                        broker_order_id="old-partial-recent-terminal",
+                        side="BUY",
+                        status="SUBMITTED",
+                        message="locally submitted entry",
+                        created_at=partial_filled_at - timedelta(seconds=2),
+                    ),
+                    TradeEvent(
+                        event_type="ORDER_CANCELLED",
+                        symbol="AAPL.US",
+                        broker_order_id="old-partial-recent-terminal",
+                        side="BUY",
+                        status="CANCELLED",
+                        message="partial entry became terminal",
+                        created_at=terminal_observed_at,
+                    ),
+                ]
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        terminal_order = _make_broker_order(
+            "old-partial-recent-terminal",
+            symbol="AAPL.US",
+            side="BUY",
+            quantity=10.0,
+            price=100.0,
+            status="CANCELLED",
+            executed_quantity=5.0,
+            executed_price=100.0,
+            filled_at=partial_filled_at,
+        )
+        fake_broker = _FakeBroker(today_orders=[terminal_order], positions=[])
+        _install_fake_broker(monkeypatch, fake_broker)
+
+        runner = get_runner()
+        runner._initialize_runner()
+
+        expectation = runner._post_fill_expectations["AAPL.US"]
+        assert expectation.side == "LONG"
+        assert expectation.quantity == Decimal("5")
+        assert runner.risk.paused is True
+        assert runner.risk.pause_reason.startswith(
+            "POSITION_RECONCILIATION_UNCERTAIN:"
+        )
+
+    def test_recent_broker_discovered_fill_blocks_direction_guessing(
+        self, fresh_runner, monkeypatch
+    ) -> None:
+        _seed_strategy(symbol="AAPL.US")
+        filled_at = datetime.now(timezone.utc) - timedelta(seconds=5)
+        raw_fill = _make_broker_order(
+            "broker-only-fill",
+            symbol="AAPL.US",
+            side="BUY",
+            quantity=5.0,
+            price=100.0,
+            status="FILLED",
+            executed_quantity=5.0,
+            executed_price=100.0,
+            filled_at=filled_at,
+        )
+        fake_broker = _FakeBroker(today_orders=[raw_fill], positions=[])
+        _install_fake_broker(monkeypatch, fake_broker)
+
+        runner = get_runner()
+        runner._initialize_runner()
+
+        assert runner.risk.paused is True
+        assert runner.risk.pause_reason.startswith(
+            "ORDER_RECONCILIATION_UNCERTAIN:"
+        )
+        assert runner.engine.state.value == "flat"
+        assert runner._trade_svc.tracked_position("AAPL.US") is None
+        assert runner._unsettled_position_symbols == {"AAPL.US"}
+        safe, error = runner.verify_operational_resume()
+        assert safe is False
+        assert "grace period" in error
+
+    def test_settled_partial_exit_keeps_remaining_tracked_position(
+        self, fresh_runner, monkeypatch
+    ) -> None:
+        _seed_strategy(symbol="AAPL.US")
+        filled_at = datetime.now(timezone.utc) - timedelta(seconds=5)
+        db = SessionLocal()
+        try:
+            db.add(
+                TrackedEntry(
+                    symbol="AAPL.US",
+                    side="LONG",
+                    quantity=3.0,
+                    cost=300.0,
+                    opened_at=filled_at - timedelta(minutes=30),
+                    updated_at=filled_at + timedelta(seconds=1),
+                )
+            )
+            db.add(
+                OrderRecord(
+                    broker_order_id="partial-exit",
+                    symbol="AAPL.US",
+                    side="SELL",
+                    quantity=2.0,
+                    price=101.0,
+                    executed_quantity=2.0,
+                    executed_price=101.0,
+                    status="FILLED",
+                    created_at=filled_at - timedelta(seconds=2),
+                    filled_at=filled_at,
+                )
+            )
+            db.add(
+                TradeEvent(
+                    event_type="ORDER_SUBMITTED",
+                    symbol="AAPL.US",
+                    broker_order_id="partial-exit",
+                    side="SELL",
+                    status="FILLED",
+                    message="partial local exit",
+                )
+            )
+            db.add(RuntimeState(symbol="AAPL.US", engine_state="long"))
+            db.commit()
+        finally:
+            db.close()
+
+        partial_fill = _make_broker_order(
+            "partial-exit",
+            symbol="AAPL.US",
+            side="SELL",
+            quantity=2.0,
+            price=101.0,
+            status="FILLED",
+            executed_quantity=2.0,
+            executed_price=101.0,
+            filled_at=filled_at,
+        )
+        fake_broker = _FakeBroker(
+            today_orders=[partial_fill],
+            positions=[
+                Position("AAPL.US", "LONG", Decimal("3"), Decimal("100"))
+            ],
+        )
+        _install_fake_broker(monkeypatch, fake_broker)
+
+        runner = get_runner()
+        runner._initialize_runner()
+
+        tracked = runner._trade_svc.tracked_position("AAPL.US")
+        assert tracked is not None
+        assert tracked.quantity == Decimal("3.0")
+        assert tracked.cost == Decimal("300.0")
+        assert runner.engine.state.value == "long"
+        assert "AAPL.US" not in runner._post_fill_expectations
+        assert "AAPL.US" not in runner._unsettled_position_symbols
 
 
 # ---------------------------------------------------------------------------
@@ -381,46 +1276,129 @@ class TestE2ERestartPausesOnUnresolvedOrder:
                     created_at=old_created_at,
                 )
             )
+            db.add(
+                TradeEvent(
+                    event_type="ORDER_SUBMITTED",
+                    symbol="AAPL.US",
+                    broker_order_id="order-live-1",
+                    side="BUY",
+                    status="SUBMITTED",
+                    message="locally submitted live order",
+                    created_at=old_created_at,
+                )
+            )
             db.commit()
         finally:
             db.close()
 
         fake_broker = _FakeBroker(
+            today_orders=[
+                _make_broker_order(
+                    "order-live-1",
+                    symbol="AAPL.US",
+                    side="BUY",
+                    quantity=10.0,
+                    price=150.0,
+                    status="SUBMITTED",
+                    created_at=old_created_at,
+                )
+            ],
             order_status_response=SimpleNamespace(
                 broker_order_id="order-live-1",
                 status="SUBMITTED",
                 executed_quantity=Decimal("0"),
                 executed_price=Decimal("0"),
-            )
+            ),
         )
         _install_fake_broker(monkeypatch, fake_broker)
 
         runner = get_runner()
         runner._initialize_runner()
 
-        # The startup pause path should have activated.
         assert runner.risk.paused is True
         assert "unresolved live order" in runner.risk.pause_reason.lower()
         assert "order-live-1" in runner.risk.pause_reason
 
-        # The risk state itself is the source of truth for the unresolved
-        # live order guard: the guard only invokes ``risk.pause()`` and does
-        # not emit a TradeEvent. The audit + TradeEvent trail is written by
-        # the manual ``/api/control/start`` and ``/api/control/stop`` flows
-        # which set the runtime_state row used by the dashboard.
         db = SessionLocal()
         try:
-            from app.models import RuntimeState
             runtime = (
                 db.query(RuntimeState).order_by(RuntimeState.id.desc()).first()
             )
-            # Runtime state may be uninitialized until the next /api/control
-            # call — that's expected for a fresh restart. The key assertion
-            # is the in-memory risk state captured above.
             assert runner.risk.pause_reason
         finally:
             db.close()
 
+    def test_broker_only_live_order_never_becomes_semantic_pending(
+        self, fresh_runner, monkeypatch
+    ) -> None:
+        _seed_strategy(symbol="AAPL.US")
+        opened_at = datetime.now(timezone.utc) - timedelta(minutes=5)
+        db = SessionLocal()
+        try:
+            db.add(
+                TrackedEntry(
+                    symbol="AAPL.US",
+                    side="SHORT",
+                    quantity=5.0,
+                    cost=500.0,
+                    opened_at=opened_at,
+                    updated_at=opened_at,
+                )
+            )
+            db.commit()
+        finally:
+            db.close()
+        partial_order = _make_broker_order(
+            "broker-only-live",
+            symbol="AAPL.US",
+            side="BUY",
+            quantity=5.0,
+            price=100.0,
+            status="PARTIAL_FILLED",
+            executed_quantity=2.0,
+            executed_price=100.0,
+        )
+        fake_broker = _FakeBroker(
+            today_orders=[partial_order],
+            positions=[
+                Position("AAPL.US", "SHORT", Decimal("5"), Decimal("100"))
+            ],
+        )
+        _install_fake_broker(monkeypatch, fake_broker)
+
+        runner = get_runner()
+        runner._initialize_runner()
+
+        assert runner.risk.paused is True
+        assert runner.risk.pause_reason.startswith(
+            "ORDER_RECONCILIATION_UNCERTAIN:"
+        )
+        assert runner._trade_svc.pending_order_for("AAPL.US") is None
+        tracked = runner._trade_svc.tracked_position("AAPL.US")
+        assert tracked is not None and tracked.side == "SHORT"
+        assert tracked.quantity == Decimal("5.0")
+        assert runner.risk.daily_pnl == 0
+
+        fake_broker.today_orders = [
+            _make_broker_order(
+                "broker-only-live",
+                symbol="AAPL.US",
+                side="BUY",
+                quantity=5.0,
+                price=100.0,
+                status="FILLED",
+                executed_quantity=5.0,
+                executed_price=100.0,
+            )
+        ]
+        runner.sync_today_orders_from_broker(force=True)
+        runner._trade_svc.reconcile(runner.risk, runner.notifier)
+
+        assert runner._trade_svc.pending_order_for("AAPL.US") is None
+        tracked = runner._trade_svc.tracked_position("AAPL.US")
+        assert tracked is not None and tracked.side == "SHORT"
+        assert tracked.quantity == Decimal("5.0")
+        assert runner.risk.daily_pnl == 0
 
 # ---------------------------------------------------------------------------
 # Scenario 3: pending order timeout pauses and emits ORDER_TIMEOUT
@@ -765,6 +1743,26 @@ class TestE2EMultiSymbolPendingRestart:
                     created_at=datetime.now(timezone.utc) - timedelta(seconds=20),
                     filled_at=datetime.now(timezone.utc) - timedelta(seconds=19),
                 )
+            )
+            db.add_all(
+                [
+                    TradeEvent(
+                        event_type="ORDER_SUBMITTED",
+                        symbol="AAPL.US",
+                        broker_order_id="order-pending-aapl",
+                        side="BUY",
+                        status="SUBMITTED",
+                        message="locally submitted pending order",
+                    ),
+                    TradeEvent(
+                        event_type="ORDER_SUBMITTED",
+                        symbol="NVDA.US",
+                        broker_order_id="order-filled-nvda",
+                        side="BUY",
+                        status="SUBMITTED",
+                        message="locally submitted filled order",
+                    ),
+                ]
             )
             db.commit()
         finally:

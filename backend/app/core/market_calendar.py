@@ -18,7 +18,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import Iterable
 from zoneinfo import ZoneInfo
 
-from app.core.holiday_calendar import closure_label, is_market_closed
+from app.core.holiday_calendar import closure_label, is_half_day, is_market_closed
 
 
 @dataclass(frozen=True)
@@ -39,6 +39,11 @@ class MarketSession:
         local = self.local(instant)
         return local.date()
 
+    def close_time(self, day: date) -> time:
+        if not is_half_day(self.code, day):
+            return self.rth_close
+        return time(13, 0) if self.code == "US" else time(12, 0)
+
     def is_rth(self, instant: datetime) -> bool:
         local = self.local(instant)
         if local.weekday() >= 5:
@@ -46,7 +51,7 @@ class MarketSession:
         if is_market_closed(self.code, local.date()):
             return False
         current = local.time()
-        if not (self.rth_open <= current < self.rth_close):
+        if not (self.rth_open <= current < self.close_time(local.date())):
             return False
         if (
             self.lunch_start is not None
@@ -119,6 +124,23 @@ def is_opening_warmup(market: str, minutes: int, instant: datetime | None = None
     return open_at <= local < open_at + timedelta(minutes=minutes)
 
 
+def is_closing_window(market: str, minutes: int, instant: datetime | None = None) -> bool:
+    """Whether an open session is within ``minutes`` of its actual close."""
+    if minutes <= 0:
+        return False
+    session = get_session(market)
+    now = _ensure_utc(instant or datetime.now(timezone.utc))
+    if not session.is_rth(now):
+        return False
+    local = session.local(now)
+    close_at = datetime.combine(
+        local.date(),
+        session.close_time(local.date()),
+        tzinfo=session.timezone,
+    )
+    return close_at - timedelta(minutes=minutes) <= local < close_at
+
+
 def session_status(market: str, instant: datetime | None = None) -> str:
     """Granular session phase: ``rth`` / ``pre`` / ``post`` / ``lunch`` / ``closed``.
 
@@ -141,7 +163,7 @@ def session_status(market: str, instant: datetime | None = None) -> str:
         return "lunch"
     if current < session.rth_open:
         return "pre"
-    if current >= session.rth_close:
+    if current >= session.close_time(local.date()):
         return "post"
     return "closed"
 

@@ -32,6 +32,11 @@ class StrategyParams:
     fee_rate_hk: float = 0.003
     min_repricing_pct: float = 0.003
     llm_action_cooldown_seconds: int = 60
+    allow_position_addons: bool = True
+    stop_loss_pct: float = 0.0
+    max_holding_minutes: int = 0
+    entry_cutoff_minutes_before_close: int = 0
+    flatten_minutes_before_close: int = 0
 
 
 @dataclass
@@ -115,7 +120,7 @@ class StrategyEngine:
                     action="SELL",
                     description=f"Price {price} >= sell_high {self.params.sell_high}, sell LONG",
                 )
-            if price <= self.params.buy_low:
+            if self.params.allow_position_addons and price <= self.params.buy_low:
                 self._mark_trigger(price)
                 return TriggerResult(
                     triggered=True,
@@ -244,4 +249,9 @@ class StrategyEngine:
                 "short_selling": self.params.short_selling,
                 "min_profit_amount": self.params.min_profit_amount,
                 "auto_resume_minutes": self.params.auto_resume_minutes,
+                "allow_position_addons": self.params.allow_position_addons,
+                "stop_loss_pct": self.params.stop_loss_pct,
+                "max_holding_minutes": self.params.max_holding_minutes,
+                "entry_cutoff_minutes_before_close": self.params.entry_cutoff_minutes_before_close,
+                "flatten_minutes_before_close": self.params.flatten_minutes_before_close,
             }

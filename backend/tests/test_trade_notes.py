@@ -49,6 +49,7 @@ class _Base:
 
     def setup_method(self) -> None:
         # Tests in one class share the DB; clear notes + orders before each method.
+        self._order_sequence = 0
         db = self._db()
         db.query(TradeNote).delete()
         db.query(OrderRecord).delete()
@@ -59,8 +60,15 @@ class _Base:
         return Session(bind=self.engine)
 
     def _make_order(self, symbol: str = "AAPL.US", side: str = "BUY") -> int:
+        self._order_sequence += 1
         db = self._db()
-        order = OrderRecord(broker_order_id=f"O-{symbol}-{id(self)}", symbol=symbol, side=side, quantity=10, price=100.0)
+        order = OrderRecord(
+            broker_order_id=f"O-{symbol}-{side}-{self._order_sequence}",
+            symbol=symbol,
+            side=side,
+            quantity=10,
+            price=100.0,
+        )
         db.add(order)
         db.commit()
         db.refresh(order)

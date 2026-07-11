@@ -13,7 +13,7 @@ from app.core.engine import StrategyParams
 
 
 @pytest.mark.asyncio
-async def test_lifespan_logs_runner_start_failure_without_crashing(monkeypatch) -> None:
+async def test_lifespan_fails_startup_when_runner_cannot_start(monkeypatch) -> None:
     class FailingRunner:
         def start(self, *, loop=None) -> bool:
             return False
@@ -24,8 +24,9 @@ async def test_lifespan_logs_runner_start_failure_without_crashing(monkeypatch) 
     monkeypatch.setattr(main_module, "init_db", lambda: None)
     monkeypatch.setattr(main_module, "get_runner", lambda: FailingRunner())
 
-    async with main_module.lifespan(main_module.app):
-        pass
+    with pytest.raises(RuntimeError, match="runner failed to start during app lifespan"):
+        async with main_module.lifespan(main_module.app):
+            pass
 
 
 @pytest.mark.asyncio
@@ -133,7 +134,8 @@ class TestShouldRunLLMAnalysis:
 
 class TestLLMAnalysisTick:
     @pytest.fixture(autouse=True)
-    def reset_trigger_price(self) -> Generator[None, None, None]:
+    def reset_trigger_price(self, monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
+        monkeypatch.setattr(main_module.settings, "llm_shadow_mode", False)
         main_module._last_llm_trigger_price = 0.0
         main_module._last_llm_trigger_price_by_symbol = {}
         main_module._llm_last_analysis_at_by_symbol = {}
@@ -164,6 +166,7 @@ class TestLLMAnalysisTick:
         runner = MagicMock()
         runner.engine = SimpleNamespace(last_price=last_price, state=SimpleNamespace(value="flat"))
         runner.broker = MagicMock()
+        runner.fresh_market_price.return_value = last_price
         runner.recent_price_context.return_value = []
         runner.execute_llm_order_decision.return_value = {"status": "NO_ACTION", "order_id": None}
         return runner
@@ -204,7 +207,10 @@ class TestLLMAnalysisTick:
             lambda symbol, price: {"side": "FLAT", "quantity": 0, "avg_price": 0.0, "unrealized_pnl_pct": 0.0},
         )
         monkeypatch.setattr("app.api.llm_advisor._account_context", lambda *a: {})
-        monkeypatch.setattr("app.api.llm_advisor._interval_reference_quantity", lambda *a: 1.0)
+        monkeypatch.setattr(
+            "app.api.llm_advisor._interval_reference_quantity",
+            lambda *args, **kwargs: 1.0,
+        )
         monkeypatch.setattr(
             "app.services.llm_interaction_service.LLMInteractionService",
             lambda db: MagicMock(update_outcome=lambda *a, **kw: None),
@@ -401,6 +407,106 @@ class TestLLMAnalysisTick:
         assert apply_calls and apply_calls[0]["reference_quantity"] == 1.0
 
     @pytest.mark.asyncio
+    async def test_tick_shadow_still_delegates_to_interval_policy(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        config = self._make_fake_config(llm_last_analysis_at=now - timedelta(minutes=3))
+        runner = self._make_fake_runner(last_price=100.0)
+        self._patch_tick_deps(monkeypatch, config, runner)
+        monkeypatch.setattr(main_module.settings, "llm_shadow_mode", True)
+        apply_calls: list[dict[str, object]] = []
+        monkeypatch.setattr(
+            "app.main.IntervalApplicationService",
+            lambda: MagicMock(
+                apply_suggestion=lambda **kwargs: apply_calls.append(kwargs)
+                or {
+                    "success": True,
+                    "applied": False,
+                    "reason": "validated shadow interval",
+                    "policy_status": "SHADOW",
+                }
+            ),
+        )
+
+        await main_module._llm_analysis_tick()
+
+        assert len(apply_calls) == 1
+        assert apply_calls[0]["current_price"] == 100.0
+
+    @pytest.mark.asyncio
+    async def test_tick_records_order_policy_outcome_in_interaction_and_event(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        config = self._make_fake_config(llm_last_analysis_at=now - timedelta(minutes=3))
+        runner = self._make_fake_runner(last_price=100.0)
+        self._patch_tick_deps(monkeypatch, config, runner)
+        runner.execute_llm_order_decision.return_value = {
+            "executed": False,
+            "status": "POLICY_REJECTED",
+            "order_id": None,
+            "policy_code": "PRICE_DEVIATION",
+            "confidence": 0.85,
+            "reference_price": 100.0,
+            "candidate_price": 102.0,
+            "deviation_pct": 2.0,
+        }
+        outcome_updates: list[dict[str, object]] = []
+        analysis_events: list[dict[str, object]] = []
+
+        class FakeAdvisor:
+            def __init__(self, broker: object = None) -> None:
+                pass
+
+            def analyze(self, **_kwargs: object) -> dict[str, object]:
+                return {
+                    "success": True,
+                    "suggested_buy_low": 98.0,
+                    "suggested_sell_high": 102.0,
+                    "confidence_score": 0.85,
+                    "order_action": "BUY_NOW",
+                    "order_price": 102.0,
+                    "interaction_id": 77,
+                }
+
+        class FakeInteractionService:
+            def __init__(self, _db: object) -> None:
+                pass
+
+            def update_outcome(self, interaction_id: int, **kwargs: object) -> None:
+                outcome_updates.append({"interaction_id": interaction_id, **kwargs})
+
+        monkeypatch.setattr("app.services.llm_advisor_service.LLMAdvisorService", FakeAdvisor)
+        monkeypatch.setattr(
+            "app.services.llm_interaction_service.LLMInteractionService",
+            FakeInteractionService,
+        )
+        monkeypatch.setattr(
+            main_module,
+            "record_trade_event",
+            lambda *_args, **kwargs: analysis_events.append(kwargs),
+        )
+
+        await main_module._llm_analysis_tick()
+
+        expected_policy_outcome = {
+            "code": "PRICE_DEVIATION",
+            "reference_price": 100.0,
+            "candidate_price": 102.0,
+            "deviation_pct": 2.0,
+            "confidence": 0.85,
+            "disposition": "REJECT",
+        }
+        assert outcome_updates[0]["interaction_id"] == 77
+        assert outcome_updates[0]["policy_outcome"] == expected_policy_outcome
+        event_payload = analysis_events[0]["payload"]
+        assert isinstance(event_payload, dict)
+        assert event_payload["policy_outcome"] == expected_policy_outcome
+
+    @pytest.mark.asyncio
     async def test_tick_uses_secondary_symbol_interval_bounds(self, monkeypatch: pytest.MonkeyPatch) -> None:
         now = datetime.now(timezone.utc)
         config = self._make_fake_config(symbol="AAPL.US", market="US", llm_last_analysis_at=now - timedelta(minutes=3))
@@ -444,7 +550,7 @@ class TestLLMAnalysisTick:
         assert any(call["symbol"] == "NVDA.US" for call in calls)
 
     @pytest.mark.asyncio
-    async def test_tick_executes_secondary_symbol_order_action_with_budgeted_symbol(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_tick_keeps_secondary_symbol_order_action_read_only(self, monkeypatch: pytest.MonkeyPatch) -> None:
         now = datetime.now(timezone.utc)
         config = self._make_fake_config(symbol="AAPL.US", market="US", llm_last_analysis_at=now - timedelta(minutes=3))
         runner = self._make_fake_runner(last_price=101.0)
@@ -500,8 +606,7 @@ class TestLLMAnalysisTick:
         await main_module._llm_analysis_tick()
 
         assert [call["symbol"] for call in calls] == ["AAPL.US", "NVDA.US"]
-        assert execute_calls[0]["symbol"] == "NVDA.US"
-        assert execute_calls[0]["order_action"] == "BUY_NOW"
+        assert execute_calls == []
 
     @pytest.mark.asyncio
     async def test_tick_records_budget_skip_reason_for_unanalyzed_symbols(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -608,6 +713,9 @@ async def test_llm_tick_persists_skip_state(monkeypatch: pytest.MonkeyPatch, tmp
         ),
     }
     runner.execute_llm_order_decision.return_value = {"status": "NO_ACTION", "order_id": None}
+    runner.fresh_market_price.side_effect = lambda symbol: (
+        101.0 if symbol == "AAPL.US" else 330.0
+    )
 
     class FakeStrategyService:
         def __init__(self, db: object) -> None:
@@ -625,7 +733,10 @@ async def test_llm_tick_persists_skip_state(monkeypatch: pytest.MonkeyPatch, tmp
         lambda symbol, price: {"side": "FLAT", "quantity": 0, "avg_price": 0.0, "unrealized_pnl_pct": 0.0},
     )
     monkeypatch.setattr("app.api.llm_advisor._account_context", lambda *args: {})
-    monkeypatch.setattr("app.api.llm_advisor._interval_reference_quantity", lambda *args: 1.0)
+    monkeypatch.setattr(
+        "app.api.llm_advisor._interval_reference_quantity",
+        lambda *args, **kwargs: 1.0,
+    )
     monkeypatch.setattr(
         "app.services.llm_interaction_service.LLMInteractionService",
         lambda db: MagicMock(update_outcome=lambda *args, **kwargs: None),

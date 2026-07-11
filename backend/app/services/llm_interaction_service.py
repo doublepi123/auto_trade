@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any
@@ -48,6 +49,75 @@ def _json_loads_dict(value: str | None) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {"value": parsed}
 
 
+def build_order_policy_outcome(
+    analysis_result: dict[str, Any],
+    order_result: dict[str, Any],
+) -> dict[str, Any]:
+    """Build the stable audit shape for an LLM order-policy decision."""
+    action = str(analysis_result.get("order_action") or "NONE").upper()
+    status = str(order_result.get("status") or "NO_ACTION").upper()
+
+    raw_disposition = order_result.get("policy_disposition") or order_result.get("disposition")
+    normalized_disposition = str(raw_disposition or "").upper()
+    if normalized_disposition not in {"ALLOW", "REJECT", "SHADOW"}:
+        if status == "SHADOW_ONLY":
+            normalized_disposition = "SHADOW"
+        elif action == "NONE" or status in {
+            "POLICY_REJECTED",
+            "CONFIDENCE_REJECTED",
+            "RUNNER_STOPPED",
+            "WATCHLIST_READ_ONLY",
+            "UNKNOWN_SYMBOL",
+            "ERROR",
+        }:
+            normalized_disposition = "REJECT"
+        else:
+            normalized_disposition = "ALLOW"
+
+    raw_code = order_result.get("policy_code")
+    if raw_code:
+        code = str(raw_code)
+    elif action == "NONE":
+        code = "NO_ACTION"
+    elif normalized_disposition == "SHADOW":
+        code = "SHADOW_MODE"
+    elif normalized_disposition == "REJECT":
+        code = status or "POLICY_REJECTED"
+    else:
+        code = "ALLOW"
+
+    candidate_source = order_result.get("candidate_price")
+    if candidate_source is None:
+        candidate_source = (
+            analysis_result.get("replacement_price") or analysis_result.get("order_price")
+            if action == "CANCEL_REPLACE"
+            else analysis_result.get("order_price")
+        )
+
+    return {
+        "code": code,
+        "reference_price": _finite_float_or_none(order_result.get("reference_price")),
+        "candidate_price": _finite_float_or_none(candidate_source),
+        "deviation_pct": _finite_float_or_none(order_result.get("deviation_pct")),
+        "confidence": _finite_float_or_none(
+            order_result.get("confidence")
+            if order_result.get("confidence") is not None
+            else analysis_result.get("confidence_score")
+        ),
+        "disposition": normalized_disposition,
+    }
+
+
+def _finite_float_or_none(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        normalized = float(value)
+    except (TypeError, ValueError):
+        return None
+    return normalized if math.isfinite(normalized) else None
+
+
 class LLMInteractionService:
     def __init__(self, db: Session) -> None:
         self.db = db
@@ -93,6 +163,7 @@ class LLMInteractionService:
         applied: bool | None = None,
         order_status: str | None = None,
         order_id: str | None = None,
+        policy_outcome: dict[str, Any] | None = None,
     ) -> None:
         if interaction_id is None:
             return
@@ -105,6 +176,10 @@ class LLMInteractionService:
             record.order_status = order_status
         if order_id is not None:
             record.order_id = order_id
+        if policy_outcome is not None:
+            parsed_response = _json_loads_dict(record.parsed_response)
+            parsed_response["policy_outcome"] = dict(policy_outcome)
+            record.parsed_response = _json_dumps(parsed_response)
         self.db.commit()
 
     def list_recent(self, limit: int = 50) -> list[LLMInteraction]:

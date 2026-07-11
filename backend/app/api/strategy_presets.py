@@ -4,9 +4,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 
 from app.api.auth import require_api_key
 from app.api.deps import extract_actor, get_audit_logger
+from app.api.strategy import update_strategy_with_runtime_reload
 from app.core.audit import AuditLogger
 from app.database import get_db
 from app.schemas import (
+    StrategyConfigSchema,
     StrategyPresetApplyResult,
     StrategyPresetCreate,
     StrategyPresetOut,
@@ -14,6 +16,7 @@ from app.schemas import (
 )
 from app.services.strategy_preset_service import StrategyPresetService
 from app.services.strategy_service import StrategyService
+from app.services.strategy_version_service import StrategyVersionService
 
 router = APIRouter(
     prefix="/api/strategy-presets",
@@ -24,7 +27,10 @@ router = APIRouter(
 
 @router.post("", response_model=StrategyPresetOut)
 def create_preset(payload: StrategyPresetCreate, db=Depends(get_db)) -> StrategyPresetOut:
-    return StrategyPresetService(db).create(payload.name, payload.params)
+    return StrategyPresetService(db).create(
+        payload.name,
+        payload.params.model_dump(exclude_unset=True),
+    )
 
 
 @router.get("", response_model=StrategyPresetPage)
@@ -67,7 +73,24 @@ def apply_preset(
             result="NOT_FOUND",
         )
         raise HTTPException(status_code=404, detail="strategy preset not found")
-    _, diff = StrategyService(db).update_config(params)
+    strategy_svc = StrategyService(db)
+    current = strategy_svc.get_config()
+    try:
+        validated = StrategyConfigSchema.model_validate(params).model_dump(exclude_unset=True)
+    except (HTTPException, ValueError) as exc:
+        audit.record(
+            "STRATEGY_PRESET_APPLY",
+            severity="INFO",
+            actor_hash=actor_hash,
+            source_ip=source_ip,
+            request_summary={"preset_id": preset_id, "found": True},
+            result="FAILED",
+        )
+        if isinstance(exc, HTTPException):
+            raise
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    config, diff = update_strategy_with_runtime_reload(strategy_svc, current, validated)
+    StrategyVersionService(db).record_version(config, actor_hash=actor_hash)
     audit.record(
         "STRATEGY_PRESET_APPLY",
         severity="INFO",

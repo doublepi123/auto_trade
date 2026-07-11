@@ -29,6 +29,15 @@ STRATEGY_AUDIT_KEYS = (
     "llm_action_cooldown_seconds",
     "trading_session_mode",
     "margin_safety_factor",
+    "allow_position_addons",
+    "max_position_quantity",
+    "max_position_notional",
+    "max_risk_per_trade",
+    "stop_loss_pct",
+    "max_holding_minutes",
+    "entry_cutoff_minutes_before_close",
+    "flatten_minutes_before_close",
+    "llm_order_execution_enabled",
 )
 
 
@@ -46,6 +55,9 @@ class StrategyService:
         return config
 
     def update_config(self, data: dict[str, Any]) -> tuple[StrategyConfig, dict[str, Any]]:
+        if data.get("short_selling"):
+            logger.warning("forcing short_selling=false under the P0 live safety policy")
+            data = {**data, "short_selling": False}
         config = self.db.query(StrategyConfig).order_by(StrategyConfig.id.desc()).first()
         is_new = config is None
         if config is None:
@@ -61,6 +73,15 @@ class StrategyService:
             "fee_rate_us", "fee_rate_hk", "min_repricing_pct", "llm_action_cooldown_seconds",
             "trading_session_mode",
             "margin_safety_factor",
+            "allow_position_addons",
+            "max_position_quantity",
+            "max_position_notional",
+            "max_risk_per_trade",
+            "stop_loss_pct",
+            "max_holding_minutes",
+            "entry_cutoff_minutes_before_close",
+            "flatten_minutes_before_close",
+            "llm_order_execution_enabled",
             "report_schedule_enabled",
             "report_schedule_interval_hours",
             "report_schedule_symbol",
@@ -142,6 +163,8 @@ class StrategyService:
         "pause_auto_resumable", "kill_switch", "daily_pnl",
         "daily_pnl_date", "consecutive_losses", "last_price",
         "last_trigger_price", "last_trigger_at",
+        "execution_state", "reduction_action", "reduction_cause",
+        "reduction_reason", "reduction_started_at", "reduction_trigger_price",
     })
 
     def update_runtime_state(self, symbol: str = "", **kwargs: object) -> RuntimeState:

@@ -203,3 +203,16 @@ class TestRiskController:
         ctrl = RiskController()
         ctrl.set_trade_day_provider(lambda: date(2030, 1, 1))
         assert ctrl.daily_pnl_date == date(2030, 1, 1)
+
+    def test_operational_pause_cannot_be_downgraded_by_manual_reason(self) -> None:
+        ctrl = RiskController()
+        operational = "ORDER_RECONCILIATION_UNCERTAIN: live order unknown"
+
+        ctrl.pause(operational, auto_resumable=False)
+        paused_at = ctrl.paused_at
+        ctrl.pause("manual", auto_resumable=True)
+
+        assert ctrl.paused is True
+        assert ctrl.pause_reason == operational
+        assert ctrl.paused_at == paused_at
+        assert ctrl.pause_auto_resumable is False

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import json
 
 os.environ["AUTO_TRADE_DATABASE_URL"] = (
     f"sqlite:///{tempfile.gettempdir()}/auto_trade_test_strategy_presets_{os.getpid()}.db"
@@ -70,10 +71,30 @@ class TestStrategyPresetService(_Base):
 
 
 class TestStrategyPresetAPI(_Base):
-    def test_create_apply_flow(self) -> None:
+    def test_create_apply_flow(self, monkeypatch) -> None:
+        reloads: list[bool] = []
+
+        class _SafeSwitchRunner:
+            def assert_primary_switch_safe(self, _symbol: str, _market: str) -> None:
+                return None
+
+        monkeypatch.setattr(
+            "app.api.strategy.get_runner",
+            lambda: _SafeSwitchRunner(),
+        )
+        monkeypatch.setattr(
+            "app.api.strategy._reload_strategy_after_save",
+            lambda: reloads.append(True),
+        )
         create = self.client.post("/api/strategy-presets", json={
             "name": "conservative",
-            "params": {"buy_low": 80, "sell_high": 180, "min_profit_amount": 5},
+            "params": {
+                "symbol": "AAPL.US",
+                "market": "US",
+                "buy_low": 80,
+                "sell_high": 180,
+                "min_profit_amount": 5,
+            },
         })
         assert create.status_code == 200, create.text
         pid = create.json()["id"]
@@ -85,6 +106,7 @@ class TestStrategyPresetAPI(_Base):
         assert apply.status_code == 200, apply.text
         changed = apply.json()["changed"]
         assert "buy_low" in changed and "sell_high" in changed
+        assert reloads == [True]
 
         # Active config now reflects the preset.
         db = self._db()
@@ -103,3 +125,41 @@ class TestStrategyPresetAPI(_Base):
     def test_create_validates_name(self) -> None:
         resp = self.client.post("/api/strategy-presets", json={"name": "", "params": {}})
         assert resp.status_code == 422
+
+    def test_create_rejects_unsafe_or_unknown_params(self) -> None:
+        for params in (
+            {"short_selling": True},
+            {
+                "entry_cutoff_minutes_before_close": 15,
+                "flatten_minutes_before_close": 30,
+            },
+            {"unknown_safety_knob": 1},
+        ):
+            resp = self.client.post(
+                "/api/strategy-presets",
+                json={"name": "unsafe", "params": params},
+            )
+            assert resp.status_code == 422
+
+    def test_apply_revalidates_legacy_preset_before_write(self) -> None:
+        db = self._db()
+        preset = StrategyPreset(
+            name="legacy-unsafe",
+            params_json=json.dumps({
+                "entry_cutoff_minutes_before_close": 15,
+                "flatten_minutes_before_close": 30,
+            }),
+        )
+        db.add(preset)
+        db.commit()
+        preset_id = preset.id
+        db.close()
+
+        resp = self.client.post(f"/api/strategy-presets/{preset_id}/apply")
+
+        assert resp.status_code == 422
+        db = self._db()
+        config = db.query(StrategyConfig).order_by(StrategyConfig.id.desc()).first()
+        if config is not None:
+            assert config.flatten_minutes_before_close <= config.entry_cutoff_minutes_before_close
+        db.close()

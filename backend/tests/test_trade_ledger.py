@@ -316,11 +316,9 @@ class TestPairRoundTrips:
         assert trades[0].exit_at < trades[1].exit_at
 
     def test_dedupes_duplicate_broker_order_rows(self) -> None:
-        """A broker order often has a SUBMITTED + FILLED row; only the latest counts."""
-        self._cleanup()
+        """Legacy duplicate rows stay defensively deduplicated on read."""
         day = date(2026, 1, 1)
-        db = self._get_db()
-        db.add_all([
+        rows = [
             OrderRecord(
                 id=1, broker_order_id="buy", symbol="AAPL.US", side="BUY",
                 quantity=10, price=100, executed_quantity=0, executed_price=None,
@@ -336,10 +334,17 @@ class TestPairRoundTrips:
                 quantity=10, price=110, executed_quantity=10, executed_price=110,
                 status="FILLED", created_at=self._dt(day, 11), filled_at=self._dt(day, 11, 1),
             ),
-        ])
-        db.commit()
-        trades = DailyPnlService(db).pair_round_trips()
-        db.close()
+        ]
+
+        class _RowsQuery:
+            def all(self):
+                return rows
+
+        class _RowsDb:
+            def query(self, _model):
+                return _RowsQuery()
+
+        trades = DailyPnlService(_RowsDb()).pair_round_trips()
 
         assert len(trades) == 1
         assert trades[0].gross_pnl == approx(100.0)

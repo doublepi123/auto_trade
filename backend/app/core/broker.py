@@ -168,33 +168,60 @@ def _get_value(item: Any, key: str, default: Any = None) -> Any:
 def _iter_position_items(item: Any) -> list[Any]:
     if item is None:
         return []
-    if isinstance(item, list):
+    if isinstance(item, (list, tuple)):
         result: list[Any] = []
         for child in item:
             result.extend(_iter_position_items(child))
         return result
     if isinstance(item, dict):
-        nested = item.get("data", item)
-        if nested is not item:
-            result = _iter_position_items(nested)
-            if result:
-                return result
+        if "data" in item:
+            nested = item["data"]
+            if nested is None:
+                raise ValueError("broker returned null position data")
+            return _iter_position_items(nested)
         for key in ("list", "channels", "stock_info", "positions"):
             if key in item:
                 nested = item[key]
                 if nested is item:
                     continue
+                if nested is None:
+                    raise ValueError(f"broker returned null position {key}")
                 return _iter_position_items(nested)
-        return [item] if item.get("symbol") else []
+        position_fields = {
+            "symbol",
+            "quantity",
+            "available_quantity",
+            "cost_price",
+            "avg_price",
+            "average_price",
+        }
+        if position_fields.intersection(item):
+            return [item]
+        raise ValueError("broker returned an unrecognized position response")
 
     children: list[Any] = []
+    saw_container = False
     for attr in ("channels", "list", "stock_info", "positions"):
-        nested = getattr(item, attr, None)
-        if nested is not None:
-            children.extend(_iter_position_items(nested))
-    if children:
+        if not hasattr(item, attr):
+            continue
+        saw_container = True
+        nested = getattr(item, attr)
+        if nested is None:
+            raise ValueError(f"broker returned null position {attr}")
+        children.extend(_iter_position_items(nested))
+    if saw_container:
         return children
-    return [item] if getattr(item, "symbol", "") else []
+    position_fields = (
+        "symbol",
+        "quantity",
+        "available_quantity",
+        "cost_price",
+        "avg_price",
+        "average_price",
+    )
+    if any(getattr(item, name, None) is not None for name in position_fields):
+        return [item]
+    raise ValueError("broker returned an unrecognized position response")
 
 
 def _iter_order_items(item: Any) -> list[Any]:
@@ -206,22 +233,60 @@ def _iter_order_items(item: Any) -> list[Any]:
             result.extend(_iter_order_items(child))
         return result
     if isinstance(item, dict):
-        nested = item.get("data", item)
-        if nested is not item:
+        if "data" in item:
+            nested = item["data"]
+            if nested is None:
+                raise ValueError("broker returned null order data")
             return _iter_order_items(nested)
         for key in ("orders", "list", "items"):
             if key in item:
-                return _iter_order_items(item[key])
-        return [item] if item.get("order_id") or item.get("broker_order_id") else []
+                nested = item[key]
+                if nested is None:
+                    raise ValueError(f"broker returned null order {key}")
+                return _iter_order_items(nested)
+        order_fields = {
+            "order_id",
+            "broker_order_id",
+            "symbol",
+            "side",
+            "status",
+            "submitted_quantity",
+            "quantity",
+            "executed_quantity",
+            "filled_quantity",
+        }
+        if order_fields.intersection(item):
+            return [item]
+        raise ValueError("broker returned an unrecognized order response")
 
     children: list[Any] = []
+    saw_container = False
     for attr in ("orders", "list", "items", "data"):
-        nested = getattr(item, attr, None)
-        if nested is not None and nested is not item:
-            children.extend(_iter_order_items(nested))
-    if children:
+        if not hasattr(item, attr):
+            continue
+        nested = getattr(item, attr)
+        if nested is item:
+            continue
+        saw_container = True
+        if nested is None:
+            raise ValueError(f"broker returned null order {attr}")
+        children.extend(_iter_order_items(nested))
+    if saw_container:
         return children
-    return [item] if getattr(item, "order_id", None) or getattr(item, "broker_order_id", None) else []
+    order_fields = (
+        "order_id",
+        "broker_order_id",
+        "symbol",
+        "side",
+        "status",
+        "submitted_quantity",
+        "quantity",
+        "executed_quantity",
+        "filled_quantity",
+    )
+    if any(getattr(item, name, None) is not None for name in order_fields):
+        return [item]
+    raise ValueError("broker returned an unrecognized order response")
 
 
 _SIDE_MAP = {"BUY": "Buy", "SELL": "Sell", "SELL_SHORT": "Sell", "BUY_TO_COVER": "Buy"}
@@ -250,6 +315,38 @@ def _decimal_attr(item: Any, *names: str) -> Decimal:
             except (ValueError, TypeError, AttributeError, _DecimalInvalidOp):
                 return Decimal("0")
     return Decimal("0")
+
+
+def _nonnegative_decimal_attr(item: Any, *names: str) -> Decimal:
+    for name in names:
+        value = _get_value(item, name, None)
+        if value is None:
+            continue
+        try:
+            parsed = Decimal(str(value))
+        except (ValueError, TypeError, AttributeError, _DecimalInvalidOp) as exc:
+            raise ValueError(f"broker returned invalid {name}") from exc
+        if not parsed.is_finite() or parsed < 0:
+            raise ValueError(f"broker returned invalid {name}")
+        return parsed
+    return Decimal("0")
+
+
+def _require_matching_order_id(item: Any, expected_order_id: str) -> str:
+    raw_order_id = _get_value(
+        item,
+        "order_id",
+        _get_value(item, "broker_order_id", None),
+    )
+    order_id = str(raw_order_id or "").strip()
+    if not order_id:
+        raise ValueError("broker order status response is missing order_id")
+    if order_id != expected_order_id:
+        raise ValueError(
+            "broker order status response id mismatch: "
+            f"expected {expected_order_id}, got {order_id}"
+        )
+    return order_id
 
 
 def _parse_datetime(value: Any) -> datetime | None:
@@ -619,10 +716,18 @@ class BrokerGateway:
                 self._init_clients()
                 detail = self._trade_ctx.order_detail(order_id)
                 return OrderStatusResult(
-                    broker_order_id=str(_get_value(detail, "order_id", order_id)),
+                    broker_order_id=_require_matching_order_id(detail, order_id),
                     status=_normalize_order_status(_get_value(detail, "status", "SUBMITTED")),
-                    executed_quantity=_decimal_attr(detail, "executed_quantity", "filled_quantity", "quantity"),
-                    executed_price=_decimal_attr(detail, "executed_price", "filled_price", "price"),
+                    executed_quantity=_nonnegative_decimal_attr(
+                        detail,
+                        "executed_quantity",
+                        "filled_quantity",
+                    ),
+                    executed_price=_nonnegative_decimal_attr(
+                        detail,
+                        "executed_price",
+                        "filled_price",
+                    ),
                 )
         return self._call_with_retry(
             _fetch,
@@ -654,20 +759,44 @@ class BrokerGateway:
 
                 orders: list[BrokerOrder] = []
                 for item in _iter_order_items(response):
-                    order_id = str(_get_value(item, "order_id", _get_value(item, "broker_order_id", "")))
+                    raw_order_id = _get_value(
+                        item,
+                        "order_id",
+                        _get_value(item, "broker_order_id", None),
+                    )
+                    order_id = str(raw_order_id or "").strip()
                     if not order_id:
-                        continue
+                        raise ValueError(
+                            "broker returned an order without broker_order_id"
+                        )
+                    executed_quantity = _nonnegative_decimal_attr(
+                        item,
+                        "executed_quantity",
+                        "filled_quantity",
+                    )
+                    status = _normalize_order_status(
+                        _get_value(item, "status", "SUBMITTED")
+                    )
+                    raw_filled_at = _get_value(item, "filled_at", None)
+                    if raw_filled_at is None and (
+                        status == "FILLED" or executed_quantity > 0
+                    ):
+                        raw_filled_at = _get_value(item, "updated_at", None)
                     orders.append(BrokerOrder(
                         broker_order_id=order_id,
                         symbol=str(_get_value(item, "symbol", "")),
                         side=_normalize_order_side(_get_value(item, "side", "")),
                         quantity=_decimal_attr(item, "submitted_quantity", "quantity"),
                         price=_decimal_attr(item, "submitted_price", "price", "limit_price"),
-                        executed_quantity=_decimal_attr(item, "executed_quantity", "filled_quantity"),
-                        executed_price=_decimal_attr(item, "executed_price", "filled_price"),
-                        status=_normalize_order_status(_get_value(item, "status", "SUBMITTED")),
+                        executed_quantity=executed_quantity,
+                        executed_price=_nonnegative_decimal_attr(
+                            item,
+                            "executed_price",
+                            "filled_price",
+                        ),
+                        status=status,
                         created_at=_parse_datetime(_get_value(item, "created_at", _get_value(item, "submitted_at", None))),
-                        filled_at=_parse_datetime(_get_value(item, "filled_at", _get_value(item, "updated_at", None))),
+                        filled_at=_parse_datetime(raw_filled_at),
                     ))
                 return orders
         return self._call_with_retry(
@@ -694,11 +823,50 @@ class BrokerGateway:
             if cancel is None:
                 raise RuntimeError("broker does not support order cancellation")
             response = cancel(order_id)
+            detail = None
+            order_detail = getattr(self._trade_ctx, "order_detail", None)
+            if order_detail is not None:
+                try:
+                    detail = order_detail(order_id)
+                except Exception as exc:
+                    logger.warning(
+                        "cancel request accepted but order %s status could not be confirmed: %s",
+                        order_id,
+                        exc,
+                    )
+            if detail is None:
+                # Longport's cancel_order contract returns None after accepting
+                # the request. Acceptance is not terminal proof: the order may
+                # fill before cancellation reaches the venue.
+                return OrderStatusResult(
+                    broker_order_id=order_id,
+                    status="SUBMITTED",
+                    executed_quantity=_nonnegative_decimal_attr(
+                        response,
+                        "executed_quantity",
+                        "filled_quantity",
+                    ),
+                    executed_price=_nonnegative_decimal_attr(
+                        response,
+                        "executed_price",
+                        "filled_price",
+                    ),
+                )
             return OrderStatusResult(
-                broker_order_id=str(_get_value(response, "order_id", order_id)),
-                status=_normalize_order_status(_get_value(response, "status", "CANCELLED")),
-                executed_quantity=_decimal_attr(response, "executed_quantity", "filled_quantity", "quantity"),
-                executed_price=_decimal_attr(response, "executed_price", "filled_price", "price"),
+                broker_order_id=_require_matching_order_id(detail, order_id),
+                status=_normalize_order_status(
+                    _get_value(detail, "status", "SUBMITTED")
+                ),
+                executed_quantity=_nonnegative_decimal_attr(
+                    detail,
+                    "executed_quantity",
+                    "filled_quantity",
+                ),
+                executed_price=_nonnegative_decimal_attr(
+                    detail,
+                    "executed_price",
+                    "filled_price",
+                ),
             )
 
     def get_positions(self) -> list[Position]:
@@ -706,27 +874,89 @@ class BrokerGateway:
             with self._lock:
                 self._init_clients()
                 response = self._trade_ctx.stock_positions()
+                if response is None:
+                    raise RuntimeError("broker returned no position snapshot")
                 positions: list[Position] = []
                 for item in _iter_position_items(response):
+                    symbol = str(_get_value(item, "symbol", "") or "").strip()
+                    if not symbol:
+                        raise ValueError(
+                            "broker returned a position without symbol"
+                        )
                     raw = _get_value(item, "quantity", None)
                     raw_available = _get_value(item, "available_quantity", None)
                     if raw is None:
-                        raw = raw_available if raw_available is not None else 0
+                        if raw_available is None:
+                            raise ValueError(
+                                f"broker returned position {symbol} without quantity"
+                            )
+                        raw = raw_available
                     try:
-                        qty = Decimal(str(raw)) if raw is not None else Decimal("0")
-                    except (ValueError, TypeError, _DecimalInvalidOp):
-                        qty = Decimal("0")
+                        qty = Decimal(str(raw))
+                    except (ValueError, TypeError, _DecimalInvalidOp) as exc:
+                        raise ValueError(
+                            f"broker returned invalid quantity for position {symbol}"
+                        ) from exc
+                    if not qty.is_finite():
+                        raise ValueError(
+                            f"broker returned invalid quantity for position {symbol}"
+                        )
+                    raw_side_value = _get_value(item, "side", None)
+                    explicit_side = raw_side_value is not None and bool(
+                        str(getattr(raw_side_value, "value", raw_side_value)).strip()
+                    )
+                    if explicit_side:
+                        side_text = str(
+                            getattr(raw_side_value, "value", raw_side_value)
+                        ).split(".")[-1].strip().upper()
+                        if side_text not in {"LONG", "SHORT"}:
+                            raise ValueError(
+                                f"broker returned invalid side for position {symbol}"
+                            )
+                        if qty < 0:
+                            raise ValueError(
+                                "broker returned signed quantity together with explicit "
+                                f"side for position {symbol}"
+                            )
+                        side = side_text
+                    else:
+                        side = "SHORT" if qty < 0 else "LONG"
                     available_qty = None
                     if raw_available is not None:
                         try:
-                            available_qty = abs(Decimal(str(raw_available)))
-                        except (ValueError, TypeError, _DecimalInvalidOp):
-                            available_qty = None
+                            parsed_available = Decimal(str(raw_available))
+                        except (ValueError, TypeError, _DecimalInvalidOp) as exc:
+                            raise ValueError(
+                                "broker returned invalid available quantity for "
+                                f"position {symbol}"
+                            ) from exc
+                        if not parsed_available.is_finite():
+                            raise ValueError(
+                                "broker returned invalid available quantity for "
+                                f"position {symbol}"
+                            )
+                        if explicit_side and parsed_available < 0:
+                            raise ValueError(
+                                "broker returned signed available quantity together "
+                                f"with explicit side for position {symbol}"
+                            )
+                        if not explicit_side and (
+                            (qty > 0 and parsed_available < 0)
+                            or (qty < 0 and parsed_available > 0)
+                        ):
+                            raise ValueError(
+                                "broker position quantity and available quantity have "
+                                f"conflicting signs for {symbol}"
+                            )
+                        available_qty = abs(parsed_available)
                     if qty == 0:
                         continue
+                    if available_qty is not None and available_qty > abs(qty):
+                        raise ValueError(
+                            "broker available quantity exceeds total quantity for "
+                            f"position {symbol}"
+                        )
 
-                    raw_side = str(_get_value(item, "side", "")).upper()
-                    side = raw_side if raw_side in {"LONG", "SHORT"} else ("SHORT" if qty < 0 else "LONG")
                     raw_avg = None
                     for key in ("cost_price", "avg_price", "average_price", "avg_cost_price"):
                         val = _get_value(item, key)
@@ -734,11 +964,20 @@ class BrokerGateway:
                             raw_avg = val
                             break
                     if raw_avg is None:
-                        raw_avg = "0"
-                    try:
-                        avg_price = Decimal(str(raw_avg))
-                    except (ValueError, TypeError, _DecimalInvalidOp):
                         avg_price = Decimal("0")
+                    else:
+                        try:
+                            avg_price = Decimal(str(raw_avg))
+                        except (ValueError, TypeError, _DecimalInvalidOp) as exc:
+                            raise ValueError(
+                                "broker returned invalid average price for "
+                                f"position {symbol}"
+                            ) from exc
+                        if not avg_price.is_finite() or avg_price <= 0:
+                            raise ValueError(
+                                "broker returned invalid average price for "
+                                f"position {symbol}"
+                            )
                     if avg_price <= 0:
                         logger.warning(
                             "position %s side=%s has avg_price=%s (raw=%s), pnl calculation may be inaccurate",
@@ -748,7 +987,7 @@ class BrokerGateway:
                             raw_avg,
                         )
                     positions.append(Position(
-                        symbol=str(_get_value(item, "symbol", "")),
+                        symbol=symbol,
                         side=side,
                         quantity=abs(qty),
                         avg_price=avg_price,

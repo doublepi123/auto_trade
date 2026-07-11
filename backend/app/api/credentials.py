@@ -12,7 +12,7 @@ from app.api.deps import extract_actor, get_audit_logger
 from app.core.audit import AuditLogger
 from app.database import get_db
 from app.schemas import CredentialConfigSchema, CredentialResponse
-from app.runner import get_runner
+from app.runner import CredentialSwitchBlockedError, get_runner
 from app.services.credentials_service import CredentialsService
 
 router = APIRouter(prefix="/api", tags=["credentials"])
@@ -72,18 +72,45 @@ def update_credentials(
         svc = CredentialsService(db)
         data = payload.model_dump(exclude_unset=True)
         masked = _mask_credentials_payload(data)
-        config = svc.update_config(data)
-        reload_warning = None
-        try:
-            get_runner().reload_credentials()
-        except Exception:
-            logger.exception("credential reload failed after save")
-            reload_warning = (
-                "Credentials saved but live reload failed. "
-                "A restart may be required for changes to take effect."
+        current = svc.get_config()
+        previous = {
+            field: getattr(current, field)
+            for field in (
+                "longbridge_app_key",
+                "longbridge_app_secret",
+                "longbridge_access_token",
+                "sct_key",
+                "notification_channels",
             )
+        }
+        config = svc.update_config(data)
+        broker_identity_change = any(
+            field in data and data[field] is not None
+            for field in (
+                "longbridge_app_key",
+                "longbridge_app_secret",
+                "longbridge_access_token",
+            )
+        )
+        try:
+            get_runner().reload_credentials(
+                broker_identity_change=broker_identity_change
+            )
+        except Exception as exc:
+            logger.exception("credential reload failed after save; rolling back")
+            for field, value in previous.items():
+                setattr(config, field, value)
+            db.add(config)
+            db.commit()
+            status_code = (
+                409 if isinstance(exc, CredentialSwitchBlockedError) else 503
+            )
+            raise HTTPException(
+                status_code=status_code,
+                detail="credentials were not changed because live verification failed",
+            ) from exc
         response = svc.to_response(config)
-        response["reload_warning"] = reload_warning
+        response["reload_warning"] = None
         return CredentialResponse.model_validate(response)
     except HTTPException as exc:
         result = "FAILED"

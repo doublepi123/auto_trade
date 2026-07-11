@@ -4,6 +4,7 @@ import pytest
 from sqlalchemy.orm import Session
 
 from app import database
+from app.config import settings
 from app.models import StrategyConfig
 from app.services.interval_application_service import IntervalApplicationService
 from app.services.strategy_service import StrategyService
@@ -13,6 +14,10 @@ database.init_db()
 
 
 class TestIntervalApplicationService:
+    @pytest.fixture(autouse=True)
+    def _enable_live_interval_application(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(settings, "llm_shadow_mode", False)
+
     def _get_db(self):
         return database.SessionLocal()
 
@@ -38,6 +43,199 @@ class TestIntervalApplicationService:
     @pytest.fixture
     def service(self) -> IntervalApplicationService:
         return IntervalApplicationService()
+
+    def test_shadow_valid_suggestion_does_not_mutate_live_bounds(
+        self,
+        service: IntervalApplicationService,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        self._cleanup()
+        db = self._get_db()
+        config = self._create_config(db)
+        monkeypatch.setattr(settings, "llm_shadow_mode", True)
+
+        result = service.apply_suggestion(
+            db,
+            engine_state="flat",
+            current_price=200.0,
+            suggestion={
+                "suggested_buy_low": 195.0,
+                "suggested_sell_high": 205.0,
+                "confidence_score": 0.85,
+            },
+        )
+
+        db.refresh(config)
+        assert result["success"] is True
+        assert result["applied"] is False
+        assert result["policy_status"] == "SHADOW"
+        assert result["policy_code"] == "SHADOW_MODE"
+        assert config.buy_low == 180.0
+        assert config.sell_high == 220.0
+        assert config.llm_applied_buy_low is None
+        assert config.llm_applied_sell_high is None
+        assert config.llm_reject_reason is None
+
+    def test_direct_shadow_suggestion_cannot_bypass_policy(
+        self,
+        service: IntervalApplicationService,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        self._cleanup()
+        db = self._get_db()
+        config = self._create_config(db)
+        monkeypatch.setattr(settings, "llm_shadow_mode", True)
+
+        result = service.apply_direct_suggestion(
+            db,
+            current_price=200.0,
+            suggestion={
+                "suggested_buy_low": 195.0,
+                "suggested_sell_high": 205.0,
+                "confidence_score": 0.85,
+            },
+        )
+
+        db.refresh(config)
+        assert result["policy_status"] == "SHADOW"
+        assert result["applied"] is False
+        assert config.buy_low == 180.0
+        assert config.sell_high == 220.0
+
+    def test_shadow_preserves_last_live_applied_values_for_audit(
+        self,
+        service: IntervalApplicationService,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        self._cleanup()
+        db = self._get_db()
+        config = self._create_config(db)
+        config.llm_applied_buy_low = 181.0
+        config.llm_applied_sell_high = 219.0
+        db.commit()
+        monkeypatch.setattr(settings, "llm_shadow_mode", True)
+
+        result = service.apply_suggestion(
+            db,
+            engine_state="flat",
+            current_price=200.0,
+            suggestion={
+                "suggested_buy_low": 195.0,
+                "suggested_sell_high": 205.0,
+                "confidence_score": 0.85,
+            },
+        )
+
+        db.refresh(config)
+        assert result["policy_status"] == "SHADOW"
+        assert config.llm_applied_buy_low == 181.0
+        assert config.llm_applied_sell_high == 219.0
+
+    def test_shadow_rejects_low_confidence_before_shadowing(
+        self,
+        service: IntervalApplicationService,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        self._cleanup()
+        db = self._get_db()
+        config = self._create_config(db)
+        monkeypatch.setattr(settings, "llm_shadow_mode", True)
+
+        result = service.apply_suggestion(
+            db,
+            engine_state="flat",
+            current_price=200.0,
+            suggestion={
+                "suggested_buy_low": 195.0,
+                "suggested_sell_high": 205.0,
+                "confidence_score": 0.69,
+            },
+        )
+
+        db.refresh(config)
+        assert result["success"] is False
+        assert result["policy_status"] == "REJECT"
+        assert result["policy_code"] == "LOW_CONFIDENCE"
+        assert config.buy_low == 180.0
+        assert config.sell_high == 220.0
+
+    def test_shadow_rejects_missing_market_price_instead_of_using_strategy_bound(
+        self,
+        service: IntervalApplicationService,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        self._cleanup()
+        db = self._get_db()
+        config = self._create_config(db)
+        monkeypatch.setattr(settings, "llm_shadow_mode", True)
+
+        result = service.apply_suggestion(
+            db,
+            engine_state="flat",
+            current_price=0.0,
+            suggestion={
+                "suggested_buy_low": 179.0,
+                "suggested_sell_high": 181.0,
+                "confidence_score": 0.9,
+            },
+        )
+
+        db.refresh(config)
+        assert result["success"] is False
+        assert result["policy_code"] == "INVALID_CURRENT_PRICE"
+        assert config.buy_low == 180.0
+        assert config.sell_high == 220.0
+
+    def test_rejects_narrow_interval_far_from_current_price(
+        self,
+        service: IntervalApplicationService,
+    ) -> None:
+        self._cleanup()
+        db = self._get_db()
+        config = self._create_config(db)
+
+        result = service.apply_suggestion(
+            db,
+            engine_state="flat",
+            current_price=200.0,
+            suggestion={
+                "suggested_buy_low": 100.0,
+                "suggested_sell_high": 105.0,
+                "confidence_score": 0.9,
+            },
+        )
+
+        db.refresh(config)
+        assert result["success"] is False
+        assert result["policy_code"] == "INTERVAL_BOUND_DEVIATION"
+        assert result["deviation_pct"] == 50.0
+        assert config.buy_low == 180.0
+        assert config.sell_high == 220.0
+
+    def test_allows_interval_at_bound_deviation_limit(
+        self,
+        service: IntervalApplicationService,
+    ) -> None:
+        self._cleanup()
+        db = self._get_db()
+        config = self._create_config(db)
+
+        result = service.apply_suggestion(
+            db,
+            engine_state="flat",
+            current_price=200.0,
+            suggestion={
+                "suggested_buy_low": 195.0,
+                "suggested_sell_high": 210.0,
+                "confidence_score": 0.7,
+            },
+        )
+
+        db.refresh(config)
+        assert result["policy_status"] == "ALLOW"
+        assert result["deviation_pct"] == 5.0
+        assert config.buy_low == 195.0
+        assert config.sell_high == 210.0
 
     def test_apply_flat(self, service: IntervalApplicationService) -> None:
         self._cleanup()
@@ -88,7 +286,7 @@ class TestIntervalApplicationService:
         db = self._get_db()
         config = self._create_config(db)
         config.min_profit_amount = 1.5
-        # Set previous applied values to ensure they get cleared on rejection
+        # A rejected evaluation must not erase the last real application.
         config.llm_applied_buy_low = 195.0
         config.llm_applied_sell_high = 205.0
         db.commit()
@@ -109,9 +307,8 @@ class TestIntervalApplicationService:
         assert "minimum profit" in result["reason"].lower()
         assert config.buy_low == 180.0
         assert config.sell_high == 220.0
-        # G2-2: guardrail rejection must clear applied fields
-        assert config.llm_applied_buy_low is None
-        assert config.llm_applied_sell_high is None
+        assert config.llm_applied_buy_low == 195.0
+        assert config.llm_applied_sell_high == 205.0
 
     def test_apply_direct_uses_reference_quantity_for_min_profit_amount(self, service: IntervalApplicationService) -> None:
         self._cleanup()
@@ -299,7 +496,7 @@ class TestIntervalApplicationService:
         self._cleanup()
         db = self._get_db()
         config = self._create_config(db)
-        # Set previous applied values to ensure they get cleared on rejection
+        # A rejected evaluation must not erase the last real application.
         config.llm_applied_buy_low = 190.0
         config.llm_applied_sell_high = 210.0
         db.commit()
@@ -317,10 +514,9 @@ class TestIntervalApplicationService:
 
         assert result["success"] is False
         assert "confidence" in result["reason"].lower()
-        # G2-2: guardrail rejection must clear applied fields
         db.refresh(config)
-        assert config.llm_applied_buy_low is None
-        assert config.llm_applied_sell_high is None
+        assert config.llm_applied_buy_low == 190.0
+        assert config.llm_applied_sell_high == 210.0
 
     def test_reject_interval_too_wide_before_state_application(self, service: IntervalApplicationService) -> None:
         self._cleanup()

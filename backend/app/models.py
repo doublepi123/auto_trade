@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from typing import Optional
 
-from sqlalchemy import Boolean, Date, DateTime, Float, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Date, DateTime, Float, Index, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 _TZDateTime = DateTime(timezone=True)
@@ -52,6 +52,15 @@ class StrategyConfig(Base):
     llm_reject_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     trading_session_mode: Mapped[str] = mapped_column(String(16), default="ANY", nullable=False)
     margin_safety_factor: Mapped[Optional[float]] = mapped_column(Float, nullable=True, default=0.9)
+    allow_position_addons: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    max_position_quantity: Mapped[int] = mapped_column(Integer, default=100, nullable=False)
+    max_position_notional: Mapped[float] = mapped_column(Float, default=5000.0, nullable=False)
+    max_risk_per_trade: Mapped[float] = mapped_column(Float, default=250.0, nullable=False)
+    stop_loss_pct: Mapped[float] = mapped_column(Float, default=1.0, nullable=False)
+    max_holding_minutes: Mapped[int] = mapped_column(Integer, default=60, nullable=False)
+    entry_cutoff_minutes_before_close: Mapped[int] = mapped_column(Integer, default=45, nullable=False)
+    flatten_minutes_before_close: Mapped[int] = mapped_column(Integer, default=15, nullable=False)
+    llm_order_execution_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     report_schedule_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     report_schedule_interval_hours: Mapped[int] = mapped_column(Integer, default=24, nullable=False)
     report_schedule_symbol: Mapped[str] = mapped_column(String(50), default="", nullable=False)
@@ -171,6 +180,12 @@ class OrderRecord(Base):
         Index("ix_orders_symbol_filled_at", "symbol", "filled_at"),
         Index("ix_orders_symbol_created_at", "symbol", "created_at"),
         Index("ix_orders_status", "status"),
+        Index(
+            "ux_orders_broker_order_id_nonempty",
+            "broker_order_id",
+            unique=True,
+            sqlite_where=text("broker_order_id <> ''"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -255,7 +270,7 @@ class RuntimeState(Base):
     __tablename__ = "runtime_state"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    symbol: Mapped[str] = mapped_column(String(50), default="", index=True)
+    symbol: Mapped[str] = mapped_column(String(50), default="", unique=True, index=True)
     engine_state: Mapped[str] = mapped_column(String(20), default="flat")
     paused: Mapped[bool] = mapped_column(Boolean, default=False)
     pause_reason: Mapped[str] = mapped_column(Text, default="")
@@ -268,6 +283,12 @@ class RuntimeState(Base):
     last_price: Mapped[float] = mapped_column(Float, default=0.0)
     last_trigger_price: Mapped[float] = mapped_column(Float, default=0.0)
     last_trigger_at: Mapped[Optional[datetime]] = mapped_column(_TZDateTime, nullable=True)
+    execution_state: Mapped[str] = mapped_column(String(20), default="IDLE", nullable=False)
+    reduction_action: Mapped[str] = mapped_column(String(20), default="", nullable=False)
+    reduction_cause: Mapped[str] = mapped_column(String(30), default="", nullable=False)
+    reduction_reason: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    reduction_started_at: Mapped[Optional[datetime]] = mapped_column(_TZDateTime, nullable=True)
+    reduction_trigger_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow, onupdate=_utcnow)
 
 
@@ -281,8 +302,14 @@ class TrackedEntry(Base):
     __tablename__ = "tracked_entries"
 
     symbol: Mapped[str] = mapped_column(String(50), primary_key=True)
+    side: Mapped[str] = mapped_column(String(10), default="LONG", nullable=False)
     quantity: Mapped[float] = mapped_column(Float, default=0.0)
     cost: Mapped[float] = mapped_column(Float, default=0.0)
+    opened_at: Mapped[Optional[datetime]] = mapped_column(
+        _TZDateTime,
+        nullable=True,
+        default=_utcnow,
+    )
     updated_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow, onupdate=_utcnow)
 
 
@@ -298,6 +325,8 @@ class RuntimeStateSnapshot(Base):
     consecutive_losses: Mapped[int] = mapped_column(Integer, default=0)
     last_price: Mapped[float] = mapped_column(Float, default=0.0)
     last_trigger_price: Mapped[float] = mapped_column(Float, default=0.0)
+    execution_state: Mapped[str] = mapped_column(String(20), default="IDLE", nullable=False)
+    reduction_reason: Mapped[str] = mapped_column(Text, default="", nullable=False)
     created_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow)
 
 
