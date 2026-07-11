@@ -4,6 +4,25 @@
 
 ---
 
+## 近期已完成迭代 (2026-07-12) — P2.1 证据成熟度与版本审计
+
+> P2 仍处于纯影子观察阶段。本轮先补齐“评估的是哪个版本、样本是否成熟、数据是否连续”的证据链，不改变 P0 实盘策略，也不增加任何订单能力。设计口径见 [2026-07-12-strategy-v2-evidence-design.md](superpowers/specs/2026-07-12-strategy-v2-evidence-design.md)。
+
+| 交付 | 状态 |
+|------|------|
+| 配置哈希对应不可变参数快照，旧版本可追溯查询 | ✅ |
+| `/versions`、`/evaluation` 及按 `config_version` 查询决策/虚拟交易 | ✅ |
+| 20 个交易日 / 50 笔闭环交易成熟度门槛，仅输出采集中或可复核 | ✅ |
+| 按日 bar 覆盖率、缺口、交易、净收益与退出原因证据 | ✅ |
+| 实盘对照不存在时返回 unavailable/null，前端不再展示伪造零值 | ✅ |
+| 15 秒状态轮询、本地新鲜度时钟、版本选择与进度展示 | ✅ |
+
+**同时修复：** 部分成交缺数量不再按全量入账；费用补录移出下单互斥锁并增加批次/退避；审计来源 IP 仅信任显式代理网段；US/HK 影子窗口受开仓截止前可用 bar 容量约束；CI 主线 E2E 门禁与同 SHA 镜像晋级。
+
+**验证：** `pytest tests/` **4156 passed, 1 skipped**，覆盖率 **87.38%**；`basedpyright` 0/0/0；`vue-tsc`、生产构建与 chunk 预算通过；本地 Docker 生产链路、数据库升级、严格 readiness、API 和真实无头浏览器页面通过。Cypress Electron 在本机启动阶段 `SIGABRT`，spec 已更新并由主线 CI 强制执行。
+
+---
+
 ## 近期已完成迭代 (2026-07-12) — P2 Strategy v2 前向影子
 
 > 在 P0 实盘安全路径旁新增完全隔离的 RTH 低频日内均值回归观察器。P2 只记录因果特征、虚拟决策与估算净收益，没有 broker 订单能力；设计口径见 [2026-07-12-strategy-v2-shadow-design.md](superpowers/specs/2026-07-12-strategy-v2-shadow-design.md)。
@@ -31,7 +50,7 @@
 | **API 覆盖** | ✅ 完备。策略配置、凭证管理、订单查询、状态获取、状态历史、事件时间线、运行时控制（启停/暂停/Kill Switch）。 |
 | **WebSocket 推送** | ✅ 就绪。实时状态同步。 |
 | **本地部署** | ✅ 就绪。Docker Compose 一键启动。 |
-| **测试** | ✅ 就绪。Backend pytest **1228** 项、pytest-cov 覆盖率 **89%**、Frontend Cypress E2E **216** 项。 |
+| **测试** | ✅ 就绪。Backend pytest **4156 passed, 1 skipped**、pytest-cov 覆盖率 **87.38%**；Frontend Cypress E2E 已纳入主线发布门禁。 |
 | **凭证安全** | ✅ 就绪。主密钥 + AES-GCM 加密存储，前端不回显明文。 |
 | **数据库** | ✅ 就位。SQLite，含运行状态、状态快照、订单、`tracked_entries`、LLM 交互、交易事件、审计日志和凭证配置。 |
 | **LLM 行情数据** | ✅ 真实 K 线（日 K + 1 分钟 K），ATR/布林带有效。 |

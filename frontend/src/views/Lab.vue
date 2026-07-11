@@ -248,6 +248,20 @@
                   :value="item.symbol"
                 />
               </el-select>
+              <el-select
+                v-model="selectedShadowVersion"
+                size="small"
+                placeholder="证据版本"
+                data-testid="shadow-version-select"
+                @change="loadShadowEvidence"
+              >
+                <el-option
+                  v-for="item in shadowVersions"
+                  :key="item.config_version"
+                  :label="`${shortVersion(item.config_version)}${item.current ? ' · 当前' : ''}`"
+                  :value="item.config_version"
+                />
+              </el-select>
               <el-button
                 type="primary"
                 size="small"
@@ -307,7 +321,7 @@
                   <el-input-number v-model="shadowForm.zscore_window_1m_bars" :min="10" :max="240" :step="5" data-testid="shadow-window-1m" />
                 </el-form-item>
                 <el-form-item label="5m z-score 窗口">
-                  <el-input-number v-model="shadowForm.zscore_window_5m_bars" :min="5" :max="120" :step="5" data-testid="shadow-window-5m" />
+                  <el-input-number v-model="shadowForm.zscore_window_5m_bars" :min="5" :max="shadowMax5mWindow" :step="5" data-testid="shadow-window-5m" />
                 </el-form-item>
                 <el-form-item label="跌破阈值">
                   <el-input-number v-model="shadowForm.breach_zscore" :min="-5" :max="-0.5" :step="0.1" :precision="2" data-testid="shadow-breach-z" />
@@ -319,7 +333,7 @@
                   <el-input-number v-model="shadowForm.five_minute_zscore_max" :min="-5" :max="0" :step="0.1" :precision="2" data-testid="shadow-five-minute-z" />
                 </el-form-item>
                 <el-form-item label="ADX 周期">
-                  <el-input-number v-model="shadowForm.adx_period" :min="5" :max="50" data-testid="shadow-adx-period" />
+                  <el-input-number v-model="shadowForm.adx_period" :min="5" :max="shadowMaxAdxPeriod" data-testid="shadow-adx-period" />
                 </el-form-item>
                 <el-form-item label="ADX 上限">
                   <el-input-number v-model="shadowForm.max_adx" :min="1" :max="40" :step="1" :precision="1" data-testid="shadow-max-adx" />
@@ -391,16 +405,54 @@
                 <el-statistic title="胜率" :value="shadowStatus.metrics.win_rate * 100" suffix="%" :precision="1" />
                 <el-statistic title="最大回撤" :value="shadowStatus.metrics.max_drawdown" :precision="2" />
                 <el-statistic title="平均持仓" :value="shadowStatus.metrics.avg_holding_minutes" suffix="m" :precision="1" />
-                <el-statistic title="动作一致率" :value="shadowStatus.metrics.action_agreement_rate * 100" suffix="%" :precision="1" />
-                <el-statistic title="相对实盘净收益" :value="shadowStatus.metrics.net_pnl_delta_vs_live" :precision="2" />
                 <el-statistic title="有效 bar" :value="shadowStatus.metrics.eligible_bars" />
               </div>
+              <el-alert
+                v-if="!shadowStatus.metrics.comparison_available"
+                title="尚未建立版本一致的实盘对照基线"
+                type="info"
+                :closable="false"
+                show-icon
+                data-testid="shadow-comparison-unavailable"
+              />
               <div class="shadow-excursions">
                 <span>平均 MAE {{ formatPercent(shadowStatus.metrics.avg_mae_pct) }}</span>
                 <span>平均 MFE {{ formatPercent(shadowStatus.metrics.avg_mfe_pct) }}</span>
                 <span>费用 {{ shadowStatus.metrics.fees.toFixed(2) }}</span>
                 <span>跌破 / 收复 {{ shadowStatus.metrics.breaches }} / {{ shadowStatus.metrics.reclaims }}</span>
               </div>
+            </section>
+
+            <section v-if="shadowEvaluation" class="shadow-section" data-testid="shadow-evaluation">
+              <div class="shadow-section-header">
+                <div>
+                  <h3>证据成熟度</h3>
+                  <small>{{ shortVersion(shadowEvaluation.config_version) }} · 仅供复核，不会自动晋级或下单</small>
+                </div>
+                <el-tag :type="shadowEvaluation.status === 'READY_FOR_REVIEW' ? 'success' : 'warning'">
+                  {{ shadowEvaluation.status === 'READY_FOR_REVIEW' ? '可复核' : '采集中' }}
+                </el-tag>
+              </div>
+              <div class="shadow-progress-grid">
+                <div>
+                  <span>交易日 {{ shadowEvaluation.observed_trading_days }} / {{ shadowEvaluation.minimum_trading_days }}</span>
+                  <el-progress :percentage="shadowDayProgress" :stroke-width="8" />
+                </div>
+                <div>
+                  <span>闭环交易 {{ shadowEvaluation.closed_trades }} / {{ shadowEvaluation.minimum_closed_trades }}</span>
+                  <el-progress :percentage="shadowTradeProgress" :stroke-width="8" />
+                </div>
+              </div>
+              <el-table :data="shadowEvaluation.daily" size="small" empty-text="暂无按日证据">
+                <el-table-column prop="session_date" label="交易日" width="120" />
+                <el-table-column prop="bars" label="bar" width="80" />
+                <el-table-column label="覆盖率" width="100">
+                  <template #default="{ row }">{{ formatPercent(row.coverage_ratio) }}</template>
+                </el-table-column>
+                <el-table-column prop="missing_internal_bars" label="缺口" width="80" />
+                <el-table-column prop="trades" label="交易" width="80" />
+                <el-table-column prop="net_pnl" label="净收益" min-width="100" />
+              </el-table>
             </section>
 
             <section class="shadow-section" data-testid="shadow-gates">
@@ -455,7 +507,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, reactive, onMounted, watch } from 'vue'
+import { computed, ref, reactive, onBeforeUnmount, onMounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   listPromptVersions, createPromptVersion, activatePromptVersion,
@@ -468,14 +520,16 @@ import {
   getStrategyShadowConfig,
   getStrategyShadowConfigs,
   getStrategyShadowDecisions,
+  getStrategyShadowEvaluation,
   getStrategyShadowStatus,
+  getStrategyShadowVersions,
   updateStrategyShadowConfig,
 } from '../api/strategy_shadow'
 import type {
   PromptVersion, ExperimentSummary, PerformanceStats,
   PerformanceVariant, IndicatorsResponse, LLMInteractionRecord, LLMIntervalStatus,
   StrategyShadowConfig, StrategyShadowConfigUpdate, StrategyShadowDecision,
-  StrategyShadowStatus,
+  StrategyShadowEvaluation, StrategyShadowStatus, StrategyShadowVersion,
 } from '../types'
 import { resolveErrorMessage } from '../utils/error'
 import { downloadCsv } from '../utils/csv'
@@ -688,6 +742,9 @@ const shadowConfig = ref<StrategyShadowConfig | null>(null)
 const shadowConfigs = ref<StrategyShadowConfig[]>([])
 const selectedShadowSymbol = ref('')
 const shadowStatus = ref<StrategyShadowStatus | null>(null)
+const shadowVersions = ref<StrategyShadowVersion[]>([])
+const selectedShadowVersion = ref('')
+const shadowEvaluation = ref<StrategyShadowEvaluation | null>(null)
 const shadowDecisions = ref<StrategyShadowDecision[]>([])
 const shadowDecisionTotal = ref(0)
 const shadowDecisionPage = ref(1)
@@ -696,6 +753,9 @@ const shadowLoading = ref(false)
 const shadowSaving = ref(false)
 const shadowLoaded = ref(false)
 const shadowLoadError = ref('')
+const shadowRequestGeneration = ref(0)
+const shadowStatusFetchedAtMs = ref(0)
+const shadowNowMs = ref(Date.now())
 const shadowForm = reactive<StrategyShadowConfigUpdate>({
   enabled: false,
   zscore_window_1m_bars: 30,
@@ -711,6 +771,8 @@ const shadowForm = reactive<StrategyShadowConfigUpdate>({
   stop_loss_pct: 0.5,
   profit_target_pct: 0.5,
 })
+const shadowMax5mWindow = computed(() => shadowConfig.value?.symbol.endsWith('.HK') ? 56 : 68)
+const shadowMaxAdxPeriod = computed(() => shadowConfig.value?.symbol.endsWith('.HK') ? 28 : 34)
 
 function applyShadowConfig(config: StrategyShadowConfig) {
   shadowConfig.value = config
@@ -732,24 +794,35 @@ function applyShadowConfig(config: StrategyShadowConfig) {
 }
 
 async function loadStrategyShadow(symbol = selectedShadowSymbol.value || undefined) {
+  const generation = ++shadowRequestGeneration.value
   shadowLoading.value = true
   shadowLoadError.value = ''
   try {
     const configs = await getStrategyShadowConfigs()
+    if (generation !== shadowRequestGeneration.value) return
     shadowConfigs.value = configs
     const requestedSymbol = symbol || configs[0]?.symbol
     const config = await getStrategyShadowConfig(requestedSymbol)
-    const [status, decisions] = await Promise.all([
+    const versions = await getStrategyShadowVersions(config.symbol)
+    const currentVersion = versions.find((item) => item.current)?.config_version ?? config.config_version
+    const [status, decisions, evaluation] = await Promise.all([
       getStrategyShadowStatus(config.symbol),
       getStrategyShadowDecisions({
         symbol: config.symbol,
+        config_version: currentVersion,
         page: 1,
         page_size: shadowDecisionPageSize,
       }),
+      getStrategyShadowEvaluation(config.symbol, currentVersion),
     ])
+    if (generation !== shadowRequestGeneration.value) return
     applyShadowConfig(config)
     selectedShadowSymbol.value = config.symbol
     shadowStatus.value = status
+    shadowStatusFetchedAtMs.value = Date.now()
+    shadowVersions.value = versions
+    selectedShadowVersion.value = currentVersion
+    shadowEvaluation.value = evaluation
     shadowDecisions.value = decisions.items
     shadowDecisionTotal.value = decisions.total
     shadowDecisionPage.value = decisions.page
@@ -758,7 +831,36 @@ async function loadStrategyShadow(symbol = selectedShadowSymbol.value || undefin
     shadowLoadError.value = resolveErrorMessage(error, '加载策略 v2 影子状态失败')
     shadowLoaded.value = false
   } finally {
-    shadowLoading.value = false
+    if (generation === shadowRequestGeneration.value) shadowLoading.value = false
+  }
+}
+
+async function loadShadowEvidence() {
+  const symbol = shadowConfig.value?.symbol
+  if (!symbol || !selectedShadowVersion.value) return
+  const version = selectedShadowVersion.value
+  const generation = ++shadowRequestGeneration.value
+  try {
+    const [evaluation, decisions] = await Promise.all([
+      getStrategyShadowEvaluation(symbol, version),
+      getStrategyShadowDecisions({
+        symbol,
+        config_version: version,
+        page: 1,
+        page_size: shadowDecisionPageSize,
+      }),
+    ])
+    if (
+      generation !== shadowRequestGeneration.value
+      || selectedShadowSymbol.value !== symbol
+      || selectedShadowVersion.value !== version
+    ) return
+    shadowEvaluation.value = evaluation
+    shadowDecisions.value = decisions.items
+    shadowDecisionTotal.value = decisions.total
+    shadowDecisionPage.value = decisions.page
+  } catch (error: unknown) {
+    ElMessage.error(resolveErrorMessage(error, '加载证据版本失败'))
   }
 }
 
@@ -767,6 +869,7 @@ async function loadShadowDecisions(page: number) {
   try {
     const result = await getStrategyShadowDecisions({
       symbol: shadowConfig.value?.symbol || undefined,
+      config_version: selectedShadowVersion.value || undefined,
       page,
       page_size: shadowDecisionPageSize,
     })
@@ -784,6 +887,12 @@ function validateShadowForm(): string | null {
   }
   if (shadowForm.min_realized_vol >= shadowForm.max_realized_vol) {
     return '波动率下限必须小于上限'
+  }
+  if (shadowForm.zscore_window_5m_bars > shadowMax5mWindow.value) {
+    return `5m z-score 窗口不能超过 ${shadowMax5mWindow.value}`
+  }
+  if (shadowForm.adx_period > shadowMaxAdxPeriod.value) {
+    return `ADX 周期不能超过 ${shadowMaxAdxPeriod.value}`
   }
   return null
 }
@@ -823,18 +932,57 @@ const shadowGateRows = computed(() => {
 })
 
 const shadowFreshnessLabel = computed(() => {
-  const age = shadowStatus.value?.latest?.data_age_seconds
+  const serverAge = shadowStatus.value?.latest?.data_age_seconds
+  const age = serverAge == null
+    ? null
+    : serverAge + Math.max(0, shadowNowMs.value - shadowStatusFetchedAtMs.value) / 1000
   if (age == null) return '无数据'
   if (age < 1) return '刚刚更新'
   return `${Math.round(age)} 秒前`
 })
 
 const shadowFreshnessType = computed<'success' | 'warning' | 'danger'>(() => {
-  const age = shadowStatus.value?.latest?.data_age_seconds ?? Number.POSITIVE_INFINITY
+  const serverAge = shadowStatus.value?.latest?.data_age_seconds
+  const age = serverAge == null
+    ? Number.POSITIVE_INFINITY
+    : serverAge + Math.max(0, shadowNowMs.value - shadowStatusFetchedAtMs.value) / 1000
   if (age <= 15) return 'success'
   if (age <= 60) return 'warning'
   return 'danger'
 })
+
+const shadowDayProgress = computed(() => {
+  const value = shadowEvaluation.value
+  return value ? Math.min(100, Math.round(value.observed_trading_days / value.minimum_trading_days * 100)) : 0
+})
+
+const shadowTradeProgress = computed(() => {
+  const value = shadowEvaluation.value
+  return value ? Math.min(100, Math.round(value.closed_trades / value.minimum_closed_trades * 100)) : 0
+})
+
+async function pollStrategyShadow() {
+  const symbol = shadowConfig.value?.symbol
+  if (!symbol || !selectedShadowVersion.value) return
+  const version = selectedShadowVersion.value
+  const generation = shadowRequestGeneration.value
+  try {
+    const [status, evaluation] = await Promise.all([
+      getStrategyShadowStatus(symbol),
+      getStrategyShadowEvaluation(symbol, version),
+    ])
+    if (
+      generation !== shadowRequestGeneration.value
+      || selectedShadowSymbol.value !== symbol
+      || selectedShadowVersion.value !== version
+    ) return
+    shadowStatus.value = status
+    shadowStatusFetchedAtMs.value = Date.now()
+    shadowEvaluation.value = evaluation
+  } catch {
+    // Keep the last good snapshot; the next manual refresh exposes the error.
+  }
+}
 
 function gateShare(count: number): string {
   const total = shadowGateRows.value.reduce((sum, row) => sum + row.count, 0)
@@ -920,6 +1068,18 @@ watch(activeTab, (tab) => {
 
 onMounted(async () => {
   await Promise.all([loadVersions(), loadExperimentNames()])
+})
+
+const shadowClock = window.setInterval(() => {
+  shadowNowMs.value = Date.now()
+}, 1000)
+const shadowPoll = window.setInterval(() => {
+  if (activeTab.value === 'strategy-shadow' && !shadowLoading.value) void pollStrategyShadow()
+}, 15_000)
+
+onBeforeUnmount(() => {
+  window.clearInterval(shadowClock)
+  window.clearInterval(shadowPoll)
 })
 </script>
 
@@ -1083,6 +1243,20 @@ onMounted(async () => {
   grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
+.shadow-progress-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.shadow-progress-grid span {
+  display: block;
+  margin-bottom: 6px;
+  color: #4b5563;
+  font-size: 13px;
+}
+
 .shadow-metrics-grid :deep(.el-statistic) {
   min-width: 0;
   padding: 10px 12px;
@@ -1112,7 +1286,8 @@ onMounted(async () => {
 
 @media (max-width: 900px) {
   .shadow-form,
-  .shadow-metrics-grid {
+  .shadow-metrics-grid,
+  .shadow-progress-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
@@ -1135,7 +1310,8 @@ onMounted(async () => {
 
   .shadow-form,
   .shadow-facts,
-  .shadow-metrics-grid {
+  .shadow-metrics-grid,
+  .shadow-progress-grid {
     grid-template-columns: minmax(0, 1fr);
   }
 }

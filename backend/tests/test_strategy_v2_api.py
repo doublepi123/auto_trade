@@ -21,6 +21,7 @@ from app.models import (
     StrategyV2ShadowDecision,
     StrategyV2ShadowState,
     StrategyV2ShadowTrade,
+    StrategyV2ShadowVersion,
 )
 from app.services.strategy_v2_shadow_service import StrategyV2ShadowService
 
@@ -81,6 +82,7 @@ class TestStrategyV2ShadowApi:
                 StrategyV2ShadowTrade,
                 StrategyV2ShadowState,
                 StrategyV2ShadowConfig,
+                StrategyV2ShadowVersion,
                 StrategyConfig,
             ):
                 db.query(model).delete()
@@ -364,6 +366,125 @@ class TestStrategyV2ShadowApi:
         assert response.json()["persisted"] is False
         with self.session_factory() as db:
             assert self._shadow_counts(db) == before == (0, 0, 0, 0)
+
+    def test_versions_and_evaluation_preserve_old_config_evidence(self) -> None:
+        original = self.client.get("/api/strategy-shadow/config").json()
+        old_version = original["config_version"]
+        updated = self.client.put(
+            "/api/strategy-shadow/config",
+            params={"symbol": "AAPL.US"},
+            json={"max_adx": 18.0},
+        )
+        assert updated.status_code == 200
+        new_version = updated.json()["config_version"]
+        assert new_version != old_version
+
+        versions = self.client.get(
+            "/api/strategy-shadow/versions",
+            params={"symbol": "AAPL.US"},
+        )
+        assert versions.status_code == 200
+        assert {item["config_version"] for item in versions.json()} == {
+            old_version,
+            new_version,
+        }
+        assert sum(item["current"] for item in versions.json()) == 1
+
+        evaluation = self.client.get(
+            "/api/strategy-shadow/evaluation",
+            params={"symbol": "AAPL.US", "config_version": old_version},
+        )
+        assert evaluation.status_code == 200
+        body = evaluation.json()
+        assert body["status"] == "COLLECTING"
+        assert body["order_submission_allowed"] is False
+        assert body["remaining_trading_days"] == 20
+        assert body["remaining_closed_trades"] == 50
+
+        missing = self.client.get(
+            "/api/strategy-shadow/evaluation",
+            params={"symbol": "AAPL.US", "config_version": "0" * 64},
+        )
+        assert missing.status_code == 400
+
+    def test_market_aware_window_capacity_validation(self) -> None:
+        response = self.client.put(
+            "/api/strategy-shadow/config",
+            params={"symbol": "AAPL.US"},
+            json={"zscore_window_5m_bars": 69},
+        )
+        assert response.status_code == 400
+        assert "must not exceed 68" in response.json()["detail"]
+
+    def test_disabled_config_reports_disabled_even_with_state_row(self) -> None:
+        self.client.get("/api/strategy-shadow/config")
+        with self.session_factory() as db:
+            db.add(StrategyV2ShadowState(symbol="AAPL.US", phase="READY"))
+            db.commit()
+
+        response = self.client.get(
+            "/api/strategy-shadow/status",
+            params={"symbol": "AAPL.US"},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["phase"] == "DISABLED"
+
+    def test_legacy_evidence_version_is_backfilled_as_queryable(self) -> None:
+        legacy_version = "a" * 64
+        with self.session_factory() as db:
+            db.add(StrategyV2ShadowDecision(
+                idempotency_key="legacy-decision",
+                symbol="AAPL.US",
+                market="US",
+                config_version=legacy_version,
+                session_date=_NOW.date(),
+                bar_at=_NOW,
+                close_price=100.0,
+            ))
+            db.commit()
+
+        versions = self.client.get(
+            "/api/strategy-shadow/versions",
+            params={"symbol": "AAPL.US"},
+        )
+        assert versions.status_code == 200
+        legacy = next(
+            item for item in versions.json()
+            if item["config_version"] == legacy_version
+        )
+        assert legacy["params"]["parameters_available"] is False
+
+        decisions = self.client.get(
+            "/api/strategy-shadow/decisions",
+            params={"symbol": "AAPL.US", "config_version": legacy_version},
+        )
+        assert decisions.status_code == 200
+        assert decisions.json()["total"] == 1
+
+    def test_partial_day_has_no_internal_gap_and_does_not_mature_sample(self) -> None:
+        config = self.client.get("/api/strategy-shadow/config").json()
+        with self.session_factory() as db:
+            db.add(StrategyV2ShadowDecision(
+                idempotency_key="partial-day-decision",
+                symbol="AAPL.US",
+                market="US",
+                config_version=config["config_version"],
+                session_date=_NOW.date(),
+                bar_at=_NOW,
+                close_price=100.0,
+            ))
+            db.commit()
+
+        evaluation = self.client.get(
+            "/api/strategy-shadow/evaluation",
+            params={"symbol": "AAPL.US"},
+        ).json()
+
+        assert evaluation["observed_trading_days"] == 0
+        assert evaluation["daily"][0]["missing_internal_bars"] == 0
+        assert evaluation["daily"][0]["partial_start"] is True
+        assert evaluation["daily"][0]["partial_end"] is True
 
     @staticmethod
     def _shadow_counts(db: Session) -> tuple[int, int, int, int]:

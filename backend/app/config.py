@@ -63,6 +63,10 @@ class Settings(BaseSettings):
         default=2048,
         validation_alias="AUTO_TRADE_AUDIT_REQUEST_SUMMARY_LIMIT",
     )
+    audit_trusted_proxy_cidrs: str = Field(
+        default="",
+        validation_alias="AUTO_TRADE_AUDIT_TRUSTED_PROXY_CIDRS",
+    )
 
     broker_retry_max: int = Field(default=3, validation_alias="AUTO_TRADE_BROKER_RETRY_MAX")
     broker_quote_retry_max: int = Field(default=1, validation_alias="AUTO_TRADE_BROKER_QUOTE_RETRY_MAX")

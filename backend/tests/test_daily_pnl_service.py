@@ -304,6 +304,46 @@ class TestDailyPnlService:
         assert result.realized_pnl == approx(3.0 - (3 * 100 + 3 * 101) * 0.0005)
         assert result.consecutive_losses == 0
 
+    def test_partial_fill_without_executed_quantity_is_not_assumed_full(self) -> None:
+        self._cleanup()
+        db = self._get_db()
+        order = OrderRecord(
+            broker_order_id="partial-without-quantity",
+            symbol="AAPL.US",
+            side="BUY",
+            quantity=50,
+            price=100,
+            executed_quantity=0,
+            executed_price=100,
+            status="PARTIAL_FILLED",
+            created_at=self._dt(date(2026, 7, 11), 10),
+            filled_at=self._dt(date(2026, 7, 11), 10, 1),
+        )
+
+        assert DailyPnlService(db)._fill_from_order(order) is None
+        db.close()
+
+    def test_zero_quantity_terminal_order_does_not_warn_about_price(
+        self,
+        caplog: LogCaptureFixture,
+    ) -> None:
+        self._cleanup()
+        db = self._get_db()
+        order = OrderRecord(
+            broker_order_id="rejected-no-fill",
+            symbol="AAPL.US",
+            side="BUY",
+            quantity=50,
+            price=100,
+            executed_quantity=0,
+            executed_price=0,
+            status="REJECTED",
+        )
+
+        assert DailyPnlService(db)._fill_from_order(order) is None
+        assert "falling back to limit price" not in caplog.text
+        db.close()
+
     def test_market_aware_trade_day_keeps_after_hours_fill_on_session_day(self) -> None:
         """A US fill at 22:30 UTC = 18:30 ET still belongs to that session day."""
         self._cleanup()

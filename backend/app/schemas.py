@@ -316,6 +316,16 @@ class StrategyV2ShadowConfigValues(BaseModel):
                 "flatten_minutes_before_close must not exceed "
                 "entry_cutoff_minutes_before_close"
             )
+        max_5m_window = 68 if self.symbol.endswith(".US") else 56
+        max_adx_period = 34 if self.symbol.endswith(".US") else 28
+        if self.zscore_window_5m_bars > max_5m_window:
+            raise ValueError(
+                f"zscore_window_5m_bars must not exceed {max_5m_window} for {self.symbol}"
+            )
+        if self.adx_period > max_adx_period:
+            raise ValueError(
+                f"adx_period must not exceed {max_adx_period} for {self.symbol}"
+            )
         return self
 
 
@@ -449,9 +459,10 @@ class StrategyV2ShadowMetrics(BaseModel):
     avg_holding_minutes: float = 0.0
     avg_mae_pct: float = 0.0
     avg_mfe_pct: float = 0.0
-    live_action_count: int = 0
-    action_agreement_rate: float = 0.0
-    net_pnl_delta_vs_live: float = 0.0
+    comparison_available: bool = False
+    live_action_count: Optional[int] = None
+    action_agreement_rate: Optional[float] = None
+    net_pnl_delta_vs_live: Optional[float] = None
 
 
 class StrategyV2ShadowStatusResponse(BaseModel):
@@ -462,6 +473,55 @@ class StrategyV2ShadowStatusResponse(BaseModel):
     phase: str = "COLD"
     last_polled_at: Optional[datetime] = None
     last_poll_error: str = ""
+
+
+class StrategyV2ShadowVersionResponse(BaseModel):
+    symbol: str
+    config_version: str
+    activated_at: datetime
+    current: bool
+    params: dict[str, Any]
+    observed_trading_days: int = 0
+    bars: int = 0
+    closed_trades: int = 0
+    net_pnl: float = 0.0
+
+
+class StrategyV2ShadowDailyEvidence(BaseModel):
+    session_date: date
+    first_bar_at: datetime
+    last_bar_at: datetime
+    bars: int
+    eligible_bars: int
+    expected_internal_bars: int
+    missing_internal_bars: int
+    coverage_ratio: float
+    trades: int
+    net_pnl: float
+    exit_reasons: dict[str, int] = Field(default_factory=dict)
+    partial_start: bool
+    partial_end: bool
+
+
+class StrategyV2ShadowEvaluationResponse(BaseModel):
+    symbol: str
+    config_version: str
+    mode: Literal["SHADOW"] = "SHADOW"
+    order_submission_allowed: Literal[False] = False
+    status: Literal["COLLECTING", "READY_FOR_REVIEW"]
+    observed_trading_days: int
+    minimum_trading_days: int = 20
+    remaining_trading_days: int
+    closed_trades: int
+    minimum_closed_trades: int = 50
+    remaining_closed_trades: int
+    first_bar_at: Optional[datetime] = None
+    last_bar_at: Optional[datetime] = None
+    bars: int = 0
+    readiness_blockers: list[str] = Field(default_factory=list)
+    data_quality_warnings: list[str] = Field(default_factory=list)
+    quality: Optional[dict[str, Any]] = None
+    daily: list[StrategyV2ShadowDailyEvidence] = Field(default_factory=list)
 
 
 class StrategyV2ReplayBar(BaseModel):

@@ -16,6 +16,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   BACKEND_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/auto-trade-backend
   FRONTEND_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/auto-trade-frontend
@@ -73,16 +77,9 @@ jobs:
       - name: Build
         run: npm run build
 
-  # Cypress E2E runs on PR and manual dispatch only.
-  # It is NOT a required dependency for Docker push because:
-  # 1. Cypress needs a served frontend and browser infrastructure (longer setup).
-  # 2. E2E tests stub all APIs but still add significant CI time.
-  # 3. type-check + build already cover the primary compile-time quality risk.
-  # Push-to-main gates use backend-test + frontend-check only.
   frontend-e2e:
     name: Frontend E2E Tests
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -112,7 +109,7 @@ jobs:
 
   dockerhub:
     name: Build and push Docker images
-    needs: [backend-test, frontend-check]
+    needs: [backend-test, frontend-check, frontend-e2e]
     runs-on: ubuntu-latest
     if: github.event_name != 'pull_request'
 
@@ -135,8 +132,7 @@ jobs:
         with:
           images: ${{ env.BACKEND_IMAGE }}
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=sha,prefix=sha-,format=short
+            type=sha,prefix=sha-,format=long
             type=ref,event=tag
 
       - name: Build and push backend image
@@ -154,8 +150,7 @@ jobs:
         with:
           images: ${{ env.FRONTEND_IMAGE }}
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=sha,prefix=sha-,format=short
+            type=sha,prefix=sha-,format=long
             type=ref,event=tag
 
       - name: Build and push frontend image
@@ -166,3 +161,15 @@ jobs:
           push: true
           tags: ${{ steps.frontend_meta.outputs.tags }}
           labels: ${{ steps.frontend_meta.outputs.labels }}
+
+      - name: Promote matching images to latest
+        if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        run: |
+          previous_backend_digest=$(docker buildx imagetools inspect "${BACKEND_IMAGE}:latest" | awk '$1 == "Digest:" {print $2; exit}' || true)
+          docker buildx imagetools create --tag "${BACKEND_IMAGE}:latest" "${BACKEND_IMAGE}:sha-${GITHUB_SHA}"
+          if ! docker buildx imagetools create --tag "${FRONTEND_IMAGE}:latest" "${FRONTEND_IMAGE}:sha-${GITHUB_SHA}"; then
+            if [ -n "${previous_backend_digest}" ]; then
+              docker buildx imagetools create --tag "${BACKEND_IMAGE}:latest" "${BACKEND_IMAGE}@${previous_backend_digest}"
+            fi
+            exit 1
+          fi

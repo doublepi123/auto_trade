@@ -102,6 +102,23 @@ class StrategyV2ShadowConfig(Base):
     updated_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow, onupdate=_utcnow)
 
 
+class StrategyV2ShadowVersion(Base):
+    """Immutable parameter snapshot for one P2 shadow config hash."""
+
+    __tablename__ = "strategy_v2_shadow_versions"
+    __table_args__ = (
+        UniqueConstraint("symbol", "config_version", name="uq_strategy_v2_shadow_version"),
+        Index("ix_strategy_v2_shadow_versions_symbol_activated", "symbol", "activated_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(50), nullable=False)
+    config_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    config_json: Mapped[str] = mapped_column(Text, nullable=False)
+    activated_at: Mapped[datetime] = mapped_column(_TZDateTime, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow, nullable=False)
+
+
 class StrategyParamVersion(Base):
     """Immutable snapshot of the tunable strategy params at a point in time.
 

@@ -23,12 +23,14 @@ from app.domain.strategy_v2 import (
     StrategyV2State,
     VirtualPosition,
 )
+from app.platform.strategy_quality import strategy_quality_report
 from app.models import (
     StrategyConfig,
     StrategyV2ShadowConfig,
     StrategyV2ShadowDecision,
     StrategyV2ShadowState,
     StrategyV2ShadowTrade,
+    StrategyV2ShadowVersion,
 )
 from app.schemas import (
     StrategyV2ShadowConfigResponse,
@@ -36,12 +38,15 @@ from app.schemas import (
     StrategyV2ShadowConfigValues,
     StrategyV2ShadowDecisionPage,
     StrategyV2ShadowDecisionResponse,
+    StrategyV2ShadowDailyEvidence,
+    StrategyV2ShadowEvaluationResponse,
     StrategyV2ShadowLatestResponse,
     StrategyV2ShadowMetrics,
     StrategyV2ShadowReplayRequest,
     StrategyV2ShadowReplayResponse,
     StrategyV2ShadowStatusResponse,
     StrategyV2ShadowTradeResponse,
+    StrategyV2ShadowVersionResponse,
 )
 from app.services.strategy_service import StrategyService
 
@@ -75,7 +80,6 @@ _CONFIG_FIELDS = (
     "estimated_fee_rate_us",
     "estimated_fee_rate_hk",
 )
-
 _ALGORITHM_VERSION = "strategy-v2-rth-mr-v1"
 _VALID_ACTIONS = frozenset(action.value for action in StrategyV2Action)
 _SHADOW_SYMBOL_RE = re.compile(r"^[A-Z0-9\-]{1,12}\.(US|HK)$")
@@ -95,7 +99,9 @@ class StrategyV2ShadowService:
         self.candle_provider = candle_provider
 
     def get_config(self, symbol: str | None = None) -> StrategyV2ShadowConfigResponse:
-        return self._config_response(self._get_or_create_config(symbol))
+        row = self._get_or_create_config(symbol)
+        self._ensure_version_snapshot(row)
+        return self._config_response(row)
 
     def list_configs(self) -> list[StrategyV2ShadowConfigResponse]:
         rows = self.db.query(StrategyV2ShadowConfig).all()
@@ -107,7 +113,67 @@ class StrategyV2ShadowService:
         rows = self.db.query(StrategyV2ShadowConfig).order_by(
             StrategyV2ShadowConfig.symbol.asc()
         ).all()
+        for row in rows:
+            self._ensure_version_snapshot(row, commit=False)
+        self.db.commit()
         return [self._config_response(row) for row in rows]
+
+    def list_versions(self, symbol: str | None = None) -> list[StrategyV2ShadowVersionResponse]:
+        config = self._get_or_create_config(symbol)
+        self._ensure_version_snapshot(config)
+        self._backfill_legacy_version_snapshots(config.symbol)
+        current_version = self._config_version(config)
+        rows = self.db.query(StrategyV2ShadowVersion).filter(
+            StrategyV2ShadowVersion.symbol == config.symbol
+        ).order_by(StrategyV2ShadowVersion.activated_at.desc()).all()
+        return [self._version_response(row, current_version) for row in rows]
+
+    def get_evaluation(
+        self,
+        symbol: str | None = None,
+        config_version: str | None = None,
+    ) -> StrategyV2ShadowEvaluationResponse:
+        normalized = self._resolve_symbol(symbol)
+        version = self._resolve_config_version(normalized, config_version)
+        decisions = self.db.query(StrategyV2ShadowDecision).filter(
+            StrategyV2ShadowDecision.symbol == normalized,
+            StrategyV2ShadowDecision.config_version == version,
+        ).order_by(StrategyV2ShadowDecision.bar_at.asc()).all()
+        trades = self.db.query(StrategyV2ShadowTrade).filter(
+            StrategyV2ShadowTrade.symbol == normalized,
+            StrategyV2ShadowTrade.config_version == version,
+            StrategyV2ShadowTrade.status == "CLOSED",
+        ).order_by(StrategyV2ShadowTrade.exit_at.asc()).all()
+        daily = self._daily_evidence(decisions, trades)
+        observed_days = sum(item.coverage_ratio >= 0.8 for item in daily)
+        closed_trades = len(trades)
+        blockers: list[str] = []
+        if observed_days < 20:
+            blockers.append("MIN_TRADING_DAYS")
+        if closed_trades < 50:
+            blockers.append("MIN_CLOSED_TRADES")
+        warnings = [
+            f"{item.session_date.isoformat()}: {item.missing_internal_bars} internal bars missing"
+            for item in daily
+            if item.missing_internal_bars > 0
+        ]
+        net_values = [float(item.net_pnl or 0.0) for item in trades]
+        return StrategyV2ShadowEvaluationResponse(
+            symbol=normalized,
+            config_version=version,
+            status="READY_FOR_REVIEW" if not blockers else "COLLECTING",
+            observed_trading_days=observed_days,
+            remaining_trading_days=max(0, 20 - observed_days),
+            closed_trades=closed_trades,
+            remaining_closed_trades=max(0, 50 - closed_trades),
+            first_bar_at=decisions[0].bar_at if decisions else None,
+            last_bar_at=decisions[-1].bar_at if decisions else None,
+            bars=len({item.bar_at for item in decisions}),
+            readiness_blockers=blockers,
+            data_quality_warnings=warnings,
+            quality=strategy_quality_report(net_values).to_dict() if net_values else None,
+            daily=daily,
+        )
 
     def update_config(
         self,
@@ -116,6 +182,7 @@ class StrategyV2ShadowService:
         symbol: str | None = None,
     ) -> StrategyV2ShadowConfigResponse:
         row = self._get_or_create_config(symbol)
+        self._ensure_version_snapshot(row)
         updates = payload.model_dump(exclude_unset=True, exclude_none=True)
         tunable_updates = set(updates) - {"enabled"}
         open_trade = self._open_trade(row.symbol)
@@ -160,10 +227,12 @@ class StrategyV2ShadowService:
             self.db.add(state)
         self.db.commit()
         self.db.refresh(row)
+        self._ensure_version_snapshot(row)
         return self._config_response(row)
 
     def get_status(self, symbol: str | None = None) -> StrategyV2ShadowStatusResponse:
         config_row = self._get_or_create_config(symbol)
+        self._ensure_version_snapshot(config_row)
         config_version = self._config_version(config_row)
         open_trade = self._open_trade(config_row.symbol)
         active_version = (
@@ -191,9 +260,9 @@ class StrategyV2ShadowService:
             metrics=self._metrics(config_row.symbol, active_version),
             gate_counts=self._gate_counts(config_row.symbol, active_version),
             phase=(
-                state.phase
-                if state is not None
-                else ("DISABLED" if not config_row.enabled else StrategyV2State.COLD.value)
+                "DISABLED"
+                if not config_row.enabled and open_trade is None
+                else state.phase if state is not None else StrategyV2State.COLD.value
             ),
             last_polled_at=state.last_polled_at if state is not None else None,
             last_poll_error=state.last_poll_error if state is not None else "",
@@ -208,15 +277,10 @@ class StrategyV2ShadowService:
         action: str | None = None,
         from_dt: datetime | None = None,
         to_dt: datetime | None = None,
+        config_version: str | None = None,
     ) -> StrategyV2ShadowDecisionPage:
         normalized = self._resolve_symbol(symbol)
-        config = self._get_or_create_config(normalized)
-        open_trade = self._open_trade(normalized)
-        active_version = (
-            open_trade.config_version
-            if open_trade is not None
-            else self._config_version(config)
-        )
+        active_version = self._resolve_config_version(normalized, config_version)
         query = self.db.query(StrategyV2ShadowDecision).filter(
             StrategyV2ShadowDecision.symbol == normalized,
             StrategyV2ShadowDecision.config_version == active_version,
@@ -254,15 +318,10 @@ class StrategyV2ShadowService:
         *,
         symbol: str | None = None,
         limit: int = 200,
+        config_version: str | None = None,
     ) -> list[StrategyV2ShadowTradeResponse]:
         normalized = self._resolve_symbol(symbol)
-        config = self._get_or_create_config(normalized)
-        open_trade = self._open_trade(normalized)
-        active_version = (
-            open_trade.config_version
-            if open_trade is not None
-            else self._config_version(config)
-        )
+        active_version = self._resolve_config_version(normalized, config_version)
         rows = (
             self.db.query(StrategyV2ShadowTrade)
             .filter(
@@ -1006,6 +1065,193 @@ class StrategyV2ShadowService:
                 else 0.0
             ),
         )
+
+    def _ensure_version_snapshot(
+        self,
+        row: StrategyV2ShadowConfig,
+        *,
+        commit: bool = True,
+    ) -> StrategyV2ShadowVersion:
+        version = self._config_version(row)
+        existing = self.db.query(StrategyV2ShadowVersion).filter(
+            StrategyV2ShadowVersion.symbol == row.symbol,
+            StrategyV2ShadowVersion.config_version == version,
+        ).first()
+        if existing is not None:
+            return existing
+        params = self._config_values(row)
+        params.pop("enabled", None)
+        snapshot = StrategyV2ShadowVersion(
+            symbol=row.symbol,
+            config_version=version,
+            config_json=json.dumps(params, sort_keys=True, separators=(",", ":")),
+            activated_at=row.updated_at,
+        )
+        self.db.add(snapshot)
+        if commit:
+            try:
+                self.db.commit()
+            except IntegrityError:
+                self.db.rollback()
+                existing = self.db.query(StrategyV2ShadowVersion).filter(
+                    StrategyV2ShadowVersion.symbol == row.symbol,
+                    StrategyV2ShadowVersion.config_version == version,
+                ).first()
+                if existing is None:
+                    raise
+                return existing
+            self.db.refresh(snapshot)
+        return snapshot
+
+    def _resolve_config_version(
+        self,
+        symbol: str,
+        requested: str | None,
+    ) -> str:
+        config = self._get_or_create_config(symbol)
+        self._ensure_version_snapshot(config)
+        self._backfill_legacy_version_snapshots(symbol)
+        if requested is None:
+            open_trade = self._open_trade(symbol)
+            return open_trade.config_version if open_trade is not None else self._config_version(config)
+        normalized = requested.strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", normalized):
+            raise ValueError("invalid strategy v2 shadow config_version")
+        exists = self.db.query(StrategyV2ShadowVersion.id).filter(
+            StrategyV2ShadowVersion.symbol == symbol,
+            StrategyV2ShadowVersion.config_version == normalized,
+        ).first()
+        if exists is None:
+            raise ValueError("strategy v2 shadow config_version was not found for symbol")
+        return normalized
+
+    def _backfill_legacy_version_snapshots(self, symbol: str) -> None:
+        """Keep pre-P2.1 evidence queryable when its parameters are unknowable."""
+        known = {
+            value
+            for (value,) in self.db.query(StrategyV2ShadowVersion.config_version).filter(
+                StrategyV2ShadowVersion.symbol == symbol
+            ).all()
+        }
+        candidates: dict[str, datetime] = {}
+        for version, created_at in self.db.query(
+            StrategyV2ShadowDecision.config_version,
+            StrategyV2ShadowDecision.created_at,
+        ).filter(StrategyV2ShadowDecision.symbol == symbol).all():
+            if re.fullmatch(r"[0-9a-f]{64}", str(version or "")):
+                current = candidates.get(str(version))
+                if current is None or _as_utc(created_at) < _as_utc(current):
+                    candidates[str(version)] = created_at
+        for version, created_at in self.db.query(
+            StrategyV2ShadowTrade.config_version,
+            StrategyV2ShadowTrade.created_at,
+        ).filter(StrategyV2ShadowTrade.symbol == symbol).all():
+            if re.fullmatch(r"[0-9a-f]{64}", str(version or "")):
+                current = candidates.get(str(version))
+                if current is None or _as_utc(created_at) < _as_utc(current):
+                    candidates[str(version)] = created_at
+        missing = sorted(set(candidates) - known)
+        if not missing:
+            return
+        for version in missing:
+            self.db.add(StrategyV2ShadowVersion(
+                symbol=symbol,
+                config_version=version,
+                config_json=json.dumps({
+                    "parameters_available": False,
+                    "reason": "evidence predates immutable config snapshots",
+                }, sort_keys=True, separators=(",", ":")),
+                activated_at=candidates[version],
+            ))
+        self.db.commit()
+
+    def _version_response(
+        self,
+        row: StrategyV2ShadowVersion,
+        current_version: str,
+    ) -> StrategyV2ShadowVersionResponse:
+        metrics = self._metrics(row.symbol, row.config_version)
+        decisions = self.db.query(StrategyV2ShadowDecision).filter(
+            StrategyV2ShadowDecision.symbol == row.symbol,
+            StrategyV2ShadowDecision.config_version == row.config_version,
+        ).order_by(StrategyV2ShadowDecision.bar_at.asc()).all()
+        trades = self.db.query(StrategyV2ShadowTrade).filter(
+            StrategyV2ShadowTrade.symbol == row.symbol,
+            StrategyV2ShadowTrade.config_version == row.config_version,
+            StrategyV2ShadowTrade.status == "CLOSED",
+        ).all()
+        observed_days = sum(
+            item.coverage_ratio >= 0.8
+            for item in self._daily_evidence(decisions, trades)
+        )
+        try:
+            params = json.loads(row.config_json)
+        except json.JSONDecodeError:
+            params = {}
+        return StrategyV2ShadowVersionResponse(
+            symbol=row.symbol,
+            config_version=row.config_version,
+            activated_at=row.activated_at,
+            current=row.config_version == current_version,
+            params=params if isinstance(params, dict) else {},
+            observed_trading_days=observed_days,
+            bars=metrics.bars,
+            closed_trades=metrics.closed_trades,
+            net_pnl=metrics.net_pnl,
+        )
+
+    @staticmethod
+    def _daily_evidence(
+        decisions: list[StrategyV2ShadowDecision],
+        trades: list[StrategyV2ShadowTrade],
+    ) -> list[StrategyV2ShadowDailyEvidence]:
+        by_day: dict[Any, list[StrategyV2ShadowDecision]] = {}
+        for row in decisions:
+            by_day.setdefault(row.session_date, []).append(row)
+        trades_by_day: dict[Any, list[StrategyV2ShadowTrade]] = {}
+        for trade in trades:
+            if trade.exit_at is not None:
+                trades_by_day.setdefault(_as_utc(trade.exit_at).date(), []).append(trade)
+        result: list[StrategyV2ShadowDailyEvidence] = []
+        for session_date, rows in sorted(by_day.items()):
+            timestamps = sorted({_as_utc(row.bar_at).replace(second=0, microsecond=0) for row in rows})
+            market = rows[0].market.upper()
+            session = get_session(market)
+            midnight = datetime.combine(session_date, datetime.min.time(), tzinfo=timezone.utc)
+            expected = [
+                midnight + timedelta(minutes=offset)
+                for offset in range(24 * 60)
+                if session.is_rth(midnight + timedelta(minutes=offset))
+            ]
+            expected_count = len(expected)
+            internal_expected = [
+                timestamp
+                for timestamp in expected
+                if timestamps[0] <= timestamp <= timestamps[-1]
+            ]
+            actual_internal = sum(
+                timestamps[0] <= timestamp <= timestamps[-1]
+                for timestamp in timestamps
+            )
+            missing = max(0, len(internal_expected) - actual_internal)
+            day_trades = trades_by_day.get(session_date, [])
+            exits = Counter(str(trade.exit_reason or "UNKNOWN") for trade in day_trades)
+            result.append(StrategyV2ShadowDailyEvidence(
+                session_date=session_date,
+                first_bar_at=timestamps[0],
+                last_bar_at=timestamps[-1],
+                bars=len(timestamps),
+                eligible_bars=len({row.bar_at for row in rows if row.gate_passed}),
+                expected_internal_bars=len(internal_expected),
+                missing_internal_bars=missing,
+                coverage_ratio=(len(timestamps) / expected_count) if expected_count else 0.0,
+                trades=len(day_trades),
+                net_pnl=sum(float(trade.net_pnl or 0.0) for trade in day_trades),
+                exit_reasons=dict(sorted(exits.items())),
+                partial_start=bool(expected and timestamps[0] > expected[0]),
+                partial_end=bool(expected and timestamps[-1] < expected[-1]),
+            ))
+        return result
 
     def _get_or_create_config(self, symbol: str | None = None) -> StrategyV2ShadowConfig:
         normalized = self._resolve_symbol(symbol)

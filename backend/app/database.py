@@ -1262,6 +1262,7 @@ def _ensure_strategy_v2_shadow_tables(db_engine: Engine) -> None:
 
     for table_name in (
         "strategy_v2_shadow_config",
+        "strategy_v2_shadow_versions",
         "strategy_v2_shadow_state",
         "strategy_v2_shadow_decisions",
         "strategy_v2_shadow_trades",

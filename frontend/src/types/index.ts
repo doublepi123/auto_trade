@@ -1411,9 +1411,10 @@ export interface StrategyShadowMetrics {
   avg_holding_minutes: number
   avg_mae_pct: number
   avg_mfe_pct: number
-  live_action_count: number
-  action_agreement_rate: number
-  net_pnl_delta_vs_live: number
+  comparison_available: boolean
+  live_action_count: number | null
+  action_agreement_rate: number | null
+  net_pnl_delta_vs_live: number | null
 }
 
 export interface StrategyShadowStatus {
@@ -1461,4 +1462,53 @@ export interface StrategyShadowDecisionPage {
   total: number
   page: number
   page_size: number
+}
+
+export interface StrategyShadowVersion {
+  symbol: string
+  config_version: string
+  activated_at: string
+  current: boolean
+  params: Record<string, unknown>
+  observed_trading_days: number
+  bars: number
+  closed_trades: number
+  net_pnl: number
+}
+
+export interface StrategyShadowDailyEvidence {
+  session_date: string
+  first_bar_at: string
+  last_bar_at: string
+  bars: number
+  eligible_bars: number
+  expected_internal_bars: number
+  missing_internal_bars: number
+  coverage_ratio: number
+  trades: number
+  net_pnl: number
+  exit_reasons: Record<string, number>
+  partial_start: boolean
+  partial_end: boolean
+}
+
+export interface StrategyShadowEvaluation {
+  symbol: string
+  config_version: string
+  mode: StrategyShadowMode
+  order_submission_allowed: false
+  status: 'COLLECTING' | 'READY_FOR_REVIEW'
+  observed_trading_days: number
+  minimum_trading_days: number
+  remaining_trading_days: number
+  closed_trades: number
+  minimum_closed_trades: number
+  remaining_closed_trades: number
+  first_bar_at: string | null
+  last_bar_at: string | null
+  bars: number
+  readiness_blockers: string[]
+  data_quality_warnings: string[]
+  quality: Record<string, unknown> | null
+  daily: StrategyShadowDailyEvidence[]
 }

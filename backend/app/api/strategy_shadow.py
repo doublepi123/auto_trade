@@ -14,10 +14,12 @@ from app.schemas import (
     StrategyV2ShadowConfigResponse,
     StrategyV2ShadowConfigUpdate,
     StrategyV2ShadowDecisionPage,
+    StrategyV2ShadowEvaluationResponse,
     StrategyV2ShadowReplayRequest,
     StrategyV2ShadowReplayResponse,
     StrategyV2ShadowStatusResponse,
     StrategyV2ShadowTradeResponse,
+    StrategyV2ShadowVersionResponse,
 )
 from app.services.strategy_v2_shadow_service import StrategyV2ShadowService
 
@@ -106,6 +108,29 @@ def get_shadow_status(
         raise _bad_request(exc) from exc
 
 
+@router.get("/versions", response_model=list[StrategyV2ShadowVersionResponse])
+def list_shadow_versions(
+    symbol: str | None = Query(default=None, max_length=50),
+    db: Session = Depends(get_db),
+) -> list[StrategyV2ShadowVersionResponse]:
+    try:
+        return StrategyV2ShadowService(db).list_versions(symbol)
+    except ValueError as exc:
+        raise _bad_request(exc) from exc
+
+
+@router.get("/evaluation", response_model=StrategyV2ShadowEvaluationResponse)
+def get_shadow_evaluation(
+    symbol: str | None = Query(default=None, max_length=50),
+    config_version: str | None = Query(default=None, max_length=64),
+    db: Session = Depends(get_db),
+) -> StrategyV2ShadowEvaluationResponse:
+    try:
+        return StrategyV2ShadowService(db).get_evaluation(symbol, config_version)
+    except ValueError as exc:
+        raise _bad_request(exc) from exc
+
+
 @router.get("/decisions", response_model=StrategyV2ShadowDecisionPage)
 def list_shadow_decisions(
     symbol: str | None = Query(default=None, max_length=50),
@@ -114,6 +139,7 @@ def list_shadow_decisions(
     action: str | None = Query(default=None, max_length=24),
     from_: datetime | None = Query(default=None, alias="from"),
     to: datetime | None = Query(default=None),
+    config_version: str | None = Query(default=None, max_length=64),
     db: Session = Depends(get_db),
 ) -> StrategyV2ShadowDecisionPage:
     try:
@@ -124,6 +150,7 @@ def list_shadow_decisions(
             action=action,
             from_dt=from_,
             to_dt=to,
+            config_version=config_version,
         )
     except ValueError as exc:
         raise _bad_request(exc) from exc
@@ -133,10 +160,15 @@ def list_shadow_decisions(
 def list_shadow_trades(
     symbol: str | None = Query(default=None, max_length=50),
     limit: int = Query(default=200, ge=1, le=500),
+    config_version: str | None = Query(default=None, max_length=64),
     db: Session = Depends(get_db),
 ) -> list[StrategyV2ShadowTradeResponse]:
     try:
-        return StrategyV2ShadowService(db).list_trades(symbol=symbol, limit=limit)
+        return StrategyV2ShadowService(db).list_trades(
+            symbol=symbol,
+            limit=limit,
+            config_version=config_version,
+        )
     except ValueError as exc:
         raise _bad_request(exc) from exc
 

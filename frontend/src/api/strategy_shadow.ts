@@ -4,6 +4,8 @@ import type {
   StrategyShadowConfigUpdate,
   StrategyShadowDecisionPage,
   StrategyShadowStatus,
+  StrategyShadowEvaluation,
+  StrategyShadowVersion,
 } from '../types'
 
 export async function getStrategyShadowConfig(symbol?: string): Promise<StrategyShadowConfig> {
@@ -35,6 +37,26 @@ export async function getStrategyShadowStatus(symbol?: string): Promise<Strategy
   return response.data
 }
 
+export async function getStrategyShadowVersions(symbol?: string): Promise<StrategyShadowVersion[]> {
+  const response = await api.get('/api/strategy-shadow/versions', {
+    params: symbol ? { symbol } : {},
+  })
+  return response.data
+}
+
+export async function getStrategyShadowEvaluation(
+  symbol?: string,
+  configVersion?: string,
+): Promise<StrategyShadowEvaluation> {
+  const response = await api.get('/api/strategy-shadow/evaluation', {
+    params: {
+      ...(symbol ? { symbol } : {}),
+      ...(configVersion ? { config_version: configVersion } : {}),
+    },
+  })
+  return response.data
+}
+
 export async function getStrategyShadowDecisions(params: {
   symbol?: string
   action?: string
@@ -42,6 +64,7 @@ export async function getStrategyShadowDecisions(params: {
   to?: string
   page?: number
   page_size?: number
+  config_version?: string
 } = {}): Promise<StrategyShadowDecisionPage> {
   const response = await api.get('/api/strategy-shadow/decisions', { params })
   return response.data

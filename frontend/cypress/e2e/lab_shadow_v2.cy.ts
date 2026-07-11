@@ -8,8 +8,10 @@ describe('Strategy v2 shadow lab', () => {
     cy.wait([
       '@getStrategyShadowConfigs',
       '@getStrategyShadowConfig',
+      '@getStrategyShadowVersions',
       '@getStrategyShadowStatus',
       '@getStrategyShadowDecisions',
+      '@getStrategyShadowEvaluation',
     ])
   }
 
@@ -51,8 +53,13 @@ describe('Strategy v2 shadow lab', () => {
     cy.get('[data-testid="shadow-metrics"]')
       .should('contain', '34.20')
       .and('contain', '75.0%')
-      .and('contain', '动作一致率')
+      .and('contain', '尚未建立版本一致的实盘对照基线')
       .and('contain', '21.5m')
+
+    cy.get('[data-testid="shadow-evaluation"]')
+      .should('contain', '采集中')
+      .and('contain', '交易日 7 / 20')
+      .and('contain', '闭环交易 4 / 50')
 
     cy.get('[data-testid="shadow-gates"]')
       .should('contain', 'WAIT_BREACH')

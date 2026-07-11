@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import logging
 from typing import Any, Callable
@@ -79,13 +80,27 @@ class AuditLogger:
     def extract_ip(request: Request) -> str:
         """Resolve the request source IP for the audit log.
 
-        The deployment runs backend-on-container with no reverse proxy in the
-        current docker-compose (frontend is a separate service that proxies
-        /api and /ws). X-Forwarded-For is therefore attacker-controlled and
-        must NOT be trusted for source attribution. We use the real socket
-        peer. If a reverse proxy is later added, gate XFF on a configured
-        trusted-proxy list and fall back to client.host.
+        Forwarded identity is accepted only when the socket peer belongs to an
+        explicitly configured trusted proxy network. This keeps direct and
+        development requests from spoofing audit attribution.
         """
-        if request.client:
-            return request.client.host
-        return ""
+        peer = request.client.host if request.client else ""
+        if not peer:
+            return ""
+        try:
+            peer_ip = ipaddress.ip_address(peer)
+            trusted = any(
+                peer_ip in ipaddress.ip_network(item.strip(), strict=False)
+                for item in settings.audit_trusted_proxy_cidrs.split(",")
+                if item.strip()
+            )
+        except ValueError:
+            trusted = False
+        if trusted:
+            forwarded = request.headers.get("x-real-ip", "").strip()
+            try:
+                if forwarded:
+                    return str(ipaddress.ip_address(forwarded))
+            except ValueError:
+                pass
+        return peer

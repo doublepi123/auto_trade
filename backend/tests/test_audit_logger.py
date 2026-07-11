@@ -92,6 +92,38 @@ def test_extract_ip_falls_back_to_client_host():
     assert AuditLogger.extract_ip(req) == "198.51.100.7"
 
 
+def test_extract_ip_accepts_x_real_ip_only_from_trusted_proxy(monkeypatch):
+    from starlette.requests import Request
+
+    monkeypatch.setattr(settings, "audit_trusted_proxy_cidrs", "172.16.0.0/12")
+    trusted = Request({
+        "type": "http",
+        "headers": [(b"x-real-ip", b"203.0.113.8")],
+        "client": ("172.18.0.3", 12345),
+    })
+    untrusted = Request({
+        "type": "http",
+        "headers": [(b"x-real-ip", b"203.0.113.8")],
+        "client": ("198.51.100.7", 12345),
+    })
+
+    assert AuditLogger.extract_ip(trusted) == "203.0.113.8"
+    assert AuditLogger.extract_ip(untrusted) == "198.51.100.7"
+
+
+def test_extract_ip_rejects_invalid_forwarded_value(monkeypatch):
+    from starlette.requests import Request
+
+    monkeypatch.setattr(settings, "audit_trusted_proxy_cidrs", "172.16.0.0/12")
+    request = Request({
+        "type": "http",
+        "headers": [(b"x-real-ip", b"not-an-ip")],
+        "client": ("172.18.0.3", 12345),
+    })
+
+    assert AuditLogger.extract_ip(request) == "172.18.0.3"
+
+
 def test_record_swallows_write_errors(monkeypatch, caplog):
     def broken_session():
         raise RuntimeError("db gone")

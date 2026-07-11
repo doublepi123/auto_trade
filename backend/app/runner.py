@@ -224,6 +224,9 @@ class AppRunner:
         self._last_order_sync_at = 0.0
         self._order_sync_interval_seconds = 15.0
         self._last_order_sync_succeeded = False
+        self._fee_enrichment_next_retry_at: dict[str, float] = {}
+        self._fee_enrichment_attempts: dict[str, int] = {}
+        self._fee_enrichment_batch_size = 3
         self._unresolved_live_order_ids: list[str] = []
         self._unrepresentable_live_order_issues: list[str] = []
         self._recent_quote_window_seconds = 300.0
@@ -2508,13 +2511,15 @@ class AppRunner:
 
     def sync_today_orders_from_broker(self, *, force: bool = False) -> int:
         with self._trade_svc.submission_guard():
-            return self._sync_today_orders_from_broker_serialized(force=force)
+            changed, broker_orders = self._sync_today_orders_from_broker_serialized(force=force)
+        self._enrich_broker_order_costs(broker_orders)
+        return changed
 
     def _sync_today_orders_from_broker_serialized(
         self,
         *,
         force: bool = False,
-    ) -> int:
+    ) -> tuple[int, Sequence[object]]:
         with self._state_lock:
             now = time.monotonic()
             if (
@@ -2522,7 +2527,7 @@ class AppRunner:
                 and self._last_order_sync_at > 0
                 and now - self._last_order_sync_at < self._order_sync_interval_seconds
             ):
-                return 0
+                return 0, ()
             self._last_order_sync_at = now
             self._last_order_sync_succeeded = False
 
@@ -2536,7 +2541,7 @@ class AppRunner:
                 self._trade_svc.pending_order_inventory(),
                 ["broker today-order snapshot could not be represented or fetched"],
             )
-            return 0
+            return 0, ()
         broker_representation_issues: dict[int, str] = {}
         broker_live_inventory: dict[str, list[str]] = {}
         for index, broker_order in enumerate(broker_orders):
@@ -2643,8 +2648,7 @@ class AppRunner:
                 self._trade_svc.pending_order_inventory(),
                 ["cannot persist broker order reconciliation"],
             )
-            return 0
-        self._enrich_broker_order_costs(broker_orders)
+            return 0, ()
         self._latch_live_order_reconciliation(
             live_inventory,
             sorted(set(representation_issues)),
@@ -2652,7 +2656,7 @@ class AppRunner:
         with self._state_lock:
             self._last_order_sync_succeeded = not representation_issues
         self._sync_risk_from_order_ledger()
-        return changed
+        return changed, broker_orders
 
     def _enrich_broker_order_costs(self, broker_orders: Sequence[object]) -> None:
         """Best-effort refresh for charges that settle after the fill."""
@@ -2675,7 +2679,13 @@ class AppRunner:
                     OrderRecord.actual_fee.is_(None),
                 ).all()
             }
-        for order_id in sorted(missing_ids):
+        now = time.monotonic()
+        eligible_ids = [
+            order_id
+            for order_id in sorted(missing_ids)
+            if now >= self._fee_enrichment_next_retry_at.get(order_id, 0.0)
+        ][: self._fee_enrichment_batch_size]
+        for order_id in eligible_ids:
             try:
                 detail = status_reader(order_id)
                 metadata = {
@@ -2690,6 +2700,7 @@ class AppRunner:
                     and value != ""
                 }
                 if "actual_fee" not in metadata:
+                    self._schedule_fee_enrichment_retry(order_id, now)
                     continue
                 metadata["fee_source"] = "ACTUAL"
                 self._update_order_status(
@@ -2700,12 +2711,23 @@ class AppRunner:
                     float(getattr(detail, "executed_price", 0) or 0),
                     metadata,
                 )
+                self._fee_enrichment_attempts.pop(order_id, None)
+                self._fee_enrichment_next_retry_at.pop(order_id, None)
             except Exception:
+                self._schedule_fee_enrichment_retry(order_id, now)
                 logger.warning(
                     "broker charges are not yet available for order %s",
                     order_id,
                     exc_info=True,
                 )
+
+    def _schedule_fee_enrichment_retry(self, order_id: str, now: float) -> None:
+        attempts = self._fee_enrichment_attempts.get(order_id, 0) + 1
+        self._fee_enrichment_attempts[order_id] = attempts
+        self._fee_enrichment_next_retry_at[order_id] = now + min(
+            3600.0,
+            60.0 * (2 ** min(attempts - 1, 6)),
+        )
 
     def verify_operational_resume(self) -> tuple[bool, str]:
         """Prove broker/order state is coherent before clearing any pause."""

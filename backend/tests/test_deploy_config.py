@@ -79,6 +79,16 @@ def test_env_example_documents_llm_provider_keys() -> None:
     assert "MINIMAX_API_KEY=" in env_example
 
 
+def test_compose_trusts_only_explicit_docker_proxy_network_for_audit_ip() -> None:
+    for filename in ("docker-compose.yaml", "docker-compose.dockerhub.yaml"):
+        compose = (ROOT / filename).read_text(encoding="utf-8")
+        assert "AUTO_TRADE_AUDIT_TRUSTED_PROXY_CIDRS=" in compose
+        assert "172.16.0.0/12" in compose
+
+    env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
+    assert "AUTO_TRADE_AUDIT_TRUSTED_PROXY_CIDRS=" in env_example
+
+
 def test_deploy_files_expose_p0_hard_safety_controls() -> None:
     compose = (ROOT / "docker-compose.yaml").read_text(encoding="utf-8")
     dockerhub = (ROOT / "docker-compose.dockerhub.yaml").read_text(encoding="utf-8")

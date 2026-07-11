@@ -453,13 +453,15 @@ class DailyPnlService:
 
     def _fill_from_order(self, order: Any) -> _Fill | None:
         quantity = self._executed_quantity(order)
-        price = self._executed_price(order)
-        if quantity <= 0 or price <= 0:
+        if quantity <= 0:
             return None
 
         symbol = str(getattr(order, "symbol", "") or "").upper()
         side = str(getattr(order, "side", "") or "").upper()
         if not symbol or side not in {"BUY", "SELL", "SELL_SHORT", "BUY_TO_COVER"}:
+            return None
+        price = self._executed_price(order)
+        if price <= 0:
             return None
 
         status = str(getattr(order, "status", "") or "").upper()
@@ -586,7 +588,7 @@ class DailyPnlService:
         if executed_quantity > 0:
             return executed_quantity
         status = str(getattr(order, "status", "") or "").upper()
-        if status in {_FILLED_STATUS, _PARTIAL_FILLED_STATUS}:
+        if status == _FILLED_STATUS:
             return DailyPnlService._decimal(getattr(order, "quantity", None))
         return _ZERO
 

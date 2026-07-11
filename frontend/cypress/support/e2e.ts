@@ -1186,9 +1186,10 @@ Cypress.Commands.add('stubApi', () => {
           avg_holding_minutes: 21.5,
           avg_mae_pct: 0.0032,
           avg_mfe_pct: 0.0078,
-          live_action_count: 3,
-          action_agreement_rate: 0.6667,
-          net_pnl_delta_vs_live: 12.6,
+          comparison_available: false,
+          live_action_count: null,
+          action_agreement_rate: null,
+          net_pnl_delta_vs_live: null,
         },
         gate_counts: {
           WAIT_BREACH: 32,
@@ -1201,6 +1202,43 @@ Cypress.Commands.add('stubApi', () => {
       },
     })
   }).as('getStrategyShadowStatus')
+
+  cy.intercept('GET', '/api/strategy-shadow/versions*', {
+    body: [{
+      symbol: 'NVDA.US',
+      config_version: 'shadow-stub-v1',
+      activated_at: '2026-07-01T13:30:00Z',
+      current: true,
+      params: {},
+      observed_trading_days: 7,
+      bars: 120,
+      closed_trades: 4,
+      net_pnl: 34.2,
+    }],
+  }).as('getStrategyShadowVersions')
+
+  cy.intercept('GET', '/api/strategy-shadow/evaluation*', {
+    body: {
+      symbol: 'NVDA.US',
+      config_version: 'shadow-stub-v1',
+      mode: 'SHADOW',
+      order_submission_allowed: false,
+      status: 'COLLECTING',
+      observed_trading_days: 7,
+      minimum_trading_days: 20,
+      remaining_trading_days: 13,
+      closed_trades: 4,
+      minimum_closed_trades: 50,
+      remaining_closed_trades: 46,
+      first_bar_at: '2026-07-01T13:30:00Z',
+      last_bar_at: '2026-07-12T02:04:00Z',
+      bars: 120,
+      readiness_blockers: ['MIN_TRADING_DAYS', 'MIN_CLOSED_TRADES'],
+      data_quality_warnings: [],
+      quality: null,
+      daily: [],
+    },
+  }).as('getStrategyShadowEvaluation')
 
   cy.intercept('GET', '/api/strategy-shadow/decisions*', {
     body: {

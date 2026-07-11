@@ -75,6 +75,33 @@ class TestAppRunner:
             runner._cash_currency(),
         )
 
+    def test_fee_enrichment_runs_after_submission_guard_is_released(self) -> None:
+        runner = AppRunner()
+        guard_active = False
+
+        class Guard:
+            def __enter__(self) -> None:
+                nonlocal guard_active
+                guard_active = True
+
+            def __exit__(self, *_args: object) -> None:
+                nonlocal guard_active
+                guard_active = False
+
+        def sync(*, force: bool = False) -> tuple[int, list[object]]:
+            assert force is True
+            assert guard_active is True
+            return 2, [object()]
+
+        def enrich(_orders: object) -> None:
+            assert guard_active is False
+
+        runner._trade_svc.submission_guard = lambda: Guard()
+        runner._sync_today_orders_from_broker_serialized = sync
+        runner._enrich_broker_order_costs = enrich
+
+        assert runner.sync_today_orders_from_broker(force=True) == 2
+
     def test_final_order_quote_gate_blocks_stale_quote_before_submit(self) -> None:
         class Broker:
             def __init__(self) -> None:
