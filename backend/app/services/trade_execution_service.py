@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import inspect
 import time
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
@@ -84,6 +85,10 @@ class OrderStatus:
     executed_price: Optional[Decimal] = None
     reason: str = ""
     fill_finalized: bool = False
+    actual_fee: Optional[Decimal] = None
+    fee_currency: str = ""
+    broker_submitted_at: datetime | None = None
+    broker_updated_at: datetime | None = None
 
     @staticmethod
     def _positive(value: Optional[Decimal]) -> Decimal:
@@ -157,21 +162,8 @@ _FinalOrderQuoteCheck = Callable[["BrokerGateway", str, str, Decimal], str | Non
 class TradeExecutionService:
     def __init__(
         self,
-        record_order: Callable[
-            [
-                str,
-                str,
-                str,
-                float,
-                float,
-                str,
-                datetime | None,
-                float | None,
-                float | None,
-            ],
-            None,
-        ],
-        update_order_status: Callable[[str, str, datetime | None, float | None, float | None], None],
+        record_order: Callable[..., None],
+        update_order_status: Callable[..., None],
         record_risk_event: Callable[[str], None],
         record_order_skipped: _RecordOrderSkipped | None = None,
         persist_entry: _EntryPersistCallback | None = None,
@@ -190,6 +182,12 @@ class TradeExecutionService:
     ) -> None:
         self._record_order = record_order
         self._update_order_status = update_order_status
+        self._record_order_accepts_metadata = self._accepts_positional_args(
+            record_order, 10
+        )
+        self._update_order_accepts_metadata = self._accepts_positional_args(
+            update_order_status, 6
+        )
         self._record_risk_event = record_risk_event
         self._record_order_skipped = record_order_skipped
         self._persist_entry = persist_entry
@@ -216,6 +214,15 @@ class TradeExecutionService:
         self._pending_status_query_warned_ids: set[str] = set()
         self._fill_finalization_in_flight: set[str] = set()
         self._finalized_order_ids: set[str] = set()
+        self._active_execution_context: dict[str, object] = {}
+
+    @staticmethod
+    def _accepts_positional_args(callback: Callable[..., object], count: int) -> bool:
+        try:
+            inspect.signature(callback).bind(*([None] * count))
+            return True
+        except (TypeError, ValueError):
+            return False
 
     @contextmanager
     def submission_guard(self) -> Iterator[None]:
@@ -641,26 +648,33 @@ class TradeExecutionService:
         restore_engine_snapshot: Callable[[EngineSnapshot], None] | None = None,
         notify_risk_event: _NotifyRiskEvent | None = None,
         reduce_only: bool = False,
+        execution_context: Mapping[str, object] | None = None,
     ) -> OrderStatus | None:
         with self._submission_lock:
-            return self._execute_under_submission_guard(
-                action,
-                symbol,
-                quote,
-                broker,
-                risk,
-                notifier,
-                cash_currency,
-                market=market,
-                trading_session_mode=trading_session_mode,
-                min_profit_amount=min_profit_amount,
-                allow_loss_exit=allow_loss_exit,
-                fee_rate=fee_rate,
-                engine_snapshot=engine_snapshot,
-                restore_engine_snapshot=restore_engine_snapshot,
-                notify_risk_event=notify_risk_event,
-                reduce_only=reduce_only,
-            )
+            self._active_execution_context = dict(execution_context or {})
+            self._active_execution_context.setdefault("market", market)
+            self._active_execution_context.setdefault("fee_rate", float(fee_rate))
+            try:
+                return self._execute_under_submission_guard(
+                    action,
+                    symbol,
+                    quote,
+                    broker,
+                    risk,
+                    notifier,
+                    cash_currency,
+                    market=market,
+                    trading_session_mode=trading_session_mode,
+                    min_profit_amount=min_profit_amount,
+                    allow_loss_exit=allow_loss_exit,
+                    fee_rate=fee_rate,
+                    engine_snapshot=engine_snapshot,
+                    restore_engine_snapshot=restore_engine_snapshot,
+                    notify_risk_event=notify_risk_event,
+                    reduce_only=reduce_only,
+                )
+            finally:
+                self._active_execution_context = {}
 
     def _execute_under_submission_guard(
         self,
@@ -1644,7 +1658,28 @@ class TradeExecutionService:
         notify_risk_event: _NotifyRiskEvent | None = None,
         avg_price: Decimal | None = None,
     ) -> OrderStatus | None:
+        submit_started_at = datetime.now(timezone.utc)
+        submit_started_monotonic = time.perf_counter()
         result = broker.submit_limit_order(symbol, side, qty, price)
+        acknowledged_at = datetime.now(timezone.utc)
+        ack_latency_ms = (time.perf_counter() - submit_started_monotonic) * 1000
+        ledger_metadata = dict(self._active_execution_context)
+        ledger_metadata.update({
+            "submit_started_at": submit_started_at,
+            "acknowledged_at": acknowledged_at,
+            "ack_latency_ms": ack_latency_ms,
+            "estimated_fee": float(
+                abs(qty * price * Decimal(str(ledger_metadata.get("fee_rate", 0))))
+            ),
+            "fee_source": "ESTIMATED",
+        })
+        decision_at = ledger_metadata.get("decision_at")
+        if isinstance(decision_at, datetime):
+            ledger_metadata["submit_latency_ms"] = max(
+                0.0,
+                (submit_started_at - decision_at).total_seconds() * 1000,
+            )
+        self._active_execution_context = ledger_metadata
         status = getattr(result, "status", "SUBMITTED")
         order_status = self._order_status_from_submit_result(result)
         initial_executed_quantity = self._resolved_decimal(
@@ -1681,6 +1716,7 @@ class TradeExecutionService:
                     if initial_executed_price > 0
                     else None
                 ),
+                ledger_metadata=ledger_metadata,
             )
         except OrderPersistenceError:
             return self._recover_from_missing_order_record(
@@ -1694,6 +1730,18 @@ class TradeExecutionService:
                 restore_engine_snapshot=restore_engine_snapshot,
                 avg_price=avg_price,
             )
+        if str(status).upper() == "FILLED" and order_status.actual_fee is None:
+            try:
+                order_status = self._coerce_order_status(
+                    broker.get_order_status(result.broker_order_id),
+                    result.broker_order_id,
+                )
+            except Exception:
+                logger.warning(
+                    "immediate fill %s could not be enriched with broker charges",
+                    result.broker_order_id,
+                    exc_info=True,
+                )
         self._safe_update_order_status_from_result(order_status)
 
         if self._order_status_is_live(order_status):
@@ -2397,9 +2445,10 @@ class TradeExecutionService:
         filled_at: datetime | None = None,
         executed_quantity: float | None = None,
         executed_price: float | None = None,
+        ledger_metadata: Mapping[str, object] | None = None,
     ) -> None:
         try:
-            self._record_order(
+            args = (
                 order_id,
                 symbol,
                 action,
@@ -2410,6 +2459,13 @@ class TradeExecutionService:
                 executed_quantity,
                 executed_price,
             )
+            if self._accepts_positional_args(self._record_order, 10):
+                self._record_order(
+                    *args,
+                    dict(ledger_metadata or self._active_execution_context),
+                )
+            else:
+                self._record_order(*args)
         except Exception as exc:
             logger.exception("failed to record order %s for %s", order_id, symbol)
             raise OrderPersistenceError(f"failed to persist order {order_id}") from exc
@@ -2559,9 +2615,14 @@ class TradeExecutionService:
         filled_at: datetime | None = None,
         executed_quantity: float | None = None,
         executed_price: float | None = None,
+        ledger_metadata: Mapping[str, object] | None = None,
     ) -> bool:
         try:
-            self._update_order_status(order_id, status, filled_at, executed_quantity, executed_price)
+            args = (order_id, status, filled_at, executed_quantity, executed_price)
+            if self._accepts_positional_args(self._update_order_status, 6):
+                self._update_order_status(*args, dict(ledger_metadata or {}))
+            else:
+                self._update_order_status(*args)
         except Exception:
             logger.exception("failed to update order %s to status %s", order_id, status)
             return False
@@ -2580,16 +2641,29 @@ class TradeExecutionService:
             Decimal("0"),
         )
         filled_at = (
-            datetime.now(timezone.utc)
+            getattr(result, "broker_updated_at", None) or datetime.now(timezone.utc)
             if status == "FILLED" or resolved_quantity > 0
             else None
         )
+        metadata: dict[str, object] = {}
+        for name in (
+            "actual_fee",
+            "fee_currency",
+            "broker_submitted_at",
+            "broker_updated_at",
+        ):
+            value = getattr(result, name, None)
+            if value is not None and value != "":
+                metadata[name] = value
+        if "actual_fee" in metadata:
+            metadata["fee_source"] = "ACTUAL"
         return self._safe_update_order_status(
             broker_order_id or "",
             status,
             filled_at,
             float(executed_quantity) if executed_quantity is not None else None,
             float(executed_price) if executed_price is not None else None,
+            metadata,
         )
 
     def _pause_for_order_status_persistence_failure(
@@ -2631,6 +2705,10 @@ class TradeExecutionService:
             status=status,
             executed_quantity=getattr(result, "executed_quantity", getattr(result, "quantity", Decimal("0"))) if status == "FILLED" else Decimal("0"),
             executed_price=getattr(result, "executed_price", getattr(result, "price", Decimal("0"))) if status == "FILLED" else Decimal("0"),
+            actual_fee=getattr(result, "actual_fee", None),
+            fee_currency=str(getattr(result, "fee_currency", "") or ""),
+            broker_submitted_at=getattr(result, "broker_submitted_at", None),
+            broker_updated_at=getattr(result, "broker_updated_at", None),
         )
 
     def _safe_notify_order(
@@ -2686,6 +2764,10 @@ class TradeExecutionService:
             status=status,
             executed_quantity=executed_qty,
             executed_price=executed_price,
+            actual_fee=getattr(result, "actual_fee", None),
+            fee_currency=str(getattr(result, "fee_currency", "") or ""),
+            broker_submitted_at=getattr(result, "broker_submitted_at", None),
+            broker_updated_at=getattr(result, "broker_updated_at", None),
         )
 
     def _record_entry_price(

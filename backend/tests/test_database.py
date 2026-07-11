@@ -780,6 +780,44 @@ def test_init_db_creates_report_query_indexes(tmp_path, monkeypatch) -> None:
     assert "ix_llm_interactions_symbol_created_at" in llm_indexes
 
 
+def test_execution_ledger_migration_freezes_legacy_fill_fee(tmp_path) -> None:
+    db_path = tmp_path / "legacy_orders.db"
+    legacy_engine = create_engine(f"sqlite:///{db_path}")
+    with legacy_engine.begin() as connection:
+        connection.exec_driver_sql(
+            "CREATE TABLE strategy_config (id INTEGER PRIMARY KEY, "
+            "fee_rate_us FLOAT, fee_rate_hk FLOAT)"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO strategy_config VALUES (1, 0.001, 0.004)"
+        )
+        connection.exec_driver_sql(
+            "CREATE TABLE orders (id INTEGER PRIMARY KEY, broker_order_id TEXT, "
+            "symbol TEXT, side TEXT, quantity FLOAT, price FLOAT, "
+            "executed_quantity FLOAT, executed_price FLOAT, status TEXT, "
+            "created_at DATETIME, filled_at DATETIME, raw_response TEXT)"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO orders (id, symbol, side, quantity, price, "
+            "executed_quantity, executed_price, status) VALUES "
+            "(1, 'AAPL.US', 'BUY', 10, 100, 10, 101, 'FILLED')"
+        )
+
+    database._ensure_order_execution_ledger_columns(legacy_engine)
+
+    with legacy_engine.connect() as connection:
+        row = connection.exec_driver_sql(
+            "SELECT estimated_fee, fee_source FROM orders WHERE id = 1"
+        ).one()
+        columns = {
+            value[1]
+            for value in connection.exec_driver_sql("PRAGMA table_info(orders)")
+        }
+    assert row[0] == pytest.approx(1.01)
+    assert row[1] == "ESTIMATED"
+    assert {"decision_bid", "actual_fee", "slippage_bps", "mfe_pct"} <= columns
+
+
 
 def test_sqlite_wal_and_busy_timeout_enabled(tmp_path, monkeypatch) -> None:
     """P0-2: SQLite connection must enable WAL, busy_timeout, and FK enforcement.

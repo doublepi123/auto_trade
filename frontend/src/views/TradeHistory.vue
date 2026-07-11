@@ -136,6 +136,9 @@
           <div class="stat"><span>当前连续</span><strong>{{ streakLabel(tradeStats) }}</strong></div>
           <div class="stat"><span>最长胜/败</span><strong>{{ tradeStats.max_win_streak }} / {{ tradeStats.max_loss_streak }}</strong></div>
           <div class="stat"><span>近30天净盈亏</span><strong :class="pnlClass(tradeStats.total_net_pnl)">{{ formatPnl(tradeStats.total_net_pnl) }}</strong></div>
+          <div class="stat"><span>费用</span><strong>{{ tradeStats.total_fees.toFixed(2) }}</strong></div>
+          <div class="stat"><span>实收费用覆盖</span><strong>{{ tradeStats.actual_fee_coverage_pct.toFixed(0) }}%</strong></div>
+          <div class="stat"><span>平均滑点</span><strong>{{ tradeStats.avg_slippage_bps != null ? `${tradeStats.avg_slippage_bps.toFixed(2)} bps` : '—' }}</strong></div>
         </div>
         <div class="roundtrips-controls">
           <el-input
@@ -180,7 +183,14 @@
                 <span>exit time {{ formatDateTime(row.exit_at) }}</span>
                 <span>gross pnl {{ formatPnl(row.gross_pnl) }}</span>
                 <span>net pnl {{ formatPnl(row.net_pnl) }}</span>
-                <span>费用拖累 {{ row.est_fees.toFixed(2) }}</span>
+                <span>费用 {{ row.est_fees.toFixed(2) }}（{{ feeSourceLabel(row.fee_source) }}）</span>
+                <span v-if="row.slippage_bps != null">滑点 {{ row.slippage_bps.toFixed(2) }} bps</span>
+                <span v-if="row.ack_latency_ms != null">确认延迟 {{ formatLatency(row.ack_latency_ms) }}</span>
+                <span v-if="row.fill_latency_ms != null">成交延迟 {{ formatLatency(row.fill_latency_ms) }}</span>
+                <span v-if="row.mfe_pct != null">MFE {{ row.mfe_pct.toFixed(2) }}%</span>
+                <span v-if="row.mae_pct != null">MAE {{ row.mae_pct.toFixed(2) }}%</span>
+                <span v-if="row.exit_cause">退出 {{ row.exit_cause }}</span>
+                <span v-if="row.exit_reason">{{ row.exit_reason }}</span>
               </div>
             </template>
           </el-table-column>
@@ -201,8 +211,11 @@
               <span :class="pnlClass(row.gross_pnl)">{{ formatPnl(row.gross_pnl) }}</span>
             </template>
           </el-table-column>
-          <el-table-column label="估算费用" width="90">
-            <template #default="{ row }">{{ row.est_fees.toFixed(2) }}</template>
+          <el-table-column label="费用" width="110">
+            <template #default="{ row }">
+              {{ row.est_fees.toFixed(2) }}
+              <el-tag size="small" effect="plain">{{ feeSourceLabel(row.fee_source) }}</el-tag>
+            </template>
           </el-table-column>
           <el-table-column label="净盈亏" width="100">
             <template #default="{ row }">
@@ -741,6 +754,16 @@ function formatPnl(v: number): string {
   return (v >= 0 ? '+' : '') + v.toFixed(2)
 }
 
+function feeSourceLabel(source: ClosedTrade['fee_source']): string {
+  if (source === 'ACTUAL') return '实收'
+  if (source === 'MIXED') return '混合'
+  return '估算'
+}
+
+function formatLatency(ms: number): string {
+  return ms >= 1000 ? `${(ms / 1000).toFixed(2)}s` : `${ms.toFixed(0)}ms`
+}
+
 /** Client-side export of the currently filtered round-trip trades only. */
 function exportRoundTrips() {
   const rows = filteredClosedTrades.value.map((t) => ({
@@ -751,7 +774,15 @@ function exportRoundTrips() {
     quantity: t.quantity,
     gross_pnl: t.gross_pnl.toFixed(2),
     est_fees: t.est_fees.toFixed(2),
+    fee_source: t.fee_source,
     net_pnl: t.net_pnl.toFixed(2),
+    slippage_bps: t.slippage_bps?.toFixed(4) ?? '',
+    ack_latency_ms: t.ack_latency_ms?.toFixed(2) ?? '',
+    fill_latency_ms: t.fill_latency_ms?.toFixed(2) ?? '',
+    mfe_pct: t.mfe_pct?.toFixed(4) ?? '',
+    mae_pct: t.mae_pct?.toFixed(4) ?? '',
+    exit_cause: t.exit_cause,
+    exit_reason: t.exit_reason,
     holding_seconds: t.holding_seconds,
     entry_at: t.entry_at,
     exit_at: t.exit_at,
@@ -766,7 +797,15 @@ function exportRoundTrips() {
     { key: 'quantity', label: 'quantity' },
     { key: 'gross_pnl', label: 'gross_pnl' },
     { key: 'est_fees', label: 'est_fees' },
+    { key: 'fee_source', label: 'fee_source' },
     { key: 'net_pnl', label: 'net_pnl' },
+    { key: 'slippage_bps', label: 'slippage_bps' },
+    { key: 'ack_latency_ms', label: 'ack_latency_ms' },
+    { key: 'fill_latency_ms', label: 'fill_latency_ms' },
+    { key: 'mfe_pct', label: 'mfe_pct' },
+    { key: 'mae_pct', label: 'mae_pct' },
+    { key: 'exit_cause', label: 'exit_cause' },
+    { key: 'exit_reason', label: 'exit_reason' },
     { key: 'holding_seconds', label: 'holding_seconds' },
     { key: 'entry_at', label: 'entry_at' },
     { key: 'exit_at', label: 'exit_at' },

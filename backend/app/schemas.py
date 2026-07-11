@@ -460,6 +460,20 @@ class OrderResponse(BaseModel):
     filled_at: Optional[datetime]
     source: str = "local"
     cancellable: bool = False
+    decision_bid: Optional[float] = None
+    decision_ask: Optional[float] = None
+    quote_age_ms: Optional[float] = None
+    config_version: str = ""
+    ack_latency_ms: Optional[float] = None
+    fill_latency_ms: Optional[float] = None
+    estimated_fee: Optional[float] = None
+    actual_fee: Optional[float] = None
+    fee_currency: str = ""
+    fee_source: str = "UNKNOWN"
+    slippage_amount: Optional[float] = None
+    slippage_bps: Optional[float] = None
+    exit_cause: str = ""
+    exit_reason: str = ""
 
     model_config = {"from_attributes": True}
 
@@ -632,6 +646,13 @@ class BacktestTradeLog(BaseModel):
     state_after: str
     reason: str
     holding_minutes: Optional[float] = None
+    gross_pnl: Optional[float] = None
+    net_pnl: Optional[float] = None
+    total_fees: Optional[float] = None
+    mfe_amount: Optional[float] = None
+    mae_amount: Optional[float] = None
+    mfe_pct: Optional[float] = None
+    mae_pct: Optional[float] = None
 
 
 class BacktestSkippedSignal(BaseModel):
@@ -1654,6 +1675,18 @@ class ClosedTrade(BaseModel):
     est_fees: float
     net_pnl: float
     holding_seconds: float
+    fee_source: str = "ESTIMATED"
+    actual_fees: Optional[float] = None
+    slippage_amount: Optional[float] = None
+    slippage_bps: Optional[float] = None
+    ack_latency_ms: Optional[float] = None
+    fill_latency_ms: Optional[float] = None
+    exit_cause: str = ""
+    exit_reason: str = ""
+    mfe_amount: Optional[float] = None
+    mae_amount: Optional[float] = None
+    mfe_pct: Optional[float] = None
+    mae_pct: Optional[float] = None
 
 
 class ClosedTradePage(BaseModel):
@@ -1685,6 +1718,10 @@ class TradeStats(BaseModel):
     max_win_streak: int
     max_loss_streak: int
     avg_hold_seconds: Optional[float] = None
+    total_fees: float = 0.0
+    actual_fee_coverage_pct: float = 0.0
+    avg_slippage_bps: Optional[float] = None
+    avg_ack_latency_ms: Optional[float] = None
 
 
 class TradeCalendarDay(BaseModel):

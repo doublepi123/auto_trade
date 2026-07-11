@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 from freezegun import freeze_time
+import pytest
 
 from app.api import credentials as credentials_api
 from app.api import llm_advisor as llm_api
@@ -495,7 +496,7 @@ class TestAPI:
             resp = client.get("/api/status")
 
         assert resp.status_code == 200
-        assert resp.json()["daily_pnl"] == 6.0
+        assert resp.json()["daily_pnl"] == pytest.approx(5.797)
         assert resp.json()["consecutive_losses"] == 0
 
     def test_status_history_returns_points_and_trade_markers(self) -> None:

@@ -92,13 +92,13 @@ class TestReportsApi:
 
         assert response.status_code == 200
         payload = response.json()
-        assert payload["metrics"]["total_pnl"] == 10.0
+        assert payload["metrics"]["total_pnl"] == 9.79
         assert payload["metrics"]["max_drawdown"] == 0.0
-        assert payload["daily_points"][0]["cumulative_pnl"] == 10.0
+        assert payload["daily_points"][0]["cumulative_pnl"] == 9.79
         assert len(payload["attribution"]) == 1
         assert payload["attribution"][0]["key"] == "SELL"
         assert payload["attribution"][0]["trade_count"] == 1
-        assert payload["attribution"][0]["pnl"] == 10.0
+        assert payload["attribution"][0]["pnl"] == 9.79
         assert len(payload["details"]) == 1
         assert payload["details"][0]["date"] == "2026-06-01"
         assert len(payload["details"][0]["orders"]) == 1

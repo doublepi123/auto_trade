@@ -190,10 +190,10 @@ def list_closed_trades(
     """Closed entry<->exit round trips with realized PnL (lot-level FIFO).
 
     Read-only drill-down: each row ties a closing fill to the entry lots it
-    consumed (weighted-avg entry price, hold duration, estimated fees). Date
+    consumed (weighted-avg entry price, hold duration, persisted fees). Date
     bounds filter on the *exit* time; a round trip that closed inside the window
-    is included even if its entry pre-dates it. ``net_pnl`` uses the currently
-    configured fee schedule.
+    is included even if its entry pre-dates it. ``net_pnl`` prefers actual
+    broker charges and otherwise uses the fee estimate frozen at submission.
     """
     fee_rate_us, fee_rate_hk = _active_fee_rates(db)
     trips = DailyPnlService(db).pair_round_trips(
@@ -221,6 +221,18 @@ def list_closed_trades(
                 est_fees=round(t.est_fees, 2),
                 net_pnl=round(t.net_pnl, 2),
                 holding_seconds=t.holding_seconds,
+                fee_source=t.fee_source,
+                actual_fees=t.actual_fees,
+                slippage_amount=t.slippage_amount,
+                slippage_bps=t.slippage_bps,
+                ack_latency_ms=t.ack_latency_ms,
+                fill_latency_ms=t.fill_latency_ms,
+                exit_cause=t.exit_cause,
+                exit_reason=t.exit_reason,
+                mfe_amount=t.mfe_amount,
+                mae_amount=t.mae_amount,
+                mfe_pct=t.mfe_pct,
+                mae_pct=t.mae_pct,
             )
             for t in trips
         ],

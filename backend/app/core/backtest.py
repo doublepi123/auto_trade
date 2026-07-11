@@ -46,6 +46,13 @@ class BacktestTrade:
     state_after: str
     reason: str
     holding_minutes: float | None = None
+    gross_pnl: float | None = None
+    net_pnl: float | None = None
+    total_fees: float | None = None
+    mfe_amount: float | None = None
+    mae_amount: float | None = None
+    mfe_pct: float | None = None
+    mae_pct: float | None = None
 
 
 @dataclass(frozen=True)
@@ -115,6 +122,8 @@ class _OpenPosition:
     entry_price: float
     entry_at: datetime
     entry_fee: float
+    highest_price: float
+    lowest_price: float
 
 
 class BacktestEngine:
@@ -153,6 +162,11 @@ class BacktestEngine:
                     paused_reason = ""
 
             if position is not None:
+                position = replace(
+                    position,
+                    highest_price=max(position.highest_price, bar.high),
+                    lowest_price=min(position.lowest_price, bar.low),
+                )
                 exit_result = self._try_exit_position(bar, position)
                 if exit_result is not None:
                     action, price, exit_fee, net_pnl, reason, require_min_profit = exit_result
@@ -177,6 +191,12 @@ class BacktestEngine:
                         held_minutes = (bar.timestamp - position.entry_at).total_seconds() / 60
                         holding_minutes.append(held_minutes)
                         state_after = "flat"
+                        if position.side == "long":
+                            favorable = position.highest_price - position.entry_price
+                            adverse = position.lowest_price - position.entry_price
+                        else:
+                            favorable = position.entry_price - position.lowest_price
+                            adverse = position.entry_price - position.highest_price
                         trades.append(BacktestTrade(
                             timestamp=bar.timestamp,
                             action=action,
@@ -187,6 +207,13 @@ class BacktestEngine:
                             state_after=state_after,
                             reason=reason,
                             holding_minutes=held_minutes,
+                            gross_pnl=gross_pnl,
+                            net_pnl=net_pnl,
+                            total_fees=position.entry_fee + exit_fee,
+                            mfe_amount=favorable * position.quantity,
+                            mae_amount=adverse * position.quantity,
+                            mfe_pct=favorable / position.entry_price * 100,
+                            mae_pct=adverse / position.entry_price * 100,
                         ))
                         position = None
                         closed_position_this_bar = True
@@ -223,6 +250,8 @@ class BacktestEngine:
                             entry_price=price,
                             entry_at=bar.timestamp,
                             entry_fee=entry_fee,
+                            highest_price=price,
+                            lowest_price=price,
                         )
                         trades.append(BacktestTrade(
                             timestamp=bar.timestamp,

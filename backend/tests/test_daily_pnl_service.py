@@ -6,7 +6,7 @@ from pytest import approx
 from pytest import LogCaptureFixture
 
 from app import database
-from app.models import OrderRecord
+from app.models import OrderRecord, RuntimeStateSnapshot
 from app.services.daily_pnl_service import DailyPnlService
 
 
@@ -20,7 +20,111 @@ class TestDailyPnlService:
     def _cleanup(self) -> None:
         db = self._get_db()
         db.query(OrderRecord).delete()
+        db.query(RuntimeStateSnapshot).delete()
         db.commit()
+        db.close()
+
+    def test_prefers_persisted_actual_fees_and_computes_excursions(self) -> None:
+        self._cleanup()
+        trade_day = date(2026, 7, 11)
+        entry_at = self._dt(trade_day, 10)
+        exit_at = self._dt(trade_day, 11)
+        db = self._get_db()
+        db.add_all([
+            OrderRecord(
+                broker_order_id="actual-buy",
+                symbol="AAPL.US",
+                side="BUY",
+                quantity=10,
+                price=100,
+                executed_quantity=10,
+                executed_price=100,
+                actual_fee=1.0,
+                estimated_fee=0.5,
+                fee_source="ACTUAL",
+                status="FILLED",
+                created_at=entry_at,
+                filled_at=entry_at,
+            ),
+            OrderRecord(
+                broker_order_id="actual-sell",
+                symbol="AAPL.US",
+                side="SELL",
+                quantity=10,
+                price=110,
+                executed_quantity=10,
+                executed_price=110,
+                actual_fee=2.0,
+                estimated_fee=0.55,
+                fee_source="ACTUAL",
+                slippage_bps=1.5,
+                exit_cause="TIME_STOP",
+                status="FILLED",
+                created_at=exit_at,
+                filled_at=exit_at,
+            ),
+            RuntimeStateSnapshot(
+                symbol="AAPL.US",
+                last_price=115,
+                created_at=self._dt(trade_day, 10, 30),
+            ),
+            RuntimeStateSnapshot(
+                symbol="AAPL.US",
+                last_price=97,
+                created_at=self._dt(trade_day, 10, 45),
+            ),
+        ])
+        db.commit()
+
+        trip = DailyPnlService(db).pair_round_trips()[0]
+
+        assert trip.fee_source == "ACTUAL"
+        assert trip.est_fees == approx(3.0)
+        assert trip.net_pnl == approx(97.0)
+        assert trip.mfe_pct == approx(15.0)
+        assert trip.mae_pct == approx(-3.0)
+        assert trip.exit_cause == "TIME_STOP"
+        db.close()
+
+    def test_persisted_estimate_does_not_change_with_active_fee_rate(self) -> None:
+        self._cleanup()
+        trade_day = date(2026, 7, 11)
+        db = self._get_db()
+        db.add_all([
+            OrderRecord(
+                broker_order_id="frozen-buy",
+                symbol="AAPL.US",
+                side="BUY",
+                quantity=10,
+                price=100,
+                executed_quantity=10,
+                executed_price=100,
+                estimated_fee=1.0,
+                fee_source="ESTIMATED",
+                status="FILLED",
+                filled_at=self._dt(trade_day, 10),
+            ),
+            OrderRecord(
+                broker_order_id="frozen-sell",
+                symbol="AAPL.US",
+                side="SELL",
+                quantity=10,
+                price=110,
+                executed_quantity=10,
+                executed_price=110,
+                estimated_fee=2.0,
+                fee_source="ESTIMATED",
+                status="FILLED",
+                filled_at=self._dt(trade_day, 11),
+            ),
+        ])
+        db.commit()
+
+        low_rate = DailyPnlService(db).pair_round_trips(fee_rate_us=0.0001)[0]
+        high_rate = DailyPnlService(db).pair_round_trips(fee_rate_us=0.1)[0]
+
+        assert low_rate.net_pnl == high_rate.net_pnl == approx(97.0)
+        assert low_rate.fee_source == "ESTIMATED"
         db.close()
 
     def _dt(self, day: date, hour: int, minute: int = 0) -> datetime:
@@ -62,9 +166,11 @@ class TestDailyPnlService:
         result = DailyPnlService(db).calculate(trade_day=trade_day)
         db.close()
 
-        assert result.realized_pnl == approx(40.0)
+        assert result.realized_pnl == approx(40.0 - (4 * 100 + 4 * 110) * 0.0005)
         assert result.consecutive_losses == 0
-        assert [(trade.broker_order_id, trade.pnl) for trade in result.trades] == [("sell-today", approx(40.0))]
+        assert [(trade.broker_order_id, trade.pnl) for trade in result.trades] == [
+            ("sell-today", approx(40.0 - (4 * 100 + 4 * 110) * 0.0005))
+        ]
 
     def test_calculates_long_held_position_realized_pnl(self) -> None:
         self._cleanup()
@@ -102,9 +208,9 @@ class TestDailyPnlService:
         result = DailyPnlService(db).calculate(trade_day=sell_day)
         db.close()
 
-        assert result.realized_pnl == approx(50.0)
+        assert result.realized_pnl == approx(50.0 - (10 * 100 + 10 * 105) * 0.0005)
         assert [trade.broker_order_id for trade in result.trades] == ["aapl-sell-held"]
-        assert result.trades[0].pnl == approx(50.0)
+        assert result.trades[0].pnl == approx(50.0 - (10 * 100 + 10 * 105) * 0.0005)
 
     def test_calculates_average_cost_for_same_day_round_trip(self) -> None:
         self._cleanup()
@@ -154,7 +260,10 @@ class TestDailyPnlService:
         db.close()
 
         avg_cost = ((105 * 220.15) + (16 * 219.51)) / 121
-        assert result.realized_pnl == approx((217.530909 - avg_cost) * 121)
+        assert result.realized_pnl == approx(
+            (217.530909 - avg_cost) * 121
+            - ((105 * 220.15) + (16 * 219.51) + (121 * 217.530909)) * 0.0005
+        )
         assert result.consecutive_losses == 1
 
     def test_counts_executed_quantity_on_partially_filled_terminal_order(self) -> None:
@@ -192,7 +301,7 @@ class TestDailyPnlService:
         result = DailyPnlService(db).calculate(trade_day=trade_day)
         db.close()
 
-        assert result.realized_pnl == approx(3.0)
+        assert result.realized_pnl == approx(3.0 - (3 * 100 + 3 * 101) * 0.0005)
         assert result.consecutive_losses == 0
 
     def test_market_aware_trade_day_keeps_after_hours_fill_on_session_day(self) -> None:
@@ -238,7 +347,7 @@ class TestDailyPnlService:
         )
         db.close()
 
-        assert result.realized_pnl == approx(100.0)
+        assert result.realized_pnl == approx(100.0 - (10 * 100 + 10 * 110) * 0.0005)
         assert any(t.broker_order_id == "sell-after-hours" for t in result.trades)
 
     def test_market_aware_trade_day_keeps_late_utc_us_fill_on_previous_session(self) -> None:
@@ -283,7 +392,7 @@ class TestDailyPnlService:
         )
         db.close()
 
-        assert result.realized_pnl == approx(20.0)
+        assert result.realized_pnl == approx(20.0 - (5 * 100 + 5 * 104) * 0.0005)
 
     def test_calculates_short_cover_pnl(self) -> None:
         self._cleanup()
@@ -320,7 +429,7 @@ class TestDailyPnlService:
         result = DailyPnlService(db).calculate(trade_day=trade_day)
         db.close()
 
-        assert result.realized_pnl == approx(50.0)
+        assert result.realized_pnl == approx(50.0 - (10 * 100 + 10 * 95) * 0.0005)
         assert result.consecutive_losses == 0
 
     def test_executed_price_fallback_logs_warning(self, caplog: LogCaptureFixture) -> None:

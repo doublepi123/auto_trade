@@ -44,6 +44,33 @@ class TestQuote:
 
 
 class TestBrokerGateway:
+    def test_get_order_status_includes_broker_charges_and_timestamps(self) -> None:
+        class TradeContext:
+            def order_detail(self, _order_id: str):
+                return {
+                    "order_id": "charged-order",
+                    "status": "Filled",
+                    "executed_quantity": "5",
+                    "executed_price": "101.25",
+                    "submitted_at": "2026-07-11T01:02:03Z",
+                    "updated_at": "2026-07-11T01:02:05Z",
+                    "charge_detail": {
+                        "currency": "USD",
+                        "total_amount": "1.23",
+                    },
+                }
+
+        gw = BrokerGateway()
+        gw._quote_ctx = object()
+        gw._trade_ctx = TradeContext()
+
+        result = gw.get_order_status("charged-order")
+
+        assert result.actual_fee == Decimal("1.23")
+        assert result.fee_currency == "USD"
+        assert result.broker_submitted_at == datetime(2026, 7, 11, 1, 2, 3, tzinfo=timezone.utc)
+        assert result.broker_updated_at == datetime(2026, 7, 11, 1, 2, 5, tzinfo=timezone.utc)
+
     def test_init_no_credentials(self) -> None:
         gw = BrokerGateway()
         assert gw._quote_ctx is None

@@ -127,7 +127,7 @@ def _float_attr(item: Any, name: str) -> float | None:
 def _broker_order_response(item: Any, local_order: OrderRecord | None = None) -> OrderResponse:
     status = str(getattr(item, "status", "SUBMITTED"))
     created_at = getattr(item, "created_at", None) or (local_order.created_at if local_order else datetime.now(timezone.utc))
-    return OrderResponse(
+    response = OrderResponse(
         id=local_order.id if local_order else 0,
         broker_order_id=str(getattr(item, "broker_order_id", "")),
         symbol=str(getattr(item, "symbol", local_order.symbol if local_order else "")),
@@ -142,6 +142,25 @@ def _broker_order_response(item: Any, local_order: OrderRecord | None = None) ->
         source="broker",
         cancellable=status in _LIVE_ORDER_STATUSES,
     )
+    if local_order is None:
+        return response
+    local_fields = OrderResponse.model_validate(local_order)
+    return response.model_copy(update={
+        "decision_bid": local_fields.decision_bid,
+        "decision_ask": local_fields.decision_ask,
+        "quote_age_ms": local_fields.quote_age_ms,
+        "config_version": local_fields.config_version,
+        "ack_latency_ms": local_fields.ack_latency_ms,
+        "fill_latency_ms": local_fields.fill_latency_ms,
+        "estimated_fee": local_fields.estimated_fee,
+        "actual_fee": local_fields.actual_fee,
+        "fee_currency": local_fields.fee_currency,
+        "fee_source": local_fields.fee_source,
+        "slippage_amount": local_fields.slippage_amount,
+        "slippage_bps": local_fields.slippage_bps,
+        "exit_cause": local_fields.exit_cause,
+        "exit_reason": local_fields.exit_reason,
+    })
 
 
 def _paginate_orders(items: list[OrderResponse], *, page: int, page_size: int, scope: str) -> OrderPageResponse:
@@ -229,7 +248,23 @@ def _update_local_order_from_status(db: Session, order_id: str, status_result: A
     ):
         order.executed_price = executed_price
     if effective_status == "FILLED" and order.filled_at is None:
-        order.filled_at = datetime.now(timezone.utc)
+        order.filled_at = (
+            getattr(status_result, "broker_updated_at", None)
+            or datetime.now(timezone.utc)
+        )
+    actual_fee = _float_attr(status_result, "actual_fee")
+    if actual_fee is not None and math.isfinite(actual_fee) and actual_fee >= 0:
+        order.actual_fee = actual_fee
+        order.fee_source = "ACTUAL"
+    fee_currency = str(getattr(status_result, "fee_currency", "") or "").upper()
+    if fee_currency:
+        order.fee_currency = fee_currency
+    broker_submitted_at = getattr(status_result, "broker_submitted_at", None)
+    broker_updated_at = getattr(status_result, "broker_updated_at", None)
+    if broker_submitted_at is not None:
+        order.broker_submitted_at = broker_submitted_at
+    if broker_updated_at is not None:
+        order.broker_updated_at = broker_updated_at
     changed = (
         old_status != order.status
         or old_executed_quantity != order.executed_quantity

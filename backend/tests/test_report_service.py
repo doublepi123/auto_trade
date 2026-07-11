@@ -209,29 +209,29 @@ class TestReportService:
             assert report.details[0].date == "2026-01-01"
             assert len(report.details[0].orders) == 1
             assert report.details[0].orders[0].side == "SELL"
-            assert report.details[0].orders[0].pnl == 100.0
+            assert report.details[0].orders[0].pnl == 98.95
             assert len(report.attribution) == 1
             assert report.attribution[0].key == "SELL"
             assert report.attribution[0].trade_count == 3
-            assert report.attribution[0].pnl == 56.0
+            assert report.attribution[0].pnl == 53.57
             assert report.attribution[0].win_rate == 0.6667
             assert report.attribution[0].share == 1.0
-            assert report.metrics.total_pnl == 56.0
+            assert report.metrics.total_pnl == 53.57
             assert report.metrics.total_trades == 3
             assert report.metrics.win_count == 2
             assert report.metrics.loss_count == 1
             assert report.metrics.win_rate == 0.6667
-            assert report.metrics.avg_pnl_per_trade == 18.67
-            assert report.metrics.max_profit == 100.0
-            assert report.metrics.max_loss == -50.0
-            assert report.metrics.profit_loss_ratio == 1.06
-            assert report.metrics.max_drawdown == 50.0
+            assert report.metrics.avg_pnl_per_trade == 17.86
+            assert report.metrics.max_profit == 98.95
+            assert report.metrics.max_loss == -51.17
+            assert report.metrics.profit_loss_ratio == 1.02
+            assert report.metrics.max_drawdown == 51.17
             assert report.metrics.llm_suggestions_count == 2
             assert report.metrics.llm_applied_count == 1
             assert report.metrics.llm_apply_rate == 0.5
             assert report.metrics.llm_profitable_count == 0
             assert report.metrics.llm_accuracy_rate == 0.0
-            assert [p.pnl for p in report.daily_points] == [100.0, -50.0, 6.0]
+            assert [p.pnl for p in report.daily_points] == [98.95, -51.17, 5.8]
             assert [p.trade_count for p in report.daily_points] == [1, 1, 1]
             assert [
                 {
@@ -242,9 +242,9 @@ class TestReportService:
                 }
                 for p in report.daily_points
             ] == [
-                {"date": "2026-01-01", "pnl": 100.0, "cumulative_pnl": 100.0, "drawdown": 0.0},
-                {"date": "2026-01-02", "pnl": -50.0, "cumulative_pnl": 50.0, "drawdown": 50.0},
-                {"date": "2026-01-03", "pnl": 6.0, "cumulative_pnl": 56.0, "drawdown": 44.0},
+                {"date": "2026-01-01", "pnl": 98.95, "cumulative_pnl": 98.95, "drawdown": 0.0},
+                {"date": "2026-01-02", "pnl": -51.17, "cumulative_pnl": 47.78, "drawdown": 51.17},
+                {"date": "2026-01-03", "pnl": 5.8, "cumulative_pnl": 53.57, "drawdown": 45.38},
             ]
         finally:
             db.close()
@@ -284,9 +284,9 @@ class TestReportService:
             service = ReportService(db=db)
             report = service.get_daily_report("AAPL.US", "2026-05-22")
 
-            assert report.metrics.total_pnl == 100.0
+            assert report.metrics.total_pnl == 98.95
             assert [p.date for p in report.daily_points] == ["2026-05-22"]
-            assert [p.pnl for p in report.daily_points] == [100.0]
+            assert [p.pnl for p in report.daily_points] == [98.95]
         finally:
             db.close()
 
@@ -326,9 +326,9 @@ class TestReportService:
             report = service.get_range_report("AAPL.US", "2026-01-01", "2026-01-03")
 
             assert report.metrics.total_trades == 1
-            assert report.metrics.total_pnl == 30.0
+            assert report.metrics.total_pnl == 28.98
             assert [p.date for p in report.daily_points] == ["2026-01-03"]
-            assert [p.cumulative_pnl for p in report.daily_points] == [30.0]
+            assert [p.cumulative_pnl for p in report.daily_points] == [28.98]
         finally:
             db.close()
 
@@ -369,7 +369,7 @@ class TestReportService:
             report = service.get_range_report("AAPL.US", "2026-01-01", "2026-01-03")
 
             assert report.metrics.total_trades == 4
-            assert report.metrics.total_pnl == 356.0
+            assert report.metrics.total_pnl == 352.42
             assert [p.date for p in report.daily_points] == ["2026-01-01", "2026-01-02", "2026-01-03"]
             assert all(p.date != "2026-01-04" for p in report.daily_points)
         finally:
@@ -384,11 +384,11 @@ class TestReportService:
 
             json_bytes = service.export_report("AAPL.US", "2026-01-01", "2026-01-03", "json")
             json_report = json.loads(json_bytes.getvalue().decode("utf-8"))
-            assert json_report["metrics"]["max_drawdown"] == 50.0
+            assert json_report["metrics"]["max_drawdown"] == 51.17
             assert json_report["daily_points"] == [
-                {"date": "2026-01-01", "pnl": 100.0, "cumulative_pnl": 100.0, "drawdown": 0.0, "trade_count": 1, "win_count": 1},
-                {"date": "2026-01-02", "pnl": -50.0, "cumulative_pnl": 50.0, "drawdown": 50.0, "trade_count": 1, "win_count": 0},
-                {"date": "2026-01-03", "pnl": 6.0, "cumulative_pnl": 56.0, "drawdown": 44.0, "trade_count": 1, "win_count": 1},
+                {"date": "2026-01-01", "pnl": 98.95, "cumulative_pnl": 98.95, "drawdown": 0.0, "trade_count": 1, "win_count": 1},
+                {"date": "2026-01-02", "pnl": -51.17, "cumulative_pnl": 47.78, "drawdown": 51.17, "trade_count": 1, "win_count": 0},
+                {"date": "2026-01-03", "pnl": 5.8, "cumulative_pnl": 53.57, "drawdown": 45.38, "trade_count": 1, "win_count": 1},
             ]
 
             csv_bytes = service.export_report("AAPL.US", "2026-01-01", "2026-01-03", "csv")

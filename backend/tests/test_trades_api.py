@@ -217,8 +217,8 @@ class TestTradesStatsAPI(_Base):
         assert data["win_rate"] == pytest.approx(50.0)
         assert data["max_win_streak"] == 1
         assert data["max_loss_streak"] == 1
-        # profit_factor = gross_win(100) / gross_loss(50) = 2
-        assert data["profit_factor"] == pytest.approx(2.0)
+        # Profit factor uses take-home PnL after the frozen round-trip costs.
+        assert data["profit_factor"] == pytest.approx(1.9411)
 
     def test_days_window_excludes_old_trades(self) -> None:
         db = self._db()

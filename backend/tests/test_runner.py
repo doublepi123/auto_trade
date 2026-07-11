@@ -162,6 +162,56 @@ class TestAppRunner:
             db.delete(order)
             db.commit()
 
+    def test_order_ledger_persists_decision_context_and_slippage(self) -> None:
+        from app.database import SessionLocal
+        from app.models import OrderRecord, TradeEvent
+
+        order_id = "execution-ledger-context"
+        now = datetime.now(timezone.utc)
+        with SessionLocal() as db:
+            db.query(OrderRecord).filter(
+                OrderRecord.broker_order_id == order_id
+            ).delete()
+            db.commit()
+
+        runner = AppRunner()
+        runner._record_order(
+            order_id,
+            "AAPL.US",
+            "BUY",
+            5.0,
+            100.2,
+            "FILLED",
+            now,
+            5.0,
+            100.2,
+            {
+                "decision_at": now,
+                "decision_bid": 99.9,
+                "decision_ask": 100.0,
+                "config_version": "abc123",
+                "estimated_fee": 0.25,
+                "fee_source": "ESTIMATED",
+                "submit_started_at": now,
+                "ack_latency_ms": 12.5,
+            },
+        )
+
+        with SessionLocal() as db:
+            order = db.query(OrderRecord).filter(
+                OrderRecord.broker_order_id == order_id
+            ).one()
+            assert order.config_version == "abc123"
+            assert order.estimated_fee == 0.25
+            assert order.ack_latency_ms == 12.5
+            assert order.slippage_amount == pytest.approx(1.0)
+            assert order.slippage_bps == pytest.approx(20.0)
+            db.query(TradeEvent).filter(
+                TradeEvent.broker_order_id == order_id
+            ).delete()
+            db.delete(order)
+            db.commit()
+
     def test_sync_symbol_runtimes_loads_watchlist_without_replacing_primary_engine(self, monkeypatch) -> None:
         runner = AppRunner()
         runner.engine.params = StrategyParams(symbol="NVDA.US", market="US", buy_low=100.0, sell_high=200.0)

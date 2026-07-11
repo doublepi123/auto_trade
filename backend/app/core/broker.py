@@ -114,6 +114,10 @@ class OrderStatusResult:
     status: str
     executed_quantity: Decimal = Decimal("0")
     executed_price: Decimal = Decimal("0")
+    actual_fee: Decimal | None = None
+    fee_currency: str = ""
+    broker_submitted_at: datetime | None = None
+    broker_updated_at: datetime | None = None
 
 
 @dataclass
@@ -347,6 +351,24 @@ def _require_matching_order_id(item: Any, expected_order_id: str) -> str:
             f"expected {expected_order_id}, got {order_id}"
         )
     return order_id
+
+
+def _order_charge(item: Any) -> tuple[Decimal | None, str]:
+    """Return broker-reported total charges, preserving unavailable vs zero."""
+    detail = _get_value(item, "charge_detail", None)
+    if detail is None:
+        return None, ""
+    raw_total = _get_value(detail, "total_amount", None)
+    currency = str(_get_value(detail, "currency", "") or "").upper()
+    if raw_total is None:
+        return None, currency
+    try:
+        total = Decimal(str(raw_total))
+    except (ValueError, TypeError, AttributeError, _DecimalInvalidOp) as exc:
+        raise ValueError("broker returned invalid total order charge") from exc
+    if not total.is_finite() or total < 0:
+        raise ValueError("broker returned invalid total order charge")
+    return total, currency
 
 
 def _parse_datetime(value: Any) -> datetime | None:
@@ -715,6 +737,7 @@ class BrokerGateway:
             with self._lock:
                 self._init_clients()
                 detail = self._trade_ctx.order_detail(order_id)
+                actual_fee, fee_currency = _order_charge(detail)
                 return OrderStatusResult(
                     broker_order_id=_require_matching_order_id(detail, order_id),
                     status=_normalize_order_status(_get_value(detail, "status", "SUBMITTED")),
@@ -727,6 +750,14 @@ class BrokerGateway:
                         detail,
                         "executed_price",
                         "filled_price",
+                    ),
+                    actual_fee=actual_fee,
+                    fee_currency=fee_currency,
+                    broker_submitted_at=_parse_datetime(
+                        _get_value(detail, "submitted_at", None)
+                    ),
+                    broker_updated_at=_parse_datetime(
+                        _get_value(detail, "updated_at", None)
                     ),
                 )
         return self._call_with_retry(

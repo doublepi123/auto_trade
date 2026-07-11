@@ -47,6 +47,7 @@ def init_db() -> None:
     Base.metadata.create_all(bind=engine)
     _ensure_order_execution_columns(engine)
     _ensure_order_raw_response_column(engine)
+    _ensure_order_execution_ledger_columns(engine)
     _ensure_strategy_config_llm_columns(engine)
     _ensure_strategy_config_trade_safety_columns(engine)
     _ensure_strategy_config_session_columns(engine)
@@ -118,6 +119,88 @@ def _ensure_order_raw_response_column(db_engine: Engine) -> None:
     with db_engine.begin() as connection:
         if "raw_response" not in columns:
             connection.exec_driver_sql("ALTER TABLE orders ADD COLUMN raw_response TEXT")
+
+
+def _ensure_order_execution_ledger_columns(db_engine: Engine) -> None:
+    """Add the immutable execution-context and cost fields used by P1."""
+    inspector = inspect(db_engine)
+    if "orders" not in inspector.get_table_names():
+        return
+
+    columns = {column["name"] for column in inspector.get_columns("orders")}
+    missing_columns = {
+        "decision_at": "DATETIME",
+        "decision_bid": "FLOAT",
+        "decision_ask": "FLOAT",
+        "decision_spread": "FLOAT",
+        "decision_spread_bps": "FLOAT",
+        "quote_age_ms": "FLOAT",
+        "config_version": "VARCHAR(64) DEFAULT '' NOT NULL",
+        "config_snapshot": "TEXT DEFAULT '{}' NOT NULL",
+        "submit_started_at": "DATETIME",
+        "acknowledged_at": "DATETIME",
+        "broker_submitted_at": "DATETIME",
+        "broker_updated_at": "DATETIME",
+        "submit_latency_ms": "FLOAT",
+        "ack_latency_ms": "FLOAT",
+        "fill_latency_ms": "FLOAT",
+        "estimated_fee": "FLOAT",
+        "actual_fee": "FLOAT",
+        "fee_currency": "VARCHAR(10) DEFAULT '' NOT NULL",
+        "fee_source": "VARCHAR(20) DEFAULT 'UNKNOWN' NOT NULL",
+        "slippage_amount": "FLOAT",
+        "slippage_bps": "FLOAT",
+        "exit_cause": "VARCHAR(50) DEFAULT '' NOT NULL",
+        "exit_reason": "TEXT DEFAULT '' NOT NULL",
+        "gross_pnl": "FLOAT",
+        "net_pnl": "FLOAT",
+        "mfe_amount": "FLOAT",
+        "mae_amount": "FLOAT",
+        "mfe_pct": "FLOAT",
+        "mae_pct": "FLOAT",
+    }
+    with db_engine.begin() as connection:
+        for name, column_type in missing_columns.items():
+            if name not in columns:
+                connection.exec_driver_sql(
+                    f"ALTER TABLE orders ADD COLUMN {name} {column_type}"
+                )
+
+        # Freeze a best-effort cost for legacy fills. Future reads must not
+        # rewrite history merely because the active strategy fee rate changed.
+        strategy_columns = (
+            {column["name"] for column in inspector.get_columns("strategy_config")}
+            if "strategy_config" in inspector.get_table_names()
+            else set()
+        )
+        fee_us = (
+            connection.execute(
+                text("SELECT fee_rate_us FROM strategy_config ORDER BY id DESC LIMIT 1")
+            ).scalar()
+            if "fee_rate_us" in strategy_columns
+            else None
+        )
+        fee_hk = (
+            connection.execute(
+                text("SELECT fee_rate_hk FROM strategy_config ORDER BY id DESC LIMIT 1")
+            ).scalar()
+            if "fee_rate_hk" in strategy_columns
+            else None
+        )
+        us_rate = float(fee_us) if fee_us is not None else 0.0005
+        hk_rate = float(fee_hk) if fee_hk is not None else 0.003
+        connection.execute(
+            text(
+                "UPDATE orders SET estimated_fee = "
+                "ABS(COALESCE(executed_price, price) * "
+                "COALESCE(executed_quantity, quantity) * "
+                "CASE WHEN UPPER(symbol) LIKE '%.HK' THEN :hk ELSE :us END), "
+                "fee_source = 'ESTIMATED' "
+                "WHERE estimated_fee IS NULL AND actual_fee IS NULL "
+                "AND UPPER(status) IN ('FILLED', 'PARTIAL_FILLED')"
+            ),
+            {"us": us_rate, "hk": hk_rate},
+        )
 
 
 def _ensure_strategy_config_llm_columns(db_engine: Engine) -> None:

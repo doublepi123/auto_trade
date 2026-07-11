@@ -186,6 +186,20 @@ export interface OrderRecord {
   filled_at: string | null
   source: string
   cancellable: boolean
+  decision_bid: number | null
+  decision_ask: number | null
+  quote_age_ms: number | null
+  config_version: string
+  ack_latency_ms: number | null
+  fill_latency_ms: number | null
+  estimated_fee: number | null
+  actual_fee: number | null
+  fee_currency: string
+  fee_source: 'ACTUAL' | 'ESTIMATED' | 'UNKNOWN'
+  slippage_amount: number | null
+  slippage_bps: number | null
+  exit_cause: string
+  exit_reason: string
 }
 
 export interface TradeNote {
@@ -432,6 +446,13 @@ export interface BacktestTradeLog {
   state_after: string
   reason: string
   holding_minutes: number | null
+  gross_pnl: number | null
+  net_pnl: number | null
+  total_fees: number | null
+  mfe_amount: number | null
+  mae_amount: number | null
+  mfe_pct: number | null
+  mae_pct: number | null
 }
 
 export interface BacktestSkippedSignal {
@@ -626,6 +647,18 @@ export interface ClosedTrade {
   est_fees: number
   net_pnl: number
   holding_seconds: number
+  fee_source: 'ACTUAL' | 'MIXED' | 'ESTIMATED'
+  actual_fees: number | null
+  slippage_amount: number | null
+  slippage_bps: number | null
+  ack_latency_ms: number | null
+  fill_latency_ms: number | null
+  exit_cause: string
+  exit_reason: string
+  mfe_amount: number | null
+  mae_amount: number | null
+  mfe_pct: number | null
+  mae_pct: number | null
 }
 
 export interface ClosedTradePage {
@@ -653,6 +686,10 @@ export interface TradeStats {
   max_win_streak: number
   max_loss_streak: number
   avg_hold_seconds: number | null
+  total_fees: number
+  actual_fee_coverage_pct: number
+  avg_slippage_bps: number | null
+  avg_ack_latency_ms: number | null
 }
 
 export interface TradeCalendarDay {

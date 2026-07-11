@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import datetime, time, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
+import pytest
 
 from app.core.broker import BrokerOrder
 from app.core.engine import StrategyParams
@@ -384,7 +385,7 @@ class TestTradeEventSync:
 
         assert runner.sync_today_orders_from_broker(force=True) == 2
 
-        assert runner.risk.daily_pnl == 6.0
+        assert runner.risk.daily_pnl == pytest.approx(5.797)
         assert runner.risk.consecutive_losses == 0
 
     def test_sync_today_orders_keeps_less_optimistic_live_pnl(self) -> None:

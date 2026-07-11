@@ -37,6 +37,29 @@ def bar(minute: int, open_: float, high: float, low: float, close: float) -> Bac
 
 
 class TestBacktestEngine:
+    def test_closed_trade_uses_net_pnl_and_reports_excursions(self) -> None:
+        engine = BacktestEngine(BacktestEngineParams(
+            symbol="AAPL.US",
+            buy_low=100,
+            sell_high=110,
+            quantity=10,
+            fee_rate=0.001,
+        ))
+
+        result = engine.run([
+            bar(0, 101, 102, 99, 100),
+            bar(1, 100, 108, 95, 105),
+            bar(2, 105, 111, 104, 110),
+        ], include_fee_sensitivity=False)
+        closed = result.trades[-1]
+
+        assert closed.gross_pnl == 100
+        assert closed.total_fees == 2.1
+        assert closed.net_pnl == 97.9
+        assert closed.pnl == closed.net_pnl
+        assert closed.mfe_pct == 11
+        assert closed.mae_pct == -5
+
     def test_flat_long_flat_path(self) -> None:
         engine = BacktestEngine(BacktestEngineParams(
             symbol="AAPL.US",
@@ -543,4 +566,3 @@ class TestBacktestExport:
         assert "trades" in body
         assert "equity_curve" not in body
         assert "fee_sensitivity" not in body
-

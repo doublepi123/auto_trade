@@ -10,8 +10,9 @@ import re
 import threading
 import time
 from collections import deque
+from collections.abc import Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, replace as dataclass_replace
+from dataclasses import asdict, dataclass, replace as dataclass_replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Deque, Generator, Optional, cast
@@ -265,6 +266,27 @@ class AppRunner:
         def _persist_async() -> None:
             try:
                 with self._db_session() as db:
+                    pnl_service = DailyPnlService(db)
+                    pnl_service.refresh_execution_outcomes(symbol=fill_symbol or None)
+                    ledger_result = pnl_service.calculate(
+                        trade_day=self._market_trade_day(),
+                        to_trade_day=self._market_trade_day_for,
+                        fee_rate_us=self.engine.params.fee_rate_us,
+                        fee_rate_hk=self.engine.params.fee_rate_hk,
+                    )
+                    with self._state_lock:
+                        net_pnl, net_losses = DailyPnlService.reconcile_risk_state(
+                            self.risk.daily_pnl,
+                            self.risk.consecutive_losses,
+                            self.risk.daily_pnl_date,
+                            ledger_result,
+                        )
+                        if ledger_result.trades:
+                            self.risk.replace_daily_pnl(
+                                net_pnl,
+                                net_losses,
+                                ledger_result.trade_day,
+                            )
                     self._state_svc.persist(db, self.engine, self.risk)
                     if fill_symbol:
                         runtime = self._symbol_runtimes.get(fill_symbol)
@@ -1433,6 +1455,11 @@ class AppRunner:
             return
 
         try:
+            ledger_context = self._execution_ledger_context(
+                decision,
+                quote,
+                result.description,
+            )
             execution_quote = quote
             if decision.reduce_only:
                 executable_price = (
@@ -1466,6 +1493,7 @@ class AppRunner:
                 restore_engine_snapshot=restore_engine_snapshot,
                 notify_risk_event=self.notifier.notify_risk_event,
                 reduce_only=decision.reduce_only,
+                execution_context=ledger_context,
             )
             if order_status is None:
                 self._set_last_action_message(f"{result.action} skipped: no order submitted")
@@ -1523,7 +1551,88 @@ class AppRunner:
                 logger.exception("failed to send order execution exception notification")
             self._broadcast_status()
             logger.exception("order execution failed; trading paused")
-            return
+
+    def _execution_ledger_context(
+        self,
+        decision: _QuoteTriggerDecision,
+        quote: Quote,
+        reason: str,
+    ) -> dict[str, object]:
+        now = datetime.now(timezone.utc)
+        bid = float(quote.bid)
+        ask = float(quote.ask)
+        midpoint = (bid + ask) / 2 if bid > 0 and ask > 0 else 0.0
+        spread = ask - bid if midpoint > 0 else 0.0
+        params = (
+            decision.trigger_engine.params
+            if decision.trigger_engine is not None
+            else self.engine.params
+        )
+        snapshot = {
+            "strategy": asdict(params),
+            "trading_session_mode": self._get_trading_session_mode(),
+            "reduce_only": decision.reduce_only,
+            "allow_short_entries": settings.allow_short_entries,
+            "risk": {
+                "max_daily_loss": self.risk.config.max_daily_loss,
+                "max_consecutive_losses": self.risk.config.max_consecutive_losses,
+            },
+            "hard_limits": {
+                "max_position_quantity": settings.hard_max_position_quantity,
+                "max_position_notional": settings.hard_max_position_notional,
+                "max_risk_per_trade": settings.hard_max_risk_per_trade,
+                "stop_loss_pct": settings.hard_stop_loss_pct,
+            },
+        }
+        snapshot_json = json.dumps(
+            snapshot,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        is_exit = bool(
+            decision.result is not None
+            and decision.result.action in _POSITION_REDUCING_ACTIONS
+        )
+        return {
+            "decision_at": now,
+            "decision_bid": bid if bid > 0 else None,
+            "decision_ask": ask if ask > 0 else None,
+            "decision_spread": spread if midpoint > 0 else None,
+            "decision_spread_bps": spread / midpoint * 10_000 if midpoint > 0 else None,
+            "quote_age_ms": self._quote_age_ms(quote.timestamp, now),
+            "config_version": hashlib.sha256(snapshot_json.encode("utf-8")).hexdigest(),
+            "config_snapshot": snapshot_json,
+            "exit_cause": (
+                decision.reduction_cause or "TARGET" if is_exit else ""
+            ),
+            "exit_reason": reason if is_exit else "",
+        }
+
+    @staticmethod
+    def _quote_age_ms(value: object, now: datetime | None = None) -> float | None:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        try:
+            if raw.replace(".", "", 1).isdigit():
+                numeric = float(raw)
+                if numeric > 10_000_000_000:
+                    numeric /= 1000
+                source_time = datetime.fromtimestamp(numeric, tz=timezone.utc)
+            else:
+                source_time = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                source_time = (
+                    source_time.replace(tzinfo=timezone.utc)
+                    if source_time.tzinfo is None
+                    else source_time.astimezone(timezone.utc)
+                )
+        except (ValueError, OverflowError, OSError):
+            return None
+        return max(
+            0.0,
+            ((now or datetime.now(timezone.utc)) - source_time).total_seconds() * 1000,
+        )
 
     def _on_quote(self, quote: Quote, *, is_push: bool = True) -> None:
         processing_started = False
@@ -1870,6 +1979,21 @@ class AppRunner:
             return {"executed": False, "status": "NO_QUOTE", "order_id": None, "action": action}
 
         try:
+            llm_decision = _QuoteTriggerDecision(
+                result=TriggerResult(
+                    triggered=True,
+                    action=action,
+                    description="LLM trade action",
+                ),
+                trigger_symbol=target_symbol,
+                trigger_engine=target_engine,
+                trigger_market=target_market,
+                allow_loss_exit=allow_loss_exit,
+                reduce_only=action in _POSITION_REDUCING_ACTIONS,
+                reduction_cause=(
+                    "LLM_STOP_LOSS" if allow_loss_exit else "LLM"
+                ),
+            )
             order_status = self._trade_svc.execute(
                 action=action,
                 symbol=target_symbol,
@@ -1886,6 +2010,11 @@ class AppRunner:
                 engine_snapshot=engine_snapshot,
                 restore_engine_snapshot=lambda snapshot: target_engine.restore(snapshot),
                 notify_risk_event=self.notifier.notify_risk_event,
+                execution_context=self._execution_ledger_context(
+                    llm_decision,
+                    quote,
+                    "LLM trade action",
+                ),
             )
         except Exception:
             target_engine.restore(engine_snapshot)
@@ -2515,6 +2644,7 @@ class AppRunner:
                 ["cannot persist broker order reconciliation"],
             )
             return 0
+        self._enrich_broker_order_costs(broker_orders)
         self._latch_live_order_reconciliation(
             live_inventory,
             sorted(set(representation_issues)),
@@ -2523,6 +2653,59 @@ class AppRunner:
             self._last_order_sync_succeeded = not representation_issues
         self._sync_risk_from_order_ledger()
         return changed
+
+    def _enrich_broker_order_costs(self, broker_orders: Sequence[object]) -> None:
+        """Best-effort refresh for charges that settle after the fill."""
+        status_reader = getattr(self.broker, "get_order_status", None)
+        if not callable(status_reader):
+            return
+        filled_ids = [
+            str(getattr(order, "broker_order_id", "") or "")
+            for order in broker_orders
+            if str(getattr(order, "status", "") or "").upper() == "FILLED"
+            and str(getattr(order, "broker_order_id", "") or "")
+        ]
+        if not filled_ids:
+            return
+        with self._db_session() as db:
+            missing_ids = {
+                str(order.broker_order_id)
+                for order in db.query(OrderRecord).filter(
+                    OrderRecord.broker_order_id.in_(filled_ids),
+                    OrderRecord.actual_fee.is_(None),
+                ).all()
+            }
+        for order_id in sorted(missing_ids):
+            try:
+                detail = status_reader(order_id)
+                metadata = {
+                    name: value
+                    for name in (
+                        "actual_fee",
+                        "fee_currency",
+                        "broker_submitted_at",
+                        "broker_updated_at",
+                    )
+                    if (value := getattr(detail, name, None)) is not None
+                    and value != ""
+                }
+                if "actual_fee" not in metadata:
+                    continue
+                metadata["fee_source"] = "ACTUAL"
+                self._update_order_status(
+                    order_id,
+                    str(getattr(detail, "status", "FILLED") or "FILLED"),
+                    getattr(detail, "broker_updated_at", None),
+                    float(getattr(detail, "executed_quantity", 0) or 0),
+                    float(getattr(detail, "executed_price", 0) or 0),
+                    metadata,
+                )
+            except Exception:
+                logger.warning(
+                    "broker charges are not yet available for order %s",
+                    order_id,
+                    exc_info=True,
+                )
 
     def verify_operational_resume(self) -> tuple[bool, str]:
         """Prove broker/order state is coherent before clearing any pause."""
@@ -2734,6 +2917,8 @@ class AppRunner:
                 result = DailyPnlService(db).calculate(
                     trade_day=self._market_trade_day(),
                     to_trade_day=self._market_trade_day_for,
+                    fee_rate_us=self.engine.params.fee_rate_us,
+                    fee_rate_hk=self.engine.params.fee_rate_hk,
                 )
         except Exception:
             logger.exception("failed to sync realized daily pnl from order ledger")
@@ -3805,6 +3990,7 @@ class AppRunner:
         filled_at: datetime | None = None,
         executed_quantity: float | None = None,
         executed_price: float | None = None,
+        ledger_metadata: dict[str, object] | None = None,
     ) -> None:
         normalized_status = str(status or "SUBMITTED").upper()
         effective_filled_at = filled_at
@@ -3819,6 +4005,12 @@ class AppRunner:
             "price": price,
             "source": "runner",
         }
+        metadata = ledger_metadata or {}
+        submission_payload.update({
+            key: value.isoformat() if isinstance(value, datetime) else value
+            for key, value in metadata.items()
+            if key not in {"config_snapshot"}
+        })
         if self._broker_identity_fingerprint:
             submission_payload["broker_identity_fingerprint"] = (
                 self._broker_identity_fingerprint
@@ -3833,6 +4025,7 @@ class AppRunner:
                         .first()
                     )
                 if existing is not None:
+                    self._apply_order_ledger_metadata(existing, metadata)
                     existing.symbol = symbol or existing.symbol
                     existing.side = side or existing.side
                     existing.quantity = qty or existing.quantity
@@ -3855,6 +4048,7 @@ class AppRunner:
                             existing.executed_price = float(executed_price)
                     if effective_filled_at is not None and existing.filled_at is None:
                         existing.filled_at = effective_filled_at
+                    self._update_execution_outcome_fields(existing)
                     submitted_event_exists = (
                         db.query(TradeEvent.id)
                         .filter(
@@ -3890,6 +4084,8 @@ class AppRunner:
                     status=normalized_status,
                     filled_at=effective_filled_at,
                 )
+                self._apply_order_ledger_metadata(order, metadata)
+                self._update_execution_outcome_fields(order)
                 db.add(order)
                 record_trade_event(
                     db,
@@ -3931,6 +4127,7 @@ class AppRunner:
         filled_at: datetime | None = None,
         executed_quantity: float | None = None,
         executed_price: float | None = None,
+        ledger_metadata: dict[str, object] | None = None,
     ) -> None:
         with self._order_persistence_lock:
             with self._db_session() as db:
@@ -3956,6 +4153,7 @@ class AppRunner:
                 old_executed_quantity = order.executed_quantity
                 old_executed_price = order.executed_price
                 old_filled_at = order.filled_at
+                self._apply_order_ledger_metadata(order, ledger_metadata or {})
                 order.status = effective_status
                 normalized_executed_quantity = executed_quantity
                 if (
@@ -4003,6 +4201,7 @@ class AppRunner:
                     >= float(old_executed_quantity or 0)
                 ):
                     order.executed_price = normalized_executed_price
+                self._update_execution_outcome_fields(order)
                 changed = (
                     old_status != effective_status
                     or old_executed_quantity != order.executed_quantity
@@ -4032,6 +4231,60 @@ class AppRunner:
                     )
                 db.add(order)
                 db.commit()
+
+    @staticmethod
+    def _apply_order_ledger_metadata(
+        order: OrderRecord,
+        metadata: dict[str, object],
+    ) -> None:
+        fields = {
+            "decision_at",
+            "decision_bid",
+            "decision_ask",
+            "decision_spread",
+            "decision_spread_bps",
+            "quote_age_ms",
+            "config_version",
+            "config_snapshot",
+            "submit_started_at",
+            "acknowledged_at",
+            "broker_submitted_at",
+            "broker_updated_at",
+            "submit_latency_ms",
+            "ack_latency_ms",
+            "estimated_fee",
+            "actual_fee",
+            "fee_currency",
+            "fee_source",
+            "exit_cause",
+            "exit_reason",
+        }
+        for name in fields:
+            value = metadata.get(name)
+            if value is not None:
+                setattr(order, name, value)
+
+    @staticmethod
+    def _update_execution_outcome_fields(order: OrderRecord) -> None:
+        if order.filled_at is not None and order.submit_started_at is not None:
+            order.fill_latency_ms = max(
+                0.0,
+                (order.filled_at - order.submit_started_at).total_seconds() * 1000,
+            )
+        fill_price = float(order.executed_price or 0)
+        fill_quantity = float(order.executed_quantity or 0)
+        if fill_price <= 0 or fill_quantity <= 0:
+            return
+        if str(order.side).upper() in {"BUY", "BUY_TO_COVER"}:
+            reference = float(order.decision_ask or 0)
+            price_cost = fill_price - reference
+        else:
+            reference = float(order.decision_bid or 0)
+            price_cost = reference - fill_price
+        if reference <= 0:
+            return
+        order.slippage_amount = price_cost * fill_quantity
+        order.slippage_bps = price_cost / reference * 10_000
 
     def _record_risk_event(self, reason: str) -> None:
         with self._db_session() as db:
