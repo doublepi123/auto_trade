@@ -867,11 +867,41 @@ class AppRunner:
 
     def diagnostics(self) -> dict[str, Any]:
         now = time.monotonic()
+        tracked_entries = self._trade_svc.snapshot_tracked_entries()
+        max_quantity = float(self._trade_svc.max_position_quantity or 0)
+        max_notional = float(self._trade_svc.max_position_notional or 0)
+        max_risk = float(self._trade_svc.max_risk_per_trade or 0)
+        stop_loss_pct = float(self._trade_svc.stop_loss_pct or 0)
 
         def age_since(value: float) -> float | None:
             if value <= 0:
                 return None
             return max(0.0, now - value)
+
+        def exposure(symbol: str, last_price: float) -> dict[str, object]:
+            quantity, cost = tracked_entries.get(
+                symbol,
+                (Decimal("0"), Decimal("0")),
+            )
+            quantity_value = float(quantity)
+            avg_price = float(cost / quantity) if quantity > 0 else 0.0
+            reference_price = last_price if last_price > 0 else avg_price
+            notional = quantity_value * reference_price
+            risk_at_stop = float(cost) * stop_loss_pct / 100 if cost > 0 else 0.0
+            breaches: list[str] = []
+            if max_quantity > 0 and quantity_value > max_quantity:
+                breaches.append("MAX_POSITION_QUANTITY")
+            if max_notional > 0 and notional > max_notional:
+                breaches.append("MAX_POSITION_NOTIONAL")
+            if max_risk > 0 and risk_at_stop > max_risk:
+                breaches.append("MAX_RISK_PER_TRADE")
+            return {
+                "position_quantity": quantity_value,
+                "position_avg_price": avg_price,
+                "position_notional": notional,
+                "position_risk_at_stop": risk_at_stop,
+                "position_limit_breaches": breaches,
+            }
 
         with self._state_lock:
             thread_alive = self._thread is not None and self._thread.is_alive()
@@ -884,22 +914,24 @@ class AppRunner:
                 self._unrepresentable_live_order_issues
             )
             primary_symbol = self.engine.params.symbol
-            symbol_runtimes = [
-                {
+            symbol_runtimes = []
+            for symbol, runtime in sorted(self._symbol_runtimes.items()):
+                last_price = float(runtime.engine.last_price)
+                symbol_runtimes.append({
                     "symbol": runtime.symbol,
                     "market": runtime.market,
                     "is_primary": symbol == primary_symbol,
                     "trading_enabled": symbol == primary_symbol,
                     "engine_state": runtime.engine.state.value,
-                    "last_price": float(runtime.engine.last_price),
+                    "last_price": last_price,
                     "last_trigger_price": float(runtime.engine.last_trigger_price),
                     "recent_quote_count": len(runtime.recent_quotes),
                     "has_pending_order": self._trade_svc.pending_order_for(symbol) is not None,
                     "quote_quality": self._quote_quality_for_runtime(runtime),
-                }
-                for symbol, runtime in sorted(self._symbol_runtimes.items())
-            ]
+                    **exposure(symbol, last_price),
+                })
             if primary_symbol and primary_symbol not in self._symbol_runtimes:
+                last_price = float(self.engine.last_price)
                 symbol_runtimes.insert(
                     0,
                     {
@@ -908,11 +940,12 @@ class AppRunner:
                         "is_primary": True,
                         "trading_enabled": True,
                         "engine_state": self.engine.state.value,
-                        "last_price": float(self.engine.last_price),
+                        "last_price": last_price,
                         "last_trigger_price": float(self.engine.last_trigger_price),
                         "recent_quote_count": len(self._recent_quotes),
                         "has_pending_order": self._trade_svc.pending_order_for(primary_symbol) is not None,
                         "quote_quality": self._quote_quality_for_primary(),
+                        **exposure(primary_symbol, last_price),
                     },
                 )
             return {

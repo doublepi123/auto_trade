@@ -4,6 +4,27 @@
 
 ---
 
+## 近期已完成迭代 (2026-07-14) — P2.2 实时行情完整性与暴露诊断
+
+> 本轮由 `192.168.31.143` 近期真实运行证据驱动，不调整 P0/P2 参数。重点修复成交价、可执行 BBO、订单对账和影子 K 线四条数据契约，避免把上游适配错误误判为策略没有信号。
+
+| 证据 / 交付 | 结论与状态 |
+|------|------|
+| P0 近 30 日 3 笔闭环：净收益 `-16,256.69`、profit factor `0.159`、expectancy `-5,418.90` | ❗ 当前实盘表现不符合超短线目标；单笔 `-19,330.39` 覆盖两笔盈利，平均持仓约 25.8 天 |
+| 当前 NVDA 持仓 `1088 @ 206.329`，而硬上限为 100 股 / 5,000 USD / 250 USD 风险 | ❗ 遗留暴露超限；新增只读持仓数量、名义金额、止损风险和三类超限诊断，不自动处置仓位 |
+| Quote 推送持续但 P0 价格停在 7 月 10 日，P2 K 线已到 7 月 13 日 | ✅ 修复 Longbridge 适配契约：`PushQuote` 只提供最新成交，独立订阅/拉取 Depth 并兼容 Python SDK `bids` / `asks`，合并后才通过执行质量门禁 |
+| `get_today_orders` 遇到 Longbridge `500000 internal error` 后进入操作性暂停 | ✅ 将券商内部错误纳入只读调用的分档退避重试；重试耗尽仍 fail closed，既有操作性暂停仍需显式对账恢复 |
+| P2 开盘三次因负成交量 K 线失败，随后恢复并采集 240 根完整内部 bar | ✅ 券商边界丢弃违反 OHLCV 不变量的单条 K 线并记录数量；策略域和 replay 输入继续严格拒绝脏数据 |
+| P2 首个部分交易日 `eligible_bars=0`、`ADX_REGIME_BLOCKED=240` | ✅ 保持参数版本不变；当日 NVDA 单边下跌，趋势 gate 阻止均值回归抄底符合预期，待完整样本后再评估 |
+
+**参考实现与契约：** [Longbridge Quote push](https://open.longbridge.com/docs/quote/push/quote) 明确推送体不含 BBO，[Longbridge Depth](https://open.longbridge.com/docs/quote/pull/depth) 提供独立盘口；[NautilusTrader live reconciliation](https://nautilustrader.io/docs/latest/how_to/configure_live_trading/) 使用重试、连续对账和 position checks 保持 venue truth；[LEAN warm-up](https://www.quantconnect.com/docs/v2/writing-algorithms/historical-data/warm-up-periods) 与 [Freqtrade recursive analysis](https://docs.freqtrade.io/en/stable/recursive-analysis/) 都要求先确认指标就绪和窗口稳定性，再解释或调参。
+
+**下一阶段门槛：** 继续收集至少 20 个覆盖率 >= 80% 的完整交易日和 50 笔 P2 闭环；前 5 个完整日只监控 BBO 新鲜度、分钟覆盖和坏 bar 数。若 5 日后仍无 eligible bar，再用零写入 replay 对 `max_adx=20/25/30` 做同样本对照，只有在趋势日误入率、净费用后收益和最大回撤同时可接受时才创建新配置版本。
+
+**验证：** `pytest tests/` **4162 passed, 1 skipped**，覆盖率 **87.50%**；`basedpyright` 0/0/0；前端 `vue-tsc` 与生产构建通过；远端真实 Longbridge LV1 Depth 返回 NVDA `bid=204.060 / ask=204.080`。
+
+---
+
 ## 近期已完成迭代 (2026-07-12) — P2.1 证据成熟度与版本审计
 
 > P2 仍处于纯影子观察阶段。本轮先补齐“评估的是哪个版本、样本是否成熟、数据是否连续”的证据链，不改变 P0 实盘策略，也不增加任何订单能力。设计口径见 [2026-07-12-strategy-v2-evidence-design.md](superpowers/specs/2026-07-12-strategy-v2-evidence-design.md)。
@@ -50,7 +71,7 @@
 | **API 覆盖** | ✅ 完备。策略配置、凭证管理、订单查询、状态获取、状态历史、事件时间线、运行时控制（启停/暂停/Kill Switch）。 |
 | **WebSocket 推送** | ✅ 就绪。实时状态同步。 |
 | **本地部署** | ✅ 就绪。Docker Compose 一键启动。 |
-| **测试** | ✅ 就绪。Backend pytest **4156 passed, 1 skipped**、pytest-cov 覆盖率 **87.38%**；Frontend Cypress E2E 已纳入主线发布门禁。 |
+| **测试** | ✅ 就绪。Backend pytest **4162 passed, 1 skipped**、pytest-cov 覆盖率 **87.50%**；Frontend Cypress E2E 已纳入主线发布门禁。 |
 | **凭证安全** | ✅ 就绪。主密钥 + AES-GCM 加密存储，前端不回显明文。 |
 | **数据库** | ✅ 就位。SQLite，含运行状态、状态快照、订单、`tracked_entries`、LLM 交互、交易事件、审计日志和凭证配置。 |
 | **LLM 行情数据** | ✅ 真实 K 线（日 K + 1 分钟 K），ATR/布林带有效。 |

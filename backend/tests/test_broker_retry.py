@@ -53,6 +53,21 @@ def test_call_with_retry_eventually_succeeds(gw, monkeypatch):
     assert args.args[0] == "BROKER_RETRY"
 
 
+def test_call_with_retry_treats_longport_internal_error_as_transient(gw, monkeypatch):
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+    calls = 0
+
+    def flaky():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise _TransientErr("code=500000 internal error")
+        return "ok"
+
+    assert gw._call_with_retry(flaky, op="get_today_orders", max_retries=3, base_ms=10) == "ok"
+    assert calls == 2
+
+
 def test_call_with_retry_exhausts_then_raises(gw, monkeypatch):
     monkeypatch.setattr("time.sleep", lambda s: None)
 

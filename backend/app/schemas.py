@@ -723,6 +723,11 @@ class DiagnosticSymbolRuntime(BaseModel):
     recent_quote_count: int
     has_pending_order: bool
     quote_quality: QuoteQuality | None = None
+    position_quantity: float = 0.0
+    position_avg_price: float = 0.0
+    position_notional: float = 0.0
+    position_risk_at_stop: float = 0.0
+    position_limit_breaches: list[str] = Field(default_factory=list)
 
 
 class DiagnosticLiveSafety(BaseModel):

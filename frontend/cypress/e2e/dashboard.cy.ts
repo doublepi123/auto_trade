@@ -238,6 +238,11 @@ describe('Dashboard', () => {
             last_trigger_price: 220.6,
             recent_quote_count: 5,
             has_pending_order: false,
+            position_quantity: 1088,
+            position_avg_price: 206.329,
+            position_notional: 240665.6,
+            position_risk_at_stop: 2244.86,
+            position_limit_breaches: ['MAX_POSITION_QUANTITY', 'MAX_POSITION_NOTIONAL', 'MAX_RISK_PER_TRADE'],
           },
           {
             symbol: 'AAPL.US',
@@ -248,6 +253,11 @@ describe('Dashboard', () => {
             last_trigger_price: 0,
             recent_quote_count: 7,
             has_pending_order: true,
+            position_quantity: 0,
+            position_avg_price: 0,
+            position_notional: 0,
+            position_risk_at_stop: 0,
+            position_limit_breaches: [],
           },
         ],
       },
@@ -259,6 +269,7 @@ describe('Dashboard', () => {
     cy.contains('运行诊断').should('be.visible')
     cy.contains('行情流').should('be.visible')
     cy.contains('AAPL.US').should('be.visible')
+    cy.contains('超限 3 项').should('be.visible')
     cy.contains('线程存活').should('be.visible')
     cy.contains('最近推送 3.0s').should('be.visible')
     cy.get('[data-testid="dashboard-live-safety"]')

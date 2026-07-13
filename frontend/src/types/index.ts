@@ -139,6 +139,11 @@ export interface DiagnosticSymbolRuntime {
   recent_quote_count: number
   has_pending_order: boolean
   quote_quality?: QuoteQuality | null
+  position_quantity: number
+  position_avg_price: number
+  position_notional: number
+  position_risk_at_stop: number
+  position_limit_breaches: string[]
 }
 
 export interface DiagnosticLiveSafety {

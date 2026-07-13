@@ -501,6 +501,22 @@
           <el-table-column label="最新价" min-width="90">
             <template #default="{ row }">${{ formatNumber(row.last_price) }}</template>
           </el-table-column>
+          <el-table-column label="持仓暴露" min-width="140">
+            <template #default="{ row }">
+              <span v-if="row.position_quantity > 0">
+                {{ formatNumber(row.position_quantity) }} 股 / ${{ formatNumber(row.position_notional) }}
+              </span>
+              <span v-else>-</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="限额" min-width="130">
+            <template #default="{ row }">
+              <el-tag v-if="row.position_limit_breaches.length" type="danger" size="small">
+                超限 {{ row.position_limit_breaches.length }} 项
+              </el-tag>
+              <el-tag v-else type="success" size="small">正常</el-tag>
+            </template>
+          </el-table-column>
           <el-table-column label="最近触发" min-width="90">
             <template #default="{ row }">{{ row.last_trigger_price > 0 ? `$${formatNumber(row.last_trigger_price)}` : '-' }}</template>
           </el-table-column>
@@ -1158,6 +1174,11 @@ function exportDiagnostics() {
     last_trigger_price: r.last_trigger_price,
     recent_quote_count: r.recent_quote_count,
     has_pending_order: r.has_pending_order ? 'yes' : 'no',
+    position_quantity: r.position_quantity,
+    position_avg_price: r.position_avg_price,
+    position_notional: r.position_notional,
+    position_risk_at_stop: r.position_risk_at_stop,
+    position_limit_breaches: r.position_limit_breaches.join('|'),
   }))
   downloadCsv('diagnostics_snapshot.csv', [
     { key: 'symbol', label: 'symbol' },
@@ -1168,6 +1189,11 @@ function exportDiagnostics() {
     { key: 'last_trigger_price', label: 'last_trigger_price' },
     { key: 'recent_quote_count', label: 'recent_quote_count' },
     { key: 'has_pending_order', label: 'has_pending_order' },
+    { key: 'position_quantity', label: 'position_quantity' },
+    { key: 'position_avg_price', label: 'position_avg_price' },
+    { key: 'position_notional', label: 'position_notional' },
+    { key: 'position_risk_at_stop', label: 'position_risk_at_stop' },
+    { key: 'position_limit_breaches', label: 'position_limit_breaches' },
   ], rows)
   ElMessage.success(`已导出 ${rows.length} 个运行时诊断`)
 }

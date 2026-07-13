@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 from dataclasses import dataclass
@@ -41,8 +42,12 @@ _RETRYABLE_MESSAGE_MARKERS = (
     "timeout",
     "connection",
     "unavailable",
+    "internal error",
+    "500000",
     "429",
 )
+
+_BBO_CACHE_MAX_AGE_SECONDS = 30.0
 
 
 def _is_retryable_message(exc: BaseException) -> bool:
@@ -442,6 +447,69 @@ class BrokerGateway:
         self._quote_callbacks: list[Callable[[Quote], None]] = []
         self._disconnect_hooks: list[DisconnectHook] = []
         self._subscribed_symbols: set[str] = set()
+        self._last_trade_by_symbol: dict[str, tuple[float, str]] = {}
+        self._bbo_by_symbol: dict[str, tuple[float, float, float]] = {}
+
+    @staticmethod
+    def _best_depth_price(levels: Any, *, side: str) -> float:
+        values: list[float] = []
+        for level in levels or ():
+            try:
+                price = float(getattr(level, "price", 0))
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if math.isfinite(price) and price > 0:
+                values.append(price)
+        if not values:
+            return 0.0
+        return max(values) if side == "bid" else min(values)
+
+    @classmethod
+    def _bbo_from_depth(cls, depth: Any) -> tuple[float, float]:
+        bids = getattr(depth, "bids", None)
+        asks = getattr(depth, "asks", None)
+        return (
+            cls._best_depth_price(
+                bids if bids is not None else getattr(depth, "bid", ()),
+                side="bid",
+            ),
+            cls._best_depth_price(
+                asks if asks is not None else getattr(depth, "ask", ()),
+                side="ask",
+            ),
+        )
+
+    def _remember_bbo(self, symbol: str, bid: float, ask: float) -> None:
+        if (
+            not math.isfinite(bid)
+            or not math.isfinite(ask)
+            or bid <= 0
+            or ask <= 0
+            or ask < bid
+        ):
+            return
+        self._bbo_by_symbol[symbol] = (bid, ask, time.monotonic())
+
+    def _cached_bbo(self, symbol: str) -> tuple[float, float]:
+        cached = self._bbo_by_symbol.get(symbol)
+        if cached is None:
+            return 0.0, 0.0
+        bid, ask, observed_at = cached
+        if time.monotonic() - observed_at > _BBO_CACHE_MAX_AGE_SECONDS:
+            return 0.0, 0.0
+        return bid, ask
+
+    def _pull_bbo(self, symbol: str) -> tuple[float, float]:
+        depth_reader = getattr(self._quote_ctx, "depth", None)
+        if not callable(depth_reader):
+            return self._cached_bbo(symbol)
+        try:
+            bid, ask = self._bbo_from_depth(depth_reader(symbol))
+        except Exception as exc:
+            logger.warning("broker depth fetch failed for %s: %s", symbol, exc)
+            return self._cached_bbo(symbol)
+        self._remember_bbo(symbol, bid, ask)
+        return bid, ask
 
     def register_disconnect_hook(self, hook: DisconnectHook) -> None:
         """Register a broker disconnect hook, de-duplicating the same callable."""
@@ -546,12 +614,14 @@ class BrokerGateway:
             response = quote_ctx.candlesticks(symbol, period_enum, count, adjust_enum)
             items = response if isinstance(response, list) else [response]
             candles: list[BrokerCandle] = []
+            dropped = 0
             for item in items:
                 ts = _parse_candle_timestamp(getattr(item, "timestamp", None))
                 if ts is None:
+                    dropped += 1
                     continue
                 try:
-                    candles.append(BrokerCandle(
+                    candle = BrokerCandle(
                         timestamp=ts,
                         open=float(getattr(item, "open", 0)),
                         high=float(getattr(item, "high", 0)),
@@ -559,9 +629,31 @@ class BrokerGateway:
                         close=float(getattr(item, "close", 0)),
                         volume=float(getattr(item, "volume", 0)),
                         turnover=float(getattr(item, "turnover", 0)),
-                    ))
+                    )
                 except (TypeError, ValueError):
+                    dropped += 1
                     continue
+                prices = (candle.open, candle.high, candle.low, candle.close)
+                if (
+                    not all(math.isfinite(value) and value > 0 for value in prices)
+                    or candle.high < max(candle.open, candle.close, candle.low)
+                    or candle.low > min(candle.open, candle.close, candle.high)
+                    or not math.isfinite(candle.volume)
+                    or candle.volume < 0
+                    or not math.isfinite(candle.turnover)
+                    or candle.turnover < 0
+                ):
+                    dropped += 1
+                    continue
+                candles.append(candle)
+            if dropped:
+                logger.warning(
+                    "dropped %d invalid %s candlesticks for %s (received=%d)",
+                    dropped,
+                    period,
+                    symbol,
+                    len(items),
+                )
             candles.sort(key=lambda c: c.timestamp)
             return candles
 
@@ -613,12 +705,23 @@ class BrokerGateway:
                 if item is None:
                     logger.warning("broker did not return quote for symbol %s", fallback_symbol)
                     continue
+                symbol = str(getattr(item, "symbol", fallback_symbol))
+                last_price = float(getattr(item, "last_done", 0))
+                timestamp = str(getattr(item, "timestamp", ""))
+                bid = float(getattr(item, "bid", 0))
+                ask = float(getattr(item, "ask", 0))
+                if bid <= 0 or ask <= 0:
+                    bid, ask = self._pull_bbo(symbol)
+                else:
+                    self._remember_bbo(symbol, bid, ask)
+                if last_price > 0:
+                    self._last_trade_by_symbol[symbol] = (last_price, timestamp)
                 quotes.append(Quote(
-                    symbol=str(getattr(item, "symbol", fallback_symbol)),
-                    last_price=float(getattr(item, "last_done", 0)),
-                    bid=float(getattr(item, "bid", 0)),
-                    ask=float(getattr(item, "ask", 0)),
-                    timestamp=str(getattr(item, "timestamp", "")),
+                    symbol=symbol,
+                    last_price=last_price,
+                    bid=bid,
+                    ask=ask,
+                    timestamp=timestamp,
                 ))
             return quotes
 
@@ -631,18 +734,42 @@ class BrokerGateway:
             return
 
         def _on_quote(_symbol: str, _event: Any) -> None:
-            quote = Quote(
-                symbol=str(getattr(_event, "symbol", _symbol)),
-                last_price=float(getattr(_event, "last_done", 0)),
-                bid=float(getattr(_event, "bid", 0)),
-                ask=float(getattr(_event, "ask", 0)),
-                timestamp=str(getattr(_event, "timestamp", "")),
-            )
-            for cb in list(self._quote_callbacks):
+            symbol = str(getattr(_event, "symbol", _symbol))
+            last_price = float(getattr(_event, "last_done", 0))
+            timestamp = str(getattr(_event, "timestamp", ""))
+            with self._lock:
+                if last_price > 0:
+                    self._last_trade_by_symbol[symbol] = (last_price, timestamp)
+                else:
+                    latest = self._last_trade_by_symbol.get(symbol)
+                    if latest is None:
+                        return
+                    last_price, timestamp = latest
+                bid, ask = self._cached_bbo(symbol)
+                callbacks = list(self._quote_callbacks)
+            quote = Quote(symbol, last_price, bid, ask, timestamp)
+            for cb in callbacks:
                 try:
                     cb(quote)
                 except Exception:
                     logger.exception("quote callback failed for %s", _symbol)
+
+        def _on_depth(_symbol: str, _event: Any) -> None:
+            symbol = str(getattr(_event, "symbol", _symbol))
+            bid, ask = self._bbo_from_depth(_event)
+            with self._lock:
+                self._remember_bbo(symbol, bid, ask)
+                latest = self._last_trade_by_symbol.get(symbol)
+                callbacks = list(self._quote_callbacks)
+            if latest is None or bid <= 0 or ask <= 0 or ask < bid:
+                return
+            last_price, timestamp = latest
+            quote = Quote(symbol, last_price, bid, ask, timestamp)
+            for cb in callbacks:
+                try:
+                    cb(quote)
+                except Exception:
+                    logger.exception("depth callback failed for %s", _symbol)
 
         with self._lock:
             added_callback = False
@@ -657,6 +784,9 @@ class BrokerGateway:
                 quote_ctx = self._quote_ctx
                 if quote_ctx is not None:
                     quote_ctx.set_on_quote(_on_quote)
+                    depth_handler = getattr(quote_ctx, "set_on_depth", None)
+                    if callable(depth_handler):
+                        depth_handler(_on_depth)
                 return
             self._init_clients()
             quote_ctx = self._quote_ctx
@@ -676,6 +806,16 @@ class BrokerGateway:
                     "Install the longport package."
                 )
             topics = [SubType.Quote]
+            depth_type = getattr(SubType, "Depth", None)
+            depth_handler = getattr(quote_ctx, "set_on_depth", None)
+            if depth_type is not None and callable(depth_handler):
+                depth_handler(_on_depth)
+                topics.append(depth_type)
+            else:
+                logger.warning(
+                    "longport SDK depth subscription unavailable; executable BBO "
+                    "will rely on pull depth"
+                )
             try:
                 quote_ctx.subscribe(missing_symbols, topics)
             except Exception:
@@ -1036,6 +1176,8 @@ class BrokerGateway:
         with self._lock:
             self._quote_callbacks.clear()
             self._subscribed_symbols.clear()
+            self._last_trade_by_symbol.clear()
+            self._bbo_by_symbol.clear()
             for ctx in (self._quote_ctx, self._trade_ctx):
                 if ctx is not None:
                     try:
@@ -1055,6 +1197,8 @@ class BrokerGateway:
                     logger.warning("failed to unsubscribe from %s", ", ".join(symbols))
             self._quote_callbacks.clear()
             self._subscribed_symbols.clear()
+            self._last_trade_by_symbol.clear()
+            self._bbo_by_symbol.clear()
 
     def get_cash(self, currency: str | None = None) -> Decimal:
         """Return available cash for the given currency.

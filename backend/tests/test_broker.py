@@ -235,6 +235,75 @@ class TestBrokerGateway:
         assert called["subtypes"] == ["SubType.Quote"]
         assert gw._subscribed_symbols == {"AAPL.US"}
 
+    def test_subscribe_quotes_merges_depth_bbo_into_quote_events(self, monkeypatch) -> None:
+        called: dict[str, Any] = {}
+
+        class FakeConfig:
+            @staticmethod
+            def from_env():
+                return "fake-config"
+
+        class QuoteContext:
+            def __init__(self, _config):
+                pass
+
+            def set_on_quote(self, callback):
+                called["quote_callback"] = callback
+
+            def set_on_depth(self, callback):
+                called["depth_callback"] = callback
+
+            def subscribe(self, symbols, subtypes):
+                called["symbols"] = symbols
+                called["subtypes"] = subtypes
+
+        class TradeContext:
+            def __init__(self, _config):
+                pass
+
+        class SubType:
+            Quote = "SubType.Quote"
+            Depth = "SubType.Depth"
+
+        class FakeModule:
+            pass
+
+        FakeModule.Config = FakeConfig
+        FakeModule.QuoteContext = QuoteContext
+        FakeModule.TradeContext = TradeContext
+        FakeModule.SubType = SubType
+
+        monkeypatch.setattr(broker_module, "_import_openapi", lambda: FakeModule)
+        received: list[Quote] = []
+        gw = BrokerGateway()
+        gw.subscribe_quotes("AAPL.US", received.append)
+
+        class QuoteEvent:
+            symbol = "AAPL.US"
+            last_done = 150.05
+            timestamp = "2026-07-13T17:00:00Z"
+
+        class Level:
+            def __init__(self, price: float) -> None:
+                self.price = price
+
+        class DepthEvent:
+            symbol = "AAPL.US"
+            bids = [Level(149.9), Level(150.0), Level(float("inf"))]
+            asks = [Level(150.2), Level(150.1), Level(float("nan"))]
+
+        called["quote_callback"]("AAPL.US", QuoteEvent())
+        called["depth_callback"]("AAPL.US", DepthEvent())
+
+        assert called["subtypes"] == ["SubType.Quote", "SubType.Depth"]
+        assert received[-1] == Quote(
+            symbol="AAPL.US",
+            last_price=150.05,
+            bid=150.0,
+            ask=150.1,
+            timestamp="2026-07-13T17:00:00Z",
+        )
+
     def test_subscribe_quotes_adds_multiple_symbols_without_unsubscribing_previous(self, monkeypatch) -> None:
         called = {"subscribed": [], "unsubscribed": []}
 
@@ -618,6 +687,37 @@ class TestBrokerGateway:
         assert result.last_price == 150.0
         assert result.bid == 149.5
 
+    def test_get_quote_uses_depth_when_quote_has_no_bbo(self) -> None:
+        class QuoteItem:
+            symbol = "AAPL.US"
+            last_done = 150.05
+            timestamp = "2026-07-13T17:00:00Z"
+
+        class Level:
+            def __init__(self, price: float) -> None:
+                self.price = price
+
+        class Depth:
+            bids = [Level(149.9), Level(150.0)]
+            asks = [Level(150.2), Level(150.1)]
+
+        class QuoteContext:
+            def quote(self, _symbols):
+                return [QuoteItem()]
+
+            def depth(self, symbol):
+                assert symbol == "AAPL.US"
+                return Depth()
+
+        gw = BrokerGateway()
+        gw._quote_ctx = QuoteContext()
+        gw._trade_ctx = object()
+
+        result = gw.get_quote("AAPL.US")
+
+        assert result.bid == 150.0
+        assert result.ask == 150.1
+
     def test_get_quote_with_dict_response(self) -> None:
         gw = BrokerGateway()
         gw._quote_ctx = object()
@@ -675,6 +775,41 @@ class TestBrokerGateway:
         assert all(isinstance(c, BrokerCandle) for c in candles)
         assert candles[1].close == 103.0
         assert gw._quote_ctx.calls[0] == ("AAPL.US", "DAY", 2, "noadj")
+
+    def test_get_candlesticks_drops_invalid_upstream_ohlcv(self, monkeypatch, caplog) -> None:
+        class FakeAdjust:
+            NoAdjust = "NO_ADJUST"
+
+        class FakePeriod:
+            Min_1 = "MIN_1"
+
+        class FakeModule:
+            Period = FakePeriod
+            AdjustType = FakeAdjust
+
+        class Candle:
+            def __init__(self, minute: int, volume: float) -> None:
+                self.timestamp = datetime(2026, 7, 13, 13, minute, tzinfo=timezone.utc)
+                self.open = 100
+                self.high = 101
+                self.low = 99
+                self.close = 100.5
+                self.volume = volume
+                self.turnover = 1000
+
+        class QuoteContext:
+            def candlesticks(self, _symbol, _period, _count, _adjust):
+                return [Candle(30, -1), Candle(31, 100)]
+
+        monkeypatch.setattr(broker_module, "_import_openapi", lambda: FakeModule)
+        gw = BrokerGateway()
+        gw._quote_ctx = QuoteContext()
+        gw._trade_ctx = object()
+
+        result = gw.get_candlesticks("AAPL.US", "MIN_1", 2)
+
+        assert [item.volume for item in result] == [100]
+        assert "dropped 1 invalid MIN_1 candlesticks for AAPL.US" in caplog.text
 
     def test_get_candlesticks_handles_zero_count(self) -> None:
         gw = BrokerGateway()

@@ -371,6 +371,13 @@ class TestAppRunner:
             "NVDA.US": runner._build_symbol_runtime("NVDA.US", "US", primary=True),
             "AAPL.US": secondary,
         }
+        runner._trade_svc.max_position_quantity = 100
+        runner._trade_svc.max_position_notional = Decimal("5000")
+        runner._trade_svc.max_risk_per_trade = Decimal("250")
+        runner._trade_svc.stop_loss_pct = Decimal("1")
+        runner._trade_svc.load_tracked_entries(
+            {"NVDA.US": (Decimal("1088"), Decimal("224485.952"))}
+        )
         runner._trade_svc._track_pending_order(
             "BUY",
             OrderResult("order-aapl", "AAPL.US", "BUY", Decimal("9"), Decimal("99"), "SUBMITTED"),
@@ -419,6 +426,13 @@ class TestAppRunner:
         assert by_symbol["AAPL.US"]["has_pending_order"] is True
         # Quote quality: primary has no recent quotes; secondary has a quote with missing prices.
         assert by_symbol["NVDA.US"]["quote_quality"]["has_quote"] is False
+        assert by_symbol["NVDA.US"]["position_quantity"] == 1088.0
+        assert by_symbol["NVDA.US"]["position_avg_price"] == 206.329
+        assert by_symbol["NVDA.US"]["position_limit_breaches"] == [
+            "MAX_POSITION_QUANTITY",
+            "MAX_POSITION_NOTIONAL",
+            "MAX_RISK_PER_TRADE",
+        ]
         assert by_symbol["AAPL.US"]["quote_quality"]["has_quote"] is True
         assert by_symbol["AAPL.US"]["quote_quality"]["price_positive"] is False
 
