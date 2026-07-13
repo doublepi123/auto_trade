@@ -490,8 +490,13 @@
 
         <el-table :data="diagnostics.symbol_runtimes" size="small" class="responsive-table">
           <el-table-column prop="symbol" label="标的" min-width="120" />
-          <el-table-column label="状态" min-width="100">
-            <template #default="{ row }">{{ engineStateLabel(row.engine_state) }}</template>
+          <el-table-column label="限额" min-width="130">
+            <template #default="{ row }">
+              <el-tag v-if="row.position_limit_breaches.length" type="danger" size="small">
+                超限 {{ row.position_limit_breaches.length }} 项
+              </el-tag>
+              <el-tag v-else type="success" size="small">正常</el-tag>
+            </template>
           </el-table-column>
           <el-table-column label="持仓暴露" min-width="140">
             <template #default="{ row }">
@@ -501,13 +506,8 @@
               <span v-else>-</span>
             </template>
           </el-table-column>
-          <el-table-column label="限额" min-width="130">
-            <template #default="{ row }">
-              <el-tag v-if="row.position_limit_breaches.length" type="danger" size="small">
-                超限 {{ row.position_limit_breaches.length }} 项
-              </el-tag>
-              <el-tag v-else type="success" size="small">正常</el-tag>
-            </template>
+          <el-table-column label="状态" min-width="100">
+            <template #default="{ row }">{{ engineStateLabel(row.engine_state) }}</template>
           </el-table-column>
           <el-table-column label="角色" min-width="90">
             <template #default="{ row }">
