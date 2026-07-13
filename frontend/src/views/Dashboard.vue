@@ -493,14 +493,6 @@
           <el-table-column label="状态" min-width="100">
             <template #default="{ row }">{{ engineStateLabel(row.engine_state) }}</template>
           </el-table-column>
-          <el-table-column label="角色" min-width="90">
-            <template #default="{ row }">
-              <el-tag :type="row.is_primary ? 'success' : 'info'" size="small">{{ row.is_primary ? '主标的' : '观察标的' }}</el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column label="最新价" min-width="90">
-            <template #default="{ row }">${{ formatNumber(row.last_price) }}</template>
-          </el-table-column>
           <el-table-column label="持仓暴露" min-width="140">
             <template #default="{ row }">
               <span v-if="row.position_quantity > 0">
@@ -516,6 +508,14 @@
               </el-tag>
               <el-tag v-else type="success" size="small">正常</el-tag>
             </template>
+          </el-table-column>
+          <el-table-column label="角色" min-width="90">
+            <template #default="{ row }">
+              <el-tag :type="row.is_primary ? 'success' : 'info'" size="small">{{ row.is_primary ? '主标的' : '观察标的' }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="最新价" min-width="90">
+            <template #default="{ row }">${{ formatNumber(row.last_price) }}</template>
           </el-table-column>
           <el-table-column label="最近触发" min-width="90">
             <template #default="{ row }">{{ row.last_trigger_price > 0 ? `$${formatNumber(row.last_trigger_price)}` : '-' }}</template>
@@ -1941,6 +1941,30 @@ function severityType(s: string): string {
 }
 
 @media (max-width: 520px) {
+  .notif-ticker {
+    gap: 8px;
+  }
+
+  .ticker-item {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .ticker-item:not(:first-child) {
+    display: none;
+  }
+
+  .ticker-title {
+    display: block;
+    flex: 1;
+    min-width: 0;
+    max-width: none;
+  }
+
+  .ticker-item small {
+    display: none;
+  }
+
   .status-strip,
   .cockpit-grid,
   .chart-panels,

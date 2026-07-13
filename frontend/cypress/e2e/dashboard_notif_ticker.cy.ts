@@ -33,4 +33,13 @@ describe('Dashboard Notification Ticker', () => {
       .click()
     cy.url().should('include', '/notifications')
   })
+
+  it('keeps one ellipsized notification readable on mobile', () => {
+    cy.viewport(390, 844)
+
+    cy.get('[data-testid="dashboard-notif-ticker"] .ticker-item:visible')
+      .should('have.length', 1)
+      .find('.ticker-title')
+      .should('have.css', 'text-overflow', 'ellipsis')
+  })
 })
