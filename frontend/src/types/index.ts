@@ -207,6 +207,16 @@ export interface OrderRecord {
   slippage_bps: number | null
   exit_cause: string
   exit_reason: string
+  gross_pnl: number | null
+  net_pnl: number | null
+  pnl_source: 'TRACKED_ENTRY' | 'BROKER_POSITION' | 'LEDGER_REPLAY' | 'UNKNOWN'
+  cost_basis_price: number | null
+  cost_basis_quantity: number | null
+  cost_basis_opened_at: string | null
+  position_quantity_before: number | null
+  pnl_fee: number | null
+  pnl_fee_source: 'ACTUAL' | 'MIXED' | 'ESTIMATED' | 'UNKNOWN'
+  pnl_fee_rate: number | null
 }
 
 export interface TradeNote {
@@ -1497,6 +1507,8 @@ export interface StrategyShadowDailyEvidence {
   exit_reasons: Record<string, number>
   partial_start: boolean
   partial_end: boolean
+  outside_session_bars: number
+  complete_session: boolean
 }
 
 export interface StrategyShadowEvaluation {
@@ -1507,6 +1519,7 @@ export interface StrategyShadowEvaluation {
   status: 'COLLECTING' | 'READY_FOR_REVIEW'
   observed_trading_days: number
   minimum_trading_days: number
+  minimum_session_coverage_ratio: number
   remaining_trading_days: number
   closed_trades: number
   minimum_closed_trades: number

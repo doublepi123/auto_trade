@@ -124,6 +124,36 @@ class Settings(BaseSettings):
         le=10000,
         validation_alias="AUTO_TRADE_LLM_MAX_ANALYSES_PER_HOUR",
     )
+    llm_interaction_retention_days: int = Field(
+        default=90,
+        ge=0,
+        le=3650,
+        validation_alias="AUTO_TRADE_LLM_INTERACTION_RETENTION_DAYS",
+    )
+    llm_no_action_retention_days: int = Field(
+        default=14,
+        ge=0,
+        le=3650,
+        validation_alias="AUTO_TRADE_LLM_NO_ACTION_RETENTION_DAYS",
+    )
+    llm_context_snapshot_max_bytes: int = Field(
+        default=16384,
+        ge=2048,
+        le=1048576,
+        validation_alias="AUTO_TRADE_LLM_CONTEXT_SNAPSHOT_MAX_BYTES",
+    )
+    llm_storage_maintenance_interval_minutes: int = Field(
+        default=360,
+        ge=5,
+        le=10080,
+        validation_alias="AUTO_TRADE_LLM_STORAGE_MAINTENANCE_INTERVAL_MINUTES",
+    )
+    llm_storage_maintenance_batch_size: int = Field(
+        default=250,
+        ge=10,
+        le=5000,
+        validation_alias="AUTO_TRADE_LLM_STORAGE_MAINTENANCE_BATCH_SIZE",
+    )
     llm_interval_volatility_threshold_pct: float = Field(
         default=1.0,
         gt=0,

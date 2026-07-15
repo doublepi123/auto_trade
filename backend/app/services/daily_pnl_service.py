@@ -79,6 +79,7 @@ class DailyPnlResult:
     realized_pnl: float
     consecutive_losses: int
     trades: list[RealizedTrade]
+    is_complete: bool = True
 
 
 @dataclass(frozen=True)
@@ -99,14 +100,26 @@ class _Fill:
     fill_latency_ms: float | None = None
     exit_cause: str = ""
     exit_reason: str = ""
+    pnl_source: str = "UNKNOWN"
+    cost_basis_price: Decimal | None = None
+    cost_basis_quantity: Decimal | None = None
+    cost_basis_opened_at: datetime | None = None
+    position_quantity_before: Decimal | None = None
+    gross_pnl: Decimal | None = None
+    net_pnl: Decimal | None = None
+    pnl_fee: Decimal | None = None
+    pnl_fee_source: str = "UNKNOWN"
+    pnl_fee_rate: Decimal | None = None
 
 
 @dataclass
 class _LedgerPosition:
     long_quantity: Decimal = _ZERO
     long_cost: Decimal = _ZERO
+    long_fees: Decimal = _ZERO
     short_quantity: Decimal = _ZERO
     short_proceeds: Decimal = _ZERO
+    short_fees: Decimal = _ZERO
 
 
 @dataclass
@@ -157,6 +170,12 @@ class DailyPnlService:
         """
         replay_pnl = result.realized_pnl
         replay_losses = result.consecutive_losses
+        if not result.is_complete:
+            logger.error(
+                "refusing incomplete daily PnL replay for %s; preserving live risk state",
+                result.trade_day,
+            )
+            return current_pnl, current_consecutive_losses
         if current_trade_day != result.trade_day:
             return replay_pnl, replay_losses
         if replay_pnl > current_pnl + 1e-9:
@@ -181,34 +200,87 @@ class DailyPnlService:
         # handling: fills near midnight in the target timezone may have UTC
         # timestamps that fall on the next calendar day.
         query_end = end_of_day + timedelta(days=1)
-        round_trips = self.pair_round_trips(
-            symbol=symbol,
-            to_dt=query_end,
-            fee_rate_us=fee_rate_us,
-            fee_rate_hk=fee_rate_hk,
-            include_excursions=False,
+        from app.models import OrderRecord
+
+        query = self._db.query(OrderRecord)
+        if symbol:
+            query = query.filter(OrderRecord.symbol == symbol.strip().upper())
+        query = query.filter(
+            (
+                (OrderRecord.filled_at.isnot(None))
+                & (OrderRecord.filled_at < query_end)
+            )
+            | (
+                (OrderRecord.filled_at.is_(None))
+                & (OrderRecord.created_at < query_end)
+            )
         )
+        latest_orders: dict[str, Any] = {}
+        for order in query.all():
+            key = order.broker_order_id or f"local:{order.id}"
+            existing = latest_orders.get(key)
+            if existing is None or order.id > existing.id:
+                latest_orders[key] = order
+        fills = [
+            fill
+            for order in latest_orders.values()
+            if (fill := self._fill_from_order(order)) is not None
+            and resolve_day(fill.filled_at) <= target_day
+        ]
+        fills.sort(key=lambda item: (item.filled_at, item.id))
+
+        positions: dict[str, _LedgerPosition] = {}
         trades: list[RealizedTrade] = []
         realized_pnl = _ZERO
         consecutive_losses = 0
+        is_complete = True
 
-        for trip in round_trips:
-            if resolve_day(trip.exit_at) != target_day:
+        for fill in fills:
+            position = positions.setdefault(fill.symbol, _LedgerPosition())
+            authoritative = self._is_authoritative_exit(fill)
+            if authoritative:
+                self._rebase_position_from_authoritative_exit(position, fill)
+            matched_quantity, replay_pnl = self._apply_fill_net(
+                position,
+                fill,
+                fee_rate_us=fee_rate_us,
+                fee_rate_hk=fee_rate_hk,
+            )
+            if fill.side not in {"SELL", "BUY_TO_COVER"}:
                 continue
-            pnl = Decimal(str(trip.net_pnl))
+            if resolve_day(fill.filled_at) != target_day:
+                continue
+            if authoritative:
+                matched_quantity = fill.cost_basis_quantity or fill.quantity
+                pnl = fill.net_pnl
+            else:
+                pnl = replay_pnl
+                if matched_quantity < fill.quantity:
+                    is_complete = False
+                    logger.error(
+                        "daily PnL replay is incomplete for %s order %s: matched=%s filled=%s",
+                        fill.symbol,
+                        fill.broker_order_id or fill.id,
+                        matched_quantity,
+                        fill.quantity,
+                    )
+                    continue
+            if matched_quantity <= 0 or pnl is None:
+                is_complete = False
+                continue
             realized_pnl += pnl
             if pnl < 0:
                 consecutive_losses += 1
             else:
                 consecutive_losses = 0
             trades.append(RealizedTrade(
-                broker_order_id=trip.exit_broker_order_id or str(trip.exit_order_id),
-                symbol=trip.symbol,
-                side="SELL" if trip.side == "long" else "BUY_TO_COVER",
-                quantity=trip.quantity,
-                price=trip.exit_price,
+                broker_order_id=fill.broker_order_id or str(fill.id),
+                symbol=fill.symbol,
+                side=fill.side,
+                quantity=float(matched_quantity),
+                price=float(fill.price),
                 pnl=float(pnl),
-                filled_at=trip.exit_at,
+                filled_at=fill.filled_at,
             ))
 
         return DailyPnlResult(
@@ -216,6 +288,7 @@ class DailyPnlService:
             realized_pnl=float(realized_pnl),
             consecutive_losses=consecutive_losses,
             trades=trades,
+            is_complete=is_complete,
         )
 
     def pair_round_trips(
@@ -331,6 +404,23 @@ class DailyPnlService:
     ) -> list[ClosedRoundTrip]:
         from app.core.fees import one_side_fee_rate
 
+        authoritative = DailyPnlService._is_authoritative_exit(exit_fill)
+        if authoritative:
+            basis_price = exit_fill.cost_basis_price or _ZERO
+            position_quantity = exit_fill.position_quantity_before or _ZERO
+            opened_at = exit_fill.cost_basis_opened_at or exit_fill.filled_at
+            fee_rate = exit_fill.pnl_fee_rate or _ZERO
+            lot_queue[:] = [
+                _Lot(
+                    order_id=0,
+                    quantity=position_quantity,
+                    price=basis_price,
+                    filled_at=opened_at,
+                    fee_remaining=basis_price * position_quantity * fee_rate,
+                    fee_source="ESTIMATED",
+                )
+            ]
+
         remaining = exit_fill.quantity
         matched_quantity = _ZERO
         cost_basis = _ZERO
@@ -374,6 +464,43 @@ class DailyPnlService:
 
         if matched_quantity <= 0 or first_entry_at is None:
             return []
+
+        if authoritative:
+            basis_price = exit_fill.cost_basis_price or _ZERO
+            pnl_fee = exit_fill.pnl_fee or _ZERO
+            gross_pnl = exit_fill.gross_pnl or _ZERO
+            net_pnl = exit_fill.net_pnl
+            if net_pnl is None:
+                return []
+            holding_seconds = (exit_fill.filled_at - first_entry_at).total_seconds()
+            return [ClosedRoundTrip(
+                symbol=exit_fill.symbol,
+                side=side,
+                entry_order_id=entry_order_id,
+                exit_order_id=exit_fill.id,
+                entry_at=first_entry_at,
+                exit_at=exit_fill.filled_at,
+                entry_price=float(basis_price),
+                exit_price=float(exit_fill.price),
+                quantity=float(exit_fill.cost_basis_quantity or exit_fill.quantity),
+                gross_pnl=float(gross_pnl),
+                est_fees=float(pnl_fee),
+                net_pnl=float(net_pnl),
+                holding_seconds=holding_seconds,
+                exit_broker_order_id=exit_fill.broker_order_id,
+                fee_source=exit_fill.pnl_fee_source,
+                actual_fees=(
+                    float(pnl_fee)
+                    if exit_fill.pnl_fee_source == "ACTUAL"
+                    else None
+                ),
+                slippage_amount=exit_fill.slippage_amount,
+                slippage_bps=exit_fill.slippage_bps,
+                ack_latency_ms=exit_fill.ack_latency_ms,
+                fill_latency_ms=exit_fill.fill_latency_ms,
+                exit_cause=exit_fill.exit_cause,
+                exit_reason=exit_fill.exit_reason,
+            )]
 
         avg_entry = cost_basis / matched_quantity
         exit_price = exit_fill.price
@@ -506,6 +633,28 @@ class DailyPnlService:
             fill_latency_ms=getattr(order, "fill_latency_ms", None),
             exit_cause=str(getattr(order, "exit_cause", "") or ""),
             exit_reason=str(getattr(order, "exit_reason", "") or ""),
+            pnl_source=str(getattr(order, "pnl_source", "UNKNOWN") or "UNKNOWN").upper(),
+            cost_basis_price=self._optional_decimal(
+                getattr(order, "cost_basis_price", None)
+            ),
+            cost_basis_quantity=self._optional_decimal(
+                getattr(order, "cost_basis_quantity", None)
+            ),
+            cost_basis_opened_at=self._coerce_datetime(
+                getattr(order, "cost_basis_opened_at", None)
+            ),
+            position_quantity_before=self._optional_decimal(
+                getattr(order, "position_quantity_before", None)
+            ),
+            gross_pnl=self._optional_decimal(getattr(order, "gross_pnl", None)),
+            net_pnl=self._optional_decimal(getattr(order, "net_pnl", None)),
+            pnl_fee=self._optional_decimal(getattr(order, "pnl_fee", None)),
+            pnl_fee_source=str(
+                getattr(order, "pnl_fee_source", "UNKNOWN") or "UNKNOWN"
+            ).upper(),
+            pnl_fee_rate=self._optional_decimal(
+                getattr(order, "pnl_fee_rate", None)
+            ),
         )
 
     def _attach_excursions(
@@ -571,8 +720,20 @@ class DailyPnlService:
             ).first()
             if order is None:
                 continue
+            if str(getattr(order, "pnl_source", "") or "").upper() in {
+                "TRACKED_ENTRY",
+                "BROKER_POSITION",
+            }:
+                continue
             order.gross_pnl = trade.gross_pnl
             order.net_pnl = trade.net_pnl
+            order.pnl_source = "LEDGER_REPLAY"
+            order.cost_basis_price = trade.entry_price
+            order.cost_basis_quantity = trade.quantity
+            order.cost_basis_opened_at = trade.entry_at
+            order.position_quantity_before = trade.quantity
+            order.pnl_fee = trade.est_fees
+            order.pnl_fee_source = trade.fee_source
             order.mfe_amount = trade.mfe_amount
             order.mae_amount = trade.mae_amount
             order.mfe_pct = trade.mfe_pct
@@ -638,6 +799,111 @@ class DailyPnlService:
         if fill.side == "SELL_SHORT":
             DailyPnlService._open_short(position, fill.quantity, fill.price)
             return _ZERO, _ZERO
+        return _ZERO, _ZERO
+
+    @staticmethod
+    def _is_authoritative_exit(fill: _Fill) -> bool:
+        return (
+            fill.side in {"SELL", "BUY_TO_COVER"}
+            and fill.pnl_source in {"TRACKED_ENTRY", "BROKER_POSITION"}
+            and fill.cost_basis_price is not None
+            and fill.cost_basis_price > 0
+            and fill.cost_basis_quantity is not None
+            and fill.cost_basis_quantity == fill.quantity
+            and fill.position_quantity_before is not None
+            and fill.position_quantity_before >= fill.cost_basis_quantity
+            and fill.gross_pnl is not None
+            and fill.net_pnl is not None
+            and fill.pnl_fee is not None
+        )
+
+    @staticmethod
+    def _rebase_position_from_authoritative_exit(
+        position: _LedgerPosition,
+        fill: _Fill,
+    ) -> None:
+        basis_price = fill.cost_basis_price or _ZERO
+        position_quantity = fill.position_quantity_before or _ZERO
+        fee_rate = fill.pnl_fee_rate or _ZERO
+        if fill.side == "SELL":
+            position.long_quantity = position_quantity
+            position.long_cost = basis_price * position_quantity
+            position.long_fees = basis_price * position_quantity * fee_rate
+        else:
+            position.short_quantity = position_quantity
+            position.short_proceeds = basis_price * position_quantity
+            position.short_fees = basis_price * position_quantity * fee_rate
+
+    @staticmethod
+    def _apply_fill_net(
+        position: _LedgerPosition,
+        fill: _Fill,
+        *,
+        fee_rate_us: float,
+        fee_rate_hk: float,
+    ) -> tuple[Decimal, Decimal]:
+        from app.core.fees import one_side_fee_rate
+
+        market = "HK" if fill.symbol.endswith(".HK") else "US"
+        fee_rate = one_side_fee_rate(
+            market,
+            Decimal(str(fee_rate_us)),
+            Decimal(str(fee_rate_hk)),
+        )
+
+        def fill_fee(quantity: Decimal) -> Decimal:
+            if quantity <= 0:
+                return _ZERO
+            if fill.fee is not None and fill.quantity > 0:
+                return fill.fee * quantity / fill.quantity
+            return fill.price * quantity * fee_rate
+
+        if fill.side == "BUY":
+            DailyPnlService._open_long(position, fill.quantity, fill.price)
+            position.long_fees += fill_fee(fill.quantity)
+            return _ZERO, _ZERO
+        if fill.side == "SELL_SHORT":
+            DailyPnlService._open_short(position, fill.quantity, fill.price)
+            position.short_fees += fill_fee(fill.quantity)
+            return _ZERO, _ZERO
+        if fill.side == "SELL":
+            quantity_before = position.long_quantity
+            fees_before = position.long_fees
+            unclosed, matched_quantity, gross_pnl = DailyPnlService._close_long(
+                position,
+                fill.quantity,
+                fill.price,
+            )
+            if unclosed > _ZERO:
+                DailyPnlService._warn_unclosed_remainder_once(fill, unclosed)
+            entry_fee = (
+                fees_before * matched_quantity / quantity_before
+                if quantity_before > 0
+                else _ZERO
+            )
+            position.long_fees = max(_ZERO, fees_before - entry_fee)
+            if position.long_quantity <= 0:
+                position.long_fees = _ZERO
+            return matched_quantity, gross_pnl - entry_fee - fill_fee(matched_quantity)
+        if fill.side == "BUY_TO_COVER":
+            quantity_before = position.short_quantity
+            fees_before = position.short_fees
+            unclosed, matched_quantity, gross_pnl = DailyPnlService._close_short(
+                position,
+                fill.quantity,
+                fill.price,
+            )
+            if unclosed > _ZERO:
+                DailyPnlService._warn_unclosed_remainder_once(fill, unclosed)
+            entry_fee = (
+                fees_before * matched_quantity / quantity_before
+                if quantity_before > 0
+                else _ZERO
+            )
+            position.short_fees = max(_ZERO, fees_before - entry_fee)
+            if position.short_quantity <= 0:
+                position.short_fees = _ZERO
+            return matched_quantity, gross_pnl - entry_fee - fill_fee(matched_quantity)
         return _ZERO, _ZERO
 
     @staticmethod
@@ -707,6 +973,16 @@ class DailyPnlService:
             return Decimal(str(value))
         except Exception:
             return _ZERO
+
+    @staticmethod
+    def _optional_decimal(value: Any) -> Decimal | None:
+        if value is None:
+            return None
+        try:
+            candidate = Decimal(str(value))
+        except Exception:
+            return None
+        return candidate if candidate.is_finite() else None
 
     @staticmethod
     def _coerce_datetime(value: Any) -> datetime | None:

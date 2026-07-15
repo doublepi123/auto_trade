@@ -103,6 +103,11 @@ class TestAppRunner:
             "verify_operational_resume",
             lambda: (False, "broker state changed"),
         )
+        monkeypatch.setattr(
+            runner,
+            "_protective_exit_runtime_health",
+            lambda: (True, ""),
+        )
 
         safe, error = runner.permit_protective_exits_after_verification()
 
@@ -128,6 +133,11 @@ class TestAppRunner:
             "verify_operational_resume",
             change_operational_pause,
         )
+        monkeypatch.setattr(
+            runner,
+            "_protective_exit_runtime_health",
+            lambda: (True, ""),
+        )
 
         safe, error = runner.permit_protective_exits_after_verification()
 
@@ -152,6 +162,11 @@ class TestAppRunner:
             "verify_operational_resume",
             repeat_operational_pause,
         )
+        monkeypatch.setattr(
+            runner,
+            "_protective_exit_runtime_health",
+            lambda: (True, ""),
+        )
 
         safe, error = runner.permit_protective_exits_after_verification()
 
@@ -159,6 +174,93 @@ class TestAppRunner:
         assert error == "protective exits require an unchanged operational pause"
         assert runner.risk.paused is True
         assert runner.risk.protective_exit_permitted is False
+
+    def test_protective_exit_verification_rejects_stopped_runner(
+        self,
+        monkeypatch,
+    ) -> None:
+        runner = AppRunner()
+        runner.risk.pause("ORDER_EXECUTION_BLOCKED: operator review")
+        assert runner.risk.permit_protective_exits() is True
+        monkeypatch.setattr(
+            runner,
+            "verify_operational_resume",
+            lambda: pytest.fail("broker verification must not run while stopped"),
+        )
+
+        safe, error = runner.permit_protective_exits_after_verification()
+
+        assert safe is False
+        assert "runner thread" in error
+        assert runner.risk.protective_exit_permitted is False
+
+    def test_protective_exit_verification_rechecks_quote_loop_health(
+        self,
+        monkeypatch,
+    ) -> None:
+        class AliveThread:
+            @staticmethod
+            def is_alive() -> bool:
+                return True
+
+        runner = AppRunner()
+        runner.risk.pause("ORDER_EXECUTION_BLOCKED: operator review")
+        runner._running = True
+        runner._thread = cast(Any, AliveThread())
+        runner._quotes_subscribed = True
+        runner._last_quote_at = time.monotonic()
+
+        def make_quote_loop_stale() -> tuple[bool, str]:
+            runner._last_quote_at = time.monotonic() - 31
+            return True, ""
+
+        monkeypatch.setattr(
+            runner,
+            "verify_operational_resume",
+            make_quote_loop_stale,
+        )
+
+        safe, error = runner.permit_protective_exits_after_verification()
+
+        assert safe is False
+        assert "healthy quote loop" in error
+        assert runner.risk.protective_exit_permitted is False
+
+    def test_protective_exit_health_requires_fresh_primary_quote(self) -> None:
+        class AliveThread:
+            @staticmethod
+            def is_alive() -> bool:
+                return True
+
+        runner = AppRunner()
+        runner.engine.params = StrategyParams(
+            symbol="NVDA.US",
+            market="US",
+            buy_low=100.0,
+            sell_high=200.0,
+        )
+        runner._symbol_runtimes = {
+            "NVDA.US": runner._build_symbol_runtime("NVDA.US", "US", primary=True),
+            "AAPL.US": runner._build_symbol_runtime("AAPL.US", "US"),
+        }
+        runner._running = True
+        runner._thread = cast(Any, AliveThread())
+        runner._quotes_subscribed = True
+        runner._last_quote_at = time.monotonic() - 31
+
+        runner._remember_quote(
+            Quote(
+                symbol="AAPL.US",
+                last_price=210.0,
+                bid=209.9,
+                ask=210.1,
+                timestamp=_fresh_timestamp(),
+            )
+        )
+        healthy, error = runner._protective_exit_runtime_health()
+
+        assert healthy is False
+        assert "healthy quote loop" in error
 
     def test_failed_resume_reverification_revokes_protective_exits(
         self,
@@ -298,6 +400,206 @@ class TestAppRunner:
         assert result is not None
         assert result.status == "SKIPPED"
         assert broker.submissions == 0
+
+    def test_reduce_only_final_quote_rebinds_submission_to_fresh_bid(self) -> None:
+        class Broker:
+            submitted_price: Decimal | None = None
+
+            def get_positions(self) -> list[Position]:
+                return [
+                    Position(
+                        "AAPL.US",
+                        "LONG",
+                        Decimal("2"),
+                        Decimal("220"),
+                        available_quantity=Decimal("2"),
+                    )
+                ]
+
+            def get_quotes(self, symbols: list[str]) -> list[Quote]:
+                return [
+                    Quote(
+                        symbols[0],
+                        214.76,
+                        214.73,
+                        214.79,
+                        _fresh_timestamp(),
+                    )
+                ]
+
+            def submit_limit_order(
+                self,
+                symbol: str,
+                side: str,
+                quantity: Decimal,
+                price: Decimal,
+            ) -> OrderResult:
+                self.submitted_price = price
+                return OrderResult(
+                    "fresh-protective-exit",
+                    symbol,
+                    side,
+                    quantity,
+                    price,
+                    "FILLED",
+                )
+
+        runner = AppRunner()
+        broker = Broker()
+        runner.broker = cast(Any, broker)
+        runner.notifier = _NoopNotifier()
+        runner._trade_svc._record_order = lambda *args: None
+        runner._trade_svc._update_order_status = lambda *args, **kwargs: None
+        runner._trade_svc._record_risk_event = lambda reason: None
+        runner._trade_svc._record_order_skipped = lambda *args: None
+        runner._trade_svc.load_tracked_entries(
+            {
+                "AAPL.US": (
+                    Decimal("2"),
+                    Decimal("440"),
+                    "LONG",
+                    datetime.now(timezone.utc) - timedelta(minutes=5),
+                )
+            }
+        )
+
+        result = runner._trade_svc.execute(
+            "SELL",
+            "AAPL.US",
+            Quote("AAPL.US", 215.0, 214.9, 215.1, _fresh_timestamp()),
+            cast(Any, broker),
+            runner.risk,
+            runner.notifier,
+            "USD",
+            allow_loss_exit=True,
+            reduce_only=True,
+        )
+
+        assert result is not None
+        assert result.status == "FILLED"
+        assert broker.submitted_price == Decimal("214.73")
+
+    @pytest.mark.parametrize(
+        ("action", "engine_state", "position_side", "bid", "ask", "order_price", "expected_price"),
+        [
+            ("SELL", EngineState.LONG, "LONG", 98.0, 98.1, 98.4, Decimal("98.00")),
+            (
+                "BUY_TO_COVER",
+                EngineState.SHORT,
+                "SHORT",
+                101.0,
+                101.1,
+                101.5,
+                Decimal("101.10"),
+            ),
+        ],
+    )
+    def test_llm_reduction_rebinds_submission_to_fresh_bbo(
+        self,
+        action: str,
+        engine_state: EngineState,
+        position_side: str,
+        bid: float,
+        ask: float,
+        order_price: float,
+        expected_price: Decimal,
+    ) -> None:
+        class Broker:
+            submitted_price: Decimal | None = None
+
+            def get_positions(self) -> list[Position]:
+                return [
+                    Position(
+                        "AAPL.US",
+                        position_side,
+                        Decimal("2"),
+                        Decimal("100"),
+                        available_quantity=Decimal("2"),
+                    )
+                ]
+
+            def get_quotes(self, symbols: list[str]) -> list[Quote]:
+                return [
+                    Quote(
+                        symbols[0],
+                        (bid + ask) / 2,
+                        bid,
+                        ask,
+                        _fresh_timestamp(),
+                    )
+                ]
+
+            def submit_limit_order(
+                self,
+                symbol: str,
+                side: str,
+                quantity: Decimal,
+                price: Decimal,
+            ) -> OrderResult:
+                self.submitted_price = price
+                return OrderResult(
+                    "llm-reduce-only",
+                    symbol,
+                    side,
+                    quantity,
+                    price,
+                    "SUBMITTED",
+                )
+
+        runner = AppRunner()
+        broker = Broker()
+        runner.engine.params = StrategyParams(symbol="AAPL.US", market="US")
+        runner.engine.state = engine_state
+        runner.broker = cast(Any, broker)
+        runner.notifier = _NoopNotifier()
+        runner._trade_svc._record_order = lambda *args: None
+        runner._trade_svc._update_order_status = lambda *args, **kwargs: None
+        runner._trade_svc._record_risk_event = lambda reason: None
+        runner._trade_svc._record_order_skipped = lambda *args: None
+        runner._trade_svc.load_tracked_entries(
+            {
+                "AAPL.US": (
+                    Decimal("2"),
+                    Decimal("200"),
+                    position_side,
+                    datetime.now(timezone.utc) - timedelta(minutes=5),
+                )
+            }
+        )
+
+        result = runner._execute_llm_trade_action(
+            action,
+            order_price,
+            allow_loss_exit=True,
+        )
+
+        assert result["status"] == "SUBMITTED"
+        assert broker.submitted_price == expected_price
+
+    @pytest.mark.parametrize("pnl_source", ["LEDGER_REPLAY", "UNKNOWN", ""])
+    def test_execution_outcome_recompute_preserves_non_authoritative_pnl_source(
+        self,
+        pnl_source: str,
+    ) -> None:
+        order = SimpleNamespace(
+            filled_at=datetime.now(timezone.utc),
+            submit_started_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+            executed_price=101.0,
+            executed_quantity=2.0,
+            side="SELL",
+            cost_basis_price=100.0,
+            position_quantity_before=2.0,
+            pnl_fee_rate=0.0005,
+            actual_fee=None,
+            pnl_source=pnl_source,
+            decision_bid=101.0,
+            decision_ask=101.1,
+        )
+
+        AppRunner._update_execution_outcome_fields(order)
+
+        assert order.gross_pnl == pytest.approx(2.0)
+        assert order.pnl_source == pnl_source
 
     def test_immediate_filled_order_is_atomically_recorded_with_execution(self) -> None:
         from app.database import SessionLocal
@@ -1454,6 +1756,7 @@ class TestAppRunner:
         runner.broker = broker
         runner.notifier = _NoopNotifier()
         self._stub_trade_callbacks(runner)
+        runner._trade_svc._final_order_quote_check = runner._validate_final_order_quote
         runner._trade_svc._track_pending_order(
             "BUY",
             OrderResult("order-pending", "NVDA.US", "BUY", Decimal("5"), Decimal("221"), "SUBMITTED"),
@@ -1464,7 +1767,7 @@ class TestAppRunner:
         result = runner.execute_llm_order_decision({
             "order_action": "CANCEL_REPLACE",
             "replacement_action": "SELL_NOW",
-            "replacement_price": 225.25,
+            "replacement_price": 225.0,
             "confidence_score": 0.9,
             "order_reason": "replace stale buy with exit",
         })
@@ -1477,7 +1780,7 @@ class TestAppRunner:
         }
         assert result["policy_disposition"] == "ALLOW"
         assert broker.cancelled == ["order-pending"]
-        assert broker.submitted == [("NVDA.US", "SELL", Decimal("5"), Decimal("225.25"))]
+        assert broker.submitted == [("NVDA.US", "SELL", Decimal("5"), Decimal("224.90"))]
         assert runner._trade_svc.has_pending_order is False
         assert runner.engine.state == EngineState.FLAT
 
@@ -1585,7 +1888,7 @@ class TestAppRunner:
             "action": "SELL",
         }
         assert result["policy_disposition"] == "ALLOW"
-        assert runner.broker.submitted == [("NVDA.US", "SELL", Decimal("8"), Decimal("215.00"))]
+        assert runner.broker.submitted == [("NVDA.US", "SELL", Decimal("8"), Decimal("214.90"))]
         assert runner.engine.state == EngineState.FLAT
         assert runner.last_action_message == "LLM SELL FILLED: order-stop-loss"
 
@@ -1616,6 +1919,7 @@ class TestAppRunner:
         runner.notifier = _NoopNotifier()
         runner.risk.pause("pending order order-entry timed out after 30s")
         self._stub_trade_callbacks(runner)
+        runner._trade_svc._final_order_quote_check = runner._validate_final_order_quote
 
         result = runner.execute_llm_order_decision({
             "order_action": "STOP_LOSS_SELL_NOW",
@@ -1631,7 +1935,7 @@ class TestAppRunner:
             "action": "SELL",
         }
         assert result["policy_disposition"] == "ALLOW"
-        assert runner.broker.submitted == [("NVDA.US", "SELL", Decimal("10"), Decimal("193.00"))]
+        assert runner.broker.submitted == [("NVDA.US", "SELL", Decimal("10"), Decimal("192.90"))]
         assert runner.engine.state == EngineState.FLAT
 
     def _runner_with_pending_buy(self, price: Decimal) -> AppRunner:
@@ -2226,6 +2530,73 @@ class TestAppRunner:
             Decimal("1600.0"),
         )
 
+    def test_reconcile_preserves_cost_when_quantity_grows_without_broker_avg(
+        self,
+    ) -> None:
+        from app.models import TrackedEntry
+
+        symbol = "COSTMISS.US"
+        opened_at = datetime.now(timezone.utc) - timedelta(minutes=5)
+        runner = AppRunner()
+        runner.engine.params = StrategyParams(symbol=symbol, market="US")
+        runner._trade_svc.load_tracked_entries(
+            {
+                symbol: (
+                    Decimal("10"),
+                    Decimal("1500"),
+                    "LONG",
+                    opened_at,
+                )
+            }
+        )
+
+        class Broker:
+            def get_positions(self) -> list[Position]:
+                return [
+                    Position(symbol, "LONG", Decimal("12"), Decimal("0"))
+                ]
+
+        runner.broker = Broker()
+        events: list[dict[str, Any]] = []
+        with database.SessionLocal() as db:
+            db.query(TrackedEntry).filter(TrackedEntry.symbol == symbol).delete()
+            db.add(
+                TrackedEntry(
+                    symbol=symbol,
+                    side="LONG",
+                    quantity=10,
+                    cost=1500,
+                    opened_at=opened_at,
+                )
+            )
+            db.commit()
+            with patch(
+                "app.runner.record_trade_event",
+                side_effect=lambda _db, **kwargs: events.append(kwargs),
+            ):
+                runner._reconcile_tracked_entries_with_broker(
+                    db,
+                    source="test_missing_added_cost",
+                )
+            row = db.query(TrackedEntry).filter(
+                TrackedEntry.symbol == symbol
+            ).first()
+            assert row is not None
+            assert row.quantity == 10
+            assert row.cost == 1500
+            db.delete(row)
+            db.commit()
+
+        tracked = runner._trade_svc.tracked_position(symbol)
+        assert tracked is not None
+        assert tracked.quantity == Decimal("10.0")
+        assert tracked.cost == Decimal("1500.0")
+        assert runner.risk.paused is True
+        assert runner.risk.pause_auto_resumable is False
+        assert "added position cost is unavailable" in runner.risk.pause_reason
+        assert events[-1]["event_type"] == "TRACKED_ENTRY_RECOVERY_FAILED"
+        assert events[-1]["payload"]["preserved"] is True
+
     def test_reconcile_pauses_for_simultaneous_long_and_short_positions(self) -> None:
         from app.models import TrackedEntry
 
@@ -2490,6 +2861,59 @@ class TestAppRunner:
         assert broker.calls == [["AAPL.US"]]
         assert runner.engine.last_price == 123.45
         assert runner._last_quote_at > 0
+
+    def test_secondary_quote_does_not_mask_stale_primary_quote(
+        self,
+        monkeypatch,
+    ) -> None:
+        class Broker:
+            def __init__(self) -> None:
+                self.calls: list[list[str]] = []
+
+            def get_quotes(self, symbols: list[str]) -> list[Quote]:
+                self.calls.append(list(symbols))
+                return [
+                    Quote(
+                        symbol=symbol,
+                        last_price=123.45,
+                        bid=123.4,
+                        ask=123.5,
+                        timestamp=_fresh_timestamp(),
+                    )
+                    for symbol in symbols
+                ]
+
+        runner = AppRunner()
+        broker = Broker()
+        runner.broker = broker
+        runner._running = True
+        runner.engine.params = StrategyParams(
+            symbol="NVDA.US",
+            market="US",
+            buy_low=100.0,
+            sell_high=200.0,
+        )
+        runner._symbol_runtimes = {
+            "NVDA.US": runner._build_symbol_runtime("NVDA.US", "US", primary=True),
+            "AAPL.US": runner._build_symbol_runtime("AAPL.US", "US"),
+        }
+        runner._active_quote_refresh_interval_seconds = 15.0
+        runner._last_quote_at = 900.0
+        monkeypatch.setattr(runner_module.time, "monotonic", lambda: 1000.0)
+
+        runner._remember_quote(
+            Quote(
+                symbol="AAPL.US",
+                last_price=210.0,
+                bid=209.9,
+                ask=210.1,
+                timestamp=_fresh_timestamp(),
+            )
+        )
+        runner._refresh_quote_if_stale()
+
+        assert broker.calls == [["NVDA.US"]]
+        assert runner._last_quote_at == 1000.0
 
     def test_active_quote_refresh_skips_when_push_is_fresh(self) -> None:
         class Broker:
@@ -3281,7 +3705,9 @@ class TestAppRunner:
 
         runner._on_quote(quote)
 
-        assert runner.risk.daily_pnl == 110.0
+        assert runner.risk.daily_pnl == pytest.approx(
+            110.0 - (2 * 150 + 2 * 205) * 0.0005
+        )
         assert runner.engine.state == EngineState.LONG
         assert runner._trade_svc._pending_order is None
 
@@ -4024,6 +4450,7 @@ class TestRecentQuotesDequeBound:
 
     def test_pending_sell_fill_does_not_accept_stale_pre_exit_position(self) -> None:
         from app.database import SessionLocal
+        from app.models import OrderRecord, TradeEvent
         from app.services.trade_execution_service import _PendingOrder
 
         class Broker:
@@ -4054,6 +4481,32 @@ class TestRecentQuotesDequeBound:
             Decimal("5"),
             Decimal("500"),
         )
+        with SessionLocal() as db:
+            db.query(OrderRecord).filter(
+                OrderRecord.broker_order_id == "exit-fill"
+            ).delete()
+            db.add(OrderRecord(
+                broker_order_id="exit-fill",
+                symbol="NVDA.US",
+                side="SELL",
+                quantity=5.0,
+                price=101.0,
+                status="SUBMITTED",
+                pnl_source="TRACKED_ENTRY",
+                cost_basis_price=100.0,
+                cost_basis_quantity=5.0,
+                position_quantity_before=5.0,
+                pnl_fee_rate=0.0,
+            ))
+            db.add(TradeEvent(
+                event_type="ORDER_SUBMITTED",
+                symbol="NVDA.US",
+                broker_order_id="exit-fill",
+                side="SELL",
+                status="SUBMITTED",
+                message="locally submitted stale-position test exit",
+            ))
+            db.commit()
         pending = _PendingOrder(
             broker=runner.broker,
             broker_order_id="exit-fill",
@@ -4093,6 +4546,14 @@ class TestRecentQuotesDequeBound:
             )
         assert "NVDA.US" not in runner._post_fill_expectations
         assert runner._trade_svc.tracked_position("NVDA.US") is None
+        with SessionLocal() as db:
+            db.query(TradeEvent).filter(
+                TradeEvent.broker_order_id == "exit-fill"
+            ).delete()
+            db.query(OrderRecord).filter(
+                OrderRecord.broker_order_id == "exit-fill"
+            ).delete()
+            db.commit()
 
     def test_immediate_buy_fill_latches_expected_position_before_reconcile(self) -> None:
         class Broker:

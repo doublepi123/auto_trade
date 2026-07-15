@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from datetime import datetime, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -14,7 +15,13 @@ from app.core.broker import OrderResult, Quote
 from app.core.notify import ServerChanNotifier
 from app.core.risk import RiskController
 from app.services import trade_execution_service as trade_svc_module
-from app.services.trade_execution_service import TradeExecutionService, OrderStatus, _PendingOrder
+from app.services.trade_execution_service import (
+    FinalOrderQuoteCheckResult,
+    OrderPersistenceError,
+    OrderStatus,
+    TradeExecutionService,
+    _PendingOrder,
+)
 
 
 class TestOrderStatus:
@@ -49,6 +56,9 @@ class TestTradeExecutionServiceBasics:
             record_order=lambda *args: None,
             update_order_status=lambda *args: None,
             record_risk_event=lambda *args: None,
+            final_order_quote_check=lambda _broker, _symbol, _action, price: (
+                FinalOrderQuoteCheckResult(executable_price=price)
+            ),
         )
 
     def test_has_pending_order_false_initially(self, svc: TradeExecutionService) -> None:
@@ -322,6 +332,7 @@ class TestTradeExecutionServiceBasics:
         record_calls = 0
         order_persisted = False
         update_calls = 0
+        update_args: list[tuple[object, ...]] = []
         filled_symbols: list[str] = []
 
         def record_order(*_args: object) -> None:
@@ -331,9 +342,10 @@ class TestTradeExecutionServiceBasics:
                 raise RuntimeError("initial order persistence failed")
             order_persisted = True
 
-        def update_order_status(*_args: object) -> None:
+        def update_order_status(*args: object) -> None:
             nonlocal update_calls
             update_calls += 1
+            update_args.append(args)
             if not order_persisted:
                 raise RuntimeError("order record does not exist yet")
 
@@ -395,7 +407,14 @@ class TestTradeExecutionServiceBasics:
         assert status.status == "FILLED"
         assert status.fill_finalized is True
         assert record_calls == 2
-        assert update_calls == 2
+        assert update_calls == 3
+        assert sum(
+            1
+            for args in update_args
+            if len(args) == 6
+            and isinstance(args[5], dict)
+            and args[5].get("pnl_source") == "TRACKED_ENTRY"
+        ) == 1
         tracked = svc.tracked_position("AAPL.US")
         assert tracked is not None
         assert tracked.quantity == Decimal("3")
@@ -1462,6 +1481,124 @@ class TestTradeExecutionServiceBasics:
         assert broker.get_positions.call_count == 2
 
     @pytest.mark.parametrize(
+        ("action", "position_side", "fresh_bbo", "expected_price"),
+        [
+            ("SELL", "LONG", Decimal("214.737"), Decimal("214.73")),
+            (
+                "BUY_TO_COVER",
+                "SHORT",
+                Decimal("100.123"),
+                Decimal("100.13"),
+            ),
+        ],
+    )
+    def test_reduce_only_submission_binds_fresh_marketable_bbo(
+        self,
+        action: str,
+        position_side: str,
+        fresh_bbo: Decimal,
+        expected_price: Decimal,
+    ) -> None:
+        submitted_prices: list[Decimal] = []
+
+        class Broker:
+            def get_positions(self):
+                return [
+                    SimpleNamespace(
+                        symbol="AAPL.US",
+                        side=position_side,
+                        quantity=Decimal("2"),
+                        available_quantity=Decimal("2"),
+                        avg_price=Decimal("200"),
+                    )
+                ]
+
+            def submit_limit_order(
+                self,
+                symbol: str,
+                side: str,
+                quantity: Decimal,
+                price: Decimal,
+            ) -> OrderResult:
+                submitted_prices.append(price)
+                return OrderResult(
+                    "fresh-bbo-exit",
+                    symbol,
+                    side,
+                    quantity,
+                    price,
+                    "FILLED",
+                )
+
+        svc = TradeExecutionService(
+            record_order=lambda *args: None,
+            update_order_status=lambda *args: None,
+            record_risk_event=lambda *args: None,
+            final_order_quote_check=lambda *_args: FinalOrderQuoteCheckResult(
+                executable_price=fresh_bbo
+            ),
+        )
+        svc._record_entry_price(
+            "AAPL.US",
+            Decimal("200"),
+            Decimal("2"),
+            side=position_side,
+        )
+
+        status = svc.execute(
+            action,
+            "AAPL.US",
+            Quote("AAPL.US", 214.9, 214.8, 215.0, ""),
+            Broker(),
+            RiskController(),
+            ServerChanNotifier(""),
+            "USD",
+            allow_loss_exit=True,
+            reduce_only=True,
+        )
+
+        assert status is not None
+        assert status.status == "FILLED"
+        assert submitted_prices == [expected_price]
+
+    def test_reduce_only_submission_rejects_quote_check_without_bound_price(
+        self,
+    ) -> None:
+        broker = MagicMock()
+        broker.get_positions.return_value = [
+            SimpleNamespace(
+                symbol="AAPL.US",
+                side="LONG",
+                quantity=Decimal("2"),
+                available_quantity=Decimal("2"),
+                avg_price=Decimal("100"),
+            )
+        ]
+        svc = TradeExecutionService(
+            record_order=lambda *args: None,
+            update_order_status=lambda *args: None,
+            record_risk_event=lambda *args: None,
+            final_order_quote_check=lambda *_args: None,
+        )
+
+        status = svc.execute(
+            "SELL",
+            "AAPL.US",
+            Quote("AAPL.US", 101, 100.9, 101.1, ""),
+            broker,
+            RiskController(),
+            ServerChanNotifier(""),
+            "USD",
+            allow_loss_exit=True,
+            reduce_only=True,
+        )
+
+        assert status is not None
+        assert status.status == "SKIPPED"
+        assert "was not bound" in status.reason
+        broker.submit_limit_order.assert_not_called()
+
+    @pytest.mark.parametrize(
         "final_snapshot",
         [
             [],
@@ -2100,8 +2237,18 @@ class TestTradeExecutionServiceBasics:
         broker.get_positions.return_value = [Position("NVDA.US", "SHORT", Decimal("200"), Decimal("102"))]
         broker.submit_limit_order.return_value = OrderResult("weighted-cover", "NVDA.US", "BUY", Decimal("200"), Decimal("95"), "FILLED")
         risk = RiskController()
-        svc._record_entry_price("NVDA.US", Decimal("100"), Decimal("100"))
-        svc._record_entry_price("NVDA.US", Decimal("96"), Decimal("100"))
+        svc._record_entry_price(
+            "NVDA.US",
+            Decimal("100"),
+            Decimal("100"),
+            side="SHORT",
+        )
+        svc._record_entry_price(
+            "NVDA.US",
+            Decimal("96"),
+            Decimal("100"),
+            side="SHORT",
+        )
 
         status = svc.execute(
             "BUY_TO_COVER",
@@ -2466,6 +2613,106 @@ class TestTradeExecutionServiceBasics:
         assert tracked.side == tracked_side
         assert svc.pending_order_for("AAPL.US") is None
 
+    @pytest.mark.parametrize(
+        (
+            "action",
+            "tracked_side",
+            "fill_price",
+            "actual_fee",
+            "expected_fee",
+            "expected_fee_source",
+        ),
+        [
+            (
+                "SELL",
+                "LONG",
+                Decimal("110"),
+                Decimal("0.05"),
+                0.25,
+                "MIXED",
+            ),
+            (
+                "BUY_TO_COVER",
+                "SHORT",
+                Decimal("90"),
+                None,
+                0.38,
+                "ESTIMATED",
+            ),
+        ],
+    )
+    def test_exit_fill_persists_authoritative_tracked_entry_pnl_metadata(
+        self,
+        action: str,
+        tracked_side: str,
+        fill_price: Decimal,
+        actual_fee: Decimal | None,
+        expected_fee: float,
+        expected_fee_source: str,
+    ) -> None:
+        updates: list[tuple[object, ...]] = []
+
+        def update_order_status(*args: object) -> None:
+            updates.append(args)
+
+        svc = TradeExecutionService(
+            record_order=lambda *args: None,
+            update_order_status=update_order_status,
+            record_risk_event=lambda *args: None,
+        )
+        opened_at = datetime(2026, 7, 15, 13, 30, tzinfo=timezone.utc)
+        svc.load_tracked_entries({
+            "AAPL.US": (
+                Decimal("5"),
+                Decimal("500"),
+                tracked_side,
+                opened_at,
+            )
+        })
+        pending = _PendingOrder(
+            broker=MagicMock(),
+            broker_order_id=f"authoritative-{action.lower()}",
+            symbol="AAPL.US",
+            action=action,
+            quantity=Decimal("2"),
+            price=fill_price,
+            engine_snapshot=None,
+            avg_price=Decimal("80"),
+            pnl_fee_rate=Decimal("0.001"),
+        )
+        terminal = OrderStatus(
+            pending.broker_order_id,
+            "FILLED",
+            executed_quantity=Decimal("2"),
+            executed_price=fill_price,
+            actual_fee=actual_fee,
+            broker_updated_at=datetime(2026, 7, 15, 14, 0, tzinfo=timezone.utc),
+        )
+
+        svc._finalize_pending_fill(pending, terminal, risk=RiskController())
+
+        assert len(updates) == 1
+        order_id, status, _filled_at, executed_qty, executed_price, metadata = updates[0]
+        assert order_id == pending.broker_order_id
+        assert status == "FILLED"
+        assert executed_qty == pytest.approx(2.0)
+        assert executed_price == pytest.approx(float(fill_price))
+        assert isinstance(metadata, dict)
+        assert metadata["pnl_source"] == "TRACKED_ENTRY"
+        assert metadata["cost_basis_price"] == pytest.approx(100.0)
+        assert metadata["cost_basis_quantity"] == pytest.approx(2.0)
+        assert metadata["cost_basis_opened_at"] == opened_at
+        assert metadata["position_quantity_before"] == pytest.approx(5.0)
+        assert metadata["gross_pnl"] == pytest.approx(20.0)
+        assert metadata["pnl_fee"] == pytest.approx(expected_fee)
+        assert metadata["pnl_fee_rate"] == pytest.approx(0.001)
+        assert metadata["pnl_fee_source"] == expected_fee_source
+        assert metadata["net_pnl"] == pytest.approx(20.0 - expected_fee)
+
+        tracked = svc.tracked_position("AAPL.US")
+        assert tracked is not None
+        assert tracked.quantity == Decimal("3")
+
     def test_same_terminal_fill_is_finalized_only_once(self) -> None:
         fills: list[str] = []
         reductions: list[tuple[str, str, Decimal]] = []
@@ -2614,6 +2861,189 @@ class TestTradeExecutionServiceBasics:
         assert tracked_after_retry.quantity == Decimal("3")
         assert risk.record_calls == 2
         assert risk.daily_pnl == 20.0
+
+    def test_authoritative_accounting_write_failure_has_no_memory_side_effects(
+        self,
+    ) -> None:
+        should_fail = True
+        tracked_writes: list[tuple[str, Decimal, Decimal]] = []
+        fill_callbacks: list[str] = []
+
+        def update_order_status(*_args: object) -> None:
+            if should_fail:
+                raise RuntimeError("temporary ledger failure")
+
+        svc = TradeExecutionService(
+            record_order=lambda *args: None,
+            update_order_status=update_order_status,
+            record_risk_event=lambda *args: None,
+            persist_entry=lambda symbol, quantity, cost: tracked_writes.append(
+                (symbol, quantity, cost)
+            ),
+            on_fill=fill_callbacks.append,
+        )
+        svc.load_tracked_entries({
+            "AAPL.US": (
+                Decimal("5"),
+                Decimal("500"),
+                "LONG",
+                datetime(2026, 7, 15, 13, 30, tzinfo=timezone.utc),
+            )
+        })
+        pending = _PendingOrder(
+            broker=MagicMock(),
+            broker_order_id="accounting-retry",
+            symbol="AAPL.US",
+            action="SELL",
+            quantity=Decimal("2"),
+            price=Decimal("110"),
+            engine_snapshot=None,
+            avg_price=Decimal("100"),
+        )
+        terminal = OrderStatus(
+            "accounting-retry",
+            "FILLED",
+            executed_quantity=Decimal("2"),
+            executed_price=Decimal("110"),
+        )
+        risk = RiskController()
+
+        with pytest.raises(OrderPersistenceError, match="authoritative accounting"):
+            svc._finalize_pending_fill(pending, terminal, risk=risk)
+
+        tracked = svc.tracked_position("AAPL.US")
+        assert tracked is not None
+        assert tracked.quantity == Decimal("5")
+        assert tracked.cost == Decimal("500")
+        assert tracked_writes == []
+        assert fill_callbacks == []
+        assert risk.daily_pnl == 0.0
+        assert risk.paused is True
+        assert svc.pending_order_ids() == ["accounting-retry"]
+
+        should_fail = False
+        svc._finalize_pending_fill(pending, terminal, risk=risk)
+        svc._finalize_pending_fill(pending, terminal, risk=risk)
+
+        tracked = svc.tracked_position("AAPL.US")
+        assert tracked is not None
+        assert tracked.quantity == Decimal("3")
+        assert tracked.cost == Decimal("300")
+        assert tracked_writes == [("AAPL.US", Decimal("3"), Decimal("300"))]
+        assert fill_callbacks == ["AAPL.US"]
+        assert risk.daily_pnl == 20.0
+
+    def test_tracked_reduction_write_failure_is_retryable_without_double_pnl(
+        self,
+    ) -> None:
+        persist_calls = 0
+
+        def persist_entry(_symbol: str, _quantity: Decimal, _cost: Decimal) -> None:
+            nonlocal persist_calls
+            persist_calls += 1
+            if persist_calls == 1:
+                raise RuntimeError("temporary tracked-entry failure")
+
+        svc = TradeExecutionService(
+            record_order=lambda *args: None,
+            update_order_status=lambda *args: None,
+            record_risk_event=lambda *args: None,
+            persist_entry=persist_entry,
+        )
+        svc.load_tracked_entries({
+            "AAPL.US": (
+                Decimal("5"),
+                Decimal("500"),
+                "LONG",
+                datetime(2026, 7, 15, 13, 30, tzinfo=timezone.utc),
+            )
+        })
+        pending = _PendingOrder(
+            broker=MagicMock(),
+            broker_order_id="tracked-retry",
+            symbol="AAPL.US",
+            action="SELL",
+            quantity=Decimal("2"),
+            price=Decimal("110"),
+            engine_snapshot=None,
+            avg_price=Decimal("100"),
+        )
+        terminal = OrderStatus(
+            "tracked-retry",
+            "FILLED",
+            executed_quantity=Decimal("2"),
+            executed_price=Decimal("110"),
+        )
+        risk = RiskController()
+
+        with pytest.raises(OrderPersistenceError, match="tracked reduction"):
+            svc._finalize_pending_fill(pending, terminal, risk=risk)
+
+        tracked = svc.tracked_position("AAPL.US")
+        assert tracked is not None
+        assert tracked.quantity == Decimal("5")
+        assert risk.daily_pnl == 0.0
+
+        svc._finalize_pending_fill(pending, terminal, risk=risk)
+        svc._finalize_pending_fill(pending, terminal, risk=risk)
+
+        tracked = svc.tracked_position("AAPL.US")
+        assert tracked is not None
+        assert tracked.quantity == Decimal("3")
+        assert persist_calls == 2
+        assert risk.daily_pnl == 20.0
+
+    def test_tracked_entry_write_failure_keeps_entry_fill_retryable(self) -> None:
+        persist_calls = 0
+        fill_callbacks: list[str] = []
+
+        def persist_entry(_symbol: str, _quantity: Decimal, _cost: Decimal) -> None:
+            nonlocal persist_calls
+            persist_calls += 1
+            if persist_calls == 1:
+                raise RuntimeError("temporary tracked-entry failure")
+
+        svc = TradeExecutionService(
+            record_order=lambda *args: None,
+            update_order_status=lambda *args: None,
+            record_risk_event=lambda *args: None,
+            persist_entry=persist_entry,
+            on_fill=fill_callbacks.append,
+        )
+        pending = _PendingOrder(
+            broker=MagicMock(),
+            broker_order_id="entry-retry",
+            symbol="AAPL.US",
+            action="BUY",
+            quantity=Decimal("2"),
+            price=Decimal("100"),
+            engine_snapshot=None,
+        )
+        terminal = OrderStatus(
+            "entry-retry",
+            "FILLED",
+            executed_quantity=Decimal("2"),
+            executed_price=Decimal("100"),
+        )
+        risk = RiskController()
+
+        with pytest.raises(OrderPersistenceError, match="tracked entry"):
+            svc._finalize_pending_fill(pending, terminal, risk=risk)
+
+        assert svc.tracked_position("AAPL.US") is None
+        assert fill_callbacks == []
+        assert risk.paused is True
+        assert svc.pending_order_ids() == ["entry-retry"]
+
+        svc._finalize_pending_fill(pending, terminal, risk=risk)
+        svc._finalize_pending_fill(pending, terminal, risk=risk)
+
+        tracked = svc.tracked_position("AAPL.US")
+        assert tracked is not None
+        assert tracked.quantity == Decimal("2")
+        assert tracked.cost == Decimal("200")
+        assert persist_calls == 2
+        assert fill_callbacks == ["AAPL.US"]
 
     def test_execute_sell_skips_when_fees_reduce_net_profit_below_minimum(self, monkeypatch) -> None:
         from app.config import settings
@@ -2771,6 +3201,9 @@ class TestTradeExecutionServiceBasics:
             record_order=lambda *args: None,
             update_order_status=lambda *args: None,
             record_risk_event=lambda *args: None,
+            final_order_quote_check=lambda _broker, _symbol, _action, price: (
+                FinalOrderQuoteCheckResult(executable_price=price)
+            ),
         )
         risk = RiskController()
         risk.pause(f"{trade_svc_module.ORDER_EXECUTION_BLOCKED_PREFIX} verified")

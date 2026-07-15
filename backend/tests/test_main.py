@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from collections.abc import Generator
 from datetime import datetime, timedelta, timezone
@@ -50,6 +51,33 @@ async def test_lifespan_passes_application_loop_to_runner(monkeypatch) -> None:
         pass
 
     assert started_with == [current_loop]
+
+
+async def test_llm_storage_maintenance_waits_for_worker_during_cancel(
+    monkeypatch,
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_tick() -> None:
+        started.set()
+        assert release.wait(2)
+
+    monkeypatch.setattr(
+        main_module,
+        "_llm_storage_maintenance_tick_sync",
+        blocking_tick,
+    )
+    task = asyncio.create_task(main_module._run_llm_storage_maintenance_tick())
+    assert await asyncio.to_thread(started.wait, 2)
+
+    task.cancel()
+    await asyncio.sleep(0)
+    assert task.done() is False
+
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
 
 
 def test_strategy_v2_shadow_tick_is_isolated_from_execution(monkeypatch) -> None:

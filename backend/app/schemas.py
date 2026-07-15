@@ -503,6 +503,8 @@ class StrategyV2ShadowDailyEvidence(BaseModel):
     exit_reasons: dict[str, int] = Field(default_factory=dict)
     partial_start: bool
     partial_end: bool
+    outside_session_bars: int = 0
+    complete_session: bool = False
 
 
 class StrategyV2ShadowEvaluationResponse(BaseModel):
@@ -513,6 +515,7 @@ class StrategyV2ShadowEvaluationResponse(BaseModel):
     status: Literal["COLLECTING", "READY_FOR_REVIEW"]
     observed_trading_days: int
     minimum_trading_days: int = 20
+    minimum_session_coverage_ratio: float = 0.995
     remaining_trading_days: int
     closed_trades: int
     minimum_closed_trades: int = 50
@@ -793,6 +796,16 @@ class OrderResponse(BaseModel):
     slippage_bps: Optional[float] = None
     exit_cause: str = ""
     exit_reason: str = ""
+    gross_pnl: Optional[float] = None
+    net_pnl: Optional[float] = None
+    pnl_source: str = "UNKNOWN"
+    cost_basis_price: Optional[float] = None
+    cost_basis_quantity: Optional[float] = None
+    cost_basis_opened_at: Optional[datetime] = None
+    position_quantity_before: Optional[float] = None
+    pnl_fee: Optional[float] = None
+    pnl_fee_source: str = "UNKNOWN"
+    pnl_fee_rate: Optional[float] = None
 
     model_config = {"from_attributes": True}
 

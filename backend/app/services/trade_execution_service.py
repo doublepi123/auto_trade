@@ -103,6 +103,14 @@ class OrderStatus:
 
 
 @dataclass(frozen=True)
+class FinalOrderQuoteCheckResult:
+    """Fresh quote validation result returned immediately before submission."""
+
+    executable_price: Decimal | None = None
+    issue: str = ""
+
+
+@dataclass(frozen=True)
 class _PendingOrder:
     broker: BrokerGateway
     broker_order_id: str
@@ -112,6 +120,7 @@ class _PendingOrder:
     price: Decimal
     engine_snapshot: EngineSnapshot | None
     avg_price: Decimal | None = None
+    pnl_fee_rate: Decimal = Decimal("0")
     next_status_check_at: float = 0.0
     submitted_at: float = 0.0
     restore_engine_snapshot_fn: Callable[[EngineSnapshot], None] | None = None
@@ -156,7 +165,10 @@ class _EntryPositionCheck:
 _EntryPersistCallback = Callable[[str, Decimal, Decimal], None]
 _FillCallback = Callable[[str], None]
 _ReductionFillCallback = Callable[[str, str, Decimal], None]
-_FinalOrderQuoteCheck = Callable[["BrokerGateway", str, str, Decimal], str | None]
+_FinalOrderQuoteCheck = Callable[
+    ["BrokerGateway", str, str, Decimal],
+    FinalOrderQuoteCheckResult | str | None,
+]
 
 
 class TradeExecutionService:
@@ -266,6 +278,7 @@ class TradeExecutionService:
                     price=pending.price,
                     engine_snapshot=pending.engine_snapshot,
                     avg_price=pending.avg_price,
+                    pnl_fee_rate=pending.pnl_fee_rate,
                     next_status_check_at=pending.next_status_check_at,
                     submitted_at=pending.submitted_at,
                     restore_engine_snapshot_fn=pending.restore_engine_snapshot_fn,
@@ -298,6 +311,11 @@ class TradeExecutionService:
                         price=pending.price,
                         engine_snapshot=existing.engine_snapshot,
                         avg_price=existing.avg_price if existing.avg_price is not None else pending.avg_price,
+                        pnl_fee_rate=(
+                            existing.pnl_fee_rate
+                            if existing.pnl_fee_rate > 0
+                            else pending.pnl_fee_rate
+                        ),
                         next_status_check_at=existing.next_status_check_at,
                         submitted_at=existing.submitted_at,
                         restore_engine_snapshot_fn=existing.restore_engine_snapshot_fn if existing.restore_engine_snapshot_fn is not None else pending.restore_engine_snapshot_fn,
@@ -821,11 +839,11 @@ class TradeExecutionService:
         if action == "BUY":
             return self._execute_buy(symbol, quote, broker, risk, notifier, cash_currency, engine_snapshot=engine_snapshot, restore_engine_snapshot=restore_engine_snapshot, notify_risk_event=notify_risk_event)
         if action == "SELL":
-            return self._execute_sell(symbol, quote, broker, risk, notifier, min_profit_amount=min_profit_amount, allow_loss_exit=allow_loss_exit, fee_rate=fee_rate, engine_snapshot=engine_snapshot, restore_engine_snapshot=restore_engine_snapshot, notify_risk_event=notify_risk_event)
+            return self._execute_sell(symbol, quote, broker, risk, notifier, min_profit_amount=min_profit_amount, allow_loss_exit=allow_loss_exit, fee_rate=fee_rate, engine_snapshot=engine_snapshot, restore_engine_snapshot=restore_engine_snapshot, notify_risk_event=notify_risk_event, reduce_only=reduce_only)
         if action == "SELL_SHORT":
             return self._execute_sell_short(symbol, quote, broker, risk, notifier, cash_currency, engine_snapshot=engine_snapshot, restore_engine_snapshot=restore_engine_snapshot, notify_risk_event=notify_risk_event)
         if action == "BUY_TO_COVER":
-            return self._execute_buy_to_cover(symbol, quote, broker, risk, notifier, min_profit_amount=min_profit_amount, allow_loss_exit=allow_loss_exit, fee_rate=fee_rate, engine_snapshot=engine_snapshot, restore_engine_snapshot=restore_engine_snapshot, notify_risk_event=notify_risk_event)
+            return self._execute_buy_to_cover(symbol, quote, broker, risk, notifier, min_profit_amount=min_profit_amount, allow_loss_exit=allow_loss_exit, fee_rate=fee_rate, engine_snapshot=engine_snapshot, restore_engine_snapshot=restore_engine_snapshot, notify_risk_event=notify_risk_event, reduce_only=reduce_only)
         logger.warning("unknown action: %s", action)
         return None
 
@@ -1009,7 +1027,30 @@ class TradeExecutionService:
         return price
 
     @staticmethod
-    def _coerce_non_negative_decimal(value: Decimal | float | int) -> Decimal:
+    def _normalize_marketable_limit_price(
+        symbol: str,
+        action: str,
+        price: Decimal,
+    ) -> Decimal:
+        """Round through the executable BBO, never away from it."""
+        upper_symbol = symbol.upper()
+        rounding = (
+            ROUND_CEILING
+            if action in {"BUY", "BUY_TO_COVER"}
+            else ROUND_FLOOR
+        )
+        if upper_symbol.endswith(".US"):
+            return price.quantize(US_PRICE_TICK, rounding=rounding)
+        if upper_symbol.endswith(".HK"):
+            if price <= 0:
+                return price
+            tick = _hk_tick_for(price)
+            steps = (price / tick).to_integral_value(rounding=rounding)
+            return (steps * tick).quantize(tick)
+        return price
+
+    @staticmethod
+    def _coerce_non_negative_decimal(value: object) -> Decimal:
         try:
             amount = Decimal(str(value))
         except Exception:
@@ -1159,9 +1200,32 @@ class TradeExecutionService:
 
         fill_price = OrderStatus._positive(order_status.executed_price) or price
         fill_qty = OrderStatus._positive(order_status.executed_quantity) or Decimal(qty)
-        self._record_entry_price(symbol, fill_price, fill_qty, side="LONG")
+        pending = _PendingOrder(
+            broker=broker,
+            broker_order_id=order_status.broker_order_id,
+            symbol=symbol,
+            action="BUY",
+            quantity=Decimal(qty),
+            price=price,
+            engine_snapshot=engine_snapshot,
+        )
+        self._record_entry_fill(
+            pending,
+            fill_price,
+            fill_qty,
+            side="LONG",
+            risk=risk,
+            notify_risk_event=notify_risk_event,
+        )
+        self._safe_notify_order(
+            notifier,
+            "BUY",
+            symbol,
+            str(fill_qty),
+            str(fill_price),
+            order_status.broker_order_id,
+        )
         self._mark_fill_processed(symbol)
-        self._safe_notify_order(notifier, "BUY", symbol, str(fill_qty), str(fill_price), order_status.broker_order_id)
         logger.info("BUY: %s qty=%s price=%s", symbol, fill_qty, fill_price)
         return order_status
 
@@ -1179,6 +1243,7 @@ class TradeExecutionService:
         engine_snapshot: EngineSnapshot | None = None,
         restore_engine_snapshot: Callable[[EngineSnapshot], None] | None = None,
         notify_risk_event: _NotifyRiskEvent | None = None,
+        reduce_only: bool = False,
     ) -> OrderStatus | None:
         positions = broker.get_positions()
         long_pos = next((p for p in positions if p.symbol == symbol and p.side == "LONG"), None)
@@ -1221,6 +1286,7 @@ class TradeExecutionService:
             restore_engine_snapshot=restore_engine_snapshot,
             notify_risk_event=notify_risk_event,
             avg_price=pos_avg_price,
+            bind_final_executable_price=reduce_only,
         )
         if (
             order_status is None
@@ -1231,14 +1297,61 @@ class TradeExecutionService:
 
         fill_price = OrderStatus._positive(order_status.executed_price) or price
         fill_qty = OrderStatus._positive(order_status.executed_quantity) or qty
-        self._safe_notify_order(notifier, "SELL", symbol, str(fill_qty), str(fill_price), order_status.broker_order_id)
-        if pos_avg_price > 0:
-            pnl = float((fill_price - pos_avg_price) * fill_qty)
-            risk.record_trade(pnl)
-            logger.info("SELL: %s qty=%s price=%s avg_price=%s pnl=%s", symbol, fill_qty, fill_price, pos_avg_price, pnl)
+        pending = _PendingOrder(
+            broker=broker,
+            broker_order_id=order_status.broker_order_id,
+            symbol=symbol,
+            action="SELL",
+            quantity=qty,
+            price=price,
+            engine_snapshot=engine_snapshot,
+            avg_price=pos_avg_price,
+            pnl_fee_rate=self._coerce_non_negative_decimal(fee_rate),
+        )
+        outcome = self._persist_authoritative_exit_outcome(
+            pending,
+            order_status,
+            fill_price=fill_price,
+            fill_qty=fill_qty,
+            fallback_avg_price=pos_avg_price,
+            risk=risk,
+            notify_risk_event=notify_risk_event,
+        )
+        net_pnl: Decimal | None = None
+        if outcome is not None:
+            gross_pnl, net_pnl = outcome
+            logger.info(
+                "SELL: %s qty=%s price=%s avg_price=%s gross_pnl=%s net_pnl=%s",
+                symbol,
+                fill_qty,
+                fill_price,
+                pos_avg_price,
+                gross_pnl,
+                net_pnl,
+            )
         else:
-            logger.warning("SELL: %s qty=%s price=%s avg_price=%s, skipping PnL recording to avoid inflated risk", symbol, fill_qty, fill_price, pos_avg_price)
-        self._consume_entry_quantity(symbol, fill_qty)
+            logger.warning(
+                "SELL: %s qty=%s price=%s has no authoritative tracked cost; "
+                "skipping PnL recording",
+                symbol,
+                fill_qty,
+                fill_price,
+            )
+        self._settle_reduction_fill(
+            pending,
+            fill_qty,
+            net_pnl=net_pnl,
+            risk=risk,
+            notify_risk_event=notify_risk_event,
+        )
+        self._safe_notify_order(
+            notifier,
+            "SELL",
+            symbol,
+            str(fill_qty),
+            str(fill_price),
+            order_status.broker_order_id,
+        )
         self._mark_fill_processed(symbol)
         return order_status
 
@@ -1291,9 +1404,32 @@ class TradeExecutionService:
 
         fill_price = OrderStatus._positive(order_status.executed_price) or price
         fill_qty = OrderStatus._positive(order_status.executed_quantity) or Decimal(qty)
-        self._record_entry_price(symbol, fill_price, fill_qty, side="SHORT")
+        pending = _PendingOrder(
+            broker=broker,
+            broker_order_id=order_status.broker_order_id,
+            symbol=symbol,
+            action="SELL_SHORT",
+            quantity=Decimal(qty),
+            price=price,
+            engine_snapshot=engine_snapshot,
+        )
+        self._record_entry_fill(
+            pending,
+            fill_price,
+            fill_qty,
+            side="SHORT",
+            risk=risk,
+            notify_risk_event=notify_risk_event,
+        )
+        self._safe_notify_order(
+            notifier,
+            "SELL_SHORT",
+            symbol,
+            str(fill_qty),
+            str(fill_price),
+            order_status.broker_order_id,
+        )
         self._mark_fill_processed(symbol)
-        self._safe_notify_order(notifier, "SELL_SHORT", symbol, str(fill_qty), str(fill_price), order_status.broker_order_id)
         logger.info("SELL_SHORT: %s qty=%s price=%s", symbol, fill_qty, fill_price)
         return order_status
 
@@ -1311,6 +1447,7 @@ class TradeExecutionService:
         engine_snapshot: EngineSnapshot | None = None,
         restore_engine_snapshot: Callable[[EngineSnapshot], None] | None = None,
         notify_risk_event: _NotifyRiskEvent | None = None,
+        reduce_only: bool = False,
     ) -> OrderStatus | None:
         positions = broker.get_positions()
         pos = next((p for p in positions if p.symbol == symbol and p.side == "SHORT" and p.quantity > 0), None)
@@ -1353,6 +1490,7 @@ class TradeExecutionService:
             restore_engine_snapshot=restore_engine_snapshot,
             notify_risk_event=notify_risk_event,
             avg_price=pos_avg_price,
+            bind_final_executable_price=reduce_only,
         )
         if (
             order_status is None
@@ -1363,14 +1501,61 @@ class TradeExecutionService:
 
         fill_price = OrderStatus._positive(order_status.executed_price) or price
         fill_qty = OrderStatus._positive(order_status.executed_quantity) or qty
-        self._safe_notify_order(notifier, "BUY_TO_COVER", symbol, str(fill_qty), str(fill_price), order_status.broker_order_id)
-        if pos_avg_price > 0:
-            pnl = float((pos_avg_price - fill_price) * fill_qty)
-            risk.record_trade(pnl)
-            logger.info("BUY_TO_COVER: %s qty=%s price=%s avg_price=%s pnl=%s", symbol, fill_qty, fill_price, pos_avg_price, pnl)
+        pending = _PendingOrder(
+            broker=broker,
+            broker_order_id=order_status.broker_order_id,
+            symbol=symbol,
+            action="BUY_TO_COVER",
+            quantity=qty,
+            price=price,
+            engine_snapshot=engine_snapshot,
+            avg_price=pos_avg_price,
+            pnl_fee_rate=self._coerce_non_negative_decimal(fee_rate),
+        )
+        outcome = self._persist_authoritative_exit_outcome(
+            pending,
+            order_status,
+            fill_price=fill_price,
+            fill_qty=fill_qty,
+            fallback_avg_price=pos_avg_price,
+            risk=risk,
+            notify_risk_event=notify_risk_event,
+        )
+        net_pnl: Decimal | None = None
+        if outcome is not None:
+            gross_pnl, net_pnl = outcome
+            logger.info(
+                "BUY_TO_COVER: %s qty=%s price=%s avg_price=%s gross_pnl=%s net_pnl=%s",
+                symbol,
+                fill_qty,
+                fill_price,
+                pos_avg_price,
+                gross_pnl,
+                net_pnl,
+            )
         else:
-            logger.warning("BUY_TO_COVER: %s qty=%s price=%s avg_price=%s, skipping PnL recording to avoid inflated risk", symbol, fill_qty, fill_price, pos_avg_price)
-        self._consume_entry_quantity(symbol, fill_qty)
+            logger.warning(
+                "BUY_TO_COVER: %s qty=%s price=%s has no authoritative tracked cost; "
+                "skipping PnL recording",
+                symbol,
+                fill_qty,
+                fill_price,
+            )
+        self._settle_reduction_fill(
+            pending,
+            fill_qty,
+            net_pnl=net_pnl,
+            risk=risk,
+            notify_risk_event=notify_risk_event,
+        )
+        self._safe_notify_order(
+            notifier,
+            "BUY_TO_COVER",
+            symbol,
+            str(fill_qty),
+            str(fill_price),
+            order_status.broker_order_id,
+        )
         self._mark_fill_processed(symbol)
         return order_status
 
@@ -1389,6 +1574,7 @@ class TradeExecutionService:
         restore_engine_snapshot: Callable[[EngineSnapshot], None] | None = None,
         notify_risk_event: _NotifyRiskEvent | None = None,
         avg_price: Decimal | None = None,
+        bind_final_executable_price: bool = False,
     ) -> OrderStatus | None:
         """Submit a limit order, persist it, and handle immediate live/terminal/filled outcomes.
 
@@ -1397,22 +1583,28 @@ class TradeExecutionService:
         should inspect ``status == "FILLED"`` and perform their own tail logic.
         """
         with self._submission_lock:
-            blocked = self._final_submission_precheck(
+            precheck_result = self._final_submission_precheck(
                 action,
                 symbol,
                 qty,
                 price,
                 broker,
                 risk,
+                bind_final_executable_price=bind_final_executable_price,
             )
-            if blocked is not None:
-                return blocked
+            if isinstance(precheck_result, OrderStatus):
+                return precheck_result
+            submission_price = (
+                precheck_result
+                if isinstance(precheck_result, Decimal)
+                else price
+            )
             return self._submit_limit_order_after_precheck(
                 action,
                 symbol,
                 side,
                 qty,
-                price,
+                submission_price,
                 broker,
                 risk,
                 notifier,
@@ -1430,7 +1622,9 @@ class TradeExecutionService:
         price: Decimal,
         broker: BrokerGateway,
         risk: RiskController,
-    ) -> OrderStatus | None:
+        *,
+        bind_final_executable_price: bool = False,
+    ) -> OrderStatus | Decimal | None:
         if action in _ENTRY_ACTIONS:
             position_check = self._entry_position_check(broker, symbol, action)
             if position_check is None:
@@ -1499,9 +1693,10 @@ class TradeExecutionService:
                     position_issue,
                     risk,
                 )
+        final_executable_price: Decimal | None = None
         if self._final_order_quote_check is not None:
             try:
-                quote_issue = self._final_order_quote_check(
+                quote_check_result = self._final_order_quote_check(
                     broker,
                     symbol,
                     action,
@@ -1513,7 +1708,12 @@ class TradeExecutionService:
                     action,
                     symbol,
                 )
-                quote_issue = "fresh executable quote could not be verified"
+                quote_check_result = "fresh executable quote could not be verified"
+            if isinstance(quote_check_result, FinalOrderQuoteCheckResult):
+                quote_issue = quote_check_result.issue
+                final_executable_price = quote_check_result.executable_price
+            else:
+                quote_issue = quote_check_result
             if quote_issue:
                 return self._skip_order(
                     symbol,
@@ -1521,6 +1721,28 @@ class TradeExecutionService:
                     quote_issue,
                     skip_category="RISK",
                 )
+        if bind_final_executable_price:
+            if final_executable_price is None:
+                return self._skip_order(
+                    symbol,
+                    action,
+                    "fresh executable BBO price was not bound to the reduce-only order",
+                    skip_category="RISK",
+                )
+            marketable_price = self._normalize_marketable_limit_price(
+                symbol,
+                action,
+                final_executable_price,
+            )
+            if not marketable_price.is_finite() or marketable_price <= 0:
+                return self._skip_order(
+                    symbol,
+                    action,
+                    "fresh executable BBO price is unavailable",
+                    skip_category="RISK",
+                )
+        else:
+            marketable_price = None
         risk_result = risk.check()
         if not risk_result.approved and not self._risk_rejection_allows_action(action, risk):
             logger.warning(
@@ -1541,7 +1763,7 @@ class TradeExecutionService:
                 action,
                 risk_result.reason,
             )
-        return None
+        return marketable_price
 
     @staticmethod
     def _final_reduction_position_issue(
@@ -1672,6 +1894,38 @@ class TradeExecutionService:
             ),
             "fee_source": "ESTIMATED",
         })
+        if action in _POSITION_REDUCING_ACTIONS and avg_price is not None and avg_price > 0:
+            tracked = self.tracked_position(symbol)
+            expected_side = "LONG" if action == "SELL" else "SHORT"
+            tracked_is_authoritative = (
+                tracked is not None
+                and tracked.side == expected_side
+                and tracked.quantity >= qty
+                and tracked.avg_price > 0
+            )
+            if tracked_is_authoritative:
+                assert tracked is not None
+                cost_basis_price = tracked.avg_price
+                cost_basis_opened_at = tracked.opened_at
+                position_quantity_before = tracked.quantity
+            else:
+                cost_basis_price = avg_price
+                cost_basis_opened_at = None
+                position_quantity_before = qty
+            ledger_metadata.update({
+                "pnl_source": (
+                    "TRACKED_ENTRY" if tracked_is_authoritative else "BROKER_POSITION"
+                ),
+                "cost_basis_price": float(cost_basis_price),
+                "cost_basis_quantity": float(qty),
+                "cost_basis_opened_at": cost_basis_opened_at,
+                "position_quantity_before": float(position_quantity_before),
+                "pnl_fee_rate": float(
+                    self._coerce_non_negative_decimal(
+                        ledger_metadata.get("fee_rate", 0)
+                    )
+                ),
+            })
         decision_at = ledger_metadata.get("decision_at")
         if isinstance(decision_at, datetime):
             ledger_metadata["submit_latency_ms"] = max(
@@ -1812,6 +2066,9 @@ class TradeExecutionService:
             price=result.price,
             engine_snapshot=engine_snapshot,
             avg_price=avg_price,
+            pnl_fee_rate=self._coerce_non_negative_decimal(
+                self._active_execution_context.get("fee_rate", 0)
+            ),
             next_status_check_at=time.monotonic() + self._order_status_poll_interval_seconds,
             submitted_at=time.monotonic(),
             restore_engine_snapshot_fn=restore_engine_snapshot_fn,
@@ -1855,6 +2112,11 @@ class TradeExecutionService:
                         if pending.avg_price is not None
                         else existing_by_id.avg_price
                     ),
+                    pnl_fee_rate=(
+                        pending.pnl_fee_rate
+                        if pending.pnl_fee_rate > 0
+                        else existing_by_id.pnl_fee_rate
+                    ),
                     next_status_check_at=pending.next_status_check_at,
                     submitted_at=(
                         existing_by_id.submitted_at
@@ -1891,6 +2153,7 @@ class TradeExecutionService:
             price=pending.price,
             engine_snapshot=pending.engine_snapshot,
             avg_price=pending.avg_price,
+            pnl_fee_rate=pending.pnl_fee_rate,
             next_status_check_at=now + self._order_status_poll_interval_seconds,
             submitted_at=pending.submitted_at,
             restore_engine_snapshot_fn=pending.restore_engine_snapshot_fn,
@@ -1963,6 +2226,7 @@ class TradeExecutionService:
             price=pending.price,
             engine_snapshot=pending.engine_snapshot,
             avg_price=pending.avg_price,
+            pnl_fee_rate=pending.pnl_fee_rate,
             next_status_check_at=now + self._order_status_poll_interval_seconds,
             submitted_at=pending.submitted_at,
             restore_engine_snapshot_fn=pending.restore_engine_snapshot_fn,
@@ -2281,42 +2545,312 @@ class TradeExecutionService:
         fill_qty = fill_qty if fill_qty is not None else self._resolved_decimal(order_status, "executed_quantity", pending.quantity)
         if pending.action == "SELL":
             avg_price = self._resolve_avg_price_for_exit(pending.symbol, pending.avg_price if pending.avg_price is not None and pending.avg_price > 0 else None, fill_qty)
-            self._safe_notify_order(notifier, "SELL", pending.symbol, str(fill_qty), str(fill_price), pending.broker_order_id)
-            if avg_price > 0:
-                pnl = float((fill_price - avg_price) * fill_qty)
-                if risk is not None:
-                    risk.record_trade(pnl)
-                logger.info("SELL filled: %s qty=%s price=%s avg_price=%s pnl=%s", pending.symbol, fill_qty, fill_price, avg_price, pnl)
+            outcome = self._persist_authoritative_exit_outcome(
+                pending,
+                order_status,
+                fill_price=fill_price,
+                fill_qty=fill_qty,
+                fallback_avg_price=avg_price,
+                risk=risk,
+                notify_risk_event=notify_risk_event,
+            )
+            net_pnl: Decimal | None = None
+            if outcome is not None:
+                gross_pnl, net_pnl = outcome
+                logger.info(
+                    "SELL filled: %s qty=%s price=%s avg_price=%s gross_pnl=%s net_pnl=%s",
+                    pending.symbol,
+                    fill_qty,
+                    fill_price,
+                    avg_price,
+                    gross_pnl,
+                    net_pnl,
+                )
             else:
-                logger.warning("SELL filled with avg_price=0 for %s, skipping PnL recording to avoid inflated risk", pending.symbol)
-            self._consume_entry_quantity(pending.symbol, fill_qty)
+                logger.warning(
+                    "SELL filled without authoritative tracked cost for %s; "
+                    "skipping PnL recording to avoid corrupting risk state",
+                    pending.symbol,
+                )
+            self._settle_reduction_fill(
+                pending,
+                fill_qty,
+                net_pnl=net_pnl,
+                risk=risk,
+                notify_risk_event=notify_risk_event,
+            )
+            self._safe_notify_order(
+                notifier,
+                "SELL",
+                pending.symbol,
+                str(fill_qty),
+                str(fill_price),
+                pending.broker_order_id,
+            )
             self._mark_fill_processed(pending.symbol)
             self._notify_reduction_fill(pending.symbol, pending.action, fill_qty)
             return
         if pending.action == "BUY_TO_COVER":
             avg_price = self._resolve_avg_price_for_exit(pending.symbol, pending.avg_price if pending.avg_price is not None and pending.avg_price > 0 else None, fill_qty)
-            self._safe_notify_order(notifier, "BUY_TO_COVER", pending.symbol, str(fill_qty), str(fill_price), pending.broker_order_id)
-            if avg_price > 0:
-                pnl = float((avg_price - fill_price) * fill_qty)
-                if risk is not None:
-                    risk.record_trade(pnl)
-                logger.info("BUY_TO_COVER filled: %s qty=%s price=%s avg_price=%s pnl=%s", pending.symbol, fill_qty, fill_price, avg_price, pnl)
+            outcome = self._persist_authoritative_exit_outcome(
+                pending,
+                order_status,
+                fill_price=fill_price,
+                fill_qty=fill_qty,
+                fallback_avg_price=avg_price,
+                risk=risk,
+                notify_risk_event=notify_risk_event,
+            )
+            net_pnl = None
+            if outcome is not None:
+                gross_pnl, net_pnl = outcome
+                logger.info(
+                    "BUY_TO_COVER filled: %s qty=%s price=%s avg_price=%s gross_pnl=%s net_pnl=%s",
+                    pending.symbol,
+                    fill_qty,
+                    fill_price,
+                    avg_price,
+                    gross_pnl,
+                    net_pnl,
+                )
             else:
-                logger.warning("BUY_TO_COVER filled with avg_price=0 for %s, skipping PnL recording to avoid inflated risk", pending.symbol)
-            self._consume_entry_quantity(pending.symbol, fill_qty)
+                logger.warning(
+                    "BUY_TO_COVER filled without authoritative tracked cost for %s; "
+                    "skipping PnL recording to avoid corrupting risk state",
+                    pending.symbol,
+                )
+            self._settle_reduction_fill(
+                pending,
+                fill_qty,
+                net_pnl=net_pnl,
+                risk=risk,
+                notify_risk_event=notify_risk_event,
+            )
+            self._safe_notify_order(
+                notifier,
+                "BUY_TO_COVER",
+                pending.symbol,
+                str(fill_qty),
+                str(fill_price),
+                pending.broker_order_id,
+            )
             self._mark_fill_processed(pending.symbol)
             self._notify_reduction_fill(pending.symbol, pending.action, fill_qty)
             return
-        self._safe_notify_order(notifier, pending.action, pending.symbol, str(fill_qty), str(fill_price), pending.broker_order_id)
         if pending.action in {"BUY", "SELL_SHORT"}:
+            self._record_entry_fill(
+                pending,
+                fill_price,
+                fill_qty,
+                side="SHORT" if pending.action == "SELL_SHORT" else "LONG",
+                risk=risk,
+                notify_risk_event=notify_risk_event,
+            )
+        self._safe_notify_order(notifier, pending.action, pending.symbol, str(fill_qty), str(fill_price), pending.broker_order_id)
+        self._mark_fill_processed(pending.symbol)
+        logger.info("%s filled: %s qty=%s price=%s", pending.action, pending.symbol, fill_qty, fill_price)
+
+    def _persist_authoritative_exit_outcome(
+        self,
+        pending: _PendingOrder,
+        order_status: object,
+        *,
+        fill_price: Decimal,
+        fill_qty: Decimal,
+        fallback_avg_price: Decimal,
+        risk: RiskController | None,
+        notify_risk_event: _NotifyRiskEvent | None,
+    ) -> tuple[Decimal, Decimal] | None:
+        expected_side = "LONG" if pending.action == "SELL" else "SHORT"
+        tracked = self.tracked_position(pending.symbol)
+        tracked_is_authoritative = (
+            tracked is not None
+            and tracked.side == expected_side
+            and tracked.quantity >= fill_qty
+            and tracked.avg_price > 0
+        )
+        if not tracked_is_authoritative and fallback_avg_price <= 0:
+            logger.error(
+                "cannot persist authoritative %s outcome for %s: tracked side/quantity/cost "
+                "does not cover fill; tracked=%s fill_qty=%s fallback_avg=%s",
+                pending.action,
+                pending.symbol,
+                tracked,
+                fill_qty,
+                fallback_avg_price,
+            )
+            return None
+
+        if tracked_is_authoritative:
+            assert tracked is not None
+            cost_basis_price = tracked.avg_price
+            position_quantity_before = tracked.quantity
+            cost_basis_opened_at = tracked.opened_at
+        else:
+            cost_basis_price = fallback_avg_price
+            position_quantity_before = max(pending.quantity, fill_qty)
+            cost_basis_opened_at = None
+        pnl_source = "TRACKED_ENTRY" if tracked_is_authoritative else "BROKER_POSITION"
+        gross_pnl = (
+            (fill_price - cost_basis_price) * fill_qty
+            if pending.action == "SELL"
+            else (cost_basis_price - fill_price) * fill_qty
+        )
+        fee_rate = self._coerce_non_negative_decimal(pending.pnl_fee_rate)
+        entry_fee = cost_basis_price * fill_qty * fee_rate
+        actual_fee_raw = getattr(order_status, "actual_fee", None)
+        actual_exit_fee: Decimal | None = None
+        if actual_fee_raw is not None:
+            try:
+                candidate = Decimal(str(actual_fee_raw))
+                if candidate.is_finite() and candidate >= 0:
+                    actual_exit_fee = candidate
+            except Exception:
+                actual_exit_fee = None
+        if actual_exit_fee is None:
+            exit_fee = fill_price * fill_qty * fee_rate
+            pnl_fee_source = "ESTIMATED"
+        else:
+            exit_fee = actual_exit_fee
+            pnl_fee_source = "MIXED"
+        pnl_fee = entry_fee + exit_fee
+        net_pnl = gross_pnl - pnl_fee
+        metadata: dict[str, object] = {
+            "pnl_source": pnl_source,
+            "cost_basis_price": float(cost_basis_price),
+            "cost_basis_quantity": float(fill_qty),
+            "cost_basis_opened_at": cost_basis_opened_at,
+            "position_quantity_before": float(position_quantity_before),
+            "gross_pnl": float(gross_pnl),
+            "pnl_fee": float(pnl_fee),
+            "pnl_fee_source": pnl_fee_source,
+            "pnl_fee_rate": float(fee_rate),
+            "net_pnl": float(net_pnl),
+        }
+        filled_at = getattr(order_status, "broker_updated_at", None) or datetime.now(timezone.utc)
+        persisted = self._safe_update_order_status(
+            pending.broker_order_id,
+            str(getattr(order_status, "status", "FILLED") or "FILLED"),
+            filled_at,
+            float(fill_qty),
+            float(fill_price),
+            metadata,
+        )
+        if not persisted:
+            self._pause_for_order_status_persistence_failure(
+                pending,
+                "FILLED_ACCOUNTING",
+                risk=risk,
+                notify_risk_event=notify_risk_event,
+            )
+            raise OrderPersistenceError(
+                f"failed to persist authoritative accounting for order "
+                f"{pending.broker_order_id}"
+            )
+        return gross_pnl, net_pnl
+
+    def _settle_reduction_fill(
+        self,
+        pending: _PendingOrder,
+        fill_qty: Decimal,
+        *,
+        net_pnl: Decimal | None,
+        risk: RiskController | None,
+        notify_risk_event: _NotifyRiskEvent | None,
+    ) -> None:
+        """Persist tracked-position reduction before changing in-memory state.
+
+        Retrying a terminal fill must be idempotent. The durable tracked-entry
+        update is therefore written from the unchanged in-memory snapshot,
+        followed by the risk update, and only then applied in memory. If either
+        durable accounting or risk settlement fails, the pending fill remains
+        retryable and no quantity is consumed in memory.
+        """
+        if fill_qty <= 0:
+            return
+        try:
+            with self._state_lock:
+                entry = self._entry_positions.get(pending.symbol)
+                consumed = Decimal("0")
+                new_quantity = Decimal("0")
+                new_cost = Decimal("0")
+                if entry is not None and entry.quantity > 0:
+                    consumed = min(fill_qty, entry.quantity)
+                    avg_price = entry.avg_price
+                    new_quantity = entry.quantity - consumed
+                    new_cost = entry.cost - avg_price * consumed
+                    if new_quantity <= 0:
+                        new_quantity = Decimal("0")
+                        new_cost = Decimal("0")
+                    elif new_cost < 0:
+                        logger.warning(
+                            "cost clamp for %s: cost went negative (%s), resetting to 0",
+                            pending.symbol,
+                            new_cost,
+                        )
+                        new_cost = Decimal("0")
+
+                    if self._persist_entry is not None:
+                        try:
+                            self._persist_entry(
+                                pending.symbol,
+                                new_quantity,
+                                new_cost,
+                            )
+                        except Exception as exc:
+                            logger.exception(
+                                "failed to persist tracked reduction for %s",
+                                pending.symbol,
+                            )
+                            raise OrderPersistenceError(
+                                f"failed to persist tracked reduction for "
+                                f"{pending.symbol}"
+                            ) from exc
+
+                if net_pnl is not None and risk is not None:
+                    risk.record_trade(float(net_pnl))
+
+                if entry is not None and consumed > 0:
+                    if new_quantity <= 0:
+                        self._entry_positions.pop(pending.symbol, None)
+                    else:
+                        entry.quantity = new_quantity
+                        entry.cost = new_cost
+        except Exception:
+            self._pause_for_order_status_persistence_failure(
+                pending,
+                "FILLED_ACCOUNTING",
+                risk=risk,
+                notify_risk_event=notify_risk_event,
+            )
+            raise
+
+    def _record_entry_fill(
+        self,
+        pending: _PendingOrder,
+        fill_price: Decimal,
+        fill_qty: Decimal,
+        *,
+        side: str,
+        risk: RiskController | None,
+        notify_risk_event: _NotifyRiskEvent | None,
+    ) -> None:
+        try:
             self._record_entry_price(
                 pending.symbol,
                 fill_price,
                 fill_qty,
-                side="SHORT" if pending.action == "SELL_SHORT" else "LONG",
+                side=side,
+                raise_on_persistence_error=True,
             )
-        self._mark_fill_processed(pending.symbol)
-        logger.info("%s filled: %s qty=%s price=%s", pending.action, pending.symbol, fill_qty, fill_price)
+        except Exception:
+            self._pause_for_order_status_persistence_failure(
+                pending,
+                "FILLED_TRACKED_ENTRY",
+                risk=risk,
+                notify_risk_event=notify_risk_event,
+            )
+            raise
 
     def _notify_reduction_fill(self, symbol: str, action: str, fill_qty: Decimal) -> None:
         if self._on_reduction_fill is None:
@@ -2372,6 +2906,9 @@ class TradeExecutionService:
             price=result.price,
             engine_snapshot=engine_snapshot,
             avg_price=avg_price,
+            pnl_fee_rate=self._coerce_non_negative_decimal(
+                self._active_execution_context.get("fee_rate", 0)
+            ),
         )
         self._finalize_pending_fill(pending, order_status, risk=risk, notifier=notifier, fill_qty=fill_qty, notify_risk_event=notify_risk_event)
         if engine_snapshot is not None and self._should_restore_after_partial_terminal_fill(pending, fill_qty) and restore_engine_snapshot is not None:
@@ -2516,6 +3053,9 @@ class TradeExecutionService:
             price=result.price,
             engine_snapshot=engine_snapshot,
             avg_price=avg_price,
+            pnl_fee_rate=self._coerce_non_negative_decimal(
+                self._active_execution_context.get("fee_rate", 0)
+            ),
             next_status_check_at=time.monotonic() + self._order_status_poll_interval_seconds,
             submitted_at=time.monotonic(),
             restore_engine_snapshot_fn=restore_engine_snapshot,
@@ -2677,6 +3217,13 @@ class TradeExecutionService:
             f"{ORDER_STATUS_PERSISTENCE_UNCERTAIN_PREFIX} cannot persist terminal "
             f"status {status} for order {pending.broker_order_id}"
         )
+        if pending.broker_order_id:
+            with self._state_lock:
+                self._pending_orders_by_id.setdefault(
+                    pending.broker_order_id,
+                    pending,
+                )
+                self._rebuild_pending_orders_by_symbol_locked()
         self._defer_pending_status_retry(pending, time.monotonic())
         if risk is not None:
             risk.pause(reason, auto_resumable=False)
@@ -2776,6 +3323,7 @@ class TradeExecutionService:
         fill_qty: Decimal,
         *,
         side: str = "LONG",
+        raise_on_persistence_error: bool = False,
     ) -> None:
         if fill_price <= 0 or fill_qty <= 0:
             return
@@ -2795,14 +3343,19 @@ class TradeExecutionService:
             previous_avg = entry.avg_price if entry is not None else Decimal("0")
             opened_at = entry.opened_at if entry is not None else datetime.now(timezone.utc)
 
-            # Persist inside the same critical section. _persist_entry_safe
-            # swallows the underlying error so the lock is always
-            # released and we never raise from this path; if persist
-            # fails we still apply the in-memory update so the
-            # engine's tracked state stays consistent with the
-            # immediate broker fill (the next reconciliation will
-            # re-derive from broker truth).
-            self._persist_entry_safe(symbol, new_quantity, new_cost)
+            # Production fill finalization uses strict persistence so a failed
+            # write leaves this unchanged and retryable. Non-fill callers keep
+            # the historical best-effort behavior for local state setup.
+            if raise_on_persistence_error and self._persist_entry is not None:
+                try:
+                    self._persist_entry(symbol, new_quantity, new_cost)
+                except Exception as exc:
+                    logger.exception("failed to persist tracked entry for %s", symbol)
+                    raise OrderPersistenceError(
+                        f"failed to persist tracked entry for {symbol}"
+                    ) from exc
+            else:
+                self._persist_entry_safe(symbol, new_quantity, new_cost)
 
             if entry is None:
                 entry = _TrackedEntry()

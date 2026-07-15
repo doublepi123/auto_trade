@@ -27,6 +27,7 @@ from app.domain.strategy_v2 import (
     StrategyV2Engine,
     StrategyV2State,
     VirtualPosition,
+    minimum_profit_target_pct,
 )
 from app.platform.strategy_quality import strategy_quality_report
 from app.models import (
@@ -91,6 +92,9 @@ _SHADOW_SYMBOL_RE = re.compile(r"^[A-Z0-9\-]{1,12}\.(US|HK)$")
 _MIN_POLL_SECONDS = 45.0
 _ONE_MINUTE_CANDLE_COUNT = 500
 _POST_CLOSE_COLLECTION_MINUTES = 15
+_MIN_REVIEW_TRADING_DAYS = 20
+_MIN_REVIEW_CLOSED_TRADES = 50
+_MIN_COMPLETE_SESSION_COVERAGE = 0.995
 
 
 class StrategyV2ShadowService:
@@ -151,33 +155,80 @@ class StrategyV2ShadowService:
             StrategyV2ShadowTrade.status == "CLOSED",
         ).order_by(StrategyV2ShadowTrade.exit_at.asc()).all()
         daily = self._daily_evidence(decisions, trades)
-        observed_days = sum(item.coverage_ratio >= 0.8 for item in daily)
+        observed_days = sum(item.complete_session for item in daily)
         closed_trades = len(trades)
         blockers: list[str] = []
-        if observed_days < 20:
+        if observed_days < _MIN_REVIEW_TRADING_DAYS:
             blockers.append("MIN_TRADING_DAYS")
-        if closed_trades < 50:
+        if closed_trades < _MIN_REVIEW_CLOSED_TRADES:
             blockers.append("MIN_CLOSED_TRADES")
-        warnings = [
-            f"{item.session_date.isoformat()}: {item.missing_internal_bars} internal bars missing"
+        if any(item.missing_internal_bars > 0 for item in daily):
+            blockers.append("DATA_INTERNAL_GAPS")
+        if any(item.partial_start or item.partial_end for item in daily):
+            blockers.append("DATA_PARTIAL_SESSIONS")
+        if any(
+            item.coverage_ratio < _MIN_COMPLETE_SESSION_COVERAGE
             for item in daily
-            if item.missing_internal_bars > 0
-        ]
-        net_values = [float(item.net_pnl or 0.0) for item in trades]
+        ):
+            blockers.append("DATA_SESSION_COVERAGE")
+        if any(item.outside_session_bars > 0 for item in daily):
+            blockers.append("DATA_OUTSIDE_SESSION_BARS")
+        evidence_dates = {item.session_date for item in daily}
+        trades_without_evidence = sum(
+            item.exit_at is None
+            or _as_utc(item.exit_at).date() not in evidence_dates
+            for item in trades
+        )
+        if trades_without_evidence:
+            blockers.append("DATA_TRADE_SESSION_MISSING")
+
+        params = self._version_params(normalized, version)
+        edge_blocker = self._net_edge_blocker(normalized, params)
+        if edge_blocker is not None:
+            blockers.append(edge_blocker)
+        quality, quality_blockers = self._readiness_quality(trades, params)
+        if closed_trades >= _MIN_REVIEW_CLOSED_TRADES:
+            blockers.extend(quality_blockers)
+
+        warnings: list[str] = []
+        for item in daily:
+            issues: list[str] = []
+            if item.missing_internal_bars:
+                issues.append(f"{item.missing_internal_bars} internal bars missing")
+            if item.partial_start or item.partial_end:
+                issues.append("partial session boundary")
+            if item.coverage_ratio < _MIN_COMPLETE_SESSION_COVERAGE:
+                issues.append(f"coverage {item.coverage_ratio:.3%}")
+            if item.outside_session_bars:
+                issues.append(f"{item.outside_session_bars} outside-session bars")
+            if issues:
+                warnings.append(
+                    f"{item.session_date.isoformat()}: " + "; ".join(issues)
+                )
+        if trades_without_evidence:
+            warnings.append(
+                f"{trades_without_evidence} closed trades lack session evidence"
+            )
         return StrategyV2ShadowEvaluationResponse(
             symbol=normalized,
             config_version=version,
             status="READY_FOR_REVIEW" if not blockers else "COLLECTING",
             observed_trading_days=observed_days,
-            remaining_trading_days=max(0, 20 - observed_days),
+            remaining_trading_days=max(
+                0,
+                _MIN_REVIEW_TRADING_DAYS - observed_days,
+            ),
             closed_trades=closed_trades,
-            remaining_closed_trades=max(0, 50 - closed_trades),
+            remaining_closed_trades=max(
+                0,
+                _MIN_REVIEW_CLOSED_TRADES - closed_trades,
+            ),
             first_bar_at=decisions[0].bar_at if decisions else None,
             last_bar_at=decisions[-1].bar_at if decisions else None,
             bars=len({item.bar_at for item in decisions}),
             readiness_blockers=blockers,
             data_quality_warnings=warnings,
-            quality=strategy_quality_report(net_values).to_dict() if net_values else None,
+            quality=quality,
             daily=daily,
         )
 
@@ -200,6 +251,8 @@ class StrategyV2ShadowService:
         merged = self._config_values(row)
         merged.update(updates)
         validated = StrategyV2ShadowConfigValues.model_validate(merged)
+        if tunable_updates or validated.enabled:
+            self._validate_minimum_net_edge(validated.model_dump())
 
         was_enabled = row.enabled
         changed = any(getattr(row, field) != value for field, value in updates.items())
@@ -355,6 +408,8 @@ class StrategyV2ShadowService:
 
         if not config.enabled and open_trade is None:
             return self.get_status(normalized)
+        if open_trade is None:
+            self._validate_minimum_net_edge(self._config_values(config))
         if (
             not is_trading_hours(market, current)
             and open_trade is None
@@ -467,6 +522,7 @@ class StrategyV2ShadowService:
         ).first()
         if config is None:
             config = self._transient_config(payload.symbol)
+        self._validate_minimum_net_edge(self._config_values(config))
         return self._replay_payload(payload, config)
 
     def _evaluate_candles(
@@ -1261,6 +1317,136 @@ class StrategyV2ShadowService:
             raise ValueError("strategy v2 shadow config_version was not found for symbol")
         return normalized
 
+    def _version_params(self, symbol: str, config_version: str) -> dict[str, Any]:
+        row = self.db.query(StrategyV2ShadowVersion).filter(
+            StrategyV2ShadowVersion.symbol == symbol,
+            StrategyV2ShadowVersion.config_version == config_version,
+        ).first()
+        if row is None:
+            return {}
+        try:
+            payload = json.loads(row.config_json)
+        except (TypeError, json.JSONDecodeError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    @staticmethod
+    def _required_hk_profit_target(values: dict[str, Any]) -> float | None:
+        symbol = str(values.get("symbol", "") or "").upper()
+        if not symbol.endswith(".HK"):
+            return None
+        return minimum_profit_target_pct(
+            one_side_fee_rate=float(values["estimated_fee_rate_hk"]),
+            slippage_bps=float(values["slippage_bps"]),
+        )
+
+    @classmethod
+    def _validate_minimum_net_edge(cls, values: dict[str, Any]) -> None:
+        try:
+            required = cls._required_hk_profit_target(values)
+            target = float(values["profit_target_pct"])
+        except (KeyError, TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(
+                "strategy v2 shadow cost assumptions are incomplete"
+            ) from exc
+        if required is not None and target + 1e-12 < required:
+            raise ValueError(
+                "HK profit_target_pct must be at least "
+                f"{required:.4f}% to cover round-trip fees, slippage, "
+                "and the safety buffer"
+            )
+
+    @classmethod
+    def _net_edge_blocker(
+        cls,
+        symbol: str,
+        params: dict[str, Any],
+    ) -> str | None:
+        if not symbol.endswith(".HK"):
+            return None
+        values = dict(params)
+        values.setdefault("symbol", symbol)
+        try:
+            cls._validate_minimum_net_edge(values)
+        except ValueError as exc:
+            return (
+                "HK_MIN_NET_EDGE"
+                if "must be at least" in str(exc)
+                else "CONFIG_COST_SNAPSHOT_INCOMPLETE"
+            )
+        return None
+
+    @staticmethod
+    def _readiness_quality(
+        trades: list[StrategyV2ShadowTrade],
+        params: dict[str, Any],
+    ) -> tuple[dict[str, Any] | None, list[str]]:
+        if not trades:
+            return None, []
+        net_values: list[float] = []
+        for item in trades:
+            if item.net_pnl is None:
+                return {
+                    "n_trades": len(trades),
+                    "quality_data_complete": False,
+                }, ["QUALITY_DATA_INCOMPLETE"]
+            net_values.append(float(item.net_pnl))
+        quality = strategy_quality_report(net_values).to_dict()
+        cumulative = 0.0
+        peak = 0.0
+        max_drawdown = 0.0
+        for value in net_values:
+            cumulative += value
+            peak = max(peak, cumulative)
+            max_drawdown = max(max_drawdown, peak - cumulative)
+        total_net_pnl = sum(net_values)
+
+        cost_stressed_net_pnl: float | None = 0.0
+        try:
+            slippage_bps = float(params["slippage_bps"])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            cost_stressed_net_pnl = None
+        if cost_stressed_net_pnl is not None:
+            for item, net_pnl in zip(trades, net_values):
+                exit_price = item.exit_price
+                if exit_price is None:
+                    cost_stressed_net_pnl = None
+                    break
+                quantity = float(item.quantity)
+                notional = (float(item.entry_price) + float(exit_price)) * quantity
+                estimated_fees = item.estimated_fees
+                if estimated_fees is None:
+                    if item.estimated_fee_rate is None:
+                        cost_stressed_net_pnl = None
+                        break
+                    estimated_fees = notional * float(item.estimated_fee_rate)
+                extra_slippage = notional * slippage_bps / 10_000
+                cost_stressed_net_pnl += (
+                    net_pnl - float(estimated_fees) - extra_slippage
+                )
+
+        quality.update({
+            "quality_data_complete": True,
+            "total_net_pnl": total_net_pnl,
+            "max_drawdown": max_drawdown,
+            "profit_to_drawdown_ratio": (
+                total_net_pnl / max_drawdown if max_drawdown > 0 else None
+            ),
+            "cost_stressed_net_pnl": cost_stressed_net_pnl,
+            "stress_fee_multiplier": 2.0,
+            "stress_slippage_multiplier": 2.0,
+        })
+        blockers: list[str] = []
+        if total_net_pnl <= 0:
+            blockers.append("NET_PNL_NON_POSITIVE")
+        if total_net_pnl > 0 and max_drawdown > total_net_pnl:
+            blockers.append("MAX_DRAWDOWN_EXCEEDS_NET_PNL")
+        if cost_stressed_net_pnl is None:
+            blockers.append("COST_STRESS_UNAVAILABLE")
+        elif cost_stressed_net_pnl <= 0:
+            blockers.append("COST_STRESS_NET_PNL_NON_POSITIVE")
+        return quality, blockers
+
     def _backfill_legacy_version_snapshots(self, symbol: str) -> None:
         """Keep pre-P2.1 evidence queryable when its parameters are unknowable."""
         known = {
@@ -1317,7 +1503,7 @@ class StrategyV2ShadowService:
             StrategyV2ShadowTrade.status == "CLOSED",
         ).all()
         observed_days = sum(
-            item.coverage_ratio >= 0.8
+            item.complete_session
             for item in self._daily_evidence(decisions, trades)
         )
         try:
@@ -1350,7 +1536,10 @@ class StrategyV2ShadowService:
                 trades_by_day.setdefault(_as_utc(trade.exit_at).date(), []).append(trade)
         result: list[StrategyV2ShadowDailyEvidence] = []
         for session_date, rows in sorted(by_day.items()):
-            timestamps = sorted({_as_utc(row.bar_at).replace(second=0, microsecond=0) for row in rows})
+            timestamps = sorted({
+                _as_utc(row.bar_at).replace(second=0, microsecond=0)
+                for row in rows
+            })
             market = rows[0].market.upper()
             session = get_session(market)
             midnight = datetime.combine(session_date, datetime.min.time(), tzinfo=timezone.utc)
@@ -1360,32 +1549,71 @@ class StrategyV2ShadowService:
                 if session.is_rth(midnight + timedelta(minutes=offset))
             ]
             expected_count = len(expected)
-            internal_expected = [
-                timestamp
-                for timestamp in expected
-                if timestamps[0] <= timestamp <= timestamps[-1]
+            expected_set = set(expected)
+            rth_timestamps = [
+                timestamp for timestamp in timestamps if timestamp in expected_set
             ]
-            actual_internal = sum(
-                timestamps[0] <= timestamp <= timestamps[-1]
-                for timestamp in timestamps
+            outside_session_bars = len(timestamps) - len(rth_timestamps)
+            if rth_timestamps:
+                first_bar_at = rth_timestamps[0]
+                last_bar_at = rth_timestamps[-1]
+                internal_expected = [
+                    timestamp
+                    for timestamp in expected
+                    if first_bar_at <= timestamp <= last_bar_at
+                ]
+                actual_set = set(rth_timestamps)
+                missing = sum(
+                    timestamp not in actual_set for timestamp in internal_expected
+                )
+            else:
+                first_bar_at = timestamps[0]
+                last_bar_at = timestamps[-1]
+                internal_expected = []
+                missing = 0
+            partial_start = not expected or not rth_timestamps or (
+                rth_timestamps[0] != expected[0]
             )
-            missing = max(0, len(internal_expected) - actual_internal)
+            partial_end = not expected or not rth_timestamps or (
+                rth_timestamps[-1] != expected[-1]
+            )
+            coverage_ratio = (
+                len(rth_timestamps) / expected_count if expected_count else 0.0
+            )
+            complete_session = (
+                expected_count > 0
+                and coverage_ratio >= _MIN_COMPLETE_SESSION_COVERAGE
+                and missing == 0
+                and not partial_start
+                and not partial_end
+                and outside_session_bars == 0
+            )
             day_trades = trades_by_day.get(session_date, [])
             exits = Counter(str(trade.exit_reason or "UNKNOWN") for trade in day_trades)
             result.append(StrategyV2ShadowDailyEvidence(
                 session_date=session_date,
-                first_bar_at=timestamps[0],
-                last_bar_at=timestamps[-1],
-                bars=len(timestamps),
-                eligible_bars=len({row.bar_at for row in rows if row.gate_passed}),
+                first_bar_at=first_bar_at,
+                last_bar_at=last_bar_at,
+                bars=len(rth_timestamps),
+                eligible_bars=len({
+                    _as_utc(row.bar_at).replace(second=0, microsecond=0)
+                    for row in rows
+                    if row.gate_passed
+                    and _as_utc(row.bar_at).replace(
+                        second=0,
+                        microsecond=0,
+                    ) in expected_set
+                }),
                 expected_internal_bars=len(internal_expected),
                 missing_internal_bars=missing,
-                coverage_ratio=(len(timestamps) / expected_count) if expected_count else 0.0,
+                coverage_ratio=coverage_ratio,
                 trades=len(day_trades),
                 net_pnl=sum(float(trade.net_pnl or 0.0) for trade in day_trades),
                 exit_reasons=dict(sorted(exits.items())),
-                partial_start=bool(expected and timestamps[0] > expected[0]),
-                partial_end=bool(expected and timestamps[-1] < expected[-1]),
+                partial_start=partial_start,
+                partial_end=partial_end,
+                outside_session_bars=outside_session_bars,
+                complete_session=complete_session,
             ))
         return result
 
@@ -1397,15 +1625,26 @@ class StrategyV2ShadowService:
         if row is not None:
             return row
         live = self.db.query(StrategyConfig).order_by(StrategyConfig.id.desc()).first()
+        fee_rate_us = float(live.fee_rate_us) if live is not None else 0.0005
+        fee_rate_hk = float(live.fee_rate_hk) if live is not None else 0.003
+        default_profit_target = 0.50
+        if normalized.endswith(".HK"):
+            default_profit_target = min(
+                5.0,
+                max(
+                    default_profit_target,
+                    minimum_profit_target_pct(
+                        one_side_fee_rate=fee_rate_hk,
+                        slippage_bps=2.0,
+                    ),
+                ),
+            )
         row = StrategyV2ShadowConfig(
             symbol=normalized,
             enabled=False,
-            estimated_fee_rate_us=(
-                float(live.fee_rate_us) if live is not None else 0.0005
-            ),
-            estimated_fee_rate_hk=(
-                float(live.fee_rate_hk) if live is not None else 0.003
-            ),
+            profit_target_pct=default_profit_target,
+            estimated_fee_rate_us=fee_rate_us,
+            estimated_fee_rate_hk=fee_rate_hk,
         )
         self.db.add(row)
         try:
@@ -1423,14 +1662,25 @@ class StrategyV2ShadowService:
 
     def _transient_config(self, symbol: str) -> StrategyV2ShadowConfig:
         live = self.db.query(StrategyConfig).order_by(StrategyConfig.id.desc()).first()
+        fee_rate_us = float(live.fee_rate_us) if live is not None else 0.0005
+        fee_rate_hk = float(live.fee_rate_hk) if live is not None else 0.003
+        default_profit_target = 0.50
+        if symbol.endswith(".HK"):
+            default_profit_target = min(
+                5.0,
+                max(
+                    default_profit_target,
+                    minimum_profit_target_pct(
+                        one_side_fee_rate=fee_rate_hk,
+                        slippage_bps=2.0,
+                    ),
+                ),
+            )
         values = StrategyV2ShadowConfigValues(
             symbol=symbol,
-            estimated_fee_rate_us=(
-                float(live.fee_rate_us) if live is not None else 0.0005
-            ),
-            estimated_fee_rate_hk=(
-                float(live.fee_rate_hk) if live is not None else 0.003
-            ),
+            profit_target_pct=default_profit_target,
+            estimated_fee_rate_us=fee_rate_us,
+            estimated_fee_rate_hk=fee_rate_hk,
         )
         return StrategyV2ShadowConfig(
             **{

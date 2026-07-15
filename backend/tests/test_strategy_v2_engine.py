@@ -13,11 +13,19 @@ from app.domain.strategy_v2.engine import (
     StrategyV2State,
     VirtualPosition,
 )
+from app.domain.strategy_v2.costs import minimum_profit_target_pct
 from app.domain.strategy_v2.features import StrategyBar, StrategyV2FeatureSnapshot
 
 
 _NEW_YORK = ZoneInfo("America/New_York")
 _START = datetime(2026, 7, 7, 12, 0, tzinfo=_NEW_YORK).astimezone(timezone.utc)
+
+
+def test_minimum_profit_target_covers_round_trip_costs_and_edge_buffer() -> None:
+    assert minimum_profit_target_pct(
+        one_side_fee_rate=0.003,
+        slippage_bps=2.0,
+    ) == pytest.approx(0.74)
 
 
 def _feature(

@@ -19,6 +19,10 @@ from app.domain.strategy_v2.engine import (
     StrategyV2Step,
     VirtualPosition,
 )
+from app.domain.strategy_v2.costs import (
+    DEFAULT_EDGE_SAFETY_BUFFER_BPS,
+    minimum_profit_target_pct,
+)
 
 __all__ = [
     "SessionFeatureEngine",
@@ -38,4 +42,6 @@ __all__ = [
     "StrategyV2State",
     "StrategyV2Step",
     "VirtualPosition",
+    "DEFAULT_EDGE_SAFETY_BUFFER_BPS",
+    "minimum_profit_target_pct",
 ]

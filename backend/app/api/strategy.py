@@ -261,7 +261,7 @@ def get_status(db: Session = Depends(get_db)) -> StatusResponse:
     else:
         new_pnl = pnl_result.realized_pnl
         new_losses = pnl_result.consecutive_losses
-    if (
+    if pnl_result.is_complete and (
         abs(state.daily_pnl - new_pnl) > 1e-9
         or state.consecutive_losses != new_losses
         or state.daily_pnl_date != pnl_result.trade_day

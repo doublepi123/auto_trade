@@ -130,6 +130,147 @@ class TestDailyPnlService:
     def _dt(self, day: date, hour: int, minute: int = 0) -> datetime:
         return datetime.combine(day, time(hour, minute), tzinfo=timezone.utc)
 
+    def _seed_authoritative_inventory_reset(
+        self,
+        db,
+        trade_day: date,
+    ) -> tuple[OrderRecord, float]:
+        authoritative_gross = (208.16 - 206.329) * 1088
+        authoritative_fee = 12.128
+        authoritative_net = authoritative_gross - authoritative_fee
+        db.add(OrderRecord(
+            broker_order_id="stale-fifo-buy",
+            symbol="NVDA.US",
+            side="BUY",
+            quantity=1192,
+            price=209.3493704,
+            executed_quantity=1192,
+            executed_price=209.3493704,
+            estimated_fee=124.7782241584,
+            fee_source="ESTIMATED",
+            status="FILLED",
+            created_at=self._dt(trade_day, 10),
+            filled_at=self._dt(trade_day, 10),
+        ))
+        exit_order = OrderRecord(
+            broker_order_id="tracked-entry-sell",
+            symbol="NVDA.US",
+            side="SELL",
+            quantity=1088,
+            price=208.16,
+            executed_quantity=1088,
+            executed_price=208.16,
+            status="FILLED",
+            created_at=self._dt(trade_day, 11),
+            filled_at=self._dt(trade_day, 11),
+            cost_basis_price=206.329,
+            cost_basis_quantity=1088,
+            cost_basis_opened_at=self._dt(trade_day, 9),
+            position_quantity_before=1088,
+            gross_pnl=authoritative_gross,
+            pnl_fee=authoritative_fee,
+            pnl_fee_rate=0.0005,
+            pnl_fee_source="MIXED",
+            net_pnl=authoritative_net,
+            pnl_source="TRACKED_ENTRY",
+        )
+        db.add(exit_order)
+        db.add_all([
+            OrderRecord(
+                broker_order_id="fresh-buy-after-reset",
+                symbol="NVDA.US",
+                side="BUY",
+                quantity=10,
+                price=205,
+                executed_quantity=10,
+                executed_price=205,
+                actual_fee=0,
+                fee_source="ACTUAL",
+                status="FILLED",
+                created_at=self._dt(trade_day, 12),
+                filled_at=self._dt(trade_day, 12),
+            ),
+            OrderRecord(
+                broker_order_id="fresh-sell-after-reset",
+                symbol="NVDA.US",
+                side="SELL",
+                quantity=10,
+                price=206,
+                executed_quantity=10,
+                executed_price=206,
+                actual_fee=0,
+                fee_source="ACTUAL",
+                status="FILLED",
+                created_at=self._dt(trade_day, 13),
+                filled_at=self._dt(trade_day, 13),
+            ),
+        ])
+        db.commit()
+        return exit_order, authoritative_net
+
+    def test_refresh_preserves_authoritative_tracked_entry_outcome(self) -> None:
+        self._cleanup()
+        trade_day = date(2026, 7, 15)
+        db = self._get_db()
+        exit_order, authoritative_net = self._seed_authoritative_inventory_reset(
+            db,
+            trade_day,
+        )
+        authoritative_gross = float(exit_order.gross_pnl or 0)
+
+        DailyPnlService(db).refresh_execution_outcomes(symbol="NVDA.US")
+        db.expire_all()
+        refreshed = db.query(OrderRecord).filter(
+            OrderRecord.broker_order_id == "tracked-entry-sell"
+        ).one()
+
+        assert refreshed.pnl_source == "TRACKED_ENTRY"
+        assert refreshed.cost_basis_quantity == approx(1088.0)
+        assert refreshed.gross_pnl == approx(authoritative_gross)
+        assert refreshed.net_pnl == approx(authoritative_net)
+        assert refreshed.gross_pnl is not None and refreshed.gross_pnl > 0
+        assert refreshed.net_pnl is not None and refreshed.net_pnl > 0
+        db.close()
+
+    def test_authoritative_outcome_drives_calculate_and_risk_reconcile(self) -> None:
+        self._cleanup()
+        trade_day = date(2026, 7, 15)
+        db = self._get_db()
+        _exit_order, authoritative_net = self._seed_authoritative_inventory_reset(
+            db,
+            trade_day,
+        )
+        svc = DailyPnlService(db)
+
+        trips = svc.pair_round_trips(symbol="NVDA.US")
+        result = svc.calculate(trade_day=trade_day, symbol="NVDA.US")
+        expected_daily_pnl = authoritative_net + 10.0
+        reconciled_pnl, reconciled_losses = DailyPnlService.reconcile_risk_state(
+            expected_daily_pnl,
+            0,
+            trade_day,
+            result,
+        )
+
+        assert len(trips) == 2
+        assert trips[0].quantity == approx(1088.0)
+        assert trips[0].entry_price == approx(206.329)
+        assert trips[0].gross_pnl == approx((208.16 - 206.329) * 1088)
+        assert trips[0].net_pnl == approx(authoritative_net)
+        assert trips[1].exit_broker_order_id == "fresh-sell-after-reset"
+        assert trips[1].quantity == approx(10.0)
+        assert trips[1].entry_price == approx(205.0)
+        assert trips[1].gross_pnl == approx(10.0)
+        assert trips[1].net_pnl == approx(10.0)
+        assert result.realized_pnl == approx(expected_daily_pnl)
+        assert [(trade.broker_order_id, trade.quantity) for trade in result.trades] == [
+            ("tracked-entry-sell", approx(1088.0)),
+            ("fresh-sell-after-reset", approx(10.0)),
+        ]
+        assert reconciled_pnl == approx(expected_daily_pnl)
+        assert reconciled_losses == 0
+        db.close()
+
     def test_calculates_today_pnl_using_carryover_cost_basis(self) -> None:
         self._cleanup()
         prior_day = date(2026, 5, 21)

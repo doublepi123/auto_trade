@@ -46,6 +46,7 @@ from app.services.llm_order_policy import evaluate_llm_order_policy
 from app.services.strategy_service import StrategyService
 from app.services.trade_event_service import record_trade_event
 from app.services.trade_execution_service import (
+    FinalOrderQuoteCheckResult,
     ORDER_EXECUTION_BLOCKED_PREFIX,
     ORDER_PERSISTENCE_UNCERTAIN_PREFIX,
     ORDER_STATUS_PERSISTENCE_UNCERTAIN_PREFIX,
@@ -277,6 +278,12 @@ class AppRunner:
                         fee_rate_us=self.engine.params.fee_rate_us,
                         fee_rate_hk=self.engine.params.fee_rate_hk,
                     )
+                    if not ledger_result.is_complete:
+                        logger.error(
+                            "post-fill PnL replay is incomplete for %s; live risk state preserved",
+                            fill_symbol,
+                        )
+                        return
                     with self._state_lock:
                         net_pnl, net_losses = DailyPnlService.reconcile_risk_state(
                             self.risk.daily_pnl,
@@ -770,11 +777,19 @@ class AppRunner:
         """Arm reduce-only execution while retaining the operational pause."""
         with self._trade_svc.submission_guard():
             self.risk.revoke_protective_exits()
+            healthy, health_error = self._protective_exit_runtime_health()
+            if not healthy:
+                self._broadcast_status()
+                return False, health_error
             pause_reason, safety_generation = self.risk.pause_verification_snapshot()
             safe, error = self.verify_operational_resume()
             if not safe:
                 self._broadcast_status()
                 return False, error
+            healthy, health_error = self._protective_exit_runtime_health()
+            if not healthy:
+                self._broadcast_status()
+                return False, health_error
             if not self.risk.permit_protective_exits(
                 expected_pause_reason=pause_reason,
                 expected_generation=safety_generation,
@@ -783,6 +798,32 @@ class AppRunner:
                 return False, "protective exits require an unchanged operational pause"
             self._broadcast_status()
             return True, ""
+
+    def _protective_exit_runtime_health(self) -> tuple[bool, str]:
+        """Require a live runner and a recent trusted quote before arming exits."""
+        with self._state_lock:
+            thread_alive = self._thread is not None and self._thread.is_alive()
+            running = self._running and thread_alive
+            quotes_subscribed = self._quotes_subscribed
+            last_quote_at = self._last_quote_at
+        if not running:
+            return False, "protective exits require the runner thread to be running"
+        if not quotes_subscribed:
+            return False, "protective exits require an active quote subscription"
+        if last_quote_at <= 0:
+            return False, "protective exits require a trusted live quote"
+        max_quote_age = max(
+            _QUOTE_SOURCE_MAX_AGE_SECONDS,
+            self._active_quote_refresh_interval_seconds * 2,
+        )
+        quote_age = time.monotonic() - last_quote_at
+        if quote_age > max_quote_age:
+            return (
+                False,
+                "protective exits require a healthy quote loop; "
+                f"last trusted quote is {quote_age:.1f}s old",
+            )
+        return True, ""
 
     def revoke_protective_exits(self) -> None:
         with self._trade_svc.submission_guard():
@@ -2083,6 +2124,7 @@ class AppRunner:
                 engine_snapshot=engine_snapshot,
                 restore_engine_snapshot=lambda snapshot: target_engine.restore(snapshot),
                 notify_risk_event=self.notifier.notify_risk_event,
+                reduce_only=llm_decision.reduce_only,
                 execution_context=self._execution_ledger_context(
                     llm_decision,
                     quote,
@@ -2275,7 +2317,10 @@ class AppRunner:
             and quality["source_timestamp_fresh"]
         )
         self._remember_symbol_runtime_quote(quote, now, trusted=trusted)
-        if trusted:
+        # This timestamp is the health signal for the trading symbol. A fresh
+        # watchlist quote must not mask a silent primary feed or suppress the
+        # primary's active refresh loop.
+        if trusted and quote.symbol == self.engine.params.symbol:
             self._last_quote_at = time.monotonic()
         self._recent_quotes.append(
             {
@@ -2392,7 +2437,7 @@ class AppRunner:
         symbol: str,
         action: str,
         limit_price: Decimal,
-    ) -> str | None:
+    ) -> FinalOrderQuoteCheckResult | str:
         quotes = broker.get_quotes([symbol])
         if len(quotes) != 1 or quotes[0].symbol != symbol:
             return "fresh quote for the submitted symbol is unavailable"
@@ -2430,7 +2475,7 @@ class AppRunner:
                 "submitted limit price deviates from fresh executable BBO by "
                 f"{float(deviation) * 100:.2f}%"
             )
-        return None
+        return FinalOrderQuoteCheckResult(executable_price=executable)
 
     @staticmethod
     def _evaluate_quote_quality(recent: dict[str, Any] | None) -> dict[str, Any]:
@@ -3016,6 +3061,12 @@ class AppRunner:
         except Exception:
             logger.exception("failed to sync realized daily pnl from order ledger")
             return False
+        if not result.is_complete:
+            logger.error(
+                "refusing incomplete order-ledger risk sync for trade day %s",
+                result.trade_day,
+            )
+            return False
 
         with self._state_lock:
             old_daily_pnl = self.risk.daily_pnl
@@ -3191,6 +3242,30 @@ class AppRunner:
         elif effective_status == "FILLED" and order.filled_at is None:
             order.filled_at = datetime.now(timezone.utc)
             changed = True
+
+        accounting_fields = (
+            "fill_latency_ms",
+            "cost_basis_quantity",
+            "gross_pnl",
+            "net_pnl",
+            "pnl_source",
+            "pnl_fee",
+            "pnl_fee_source",
+            "slippage_amount",
+            "slippage_bps",
+        )
+        accounting_before = tuple(
+            getattr(order, name) for name in accounting_fields
+        )
+        if self._has_terminal_execution(order):
+            # A locally submitted order may become terminal while the process is
+            # down. Rebuild the authoritative outcome from the cost basis frozen
+            # on submission before startup drops the row from pending recovery.
+            self._update_execution_outcome_fields(order)
+        accounting_changed = accounting_before != tuple(
+            getattr(order, name) for name in accounting_fields
+        )
+        changed = changed or accounting_changed
 
         if not changed:
             return False
@@ -3866,6 +3941,9 @@ class AppRunner:
             self.risk.pause(reason, auto_resumable=True)
         with self._db_session() as db:
             self._state_svc.persist(db, self.engine, self.risk)
+        self._set_last_action_message(
+            f"{symbol} reduction FILLED; broker position is flat ({cause})"
+        )
         self._broadcast_status()
 
     def execution_state(self) -> tuple[str, str, datetime | None]:
@@ -4363,6 +4441,16 @@ class AppRunner:
             "fee_source",
             "exit_cause",
             "exit_reason",
+            "gross_pnl",
+            "net_pnl",
+            "pnl_source",
+            "cost_basis_price",
+            "cost_basis_quantity",
+            "cost_basis_opened_at",
+            "position_quantity_before",
+            "pnl_fee",
+            "pnl_fee_source",
+            "pnl_fee_rate",
         }
         for name in fields:
             value = metadata.get(name)
@@ -4380,7 +4468,34 @@ class AppRunner:
         fill_quantity = float(order.executed_quantity or 0)
         if fill_price <= 0 or fill_quantity <= 0:
             return
-        if str(order.side).upper() in {"BUY", "BUY_TO_COVER"}:
+        side = str(order.side or "").upper()
+        cost_basis_price = float(order.cost_basis_price or 0)
+        position_quantity_before = float(order.position_quantity_before or 0)
+        if (
+            side in _POSITION_REDUCING_ACTIONS
+            and cost_basis_price > 0
+            and position_quantity_before >= fill_quantity
+        ):
+            fee_rate = max(0.0, float(order.pnl_fee_rate or 0))
+            gross_pnl = (
+                (fill_price - cost_basis_price) * fill_quantity
+                if side == "SELL"
+                else (cost_basis_price - fill_price) * fill_quantity
+            )
+            entry_fee = cost_basis_price * fill_quantity * fee_rate
+            if order.actual_fee is not None:
+                exit_fee = max(0.0, float(order.actual_fee))
+                pnl_fee_source = "MIXED"
+            else:
+                exit_fee = fill_price * fill_quantity * fee_rate
+                pnl_fee_source = "ESTIMATED"
+            pnl_fee = entry_fee + exit_fee
+            order.cost_basis_quantity = fill_quantity
+            order.gross_pnl = gross_pnl
+            order.pnl_fee = pnl_fee
+            order.pnl_fee_source = pnl_fee_source
+            order.net_pnl = gross_pnl - pnl_fee
+        if side in {"BUY", "BUY_TO_COVER"}:
             reference = float(order.decision_ask or 0)
             price_cost = fill_price - reference
         else:
@@ -4510,7 +4625,18 @@ class AppRunner:
                     quantity=quantity,
                     price=price,
                     engine_snapshot=None,
-                    avg_price=None,
+                    avg_price=(
+                        Decimal(str(getattr(row, "cost_basis_price", None)))
+                        if getattr(row, "cost_basis_price", None) is not None
+                        else None
+                    ),
+                    pnl_fee_rate=(
+                        Decimal(str(getattr(row, "pnl_fee_rate", None)))
+                        if getattr(row, "pnl_fee_rate", None) is not None
+                        else self._live_fee_rate_for_market(
+                            "HK" if str(row.symbol).upper().endswith(".HK") else "US"
+                        )
+                    ),
                     next_status_check_at=0.0,
                     submitted_at=now - submitted_age_seconds,
                 )
@@ -4841,6 +4967,12 @@ class AppRunner:
         for symbol in sorted(managed_symbols):
             if symbol in unsettled_symbols or symbol in confirmed_expectation_symbols:
                 continue
+            if self._trade_svc.pending_order_for(symbol) is not None:
+                # Broker position already includes any live partial execution,
+                # while pending finalization consumes the broker's cumulative
+                # executed quantity. Keeping the pre-submit tracked inventory
+                # here prevents that cumulative fill from being applied twice.
+                continue
             tracked = self._trade_svc.tracked_position(symbol)
             tracked_qty = tracked.quantity if tracked is not None else Decimal("0")
             tracked_cost = tracked.cost if tracked is not None else Decimal("0")
@@ -4873,6 +5005,47 @@ class AppRunner:
             all_broker_prices_known = bool(broker_rows) and all(avg > 0 for _, _, avg in broker_rows)
             broker_avg = broker_cost / broker_qty if broker_qty > 0 and all_broker_prices_known else Decimal("0")
             row = db.query(TrackedEntry).filter(TrackedEntry.symbol == symbol).first()
+
+            quantity_grew_without_cost = bool(
+                tracked is not None
+                and tracked_side == broker_side
+                and broker_qty > tracked_qty
+                and broker_avg <= 0
+            )
+            if quantity_grew_without_cost and tracked is not None:
+                reason = (
+                    f"{_POSITION_RECONCILIATION_UNCERTAIN_PREFIX} "
+                    f"broker quantity grew from {tracked_qty} to {broker_qty} for "
+                    f"{symbol}, but the added position cost is unavailable; "
+                    "preserving the last durable tracked entry"
+                )
+                logger.critical(reason)
+                self.risk.pause(reason, auto_resumable=False)
+                if row is None:
+                    row = TrackedEntry(symbol=symbol)
+                    db.add(row)
+                    row.side = tracked_side
+                    row.quantity = float(tracked_qty)
+                    row.cost = float(tracked_cost)
+                    row.opened_at = tracked.opened_at
+                    row.updated_at = datetime.now(timezone.utc)
+                record_trade_event(
+                    db,
+                    event_type="TRACKED_ENTRY_RECOVERY_FAILED",
+                    symbol=symbol,
+                    status="ERROR",
+                    message=reason,
+                    payload={
+                        "source": source,
+                        "tracked_quantity": float(tracked_qty),
+                        "tracked_avg_price": float(tracked.avg_price),
+                        "broker_quantity": float(broker_qty),
+                        "broker_side": broker_side,
+                        "broker_avg_price": 0.0,
+                        "preserved": True,
+                    },
+                )
+                continue
 
             quantity_drift = tracked_qty != broker_qty
             side_drift = bool(broker_side and tracked_side and broker_side != tracked_side)

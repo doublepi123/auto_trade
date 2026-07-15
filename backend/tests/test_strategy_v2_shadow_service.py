@@ -144,6 +144,111 @@ class TestStrategyV2ShadowService:
         assert config.entry_cutoff_minutes_before_close == 45
         assert config.flatten_minutes_before_close == 15
 
+    def test_daily_evidence_requires_a_complete_contiguous_rth_session(self) -> None:
+        rows = [
+            StrategyV2ShadowDecision(
+                idempotency_key=f"complete-{index}",
+                symbol="AAPL.US",
+                market="US",
+                config_version="complete-version",
+                session_date=_SESSION_OPEN.date(),
+                bar_at=_SESSION_OPEN + timedelta(minutes=index),
+                close_price=100.0,
+                gate_passed=index == 120,
+            )
+            for index in range(390)
+        ]
+
+        complete = StrategyV2ShadowService._daily_evidence(rows, [])[0]
+        with_gap = StrategyV2ShadowService._daily_evidence(
+            rows[:200] + rows[201:],
+            [],
+        )[0]
+        outside = StrategyV2ShadowDecision(
+            idempotency_key="outside-rth",
+            symbol="AAPL.US",
+            market="US",
+            config_version="complete-version",
+            session_date=_SESSION_OPEN.date(),
+            bar_at=_SESSION_OPEN - timedelta(minutes=1),
+            close_price=100.0,
+        )
+        with_outside = StrategyV2ShadowService._daily_evidence(
+            [outside, *rows],
+            [],
+        )[0]
+
+        assert complete.complete_session is True
+        assert complete.coverage_ratio == pytest.approx(1.0)
+        assert complete.missing_internal_bars == 0
+        assert complete.partial_start is False
+        assert complete.partial_end is False
+        assert complete.outside_session_bars == 0
+        assert complete.eligible_bars == 1
+        assert with_gap.complete_session is False
+        assert with_gap.coverage_ratio == pytest.approx(389 / 390)
+        assert with_gap.missing_internal_bars == 1
+        assert with_outside.complete_session is False
+        assert with_outside.coverage_ratio == pytest.approx(1.0)
+        assert with_outside.outside_session_bars == 1
+
+    def test_readiness_quality_blocks_loss_drawdown_and_cost_stress(self) -> None:
+        def trades(
+            values: list[float],
+            *,
+            estimated_fee: float,
+            exit_price: float,
+        ) -> list[StrategyV2ShadowTrade]:
+            return [
+                StrategyV2ShadowTrade(
+                    symbol="AAPL.US",
+                    config_version="quality-version",
+                    status="CLOSED",
+                    entry_at=_SESSION_OPEN + timedelta(minutes=index),
+                    exit_at=_SESSION_OPEN + timedelta(minutes=index + 1),
+                    entry_price=100.0,
+                    exit_price=exit_price,
+                    quantity=1.0,
+                    gross_pnl=value + estimated_fee,
+                    estimated_fees=estimated_fee,
+                    net_pnl=value,
+                    fee_source="ESTIMATED",
+                    estimated_fee_rate=0.0005,
+                )
+                for index, value in enumerate(values)
+            ]
+
+        _loss_quality, loss_blockers = StrategyV2ShadowService._readiness_quality(
+            trades([-1.0] * 50, estimated_fee=0.1, exit_price=99.0),
+            {"slippage_bps": 2.0},
+        )
+        drawdown_values = [0.2] * 25 + [-4.0] + [0.1] * 24
+        drawdown_quality, drawdown_blockers = (
+            StrategyV2ShadowService._readiness_quality(
+                trades(drawdown_values, estimated_fee=0.0, exit_price=100.0),
+                {"slippage_bps": 0.0},
+            )
+        )
+        cost_quality, cost_blockers = StrategyV2ShadowService._readiness_quality(
+            trades([0.05] * 50, estimated_fee=0.04, exit_price=100.1),
+            {"slippage_bps": 2.0},
+        )
+        pass_quality, pass_blockers = StrategyV2ShadowService._readiness_quality(
+            trades([0.9] * 50, estimated_fee=0.1, exit_price=101.0),
+            {"slippage_bps": 2.0},
+        )
+
+        assert "NET_PNL_NON_POSITIVE" in loss_blockers
+        assert "MAX_DRAWDOWN_EXCEEDS_NET_PNL" in drawdown_blockers
+        assert drawdown_quality is not None
+        assert drawdown_quality["max_drawdown"] == pytest.approx(4.0)
+        assert "COST_STRESS_NET_PNL_NON_POSITIVE" in cost_blockers
+        assert cost_quality is not None
+        assert float(cost_quality["cost_stressed_net_pnl"]) < 0
+        assert pass_blockers == []
+        assert pass_quality is not None
+        assert float(pass_quality["cost_stressed_net_pnl"]) > 0
+
     def test_config_updates_and_listing_are_scoped_by_symbol(self) -> None:
         with self._db() as db:
             service = StrategyV2ShadowService(db)

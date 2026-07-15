@@ -584,6 +584,68 @@ async def _alert_rules_cron() -> None:
                 logger.exception("alert rules cron failed")
 
 
+def _llm_storage_maintenance_tick_sync() -> None:
+    """Prune and compact LLM audit rows without running on the event loop."""
+    from app.services.llm_interaction_service import LLMInteractionService
+
+    db = SessionLocal()
+    try:
+        service = LLMInteractionService(db)
+        pruned = service.prune_expired(
+            retention_days=settings.llm_interaction_retention_days,
+            no_action_retention_days=settings.llm_no_action_retention_days,
+            batch_size=settings.llm_storage_maintenance_batch_size,
+            max_batches=8,
+        )
+        compacted = service.compact_oversized_contexts(
+            max_bytes=settings.llm_context_snapshot_max_bytes,
+            batch_size=min(25, settings.llm_storage_maintenance_batch_size),
+            max_rows=settings.llm_storage_maintenance_batch_size,
+        )
+        if pruned.deleted or compacted.compacted:
+            logger.info(
+                "LLM storage maintenance: deleted=%d delete_batches=%d "
+                "compacted=%d inspected=%d compact_batches=%d",
+                pruned.deleted,
+                pruned.batches,
+                compacted.compacted,
+                compacted.inspected,
+                compacted.batches,
+            )
+    finally:
+        db.close()
+
+
+async def _llm_storage_maintenance_cron() -> None:
+    """Run bounded SQLite maintenance; full VACUUM is intentionally offline-only."""
+    await asyncio.sleep(60)
+    while True:
+        try:
+            await _run_llm_storage_maintenance_tick()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("LLM storage maintenance failed")
+        await asyncio.sleep(settings.llm_storage_maintenance_interval_minutes * 60)
+
+
+async def _run_llm_storage_maintenance_tick() -> None:
+    """Run one bounded maintenance tick and join its thread during shutdown."""
+    worker = asyncio.create_task(
+        asyncio.to_thread(_llm_storage_maintenance_tick_sync)
+    )
+    try:
+        await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        # Cancelling the asyncio waiter does not stop ``to_thread``. Waiting
+        # here keeps SQLite commits from racing application/container teardown.
+        try:
+            await worker
+        except Exception:
+            logger.exception("LLM storage maintenance failed during shutdown")
+        raise
+
+
 def _strategy_v2_shadow_tick_sync() -> None:
     """Advance every active Strategy v2 simulator without touching orders."""
     from app.core.market_calendar import market_for_symbol
@@ -676,18 +738,21 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     llm_task = asyncio.create_task(_llm_analysis_cron())
     report_task = asyncio.create_task(_report_schedule_cron())
     alert_task = asyncio.create_task(_alert_rules_cron())
+    llm_storage_task = asyncio.create_task(_llm_storage_maintenance_cron())
     strategy_v2_shadow_task = asyncio.create_task(_strategy_v2_shadow_cron())
     yield
     cleanup_task.cancel()
     llm_task.cancel()
     report_task.cancel()
     alert_task.cancel()
+    llm_storage_task.cancel()
     strategy_v2_shadow_task.cancel()
     for task in (
         cleanup_task,
         llm_task,
         report_task,
         alert_task,
+        llm_storage_task,
         strategy_v2_shadow_task,
     ):
         try:

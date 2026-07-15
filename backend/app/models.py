@@ -278,6 +278,14 @@ class OrderRecord(Base):
     exit_reason: Mapped[str] = mapped_column(Text, default="", nullable=False)
     gross_pnl: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     net_pnl: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    pnl_source: Mapped[str] = mapped_column(String(30), default="UNKNOWN", nullable=False)
+    cost_basis_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    cost_basis_quantity: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    cost_basis_opened_at: Mapped[Optional[datetime]] = mapped_column(_TZDateTime, nullable=True)
+    position_quantity_before: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    pnl_fee: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    pnl_fee_source: Mapped[str] = mapped_column(String(20), default="UNKNOWN", nullable=False)
+    pnl_fee_rate: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     mfe_amount: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     mae_amount: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     mfe_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
@@ -315,6 +323,7 @@ class LLMInteraction(Base):
     __tablename__ = "llm_interactions"
     __table_args__ = (
         Index("ix_llm_interactions_symbol_created_at", "symbol", "created_at"),
+        Index("ix_llm_interactions_created_at_id", "created_at", "id"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)

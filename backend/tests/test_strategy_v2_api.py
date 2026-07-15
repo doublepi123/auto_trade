@@ -4,6 +4,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import Any, Generator
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -23,6 +24,7 @@ from app.models import (
     StrategyV2ShadowTrade,
     StrategyV2ShadowVersion,
 )
+from app.schemas import StrategyV2ShadowDailyEvidence
 from app.services.strategy_v2_shadow_service import StrategyV2ShadowService
 
 
@@ -420,6 +422,34 @@ class TestStrategyV2ShadowApi:
         assert response.status_code == 400
         assert "must not exceed 68" in response.json()["detail"]
 
+    def test_hk_profit_target_must_cover_round_trip_costs_and_buffer(self) -> None:
+        created = self.client.get(
+            "/api/strategy-shadow/config",
+            params={"symbol": "0700.HK"},
+        )
+
+        assert created.status_code == 200
+        assert created.json()["profit_target_pct"] == pytest.approx(0.74)
+        assert created.json()["order_submission_allowed"] is False
+
+        rejected = self.client.put(
+            "/api/strategy-shadow/config",
+            params={"symbol": "0700.HK"},
+            json={"profit_target_pct": 0.73},
+        )
+        accepted = self.client.put(
+            "/api/strategy-shadow/config",
+            params={"symbol": "0700.HK"},
+            json={"profit_target_pct": 0.75},
+        )
+
+        assert rejected.status_code == 400
+        assert "must be at least 0.7400%" in rejected.json()["detail"]
+        assert accepted.status_code == 200
+        assert accepted.json()["profit_target_pct"] == pytest.approx(0.75)
+        assert accepted.json()["max_adx"] == pytest.approx(20.0)
+        assert accepted.json()["order_submission_allowed"] is False
+
     def test_disabled_config_reports_disabled_even_with_state_row(self) -> None:
         self.client.get("/api/strategy-shadow/config")
         with self.session_factory() as db:
@@ -489,6 +519,98 @@ class TestStrategyV2ShadowApi:
         assert evaluation["daily"][0]["missing_internal_bars"] == 0
         assert evaluation["daily"][0]["partial_start"] is True
         assert evaluation["daily"][0]["partial_end"] is True
+
+    def test_evaluation_requires_complete_data_and_profitable_quality(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        config = self.client.get("/api/strategy-shadow/config").json()
+        complete_days = [
+            StrategyV2ShadowDailyEvidence(
+                session_date=(_NOW - timedelta(days=index)).date(),
+                first_bar_at=_NOW - timedelta(hours=1),
+                last_bar_at=_NOW,
+                bars=390,
+                eligible_bars=10,
+                expected_internal_bars=390,
+                missing_internal_bars=0,
+                coverage_ratio=1.0,
+                trades=3,
+                net_pnl=2.7,
+                partial_start=False,
+                partial_end=False,
+                outside_session_bars=0,
+                complete_session=True,
+            )
+            for index in range(20)
+        ]
+        evidence = list(complete_days)
+        monkeypatch.setattr(
+            StrategyV2ShadowService,
+            "_daily_evidence",
+            staticmethod(lambda _decisions, _trades: evidence),
+        )
+        with self.session_factory() as db:
+            db.add_all([
+                StrategyV2ShadowTrade(
+                    symbol="AAPL.US",
+                    config_version=config["config_version"],
+                    status="CLOSED",
+                    entry_at=_NOW - timedelta(minutes=2),
+                    exit_at=_NOW - timedelta(minutes=1),
+                    entry_price=100.0,
+                    exit_price=101.0,
+                    quantity=1.0,
+                    gross_pnl=1.0,
+                    estimated_fees=0.1,
+                    net_pnl=0.9,
+                    fee_source="ESTIMATED",
+                    estimated_fee_rate=0.0005,
+                )
+                for _ in range(50)
+            ])
+            db.commit()
+
+        ready = self.client.get(
+            "/api/strategy-shadow/evaluation",
+            params={"symbol": "AAPL.US"},
+        ).json()
+
+        assert ready["status"] == "READY_FOR_REVIEW"
+        assert ready["observed_trading_days"] == 20
+        assert ready["closed_trades"] == 50
+        assert ready["minimum_session_coverage_ratio"] == pytest.approx(0.995)
+        assert ready["readiness_blockers"] == []
+        assert ready["quality"]["total_net_pnl"] == pytest.approx(45.0)
+        assert ready["quality"]["cost_stressed_net_pnl"] > 0
+
+        with self.session_factory() as db:
+            for trade in db.query(StrategyV2ShadowTrade).all():
+                trade.exit_price = 99.0
+                trade.gross_pnl = -1.0
+                trade.net_pnl = -1.1
+            db.commit()
+
+        losing = self.client.get(
+            "/api/strategy-shadow/evaluation",
+            params={"symbol": "AAPL.US"},
+        ).json()
+        assert losing["status"] == "COLLECTING"
+        assert "NET_PNL_NON_POSITIVE" in losing["readiness_blockers"]
+
+        evidence.append(complete_days[0].model_copy(update={
+            "session_date": (_NOW + timedelta(days=1)).date(),
+            "coverage_ratio": 0.80,
+            "partial_start": True,
+            "complete_session": False,
+        }))
+        incomplete = self.client.get(
+            "/api/strategy-shadow/evaluation",
+            params={"symbol": "AAPL.US"},
+        ).json()
+        assert incomplete["observed_trading_days"] == 20
+        assert "DATA_PARTIAL_SESSIONS" in incomplete["readiness_blockers"]
+        assert "DATA_SESSION_COVERAGE" in incomplete["readiness_blockers"]
 
     @staticmethod
     def _shadow_counts(db: Session) -> tuple[int, int, int, int]:

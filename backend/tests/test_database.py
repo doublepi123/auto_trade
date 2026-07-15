@@ -46,6 +46,18 @@ def test_init_db_adds_missing_order_execution_columns(tmp_path, monkeypatch) -> 
         columns = {row[1] for row in db.exec_driver_sql("PRAGMA table_info(orders)")}
     assert "executed_quantity" in columns
     assert "executed_price" in columns
+    assert {
+        "cost_basis_price",
+        "cost_basis_quantity",
+        "cost_basis_opened_at",
+        "position_quantity_before",
+        "gross_pnl",
+        "pnl_fee",
+        "pnl_fee_rate",
+        "pnl_fee_source",
+        "net_pnl",
+        "pnl_source",
+    } <= columns
 
     session = testing_session()
     try:
@@ -830,6 +842,31 @@ def test_init_db_creates_report_query_indexes(tmp_path, monkeypatch) -> None:
     assert "ix_trade_events_symbol_created_at" in trade_events_indexes
     assert "ix_trade_events_event_type" in trade_events_indexes
     assert "ix_llm_interactions_symbol_created_at" in llm_indexes
+    assert "ix_llm_interactions_created_at_id" in llm_indexes
+
+
+def test_report_index_migration_adds_llm_created_at_id_index(tmp_path) -> None:
+    from app import database
+
+    db_path = tmp_path / "legacy_llm_index.db"
+    legacy_engine = create_engine(f"sqlite:///{db_path}")
+    with legacy_engine.begin() as connection:
+        connection.exec_driver_sql(
+            "CREATE TABLE llm_interactions ("
+            "id INTEGER PRIMARY KEY, symbol VARCHAR(50), created_at DATETIME)"
+        )
+
+    database._ensure_report_query_indexes(legacy_engine)
+
+    with legacy_engine.connect() as connection:
+        indexes = {
+            row[0]
+            for row in connection.exec_driver_sql(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='index' AND tbl_name='llm_interactions'"
+            )
+        }
+    assert "ix_llm_interactions_created_at_id" in indexes
 
 
 def test_execution_ledger_migration_freezes_legacy_fill_fee(tmp_path) -> None:

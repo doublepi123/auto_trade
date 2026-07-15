@@ -702,6 +702,11 @@ class TestAPI:
             "verify_operational_resume",
             lambda: (True, ""),
         )
+        monkeypatch.setattr(
+            runner,
+            "_protective_exit_runtime_health",
+            lambda: (True, ""),
+        )
         monkeypatch.setattr(trade_api, "get_runner", lambda: runner)
 
         enabled = client.post("/api/control/protective-exit/enable")

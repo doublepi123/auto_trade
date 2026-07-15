@@ -436,6 +436,11 @@ class TestE2EStartupRestoresTrackedEntries:
         _install_fake_broker(monkeypatch, fake_broker)
         runner = get_runner()
         runner._initialize_runner()
+        monkeypatch.setattr(
+            runner,
+            "_protective_exit_runtime_health",
+            lambda: (True, ""),
+        )
         pause_reason = (
             "ORDER_SUBMISSION_UNCERTAIN: symbol=AAPL.US action=BUY "
             "broker response was lost"
@@ -1019,6 +1024,264 @@ class TestE2EOfflineFillRecovery:
         safe, error = runner.verify_operational_resume()
         assert safe is False
         assert "settlement" in error
+
+    def test_restart_live_partial_entry_applies_cumulative_fill_once(
+        self, fresh_runner, monkeypatch
+    ) -> None:
+        _seed_strategy(symbol="AAPL.US")
+        submitted_at = datetime.now(timezone.utc) - timedelta(seconds=10)
+        db = SessionLocal()
+        try:
+            db.add(OrderRecord(
+                broker_order_id="live-partial-entry",
+                symbol="AAPL.US",
+                side="BUY",
+                quantity=10.0,
+                price=100.0,
+                status="SUBMITTED",
+                created_at=submitted_at,
+            ))
+            db.add(TradeEvent(
+                event_type="ORDER_SUBMITTED",
+                symbol="AAPL.US",
+                broker_order_id="live-partial-entry",
+                side="BUY",
+                status="SUBMITTED",
+                message="locally submitted partial entry",
+                created_at=submitted_at,
+            ))
+            db.add(RuntimeState(symbol="AAPL.US", engine_state="long"))
+            db.commit()
+        finally:
+            db.close()
+
+        partial_order = _make_broker_order(
+            "live-partial-entry",
+            symbol="AAPL.US",
+            side="BUY",
+            quantity=10.0,
+            price=100.0,
+            status="PARTIAL_FILLED",
+            executed_quantity=4.0,
+            executed_price=101.0,
+            created_at=submitted_at,
+        )
+        fake_broker = _FakeBroker(
+            today_orders=[partial_order],
+            positions=[Position("AAPL.US", "LONG", Decimal("4"), Decimal("101"))],
+            order_status_response=SimpleNamespace(
+                broker_order_id="live-partial-entry",
+                status="PARTIAL_FILLED",
+                executed_quantity=Decimal("4"),
+                executed_price=Decimal("101"),
+            ),
+        )
+        _install_fake_broker(monkeypatch, fake_broker)
+
+        runner = get_runner()
+        runner._initialize_runner()
+
+        assert runner._trade_svc.pending_order_for("AAPL.US") is not None
+        assert runner._trade_svc.tracked_position("AAPL.US") is None
+
+        fake_broker._order_status_response = SimpleNamespace(
+            broker_order_id="live-partial-entry",
+            status="CANCELLED",
+            executed_quantity=Decimal("4"),
+            executed_price=Decimal("101"),
+        )
+        runner._trade_svc._order_status_poll_interval_seconds = 0
+        runner._trade_svc.reconcile(runner.risk, runner.notifier)
+
+        tracked = runner._trade_svc.tracked_position("AAPL.US")
+        assert tracked is not None
+        assert tracked.quantity == Decimal("4")
+        assert tracked.cost == Decimal("404")
+        assert runner._trade_svc.pending_order_for("AAPL.US") is None
+
+    def test_restart_live_partial_exit_consumes_cumulative_fill_once(
+        self, fresh_runner, monkeypatch
+    ) -> None:
+        _seed_strategy(symbol="AAPL.US")
+        submitted_at = datetime.now(timezone.utc) - timedelta(seconds=10)
+        opened_at = submitted_at - timedelta(minutes=10)
+        db = SessionLocal()
+        try:
+            db.add(TrackedEntry(
+                symbol="AAPL.US",
+                side="LONG",
+                quantity=10.0,
+                cost=1000.0,
+                opened_at=opened_at,
+                updated_at=submitted_at - timedelta(seconds=1),
+            ))
+            db.add(OrderRecord(
+                broker_order_id="live-partial-exit",
+                symbol="AAPL.US",
+                side="SELL",
+                quantity=10.0,
+                price=105.0,
+                status="SUBMITTED",
+                pnl_source="TRACKED_ENTRY",
+                cost_basis_price=100.0,
+                cost_basis_quantity=10.0,
+                cost_basis_opened_at=opened_at,
+                position_quantity_before=10.0,
+                pnl_fee_rate=0.0005,
+                created_at=submitted_at,
+            ))
+            db.add(TradeEvent(
+                event_type="ORDER_SUBMITTED",
+                symbol="AAPL.US",
+                broker_order_id="live-partial-exit",
+                side="SELL",
+                status="SUBMITTED",
+                message="locally submitted partial exit",
+                created_at=submitted_at,
+            ))
+            db.add(RuntimeState(symbol="AAPL.US", engine_state="long"))
+            db.commit()
+        finally:
+            db.close()
+
+        partial_order = _make_broker_order(
+            "live-partial-exit",
+            symbol="AAPL.US",
+            side="SELL",
+            quantity=10.0,
+            price=105.0,
+            status="PARTIAL_FILLED",
+            executed_quantity=4.0,
+            executed_price=105.0,
+            created_at=submitted_at,
+        )
+        fake_broker = _FakeBroker(
+            today_orders=[partial_order],
+            positions=[Position("AAPL.US", "LONG", Decimal("6"), Decimal("100"))],
+            order_status_response=SimpleNamespace(
+                broker_order_id="live-partial-exit",
+                status="PARTIAL_FILLED",
+                executed_quantity=Decimal("4"),
+                executed_price=Decimal("105"),
+            ),
+        )
+        _install_fake_broker(monkeypatch, fake_broker)
+
+        runner = get_runner()
+        runner._initialize_runner()
+
+        tracked = runner._trade_svc.tracked_position("AAPL.US")
+        assert tracked is not None
+        assert tracked.quantity == Decimal("10.0")
+
+        fake_broker._order_status_response = SimpleNamespace(
+            broker_order_id="live-partial-exit",
+            status="CANCELLED",
+            executed_quantity=Decimal("4"),
+            executed_price=Decimal("105"),
+        )
+        runner._trade_svc._order_status_poll_interval_seconds = 0
+        runner._trade_svc.reconcile(runner.risk, runner.notifier)
+
+        tracked = runner._trade_svc.tracked_position("AAPL.US")
+        assert tracked is not None
+        assert tracked.quantity == Decimal("6.0")
+        assert tracked.cost == Decimal("600.0")
+        assert runner.risk.daily_pnl == pytest.approx(19.59)
+        assert runner._trade_svc.pending_order_for("AAPL.US") is None
+
+    def test_restart_offline_terminal_exit_backfills_authoritative_outcome(
+        self, fresh_runner, monkeypatch
+    ) -> None:
+        _seed_strategy(symbol="AAPL.US")
+        submitted_at = datetime.now(timezone.utc) - timedelta(seconds=10)
+        filled_at = submitted_at + timedelta(seconds=5)
+        opened_at = submitted_at - timedelta(minutes=10)
+        db = SessionLocal()
+        try:
+            db.add(TrackedEntry(
+                symbol="AAPL.US",
+                side="LONG",
+                quantity=10.0,
+                cost=1000.0,
+                opened_at=opened_at,
+                updated_at=submitted_at - timedelta(seconds=1),
+            ))
+            db.add(OrderRecord(
+                broker_order_id="offline-authoritative-exit",
+                symbol="AAPL.US",
+                side="SELL",
+                quantity=4.0,
+                price=109.0,
+                status="SUBMITTED",
+                pnl_source="TRACKED_ENTRY",
+                cost_basis_price=100.0,
+                cost_basis_quantity=4.0,
+                cost_basis_opened_at=opened_at,
+                position_quantity_before=10.0,
+                pnl_fee_rate=0.001,
+                created_at=submitted_at,
+            ))
+            db.add(TradeEvent(
+                event_type="ORDER_SUBMITTED",
+                symbol="AAPL.US",
+                broker_order_id="offline-authoritative-exit",
+                side="SELL",
+                status="SUBMITTED",
+                message="locally submitted exit filled while offline",
+                created_at=submitted_at,
+            ))
+            db.add(RuntimeState(symbol="AAPL.US", engine_state="long"))
+            db.commit()
+        finally:
+            db.close()
+
+        filled_order = _make_broker_order(
+            "offline-authoritative-exit",
+            symbol="AAPL.US",
+            side="SELL",
+            quantity=4.0,
+            price=109.0,
+            status="FILLED",
+            executed_quantity=4.0,
+            executed_price=110.0,
+            created_at=submitted_at,
+            filled_at=filled_at,
+        )
+        fake_broker = _FakeBroker(
+            today_orders=[filled_order],
+            positions=[Position("AAPL.US", "LONG", Decimal("6"), Decimal("100"))],
+        )
+        _install_fake_broker(monkeypatch, fake_broker)
+
+        runner = get_runner()
+        runner._initialize_runner()
+
+        assert runner._trade_svc.pending_order_for("AAPL.US") is None
+        tracked = runner._trade_svc.tracked_position("AAPL.US")
+        assert tracked is not None
+        assert tracked.quantity == Decimal("6.0")
+        assert tracked.cost == Decimal("600.0")
+        db = SessionLocal()
+        try:
+            order = db.query(OrderRecord).filter(
+                OrderRecord.broker_order_id == "offline-authoritative-exit"
+            ).one()
+            assert order.pnl_source == "TRACKED_ENTRY"
+            assert order.cost_basis_price == pytest.approx(100.0)
+            assert order.cost_basis_quantity == pytest.approx(4.0)
+            assert order.position_quantity_before == pytest.approx(10.0)
+            assert order.gross_pnl == pytest.approx(40.0)
+            assert order.pnl_fee == pytest.approx(0.84)
+            assert order.pnl_fee_source == "ESTIMATED"
+            assert order.net_pnl == pytest.approx(39.16)
+            from app.services.daily_pnl_service import DailyPnlService
+
+            replay = DailyPnlService(db).calculate(symbol="AAPL.US")
+            assert replay.is_complete is True
+            assert replay.realized_pnl == pytest.approx(39.16)
+        finally:
+            db.close()
 
     def test_old_exit_fill_does_not_mask_new_broker_exposure(
         self, fresh_runner, monkeypatch

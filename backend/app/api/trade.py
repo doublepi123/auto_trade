@@ -160,6 +160,16 @@ def _broker_order_response(item: Any, local_order: OrderRecord | None = None) ->
         "slippage_bps": local_fields.slippage_bps,
         "exit_cause": local_fields.exit_cause,
         "exit_reason": local_fields.exit_reason,
+        "gross_pnl": local_fields.gross_pnl,
+        "net_pnl": local_fields.net_pnl,
+        "pnl_source": local_fields.pnl_source,
+        "cost_basis_price": local_fields.cost_basis_price,
+        "cost_basis_quantity": local_fields.cost_basis_quantity,
+        "cost_basis_opened_at": local_fields.cost_basis_opened_at,
+        "position_quantity_before": local_fields.position_quantity_before,
+        "pnl_fee": local_fields.pnl_fee,
+        "pnl_fee_source": local_fields.pnl_fee_source,
+        "pnl_fee_rate": local_fields.pnl_fee_rate,
     })
 
 

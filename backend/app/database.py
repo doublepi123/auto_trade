@@ -155,6 +155,14 @@ def _ensure_order_execution_ledger_columns(db_engine: Engine) -> None:
         "exit_reason": "TEXT DEFAULT '' NOT NULL",
         "gross_pnl": "FLOAT",
         "net_pnl": "FLOAT",
+        "pnl_source": "VARCHAR(30) DEFAULT 'UNKNOWN' NOT NULL",
+        "cost_basis_price": "FLOAT",
+        "cost_basis_quantity": "FLOAT",
+        "cost_basis_opened_at": "DATETIME",
+        "position_quantity_before": "FLOAT",
+        "pnl_fee": "FLOAT",
+        "pnl_fee_source": "VARCHAR(20) DEFAULT 'UNKNOWN' NOT NULL",
+        "pnl_fee_rate": "FLOAT",
         "mfe_amount": "FLOAT",
         "mae_amount": "FLOAT",
         "mfe_pct": "FLOAT",
@@ -1367,6 +1375,11 @@ def _ensure_report_query_indexes(db_engine: Engine) -> None:
             if "ix_llm_interactions_symbol_created_at" not in existing_indexes:
                 connection.exec_driver_sql(
                     "CREATE INDEX IF NOT EXISTS ix_llm_interactions_symbol_created_at ON llm_interactions (symbol, created_at)"
+                )
+            if "ix_llm_interactions_created_at_id" not in existing_indexes:
+                connection.exec_driver_sql(
+                    "CREATE INDEX IF NOT EXISTS ix_llm_interactions_created_at_id "
+                    "ON llm_interactions (created_at, id)"
                 )
 
 
