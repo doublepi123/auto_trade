@@ -247,7 +247,7 @@ async def _llm_analysis_tick() -> None:
         if not targets:
             return
         cycle_budget = min(settings.llm_max_symbols_per_cycle, remaining_hour_budget)
-        analyzed_count = 0
+        attempted_count = 0
 
         from app.api.llm_advisor import _interval_reference_quantity
         from app.services.llm_interaction_service import (
@@ -258,7 +258,35 @@ async def _llm_analysis_tick() -> None:
         advisor = LLMAdvisorService(broker=runner.broker)
         for symbol, market, engine, is_primary in targets:
             try:
-                if analyzed_count >= cycle_budget:
+                symbol_state = state_svc.get_state(symbol, market)
+                symbol_last_analysis_at = symbol_state.last_analysis_at
+                symbol_next_analysis_at = symbol_state.next_analysis_at
+                symbol_last_status = getattr(symbol_state, "last_status", "")
+                # A newly created schedule row is flushed by get_state(). End
+                # that transaction before broker context and the long LLM call.
+                db.commit()
+                if symbol_next_analysis_at is not None:
+                    if symbol_next_analysis_at.tzinfo is None:
+                        symbol_next_analysis_at = symbol_next_analysis_at.replace(
+                            tzinfo=timezone.utc
+                        )
+                    else:
+                        symbol_next_analysis_at = symbol_next_analysis_at.astimezone(
+                            timezone.utc
+                        )
+                if (
+                    symbol_last_status == "FAILED"
+                    and symbol_next_analysis_at is not None
+                    and symbol_next_analysis_at > now
+                ):
+                    logger.info(
+                        "LLM analysis backoff active for %s until %s",
+                        symbol,
+                        symbol_next_analysis_at.isoformat(),
+                    )
+                    continue
+
+                if attempted_count >= cycle_budget:
                     state_svc.record_skip(
                         symbol,
                         market,
@@ -285,13 +313,12 @@ async def _llm_analysis_tick() -> None:
                     db.commit()
                     continue
 
-                symbol_state = state_svc.get_state(symbol, market)
                 with _llm_globals_lock:
                     if is_primary:
                         last_analysis_at = config.llm_last_analysis_at
                         last_trigger_price = _last_llm_trigger_price
                     else:
-                        last_analysis_at = symbol_state.last_analysis_at
+                        last_analysis_at = symbol_last_analysis_at
                         last_trigger_price = _last_llm_trigger_price_by_symbol.get(symbol, 0.0)
 
                 time_gate_passed, volatility_triggered = _should_run_llm_analysis(
@@ -343,6 +370,7 @@ async def _llm_analysis_tick() -> None:
 
                 target_buy_low = getattr(params, "buy_low", config.buy_low)
                 target_sell_high = getattr(params, "sell_high", config.sell_high)
+                attempted_count += 1
                 result = await asyncio.to_thread(
                     advisor.analyze,
                     symbol=symbol,
@@ -363,13 +391,15 @@ async def _llm_analysis_tick() -> None:
                     force=True,
                     persist=is_primary,
                 )
+                analysis_completed_at = datetime.now(timezone.utc)
                 if result.get("success"):
-                    analyzed_count += 1
                     now_mono = time.monotonic()
                     with _llm_globals_lock:
                         _prune_llm_analysis_timestamps(now_mono)
                         _llm_analysis_timestamps.append(now_mono)
-                        _llm_last_analysis_at_by_symbol[symbol] = now
+                        _llm_last_analysis_at_by_symbol[symbol] = (
+                            analysis_completed_at
+                        )
 
                 if result.get("success"):
                     # Only update trigger reference price on successful analysis
@@ -441,15 +471,16 @@ async def _llm_analysis_tick() -> None:
                             "order_status": order_result.get("status"),
                             "order_id": order_result.get("order_id"),
                             "policy_outcome": policy_outcome,
-                            "symbol_budget_index": analyzed_count,
+                            "symbol_budget_index": attempted_count,
                             "persisted_interval": is_primary,
                         },
                     )
                     state_svc.record_analysis(
                         symbol,
                         market,
-                        analyzed_at=now,
-                        next_analysis_at=now + timedelta(minutes=interval_minutes),
+                        analyzed_at=analysis_completed_at,
+                        next_analysis_at=analysis_completed_at
+                        + timedelta(minutes=interval_minutes),
                     )
                     db.commit()
                 else:
@@ -462,15 +493,25 @@ async def _llm_analysis_tick() -> None:
                         payload={
                             "source": "cron",
                             "error": result.get("error", "Unknown error"),
-                            "symbol_budget_index": analyzed_count,
+                            "failure_kind": result.get("failure_kind"),
+                            "transient": result.get("transient", False),
+                            "retry_after_seconds": result.get(
+                                "retry_after_seconds", 0
+                            ),
+                            "symbol_budget_index": attempted_count,
                             "persisted_interval": is_primary,
                         },
+                    )
+                    failure_at = datetime.now(timezone.utc)
+                    retry_after_seconds = int(
+                        result.get("retry_after_seconds") or interval_minutes * 60
                     )
                     state_svc.record_failure(
                         symbol,
                         market,
                         result.get("error", "Unknown error"),
-                        next_analysis_at=now + timedelta(minutes=interval_minutes),
+                        next_analysis_at=failure_at
+                        + timedelta(seconds=max(1, retry_after_seconds)),
                     )
                     db.commit()
             except Exception:

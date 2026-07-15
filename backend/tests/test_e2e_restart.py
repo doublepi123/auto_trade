@@ -442,23 +442,27 @@ class TestE2EStartupRestoresTrackedEntries:
         )
         runner.risk.pause(pause_reason, auto_resumable=False)
 
-        safe, error = runner.verify_operational_resume()
+        safe, error = runner.permit_protective_exits_after_verification()
         assert safe is False
         assert "grace period" in error
+        assert runner.risk.protective_exit_permitted is False
 
         runner.risk.pause(
             pause_reason,
             auto_resumable=False,
             paused_at=datetime.now(timezone.utc) - timedelta(seconds=61),
         )
-        safe, error = runner.verify_operational_resume()
+        safe, error = runner.permit_protective_exits_after_verification()
         assert safe is False
         assert "first coherent empty broker proof" in error
+        assert runner.risk.protective_exit_permitted is False
 
         runner._unknown_submission_proof_at -= 6
-        safe, error = runner.verify_operational_resume()
+        safe, error = runner.permit_protective_exits_after_verification()
         assert safe is True
         assert error == ""
+        assert runner.risk.paused is True
+        assert runner.risk.protective_exit_permitted is True
 
 
 class TestE2EOfflineFillRecovery:

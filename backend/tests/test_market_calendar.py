@@ -11,6 +11,7 @@ from app.core.market_calendar import (
     is_closing_window,
     is_trading_hours,
     next_session_open,
+    session_status,
     trade_day_for,
 )
 
@@ -70,6 +71,23 @@ class TestIsTradingHours:
         resume = next_session_open("HK", instant)
         assert resume.astimezone(ZoneInfo("Asia/Hong_Kong")).hour == 13
         assert resume.astimezone(ZoneInfo("Asia/Hong_Kong")).minute == 0
+
+    def test_hk_holiday_lunch_time_advances_to_next_session(self) -> None:
+        # 2026-07-01 is Hong Kong SAR Establishment Day.
+        holiday_lunch = datetime(2026, 7, 1, 4, 30, tzinfo=timezone.utc)
+
+        assert session_status("HK", holiday_lunch) == "closed"
+        assert next_session_open("HK", holiday_lunch) == datetime(
+            2026, 7, 2, 1, 30, tzinfo=timezone.utc
+        )
+
+    def test_hk_half_day_close_advances_to_next_session(self) -> None:
+        close = datetime(2026, 12, 24, 4, 0, tzinfo=timezone.utc)
+
+        assert session_status("HK", close) == "post"
+        assert next_session_open("HK", close) == datetime(
+            2026, 12, 28, 1, 30, tzinfo=timezone.utc
+        )
 
     def test_hk_lunch_break_is_not_rth(self) -> None:
         # 2026-05-22 04:30 UTC = 12:30 HKT (lunch break)

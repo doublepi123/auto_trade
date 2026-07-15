@@ -5,6 +5,7 @@ from typing import Any, cast
 from datetime import datetime, timezone
 
 import pytest
+import httpx
 
 from app.core.broker import BrokerCandle
 from app.services.data_aggregator import (
@@ -12,7 +13,11 @@ from app.services.data_aggregator import (
     _compute_atr,
     _compute_bollinger_bands,
 )
-from app.services.llm_advisor_service import LLMAdvisorService, _escape_orphan_braces
+from app.services.llm_advisor_service import (
+    LLMAdvisorService,
+    LLMProviderError,
+    _escape_orphan_braces,
+)
 from app.schemas import LLMPreviewAnalyzeRequest
 
 
@@ -1057,6 +1062,88 @@ class TestLLMAdvisorDegradation:
         with pytest.raises(RuntimeError, match="MINIMAX_API_KEY"):
             advisor._call_minimax("analyze NVDA")
 
+    def test_call_minimax_529_uses_cross_tick_backoff_without_inline_retry(
+        self,
+        advisor: LLMAdvisorService,
+        monkeypatch,
+    ) -> None:
+        import app.config
+        import app.services.llm_advisor_service as service_module
+
+        calls = 0
+
+        def overloaded(*args, **kwargs) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            request = httpx.Request("POST", "https://api.minimaxi.com/v1/chat/completions")
+            return httpx.Response(529, text="overloaded", request=request)
+
+        monkeypatch.setattr(app.config.settings, "minimax_api_key", "mm-test-key", raising=False)
+        monkeypatch.setattr(service_module.httpx, "post", overloaded)
+
+        with pytest.raises(LLMProviderError) as excinfo:
+            advisor._call_minimax("analyze NVDA")
+
+        assert calls == 1
+        assert excinfo.value.failure_kind == "HTTP_529"
+        assert excinfo.value.transient is True
+        assert excinfo.value.retry_after_seconds == 300
+
+    def test_call_minimax_retries_503_once_then_succeeds(
+        self,
+        advisor: LLMAdvisorService,
+        monkeypatch,
+    ) -> None:
+        import app.config
+        import app.services.llm_advisor_service as service_module
+
+        calls = 0
+
+        def respond(*args, **kwargs) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            request = httpx.Request("POST", "https://api.minimaxi.com/v1/chat/completions")
+            if calls == 1:
+                return httpx.Response(503, text="unavailable", request=request)
+            return httpx.Response(
+                200,
+                json={"choices": [{"message": {"content": "ok"}}]},
+                request=request,
+            )
+
+        monkeypatch.setattr(app.config.settings, "minimax_api_key", "mm-test-key", raising=False)
+        monkeypatch.setattr(service_module.httpx, "post", respond)
+        monkeypatch.setattr(service_module.time, "sleep", lambda _seconds: None)
+
+        assert advisor._call_minimax("analyze NVDA") == "ok"
+        assert calls == 2
+
+    def test_call_minimax_read_timeout_does_not_retry_inline(
+        self,
+        advisor: LLMAdvisorService,
+        monkeypatch,
+    ) -> None:
+        import app.config
+        import app.services.llm_advisor_service as service_module
+
+        calls = 0
+
+        def timeout(*args, **kwargs) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            request = httpx.Request("POST", "https://api.minimaxi.com/v1/chat/completions")
+            raise httpx.ReadTimeout("slow response", request=request)
+
+        monkeypatch.setattr(app.config.settings, "minimax_api_key", "mm-test-key", raising=False)
+        monkeypatch.setattr(service_module.httpx, "post", timeout)
+
+        with pytest.raises(LLMProviderError) as excinfo:
+            advisor._call_minimax("analyze NVDA")
+
+        assert calls == 1
+        assert excinfo.value.failure_kind == "TIMEOUT"
+        assert excinfo.value.retry_after_seconds == 300
+
     def test_analyze_records_failed_interaction_on_runtime_error(
         self,
         advisor: LLMAdvisorService,
@@ -1418,6 +1505,92 @@ class TestThrottleReserveSlot:
         assert service_module._LAST_ANALYSIS_TIMESTAMP != float("inf")
         assert service_module._LAST_ANALYSIS_TIMESTAMP > 0
         assert call_count == 1
+
+    def test_force_analyze_cannot_bypass_in_flight_slot(
+        self,
+        advisor: LLMAdvisorService,
+        monkeypatch,
+    ) -> None:
+        import app.services.llm_advisor_service as service_module
+
+        monkeypatch.setattr(
+            service_module,
+            "_LAST_ANALYSIS_TIMESTAMP",
+            float("inf"),
+        )
+        result = advisor.analyze(
+            symbol="AAPL.US",
+            market="US",
+            current_price=100.0,
+            current_buy_low=90.0,
+            current_sell_high=110.0,
+            short_selling=False,
+            current_position="FLAT",
+            recent_trades=[],
+            force=True,
+        )
+
+        assert result["success"] is False
+        assert result["failure_kind"] == "IN_FLIGHT"
+
+    def test_slot_remains_reserved_through_interaction_recording(
+        self,
+        advisor: LLMAdvisorService,
+        monkeypatch,
+    ) -> None:
+        import app.services.llm_advisor_service as service_module
+
+        monkeypatch.setattr(service_module, "_LAST_ANALYSIS_TIMESTAMP", 0.0)
+        monkeypatch.setattr(
+            advisor._data_aggregator,
+            "fetch_market_data",
+            lambda symbol, market: {"daily_candles": [], "minute_candles": []},
+        )
+        monkeypatch.setattr(
+            advisor,
+            "_call_deepseek",
+            lambda prompt: '{"suggested_buy_low":95,"suggested_sell_high":105,"confidence_score":0.8,"analysis":"ok"}',
+        )
+        nested_results: list[dict[str, object]] = []
+
+        def record_interaction(**kwargs: object) -> int:
+            nested_results.append(
+                advisor.analyze(
+                    symbol="MSFT.US",
+                    market="US",
+                    current_price=100.0,
+                    current_buy_low=90.0,
+                    current_sell_high=110.0,
+                    short_selling=False,
+                    current_position="FLAT",
+                    recent_trades=[],
+                    force=True,
+                    persist=False,
+                )
+            )
+            return 1
+
+        monkeypatch.setattr(
+            service_module.LLMAdvisorService,
+            "_record_interaction",
+            staticmethod(record_interaction),
+        )
+
+        result = advisor.analyze(
+            symbol="AAPL.US",
+            market="US",
+            current_price=100.0,
+            current_buy_low=90.0,
+            current_sell_high=110.0,
+            short_selling=False,
+            current_position="FLAT",
+            recent_trades=[],
+            force=True,
+            persist=False,
+        )
+
+        assert result["success"] is True
+        assert nested_results[0]["failure_kind"] == "IN_FLIGHT"
 
     def test_analyze_failure_releases_slot(self, advisor: LLMAdvisorService, monkeypatch) -> None:
         """When LLM call fails, _LAST_ANALYSIS_TIMESTAMP must be restored to

@@ -4,6 +4,7 @@ interface StatusStub {
   engine_state: EngineState
   paused: boolean
   kill_switch: boolean
+  protective_exit_permitted: boolean
   runner_running: boolean
   daily_pnl: number
   consecutive_losses: number
@@ -23,6 +24,7 @@ function initialStatus(): StatusStub {
     engine_state: 'flat',
     paused: false,
     kill_switch: false,
+    protective_exit_permitted: false,
     runner_running: false,
     daily_pnl: 0,
     consecutive_losses: 0,
@@ -68,7 +70,7 @@ Cypress.Commands.add('stubApi', () => {
     slippage_bps: 2,
     estimated_fee_rate_us: 0.0005,
     estimated_fee_rate_hk: 0.003,
-    algorithm_version: 'strategy-v2-rth-mr-v1',
+    algorithm_version: 'strategy-v2-rth-mr-v2-contiguous',
     mode: 'SHADOW',
     order_submission_allowed: false,
     allow_position_addons: false,
@@ -671,6 +673,7 @@ Cypress.Commands.add('stubApi', () => {
         paused: false,
         kill_switch: false,
         pause_reason: '',
+        protective_exit_permitted: false,
         daily_pnl: 12.5,
         consecutive_losses: 1,
       },
@@ -1064,27 +1067,37 @@ Cypress.Commands.add('stubApi', () => {
   }).as('applyStrategyPreset')
 
   cy.intercept('POST', '/api/control/start', (req) => {
-    status = { ...status, paused: false, kill_switch: false }
+    status = { ...status, paused: false, kill_switch: false, protective_exit_permitted: false }
     req.reply({ body: { message: 'runner started' } })
   }).as('startAction')
 
   cy.intercept('POST', '/api/control/stop', (req) => {
-    status = { ...status, paused: true }
+    status = { ...status, paused: true, protective_exit_permitted: false }
     req.reply({ body: { message: 'runner stopped' } })
   }).as('stopAction')
 
   cy.intercept('POST', '/api/control/pause', (req) => {
-    status = { ...status, paused: true }
+    status = { ...status, paused: true, protective_exit_permitted: false }
     req.reply({ body: { message: 'trading paused' } })
   }).as('pauseAction')
 
   cy.intercept('POST', '/api/control/resume', (req) => {
-    status = { ...status, paused: false }
+    status = { ...status, paused: false, protective_exit_permitted: false }
     req.reply({ body: { message: 'trading resumed' } })
   }).as('resumeAction')
 
+  cy.intercept('POST', '/api/control/protective-exit/enable', (req) => {
+    status = { ...status, protective_exit_permitted: true }
+    req.reply({ body: { message: 'protective exits enabled' } })
+  }).as('enableProtectiveExitsAction')
+
+  cy.intercept('POST', '/api/control/protective-exit/disable', (req) => {
+    status = { ...status, protective_exit_permitted: false }
+    req.reply({ body: { message: 'protective exits disabled' } })
+  }).as('disableProtectiveExitsAction')
+
   cy.intercept('POST', '/api/control/kill-switch', (req) => {
-    status = { ...status, kill_switch: true }
+    status = { ...status, kill_switch: true, protective_exit_permitted: false }
     req.reply({ body: { message: 'kill switch activated' } })
   }).as('killSwitchAction')
 

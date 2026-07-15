@@ -62,6 +62,7 @@ export interface StatusData {
   engine_state: string
   paused: boolean
   kill_switch: boolean
+  protective_exit_permitted: boolean
   runner_running: boolean
   daily_pnl: number
   consecutive_losses: number
@@ -113,6 +114,7 @@ export interface DiagnosticRiskState {
   paused: boolean
   kill_switch: boolean
   pause_reason: string
+  protective_exit_permitted: boolean
   daily_pnl: number
   consecutive_losses: number
 }
@@ -1354,7 +1356,7 @@ export interface StrategyShadowConfig {
   slippage_bps: number
   estimated_fee_rate_us: number
   estimated_fee_rate_hk: number
-  algorithm_version: 'strategy-v2-rth-mr-v1'
+  algorithm_version: 'strategy-v2-rth-mr-v2-contiguous'
   mode: StrategyShadowMode
   order_submission_allowed: boolean
   allow_position_addons: boolean

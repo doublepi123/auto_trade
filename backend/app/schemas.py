@@ -294,7 +294,9 @@ class StrategyV2ShadowConfigValues(BaseModel):
         le=0.1,
         allow_inf_nan=False,
     )
-    algorithm_version: Literal["strategy-v2-rth-mr-v1"] = "strategy-v2-rth-mr-v1"
+    algorithm_version: Literal["strategy-v2-rth-mr-v2-contiguous"] = (
+        "strategy-v2-rth-mr-v2-contiguous"
+    )
     mode: Literal["SHADOW"] = "SHADOW"
     order_submission_allowed: Literal[False] = False
     allow_position_addons: Literal[False] = False
@@ -570,6 +572,7 @@ class StatusResponse(BaseModel):
     engine_state: str
     paused: bool
     kill_switch: bool
+    protective_exit_permitted: bool = False
     runner_running: bool = False
     daily_pnl: float
     consecutive_losses: int
@@ -697,6 +700,7 @@ class DiagnosticRiskState(BaseModel):
     paused: bool
     kill_switch: bool
     pause_reason: str = ""
+    protective_exit_permitted: bool = False
     daily_pnl: float
     consecutive_losses: int
 

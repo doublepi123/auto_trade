@@ -55,7 +55,9 @@ class RiskController:
         self._pause_reason: str = ""
         self._paused_at: datetime | None = None
         self._pause_auto_resumable: bool = False
+        self._protective_exit_pause_reason: str = ""
         self._kill_switch_reason: str = ""
+        self._safety_generation: int = 0
         self._lock = threading.Lock()
 
     def set_trade_day_provider(self, provider: TradeDayProvider) -> None:
@@ -137,6 +139,8 @@ class RiskController:
         paused_at: datetime | None = None,
     ) -> None:
         with self._lock:
+            self._safety_generation += 1
+            self._protective_exit_pause_reason = ""
             if (
                 self.paused
                 and self._pause_reason.startswith(_OPERATIONAL_PAUSE_PREFIXES)
@@ -150,10 +154,43 @@ class RiskController:
 
     def resume(self) -> None:
         with self._lock:
+            self._safety_generation += 1
+            self._protective_exit_pause_reason = ""
             self.paused = False
             self._pause_reason = ""
             self._paused_at = None
             self._pause_auto_resumable = False
+
+    def resume_if_pause_reason(
+        self,
+        expected_pause_reason: str,
+        *,
+        expected_generation: int,
+    ) -> bool:
+        """Resume only if the verified pause is still current."""
+        with self._lock:
+            if self._safety_generation != expected_generation:
+                self._protective_exit_pause_reason = ""
+                self._safety_generation += 1
+                return False
+            if not self.paused:
+                self._protective_exit_pause_reason = ""
+                self._safety_generation += 1
+                return not self.kill_switch and expected_pause_reason == ""
+            if (
+                self.kill_switch
+                or self._pause_reason != expected_pause_reason
+            ):
+                self._protective_exit_pause_reason = ""
+                self._safety_generation += 1
+                return False
+            self._safety_generation += 1
+            self._protective_exit_pause_reason = ""
+            self.paused = False
+            self._pause_reason = ""
+            self._paused_at = None
+            self._pause_auto_resumable = False
+            return True
 
     def restore_pause(
         self,
@@ -163,6 +200,8 @@ class RiskController:
         auto_resumable: bool = False,
     ) -> None:
         with self._lock:
+            self._safety_generation += 1
+            self._protective_exit_pause_reason = ""
             self.paused = paused
             self._pause_reason = reason if paused else ""
             self._paused_at = paused_at if paused else None
@@ -170,13 +209,54 @@ class RiskController:
 
     def enable_kill_switch(self, reason: str = "manual") -> None:
         with self._lock:
+            self._safety_generation += 1
+            self._protective_exit_pause_reason = ""
             self.kill_switch = True
             self._kill_switch_reason = reason
 
     def disable_kill_switch(self) -> None:
         with self._lock:
+            self._safety_generation += 1
             self.kill_switch = False
             self._kill_switch_reason = ""
+
+    def permit_protective_exits(
+        self,
+        *,
+        expected_pause_reason: str | None = None,
+        expected_generation: int | None = None,
+    ) -> bool:
+        """Temporarily allow position-reducing orders during an operational pause."""
+        with self._lock:
+            if (
+                not self.paused
+                or self.kill_switch
+                or not self._pause_reason.startswith(_OPERATIONAL_PAUSE_PREFIXES)
+                or (
+                    expected_pause_reason is not None
+                    and self._pause_reason != expected_pause_reason
+                )
+                or (
+                    expected_generation is not None
+                    and self._safety_generation != expected_generation
+                )
+            ):
+                self._protective_exit_pause_reason = ""
+                self._safety_generation += 1
+                return False
+            self._protective_exit_pause_reason = self._pause_reason
+            self._safety_generation += 1
+            return True
+
+    def revoke_protective_exits(self) -> None:
+        with self._lock:
+            self._protective_exit_pause_reason = ""
+            self._safety_generation += 1
+
+    def pause_verification_snapshot(self) -> tuple[str, int]:
+        """Return an atomic token binding a verification to the current safety state."""
+        with self._lock:
+            return self._pause_reason, self._safety_generation
 
     def begin_day(self, persisted_date: Optional[date] = None) -> None:
         """Reset daily P&L and consecutive losses if the day has changed.
@@ -213,6 +293,16 @@ class RiskController:
     def pause_auto_resumable(self) -> bool:
         with self._lock:
             return self._pause_auto_resumable
+
+    @property
+    def protective_exit_permitted(self) -> bool:
+        with self._lock:
+            return bool(
+                self.paused
+                and not self.kill_switch
+                and self._pause_reason.startswith(_OPERATIONAL_PAUSE_PREFIXES)
+                and self._protective_exit_pause_reason == self._pause_reason
+            )
 
 
 def _current_risk_day() -> date:

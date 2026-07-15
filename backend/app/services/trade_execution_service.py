@@ -833,9 +833,9 @@ class TradeExecutionService:
     def _risk_rejection_allows_action(action: str, risk: RiskController) -> bool:
         if action not in _POSITION_REDUCING_ACTIONS or risk.kill_switch:
             return False
-        return not (
-            risk.paused and risk.pause_reason.startswith(_OPERATIONAL_PAUSE_PREFIXES)
-        )
+        if risk.paused and risk.pause_reason.startswith(_OPERATIONAL_PAUSE_PREFIXES):
+            return risk.protective_exit_permitted
+        return True
 
     def _is_losing_long_add_on(self, symbol: str, price: Decimal) -> bool:
         with self._state_lock:
@@ -1458,27 +1458,6 @@ class TradeExecutionService:
                     skip_category="POSITION",
                 )
 
-        risk_result = risk.check()
-        if not risk_result.approved and not self._risk_rejection_allows_action(action, risk):
-            logger.warning(
-                "submission rejected by final risk check for %s %s: %s",
-                action,
-                symbol,
-                risk_result.reason,
-            )
-            return self._skip_order(
-                symbol,
-                action,
-                risk_result.reason,
-                skip_category="RISK",
-            )
-        if not risk_result.approved:
-            logger.info(
-                "allowing position-reducing %s despite final risk rejection: %s",
-                action,
-                risk_result.reason,
-            )
-
         with self._state_lock:
             unresolved_order_ids = (
                 sorted(self._pending_orders_by_id)
@@ -1542,6 +1521,26 @@ class TradeExecutionService:
                     quote_issue,
                     skip_category="RISK",
                 )
+        risk_result = risk.check()
+        if not risk_result.approved and not self._risk_rejection_allows_action(action, risk):
+            logger.warning(
+                "submission rejected by final risk check for %s %s: %s",
+                action,
+                symbol,
+                risk_result.reason,
+            )
+            return self._skip_order(
+                symbol,
+                action,
+                risk_result.reason,
+                skip_category="RISK",
+            )
+        if not risk_result.approved:
+            logger.info(
+                "allowing position-reducing %s despite final risk rejection: %s",
+                action,
+                risk_result.reason,
+            )
         return None
 
     @staticmethod

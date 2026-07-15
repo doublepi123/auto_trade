@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Generator
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -292,7 +293,13 @@ class TestLLMAnalysisTick:
         runner.execute_llm_order_decision.return_value = {"status": "NO_ACTION", "order_id": None}
         return runner
 
-    def _patch_tick_deps(self, monkeypatch: pytest.MonkeyPatch, config: SimpleNamespace, runner: MagicMock) -> list[dict[str, object]]:
+    def _patch_tick_deps(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        config: SimpleNamespace,
+        runner: MagicMock,
+        schedule_state: SimpleNamespace | None = None,
+    ) -> list[dict[str, object]]:
         class FakeDB:
             def commit(self) -> None:
                 pass
@@ -344,15 +351,32 @@ class TestLLMAnalysisTick:
                 return 0
 
             def get_state(self, symbol: str, market: str):
-                return SimpleNamespace(symbol=symbol, market=market, last_analysis_at=None, next_analysis_at=None, last_skip_reason="")
+                return schedule_state or SimpleNamespace(
+                    symbol=symbol,
+                    market=market,
+                    last_analysis_at=None,
+                    next_analysis_at=None,
+                    last_status="",
+                    last_skip_reason="",
+                )
 
             def record_analysis(self, symbol: str, market: str, *, analyzed_at: datetime, next_analysis_at: datetime | None) -> None:
+                if schedule_state is not None:
+                    schedule_state.last_status = "ANALYZED"
+                    schedule_state.last_analysis_at = analyzed_at
+                    schedule_state.next_analysis_at = next_analysis_at
                 return None
 
             def record_skip(self, symbol: str, market: str, reason: str, *, next_analysis_at: datetime | None) -> None:
+                if schedule_state is not None:
+                    schedule_state.last_status = "SKIPPED"
+                    schedule_state.next_analysis_at = next_analysis_at
                 return None
 
             def record_failure(self, symbol: str, market: str, reason: str, *, next_analysis_at: datetime | None) -> None:
+                if schedule_state is not None:
+                    schedule_state.last_status = "FAILED"
+                    schedule_state.next_analysis_at = next_analysis_at
                 return None
 
         monkeypatch.setattr("app.main.LLMSymbolStateService", FakeStateService)
@@ -397,6 +421,124 @@ class TestLLMAnalysisTick:
 
         assert len(calls) == 1
         assert calls[0]["current_price"] == 100.0
+
+    @pytest.mark.asyncio
+    async def test_tick_honors_failed_provider_backoff_without_overwriting_state(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        config = self._make_fake_config(llm_last_analysis_at=now - timedelta(minutes=10))
+        runner = self._make_fake_runner(last_price=100.0)
+        runner.fresh_market_price.return_value = None
+        state = SimpleNamespace(
+            symbol="AAPL.US",
+            market="US",
+            last_analysis_at=now - timedelta(minutes=10),
+            next_analysis_at=now + timedelta(minutes=5),
+            last_status="FAILED",
+            last_skip_reason="MiniMax overloaded",
+        )
+        calls = self._patch_tick_deps(
+            monkeypatch,
+            config,
+            runner,
+            schedule_state=state,
+        )
+
+        await main_module._llm_analysis_tick()
+
+        assert calls == []
+        assert state.last_status == "FAILED"
+        runner.fresh_market_price.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_tick_starts_provider_backoff_at_failure_time(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        config = self._make_fake_config(llm_last_analysis_at=now - timedelta(minutes=10))
+        runner = self._make_fake_runner(last_price=100.0)
+        state = SimpleNamespace(
+            symbol="AAPL.US",
+            market="US",
+            last_analysis_at=now - timedelta(minutes=10),
+            next_analysis_at=None,
+            last_status="",
+            last_skip_reason="",
+        )
+        self._patch_tick_deps(monkeypatch, config, runner, schedule_state=state)
+
+        class FailedAdvisor:
+            def __init__(self, broker: object = None) -> None:
+                pass
+
+            def analyze(self, **kwargs: object) -> dict[str, object]:
+                time.sleep(0.05)
+                return {
+                    "success": False,
+                    "error": "MiniMax overloaded",
+                    "failure_kind": "HTTP_529",
+                    "transient": True,
+                    "retry_after_seconds": 300,
+                }
+
+        monkeypatch.setattr(
+            "app.services.llm_advisor_service.LLMAdvisorService",
+            FailedAdvisor,
+        )
+
+        await main_module._llm_analysis_tick()
+        finished_at = datetime.now(timezone.utc)
+
+        assert state.last_status == "FAILED"
+        assert state.next_analysis_at is not None
+        assert state.next_analysis_at >= finished_at + timedelta(seconds=299)
+
+    @pytest.mark.asyncio
+    async def test_tick_schedules_next_analysis_from_completion_time(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        config = self._make_fake_config(llm_last_analysis_at=now - timedelta(minutes=10))
+        runner = self._make_fake_runner(last_price=100.0)
+        state = SimpleNamespace(
+            symbol="AAPL.US",
+            market="US",
+            last_analysis_at=now - timedelta(minutes=10),
+            next_analysis_at=None,
+            last_status="",
+            last_skip_reason="",
+        )
+        self._patch_tick_deps(monkeypatch, config, runner, schedule_state=state)
+
+        class SlowSuccessfulAdvisor:
+            def __init__(self, broker: object = None) -> None:
+                pass
+
+            def analyze(self, **kwargs: object) -> dict[str, object]:
+                time.sleep(0.05)
+                return {
+                    "success": True,
+                    "suggested_buy_low": 98.0,
+                    "suggested_sell_high": 112.0,
+                    "confidence_score": 0.85,
+                    "order_action": "NONE",
+                    "interaction_id": 42,
+                }
+
+        monkeypatch.setattr(
+            "app.services.llm_advisor_service.LLMAdvisorService",
+            SlowSuccessfulAdvisor,
+        )
+        started_at = datetime.now(timezone.utc)
+
+        await main_module._llm_analysis_tick()
+
+        assert state.last_analysis_at >= started_at + timedelta(seconds=0.04)
+        assert state.next_analysis_at == state.last_analysis_at + timedelta(minutes=2)
 
     @pytest.mark.asyncio
     async def test_tick_collects_blocking_context_in_worker_thread(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -646,6 +788,8 @@ class TestLLMAnalysisTick:
         }
         runner.recent_price_context.side_effect = lambda symbol=None: []
         calls = self._patch_tick_deps(monkeypatch, config, runner)
+        monkeypatch.setattr(main_module.settings, "llm_max_symbols_per_cycle", 2)
+        monkeypatch.setattr(main_module.settings, "llm_max_analyses_per_hour", 10)
 
         class FakeAdvisor:
             def __init__(self, broker: object = None) -> None:
@@ -653,8 +797,9 @@ class TestLLMAnalysisTick:
 
             def analyze(self, **kwargs: object) -> dict[str, object]:
                 calls.append(kwargs)
-                assert kwargs["current_buy_low"] == 190.0
-                assert kwargs["current_sell_high"] == 230.0
+                if kwargs["symbol"] == "NVDA.US":
+                    assert kwargs["current_buy_low"] == 190.0
+                    assert kwargs["current_sell_high"] == 230.0
                 return {
                     "success": True,
                     "suggested_buy_low": 188.0,
@@ -787,6 +932,66 @@ class TestLLMAnalysisTick:
             ("NVDA.US", "cycle budget exhausted"),
             ("MSFT.US", "cycle budget exhausted"),
         ]
+
+    @pytest.mark.asyncio
+    async def test_failed_provider_call_consumes_cycle_budget(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        config = self._make_fake_config(
+            symbol="AAPL.US",
+            market="US",
+            llm_last_analysis_at=now - timedelta(minutes=10),
+        )
+        runner = self._make_fake_runner(last_price=101.0)
+        runner.engine.params = StrategyParams(
+            symbol="AAPL.US",
+            market="US",
+            buy_low=100.0,
+            sell_high=110.0,
+        )
+        runner._symbol_runtimes = {
+            "AAPL.US": SimpleNamespace(
+                symbol="AAPL.US",
+                market="US",
+                engine=runner.engine,
+            ),
+            "NVDA.US": SimpleNamespace(
+                symbol="NVDA.US",
+                market="US",
+                engine=SimpleNamespace(
+                    last_price=220.0,
+                    params=StrategyParams(symbol="NVDA.US", market="US"),
+                ),
+            ),
+        }
+        calls = self._patch_tick_deps(monkeypatch, config, runner)
+        monkeypatch.setattr(main_module.settings, "llm_max_symbols_per_cycle", 1)
+        monkeypatch.setattr(main_module.settings, "llm_max_analyses_per_hour", 10)
+
+        class FailedAdvisor:
+            def __init__(self, broker: object = None) -> None:
+                pass
+
+            def analyze(self, **kwargs: object) -> dict[str, object]:
+                calls.append(kwargs)
+                return {
+                    "success": False,
+                    "error": "MiniMax overloaded",
+                    "failure_kind": "HTTP_529",
+                    "transient": True,
+                    "retry_after_seconds": 300,
+                }
+
+        monkeypatch.setattr(
+            "app.services.llm_advisor_service.LLMAdvisorService",
+            FailedAdvisor,
+        )
+
+        await main_module._llm_analysis_tick()
+
+        assert [call["symbol"] for call in calls] == ["AAPL.US"]
 
 
 @pytest.mark.asyncio

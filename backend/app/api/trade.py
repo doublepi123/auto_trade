@@ -934,6 +934,112 @@ def resume_trading(
             logger.exception("failed to record control resume trace")
 
 
+@router.post(
+    "/control/protective-exit/enable",
+    response_model=MessageResponse,
+    dependencies=[Depends(require_api_key())],
+)
+def enable_protective_exits(
+    request: Request,
+    audit: AuditLogger = Depends(get_audit_logger),
+) -> MessageResponse:
+    actor_hash, source_ip = extract_actor(request)
+    result = "SUCCESS"
+    detail: dict[str, Any] = {}
+    control_scope: dict[str, Any] = {}
+    try:
+        runner = get_runner()
+        control_scope = _control_scope_snapshot(runner)
+        enable_with_gate = getattr(
+            runner, "permit_protective_exits_after_verification", None
+        )
+        if not callable(enable_with_gate):
+            raise HTTPException(
+                status_code=503,
+                detail="protective exit verification is unavailable",
+            )
+        safe, error = cast(tuple[bool, str], enable_with_gate())
+        if not safe:
+            raise HTTPException(status_code=409, detail=error)
+        detail = {**control_scope, "protective_exit_permitted": True}
+        return MessageResponse(message="protective exits enabled while trading remains paused")
+    except HTTPException as exc:
+        result = "FAILED"
+        detail = {**control_scope, "detail": str(exc.detail)}
+        raise
+    except Exception as exc:
+        result = "FAILED"
+        detail = {**control_scope, "detail": str(exc)}
+        logger.exception("unexpected protective exit enable failure")
+        raise HTTPException(status_code=500, detail="protective exit enable failed") from exc
+    finally:
+        audit.record(
+            "PROTECTIVE_EXIT_ENABLE",
+            severity="WARNING",
+            actor_hash=actor_hash,
+            source_ip=source_ip,
+            request_summary=detail,
+            result=result,
+        )
+        try:
+            _record_control_trace(
+                event_type="CONTROL_PROTECTIVE_EXIT_ENABLE",
+                status=result,
+                message=detail.get("detail", "protective exits enabled"),
+                payload=detail,
+            )
+        except Exception:
+            logger.exception("failed to record protective exit enable trace")
+
+
+@router.post(
+    "/control/protective-exit/disable",
+    response_model=MessageResponse,
+    dependencies=[Depends(require_api_key())],
+)
+def disable_protective_exits(
+    request: Request,
+    audit: AuditLogger = Depends(get_audit_logger),
+) -> MessageResponse:
+    actor_hash, source_ip = extract_actor(request)
+    result = "SUCCESS"
+    detail: dict[str, Any] = {}
+    control_scope: dict[str, Any] = {}
+    try:
+        runner = get_runner()
+        control_scope = _control_scope_snapshot(runner)
+        revoke = getattr(runner, "revoke_protective_exits", None)
+        if callable(revoke):
+            revoke()
+        else:
+            runner.risk.revoke_protective_exits()
+        detail = {**control_scope, "protective_exit_permitted": False}
+        return MessageResponse(message="protective exits disabled; trading remains paused")
+    except Exception as exc:
+        result = "FAILED"
+        detail = {**control_scope, "detail": str(exc)}
+        logger.exception("unexpected protective exit disable failure")
+        raise HTTPException(status_code=500, detail="protective exit disable failed") from exc
+    finally:
+        audit.record(
+            "PROTECTIVE_EXIT_DISABLE",
+            severity="INFO",
+            actor_hash=actor_hash,
+            source_ip=source_ip,
+            request_summary=detail,
+            result=result,
+        )
+        try:
+            _record_control_trace(
+                event_type="CONTROL_PROTECTIVE_EXIT_DISABLE",
+                status=result,
+                message=detail.get("detail", "protective exits disabled"),
+                payload=detail,
+            )
+        except Exception:
+            logger.exception("failed to record protective exit disable trace")
+
+
 @router.post("/control/kill-switch", response_model=MessageResponse, dependencies=[Depends(require_api_key())])
 def kill_switch(
     request: Request,

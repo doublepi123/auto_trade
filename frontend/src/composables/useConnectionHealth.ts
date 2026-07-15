@@ -37,6 +37,7 @@ export const defaultStatus: StatusData = {
   engine_state: 'flat',
   paused: false,
   kill_switch: false,
+  protective_exit_permitted: false,
   runner_running: false,
   daily_pnl: 0,
   consecutive_losses: 0,
@@ -123,6 +124,9 @@ function connectWebSocket(): void {
           engine_state: data.state,
           paused: (risks.paused as boolean | undefined) ?? status.value.paused,
           kill_switch: (risks.kill_switch as boolean | undefined) ?? status.value.kill_switch,
+          protective_exit_permitted:
+            (risks.protective_exit_permitted as boolean | undefined) ??
+            status.value.protective_exit_permitted,
           runner_running: data.runner_running ?? status.value.runner_running,
           daily_pnl: (risks.daily_pnl as number | undefined) ?? status.value.daily_pnl,
           consecutive_losses:

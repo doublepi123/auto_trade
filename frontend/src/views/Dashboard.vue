@@ -75,8 +75,8 @@
         </div>
         <div class="strip-item">
           <span>交易状态</span>
-          <strong>{{ status.kill_switch ? '紧急停止' : status.execution_state === 'REDUCING' ? '减仓中' : status.paused ? '已暂停' : '运行中' }}</strong>
-          <small :title="status.reduction_reason">{{ status.kill_switch ? '紧急停止开启' : status.execution_state === 'REDUCING' ? '保护性退出处理中' : '紧急停止关闭' }}</small>
+          <strong>{{ status.kill_switch ? '紧急停止' : status.protective_exit_permitted ? '仅减仓' : status.paused ? '已暂停' : status.execution_state === 'REDUCING' ? '减仓中' : '运行中' }}</strong>
+          <small :title="status.reduction_reason">{{ status.kill_switch ? '紧急停止开启' : status.protective_exit_permitted ? '保护性退出已授权' : status.paused ? pausedStatusDetail : status.execution_state === 'REDUCING' ? '保护性退出处理中' : '紧急停止关闭' }}</small>
         </div>
         <div class="strip-item">
           <span>引擎状态</span>
@@ -318,7 +318,7 @@
               <p class="panel-caption">全局控制，作用于全部标的运行时</p>
             </div>
             <el-tag :type="status.kill_switch ? 'danger' : status.execution_state === 'REDUCING' || status.paused ? 'warning' : 'success'" effect="plain">
-              {{ status.kill_switch ? '紧急停止' : status.execution_state === 'REDUCING' ? '减仓中' : status.paused ? '暂停中' : '可交易' }}
+              {{ status.kill_switch ? '紧急停止' : status.protective_exit_permitted ? '仅减仓' : status.paused ? '暂停中' : status.execution_state === 'REDUCING' ? '减仓中' : '可交易' }}
             </el-tag>
           </div>
           <div class="action-grid">
@@ -343,6 +343,17 @@
               data-testid="dashboard-pause-btn"
               aria-label="暂停交易"
             >暂停</el-button>
+            <el-button
+              v-if="protectiveExitControlVisible"
+              class="protective-exit-button"
+              :type="status.protective_exit_permitted ? 'info' : 'danger'"
+              plain
+              :loading="controlInFlight"
+              @click="handleProtectiveExits"
+              data-testid="dashboard-protective-exit-btn"
+              :aria-pressed="status.protective_exit_permitted"
+              :aria-label="status.protective_exit_permitted ? '撤销仅减仓许可' : '启用仅减仓许可'"
+            >{{ status.protective_exit_permitted ? '撤销仅减仓许可' : '仅允许减仓' }}</el-button>
             <el-button
               type="danger"
               @click="handleStop"
@@ -702,13 +713,14 @@ import { useSymbolStore } from '../composables/useSymbolStore'
 import { usePinnedSymbols } from '../composables/usePinnedSymbols'
 import { useRegisterViewRefresh } from '../composables/useViewRefreshRegistry'
 import { useDiagnosticsSnapshot } from '../composables/useDiagnosticsSnapshot'
-import { startTrading, stopTrading, pauseTrading, resumeTrading, activateKillSwitch, disableKillSwitch, getLLMIntervalStatus, getNotifications, getOrders, getTradeEvents, getMetricsSummary } from '../api'
+import { startTrading, stopTrading, pauseTrading, resumeTrading, enableProtectiveExits, disableProtectiveExits, activateKillSwitch, disableKillSwitch, getLLMIntervalStatus, getNotifications, getOrders, getTradeEvents, getMetricsSummary } from '../api'
 import type { LLMIntervalStatus, NotificationLogOut, OrderRecord, Position, StatusHistoryPoint, TradeEventRecord } from '../types'
 import { engineStateLabel, auditActionLabel, marketLabel, positionSideLabel, skipCategoryLabel, tradeEventTypeLabel } from '../utils/labels'
 import { EVENT_TYPE } from '../utils/constants'
 import { downloadCsv } from '../utils/csv'
 import { relativeAgeLabel } from '../utils/time'
 import { formatNumber, signedCurrency, signedPercent } from '../utils/format'
+import { resolveErrorMessage } from '../utils/error'
 
 type CypressWindow = Window & { Cypress?: unknown }
 const multiSymbols = useMultiSymbolSnapshots()
@@ -789,6 +801,33 @@ const stateTagType = computed(() => {
     default: return 'info'
   }
 })
+
+const OPERATIONAL_PAUSE_PREFIXES = [
+  'ORDER_SUBMISSION_UNCERTAIN:',
+  'POSITION_RECONCILIATION_UNCERTAIN:',
+  'REDUCTION_SETTLEMENT_UNCERTAIN:',
+  'ORDER_RECONCILIATION_UNCERTAIN:',
+  'ORDER_EXECUTION_BLOCKED:',
+  'ORDER_PERSISTENCE_UNCERTAIN:',
+  'ORDER_STATUS_PERSISTENCE_UNCERTAIN:',
+]
+const operationalPauseActive = computed(() =>
+  status.value.paused &&
+  !status.value.kill_switch &&
+  OPERATIONAL_PAUSE_PREFIXES.some((prefix) =>
+    diagnostics.value?.risk.pause_reason.startsWith(prefix),
+  ),
+)
+const pausedStatusDetail = computed(() => {
+  if (!status.value.runner_running) return '运行器已停止，所有自动交易已停止'
+  if (!diagnostics.value) return '暂停状态确认中'
+  return operationalPauseActive.value
+    ? '所有交易已暂停'
+    : '暂停开仓，保护性退出仍可执行'
+})
+const protectiveExitControlVisible = computed(() =>
+  status.value.protective_exit_permitted || operationalPauseActive.value,
+)
 
 // Data-staleness watermark: once we have heard from the server at all, flag the
 // cockpit when the shared status stream has gone quiet long enough that the
@@ -1094,6 +1133,7 @@ watch(
     status.value.engine_state,
     status.value.paused,
     status.value.kill_switch,
+    status.value.protective_exit_permitted,
   ],
   appendStatusPoint,
 )
@@ -1134,6 +1174,38 @@ async function handlePause() {
 
 async function handleResume() {
   await runControlAction(resumeTrading, '交易已恢复', '恢复失败')
+}
+
+async function handleProtectiveExits() {
+  if (controlInFlight.value) return
+  if (status.value.protective_exit_permitted) {
+    await runControlAction(disableProtectiveExits, '仅减仓许可已撤销', '撤销仅减仓许可失败')
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      '启用后系统仍保持暂停，但可立即提交止损或减仓订单，最多卖出当前全部可用持仓。确定继续？',
+      '启用仅减仓许可',
+      { type: 'warning', confirmButtonText: '确认启用' },
+    )
+  } catch {
+    return
+  }
+  controlInFlight.value = true
+  try {
+    await enableProtectiveExits()
+    ElMessage.success('仅减仓许可已启用')
+    await Promise.all([refreshStatus(), loadDiagnostics()])
+  } catch (error) {
+    const message = resolveErrorMessage(error, '启用仅减仓许可失败')
+    if (message.includes('first coherent empty broker proof')) {
+      ElMessage.warning('第一轮券商校验已通过，请至少等待 5 秒后再次确认')
+    } else {
+      ElMessage.error(message)
+    }
+  } finally {
+    controlInFlight.value = false
+  }
 }
 
 async function handleKillSwitch() {
@@ -1717,6 +1789,10 @@ function severityType(s: string): string {
 }
 
 .kill-button {
+  grid-column: 1 / -1;
+}
+
+.protective-exit-button {
   grid-column: 1 / -1;
 }
 

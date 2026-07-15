@@ -44,6 +44,16 @@ export async function resumeTrading(): Promise<{ message: string }> {
   return resp.data
 }
 
+export async function enableProtectiveExits(): Promise<{ message: string }> {
+  const resp = await api.post('/api/control/protective-exit/enable')
+  return resp.data
+}
+
+export async function disableProtectiveExits(): Promise<{ message: string }> {
+  const resp = await api.post('/api/control/protective-exit/disable')
+  return resp.data
+}
+
 export async function activateKillSwitch(reason = 'manual'): Promise<{ message: string }> {
   const resp = await api.post('/api/control/kill-switch', { reason })
   return resp.data

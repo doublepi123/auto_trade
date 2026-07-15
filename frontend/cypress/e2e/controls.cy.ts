@@ -17,6 +17,10 @@ describe('Controls', () => {
     cy.wait('@getDiagnostics')
     cy.wait(500)
     cy.contains('已暂停').should('be.visible')
+    cy.get('[data-testid="status-strip"]').should(
+      'contain',
+      '运行器已停止，所有自动交易已停止',
+    )
 
     cy.get('[data-testid="dashboard-start-btn"]').should('not.be.disabled').click({ force: true })
     cy.wait('@startAction')

@@ -25,6 +25,7 @@ from app.models import (
     StrategyV2ShadowDecision,
     StrategyV2ShadowState,
     StrategyV2ShadowTrade,
+    StrategyV2ShadowVersion,
 )
 from app.schemas import StrategyV2ShadowConfigUpdate
 from app.services.strategy_v2_shadow_service import StrategyV2ShadowService
@@ -41,6 +42,27 @@ class _FakeCandles:
     def get_candlesticks(self, symbol: str, period: str, count: int) -> list[BrokerCandle]:
         self.calls.append((symbol, period, count))
         return list(self.candles)
+
+
+class _PagedFakeCandles(_FakeCandles):
+    def __init__(
+        self,
+        candles: list[BrokerCandle],
+        historical: list[BrokerCandle],
+    ) -> None:
+        super().__init__(candles)
+        self.historical = historical
+        self.history_calls: list[tuple[str, str, int, datetime]] = []
+
+    def get_history_candlesticks_by_offset(
+        self,
+        symbol: str,
+        period: str,
+        count: int,
+        after: datetime,
+    ) -> list[BrokerCandle]:
+        self.history_calls.append((symbol, period, count, after))
+        return list(self.historical)
 
 
 def _candles(count: int = 180) -> list[BrokerCandle]:
@@ -76,6 +98,7 @@ class TestStrategyV2ShadowService:
                 StrategyV2ShadowDecision,
                 StrategyV2ShadowTrade,
                 StrategyV2ShadowState,
+                StrategyV2ShadowVersion,
                 StrategyV2ShadowConfig,
                 StrategyConfig,
             ):
@@ -235,6 +258,213 @@ class TestStrategyV2ShadowService:
             state = db.query(StrategyV2ShadowState).filter_by(symbol="AAPL.US").one()
             snapshot = state.state_json
             assert "last_processed_at" in snapshot
+
+    def test_tick_stops_at_gap_then_recovers_in_order(self) -> None:
+        initial = _candles(121)
+        provider = _FakeCandles(initial)
+        with self._db() as db:
+            self._enabled_config(db, activated_at=_SESSION_OPEN)
+            service = StrategyV2ShadowService(db, provider)
+            service.tick(
+                "AAPL.US",
+                "US",
+                now=_SESSION_OPEN + timedelta(minutes=121, seconds=10),
+            )
+            state = db.query(StrategyV2ShadowState).filter_by(symbol="AAPL.US").one()
+            assert state.last_bar_at is not None
+            assert state.last_bar_at.replace(tzinfo=timezone.utc) == _SESSION_OPEN + timedelta(minutes=120)
+
+            with_gap = _candles(124)
+            del with_gap[122]
+            provider.candles = with_gap
+            service.tick(
+                "AAPL.US",
+                "US",
+                now=_SESSION_OPEN + timedelta(minutes=124, seconds=10),
+            )
+            db.refresh(state)
+            assert state.last_bar_at is not None
+            assert state.last_bar_at.replace(tzinfo=timezone.utc) == _SESSION_OPEN + timedelta(minutes=121)
+            assert state.last_poll_error == (
+                f"DATA_GAP_WAITING:{(_SESSION_OPEN + timedelta(minutes=122)).isoformat()}"
+            )
+
+            provider.candles = _candles(125)
+            service.tick(
+                "AAPL.US",
+                "US",
+                now=_SESSION_OPEN + timedelta(minutes=125, seconds=10),
+            )
+            db.refresh(state)
+            assert state.last_bar_at is not None
+            assert state.last_bar_at.replace(tzinfo=timezone.utc) == _SESSION_OPEN + timedelta(minutes=124)
+            assert state.last_poll_error == ""
+
+    def test_tick_pages_from_watermark_when_recent_window_moved_past_gap(
+        self,
+    ) -> None:
+        provider = _PagedFakeCandles(_candles(121), [])
+        with self._db() as db:
+            self._enabled_config(db, activated_at=_SESSION_OPEN)
+            service = StrategyV2ShadowService(db, provider)
+            service.tick(
+                "AAPL.US",
+                "US",
+                now=_SESSION_OPEN + timedelta(minutes=121, seconds=10),
+            )
+            state = db.query(StrategyV2ShadowState).filter_by(symbol="AAPL.US").one()
+            assert state.last_bar_at is not None
+            frontier = state.last_bar_at.replace(tzinfo=timezone.utc)
+
+            provider.candles = [
+                BrokerCandle(
+                    timestamp=datetime(2026, 7, 13, 13, 30, tzinfo=timezone.utc),
+                    open=100,
+                    high=100.1,
+                    low=99.9,
+                    close=100,
+                    volume=1000,
+                )
+            ]
+            provider.historical = _candles(181)
+            service.tick(
+                "AAPL.US",
+                "US",
+                now=datetime(2026, 7, 13, 13, 31, 10, tzinfo=timezone.utc),
+            )
+
+            db.refresh(state)
+            assert provider.history_calls == [
+                (
+                    "AAPL.US",
+                    "MIN_1",
+                    500,
+                    _SESSION_OPEN - timedelta(minutes=1),
+                )
+            ]
+            assert state.last_bar_at is not None
+            assert state.last_bar_at.replace(tzinfo=timezone.utc) > frontier
+            assert state.last_poll_error == ""
+            paged_decisions = [
+                (
+                    row.bar_at.replace(tzinfo=timezone.utc),
+                    row.action,
+                    row.reason,
+                )
+                for row in db.query(StrategyV2ShadowDecision)
+                .order_by(StrategyV2ShadowDecision.bar_at)
+                .all()
+            ]
+            paged_snapshot = json.loads(state.state_json)
+
+        control_engine = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        Base.metadata.create_all(bind=control_engine)
+        try:
+            with Session(bind=control_engine) as control_db:
+                control_config = StrategyV2ShadowConfig(
+                    symbol="AAPL.US",
+                    enabled=True,
+                    updated_at=_SESSION_OPEN,
+                )
+                control_state = StrategyV2ShadowState(
+                    symbol="AAPL.US",
+                    state_json="{}",
+                )
+                control_db.add_all([control_config, control_state])
+                control_db.commit()
+                StrategyV2ShadowService(control_db)._evaluate_candles(
+                    config=control_config,
+                    state=control_state,
+                    market="US",
+                    one_minute=_candles(181),
+                    observed_at=datetime(
+                        2026,
+                        7,
+                        13,
+                        13,
+                        31,
+                        10,
+                        tzinfo=timezone.utc,
+                    ),
+                )
+                control_decisions = [
+                    (
+                        row.bar_at.replace(tzinfo=timezone.utc),
+                        row.action,
+                        row.reason,
+                    )
+                    for row in control_db.query(StrategyV2ShadowDecision)
+                    .order_by(StrategyV2ShadowDecision.bar_at)
+                    .all()
+                ]
+                control_snapshot = json.loads(control_state.state_json)
+        finally:
+            control_engine.dispose()
+
+        assert paged_decisions == control_decisions
+        assert paged_snapshot == control_snapshot
+
+    def test_tick_filters_unsettled_bar_and_collects_after_close(self) -> None:
+        provider = _FakeCandles(_candles(3))
+        with self._db() as db:
+            self._enabled_config(db, activated_at=_SESSION_OPEN)
+            service = StrategyV2ShadowService(db, provider)
+            service.tick(
+                "AAPL.US",
+                "US",
+                now=_SESSION_OPEN + timedelta(minutes=2, seconds=3),
+            )
+            state = db.query(StrategyV2ShadowState).filter_by(symbol="AAPL.US").one()
+            assert state.last_bar_at is not None
+            assert state.last_bar_at.replace(tzinfo=timezone.utc) == _SESSION_OPEN
+
+            provider.candles = _candles(390)
+            service.tick(
+                "AAPL.US",
+                "US",
+                now=datetime(2026, 7, 10, 20, 5, tzinfo=timezone.utc),
+            )
+            assert len(provider.calls) == 2
+            service.tick(
+                "AAPL.US",
+                "US",
+                now=datetime(2026, 7, 10, 20, 16, tzinfo=timezone.utc),
+            )
+            assert len(provider.calls) == 2
+
+    def test_contiguous_frontier_skips_lunch_weekend_and_detects_first_rth_gap(self) -> None:
+        service = StrategyV2ShadowService(self._db())
+        try:
+            assert service._missing_rth_minute(
+                "HK",
+                previous=datetime(2026, 7, 10, 3, 59, tzinfo=timezone.utc),
+                current=datetime(2026, 7, 10, 5, 0, tzinfo=timezone.utc),
+            ) is None
+            assert service._missing_rth_minute(
+                "HK",
+                previous=datetime(2026, 7, 10, 3, 59, tzinfo=timezone.utc),
+                current=datetime(2026, 7, 10, 5, 1, tzinfo=timezone.utc),
+            ) == datetime(2026, 7, 10, 5, 0, tzinfo=timezone.utc)
+            assert service._missing_rth_minute(
+                "US",
+                previous=datetime(2026, 7, 10, 19, 59, tzinfo=timezone.utc),
+                current=datetime(2026, 7, 13, 13, 30, tzinfo=timezone.utc),
+            ) is None
+            assert service._missing_rth_minute(
+                "HK",
+                previous=datetime(2026, 12, 24, 3, 59, tzinfo=timezone.utc),
+                current=datetime(2026, 12, 28, 1, 30, tzinfo=timezone.utc),
+            ) is None
+            assert service._in_post_close_collection_window(
+                "HK",
+                datetime(2026, 12, 24, 4, 5, tzinfo=timezone.utc),
+            ) is True
+        finally:
+            service.db.close()
 
     def test_disabled_or_outside_rth_never_fetches(self) -> None:
         provider = _FakeCandles(_candles())
@@ -652,3 +882,53 @@ class TestStrategyV2ShadowService:
             assert min(
                 row.bar_at.replace(tzinfo=timezone.utc) for row in current_rows
             ) == future_bar_at
+
+    def test_flat_legacy_version_resets_forward_without_rewriting_evidence(self) -> None:
+        observed_at = _SESSION_OPEN + timedelta(minutes=180, seconds=10)
+        with self._db() as db:
+            config = self._enabled_config(db, activated_at=_SESSION_OPEN)
+            service = StrategyV2ShadowService(db, _FakeCandles(_candles(181)))
+            current_version = service._config_version(config)
+            legacy_version = "legacy-with-internal-gap"
+            db.add(
+                StrategyV2ShadowState(
+                    symbol="AAPL.US",
+                    config_version=legacy_version,
+                    phase="FLAT",
+                    last_bar_at=_SESSION_OPEN + timedelta(minutes=179),
+                    state_json="{}",
+                )
+            )
+            db.add(
+                StrategyV2ShadowDecision(
+                    idempotency_key="legacy-evidence",
+                    symbol="AAPL.US",
+                    market="US",
+                    config_version=legacy_version,
+                    session_date=_SESSION_OPEN.date(),
+                    bar_at=_SESSION_OPEN + timedelta(minutes=178),
+                    action="NO_ACTION",
+                    state_before="READY",
+                    state_after="READY",
+                    close_price=100,
+                )
+            )
+            db.commit()
+
+            before_activation = datetime.now(timezone.utc)
+            service.tick("AAPL.US", "US", now=observed_at)
+
+            state = db.query(StrategyV2ShadowState).filter_by(symbol="AAPL.US").one()
+            assert state.config_version == current_version
+            assert state.last_bar_at is not None
+            assert state.last_bar_at.replace(tzinfo=timezone.utc) == observed_at
+            assert db.query(StrategyV2ShadowDecision).filter_by(
+                config_version=legacy_version
+            ).count() == 1
+            assert db.query(StrategyV2ShadowDecision).filter_by(
+                config_version=current_version
+            ).count() == 0
+
+            snapshot = service._ensure_version_snapshot(config)
+            assert snapshot.activated_at is not None
+            assert snapshot.activated_at.replace(tzinfo=timezone.utc) >= before_activation

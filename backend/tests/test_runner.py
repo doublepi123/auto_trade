@@ -75,6 +75,165 @@ class TestAppRunner:
             runner._cash_currency(),
         )
 
+    def test_repeated_reconciliation_hazard_revokes_protective_exits(
+        self,
+        monkeypatch,
+    ) -> None:
+        runner = AppRunner()
+        monkeypatch.setattr(runner, "_persist_risk_pause_best_effort", lambda: None)
+        monkeypatch.setattr(runner, "_record_risk_event", lambda _reason: None)
+        monkeypatch.setattr(runner, "_broadcast_status", lambda: None)
+
+        inventory = {"AAPL.US": ["live-1", "live-2"]}
+        assert runner._latch_live_order_reconciliation(inventory, []) is True
+        assert runner.risk.permit_protective_exits() is True
+
+        assert runner._latch_live_order_reconciliation(inventory, []) is True
+        assert runner.risk.protective_exit_permitted is False
+
+    def test_failed_protective_exit_reverification_revokes_prior_permission(
+        self,
+        monkeypatch,
+    ) -> None:
+        runner = AppRunner()
+        runner.risk.pause("ORDER_EXECUTION_BLOCKED: operator review")
+        assert runner.risk.permit_protective_exits() is True
+        monkeypatch.setattr(
+            runner,
+            "verify_operational_resume",
+            lambda: (False, "broker state changed"),
+        )
+
+        safe, error = runner.permit_protective_exits_after_verification()
+
+        assert safe is False
+        assert error == "broker state changed"
+        assert runner.risk.protective_exit_permitted is False
+
+    def test_protective_exit_verification_rejects_changed_pause_reason(
+        self,
+        monkeypatch,
+    ) -> None:
+        runner = AppRunner()
+        runner.risk.pause("ORDER_EXECUTION_BLOCKED: initial review")
+
+        def change_operational_pause() -> tuple[bool, str]:
+            runner.risk.pause(
+                "POSITION_RECONCILIATION_UNCERTAIN: broker state changed"
+            )
+            return True, ""
+
+        monkeypatch.setattr(
+            runner,
+            "verify_operational_resume",
+            change_operational_pause,
+        )
+
+        safe, error = runner.permit_protective_exits_after_verification()
+
+        assert safe is False
+        assert error == "protective exits require an unchanged operational pause"
+        assert runner.risk.protective_exit_permitted is False
+
+    def test_protective_exit_verification_rejects_same_reason_aba(
+        self,
+        monkeypatch,
+    ) -> None:
+        runner = AppRunner()
+        reason = "ORDER_EXECUTION_BLOCKED: repeated broker failure"
+        runner.risk.pause(reason)
+
+        def repeat_operational_pause() -> tuple[bool, str]:
+            runner.risk.pause(reason)
+            return True, ""
+
+        monkeypatch.setattr(
+            runner,
+            "verify_operational_resume",
+            repeat_operational_pause,
+        )
+
+        safe, error = runner.permit_protective_exits_after_verification()
+
+        assert safe is False
+        assert error == "protective exits require an unchanged operational pause"
+        assert runner.risk.paused is True
+        assert runner.risk.protective_exit_permitted is False
+
+    def test_failed_resume_reverification_revokes_protective_exits(
+        self,
+        monkeypatch,
+    ) -> None:
+        runner = AppRunner()
+        runner.risk.pause("ORDER_EXECUTION_BLOCKED: operator review")
+        assert runner.risk.permit_protective_exits() is True
+        monkeypatch.setattr(
+            runner,
+            "verify_operational_resume",
+            lambda: (False, "broker state changed"),
+        )
+
+        safe, error = runner.resume_after_verification()
+
+        assert safe is False
+        assert error == "broker state changed"
+        assert runner.risk.paused is True
+        assert runner.risk.protective_exit_permitted is False
+
+    def test_resume_verification_does_not_clear_changed_operational_pause(
+        self,
+        monkeypatch,
+    ) -> None:
+        runner = AppRunner()
+        runner.risk.pause("ORDER_EXECUTION_BLOCKED: initial review")
+
+        def change_operational_pause() -> tuple[bool, str]:
+            runner.risk.pause(
+                "POSITION_RECONCILIATION_UNCERTAIN: broker state changed"
+            )
+            return True, ""
+
+        monkeypatch.setattr(
+            runner,
+            "verify_operational_resume",
+            change_operational_pause,
+        )
+
+        safe, error = runner.resume_after_verification()
+
+        assert safe is False
+        assert error == "operational pause changed during verification"
+        assert runner.risk.paused is True
+        assert runner.risk.pause_reason == (
+            "POSITION_RECONCILIATION_UNCERTAIN: broker state changed"
+        )
+        assert runner.risk.protective_exit_permitted is False
+
+    def test_resume_verification_rejects_same_reason_aba(
+        self,
+        monkeypatch,
+    ) -> None:
+        runner = AppRunner()
+        reason = "ORDER_EXECUTION_BLOCKED: repeated broker failure"
+        runner.risk.pause(reason)
+
+        def repeat_operational_pause() -> tuple[bool, str]:
+            runner.risk.pause(reason)
+            return True, ""
+
+        monkeypatch.setattr(
+            runner,
+            "verify_operational_resume",
+            repeat_operational_pause,
+        )
+
+        safe, error = runner.resume_after_verification()
+
+        assert safe is False
+        assert error == "operational pause changed during verification"
+        assert runner.risk.paused is True
+        assert runner.risk.pause_reason == reason
+
     def test_fee_enrichment_runs_after_submission_guard_is_released(self) -> None:
         runner = AppRunner()
         guard_active = False
@@ -1126,6 +1285,71 @@ class TestAppRunner:
 
         assert changed is False
         assert runner.engine.state == EngineState.LONG
+
+    def test_recent_unsettled_entry_revokes_protective_exits(
+        self,
+        monkeypatch,
+    ) -> None:
+        class Broker:
+            def get_positions(self) -> list[Position]:
+                return []
+
+        runner = AppRunner()
+        runner._running = True
+        runner.engine.params = StrategyParams(
+            symbol="NVDA.US",
+            market="US",
+            buy_low=218,
+            sell_high=225,
+        )
+        runner.engine.state = EngineState.LONG
+        runner.broker = Broker()
+        runner._trade_svc.load_tracked_entries({
+            "NVDA.US": (
+                Decimal("5"),
+                Decimal("1000"),
+                "LONG",
+                datetime.now(timezone.utc),
+            )
+        })
+        runner.risk.pause("ORDER_EXECUTION_BLOCKED: operator review")
+        assert runner.risk.permit_protective_exits() is True
+        monkeypatch.setattr(runner, "_persist_risk_pause_best_effort", lambda: None)
+
+        assert runner._sync_engine_state_with_positions(force=True) is False
+        assert runner.risk.protective_exit_permitted is False
+
+    def test_position_sync_waits_for_submission_guard(self) -> None:
+        class Broker:
+            def get_positions(self) -> list[Position]:
+                return []
+
+        runner = AppRunner()
+        runner.engine.params = StrategyParams(
+            symbol="NVDA.US",
+            market="US",
+            buy_low=218,
+            sell_high=225,
+        )
+        runner.engine.state = EngineState.LONG
+        runner.broker = Broker()
+        started = threading.Event()
+        completed = threading.Event()
+
+        def sync_positions() -> None:
+            started.set()
+            runner._sync_engine_state_with_positions(force=True)
+            completed.set()
+
+        with runner._trade_svc.submission_guard():
+            thread = threading.Thread(target=sync_positions)
+            thread.start()
+            assert started.wait(timeout=1)
+            assert completed.wait(timeout=0.05) is False
+
+        assert completed.wait(timeout=1)
+        thread.join(timeout=1)
+        assert thread.is_alive() is False
 
     def test_live_safety_invalid_db_values_fall_back_to_hard_limits(self) -> None:
         runner = AppRunner()

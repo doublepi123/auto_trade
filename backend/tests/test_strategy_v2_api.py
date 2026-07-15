@@ -122,7 +122,7 @@ class TestStrategyV2ShadowApi:
         body = response.json()
         assert body["enabled"] is True
         assert body["max_adx"] == 19.5
-        assert body["algorithm_version"] == "strategy-v2-rth-mr-v1"
+        assert body["algorithm_version"] == "strategy-v2-rth-mr-v2-contiguous"
         assert body["estimated_fee_rate_us"] == 0.0005
         assert body["mode"] == "SHADOW"
         assert body["order_submission_allowed"] is False

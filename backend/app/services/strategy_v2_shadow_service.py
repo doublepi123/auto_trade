@@ -13,7 +13,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.fees import one_side_fee_rate
-from app.core.market_calendar import get_session, is_trading_hours
+from app.core.market_calendar import (
+    get_session,
+    is_trading_hours,
+    next_session_open,
+    session_status,
+)
 from app.domain.strategy_v2 import (
     StrategyBar,
     StrategyV2Action,
@@ -80,11 +85,12 @@ _CONFIG_FIELDS = (
     "estimated_fee_rate_us",
     "estimated_fee_rate_hk",
 )
-_ALGORITHM_VERSION = "strategy-v2-rth-mr-v1"
+_ALGORITHM_VERSION = "strategy-v2-rth-mr-v2-contiguous"
 _VALID_ACTIONS = frozenset(action.value for action in StrategyV2Action)
 _SHADOW_SYMBOL_RE = re.compile(r"^[A-Z0-9\-]{1,12}\.(US|HK)$")
 _MIN_POLL_SECONDS = 45.0
 _ONE_MINUTE_CANDLE_COUNT = 500
+_POST_CLOSE_COLLECTION_MINUTES = 15
 
 
 class StrategyV2ShadowService:
@@ -349,7 +355,11 @@ class StrategyV2ShadowService:
 
         if not config.enabled and open_trade is None:
             return self.get_status(normalized)
-        if not is_trading_hours(market, current) and open_trade is None:
+        if (
+            not is_trading_hours(market, current)
+            and open_trade is None
+            and not self._in_post_close_collection_window(market, current)
+        ):
             return self.get_status(normalized)
         if state.last_polled_at is not None:
             elapsed = (current - _as_utc(state.last_polled_at)).total_seconds()
@@ -368,6 +378,13 @@ class StrategyV2ShadowService:
             one_minute = self.candle_provider.get_candlesticks(
                 normalized, "MIN_1", _ONE_MINUTE_CANDLE_COUNT
             )
+            one_minute = self._historical_page_for_frontier(
+                config=config,
+                state=state,
+                market=market,
+                recent=one_minute,
+                observed_at=current,
+            )
             self._evaluate_candles(
                 config=config,
                 state=state,
@@ -384,6 +401,64 @@ class StrategyV2ShadowService:
             self.db.commit()
             raise
         return self.get_status(normalized)
+
+    def _historical_page_for_frontier(
+        self,
+        *,
+        config: StrategyV2ShadowConfig,
+        state: StrategyV2ShadowState,
+        market: str,
+        recent: list[Any],
+        observed_at: datetime,
+    ) -> list[Any]:
+        """Page forward from the watermark when it fell out of the recent window."""
+        if state.last_bar_at is None or not recent or self.candle_provider is None:
+            return recent
+        last_bar_at = _as_utc(state.last_bar_at)
+        engine = StrategyV2Engine(self._domain_config(config, market))
+        grace = timedelta(seconds=engine.config.settlement_grace_seconds)
+        session = get_session(market)
+        processable = [
+            bar
+            for bar in self._coerce_strategy_bars(recent, symbol=config.symbol)
+            if (
+                bar.timestamp > last_bar_at
+                and session.is_rth(bar.timestamp)
+                and bar.end_at + grace <= observed_at
+            )
+        ]
+        if not processable:
+            return recent
+        first_bar_at = min(bar.timestamp for bar in processable)
+        if self._missing_rth_minute(
+            market,
+            previous=last_bar_at,
+            current=first_bar_at,
+        ) is None:
+            return recent
+        history_reader = getattr(
+            self.candle_provider,
+            "get_history_candlesticks_by_offset",
+            None,
+        )
+        if not callable(history_reader):
+            return recent
+        frontier_local = session.local(last_bar_at)
+        session_open = datetime.combine(
+            frontier_local.date(),
+            session.rth_open,
+            tzinfo=session.timezone,
+        ).astimezone(timezone.utc)
+        history_anchor = session_open - timedelta(minutes=1)
+        historical = history_reader(
+            config.symbol,
+            "MIN_1",
+            _ONE_MINUTE_CANDLE_COUNT,
+            history_anchor,
+        )
+        if not isinstance(historical, list):
+            raise ValueError("historical candle provider returned a non-list response")
+        return historical or recent
 
     def replay(self, payload: StrategyV2ShadowReplayRequest) -> StrategyV2ShadowReplayResponse:
         """Evaluate supplied bars without mutating any persistent shadow state."""
@@ -411,10 +486,12 @@ class StrategyV2ShadowService:
         engine = StrategyV2Engine(self._domain_config(config, market))
         session = get_session(market)
         grace = timedelta(seconds=engine.config.settlement_grace_seconds)
-        if not any(
-            session.is_rth(bar.timestamp) and bar.end_at + grace <= observed_at
+        bars = [
+            bar
             for bar in bars
-        ):
+            if session.is_rth(bar.timestamp) and bar.end_at + grace <= observed_at
+        ]
+        if not bars:
             raise ValueError("no processable one-minute bars")
 
         open_trade = self._open_trade(config.symbol)
@@ -438,6 +515,7 @@ class StrategyV2ShadowService:
             and state.config_version
             and state.config_version != current_version
         ):
+            self._ensure_version_snapshot(config)
             self._reset_state_forward(
                 state,
                 config_version=current_version,
@@ -483,6 +561,8 @@ class StrategyV2ShadowService:
         armed_zscore: float | None = state.armed_zscore if restored else None
         latest_feature: Any = None
         exited_managed_position = False
+        gap_error = ""
+        frontier = last_bar_at
 
         for bar in bars:
             if last_bar_at is not None and bar.timestamp <= last_bar_at:
@@ -490,7 +570,17 @@ class StrategyV2ShadowService:
             if last_bar_at is None and bar.timestamp < activation_at:
                 engine.features.on_bar(bar, observed_at=observed_at)
                 continue
+            if frontier is not None:
+                missing_at = self._missing_rth_minute(
+                    market,
+                    previous=frontier,
+                    current=bar.timestamp,
+                )
+                if missing_at is not None:
+                    gap_error = f"DATA_GAP_WAITING:{missing_at.isoformat()}"
+                    break
             feature = engine.features.on_bar(bar, observed_at=observed_at)
+            frontier = bar.timestamp
             if feature is None:
                 continue
             gate_reasons = engine.entry_gate_reasons(feature)
@@ -575,9 +665,45 @@ class StrategyV2ShadowService:
                     engine.snapshot().to_dict(),
                     sort_keys=True,
                 )
-            state.last_poll_error = ""
+            state.last_poll_error = gap_error
             self.db.add(state)
             self.db.commit()
+        elif gap_error:
+            state.last_poll_error = gap_error
+            self.db.add(state)
+            self.db.commit()
+
+    @staticmethod
+    def _in_post_close_collection_window(market: str, current: datetime) -> bool:
+        if session_status(market, current) != "post":
+            return False
+        session = get_session(market)
+        local = session.local(current)
+        close_at = datetime.combine(
+            local.date(),
+            session.close_time(local.date()),
+            tzinfo=session.timezone,
+        )
+        return close_at <= local < close_at + timedelta(
+            minutes=_POST_CLOSE_COLLECTION_MINUTES
+        )
+
+    @staticmethod
+    def _missing_rth_minute(
+        market: str,
+        *,
+        previous: datetime,
+        current: datetime,
+    ) -> datetime | None:
+        previous_minute = _as_utc(previous).replace(second=0, microsecond=0)
+        current_minute = _as_utc(current).replace(second=0, microsecond=0)
+        expected = previous_minute + timedelta(minutes=1)
+        if expected >= current_minute:
+            return None
+        session = get_session(market)
+        if not session.is_rth(expected):
+            expected = next_session_open(market, expected)
+        return expected if expected < current_minute else None
 
     def _replay_payload(
         self,
@@ -1081,11 +1207,21 @@ class StrategyV2ShadowService:
             return existing
         params = self._config_values(row)
         params.pop("enabled", None)
+        activated_at = _as_utc(row.updated_at)
+        state = self.db.query(StrategyV2ShadowState).filter(
+            StrategyV2ShadowState.symbol == row.symbol
+        ).first()
+        if (
+            state is not None
+            and state.config_version
+            and state.config_version != version
+        ):
+            activated_at = datetime.now(timezone.utc)
         snapshot = StrategyV2ShadowVersion(
             symbol=row.symbol,
             config_version=version,
             config_json=json.dumps(params, sort_keys=True, separators=(",", ":")),
-            activated_at=row.updated_at,
+            activated_at=activated_at,
         )
         self.db.add(snapshot)
         if commit:

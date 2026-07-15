@@ -686,6 +686,8 @@ class AppRunner:
         if not unsafe:
             return False
 
+        self.risk.revoke_protective_exits()
+
         inventory_text = "; ".join(
             f"{symbol}=[{', '.join(order_ids)}]"
             for symbol, order_ids in inventory.items()
@@ -726,6 +728,7 @@ class AppRunner:
         """Pause manually without replacing a latched operational diagnosis."""
         with self._trade_svc.submission_guard():
             with self._state_lock:
+                self.risk.revoke_protective_exits()
                 if self.risk.paused and (
                     self.risk.pause_reason.startswith(_OPERATIONAL_PAUSE_PREFIXES)
                     or self._unresolved_live_order_ids
@@ -748,10 +751,43 @@ class AppRunner:
 
     def resume_after_verification(self) -> tuple[bool, str]:
         with self._trade_svc.submission_guard():
+            self.risk.revoke_protective_exits()
+            pause_reason, safety_generation = self.risk.pause_verification_snapshot()
             safe, error = self.verify_operational_resume()
-            if safe:
-                self.risk.resume()
-            return safe, error
+            if not safe:
+                self._broadcast_status()
+                return False, error
+            if not self.risk.resume_if_pause_reason(
+                pause_reason,
+                expected_generation=safety_generation,
+            ):
+                self._broadcast_status()
+                return False, "operational pause changed during verification"
+            self._broadcast_status()
+            return True, ""
+
+    def permit_protective_exits_after_verification(self) -> tuple[bool, str]:
+        """Arm reduce-only execution while retaining the operational pause."""
+        with self._trade_svc.submission_guard():
+            self.risk.revoke_protective_exits()
+            pause_reason, safety_generation = self.risk.pause_verification_snapshot()
+            safe, error = self.verify_operational_resume()
+            if not safe:
+                self._broadcast_status()
+                return False, error
+            if not self.risk.permit_protective_exits(
+                expected_pause_reason=pause_reason,
+                expected_generation=safety_generation,
+            ):
+                self._broadcast_status()
+                return False, "protective exits require an unchanged operational pause"
+            self._broadcast_status()
+            return True, ""
+
+    def revoke_protective_exits(self) -> None:
+        with self._trade_svc.submission_guard():
+            self.risk.revoke_protective_exits()
+            self._broadcast_status()
 
     def _register_broker_disconnect_hook(self) -> None:
         register = getattr(self.broker, "register_disconnect_hook", None)
@@ -990,6 +1026,7 @@ class AppRunner:
                     "paused": self.risk.paused,
                     "kill_switch": self.risk.kill_switch,
                     "pause_reason": self.risk.pause_reason,
+                    "protective_exit_permitted": self.risk.protective_exit_permitted,
                     "daily_pnl": float(self.risk.daily_pnl),
                     "consecutive_losses": self.risk.consecutive_losses,
                 },
@@ -2184,6 +2221,7 @@ class AppRunner:
                 "consecutive_losses": self.risk.consecutive_losses,
                 "kill_switch": self.risk.kill_switch,
                 "paused": self.risk.paused,
+                "protective_exit_permitted": self.risk.protective_exit_permitted,
             }
             data["runner_running"] = self.is_running
             data["last_action_message"] = self.last_action_message
@@ -3323,6 +3361,16 @@ class AppRunner:
         return any(marker in normalized for marker in transient_markers)
 
     def _sync_engine_state_with_positions(self, *, force: bool = False) -> bool:
+        with self._trade_svc.submission_guard():
+            return self._sync_engine_state_with_positions_under_submission_guard(
+                force=force
+            )
+
+    def _sync_engine_state_with_positions_under_submission_guard(
+        self,
+        *,
+        force: bool = False,
+    ) -> bool:
         with self._state_lock:
             if (not self._running and not force) or self._trigger_in_flight:
                 return False
@@ -3394,6 +3442,7 @@ class AppRunner:
                         f"{_POSITION_RECONCILIATION_UNCERTAIN_PREFIX} "
                         f"broker position has not settled after fill for {symbol}"
                     )
+                    self.risk.revoke_protective_exits()
                     if not (
                         self.risk.paused
                         and self.risk.pause_reason.startswith(
@@ -3877,10 +3926,11 @@ class AppRunner:
     def _risk_rejection_allows_action(self, action: str) -> bool:
         if action not in _POSITION_REDUCING_ACTIONS or self.risk.kill_switch:
             return False
-        return not (
-            self.risk.paused
-            and self.risk.pause_reason.startswith(_OPERATIONAL_PAUSE_PREFIXES)
-        )
+        if self.risk.paused and self.risk.pause_reason.startswith(
+            _OPERATIONAL_PAUSE_PREFIXES
+        ):
+            return self.risk.protective_exit_permitted
+        return True
 
     def _should_evaluate_reducing_trigger(self, engine: StrategyEngine, price: float) -> bool:
         if self.risk.kill_switch or price <= 0:
@@ -4597,6 +4647,7 @@ class AppRunner:
                     "broker position reconciliation failed with unprotected local state: "
                     + ", ".join(sorted(set(unsafe_symbols)))
                 )
+                self.risk.revoke_protective_exits()
                 if not (
                     self.risk.paused
                     and self.risk.pause_reason.startswith(_OPERATIONAL_PAUSE_PREFIXES)
@@ -4735,6 +4786,7 @@ class AppRunner:
                 f"{_POSITION_RECONCILIATION_UNCERTAIN_PREFIX} "
                 f"broker position has not settled after fill for {symbol}"
             )
+            self.risk.revoke_protective_exits()
             already_latched = self.risk.paused and self.risk.pause_reason == reason
             if not (
                 self.risk.paused
@@ -4765,6 +4817,7 @@ class AppRunner:
                 "broker exposure exists outside the primary strategy: "
                 + ", ".join(unexpected_exposure)
             )
+            self.risk.revoke_protective_exits()
             if not (
                 self.risk.paused
                 and self.risk.pause_reason.startswith(

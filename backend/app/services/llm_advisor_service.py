@@ -43,6 +43,23 @@ _ORDER_ACTIONS = {
     "CANCEL_PENDING",
     "CANCEL_REPLACE",
 }
+_MINIMAX_BACKOFF_SECONDS = 300
+_MINIMAX_RETRYABLE_HTTP_STATUSES = frozenset({502, 503, 504})
+
+
+class LLMProviderError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        failure_kind: str,
+        transient: bool,
+        retry_after_seconds: int = 0,
+    ) -> None:
+        super().__init__(message)
+        self.failure_kind = failure_kind
+        self.transient = transient
+        self.retry_after_seconds = max(0, retry_after_seconds)
 
 
 # Match an already-escaped placeholder {{identifier}}, {{identifier!s}},
@@ -364,6 +381,14 @@ class LLMAdvisorService:
 
         interval_minutes = self._get_interval_minutes()
         with _throttle_lock:
+            if _LAST_ANALYSIS_TIMESTAMP == float("inf"):
+                return {
+                    "success": False,
+                    "error": "Analysis already in progress",
+                    "failure_kind": "IN_FLIGHT",
+                    "transient": True,
+                    "retry_after_seconds": 60,
+                }
             if not force and self._is_throttled(interval_minutes * 60):
                 return {
                     "success": False,
@@ -373,6 +398,7 @@ class LLMAdvisorService:
             # the throttle check while the LLM call is in flight.
             _prev_analysis_ts = _LAST_ANALYSIS_TIMESTAMP
             _LAST_ANALYSIS_TIMESTAMP = float("inf")
+        analysis_succeeded = False
 
         try:
             try:
@@ -415,10 +441,6 @@ class LLMAdvisorService:
                     prompt_template=prompt_template,
                 )
             except Exception:
-                # _select_variant or _build_prompt failed — release the reserved
-                # slot so the throttle is not permanently locked at inf.
-                with _throttle_lock:
-                    _LAST_ANALYSIS_TIMESTAMP = _prev_analysis_ts
                 raise
             context_snapshot = {
                 "symbol": symbol,
@@ -441,9 +463,7 @@ class LLMAdvisorService:
             try:
                 raw_response = self._call_llm(prompt)
                 result = self._parse_response(raw_response)
-                # LLM succeeded — consume the throttle budget.
-                with _throttle_lock:
-                    _LAST_ANALYSIS_TIMESTAMP = time.monotonic()
+                analysis_succeeded = True
 
                 # NOTE: indicator selection is validated against AVAILABLE_INDICATORS
                 # whitelist inside FeatureSelector.parse_selection, so adversarial
@@ -455,10 +475,6 @@ class LLMAdvisorService:
                 selected = FeatureSelector.parse_selection(raw_response, suggested)
                 logger.info("LLM selected indicators: %s", selected)
             except Exception as exc:
-                # LLM call or parse failed — release the reserved slot so the
-                # next caller is not needlessly blocked.
-                with _throttle_lock:
-                    _LAST_ANALYSIS_TIMESTAMP = _prev_analysis_ts
                 logger.warning("LLM analysis failed: %s", exc)
                 interaction_id = self._record_interaction(
                     interaction_type="analyze",
@@ -476,6 +492,19 @@ class LLMAdvisorService:
                     "success": False,
                     "error": "LLM analysis failed",
                     "interaction_id": interaction_id,
+                    "failure_kind": (
+                        exc.failure_kind
+                        if isinstance(exc, LLMProviderError)
+                        else "LLM_FAILURE"
+                    ),
+                    "transient": (
+                        exc.transient if isinstance(exc, LLMProviderError) else False
+                    ),
+                    "retry_after_seconds": (
+                        exc.retry_after_seconds
+                        if isinstance(exc, LLMProviderError)
+                        else 0
+                    ),
                 }
 
             next_analysis_at = datetime.now(timezone.utc) + timedelta(minutes=interval_minutes)
@@ -525,7 +554,9 @@ class LLMAdvisorService:
             # unhandled exception, preventing permanent throttle blockage.
             with _throttle_lock:
                 if _LAST_ANALYSIS_TIMESTAMP == float("inf"):
-                    _LAST_ANALYSIS_TIMESTAMP = _prev_analysis_ts
+                    _LAST_ANALYSIS_TIMESTAMP = (
+                        time.monotonic() if analysis_succeeded else _prev_analysis_ts
+                    )
 
     def _preview_market_data(self, symbol: str, market: str, current_price: float) -> dict[str, Any]:
         try:
@@ -813,27 +844,69 @@ class LLMAdvisorService:
         if not settings.minimax_api_key:
             raise RuntimeError("MINIMAX_API_KEY is not configured")
 
-        try:
-            response = httpx.post(
-                self._minimax_chat_url(),
-                headers={
-                    "Authorization": f"Bearer {settings.minimax_api_key}",
-                    "Content-Type": "application/json",
-                },
-                json=self._minimax_chat_payload(prompt),
-                timeout=120.0,
-            )
-        except httpx.TimeoutException as exc:
-            raise RuntimeError(f"MiniMax request timeout: {exc}") from exc
-        except httpx.RequestError as exc:
-            raise RuntimeError(f"MiniMax request failed: {exc}") from exc
+        response: httpx.Response
+        attempt = 0
+        while True:
+            try:
+                response = httpx.post(
+                    self._minimax_chat_url(),
+                    headers={
+                        "Authorization": f"Bearer {settings.minimax_api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=self._minimax_chat_payload(prompt),
+                    timeout=httpx.Timeout(120.0, connect=10.0),
+                )
+            except (
+                httpx.ConnectError,
+                httpx.ConnectTimeout,
+                httpx.RemoteProtocolError,
+            ) as exc:
+                if attempt == 0:
+                    attempt += 1
+                    time.sleep(0.5)
+                    continue
+                raise LLMProviderError(
+                    f"MiniMax connection failed: {exc}",
+                    failure_kind="CONNECTION",
+                    transient=True,
+                    retry_after_seconds=_MINIMAX_BACKOFF_SECONDS,
+                ) from exc
+            except httpx.TimeoutException as exc:
+                raise LLMProviderError(
+                    f"MiniMax request timeout: {exc}",
+                    failure_kind="TIMEOUT",
+                    transient=True,
+                    retry_after_seconds=_MINIMAX_BACKOFF_SECONDS,
+                ) from exc
+            except httpx.RequestError as exc:
+                raise LLMProviderError(
+                    f"MiniMax request failed: {exc}",
+                    failure_kind="NETWORK",
+                    transient=True,
+                    retry_after_seconds=_MINIMAX_BACKOFF_SECONDS,
+                ) from exc
 
-        try:
-            response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            raise RuntimeError(
-                f"MiniMax HTTP {exc.response.status_code}: {exc.response.text[:200]}"
-            ) from exc
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                status_code = exc.response.status_code
+                if status_code in _MINIMAX_RETRYABLE_HTTP_STATUSES and attempt == 0:
+                    attempt += 1
+                    time.sleep(0.5)
+                    continue
+                if status_code in {429, 529} or status_code in _MINIMAX_RETRYABLE_HTTP_STATUSES:
+                    retry_after = self._retry_after_seconds(exc.response)
+                    raise LLMProviderError(
+                        f"MiniMax HTTP {status_code}: {exc.response.text[:200]}",
+                        failure_kind=f"HTTP_{status_code}",
+                        transient=True,
+                        retry_after_seconds=retry_after,
+                    ) from exc
+                raise RuntimeError(
+                    f"MiniMax HTTP {status_code}: {exc.response.text[:200]}"
+                ) from exc
+            break
 
         try:
             data = response.json()
@@ -859,6 +932,15 @@ class LLMAdvisorService:
                 f" max_completion_tokens={settings.minimax_max_completion_tokens})."
             )
         return content
+
+    @staticmethod
+    def _retry_after_seconds(response: httpx.Response) -> int:
+        value = response.headers.get("Retry-After", "").strip()
+        try:
+            parsed = int(value)
+        except ValueError:
+            return _MINIMAX_BACKOFF_SECONDS
+        return max(1, min(parsed, 3600))
 
     @staticmethod
     def _parse_response(raw: str) -> dict[str, Any]:

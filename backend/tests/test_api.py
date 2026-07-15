@@ -675,6 +675,7 @@ class TestAPI:
             "ORDER_RECONCILIATION_UNCERTAIN: live_orders=AAPL.US=[latched-1]"
         )
         runner.risk.pause(operational_reason, auto_resumable=False)
+        assert runner.risk.permit_protective_exits() is True
         monkeypatch.setattr(
             runner,
             "notifier",
@@ -686,9 +687,39 @@ class TestAPI:
         kill_resp = client.post("/api/control/kill-switch", json={"reason": "panic"})
 
         assert pause_resp.status_code == 200
+        assert runner.risk.protective_exit_permitted is False
         assert kill_resp.status_code == 200
         assert runner.risk.pause_reason == operational_reason
         assert runner.risk.kill_switch is True
+
+    def test_protective_exit_control_keeps_operational_pause(self, monkeypatch) -> None:
+        from app.runner import AppRunner
+
+        runner = AppRunner()
+        runner.risk.pause("ORDER_EXECUTION_BLOCKED: operator review")
+        monkeypatch.setattr(
+            runner,
+            "verify_operational_resume",
+            lambda: (True, ""),
+        )
+        monkeypatch.setattr(trade_api, "get_runner", lambda: runner)
+
+        enabled = client.post("/api/control/protective-exit/enable")
+
+        assert enabled.status_code == 200
+        assert runner.risk.paused is True
+        assert runner.risk.protective_exit_permitted is True
+
+        disabled = client.post("/api/control/protective-exit/disable")
+
+        assert disabled.status_code == 200
+        assert runner.risk.paused is True
+        assert runner.risk.protective_exit_permitted is False
+
+        assert client.post("/api/control/protective-exit/enable").status_code == 200
+        stopped = client.post("/api/control/stop", json={"reason": "operator stop"})
+        assert stopped.status_code == 200
+        assert runner.risk.protective_exit_permitted is False
 
     def test_kill_switch(self) -> None:
         resp = client.post("/api/control/kill-switch", json={"reason": "testing"})

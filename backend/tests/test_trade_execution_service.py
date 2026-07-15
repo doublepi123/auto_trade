@@ -2742,6 +2742,154 @@ class TestTradeExecutionServiceBasics:
         assert status is not None
         assert status.status == "FILLED"
 
+    def test_verified_protective_permission_allows_operational_pause_exit(self) -> None:
+        class Broker:
+            submitted_quantity = Decimal("0")
+
+            def get_positions(self):
+                return [
+                    SimpleNamespace(
+                        symbol="NVDA.US",
+                        side="LONG",
+                        quantity=Decimal("10"),
+                        available_quantity=Decimal("10"),
+                        avg_price=Decimal("220"),
+                    )
+                ]
+
+            def submit_limit_order(
+                self,
+                symbol: str,
+                side: str,
+                quantity: Decimal,
+                price: Decimal,
+            ) -> OrderResult:
+                self.submitted_quantity = quantity
+                return OrderResult("order-protective", symbol, side, quantity, price, "FILLED")
+
+        svc = TradeExecutionService(
+            record_order=lambda *args: None,
+            update_order_status=lambda *args: None,
+            record_risk_event=lambda *args: None,
+        )
+        risk = RiskController()
+        risk.pause(f"{trade_svc_module.ORDER_EXECUTION_BLOCKED_PREFIX} verified")
+        assert risk.permit_protective_exits() is True
+
+        broker = Broker()
+        status = svc.execute(
+            "SELL",
+            "NVDA.US",
+            Quote("NVDA.US", 215, 214.9, 215.1, ""),
+            broker,
+            risk,
+            ServerChanNotifier(""),
+            "USD",
+            allow_loss_exit=True,
+            reduce_only=True,
+        )
+
+        assert status is not None
+        assert status.status == "FILLED"
+        assert broker.submitted_quantity == Decimal("10")
+
+    def test_revoked_protective_permission_blocks_final_submission(self) -> None:
+        risk = RiskController()
+        risk.pause(f"{trade_svc_module.ORDER_EXECUTION_BLOCKED_PREFIX} verified")
+        assert risk.permit_protective_exits() is True
+
+        class Broker:
+            submitted = False
+
+            def get_positions(self):
+                risk.revoke_protective_exits()
+                return [
+                    SimpleNamespace(
+                        symbol="NVDA.US",
+                        side="LONG",
+                        quantity=Decimal("10"),
+                        available_quantity=Decimal("10"),
+                        avg_price=Decimal("220"),
+                    )
+                ]
+
+            def submit_limit_order(self, *args: object, **kwargs: object) -> OrderResult:
+                self.submitted = True
+                raise AssertionError("revoked permission must block broker submission")
+
+        svc = TradeExecutionService(
+            record_order=lambda *args: None,
+            update_order_status=lambda *args: None,
+            record_risk_event=lambda *args: None,
+        )
+        broker = Broker()
+
+        status = svc.execute(
+            "SELL",
+            "NVDA.US",
+            Quote("NVDA.US", 215, 214.9, 215.1, ""),
+            broker,
+            risk,
+            ServerChanNotifier(""),
+            "USD",
+            allow_loss_exit=True,
+            reduce_only=True,
+        )
+
+        assert status is not None
+        assert status.status == "SKIPPED"
+        assert broker.submitted is False
+
+    def test_quote_check_revocation_blocks_final_protective_submission(self) -> None:
+        risk = RiskController()
+        risk.pause(f"{trade_svc_module.ORDER_EXECUTION_BLOCKED_PREFIX} verified")
+        assert risk.permit_protective_exits() is True
+
+        class Broker:
+            submitted = False
+
+            def get_positions(self):
+                return [
+                    SimpleNamespace(
+                        symbol="NVDA.US",
+                        side="LONG",
+                        quantity=Decimal("10"),
+                        available_quantity=Decimal("10"),
+                        avg_price=Decimal("220"),
+                    )
+                ]
+
+            def submit_limit_order(self, *args: object, **kwargs: object) -> OrderResult:
+                self.submitted = True
+                raise AssertionError("revoked permission must block broker submission")
+
+        def revoke_during_quote_check(*args: object) -> None:
+            risk.revoke_protective_exits()
+
+        svc = TradeExecutionService(
+            record_order=lambda *args: None,
+            update_order_status=lambda *args: None,
+            record_risk_event=lambda *args: None,
+            final_order_quote_check=revoke_during_quote_check,
+        )
+        broker = Broker()
+
+        status = svc.execute(
+            "SELL",
+            "NVDA.US",
+            Quote("NVDA.US", 215, 214.9, 215.1, ""),
+            broker,
+            risk,
+            ServerChanNotifier(""),
+            "USD",
+            allow_loss_exit=True,
+            reduce_only=True,
+        )
+
+        assert status is not None
+        assert status.status == "SKIPPED"
+        assert broker.submitted is False
+
     def test_opening_warmup_blocks_new_entry_orders(self, monkeypatch) -> None:
         skipped: list[tuple[str, str, str, dict[str, object]]] = []
         svc = TradeExecutionService(

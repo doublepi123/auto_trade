@@ -274,6 +274,9 @@ def get_status(db: Session = Depends(get_db)) -> StatusResponse:
         )
     response = StatusResponse.model_validate(state)
     response.runner_running = runner.is_running
+    response.protective_exit_permitted = bool(
+        getattr(risk, "protective_exit_permitted", False)
+    )
     response.last_action_message = getattr(runner, "last_action_message", "")
     response.trading_session_mode = getattr(config, "trading_session_mode", "ANY") or "ANY"
     response.is_trading_hours = is_trading_hours(config.market)

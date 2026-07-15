@@ -155,6 +155,8 @@ def session_status(market: str, instant: datetime | None = None) -> str:
     if session.is_rth(now):
         return "rth"
     current = local.time()
+    if current >= session.close_time(local.date()):
+        return "post"
     if (
         session.lunch_start is not None
         and session.lunch_end is not None
@@ -163,8 +165,6 @@ def session_status(market: str, instant: datetime | None = None) -> str:
         return "lunch"
     if current < session.rth_open:
         return "pre"
-    if current >= session.close_time(local.date()):
-        return "post"
     return "closed"
 
 
@@ -188,9 +188,11 @@ def next_session_open(market: str, instant: datetime | None = None) -> datetime:
     here = _ensure_utc(instant or datetime.now(timezone.utc)).astimezone(session.timezone)
     if (
         here.weekday() < 5
+        and not is_market_closed(session.code, here.date())
         and session.lunch_start is not None
         and session.lunch_end is not None
         and session.lunch_start <= here.time() < session.lunch_end
+        and here.time() < session.close_time(here.date())
     ):
         resume = here.replace(
             hour=session.lunch_end.hour,

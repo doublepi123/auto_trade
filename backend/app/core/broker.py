@@ -428,6 +428,58 @@ def _parse_candle_timestamp(value: Any) -> datetime | None:
     return _parse_datetime(value)
 
 
+def _normalize_candlestick_response(
+    response: Any,
+    *,
+    symbol: str,
+    period: str,
+) -> list[BrokerCandle]:
+    items = response if isinstance(response, list) else [response]
+    candles: list[BrokerCandle] = []
+    dropped = 0
+    for item in items:
+        ts = _parse_candle_timestamp(getattr(item, "timestamp", None))
+        if ts is None:
+            dropped += 1
+            continue
+        try:
+            candle = BrokerCandle(
+                timestamp=ts,
+                open=float(getattr(item, "open", 0)),
+                high=float(getattr(item, "high", 0)),
+                low=float(getattr(item, "low", 0)),
+                close=float(getattr(item, "close", 0)),
+                volume=float(getattr(item, "volume", 0)),
+                turnover=float(getattr(item, "turnover", 0)),
+            )
+        except (TypeError, ValueError):
+            dropped += 1
+            continue
+        prices = (candle.open, candle.high, candle.low, candle.close)
+        if (
+            not all(math.isfinite(value) and value > 0 for value in prices)
+            or candle.high < max(candle.open, candle.close, candle.low)
+            or candle.low > min(candle.open, candle.close, candle.high)
+            or not math.isfinite(candle.volume)
+            or candle.volume < 0
+            or not math.isfinite(candle.turnover)
+            or candle.turnover < 0
+        ):
+            dropped += 1
+            continue
+        candles.append(candle)
+    if dropped:
+        logger.warning(
+            "dropped %d invalid %s candlesticks for %s (received=%d)",
+            dropped,
+            period,
+            symbol,
+            len(items),
+        )
+    candles.sort(key=lambda candle: candle.timestamp)
+    return candles
+
+
 def _normalize_order_side(raw_side: Any) -> str:
     text = str(getattr(raw_side, "value", raw_side)).split(".")[-1]
     key = text.upper().replace("_", "").replace("-", "").replace(" ", "")
@@ -612,50 +664,83 @@ class BrokerGateway:
             if quote_ctx is None:
                 raise RuntimeError("quote context is not initialized")
             response = quote_ctx.candlesticks(symbol, period_enum, count, adjust_enum)
-            items = response if isinstance(response, list) else [response]
-            candles: list[BrokerCandle] = []
-            dropped = 0
-            for item in items:
-                ts = _parse_candle_timestamp(getattr(item, "timestamp", None))
-                if ts is None:
-                    dropped += 1
-                    continue
-                try:
-                    candle = BrokerCandle(
-                        timestamp=ts,
-                        open=float(getattr(item, "open", 0)),
-                        high=float(getattr(item, "high", 0)),
-                        low=float(getattr(item, "low", 0)),
-                        close=float(getattr(item, "close", 0)),
-                        volume=float(getattr(item, "volume", 0)),
-                        turnover=float(getattr(item, "turnover", 0)),
-                    )
-                except (TypeError, ValueError):
-                    dropped += 1
-                    continue
-                prices = (candle.open, candle.high, candle.low, candle.close)
-                if (
-                    not all(math.isfinite(value) and value > 0 for value in prices)
-                    or candle.high < max(candle.open, candle.close, candle.low)
-                    or candle.low > min(candle.open, candle.close, candle.high)
-                    or not math.isfinite(candle.volume)
-                    or candle.volume < 0
-                    or not math.isfinite(candle.turnover)
-                    or candle.turnover < 0
-                ):
-                    dropped += 1
-                    continue
-                candles.append(candle)
-            if dropped:
-                logger.warning(
-                    "dropped %d invalid %s candlesticks for %s (received=%d)",
-                    dropped,
-                    period,
-                    symbol,
-                    len(items),
+            return _normalize_candlestick_response(
+                response,
+                symbol=symbol,
+                period=period,
+            )
+
+    def get_history_candlesticks_by_offset(
+        self,
+        symbol: str,
+        period: str,
+        count: int,
+        after: datetime,
+    ) -> list[BrokerCandle]:
+        """Fetch a forward historical page beginning at ``after``."""
+        return self._call_with_retry(
+            lambda: self._get_history_candlesticks_by_offset_inner(
+                symbol,
+                period,
+                count,
+                after,
+            ),
+            op="get_history_candlesticks_by_offset",
+            max_retries=settings.broker_quote_retry_max,
+            base_ms=settings.broker_retry_base_ms,
+        )
+
+    def _get_history_candlesticks_by_offset_inner(
+        self,
+        symbol: str,
+        period: str,
+        count: int,
+        after: datetime,
+    ) -> list[BrokerCandle]:
+        if count <= 0:
+            return []
+        with self._lock:
+            self._init_clients()
+            module = _import_openapi()
+            period_enum = getattr(
+                getattr(module, "Period", None),
+                _normalize_period_name(period),
+                None,
+            )
+            if period_enum is None:
+                raise ValueError(f"unsupported candlestick period: {period}")
+            adjust_enum = getattr(
+                getattr(module, "AdjustType", None),
+                "NoAdjust",
+                None,
+            )
+            if adjust_enum is None:
+                raise RuntimeError("AdjustType.NoAdjust not found in SDK")
+            quote_ctx = self._quote_ctx
+            if quote_ctx is None:
+                raise RuntimeError("quote context is not initialized")
+            history_reader = getattr(
+                quote_ctx,
+                "history_candlesticks_by_offset",
+                None,
+            )
+            if not callable(history_reader):
+                raise RuntimeError(
+                    "quote context does not support historical candlestick paging"
                 )
-            candles.sort(key=lambda c: c.timestamp)
-            return candles
+            response = history_reader(
+                symbol,
+                period_enum,
+                adjust_enum,
+                True,
+                count,
+                after,
+            )
+            return _normalize_candlestick_response(
+                response,
+                symbol=symbol,
+                period=period,
+            )
 
     def get_quote(self, symbol: str) -> Quote:
         return self._call_with_retry(

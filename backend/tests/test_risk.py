@@ -216,3 +216,65 @@ class TestRiskController:
         assert ctrl.pause_reason == operational
         assert ctrl.paused_at == paused_at
         assert ctrl.pause_auto_resumable is False
+
+    def test_protective_exit_permission_is_ephemeral_and_operational_only(self) -> None:
+        ctrl = RiskController()
+
+        ctrl.pause("manual")
+        assert ctrl.permit_protective_exits() is False
+
+        operational = "ORDER_RECONCILIATION_UNCERTAIN: broker proof required"
+        ctrl.pause(operational)
+        assert ctrl.permit_protective_exits() is True
+        assert ctrl.protective_exit_permitted is True
+        assert ctrl.paused is True
+
+        ctrl.pause("manual confirmation")
+        assert ctrl.pause_reason == operational
+        assert ctrl.protective_exit_permitted is False
+
+        assert ctrl.permit_protective_exits() is True
+        ctrl.enable_kill_switch()
+        assert ctrl.protective_exit_permitted is False
+
+    def test_restored_operational_pause_does_not_restore_protective_permission(self) -> None:
+        ctrl = RiskController()
+        reason = "ORDER_SUBMISSION_UNCERTAIN: timeout"
+        ctrl.pause(reason)
+        assert ctrl.permit_protective_exits() is True
+
+        ctrl.restore_pause(True, reason)
+
+        assert ctrl.paused is True
+        assert ctrl.protective_exit_permitted is False
+
+    def test_verified_resume_is_idempotent_when_already_running(self) -> None:
+        ctrl = RiskController()
+        reason, generation = ctrl.pause_verification_snapshot()
+
+        assert ctrl.resume_if_pause_reason(
+            reason,
+            expected_generation=generation,
+        ) is True
+
+        ctrl.enable_kill_switch()
+        reason, generation = ctrl.pause_verification_snapshot()
+        assert ctrl.resume_if_pause_reason(
+            reason,
+            expected_generation=generation,
+        ) is False
+
+    def test_ignored_manual_pause_invalidates_operational_verification(self) -> None:
+        ctrl = RiskController()
+        operational = "ORDER_EXECUTION_BLOCKED: broker proof required"
+        ctrl.pause(operational)
+        reason, generation = ctrl.pause_verification_snapshot()
+
+        ctrl.pause("manual pause")
+
+        assert ctrl.pause_reason == operational
+        assert ctrl.resume_if_pause_reason(
+            reason,
+            expected_generation=generation,
+        ) is False
+        assert ctrl.paused is True
