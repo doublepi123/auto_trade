@@ -309,12 +309,21 @@
           />
 
           <template v-if="shadowConfig && shadowStatus">
+            <el-alert
+              v-if="shadowStatus.version_transition_pending"
+              :title="shadowVersionTransitionTitle"
+              type="warning"
+              :closable="false"
+              show-icon
+              data-testid="shadow-version-transition"
+            />
+
             <section class="shadow-section" data-testid="shadow-config-section">
               <div class="shadow-section-header">
                 <div>
                   <h3>采集配置</h3>
                   <small>
-                    {{ shadowConfig.symbol || '-' }} · {{ shortVersion(shadowConfig.config_version) }} ·
+                    {{ shadowConfig.symbol || '-' }} · 当前 {{ shortVersion(shadowStatus.config.config_version) }} ·
                     {{ shadowStatus.phase }} · 轮询 {{ formatDateTime(shadowStatus.last_polled_at) }}
                   </small>
                 </div>
@@ -396,7 +405,10 @@
             <section class="shadow-section" data-testid="shadow-latest-signal">
               <div class="shadow-section-header">
                 <h3>当前信号</h3>
-                <el-tag v-if="shadowStatus.latest" :type="shadowFreshnessType" effect="plain">{{ shadowFreshnessLabel }}</el-tag>
+                <div class="shadow-tags">
+                  <el-tag effect="plain">证据 {{ shortVersion(shadowStatus.evidence_config_version) }}</el-tag>
+                  <el-tag v-if="shadowStatus.latest" :type="shadowFreshnessType" effect="plain">{{ shadowFreshnessLabel }}</el-tag>
+                </div>
               </div>
               <el-empty v-if="!shadowStatus.latest" description="暂无影子信号" />
               <template v-else>
@@ -416,7 +428,10 @@
             </section>
 
             <section class="shadow-section" data-testid="shadow-metrics">
-              <div class="shadow-section-header"><h3>影子表现</h3></div>
+              <div class="shadow-section-header">
+                <h3>影子表现</h3>
+                <el-tag effect="plain">证据 {{ shortVersion(shadowStatus.evidence_config_version) }}</el-tag>
+              </div>
               <div class="shadow-metrics-grid">
                 <el-statistic title="闭环交易" :value="shadowStatus.metrics.closed_trades" />
                 <el-statistic title="净收益" :value="shadowStatus.metrics.net_pnl" :precision="2" />
@@ -617,7 +632,10 @@
             </section>
 
             <section class="shadow-section" data-testid="shadow-gates">
-              <div class="shadow-section-header"><h3>Gate 统计</h3></div>
+              <div class="shadow-section-header">
+                <h3>Gate 统计</h3>
+                <el-tag effect="plain">证据 {{ shortVersion(shadowStatus.evidence_config_version) }}</el-tag>
+              </div>
               <el-table :data="shadowGateRows" size="small" empty-text="暂无 Gate 记录">
                 <el-table-column prop="gate" label="Gate" min-width="180" />
                 <el-table-column prop="count" label="次数" width="120" />
@@ -940,6 +958,16 @@ const shadowForm = reactive<StrategyShadowConfigUpdate>({
 })
 const shadowMax5mWindow = computed(() => shadowConfig.value?.symbol.endsWith('.HK') ? 56 : 68)
 const shadowMaxAdxPeriod = computed(() => shadowConfig.value?.symbol.endsWith('.HK') ? 28 : 34)
+const shadowVersionTransitionTitle = computed(() => {
+  const status = shadowStatus.value
+  if (!status?.version_transition_pending) return ''
+  const currentConfig = status.config
+  const disabledSuffix = currentConfig.enabled ? '' : '（采集仍停用）'
+  if (status.evidence_config_version !== currentConfig.config_version) {
+    return `版本切换等待中：旧虚拟仓位仍由 ${shortVersion(status.evidence_config_version)} 收尾；平仓后切换到 ${shortVersion(currentConfig.config_version)}${disabledSuffix}`
+  }
+  return `版本切换等待中：运行状态尚待初始化 ${shortVersion(currentConfig.config_version)}${disabledSuffix}`
+})
 
 function applyShadowConfig(config: StrategyShadowConfig) {
   shadowConfig.value = config

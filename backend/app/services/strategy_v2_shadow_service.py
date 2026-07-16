@@ -372,8 +372,15 @@ class StrategyV2ShadowService:
         state = self.db.query(StrategyV2ShadowState).filter(
             StrategyV2ShadowState.symbol == config_row.symbol
         ).first()
+        state_version_mismatch = (
+            state is not None and state.config_version != config_version
+        )
         return StrategyV2ShadowStatusResponse(
             config=self._config_response(config_row),
+            evidence_config_version=active_version,
+            version_transition_pending=(
+                active_version != config_version or state_version_mismatch
+            ),
             latest=(
                 self._latest_response(latest_row, open_trade)
                 if latest_row is not None
@@ -384,6 +391,8 @@ class StrategyV2ShadowService:
             phase=(
                 "DISABLED"
                 if not config_row.enabled and open_trade is None
+                else StrategyV2State.COLD.value
+                if open_trade is None and state_version_mismatch
                 else state.phase if state is not None else StrategyV2State.COLD.value
             ),
             last_polled_at=state.last_polled_at if state is not None else None,

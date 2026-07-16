@@ -1194,6 +1194,8 @@ Cypress.Commands.add('stubApi', () => {
     req.reply({
       body: {
         config: strategyShadowConfig,
+        evidence_config_version: strategyShadowConfig.config_version,
+        version_transition_pending: false,
         latest: {
           observed_at: '2026-07-12T02:04:58Z',
           data_age_seconds: 2,

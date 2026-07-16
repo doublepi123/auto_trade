@@ -15,13 +15,14 @@
 | 基线逐决策、gate、成交、费用和净收益一致性门禁 | ✅ |
 | 脏证据与 baseline mismatch fail closed | ✅ |
 | 算法版本升级为 `strategy-v2-rth-mr-v4-frozen-config`，旧 state 前向重置 | ✅ |
+| 版本过渡期分别暴露当前配置与冻结证据版本，旧虚拟仓位收尾和 flat 初始化不再混淆 | ✅ |
 | 少于 5 个完整日只显示 `INSUFFICIENT_EVIDENCE` | ✅ |
 | 明示 `EXPLORATORY_IN_SAMPLE`、禁止晋级、要求后续前向验证 | ✅ |
 | Lab 只读候选表，无应用参数入口且不进入 15 秒轮询 | ✅ |
 
 **外部依据：** [LEAN warm-up](https://www.quantconnect.com/docs/v2/writing-algorithms/historical-data/warm-up-periods) 用历史数据预热且预热期禁止交易；[Longbridge 历史 K 线](https://open.longbridge.com/docs/quote/pull/history-candlestick) 支持最多 1,000 根分钟 bar；[Freqtrade 策略文档](https://www.freqtrade.io/en/stable/strategy-customization/) 使用 crossing event 与多重 guard；[Deflated Sharpe Ratio](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2460551) 要求控制多重测试。因此同样本 challenger 仅用于诊断，不产生“赢家”或自动修改配置。
 
-**验证：** `pytest tests/` **4296 passed, 1 skipped**，覆盖率 **87.74%**；`basedpyright` 0/0/0；前端 `vue-tsc`、生产构建、chunk 与 Element Plus 预算检查通过；Cypress **71/71 specs** 通过（前 70 个全量运行零失败，最后 1 个因汇总输出截断后独立复跑通过）。
+**验证：** `pytest tests/` **4297 passed, 1 skipped**，覆盖率 **87.74%**；`basedpyright` 0/0/0；前端 `vue-tsc`、生产构建、chunk 与 Element Plus 预算检查通过；Cypress **71/71 specs** 通过（前 70 个全量运行零失败，最后 1 个因汇总输出截断后独立复跑通过；Lab 最终状态契约 9/9 再复跑通过）。
 
 **后续顺序：** P2.4 增加 `first_ready_at`、warm-up 损失 bar 与分时 eligibility，并研究只预热 ADX/波动率、仍按 session 重置 VWAP/z-score 的纯影子 challenger；P2.5 冻结候选后只用未来完整日做 paired forward validation。保持至少 20 个完整日、50 笔合格闭环、成本压力后正收益和回撤约束的晋级门槛。
 

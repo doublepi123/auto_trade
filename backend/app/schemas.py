@@ -469,6 +469,8 @@ class StrategyV2ShadowMetrics(BaseModel):
 
 class StrategyV2ShadowStatusResponse(BaseModel):
     config: StrategyV2ShadowConfigResponse
+    evidence_config_version: str
+    version_transition_pending: bool = False
     latest: Optional[StrategyV2ShadowLatestResponse] = None
     metrics: StrategyV2ShadowMetrics
     gate_counts: dict[str, int] = Field(default_factory=dict)

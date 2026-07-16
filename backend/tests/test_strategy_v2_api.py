@@ -272,6 +272,8 @@ class TestStrategyV2ShadowApi:
         body = response.json()
         assert set(body) == {
             "config",
+            "evidence_config_version",
+            "version_transition_pending",
             "latest",
             "metrics",
             "gate_counts",
@@ -279,6 +281,8 @@ class TestStrategyV2ShadowApi:
             "last_polled_at",
             "last_poll_error",
         }
+        assert body["evidence_config_version"] == body["config"]["config_version"]
+        assert body["version_transition_pending"] is False
         assert set(body["latest"]) == {
             "observed_at",
             "data_age_seconds",

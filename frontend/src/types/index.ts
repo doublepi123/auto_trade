@@ -1436,6 +1436,8 @@ export interface StrategyShadowMetrics {
 
 export interface StrategyShadowStatus {
   config: StrategyShadowConfig
+  evidence_config_version: string
+  version_transition_pending: boolean
   latest: StrategyShadowLatest | null
   metrics: StrategyShadowMetrics
   gate_counts: Record<string, number>

@@ -51,6 +51,7 @@ describe('Strategy v2 shadow lab', () => {
       .and('contain', '等待 1m 价格重新收复')
 
     cy.get('[data-testid="shadow-config-section"]').should('contain', 'ARMED_LONG')
+    cy.get('[data-testid="shadow-version-transition"]').should('not.exist')
 
     cy.get('[data-testid="shadow-metrics"]')
       .should('contain', '34.20')
@@ -102,6 +103,55 @@ describe('Strategy v2 shadow lab', () => {
 
     cy.get('[data-testid="shadow-export-decisions"]').click()
     cy.document().its('body').should('contain', '已导出 1 条影子决策')
+  })
+
+  it('distinguishes a frozen evidence version while a virtual trade exits', () => {
+    cy.intercept('GET', '/api/strategy-shadow/status*', (req) => {
+      req.on('before:response', (response) => {
+        response.body.config.config_version = 'shadow-new-v4'
+        response.body.evidence_config_version = 'shadow-old-v0'
+        response.body.version_transition_pending = true
+        response.body.latest.virtual_position = 'LONG'
+      })
+    })
+
+    openShadowTab()
+
+    cy.get('[data-testid="shadow-version-transition"]')
+      .should('contain', '版本切换等待中')
+      .and('contain', '旧虚拟仓位')
+      .and('contain', '配置 shadow-o')
+      .and('contain', '配置 shadow-n')
+      .and('contain', '平仓后切换')
+    cy.get('[data-testid="shadow-config-section"]')
+      .should('contain', '当前 配置 shadow-n')
+    cy.get('[data-testid="shadow-latest-signal"]')
+      .should('contain', '证据 配置 shadow-o')
+    cy.get('[data-testid="shadow-metrics"]')
+      .should('contain', '证据 配置 shadow-o')
+    cy.get('[data-testid="shadow-gates"]')
+      .should('contain', '证据 配置 shadow-o')
+  })
+
+  it('reports a flat version initialization without claiming a virtual exit', () => {
+    cy.intercept('GET', '/api/strategy-shadow/status*', (req) => {
+      req.on('before:response', (response) => {
+        response.body.config.enabled = false
+        response.body.evidence_config_version = response.body.config.config_version
+        response.body.version_transition_pending = true
+        response.body.phase = 'DISABLED'
+      })
+    })
+
+    openShadowTab()
+
+    cy.get('[data-testid="shadow-version-transition"]')
+      .should('contain', '运行状态尚待初始化')
+      .and('contain', '采集仍停用')
+      .and('not.contain', '旧虚拟仓位')
+    cy.get('[data-testid="shadow-config-section"]')
+      .should('contain', 'DISABLED')
+      .and('contain', '当前 配置 shadow-s')
   })
 
   it('shows a hard blocker when baseline replay does not match', () => {

@@ -1437,6 +1437,12 @@ class TestStrategyV2ShadowService:
             db.add_all([state, trade])
             db.commit()
 
+            transition_status = service.get_status("AAPL.US")
+            assert transition_status.config.config_version == current_version
+            assert transition_status.evidence_config_version == legacy_version
+            assert transition_status.version_transition_pending is True
+            assert transition_status.phase == StrategyV2State.LONG.value
+
             exit_bar_at = last_bar_at + timedelta(minutes=1)
             candles = [
                 BrokerCandle(
@@ -1505,6 +1511,11 @@ class TestStrategyV2ShadowService:
             assert state.open_trade_id is None
             assert state.state_json == "{}"
 
+            current_status = service.get_status("AAPL.US")
+            assert current_status.evidence_config_version == current_version
+            assert current_status.version_transition_pending is False
+            assert current_status.phase == StrategyV2State.COLD.value
+
             future_bar_at = exit_bar_at + timedelta(minutes=1)
             service._evaluate_candles(
                 config=config,
@@ -1521,6 +1532,83 @@ class TestStrategyV2ShadowService:
             assert min(
                 row.bar_at.replace(tzinfo=timezone.utc) for row in current_rows
             ) == future_bar_at
+
+    def test_status_pins_latest_metrics_and_gates_to_open_trade_version(self) -> None:
+        with self._db() as db:
+            config = self._enabled_config(
+                db,
+                activated_at=_SESSION_OPEN,
+                establish_current_state=False,
+            )
+            service = StrategyV2ShadowService(db)
+            current_version = service._config_version(config)
+            legacy_version = "legacy-open-trade-version"
+            db.add_all([
+                StrategyV2ShadowState(
+                    symbol="AAPL.US",
+                    config_version=legacy_version,
+                    phase=StrategyV2State.LONG.value,
+                    last_bar_at=_SESSION_OPEN,
+                    open_trade_id=1,
+                    state_json="{}",
+                ),
+                StrategyV2ShadowTrade(
+                    id=1,
+                    symbol="AAPL.US",
+                    config_version=legacy_version,
+                    status="OPEN",
+                    entry_at=_SESSION_OPEN,
+                    entry_price=100.0,
+                    quantity=1.0,
+                ),
+                StrategyV2ShadowDecision(
+                    idempotency_key="legacy-status-evidence",
+                    symbol="AAPL.US",
+                    market="US",
+                    config_version=legacy_version,
+                    session_date=_SESSION_OPEN.date(),
+                    bar_at=_SESSION_OPEN,
+                    close_price=101.0,
+                    gate_reasons_json='["LEGACY_GATE"]',
+                    virtual_position="LONG",
+                ),
+                StrategyV2ShadowDecision(
+                    idempotency_key="current-status-evidence",
+                    symbol="AAPL.US",
+                    market="US",
+                    config_version=current_version,
+                    session_date=_SESSION_OPEN.date(),
+                    bar_at=_SESSION_OPEN + timedelta(minutes=1),
+                    close_price=999.0,
+                    gate_reasons_json='["CURRENT_GATE"]',
+                ),
+                StrategyV2ShadowTrade(
+                    symbol="AAPL.US",
+                    config_version=current_version,
+                    status="CLOSED",
+                    entry_at=_SESSION_OPEN,
+                    exit_at=_SESSION_OPEN + timedelta(minutes=1),
+                    entry_price=100.0,
+                    exit_price=223.0,
+                    quantity=1.0,
+                    gross_pnl=123.0,
+                    estimated_fees=0.0,
+                    net_pnl=123.0,
+                ),
+            ])
+            db.commit()
+
+            status = service.get_status("AAPL.US")
+
+            assert status.config.config_version == current_version
+            assert status.evidence_config_version == legacy_version
+            assert status.version_transition_pending is True
+            assert status.latest is not None
+            assert status.latest.price == pytest.approx(101.0)
+            assert status.metrics.bars == 1
+            assert status.metrics.closed_trades == 0
+            assert status.metrics.net_pnl == pytest.approx(0.0)
+            assert status.gate_counts == {"LEGACY_GATE": 1}
 
     def test_flat_legacy_version_resets_forward_without_rewriting_evidence(self) -> None:
         observed_at = _SESSION_OPEN + timedelta(minutes=180, seconds=10)
@@ -1559,6 +1647,13 @@ class TestStrategyV2ShadowService:
             db.commit()
 
             before_activation = datetime.now(timezone.utc)
+            pending_status = service.get_status("AAPL.US")
+            assert pending_status.evidence_config_version == current_version
+            assert pending_status.version_transition_pending is True
+            assert pending_status.phase == StrategyV2State.COLD.value
+            assert pending_status.latest is None
+            assert pending_status.metrics.bars == 0
+
             service.tick("AAPL.US", "US", now=observed_at)
 
             state = db.query(StrategyV2ShadowState).filter_by(symbol="AAPL.US").one()
@@ -1573,6 +1668,11 @@ class TestStrategyV2ShadowService:
             assert db.query(StrategyV2ShadowDecision).filter_by(
                 config_version=current_version
             ).count() == 0
+
+            activated_status = service.get_status("AAPL.US")
+            assert activated_status.evidence_config_version == current_version
+            assert activated_status.version_transition_pending is False
+            assert activated_status.phase == StrategyV2State.COLD.value
 
             snapshot = service._ensure_version_snapshot(config)
             assert snapshot.activated_at is not None
