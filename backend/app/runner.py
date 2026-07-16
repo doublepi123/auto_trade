@@ -95,6 +95,7 @@ _UNKNOWN_SUBMISSION_SECOND_PROOF_SECONDS = 5.0
 _ORDER_PROVENANCE_TIME_TOLERANCE_SECONDS = 600.0
 _POSITION_DRIFT_PCT_TOLERANCE = Decimal("0.05")  # 5% position drift tolerance
 _POSITION_DRIFT_SHARE_TOLERANCE = Decimal("1")  # 1 share absolute drift tolerance
+_POSITION_DRIFT_SIGNATURE_QUANTUM = Decimal("0.000001")
 
 _OPERATIONAL_PAUSE_PREFIXES = (
     _ORDER_SUBMISSION_UNCERTAIN_PREFIX,
@@ -243,6 +244,7 @@ class AppRunner:
         self._recent_quotes: Deque[dict[str, Any]] = deque(maxlen=self._recent_quotes_cap)
         self._last_action_message = ""
         self._last_guarded_ledger_replay: tuple[object, ...] | None = None
+        self._tracked_avg_drift_warning_keys: dict[str, tuple[object, ...]] = {}
         self._last_llm_action_at: dict[tuple[str, str], float] = {}
         self._llm_order_execution_enabled = False
         self._reduction_intents: dict[str, _ReductionIntent] = {}
@@ -1528,11 +1530,28 @@ class AppRunner:
                             active_engine.state.value,
                             transition_status,
                         )
+                elif (
+                    active_engine.state == EngineState.FLAT
+                    and active_engine.long_entry_rearm_required
+                    and self._get_trading_session_mode() == "RTH_ONLY"
+                    and not is_trading_hours(active_market)
+                ):
+                    # Extended-hours quotes may update observability, but they
+                    # must not re-arm the next regular-session entry.
+                    active_engine.record_price(quote.last_price)
                 elif not risk_result.approved and not self._should_evaluate_reducing_trigger(
                     active_engine,
                     float(quote.last_price),
                 ):
-                    active_engine.record_price(quote.last_price)
+                    if (
+                        active_engine.state == EngineState.FLAT
+                        and active_engine.long_entry_rearm_required
+                    ):
+                        # Risk limits block orders, not observation of a valid
+                        # in-session reclaim needed for a future fresh breach.
+                        active_engine.update_price(quote.last_price)
+                    else:
+                        active_engine.record_price(quote.last_price)
                 else:
                     decision.engine_snapshot = active_engine.snapshot()
                     decision.result = active_engine.update_price(quote.last_price)
@@ -5064,6 +5083,8 @@ class AppRunner:
             )
 
         completed_reductions: list[tuple[str, _ReductionIntent]] = []
+        avg_drift_keys_to_confirm: dict[str, tuple[object, ...]] = {}
+        avg_drift_keys_to_clear: set[str] = set()
         for symbol in sorted(confirmed_flat_symbols):
             intent = self._reduction_intents.get(symbol)
             if intent is not None and self._trade_svc.pending_order_for(symbol) is None:
@@ -5167,6 +5188,28 @@ class AppRunner:
                 drift_pct >= _POSITION_DRIFT_PCT_TOLERANCE
                 or abs(tracked_qty - broker_qty) >= _POSITION_DRIFT_SHARE_TOLERANCE
             )
+            avg_drift_key = (
+                tracked_side,
+                tracked_qty.quantize(_POSITION_DRIFT_SIGNATURE_QUANTUM),
+                (
+                    tracked.avg_price if tracked is not None else Decimal("0")
+                ).quantize(_POSITION_DRIFT_SIGNATURE_QUANTUM),
+                broker_side,
+                broker_qty.quantize(_POSITION_DRIFT_SIGNATURE_QUANTUM),
+                broker_avg.quantize(_POSITION_DRIFT_SIGNATURE_QUANTUM),
+            )
+            should_record_avg_drift = bool(
+                avg_price_drift
+                and self._tracked_avg_drift_warning_keys.get(symbol)
+                != avg_drift_key
+            )
+            if avg_price_drift:
+                avg_drift_keys_to_confirm[symbol] = avg_drift_key
+                avg_drift_keys_to_clear.discard(symbol)
+            else:
+                avg_drift_keys_to_confirm.pop(symbol, None)
+                avg_drift_keys_to_clear.add(symbol)
+            tracked_avg_is_durable = False
 
             if broker_qty <= 0:
                 if row is not None:
@@ -5185,7 +5228,18 @@ class AppRunner:
                     )
                 runtime = self._runtime_for_symbol(symbol)
                 recovery_engine = runtime[2] if runtime is not None else self.engine
-                if broker_avg > 0:
+                tracked_avg_is_durable = bool(
+                    tracked is not None
+                    and tracked_side == broker_side
+                    and tracked.avg_price > 0
+                    and broker_qty <= tracked_qty
+                )
+                if tracked_avg_is_durable and tracked is not None:
+                    # Broker average prices can lag a just-closed and reopened
+                    # position. When direction matches and broker inventory did
+                    # not grow, the fill-derived durable cost is authoritative.
+                    desired_avg = tracked.avg_price
+                elif broker_avg > 0:
                     desired_avg = broker_avg
                 elif tracked is not None and tracked_side == broker_side and tracked.avg_price > 0:
                     desired_avg = tracked.avg_price
@@ -5232,7 +5286,7 @@ class AppRunner:
                 row.opened_at = opened_at
                 row.updated_at = datetime.now(timezone.utc)
 
-            if should_record_drift or side_drift or avg_price_drift:
+            if should_record_drift or side_drift or should_record_avg_drift:
                 if should_record_drift:
                     drift_message = (
                         f"tracked qty {tracked_qty} diverged from broker qty {broker_qty} for {symbol}"
@@ -5255,7 +5309,19 @@ class AppRunner:
                     "broker_sides": sorted(sides),
                     "drift_pct": float(drift_pct),
                     "source": source,
-                    "repaired": True,
+                    "repaired": bool(
+                        quantity_drift
+                        or side_drift
+                        or (avg_price_drift and not tracked_avg_is_durable)
+                    ),
+                    "preserved": tracked_avg_is_durable,
+                    "cost_authority": (
+                        "DURABLE_TRACKED_ENTRY"
+                        if tracked_avg_is_durable
+                        else "BROKER_POSITION"
+                        if broker_qty > 0
+                        else "NO_POSITION"
+                    ),
                 }
                 record_trade_event(
                     db,
@@ -5268,6 +5334,9 @@ class AppRunner:
         with self._state_lock:
             self._unsettled_position_symbols = set(unsettled_symbols)
         db.commit()
+        for symbol in avg_drift_keys_to_clear:
+            self._tracked_avg_drift_warning_keys.pop(symbol, None)
+        self._tracked_avg_drift_warning_keys.update(avg_drift_keys_to_confirm)
         self._load_tracked_entries(db)
         return completed_reductions
 

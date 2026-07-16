@@ -171,6 +171,42 @@ class TestRuntimeStateService:
         assert state.paused_at.replace(tzinfo=timezone.utc) == paused_at
         assert state.pause_auto_resumable is True
 
+    def test_long_entry_rearm_latch_survives_restart(self) -> None:
+        self._cleanup()
+        db = self._get_db()
+        StrategyService(db).update_config({
+            "symbol": "NVDA.US",
+            "market": "US",
+            "buy_low": 100.0,
+            "sell_high": 200.0,
+        })
+        db.close()
+
+        engine = StrategyEngine(StrategyParams(
+            symbol="NVDA.US",
+            market="US",
+            buy_low=100.0,
+            sell_high=200.0,
+        ))
+        engine.sync_state(has_long_position=True, has_short_position=False)
+        assert engine.transition_for_action("SELL") == "OK"
+
+        db = self._get_db()
+        RuntimeStateService().persist(db, engine, RiskController())
+        db.close()
+
+        restored = StrategyEngine()
+        db = self._get_db()
+        RuntimeStateService().load(db, restored, RiskController())
+        persisted = StrategyService(db).get_runtime_state(symbol="NVDA.US")
+        db.close()
+
+        assert persisted.long_entry_rearm_required is True
+        assert restored.long_entry_rearm_required is True
+        assert restored.update_price(99.0).triggered is False
+        assert restored.update_price(101.0).triggered is False
+        assert restored.long_entry_rearm_required is False
+
     def test_stage_keeps_runtime_state_and_snapshot_in_caller_transaction(
         self,
     ) -> None:

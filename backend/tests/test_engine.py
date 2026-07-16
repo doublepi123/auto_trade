@@ -17,6 +17,84 @@ class TestStrategyEngine:
         assert result.triggered is True
         assert result.action == "BUY"
         assert engine.state == EngineState.LONG
+        assert engine.long_entry_rearm_required is True
+
+    def test_forced_long_exit_requires_reclaim_before_reentry(self) -> None:
+        engine = StrategyEngine(make_params(100, 200))
+        engine._cooldown_seconds = 0
+        assert engine.update_price(99.0).action == "BUY"
+        assert engine.transition_for_action("SELL") == "OK"
+
+        still_below = engine.update_price(98.0)
+        reclaim = engine.update_price(101.0)
+        next_breach = engine.update_price(100.0)
+
+        assert still_below.triggered is False
+        assert reclaim.triggered is False
+        assert next_breach.action == "BUY"
+        assert engine.state == EngineState.LONG
+
+    def test_band_profit_exit_is_already_rearmed(self) -> None:
+        engine = StrategyEngine(make_params(100, 200))
+        engine._cooldown_seconds = 0
+        assert engine.update_price(99.0).action == "BUY"
+
+        exit_result = engine.update_price(200.0)
+        next_breach = engine.update_price(100.0)
+
+        assert exit_result.action == "SELL"
+        assert next_breach.action == "BUY"
+
+    def test_syncing_long_position_flat_preserves_reentry_latch(self) -> None:
+        engine = StrategyEngine(make_params(100, 200))
+        engine.sync_state(has_long_position=True, has_short_position=False)
+        engine.sync_state(has_long_position=False, has_short_position=False)
+
+        assert engine.state == EngineState.FLAT
+        assert engine.long_entry_rearm_required is True
+        assert engine.update_price(99.0).triggered is False
+
+    def test_snapshot_restore_includes_reentry_latch(self) -> None:
+        engine = StrategyEngine(make_params(100, 200))
+        before_entry = engine.snapshot()
+        engine.update_price(99.0)
+        assert engine.long_entry_rearm_required is True
+
+        engine.restore(before_entry)
+
+        assert engine.state == EngineState.FLAT
+        assert engine.long_entry_rearm_required is False
+
+    def test_restore_preserving_trigger_restores_reentry_latch(self) -> None:
+        engine = StrategyEngine(make_params(100, 200))
+        engine.sync_state(has_long_position=True, has_short_position=False)
+        before_exit = engine.snapshot()
+        engine.restore_long_entry_rearm(False)
+        engine.state = EngineState.FLAT
+
+        engine.restore_preserving_trigger(before_exit)
+
+        assert engine.state == EngineState.LONG
+        assert engine.long_entry_rearm_required is True
+
+    def test_reclaim_rearms_even_during_trigger_cooldown(self) -> None:
+        engine = StrategyEngine(make_params(100, 200))
+        assert engine.update_price(99.0).action == "BUY"
+        assert engine.transition_for_action("SELL") == "OK"
+        engine._cooldown_seconds = 60
+
+        result = engine.update_price(101.0)
+
+        assert result.triggered is False
+        assert engine.long_entry_rearm_required is False
+
+    def test_explicit_buy_cannot_bypass_reentry_latch(self) -> None:
+        engine = StrategyEngine(make_params(100, 200))
+        engine.sync_state(has_long_position=True, has_short_position=False)
+        engine.sync_state(has_long_position=False, has_short_position=False)
+
+        assert engine.transition_for_action("BUY") == "ENTRY_REARM_REQUIRED"
+        assert engine.state == EngineState.FLAT
 
     def test_price_at_buy_low_boundary_triggers_buy(self) -> None:
         engine = StrategyEngine(make_params(100, 200))
@@ -189,6 +267,7 @@ class TestStrategyEngine:
         assert d["symbol"] == "AAPL.US"
         assert d["buy_low"] == 100.0
         assert d["sell_high"] == 200.0
+        assert d["long_entry_rearm_required"] is False
 
     def test_cooldown_prevents_trigger(self) -> None:
         engine = StrategyEngine(make_params(100, 200))

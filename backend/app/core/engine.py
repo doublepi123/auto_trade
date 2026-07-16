@@ -60,6 +60,7 @@ class EngineSnapshot:
     state: EngineState
     last_trigger_price: float
     last_trigger_at: datetime | None
+    long_entry_rearm_required: bool = False
 
 
 class StrategyEngine:
@@ -69,6 +70,7 @@ class StrategyEngine:
         self.last_price: float = 0.0
         self.last_trigger_price: float = 0.0
         self.last_trigger_at: datetime | None = None
+        self._long_entry_rearm_required = False
         self._last_trigger_monotonic: float = 0.0
         self._cooldown_seconds: int = settings.engine_cooldown_seconds
         self._lock = threading.Lock()
@@ -90,12 +92,18 @@ class StrategyEngine:
         if not self.params.symbol or self.params.buy_low <= 0 or self.params.sell_high <= 0 or self.params.buy_low >= self.params.sell_high:
             return TriggerResult(triggered=False)
 
+        if self.state == EngineState.FLAT and self._long_entry_rearm_required:
+            if price > self.params.buy_low:
+                self._long_entry_rearm_required = False
+            return TriggerResult(triggered=False)
+
         if self._in_cooldown():
             return TriggerResult(triggered=False)
 
         if self.state == EngineState.FLAT:
             if price <= self.params.buy_low:
                 self.state = EngineState.LONG
+                self._long_entry_rearm_required = True
                 self._mark_trigger(price)
                 return TriggerResult(
                     triggered=True,
@@ -114,6 +122,7 @@ class StrategyEngine:
         elif self.state == EngineState.LONG:
             if price >= self.params.sell_high:
                 self.state = EngineState.FLAT
+                self._long_entry_rearm_required = False
                 self._mark_trigger(price)
                 return TriggerResult(
                     triggered=True,
@@ -167,10 +176,23 @@ class StrategyEngine:
                 logger.warning("both long and short positions detected; defaulting to LONG")
             if has_long_position:
                 self.state = EngineState.LONG
+                self._long_entry_rearm_required = True
             elif has_short_position:
                 self.state = EngineState.SHORT
             else:
+                if self.state == EngineState.LONG:
+                    self._long_entry_rearm_required = True
                 self.state = EngineState.FLAT
+
+    @property
+    def long_entry_rearm_required(self) -> bool:
+        with self._lock:
+            return self._long_entry_rearm_required
+
+    def restore_long_entry_rearm(self, required: bool) -> None:
+        """Restore the durable long-entry edge-trigger latch."""
+        with self._lock:
+            self._long_entry_rearm_required = bool(required)
 
     # ------------------------------------------------------------------
     # Snapshot / restore / state-machine transitions (owned by engine)
@@ -183,6 +205,7 @@ class StrategyEngine:
                 state=self.state,
                 last_trigger_price=self.last_trigger_price,
                 last_trigger_at=self.last_trigger_at,
+                long_entry_rearm_required=self._long_entry_rearm_required,
             )
 
     def restore(self, snap: EngineSnapshot) -> None:
@@ -191,22 +214,24 @@ class StrategyEngine:
             self.state = snap.state
             self.last_trigger_price = snap.last_trigger_price
             self.last_trigger_at = snap.last_trigger_at
+            self._long_entry_rearm_required = snap.long_entry_rearm_required
 
     def restore_preserving_trigger(self, snap: EngineSnapshot) -> None:
-        """Restore only the ``state`` field, keeping trigger info unchanged.
+        """Restore state-machine safety fields, keeping trigger info unchanged.
 
         Used when an unprofitable exit is skipped — the cooldown must remain
         active to prevent a tight position-polling loop.
         """
         with self._lock:
             self.state = snap.state
+            self._long_entry_rearm_required = snap.long_entry_rearm_required
 
     def transition_for_action(self, action: str) -> str:
         """Attempt a state-machine transition for *action*.
 
         Returns ``"OK"`` on success or an error status string:
         ``"INCOMPATIBLE_STATE"``, ``"SHORT_SELLING_DISABLED"``,
-        ``"UNKNOWN_ACTION"``.
+        ``"ENTRY_REARM_REQUIRED"``, ``"UNKNOWN_ACTION"``.
         """
         with self._lock:
             current = self.state
@@ -215,12 +240,16 @@ class StrategyEngine:
                     return "OK"
                 if current != EngineState.FLAT:
                     return "INCOMPATIBLE_STATE"
+                if self._long_entry_rearm_required:
+                    return "ENTRY_REARM_REQUIRED"
                 self.state = EngineState.LONG
+                self._long_entry_rearm_required = True
                 return "OK"
             if action == "SELL":
                 if current != EngineState.LONG:
                     return "INCOMPATIBLE_STATE"
                 self.state = EngineState.FLAT
+                self._long_entry_rearm_required = True
                 return "OK"
             if action == "SELL_SHORT":
                 if not self.params.short_selling:
@@ -243,6 +272,7 @@ class StrategyEngine:
                 "last_price": self.last_price,
                 "last_trigger_price": self.last_trigger_price,
                 "last_trigger_at": self.last_trigger_at.isoformat() if self.last_trigger_at else None,
+                "long_entry_rearm_required": self._long_entry_rearm_required,
                 "symbol": self.params.symbol,
                 "buy_low": self.params.buy_low,
                 "sell_high": self.params.sell_high,

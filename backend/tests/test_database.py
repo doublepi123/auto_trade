@@ -291,6 +291,51 @@ def test_init_db_adds_runtime_symbol_columns(tmp_path, monkeypatch) -> None:
     Base.metadata.drop_all(bind=engine)
 
 
+def test_runtime_state_entry_rearm_migration_backfills_flat_once(tmp_path) -> None:
+    db_path = tmp_path / "legacy_runtime_rearm.db"
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(
+            "CREATE TABLE runtime_state ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "engine_state VARCHAR(20), consecutive_losses INTEGER)"
+        )
+        connection.execute(
+            "INSERT INTO runtime_state (engine_state, consecutive_losses) "
+            "VALUES ('flat', 0)"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    engine = create_engine(f"sqlite:///{db_path}")
+    database._ensure_runtime_state_entry_rearm_column(engine)
+    database._ensure_runtime_state_entry_rearm_column(engine)
+
+    with engine.connect() as db:
+        columns = {
+            row[1] for row in db.exec_driver_sql("PRAGMA table_info(runtime_state)")
+        }
+        migrated_value = db.exec_driver_sql(
+            "SELECT long_entry_rearm_required FROM runtime_state WHERE id = 1"
+        ).scalar_one()
+        db.exec_driver_sql(
+            "UPDATE runtime_state SET long_entry_rearm_required = 0 WHERE id = 1"
+        )
+        db.commit()
+
+    database._ensure_runtime_state_entry_rearm_column(engine)
+    with engine.connect() as db:
+        value_after_second_run = db.exec_driver_sql(
+            "SELECT long_entry_rearm_required FROM runtime_state WHERE id = 1"
+        ).scalar_one()
+
+    assert "long_entry_rearm_required" in columns
+    assert migrated_value == 1
+    assert value_after_second_run == 0
+    engine.dispose()
+
+
 def test_init_db_adds_missing_strategy_trade_safety_columns(tmp_path, monkeypatch) -> None:
     db_path = tmp_path / "legacy_strategy_trade_safety.db"
     connection = sqlite3.connect(db_path)

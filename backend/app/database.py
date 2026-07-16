@@ -56,6 +56,7 @@ def init_db() -> None:
     _ensure_runtime_reduction_columns(engine)
     _backfill_primary_runtime_state_symbols(engine)
     _ensure_runtime_state_symbol_uniqueness(engine)
+    _ensure_runtime_state_entry_rearm_column(engine)
     _ensure_order_broker_id_uniqueness(engine)
     _ensure_tracked_entries_table(engine)
     _ensure_tracked_entry_metadata_columns(engine)
@@ -324,6 +325,30 @@ def _ensure_runtime_state_symbol_columns(db_engine: Engine) -> None:
                 )
                 connection.exec_driver_sql(
                     "CREATE INDEX IF NOT EXISTS ix_runtime_state_snapshots_symbol ON runtime_state_snapshots (symbol)"
+                )
+
+
+def _ensure_runtime_state_entry_rearm_column(db_engine: Engine) -> None:
+    inspector = inspect(db_engine)
+    if "runtime_state" not in inspector.get_table_names():
+        return
+
+    columns = {column["name"] for column in inspector.get_columns("runtime_state")}
+    if "long_entry_rearm_required" not in columns:
+        with db_engine.begin() as connection:
+            connection.exec_driver_sql(
+                "ALTER TABLE runtime_state ADD COLUMN "
+                "long_entry_rearm_required BOOLEAN DEFAULT 0 NOT NULL"
+            )
+            predicates: list[str] = []
+            if "engine_state" in columns:
+                predicates.append(
+                    "LOWER(COALESCE(engine_state, 'flat')) IN ('flat', 'long')"
+                )
+            if predicates:
+                connection.exec_driver_sql(
+                    "UPDATE runtime_state SET long_entry_rearm_required = 1 WHERE "
+                    + " OR ".join(predicates)
                 )
 
 

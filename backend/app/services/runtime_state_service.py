@@ -100,6 +100,9 @@ class RuntimeStateService:
         engine.last_price = state.last_price
         engine.last_trigger_price = state.last_trigger_price
         engine.last_trigger_at = state.last_trigger_at
+        engine.restore_long_entry_rearm(
+            bool(getattr(state, "long_entry_rearm_required", False))
+        )
 
         risk.config = RiskConfig(
             max_daily_loss=config.max_daily_loss,
@@ -143,6 +146,7 @@ class RuntimeStateService:
         runtime_state.pause_auto_resumable = risk.pause_auto_resumable
         runtime_state.last_trigger_price = engine.last_trigger_price
         runtime_state.last_trigger_at = engine.last_trigger_at
+        runtime_state.long_entry_rearm_required = engine.long_entry_rearm_required
         runtime_state.updated_at = datetime.now(timezone.utc)
         db.add(runtime_state)
         db.add(
@@ -186,6 +190,9 @@ class RuntimeStateService:
         engine.last_price = state.last_price
         engine.last_trigger_price = state.last_trigger_price
         engine.last_trigger_at = state.last_trigger_at
+        engine.restore_long_entry_rearm(
+            bool(getattr(state, "long_entry_rearm_required", False))
+        )
 
     def persist_symbol(self, db: Any, engine: StrategyEngine, symbol: str | None = None, risk: RiskController | None = None) -> None:
         from app.services.strategy_service import StrategyService
@@ -197,6 +204,7 @@ class RuntimeStateService:
             last_price=engine.last_price,
             last_trigger_price=engine.last_trigger_price,
             last_trigger_at=engine.last_trigger_at,
+            long_entry_rearm_required=engine.long_entry_rearm_required,
         )
         self.record_snapshot(db, engine, risk or RiskController(), symbol=runtime_symbol)
 

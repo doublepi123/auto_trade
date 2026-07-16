@@ -12,6 +12,8 @@ logger = logging.getLogger(__name__)
 
 
 _ZERO = Decimal("0")
+_COST_BASIS_ABS_TOLERANCE = Decimal("0.000001")
+_COST_BASIS_REL_TOLERANCE = Decimal("0.000001")
 _FILLED_STATUS = "FILLED"
 _PARTIAL_FILLED_STATUS = "PARTIAL_FILLED"
 
@@ -237,8 +239,32 @@ class DailyPnlService:
 
         for fill in fills:
             position = positions.setdefault(fill.symbol, _LedgerPosition())
+            fill_trade_day = resolve_day(fill.filled_at)
             authoritative = self._is_authoritative_exit(fill)
-            if authoritative:
+            replay_cost_basis = (
+                self._fully_covered_replay_cost_basis(position, fill)
+                if authoritative
+                else None
+            )
+            cost_basis_conflict = (
+                replay_cost_basis is not None
+                and self._cost_basis_conflicts(fill, replay_cost_basis)
+            )
+            if cost_basis_conflict:
+                if fill_trade_day == target_day:
+                    is_complete = False
+                logger.error(
+                    "daily PnL replay found conflicting tracked cost basis for %s "
+                    "order %s on %s: declared=%s replayed=%s position=%s; refusing "
+                    "suspect realized PnL for that trade day",
+                    fill.symbol,
+                    fill.broker_order_id or fill.id,
+                    fill_trade_day,
+                    fill.cost_basis_price,
+                    replay_cost_basis,
+                    fill.position_quantity_before,
+                )
+            elif authoritative:
                 self._rebase_position_from_authoritative_exit(position, fill)
             matched_quantity, replay_pnl = self._apply_fill_net(
                 position,
@@ -248,7 +274,12 @@ class DailyPnlService:
             )
             if fill.side not in {"SELL", "BUY_TO_COVER"}:
                 continue
-            if resolve_day(fill.filled_at) != target_day:
+            if fill_trade_day != target_day:
+                continue
+            if cost_basis_conflict:
+                # _apply_fill_net has already consumed the closing fill from
+                # the fully represented ledger position. Keep later replay
+                # state accurate, but do not credit either disputed PnL value.
                 continue
             if authoritative:
                 matched_quantity = fill.cost_basis_quantity or fill.quantity
@@ -816,6 +847,45 @@ class DailyPnlService:
             and fill.net_pnl is not None
             and fill.pnl_fee is not None
         )
+
+    @staticmethod
+    def _fully_covered_replay_cost_basis(
+        position: _LedgerPosition,
+        fill: _Fill,
+    ) -> Decimal | None:
+        """Return replayed average cost only when the whole position is known.
+
+        Quantity equality is intentional. A smaller ledger position is only
+        partially represented, while a larger one signals stale inventory or
+        a position reset. In either case the tracked entry can legitimately
+        have originated outside this order ledger and remains authoritative.
+        """
+        if fill.pnl_source != "TRACKED_ENTRY":
+            return None
+        position_quantity = fill.position_quantity_before
+        if position_quantity is None or position_quantity <= 0:
+            return None
+        if fill.side == "SELL":
+            if position.long_quantity != position_quantity:
+                return None
+            return position.long_cost / position.long_quantity
+        if fill.side == "BUY_TO_COVER":
+            if position.short_quantity != position_quantity:
+                return None
+            return position.short_proceeds / position.short_quantity
+        return None
+
+    @staticmethod
+    def _cost_basis_conflicts(fill: _Fill, replay_cost_basis: Decimal) -> bool:
+        declared_cost_basis = fill.cost_basis_price
+        if declared_cost_basis is None:
+            return False
+        tolerance = max(
+            _COST_BASIS_ABS_TOLERANCE,
+            max(abs(declared_cost_basis), abs(replay_cost_basis))
+            * _COST_BASIS_REL_TOLERANCE,
+        )
+        return abs(declared_cost_basis - replay_cost_basis) > tolerance
 
     @staticmethod
     def _rebase_position_from_authoritative_exit(

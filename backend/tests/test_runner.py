@@ -976,7 +976,6 @@ class TestAppRunner:
             buy_low=100.0,
             sell_high=110.0,
         )
-
         decision = runner._evaluate_quote_trigger(
             Quote("AAPL.US", 99.0, 50.0, 150.0, _fresh_timestamp())
         )
@@ -987,6 +986,57 @@ class TestAppRunner:
         assert runner.engine.last_price == 0.0
         assert runner._last_quote_at == 0.0
         assert "quality gate" in runner.last_action_message
+
+    def test_extended_hours_quote_does_not_rearm_regular_session_entry(
+        self,
+        monkeypatch,
+    ) -> None:
+        runner = AppRunner()
+        runner._running = True
+        runner._trading_session_mode = "RTH_ONLY"
+        runner.engine.params = StrategyParams(
+            symbol="AAPL.US",
+            market="US",
+            buy_low=100.0,
+            sell_high=110.0,
+        )
+        runner.engine.restore_long_entry_rearm(True)
+        monkeypatch.setattr("app.runner.is_trading_hours", lambda _market: False)
+
+        decision = runner._evaluate_quote_trigger(
+            Quote("AAPL.US", 101.0, 100.99, 101.01, _fresh_timestamp())
+        )
+
+        assert decision.result is None
+        assert runner.engine.state == EngineState.FLAT
+        assert runner.engine.last_price == 101.0
+        assert runner.engine.long_entry_rearm_required is True
+
+    def test_risk_rejection_still_observes_regular_session_reclaim(
+        self,
+        monkeypatch,
+    ) -> None:
+        runner = AppRunner()
+        runner._running = True
+        runner._trading_session_mode = "RTH_ONLY"
+        runner.engine.params = StrategyParams(
+            symbol="AAPL.US",
+            market="US",
+            buy_low=100.0,
+            sell_high=110.0,
+        )
+        runner.engine.restore_long_entry_rearm(True)
+        runner.risk.consecutive_losses = runner.risk.config.max_consecutive_losses
+        assert runner.risk.check().approved is False
+        monkeypatch.setattr("app.runner.is_trading_hours", lambda _market: True)
+
+        decision = runner._evaluate_quote_trigger(
+            Quote("AAPL.US", 101.0, 100.99, 101.01, _fresh_timestamp())
+        )
+
+        assert decision.result is None
+        assert runner.engine.state == EngineState.FLAT
+        assert runner.engine.long_entry_rearm_required is False
 
     def test_bad_quote_cannot_update_price_or_trigger_unrealized_loss_pause(self) -> None:
         runner = AppRunner()
@@ -1365,6 +1415,7 @@ class TestAppRunner:
             buy_low=100.0,
             sell_high=110.0,
         )
+        runner.engine.restore_long_entry_rearm(True)
         runner._last_quote_at = 123.0
         runner._last_push_quote_at = 122.0
         runner._recent_quotes.append({"symbol": "AAPL.US", "last_price": 105.0})
@@ -1414,6 +1465,7 @@ class TestAppRunner:
         assert list(runner._recent_quotes) == [{"symbol": "AAPL.US", "last_price": 105.0}]
         assert runner.engine.params.buy_low == 101.0
         assert runner.engine.params.sell_high == 111.0
+        assert runner.engine.long_entry_rearm_required is True
 
     def test_reload_strategy_resubscribes_when_primary_symbol_changes(self, monkeypatch) -> None:
         from app.services.strategy_service import StrategyService
@@ -2518,10 +2570,11 @@ class TestAppRunner:
                 db.query(TrackedEntry).filter(TrackedEntry.symbol == "NVDA.US").delete()
                 db.commit()
 
-    def test_reconcile_repairs_average_price_when_quantity_is_unchanged(self) -> None:
+    def test_reconcile_preserves_fill_cost_when_broker_average_is_stale(self) -> None:
         from app.models import TrackedEntry
 
         runner = AppRunner()
+        runner.engine.params = StrategyParams(symbol="AAPL.US", market="US")
         runner._trade_svc.load_tracked_entries({
             "AAPL.US": (
                 Decimal("10"),
@@ -2532,10 +2585,19 @@ class TestAppRunner:
         })
 
         class Broker:
+            calls = 0
+
             def get_positions(self) -> list[Position]:
-                return [Position("AAPL.US", "LONG", Decimal("10"), Decimal("160"))]
+                self.calls += 1
+                broker_avg = (
+                    Decimal("160")
+                    if self.calls == 1
+                    else Decimal("160.0000004")
+                )
+                return [Position("AAPL.US", "LONG", Decimal("10"), broker_avg)]
 
         runner.broker = Broker()
+        events: list[dict[str, Any]] = []
         with database.SessionLocal() as db:
             db.query(TrackedEntry).filter(TrackedEntry.symbol == "AAPL.US").delete()
             db.add(
@@ -2547,12 +2609,177 @@ class TestAppRunner:
                 )
             )
             db.commit()
-            runner._reconcile_tracked_entries_with_broker(db)
+            with patch(
+                "app.runner.record_trade_event",
+                side_effect=lambda _db, **kwargs: events.append(kwargs),
+            ):
+                runner._reconcile_tracked_entries_with_broker(db)
+                runner._reconcile_tracked_entries_with_broker(db)
+            row = db.query(TrackedEntry).filter(
+                TrackedEntry.symbol == "AAPL.US"
+            ).one()
+            assert row.quantity == 10
+            assert row.cost == 1500
 
         assert runner._trade_svc.snapshot_tracked_entries()["AAPL.US"] == (
             Decimal("10.0"),
-            Decimal("1600.0"),
+            Decimal("1500.0"),
         )
+        assert events[-1]["event_type"] == "TRACKED_ENTRY_DRIFT"
+        assert events[-1]["payload"]["repaired"] is False
+        assert events[-1]["payload"]["preserved"] is True
+        assert events[-1]["payload"]["cost_authority"] == "DURABLE_TRACKED_ENTRY"
+        assert len(events) == 1
+
+    def test_reconcile_uses_broker_average_when_inventory_grows(self) -> None:
+        from app.models import TrackedEntry
+
+        runner = AppRunner()
+        runner.engine.params = StrategyParams(symbol="AAPL.US", market="US")
+        runner._trade_svc.load_tracked_entries({
+            "AAPL.US": (
+                Decimal("10"),
+                Decimal("1500"),
+                "LONG",
+                datetime.now(timezone.utc) - timedelta(minutes=5),
+            )
+        })
+
+        class Broker:
+            def get_positions(self) -> list[Position]:
+                return [Position("AAPL.US", "LONG", Decimal("12"), Decimal("155"))]
+
+        runner.broker = Broker()
+        events: list[dict[str, Any]] = []
+        with database.SessionLocal() as db:
+            db.query(TrackedEntry).filter(TrackedEntry.symbol == "AAPL.US").delete()
+            db.add(TrackedEntry(
+                symbol="AAPL.US",
+                side="LONG",
+                quantity=10,
+                cost=1500,
+            ))
+            db.commit()
+            with patch(
+                "app.runner.record_trade_event",
+                side_effect=lambda _db, **kwargs: events.append(kwargs),
+            ):
+                runner._reconcile_tracked_entries_with_broker(db)
+
+        assert runner._trade_svc.snapshot_tracked_entries()["AAPL.US"] == (
+            Decimal("12.0"),
+            Decimal("1860.0"),
+        )
+        assert events[-1]["payload"]["repaired"] is True
+        assert events[-1]["payload"]["preserved"] is False
+        assert events[-1]["payload"]["cost_authority"] == "BROKER_POSITION"
+
+    def test_reconcile_removes_flat_entry_and_clears_confirmed_drift(self) -> None:
+        from app.models import TrackedEntry
+
+        symbol = "FLATRECON.US"
+        runner = AppRunner()
+        runner.engine.params = StrategyParams(symbol=symbol, market="US")
+        runner._trade_svc.load_tracked_entries({
+            symbol: (
+                Decimal("10"),
+                Decimal("1500"),
+                "LONG",
+                datetime.now(timezone.utc) - timedelta(minutes=5),
+            )
+        })
+        runner._tracked_avg_drift_warning_keys[symbol] = ("stale",)
+
+        class Broker:
+            def get_positions(self) -> list[Position]:
+                return []
+
+        runner.broker = Broker()
+        with database.SessionLocal() as db:
+            db.query(TrackedEntry).filter(TrackedEntry.symbol == symbol).delete()
+            db.add(
+                TrackedEntry(
+                    symbol=symbol,
+                    side="LONG",
+                    quantity=10,
+                    cost=1500,
+                )
+            )
+            db.commit()
+            with patch("app.runner.record_trade_event"):
+                runner._reconcile_tracked_entries_with_broker(db)
+            assert (
+                db.query(TrackedEntry)
+                .filter(TrackedEntry.symbol == symbol)
+                .first()
+                is None
+            )
+
+        assert symbol not in runner._trade_svc.snapshot_tracked_entries()
+        assert symbol not in runner._tracked_avg_drift_warning_keys
+
+    def test_reconcile_retries_avg_drift_warning_after_commit_failure(self) -> None:
+        from app.models import TrackedEntry
+
+        symbol = "DRIFTRETRY.US"
+        runner = AppRunner()
+        runner.engine.params = StrategyParams(symbol=symbol, market="US")
+        runner._trade_svc.load_tracked_entries({
+            symbol: (
+                Decimal("10"),
+                Decimal("1500"),
+                "LONG",
+                datetime.now(timezone.utc) - timedelta(minutes=5),
+            )
+        })
+
+        class Broker:
+            def get_positions(self) -> list[Position]:
+                return [Position(symbol, "LONG", Decimal("10"), Decimal("160"))]
+
+        runner.broker = Broker()
+        events: list[dict[str, Any]] = []
+        with database.SessionLocal() as db:
+            db.query(TrackedEntry).filter(TrackedEntry.symbol == symbol).delete()
+            db.add(
+                TrackedEntry(
+                    symbol=symbol,
+                    side="LONG",
+                    quantity=10,
+                    cost=1500,
+                )
+            )
+            db.commit()
+            with patch(
+                "app.runner.record_trade_event",
+                side_effect=lambda _db, **kwargs: events.append(kwargs),
+            ):
+                with (
+                    patch.object(
+                        db,
+                        "commit",
+                        side_effect=RuntimeError("commit failed"),
+                    ),
+                    pytest.raises(RuntimeError, match="commit failed"),
+                ):
+                    runner._reconcile_tracked_entries_with_broker(db)
+                assert symbol not in runner._tracked_avg_drift_warning_keys
+                db.rollback()
+
+                runner._reconcile_tracked_entries_with_broker(db)
+                assert symbol in runner._tracked_avg_drift_warning_keys
+                runner._reconcile_tracked_entries_with_broker(db)
+
+            db.query(TrackedEntry).filter(TrackedEntry.symbol == symbol).delete()
+            db.commit()
+
+        drift_events = [
+            event
+            for event in events
+            if event["event_type"] == "TRACKED_ENTRY_DRIFT"
+            and event["symbol"] == symbol
+        ]
+        assert len(drift_events) == 2
 
     def test_reconcile_preserves_cost_when_quantity_grows_without_broker_avg(
         self,
@@ -4413,6 +4640,8 @@ class TestRecentQuotesDequeBound:
         assert persisted == ["PRICE_STOP"]
         assert completed == ["PRICE_STOP"]
         assert runner.engine.state == EngineState.FLAT
+        assert runner.engine.long_entry_rearm_required is True
+        assert runner.engine.update_price(94.0).triggered is False
 
     def test_reduction_persistence_failure_blocks_submission_and_restores_engine(
         self,

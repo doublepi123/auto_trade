@@ -271,6 +271,207 @@ class TestDailyPnlService:
         assert reconciled_losses == 0
         db.close()
 
+    def test_conflicting_tracked_cost_basis_fails_closed_and_consumes_exit(
+        self,
+        caplog: LogCaptureFixture,
+    ) -> None:
+        self._cleanup()
+        trade_day = date(2026, 7, 16)
+        db = self._get_db()
+        db.add_all([
+            OrderRecord(
+                broker_order_id="ledger-buy-before-drift",
+                symbol="AAPL.US",
+                side="BUY",
+                quantity=10,
+                price=100,
+                executed_quantity=10,
+                executed_price=100,
+                actual_fee=0,
+                status="FILLED",
+                filled_at=self._dt(trade_day, 10),
+            ),
+            OrderRecord(
+                broker_order_id="tracked-sell-with-drift",
+                symbol="AAPL.US",
+                side="SELL",
+                quantity=10,
+                price=110,
+                executed_quantity=10,
+                executed_price=110,
+                actual_fee=0,
+                status="FILLED",
+                filled_at=self._dt(trade_day, 11),
+                cost_basis_price=105,
+                cost_basis_quantity=10,
+                position_quantity_before=10,
+                gross_pnl=50,
+                pnl_fee=0,
+                net_pnl=50,
+                pnl_source="TRACKED_ENTRY",
+            ),
+            OrderRecord(
+                broker_order_id="fresh-buy-after-drift",
+                symbol="AAPL.US",
+                side="BUY",
+                quantity=1,
+                price=200,
+                executed_quantity=1,
+                executed_price=200,
+                actual_fee=0,
+                status="FILLED",
+                filled_at=self._dt(trade_day, 12),
+            ),
+            OrderRecord(
+                broker_order_id="fresh-sell-after-drift",
+                symbol="AAPL.US",
+                side="SELL",
+                quantity=1,
+                price=210,
+                executed_quantity=1,
+                executed_price=210,
+                actual_fee=0,
+                status="FILLED",
+                filled_at=self._dt(trade_day, 13),
+            ),
+        ])
+        db.commit()
+
+        result = DailyPnlService(db).calculate(
+            trade_day=trade_day,
+            symbol="AAPL.US",
+        )
+        reconciled = DailyPnlService.reconcile_risk_state(
+            -7.0,
+            2,
+            trade_day,
+            result,
+        )
+
+        assert result.is_complete is False
+        assert result.realized_pnl == approx(10.0)
+        assert [trade.broker_order_id for trade in result.trades] == [
+            "fresh-sell-after-drift"
+        ]
+        assert reconciled == (-7.0, 2)
+        assert "conflicting tracked cost basis" in caplog.text
+        db.close()
+
+    def test_external_tracked_position_without_full_ledger_remains_authoritative(
+        self,
+    ) -> None:
+        self._cleanup()
+        trade_day = date(2026, 7, 16)
+        db = self._get_db()
+        db.add(OrderRecord(
+            broker_order_id="external-tracked-sell",
+            symbol="AAPL.US",
+            side="SELL",
+            quantity=10,
+            price=100,
+            executed_quantity=10,
+            executed_price=100,
+            actual_fee=0,
+            status="FILLED",
+            filled_at=self._dt(trade_day, 11),
+            cost_basis_price=90,
+            cost_basis_quantity=10,
+            position_quantity_before=10,
+            gross_pnl=100,
+            pnl_fee=0,
+            net_pnl=100,
+            pnl_source="TRACKED_ENTRY",
+        ))
+        db.commit()
+
+        result = DailyPnlService(db).calculate(
+            trade_day=trade_day,
+            symbol="AAPL.US",
+        )
+
+        assert result.is_complete is True
+        assert result.realized_pnl == approx(100.0)
+        assert [trade.broker_order_id for trade in result.trades] == [
+            "external-tracked-sell"
+        ]
+        db.close()
+
+    def test_historical_cost_conflict_does_not_taint_later_trade_day(self) -> None:
+        self._cleanup()
+        prior_day = date(2026, 7, 15)
+        trade_day = date(2026, 7, 16)
+        db = self._get_db()
+        db.add_all([
+            OrderRecord(
+                broker_order_id="prior-buy-before-drift",
+                symbol="AAPL.US",
+                side="BUY",
+                quantity=10,
+                price=100,
+                executed_quantity=10,
+                executed_price=100,
+                actual_fee=0,
+                status="FILLED",
+                filled_at=self._dt(prior_day, 10),
+            ),
+            OrderRecord(
+                broker_order_id="prior-tracked-sell-with-drift",
+                symbol="AAPL.US",
+                side="SELL",
+                quantity=10,
+                price=110,
+                executed_quantity=10,
+                executed_price=110,
+                actual_fee=0,
+                status="FILLED",
+                filled_at=self._dt(prior_day, 11),
+                cost_basis_price=105,
+                cost_basis_quantity=10,
+                position_quantity_before=10,
+                gross_pnl=50,
+                pnl_fee=0,
+                net_pnl=50,
+                pnl_source="TRACKED_ENTRY",
+            ),
+            OrderRecord(
+                broker_order_id="next-day-buy",
+                symbol="AAPL.US",
+                side="BUY",
+                quantity=1,
+                price=200,
+                executed_quantity=1,
+                executed_price=200,
+                actual_fee=0,
+                status="FILLED",
+                filled_at=self._dt(trade_day, 10),
+            ),
+            OrderRecord(
+                broker_order_id="next-day-sell",
+                symbol="AAPL.US",
+                side="SELL",
+                quantity=1,
+                price=210,
+                executed_quantity=1,
+                executed_price=210,
+                actual_fee=0,
+                status="FILLED",
+                filled_at=self._dt(trade_day, 11),
+            ),
+        ])
+        db.commit()
+
+        result = DailyPnlService(db).calculate(
+            trade_day=trade_day,
+            symbol="AAPL.US",
+        )
+
+        assert result.is_complete is True
+        assert result.realized_pnl == approx(10.0)
+        assert [trade.broker_order_id for trade in result.trades] == [
+            "next-day-sell"
+        ]
+        db.close()
+
     def test_calculates_today_pnl_using_carryover_cost_basis(self) -> None:
         self._cleanup()
         prior_day = date(2026, 5, 21)

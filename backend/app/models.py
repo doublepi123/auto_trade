@@ -374,6 +374,11 @@ class RuntimeState(Base):
     last_price: Mapped[float] = mapped_column(Float, default=0.0)
     last_trigger_price: Mapped[float] = mapped_column(Float, default=0.0)
     last_trigger_at: Mapped[Optional[datetime]] = mapped_column(_TZDateTime, nullable=True)
+    long_entry_rearm_required: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        nullable=False,
+    )
     execution_state: Mapped[str] = mapped_column(String(20), default="IDLE", nullable=False)
     reduction_action: Mapped[str] = mapped_column(String(20), default="", nullable=False)
     reduction_cause: Mapped[str] = mapped_column(String(30), default="", nullable=False)

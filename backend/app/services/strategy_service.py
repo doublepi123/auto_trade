@@ -163,6 +163,7 @@ class StrategyService:
         "pause_auto_resumable", "kill_switch", "daily_pnl",
         "daily_pnl_date", "consecutive_losses", "last_price",
         "last_trigger_price", "last_trigger_at",
+        "long_entry_rearm_required",
         "execution_state", "reduction_action", "reduction_cause",
         "reduction_reason", "reduction_started_at", "reduction_trigger_price",
     })
