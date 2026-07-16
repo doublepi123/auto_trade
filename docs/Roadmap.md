@@ -4,14 +4,37 @@
 
 ---
 
+## 近期已完成迭代 (2026-07-17) — P2.3 同样本 ADX Challenger
+
+> 部署前 v3 只有一个约 60% 覆盖的部分交易日，约 13 根 gate-eligible bar、零 breach、零闭环；ADX(14) 的前 139 根 warm-up 与实现一致。当前证据不足以直接放宽参数，本轮先建立可复核的同样本候选比较，不改变 P0 参数或 P2 交易阈值。冻结执行参数的回放语义已升级为 v4，部署后从新版本前向采集，旧 v3 证据不会与新语义混用。实施计划见 [2026-07-17-strategy-v2-adx-challengers.md](superpowers/plans/2026-07-17-strategy-v2-adx-challengers.md)。
+
+| 交付 | 状态 |
+|------|------|
+| 从不可变版本的 `features_json` 严格重建完整日原始 OHLCV | ✅ |
+| 固定预注册 baseline / `max_adx=20/25/30` 同样本零写入 replay | ✅ |
+| 基线逐决策、gate、成交、费用和净收益一致性门禁 | ✅ |
+| 脏证据与 baseline mismatch fail closed | ✅ |
+| 算法版本升级为 `strategy-v2-rth-mr-v4-frozen-config`，旧 state 前向重置 | ✅ |
+| 少于 5 个完整日只显示 `INSUFFICIENT_EVIDENCE` | ✅ |
+| 明示 `EXPLORATORY_IN_SAMPLE`、禁止晋级、要求后续前向验证 | ✅ |
+| Lab 只读候选表，无应用参数入口且不进入 15 秒轮询 | ✅ |
+
+**外部依据：** [LEAN warm-up](https://www.quantconnect.com/docs/v2/writing-algorithms/historical-data/warm-up-periods) 用历史数据预热且预热期禁止交易；[Longbridge 历史 K 线](https://open.longbridge.com/docs/quote/pull/history-candlestick) 支持最多 1,000 根分钟 bar；[Freqtrade 策略文档](https://www.freqtrade.io/en/stable/strategy-customization/) 使用 crossing event 与多重 guard；[Deflated Sharpe Ratio](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2460551) 要求控制多重测试。因此同样本 challenger 仅用于诊断，不产生“赢家”或自动修改配置。
+
+**验证：** `pytest tests/` **4296 passed, 1 skipped**，覆盖率 **87.74%**；`basedpyright` 0/0/0；前端 `vue-tsc`、生产构建、chunk 与 Element Plus 预算检查通过；Cypress **71/71 specs** 通过（前 70 个全量运行零失败，最后 1 个因汇总输出截断后独立复跑通过）。
+
+**后续顺序：** P2.4 增加 `first_ready_at`、warm-up 损失 bar 与分时 eligibility，并研究只预热 ADX/波动率、仍按 session 重置 VWAP/z-score 的纯影子 challenger；P2.5 冻结候选后只用未来完整日做 paired forward validation。保持至少 20 个完整日、50 笔合格闭环、成本压力后正收益和回撤约束的晋级门槛。
+
+---
+
 ## 近期已完成迭代 (2026-07-14) — P2.2 实时行情完整性与暴露诊断
 
 > 本轮由 `192.168.31.143` 近期真实运行证据驱动，不调整 P0/P2 参数。重点修复成交价、可执行 BBO、订单对账和影子 K 线四条数据契约，避免把上游适配错误误判为策略没有信号。
 
 | 证据 / 交付 | 结论与状态 |
 |------|------|
-| P0 近 30 日 3 笔闭环：净收益 `-16,256.69`、profit factor `0.159`、expectancy `-5,418.90` | ❗ 当前实盘表现不符合超短线目标；单笔 `-19,330.39` 覆盖两笔盈利，平均持仓约 25.8 天 |
-| 当前 NVDA 持仓 `1088 @ 206.329`，而硬上限为 100 股 / 5,000 USD / 250 USD 风险 | ❗ 遗留暴露超限；新增只读持仓数量、名义金额、止损风险和三类超限诊断，不自动处置仓位 |
+| 2026-07-14 历史快照：P0 近 30 日 3 笔闭环，净收益 `-16,256.69`、profit factor `0.159`、expectancy `-5,418.90` | ❗ 当时表现不符合超短线目标；该行是历史诊断，不代表 2026-07-17 的模拟账户状态 |
+| 2026-07-14 历史快照：NVDA 持仓 `1088 @ 206.329`，而硬上限为 100 股 / 5,000 USD / 250 USD 风险 | ❗ 当时遗留暴露超限；该仓位现已不存在，不应作为当前暴露解读 |
 | Quote 推送持续但 P0 价格停在 7 月 10 日，P2 K 线已到 7 月 13 日 | ✅ 修复 Longbridge 适配契约：`PushQuote` 只提供最新成交，独立订阅/拉取 Depth 并兼容 Python SDK `bids` / `asks`，合并后才通过执行质量门禁 |
 | `get_today_orders` 遇到 Longbridge `500000 internal error` 后进入操作性暂停 | ✅ 将券商内部错误纳入只读调用的分档退避重试；重试耗尽仍 fail closed，既有操作性暂停仍需显式对账恢复 |
 | P2 开盘三次因负成交量 K 线失败，随后恢复并采集 240 根完整内部 bar | ✅ 券商边界丢弃违反 OHLCV 不变量的单条 K 线并记录数量；策略域和 replay 输入继续严格拒绝脏数据 |
@@ -19,7 +42,7 @@
 
 **参考实现与契约：** [Longbridge Quote push](https://open.longbridge.com/docs/quote/push/quote) 明确推送体不含 BBO，[Longbridge Depth](https://open.longbridge.com/docs/quote/pull/depth) 提供独立盘口；[NautilusTrader live reconciliation](https://nautilustrader.io/docs/latest/how_to/configure_live_trading/) 使用重试、连续对账和 position checks 保持 venue truth；[LEAN warm-up](https://www.quantconnect.com/docs/v2/writing-algorithms/historical-data/warm-up-periods) 与 [Freqtrade recursive analysis](https://docs.freqtrade.io/en/stable/recursive-analysis/) 都要求先确认指标就绪和窗口稳定性，再解释或调参。
 
-**下一阶段门槛：** 继续收集至少 20 个覆盖率 >= 80% 的完整交易日和 50 笔 P2 闭环；前 5 个完整日只监控 BBO 新鲜度、分钟覆盖和坏 bar 数。若 5 日后仍无 eligible bar，再用零写入 replay 对 `max_adx=20/25/30` 做同样本对照，只有在趋势日误入率、净费用后收益和最大回撤同时可接受时才创建新配置版本。
+**下一阶段门槛：** 继续收集至少 20 个满足代码完整性契约的交易日和 50 笔 P2 闭环；完整日要求覆盖率 >= 99.5%、首尾边界完整、零内部缺口、零会话外 bar、零 incomplete marker。前 5 个完整日只监控 BBO 新鲜度、分钟覆盖和坏 bar 数。P2.3 同样本 replay 只作探索诊断；候选必须冻结后再用未来完整日验证，只有趋势日误入率、净费用后收益和最大回撤同时可接受时才创建新影子版本。
 
 **验证：** `pytest tests/` **4162 passed, 1 skipped**，覆盖率 **87.50%**；`basedpyright` 0/0/0；前端 `vue-tsc` 与生产构建通过；远端真实 Longbridge LV1 Depth 返回 NVDA `bid=204.060 / ask=204.080`。
 

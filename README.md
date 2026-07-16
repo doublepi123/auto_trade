@@ -386,6 +386,7 @@ auto_trade/
 | `GET` / `PUT` | `/api/strategy-shadow/config` | 获取或更新指定 `symbol` 的影子开关与可调阈值；硬安全字段不可写 |
 | `GET` | `/api/strategy-shadow/configs` | 列出全部影子标的配置，包含已切离主策略但仍需管理的标的 |
 | `GET` | `/api/strategy-shadow/status` | 当前因果特征、状态、gate 计数与虚拟净收益指标 |
+| `POST` | `/api/strategy-shadow/adx-challengers` | 对不可变版本的完整日证据做固定 ADX 候选同样本零写入重放；结果仅供探索，不会晋级或改配置 |
 | `GET` | `/api/strategy-shadow/decisions` | 当前配置版本的分页逐 bar 决策；支持 symbol/action/from/to |
 | `GET` | `/api/strategy-shadow/trades` | 当前配置版本的虚拟闭环交易与估算费用 |
 | `POST` | `/api/strategy-shadow/replay` | 对调用方提供的 1 分钟 bars 做确定性零写入回放 |

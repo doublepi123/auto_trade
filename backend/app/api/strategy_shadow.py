@@ -11,6 +11,8 @@ from app.api.deps import extract_actor, get_audit_logger
 from app.core.audit import AuditLogger
 from app.database import get_db
 from app.schemas import (
+    StrategyV2AdxChallengerRequest,
+    StrategyV2AdxChallengerResponse,
     StrategyV2ShadowConfigResponse,
     StrategyV2ShadowConfigUpdate,
     StrategyV2ShadowDecisionPage,
@@ -127,6 +129,17 @@ def get_shadow_evaluation(
 ) -> StrategyV2ShadowEvaluationResponse:
     try:
         return StrategyV2ShadowService(db).get_evaluation(symbol, config_version)
+    except ValueError as exc:
+        raise _bad_request(exc) from exc
+
+
+@router.post("/adx-challengers", response_model=StrategyV2AdxChallengerResponse)
+def compare_shadow_adx_challengers(
+    payload: StrategyV2AdxChallengerRequest,
+    db: Session = Depends(get_db),
+) -> StrategyV2AdxChallengerResponse:
+    try:
+        return StrategyV2ShadowService(db).compare_adx_challengers(payload)
     except ValueError as exc:
         raise _bad_request(exc) from exc
 

@@ -290,6 +290,24 @@
             data-testid="shadow-poll-error"
           />
 
+          <el-alert
+            v-if="shadowAdxLoading"
+            title="正在计算 ADX 同样本对照"
+            type="info"
+            :closable="false"
+            show-icon
+            data-testid="shadow-adx-loading"
+          />
+
+          <el-alert
+            v-if="shadowAdxChallengerError"
+            :title="shadowAdxChallengerError"
+            type="warning"
+            :closable="false"
+            show-icon
+            data-testid="shadow-adx-error"
+          />
+
           <template v-if="shadowConfig && shadowStatus">
             <section class="shadow-section" data-testid="shadow-config-section">
               <div class="shadow-section-header">
@@ -480,6 +498,124 @@
               </el-table>
             </section>
 
+            <section v-if="shadowAdxChallengers" class="shadow-section" data-testid="shadow-adx-challengers">
+              <div class="shadow-section-header">
+                <div>
+                  <h3>ADX 同样本对照</h3>
+                  <small>
+                    {{ shortVersion(shadowAdxChallengers.source_config_version) }} ·
+                    即时回放不落库，永不提交订单
+                  </small>
+                </div>
+                <div class="shadow-tags">
+                  <el-tag :type="shadowAdxReplayMeta.type" effect="plain" data-testid="shadow-adx-replay">
+                    {{ shadowAdxReplayMeta.label }}
+                  </el-tag>
+                  <el-tag :type="shadowAdxStatusMeta.type">
+                    {{ shadowAdxStatusMeta.label }}
+                  </el-tag>
+                </div>
+              </div>
+              <div class="shadow-evidence-summary">
+                <span>
+                  完整交易日 {{ shadowAdxChallengers.evaluated_complete_sessions }} /
+                  {{ shadowAdxChallengers.minimum_complete_sessions }}
+                </span>
+                <span>观测完整日 {{ shadowAdxChallengers.observed_complete_sessions }}</span>
+                <span>方案 {{ shadowAdxChallengers.candidates.length }}</span>
+              </div>
+              <el-alert
+                title="样本内探索：不可晋级"
+                description="当前同样本结果只用于比较方案，需后续前向验证。"
+                type="info"
+                :closable="false"
+                show-icon
+                class="shadow-evidence-alert"
+                data-testid="shadow-adx-exploratory"
+              />
+              <el-alert
+                v-if="shadowAdxChallengers.evaluated_complete_sessions < shadowAdxChallengers.minimum_complete_sessions"
+                title="完整同样本交易日不足"
+                :description="`当前仅能评估 ${shadowAdxChallengers.evaluated_complete_sessions} 日，至少需要 ${shadowAdxChallengers.minimum_complete_sessions} 日。`"
+                type="warning"
+                :closable="false"
+                show-icon
+                class="shadow-evidence-alert"
+                data-testid="shadow-adx-insufficient"
+              />
+              <el-alert
+                v-if="shadowAdxChallengers.status === 'BLOCKED'"
+                title="ADX 对照已阻塞"
+                :description="shadowAdxBlockerSummary || '回放校验未通过，暂不可复核。'"
+                type="error"
+                :closable="false"
+                show-icon
+                class="shadow-evidence-alert"
+                data-testid="shadow-adx-blocked"
+              />
+              <el-table
+                :data="shadowAdxChallengers.candidates"
+                size="small"
+                empty-text="暂无可比方案"
+                data-testid="shadow-adx-candidates"
+              >
+                <el-table-column type="expand">
+                  <template #default="{ row }">
+                    <el-table :data="row.daily" size="small" empty-text="暂无按日回放">
+                      <el-table-column prop="session_date" label="交易日" width="120" />
+                      <el-table-column label="bar / 有效" width="110">
+                        <template #default="scope">{{ scope.row.bars }} / {{ scope.row.eligible_bars }}</template>
+                      </el-table-column>
+                      <el-table-column label="跌破 / 收复" width="110">
+                        <template #default="scope">{{ scope.row.breaches }} / {{ scope.row.reclaims }}</template>
+                      </el-table-column>
+                      <el-table-column prop="closed_trades" label="闭环" width="80" />
+                      <el-table-column label="净收益" width="100">
+                        <template #default="scope">{{ formatNullable(scope.row.net_pnl) }}</template>
+                      </el-table-column>
+                      <el-table-column label="最大回撤" width="100">
+                        <template #default="scope">{{ formatNullable(scope.row.max_drawdown) }}</template>
+                      </el-table-column>
+                      <el-table-column label="退出原因" min-width="180">
+                        <template #default="scope">{{ formatExitReasons(scope.row.exit_reasons) }}</template>
+                      </el-table-column>
+                    </el-table>
+                  </template>
+                </el-table-column>
+                <el-table-column label="方案" width="110">
+                  <template #default="{ row }">
+                    <el-tag :type="row.label === 'BASELINE' ? 'info' : 'primary'" effect="plain">
+                      {{ row.label === 'BASELINE' ? '基线' : '挑战者' }}
+                    </el-tag>
+                  </template>
+                </el-table-column>
+                <el-table-column label="ADX 上限" width="100">
+                  <template #default="{ row }">{{ row.max_adx.toFixed(1) }}</template>
+                </el-table-column>
+                <el-table-column label="配置版本" min-width="130">
+                  <template #default="{ row }">{{ shortVersion(row.config_version) }}</template>
+                </el-table-column>
+                <el-table-column label="完整日" width="80">
+                  <template #default="{ row }">{{ row.daily.length }}</template>
+                </el-table-column>
+                <el-table-column label="闭环交易" width="90">
+                  <template #default="{ row }">{{ row.metrics.closed_trades }}</template>
+                </el-table-column>
+                <el-table-column label="净收益" width="100">
+                  <template #default="{ row }">{{ formatNullable(row.metrics.net_pnl) }}</template>
+                </el-table-column>
+                <el-table-column label="胜率" width="90">
+                  <template #default="{ row }">{{ formatPercent(row.metrics.win_rate) }}</template>
+                </el-table-column>
+                <el-table-column label="最大回撤" width="100">
+                  <template #default="{ row }">{{ formatNullable(row.metrics.max_drawdown) }}</template>
+                </el-table-column>
+                <el-table-column label="有效 bar" width="90">
+                  <template #default="{ row }">{{ row.metrics.eligible_bars }}</template>
+                </el-table-column>
+              </el-table>
+            </section>
+
             <section class="shadow-section" data-testid="shadow-gates">
               <div class="shadow-section-header"><h3>Gate 统计</h3></div>
               <el-table :data="shadowGateRows" size="small" empty-text="暂无 Gate 记录">
@@ -513,7 +649,7 @@
               </el-table>
               <el-pagination
                 v-if="shadowDecisionTotal > shadowDecisionPageSize"
-                v-model:current-page="shadowDecisionPage"
+                :current-page="shadowDecisionPage"
                 :page-size="shadowDecisionPageSize"
                 :total="shadowDecisionTotal"
                 layout="prev, pager, next, total"
@@ -542,6 +678,7 @@ import {
 } from '../api/lab'
 import { getLLMInteractions, getLLMIntervalStatus } from '../api/llm_advisor'
 import {
+  evaluateStrategyShadowAdxChallengers,
   getStrategyShadowConfig,
   getStrategyShadowConfigs,
   getStrategyShadowDecisions,
@@ -553,6 +690,7 @@ import {
 import type {
   PromptVersion, ExperimentSummary, PerformanceStats,
   PerformanceVariant, IndicatorsResponse, LLMInteractionRecord, LLMIntervalStatus,
+  StrategyShadowAdxChallengerResponse,
   StrategyShadowConfig, StrategyShadowConfigUpdate, StrategyShadowDecision,
   StrategyShadowEvaluation, StrategyShadowStatus, StrategyShadowVersion,
 } from '../types'
@@ -770,6 +908,9 @@ const shadowStatus = ref<StrategyShadowStatus | null>(null)
 const shadowVersions = ref<StrategyShadowVersion[]>([])
 const selectedShadowVersion = ref('')
 const shadowEvaluation = ref<StrategyShadowEvaluation | null>(null)
+const shadowAdxChallengers = ref<StrategyShadowAdxChallengerResponse | null>(null)
+const shadowAdxChallengerError = ref('')
+const shadowAdxLoading = ref(false)
 const shadowDecisions = ref<StrategyShadowDecision[]>([])
 const shadowDecisionTotal = ref(0)
 const shadowDecisionPage = ref(1)
@@ -779,6 +920,7 @@ const shadowSaving = ref(false)
 const shadowLoaded = ref(false)
 const shadowLoadError = ref('')
 const shadowRequestGeneration = ref(0)
+const shadowDecisionRequestGeneration = ref(0)
 const shadowStatusFetchedAtMs = ref(0)
 const shadowNowMs = ref(Date.now())
 const shadowForm = reactive<StrategyShadowConfigUpdate>({
@@ -820,8 +962,22 @@ function applyShadowConfig(config: StrategyShadowConfig) {
 
 async function loadStrategyShadow(symbol = selectedShadowSymbol.value || undefined) {
   const generation = ++shadowRequestGeneration.value
+  shadowDecisionRequestGeneration.value += 1
   shadowLoading.value = true
   shadowLoadError.value = ''
+  shadowConfig.value = null
+  shadowStatus.value = null
+  shadowVersions.value = []
+  selectedShadowVersion.value = ''
+  shadowEvaluation.value = null
+  shadowDecisions.value = []
+  shadowDecisionTotal.value = 0
+  shadowDecisionPage.value = 1
+  shadowAdxChallengers.value = null
+  shadowAdxChallengerError.value = ''
+  shadowAdxLoading.value = false
+  shadowStatusFetchedAtMs.value = 0
+  shadowLoaded.value = false
   try {
     const configs = await getStrategyShadowConfigs()
     if (generation !== shadowRequestGeneration.value) return
@@ -852,7 +1008,9 @@ async function loadStrategyShadow(symbol = selectedShadowSymbol.value || undefin
     shadowDecisionTotal.value = decisions.total
     shadowDecisionPage.value = decisions.page
     shadowLoaded.value = true
+    void loadShadowAdxChallengers(config.symbol, currentVersion, generation)
   } catch (error: unknown) {
+    if (generation !== shadowRequestGeneration.value) return
     shadowLoadError.value = resolveErrorMessage(error, '加载策略 v2 影子状态失败')
     shadowLoaded.value = false
   } finally {
@@ -865,6 +1023,14 @@ async function loadShadowEvidence() {
   if (!symbol || !selectedShadowVersion.value) return
   const version = selectedShadowVersion.value
   const generation = ++shadowRequestGeneration.value
+  shadowDecisionRequestGeneration.value += 1
+  shadowEvaluation.value = null
+  shadowDecisions.value = []
+  shadowDecisionTotal.value = 0
+  shadowDecisionPage.value = 1
+  shadowAdxChallengers.value = null
+  shadowAdxChallengerError.value = ''
+  shadowAdxLoading.value = false
   try {
     const [evaluation, decisions] = await Promise.all([
       getStrategyShadowEvaluation(symbol, version),
@@ -884,24 +1050,89 @@ async function loadShadowEvidence() {
     shadowDecisions.value = decisions.items
     shadowDecisionTotal.value = decisions.total
     shadowDecisionPage.value = decisions.page
+    void loadShadowAdxChallengers(symbol, version, generation)
   } catch (error: unknown) {
+    if (
+      generation !== shadowRequestGeneration.value
+      || selectedShadowSymbol.value !== symbol
+      || selectedShadowVersion.value !== version
+    ) return
     ElMessage.error(resolveErrorMessage(error, '加载证据版本失败'))
   }
 }
 
+async function loadShadowAdxChallengers(
+  symbol: string,
+  version: string,
+  generation: number,
+) {
+  if (
+    generation !== shadowRequestGeneration.value
+    || selectedShadowSymbol.value !== symbol
+    || selectedShadowVersion.value !== version
+  ) return
+  shadowAdxLoading.value = true
+  try {
+    const result = await evaluateStrategyShadowAdxChallengers({
+      symbol,
+      config_version: version,
+    })
+    if (
+      generation !== shadowRequestGeneration.value
+      || selectedShadowSymbol.value !== symbol
+      || selectedShadowVersion.value !== version
+    ) return
+    shadowAdxChallengers.value = result
+    shadowAdxChallengerError.value = ''
+  } catch (error: unknown) {
+    if (
+      generation !== shadowRequestGeneration.value
+      || selectedShadowSymbol.value !== symbol
+      || selectedShadowVersion.value !== version
+    ) return
+    shadowAdxChallengers.value = null
+    shadowAdxChallengerError.value = resolveErrorMessage(
+      error,
+      '加载 ADX 同样本对照失败',
+    )
+  } finally {
+    if (
+      generation === shadowRequestGeneration.value
+      && selectedShadowSymbol.value === symbol
+      && selectedShadowVersion.value === version
+    ) shadowAdxLoading.value = false
+  }
+}
+
 async function loadShadowDecisions(page: number) {
-  shadowDecisionPage.value = page
+  const symbol = shadowConfig.value?.symbol
+  const version = selectedShadowVersion.value
+  const generation = shadowRequestGeneration.value
+  const decisionGeneration = ++shadowDecisionRequestGeneration.value
+  if (!symbol || !version) return
   try {
     const result = await getStrategyShadowDecisions({
-      symbol: shadowConfig.value?.symbol || undefined,
-      config_version: selectedShadowVersion.value || undefined,
+      symbol,
+      config_version: version,
       page,
       page_size: shadowDecisionPageSize,
     })
+    if (
+      generation !== shadowRequestGeneration.value
+      || decisionGeneration !== shadowDecisionRequestGeneration.value
+      || shadowConfig.value?.symbol !== symbol
+      || selectedShadowVersion.value !== version
+    ) return
     shadowDecisions.value = result.items
     shadowDecisionTotal.value = result.total
     shadowDecisionPage.value = result.page
   } catch (error: unknown) {
+    if (
+      generation !== shadowRequestGeneration.value
+      || decisionGeneration !== shadowDecisionRequestGeneration.value
+      || shadowConfig.value?.symbol !== symbol
+      || selectedShadowVersion.value !== version
+    ) return
     ElMessage.error(resolveErrorMessage(error, '加载影子决策失败'))
   }
 }
@@ -1006,6 +1237,46 @@ const shadowBlockerSummary = computed(() => (
     .join('；') ?? ''
 ))
 
+const shadowAdxStatusMeta = computed<{
+  label: string
+  type: 'success' | 'warning' | 'danger'
+}>(() => {
+  if (shadowAdxChallengers.value?.status === 'READY_FOR_REVIEW') {
+    return { label: '可复核', type: 'success' }
+  }
+  if (shadowAdxChallengers.value?.status === 'BLOCKED') {
+    return { label: '已阻塞', type: 'danger' }
+  }
+  return { label: '证据不足', type: 'warning' }
+})
+
+const shadowAdxReplayMeta = computed<{
+  label: string
+  type: 'success' | 'danger' | 'info'
+}>(() => {
+  if (shadowAdxChallengers.value?.baseline_replay_match === true) {
+    return { label: '基线复放一致', type: 'success' }
+  }
+  if (shadowAdxChallengers.value?.baseline_replay_match === false) {
+    return { label: '基线复放不一致', type: 'danger' }
+  }
+  return { label: '基线尚不可校验', type: 'info' }
+})
+
+const shadowAdxBlockerLabels: Record<string, string> = {
+  MIN_COMPLETE_SESSIONS: '完整同样本交易日不足',
+  BASELINE_REPLAY_MISMATCH: '基线回放与持久化指标不一致',
+  ALGORITHM_VERSION_UNSUPPORTED: '算法版本不支持同样本回放',
+  CONFIG_SNAPSHOT_INVALID: '源配置快照不完整',
+  CONFIG_SNAPSHOT_VERSION_MISMATCH: '源配置快照版本校验失败',
+}
+
+const shadowAdxBlockerSummary = computed(() => (
+  shadowAdxChallengers.value?.blockers
+    .map((item) => shadowAdxBlockerLabels[item] ?? item)
+    .join('；') ?? ''
+))
+
 async function pollStrategyShadow() {
   const symbol = shadowConfig.value?.symbol
   if (!symbol || !selectedShadowVersion.value) return
@@ -1040,6 +1311,14 @@ function formatNullable(value: number | null, precision = 2): string {
 
 function formatPercent(value: number): string {
   return Number.isFinite(value) ? `${(value * 100).toFixed(2)}%` : '-'
+}
+
+function formatExitReasons(reasons: Record<string, number>): string {
+  const values = Object.entries(reasons)
+    .filter(([, count]) => count > 0)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([reason, count]) => `${reason} ${count}`)
+  return values.join('；') || '-'
 }
 
 function shortVersion(version: string): string {

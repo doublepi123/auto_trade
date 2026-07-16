@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import random
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
@@ -27,7 +28,10 @@ from app.models import (
     StrategyV2ShadowTrade,
     StrategyV2ShadowVersion,
 )
-from app.schemas import StrategyV2ShadowConfigUpdate
+from app.schemas import (
+    StrategyV2AdxChallengerRequest,
+    StrategyV2ShadowConfigUpdate,
+)
 from app.services.strategy_v2_shadow_service import StrategyV2ShadowService
 
 
@@ -79,6 +83,27 @@ def _candles(
                 open=close - 0.01,
                 high=close + 0.08,
                 low=close - 0.08,
+                close=close,
+                volume=1000 + index,
+            )
+        )
+    return result
+
+
+def _closed_trade_candles() -> list[BrokerCandle]:
+    rng = random.Random(1)
+    displacement = 0.0
+    result: list[BrokerCandle] = []
+    for index in range(390):
+        displacement = 0.75 * displacement + rng.gauss(0.0, 0.18)
+        close = 100.0 + displacement
+        open_price = close + rng.gauss(0.0, 0.015)
+        result.append(
+            BrokerCandle(
+                timestamp=_SESSION_OPEN + timedelta(minutes=index),
+                open=open_price,
+                high=max(open_price, close) + 0.05,
+                low=min(open_price, close) - 0.05,
                 close=close,
                 volume=1000 + index,
             )
@@ -142,6 +167,64 @@ class TestStrategyV2ShadowService:
             ))
             db.commit()
         return config
+
+    def _collect_complete_session(
+        self,
+        db: Session,
+    ) -> tuple[StrategyV2ShadowService, str]:
+        config = self._enabled_config(
+            db,
+            activated_at=_SESSION_OPEN - timedelta(days=1),
+        )
+        service = StrategyV2ShadowService(db, _FakeCandles(_candles(390)))
+        service.tick(
+            "AAPL.US",
+            "US",
+            now=_SESSION_OPEN + timedelta(minutes=390, seconds=10),
+        )
+        version = service._config_version(config)
+        service._ensure_version_snapshot(config)
+        return service, version
+
+    def _collect_complete_trade_session(
+        self,
+        db: Session,
+    ) -> tuple[StrategyV2ShadowService, str]:
+        config = StrategyV2ShadowConfig(
+            symbol="AAPL.US",
+            enabled=True,
+            zscore_window_1m_bars=10,
+            zscore_window_5m_bars=5,
+            breach_zscore=-0.5,
+            reclaim_zscore=-0.1,
+            five_minute_zscore_max=0.0,
+            adx_period=5,
+            max_adx=40.0,
+            realized_vol_window_bars=10,
+            min_realized_vol=0.0,
+            max_realized_vol=3.0,
+            profit_target_pct=0.05,
+            updated_at=_SESSION_OPEN - timedelta(days=1),
+        )
+        db.add(config)
+        db.commit()
+        service = StrategyV2ShadowService(
+            db,
+            _FakeCandles(_closed_trade_candles()),
+        )
+        version = service._config_version(config)
+        db.add(StrategyV2ShadowState(
+            symbol=config.symbol,
+            config_version=version,
+            state_json="{}",
+        ))
+        service._ensure_version_snapshot(config)
+        service.tick(
+            "AAPL.US",
+            "US",
+            now=_SESSION_OPEN + timedelta(minutes=390, seconds=10),
+        )
+        return service, version
 
     def test_default_config_is_disabled_and_hard_shadow_only(self) -> None:
         with self._db() as db:
@@ -1538,3 +1621,318 @@ class TestStrategyV2ShadowService:
             assert evidence[0].bars == 390
             assert evidence[0].incomplete_feature_bars == 0
             assert evidence[0].complete_session is True
+
+    def test_adx_challengers_replay_same_complete_evidence_without_writes(
+        self,
+    ) -> None:
+        with self._db() as db:
+            service, version = self._collect_complete_session(db)
+            state = db.query(StrategyV2ShadowState).filter_by(symbol="AAPL.US").one()
+            before_state = (
+                state.config_version,
+                state.phase,
+                state.last_bar_at,
+                state.state_json,
+            )
+            before_counts = tuple(
+                db.query(model).count()
+                for model in (
+                    StrategyV2ShadowConfig,
+                    StrategyV2ShadowVersion,
+                    StrategyV2ShadowState,
+                    StrategyV2ShadowDecision,
+                    StrategyV2ShadowTrade,
+                )
+            )
+            expected_eligible = len({
+                row.bar_at
+                for row in db.query(StrategyV2ShadowDecision).filter_by(
+                    symbol="AAPL.US",
+                    config_version=version,
+                    gate_passed=True,
+                )
+            })
+
+            response = service.compare_adx_challengers(
+                StrategyV2AdxChallengerRequest(
+                    symbol="AAPL.US",
+                    config_version=version,
+                )
+            )
+
+            db.refresh(state)
+            after_counts = tuple(
+                db.query(model).count()
+                for model in (
+                    StrategyV2ShadowConfig,
+                    StrategyV2ShadowVersion,
+                    StrategyV2ShadowState,
+                    StrategyV2ShadowDecision,
+                    StrategyV2ShadowTrade,
+                )
+            )
+            assert response.status == "INSUFFICIENT_EVIDENCE"
+            assert response.observed_complete_sessions == 1
+            assert response.evaluated_complete_sessions == 1
+            assert response.baseline_replay_match is True
+            assert response.blockers == ["MIN_COMPLETE_SESSIONS"]
+            assert [item.max_adx for item in response.candidates] == [20.0, 25.0, 30.0]
+            assert response.candidates[0].label == "BASELINE"
+            assert response.candidates[0].config_version == version
+            assert response.candidates[0].metrics.bars == 390
+            assert response.candidates[0].metrics.eligible_bars == expected_eligible
+            assert len(response.candidates[0].daily) == 1
+            assert response.candidates[0].daily[0].bars == 390
+            assert after_counts == before_counts
+            assert (
+                state.config_version,
+                state.phase,
+                state.last_bar_at,
+                state.state_json,
+            ) == before_state
+
+    def test_replay_metrics_count_unique_gate_eligible_bars(self) -> None:
+        metrics = StrategyV2ShadowService._metrics_from_replay(
+            [
+                {"timestamp": "2026-07-10T13:30:00+00:00", "gate_passed": True},
+                {"timestamp": "2026-07-10T13:30:00+00:00", "gate_passed": True},
+                {"timestamp": "2026-07-10T13:31:00+00:00", "gate_passed": False},
+            ],
+            [],
+        )
+
+        assert metrics.bars == 2
+        assert metrics.eligible_bars == 1
+
+    def test_domain_config_preserves_frozen_execution_parameters(self) -> None:
+        with self._db() as db:
+            row = StrategyV2ShadowConfig(
+                symbol="AAPL.US",
+                max_holding_minutes=37,
+                entry_cutoff_minutes_before_close=52,
+                flatten_minutes_before_close=21,
+                max_entries_per_day=1,
+                entry_cooldown_minutes=23,
+            )
+            db.add(row)
+            db.flush()
+
+            config = StrategyV2ShadowService._domain_config(row, "US")
+
+        assert config.max_holding_minutes == 37
+        assert config.entry_cutoff_minutes_before_close == 52
+        assert config.flatten_minutes_before_close == 21
+        assert config.max_entries_per_session == 1
+        assert config.entry_cooldown_minutes == 23
+
+    def test_adx_challenger_baseline_matches_a_complete_closed_trade(self) -> None:
+        with self._db() as db:
+            service, version = self._collect_complete_trade_session(db)
+            persisted_trade = db.query(StrategyV2ShadowTrade).filter_by(
+                symbol="AAPL.US",
+                config_version=version,
+                status="CLOSED",
+            ).one()
+
+            response = service.compare_adx_challengers(
+                StrategyV2AdxChallengerRequest(symbol="AAPL.US")
+            )
+
+            assert response.baseline_replay_match is True
+            assert response.candidates[0].metrics.closed_trades == 1
+            assert response.candidates[0].metrics.net_pnl == pytest.approx(
+                persisted_trade.net_pnl
+            )
+
+    def test_adx_challengers_block_mutated_raw_feature_evidence(self) -> None:
+        with self._db() as db:
+            service, version = self._collect_complete_session(db)
+            row = db.query(StrategyV2ShadowDecision).filter_by(
+                symbol="AAPL.US",
+                config_version=version,
+            ).order_by(StrategyV2ShadowDecision.bar_at.asc()).first()
+            assert row is not None
+            evidence = json.loads(row.features_json)
+            evidence["bar"]["high"] = float(evidence["bar"]["high"]) + 0.01
+            row.features_json = json.dumps(evidence, default=str, sort_keys=True)
+            db.commit()
+
+            response = service.compare_adx_challengers(
+                StrategyV2AdxChallengerRequest(symbol="AAPL.US")
+            )
+
+            assert response.status == "BLOCKED"
+            assert response.baseline_replay_match is False
+            assert "BASELINE_REPLAY_MISMATCH" in response.blockers
+
+    def test_adx_challengers_tolerate_derived_float_roundoff(self) -> None:
+        with self._db() as db:
+            service, version = self._collect_complete_session(db)
+            rows = db.query(StrategyV2ShadowDecision).filter_by(
+                symbol="AAPL.US",
+                config_version=version,
+            ).order_by(StrategyV2ShadowDecision.bar_at.asc()).all()
+            row = next(
+                item
+                for item in rows
+                if json.loads(item.features_json).get("adx_5m") is not None
+            )
+            evidence = json.loads(row.features_json)
+            evidence["adx_5m"] = float(evidence["adx_5m"]) + 1e-12
+            row.features_json = json.dumps(evidence, default=str, sort_keys=True)
+            db.commit()
+
+            response = service.compare_adx_challengers(
+                StrategyV2AdxChallengerRequest(symbol="AAPL.US")
+            )
+
+            assert response.baseline_replay_match is True
+
+    def test_adx_challengers_block_broken_trade_linkage(self) -> None:
+        with self._db() as db:
+            service, version = self._collect_complete_trade_session(db)
+            trade = db.query(StrategyV2ShadowTrade).filter_by(
+                symbol="AAPL.US",
+                config_version=version,
+                status="CLOSED",
+            ).one()
+            trade.entry_decision_id = None
+            db.commit()
+
+            response = service.compare_adx_challengers(
+                StrategyV2AdxChallengerRequest(symbol="AAPL.US")
+            )
+
+            assert response.status == "BLOCKED"
+            assert response.baseline_replay_match is False
+
+    def test_adx_challengers_compare_persisted_trade_quantity(self) -> None:
+        with self._db() as db:
+            service, version = self._collect_complete_trade_session(db)
+            trade = db.query(StrategyV2ShadowTrade).filter_by(
+                symbol="AAPL.US",
+                config_version=version,
+                status="CLOSED",
+            ).one()
+            trade.quantity += 1
+            db.commit()
+
+            response = service.compare_adx_challengers(
+                StrategyV2AdxChallengerRequest(symbol="AAPL.US")
+            )
+
+            assert response.status == "BLOCKED"
+            assert response.baseline_replay_match is False
+
+    def test_adx_challengers_require_global_trade_linkage_uniqueness(self) -> None:
+        with self._db() as db:
+            service, version = self._collect_complete_trade_session(db)
+            trade = db.query(StrategyV2ShadowTrade).filter_by(
+                symbol="AAPL.US",
+                config_version=version,
+                status="CLOSED",
+            ).one()
+            assert trade.exit_at is not None
+            db.add(StrategyV2ShadowTrade(
+                symbol=trade.symbol,
+                config_version=trade.config_version,
+                entry_decision_id=trade.entry_decision_id,
+                exit_decision_id=trade.exit_decision_id,
+                status="CLOSED",
+                entry_at=trade.entry_at + timedelta(days=90),
+                exit_at=trade.exit_at + timedelta(days=90),
+                entry_price=trade.entry_price,
+                exit_price=trade.exit_price,
+                quantity=trade.quantity,
+                entry_reason=trade.entry_reason,
+                exit_reason=trade.exit_reason,
+            ))
+            db.commit()
+
+            response = service.compare_adx_challengers(
+                StrategyV2AdxChallengerRequest(symbol="AAPL.US")
+            )
+
+            assert response.status == "BLOCKED"
+            assert response.baseline_replay_match is False
+
+    def test_adx_challengers_block_unsupported_version_without_evidence(self) -> None:
+        with self._db() as db:
+            legacy_version = "a" * 64
+            db.add(StrategyV2ShadowConfig(symbol="AAPL.US"))
+            db.add(StrategyV2ShadowVersion(
+                symbol="AAPL.US",
+                config_version=legacy_version,
+                config_json=json.dumps({"algorithm_version": "legacy"}),
+                activated_at=_SESSION_OPEN,
+            ))
+            db.commit()
+
+            response = StrategyV2ShadowService(db).compare_adx_challengers(
+                StrategyV2AdxChallengerRequest(
+                    symbol="AAPL.US",
+                    config_version=legacy_version,
+                )
+            )
+
+            assert response.status == "BLOCKED"
+            assert response.observed_complete_sessions == 0
+            assert "ALGORITHM_VERSION_UNSUPPORTED" in response.blockers
+
+    def test_adx_challengers_block_when_baseline_replay_does_not_match(self) -> None:
+        with self._db() as db:
+            service, version = self._collect_complete_session(db)
+            row = db.query(StrategyV2ShadowDecision).filter_by(
+                symbol="AAPL.US",
+                config_version=version,
+            ).order_by(StrategyV2ShadowDecision.bar_at.asc()).first()
+            assert row is not None
+            row.reason = "PERSISTED_DECISION_DRIFT"
+            db.commit()
+
+            response = service.compare_adx_challengers(
+                StrategyV2AdxChallengerRequest(symbol="AAPL.US")
+            )
+
+            assert response.status == "BLOCKED"
+            assert response.baseline_replay_match is False
+            assert "BASELINE_REPLAY_MISMATCH" in response.blockers
+            assert len(response.candidates) == 1
+            assert response.candidates[0].label == "BASELINE"
+
+    def test_adx_challengers_become_reviewable_at_complete_session_gate(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            "app.services.strategy_v2_shadow_service."
+            "_MIN_CHALLENGER_COMPLETE_SESSIONS",
+            1,
+        )
+        with self._db() as db:
+            service, _version = self._collect_complete_session(db)
+
+            response = service.compare_adx_challengers(
+                StrategyV2AdxChallengerRequest(symbol="AAPL.US")
+            )
+
+            assert response.status == "READY_FOR_REVIEW"
+            assert response.minimum_complete_sessions == 1
+            assert response.blockers == []
+            assert response.baseline_replay_match is True
+
+    def test_adx_challengers_reject_corrupt_persisted_bar_evidence(self) -> None:
+        with self._db() as db:
+            service, version = self._collect_complete_session(db)
+            row = db.query(StrategyV2ShadowDecision).filter_by(
+                symbol="AAPL.US",
+                config_version=version,
+            ).order_by(StrategyV2ShadowDecision.bar_at.asc()).first()
+            assert row is not None
+            row.features_json = "{}"
+            db.commit()
+
+            with pytest.raises(ValueError, match="invalid persisted shadow feature evidence"):
+                service.compare_adx_challengers(
+                    StrategyV2AdxChallengerRequest(symbol="AAPL.US")
+                )

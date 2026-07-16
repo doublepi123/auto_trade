@@ -1366,7 +1366,7 @@ export interface StrategyShadowConfig {
   slippage_bps: number
   estimated_fee_rate_us: number
   estimated_fee_rate_hk: number
-  algorithm_version: 'strategy-v2-rth-mr-v3-evidence'
+  algorithm_version: 'strategy-v2-rth-mr-v4-frozen-config'
   mode: StrategyShadowMode
   order_submission_allowed: boolean
   allow_position_addons: boolean
@@ -1535,4 +1535,47 @@ export interface StrategyShadowEvaluation {
   data_quality_warnings: string[]
   quality: Record<string, unknown> | null
   daily: StrategyShadowDailyEvidence[]
+}
+
+export interface StrategyShadowAdxChallengerRequest {
+  symbol: string
+  config_version?: string
+}
+
+export interface StrategyShadowAdxChallengerDaily {
+  session_date: string
+  bars: number
+  eligible_bars: number
+  breaches: number
+  reclaims: number
+  closed_trades: number
+  net_pnl: number
+  max_drawdown: number
+  exit_reasons: Record<string, number>
+}
+
+export interface StrategyShadowAdxChallengerCandidate {
+  label: 'BASELINE' | 'CHALLENGER'
+  max_adx: number
+  config_version: string
+  metrics: StrategyShadowMetrics
+  daily: StrategyShadowAdxChallengerDaily[]
+}
+
+export interface StrategyShadowAdxChallengerResponse {
+  persisted: false
+  mode: StrategyShadowMode
+  order_submission_allowed: false
+  evaluation_scope: 'EXPLORATORY_IN_SAMPLE'
+  promotion_eligible: false
+  forward_validation_required: true
+  symbol: string
+  source_config_version: string
+  status: 'INSUFFICIENT_EVIDENCE' | 'READY_FOR_REVIEW' | 'BLOCKED'
+  minimum_complete_sessions: number
+  observed_complete_sessions: number
+  evaluated_complete_sessions: number
+  baseline_replay_match: boolean | null
+  blockers: string[]
+  candidates: StrategyShadowAdxChallengerCandidate[]
 }

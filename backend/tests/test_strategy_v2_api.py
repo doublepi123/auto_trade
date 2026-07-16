@@ -124,7 +124,7 @@ class TestStrategyV2ShadowApi:
         body = response.json()
         assert body["enabled"] is True
         assert body["max_adx"] == 19.5
-        assert body["algorithm_version"] == "strategy-v2-rth-mr-v3-evidence"
+        assert body["algorithm_version"] == "strategy-v2-rth-mr-v4-frozen-config"
         assert body["estimated_fee_rate_us"] == 0.0005
         assert body["mode"] == "SHADOW"
         assert body["order_submission_allowed"] is False
@@ -371,7 +371,59 @@ class TestStrategyV2ShadowApi:
         assert response.status_code == 200
         assert response.json()["persisted"] is False
         with self.session_factory() as db:
-            assert self._shadow_counts(db) == before == (0, 0, 0, 0)
+            assert self._shadow_counts(db) == before == (0, 0, 0, 0, 0)
+
+    def test_adx_challenger_api_is_read_only_and_reports_missing_evidence(self) -> None:
+        with self.session_factory() as db:
+            empty_before = self._shadow_counts(db)
+        missing_config = self.client.post(
+            "/api/strategy-shadow/adx-challengers",
+            json={"symbol": "AAPL.US"},
+        )
+        assert missing_config.status_code == 400
+        with self.session_factory() as db:
+            assert self._shadow_counts(db) == empty_before == (0, 0, 0, 0, 0)
+
+        config = self.client.get(
+            "/api/strategy-shadow/config",
+            params={"symbol": "AAPL.US"},
+        ).json()
+        with self.session_factory() as db:
+            before = self._shadow_counts(db)
+
+        response = self.client.post(
+            "/api/strategy-shadow/adx-challengers",
+            json={
+                "symbol": "AAPL.US",
+                "config_version": config["config_version"],
+            },
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["persisted"] is False
+        assert body["mode"] == "SHADOW"
+        assert body["order_submission_allowed"] is False
+        assert body["evaluation_scope"] == "EXPLORATORY_IN_SAMPLE"
+        assert body["promotion_eligible"] is False
+        assert body["forward_validation_required"] is True
+        assert body["status"] == "INSUFFICIENT_EVIDENCE"
+        assert body["minimum_complete_sessions"] == 5
+        assert body["observed_complete_sessions"] == 0
+        assert body["baseline_replay_match"] is None
+        assert body["blockers"] == ["MIN_COMPLETE_SESSIONS"]
+        assert body["candidates"] == []
+        with self.session_factory() as db:
+            assert self._shadow_counts(db) == before
+
+        missing = self.client.post(
+            "/api/strategy-shadow/adx-challengers",
+            json={
+                "symbol": "AAPL.US",
+                "config_version": "0" * 64,
+            },
+        )
+        assert missing.status_code == 400
 
     def test_versions_and_evaluation_preserve_old_config_evidence(self) -> None:
         original = self.client.get("/api/strategy-shadow/config").json()
@@ -693,9 +745,10 @@ class TestStrategyV2ShadowApi:
         assert "DATA_TRADE_SESSION_INCOMPLETE" in excluded_loss["readiness_blockers"]
 
     @staticmethod
-    def _shadow_counts(db: Session) -> tuple[int, int, int, int]:
+    def _shadow_counts(db: Session) -> tuple[int, int, int, int, int]:
         return (
             db.query(StrategyV2ShadowConfig).count(),
+            db.query(StrategyV2ShadowVersion).count(),
             db.query(StrategyV2ShadowState).count(),
             db.query(StrategyV2ShadowDecision).count(),
             db.query(StrategyV2ShadowTrade).count(),

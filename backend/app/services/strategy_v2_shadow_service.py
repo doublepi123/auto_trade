@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from collections import Counter
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Any, Protocol
+from typing import Any, Protocol, Sequence
 
+from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -39,6 +41,10 @@ from app.models import (
     StrategyV2ShadowVersion,
 )
 from app.schemas import (
+    StrategyV2AdxChallengerDaily,
+    StrategyV2AdxChallengerRequest,
+    StrategyV2AdxChallengerResponse,
+    StrategyV2AdxChallengerResult,
     StrategyV2ShadowConfigResponse,
     StrategyV2ShadowConfigUpdate,
     StrategyV2ShadowConfigValues,
@@ -48,6 +54,7 @@ from app.schemas import (
     StrategyV2ShadowEvaluationResponse,
     StrategyV2ShadowLatestResponse,
     StrategyV2ShadowMetrics,
+    StrategyV2ReplayBar,
     StrategyV2ShadowReplayRequest,
     StrategyV2ShadowReplayResponse,
     StrategyV2ShadowStatusResponse,
@@ -86,7 +93,7 @@ _CONFIG_FIELDS = (
     "estimated_fee_rate_us",
     "estimated_fee_rate_hk",
 )
-_ALGORITHM_VERSION = "strategy-v2-rth-mr-v3-evidence"
+_ALGORITHM_VERSION = "strategy-v2-rth-mr-v4-frozen-config"
 _VALID_ACTIONS = frozenset(action.value for action in StrategyV2Action)
 _SHADOW_SYMBOL_RE = re.compile(r"^[A-Z0-9\-]{1,12}\.(US|HK)$")
 _MIN_POLL_SECONDS = 45.0
@@ -95,6 +102,18 @@ _POST_CLOSE_COLLECTION_MINUTES = 15
 _MIN_REVIEW_TRADING_DAYS = 20
 _MIN_REVIEW_CLOSED_TRADES = 50
 _MIN_COMPLETE_SESSION_COVERAGE = 0.995
+_ADX_CHALLENGER_VALUES = (20.0, 25.0, 30.0)
+_MIN_CHALLENGER_COMPLETE_SESSIONS = 5
+_MAX_CHALLENGER_COMPLETE_SESSIONS = 20
+
+
+@dataclass(frozen=True)
+class _DecisionEvidenceRow:
+    session_date: date
+    market: str
+    bar_at: datetime
+    gate_passed: bool
+    gate_reasons_json: str
 
 
 class StrategyV2ShadowService:
@@ -574,6 +593,177 @@ class StrategyV2ShadowService:
             raise ValueError("historical candle provider returned a non-list response")
         return historical or recent
 
+    def compare_adx_challengers(
+        self,
+        payload: StrategyV2AdxChallengerRequest,
+    ) -> StrategyV2AdxChallengerResponse:
+        """Replay fixed ADX gates over the same complete persisted sessions."""
+        symbol = self._resolve_symbol(payload.symbol)
+        config_version = self._resolve_existing_config_version(
+            symbol,
+            payload.config_version,
+        )
+        complete_dates = self._complete_session_dates(symbol, config_version)
+        selected_dates = complete_dates[-_MAX_CHALLENGER_COMPLETE_SESSIONS:]
+        blockers: list[str] = []
+        if len(complete_dates) < _MIN_CHALLENGER_COMPLETE_SESSIONS:
+            blockers.append("MIN_COMPLETE_SESSIONS")
+        params = self._version_params(symbol, config_version)
+        if params.get("algorithm_version") != _ALGORITHM_VERSION:
+            return StrategyV2AdxChallengerResponse(
+                symbol=symbol,
+                source_config_version=config_version,
+                status="BLOCKED",
+                minimum_complete_sessions=_MIN_CHALLENGER_COMPLETE_SESSIONS,
+                observed_complete_sessions=len(complete_dates),
+                evaluated_complete_sessions=len(selected_dates),
+                blockers=[*blockers, "ALGORITHM_VERSION_UNSUPPORTED"],
+            )
+        try:
+            source_config = self._challenger_config(
+                symbol=symbol,
+                params=params,
+                max_adx=float(params["max_adx"]),
+            )
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return StrategyV2AdxChallengerResponse(
+                symbol=symbol,
+                source_config_version=config_version,
+                status="BLOCKED",
+                minimum_complete_sessions=_MIN_CHALLENGER_COMPLETE_SESSIONS,
+                observed_complete_sessions=len(complete_dates),
+                evaluated_complete_sessions=len(selected_dates),
+                blockers=[*blockers, "CONFIG_SNAPSHOT_INVALID"],
+            )
+        if self._config_version(source_config) != config_version:
+            return StrategyV2AdxChallengerResponse(
+                symbol=symbol,
+                source_config_version=config_version,
+                status="BLOCKED",
+                minimum_complete_sessions=_MIN_CHALLENGER_COMPLETE_SESSIONS,
+                observed_complete_sessions=len(complete_dates),
+                evaluated_complete_sessions=len(selected_dates),
+                blockers=[*blockers, "CONFIG_SNAPSHOT_VERSION_MISMATCH"],
+            )
+        if not selected_dates:
+            return StrategyV2AdxChallengerResponse(
+                symbol=symbol,
+                source_config_version=config_version,
+                status="INSUFFICIENT_EVIDENCE",
+                minimum_complete_sessions=_MIN_CHALLENGER_COMPLETE_SESSIONS,
+                observed_complete_sessions=0,
+                evaluated_complete_sessions=0,
+                blockers=blockers,
+            )
+
+        selected_set = set(selected_dates)
+        selected_decisions = self.db.query(StrategyV2ShadowDecision).filter(
+            StrategyV2ShadowDecision.symbol == symbol,
+            StrategyV2ShadowDecision.config_version == config_version,
+            StrategyV2ShadowDecision.session_date.in_(selected_dates),
+        ).order_by(
+            StrategyV2ShadowDecision.bar_at.asc(),
+            StrategyV2ShadowDecision.id.asc(),
+        ).execution_options(populate_existing=True).all()
+        trade_window_start = datetime.combine(
+            min(selected_dates) - timedelta(days=1),
+            datetime.min.time(),
+            tzinfo=timezone.utc,
+        )
+        trade_window_end = datetime.combine(
+            max(selected_dates) + timedelta(days=2),
+            datetime.min.time(),
+            tzinfo=timezone.utc,
+        )
+        trades = self.db.query(StrategyV2ShadowTrade).filter(
+            StrategyV2ShadowTrade.symbol == symbol,
+            StrategyV2ShadowTrade.config_version == config_version,
+            StrategyV2ShadowTrade.status == "CLOSED",
+            StrategyV2ShadowTrade.exit_at >= trade_window_start,
+            StrategyV2ShadowTrade.exit_at < trade_window_end,
+        ).order_by(StrategyV2ShadowTrade.entry_at.asc()).all()
+        market = "HK" if symbol.endswith(".HK") else "US"
+        if any(item.market.upper() != market for item in selected_decisions):
+            raise ValueError("persisted challenger evidence mixes markets")
+        bars = self._bars_from_persisted_evidence(
+            selected_decisions,
+            symbol=symbol,
+        )
+        replay_payload = StrategyV2ShadowReplayRequest(
+            symbol=symbol,
+            market=market,
+            bars=bars,
+        )
+
+        baseline_max_adx = float(source_config.max_adx)
+        candidate_values = [
+            baseline_max_adx,
+            *(
+                value
+                for value in _ADX_CHALLENGER_VALUES
+                if not math.isclose(value, baseline_max_adx, abs_tol=1e-12)
+            ),
+        ]
+        results: list[StrategyV2AdxChallengerResult] = []
+        baseline_replay: StrategyV2ShadowReplayResponse | None = None
+        for index, max_adx in enumerate(candidate_values):
+            candidate_config = self._challenger_config(
+                symbol=symbol,
+                params=params,
+                max_adx=max_adx,
+            )
+            replay = self._replay_payload(
+                replay_payload,
+                candidate_config,
+                include_feature_evidence=index == 0,
+            )
+            if index == 0:
+                baseline_replay = replay
+            results.append(StrategyV2AdxChallengerResult(
+                label="BASELINE" if index == 0 else "CHALLENGER",
+                max_adx=max_adx,
+                config_version=replay.config_version,
+                metrics=replay.metrics,
+                daily=self._challenger_daily(replay, market, selected_dates),
+            ))
+
+        if baseline_replay is None:
+            raise RuntimeError("ADX challenger baseline replay was not produced")
+        baseline_match = self._baseline_replay_matches(
+            decisions=selected_decisions,
+            trades=trades,
+            replay=baseline_replay,
+            market=market,
+            session_dates=selected_set,
+        )
+        if not baseline_match:
+            return StrategyV2AdxChallengerResponse(
+                symbol=symbol,
+                source_config_version=config_version,
+                status="BLOCKED",
+                minimum_complete_sessions=_MIN_CHALLENGER_COMPLETE_SESSIONS,
+                observed_complete_sessions=len(complete_dates),
+                evaluated_complete_sessions=len(selected_dates),
+                baseline_replay_match=False,
+                blockers=[*blockers, "BASELINE_REPLAY_MISMATCH"],
+                candidates=results[:1],
+            )
+        return StrategyV2AdxChallengerResponse(
+            symbol=symbol,
+            source_config_version=config_version,
+            status=(
+                "READY_FOR_REVIEW"
+                if len(complete_dates) >= _MIN_CHALLENGER_COMPLETE_SESSIONS
+                else "INSUFFICIENT_EVIDENCE"
+            ),
+            minimum_complete_sessions=_MIN_CHALLENGER_COMPLETE_SESSIONS,
+            observed_complete_sessions=len(complete_dates),
+            evaluated_complete_sessions=len(selected_dates),
+            baseline_replay_match=True,
+            blockers=blockers,
+            candidates=results,
+        )
+
     def replay(self, payload: StrategyV2ShadowReplayRequest) -> StrategyV2ShadowReplayResponse:
         """Evaluate supplied bars without mutating any persistent shadow state."""
         config = self.db.query(StrategyV2ShadowConfig).filter(
@@ -938,6 +1128,8 @@ class StrategyV2ShadowService:
         self,
         payload: StrategyV2ShadowReplayRequest,
         config: StrategyV2ShadowConfig,
+        *,
+        include_feature_evidence: bool = False,
     ) -> StrategyV2ShadowReplayResponse:
         engine = StrategyV2Engine(self._domain_config(config, payload.market))
         bars = [
@@ -965,7 +1157,13 @@ class StrategyV2ShadowService:
             if feature is None:
                 continue
             before_step = engine.snapshot()
+            gate_reasons = engine.entry_gate_reasons(feature)
             step = engine.on_feature(feature)
+            feature_evidence = (
+                json.loads(json.dumps(asdict(feature), default=str, sort_keys=True))
+                if include_feature_evidence
+                else None
+            )
             for decision in step.decisions:
                 item = {
                     "timestamp": decision.timestamp.isoformat(),
@@ -979,7 +1177,10 @@ class StrategyV2ShadowService:
                     "zscore_5m": feature.zscore_5m,
                     "adx": feature.adx_5m,
                     "realized_vol": feature.realized_vol_1m,
+                    "gate_passed": not gate_reasons,
                 }
+                if feature_evidence is not None:
+                    item["_feature_evidence"] = feature_evidence
                 decisions.append(item)
                 if decision.action == StrategyV2Action.FILL_ENTRY and decision.price is not None:
                     entry_price = decision.price
@@ -998,6 +1199,7 @@ class StrategyV2ShadowService:
                     )
                     open_trade = {
                         "entry_at": decision.timestamp,
+                        "entry_reason": decision.reason,
                         "entry_price": entry_price,
                         "quantity": decision.quantity,
                         "entry_fee": entry_fee,
@@ -1029,6 +1231,7 @@ class StrategyV2ShadowService:
                         trades.append(
                             {
                                 "entry_at": open_trade["entry_at"].isoformat(),
+                                "entry_reason": open_trade["entry_reason"],
                                 "exit_at": decision.timestamp.isoformat(),
                                 "entry_price": entry_price,
                                 "exit_price": exit_price,
@@ -1088,11 +1291,11 @@ class StrategyV2ShadowService:
             arm_ttl_bars=row.arm_ttl_bars,
             stop_loss_pct=row.stop_loss_pct,
             profit_target_pct=row.profit_target_pct,
-            max_holding_minutes=60,
-            entry_cutoff_minutes_before_close=45,
-            flatten_minutes_before_close=15,
-            max_entries_per_session=2,
-            entry_cooldown_minutes=15,
+            max_holding_minutes=row.max_holding_minutes,
+            entry_cutoff_minutes_before_close=row.entry_cutoff_minutes_before_close,
+            flatten_minutes_before_close=row.flatten_minutes_before_close,
+            max_entries_per_session=row.max_entries_per_day,
+            entry_cooldown_minutes=row.entry_cooldown_minutes,
             virtual_quantity=1.0,
             slippage_bps=row.slippage_bps,
             settlement_grace_seconds=5,
@@ -1394,6 +1597,11 @@ class StrategyV2ShadowService:
             max_drawdown = max(max_drawdown, peak - cumulative)
         return StrategyV2ShadowMetrics(
             bars=len({str(item.get("timestamp", "")) for item in decisions}),
+            eligible_bars=len({
+                str(item.get("timestamp", ""))
+                for item in decisions
+                if bool(item.get("gate_passed", False))
+            }),
             breaches=actions.count(StrategyV2Action.ARM_LONG.value),
             reclaims=actions.count(StrategyV2Action.SUBMIT_ENTRY.value),
             entries=actions.count(StrategyV2Action.FILL_ENTRY.value),
@@ -1420,6 +1628,369 @@ class StrategyV2ShadowService:
                 else 0.0
             ),
         )
+
+    @staticmethod
+    def _challenger_config(
+        *,
+        symbol: str,
+        params: dict[str, Any],
+        max_adx: float,
+    ) -> StrategyV2ShadowConfig:
+        values = dict(params)
+        values.update({
+            "enabled": False,
+            "symbol": symbol,
+            "max_adx": max_adx,
+        })
+        validated = StrategyV2ShadowConfigValues.model_validate(values)
+        return StrategyV2ShadowConfig(
+            **{
+                field: getattr(validated, field)
+                for field in _CONFIG_FIELDS
+            },
+            updated_at=datetime.now(timezone.utc),
+        )
+
+    @staticmethod
+    def _bars_from_persisted_evidence(
+        decisions: list[StrategyV2ShadowDecision],
+        *,
+        symbol: str,
+    ) -> list[StrategyV2ReplayBar]:
+        by_timestamp: dict[datetime, StrategyBar] = {}
+        expected_timestamps: set[datetime] = set()
+        for row in decisions:
+            row_timestamp = _as_utc(row.bar_at).replace(second=0, microsecond=0)
+            expected_timestamps.add(row_timestamp)
+            try:
+                decoded = json.loads(row.features_json)
+                raw_bar = decoded["bar"]
+                if not isinstance(decoded, dict) or not isinstance(raw_bar, dict):
+                    raise TypeError("feature payload is not an object")
+                bar = StrategyBar(
+                    timestamp=datetime.fromisoformat(str(raw_bar["timestamp"])),
+                    open=float(raw_bar["open"]),
+                    high=float(raw_bar["high"]),
+                    low=float(raw_bar["low"]),
+                    close=float(raw_bar["close"]),
+                    volume=float(raw_bar["volume"]),
+                    symbol=str(raw_bar["symbol"]),
+                    duration_minutes=int(raw_bar["duration_minutes"]),
+                )
+            except (
+                KeyError,
+                TypeError,
+                ValueError,
+                json.JSONDecodeError,
+                OverflowError,
+            ) as exc:
+                raise ValueError(
+                    f"invalid persisted shadow feature evidence at decision {row.id}"
+                ) from exc
+            if (
+                bar.duration_minutes != 1
+                or bar.symbol.strip().upper() != symbol
+                or bar.timestamp != row_timestamp
+                or not math.isclose(
+                    bar.close,
+                    float(row.close_price),
+                    rel_tol=0.0,
+                    abs_tol=1e-9,
+                )
+            ):
+                raise ValueError(
+                    f"persisted shadow feature evidence conflicts at decision {row.id}"
+                )
+            previous = by_timestamp.get(bar.timestamp)
+            if previous is not None and previous != bar:
+                raise ValueError(
+                    f"conflicting persisted shadow bars at {bar.timestamp.isoformat()}"
+                )
+            by_timestamp[bar.timestamp] = bar
+        if set(by_timestamp) != expected_timestamps:
+            raise ValueError("persisted shadow feature evidence is incomplete")
+        return [
+            StrategyV2ReplayBar(
+                timestamp=bar.timestamp,
+                open=bar.open,
+                high=bar.high,
+                low=bar.low,
+                close=bar.close,
+                volume=bar.volume,
+            )
+            for bar in (by_timestamp[key] for key in sorted(by_timestamp))
+        ]
+
+    @classmethod
+    def _challenger_daily(
+        cls,
+        replay: StrategyV2ShadowReplayResponse,
+        market: str,
+        session_dates: list[date],
+    ) -> list[StrategyV2AdxChallengerDaily]:
+        session = get_session(market)
+        decisions_by_day: dict[date, list[dict[str, Any]]] = {
+            item: [] for item in session_dates
+        }
+        trades_by_day: dict[date, list[dict[str, Any]]] = {
+            item: [] for item in session_dates
+        }
+        for item in replay.decisions:
+            timestamp = _as_utc(datetime.fromisoformat(str(item["timestamp"])))
+            session_day = session.trade_day(timestamp)
+            if session_day in decisions_by_day:
+                decisions_by_day[session_day].append(item)
+        for item in replay.trades:
+            timestamp = _as_utc(datetime.fromisoformat(str(item["exit_at"])))
+            session_day = session.trade_day(timestamp)
+            if session_day in trades_by_day:
+                trades_by_day[session_day].append(item)
+        result: list[StrategyV2AdxChallengerDaily] = []
+        for session_day in session_dates:
+            day_decisions = decisions_by_day[session_day]
+            day_trades = trades_by_day[session_day]
+            metrics = cls._metrics_from_replay(day_decisions, day_trades)
+            exits = Counter(str(item.get("exit_reason") or "UNKNOWN") for item in day_trades)
+            result.append(StrategyV2AdxChallengerDaily(
+                session_date=session_day,
+                bars=metrics.bars,
+                eligible_bars=metrics.eligible_bars,
+                breaches=metrics.breaches,
+                reclaims=metrics.reclaims,
+                closed_trades=metrics.closed_trades,
+                net_pnl=metrics.net_pnl,
+                max_drawdown=metrics.max_drawdown,
+                exit_reasons=dict(sorted(exits.items())),
+            ))
+        return result
+
+    def _baseline_replay_matches(
+        self,
+        *,
+        decisions: list[StrategyV2ShadowDecision],
+        trades: list[StrategyV2ShadowTrade],
+        replay: StrategyV2ShadowReplayResponse,
+        market: str,
+        session_dates: set[date],
+    ) -> bool:
+        if len(decisions) != len(replay.decisions):
+            return False
+        for expected, actual in zip(decisions, replay.decisions):
+            try:
+                expected_features = json.loads(expected.features_json)
+                actual_at = _as_utc(
+                    datetime.fromisoformat(str(actual["timestamp"]))
+                ).isoformat()
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                return False
+            if (
+                not isinstance(expected_features, dict)
+                or not StrategyV2ShadowService._feature_evidence_matches(
+                    expected_features,
+                    actual.get("_feature_evidence"),
+                )
+                or _as_utc(expected.bar_at).isoformat() != actual_at
+                or expected.action != str(actual.get("action", ""))
+                or expected.reason != str(actual.get("reason", ""))
+                or expected.state_before != str(actual.get("state_before", ""))
+                or expected.state_after != str(actual.get("state_after", ""))
+                or bool(expected.gate_passed)
+                != bool(actual.get("gate_passed", False))
+                or not StrategyV2ShadowService._optional_numbers_match(
+                    expected.reference_price,
+                    actual.get("price"),
+                )
+                or not StrategyV2ShadowService._optional_numbers_match(
+                    expected.quantity,
+                    actual.get("quantity"),
+                )
+            ):
+                return False
+
+        session = get_session(market)
+        selected_trades = [
+            item
+            for item in trades
+            if item.exit_at is not None
+            and session.trade_day(_as_utc(item.exit_at)) in session_dates
+        ]
+        decisions_by_id = {item.id: item for item in decisions}
+        entry_ids = [
+            int(item.entry_decision_id)
+            for item in selected_trades
+            if item.entry_decision_id is not None
+        ]
+        exit_ids = [
+            int(item.exit_decision_id)
+            for item in selected_trades
+            if item.exit_decision_id is not None
+        ]
+        if (
+            len(entry_ids) != len(selected_trades)
+            or len(exit_ids) != len(selected_trades)
+        ):
+            return False
+        entry_linkage_counts = {
+            int(decision_id): int(count)
+            for decision_id, count in self.db.query(
+                StrategyV2ShadowTrade.entry_decision_id,
+                func.count(StrategyV2ShadowTrade.id),
+            ).filter(
+                StrategyV2ShadowTrade.symbol == decisions[0].symbol,
+                StrategyV2ShadowTrade.config_version == decisions[0].config_version,
+                StrategyV2ShadowTrade.entry_decision_id.in_(entry_ids),
+            ).group_by(StrategyV2ShadowTrade.entry_decision_id).all()
+        }
+        exit_linkage_counts = {
+            int(decision_id): int(count)
+            for decision_id, count in self.db.query(
+                StrategyV2ShadowTrade.exit_decision_id,
+                func.count(StrategyV2ShadowTrade.id),
+            ).filter(
+                StrategyV2ShadowTrade.symbol == decisions[0].symbol,
+                StrategyV2ShadowTrade.config_version == decisions[0].config_version,
+                StrategyV2ShadowTrade.exit_decision_id.in_(exit_ids),
+            ).group_by(StrategyV2ShadowTrade.exit_decision_id).all()
+        }
+        expected_trades: list[StrategyV2ShadowTrade] = []
+        for trade in selected_trades:
+            entry_id = trade.entry_decision_id
+            exit_id = trade.exit_decision_id
+            if (
+                entry_id is None
+                or exit_id is None
+                or entry_linkage_counts[entry_id] != 1
+                or exit_linkage_counts[exit_id] != 1
+                or StrategyV2ShadowService._trade_evidence_session_date(
+                    trade,
+                    decisions_by_id,
+                )
+                not in session_dates
+            ):
+                return False
+            expected_trades.append(trade)
+        if len(expected_trades) != len(replay.trades):
+            return False
+        for expected, actual in zip(expected_trades, replay.trades):
+            if expected.exit_at is None:
+                return False
+            try:
+                actual_entry_at = _as_utc(
+                    datetime.fromisoformat(str(actual["entry_at"]))
+                ).isoformat()
+                actual_exit_at = _as_utc(
+                    datetime.fromisoformat(str(actual["exit_at"]))
+                ).isoformat()
+            except (KeyError, TypeError, ValueError):
+                return False
+            if (
+                _as_utc(expected.entry_at).isoformat() != actual_entry_at
+                or _as_utc(expected.exit_at).isoformat() != actual_exit_at
+                or expected.entry_reason != str(actual.get("entry_reason", ""))
+                or expected.exit_reason != str(actual.get("exit_reason", ""))
+                or expected.fee_source != str(actual.get("fee_source", ""))
+                or not StrategyV2ShadowService._optional_datetimes_match(
+                    expected.holding_deadline,
+                    actual.get("holding_deadline"),
+                )
+            ):
+                return False
+            numeric_pairs = (
+                (expected.entry_price, actual.get("entry_price")),
+                (expected.exit_price, actual.get("exit_price")),
+                (expected.quantity, actual.get("quantity")),
+                (expected.stop_price, actual.get("stop_price")),
+                (expected.target_price, actual.get("target_price")),
+                (expected.signal_vwap, actual.get("signal_vwap")),
+                (expected.estimated_fee_rate, actual.get("estimated_fee_rate")),
+                (expected.gross_pnl, actual.get("gross_pnl")),
+                (expected.estimated_fees, actual.get("fees")),
+                (expected.net_pnl, actual.get("net_pnl")),
+                (
+                    (
+                        float(expected.holding_seconds) / 60
+                        if expected.holding_seconds is not None
+                        else None
+                    ),
+                    actual.get("holding_minutes"),
+                ),
+                (expected.mae_pct, actual.get("mae_pct")),
+                (expected.mfe_pct, actual.get("mfe_pct")),
+            )
+            if any(
+                not StrategyV2ShadowService._optional_numbers_match(left, right)
+                for left, right in numeric_pairs
+            ):
+                return False
+        return True
+
+    @staticmethod
+    def _feature_evidence_matches(
+        expected: Any,
+        actual: Any,
+        path: tuple[str, ...] = (),
+    ) -> bool:
+        if isinstance(expected, dict):
+            if not isinstance(actual, dict) or set(expected) != set(actual):
+                return False
+            return all(
+                StrategyV2ShadowService._feature_evidence_matches(
+                    value,
+                    actual[key],
+                    (*path, str(key)),
+                )
+                for key, value in expected.items()
+            )
+        if isinstance(expected, list):
+            return (
+                isinstance(actual, list)
+                and len(expected) == len(actual)
+                and all(
+                    StrategyV2ShadowService._feature_evidence_matches(
+                        left,
+                        right,
+                        (*path, str(index)),
+                    )
+                    for index, (left, right) in enumerate(zip(expected, actual))
+                )
+            )
+        if isinstance(expected, bool) or isinstance(actual, bool):
+            return type(expected) is type(actual) and expected == actual
+        if isinstance(expected, (int, float)) and isinstance(actual, (int, float)):
+            if path and path[0] == "bar":
+                return expected == actual
+            return math.isclose(
+                float(expected),
+                float(actual),
+                rel_tol=1e-9,
+                abs_tol=1e-12,
+            )
+        return type(expected) is type(actual) and expected == actual
+
+    @staticmethod
+    def _optional_numbers_match(left: Any, right: Any) -> bool:
+        if left is None or right is None:
+            return left is None and right is None
+        try:
+            return math.isclose(
+                float(left),
+                float(right),
+                rel_tol=1e-10,
+                abs_tol=1e-10,
+            )
+        except (TypeError, ValueError, OverflowError):
+            return False
+
+    @staticmethod
+    def _optional_datetimes_match(left: datetime | None, right: Any) -> bool:
+        if left is None or right is None:
+            return left is None and right is None
+        try:
+            return _as_utc(left).isoformat() == _as_utc(
+                datetime.fromisoformat(str(right))
+            ).isoformat()
+        except (TypeError, ValueError):
+            return False
 
     def _ensure_version_snapshot(
         self,
@@ -1487,6 +2058,38 @@ class StrategyV2ShadowService:
         ).first()
         if exists is None:
             raise ValueError("strategy v2 shadow config_version was not found for symbol")
+        return normalized
+
+    def _resolve_existing_config_version(
+        self,
+        symbol: str,
+        requested: str | None,
+    ) -> str:
+        """Resolve a snapshotted version without creating or backfilling rows."""
+        config = self.db.query(StrategyV2ShadowConfig).filter(
+            StrategyV2ShadowConfig.symbol == symbol
+        ).first()
+        if config is None:
+            raise ValueError("strategy v2 shadow config was not found for symbol")
+        if requested is None:
+            open_trade = self._open_trade(symbol)
+            normalized = (
+                open_trade.config_version
+                if open_trade is not None
+                else self._config_version(config)
+            )
+        else:
+            normalized = requested.strip().lower()
+            if not re.fullmatch(r"[0-9a-f]{64}", normalized):
+                raise ValueError("invalid strategy v2 shadow config_version")
+        exists = self.db.query(StrategyV2ShadowVersion.id).filter(
+            StrategyV2ShadowVersion.symbol == symbol,
+            StrategyV2ShadowVersion.config_version == normalized,
+        ).first()
+        if exists is None:
+            raise ValueError(
+                "strategy v2 shadow immutable config snapshot was not found for symbol"
+            )
         return normalized
 
     def _version_params(self, symbol: str, config_version: str) -> dict[str, Any]:
@@ -1696,7 +2299,7 @@ class StrategyV2ShadowService:
 
     @staticmethod
     def _stored_gate_reasons(
-        row: StrategyV2ShadowDecision,
+        row: StrategyV2ShadowDecision | _DecisionEvidenceRow,
     ) -> set[str] | None:
         try:
             decoded = json.loads(row.gate_reasons_json or "[]")
@@ -1705,6 +2308,51 @@ class StrategyV2ShadowService:
         if not isinstance(decoded, list):
             return None
         return {str(item) for item in decoded}
+
+    def _complete_session_dates(
+        self,
+        symbol: str,
+        config_version: str,
+    ) -> list[date]:
+        query = self.db.query(
+            StrategyV2ShadowDecision.session_date,
+            StrategyV2ShadowDecision.market,
+            StrategyV2ShadowDecision.bar_at,
+            StrategyV2ShadowDecision.gate_passed,
+            StrategyV2ShadowDecision.gate_reasons_json,
+        ).filter(
+            StrategyV2ShadowDecision.symbol == symbol,
+            StrategyV2ShadowDecision.config_version == config_version,
+        ).order_by(
+            StrategyV2ShadowDecision.session_date.asc(),
+            StrategyV2ShadowDecision.bar_at.asc(),
+            StrategyV2ShadowDecision.id.asc(),
+        ).execution_options(stream_results=True).yield_per(1000)
+        complete_dates: list[date] = []
+        day_rows: list[_DecisionEvidenceRow] = []
+
+        def finish_day() -> None:
+            if not day_rows:
+                return
+            daily = self._daily_evidence(day_rows, [])
+            if daily and daily[0].complete_session:
+                complete_dates.append(daily[0].session_date)
+
+        current_date: date | None = None
+        for session_date, market, bar_at, gate_passed, gate_reasons_json in query:
+            if current_date is not None and session_date != current_date:
+                finish_day()
+                day_rows = []
+            current_date = session_date
+            day_rows.append(_DecisionEvidenceRow(
+                session_date=session_date,
+                market=market,
+                bar_at=bar_at,
+                gate_passed=gate_passed,
+                gate_reasons_json=gate_reasons_json,
+            ))
+        finish_day()
+        return complete_dates
 
     @staticmethod
     def _trade_evidence_session_date(
@@ -1746,10 +2394,13 @@ class StrategyV2ShadowService:
 
     @staticmethod
     def _daily_evidence(
-        decisions: list[StrategyV2ShadowDecision],
-        trades: list[StrategyV2ShadowTrade],
+        decisions: Sequence[StrategyV2ShadowDecision | _DecisionEvidenceRow],
+        trades: Sequence[StrategyV2ShadowTrade],
     ) -> list[StrategyV2ShadowDailyEvidence]:
-        by_day: dict[Any, list[StrategyV2ShadowDecision]] = {}
+        by_day: dict[
+            Any,
+            list[StrategyV2ShadowDecision | _DecisionEvidenceRow],
+        ] = {}
         for row in decisions:
             by_day.setdefault(row.session_date, []).append(row)
         trades_by_day: dict[Any, list[StrategyV2ShadowTrade]] = {}

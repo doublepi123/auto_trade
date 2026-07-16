@@ -1,5 +1,7 @@
 import { api } from './client'
 import type {
+  StrategyShadowAdxChallengerRequest,
+  StrategyShadowAdxChallengerResponse,
   StrategyShadowConfig,
   StrategyShadowConfigUpdate,
   StrategyShadowDecisionPage,
@@ -7,6 +9,15 @@ import type {
   StrategyShadowEvaluation,
   StrategyShadowVersion,
 } from '../types'
+
+export async function evaluateStrategyShadowAdxChallengers(
+  payload: StrategyShadowAdxChallengerRequest,
+): Promise<StrategyShadowAdxChallengerResponse> {
+  const response = await api.post('/api/strategy-shadow/adx-challengers', payload, {
+    timeout: 120_000,
+  })
+  return response.data
+}
 
 export async function getStrategyShadowConfig(symbol?: string): Promise<StrategyShadowConfig> {
   const response = await api.get('/api/strategy-shadow/config', {

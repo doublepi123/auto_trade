@@ -294,8 +294,8 @@ class StrategyV2ShadowConfigValues(BaseModel):
         le=0.1,
         allow_inf_nan=False,
     )
-    algorithm_version: Literal["strategy-v2-rth-mr-v3-evidence"] = (
-        "strategy-v2-rth-mr-v3-evidence"
+    algorithm_version: Literal["strategy-v2-rth-mr-v4-frozen-config"] = (
+        "strategy-v2-rth-mr-v4-frozen-config"
     )
     mode: Literal["SHADOW"] = "SHADOW"
     order_submission_allowed: Literal[False] = False
@@ -531,6 +531,60 @@ class StrategyV2ShadowEvaluationResponse(BaseModel):
     data_quality_warnings: list[str] = Field(default_factory=list)
     quality: Optional[dict[str, Any]] = None
     daily: list[StrategyV2ShadowDailyEvidence] = Field(default_factory=list)
+
+
+class StrategyV2AdxChallengerRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    symbol: str
+    config_version: Optional[str] = Field(default=None, max_length=64)
+
+    @field_validator("symbol")
+    @classmethod
+    def validate_challenger_symbol(cls, value: str) -> str:
+        return _normalize_symbol(value)
+
+
+class StrategyV2AdxChallengerDaily(BaseModel):
+    session_date: date
+    bars: int = 0
+    eligible_bars: int = 0
+    breaches: int = 0
+    reclaims: int = 0
+    closed_trades: int = 0
+    net_pnl: float = 0.0
+    max_drawdown: float = 0.0
+    exit_reasons: dict[str, int] = Field(default_factory=dict)
+
+
+class StrategyV2AdxChallengerResult(BaseModel):
+    label: Literal["BASELINE", "CHALLENGER"]
+    max_adx: float
+    config_version: str
+    metrics: StrategyV2ShadowMetrics = Field(default_factory=StrategyV2ShadowMetrics)
+    daily: list[StrategyV2AdxChallengerDaily] = Field(default_factory=list)
+
+
+class StrategyV2AdxChallengerResponse(BaseModel):
+    persisted: Literal[False] = False
+    mode: Literal["SHADOW"] = "SHADOW"
+    order_submission_allowed: Literal[False] = False
+    evaluation_scope: Literal["EXPLORATORY_IN_SAMPLE"] = "EXPLORATORY_IN_SAMPLE"
+    promotion_eligible: Literal[False] = False
+    forward_validation_required: Literal[True] = True
+    symbol: str
+    source_config_version: str
+    status: Literal[
+        "INSUFFICIENT_EVIDENCE",
+        "READY_FOR_REVIEW",
+        "BLOCKED",
+    ]
+    minimum_complete_sessions: int = 5
+    observed_complete_sessions: int = 0
+    evaluated_complete_sessions: int = 0
+    baseline_replay_match: Optional[bool] = None
+    blockers: list[str] = Field(default_factory=list)
+    candidates: list[StrategyV2AdxChallengerResult] = Field(default_factory=list)
 
 
 class StrategyV2ReplayBar(BaseModel):
