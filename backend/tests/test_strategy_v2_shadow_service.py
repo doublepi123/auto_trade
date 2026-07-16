@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import math
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import create_engine
@@ -65,13 +65,17 @@ class _PagedFakeCandles(_FakeCandles):
         return list(self.historical)
 
 
-def _candles(count: int = 180) -> list[BrokerCandle]:
+def _candles(
+    count: int = 180,
+    *,
+    start: datetime = _SESSION_OPEN,
+) -> list[BrokerCandle]:
     result: list[BrokerCandle] = []
     for index in range(count):
         close = 100 + math.sin(index / 6) * 0.35 + index * 0.0005
         result.append(
             BrokerCandle(
-                timestamp=_SESSION_OPEN + timedelta(minutes=index),
+                timestamp=start + timedelta(minutes=index),
                 open=close - 0.01,
                 high=close + 0.08,
                 low=close - 0.08,
@@ -121,6 +125,7 @@ class TestStrategyV2ShadowService:
         db: Session,
         *,
         activated_at: datetime,
+        establish_current_state: bool = True,
     ) -> StrategyV2ShadowConfig:
         config = StrategyV2ShadowConfig(
             symbol="AAPL.US",
@@ -129,6 +134,13 @@ class TestStrategyV2ShadowService:
         )
         db.add(config)
         db.commit()
+        if establish_current_state:
+            db.add(StrategyV2ShadowState(
+                symbol=config.symbol,
+                config_version=StrategyV2ShadowService(db)._config_version(config),
+                state_json="{}",
+            ))
+            db.commit()
         return config
 
     def test_default_config_is_disabled_and_hard_shadow_only(self) -> None:
@@ -177,6 +189,16 @@ class TestStrategyV2ShadowService:
             [outside, *rows],
             [],
         )[0]
+        rows[200].gate_reasons_json = json.dumps(["SESSION_DATA_INCOMPLETE"])
+        with_incomplete_features = StrategyV2ShadowService._daily_evidence(
+            rows,
+            [],
+        )[0]
+        rows[200].gate_reasons_json = "{malformed"
+        with_malformed_features = StrategyV2ShadowService._daily_evidence(
+            rows,
+            [],
+        )[0]
 
         assert complete.complete_session is True
         assert complete.coverage_ratio == pytest.approx(1.0)
@@ -191,6 +213,229 @@ class TestStrategyV2ShadowService:
         assert with_outside.complete_session is False
         assert with_outside.coverage_ratio == pytest.approx(1.0)
         assert with_outside.outside_session_bars == 1
+        assert with_incomplete_features.complete_session is False
+        assert with_incomplete_features.incomplete_feature_bars == 1
+        assert with_malformed_features.complete_session is False
+        assert with_malformed_features.incomplete_feature_bars == 1
+
+    def test_gate_counts_use_unique_bars_as_the_denominator(self) -> None:
+        with self._db() as db:
+            db.add_all([
+                StrategyV2ShadowDecision(
+                    idempotency_key=f"gate-count-{index}",
+                    symbol="AAPL.US",
+                    market="US",
+                    config_version="gate-version",
+                    session_date=_SESSION_OPEN.date(),
+                    bar_at=_SESSION_OPEN + timedelta(minutes=minute),
+                    close_price=100.0,
+                    gate_reasons_json=json.dumps(["ADX_REGIME_BLOCKED"]),
+                )
+                for index, minute in enumerate((0, 0, 1))
+            ])
+            db.add_all([
+                StrategyV2ShadowDecision(
+                    idempotency_key=f"invalid-gate-{index}",
+                    symbol="AAPL.US",
+                    market="US",
+                    config_version="gate-version",
+                    session_date=_SESSION_OPEN.date(),
+                    bar_at=_SESSION_OPEN + timedelta(minutes=minute),
+                    close_price=100.0,
+                    gate_reasons_json=raw,
+                )
+                for index, (minute, raw) in enumerate(
+                    ((2, "{malformed"), (2, json.dumps({"reason": "bad"})))
+                )
+            ])
+            db.commit()
+
+            counts = StrategyV2ShadowService(db)._gate_counts(
+                "AAPL.US",
+                "gate-version",
+            )
+
+        assert counts == {
+            "ADX_REGIME_BLOCKED": 2,
+            "FEATURE_EVIDENCE_INVALID": 1,
+        }
+
+    def test_trade_evidence_requires_linked_rth_ordered_same_session_decisions(
+        self,
+    ) -> None:
+        version = "evidence-version"
+
+        def decision(
+            row_id: int,
+            action: str,
+            bar_at: datetime,
+            *,
+            session_date: date = _SESSION_OPEN.date(),
+        ) -> StrategyV2ShadowDecision:
+            return StrategyV2ShadowDecision(
+                id=row_id,
+                idempotency_key=f"evidence-{row_id}-{bar_at.isoformat()}",
+                symbol="AAPL.US",
+                market="US",
+                config_version=version,
+                session_date=session_date,
+                bar_at=bar_at,
+                action=action,
+                close_price=100.0,
+            )
+
+        def trade(
+            entry: StrategyV2ShadowDecision,
+            exit_row: StrategyV2ShadowDecision,
+        ) -> StrategyV2ShadowTrade:
+            return StrategyV2ShadowTrade(
+                id=1,
+                symbol="AAPL.US",
+                config_version=version,
+                entry_decision_id=entry.id,
+                exit_decision_id=exit_row.id,
+                status="CLOSED",
+                entry_at=entry.bar_at,
+                exit_at=exit_row.bar_at,
+                entry_price=100.0,
+                exit_price=101.0,
+            )
+
+        entry = decision(
+            1,
+            StrategyV2Action.FILL_ENTRY.value,
+            _SESSION_OPEN + timedelta(minutes=10),
+        )
+        exit_row = decision(
+            2,
+            StrategyV2Action.EXIT_LONG.value,
+            _SESSION_OPEN + timedelta(minutes=20),
+        )
+        valid = trade(entry, exit_row)
+        assert StrategyV2ShadowService._trade_evidence_session_date(
+            valid,
+            {1: entry, 2: exit_row},
+        ) == _SESSION_OPEN.date()
+        assert StrategyV2ShadowService._trade_evidence_session_date(
+            valid,
+            {1: entry},
+        ) is None
+
+        wrong_action = decision(
+            3,
+            StrategyV2Action.WAIT.value,
+            entry.bar_at,
+        )
+        wrong_action_trade = trade(wrong_action, exit_row)
+        assert StrategyV2ShadowService._trade_evidence_session_date(
+            wrong_action_trade,
+            {2: exit_row, 3: wrong_action},
+        ) is None
+
+        outside_rth = decision(
+            4,
+            StrategyV2Action.FILL_ENTRY.value,
+            _SESSION_OPEN - timedelta(minutes=1),
+        )
+        outside_trade = trade(outside_rth, exit_row)
+        assert StrategyV2ShadowService._trade_evidence_session_date(
+            outside_trade,
+            {2: exit_row, 4: outside_rth},
+        ) is None
+
+        next_open = datetime(2026, 7, 13, 13, 30, tzinfo=timezone.utc)
+        next_session_exit = decision(
+            5,
+            StrategyV2Action.EXIT_LONG.value,
+            next_open + timedelta(minutes=10),
+            session_date=next_open.date(),
+        )
+        cross_session_trade = trade(entry, next_session_exit)
+        assert StrategyV2ShadowService._trade_evidence_session_date(
+            cross_session_trade,
+            {1: entry, 5: next_session_exit},
+        ) is None
+
+        reverse_entry = decision(
+            6,
+            StrategyV2Action.FILL_ENTRY.value,
+            _SESSION_OPEN + timedelta(minutes=30),
+        )
+        reverse_exit = decision(
+            7,
+            StrategyV2Action.EXIT_LONG.value,
+            _SESSION_OPEN + timedelta(minutes=29),
+        )
+        reverse_trade = trade(reverse_entry, reverse_exit)
+        assert StrategyV2ShadowService._trade_evidence_session_date(
+            reverse_trade,
+            {6: reverse_entry, 7: reverse_exit},
+        ) is None
+
+        mismatched_time = trade(entry, exit_row)
+        mismatched_time.entry_at = entry.bar_at + timedelta(minutes=1)
+        assert StrategyV2ShadowService._trade_evidence_session_date(
+            mismatched_time,
+            {1: entry, 2: exit_row},
+        ) is None
+
+    def test_reused_entry_decision_excludes_every_linked_trade(self) -> None:
+        with self._db() as db:
+            config = self._enabled_config(db, activated_at=_SESSION_OPEN)
+            service = StrategyV2ShadowService(db)
+            version = service._config_version(config)
+            rows = [
+                StrategyV2ShadowDecision(
+                    idempotency_key=f"duplicate-link-{index}",
+                    symbol="AAPL.US",
+                    market="US",
+                    config_version=version,
+                    session_date=_SESSION_OPEN.date(),
+                    bar_at=_SESSION_OPEN + timedelta(minutes=index),
+                    action=(
+                        StrategyV2Action.FILL_ENTRY.value
+                        if index == 60
+                        else StrategyV2Action.EXIT_LONG.value
+                        if index in {61, 62}
+                        else StrategyV2Action.WAIT.value
+                    ),
+                    close_price=100.0,
+                )
+                for index in range(390)
+            ]
+            db.add_all(rows)
+            db.flush()
+            entry = rows[60]
+            db.add_all([
+                StrategyV2ShadowTrade(
+                    symbol="AAPL.US",
+                    config_version=version,
+                    entry_decision_id=entry.id,
+                    exit_decision_id=rows[index].id,
+                    status="CLOSED",
+                    entry_at=entry.bar_at,
+                    exit_at=rows[index].bar_at,
+                    entry_price=100.0,
+                    exit_price=101.0,
+                    quantity=1.0,
+                    gross_pnl=1.0,
+                    estimated_fees=0.1,
+                    net_pnl=0.9,
+                )
+                for index in (61, 62)
+            ])
+            db.commit()
+
+            evaluation = service.get_evaluation("AAPL.US")
+
+        assert evaluation.closed_trades == 2
+        assert evaluation.eligible_closed_trades == 0
+        assert evaluation.excluded_closed_trades == 2
+        assert "DATA_TRADE_EVIDENCE_INVALID" in evaluation.readiness_blockers
+        assert any(
+            "2 closed trades have invalid decision linkage" in warning
+            for warning in evaluation.data_quality_warnings
+        )
 
     def test_readiness_quality_blocks_loss_drawdown_and_cost_stress(self) -> None:
         def trades(
@@ -364,6 +609,192 @@ class TestStrategyV2ShadowService:
             snapshot = state.state_json
             assert "last_processed_at" in snapshot
 
+    def test_empty_legacy_version_first_tick_only_advances_watermark(self) -> None:
+        provider = _FakeCandles(_candles(180))
+        first_now = _SESSION_OPEN + timedelta(minutes=60, seconds=10)
+        with self._db() as db:
+            config = self._enabled_config(
+                db,
+                activated_at=_SESSION_OPEN,
+                establish_current_state=False,
+            )
+            service = StrategyV2ShadowService(db, provider)
+
+            service.tick("AAPL.US", "US", now=first_now)
+
+            state = db.query(StrategyV2ShadowState).filter_by(symbol="AAPL.US").one()
+            assert provider.calls == []
+            assert state.config_version == service._config_version(config)
+            assert state.last_bar_at is not None
+            assert state.last_bar_at.replace(tzinfo=timezone.utc) == (
+                _SESSION_OPEN + timedelta(minutes=60)
+            )
+            assert db.query(StrategyV2ShadowDecision).count() == 0
+
+            service.tick("AAPL.US", "US", now=first_now + timedelta(minutes=2))
+
+            rows = db.query(StrategyV2ShadowDecision).order_by(
+                StrategyV2ShadowDecision.bar_at
+            ).all()
+            assert provider.calls == [("AAPL.US", "MIN_1", 500)]
+            assert rows
+            assert rows[0].bar_at.replace(tzinfo=timezone.utc) == (
+                _SESSION_OPEN + timedelta(minutes=61)
+            )
+
+    def test_incomplete_session_before_close_keeps_watermark_for_retry(self) -> None:
+        observed_at = _SESSION_OPEN + timedelta(minutes=121, seconds=10)
+        with self._db() as db:
+            config = self._enabled_config(db, activated_at=_SESSION_OPEN)
+            service = StrategyV2ShadowService(db)
+            state = db.query(StrategyV2ShadowState).filter_by(symbol="AAPL.US").one()
+
+            service._evaluate_candles(
+                config=config,
+                state=state,
+                market="US",
+                one_minute=_candles(120, start=_SESSION_OPEN + timedelta(minutes=1)),
+                observed_at=observed_at,
+            )
+
+            db.refresh(state)
+            assert state.last_bar_at is None
+            assert state.last_poll_error == (
+                "SESSION_DATA_INCOMPLETE_WAITING:"
+                f"{(_SESSION_OPEN + timedelta(minutes=1)).isoformat()}"
+            )
+            assert db.query(StrategyV2ShadowDecision).count() == 0
+
+            service._evaluate_candles(
+                config=config,
+                state=state,
+                market="US",
+                one_minute=_candles(121),
+                observed_at=observed_at,
+            )
+
+            db.refresh(state)
+            assert state.last_bar_at is not None
+            assert state.last_bar_at.replace(tzinfo=timezone.utc) == (
+                _SESSION_OPEN + timedelta(minutes=120)
+            )
+            assert state.last_poll_error == ""
+            assert db.query(StrategyV2ShadowDecision).count() == 121
+
+    def test_closed_incomplete_session_is_quarantined_then_next_session_collects(
+        self,
+    ) -> None:
+        next_open = datetime(2026, 7, 13, 13, 30, tzinfo=timezone.utc)
+        with self._db() as db:
+            config = self._enabled_config(db, activated_at=_SESSION_OPEN)
+            service = StrategyV2ShadowService(db)
+            state = db.query(StrategyV2ShadowState).filter_by(symbol="AAPL.US").one()
+
+            service._evaluate_candles(
+                config=config,
+                state=state,
+                market="US",
+                one_minute=_candles(389, start=_SESSION_OPEN + timedelta(minutes=1)),
+                observed_at=_SESSION_OPEN + timedelta(minutes=390, seconds=10),
+            )
+
+            db.refresh(state)
+            assert state.last_bar_at is not None
+            assert state.last_bar_at.replace(tzinfo=timezone.utc) == (
+                _SESSION_OPEN + timedelta(minutes=389)
+            )
+            assert state.last_poll_error.startswith("DATA_SESSION_QUARANTINED:")
+            quarantined = db.query(StrategyV2ShadowDecision).one()
+            assert quarantined.reason == "SESSION_DATA_INCOMPLETE"
+            assert "SESSION_DATA_INCOMPLETE" in json.loads(
+                quarantined.gate_reasons_json
+            )
+
+            service._evaluate_candles(
+                config=config,
+                state=state,
+                market="US",
+                one_minute=_candles(390, start=next_open),
+                observed_at=next_open + timedelta(minutes=390, seconds=10),
+            )
+
+            db.refresh(state)
+            assert state.last_bar_at is not None
+            assert state.last_bar_at.replace(tzinfo=timezone.utc) == (
+                next_open + timedelta(minutes=389)
+            )
+            assert state.last_poll_error == ""
+            daily = service._daily_evidence(
+                db.query(StrategyV2ShadowDecision).order_by(
+                    StrategyV2ShadowDecision.bar_at
+                ).all(),
+                [],
+            )
+            assert [item.complete_session for item in daily] == [False, True]
+            assert daily[0].incomplete_feature_bars == 1
+            assert daily[1].bars == 390
+
+    def test_cross_session_gap_does_not_consume_next_opening_decision(self) -> None:
+        next_open = datetime(2026, 7, 13, 13, 30, tzinfo=timezone.utc)
+        previous_last_observed = _SESSION_OPEN + timedelta(minutes=388)
+        previous_close_bar = _SESSION_OPEN + timedelta(minutes=389)
+        with self._db() as db:
+            config = self._enabled_config(db, activated_at=_SESSION_OPEN)
+            service = StrategyV2ShadowService(db)
+            version = service._config_version(config)
+            state = db.query(StrategyV2ShadowState).filter_by(symbol="AAPL.US").one()
+            state.last_bar_at = previous_last_observed
+            db.add(StrategyV2ShadowDecision(
+                idempotency_key="previous-session-last-observed",
+                symbol="AAPL.US",
+                market="US",
+                config_version=version,
+                session_date=_SESSION_OPEN.date(),
+                bar_at=previous_last_observed,
+                action="WAIT",
+                reason="WARMUP",
+                close_price=100.0,
+                gate_reasons_json=json.dumps(["WARMUP"]),
+            ))
+            db.commit()
+
+            service._evaluate_candles(
+                config=config,
+                state=state,
+                market="US",
+                one_minute=_candles(1, start=next_open),
+                observed_at=next_open + timedelta(minutes=1, seconds=10),
+            )
+
+            db.refresh(state)
+            quarantined_at = state.last_bar_at
+            assert quarantined_at is not None
+            assert quarantined_at.replace(tzinfo=timezone.utc) == previous_close_bar
+            assert state.last_poll_error.startswith("DATA_SESSION_QUARANTINED:")
+            assert db.query(StrategyV2ShadowDecision).count() == 1
+
+            service._evaluate_candles(
+                config=config,
+                state=state,
+                market="US",
+                one_minute=_candles(1, start=next_open),
+                observed_at=next_open + timedelta(minutes=1, seconds=10),
+            )
+
+            decisions = db.query(StrategyV2ShadowDecision).order_by(
+                StrategyV2ShadowDecision.bar_at
+            ).all()
+            opening = decisions[-1]
+            assert opening.bar_at.replace(tzinfo=timezone.utc) == next_open
+            assert opening.reason != "SESSION_DATA_INCOMPLETE"
+            assert "SESSION_DATA_INCOMPLETE" not in json.loads(
+                opening.gate_reasons_json
+            )
+            db.refresh(state)
+            resumed_at = state.last_bar_at
+            assert resumed_at is not None
+            assert resumed_at.replace(tzinfo=timezone.utc) == next_open
+
     def test_tick_stops_at_gap_then_recovers_in_order(self) -> None:
         initial = _candles(121)
         provider = _FakeCandles(initial)
@@ -475,13 +906,17 @@ class TestStrategyV2ShadowService:
                     enabled=True,
                     updated_at=_SESSION_OPEN,
                 )
+                control_db.add(control_config)
+                control_db.flush()
+                control_service = StrategyV2ShadowService(control_db)
                 control_state = StrategyV2ShadowState(
                     symbol="AAPL.US",
+                    config_version=control_service._config_version(control_config),
                     state_json="{}",
                 )
-                control_db.add_all([control_config, control_state])
+                control_db.add(control_state)
                 control_db.commit()
-                StrategyV2ShadowService(control_db)._evaluate_candles(
+                control_service._evaluate_candles(
                     config=control_config,
                     state=control_state,
                     market="US",
@@ -695,7 +1130,11 @@ class TestStrategyV2ShadowService:
 
     def test_virtual_ledger_uses_domain_fill_once_and_estimated_net_pnl(self) -> None:
         with self._db() as db:
-            config = self._enabled_config(db, activated_at=_SESSION_OPEN)
+            config = self._enabled_config(
+                db,
+                activated_at=_SESSION_OPEN,
+                establish_current_state=False,
+            )
             service = StrategyV2ShadowService(db)
             feature = type(
                 "Feature",
@@ -853,7 +1292,11 @@ class TestStrategyV2ShadowService:
 
     def test_algorithm_version_change_manages_frozen_open_trade_then_starts_forward(self) -> None:
         with self._db() as db:
-            config = self._enabled_config(db, activated_at=_SESSION_OPEN)
+            config = self._enabled_config(
+                db,
+                activated_at=_SESSION_OPEN,
+                establish_current_state=False,
+            )
             service = StrategyV2ShadowService(db)
             current_version = service._config_version(config)
             legacy_version = "legacy-algorithm-version"
@@ -913,6 +1356,14 @@ class TestStrategyV2ShadowService:
 
             exit_bar_at = last_bar_at + timedelta(minutes=1)
             candles = [
+                BrokerCandle(
+                    timestamp=_SESSION_OPEN,
+                    open=100,
+                    high=100.2,
+                    low=99.8,
+                    close=100,
+                    volume=1000,
+                ),
                 BrokerCandle(
                     timestamp=last_bar_at,
                     open=100,
@@ -991,7 +1442,11 @@ class TestStrategyV2ShadowService:
     def test_flat_legacy_version_resets_forward_without_rewriting_evidence(self) -> None:
         observed_at = _SESSION_OPEN + timedelta(minutes=180, seconds=10)
         with self._db() as db:
-            config = self._enabled_config(db, activated_at=_SESSION_OPEN)
+            config = self._enabled_config(
+                db,
+                activated_at=_SESSION_OPEN,
+                establish_current_state=False,
+            )
             service = StrategyV2ShadowService(db, _FakeCandles(_candles(181)))
             current_version = service._config_version(config)
             legacy_version = "legacy-with-internal-gap"
@@ -1026,7 +1481,9 @@ class TestStrategyV2ShadowService:
             state = db.query(StrategyV2ShadowState).filter_by(symbol="AAPL.US").one()
             assert state.config_version == current_version
             assert state.last_bar_at is not None
-            assert state.last_bar_at.replace(tzinfo=timezone.utc) == observed_at
+            assert state.last_bar_at.replace(tzinfo=timezone.utc) == (
+                observed_at.replace(second=0, microsecond=0)
+            )
             assert db.query(StrategyV2ShadowDecision).filter_by(
                 config_version=legacy_version
             ).count() == 1
@@ -1037,3 +1494,47 @@ class TestStrategyV2ShadowService:
             snapshot = service._ensure_version_snapshot(config)
             assert snapshot.activated_at is not None
             assert snapshot.activated_at.replace(tzinfo=timezone.utc) >= before_activation
+
+    def test_premarket_version_transition_preserves_the_next_complete_session(
+        self,
+    ) -> None:
+        premarket = _SESSION_OPEN - timedelta(hours=1)
+        post_close = _SESSION_OPEN + timedelta(minutes=390, seconds=10)
+        candles = _FakeCandles(_candles(390))
+        with self._db() as db:
+            config = self._enabled_config(
+                db,
+                activated_at=_SESSION_OPEN - timedelta(days=1),
+                establish_current_state=False,
+            )
+            state = StrategyV2ShadowState(
+                symbol="AAPL.US",
+                config_version="legacy-algorithm",
+                phase="FLAT",
+                last_bar_at=_SESSION_OPEN - timedelta(days=1, minutes=1),
+                state_json="{}",
+            )
+            db.add(state)
+            db.commit()
+            service = StrategyV2ShadowService(db, candles)
+            current_version = service._config_version(config)
+
+            service.tick("AAPL.US", "US", now=premarket)
+
+            db.refresh(state)
+            assert candles.calls == []
+            assert state.config_version == current_version
+            assert state.last_bar_at is not None
+            assert state.last_bar_at.replace(tzinfo=timezone.utc) == premarket
+
+            service.tick("AAPL.US", "US", now=post_close)
+
+            decisions = db.query(StrategyV2ShadowDecision).filter_by(
+                config_version=current_version
+            ).order_by(StrategyV2ShadowDecision.bar_at).all()
+            assert decisions[0].bar_at.replace(tzinfo=timezone.utc) == _SESSION_OPEN
+            evidence = service._daily_evidence(decisions, [])
+            assert len(evidence) == 1
+            assert evidence[0].bars == 390
+            assert evidence[0].incomplete_feature_bars == 0
+            assert evidence[0].complete_session is True

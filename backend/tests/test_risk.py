@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import threading
 
 import pytest
 
@@ -39,6 +40,98 @@ class TestRiskController:
         ctrl.resume()
         result = ctrl.check()
         assert result.approved is True
+
+    def test_verified_resume_callback_failure_restores_original_pause(self) -> None:
+        paused_at = datetime(2026, 7, 16, 1, 2, tzinfo=timezone.utc)
+        reason = "ORDER_RECONCILIATION_UNCERTAIN: retain this diagnosis"
+        ctrl = RiskController()
+        ctrl.pause(
+            reason,
+            auto_resumable=True,
+            paused_at=paused_at,
+        )
+        pause_reason, generation = ctrl.pause_verification_snapshot()
+
+        def fail_persistence() -> None:
+            assert ctrl.paused is False
+            raise RuntimeError("commit interrupted")
+
+        with pytest.raises(RuntimeError, match="commit interrupted"):
+            ctrl.resume_if_pause_reason(
+                pause_reason,
+                expected_generation=generation,
+                on_resumed=fail_persistence,
+            )
+
+        assert ctrl.paused is True
+        assert ctrl.pause_reason == reason
+        assert ctrl.paused_at == paused_at
+        assert ctrl.pause_auto_resumable is True
+
+    def test_verified_resume_serializes_concurrent_pause_with_callback(self) -> None:
+        original_reason = "ORDER_RECONCILIATION_UNCERTAIN: original"
+        changed_reason = "POSITION_RECONCILIATION_UNCERTAIN: changed"
+        ctrl = RiskController()
+        ctrl.pause(original_reason)
+        pause_reason, generation = ctrl.pause_verification_snapshot()
+        callback_entered = threading.Event()
+        release_callback = threading.Event()
+        pause_attempted = threading.Event()
+        pause_finished = threading.Event()
+        resume_results: list[bool] = []
+
+        def durable_resume_callback() -> None:
+            callback_entered.set()
+            assert release_callback.wait(timeout=2)
+
+        def verified_resume() -> None:
+            resume_results.append(
+                ctrl.resume_if_pause_reason(
+                    pause_reason,
+                    expected_generation=generation,
+                    on_resumed=durable_resume_callback,
+                )
+            )
+
+        def concurrent_pause() -> None:
+            pause_attempted.set()
+            ctrl.pause(changed_reason)
+            pause_finished.set()
+
+        resume_thread = threading.Thread(target=verified_resume)
+        pause_thread = threading.Thread(target=concurrent_pause)
+        resume_thread.start()
+        assert callback_entered.wait(timeout=1)
+        pause_thread.start()
+        assert pause_attempted.wait(timeout=1)
+        assert pause_finished.wait(timeout=0.05) is False
+
+        release_callback.set()
+        resume_thread.join(timeout=2)
+        pause_thread.join(timeout=2)
+
+        assert resume_thread.is_alive() is False
+        assert pause_thread.is_alive() is False
+        assert resume_results == [True]
+        assert ctrl.paused is True
+        assert ctrl.pause_reason == changed_reason
+
+    def test_verified_resume_callback_pause_is_not_reported_as_running(self) -> None:
+        original_reason = "ORDER_RECONCILIATION_UNCERTAIN: original"
+        changed_reason = "POSITION_RECONCILIATION_UNCERTAIN: callback changed state"
+        ctrl = RiskController()
+        ctrl.pause(original_reason)
+        pause_reason, generation = ctrl.pause_verification_snapshot()
+
+        resumed = ctrl.resume_if_pause_reason(
+            pause_reason,
+            expected_generation=generation,
+            on_resumed=lambda: ctrl.pause(changed_reason),
+        )
+
+        assert resumed is False
+        assert ctrl.paused is True
+        assert ctrl.pause_reason == changed_reason
 
     def test_pause_records_auto_resume_metadata(self) -> None:
         from datetime import datetime, timezone

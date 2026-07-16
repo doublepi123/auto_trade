@@ -58,7 +58,7 @@ class RiskController:
         self._protective_exit_pause_reason: str = ""
         self._kill_switch_reason: str = ""
         self._safety_generation: int = 0
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
     def set_trade_day_provider(self, provider: TradeDayProvider) -> None:
         with self._lock:
@@ -166,8 +166,15 @@ class RiskController:
         expected_pause_reason: str,
         *,
         expected_generation: int,
+        on_resumed: Callable[[], None] | None = None,
     ) -> bool:
-        """Resume only if the verified pause is still current."""
+        """Resume only if the verified pause is still current.
+
+        ``on_resumed`` runs while the safety lock is held. If it raises, the
+        original pause is restored before the exception is propagated. This is
+        used to make a verified resume and its durable audit transaction one
+        indivisible in-process state transition.
+        """
         with self._lock:
             if self._safety_generation != expected_generation:
                 self._protective_exit_pause_reason = ""
@@ -184,12 +191,31 @@ class RiskController:
                 self._protective_exit_pause_reason = ""
                 self._safety_generation += 1
                 return False
+            paused_at = self._paused_at
+            pause_auto_resumable = self._pause_auto_resumable
             self._safety_generation += 1
             self._protective_exit_pause_reason = ""
             self.paused = False
             self._pause_reason = ""
             self._paused_at = None
             self._pause_auto_resumable = False
+            resumed_generation = self._safety_generation
+            try:
+                if on_resumed is not None:
+                    on_resumed()
+            except Exception:
+                self._safety_generation += 1
+                self.paused = True
+                self._pause_reason = expected_pause_reason
+                self._paused_at = paused_at
+                self._pause_auto_resumable = pause_auto_resumable
+                raise
+            if (
+                self._safety_generation != resumed_generation
+                or self.paused
+                or self.kill_switch
+            ):
+                return False
             return True
 
     def restore_pause(

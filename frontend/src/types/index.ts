@@ -1366,7 +1366,7 @@ export interface StrategyShadowConfig {
   slippage_bps: number
   estimated_fee_rate_us: number
   estimated_fee_rate_hk: number
-  algorithm_version: 'strategy-v2-rth-mr-v2-contiguous'
+  algorithm_version: 'strategy-v2-rth-mr-v3-evidence'
   mode: StrategyShadowMode
   order_submission_allowed: boolean
   allow_position_addons: boolean
@@ -1501,6 +1501,7 @@ export interface StrategyShadowDailyEvidence {
   eligible_bars: number
   expected_internal_bars: number
   missing_internal_bars: number
+  incomplete_feature_bars: number
   coverage_ratio: number
   trades: number
   net_pnl: number
@@ -1518,10 +1519,13 @@ export interface StrategyShadowEvaluation {
   order_submission_allowed: false
   status: 'COLLECTING' | 'READY_FOR_REVIEW'
   observed_trading_days: number
+  excluded_trading_days: number
   minimum_trading_days: number
   minimum_session_coverage_ratio: number
   remaining_trading_days: number
   closed_trades: number
+  eligible_closed_trades: number
+  excluded_closed_trades: number
   minimum_closed_trades: number
   remaining_closed_trades: number
   first_bar_at: string | null

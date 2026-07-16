@@ -294,8 +294,8 @@ class StrategyV2ShadowConfigValues(BaseModel):
         le=0.1,
         allow_inf_nan=False,
     )
-    algorithm_version: Literal["strategy-v2-rth-mr-v2-contiguous"] = (
-        "strategy-v2-rth-mr-v2-contiguous"
+    algorithm_version: Literal["strategy-v2-rth-mr-v3-evidence"] = (
+        "strategy-v2-rth-mr-v3-evidence"
     )
     mode: Literal["SHADOW"] = "SHADOW"
     order_submission_allowed: Literal[False] = False
@@ -497,6 +497,7 @@ class StrategyV2ShadowDailyEvidence(BaseModel):
     eligible_bars: int
     expected_internal_bars: int
     missing_internal_bars: int
+    incomplete_feature_bars: int = 0
     coverage_ratio: float
     trades: int
     net_pnl: float
@@ -514,10 +515,13 @@ class StrategyV2ShadowEvaluationResponse(BaseModel):
     order_submission_allowed: Literal[False] = False
     status: Literal["COLLECTING", "READY_FOR_REVIEW"]
     observed_trading_days: int
+    excluded_trading_days: int = 0
     minimum_trading_days: int = 20
     minimum_session_coverage_ratio: float = 0.995
     remaining_trading_days: int
     closed_trades: int
+    eligible_closed_trades: int = 0
+    excluded_closed_trades: int = 0
     minimum_closed_trades: int = 50
     remaining_closed_trades: int
     first_bar_at: Optional[datetime] = None

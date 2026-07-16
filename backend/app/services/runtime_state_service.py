@@ -118,26 +118,47 @@ class RuntimeStateService:
         return config
 
     def persist(self, db: Any, engine: StrategyEngine, risk: RiskController) -> None:
-        from app.services.strategy_service import StrategyService
+        self.stage(db, engine, risk)
+        db.commit()
+
+    def stage(self, db: Any, engine: StrategyEngine, risk: RiskController) -> None:
+        """Stage runtime state and its history snapshot without committing."""
+        from app.models import RuntimeState, RuntimeStateSnapshot
 
         primary_symbol = (engine.params.symbol or "").strip().upper()
-        svc = StrategyService(db)
-        svc.update_runtime_state(
-            symbol=primary_symbol,
-            engine_state=engine.state.value,
-            last_price=engine.last_price,
-            daily_pnl=risk.daily_pnl,
-            daily_pnl_date=risk.daily_pnl_date,
-            consecutive_losses=risk.consecutive_losses,
-            kill_switch=risk.kill_switch,
-            paused=risk.paused,
-            pause_reason=risk.pause_reason,
-            paused_at=risk.paused_at,
-            pause_auto_resumable=risk.pause_auto_resumable,
-            last_trigger_price=engine.last_trigger_price,
-            last_trigger_at=engine.last_trigger_at,
+        runtime_state = db.query(RuntimeState).filter(
+            RuntimeState.symbol == primary_symbol
+        ).first()
+        if runtime_state is None:
+            runtime_state = RuntimeState(symbol=primary_symbol)
+        runtime_state.engine_state = engine.state.value
+        runtime_state.last_price = engine.last_price
+        runtime_state.daily_pnl = risk.daily_pnl
+        runtime_state.daily_pnl_date = risk.daily_pnl_date
+        runtime_state.consecutive_losses = risk.consecutive_losses
+        runtime_state.kill_switch = risk.kill_switch
+        runtime_state.paused = risk.paused
+        runtime_state.pause_reason = risk.pause_reason
+        runtime_state.paused_at = risk.paused_at
+        runtime_state.pause_auto_resumable = risk.pause_auto_resumable
+        runtime_state.last_trigger_price = engine.last_trigger_price
+        runtime_state.last_trigger_at = engine.last_trigger_at
+        runtime_state.updated_at = datetime.now(timezone.utc)
+        db.add(runtime_state)
+        db.add(
+            RuntimeStateSnapshot(
+                symbol=primary_symbol,
+                engine_state=engine.state.value,
+                paused=risk.paused,
+                kill_switch=risk.kill_switch,
+                daily_pnl=risk.daily_pnl,
+                consecutive_losses=risk.consecutive_losses,
+                last_price=engine.last_price,
+                last_trigger_price=engine.last_trigger_price,
+                execution_state=runtime_state.execution_state or "IDLE",
+                reduction_reason=runtime_state.reduction_reason or "",
+            )
         )
-        self.record_snapshot(db, engine, risk, symbol=primary_symbol)
 
     def persist_risk(self, db: Any, risk: RiskController, *, symbol: str = "") -> None:
         from app.services.strategy_service import StrategyService

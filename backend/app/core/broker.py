@@ -41,6 +41,8 @@ _RETRYABLE_MESSAGE_MARKERS = (
     "throttled",
     "timeout",
     "connection",
+    "error sending request",
+    "sendrequest",
     "unavailable",
     "internal error",
     "500000",

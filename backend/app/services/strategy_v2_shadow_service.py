@@ -5,7 +5,7 @@ import json
 import re
 from collections import Counter
 from dataclasses import asdict
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Protocol
 
@@ -86,7 +86,7 @@ _CONFIG_FIELDS = (
     "estimated_fee_rate_us",
     "estimated_fee_rate_hk",
 )
-_ALGORITHM_VERSION = "strategy-v2-rth-mr-v2-contiguous"
+_ALGORITHM_VERSION = "strategy-v2-rth-mr-v3-evidence"
 _VALID_ACTIONS = frozenset(action.value for action in StrategyV2Action)
 _SHADOW_SYMBOL_RE = re.compile(r"^[A-Z0-9\-]{1,12}\.(US|HK)$")
 _MIN_POLL_SECONDS = 45.0
@@ -156,38 +156,69 @@ class StrategyV2ShadowService:
         ).order_by(StrategyV2ShadowTrade.exit_at.asc()).all()
         daily = self._daily_evidence(decisions, trades)
         observed_days = sum(item.complete_session for item in daily)
+        complete_dates = {
+            item.session_date for item in daily if item.complete_session
+        }
+        decisions_by_id = {item.id: item for item in decisions}
+        entry_linkage_counts = Counter(
+            item.entry_decision_id
+            for item in trades
+            if item.entry_decision_id is not None
+        )
+        exit_linkage_counts = Counter(
+            item.exit_decision_id
+            for item in trades
+            if item.exit_decision_id is not None
+        )
+
+        def has_unique_linkage(item: StrategyV2ShadowTrade) -> bool:
+            entry_id = item.entry_decision_id
+            exit_id = item.exit_decision_id
+            return (
+                entry_id is not None
+                and exit_id is not None
+                and entry_linkage_counts[entry_id] == 1
+                and exit_linkage_counts[exit_id] == 1
+            )
+
+        linked_trade_days = {
+            item.id: (
+                self._trade_evidence_session_date(item, decisions_by_id)
+                if has_unique_linkage(item)
+                else None
+            )
+            for item in trades
+        }
+        eligible_trades = [
+            item
+            for item in trades
+            if linked_trade_days[item.id] in complete_dates
+        ]
         closed_trades = len(trades)
+        eligible_closed_trades = len(eligible_trades)
+        excluded_closed_trades = closed_trades - eligible_closed_trades
+        invalid_trade_evidence = sum(
+            session_date is None for session_date in linked_trade_days.values()
+        )
         blockers: list[str] = []
         if observed_days < _MIN_REVIEW_TRADING_DAYS:
             blockers.append("MIN_TRADING_DAYS")
-        if closed_trades < _MIN_REVIEW_CLOSED_TRADES:
+        if eligible_closed_trades < _MIN_REVIEW_CLOSED_TRADES:
             blockers.append("MIN_CLOSED_TRADES")
-        if any(item.missing_internal_bars > 0 for item in daily):
-            blockers.append("DATA_INTERNAL_GAPS")
-        if any(item.partial_start or item.partial_end for item in daily):
-            blockers.append("DATA_PARTIAL_SESSIONS")
-        if any(
-            item.coverage_ratio < _MIN_COMPLETE_SESSION_COVERAGE
-            for item in daily
-        ):
-            blockers.append("DATA_SESSION_COVERAGE")
-        if any(item.outside_session_bars > 0 for item in daily):
-            blockers.append("DATA_OUTSIDE_SESSION_BARS")
-        evidence_dates = {item.session_date for item in daily}
-        trades_without_evidence = sum(
-            item.exit_at is None
-            or _as_utc(item.exit_at).date() not in evidence_dates
-            for item in trades
-        )
-        if trades_without_evidence:
-            blockers.append("DATA_TRADE_SESSION_MISSING")
+        if invalid_trade_evidence:
+            blockers.append("DATA_TRADE_EVIDENCE_INVALID")
+        if excluded_closed_trades:
+            blockers.append("DATA_TRADE_SESSION_INCOMPLETE")
 
         params = self._version_params(normalized, version)
         edge_blocker = self._net_edge_blocker(normalized, params)
         if edge_blocker is not None:
             blockers.append(edge_blocker)
-        quality, quality_blockers = self._readiness_quality(trades, params)
-        if closed_trades >= _MIN_REVIEW_CLOSED_TRADES:
+        quality, quality_blockers = self._readiness_quality(
+            eligible_trades,
+            params,
+        )
+        if eligible_closed_trades >= _MIN_REVIEW_CLOSED_TRADES:
             blockers.extend(quality_blockers)
 
         warnings: list[str] = []
@@ -195,6 +226,10 @@ class StrategyV2ShadowService:
             issues: list[str] = []
             if item.missing_internal_bars:
                 issues.append(f"{item.missing_internal_bars} internal bars missing")
+            if item.incomplete_feature_bars:
+                issues.append(
+                    f"{item.incomplete_feature_bars} feature bars incomplete"
+                )
             if item.partial_start or item.partial_end:
                 issues.append("partial session boundary")
             if item.coverage_ratio < _MIN_COMPLETE_SESSION_COVERAGE:
@@ -205,23 +240,31 @@ class StrategyV2ShadowService:
                 warnings.append(
                     f"{item.session_date.isoformat()}: " + "; ".join(issues)
                 )
-        if trades_without_evidence:
+        if invalid_trade_evidence:
             warnings.append(
-                f"{trades_without_evidence} closed trades lack session evidence"
+                f"{invalid_trade_evidence} closed trades have invalid decision linkage"
             )
+        if excluded_closed_trades:
+            warnings.append(
+                f"{excluded_closed_trades} closed trades excluded from complete-session evidence"
+            )
+        blockers = list(dict.fromkeys(blockers))
         return StrategyV2ShadowEvaluationResponse(
             symbol=normalized,
             config_version=version,
             status="READY_FOR_REVIEW" if not blockers else "COLLECTING",
             observed_trading_days=observed_days,
+            excluded_trading_days=len(daily) - observed_days,
             remaining_trading_days=max(
                 0,
                 _MIN_REVIEW_TRADING_DAYS - observed_days,
             ),
             closed_trades=closed_trades,
+            eligible_closed_trades=eligible_closed_trades,
+            excluded_closed_trades=excluded_closed_trades,
             remaining_closed_trades=max(
                 0,
-                _MIN_REVIEW_CLOSED_TRADES - closed_trades,
+                _MIN_REVIEW_CLOSED_TRADES - eligible_closed_trades,
             ),
             first_bar_at=decisions[0].bar_at if decisions else None,
             last_bar_at=decisions[-1].bar_at if decisions else None,
@@ -275,7 +318,8 @@ class StrategyV2ShadowService:
         if reset_for_forward_run:
             state = self._get_or_create_state(row.symbol, commit=False)
             state.phase = StrategyV2State.COLD.value
-            state.last_bar_at = now
+            market = "HK" if row.symbol.endswith(".HK") else "US"
+            state.last_bar_at = self._forward_watermark(market, now)
             state.armed_at = None
             state.armed_zscore = None
             state.open_trade_id = None
@@ -405,6 +449,21 @@ class StrategyV2ShadowService:
         config = self._get_or_create_config(normalized)
         state = self._get_or_create_state(normalized)
         open_trade = self._open_trade(normalized)
+
+        # A flat algorithm revision is activated at the first observation, even
+        # when that observation is outside RTH. A pre-market deployment can then
+        # consume the opening minute instead of burning it on the transition.
+        current_version = self._config_version(config)
+        if open_trade is None and state.config_version != current_version:
+            self._ensure_version_snapshot(config)
+            self._reset_state_forward(
+                state,
+                config_version=current_version,
+                watermark=self._forward_watermark(market, current),
+            )
+            self.db.add(state)
+            self.db.commit()
+            return self.get_status(normalized)
 
         if not config.enabled and open_trade is None:
             return self.get_status(normalized)
@@ -566,16 +625,12 @@ class StrategyV2ShadowService:
 
         # A flat old algorithm must begin strictly at this deployment's first
         # observation. It must not replay downtime under the new code version.
-        if (
-            open_trade is None
-            and state.config_version
-            and state.config_version != current_version
-        ):
+        if open_trade is None and state.config_version != current_version:
             self._ensure_version_snapshot(config)
             self._reset_state_forward(
                 state,
                 config_version=current_version,
-                watermark=observed_at,
+                watermark=self._forward_watermark(market, observed_at),
             )
             self.db.commit()
             return
@@ -616,6 +671,8 @@ class StrategyV2ShadowService:
         armed_at: datetime | None = state.armed_at if restored else None
         armed_zscore: float | None = state.armed_zscore if restored else None
         latest_feature: Any = None
+        quarantined_feature: Any = None
+        quarantined_until: datetime | None = None
         exited_managed_position = False
         gap_error = ""
         frontier = last_bar_at
@@ -633,13 +690,64 @@ class StrategyV2ShadowService:
                     current=bar.timestamp,
                 )
                 if missing_at is not None:
-                    gap_error = f"DATA_GAP_WAITING:{missing_at.isoformat()}"
-                    break
+                    if engine.position is None and self._session_has_closed(
+                        market,
+                        missing_at,
+                        observed_at,
+                        grace,
+                    ):
+                        if (
+                            session.trade_day(bar.timestamp)
+                            == session.trade_day(missing_at)
+                        ):
+                            quarantined_feature = engine.features.on_bar(
+                                bar,
+                                observed_at=observed_at,
+                            )
+                        quarantined_until = self._session_last_bar_at(
+                            market,
+                            missing_at,
+                        )
+                        gap_error = (
+                            "DATA_SESSION_QUARANTINED:"
+                            f"{session.trade_day(missing_at).isoformat()};"
+                            f"missing={missing_at.isoformat()}"
+                        )
+                        break
+                    if engine.position is None:
+                        gap_error = f"DATA_GAP_WAITING:{missing_at.isoformat()}"
+                        break
             feature = engine.features.on_bar(bar, observed_at=observed_at)
             frontier = bar.timestamp
             if feature is None:
                 continue
             gate_reasons = engine.entry_gate_reasons(feature)
+            if (
+                "SESSION_DATA_INCOMPLETE" in gate_reasons
+                and engine.position is None
+            ):
+                if self._session_has_closed(
+                    market,
+                    bar.timestamp,
+                    observed_at,
+                    grace,
+                ):
+                    quarantined_feature = feature
+                    quarantined_until = self._session_last_bar_at(
+                        market,
+                        bar.timestamp,
+                    )
+                    gap_error = (
+                        "DATA_SESSION_QUARANTINED:"
+                        f"{feature.session_day.isoformat()};"
+                        f"incomplete={bar.timestamp.isoformat()}"
+                    )
+                else:
+                    gap_error = (
+                        "SESSION_DATA_INCOMPLETE_WAITING:"
+                        f"{bar.timestamp.isoformat()}"
+                    )
+                break
             before_step = engine.snapshot()
             step = engine.on_feature(feature)
             latest_feature = feature
@@ -692,7 +800,49 @@ class StrategyV2ShadowService:
             if exited_managed_position:
                 break
 
-        if latest_feature is not None:
+        if quarantined_until is not None:
+            if quarantined_feature is not None:
+                decision = StrategyV2Decision(
+                    timestamp=quarantined_feature.bar.timestamp,
+                    action=StrategyV2Action.WAIT,
+                    reason="SESSION_DATA_INCOMPLETE",
+                    state_before=engine.state,
+                    state_after=StrategyV2State.COLD,
+                )
+                key = self._decision_key(
+                    symbol=config.symbol,
+                    config_version=decision_version,
+                    timestamp=quarantined_feature.bar.timestamp,
+                    index=0,
+                    action=decision.action.value,
+                )
+                if key not in existing_keys:
+                    gate_reasons = tuple(
+                        dict.fromkeys((
+                            *engine.entry_gate_reasons(quarantined_feature),
+                            "SESSION_DATA_INCOMPLETE",
+                        ))
+                    )
+                    self.db.add(self._new_decision_row(
+                        key=key,
+                        symbol=config.symbol,
+                        market=market,
+                        config_version=decision_version,
+                        feature=quarantined_feature,
+                        decision=decision,
+                        gate_reasons=gate_reasons,
+                        observed_at=observed_at,
+                    ))
+            self._reset_state_forward(
+                state,
+                config_version=current_version,
+                watermark=quarantined_until,
+            )
+            state.session_date = session.trade_day(quarantined_until)
+            state.last_poll_error = gap_error
+            self.db.add(state)
+            self.db.commit()
+        elif latest_feature is not None:
             if exited_managed_position and version_transition_open:
                 self._reset_state_forward(
                     state,
@@ -743,6 +893,29 @@ class StrategyV2ShadowService:
         return close_at <= local < close_at + timedelta(
             minutes=_POST_CLOSE_COLLECTION_MINUTES
         )
+
+    @staticmethod
+    def _session_last_bar_at(market: str, instant: datetime) -> datetime:
+        session = get_session(market)
+        local = session.local(instant)
+        close_at = datetime.combine(
+            session.trade_day(instant),
+            session.close_time(local.date()),
+            tzinfo=session.timezone,
+        )
+        return close_at.astimezone(timezone.utc) - timedelta(minutes=1)
+
+    @classmethod
+    def _session_has_closed(
+        cls,
+        market: str,
+        instant: datetime,
+        observed_at: datetime,
+        grace: timedelta,
+    ) -> bool:
+        return cls._session_last_bar_at(market, instant) + timedelta(
+            minutes=1
+        ) + grace <= observed_at
 
     @staticmethod
     def _missing_rth_minute(
@@ -1269,7 +1442,6 @@ class StrategyV2ShadowService:
         ).first()
         if (
             state is not None
-            and state.config_version
             and state.config_version != version
         ):
             activated_at = datetime.now(timezone.utc)
@@ -1523,6 +1695,56 @@ class StrategyV2ShadowService:
         )
 
     @staticmethod
+    def _stored_gate_reasons(
+        row: StrategyV2ShadowDecision,
+    ) -> set[str] | None:
+        try:
+            decoded = json.loads(row.gate_reasons_json or "[]")
+        except (TypeError, json.JSONDecodeError):
+            return None
+        if not isinstance(decoded, list):
+            return None
+        return {str(item) for item in decoded}
+
+    @staticmethod
+    def _trade_evidence_session_date(
+        trade: StrategyV2ShadowTrade,
+        decisions_by_id: dict[int, StrategyV2ShadowDecision],
+    ) -> date | None:
+        if trade.entry_decision_id is None or trade.exit_decision_id is None:
+            return None
+        entry = decisions_by_id.get(trade.entry_decision_id)
+        exit_row = decisions_by_id.get(trade.exit_decision_id)
+        if entry is None or exit_row is None or trade.exit_at is None:
+            return None
+        if (
+            entry.action != StrategyV2Action.FILL_ENTRY.value
+            or exit_row.action != StrategyV2Action.EXIT_LONG.value
+            or entry.symbol != trade.symbol
+            or exit_row.symbol != trade.symbol
+            or entry.config_version != trade.config_version
+            or exit_row.config_version != trade.config_version
+            or entry.market.upper() != exit_row.market.upper()
+            or entry.session_date != exit_row.session_date
+            or _as_utc(entry.bar_at) >= _as_utc(exit_row.bar_at)
+            or _as_utc(trade.entry_at) >= _as_utc(trade.exit_at)
+        ):
+            return None
+        session = get_session(entry.market)
+        entry_at = _as_utc(entry.bar_at).replace(second=0, microsecond=0)
+        exit_at = _as_utc(exit_row.bar_at).replace(second=0, microsecond=0)
+        if (
+            not session.is_rth(entry_at)
+            or not session.is_rth(exit_at)
+            or session.trade_day(entry_at) != entry.session_date
+            or session.trade_day(exit_at) != entry.session_date
+            or _as_utc(trade.entry_at).replace(second=0, microsecond=0) != entry_at
+            or _as_utc(trade.exit_at).replace(second=0, microsecond=0) != exit_at
+        ):
+            return None
+        return entry.session_date
+
+    @staticmethod
     def _daily_evidence(
         decisions: list[StrategyV2ShadowDecision],
         trades: list[StrategyV2ShadowTrade],
@@ -1580,10 +1802,20 @@ class StrategyV2ShadowService:
             coverage_ratio = (
                 len(rth_timestamps) / expected_count if expected_count else 0.0
             )
+            incomplete_feature_bars = len({
+                _as_utc(row.bar_at).replace(second=0, microsecond=0)
+                for row in rows
+                if (
+                    (stored := StrategyV2ShadowService._stored_gate_reasons(row))
+                    is None
+                    or "SESSION_DATA_INCOMPLETE" in stored
+                )
+            })
             complete_session = (
                 expected_count > 0
                 and coverage_ratio >= _MIN_COMPLETE_SESSION_COVERAGE
                 and missing == 0
+                and incomplete_feature_bars == 0
                 and not partial_start
                 and not partial_end
                 and outside_session_bars == 0
@@ -1606,6 +1838,7 @@ class StrategyV2ShadowService:
                 }),
                 expected_internal_bars=len(internal_expected),
                 missing_internal_bars=missing,
+                incomplete_feature_bars=incomplete_feature_bars,
                 coverage_ratio=coverage_ratio,
                 trades=len(day_trades),
                 net_pnl=sum(float(trade.net_pnl or 0.0) for trade in day_trades),
@@ -1734,6 +1967,13 @@ class StrategyV2ShadowService:
         state.open_trade_id = None
         state.state_json = "{}"
         state.last_poll_error = ""
+
+    @staticmethod
+    def _forward_watermark(market: str, current: datetime) -> datetime:
+        normalized = _as_utc(current)
+        if get_session(market).is_rth(normalized):
+            return normalized.replace(second=0, microsecond=0)
+        return normalized
 
     def _resolve_symbol(self, symbol: str | None) -> str:
         normalized = (symbol or "").strip().upper()
@@ -1874,6 +2114,15 @@ class StrategyV2ShadowService:
             StrategyV2ShadowTrade.status == "CLOSED",
         ).order_by(StrategyV2ShadowTrade.exit_at.asc()).all()
         actions = [row.action.upper() for row in decisions]
+        bar_minutes = {
+            _as_utc(row.bar_at).replace(second=0, microsecond=0)
+            for row in decisions
+        }
+        eligible_bar_minutes = {
+            _as_utc(row.bar_at).replace(second=0, microsecond=0)
+            for row in decisions
+            if row.gate_passed
+        }
         net_values = [float(row.net_pnl or 0.0) for row in trades]
         wins = sum(value > 0 for value in net_values)
         cumulative = 0.0
@@ -1887,8 +2136,8 @@ class StrategyV2ShadowService:
         mae = [float(row.mae_pct) for row in trades if row.mae_pct is not None]
         mfe = [float(row.mfe_pct) for row in trades if row.mfe_pct is not None]
         return StrategyV2ShadowMetrics(
-            bars=len({row.bar_at for row in decisions}),
-            eligible_bars=len({row.bar_at for row in decisions if row.gate_passed}),
+            bars=len(bar_minutes),
+            eligible_bars=len(eligible_bar_minutes),
             breaches=actions.count(StrategyV2Action.ARM_LONG.value),
             reclaims=actions.count(StrategyV2Action.SUBMIT_ENTRY.value),
             entries=actions.count(StrategyV2Action.FILL_ENTRY.value),
@@ -1905,19 +2154,33 @@ class StrategyV2ShadowService:
         )
 
     def _gate_counts(self, symbol: str, config_version: str) -> dict[str, int]:
-        counter: Counter[str] = Counter()
-        rows = self.db.query(StrategyV2ShadowDecision.gate_reasons_json).filter(
+        bars_by_reason: dict[str, set[datetime]] = {}
+        rows = self.db.query(
+            StrategyV2ShadowDecision.bar_at,
+            StrategyV2ShadowDecision.gate_reasons_json,
+        ).filter(
             StrategyV2ShadowDecision.symbol == symbol,
             StrategyV2ShadowDecision.config_version == config_version,
         ).all()
-        for (raw,) in rows:
+        for bar_at, raw in rows:
             try:
                 values = json.loads(raw or "[]")
-            except json.JSONDecodeError:
-                continue
-            if isinstance(values, list):
-                counter.update(str(value) for value in values)
-        return dict(sorted(counter.items()))
+            except (TypeError, json.JSONDecodeError):
+                values = ["FEATURE_EVIDENCE_INVALID"]
+            if not isinstance(values, list):
+                values = ["FEATURE_EVIDENCE_INVALID"]
+            normalized_bar_at = _as_utc(bar_at).replace(
+                second=0,
+                microsecond=0,
+            )
+            for value in values:
+                bars_by_reason.setdefault(str(value), set()).add(
+                    normalized_bar_at
+                )
+        return {
+            reason: len(timestamps)
+            for reason, timestamps in sorted(bars_by_reason.items())
+        }
 
 
 def _as_utc(value: datetime) -> datetime:

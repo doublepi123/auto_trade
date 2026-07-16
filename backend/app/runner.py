@@ -10,7 +10,7 @@ import re
 import threading
 import time
 from collections import deque
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace as dataclass_replace
 from datetime import datetime, timedelta, timezone
@@ -76,6 +76,14 @@ _ORDER_SUBMISSION_UNCERTAIN_PREFIX = "ORDER_SUBMISSION_UNCERTAIN:"
 _POSITION_RECONCILIATION_UNCERTAIN_PREFIX = "POSITION_RECONCILIATION_UNCERTAIN:"
 _REDUCTION_SETTLEMENT_UNCERTAIN_PREFIX = "REDUCTION_SETTLEMENT_UNCERTAIN:"
 _ORDER_RECONCILIATION_UNCERTAIN_PREFIX = "ORDER_RECONCILIATION_UNCERTAIN:"
+_ORDER_SNAPSHOT_FETCH_ISSUE = (
+    "broker today-order snapshot could not be represented or fetched"
+)
+_EMPTY_ORDER_SNAPSHOT_RECONCILIATION_REASON = (
+    f"{_ORDER_RECONCILIATION_UNCERTAIN_PREFIX} "
+    "unresolved live orders require manual reconciliation; "
+    f"live_orders=none; representation_issues={_ORDER_SNAPSHOT_FETCH_ISSUE}"
+)
 DISCONNECT_RETRY_EXHAUSTED_THRESHOLD = 3
 
 _QUOTE_SPREAD_THRESHOLD_PCT = 0.05  # Reject quotes with >5% bid-ask spread
@@ -756,7 +764,11 @@ class AppRunner:
             with self._state_lock:
                 self._running = False
 
-    def resume_after_verification(self) -> tuple[bool, str]:
+    def resume_after_verification(
+        self,
+        *,
+        on_resumed: Callable[[], None] | None = None,
+    ) -> tuple[bool, str]:
         with self._trade_svc.submission_guard():
             self.risk.revoke_protective_exits()
             pause_reason, safety_generation = self.risk.pause_verification_snapshot()
@@ -767,6 +779,7 @@ class AppRunner:
             if not self.risk.resume_if_pause_reason(
                 pause_reason,
                 expected_generation=safety_generation,
+                on_resumed=on_resumed,
             ):
                 self._broadcast_status()
                 return False, "operational pause changed during verification"
@@ -2655,7 +2668,7 @@ class AppRunner:
                 self._last_order_sync_succeeded = False
             self._latch_live_order_reconciliation(
                 self._trade_svc.pending_order_inventory(),
-                ["broker today-order snapshot could not be represented or fetched"],
+                [_ORDER_SNAPSHOT_FETCH_ISSUE],
             )
             return 0, ()
         broker_representation_issues: dict[int, str] = {}
@@ -3650,6 +3663,26 @@ class AppRunner:
     def _auto_resume_pause_if_due(self, now: datetime | None = None) -> bool:
         now = now or datetime.now(timezone.utc)
         with self._state_lock:
+            empty_snapshot_pause = (
+                self.risk.paused
+                and self.risk.pause_reason
+                == _EMPTY_ORDER_SNAPSHOT_RECONCILIATION_REASON
+            )
+            other_order_reconciliation_pause = (
+                self.risk.paused
+                and self.risk.pause_reason.startswith(
+                    _ORDER_RECONCILIATION_UNCERTAIN_PREFIX
+                )
+                and not empty_snapshot_pause
+            )
+        if empty_snapshot_pause:
+            # This operational pause must never fall through to the generic,
+            # timer-only auto-resume path, even if old persisted data happened
+            # to mark it auto-resumable.
+            return self._auto_resume_empty_order_snapshot_pause(now)
+        if other_order_reconciliation_pause:
+            return False
+        with self._state_lock:
             if not self.risk.paused or self.risk.kill_switch:
                 return False
             auto_resume_minutes = self.engine.params.auto_resume_minutes
@@ -3674,6 +3707,77 @@ class AppRunner:
                 payload={"source": "auto_resume_pause"},
             )
             db.commit()
+        self._broadcast_status()
+        return True
+
+    def _auto_resume_empty_order_snapshot_pause(self, now: datetime) -> bool:
+        """Recover the one reconciliation pause that has no order ambiguity."""
+        with self._state_lock:
+            if (
+                not self.risk.paused
+                or self.risk.kill_switch
+                or self.risk.pause_reason
+                != _EMPTY_ORDER_SNAPSHOT_RECONCILIATION_REASON
+            ):
+                return False
+            paused_at = self.risk.paused_at
+        if paused_at is None:
+            return False
+        if paused_at.tzinfo is None:
+            paused_at = paused_at.replace(tzinfo=timezone.utc)
+        if now - paused_at < timedelta(
+            seconds=_UNKNOWN_SUBMISSION_RESUME_GRACE_SECONDS
+        ):
+            return False
+
+        # Keep order submission serialized until the verified resume is durable.
+        # resume_after_verification supplies the existing two independent empty
+        # broker proofs, position/tracked-entry checks, and safety-generation CAS.
+        with self._trade_svc.submission_guard():
+            with self._state_lock:
+                if (
+                    not self.risk.paused
+                    or self.risk.kill_switch
+                    or self.risk.pause_reason
+                    != _EMPTY_ORDER_SNAPSHOT_RECONCILIATION_REASON
+                ):
+                    return False
+            def persist_resumed_state() -> None:
+                with self._db_session() as db:
+                    self._state_svc.stage(db, self.engine, self.risk)
+                    record_trade_event(
+                        db,
+                        event_type="RISK_AUTO_RESUMED",
+                        status="RUNNING",
+                        message=_EMPTY_ORDER_SNAPSHOT_RECONCILIATION_REASON,
+                        payload={
+                            "source": "verified_empty_order_snapshot_reconciliation",
+                        },
+                    )
+                    db.commit()
+
+            try:
+                resumed, error = self.resume_after_verification(
+                    on_resumed=persist_resumed_state,
+                )
+            except Exception:
+                logger.exception(
+                    "verified empty-order snapshot auto-resume could not be persisted"
+                )
+                self._persist_risk_pause_best_effort()
+                self._broadcast_status()
+                return False
+            if not resumed:
+                if error:
+                    logger.info(
+                        "verified empty-order snapshot auto-resume deferred: %s",
+                        error,
+                    )
+                return False
+
+        logger.info(
+            "auto-resumed trading after verified empty order snapshot recovery"
+        )
         self._broadcast_status()
         return True
 

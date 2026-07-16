@@ -5,6 +5,7 @@ from typing import Any, cast
 import asyncio
 import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
@@ -90,6 +91,29 @@ class TestAppRunner:
 
         assert runner._latch_live_order_reconciliation(inventory, []) is True
         assert runner.risk.protective_exit_permitted is False
+
+    def test_order_snapshot_fetch_failure_latches_exact_recovery_reason(
+        self,
+        monkeypatch,
+    ) -> None:
+        class Broker:
+            def get_today_orders(self) -> list[object]:
+                raise RuntimeError("snapshot unavailable")
+
+        runner = AppRunner()
+        runner.broker = cast(Any, Broker())
+        monkeypatch.setattr(runner, "_persist_risk_pause_best_effort", lambda: None)
+        monkeypatch.setattr(runner, "_record_risk_event", lambda _reason: None)
+        monkeypatch.setattr(runner, "_broadcast_status", lambda: None)
+
+        assert runner.sync_today_orders_from_broker(force=True) == 0
+        assert runner.risk.paused is True
+        assert (
+            runner.risk.pause_reason
+            == runner_module._EMPTY_ORDER_SNAPSHOT_RECONCILIATION_REASON
+        )
+        assert runner.risk.pause_auto_resumable is False
+        assert runner.diagnostics()["order_sync_succeeded"] is False
 
     def test_failed_protective_exit_reverification_revokes_prior_permission(
         self,
@@ -3061,6 +3085,299 @@ class TestAppRunner:
 
         assert resumed is False
         assert runner.risk.paused is True
+
+    def test_empty_order_snapshot_pause_waits_for_grace_and_never_uses_blind_resume(
+        self,
+        monkeypatch,
+    ) -> None:
+        runner = AppRunner()
+        now = datetime.now(timezone.utc)
+        reason = runner_module._EMPTY_ORDER_SNAPSHOT_RECONCILIATION_REASON
+        runner.engine.params = StrategyParams(
+            symbol="AUTO-GRACE.US",
+            market="US",
+            auto_resume_minutes=0,
+        )
+        # Even incorrectly persisted legacy metadata must not route this
+        # operational pause through the timer-only resume path.
+        runner.risk.pause(
+            reason,
+            auto_resumable=True,
+            paused_at=now - timedelta(seconds=59),
+        )
+        monkeypatch.setattr(
+            runner,
+            "resume_after_verification",
+            lambda *, on_resumed=None: pytest.fail(
+                "broker verification ran inside the 60s grace"
+            ),
+        )
+
+        assert runner._auto_resume_pause_if_due(now=now) is False
+        assert runner.risk.paused is True
+        assert runner.risk.pause_reason == reason
+
+    def test_empty_order_snapshot_pause_auto_resumes_after_two_complete_proofs(
+        self,
+        monkeypatch,
+    ) -> None:
+        from app.models import (
+            OrderRecord,
+            RuntimeState,
+            RuntimeStateSnapshot,
+            TrackedEntry,
+            TradeEvent,
+        )
+
+        symbol = "AUTO-PROOF.US"
+        reason = runner_module._EMPTY_ORDER_SNAPSHOT_RECONCILIATION_REASON
+
+        def clean() -> None:
+            with database.SessionLocal() as db:
+                db.query(OrderRecord).filter(
+                    OrderRecord.status.in_(["SUBMITTED", "PARTIAL_FILLED"])
+                ).delete(synchronize_session=False)
+                db.query(TradeEvent).filter(
+                    TradeEvent.event_type == "RISK_AUTO_RESUMED",
+                    TradeEvent.message == reason,
+                ).delete(synchronize_session=False)
+                db.query(RuntimeStateSnapshot).filter(
+                    RuntimeStateSnapshot.symbol == symbol
+                ).delete(synchronize_session=False)
+                db.query(RuntimeState).filter(
+                    RuntimeState.symbol == symbol
+                ).delete(synchronize_session=False)
+                db.query(TrackedEntry).filter(
+                    TrackedEntry.symbol == symbol
+                ).delete(synchronize_session=False)
+                db.commit()
+
+        class Broker:
+            def __init__(self) -> None:
+                self.order_reads = 0
+                self.position_reads = 0
+
+            def get_today_orders(self) -> list[object]:
+                self.order_reads += 1
+                return []
+
+            def get_positions(self) -> list[object]:
+                self.position_reads += 1
+                return []
+
+        clean()
+        try:
+            with database.SessionLocal() as db:
+                db.add(RuntimeState(symbol=symbol))
+                db.commit()
+            runner = AppRunner()
+            broker = Broker()
+            runner.broker = cast(Any, broker)
+            monkeypatch.setattr(
+                runner,
+                "_reconcile_tracked_entries_with_broker",
+                lambda *_args, **_kwargs: [],
+            )
+            runner.engine.params = StrategyParams(
+                symbol=symbol,
+                market="US",
+                auto_resume_minutes=0,
+            )
+            now = datetime.now(timezone.utc)
+            runner.risk.pause(
+                reason,
+                auto_resumable=False,
+                paused_at=now - timedelta(seconds=61),
+            )
+
+            assert runner._auto_resume_pause_if_due(now=now) is False
+            assert runner.risk.paused is True
+            assert runner.risk.pause_reason == reason
+            assert runner._unknown_submission_proof_at > 0
+
+            runner._unknown_submission_proof_at -= 6
+            assert runner._auto_resume_pause_if_due(now=now) is True
+            assert runner.risk.paused is False
+            assert broker.order_reads >= 2
+            assert broker.position_reads >= 2
+
+            with database.SessionLocal() as db:
+                event = (
+                    db.query(TradeEvent)
+                    .filter(
+                        TradeEvent.event_type == "RISK_AUTO_RESUMED",
+                        TradeEvent.message == reason,
+                    )
+                    .one()
+                )
+                assert (
+                    '"source": "verified_empty_order_snapshot_reconciliation"'
+                    in event.payload_json
+                )
+                state = (
+                    db.query(RuntimeState)
+                    .filter(RuntimeState.symbol == symbol)
+                    .one()
+                )
+                assert state.paused is False
+        finally:
+            clean()
+
+    def test_empty_order_snapshot_pause_stays_paused_when_proof_changes_state(
+        self,
+        monkeypatch,
+    ) -> None:
+        runner = AppRunner()
+        now = datetime.now(timezone.utc)
+        original_reason = runner_module._EMPTY_ORDER_SNAPSHOT_RECONCILIATION_REASON
+        changed_reason = (
+            "ORDER_RECONCILIATION_UNCERTAIN: unresolved live orders require "
+            "manual reconciliation; live_orders=AAPL.US=[appeared-1]; "
+            "representation_issues=none"
+        )
+        runner.risk.pause(
+            original_reason,
+            paused_at=now - timedelta(seconds=61),
+        )
+
+        def changed_proof(
+            *,
+            on_resumed: object | None = None,
+        ) -> tuple[bool, str]:
+            assert on_resumed is not None
+            runner.risk.pause(changed_reason)
+            return False, "live or unresolved orders still exist: appeared-1"
+
+        monkeypatch.setattr(runner, "resume_after_verification", changed_proof)
+
+        assert runner._auto_resume_pause_if_due(now=now) is False
+        assert runner.risk.paused is True
+        assert runner.risk.pause_reason == changed_reason
+
+    def test_empty_order_snapshot_resume_persistence_failure_repauses(
+        self,
+        monkeypatch,
+    ) -> None:
+        from app.models import RuntimeState, RuntimeStateSnapshot, TradeEvent
+
+        symbol = "AUTO-COMMIT-FAIL.US"
+        reason = runner_module._EMPTY_ORDER_SNAPSHOT_RECONCILIATION_REASON
+        now = datetime.now(timezone.utc)
+        paused_at = now - timedelta(seconds=61)
+
+        def clean() -> None:
+            with database.SessionLocal() as db:
+                db.query(TradeEvent).filter(
+                    TradeEvent.event_type == "RISK_AUTO_RESUMED",
+                    TradeEvent.message == reason,
+                ).delete(synchronize_session=False)
+                db.query(RuntimeStateSnapshot).filter(
+                    RuntimeStateSnapshot.symbol == symbol
+                ).delete(synchronize_session=False)
+                db.query(RuntimeState).filter(
+                    RuntimeState.symbol == symbol
+                ).delete(synchronize_session=False)
+                db.commit()
+
+        clean()
+        try:
+            with database.SessionLocal() as db:
+                db.add(
+                    RuntimeState(
+                        symbol=symbol,
+                        paused=True,
+                        pause_reason=reason,
+                        paused_at=paused_at,
+                    )
+                )
+                db.commit()
+
+            runner = AppRunner()
+            runner.engine.params = StrategyParams(symbol=symbol, market="US")
+            runner.risk.pause(reason, paused_at=paused_at)
+            monkeypatch.setattr(
+                runner,
+                "verify_operational_resume",
+                lambda: (True, ""),
+            )
+            monkeypatch.setattr(runner, "_broadcast_status", lambda: None)
+
+            @contextmanager
+            def failing_commit_session():
+                db = database.SessionLocal()
+
+                def fail_after_flush() -> None:
+                    db.flush()
+                    raise RuntimeError("commit interrupted")
+
+                monkeypatch.setattr(db, "commit", fail_after_flush)
+                try:
+                    yield db
+                finally:
+                    db.rollback()
+                    db.close()
+
+            monkeypatch.setattr(runner, "_db_session", failing_commit_session)
+
+            assert runner._auto_resume_pause_if_due(now=now) is False
+            assert runner.risk.paused is True
+            assert runner.risk.pause_reason == reason
+            assert runner.risk.paused_at == paused_at
+
+            with database.SessionLocal() as db:
+                state = (
+                    db.query(RuntimeState)
+                    .filter(RuntimeState.symbol == symbol)
+                    .one()
+                )
+                assert state.paused is True
+                assert state.pause_reason == reason
+                assert state.paused_at is not None
+                assert state.paused_at.replace(tzinfo=timezone.utc) == paused_at
+                assert (
+                    db.query(TradeEvent)
+                    .filter(
+                        TradeEvent.event_type == "RISK_AUTO_RESUMED",
+                        TradeEvent.message == reason,
+                    )
+                    .count()
+                    == 0
+                )
+        finally:
+            clean()
+
+    def test_other_order_reconciliation_pause_never_auto_resumes(
+        self,
+        monkeypatch,
+    ) -> None:
+        runner = AppRunner()
+        now = datetime.now(timezone.utc)
+        reason = (
+            "ORDER_RECONCILIATION_UNCERTAIN: unresolved live orders require "
+            "manual reconciliation; live_orders=AAPL.US=[live-1]; "
+            "representation_issues=none"
+        )
+        runner.engine.params = StrategyParams(
+            symbol="AAPL.US",
+            market="US",
+            auto_resume_minutes=1,
+        )
+        runner.risk.pause(
+            reason,
+            auto_resumable=True,
+            paused_at=now - timedelta(minutes=10),
+        )
+        monkeypatch.setattr(
+            runner,
+            "resume_after_verification",
+            lambda *, on_resumed=None: pytest.fail(
+                "ambiguous reconciliation pause was verified automatically"
+            ),
+        )
+
+        assert runner._auto_resume_pause_if_due(now=now) is False
+        assert runner.risk.paused is True
+        assert runner.risk.pause_reason == reason
 
     def test_auto_resume_pending_timeout_pause_after_broker_fill(self) -> None:
         from app import database

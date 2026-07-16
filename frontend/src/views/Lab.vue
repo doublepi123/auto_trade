@@ -439,10 +439,34 @@
                   <el-progress :percentage="shadowDayProgress" :stroke-width="8" />
                 </div>
                 <div>
-                  <span>闭环交易 {{ shadowEvaluation.closed_trades }} / {{ shadowEvaluation.minimum_closed_trades }}</span>
+                  <span>闭环交易 {{ shadowEvaluation.eligible_closed_trades }} / {{ shadowEvaluation.minimum_closed_trades }}</span>
                   <el-progress :percentage="shadowTradeProgress" :stroke-width="8" />
                 </div>
               </div>
+              <div class="shadow-evidence-summary" data-testid="shadow-evidence-excluded">
+                <span>排除交易日 {{ shadowEvaluation.excluded_trading_days }}</span>
+                <span>排除闭环交易 {{ shadowEvaluation.excluded_closed_trades }}</span>
+              </div>
+              <el-alert
+                v-if="shadowEvaluation.readiness_blockers.length"
+                title="当前阻塞"
+                :description="shadowBlockerSummary"
+                type="warning"
+                :closable="false"
+                show-icon
+                class="shadow-evidence-alert"
+                data-testid="shadow-evidence-blockers"
+              />
+              <el-alert
+                v-if="shadowEvaluation.data_quality_warnings.length"
+                title="数据质量提示"
+                :description="shadowEvaluation.data_quality_warnings.join('；')"
+                type="info"
+                :closable="false"
+                show-icon
+                class="shadow-evidence-alert"
+                data-testid="shadow-evidence-warnings"
+              />
               <el-table :data="shadowEvaluation.daily" size="small" empty-text="暂无按日证据">
                 <el-table-column prop="session_date" label="交易日" width="120" />
                 <el-table-column prop="bars" label="bar" width="80" />
@@ -450,6 +474,7 @@
                   <template #default="{ row }">{{ formatPercent(row.coverage_ratio) }}</template>
                 </el-table-column>
                 <el-table-column prop="missing_internal_bars" label="缺口" width="80" />
+                <el-table-column prop="incomplete_feature_bars" label="特征缺失" width="90" />
                 <el-table-column prop="trades" label="交易" width="80" />
                 <el-table-column prop="net_pnl" label="净收益" min-width="100" />
               </el-table>
@@ -958,8 +983,28 @@ const shadowDayProgress = computed(() => {
 
 const shadowTradeProgress = computed(() => {
   const value = shadowEvaluation.value
-  return value ? Math.min(100, Math.round(value.closed_trades / value.minimum_closed_trades * 100)) : 0
+  return value ? Math.min(100, Math.round(value.eligible_closed_trades / value.minimum_closed_trades * 100)) : 0
 })
+
+const shadowBlockerLabels: Record<string, string> = {
+  MIN_TRADING_DAYS: '完整交易日不足',
+  MIN_CLOSED_TRADES: '完整会话闭环交易不足',
+  DATA_TRADE_EVIDENCE_INVALID: '交易与决策证据无法关联',
+  DATA_TRADE_SESSION_INCOMPLETE: '残缺会话包含交易',
+  NET_PNL_NON_POSITIVE: '净收益尚未为正',
+  COST_STRESS_NET_PNL_NON_POSITIVE: '费用压力后净收益不为正',
+  COST_STRESS_UNAVAILABLE: '费用压力证据不可用',
+  MAX_DRAWDOWN_EXCEEDS_NET_PNL: '最大回撤超过净收益',
+  QUALITY_DATA_INCOMPLETE: '交易收益证据不完整',
+  HK_MIN_NET_EDGE: '港股目标收益不足以覆盖成本',
+  CONFIG_COST_SNAPSHOT_INCOMPLETE: '成本配置证据不完整',
+}
+
+const shadowBlockerSummary = computed(() => (
+  shadowEvaluation.value?.readiness_blockers
+    .map((item) => shadowBlockerLabels[item] ?? item)
+    .join('；') ?? ''
+))
 
 async function pollStrategyShadow() {
   const symbol = shadowConfig.value?.symbol
@@ -985,7 +1030,7 @@ async function pollStrategyShadow() {
 }
 
 function gateShare(count: number): string {
-  const total = shadowGateRows.value.reduce((sum, row) => sum + row.count, 0)
+  const total = shadowStatus.value?.metrics.bars ?? 0
   return total > 0 ? `${((count / total) * 100).toFixed(1)}%` : '0.0%'
 }
 
@@ -1255,6 +1300,19 @@ onBeforeUnmount(() => {
   margin-bottom: 6px;
   color: #4b5563;
   font-size: 13px;
+}
+
+.shadow-evidence-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+  margin: -4px 0 12px;
+  color: #6b7280;
+  font-size: 13px;
+}
+
+.shadow-evidence-alert {
+  margin-bottom: 10px;
 }
 
 .shadow-metrics-grid :deep(.el-statistic) {

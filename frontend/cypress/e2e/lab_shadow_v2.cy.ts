@@ -60,6 +60,15 @@ describe('Strategy v2 shadow lab', () => {
       .should('contain', '采集中')
       .and('contain', '交易日 7 / 20')
       .and('contain', '闭环交易 4 / 50')
+    cy.get('[data-testid="shadow-evidence-excluded"]')
+      .should('contain', '排除交易日 1')
+      .and('contain', '排除闭环交易 2')
+    cy.get('[data-testid="shadow-evidence-blockers"]')
+      .should('contain', '完整交易日不足')
+      .and('contain', '完整会话闭环交易不足')
+      .and('contain', '费用压力后净收益不为正')
+    cy.get('[data-testid="shadow-evidence-warnings"]')
+      .should('contain', '1 internal bars missing')
 
     cy.get('[data-testid="shadow-gates"]')
       .should('contain', 'WAIT_BREACH')
@@ -110,7 +119,7 @@ describe('Strategy v2 shadow lab', () => {
           slippage_bps: 2,
           estimated_fee_rate_us: 0.0005,
           estimated_fee_rate_hk: 0.003,
-          algorithm_version: 'strategy-v2-rth-mr-v2-contiguous',
+          algorithm_version: 'strategy-v2-rth-mr-v3-evidence',
           mode: 'SHADOW',
           order_submission_allowed: false,
           allow_position_addons: false,

@@ -124,7 +124,7 @@ class TestStrategyV2ShadowApi:
         body = response.json()
         assert body["enabled"] is True
         assert body["max_adx"] == 19.5
-        assert body["algorithm_version"] == "strategy-v2-rth-mr-v2-contiguous"
+        assert body["algorithm_version"] == "strategy-v2-rth-mr-v3-evidence"
         assert body["estimated_fee_rate_us"] == 0.0005
         assert body["mode"] == "SHADOW"
         assert body["order_submission_allowed"] is False
@@ -525,6 +525,57 @@ class TestStrategyV2ShadowApi:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         config = self.client.get("/api/strategy-shadow/config").json()
+
+        def add_linked_trade(
+            db: Session,
+            *,
+            key: str,
+            entry_at: datetime,
+            exit_at: datetime,
+            exit_price: float,
+            gross_pnl: float,
+            net_pnl: float,
+        ) -> None:
+            entry = StrategyV2ShadowDecision(
+                idempotency_key=f"{key}-entry",
+                symbol="AAPL.US",
+                market="US",
+                config_version=config["config_version"],
+                session_date=entry_at.date(),
+                bar_at=entry_at,
+                action="FILL_ENTRY",
+                close_price=100.0,
+            )
+            exit_row = StrategyV2ShadowDecision(
+                idempotency_key=f"{key}-exit",
+                symbol="AAPL.US",
+                market="US",
+                config_version=config["config_version"],
+                session_date=exit_at.date(),
+                bar_at=exit_at,
+                action="EXIT_LONG",
+                close_price=exit_price,
+            )
+            db.add_all([entry, exit_row])
+            db.flush()
+            db.add(StrategyV2ShadowTrade(
+                symbol="AAPL.US",
+                config_version=config["config_version"],
+                entry_decision_id=entry.id,
+                exit_decision_id=exit_row.id,
+                status="CLOSED",
+                entry_at=entry_at,
+                exit_at=exit_at,
+                entry_price=100.0,
+                exit_price=exit_price,
+                quantity=1.0,
+                gross_pnl=gross_pnl,
+                estimated_fees=0.1,
+                net_pnl=net_pnl,
+                fee_source="ESTIMATED",
+                estimated_fee_rate=0.0005,
+            ))
+
         complete_days = [
             StrategyV2ShadowDailyEvidence(
                 session_date=(_NOW - timedelta(days=index)).date(),
@@ -551,24 +602,18 @@ class TestStrategyV2ShadowApi:
             staticmethod(lambda _decisions, _trades: evidence),
         )
         with self.session_factory() as db:
-            db.add_all([
-                StrategyV2ShadowTrade(
-                    symbol="AAPL.US",
-                    config_version=config["config_version"],
-                    status="CLOSED",
-                    entry_at=_NOW - timedelta(minutes=2),
-                    exit_at=_NOW - timedelta(minutes=1),
-                    entry_price=100.0,
+            first_entry = _NOW - timedelta(minutes=90)
+            for index in range(50):
+                entry_at = first_entry + timedelta(minutes=index * 2)
+                add_linked_trade(
+                    db,
+                    key=f"quality-{index}",
+                    entry_at=entry_at,
+                    exit_at=entry_at + timedelta(minutes=1),
                     exit_price=101.0,
-                    quantity=1.0,
                     gross_pnl=1.0,
-                    estimated_fees=0.1,
                     net_pnl=0.9,
-                    fee_source="ESTIMATED",
-                    estimated_fee_rate=0.0005,
                 )
-                for _ in range(50)
-            ])
             db.commit()
 
         ready = self.client.get(
@@ -579,6 +624,9 @@ class TestStrategyV2ShadowApi:
         assert ready["status"] == "READY_FOR_REVIEW"
         assert ready["observed_trading_days"] == 20
         assert ready["closed_trades"] == 50
+        assert ready["eligible_closed_trades"] == 50
+        assert ready["excluded_closed_trades"] == 0
+        assert ready["excluded_trading_days"] == 0
         assert ready["minimum_session_coverage_ratio"] == pytest.approx(0.995)
         assert ready["readiness_blockers"] == []
         assert ready["quality"]["total_net_pnl"] == pytest.approx(45.0)
@@ -598,8 +646,16 @@ class TestStrategyV2ShadowApi:
         assert losing["status"] == "COLLECTING"
         assert "NET_PNL_NON_POSITIVE" in losing["readiness_blockers"]
 
+        with self.session_factory() as db:
+            for trade in db.query(StrategyV2ShadowTrade).all():
+                trade.exit_price = 101.0
+                trade.gross_pnl = 1.0
+                trade.net_pnl = 0.9
+            db.commit()
+
+        incomplete_day = _NOW + timedelta(days=3)
         evidence.append(complete_days[0].model_copy(update={
-            "session_date": (_NOW + timedelta(days=1)).date(),
+            "session_date": incomplete_day.date(),
             "coverage_ratio": 0.80,
             "partial_start": True,
             "complete_session": False,
@@ -609,8 +665,32 @@ class TestStrategyV2ShadowApi:
             params={"symbol": "AAPL.US"},
         ).json()
         assert incomplete["observed_trading_days"] == 20
-        assert "DATA_PARTIAL_SESSIONS" in incomplete["readiness_blockers"]
-        assert "DATA_SESSION_COVERAGE" in incomplete["readiness_blockers"]
+        assert incomplete["excluded_trading_days"] == 1
+        assert incomplete["status"] == "READY_FOR_REVIEW"
+        assert "DATA_PARTIAL_SESSIONS" not in incomplete["readiness_blockers"]
+        assert "DATA_SESSION_COVERAGE" not in incomplete["readiness_blockers"]
+        assert any("partial session" in item for item in incomplete["data_quality_warnings"])
+
+        with self.session_factory() as db:
+            add_linked_trade(
+                db,
+                key="excluded-loss",
+                entry_at=incomplete_day - timedelta(minutes=90),
+                exit_at=incomplete_day - timedelta(minutes=89),
+                exit_price=1.0,
+                gross_pnl=-99.0,
+                net_pnl=-99.1,
+            )
+            db.commit()
+
+        excluded_loss = self.client.get(
+            "/api/strategy-shadow/evaluation",
+            params={"symbol": "AAPL.US"},
+        ).json()
+        assert excluded_loss["eligible_closed_trades"] == 50
+        assert excluded_loss["excluded_closed_trades"] == 1
+        assert excluded_loss["status"] == "COLLECTING"
+        assert "DATA_TRADE_SESSION_INCOMPLETE" in excluded_loss["readiness_blockers"]
 
     @staticmethod
     def _shadow_counts(db: Session) -> tuple[int, int, int, int]:

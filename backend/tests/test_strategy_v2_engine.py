@@ -30,17 +30,19 @@ def test_minimum_profit_target_covers_round_trip_costs_and_edge_buffer() -> None
 
 def _feature(
     index: int,
-    zscore_1m: float,
+    zscore_1m: float | None,
     *,
     timestamp: datetime | None = None,
     open_price: float = 100.0,
     high: float | None = None,
     low: float | None = None,
-    zscore_5m: float = -0.6,
-    adx: float = 15.0,
-    realized_vol: float = 0.40,
-    sigma_1m: float = 0.001,
-    sigma_5m: float = 0.001,
+    zscore_5m: float | None = -0.6,
+    adx: float | None = 15.0,
+    realized_vol: float | None = 0.40,
+    sigma_1m: float | None = 0.001,
+    sigma_5m: float | None = 0.001,
+    vwap_1m: float | None = 100.5,
+    vwap_5m: float | None = 100.5,
     ready: bool = True,
     gate_reasons: tuple[str, ...] = (),
     volume: float = 1000.0,
@@ -60,12 +62,12 @@ def _feature(
         session_day=at.astimezone(_NEW_YORK).date(),
         bar_index=index,
         bar_timestamp_5m=at - timedelta(minutes=at.minute % 5),
-        session_vwap_1m=100.5,
+        session_vwap_1m=vwap_1m,
         residual_1m=-0.001,
         residual_mean_1m=0.0,
         residual_sigma_1m=sigma_1m,
         zscore_1m=zscore_1m,
-        session_vwap_5m=100.5,
+        session_vwap_5m=vwap_5m,
         residual_5m=-0.001,
         residual_mean_5m=0.0,
         residual_sigma_5m=sigma_5m,
@@ -263,6 +265,72 @@ def test_gate_boundaries_and_residual_sigma_floor_are_inclusive() -> None:
     )
     assert "RESIDUAL_SIGMA_1M_TOO_LOW" in engine.entry_gate_reasons(
         _feature(3, -2.1, sigma_1m=0.00079)
+    )
+
+
+def test_warmup_reasons_are_not_double_counted_as_regime_blocks() -> None:
+    engine = StrategyV2Engine()
+    warmup_reasons = (
+        "VWAP_5M_UNAVAILABLE",
+        "ZSCORE_1M_WARMUP",
+        "ZSCORE_5M_WARMUP",
+        "ADX_5M_WARMUP",
+        "REALIZED_VOL_1M_WARMUP",
+    )
+    reasons = engine.entry_gate_reasons(_feature(
+        4,
+        -2.1,
+        zscore_5m=None,
+        adx=None,
+        realized_vol=None,
+        sigma_1m=None,
+        sigma_5m=None,
+        vwap_1m=None,
+        vwap_5m=None,
+        ready=False,
+        gate_reasons=warmup_reasons,
+    ))
+
+    assert set(warmup_reasons).issubset(reasons)
+    assert "RESIDUAL_SIGMA_1M_TOO_LOW" not in reasons
+    assert "RESIDUAL_SIGMA_5M_TOO_LOW" not in reasons
+    assert "ZSCORE_5M_NOT_OVERSOLD" not in reasons
+    assert "ADX_REGIME_BLOCKED" not in reasons
+    assert "REALIZED_VOL_REGIME_BLOCKED" not in reasons
+
+
+def test_ready_flag_cannot_bypass_missing_indicator_gates() -> None:
+    engine = StrategyV2Engine()
+    feature = _feature(
+        5,
+        None,
+        zscore_5m=None,
+        adx=None,
+        realized_vol=None,
+        sigma_1m=None,
+        sigma_5m=None,
+        vwap_1m=None,
+        vwap_5m=None,
+        ready=True,
+        gate_reasons=(),
+    )
+
+    reasons = engine.entry_gate_reasons(feature)
+    result = engine.on_feature(feature)
+
+    assert {
+        "VWAP_1M_UNAVAILABLE",
+        "ZSCORE_1M_WARMUP",
+        "VWAP_5M_UNAVAILABLE",
+        "ZSCORE_5M_WARMUP",
+        "ADX_5M_WARMUP",
+        "REALIZED_VOL_1M_WARMUP",
+    }.issubset(reasons)
+    assert result.decisions[-1].action == StrategyV2Action.WAIT
+    assert result.decisions[-1].reason == "VWAP_1M_UNAVAILABLE"
+    assert all(
+        decision.action != StrategyV2Action.ARM_LONG
+        for decision in result.decisions
     )
 
 

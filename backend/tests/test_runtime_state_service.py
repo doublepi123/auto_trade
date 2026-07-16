@@ -171,6 +171,63 @@ class TestRuntimeStateService:
         assert state.paused_at.replace(tzinfo=timezone.utc) == paused_at
         assert state.pause_auto_resumable is True
 
+    def test_stage_keeps_runtime_state_and_snapshot_in_caller_transaction(
+        self,
+    ) -> None:
+        self._cleanup()
+        engine = StrategyEngine(StrategyParams(symbol="ATOMIC.US", market="US"))
+        risk = RiskController()
+        risk.pause("ORDER_EXECUTION_BLOCKED: keep persisted pause")
+        state_svc = RuntimeStateService()
+
+        db = self._get_db()
+        try:
+            state_svc.persist(db, engine, risk)
+        finally:
+            db.close()
+
+        risk.resume()
+        db = self._get_db()
+        try:
+            state_svc.stage(db, engine, risk)
+            db.flush()
+            assert (
+                db.query(RuntimeState)
+                .filter(RuntimeState.symbol == "ATOMIC.US")
+                .one()
+                .paused
+                is False
+            )
+            assert (
+                db.query(RuntimeStateSnapshot)
+                .filter(RuntimeStateSnapshot.symbol == "ATOMIC.US")
+                .count()
+                == 2
+            )
+            db.rollback()
+        finally:
+            db.close()
+
+        db = self._get_db()
+        try:
+            state = (
+                db.query(RuntimeState)
+                .filter(RuntimeState.symbol == "ATOMIC.US")
+                .one()
+            )
+            assert state.paused is True
+            assert state.pause_reason == (
+                "ORDER_EXECUTION_BLOCKED: keep persisted pause"
+            )
+            assert (
+                db.query(RuntimeStateSnapshot)
+                .filter(RuntimeStateSnapshot.symbol == "ATOMIC.US")
+                .count()
+                == 1
+            )
+        finally:
+            db.close()
+
     def test_persist_risk_saves_only_risk(self) -> None:
         self._cleanup()
         db = self._get_db()

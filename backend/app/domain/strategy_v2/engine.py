@@ -481,19 +481,42 @@ class StrategyV2Engine:
         reasons = list(feature.gate_reasons)
         if not feature.ready and not reasons:
             reasons.append("FEATURES_NOT_READY")
-        if feature.residual_sigma_1m is None or feature.residual_sigma_1m < self.config.residual_sigma_min:
+        if feature.session_vwap_1m is None:
+            reasons.append("VWAP_1M_UNAVAILABLE")
+        if feature.residual_sigma_1m is None or feature.zscore_1m is None:
+            reasons.append("ZSCORE_1M_WARMUP")
+        if feature.session_vwap_5m is None:
+            reasons.append("VWAP_5M_UNAVAILABLE")
+        if feature.residual_sigma_5m is None or feature.zscore_5m is None:
+            reasons.append("ZSCORE_5M_WARMUP")
+        if feature.adx_5m is None:
+            reasons.append("ADX_5M_WARMUP")
+        if feature.realized_vol_1m is None:
+            reasons.append("REALIZED_VOL_1M_WARMUP")
+        if (
+            feature.residual_sigma_1m is not None
+            and feature.residual_sigma_1m < self.config.residual_sigma_min
+        ):
             reasons.append("RESIDUAL_SIGMA_1M_TOO_LOW")
-        if feature.residual_sigma_5m is None or feature.residual_sigma_5m < self.config.residual_sigma_min:
+        if (
+            feature.residual_sigma_5m is not None
+            and feature.residual_sigma_5m < self.config.residual_sigma_min
+        ):
             reasons.append("RESIDUAL_SIGMA_5M_TOO_LOW")
-        if feature.zscore_5m is None or feature.zscore_5m > self.config.five_minute_zscore_max:
+        if (
+            feature.zscore_5m is not None
+            and feature.zscore_5m > self.config.five_minute_zscore_max
+        ):
             reasons.append("ZSCORE_5M_NOT_OVERSOLD")
-        if feature.adx_5m is None or feature.adx_5m > self.config.adx_max:
+        if feature.adx_5m is not None and feature.adx_5m > self.config.adx_max:
             reasons.append("ADX_REGIME_BLOCKED")
         realized_vol = feature.realized_vol_1m
         if (
-            realized_vol is None
-            or realized_vol < self.config.realized_vol_min
-            or realized_vol > self.config.realized_vol_max
+            realized_vol is not None
+            and (
+                realized_vol < self.config.realized_vol_min
+                or realized_vol > self.config.realized_vol_max
+            )
         ):
             reasons.append("REALIZED_VOL_REGIME_BLOCKED")
         if self._closing_window_reached(
