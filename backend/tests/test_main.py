@@ -82,6 +82,7 @@ async def test_llm_storage_maintenance_waits_for_worker_during_cancel(
 
 def test_strategy_v2_shadow_tick_is_isolated_from_execution(monkeypatch) -> None:
     calls: list[dict[str, object]] = []
+    collections: list[dict[str, object]] = []
 
     class FakeQuery:
         def __init__(self, values: list[tuple[str]]) -> None:
@@ -138,6 +139,9 @@ def test_strategy_v2_shadow_tick_is_isolated_from_execution(monkeypatch) -> None
             if kwargs["symbol"] == "MSFT.US":
                 raise RuntimeError("isolated symbol failure")
 
+        def collect_forward_validation(self, **kwargs: object) -> None:
+            collections.append(kwargs)
+
     monkeypatch.setattr(main_module, "SessionLocal", lambda: db)
     monkeypatch.setattr(main_module, "StrategyService", FakeStrategyService)
     monkeypatch.setattr(main_module, "get_runner", lambda: runner)
@@ -153,6 +157,7 @@ def test_strategy_v2_shadow_tick_is_isolated_from_execution(monkeypatch) -> None
         {"symbol": "MSFT.US", "market": "US"},
         {"symbol": "NVDA.US", "market": "US"},
     ]
+    assert collections == calls
     assert db.rolled_back == 1
     assert db.closed is True
     runner._trade_svc.execute.assert_not_called()

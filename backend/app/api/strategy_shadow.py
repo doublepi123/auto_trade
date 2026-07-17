@@ -13,6 +13,8 @@ from app.database import get_db
 from app.schemas import (
     StrategyV2AdxChallengerRequest,
     StrategyV2AdxChallengerResponse,
+    StrategyV2ForwardRegistrationRequest,
+    StrategyV2ForwardValidationResponse,
     StrategyV2ShadowConfigResponse,
     StrategyV2ShadowConfigUpdate,
     StrategyV2ShadowDecisionPage,
@@ -140,6 +142,60 @@ def compare_shadow_adx_challengers(
 ) -> StrategyV2AdxChallengerResponse:
     try:
         return StrategyV2ShadowService(db).compare_adx_challengers(payload)
+    except ValueError as exc:
+        raise _bad_request(exc) from exc
+
+
+@router.post(
+    "/forward-validation/register",
+    response_model=StrategyV2ForwardValidationResponse,
+)
+def register_forward_validation(
+    request: Request,
+    payload: StrategyV2ForwardRegistrationRequest,
+    db: Session = Depends(get_db),
+    audit: AuditLogger = Depends(get_audit_logger),
+) -> StrategyV2ForwardValidationResponse:
+    actor_hash, source_ip = extract_actor(request)
+    result = "SUCCESS"
+    summary: dict[str, Any] = {
+        "symbol": payload.symbol,
+        "candidate_algorithm_version": payload.candidate_algorithm_version,
+        "source_config_version": payload.source_config_version,
+    }
+    try:
+        service = StrategyV2ShadowService(db)
+        service.register_forward_validation(payload)
+        return service.get_forward_validation(payload.symbol)
+    except ValueError as exc:
+        result = "FAILED"
+        summary["detail"] = str(exc)
+        raise _bad_request(exc) from exc
+    except Exception as exc:
+        result = "FAILED"
+        summary["detail"] = type(exc).__name__
+        raise
+    finally:
+        audit.record(
+            "STRATEGY_V2_FORWARD_VALIDATION_REGISTER",
+            severity="INFO",
+            actor_hash=actor_hash,
+            source_ip=source_ip,
+            request_summary=summary,
+            result=result,
+        )
+
+
+@router.get(
+    "/forward-validation",
+    response_model=StrategyV2ForwardValidationResponse,
+)
+def get_forward_validation(
+    symbol: str = Query(max_length=50),
+    db: Session = Depends(get_db),
+) -> StrategyV2ForwardValidationResponse:
+    try:
+        return StrategyV2ShadowService(db).get_forward_validation(symbol)
     except ValueError as exc:
         raise _bad_request(exc) from exc
 

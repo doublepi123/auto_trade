@@ -5,10 +5,28 @@ import type {
   StrategyShadowConfig,
   StrategyShadowConfigUpdate,
   StrategyShadowDecisionPage,
+  StrategyShadowForwardValidationRegisterRequest,
+  StrategyShadowForwardValidationResponse,
   StrategyShadowStatus,
   StrategyShadowEvaluation,
   StrategyShadowVersion,
 } from '../types'
+
+export async function getStrategyShadowForwardValidation(
+  symbol?: string,
+): Promise<StrategyShadowForwardValidationResponse> {
+  const response = await api.get('/api/strategy-shadow/forward-validation', {
+    params: symbol ? { symbol } : {},
+  })
+  return response.data
+}
+
+export async function registerStrategyShadowForwardValidation(
+  payload: StrategyShadowForwardValidationRegisterRequest,
+): Promise<StrategyShadowForwardValidationResponse> {
+  const response = await api.post('/api/strategy-shadow/forward-validation/register', payload)
+  return response.data
+}
 
 export async function evaluateStrategyShadowAdxChallengers(
   payload: StrategyShadowAdxChallengerRequest,

@@ -8,7 +8,7 @@ from collections import Counter
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Any, Protocol, Sequence
+from typing import Any, Literal, Protocol, Sequence
 
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
@@ -36,6 +36,8 @@ from app.domain.strategy_v2 import (
 from app.platform.strategy_quality import strategy_quality_report
 from app.models import (
     StrategyConfig,
+    StrategyV2ForwardEvidence,
+    StrategyV2ForwardRegistration,
     StrategyV2ShadowConfig,
     StrategyV2ShadowDecision,
     StrategyV2ShadowState,
@@ -47,6 +49,10 @@ from app.schemas import (
     StrategyV2AdxChallengerRequest,
     StrategyV2AdxChallengerResponse,
     StrategyV2AdxChallengerResult,
+    StrategyV2ForwardDailyEvidence,
+    StrategyV2ForwardRegistrationRequest,
+    StrategyV2ForwardRegistrationResponse,
+    StrategyV2ForwardValidationResponse,
     StrategyV2ShadowConfigResponse,
     StrategyV2ShadowConfigUpdate,
     StrategyV2ShadowConfigValues,
@@ -112,6 +118,12 @@ _ADX_CHALLENGER_VALUES = (20.0, 25.0, 30.0)
 _MIN_CHALLENGER_COMPLETE_SESSIONS = 5
 _MAX_CHALLENGER_COMPLETE_SESSIONS = 20
 _MIN_WARMUP_CAUSAL_PAIRS = 5
+_FORWARD_CANDIDATE_VERSION = "strategy-v2-causal-trend-prewarm-v1"
+_FORWARD_EVALUATOR_VERSION = "strategy-v2-forward-evaluator-v2"
+_FORWARD_READY_PAIRS = 5
+_FORWARD_MATURE_PAIRS = 20
+_FORWARD_FINALIZE_START_MINUTES = 10
+_FORWARD_INCOMPLETE_DEADLINE_MINUTES = 14
 _FEATURE_NOT_READY_REASONS = frozenset({
     "FEATURES_NOT_READY",
     "SESSION_DATA_INCOMPLETE",
@@ -827,6 +839,1187 @@ class StrategyV2ShadowService:
             candidates=results,
             warmup_diagnostic=warmup_diagnostic,
         )
+
+    def register_forward_validation(
+        self,
+        payload: StrategyV2ForwardRegistrationRequest,
+        *,
+        now: datetime | None = None,
+    ) -> StrategyV2ForwardRegistrationResponse:
+        """Freeze the one prospective warm-up candidate without touching shadow state."""
+        symbol = self._resolve_symbol(payload.symbol)
+        existing = self.db.query(StrategyV2ForwardRegistration).filter(
+            StrategyV2ForwardRegistration.symbol == symbol,
+        ).first()
+        if existing is not None:
+            if (
+                existing.candidate_algorithm_version
+                != payload.candidate_algorithm_version
+                or existing.source_config_version != payload.source_config_version
+                or existing.evaluator_digest != self._forward_evaluator_digest()
+                or not self._forward_spec_matches(existing)
+            ):
+                raise ValueError(
+                    "strategy v2 forward candidate was already registered with a different definition"
+                )
+            return self._forward_registration_response(existing)
+
+        config = self.db.query(StrategyV2ShadowConfig).filter(
+            StrategyV2ShadowConfig.symbol == symbol
+        ).first()
+        if config is None:
+            raise ValueError("strategy v2 shadow config was not found for symbol")
+        source_version = self._resolve_existing_config_version(
+            symbol,
+            payload.source_config_version,
+        )
+        if source_version != self._config_version(config):
+            raise ValueError("forward validation requires the current shadow config version")
+        if not config.enabled:
+            raise ValueError("forward validation requires an enabled shadow config")
+        state = self.db.query(StrategyV2ShadowState).filter(
+            StrategyV2ShadowState.symbol == symbol
+        ).first()
+        open_trade = self._open_trade(symbol)
+        if state is None or state.config_version != source_version:
+            raise ValueError("forward validation requires an activated current shadow state")
+        if (
+            open_trade is not None
+            or state.open_trade_id is not None
+            or state.phase == StrategyV2State.LONG.value
+        ):
+            raise ValueError("forward validation cannot register during a virtual position")
+        params = self._version_params(symbol, source_version)
+        if params.get("algorithm_version") != _ALGORITHM_VERSION:
+            raise ValueError("forward validation source algorithm version is unsupported")
+        registered_at = _as_utc(now or datetime.now(timezone.utc))
+        market = "HK" if symbol.endswith(".HK") else "US"
+        spec = self._forward_candidate_spec(source_version, params)
+        registration = StrategyV2ForwardRegistration(
+            symbol=symbol,
+            market=market,
+            candidate_algorithm_version=_FORWARD_CANDIDATE_VERSION,
+            source_config_version=source_version,
+            evaluator_digest=self._forward_evaluator_digest(),
+            candidate_spec_json=json.dumps(
+                spec,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            registered_at=registered_at,
+            eligible_after=self._forward_eligible_after(market, registered_at),
+        )
+        self.db.add(registration)
+        try:
+            self.db.commit()
+        except IntegrityError:
+            self.db.rollback()
+            existing = self.db.query(StrategyV2ForwardRegistration).filter(
+                StrategyV2ForwardRegistration.symbol == symbol,
+            ).first()
+            if (
+                existing is None
+                or existing.candidate_algorithm_version != _FORWARD_CANDIDATE_VERSION
+                or existing.source_config_version != source_version
+                or existing.evaluator_digest != self._forward_evaluator_digest()
+                or not self._forward_spec_matches(existing)
+            ):
+                raise ValueError(
+                    "strategy v2 forward candidate registration conflicts with an existing definition"
+                )
+            return self._forward_registration_response(existing)
+        self.db.refresh(registration)
+        return self._forward_registration_response(registration)
+
+    def get_forward_validation(
+        self,
+        symbol: str,
+    ) -> StrategyV2ForwardValidationResponse:
+        """Read only materialized prospective evidence; never replay or persist here."""
+        normalized = self._resolve_symbol(symbol)
+        registration = self.db.query(StrategyV2ForwardRegistration).filter(
+            StrategyV2ForwardRegistration.symbol == normalized,
+        ).first()
+        if registration is None:
+            return StrategyV2ForwardValidationResponse(status="NOT_REGISTERED")
+
+        rows = self.db.query(StrategyV2ForwardEvidence).filter(
+            StrategyV2ForwardEvidence.registration_id == registration.id
+        ).order_by(
+            StrategyV2ForwardEvidence.target_session_date.asc(),
+            StrategyV2ForwardEvidence.id.asc(),
+        ).all()
+        blockers: list[str] = []
+        expected_market = "HK" if normalized.endswith(".HK") else "US"
+        if (
+            registration.market != expected_market
+            or registration.candidate_algorithm_version
+            != _FORWARD_CANDIDATE_VERSION
+            or not re.fullmatch(r"[0-9a-f]{64}", registration.evaluator_digest)
+            or not re.fullmatch(
+                r"[0-9a-f]{64}",
+                registration.source_config_version,
+            )
+        ):
+            blockers.append("REGISTRATION_METADATA_INVALID")
+        if (
+            registration.evaluator_digest != self._forward_evaluator_digest()
+            or not self._forward_spec_matches(registration)
+        ):
+            blockers.append("EVALUATOR_DEFINITION_MISMATCH")
+        try:
+            expected_eligible_after = self._forward_eligible_after(
+                expected_market,
+                registration.registered_at,
+            )
+        except ValueError:
+            blockers.append("REGISTRATION_BOUNDARY_INVALID")
+        else:
+            if _as_utc(registration.eligible_after) != expected_eligible_after:
+                blockers.append("REGISTRATION_BOUNDARY_INVALID")
+
+        daily: list[StrategyV2ForwardDailyEvidence] = []
+        baseline_metrics: list[tuple[StrategyV2ShadowMetrics, list[float]]] = []
+        candidate_metrics: list[tuple[StrategyV2ShadowMetrics, list[float]]] = []
+        valid_included = 0
+        market_session = get_session(expected_market)
+        for row in rows:
+            baseline_daily: StrategyV2WarmupDaily | None = None
+            candidate_daily: StrategyV2WarmupDaily | None = None
+            baseline_metric: StrategyV2ShadowMetrics | None = None
+            candidate_metric: StrategyV2ShadowMetrics | None = None
+            if (
+                not self._is_sha256(row.evidence_digest_sha256)
+                or self._forward_evidence_digest(row)
+                != row.evidence_digest_sha256
+            ):
+                blockers.append("EVIDENCE_DIGEST_MISMATCH")
+            if row.disposition not in {"INCLUDED", "EXCLUDED"}:
+                blockers.append("EVIDENCE_DISPOSITION_INVALID")
+            target_open = _as_utc(row.target_open_at)
+            expected_target_open = datetime.combine(
+                row.target_session_date,
+                market_session.rth_open,
+                tzinfo=market_session.timezone,
+            ).astimezone(timezone.utc)
+            if (
+                target_open < _as_utc(registration.eligible_after)
+                or target_open != expected_target_open
+                or not market_session.is_rth(target_open)
+                or market_session.trade_day(target_open) != row.target_session_date
+            ):
+                blockers.append("EVIDENCE_TARGET_BOUNDARY_INVALID")
+            if row.disposition == "INCLUDED":
+                try:
+                    if (
+                        self._forward_collection_phase(
+                            registration.market,
+                            _as_utc(row.evaluated_at),
+                        )
+                        != "FINALIZE"
+                        or market_session.trade_day(_as_utc(row.evaluated_at))
+                        != row.target_session_date
+                        or row.structural_failure
+                        or bool(row.exclusion_reason)
+                        or row.seed_session_date is None
+                        or next_session_open(
+                            registration.market,
+                            datetime.combine(
+                                row.seed_session_date,
+                                market_session.close_time(row.seed_session_date),
+                                tzinfo=market_session.timezone,
+                            ).astimezone(timezone.utc),
+                        )
+                        != target_open
+                        or not row.same_target_bars
+                        or not self._is_sha256(row.seed_bars_sha256)
+                        or not self._is_sha256(row.target_bars_sha256)
+                        or not self._is_sha256(row.baseline_input_sha256)
+                        or not self._is_sha256(row.candidate_input_sha256)
+                        or not self._is_sha256(row.baseline_result_sha256)
+                        or not self._is_sha256(row.candidate_result_sha256)
+                        or row.target_bars_sha256 != row.baseline_input_sha256
+                        or row.target_bars_sha256 != row.candidate_input_sha256
+                        or self._forward_text_hash(row.baseline_result_json)
+                        != row.baseline_result_sha256
+                        or self._forward_text_hash(row.candidate_result_json)
+                        != row.candidate_result_sha256
+                        or row.baseline_replay_match is not True
+                        or row.session_local_invariant is not True
+                    ):
+                        raise ValueError("forward evidence hash mismatch")
+                    baseline_payload = json.loads(row.baseline_result_json)
+                    candidate_payload = json.loads(row.candidate_result_json)
+                    if not isinstance(baseline_payload, dict) or not isinstance(
+                        candidate_payload,
+                        dict,
+                    ):
+                        raise TypeError("forward evidence payload is not an object")
+                    baseline_daily = StrategyV2WarmupDaily.model_validate(
+                        baseline_payload["daily"]
+                    )
+                    candidate_daily = StrategyV2WarmupDaily.model_validate(
+                        candidate_payload["daily"]
+                    )
+                    baseline_metric = StrategyV2ShadowMetrics.model_validate(
+                        baseline_payload["metrics"]
+                    )
+                    candidate_metric = StrategyV2ShadowMetrics.model_validate(
+                        candidate_payload["metrics"]
+                    )
+                    baseline_net_sequence = self._forward_net_pnl_sequence(
+                        baseline_payload,
+                        baseline_metric,
+                    )
+                    candidate_net_sequence = self._forward_net_pnl_sequence(
+                        candidate_payload,
+                        candidate_metric,
+                    )
+                    if (
+                        baseline_daily.session_date != row.target_session_date
+                        or candidate_daily.session_date != row.target_session_date
+                        or baseline_daily.seed_session_date != row.seed_session_date
+                        or candidate_daily.seed_session_date != row.seed_session_date
+                        or baseline_daily.bars != row.target_bars
+                        or candidate_daily.bars != row.target_bars
+                        or _as_utc(baseline_daily.trend_context_cutoff_at)
+                        >= target_open
+                        or _as_utc(candidate_daily.trend_context_cutoff_at)
+                        >= target_open
+                    ):
+                        raise ValueError("forward evidence session identity mismatch")
+                except (
+                    KeyError,
+                    TypeError,
+                    ValueError,
+                    json.JSONDecodeError,
+                ):
+                    blockers.append("EVIDENCE_PAYLOAD_INVALID")
+                else:
+                    baseline_metrics.append((baseline_metric, baseline_net_sequence))
+                    candidate_metrics.append((candidate_metric, candidate_net_sequence))
+                    valid_included += 1
+            elif not self._forward_exclusion_semantics_valid(row):
+                blockers.append("EVIDENCE_EXCLUSION_INVALID")
+            if row.structural_failure:
+                blockers.append(row.exclusion_reason or "STRUCTURAL_EVALUATION_FAILURE")
+            daily.append(StrategyV2ForwardDailyEvidence(
+                target_session_date=row.target_session_date,
+                seed_session_date=row.seed_session_date,
+                target_open_at=_as_utc(row.target_open_at),
+                evaluated_at=_as_utc(row.evaluated_at),
+                disposition=(
+                    "INCLUDED" if row.disposition == "INCLUDED" else "EXCLUDED"
+                ),
+                exclusion_reason=row.exclusion_reason,
+                structural_failure=row.structural_failure,
+                target_bars=row.target_bars,
+                target_bars_sha256=row.target_bars_sha256,
+                seed_bars_sha256=row.seed_bars_sha256,
+                baseline_input_sha256=row.baseline_input_sha256,
+                candidate_input_sha256=row.candidate_input_sha256,
+                same_target_bars=row.same_target_bars,
+                baseline_replay_match=row.baseline_replay_match,
+                session_local_invariant=row.session_local_invariant,
+                baseline=baseline_daily,
+                candidate=candidate_daily,
+                baseline_metrics=baseline_metric,
+                candidate_metrics=candidate_metric,
+                baseline_result_sha256=row.baseline_result_sha256,
+                candidate_result_sha256=row.candidate_result_sha256,
+                evidence_digest_sha256=row.evidence_digest_sha256,
+            ))
+
+        blockers = list(dict.fromkeys(blockers))
+        included = valid_included
+        excluded = sum(row.disposition == "EXCLUDED" for row in rows)
+        status = self._forward_validation_status(
+            included=included,
+            has_rows=bool(rows),
+            blockers=blockers,
+        )
+        return StrategyV2ForwardValidationResponse(
+            registration=self._forward_registration_response(registration),
+            status=status,
+            included_pairs=included,
+            excluded_targets=excluded,
+            remaining_ready_pairs=max(0, _FORWARD_READY_PAIRS - included),
+            remaining_mature_pairs=max(0, _FORWARD_MATURE_PAIRS - included),
+            blockers=blockers,
+            baseline_metrics=self._aggregate_forward_metrics(baseline_metrics),
+            candidate_metrics=self._aggregate_forward_metrics(candidate_metrics),
+            daily=daily,
+        )
+
+    def collect_forward_validation(
+        self,
+        symbol: str,
+        market: str,
+        *,
+        now: datetime | None = None,
+    ) -> StrategyV2ForwardValidationResponse | None:
+        """Materialize at most one target outcome during the fixed close window."""
+        current = _as_utc(now or datetime.now(timezone.utc))
+        normalized = self._resolve_symbol(symbol)
+        registration = self.db.query(StrategyV2ForwardRegistration).filter(
+            StrategyV2ForwardRegistration.symbol == normalized,
+        ).first()
+        if registration is None:
+            return None
+        normalized_market = market.upper()
+        if normalized_market != registration.market:
+            raise ValueError("forward validation registration market mismatch")
+        current_view = self.get_forward_validation(normalized)
+        if current_view.status in {"BLOCKED", "MATURE_EVIDENCE"}:
+            return current_view
+
+        active_config = self.db.query(StrategyV2ShadowConfig).filter(
+            StrategyV2ShadowConfig.symbol == normalized
+        ).first()
+        active_state = self.db.query(StrategyV2ShadowState).filter(
+            StrategyV2ShadowState.symbol == normalized
+        ).first()
+        active_trade = self._open_trade(normalized)
+        source_superseded = (
+            active_config is None
+            or self._config_version(active_config)
+            != registration.source_config_version
+            or active_state is None
+            or active_state.config_version != registration.source_config_version
+            or (
+                active_trade is not None
+                and active_trade.config_version != registration.source_config_version
+            )
+        )
+        appended_missed = self._record_forward_missed_targets(
+            registration,
+            current,
+            reason=(
+                "SOURCE_VERSION_SUPERSEDED"
+                if source_superseded
+                else "FINALIZATION_WINDOW_MISSED"
+            ),
+            structural=source_superseded,
+        )
+        current_view = self.get_forward_validation(normalized)
+        if appended_missed:
+            return current_view
+        collection_phase = self._forward_collection_phase(
+            normalized_market,
+            current,
+        )
+        if collection_phase == "WAIT":
+            return None
+        if current_view.status in {"BLOCKED", "MATURE_EVIDENCE"}:
+            return current_view
+
+        session = get_session(normalized_market)
+        target_day = session.trade_day(current)
+        target_open = datetime.combine(
+            target_day,
+            session.rth_open,
+            tzinfo=session.timezone,
+        ).astimezone(timezone.utc)
+        if target_open < _as_utc(registration.eligible_after):
+            return None
+        existing = self.db.query(StrategyV2ForwardEvidence.id).filter(
+            StrategyV2ForwardEvidence.registration_id == registration.id,
+            StrategyV2ForwardEvidence.target_session_date == target_day,
+        ).first()
+        if existing is not None:
+            return current_view
+        if collection_phase == "MISSED":
+            self._persist_forward_exclusion(
+                registration=registration,
+                target_day=target_day,
+                target_open=target_open,
+                evaluated_at=current,
+                reason="FINALIZATION_WINDOW_MISSED",
+                structural=False,
+            )
+            return self.get_forward_validation(normalized)
+        if (
+            registration.evaluator_digest != self._forward_evaluator_digest()
+            or not self._forward_spec_matches(registration)
+        ):
+            self._persist_forward_exclusion(
+                registration=registration,
+                target_day=target_day,
+                target_open=target_open,
+                evaluated_at=current,
+                reason="EVALUATOR_DEFINITION_MISMATCH",
+                structural=True,
+            )
+            return self.get_forward_validation(normalized)
+
+        if source_superseded:
+            self._persist_forward_exclusion(
+                registration=registration,
+                target_day=target_day,
+                target_open=target_open,
+                evaluated_at=current,
+                reason="SOURCE_VERSION_SUPERSEDED",
+                structural=True,
+            )
+            return self.get_forward_validation(normalized)
+        if active_config is not None and not active_config.enabled:
+            self._persist_forward_exclusion(
+                registration=registration,
+                target_day=target_day,
+                target_open=target_open,
+                evaluated_at=current,
+                reason="COLLECTION_DISABLED",
+                structural=False,
+            )
+            return self.get_forward_validation(normalized)
+        if (
+            active_trade is not None
+            or active_state is None
+            or active_state.open_trade_id is not None
+            or active_state.phase == StrategyV2State.LONG.value
+        ):
+            self._persist_forward_exclusion(
+                registration=registration,
+                target_day=target_day,
+                target_open=target_open,
+                evaluated_at=current,
+                reason="TARGET_STATE_NOT_FLAT",
+                structural=True,
+            )
+            return self.get_forward_validation(normalized)
+
+        target_decisions = self.db.query(StrategyV2ShadowDecision).filter(
+            StrategyV2ShadowDecision.symbol == normalized,
+            StrategyV2ShadowDecision.config_version
+            == registration.source_config_version,
+            StrategyV2ShadowDecision.session_date == target_day,
+        ).order_by(
+            StrategyV2ShadowDecision.bar_at.asc(),
+            StrategyV2ShadowDecision.id.asc(),
+        ).execution_options(populate_existing=True).all()
+        target_daily = self._daily_evidence(target_decisions, [])
+        if target_decisions and max(
+            _as_utc(item.observed_at) for item in target_decisions
+        ) > current:
+            self._persist_forward_exclusion(
+                registration=registration,
+                target_day=target_day,
+                target_open=target_open,
+                evaluated_at=current,
+                reason="TARGET_EVIDENCE_NOT_KNOWN_AT_EVALUATION",
+                structural=True,
+                target_bars=len(target_decisions),
+            )
+            return self.get_forward_validation(normalized)
+        if (
+            len(target_daily) != 1
+            or not target_daily[0].complete_session
+            or _as_utc(target_daily[0].first_bar_at) != target_open
+        ):
+            local_current = session.local(current)
+            incomplete_deadline = datetime.combine(
+                target_day,
+                session.close_time(target_day),
+                tzinfo=session.timezone,
+            ) + timedelta(minutes=_FORWARD_INCOMPLETE_DEADLINE_MINUTES)
+            if local_current < incomplete_deadline:
+                return current_view
+            self._persist_forward_exclusion(
+                registration=registration,
+                target_day=target_day,
+                target_open=target_open,
+                evaluated_at=current,
+                reason="TARGET_SESSION_INCOMPLETE",
+                structural=False,
+                target_bars=(target_daily[0].bars if target_daily else 0),
+            )
+            return self.get_forward_validation(normalized)
+
+        complete_dates = self._complete_session_dates(
+            normalized,
+            registration.source_config_version,
+        )
+        prior_dates = [item for item in complete_dates if item < target_day]
+        seed_day = prior_dates[-1] if prior_dates else None
+        seed_decisions: list[StrategyV2ShadowDecision] = []
+        if seed_day is not None:
+            seed_decisions = self.db.query(StrategyV2ShadowDecision).filter(
+                StrategyV2ShadowDecision.symbol == normalized,
+                StrategyV2ShadowDecision.config_version
+                == registration.source_config_version,
+                StrategyV2ShadowDecision.session_date == seed_day,
+            ).order_by(
+                StrategyV2ShadowDecision.bar_at.asc(),
+                StrategyV2ShadowDecision.id.asc(),
+            ).execution_options(populate_existing=True).all()
+        if (
+            seed_day is None
+            or not seed_decisions
+            or next_session_open(
+                normalized_market,
+                _as_utc(seed_decisions[-1].bar_at) + timedelta(minutes=1),
+            )
+            != target_open
+        ):
+            self._persist_forward_exclusion(
+                registration=registration,
+                target_day=target_day,
+                target_open=target_open,
+                evaluated_at=current,
+                reason="IMMEDIATE_COMPLETE_SEED_UNAVAILABLE",
+                structural=False,
+                target_bars=target_daily[0].bars,
+                seed_day=seed_day,
+            )
+            return self.get_forward_validation(normalized)
+        if max(_as_utc(item.observed_at) for item in seed_decisions) > target_open:
+            self._persist_forward_exclusion(
+                registration=registration,
+                target_day=target_day,
+                target_open=target_open,
+                evaluated_at=current,
+                reason="SEED_NOT_KNOWN_AT_TARGET_OPEN",
+                structural=False,
+                target_bars=target_daily[0].bars,
+                seed_day=seed_day,
+            )
+            return self.get_forward_validation(normalized)
+
+        try:
+            params = self._version_params(
+                normalized,
+                registration.source_config_version,
+            )
+            source_config = self._challenger_config(
+                symbol=normalized,
+                params=params,
+                max_adx=float(params["max_adx"]),
+            )
+            if self._config_version(source_config) != registration.source_config_version:
+                raise ValueError("source config snapshot version mismatch")
+            seed_replay_bars = self._bars_from_persisted_evidence(
+                seed_decisions,
+                symbol=normalized,
+            )
+            target_replay_bars = self._bars_from_persisted_evidence(
+                target_decisions,
+                symbol=normalized,
+            )
+            target_hash = self._forward_bars_hash(target_replay_bars)
+            seed_hash = self._forward_bars_hash(seed_replay_bars)
+            target_payload = StrategyV2ShadowReplayRequest(
+                symbol=normalized,
+                market="HK" if normalized_market == "HK" else "US",
+                bars=target_replay_bars,
+            )
+            baseline_input_hash = self._forward_bars_hash(target_payload.bars)
+            baseline = self._replay_payload(
+                target_payload,
+                source_config,
+                include_feature_evidence=True,
+            )
+            if self._forward_bars_hash(target_payload.bars) != baseline_input_hash:
+                raise ValueError("baseline replay mutated its target input")
+            trades = self.db.query(StrategyV2ShadowTrade).filter(
+                StrategyV2ShadowTrade.symbol == normalized,
+                StrategyV2ShadowTrade.config_version
+                == registration.source_config_version,
+                StrategyV2ShadowTrade.status == "CLOSED",
+            ).order_by(StrategyV2ShadowTrade.entry_at.asc()).all()
+            if not self._baseline_replay_matches(
+                decisions=target_decisions,
+                trades=trades,
+                replay=baseline,
+                market=normalized_market,
+                session_dates={target_day},
+            ):
+                self._persist_forward_exclusion(
+                    registration=registration,
+                    target_day=target_day,
+                    target_open=target_open,
+                    evaluated_at=current,
+                    reason="BASELINE_REPLAY_MISMATCH",
+                    structural=True,
+                    target_bars=len(target_replay_bars),
+                    target_hash=target_hash,
+                    seed_hash=seed_hash,
+                    seed_day=seed_day,
+                    baseline_input_hash=baseline_input_hash,
+                    candidate_input_hash=self._forward_bars_hash(target_payload.bars),
+                    baseline_match=False,
+                )
+                return self.get_forward_validation(normalized)
+            seed_bars = self._strategy_bars_from_replay(
+                seed_replay_bars,
+                symbol=normalized,
+            )
+            target_bars = self._strategy_bars_from_replay(
+                target_replay_bars,
+                symbol=normalized,
+            )
+            candidate_input_hash = self._forward_bars_hash(target_payload.bars)
+            if not (
+                target_hash == baseline_input_hash == candidate_input_hash
+            ):
+                self._persist_forward_exclusion(
+                    registration=registration,
+                    target_day=target_day,
+                    target_open=target_open,
+                    evaluated_at=current,
+                    reason="TARGET_INPUT_HASH_MISMATCH",
+                    structural=True,
+                    target_bars=len(target_replay_bars),
+                    target_hash=target_hash,
+                    seed_hash=seed_hash,
+                    seed_day=seed_day,
+                    baseline_input_hash=baseline_input_hash,
+                    candidate_input_hash=candidate_input_hash,
+                    baseline_match=True,
+                )
+                return self.get_forward_validation(normalized)
+            prewarmed = self._replay_payload(
+                target_payload,
+                source_config,
+                include_feature_evidence=True,
+                features=CausalTrendPrewarmFeatureEngine(
+                    self._domain_config(source_config, normalized_market).feature_config(),
+                    seed_bars,
+                ),
+            )
+            if self._forward_bars_hash(target_payload.bars) != candidate_input_hash:
+                raise ValueError("candidate replay mutated its target input")
+            if not self._session_local_features_match(baseline, prewarmed):
+                self._persist_forward_exclusion(
+                    registration=registration,
+                    target_day=target_day,
+                    target_open=target_open,
+                    evaluated_at=current,
+                    reason="SESSION_LOCAL_FEATURE_DRIFT",
+                    structural=True,
+                    target_bars=len(target_replay_bars),
+                    target_hash=target_hash,
+                    seed_hash=seed_hash,
+                    seed_day=seed_day,
+                    baseline_input_hash=baseline_input_hash,
+                    candidate_input_hash=candidate_input_hash,
+                    baseline_match=True,
+                    local_invariant=False,
+                )
+                return self.get_forward_validation(normalized)
+            baseline_daily = self._warmup_daily_from_replay(
+                replay=baseline,
+                market=normalized_market,
+                seed_day=seed_day,
+                target_day=target_day,
+                seed_bars=seed_bars,
+                target_bars=target_bars,
+            )
+            candidate_daily = self._warmup_daily_from_replay(
+                replay=prewarmed,
+                market=normalized_market,
+                seed_day=seed_day,
+                target_day=target_day,
+                seed_bars=seed_bars,
+                target_bars=target_bars,
+            )
+        except (KeyError, TypeError, ValueError, OverflowError):
+            self.db.rollback()
+            self._persist_forward_exclusion(
+                registration=registration,
+                target_day=target_day,
+                target_open=target_open,
+                evaluated_at=current,
+                reason="FORWARD_EVALUATION_FAILED",
+                structural=True,
+                target_bars=target_daily[0].bars,
+                seed_day=seed_day,
+            )
+            return self.get_forward_validation(normalized)
+
+        baseline_result = self._forward_result_json(
+            baseline.metrics,
+            baseline_daily,
+            baseline.trades,
+        )
+        candidate_result = self._forward_result_json(
+            prewarmed.metrics,
+            candidate_daily,
+            prewarmed.trades,
+        )
+        result = StrategyV2ForwardEvidence(
+            registration_id=registration.id,
+            target_session_date=target_day,
+            seed_session_date=seed_day,
+            target_open_at=target_open,
+            evaluated_at=current,
+            disposition="INCLUDED",
+            exclusion_reason="",
+            structural_failure=False,
+            target_bars=len(target_replay_bars),
+            target_bars_sha256=target_hash,
+            seed_bars_sha256=seed_hash,
+            baseline_input_sha256=baseline_input_hash,
+            candidate_input_sha256=candidate_input_hash,
+            same_target_bars=(
+                target_hash == baseline_input_hash == candidate_input_hash
+            ),
+            baseline_replay_match=True,
+            session_local_invariant=True,
+            baseline_result_json=baseline_result,
+            candidate_result_json=candidate_result,
+            baseline_result_sha256=self._forward_text_hash(baseline_result),
+            candidate_result_sha256=self._forward_text_hash(candidate_result),
+        )
+        result.evidence_digest_sha256 = self._forward_evidence_digest(result)
+        self.db.add(result)
+        try:
+            self.db.commit()
+        except IntegrityError:
+            self.db.rollback()
+        return self.get_forward_validation(normalized)
+
+    @staticmethod
+    def _forward_evaluator_spec() -> dict[str, Any]:
+        return {
+            "schema_version": 2,
+            "evaluator_version": _FORWARD_EVALUATOR_VERSION,
+            "candidate_algorithm_version": _FORWARD_CANDIDATE_VERSION,
+            "source_algorithm_version": _ALGORITHM_VERSION,
+            "evaluation_scope": "FORWARD_OUT_OF_SAMPLE",
+            "target_semantics": "FIRST_FULL_RTH_SESSION_OPEN_STRICTLY_AFTER_REGISTRATION",
+            "seed_semantics": "IMMEDIATE_PRIOR_COMPLETE_SAME_VERSION_SESSION_KNOWN_AT_OPEN",
+            "warmup_scope": "ADX_VOL_ONLY",
+            "baseline_scope": "SESSION_LOCAL",
+            "minimum_ready_pairs": _FORWARD_READY_PAIRS,
+            "minimum_mature_pairs": _FORWARD_MATURE_PAIRS,
+            "finalize_start_minutes_after_close": _FORWARD_FINALIZE_START_MINUTES,
+            "incomplete_deadline_minutes_after_close": (
+                _FORWARD_INCOMPLETE_DEADLINE_MINUTES
+            ),
+            "finalize_end_minutes_after_close": _POST_CLOSE_COLLECTION_MINUTES,
+            "historical_target_backfill_allowed": False,
+            "evidence_integrity": "CANONICAL_ROW_SHA256",
+            "aggregate_drawdown": "ORDERED_TRADE_NET_PNL",
+            "order_submission_allowed": False,
+            "automatic_promotion_allowed": False,
+        }
+
+    @classmethod
+    def _forward_evaluator_digest(cls) -> str:
+        encoded = json.dumps(
+            cls._forward_evaluator_spec(),
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    @classmethod
+    def _forward_candidate_spec(
+        cls,
+        source_config_version: str,
+        source_params: dict[str, Any],
+    ) -> dict[str, Any]:
+        return {
+            **cls._forward_evaluator_spec(),
+            "source_config_version": source_config_version,
+            "source_config": source_params,
+        }
+
+    def _forward_spec_matches(
+        self,
+        registration: StrategyV2ForwardRegistration,
+    ) -> bool:
+        try:
+            decoded = json.loads(registration.candidate_spec_json)
+            source_params = self._version_params(
+                registration.symbol,
+                registration.source_config_version,
+            )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return False
+        return (
+            isinstance(decoded, dict)
+            and decoded
+            == self._forward_candidate_spec(
+                registration.source_config_version,
+                source_params,
+            )
+        )
+
+    @staticmethod
+    def _forward_eligible_after(market: str, registered_at: datetime) -> datetime:
+        """Return a full RTH open strictly after registration, never HK lunch."""
+        registered = _as_utc(registered_at)
+        session = get_session(market)
+        probe = registered
+        for _ in range(4):
+            candidate = next_session_open(market, probe)
+            if (
+                candidate > registered
+                and session.local(candidate).time() == session.rth_open
+            ):
+                return candidate
+            probe = candidate + timedelta(microseconds=1)
+        raise ValueError("unable to resolve the next complete market session")
+
+    @staticmethod
+    def _forward_collection_phase(market: str, current: datetime) -> str:
+        if session_status(market, current) != "post":
+            return "WAIT"
+        session = get_session(market)
+        local = session.local(current)
+        close_at = datetime.combine(
+            local.date(),
+            session.close_time(local.date()),
+            tzinfo=session.timezone,
+        )
+        if local < close_at + timedelta(minutes=_FORWARD_FINALIZE_START_MINUTES):
+            return "WAIT"
+        if local < close_at + timedelta(minutes=_POST_CLOSE_COLLECTION_MINUTES):
+            return "FINALIZE"
+        return "MISSED"
+
+    @classmethod
+    def _in_forward_finalize_window(cls, market: str, current: datetime) -> bool:
+        return cls._forward_collection_phase(market, current) == "FINALIZE"
+
+    @classmethod
+    def _forward_registration_response(
+        cls,
+        registration: StrategyV2ForwardRegistration,
+    ) -> StrategyV2ForwardRegistrationResponse:
+        market = "HK" if registration.symbol.endswith(".HK") else "US"
+        session = get_session(market)
+        return StrategyV2ForwardRegistrationResponse(
+            id=registration.id,
+            symbol=registration.symbol,
+            market=market,
+            market_timezone=str(session.timezone),
+            candidate_algorithm_version=_FORWARD_CANDIDATE_VERSION,
+            source_config_version=registration.source_config_version,
+            evaluator_digest=registration.evaluator_digest,
+            registered_at=_as_utc(registration.registered_at),
+            eligible_after=_as_utc(registration.eligible_after),
+        )
+
+    @staticmethod
+    def _forward_bars_hash(bars: Sequence[StrategyV2ReplayBar]) -> str:
+        encoded = json.dumps(
+            [item.model_dump(mode="json") for item in bars],
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _forward_result_json(
+        metrics: StrategyV2ShadowMetrics,
+        daily: StrategyV2WarmupDaily,
+        trades: Sequence[dict[str, Any]],
+    ) -> str:
+        return json.dumps(
+            {
+                "metrics": metrics.model_dump(mode="json"),
+                "daily": daily.model_dump(mode="json"),
+                "trade_net_pnl": [
+                    float(item.get("net_pnl", 0.0)) for item in trades
+                ],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+
+    @staticmethod
+    def _forward_text_hash(value: str) -> str:
+        return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _is_sha256(value: str) -> bool:
+        return re.fullmatch(r"[0-9a-f]{64}", value or "") is not None
+
+    @classmethod
+    def _forward_evidence_digest(
+        cls,
+        row: StrategyV2ForwardEvidence,
+    ) -> str:
+        encoded = json.dumps(
+            {
+                "registration_id": row.registration_id,
+                "target_session_date": row.target_session_date.isoformat(),
+                "seed_session_date": (
+                    row.seed_session_date.isoformat()
+                    if row.seed_session_date is not None
+                    else None
+                ),
+                "target_open_at": _as_utc(row.target_open_at).isoformat(),
+                "evaluated_at": _as_utc(row.evaluated_at).isoformat(),
+                "disposition": row.disposition,
+                "exclusion_reason": row.exclusion_reason,
+                "structural_failure": row.structural_failure,
+                "target_bars": row.target_bars,
+                "target_bars_sha256": row.target_bars_sha256,
+                "seed_bars_sha256": row.seed_bars_sha256,
+                "baseline_input_sha256": row.baseline_input_sha256,
+                "candidate_input_sha256": row.candidate_input_sha256,
+                "same_target_bars": row.same_target_bars,
+                "baseline_replay_match": row.baseline_replay_match,
+                "session_local_invariant": row.session_local_invariant,
+                "baseline_result_json": row.baseline_result_json,
+                "candidate_result_json": row.candidate_result_json,
+                "baseline_result_sha256": row.baseline_result_sha256,
+                "candidate_result_sha256": row.candidate_result_sha256,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        return cls._forward_text_hash(encoded)
+
+    @staticmethod
+    def _forward_net_pnl_sequence(
+        payload: dict[str, Any],
+        metrics: StrategyV2ShadowMetrics,
+    ) -> list[float]:
+        raw = payload.get("trade_net_pnl")
+        if not isinstance(raw, list) or any(
+            isinstance(value, bool) or not isinstance(value, (int, float))
+            for value in raw
+        ):
+            raise ValueError("forward trade PnL sequence is invalid")
+        values = [float(value) for value in raw]
+        if (
+            any(not math.isfinite(value) for value in values)
+            or len(values) != metrics.closed_trades
+            or not math.isclose(
+                sum(values),
+                metrics.net_pnl,
+                rel_tol=1e-9,
+                abs_tol=1e-9,
+            )
+        ):
+            raise ValueError("forward trade PnL sequence does not match metrics")
+        cumulative = 0.0
+        peak = 0.0
+        drawdown = 0.0
+        for value in values:
+            cumulative += value
+            peak = max(peak, cumulative)
+            drawdown = max(drawdown, peak - cumulative)
+        if not math.isclose(
+            drawdown,
+            metrics.max_drawdown,
+            rel_tol=1e-9,
+            abs_tol=1e-9,
+        ):
+            raise ValueError("forward trade PnL sequence drawdown does not match metrics")
+        return values
+
+    @staticmethod
+    def _forward_exclusion_semantics_valid(
+        row: StrategyV2ForwardEvidence,
+    ) -> bool:
+        nonstructural = {
+            "FINALIZATION_WINDOW_MISSED",
+            "COLLECTION_DISABLED",
+            "TARGET_SESSION_INCOMPLETE",
+            "IMMEDIATE_COMPLETE_SEED_UNAVAILABLE",
+            "SEED_NOT_KNOWN_AT_TARGET_OPEN",
+        }
+        structural = {
+            "EVALUATOR_DEFINITION_MISMATCH",
+            "SOURCE_VERSION_SUPERSEDED",
+            "TARGET_STATE_NOT_FLAT",
+            "TARGET_EVIDENCE_NOT_KNOWN_AT_EVALUATION",
+            "BASELINE_REPLAY_MISMATCH",
+            "TARGET_INPUT_HASH_MISMATCH",
+            "SESSION_LOCAL_FEATURE_DRIFT",
+            "FORWARD_EVALUATION_FAILED",
+        }
+        expected_structural = row.exclusion_reason in structural
+        return (
+            row.exclusion_reason in nonstructural | structural
+            and row.structural_failure is expected_structural
+            and row.baseline_result_json == "{}"
+            and row.candidate_result_json == "{}"
+            and row.baseline_result_sha256 == ""
+            and row.candidate_result_sha256 == ""
+        )
+
+    @staticmethod
+    def _forward_validation_status(
+        *,
+        included: int,
+        has_rows: bool,
+        blockers: Sequence[str],
+    ) -> Literal[
+        "FROZEN",
+        "COLLECTING",
+        "READY_FOR_REVIEW",
+        "MATURE_EVIDENCE",
+        "BLOCKED",
+    ]:
+        if blockers:
+            return "BLOCKED"
+        if included >= _FORWARD_MATURE_PAIRS:
+            return "MATURE_EVIDENCE"
+        if included >= _FORWARD_READY_PAIRS:
+            return "READY_FOR_REVIEW"
+        return "COLLECTING" if has_rows else "FROZEN"
+
+    @staticmethod
+    def _aggregate_forward_metrics(
+        values: Sequence[tuple[StrategyV2ShadowMetrics, Sequence[float]]],
+    ) -> StrategyV2ShadowMetrics:
+        if not values:
+            return StrategyV2ShadowMetrics()
+        metrics = [item for item, _sequence in values]
+        closed = sum(item.closed_trades for item in metrics)
+        cumulative = 0.0
+        peak = 0.0
+        max_drawdown = 0.0
+        for _item, sequence in values:
+            for net_pnl in sequence:
+                cumulative += net_pnl
+                peak = max(peak, cumulative)
+                max_drawdown = max(max_drawdown, peak - cumulative)
+        return StrategyV2ShadowMetrics(
+            bars=sum(item.bars for item in metrics),
+            eligible_bars=sum(item.eligible_bars for item in metrics),
+            breaches=sum(item.breaches for item in metrics),
+            reclaims=sum(item.reclaims for item in metrics),
+            entries=sum(item.entries for item in metrics),
+            exits=sum(item.exits for item in metrics),
+            closed_trades=closed,
+            win_rate=(
+                sum(item.win_rate * item.closed_trades for item in metrics) / closed
+                if closed
+                else 0.0
+            ),
+            gross_pnl=sum(item.gross_pnl for item in metrics),
+            fees=sum(item.fees for item in metrics),
+            net_pnl=sum(item.net_pnl for item in metrics),
+            max_drawdown=max_drawdown,
+            avg_holding_minutes=(
+                sum(item.avg_holding_minutes * item.closed_trades for item in metrics)
+                / closed
+                if closed
+                else 0.0
+            ),
+            avg_mae_pct=(
+                sum(item.avg_mae_pct * item.closed_trades for item in metrics) / closed
+                if closed
+                else 0.0
+            ),
+            avg_mfe_pct=(
+                sum(item.avg_mfe_pct * item.closed_trades for item in metrics) / closed
+                if closed
+                else 0.0
+            ),
+        )
+
+    def _persist_forward_exclusion(
+        self,
+        *,
+        registration: StrategyV2ForwardRegistration,
+        target_day: date,
+        target_open: datetime,
+        evaluated_at: datetime,
+        reason: str,
+        structural: bool,
+        target_bars: int = 0,
+        target_hash: str = "",
+        seed_hash: str = "",
+        seed_day: date | None = None,
+        baseline_input_hash: str = "",
+        candidate_input_hash: str = "",
+        baseline_match: bool | None = None,
+        local_invariant: bool | None = None,
+    ) -> None:
+        row = StrategyV2ForwardEvidence(
+            registration_id=registration.id,
+            target_session_date=target_day,
+            seed_session_date=seed_day,
+            target_open_at=target_open,
+            evaluated_at=evaluated_at,
+            disposition="EXCLUDED",
+            exclusion_reason=reason,
+            structural_failure=structural,
+            target_bars=target_bars,
+            target_bars_sha256=target_hash,
+            seed_bars_sha256=seed_hash,
+            baseline_input_sha256=baseline_input_hash,
+            candidate_input_sha256=candidate_input_hash,
+            same_target_bars=(
+                bool(target_hash)
+                and target_hash == baseline_input_hash == candidate_input_hash
+            ),
+            baseline_replay_match=baseline_match,
+            session_local_invariant=local_invariant,
+            baseline_result_json="{}",
+            candidate_result_json="{}",
+            baseline_result_sha256="",
+            candidate_result_sha256="",
+        )
+        row.evidence_digest_sha256 = self._forward_evidence_digest(row)
+        self.db.add(row)
+        try:
+            self.db.commit()
+        except IntegrityError:
+            self.db.rollback()
+
+    def _record_forward_missed_targets(
+        self,
+        registration: StrategyV2ForwardRegistration,
+        current: datetime,
+        *,
+        reason: str,
+        structural: bool,
+    ) -> bool:
+        """Append MISSED markers for elapsed deadlines without reading bar evidence."""
+        session = get_session(registration.market)
+        current_utc = _as_utc(current)
+        first_day = session.trade_day(_as_utc(registration.eligible_after))
+        last_day = session.trade_day(current_utc)
+        existing = {
+            item
+            for (item,) in self.db.query(
+                StrategyV2ForwardEvidence.target_session_date
+            ).filter(
+                StrategyV2ForwardEvidence.registration_id == registration.id
+            ).all()
+        }
+        candidate_day = first_day
+        while candidate_day <= last_day:
+            target_open = datetime.combine(
+                candidate_day,
+                session.rth_open,
+                tzinfo=session.timezone,
+            ).astimezone(timezone.utc)
+            deadline = datetime.combine(
+                candidate_day,
+                session.close_time(candidate_day),
+                tzinfo=session.timezone,
+            ).astimezone(timezone.utc) + timedelta(
+                minutes=_POST_CLOSE_COLLECTION_MINUTES
+            )
+            if (
+                target_open >= _as_utc(registration.eligible_after)
+                and session.is_rth(target_open)
+                and current_utc >= deadline
+                and candidate_day not in existing
+            ):
+                self._persist_forward_exclusion(
+                    registration=registration,
+                    target_day=candidate_day,
+                    target_open=target_open,
+                    evaluated_at=current_utc,
+                    reason=reason,
+                    structural=structural,
+                )
+                return True
+            candidate_day += timedelta(days=1)
+        return False
 
     def replay(self, payload: StrategyV2ShadowReplayRequest) -> StrategyV2ShadowReplayResponse:
         """Evaluate supplied bars without mutating any persistent shadow state."""

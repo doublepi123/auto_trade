@@ -623,6 +623,101 @@ class StrategyV2WarmupDiagnostic(BaseModel):
     variants: list[StrategyV2WarmupVariant] = Field(default_factory=list)
 
 
+class StrategyV2ForwardRegistrationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    symbol: str
+    source_config_version: str = Field(min_length=64, max_length=64)
+    candidate_algorithm_version: Literal[
+        "strategy-v2-causal-trend-prewarm-v1"
+    ] = "strategy-v2-causal-trend-prewarm-v1"
+    confirm_forward_only: Literal[True]
+    confirm_no_automatic_promotion: Literal[True]
+
+    @field_validator("symbol")
+    @classmethod
+    def validate_forward_symbol(cls, value: str) -> str:
+        return _normalize_symbol(value)
+
+    @field_validator("source_config_version")
+    @classmethod
+    def validate_forward_source_version(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", normalized):
+            raise ValueError("source_config_version must be a SHA-256 hex digest")
+        return normalized
+
+
+class StrategyV2ForwardRegistrationResponse(BaseModel):
+    id: int
+    symbol: str
+    market: Literal["US", "HK"]
+    market_timezone: str
+    candidate_algorithm_version: Literal[
+        "strategy-v2-causal-trend-prewarm-v1"
+    ]
+    source_config_version: str
+    evaluator_digest: str
+    registered_at: datetime
+    eligible_after: datetime
+    minimum_ready_pairs: Literal[5] = 5
+    minimum_mature_pairs: Literal[20] = 20
+
+
+class StrategyV2ForwardDailyEvidence(BaseModel):
+    target_session_date: date
+    seed_session_date: Optional[date] = None
+    target_open_at: datetime
+    evaluated_at: datetime
+    disposition: Literal["INCLUDED", "EXCLUDED"]
+    exclusion_reason: str = ""
+    structural_failure: bool = False
+    target_bars: int = 0
+    target_bars_sha256: str = ""
+    seed_bars_sha256: str = ""
+    baseline_input_sha256: str = ""
+    candidate_input_sha256: str = ""
+    same_target_bars: bool = False
+    baseline_replay_match: Optional[bool] = None
+    session_local_invariant: Optional[bool] = None
+    baseline: Optional[StrategyV2WarmupDaily] = None
+    candidate: Optional[StrategyV2WarmupDaily] = None
+    baseline_metrics: Optional[StrategyV2ShadowMetrics] = None
+    candidate_metrics: Optional[StrategyV2ShadowMetrics] = None
+    baseline_result_sha256: str = ""
+    candidate_result_sha256: str = ""
+    evidence_digest_sha256: str = ""
+
+
+class StrategyV2ForwardValidationResponse(BaseModel):
+    registration: Optional[StrategyV2ForwardRegistrationResponse] = None
+    status: Literal[
+        "NOT_REGISTERED",
+        "FROZEN",
+        "COLLECTING",
+        "READY_FOR_REVIEW",
+        "MATURE_EVIDENCE",
+        "BLOCKED",
+    ]
+    mode: Literal["SHADOW"] = "SHADOW"
+    order_submission_allowed: Literal[False] = False
+    automatic_promotion_allowed: Literal[False] = False
+    historical_target_backfill_allowed: Literal[False] = False
+    evaluation_scope: Literal["FORWARD_OUT_OF_SAMPLE"] = "FORWARD_OUT_OF_SAMPLE"
+    included_pairs: int = 0
+    excluded_targets: int = 0
+    remaining_ready_pairs: int = 5
+    remaining_mature_pairs: int = 20
+    blockers: list[str] = Field(default_factory=list)
+    baseline_metrics: StrategyV2ShadowMetrics = Field(
+        default_factory=StrategyV2ShadowMetrics
+    )
+    candidate_metrics: StrategyV2ShadowMetrics = Field(
+        default_factory=StrategyV2ShadowMetrics
+    )
+    daily: list[StrategyV2ForwardDailyEvidence] = Field(default_factory=list)
+
+
 class StrategyV2AdxChallengerResponse(BaseModel):
     persisted: Literal[False] = False
     mode: Literal["SHADOW"] = "SHADOW"

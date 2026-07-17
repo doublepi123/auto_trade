@@ -119,6 +119,75 @@ class StrategyV2ShadowVersion(Base):
     created_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow, nullable=False)
 
 
+class StrategyV2ForwardRegistration(Base):
+    """Immutable registration for one prospective Strategy v2 challenger."""
+
+    __tablename__ = "strategy_v2_forward_registrations"
+    __table_args__ = (
+        UniqueConstraint(
+            "symbol",
+            name="uq_strategy_v2_forward_registration_candidate",
+        ),
+        Index(
+            "ix_strategy_v2_forward_registration_symbol_eligible",
+            "symbol",
+            "eligible_after",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(50), nullable=False)
+    market: Mapped[str] = mapped_column(String(10), nullable=False)
+    candidate_algorithm_version: Mapped[str] = mapped_column(String(100), nullable=False)
+    source_config_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    evaluator_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    candidate_spec_json: Mapped[str] = mapped_column(Text, nullable=False)
+    registered_at: Mapped[datetime] = mapped_column(_TZDateTime, nullable=False)
+    eligible_after: Mapped[datetime] = mapped_column(_TZDateTime, nullable=False)
+
+
+class StrategyV2ForwardEvidence(Base):
+    """Append-only, per-target prospective evidence produced by the cron."""
+
+    __tablename__ = "strategy_v2_forward_evidence"
+    __table_args__ = (
+        UniqueConstraint(
+            "registration_id",
+            "target_session_date",
+            name="uq_strategy_v2_forward_evidence_target",
+        ),
+        Index(
+            "ix_strategy_v2_forward_evidence_registration_target",
+            "registration_id",
+            "target_session_date",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    registration_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    target_session_date: Mapped[date] = mapped_column(Date, nullable=False)
+    seed_session_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    target_open_at: Mapped[datetime] = mapped_column(_TZDateTime, nullable=False)
+    evaluated_at: Mapped[datetime] = mapped_column(_TZDateTime, nullable=False)
+    disposition: Mapped[str] = mapped_column(String(16), nullable=False)
+    exclusion_reason: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    structural_failure: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    target_bars: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    target_bars_sha256: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    seed_bars_sha256: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    baseline_input_sha256: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    candidate_input_sha256: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    same_target_bars: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    baseline_replay_match: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    session_local_invariant: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    baseline_result_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    candidate_result_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    baseline_result_sha256: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    candidate_result_sha256: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    evidence_digest_sha256: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow, nullable=False)
+
+
 class StrategyParamVersion(Base):
     """Immutable snapshot of the tunable strategy params at a point in time.
 

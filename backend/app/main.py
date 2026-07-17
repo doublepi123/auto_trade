@@ -649,7 +649,11 @@ async def _run_llm_storage_maintenance_tick() -> None:
 def _strategy_v2_shadow_tick_sync() -> None:
     """Advance every active Strategy v2 simulator without touching orders."""
     from app.core.market_calendar import market_for_symbol
-    from app.models import StrategyV2ShadowConfig, StrategyV2ShadowTrade
+    from app.models import (
+        StrategyV2ForwardRegistration,
+        StrategyV2ShadowConfig,
+        StrategyV2ShadowTrade,
+    )
     from app.services.strategy_v2_shadow_service import StrategyV2ShadowService
 
     db = SessionLocal()
@@ -664,7 +668,8 @@ def _strategy_v2_shadow_tick_sync() -> None:
         open_symbols = db.query(StrategyV2ShadowTrade.symbol).filter(
             StrategyV2ShadowTrade.status == "OPEN"
         ).distinct().all()
-        for (symbol,) in (*enabled_symbols, *open_symbols):
+        registered_symbols = db.query(StrategyV2ForwardRegistration.symbol).all()
+        for (symbol,) in (*enabled_symbols, *open_symbols, *registered_symbols):
             targets.setdefault(symbol, market_for_symbol(symbol))
         if not targets:
             return
@@ -676,6 +681,14 @@ def _strategy_v2_shadow_tick_sync() -> None:
             except Exception:
                 db.rollback()
                 logger.exception("Strategy v2 shadow tick failed for symbol=%s", symbol)
+            try:
+                shadow.collect_forward_validation(symbol=symbol, market=market)
+            except Exception:
+                db.rollback()
+                logger.exception(
+                    "Strategy v2 forward validation failed for symbol=%s",
+                    symbol,
+                )
     finally:
         db.close()
 

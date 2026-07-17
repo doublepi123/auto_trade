@@ -23,6 +23,8 @@ from app.domain.strategy_v2 import (
 from app.models import (
     Base,
     StrategyConfig,
+    StrategyV2ForwardEvidence,
+    StrategyV2ForwardRegistration,
     StrategyV2ShadowConfig,
     StrategyV2ShadowDecision,
     StrategyV2ShadowState,
@@ -31,8 +33,10 @@ from app.models import (
 )
 from app.schemas import (
     StrategyV2AdxChallengerRequest,
+    StrategyV2ForwardRegistrationRequest,
     StrategyV2ReplayBar,
     StrategyV2ShadowConfigUpdate,
+    StrategyV2ShadowMetrics,
 )
 from app.services.strategy_v2_shadow_service import StrategyV2ShadowService
 
@@ -126,6 +130,8 @@ class TestStrategyV2ShadowService:
     def setup_method(self) -> None:
         with Session(bind=self.engine) as db:
             for model in (
+                StrategyV2ForwardEvidence,
+                StrategyV2ForwardRegistration,
                 StrategyV2ShadowDecision,
                 StrategyV2ShadowTrade,
                 StrategyV2ShadowState,
@@ -254,6 +260,50 @@ class TestStrategyV2ShadowService:
         )
         version = service._config_version(config)
         service._ensure_version_snapshot(config)
+        return service, version, target_open
+
+    @staticmethod
+    def _forward_registration_payload(
+        version: str,
+    ) -> StrategyV2ForwardRegistrationRequest:
+        return StrategyV2ForwardRegistrationRequest(
+            symbol="AAPL.US",
+            source_config_version=version,
+            candidate_algorithm_version=(
+                "strategy-v2-causal-trend-prewarm-v1"
+            ),
+            confirm_forward_only=True,
+            confirm_no_automatic_promotion=True,
+        )
+
+    def _collect_forward_pair(
+        self,
+        db: Session,
+    ) -> tuple[StrategyV2ShadowService, str, datetime]:
+        config = self._enabled_config(
+            db,
+            activated_at=_SESSION_OPEN - timedelta(days=1),
+        )
+        candles = _FakeCandles(_candles(390))
+        service = StrategyV2ShadowService(db, candles)
+        service.tick(
+            "AAPL.US",
+            "US",
+            now=_SESSION_OPEN + timedelta(minutes=390, seconds=10),
+        )
+        version = service._config_version(config)
+        service._ensure_version_snapshot(config)
+        target_open = _SESSION_OPEN + timedelta(days=3)
+        service.register_forward_validation(
+            self._forward_registration_payload(version),
+            now=target_open - timedelta(minutes=1),
+        )
+        candles.candles = _candles(390, start=target_open)
+        service.tick(
+            "AAPL.US",
+            "US",
+            now=target_open + timedelta(minutes=390, seconds=10),
+        )
         return service, version, target_open
 
     def test_default_config_is_disabled_and_hard_shadow_only(self) -> None:
@@ -2129,6 +2179,705 @@ class TestStrategyV2ShadowService:
         assert diagnostic.blockers == ["PREWARM_REPLAY_FAILED"]
         assert diagnostic.variants == []
 
+    def test_forward_eligible_after_uses_only_a_strict_full_rth_open(self) -> None:
+        assert StrategyV2ShadowService._forward_eligible_after(
+            "US",
+            datetime(2026, 7, 13, 13, 29, tzinfo=timezone.utc),
+        ) == datetime(2026, 7, 13, 13, 30, tzinfo=timezone.utc)
+        assert StrategyV2ShadowService._forward_eligible_after(
+            "US",
+            datetime(2026, 7, 13, 13, 30, tzinfo=timezone.utc),
+        ) == datetime(2026, 7, 14, 13, 30, tzinfo=timezone.utc)
+        assert StrategyV2ShadowService._forward_eligible_after(
+            "US",
+            datetime(2026, 10, 30, 14, 0, tzinfo=timezone.utc),
+        ) == datetime(2026, 11, 2, 14, 30, tzinfo=timezone.utc)
+        assert StrategyV2ShadowService._forward_eligible_after(
+            "HK",
+            datetime(2026, 7, 2, 1, 29, tzinfo=timezone.utc),
+        ) == datetime(2026, 7, 2, 1, 30, tzinfo=timezone.utc)
+        assert StrategyV2ShadowService._forward_eligible_after(
+            "HK",
+            datetime(2026, 7, 2, 4, 30, tzinfo=timezone.utc),
+        ) == datetime(2026, 7, 3, 1, 30, tzinfo=timezone.utc)
+
+    def test_forward_finalize_window_uses_the_actual_half_day_close(self) -> None:
+        assert StrategyV2ShadowService._forward_collection_phase(
+            "US",
+            datetime(2026, 11, 27, 18, 9, tzinfo=timezone.utc),
+        ) == "WAIT"
+        assert StrategyV2ShadowService._forward_collection_phase(
+            "US",
+            datetime(2026, 11, 27, 18, 10, tzinfo=timezone.utc),
+        ) == "FINALIZE"
+        assert StrategyV2ShadowService._forward_collection_phase(
+            "US",
+            datetime(2026, 11, 27, 18, 15, tzinfo=timezone.utc),
+        ) == "MISSED"
+
+    def test_forward_registration_is_immutable_idempotent_and_read_only(self) -> None:
+        with self._db() as db:
+            config = self._enabled_config(
+                db,
+                activated_at=_SESSION_OPEN - timedelta(days=1),
+            )
+            service = StrategyV2ShadowService(db)
+            version = service._config_version(config)
+            service._ensure_version_snapshot(config)
+            payload = self._forward_registration_payload(version)
+            first = service.register_forward_validation(
+                payload,
+                now=_SESSION_OPEN - timedelta(minutes=1),
+            )
+            second = service.register_forward_validation(
+                payload,
+                now=_SESSION_OPEN + timedelta(days=30),
+            )
+
+            assert second == first
+            assert first.eligible_after == _SESSION_OPEN
+            assert len(first.evaluator_digest) == 64
+            assert db.query(StrategyV2ForwardRegistration).count() == 1
+            before = tuple(
+                db.query(model).count()
+                for model in (
+                    StrategyV2ForwardRegistration,
+                    StrategyV2ForwardEvidence,
+                    StrategyV2ShadowState,
+                    StrategyV2ShadowDecision,
+                    StrategyV2ShadowTrade,
+                )
+            )
+            view = service.get_forward_validation("AAPL.US")
+            after = tuple(
+                db.query(model).count()
+                for model in (
+                    StrategyV2ForwardRegistration,
+                    StrategyV2ForwardEvidence,
+                    StrategyV2ShadowState,
+                    StrategyV2ShadowDecision,
+                    StrategyV2ShadowTrade,
+                )
+            )
+            assert view.status == "FROZEN"
+            assert view.registration == first
+            assert before == after
+            assert not db.new and not db.dirty and not db.deleted
+
+    def test_forward_registration_rejects_a_state_transition(self) -> None:
+        with self._db() as db:
+            config = self._enabled_config(
+                db,
+                activated_at=_SESSION_OPEN - timedelta(days=1),
+            )
+            service = StrategyV2ShadowService(db)
+            version = service._config_version(config)
+            service._ensure_version_snapshot(config)
+            state = db.query(StrategyV2ShadowState).filter_by(
+                symbol="AAPL.US"
+            ).one()
+            state.config_version = "0" * 64
+            db.commit()
+
+            with pytest.raises(ValueError, match="activated current shadow state"):
+                service.register_forward_validation(
+                    self._forward_registration_payload(version),
+                    now=_SESSION_OPEN - timedelta(minutes=1),
+                )
+            assert db.query(StrategyV2ForwardRegistration).count() == 0
+
+    def test_forward_registration_rejects_a_drifted_long_state(self) -> None:
+        with self._db() as db:
+            config = self._enabled_config(
+                db,
+                activated_at=_SESSION_OPEN - timedelta(days=1),
+            )
+            service = StrategyV2ShadowService(db)
+            version = service._config_version(config)
+            service._ensure_version_snapshot(config)
+            state = db.query(StrategyV2ShadowState).filter_by(
+                symbol="AAPL.US"
+            ).one()
+            state.phase = StrategyV2State.LONG.value
+            state.open_trade_id = 999
+            db.commit()
+
+            with pytest.raises(ValueError, match="virtual position"):
+                service.register_forward_validation(
+                    self._forward_registration_payload(version),
+                    now=_SESSION_OPEN - timedelta(minutes=1),
+                )
+            assert db.query(StrategyV2ForwardRegistration).count() == 0
+
+    def test_forward_registration_snapshot_tampering_blocks_and_cannot_reset(self) -> None:
+        with self._db() as db:
+            config = self._enabled_config(
+                db,
+                activated_at=_SESSION_OPEN - timedelta(days=1),
+            )
+            service = StrategyV2ShadowService(db)
+            version = service._config_version(config)
+            service._ensure_version_snapshot(config)
+            payload = self._forward_registration_payload(version)
+            service.register_forward_validation(
+                payload,
+                now=_SESSION_OPEN - timedelta(minutes=1),
+            )
+            registration = db.query(StrategyV2ForwardRegistration).one()
+            spec = json.loads(registration.candidate_spec_json)
+            spec["minimum_ready_pairs"] = 99
+            registration.candidate_spec_json = json.dumps(spec, sort_keys=True)
+            db.commit()
+
+            blocked = service.get_forward_validation("AAPL.US")
+
+            assert blocked.status == "BLOCKED"
+            assert "EVALUATOR_DEFINITION_MISMATCH" in blocked.blockers
+            with pytest.raises(ValueError, match="different definition"):
+                service.register_forward_validation(
+                    payload,
+                    now=_SESSION_OPEN + timedelta(days=30),
+                )
+            assert db.query(StrategyV2ForwardRegistration).count() == 1
+
+    def test_forward_registration_normalizes_sha_for_repeat_idempotency(self) -> None:
+        with self._db() as db:
+            config = self._enabled_config(
+                db,
+                activated_at=_SESSION_OPEN - timedelta(days=1),
+            )
+            service = StrategyV2ShadowService(db)
+            version = service._config_version(config)
+            service._ensure_version_snapshot(config)
+            payload = self._forward_registration_payload(version.upper())
+
+            first = service.register_forward_validation(
+                payload,
+                now=_SESSION_OPEN - timedelta(minutes=1),
+            )
+            second = service.register_forward_validation(
+                self._forward_registration_payload(version.upper()),
+                now=_SESSION_OPEN + timedelta(days=30),
+            )
+
+            assert payload.source_config_version == version
+            assert first == second
+            assert db.query(StrategyV2ForwardRegistration).count() == 1
+
+    def test_forward_collector_materializes_one_hashed_pair_and_get_stays_read_only(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(shadow_service_module, "_FORWARD_READY_PAIRS", 1)
+        with self._db() as db:
+            service, version, target_open = self._collect_forward_pair(db)
+            registration = db.query(StrategyV2ForwardRegistration).one()
+            assert registration.source_config_version == version
+            before_state = db.query(StrategyV2ShadowState).filter_by(
+                symbol="AAPL.US"
+            ).one().state_json
+
+            response = service.collect_forward_validation(
+                "AAPL.US",
+                "US",
+                now=target_open + timedelta(minutes=400, seconds=30),
+            )
+
+            assert response is not None
+            assert response.status == "READY_FOR_REVIEW"
+            assert response.included_pairs == 1
+            assert response.excluded_targets == 0
+            assert response.order_submission_allowed is False
+            assert response.automatic_promotion_allowed is False
+            assert len(response.daily) == 1
+            item = response.daily[0]
+            assert item.disposition == "INCLUDED"
+            assert item.target_session_date == target_open.date()
+            assert item.seed_session_date == _SESSION_OPEN.date()
+            assert item.seed_session_date is not None
+            assert item.seed_session_date < registration.eligible_after.date()
+            assert item.same_target_bars is True
+            assert item.baseline_replay_match is True
+            assert item.session_local_invariant is True
+            assert item.target_bars == 390
+            assert {
+                len(item.target_bars_sha256),
+                len(item.seed_bars_sha256),
+                len(item.baseline_input_sha256),
+                len(item.candidate_input_sha256),
+                len(item.baseline_result_sha256),
+                len(item.candidate_result_sha256),
+                len(item.evidence_digest_sha256),
+            } == {64}
+            assert item.baseline is not None
+            assert item.candidate is not None
+            assert item.baseline.warmup_lost_bars == 139
+            assert item.candidate.warmup_lost_bars == 64
+            assert db.query(StrategyV2ForwardEvidence).count() == 1
+            evidence_before = db.query(StrategyV2ForwardEvidence).one()
+            frozen = (
+                evidence_before.id,
+                evidence_before.target_bars_sha256,
+                evidence_before.baseline_result_sha256,
+                evidence_before.candidate_result_sha256,
+                evidence_before.evidence_digest_sha256,
+            )
+            assert service.collect_forward_validation(
+                "AAPL.US",
+                "US",
+                now=target_open + timedelta(minutes=401),
+            ) is not None
+            fetched = service.get_forward_validation("AAPL.US")
+            evidence_after = db.query(StrategyV2ForwardEvidence).one()
+            assert fetched.included_pairs == 1
+            assert (
+                evidence_after.id,
+                evidence_after.target_bars_sha256,
+                evidence_after.baseline_result_sha256,
+                evidence_after.candidate_result_sha256,
+                evidence_after.evidence_digest_sha256,
+            ) == frozen
+            assert db.query(StrategyV2ShadowState).filter_by(
+                symbol="AAPL.US"
+            ).one().state_json == before_state
+
+    def test_forward_registration_excludes_the_intraday_registration_session(
+        self,
+    ) -> None:
+        with self._db() as db:
+            service, version = self._collect_complete_session(db)
+            registered = service.register_forward_validation(
+                self._forward_registration_payload(version),
+                now=_SESSION_OPEN + timedelta(hours=1),
+            )
+
+            assert registered.eligible_after == _SESSION_OPEN + timedelta(days=3)
+            assert service.collect_forward_validation(
+                "AAPL.US",
+                "US",
+                now=_SESSION_OPEN + timedelta(minutes=400),
+            ) is None
+            assert db.query(StrategyV2ForwardEvidence).count() == 0
+
+    def test_forward_incomplete_target_waits_until_the_frozen_deadline(self) -> None:
+        with self._db() as db:
+            service, version = self._collect_complete_session(db)
+            target_open = _SESSION_OPEN + timedelta(days=3)
+            service.register_forward_validation(
+                self._forward_registration_payload(version),
+                now=target_open - timedelta(minutes=1),
+            )
+
+            early = service.collect_forward_validation(
+                "AAPL.US",
+                "US",
+                now=target_open + timedelta(minutes=400, seconds=30),
+            )
+            assert early is not None
+            assert early.status == "FROZEN"
+            assert db.query(StrategyV2ForwardEvidence).count() == 0
+
+            final = service.collect_forward_validation(
+                "AAPL.US",
+                "US",
+                now=target_open + timedelta(minutes=404, seconds=10),
+            )
+            assert final is not None
+            assert final.status == "COLLECTING"
+            assert final.excluded_targets == 1
+            assert final.daily[0].exclusion_reason == "TARGET_SESSION_INCOMPLETE"
+            assert final.daily[0].structural_failure is False
+
+    def test_forward_collector_marks_old_deadlines_missed_one_per_tick(self) -> None:
+        with self._db() as db:
+            config = self._enabled_config(
+                db,
+                activated_at=_SESSION_OPEN - timedelta(days=1),
+            )
+            service = StrategyV2ShadowService(db)
+            version = service._config_version(config)
+            service._ensure_version_snapshot(config)
+            monday_open = _SESSION_OPEN + timedelta(days=3)
+            service.register_forward_validation(
+                self._forward_registration_payload(version),
+                now=_SESSION_OPEN,
+            )
+            wednesday_preopen = monday_open + timedelta(days=2, hours=-1)
+
+            first = service.collect_forward_validation(
+                "AAPL.US",
+                "US",
+                now=wednesday_preopen,
+            )
+            assert first is not None
+            assert first.status == "COLLECTING"
+            rows = db.query(StrategyV2ForwardEvidence).order_by(
+                StrategyV2ForwardEvidence.target_session_date
+            ).all()
+            assert [item.target_session_date for item in rows] == [
+                monday_open.date()
+            ]
+            assert rows[0].exclusion_reason == "FINALIZATION_WINDOW_MISSED"
+            assert db.query(StrategyV2ShadowDecision).count() == 0
+
+            second = service.collect_forward_validation(
+                "AAPL.US",
+                "US",
+                now=wednesday_preopen + timedelta(seconds=15),
+            )
+            assert second is not None
+            assert second.status == "COLLECTING"
+            rows = db.query(StrategyV2ForwardEvidence).order_by(
+                StrategyV2ForwardEvidence.target_session_date
+            ).all()
+            assert [item.target_session_date for item in rows] == [
+                monday_open.date(),
+                (monday_open + timedelta(days=1)).date(),
+            ]
+            assert all(
+                item.exclusion_reason == "FINALIZATION_WINDOW_MISSED"
+                for item in rows
+            )
+
+    def test_forward_missing_immediate_seed_is_terminally_excluded(self) -> None:
+        with self._db() as db:
+            config = self._enabled_config(
+                db,
+                activated_at=_SESSION_OPEN - timedelta(days=1),
+            )
+            target_open = _SESSION_OPEN + timedelta(days=3)
+            candles = _FakeCandles(_candles(390, start=target_open))
+            service = StrategyV2ShadowService(db, candles)
+            version = service._config_version(config)
+            service._ensure_version_snapshot(config)
+            service.register_forward_validation(
+                self._forward_registration_payload(version),
+                now=target_open - timedelta(minutes=1),
+            )
+            service.tick(
+                "AAPL.US",
+                "US",
+                now=target_open + timedelta(minutes=390, seconds=10),
+            )
+
+            response = service.collect_forward_validation(
+                "AAPL.US",
+                "US",
+                now=target_open + timedelta(minutes=400, seconds=30),
+            )
+
+            assert response is not None
+            assert response.status == "COLLECTING"
+            assert response.included_pairs == 0
+            assert response.excluded_targets == 1
+            assert response.daily[0].exclusion_reason == (
+                "IMMEDIATE_COMPLETE_SEED_UNAVAILABLE"
+            )
+            assert response.daily[0].structural_failure is False
+            expected = response.model_dump(mode="json")
+
+        with self._db() as restarted_db:
+            restarted = StrategyV2ShadowService(restarted_db).get_forward_validation(
+                "AAPL.US"
+            )
+            assert restarted.model_dump(mode="json") == expected
+
+    def test_forward_seed_must_have_been_known_before_target_open(self) -> None:
+        with self._db() as db:
+            service, version, target_open = self._collect_forward_pair(db)
+            seed = db.query(StrategyV2ShadowDecision).filter_by(
+                symbol="AAPL.US",
+                config_version=version,
+                session_date=_SESSION_OPEN.date(),
+            ).order_by(StrategyV2ShadowDecision.bar_at.desc()).first()
+            assert seed is not None
+            seed.observed_at = target_open + timedelta(seconds=1)
+            db.commit()
+
+            response = service.collect_forward_validation(
+                "AAPL.US",
+                "US",
+                now=target_open + timedelta(minutes=400, seconds=30),
+            )
+
+            assert response is not None
+            assert response.status == "COLLECTING"
+            assert response.daily[0].exclusion_reason == (
+                "SEED_NOT_KNOWN_AT_TARGET_OPEN"
+            )
+            assert response.daily[0].structural_failure is False
+
+    def test_forward_target_state_must_be_flat_at_materialization(self) -> None:
+        with self._db() as db:
+            service, _version, target_open = self._collect_forward_pair(db)
+            state = db.query(StrategyV2ShadowState).filter_by(
+                symbol="AAPL.US"
+            ).one()
+            state.phase = StrategyV2State.LONG.value
+            db.commit()
+
+            response = service.collect_forward_validation(
+                "AAPL.US",
+                "US",
+                now=target_open + timedelta(minutes=400, seconds=30),
+            )
+
+            assert response is not None
+            assert response.status == "BLOCKED"
+            assert response.daily[0].exclusion_reason == "TARGET_STATE_NOT_FLAT"
+            assert response.daily[0].structural_failure is True
+
+    def test_forward_target_evidence_must_be_known_at_evaluation(self) -> None:
+        with self._db() as db:
+            service, version, target_open = self._collect_forward_pair(db)
+            current = target_open + timedelta(minutes=400, seconds=30)
+            target = db.query(StrategyV2ShadowDecision).filter_by(
+                symbol="AAPL.US",
+                config_version=version,
+                session_date=target_open.date(),
+            ).order_by(StrategyV2ShadowDecision.bar_at.desc()).first()
+            assert target is not None
+            target.observed_at = current + timedelta(seconds=1)
+            db.commit()
+
+            response = service.collect_forward_validation(
+                "AAPL.US",
+                "US",
+                now=current,
+            )
+
+            assert response is not None
+            assert response.status == "BLOCKED"
+            assert response.daily[0].exclusion_reason == (
+                "TARGET_EVIDENCE_NOT_KNOWN_AT_EVALUATION"
+            )
+            assert response.daily[0].structural_failure is True
+
+    def test_forward_structural_baseline_drift_blocks_the_registration(self) -> None:
+        with self._db() as db:
+            service, version, target_open = self._collect_forward_pair(db)
+            target = db.query(StrategyV2ShadowDecision).filter_by(
+                symbol="AAPL.US",
+                config_version=version,
+                session_date=target_open.date(),
+            ).order_by(StrategyV2ShadowDecision.bar_at.asc()).first()
+            assert target is not None
+            target.reason = "MUTATED_AFTER_COLLECTION"
+            db.commit()
+
+            response = service.collect_forward_validation(
+                "AAPL.US",
+                "US",
+                now=target_open + timedelta(minutes=400, seconds=30),
+            )
+
+            assert response is not None
+            assert response.status == "BLOCKED"
+            assert response.included_pairs == 0
+            assert response.daily[0].disposition == "EXCLUDED"
+            assert response.daily[0].structural_failure is True
+            assert response.daily[0].exclusion_reason == "BASELINE_REPLAY_MISMATCH"
+
+    def test_forward_disabled_collection_is_excluded_without_structural_block(self) -> None:
+        with self._db() as db:
+            service, _version, target_open = self._collect_forward_pair(db)
+            config = db.query(StrategyV2ShadowConfig).filter_by(
+                symbol="AAPL.US"
+            ).one()
+            config.enabled = False
+            db.commit()
+
+            response = service.collect_forward_validation(
+                "AAPL.US",
+                "US",
+                now=target_open + timedelta(minutes=400, seconds=30),
+            )
+
+            assert response is not None
+            assert response.status == "COLLECTING"
+            assert response.daily[0].exclusion_reason == "COLLECTION_DISABLED"
+            assert response.daily[0].structural_failure is False
+
+    def test_forward_source_version_drift_is_a_structural_block(self) -> None:
+        with self._db() as db:
+            service, _version, target_open = self._collect_forward_pair(db)
+            service.update_config(
+                StrategyV2ShadowConfigUpdate(max_adx=18.0),
+                symbol="AAPL.US",
+            )
+
+            response = service.collect_forward_validation(
+                "AAPL.US",
+                "US",
+                now=target_open + timedelta(minutes=400, seconds=30),
+            )
+
+            assert response is not None
+            assert response.status == "BLOCKED"
+            assert response.daily[0].exclusion_reason == "SOURCE_VERSION_SUPERSEDED"
+            assert response.daily[0].structural_failure is True
+
+    def test_forward_source_drift_wins_over_collection_disabled(self) -> None:
+        with self._db() as db:
+            service, _version, target_open = self._collect_forward_pair(db)
+            config = db.query(StrategyV2ShadowConfig).filter_by(
+                symbol="AAPL.US"
+            ).one()
+            config.max_adx = 18.0
+            config.enabled = False
+            db.commit()
+
+            response = service.collect_forward_validation(
+                "AAPL.US",
+                "US",
+                now=target_open + timedelta(minutes=400, seconds=30),
+            )
+
+            assert response is not None
+            assert response.status == "BLOCKED"
+            assert response.daily[0].exclusion_reason == "SOURCE_VERSION_SUPERSEDED"
+            assert response.daily[0].structural_failure is True
+
+    def test_forward_source_drift_wins_over_a_missed_window(self) -> None:
+        with self._db() as db:
+            service, _version, target_open = self._collect_forward_pair(db)
+            service.update_config(
+                StrategyV2ShadowConfigUpdate(max_adx=18.0),
+                symbol="AAPL.US",
+            )
+
+            response = service.collect_forward_validation(
+                "AAPL.US",
+                "US",
+                now=target_open + timedelta(minutes=405),
+            )
+
+            assert response is not None
+            assert response.status == "BLOCKED"
+            assert response.excluded_targets == 1
+            assert response.daily[0].exclusion_reason == "SOURCE_VERSION_SUPERSEDED"
+            assert db.query(StrategyV2ForwardEvidence).count() == 1
+
+    def test_forward_mature_registration_stops_appending_targets(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(shadow_service_module, "_FORWARD_MATURE_PAIRS", 1)
+        with self._db() as db:
+            service, _version, target_open = self._collect_forward_pair(db)
+            response = service.collect_forward_validation(
+                "AAPL.US",
+                "US",
+                now=target_open + timedelta(minutes=400, seconds=30),
+            )
+            assert response is not None
+            assert response.status == "MATURE_EVIDENCE"
+            assert db.query(StrategyV2ForwardEvidence).count() == 1
+
+            later = service.collect_forward_validation(
+                "AAPL.US",
+                "US",
+                now=target_open + timedelta(days=2, minutes=400),
+            )
+            assert later is not None
+            assert later.status == "MATURE_EVIDENCE"
+            assert db.query(StrategyV2ForwardEvidence).count() == 1
+
+    def test_forward_get_fails_closed_on_materialized_payload_tampering(self) -> None:
+        with self._db() as db:
+            service, _version, target_open = self._collect_forward_pair(db)
+            response = service.collect_forward_validation(
+                "AAPL.US",
+                "US",
+                now=target_open + timedelta(minutes=400, seconds=30),
+            )
+            assert response is not None and response.included_pairs == 1
+            row = db.query(StrategyV2ForwardEvidence).one()
+            row.baseline_result_json = "{}"
+            db.commit()
+
+            blocked = service.get_forward_validation("AAPL.US")
+
+            assert blocked.status == "BLOCKED"
+            assert blocked.included_pairs == 0
+            assert "EVIDENCE_PAYLOAD_INVALID" in blocked.blockers
+
+    def test_forward_get_rejects_self_hashed_inconsistent_trade_sequence(self) -> None:
+        with self._db() as db:
+            service, _version, target_open = self._collect_forward_pair(db)
+            collected = service.collect_forward_validation(
+                "AAPL.US",
+                "US",
+                now=target_open + timedelta(minutes=400, seconds=30),
+            )
+            assert collected is not None and collected.included_pairs == 1
+            row = db.query(StrategyV2ForwardEvidence).one()
+            payload = json.loads(row.baseline_result_json)
+            payload["trade_net_pnl"].append(123.0)
+            row.baseline_result_json = json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            row.baseline_result_sha256 = service._forward_text_hash(
+                row.baseline_result_json
+            )
+            row.evidence_digest_sha256 = service._forward_evidence_digest(row)
+            db.commit()
+
+            blocked = service.get_forward_validation("AAPL.US")
+
+            assert blocked.status == "BLOCKED"
+            assert blocked.included_pairs == 0
+            assert "EVIDENCE_PAYLOAD_INVALID" in blocked.blockers
+            assert "EVIDENCE_DIGEST_MISMATCH" not in blocked.blockers
+
+    def test_forward_get_fails_closed_on_exclusion_metadata_tampering(self) -> None:
+        with self._db() as db:
+            service, version, target_open = self._collect_forward_pair(db)
+            target = db.query(StrategyV2ShadowDecision).filter_by(
+                symbol="AAPL.US",
+                config_version=version,
+                session_date=target_open.date(),
+            ).order_by(StrategyV2ShadowDecision.bar_at.asc()).first()
+            assert target is not None
+            target.reason = "MUTATED_AFTER_COLLECTION"
+            db.commit()
+            collected = service.collect_forward_validation(
+                "AAPL.US",
+                "US",
+                now=target_open + timedelta(minutes=400, seconds=30),
+            )
+            assert collected is not None and collected.status == "BLOCKED"
+            row = db.query(StrategyV2ForwardEvidence).one()
+            row.structural_failure = False
+            db.commit()
+
+            blocked = service.get_forward_validation("AAPL.US")
+
+            assert blocked.status == "BLOCKED"
+            assert "EVIDENCE_DIGEST_MISMATCH" in blocked.blockers
+            assert "EVIDENCE_EXCLUSION_INVALID" in blocked.blockers
+
+    def test_forward_materialized_evidence_survives_a_fresh_service_session(self) -> None:
+        with self._db() as db:
+            service, _version, target_open = self._collect_forward_pair(db)
+            collected = service.collect_forward_validation(
+                "AAPL.US",
+                "US",
+                now=target_open + timedelta(minutes=400, seconds=30),
+            )
+            assert collected is not None
+            expected = collected.model_dump(mode="json")
+
+        with self._db() as restarted_db:
+            restarted = StrategyV2ShadowService(restarted_db)
+            actual = restarted.get_forward_validation("AAPL.US")
+
+            assert actual.model_dump(mode="json") == expected
+            assert restarted_db.query(StrategyV2ForwardEvidence).count() == 1
+            assert not restarted_db.new and not restarted_db.dirty
+
     def test_replay_metrics_count_unique_gate_eligible_bars(self) -> None:
         metrics = StrategyV2ShadowService._metrics_from_replay(
             [
@@ -2141,6 +2890,49 @@ class TestStrategyV2ShadowService:
 
         assert metrics.bars == 2
         assert metrics.eligible_bars == 1
+
+    def test_forward_metric_aggregation_keeps_cross_session_drawdown(self) -> None:
+        metrics = StrategyV2ShadowService._aggregate_forward_metrics([
+            (
+                StrategyV2ShadowMetrics(
+                    closed_trades=2,
+                    net_pnl=5.0,
+                    max_drawdown=5.0,
+                ),
+                [10.0, -5.0],
+            ),
+            (
+                StrategyV2ShadowMetrics(
+                    closed_trades=2,
+                    net_pnl=0.0,
+                    max_drawdown=5.0,
+                ),
+                [-5.0, 5.0],
+            ),
+        ])
+
+        assert metrics.net_pnl == 5.0
+        assert metrics.max_drawdown == 10.0
+
+    @pytest.mark.parametrize(
+        ("included", "expected"),
+        [
+            (4, "COLLECTING"),
+            (5, "READY_FOR_REVIEW"),
+            (19, "READY_FOR_REVIEW"),
+            (20, "MATURE_EVIDENCE"),
+        ],
+    )
+    def test_forward_validation_uses_exact_review_and_maturity_boundaries(
+        self,
+        included: int,
+        expected: str,
+    ) -> None:
+        assert StrategyV2ShadowService._forward_validation_status(
+            included=included,
+            has_rows=True,
+            blockers=[],
+        ) == expected
 
     def test_domain_config_preserves_frozen_execution_parameters(self) -> None:
         with self._db() as db:

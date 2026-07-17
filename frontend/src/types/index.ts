@@ -1610,6 +1610,79 @@ export interface StrategyShadowWarmupDiagnostic {
   variants: StrategyShadowWarmupVariant[]
 }
 
+export type StrategyShadowForwardValidationStatus =
+  | 'NOT_REGISTERED'
+  | 'FROZEN'
+  | 'COLLECTING'
+  | 'READY_FOR_REVIEW'
+  | 'MATURE_EVIDENCE'
+  | 'BLOCKED'
+
+export interface StrategyShadowForwardValidationRegistration {
+  id: number
+  symbol: string
+  market: 'US' | 'HK'
+  market_timezone: string
+  candidate_algorithm_version: 'strategy-v2-causal-trend-prewarm-v1'
+  source_config_version: string
+  evaluator_digest: string
+  registered_at: string
+  eligible_after: string
+  minimum_ready_pairs: number
+  minimum_mature_pairs: number
+}
+
+export interface StrategyShadowForwardValidationDaily {
+  target_session_date: string
+  seed_session_date: string | null
+  target_open_at: string
+  evaluated_at: string
+  disposition: 'INCLUDED' | 'EXCLUDED'
+  exclusion_reason: string
+  structural_failure: boolean
+  target_bars: number
+  target_bars_sha256: string | null
+  seed_bars_sha256: string
+  baseline_input_sha256: string
+  candidate_input_sha256: string
+  same_target_bars: boolean | null
+  baseline_replay_match: boolean | null
+  session_local_invariant: boolean | null
+  baseline: StrategyShadowWarmupDaily | null
+  candidate: StrategyShadowWarmupDaily | null
+  baseline_metrics: StrategyShadowMetrics | null
+  candidate_metrics: StrategyShadowMetrics | null
+  baseline_result_sha256: string
+  candidate_result_sha256: string
+  evidence_digest_sha256: string
+}
+
+export interface StrategyShadowForwardValidationResponse {
+  registration: StrategyShadowForwardValidationRegistration | null
+  status: StrategyShadowForwardValidationStatus
+  mode: StrategyShadowMode
+  order_submission_allowed: false
+  automatic_promotion_allowed: false
+  historical_target_backfill_allowed: false
+  evaluation_scope: 'FORWARD_OUT_OF_SAMPLE'
+  included_pairs: number
+  excluded_targets: number
+  remaining_ready_pairs: number
+  remaining_mature_pairs: number
+  blockers: string[]
+  baseline_metrics: StrategyShadowMetrics
+  candidate_metrics: StrategyShadowMetrics
+  daily: StrategyShadowForwardValidationDaily[]
+}
+
+export interface StrategyShadowForwardValidationRegisterRequest {
+  symbol: string
+  source_config_version: string
+  candidate_algorithm_version: 'strategy-v2-causal-trend-prewarm-v1'
+  confirm_forward_only: true
+  confirm_no_automatic_promotion: true
+}
+
 export interface StrategyShadowAdxChallengerResponse {
   persisted: false
   mode: StrategyShadowMode

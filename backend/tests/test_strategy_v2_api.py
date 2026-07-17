@@ -18,6 +18,8 @@ from app.database import get_db
 from app.models import (
     Base,
     StrategyConfig,
+    StrategyV2ForwardEvidence,
+    StrategyV2ForwardRegistration,
     StrategyV2ShadowConfig,
     StrategyV2ShadowDecision,
     StrategyV2ShadowState,
@@ -80,6 +82,8 @@ class TestStrategyV2ShadowApi:
         self.audit.records.clear()
         with self.session_factory() as db:
             for model in (
+                StrategyV2ForwardEvidence,
+                StrategyV2ForwardRegistration,
                 StrategyV2ShadowDecision,
                 StrategyV2ShadowTrade,
                 StrategyV2ShadowState,
@@ -440,6 +444,84 @@ class TestStrategyV2ShadowApi:
             },
         )
         assert missing.status_code == 400
+
+    def test_forward_validation_registration_and_read_only_empty_envelope(self) -> None:
+        empty = self.client.get(
+            "/api/strategy-shadow/forward-validation",
+            params={"symbol": "AAPL.US"},
+        )
+        assert empty.status_code == 200
+        assert empty.json()["status"] == "NOT_REGISTERED"
+        assert empty.json()["registration"] is None
+        assert empty.json()["historical_target_backfill_allowed"] is False
+
+        self.client.get(
+            "/api/strategy-shadow/config",
+            params={"symbol": "AAPL.US"},
+        )
+        enabled = self.client.put(
+            "/api/strategy-shadow/config",
+            params={"symbol": "AAPL.US"},
+            json={"enabled": True},
+        )
+        assert enabled.status_code == 200
+        source_version = enabled.json()["config_version"]
+        registered = self.client.post(
+            "/api/strategy-shadow/forward-validation/register",
+            json={
+                "symbol": "AAPL.US",
+                "source_config_version": source_version,
+                "candidate_algorithm_version": (
+                    "strategy-v2-causal-trend-prewarm-v1"
+                ),
+                "confirm_forward_only": True,
+                "confirm_no_automatic_promotion": True,
+            },
+        )
+
+        assert registered.status_code == 200
+        body = registered.json()
+        assert body["status"] == "FROZEN"
+        assert body["registration"]["source_config_version"] == source_version
+        assert body["registration"]["market_timezone"] == "America/New_York"
+        assert body["included_pairs"] == 0
+        assert body["order_submission_allowed"] is False
+        assert body["automatic_promotion_allowed"] is False
+        assert body["evaluation_scope"] == "FORWARD_OUT_OF_SAMPLE"
+        assert self.audit.records[-1][0] == (
+            "STRATEGY_V2_FORWARD_VALIDATION_REGISTER"
+        )
+
+        duplicate = self.client.post(
+            "/api/strategy-shadow/forward-validation/register",
+            json={
+                "symbol": "AAPL.US",
+                "source_config_version": source_version,
+                "candidate_algorithm_version": (
+                    "strategy-v2-causal-trend-prewarm-v1"
+                ),
+                "confirm_forward_only": True,
+                "confirm_no_automatic_promotion": True,
+            },
+        )
+        assert duplicate.status_code == 200
+        assert duplicate.json()["registration"] == body["registration"]
+        with self.session_factory() as db:
+            assert db.query(StrategyV2ForwardRegistration).count() == 1
+            before = (
+                db.query(StrategyV2ForwardRegistration).count(),
+                db.query(StrategyV2ForwardEvidence).count(),
+            )
+        fetched = self.client.get(
+            "/api/strategy-shadow/forward-validation",
+            params={"symbol": "AAPL.US"},
+        )
+        assert fetched.status_code == 200
+        with self.session_factory() as db:
+            assert (
+                db.query(StrategyV2ForwardRegistration).count(),
+                db.query(StrategyV2ForwardEvidence).count(),
+            ) == before
 
     def test_versions_and_evaluation_preserve_old_config_evidence(self) -> None:
         original = self.client.get("/api/strategy-shadow/config").json()

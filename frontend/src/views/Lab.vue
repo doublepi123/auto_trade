@@ -680,6 +680,259 @@
               </el-table>
             </section>
 
+            <section class="shadow-section" data-testid="shadow-forward-validation">
+              <div class="shadow-section-header">
+                <div>
+                  <h3>因果预热前向验证</h3>
+                  <small v-if="shadowForwardRegistration">
+                    注册 #{{ shadowForwardRegistration.id }} ·
+                    {{ shortVersion(shadowForwardRegistration.source_config_version) }} ·
+                    {{ shadowForwardRegistration.candidate_algorithm_version }}
+                  </small>
+                  <small v-else>
+                    固定候选 {{ shadowForwardCandidateVersion }}
+                  </small>
+                </div>
+                <div class="shadow-tags">
+                  <el-tag effect="plain">纯影子</el-tag>
+                  <el-tag
+                    v-if="shadowForwardValidation"
+                    :type="shadowForwardStatusMeta.type"
+                    data-testid="shadow-forward-status"
+                  >
+                    {{ shadowForwardStatusMeta.label }}
+                  </el-tag>
+                  <el-button
+                    v-if="!shadowForwardRegistration"
+                    type="primary"
+                    size="small"
+                    :disabled="!shadowForwardCanRegister"
+                    :loading="shadowForwardRegistering"
+                    data-testid="shadow-forward-register"
+                    @click="openShadowForwardDialog"
+                  >
+                    <el-icon><Lock /></el-icon>
+                    <span>冻结前向验证</span>
+                  </el-button>
+                </div>
+              </div>
+
+              <el-alert
+                v-if="shadowForwardLoading"
+                title="正在读取前向验证"
+                type="info"
+                :closable="false"
+                show-icon
+                class="shadow-evidence-alert"
+                data-testid="shadow-forward-loading"
+              />
+              <el-alert
+                v-if="shadowForwardError"
+                :title="shadowForwardError"
+                type="error"
+                :closable="false"
+                show-icon
+                class="shadow-evidence-alert"
+                data-testid="shadow-forward-error"
+              />
+
+              <template v-if="shadowForwardValidation">
+                <div
+                  v-if="shadowForwardRegistration"
+                  class="shadow-facts shadow-forward-facts"
+                  data-testid="shadow-forward-registration"
+                >
+                  <div>
+                    <span>注册时间（市场）</span>
+                    <strong>{{ formatForwardDateTime(shadowForwardRegistration.registered_at) }}</strong>
+                  </div>
+                  <div>
+                    <span>最早纳入（市场）</span>
+                    <strong>{{ formatForwardDateTime(shadowForwardRegistration.eligible_after) }}</strong>
+                  </div>
+                  <div>
+                    <span>评估器摘要</span>
+                    <strong>{{ shadowForwardRegistration.evaluator_digest.slice(0, 12) }}</strong>
+                  </div>
+                </div>
+
+                <el-alert
+                  v-if="shadowForwardRegistration
+                    && shadowForwardRegistration.source_config_version !== selectedShadowVersion"
+                  title="前向 cohort 属于另一证据版本"
+                  :description="`此处始终展示 ${shortVersion(shadowForwardRegistration.source_config_version)} 的冻结前向证据，与当前选择的 ${shortVersion(selectedShadowVersion)} 不混合。`"
+                  type="info"
+                  :closable="false"
+                  show-icon
+                  class="shadow-evidence-alert"
+                  data-testid="shadow-forward-version-context"
+                />
+
+                <div
+                  v-if="shadowForwardRegistration"
+                  class="shadow-evidence-summary shadow-forward-summary"
+                  data-testid="shadow-forward-summary"
+                >
+                  <span>
+                    初步复核 {{ shadowForwardValidation.included_pairs }} /
+                    {{ shadowForwardRegistration.minimum_ready_pairs }}
+                  </span>
+                  <span>
+                    成熟证据 {{ shadowForwardValidation.included_pairs }} /
+                    {{ shadowForwardRegistration.minimum_mature_pairs }}
+                  </span>
+                  <span>排除目标 {{ shadowForwardValidation.excluded_targets }}</span>
+                  <span>初审还需 {{ shadowForwardValidation.remaining_ready_pairs }}</span>
+                  <span>成熟还需 {{ shadowForwardValidation.remaining_mature_pairs }}</span>
+                </div>
+
+                <el-alert
+                  :title="shadowForwardStatusAlert.title"
+                  :description="shadowForwardStatusAlert.description"
+                  :type="shadowForwardStatusAlert.type"
+                  :closable="false"
+                  show-icon
+                  class="shadow-evidence-alert"
+                  data-testid="shadow-forward-lifecycle"
+                />
+                <el-alert
+                  title="前向边界已锁定"
+                  :description="shadowForwardRegistration
+                    ? `仅纳入 ${formatForwardDateTime(shadowForwardRegistration.eligible_after)} 起始的完整目标会话；更早数据只可作为因果 seed。`
+                    : '注册时间和最早纳入时间由服务端确定；注册前目标会话永不回填。'"
+                  type="info"
+                  :closable="false"
+                  show-icon
+                  class="shadow-evidence-alert"
+                  data-testid="shadow-forward-no-backfill"
+                />
+                <el-alert
+                  title="不会自动晋级或下单"
+                  description="前向结果只用于人工复核，不修改影子配置、不触发现行策略，也不提交任何订单。"
+                  type="info"
+                  :closable="false"
+                  show-icon
+                  class="shadow-evidence-alert"
+                  data-testid="shadow-forward-safety"
+                />
+                <el-alert
+                  v-if="!shadowForwardRegistration && shadowForwardRegisterUnavailableReason"
+                  title="暂不可冻结"
+                  :description="shadowForwardRegisterUnavailableReason"
+                  type="warning"
+                  :closable="false"
+                  show-icon
+                  class="shadow-evidence-alert"
+                  data-testid="shadow-forward-register-disabled"
+                />
+
+                <el-table
+                  v-if="shadowForwardRegistration"
+                  :data="shadowForwardDailyRows"
+                  size="small"
+                  empty-text="等待注册后的完整目标会话"
+                  data-testid="shadow-forward-daily"
+                >
+                  <el-table-column type="expand" width="44">
+                    <template #default="{ row }">
+                      <div class="shadow-evidence-summary shadow-forward-pair-audit">
+                        <span>目标开盘 {{ formatForwardDateTime(row.target_open_at) }}</span>
+                        <span>评估 {{ formatForwardDateTime(row.evaluated_at) }}</span>
+                        <span>目标 bar {{ row.target_bars }}</span>
+                        <span>bar 哈希 {{ row.target_bars_sha256?.slice(0, 12) || '-' }}</span>
+                        <span>seed 哈希 {{ row.seed_bars_sha256?.slice(0, 12) || '-' }}</span>
+                        <span>
+                          输入哈希 B/C
+                          {{ row.baseline_input_sha256?.slice(0, 8) || '-' }} /
+                          {{ row.candidate_input_sha256?.slice(0, 8) || '-' }}
+                        </span>
+                        <span>
+                          结果哈希 B/C
+                          {{ row.baseline_result_sha256?.slice(0, 8) || '-' }} /
+                          {{ row.candidate_result_sha256?.slice(0, 8) || '-' }}
+                        </span>
+                        <span>
+                          证据摘要 {{ row.evidence_digest_sha256?.slice(0, 8) || '-' }}
+                        </span>
+                        <span>同目标 bar {{ formatNullableBoolean(row.same_target_bars) }}</span>
+                        <span>基线一致 {{ formatNullableBoolean(row.baseline_replay_match) }}</span>
+                        <span>日内特征不变 {{ formatNullableBoolean(row.session_local_invariant) }}</span>
+                      </div>
+                      <el-alert
+                        v-if="row.disposition === 'EXCLUDED'"
+                        title="目标会话已排除"
+                        :description="shadowForwardExclusionLabel(row.exclusion_reason)"
+                        :type="row.structural_failure ? 'error' : 'warning'"
+                        :closable="false"
+                        show-icon
+                        class="shadow-evidence-alert"
+                      />
+                      <el-table
+                        v-if="row.included"
+                        :data="shadowForwardVariantRows(row)"
+                        size="small"
+                        empty-text="暂无配对明细"
+                      >
+                        <el-table-column prop="label" label="方案" width="130" />
+                        <el-table-column label="首次就绪（市场）" width="135">
+                          <template #default="scope">{{ formatMarketClock(scope.row.first_ready_at) }}</template>
+                        </el-table-column>
+                        <el-table-column label="就绪 / 预热损失" width="125">
+                          <template #default="scope">{{ scope.row.ready_bars }} / {{ scope.row.warmup_lost_bars }}</template>
+                        </el-table-column>
+                        <el-table-column prop="eligible_bars" label="Gate 通过" width="95" />
+                        <el-table-column prop="entries" label="开仓" width="75" />
+                        <el-table-column prop="closed_trades" label="闭环" width="75" />
+                        <el-table-column label="净收益" width="100">
+                          <template #default="scope">{{ formatNullable(scope.row.net_pnl) }}</template>
+                        </el-table-column>
+                        <el-table-column label="最大回撤" min-width="100">
+                          <template #default="scope">{{ formatNullable(scope.row.max_drawdown) }}</template>
+                        </el-table-column>
+                      </el-table>
+                    </template>
+                  </el-table-column>
+                  <el-table-column prop="target_session_date" label="目标日" width="110" />
+                  <el-table-column label="资格" width="90">
+                    <template #default="{ row }">
+                      <el-tag :type="row.included ? 'success' : 'warning'" effect="plain">
+                        {{ row.included ? '纳入' : '排除' }}
+                      </el-tag>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="seed 日" width="110">
+                    <template #default="{ row }">{{ row.seed_session_date || '-' }}</template>
+                  </el-table-column>
+                  <el-table-column label="首次就绪 基线 / 预热" width="165">
+                    <template #default="{ row }">
+                      {{ formatMarketClock(row.baseline?.first_ready_at ?? null) }} /
+                      {{ formatMarketClock(row.candidate?.first_ready_at ?? null) }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="恢复就绪" width="95">
+                    <template #default="{ row }">{{ formatSignedNullableCount(row.readyDelta) }}</template>
+                  </el-table-column>
+                  <el-table-column label="Gate 基线 / 预热" width="135">
+                    <template #default="{ row }">
+                      {{ row.baseline?.eligible_bars ?? '-' }} / {{ row.candidate?.eligible_bars ?? '-' }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="Gate 增量" width="95">
+                    <template #default="{ row }">{{ formatSignedNullableCount(row.eligibleDelta) }}</template>
+                  </el-table-column>
+                  <el-table-column label="闭环增量" width="95">
+                    <template #default="{ row }">{{ formatSignedNullableCount(row.closedTradeDelta) }}</template>
+                  </el-table-column>
+                  <el-table-column label="净收益增量" width="105">
+                    <template #default="{ row }">{{ formatSignedNullable(row.netPnlDelta) }}</template>
+                  </el-table-column>
+                  <el-table-column label="回撤变化" min-width="100">
+                    <template #default="{ row }">{{ formatSignedNullable(row.drawdownDelta) }}</template>
+                  </el-table-column>
+                </el-table>
+              </template>
+            </section>
+
             <section v-if="shadowAdxChallengers" class="shadow-section" data-testid="shadow-adx-challengers">
               <div class="shadow-section-header">
                 <div>
@@ -849,12 +1102,71 @@
         </div>
       </el-tab-pane>
     </el-tabs>
+
+    <el-dialog
+      v-model="shadowForwardDialogVisible"
+      title="冻结前向验证候选"
+      width="500px"
+      class="shadow-forward-dialog"
+      :close-on-click-modal="!shadowForwardRegistering"
+      :close-on-press-escape="!shadowForwardRegistering"
+      :show-close="!shadowForwardRegistering"
+      data-testid="shadow-forward-dialog"
+      @closed="resetShadowForwardConfirmations"
+    >
+      <div class="shadow-forward-dialog-summary">
+        <span>{{ shadowConfig?.symbol || '-' }}</span>
+        <strong>{{ shortVersion(selectedShadowVersion) }}</strong>
+        <span>候选</span>
+        <strong>{{ shadowForwardCandidateVersion }}</strong>
+      </div>
+      <el-alert
+        title="注册时间由服务端确定"
+        description="盘前注册可从当日完整 RTH 开盘纳入；开盘时及之后注册从下一完整会话开始。seed 可早于边界，目标会话不可早于边界。"
+        type="info"
+        :closable="false"
+        show-icon
+        class="shadow-evidence-alert"
+      />
+      <div class="shadow-forward-confirmations">
+        <el-checkbox
+          v-model="shadowForwardOnlyConfirmed"
+          data-testid="shadow-forward-confirm-only"
+        >
+          仅纳入注册边界之后的完整目标会话，不回填历史目标样本
+        </el-checkbox>
+        <el-checkbox
+          v-model="shadowForwardNoPromotionConfirmed"
+          data-testid="shadow-forward-confirm-safety"
+        >
+          不会自动修改配置、晋级或提交订单
+        </el-checkbox>
+      </div>
+      <template #footer>
+        <el-button
+          :disabled="shadowForwardRegistering"
+          data-testid="shadow-forward-register-cancel"
+          @click="shadowForwardDialogVisible = false"
+        >取消</el-button>
+        <el-button
+          type="primary"
+          :loading="shadowForwardRegistering"
+          :disabled="!shadowForwardOnlyConfirmed || !shadowForwardNoPromotionConfirmed"
+          data-testid="shadow-forward-register-confirm"
+          @click="registerShadowForwardValidation"
+        >
+          <el-icon><Lock /></el-icon>
+          <span>冻结并开始采集</span>
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, ref, reactive, onBeforeUnmount, onMounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { Lock } from '@element-plus/icons-vue'
 import {
   listPromptVersions, createPromptVersion, activatePromptVersion,
   listExperimentNames, getExperimentSummary,
@@ -868,8 +1180,10 @@ import {
   getStrategyShadowConfigs,
   getStrategyShadowDecisions,
   getStrategyShadowEvaluation,
+  getStrategyShadowForwardValidation,
   getStrategyShadowStatus,
   getStrategyShadowVersions,
+  registerStrategyShadowForwardValidation,
   updateStrategyShadowConfig,
 } from '../api/strategy_shadow'
 import type {
@@ -877,7 +1191,8 @@ import type {
   PerformanceVariant, IndicatorsResponse, LLMInteractionRecord, LLMIntervalStatus,
   StrategyShadowAdxChallengerResponse,
   StrategyShadowConfig, StrategyShadowConfigUpdate, StrategyShadowDecision,
-  StrategyShadowEvaluation, StrategyShadowStatus, StrategyShadowVersion,
+  StrategyShadowEvaluation, StrategyShadowForwardValidationDaily,
+  StrategyShadowForwardValidationResponse, StrategyShadowStatus, StrategyShadowVersion,
   StrategyShadowWarmupVariant,
 } from '../types'
 import { resolveErrorMessage } from '../utils/error'
@@ -1097,6 +1412,13 @@ const shadowEvaluation = ref<StrategyShadowEvaluation | null>(null)
 const shadowAdxChallengers = ref<StrategyShadowAdxChallengerResponse | null>(null)
 const shadowAdxChallengerError = ref('')
 const shadowAdxLoading = ref(false)
+const shadowForwardValidation = ref<StrategyShadowForwardValidationResponse | null>(null)
+const shadowForwardLoading = ref(false)
+const shadowForwardError = ref('')
+const shadowForwardRegistering = ref(false)
+const shadowForwardDialogVisible = ref(false)
+const shadowForwardOnlyConfirmed = ref(false)
+const shadowForwardNoPromotionConfirmed = ref(false)
 const shadowDecisions = ref<StrategyShadowDecision[]>([])
 const shadowDecisionTotal = ref(0)
 const shadowDecisionPage = ref(1)
@@ -1109,6 +1431,7 @@ const shadowRequestGeneration = ref(0)
 const shadowDecisionRequestGeneration = ref(0)
 const shadowStatusFetchedAtMs = ref(0)
 const shadowNowMs = ref(Date.now())
+const shadowForwardCandidateVersion = 'strategy-v2-causal-trend-prewarm-v1' as const
 const shadowForm = reactive<StrategyShadowConfigUpdate>({
   enabled: false,
   zscore_window_1m_bars: 30,
@@ -1172,6 +1495,9 @@ async function loadStrategyShadow(symbol = selectedShadowSymbol.value || undefin
   shadowAdxChallengers.value = null
   shadowAdxChallengerError.value = ''
   shadowAdxLoading.value = false
+  shadowForwardValidation.value = null
+  shadowForwardError.value = ''
+  shadowForwardLoading.value = false
   shadowStatusFetchedAtMs.value = 0
   shadowLoaded.value = false
   try {
@@ -1205,6 +1531,7 @@ async function loadStrategyShadow(symbol = selectedShadowSymbol.value || undefin
     shadowDecisionPage.value = decisions.page
     shadowLoaded.value = true
     void loadShadowAdxChallengers(config.symbol, currentVersion, generation)
+    void loadShadowForwardValidation(config.symbol, currentVersion, generation)
   } catch (error: unknown) {
     if (generation !== shadowRequestGeneration.value) return
     shadowLoadError.value = resolveErrorMessage(error, '加载策略 v2 影子状态失败')
@@ -1227,6 +1554,9 @@ async function loadShadowEvidence() {
   shadowAdxChallengers.value = null
   shadowAdxChallengerError.value = ''
   shadowAdxLoading.value = false
+  shadowForwardValidation.value = null
+  shadowForwardError.value = ''
+  shadowForwardLoading.value = false
   try {
     const [evaluation, decisions] = await Promise.all([
       getStrategyShadowEvaluation(symbol, version),
@@ -1247,6 +1577,7 @@ async function loadShadowEvidence() {
     shadowDecisionTotal.value = decisions.total
     shadowDecisionPage.value = decisions.page
     void loadShadowAdxChallengers(symbol, version, generation)
+    void loadShadowForwardValidation(symbol, version, generation)
   } catch (error: unknown) {
     if (
       generation !== shadowRequestGeneration.value
@@ -1297,6 +1628,46 @@ async function loadShadowAdxChallengers(
       && selectedShadowSymbol.value === symbol
       && selectedShadowVersion.value === version
     ) shadowAdxLoading.value = false
+  }
+}
+
+async function loadShadowForwardValidation(
+  symbol: string,
+  version: string,
+  generation: number,
+) {
+  if (
+    generation !== shadowRequestGeneration.value
+    || selectedShadowSymbol.value !== symbol
+    || selectedShadowVersion.value !== version
+  ) return
+  shadowForwardLoading.value = true
+  try {
+    const result = await getStrategyShadowForwardValidation(symbol)
+    if (
+      generation !== shadowRequestGeneration.value
+      || selectedShadowSymbol.value !== symbol
+      || selectedShadowVersion.value !== version
+    ) return
+    shadowForwardValidation.value = result
+    shadowForwardError.value = ''
+  } catch (error: unknown) {
+    if (
+      generation !== shadowRequestGeneration.value
+      || selectedShadowSymbol.value !== symbol
+      || selectedShadowVersion.value !== version
+    ) return
+    shadowForwardValidation.value = null
+    shadowForwardError.value = resolveErrorMessage(
+      error,
+      '加载前向验证失败',
+    )
+  } finally {
+    if (
+      generation === shadowRequestGeneration.value
+      && selectedShadowSymbol.value === symbol
+      && selectedShadowVersion.value === version
+    ) shadowForwardLoading.value = false
   }
 }
 
@@ -1597,6 +1968,237 @@ const shadowWarmupHourlyRows = computed(() => {
   })
 })
 
+const shadowForwardRegistration = computed(() => (
+  shadowForwardValidation.value?.registration ?? null
+))
+
+const shadowForwardStatusMeta = computed<{
+  label: string
+  type: 'success' | 'warning' | 'danger' | 'info'
+}>(() => {
+  switch (shadowForwardValidation.value?.status) {
+    case 'FROZEN':
+      return { label: '已冻结', type: 'info' }
+    case 'COLLECTING':
+      return { label: '前向采集中', type: 'warning' }
+    case 'READY_FOR_REVIEW':
+      return { label: '可复核', type: 'success' }
+    case 'MATURE_EVIDENCE':
+      return { label: '证据成熟', type: 'success' }
+    case 'BLOCKED':
+      return { label: '已阻塞', type: 'danger' }
+    default:
+      return { label: '尚未注册', type: 'info' }
+  }
+})
+
+const shadowForwardStatusAlert = computed<{
+  title: string
+  description: string
+  type: 'success' | 'warning' | 'error' | 'info'
+}>(() => {
+  const value = shadowForwardValidation.value
+  const registration = value?.registration
+  switch (value?.status) {
+    case 'FROZEN':
+      return {
+        title: '候选已冻结',
+        description: `等待自 ${formatForwardDateTime(registration?.eligible_after ?? null)} 起的首个完整目标会话。`,
+        type: 'info',
+      }
+    case 'COLLECTING':
+      return {
+        title: '注册后样本采集中',
+        description: `已纳入 ${value.included_pairs} 对，距离初步复核还需 ${value.remaining_ready_pairs} 对。`,
+        type: 'warning',
+      }
+    case 'READY_FOR_REVIEW':
+      return {
+        title: '样本已达初步复核门槛',
+        description: `当前 ${value.included_pairs} 对仅可人工复核，不代表候选胜出或可以晋级。`,
+        type: 'success',
+      }
+    case 'MATURE_EVIDENCE':
+      return {
+        title: '前向证据已成熟',
+        description: `当前 ${value.included_pairs} 对已达到成熟门槛，仍不会自动修改配置或晋级。`,
+        type: 'success',
+      }
+    case 'BLOCKED':
+      return {
+        title: '前向验证已阻塞',
+        description: shadowForwardBlockerSummary.value || '完整性校验未通过，冻结 cohort 不再接收证据。',
+        type: 'error',
+      }
+    default:
+      return {
+        title: '尚未冻结前向候选',
+        description: '注册后才开始计入目标会话；注册前数据不会回填为前向样本。',
+        type: 'info',
+      }
+  }
+})
+
+const shadowForwardBlockerLabels: Record<string, string> = {
+  BASELINE_REPLAY_MISMATCH: '基线回放与持久化证据不一致',
+  EVALUATOR_DEFINITION_MISMATCH: '评估器定义与注册时不一致',
+  EVIDENCE_DIGEST_MISMATCH: '前向证据摘要校验失败',
+  EVIDENCE_DISPOSITION_INVALID: '前向证据资格字段无效',
+  EVIDENCE_EXCLUSION_INVALID: '排除证据语义校验失败',
+  EVIDENCE_PAYLOAD_INVALID: '前向证据载荷无效',
+  EVIDENCE_TARGET_BOUNDARY_INVALID: '目标会话早于注册边界',
+  FORWARD_EVALUATION_FAILED: '前向评估失败',
+  REGISTRATION_BOUNDARY_INVALID: '注册纳入边界无效',
+  REGISTRATION_METADATA_INVALID: '注册元数据校验失败',
+  SESSION_LOCAL_FEATURE_DRIFT: '日内 VWAP / z-score 与基线发生偏移',
+  SOURCE_VERSION_SUPERSEDED: '冻结源版本已被替换',
+  TARGET_EVIDENCE_NOT_KNOWN_AT_EVALUATION: '目标证据在评估时尚不可用',
+  TARGET_INPUT_HASH_MISMATCH: '基线与候选目标输入不一致',
+  TARGET_STATE_NOT_FLAT: '目标交易日结束时影子状态仍有持仓',
+}
+
+const shadowForwardBlockerSummary = computed(() => (
+  shadowForwardValidation.value?.blockers
+    .map((item) => shadowForwardBlockerLabels[item] ?? item)
+    .join('；') ?? ''
+))
+
+const shadowForwardRegisterUnavailableReason = computed(() => {
+  if (shadowForwardLoading.value) return '正在读取前向验证状态'
+  if (!shadowForwardValidation.value) return shadowForwardError.value || '前向验证状态不可用'
+  if (shadowForwardRegistration.value) return ''
+  if (!shadowConfig.value?.enabled) return '请先启用当前影子采集配置'
+  if (shadowStatus.value?.version_transition_pending) return '版本过渡完成后才能冻结候选'
+  if (
+    selectedShadowVersion.value !== shadowConfig.value.config_version
+    || selectedShadowVersion.value !== shadowStatus.value?.evidence_config_version
+  ) return '只能为当前稳定证据版本冻结候选'
+  if (!shadowWarmupDiagnostic.value) return '正在等待因果预热完整性校验'
+  if (shadowWarmupDiagnostic.value.status === 'BLOCKED') return '因果预热诊断已阻塞，不能注册'
+  return ''
+})
+
+const shadowForwardCanRegister = computed(() => (
+  !shadowForwardRegistration.value && !shadowForwardRegisterUnavailableReason.value
+))
+
+const shadowForwardDailyRows = computed(() => (
+  (shadowForwardValidation.value?.daily ?? []).map((item) => {
+    const baseline = item.baseline
+    const candidate = item.candidate
+    const baselineMetrics = item.baseline_metrics
+    const candidateMetrics = item.candidate_metrics
+    const included = item.disposition === 'INCLUDED'
+      && baseline !== null
+      && candidate !== null
+      && baselineMetrics !== null
+      && candidateMetrics !== null
+    return {
+      ...item,
+      included,
+      readyDelta: included ? candidate.ready_bars - baseline.ready_bars : null,
+      warmupLostDelta: included ? candidate.warmup_lost_bars - baseline.warmup_lost_bars : null,
+      eligibleDelta: included ? candidate.eligible_bars - baseline.eligible_bars : null,
+      entryDelta: included ? candidateMetrics.entries - baselineMetrics.entries : null,
+      closedTradeDelta: included
+        ? candidateMetrics.closed_trades - baselineMetrics.closed_trades
+        : null,
+      netPnlDelta: included ? candidateMetrics.net_pnl - baselineMetrics.net_pnl : null,
+      drawdownDelta: included
+        ? candidateMetrics.max_drawdown - baselineMetrics.max_drawdown
+        : null,
+    }
+  })
+))
+
+function shadowForwardVariantRows(row: StrategyShadowForwardValidationDaily) {
+  const values = [
+    { label: '日内冷启动', daily: row.baseline, metrics: row.baseline_metrics },
+    { label: '因果趋势预热', daily: row.candidate, metrics: row.candidate_metrics },
+  ]
+  return values.flatMap((item) => (
+    item.daily && item.metrics ? [{ ...item.daily, ...item.metrics, label: item.label }] : []
+  ))
+}
+
+const shadowForwardExclusionLabels: Record<string, string> = {
+  BASELINE_REPLAY_MISMATCH: '基线复放不一致',
+  COLLECTION_DISABLED: '采集已停用',
+  EVALUATOR_DEFINITION_MISMATCH: '评估器定义发生变化',
+  FINALIZATION_WINDOW_MISSED: '错过固定收盘物化窗口',
+  FORWARD_EVALUATION_FAILED: '前向评估失败',
+  IMMEDIATE_COMPLETE_SEED_UNAVAILABLE: '缺少紧邻的完整 seed 会话',
+  SEED_NOT_KNOWN_AT_TARGET_OPEN: 'seed 数据在目标开盘时尚不可用',
+  SESSION_LOCAL_FEATURE_DRIFT: '日内特征发生偏移',
+  SOURCE_VERSION_SUPERSEDED: '冻结源版本已被替换',
+  TARGET_EVIDENCE_NOT_KNOWN_AT_EVALUATION: '目标证据在评估时尚不可用',
+  TARGET_INPUT_HASH_MISMATCH: '目标输入哈希不一致',
+  TARGET_SESSION_INCOMPLETE: '目标会话不完整',
+  TARGET_STATE_NOT_FLAT: '目标交易日结束时影子状态仍有持仓',
+}
+
+function shadowForwardExclusionLabel(reason: string | null): string {
+  if (!reason) return '-'
+  return shadowForwardExclusionLabels[reason] ?? reason
+}
+
+function openShadowForwardDialog() {
+  if (!shadowForwardCanRegister.value) return
+  shadowForwardOnlyConfirmed.value = false
+  shadowForwardNoPromotionConfirmed.value = false
+  shadowForwardDialogVisible.value = true
+}
+
+function resetShadowForwardConfirmations() {
+  shadowForwardOnlyConfirmed.value = false
+  shadowForwardNoPromotionConfirmed.value = false
+}
+
+async function registerShadowForwardValidation() {
+  const symbol = shadowConfig.value?.symbol
+  const version = selectedShadowVersion.value
+  const generation = shadowRequestGeneration.value
+  if (
+    !symbol
+    || !version
+    || !shadowForwardCanRegister.value
+    || !shadowForwardOnlyConfirmed.value
+    || !shadowForwardNoPromotionConfirmed.value
+  ) return
+  shadowForwardRegistering.value = true
+  try {
+    const result = await registerStrategyShadowForwardValidation({
+      symbol,
+      source_config_version: version,
+      candidate_algorithm_version: shadowForwardCandidateVersion,
+      confirm_forward_only: true,
+      confirm_no_automatic_promotion: true,
+    })
+    if (
+      generation !== shadowRequestGeneration.value
+      || selectedShadowSymbol.value !== symbol
+      || selectedShadowVersion.value !== version
+    ) return
+    shadowForwardValidation.value = result
+    shadowForwardError.value = ''
+    shadowForwardDialogVisible.value = false
+    ElMessage.success('前向验证候选已冻结')
+  } catch (error: unknown) {
+    if (
+      generation !== shadowRequestGeneration.value
+      || selectedShadowSymbol.value !== symbol
+      || selectedShadowVersion.value !== version
+    ) return
+    ElMessage.error(resolveErrorMessage(error, '冻结前向验证候选失败'))
+  } finally {
+    if (
+      generation === shadowRequestGeneration.value
+      && selectedShadowSymbol.value === symbol
+      && selectedShadowVersion.value === version
+    ) shadowForwardRegistering.value = false
+  }
+}
+
 async function pollStrategyShadow() {
   const symbol = shadowConfig.value?.symbol
   if (!symbol || !selectedShadowVersion.value) return
@@ -1668,6 +2270,25 @@ function formatMarketDateTime(value: string | null): string {
   }).format(parsed)
 }
 
+function formatForwardDateTime(value: string | null): string {
+  if (!value) return '-'
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) return '-'
+  try {
+    return new Intl.DateTimeFormat('zh-CN', {
+      timeZone: shadowForwardRegistration.value?.market_timezone || shadowMarketTimeZone(),
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+    }).format(parsed)
+  } catch {
+    return '-'
+  }
+}
+
 function formatShadowSessionHour(sessionHour: number): string {
   if (!Number.isInteger(sessionHour) || sessionHour < 0 || sessionHour > 23) return '-'
   const hour = String(sessionHour).padStart(2, '0')
@@ -1681,6 +2302,21 @@ function formatEligibilityRate(eligibleBars: number, bars: number): string {
 function formatSignedCount(value: number): string {
   if (!Number.isFinite(value)) return '-'
   return value > 0 ? `+${value}` : `${value}`
+}
+
+function formatSignedNullableCount(value: number | null): string {
+  return value == null ? '-' : formatSignedCount(value)
+}
+
+function formatSignedNullable(value: number | null, precision = 2): string {
+  if (value == null || !Number.isFinite(value)) return '-'
+  const formatted = value.toFixed(precision)
+  return value > 0 ? `+${formatted}` : formatted
+}
+
+function formatNullableBoolean(value: boolean | null): string {
+  if (value == null) return '-'
+  return value ? '是' : '否'
 }
 
 function formatGateCounts(counts: Record<string, number>): string {
@@ -1973,6 +2609,52 @@ onBeforeUnmount(() => {
   margin: -4px 0 12px;
   color: #6b7280;
   font-size: 13px;
+}
+
+.shadow-forward-facts {
+  margin-bottom: 16px;
+}
+
+.shadow-forward-summary,
+.shadow-forward-pair-audit {
+  margin-top: 0;
+}
+
+.shadow-forward-dialog-summary {
+  display: grid;
+  grid-template-columns: 90px minmax(0, 1fr);
+  gap: 8px 12px;
+  margin-bottom: 14px;
+}
+
+.shadow-forward-dialog-summary span {
+  color: #6b7280;
+}
+
+.shadow-forward-dialog-summary strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.shadow-forward-confirmations {
+  display: grid;
+  gap: 8px;
+}
+
+.shadow-forward-confirmations :deep(.el-checkbox) {
+  align-items: flex-start;
+  height: auto;
+  margin-right: 0;
+  white-space: normal;
+}
+
+.shadow-forward-confirmations :deep(.el-checkbox__label) {
+  line-height: 1.45;
+  white-space: normal;
+}
+
+:global(.shadow-forward-dialog) {
+  max-width: calc(100vw - 32px);
 }
 
 .shadow-evidence-alert {

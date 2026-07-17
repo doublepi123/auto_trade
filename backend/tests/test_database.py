@@ -144,6 +144,8 @@ def test_strategy_v2_shadow_table_migration_is_complete_and_idempotent(tmp_path)
         "strategy_v2_shadow_state",
         "strategy_v2_shadow_decisions",
         "strategy_v2_shadow_trades",
+        "strategy_v2_forward_registrations",
+        "strategy_v2_forward_evidence",
     }
     assert expected_tables <= set(inspector.get_table_names())
     assert {
@@ -177,6 +179,44 @@ def test_strategy_v2_shadow_table_migration_is_complete_and_idempotent(tmp_path)
     assert {"holding_deadline", "estimated_fee_rate"} <= {
         column["name"]
         for column in inspector.get_columns("strategy_v2_shadow_trades")
+    }
+    assert {
+        "candidate_algorithm_version",
+        "source_config_version",
+        "evaluator_digest",
+        "candidate_spec_json",
+        "registered_at",
+        "eligible_after",
+    } <= {
+        column["name"]
+        for column in inspector.get_columns("strategy_v2_forward_registrations")
+    }
+    assert {
+        "registration_id",
+        "target_session_date",
+        "disposition",
+        "target_bars_sha256",
+        "seed_bars_sha256",
+        "baseline_input_sha256",
+        "candidate_input_sha256",
+        "baseline_result_sha256",
+        "candidate_result_sha256",
+        "evidence_digest_sha256",
+    } <= {
+        column["name"]
+        for column in inspector.get_columns("strategy_v2_forward_evidence")
+    }
+    assert "uq_strategy_v2_forward_registration_candidate" in {
+        constraint["name"]
+        for constraint in inspector.get_unique_constraints(
+            "strategy_v2_forward_registrations"
+        )
+    }
+    assert "uq_strategy_v2_forward_evidence_target" in {
+        constraint["name"]
+        for constraint in inspector.get_unique_constraints(
+            "strategy_v2_forward_evidence"
+        )
     }
 
     Base.metadata.drop_all(bind=engine)

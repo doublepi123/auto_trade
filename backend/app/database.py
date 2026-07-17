@@ -1299,6 +1299,8 @@ def _ensure_strategy_v2_shadow_tables(db_engine: Engine) -> None:
         "strategy_v2_shadow_state",
         "strategy_v2_shadow_decisions",
         "strategy_v2_shadow_trades",
+        "strategy_v2_forward_registrations",
+        "strategy_v2_forward_evidence",
     ):
         Base.metadata.tables[table_name].create(db_engine, checkfirst=True)
 
@@ -1310,6 +1312,10 @@ def _ensure_strategy_v2_shadow_tables(db_engine: Engine) -> None:
     trade_columns = {
         column["name"]
         for column in inspector.get_columns("strategy_v2_shadow_trades")
+    }
+    evidence_columns = {
+        column["name"]
+        for column in inspector.get_columns("strategy_v2_forward_evidence")
     }
     with db_engine.begin() as connection:
         if "estimated_fee_rate_us" not in config_columns:
@@ -1329,6 +1335,11 @@ def _ensure_strategy_v2_shadow_tables(db_engine: Engine) -> None:
         if "estimated_fee_rate" not in trade_columns:
             connection.exec_driver_sql(
                 "ALTER TABLE strategy_v2_shadow_trades ADD COLUMN estimated_fee_rate FLOAT"
+            )
+        if "evidence_digest_sha256" not in evidence_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE strategy_v2_forward_evidence ADD COLUMN "
+                "evidence_digest_sha256 VARCHAR(64) NOT NULL DEFAULT ''"
             )
 
 

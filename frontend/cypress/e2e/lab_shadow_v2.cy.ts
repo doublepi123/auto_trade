@@ -1,4 +1,46 @@
 describe('Strategy v2 shadow lab', () => {
+  const emptyForwardMetrics = {
+    bars: 0,
+    eligible_bars: 0,
+    breaches: 0,
+    reclaims: 0,
+    entries: 0,
+    exits: 0,
+    closed_trades: 0,
+    win_rate: 0,
+    gross_pnl: 0,
+    fees: 0,
+    net_pnl: 0,
+    max_drawdown: 0,
+    avg_holding_minutes: 0,
+    avg_mae_pct: 0,
+    avg_mfe_pct: 0,
+    comparison_available: false,
+    live_action_count: null,
+    action_agreement_rate: null,
+    net_pnl_delta_vs_live: null,
+  }
+
+  function emptyForwardValidation() {
+    return {
+      registration: null,
+      status: 'NOT_REGISTERED',
+      mode: 'SHADOW',
+      order_submission_allowed: false,
+      automatic_promotion_allowed: false,
+      historical_target_backfill_allowed: false,
+      evaluation_scope: 'FORWARD_OUT_OF_SAMPLE',
+      included_pairs: 0,
+      excluded_targets: 0,
+      remaining_ready_pairs: 5,
+      remaining_mature_pairs: 20,
+      blockers: [],
+      baseline_metrics: emptyForwardMetrics,
+      candidate_metrics: emptyForwardMetrics,
+      daily: [],
+    }
+  }
+
   beforeEach(() => {
     cy.visitApp('/#/lab')
   })
@@ -13,6 +55,7 @@ describe('Strategy v2 shadow lab', () => {
       '@getStrategyShadowDecisions',
       '@getStrategyShadowEvaluation',
       '@evaluateStrategyShadowAdxChallengers',
+      '@getStrategyShadowForwardValidation',
     ])
   }
 
@@ -40,6 +83,9 @@ describe('Strategy v2 shadow lab', () => {
     cy.get('[data-testid="tab-strategy-shadow"]').should('not.contain', '实盘应用')
     cy.get('[data-testid="shadow-adx-challengers"]').should('not.contain', '应用参数')
     cy.get('[data-testid="shadow-warmup-diagnostic"]').should('not.contain', '应用参数')
+    cy.get('[data-testid="shadow-forward-validation"]')
+      .should('not.contain', '应用参数')
+    cy.get('[data-testid="shadow-forward-register"]').should('not.exist')
   })
 
   it('renders live features, gate reasons, metrics and decisions', () => {
@@ -109,6 +155,43 @@ describe('Strategy v2 shadow lab', () => {
     cy.get('[data-testid="shadow-warmup-variants"]')
       .should('contain', '10:34')
       .and('contain', '2026-07-09')
+
+    cy.get('[data-testid="shadow-forward-validation"]')
+      .should('contain', '因果预热前向验证')
+      .and('contain', '注册 #1')
+      .and('contain', '前向采集中')
+      .and('contain', '初步复核 2 / 5')
+      .and('contain', '成熟证据 2 / 20')
+      .and('contain', '排除目标 1')
+      .and('contain', '08:00')
+      .and('contain', '09:30')
+    cy.get('[data-testid="shadow-forward-no-backfill"]')
+      .should('contain', '前向边界已锁定')
+      .and('contain', '更早数据只可作为因果 seed')
+    cy.get('[data-testid="shadow-forward-safety"]')
+      .should('contain', '不会自动晋级或下单')
+      .and('contain', '不修改影子配置')
+    cy.get('[data-testid="shadow-forward-daily"]')
+      .should('contain', '2026-07-10')
+      .and('contain', '2026-07-13')
+      .and('contain', '2026-07-14')
+      .and('contain', '+75')
+      .and('contain', '+15')
+      .and('contain', '+12.50')
+    cy.get('[data-testid="shadow-forward-daily"] > .el-table__inner-wrapper .el-table__expand-icon')
+      .first()
+      .click()
+    cy.get('[data-testid="shadow-forward-daily"]')
+      .should('contain', '111111111111')
+      .and('contain', '日内冷启动')
+      .and('contain', '因果趋势预热')
+      .and('contain', '证据摘要 eeeeeeee')
+    cy.get('[data-testid="shadow-forward-daily"] > .el-table__inner-wrapper .el-table__expand-icon')
+      .eq(2)
+      .click()
+    cy.get('[data-testid="shadow-forward-daily"]')
+      .should('contain', '目标会话已排除')
+      .and('contain', '目标会话不完整')
 
     cy.get('[data-testid="shadow-adx-challengers"]')
       .should('contain', 'ADX 同样本对照')
@@ -275,6 +358,168 @@ describe('Strategy v2 shadow lab', () => {
       .and('contain', '基线回放与持久化证据不一致')
   })
 
+  it('registers a frozen forward cohort only after both confirmations', () => {
+    const empty = emptyForwardValidation()
+    cy.intercept('GET', '/api/strategy-shadow/forward-validation*', {
+      body: empty,
+    }).as('getStrategyShadowForwardValidation')
+    cy.intercept('POST', '/api/strategy-shadow/forward-validation/register', (req) => {
+      expect(req.body).to.deep.equal({
+        symbol: 'NVDA.US',
+        source_config_version: 'shadow-stub-v1',
+        candidate_algorithm_version: 'strategy-v2-causal-trend-prewarm-v1',
+        confirm_forward_only: true,
+        confirm_no_automatic_promotion: true,
+      })
+      expect(req.body).not.to.have.property('registered_at')
+      expect(req.body).not.to.have.property('eligible_after')
+      expect(req.body).not.to.have.property('order_submission_allowed')
+      req.reply({
+        body: {
+          ...empty,
+          registration: {
+            id: 9,
+            symbol: 'NVDA.US',
+            market: 'US',
+            market_timezone: 'America/New_York',
+            candidate_algorithm_version: 'strategy-v2-causal-trend-prewarm-v1',
+            source_config_version: 'shadow-stub-v1',
+            evaluator_digest: 'registered98765432101234567890123456789012345678901234567890123456',
+            registered_at: '2026-07-17T12:00:00Z',
+            eligible_after: '2026-07-17T13:30:00Z',
+            minimum_ready_pairs: 5,
+            minimum_mature_pairs: 20,
+          },
+          status: 'FROZEN',
+        },
+      })
+    }).as('registerStrategyShadowForwardValidation')
+
+    openShadowTab()
+
+    cy.get('[data-testid="shadow-forward-register"]').should('be.enabled').click()
+    cy.get('[data-testid="shadow-forward-dialog"]')
+      .should('contain', '注册时间由服务端确定')
+      .and('contain', '目标会话不可早于边界')
+    cy.get('[data-testid="shadow-forward-register-confirm"]').should('be.disabled')
+    cy.get('[data-testid="shadow-forward-confirm-only"] input').check({ force: true })
+    cy.get('[data-testid="shadow-forward-register-confirm"]').should('be.disabled')
+    cy.get('[data-testid="shadow-forward-confirm-safety"] input').check({ force: true })
+    cy.get('[data-testid="shadow-forward-register-confirm"]').should('be.enabled').click()
+    cy.wait('@registerStrategyShadowForwardValidation')
+
+    cy.get('[data-testid="shadow-forward-dialog"]').should('not.be.visible')
+    cy.get('[data-testid="shadow-forward-status"]').should('contain', '已冻结')
+    cy.get('[data-testid="shadow-forward-lifecycle"]')
+      .should('contain', '候选已冻结')
+      .and('contain', '2026')
+    cy.get('[data-testid="shadow-forward-register"]').should('not.exist')
+    cy.get('@registerStrategyShadowForwardValidation.all').should('have.length', 1)
+  })
+
+  it('allows registration only for the current stable evidence version', () => {
+    cy.intercept('GET', '/api/strategy-shadow/forward-validation*', {
+      body: emptyForwardValidation(),
+    }).as('getStrategyShadowForwardValidation')
+
+    openShadowTab()
+    cy.get('[data-testid="shadow-forward-register"]').should('be.enabled')
+
+    cy.get('[data-testid="shadow-version-select"]').click()
+    cy.get('.el-select-dropdown:visible .el-select-dropdown__item')
+      .contains('shadow-o')
+      .click()
+    cy.wait([
+      '@getStrategyShadowEvaluation',
+      '@getStrategyShadowDecisions',
+      '@evaluateStrategyShadowAdxChallengers',
+      '@getStrategyShadowForwardValidation',
+    ])
+
+    cy.get('[data-testid="shadow-forward-register"]').should('be.disabled')
+    cy.get('[data-testid="shadow-forward-register-disabled"]')
+      .should('contain', '只能为当前稳定证据版本冻结候选')
+  })
+
+  it('blocks registration while the evidence version is transitioning', () => {
+    cy.intercept('GET', '/api/strategy-shadow/forward-validation*', {
+      body: emptyForwardValidation(),
+    }).as('getStrategyShadowForwardValidation')
+    cy.intercept('GET', '/api/strategy-shadow/status*', (req) => {
+      req.on('before:response', (response) => {
+        response.body.version_transition_pending = true
+      })
+    })
+
+    openShadowTab()
+
+    cy.get('[data-testid="shadow-forward-register"]').should('be.disabled')
+    cy.get('[data-testid="shadow-forward-register-disabled"]')
+      .should('contain', '版本过渡完成后才能冻结候选')
+  })
+
+  const forwardLifecycleScenarios = [
+    {
+      status: 'FROZEN',
+      label: '已冻结',
+      title: '候选已冻结',
+      included: 0,
+      remainingReady: 5,
+      remainingMature: 20,
+      blockers: [],
+    },
+    {
+      status: 'READY_FOR_REVIEW',
+      label: '可复核',
+      title: '样本已达初步复核门槛',
+      included: 5,
+      remainingReady: 0,
+      remainingMature: 15,
+      blockers: [],
+    },
+    {
+      status: 'MATURE_EVIDENCE',
+      label: '证据成熟',
+      title: '前向证据已成熟',
+      included: 20,
+      remainingReady: 0,
+      remainingMature: 0,
+      blockers: [],
+    },
+    {
+      status: 'BLOCKED',
+      label: '已阻塞',
+      title: '前向验证已阻塞',
+      included: 2,
+      remainingReady: 3,
+      remainingMature: 18,
+      blockers: ['TARGET_BAR_HASH_MISMATCH'],
+    },
+  ]
+
+  for (const scenario of forwardLifecycleScenarios) {
+    it(`renders the ${scenario.status} forward lifecycle without promotion controls`, () => {
+      cy.intercept('GET', '/api/strategy-shadow/forward-validation*', (req) => {
+        req.on('before:response', (response) => {
+          response.body.status = scenario.status
+          response.body.included_pairs = scenario.included
+          response.body.remaining_ready_pairs = scenario.remainingReady
+          response.body.remaining_mature_pairs = scenario.remainingMature
+          response.body.blockers = scenario.blockers
+          if (scenario.status === 'FROZEN') response.body.daily = []
+        })
+      })
+
+      openShadowTab()
+
+      cy.get('[data-testid="shadow-forward-status"]').should('contain', scenario.label)
+      cy.get('[data-testid="shadow-forward-lifecycle"]').should('contain', scenario.title)
+      cy.get('[data-testid="shadow-forward-validation"]')
+        .should('not.contain', '应用参数')
+      cy.get('[data-testid="shadow-forward-register"]').should('not.exist')
+    })
+  }
+
   it('replays challengers only on full load, version change, and manual refresh', () => {
     openShadowTab()
 
@@ -286,8 +531,12 @@ describe('Strategy v2 shadow lab', () => {
       '@getStrategyShadowEvaluation',
       '@getStrategyShadowDecisions',
       '@evaluateStrategyShadowAdxChallengers',
+      '@getStrategyShadowForwardValidation',
     ]).then((requests) => requests[2]?.request.body.config_version)
       .should('equal', 'shadow-old-v0')
+    cy.get('[data-testid="shadow-forward-version-context"]')
+      .should('contain', '前向 cohort 属于另一证据版本')
+      .and('contain', '不混合')
 
     cy.get('[data-testid="shadow-refresh"]').click()
     cy.wait([
@@ -298,13 +547,16 @@ describe('Strategy v2 shadow lab', () => {
       '@getStrategyShadowDecisions',
       '@getStrategyShadowEvaluation',
       '@evaluateStrategyShadowAdxChallengers',
+      '@getStrategyShadowForwardValidation',
     ]).then((requests) => requests[6]?.request.body.config_version)
       .should('equal', 'shadow-stub-v1')
 
     cy.get('@evaluateStrategyShadowAdxChallengers.all').should('have.length', 3)
+    cy.get('@getStrategyShadowForwardValidation.all').should('have.length', 3)
     cy.wait(15_100)
     cy.wait(['@getStrategyShadowStatus', '@getStrategyShadowEvaluation'])
     cy.get('@evaluateStrategyShadowAdxChallengers.all').should('have.length', 3)
+    cy.get('@getStrategyShadowForwardValidation.all').should('have.length', 3)
   })
 
   it('keeps core evidence and clears stale challenger data when replay fails', () => {
@@ -324,6 +576,7 @@ describe('Strategy v2 shadow lab', () => {
       '@getStrategyShadowEvaluation',
       '@getStrategyShadowDecisions',
       '@failedStrategyShadowAdxChallengers',
+      '@getStrategyShadowForwardValidation',
     ])
 
     cy.get('[data-testid="shadow-evaluation"]').should('be.visible')

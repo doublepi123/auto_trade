@@ -4,6 +4,30 @@
 
 ---
 
+## 近期已完成迭代 (2026-07-17) — P2.5 预注册前向 OOS 验证
+
+> P2.4 的因果趋势预热仍只有历史诊断价值，不能把同一批历史 replay 改名为 OOS。本轮在未来目标会话发生前冻结 `strategy-v2-causal-trend-prewarm-v1`、v4 源配置、评估器定义与注册时间，只物化注册边界之后的日终 paired evidence。实施口径见 [2026-07-17-strategy-v2-forward-oos-registration.md](superpowers/plans/2026-07-17-strategy-v2-forward-oos-registration.md)。
+
+| 交付 | 状态 |
+|------|------|
+| 不可变 candidate registration：服务端时间、完整 RTH `eligible_after`、源配置、评估器与 canonical spec digest | ✅ |
+| append-only `(registration, target_session_date)` 日证据，注册前目标永不回填 | ✅ |
+| 仅收盘后固定窗口允许 INCLUDED；漏窗、残缺日和缺 immediate seed 终态排除 | ✅ |
+| baseline / candidate 使用同一 target bar hash，保存 seed/input/result hash 与 canonical row digest 并 fail closed | ✅ |
+| persisted v4 baseline 逐决策复放一致性与 session-local VWAP/z-score 不变性门禁 | ✅ |
+| seed/target `observed_at` 因果截止、日终空仓门禁与按有序成交序列精确聚合跨日回撤 | ✅ |
+| `5` 对仅 `READY_FOR_REVIEW`、`20` 对仅 `MATURE_EVIDENCE`，均无自动晋级/配置修改/订单路径 | ✅ |
+| Lab 双确认冻结、逐日 paired delta、完整 provenance 与只读安全提示 | ✅ |
+| cron 按注册 symbol 独立物化，GET 不 replay、不懒创建、不写数据库 | ✅ |
+
+**验证：** `pytest tests/` **4338 passed, 2 skipped**，覆盖率 **87.36%**；`basedpyright` 0/0/0；前端 `vue-tsc`、生产构建、48-chunk 与 16 个 Element Plus chunk 预算检查通过；Cypress **71/71 specs、274/274 tests** 通过；两轮独立 OOS/完整性 review 均无遗留 P0/P1。
+
+**外部依据：** [LEAN 参数优化](https://www.quantconnect.com/docs/v2/writing-algorithms/optimization/parameters) 要求用更晚的数据检验已选择参数；[LEAN warm-up](https://www.quantconnect.com/docs/v2/writing-algorithms/historical-data/warm-up-periods) 在历史预热期间禁止订单；[Freqtrade lookahead analysis](https://www.freqtrade.io/en/stable/lookahead-analysis/) 用 baseline 与切片回放检查未来信息漂移；[MLflow Model Registry workflow](https://mlflow.org/docs/latest/ml/model-registry/workflow) 将不可变版本/验证元数据与 production alias 分离。因此 P2.5 只建立 review candidate，不创建 champion 或 production 路径。
+
+**后续顺序：** P2.6 只观察冻结 cohort。达到 5 对只进行初步人工复核，达到 20 对才讨论样本成熟度；在此之前不创建 v5，不改变 P0/P2 阈值，不把 v4/v5、注册前/注册后或 included/excluded 样本混合。任何后续晋级都必须是独立、显式且可审计的新迭代。
+
+---
+
 ## 近期已完成迭代 (2026-07-17) — P2.3 同样本 ADX Challenger
 
 > 部署前 v3 只有一个约 60% 覆盖的部分交易日，约 13 根 gate-eligible bar、零 breach、零闭环；ADX(14) 的前 139 根 warm-up 与实现一致。当前证据不足以直接放宽参数，本轮先建立可复核的同样本候选比较，不改变 P0 参数或 P2 交易阈值。冻结执行参数的回放语义已升级为 v4，部署后从新版本前向采集，旧 v3 证据不会与新语义混用。实施计划见 [2026-07-17-strategy-v2-adx-challengers.md](superpowers/plans/2026-07-17-strategy-v2-adx-challengers.md)。
