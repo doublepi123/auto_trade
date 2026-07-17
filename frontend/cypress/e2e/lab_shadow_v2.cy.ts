@@ -39,6 +39,7 @@ describe('Strategy v2 shadow lab', () => {
 
     cy.get('[data-testid="tab-strategy-shadow"]').should('not.contain', '实盘应用')
     cy.get('[data-testid="shadow-adx-challengers"]').should('not.contain', '应用参数')
+    cy.get('[data-testid="shadow-warmup-diagnostic"]').should('not.contain', '应用参数')
   })
 
   it('renders live features, gate reasons, metrics and decisions', () => {
@@ -72,6 +73,42 @@ describe('Strategy v2 shadow lab', () => {
       .and('contain', '费用压力后净收益不为正')
     cy.get('[data-testid="shadow-evidence-warnings"]')
       .should('contain', '1 internal bars missing')
+    cy.get('[data-testid="shadow-evidence-daily"]')
+      .should('contain', '11:49')
+      .and('contain', '251 / 139')
+    cy.get('[data-testid="shadow-evidence-daily"] .el-table__expand-icon').first().click()
+    cy.get('[data-testid="shadow-evidence-daily"]')
+      .should('contain', '09:00-09:59')
+      .and('contain', 'ADX_5M_WARMUP 60')
+
+    cy.get('[data-testid="shadow-warmup-diagnostic"]')
+      .should('contain', '预热与分时可用性')
+      .and('contain', '因果配对 1 / 5')
+      .and('contain', '日内冷启动')
+      .and('contain', '因果趋势预热')
+      .and('contain', '139')
+      .and('contain', '64')
+      .and('contain', '+75')
+      .and('contain', '+15')
+      .and('not.contain', '应用参数')
+    cy.get('[data-testid="shadow-warmup-readonly"]')
+      .should('contain', '仅预热 ADX / 波动率')
+      .and('contain', 'VWAP 与 z-score 仍按交易日重置')
+      .and('contain', '不会写入状态或提交订单')
+    cy.get('[data-testid="shadow-warmup-insufficient"]')
+      .should('contain', '因果配对交易日不足')
+      .and('contain', '至少需要 5 对')
+    cy.get('[data-testid="shadow-warmup-hourly"]')
+      .should('contain', '09:00-09:59')
+      .and('contain', '10:00-10:59')
+      .and('contain', '0 / 56')
+      .and('contain', '+56')
+    cy.get('[data-testid="shadow-warmup-variants"] .el-table__expand-icon').first().click()
+    cy.get('[data-testid="shadow-warmup-variants"]').should('contain', '11:49')
+    cy.get('[data-testid="shadow-warmup-variants"] .el-table__expand-icon').eq(1).click()
+    cy.get('[data-testid="shadow-warmup-variants"]')
+      .should('contain', '10:34')
+      .and('contain', '2026-07-09')
 
     cy.get('[data-testid="shadow-adx-challengers"]')
       .should('contain', 'ADX 同样本对照')
@@ -171,6 +208,18 @@ describe('Strategy v2 shadow lab', () => {
         evaluated_complete_sessions: 1,
         baseline_replay_match: false,
         blockers: ['MIN_COMPLETE_SESSIONS', 'BASELINE_REPLAY_MISMATCH'],
+        warmup_diagnostic: {
+          algorithm_version: 'strategy-v2-causal-trend-prewarm-v1',
+          status: 'BLOCKED',
+          minimum_causal_pairs: 5,
+          observed_causal_pairs: 0,
+          evaluated_causal_pairs: 0,
+          blockers: ['BASELINE_REPLAY_MISMATCH'],
+          same_sample: true,
+          causal_history_only: true,
+          vwap_zscore_session_local: true,
+          variants: [],
+        },
         candidates: [{
           label: 'BASELINE',
           max_adx: 25,
@@ -220,6 +269,10 @@ describe('Strategy v2 shadow lab', () => {
     cy.get('[data-testid="shadow-adx-candidates"]')
       .should('contain', '基线')
       .and('not.contain', '挑战者')
+    cy.get('[data-testid="shadow-warmup-diagnostic"]').should('exist')
+    cy.get('[data-testid="shadow-warmup-blocked"]')
+      .should('contain', '因果预热诊断已阻塞')
+      .and('contain', '基线回放与持久化证据不一致')
   })
 
   it('replays challengers only on full load, version change, and manual refresh', () => {
@@ -298,6 +351,18 @@ describe('Strategy v2 shadow lab', () => {
     cy.get('[data-testid="shadow-evaluation"]').should('not.exist')
     cy.get('[data-testid="shadow-decisions"]').should('not.contain', 'WAIT_RECLAIM')
     cy.get('.el-message--error').should('contain', '版本证据读取失败')
+  })
+
+  it('keeps warmup diagnostics inside the mobile viewport', () => {
+    cy.viewport(390, 844)
+    openShadowTab()
+
+    cy.get('[data-testid="shadow-warmup-diagnostic"]').should('be.visible')
+    cy.document().then((document) => {
+      expect(document.documentElement.scrollWidth).to.be.at.most(
+        document.documentElement.clientWidth,
+      )
+    })
   })
 
   it('saves only shadow tunables and never sends execution safety fields', () => {

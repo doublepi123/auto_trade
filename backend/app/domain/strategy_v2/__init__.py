@@ -1,4 +1,5 @@
 from app.domain.strategy_v2.features import (
+    CausalTrendPrewarmFeatureEngine,
     SessionFeatureEngine,
     StrategyBar,
     StrategyV2FeatureConfig,
@@ -25,6 +26,7 @@ from app.domain.strategy_v2.costs import (
 )
 
 __all__ = [
+    "CausalTrendPrewarmFeatureEngine",
     "SessionFeatureEngine",
     "StrategyBar",
     "StrategyV2FeatureConfig",

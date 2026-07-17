@@ -417,6 +417,18 @@ class TestStrategyV2ShadowApi:
         assert body["baseline_replay_match"] is None
         assert body["blockers"] == ["MIN_COMPLETE_SESSIONS"]
         assert body["candidates"] == []
+        assert body["warmup_diagnostic"] == {
+            "algorithm_version": "strategy-v2-causal-trend-prewarm-v1",
+            "status": "INSUFFICIENT_EVIDENCE",
+            "minimum_causal_pairs": 5,
+            "observed_causal_pairs": 0,
+            "evaluated_causal_pairs": 0,
+            "blockers": ["MIN_CAUSAL_PAIRS"],
+            "same_sample": True,
+            "causal_history_only": True,
+            "vwap_zscore_session_local": True,
+            "variants": [],
+        }
         with self.session_factory() as db:
             assert self._shadow_counts(db) == before
 

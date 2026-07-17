@@ -491,6 +491,14 @@ class StrategyV2ShadowVersionResponse(BaseModel):
     net_pnl: float = 0.0
 
 
+class StrategyV2ShadowHourlyEvidence(BaseModel):
+    session_hour: int = Field(ge=0, le=23)
+    bars: int = 0
+    ready_bars: int = 0
+    eligible_bars: int = 0
+    gate_counts: dict[str, int] = Field(default_factory=dict)
+
+
 class StrategyV2ShadowDailyEvidence(BaseModel):
     session_date: date
     first_bar_at: datetime
@@ -508,6 +516,12 @@ class StrategyV2ShadowDailyEvidence(BaseModel):
     partial_end: bool
     outside_session_bars: int = 0
     complete_session: bool = False
+    first_ready_at: Optional[datetime] = None
+    ready_bars: int = 0
+    warmup_lost_bars: int = 0
+    hourly_eligibility: list[StrategyV2ShadowHourlyEvidence] = Field(
+        default_factory=list
+    )
 
 
 class StrategyV2ShadowEvaluationResponse(BaseModel):
@@ -567,6 +581,48 @@ class StrategyV2AdxChallengerResult(BaseModel):
     daily: list[StrategyV2AdxChallengerDaily] = Field(default_factory=list)
 
 
+class StrategyV2WarmupDaily(BaseModel):
+    session_date: date
+    seed_session_date: date
+    trend_context_cutoff_at: datetime
+    overnight_gap_pct: float
+    first_ready_at: Optional[datetime] = None
+    bars: int = 0
+    ready_bars: int = 0
+    warmup_lost_bars: int = 0
+    eligible_bars: int = 0
+    hourly_eligibility: list[StrategyV2ShadowHourlyEvidence] = Field(
+        default_factory=list
+    )
+
+
+class StrategyV2WarmupVariant(BaseModel):
+    label: Literal["SESSION_LOCAL", "CAUSAL_TREND_PREWARM"]
+    warmup_scope: Literal["NONE", "ADX_VOL_ONLY"]
+    source_config_version: str
+    metrics: StrategyV2ShadowMetrics = Field(default_factory=StrategyV2ShadowMetrics)
+    daily: list[StrategyV2WarmupDaily] = Field(default_factory=list)
+
+
+class StrategyV2WarmupDiagnostic(BaseModel):
+    algorithm_version: Literal["strategy-v2-causal-trend-prewarm-v1"] = (
+        "strategy-v2-causal-trend-prewarm-v1"
+    )
+    status: Literal[
+        "INSUFFICIENT_EVIDENCE",
+        "READY_FOR_REVIEW",
+        "BLOCKED",
+    ]
+    minimum_causal_pairs: int = 5
+    observed_causal_pairs: int = 0
+    evaluated_causal_pairs: int = 0
+    blockers: list[str] = Field(default_factory=list)
+    same_sample: Literal[True] = True
+    causal_history_only: Literal[True] = True
+    vwap_zscore_session_local: Literal[True] = True
+    variants: list[StrategyV2WarmupVariant] = Field(default_factory=list)
+
+
 class StrategyV2AdxChallengerResponse(BaseModel):
     persisted: Literal[False] = False
     mode: Literal["SHADOW"] = "SHADOW"
@@ -587,6 +643,7 @@ class StrategyV2AdxChallengerResponse(BaseModel):
     baseline_replay_match: Optional[bool] = None
     blockers: list[str] = Field(default_factory=list)
     candidates: list[StrategyV2AdxChallengerResult] = Field(default_factory=list)
+    warmup_diagnostic: Optional[StrategyV2WarmupDiagnostic] = None
 
 
 class StrategyV2ReplayBar(BaseModel):

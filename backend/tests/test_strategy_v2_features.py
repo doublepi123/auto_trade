@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import math
 from datetime import datetime, timedelta, timezone
+from statistics import stdev
 from zoneinfo import ZoneInfo
 
 import pytest
 
 from app.domain.strategy_v2.features import (
+    CausalTrendPrewarmFeatureEngine,
     SessionFeatureEngine,
     StrategyBar,
     StrategyV2FeatureConfig,
@@ -16,6 +18,7 @@ from app.domain.strategy_v2.features import (
     session_vwap,
     wilder_adx,
 )
+from app.domain.strategy_v2.engine import StrategyV2Engine, StrategyV2State
 
 
 _NEW_YORK = ZoneInfo("America/New_York")
@@ -42,6 +45,19 @@ def _bar(
         volume=volume,
         symbol=symbol,
     )
+
+
+def _session_bars(day: int, *, price_shift: float = 0.0) -> list[StrategyBar]:
+    bars: list[StrategyBar] = []
+    for index in range(390):
+        price = (
+            100.0
+            + price_shift
+            + 0.002 * index
+            + 0.25 * math.sin(index / 3.0)
+        )
+        bars.append(_bar(index, price=price, volume=1000 + index, day=day))
+    return bars
 
 
 def test_session_vwap_uses_typical_price_and_resets_with_feature_session() -> None:
@@ -226,3 +242,174 @@ def test_realized_vol_default_is_market_aware_and_excludes_lunch_gap() -> None:
         periods_per_year=252 * 330,
         timestamps=timestamps,
     ) is None
+
+
+def test_causal_trend_prewarm_preserves_local_features_and_reduces_warmup() -> None:
+    config = StrategyV2FeatureConfig(settlement_grace_seconds=0)
+    seed = _session_bars(7)
+    target = _session_bars(8, price_shift=2.0)
+    baseline = SessionFeatureEngine(config)
+    prewarmed = CausalTrendPrewarmFeatureEngine(config, seed)
+
+    assert prewarmed.session_day is None
+    strategy = StrategyV2Engine(features=prewarmed)
+    strategy_snapshot = strategy.snapshot()
+    assert strategy_snapshot.state == StrategyV2State.COLD
+    assert strategy_snapshot.last_processed_at is None
+
+    baseline_first_ready: int | None = None
+    prewarmed_first_ready: int | None = None
+    local_fields = (
+        "bar_index",
+        "bar_timestamp_5m",
+        "session_vwap_1m",
+        "residual_1m",
+        "residual_mean_1m",
+        "residual_sigma_1m",
+        "zscore_1m",
+        "session_vwap_5m",
+        "residual_5m",
+        "residual_mean_5m",
+        "residual_sigma_5m",
+        "zscore_5m",
+    )
+    for index, bar in enumerate(target[:145]):
+        baseline_snapshot = baseline.on_bar(bar, observed_at=bar.end_at)
+        prewarmed_snapshot = prewarmed.on_bar(bar, observed_at=bar.end_at)
+        assert baseline_snapshot is not None
+        assert prewarmed_snapshot is not None
+        for field in local_fields:
+            assert getattr(prewarmed_snapshot, field) == getattr(
+                baseline_snapshot,
+                field,
+            )
+        if baseline_snapshot.ready and baseline_first_ready is None:
+            baseline_first_ready = index
+        if prewarmed_snapshot.ready and prewarmed_first_ready is None:
+            prewarmed_first_ready = index
+
+    assert baseline_first_ready == 139
+    assert prewarmed_first_ready == 64
+
+
+def test_causal_trend_prewarm_excludes_overnight_return_but_keeps_adx_gap() -> None:
+    config = StrategyV2FeatureConfig(settlement_grace_seconds=0)
+    seed = _session_bars(7)
+    target = _session_bars(8, price_shift=25.0)
+    engine = CausalTrendPrewarmFeatureEngine(config, seed)
+
+    seed_returns = [
+        math.log(current.close / previous.close)
+        for previous, current in zip(seed, seed[1:])
+    ]
+    expected_seed_vol = stdev(seed_returns[-config.realized_vol_window_1m :]) * math.sqrt(
+        int(config.realized_vol_periods_per_year or 0)
+    )
+    first = engine.on_bar(target[0], observed_at=target[0].end_at)
+    assert first is not None
+    assert first.realized_vol_1m == pytest.approx(expected_seed_vol)
+
+    snapshot = first
+    for bar in target[1:5]:
+        snapshot = engine.on_bar(bar, observed_at=bar.end_at)
+    assert snapshot is not None
+    seed_5m = aggregate_complete_five_minute_bars(seed, market="US")
+    target_5m = aggregate_complete_five_minute_bars(target[:5], market="US")
+    expected_adx = wilder_adx(
+        [*seed_5m, *target_5m],
+        period=config.adx_period,
+    )
+    assert snapshot.adx_5m == pytest.approx(expected_adx)
+
+
+def test_causal_trend_prewarm_retains_valid_returns_across_hk_lunch() -> None:
+    hong_kong = ZoneInfo("Asia/Hong_Kong")
+
+    def hk_session_bars(day: int) -> list[StrategyBar]:
+        timestamps = [
+            datetime(2026, 7, day, 9, 30, tzinfo=hong_kong)
+            + timedelta(minutes=index)
+            for index in range(150)
+        ]
+        timestamps.extend(
+            datetime(2026, 7, day, 13, 0, tzinfo=hong_kong)
+            + timedelta(minutes=index)
+            for index in range(180)
+        )
+        result: list[StrategyBar] = []
+        for index, timestamp in enumerate(timestamps):
+            price = 100.0 + 0.002 * index + 0.15 * math.sin(index / 4.0)
+            result.append(StrategyBar(
+                timestamp=timestamp,
+                open=price,
+                high=price + 0.1,
+                low=price - 0.1,
+                close=price,
+                volume=1000 + index,
+                symbol="700.HK",
+            ))
+        return result
+
+    config = StrategyV2FeatureConfig(market="HK", settlement_grace_seconds=0)
+    seed = hk_session_bars(7)
+    target = hk_session_bars(8)
+    baseline = SessionFeatureEngine(config)
+    prewarmed = CausalTrendPrewarmFeatureEngine(config, seed)
+    baseline_snapshot = None
+    prewarmed_snapshot = None
+    for bar in target[:151]:
+        baseline_snapshot = baseline.on_bar(bar, observed_at=bar.end_at)
+        prewarmed_snapshot = prewarmed.on_bar(bar, observed_at=bar.end_at)
+
+    assert baseline_snapshot is not None
+    assert prewarmed_snapshot is not None
+    assert baseline_snapshot.realized_vol_1m is None
+    assert prewarmed_snapshot.realized_vol_1m is not None
+
+
+def test_causal_trend_prewarm_is_prefix_invariant() -> None:
+    config = StrategyV2FeatureConfig(settlement_grace_seconds=0)
+    seed = _session_bars(7)
+    unchanged = _session_bars(8, price_shift=2.0)
+    changed = [
+        bar
+        if index < 90
+        else _bar(
+            index,
+            price=bar.close + 10.0,
+            volume=bar.volume,
+            day=8,
+        )
+        for index, bar in enumerate(unchanged)
+    ]
+    first = CausalTrendPrewarmFeatureEngine(config, seed)
+    second = CausalTrendPrewarmFeatureEngine(config, seed)
+
+    for left_bar, right_bar in zip(unchanged[:90], changed[:90]):
+        left = first.on_bar(left_bar, observed_at=left_bar.end_at)
+        right = second.on_bar(right_bar, observed_at=right_bar.end_at)
+        assert left == right
+
+    left_future = first.on_bar(unchanged[90], observed_at=unchanged[90].end_at)
+    right_future = second.on_bar(changed[90], observed_at=changed[90].end_at)
+    assert left_future is not None
+    assert right_future is not None
+    assert left_future.bar.close != right_future.bar.close
+
+
+def test_causal_trend_prewarm_validates_seed_and_preserves_gap_failure() -> None:
+    config = StrategyV2FeatureConfig(settlement_grace_seconds=0)
+    seed = _session_bars(7)
+    with pytest.raises(ValueError, match="complete RTH session"):
+        CausalTrendPrewarmFeatureEngine(config, seed[:-1])
+
+    engine = CausalTrendPrewarmFeatureEngine(config, seed)
+    target = _session_bars(8, price_shift=2.0)
+    snapshot = None
+    for index, bar in enumerate(target[:145]):
+        if index == 20:
+            continue
+        snapshot = engine.on_bar(bar, observed_at=bar.end_at)
+    assert snapshot is not None
+    assert snapshot.ready is False
+    assert "SESSION_DATA_INCOMPLETE" in snapshot.gate_reasons

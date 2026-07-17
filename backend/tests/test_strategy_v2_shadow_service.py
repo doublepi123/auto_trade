@@ -10,6 +10,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
+import app.services.strategy_v2_shadow_service as shadow_service_module
 from app.core.broker import BrokerCandle
 from app.domain.strategy_v2 import (
     StrategyBar,
@@ -30,6 +31,7 @@ from app.models import (
 )
 from app.schemas import (
     StrategyV2AdxChallengerRequest,
+    StrategyV2ReplayBar,
     StrategyV2ShadowConfigUpdate,
 )
 from app.services.strategy_v2_shadow_service import StrategyV2ShadowService
@@ -226,6 +228,34 @@ class TestStrategyV2ShadowService:
         )
         return service, version
 
+    def _collect_two_complete_sessions(
+        self,
+        db: Session,
+        *,
+        target_day_offset: int = 3,
+    ) -> tuple[StrategyV2ShadowService, str, datetime]:
+        config = self._enabled_config(
+            db,
+            activated_at=_SESSION_OPEN - timedelta(days=1),
+        )
+        candles = _FakeCandles(_candles(390))
+        service = StrategyV2ShadowService(db, candles)
+        service.tick(
+            "AAPL.US",
+            "US",
+            now=_SESSION_OPEN + timedelta(minutes=390, seconds=10),
+        )
+        target_open = _SESSION_OPEN + timedelta(days=target_day_offset)
+        candles.candles = _candles(390, start=target_open)
+        service.tick(
+            "AAPL.US",
+            "US",
+            now=target_open + timedelta(minutes=390, seconds=10),
+        )
+        version = service._config_version(config)
+        service._ensure_version_snapshot(config)
+        return service, version, target_open
+
     def test_default_config_is_disabled_and_hard_shadow_only(self) -> None:
         with self._db() as db:
             config = StrategyV2ShadowService(db).get_config()
@@ -249,12 +279,34 @@ class TestStrategyV2ShadowService:
                 session_date=_SESSION_OPEN.date(),
                 bar_at=_SESSION_OPEN + timedelta(minutes=index),
                 close_price=100.0,
-                gate_passed=index == 120,
+                gate_passed=index == 140,
+                gate_reasons_json=json.dumps(
+                    ["ADX_5M_WARMUP"] if index < 139 else ["NO_BREACH"]
+                ),
             )
             for index in range(390)
         ]
 
         complete = StrategyV2ShadowService._daily_evidence(rows, [])[0]
+        with_duplicate = StrategyV2ShadowService._daily_evidence(
+            [*rows, rows[140]],
+            [],
+        )[0]
+        conflicting_duplicate = StrategyV2ShadowDecision(
+            idempotency_key="conflicting-duplicate",
+            symbol="AAPL.US",
+            market="US",
+            config_version="complete-version",
+            session_date=_SESSION_OPEN.date(),
+            bar_at=_SESSION_OPEN + timedelta(minutes=140),
+            close_price=100.0,
+            gate_passed=False,
+            gate_reasons_json=json.dumps(["ADX_REGIME_BLOCKED"]),
+        )
+        with_conflicting_duplicate = StrategyV2ShadowService._daily_evidence(
+            [*rows, conflicting_duplicate],
+            [],
+        )[0]
         with_gap = StrategyV2ShadowService._daily_evidence(
             rows[:200] + rows[201:],
             [],
@@ -290,6 +342,24 @@ class TestStrategyV2ShadowService:
         assert complete.partial_end is False
         assert complete.outside_session_bars == 0
         assert complete.eligible_bars == 1
+        assert complete.first_ready_at == _SESSION_OPEN + timedelta(minutes=139)
+        assert complete.ready_bars == 251
+        assert complete.warmup_lost_bars == 139
+        assert complete.hourly_eligibility[0].session_hour == 9
+        assert complete.hourly_eligibility[0].bars == 30
+        assert complete.hourly_eligibility[0].ready_bars == 0
+        assert complete.hourly_eligibility[2].session_hour == 11
+        assert complete.hourly_eligibility[2].ready_bars == 11
+        assert all(
+            "NO_BREACH" not in item.gate_counts
+            for item in complete.hourly_eligibility
+        )
+        assert with_duplicate.bars == 390
+        assert with_duplicate.ready_bars == 251
+        assert with_duplicate.eligible_bars == 1
+        assert with_conflicting_duplicate.complete_session is False
+        assert with_conflicting_duplicate.incomplete_feature_bars == 1
+        assert with_conflicting_duplicate.eligible_bars == 0
         assert with_gap.complete_session is False
         assert with_gap.coverage_ratio == pytest.approx(389 / 390)
         assert with_gap.missing_internal_bars == 1
@@ -1783,6 +1853,10 @@ class TestStrategyV2ShadowService:
             assert response.candidates[0].metrics.eligible_bars == expected_eligible
             assert len(response.candidates[0].daily) == 1
             assert response.candidates[0].daily[0].bars == 390
+            assert response.warmup_diagnostic is not None
+            assert response.warmup_diagnostic.status == "INSUFFICIENT_EVIDENCE"
+            assert response.warmup_diagnostic.evaluated_causal_pairs == 0
+            assert response.warmup_diagnostic.variants == []
             assert after_counts == before_counts
             assert (
                 state.config_version,
@@ -1790,6 +1864,270 @@ class TestStrategyV2ShadowService:
                 state.last_bar_at,
                 state.state_json,
             ) == before_state
+
+    def test_causal_warmup_compares_the_same_consecutive_target_session(
+        self,
+    ) -> None:
+        with self._db() as db:
+            service, version, target_open = self._collect_two_complete_sessions(db)
+            state = db.query(StrategyV2ShadowState).filter_by(symbol="AAPL.US").one()
+            before_state = (
+                state.config_version,
+                state.phase,
+                state.last_bar_at,
+                state.state_json,
+                state.last_poll_error,
+            )
+            before_decisions = [
+                (
+                    item.id,
+                    item.idempotency_key,
+                    item.config_version,
+                    item.bar_at,
+                    item.action,
+                    item.reason,
+                    item.gate_passed,
+                    item.gate_reasons_json,
+                    item.features_json,
+                )
+                for item in db.query(StrategyV2ShadowDecision).order_by(
+                    StrategyV2ShadowDecision.id.asc()
+                )
+            ]
+            before_counts = tuple(
+                db.query(model).count()
+                for model in (
+                    StrategyV2ShadowConfig,
+                    StrategyV2ShadowVersion,
+                    StrategyV2ShadowState,
+                    StrategyV2ShadowDecision,
+                    StrategyV2ShadowTrade,
+                )
+            )
+
+            response = service.compare_adx_challengers(
+                StrategyV2AdxChallengerRequest(
+                    symbol="AAPL.US",
+                    config_version=version,
+                )
+            )
+
+            diagnostic = response.warmup_diagnostic
+            assert diagnostic is not None
+            assert diagnostic.algorithm_version == "strategy-v2-causal-trend-prewarm-v1"
+            assert diagnostic.status == "INSUFFICIENT_EVIDENCE"
+            assert diagnostic.minimum_causal_pairs == 5
+            assert diagnostic.observed_causal_pairs == 1
+            assert diagnostic.evaluated_causal_pairs == 1
+            assert diagnostic.blockers == ["MIN_CAUSAL_PAIRS"]
+            assert diagnostic.same_sample is True
+            assert diagnostic.causal_history_only is True
+            assert diagnostic.vwap_zscore_session_local is True
+            assert [item.label for item in diagnostic.variants] == [
+                "SESSION_LOCAL",
+                "CAUSAL_TREND_PREWARM",
+            ]
+            baseline, prewarmed = diagnostic.variants
+            assert baseline.warmup_scope == "NONE"
+            assert prewarmed.warmup_scope == "ADX_VOL_ONLY"
+            assert baseline.source_config_version == version
+            assert prewarmed.source_config_version == version
+            assert baseline.metrics.bars == 390
+            assert prewarmed.metrics.bars == 390
+            assert [item.session_date for item in baseline.daily] == [
+                item.session_date for item in prewarmed.daily
+            ]
+            assert baseline.daily[0].first_ready_at == target_open + timedelta(
+                minutes=139
+            )
+            assert baseline.daily[0].warmup_lost_bars == 139
+            assert baseline.daily[0].ready_bars == 251
+            assert prewarmed.daily[0].first_ready_at == target_open + timedelta(
+                minutes=64
+            )
+            assert prewarmed.daily[0].warmup_lost_bars == 64
+            assert prewarmed.daily[0].ready_bars == 326
+            assert prewarmed.daily[0].seed_session_date == _SESSION_OPEN.date()
+            assert prewarmed.daily[0].trend_context_cutoff_at == (
+                _SESSION_OPEN + timedelta(minutes=390)
+            )
+            assert prewarmed.daily[0].eligible_bars <= prewarmed.daily[0].ready_bars
+            assert tuple(
+                db.query(model).count()
+                for model in (
+                    StrategyV2ShadowConfig,
+                    StrategyV2ShadowVersion,
+                    StrategyV2ShadowState,
+                    StrategyV2ShadowDecision,
+                    StrategyV2ShadowTrade,
+                )
+            ) == before_counts
+            db.refresh(state)
+            assert (
+                state.config_version,
+                state.phase,
+                state.last_bar_at,
+                state.state_json,
+                state.last_poll_error,
+            ) == before_state
+            assert [
+                (
+                    item.id,
+                    item.idempotency_key,
+                    item.config_version,
+                    item.bar_at,
+                    item.action,
+                    item.reason,
+                    item.gate_passed,
+                    item.gate_reasons_json,
+                    item.features_json,
+                )
+                for item in db.query(StrategyV2ShadowDecision).order_by(
+                    StrategyV2ShadowDecision.id.asc()
+                )
+            ] == before_decisions
+
+    def test_causal_warmup_does_not_use_a_stale_complete_session(self) -> None:
+        with self._db() as db:
+            service, version, _target_open = self._collect_two_complete_sessions(
+                db,
+                target_day_offset=4,
+            )
+
+            response = service.compare_adx_challengers(
+                StrategyV2AdxChallengerRequest(
+                    symbol="AAPL.US",
+                    config_version=version,
+                )
+            )
+
+            diagnostic = response.warmup_diagnostic
+            assert diagnostic is not None
+            assert diagnostic.status == "INSUFFICIENT_EVIDENCE"
+            assert diagnostic.observed_causal_pairs == 0
+            assert diagnostic.evaluated_causal_pairs == 0
+            assert diagnostic.variants == []
+
+    def test_causal_warmup_is_ready_after_the_frozen_pair_minimum(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(shadow_service_module, "_MIN_WARMUP_CAUSAL_PAIRS", 1)
+        with self._db() as db:
+            service, version, _target_open = self._collect_two_complete_sessions(db)
+
+            response = service.compare_adx_challengers(
+                StrategyV2AdxChallengerRequest(
+                    symbol="AAPL.US",
+                    config_version=version,
+                )
+            )
+
+        diagnostic = response.warmup_diagnostic
+        assert diagnostic is not None
+        assert diagnostic.status == "READY_FOR_REVIEW"
+        assert diagnostic.minimum_causal_pairs == 1
+        assert diagnostic.evaluated_causal_pairs == 1
+        assert diagnostic.blockers == []
+        assert len(diagnostic.variants) == 2
+
+    def test_causal_warmup_aggregates_five_real_consecutive_pairs(self) -> None:
+        session_opens = [
+            _SESSION_OPEN + timedelta(days=offset)
+            for offset in (0, 3, 4, 5, 6, 7)
+        ]
+        replay_bars = [
+            StrategyV2ReplayBar(
+                timestamp=item.timestamp,
+                open=item.open,
+                high=item.high,
+                low=item.low,
+                close=item.close,
+                volume=item.volume,
+            )
+            for session_open in session_opens
+            for item in _candles(390, start=session_open)
+        ]
+        with self._db() as db:
+            config = self._enabled_config(
+                db,
+                activated_at=_SESSION_OPEN - timedelta(days=1),
+            )
+            service = StrategyV2ShadowService(db)
+            version = service._config_version(config)
+
+            diagnostic = service._warmup_diagnostic(
+                replay_bars=replay_bars,
+                source_config=config,
+                source_config_version=version,
+                market="US",
+                session_dates=[item.date() for item in session_opens],
+            )
+
+        assert diagnostic.status == "READY_FOR_REVIEW"
+        assert diagnostic.minimum_causal_pairs == 5
+        assert diagnostic.observed_causal_pairs == 5
+        assert diagnostic.evaluated_causal_pairs == 5
+        assert diagnostic.blockers == []
+        assert len(diagnostic.variants) == 2
+        assert all(len(item.daily) == 5 for item in diagnostic.variants)
+        assert all(item.metrics.bars == 5 * 390 for item in diagnostic.variants)
+
+    def test_causal_warmup_blocks_session_local_feature_drift(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            StrategyV2ShadowService,
+            "_session_local_features_match",
+            classmethod(lambda cls, baseline, prewarmed: False),
+        )
+        with self._db() as db:
+            service, version, _target_open = self._collect_two_complete_sessions(db)
+
+            response = service.compare_adx_challengers(
+                StrategyV2AdxChallengerRequest(
+                    symbol="AAPL.US",
+                    config_version=version,
+                )
+            )
+
+        diagnostic = response.warmup_diagnostic
+        assert diagnostic is not None
+        assert diagnostic.status == "BLOCKED"
+        assert diagnostic.evaluated_causal_pairs == 0
+        assert diagnostic.blockers == ["SESSION_LOCAL_FEATURE_DRIFT"]
+        assert diagnostic.variants == []
+
+    def test_causal_warmup_fails_closed_when_prewarm_replay_fails(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        class _BrokenPrewarmEngine:
+            def __init__(self, *_args: object, **_kwargs: object) -> None:
+                raise ValueError("synthetic prewarm failure")
+
+        monkeypatch.setattr(
+            shadow_service_module,
+            "CausalTrendPrewarmFeatureEngine",
+            _BrokenPrewarmEngine,
+        )
+        with self._db() as db:
+            service, version, _target_open = self._collect_two_complete_sessions(db)
+
+            response = service.compare_adx_challengers(
+                StrategyV2AdxChallengerRequest(
+                    symbol="AAPL.US",
+                    config_version=version,
+                )
+            )
+
+        diagnostic = response.warmup_diagnostic
+        assert diagnostic is not None
+        assert diagnostic.status == "BLOCKED"
+        assert diagnostic.evaluated_causal_pairs == 0
+        assert diagnostic.blockers == ["PREWARM_REPLAY_FAILED"]
+        assert diagnostic.variants == []
 
     def test_replay_metrics_count_unique_gate_eligible_bars(self) -> None:
         metrics = StrategyV2ShadowService._metrics_from_replay(

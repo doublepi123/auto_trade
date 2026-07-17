@@ -22,6 +22,7 @@ from app.core.market_calendar import (
     session_status,
 )
 from app.domain.strategy_v2 import (
+    CausalTrendPrewarmFeatureEngine,
     StrategyBar,
     StrategyV2Action,
     StrategyV2Config,
@@ -29,6 +30,7 @@ from app.domain.strategy_v2 import (
     StrategyV2Engine,
     StrategyV2State,
     VirtualPosition,
+    aggregate_complete_five_minute_bars,
     minimum_profit_target_pct,
 )
 from app.platform.strategy_quality import strategy_quality_report
@@ -52,6 +54,7 @@ from app.schemas import (
     StrategyV2ShadowDecisionResponse,
     StrategyV2ShadowDailyEvidence,
     StrategyV2ShadowEvaluationResponse,
+    StrategyV2ShadowHourlyEvidence,
     StrategyV2ShadowLatestResponse,
     StrategyV2ShadowMetrics,
     StrategyV2ReplayBar,
@@ -60,6 +63,9 @@ from app.schemas import (
     StrategyV2ShadowStatusResponse,
     StrategyV2ShadowTradeResponse,
     StrategyV2ShadowVersionResponse,
+    StrategyV2WarmupDaily,
+    StrategyV2WarmupDiagnostic,
+    StrategyV2WarmupVariant,
 )
 from app.services.strategy_service import StrategyService
 
@@ -105,6 +111,30 @@ _MIN_COMPLETE_SESSION_COVERAGE = 0.995
 _ADX_CHALLENGER_VALUES = (20.0, 25.0, 30.0)
 _MIN_CHALLENGER_COMPLETE_SESSIONS = 5
 _MAX_CHALLENGER_COMPLETE_SESSIONS = 20
+_MIN_WARMUP_CAUSAL_PAIRS = 5
+_FEATURE_NOT_READY_REASONS = frozenset({
+    "FEATURES_NOT_READY",
+    "SESSION_DATA_INCOMPLETE",
+    "NON_POSITIVE_VOLUME",
+    "VWAP_1M_UNAVAILABLE",
+    "RESIDUAL_SIGMA_1M_ZERO",
+    "ZSCORE_1M_WARMUP",
+    "VWAP_5M_UNAVAILABLE",
+    "RESIDUAL_SIGMA_5M_ZERO",
+    "ZSCORE_5M_WARMUP",
+    "ADX_5M_WARMUP",
+    "REALIZED_VOL_1M_WARMUP",
+})
+_ENTRY_GATE_REASONS = _FEATURE_NOT_READY_REASONS | frozenset({
+    "RESIDUAL_SIGMA_1M_TOO_LOW",
+    "RESIDUAL_SIGMA_5M_TOO_LOW",
+    "ZSCORE_5M_NOT_OVERSOLD",
+    "ADX_REGIME_BLOCKED",
+    "REALIZED_VOL_REGIME_BLOCKED",
+    "ENTRY_CUTOFF",
+    "MAX_SESSION_ENTRIES",
+    "ENTRY_COOLDOWN",
+})
 
 
 @dataclass(frozen=True)
@@ -627,6 +657,10 @@ class StrategyV2ShadowService:
                 observed_complete_sessions=len(complete_dates),
                 evaluated_complete_sessions=len(selected_dates),
                 blockers=[*blockers, "ALGORITHM_VERSION_UNSUPPORTED"],
+                warmup_diagnostic=self._empty_warmup_diagnostic(
+                    status="BLOCKED",
+                    blockers=["ALGORITHM_VERSION_UNSUPPORTED"],
+                ),
             )
         try:
             source_config = self._challenger_config(
@@ -643,6 +677,10 @@ class StrategyV2ShadowService:
                 observed_complete_sessions=len(complete_dates),
                 evaluated_complete_sessions=len(selected_dates),
                 blockers=[*blockers, "CONFIG_SNAPSHOT_INVALID"],
+                warmup_diagnostic=self._empty_warmup_diagnostic(
+                    status="BLOCKED",
+                    blockers=["CONFIG_SNAPSHOT_INVALID"],
+                ),
             )
         if self._config_version(source_config) != config_version:
             return StrategyV2AdxChallengerResponse(
@@ -653,6 +691,10 @@ class StrategyV2ShadowService:
                 observed_complete_sessions=len(complete_dates),
                 evaluated_complete_sessions=len(selected_dates),
                 blockers=[*blockers, "CONFIG_SNAPSHOT_VERSION_MISMATCH"],
+                warmup_diagnostic=self._empty_warmup_diagnostic(
+                    status="BLOCKED",
+                    blockers=["CONFIG_SNAPSHOT_VERSION_MISMATCH"],
+                ),
             )
         if not selected_dates:
             return StrategyV2AdxChallengerResponse(
@@ -663,6 +705,7 @@ class StrategyV2ShadowService:
                 observed_complete_sessions=0,
                 evaluated_complete_sessions=0,
                 blockers=blockers,
+                warmup_diagnostic=self._empty_warmup_diagnostic(),
             )
 
         selected_set = set(selected_dates)
@@ -756,7 +799,18 @@ class StrategyV2ShadowService:
                 baseline_replay_match=False,
                 blockers=[*blockers, "BASELINE_REPLAY_MISMATCH"],
                 candidates=results[:1],
+                warmup_diagnostic=self._empty_warmup_diagnostic(
+                    status="BLOCKED",
+                    blockers=["BASELINE_REPLAY_MISMATCH"],
+                ),
             )
+        warmup_diagnostic = self._warmup_diagnostic(
+            replay_bars=bars,
+            source_config=source_config,
+            source_config_version=config_version,
+            market=market,
+            session_dates=selected_dates,
+        )
         return StrategyV2AdxChallengerResponse(
             symbol=symbol,
             source_config_version=config_version,
@@ -771,6 +825,7 @@ class StrategyV2ShadowService:
             baseline_replay_match=True,
             blockers=blockers,
             candidates=results,
+            warmup_diagnostic=warmup_diagnostic,
         )
 
     def replay(self, payload: StrategyV2ShadowReplayRequest) -> StrategyV2ShadowReplayResponse:
@@ -1139,8 +1194,10 @@ class StrategyV2ShadowService:
         config: StrategyV2ShadowConfig,
         *,
         include_feature_evidence: bool = False,
+        features: CausalTrendPrewarmFeatureEngine | None = None,
     ) -> StrategyV2ShadowReplayResponse:
-        engine = StrategyV2Engine(self._domain_config(config, payload.market))
+        domain_config = self._domain_config(config, payload.market)
+        engine = StrategyV2Engine(domain_config, features=features)
         bars = [
             StrategyBar(
                 timestamp=item.timestamp,
@@ -1187,6 +1244,7 @@ class StrategyV2ShadowService:
                     "adx": feature.adx_5m,
                     "realized_vol": feature.realized_vol_1m,
                     "gate_passed": not gate_reasons,
+                    "gate_reasons": list(gate_reasons),
                 }
                 if feature_evidence is not None:
                     item["_feature_evidence"] = feature_evidence
@@ -1772,6 +1830,371 @@ class StrategyV2ShadowService:
                 exit_reasons=dict(sorted(exits.items())),
             ))
         return result
+
+    @staticmethod
+    def _empty_warmup_diagnostic(
+        *,
+        status: str = "INSUFFICIENT_EVIDENCE",
+        blockers: Sequence[str] = ("MIN_CAUSAL_PAIRS",),
+        observed_causal_pairs: int = 0,
+    ) -> StrategyV2WarmupDiagnostic:
+        normalized_status = (
+            "BLOCKED" if status == "BLOCKED" else "INSUFFICIENT_EVIDENCE"
+        )
+        return StrategyV2WarmupDiagnostic(
+            status=normalized_status,
+            minimum_causal_pairs=_MIN_WARMUP_CAUSAL_PAIRS,
+            observed_causal_pairs=observed_causal_pairs,
+            evaluated_causal_pairs=0,
+            blockers=list(dict.fromkeys(blockers)),
+        )
+
+    @staticmethod
+    def _strategy_bars_from_replay(
+        bars: Sequence[StrategyV2ReplayBar],
+        *,
+        symbol: str,
+    ) -> list[StrategyBar]:
+        return [
+            StrategyBar(
+                timestamp=item.timestamp,
+                open=item.open,
+                high=item.high,
+                low=item.low,
+                close=item.close,
+                volume=item.volume,
+                symbol=symbol,
+            )
+            for item in sorted(bars, key=lambda value: value.timestamp)
+        ]
+
+    @staticmethod
+    def _causal_warmup_pairs(
+        *,
+        bars: Sequence[StrategyBar],
+        market: str,
+        session_dates: Sequence[date],
+        config: StrategyV2ShadowConfig,
+    ) -> tuple[int, list[tuple[date, date, list[StrategyBar], list[StrategyBar]]]]:
+        session = get_session(market)
+        by_day: dict[date, list[StrategyBar]] = {item: [] for item in session_dates}
+        for bar in bars:
+            session_day = session.trade_day(bar.timestamp)
+            if session_day in by_day:
+                by_day[session_day].append(bar)
+        immediate_pairs = 0
+        result: list[tuple[date, date, list[StrategyBar], list[StrategyBar]]] = []
+        ordered_dates = sorted(session_dates)
+        for seed_day, target_day in zip(ordered_dates, ordered_dates[1:]):
+            seed = sorted(by_day[seed_day], key=lambda item: item.timestamp)
+            target = sorted(by_day[target_day], key=lambda item: item.timestamp)
+            if not seed or not target:
+                continue
+            expected_open = next_session_open(market, seed[-1].end_at)
+            if (
+                session.trade_day(expected_open) != target_day
+                or target[0].timestamp != expected_open
+            ):
+                continue
+            immediate_pairs += 1
+            completed_5m = aggregate_complete_five_minute_bars(
+                seed,
+                market=market,
+                observed_at=seed[-1].end_at,
+            )
+            valid_returns = sum(
+                current.timestamp - previous.timestamp == timedelta(minutes=1)
+                and session.trade_day(current.timestamp)
+                == session.trade_day(previous.timestamp)
+                for previous, current in zip(seed, seed[1:])
+            )
+            if (
+                len(completed_5m) < 2 * config.adx_period
+                or valid_returns < config.realized_vol_window_bars
+            ):
+                continue
+            result.append((seed_day, target_day, seed, target))
+        return immediate_pairs, result
+
+    @staticmethod
+    def _replay_feature_map(
+        replay: StrategyV2ShadowReplayResponse,
+    ) -> dict[datetime, dict[str, Any]]:
+        result: dict[datetime, dict[str, Any]] = {}
+        for item in replay.decisions:
+            timestamp = _as_utc(datetime.fromisoformat(str(item["timestamp"])))
+            raw_feature = item.get("_feature_evidence")
+            if not isinstance(raw_feature, dict):
+                raise ValueError("warm-up replay is missing feature evidence")
+            existing = result.get(timestamp)
+            if existing is not None and not StrategyV2ShadowService._feature_evidence_matches(
+                existing,
+                raw_feature,
+            ):
+                raise ValueError("warm-up replay has conflicting feature evidence")
+            result[timestamp] = raw_feature
+        return result
+
+    @classmethod
+    def _session_local_features_match(
+        cls,
+        baseline: StrategyV2ShadowReplayResponse,
+        prewarmed: StrategyV2ShadowReplayResponse,
+    ) -> bool:
+        baseline_features = cls._replay_feature_map(baseline)
+        prewarmed_features = cls._replay_feature_map(prewarmed)
+        if set(baseline_features) != set(prewarmed_features):
+            return False
+        local_fields = (
+            "session_day",
+            "bar_index",
+            "bar_timestamp_5m",
+            "session_vwap_1m",
+            "residual_1m",
+            "residual_mean_1m",
+            "residual_sigma_1m",
+            "zscore_1m",
+            "session_vwap_5m",
+            "residual_5m",
+            "residual_mean_5m",
+            "residual_sigma_5m",
+            "zscore_5m",
+        )
+        return all(
+            all(
+                field in baseline_features[timestamp]
+                and field in prewarmed_features[timestamp]
+                and cls._feature_evidence_matches(
+                    baseline_features[timestamp][field],
+                    prewarmed_features[timestamp][field],
+                    (field,),
+                )
+                for field in local_fields
+            )
+            for timestamp in baseline_features
+        )
+
+    @classmethod
+    def _warmup_daily_from_replay(
+        cls,
+        *,
+        replay: StrategyV2ShadowReplayResponse,
+        market: str,
+        seed_day: date,
+        target_day: date,
+        seed_bars: Sequence[StrategyBar],
+        target_bars: Sequence[StrategyBar],
+    ) -> StrategyV2WarmupDaily:
+        features = cls._replay_feature_map(replay)
+        expected_timestamps = {item.timestamp for item in target_bars}
+        if set(features) != expected_timestamps:
+            raise ValueError("warm-up replay target evidence is incomplete")
+        decisions_by_timestamp: dict[datetime, list[dict[str, Any]]] = {}
+        for item in replay.decisions:
+            timestamp = _as_utc(datetime.fromisoformat(str(item["timestamp"])))
+            decisions_by_timestamp.setdefault(timestamp, []).append(item)
+        records: dict[datetime, tuple[bool, bool, set[str]]] = {}
+        for timestamp in sorted(expected_timestamps):
+            raw_ready = features[timestamp].get("ready")
+            if not isinstance(raw_ready, bool):
+                raise ValueError("warm-up replay readiness evidence is invalid")
+            gates: set[str] = set()
+            gate_passed = False
+            for item in decisions_by_timestamp[timestamp]:
+                raw_gates = item.get("gate_reasons")
+                if not isinstance(raw_gates, list):
+                    raise ValueError("warm-up replay gate evidence is invalid")
+                gates.update(
+                    str(value)
+                    for value in raw_gates
+                    if str(value) in _ENTRY_GATE_REASONS
+                )
+                gate_passed = gate_passed or bool(item.get("gate_passed", False))
+            records[timestamp] = (raw_ready, raw_ready and gate_passed, gates)
+
+        ordered = sorted(expected_timestamps)
+        ready_timestamps = [item for item in ordered if records[item][0]]
+        eligible_timestamps = [item for item in ordered if records[item][1]]
+        session = get_session(market)
+        timestamps_by_hour: dict[int, list[datetime]] = {}
+        for timestamp in ordered:
+            timestamps_by_hour.setdefault(
+                timestamp.astimezone(session.timezone).hour,
+                [],
+            ).append(timestamp)
+        hourly: list[StrategyV2ShadowHourlyEvidence] = []
+        for market_hour, timestamps in sorted(timestamps_by_hour.items()):
+            hourly_gate_counts: Counter[str] = Counter()
+            for timestamp in timestamps:
+                hourly_gate_counts.update(records[timestamp][2])
+            hourly.append(StrategyV2ShadowHourlyEvidence(
+                session_hour=market_hour,
+                bars=len(timestamps),
+                ready_bars=sum(records[item][0] for item in timestamps),
+                eligible_bars=sum(records[item][1] for item in timestamps),
+                gate_counts=dict(sorted(hourly_gate_counts.items())),
+            ))
+        first_ready_at = ready_timestamps[0] if ready_timestamps else None
+        warmup_lost_bars = (
+            ordered.index(first_ready_at)
+            if first_ready_at is not None
+            else len(ordered)
+        )
+        return StrategyV2WarmupDaily(
+            session_date=target_day,
+            seed_session_date=seed_day,
+            trend_context_cutoff_at=seed_bars[-1].end_at,
+            overnight_gap_pct=(target_bars[0].open / seed_bars[-1].close) - 1.0,
+            first_ready_at=first_ready_at,
+            bars=len(ordered),
+            ready_bars=len(ready_timestamps),
+            warmup_lost_bars=warmup_lost_bars,
+            eligible_bars=len(eligible_timestamps),
+            hourly_eligibility=hourly,
+        )
+
+    def _warmup_diagnostic(
+        self,
+        *,
+        replay_bars: Sequence[StrategyV2ReplayBar],
+        source_config: StrategyV2ShadowConfig,
+        source_config_version: str,
+        market: str,
+        session_dates: Sequence[date],
+    ) -> StrategyV2WarmupDiagnostic:
+        strategy_bars = self._strategy_bars_from_replay(
+            replay_bars,
+            symbol=source_config.symbol,
+        )
+        observed_pairs, pairs = self._causal_warmup_pairs(
+            bars=strategy_bars,
+            market=market,
+            session_dates=session_dates,
+            config=source_config,
+        )
+        blockers = (
+            ["MIN_CAUSAL_PAIRS"]
+            if len(pairs) < _MIN_WARMUP_CAUSAL_PAIRS
+            else []
+        )
+        if not pairs:
+            return StrategyV2WarmupDiagnostic(
+                status="INSUFFICIENT_EVIDENCE",
+                minimum_causal_pairs=_MIN_WARMUP_CAUSAL_PAIRS,
+                observed_causal_pairs=observed_pairs,
+                evaluated_causal_pairs=0,
+                blockers=blockers,
+            )
+
+        baseline_decisions: list[dict[str, Any]] = []
+        baseline_trades: list[dict[str, Any]] = []
+        baseline_daily: list[StrategyV2WarmupDaily] = []
+        prewarm_decisions: list[dict[str, Any]] = []
+        prewarm_trades: list[dict[str, Any]] = []
+        prewarm_daily: list[StrategyV2WarmupDaily] = []
+        domain_config = self._domain_config(source_config, market)
+        try:
+            for seed_day, target_day, seed_bars, target_bars in pairs:
+                target_payload = StrategyV2ShadowReplayRequest(
+                    symbol=source_config.symbol,
+                    market="HK" if market == "HK" else "US",
+                    bars=[
+                        StrategyV2ReplayBar(
+                            timestamp=item.timestamp,
+                            open=item.open,
+                            high=item.high,
+                            low=item.low,
+                            close=item.close,
+                            volume=item.volume,
+                        )
+                        for item in target_bars
+                    ],
+                )
+                baseline = self._replay_payload(
+                    target_payload,
+                    source_config,
+                    include_feature_evidence=True,
+                )
+                prewarmed = self._replay_payload(
+                    target_payload,
+                    source_config,
+                    include_feature_evidence=True,
+                    features=CausalTrendPrewarmFeatureEngine(
+                        domain_config.feature_config(),
+                        seed_bars,
+                    ),
+                )
+                if not self._session_local_features_match(baseline, prewarmed):
+                    return StrategyV2WarmupDiagnostic(
+                        status="BLOCKED",
+                        minimum_causal_pairs=_MIN_WARMUP_CAUSAL_PAIRS,
+                        observed_causal_pairs=observed_pairs,
+                        evaluated_causal_pairs=0,
+                        blockers=["SESSION_LOCAL_FEATURE_DRIFT"],
+                    )
+                baseline_decisions.extend(baseline.decisions)
+                baseline_trades.extend(baseline.trades)
+                prewarm_decisions.extend(prewarmed.decisions)
+                prewarm_trades.extend(prewarmed.trades)
+                baseline_daily.append(self._warmup_daily_from_replay(
+                    replay=baseline,
+                    market=market,
+                    seed_day=seed_day,
+                    target_day=target_day,
+                    seed_bars=seed_bars,
+                    target_bars=target_bars,
+                ))
+                prewarm_daily.append(self._warmup_daily_from_replay(
+                    replay=prewarmed,
+                    market=market,
+                    seed_day=seed_day,
+                    target_day=target_day,
+                    seed_bars=seed_bars,
+                    target_bars=target_bars,
+                ))
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return StrategyV2WarmupDiagnostic(
+                status="BLOCKED",
+                minimum_causal_pairs=_MIN_WARMUP_CAUSAL_PAIRS,
+                observed_causal_pairs=observed_pairs,
+                evaluated_causal_pairs=0,
+                blockers=["PREWARM_REPLAY_FAILED"],
+            )
+
+        variants = [
+            StrategyV2WarmupVariant(
+                label="SESSION_LOCAL",
+                warmup_scope="NONE",
+                source_config_version=source_config_version,
+                metrics=self._metrics_from_replay(
+                    baseline_decisions,
+                    baseline_trades,
+                ),
+                daily=baseline_daily,
+            ),
+            StrategyV2WarmupVariant(
+                label="CAUSAL_TREND_PREWARM",
+                warmup_scope="ADX_VOL_ONLY",
+                source_config_version=source_config_version,
+                metrics=self._metrics_from_replay(
+                    prewarm_decisions,
+                    prewarm_trades,
+                ),
+                daily=prewarm_daily,
+            ),
+        ]
+        return StrategyV2WarmupDiagnostic(
+            status=(
+                "READY_FOR_REVIEW"
+                if len(pairs) >= _MIN_WARMUP_CAUSAL_PAIRS
+                else "INSUFFICIENT_EVIDENCE"
+            ),
+            minimum_causal_pairs=_MIN_WARMUP_CAUSAL_PAIRS,
+            observed_causal_pairs=observed_pairs,
+            evaluated_causal_pairs=len(pairs),
+            blockers=blockers,
+            variants=variants,
+        )
 
     def _baseline_replay_matches(
         self,
@@ -2402,6 +2825,24 @@ class StrategyV2ShadowService:
         return entry.session_date
 
     @staticmethod
+    def _bar_readiness(
+        rows: Sequence[StrategyV2ShadowDecision | _DecisionEvidenceRow],
+    ) -> tuple[bool, bool, set[str]]:
+        stored = [StrategyV2ShadowService._stored_gate_reasons(row) for row in rows]
+        if any(item is None for item in stored):
+            return False, False, {"READINESS_EVIDENCE_MALFORMED"}
+        reasons = set().union(*(item or set() for item in stored))
+        gate_passed = any(row.gate_passed for row in rows)
+        if gate_passed and reasons & _ENTRY_GATE_REASONS:
+            return False, False, {
+                *reasons,
+                "READINESS_EVIDENCE_MALFORMED",
+            }
+        ready = not bool(reasons & _FEATURE_NOT_READY_REASONS)
+        eligible = ready and gate_passed
+        return ready, eligible, reasons
+
+    @staticmethod
     def _daily_evidence(
         decisions: Sequence[StrategyV2ShadowDecision | _DecisionEvidenceRow],
         trades: Sequence[StrategyV2ShadowTrade],
@@ -2418,10 +2859,14 @@ class StrategyV2ShadowService:
                 trades_by_day.setdefault(_as_utc(trade.exit_at).date(), []).append(trade)
         result: list[StrategyV2ShadowDailyEvidence] = []
         for session_date, rows in sorted(by_day.items()):
-            timestamps = sorted({
-                _as_utc(row.bar_at).replace(second=0, microsecond=0)
-                for row in rows
-            })
+            rows_by_timestamp: dict[
+                datetime,
+                list[StrategyV2ShadowDecision | _DecisionEvidenceRow],
+            ] = {}
+            for row in rows:
+                timestamp = _as_utc(row.bar_at).replace(second=0, microsecond=0)
+                rows_by_timestamp.setdefault(timestamp, []).append(row)
+            timestamps = sorted(rows_by_timestamp)
             market = rows[0].market.upper()
             session = get_session(market)
             midnight = datetime.combine(session_date, datetime.min.time(), tzinfo=timezone.utc)
@@ -2462,15 +2907,27 @@ class StrategyV2ShadowService:
             coverage_ratio = (
                 len(rth_timestamps) / expected_count if expected_count else 0.0
             )
-            incomplete_feature_bars = len({
-                _as_utc(row.bar_at).replace(second=0, microsecond=0)
-                for row in rows
-                if (
-                    (stored := StrategyV2ShadowService._stored_gate_reasons(row))
-                    is None
-                    or "SESSION_DATA_INCOMPLETE" in stored
+            evidence_by_timestamp = {
+                timestamp: StrategyV2ShadowService._bar_readiness(
+                    rows_by_timestamp[timestamp]
                 )
-            })
+                for timestamp in rth_timestamps
+            }
+            ready_timestamps = [
+                timestamp
+                for timestamp in rth_timestamps
+                if evidence_by_timestamp[timestamp][0]
+            ]
+            eligible_timestamps = [
+                timestamp
+                for timestamp in rth_timestamps
+                if evidence_by_timestamp[timestamp][1]
+            ]
+            incomplete_feature_bars = sum(
+                "READINESS_EVIDENCE_MALFORMED" in reasons
+                or "SESSION_DATA_INCOMPLETE" in reasons
+                for _ready, _eligible, reasons in evidence_by_timestamp.values()
+            )
             complete_session = (
                 expected_count > 0
                 and coverage_ratio >= _MIN_COMPLETE_SESSION_COVERAGE
@@ -2482,20 +2939,43 @@ class StrategyV2ShadowService:
             )
             day_trades = trades_by_day.get(session_date, [])
             exits = Counter(str(trade.exit_reason or "UNKNOWN") for trade in day_trades)
+            hourly_rows: list[StrategyV2ShadowHourlyEvidence] = []
+            timestamps_by_hour: dict[int, list[datetime]] = {}
+            for timestamp in rth_timestamps:
+                market_hour = timestamp.astimezone(session.timezone).hour
+                timestamps_by_hour.setdefault(market_hour, []).append(timestamp)
+            for market_hour, hour_timestamps in sorted(timestamps_by_hour.items()):
+                gate_counts: Counter[str] = Counter()
+                for timestamp in hour_timestamps:
+                    gate_counts.update(
+                        evidence_by_timestamp[timestamp][2]
+                        & _ENTRY_GATE_REASONS
+                    )
+                hourly_rows.append(StrategyV2ShadowHourlyEvidence(
+                    session_hour=market_hour,
+                    bars=len(hour_timestamps),
+                    ready_bars=sum(
+                        evidence_by_timestamp[timestamp][0]
+                        for timestamp in hour_timestamps
+                    ),
+                    eligible_bars=sum(
+                        evidence_by_timestamp[timestamp][1]
+                        for timestamp in hour_timestamps
+                    ),
+                    gate_counts=dict(sorted(gate_counts.items())),
+                ))
+            first_ready_at = ready_timestamps[0] if ready_timestamps else None
+            warmup_lost_bars = (
+                rth_timestamps.index(first_ready_at)
+                if first_ready_at is not None
+                else len(rth_timestamps)
+            )
             result.append(StrategyV2ShadowDailyEvidence(
                 session_date=session_date,
                 first_bar_at=first_bar_at,
                 last_bar_at=last_bar_at,
                 bars=len(rth_timestamps),
-                eligible_bars=len({
-                    _as_utc(row.bar_at).replace(second=0, microsecond=0)
-                    for row in rows
-                    if row.gate_passed
-                    and _as_utc(row.bar_at).replace(
-                        second=0,
-                        microsecond=0,
-                    ) in expected_set
-                }),
+                eligible_bars=len(eligible_timestamps),
                 expected_internal_bars=len(internal_expected),
                 missing_internal_bars=missing,
                 incomplete_feature_bars=incomplete_feature_bars,
@@ -2507,6 +2987,10 @@ class StrategyV2ShadowService:
                 partial_end=partial_end,
                 outside_session_bars=outside_session_bars,
                 complete_session=complete_session,
+                first_ready_at=first_ready_at,
+                ready_bars=len(ready_timestamps),
+                warmup_lost_bars=warmup_lost_bars,
+                hourly_eligibility=hourly_rows,
             ))
         return result
 

@@ -1495,12 +1495,24 @@ export interface StrategyShadowVersion {
   net_pnl: number
 }
 
+export interface StrategyShadowHourlyEligibility {
+  session_hour: number
+  bars: number
+  ready_bars: number
+  eligible_bars: number
+  gate_counts: Record<string, number>
+}
+
 export interface StrategyShadowDailyEvidence {
   session_date: string
   first_bar_at: string
   last_bar_at: string
+  first_ready_at: string | null
   bars: number
+  ready_bars: number
+  warmup_lost_bars: number
   eligible_bars: number
+  hourly_eligibility: StrategyShadowHourlyEligibility[]
   expected_internal_bars: number
   missing_internal_bars: number
   incomplete_feature_bars: number
@@ -1564,6 +1576,40 @@ export interface StrategyShadowAdxChallengerCandidate {
   daily: StrategyShadowAdxChallengerDaily[]
 }
 
+export interface StrategyShadowWarmupDaily {
+  session_date: string
+  seed_session_date: string
+  trend_context_cutoff_at: string
+  overnight_gap_pct: number
+  first_ready_at: string | null
+  bars: number
+  ready_bars: number
+  warmup_lost_bars: number
+  eligible_bars: number
+  hourly_eligibility: StrategyShadowHourlyEligibility[]
+}
+
+export interface StrategyShadowWarmupVariant {
+  label: 'SESSION_LOCAL' | 'CAUSAL_TREND_PREWARM'
+  warmup_scope: 'NONE' | 'ADX_VOL_ONLY'
+  source_config_version: string
+  metrics: StrategyShadowMetrics
+  daily: StrategyShadowWarmupDaily[]
+}
+
+export interface StrategyShadowWarmupDiagnostic {
+  algorithm_version: 'strategy-v2-causal-trend-prewarm-v1'
+  status: 'INSUFFICIENT_EVIDENCE' | 'READY_FOR_REVIEW' | 'BLOCKED'
+  minimum_causal_pairs: number
+  observed_causal_pairs: number
+  evaluated_causal_pairs: number
+  blockers: string[]
+  same_sample: true
+  causal_history_only: true
+  vwap_zscore_session_local: true
+  variants: StrategyShadowWarmupVariant[]
+}
+
 export interface StrategyShadowAdxChallengerResponse {
   persisted: false
   mode: StrategyShadowMode
@@ -1580,4 +1626,5 @@ export interface StrategyShadowAdxChallengerResponse {
   baseline_replay_match: boolean | null
   blockers: string[]
   candidates: StrategyShadowAdxChallengerCandidate[]
+  warmup_diagnostic: StrategyShadowWarmupDiagnostic | null
 }

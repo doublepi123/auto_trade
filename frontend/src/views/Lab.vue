@@ -500,9 +500,38 @@
                 class="shadow-evidence-alert"
                 data-testid="shadow-evidence-warnings"
               />
-              <el-table :data="shadowEvaluation.daily" size="small" empty-text="暂无按日证据">
+              <el-table
+                :data="shadowEvaluation.daily"
+                size="small"
+                empty-text="暂无按日证据"
+                data-testid="shadow-evidence-daily"
+              >
+                <el-table-column type="expand" width="44">
+                  <template #default="{ row }">
+                    <el-table :data="row.hourly_eligibility" size="small" empty-text="暂无分时证据">
+                      <el-table-column label="市场时段" width="130">
+                        <template #default="scope">{{ formatShadowSessionHour(scope.row.session_hour) }}</template>
+                      </el-table-column>
+                      <el-table-column prop="bars" label="bar" width="70" />
+                      <el-table-column prop="ready_bars" label="指标就绪" width="90" />
+                      <el-table-column prop="eligible_bars" label="Gate 通过" width="90" />
+                      <el-table-column label="通过率" width="90">
+                        <template #default="scope">{{ formatEligibilityRate(scope.row.eligible_bars, scope.row.bars) }}</template>
+                      </el-table-column>
+                      <el-table-column label="主要 Gate" min-width="180">
+                        <template #default="scope">{{ formatGateCounts(scope.row.gate_counts) }}</template>
+                      </el-table-column>
+                    </el-table>
+                  </template>
+                </el-table-column>
                 <el-table-column prop="session_date" label="交易日" width="120" />
                 <el-table-column prop="bars" label="bar" width="80" />
+                <el-table-column label="首次就绪（市场）" width="135">
+                  <template #default="{ row }">{{ formatMarketClock(row.first_ready_at) }}</template>
+                </el-table-column>
+                <el-table-column label="就绪 / 预热损失" width="125">
+                  <template #default="{ row }">{{ row.ready_bars }} / {{ row.warmup_lost_bars }}</template>
+                </el-table-column>
                 <el-table-column label="覆盖率" width="100">
                   <template #default="{ row }">{{ formatPercent(row.coverage_ratio) }}</template>
                 </el-table-column>
@@ -510,6 +539,144 @@
                 <el-table-column prop="incomplete_feature_bars" label="特征缺失" width="90" />
                 <el-table-column prop="trades" label="交易" width="80" />
                 <el-table-column prop="net_pnl" label="净收益" min-width="100" />
+              </el-table>
+            </section>
+
+            <section
+              v-if="shadowWarmupDiagnostic"
+              class="shadow-section"
+              data-testid="shadow-warmup-diagnostic"
+            >
+              <div class="shadow-section-header">
+                <div>
+                  <h3>预热与分时可用性</h3>
+                  <small>
+                    {{ shadowWarmupDiagnostic.algorithm_version }} ·
+                    {{ shortVersion(shadowAdxChallengers?.source_config_version || '') }}
+                  </small>
+                </div>
+                <div class="shadow-tags">
+                  <el-tag effect="plain">只读影子</el-tag>
+                  <el-tag :type="shadowWarmupStatusMeta.type" data-testid="shadow-warmup-status">
+                    {{ shadowWarmupStatusMeta.label }}
+                  </el-tag>
+                </div>
+              </div>
+              <div class="shadow-evidence-summary">
+                <span>
+                  因果配对 {{ shadowWarmupDiagnostic.evaluated_causal_pairs }} /
+                  {{ shadowWarmupDiagnostic.minimum_causal_pairs }}
+                </span>
+                <span>观测配对 {{ shadowWarmupDiagnostic.observed_causal_pairs }}</span>
+                <span>同样本 {{ shadowWarmupDiagnostic.same_sample ? '是' : '否' }}</span>
+                <span>仅历史上下文 {{ shadowWarmupDiagnostic.causal_history_only ? '是' : '否' }}</span>
+              </div>
+              <el-alert
+                title="仅预热 ADX / 波动率"
+                description="VWAP 与 z-score 仍按交易日重置；结果不可晋级、不会写入状态或提交订单。"
+                type="info"
+                :closable="false"
+                show-icon
+                class="shadow-evidence-alert"
+                data-testid="shadow-warmup-readonly"
+              />
+              <el-alert
+                v-if="shadowWarmupDiagnostic.status === 'INSUFFICIENT_EVIDENCE'"
+                title="因果配对交易日不足"
+                :description="`当前可评估 ${shadowWarmupDiagnostic.evaluated_causal_pairs} 对，至少需要 ${shadowWarmupDiagnostic.minimum_causal_pairs} 对。`"
+                type="warning"
+                :closable="false"
+                show-icon
+                class="shadow-evidence-alert"
+                data-testid="shadow-warmup-insufficient"
+              />
+              <el-alert
+                v-if="shadowWarmupDiagnostic.status === 'BLOCKED'"
+                title="因果预热诊断已阻塞"
+                :description="shadowWarmupBlockerSummary || '诊断校验未通过，暂不可复核。'"
+                type="error"
+                :closable="false"
+                show-icon
+                class="shadow-evidence-alert"
+                data-testid="shadow-warmup-blocked"
+              />
+              <el-table
+                :data="shadowWarmupVariantRows"
+                size="small"
+                empty-text="暂无预热对照"
+                data-testid="shadow-warmup-variants"
+              >
+                <el-table-column type="expand" width="44">
+                  <template #default="{ row }">
+                    <el-table :data="row.daily" size="small" empty-text="暂无配对交易日">
+                      <el-table-column prop="session_date" label="目标日" width="110" />
+                      <el-table-column label="种子日" width="110">
+                        <template #default="scope">{{ scope.row.seed_session_date || '-' }}</template>
+                      </el-table-column>
+                      <el-table-column label="上下文截止（市场）" width="145">
+                        <template #default="scope">{{ formatMarketDateTime(scope.row.trend_context_cutoff_at) }}</template>
+                      </el-table-column>
+                      <el-table-column label="隔夜跳空" width="100">
+                        <template #default="scope">{{ formatNullablePercent(scope.row.overnight_gap_pct) }}</template>
+                      </el-table-column>
+                      <el-table-column label="首次就绪（市场）" width="135">
+                        <template #default="scope">{{ formatMarketClock(scope.row.first_ready_at) }}</template>
+                      </el-table-column>
+                      <el-table-column label="就绪 / 预热损失" width="125">
+                        <template #default="scope">{{ scope.row.ready_bars }} / {{ scope.row.warmup_lost_bars }}</template>
+                      </el-table-column>
+                      <el-table-column prop="eligible_bars" label="Gate 通过" width="95" />
+                    </el-table>
+                  </template>
+                </el-table-column>
+                <el-table-column label="方案" min-width="170">
+                  <template #default="{ row }">
+                    <el-tag :type="row.label === 'SESSION_LOCAL' ? 'info' : 'primary'" effect="plain">
+                      {{ shadowWarmupVariantLabel(row.label) }}
+                    </el-tag>
+                  </template>
+                </el-table-column>
+                <el-table-column label="预热范围" width="125">
+                  <template #default="{ row }">{{ row.warmup_scope === 'ADX_VOL_ONLY' ? 'ADX / 波动率' : '无' }}</template>
+                </el-table-column>
+                <el-table-column prop="bars" label="bar" width="80" />
+                <el-table-column prop="readyBars" label="指标就绪" width="95" />
+                <el-table-column prop="warmupLostBars" label="预热损失" width="95" />
+                <el-table-column prop="eligibleBars" label="Gate 通过" width="95" />
+                <el-table-column label="恢复就绪" width="95">
+                  <template #default="{ row }">{{ formatSignedCount(row.recoveredReadyBars) }}</template>
+                </el-table-column>
+                <el-table-column label="Gate 增量" width="95">
+                  <template #default="{ row }">{{ formatSignedCount(row.eligibleDelta) }}</template>
+                </el-table-column>
+              </el-table>
+
+              <h4 class="shadow-subsection-title">市场分时对照</h4>
+              <el-table
+                :data="shadowWarmupHourlyRows"
+                size="small"
+                empty-text="暂无分时对照"
+                data-testid="shadow-warmup-hourly"
+              >
+                <el-table-column prop="sessionLabel" label="市场时段" width="130" />
+                <el-table-column label="bar 基线 / 预热" width="125">
+                  <template #default="{ row }">{{ row.baselineBars }} / {{ row.prewarmBars }}</template>
+                </el-table-column>
+                <el-table-column label="就绪 基线 / 预热" width="135">
+                  <template #default="{ row }">{{ row.baselineReady }} / {{ row.prewarmReady }}</template>
+                </el-table-column>
+                <el-table-column label="Gate 基线 / 预热" width="135">
+                  <template #default="{ row }">{{ row.baselineEligible }} / {{ row.prewarmEligible }}</template>
+                </el-table-column>
+                <el-table-column label="恢复就绪" width="95">
+                  <template #default="{ row }">{{ formatSignedCount(row.readyDelta) }}</template>
+                </el-table-column>
+                <el-table-column label="Gate 增量" width="95">
+                  <template #default="{ row }">{{ formatSignedCount(row.eligibleDelta) }}</template>
+                </el-table-column>
+                <el-table-column label="预热方案主要 Gate" min-width="190">
+                  <template #default="{ row }">{{ formatGateCounts(row.prewarmGateCounts) }}</template>
+                </el-table-column>
               </el-table>
             </section>
 
@@ -711,6 +878,7 @@ import type {
   StrategyShadowAdxChallengerResponse,
   StrategyShadowConfig, StrategyShadowConfigUpdate, StrategyShadowDecision,
   StrategyShadowEvaluation, StrategyShadowStatus, StrategyShadowVersion,
+  StrategyShadowWarmupVariant,
 } from '../types'
 import { resolveErrorMessage } from '../utils/error'
 import { downloadCsv } from '../utils/csv'
@@ -1305,6 +1473,130 @@ const shadowAdxBlockerSummary = computed(() => (
     .join('；') ?? ''
 ))
 
+const shadowWarmupDiagnostic = computed(() => (
+  shadowAdxChallengers.value?.warmup_diagnostic ?? null
+))
+
+const shadowWarmupStatusMeta = computed<{
+  label: string
+  type: 'success' | 'warning' | 'danger'
+}>(() => {
+  if (shadowWarmupDiagnostic.value?.status === 'READY_FOR_REVIEW') {
+    return { label: '可复核', type: 'success' }
+  }
+  if (shadowWarmupDiagnostic.value?.status === 'BLOCKED') {
+    return { label: '已阻塞', type: 'danger' }
+  }
+  return { label: '证据不足', type: 'warning' }
+})
+
+const shadowWarmupBlockerLabels: Record<string, string> = {
+  MIN_CAUSAL_PAIRS: '因果配对完整交易日不足',
+  BASELINE_REPLAY_MISMATCH: '基线回放与持久化证据不一致',
+  ALGORITHM_VERSION_UNSUPPORTED: '算法版本不支持因果预热诊断',
+  CONFIG_SNAPSHOT_INVALID: '源配置快照不完整',
+  CONFIG_SNAPSHOT_VERSION_MISMATCH: '源配置快照版本校验失败',
+  SESSION_LOCAL_FEATURE_DRIFT: '日内 VWAP / z-score 与基线发生偏移',
+  PREWARM_REPLAY_FAILED: '因果预热回放校验失败',
+}
+
+const shadowWarmupBlockerSummary = computed(() => (
+  shadowWarmupDiagnostic.value?.blockers
+    .map((item) => shadowWarmupBlockerLabels[item] ?? item)
+    .join('；') ?? ''
+))
+
+function sumWarmupDaily(
+  variant: StrategyShadowWarmupVariant,
+  field: 'bars' | 'ready_bars' | 'warmup_lost_bars' | 'eligible_bars',
+): number {
+  return variant.daily.reduce((total, item) => total + item[field], 0)
+}
+
+const shadowWarmupVariantRows = computed(() => {
+  const variants = shadowWarmupDiagnostic.value?.variants ?? []
+  const baseline = variants.find((item) => item.label === 'SESSION_LOCAL')
+  const baselineReady = baseline ? sumWarmupDaily(baseline, 'ready_bars') : 0
+  const baselineEligible = baseline ? sumWarmupDaily(baseline, 'eligible_bars') : 0
+  return variants.map((item) => {
+    const readyBars = sumWarmupDaily(item, 'ready_bars')
+    const eligibleBars = sumWarmupDaily(item, 'eligible_bars')
+    return {
+      ...item,
+      bars: sumWarmupDaily(item, 'bars'),
+      readyBars,
+      warmupLostBars: sumWarmupDaily(item, 'warmup_lost_bars'),
+      eligibleBars,
+      recoveredReadyBars: item.label === 'SESSION_LOCAL' ? 0 : readyBars - baselineReady,
+      eligibleDelta: item.label === 'SESSION_LOCAL' ? 0 : eligibleBars - baselineEligible,
+    }
+  })
+})
+
+interface ShadowWarmupHourlyAggregate {
+  bars: number
+  readyBars: number
+  eligibleBars: number
+  gateCounts: Record<string, number>
+}
+
+function aggregateWarmupHourly(
+  variant: StrategyShadowWarmupVariant | undefined,
+): Map<number, ShadowWarmupHourlyAggregate> {
+  const result = new Map<number, ShadowWarmupHourlyAggregate>()
+  for (const daily of variant?.daily ?? []) {
+    for (const item of daily.hourly_eligibility) {
+      const current = result.get(item.session_hour) ?? {
+        bars: 0,
+        readyBars: 0,
+        eligibleBars: 0,
+        gateCounts: {},
+      }
+      current.bars += item.bars
+      current.readyBars += item.ready_bars
+      current.eligibleBars += item.eligible_bars
+      for (const [gate, count] of Object.entries(item.gate_counts)) {
+        current.gateCounts[gate] = (current.gateCounts[gate] ?? 0) + count
+      }
+      result.set(item.session_hour, current)
+    }
+  }
+  return result
+}
+
+const shadowWarmupHourlyRows = computed(() => {
+  const variants = shadowWarmupDiagnostic.value?.variants ?? []
+  const baseline = aggregateWarmupHourly(
+    variants.find((item) => item.label === 'SESSION_LOCAL'),
+  )
+  const prewarm = aggregateWarmupHourly(
+    variants.find((item) => item.label === 'CAUSAL_TREND_PREWARM'),
+  )
+  const hours = [...new Set([...baseline.keys(), ...prewarm.keys()])]
+    .sort((left, right) => left - right)
+  return hours.map((sessionHour) => {
+    const baselineItem = baseline.get(sessionHour)
+    const prewarmItem = prewarm.get(sessionHour)
+    const baselineReady = baselineItem?.readyBars ?? 0
+    const prewarmReady = prewarmItem?.readyBars ?? 0
+    const baselineEligible = baselineItem?.eligibleBars ?? 0
+    const prewarmEligible = prewarmItem?.eligibleBars ?? 0
+    return {
+      sessionHour,
+      sessionLabel: formatShadowSessionHour(sessionHour),
+      baselineBars: baselineItem?.bars ?? 0,
+      prewarmBars: prewarmItem?.bars ?? 0,
+      baselineReady,
+      prewarmReady,
+      baselineEligible,
+      prewarmEligible,
+      readyDelta: prewarmReady - baselineReady,
+      eligibleDelta: prewarmEligible - baselineEligible,
+      prewarmGateCounts: prewarmItem?.gateCounts ?? {},
+    }
+  })
+})
+
 async function pollStrategyShadow() {
   const symbol = shadowConfig.value?.symbol
   if (!symbol || !selectedShadowVersion.value) return
@@ -1339,6 +1631,71 @@ function formatNullable(value: number | null, precision = 2): string {
 
 function formatPercent(value: number): string {
   return Number.isFinite(value) ? `${(value * 100).toFixed(2)}%` : '-'
+}
+
+function formatNullablePercent(value: number | null): string {
+  return value == null ? '-' : formatPercent(value)
+}
+
+function shadowMarketTimeZone(): string {
+  const symbol = selectedShadowSymbol.value || shadowConfig.value?.symbol || ''
+  return symbol.endsWith('.HK') ? 'Asia/Hong_Kong' : 'America/New_York'
+}
+
+function formatMarketClock(value: string | null): string {
+  if (!value) return '尚未就绪'
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) return '-'
+  return new Intl.DateTimeFormat('zh-CN', {
+    timeZone: shadowMarketTimeZone(),
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).format(parsed)
+}
+
+function formatMarketDateTime(value: string | null): string {
+  if (!value) return '-'
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) return '-'
+  return new Intl.DateTimeFormat('zh-CN', {
+    timeZone: shadowMarketTimeZone(),
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).format(parsed)
+}
+
+function formatShadowSessionHour(sessionHour: number): string {
+  if (!Number.isInteger(sessionHour) || sessionHour < 0 || sessionHour > 23) return '-'
+  const hour = String(sessionHour).padStart(2, '0')
+  return `${hour}:00-${hour}:59`
+}
+
+function formatEligibilityRate(eligibleBars: number, bars: number): string {
+  return bars > 0 ? `${((eligibleBars / bars) * 100).toFixed(1)}%` : '-'
+}
+
+function formatSignedCount(value: number): string {
+  if (!Number.isFinite(value)) return '-'
+  return value > 0 ? `+${value}` : `${value}`
+}
+
+function formatGateCounts(counts: Record<string, number>): string {
+  const values = Object.entries(counts)
+    .filter(([, count]) => count > 0)
+    .sort(([leftGate, leftCount], [rightGate, rightCount]) => (
+      rightCount - leftCount || leftGate.localeCompare(rightGate)
+    ))
+    .slice(0, 3)
+    .map(([gate, count]) => `${gate} ${count}`)
+  return values.join('；') || '-'
+}
+
+function shadowWarmupVariantLabel(label: StrategyShadowWarmupVariant['label']): string {
+  return label === 'SESSION_LOCAL' ? '日内冷启动' : '因果趋势预热'
 }
 
 function formatExitReasons(reasons: Record<string, number>): string {
@@ -1620,6 +1977,12 @@ onBeforeUnmount(() => {
 
 .shadow-evidence-alert {
   margin-bottom: 10px;
+}
+
+.shadow-subsection-title {
+  margin: 18px 0 10px;
+  font-size: 14px;
+  font-weight: 600;
 }
 
 .shadow-metrics-grid :deep(.el-statistic) {

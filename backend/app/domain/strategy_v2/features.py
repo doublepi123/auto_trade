@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from statistics import stdev
 from typing import Iterable, Sequence
@@ -524,3 +524,164 @@ class SessionFeatureEngine:
         if realized_vol is None:
             reasons.append("REALIZED_VOL_1M_WARMUP")
         return reasons
+
+
+class CausalTrendPrewarmFeatureEngine(SessionFeatureEngine):
+    """Keep session-local residual features while causally prewarming trend state.
+
+    ``seed_bars`` must contain exactly one complete earlier RTH session.  The
+    seed primes only completed five-minute ADX and valid consecutive one-minute
+    returns.  It never enters the base reducer, so VWAP and residual z-scores
+    still begin empty when the first target-session bar arrives.
+    """
+
+    def __init__(
+        self,
+        config: StrategyV2FeatureConfig,
+        seed_bars: Sequence[StrategyBar],
+    ) -> None:
+        super().__init__(config)
+        self._seed_bars = self._validated_seed(seed_bars)
+        self._trend_bars_5m: list[StrategyBar] = []
+        self._trend_returns_1m: list[float] = []
+        self._trend_five_minute_group: list[StrategyBar] = []
+        self._trend_last_bar_1m: StrategyBar | None = None
+        self._trend_symbol = self._seed_bars[0].symbol.strip().upper()
+        self._seed_last_at = self._seed_bars[-1].timestamp
+        self._restore_seed_state()
+
+    def reset(self) -> None:
+        """Reset target-session state and deterministically restore the seed."""
+        super().reset()
+        self._restore_seed_state()
+
+    def on_bar(
+        self,
+        bar: StrategyBar,
+        *,
+        observed_at: datetime | None = None,
+    ) -> StrategyV2FeatureSnapshot | None:
+        symbol = bar.symbol.strip().upper()
+        if symbol != self._trend_symbol:
+            raise ValueError("prewarm seed and target bars must use the same symbol")
+        if not self._bars_1m and bar.timestamp <= self._seed_last_at:
+            raise ValueError("target bars must follow the prewarm seed session")
+
+        previous_snapshot = self._last_snapshot
+        snapshot = super().on_bar(bar, observed_at=observed_at)
+        if snapshot is None or snapshot is previous_snapshot:
+            return snapshot
+
+        self._record_trend_bar(bar)
+        adx_5m = wilder_adx(
+            self._trend_bars_5m,
+            period=self.config.adx_period,
+        )
+        realized_vol = self._trend_realized_vol()
+        reasons = [
+            reason
+            for reason in snapshot.gate_reasons
+            if reason not in {"ADX_5M_WARMUP", "REALIZED_VOL_1M_WARMUP"}
+        ]
+        if adx_5m is None:
+            reasons.append("ADX_5M_WARMUP")
+        if realized_vol is None:
+            reasons.append("REALIZED_VOL_1M_WARMUP")
+        result = replace(
+            snapshot,
+            adx_5m=adx_5m,
+            realized_vol_1m=realized_vol,
+            ready=not reasons,
+            gate_reasons=tuple(reasons),
+        )
+        self._last_snapshot = result
+        return result
+
+    def _validated_seed(
+        self,
+        seed_bars: Sequence[StrategyBar],
+    ) -> tuple[StrategyBar, ...]:
+        ordered = tuple(sorted(seed_bars, key=lambda item: item.timestamp))
+        if not ordered:
+            raise ValueError("prewarm seed must contain one complete RTH session")
+        if any(item.duration_minutes != 1 for item in ordered):
+            raise ValueError("prewarm seed accepts one-minute bars only")
+        symbols = {item.symbol.strip().upper() for item in ordered}
+        if "" in symbols or len(symbols) != 1:
+            raise ValueError("prewarm seed requires exactly one non-empty symbol")
+        if any(item.volume <= 0 for item in ordered):
+            raise ValueError("prewarm seed requires positive volume")
+
+        session = get_session(self.config.market)
+        session_days = {session.trade_day(item.timestamp) for item in ordered}
+        if len(session_days) != 1:
+            raise ValueError("prewarm seed must contain exactly one session")
+        session_day = next(iter(session_days))
+        local_midnight = datetime.combine(
+            session_day,
+            datetime.min.time(),
+            tzinfo=session.timezone,
+        )
+        expected = [
+            (local_midnight + timedelta(minutes=offset)).astimezone(timezone.utc)
+            for offset in range(24 * 60)
+            if session.is_rth(local_midnight + timedelta(minutes=offset))
+        ]
+        actual = [item.timestamp for item in ordered]
+        if not expected or actual != expected:
+            raise ValueError("prewarm seed must contain one complete RTH session")
+        return ordered
+
+    def _restore_seed_state(self) -> None:
+        self._trend_bars_5m = []
+        self._trend_returns_1m = []
+        self._trend_five_minute_group = []
+        self._trend_last_bar_1m = None
+        for bar in self._seed_bars:
+            self._record_trend_bar(bar)
+
+    def _record_trend_bar(self, bar: StrategyBar) -> None:
+        previous = self._trend_last_bar_1m
+        if previous is not None:
+            if bar.timestamp <= previous.timestamp:
+                raise ValueError("trend prewarm bars must be strictly ordered")
+            if bar.timestamp - previous.timestamp == timedelta(minutes=1):
+                self._trend_returns_1m.append(math.log(bar.close / previous.close))
+        self._trend_last_bar_1m = bar
+
+        completed = self._accept_trend_five_minute_component(bar)
+        if completed is not None:
+            self._trend_bars_5m.append(completed)
+
+    def _accept_trend_five_minute_component(
+        self,
+        bar: StrategyBar,
+    ) -> StrategyBar | None:
+        bucket = _bucket_start(bar, self.config.market)
+        if self._trend_five_minute_group:
+            current_bucket = _bucket_start(
+                self._trend_five_minute_group[0],
+                self.config.market,
+            )
+            if current_bucket != bucket:
+                self._trend_five_minute_group = []
+        self._trend_five_minute_group.append(bar)
+        expected = [bucket + timedelta(minutes=index) for index in range(5)]
+        actual = [item.timestamp for item in self._trend_five_minute_group]
+        if actual != expected[: len(actual)]:
+            self._trend_five_minute_group = []
+            return None
+        if len(self._trend_five_minute_group) < 5:
+            return None
+        completed = _aggregate_group(self._trend_five_minute_group, bucket)
+        self._trend_five_minute_group = []
+        return completed
+
+    def _trend_realized_vol(self) -> float | None:
+        window = self.config.realized_vol_window_1m
+        if len(self._trend_returns_1m) < window:
+            return None
+        sample = self._trend_returns_1m[-window:]
+        return stdev(sample) * math.sqrt(
+            int(self.config.realized_vol_periods_per_year or 0)
+        )
