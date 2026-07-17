@@ -3,11 +3,16 @@ from __future__ import annotations
 from datetime import date, datetime, time, timezone
 
 from pytest import approx
+import pytest
 from pytest import LogCaptureFixture
 
 from app import database
 from app.models import OrderRecord, RuntimeStateSnapshot
-from app.services.daily_pnl_service import DailyPnlService
+from app.services.daily_pnl_service import (
+    DailyPnlResult,
+    DailyPnlService,
+    RealizedTrade,
+)
 
 
 database.init_db()
@@ -269,6 +274,145 @@ class TestDailyPnlService:
         ]
         assert reconciled_pnl == approx(expected_daily_pnl)
         assert reconciled_losses == 0
+        db.close()
+
+    def test_same_day_replay_never_reduces_live_consecutive_losses(self) -> None:
+        trade_day = date(2026, 7, 17)
+        result = DailyPnlResult(
+            trade_day=trade_day,
+            realized_pnl=-20.0,
+            consecutive_losses=0,
+            trades=[
+                RealizedTrade(
+                    broker_order_id="ledger-loss",
+                    symbol="AAPL.US",
+                    side="SELL",
+                    quantity=1.0,
+                    price=90.0,
+                    pnl=-20.0,
+                    filled_at=self._dt(trade_day, 11),
+                )
+            ],
+        )
+
+        assert DailyPnlService.reconcile_risk_state(
+            -10.0,
+            3,
+            trade_day,
+            result,
+        ) == (-20.0, 3)
+
+    def test_malformed_authoritative_outcome_is_not_trusted(self) -> None:
+        self._cleanup()
+        trade_day = date(2026, 7, 17)
+        db = self._get_db()
+        db.add(OrderRecord(
+            broker_order_id="malformed-authoritative-sell",
+            symbol="AAPL.US",
+            side="SELL",
+            quantity=10,
+            price=90,
+            executed_quantity=10,
+            executed_price=90,
+            actual_fee=0,
+            status="FILLED",
+            filled_at=self._dt(trade_day, 11),
+            cost_basis_price=100,
+            cost_basis_quantity=10,
+            position_quantity_before=10,
+            gross_pnl=-100,
+            pnl_fee=0,
+            net_pnl=100,
+            pnl_source="TRACKED_ENTRY",
+        ))
+        db.commit()
+
+        result = DailyPnlService(db).calculate(
+            trade_day=trade_day,
+            symbol="AAPL.US",
+        )
+
+        assert result.is_complete is False
+        assert result.realized_pnl == 0.0
+        assert result.trades == []
+        db.close()
+
+    def test_near_zero_authoritative_sign_flip_is_not_trusted(self) -> None:
+        self._cleanup()
+        trade_day = date(2026, 7, 17)
+        db = self._get_db()
+        db.add(OrderRecord(
+            broker_order_id="sign-flipped-authoritative-sell",
+            symbol="AAPL.US",
+            side="SELL",
+            quantity=1,
+            price=100.00000001,
+            executed_quantity=1,
+            executed_price=100.00000001,
+            actual_fee=0,
+            status="FILLED",
+            filled_at=self._dt(trade_day, 11),
+            cost_basis_price=100,
+            cost_basis_quantity=1,
+            position_quantity_before=1,
+            gross_pnl=-0.00000001,
+            pnl_fee=0,
+            net_pnl=-0.00000001,
+            pnl_source="TRACKED_ENTRY",
+        ))
+        db.commit()
+
+        result = DailyPnlService(db).calculate(
+            trade_day=trade_day,
+            symbol="AAPL.US",
+        )
+
+        assert result.is_complete is False
+        assert result.realized_pnl == 0.0
+        assert result.trades == []
+        db.close()
+
+    def test_authoritative_outcome_uses_canonical_formula_after_validation(
+        self,
+    ) -> None:
+        self._cleanup()
+        trade_day = date(2026, 7, 17)
+        db = self._get_db()
+        db.add(OrderRecord(
+            broker_order_id="rounded-authoritative-sell",
+            symbol="AAPL.US",
+            side="SELL",
+            quantity=1000,
+            price=1100,
+            executed_quantity=1000,
+            executed_price=1100,
+            actual_fee=10,
+            status="FILLED",
+            filled_at=self._dt(trade_day, 11),
+            cost_basis_price=100,
+            cost_basis_quantity=1000,
+            position_quantity_before=1000,
+            gross_pnl=1000000.5,
+            pnl_fee=10,
+            net_pnl=999990.5,
+            pnl_source="TRACKED_ENTRY",
+        ))
+        db.commit()
+
+        service = DailyPnlService(db)
+        result = service.calculate(
+            trade_day=trade_day,
+            symbol="AAPL.US",
+        )
+        round_trips = service.pair_round_trips(
+            symbol="AAPL.US",
+            include_excursions=False,
+        )
+
+        assert result.is_complete is True
+        assert result.realized_pnl == pytest.approx(999990.0)
+        assert round_trips[0].gross_pnl == pytest.approx(1000000.0)
+        assert round_trips[0].net_pnl == pytest.approx(999990.0)
         db.close()
 
     def test_conflicting_tracked_cost_basis_fails_closed_and_consumes_exit(

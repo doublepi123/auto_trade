@@ -299,6 +299,48 @@ def _install_fake_broker(monkeypatch: pytest.MonkeyPatch, broker: _FakeBroker) -
 # ---------------------------------------------------------------------------
 # Scenario 1: startup restores tracked entries and records drift
 # ---------------------------------------------------------------------------
+class TestE2EStalePostFillPauseRecovery:
+    def test_startup_clears_stale_post_fill_pause_after_full_verification(
+        self,
+        fresh_runner,
+        monkeypatch,
+    ) -> None:
+        _seed_strategy(symbol="AAPL.US")
+        stale_reason = "post-fill PnL reconciliation in progress: AAPL.US"
+        db = SessionLocal()
+        try:
+            db.add(
+                RuntimeState(
+                    symbol="AAPL.US",
+                    engine_state="flat",
+                    paused=True,
+                    pause_reason=stale_reason,
+                    pause_auto_resumable=False,
+                )
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        _install_fake_broker(monkeypatch, _FakeBroker())
+        runner = get_runner()
+
+        runner._initialize_runner()
+
+        assert runner.risk.paused is False
+        assert runner.risk.pause_reason == ""
+        db = SessionLocal()
+        try:
+            event = db.query(TradeEvent).filter(
+                TradeEvent.event_type == "RISK_AUTO_RESUMED"
+            ).one()
+            assert json.loads(event.payload_json)["source"] == (
+                "verified_stale_post_fill_reconciliation"
+            )
+        finally:
+            db.close()
+
+
 class TestE2EStartupRestoresTrackedEntries:
     def test_e2e_startup_restores_tracked_entries_and_records_drift(
         self, fresh_runner, monkeypatch
@@ -638,7 +680,9 @@ class TestE2EOfflineFillRecovery:
         assert runner.execution_state()[0] == "IDLE"
         assert runner.engine.state.value == "flat"
         assert runner.risk.paused is True
-        assert runner.risk.pause_reason == "offline protective exit"
+        assert runner.risk.pause_reason.startswith(
+            "PNL_RECONCILIATION_UNCERTAIN:"
+        )
 
         db = SessionLocal()
         try:
@@ -810,8 +854,8 @@ class TestE2EOfflineFillRecovery:
 
         fake_broker.positions = []
         safe, error = runner.verify_operational_resume()
-        assert safe is True
-        assert error == ""
+        assert safe is False
+        assert "realized PnL ledger remains incomplete" in error
         assert runner._trade_svc.tracked_position("AAPL.US") is None
         assert "AAPL.US" not in runner._post_fill_expectations
 

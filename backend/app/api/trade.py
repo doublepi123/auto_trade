@@ -70,6 +70,31 @@ def _pause_for_manual_control(runner: Any, reason: str) -> None:
     runner.risk.pause(reason)
 
 
+def _commit_runner_runtime_state(runner: Any, db: Session) -> None:
+    state_service = getattr(runner, "_state_svc", None)
+    stage = getattr(state_service, "stage", None)
+    if not callable(stage):
+        raise RuntimeError("runner does not support atomic runtime-state staging")
+    stage(db, runner.engine, runner.risk)
+    db.commit()
+
+
+def _restore_runner_runtime_state_best_effort(runner: Any, db: Session) -> None:
+    """Rewrite the restored safe state after an ambiguous callback failure."""
+    try:
+        db.rollback()
+        _commit_runner_runtime_state(runner, db)
+    except Exception:
+        logger.critical(
+            "failed to restore durable runtime safety state after control failure",
+            exc_info=True,
+        )
+        try:
+            db.rollback()
+        except Exception:
+            logger.exception("failed to rollback runtime safety restoration")
+
+
 def _record_control_trace(
     *,
     event_type: str,
@@ -904,15 +929,30 @@ def resume_trading(
         control_scope = _control_scope_snapshot(runner)
         resume_with_gate = getattr(runner, "resume_after_verification", None)
         if callable(resume_with_gate):
-            resume_safe, resume_error = cast(tuple[bool, str], resume_with_gate())
+            def persist_resumed_state() -> None:
+                _commit_runner_runtime_state(runner, db)
+
+            try:
+                resume_safe, resume_error = cast(
+                    tuple[bool, str],
+                    resume_with_gate(on_resumed=persist_resumed_state),
+                )
+            except Exception:
+                _restore_runner_runtime_state_best_effort(runner, db)
+                raise
         else:
             resume_safe, resume_error = runner.verify_operational_resume()
         if not resume_safe:
             raise HTTPException(status_code=409, detail=resume_error)
         if not callable(resume_with_gate):
+            svc = StrategyService(db)
+            svc.update_primary_runtime_state(
+                paused=False,
+                pause_reason="",
+                paused_at=None,
+                pause_auto_resumable=False,
+            )
             runner.risk.resume()
-        svc = StrategyService(db)
-        svc.update_primary_runtime_state(paused=False, pause_reason="", paused_at=None, pause_auto_resumable=False)
         detail = control_scope
         return MessageResponse(message="trading resumed")
     except HTTPException as exc:
@@ -1126,9 +1166,17 @@ def disable_kill_switch(
     try:
         runner = get_runner()
         control_scope = _control_scope_snapshot(runner)
-        runner.risk.disable_kill_switch()
-        svc = StrategyService(db)
-        svc.update_primary_runtime_state(kill_switch=False)
+
+        def persist_disabled_state() -> None:
+            _commit_runner_runtime_state(runner, db)
+
+        try:
+            runner.risk.disable_kill_switch(
+                on_disabled=persist_disabled_state
+            )
+        except Exception:
+            _restore_runner_runtime_state_best_effort(runner, db)
+            raise
         detail = control_scope
         return MessageResponse(message="kill switch disabled — trading remains paused, use Resume to re-enable")
     except HTTPException as exc:

@@ -618,6 +618,125 @@ class TestAPI:
         assert resp.status_code == 200
         assert resp.json()["message"] == "trading resumed"
 
+    def test_resume_persistence_failure_keeps_runtime_paused(
+        self,
+        monkeypatch,
+    ) -> None:
+        from app.runner import AppRunner
+
+        runner = AppRunner()
+        pause_reason = "ORDER_EXECUTION_BLOCKED: operator review"
+        runner.risk.pause(pause_reason)
+        monkeypatch.setattr(
+            runner,
+            "verify_operational_resume",
+            lambda: (True, ""),
+        )
+        monkeypatch.setattr(trade_api, "get_runner", lambda: runner)
+
+        def fail_persistence(*_args: object) -> None:
+            raise RuntimeError("runtime state write failed")
+
+        monkeypatch.setattr(
+            runner._state_svc,
+            "stage",
+            fail_persistence,
+        )
+
+        resp = client.post("/api/control/resume")
+
+        assert resp.status_code == 500
+        assert runner.risk.paused is True
+        assert runner.risk.pause_reason == pause_reason
+        assert runner.risk.check().approved is False
+
+    @pytest.mark.parametrize(
+        ("control", "endpoint"),
+        [
+            ("resume", "/api/control/resume"),
+            ("disable_kill", "/api/control/disable-kill-switch"),
+        ],
+    )
+    def test_control_post_commit_error_restores_durable_safe_state(
+        self,
+        monkeypatch,
+        control: str,
+        endpoint: str,
+    ) -> None:
+        from app.core.engine import StrategyParams
+        from app.runner import AppRunner
+
+        symbol = f"POST-COMMIT-{control.upper()}.US"
+        pause_reason = "ORDER_EXECUTION_BLOCKED: operator review"
+        with SessionLocal() as db:
+            db.query(RuntimeStateSnapshot).filter(
+                RuntimeStateSnapshot.symbol == symbol
+            ).delete(synchronize_session=False)
+            db.query(RuntimeState).filter(
+                RuntimeState.symbol == symbol
+            ).delete(synchronize_session=False)
+            db.commit()
+
+        runner = AppRunner()
+        runner.engine.params = StrategyParams(symbol=symbol, market="US")
+        runner.risk.pause(pause_reason)
+        if control == "resume":
+            monkeypatch.setattr(
+                runner,
+                "verify_operational_resume",
+                lambda: (True, ""),
+            )
+        else:
+            runner.risk.enable_kill_switch("operator emergency stop")
+        monkeypatch.setattr(trade_api, "get_runner", lambda: runner)
+
+        request_db = SessionLocal()
+        real_commit = request_db.commit
+        commit_calls = 0
+
+        def commit_then_report_error() -> None:
+            nonlocal commit_calls
+            real_commit()
+            commit_calls += 1
+            if commit_calls == 1:
+                raise RuntimeError("commit acknowledgement lost")
+
+        monkeypatch.setattr(request_db, "commit", commit_then_report_error)
+
+        def override_db():
+            try:
+                yield request_db
+            finally:
+                request_db.close()
+
+        app.dependency_overrides[trade_api.get_db] = override_db
+        try:
+            resp = client.post(endpoint)
+
+            assert resp.status_code == 500
+            assert commit_calls == 2
+            assert runner.risk.paused is True
+            assert runner.risk.pause_reason == pause_reason
+            assert runner.risk.kill_switch is (control == "disable_kill")
+            assert runner.risk.check().approved is False
+            with SessionLocal() as db:
+                state = db.query(RuntimeState).filter(
+                    RuntimeState.symbol == symbol
+                ).one()
+                assert state.paused is True
+                assert state.pause_reason == pause_reason
+                assert state.kill_switch is (control == "disable_kill")
+        finally:
+            app.dependency_overrides.pop(trade_api.get_db, None)
+            with SessionLocal() as db:
+                db.query(RuntimeStateSnapshot).filter(
+                    RuntimeStateSnapshot.symbol == symbol
+                ).delete(synchronize_session=False)
+                db.query(RuntimeState).filter(
+                    RuntimeState.symbol == symbol
+                ).delete(synchronize_session=False)
+                db.commit()
+
     def test_manual_resume_cannot_bypass_unknown_live_order(self, monkeypatch) -> None:
         from decimal import Decimal
 
@@ -700,7 +819,7 @@ class TestAPI:
         monkeypatch.setattr(
             runner,
             "verify_operational_resume",
-            lambda: (True, ""),
+            lambda **_kwargs: (True, ""),
         )
         monkeypatch.setattr(
             runner,
@@ -778,6 +897,32 @@ class TestAPI:
         resp = client.post("/api/control/disable-kill-switch")
         assert resp.status_code == 200
         assert "kill switch disabled" in resp.json()["message"]
+
+    def test_disable_kill_switch_persistence_failure_keeps_switch_enabled(
+        self,
+        monkeypatch,
+    ) -> None:
+        from app.runner import AppRunner
+
+        runner = AppRunner()
+        runner.risk.pause("operator emergency stop")
+        runner.risk.enable_kill_switch("operator emergency stop")
+        monkeypatch.setattr(trade_api, "get_runner", lambda: runner)
+
+        def fail_persistence(*_args: object) -> None:
+            raise RuntimeError("runtime state write failed")
+
+        monkeypatch.setattr(
+            runner._state_svc,
+            "stage",
+            fail_persistence,
+        )
+
+        resp = client.post("/api/control/disable-kill-switch")
+
+        assert resp.status_code == 500
+        assert runner.risk.kill_switch is True
+        assert runner.risk.check().approved is False
 
     def test_put_credentials(self, monkeypatch) -> None:
         monkeypatch.setattr(

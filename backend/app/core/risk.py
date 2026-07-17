@@ -14,6 +14,7 @@ _OPERATIONAL_PAUSE_PREFIXES = (
     "ORDER_EXECUTION_BLOCKED:",
     "ORDER_PERSISTENCE_UNCERTAIN:",
     "ORDER_STATUS_PERSISTENCE_UNCERTAIN:",
+    "PNL_RECONCILIATION_UNCERTAIN:",
 )
 
 
@@ -58,6 +59,7 @@ class RiskController:
         self._protective_exit_pause_reason: str = ""
         self._kill_switch_reason: str = ""
         self._safety_generation: int = 0
+        self._entry_reconciliation_count: int = 0
         self._lock = threading.RLock()
 
     def set_trade_day_provider(self, provider: TradeDayProvider) -> None:
@@ -74,6 +76,11 @@ class RiskController:
                 if self._pause_reason:
                     reason = f"{reason}: {self._pause_reason}"
                 return RiskResult(approved=False, reason=reason)
+            if self._entry_reconciliation_count > 0:
+                return RiskResult(
+                    approved=False,
+                    reason="post-fill PnL reconciliation is still in progress",
+                )
             # Day rollover is a mutating operation (resets daily_pnl and
             # consecutive_losses) so it is performed explicitly here rather
             # than hidden inside the read-only limit check.
@@ -152,6 +159,71 @@ class RiskController:
             self._paused_at = paused_at or datetime.now(timezone.utc)
             self._pause_auto_resumable = auto_resumable
 
+    def pause_unless_operational(
+        self,
+        reason: str,
+        *,
+        auto_resumable: bool = False,
+        paused_at: datetime | None = None,
+    ) -> tuple[bool, str]:
+        """Atomically latch ``reason`` without replacing an operational pause.
+
+        An existing operational diagnosis and any verified protective-exit
+        authorization remain unchanged. The secondary reconciliation blocker
+        is compatible with reduce-only execution but still prevents full resume.
+        """
+        with self._lock:
+            if self.paused and self._pause_reason.startswith(
+                _OPERATIONAL_PAUSE_PREFIXES
+            ):
+                return False, self._pause_reason
+            self._safety_generation += 1
+            self._protective_exit_pause_reason = ""
+            self.paused = True
+            self._pause_reason = reason
+            self._paused_at = paused_at or datetime.now(timezone.utc)
+            self._pause_auto_resumable = auto_resumable
+            return True, reason
+
+    def begin_entry_reconciliation(
+        self,
+        reason: str,
+        *,
+        preserve_protective_exits: bool = False,
+        auto_resumable: bool = False,
+        paused_at: datetime | None = None,
+    ) -> tuple[int, bool]:
+        """Block entries and optionally own a visible transient pause."""
+        with self._lock:
+            self._entry_reconciliation_count += 1
+            self._safety_generation += 1
+            if not (
+                preserve_protective_exits
+                and self.paused
+                and self._pause_reason.startswith(_OPERATIONAL_PAUSE_PREFIXES)
+                and self._protective_exit_pause_reason == self._pause_reason
+            ):
+                self._protective_exit_pause_reason = ""
+            pause_created = False
+            if (
+                self._entry_reconciliation_count == 1
+                and not self.paused
+                and not self.kill_switch
+            ):
+                self.paused = True
+                self._pause_reason = reason
+                self._paused_at = paused_at or datetime.now(timezone.utc)
+                self._pause_auto_resumable = auto_resumable
+                pause_created = True
+            return self._entry_reconciliation_count, pause_created
+
+    def finish_entry_reconciliation(self) -> int:
+        with self._lock:
+            if self._entry_reconciliation_count > 0:
+                self._entry_reconciliation_count -= 1
+                self._safety_generation += 1
+            return self._entry_reconciliation_count
+
     def resume(self) -> None:
         with self._lock:
             self._safety_generation += 1
@@ -183,9 +255,14 @@ class RiskController:
             if not self.paused:
                 self._protective_exit_pause_reason = ""
                 self._safety_generation += 1
-                return not self.kill_switch and expected_pause_reason == ""
+                return (
+                    not self.kill_switch
+                    and self._entry_reconciliation_count == 0
+                    and expected_pause_reason == ""
+                )
             if (
                 self.kill_switch
+                or self._entry_reconciliation_count > 0
                 or self._pause_reason != expected_pause_reason
             ):
                 self._protective_exit_pause_reason = ""
@@ -240,11 +317,25 @@ class RiskController:
             self.kill_switch = True
             self._kill_switch_reason = reason
 
-    def disable_kill_switch(self) -> None:
+    def disable_kill_switch(
+        self,
+        *,
+        on_disabled: Callable[[], None] | None = None,
+    ) -> None:
         with self._lock:
             self._safety_generation += 1
+            previous_kill_switch = self.kill_switch
+            previous_reason = self._kill_switch_reason
             self.kill_switch = False
             self._kill_switch_reason = ""
+            try:
+                if on_disabled is not None:
+                    on_disabled()
+            except Exception:
+                self._safety_generation += 1
+                self.kill_switch = previous_kill_switch
+                self._kill_switch_reason = previous_reason
+                raise
 
     def permit_protective_exits(
         self,
@@ -329,6 +420,16 @@ class RiskController:
                 and self._pause_reason.startswith(_OPERATIONAL_PAUSE_PREFIXES)
                 and self._protective_exit_pause_reason == self._pause_reason
             )
+
+    @property
+    def entry_reconciliation_count(self) -> int:
+        with self._lock:
+            return self._entry_reconciliation_count
+
+    @property
+    def entry_reconciliation_pending(self) -> bool:
+        with self._lock:
+            return self._entry_reconciliation_count > 0
 
 
 def _current_risk_day() -> date:

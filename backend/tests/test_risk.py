@@ -341,6 +341,136 @@ class TestRiskController:
         assert ctrl.paused is True
         assert ctrl.protective_exit_permitted is False
 
+    def test_pnl_reconciliation_pause_allows_only_verified_protective_exit(self) -> None:
+        ctrl = RiskController()
+        ctrl.pause(
+            "PNL_RECONCILIATION_UNCERTAIN: incomplete current-day ledger",
+            auto_resumable=False,
+        )
+
+        assert ctrl.check().approved is False
+        assert ctrl.protective_exit_permitted is False
+        assert ctrl.permit_protective_exits() is True
+        assert ctrl.protective_exit_permitted is True
+
+        pause_reason, generation = ctrl.pause_verification_snapshot()
+        latched, current_reason = ctrl.pause_unless_operational(pause_reason)
+
+        assert latched is False
+        assert current_reason == pause_reason
+        assert ctrl.pause_verification_snapshot() == (pause_reason, generation)
+        assert ctrl.protective_exit_permitted is True
+
+    def test_new_pnl_hazard_preserves_existing_protective_authorization(
+        self,
+    ) -> None:
+        ctrl = RiskController()
+        existing = "ORDER_SUBMISSION_UNCERTAIN: acknowledgement missing"
+        ctrl.pause(existing)
+        assert ctrl.permit_protective_exits() is True
+        _, generation = ctrl.pause_verification_snapshot()
+
+        latched, current_reason = ctrl.pause_unless_operational(
+            "PNL_RECONCILIATION_UNCERTAIN: incomplete ledger"
+        )
+
+        assert latched is False
+        assert current_reason == existing
+        assert ctrl.pause_reason == existing
+        assert ctrl.protective_exit_permitted is True
+        assert ctrl.pause_verification_snapshot()[1] == generation
+
+    def test_unknown_submission_wins_concurrent_pnl_latch(self) -> None:
+        for _ in range(25):
+            ctrl = RiskController()
+            barrier = threading.Barrier(3)
+            unknown_reason = "ORDER_SUBMISSION_UNCERTAIN: broker outcome unknown"
+            pnl_reason = "PNL_RECONCILIATION_UNCERTAIN: incomplete ledger"
+
+            def latch_pnl() -> None:
+                barrier.wait()
+                ctrl.pause_unless_operational(pnl_reason)
+
+            def latch_unknown_submission() -> None:
+                barrier.wait()
+                ctrl.pause(unknown_reason)
+
+            pnl_thread = threading.Thread(target=latch_pnl)
+            order_thread = threading.Thread(target=latch_unknown_submission)
+            pnl_thread.start()
+            order_thread.start()
+            barrier.wait()
+            pnl_thread.join()
+            order_thread.join()
+
+            assert ctrl.pause_reason == unknown_reason
+            assert ctrl.protective_exit_permitted is False
+
+    def test_existing_pause_wins_concurrent_transient_pause_attempt(self) -> None:
+        for _ in range(25):
+            ctrl = RiskController()
+            barrier = threading.Barrier(3)
+            transient_reason = "post-fill PnL reconciliation in progress: AAPL.US"
+            daily_loss_reason = "daily loss limit reached"
+
+            def latch_transient() -> None:
+                barrier.wait()
+                ctrl.begin_entry_reconciliation(transient_reason)
+
+            def latch_daily_loss() -> None:
+                barrier.wait()
+                ctrl.pause(daily_loss_reason, auto_resumable=False)
+
+            transient_thread = threading.Thread(target=latch_transient)
+            loss_thread = threading.Thread(target=latch_daily_loss)
+            transient_thread.start()
+            loss_thread.start()
+            barrier.wait()
+            transient_thread.join()
+            loss_thread.join()
+
+            assert ctrl.pause_reason == daily_loss_reason
+            assert ctrl.check().approved is False
+            ctrl.finish_entry_reconciliation()
+
+    def test_new_fill_revokes_stale_protective_exit_authorization(self) -> None:
+        ctrl = RiskController()
+        reason = "PNL_RECONCILIATION_UNCERTAIN: incomplete ledger"
+        ctrl.pause(reason)
+        assert ctrl.permit_protective_exits() is True
+
+        count, pause_created = ctrl.begin_entry_reconciliation(
+            "post-fill PnL reconciliation in progress: AAPL.US"
+        )
+
+        assert count == 1
+        assert pause_created is False
+        assert ctrl.pause_reason == reason
+        assert ctrl.protective_exit_permitted is False
+        assert ctrl.check().approved is False
+        ctrl.finish_entry_reconciliation()
+
+    def test_reduction_fill_preserves_verified_protective_exit_authorization(
+        self,
+    ) -> None:
+        ctrl = RiskController()
+        reason = "PNL_RECONCILIATION_UNCERTAIN: incomplete ledger"
+        ctrl.pause(reason)
+        assert ctrl.permit_protective_exits() is True
+
+        count, pause_created = ctrl.begin_entry_reconciliation(
+            "post-fill PnL reconciliation in progress: AAPL.US",
+            preserve_protective_exits=True,
+        )
+
+        assert count == 1
+        assert pause_created is False
+        assert ctrl.pause_reason == reason
+        assert ctrl.protective_exit_permitted is True
+        assert ctrl.check().approved is False
+        ctrl.finish_entry_reconciliation()
+        assert ctrl.protective_exit_permitted is True
+
     def test_verified_resume_is_idempotent_when_already_running(self) -> None:
         ctrl = RiskController()
         reason, generation = ctrl.pause_verification_snapshot()

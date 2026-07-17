@@ -182,9 +182,7 @@ class DailyPnlService:
             return replay_pnl, replay_losses
         if replay_pnl > current_pnl + 1e-9:
             return current_pnl, max(current_consecutive_losses, replay_losses)
-        if not result.trades and replay_losses < current_consecutive_losses:
-            replay_losses = current_consecutive_losses
-        return replay_pnl, replay_losses
+        return replay_pnl, max(current_consecutive_losses, replay_losses)
 
     def calculate(
         self,
@@ -240,7 +238,8 @@ class DailyPnlService:
         for fill in fills:
             position = positions.setdefault(fill.symbol, _LedgerPosition())
             fill_trade_day = resolve_day(fill.filled_at)
-            authoritative = self._is_authoritative_exit(fill)
+            authoritative_outcome = self._authoritative_outcome(fill)
+            authoritative = authoritative_outcome is not None
             replay_cost_basis = (
                 self._fully_covered_replay_cost_basis(position, fill)
                 if authoritative
@@ -283,7 +282,8 @@ class DailyPnlService:
                 continue
             if authoritative:
                 matched_quantity = fill.cost_basis_quantity or fill.quantity
-                pnl = fill.net_pnl
+                assert authoritative_outcome is not None
+                pnl = authoritative_outcome[1]
             else:
                 pnl = replay_pnl
                 if matched_quantity < fill.quantity:
@@ -435,7 +435,8 @@ class DailyPnlService:
     ) -> list[ClosedRoundTrip]:
         from app.core.fees import one_side_fee_rate
 
-        authoritative = DailyPnlService._is_authoritative_exit(exit_fill)
+        authoritative_outcome = DailyPnlService._authoritative_outcome(exit_fill)
+        authoritative = authoritative_outcome is not None
         if authoritative:
             basis_price = exit_fill.cost_basis_price or _ZERO
             position_quantity = exit_fill.position_quantity_before or _ZERO
@@ -499,10 +500,8 @@ class DailyPnlService:
         if authoritative:
             basis_price = exit_fill.cost_basis_price or _ZERO
             pnl_fee = exit_fill.pnl_fee or _ZERO
-            gross_pnl = exit_fill.gross_pnl or _ZERO
-            net_pnl = exit_fill.net_pnl
-            if net_pnl is None:
-                return []
+            assert authoritative_outcome is not None
+            gross_pnl, net_pnl = authoritative_outcome
             holding_seconds = (exit_fill.filled_at - first_entry_at).total_seconds()
             return [ClosedRoundTrip(
                 symbol=exit_fill.symbol,
@@ -834,7 +833,13 @@ class DailyPnlService:
 
     @staticmethod
     def _is_authoritative_exit(fill: _Fill) -> bool:
-        return (
+        return DailyPnlService._authoritative_outcome(fill) is not None
+
+    @staticmethod
+    def _authoritative_outcome(
+        fill: _Fill,
+    ) -> tuple[Decimal, Decimal] | None:
+        structurally_valid = (
             fill.side in {"SELL", "BUY_TO_COVER"}
             and fill.pnl_source in {"TRACKED_ENTRY", "BROKER_POSITION"}
             and fill.cost_basis_price is not None
@@ -846,7 +851,43 @@ class DailyPnlService:
             and fill.gross_pnl is not None
             and fill.net_pnl is not None
             and fill.pnl_fee is not None
+            and fill.pnl_fee >= 0
         )
+        if not structurally_valid:
+            return None
+        assert fill.cost_basis_price is not None
+        assert fill.gross_pnl is not None
+        assert fill.net_pnl is not None
+        assert fill.pnl_fee is not None
+        if fill.side == "SELL":
+            expected_gross = (
+                fill.price - fill.cost_basis_price
+            ) * fill.quantity
+        else:
+            expected_gross = (
+                fill.cost_basis_price - fill.price
+            ) * fill.quantity
+        expected_net = expected_gross - fill.pnl_fee
+        if not (
+            DailyPnlService._same_decimal_sign(fill.gross_pnl, expected_gross)
+            and DailyPnlService._same_decimal_sign(fill.net_pnl, expected_net)
+            and DailyPnlService._decimal_values_close(fill.gross_pnl, expected_gross)
+            and DailyPnlService._decimal_values_close(fill.net_pnl, expected_net)
+        ):
+            return None
+        return expected_gross, expected_net
+
+    @staticmethod
+    def _same_decimal_sign(left: Decimal, right: Decimal) -> bool:
+        return (left > 0) == (right > 0) and (left < 0) == (right < 0)
+
+    @staticmethod
+    def _decimal_values_close(left: Decimal, right: Decimal) -> bool:
+        tolerance = max(
+            _COST_BASIS_ABS_TOLERANCE,
+            max(abs(left), abs(right)) * _COST_BASIS_REL_TOLERANCE,
+        )
+        return abs(left - right) <= tolerance
 
     @staticmethod
     def _fully_covered_replay_cost_basis(

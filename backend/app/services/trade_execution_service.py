@@ -34,6 +34,7 @@ _FAILED_ORDER_STATUSES = {"REJECTED", "CANCELLED"}
 ORDER_EXECUTION_BLOCKED_PREFIX = "ORDER_EXECUTION_BLOCKED:"
 ORDER_PERSISTENCE_UNCERTAIN_PREFIX = "ORDER_PERSISTENCE_UNCERTAIN:"
 ORDER_STATUS_PERSISTENCE_UNCERTAIN_PREFIX = "ORDER_STATUS_PERSISTENCE_UNCERTAIN:"
+PNL_RECONCILIATION_UNCERTAIN_PREFIX = "PNL_RECONCILIATION_UNCERTAIN:"
 _OPERATIONAL_PAUSE_PREFIXES = (
     "ORDER_SUBMISSION_UNCERTAIN:",
     "POSITION_RECONCILIATION_UNCERTAIN:",
@@ -42,6 +43,7 @@ _OPERATIONAL_PAUSE_PREFIXES = (
     ORDER_EXECUTION_BLOCKED_PREFIX,
     ORDER_PERSISTENCE_UNCERTAIN_PREFIX,
     ORDER_STATUS_PERSISTENCE_UNCERTAIN_PREFIX,
+    PNL_RECONCILIATION_UNCERTAIN_PREFIX,
 )
 _SKIPPED_ORDER_STATUS = "SKIPPED"
 _ENTRY_ACTIONS = {"BUY", "SELL_SHORT"}
@@ -163,7 +165,7 @@ class _EntryPositionCheck:
 
 
 _EntryPersistCallback = Callable[[str, Decimal, Decimal], None]
-_FillCallback = Callable[[str], None]
+_FillCallback = Callable[[str, str], None]
 _ReductionFillCallback = Callable[[str, str, Decimal], None]
 _FinalOrderQuoteCheck = Callable[
     ["BrokerGateway", str, str, Decimal],
@@ -1225,7 +1227,7 @@ class TradeExecutionService:
             str(fill_price),
             order_status.broker_order_id,
         )
-        self._mark_fill_processed(symbol)
+        self._mark_fill_processed(symbol, "BUY")
         logger.info("BUY: %s qty=%s price=%s", symbol, fill_qty, fill_price)
         return order_status
 
@@ -1352,7 +1354,7 @@ class TradeExecutionService:
             str(fill_price),
             order_status.broker_order_id,
         )
-        self._mark_fill_processed(symbol)
+        self._mark_fill_processed(symbol, "SELL")
         return order_status
 
     def _execute_sell_short(
@@ -1429,7 +1431,7 @@ class TradeExecutionService:
             str(fill_price),
             order_status.broker_order_id,
         )
-        self._mark_fill_processed(symbol)
+        self._mark_fill_processed(symbol, "SELL_SHORT")
         logger.info("SELL_SHORT: %s qty=%s price=%s", symbol, fill_qty, fill_price)
         return order_status
 
@@ -1556,7 +1558,7 @@ class TradeExecutionService:
             str(fill_price),
             order_status.broker_order_id,
         )
-        self._mark_fill_processed(symbol)
+        self._mark_fill_processed(symbol, "BUY_TO_COVER")
         return order_status
 
     def _submit_limit_order(
@@ -2587,7 +2589,7 @@ class TradeExecutionService:
                 str(fill_price),
                 pending.broker_order_id,
             )
-            self._mark_fill_processed(pending.symbol)
+            self._mark_fill_processed(pending.symbol, pending.action)
             self._notify_reduction_fill(pending.symbol, pending.action, fill_qty)
             return
         if pending.action == "BUY_TO_COVER":
@@ -2634,7 +2636,7 @@ class TradeExecutionService:
                 str(fill_price),
                 pending.broker_order_id,
             )
-            self._mark_fill_processed(pending.symbol)
+            self._mark_fill_processed(pending.symbol, pending.action)
             self._notify_reduction_fill(pending.symbol, pending.action, fill_qty)
             return
         if pending.action in {"BUY", "SELL_SHORT"}:
@@ -2647,7 +2649,7 @@ class TradeExecutionService:
                 notify_risk_event=notify_risk_event,
             )
         self._safe_notify_order(notifier, pending.action, pending.symbol, str(fill_qty), str(fill_price), pending.broker_order_id)
-        self._mark_fill_processed(pending.symbol)
+        self._mark_fill_processed(pending.symbol, pending.action)
         logger.info("%s filled: %s qty=%s price=%s", pending.action, pending.symbol, fill_qty, fill_price)
 
     def _persist_authoritative_exit_outcome(
@@ -2860,11 +2862,11 @@ class TradeExecutionService:
         except Exception:
             logger.exception("failed to finalize reduction fill for %s %s", action, symbol)
 
-    def _mark_fill_processed(self, symbol: str) -> None:
+    def _mark_fill_processed(self, symbol: str, action: str) -> None:
         if self._on_fill is None:
             return
         try:
-            self._on_fill(symbol)
+            self._on_fill(symbol, action)
         except Exception:
             logger.exception("failed to run fill callback")
 

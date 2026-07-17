@@ -387,7 +387,7 @@ class TestTradeExecutionServiceBasics:
 
         svc._record_order = record_order
         svc._update_order_status = update_order_status
-        svc._on_fill = filled_symbols.append
+        svc._on_fill = lambda symbol, _action: filled_symbols.append(symbol)
         svc._record_entry_price("AAPL.US", Decimal("100"), Decimal("5"))
         risk = RiskController()
 
@@ -1133,7 +1133,7 @@ class TestTradeExecutionServiceBasics:
         guard_acquired = threading.Event()
         errors: list[BaseException] = []
 
-        def on_fill(_symbol: str) -> None:
+        def on_fill(_symbol: str, _action: str) -> None:
             fill_callback_started.set()
             if not release_fill_callback.wait(2):
                 raise TimeoutError("pending fill callback was not released")
@@ -2720,7 +2720,7 @@ class TestTradeExecutionServiceBasics:
             record_order=lambda *args: None,
             update_order_status=lambda *args: None,
             record_risk_event=lambda *args: None,
-            on_fill=fills.append,
+            on_fill=lambda symbol, _action: fills.append(symbol),
             on_reduction_fill=lambda symbol, action, quantity: reductions.append(
                 (symbol, action, quantity)
             ),
@@ -2760,7 +2760,7 @@ class TestTradeExecutionServiceBasics:
         callback_symbols: list[str] = []
         errors: list[BaseException] = []
 
-        def block_on_fill(symbol: str) -> None:
+        def block_on_fill(symbol: str, _action: str) -> None:
             callback_symbols.append(symbol)
             callback_started.set()
             if not release_callback.wait(2):
@@ -2880,7 +2880,7 @@ class TestTradeExecutionServiceBasics:
             persist_entry=lambda symbol, quantity, cost: tracked_writes.append(
                 (symbol, quantity, cost)
             ),
-            on_fill=fill_callbacks.append,
+            on_fill=lambda symbol, _action: fill_callbacks.append(symbol),
         )
         svc.load_tracked_entries({
             "AAPL.US": (
@@ -3008,7 +3008,7 @@ class TestTradeExecutionServiceBasics:
             update_order_status=lambda *args: None,
             record_risk_event=lambda *args: None,
             persist_entry=persist_entry,
-            on_fill=fill_callbacks.append,
+            on_fill=lambda symbol, _action: fill_callbacks.append(symbol),
         )
         pending = _PendingOrder(
             broker=MagicMock(),
@@ -3206,7 +3206,9 @@ class TestTradeExecutionServiceBasics:
             ),
         )
         risk = RiskController()
-        risk.pause(f"{trade_svc_module.ORDER_EXECUTION_BLOCKED_PREFIX} verified")
+        risk.pause(
+            f"{trade_svc_module.PNL_RECONCILIATION_UNCERTAIN_PREFIX} verified"
+        )
         assert risk.permit_protective_exits() is True
 
         broker = Broker()
@@ -3226,9 +3228,43 @@ class TestTradeExecutionServiceBasics:
         assert status.status == "FILLED"
         assert broker.submitted_quantity == Decimal("10")
 
+    def test_unarmed_pnl_pause_blocks_position_reducing_order(self) -> None:
+        class Broker:
+            @staticmethod
+            def get_positions() -> list[object]:
+                raise AssertionError("unarmed PnL pause must fail before broker lookup")
+
+        svc = TradeExecutionService(
+            record_order=lambda *args: None,
+            update_order_status=lambda *args: None,
+            record_risk_event=lambda *args: None,
+        )
+        risk = RiskController()
+        risk.pause(
+            f"{trade_svc_module.PNL_RECONCILIATION_UNCERTAIN_PREFIX} unverified"
+        )
+
+        status = svc.execute(
+            "SELL",
+            "NVDA.US",
+            Quote("NVDA.US", 215, 214.9, 215.1, ""),
+            Broker(),
+            risk,
+            ServerChanNotifier(""),
+            "USD",
+            allow_loss_exit=True,
+            reduce_only=True,
+        )
+
+        assert status is not None
+        assert status.status == "SKIPPED"
+        assert status.reason.startswith("trading is paused:")
+
     def test_revoked_protective_permission_blocks_final_submission(self) -> None:
         risk = RiskController()
-        risk.pause(f"{trade_svc_module.ORDER_EXECUTION_BLOCKED_PREFIX} verified")
+        risk.pause(
+            f"{trade_svc_module.PNL_RECONCILIATION_UNCERTAIN_PREFIX} verified"
+        )
         assert risk.permit_protective_exits() is True
 
         class Broker:

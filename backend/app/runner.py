@@ -76,6 +76,10 @@ _ORDER_SUBMISSION_UNCERTAIN_PREFIX = "ORDER_SUBMISSION_UNCERTAIN:"
 _POSITION_RECONCILIATION_UNCERTAIN_PREFIX = "POSITION_RECONCILIATION_UNCERTAIN:"
 _REDUCTION_SETTLEMENT_UNCERTAIN_PREFIX = "REDUCTION_SETTLEMENT_UNCERTAIN:"
 _ORDER_RECONCILIATION_UNCERTAIN_PREFIX = "ORDER_RECONCILIATION_UNCERTAIN:"
+_PNL_RECONCILIATION_UNCERTAIN_PREFIX = "PNL_RECONCILIATION_UNCERTAIN:"
+_POST_FILL_PNL_RECONCILIATION_PREFIX = (
+    "post-fill PnL reconciliation in progress:"
+)
 _ORDER_SNAPSHOT_FETCH_ISSUE = (
     "broker today-order snapshot could not be represented or fetched"
 )
@@ -105,6 +109,7 @@ _OPERATIONAL_PAUSE_PREFIXES = (
     ORDER_EXECUTION_BLOCKED_PREFIX,
     ORDER_PERSISTENCE_UNCERTAIN_PREFIX,
     ORDER_STATUS_PERSISTENCE_UNCERTAIN_PREFIX,
+    _PNL_RECONCILIATION_UNCERTAIN_PREFIX,
 )
 
 
@@ -244,6 +249,8 @@ class AppRunner:
         self._recent_quotes: Deque[dict[str, Any]] = deque(maxlen=self._recent_quotes_cap)
         self._last_action_message = ""
         self._last_guarded_ledger_replay: tuple[object, ...] | None = None
+        self._defer_incomplete_pnl_latch = False
+        self._post_fill_pnl_pause_reason = ""
         self._tracked_avg_drift_warning_keys: dict[str, tuple[object, ...]] = {}
         self._last_llm_action_at: dict[tuple[str, str], float] = {}
         self._llm_order_execution_enabled = False
@@ -258,7 +265,7 @@ class AppRunner:
         self._unknown_submission_proof_at = 0.0
         self._broker_identity_fingerprint = ""
 
-    def _mark_fill_processed(self, symbol: str) -> None:
+    def _mark_fill_processed(self, symbol: str, action: str = "") -> None:
         tracked = self._trade_svc.tracked_position(symbol)
         expectation = _PostFillExpectation(
             side=tracked.side if tracked is not None else "",
@@ -267,18 +274,35 @@ class AppRunner:
             cost=tracked.cost if tracked is not None else Decimal("0"),
             opened_at=tracked.opened_at if tracked is not None else None,
         )
-        with self._state_lock:
-            fill_symbol = symbol or self.engine.params.symbol
-            if fill_symbol:
-                self._last_fill_at[fill_symbol] = expectation.recorded_at
-                self._post_fill_expectations[fill_symbol] = expectation
+        with self._trade_svc.submission_guard():
+            with self._state_lock:
+                fill_symbol = symbol or self.engine.params.symbol
+                if fill_symbol:
+                    self._last_fill_at[fill_symbol] = expectation.recorded_at
+                    self._post_fill_expectations[fill_symbol] = expectation
+            pause_reason = (
+                f"{_POST_FILL_PNL_RECONCILIATION_PREFIX} "
+                f"{fill_symbol or 'unknown symbol'}"
+            )
+            _, pause_created = self.risk.begin_entry_reconciliation(
+                pause_reason,
+                preserve_protective_exits=action in _POSITION_REDUCING_ACTIONS,
+                auto_resumable=False,
+            )
+            if pause_created:
+                with self._state_lock:
+                    self._post_fill_pnl_pause_reason = pause_reason
+                self._broadcast_status()
         # Persist immediately on fill so a crash before the 5s snapshot loop
         # does not lose the new engine state, tracked entry, or risk counters.
         # We do this in a best-effort fire-and-forget path because the
         # caller (trade_execution_service._finalize_pending_fill) is already
         # running under tight latency constraints.
         def _persist_async() -> None:
+            reconciliation_complete = False
+            reconciliation_trade_day: object = datetime.now(timezone.utc).date()
             try:
+                reconciliation_trade_day = self._market_trade_day()
                 with self._db_session() as db:
                     pnl_service = DailyPnlService(db)
                     pnl_service.refresh_execution_outcomes(symbol=fill_symbol or None)
@@ -293,29 +317,99 @@ class AppRunner:
                             "post-fill PnL replay is incomplete for %s; live risk state preserved",
                             fill_symbol,
                         )
-                        return
-                    with self._state_lock:
-                        net_pnl, net_losses = DailyPnlService.reconcile_risk_state(
-                            self.risk.daily_pnl,
-                            self.risk.consecutive_losses,
-                            self.risk.daily_pnl_date,
-                            ledger_result,
-                        )
-                        if ledger_result.trades:
-                            self.risk.replace_daily_pnl(
-                                net_pnl,
-                                net_losses,
-                                ledger_result.trade_day,
+                        reconciliation_trade_day = ledger_result.trade_day
+                    else:
+                        with self._state_lock:
+                            net_pnl, net_losses = DailyPnlService.reconcile_risk_state(
+                                self.risk.daily_pnl,
+                                self.risk.consecutive_losses,
+                                self.risk.daily_pnl_date,
+                                ledger_result,
                             )
-                    self._state_svc.persist(db, self.engine, self.risk)
-                    if fill_symbol:
-                        runtime = self._symbol_runtimes.get(fill_symbol)
-                        if runtime is not None and runtime.engine is not self.engine:
-                            self._state_svc.persist_symbol(db, runtime.engine, fill_symbol)
+                            if ledger_result.trades:
+                                self.risk.replace_daily_pnl(
+                                    net_pnl,
+                                    net_losses,
+                                    ledger_result.trade_day,
+                                )
+                        self._state_svc.persist(db, self.engine, self.risk)
+                        if fill_symbol:
+                            runtime = self._symbol_runtimes.get(fill_symbol)
+                            if runtime is not None and runtime.engine is not self.engine:
+                                self._state_svc.persist_symbol(db, runtime.engine, fill_symbol)
+                        reconciliation_complete = True
             except Exception:
                 logger.exception("post-fill persist failed for %s", fill_symbol)
+            finally:
+                self._finish_post_fill_pnl_reconciliation(
+                    is_complete=reconciliation_complete,
+                    trade_day=reconciliation_trade_day,
+                )
 
-        threading.Thread(target=_persist_async, name="post-fill-persist", daemon=True).start()
+        try:
+            threading.Thread(
+                target=_persist_async,
+                name="post-fill-persist",
+                daemon=True,
+            ).start()
+        except Exception:
+            logger.exception("post-fill persistence worker could not be started")
+            fallback_trade_day: object = datetime.now(timezone.utc).date()
+            try:
+                fallback_trade_day = self._market_trade_day()
+            except Exception:
+                logger.exception("market trade day unavailable after worker start failure")
+            self._finish_post_fill_pnl_reconciliation(
+                is_complete=False,
+                trade_day=fallback_trade_day,
+            )
+
+    def _finish_post_fill_pnl_reconciliation(
+        self,
+        *,
+        is_complete: bool,
+        trade_day: object,
+    ) -> None:
+        """Release the transient entry gate or convert it to a durable pause."""
+        with self._trade_svc.submission_guard():
+            remaining_reconciliations = self.risk.finish_entry_reconciliation()
+            with self._state_lock:
+                transient_reason = self._post_fill_pnl_pause_reason
+
+            if not is_complete:
+                self._latch_pnl_reconciliation_uncertain(trade_day)
+
+            if remaining_reconciliations > 0:
+                return
+
+            with self._state_lock:
+                if self._post_fill_pnl_pause_reason == transient_reason:
+                    self._post_fill_pnl_pause_reason = ""
+            if not is_complete or not transient_reason:
+                return
+
+            pause_reason, safety_generation = self.risk.pause_verification_snapshot()
+            if pause_reason != transient_reason:
+                return
+            try:
+                with self._db_session() as db:
+                    resumed = self.risk.resume_if_pause_reason(
+                        transient_reason,
+                        expected_generation=safety_generation,
+                        on_resumed=lambda: self._state_svc.persist(
+                            db,
+                            self.engine,
+                            self.risk,
+                        ),
+                    )
+            except Exception:
+                logger.exception(
+                    "failed to persist completed post-fill PnL reconciliation"
+                )
+                self._latch_pnl_reconciliation_uncertain(trade_day)
+                return
+            if resumed:
+                self._broadcast_status()
 
     def _on_reduction_fill(
         self,
@@ -440,33 +534,37 @@ class AppRunner:
         self._register_broker_disconnect_hook()
         self._refresh_trading_session_mode()
 
-        self.sync_today_orders_from_broker(force=True)
-        with self._db_session() as db:
-            self._load_pending_orders(db)
-            self._resume_pending_timeout_pause_if_filled(db)
-        self._sync_risk_from_order_ledger()
-        completed_reductions: list[tuple[str, _ReductionIntent]] = []
-        with self._db_session() as db:
-            self._pause_if_unresolved_live_order_exists(db)
-            completed_reductions = self._reconcile_tracked_entries_with_broker(db)
-        # Force an engine-vs-broker position sync BEFORE the quote
-        # subscription is set up below. Without this, the engine state we
-        # just loaded from DB can be stale (positions opened or closed
-        # outside the service) for the first ~15s of quote-driven
-        # decisions, leading to spurious buys/sells.
+        self._defer_incomplete_pnl_latch = True
         try:
-            state_changed = self._sync_engine_state_with_positions(force=True)
-            for symbol, intent in completed_reductions:
-                self._complete_reduction(
-                    symbol,
-                    cause=intent.cause,
-                    reason=intent.reason,
-                )
-            if (state_changed or self.risk.paused) and not completed_reductions:
-                with self._db_session() as db:
-                    self._state_svc.persist(db, self.engine, self.risk)
-        except Exception:
-            logger.exception("initial engine state sync with broker positions failed")
+            self.sync_today_orders_from_broker(force=True)
+            with self._db_session() as db:
+                self._load_pending_orders(db)
+                self._resume_pending_timeout_pause_if_filled(db)
+            self._sync_risk_from_order_ledger()
+            completed_reductions: list[tuple[str, _ReductionIntent]] = []
+            with self._db_session() as db:
+                self._pause_if_unresolved_live_order_exists(db)
+                completed_reductions = self._reconcile_tracked_entries_with_broker(db)
+            # Force an engine-vs-broker position sync BEFORE the quote
+            # subscription is set up below. Without this, the engine state we
+            # just loaded from DB can be stale for the first quote decisions.
+            try:
+                state_changed = self._sync_engine_state_with_positions(force=True)
+                for symbol, intent in completed_reductions:
+                    self._complete_reduction(
+                        symbol,
+                        cause=intent.cause,
+                        reason=intent.reason,
+                    )
+                if (state_changed or self.risk.paused) and not completed_reductions:
+                    with self._db_session() as db:
+                        self._state_svc.persist(db, self.engine, self.risk)
+            except Exception:
+                logger.exception("initial engine state sync with broker positions failed")
+        finally:
+            self._defer_incomplete_pnl_latch = False
+        self._sync_risk_from_order_ledger()
+        self._resume_stale_post_fill_pause_after_startup()
 
         try:
             self._loop = asyncio.get_running_loop()
@@ -485,6 +583,46 @@ class AppRunner:
             except Exception as exc:
                 logger.error("quote subscription failed for %s: %s", ", ".join(symbols), exc)
                 logger.error("system running without quote updates")
+
+    def _resume_stale_post_fill_pause_after_startup(self) -> bool:
+        with self._state_lock:
+            pause_reason = self.risk.pause_reason
+            if (
+                self.risk.entry_reconciliation_pending
+                or not pause_reason.startswith(_POST_FILL_PNL_RECONCILIATION_PREFIX)
+            ):
+                return False
+
+        def persist_resumed_state() -> None:
+            with self._db_session() as db:
+                self._state_svc.stage(db, self.engine, self.risk)
+                record_trade_event(
+                    db,
+                    event_type="RISK_AUTO_RESUMED",
+                    status="RUNNING",
+                    message="stale post-fill PnL pause cleared after startup verification",
+                    payload={
+                        "source": "verified_stale_post_fill_reconciliation",
+                        "pause_reason": pause_reason,
+                    },
+                )
+                db.commit()
+
+        try:
+            resumed, error = self.resume_after_verification(
+                on_resumed=persist_resumed_state,
+            )
+        except Exception:
+            logger.exception("stale post-fill pause could not be cleared durably")
+            return False
+        if not resumed:
+            logger.warning(
+                "stale post-fill pause remains after startup verification: %s",
+                error,
+            )
+            return False
+        logger.info("cleared stale post-fill pause after complete startup verification")
+        return True
 
     def _configure_live_safety(self, config: object) -> None:
         self._trade_svc.margin_safety_factor = getattr(config, "margin_safety_factor", None)
@@ -797,7 +935,9 @@ class AppRunner:
                 self._broadcast_status()
                 return False, health_error
             pause_reason, safety_generation = self.risk.pause_verification_snapshot()
-            safe, error = self.verify_operational_resume()
+            safe, error = self.verify_operational_resume(
+                require_complete_pnl=False,
+            )
             if not safe:
                 self._broadcast_status()
                 return False, error
@@ -2877,8 +3017,12 @@ class AppRunner:
             60.0 * (2 ** min(attempts - 1, 6)),
         )
 
-    def verify_operational_resume(self) -> tuple[bool, str]:
-        """Prove broker/order state is coherent before clearing any pause."""
+    def verify_operational_resume(
+        self,
+        *,
+        require_complete_pnl: bool = True,
+    ) -> tuple[bool, str]:
+        """Prove broker/order state is coherent before changing pause access."""
         with self._state_lock:
             if self.risk.kill_switch:
                 self._unknown_submission_proof_reason = ""
@@ -2949,7 +3093,6 @@ class AppRunner:
             return False, "broker order reconciliation has not completed successfully"
         if current_pause_reason != pause_reason:
             return False, "operational pause reason changed during reconciliation"
-
         try:
             positions = self.broker.get_positions()
         except Exception:
@@ -3043,6 +3186,26 @@ class AppRunner:
             logger.exception("engine state could not be persisted before operational resume")
             return False, "reconciled engine state could not be persisted"
 
+        if require_complete_pnl:
+            try:
+                trade_day = self._market_trade_day()
+                with self._db_session() as db:
+                    pnl_result = DailyPnlService(db).calculate(
+                        trade_day=trade_day,
+                        to_trade_day=self._market_trade_day_for,
+                        fee_rate_us=self.engine.params.fee_rate_us,
+                        fee_rate_hk=self.engine.params.fee_rate_hk,
+                    )
+            except Exception:
+                logger.exception("cannot verify realized PnL before operational resume")
+                return False, "realized PnL reconciliation could not be verified"
+            if not pnl_result.is_complete:
+                return (
+                    False,
+                    "realized PnL ledger remains incomplete for trade day "
+                    f"{pnl_result.trade_day}",
+                )
+
         if delayed_resume_proof:
             proof_now = time.monotonic()
             proof_is_old_enough = (
@@ -3082,22 +3245,35 @@ class AppRunner:
         with self._state_lock:
             if self._trigger_in_flight or self._trade_svc.has_pending_order:
                 return False
+        trade_day = self._market_trade_day()
         try:
             with self._db_session() as db:
                 result = DailyPnlService(db).calculate(
-                    trade_day=self._market_trade_day(),
+                    trade_day=trade_day,
                     to_trade_day=self._market_trade_day_for,
                     fee_rate_us=self.engine.params.fee_rate_us,
                     fee_rate_hk=self.engine.params.fee_rate_hk,
                 )
         except Exception:
             logger.exception("failed to sync realized daily pnl from order ledger")
+            if self._defer_incomplete_pnl_latch:
+                logger.warning(
+                    "deferring failed order-ledger pause until startup position "
+                    "reconciliation finishes for trade day %s",
+                    trade_day,
+                )
+                return False
+            self._latch_pnl_reconciliation_uncertain(trade_day)
             return False
         if not result.is_complete:
-            logger.error(
-                "refusing incomplete order-ledger risk sync for trade day %s",
-                result.trade_day,
-            )
+            if self._defer_incomplete_pnl_latch:
+                logger.warning(
+                    "deferring incomplete order-ledger pause until startup "
+                    "position reconciliation finishes for trade day %s",
+                    result.trade_day,
+                )
+                return False
+            self._latch_pnl_reconciliation_uncertain(result.trade_day)
             return False
 
         with self._state_lock:
@@ -3159,6 +3335,34 @@ class AppRunner:
             len(result.trades),
         )
         return True
+
+    def _latch_pnl_reconciliation_uncertain(self, trade_day: object) -> None:
+        reason = (
+            f"{_PNL_RECONCILIATION_UNCERTAIN_PREFIX} incomplete order ledger "
+            f"for trade day {trade_day}; new entries remain blocked until "
+            "the realized PnL can be reconciled"
+        )
+        latched, current_reason = self.risk.pause_unless_operational(
+            reason,
+            auto_resumable=False,
+        )
+        if not latched:
+            if current_reason == reason:
+                return
+            logger.critical(
+                "%s; preserving existing operational pause: %s",
+                reason,
+                current_reason,
+            )
+            return
+        logger.critical(reason)
+        self._set_last_action_message(reason)
+        self._persist_risk_pause_best_effort()
+        try:
+            self._record_risk_event(reason)
+        except Exception:
+            logger.exception("failed to record PnL reconciliation risk")
+        self._broadcast_status()
 
     def _upsert_broker_order(self, db, broker_order: object) -> bool:
         order_id = str(getattr(broker_order, "broker_order_id", "") or "")
@@ -3682,16 +3886,16 @@ class AppRunner:
     def _auto_resume_pause_if_due(self, now: datetime | None = None) -> bool:
         now = now or datetime.now(timezone.utc)
         with self._state_lock:
+            if self.risk.entry_reconciliation_pending:
+                return False
             empty_snapshot_pause = (
                 self.risk.paused
                 and self.risk.pause_reason
                 == _EMPTY_ORDER_SNAPSHOT_RECONCILIATION_REASON
             )
-            other_order_reconciliation_pause = (
+            other_operational_pause = (
                 self.risk.paused
-                and self.risk.pause_reason.startswith(
-                    _ORDER_RECONCILIATION_UNCERTAIN_PREFIX
-                )
+                and self.risk.pause_reason.startswith(_OPERATIONAL_PAUSE_PREFIXES)
                 and not empty_snapshot_pause
             )
         if empty_snapshot_pause:
@@ -3699,33 +3903,54 @@ class AppRunner:
             # timer-only auto-resume path, even if old persisted data happened
             # to mark it auto-resumable.
             return self._auto_resume_empty_order_snapshot_pause(now)
-        if other_order_reconciliation_pause:
+        if other_operational_pause:
             return False
-        with self._state_lock:
-            if not self.risk.paused or self.risk.kill_switch:
+        with self._trade_svc.submission_guard():
+            with self._state_lock:
+                if (
+                    self.risk.entry_reconciliation_pending
+                    or not self.risk.paused
+                    or self.risk.kill_switch
+                ):
+                    return False
+                auto_resume_minutes = self.engine.params.auto_resume_minutes
+                paused_at = self.risk.paused_at
+                if auto_resume_minutes <= 0 or paused_at is None:
+                    return False
+                if paused_at.tzinfo is None:
+                    paused_at = paused_at.replace(tzinfo=timezone.utc)
+                if not self.risk.pause_auto_resumable:
+                    return False
+                if now - paused_at < timedelta(minutes=auto_resume_minutes):
+                    return False
+                reason, safety_generation = self.risk.pause_verification_snapshot()
+
+            def persist_resumed_state() -> None:
+                with self._db_session() as db:
+                    self._state_svc.stage(db, self.engine, self.risk)
+                    record_trade_event(
+                        db,
+                        event_type="RISK_AUTO_RESUMED",
+                        status="RUNNING",
+                        message=reason,
+                        payload={"source": "auto_resume_pause"},
+                    )
+                    db.commit()
+
+            try:
+                resumed = self.risk.resume_if_pause_reason(
+                    reason,
+                    expected_generation=safety_generation,
+                    on_resumed=persist_resumed_state,
+                )
+            except Exception:
+                logger.exception("transient auto-resume could not be persisted")
+                self._persist_risk_pause_best_effort()
+                self._broadcast_status()
                 return False
-            auto_resume_minutes = self.engine.params.auto_resume_minutes
-            paused_at = self.risk.paused_at
-            if auto_resume_minutes <= 0 or paused_at is None:
+            if not resumed:
                 return False
-            if paused_at.tzinfo is None:
-                paused_at = paused_at.replace(tzinfo=timezone.utc)
-            if not self.risk.pause_auto_resumable:
-                return False
-            if now - paused_at < timedelta(minutes=auto_resume_minutes):
-                return False
-            reason = self.risk.pause_reason
-            self.risk.resume()
         logger.info("auto-resumed trading after transient pause: %s", reason)
-        with self._db_session() as db:
-            record_trade_event(
-                db,
-                event_type="RISK_AUTO_RESUMED",
-                status="RUNNING",
-                message=reason,
-                payload={"source": "auto_resume_pause"},
-            )
-            db.commit()
         self._broadcast_status()
         return True
 
@@ -3813,21 +4038,42 @@ class AppRunner:
         if order is None or order.status != "FILLED" or float(order.executed_quantity or 0) <= 0:
             return False
 
-        with self._state_lock:
-            if self.risk.pause_reason != pause_reason:
-                return False
-            self.risk.resume()
         message = f"pending timeout resolved by broker fill {order_id}"
+        with self._trade_svc.submission_guard():
+            with self._state_lock:
+                if (
+                    self.risk.entry_reconciliation_pending
+                    or self.risk.pause_reason != pause_reason
+                ):
+                    return False
+                _, safety_generation = self.risk.pause_verification_snapshot()
+
+            def persist_resumed_state() -> None:
+                self._state_svc.stage(db, self.engine, self.risk)
+                record_trade_event(
+                    db,
+                    event_type="RISK_AUTO_RESUMED",
+                    status="RUNNING",
+                    message=message,
+                    payload={
+                        "source": "pending_timeout_fill_reconcile",
+                        "order_id": order_id,
+                    },
+                )
+                db.commit()
+
+            try:
+                resumed = self.risk.resume_if_pause_reason(
+                    pause_reason,
+                    expected_generation=safety_generation,
+                    on_resumed=persist_resumed_state,
+                )
+            except Exception:
+                db.rollback()
+                raise
+            if not resumed:
+                return False
         logger.info(message)
-        self._state_svc.persist(db, self.engine, self.risk)
-        record_trade_event(
-            db,
-            event_type="RISK_AUTO_RESUMED",
-            status="RUNNING",
-            message=message,
-            payload={"source": "pending_timeout_fill_reconcile", "order_id": order_id},
-        )
-        db.commit()
         self._broadcast_status()
         return True
 

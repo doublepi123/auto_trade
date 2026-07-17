@@ -386,7 +386,7 @@ class TestTradeEventSync:
         assert runner.sync_today_orders_from_broker(force=True) == 2
 
         assert runner.risk.daily_pnl == pytest.approx(5.797)
-        assert runner.risk.consecutive_losses == 0
+        assert runner.risk.consecutive_losses == 3
 
     def test_sync_today_orders_keeps_less_optimistic_live_pnl(self) -> None:
         _clean()
@@ -487,3 +487,9 @@ class TestTradeEventSync:
 
         assert runner.risk.daily_pnl == -100.0
         assert runner.risk.consecutive_losses == 2
+        assert runner.risk.paused is True
+        assert runner.risk.pause_reason.startswith(
+            "ORDER_RECONCILIATION_UNCERTAIN:"
+        )
+        assert runner.risk.check().approved is False
+        _clean()

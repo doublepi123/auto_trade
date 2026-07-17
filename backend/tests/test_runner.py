@@ -1,7 +1,7 @@
 # pyright: reportArgumentType=false, reportAttributeAccessIssue=false
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import Any, Callable, cast
 import asyncio
 import threading
 import time
@@ -92,6 +92,426 @@ class TestAppRunner:
         assert runner._latch_live_order_reconciliation(inventory, []) is True
         assert runner.risk.protective_exit_permitted is False
 
+    def test_incomplete_pnl_ledger_blocks_operational_resume(
+        self,
+        monkeypatch,
+    ) -> None:
+        trade_day = runner_module.trade_day_for("US")
+
+        class IncompletePnlService:
+            def __init__(self, _db: object) -> None:
+                pass
+
+            def calculate(self, **_kwargs: object) -> object:
+                return SimpleNamespace(
+                    trade_day=trade_day,
+                    is_complete=False,
+                )
+
+        class Broker:
+            @staticmethod
+            def get_positions() -> list[object]:
+                return []
+
+        runner = AppRunner()
+        runner.broker = cast(Any, Broker())
+        reason = "ORDER_EXECUTION_BLOCKED: broker acknowledgement needs review"
+        runner.risk.pause(reason, auto_resumable=False)
+        runner._last_order_sync_succeeded = True
+        monkeypatch.setattr(
+            runner,
+            "sync_today_orders_from_broker",
+            lambda *, force: 0,
+        )
+        monkeypatch.setattr(
+            runner_module,
+            "DailyPnlService",
+            IncompletePnlService,
+        )
+        monkeypatch.setattr(
+            runner,
+            "_reconcile_tracked_entries_with_broker",
+            lambda _db, **_kwargs: [],
+        )
+        monkeypatch.setattr(
+            runner._state_svc,
+            "persist",
+            lambda _db, _engine, _risk: None,
+        )
+
+        safe, error = runner.verify_operational_resume()
+
+        assert safe is False
+        assert error == (
+            "realized PnL ledger remains incomplete for trade day "
+            f"{trade_day}"
+        )
+        assert runner.risk.paused is True
+
+    def test_incomplete_order_ledger_latches_pnl_operational_pause(
+        self,
+        monkeypatch,
+    ) -> None:
+        trade_day = runner_module.trade_day_for("US")
+
+        class IncompletePnlService:
+            def __init__(self, _db: object) -> None:
+                pass
+
+            def calculate(self, **_kwargs: object) -> object:
+                return SimpleNamespace(
+                    trade_day=trade_day,
+                    is_complete=False,
+                )
+
+        runner = AppRunner()
+        monkeypatch.setattr(
+            runner_module,
+            "DailyPnlService",
+            IncompletePnlService,
+        )
+        monkeypatch.setattr(
+            runner,
+            "_persist_risk_pause_best_effort",
+            lambda: None,
+        )
+        monkeypatch.setattr(runner, "_record_risk_event", lambda _reason: None)
+        monkeypatch.setattr(runner, "_broadcast_status", lambda: None)
+
+        assert runner._sync_risk_from_order_ledger() is False
+        assert runner.risk.paused is True
+        assert runner.risk.pause_reason.startswith(
+            "PNL_RECONCILIATION_UNCERTAIN:"
+        )
+        assert runner.risk.check().approved is False
+
+    def test_order_ledger_calculation_error_is_deferred_only_during_startup(
+        self,
+        monkeypatch,
+    ) -> None:
+        class FailingPnlService:
+            def __init__(self, _db: object) -> None:
+                pass
+
+            def calculate(self, **_kwargs: object) -> object:
+                raise RuntimeError("ledger unavailable")
+
+        runner = AppRunner()
+        monkeypatch.setattr(runner_module, "DailyPnlService", FailingPnlService)
+        monkeypatch.setattr(
+            runner,
+            "_persist_risk_pause_best_effort",
+            lambda: None,
+        )
+        monkeypatch.setattr(runner, "_record_risk_event", lambda _reason: None)
+        monkeypatch.setattr(runner, "_broadcast_status", lambda: None)
+
+        runner._defer_incomplete_pnl_latch = True
+        assert runner._sync_risk_from_order_ledger() is False
+        assert runner.risk.paused is False
+
+        runner._defer_incomplete_pnl_latch = False
+        assert runner._sync_risk_from_order_ledger() is False
+        assert runner.risk.paused is True
+        assert runner.risk.pause_reason.startswith(
+            "PNL_RECONCILIATION_UNCERTAIN:"
+        )
+
+    def test_pnl_latch_preserves_existing_operational_diagnosis(
+        self,
+        monkeypatch,
+    ) -> None:
+        runner = AppRunner()
+        existing = "ORDER_SUBMISSION_UNCERTAIN: broker acknowledgement missing"
+        runner.risk.pause(existing, auto_resumable=False)
+        assert runner.risk.permit_protective_exits() is True
+        monkeypatch.setattr(
+            runner,
+            "_persist_risk_pause_best_effort",
+            lambda: pytest.fail("existing operational pause must be preserved"),
+        )
+
+        runner._latch_pnl_reconciliation_uncertain(
+            runner_module.trade_day_for("US"),
+        )
+
+        assert runner.risk.pause_reason == existing
+        assert runner.risk.protective_exit_permitted is True
+        assert runner.risk.check().approved is False
+
+    def test_post_fill_incomplete_ledger_latches_pnl_pause(
+        self,
+        monkeypatch,
+    ) -> None:
+        trade_day = runner_module.trade_day_for("US")
+        latched_days: list[object] = []
+
+        class IncompletePnlService:
+            def __init__(self, _db: object) -> None:
+                pass
+
+            def refresh_execution_outcomes(self, *, symbol: str | None) -> int:
+                return 0
+
+            def calculate(self, **_kwargs: object) -> object:
+                return SimpleNamespace(
+                    trade_day=trade_day,
+                    is_complete=False,
+                )
+
+        class ImmediateThread:
+            def __init__(self, *, target, **_kwargs: object) -> None:
+                self._target = target
+
+            def start(self) -> None:
+                self._target()
+
+        runner = AppRunner()
+        monkeypatch.setattr(
+            runner_module,
+            "DailyPnlService",
+            IncompletePnlService,
+        )
+        monkeypatch.setattr(runner_module.threading, "Thread", ImmediateThread)
+        monkeypatch.setattr(
+            runner,
+            "_latch_pnl_reconciliation_uncertain",
+            latched_days.append,
+        )
+
+        runner._mark_fill_processed("AAPL.US")
+
+        assert latched_days == [trade_day]
+
+    def test_post_fill_blocks_entries_until_complete_replay(
+        self,
+        monkeypatch,
+    ) -> None:
+        trade_day = runner_module.trade_day_for("US")
+        targets: list[Callable[[], None]] = []
+
+        class CompletePnlService:
+            def __init__(self, _db: object) -> None:
+                pass
+
+            def refresh_execution_outcomes(self, *, symbol: str | None) -> int:
+                return 0
+
+            def calculate(self, **_kwargs: object) -> object:
+                return SimpleNamespace(
+                    trade_day=trade_day,
+                    is_complete=True,
+                    trades=[],
+                    realized_pnl=0.0,
+                    consecutive_losses=0,
+                )
+
+            @staticmethod
+            def reconcile_risk_state(
+                current_pnl: float,
+                current_losses: int,
+                _current_trade_day: object,
+                _result: object,
+            ) -> tuple[float, int]:
+                return current_pnl, current_losses
+
+        class DeferredThread:
+            def __init__(self, *, target: Callable[[], None], **_kwargs: object) -> None:
+                targets.append(target)
+
+            def start(self) -> None:
+                pass
+
+        runner = AppRunner()
+        monkeypatch.setattr(runner_module, "DailyPnlService", CompletePnlService)
+        monkeypatch.setattr(runner_module.threading, "Thread", DeferredThread)
+        monkeypatch.setattr(
+            runner._state_svc,
+            "persist",
+            lambda _db, _engine, _risk: None,
+        )
+        monkeypatch.setattr(runner, "_broadcast_status", lambda: None)
+
+        runner._mark_fill_processed("AAPL.US")
+
+        assert len(targets) == 1
+        assert runner.risk.paused is True
+        assert runner.risk.pause_reason.startswith(
+            "post-fill PnL reconciliation in progress:"
+        )
+        assert runner.risk.check().approved is False
+        assert runner._risk_rejection_allows_action("BUY") is False
+        assert runner._risk_rejection_allows_action("SELL") is True
+
+        targets[0]()
+
+        assert runner.risk.paused is False
+        assert runner.risk.entry_reconciliation_count == 0
+
+    def test_post_fill_waits_for_all_concurrent_replays_before_resuming(
+        self,
+        monkeypatch,
+    ) -> None:
+        trade_day = runner_module.trade_day_for("US")
+        targets: list[Callable[[], None]] = []
+
+        class CompletePnlService:
+            def __init__(self, _db: object) -> None:
+                pass
+
+            def refresh_execution_outcomes(self, *, symbol: str | None) -> int:
+                return 0
+
+            def calculate(self, **_kwargs: object) -> object:
+                return SimpleNamespace(
+                    trade_day=trade_day,
+                    is_complete=True,
+                    trades=[],
+                    realized_pnl=0.0,
+                    consecutive_losses=0,
+                )
+
+            @staticmethod
+            def reconcile_risk_state(
+                current_pnl: float,
+                current_losses: int,
+                _current_trade_day: object,
+                _result: object,
+            ) -> tuple[float, int]:
+                return current_pnl, current_losses
+
+        class DeferredThread:
+            def __init__(self, *, target: Callable[[], None], **_kwargs: object) -> None:
+                targets.append(target)
+
+            def start(self) -> None:
+                pass
+
+        runner = AppRunner()
+        monkeypatch.setattr(runner_module, "DailyPnlService", CompletePnlService)
+        monkeypatch.setattr(runner_module.threading, "Thread", DeferredThread)
+        monkeypatch.setattr(
+            runner._state_svc,
+            "persist",
+            lambda _db, _engine, _risk: None,
+        )
+        monkeypatch.setattr(runner, "_broadcast_status", lambda: None)
+
+        runner._mark_fill_processed("AAPL.US")
+        runner._mark_fill_processed("AAPL.US")
+        assert len(targets) == 2
+
+        targets[0]()
+        assert runner.risk.paused is True
+        assert runner.risk.entry_reconciliation_count == 1
+
+        targets[1]()
+        assert runner.risk.paused is False
+        assert runner.risk.entry_reconciliation_count == 0
+
+    def test_partial_protective_fill_keeps_next_reduction_permitted(
+        self,
+        monkeypatch,
+    ) -> None:
+        trade_day = runner_module.trade_day_for("US")
+        targets: list[Callable[[], None]] = []
+
+        class CompletePnlService:
+            def __init__(self, _db: object) -> None:
+                pass
+
+            def refresh_execution_outcomes(self, *, symbol: str | None) -> int:
+                return 0
+
+            def calculate(self, **_kwargs: object) -> object:
+                return SimpleNamespace(
+                    trade_day=trade_day,
+                    is_complete=True,
+                    trades=[],
+                    realized_pnl=0.0,
+                    consecutive_losses=0,
+                )
+
+            @staticmethod
+            def reconcile_risk_state(
+                current_pnl: float,
+                current_losses: int,
+                _current_trade_day: object,
+                _result: object,
+            ) -> tuple[float, int]:
+                return current_pnl, current_losses
+
+        class DeferredThread:
+            def __init__(self, *, target: Callable[[], None], **_kwargs: object) -> None:
+                targets.append(target)
+
+            def start(self) -> None:
+                pass
+
+        runner = AppRunner()
+        runner._trade_svc.load_tracked_entries({
+            "AAPL.US": (
+                Decimal("3"),
+                Decimal("300"),
+                "LONG",
+                datetime.now(timezone.utc),
+            )
+        })
+        pause_reason = "PNL_RECONCILIATION_UNCERTAIN: incomplete ledger"
+        runner.risk.pause(pause_reason)
+        assert runner.risk.permit_protective_exits() is True
+        monkeypatch.setattr(runner_module, "DailyPnlService", CompletePnlService)
+        monkeypatch.setattr(runner_module.threading, "Thread", DeferredThread)
+        monkeypatch.setattr(
+            runner._state_svc,
+            "persist",
+            lambda _db, _engine, _risk: None,
+        )
+
+        runner._mark_fill_processed("AAPL.US", "SELL")
+
+        assert len(targets) == 1
+        assert runner.risk.entry_reconciliation_count == 1
+        assert runner.risk.protective_exit_permitted is True
+        assert runner._risk_rejection_allows_action("SELL") is True
+        assert runner._risk_rejection_allows_action("BUY") is False
+
+        targets[0]()
+
+        assert runner.risk.entry_reconciliation_count == 0
+        assert runner.risk.pause_reason == pause_reason
+        assert runner.risk.protective_exit_permitted is True
+        assert runner._risk_rejection_allows_action("SELL") is True
+
+    def test_post_fill_thread_start_failure_becomes_durable_pnl_pause(
+        self,
+        monkeypatch,
+    ) -> None:
+        class FailingThread:
+            def __init__(self, **_kwargs: object) -> None:
+                pass
+
+            def start(self) -> None:
+                raise RuntimeError("thread unavailable")
+
+        runner = AppRunner()
+        monkeypatch.setattr(runner_module.threading, "Thread", FailingThread)
+        monkeypatch.setattr(
+            runner,
+            "_persist_risk_pause_best_effort",
+            lambda: None,
+        )
+        monkeypatch.setattr(runner, "_record_risk_event", lambda _reason: None)
+        monkeypatch.setattr(runner, "_broadcast_status", lambda: None)
+
+        runner._mark_fill_processed("AAPL.US")
+
+        assert runner.risk.entry_reconciliation_count == 0
+        assert runner.risk.paused is True
+        assert runner.risk.pause_reason.startswith(
+            "PNL_RECONCILIATION_UNCERTAIN:"
+        )
+
     def test_order_snapshot_fetch_failure_latches_exact_recovery_reason(
         self,
         monkeypatch,
@@ -125,7 +545,7 @@ class TestAppRunner:
         monkeypatch.setattr(
             runner,
             "verify_operational_resume",
-            lambda: (False, "broker state changed"),
+            lambda **_kwargs: (False, "broker state changed"),
         )
         monkeypatch.setattr(
             runner,
@@ -146,7 +566,7 @@ class TestAppRunner:
         runner = AppRunner()
         runner.risk.pause("ORDER_EXECUTION_BLOCKED: initial review")
 
-        def change_operational_pause() -> tuple[bool, str]:
+        def change_operational_pause(**_kwargs: object) -> tuple[bool, str]:
             runner.risk.pause(
                 "POSITION_RECONCILIATION_UNCERTAIN: broker state changed"
             )
@@ -177,7 +597,7 @@ class TestAppRunner:
         reason = "ORDER_EXECUTION_BLOCKED: repeated broker failure"
         runner.risk.pause(reason)
 
-        def repeat_operational_pause() -> tuple[bool, str]:
+        def repeat_operational_pause(**_kwargs: object) -> tuple[bool, str]:
             runner.risk.pause(reason)
             return True, ""
 
@@ -234,7 +654,7 @@ class TestAppRunner:
         runner._quotes_subscribed = True
         runner._last_quote_at = time.monotonic()
 
-        def make_quote_loop_stale() -> tuple[bool, str]:
+        def make_quote_loop_stale(**_kwargs: object) -> tuple[bool, str]:
             runner._last_quote_at = time.monotonic() - 31
             return True, ""
 
@@ -249,6 +669,90 @@ class TestAppRunner:
         assert safe is False
         assert "healthy quote loop" in error
         assert runner.risk.protective_exit_permitted is False
+
+    @pytest.mark.parametrize("pause_kind", ["PNL", "ORDER"])
+    def test_incomplete_pnl_can_arm_verified_protective_exits(
+        self,
+        monkeypatch,
+        pause_kind: str,
+    ) -> None:
+        trade_day = runner_module.trade_day_for("US")
+        pnl_reason = (
+            "PNL_RECONCILIATION_UNCERTAIN: incomplete order ledger "
+            f"for trade day {trade_day}; new entries remain blocked until "
+            "the realized PnL can be reconciled"
+        )
+        reason = (
+            pnl_reason
+            if pause_kind == "PNL"
+            else "ORDER_EXECUTION_BLOCKED: broker acknowledgement needs review"
+        )
+
+        class Broker:
+            @staticmethod
+            def get_positions() -> list[object]:
+                return []
+
+        class IncompletePnlService:
+            def __init__(self, _db: object) -> None:
+                pass
+
+            def calculate(self, **_kwargs: object) -> object:
+                return SimpleNamespace(
+                    trade_day=trade_day,
+                    is_complete=False,
+                )
+
+        runner = AppRunner()
+        runner.broker = cast(Any, Broker())
+        runner.risk.pause(reason, auto_resumable=False)
+        runner._last_order_sync_succeeded = True
+
+        def sync(*, force: bool) -> int:
+            assert force is True
+            runner._last_order_sync_succeeded = True
+            runner._latch_pnl_reconciliation_uncertain(trade_day)
+            return 0
+
+        monkeypatch.setattr(runner, "sync_today_orders_from_broker", sync)
+        monkeypatch.setattr(
+            runner_module,
+            "DailyPnlService",
+            IncompletePnlService,
+        )
+        monkeypatch.setattr(
+            runner,
+            "_reconcile_tracked_entries_with_broker",
+            lambda _db, **_kwargs: [],
+        )
+        monkeypatch.setattr(
+            runner._state_svc,
+            "persist",
+            lambda _db, _engine, _risk: None,
+        )
+        monkeypatch.setattr(
+            runner,
+            "_protective_exit_runtime_health",
+            lambda: (True, ""),
+        )
+        monkeypatch.setattr(runner, "_broadcast_status", lambda: None)
+
+        safe, error = runner.permit_protective_exits_after_verification()
+
+        assert safe is True
+        assert error == ""
+        assert runner.risk.paused is True
+        assert runner.risk.pause_reason == reason
+        assert runner.risk.check().approved is False
+        assert runner.risk.protective_exit_permitted is True
+        assert runner._risk_rejection_allows_action("BUY") is False
+        assert runner._risk_rejection_allows_action("SELL") is True
+
+        assert runner._sync_risk_from_order_ledger() is False
+        assert runner.risk.pause_reason == reason
+        assert runner.risk.protective_exit_permitted is True
+        assert runner._risk_rejection_allows_action("BUY") is False
+        assert runner._risk_rejection_allows_action("SELL") is True
 
     def test_protective_exit_health_requires_fresh_primary_quote(self) -> None:
         class AliveThread:
@@ -3296,6 +3800,116 @@ class TestAppRunner:
         assert resumed is True
         assert runner.risk.paused is False
 
+    def test_auto_resume_persistence_failure_keeps_pause(
+        self,
+        monkeypatch,
+    ) -> None:
+        runner = AppRunner()
+        now = datetime(2026, 5, 22, 10, 3, tzinfo=timezone.utc)
+        reason = "429 too many requests"
+        runner.engine.params = StrategyParams(
+            symbol="AAPL.US",
+            buy_low=100.0,
+            sell_high=200.0,
+            auto_resume_minutes=1,
+        )
+        runner.risk.pause(
+            reason,
+            auto_resumable=True,
+            paused_at=now - timedelta(minutes=2),
+        )
+        monkeypatch.setattr(
+            runner._state_svc,
+            "stage",
+            lambda *_args: (_ for _ in ()).throw(
+                RuntimeError("runtime state write failed")
+            ),
+        )
+        monkeypatch.setattr(runner, "_persist_risk_pause_best_effort", lambda: None)
+        monkeypatch.setattr(runner, "_broadcast_status", lambda: None)
+
+        resumed = runner._auto_resume_pause_if_due(now=now)
+
+        assert resumed is False
+        assert runner.risk.paused is True
+        assert runner.risk.pause_reason == reason
+        assert runner.risk.check().approved is False
+
+    def test_auto_resume_waits_for_post_fill_pnl_reconciliation(self) -> None:
+        runner = AppRunner()
+        now = datetime(2026, 5, 22, 10, 3, tzinfo=timezone.utc)
+        runner.engine.params = StrategyParams(
+            symbol="AAPL.US",
+            buy_low=100.0,
+            sell_high=200.0,
+            auto_resume_minutes=1,
+        )
+        runner.risk.pause(
+            "429 too many requests",
+            auto_resumable=True,
+            paused_at=now - timedelta(minutes=2),
+        )
+        runner.risk.begin_entry_reconciliation(
+            "post-fill PnL reconciliation in progress: AAPL.US"
+        )
+
+        assert runner._auto_resume_pause_if_due(now=now) is False
+        assert runner.risk.paused is True
+        assert runner.risk.pause_reason == "429 too many requests"
+
+    def test_auto_resume_rechecks_post_fill_gate_at_resume_point(self) -> None:
+        runner = AppRunner()
+        now = datetime(2026, 5, 22, 10, 3, tzinfo=timezone.utc)
+        runner.engine.params = StrategyParams(
+            symbol="AAPL.US",
+            buy_low=100.0,
+            sell_high=200.0,
+            auto_resume_minutes=1,
+        )
+        runner.risk.pause(
+            "429 too many requests",
+            auto_resumable=True,
+            paused_at=now - timedelta(minutes=2),
+        )
+
+        real_lock = runner._state_lock
+        first_check_released = threading.Event()
+        allow_resume_check = threading.Event()
+
+        class CoordinatedLock:
+            exits = 0
+
+            def __enter__(self) -> None:
+                real_lock.acquire()
+
+            def __exit__(self, *_args: object) -> None:
+                real_lock.release()
+                self.exits += 1
+                if self.exits == 1:
+                    first_check_released.set()
+                    assert allow_resume_check.wait(timeout=2)
+
+        runner._state_lock = cast(Any, CoordinatedLock())
+        results: list[bool] = []
+        worker = threading.Thread(
+            target=lambda: results.append(runner._auto_resume_pause_if_due(now=now))
+        )
+        worker.start()
+        assert first_check_released.wait(timeout=2)
+        with real_lock:
+            runner.risk.begin_entry_reconciliation(
+                "post-fill PnL reconciliation in progress: AAPL.US"
+            )
+        allow_resume_check.set()
+        worker.join(timeout=2)
+        runner._state_lock = real_lock
+
+        assert worker.is_alive() is False
+        assert results == [False]
+        assert runner.risk.paused is True
+        assert runner.risk.pause_reason == "429 too many requests"
+        runner.risk.finish_entry_reconciliation()
+
     def test_auto_resume_does_not_resume_manual_pause(self) -> None:
         runner = AppRunner()
         now = datetime(2026, 5, 22, 10, 3, tzinfo=timezone.utc)
@@ -3634,6 +4248,13 @@ class TestAppRunner:
             runner.engine.params = StrategyParams(symbol="NVDA.US", market="US", buy_low=196, sell_high=199)
             runner.risk.pause("pending order order-late-fill timed out after 30s")
 
+            runner.risk.begin_entry_reconciliation(
+                "post-fill PnL reconciliation in progress: NVDA.US"
+            )
+            assert runner._resume_pending_timeout_pause_if_filled(db) is False
+            assert runner.risk.paused is True
+            runner.risk.finish_entry_reconciliation()
+
             resumed = runner._resume_pending_timeout_pause_if_filled(db)
 
             assert resumed is True
@@ -3641,6 +4262,62 @@ class TestAppRunner:
             event = db.query(TradeEvent).filter(TradeEvent.event_type == "RISK_AUTO_RESUMED").first()
             assert event is not None
             assert "order-late-fill" in event.message
+
+    def test_pending_timeout_resume_commit_failure_keeps_pause(
+        self,
+        monkeypatch,
+    ) -> None:
+        from app import database
+        from app.models import OrderRecord
+
+        order_id = "order-late-fill-commit-failure"
+        reason = f"pending order {order_id} timed out after 30s"
+        with database.SessionLocal() as db:
+            db.query(OrderRecord).filter(
+                OrderRecord.broker_order_id == order_id
+            ).delete(synchronize_session=False)
+            db.add(OrderRecord(
+                broker_order_id=order_id,
+                symbol="NVDA.US",
+                side="BUY",
+                quantity=1,
+                price=197.76,
+                executed_quantity=1,
+                executed_price=197.74,
+                status="FILLED",
+                created_at=datetime(2026, 7, 2, 13, 30, tzinfo=timezone.utc),
+                filled_at=datetime(2026, 7, 2, 13, 31, tzinfo=timezone.utc),
+            ))
+            db.commit()
+
+        try:
+            runner = AppRunner()
+            runner.engine.params = StrategyParams(
+                symbol="NVDA.US",
+                market="US",
+                buy_low=196,
+                sell_high=199,
+            )
+            runner.risk.pause(reason)
+            with database.SessionLocal() as db:
+                def fail_commit() -> None:
+                    db.flush()
+                    raise RuntimeError("commit interrupted")
+
+                monkeypatch.setattr(db, "commit", fail_commit)
+
+                with pytest.raises(RuntimeError, match="commit interrupted"):
+                    runner._resume_pending_timeout_pause_if_filled(db)
+
+                assert runner.risk.paused is True
+                assert runner.risk.pause_reason == reason
+                assert runner.risk.check().approved is False
+        finally:
+            with database.SessionLocal() as db:
+                db.query(OrderRecord).filter(
+                    OrderRecord.broker_order_id == order_id
+                ).delete(synchronize_session=False)
+                db.commit()
 
     def test_unrealized_loss_guard_pauses_when_combined_daily_loss_reaches_limit(self) -> None:
         runner = AppRunner()
