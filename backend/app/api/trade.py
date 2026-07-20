@@ -20,7 +20,7 @@ from app.core.audit import AuditLogger
 from app.database import SessionLocal, get_db
 from app.models import AuditLog, OrderRecord, TradeEvent
 from app.runner import get_runner
-from app.schemas import AccountResponse, CashBalanceSchema, ControlRequest, MessageResponse, OrderCancelResponse, OrderPageResponse, OrderResponse, PositionSchema, TradeEventPageResponse
+from app.schemas import AccountResponse, CashBalanceSchema, ControlRequest, MessageResponse, OrderCancelAllRequest, OrderCancelAllResponse, OrderCancelFailure, OrderCancelResponse, OrderPageResponse, OrderResponse, PositionSchema, TradeEventPageResponse
 from app.services.event_list_service import list_timeline_events
 from app.services.strategy_service import StrategyService
 from app.services.trade_event_service import decode_event_payload, record_trade_event
@@ -544,6 +544,88 @@ def export_audit_logs(
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+@router.post("/orders/cancel-all", response_model=OrderCancelAllResponse, dependencies=[Depends(require_api_key())])
+def cancel_all_orders(
+    request: Request,
+    payload: OrderCancelAllRequest | None = None,
+    db: Session = Depends(get_db),
+    audit: AuditLogger = Depends(get_audit_logger),
+) -> OrderCancelAllResponse:
+    actor_hash, source_ip = extract_actor(request)
+    target_symbol = (
+        payload.symbol.strip().upper()
+        if payload is not None and payload.symbol
+        else StrategyService(db).resolve_primary_symbol()
+    )
+    cancelled = 0
+    failed: list[OrderCancelFailure] = []
+    skipped = 0
+    total_pending = 0
+    audit_result = "SUCCESS"
+    try:
+        runner = get_runner()
+        broker_orders = runner.broker.get_today_orders()
+        for order in broker_orders:
+            if str(getattr(order, "symbol", "") or "").strip().upper() != target_symbol:
+                continue
+            status = str(getattr(order, "status", "SUBMITTED") or "SUBMITTED").upper()
+            if status not in _LIVE_ORDER_STATUSES:
+                skipped += 1
+                continue
+            total_pending += 1
+            order_id = str(getattr(order, "broker_order_id", "") or "").strip()
+            try:
+                cancel_by_id = getattr(runner, "cancel_order_by_id", None)
+                status_result = (
+                    cancel_by_id(order_id)
+                    if callable(cancel_by_id)
+                    else runner.broker.cancel_order(order_id)
+                )
+                result_status = str(getattr(status_result, "status", "CANCELLED") or "CANCELLED").upper()
+                if result_status in {"CANCEL_FAILED", "NO_PENDING_ORDER", "RECONCILE_IN_FLIGHT"}:
+                    failed.append(OrderCancelFailure(order_id=order_id, error="cancel order failed"))
+                    continue
+                cancelled += 1
+                try:
+                    _update_local_order_from_status(db, order_id, status_result)
+                except Exception as exc:
+                    logger.error(
+                        "broker cancel succeeded for order %s but local DB update failed: %s — will self-heal on next broker sync",
+                        order_id,
+                        exc,
+                    )
+            except Exception as exc:
+                logger.exception("failed to cancel order %s in bulk request", order_id)
+                failed.append(OrderCancelFailure(order_id=order_id, error=str(exc)))
+        if failed:
+            audit_result = "FAILED"
+        return OrderCancelAllResponse(
+            cancelled=cancelled,
+            failed=failed,
+            skipped=skipped,
+            total_pending=total_pending,
+        )
+    except Exception as exc:
+        audit_result = "FAILED"
+        logger.exception("unexpected cancel-all orders failure")
+        raise HTTPException(status_code=500, detail="cancel all orders failed") from exc
+    finally:
+        audit.record(
+            "ORDER_CANCEL_ALL",
+            severity="INFO",
+            actor_hash=actor_hash,
+            source_ip=source_ip,
+            request_summary={
+                "symbol": target_symbol,
+                "cancelled": cancelled,
+                "failed": len(failed),
+                "skipped": skipped,
+                "total_pending": total_pending,
+            },
+            result=audit_result,
+        )
 
 
 @router.post("/orders/{order_id}/cancel", response_model=OrderCancelResponse, dependencies=[Depends(require_api_key())])

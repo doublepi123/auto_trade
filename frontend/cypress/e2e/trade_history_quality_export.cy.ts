@@ -1,9 +1,9 @@
-describe('TradeHistory Fill Quality, Note Filter & Round-trip Export', () => {
+describe('TradeHistory Fill Quality, Note Filter & Closed-trade Export', () => {
   beforeEach(() => {
     cy.stubApi()
     // Register the closed-trades override BEFORE visiting so it shadows the
     // support stub for the mount-time loadClosedTrades() request.
-    cy.intercept('GET', '/api/trades*', {
+    cy.intercept({ method: 'GET', pathname: '/api/trades' }, {
       body: {
         items: [
           {
@@ -33,10 +33,23 @@ describe('TradeHistory Fill Quality, Note Filter & Round-trip Export', () => {
     cy.get('.orders-page .el-table').should('contain', 'AAPL.US')
   })
 
-  it('exports the filtered round-trips as CSV', () => {
+  it('exports the active closed-trade filters as backend CSV', () => {
+    cy.intercept('GET', '/api/trades/export*', (req) => {
+      expect(req.query.format).to.eq('csv')
+      expect(req.query.symbol).to.eq('AAPL.US')
+      expect(req.query.from_date).to.eq('2026-01-01')
+      expect(req.query.to_date).to.eq('2026-01-31')
+      req.reply({
+        body: 'symbol,net_pnl\nAAPL.US,197.8\n',
+        headers: { 'content-type': 'text/csv' },
+      })
+    }).as('exportClosedTrades')
     cy.contains('已实现成交（往返配对').click()
     cy.get('[data-testid="roundtrips-table"]').should('be.visible')
-    cy.get('[data-testid="roundtrips-export-csv"]').should('not.be.disabled').click()
-    cy.document().its('body').should('contain', '已导出 1 条往返')
+    cy.get('[data-testid="roundtrip-symbol-search"]').type('AAPL.US')
+    cy.get('.roundtrips-controls .el-date-editor').eq(0).find('input').type('2026-01-01{enter}')
+    cy.get('.roundtrips-controls .el-date-editor').eq(1).find('input').type('2026-01-31{enter}')
+    cy.get('[data-testid="trades-export-csv"]').should('not.be.disabled').click()
+    cy.wait('@exportClosedTrades')
   })
 })

@@ -1,5 +1,5 @@
 import { api } from './client'
-import type { AccountInfo, OrderCancelResult, OrderPage } from '../types'
+import type { AccountInfo, OrderCancelAllResult, OrderCancelResult, OrderPage } from '../types'
 
 export interface GetOrdersParams {
   scope?: 'today' | 'history'
@@ -26,6 +26,11 @@ export async function getOrders(params: GetOrdersParams | number = {}): Promise<
 
 export async function cancelOrder(orderId: string): Promise<OrderCancelResult> {
   const resp = await api.post(`/api/orders/${encodeURIComponent(orderId)}/cancel`)
+  return resp.data
+}
+
+export async function cancelAllOrders(symbol?: string): Promise<OrderCancelAllResult> {
+  const resp = await api.post('/api/orders/cancel-all', symbol ? { symbol } : undefined)
   return resp.data
 }
 

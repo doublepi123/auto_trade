@@ -1,3 +1,4 @@
+import json
 import time
 from datetime import datetime, time as datetime_time, timedelta, timezone
 from types import SimpleNamespace
@@ -441,11 +442,49 @@ class TestAPI:
 
         assert resp.status_code == 422
 
-    def test_get_status(self) -> None:
+    def test_get_status(self, monkeypatch) -> None:
+        from app.core.risk import RiskController
+
+        _clean_runtime_state()
+        risk = RiskController()
+        risk.restore_drawdown_state(
+            cumulative_realized_pnl=750.0,
+            peak_realized_pnl=1000.0,
+        )
+        monkeypatch.setattr(
+            strategy_api,
+            "get_runner",
+            lambda: SimpleNamespace(
+                risk=risk,
+                is_running=True,
+                last_action_message="",
+            ),
+        )
         resp = client.get("/api/status")
         assert resp.status_code == 200
         data = resp.json()
         assert "engine_state" in data
+        assert data["cumulative_realized_pnl"] == 750.0
+        assert data["peak_realized_pnl"] == 1000.0
+        assert data["drawdown_amount"] == 250.0
+
+    def test_strategy_null_disables_drawdown_limit(self) -> None:
+        _clean_strategy()
+        assert client.put("/api/strategy", json={
+            "symbol": "AAPL.US",
+            "market": "US",
+            "buy_low": 100.0,
+            "sell_high": 200.0,
+            "max_drawdown_amount": 500.0,
+        }).status_code == 200
+
+        response = client.put(
+            "/api/strategy",
+            json={"max_drawdown_amount": None},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["max_drawdown_amount"] is None
 
     def test_get_status_recomputes_daily_pnl_from_filled_orders(self) -> None:
         _clean_orders()
@@ -1155,6 +1194,225 @@ class TestAPI:
             assert event.event_type == "ORDER_CANCELLED"
             assert event.status == "CANCELLED"
 
+    def test_cancel_all_orders_cancels_only_pending_for_current_symbol(self, monkeypatch) -> None:
+        _clean_strategy()
+        _clean_orders()
+        _clean_trade_events()
+        _clean_audit_logs()
+        with SessionLocal() as db:
+            db.add_all([
+                OrderRecord(broker_order_id="pending-1", symbol="NVDA.US", side="BUY", quantity=1, price=100, status="SUBMITTED"),
+                OrderRecord(broker_order_id="pending-2", symbol="NVDA.US", side="SELL", quantity=2, price=101, status="PARTIAL_FILLED"),
+                OrderRecord(broker_order_id="pending-3", symbol="NVDA.US", side="BUY", quantity=3, price=102, status="SUBMITTED"),
+                OrderRecord(broker_order_id="filled-1", symbol="NVDA.US", side="BUY", quantity=4, price=103, status="FILLED"),
+            ])
+            config = StrategyService(db).get_config()
+            config.symbol = "NVDA.US"
+            db.commit()
+
+        broker_orders = [
+            SimpleNamespace(broker_order_id="pending-1", symbol="NVDA.US", status="SUBMITTED"),
+            SimpleNamespace(broker_order_id="pending-2", symbol="NVDA.US", status="PARTIAL_FILLED"),
+            SimpleNamespace(broker_order_id="pending-3", symbol="NVDA.US", status="SUBMITTED"),
+            SimpleNamespace(broker_order_id="filled-1", symbol="NVDA.US", status="FILLED"),
+            SimpleNamespace(broker_order_id="other-symbol", symbol="AAPL.US", status="SUBMITTED"),
+        ]
+        cancelled: list[str] = []
+
+        class Broker:
+            def get_today_orders(self):
+                return broker_orders
+
+        class Runner:
+            broker = Broker()
+
+            def cancel_order_by_id(self, order_id: str):
+                cancelled.append(order_id)
+                return SimpleNamespace(
+                    broker_order_id=order_id,
+                    status="CANCELLED",
+                    executed_quantity=0,
+                    executed_price=0,
+                )
+
+        monkeypatch.setattr(trade_api, "get_runner", lambda: Runner())
+
+        response = client.post("/api/orders/cancel-all")
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "cancelled": 3,
+            "failed": [],
+            "skipped": 1,
+            "total_pending": 3,
+        }
+        assert cancelled == ["pending-1", "pending-2", "pending-3"]
+        with SessionLocal() as db:
+            filled = db.query(OrderRecord).filter_by(broker_order_id="filled-1").one()
+            assert filled.status == "FILLED"
+
+    def test_cancel_all_orders_collects_per_order_failure_and_returns_200(self, monkeypatch) -> None:
+        _clean_strategy()
+        _clean_orders()
+        _clean_audit_logs()
+        with SessionLocal() as db:
+            config = StrategyService(db).get_config()
+            config.symbol = "NVDA.US"
+            db.commit()
+
+        class Broker:
+            def get_today_orders(self):
+                return [
+                    SimpleNamespace(broker_order_id="pending-ok", symbol="NVDA.US", status="SUBMITTED"),
+                    SimpleNamespace(broker_order_id="pending-fail", symbol="NVDA.US", status="SUBMITTED"),
+                ]
+
+        class Runner:
+            broker = Broker()
+
+            def cancel_order_by_id(self, order_id: str):
+                if order_id == "pending-fail":
+                    raise RuntimeError("broker unavailable")
+                return SimpleNamespace(
+                    broker_order_id=order_id,
+                    status="CANCELLED",
+                    executed_quantity=0,
+                    executed_price=0,
+                )
+
+        monkeypatch.setattr(trade_api, "get_runner", lambda: Runner())
+
+        response = client.post("/api/orders/cancel-all")
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "cancelled": 1,
+            "failed": [{"order_id": "pending-fail", "error": "broker unavailable"}],
+            "skipped": 0,
+            "total_pending": 2,
+        }
+
+    def test_cancel_all_orders_returns_zeros_when_symbol_has_no_pending_orders(self, monkeypatch) -> None:
+        _clean_strategy()
+        _clean_orders()
+        _clean_audit_logs()
+        with SessionLocal() as db:
+            config = StrategyService(db).get_config()
+            config.symbol = "NVDA.US"
+            db.commit()
+
+        class Broker:
+            def get_today_orders(self):
+                return []
+
+        runner = SimpleNamespace(broker=Broker(), cancel_order_by_id=lambda _order_id: None)
+        monkeypatch.setattr(trade_api, "get_runner", lambda: runner)
+
+        response = client.post("/api/orders/cancel-all")
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "cancelled": 0,
+            "failed": [],
+            "skipped": 0,
+            "total_pending": 0,
+        }
+
+    def test_cancel_all_orders_writes_one_count_only_audit_row(self, monkeypatch) -> None:
+        _clean_strategy()
+        _clean_orders()
+        _clean_audit_logs()
+        with SessionLocal() as db:
+            config = StrategyService(db).get_config()
+            config.symbol = "NVDA.US"
+            db.commit()
+
+        class Broker:
+            def get_today_orders(self):
+                return [
+                    SimpleNamespace(broker_order_id="audit-pending", symbol="NVDA.US", status="SUBMITTED"),
+                    SimpleNamespace(broker_order_id="audit-filled", symbol="NVDA.US", status="FILLED"),
+                ]
+
+        class Runner:
+            broker = Broker()
+
+            def cancel_order_by_id(self, order_id: str):
+                return SimpleNamespace(
+                    broker_order_id=order_id,
+                    status="CANCELLED",
+                    executed_quantity=0,
+                    executed_price=0,
+                )
+
+        monkeypatch.setattr(trade_api, "get_runner", lambda: Runner())
+
+        response = client.post("/api/orders/cancel-all")
+
+        assert response.status_code == 200
+        with SessionLocal() as db:
+            rows = db.query(AuditLog).filter_by(action="ORDER_CANCEL_ALL").all()
+            assert len(rows) == 1
+            summary = json.loads(rows[0].request_summary)
+            assert summary == {
+                "symbol": "NVDA.US",
+                "cancelled": 1,
+                "failed": 0,
+                "skipped": 1,
+                "total_pending": 1,
+            }
+            assert "audit-pending" not in rows[0].request_summary
+            assert rows[0].result == "SUCCESS"
+
+    def test_cancel_all_orders_requires_api_key_when_configured(self, monkeypatch) -> None:
+        from app.config import settings
+
+        monkeypatch.setattr(settings, "api_key", "bulk-cancel-secret")
+
+        response = client.post("/api/orders/cancel-all")
+
+        assert response.status_code == 401
+
+    def test_cancel_all_orders_optional_symbol_overrides_current_strategy(self, monkeypatch) -> None:
+        _clean_strategy()
+        _clean_orders()
+        _clean_audit_logs()
+        with SessionLocal() as db:
+            config = StrategyService(db).get_config()
+            config.symbol = "NVDA.US"
+            db.commit()
+
+        cancelled: list[str] = []
+
+        class Broker:
+            def get_today_orders(self):
+                return [
+                    SimpleNamespace(broker_order_id="primary-pending", symbol="NVDA.US", status="SUBMITTED"),
+                    SimpleNamespace(broker_order_id="override-pending", symbol="AAPL.US", status="SUBMITTED"),
+                ]
+
+            def cancel_order(self, order_id: str):
+                cancelled.append(order_id)
+                return SimpleNamespace(
+                    broker_order_id=order_id,
+                    status="CANCELLED",
+                    executed_quantity=0,
+                    executed_price=0,
+                )
+
+        monkeypatch.setattr(trade_api, "get_runner", lambda: SimpleNamespace(broker=Broker()))
+
+        response = client.post("/api/orders/cancel-all", json={"symbol": "aapl.us"})
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "cancelled": 1,
+            "failed": [],
+            "skipped": 0,
+            "total_pending": 1,
+        }
+        assert cancelled == ["override-pending"]
+
     def test_local_order_status_merge_does_not_regress_terminal_fill(self) -> None:
         _clean_orders()
         _clean_trade_events()
@@ -1377,6 +1635,8 @@ class TestAPI:
                     "quotes_subscribed": True,
                     "trigger_in_flight": False,
                     "pending_order_symbols": ["AAPL.US"],
+                    "dedup_suppressed_total": 7,
+                    "dedup_window_seconds": 45.0,
                     "live_safety": {
                         "short_entries_enabled": False,
                         "allow_position_addons": False,
@@ -1439,6 +1699,8 @@ class TestAPI:
         assert data["live_safety"]["short_entries_enabled"] is False
         assert data["live_safety"]["max_position_notional"] == 5000.0
         assert data["live_safety"]["llm_shadow_mode"] is True
+        assert data["dedup_suppressed_total"] == 7
+        assert data["dedup_window_seconds"] == 45.0
         assert data["symbol_runtimes"][1]["symbol"] == "AAPL.US"
         assert data["symbol_runtimes"][1]["has_pending_order"] is True
 

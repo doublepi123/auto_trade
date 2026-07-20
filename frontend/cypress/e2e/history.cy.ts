@@ -72,9 +72,89 @@ describe('History', () => {
     cy.contains('今日订单').should('be.visible')
     cy.contains('manual-1').should('be.visible')
     cy.contains('broker').should('be.visible')
-    cy.contains('button', '撤单').click()
+    cy.contains('button', /^\s*撤单\s*$/).click()
     cy.wait('@cancelOrder')
     cy.contains('撤单成功').should('be.visible')
+  })
+
+  it('cancels all pending today orders and refreshes the list', () => {
+    cy.stubApi()
+    let orderRequestCount = 0
+    cy.intercept('GET', '/api/orders*', (req) => {
+      orderRequestCount += 1
+      req.reply({
+        body: {
+          items: orderRequestCount === 1
+            ? [
+                {
+                  id: 1,
+                  broker_order_id: 'pending-1',
+                  symbol: 'NVDA.US',
+                  side: 'BUY',
+                  quantity: 2,
+                  price: 220.5,
+                  executed_quantity: 0,
+                  executed_price: 0,
+                  status: 'SUBMITTED',
+                  created_at: '2026-05-22T13:00:00Z',
+                  filled_at: null,
+                  source: 'broker',
+                  cancellable: true,
+                },
+              ]
+            : [],
+          total: orderRequestCount === 1 ? 1 : 0,
+          page: 1,
+          page_size: 10,
+          scope: 'today',
+        },
+      })
+    }).as('todayOrders')
+    cy.intercept('POST', '/api/orders/cancel-all', {
+      body: { cancelled: 2, failed: [], skipped: 1, total_pending: 3 },
+    }).as('cancelAllOrders')
+
+    cy.visit('/#/history')
+    cy.wait('@todayOrders')
+    cy.get('[data-testid="cancel-all-orders"]').should('be.enabled').click()
+    cy.contains('.el-message-box', '确认全部撤单').should('be.visible')
+    cy.contains('.el-message-box button', '确认撤单').click()
+    cy.wait('@cancelAllOrders')
+    cy.wait('@todayOrders')
+    cy.contains('已撤 2 单，失败 0 单').should('be.visible')
+  })
+
+  it('disables bulk cancellation when today has no pending orders', () => {
+    cy.stubApi()
+    cy.intercept('GET', '/api/orders*', {
+      body: {
+        items: [
+          {
+            id: 1,
+            broker_order_id: 'filled-1',
+            symbol: 'NVDA.US',
+            side: 'BUY',
+            quantity: 2,
+            price: 220.5,
+            executed_quantity: 2,
+            executed_price: 220.5,
+            status: 'FILLED',
+            created_at: '2026-05-22T13:00:00Z',
+            filled_at: '2026-05-22T13:01:00Z',
+            source: 'broker',
+            cancellable: false,
+          },
+        ],
+        total: 1,
+        page: 1,
+        page_size: 10,
+        scope: 'today',
+      },
+    }).as('todayOrders')
+
+    cy.visit('/#/history')
+    cy.wait('@todayOrders')
+    cy.get('[data-testid="cancel-all-orders"]').should('be.disabled')
   })
 
   it('renders trade-note analytics when notes exist', () => {

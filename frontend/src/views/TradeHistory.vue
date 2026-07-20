@@ -22,7 +22,20 @@
       </div>
     </div>
     <div class="orders-toolbar">
-      <el-checkbox v-model="onlyWithNotes" data-testid="orders-only-notes">仅看有笔记 ({{ notesByOrder.size }})</el-checkbox>
+      <el-space wrap>
+        <el-checkbox v-model="onlyWithNotes" data-testid="orders-only-notes">仅看有笔记 ({{ notesByOrder.size }})</el-checkbox>
+        <el-button
+          v-if="scope === 'today'"
+          type="danger"
+          :loading="cancellingAllOrders"
+          :disabled="cancellingAllOrders || !hasPendingTodayOrders"
+          data-testid="cancel-all-orders"
+          @click="handleCancelAll"
+        >
+          全部撤单
+        </el-button>
+        <el-button @click="loadOrders(true)" :loading="loading">刷新</el-button>
+      </el-space>
     </div>
     <el-table :data="filteredOrders" stripe style="width: 100%" v-loading="loading" @row-click="openOrderDrawer">
       <el-table-column prop="broker_order_id" label="订单号" width="210">
@@ -109,7 +122,6 @@
       </el-table-column>
     </el-table>
     <div class="orders-footer">
-      <el-button @click="loadOrders(true)" :loading="loading">刷新</el-button>
       <el-pagination
         background
         layout="total, sizes, prev, pager, next"
@@ -160,13 +172,7 @@
           <el-date-picker v-model="rtFromDate" type="date" value-format="YYYY-MM-DD" placeholder="开始日期" size="small" />
           <el-date-picker v-model="rtToDate" type="date" value-format="YYYY-MM-DD" placeholder="结束日期" size="small" />
           <el-button size="small" type="primary" :loading="rtLoading" data-testid="load-roundtrips" @click="loadTradeData">拉取</el-button>
-          <el-button
-            size="small"
-            plain
-            :disabled="filteredClosedTrades.length === 0"
-            data-testid="roundtrips-export-csv"
-            @click="exportRoundTrips"
-          >导出 CSV</el-button>
+          <el-button size="small" plain :loading="rtExporting" data-testid="trades-export-csv" @click="exportClosedTradesCsv">导出 CSV</el-button>
           <span class="muted">按平仓时间，最近优先；筛选仅作用于当前已加载前 200 条</span>
         </div>
         <div class="roundtrips-summary" data-testid="roundtrip-summary">{{ roundTripSummaryText }}</div>
@@ -441,10 +447,12 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import {
+  cancelAllOrders,
   cancelOrder,
   deleteTradeNote,
+  exportClosedTrades,
   getClosedTrades,
   getOrders,
   getTradeCalendar,
@@ -471,12 +479,12 @@ import type {
 } from '../types'
 import { orderSideLabel, orderStatusLabel } from '../utils/labels'
 import { resolveErrorMessage } from '../utils/error'
-import { downloadCsv } from '../utils/csv'
 import CopyButton from '../components/CopyButton.vue'
 
 const orders = ref<OrderRecord[]>([])
 const loading = ref(false)
 const cancellingOrderId = ref('')
+const cancellingAllOrders = ref(false)
 const scope = ref<'today' | 'history'>('today')
 const page = ref(1)
 const pageSize = ref(10)
@@ -487,6 +495,7 @@ const filteredOrders = computed(() => {
   if (!onlyWithNotes.value) return orders.value
   return orders.value.filter((o) => notesByOrder.value.has(o.id))
 })
+const hasPendingTodayOrders = computed(() => scope.value === 'today' && orders.value.some((order) => order.cancellable))
 
 /** Signed fill-quality slippage, normalized so POSITIVE = adverse for the side:
  * a BUY filling above its limit, or a SELL filling below. Negative = favorable.
@@ -509,6 +518,7 @@ const noteAnalytics = ref<TradeNoteAnalytics | null>(null)
 // ---- Closed round-trip trades (entry <-> exit pairing) ----
 const closedTrades = ref<ClosedTrade[]>([])
 const rtLoading = ref(false)
+const rtExporting = ref(false)
 const rtFromDate = ref('')
 const rtToDate = ref('')
 const rtTotal = ref(0)
@@ -764,55 +774,32 @@ function formatLatency(ms: number): string {
   return ms >= 1000 ? `${(ms / 1000).toFixed(2)}s` : `${ms.toFixed(0)}ms`
 }
 
-/** Client-side export of the currently filtered round-trip trades only. */
-function exportRoundTrips() {
-  const rows = filteredClosedTrades.value.map((t) => ({
-    symbol: t.symbol,
-    side: t.side,
-    entry_price: t.entry_price.toFixed(4),
-    exit_price: t.exit_price.toFixed(4),
-    quantity: t.quantity,
-    gross_pnl: t.gross_pnl.toFixed(2),
-    est_fees: t.est_fees.toFixed(2),
-    fee_source: t.fee_source,
-    net_pnl: t.net_pnl.toFixed(2),
-    slippage_bps: t.slippage_bps?.toFixed(4) ?? '',
-    ack_latency_ms: t.ack_latency_ms?.toFixed(2) ?? '',
-    fill_latency_ms: t.fill_latency_ms?.toFixed(2) ?? '',
-    mfe_pct: t.mfe_pct?.toFixed(4) ?? '',
-    mae_pct: t.mae_pct?.toFixed(4) ?? '',
-    exit_cause: t.exit_cause,
-    exit_reason: t.exit_reason,
-    holding_seconds: t.holding_seconds,
-    entry_at: t.entry_at,
-    exit_at: t.exit_at,
-    entry_order_id: t.entry_order_id,
-    exit_order_id: t.exit_order_id,
-  }))
-  downloadCsv('round_trips.csv', [
-    { key: 'symbol', label: 'symbol' },
-    { key: 'side', label: 'side' },
-    { key: 'entry_price', label: 'entry_price' },
-    { key: 'exit_price', label: 'exit_price' },
-    { key: 'quantity', label: 'quantity' },
-    { key: 'gross_pnl', label: 'gross_pnl' },
-    { key: 'est_fees', label: 'est_fees' },
-    { key: 'fee_source', label: 'fee_source' },
-    { key: 'net_pnl', label: 'net_pnl' },
-    { key: 'slippage_bps', label: 'slippage_bps' },
-    { key: 'ack_latency_ms', label: 'ack_latency_ms' },
-    { key: 'fill_latency_ms', label: 'fill_latency_ms' },
-    { key: 'mfe_pct', label: 'mfe_pct' },
-    { key: 'mae_pct', label: 'mae_pct' },
-    { key: 'exit_cause', label: 'exit_cause' },
-    { key: 'exit_reason', label: 'exit_reason' },
-    { key: 'holding_seconds', label: 'holding_seconds' },
-    { key: 'entry_at', label: 'entry_at' },
-    { key: 'exit_at', label: 'exit_at' },
-    { key: 'entry_order_id', label: 'entry_order_id' },
-    { key: 'exit_order_id', label: 'exit_order_id' },
-  ], rows)
-  ElMessage.success(`已导出 ${rows.length} 条往返`)
+async function exportClosedTradesCsv() {
+  rtExporting.value = true
+  try {
+    const blob = await exportClosedTrades({
+      ...(roundTripSymbolSearch.value.trim() ? { symbol: roundTripSymbolSearch.value.trim() } : {}),
+      ...(rtFromDate.value ? { from_date: rtFromDate.value } : {}),
+      ...(rtToDate.value ? { to_date: rtToDate.value } : {}),
+    })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `trades_${new Date().toISOString().slice(0, 10)}.csv`
+    document.body.appendChild(link)
+    const cleanup = () => {
+      URL.revokeObjectURL(url)
+      link.removeEventListener('click', cleanup)
+      if (link.parentNode) link.parentNode.removeChild(link)
+    }
+    link.addEventListener('click', cleanup)
+    link.click()
+    setTimeout(cleanup, 1000)
+  } catch (e) {
+    ElMessage.error(resolveErrorMessage(e, '导出 CSV 失败'))
+  } finally {
+    rtExporting.value = false
+  }
 }
 
 function formatPercent(v: number): string {
@@ -861,6 +848,30 @@ async function handleCancel(row: OrderRecord) {
     ElMessage.error('撤单失败')
   } finally {
     cancellingOrderId.value = ''
+  }
+}
+
+async function handleCancelAll() {
+  try {
+    await ElMessageBox.confirm(
+      `确定要撤销今日全部 ${orders.value.filter((order) => order.cancellable).length} 笔挂单吗？`,
+      '确认全部撤单',
+      { type: 'warning', confirmButtonText: '确认撤单', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+
+  cancellingAllOrders.value = true
+  try {
+    const result = await cancelAllOrders()
+    ElMessage.success(`已撤 ${result.cancelled} 单，失败 ${result.failed.length} 单`)
+    await loadOrders()
+  } catch (e) {
+    console.error('全部撤单失败：', e)
+    ElMessage.error('全部撤单失败')
+  } finally {
+    cancellingAllOrders.value = false
   }
 }
 
