@@ -21,6 +21,14 @@ export async function getClosedTrades(params: ClosedTradeQuery = {}): Promise<Cl
   return resp.data
 }
 
+export async function exportClosedTrades(params: ClosedTradeQuery = {}): Promise<Blob> {
+  const resp = await api.get('/api/trades/export', {
+    params: { ...params, format: 'csv' },
+    responseType: 'blob',
+  })
+  return resp.data
+}
+
 export interface TradeStatsQuery {
   symbol?: string
   days?: number

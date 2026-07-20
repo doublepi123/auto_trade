@@ -2,14 +2,14 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Response
 from sqlalchemy.orm import Session
 
 from app.api.auth import require_api_key
+from app.api.trade_export import build_closed_trade_items, closed_trade_export_response
 from app.database import get_db
 from app.models import StrategyConfig
 from app.schemas import (
-    ClosedTrade,
     ClosedTradePage,
     TradeCalendarDay,
     TradeCalendarResponse,
@@ -23,7 +23,7 @@ from app.schemas import (
     TradeWeekdayAttributionRow,
     TradeWeekdayAttributionResponse,
 )
-from app.services.daily_pnl_service import DailyPnlService
+from app.services.daily_pnl_service import ClosedRoundTrip, DailyPnlService
 from app.services.trade_analytics_service import (
     compute_hold_duration_buckets,
     compute_monthly_summary,
@@ -40,6 +40,7 @@ router = APIRouter(
 )
 
 _MAX_LIMIT = 500
+_MAX_EXPORT_LIMIT = 10_000
 _DATE_PATTERN = r"^\d{4}-\d{2}-\d{2}$"
 
 
@@ -69,7 +70,7 @@ def _closed_trips(
     symbol: str | None = None,
     from_date: str | None = None,
     to_date: str | None = None,
-):
+) -> list[ClosedRoundTrip]:
     fee_rate_us, fee_rate_hk = _active_fee_rates(db)
     return DailyPnlService(db).pair_round_trips(
         symbol=symbol,
@@ -179,6 +180,22 @@ def trade_stats(
     return TradeStats.model_validate(compute_trade_stats(trips))
 
 
+@router.get("/export")
+def export_closed_trades(
+    format: str = Query(default="csv", pattern="^(csv|json)$"),
+    symbol: str | None = Query(default=None, description="Filter by symbol (e.g. AAPL.US)"),
+    from_date: str | None = Query(default=None, description="Exit-time lower bound (YYYY-MM-DD)", pattern=_DATE_PATTERN),
+    to_date: str | None = Query(default=None, description="Exit-time upper bound (YYYY-MM-DD)", pattern=_DATE_PATTERN),
+    limit: int = Query(default=1000, ge=1, le=_MAX_EXPORT_LIMIT),
+    db: Session = Depends(get_db),
+) -> Response:
+    items = build_closed_trade_items(
+        _closed_trips(db, symbol=symbol, from_date=from_date, to_date=to_date),
+        limit,
+    )
+    return closed_trade_export_response(items, format)
+
+
 @router.get("", response_model=ClosedTradePage)
 def list_closed_trades(
     symbol: str | None = Query(default=None, description="Filter by symbol (e.g. AAPL.US)"),
@@ -195,46 +212,9 @@ def list_closed_trades(
     is included even if its entry pre-dates it. ``net_pnl`` prefers actual
     broker charges and otherwise uses the fee estimate frozen at submission.
     """
-    fee_rate_us, fee_rate_hk = _active_fee_rates(db)
-    trips = DailyPnlService(db).pair_round_trips(
-        symbol=symbol,
-        from_dt=_day_bound(from_date, end_of_day=False),
-        to_dt=_day_bound(to_date, end_of_day=True),
-        fee_rate_us=fee_rate_us,
-        fee_rate_hk=fee_rate_hk,
-    )
+    trips = _closed_trips(db, symbol=symbol, from_date=from_date, to_date=to_date)
     total = len(trips)
-    trips = sorted(trips, key=lambda t: t.exit_at, reverse=True)[:limit]
     return ClosedTradePage(
-        items=[
-            ClosedTrade(
-                symbol=t.symbol,
-                side=t.side,
-                entry_order_id=t.entry_order_id,
-                exit_order_id=t.exit_order_id,
-                entry_at=t.entry_at,
-                exit_at=t.exit_at,
-                entry_price=t.entry_price,
-                exit_price=t.exit_price,
-                quantity=t.quantity,
-                gross_pnl=round(t.gross_pnl, 2),
-                est_fees=round(t.est_fees, 2),
-                net_pnl=round(t.net_pnl, 2),
-                holding_seconds=t.holding_seconds,
-                fee_source=t.fee_source,
-                actual_fees=t.actual_fees,
-                slippage_amount=t.slippage_amount,
-                slippage_bps=t.slippage_bps,
-                ack_latency_ms=t.ack_latency_ms,
-                fill_latency_ms=t.fill_latency_ms,
-                exit_cause=t.exit_cause,
-                exit_reason=t.exit_reason,
-                mfe_amount=t.mfe_amount,
-                mae_amount=t.mae_amount,
-                mfe_pct=t.mfe_pct,
-                mae_pct=t.mae_pct,
-            )
-            for t in trips
-        ],
+        items=build_closed_trade_items(trips, limit),
         total=total,
     )
