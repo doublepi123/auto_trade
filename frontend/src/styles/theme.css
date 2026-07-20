@@ -1,0 +1,37 @@
+:root {
+  color-scheme: light;
+  --app-background: #f5f7fa;
+  --chart-surface: #fff;
+  --chart-border: #e1e7f0;
+  --chart-heading: #172033;
+  --chart-muted: #6b7280;
+  --chart-axis: #d8e0ec;
+  --chart-label: #7a8595;
+  --chart-marker-stroke: #fff;
+  --chart-zero: #d1d5db;
+}
+
+html.dark {
+  color-scheme: dark;
+  --app-background: #141414;
+  --chart-surface: var(--el-bg-color-overlay);
+  --chart-border: var(--el-border-color);
+  --chart-heading: var(--el-text-color-primary);
+  --chart-muted: var(--el-text-color-secondary);
+  --chart-axis: var(--el-border-color);
+  --chart-label: var(--el-text-color-secondary);
+  --chart-marker-stroke: var(--el-bg-color-overlay);
+  --chart-zero: var(--el-border-color);
+}
+
+html,
+body,
+#app {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--app-background);
+  color: var(--el-text-color-primary);
+}

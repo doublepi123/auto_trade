@@ -93,8 +93,16 @@
           >通知偏好</el-button
         >
         <el-button size="small" text data-testid="nav-shortcuts" @click="shortcutsVisible = true">快捷键</el-button>
-        <el-button size="small" text data-testid="nav-theme-toggle" @click="toggleDark">
-          {{ isDark ? '☀️ 亮色' : '🌙 深色' }}
+        <el-button
+          size="small"
+          text
+          circle
+          data-testid="theme-toggle"
+          :aria-label="isDark ? '切换至亮色模式' : '切换至深色模式'"
+          :title="isDark ? '切换至亮色模式' : '切换至深色模式'"
+          @click="toggleTheme"
+        >
+          <el-icon><Sunny v-if="isDark" /><Moon v-else /></el-icon>
         </el-button>
       </div>
     </el-header>
@@ -199,7 +207,7 @@
 import { defineAsyncComponent, computed, ref, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { Odometer, Setting, List, Clock, Key, TrendCharts } from '@element-plus/icons-vue'
+import { Clock, Key, List, Moon, Odometer, Setting, Sunny, TrendCharts } from '@element-plus/icons-vue'
 import { useNotificationStream } from './composables/useNotificationStream'
 import { useNotificationBadge } from './composables/useNotificationBadge'
 import { useConnectionHealth } from './composables/useConnectionHealth'
@@ -207,6 +215,7 @@ import { useMarketSession } from './composables/useMarketSession'
 import { useCommandPalette } from './composables/useCommandPalette'
 import { useRecentPages } from './composables/useRecentPages'
 import { useDensity } from './composables/useDensity'
+import { useTheme } from './composables/useTheme'
 import MetricStat from './components/MetricStat.vue'
 import CommandPalette from './components/CommandPalette.vue'
 import { engineStateLabel } from './utils/labels'
@@ -226,6 +235,7 @@ const health = useConnectionHealth()
 const palette = useCommandPalette()
 const { recordVisit } = useRecentPages()
 const { size: densitySize, cycleDensity } = useDensity()
+const { isDark, toggleTheme } = useTheme()
 const densityLabel = computed(() => {
   switch (densitySize.value) {
     case 'small':
@@ -340,17 +350,6 @@ async function copyHealthSnapshot(): Promise<void> {
 const MOBILE_BREAKPOINT = 768
 const isMobile = ref(window.innerWidth <= MOBILE_BREAKPOINT)
 
-// Dark mode persisted to localStorage; Element Plus dark CSS vars are imported
-// in main.ts and recolor when <html class="dark"> is present.
-const DARK_KEY = 'auto_trade.theme.dark'
-const isDark = ref(false)
-function applyDark(value: boolean) {
-  isDark.value = value
-  document.documentElement.classList.toggle('dark', value)
-  try { localStorage.setItem(DARK_KEY, value ? '1' : '0') } catch { /* ignore */ }
-}
-function toggleDark() { applyDark(!isDark.value) }
-
 // Single-letter keyboard shortcuts → route. Only active when NOT typing in an
 // input/textarea/select/contenteditable, and only with no Ctrl/Meta/Alt held.
 const shortcutList = [
@@ -432,11 +431,6 @@ function handleResize() {
 onMounted(() => {
   window.addEventListener('resize', handleResize)
   window.addEventListener('keydown', handleKeydown)
-  try {
-    applyDark(localStorage.getItem(DARK_KEY) === '1')
-  } catch {
-    applyDark(false)
-  }
 })
 
 onUnmounted(() => {
@@ -448,6 +442,7 @@ onUnmounted(() => {
 <style scoped>
 .app-container {
   min-height: 100vh;
+  background: var(--app-background);
 }
 
 .app-header {
@@ -485,7 +480,7 @@ onUnmounted(() => {
 }
 
 .app-menu-link {
-  color: #6b7280;
+  color: var(--el-text-color-secondary);
   font-size: 13px;
   text-decoration: none;
   white-space: nowrap;
@@ -511,8 +506,8 @@ onUnmounted(() => {
   align-items: center;
   justify-content: space-around;
   height: 60px;
-  border-top: 1px solid #e1e7f0;
-  background: #fff;
+  border-top: 1px solid var(--el-border-color);
+  background: var(--el-bg-color-overlay);
   box-shadow: 0 -2px 8px rgba(0, 0, 0, 0.06);
 }
 
@@ -524,7 +519,7 @@ onUnmounted(() => {
   gap: 2px;
   width: 20%;
   height: 100%;
-  color: #6b7280;
+  color: var(--el-text-color-secondary);
   font-size: 11px;
   text-decoration: none;
   transition: color 0.2s;
@@ -544,7 +539,7 @@ onUnmounted(() => {
 
 .shortcut-hint {
   margin: 0 0 12px;
-  color: #6b7280;
+  color: var(--el-text-color-secondary);
   font-size: 13px;
 }
 
@@ -558,7 +553,7 @@ onUnmounted(() => {
 }
 
 .shortcut-list li {
-  color: #4b5563;
+  color: var(--el-text-color-regular);
   font-size: 13px;
 }
 
@@ -567,7 +562,7 @@ onUnmounted(() => {
 }
 .help-title {
   margin: 0 0 8px;
-  color: #303133;
+  color: var(--el-text-color-primary);
   font-size: 14px;
   font-weight: 600;
 }
@@ -578,7 +573,7 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  color: #6b7280;
+  color: var(--el-text-color-secondary);
   font-size: 13px;
 }
 
@@ -588,8 +583,8 @@ onUnmounted(() => {
   min-width: 18px;
   padding: 1px 6px;
   margin-right: 6px;
-  background: #f5f7fa;
-  border: 1px solid #dcdfe6;
+  background: var(--el-fill-color-light);
+  border: 1px solid var(--el-border-color);
   border-radius: 4px;
   font-family: ui-monospace, monospace;
   font-size: 12px;
@@ -642,7 +637,7 @@ onUnmounted(() => {
   gap: 12px;
 }
 .health-row span {
-  color: #6b7280;
+  color: var(--el-text-color-secondary);
 }
 .health-actions {
   display: flex;
@@ -656,6 +651,6 @@ onUnmounted(() => {
 }
 .session-banner-desc {
   font-size: 12px;
-  color: #6b7280;
+  color: var(--el-text-color-secondary);
 }
 </style>

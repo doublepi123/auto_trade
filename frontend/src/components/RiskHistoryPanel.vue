@@ -117,7 +117,7 @@ defineExpose({ load })
 .panel-heading h4 {
   margin: 0;
   font-size: 15px;
-  color: #172033;
+  color: var(--chart-heading);
 }
 
 .risk-summary {
@@ -128,13 +128,13 @@ defineExpose({ load })
 
 .risk-stat span {
   display: block;
-  color: #6b7280;
+  color: var(--chart-muted);
   font-size: 12px;
 }
 
 .risk-stat strong {
   font-size: 16px;
-  color: #172033;
+  color: var(--chart-heading);
 }
 
 .sparkline {
@@ -143,7 +143,7 @@ defineExpose({ load })
 }
 
 .sparkline .zero {
-  stroke: #d1d5db;
+  stroke: var(--chart-zero);
   stroke-width: 1;
   stroke-dasharray: 3 3;
 }
@@ -156,7 +156,7 @@ defineExpose({ load })
 
 .empty-note {
   margin: 12px 0;
-  color: #999;
+  color: var(--chart-muted);
   text-align: center;
 }
 

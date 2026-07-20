@@ -125,10 +125,10 @@ function formatNumber(value: number | null | undefined): string {
 <style scoped>
 .chart-panel {
   min-height: 240px;
-  border: 1px solid #e1e7f0;
+  border: 1px solid var(--chart-border);
   border-radius: 8px;
   padding: 14px;
-  background: #fff;
+  background: var(--chart-surface);
 }
 
 .chart-heading {
@@ -140,19 +140,19 @@ function formatNumber(value: number | null | undefined): string {
 
 .chart-heading h4 {
   margin: 0;
-  color: #172033;
+  color: var(--chart-heading);
   font-size: 15px;
 }
 
 .chart-heading span {
   display: block;
   margin-top: 4px;
-  color: #6b7280;
+  color: var(--chart-muted);
   font-size: 12px;
 }
 
 .chart-heading strong {
-  color: #172033;
+  color: var(--chart-heading);
   font-size: 20px;
 }
 
@@ -163,13 +163,13 @@ function formatNumber(value: number | null | undefined): string {
 }
 
 .axis {
-  stroke: #d8e0ec;
+  stroke: var(--chart-axis);
   stroke-width: 1;
 }
 
 .axis-label,
 .marker-label {
-  fill: #7a8595;
+  fill: var(--chart-label);
   font-size: 10px;
 }
 
@@ -196,13 +196,13 @@ function formatNumber(value: number | null | undefined): string {
 
 .marker-buy {
   fill: #14884f;
-  stroke: #fff;
+  stroke: var(--chart-marker-stroke);
   stroke-width: 2;
 }
 
 .marker-sell {
   fill: #c43838;
-  stroke: #fff;
+  stroke: var(--chart-marker-stroke);
   stroke-width: 2;
 }
 
@@ -210,7 +210,7 @@ function formatNumber(value: number | null | undefined): string {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
-  color: #6b7280;
+  color: var(--chart-muted);
   font-size: 12px;
 }
 

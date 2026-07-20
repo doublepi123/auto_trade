@@ -182,7 +182,7 @@ defineExpose({ load })
 .panel-heading h4 {
   margin: 0;
   font-size: 15px;
-  color: #172033;
+  color: var(--chart-heading);
 }
 
 .heading-controls {
@@ -205,13 +205,13 @@ defineExpose({ load })
 
 .equity-stat span {
   display: block;
-  color: #6b7280;
+  color: var(--chart-muted);
   font-size: 12px;
 }
 
 .equity-stat strong {
   font-size: 16px;
-  color: #172033;
+  color: var(--chart-heading);
 }
 
 .equity-chart {
@@ -220,7 +220,7 @@ defineExpose({ load })
 }
 
 .equity-chart .zero {
-  stroke: #d1d5db;
+  stroke: var(--chart-zero);
   stroke-width: 1;
   stroke-dasharray: 3 3;
 }
@@ -237,7 +237,7 @@ defineExpose({ load })
 }
 
 .empty-note {
-  color: #9ca3af;
+  color: var(--chart-muted);
   font-size: 13px;
   margin: 0;
 }
