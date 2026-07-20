@@ -38,6 +38,7 @@ class TestRuntimeStateService:
             "short_selling": False,
             "auto_resume_minutes": 5,
             "max_daily_loss": 3000.0,
+            "max_drawdown_amount": 750.0,
             "max_consecutive_losses": 2,
             "fee_rate_us": 0.001,
             "fee_rate_hk": 0.004,
@@ -51,6 +52,8 @@ class TestRuntimeStateService:
             last_price=150.0,
             daily_pnl=-100.0,
             consecutive_losses=1,
+            cumulative_realized_pnl=1250.0,
+            peak_realized_pnl=1500.0,
             kill_switch=False,
             paused=True,
             pause_reason="429 too many requests",
@@ -78,6 +81,10 @@ class TestRuntimeStateService:
         assert engine.last_price == 150.0
         assert risk.daily_pnl == -100.0
         assert risk.consecutive_losses == 1
+        assert risk.config.max_drawdown_amount == 750.0
+        assert risk.cumulative_realized_pnl == 1250.0
+        assert risk.peak_realized_pnl == 1500.0
+        assert risk.drawdown_amount == 250.0
         assert risk.paused is True
         assert risk.pause_reason == "429 too many requests"
         assert risk.paused_at == paused_at
@@ -148,6 +155,10 @@ class TestRuntimeStateService:
         risk = RiskController()
         risk.daily_pnl = -50.0
         risk.consecutive_losses = 2
+        risk.restore_drawdown_state(
+            cumulative_realized_pnl=900.0,
+            peak_realized_pnl=1200.0,
+        )
         from datetime import datetime, timezone
         paused_at = datetime(2026, 5, 22, 10, 0, tzinfo=timezone.utc)
         risk.pause("429 too many requests", auto_resumable=True, paused_at=paused_at)
@@ -165,6 +176,8 @@ class TestRuntimeStateService:
         assert state.last_price == 180.0
         assert state.daily_pnl == -50.0
         assert state.consecutive_losses == 2
+        assert state.cumulative_realized_pnl == 900.0
+        assert state.peak_realized_pnl == 1200.0
         assert state.paused is True
         assert state.pause_reason == "429 too many requests"
         assert state.paused_at is not None
@@ -439,6 +452,23 @@ class TestRuntimeStateService:
         assert len(events) == 1
         assert events[0].event_type == "RISK_REJECTION"
         assert events[0].reason == "test risk reason"
+
+    def test_record_drawdown_limit_event_type(self) -> None:
+        self._cleanup()
+        db = self._get_db()
+        RuntimeStateService().record_risk_event(
+            db,
+            "DRAWDOWN_LIMIT: drawdown=500.00",
+            event_type="DRAWDOWN_LIMIT",
+        )
+        db.close()
+
+        db = self._get_db()
+        event = db.query(RiskEvent).one()
+        db.close()
+
+        assert event.event_type == "DRAWDOWN_LIMIT"
+        assert event.reason.startswith("DRAWDOWN_LIMIT:")
 
     def test_load_resets_daily_pnl_when_day_changed(self) -> None:
         from datetime import datetime, timedelta, timezone

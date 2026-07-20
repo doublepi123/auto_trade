@@ -93,6 +93,8 @@ class TestModels:
             assert result.kill_switch is False
             assert result.daily_pnl == 0.0
             assert result.consecutive_losses == 0
+            assert result.cumulative_realized_pnl == 0.0
+            assert result.peak_realized_pnl == 0.0
             assert result.last_price == 0.0
             assert result.updated_at is not None
         finally:

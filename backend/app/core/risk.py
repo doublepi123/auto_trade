@@ -20,14 +20,17 @@ _OPERATIONAL_PAUSE_PREFIXES = (
 
 @dataclass
 class RiskConfig:
-    max_daily_loss: float = 5000.0
+    max_daily_loss: float | None = 5000.0
     max_consecutive_losses: int = 3
+    max_drawdown_amount: float | None = None
 
     def __post_init__(self) -> None:
         # ``is not None`` guard is required: runtime_state_service.load() may
         # pass None when the DB column is NULL — this is NOT dead code.
         if self.max_daily_loss is not None and self.max_daily_loss < 0:
             raise ValueError("max_daily_loss must be non-negative")
+        if self.max_drawdown_amount is not None and self.max_drawdown_amount < 0:
+            raise ValueError("max_drawdown_amount must be non-negative")
 
 
 @dataclass
@@ -51,6 +54,9 @@ class RiskController:
         self.daily_pnl: float = 0.0
         self._today: date = self._trade_day_provider()
         self.consecutive_losses: int = 0
+        self.cumulative_realized_pnl: float = 0.0
+        self.peak_realized_pnl: float = 0.0
+        self._pending_drawdown_limit_reason: str | None = None
         self.kill_switch: bool = False
         self.paused: bool = False
         self._pause_reason: str = ""
@@ -104,13 +110,14 @@ class RiskController:
             self._today = today
 
     def _check_limits(self) -> RiskResult:
-        if self.config.max_daily_loss < 0:
+        max_daily_loss = self.config.max_daily_loss or 0.0
+        if max_daily_loss < 0:
             raise ValueError("max_daily_loss must be non-negative")
 
         # max_daily_loss == 0 means "no limit" (disabled); only enforce when > 0.
         # Without this guard, daily_pnl <= -0 is always True when daily_pnl == 0,
         # which would permanently block trading.
-        if self.config.max_daily_loss > 0 and self.daily_pnl <= -self.config.max_daily_loss:
+        if max_daily_loss > 0 and self.daily_pnl <= -max_daily_loss:
             return RiskResult(approved=False, reason=f"daily loss limit reached: {self.daily_pnl}")
 
         if self.consecutive_losses >= self.config.max_consecutive_losses:
@@ -131,6 +138,47 @@ class RiskController:
                 self.consecutive_losses += 1
             else:
                 self.consecutive_losses = 0
+            self.cumulative_realized_pnl += pnl
+            self.peak_realized_pnl = max(
+                self.peak_realized_pnl,
+                self.cumulative_realized_pnl,
+            )
+            max_drawdown_amount = self.config.max_drawdown_amount or 0.0
+            if (
+                max_drawdown_amount > 0
+                and self.drawdown_amount >= max_drawdown_amount
+                and not self.paused
+            ):
+                reason = (
+                    "DRAWDOWN_LIMIT: "
+                    f"drawdown={self.drawdown_amount:.2f}, "
+                    f"cumulative_realized_pnl={self.cumulative_realized_pnl:.2f}, "
+                    f"peak_realized_pnl={self.peak_realized_pnl:.2f}, "
+                    f"limit={max_drawdown_amount:.2f}"
+                )
+                self.pause(reason, auto_resumable=True)
+                if self._pause_reason == reason:
+                    self._pending_drawdown_limit_reason = reason
+
+    def restore_drawdown_state(
+        self,
+        *,
+        cumulative_realized_pnl: float,
+        peak_realized_pnl: float,
+    ) -> None:
+        with self._lock:
+            self.cumulative_realized_pnl = cumulative_realized_pnl
+            self.peak_realized_pnl = max(
+                peak_realized_pnl,
+                cumulative_realized_pnl,
+            )
+            self._pending_drawdown_limit_reason = None
+
+    def consume_drawdown_limit_reason(self) -> str | None:
+        with self._lock:
+            reason = self._pending_drawdown_limit_reason
+            self._pending_drawdown_limit_reason = None
+            return reason
 
     def replace_daily_pnl(self, daily_pnl: float, consecutive_losses: int, pnl_date: date | None = None) -> None:
         with self._lock:
@@ -400,6 +448,14 @@ class RiskController:
     def pause_reason(self) -> str:
         with self._lock:
             return self._pause_reason
+
+    @property
+    def drawdown_amount(self) -> float:
+        with self._lock:
+            return max(
+                0.0,
+                self.peak_realized_pnl - self.cumulative_realized_pnl,
+            )
 
     @property
     def paused_at(self) -> datetime | None:

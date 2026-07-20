@@ -84,7 +84,14 @@ class TestStrategyService:
         self._cleanup()
         db = self._get_db()
         svc = StrategyService(db)
-        updated = svc.update_runtime_state(engine_state="long", last_price=150.0)
+        updated = svc.update_runtime_state(
+            engine_state="long",
+            last_price=150.0,
+            cumulative_realized_pnl=250.0,
+            peak_realized_pnl=400.0,
+        )
         assert updated.engine_state == "long"
         assert updated.last_price == 150.0
+        assert updated.cumulative_realized_pnl == 250.0
+        assert updated.peak_realized_pnl == 400.0
         db.close()

@@ -56,7 +56,9 @@ def merge_and_validate_strategy_update(
     """Merge a partial write with the active config through one validation path."""
     merged: dict[str, Any] = {}
     for field_name, field_info in StrategyMergedSchema.model_fields.items():
-        if field_name in data and data[field_name] is not None:
+        if field_name == "max_drawdown_amount" and field_name in data:
+            merged[field_name] = data[field_name]
+        elif field_name in data and data[field_name] is not None:
             merged[field_name] = data[field_name]
         else:
             merged[field_name] = getattr(current, field_name, field_info.default)
@@ -273,6 +275,15 @@ def get_status(db: Session = Depends(get_db)) -> StatusResponse:
             consecutive_losses=new_losses,
         )
     response = StatusResponse.model_validate(state)
+    if risk is not None:
+        response.cumulative_realized_pnl = risk.cumulative_realized_pnl
+        response.peak_realized_pnl = risk.peak_realized_pnl
+        response.drawdown_amount = risk.drawdown_amount
+    else:
+        response.drawdown_amount = max(
+            0.0,
+            response.peak_realized_pnl - response.cumulative_realized_pnl,
+        )
     response.runner_running = runner.is_running
     response.protective_exit_permitted = bool(
         getattr(risk, "protective_exit_permitted", False)

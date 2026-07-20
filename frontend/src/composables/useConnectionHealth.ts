@@ -41,6 +41,10 @@ export const defaultStatus: StatusData = {
   runner_running: false,
   daily_pnl: 0,
   consecutive_losses: 0,
+  cumulative_realized_pnl: 0,
+  peak_realized_pnl: 0,
+  drawdown_amount: 0,
+  max_drawdown_amount: null,
   last_price: 0,
   last_trigger_price: 0,
   last_trigger_at: null,
@@ -131,6 +135,16 @@ function connectWebSocket(): void {
           daily_pnl: (risks.daily_pnl as number | undefined) ?? status.value.daily_pnl,
           consecutive_losses:
             (risks.consecutive_losses as number | undefined) ?? status.value.consecutive_losses,
+          cumulative_realized_pnl:
+            (risks.cumulative_realized_pnl as number | undefined) ?? status.value.cumulative_realized_pnl,
+          peak_realized_pnl:
+            (risks.peak_realized_pnl as number | undefined) ?? status.value.peak_realized_pnl,
+          drawdown_amount:
+            (risks.drawdown_amount as number | undefined) ?? status.value.drawdown_amount,
+          max_drawdown_amount:
+            typeof risks.max_drawdown_amount === 'number' || risks.max_drawdown_amount === null
+              ? risks.max_drawdown_amount
+              : status.value.max_drawdown_amount,
           last_price: data.last_price ?? status.value.last_price,
           last_trigger_price: data.last_trigger_price ?? status.value.last_trigger_price,
           last_trigger_at: data.last_trigger_at ?? status.value.last_trigger_at,

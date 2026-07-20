@@ -131,6 +131,38 @@ def test_init_db_creates_llm_interactions_table(tmp_path, monkeypatch) -> None:
     Base.metadata.drop_all(bind=engine)
 
 
+def test_llm_interaction_token_migration_adds_nullable_columns(tmp_path) -> None:
+    db_path = tmp_path / "legacy_llm_tokens.db"
+    legacy_engine = create_engine(f"sqlite:///{db_path}")
+    with legacy_engine.begin() as connection:
+        connection.exec_driver_sql(
+            "CREATE TABLE llm_interactions ("
+            "id INTEGER PRIMARY KEY, interaction_type VARCHAR(20), "
+            "created_at DATETIME)"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO llm_interactions (id, interaction_type) VALUES (1, 'analyze')"
+        )
+
+    database._ensure_llm_interaction_token_columns(legacy_engine)
+    database._ensure_llm_interaction_token_columns(legacy_engine)
+
+    with legacy_engine.connect() as connection:
+        columns = {
+            row[1]
+            for row in connection.exec_driver_sql(
+                "PRAGMA table_info(llm_interactions)"
+            )
+        }
+        values = connection.exec_driver_sql(
+            "SELECT prompt_tokens, completion_tokens, total_tokens "
+            "FROM llm_interactions WHERE id = 1"
+        ).one()
+
+    assert {"prompt_tokens", "completion_tokens", "total_tokens"} <= columns
+    assert tuple(values) == (None, None, None)
+
+
 def test_strategy_v2_shadow_table_migration_is_complete_and_idempotent(tmp_path) -> None:
     db_path = tmp_path / "strategy_v2_shadow.db"
     engine = create_engine(f"sqlite:///{db_path}")
@@ -807,6 +839,44 @@ def test_init_db_adds_missing_runtime_state_daily_pnl_date_column(tmp_path, monk
     assert row[2] is not None  # daily_pnl_date backfilled
 
     Base.metadata.drop_all(bind=engine)
+
+
+def test_drawdown_migration_adds_config_and_runtime_columns(tmp_path) -> None:
+    db_path = tmp_path / "legacy_drawdown_state.db"
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(
+            "CREATE TABLE strategy_config (id INTEGER PRIMARY KEY AUTOINCREMENT)"
+        )
+        connection.execute(
+            "CREATE TABLE runtime_state (id INTEGER PRIMARY KEY AUTOINCREMENT)"
+        )
+        connection.execute("INSERT INTO runtime_state DEFAULT VALUES")
+        connection.commit()
+    finally:
+        connection.close()
+
+    engine = create_engine(
+        f"sqlite:///{db_path}",
+        connect_args={"check_same_thread": False},
+    )
+    database._ensure_drawdown_columns(engine)
+
+    with engine.connect() as db:
+        strategy_columns = {
+            row[1] for row in db.exec_driver_sql("PRAGMA table_info(strategy_config)")
+        }
+        runtime_columns = {
+            row[1] for row in db.exec_driver_sql("PRAGMA table_info(runtime_state)")
+        }
+        runtime_values = db.exec_driver_sql(
+            "SELECT cumulative_realized_pnl, peak_realized_pnl FROM runtime_state WHERE id = 1"
+        ).one()
+    assert "max_drawdown_amount" in strategy_columns
+    assert "cumulative_realized_pnl" in runtime_columns
+    assert "peak_realized_pnl" in runtime_columns
+    assert tuple(runtime_values) == (0.0, 0.0)
+    engine.dispose()
 
 
 def test_ensure_credential_config_notification_channels_column_adds_and_backfills(

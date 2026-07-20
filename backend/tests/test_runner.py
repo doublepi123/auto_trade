@@ -1382,6 +1382,8 @@ class TestAppRunner:
         assert diagnostics["quotes_subscribed"] is True
         assert diagnostics["trigger_in_flight"] is True
         assert diagnostics["pending_order_symbols"] == ["AAPL.US"]
+        assert diagnostics["dedup_suppressed_total"] == 0
+        assert diagnostics["dedup_window_seconds"] == runner.notifier.dedup_window_seconds
         assert diagnostics["quote_stream"]["last_push_age_seconds"] >= 12.0
         assert diagnostics["quote_stream"]["last_quote_age_seconds"] >= 5.0
         assert diagnostics["risk"]["paused"] is True
@@ -3590,10 +3592,17 @@ class TestAppRunner:
         runner._running = True
         runner._thread = SimpleNamespace(is_alive=lambda: True)
         runner._loop = RunningLoop()
+        runner.risk.restore_drawdown_state(
+            cumulative_realized_pnl=80.0,
+            peak_realized_pnl=125.0,
+        )
 
         runner._broadcast_status()
 
         assert messages[0]["runner_running"] is True
+        assert messages[0]["risks"]["cumulative_realized_pnl"] == 80.0
+        assert messages[0]["risks"]["peak_realized_pnl"] == 125.0
+        assert messages[0]["risks"]["drawdown_amount"] == 45.0
 
     def test_active_quote_refresh_fetches_quote_when_push_is_stale(self) -> None:
         class Broker:
@@ -3799,6 +3808,33 @@ class TestAppRunner:
 
         assert resumed is True
         assert runner.risk.paused is False
+
+    def test_auto_resumed_drawdown_pause_retriggers_with_retained_peak(self) -> None:
+        runner = AppRunner()
+        now = datetime(2026, 7, 19, 10, 3, tzinfo=timezone.utc)
+        runner.engine.params = StrategyParams(
+            symbol="AAPL.US",
+            buy_low=100.0,
+            sell_high=200.0,
+            auto_resume_minutes=1,
+        )
+        runner.risk.config.max_drawdown_amount = 25.0
+        runner.risk.restore_drawdown_state(
+            cumulative_realized_pnl=75.0,
+            peak_realized_pnl=100.0,
+        )
+        runner.risk.pause(
+            "DRAWDOWN_LIMIT: drawdown=25.00",
+            auto_resumable=True,
+            paused_at=now - timedelta(minutes=2),
+        )
+
+        assert runner._auto_resume_pause_if_due(now=now) is True
+        runner.risk.record_trade(-1.0)
+
+        assert runner.risk.paused is True
+        assert runner.risk.peak_realized_pnl == 100.0
+        assert runner.risk.consume_drawdown_limit_reason() == runner.risk.pause_reason
 
     def test_auto_resume_persistence_failure_keeps_pause(
         self,

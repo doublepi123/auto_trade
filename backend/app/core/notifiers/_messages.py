@@ -35,6 +35,7 @@ def severity_for_risk_event(event_type: str) -> str:
         "ORDER_TIMEOUT": "WARNING",
         "REJECTED": "WARNING",
         "DAILY_LOSS": "WARNING",
+        "DRAWDOWN_LIMIT": "WARNING",
     }.get(event_type, "WARNING")
 
 

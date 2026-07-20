@@ -645,6 +645,7 @@
           <span>全局紧急停止：{{ status.kill_switch ? '已开启' : '已关闭' }}</span>
           <span>全局暂停状态：{{ status.paused ? '已暂停' : '运行中' }}</span>
           <span>单日最大亏损：${{ formatNumber(strategy.max_daily_loss) }}</span>
+          <span data-testid="drawdown-risk-status">高水位回撤：${{ formatNumber(status.drawdown_amount) }} / {{ drawdownLimit === null ? '未设置' : `$${formatNumber(drawdownLimit)}` }}（峰值 ${{ formatNumber(status.peak_realized_pnl) }}）</span>
         </div>
       </div>
 
@@ -869,6 +870,10 @@ const sessionOrderDotClass = computed(() => {
   if (status.value.trading_session_mode !== 'RTH_ONLY') return 'session-dot-neutral'
   return status.value.is_trading_hours ? 'session-dot-ok' : 'session-dot-block'
 })
+
+const drawdownLimit = computed(() =>
+  status.value.max_drawdown_amount ?? strategy.value.max_drawdown_amount,
+)
 
 const chartSymbolOptions = computed(() => {
   const options: Array<{ symbol: string; label: string }> = []

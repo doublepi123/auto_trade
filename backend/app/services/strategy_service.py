@@ -21,6 +21,7 @@ STRATEGY_AUDIT_KEYS = (
     "min_profit_amount",
     "auto_resume_minutes",
     "max_daily_loss",
+    "max_drawdown_amount",
     "max_consecutive_losses",
     "llm_interval_minutes",
     "fee_rate_us",
@@ -68,7 +69,7 @@ class StrategyService:
         updatable_fields = [
             "symbol", "market", "buy_low", "sell_high",
             "short_selling", "min_profit_amount", "auto_resume_minutes",
-            "max_daily_loss", "max_consecutive_losses",
+            "max_daily_loss", "max_drawdown_amount", "max_consecutive_losses",
             "llm_interval_minutes",
             "fee_rate_us", "fee_rate_hk", "min_repricing_pct", "llm_action_cooldown_seconds",
             "trading_session_mode",
@@ -161,7 +162,8 @@ class StrategyService:
     UPDATABLE_STATE_FIELDS = frozenset({
         "engine_state", "paused", "pause_reason", "paused_at",
         "pause_auto_resumable", "kill_switch", "daily_pnl",
-        "daily_pnl_date", "consecutive_losses", "last_price",
+        "daily_pnl_date", "consecutive_losses", "cumulative_realized_pnl",
+        "peak_realized_pnl", "last_price",
         "last_trigger_price", "last_trigger_at",
         "long_entry_rearm_required",
         "execution_state", "reduction_action", "reduction_cause",

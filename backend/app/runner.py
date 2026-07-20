@@ -191,6 +191,7 @@ class AppRunner:
         self.notifier = MultiChannelNotifier(
             [(ServerChanNotifier(""), "INFO")],
             sink=get_notification_sink().record,
+            dedup_window_seconds=settings.notify_dedup_window_seconds,
         )
         self._trade_svc = TradeExecutionService(
             record_order=self._record_order,
@@ -1191,6 +1192,8 @@ class AppRunner:
                 "order_sync_succeeded": self._last_order_sync_succeeded,
                 "execution_state": self.execution_state()[0],
                 "reduction_reason": self.execution_state()[1],
+                "dedup_suppressed_total": self.notifier.dedup_suppressed_total,
+                "dedup_window_seconds": self.notifier.dedup_window_seconds,
                 "live_safety": {
                     "short_entries_enabled": bool(
                         self._trade_svc.short_entries_enabled and self.engine.params.short_selling
@@ -1225,6 +1228,11 @@ class AppRunner:
                     "protective_exit_permitted": self.risk.protective_exit_permitted,
                     "daily_pnl": float(self.risk.daily_pnl),
                     "consecutive_losses": self.risk.consecutive_losses,
+                    "cumulative_realized_pnl": float(
+                        self.risk.cumulative_realized_pnl
+                    ),
+                    "peak_realized_pnl": float(self.risk.peak_realized_pnl),
+                    "drawdown_amount": float(self.risk.drawdown_amount),
                 },
                 "symbol_runtimes": symbol_runtimes,
             }
@@ -1311,6 +1319,7 @@ class AppRunner:
             new_notifier = MultiChannelNotifier.from_credential_config(
                 effective_credentials,
                 sink=get_notification_sink().record,
+                dedup_window_seconds=settings.notify_dedup_window_seconds,
             )
             with self._state_lock:
                 old_notifier = self.notifier
@@ -1518,6 +1527,7 @@ class AppRunner:
             new_risk_config = RiskConfig(
                 max_daily_loss=config.max_daily_loss,
                 max_consecutive_losses=config.max_consecutive_losses,
+                max_drawdown_amount=getattr(config, "max_drawdown_amount", None),
             )
             mode = getattr(config, "trading_session_mode", None)
             new_session_mode = mode if mode else "ANY"
@@ -2433,6 +2443,9 @@ class AppRunner:
             data["risks"] = {
                 "daily_pnl": self.risk.daily_pnl,
                 "consecutive_losses": self.risk.consecutive_losses,
+                "cumulative_realized_pnl": self.risk.cumulative_realized_pnl,
+                "peak_realized_pnl": self.risk.peak_realized_pnl,
+                "drawdown_amount": self.risk.drawdown_amount,
                 "kill_switch": self.risk.kill_switch,
                 "paused": self.risk.paused,
                 "protective_exit_permitted": self.risk.protective_exit_permitted,
@@ -4439,6 +4452,7 @@ class AppRunner:
             new_notifier = MultiChannelNotifier.from_credential_config(
                 effective_credentials,
                 sink=get_notification_sink().record,
+                dedup_window_seconds=settings.notify_dedup_window_seconds,
             )
 
             credential_env = {
@@ -4875,12 +4889,20 @@ class AppRunner:
         order.slippage_amount = price_cost * fill_quantity
         order.slippage_bps = price_cost / reference * 10_000
 
-    def _record_risk_event(self, reason: str) -> None:
+    def _record_risk_event(
+        self,
+        reason: str,
+        event_type: str = "RISK_REJECTION",
+    ) -> None:
         with self._db_session() as db:
-            self._state_svc.record_risk_event(db, reason)
+            self._state_svc.record_risk_event(db, reason, event_type=event_type)
             record_trade_event(
                 db,
-                event_type="RISK_PAUSED",
+                event_type=(
+                    "DRAWDOWN_LIMIT"
+                    if event_type == "DRAWDOWN_LIMIT"
+                    else "RISK_PAUSED"
+                ),
                 status="PAUSED",
                 message=reason,
                 payload={"source": "risk_controller"},

@@ -64,6 +64,9 @@ describe('Dashboard', () => {
     cy.contains('风控状态').should('be.visible')
     cy.contains('紧急停止').should('be.visible')
     cy.contains('暂停状态').should('be.visible')
+    cy.get('[data-testid="drawdown-risk-status"]')
+      .should('contain', '高水位回撤：$100.00 / $250.00')
+      .and('contain', '峰值 $1000.00')
   })
 
   it('shows the latest trigger skip reason', () => {

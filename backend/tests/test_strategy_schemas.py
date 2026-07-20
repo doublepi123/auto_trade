@@ -24,6 +24,7 @@ _VALID_STRATEGY = {
         "sell_high",
         "min_profit_amount",
         "max_daily_loss",
+        "max_drawdown_amount",
         "fee_rate_us",
         "fee_rate_hk",
         "min_repricing_pct",
@@ -58,3 +59,14 @@ def test_strategy_schemas_permanently_reject_disabled_live_features(
 ) -> None:
     with pytest.raises(ValidationError, match="disabled by the P0 live safety policy"):
         schema.model_validate({**_VALID_STRATEGY, field: True})
+
+
+@pytest.mark.parametrize("schema", [StrategyConfigSchema, StrategyMergedSchema])
+@pytest.mark.parametrize("value", [None, 0.0, 500.0])
+def test_strategy_schemas_accept_optional_drawdown_limit(
+    schema: type[StrategyConfigSchema] | type[StrategyMergedSchema],
+    value: float | None,
+) -> None:
+    validated = schema.model_validate({**_VALID_STRATEGY, "max_drawdown_amount": value})
+
+    assert validated.max_drawdown_amount == value

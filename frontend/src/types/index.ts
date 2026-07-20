@@ -8,6 +8,7 @@ export interface StrategyConfig {
   min_profit_amount: number
   auto_resume_minutes: number
   max_daily_loss: number
+  max_drawdown_amount: number | null
   max_consecutive_losses: number
   llm_interval_minutes: number
   fee_rate_us: number
@@ -32,7 +33,7 @@ export interface StrategyConfig {
 }
 
 export interface NotificationChannel {
-  type: 'serverchan' | 'webhook'
+  type: 'serverchan' | 'webhook' | 'telegram'
   severity_floor: 'INFO' | 'WARNING' | 'CRITICAL'
   url?: string
   /** Optional JSON payload template for webhook channels.
@@ -41,6 +42,8 @@ export interface NotificationChannel {
    *  are rejected at the backend and the channel falls back to the
    *  default payload. */
   template?: string
+  bot_token?: string
+  chat_id?: string
 }
 
 export interface CredentialsConfig {
@@ -66,6 +69,10 @@ export interface StatusData {
   runner_running: boolean
   daily_pnl: number
   consecutive_losses: number
+  cumulative_realized_pnl: number
+  peak_realized_pnl: number
+  drawdown_amount: number
+  max_drawdown_amount: number | null
   last_price: number
   last_trigger_price: number
   last_trigger_at: string | null
@@ -290,6 +297,18 @@ export interface OrderCancelResult {
   message: string
 }
 
+export interface OrderCancelFailure {
+  order_id: string
+  error: string
+}
+
+export interface OrderCancelAllResult {
+  cancelled: number
+  failed: OrderCancelFailure[]
+  skipped: number
+  total_pending: number
+}
+
 export interface TradeEventRecord {
   id: number
   source: 'trade' | 'audit'
@@ -429,7 +448,35 @@ export interface LLMInteractionRecord {
   order_status: string | null
   order_id: string | null
   applied: boolean
+  prompt_tokens?: number | null
+  completion_tokens?: number | null
+  total_tokens?: number | null
   created_at: string
+}
+
+export interface LLMUsageDailySummary {
+  date: string
+  interactions: number
+  prompt_tokens: number
+  completion_tokens: number
+  total_tokens: number
+}
+
+export interface LLMUsageTypeSummary {
+  interaction_type: string
+  interactions: number
+  total_tokens: number
+}
+
+export interface LLMUsageSummary {
+  days: number
+  total_interactions: number
+  successful_interactions: number
+  total_prompt_tokens: number
+  total_completion_tokens: number
+  total_tokens: number
+  by_day: LLMUsageDailySummary[]
+  by_type: LLMUsageTypeSummary[]
 }
 
 export interface BacktestParams {
@@ -439,6 +486,7 @@ export interface BacktestParams {
   short_selling: boolean
   min_profit_amount: number
   max_daily_loss: number
+  max_drawdown_amount?: number
   max_consecutive_losses: number
   quantity: number
   initial_cash: number
@@ -446,6 +494,7 @@ export interface BacktestParams {
   fixed_fee: number
   slippage_pct: number
   stop_loss_pct: number
+  trailing_stop_pct?: number
 }
 
 export interface BacktestRunRequest {

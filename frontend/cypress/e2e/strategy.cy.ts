@@ -10,6 +10,7 @@ describe('Strategy', () => {
     cy.contains('市场').should('be.visible')
     cy.contains('单笔最低盈利金额').should('be.visible')
     cy.contains('暂停自动恢复（分钟）').should('be.visible')
+    cy.contains('最大回撤额度').should('be.visible')
   })
 
   it('has save button', () => {
@@ -77,6 +78,26 @@ describe('Strategy', () => {
     cy.contains('LLM 同向冷却').parent().find('input').clear().type('120')
     cy.contains('button', /^保存$/).click()
     cy.wait('@saveSafetySettings')
+  })
+
+  it('saves a drawdown limit and clears it when disabled', () => {
+    cy.intercept('PUT', '/api/strategy', (req) => {
+      expect(req.body.max_drawdown_amount).to.equal(125.5)
+      req.reply({ statusCode: 200, body: Object.assign({ id: 1, updated_at: '2026-05-25T00:00:00Z' }, req.body) })
+    }).as('saveDrawdownLimit')
+
+    cy.get('[data-testid="max-drawdown-amount"] input').clear().type('125.50')
+    cy.contains('button', /^保存$/).click()
+    cy.wait('@saveDrawdownLimit')
+
+    cy.intercept('PUT', '/api/strategy', (req) => {
+      expect(req.body.max_drawdown_amount).to.equal(null)
+      req.reply({ statusCode: 200, body: Object.assign({ id: 1, updated_at: '2026-05-25T00:00:00Z' }, req.body) })
+    }).as('clearDrawdownLimit')
+
+    cy.get('[data-testid="max-drawdown-amount"] input').clear()
+    cy.contains('button', /^保存$/).click()
+    cy.wait('@clearDrawdownLimit')
   })
 
   it('renders the scheduled-report section and sends on demand', () => {

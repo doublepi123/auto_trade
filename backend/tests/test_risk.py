@@ -20,6 +20,10 @@ class TestRiskConfig:
         config = RiskConfig(max_daily_loss=None)  # type: ignore[arg-type]
         assert config.max_daily_loss is None
 
+    def test_negative_max_drawdown_amount_raises(self) -> None:
+        with pytest.raises(ValueError, match="max_drawdown_amount must be non-negative"):
+            RiskConfig(max_drawdown_amount=-1.0)
+
 
 class TestRiskController:
     def test_default_approved(self) -> None:
@@ -198,6 +202,84 @@ class TestRiskController:
         assert ctrl.consecutive_losses == 0
         result = ctrl.check()
         assert result.approved is True
+
+    def test_drawdown_limit_latches_auto_resumable_pause_from_all_time_peak(self) -> None:
+        ctrl = RiskController(
+            RiskConfig(
+                max_daily_loss=5000.0,
+                max_consecutive_losses=10,
+                max_drawdown_amount=30.0,
+            )
+        )
+
+        ctrl.record_trade(100.0)
+        ctrl.record_trade(-30.0)
+
+        assert ctrl.cumulative_realized_pnl == 70.0
+        assert ctrl.peak_realized_pnl == 100.0
+        assert ctrl.drawdown_amount == 30.0
+        assert ctrl.paused is True
+        assert ctrl.pause_auto_resumable is True
+        assert ctrl.pause_reason.startswith("DRAWDOWN_LIMIT:")
+        assert ctrl.consume_drawdown_limit_reason() == ctrl.pause_reason
+        assert ctrl.consume_drawdown_limit_reason() is None
+
+    @pytest.mark.parametrize("limit", [None, 0.0])
+    def test_drawdown_limit_is_disabled_when_unset_or_zero(
+        self,
+        limit: float | None,
+    ) -> None:
+        ctrl = RiskController(
+            RiskConfig(
+                max_daily_loss=5000.0,
+                max_consecutive_losses=10,
+                max_drawdown_amount=limit,
+            )
+        )
+
+        ctrl.record_trade(100.0)
+        ctrl.record_trade(-1000.0)
+
+        assert ctrl.paused is False
+        assert ctrl.consume_drawdown_limit_reason() is None
+
+    def test_drawdown_peak_survives_day_rollover(self) -> None:
+        from datetime import date
+
+        days = iter([
+            date(2026, 7, 18),
+            date(2026, 7, 18),
+            date(2026, 7, 19),
+        ])
+        ctrl = RiskController(
+            RiskConfig(max_drawdown_amount=500.0),
+            trade_day_provider=lambda: next(days),
+        )
+        ctrl.record_trade(100.0)
+
+        ctrl.check()
+
+        assert ctrl.daily_pnl == 0.0
+        assert ctrl.cumulative_realized_pnl == 100.0
+        assert ctrl.peak_realized_pnl == 100.0
+
+    def test_restored_drawdown_retriggers_after_resume(self) -> None:
+        ctrl = RiskController(RiskConfig(max_drawdown_amount=50.0))
+        ctrl.restore_drawdown_state(
+            cumulative_realized_pnl=80.0,
+            peak_realized_pnl=100.0,
+        )
+
+        ctrl.record_trade(-30.0)
+        first_reason = ctrl.consume_drawdown_limit_reason()
+        ctrl.resume()
+        ctrl.record_trade(-1.0)
+
+        assert first_reason is not None
+        assert ctrl.paused is True
+        assert ctrl.peak_realized_pnl == 100.0
+        assert ctrl.cumulative_realized_pnl == 49.0
+        assert ctrl.consume_drawdown_limit_reason() == ctrl.pause_reason
 
     def test_disable_kill_switch(self) -> None:
         ctrl = RiskController()

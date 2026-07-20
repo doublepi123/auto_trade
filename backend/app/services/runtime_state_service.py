@@ -107,9 +107,18 @@ class RuntimeStateService:
         risk.config = RiskConfig(
             max_daily_loss=config.max_daily_loss,
             max_consecutive_losses=config.max_consecutive_losses,
+            max_drawdown_amount=getattr(config, "max_drawdown_amount", None),
         )
         risk.daily_pnl = state.daily_pnl
         risk.consecutive_losses = state.consecutive_losses
+        risk.restore_drawdown_state(
+            cumulative_realized_pnl=float(
+                getattr(state, "cumulative_realized_pnl", 0.0) or 0.0
+            ),
+            peak_realized_pnl=float(
+                getattr(state, "peak_realized_pnl", 0.0) or 0.0
+            ),
+        )
         risk.begin_day(persisted_date=_coerce_date(state.daily_pnl_date))
         risk.kill_switch = state.kill_switch
         risk.restore_pause(
@@ -139,6 +148,8 @@ class RuntimeStateService:
         runtime_state.daily_pnl = risk.daily_pnl
         runtime_state.daily_pnl_date = risk.daily_pnl_date
         runtime_state.consecutive_losses = risk.consecutive_losses
+        runtime_state.cumulative_realized_pnl = risk.cumulative_realized_pnl
+        runtime_state.peak_realized_pnl = risk.peak_realized_pnl
         runtime_state.kill_switch = risk.kill_switch
         runtime_state.paused = risk.paused
         runtime_state.pause_reason = risk.pause_reason
@@ -172,13 +183,20 @@ class RuntimeStateService:
             symbol=(symbol or "").strip().upper(),
             daily_pnl=risk.daily_pnl,
             consecutive_losses=risk.consecutive_losses,
+            cumulative_realized_pnl=risk.cumulative_realized_pnl,
+            peak_realized_pnl=risk.peak_realized_pnl,
             daily_pnl_date=risk.daily_pnl_date,
         )
 
-    def record_risk_event(self, db: Any, reason: str) -> None:
+    def record_risk_event(
+        self,
+        db: Any,
+        reason: str,
+        event_type: str = "RISK_REJECTION",
+    ) -> None:
         from app.models import RiskEvent
 
-        event = RiskEvent(event_type="RISK_REJECTION", reason=reason)
+        event = RiskEvent(event_type=event_type, reason=reason)
         db.add(event)
         db.commit()
 

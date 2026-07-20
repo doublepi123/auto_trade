@@ -11,6 +11,7 @@ from app.models import StrategyConfig, StrategyParamVersion
 _VERSIONED_COLUMNS = (
     "symbol", "market", "buy_low", "sell_high", "short_selling",
     "min_profit_amount", "auto_resume_minutes", "max_daily_loss",
+    "max_drawdown_amount",
     "max_consecutive_losses", "fee_rate_us", "fee_rate_hk",
     "min_repricing_pct", "llm_action_cooldown_seconds",
     "trading_session_mode", "margin_safety_factor",

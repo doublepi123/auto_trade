@@ -8,6 +8,10 @@ interface StatusStub {
   runner_running: boolean
   daily_pnl: number
   consecutive_losses: number
+  cumulative_realized_pnl: number
+  peak_realized_pnl: number
+  drawdown_amount: number
+  max_drawdown_amount: number | null
   last_price: number
   last_trigger_price: number
   last_trigger_at: string | null
@@ -28,6 +32,10 @@ function initialStatus(): StatusStub {
     runner_running: false,
     daily_pnl: 0,
     consecutive_losses: 0,
+    cumulative_realized_pnl: 900,
+    peak_realized_pnl: 1000,
+    drawdown_amount: 100,
+    max_drawdown_amount: 250,
     last_price: 0,
     last_trigger_price: 0,
     last_trigger_at: null,
@@ -303,7 +311,7 @@ Cypress.Commands.add('stubApi', () => {
   cy.intercept('GET', '/api/strategy', {
     body: {
       id: 1, symbol: '', market: 'US', buy_low: 0, sell_high: 0,
-      short_selling: false, max_daily_loss: 5000, max_consecutive_losses: 3,
+      short_selling: false, max_daily_loss: 5000, max_drawdown_amount: 250, max_consecutive_losses: 3,
       min_profit_amount: 0,
       auto_resume_minutes: 3,
       llm_interval_minutes: 2,
@@ -1005,6 +1013,19 @@ Cypress.Commands.add('stubApi', () => {
     ],
   }).as('getLLMInteractions')
 
+  cy.intercept('GET', '/api/llm-usage/summary*', {
+    body: {
+      days: 30,
+      total_interactions: 0,
+      successful_interactions: 0,
+      total_prompt_tokens: 0,
+      total_completion_tokens: 0,
+      total_tokens: 0,
+      by_day: [],
+      by_type: [],
+    },
+  }).as('getLLMUsageSummary')
+
   cy.intercept('POST', '/api/backtest/run', {
     body: {
       params: {
@@ -1014,6 +1035,7 @@ Cypress.Commands.add('stubApi', () => {
         short_selling: false,
         min_profit_amount: 0,
         max_daily_loss: 5000,
+        max_drawdown_amount: 0,
         max_consecutive_losses: 3,
         quantity: 2,
         initial_cash: 10000,
@@ -1021,6 +1043,7 @@ Cypress.Commands.add('stubApi', () => {
         fixed_fee: 0,
         slippage_pct: 0,
         stop_loss_pct: 0,
+        trailing_stop_pct: 0,
       },
       metrics: {
         initial_cash: 10000,
@@ -1082,14 +1105,24 @@ Cypress.Commands.add('stubApi', () => {
           holding_minutes: 1,
         },
       ],
-      skipped_signals: [{
-        timestamp: '2026-05-22T10:02:00Z',
-        action: 'SELL',
-        price: 101,
-        reason: 'net profit below min_profit_amount',
-        state: 'long',
-        category: 'FEE',
-      }],
+      skipped_signals: [
+        {
+          timestamp: '2026-05-22T10:02:00Z',
+          action: 'SELL',
+          price: 101,
+          reason: 'net profit below min_profit_amount',
+          state: 'long',
+          category: 'FEE',
+        },
+        {
+          timestamp: '2026-05-22T10:03:00Z',
+          action: 'BUY',
+          price: 100,
+          reason: 'maximum drawdown amount reached',
+          state: 'flat',
+          category: 'DRAWDOWN',
+        },
+      ],
       fee_sensitivity: [
         { fee_rate: 0, total_pnl: 200, total_return_pct: 2, max_drawdown_pct: 0 },
         { fee_rate: 0.001, total_pnl: 199.4, total_return_pct: 1.994, max_drawdown_pct: 0 },
@@ -1330,7 +1363,7 @@ Cypress.Commands.add('stubApi', () => {
   cy.intercept('PUT', '/api/strategy', {
     body: {
       id: 1, symbol: 'AAPL.US', market: 'US', buy_low: 100, sell_high: 200,
-      short_selling: false, max_daily_loss: 5000, max_consecutive_losses: 3,
+      short_selling: false, max_daily_loss: 5000, max_drawdown_amount: 250, max_consecutive_losses: 3,
       min_profit_amount: 0,
       auto_resume_minutes: 3,
       llm_interval_minutes: 2,

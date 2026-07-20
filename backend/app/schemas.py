@@ -43,6 +43,11 @@ class StrategyConfigSchema(BaseModel):
     min_profit_amount: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
     auto_resume_minutes: Optional[int] = Field(default=None, ge=0, le=1440)
     max_daily_loss: float = Field(default=5000.0, gt=0, allow_inf_nan=False)
+    max_drawdown_amount: Optional[float] = Field(
+        default=None,
+        ge=0,
+        allow_inf_nan=False,
+    )
     max_consecutive_losses: int = Field(default=3, ge=1, le=100)
     llm_interval_minutes: Optional[int] = Field(default=None, ge=1, le=1440)
     fee_rate_us: Optional[float] = Field(default=None, ge=0, le=0.01)
@@ -118,6 +123,11 @@ class StrategyMergedSchema(BaseModel):
     min_profit_amount: float = Field(default=0.0, ge=0, allow_inf_nan=False)
     auto_resume_minutes: int = Field(default=3, ge=0, le=1440)
     max_daily_loss: float = Field(default=5000.0, gt=0, allow_inf_nan=False)
+    max_drawdown_amount: Optional[float] = Field(
+        default=None,
+        ge=0,
+        allow_inf_nan=False,
+    )
     max_consecutive_losses: int = Field(default=3, ge=1, le=100)
     llm_interval_minutes: int = Field(default=2, ge=1, le=1440)
     fee_rate_us: float = Field(default=0.0005, ge=0, le=0.01)
@@ -178,9 +188,11 @@ class StrategyMergedSchema(BaseModel):
 
 
 class NotificationChannelSchema(BaseModel):
-    type: Literal["serverchan", "webhook"]
+    type: Literal["serverchan", "webhook", "telegram"]
     severity_floor: Literal["INFO", "WARNING", "CRITICAL"] = "INFO"
     url: Optional[str] = None
+    bot_token: Optional[str] = Field(default=None, max_length=4096)
+    chat_id: Optional[str] = Field(default=None, max_length=4096)
 
     @field_validator("url")
     @classmethod
@@ -230,6 +242,7 @@ class StrategyResponse(BaseModel):
     min_profit_amount: float
     auto_resume_minutes: int
     max_daily_loss: float
+    max_drawdown_amount: Optional[float] = None
     max_consecutive_losses: int
     llm_interval_minutes: int
     fee_rate_us: float
@@ -791,6 +804,9 @@ class StatusResponse(BaseModel):
     runner_running: bool = False
     daily_pnl: float
     consecutive_losses: int
+    cumulative_realized_pnl: float = 0.0
+    peak_realized_pnl: float = 0.0
+    drawdown_amount: float = 0.0
     last_price: float
     last_trigger_price: float
     last_trigger_at: Optional[datetime]
@@ -974,6 +990,8 @@ class DiagnosticsResponse(BaseModel):
     order_sync_succeeded: bool = False
     execution_state: str = "IDLE"
     reduction_reason: str = ""
+    dedup_suppressed_total: int
+    dedup_window_seconds: float
     live_safety: DiagnosticLiveSafety
     quote_stream: DiagnosticQuoteStream
     risk: DiagnosticRiskState
@@ -1034,6 +1052,22 @@ class OrderCancelResponse(BaseModel):
     broker_order_id: str
     status: str
     message: str
+
+
+class OrderCancelAllRequest(BaseModel):
+    symbol: Optional[str] = Field(default=None, max_length=50)
+
+
+class OrderCancelFailure(BaseModel):
+    order_id: str
+    error: str
+
+
+class OrderCancelAllResponse(BaseModel):
+    cancelled: int
+    failed: list[OrderCancelFailure]
+    skipped: int
+    total_pending: int
 
 
 class TradeEventResponse(BaseModel):
@@ -1142,6 +1176,7 @@ class BacktestParams(BaseModel):
     short_selling: bool = Field(default=False)
     min_profit_amount: float = Field(default=0.0, ge=0)
     max_daily_loss: float = Field(default=5000.0, gt=0)
+    max_drawdown_amount: float = Field(default=0.0, ge=0, allow_inf_nan=False)
     max_consecutive_losses: int = Field(default=3, ge=1)
     quantity: float = Field(default=1.0, gt=0)
     initial_cash: float = Field(default=100000.0, gt=0)
@@ -1149,6 +1184,7 @@ class BacktestParams(BaseModel):
     fixed_fee: float = Field(default=0.0, ge=0)
     slippage_pct: float = Field(default=0.0, ge=0, le=5)
     stop_loss_pct: float = Field(default=0.0, ge=0, le=100)
+    trailing_stop_pct: float = Field(default=0.0, ge=0, le=100)
 
     @field_validator("symbol")
     @classmethod
@@ -1773,6 +1809,9 @@ class LLMInteractionResponse(BaseModel):
     order_status: Optional[str] = None
     order_id: Optional[str] = None
     applied: bool
+    prompt_tokens: Optional[int] = None
+    completion_tokens: Optional[int] = None
+    total_tokens: Optional[int] = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -1797,7 +1836,35 @@ class LLMInteractionDetail(BaseModel):
     order_id: Optional[str] = None
     applied: bool
     prompt_variant: Optional[str] = None
+    prompt_tokens: Optional[int] = None
+    completion_tokens: Optional[int] = None
+    total_tokens: Optional[int] = None
     created_at: datetime
+
+
+class LLMUsageDailySummary(BaseModel):
+    date: str
+    interactions: int
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+
+
+class LLMUsageTypeSummary(BaseModel):
+    interaction_type: str
+    interactions: int
+    total_tokens: int
+
+
+class LLMUsageSummaryResponse(BaseModel):
+    days: int
+    total_interactions: int
+    successful_interactions: int
+    total_prompt_tokens: int
+    total_completion_tokens: int
+    total_tokens: int
+    by_day: list[LLMUsageDailySummary]
+    by_type: list[LLMUsageTypeSummary]
 
 
 class MarketSessionStatus(BaseModel):

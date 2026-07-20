@@ -13,7 +13,7 @@ import pytest
 
 from app.core.broker import OrderResult, Quote
 from app.core.notify import ServerChanNotifier
-from app.core.risk import RiskController
+from app.core.risk import RiskConfig, RiskController
 from app.services import trade_execution_service as trade_svc_module
 from app.services.trade_execution_service import (
     FinalOrderQuoteCheckResult,
@@ -2753,6 +2753,61 @@ class TestTradeExecutionServiceBasics:
         assert risk.daily_pnl == 20.0
         assert fills == ["AAPL.US"]
         assert reductions == [("AAPL.US", "SELL", Decimal("2"))]
+
+    def test_exit_fill_emits_drawdown_limit_event_and_notification(self) -> None:
+        risk_events: list[tuple[str, str]] = []
+        notifications: list[tuple[str, str]] = []
+        svc = TradeExecutionService(
+            record_order=lambda *args: None,
+            update_order_status=lambda *args: None,
+            record_risk_event=lambda reason, event_type="RISK_REJECTION": risk_events.append(
+                (event_type, reason)
+            ),
+        )
+        svc.load_tracked_entries({
+            "AAPL.US": (
+                Decimal("1"),
+                Decimal("100"),
+                "LONG",
+                datetime(2026, 7, 19, 13, 30, tzinfo=timezone.utc),
+            )
+        })
+        pending = _PendingOrder(
+            broker=MagicMock(),
+            broker_order_id="drawdown-fill",
+            symbol="AAPL.US",
+            action="SELL",
+            quantity=Decimal("1"),
+            price=Decimal("90"),
+            engine_snapshot=None,
+            avg_price=Decimal("100"),
+        )
+        terminal = OrderStatus(
+            "drawdown-fill",
+            "FILLED",
+            executed_quantity=Decimal("1"),
+            executed_price=Decimal("90"),
+        )
+        risk = RiskController(
+            RiskConfig(
+                max_daily_loss=5000.0,
+                max_consecutive_losses=10,
+                max_drawdown_amount=10.0,
+            )
+        )
+
+        svc._finalize_pending_fill(
+            pending,
+            terminal,
+            risk=risk,
+            notify_risk_event=lambda event_type, reason: notifications.append(
+                (event_type, reason)
+            ),
+        )
+
+        assert risk.paused is True
+        assert risk_events == [("DRAWDOWN_LIMIT", risk.pause_reason)]
+        assert notifications == [("DRAWDOWN_LIMIT", risk.pause_reason)]
 
     def test_concurrent_same_id_fill_finalization_skips_in_flight_reentry(self) -> None:
         callback_started = threading.Event()

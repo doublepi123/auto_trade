@@ -29,6 +29,11 @@ class StrategyConfig(Base):
     min_profit_amount: Mapped[float] = mapped_column(Float, default=0.0)
     auto_resume_minutes: Mapped[int] = mapped_column(Integer, default=3)
     max_daily_loss: Mapped[float] = mapped_column(Float, default=5000.0)
+    max_drawdown_amount: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+        default=None,
+    )
     max_consecutive_losses: Mapped[int] = mapped_column(Integer, default=3)
     sct_key: Mapped[str] = mapped_column(String(200), default="")
     updated_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow, onupdate=_utcnow)
@@ -410,6 +415,9 @@ class LLMInteraction(Base):
     order_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     applied: Mapped[bool] = mapped_column(Boolean, default=False)
     prompt_variant: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    prompt_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    completion_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    total_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow)
 
 
@@ -440,6 +448,8 @@ class RuntimeState(Base):
     daily_pnl: Mapped[float] = mapped_column(Float, default=0.0)
     daily_pnl_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
     consecutive_losses: Mapped[int] = mapped_column(Integer, default=0)
+    cumulative_realized_pnl: Mapped[float] = mapped_column(Float, default=0.0)
+    peak_realized_pnl: Mapped[float] = mapped_column(Float, default=0.0)
     last_price: Mapped[float] = mapped_column(Float, default=0.0)
     last_trigger_price: Mapped[float] = mapped_column(Float, default=0.0)
     last_trigger_at: Mapped[Optional[datetime]] = mapped_column(_TZDateTime, nullable=True)

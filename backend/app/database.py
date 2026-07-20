@@ -51,6 +51,7 @@ def init_db() -> None:
     _ensure_strategy_config_llm_columns(engine)
     _ensure_strategy_config_trade_safety_columns(engine)
     _ensure_strategy_config_session_columns(engine)
+    _ensure_drawdown_columns(engine)
     _ensure_runtime_state_daily_pnl_date_column(engine)
     _ensure_runtime_state_symbol_columns(engine)
     _ensure_runtime_reduction_columns(engine)
@@ -74,6 +75,7 @@ def init_db() -> None:
     _ensure_strategy_config_report_schedule_columns(engine)
     _ensure_strategy_v2_shadow_tables(engine)
     _ensure_llm_interaction_variant_column(engine)
+    _ensure_llm_interaction_token_columns(engine)
     _ensure_report_query_indexes(engine)
     _ensure_trade_notes_table(engine)
     _ensure_backtest_runs_table(engine)
@@ -274,6 +276,36 @@ def _ensure_strategy_config_session_columns(db_engine: Engine) -> None:
             connection.exec_driver_sql(
                 "ALTER TABLE strategy_config ADD COLUMN trading_session_mode VARCHAR(16) DEFAULT 'ANY' NOT NULL"
             )
+
+
+def _ensure_drawdown_columns(db_engine: Engine) -> None:
+    inspector = inspect(db_engine)
+    table_names = set(inspector.get_table_names())
+    with db_engine.begin() as connection:
+        if "strategy_config" in table_names:
+            strategy_columns = {
+                column["name"]
+                for column in inspector.get_columns("strategy_config")
+            }
+            if "max_drawdown_amount" not in strategy_columns:
+                connection.exec_driver_sql(
+                    "ALTER TABLE strategy_config ADD COLUMN max_drawdown_amount FLOAT"
+                )
+        if "runtime_state" in table_names:
+            runtime_columns = {
+                column["name"]
+                for column in inspector.get_columns("runtime_state")
+            }
+            if "cumulative_realized_pnl" not in runtime_columns:
+                connection.exec_driver_sql(
+                    "ALTER TABLE runtime_state ADD COLUMN "
+                    "cumulative_realized_pnl FLOAT DEFAULT 0 NOT NULL"
+                )
+            if "peak_realized_pnl" not in runtime_columns:
+                connection.exec_driver_sql(
+                    "ALTER TABLE runtime_state ADD COLUMN "
+                    "peak_realized_pnl FLOAT DEFAULT 0 NOT NULL"
+                )
 
 
 def _ensure_runtime_state_daily_pnl_date_column(db_engine: Engine) -> None:
@@ -1354,6 +1386,24 @@ def _ensure_llm_interaction_variant_column(db_engine: Engine) -> None:
             connection.exec_driver_sql(
                 "ALTER TABLE llm_interactions ADD COLUMN prompt_variant VARCHAR(100)"
             )
+
+
+def _ensure_llm_interaction_token_columns(db_engine: Engine) -> None:
+    inspector = inspect(db_engine)
+    if "llm_interactions" not in inspector.get_table_names():
+        return
+    columns = {column["name"] for column in inspector.get_columns("llm_interactions")}
+    missing_columns = {
+        "prompt_tokens": "INTEGER",
+        "completion_tokens": "INTEGER",
+        "total_tokens": "INTEGER",
+    }
+    with db_engine.begin() as connection:
+        for name, column_type in missing_columns.items():
+            if name not in columns:
+                connection.exec_driver_sql(
+                    f"ALTER TABLE llm_interactions ADD COLUMN {name} {column_type}"
+                )
 
 def _bootstrap_credentials(db: Session, credential_model: type, strategy_model: type) -> None:
     from app.core.credential_crypto import encrypt_secret

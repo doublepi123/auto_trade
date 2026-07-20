@@ -178,7 +178,7 @@ class TradeExecutionService:
         self,
         record_order: Callable[..., None],
         update_order_status: Callable[..., None],
-        record_risk_event: Callable[[str], None],
+        record_risk_event: Callable[..., None],
         record_order_skipped: _RecordOrderSkipped | None = None,
         persist_entry: _EntryPersistCallback | None = None,
         on_fill: _FillCallback | None = None,
@@ -2811,6 +2811,29 @@ class TradeExecutionService:
 
                 if net_pnl is not None and risk is not None:
                     risk.record_trade(float(net_pnl))
+                    drawdown_reason = risk.consume_drawdown_limit_reason()
+                    if drawdown_reason is not None:
+                        try:
+                            self._record_risk_event(
+                                drawdown_reason,
+                                "DRAWDOWN_LIMIT",
+                            )
+                        except Exception:
+                            logger.exception(
+                                "failed to record drawdown limit risk event for %s",
+                                pending.symbol,
+                            )
+                        if notify_risk_event is not None:
+                            try:
+                                notify_risk_event(
+                                    "DRAWDOWN_LIMIT",
+                                    drawdown_reason,
+                                )
+                            except Exception:
+                                logger.exception(
+                                    "failed to send drawdown limit notification for %s",
+                                    pending.symbol,
+                                )
 
                 if entry is not None and consumed > 0:
                     if new_quantity <= 0:

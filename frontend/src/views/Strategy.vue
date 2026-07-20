@@ -167,6 +167,9 @@
         <el-form-item label="单日最大亏损">
           <el-input-number v-model="form.max_daily_loss" :min="1" :precision="2" :step="0.01" />
         </el-form-item>
+        <el-form-item label="最大回撤额度">
+          <el-input-number v-model="form.max_drawdown_amount" :min="0" :precision="2" :step="0.01" :value-on-clear="null" data-testid="max-drawdown-amount" />
+        </el-form-item>
         <el-form-item label="连续亏损暂停阈值">
           <el-input-number v-model="form.max_consecutive_losses" :min="1" />
         </el-form-item>
@@ -308,6 +311,7 @@ interface StrategyForm {
   min_profit_amount: number
   auto_resume_minutes: number
   max_daily_loss: number
+  max_drawdown_amount: number | null
   max_consecutive_losses: number
   llm_interval_minutes: number
   fee_rate_us: number
@@ -342,6 +346,7 @@ const { form, loading, saving, saved, error, isDirty, load, save } = useFormStat
     min_profit_amount: 0,
     auto_resume_minutes: 3,
     max_daily_loss: 5000,
+    max_drawdown_amount: null as number | null,
     max_consecutive_losses: 3,
     llm_interval_minutes: 2,
     fee_rate_us: 0.05,
@@ -374,6 +379,7 @@ const { form, loading, saving, saved, error, isDirty, load, save } = useFormStat
       min_profit_amount: s.min_profit_amount,
       auto_resume_minutes: s.auto_resume_minutes,
       max_daily_loss: s.max_daily_loss,
+      max_drawdown_amount: s.max_drawdown_amount,
       max_consecutive_losses: s.max_consecutive_losses,
       llm_interval_minutes: s.llm_interval_minutes,
       fee_rate_us: s.fee_rate_us * 100,
@@ -409,6 +415,7 @@ const { form, loading, saving, saved, error, isDirty, load, save } = useFormStat
     if (!previous || data.min_profit_amount !== previous.min_profit_amount) patch.min_profit_amount = data.min_profit_amount
     if (!previous || data.auto_resume_minutes !== previous.auto_resume_minutes) patch.auto_resume_minutes = data.auto_resume_minutes
     if (!previous || data.max_daily_loss !== previous.max_daily_loss) patch.max_daily_loss = data.max_daily_loss
+    if (!previous || data.max_drawdown_amount !== previous.max_drawdown_amount) patch.max_drawdown_amount = data.max_drawdown_amount
     if (!previous || data.max_consecutive_losses !== previous.max_consecutive_losses) patch.max_consecutive_losses = data.max_consecutive_losses
     if (!previous || data.llm_interval_minutes !== previous.llm_interval_minutes) patch.llm_interval_minutes = data.llm_interval_minutes
     if (!previous || data.fee_rate_us !== previous.fee_rate_us) patch.fee_rate_us = data.fee_rate_us / 100
@@ -480,6 +487,7 @@ function buildPresetParams(): Record<string, unknown> {
     min_profit_amount: form.value.min_profit_amount,
     auto_resume_minutes: form.value.auto_resume_minutes,
     max_daily_loss: form.value.max_daily_loss,
+    max_drawdown_amount: form.value.max_drawdown_amount,
     max_consecutive_losses: form.value.max_consecutive_losses,
     fee_rate_us: form.value.fee_rate_us / 100,
     fee_rate_hk: form.value.fee_rate_hk / 100,
@@ -613,6 +621,7 @@ function buildStrategyConfig(): Record<string, unknown> {
     min_profit_amount: form.value.min_profit_amount,
     auto_resume_minutes: form.value.auto_resume_minutes,
     max_daily_loss: form.value.max_daily_loss,
+    max_drawdown_amount: form.value.max_drawdown_amount,
     max_consecutive_losses: form.value.max_consecutive_losses,
     llm_interval_minutes: form.value.llm_interval_minutes,
     fee_rate_us: form.value.fee_rate_us / 100,
@@ -676,6 +685,8 @@ async function handleImportConfig(evt: Event) {
     if (numeric(parsed.min_profit_amount) !== undefined) patch.min_profit_amount = numeric(parsed.min_profit_amount)!
     if (numeric(parsed.auto_resume_minutes) !== undefined) patch.auto_resume_minutes = numeric(parsed.auto_resume_minutes)!
     if (numeric(parsed.max_daily_loss) !== undefined) patch.max_daily_loss = numeric(parsed.max_daily_loss)!
+    if (parsed.max_drawdown_amount === null) patch.max_drawdown_amount = null
+    else if (numeric(parsed.max_drawdown_amount) !== undefined) patch.max_drawdown_amount = numeric(parsed.max_drawdown_amount)!
     if (numeric(parsed.max_consecutive_losses) !== undefined) patch.max_consecutive_losses = numeric(parsed.max_consecutive_losses)!
     if (numeric(parsed.llm_interval_minutes) !== undefined) patch.llm_interval_minutes = numeric(parsed.llm_interval_minutes)!
     if (numeric(parsed.fee_rate_us) !== undefined) patch.fee_rate_us = numeric(parsed.fee_rate_us)! * 100
