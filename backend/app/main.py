@@ -21,6 +21,7 @@ from app.platform.runner import PlatformRunner
 from app.services.strategy_service import StrategyService
 from app.database import SessionLocal
 from app.api.backtest import router as backtest_router
+from app.api.audit_pack import router as audit_pack_router
 from app.api.calendar import router as calendar_router
 from app.api.trade_notes import router as trade_notes_router
 from app.api.trades import router as trades_router
@@ -821,6 +822,7 @@ app.include_router(trade_router)
 app.include_router(watchlist_router)
 app.include_router(llm_advisor_router)
 app.include_router(backtest_router)
+app.include_router(audit_pack_router)
 app.include_router(trade_notes_router)
 app.include_router(trades_router)
 app.include_router(equity_router)

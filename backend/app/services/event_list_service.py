@@ -157,6 +157,8 @@ def list_timeline_events(
     page: int,
     page_size: int,
     query: str | None = None,
+    from_dt: datetime | None = None,
+    to_dt: datetime | None = None,
 ) -> tuple[list[TimelineEventResponse], int]:
     """Merge trade_events and audit_logs for the timeline API (spec §5.2).
 
@@ -174,6 +176,10 @@ def list_timeline_events(
         tq = db.query(TradeEvent)
         if symbol:
             tq = tq.filter(TradeEvent.symbol == symbol)
+        if from_dt is not None:
+            tq = tq.filter(TradeEvent.created_at >= from_dt)
+        if to_dt is not None:
+            tq = tq.filter(TradeEvent.created_at < to_dt)
         if et:
             tq = tq.filter(TradeEvent.event_type.in_(et))
         if query_term:
@@ -189,6 +195,10 @@ def list_timeline_events(
 
     if source == "audit":
         aq = db.query(AuditLog)
+        if from_dt is not None:
+            aq = aq.filter(AuditLog.created_at >= from_dt)
+        if to_dt is not None:
+            aq = aq.filter(AuditLog.created_at < to_dt)
         if et:
             aq = aq.filter(AuditLog.action.in_(et))
         if query_term:
@@ -204,6 +214,10 @@ def list_timeline_events(
         lq = db.query(LLMInteraction)
         if symbol:
             lq = lq.filter(LLMInteraction.symbol == symbol)
+        if from_dt is not None:
+            lq = lq.filter(LLMInteraction.created_at >= from_dt)
+        if to_dt is not None:
+            lq = lq.filter(LLMInteraction.created_at < to_dt)
         if et:
             lq = lq.filter(LLMInteraction.interaction_type.in_(et))
         if query_term:
@@ -218,6 +232,10 @@ def list_timeline_events(
 
     if source == "risk":
         rq = db.query(RiskEvent)
+        if from_dt is not None:
+            rq = rq.filter(RiskEvent.created_at >= from_dt)
+        if to_dt is not None:
+            rq = rq.filter(RiskEvent.created_at < to_dt)
         if et:
             rq = rq.filter(RiskEvent.event_type.in_(et))
         if symbol:
@@ -242,6 +260,10 @@ def list_timeline_events(
     tq = db.query(TradeEvent)
     if symbol:
         tq = tq.filter(TradeEvent.symbol == symbol)
+    if from_dt is not None:
+        tq = tq.filter(TradeEvent.created_at >= from_dt)
+    if to_dt is not None:
+        tq = tq.filter(TradeEvent.created_at < to_dt)
     if et:
         tq = tq.filter(TradeEvent.event_type.in_(et))
     if query_term:
@@ -264,6 +286,10 @@ def list_timeline_events(
         audit_rows = []
     else:
         aq = db.query(AuditLog)
+        if from_dt is not None:
+            aq = aq.filter(AuditLog.created_at >= from_dt)
+        if to_dt is not None:
+            aq = aq.filter(AuditLog.created_at < to_dt)
         if symbol:
             aq = aq.filter(AuditLog.request_summary.contains(symbol))
         if et:
@@ -279,6 +305,10 @@ def list_timeline_events(
         lq = db.query(LLMInteraction)
         if symbol:
             lq = lq.filter(LLMInteraction.symbol == symbol)
+        if from_dt is not None:
+            lq = lq.filter(LLMInteraction.created_at >= from_dt)
+        if to_dt is not None:
+            lq = lq.filter(LLMInteraction.created_at < to_dt)
         if et:
             lq = lq.filter(LLMInteraction.interaction_type.in_(et))
         if query_term:
@@ -291,6 +321,10 @@ def list_timeline_events(
         llm_rows = lq.order_by(LLMInteraction.created_at.desc(), LLMInteraction.id.desc()).limit(fetch_n).all()
 
         rq = db.query(RiskEvent)
+        if from_dt is not None:
+            rq = rq.filter(RiskEvent.created_at >= from_dt)
+        if to_dt is not None:
+            rq = rq.filter(RiskEvent.created_at < to_dt)
         if et:
             rq = rq.filter(RiskEvent.event_type.in_(et))
         if symbol:

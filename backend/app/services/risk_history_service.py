@@ -1,6 +1,8 @@
 """Daily risk history — reads runtime_state_snapshots to show risk over time."""
 from __future__ import annotations
 
+from datetime import datetime
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -12,11 +14,23 @@ class RiskHistoryService:
     def __init__(self, db: Session) -> None:
         self._db = db
 
-    def get_history(self, *, symbol: str | None = None, limit: int = 100) -> RiskHistoryResponse:
-        capped = max(1, min(limit, 500))
+    def get_history(
+        self,
+        *,
+        symbol: str | None = None,
+        limit: int = 100,
+        from_dt: datetime | None = None,
+        to_dt: datetime | None = None,
+        max_limit: int = 500,
+    ) -> RiskHistoryResponse:
+        capped = max(1, min(limit, max_limit))
         stmt = select(RuntimeStateSnapshot)
         if symbol:
             stmt = stmt.where(RuntimeStateSnapshot.symbol == symbol)
+        if from_dt is not None:
+            stmt = stmt.where(RuntimeStateSnapshot.created_at >= from_dt)
+        if to_dt is not None:
+            stmt = stmt.where(RuntimeStateSnapshot.created_at < to_dt)
         stmt = stmt.order_by(RuntimeStateSnapshot.created_at.desc()).limit(capped)
         rows = list(self._db.scalars(stmt))
         rows = list(reversed(rows))  # chronological for charting
