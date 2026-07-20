@@ -457,6 +457,9 @@ class LLMInteractionService:
         error: str = "",
         order_action: str = "NONE",
         prompt_variant: str | None = None,
+        prompt_tokens: int | None = None,
+        completion_tokens: int | None = None,
+        total_tokens: int | None = None,
     ) -> LLMInteraction:
         record = LLMInteraction(
             interaction_type=interaction_type,
@@ -474,6 +477,9 @@ class LLMInteractionService:
             error=error,
             order_action=order_action or "NONE",
             prompt_variant=prompt_variant,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
             created_at=datetime.now(timezone.utc),
         )
         self.db.add(record)
@@ -702,5 +708,8 @@ class LLMInteractionService:
             order_id=record.order_id,
             applied=bool(record.applied),
             prompt_variant=record.prompt_variant,
+            prompt_tokens=record.prompt_tokens,
+            completion_tokens=record.completion_tokens,
+            total_tokens=record.total_tokens,
             created_at=record.created_at,
         )

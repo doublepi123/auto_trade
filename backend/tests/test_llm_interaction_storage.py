@@ -6,14 +6,19 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Query, Session
+from sqlalchemy.pool import StaticPool
 
 from app.config import Settings
 from app.models import Base, ExperimentResult, LLMInteraction
 from app.services.llm_interaction_service import LLMInteractionService
 
 
-def _session(tmp_path) -> Session:
-    engine = create_engine(f"sqlite:///{tmp_path / 'llm_storage.db'}")
+def _session() -> Session:
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
     Base.metadata.create_all(bind=engine)
     return Session(bind=engine)
 
@@ -45,8 +50,8 @@ def _interaction(
     )
 
 
-def test_create_samples_large_recent_price_context_and_keeps_audit_fields(tmp_path) -> None:
-    db = _session(tmp_path)
+def test_create_samples_large_recent_price_context_and_keeps_audit_fields() -> None:
+    db = _session()
     prices = [
         {
             "symbol": "NVDA.US",
@@ -93,8 +98,8 @@ def test_create_samples_large_recent_price_context_and_keeps_audit_fields(tmp_pa
     }
 
 
-def test_create_leaves_small_custom_context_unchanged(tmp_path) -> None:
-    db = _session(tmp_path)
+def test_create_leaves_small_custom_context_unchanged() -> None:
+    db = _session()
     record = LLMInteractionService(db, context_max_bytes=4096).create(
         interaction_type="preview",
         symbol="AAPL.US",
@@ -107,8 +112,8 @@ def test_create_leaves_small_custom_context_unchanged(tmp_path) -> None:
     assert json.loads(record.context_snapshot) == {"price": 120, "position": "flat"}
 
 
-def test_context_byte_limit_holds_for_large_multibyte_and_timestamp_values(tmp_path) -> None:
-    db = _session(tmp_path)
+def test_context_byte_limit_holds_for_large_multibyte_and_timestamp_values() -> None:
+    db = _session()
     record = LLMInteractionService(
         db,
         context_max_bytes=2048,
@@ -135,8 +140,8 @@ def test_context_byte_limit_holds_for_large_multibyte_and_timestamp_values(tmp_p
     assert [point["last_price"] for point in stored["recent_prices"]] == [99.0, 100.0]
 
 
-def test_context_hard_limit_holds_for_multibyte_core_fields(tmp_path) -> None:
-    db = _session(tmp_path)
+def test_context_hard_limit_holds_for_multibyte_core_fields() -> None:
+    db = _session()
     core_keys = (
         "symbol",
         "market",
@@ -167,10 +172,8 @@ def test_context_hard_limit_holds_for_multibyte_core_fields(tmp_path) -> None:
     assert isinstance(json.loads(record.context_snapshot), dict)
 
 
-def test_context_hard_limit_drops_non_dict_prices_and_bounds_price_scalars(
-    tmp_path,
-) -> None:
-    db = _session(tmp_path)
+def test_context_hard_limit_drops_non_dict_prices_and_bounds_price_scalars() -> None:
+    db = _session()
     record = LLMInteractionService(
         db,
         context_max_bytes=2048,
@@ -202,8 +205,8 @@ def test_context_hard_limit_drops_non_dict_prices_and_bounds_price_scalars(
     assert any(point.get("last_price") == 100.0 for point in stored["recent_prices"])
 
 
-def test_context_hard_limit_omits_nested_core_containers(tmp_path) -> None:
-    db = _session(tmp_path)
+def test_context_hard_limit_omits_nested_core_containers() -> None:
+    db = _session()
     record = LLMInteractionService(
         db,
         context_max_bytes=2048,
@@ -227,14 +230,14 @@ def test_context_hard_limit_omits_nested_core_containers(tmp_path) -> None:
         assert not isinstance(stored.get(key), (dict, list))
 
 
-def test_context_limit_validation_matches_runtime_settings(tmp_path) -> None:
-    db = _session(tmp_path)
+def test_context_limit_validation_matches_runtime_settings() -> None:
+    db = _session()
     with pytest.raises(ValueError, match="at least 2048"):
         LLMInteractionService(db, context_max_bytes=2047)
 
 
-def test_prune_uses_short_window_only_for_routine_no_action_rows(tmp_path) -> None:
-    db = _session(tmp_path)
+def test_prune_uses_short_window_only_for_routine_no_action_rows() -> None:
+    db = _session()
     now = datetime(2026, 7, 16, tzinfo=timezone.utc)
     rows = {
         "routine_old": _interaction(created_at=now - timedelta(days=20)),
@@ -299,8 +302,8 @@ def test_prune_uses_short_window_only_for_routine_no_action_rows(tmp_path) -> No
         assert db.get(LLMInteraction, ids[name]) is not None
 
 
-def test_prune_limits_each_online_run_to_bounded_batches(tmp_path) -> None:
-    db = _session(tmp_path)
+def test_prune_limits_each_online_run_to_bounded_batches() -> None:
+    db = _session()
     now = datetime(2026, 7, 16, tzinfo=timezone.utc)
     db.add_all(
         [_interaction(created_at=now - timedelta(days=20)) for _ in range(5)]
@@ -321,10 +324,9 @@ def test_prune_limits_each_online_run_to_bounded_batches(tmp_path) -> None:
 
 
 def test_prune_rechecks_expiration_predicate_before_delete(
-    tmp_path,
     monkeypatch,
 ) -> None:
-    db = _session(tmp_path)
+    db = _session()
     now = datetime(2026, 7, 16, tzinfo=timezone.utc)
     target = _interaction(created_at=now - timedelta(days=20))
     db.add(target)
@@ -356,8 +358,8 @@ def test_prune_rechecks_expiration_predicate_before_delete(
     assert db.get(LLMInteraction, target.id) is not None
 
 
-def test_compact_oversized_contexts_rewrites_legacy_rows_in_batches(tmp_path) -> None:
-    db = _session(tmp_path)
+def test_compact_oversized_contexts_rewrites_legacy_rows_in_batches() -> None:
+    db = _session()
     prices = [
         {"symbol": "NVDA.US", "last_price": float(index), "padding": "x" * 100}
         for index in range(80)
@@ -394,8 +396,8 @@ def test_compact_oversized_contexts_rewrites_legacy_rows_in_batches(tmp_path) ->
     ]
 
 
-def test_compaction_rewrites_bad_prefix_without_starving_later_rows(tmp_path) -> None:
-    db = _session(tmp_path)
+def test_compaction_rewrites_bad_prefix_without_starving_later_rows() -> None:
+    db = _session()
     now = datetime(2026, 7, 16, tzinfo=timezone.utc)
     malformed = '{"broken":' + "x" * 3000
     nested = json.dumps(
@@ -478,10 +480,8 @@ def test_compaction_rewrites_bad_prefix_without_starving_later_rows(tmp_path) ->
     assert third.batches == 0
 
 
-def test_compaction_treats_whitespace_wrapped_empty_object_as_valid_json(
-    tmp_path,
-) -> None:
-    db = _session(tmp_path)
+def test_compaction_treats_whitespace_wrapped_empty_object_as_valid_json() -> None:
+    db = _session()
     row = _interaction(
         created_at=datetime(2026, 7, 16, tzinfo=timezone.utc),
         context_snapshot=" " * 3000 + "{}",

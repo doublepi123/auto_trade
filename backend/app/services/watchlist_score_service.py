@@ -197,7 +197,7 @@ class WatchlistScoreService:
                 "recommended_action (one of BUY/SELL/HOLD/AVOID), rationale "
                 "(one short sentence)."
             )
-            raw = advisor._call_deepseek(prompt)
+            raw = advisor._call_deepseek(prompt).content
             if not raw:
                 return self.record_score(
                     symbol=symbol,

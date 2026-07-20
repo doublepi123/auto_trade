@@ -52,6 +52,7 @@ class _Base:
             parsed_response={"buy_low": 90, "sell_high": 190},
             context_snapshot={"price": 120, "position": "flat"},
             success=True, error="", order_action="BUY",
+            prompt_tokens=100, completion_tokens=25, total_tokens=125,
         )
         return record.id
 
@@ -65,6 +66,9 @@ class TestLLMInteractionDetailService(_Base):
         assert out.parsed_response == {"buy_low": 90, "sell_high": 190}
         assert out.context_snapshot["price"] == 120
         assert out.order_action == "BUY"
+        assert out.prompt_tokens == 100
+        assert out.completion_tokens == 25
+        assert out.total_tokens == 125
 
     def test_get_detail_missing(self) -> None:
         assert LLMInteractionService(self._db()).get_detail(999999) is None
@@ -102,7 +106,20 @@ class TestLLMInteractionDetailAPI(_Base):
         data = resp.json()
         assert data["prompt"] == "suggest interval"
         assert data["parsed_response"]["buy_low"] == 90
+        assert data["prompt_tokens"] == 100
+        assert data["completion_tokens"] == 25
+        assert data["total_tokens"] == 125
 
     def test_endpoint_404(self) -> None:
         resp = self.client.get("/api/llm-interactions/999999")
         assert resp.status_code == 404
+
+    def test_list_endpoint_includes_token_usage(self) -> None:
+        self._make()
+
+        resp = self.client.get("/api/strategy/llm-interval/interactions?limit=1")
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()[0]["prompt_tokens"] == 100
+        assert resp.json()[0]["completion_tokens"] == 25
+        assert resp.json()[0]["total_tokens"] == 125

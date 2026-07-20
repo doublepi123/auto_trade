@@ -1,5 +1,17 @@
 describe('Lab Budget Progress & Runtime Export', () => {
   beforeEach(() => {
+    cy.intercept('GET', '/api/llm-usage/summary*', {
+      body: {
+        days: 30,
+        total_interactions: 0,
+        successful_interactions: 0,
+        total_prompt_tokens: 0,
+        total_completion_tokens: 0,
+        total_tokens: 0,
+        by_day: [],
+        by_type: [],
+      },
+    }).as('usageSummary')
     cy.visitApp('/#/lab')
   })
 

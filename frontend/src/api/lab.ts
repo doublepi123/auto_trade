@@ -6,6 +6,7 @@ import type {
   PerformanceStats,
   PerformanceVariant,
   IndicatorsResponse,
+  LLMUsageSummary,
 } from '../types'
 
 export async function listPromptVersions(): Promise<PromptVersion[]> {
@@ -49,5 +50,10 @@ export async function getPerformanceRecommendations(experiment: string): Promise
 
 export async function getIndicators(symbol?: string): Promise<IndicatorsResponse> {
   const resp = await api.get('/api/indicators', { params: symbol ? { symbol } : {} })
+  return resp.data
+}
+
+export async function getLLMUsageSummary(days = 30): Promise<LLMUsageSummary> {
+  const resp = await api.get('/api/llm-usage/summary', { params: { days } })
   return resp.data
 }

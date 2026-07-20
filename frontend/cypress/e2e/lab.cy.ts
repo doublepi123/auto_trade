@@ -139,14 +139,56 @@ describe('LLM Lab workbench', () => {
         { id: 8, interaction_type: 'preview', symbol: 'TSLA.US', market: 'US', success: false, error: 'timeout', order_action: 'NONE', order_status: null, order_id: null, applied: false, created_at: '2026-06-17T09:55:00Z' },
       ],
     }).as('runtimeInteractions')
+    cy.intercept('GET', '/api/llm-usage/summary*', {
+      body: {
+        days: 30,
+        total_interactions: 3,
+        successful_interactions: 2,
+        total_prompt_tokens: 160,
+        total_completion_tokens: 60,
+        total_tokens: 220,
+        by_day: [
+          { date: '2026-06-16', interactions: 1, prompt_tokens: 100, completion_tokens: 40, total_tokens: 140 },
+          { date: '2026-06-17', interactions: 2, prompt_tokens: 60, completion_tokens: 20, total_tokens: 80 },
+        ],
+        by_type: [
+          { interaction_type: 'analyze', interactions: 2, total_tokens: 160 },
+          { interaction_type: 'preview', interactions: 1, total_tokens: 60 },
+        ],
+      },
+    }).as('usageSummary')
 
     cy.contains('.el-tabs__item', '运行状态').click()
-    cy.wait(['@runtimeStatus', '@runtimeInteractions'])
+    cy.wait(['@runtimeStatus', '@runtimeInteractions', '@usageSummary'])
 
     cy.get('[data-testid="llm-runtime-overview"]').should('contain', '已启用').and('contain', '180.50').and('contain', '188.80').and('contain', '震荡区间保持有效')
     cy.get('[data-testid="llm-runtime-budget"]').should('contain', '12').and('contain', '0')
     cy.get('[data-testid="llm-runtime-symbols"]').should('contain', 'AAPL.US').and('contain', 'cooldown active')
     cy.get('[data-testid="llm-runtime-interactions"]').should('contain', 'BUY').and('contain', 'timeout')
     cy.get('[data-testid="llm-runtime-health"]').should('contain', '预算已耗尽').and('contain', 'AAPL.US: cooldown active')
+    cy.get('[data-testid="llm-usage-metrics"]').should('contain', '220')
+    cy.get('[data-testid="llm-usage-daily"]').should('contain', '2026-06-16').and('contain', '140')
+    cy.get('[data-testid="llm-usage-types"]').should('contain', 'analyze: 2 次 / 160 Token')
+  })
+
+  it('shows an empty state when the selected range has no LLM usage', () => {
+    cy.intercept('GET', '/api/llm-usage/summary*', {
+      body: {
+        days: 30,
+        total_interactions: 0,
+        successful_interactions: 0,
+        total_prompt_tokens: 0,
+        total_completion_tokens: 0,
+        total_tokens: 0,
+        by_day: [],
+        by_type: [],
+      },
+    }).as('emptyUsageSummary')
+
+    cy.contains('.el-tabs__item', '运行状态').click()
+    cy.wait('@emptyUsageSummary')
+
+    cy.get('[data-testid="llm-usage-summary"]').should('contain', '所选时间范围内暂无大模型调用')
+    cy.get('[data-testid="llm-usage-summary"] [data-testid="data-state-empty"]').should('be.visible')
   })
 })

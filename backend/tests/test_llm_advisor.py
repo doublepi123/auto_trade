@@ -16,6 +16,8 @@ from app.services.data_aggregator import (
 from app.services.llm_advisor_service import (
     LLMAdvisorService,
     LLMProviderError,
+    LLMProviderResponse,
+    LLMTokenUsage,
     _escape_orphan_braces,
 )
 from app.schemas import LLMPreviewAnalyzeRequest
@@ -437,9 +439,16 @@ class TestLLMAdvisorService:
         import app.config
 
         monkeypatch.setattr(app.config.settings, "llm_provider", "minimax", raising=False)
-        monkeypatch.setattr(advisor, "_call_minimax", lambda prompt: f"minimax:{prompt}")
+        monkeypatch.setattr(
+            advisor,
+            "_call_minimax",
+            lambda prompt: LLMProviderResponse(
+                content=f"minimax:{prompt}",
+                usage=LLMTokenUsage(),
+            ),
+        )
 
-        assert advisor._call_llm("analyze NVDA") == "minimax:analyze NVDA"
+        assert advisor._call_llm("analyze NVDA").content == "minimax:analyze NVDA"
 
     def test_preview_does_not_record_or_update_analysis_throttle(self, advisor: LLMAdvisorService, monkeypatch) -> None:
         import app.services.llm_advisor_service as service_module
@@ -463,7 +472,10 @@ class TestLLMAdvisorService:
         monkeypatch.setattr(
             advisor,
             "_call_deepseek",
-            lambda prompt: '{"suggested_buy_low": 200.0, "suggested_sell_high": 210.0, "confidence_score": 0.82, "analysis": "preview"}',
+            lambda prompt: LLMProviderResponse(
+                content='{"suggested_buy_low": 200.0, "suggested_sell_high": 210.0, "confidence_score": 0.82, "analysis": "preview"}',
+                usage=LLMTokenUsage(),
+            ),
         )
         monkeypatch.setattr(
             advisor,
@@ -531,7 +543,10 @@ class TestLLMAdvisorService:
         monkeypatch.setattr(
             advisor,
             "_call_deepseek",
-            lambda prompt: '{"suggested_buy_low": 220.0, "suggested_sell_high": 224.0, "confidence_score": 0.91, "analysis": "test", "order_action": "BUY_NOW", "order_price": 221.8}',
+            lambda prompt: LLMProviderResponse(
+                content='{"suggested_buy_low": 220.0, "suggested_sell_high": 224.0, "confidence_score": 0.91, "analysis": "test", "order_action": "BUY_NOW", "order_price": 221.8}',
+                usage=LLMTokenUsage(),
+            ),
         )
         monkeypatch.setattr(
             advisor,
@@ -569,6 +584,159 @@ class TestLLMAdvisorService:
             assert "BUY_NOW" in row.raw_response
         finally:
             db.close()
+
+    def test_analyze_persists_provider_token_usage(
+        self,
+        advisor: LLMAdvisorService,
+        monkeypatch,
+    ) -> None:
+        from app.database import SessionLocal
+        from app.models import LLMInteraction
+        import app.config
+        import app.services.llm_advisor_service as service_module
+
+        class FakeResponse:
+            text = "provider response"
+
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict[str, Any]:
+                return {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": (
+                                    '{"suggested_buy_low": 220.0, '
+                                    '"suggested_sell_high": 224.0, '
+                                    '"confidence_score": 0.91, '
+                                    '"analysis": "test"}'
+                                )
+                            }
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": 120,
+                        "completion_tokens": 45,
+                        "total_tokens": 165,
+                    },
+                }
+
+        with SessionLocal() as db:
+            db.query(LLMInteraction).delete()
+            db.commit()
+        monkeypatch.setattr(service_module, "_LAST_ANALYSIS_TIMESTAMP", 0.0)
+        monkeypatch.setattr(app.config.settings, "llm_provider", "deepseek")
+        monkeypatch.setattr(app.config.settings, "deepseek_api_key", "test-key")
+        monkeypatch.setattr(service_module.httpx, "post", lambda *args, **kwargs: FakeResponse())
+        monkeypatch.setattr(
+            advisor._data_aggregator,
+            "fetch_market_data",
+            lambda symbol, market: {
+                "daily_candles": [],
+                "minute_candles": [],
+                "current_price": 221.8,
+            },
+        )
+        result = advisor.analyze(
+            symbol="NVDA.US",
+            market="US",
+            current_price=221.8,
+            current_buy_low=219.0,
+            current_sell_high=224.0,
+            short_selling=False,
+            current_position="FLAT",
+            recent_trades=[],
+            force=True,
+            persist=False,
+        )
+
+        with SessionLocal() as db:
+            row = db.get(LLMInteraction, result["interaction_id"])
+            assert row is not None
+            assert row.prompt_tokens == 120
+            assert row.completion_tokens == 45
+            assert row.total_tokens == 165
+
+    def test_analyze_persists_null_tokens_when_provider_usage_is_missing(
+        self,
+        advisor: LLMAdvisorService,
+        monkeypatch,
+    ) -> None:
+        from app.database import SessionLocal
+        from app.models import LLMInteraction
+        import app.config
+        import app.services.llm_advisor_service as service_module
+
+        class FakeResponse:
+            text = "provider response"
+
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict[str, Any]:
+                return {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": (
+                                    '{"suggested_buy_low": 220.0, '
+                                    '"suggested_sell_high": 224.0, '
+                                    '"confidence_score": 0.91, '
+                                    '"analysis": "test"}'
+                                )
+                            }
+                        }
+                    ]
+                }
+
+        with SessionLocal() as db:
+            db.query(LLMInteraction).delete()
+            db.commit()
+        monkeypatch.setattr(service_module, "_LAST_ANALYSIS_TIMESTAMP", 0.0)
+        monkeypatch.setattr(app.config.settings, "llm_provider", "deepseek")
+        monkeypatch.setattr(app.config.settings, "deepseek_api_key", "test-key")
+        monkeypatch.setattr(service_module.httpx, "post", lambda *args, **kwargs: FakeResponse())
+        monkeypatch.setattr(
+            advisor._data_aggregator,
+            "fetch_market_data",
+            lambda symbol, market: {
+                "daily_candles": [],
+                "minute_candles": [],
+                "current_price": 221.8,
+            },
+        )
+        result = advisor.analyze(
+            symbol="NVDA.US",
+            market="US",
+            current_price=221.8,
+            current_buy_low=219.0,
+            current_sell_high=224.0,
+            short_selling=False,
+            current_position="FLAT",
+            recent_trades=[],
+            force=True,
+            persist=False,
+        )
+
+        assert result["success"] is True
+        with SessionLocal() as db:
+            row = db.get(LLMInteraction, result["interaction_id"])
+            assert row is not None
+            assert row.prompt_tokens is None
+            assert row.completion_tokens is None
+            assert row.total_tokens is None
+
+    def test_partial_provider_usage_keeps_missing_counts_null(self) -> None:
+        usage = LLMAdvisorService._parse_token_usage(
+            {"prompt_tokens": 20, "total_tokens": 33}
+        )
+
+        assert usage == LLMTokenUsage(
+            prompt_tokens=20,
+            completion_tokens=None,
+            total_tokens=33,
+        )
 
 def test_preview_endpoint_uses_payload_without_saving(monkeypatch) -> None:
     from fastapi.testclient import TestClient
@@ -1001,7 +1169,14 @@ class TestLLMAdvisorDegradation:
                 return None
 
             def json(self) -> dict[str, object]:
-                return {"choices": [{"message": {"content": "ok"}}]}
+                return {
+                    "choices": [{"message": {"content": "ok"}}],
+                    "usage": {
+                        "prompt_tokens": 11,
+                        "completion_tokens": 4,
+                        "total_tokens": 15,
+                    },
+                }
 
         def fake_post(*args, **kwargs) -> FakeResponse:
             captured["args"] = args
@@ -1016,7 +1191,14 @@ class TestLLMAdvisorDegradation:
         monkeypatch.setattr(app.config.settings, "minimax_thinking_type", "adaptive", raising=False)
         monkeypatch.setattr(service_module.httpx, "post", fake_post)
 
-        assert advisor._call_minimax("analyze NVDA") == "ok"
+        provider_response = advisor._call_minimax("analyze NVDA")
+
+        assert provider_response.content == "ok"
+        assert provider_response.usage == LLMTokenUsage(
+            prompt_tokens=11,
+            completion_tokens=4,
+            total_tokens=15,
+        )
 
         assert captured["args"][0] == "https://api.minimaxi.com/v1/chat/completions"
         headers = captured["kwargs"]["headers"]
@@ -1040,7 +1222,14 @@ class TestLLMAdvisorDegradation:
                 return None
 
             def json(self) -> dict[str, object]:
-                return {"choices": [{"message": {"content": "ok"}}]}
+                return {
+                    "choices": [{"message": {"content": "ok"}}],
+                    "usage": {
+                        "prompt_tokens": 11,
+                        "completion_tokens": 4,
+                        "total_tokens": 15,
+                    },
+                }
 
         def fake_post(*args, **kwargs) -> FakeResponse:
             captured["args"] = args
@@ -1051,7 +1240,14 @@ class TestLLMAdvisorDegradation:
         monkeypatch.setattr(app.config.settings, "minimax_api_url", "https://api.minimax.io/v1/chat/completions", raising=False)
         monkeypatch.setattr(service_module.httpx, "post", fake_post)
 
-        assert advisor._call_minimax("analyze NVDA") == "ok"
+        provider_response = advisor._call_minimax("analyze NVDA")
+
+        assert provider_response.content == "ok"
+        assert provider_response.usage == LLMTokenUsage(
+            prompt_tokens=11,
+            completion_tokens=4,
+            total_tokens=15,
+        )
         assert captured["args"][0] == "https://api.minimax.io/v1/chat/completions"
 
     def test_call_minimax_without_key_raises_runtime_error(self, advisor: LLMAdvisorService, monkeypatch) -> None:
@@ -1115,7 +1311,7 @@ class TestLLMAdvisorDegradation:
         monkeypatch.setattr(service_module.httpx, "post", respond)
         monkeypatch.setattr(service_module.time, "sleep", lambda _seconds: None)
 
-        assert advisor._call_minimax("analyze NVDA") == "ok"
+        assert advisor._call_minimax("analyze NVDA").content == "ok"
         assert calls == 2
 
     def test_call_minimax_read_timeout_does_not_retry_inline(
@@ -1452,7 +1648,7 @@ class TestThrottleReserveSlot:
 
         call_count = 0
 
-        def slow_call_deepseek(prompt: str) -> str:
+        def slow_call_deepseek(prompt: str) -> LLMProviderResponse:
             nonlocal call_count
             call_count += 1
             # While inside the LLM call, a concurrent request would see inf
@@ -1460,7 +1656,10 @@ class TestThrottleReserveSlot:
             assert service_module._LAST_ANALYSIS_TIMESTAMP == float("inf"), (
                 "Slot not reserved during LLM call"
             )
-            return '{"suggested_buy_low": 95.0, "suggested_sell_high": 105.0, "confidence_score": 0.8, "analysis": "ok"}'
+            return LLMProviderResponse(
+                content='{"suggested_buy_low": 95.0, "suggested_sell_high": 105.0, "confidence_score": 0.8, "analysis": "ok"}',
+                usage=LLMTokenUsage(),
+            )
 
         monkeypatch.setattr(service_module, "_LAST_ANALYSIS_TIMESTAMP", 0.0)
         monkeypatch.setattr(
@@ -1549,7 +1748,10 @@ class TestThrottleReserveSlot:
         monkeypatch.setattr(
             advisor,
             "_call_deepseek",
-            lambda prompt: '{"suggested_buy_low":95,"suggested_sell_high":105,"confidence_score":0.8,"analysis":"ok"}',
+            lambda prompt: LLMProviderResponse(
+                content='{"suggested_buy_low":95,"suggested_sell_high":105,"confidence_score":0.8,"analysis":"ok"}',
+                usage=LLMTokenUsage(),
+            ),
         )
         nested_results: list[dict[str, object]] = []
 

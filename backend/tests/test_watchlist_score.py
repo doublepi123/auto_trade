@@ -135,6 +135,49 @@ class TestWatchlistScoreService:
             expires = expires.replace(tzinfo=timezone.utc)
         assert expires > datetime.now(timezone.utc)
 
+    def test_configured_llm_uses_provider_response_content(
+        self, db_session, monkeypatch
+    ) -> None:
+        from types import SimpleNamespace
+
+        from app.services.llm_advisor_service import (
+            LLMAdvisorService,
+            LLMProviderResponse,
+            LLMTokenUsage,
+        )
+
+        monkeypatch.setattr(
+            "app.config.settings",
+            SimpleNamespace(deepseek_api_key="configured"),
+        )
+
+        def fake_call(
+            _advisor: LLMAdvisorService, _prompt: str
+        ) -> LLMProviderResponse:
+            return LLMProviderResponse(
+                content=json.dumps(
+                    {
+                        "score": 78,
+                        "confidence": 0.9,
+                        "recommended_action": "BUY",
+                        "rationale": "Investor's setup",
+                    }
+                ),
+                usage=LLMTokenUsage(prompt_tokens=12, completion_tokens=8, total_tokens=20),
+            )
+
+        monkeypatch.setattr(LLMAdvisorService, "_call_deepseek", fake_call)
+
+        row = WatchlistScoreService(db_session).score_from_llm_or_fallback(
+            symbol="AAPL.US", market="US", ttl_minutes=5
+        )
+
+        assert row.source == "llm"
+        assert row.score == 78.0
+        assert row.confidence == 0.9
+        assert row.recommended_action == "BUY"
+        assert row.rationale == "Investor's setup"
+
 
 class TestWatchlistScoreAPI:
     def test_post_score_endpoint_returns_fallback(self, client: TestClient, monkeypatch) -> None:

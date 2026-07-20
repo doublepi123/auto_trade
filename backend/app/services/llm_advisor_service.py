@@ -6,6 +6,7 @@ import math
 import re
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -45,6 +46,19 @@ _ORDER_ACTIONS = {
 }
 _MINIMAX_BACKOFF_SECONDS = 300
 _MINIMAX_RETRYABLE_HTTP_STATUSES = frozenset({502, 503, 504})
+
+
+@dataclass(frozen=True, slots=True)
+class LLMTokenUsage:
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class LLMProviderResponse:
+    content: str
+    usage: LLMTokenUsage
 
 
 class LLMProviderError(RuntimeError):
@@ -300,7 +314,7 @@ class LLMAdvisorService:
             "recent_analysis_context": DataAggregator._format_recent_analysis(recent_analysis),
         }
 
-    def _call_llm(self, prompt: str) -> str:
+    def _call_llm(self, prompt: str) -> LLMProviderResponse:
         """Call the configured LLM provider."""
         if settings.llm_provider == "minimax":
             return self._call_minimax(prompt)
@@ -460,8 +474,11 @@ class LLMAdvisorService:
             }
 
             raw_response = ""
+            token_usage = LLMTokenUsage()
             try:
-                raw_response = self._call_llm(prompt)
+                provider_response = self._call_llm(prompt)
+                raw_response = provider_response.content
+                token_usage = provider_response.usage
                 result = self._parse_response(raw_response)
                 analysis_succeeded = True
 
@@ -487,6 +504,7 @@ class LLMAdvisorService:
                     success=False,
                     error=f"LLM analysis failed: {exc}",
                     prompt_variant=prompt_variant,
+                    token_usage=token_usage,
                 )
                 return {
                     "success": False,
@@ -530,6 +548,7 @@ class LLMAdvisorService:
                 success=True,
                 error="",
                 prompt_variant=prompt_variant,
+                token_usage=token_usage,
             )
 
             return {
@@ -678,8 +697,11 @@ class LLMAdvisorService:
             }
 
             raw_response = ""
+            token_usage = LLMTokenUsage()
             try:
-                raw_response = self._call_llm(prompt)
+                provider_response = self._call_llm(prompt)
+                raw_response = provider_response.content
+                token_usage = provider_response.usage
                 result = self._parse_response(raw_response)
                 # LLM succeeded — consume the throttle budget.
                 with _throttle_lock:
@@ -700,6 +722,7 @@ class LLMAdvisorService:
                     success=False,
                     error=f"LLM preview failed: {exc}",
                     prompt_variant=prompt_variant,
+                    token_usage=token_usage,
                 )
                 return {"success": False, "applied": False, "error": "LLM preview failed"}
 
@@ -714,6 +737,7 @@ class LLMAdvisorService:
                 success=True,
                 error="",
                 prompt_variant=prompt_variant,
+                token_usage=token_usage,
             )
 
             return {
@@ -779,7 +803,7 @@ class LLMAdvisorService:
             return base_url
         return f"{base_url}/chat/completions"
 
-    def _call_deepseek(self, prompt: str) -> str:
+    def _call_deepseek(self, prompt: str) -> LLMProviderResponse:
         """Call DeepSeek API with the prompt."""
         if not settings.deepseek_api_key:
             raise RuntimeError("DEEPSEEK_API_KEY is not configured")
@@ -837,9 +861,12 @@ class LLMAdvisorService:
                 f" reasoning_chars={reasoning_len}, max_tokens={settings.deepseek_max_tokens})."
                 " Increase DEEPSEEK_MAX_TOKENS or lower/disable DeepSeek thinking."
             )
-        return content
+        return LLMProviderResponse(
+            content=content,
+            usage=self._parse_token_usage(data.get("usage")),
+        )
 
-    def _call_minimax(self, prompt: str) -> str:
+    def _call_minimax(self, prompt: str) -> LLMProviderResponse:
         """Call MiniMax OpenAI-compatible Chat Completions API with the prompt."""
         if not settings.minimax_api_key:
             raise RuntimeError("MINIMAX_API_KEY is not configured")
@@ -931,7 +958,27 @@ class LLMAdvisorService:
                 f" (finish_reason={finish_reason}, usage={usage},"
                 f" max_completion_tokens={settings.minimax_max_completion_tokens})."
             )
-        return content
+        return LLMProviderResponse(
+            content=content,
+            usage=self._parse_token_usage(data.get("usage")),
+        )
+
+    @staticmethod
+    def _parse_token_usage(raw_usage: Any) -> LLMTokenUsage:
+        if not isinstance(raw_usage, dict):
+            return LLMTokenUsage()
+
+        def token_count(field: str) -> int | None:
+            value = raw_usage.get(field)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                return None
+            return value
+
+        return LLMTokenUsage(
+            prompt_tokens=token_count("prompt_tokens"),
+            completion_tokens=token_count("completion_tokens"),
+            total_tokens=token_count("total_tokens"),
+        )
 
     @staticmethod
     def _retry_after_seconds(response: httpx.Response) -> int:
@@ -1146,6 +1193,7 @@ class LLMAdvisorService:
         success: bool,
         error: str,
         prompt_variant: str | None = None,
+        token_usage: LLMTokenUsage = LLMTokenUsage(),
     ) -> int | None:
         db = SessionLocal()
         try:
@@ -1161,6 +1209,9 @@ class LLMAdvisorService:
                 error=error,
                 order_action=(result or {}).get("order_action", "NONE"),
                 prompt_variant=prompt_variant,
+                prompt_tokens=token_usage.prompt_tokens,
+                completion_tokens=token_usage.completion_tokens,
+                total_tokens=token_usage.total_tokens,
             )
             return record.id
         except Exception:

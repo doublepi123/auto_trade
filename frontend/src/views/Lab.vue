@@ -152,6 +152,56 @@
             </div>
           </el-card>
 
+          <el-card class="runtime-card" data-testid="llm-usage-summary">
+            <template #header>
+              <div class="runtime-card-header">
+                <span>大模型用量</span>
+                <div class="usage-actions">
+                  <el-select v-model="usageDays" size="small" data-testid="llm-usage-days" @change="loadLLMUsageSummary">
+                    <el-option :value="7" label="近 7 天" />
+                    <el-option :value="30" label="近 30 天" />
+                    <el-option :value="90" label="近 90 天" />
+                  </el-select>
+                  <el-button size="small" :loading="usageLoading" data-testid="llm-usage-refresh" @click="loadLLMUsageSummary">刷新</el-button>
+                </div>
+              </div>
+            </template>
+            <DataState
+              :loading="usageLoading"
+              :error="usageError"
+              :empty="usageSummary?.total_interactions === 0"
+              empty-text="所选时间范围内暂无大模型调用"
+            >
+              <template v-if="usageSummary">
+                <div class="usage-metrics" data-testid="llm-usage-metrics">
+                  <MetricStat label="调用次数" :value="usageSummary.total_interactions" />
+                  <MetricStat label="成功调用" :value="usageSummary.successful_interactions" />
+                  <MetricStat label="输入 Token" :value="formatTokenCount(usageSummary.total_prompt_tokens)" />
+                  <MetricStat label="输出 Token" :value="formatTokenCount(usageSummary.total_completion_tokens)" />
+                  <MetricStat label="Token 总量" :value="formatTokenCount(usageSummary.total_tokens)" />
+                </div>
+                <el-table :data="usageSummary.by_day" size="small" class="usage-table" data-testid="llm-usage-daily">
+                  <el-table-column prop="date" label="日期" min-width="110" />
+                  <el-table-column prop="interactions" label="调用" min-width="80" />
+                  <el-table-column label="输入 Token" min-width="120">
+                    <template #default="{ row }">{{ formatTokenCount(row.prompt_tokens) }}</template>
+                  </el-table-column>
+                  <el-table-column label="输出 Token" min-width="120">
+                    <template #default="{ row }">{{ formatTokenCount(row.completion_tokens) }}</template>
+                  </el-table-column>
+                  <el-table-column label="Token 总量" min-width="120">
+                    <template #default="{ row }">{{ formatTokenCount(row.total_tokens) }}</template>
+                  </el-table-column>
+                </el-table>
+                <div v-if="usageSummary.by_type.length" class="usage-types" data-testid="llm-usage-types">
+                  <el-tag v-for="item in usageSummary.by_type" :key="item.interaction_type" effect="plain">
+                    {{ item.interaction_type }}: {{ item.interactions }} 次 / {{ formatTokenCount(item.total_tokens) }} Token
+                  </el-tag>
+                </div>
+              </template>
+            </DataState>
+          </el-card>
+
           <el-card v-if="runtimeHealthHints.length" header="健康提示" class="runtime-card" data-testid="llm-runtime-health">
             <el-alert
               v-for="hint in runtimeHealthHints"
@@ -1171,9 +1221,11 @@ import {
   listPromptVersions, createPromptVersion, activatePromptVersion,
   listExperimentNames, getExperimentSummary,
   getPerformanceStats, comparePerformanceVariants, getPerformanceRecommendations,
-  getIndicators,
+  getIndicators, getLLMUsageSummary,
 } from '../api/lab'
 import { getLLMInteractions, getLLMIntervalStatus } from '../api/llm_advisor'
+import DataState from '../components/DataState.vue'
+import MetricStat from '../components/MetricStat.vue'
 import {
   evaluateStrategyShadowAdxChallengers,
   getStrategyShadowConfig,
@@ -1188,7 +1240,7 @@ import {
 } from '../api/strategy_shadow'
 import type {
   PromptVersion, ExperimentSummary, PerformanceStats,
-  PerformanceVariant, IndicatorsResponse, LLMInteractionRecord, LLMIntervalStatus,
+  PerformanceVariant, IndicatorsResponse, LLMInteractionRecord, LLMIntervalStatus, LLMUsageSummary,
   StrategyShadowAdxChallengerResponse,
   StrategyShadowConfig, StrategyShadowConfigUpdate, StrategyShadowDecision,
   StrategyShadowEvaluation, StrategyShadowForwardValidationDaily,
@@ -1306,6 +1358,10 @@ const runtimeStatus = ref<LLMIntervalStatus | null>(null)
 const runtimeInteractions = ref<LLMInteractionRecord[]>([])
 const runtimeLoading = ref(false)
 const runtimeLoaded = ref(false)
+const usageDays = ref(30)
+const usageSummary = ref<LLMUsageSummary | null>(null)
+const usageLoading = ref(false)
+const usageError = ref('')
 
 const runtimeHealthHints = computed(() => {
   const status = runtimeStatus.value
@@ -1328,6 +1384,7 @@ const budgetUsagePct = computed(() => {
 })
 
 async function loadRuntimeStatus() {
+  void loadLLMUsageSummary()
   runtimeLoading.value = true
   try {
     const [status, interactions] = await Promise.all([
@@ -1341,6 +1398,19 @@ async function loadRuntimeStatus() {
     ElMessage.error(resolveErrorMessage(e, '加载 LLM 运行状态失败'))
   } finally {
     runtimeLoading.value = false
+  }
+}
+
+async function loadLLMUsageSummary() {
+  usageLoading.value = true
+  usageError.value = ''
+  try {
+    usageSummary.value = await getLLMUsageSummary(usageDays.value)
+  } catch (e: unknown) {
+    usageSummary.value = null
+    usageError.value = resolveErrorMessage(e, '加载大模型用量失败')
+  } finally {
+    usageLoading.value = false
   }
 }
 
@@ -1399,6 +1469,10 @@ function formatDateTime(value: string | null): string {
   return new Date(value).toLocaleString([], {
     month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
   })
+}
+
+function formatTokenCount(value: number): string {
+  return value.toLocaleString()
 }
 
 // --- Tab 5: strategy v2 shadow observability ---
@@ -2474,6 +2548,42 @@ onBeforeUnmount(() => {
   gap: 8px;
 }
 
+.usage-actions,
+.usage-types {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.usage-actions :deep(.el-select) {
+  width: 110px;
+}
+
+.usage-metrics {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.usage-metrics :deep(.metric-stat) {
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 4px;
+  background: #f5f7fa;
+}
+
+.usage-metrics :deep(.metric-label),
+.usage-metrics :deep(.metric-value) {
+  display: block;
+}
+
+.usage-types {
+  margin-top: 12px;
+}
+
 .budget-bar {
   margin-top: 12px;
 }
@@ -2697,7 +2807,8 @@ onBeforeUnmount(() => {
 @media (max-width: 900px) {
   .shadow-form,
   .shadow-metrics-grid,
-  .shadow-progress-grid {
+  .shadow-progress-grid,
+  .usage-metrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
@@ -2721,7 +2832,8 @@ onBeforeUnmount(() => {
   .shadow-form,
   .shadow-facts,
   .shadow-metrics-grid,
-  .shadow-progress-grid {
+  .shadow-progress-grid,
+  .usage-metrics {
     grid-template-columns: minmax(0, 1fr);
   }
 }

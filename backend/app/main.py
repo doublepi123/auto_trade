@@ -33,6 +33,7 @@ from app.api.strategy_presets import router as strategy_presets_router
 from app.api.risk import router as risk_router
 from app.api.broker import router as broker_router
 from app.api.llm_interactions import router as llm_interactions_router
+from app.api.llm_usage import router as llm_usage_router
 from app.api.notifications import router as notifications_router
 from app.api.credentials import router as credentials_router
 from app.api.experiments import router as experiments_router
@@ -831,6 +832,7 @@ app.include_router(strategy_presets_router)
 app.include_router(risk_router)
 app.include_router(broker_router)
 app.include_router(llm_interactions_router)
+app.include_router(llm_usage_router)
 app.include_router(notifications_router)
 app.include_router(experiments_router)
 app.include_router(performance_router)
