@@ -16,6 +16,9 @@ class _BacktestMetricsJson(TypedDict):
 
 class _BacktestTradeJson(TypedDict):
     action: str
+    price: float
+    fee: float
+    reason: str
 
 
 class _BacktestResultJson(TypedDict):
@@ -169,6 +172,252 @@ class TestBacktestEngine:
         assert result.metrics.skipped_signals == 1
         assert "max consecutive losses reached" in result.skipped_signals[0].reason
 
+    def test_drawdown_breach_blocks_long_and_short_entries(self) -> None:
+        engine = BacktestEngine(BacktestEngineParams(
+            buy_low=100,
+            sell_high=110,
+            short_selling=True,
+            max_daily_loss=1000,
+            max_consecutive_losses=100,
+            max_drawdown_amount=5,
+            stop_loss_pct=5,
+        ))
+
+        result = engine.run([
+            bar(0, 105, 106, 99, 100),
+            bar(1, 98, 99, 94, 95),
+            bar(2, 105, 106, 99, 100),
+            bar(3, 108, 111, 105, 110),
+        ], include_fee_sensitivity=False)
+
+        assert [trade.action for trade in result.trades] == ["BUY", "STOP_LOSS_SELL"]
+        assert [signal.action for signal in result.skipped_signals] == ["BUY", "SELL_SHORT"]
+        assert {signal.category for signal in result.skipped_signals} == {"DRAWDOWN"}
+
+    def test_exit_that_causes_drawdown_breach_still_executes(self) -> None:
+        engine = BacktestEngine(BacktestEngineParams(
+            buy_low=100,
+            sell_high=110,
+            max_daily_loss=1000,
+            max_consecutive_losses=100,
+            max_drawdown_amount=5,
+            stop_loss_pct=5,
+        ))
+
+        result = engine.run([
+            bar(0, 105, 106, 99, 100),
+            bar(1, 98, 99, 94, 95),
+            bar(2, 105, 106, 99, 100),
+        ], include_fee_sensitivity=False)
+
+        assert [trade.action for trade in result.trades] == ["BUY", "STOP_LOSS_SELL"]
+        assert result.trades[-1].net_pnl == -5
+        assert result.skipped_signals[0].category == "DRAWDOWN"
+
+    def test_drawdown_peak_ratchets_after_wins_before_breach(self) -> None:
+        engine = BacktestEngine(BacktestEngineParams(
+            buy_low=100,
+            sell_high=110,
+            max_daily_loss=1000,
+            max_consecutive_losses=100,
+            max_drawdown_amount=5,
+            stop_loss_pct=5,
+        ))
+
+        result = engine.run([
+            bar(0, 105, 106, 99, 100),
+            bar(1, 105, 111, 104, 110),
+            bar(2, 105, 106, 99, 100),
+            bar(3, 105, 111, 104, 110),
+            bar(4, 105, 106, 99, 100),
+            bar(5, 98, 99, 94, 95),
+            bar(6, 105, 106, 99, 100),
+        ], include_fee_sensitivity=False)
+
+        assert [trade.pnl for trade in result.trades if trade.net_pnl is not None] == [10, 10, -5]
+        assert result.skipped_signals[0].category == "DRAWDOWN"
+        assert "cumulative_realized_pnl=15.00" in result.skipped_signals[0].reason
+        assert "peak_realized_pnl=20.00" in result.skipped_signals[0].reason
+
+    def test_drawdown_zero_matches_omitted_default(self) -> None:
+        bars = [
+            bar(0, 105, 106, 99, 100),
+            bar(1, 98, 99, 94, 95),
+            bar(2, 105, 106, 99, 100),
+        ]
+        base = BacktestEngineParams(
+            buy_low=100,
+            sell_high=110,
+            max_daily_loss=1000,
+            max_consecutive_losses=100,
+            stop_loss_pct=5,
+        )
+        explicit_zero = BacktestEngineParams(
+            buy_low=100,
+            sell_high=110,
+            max_daily_loss=1000,
+            max_consecutive_losses=100,
+            max_drawdown_amount=0,
+            stop_loss_pct=5,
+        )
+
+        omitted_result = BacktestEngine(base).run(bars, include_fee_sensitivity=False)
+        zero_result = BacktestEngine(explicit_zero).run(bars, include_fee_sensitivity=False)
+
+        assert zero_result == omitted_result
+
+    def test_negative_drawdown_amount_is_rejected(self) -> None:
+        try:
+            BacktestEngine(BacktestEngineParams(
+                buy_low=100,
+                sell_high=110,
+                max_drawdown_amount=-1,
+            ))
+        except ValueError as exc:
+            assert "max_drawdown_amount cannot be negative" in str(exc)
+        else:
+            raise AssertionError("negative max_drawdown_amount should raise ValueError")
+
+    def test_long_trailing_stop_ratchets_to_latest_peak_with_costs(self) -> None:
+        engine = BacktestEngine(BacktestEngineParams(
+            buy_low=100,
+            sell_high=200,
+            quantity=10,
+            fee_rate=0.001,
+            slippage_pct=1,
+            stop_loss_pct=10,
+            trailing_stop_pct=5,
+        ))
+
+        result = engine.run([
+            bar(0, 101, 102, 99, 100),
+            bar(1, 106, 110, 105, 109),
+            bar(2, 116, 120, 115, 119),
+            bar(3, 116, 118, 113, 114),
+        ], include_fee_sensitivity=False)
+        closed = result.trades[-1]
+
+        expected_price = 120 * 0.95 * 0.99
+        assert closed.action == "TRAILING_STOP_SELL"
+        assert closed.reason == "trailing_stop"
+        assert abs(closed.price - expected_price) < 1e-9
+        assert abs(closed.fee - expected_price * 10 * 0.001) < 1e-9
+        assert closed.total_fees is not None
+        assert abs(closed.total_fees - (1.01 + expected_price * 10 * 0.001)) < 1e-9
+        assert closed.mfe_pct is not None
+        assert abs(closed.mfe_pct - ((120 - 101) / 101 * 100)) < 1e-9
+
+    def test_trailing_stop_does_not_exit_while_long_peak_keeps_rising(self) -> None:
+        engine = BacktestEngine(BacktestEngineParams(
+            buy_low=100,
+            sell_high=200,
+            trailing_stop_pct=5,
+        ))
+
+        result = engine.run([
+            bar(0, 101, 102, 99, 100),
+            bar(1, 106, 110, 105, 109),
+            bar(2, 116, 120, 115, 119),
+        ], include_fee_sensitivity=False)
+
+        assert [trade.action for trade in result.trades] == ["BUY"]
+        assert result.metrics.final_state == "long"
+
+    def test_short_trailing_stop_retraces_from_low_with_costs(self) -> None:
+        engine = BacktestEngine(BacktestEngineParams(
+            buy_low=100,
+            sell_high=200,
+            short_selling=True,
+            quantity=10,
+            fee_rate=0.001,
+            slippage_pct=1,
+            trailing_stop_pct=5,
+        ))
+
+        result = engine.run([
+            bar(0, 199, 202, 195, 200),
+            bar(1, 185, 188, 180, 182),
+            bar(2, 185, 189, 181, 188),
+        ], include_fee_sensitivity=False)
+        closed = result.trades[-1]
+
+        expected_price = 180 * 1.05 * 1.01
+        assert closed.action == "TRAILING_STOP_COVER"
+        assert closed.reason == "trailing_stop"
+        assert abs(closed.price - expected_price) < 1e-9
+        assert abs(closed.fee - expected_price * 10 * 0.001) < 1e-9
+        assert closed.mfe_pct is not None
+        assert abs(closed.mfe_pct - ((198 - 180) / 198 * 100)) < 1e-9
+
+    def test_trailing_stop_zero_matches_omitted_default(self) -> None:
+        bars = [
+            bar(0, 101, 102, 99, 100),
+            bar(1, 105, 108, 104, 107),
+            bar(2, 109, 111, 108, 110),
+        ]
+        base = BacktestEngineParams(buy_low=100, sell_high=110, fee_rate=0.001)
+        explicit_zero = BacktestEngineParams(
+            buy_low=100,
+            sell_high=110,
+            fee_rate=0.001,
+            trailing_stop_pct=0,
+        )
+
+        omitted_result = BacktestEngine(base).run(bars, include_fee_sensitivity=False)
+        zero_result = BacktestEngine(explicit_zero).run(bars, include_fee_sensitivity=False)
+
+        assert zero_result == omitted_result
+
+    def test_fixed_stop_exits_before_trailing_when_fixed_level_hits_first(self) -> None:
+        engine = BacktestEngine(BacktestEngineParams(
+            buy_low=100,
+            sell_high=200,
+            stop_loss_pct=3,
+            trailing_stop_pct=10,
+        ))
+
+        result = engine.run([
+            bar(0, 101, 102, 99, 100),
+            bar(1, 116, 120, 115, 119),
+            bar(2, 100, 116, 90, 95),
+        ], include_fee_sensitivity=False)
+
+        assert result.trades[-1].action == "STOP_LOSS_SELL"
+        assert result.trades[-1].reason == "stop loss reached"
+        assert result.trades[-1].price == 97
+
+    def test_trailing_stop_bypasses_min_profit_guard_like_fixed_stop(self) -> None:
+        engine = BacktestEngine(BacktestEngineParams(
+            buy_low=100,
+            sell_high=200,
+            min_profit_amount=1000,
+            fixed_fee=1,
+            trailing_stop_pct=5,
+        ))
+
+        result = engine.run([
+            bar(0, 101, 102, 99, 100),
+            bar(1, 106, 110, 105, 109),
+            bar(2, 106, 108, 104, 105),
+        ], include_fee_sensitivity=False)
+
+        assert [trade.action for trade in result.trades] == ["BUY", "TRAILING_STOP_SELL"]
+        assert result.trades[-1].reason == "trailing_stop"
+        assert result.trades[-1].total_fees == 2
+        assert result.metrics.skipped_signals == 0
+
+    def test_negative_trailing_stop_is_rejected(self) -> None:
+        try:
+            BacktestEngine(BacktestEngineParams(
+                buy_low=100,
+                sell_high=200,
+                trailing_stop_pct=-1,
+            ))
+        except ValueError as exc:
+            assert "trailing_stop_pct cannot be negative" in str(exc)
+        else:
+            raise AssertionError("negative trailing_stop_pct should raise ValueError")
+
     def test_parse_backtest_csv(self) -> None:
         bars = parse_backtest_csv(
             "\n".join([
@@ -312,6 +561,49 @@ class TestBacktestAPI:
 
         assert resp.status_code == 200
         assert resp.json()["skipped_signals"][0]["category"] == "FEE"
+
+    def test_run_backtest_endpoint_returns_drawdown_skip_category(self) -> None:
+        resp = client.post("/api/backtest/run", json={
+            "params": {
+                "buy_low": 100,
+                "sell_high": 110,
+                "max_daily_loss": 1000,
+                "max_consecutive_losses": 100,
+                "max_drawdown_amount": 5,
+                "stop_loss_pct": 5,
+            },
+            "csv_text": (
+                "timestamp,open,high,low,close,volume\n"
+                "2026-05-22T10:00:00Z,105,106,99,100,1000\n"
+                "2026-05-22T10:01:00Z,98,99,94,95,1000\n"
+                "2026-05-22T10:02:00Z,105,106,99,100,1000\n"
+            ),
+        })
+
+        assert resp.status_code == 200
+        assert resp.json()["skipped_signals"][0]["category"] == "DRAWDOWN"
+
+    def test_run_backtest_endpoint_applies_trailing_stop(self) -> None:
+        resp = client.post("/api/backtest/run", json={
+            "params": {
+                "buy_low": 100,
+                "sell_high": 200,
+                "trailing_stop_pct": 5,
+            },
+            "csv_text": (
+                "timestamp,open,high,low,close,volume\n"
+                "2026-05-22T10:00:00Z,101,102,99,100,1000\n"
+                "2026-05-22T10:01:00Z,106,110,105,109,1000\n"
+                "2026-05-22T10:02:00Z,106,108,104,105,1000\n"
+            ),
+        })
+
+        assert resp.status_code == 200
+        data = cast(_BacktestResultJson, resp.json())
+        closed = data["trades"][-1]
+        assert closed["action"] == "TRAILING_STOP_SELL"
+        assert closed["reason"] == "trailing_stop"
+        assert closed["price"] == 104.5
 
     def test_run_backtest_endpoint_rejects_bad_csv(self) -> None:
         resp = client.post("/api/backtest/run", json={
@@ -475,6 +767,7 @@ class TestBacktestExport:
                     "fixed_fee": 0,
                     "slippage_pct": 0,
                     "stop_loss_pct": 0,
+                    "trailing_stop_pct": 0,
                 },
                 "metrics": {
                     "initial_cash": 10000,

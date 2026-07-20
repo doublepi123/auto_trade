@@ -389,6 +389,7 @@ def _params_to_engine(p: BacktestParams) -> BacktestEngineParams:
         short_selling=p.short_selling,
         min_profit_amount=p.min_profit_amount,
         max_daily_loss=p.max_daily_loss,
+        max_drawdown_amount=p.max_drawdown_amount,
         max_consecutive_losses=p.max_consecutive_losses,
         quantity=p.quantity,
         initial_cash=p.initial_cash,
@@ -396,6 +397,7 @@ def _params_to_engine(p: BacktestParams) -> BacktestEngineParams:
         fixed_fee=p.fixed_fee,
         slippage_pct=p.slippage_pct,
         stop_loss_pct=p.stop_loss_pct,
+        trailing_stop_pct=p.trailing_stop_pct,
     )
 
 

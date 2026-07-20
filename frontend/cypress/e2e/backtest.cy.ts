@@ -25,6 +25,19 @@ describe('Backtest', () => {
     cy.contains('卖出').should('be.visible')
     cy.contains('费用敏感性').should('be.visible')
     cy.contains('成本不足').should('be.visible')
+    cy.contains('回撤限制').should('be.visible')
+  })
+
+  it('sends the configured trailing stop percentage', () => {
+    cy.get('[data-testid="trailing-stop-pct"] input').clear().type('2.5')
+    cy.get('[data-testid="run-backtest-button"]').click()
+    cy.wait('@runBacktest').its('request.body.params.trailing_stop_pct').should('equal', 2.5)
+  })
+
+  it('sends the configured maximum drawdown amount', () => {
+    cy.get('[data-testid="max-drawdown-amount"] input').clear().type('250')
+    cy.get('[data-testid="run-backtest-button"]').click()
+    cy.wait('@runBacktest').its('request.body.params.max_drawdown_amount').should('equal', 250)
   })
 
   it('can load sample csv after edits', () => {

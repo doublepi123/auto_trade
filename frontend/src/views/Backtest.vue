@@ -42,8 +42,14 @@
             <el-form-item label="止损百分比">
               <el-input-number v-model="form.stop_loss_pct" :precision="2" :step="0.5" :min="0" :max="100" />
             </el-form-item>
+            <el-form-item label="移动止损 %">
+              <el-input-number v-model="form.trailing_stop_pct" :precision="2" :step="0.5" :min="0" :max="100" data-testid="trailing-stop-pct" />
+            </el-form-item>
             <el-form-item label="单日最大亏损">
               <el-input-number v-model="form.max_daily_loss" :precision="2" :step="100" :min="1" />
+            </el-form-item>
+            <el-form-item label="最大回撤额度">
+              <el-input-number v-model="form.max_drawdown_amount" :precision="2" :step="100" :min="0" data-testid="max-drawdown-amount" />
             </el-form-item>
             <el-form-item label="连续亏损阈值">
               <el-input-number v-model="form.max_consecutive_losses" :precision="0" :step="1" :min="1" />
@@ -636,6 +642,7 @@ const defaultParams: BacktestParams = {
   short_selling: false,
   min_profit_amount: 0,
   max_daily_loss: 5000,
+  max_drawdown_amount: 0,
   max_consecutive_losses: 3,
   quantity: 1,
   initial_cash: 100000,
@@ -643,6 +650,7 @@ const defaultParams: BacktestParams = {
   fixed_fee: 0,
   slippage_pct: 0,
   stop_loss_pct: 0,
+  trailing_stop_pct: 0,
 }
 
 // Snapshot used by loadCurrentStrategy() to detect whether the user has
@@ -1235,12 +1243,14 @@ function actionLabel(action: string): string {
     BUY_TO_COVER: '平空',
     STOP_LOSS_SELL: '止损卖出',
     STOP_LOSS_COVER: '止损平空',
+    TRAILING_STOP_SELL: '移动止损卖出',
+    TRAILING_STOP_COVER: '移动止损平空',
   }
   return labels[action] ?? action
 }
 
 function actionTagType(action: string): string {
-  if (action.startsWith('STOP_LOSS')) return 'warning'
+  if (action.startsWith('STOP_LOSS') || action.startsWith('TRAILING_STOP')) return 'warning'
   if (action === 'BUY' || action === 'BUY_TO_COVER') return 'success'
   if (action === 'SELL' || action === 'SELL_SHORT') return 'danger'
   return 'info'

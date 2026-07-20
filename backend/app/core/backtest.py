@@ -26,6 +26,7 @@ class BacktestEngineParams:
     short_selling: bool = False
     min_profit_amount: float = 0.0
     max_daily_loss: float = 5000.0
+    max_drawdown_amount: float = 0.0
     max_consecutive_losses: int = 3
     quantity: float = 1.0
     initial_cash: float = 100000.0
@@ -33,6 +34,7 @@ class BacktestEngineParams:
     fixed_fee: float = 0.0
     slippage_pct: float = 0.0
     stop_loss_pct: float = 0.0
+    trailing_stop_pct: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -146,9 +148,12 @@ class BacktestEngine:
         realized_pnl = 0.0
         fees_paid = 0.0
         daily_pnl = 0.0
+        cumulative_realized_pnl = 0.0
+        peak_realized_pnl = 0.0
         current_day = ordered_bars[0].timestamp.date()
         consecutive_losses = 0
         paused_reason = ""
+        drawdown_reason = ""
         peak_equity = self.params.initial_cash
         max_drawdown_pct = 0.0
 
@@ -187,6 +192,11 @@ class BacktestEngine:
                         realized_pnl += gross_pnl - exit_fee
                         fees_paid += exit_fee
                         daily_pnl += net_pnl
+                        cumulative_realized_pnl += net_pnl
+                        peak_realized_pnl = max(
+                            peak_realized_pnl,
+                            cumulative_realized_pnl,
+                        )
                         closed_trade_pnls.append(net_pnl)
                         held_minutes = (bar.timestamp - position.entry_at).total_seconds() / 60
                         holding_minutes.append(held_minutes)
@@ -222,6 +232,24 @@ class BacktestEngine:
                             consecutive_losses += 1
                         else:
                             consecutive_losses = 0
+                        drawdown_amount = max(
+                            0.0,
+                            peak_realized_pnl - cumulative_realized_pnl,
+                        )
+                        if (
+                            not drawdown_reason
+                            and self.params.max_drawdown_amount > 0
+                            and drawdown_amount >= self.params.max_drawdown_amount
+                        ):
+                            drawdown_reason = (
+                                "DRAWDOWN_LIMIT: "
+                                f"drawdown={drawdown_amount:.2f}, "
+                                f"cumulative_realized_pnl={cumulative_realized_pnl:.2f}, "
+                                f"peak_realized_pnl={peak_realized_pnl:.2f}, "
+                                f"limit={self.params.max_drawdown_amount:.2f}"
+                            )
+                            # With new entries blocked, closed-trade PnL cannot recover;
+                            # the breach therefore remains terminal for this run.
                         if daily_pnl <= -abs(self.params.max_daily_loss):
                             paused_reason = f"daily loss limit reached: {daily_pnl:.2f}"
                         elif consecutive_losses >= self.params.max_consecutive_losses:
@@ -231,7 +259,16 @@ class BacktestEngine:
                 entry_signal = self._entry_signal(bar)
                 if entry_signal is not None:
                     action, side, price, reason = entry_signal
-                    if paused_reason:
+                    if drawdown_reason:
+                        skipped.append(BacktestSkippedSignal(
+                            timestamp=bar.timestamp,
+                            action=action,
+                            price=price,
+                            reason=drawdown_reason,
+                            state="flat",
+                            category="DRAWDOWN",
+                        ))
+                    elif paused_reason:
                         skipped.append(BacktestSkippedSignal(
                             timestamp=bar.timestamp,
                             action=action,
@@ -422,6 +459,8 @@ class BacktestEngine:
             raise ValueError("min_profit_amount cannot be negative")
         if self.params.max_daily_loss <= 0:
             raise ValueError("max_daily_loss must be greater than 0")
+        if self.params.max_drawdown_amount < 0:
+            raise ValueError("max_drawdown_amount cannot be negative")
         if self.params.max_consecutive_losses < 1:
             raise ValueError("max_consecutive_losses must be at least 1")
         if self.params.fee_rate < 0 or self.params.fixed_fee < 0 or self.params.slippage_pct < 0:
@@ -430,6 +469,10 @@ class BacktestEngine:
             raise ValueError("stop_loss_pct cannot be negative")
         if self.params.stop_loss_pct > 100:
             raise ValueError("stop_loss_pct cannot exceed 100")
+        if self.params.trailing_stop_pct < 0:
+            raise ValueError("trailing_stop_pct cannot be negative")
+        if self.params.trailing_stop_pct > 100:
+            raise ValueError("trailing_stop_pct cannot exceed 100")
 
     def _entry_signal(self, bar: BacktestBar) -> tuple[str, str, float, str] | None:
         buy_hit = bar.low <= self.params.buy_low
@@ -452,6 +495,8 @@ class BacktestEngine:
 
     def _try_exit_position(self, bar: BacktestBar, position: _OpenPosition) -> tuple[str, float, float, float, str, bool] | None:
         stop_loss_pct = self.params.stop_loss_pct / 100
+        trailing_stop_pct = self.params.trailing_stop_pct / 100
+        # Fixed stops take precedence when both protective levels are touched in one OHLC bar.
         if position.side == "long" and stop_loss_pct > 0:
             stop_price = position.entry_price * (1 - stop_loss_pct)
             if bar.low <= stop_price:
@@ -466,6 +511,20 @@ class BacktestEngine:
                 exit_fee = self._fee(price, position.quantity)
                 net_pnl = self._gross_exit_pnl(position, price) - position.entry_fee - exit_fee
                 return "STOP_LOSS_COVER", price, exit_fee, net_pnl, "stop loss reached", False
+        if position.side == "long" and trailing_stop_pct > 0:
+            trailing_price = position.highest_price * (1 - trailing_stop_pct)
+            if bar.low <= trailing_price:
+                price = self._apply_slippage(trailing_price, "SELL")
+                exit_fee = self._fee(price, position.quantity)
+                net_pnl = self._gross_exit_pnl(position, price) - position.entry_fee - exit_fee
+                return "TRAILING_STOP_SELL", price, exit_fee, net_pnl, "trailing_stop", False
+        if position.side == "short" and trailing_stop_pct > 0:
+            trailing_price = position.lowest_price * (1 + trailing_stop_pct)
+            if bar.high >= trailing_price:
+                price = self._apply_slippage(trailing_price, "BUY_TO_COVER")
+                exit_fee = self._fee(price, position.quantity)
+                net_pnl = self._gross_exit_pnl(position, price) - position.entry_fee - exit_fee
+                return "TRAILING_STOP_COVER", price, exit_fee, net_pnl, "trailing_stop", False
         if position.side == "long" and bar.high >= self.params.sell_high:
             price = self._apply_slippage(self.params.sell_high, "SELL")
             exit_fee = self._fee(price, position.quantity)

@@ -152,6 +152,7 @@ class StrategyExperimentService:
                     short_selling=params.short_selling,
                     min_profit_amount=params.min_profit_amount,
                     max_daily_loss=params.max_daily_loss,
+                    max_drawdown_amount=params.max_drawdown_amount,
                     max_consecutive_losses=params.max_consecutive_losses,
                     quantity=params.quantity,
                     initial_cash=params.initial_cash,

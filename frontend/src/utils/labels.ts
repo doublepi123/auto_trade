@@ -73,6 +73,7 @@ export function skipCategoryLabel(category?: string | null): string {
     case 'REPRICING': return '改价不显著'
     case 'COOLDOWN': return 'LLM 冷却中'
     case 'RISK': return '风控阻断'
+    case 'DRAWDOWN': return '回撤限制'
     case 'PENDING': return '已有挂单'
     case 'POSITION': return '可用持仓不足'
     case 'SESSION': return '非交易时段'
