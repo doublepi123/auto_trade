@@ -19,6 +19,16 @@ class TestSettings:
         assert s.default_strategy["symbol"] == ""
         assert s.default_strategy["market"] == "US"
 
+    def test_notification_dedup_window_defaults_and_reads_env(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("AUTO_TRADE_NOTIFY_DEDUP_WINDOW_SECONDS", raising=False)
+        assert Settings().notify_dedup_window_seconds == 300.0
+
+        monkeypatch.setenv("AUTO_TRADE_NOTIFY_DEDUP_WINDOW_SECONDS", "12.5")
+        assert Settings().notify_dedup_window_seconds == 12.5
+
     def test_production_requires_api_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("AUTO_TRADE_ENV", "prod")
         monkeypatch.setenv("AUTO_TRADE_API_KEY", "")

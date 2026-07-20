@@ -8,12 +8,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
 from app.api.auth import require_api_key
+from app.config import settings
+from app.core.notifiers.multi_channel import MultiChannelNotifier
 from app.database import get_db
 from app.models import NotificationLog
 from app.schemas import NotificationLogOut, NotificationLogPage
 from app.services.credentials_service import CredentialsService
 from app.services.notification_log_service import NotificationLogService
-from app.core.notifiers.multi_channel import MultiChannelNotifier
 
 router = APIRouter(
     prefix="/api/notifications",
@@ -63,7 +64,10 @@ def retry_notification(id: int, db=Depends(get_db)) -> NotificationLogOut:
         raise HTTPException(status_code=404, detail="notification not found")
 
     config = CredentialsService(db).get_config()
-    notifier = MultiChannelNotifier.from_credential_config(config)
+    notifier = MultiChannelNotifier.from_credential_config(
+        config,
+        dedup_window_seconds=settings.notify_dedup_window_seconds,
+    )
     try:
         success = notifier.send(log.title, log.content, log.severity)
     finally:

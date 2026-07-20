@@ -37,7 +37,7 @@
 
         <el-divider content-position="left">通知渠道</el-divider>
         <p style="margin: -6px 0 12px; color: #909399; font-size: 12px;">
-          按严重度分级推送（Server酱 + Webhook）；至少保留一条以免风控告警丢失。
+          按严重度分级推送（Server酱 + Telegram + Webhook）；至少保留一条以免风控告警丢失。
         </p>
         <div
           v-for="(channel, idx) in notificationChannels"
@@ -48,8 +48,20 @@
           <el-form-item label="类型">
             <el-select v-model="channel.type" style="width: 160px" @change="onChannelTypeChange(channel)">
               <el-option label="Server酱" value="serverchan" />
+              <el-option label="Telegram" value="telegram" />
               <el-option label="Webhook" value="webhook" />
             </el-select>
+          </el-form-item>
+          <el-form-item v-if="channel.type === 'telegram'" label="Bot Token">
+            <el-input
+              v-model="channel.bot_token"
+              placeholder="已保存，留空则保留当前 Bot Token"
+              show-password
+              data-testid="telegram-bot-token"
+            />
+          </el-form-item>
+          <el-form-item v-if="channel.type === 'telegram'" label="Chat ID">
+            <el-input v-model="channel.chat_id" placeholder="例如 -1001234567890" data-testid="telegram-chat-id" />
           </el-form-item>
           <el-form-item v-if="channel.type === 'webhook'" label="URL">
             <el-input v-model="channel.url" placeholder="https://..." data-testid="webhook-url" />
@@ -174,6 +186,7 @@ const testResult = ref<{ ok: boolean; error?: string } | null>(null)
 const channelTesting = ref<boolean[]>([])
 const channelTestResults = ref<Array<{ ok: boolean; error?: string } | null>>([])
 const channelsImportInput = ref<HTMLInputElement | null>(null)
+const maskedTelegramChannels = new WeakSet<NotificationChannel>()
 
 /**
  * Severity coverage derived from the configured channels. A channel with
@@ -257,7 +270,24 @@ onBeforeRouteLeave(() => {
 
 function normalizeChannels(rows: NotificationChannel[]) {
   rows.forEach((ch) => {
-    if (ch.type === 'serverchan') delete ch.url
+    if (ch.type === 'serverchan') {
+      delete ch.url
+      delete ch.template
+      delete ch.bot_token
+      delete ch.chat_id
+    }
+    if (ch.type === 'webhook') {
+      delete ch.bot_token
+      delete ch.chat_id
+    }
+    if (ch.type === 'telegram') {
+      delete ch.url
+      delete ch.template
+      if (ch.bot_token === '***') {
+        delete ch.bot_token
+        maskedTelegramChannels.add(ch)
+      }
+    }
     if (!ch.severity_floor) ch.severity_floor = 'INFO'
   })
 }
@@ -280,7 +310,8 @@ function previewTemplate(template: string | undefined): string {
 }
 
 function onChannelTypeChange(ch: NotificationChannel) {
-  if (ch.type === 'serverchan') delete ch.url
+  if (ch.type !== 'telegram') maskedTelegramChannels.delete(ch)
+  normalizeChannels([ch])
 }
 
 function addChannel() {
@@ -324,10 +355,15 @@ async function handleImportChannelsJson(event: Event) {
       return
     }
     const imported = (parsed as NotificationChannel[]).map((c): NotificationChannel => {
-      const type: 'serverchan' | 'webhook' = c.type === 'webhook' ? 'webhook' : 'serverchan'
+      const type: NotificationChannel['type'] = c.type === 'webhook' || c.type === 'telegram'
+        ? c.type
+        : 'serverchan'
       const severity_floor: NotificationChannel['severity_floor'] = ['INFO', 'WARNING', 'CRITICAL'].includes(c.severity_floor) ? c.severity_floor : 'INFO'
       if (type === 'webhook') {
         return { type, severity_floor, url: c.url ?? '', template: c.template }
+      }
+      if (type === 'telegram') {
+        return { type, severity_floor, bot_token: c.bot_token === '***' ? undefined : c.bot_token, chat_id: c.chat_id ?? '' }
       }
       return { type, severity_floor }
     })
@@ -435,6 +471,16 @@ async function handleSave() {
         return
       }
     }
+    if (ch.type === 'telegram') {
+      if (!ch.chat_id?.trim()) {
+        error.value = 'Telegram 必须填写 Chat ID'
+        return
+      }
+      if (!maskedTelegramChannels.has(ch) && !ch.bot_token?.trim()) {
+        error.value = 'Telegram 必须填写 Bot Token'
+        return
+      }
+    }
   }
   saving.value = true
   saved.value = false
@@ -447,7 +493,16 @@ async function handleSave() {
       if (c.type === 'serverchan') {
         return { type: 'serverchan' as const, severity_floor: c.severity_floor }
       }
-      return { type: 'webhook' as const, severity_floor: c.severity_floor, url: c.url?.trim() ?? '', template: c.template?.trim() || undefined }
+      if (c.type === 'webhook') {
+        return { type: 'webhook' as const, severity_floor: c.severity_floor, url: c.url?.trim() ?? '', template: c.template?.trim() || undefined }
+      }
+      const bot_token = c.bot_token?.trim()
+      return {
+        type: 'telegram' as const,
+        severity_floor: c.severity_floor,
+        ...(bot_token ? { bot_token } : {}),
+        chat_id: c.chat_id?.trim() ?? '',
+      }
     })
     payload.notification_channels = channels
     const resp = await updateCredentials(payload)

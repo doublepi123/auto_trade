@@ -56,6 +56,12 @@ class Settings(BaseSettings):
     legacy_longbridge_access_token: str = Field(default="", validation_alias="LONGBRIDGE_ACCESS_TOKEN")
 
     sct_key: str = ""
+    notify_dedup_window_seconds: float = Field(
+        default=300.0,
+        ge=0,
+        allow_inf_nan=False,
+        validation_alias="AUTO_TRADE_NOTIFY_DEDUP_WINDOW_SECONDS",
+    )
 
     api_key: str = ""
 

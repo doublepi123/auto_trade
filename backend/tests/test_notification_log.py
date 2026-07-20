@@ -105,6 +105,24 @@ class TestNotificationSinkAndService(_Base):
         assert notifier.send("hello", "world", "INFO") is True
         assert captured == [("hello", "INFO", True, "")]
 
+    def test_multi_channel_dedup_persists_only_first_success(self) -> None:
+        sink = NotificationLogSink(self._factory())
+        notifier = MultiChannelNotifier(
+            [(_FakeNotifier(ok=True), "INFO")],
+            sink=sink.record,
+            dedup_window_seconds=300.0,
+        )
+
+        assert notifier.send("hello", "world", "INFO") is True
+        assert notifier.send("hello", "world", "INFO") is True
+
+        db = self._db()
+        try:
+            assert db.query(NotificationLog).count() == 1
+        finally:
+            db.close()
+        assert notifier.dedup_suppressed_total == 1
+
     def test_service_q_search(self) -> None:
         sink = NotificationLogSink(self._factory())
         sink.record("hello", "world", "INFO", True)

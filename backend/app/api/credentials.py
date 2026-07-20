@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.api.auth import require_api_key
 from app.api.deps import extract_actor, get_audit_logger
+from app.config import settings
 from app.core.audit import AuditLogger
 from app.database import get_db
 from app.schemas import CredentialConfigSchema, CredentialResponse
@@ -36,6 +37,9 @@ def _mask_channel(channel: dict[str, Any]) -> dict[str, Any]:
     }
     if channel.get("type") == "webhook":
         out["url"] = "***"
+    elif channel.get("type") == "telegram":
+        out["bot_token"] = "***"
+        out["chat_id"] = channel.get("chat_id")
     return out
 
 
@@ -190,10 +194,12 @@ def test_credentials(
 
 
 class NotificationChannelTestSchema(BaseModel):
-    type: Literal["serverchan", "webhook"]
+    type: Literal["serverchan", "webhook", "telegram"]
     severity_floor: Literal["INFO", "WARNING", "CRITICAL"] = "INFO"
     url: Optional[str] = Field(default=None, max_length=4096)
     template: Optional[str] = Field(default=None, max_length=8192)
+    bot_token: Optional[str] = Field(default=None, max_length=4096)
+    chat_id: Optional[str] = Field(default=None, max_length=4096)
 
 
 @router.post("/credentials/notification-channels/test", dependencies=[Depends(require_api_key())])
@@ -205,9 +211,9 @@ def test_notification_channel(
 ) -> dict[str, Any]:
     """Send a test notification through a single notification channel.
 
-    Uses the saved Server酱 key for ``serverchan`` channels and the provided
-    URL/template for ``webhook`` channels. The channel config does not need
-    to be saved first, so users can verify a new channel before committing it.
+    Uses the saved Server酱 key for ``serverchan`` channels and request data
+    for Telegram or Webhook channels. The channel config does not need to be
+    saved first, so users can verify a new channel before committing it.
     """
     actor_hash, source_ip = extract_actor(request)
     svc = CredentialsService(db)
@@ -215,6 +221,7 @@ def test_notification_channel(
     from app.core.credential_crypto import decrypt_secret
     from app.core.notifiers.multi_channel import MultiChannelNotifier
     from app.core.notifiers.serverchan import ServerChanNotifier
+    from app.core.notifiers.telegram import TelegramNotifier
     from app.core.notifiers.webhook import WebhookNotifier
 
     built: list[tuple[Any, str]] = []
@@ -222,13 +229,27 @@ def test_notification_channel(
         built.append((ServerChanNotifier(decrypt_secret(config.sct_key or "")), payload.severity_floor))
     elif payload.type == "webhook" and payload.url:
         built.append((WebhookNotifier(payload.url, template=payload.template), payload.severity_floor))
+    elif payload.type == "telegram" and payload.bot_token and payload.chat_id:
+        built.append(
+            (
+                TelegramNotifier(payload.bot_token, payload.chat_id),
+                payload.severity_floor,
+            )
+        )
 
     if not built:
         return {"ok": False, "error": "invalid channel configuration"}
 
-    notifier = MultiChannelNotifier(built)
+    notifier = MultiChannelNotifier(
+        built,
+        dedup_window_seconds=settings.notify_dedup_window_seconds,
+    )
     try:
-        ok = notifier.send("Auto Trade: 渠道测试", "这是一条单渠道连通性测试消息。", severity="INFO")
+        ok = notifier.send(
+            "Auto Trade: 渠道测试",
+            "这是一条单渠道连通性测试消息。",
+            severity=payload.severity_floor,
+        )
     except Exception as exc:  # noqa: BLE001
         ok = False
         logger.error("single channel test failed", exc_info=exc)

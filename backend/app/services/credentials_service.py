@@ -20,7 +20,7 @@ from app.models import CredentialConfig
 #: and the associated write amplification.
 _LEGACY_ENCRYPTION_DONE: bool = False
 
-_VALID_CHANNEL_TYPES = {"serverchan", "webhook"}
+_VALID_CHANNEL_TYPES = {"serverchan", "webhook", "telegram"}
 _VALID_SEVERITY_FLOORS = {"INFO", "WARNING", "CRITICAL"}
 
 
@@ -79,6 +79,13 @@ class CredentialsService:
                     f"notification_channels[{idx}].url is required and must be non-empty when type is 'webhook'"
                 )
             validate_webhook_url(url)
+        if ch_type == "telegram":
+            for field in ("bot_token", "chat_id"):
+                value = ch.get(field)
+                if not value or not isinstance(value, str) or not value.strip():
+                    raise ValueError(
+                        f"notification_channels[{idx}].{field} is required and must be non-empty when type is 'telegram'"
+                    )
 
     def _parse_notification_channels(self, config: CredentialConfig) -> list[dict[str, Any]]:
         try:
@@ -89,6 +96,14 @@ class CredentialsService:
             return json.loads(DEFAULT_NOTIFICATION_CHANNELS_JSON)
         return raw
 
+    @staticmethod
+    def _mask_channel_for_response(channel: dict[str, Any]) -> dict[str, Any]:
+        if channel.get("type") != "telegram":
+            return channel
+        masked = dict(channel)
+        masked["bot_token"] = "***"
+        return masked
+
     def to_response(self, config: CredentialConfig) -> dict[str, Any]:
         return {
             "id": config.id,
@@ -96,7 +111,10 @@ class CredentialsService:
             "longbridge_app_secret": "",
             "longbridge_access_token": "",
             "sct_key": "",
-            "notification_channels": self._parse_notification_channels(config),
+            "notification_channels": [
+                self._mask_channel_for_response(channel)
+                for channel in self._parse_notification_channels(config)
+            ],
             "has_longbridge_app_key": bool(config.longbridge_app_key),
             "has_longbridge_app_secret": bool(config.longbridge_app_secret),
             "has_longbridge_access_token": bool(config.longbridge_access_token),

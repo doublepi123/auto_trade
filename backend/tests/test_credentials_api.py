@@ -222,6 +222,36 @@ def test_update_persists_notification_channels() -> None:
     assert body["notification_channels"][1]["url"] == "https://93.184.216.34/hook"
 
 
+def test_update_accepts_telegram_and_masks_bot_token_in_response() -> None:
+    _clean_credentials()
+    token = "123:ABC"
+    update_response = client.put(
+        "/api/credentials",
+        json={
+            "notification_channels": [
+                {
+                    "type": "telegram",
+                    "bot_token": token,
+                    "chat_id": "-100123",
+                    "severity_floor": "WARNING",
+                }
+            ]
+        },
+    )
+    get_response = client.get("/api/credentials")
+
+    assert update_response.status_code == 200
+    assert get_response.status_code == 200
+    assert get_response.json()["notification_channels"][0] == {
+        "type": "telegram",
+        "severity_floor": "WARNING",
+        "url": None,
+        "bot_token": "***",
+        "chat_id": "-100123",
+    }
+    assert token not in get_response.text
+
+
 def test_credentials_update_audits_with_masked_payload() -> None:
     _clean_audit_logs()
     _clean_credentials()
@@ -255,6 +285,39 @@ def test_credentials_update_audits_with_masked_payload() -> None:
             assert changed.get(key) == "***"
     finally:
         db.close()
+
+
+def test_credentials_update_audit_masks_telegram_bot_token() -> None:
+    _clean_audit_logs()
+    _clean_credentials()
+    token = "123:ABC"
+    response = client.put(
+        "/api/credentials",
+        json={
+            "notification_channels": [
+                {
+                    "type": "telegram",
+                    "bot_token": token,
+                    "chat_id": "42",
+                    "severity_floor": "INFO",
+                }
+            ]
+        },
+    )
+
+    assert response.status_code == 200
+    with SessionLocal() as db:
+        row = (
+            db.query(AuditLog)
+            .filter_by(action="CREDENTIALS_UPDATE")
+            .order_by(AuditLog.id.desc())
+            .first()
+        )
+        assert row is not None
+        assert token not in row.request_summary
+        channel = json.loads(row.request_summary)["changed"]["notification_channels"][0]
+        assert channel["bot_token"] == "***"
+        assert channel["chat_id"] == "42"
 
 
 def test_test_credentials_sanitizes_exception(monkeypatch):
@@ -320,6 +383,33 @@ def test_test_notification_channel_webhook_ok(monkeypatch):
     assert resp.status_code == 200
     data = resp.json()
     assert data["ok"] is True
+
+
+def test_test_notification_channel_telegram_ok(monkeypatch):
+    _clean_credentials()
+    from app.core.notifiers import telegram
+
+    captured: list[tuple[str, str]] = []
+
+    def fake_send(self, title, content, severity="INFO"):
+        del title, content, severity
+        captured.append((self.bot_token, self.chat_id))
+        return True
+
+    monkeypatch.setattr(telegram.TelegramNotifier, "send", fake_send)
+    resp = client.post(
+        "/api/credentials/notification-channels/test",
+        json={
+            "type": "telegram",
+            "severity_floor": "WARNING",
+            "bot_token": "123:ABC",
+            "chat_id": "42",
+        },
+    )
+
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True, "error": None}
+    assert captured == [("123:ABC", "42")]
 
 
 def test_test_notification_channel_invalid_config():
@@ -419,6 +509,26 @@ def test_update_notification_channels_str_rejects_invalid_severity_floor() -> No
             svc.update_config({"notification_channels": payload})
     finally:
         db.close()
+
+
+def test_update_notification_channels_rejects_telegram_without_chat_id() -> None:
+    _clean_credentials()
+    from app.services.credentials_service import CredentialsService
+
+    with SessionLocal() as db:
+        svc = CredentialsService(db)
+        with pytest.raises(ValueError, match="chat_id"):
+            svc.update_config(
+                {
+                    "notification_channels": [
+                        {
+                            "type": "telegram",
+                            "bot_token": "123:ABC",
+                            "severity_floor": "INFO",
+                        }
+                    ]
+                }
+            )
 
 
 def test_update_notification_channels_str_valid() -> None:

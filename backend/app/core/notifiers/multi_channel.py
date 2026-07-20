@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import threading
+import time
 from typing import Callable, Optional, Protocol
 
 from app.core.notifiers._messages import (
@@ -35,6 +38,7 @@ class MultiChannelNotifier:
         *,
         retry_queue: Optional["_RetryQueueProtocol"] = None,
         sink: Optional[Callable[[str, str, str, bool, str], None]] = None,
+        dedup_window_seconds: float = 0.0,
     ) -> None:
         self._channels = channels
         # Optional retry queue; when present, failed sends are rescheduled
@@ -44,6 +48,19 @@ class MultiChannelNotifier:
         # The runner attaches a NotificationLogSink so every notification is
         # auditable. Best-effort — the sink itself swallows errors.
         self._sink = sink
+        self._dedup_window_seconds = dedup_window_seconds
+        self._dedup_success_at: dict[str, float] = {}
+        self._dedup_suppressed_total = 0
+        self._dedup_lock = threading.Lock()
+
+    @property
+    def dedup_suppressed_total(self) -> int:
+        with self._dedup_lock:
+            return self._dedup_suppressed_total
+
+    @property
+    def dedup_window_seconds(self) -> float:
+        return self._dedup_window_seconds
 
     @property
     def sct_key(self) -> str:
@@ -56,6 +73,31 @@ class MultiChannelNotifier:
         return ""
 
     def send(self, title: str, content: str, severity: str = "INFO") -> bool:
+        if self._dedup_window_seconds <= 0 or severity not in {"INFO", "WARNING"}:
+            return self._dispatch(title, content, severity)
+
+        with self._dedup_lock:
+            now = time.monotonic()
+            expired = [
+                key
+                for key, sent_at in self._dedup_success_at.items()
+                if now - sent_at >= self._dedup_window_seconds
+            ]
+            for key in expired:
+                del self._dedup_success_at[key]
+            fingerprint = hashlib.sha256(
+                f"{title}\x1f{content}".encode("utf-8")
+            ).hexdigest()
+            if fingerprint in self._dedup_success_at:
+                self._dedup_suppressed_total += 1
+                return True
+
+            success_any = self._dispatch(title, content, severity)
+            if success_any:
+                self._dedup_success_at[fingerprint] = time.monotonic()
+            return success_any
+
+    def _dispatch(self, title: str, content: str, severity: str) -> bool:
         target_rank = _SEVERITY_RANK.get(severity, 0)
         success_any = False
         last_error = ""
@@ -117,18 +159,30 @@ class MultiChannelNotifier:
         *,
         retry_queue: Optional["_RetryQueueProtocol"] = None,
         sink: Optional[Callable[[str, str, str, bool, str], None]] = None,
+        dedup_window_seconds: float = 0.0,
     ) -> "MultiChannelNotifier":
         from app.core.notifiers.serverchan import ServerChanNotifier
+        from app.core.notifiers.telegram import TelegramNotifier
         from app.core.notifiers.webhook import WebhookNotifier
 
         try:
             raw = json.loads(cred.notification_channels or "[]")
         except Exception as exc:
             logger.warning("notification_channels invalid JSON, falling back: %s", exc)
-            return cls([(ServerChanNotifier(cred.sct_key or ""), "INFO")], retry_queue=retry_queue, sink=sink)
+            return cls(
+                [(ServerChanNotifier(cred.sct_key or ""), "INFO")],
+                retry_queue=retry_queue,
+                sink=sink,
+                dedup_window_seconds=dedup_window_seconds,
+            )
         if not isinstance(raw, list):
             logger.warning("notification_channels must be a JSON array, falling back")
-            return cls([(ServerChanNotifier(cred.sct_key or ""), "INFO")], retry_queue=retry_queue, sink=sink)
+            return cls(
+                [(ServerChanNotifier(cred.sct_key or ""), "INFO")],
+                retry_queue=retry_queue,
+                sink=sink,
+                dedup_window_seconds=dedup_window_seconds,
+            )
         built: list[tuple[NotifierInterface, str]] = []
         for channel in raw:
             if not isinstance(channel, dict):
@@ -146,9 +200,23 @@ class MultiChannelNotifier:
                 if url:
                     template = channel.get("template")
                     built.append((WebhookNotifier(url, template=template), floor))
+            elif channel_type == "telegram":
+                bot_token = channel.get("bot_token", "")
+                chat_id = channel.get("chat_id", "")
+                if bot_token and chat_id:
+                    built.append((TelegramNotifier(bot_token, chat_id), floor))
+                else:
+                    logger.warning(
+                        "notification_channels telegram entry is missing bot_token or chat_id, skipping"
+                    )
         if not built:
             built = [(ServerChanNotifier(cred.sct_key or ""), "INFO")]
-        return cls(built, retry_queue=retry_queue, sink=sink)
+        return cls(
+            built,
+            retry_queue=retry_queue,
+            sink=sink,
+            dedup_window_seconds=dedup_window_seconds,
+        )
 
 
 # Module-level (not nested inside MultiChannelNotifier) protocol declared

@@ -110,6 +110,100 @@ def test_from_credential_config_builds_multiple_channels() -> None:
     assert notifier._channels[1][1] == "WARNING"
 
 
+def test_from_credential_config_builds_telegram_with_severity_floor() -> None:
+    import json
+
+    from app.core.notifiers.telegram import TelegramNotifier
+
+    cred = MagicMock(
+        notification_channels=json.dumps(
+            [
+                {
+                    "type": "telegram",
+                    "bot_token": "123:ABC",
+                    "chat_id": "-100123",
+                    "severity_floor": "CRITICAL",
+                }
+            ]
+        ),
+        sct_key="",
+    )
+    notifier = MultiChannelNotifier.from_credential_config(cred)
+
+    assert len(notifier._channels) == 1
+    channel, floor = notifier._channels[0]
+    assert isinstance(channel, TelegramNotifier)
+    assert floor == "CRITICAL"
+
+
+def test_telegram_factory_entry_honors_severity_floor(monkeypatch) -> None:
+    import json
+
+    from app.core.notifiers.telegram import TelegramNotifier
+
+    sent: list[str] = []
+
+    def fake_send(
+        self: TelegramNotifier,
+        title: str,
+        content: str,
+        severity: str = "INFO",
+    ) -> bool:
+        del self, title, content
+        sent.append(severity)
+        return True
+
+    monkeypatch.setattr(TelegramNotifier, "send", fake_send)
+    cred = MagicMock(
+        notification_channels=json.dumps(
+            [
+                {
+                    "type": "telegram",
+                    "bot_token": "123:ABC",
+                    "chat_id": "42",
+                    "severity_floor": "WARNING",
+                }
+            ]
+        ),
+        sct_key="",
+    )
+    notifier = MultiChannelNotifier.from_credential_config(cred)
+
+    assert notifier.send("info", "body", severity="INFO") is False
+    assert notifier.send("warning", "body", severity="WARNING") is True
+    assert sent == ["WARNING"]
+
+
+def test_from_credential_config_skips_malformed_telegram_without_leaking_token(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import json
+
+    token = "123:SECRET_TOKEN"
+    cred = MagicMock(
+        notification_channels=json.dumps(
+            [
+                {
+                    "type": "telegram",
+                    "bot_token": token,
+                    "severity_floor": "INFO",
+                }
+            ]
+        ),
+        sct_key="",
+    )
+
+    with caplog.at_level("WARNING", logger="auto_trade.notify"):
+        notifier = MultiChannelNotifier.from_credential_config(cred)
+
+    assert token not in caplog.text
+    assert "telegram" in caplog.text.lower()
+    assert len(notifier._channels) == 1
+    from app.core.notifiers.serverchan import ServerChanNotifier
+
+    assert isinstance(notifier._channels[0][0], ServerChanNotifier)
+
+
 def test_severity_for_risk_event_mapping() -> None:
     assert _severity_for_risk_event("KILL_SWITCH") == "CRITICAL"
     assert _severity_for_risk_event("ORDER_PERSISTENCE_FAILED") == "CRITICAL"
