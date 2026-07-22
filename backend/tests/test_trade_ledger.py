@@ -6,7 +6,7 @@ from pytest import approx
 
 from app import database
 from app.models import OrderRecord
-from app.services.daily_pnl_service import DailyPnlService
+from app.services.daily_pnl_service import DailyPnlService, PnlReplayIssueCode
 
 
 database.init_db()
@@ -350,8 +350,7 @@ class TestPairRoundTrips:
         assert trades[0].gross_pnl == approx(100.0)
 
     def test_over_close_logs_warning(self, caplog) -> None:
-        """A close exceeding available entry lots is truncated to the matched
-        quantity and warns (parity with calculate()/_close_long)."""
+        """A partially matched exit is an issue, never a closed trade subset."""
         self._cleanup()
         day = date(2026, 1, 1)
         db = self._get_db()
@@ -370,9 +369,179 @@ class TestPairRoundTrips:
         db.commit()
         import logging
         caplog.set_level(logging.WARNING)
-        trades = DailyPnlService(db).pair_round_trips()
+        service = DailyPnlService(db)
+        replay = service.pair_round_trips_with_issues()
+        backwards_compatible_trades = service.pair_round_trips()
         db.close()
 
-        assert len(trades) == 1
-        assert trades[0].quantity == approx(100.0)  # only the matched entry quantity
+        assert replay.trades == []
+        assert backwards_compatible_trades == []
+        assert len(replay.issues) == 1
+        issue = replay.issues[0]
+        assert issue.issue_code is PnlReplayIssueCode.PARTIAL_OVERCLOSE
+        assert issue.symbol == "AAPL.US"
+        assert issue.trade_day == day
+        assert issue.exit_broker_order_id == "sell"
+        assert issue.filled_quantity == approx(200)
+        assert issue.matched_quantity == approx(100)
+        assert issue.unmatched_quantity == approx(100)
         assert any("exceeds matched entry lots" in rec.message for rec in caplog.records)
+
+    def test_full_unmatched_exit_is_a_structured_issue(self) -> None:
+        self._cleanup()
+        day = date(2026, 1, 1)
+        db = self._get_db()
+        exit_order = OrderRecord(
+            broker_order_id="unmatched-cover",
+            symbol="TSLA.US",
+            side="BUY_TO_COVER",
+            quantity=25,
+            price=18,
+            executed_quantity=25,
+            executed_price=18,
+            status="FILLED",
+            filled_at=self._dt(day, 11, 1),
+        )
+        db.add(exit_order)
+        db.commit()
+
+        replay = DailyPnlService(db).pair_round_trips_with_issues(
+            include_excursions=False
+        )
+
+        assert replay.trades == []
+        assert len(replay.issues) == 1
+        issue = replay.issues[0]
+        assert issue.issue_code is PnlReplayIssueCode.FULL_UNMATCHED_EXIT
+        assert issue.exit_order_id == exit_order.id
+        assert issue.side == "BUY_TO_COVER"
+        assert issue.filled_quantity == approx(25)
+        assert issue.matched_quantity == 0
+        assert issue.unmatched_quantity == approx(25)
+        db.close()
+
+    def test_tracked_cost_basis_conflict_is_an_issue_and_advances_lots(
+        self,
+    ) -> None:
+        self._cleanup()
+        day = date(2026, 1, 1)
+        db = self._get_db()
+        db.add_all([
+            OrderRecord(
+                broker_order_id="known-buy",
+                symbol="AAPL.US",
+                side="BUY",
+                quantity=10,
+                price=100,
+                executed_quantity=10,
+                executed_price=100,
+                actual_fee=0,
+                status="FILLED",
+                filled_at=self._dt(day, 10),
+            ),
+            OrderRecord(
+                broker_order_id="conflicting-tracked-sell",
+                symbol="AAPL.US",
+                side="SELL",
+                quantity=10,
+                price=110,
+                executed_quantity=10,
+                executed_price=110,
+                actual_fee=0,
+                status="FILLED",
+                filled_at=self._dt(day, 11),
+                cost_basis_price=90,
+                cost_basis_quantity=10,
+                position_quantity_before=10,
+                gross_pnl=200,
+                pnl_fee=0,
+                net_pnl=200,
+                pnl_source="TRACKED_ENTRY",
+            ),
+            OrderRecord(
+                broker_order_id="fresh-buy-after-conflict",
+                symbol="AAPL.US",
+                side="BUY",
+                quantity=1,
+                price=200,
+                executed_quantity=1,
+                executed_price=200,
+                actual_fee=0,
+                status="FILLED",
+                filled_at=self._dt(day, 12),
+            ),
+            OrderRecord(
+                broker_order_id="fresh-sell-after-conflict",
+                symbol="AAPL.US",
+                side="SELL",
+                quantity=1,
+                price=210,
+                executed_quantity=1,
+                executed_price=210,
+                actual_fee=0,
+                status="FILLED",
+                filled_at=self._dt(day, 13),
+            ),
+        ])
+        db.commit()
+
+        replay = DailyPnlService(db).pair_round_trips_with_issues(
+            include_excursions=False
+        )
+
+        assert [trade.exit_broker_order_id for trade in replay.trades] == [
+            "fresh-sell-after-conflict"
+        ]
+        assert replay.trades[0].gross_pnl == approx(10)
+        assert len(replay.issues) == 1
+        issue = replay.issues[0]
+        assert issue.issue_code is PnlReplayIssueCode.COST_BASIS_CONFLICT
+        assert issue.exit_broker_order_id == "conflicting-tracked-sell"
+        assert issue.filled_quantity == approx(10)
+        assert issue.matched_quantity == approx(10)
+        assert issue.unmatched_quantity == 0
+        db.close()
+
+    def test_issue_trade_day_is_resolved_per_symbol_market(self) -> None:
+        self._cleanup()
+        filled_at = datetime(2026, 5, 23, 1, tzinfo=timezone.utc)
+        db = self._get_db()
+        db.add_all([
+            OrderRecord(
+                broker_order_id="unmatched-us",
+                symbol="AAPL.US",
+                side="SELL",
+                quantity=1,
+                price=100,
+                executed_quantity=1,
+                executed_price=100,
+                status="FILLED",
+                filled_at=filled_at,
+            ),
+            OrderRecord(
+                broker_order_id="unmatched-hk",
+                symbol="0700.HK",
+                side="SELL",
+                quantity=1,
+                price=500,
+                executed_quantity=1,
+                executed_price=500,
+                status="FILLED",
+                filled_at=filled_at,
+            ),
+        ])
+        db.commit()
+
+        replay = DailyPnlService(db).pair_round_trips_with_issues(
+            include_excursions=False
+        )
+        issue_days = {
+            issue.symbol: issue.trade_day
+            for issue in replay.issues
+        }
+
+        assert issue_days == {
+            "AAPL.US": date(2026, 5, 22),
+            "0700.HK": date(2026, 5, 23),
+        }
+        db.close()

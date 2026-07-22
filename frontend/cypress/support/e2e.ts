@@ -54,6 +54,13 @@ Cypress.Commands.add('setupApp', () => {
 
 Cypress.Commands.add('stubApi', () => {
   let status = initialStatus()
+  const completeStatisticsQuality = {
+    status: 'COMPLETE',
+    known_exclusion_count: 0,
+    unresolved_issue_count: 0,
+    omitted_day_count: 0,
+    items: [],
+  }
   let strategyShadowConfig = {
     enabled: true,
     symbol: 'NVDA.US',
@@ -408,6 +415,7 @@ Cypress.Commands.add('stubApi', () => {
       ],
       total_realized_pnl: 260,
       max_drawdown: 60,
+      statistics_quality: completeStatisticsQuality,
     },
   }).as('getEquityCurve')
 
@@ -418,6 +426,7 @@ Cypress.Commands.add('stubApi', () => {
         { symbol: 'NVDA.US', realized_pnl: -50, trade_count: 2, win_count: 0, win_rate: 0, contribution_share: -0.125, largest_win: 0, largest_loss: -50 },
       ],
       total_realized_pnl: 250,
+      statistics_quality: completeStatisticsQuality,
     },
   }).as('getPnlBySymbol')
 
@@ -600,7 +609,7 @@ Cypress.Commands.add('stubApi', () => {
   }).as('getTradeNoteAnalytics')
 
   cy.intercept('GET', '/api/trades?*', {
-    body: { items: [], total: 0 },
+    body: { items: [], total: 0, statistics_quality: completeStatisticsQuality },
   }).as('getClosedTrades')
 
   cy.intercept('GET', '/api/trades/stats*', {
@@ -628,27 +637,28 @@ Cypress.Commands.add('stubApi', () => {
       actual_fee_coverage_pct: 0,
       avg_slippage_bps: null,
       avg_ack_latency_ms: null,
+      statistics_quality: completeStatisticsQuality,
     },
   }).as('getTradeStats')
 
   cy.intercept('GET', '/api/trades/analytics/calendar*', {
-    body: { items: [], total_trades: 0, total_net_pnl: 0 },
+    body: { items: [], total_trades: 0, total_net_pnl: 0, statistics_quality: completeStatisticsQuality },
   }).as('getTradeCalendar')
 
   cy.intercept('GET', '/api/trades/analytics/hold-duration*', {
-    body: { items: [], total_trades: 0 },
+    body: { items: [], total_trades: 0, statistics_quality: completeStatisticsQuality },
   }).as('getTradeHoldDuration')
 
   cy.intercept('GET', '/api/trades/analytics/pnl-distribution*', {
-    body: { items: [], total_trades: 0, total_net_pnl: 0 },
+    body: { items: [], total_trades: 0, total_net_pnl: 0, statistics_quality: completeStatisticsQuality },
   }).as('getTradePnlDistribution')
 
   cy.intercept('GET', '/api/trades/analytics/monthly*', {
-    body: { items: [], total_trades: 0, total_net_pnl: 0 },
+    body: { items: [], total_trades: 0, total_net_pnl: 0, statistics_quality: completeStatisticsQuality },
   }).as('getTradeMonthlySummary')
 
   cy.intercept('GET', '/api/trades/analytics/weekday*', {
-    body: { items: [], total_trades: 0, total_net_pnl: 0 },
+    body: { items: [], total_trades: 0, total_net_pnl: 0, statistics_quality: completeStatisticsQuality },
   }).as('getTradeWeekdayAttribution')
 
   cy.intercept('GET', '/api/events*', (req) => {
@@ -717,6 +727,7 @@ Cypress.Commands.add('stubApi', () => {
       daily_points: [],
       attribution: [],
       details: [],
+      statistics_quality: completeStatisticsQuality,
     },
   }).as('getReport')
 
@@ -756,11 +767,14 @@ Cypress.Commands.add('stubApi', () => {
           daily_pnl: 12.5,
           trade_count: 0,
           error_tags: [],
+          included_in_statistics: true,
+          statistics_quality: completeStatisticsQuality,
         },
       ],
       total_pnl: 12.5,
       total_trades: 0,
       all_error_tags: [],
+      statistics_quality: completeStatisticsQuality,
     },
   }).as('getReview')
 

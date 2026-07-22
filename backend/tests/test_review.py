@@ -194,3 +194,56 @@ def test_review_export_csv_contains_history_and_diagnostics_sections(db_session)
     assert "history_point,runtime_point,2026-05-20T10:03:00,AAPL.US" in content
     assert "diagnostic_runtime,runtime,AAPL.US,AAPL.US" in content
     assert "diagnostic_meta,pending_order_symbols,,AAPL.US" in content
+
+
+def test_review_preserves_runtime_pnl_but_excludes_unresolved_day_from_totals(
+    db_session,
+):
+    _make_order(
+        db_session,
+        side="BUY",
+        price=100,
+        executed_price=100,
+        created_at=datetime(2026, 5, 20, 14, tzinfo=timezone.utc),
+    )
+    _make_order(
+        db_session,
+        side="SELL",
+        price=110,
+        executed_price=110,
+        created_at=datetime(2026, 5, 20, 15, tzinfo=timezone.utc),
+    )
+    unmatched = _make_order(
+        db_session,
+        side="SELL",
+        price=111,
+        executed_price=111,
+        created_at=datetime(2026, 5, 20, 16, tzinfo=timezone.utc),
+    )
+    _make_snapshot(
+        db_session,
+        daily_pnl=50,
+        created_at=datetime(2026, 5, 20, 17, tzinfo=timezone.utc),
+    )
+    service = ReviewService(db_session)
+
+    review = service.get_review("AAPL.US", "2026-05-20", "2026-05-20")
+
+    assert review["statistics_quality"]["status"] == "UNRESOLVED"
+    assert review["statistics_quality"]["omitted_day_count"] == 1
+    assert review["statistics_quality"]["items"][0]["exit_order_id"] == (
+        unmatched.id
+    )
+    assert review["total_pnl"] == 0
+    assert review["total_trades"] == 0
+    day = review["days"][0]
+    assert day["daily_pnl"] == 50
+    assert day["trade_count"] == 3
+    assert day["included_in_statistics"] is False
+    assert day["statistics_quality"]["status"] == "UNRESOLVED"
+
+    csv_export = service.export_review(
+        "AAPL.US", "2026-05-20", "2026-05-20", "csv"
+    ).getvalue().decode("utf-8")
+    assert "statistics_quality_status" in csv_export
+    assert unmatched.broker_order_id in csv_export

@@ -14,6 +14,7 @@
     </div>
 
     <el-alert v-if="error" :title="error" type="error" show-icon :closable="false" />
+    <StatisticsQualityAlert v-if="result" :quality="result.statistics_quality" />
 
     <div v-if="result" class="equity-summary">
       <div class="equity-stat">
@@ -65,6 +66,7 @@ import { computed, onMounted, ref } from 'vue'
 import { getEquityCurve } from '../api'
 import type { EquityCurveResponse } from '../types'
 import { resolveErrorMessage } from '../utils/error'
+import StatisticsQualityAlert from './StatisticsQualityAlert.vue'
 
 const result = ref<EquityCurveResponse | null>(null)
 const loading = ref(false)

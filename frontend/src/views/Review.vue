@@ -40,6 +40,8 @@
       </el-form>
     </el-card>
 
+    <StatisticsQualityAlert v-if="reviewData" :quality="reviewData.statistics_quality" />
+
     <el-card class="llm-status-card" data-testid="review-llm-status-card" v-loading="llmStatusLoading">
       <template #header>
         <div class="llm-status-header">
@@ -503,6 +505,7 @@ import { ElMessage } from 'element-plus'
 import PriceChart from '../components/PriceChart.vue'
 import PnLChart from '../components/PnLChart.vue'
 import RiskHistoryPanel from '../components/RiskHistoryPanel.vue'
+import StatisticsQualityAlert from '../components/StatisticsQualityAlert.vue'
 import { getReview, exportReview } from '../api/review'
 import { getLLMIntervalStatus } from '../api'
 import { useStatusHistorySeries } from '../composables/useStatusHistorySeries'

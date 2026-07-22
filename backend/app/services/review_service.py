@@ -3,12 +3,19 @@ from __future__ import annotations
 import csv
 import io
 import json
+from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy.orm import Session
 
+from app.core.market_calendar import market_for_symbol, trade_day_for
 from app.models import LLMInteraction, OrderRecord, RuntimeStateSnapshot, TradeEvent
+from app.services.daily_pnl_service import DailyPnlService
+from app.services.statistics_quality_service import (
+    build_statistics_quality,
+    select_statistics_sample,
+)
 
 
 def _parse_date(value: str) -> date:
@@ -27,6 +34,8 @@ class ReviewService:
         from app.models import StrategyConfig
         from_d = _parse_date(from_date)
         to_d = _parse_date(to_date)
+        start_at = datetime(from_d.year, from_d.month, from_d.day, tzinfo=timezone.utc)
+        end_at = datetime(to_d.year, to_d.month, to_d.day, tzinfo=timezone.utc) + timedelta(days=1)
 
         config = self._db.query(StrategyConfig).order_by(StrategyConfig.id.desc()).first()
         max_daily_loss = float(config.max_daily_loss) if config and config.max_daily_loss else 0.0
@@ -35,8 +44,8 @@ class ReviewService:
             self._db.query(LLMInteraction)
             .filter(
                 LLMInteraction.symbol == symbol,
-                LLMInteraction.created_at >= datetime(from_d.year, from_d.month, from_d.day, tzinfo=timezone.utc),
-                LLMInteraction.created_at < datetime(to_d.year, to_d.month, to_d.day, tzinfo=timezone.utc) + timedelta(days=1),
+                LLMInteraction.created_at >= start_at,
+                LLMInteraction.created_at < end_at,
             )
             .all()
         )
@@ -45,8 +54,8 @@ class ReviewService:
             self._db.query(OrderRecord)
             .filter(
                 OrderRecord.symbol == symbol,
-                OrderRecord.created_at >= datetime(from_d.year, from_d.month, from_d.day, tzinfo=timezone.utc),
-                OrderRecord.created_at < datetime(to_d.year, to_d.month, to_d.day, tzinfo=timezone.utc) + timedelta(days=1),
+                OrderRecord.created_at >= start_at,
+                OrderRecord.created_at < end_at,
             )
             .all()
         )
@@ -55,8 +64,8 @@ class ReviewService:
             self._db.query(TradeEvent)
             .filter(
                 TradeEvent.symbol == symbol,
-                TradeEvent.created_at >= datetime(from_d.year, from_d.month, from_d.day, tzinfo=timezone.utc),
-                TradeEvent.created_at < datetime(to_d.year, to_d.month, to_d.day, tzinfo=timezone.utc) + timedelta(days=1),
+                TradeEvent.created_at >= start_at,
+                TradeEvent.created_at < end_at,
             )
             .all()
         )
@@ -65,8 +74,8 @@ class ReviewService:
             self._db.query(RuntimeStateSnapshot)
             .filter(
                 RuntimeStateSnapshot.symbol == symbol,
-                RuntimeStateSnapshot.created_at >= datetime(from_d.year, from_d.month, from_d.day, tzinfo=timezone.utc),
-                RuntimeStateSnapshot.created_at < datetime(to_d.year, to_d.month, to_d.day, tzinfo=timezone.utc) + timedelta(days=1),
+                RuntimeStateSnapshot.created_at >= start_at,
+                RuntimeStateSnapshot.created_at < end_at,
             )
             .order_by(RuntimeStateSnapshot.created_at.asc(), RuntimeStateSnapshot.id.asc())
             .all()
@@ -74,6 +83,7 @@ class ReviewService:
 
         # Group by date
         days: dict[str, dict[str, Any]] = {}
+        day_market_keys: dict[str, set[tuple[str, date]]] = {}
 
         for interaction in llm_interactions:
             d = _format_date(interaction.created_at)
@@ -86,6 +96,11 @@ class ReviewService:
             if d not in days:
                 days[d] = self._empty_day(d, symbol)
             days[d]["orders"].append(self._order_to_dict(order))
+            instant = order.filled_at or order.created_at
+            day_market_keys.setdefault(d, set()).add((
+                order.symbol,
+                trade_day_for(market_for_symbol(order.symbol), instant),
+            ))
 
         for event in events:
             d = _format_date(event.created_at)
@@ -99,6 +114,24 @@ class ReviewService:
                 days[d] = self._empty_day(d, symbol)
             days[d]["snapshots"].append(self._snapshot_to_dict(snapshot))
 
+        replay = DailyPnlService(self._db).pair_round_trips_with_issues(
+            symbol=symbol,
+            include_excursions=False,
+        )
+        sample = select_statistics_sample(
+            replay,
+            from_dt=start_at,
+            to_dt=end_at - timedelta(microseconds=1),
+        )
+        for issue in sample.issues:
+            issue_utc_day = _format_date(issue.filled_at)
+            if from_date <= issue_utc_day <= to_date:
+                if issue_utc_day not in days:
+                    days[issue_utc_day] = self._empty_day(issue_utc_day, symbol)
+                day_market_keys.setdefault(issue_utc_day, set()).add(
+                    (issue.symbol, issue.trade_day)
+                )
+
         # Compute error tags and daily PnL
         total_pnl = 0.0
         total_trades = 0
@@ -106,12 +139,22 @@ class ReviewService:
 
         for d in sorted(days.keys()):
             day = days[d]
+            keys = day_market_keys.get(d, set())
+            day_issues = [
+                issue
+                for issue in sample.issues
+                if (issue.symbol, issue.trade_day) in keys
+            ]
+            day_quality = build_statistics_quality(day_issues)
+            day["included_in_statistics"] = not day_issues
+            day["statistics_quality"] = asdict(day_quality)
             day["daily_pnl"] = (day["snapshots"][-1].get("daily_pnl", 0) if day["snapshots"] else 0.0)
             day["trade_count"] = len([o for o in day["orders"] if o["status"] in ("FILLED", "PARTIAL_FILLED")])
             day["error_tags"] = self._compute_error_tags(day, symbol, max_daily_loss)
             all_error_tags.update(day["error_tags"])
-            total_pnl += day["daily_pnl"]
-            total_trades += day["trade_count"]
+            if day["included_in_statistics"]:
+                total_pnl += day["daily_pnl"]
+                total_trades += day["trade_count"]
 
         return {
             "symbol": symbol,
@@ -121,6 +164,7 @@ class ReviewService:
             "total_pnl": total_pnl,
             "total_trades": total_trades,
             "all_error_tags": sorted(all_error_tags),
+            "statistics_quality": asdict(sample.quality),
         }
 
     def get_runtime_history(self, symbol: str, from_date: str, to_date: str) -> dict[str, Any]:
@@ -214,7 +258,11 @@ class ReviewService:
                 day["trade_count"],
                 day["daily_pnl"],
                 ";".join(day["error_tags"]),
-                len(day["events"]),
+                (
+                    f"events={len(day['events'])};"
+                    f"included_in_statistics={str(day['included_in_statistics']).lower()};"
+                    f"quality={day['statistics_quality']['status']}"
+                ),
             ])
         for point in runtime_history["points"]:
             writer.writerow([
@@ -260,6 +308,47 @@ class ReviewService:
             diagnostics_payload.get("quotes_subscribed", ""),
             diagnostics_payload.get("trigger_in_flight", ""),
         ])
+        quality = review["statistics_quality"]
+        writer.writerow([])
+        writer.writerow([
+            "statistics_quality_status",
+            "known_exclusion_count",
+            "unresolved_issue_count",
+            "omitted_day_count",
+        ])
+        writer.writerow([
+            quality["status"],
+            quality["known_exclusion_count"],
+            quality["unresolved_issue_count"],
+            quality["omitted_day_count"],
+        ])
+        writer.writerow([
+            "quality_trade_day",
+            "quality_symbol",
+            "issue_code",
+            "exit_order_id",
+            "broker_order_id",
+            "side",
+            "filled_quantity",
+            "matched_quantity",
+            "unmatched_quantity",
+            "exclusion_id",
+            "reason",
+        ])
+        for item in quality["items"]:
+            writer.writerow([
+                item["trade_day"],
+                item["symbol"],
+                item["issue_code"],
+                item["exit_order_id"],
+                item["broker_order_id"],
+                item["side"],
+                item["filled_quantity"],
+                item["matched_quantity"],
+                item["unmatched_quantity"],
+                item["exclusion_id"],
+                item["reason"],
+            ])
         bio = io.BytesIO(buf.getvalue().encode("utf-8"))
         bio.seek(0)
         return bio

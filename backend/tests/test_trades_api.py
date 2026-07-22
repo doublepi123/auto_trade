@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import os
 import tempfile
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 
 os.environ["AUTO_TRADE_DATABASE_URL"] = (
     f"sqlite:///{tempfile.gettempdir()}/auto_trade_test_trades_api_{os.getpid()}.db"
@@ -185,6 +185,54 @@ class TestTradesAPI(_Base):
         resp = self.client.get("/api/trades", params={"from_date": "not-a-date"})
         assert resp.status_code == 422
 
+    def test_window_boundary_keeps_prior_utc_issue_on_same_us_market_day(
+        self,
+    ) -> None:
+        db = self._db()
+        db.add_all([
+            self._order(
+                "boundary-unmatched",
+                "AAPL.US",
+                "SELL",
+                1,
+                99,
+                date(2026, 5, 22),
+                23,
+            ),
+            self._order(
+                "boundary-buy",
+                "AAPL.US",
+                "BUY",
+                10,
+                100,
+                date(2026, 5, 23),
+                0,
+            ),
+            self._order(
+                "boundary-valid-sell",
+                "AAPL.US",
+                "SELL",
+                10,
+                110,
+                date(2026, 5, 23),
+                1,
+            ),
+        ])
+        db.commit()
+        db.close()
+
+        response = self.client.get(
+            "/api/trades", params={"from_date": "2026-05-23"}
+        )
+
+        assert response.status_code == 200, response.text
+        data = response.json()
+        assert data["total"] == 0
+        assert data["statistics_quality"]["status"] == "UNRESOLVED"
+        assert data["statistics_quality"]["items"][0]["broker_order_id"] == (
+            "boundary-unmatched"
+        )
+
 
 class TestTradesStatsAPI(_Base):
     def test_empty_stats(self) -> None:
@@ -295,3 +343,59 @@ class TestTradesAnalyticsAPI(_Base):
         assert resp.status_code == 200, resp.text
         data = resp.json()
         assert [row["bucket"] for row in data["items"]] == ["<5m", "5m-1h", "1h-1d", "1d-1w", ">=1w"]
+
+    @pytest.mark.parametrize(
+        ("path", "total_field"),
+        [
+            ("/api/trades", "total"),
+            ("/api/trades/stats", "total_trades"),
+            ("/api/trades/analytics/calendar", "total_trades"),
+            ("/api/trades/analytics/hold-duration", "total_trades"),
+            ("/api/trades/analytics/pnl-distribution", "total_trades"),
+            ("/api/trades/analytics/monthly", "total_trades"),
+            ("/api/trades/analytics/weekday", "total_trades"),
+        ],
+    )
+    def test_unresolved_exit_omits_same_market_day_from_all_statistics(
+        self,
+        path: str,
+        total_field: str,
+    ) -> None:
+        db = self._db()
+        today = (datetime.now(timezone.utc) - timedelta(days=1)).date()
+        db.add_all([
+            self._order("quality-buy", "AAPL.US", "BUY", 10, 100, today, 9),
+            self._order(
+                "quality-valid-sell",
+                "AAPL.US",
+                "SELL",
+                10,
+                110,
+                today,
+                10,
+            ),
+            self._order(
+                "quality-unmatched-sell",
+                "AAPL.US",
+                "SELL",
+                1,
+                111,
+                today,
+                11,
+            ),
+        ])
+        db.commit()
+        db.close()
+
+        response = self.client.get(path)
+
+        assert response.status_code == 200, response.text
+        data = response.json()
+        assert data[total_field] == 0
+        quality = data["statistics_quality"]
+        assert quality["status"] == "UNRESOLVED"
+        assert quality["unresolved_issue_count"] == 1
+        assert quality["omitted_day_count"] == 1
+        assert quality["items"][0]["broker_order_id"] == (
+            "quality-unmatched-sell"
+        )

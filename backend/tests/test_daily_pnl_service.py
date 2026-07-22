@@ -11,6 +11,7 @@ from app.models import OrderRecord, RuntimeStateSnapshot
 from app.services.daily_pnl_service import (
     DailyPnlResult,
     DailyPnlService,
+    PnlReplayIssueCode,
     RealizedTrade,
 )
 
@@ -996,6 +997,141 @@ class TestDailyPnlService:
             rec.levelno >= logging.ERROR
             for rec in caplog.records
         )
+
+    def test_calculate_reports_full_unmatched_exit_issue(self) -> None:
+        self._cleanup()
+        trade_day = date(2026, 5, 22)
+        filled_at = self._dt(trade_day, 10, 1)
+        db = self._get_db()
+        exit_order = OrderRecord(
+            broker_order_id="sell-without-entry",
+            symbol="AAPL.US",
+            side="SELL",
+            quantity=10,
+            price=110,
+            executed_quantity=10,
+            executed_price=110,
+            actual_fee=0,
+            status="FILLED",
+            created_at=self._dt(trade_day, 10),
+            filled_at=filled_at,
+        )
+        db.add(exit_order)
+        db.commit()
+
+        result = DailyPnlService(db).calculate(trade_day=trade_day)
+
+        assert result.is_complete is False
+        assert result.realized_pnl == 0
+        assert result.trades == []
+        assert len(result.issues) == 1
+        issue = result.issues[0]
+        assert issue.issue_code is PnlReplayIssueCode.FULL_UNMATCHED_EXIT
+        assert issue.symbol == "AAPL.US"
+        assert issue.side == "SELL"
+        assert issue.trade_day == trade_day
+        assert issue.filled_at == filled_at
+        assert issue.exit_order_id == exit_order.id
+        assert issue.exit_broker_order_id == "sell-without-entry"
+        assert issue.filled_quantity == approx(10)
+        assert issue.matched_quantity == 0
+        assert issue.unmatched_quantity == approx(10)
+        db.close()
+
+    def test_calculate_reports_partial_overclose_without_partial_trade(
+        self,
+    ) -> None:
+        self._cleanup()
+        trade_day = date(2026, 5, 22)
+        db = self._get_db()
+        db.add_all([
+            OrderRecord(
+                broker_order_id="buy-before-partial-overclose",
+                symbol="AAPL.US",
+                side="BUY",
+                quantity=10,
+                price=100,
+                executed_quantity=10,
+                executed_price=100,
+                actual_fee=0,
+                status="FILLED",
+                filled_at=self._dt(trade_day, 10),
+            ),
+            OrderRecord(
+                broker_order_id="partial-overclose",
+                symbol="AAPL.US",
+                side="SELL",
+                quantity=12,
+                price=110,
+                executed_quantity=12,
+                executed_price=110,
+                actual_fee=0,
+                status="FILLED",
+                filled_at=self._dt(trade_day, 11),
+            ),
+        ])
+        db.commit()
+
+        result = DailyPnlService(db).calculate(trade_day=trade_day)
+
+        assert result.is_complete is False
+        assert result.realized_pnl == 0
+        assert result.trades == []
+        assert len(result.issues) == 1
+        issue = result.issues[0]
+        assert issue.issue_code is PnlReplayIssueCode.PARTIAL_OVERCLOSE
+        assert issue.exit_broker_order_id == "partial-overclose"
+        assert issue.filled_quantity == approx(12)
+        assert issue.matched_quantity == approx(10)
+        assert issue.unmatched_quantity == approx(2)
+        db.close()
+
+    def test_refresh_does_not_persist_partial_overclose_subset(self) -> None:
+        self._cleanup()
+        trade_day = date(2026, 5, 22)
+        db = self._get_db()
+        db.add_all([
+            OrderRecord(
+                broker_order_id="buy-before-refresh-overclose",
+                symbol="AAPL.US",
+                side="BUY",
+                quantity=10,
+                price=100,
+                executed_quantity=10,
+                executed_price=100,
+                actual_fee=0,
+                status="FILLED",
+                filled_at=self._dt(trade_day, 10),
+            ),
+            OrderRecord(
+                broker_order_id="refresh-partial-overclose",
+                symbol="AAPL.US",
+                side="SELL",
+                quantity=12,
+                price=110,
+                executed_quantity=12,
+                executed_price=110,
+                actual_fee=0,
+                status="FILLED",
+                filled_at=self._dt(trade_day, 11),
+            ),
+        ])
+        db.commit()
+        service = DailyPnlService(db)
+
+        updated = service.refresh_execution_outcomes(symbol="AAPL.US")
+        db.expire_all()
+        exit_order = db.query(OrderRecord).filter(
+            OrderRecord.broker_order_id == "refresh-partial-overclose"
+        ).one()
+
+        assert updated == 0
+        assert exit_order.pnl_source == "UNKNOWN"
+        assert exit_order.gross_pnl is None
+        assert exit_order.net_pnl is None
+        assert exit_order.cost_basis_price is None
+        assert exit_order.cost_basis_quantity is None
+        db.close()
 
     def test_unclosed_remainder_logs_warning(self, caplog: LogCaptureFixture) -> None:
         """G1-3: _apply_fill logs warning when close exceeds tracked position."""

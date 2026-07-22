@@ -397,6 +397,84 @@ class TestReportService:
         finally:
             db.close()
 
+    def test_unresolved_exit_omits_entire_market_day_and_exports_quality(
+        self,
+    ) -> None:
+        self._cleanup()
+        trade_day = date(2026, 1, 5)
+        db = self._get_db()
+        try:
+            db.add_all([
+                OrderRecord(
+                    broker_order_id="quality-buy",
+                    symbol="AAPL.US",
+                    side="BUY",
+                    quantity=10,
+                    price=100,
+                    executed_quantity=10,
+                    executed_price=100,
+                    status="FILLED",
+                    filled_at=self._dt(trade_day, 15),
+                ),
+                OrderRecord(
+                    broker_order_id="quality-valid-sell",
+                    symbol="AAPL.US",
+                    side="SELL",
+                    quantity=10,
+                    price=110,
+                    executed_quantity=10,
+                    executed_price=110,
+                    status="FILLED",
+                    filled_at=self._dt(trade_day, 16),
+                ),
+                OrderRecord(
+                    broker_order_id="quality-unmatched-sell",
+                    symbol="AAPL.US",
+                    side="SELL",
+                    quantity=1,
+                    price=111,
+                    executed_quantity=1,
+                    executed_price=111,
+                    status="FILLED",
+                    filled_at=self._dt(trade_day, 17),
+                ),
+            ])
+            db.commit()
+            service = ReportService(db=db)
+
+            report = service.get_daily_report("AAPL.US", trade_day.isoformat())
+
+            assert report.metrics.total_pnl == 0
+            assert report.metrics.total_trades == 0
+            assert report.daily_points == []
+            assert report.details == []
+            assert report.statistics_quality.status == "UNRESOLVED"
+            assert report.statistics_quality.unresolved_issue_count == 1
+            assert report.statistics_quality.omitted_day_count == 1
+            assert report.statistics_quality.items[0].broker_order_id == (
+                "quality-unmatched-sell"
+            )
+
+            json_report = json.loads(
+                service.export_report(
+                    "AAPL.US",
+                    trade_day.isoformat(),
+                    trade_day.isoformat(),
+                    "json",
+                ).getvalue()
+            )
+            assert json_report["statistics_quality"]["status"] == "UNRESOLVED"
+            csv_report = service.export_report(
+                "AAPL.US",
+                trade_day.isoformat(),
+                trade_day.isoformat(),
+                "csv",
+            ).getvalue().decode("utf-8")
+            assert "statistics_quality_status" in csv_report
+            assert "quality-unmatched-sell" in csv_report
+        finally:
+            db.close()
+
     def test_export_report_rejects_invalid_format(self) -> None:
         self._cleanup()
         self._seed_rows()

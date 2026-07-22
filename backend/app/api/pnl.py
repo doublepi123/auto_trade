@@ -11,6 +11,7 @@ from app.api.trades import _active_fee_rates
 from app.database import get_db
 from app.schemas import SymbolAttributionResponse
 from app.services.daily_pnl_service import DailyPnlService
+from app.services.statistics_quality_service import select_statistics_sample
 from app.services.symbol_attribution_service import compute_symbol_attribution
 
 router = APIRouter(
@@ -34,10 +35,12 @@ def pnl_by_symbol(
     """
     fee_rate_us, fee_rate_hk = _active_fee_rates(db)
     from_dt = datetime.now(timezone.utc) - timedelta(days=days)
-    trips = DailyPnlService(db).pair_round_trips(
+    replay = DailyPnlService(db).pair_round_trips_with_issues(
         symbol=symbol,
-        from_dt=from_dt,
         fee_rate_us=fee_rate_us,
         fee_rate_hk=fee_rate_hk,
     )
-    return SymbolAttributionResponse.model_validate(asdict(compute_symbol_attribution(trips)))
+    sample = select_statistics_sample(replay, from_dt=from_dt)
+    payload = asdict(compute_symbol_attribution(sample.trades))
+    payload["statistics_quality"] = asdict(sample.quality)
+    return SymbolAttributionResponse.model_validate(payload)

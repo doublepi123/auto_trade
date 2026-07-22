@@ -109,3 +109,43 @@ class TestPnlBySymbolAPI(_Base):
         data = self.client.get("/api/pnl/by-symbol", params={"symbol": "tsla.us"}).json()
         assert len(data["rows"]) == 1
         assert data["rows"][0]["symbol"] == "TSLA.US"
+
+    def test_unresolved_exit_omits_symbol_day_from_attribution(self) -> None:
+        db = self._db()
+        day = date(2026, 7, 1)
+        db.add_all(
+            self._roundtrip(
+                "quality-buy",
+                "quality-valid-sell",
+                "AAPL.US",
+                100,
+                110,
+                10,
+                day,
+            )
+        )
+        db.add(OrderRecord(
+            broker_order_id="quality-unmatched-sell",
+            symbol="AAPL.US",
+            side="SELL",
+            quantity=1,
+            price=111,
+            executed_quantity=1,
+            executed_price=111,
+            status="FILLED",
+            created_at=_dt(day, 12),
+            filled_at=_dt(day, 12, 1),
+        ))
+        db.commit()
+        db.close()
+
+        response = self.client.get("/api/pnl/by-symbol", params={"days": 30})
+
+        assert response.status_code == 200, response.text
+        data = response.json()
+        assert data["rows"] == []
+        assert data["total_realized_pnl"] == 0
+        assert data["statistics_quality"]["status"] == "UNRESOLVED"
+        assert data["statistics_quality"]["items"][0]["broker_order_id"] == (
+            "quality-unmatched-sell"
+        )

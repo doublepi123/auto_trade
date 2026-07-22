@@ -12,6 +12,7 @@ from app.database import get_db
 from app.schemas import EquityCurveResponse
 from app.services.daily_pnl_service import DailyPnlService
 from app.services.equity_curve_service import compute_equity_curve
+from app.services.statistics_quality_service import select_statistics_sample
 
 router = APIRouter(
     prefix="/api/equity",
@@ -35,10 +36,12 @@ def equity_curve(
     """
     fee_rate_us, fee_rate_hk = _active_fee_rates(db)
     from_dt = datetime.now(timezone.utc) - timedelta(days=days)
-    trips = DailyPnlService(db).pair_round_trips(
+    replay = DailyPnlService(db).pair_round_trips_with_issues(
         symbol=symbol,
-        from_dt=from_dt,
         fee_rate_us=fee_rate_us,
         fee_rate_hk=fee_rate_hk,
     )
-    return EquityCurveResponse.model_validate(asdict(compute_equity_curve(trips)))
+    sample = select_statistics_sample(replay, from_dt=from_dt)
+    payload = asdict(compute_equity_curve(sample.trades))
+    payload["statistics_quality"] = asdict(sample.quality)
+    return EquityCurveResponse.model_validate(payload)

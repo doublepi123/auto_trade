@@ -12,7 +12,11 @@ from sqlalchemy.orm import Session
 
 from app.core.market_calendar import trade_day_for
 from app.models import LLMInteraction
-from app.services.daily_pnl_service import DailyPnlService, RealizedTrade
+from app.services.daily_pnl_service import DailyPnlService, PnlReplayIssue, RealizedTrade
+from app.services.statistics_quality_service import (
+    StatisticsQualityData,
+    build_statistics_quality,
+)
 
 
 _REPORT_SYMBOL_RE = re.compile(r"^[A-Z0-9\-]{1,12}\.(US|HK)$")
@@ -89,6 +93,7 @@ class PeriodReport:
     daily_points: list[DailyPnLPoint]
     attribution: list[ReportAttributionPoint]
     details: list[ReportDayDetail]
+    statistics_quality: StatisticsQualityData
 
 
 class ReportService:
@@ -163,6 +168,47 @@ class ReportService:
                 point.cumulative_pnl,
                 point.drawdown,
             ])
+        writer.writerow([])
+        writer.writerow([
+            "statistics_quality_status",
+            "known_exclusion_count",
+            "unresolved_issue_count",
+            "omitted_day_count",
+        ])
+        quality = report.statistics_quality
+        writer.writerow([
+            quality.status,
+            quality.known_exclusion_count,
+            quality.unresolved_issue_count,
+            quality.omitted_day_count,
+        ])
+        writer.writerow([
+            "quality_trade_day",
+            "quality_symbol",
+            "issue_code",
+            "exit_order_id",
+            "broker_order_id",
+            "side",
+            "filled_quantity",
+            "matched_quantity",
+            "unmatched_quantity",
+            "exclusion_id",
+            "reason",
+        ])
+        for item in quality.items:
+            writer.writerow([
+                item.trade_day,
+                item.symbol,
+                item.issue_code,
+                item.exit_order_id,
+                item.broker_order_id,
+                item.side,
+                item.filled_quantity,
+                item.matched_quantity,
+                item.unmatched_quantity,
+                item.exclusion_id,
+                item.reason,
+            ])
         bio = io.BytesIO(buf.getvalue().encode("utf-8"))
         bio.seek(0)
         return bio
@@ -196,12 +242,17 @@ class ReportService:
         current_day = start.date()
         end_day = (end - timedelta(days=1)).date()
         attribution_buckets: dict[str, list[RealizedTrade]] = {}
+        replay_issues: list[PnlReplayIssue] = []
         while current_day <= end_day:
             result = pnl_service.calculate(
                 trade_day=current_day,
                 symbol=symbol,
                 to_trade_day=lambda dt, market=market: trade_day_for(market, dt),
             )
+            replay_issues.extend(result.issues)
+            if not result.is_complete:
+                current_day += timedelta(days=1)
+                continue
             day_pnl = result.realized_pnl
             day_trades = len(result.trades)
             day_wins = sum(1 for t in result.trades if t.pnl > 0)
@@ -277,6 +328,7 @@ class ReportService:
             daily_points=daily_points,
             attribution=attribution,
             details=details,
+            statistics_quality=build_statistics_quality(replay_issues),
         )
 
     def _load_llm_interactions(
@@ -412,4 +464,5 @@ class ReportService:
             ],
             "attribution": [asdict(a) for a in report.attribution],
             "details": [asdict(d) for d in report.details],
+            "statistics_quality": asdict(report.statistics_quality),
         }

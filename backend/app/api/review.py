@@ -10,23 +10,24 @@ from sqlalchemy.orm import Session
 from app.api.auth import require_api_key
 from app.database import get_db
 from app.runner import get_runner
+from app.schemas import ReviewResponse
 from app.services.review_service import ReviewService
 
 router = APIRouter(prefix="/api/review", tags=["review"], dependencies=[Depends(require_api_key())])
 logger = logging.getLogger(__name__)
 
 
-@router.get("")
+@router.get("", response_model=ReviewResponse)
 def get_review(
     symbol: str = Query(..., description="Stock symbol, e.g. AAPL.US", pattern=r'^[A-Z0-9\-]{1,12}\.[A-Z]{2,4}$'),
     from_date: str = Query(..., description="Start date (YYYY-MM-DD)", pattern=r'^\d{4}-\d{2}-\d{2}$'),
     to_date: str = Query(..., description="End date (YYYY-MM-DD)", pattern=r'^\d{4}-\d{2}-\d{2}$'),
     db: Session = Depends(get_db),
-):
+) -> ReviewResponse:
     try:
         svc = ReviewService(db)
         data = svc.get_review(symbol, from_date, to_date)
-        return data
+        return ReviewResponse.model_validate(data)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:

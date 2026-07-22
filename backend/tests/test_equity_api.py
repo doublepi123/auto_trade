@@ -121,3 +121,27 @@ class TestEquityCurveAPI(_Base):
         assert len(data["points"]) == 1
         assert data["points"][0]["cumulative_pnl"] == pytest.approx(250.0)
         assert data["points"][0]["trade_count"] == 2
+
+    def test_unresolved_exit_omits_complete_trade_on_same_market_day(self) -> None:
+        db = self._db()
+        day = date(2026, 7, 1)
+        db.add_all([
+            self._order("quality-buy", "AAPL.US", "BUY", 10, 100, day, 9),
+            self._order(
+                "quality-valid-sell", "AAPL.US", "SELL", 10, 110, day, 10
+            ),
+            self._order(
+                "quality-unmatched-sell", "AAPL.US", "SELL", 1, 111, day, 11
+            ),
+        ])
+        db.commit()
+        db.close()
+
+        response = self.client.get("/api/equity/curve", params={"days": 365})
+
+        assert response.status_code == 200, response.text
+        data = response.json()
+        assert data["points"] == []
+        assert data["total_realized_pnl"] == 0
+        assert data["statistics_quality"]["status"] == "UNRESOLVED"
+        assert data["statistics_quality"]["omitted_day_count"] == 1

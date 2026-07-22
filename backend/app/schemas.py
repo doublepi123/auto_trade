@@ -908,6 +908,37 @@ class ReportDayDetail(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class StatisticsQualityItem(BaseModel):
+    trade_day: str
+    symbol: str
+    issue_code: str
+    exit_order_id: int
+    broker_order_id: str = ""
+    side: str = ""
+    filled_quantity: float
+    matched_quantity: float
+    unmatched_quantity: float
+    exclusion_id: Optional[int] = None
+    reason: str = ""
+
+    model_config = {"from_attributes": True}
+
+
+class StatisticsQuality(BaseModel):
+    status: Literal[
+        "COMPLETE",
+        "KNOWN_EXCLUSIONS",
+        "UNRESOLVED",
+        "STALE_EXCLUSION",
+    ] = "COMPLETE"
+    known_exclusion_count: int = 0
+    unresolved_issue_count: int = 0
+    omitted_day_count: int = 0
+    items: list[StatisticsQualityItem] = Field(default_factory=list)
+
+    model_config = {"from_attributes": True}
+
+
 class ReportResponse(BaseModel):
     period_type: str
     symbol: str
@@ -917,6 +948,7 @@ class ReportResponse(BaseModel):
     daily_points: list[ReportDailyPoint]
     attribution: list[ReportAttributionPoint] = Field(default_factory=list)
     details: list[ReportDayDetail] = Field(default_factory=list)
+    statistics_quality: StatisticsQuality
 
     model_config = {"from_attributes": True}
 
@@ -1950,9 +1982,12 @@ class ReviewDaySchema(BaseModel):
     llm_interactions: list[dict[str, Any]]
     orders: list[dict[str, Any]]
     events: list[dict[str, Any]]
+    snapshots: list[dict[str, Any]]
     daily_pnl: float
     trade_count: int
     error_tags: list[str]
+    included_in_statistics: bool = True
+    statistics_quality: StatisticsQuality
 
 
 class ReviewResponse(BaseModel):
@@ -1963,6 +1998,7 @@ class ReviewResponse(BaseModel):
     total_pnl: float
     total_trades: int
     all_error_tags: list[str]
+    statistics_quality: StatisticsQuality
 
 
 class ReviewExportQuery(BaseModel):
@@ -2303,6 +2339,7 @@ class ClosedTrade(BaseModel):
 class ClosedTradePage(BaseModel):
     items: list[ClosedTrade]
     total: int
+    statistics_quality: StatisticsQuality
 
 
 class TradeStats(BaseModel):
@@ -2333,6 +2370,7 @@ class TradeStats(BaseModel):
     actual_fee_coverage_pct: float = 0.0
     avg_slippage_bps: Optional[float] = None
     avg_ack_latency_ms: Optional[float] = None
+    statistics_quality: StatisticsQuality
 
 
 class TradeCalendarDay(BaseModel):
@@ -2353,6 +2391,7 @@ class TradeCalendarResponse(BaseModel):
     items: list[TradeCalendarDay]
     total_trades: int
     total_net_pnl: float
+    statistics_quality: StatisticsQuality
 
 
 class TradeHoldDurationBucket(BaseModel):
@@ -2374,6 +2413,7 @@ class TradeHoldDurationResponse(BaseModel):
 
     items: list[TradeHoldDurationBucket]
     total_trades: int
+    statistics_quality: StatisticsQuality
 
 
 class TradePnlDistributionBucket(BaseModel):
@@ -2392,6 +2432,7 @@ class TradePnlDistributionResponse(BaseModel):
     items: list[TradePnlDistributionBucket]
     total_trades: int
     total_net_pnl: float
+    statistics_quality: StatisticsQuality
 
 
 class TradeMonthlySummaryRow(BaseModel):
@@ -2414,6 +2455,7 @@ class TradeMonthlySummaryResponse(BaseModel):
     items: list[TradeMonthlySummaryRow]
     total_trades: int
     total_net_pnl: float
+    statistics_quality: StatisticsQuality
 
 
 class TradeWeekdayAttributionRow(BaseModel):
@@ -2435,6 +2477,7 @@ class TradeWeekdayAttributionResponse(BaseModel):
     items: list[TradeWeekdayAttributionRow]
     total_trades: int
     total_net_pnl: float
+    statistics_quality: StatisticsQuality
 
 
 class EquityCurvePoint(BaseModel):
@@ -2453,6 +2496,7 @@ class EquityCurveResponse(BaseModel):
     points: list[EquityCurvePoint]
     total_realized_pnl: float
     max_drawdown: float
+    statistics_quality: StatisticsQuality
 
 
 class SymbolAttributionRow(BaseModel):
@@ -2473,3 +2517,4 @@ class SymbolAttributionResponse(BaseModel):
 
     rows: list[SymbolAttributionRow]
     total_realized_pnl: float
+    statistics_quality: StatisticsQuality

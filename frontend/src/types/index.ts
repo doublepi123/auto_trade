@@ -730,6 +730,7 @@ export interface ClosedTrade {
 export interface ClosedTradePage {
   items: ClosedTrade[]
   total: number
+  statistics_quality: StatisticsQuality
 }
 
 export interface TradeStats {
@@ -756,6 +757,7 @@ export interface TradeStats {
   actual_fee_coverage_pct: number
   avg_slippage_bps: number | null
   avg_ack_latency_ms: number | null
+  statistics_quality: StatisticsQuality
 }
 
 export interface TradeCalendarDay {
@@ -772,6 +774,7 @@ export interface TradeCalendarResponse {
   items: TradeCalendarDay[]
   total_trades: number
   total_net_pnl: number
+  statistics_quality: StatisticsQuality
 }
 
 export interface TradeHoldDurationBucket {
@@ -789,6 +792,7 @@ export interface TradeHoldDurationBucket {
 export interface TradeHoldDurationResponse {
   items: TradeHoldDurationBucket[]
   total_trades: number
+  statistics_quality: StatisticsQuality
 }
 
 export interface TradePnlDistributionBucket {
@@ -803,6 +807,7 @@ export interface TradePnlDistributionResponse {
   items: TradePnlDistributionBucket[]
   total_trades: number
   total_net_pnl: number
+  statistics_quality: StatisticsQuality
 }
 
 export interface TradeMonthlySummaryRow {
@@ -821,6 +826,7 @@ export interface TradeMonthlySummaryResponse {
   items: TradeMonthlySummaryRow[]
   total_trades: number
   total_net_pnl: number
+  statistics_quality: StatisticsQuality
 }
 
 export interface TradeWeekdayAttributionRow {
@@ -838,6 +844,7 @@ export interface TradeWeekdayAttributionResponse {
   items: TradeWeekdayAttributionRow[]
   total_trades: number
   total_net_pnl: number
+  statistics_quality: StatisticsQuality
 }
 
 export interface EquityCurvePoint {
@@ -852,6 +859,7 @@ export interface EquityCurveResponse {
   points: EquityCurvePoint[]
   total_realized_pnl: number
   max_drawdown: number
+  statistics_quality: StatisticsQuality
 }
 
 export interface SymbolAttributionRow {
@@ -868,6 +876,7 @@ export interface SymbolAttributionRow {
 export interface SymbolAttributionResponse {
   rows: SymbolAttributionRow[]
   total_realized_pnl: number
+  statistics_quality: StatisticsQuality
 }
 
 export interface StressTestResult {
@@ -1113,6 +1122,8 @@ export interface ReviewDay {
   daily_pnl: number
   trade_count: number
   error_tags: string[]
+  included_in_statistics: boolean
+  statistics_quality: StatisticsQuality
 }
 
 export interface ReviewResponse {
@@ -1123,6 +1134,35 @@ export interface ReviewResponse {
   total_pnl: number
   total_trades: number
   all_error_tags: string[]
+  statistics_quality: StatisticsQuality
+}
+
+export type StatisticsQualityStatus =
+  | 'COMPLETE'
+  | 'KNOWN_EXCLUSIONS'
+  | 'UNRESOLVED'
+  | 'STALE_EXCLUSION'
+
+export interface StatisticsQualityItem {
+  trade_day: string
+  symbol: string
+  issue_code: string
+  exit_order_id: number
+  broker_order_id: string
+  side: string
+  filled_quantity: number
+  matched_quantity: number
+  unmatched_quantity: number
+  exclusion_id: number | null
+  reason: string
+}
+
+export interface StatisticsQuality {
+  status: StatisticsQualityStatus
+  known_exclusion_count: number
+  unresolved_issue_count: number
+  omitted_day_count: number
+  items: StatisticsQualityItem[]
 }
 
 export interface ReportMetrics {
@@ -1185,6 +1225,7 @@ export interface ReportResponse {
   daily_points: ReportDailyPoint[]
   attribution: ReportAttributionPoint[]
   details: ReportDayDetail[]
+  statistics_quality: StatisticsQuality
 }
 
 export interface WatchlistItem {

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+from types import SimpleNamespace
 
 os.environ["AUTO_TRADE_DATABASE_URL"] = (
     f"sqlite:///{tempfile.gettempdir()}/auto_trade_test_report_schedule_{os.getpid()}.db"
@@ -117,6 +118,31 @@ class TestReportScheduleService(_Base):
         title, content = ReportScheduleService(self._db()).build_summary("AAPL.US")
         assert isinstance(title, str) and isinstance(content, str)
         assert "AAPL.US" in title
+
+    def test_build_summary_reports_unresolved_quality_before_no_trades(
+        self,
+        monkeypatch,
+    ) -> None:
+        report = SimpleNamespace(
+            statistics_quality=SimpleNamespace(
+                status="UNRESOLVED",
+                omitted_day_count=1,
+                unresolved_issue_count=2,
+            ),
+            metrics=SimpleNamespace(total_trades=0),
+        )
+        fake_service = SimpleNamespace(get_daily_report=lambda *_args: report)
+        monkeypatch.setattr(
+            "app.services.report_schedule_service.ReportService",
+            lambda _db: fake_service,
+        )
+
+        _title, content = ReportScheduleService(self._db()).build_summary(
+            "AAPL.US"
+        )
+
+        assert "统计未完成" in content
+        assert "今日暂无成交" not in content
 
 
 class TestReportScheduleAPI(_Base):

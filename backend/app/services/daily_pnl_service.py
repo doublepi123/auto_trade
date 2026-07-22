@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from enum import Enum
 from threading import Lock
 from typing import Any, Callable
 
@@ -18,10 +19,18 @@ _FILLED_STATUS = "FILLED"
 _PARTIAL_FILLED_STATUS = "PARTIAL_FILLED"
 
 ToTradeDay = Callable[[datetime], date]
+ToSymbolTradeDay = Callable[[str, datetime], date]
 
 
 def _utc_date(instant: datetime) -> date:
     return instant.astimezone(timezone.utc).date()
+
+
+def _symbol_trade_day(symbol: str, instant: datetime) -> date:
+    from app.core.market_calendar import trade_day_for
+
+    market = "HK" if symbol.upper().endswith(".HK") else "US"
+    return trade_day_for(market, instant)
 
 
 @dataclass(frozen=True)
@@ -75,6 +84,26 @@ class ClosedRoundTrip:
     mae_pct: float | None = None
 
 
+class PnlReplayIssueCode(str, Enum):
+    FULL_UNMATCHED_EXIT = "FULL_UNMATCHED_EXIT"
+    PARTIAL_OVERCLOSE = "PARTIAL_OVERCLOSE"
+    COST_BASIS_CONFLICT = "COST_BASIS_CONFLICT"
+
+
+@dataclass(frozen=True)
+class PnlReplayIssue:
+    issue_code: PnlReplayIssueCode
+    symbol: str
+    side: str
+    trade_day: date
+    filled_at: datetime
+    exit_order_id: int
+    exit_broker_order_id: str
+    filled_quantity: float
+    matched_quantity: float
+    unmatched_quantity: float
+
+
 @dataclass(frozen=True)
 class DailyPnlResult:
     trade_day: date
@@ -82,6 +111,13 @@ class DailyPnlResult:
     consecutive_losses: int
     trades: list[RealizedTrade]
     is_complete: bool = True
+    issues: list[PnlReplayIssue] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class RoundTripReplayResult:
+    trades: list[ClosedRoundTrip]
+    issues: list[PnlReplayIssue]
 
 
 @dataclass(frozen=True)
@@ -234,6 +270,7 @@ class DailyPnlService:
         realized_pnl = _ZERO
         consecutive_losses = 0
         is_complete = True
+        issues: list[PnlReplayIssue] = []
 
         for fill in fills:
             position = positions.setdefault(fill.symbol, _LedgerPosition())
@@ -252,6 +289,12 @@ class DailyPnlService:
             if cost_basis_conflict:
                 if fill_trade_day == target_day:
                     is_complete = False
+                    issues.append(self._replay_issue(
+                        fill,
+                        trade_day=fill_trade_day,
+                        matched_quantity=fill.quantity,
+                        issue_code=PnlReplayIssueCode.COST_BASIS_CONFLICT,
+                    ))
                 logger.error(
                     "daily PnL replay found conflicting tracked cost basis for %s "
                     "order %s on %s: declared=%s replayed=%s position=%s; refusing "
@@ -288,6 +331,11 @@ class DailyPnlService:
                 pnl = replay_pnl
                 if matched_quantity < fill.quantity:
                     is_complete = False
+                    issues.append(self._replay_issue(
+                        fill,
+                        trade_day=fill_trade_day,
+                        matched_quantity=matched_quantity,
+                    ))
                     logger.error(
                         "daily PnL replay is incomplete for %s order %s: matched=%s filled=%s",
                         fill.symbol,
@@ -320,6 +368,7 @@ class DailyPnlService:
             consecutive_losses=consecutive_losses,
             trades=trades,
             is_complete=is_complete,
+            issues=issues,
         )
 
     def pair_round_trips(
@@ -331,14 +380,36 @@ class DailyPnlService:
         fee_rate_us: float = 0.0005,
         fee_rate_hk: float = 0.003,
         include_excursions: bool = True,
+        to_trade_day: ToSymbolTradeDay | None = None,
     ) -> list[ClosedRoundTrip]:
+        """Return only fully reconciled round trips for backwards compatibility."""
+        return self.pair_round_trips_with_issues(
+            symbol=symbol,
+            from_dt=from_dt,
+            to_dt=to_dt,
+            fee_rate_us=fee_rate_us,
+            fee_rate_hk=fee_rate_hk,
+            include_excursions=include_excursions,
+            to_trade_day=to_trade_day,
+        ).trades
+
+    def pair_round_trips_with_issues(
+        self,
+        *,
+        symbol: str | None = None,
+        from_dt: datetime | None = None,
+        to_dt: datetime | None = None,
+        fee_rate_us: float = 0.0005,
+        fee_rate_hk: float = 0.003,
+        include_excursions: bool = True,
+        to_trade_day: ToSymbolTradeDay | None = None,
+    ) -> RoundTripReplayResult:
         """Pair recorded fills into closed entry<->exit round trips.
 
         Read-only FIFO lot ledger that generalizes ``calculate`` across all days
-        and symbols. Emits one ``ClosedRoundTrip`` per closing fill (``SELL``
-        closes a long lot queue; ``BUY_TO_COVER`` closes a short lot queue),
-        carrying the matched entry lots' weighted-average price, earliest entry
-        time, and an estimated round-trip fee from the current fee schedule.
+        and symbols. A closing fill is emitted only when the ledger can match its
+        entire executed quantity. Unmatched and partially matched exits are
+        returned as structured issues instead of partial performance records.
 
         Date filtering is on the *exit* fill time: a round trip that closed
         inside ``[from_dt, to_dt]`` is included even when its entry pre-dates the
@@ -379,8 +450,10 @@ class DailyPnlService:
         ]
         fills.sort(key=lambda item: (item.filled_at, item.id))
 
+        resolve_day: ToSymbolTradeDay = to_trade_day or _symbol_trade_day
         lots: dict[str, dict[str, list[_Lot]]] = {}
         trades: list[ClosedRoundTrip] = []
+        issues: list[PnlReplayIssue] = []
         for fill in fills:
             book = lots.setdefault(fill.symbol, {"long": [], "short": []})
             if fill.side == "BUY":
@@ -406,24 +479,50 @@ class DailyPnlService:
                     )
                 )
             elif fill.side == "SELL":
-                trades.extend(self._close_lots(book["long"], fill, "long", fee_rate_us, fee_rate_hk))
+                closed_trades, issue = self._close_lots(
+                    book["long"],
+                    fill,
+                    "long",
+                    fee_rate_us,
+                    fee_rate_hk,
+                    resolve_day,
+                )
+                trades.extend(closed_trades)
+                if issue is not None:
+                    issues.append(issue)
             elif fill.side == "BUY_TO_COVER":
-                trades.extend(self._close_lots(book["short"], fill, "short", fee_rate_us, fee_rate_hk))
+                closed_trades, issue = self._close_lots(
+                    book["short"],
+                    fill,
+                    "short",
+                    fee_rate_us,
+                    fee_rate_hk,
+                    resolve_day,
+                )
+                trades.extend(closed_trades)
+                if issue is not None:
+                    issues.append(issue)
 
         filtered = [
             t for t in trades
             if (from_dt is None or t.exit_at >= from_dt)
             and (to_dt is None or t.exit_at <= to_dt)
         ]
+        filtered_issues = [
+            issue for issue in issues
+            if (from_dt is None or issue.filled_at >= from_dt)
+            and (to_dt is None or issue.filled_at <= to_dt)
+        ]
         if not include_excursions:
-            return filtered
+            return RoundTripReplayResult(filtered, filtered_issues)
         try:
-            return self._attach_excursions(filtered)
+            enriched = self._attach_excursions(filtered)
         except (AttributeError, TypeError):
             # Lightweight read-model fakes and legacy integrations may expose
             # orders without the snapshot query surface. PnL remains usable;
             # only optional excursion enrichment is omitted.
-            return filtered
+            enriched = filtered
+        return RoundTripReplayResult(enriched, filtered_issues)
 
     @staticmethod
     def _close_lots(
@@ -432,12 +531,25 @@ class DailyPnlService:
         side: str,
         fee_rate_us: float,
         fee_rate_hk: float,
-    ) -> list[ClosedRoundTrip]:
+        to_trade_day: ToSymbolTradeDay,
+    ) -> tuple[list[ClosedRoundTrip], PnlReplayIssue | None]:
         from app.core.fees import one_side_fee_rate
 
         authoritative_outcome = DailyPnlService._authoritative_outcome(exit_fill)
         authoritative = authoritative_outcome is not None
-        if authoritative:
+        replay_cost_basis = (
+            DailyPnlService._fully_covered_lot_cost_basis(lot_queue, exit_fill)
+            if authoritative
+            else None
+        )
+        cost_basis_conflict = (
+            replay_cost_basis is not None
+            and DailyPnlService._cost_basis_conflicts(
+                exit_fill,
+                replay_cost_basis,
+            )
+        )
+        if authoritative and not cost_basis_conflict:
             basis_price = exit_fill.cost_basis_price or _ZERO
             position_quantity = exit_fill.position_quantity_before or _ZERO
             opened_at = exit_fill.cost_basis_opened_at or exit_fill.filled_at
@@ -493,9 +605,32 @@ class DailyPnlService:
             # an unhandled split/dividend, or a short opened outside this ledger).
             # Mirrors the warning _close_long/_close_short emit in calculate().
             DailyPnlService._warn_round_trip_overclose_once(exit_fill, remaining)
+            return [], DailyPnlService._replay_issue(
+                exit_fill,
+                trade_day=to_trade_day(exit_fill.symbol, exit_fill.filled_at),
+                matched_quantity=matched_quantity,
+            )
 
         if matched_quantity <= 0 or first_entry_at is None:
-            return []
+            return [], None
+
+        if cost_basis_conflict:
+            logger.error(
+                "round-trip replay found conflicting tracked cost basis for %s "
+                "order %s: declared=%s replayed=%s position=%s; refusing "
+                "suspect closed trade",
+                exit_fill.symbol,
+                exit_fill.broker_order_id or exit_fill.id,
+                exit_fill.cost_basis_price,
+                replay_cost_basis,
+                exit_fill.position_quantity_before,
+            )
+            return [], DailyPnlService._replay_issue(
+                exit_fill,
+                trade_day=to_trade_day(exit_fill.symbol, exit_fill.filled_at),
+                matched_quantity=matched_quantity,
+                issue_code=PnlReplayIssueCode.COST_BASIS_CONFLICT,
+            )
 
         if authoritative:
             basis_price = exit_fill.cost_basis_price or _ZERO
@@ -530,7 +665,7 @@ class DailyPnlService:
                 fill_latency_ms=exit_fill.fill_latency_ms,
                 exit_cause=exit_fill.exit_cause,
                 exit_reason=exit_fill.exit_reason,
-            )]
+            )], None
 
         avg_entry = cost_basis / matched_quantity
         exit_price = exit_fill.price
@@ -588,7 +723,34 @@ class DailyPnlService:
             fill_latency_ms=exit_fill.fill_latency_ms,
             exit_cause=exit_fill.exit_cause,
             exit_reason=exit_fill.exit_reason,
-        )]
+        )], None
+
+    @staticmethod
+    def _replay_issue(
+        fill: _Fill,
+        *,
+        trade_day: date,
+        matched_quantity: Decimal,
+        issue_code: PnlReplayIssueCode | None = None,
+    ) -> PnlReplayIssue:
+        unmatched_quantity = max(_ZERO, fill.quantity - matched_quantity)
+        resolved_code = issue_code or (
+            PnlReplayIssueCode.FULL_UNMATCHED_EXIT
+            if matched_quantity <= 0
+            else PnlReplayIssueCode.PARTIAL_OVERCLOSE
+        )
+        return PnlReplayIssue(
+            issue_code=resolved_code,
+            symbol=fill.symbol,
+            side=fill.side,
+            trade_day=trade_day,
+            filled_at=fill.filled_at,
+            exit_order_id=fill.id,
+            exit_broker_order_id=fill.broker_order_id,
+            filled_quantity=float(fill.quantity),
+            matched_quantity=float(matched_quantity),
+            unmatched_quantity=float(unmatched_quantity),
+        )
 
     @staticmethod
     def _warn_round_trip_overclose_once(exit_fill: _Fill, remaining: Decimal) -> None:
@@ -749,6 +911,19 @@ class DailyPnlService:
                 OrderRecord.id == trade.exit_order_id
             ).first()
             if order is None:
+                continue
+            executed_quantity = self._executed_quantity(order)
+            if (
+                executed_quantity <= 0
+                or self._decimal(trade.quantity) != executed_quantity
+            ):
+                logger.error(
+                    "refusing partial ledger replay outcome for order %s: "
+                    "matched=%s executed=%s",
+                    trade.exit_broker_order_id or trade.exit_order_id,
+                    trade.quantity,
+                    executed_quantity,
+                )
                 continue
             if str(getattr(order, "pnl_source", "") or "").upper() in {
                 "TRACKED_ENTRY",
@@ -915,6 +1090,29 @@ class DailyPnlService:
                 return None
             return position.short_proceeds / position.short_quantity
         return None
+
+    @staticmethod
+    def _fully_covered_lot_cost_basis(
+        lot_queue: list[_Lot],
+        fill: _Fill,
+    ) -> Decimal | None:
+        if fill.pnl_source != "TRACKED_ENTRY":
+            return None
+        position_quantity = fill.position_quantity_before
+        if position_quantity is None or position_quantity <= 0:
+            return None
+        represented_lots = [lot for lot in lot_queue if lot.quantity > 0]
+        represented_quantity = sum(
+            (lot.quantity for lot in represented_lots),
+            start=_ZERO,
+        )
+        if represented_quantity != position_quantity:
+            return None
+        represented_cost = sum(
+            (lot.quantity * lot.price for lot in represented_lots),
+            start=_ZERO,
+        )
+        return represented_cost / represented_quantity
 
     @staticmethod
     def _cost_basis_conflicts(fill: _Fill, replay_cost_basis: Decimal) -> bool:

@@ -50,6 +50,8 @@
         <span class="muted" data-testid="reports-last-refresh">更新于 {{ lastRefreshedLabel }}</span>
       </div>
 
+      <StatisticsQualityAlert :quality="reportData.statistics_quality" />
+
       <el-row :gutter="12" class="summary-row">
         <el-col :xs="12" :sm="6">
           <el-card class="summary-card">
@@ -252,6 +254,7 @@
 import { ref, computed } from 'vue'
 import { useRegisterViewRefresh } from '../composables/useViewRefreshRegistry'
 import { ElMessage } from 'element-plus'
+import StatisticsQualityAlert from '../components/StatisticsQualityAlert.vue'
 import { getRangeReport, exportReport } from '../api/reports'
 import { downloadCsv } from '../utils/csv'
 import type { ReportDailyPoint, ReportOrderDetail, ReportResponse } from '../types'

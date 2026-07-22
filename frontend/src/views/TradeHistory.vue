@@ -7,6 +7,7 @@
         <el-radio-button label="history">历史订单</el-radio-button>
       </el-radio-group>
     </div>
+    <StatisticsQualityAlert v-if="statisticsQualityLoaded" :quality="statisticsQuality" />
     <div v-if="noteAnalytics && noteAnalytics.total > 0" class="analytics-card" data-testid="note-analytics">
       <div class="analytics-stat"><span>笔记</span><strong>{{ noteAnalytics.total }}</strong></div>
       <div class="analytics-stat"><span>已评分</span><strong>{{ noteAnalytics.rated_count }}</strong></div>
@@ -474,12 +475,14 @@ import type {
   TradeNote,
   TradeNoteAnalytics,
   TradePnlDistributionResponse,
+  StatisticsQuality,
   TradeStats,
   TradeWeekdayAttributionResponse,
 } from '../types'
 import { orderSideLabel, orderStatusLabel } from '../utils/labels'
 import { resolveErrorMessage } from '../utils/error'
 import CopyButton from '../components/CopyButton.vue'
+import StatisticsQualityAlert from '../components/StatisticsQualityAlert.vue'
 
 const orders = ref<OrderRecord[]>([])
 const loading = ref(false)
@@ -517,6 +520,8 @@ const noteAnalytics = ref<TradeNoteAnalytics | null>(null)
 
 // ---- Closed round-trip trades (entry <-> exit pairing) ----
 const closedTrades = ref<ClosedTrade[]>([])
+const closedTradeQuality = ref<StatisticsQuality | null | undefined>(null)
+const statisticsQualityLoaded = ref(false)
 const rtLoading = ref(false)
 const rtExporting = ref(false)
 const rtFromDate = ref('')
@@ -532,6 +537,32 @@ const tradeHoldDuration = ref<TradeHoldDurationResponse | null>(null)
 const tradePnlDistribution = ref<TradePnlDistributionResponse | null>(null)
 const tradeMonthlySummary = ref<TradeMonthlySummaryResponse | null>(null)
 const tradeWeekdayAttribution = ref<TradeWeekdayAttributionResponse | null>(null)
+
+const qualityStatusRank: Record<StatisticsQuality['status'], number> = {
+  COMPLETE: 0,
+  KNOWN_EXCLUSIONS: 1,
+  UNRESOLVED: 2,
+  STALE_EXCLUSION: 3,
+}
+
+const statisticsQuality = computed<StatisticsQuality | undefined>(() => {
+  const qualities = [
+    closedTradeQuality.value,
+    tradeStats.value?.statistics_quality,
+    tradeCalendar.value?.statistics_quality,
+    tradeHoldDuration.value?.statistics_quality,
+    tradePnlDistribution.value?.statistics_quality,
+    tradeMonthlySummary.value?.statistics_quality,
+    tradeWeekdayAttribution.value?.statistics_quality,
+  ].filter((quality): quality is StatisticsQuality => quality !== null && quality !== undefined)
+
+  return [...qualities].sort((a, b) =>
+    qualityStatusRank[b.status] - qualityStatusRank[a.status]
+      || b.unresolved_issue_count - a.unresolved_issue_count
+      || b.omitted_day_count - a.omitted_day_count
+      || b.known_exclusion_count - a.known_exclusion_count,
+  )[0]
+})
 const noteDialog = reactive({
   visible: false,
   orderId: 0,
@@ -719,10 +750,12 @@ async function loadClosedTrades() {
     })
     closedTrades.value = data.items
     rtTotal.value = data.total
+    closedTradeQuality.value = data.statistics_quality
   } catch {
     // Round-trip view is supplementary; never block the page on it.
   } finally {
     rtLoading.value = false
+    statisticsQualityLoaded.value = true
   }
 }
 

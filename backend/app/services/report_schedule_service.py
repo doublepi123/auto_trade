@@ -58,6 +58,16 @@ class ReportScheduleService:
         except Exception:
             logger.exception("scheduled report build failed for %s", symbol)
             return (title, f"{symbol} {target}：报告生成失败，请查看日志。")
+        quality = report.statistics_quality
+        if quality.status in {"UNRESOLVED", "STALE_EXCLUSION"}:
+            return (
+                title,
+                (
+                    f"{symbol} {target}：统计未完成，已省略 "
+                    f"{quality.omitted_day_count} 个标的交易日；发现 "
+                    f"{quality.unresolved_issue_count} 个账本问题，请先复核。"
+                ),
+            )
         m = report.metrics
         if m.total_trades == 0:
             return (title, f"{symbol} {target}：今日暂无成交。")

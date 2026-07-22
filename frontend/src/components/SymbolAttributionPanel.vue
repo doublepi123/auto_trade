@@ -13,6 +13,7 @@
     </div>
 
     <el-alert v-if="error" :title="error" type="error" show-icon :closable="false" />
+    <StatisticsQualityAlert v-if="result" :quality="result.statistics_quality" />
 
     <div v-if="result" class="attribution-total">
       <span>合计已实现（净）</span>
@@ -64,6 +65,7 @@ import { onMounted, ref } from 'vue'
 import { getPnlBySymbol } from '../api'
 import type { SymbolAttributionResponse } from '../types'
 import { resolveErrorMessage } from '../utils/error'
+import StatisticsQualityAlert from './StatisticsQualityAlert.vue'
 
 const result = ref<SymbolAttributionResponse | null>(null)
 const loading = ref(false)

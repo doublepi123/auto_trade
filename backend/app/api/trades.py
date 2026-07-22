@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, Query, Response
@@ -11,6 +12,7 @@ from app.database import get_db
 from app.models import StrategyConfig
 from app.schemas import (
     ClosedTradePage,
+    StatisticsQuality,
     TradeCalendarDay,
     TradeCalendarResponse,
     TradeHoldDurationBucket,
@@ -24,6 +26,10 @@ from app.schemas import (
     TradeWeekdayAttributionResponse,
 )
 from app.services.daily_pnl_service import ClosedRoundTrip, DailyPnlService
+from app.services.statistics_quality_service import (
+    StatisticsSample,
+    select_statistics_sample,
+)
 from app.services.trade_analytics_service import (
     compute_hold_duration_buckets,
     compute_monthly_summary,
@@ -64,6 +70,24 @@ def _day_bound(value: str | None, *, end_of_day: bool) -> datetime | None:
     return dt + timedelta(days=1) if end_of_day else dt
 
 
+def _statistics_sample(
+    db: Session,
+    *,
+    symbol: str | None = None,
+    from_date: str | None = None,
+    to_date: str | None = None,
+) -> StatisticsSample:
+    fee_rate_us, fee_rate_hk = _active_fee_rates(db)
+    from_dt = _day_bound(from_date, end_of_day=False)
+    to_dt = _day_bound(to_date, end_of_day=True)
+    replay = DailyPnlService(db).pair_round_trips_with_issues(
+        symbol=symbol,
+        fee_rate_us=fee_rate_us,
+        fee_rate_hk=fee_rate_hk,
+    )
+    return select_statistics_sample(replay, from_dt=from_dt, to_dt=to_dt)
+
+
 def _closed_trips(
     db: Session,
     *,
@@ -88,12 +112,14 @@ def trade_calendar(
     to_date: str | None = Query(default=None, description="Exit-time upper bound (YYYY-MM-DD)", pattern=_DATE_PATTERN),
     db: Session = Depends(get_db),
 ) -> TradeCalendarResponse:
-    trips = _closed_trips(db, symbol=symbol, from_date=from_date, to_date=to_date)
+    sample = _statistics_sample(db, symbol=symbol, from_date=from_date, to_date=to_date)
+    trips = sample.trades
     rows = compute_trade_calendar(trips)
     return TradeCalendarResponse(
         items=[TradeCalendarDay.model_validate(row) for row in rows],
         total_trades=len(trips),
         total_net_pnl=round(sum(trip.net_pnl for trip in trips), 2),
+        statistics_quality=StatisticsQuality.model_validate(sample.quality),
     )
 
 
@@ -104,10 +130,12 @@ def trade_hold_duration(
     to_date: str | None = Query(default=None, description="Exit-time upper bound (YYYY-MM-DD)", pattern=_DATE_PATTERN),
     db: Session = Depends(get_db),
 ) -> TradeHoldDurationResponse:
-    trips = _closed_trips(db, symbol=symbol, from_date=from_date, to_date=to_date)
+    sample = _statistics_sample(db, symbol=symbol, from_date=from_date, to_date=to_date)
+    trips = sample.trades
     return TradeHoldDurationResponse(
         items=[TradeHoldDurationBucket.model_validate(row) for row in compute_hold_duration_buckets(trips)],
         total_trades=len(trips),
+        statistics_quality=StatisticsQuality.model_validate(sample.quality),
     )
 
 
@@ -118,11 +146,13 @@ def trade_pnl_distribution(
     to_date: str | None = Query(default=None, description="Exit-time upper bound (YYYY-MM-DD)", pattern=_DATE_PATTERN),
     db: Session = Depends(get_db),
 ) -> TradePnlDistributionResponse:
-    trips = _closed_trips(db, symbol=symbol, from_date=from_date, to_date=to_date)
+    sample = _statistics_sample(db, symbol=symbol, from_date=from_date, to_date=to_date)
+    trips = sample.trades
     return TradePnlDistributionResponse(
         items=[TradePnlDistributionBucket.model_validate(row) for row in compute_pnl_distribution(trips)],
         total_trades=len(trips),
         total_net_pnl=round(sum(trip.net_pnl for trip in trips), 2),
+        statistics_quality=StatisticsQuality.model_validate(sample.quality),
     )
 
 
@@ -133,12 +163,14 @@ def trade_monthly_summary(
     to_date: str | None = Query(default=None, description="Exit-time upper bound (YYYY-MM-DD)", pattern=_DATE_PATTERN),
     db: Session = Depends(get_db),
 ) -> TradeMonthlySummaryResponse:
-    trips = _closed_trips(db, symbol=symbol, from_date=from_date, to_date=to_date)
+    sample = _statistics_sample(db, symbol=symbol, from_date=from_date, to_date=to_date)
+    trips = sample.trades
     rows = compute_monthly_summary(trips)
     return TradeMonthlySummaryResponse(
         items=[TradeMonthlySummaryRow.model_validate(row) for row in rows],
         total_trades=len(trips),
         total_net_pnl=round(sum(trip.net_pnl for trip in trips), 2),
+        statistics_quality=StatisticsQuality.model_validate(sample.quality),
     )
 
 
@@ -149,11 +181,13 @@ def trade_weekday_attribution(
     to_date: str | None = Query(default=None, description="Exit-time upper bound (YYYY-MM-DD)", pattern=_DATE_PATTERN),
     db: Session = Depends(get_db),
 ) -> TradeWeekdayAttributionResponse:
-    trips = _closed_trips(db, symbol=symbol, from_date=from_date, to_date=to_date)
+    sample = _statistics_sample(db, symbol=symbol, from_date=from_date, to_date=to_date)
+    trips = sample.trades
     return TradeWeekdayAttributionResponse(
         items=[TradeWeekdayAttributionRow.model_validate(row) for row in compute_weekday_attribution(trips)],
         total_trades=len(trips),
         total_net_pnl=round(sum(trip.net_pnl for trip in trips), 2),
+        statistics_quality=StatisticsQuality.model_validate(sample.quality),
     )
 
 
@@ -171,13 +205,15 @@ def trade_stats(
     """
     fee_rate_us, fee_rate_hk = _active_fee_rates(db)
     from_dt = datetime.now(timezone.utc) - timedelta(days=days)
-    trips = DailyPnlService(db).pair_round_trips(
+    replay = DailyPnlService(db).pair_round_trips_with_issues(
         symbol=symbol,
-        from_dt=from_dt,
         fee_rate_us=fee_rate_us,
         fee_rate_hk=fee_rate_hk,
     )
-    return TradeStats.model_validate(compute_trade_stats(trips))
+    sample = select_statistics_sample(replay, from_dt=from_dt)
+    payload = asdict(compute_trade_stats(sample.trades))
+    payload["statistics_quality"] = asdict(sample.quality)
+    return TradeStats.model_validate(payload)
 
 
 @router.get("/export")
@@ -212,9 +248,11 @@ def list_closed_trades(
     is included even if its entry pre-dates it. ``net_pnl`` prefers actual
     broker charges and otherwise uses the fee estimate frozen at submission.
     """
-    trips = _closed_trips(db, symbol=symbol, from_date=from_date, to_date=to_date)
+    sample = _statistics_sample(db, symbol=symbol, from_date=from_date, to_date=to_date)
+    trips = sample.trades
     total = len(trips)
     return ClosedTradePage(
         items=build_closed_trade_items(trips, limit),
         total=total,
+        statistics_quality=StatisticsQuality.model_validate(sample.quality),
     )
