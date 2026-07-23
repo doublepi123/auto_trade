@@ -1,6 +1,9 @@
 # pyright: reportArgumentType=false, reportAttributeAccessIssue=false
+import os
+import subprocess
 import threading
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -45,6 +48,40 @@ class TestQuote:
 
 
 class TestBrokerGateway:
+    def test_position_snapshot_isolation_config_defaults_enabled_and_bounded(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path,
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv(
+            "AUTO_TRADE_BROKER_POSITION_SNAPSHOT_ISOLATION_ENABLED",
+            raising=False,
+        )
+        monkeypatch.delenv(
+            "AUTO_TRADE_BROKER_POSITION_SNAPSHOT_TIMEOUT_SECONDS",
+            raising=False,
+        )
+        settings_type = type(broker_module.settings)
+
+        configured = settings_type()
+
+        assert configured.broker_position_snapshot_isolation_enabled is True
+        assert configured.broker_position_snapshot_timeout_seconds == 8.0
+
+        monkeypatch.setenv(
+            "AUTO_TRADE_BROKER_POSITION_SNAPSHOT_TIMEOUT_SECONDS",
+            "0.5",
+        )
+        with pytest.raises(ValueError):
+            settings_type()
+        monkeypatch.setenv(
+            "AUTO_TRADE_BROKER_POSITION_SNAPSHOT_TIMEOUT_SECONDS",
+            "61",
+        )
+        with pytest.raises(ValueError):
+            settings_type()
+
     def test_get_order_status_includes_broker_charges_and_timestamps(self) -> None:
         class TradeContext:
             def order_detail(self, _order_id: str):
@@ -92,6 +129,9 @@ class TestBrokerGateway:
             class QuoteContext:
                 def __init__(self, config):
                     called["quote_ctx_config"] = config
+
+                def set_on_quote(self, _callback):
+                    pass
 
             class TradeContext:
                 def __init__(self, config):
@@ -354,10 +394,11 @@ class TestBrokerGateway:
             (["NVDA.US"], ["SubType.Quote"]),
         ]
 
-    def test_subscribe_quotes_does_not_hold_lock_during_sdk_callback_registration(
+    def test_subscribe_quotes_registers_sdk_callbacks_once_before_first_subscription(
         self,
         monkeypatch,
     ) -> None:
+        events: list[str] = []
         received = threading.Event()
 
         class FakeConfig:
@@ -367,17 +408,19 @@ class TestBrokerGateway:
 
         class QuoteContext:
             def __init__(self, _config):
-                pass
+                self.subscribed = False
 
             def set_on_quote(self, callback):
-                class QuoteEvent:
-                    symbol = "AAPL.US"
-                    last_done = 150.0
-                    timestamp = "2026-07-23T20:45:00Z"
-
+                assert not self.subscribed
+                events.append("handler")
+                event = SimpleNamespace(
+                    symbol="AAPL.US",
+                    last_done=150.0,
+                    timestamp="2026-07-23T20:45:00Z",
+                )
                 worker = threading.Thread(
                     target=callback,
-                    args=("AAPL.US", QuoteEvent()),
+                    args=("AAPL.US", event),
                 )
                 worker.start()
                 worker.join(timeout=1)
@@ -385,8 +428,9 @@ class TestBrokerGateway:
                     "SDK callback blocked on BrokerGateway._lock"
                 )
 
-            def subscribe(self, _symbols, _subtypes):
-                pass
+            def subscribe(self, symbols, _subtypes):
+                self.subscribed = True
+                events.append(f"subscribe:{','.join(symbols)}")
 
         class TradeContext:
             def __init__(self, _config):
@@ -410,9 +454,15 @@ class TestBrokerGateway:
         gw = BrokerGateway()
 
         gw.subscribe_quotes("AAPL.US", lambda _quote: received.set())
+        gw.subscribe_quotes("NVDA.US", lambda _quote: None)
 
         assert received.is_set()
-        assert gw._subscribed_symbols == {"AAPL.US"}
+        assert events == [
+            "handler",
+            "subscribe:AAPL.US",
+            "subscribe:NVDA.US",
+        ]
+        assert gw._subscribed_symbols == {"AAPL.US", "NVDA.US"}
 
     def test_get_positions_flattens_stock_position_channels(self) -> None:
         class StockInfo:
@@ -1091,12 +1141,13 @@ class TestBrokerGateway:
             def __init__(self):
                 self.unsubscribed = []
 
-            def unsubscribe(self, symbols):
+            def unsubscribe(self, symbols, _subtypes):
                 self.unsubscribed.extend(symbols)
 
         gw = BrokerGateway()
         gw._quote_ctx = FakeCtx()
         gw._subscribed_symbols = {"AAPL.US", "NVDA.US"}
+        gw._subscription_topics = ["Quote"]
         gw._quote_callbacks.append(lambda x: None)
 
         gw.unsubscribe_quotes()
@@ -1111,7 +1162,7 @@ class TestBrokerGateway:
         class FakeCtx:
             callback_blocked = False
 
-            def unsubscribe(self, _symbols):
+            def unsubscribe(self, _symbols, _subtypes):
                 worker = threading.Thread(target=self._sdk_callback)
                 worker.start()
                 worker.join(timeout=1)
@@ -1138,7 +1189,7 @@ class TestBrokerGateway:
 
     def test_unsubscribe_quotes_logs_warning_on_error(self, caplog) -> None:
         class FakeCtx:
-            def unsubscribe(self, symbols):
+            def unsubscribe(self, symbols, _subtypes):
                 raise RuntimeError("unsubscribe failed")
 
         gw = BrokerGateway()
@@ -1499,6 +1550,307 @@ class TestBrokerGateway:
 
         with pytest.raises(ValueError, match="conflicting signs"):
             gw.get_positions()
+
+    def test_get_positions_isolated_returns_strict_normalized_payload_without_parent_contexts(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
+
+        def fake_run(command: tuple[str, ...], **kwargs):
+            calls.append((command, kwargs))
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=(
+                    '{"status":"ok","positions":['
+                    '{"symbol":"AAPL.US","side":"LONG","quantity":"12",'
+                    '"avg_price":"180.25","available_quantity":"10"},'
+                    '{"symbol":"700.HK","side":"SHORT","quantity":"3",'
+                    '"avg_price":null,"available_quantity":null}'
+                    "]}"
+                ),
+            )
+
+        monkeypatch.setattr(
+            broker_module.settings,
+            "broker_position_snapshot_isolation_enabled",
+            True,
+        )
+        monkeypatch.setattr(
+            broker_module.settings,
+            "broker_position_snapshot_timeout_seconds",
+            2.0,
+        )
+        monkeypatch.setenv("LONGPORT_ACCESS_TOKEN", "must-not-enter-command")
+        monkeypatch.setattr(broker_module.subprocess, "run", fake_run)
+        gw = BrokerGateway()
+
+        positions = gw.get_positions()
+
+        assert positions == [
+            Position(
+                symbol="AAPL.US",
+                side="LONG",
+                quantity=Decimal("12"),
+                avg_price=Decimal("180.25"),
+                available_quantity=Decimal("10"),
+            ),
+            Position(
+                symbol="700.HK",
+                side="SHORT",
+                quantity=Decimal("3"),
+                avg_price=Decimal("0"),
+                available_quantity=None,
+            ),
+        ]
+        assert gw._quote_ctx is None
+        assert gw._trade_ctx is None
+        assert calls[0][0] == broker_module._POSITION_PROBE_COMMAND
+        assert "must-not-enter-command" not in " ".join(calls[0][0])
+        assert "env" not in calls[0][1]
+        assert calls[0][1]["stderr"] is subprocess.DEVNULL
+
+    def test_get_positions_isolated_timeout_releases_probe_lock(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        calls = 0
+
+        def fake_run(command, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout='{"status":"ok","positions":[]}',
+            )
+
+        monkeypatch.setattr(
+            broker_module.settings,
+            "broker_position_snapshot_isolation_enabled",
+            True,
+        )
+        monkeypatch.setattr(
+            broker_module.settings,
+            "broker_position_snapshot_timeout_seconds",
+            1.0,
+        )
+        monkeypatch.setattr(broker_module.subprocess, "run", fake_run)
+        gw = BrokerGateway()
+
+        with pytest.raises(TimeoutError, match="exceeded 1s timeout"):
+            gw.get_positions()
+
+        assert gw.get_positions() == []
+        assert calls == 2
+        assert gw._quote_ctx is None
+        assert gw._trade_ctx is None
+
+    def test_get_positions_isolated_real_probe_kills_and_reaps_timeout(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path,
+    ) -> None:
+        package_dir = tmp_path / "longport"
+        package_dir.mkdir()
+        (package_dir / "__init__.py").write_text("", encoding="utf-8")
+        (package_dir / "openapi.py").write_text(
+            "\n".join(
+                [
+                    "import os",
+                    "import time",
+                    "from pathlib import Path",
+                    "",
+                    "class OpenApiException(Exception):",
+                    "    pass",
+                    "",
+                    "class Config:",
+                    "    @staticmethod",
+                    "    def from_env():",
+                    "        return object()",
+                    "",
+                    "class TradeContext:",
+                    "    def __init__(self, _config):",
+                    "        pass",
+                    "",
+                    "    def stock_positions(self):",
+                    "        print(os.environ['LONGPORT_ACCESS_TOKEN'])",
+                    "        if os.environ['POSITION_PROBE_TEST_MODE'] == 'hang':",
+                    "            Path(os.environ['POSITION_PROBE_PID_FILE']).write_text(",
+                    "                str(os.getpid()), encoding='utf-8'",
+                    "            )",
+                    "            time.sleep(30)",
+                    "        return [{'symbol': 'AAPL.US', 'quantity': '2',",
+                    "                 'available_quantity': '2', 'cost_price': '150'}]",
+                    "",
+                    "    def close(self):",
+                    "        pass",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        pid_file = tmp_path / "probe.pid"
+        monkeypatch.setattr(
+            broker_module.settings,
+            "broker_position_snapshot_isolation_enabled",
+            True,
+        )
+        monkeypatch.setattr(
+            broker_module.settings,
+            "broker_position_snapshot_timeout_seconds",
+            1.0,
+        )
+        monkeypatch.setenv("PYTHONPATH", str(tmp_path))
+        monkeypatch.setenv("LONGPORT_ACCESS_TOKEN", "probe-secret-output")
+        monkeypatch.setenv("POSITION_PROBE_PID_FILE", str(pid_file))
+        monkeypatch.setenv("POSITION_PROBE_TEST_MODE", "hang")
+        gw = BrokerGateway()
+
+        with pytest.raises(TimeoutError, match="exceeded 1s timeout"):
+            gw.get_positions()
+
+        pid = int(pid_file.read_text(encoding="utf-8"))
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
+
+        monkeypatch.setenv("POSITION_PROBE_TEST_MODE", "success")
+        assert gw.get_positions() == [
+            Position(
+                symbol="AAPL.US",
+                side="LONG",
+                quantity=Decimal("2"),
+                avg_price=Decimal("150"),
+                available_quantity=Decimal("2"),
+            )
+        ]
+        assert gw._quote_ctx is None
+        assert gw._trade_ctx is None
+
+    def test_get_positions_isolated_surfaces_sanitized_child_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            broker_module.settings,
+            "broker_position_snapshot_isolation_enabled",
+            True,
+        )
+        monkeypatch.setattr(
+            broker_module.subprocess,
+            "run",
+            lambda command, **_kwargs: subprocess.CompletedProcess(
+                command,
+                1,
+                stdout='{"status":"error","error_type":"OpenApiException"}',
+            ),
+        )
+
+        with pytest.raises(
+            RuntimeError,
+            match=r"failed \(OpenApiException\)",
+        ):
+            BrokerGateway().get_positions()
+
+    @pytest.mark.parametrize(
+        ("output", "returncode"),
+        [
+            ("not-json", 0),
+            ('["not","an","object"]', 0),
+            ('{"status":"ok","positions":{}}', 0),
+            (
+                '{"status":"ok","positions":[{"symbol":"AAPL.US",'
+                '"side":"LONG","quantity":1,"avg_price":"100",'
+                '"available_quantity":"1"}]}',
+                0,
+            ),
+            ('{"status":"ok","positions":[]}', 1),
+            ('{"status":"error","error_type":"bad value"}', 1),
+        ],
+    )
+    def test_get_positions_isolated_rejects_malformed_protocol(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        output: str,
+        returncode: int,
+    ) -> None:
+        monkeypatch.setattr(
+            broker_module.settings,
+            "broker_position_snapshot_isolation_enabled",
+            True,
+        )
+        monkeypatch.setattr(
+            broker_module.subprocess,
+            "run",
+            lambda command, **_kwargs: subprocess.CompletedProcess(
+                command,
+                returncode,
+                stdout=output,
+            ),
+        )
+
+        with pytest.raises(
+            RuntimeError,
+            match="malformed broker position probe payload",
+        ):
+            BrokerGateway().get_positions()
+
+    def test_position_snapshot_child_uses_env_config_and_trade_context_only(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        events: list[object] = []
+
+        class Config:
+            @staticmethod
+            def from_env():
+                events.append("from_env")
+                return "env-config"
+
+        class TradeContext:
+            def __init__(self, config):
+                events.append(("trade_context", config))
+
+            def stock_positions(self):
+                events.append("stock_positions")
+                return [
+                    {
+                        "symbol": "AAPL.US",
+                        "quantity": "5",
+                        "available_quantity": "4",
+                        "cost_price": "123.45",
+                    }
+                ]
+
+            def close(self):
+                events.append("close")
+
+        class FakeModule:
+            pass
+
+        FakeModule.Config = Config
+        FakeModule.TradeContext = TradeContext
+        monkeypatch.setattr(broker_module, "_import_openapi", lambda: FakeModule)
+
+        payload = broker_module._fetch_position_snapshot_payload_from_env()
+
+        assert payload == [
+            {
+                "symbol": "AAPL.US",
+                "side": "LONG",
+                "quantity": "5",
+                "avg_price": "123.45",
+                "available_quantity": "4",
+            }
+        ]
+        assert events == [
+            "from_env",
+            ("trade_context", "env-config"),
+            "stock_positions",
+            "close",
+        ]
 
 
 class TestBrokerImports:

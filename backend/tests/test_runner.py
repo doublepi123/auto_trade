@@ -2106,8 +2106,10 @@ class TestAppRunner:
         )
         monkeypatch.setattr(
             runner.broker,
-            "subscribe_quotes",
-            lambda symbol, _callback: broker_calls.append(("subscribe", symbol)),
+            "subscribe_quotes_batch",
+            lambda symbols, _callback: broker_calls.append(
+                ("subscribe", ",".join(symbols))
+            ),
         )
 
         runner.reload_strategy()
@@ -2210,7 +2212,11 @@ class TestAppRunner:
         monkeypatch.setattr(runner, "sync_today_orders_from_broker", lambda *, force: None)
         monkeypatch.setattr(runner, "_sync_risk_from_order_ledger", lambda: None)
         monkeypatch.setattr(runner, "_pause_if_unresolved_live_order_exists", lambda db: None)
-        monkeypatch.setattr(runner, "_reconcile_tracked_entries_with_broker", lambda db: None)
+        monkeypatch.setattr(
+            runner,
+            "_reconcile_tracked_entries_with_broker",
+            lambda db, **_kwargs: [],
+        )
         monkeypatch.setattr(runner.broker, "subscribe_quotes", lambda symbol, callback: None)
 
         runner._initialize_runner()
@@ -3206,7 +3212,10 @@ class TestAppRunner:
         runner.engine.params = StrategyParams(symbol="AAPL.US", market="US")
 
         class Broker:
+            calls = 0
+
             def get_positions(self):
+                self.calls += 1
                 return [
                     Position(
                         symbol="NVDA.US",
@@ -3230,6 +3239,7 @@ class TestAppRunner:
             tracked = runner._trade_svc.tracked_position("NVDA.US")
             assert tracked is not None
             assert tracked.quantity == Decimal("2.0")
+            assert runner.broker.calls == 1
         finally:
             with database.SessionLocal() as db:
                 db.query(TrackedEntry).filter(TrackedEntry.symbol == "NVDA.US").delete()

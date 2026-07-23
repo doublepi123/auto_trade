@@ -66,7 +66,10 @@ def test_on_resubscribe_if_needed_resubscribes_when_unsubscribed() -> None:
     runner._on_resubscribe_if_needed()
 
     broker_mock.unsubscribe_quotes.assert_called_once()
-    broker_mock.subscribe_quotes.assert_called_once_with("AAPL.US", runner._on_quote)
+    broker_mock.subscribe_quotes_batch.assert_called_once_with(
+        ["AAPL.US"],
+        runner._on_quote,
+    )
     assert runner._quotes_subscribed is True
     assert runner._disconnect_retry_count == 0
     assert runner._last_push_quote_at > 0

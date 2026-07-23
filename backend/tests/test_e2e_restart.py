@@ -378,8 +378,8 @@ class TestE2EStartupRestoresTrackedEntries:
         assert snapshot["AAPL.US"][0] == Decimal("80.0")
         assert snapshot["AAPL.US"][1] == Decimal("12000.0")
 
-        # Broker should have been queried for positions and the symbol subscribed.
-        assert fake_broker.get_positions_calls >= 1
+        # One broker snapshot drives both tracked-entry repair and engine sync.
+        assert fake_broker.get_positions_calls == 1
         assert "AAPL.US" in fake_broker.subscribed_to
 
         # A TRACKED_ENTRY_DRIFT event must have been written to the DB.
@@ -1006,6 +1006,48 @@ class TestE2EOfflineFillRecovery:
         safe, error = runner.verify_operational_resume()
         assert safe is False
         assert "settlement" in error
+
+    def test_runner_starts_fail_closed_when_position_snapshot_times_out(
+        self, fresh_runner, monkeypatch
+    ) -> None:
+        _seed_strategy(symbol="AAPL.US")
+        fake_broker = _FakeBroker(
+            get_positions_exc=TimeoutError(
+                "broker position snapshot exceeded hard deadline"
+            )
+        )
+        _install_fake_broker(monkeypatch, fake_broker)
+
+        runner = get_runner()
+        release_run_loop = threading.Event()
+        monkeypatch.setattr(runner, "_run_loop", release_run_loop.wait)
+        try:
+            assert runner.start() is True
+            assert runner.is_running is True
+            assert fake_broker.get_positions_calls == 1
+            assert fake_broker.subscribed_to == ["AAPL.US"]
+            assert runner.risk.paused is True
+            assert runner.risk.pause_reason.startswith(
+                "POSITION_RECONCILIATION_UNCERTAIN:"
+            )
+            assert runner.risk.protective_exit_permitted is False
+
+            db = SessionLocal()
+            try:
+                persisted = (
+                    db.query(RuntimeState)
+                    .filter(RuntimeState.symbol == "AAPL.US")
+                    .one()
+                )
+                assert persisted.paused is True
+                assert persisted.pause_reason.startswith(
+                    "POSITION_RECONCILIATION_UNCERTAIN:"
+                )
+            finally:
+                db.close()
+        finally:
+            release_run_loop.set()
+            runner.stop()
 
     def test_restart_recovers_cancelled_partial_entry_before_tracked_write(
         self, fresh_runner, monkeypatch

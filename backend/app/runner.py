@@ -547,15 +547,32 @@ class AppRunner:
                 self._load_pending_orders(db)
                 self._resume_pending_timeout_pause_if_filled(db)
             self._sync_risk_from_order_ledger()
+            position_snapshot: list[Position] | None = None
+            position_snapshot_error: Exception | None = None
+            position_snapshot_at = time.monotonic()
+            try:
+                position_snapshot = self.broker.get_positions()
+            except Exception as exc:
+                position_snapshot_error = exc
             completed_reductions: list[tuple[str, _ReductionIntent]] = []
             with self._db_session() as db:
                 self._pause_if_unresolved_live_order_exists(db)
-                completed_reductions = self._reconcile_tracked_entries_with_broker(db)
+                completed_reductions = self._reconcile_tracked_entries_with_broker(
+                    db,
+                    position_snapshot=position_snapshot,
+                    position_snapshot_error=position_snapshot_error,
+                )
             # Force an engine-vs-broker position sync BEFORE the quote
             # subscription is set up below. Without this, the engine state we
             # just loaded from DB can be stale for the first quote decisions.
             try:
-                state_changed = self._sync_engine_state_with_positions(force=True)
+                state_changed = False
+                if position_snapshot is not None:
+                    state_changed = self._sync_engine_state_with_positions(
+                        force=True,
+                        position_snapshot=position_snapshot,
+                        position_snapshot_at=position_snapshot_at,
+                    )
                 for symbol, intent in completed_reductions:
                     self._complete_reduction(
                         symbol,
@@ -1011,6 +1028,10 @@ class AppRunner:
         return symbols
 
     def _subscribe_quote_symbols(self, broker: Any, symbols: list[str]) -> None:
+        subscribe_batch = getattr(broker, "subscribe_quotes_batch", None)
+        if callable(subscribe_batch):
+            subscribe_batch(symbols, self._on_quote)
+            return
         for symbol in symbols:
             broker.subscribe_quotes(symbol, self._on_quote)
 
@@ -3752,16 +3773,26 @@ class AppRunner:
         )
         return any(marker in normalized for marker in transient_markers)
 
-    def _sync_engine_state_with_positions(self, *, force: bool = False) -> bool:
+    def _sync_engine_state_with_positions(
+        self,
+        *,
+        force: bool = False,
+        position_snapshot: list[Position] | None = None,
+        position_snapshot_at: float | None = None,
+    ) -> bool:
         with self._trade_svc.submission_guard():
             return self._sync_engine_state_with_positions_under_submission_guard(
-                force=force
+                force=force,
+                position_snapshot=position_snapshot,
+                position_snapshot_at=position_snapshot_at,
             )
 
     def _sync_engine_state_with_positions_under_submission_guard(
         self,
         *,
         force: bool = False,
+        position_snapshot: list[Position] | None = None,
+        position_snapshot_at: float | None = None,
     ) -> bool:
         with self._state_lock:
             if (not self._running and not force) or self._trigger_in_flight:
@@ -3788,10 +3819,18 @@ class AppRunner:
                 return False
 
             self._last_position_sync_at = now
-            snapshot_time = now
+            snapshot_time = (
+                position_snapshot_at
+                if position_snapshot_at is not None
+                else now
+            )
 
         try:
-            positions = self.broker.get_positions()
+            positions = (
+                position_snapshot
+                if position_snapshot is not None
+                else self.broker.get_positions()
+            )
         except Exception as exc:
             logger.warning("position sync failed: %s", exc)
             return False
@@ -3948,13 +3987,36 @@ class AppRunner:
                 ):
                     return False
             before = self._trade_svc.snapshot_tracked_entries()
+            position_snapshot: list[Position] | None = None
+            position_snapshot_error: Exception | None = None
+            position_snapshot_at = time.monotonic()
+            try:
+                position_snapshot = self.broker.get_positions()
+            except Exception as exc:
+                position_snapshot_error = exc
             with self._db_session() as db:
                 completed = self._reconcile_tracked_entries_with_broker(
                     db,
                     source="runtime_position_reconcile",
+                    position_snapshot=position_snapshot,
+                    position_snapshot_error=position_snapshot_error,
                 )
                 if self.risk.paused:
                     self._state_svc.persist(db, self.engine, self.risk)
+            state_changed = False
+            if position_snapshot is not None:
+                state_changed = (
+                    self._sync_engine_state_with_positions_under_submission_guard(
+                        position_snapshot=position_snapshot,
+                        position_snapshot_at=position_snapshot_at,
+                    )
+                )
+            else:
+                # The tracked-position probe already consumed this interval.
+                # Suppress the immediately following engine-sync probe so a
+                # broker timeout cannot double the startup/runtime deadline.
+                with self._state_lock:
+                    self._last_position_sync_at = time.monotonic()
             for symbol, intent in completed:
                 self._complete_reduction(
                     symbol,
@@ -3962,7 +4024,7 @@ class AppRunner:
                     reason=intent.reason,
                 )
             after = self._trade_svc.snapshot_tracked_entries()
-            return before != after or bool(completed)
+            return before != after or bool(completed) or state_changed
 
     def _auto_resume_pause_if_due(self, now: datetime | None = None) -> bool:
         now = now or datetime.now(timezone.utc)
@@ -5176,6 +5238,7 @@ class AppRunner:
         *,
         source: str = "startup_tracked_entry_reconcile",
         position_snapshot: list[Position] | None = None,
+        position_snapshot_error: Exception | None = None,
     ) -> list[tuple[str, _ReductionIntent]]:
         """Repair local cost-basis state from broker truth during startup.
 
@@ -5203,6 +5266,8 @@ class AppRunner:
                 error=exc,
             )
         try:
+            if position_snapshot_error is not None:
+                raise position_snapshot_error
             positions = (
                 position_snapshot
                 if position_snapshot is not None

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
 import logging
 import math
+import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -50,6 +53,9 @@ _RETRYABLE_MESSAGE_MARKERS = (
 )
 
 _BBO_CACHE_MAX_AGE_SECONDS = 30.0
+_POSITION_PROBE_LOCK = threading.Lock()
+_POSITION_PROBE_COMMAND = (sys.executable, "-m", "app.core.position_probe")
+_POSITION_PROBE_MAX_OUTPUT_BYTES = 1_048_576
 
 
 def _is_retryable_message(exc: BaseException) -> bool:
@@ -233,6 +239,240 @@ def _iter_position_items(item: Any) -> list[Any]:
     if any(getattr(item, name, None) is not None for name in position_fields):
         return [item]
     raise ValueError("broker returned an unrecognized position response")
+
+
+def _normalize_position_response(response: Any) -> list[Position]:
+    if response is None:
+        raise RuntimeError("broker returned no position snapshot")
+    positions: list[Position] = []
+    for item in _iter_position_items(response):
+        symbol = str(_get_value(item, "symbol", "") or "").strip()
+        if not symbol:
+            raise ValueError("broker returned a position without symbol")
+        raw = _get_value(item, "quantity", None)
+        raw_available = _get_value(item, "available_quantity", None)
+        if raw is None:
+            if raw_available is None:
+                raise ValueError(
+                    f"broker returned position {symbol} without quantity"
+                )
+            raw = raw_available
+        try:
+            qty = Decimal(str(raw))
+        except (ValueError, TypeError, _DecimalInvalidOp) as exc:
+            raise ValueError(
+                f"broker returned invalid quantity for position {symbol}"
+            ) from exc
+        if not qty.is_finite():
+            raise ValueError(
+                f"broker returned invalid quantity for position {symbol}"
+            )
+        raw_side_value = _get_value(item, "side", None)
+        explicit_side = raw_side_value is not None and bool(
+            str(getattr(raw_side_value, "value", raw_side_value)).strip()
+        )
+        if explicit_side:
+            side_text = str(
+                getattr(raw_side_value, "value", raw_side_value)
+            ).split(".")[-1].strip().upper()
+            if side_text not in {"LONG", "SHORT"}:
+                raise ValueError(
+                    f"broker returned invalid side for position {symbol}"
+                )
+            if qty < 0:
+                raise ValueError(
+                    "broker returned signed quantity together with explicit "
+                    f"side for position {symbol}"
+                )
+            side = side_text
+        else:
+            side = "SHORT" if qty < 0 else "LONG"
+        available_qty = None
+        if raw_available is not None:
+            try:
+                parsed_available = Decimal(str(raw_available))
+            except (ValueError, TypeError, _DecimalInvalidOp) as exc:
+                raise ValueError(
+                    "broker returned invalid available quantity for "
+                    f"position {symbol}"
+                ) from exc
+            if not parsed_available.is_finite():
+                raise ValueError(
+                    "broker returned invalid available quantity for "
+                    f"position {symbol}"
+                )
+            if explicit_side and parsed_available < 0:
+                raise ValueError(
+                    "broker returned signed available quantity together "
+                    f"with explicit side for position {symbol}"
+                )
+            if not explicit_side and (
+                (qty > 0 and parsed_available < 0)
+                or (qty < 0 and parsed_available > 0)
+            ):
+                raise ValueError(
+                    "broker position quantity and available quantity have "
+                    f"conflicting signs for {symbol}"
+                )
+            available_qty = abs(parsed_available)
+        if qty == 0:
+            continue
+        if available_qty is not None and available_qty > abs(qty):
+            raise ValueError(
+                "broker available quantity exceeds total quantity for "
+                f"position {symbol}"
+            )
+
+        raw_avg = None
+        for key in (
+            "cost_price",
+            "avg_price",
+            "average_price",
+            "avg_cost_price",
+        ):
+            val = _get_value(item, key)
+            if val is not None:
+                raw_avg = val
+                break
+        if raw_avg is None:
+            avg_price = Decimal("0")
+        else:
+            try:
+                avg_price = Decimal(str(raw_avg))
+            except (ValueError, TypeError, _DecimalInvalidOp) as exc:
+                raise ValueError(
+                    "broker returned invalid average price for "
+                    f"position {symbol}"
+                ) from exc
+            if not avg_price.is_finite() or avg_price <= 0:
+                raise ValueError(
+                    "broker returned invalid average price for "
+                    f"position {symbol}"
+                )
+        if avg_price <= 0:
+            logger.warning(
+                "position %s side=%s has avg_price=%s (raw=%s), "
+                "pnl calculation may be inaccurate",
+                symbol,
+                side,
+                avg_price,
+                raw_avg,
+            )
+        positions.append(
+            Position(
+                symbol=symbol,
+                side=side,
+                quantity=abs(qty),
+                avg_price=avg_price,
+                available_quantity=available_qty,
+            )
+        )
+    return positions
+
+
+def _position_to_primitive(position: Position) -> dict[str, str | None]:
+    return {
+        "symbol": position.symbol,
+        "side": position.side,
+        "quantity": str(position.quantity),
+        "avg_price": (
+            str(position.avg_price) if position.avg_price > 0 else None
+        ),
+        "available_quantity": (
+            str(position.available_quantity)
+            if position.available_quantity is not None
+            else None
+        ),
+    }
+
+
+def _fetch_position_snapshot_payload_from_env() -> list[dict[str, str | None]]:
+    module = _import_openapi()
+    config = module.Config.from_env()
+    trade_ctx = module.TradeContext(config)
+    try:
+        response = trade_ctx.stock_positions()
+        return [
+            _position_to_primitive(position)
+            for position in _normalize_position_response(response)
+        ]
+    finally:
+        close = getattr(trade_ctx, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception as exc:
+                logger.debug(
+                    "position probe trade context close failed (%s)",
+                    type(exc).__name__,
+                )
+
+
+def _decode_position_probe_output(
+    output: str,
+    *,
+    returncode: int,
+) -> list[Position]:
+    if (
+        not isinstance(output, str)
+        or len(output.encode("utf-8")) > _POSITION_PROBE_MAX_OUTPUT_BYTES
+    ):
+        raise RuntimeError("malformed broker position probe payload")
+    try:
+        payload = json.loads(output)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("malformed broker position probe payload") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("malformed broker position probe payload")
+
+    status = payload.get("status")
+    if status == "error":
+        if set(payload) != {"status", "error_type"} or returncode == 0:
+            raise RuntimeError("malformed broker position probe payload")
+        error_type = payload.get("error_type")
+        if (
+            not isinstance(error_type, str)
+            or not error_type.isidentifier()
+            or len(error_type) > 80
+        ):
+            raise RuntimeError("malformed broker position probe payload")
+        raise RuntimeError(
+            f"isolated broker position snapshot failed ({error_type})"
+        )
+    if (
+        status != "ok"
+        or returncode != 0
+        or set(payload) != {"status", "positions"}
+    ):
+        raise RuntimeError("malformed broker position probe payload")
+
+    raw_positions = payload.get("positions")
+    if not isinstance(raw_positions, list):
+        raise RuntimeError("malformed broker position probe payload")
+    expected_keys = {
+        "symbol",
+        "side",
+        "quantity",
+        "avg_price",
+        "available_quantity",
+    }
+    for item in raw_positions:
+        if not isinstance(item, dict) or set(item) != expected_keys:
+            raise RuntimeError("malformed broker position probe payload")
+        if not all(
+            isinstance(item[key], str)
+            for key in ("symbol", "side", "quantity")
+        ):
+            raise RuntimeError("malformed broker position probe payload")
+        if not all(
+            item[key] is None or isinstance(item[key], str)
+            for key in ("avg_price", "available_quantity")
+        ):
+            raise RuntimeError("malformed broker position probe payload")
+    try:
+        return _normalize_position_response(raw_positions)
+    except (RuntimeError, ValueError) as exc:
+        raise RuntimeError("malformed broker position probe payload") from exc
 
 
 def _iter_order_items(item: Any) -> list[Any]:
@@ -502,6 +742,9 @@ class BrokerGateway:
         self._quote_callbacks: list[Callable[[Quote], None]] = []
         self._disconnect_hooks: list[DisconnectHook] = []
         self._subscribed_symbols: set[str] = set()
+        self._subscription_topics: list[Any] = []
+        self._quote_handler_registered = False
+        self._depth_handler_registered = False
         self._last_trade_by_symbol: dict[str, tuple[float, str]] = {}
         self._bbo_by_symbol: dict[str, tuple[float, float, float]] = {}
 
@@ -553,6 +796,44 @@ class BrokerGateway:
         if time.monotonic() - observed_at > _BBO_CACHE_MAX_AGE_SECONDS:
             return 0.0, 0.0
         return bid, ask
+
+    def _on_quote_push(self, fallback_symbol: str, event: Any) -> None:
+        symbol = str(getattr(event, "symbol", fallback_symbol))
+        last_price = float(getattr(event, "last_done", 0))
+        timestamp = str(getattr(event, "timestamp", ""))
+        with self._lock:
+            if last_price > 0:
+                self._last_trade_by_symbol[symbol] = (last_price, timestamp)
+            else:
+                latest = self._last_trade_by_symbol.get(symbol)
+                if latest is None:
+                    return
+                last_price, timestamp = latest
+            bid, ask = self._cached_bbo(symbol)
+            callbacks = list(self._quote_callbacks)
+        quote = Quote(symbol, last_price, bid, ask, timestamp)
+        for callback in callbacks:
+            try:
+                callback(quote)
+            except Exception:
+                logger.exception("quote callback failed for %s", fallback_symbol)
+
+    def _on_depth_push(self, fallback_symbol: str, event: Any) -> None:
+        symbol = str(getattr(event, "symbol", fallback_symbol))
+        bid, ask = self._bbo_from_depth(event)
+        with self._lock:
+            self._remember_bbo(symbol, bid, ask)
+            latest = self._last_trade_by_symbol.get(symbol)
+            callbacks = list(self._quote_callbacks)
+        if latest is None or bid <= 0 or ask <= 0 or ask < bid:
+            return
+        last_price, timestamp = latest
+        quote = Quote(symbol, last_price, bid, ask, timestamp)
+        for callback in callbacks:
+            try:
+                callback(quote)
+            except Exception:
+                logger.exception("depth callback failed for %s", fallback_symbol)
 
     def _pull_bbo(self, symbol: str) -> tuple[float, float]:
         depth_reader = getattr(self._quote_ctx, "depth", None)
@@ -821,44 +1102,6 @@ class BrokerGateway:
         if not unique_symbols:
             return
 
-        def _on_quote(_symbol: str, _event: Any) -> None:
-            symbol = str(getattr(_event, "symbol", _symbol))
-            last_price = float(getattr(_event, "last_done", 0))
-            timestamp = str(getattr(_event, "timestamp", ""))
-            with self._lock:
-                if last_price > 0:
-                    self._last_trade_by_symbol[symbol] = (last_price, timestamp)
-                else:
-                    latest = self._last_trade_by_symbol.get(symbol)
-                    if latest is None:
-                        return
-                    last_price, timestamp = latest
-                bid, ask = self._cached_bbo(symbol)
-                callbacks = list(self._quote_callbacks)
-            quote = Quote(symbol, last_price, bid, ask, timestamp)
-            for cb in callbacks:
-                try:
-                    cb(quote)
-                except Exception:
-                    logger.exception("quote callback failed for %s", _symbol)
-
-        def _on_depth(_symbol: str, _event: Any) -> None:
-            symbol = str(getattr(_event, "symbol", _symbol))
-            bid, ask = self._bbo_from_depth(_event)
-            with self._lock:
-                self._remember_bbo(symbol, bid, ask)
-                latest = self._last_trade_by_symbol.get(symbol)
-                callbacks = list(self._quote_callbacks)
-            if latest is None or bid <= 0 or ask <= 0 or ask < bid:
-                return
-            last_price, timestamp = latest
-            quote = Quote(symbol, last_price, bid, ask, timestamp)
-            for cb in callbacks:
-                try:
-                    cb(quote)
-                except Exception:
-                    logger.exception("depth callback failed for %s", _symbol)
-
         with self._subscription_lock:
             with self._lock:
                 added_callback = False
@@ -878,14 +1121,28 @@ class BrokerGateway:
                         self._quote_callbacks.remove(callback)
                 raise RuntimeError("quote context is not initialized")
 
-            # The Longbridge SDK may synchronously wait for its callback thread
-            # while registering a handler. Never hold ``self._lock`` here:
-            # both handlers acquire it before reading cached quote state.
             try:
-                quote_ctx.set_on_quote(_on_quote)
-                depth_handler = getattr(quote_ctx, "set_on_depth", None)
-                if callable(depth_handler):
-                    depth_handler(_on_depth)
+                # Longport may synchronously wait for its callback thread while
+                # registering a handler. The callbacks acquire ``self._lock``,
+                # so handler setters must run outside that lock. The
+                # subscription lock keeps registration one-time and prevents a
+                # concurrent close from swapping the context underneath us.
+                if not self._quote_handler_registered:
+                    quote_handler = getattr(quote_ctx, "set_on_quote", None)
+                    if not callable(quote_handler):
+                        raise RuntimeError(
+                            "quote context does not support push callbacks"
+                        )
+                    quote_handler(self._on_quote_push)
+                    with self._lock:
+                        self._quote_handler_registered = True
+                if not self._depth_handler_registered:
+                    depth_handler = getattr(quote_ctx, "set_on_depth", None)
+                    if callable(depth_handler):
+                        depth_handler(self._on_depth_push)
+                        with self._lock:
+                            self._depth_handler_registered = True
+
                 if not missing_symbols:
                     return
 
@@ -898,7 +1155,7 @@ class BrokerGateway:
                     )
                 topics = [SubType.Quote]
                 depth_type = getattr(SubType, "Depth", None)
-                if depth_type is not None and callable(depth_handler):
+                if depth_type is not None and self._depth_handler_registered:
                     topics.append(depth_type)
                 else:
                     logger.warning(
@@ -913,6 +1170,7 @@ class BrokerGateway:
                 raise
             with self._lock:
                 self._subscribed_symbols.update(missing_symbols)
+                self._subscription_topics = list(topics)
 
     def submit_limit_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal) -> OrderResult:
         # NOTE: submit_limit_order 故意不使用 _call_with_retry。
@@ -1132,136 +1390,57 @@ class BrokerGateway:
             )
 
     def get_positions(self) -> list[Position]:
-        def _fetch() -> list[Position]:
-            with self._lock:
-                self._init_clients()
-                response = self._trade_ctx.stock_positions()
-                if response is None:
-                    raise RuntimeError("broker returned no position snapshot")
-                positions: list[Position] = []
-                for item in _iter_position_items(response):
-                    symbol = str(_get_value(item, "symbol", "") or "").strip()
-                    if not symbol:
-                        raise ValueError(
-                            "broker returned a position without symbol"
-                        )
-                    raw = _get_value(item, "quantity", None)
-                    raw_available = _get_value(item, "available_quantity", None)
-                    if raw is None:
-                        if raw_available is None:
-                            raise ValueError(
-                                f"broker returned position {symbol} without quantity"
-                            )
-                        raw = raw_available
-                    try:
-                        qty = Decimal(str(raw))
-                    except (ValueError, TypeError, _DecimalInvalidOp) as exc:
-                        raise ValueError(
-                            f"broker returned invalid quantity for position {symbol}"
-                        ) from exc
-                    if not qty.is_finite():
-                        raise ValueError(
-                            f"broker returned invalid quantity for position {symbol}"
-                        )
-                    raw_side_value = _get_value(item, "side", None)
-                    explicit_side = raw_side_value is not None and bool(
-                        str(getattr(raw_side_value, "value", raw_side_value)).strip()
-                    )
-                    if explicit_side:
-                        side_text = str(
-                            getattr(raw_side_value, "value", raw_side_value)
-                        ).split(".")[-1].strip().upper()
-                        if side_text not in {"LONG", "SHORT"}:
-                            raise ValueError(
-                                f"broker returned invalid side for position {symbol}"
-                            )
-                        if qty < 0:
-                            raise ValueError(
-                                "broker returned signed quantity together with explicit "
-                                f"side for position {symbol}"
-                            )
-                        side = side_text
-                    else:
-                        side = "SHORT" if qty < 0 else "LONG"
-                    available_qty = None
-                    if raw_available is not None:
-                        try:
-                            parsed_available = Decimal(str(raw_available))
-                        except (ValueError, TypeError, _DecimalInvalidOp) as exc:
-                            raise ValueError(
-                                "broker returned invalid available quantity for "
-                                f"position {symbol}"
-                            ) from exc
-                        if not parsed_available.is_finite():
-                            raise ValueError(
-                                "broker returned invalid available quantity for "
-                                f"position {symbol}"
-                            )
-                        if explicit_side and parsed_available < 0:
-                            raise ValueError(
-                                "broker returned signed available quantity together "
-                                f"with explicit side for position {symbol}"
-                            )
-                        if not explicit_side and (
-                            (qty > 0 and parsed_available < 0)
-                            or (qty < 0 and parsed_available > 0)
-                        ):
-                            raise ValueError(
-                                "broker position quantity and available quantity have "
-                                f"conflicting signs for {symbol}"
-                            )
-                        available_qty = abs(parsed_available)
-                    if qty == 0:
-                        continue
-                    if available_qty is not None and available_qty > abs(qty):
-                        raise ValueError(
-                            "broker available quantity exceeds total quantity for "
-                            f"position {symbol}"
-                        )
-
-                    raw_avg = None
-                    for key in ("cost_price", "avg_price", "average_price", "avg_cost_price"):
-                        val = _get_value(item, key)
-                        if val is not None:
-                            raw_avg = val
-                            break
-                    if raw_avg is None:
-                        avg_price = Decimal("0")
-                    else:
-                        try:
-                            avg_price = Decimal(str(raw_avg))
-                        except (ValueError, TypeError, _DecimalInvalidOp) as exc:
-                            raise ValueError(
-                                "broker returned invalid average price for "
-                                f"position {symbol}"
-                            ) from exc
-                        if not avg_price.is_finite() or avg_price <= 0:
-                            raise ValueError(
-                                "broker returned invalid average price for "
-                                f"position {symbol}"
-                            )
-                    if avg_price <= 0:
-                        logger.warning(
-                            "position %s side=%s has avg_price=%s (raw=%s), pnl calculation may be inaccurate",
-                            _get_value(item, "symbol", ""),
-                            side,
-                            avg_price,
-                            raw_avg,
-                        )
-                    positions.append(Position(
-                        symbol=symbol,
-                        side=side,
-                        quantity=abs(qty),
-                        avg_price=avg_price,
-                        available_quantity=available_qty,
-                    ))
-                return positions
+        if settings.broker_position_snapshot_isolation_enabled:
+            return self._get_positions_isolated()
         return self._call_with_retry(
-            _fetch,
+            self._get_positions_direct,
             op="get_positions",
             max_retries=settings.broker_retry_max,
             base_ms=settings.broker_retry_base_ms,
         )
+
+    def _get_positions_direct(self) -> list[Position]:
+        with self._lock:
+            self._init_clients()
+            response = self._trade_ctx.stock_positions()
+            return _normalize_position_response(response)
+
+    def _get_positions_isolated(self) -> list[Position]:
+        timeout_seconds = settings.broker_position_snapshot_timeout_seconds
+        deadline = time.monotonic() + timeout_seconds
+        if not _POSITION_PROBE_LOCK.acquire(timeout=timeout_seconds):
+            raise TimeoutError(
+                "broker position snapshot probe remained busy beyond "
+                f"{timeout_seconds:g}s timeout"
+            )
+        try:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    "broker position snapshot exceeded "
+                    f"{timeout_seconds:g}s timeout"
+                )
+            try:
+                completed = subprocess.run(
+                    _POSITION_PROBE_COMMAND,
+                    check=False,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    timeout=remaining,
+                )
+            except subprocess.TimeoutExpired:
+                raise TimeoutError(
+                    "broker position snapshot exceeded "
+                    f"{timeout_seconds:g}s timeout"
+                ) from None
+            return _decode_position_probe_output(
+                completed.stdout,
+                returncode=completed.returncode,
+            )
+        finally:
+            _POSITION_PROBE_LOCK.release()
 
     def close(self) -> None:
         with self._subscription_lock:
@@ -1269,6 +1448,9 @@ class BrokerGateway:
                 contexts = (self._quote_ctx, self._trade_ctx)
                 self._quote_callbacks.clear()
                 self._subscribed_symbols.clear()
+                self._subscription_topics.clear()
+                self._quote_handler_registered = False
+                self._depth_handler_registered = False
                 self._last_trade_by_symbol.clear()
                 self._bbo_by_symbol.clear()
                 self._quote_ctx = None
@@ -1285,13 +1467,15 @@ class BrokerGateway:
             with self._lock:
                 symbols = sorted(self._subscribed_symbols)
                 quote_ctx = self._quote_ctx
+                topics = list(self._subscription_topics)
                 self._quote_callbacks.clear()
                 self._subscribed_symbols.clear()
+                self._subscription_topics.clear()
                 self._last_trade_by_symbol.clear()
                 self._bbo_by_symbol.clear()
             if symbols and quote_ctx is not None:
                 try:
-                    quote_ctx.unsubscribe(symbols)
+                    quote_ctx.unsubscribe(symbols, topics)
                 except Exception:
                     logger.warning("failed to unsubscribe from %s", ", ".join(symbols))
 

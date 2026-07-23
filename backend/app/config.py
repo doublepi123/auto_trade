@@ -77,6 +77,17 @@ class Settings(BaseSettings):
     broker_retry_max: int = Field(default=3, validation_alias="AUTO_TRADE_BROKER_RETRY_MAX")
     broker_quote_retry_max: int = Field(default=1, validation_alias="AUTO_TRADE_BROKER_QUOTE_RETRY_MAX")
     broker_retry_base_ms: int = Field(default=1000, validation_alias="AUTO_TRADE_BROKER_RETRY_BASE_MS")
+    broker_position_snapshot_isolation_enabled: bool = Field(
+        default=True,
+        validation_alias="AUTO_TRADE_BROKER_POSITION_SNAPSHOT_ISOLATION_ENABLED",
+    )
+    broker_position_snapshot_timeout_seconds: float = Field(
+        default=8.0,
+        ge=1.0,
+        le=60.0,
+        allow_inf_nan=False,
+        validation_alias="AUTO_TRADE_BROKER_POSITION_SNAPSHOT_TIMEOUT_SECONDS",
+    )
 
     deepseek_api_key: str = Field(default="", validation_alias="DEEPSEEK_API_KEY")
     deepseek_api_url: str = "https://api.deepseek.com/v1/chat/completions"
