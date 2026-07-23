@@ -586,6 +586,13 @@ auto_trade/
 | `POST` | `/api/platform/stability` | walk-forward 参数稳定性 |
 | `POST` | `/api/platform/cointegration` | Engle-Granger 协整 + OU 半衰期 |
 | `POST` | `/api/platform/kelly` | Kelly 仓位定尺 |
+| `POST` | `/api/platform/statistics-summary` | 描述统计汇总（均值/波动/偏度/峰度） |
+| `POST` | `/api/platform/momentum-indicators` | MACD/布林带/随机指标/Williams %R/OBV |
+| `POST` | `/api/platform/vol-targeting` | 实现波动率/EWMA 与目标波动杠杆 |
+| `POST` | `/api/platform/sprt` | 二项/正态 Wald 序贯概率比检验 |
+| `POST` | `/api/platform/bocpd` | 贝叶斯在线变点检测 |
+| `POST` | `/api/platform/adaptive-sizing` | 置信度收缩自适应 Kelly 仓位 |
+| `POST` | `/api/platform/cusum` | Page CUSUM 均值漂移检测 |
 | `POST` | `/api/platform/volatility` | EWMA + GARCH(1,1) + Parkinson |
 | `POST` | `/api/platform/microstructure` | VPIN + OFI + Kyle λ |
 | `POST` | `/api/platform/execution-cost` | Almgren-Chriss 最优执行 |

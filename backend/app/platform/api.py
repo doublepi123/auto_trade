@@ -1365,6 +1365,252 @@ def kelly_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Pure-computation statistics, indicators, sizing, and detection endpoints
+# ---------------------------------------------------------------------------
+
+
+@router.post("/statistics-summary", dependencies=[Depends(require_api_key())])
+def statistics_summary_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return descriptive statistics for a non-empty numeric series."""
+    from app.platform.stat_utils import summary_report
+
+    values = payload.get("values")
+    if not isinstance(values, list) or not values:
+        raise HTTPException(status_code=422, detail="values must be a non-empty list")
+    try:
+        report = summary_report([float(value) for value in values])
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return report.to_dict()
+
+
+@router.post("/momentum-indicators", dependencies=[Depends(require_api_key())])
+def momentum_indicators_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return one-shot momentum indicators for the supplied price series."""
+    from app.platform.momentum_indicators import (
+        bollinger,
+        macd,
+        obv,
+        stochastic,
+        williams_r,
+    )
+
+    closes = payload.get("closes")
+    if not isinstance(closes, list) or not closes:
+        raise HTTPException(status_code=422, detail="closes must be a non-empty list")
+    highs = payload.get("highs")
+    lows = payload.get("lows")
+    volumes = payload.get("volumes")
+    if (highs is None) != (lows is None):
+        raise HTTPException(status_code=422, detail="highs and lows must be provided together")
+    if highs is not None and not isinstance(highs, list):
+        raise HTTPException(status_code=422, detail="highs must be a list")
+    if lows is not None and not isinstance(lows, list):
+        raise HTTPException(status_code=422, detail="lows must be a list")
+    if volumes is not None and not isinstance(volumes, list):
+        raise HTTPException(status_code=422, detail="volumes must be a list")
+
+    try:
+        close_values = [float(value) for value in closes]
+        period = int(payload.get("period", 20))
+        macd_value = macd(
+            close_values,
+            fast=int(payload.get("fast", 12)),
+            slow=int(payload.get("slow", 26)),
+            signal=int(payload.get("signal", 9)),
+        )
+        bollinger_value = bollinger(
+            close_values,
+            period=period,
+            nbdev=float(payload.get("nbdev", 2.0)),
+        )
+        out: dict[str, Any] = {
+            "macd": macd_value.to_dict() if macd_value is not None else None,
+            "bollinger": (
+                bollinger_value.to_dict() if bollinger_value is not None else None
+            ),
+            "williams_r": None,
+        }
+        if highs is not None and lows is not None:
+            high_values = [float(value) for value in highs]
+            low_values = [float(value) for value in lows]
+            stochastic_value = stochastic(
+                high_values,
+                low_values,
+                close_values,
+                fastk=int(payload.get("fastk", 14)),
+                slowk=int(payload.get("slowk", 3)),
+                slowd=int(payload.get("slowd", 3)),
+            )
+            out["williams_r"] = williams_r(
+                high_values,
+                low_values,
+                close_values,
+                period=period,
+            )
+            out["stochastic"] = (
+                stochastic_value.to_dict() if stochastic_value is not None else None
+            )
+        if volumes is not None:
+            out["obv"] = obv(
+                close_values,
+                [float(value) for value in volumes],
+            )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return out
+
+
+@router.post("/vol-targeting", dependencies=[Depends(require_api_key())])
+def vol_targeting_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return realized/EWMA volatility and target leverage diagnostics."""
+    from app.platform.vol_targeting import vol_target_report
+
+    returns = payload.get("returns")
+    target_vol = payload.get("target_vol")
+    if not isinstance(returns, list) or not returns:
+        raise HTTPException(status_code=422, detail="returns must be a non-empty list")
+    if target_vol is None:
+        raise HTTPException(status_code=422, detail="target_vol is required")
+    try:
+        report = vol_target_report(
+            [float(value) for value in returns],
+            target_vol=float(target_vol),
+            ann_factor=float(payload.get("ann_factor", 252)),
+            max_leverage=float(payload.get("max_leverage", 1.0)),
+            decay=float(payload.get("decay", 0.94)),
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return dict(report.to_dict())
+
+
+@router.post("/sprt", dependencies=[Depends(require_api_key())])
+def sprt_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """Run a binary or normal Wald sequential probability ratio test."""
+    from app.platform.sprt import binary_sprt, normal_sprt
+
+    mode = payload.get("mode")
+    if mode not in ("binary", "normal"):
+        raise HTTPException(status_code=422, detail="mode must be binary or normal")
+
+    if mode == "binary":
+        outcomes = payload.get("outcomes")
+        required = ("p0", "p1", "alpha", "beta")
+        if not isinstance(outcomes, list) or not outcomes:
+            raise HTTPException(status_code=422, detail="outcomes must be a non-empty list")
+        if any(payload.get(field) is None for field in required):
+            raise HTTPException(
+                status_code=422,
+                detail="binary mode requires outcomes, p0, p1, alpha, and beta",
+            )
+        try:
+            numeric_outcomes = [float(value) for value in outcomes]
+            if any(value not in (0.0, 1.0) for value in numeric_outcomes):
+                raise HTTPException(
+                    status_code=422,
+                    detail="outcomes must contain only 0 or 1",
+                )
+            report = binary_sprt(
+                [int(value) for value in numeric_outcomes],
+                p0=float(payload["p0"]),
+                p1=float(payload["p1"]),
+                alpha=float(payload["alpha"]),
+                beta=float(payload["beta"]),
+            )
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        return dict(report.to_dict())
+
+    values = payload.get("values")
+    required = ("mu0", "mu1", "sigma", "alpha", "beta")
+    if not isinstance(values, list) or not values:
+        raise HTTPException(status_code=422, detail="values must be a non-empty list")
+    if any(payload.get(field) is None for field in required):
+        raise HTTPException(
+            status_code=422,
+            detail="normal mode requires values, mu0, mu1, sigma, alpha, and beta",
+        )
+    try:
+        report = normal_sprt(
+            [float(value) for value in values],
+            mu0=float(payload["mu0"]),
+            mu1=float(payload["mu1"]),
+            sigma=float(payload["sigma"]),
+            alpha=float(payload["alpha"]),
+            beta=float(payload["beta"]),
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return dict(report.to_dict())
+
+
+@router.post("/bocpd", dependencies=[Depends(require_api_key())])
+def bocpd_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """Run Bayesian online changepoint detection over a numeric series."""
+    from app.platform.bocpd import bocpd
+
+    values = payload.get("values")
+    if not isinstance(values, list) or not values:
+        raise HTTPException(status_code=422, detail="values must be a non-empty list")
+    try:
+        report = bocpd(
+            [float(value) for value in values],
+            mu0=float(payload.get("mu0", 0.0)),
+            kappa0=float(payload.get("kappa0", 1.0)),
+            alpha0=float(payload.get("alpha0", 1.0)),
+            beta0=float(payload.get("beta0", 1.0)),
+            lam=float(payload.get("lam", 100.0)),
+            threshold=float(payload.get("threshold", 0.5)),
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return dict(report.to_dict())
+
+
+@router.post("/adaptive-sizing", dependencies=[Depends(require_api_key())])
+def adaptive_sizing_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return confidence-shrunk adaptive Kelly sizing from trade outcomes."""
+    from app.platform.adaptive_sizing import adaptive_kelly
+
+    outcomes = payload.get("outcomes")
+    if not isinstance(outcomes, list) or not outcomes:
+        raise HTTPException(status_code=422, detail="outcomes must be a non-empty list")
+    try:
+        report = adaptive_kelly(
+            [float(value) for value in outcomes],
+            shrinkage_strength=float(payload.get("shrinkage_strength", 30.0)),
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return dict(report.to_dict())
+
+
+@router.post("/cusum", dependencies=[Depends(require_api_key())])
+def cusum_endpoint(payload: dict[str, Any]) -> dict[str, Any]:
+    """Run Page's tabular CUSUM mean-shift detector."""
+    from app.platform.cusum_detection import cusum
+
+    values = payload.get("values")
+    if not isinstance(values, list) or not values:
+        raise HTTPException(status_code=422, detail="values must be a non-empty list")
+    target = payload.get("target")
+    slack = payload.get("slack")
+    threshold = payload.get("threshold")
+    try:
+        report = cusum(
+            [float(value) for value in values],
+            target=float(target) if target is not None else None,
+            slack=float(slack) if slack is not None else None,
+            threshold=float(threshold) if threshold is not None else None,
+            direction=str(payload.get("direction", "both")),
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return dict(report.to_dict())
+
+
+# ---------------------------------------------------------------------------
 # P225 — volatility forecasting endpoint
 # ---------------------------------------------------------------------------
 
