@@ -1069,6 +1069,7 @@ class BrokerGateway:
             if not item_by_symbol and len(items) == len(symbols):
                 item_by_symbol = dict(zip(symbols, items))
             quotes: list[Quote] = []
+            allow_depth_pull = len(symbols) == 1
             for fallback_symbol in symbols:
                 item = item_by_symbol.get(fallback_symbol)
                 if item is None:
@@ -1080,7 +1081,9 @@ class BrokerGateway:
                 bid = float(getattr(item, "bid", 0))
                 ask = float(getattr(item, "ask", 0))
                 if bid <= 0 or ask <= 0:
-                    bid, ask = self._pull_bbo(symbol)
+                    bid, ask = self._cached_bbo(symbol)
+                    if allow_depth_pull and (bid <= 0 or ask <= 0):
+                        bid, ask = self._pull_bbo(symbol)
                 else:
                     self._remember_bbo(symbol, bid, ask)
                 if last_price > 0:

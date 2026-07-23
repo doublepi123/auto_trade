@@ -829,6 +829,118 @@ class TestBrokerGateway:
         assert result.bid == 150.0
         assert result.ask == 150.1
 
+    def test_get_quote_uses_cached_bbo_before_depth(self) -> None:
+        class QuoteItem:
+            symbol = "AAPL.US"
+            last_done = 150.05
+            timestamp = "2026-07-13T17:00:00Z"
+
+        class QuoteContext:
+            def __init__(self) -> None:
+                self.depth_calls = 0
+
+            def quote(self, _symbols):
+                return [QuoteItem()]
+
+            def depth(self, _symbol):
+                self.depth_calls += 1
+                raise AssertionError("fresh push BBO should avoid a depth request")
+
+        quote_ctx = QuoteContext()
+        gw = BrokerGateway()
+        gw._quote_ctx = quote_ctx
+        gw._trade_ctx = object()
+        gw._remember_bbo("AAPL.US", 149.9, 150.1)
+
+        result = gw.get_quote("AAPL.US")
+
+        assert result.bid == 149.9
+        assert result.ask == 150.1
+        assert quote_ctx.depth_calls == 0
+
+    def test_get_quote_pulls_depth_after_cached_bbo_expires(
+        self,
+        monkeypatch,
+    ) -> None:
+        class QuoteItem:
+            symbol = "AAPL.US"
+            last_done = 150.05
+            timestamp = "2026-07-13T17:00:00Z"
+
+        class Level:
+            def __init__(self, price: str) -> None:
+                self.price = price
+
+        class QuoteContext:
+            def __init__(self) -> None:
+                self.depth_calls = 0
+
+            def quote(self, _symbols):
+                return [QuoteItem()]
+
+            def depth(self, _symbol):
+                self.depth_calls += 1
+                return SimpleNamespace(
+                    bids=[Level("150.00")],
+                    asks=[Level("150.10")],
+                )
+
+        monotonic = iter((100.0, 131.0, 131.0))
+        monkeypatch.setattr(
+            broker_module.time,
+            "monotonic",
+            lambda: next(monotonic),
+        )
+        quote_ctx = QuoteContext()
+        gw = BrokerGateway()
+        gw._quote_ctx = quote_ctx
+        gw._trade_ctx = object()
+        gw._remember_bbo("AAPL.US", 149.9, 150.1)
+
+        result = gw.get_quote("AAPL.US")
+
+        assert result.bid == 150.0
+        assert result.ask == 150.1
+        assert quote_ctx.depth_calls == 1
+
+    def test_get_quotes_batch_does_not_pull_missing_depth(self) -> None:
+        class QuoteItem:
+            def __init__(self, symbol: str, price: float) -> None:
+                self.symbol = symbol
+                self.last_done = price
+                self.timestamp = "2026-07-13T17:00:00Z"
+
+        class QuoteContext:
+            def __init__(self) -> None:
+                self.depth_calls = 0
+
+            def quote(self, symbols):
+                return [
+                    QuoteItem(symbol, 150.0 + index)
+                    for index, symbol in enumerate(symbols)
+                ]
+
+            def depth(self, _symbol):
+                self.depth_calls += 1
+                raise AssertionError(
+                    "batch quote refresh must rely on pushed or cached BBO"
+                )
+
+        quote_ctx = QuoteContext()
+        gw = BrokerGateway()
+        gw._quote_ctx = quote_ctx
+        gw._trade_ctx = object()
+
+        results = gw.get_quotes(["AAPL.US", "MSFT.US"])
+
+        assert [result.symbol for result in results] == [
+            "AAPL.US",
+            "MSFT.US",
+        ]
+        assert all(result.bid == 0.0 for result in results)
+        assert all(result.ask == 0.0 for result in results)
+        assert quote_ctx.depth_calls == 0
+
     def test_get_quote_with_dict_response(self) -> None:
         gw = BrokerGateway()
         gw._quote_ctx = object()
