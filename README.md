@@ -712,6 +712,7 @@ auto_trade/
 | `AUTO_TRADE_HARD_MAX_POSITION_QUANTITY` | 单标的最大持仓数量硬上限 | `100` |
 | `AUTO_TRADE_HARD_MAX_POSITION_NOTIONAL` | 单标的最大名义金额硬上限（报价币种） | `5000` |
 | `AUTO_TRADE_HARD_MAX_RISK_PER_TRADE` | 单笔最大价格风险硬上限（报价币种） | `250` |
+| `AUTO_TRADE_FULL_BUYING_POWER_USAGE_ENABLED` | 仅模拟账户使用；按券商最大保证金购买力的 100% 开仓，并绕过数量、名义金额和单笔风险三项定仓上限 | `false` |
 | `AUTO_TRADE_HARD_STOP_LOSS_PCT` | 硬止损百分比上限 | `1.0` |
 | `AUTO_TRADE_HARD_MAX_HOLDING_MINUTES` | 最长持仓分钟数硬上限 | `60` |
 | `AUTO_TRADE_HARD_ENTRY_CUTOFF_MINUTES_BEFORE_CLOSE` | 收盘前停止开仓分钟数下限 | `45` |

@@ -207,6 +207,8 @@ describe('Dashboard', () => {
         trigger_in_flight: false,
         pending_order_symbols: ['AAPL.US'],
         live_safety: {
+          full_buying_power_usage_enabled: false,
+          buying_power_usage_pct: 35,
           short_entries_enabled: false,
           allow_position_addons: false,
           max_position_quantity: 80,
@@ -277,12 +279,74 @@ describe('Dashboard', () => {
     cy.contains('最近推送 3.0s').should('be.visible')
     cy.get('[data-testid="dashboard-live-safety"]')
       .should('contain', '实时安全参数')
+      .and('not.contain', '入场资金')
       .and('contain', '做空开仓')
       .and('contain', '关闭')
       .and('contain', '4000.00')
       .and('contain', '45 分钟')
       .and('contain', '影子')
       .and('contain', '禁下单')
+  })
+
+  it('makes full buying-power sizing unmistakable in diagnostics', () => {
+    cy.intercept('GET', '/api/diagnostics', {
+      body: {
+        runner_running: true,
+        thread_alive: true,
+        quotes_subscribed: true,
+        trigger_in_flight: false,
+        pending_order_symbols: [],
+        pending_order_ids: [],
+        unrepresentable_live_order_issues: [],
+        order_sync_succeeded: true,
+        execution_state: 'IDLE',
+        reduction_reason: '',
+        live_safety: {
+          full_buying_power_usage_enabled: true,
+          buying_power_usage_pct: 100,
+          short_entries_enabled: false,
+          allow_position_addons: false,
+          max_position_quantity: 100,
+          max_position_notional: 5000,
+          max_risk_per_trade: 250,
+          stop_loss_pct: 1,
+          max_holding_minutes: 60,
+          entry_cutoff_minutes_before_close: 45,
+          flatten_minutes_before_close: 15,
+          llm_shadow_mode: true,
+          llm_order_execution_enabled: false,
+        },
+        quote_stream: {
+          last_push_age_seconds: 1,
+          last_quote_age_seconds: 1,
+          recent_quote_count: 20,
+        },
+        risk: {
+          paused: false,
+          kill_switch: false,
+          pause_reason: '',
+          protective_exit_permitted: false,
+          daily_pnl: 0,
+          consecutive_losses: 0,
+        },
+        symbol_runtimes: [],
+      },
+    }).as('getFullBuyingPowerDiagnostics')
+
+    cy.visit('/')
+    cy.wait('@getFullBuyingPowerDiagnostics')
+
+    cy.get('[data-testid="dashboard-live-safety"]')
+      .should('contain', '入场资金')
+      .and('contain', '全部购买力')
+      .and('contain', '100.00%')
+      .and('contain', '由券商购买力决定')
+      .and('contain', '持仓加码')
+      .and('contain', '关闭')
+    cy.get('[data-testid="full-buying-power-mode"]').should('have.class', 'el-tag--danger')
+    cy.get('[data-testid="max-position-quantity-value"]').should('contain.text', '由券商购买力决定')
+    cy.get('[data-testid="max-position-notional-value"]').should('contain.text', '由券商购买力决定')
+    cy.get('[data-testid="max-risk-per-trade-value"]').should('contain.text', '由券商购买力决定')
   })
 
   it('clarifies that control actions apply globally across symbol runtimes', () => {

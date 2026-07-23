@@ -98,6 +98,7 @@ class TestTradeExecutionServiceBasics:
     ) -> None:
         assert svc.allow_position_addons is False
         assert svc.short_entries_enabled is False
+        assert svc.full_buying_power_usage_enabled is False
 
     def test_any_session_mode_blocks_buy_outside_trading_hours(
         self,
@@ -490,6 +491,171 @@ class TestTradeExecutionServiceBasics:
         )
 
         assert qty == 10
+
+    def test_guarded_mode_reproduces_current_nvda_23_share_sizing(
+        self,
+        svc: TradeExecutionService,
+    ) -> None:
+        broker = MagicMock()
+        broker.get_positions.return_value = []
+        broker.estimate_margin_max_quantity.return_value = Decimal("1237")
+        svc.margin_safety_factor = 0.35
+        svc.max_position_quantity = 100
+        svc.max_position_notional = 5000
+        svc.max_risk_per_trade = 250
+        svc.stop_loss_pct = 1.0
+
+        qty = svc._entry_quantity_from_margin_power(
+            broker,
+            "NVDA.US",
+            "BUY",
+            Decimal("209.62"),
+            "USD",
+        )
+
+        assert qty == 23
+
+    def test_full_buying_power_uses_broker_max_and_bypasses_entry_caps(
+        self,
+        svc: TradeExecutionService,
+    ) -> None:
+        broker = MagicMock()
+        broker.get_positions.return_value = []
+        broker.estimate_margin_max_quantity.return_value = Decimal("1237")
+        svc.full_buying_power_usage_enabled = True
+        svc.margin_safety_factor = 0.35
+        svc.max_position_quantity = 100
+        svc.max_position_notional = 5000
+        svc.max_risk_per_trade = 250
+        svc.stop_loss_pct = 1.0
+
+        qty = svc._entry_quantity_from_margin_power(
+            broker,
+            "NVDA.US",
+            "BUY",
+            Decimal("209.62"),
+            "USD",
+        )
+
+        assert qty == 1237
+
+    def test_full_buying_power_still_denies_position_addons(
+        self,
+        svc: TradeExecutionService,
+    ) -> None:
+        from app.core.broker import Position
+
+        broker = MagicMock()
+        broker.get_positions.return_value = [
+            Position("NVDA.US", "LONG", Decimal("23"), Decimal("209.62"))
+        ]
+        broker.estimate_margin_max_quantity.return_value = Decimal("1237")
+        svc.full_buying_power_usage_enabled = True
+        svc.stop_loss_pct = 1.0
+        svc.allow_position_addons = False
+
+        qty = svc._entry_quantity_from_margin_power(
+            broker,
+            "NVDA.US",
+            "BUY",
+            Decimal("209.62"),
+            "USD",
+        )
+
+        assert qty == 0
+        broker.estimate_margin_max_quantity.assert_not_called()
+
+    def test_full_buying_power_still_denies_tracked_position_addons(
+        self,
+        svc: TradeExecutionService,
+    ) -> None:
+        broker = MagicMock()
+        broker.get_positions.return_value = []
+        svc._record_entry_price(
+            "NVDA.US",
+            Decimal("209.62"),
+            Decimal("23"),
+        )
+        svc.full_buying_power_usage_enabled = True
+        svc.stop_loss_pct = 1.0
+        svc.allow_position_addons = False
+
+        qty = svc._entry_quantity_from_margin_power(
+            broker,
+            "NVDA.US",
+            "BUY",
+            Decimal("209.62"),
+            "USD",
+        )
+
+        assert qty == 0
+        broker.estimate_margin_max_quantity.assert_not_called()
+
+    def test_full_buying_power_still_denies_cross_symbol_positions(
+        self,
+        svc: TradeExecutionService,
+    ) -> None:
+        from app.core.broker import Position
+
+        broker = MagicMock()
+        broker.get_positions.return_value = [
+            Position("MSFT.US", "LONG", Decimal("1"), Decimal("500"))
+        ]
+        svc.full_buying_power_usage_enabled = True
+        svc.stop_loss_pct = 1.0
+
+        qty = svc._entry_quantity_from_margin_power(
+            broker,
+            "NVDA.US",
+            "BUY",
+            Decimal("209.62"),
+            "USD",
+        )
+
+        assert qty == 0
+        broker.estimate_margin_max_quantity.assert_not_called()
+
+    def test_full_buying_power_fails_closed_when_position_lookup_fails(
+        self,
+        svc: TradeExecutionService,
+    ) -> None:
+        broker = MagicMock()
+        broker.get_positions.side_effect = RuntimeError(
+            "position API unavailable"
+        )
+        svc.full_buying_power_usage_enabled = True
+        svc.stop_loss_pct = 1.0
+
+        qty = svc._entry_quantity_from_margin_power(
+            broker,
+            "NVDA.US",
+            "BUY",
+            Decimal("209.62"),
+            "USD",
+        )
+
+        assert qty == 0
+        broker.estimate_margin_max_quantity.assert_not_called()
+
+    def test_full_buying_power_requires_stop_loss(
+        self,
+        svc: TradeExecutionService,
+    ) -> None:
+        broker = MagicMock()
+        svc.full_buying_power_usage_enabled = True
+        svc.stop_loss_pct = None
+
+        qty = svc._entry_quantity_from_margin_power(
+            broker,
+            "NVDA.US",
+            "BUY",
+            Decimal("209.62"),
+            "USD",
+        )
+
+        assert qty == 0
+        broker.get_positions.assert_not_called()
+        broker.estimate_margin_max_quantity.assert_not_called()
 
     def test_existing_position_consumes_quantity_and_notional_headroom(
         self,
@@ -1940,7 +2106,7 @@ class TestTradeExecutionServiceBasics:
 
         assert status is not None
         assert status.status == "SKIPPED"
-        assert "risk caps" in status.reason
+        assert "buying-power and position checks" in status.reason
         broker.submit_limit_order.assert_not_called()
 
     def test_execute_sell_still_uses_position_quantity(self, svc: TradeExecutionService, monkeypatch) -> None:

@@ -60,6 +60,7 @@ class TestSettings:
         assert s.hard_max_position_quantity == 100
         assert s.hard_max_position_notional == 5000
         assert s.hard_max_risk_per_trade == 250
+        assert s.full_buying_power_usage_enabled is False
         assert s.hard_stop_loss_pct == 1
         assert s.hard_max_holding_minutes == 60
         assert s.hard_entry_cutoff_minutes_before_close == 45
@@ -107,6 +108,22 @@ class TestSettings:
         assert s.llm_max_stripe_width_pct == 8
         assert s.llm_max_interval_bound_deviation_pct == 5
         assert s.llm_max_order_price_deviation_pct == 1
+
+    def test_full_buying_power_usage_requires_explicit_environment_opt_in(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv(
+            "AUTO_TRADE_FULL_BUYING_POWER_USAGE_ENABLED",
+            "true",
+        )
+
+        settings = Settings()
+
+        assert settings.full_buying_power_usage_enabled is True
+        assert settings.hard_max_position_quantity == 100
+        assert settings.hard_max_position_notional == 5000
+        assert settings.hard_max_risk_per_trade == 250
 
     @pytest.mark.parametrize("value", ["-0.1", "1.1", "nan", "inf"])
     def test_rejects_invalid_llm_min_confidence(

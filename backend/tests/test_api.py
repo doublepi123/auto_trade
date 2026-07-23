@@ -319,6 +319,22 @@ class TestAPI:
         assert data["flatten_minutes_before_close"] == 15
         assert data["llm_order_execution_enabled"] is False
 
+    def test_full_buying_power_mode_is_deployment_only(self) -> None:
+        _clean_strategy()
+
+        response = client.put(
+            "/api/strategy",
+            json={
+                "symbol": "AAPL.US",
+                "market": "US",
+                "buy_low": 100.0,
+                "sell_high": 200.0,
+                "full_buying_power_usage_enabled": True,
+            },
+        )
+
+        assert response.status_code == 422
+
     def test_update_strategy_rejects_short_entries_and_invalid_safety_window(self) -> None:
         _clean_strategy()
         short = client.put("/api/strategy", json={
@@ -1745,6 +1761,7 @@ class TestAPI:
 
     def test_interval_reference_quantity_uses_effective_live_caps(self) -> None:
         trade_service = SimpleNamespace(
+            full_buying_power_usage_enabled=False,
             margin_safety_factor=0.9,
             max_position_quantity=100,
             max_position_notional=5000.0,
@@ -1766,6 +1783,27 @@ class TestAPI:
             current_price=200.0,
             trade_service=trade_service,
         ) == 7.0
+
+    def test_interval_reference_quantity_uses_full_broker_buying_power(
+        self,
+    ) -> None:
+        trade_service = SimpleNamespace(
+            full_buying_power_usage_enabled=True,
+            margin_safety_factor=0.35,
+            max_position_quantity=100,
+            max_position_notional=5000.0,
+            max_risk_per_trade=250.0,
+            stop_loss_pct=1.0,
+        )
+
+        quantity = llm_api._interval_reference_quantity(
+            {"quantity": 0},
+            {"max_buy_quantity": 1237},
+            current_price=209.62,
+            trade_service=trade_service,
+        )
+
+        assert quantity == 1237.0
 
     def test_llm_interval_status_includes_budget_and_symbol_statuses(self, monkeypatch) -> None:
         _clean_strategy()

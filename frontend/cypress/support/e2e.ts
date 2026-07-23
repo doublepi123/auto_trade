@@ -895,6 +895,8 @@ Cypress.Commands.add('stubApi', () => {
       trigger_in_flight: false,
       pending_order_symbols: ['AAPL.US'],
       live_safety: {
+        full_buying_power_usage_enabled: false,
+        buying_power_usage_pct: 90,
         short_entries_enabled: false,
         allow_position_addons: false,
         max_position_quantity: 100,

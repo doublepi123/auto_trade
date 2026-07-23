@@ -152,6 +152,8 @@ function pausedDiagnostics(pauseReason: string) {
     execution_state: 'REDUCING',
     reduction_reason: 'long hard stop reached',
     live_safety: {
+      full_buying_power_usage_enabled: false,
+      buying_power_usage_pct: 90,
       short_entries_enabled: false,
       allow_position_addons: false,
       max_position_quantity: 100,

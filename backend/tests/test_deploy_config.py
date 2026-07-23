@@ -119,6 +119,7 @@ def test_deploy_files_expose_p0_hard_safety_controls() -> None:
         "AUTO_TRADE_HARD_MAX_POSITION_QUANTITY",
         "AUTO_TRADE_HARD_MAX_POSITION_NOTIONAL",
         "AUTO_TRADE_HARD_MAX_RISK_PER_TRADE",
+        "AUTO_TRADE_FULL_BUYING_POWER_USAGE_ENABLED",
         "AUTO_TRADE_HARD_STOP_LOSS_PCT",
         "AUTO_TRADE_HARD_MAX_HOLDING_MINUTES",
         "AUTO_TRADE_HARD_ENTRY_CUTOFF_MINUTES_BEFORE_CLOSE",
@@ -128,6 +129,13 @@ def test_deploy_files_expose_p0_hard_safety_controls() -> None:
         assert f"{key}=" in compose
         assert f"{key}=" in dockerhub
         assert f"{key}=" in env_example
+
+    full_buying_power_default = (
+        "AUTO_TRADE_FULL_BUYING_POWER_USAGE_ENABLED="
+        "${AUTO_TRADE_FULL_BUYING_POWER_USAGE_ENABLED:-false}"
+    )
+    assert full_buying_power_default in compose
+    assert full_buying_power_default in dockerhub
 
     # The backend keeps a false-by-default defence-in-depth flag, but P0
     # schema and migration policy unconditionally disable short entries. Do

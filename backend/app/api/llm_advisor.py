@@ -169,15 +169,24 @@ def _interval_reference_quantity(
     if not math.isfinite(max_buy_quantity) or max_buy_quantity <= 0:
         return 1.0
 
-    factor = getattr(trade_service, "margin_safety_factor", None)
-    if factor is None:
-        factor = 0.9
-    try:
-        candidate = max_buy_quantity * float(factor)
-    except (TypeError, ValueError):
-        candidate = 0.0
+    full_buying_power_usage = bool(
+        getattr(trade_service, "full_buying_power_usage_enabled", False)
+    )
+    if full_buying_power_usage:
+        candidate = max_buy_quantity
+    else:
+        factor = getattr(trade_service, "margin_safety_factor", None)
+        if factor is None:
+            factor = 0.9
+        try:
+            candidate = max_buy_quantity * float(factor)
+        except (TypeError, ValueError):
+            candidate = 0.0
     if not math.isfinite(candidate) or candidate <= 0:
         return 1.0
+
+    if full_buying_power_usage:
+        return max(float(math.floor(candidate)), 1.0)
 
     quantity_cap = getattr(trade_service, "max_position_quantity", None)
     if isinstance(quantity_cap, int) and quantity_cap > 0:

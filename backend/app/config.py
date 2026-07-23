@@ -230,6 +230,16 @@ class Settings(BaseSettings):
         allow_inf_nan=False,
         validation_alias="AUTO_TRADE_HARD_MAX_RISK_PER_TRADE",
     )
+    full_buying_power_usage_enabled: bool = Field(
+        default=False,
+        validation_alias="AUTO_TRADE_FULL_BUYING_POWER_USAGE_ENABLED",
+        description=(
+            "Explicit operator opt-in that sizes new entries at 100% of the "
+            "broker-reported maximum quantity and bypasses the fixed quantity, "
+            "notional, and per-trade-risk sizing caps. Intended for paper "
+            "accounts only; position add-ons and short entries remain disabled."
+        ),
+    )
     hard_stop_loss_pct: float = Field(
         default=1.0,
         gt=0,
@@ -325,6 +335,12 @@ class Settings(BaseSettings):
             self.llm_max_order_price_deviation_pct,
             1.0,
         )
+        if self.full_buying_power_usage_enabled:
+            logger.warning(
+                "FULL BUYING-POWER USAGE ENABLED: entries may consume 100% of "
+                "broker-reported buying power; use this deployment mode only "
+                "with a paper account"
+            )
         self.longbridge_app_key = self.longbridge_app_key or self.longport_app_key or self.legacy_longbridge_app_key
         self.longbridge_app_secret = (
             self.longbridge_app_secret or self.longport_app_secret or self.legacy_longbridge_app_secret

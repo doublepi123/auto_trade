@@ -457,6 +457,18 @@
         <div class="live-safety" data-testid="dashboard-live-safety">
           <h5>实时安全参数</h5>
           <el-descriptions :column="isMobile ? 1 : 3" border size="small">
+            <el-descriptions-item v-if="diagnostics.live_safety.full_buying_power_usage_enabled" label="入场资金">
+              <el-tag
+                type="danger"
+                size="small"
+                data-testid="full-buying-power-mode"
+              >
+                全部购买力
+              </el-tag>
+              <span class="safety-inline-note">
+                {{ formatNumber(diagnostics.live_safety.buying_power_usage_pct) }}%
+              </span>
+            </el-descriptions-item>
             <el-descriptions-item label="做空开仓">
               <el-tag :type="diagnostics.live_safety.short_entries_enabled ? 'danger' : 'success'" size="small">
                 {{ diagnostics.live_safety.short_entries_enabled ? '允许' : '关闭' }}
@@ -476,13 +488,31 @@
               </span>
             </el-descriptions-item>
             <el-descriptions-item label="最大持仓数量">
-              {{ formatNumber(diagnostics.live_safety.max_position_quantity) }}
+              <span data-testid="max-position-quantity-value">
+                {{
+                  diagnostics.live_safety.full_buying_power_usage_enabled
+                    ? '由券商购买力决定'
+                    : formatNumber(diagnostics.live_safety.max_position_quantity)
+                }}
+              </span>
             </el-descriptions-item>
             <el-descriptions-item label="最大持仓市值">
-              ${{ formatNumber(diagnostics.live_safety.max_position_notional) }}
+              <span data-testid="max-position-notional-value">
+                {{
+                  diagnostics.live_safety.full_buying_power_usage_enabled
+                    ? '由券商购买力决定'
+                    : `$${formatNumber(diagnostics.live_safety.max_position_notional)}`
+                }}
+              </span>
             </el-descriptions-item>
             <el-descriptions-item label="单笔最大风险">
-              ${{ formatNumber(diagnostics.live_safety.max_risk_per_trade) }}
+              <span data-testid="max-risk-per-trade-value">
+                {{
+                  diagnostics.live_safety.full_buying_power_usage_enabled
+                    ? '由券商购买力决定'
+                    : `$${formatNumber(diagnostics.live_safety.max_risk_per_trade)}`
+                }}
+              </span>
             </el-descriptions-item>
             <el-descriptions-item label="止损阈值">
               {{ formatNumber(diagnostics.live_safety.stop_loss_pct) }}%

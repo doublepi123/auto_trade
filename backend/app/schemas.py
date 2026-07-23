@@ -998,6 +998,8 @@ class DiagnosticSymbolRuntime(BaseModel):
 
 
 class DiagnosticLiveSafety(BaseModel):
+    full_buying_power_usage_enabled: bool = False
+    buying_power_usage_pct: float = 90.0
     short_entries_enabled: bool
     allow_position_addons: bool
     max_position_quantity: int

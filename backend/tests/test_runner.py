@@ -1,14 +1,15 @@
 # pyright: reportArgumentType=false, reportAttributeAccessIssue=false
 from __future__ import annotations
 
-from typing import Any, Callable, cast
 import asyncio
+import json
 import threading
 import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
+from typing import Any, Callable, cast
 from unittest.mock import patch
 
 import pytest
@@ -1389,6 +1390,10 @@ class TestAppRunner:
         assert diagnostics["risk"]["paused"] is True
         assert diagnostics["risk"]["pause_reason"] == "manual"
         assert diagnostics["live_safety"] == {
+            "full_buying_power_usage_enabled": (
+                runner._trade_svc.full_buying_power_usage_enabled
+            ),
+            "buying_power_usage_pct": 90.0,
             "short_entries_enabled": (
                 runner._trade_svc.short_entries_enabled and runner.engine.params.short_selling
             ),
@@ -2264,6 +2269,79 @@ class TestAppRunner:
         assert live_safety["max_position_notional"] == runner_module.settings.hard_max_position_notional
         assert live_safety["max_risk_per_trade"] == runner_module.settings.hard_max_risk_per_trade
         assert live_safety["stop_loss_pct"] == runner_module.settings.hard_stop_loss_pct
+        assert live_safety["full_buying_power_usage_enabled"] is False
+
+    def test_full_buying_power_mode_is_visible_and_disables_entry_limit_breaches(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            runner_module.settings,
+            "full_buying_power_usage_enabled",
+            True,
+        )
+        runner = AppRunner()
+        config = SimpleNamespace(
+            margin_safety_factor=0.35,
+            allow_position_addons=False,
+            max_position_quantity=100,
+            max_position_notional=5000,
+            max_risk_per_trade=250,
+            stop_loss_pct=1,
+            entry_cutoff_minutes_before_close=45,
+            llm_order_execution_enabled=False,
+        )
+        runner._configure_live_safety(config)
+        runner.engine.params.symbol = "NVDA.US"
+        runner.engine.last_price = Decimal("209.62")
+        runner._trade_svc.load_tracked_entries(
+            {"NVDA.US": (Decimal("1237"), Decimal("259282.94"))}
+        )
+
+        diagnostics = runner.diagnostics()
+
+        assert runner._trade_svc.full_buying_power_usage_enabled is True
+        assert (
+            diagnostics["live_safety"]["full_buying_power_usage_enabled"]
+            is True
+        )
+        assert diagnostics["live_safety"]["buying_power_usage_pct"] == 100.0
+        assert diagnostics["symbol_runtimes"][0]["position_limit_breaches"] == []
+
+    @pytest.mark.parametrize("full_buying_power_usage", [False, True])
+    def test_execution_ledger_distinguishes_sizing_caps_from_stop_loss(
+        self,
+        full_buying_power_usage: bool,
+    ) -> None:
+        runner = AppRunner()
+        runner._trade_svc.full_buying_power_usage_enabled = (
+            full_buying_power_usage
+        )
+
+        context = runner._execution_ledger_context(
+            runner_module._QuoteTriggerDecision(),
+            Quote(
+                "NVDA.US",
+                209.62,
+                209.61,
+                209.63,
+                _fresh_timestamp(),
+            ),
+            "test",
+        )
+        snapshot = json.loads(cast(str, context["config_snapshot"]))
+
+        assert (
+            snapshot["hard_limits"]["sizing_caps_enforced_for_entry"]
+            is not full_buying_power_usage
+        )
+        assert (
+            snapshot["hard_limits"]["stop_loss_required_for_entry"]
+            is True
+        )
+        assert snapshot["buying_power_usage_mode"] == (
+            "FULL_BUYING_POWER" if full_buying_power_usage else "GUARDED"
+        )
 
     def test_execute_llm_order_decision_submits_buy_now(self) -> None:
         class Broker:

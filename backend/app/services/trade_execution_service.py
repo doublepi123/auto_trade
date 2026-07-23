@@ -191,6 +191,7 @@ class TradeExecutionService:
         max_position_notional: float | None = None,
         max_risk_per_trade: float | None = None,
         stop_loss_pct: float | None = None,
+        full_buying_power_usage_enabled: bool = False,
         entry_cutoff_minutes_before_close: int = 0,
         final_order_quote_check: _FinalOrderQuoteCheck | None = None,
     ) -> None:
@@ -215,6 +216,7 @@ class TradeExecutionService:
         self.max_position_notional = max_position_notional
         self.max_risk_per_trade = max_risk_per_trade
         self.stop_loss_pct = stop_loss_pct
+        self.full_buying_power_usage_enabled = full_buying_power_usage_enabled
         self.entry_cutoff_minutes_before_close = entry_cutoff_minutes_before_close
         self._final_order_quote_check = final_order_quote_check
         self._state_lock = RLock()
@@ -867,11 +869,22 @@ class TradeExecutionService:
 
     def _entry_safety_configuration_error(self) -> str | None:
         with self._state_lock:
-            limits = (
-                ("max_position_quantity", self.max_position_quantity),
-                ("max_position_notional", self.max_position_notional),
-                ("max_risk_per_trade", self.max_risk_per_trade),
-                ("stop_loss_pct", self.stop_loss_pct),
+            full_buying_power_usage = self.full_buying_power_usage_enabled
+            max_risk_per_trade = self.max_risk_per_trade
+            stop_loss_pct = self.stop_loss_pct
+            if full_buying_power_usage:
+                limits = (("stop_loss_pct", stop_loss_pct),)
+            else:
+                limits = (
+                    ("max_position_quantity", self.max_position_quantity),
+                    ("max_position_notional", self.max_position_notional),
+                    ("max_risk_per_trade", max_risk_per_trade),
+                    ("stop_loss_pct", stop_loss_pct),
+                )
+        if full_buying_power_usage and stop_loss_pct is None:
+            return (
+                "invalid live safety limit: stop_loss_pct is required in "
+                "full buying-power mode"
             )
         for name, raw_value in limits:
             if raw_value is None:
@@ -882,7 +895,11 @@ class TradeExecutionService:
                 return f"invalid live safety limit: {name} must be finite and greater than zero"
             if not value.is_finite() or value <= 0:
                 return f"invalid live safety limit: {name} must be finite and greater than zero"
-        if self.max_risk_per_trade is not None and self.stop_loss_pct is None:
+        if (
+            not full_buying_power_usage
+            and max_risk_per_trade is not None
+            and stop_loss_pct is None
+        ):
             return "invalid live safety limit: stop_loss_pct is required when max_risk_per_trade is set"
         return None
 
@@ -967,25 +984,47 @@ class TradeExecutionService:
             return 0
 
         max_qty = broker.estimate_margin_max_quantity(symbol, side, price, cash_currency)
-        if safety_factor is not None:
+        full_buying_power_usage = self.full_buying_power_usage_enabled
+        if full_buying_power_usage:
+            factor = Decimal("1")
+        elif safety_factor is not None:
             factor = Decimal(str(safety_factor))
         elif self.margin_safety_factor is not None:
             factor = Decimal(str(self.margin_safety_factor))
         else:
             factor = ENTRY_BUYING_POWER_USAGE
         candidate = max_qty * factor
-        if self.max_position_quantity is not None and self.max_position_quantity > 0:
+        if full_buying_power_usage:
+            logger.warning(
+                "%s: full buying-power sizing enabled for %s; "
+                "broker_max_quantity=%s price=%s",
+                side,
+                symbol,
+                max_qty,
+                price,
+            )
+        if (
+            not full_buying_power_usage
+            and self.max_position_quantity is not None
+            and self.max_position_quantity > 0
+        ):
             remaining_qty = Decimal(self.max_position_quantity) - current_qty
             candidate = min(candidate, max(Decimal("0"), remaining_qty))
 
-        if self.max_position_notional is not None and self.max_position_notional > 0 and price > 0:
+        if (
+            not full_buying_power_usage
+            and self.max_position_notional is not None
+            and self.max_position_notional > 0
+            and price > 0
+        ):
             current_notional = current_qty * price
             remaining_notional = Decimal(str(self.max_position_notional)) - current_notional
             notional_qty = max(Decimal("0"), remaining_notional) / price
             candidate = min(candidate, notional_qty)
 
         if (
-            self.max_risk_per_trade is not None
+            not full_buying_power_usage
+            and self.max_risk_per_trade is not None
             and self.max_risk_per_trade > 0
             and self.stop_loss_pct is not None
             and self.stop_loss_pct > 0
@@ -1003,7 +1042,7 @@ class TradeExecutionService:
         qty = int(candidate)
         if qty <= 0:
             logger.warning(
-                "%s: qty <= 0 after live safety caps, margin_max_qty=%s "
+                "%s: qty <= 0 after live entry sizing, margin_max_qty=%s "
                 "price=%s currency=%s factor=%s current_qty=%s",
                 side,
                 max_qty,
@@ -1176,7 +1215,7 @@ class TradeExecutionService:
             return self._skip_order(
                 symbol,
                 "BUY",
-                "entry quantity is zero after position and risk caps",
+                "entry quantity is zero after buying-power and position checks",
                 skip_category="POSITION",
             )
 
@@ -1380,7 +1419,7 @@ class TradeExecutionService:
             return self._skip_order(
                 symbol,
                 "SELL_SHORT",
-                "entry quantity is zero after position and risk caps",
+                "entry quantity is zero after buying-power and position checks",
                 skip_category="POSITION",
             )
 

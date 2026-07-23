@@ -209,6 +209,9 @@ class AppRunner:
             max_position_notional=settings.hard_max_position_notional,
             max_risk_per_trade=settings.hard_max_risk_per_trade,
             stop_loss_pct=settings.hard_stop_loss_pct,
+            full_buying_power_usage_enabled=(
+                settings.full_buying_power_usage_enabled
+            ),
             entry_cutoff_minutes_before_close=settings.hard_entry_cutoff_minutes_before_close,
             final_order_quote_check=self._validate_final_order_quote,
         )
@@ -626,6 +629,9 @@ class AppRunner:
         return True
 
     def _configure_live_safety(self, config: object) -> None:
+        self._trade_svc.full_buying_power_usage_enabled = (
+            settings.full_buying_power_usage_enabled
+        )
         self._trade_svc.margin_safety_factor = getattr(config, "margin_safety_factor", None)
         self._trade_svc.allow_position_addons = bool(
             getattr(config, "allow_position_addons", False)
@@ -1105,6 +1111,12 @@ class AppRunner:
         max_notional = float(self._trade_svc.max_position_notional or 0)
         max_risk = float(self._trade_svc.max_risk_per_trade or 0)
         stop_loss_pct = float(self._trade_svc.stop_loss_pct or 0)
+        configured_margin_factor = self._trade_svc.margin_safety_factor
+        guarded_buying_power_usage_pct = float(
+            0.9
+            if configured_margin_factor is None
+            else configured_margin_factor
+        ) * 100
 
         def age_since(value: float) -> float | None:
             if value <= 0:
@@ -1122,12 +1134,13 @@ class AppRunner:
             notional = quantity_value * reference_price
             risk_at_stop = float(cost) * stop_loss_pct / 100 if cost > 0 else 0.0
             breaches: list[str] = []
-            if max_quantity > 0 and quantity_value > max_quantity:
-                breaches.append("MAX_POSITION_QUANTITY")
-            if max_notional > 0 and notional > max_notional:
-                breaches.append("MAX_POSITION_NOTIONAL")
-            if max_risk > 0 and risk_at_stop > max_risk:
-                breaches.append("MAX_RISK_PER_TRADE")
+            if not self._trade_svc.full_buying_power_usage_enabled:
+                if max_quantity > 0 and quantity_value > max_quantity:
+                    breaches.append("MAX_POSITION_QUANTITY")
+                if max_notional > 0 and notional > max_notional:
+                    breaches.append("MAX_POSITION_NOTIONAL")
+                if max_risk > 0 and risk_at_stop > max_risk:
+                    breaches.append("MAX_RISK_PER_TRADE")
             return {
                 "position_quantity": quantity_value,
                 "position_avg_price": avg_price,
@@ -1195,6 +1208,14 @@ class AppRunner:
                 "dedup_suppressed_total": self.notifier.dedup_suppressed_total,
                 "dedup_window_seconds": self.notifier.dedup_window_seconds,
                 "live_safety": {
+                    "full_buying_power_usage_enabled": bool(
+                        self._trade_svc.full_buying_power_usage_enabled
+                    ),
+                    "buying_power_usage_pct": (
+                        100.0
+                        if self._trade_svc.full_buying_power_usage_enabled
+                        else guarded_buying_power_usage_pct
+                    ),
                     "short_entries_enabled": bool(
                         self._trade_svc.short_entries_enabled and self.engine.params.short_selling
                     ),
@@ -1878,7 +1899,16 @@ class AppRunner:
                 "max_position_notional": settings.hard_max_position_notional,
                 "max_risk_per_trade": settings.hard_max_risk_per_trade,
                 "stop_loss_pct": settings.hard_stop_loss_pct,
+                "sizing_caps_enforced_for_entry": not (
+                    self._trade_svc.full_buying_power_usage_enabled
+                ),
+                "stop_loss_required_for_entry": True,
             },
+            "buying_power_usage_mode": (
+                "FULL_BUYING_POWER"
+                if self._trade_svc.full_buying_power_usage_enabled
+                else "GUARDED"
+            ),
         }
         snapshot_json = json.dumps(
             snapshot,

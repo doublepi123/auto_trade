@@ -156,6 +156,8 @@ export interface DiagnosticSymbolRuntime {
 }
 
 export interface DiagnosticLiveSafety {
+  full_buying_power_usage_enabled: boolean
+  buying_power_usage_pct: number
   short_entries_enabled: boolean
   allow_position_addons: boolean
   max_position_quantity: number
