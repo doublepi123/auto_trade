@@ -240,6 +240,127 @@ class Settings(BaseSettings):
             "accounts only; position add-ons and short entries remain disabled."
         ),
     )
+    universe_selection_enabled: bool = Field(
+        default=False,
+        validation_alias="AUTO_TRADE_UNIVERSE_SELECTION_ENABLED",
+        description=(
+            "Build a daily, analysis-only candidate pool from completed "
+            "Nasdaq-100 and DJIA component data."
+        ),
+    )
+    universe_selection_apply_to_watchlist: bool = Field(
+        default=False,
+        validation_alias="AUTO_TRADE_UNIVERSE_SELECTION_APPLY_TO_WATCHLIST",
+        description=(
+            "Reconcile selected universe candidates into secondary, read-only "
+            "watchlist runtimes. This never changes the primary trading symbol."
+        ),
+    )
+    universe_selection_enable_shadow: bool = Field(
+        default=False,
+        validation_alias="AUTO_TRADE_UNIVERSE_SELECTION_ENABLE_SHADOW",
+    )
+    universe_selection_interval_minutes: int = Field(
+        default=60,
+        ge=15,
+        le=1_440,
+        validation_alias="AUTO_TRADE_UNIVERSE_SELECTION_INTERVAL_MINUTES",
+    )
+    universe_selection_max_symbols: int = Field(
+        default=8,
+        ge=1,
+        le=20,
+        validation_alias="AUTO_TRADE_UNIVERSE_SELECTION_MAX_SYMBOLS",
+    )
+    universe_selection_max_per_sector: int = Field(
+        default=2,
+        ge=1,
+        le=10,
+        validation_alias="AUTO_TRADE_UNIVERSE_SELECTION_MAX_PER_SECTOR",
+    )
+    universe_selection_min_evaluable_ratio: float = Field(
+        default=0.60,
+        ge=0.25,
+        le=1.0,
+        allow_inf_nan=False,
+        validation_alias="AUTO_TRADE_UNIVERSE_SELECTION_MIN_EVALUABLE_RATIO",
+    )
+    universe_selection_min_residency_days: int = Field(
+        default=2,
+        ge=1,
+        le=30,
+        validation_alias="AUTO_TRADE_UNIVERSE_SELECTION_MIN_RESIDENCY_DAYS",
+    )
+    universe_selection_min_price: float = Field(
+        default=10.0,
+        gt=0,
+        allow_inf_nan=False,
+        validation_alias="AUTO_TRADE_UNIVERSE_SELECTION_MIN_PRICE",
+    )
+    universe_selection_min_avg_dollar_volume: float = Field(
+        default=500_000_000.0,
+        gt=0,
+        allow_inf_nan=False,
+        validation_alias="AUTO_TRADE_UNIVERSE_SELECTION_MIN_AVG_DOLLAR_VOLUME",
+    )
+    universe_selection_max_spread_bps: float = Field(
+        default=15.0,
+        gt=0,
+        le=100,
+        allow_inf_nan=False,
+        validation_alias="AUTO_TRADE_UNIVERSE_SELECTION_MAX_SPREAD_BPS",
+    )
+    universe_selection_min_realized_vol: float = Field(
+        default=0.15,
+        gt=0,
+        le=3,
+        allow_inf_nan=False,
+        validation_alias="AUTO_TRADE_UNIVERSE_SELECTION_MIN_REALIZED_VOL",
+    )
+    universe_selection_max_realized_vol: float = Field(
+        default=1.20,
+        gt=0,
+        le=3,
+        allow_inf_nan=False,
+        validation_alias="AUTO_TRADE_UNIVERSE_SELECTION_MAX_REALIZED_VOL",
+    )
+    universe_selection_min_atr_pct: float = Field(
+        default=0.75,
+        gt=0,
+        le=20,
+        allow_inf_nan=False,
+        validation_alias="AUTO_TRADE_UNIVERSE_SELECTION_MIN_ATR_PCT",
+    )
+    universe_selection_max_atr_pct: float = Field(
+        default=8.0,
+        gt=0,
+        le=20,
+        allow_inf_nan=False,
+        validation_alias="AUTO_TRADE_UNIVERSE_SELECTION_MAX_ATR_PCT",
+    )
+    live_regime_gate_enabled: bool = Field(
+        default=False,
+        validation_alias="AUTO_TRADE_LIVE_REGIME_GATE_ENABLED",
+        description=(
+            "Require a fresh Strategy v2 shadow entry gate before live "
+            "position-increasing orders. Position reductions always bypass it."
+        ),
+    )
+    live_regime_max_data_age_seconds: int = Field(
+        default=600,
+        ge=60,
+        le=3_600,
+        validation_alias="AUTO_TRADE_LIVE_REGIME_MAX_DATA_AGE_SECONDS",
+    )
+    live_max_entries_per_symbol_per_day: int = Field(
+        default=2,
+        ge=0,
+        le=20,
+        validation_alias=(
+            "AUTO_TRADE_LIVE_MAX_ENTRIES_PER_SYMBOL_PER_DAY"
+        ),
+        description="Zero disables the per-symbol exchange-day entry cap.",
+    )
     hard_stop_loss_pct: float = Field(
         default=1.0,
         gt=0,
@@ -324,6 +445,29 @@ class Settings(BaseSettings):
         if self.hard_flatten_minutes_before_close > self.hard_entry_cutoff_minutes_before_close:
             self.hard_entry_cutoff_minutes_before_close = (
                 self.hard_flatten_minutes_before_close
+            )
+        if (
+            self.universe_selection_min_realized_vol
+            >= self.universe_selection_max_realized_vol
+        ):
+            raise ValueError(
+                "universe selection minimum realized volatility must be below "
+                "the maximum"
+            )
+        if (
+            self.universe_selection_min_atr_pct
+            >= self.universe_selection_max_atr_pct
+        ):
+            raise ValueError(
+                "universe selection minimum ATR percentage must be below the "
+                "maximum"
+            )
+        if (
+            self.universe_selection_enable_shadow
+            and not self.universe_selection_apply_to_watchlist
+        ):
+            raise ValueError(
+                "universe selection shadow requires watchlist application"
             )
         self.llm_min_confidence = max(self.llm_min_confidence, 0.7)
         self.llm_max_stripe_width_pct = min(self.llm_max_stripe_width_pct, 8.0)

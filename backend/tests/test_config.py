@@ -16,6 +16,13 @@ class TestSettings:
         s = Settings()
         assert s.env == "dev"
         assert s.database_url == "sqlite:///./data/auto_trade.db"
+        assert s.universe_selection_enabled is False
+        assert s.universe_selection_apply_to_watchlist is False
+        assert s.universe_selection_enable_shadow is False
+        assert s.universe_selection_max_symbols == 8
+        assert s.live_regime_gate_enabled is False
+        assert s.live_regime_max_data_age_seconds == 600
+        assert s.live_max_entries_per_symbol_per_day == 2
 
     def test_default_strategy_empty(self) -> None:
         s = Settings()
@@ -124,6 +131,58 @@ class TestSettings:
         assert settings.hard_max_position_quantity == 100
         assert settings.hard_max_position_notional == 5000
         assert settings.hard_max_risk_per_trade == 250
+
+    def test_universe_and_live_regime_controls_read_environment(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv(
+            "AUTO_TRADE_UNIVERSE_SELECTION_ENABLED",
+            "true",
+        )
+        monkeypatch.setenv(
+            "AUTO_TRADE_UNIVERSE_SELECTION_APPLY_TO_WATCHLIST",
+            "true",
+        )
+        monkeypatch.setenv(
+            "AUTO_TRADE_LIVE_REGIME_GATE_ENABLED",
+            "true",
+        )
+        monkeypatch.setenv(
+            "AUTO_TRADE_LIVE_REGIME_MAX_DATA_AGE_SECONDS",
+            "300",
+        )
+        monkeypatch.setenv(
+            "AUTO_TRADE_LIVE_MAX_ENTRIES_PER_SYMBOL_PER_DAY",
+            "1",
+        )
+
+        configured = Settings()
+
+        assert configured.universe_selection_enabled is True
+        assert configured.universe_selection_apply_to_watchlist is True
+        assert configured.live_regime_gate_enabled is True
+        assert configured.live_regime_max_data_age_seconds == 300
+        assert configured.live_max_entries_per_symbol_per_day == 1
+
+    def test_universe_shadow_requires_watchlist_application(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv(
+            "AUTO_TRADE_UNIVERSE_SELECTION_ENABLE_SHADOW",
+            "true",
+        )
+        monkeypatch.setenv(
+            "AUTO_TRADE_UNIVERSE_SELECTION_APPLY_TO_WATCHLIST",
+            "false",
+        )
+
+        with pytest.raises(
+            ValidationError,
+            match="shadow requires watchlist application",
+        ):
+            Settings()
 
     @pytest.mark.parametrize("value", ["-0.1", "1.1", "nan", "inf"])
     def test_rejects_invalid_llm_min_confidence(

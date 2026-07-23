@@ -16,6 +16,7 @@ from app.core.notify import ServerChanNotifier
 from app.core.risk import RiskConfig, RiskController
 from app.services import trade_execution_service as trade_svc_module
 from app.services.trade_execution_service import (
+    EntryPolicyCheckResult,
     FinalOrderQuoteCheckResult,
     OrderPersistenceError,
     OrderStatus,
@@ -130,6 +131,247 @@ class TestTradeExecutionServiceBasics:
         broker.get_positions.assert_not_called()
         broker.estimate_margin_max_quantity.assert_not_called()
         broker.submit_limit_order.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "policy_result",
+        [None, "", EntryPolicyCheckResult()],
+    )
+    def test_entry_policy_empty_result_allows_entry(
+        self,
+        policy_result: EntryPolicyCheckResult | str | None,
+    ) -> None:
+        entry_policy_check = MagicMock(return_value=policy_result)
+        broker = MagicMock()
+        broker.get_positions.return_value = []
+        broker.estimate_margin_max_quantity.return_value = Decimal("10")
+        broker.submit_limit_order.return_value = OrderResult(
+            "entry-allowed",
+            "NVDA.US",
+            "BUY",
+            Decimal("9"),
+            Decimal("220"),
+            "FILLED",
+        )
+        svc = TradeExecutionService(
+            record_order=lambda *args: None,
+            update_order_status=lambda *args: None,
+            record_risk_event=lambda *args: None,
+            entry_policy_check=entry_policy_check,
+        )
+
+        status = svc.execute(
+            "BUY",
+            "NVDA.US",
+            Quote("NVDA.US", 220, 219.9, 220.1, ""),
+            broker,
+            RiskController(),
+            ServerChanNotifier(""),
+            "USD",
+            market="US",
+        )
+
+        assert status is not None
+        assert status.status == "FILLED"
+        entry_policy_check.assert_called_once_with("NVDA.US", "BUY", "US")
+        broker.submit_limit_order.assert_called_once()
+
+    def test_entry_policy_structured_block_preserves_payload_and_precedes_pending_guard(
+        self,
+    ) -> None:
+        skipped: list[tuple[str, str, str, dict[str, object]]] = []
+        entry_policy_check = MagicMock(
+            return_value=EntryPolicyCheckResult(
+                issue="portfolio exposure limit reached",
+                skip_category="POSITION",
+                details={"policy": "portfolio_limit", "limit": 3},
+            )
+        )
+        broker = MagicMock()
+        engine_snapshot = MagicMock()
+        restore_engine_snapshot = MagicMock()
+        svc = TradeExecutionService(
+            record_order=lambda *args: None,
+            update_order_status=lambda *args: None,
+            record_risk_event=lambda *args: None,
+            record_order_skipped=lambda symbol, action, reason, payload: skipped.append(
+                (symbol, action, reason, payload)
+            ),
+            entry_policy_check=entry_policy_check,
+        )
+        svc.load_pending_orders(
+            [
+                _PendingOrder(
+                    broker=broker,
+                    broker_order_id="existing-live-order",
+                    symbol="AAPL.US",
+                    action="BUY",
+                    quantity=Decimal("1"),
+                    price=Decimal("100"),
+                    engine_snapshot=None,
+                )
+            ]
+        )
+
+        status = svc.execute(
+            "BUY",
+            "NVDA.US",
+            Quote("NVDA.US", 220, 219.9, 220.1, ""),
+            broker,
+            RiskController(),
+            ServerChanNotifier(""),
+            "USD",
+            market="US",
+            engine_snapshot=engine_snapshot,
+            restore_engine_snapshot=restore_engine_snapshot,
+        )
+
+        assert status is not None
+        assert status.status == "SKIPPED"
+        assert status.reason == "portfolio exposure limit reached"
+        assert skipped == [
+            (
+                "NVDA.US",
+                "BUY",
+                "portfolio exposure limit reached",
+                {
+                    "skip_category": "POSITION",
+                    "policy": "portfolio_limit",
+                    "limit": 3,
+                },
+            )
+        ]
+        broker.get_positions.assert_not_called()
+        broker.estimate_margin_max_quantity.assert_not_called()
+        broker.submit_limit_order.assert_not_called()
+        assert engine_snapshot.mock_calls == []
+        restore_engine_snapshot.assert_not_called()
+
+    def test_entry_policy_string_block_defaults_to_risk_category(self) -> None:
+        skipped: list[tuple[str, str, str, dict[str, object]]] = []
+        broker = MagicMock()
+        restore_engine_snapshot = MagicMock()
+        svc = TradeExecutionService(
+            record_order=lambda *args: None,
+            update_order_status=lambda *args: None,
+            record_risk_event=lambda *args: None,
+            record_order_skipped=lambda symbol, action, reason, payload: skipped.append(
+                (symbol, action, reason, payload)
+            ),
+            entry_policy_check=lambda _symbol, _action, _market: (
+                "strategy entry limit reached"
+            ),
+        )
+
+        status = svc.execute(
+            "BUY",
+            "NVDA.US",
+            Quote("NVDA.US", 220, 219.9, 220.1, ""),
+            broker,
+            RiskController(),
+            ServerChanNotifier(""),
+            "USD",
+            engine_snapshot=MagicMock(),
+            restore_engine_snapshot=restore_engine_snapshot,
+        )
+
+        assert status is not None
+        assert status.status == "SKIPPED"
+        assert status.reason == "strategy entry limit reached"
+        assert skipped[0][3] == {"skip_category": "RISK"}
+        broker.get_positions.assert_not_called()
+        broker.submit_limit_order.assert_not_called()
+        restore_engine_snapshot.assert_not_called()
+
+    def test_entry_policy_exception_fails_closed(self) -> None:
+        skipped: list[tuple[str, str, str, dict[str, object]]] = []
+        broker = MagicMock()
+        restore_engine_snapshot = MagicMock()
+
+        def unavailable_policy(
+            _symbol: str,
+            _action: str,
+            _market: str,
+        ) -> EntryPolicyCheckResult | None:
+            raise RuntimeError("policy backend unavailable")
+
+        svc = TradeExecutionService(
+            record_order=lambda *args: None,
+            update_order_status=lambda *args: None,
+            record_risk_event=lambda *args: None,
+            record_order_skipped=lambda symbol, action, reason, payload: skipped.append(
+                (symbol, action, reason, payload)
+            ),
+            entry_policy_check=unavailable_policy,
+        )
+
+        status = svc.execute(
+            "BUY",
+            "NVDA.US",
+            Quote("NVDA.US", 220, 219.9, 220.1, ""),
+            broker,
+            RiskController(),
+            ServerChanNotifier(""),
+            "USD",
+            engine_snapshot=MagicMock(),
+            restore_engine_snapshot=restore_engine_snapshot,
+        )
+
+        assert status is not None
+        assert status.status == "SKIPPED"
+        assert "entry policy check unavailable" in status.reason
+        assert skipped[0][3] == {"skip_category": "RISK"}
+        broker.get_positions.assert_not_called()
+        broker.submit_limit_order.assert_not_called()
+        restore_engine_snapshot.assert_not_called()
+
+    def test_entry_policy_is_bypassed_for_sell_reduction(self) -> None:
+        entry_policy_check = MagicMock(
+            side_effect=AssertionError("entry policy must not run for reductions")
+        )
+        broker = MagicMock()
+        broker.get_positions.return_value = [
+            SimpleNamespace(
+                symbol="NVDA.US",
+                side="LONG",
+                quantity=Decimal("5"),
+                available_quantity=Decimal("5"),
+                avg_price=Decimal("220"),
+            )
+        ]
+        broker.submit_limit_order.return_value = OrderResult(
+            "sell-reduction",
+            "NVDA.US",
+            "SELL",
+            Decimal("5"),
+            Decimal("215"),
+            "FILLED",
+        )
+        svc = TradeExecutionService(
+            record_order=lambda *args: None,
+            update_order_status=lambda *args: None,
+            record_risk_event=lambda *args: None,
+            entry_policy_check=entry_policy_check,
+            final_order_quote_check=lambda _broker, _symbol, _action, price: (
+                FinalOrderQuoteCheckResult(executable_price=price)
+            ),
+        )
+
+        status = svc.execute(
+            "SELL",
+            "NVDA.US",
+            Quote("NVDA.US", 215, 214.9, 215.1, ""),
+            broker,
+            RiskController(),
+            ServerChanNotifier(""),
+            "USD",
+            allow_loss_exit=True,
+            reduce_only=True,
+        )
+
+        assert status is not None
+        assert status.status == "FILLED"
+        entry_policy_check.assert_not_called()
+        broker.submit_limit_order.assert_called_once()
 
     def test_resolved_decimal_positive(self, svc: TradeExecutionService) -> None:
         item = MagicMock()

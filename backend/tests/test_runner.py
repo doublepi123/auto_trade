@@ -1179,6 +1179,78 @@ class TestAppRunner:
             db.delete(order)
             db.commit()
 
+    def test_terminal_update_preserves_first_partial_execution_time(
+        self,
+    ) -> None:
+        from app.database import SessionLocal
+        from app.models import OrderRecord, TradeEvent
+
+        order_id = "partial-cross-day-terminal"
+        first_fill = datetime(
+            2026,
+            7,
+            23,
+            19,
+            tzinfo=timezone.utc,
+        )
+        terminal_update = datetime(
+            2026,
+            7,
+            24,
+            15,
+            tzinfo=timezone.utc,
+        )
+        with SessionLocal() as db:
+            db.query(TradeEvent).filter(
+                TradeEvent.broker_order_id == order_id
+            ).delete(synchronize_session=False)
+            db.query(OrderRecord).filter(
+                OrderRecord.broker_order_id == order_id
+            ).delete(synchronize_session=False)
+            db.add(
+                OrderRecord(
+                    broker_order_id=order_id,
+                    symbol="AAPL.US",
+                    side="BUY",
+                    quantity=10,
+                    price=200,
+                    executed_quantity=3,
+                    executed_price=199.5,
+                    status="PARTIAL_FILLED",
+                    created_at=first_fill - timedelta(minutes=1),
+                    filled_at=first_fill,
+                )
+            )
+            db.commit()
+
+        runner = AppRunner()
+        runner._update_order_status(
+            order_id,
+            "CANCELLED",
+            terminal_update,
+            3,
+            199.5,
+            {"broker_updated_at": terminal_update},
+        )
+
+        with SessionLocal() as db:
+            order = (
+                db.query(OrderRecord)
+                .filter(OrderRecord.broker_order_id == order_id)
+                .one()
+            )
+            assert order.status == "CANCELLED"
+            assert order.executed_quantity == 3
+            assert order.filled_at is not None
+            assert runner._as_utc(order.filled_at) == first_fill
+            assert order.broker_updated_at is not None
+            assert runner._as_utc(order.broker_updated_at) == terminal_update
+            db.query(TradeEvent).filter(
+                TradeEvent.broker_order_id == order_id
+            ).delete(synchronize_session=False)
+            db.delete(order)
+            db.commit()
+
     def test_order_ledger_persists_decision_context_and_slippage(self) -> None:
         from app.database import SessionLocal
         from app.models import OrderRecord, TradeEvent
@@ -1412,6 +1484,15 @@ class TestAppRunner:
             "flatten_minutes_before_close": runner.engine.params.flatten_minutes_before_close,
             "llm_shadow_mode": runner_module.settings.llm_shadow_mode,
             "llm_order_execution_enabled": runner._llm_order_execution_enabled,
+            "live_regime_gate_enabled": (
+                runner_module.settings.live_regime_gate_enabled
+            ),
+            "live_regime_max_data_age_seconds": (
+                runner_module.settings.live_regime_max_data_age_seconds
+            ),
+            "live_max_entries_per_symbol_per_day": (
+                runner_module.settings.live_max_entries_per_symbol_per_day
+            ),
         }
         by_symbol = {item["symbol"]: item for item in diagnostics["symbol_runtimes"]}
         assert by_symbol["NVDA.US"]["is_primary"] is True

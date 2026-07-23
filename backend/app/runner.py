@@ -46,6 +46,7 @@ from app.services.llm_order_policy import evaluate_llm_order_policy
 from app.services.strategy_service import StrategyService
 from app.services.trade_event_service import record_trade_event
 from app.services.trade_execution_service import (
+    EntryPolicyCheckResult,
     FinalOrderQuoteCheckResult,
     ORDER_EXECUTION_BLOCKED_PREFIX,
     ORDER_PERSISTENCE_UNCERTAIN_PREFIX,
@@ -214,6 +215,7 @@ class AppRunner:
             ),
             entry_cutoff_minutes_before_close=settings.hard_entry_cutoff_minutes_before_close,
             final_order_quote_check=self._validate_final_order_quote,
+            entry_policy_check=self._validate_live_entry_policy,
         )
         self._state_svc = RuntimeStateService()
         self._running = False
@@ -1236,6 +1238,15 @@ class AppRunner:
                     ),
                     "llm_shadow_mode": bool(settings.llm_shadow_mode),
                     "llm_order_execution_enabled": bool(self._llm_order_execution_enabled),
+                    "live_regime_gate_enabled": bool(
+                        settings.live_regime_gate_enabled
+                    ),
+                    "live_regime_max_data_age_seconds": int(
+                        settings.live_regime_max_data_age_seconds
+                    ),
+                    "live_max_entries_per_symbol_per_day": int(
+                        settings.live_max_entries_per_symbol_per_day
+                    ),
                 },
                 "quote_stream": {
                     "last_push_age_seconds": age_since(self._last_push_quote_at),
@@ -2646,6 +2657,28 @@ class AppRunner:
         recent = self._recent_quotes[-1] if self._recent_quotes else None
         return self._evaluate_quote_quality(recent)
 
+    def _validate_live_entry_policy(
+        self,
+        symbol: str,
+        action: str,
+        market: str,
+    ) -> EntryPolicyCheckResult | str | None:
+        from app.services.live_entry_policy_service import (
+            LiveEntryPolicyService,
+        )
+
+        with self._db_session() as db:
+            return LiveEntryPolicyService(
+                db,
+                regime_gate_enabled=settings.live_regime_gate_enabled,
+                max_data_age_seconds=(
+                    settings.live_regime_max_data_age_seconds
+                ),
+                max_entries_per_symbol_per_day=(
+                    settings.live_max_entries_per_symbol_per_day
+                ),
+            ).evaluate(symbol, action, market)
+
     def _validate_final_order_quote(
         self,
         broker: BrokerGateway,
@@ -3506,16 +3539,21 @@ class AppRunner:
             if getattr(order, name) != value:
                 setattr(order, name, value)
                 changed = True
-        execution_advanced = incoming_executed_quantity > current_executed_quantity
-        execution_became_terminal = (
-            effective_status in _TERMINAL_ORDER_STATUSES
-            and old_status not in _TERMINAL_ORDER_STATUSES
-        )
-        if filled_at is not None and (
-            order.filled_at is None
-            or execution_advanced
-            or execution_became_terminal
+        local_has_execution = current_executed_quantity > 0
+        incoming_has_execution = incoming_executed_quantity > 0
+        if (
+            filled_at is not None
+            and incoming_has_execution
+            and (
+                order.filled_at is None
+                or not local_has_execution
+                or self._as_utc(filled_at)
+                < self._as_utc(order.filled_at)
+            )
         ):
+            # Preserve the first real execution time across later partial fills
+            # and terminal broker updates. A pre-execution legacy timestamp is
+            # replaceable until the local row has a positive executed quantity.
             order.filled_at = filled_at
             changed = True
         elif effective_status == "FILLED" and order.filled_at is None:
@@ -4768,22 +4806,21 @@ class AppRunner:
                 execution_advanced = float(normalized_executed_quantity or 0) > float(
                     old_executed_quantity or 0
                 )
-                execution_became_terminal = (
-                    effective_status in _TERMINAL_ORDER_STATUSES
-                    and old_status not in _TERMINAL_ORDER_STATUSES
-                )
                 if (
                     filled_at is not None
-                    and (
-                        order.filled_at is None
-                        or execution_advanced
-                        or execution_became_terminal
-                    )
                     and (
                         effective_status == "FILLED"
                         or float(normalized_executed_quantity or 0) > 0
                     )
+                    and (
+                        order.filled_at is None
+                        or self._as_utc(filled_at)
+                        < self._as_utc(order.filled_at)
+                    )
                 ):
+                    # ``filled_at`` is the first execution time. A later
+                    # terminal broker update belongs in ``broker_updated_at``
+                    # and must not move a partial fill into another trade day.
                     order.filled_at = filled_at
                 if normalized_executed_quantity is not None:
                     order.executed_quantity = max(

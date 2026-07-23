@@ -48,6 +48,7 @@ from app.api.strategy import router as strategy_router
 from app.api.strategy_shadow import router as strategy_shadow_router
 from app.api.strategy_experiments import router as strategy_experiments_router
 from app.api.trade import router as trade_router
+from app.api.universe import router as universe_router
 from app.api.watchlist import router as watchlist_router
 from app.api.ws import router as ws_router
 from app.api.ws import manager as ws_manager
@@ -69,6 +70,7 @@ _llm_analysis_lock = asyncio.Lock()
 _report_schedule_lock = asyncio.Lock()
 _alert_rules_lock = asyncio.Lock()
 _strategy_v2_shadow_lock = asyncio.Lock()
+_universe_selection_lock = asyncio.Lock()
 _llm_globals_lock = threading.Lock()
 
 
@@ -706,6 +708,90 @@ async def _strategy_v2_shadow_cron() -> None:
                 logger.exception("Strategy v2 shadow cron failed")
 
 
+def _universe_selection_tick_sync() -> None:
+    """Refresh the candidate pool and its short-horizon suitability scores."""
+    if not settings.universe_selection_enabled:
+        return
+    from app.api.universe import build_universe_selection_service
+    from app.models import WatchlistItem
+    from app.services.watchlist_quant_service import WatchlistQuantService
+
+    db = SessionLocal()
+    try:
+        response = build_universe_selection_service(db).refresh()
+        logger.info(
+            "universe selection run=%d as_of=%s status=%s coverage=%.3f "
+            "selected=%d applied=%s",
+            response.run.id,
+            response.run.as_of_date,
+            response.run.status,
+            response.run.coverage_ratio,
+            response.run.selected_count,
+            response.applied,
+        )
+        if response.applied:
+            # Reconciliation commits before the in-memory runtime reload. Keep
+            # this idempotent so a transient reload failure is retried even
+            # when the next refresh has no watchlist delta.
+            get_runner().reload_strategy()
+        if response.run.status == "COMPLETE":
+            watchlist_items = db.query(WatchlistItem).all()
+            if watchlist_items:
+                try:
+                    WatchlistQuantService(
+                        db,
+                        get_runner().broker,
+                    ).score_items(
+                        watchlist_items,
+                        ttl_minutes=max(
+                            60,
+                            settings.universe_selection_interval_minutes * 2,
+                        ),
+                    )
+                except Exception:
+                    db.rollback()
+                    logger.exception(
+                        "post-selection watchlist quant scoring failed"
+                    )
+    finally:
+        db.close()
+
+
+async def _run_universe_selection_tick() -> None:
+    """Join the worker thread before shutdown so DB writes cannot race stop."""
+    worker = asyncio.create_task(
+        asyncio.to_thread(_universe_selection_tick_sync)
+    )
+    try:
+        await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        try:
+            await worker
+        except Exception:
+            logger.exception(
+                "universe selection failed during shutdown"
+            )
+        raise
+
+
+async def _universe_selection_cron() -> None:
+    """Refresh at a bounded interval; daily run identity makes this idempotent."""
+    if not settings.universe_selection_enabled:
+        return
+    await asyncio.sleep(30)
+    while True:
+        async with _universe_selection_lock:
+            try:
+                await _run_universe_selection_tick()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("universe selection cron failed")
+        await asyncio.sleep(
+            settings.universe_selection_interval_minutes * 60
+        )
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     from app.api.deps import init_audit_logger
@@ -749,39 +835,34 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     else:
         _app.state.platform_runner = None
 
-    cleanup_task = asyncio.create_task(_ws_cleanup_task())
-    llm_task = asyncio.create_task(_llm_analysis_cron())
-    report_task = asyncio.create_task(_report_schedule_cron())
-    alert_task = asyncio.create_task(_alert_rules_cron())
-    llm_storage_task = asyncio.create_task(_llm_storage_maintenance_cron())
-    strategy_v2_shadow_task = asyncio.create_task(_strategy_v2_shadow_cron())
-    yield
-    cleanup_task.cancel()
-    llm_task.cancel()
-    report_task.cancel()
-    alert_task.cancel()
-    llm_storage_task.cancel()
-    strategy_v2_shadow_task.cancel()
-    for task in (
-        cleanup_task,
-        llm_task,
-        report_task,
-        alert_task,
-        llm_storage_task,
-        strategy_v2_shadow_task,
-    ):
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-        except Exception:
-            logger.exception("error during task cleanup")
-    await asyncio.to_thread(get_runner().stop)
+    background_tasks = (
+        asyncio.create_task(_ws_cleanup_task()),
+        asyncio.create_task(_llm_analysis_cron()),
+        asyncio.create_task(_report_schedule_cron()),
+        asyncio.create_task(_alert_rules_cron()),
+        asyncio.create_task(_llm_storage_maintenance_cron()),
+        asyncio.create_task(_strategy_v2_shadow_cron()),
+        asyncio.create_task(_universe_selection_cron()),
+    )
+    try:
+        yield
+    finally:
+        for task in background_tasks:
+            task.cancel()
+        for task in background_tasks:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("error during task cleanup")
+        await asyncio.to_thread(runner.stop)
 
 
 _OPENAPI_TAGS: list[dict[str, str]] = [
     {"name": "strategy", "description": "区间策略配置、状态与历史。"},
     {"name": "strategy-v2-shadow", "description": "Strategy v2 前向影子决策与回放。"},
+    {"name": "universe", "description": "版本化动态候选池与只读观察标的。"},
     {"name": "trade", "description": "订单、账户、事件与交易控制。"},
     {"name": "credentials", "description": "长桥凭据与多渠道通知。"},
     {"name": "llm", "description": "DeepSeek LLM 顾问区间建议。"},
@@ -819,6 +900,7 @@ app.include_router(strategy_shadow_router)
 app.include_router(strategy_experiments_router)
 app.include_router(credentials_router)
 app.include_router(trade_router)
+app.include_router(universe_router)
 app.include_router(watchlist_router)
 app.include_router(llm_advisor_router)
 app.include_router(backtest_router)

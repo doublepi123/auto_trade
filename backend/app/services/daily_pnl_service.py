@@ -132,6 +132,8 @@ class _Fill:
     fee: Decimal | None = None
     fee_source: str = "UNKNOWN"
     actual_fee: Decimal | None = None
+    estimated_fee: Decimal | None = None
+    reported_fee_source: str = "UNKNOWN"
     slippage_amount: float | None = None
     slippage_bps: float | None = None
     ack_latency_ms: float | None = None
@@ -634,7 +636,9 @@ class DailyPnlService:
 
         if authoritative:
             basis_price = exit_fill.cost_basis_price or _ZERO
-            pnl_fee = exit_fill.pnl_fee or _ZERO
+            pnl_fee, pnl_fee_source = DailyPnlService._effective_authoritative_fee(
+                exit_fill
+            )
             assert authoritative_outcome is not None
             gross_pnl, net_pnl = authoritative_outcome
             holding_seconds = (exit_fill.filled_at - first_entry_at).total_seconds()
@@ -653,10 +657,10 @@ class DailyPnlService:
                 net_pnl=float(net_pnl),
                 holding_seconds=holding_seconds,
                 exit_broker_order_id=exit_fill.broker_order_id,
-                fee_source=exit_fill.pnl_fee_source,
+                fee_source=pnl_fee_source,
                 actual_fees=(
                     float(pnl_fee)
-                    if exit_fill.pnl_fee_source == "ACTUAL"
+                    if pnl_fee_source == "ACTUAL"
                     else None
                 ),
                 slippage_amount=exit_fill.slippage_amount,
@@ -791,17 +795,29 @@ class DailyPnlService:
         if filled_at is None:
             return None
 
-        actual_fee_raw = getattr(order, "actual_fee", None)
-        estimated_fee_raw = getattr(order, "estimated_fee", None)
-        actual_fee = (
-            self._decimal(actual_fee_raw) if actual_fee_raw is not None else None
+        actual_fee = self._non_negative_optional_decimal(
+            getattr(order, "actual_fee", None)
         )
-        estimated_fee = (
-            self._decimal(estimated_fee_raw)
-            if estimated_fee_raw is not None
-            else None
+        estimated_fee = self._non_negative_optional_decimal(
+            getattr(order, "estimated_fee", None)
         )
-        fee = actual_fee if actual_fee is not None else estimated_fee
+        submitted_quantity = self._non_negative_optional_decimal(
+            getattr(order, "quantity", None)
+        )
+        if (
+            estimated_fee is not None
+            and submitted_quantity is not None
+            and submitted_quantity > quantity
+        ):
+            estimated_fee *= quantity / submitted_quantity
+        reported_fee_source = str(
+            getattr(order, "fee_source", "UNKNOWN") or "UNKNOWN"
+        ).upper()
+        fee, fee_source = self._select_fill_fee(
+            actual_fee,
+            estimated_fee,
+            reported_fee_source,
+        )
         return _Fill(
             id=int(getattr(order, "id", 0) or 0),
             broker_order_id=str(getattr(order, "broker_order_id", "") or ""),
@@ -811,14 +827,10 @@ class DailyPnlService:
             price=price,
             filled_at=filled_at,
             fee=fee,
-            fee_source=(
-                "ACTUAL"
-                if actual_fee is not None
-                else "ESTIMATED"
-                if estimated_fee is not None
-                else "UNKNOWN"
-            ),
+            fee_source=fee_source,
             actual_fee=actual_fee,
+            estimated_fee=estimated_fee,
+            reported_fee_source=reported_fee_source,
             slippage_amount=getattr(order, "slippage_amount", None),
             slippage_bps=getattr(order, "slippage_bps", None),
             ack_latency_ms=getattr(order, "ack_latency_ms", None),
@@ -929,6 +941,8 @@ class DailyPnlService:
                 "TRACKED_ENTRY",
                 "BROKER_POSITION",
             }:
+                if self._repair_ambiguous_zero_actual_fee(order, trade):
+                    updated += 1
                 continue
             order.gross_pnl = trade.gross_pnl
             order.net_pnl = trade.net_pnl
@@ -1042,15 +1056,76 @@ class DailyPnlService:
             expected_gross = (
                 fill.cost_basis_price - fill.price
             ) * fill.quantity
-        expected_net = expected_gross - fill.pnl_fee
+        persisted_expected_net = expected_gross - fill.pnl_fee
         if not (
             DailyPnlService._same_decimal_sign(fill.gross_pnl, expected_gross)
-            and DailyPnlService._same_decimal_sign(fill.net_pnl, expected_net)
+            and DailyPnlService._same_decimal_sign(
+                fill.net_pnl,
+                persisted_expected_net,
+            )
             and DailyPnlService._decimal_values_close(fill.gross_pnl, expected_gross)
-            and DailyPnlService._decimal_values_close(fill.net_pnl, expected_net)
+            and DailyPnlService._decimal_values_close(
+                fill.net_pnl,
+                persisted_expected_net,
+            )
         ):
             return None
+        effective_fee, _ = DailyPnlService._effective_authoritative_fee(fill)
+        expected_net = expected_gross - effective_fee
         return expected_gross, expected_net
+
+    @staticmethod
+    def _effective_authoritative_fee(fill: _Fill) -> tuple[Decimal, str]:
+        """Return a conservative total fee for a persisted authoritative exit.
+
+        Current tracked-entry accounting stores the estimated entry fee in
+        ``pnl_fee`` and marks the result ``MIXED`` when the broker supplies an
+        exit fee. Paper accounts can report that exit fee as zero. In that
+        precise case the persisted total is missing only the exit-side cost, so
+        add the frozen order estimate (or its stored fee-rate fallback) once
+        and downgrade the effective source to ``ESTIMATED``.
+        """
+        pnl_fee = fill.pnl_fee or _ZERO
+        if (
+            fill.pnl_fee_source == "MIXED"
+            and fill.actual_fee == _ZERO
+            and fill.reported_fee_source == "ACTUAL"
+        ):
+            exit_fee = (
+                fill.estimated_fee
+                if fill.estimated_fee is not None
+                and fill.estimated_fee > _ZERO
+                else fill.price * fill.quantity * (fill.pnl_fee_rate or _ZERO)
+            )
+            if exit_fee > _ZERO:
+                return pnl_fee + exit_fee, "ESTIMATED"
+        return pnl_fee, fill.pnl_fee_source
+
+    @staticmethod
+    def _repair_ambiguous_zero_actual_fee(
+        order: Any,
+        trade: ClosedRoundTrip,
+    ) -> bool:
+        """Persist the read-time fallback without charging it again later."""
+        actual_fee = DailyPnlService._non_negative_optional_decimal(
+            getattr(order, "actual_fee", None)
+        )
+        pnl_fee = DailyPnlService._non_negative_optional_decimal(
+            getattr(order, "pnl_fee", None)
+        )
+        if not (
+            actual_fee == _ZERO
+            and pnl_fee is not None
+            and str(getattr(order, "fee_source", "") or "").upper() == "ACTUAL"
+            and str(getattr(order, "pnl_fee_source", "") or "").upper() == "MIXED"
+            and trade.fee_source == "ESTIMATED"
+            and Decimal(str(trade.est_fees)) > pnl_fee
+        ):
+            return False
+        order.pnl_fee = trade.est_fees
+        order.pnl_fee_source = "ESTIMATED"
+        order.net_pnl = trade.net_pnl
+        return True
 
     @staticmethod
     def _same_decimal_sign(left: Decimal, right: Decimal) -> bool:
@@ -1292,6 +1367,36 @@ class DailyPnlService:
         except Exception:
             return None
         return candidate if candidate.is_finite() else None
+
+    @staticmethod
+    def _non_negative_optional_decimal(value: Any) -> Decimal | None:
+        candidate = DailyPnlService._optional_decimal(value)
+        if candidate is None or candidate < _ZERO:
+            return None
+        return candidate
+
+    @staticmethod
+    def _select_fill_fee(
+        actual_fee: Decimal | None,
+        estimated_fee: Decimal | None,
+        reported_fee_source: str,
+    ) -> tuple[Decimal | None, str]:
+        """Choose one persisted fee without letting an ambiguous zero hide cost."""
+        if actual_fee is not None and actual_fee > _ZERO:
+            return actual_fee, "ACTUAL"
+        if estimated_fee is not None and estimated_fee > _ZERO:
+            return estimated_fee, "ESTIMATED"
+        if actual_fee == _ZERO and reported_fee_source == "ACTUAL":
+            # Broker-synced paper fills commonly expose a placeholder zero.
+            # Returning no persisted fee lets the caller use its configured
+            # market fee schedule instead of silently treating that zero as
+            # free execution.
+            return None, "UNKNOWN"
+        if actual_fee is not None:
+            return actual_fee, "ACTUAL"
+        if estimated_fee is not None:
+            return estimated_fee, "ESTIMATED"
+        return None, "UNKNOWN"
 
     @staticmethod
     def _coerce_datetime(value: Any) -> datetime | None:

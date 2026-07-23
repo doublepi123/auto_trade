@@ -71,7 +71,8 @@ export function skipCategoryLabel(category?: string | null): string {
   switch (category) {
     case 'FEE': return '成本不足'
     case 'REPRICING': return '改价不显著'
-    case 'COOLDOWN': return 'LLM 冷却中'
+    case 'COOLDOWN': return '冷却或频次限制'
+    case 'REGIME': return '市场状态阻断'
     case 'RISK': return '风控阻断'
     case 'DRAWDOWN': return '回撤限制'
     case 'PENDING': return '已有挂单'

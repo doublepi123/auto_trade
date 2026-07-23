@@ -14,7 +14,12 @@ class WatchlistService:
     def get_item(self, item_id: int) -> WatchlistItem | None:
         return self.db.query(WatchlistItem).filter(WatchlistItem.id == item_id).first()
 
-    def add_item(self, data: WatchlistItemSchema) -> WatchlistItem:
+    def add_item(
+        self,
+        data: WatchlistItemSchema,
+        *,
+        source: str = "manual",
+    ) -> WatchlistItem:
         existing = self.db.query(WatchlistItem).filter(WatchlistItem.symbol == data.symbol).first()
         if existing:
             raise ValueError(f"Symbol {data.symbol} already in watchlist")
@@ -22,6 +27,7 @@ class WatchlistService:
             symbol=data.symbol,
             market=data.market,
             alias=data.alias,
+            source=(source or "manual")[:32],
         )
         self.db.add(item)
         self.db.commit()

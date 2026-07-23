@@ -107,6 +107,32 @@ class TestWatchlistScoreService:
         aapl_latest = next(row for row in latest if row.symbol == "AAPL.US")
         assert aapl_latest.score == 80.0
 
+    def test_quant_score_remains_primary_after_ai_review(
+        self,
+        db_session,
+    ) -> None:
+        svc = WatchlistScoreService(db_session)
+        quant = svc.record_score(
+            symbol="AAPL.US",
+            market="US",
+            score=56,
+            recommended_action="CANDIDATE",
+            source="quant_v1",
+        )
+        review = svc.record_score(
+            symbol="AAPL.US",
+            market="US",
+            score=88,
+            recommended_action="BUY",
+            source="llm",
+        )
+
+        primary = svc.list_latest_per_symbol()
+        by_family = svc.list_latest_per_symbol_and_family()
+
+        assert primary == [quant]
+        assert {row.id for row in by_family} == {quant.id, review.id}
+
     def test_freshness_check(self, db_session) -> None:
         svc = WatchlistScoreService(db_session)
         fresh = svc.record_score(symbol="AAPL.US", market="US", score=50.0, ttl_minutes=10)
@@ -115,6 +141,32 @@ class TestWatchlistScoreService:
         fresh.expires_at = datetime.now(timezone.utc) - timedelta(minutes=1)
         db_session.commit()
         assert not svc.is_fresh(fresh)
+
+    def test_prune_history_removes_only_expired_retention_window(
+        self,
+        db_session,
+    ) -> None:
+        svc = WatchlistScoreService(db_session)
+        old = svc.record_score(
+            symbol="AAPL.US",
+            market="US",
+            score=40,
+        )
+        old.created_at = datetime.now(timezone.utc) - timedelta(days=31)
+        db_session.commit()
+        recent = svc.record_score(
+            symbol="MSFT.US",
+            market="US",
+            score=60,
+        )
+        old_id = old.id
+        recent_id = recent.id
+
+        deleted = svc.prune_history(retention_days=30)
+
+        assert deleted == 1
+        assert db_session.get(WatchlistScore, old_id) is None
+        assert db_session.get(WatchlistScore, recent_id) is not None
 
     def test_fallback_when_llm_unconfigured(self, db_session, monkeypatch) -> None:
         """With no DEEPSEEK_API_KEY the service must return a deterministic
@@ -178,6 +230,62 @@ class TestWatchlistScoreService:
         assert row.recommended_action == "BUY"
         assert row.rationale == "Investor's setup"
 
+    def test_minimax_provider_does_not_require_deepseek_key(
+        self,
+        db_session,
+        monkeypatch,
+    ) -> None:
+        from types import SimpleNamespace
+
+        from app.services import llm_advisor_service
+        from app.services.llm_advisor_service import (
+            LLMAdvisorService,
+            LLMProviderResponse,
+            LLMTokenUsage,
+        )
+
+        configured = SimpleNamespace(
+            llm_provider="minimax",
+            minimax_api_key="configured",
+            deepseek_api_key="",
+        )
+        monkeypatch.setattr("app.config.settings", configured)
+        monkeypatch.setattr(llm_advisor_service, "settings", configured)
+
+        def fake_call(
+            _advisor: LLMAdvisorService,
+            _prompt: str,
+        ) -> LLMProviderResponse:
+            return LLMProviderResponse(
+                content=json.dumps(
+                    {
+                        "score": 82,
+                        "confidence": 0.88,
+                        "recommended_action": "BUY",
+                        "rationale": "MiniMax provider result",
+                    }
+                ),
+                usage=LLMTokenUsage(
+                    prompt_tokens=10,
+                    completion_tokens=6,
+                    total_tokens=16,
+                ),
+            )
+
+        monkeypatch.setattr(LLMAdvisorService, "_call_minimax", fake_call)
+
+        row = WatchlistScoreService(
+            db_session
+        ).score_from_llm_or_fallback(
+            symbol="AAPL.US",
+            market="US",
+            ttl_minutes=5,
+        )
+
+        assert row.source == "llm"
+        assert row.score == 82
+        assert row.rationale == "MiniMax provider result"
+
 
 class TestWatchlistScoreAPI:
     def test_post_score_endpoint_returns_fallback(self, client: TestClient, monkeypatch) -> None:
@@ -198,8 +306,11 @@ class TestWatchlistScoreAPI:
         assert data["source"].startswith("fallback_")
         assert data["score"] == DEFAULT_SCORE
 
-    def test_get_scores_lists_latest_per_symbol(self, client: TestClient) -> None:
-        # Seed two scores for the same symbol + one for another
+    def test_get_scores_keeps_reviews_out_of_quant_results(
+        self,
+        client: TestClient,
+    ) -> None:
+        # Seed two reviews for the same symbol + one for another.
         client.post("/api/watchlist/score", json={"symbol": "AAPL.US", "market": "US"})
         client.post("/api/watchlist/score", json={"symbol": "AAPL.US", "market": "US"})
         client.post("/api/watchlist/score", json={"symbol": "MSFT.US", "market": "US"})
@@ -207,11 +318,11 @@ class TestWatchlistScoreAPI:
         resp = client.get("/api/watchlist/scores")
         assert resp.status_code == 200
         body = resp.json()
-        scores = body["scores"]
-        symbols = {row["symbol"] for row in scores}
+        assert body["scores"] == []
+        reviews = body["reviews"]
+        symbols = {row["symbol"] for row in reviews}
         assert {"AAPL.US", "MSFT.US"}.issubset(symbols)
-        # AAPL appears exactly once (latest per symbol)
-        assert sum(1 for row in scores if row["symbol"] == "AAPL.US") == 1
+        assert sum(1 for row in reviews if row["symbol"] == "AAPL.US") == 1
 
     def test_post_score_rejects_bad_market(self, client: TestClient) -> None:
         resp = client.post(

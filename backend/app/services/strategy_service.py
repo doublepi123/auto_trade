@@ -8,7 +8,7 @@ from typing import Any
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.models import RuntimeState, StrategyConfig
+from app.models import RuntimeState, StrategyConfig, WatchlistItem
 
 logger = logging.getLogger("auto_trade.strategy_service")
 
@@ -91,6 +91,19 @@ class StrategyService:
             if field in data:
                 setattr(config, field, data[field])
 
+        if "symbol" in data or "market" in data:
+            normalized_symbol = str(config.symbol or "").strip().upper()
+            self.db.query(WatchlistItem).update(
+                {WatchlistItem.is_active: False},
+                synchronize_session=False,
+            )
+            if normalized_symbol:
+                self.db.query(WatchlistItem).filter(
+                    WatchlistItem.symbol == normalized_symbol,
+                ).update(
+                    {WatchlistItem.is_active: True},
+                    synchronize_session=False,
+                )
         config.updated_at = datetime.now(timezone.utc)
         self.db.add(config)
         self.db.commit()

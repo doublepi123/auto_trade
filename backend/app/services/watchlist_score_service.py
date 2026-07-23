@@ -5,6 +5,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from app.models import WatchlistScore
@@ -16,6 +17,7 @@ logger = logging.getLogger("auto_trade.watchlist_score_service")
 DEFAULT_SCORE = 50.0
 DEFAULT_CONFIDENCE = 0.0
 DEFAULT_ACTION = "HOLD"
+DEFAULT_RETENTION_DAYS = 30
 
 # Loose JSON object match — the LLM is asked to return {"score": N, ...}
 # but we never trust the raw text; we extract defensively.
@@ -103,27 +105,56 @@ class WatchlistScoreService:
             .first()
         )
 
-    def list_latest_per_symbol(self, now: Optional[datetime] = None) -> list[WatchlistScore]:
-        """Return one (most-recent) row per symbol. No aggregate queries.
+    @staticmethod
+    def source_family(source: str) -> str:
+        return "quant" if source.startswith("quant_") else "review"
 
-        SQLite lacks DISTINCT ON; we fetch the per-symbol max ``created_at``
-        first and then look up the rows. ``n_symbols`` is small in practice
-        (watchlist ≪ 100), so a two-step query is fine.
-        """
-        now = now or _utcnow()
-        latest = (
+    def list_latest_per_symbol_and_family(
+        self,
+    ) -> list[WatchlistScore]:
+        """Return the newest quant and review row independently per symbol."""
+        family = case(
+            (
+                WatchlistScore.source.like("quant_%"),
+                "quant",
+            ),
+            else_="review",
+        )
+        ranked = select(
+            WatchlistScore.id.label("score_id"),
+            func.row_number().over(
+                partition_by=(WatchlistScore.symbol, family),
+                order_by=(
+                    WatchlistScore.created_at.desc(),
+                    WatchlistScore.id.desc(),
+                ),
+            ).label("family_rank"),
+        ).subquery()
+        return (
             self.db.query(WatchlistScore)
-            .order_by(WatchlistScore.created_at.desc())
+            .join(ranked, ranked.c.score_id == WatchlistScore.id)
+            .filter(ranked.c.family_rank == 1)
+            .order_by(
+                WatchlistScore.symbol.asc(),
+                WatchlistScore.created_at.desc(),
+            )
             .all()
         )
-        seen: set[str] = set()
-        unique: list[WatchlistScore] = []
-        for row in latest:
-            if row.symbol in seen:
-                continue
-            seen.add(row.symbol)
-            unique.append(row)
-        return unique
+
+    def list_latest_per_symbol(self, now: Optional[datetime] = None) -> list[WatchlistScore]:
+        """Return one primary row per symbol, preferring quant selection.
+
+        AI review is supplementary evidence and must not overwrite the
+        deterministic quant candidate tier. Symbols without a quant score
+        retain the newest review for backwards compatibility.
+        """
+        del now
+        by_symbol: dict[str, WatchlistScore] = {}
+        for row in self.list_latest_per_symbol_and_family():
+            existing = by_symbol.get(row.symbol)
+            if existing is None or self.source_family(row.source) == "quant":
+                by_symbol[row.symbol] = row
+        return list(by_symbol.values())
 
     def record_score(
         self,
@@ -136,6 +167,7 @@ class WatchlistScoreService:
         recommended_action: str = DEFAULT_ACTION,
         source: str = "llm",
         ttl_minutes: int = 60,
+        commit: bool = True,
     ) -> WatchlistScore:
         now = _utcnow()
         expires = now + timedelta(minutes=max(1, int(ttl_minutes)))
@@ -151,9 +183,29 @@ class WatchlistScoreService:
             expires_at=expires,
         )
         self.db.add(row)
-        self.db.commit()
-        self.db.refresh(row)
+        if commit:
+            self.db.commit()
+            self.db.refresh(row)
         return row
+
+    def prune_history(
+        self,
+        *,
+        retention_days: int = DEFAULT_RETENTION_DAYS,
+        now: datetime | None = None,
+        commit: bool = True,
+    ) -> int:
+        if retention_days < 1:
+            raise ValueError("retention_days must be positive")
+        cutoff = (now or _utcnow()) - timedelta(days=retention_days)
+        deleted = (
+            self.db.query(WatchlistScore)
+            .filter(WatchlistScore.created_at < cutoff)
+            .delete(synchronize_session=False)
+        )
+        if commit:
+            self.db.commit()
+        return int(deleted)
 
     def is_fresh(self, row: WatchlistScore, now: Optional[datetime] = None) -> bool:
         return not _is_stale(row, now or _utcnow())
@@ -176,7 +228,15 @@ class WatchlistScoreService:
 
             from app.services.llm_advisor_service import LLMAdvisorService
 
-            if not getattr(settings, "deepseek_api_key", None):
+            provider = str(
+                getattr(settings, "llm_provider", "deepseek")
+            ).lower()
+            configured_key = (
+                getattr(settings, "minimax_api_key", "")
+                if provider == "minimax"
+                else getattr(settings, "deepseek_api_key", "")
+            )
+            if not configured_key:
                 return self.record_score(
                     symbol=symbol,
                     market=market,
@@ -197,7 +257,7 @@ class WatchlistScoreService:
                 "recommended_action (one of BUY/SELL/HOLD/AVOID), rationale "
                 "(one short sentence)."
             )
-            raw = advisor._call_deepseek(prompt).content
+            raw = advisor._call_llm(prompt).content
             if not raw:
                 return self.record_score(
                     symbol=symbol,

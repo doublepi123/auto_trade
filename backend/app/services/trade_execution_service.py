@@ -5,7 +5,7 @@ import inspect
 import time
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass, replace as dataclass_replace
+from dataclasses import dataclass, field, replace as dataclass_replace
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from threading import RLock
@@ -113,6 +113,15 @@ class FinalOrderQuoteCheckResult:
 
 
 @dataclass(frozen=True)
+class EntryPolicyCheckResult:
+    """Entry policy decision evaluated before broker-dependent safety checks."""
+
+    issue: str = ""
+    skip_category: str = "RISK"
+    details: Mapping[str, object] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class _PendingOrder:
     broker: BrokerGateway
     broker_order_id: str
@@ -171,6 +180,10 @@ _FinalOrderQuoteCheck = Callable[
     ["BrokerGateway", str, str, Decimal],
     FinalOrderQuoteCheckResult | str | None,
 ]
+EntryPolicyCheck = Callable[
+    [str, str, str],
+    EntryPolicyCheckResult | str | None,
+]
 
 
 class TradeExecutionService:
@@ -194,6 +207,7 @@ class TradeExecutionService:
         full_buying_power_usage_enabled: bool = False,
         entry_cutoff_minutes_before_close: int = 0,
         final_order_quote_check: _FinalOrderQuoteCheck | None = None,
+        entry_policy_check: EntryPolicyCheck | None = None,
     ) -> None:
         self._record_order = record_order
         self._update_order_status = update_order_status
@@ -219,6 +233,7 @@ class TradeExecutionService:
         self.full_buying_power_usage_enabled = full_buying_power_usage_enabled
         self.entry_cutoff_minutes_before_close = entry_cutoff_minutes_before_close
         self._final_order_quote_check = final_order_quote_check
+        self._entry_policy_check = entry_policy_check
         self._state_lock = RLock()
         self._submission_lock = RLock()
         self._pending_orders: dict[str, _PendingOrder] = {}
@@ -781,6 +796,40 @@ class TradeExecutionService:
             logger.info("allowing position-reducing %s despite risk rejection: %s", action, risk_result.reason)
 
         if action in _ENTRY_ACTIONS:
+            if self._entry_policy_check is not None:
+                try:
+                    policy_result = self._entry_policy_check(symbol, action, market)
+                except Exception:
+                    logger.exception(
+                        "entry policy check unavailable for %s %s",
+                        action,
+                        symbol,
+                    )
+                    return self._skip_order(
+                        symbol,
+                        action,
+                        "entry policy check unavailable; entry denied",
+                        skip_category="RISK",
+                    )
+                if isinstance(policy_result, str):
+                    if policy_result:
+                        return self._skip_order(
+                            symbol,
+                            action,
+                            policy_result,
+                            skip_category="RISK",
+                        )
+                elif policy_result is not None and policy_result.issue:
+                    policy_details = dict(policy_result.details)
+                    policy_details.pop("skip_category", None)
+                    return self._skip_order(
+                        symbol,
+                        action,
+                        policy_result.issue,
+                        skip_category=policy_result.skip_category,
+                        **policy_details,
+                    )
+
             unresolved_order_ids = self.pending_order_ids()
             if unresolved_order_ids:
                 return self._skip_order(

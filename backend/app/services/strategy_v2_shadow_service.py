@@ -341,6 +341,7 @@ class StrategyV2ShadowService:
         payload: StrategyV2ShadowConfigUpdate,
         *,
         symbol: str | None = None,
+        preserve_universe_management: bool = False,
     ) -> StrategyV2ShadowConfigResponse:
         row = self._get_or_create_config(symbol)
         self._ensure_version_snapshot(row)
@@ -351,6 +352,17 @@ class StrategyV2ShadowService:
             raise ValueError("strategy v2 shadow config cannot change while a virtual trade is open")
         if not updates:
             return self._config_response(row)
+        ownership_changed = False
+        if (
+            "enabled" in updates
+            and not preserve_universe_management
+            and row.universe_managed
+        ):
+            # An explicit operator toggle takes ownership away from the
+            # universe reconciler. In particular, a manual disable must not
+            # be undone by the next selection refresh.
+            row.universe_managed = False
+            ownership_changed = True
 
         merged = self._config_values(row)
         merged.update(updates)
@@ -359,7 +371,10 @@ class StrategyV2ShadowService:
             self._validate_minimum_net_edge(validated.model_dump())
 
         was_enabled = row.enabled
-        changed = any(getattr(row, field) != value for field, value in updates.items())
+        changed = ownership_changed or any(
+            getattr(row, field) != value
+            for field, value in updates.items()
+        )
         if not changed:
             return self._config_response(row)
         now = datetime.now(timezone.utc)

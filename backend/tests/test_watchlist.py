@@ -2,6 +2,7 @@ from app.database import SessionLocal
 from app.models import StrategyConfig, WatchlistItem
 from app.main import app
 from app.api import strategy as strategy_api
+from app.api import watchlist as watchlist_api
 from app.services.watchlist_service import WatchlistService
 from app import database
 from fastapi.testclient import TestClient
@@ -31,6 +32,39 @@ class TestWatchlistApi:
         assert resp.status_code == 200
         assert resp.json() == []
 
+    def test_get_marks_strategy_symbol_even_when_active_flag_is_stale(
+        self,
+        clean_db,
+    ):
+        with SessionLocal() as db:
+            db.add(StrategyConfig(symbol="AAPL.US", market="US"))
+            db.add_all(
+                [
+                    WatchlistItem(
+                        symbol="NVDA.US",
+                        market="US",
+                        alias="Nvidia",
+                        is_active=True,
+                    ),
+                    WatchlistItem(
+                        symbol="AAPL.US",
+                        market="US",
+                        alias="Apple",
+                        is_active=False,
+                    ),
+                ],
+            )
+            db.commit()
+
+        resp = client.get("/api/watchlist")
+
+        assert resp.status_code == 200
+        by_symbol = {row["symbol"]: row for row in resp.json()}
+        assert by_symbol["NVDA.US"]["is_active"] is True
+        assert by_symbol["NVDA.US"]["is_trading_target"] is False
+        assert by_symbol["AAPL.US"]["is_active"] is False
+        assert by_symbol["AAPL.US"]["is_trading_target"] is True
+
     def test_add_item(self, clean_db):
         resp = client.post("/api/watchlist", json={"symbol": "AAPL.US", "market": "US", "alias": "Apple"})
         assert resp.status_code == 200
@@ -39,6 +73,7 @@ class TestWatchlistApi:
         assert data["market"] == "US"
         assert data["alias"] == "Apple"
         assert data["is_active"] is False
+        assert data["is_trading_target"] is False
 
     def test_add_duplicate(self, clean_db):
         client.post("/api/watchlist", json={"symbol": "AAPL.US", "market": "US"})
@@ -57,14 +92,34 @@ class TestWatchlistApi:
         assert resp.status_code == 404
 
     def test_activate_sets_single_trading(self, clean_db, monkeypatch):
+        class FlatBroker:
+            def get_quotes(self, symbols):
+                return [
+                    type(
+                        "Quote",
+                        (),
+                        {
+                            "symbol": symbol,
+                            "last_price": 200,
+                            "bid": 199.9,
+                            "ask": 200.1,
+                        },
+                    )()
+                    for symbol in symbols
+                ]
+
         class FlatRunner:
+            broker = FlatBroker()
+
             def assert_primary_switch_safe(self, _symbol: str, _market: str) -> None:
                 pass
 
             def reload_strategy(self) -> None:
                 pass
 
-        monkeypatch.setattr(strategy_api, "get_runner", lambda: FlatRunner())
+        runner = FlatRunner()
+        monkeypatch.setattr(strategy_api, "get_runner", lambda: runner)
+        monkeypatch.setattr(watchlist_api, "get_runner", lambda: runner)
 
         # Create strategy config first
         db = SessionLocal()
@@ -83,6 +138,7 @@ class TestWatchlistApi:
         resp = client.post(f"/api/watchlist/{id1}/set-trading")
         assert resp.status_code == 200
         assert resp.json()["is_active"] is True
+        assert resp.json()["is_trading_target"] is True
 
         # Check only one is active in DB
         db = SessionLocal()
@@ -94,6 +150,7 @@ class TestWatchlistApi:
         resp2 = client.post(f"/api/watchlist/{id2}/set-trading")
         assert resp2.status_code == 200
         assert resp2.json()["is_active"] is True
+        assert resp2.json()["is_trading_target"] is True
 
         # First should be inactive now
         db = SessionLocal()
@@ -106,14 +163,34 @@ class TestWatchlistApi:
         db.close()
 
     def test_activate_syncs_strategy_config(self, clean_db, monkeypatch):
+        class FlatBroker:
+            def get_quotes(self, symbols):
+                return [
+                    type(
+                        "Quote",
+                        (),
+                        {
+                            "symbol": symbol,
+                            "last_price": 20,
+                            "bid": 19.99,
+                            "ask": 20.01,
+                        },
+                    )()
+                    for symbol in symbols
+                ]
+
         class FlatRunner:
+            broker = FlatBroker()
+
             def assert_primary_switch_safe(self, _symbol: str, _market: str) -> None:
                 pass
 
             def reload_strategy(self) -> None:
                 pass
 
-        monkeypatch.setattr(strategy_api, "get_runner", lambda: FlatRunner())
+        runner = FlatRunner()
+        monkeypatch.setattr(strategy_api, "get_runner", lambda: runner)
+        monkeypatch.setattr(watchlist_api, "get_runner", lambda: runner)
 
         db = SessionLocal()
         strategy = StrategyConfig(
@@ -137,6 +214,9 @@ class TestWatchlistApi:
         assert strategy is not None
         assert strategy.symbol == "NVDA.US"
         assert strategy.market == "US"
+        assert strategy.buy_low == pytest.approx(19.2)
+        assert strategy.sell_high == pytest.approx(20.8)
+        assert strategy.buy_low < 20 < strategy.sell_high
         db.close()
 
     def test_symbol_validation(self, clean_db):

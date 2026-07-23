@@ -145,6 +145,35 @@ def test_deploy_files_expose_p0_hard_safety_controls() -> None:
     assert "AUTO_TRADE_ALLOW_SHORT_ENTRIES=" not in env_example
 
 
+def test_deploy_files_expose_universe_and_live_regime_controls() -> None:
+    keys = {
+        "AUTO_TRADE_UNIVERSE_SELECTION_ENABLED",
+        "AUTO_TRADE_UNIVERSE_SELECTION_APPLY_TO_WATCHLIST",
+        "AUTO_TRADE_UNIVERSE_SELECTION_ENABLE_SHADOW",
+        "AUTO_TRADE_UNIVERSE_SELECTION_INTERVAL_MINUTES",
+        "AUTO_TRADE_UNIVERSE_SELECTION_MAX_SYMBOLS",
+        "AUTO_TRADE_UNIVERSE_SELECTION_MAX_PER_SECTOR",
+        "AUTO_TRADE_UNIVERSE_SELECTION_MIN_EVALUABLE_RATIO",
+        "AUTO_TRADE_UNIVERSE_SELECTION_MIN_RESIDENCY_DAYS",
+        "AUTO_TRADE_UNIVERSE_SELECTION_MIN_PRICE",
+        "AUTO_TRADE_UNIVERSE_SELECTION_MIN_AVG_DOLLAR_VOLUME",
+        "AUTO_TRADE_UNIVERSE_SELECTION_MAX_SPREAD_BPS",
+        "AUTO_TRADE_UNIVERSE_SELECTION_MIN_REALIZED_VOL",
+        "AUTO_TRADE_UNIVERSE_SELECTION_MAX_REALIZED_VOL",
+        "AUTO_TRADE_UNIVERSE_SELECTION_MIN_ATR_PCT",
+        "AUTO_TRADE_UNIVERSE_SELECTION_MAX_ATR_PCT",
+        "AUTO_TRADE_LIVE_REGIME_GATE_ENABLED",
+        "AUTO_TRADE_LIVE_REGIME_MAX_DATA_AGE_SECONDS",
+        "AUTO_TRADE_LIVE_MAX_ENTRIES_PER_SYMBOL_PER_DAY",
+    }
+    env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
+    for filename in ("docker-compose.yaml", "docker-compose.dockerhub.yaml"):
+        compose = (ROOT / filename).read_text(encoding="utf-8")
+        for key in keys:
+            assert f"{key}=" in compose
+            assert f"{key}=" in env_example
+
+
 def test_compose_healthchecks_use_strict_readiness_endpoint() -> None:
     for filename in ("docker-compose.yaml", "docker-compose.dockerhub.yaml"):
         compose = (ROOT / filename).read_text(encoding="utf-8")

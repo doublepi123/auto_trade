@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import date
 
 import pytest
 from sqlalchemy import create_engine, inspect
@@ -8,7 +9,14 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
 from app import database
-from app.models import Base, LLMInteraction, OrderRecord, StrategyConfig
+from app.models import (
+    Base,
+    LLMInteraction,
+    OrderRecord,
+    StrategyConfig,
+    UniverseSelectionCandidate,
+    UniverseSelectionRun,
+)
 
 
 def test_init_db_adds_missing_order_execution_columns(tmp_path, monkeypatch) -> None:
@@ -131,6 +139,141 @@ def test_init_db_creates_llm_interactions_table(tmp_path, monkeypatch) -> None:
     Base.metadata.drop_all(bind=engine)
 
 
+def test_watchlist_source_migration_backfills_manual_and_is_idempotent(tmp_path) -> None:
+    db_path = tmp_path / "legacy_watchlist.db"
+    legacy_engine = create_engine(f"sqlite:///{db_path}")
+    with legacy_engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE watchlist_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol VARCHAR(50) NOT NULL UNIQUE,
+                market VARCHAR(10) DEFAULT 'US' NOT NULL,
+                alias VARCHAR(100) DEFAULT '' NOT NULL,
+                is_active BOOLEAN DEFAULT 0 NOT NULL,
+                created_at DATETIME
+            )
+            """
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO watchlist_items (symbol, market) "
+            "VALUES ('AAPL.US', 'US')"
+        )
+
+    database._ensure_watchlist_item_source_column(legacy_engine)
+    database._ensure_watchlist_item_source_column(legacy_engine)
+
+    inspector = inspect(legacy_engine)
+    source_column = next(
+        column
+        for column in inspector.get_columns("watchlist_items")
+        if column["name"] == "source"
+    )
+    with legacy_engine.connect() as connection:
+        source = connection.exec_driver_sql(
+            "SELECT source FROM watchlist_items WHERE symbol = 'AAPL.US'"
+        ).scalar_one()
+
+    assert source_column["nullable"] is False
+    assert source == "manual"
+
+
+def test_universe_selection_table_migration_is_complete_and_idempotent(
+    tmp_path,
+) -> None:
+    db_path = tmp_path / "universe_selection.db"
+    legacy_engine = create_engine(f"sqlite:///{db_path}")
+
+    database._ensure_universe_selection_tables(legacy_engine)
+    database._ensure_universe_selection_tables(legacy_engine)
+
+    inspector = inspect(legacy_engine)
+    assert {
+        "universe_selection_runs",
+        "universe_selection_candidates",
+    } <= set(inspector.get_table_names())
+    assert {
+        "id",
+        "as_of_date",
+        "algorithm_version",
+        "source_version",
+        "status",
+        "candidate_count",
+        "evaluable_count",
+        "selected_count",
+        "coverage_ratio",
+        "parameters_json",
+        "error",
+        "started_at",
+        "completed_at",
+        "created_at",
+    } == {
+        column["name"]
+        for column in inspector.get_columns("universe_selection_runs")
+    }
+    assert {
+        "id",
+        "run_id",
+        "symbol",
+        "market",
+        "alias",
+        "sector",
+        "memberships_json",
+        "selected",
+        "rank",
+        "score",
+        "metrics_json",
+        "exclusion_reasons_json",
+        "created_at",
+    } == {
+        column["name"]
+        for column in inspector.get_columns("universe_selection_candidates")
+    }
+    assert "uq_universe_selection_run_identity" in {
+        constraint["name"]
+        for constraint in inspector.get_unique_constraints(
+            "universe_selection_runs"
+        )
+    }
+    assert "uq_universe_selection_candidate_symbol" in {
+        constraint["name"]
+        for constraint in inspector.get_unique_constraints(
+            "universe_selection_candidates"
+        )
+    }
+    assert "ix_universe_selection_runs_created_at" in {
+        index["name"]
+        for index in inspector.get_indexes("universe_selection_runs")
+    }
+    assert "ix_universe_selection_candidates_run_id" in {
+        index["name"]
+        for index in inspector.get_indexes("universe_selection_candidates")
+    }
+    foreign_key = inspector.get_foreign_keys(
+        "universe_selection_candidates"
+    )[0]
+    assert foreign_key["referred_table"] == "universe_selection_runs"
+    assert foreign_key.get("options", {}).get("ondelete") == "CASCADE"
+
+    session_factory = sessionmaker(bind=legacy_engine)
+    with session_factory() as session:
+        run = UniverseSelectionRun(
+            as_of_date=date(2026, 7, 23),
+            algorithm_version="algorithm-v1",
+            source_version="catalog-v1",
+        )
+        session.add(run)
+        session.flush()
+        session.add(
+            UniverseSelectionCandidate(
+                run_id=run.id,
+                symbol="AAPL.US",
+            )
+        )
+        session.commit()
+        assert session.query(UniverseSelectionCandidate).count() == 1
+
+
 def test_llm_interaction_token_migration_adds_nullable_columns(tmp_path) -> None:
     db_path = tmp_path / "legacy_llm_tokens.db"
     legacy_engine = create_engine(f"sqlite:///{db_path}")
@@ -183,6 +326,7 @@ def test_strategy_v2_shadow_table_migration_is_complete_and_idempotent(tmp_path)
     assert {
         "symbol",
         "enabled",
+        "universe_managed",
         "breach_zscore",
         "reclaim_zscore",
         "estimated_fee_rate_us",

@@ -64,6 +64,8 @@ def init_db() -> None:
     _ensure_audit_log_table(engine)
     _ensure_credential_config_notification_channels_column(engine)
     _ensure_watchlist_items_table(engine)
+    _ensure_watchlist_item_source_column(engine)
+    _ensure_universe_selection_tables(engine)
     _ensure_watchlist_scores_table(engine)
     _ensure_prompt_versions_table(engine)
     _ensure_experiment_results_table(engine)
@@ -1105,6 +1107,7 @@ def _ensure_watchlist_items_table(db_engine: Engine) -> None:
                 symbol VARCHAR(50) NOT NULL UNIQUE,
                 market VARCHAR(10) DEFAULT 'US' NOT NULL,
                 alias VARCHAR(100) DEFAULT '' NOT NULL,
+                source VARCHAR(32) DEFAULT 'manual' NOT NULL,
                 is_active BOOLEAN DEFAULT 0 NOT NULL,
                 created_at DATETIME
             )
@@ -1112,30 +1115,108 @@ def _ensure_watchlist_items_table(db_engine: Engine) -> None:
         )
 
 
-def _ensure_watchlist_scores_table(db_engine: Engine) -> None:
+def _ensure_watchlist_item_source_column(db_engine: Engine) -> None:
     inspector = inspect(db_engine)
-    if "watchlist_scores" in inspector.get_table_names():
+    if "watchlist_items" not in inspector.get_table_names():
+        return
+    columns = {
+        column["name"]
+        for column in inspector.get_columns("watchlist_items")
+    }
+    if "source" in columns:
         return
     with db_engine.begin() as connection:
         connection.exec_driver_sql(
+            "ALTER TABLE watchlist_items "
+            "ADD COLUMN source VARCHAR(32) DEFAULT 'manual' NOT NULL"
+        )
+
+
+def _ensure_universe_selection_tables(db_engine: Engine) -> None:
+    """Defensively create the universe-selection audit tables and indexes."""
+
+    with db_engine.begin() as connection:
+        connection.exec_driver_sql(
             """
-            CREATE TABLE IF NOT EXISTS watchlist_scores (
+            CREATE TABLE IF NOT EXISTS universe_selection_runs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                symbol VARCHAR(50) NOT NULL,
-                market VARCHAR(10) DEFAULT 'US' NOT NULL,
-                score FLOAT DEFAULT 0.0 NOT NULL,
-                rationale TEXT DEFAULT '' NOT NULL,
-                confidence FLOAT DEFAULT 0.0 NOT NULL,
-                recommended_action VARCHAR(16) DEFAULT 'HOLD' NOT NULL,
-                source VARCHAR(32) DEFAULT 'llm' NOT NULL,
+                as_of_date DATE NOT NULL,
+                algorithm_version VARCHAR(100) NOT NULL,
+                source_version VARCHAR(100) NOT NULL,
+                status VARCHAR(20) DEFAULT 'RUNNING' NOT NULL,
+                candidate_count INTEGER DEFAULT 0 NOT NULL,
+                evaluable_count INTEGER DEFAULT 0 NOT NULL,
+                selected_count INTEGER DEFAULT 0 NOT NULL,
+                coverage_ratio FLOAT DEFAULT 0.0 NOT NULL,
+                parameters_json TEXT DEFAULT '{}' NOT NULL,
+                error TEXT DEFAULT '' NOT NULL,
+                started_at DATETIME NOT NULL,
+                completed_at DATETIME,
                 created_at DATETIME NOT NULL,
-                expires_at DATETIME NOT NULL
+                CONSTRAINT uq_universe_selection_run_identity UNIQUE (as_of_date, algorithm_version, source_version)
             )
             """
         )
         connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_universe_selection_runs_created_at "
+            "ON universe_selection_runs (created_at)"
+        )
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS universe_selection_candidates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id INTEGER NOT NULL,
+                symbol VARCHAR(50) NOT NULL,
+                market VARCHAR(10) DEFAULT 'US' NOT NULL,
+                alias VARCHAR(100) DEFAULT '' NOT NULL,
+                sector VARCHAR(100) DEFAULT '' NOT NULL,
+                memberships_json TEXT DEFAULT '[]' NOT NULL,
+                selected BOOLEAN DEFAULT 0 NOT NULL,
+                rank INTEGER,
+                score FLOAT DEFAULT 0.0 NOT NULL,
+                metrics_json TEXT DEFAULT '{}' NOT NULL,
+                exclusion_reasons_json TEXT DEFAULT '[]' NOT NULL,
+                created_at DATETIME NOT NULL,
+                CONSTRAINT uq_universe_selection_candidate_symbol UNIQUE (run_id, symbol),
+                FOREIGN KEY (run_id) REFERENCES universe_selection_runs (id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_universe_selection_candidates_run_id "
+            "ON universe_selection_candidates (run_id)"
+        )
+
+
+def _ensure_watchlist_scores_table(db_engine: Engine) -> None:
+    inspector = inspect(db_engine)
+    table_exists = "watchlist_scores" in inspector.get_table_names()
+    with db_engine.begin() as connection:
+        if not table_exists:
+            connection.exec_driver_sql(
+                """
+                CREATE TABLE IF NOT EXISTS watchlist_scores (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    symbol VARCHAR(50) NOT NULL,
+                    market VARCHAR(10) DEFAULT 'US' NOT NULL,
+                    score FLOAT DEFAULT 0.0 NOT NULL,
+                    rationale TEXT DEFAULT '' NOT NULL,
+                    confidence FLOAT DEFAULT 0.0 NOT NULL,
+                    recommended_action VARCHAR(16) DEFAULT 'HOLD' NOT NULL,
+                    source VARCHAR(32) DEFAULT 'llm' NOT NULL,
+                    created_at DATETIME NOT NULL,
+                    expires_at DATETIME NOT NULL
+                )
+                """
+            )
+        connection.exec_driver_sql(
             "CREATE INDEX IF NOT EXISTS ix_watchlist_scores_symbol_created_at "
             "ON watchlist_scores (symbol, created_at)"
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS "
+            "ix_watchlist_scores_symbol_source_created_at "
+            "ON watchlist_scores (symbol, source, created_at)"
         )
 
 
@@ -1359,6 +1440,11 @@ def _ensure_strategy_v2_shadow_tables(db_engine: Engine) -> None:
             connection.exec_driver_sql(
                 "ALTER TABLE strategy_v2_shadow_config "
                 "ADD COLUMN estimated_fee_rate_hk FLOAT NOT NULL DEFAULT 0.003"
+            )
+        if "universe_managed" not in config_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE strategy_v2_shadow_config "
+                "ADD COLUMN universe_managed BOOLEAN NOT NULL DEFAULT 0"
             )
         if "holding_deadline" not in trade_columns:
             connection.exec_driver_sql(

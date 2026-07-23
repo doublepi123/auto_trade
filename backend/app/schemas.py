@@ -2039,10 +2039,185 @@ class WatchlistItemResponse(BaseModel):
     symbol: str
     market: str
     alias: str
+    source: str = Field(default="manual", max_length=32)
     is_active: bool
+    is_trading_target: bool = False
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class UniverseCatalogItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    symbol: str = Field(min_length=1, max_length=50)
+    market: Literal["US", "HK"] = "US"
+    alias: str = Field(default="", max_length=100)
+    sector: str = Field(default="", max_length=100)
+    memberships: list[str] = Field(default_factory=list, max_length=20)
+
+    @field_validator("symbol")
+    @classmethod
+    def validate_symbol(cls, value: str) -> str:
+        return _normalize_symbol(value)
+
+    @model_validator(mode="after")
+    def validate_symbol_market(self) -> "UniverseCatalogItem":
+        _validate_symbol_market_pair(self.symbol, self.market)
+        return self
+
+
+class UniverseSelectionMetrics(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    price: Optional[float] = Field(
+        default=None,
+        gt=0,
+        allow_inf_nan=False,
+    )
+    avg_dollar_volume: Optional[float] = Field(
+        default=None,
+        ge=0,
+        allow_inf_nan=False,
+    )
+    relative_spread_bps: Optional[float] = Field(
+        default=None,
+        ge=0,
+        allow_inf_nan=False,
+    )
+    realized_vol_20d: Optional[float] = Field(
+        default=None,
+        ge=0,
+        allow_inf_nan=False,
+    )
+    atr_pct_14d: Optional[float] = Field(
+        default=None,
+        ge=0,
+        allow_inf_nan=False,
+    )
+    momentum_5d_pct: Optional[float] = Field(
+        default=None,
+        allow_inf_nan=False,
+    )
+    trend_efficiency_10d: Optional[float] = Field(
+        default=None,
+        ge=0,
+        le=1,
+        allow_inf_nan=False,
+    )
+    opportunity_to_cost_ratio: Optional[float] = Field(
+        default=None,
+        ge=0,
+        allow_inf_nan=False,
+    )
+
+
+class UniverseSelectionCandidateResponse(BaseModel):
+    id: int = Field(ge=1)
+    run_id: int = Field(ge=1)
+    symbol: str = Field(min_length=1, max_length=50)
+    market: Literal["US", "HK"]
+    alias: str = Field(default="", max_length=100)
+    sector: str = Field(default="", max_length=100)
+    memberships: list[str] = Field(default_factory=list, max_length=20)
+    selected: bool
+    shadow_enabled: bool = False
+    is_trading_target: bool = False
+    rank: Optional[int] = Field(default=None, ge=1)
+    score: float = Field(default=0.0, ge=0, le=100, allow_inf_nan=False)
+    metrics: UniverseSelectionMetrics = Field(
+        default_factory=UniverseSelectionMetrics,
+    )
+    exclusion_reasons: list[str] = Field(default_factory=list, max_length=50)
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def decode_json_fields(cls, data: Any) -> Any:
+        import json as _json
+
+        if hasattr(data, "__table__"):
+            data = {
+                column.name: getattr(data, column.name)
+                for column in data.__table__.columns
+            }
+        if not isinstance(data, dict):
+            return data
+        decoded = dict(data)
+        for source, target, default in (
+            ("memberships_json", "memberships", "[]"),
+            ("metrics_json", "metrics", "{}"),
+            ("exclusion_reasons_json", "exclusion_reasons", "[]"),
+        ):
+            raw = decoded.pop(source, default)
+            if target not in decoded:
+                decoded[target] = _json.loads(raw) if isinstance(raw, str) else raw
+        return decoded
+
+
+class UniverseSelectionRunResponse(BaseModel):
+    id: int = Field(ge=1)
+    as_of_date: date
+    algorithm_version: str = Field(min_length=1, max_length=100)
+    source_version: str = Field(min_length=1, max_length=100)
+    status: str = Field(min_length=1, max_length=20)
+    candidate_count: int = Field(ge=0)
+    evaluable_count: int = Field(ge=0)
+    selected_count: int = Field(ge=0)
+    coverage_ratio: float = Field(ge=0, le=1, allow_inf_nan=False)
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    error: str = ""
+    started_at: datetime
+    completed_at: Optional[datetime] = None
+    created_at: datetime
+    items: list[UniverseSelectionCandidateResponse] = Field(default_factory=list)
+
+    model_config = ConfigDict(from_attributes=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def decode_parameters(cls, data: Any) -> Any:
+        import json as _json
+
+        if hasattr(data, "__table__"):
+            data = {
+                column.name: getattr(data, column.name)
+                for column in data.__table__.columns
+            }
+        if not isinstance(data, dict):
+            return data
+        decoded = dict(data)
+        raw = decoded.pop("parameters_json", "{}")
+        if "parameters" not in decoded:
+            decoded["parameters"] = (
+                _json.loads(raw)
+                if isinstance(raw, str)
+                else raw
+            )
+        return decoded
+
+
+class UniverseSelectionRefreshResponse(BaseModel):
+    run: UniverseSelectionRunResponse
+    added_symbols: list[str] = Field(default_factory=list, max_length=100)
+    removed_symbols: list[str] = Field(default_factory=list, max_length=100)
+    retained_symbols: list[str] = Field(default_factory=list, max_length=100)
+    shadow_enabled_symbols: list[str] = Field(
+        default_factory=list,
+        max_length=100,
+    )
+    shadow_disabled_symbols: list[str] = Field(
+        default_factory=list,
+        max_length=100,
+    )
+    shadow_failed_symbols: list[str] = Field(
+        default_factory=list,
+        max_length=100,
+    )
+    applied: bool
+    reason: str = Field(default="", max_length=500)
 
 
 class WatchlistQuote(BaseModel):
@@ -2119,6 +2294,7 @@ class WatchlistScoreResponse(BaseModel):
 
 class WatchlistScoreListResponse(BaseModel):
     scores: list[WatchlistScoreResponse]
+    reviews: list[WatchlistScoreResponse] = Field(default_factory=list)
 
 
 class PromptVersionCreate(BaseModel):

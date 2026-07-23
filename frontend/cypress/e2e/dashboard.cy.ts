@@ -220,6 +220,9 @@ describe('Dashboard', () => {
           flatten_minutes_before_close: 20,
           llm_shadow_mode: true,
           llm_order_execution_enabled: false,
+          live_regime_gate_enabled: true,
+          live_regime_max_data_age_seconds: 600,
+          live_max_entries_per_symbol_per_day: 2,
         },
         quote_stream: {
           last_push_age_seconds: 3,
@@ -284,8 +287,14 @@ describe('Dashboard', () => {
       .and('contain', '关闭')
       .and('contain', '4000.00')
       .and('contain', '45 分钟')
+      .and('contain', '市场状态门控')
+      .and('contain', '状态数据时效')
+      .and('contain', '单标的日内入场')
       .and('contain', '影子')
       .and('contain', '禁下单')
+    cy.get('[data-testid="live-regime-gate-mode"]').should('contain.text', '启用')
+    cy.get('[data-testid="live-regime-max-age"]').should('contain.text', '600.0s')
+    cy.get('[data-testid="live-max-entries-per-symbol"]').should('contain.text', '2 次')
   })
 
   it('makes full buying-power sizing unmistakable in diagnostics', () => {
@@ -315,6 +324,9 @@ describe('Dashboard', () => {
           flatten_minutes_before_close: 15,
           llm_shadow_mode: true,
           llm_order_execution_enabled: false,
+          live_regime_gate_enabled: true,
+          live_regime_max_data_age_seconds: 900,
+          live_max_entries_per_symbol_per_day: 0,
         },
         quote_stream: {
           last_push_age_seconds: 1,
@@ -347,6 +359,9 @@ describe('Dashboard', () => {
     cy.get('[data-testid="max-position-quantity-value"]').should('contain.text', '由券商购买力决定')
     cy.get('[data-testid="max-position-notional-value"]').should('contain.text', '由券商购买力决定')
     cy.get('[data-testid="max-risk-per-trade-value"]').should('contain.text', '由券商购买力决定')
+    cy.get('[data-testid="live-max-entries-per-symbol"]')
+      .should('contain.text', '已关闭（无限制）')
+      .and('not.contain.text', '0 次')
   })
 
   it('clarifies that control actions apply globally across symbol runtimes', () => {

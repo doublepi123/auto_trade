@@ -713,6 +713,15 @@ auto_trade/
 | `AUTO_TRADE_HARD_MAX_POSITION_NOTIONAL` | 单标的最大名义金额硬上限（报价币种） | `5000` |
 | `AUTO_TRADE_HARD_MAX_RISK_PER_TRADE` | 单笔最大价格风险硬上限（报价币种） | `250` |
 | `AUTO_TRADE_FULL_BUYING_POWER_USAGE_ENABLED` | 仅模拟账户使用；按券商最大保证金购买力的 100% 开仓，并绕过数量、名义金额和单笔风险三项定仓上限 | `false` |
+| `AUTO_TRADE_UNIVERSE_SELECTION_ENABLED` | 按已完成的 T-1 日线刷新 Nasdaq-100 / DJIA 动态候选池 | `false` |
+| `AUTO_TRADE_UNIVERSE_SELECTION_APPLY_TO_WATCHLIST` | 将完整候选池结果同步到只读 watchlist；不会切换主交易标的 | `false` |
+| `AUTO_TRADE_UNIVERSE_SELECTION_ENABLE_SHADOW` | 为入选标的启用 Strategy v2 shadow 观察；要求 `APPLY_TO_WATCHLIST=true` | `false` |
+| `AUTO_TRADE_UNIVERSE_SELECTION_INTERVAL_MINUTES` | 候选池幂等刷新周期（分钟） | `60` |
+| `AUTO_TRADE_UNIVERSE_SELECTION_MAX_SYMBOLS` | 每次最多入选标的数 | `8` |
+| `AUTO_TRADE_UNIVERSE_SELECTION_MAX_PER_SECTOR` | 每行业最多入选标的数 | `2` |
+| `AUTO_TRADE_LIVE_REGIME_GATE_ENABLED` | live 开仓前要求当前主标的最新 Strategy v2 shadow 门禁通过；减仓不受影响 | `false` |
+| `AUTO_TRADE_LIVE_REGIME_MAX_DATA_AGE_SECONDS` | live regime 证据最大允许延迟（秒） | `600` |
+| `AUTO_TRADE_LIVE_MAX_ENTRIES_PER_SYMBOL_PER_DAY` | 每标的、每交易日最大开仓次数；`0` 关闭此限制 | `2` |
 | `AUTO_TRADE_HARD_STOP_LOSS_PCT` | 硬止损百分比上限 | `1.0` |
 | `AUTO_TRADE_HARD_MAX_HOLDING_MINUTES` | 最长持仓分钟数硬上限 | `60` |
 | `AUTO_TRADE_HARD_ENTRY_CUTOFF_MINUTES_BEFORE_CLOSE` | 收盘前停止开仓分钟数下限 | `45` |

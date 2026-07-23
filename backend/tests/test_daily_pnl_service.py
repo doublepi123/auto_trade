@@ -92,6 +92,151 @@ class TestDailyPnlService:
         assert trip.exit_cause == "TIME_STOP"
         db.close()
 
+    def test_zero_actual_fee_uses_persisted_estimate_or_fee_schedule_once(
+        self,
+    ) -> None:
+        self._cleanup()
+        trade_day = date(2026, 7, 24)
+        db = self._get_db()
+        db.add_all([
+            OrderRecord(
+                broker_order_id="paper-zero-buy",
+                symbol="AAPL.US",
+                side="BUY",
+                quantity=10,
+                price=100,
+                executed_quantity=10,
+                executed_price=100,
+                actual_fee=0,
+                estimated_fee=0.5,
+                fee_source="ACTUAL",
+                status="FILLED",
+                filled_at=self._dt(trade_day, 10),
+            ),
+            OrderRecord(
+                broker_order_id="paper-zero-sell",
+                symbol="AAPL.US",
+                side="SELL",
+                quantity=10,
+                price=110,
+                executed_quantity=10,
+                executed_price=110,
+                actual_fee=0,
+                fee_source="ACTUAL",
+                status="FILLED",
+                filled_at=self._dt(trade_day, 11),
+            ),
+        ])
+        db.commit()
+        service = DailyPnlService(db)
+
+        trip = service.pair_round_trips(include_excursions=False)[0]
+        result = service.calculate(trade_day=trade_day)
+
+        assert trip.gross_pnl == approx(100.0)
+        assert trip.est_fees == approx(1.05)
+        assert trip.net_pnl == approx(98.95)
+        assert trip.fee_source == "ESTIMATED"
+        assert trip.actual_fees is None
+        assert result.realized_pnl == approx(98.95)
+        db.close()
+
+    def test_repairs_authoritative_zero_exit_fee_idempotently(self) -> None:
+        self._cleanup()
+        trade_day = date(2026, 7, 24)
+        db = self._get_db()
+        db.add(OrderRecord(
+            broker_order_id="paper-zero-authoritative-sell",
+            symbol="AAPL.US",
+            side="SELL",
+            quantity=10,
+            price=110,
+            executed_quantity=10,
+            executed_price=110,
+            actual_fee=0,
+            estimated_fee=0.55,
+            fee_source="ACTUAL",
+            status="FILLED",
+            filled_at=self._dt(trade_day, 11),
+            cost_basis_price=100,
+            cost_basis_quantity=10,
+            position_quantity_before=10,
+            gross_pnl=100,
+            pnl_fee=0.5,
+            pnl_fee_source="MIXED",
+            pnl_fee_rate=0.0005,
+            net_pnl=99.5,
+            pnl_source="TRACKED_ENTRY",
+        ))
+        db.commit()
+        service = DailyPnlService(db)
+
+        before_refresh = service.pair_round_trips(include_excursions=False)[0]
+        result = service.calculate(trade_day=trade_day)
+        first_updated = service.refresh_execution_outcomes(symbol="AAPL.US")
+        second_updated = service.refresh_execution_outcomes(symbol="AAPL.US")
+        db.expire_all()
+        repaired = db.query(OrderRecord).filter(
+            OrderRecord.broker_order_id == "paper-zero-authoritative-sell"
+        ).one()
+        after_refresh = service.pair_round_trips(include_excursions=False)[0]
+
+        assert before_refresh.est_fees == approx(1.05)
+        assert before_refresh.net_pnl == approx(98.95)
+        assert before_refresh.fee_source == "ESTIMATED"
+        assert result.realized_pnl == approx(98.95)
+        assert first_updated == 1
+        assert second_updated == 0
+        assert repaired.actual_fee == 0
+        assert repaired.estimated_fee == approx(0.55)
+        assert repaired.fee_source == "ACTUAL"
+        assert repaired.pnl_fee == approx(1.05)
+        assert repaired.pnl_fee_source == "ESTIMATED"
+        assert repaired.net_pnl == approx(98.95)
+        assert after_refresh.est_fees == approx(1.05)
+        assert after_refresh.net_pnl == approx(98.95)
+        db.close()
+
+    def test_partial_fill_scales_frozen_full_order_fee_estimate(self) -> None:
+        self._cleanup()
+        trade_day = date(2026, 7, 24)
+        db = self._get_db()
+        db.add(OrderRecord(
+            broker_order_id="paper-partial-authoritative-sell",
+            symbol="AAPL.US",
+            side="SELL",
+            quantity=100,
+            price=110,
+            executed_quantity=10,
+            executed_price=110,
+            actual_fee=0,
+            estimated_fee=5.5,
+            fee_source="ACTUAL",
+            status="PARTIAL_FILLED",
+            filled_at=self._dt(trade_day, 11),
+            cost_basis_price=100,
+            cost_basis_quantity=10,
+            position_quantity_before=10,
+            gross_pnl=100,
+            pnl_fee=0.5,
+            pnl_fee_source="MIXED",
+            pnl_fee_rate=0.0005,
+            net_pnl=99.5,
+            pnl_source="TRACKED_ENTRY",
+        ))
+        db.commit()
+
+        trip = DailyPnlService(db).pair_round_trips(
+            include_excursions=False,
+        )[0]
+
+        assert trip.quantity == approx(10)
+        assert trip.gross_pnl == approx(100)
+        assert trip.est_fees == approx(1.05)
+        assert trip.net_pnl == approx(98.95)
+        assert trip.fee_source == "ESTIMATED"
+        db.close()
+
     def test_persisted_estimate_does_not_change_with_active_fee_rate(self) -> None:
         self._cleanup()
         trade_day = date(2026, 7, 11)
@@ -250,7 +395,8 @@ class TestDailyPnlService:
 
         trips = svc.pair_round_trips(symbol="NVDA.US")
         result = svc.calculate(trade_day=trade_day, symbol="NVDA.US")
-        expected_daily_pnl = authoritative_net + 10.0
+        fresh_net_pnl = 10.0 - (205.0 + 206.0) * 10 * 0.0005
+        expected_daily_pnl = authoritative_net + fresh_net_pnl
         reconciled_pnl, reconciled_losses = DailyPnlService.reconcile_risk_state(
             expected_daily_pnl,
             0,
@@ -267,7 +413,7 @@ class TestDailyPnlService:
         assert trips[1].quantity == approx(10.0)
         assert trips[1].entry_price == approx(205.0)
         assert trips[1].gross_pnl == approx(10.0)
-        assert trips[1].net_pnl == approx(10.0)
+        assert trips[1].net_pnl == approx(fresh_net_pnl)
         assert result.realized_pnl == approx(expected_daily_pnl)
         assert [(trade.broker_order_id, trade.quantity) for trade in result.trades] == [
             ("tracked-entry-sell", approx(1088.0)),

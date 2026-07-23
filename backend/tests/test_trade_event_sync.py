@@ -149,6 +149,122 @@ class TestTradeEventSync:
                 normalized = normalized.replace(tzinfo=timezone.utc)
             assert normalized == executed_at
 
+    def test_terminal_sync_preserves_first_partial_execution_time(self) -> None:
+        _clean()
+        first_fill = datetime(2026, 7, 23, 19, 0, tzinfo=timezone.utc)
+        terminal_update = datetime(2026, 7, 24, 15, 0, tzinfo=timezone.utc)
+        with SessionLocal() as db:
+            db.add(
+                OrderRecord(
+                    broker_order_id="partial-cross-day-cancel",
+                    symbol="NVDA.US",
+                    side="BUY",
+                    quantity=10,
+                    price=200,
+                    executed_quantity=3,
+                    executed_price=199.5,
+                    status="PARTIAL_FILLED",
+                    created_at=first_fill - timedelta(minutes=1),
+                    filled_at=first_fill,
+                )
+            )
+            db.commit()
+
+        class Broker:
+            def get_today_orders(self) -> list[BrokerOrder]:
+                return [
+                    BrokerOrder(
+                        broker_order_id="partial-cross-day-cancel",
+                        symbol="NVDA.US",
+                        side="BUY",
+                        quantity=Decimal("10"),
+                        price=Decimal("200"),
+                        executed_quantity=Decimal("3"),
+                        executed_price=Decimal("199.5"),
+                        status="CANCELLED",
+                        created_at=first_fill - timedelta(minutes=1),
+                        filled_at=terminal_update,
+                    )
+                ]
+
+        runner = AppRunner()
+        runner.broker = Broker()
+
+        assert runner.sync_today_orders_from_broker(force=True) == 1
+
+        with SessionLocal() as db:
+            order = (
+                db.query(OrderRecord)
+                .filter(
+                    OrderRecord.broker_order_id
+                    == "partial-cross-day-cancel"
+                )
+                .one()
+            )
+            assert order.status == "CANCELLED"
+            assert order.executed_quantity == 3
+            assert order.filled_at is not None
+            assert runner._as_utc(order.filled_at) == first_fill
+
+    def test_partial_sync_quantity_advance_preserves_first_execution_time(
+        self,
+    ) -> None:
+        _clean()
+        first_fill = datetime(2026, 7, 23, 19, 0, tzinfo=timezone.utc)
+        later_partial = first_fill + timedelta(minutes=2)
+        with SessionLocal() as db:
+            db.add(
+                OrderRecord(
+                    broker_order_id="partial-quantity-advance",
+                    symbol="NVDA.US",
+                    side="BUY",
+                    quantity=10,
+                    price=200,
+                    executed_quantity=3,
+                    executed_price=199.5,
+                    status="PARTIAL_FILLED",
+                    created_at=first_fill - timedelta(minutes=1),
+                    filled_at=first_fill,
+                )
+            )
+            db.commit()
+
+        class Broker:
+            def get_today_orders(self) -> list[BrokerOrder]:
+                return [
+                    BrokerOrder(
+                        broker_order_id="partial-quantity-advance",
+                        symbol="NVDA.US",
+                        side="BUY",
+                        quantity=Decimal("10"),
+                        price=Decimal("200"),
+                        executed_quantity=Decimal("7"),
+                        executed_price=Decimal("199.75"),
+                        status="PARTIAL_FILLED",
+                        created_at=first_fill - timedelta(minutes=1),
+                        filled_at=later_partial,
+                    )
+                ]
+
+        runner = AppRunner()
+        runner.broker = Broker()
+
+        assert runner.sync_today_orders_from_broker(force=True) == 1
+
+        with SessionLocal() as db:
+            order = (
+                db.query(OrderRecord)
+                .filter(
+                    OrderRecord.broker_order_id
+                    == "partial-quantity-advance"
+                )
+                .one()
+            )
+            assert order.executed_quantity == 7
+            assert order.executed_price == 199.75
+            assert order.filled_at is not None
+            assert runner._as_utc(order.filled_at) == first_fill
+
     def test_periodic_sync_latches_non_primary_live_order_globally(self) -> None:
         _clean()
         created_at = datetime.now(timezone.utc)

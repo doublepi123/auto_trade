@@ -169,6 +169,9 @@ export interface DiagnosticLiveSafety {
   flatten_minutes_before_close: number
   llm_shadow_mode: boolean
   llm_order_execution_enabled: boolean
+  live_regime_gate_enabled: boolean
+  live_regime_max_data_age_seconds: number
+  live_max_entries_per_symbol_per_day: number
 }
 
 export interface DiagnosticsResponse {
@@ -1235,7 +1238,9 @@ export interface WatchlistItem {
   symbol: string
   market: 'US' | 'HK'
   alias: string
+  source: string
   is_active: boolean
+  is_trading_target: boolean
   created_at: string
 }
 
@@ -1256,6 +1261,71 @@ export interface WatchlistSnapshot {
   bid: number
   ask: number
   timestamp: string
+}
+
+export interface UniverseCatalogItem {
+  symbol: string
+  market: 'US' | 'HK'
+  alias: string
+  sector: string
+  memberships: string[]
+}
+
+export interface UniverseSelectionMetrics {
+  price: number | null
+  avg_dollar_volume: number | null
+  relative_spread_bps: number | null
+  realized_vol_20d: number | null
+  atr_pct_14d: number | null
+  momentum_5d_pct: number | null
+  trend_efficiency_10d: number | null
+  opportunity_to_cost_ratio: number | null
+}
+
+export interface UniverseSelectionItem {
+  symbol: string
+  market: 'US' | 'HK'
+  alias: string
+  sector: string
+  memberships: string[]
+  selected: boolean
+  shadow_enabled: boolean
+  is_trading_target: boolean
+  rank: number | null
+  score: number
+  metrics: UniverseSelectionMetrics
+  exclusion_reasons: string[]
+  created_at: string
+}
+
+export interface UniverseSelectionRunResponse {
+  id: number
+  as_of_date: string
+  algorithm_version: string
+  source_version: string
+  status: string
+  candidate_count: number
+  evaluable_count: number
+  selected_count: number
+  coverage_ratio: number
+  parameters: Record<string, unknown>
+  error: string
+  started_at: string
+  completed_at: string | null
+  created_at: string
+  items: UniverseSelectionItem[]
+}
+
+export interface UniverseSelectionRefreshResponse {
+  run: UniverseSelectionRunResponse
+  added_symbols: string[]
+  removed_symbols: string[]
+  retained_symbols: string[]
+  shadow_enabled_symbols: string[]
+  shadow_disabled_symbols: string[]
+  shadow_failed_symbols: string[]
+  applied: boolean
+  reason: string
 }
 
 export interface PromptVersion {

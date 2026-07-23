@@ -53,6 +53,35 @@ async def test_lifespan_passes_application_loop_to_runner(monkeypatch) -> None:
     assert started_with == [current_loop]
 
 
+@pytest.mark.asyncio
+async def test_lifespan_stops_runner_after_application_error(
+    monkeypatch,
+) -> None:
+    stopped = False
+
+    class RecordingRunner:
+        def start(self, *, loop=None) -> bool:
+            del loop
+            return True
+
+        def stop(self) -> None:
+            nonlocal stopped
+            stopped = True
+
+    monkeypatch.setattr(main_module, "init_db", lambda: None)
+    monkeypatch.setattr(
+        main_module,
+        "get_runner",
+        lambda: RecordingRunner(),
+    )
+
+    with pytest.raises(RuntimeError, match="application failed"):
+        async with main_module.lifespan(main_module.app):
+            raise RuntimeError("application failed")
+
+    assert stopped is True
+
+
 async def test_llm_storage_maintenance_waits_for_worker_during_cancel(
     monkeypatch,
 ) -> None:
@@ -78,6 +107,115 @@ async def test_llm_storage_maintenance_waits_for_worker_during_cancel(
     release.set()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+async def test_universe_selection_waits_for_worker_during_cancel(
+    monkeypatch,
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_tick() -> None:
+        started.set()
+        assert release.wait(2)
+
+    monkeypatch.setattr(
+        main_module,
+        "_universe_selection_tick_sync",
+        blocking_tick,
+    )
+    task = asyncio.create_task(
+        main_module._run_universe_selection_tick()
+    )
+    assert await asyncio.to_thread(started.wait, 2)
+
+    task.cancel()
+    await asyncio.sleep(0)
+    assert task.done() is False
+
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+def test_universe_tick_reloads_before_optional_quant_failure(
+    monkeypatch,
+) -> None:
+    from app.api import universe as universe_api
+    from app.services import watchlist_quant_service
+
+    class FakeQuery:
+        def all(self) -> list[SimpleNamespace]:
+            return [SimpleNamespace(symbol="AAPL.US", market="US")]
+
+    class FakeDB:
+        rolled_back = 0
+        closed = False
+
+        def query(self, *_args: object) -> FakeQuery:
+            return FakeQuery()
+
+        def rollback(self) -> None:
+            self.rolled_back += 1
+
+        def close(self) -> None:
+            self.closed = True
+
+    class FakeRunner:
+        broker = object()
+        reloads = 0
+
+        def reload_strategy(self) -> None:
+            self.reloads += 1
+
+    response = SimpleNamespace(
+        run=SimpleNamespace(
+            id=7,
+            as_of_date="2026-07-22",
+            status="COMPLETE",
+            coverage_ratio=1.0,
+            selected_count=1,
+        ),
+        applied=True,
+        added_symbols=(),
+        removed_symbols=(),
+    )
+    db = FakeDB()
+    runner = FakeRunner()
+    monkeypatch.setattr(
+        main_module.settings,
+        "universe_selection_enabled",
+        True,
+    )
+    monkeypatch.setattr(main_module, "SessionLocal", lambda: db)
+    monkeypatch.setattr(main_module, "get_runner", lambda: runner)
+    monkeypatch.setattr(
+        universe_api,
+        "build_universe_selection_service",
+        lambda _db: SimpleNamespace(refresh=lambda: response),
+    )
+
+    def fail_score(
+        _service: object,
+        _items: object,
+        *,
+        ttl_minutes: int,
+    ) -> None:
+        assert ttl_minutes >= 60
+        assert runner.reloads == 1
+        raise RuntimeError("quote batch unavailable")
+
+    monkeypatch.setattr(
+        watchlist_quant_service.WatchlistQuantService,
+        "score_items",
+        fail_score,
+    )
+
+    main_module._universe_selection_tick_sync()
+
+    assert runner.reloads == 1
+    assert db.rolled_back == 1
+    assert db.closed is True
 
 
 def test_strategy_v2_shadow_tick_is_isolated_from_execution(monkeypatch) -> None:

@@ -15,6 +15,11 @@ export interface WatchlistScore {
   is_stale: boolean
 }
 
+export interface WatchlistScoresResponse {
+  scores: WatchlistScore[]
+  reviews: WatchlistScore[]
+}
+
 export async function getWatchlist(): Promise<WatchlistItem[]> {
   const resp = await api.get('/api/watchlist')
   return resp.data
@@ -60,7 +65,7 @@ export async function scoreWatchlistSymbol(data: { symbol: string; market: 'US' 
   return resp.data
 }
 
-export async function getWatchlistScores(): Promise<WatchlistScore[]> {
+export async function getWatchlistScores(): Promise<WatchlistScoresResponse> {
   const resp = await api.get('/api/watchlist/scores')
   // The previous `resp.data.scores ?? []` silently swallowed shape changes
   // (typos in the backend, accidental rename, missing field after a deploy).
@@ -69,6 +74,33 @@ export async function getWatchlistScores(): Promise<WatchlistScore[]> {
   if (!Array.isArray(resp.data.scores)) {
     throw new Error(
       `Unexpected /api/watchlist/scores response: scores field is ${typeof resp.data.scores}`
+    )
+  }
+  if (!Array.isArray(resp.data.reviews)) {
+    throw new Error(
+      `Unexpected /api/watchlist/scores response: reviews field is ${typeof resp.data.reviews}`
+    )
+  }
+  return {
+    scores: resp.data.scores as WatchlistScore[],
+    reviews: resp.data.reviews as WatchlistScore[],
+  }
+}
+
+export async function rankWatchlistQuant(
+  ttlMinutes = 360,
+): Promise<WatchlistScore[]> {
+  const resp = await api.post(
+    '/api/watchlist/quant-rank',
+    undefined,
+    {
+      params: { ttl_minutes: ttlMinutes },
+      timeout: 120_000,
+    },
+  )
+  if (!Array.isArray(resp.data.scores)) {
+    throw new Error(
+      `Unexpected /api/watchlist/quant-rank response: scores field is ${typeof resp.data.scores}`,
     )
   }
   return resp.data.scores as WatchlistScore[]

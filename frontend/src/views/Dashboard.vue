@@ -479,6 +479,25 @@
                 {{ diagnostics.live_safety.allow_position_addons ? '允许' : '关闭' }}
               </el-tag>
             </el-descriptions-item>
+            <el-descriptions-item label="市场状态门控">
+              <el-tag
+                :type="diagnostics.live_safety.live_regime_gate_enabled ? 'success' : 'warning'"
+                size="small"
+                data-testid="live-regime-gate-mode"
+              >
+                {{ diagnostics.live_safety.live_regime_gate_enabled ? '启用' : '关闭' }}
+              </el-tag>
+            </el-descriptions-item>
+            <el-descriptions-item label="状态数据时效">
+              <span data-testid="live-regime-max-age">
+                {{ formatAgeSeconds(diagnostics.live_safety.live_regime_max_data_age_seconds) }}
+              </span>
+            </el-descriptions-item>
+            <el-descriptions-item label="单标的日内入场">
+              <span data-testid="live-max-entries-per-symbol">
+                {{ formatDailyEntryCap(diagnostics.live_safety.live_max_entries_per_symbol_per_day) }}
+              </span>
+            </el-descriptions-item>
             <el-descriptions-item label="LLM 模式">
               <el-tag :type="diagnostics.live_safety.llm_shadow_mode ? 'info' : 'warning'" size="small">
                 {{ diagnostics.live_safety.llm_shadow_mode ? '影子' : '实时' }}
@@ -1265,6 +1284,12 @@ async function handleDisableKillSwitch() {
 function formatAgeSeconds(value: number | null | undefined): string {
   if (value == null) return '-'
   return `${value.toFixed(1)}s`
+}
+
+function formatDailyEntryCap(value: number | null | undefined): string {
+  if (value == null) return '-'
+  if (value === 0) return '已关闭（无限制）'
+  return `${value} 次`
 }
 
 /** Dump the in-memory diagnostics snapshot (runtime table + stream health) to

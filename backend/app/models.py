@@ -3,7 +3,19 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from typing import Optional
 
-from sqlalchemy import Boolean, Date, DateTime, Float, Index, Integer, String, Text, UniqueConstraint, text
+from sqlalchemy import (
+    Boolean,
+    Date,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 _TZDateTime = DateTime(timezone=True)
@@ -83,6 +95,11 @@ class StrategyV2ShadowConfig(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     symbol: Mapped[str] = mapped_column(String(50), unique=True, index=True, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    universe_managed: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        nullable=False,
+    )
     zscore_window_1m_bars: Mapped[int] = mapped_column(Integer, default=30, nullable=False)
     zscore_window_5m_bars: Mapped[int] = mapped_column(Integer, default=12, nullable=False)
     breach_zscore: Mapped[float] = mapped_column(Float, default=-2.0, nullable=False)
@@ -643,10 +660,96 @@ class WatchlistItem(Base):
     symbol: Mapped[str] = mapped_column(String(50), nullable=False)
     market: Mapped[str] = mapped_column(String(10), default="US", nullable=False)
     alias: Mapped[str] = mapped_column(String(100), default="", nullable=False)
+    source: Mapped[str] = mapped_column(String(32), default="manual", nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow)
 
     __table_args__ = (UniqueConstraint("symbol", name="uq_watchlist_symbol"),)
+
+
+class UniverseSelectionRun(Base):
+    """One reproducible daily universe-selection attempt."""
+
+    __tablename__ = "universe_selection_runs"
+    __table_args__ = (
+        UniqueConstraint(
+            "as_of_date",
+            "algorithm_version",
+            "source_version",
+            name="uq_universe_selection_run_identity",
+        ),
+        Index("ix_universe_selection_runs_created_at", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    as_of_date: Mapped[date] = mapped_column(Date, nullable=False)
+    algorithm_version: Mapped[str] = mapped_column(String(100), nullable=False)
+    source_version: Mapped[str] = mapped_column(String(100), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(20),
+        default="RUNNING",
+        nullable=False,
+    )
+    candidate_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    evaluable_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    selected_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    coverage_ratio: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    parameters_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    error: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    started_at: Mapped[datetime] = mapped_column(
+        _TZDateTime,
+        default=_utcnow,
+        nullable=False,
+    )
+    completed_at: Mapped[Optional[datetime]] = mapped_column(
+        _TZDateTime,
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        _TZDateTime,
+        default=_utcnow,
+        nullable=False,
+    )
+
+
+class UniverseSelectionCandidate(Base):
+    """Persisted evaluation evidence for one symbol in a selection run."""
+
+    __tablename__ = "universe_selection_candidates"
+    __table_args__ = (
+        UniqueConstraint(
+            "run_id",
+            "symbol",
+            name="uq_universe_selection_candidate_symbol",
+        ),
+        Index("ix_universe_selection_candidates_run_id", "run_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("universe_selection_runs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    symbol: Mapped[str] = mapped_column(String(50), nullable=False)
+    market: Mapped[str] = mapped_column(String(10), default="US", nullable=False)
+    alias: Mapped[str] = mapped_column(String(100), default="", nullable=False)
+    sector: Mapped[str] = mapped_column(String(100), default="", nullable=False)
+    memberships_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    selected: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    rank: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    score: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    metrics_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    exclusion_reasons_json: Mapped[str] = mapped_column(
+        Text,
+        default="[]",
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        _TZDateTime,
+        default=_utcnow,
+        nullable=False,
+    )
 
 
 class WatchlistScore(Base):
@@ -670,6 +773,12 @@ class WatchlistScore(Base):
 
     __table_args__ = (
         Index("ix_watchlist_scores_symbol_created_at", "symbol", "created_at"),
+        Index(
+            "ix_watchlist_scores_symbol_source_created_at",
+            "symbol",
+            "source",
+            "created_at",
+        ),
     )
 
 
