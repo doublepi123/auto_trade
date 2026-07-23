@@ -7,12 +7,15 @@ from app.config import Settings
 
 
 class TestSettings:
-    def test_default_values(self, monkeypatch) -> None:
+    def test_default_values(self, monkeypatch, tmp_path) -> None:
         monkeypatch.delenv("AUTO_TRADE_ENV", raising=False)
         monkeypatch.delenv("AUTO_TRADE_DATABASE_URL", raising=False)
+        # Read the true code defaults, not the developer-local .env (which the
+        # Settings env_file would otherwise pick up and mask the defaults).
+        monkeypatch.chdir(tmp_path)
         s = Settings()
         assert s.env == "dev"
-        assert s.database_url == "sqlite:///data/auto_trade.db"
+        assert s.database_url == "sqlite:///./data/auto_trade.db"
 
     def test_default_strategy_empty(self) -> None:
         s = Settings()

@@ -50,12 +50,12 @@ class StrategyConfigSchema(BaseModel):
     )
     max_consecutive_losses: int = Field(default=3, ge=1, le=100)
     llm_interval_minutes: Optional[int] = Field(default=None, ge=1, le=1440)
-    fee_rate_us: Optional[float] = Field(default=None, ge=0, le=0.01)
-    fee_rate_hk: Optional[float] = Field(default=None, ge=0, le=0.02)
-    min_repricing_pct: Optional[float] = Field(default=None, ge=0, le=0.05)
+    fee_rate_us: Optional[float] = Field(default=None, ge=0, le=0.01, allow_inf_nan=False)
+    fee_rate_hk: Optional[float] = Field(default=None, ge=0, le=0.02, allow_inf_nan=False)
+    min_repricing_pct: Optional[float] = Field(default=None, ge=0, le=0.05, allow_inf_nan=False)
     llm_action_cooldown_seconds: Optional[int] = Field(default=None, ge=0, le=3600)
     trading_session_mode: Literal["RTH_ONLY", "ANY"] = "ANY"
-    margin_safety_factor: Optional[float] = Field(default=None, ge=0, le=1)
+    margin_safety_factor: Optional[float] = Field(default=None, ge=0, le=1, allow_inf_nan=False)
     allow_position_addons: Optional[bool] = None
     max_position_quantity: Optional[int] = Field(default=None, ge=1, le=1_000_000)
     max_position_notional: Optional[float] = Field(default=None, gt=0, allow_inf_nan=False)
@@ -130,12 +130,12 @@ class StrategyMergedSchema(BaseModel):
     )
     max_consecutive_losses: int = Field(default=3, ge=1, le=100)
     llm_interval_minutes: int = Field(default=2, ge=1, le=1440)
-    fee_rate_us: float = Field(default=0.0005, ge=0, le=0.01)
-    fee_rate_hk: float = Field(default=0.003, ge=0, le=0.02)
-    min_repricing_pct: float = Field(default=0.003, ge=0, le=0.05)
+    fee_rate_us: float = Field(default=0.0005, ge=0, le=0.01, allow_inf_nan=False)
+    fee_rate_hk: float = Field(default=0.003, ge=0, le=0.02, allow_inf_nan=False)
+    min_repricing_pct: float = Field(default=0.003, ge=0, le=0.05, allow_inf_nan=False)
     llm_action_cooldown_seconds: int = Field(default=60, ge=0, le=3600)
     trading_session_mode: Literal["RTH_ONLY", "ANY"] = "ANY"
-    margin_safety_factor: float = Field(default=0.9, ge=0, le=1)
+    margin_safety_factor: float = Field(default=0.9, ge=0, le=1, allow_inf_nan=False)
     allow_position_addons: bool = False
     max_position_quantity: int = Field(default=100, ge=1, le=1_000_000)
     max_position_notional: float = Field(default=5000.0, gt=0, allow_inf_nan=False)
