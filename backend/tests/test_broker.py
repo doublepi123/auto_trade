@@ -1,6 +1,7 @@
 # pyright: reportArgumentType=false, reportAttributeAccessIssue=false
-from typing import Any
+import threading
 from decimal import Decimal
+from typing import Any
 
 import pytest
 
@@ -352,6 +353,66 @@ class TestBrokerGateway:
             (["AAPL.US"], ["SubType.Quote"]),
             (["NVDA.US"], ["SubType.Quote"]),
         ]
+
+    def test_subscribe_quotes_does_not_hold_lock_during_sdk_callback_registration(
+        self,
+        monkeypatch,
+    ) -> None:
+        received = threading.Event()
+
+        class FakeConfig:
+            @staticmethod
+            def from_env():
+                return "fake-config"
+
+        class QuoteContext:
+            def __init__(self, _config):
+                pass
+
+            def set_on_quote(self, callback):
+                class QuoteEvent:
+                    symbol = "AAPL.US"
+                    last_done = 150.0
+                    timestamp = "2026-07-23T20:45:00Z"
+
+                worker = threading.Thread(
+                    target=callback,
+                    args=("AAPL.US", QuoteEvent()),
+                )
+                worker.start()
+                worker.join(timeout=1)
+                assert not worker.is_alive(), (
+                    "SDK callback blocked on BrokerGateway._lock"
+                )
+
+            def subscribe(self, _symbols, _subtypes):
+                pass
+
+        class TradeContext:
+            def __init__(self, _config):
+                pass
+
+        class SubType:
+            Quote = "SubType.Quote"
+
+        class FakeModule:
+            pass
+
+        FakeModule.Config = FakeConfig
+        FakeModule.QuoteContext = QuoteContext
+        FakeModule.TradeContext = TradeContext
+        FakeModule.SubType = SubType
+        monkeypatch.setattr(
+            broker_module,
+            "_import_openapi",
+            lambda: FakeModule,
+        )
+        gw = BrokerGateway()
+
+        gw.subscribe_quotes("AAPL.US", lambda _quote: received.set())
+
+        assert received.is_set()
+        assert gw._subscribed_symbols == {"AAPL.US"}
 
     def test_get_positions_flattens_stock_position_channels(self) -> None:
         class StockInfo:
@@ -1001,6 +1062,30 @@ class TestBrokerGateway:
         assert gw._quote_ctx is None
         assert gw._trade_ctx is None
 
+    def test_close_does_not_hold_lock_while_closing_sdk_context(self) -> None:
+        gw = BrokerGateway()
+
+        class FakeCtx:
+            callback_blocked = False
+
+            def close(self):
+                worker = threading.Thread(target=self._sdk_callback)
+                worker.start()
+                worker.join(timeout=1)
+                self.callback_blocked = worker.is_alive()
+
+            @staticmethod
+            def _sdk_callback() -> None:
+                with gw._lock:
+                    pass
+
+        quote_ctx = FakeCtx()
+        gw._quote_ctx = quote_ctx
+
+        gw.close()
+
+        assert quote_ctx.callback_blocked is False
+
     def test_unsubscribe_quotes(self) -> None:
         class FakeCtx:
             def __init__(self):
@@ -1019,6 +1104,31 @@ class TestBrokerGateway:
         assert gw._subscribed_symbols == set()
         assert gw._quote_callbacks == []
         assert gw._quote_ctx.unsubscribed == ["AAPL.US", "NVDA.US"]
+
+    def test_unsubscribe_does_not_hold_lock_during_sdk_callback(self) -> None:
+        gw = BrokerGateway()
+
+        class FakeCtx:
+            callback_blocked = False
+
+            def unsubscribe(self, _symbols):
+                worker = threading.Thread(target=self._sdk_callback)
+                worker.start()
+                worker.join(timeout=1)
+                self.callback_blocked = worker.is_alive()
+
+            @staticmethod
+            def _sdk_callback() -> None:
+                with gw._lock:
+                    pass
+
+        quote_ctx = FakeCtx()
+        gw._quote_ctx = quote_ctx
+        gw._subscribed_symbols = {"AAPL.US"}
+
+        gw.unsubscribe_quotes()
+
+        assert quote_ctx.callback_blocked is False
 
     def test_unsubscribe_quotes_when_no_subscription(self) -> None:
         gw = BrokerGateway()

@@ -496,6 +496,7 @@ class BrokerGateway:
     def __init__(self, audit: AuditLogger | None = None) -> None:
         self._audit = audit
         self._lock = threading.RLock()
+        self._subscription_lock = threading.Lock()
         self._quote_ctx: Any = None
         self._trade_ctx: Any = None
         self._quote_callbacks: list[Callable[[Quote], None]] = []
@@ -858,58 +859,61 @@ class BrokerGateway:
                 except Exception:
                     logger.exception("depth callback failed for %s", _symbol)
 
-        with self._lock:
-            added_callback = False
-            if callback not in self._quote_callbacks:
-                self._quote_callbacks.append(callback)
-                added_callback = True
-            missing_symbols = [symbol for symbol in unique_symbols if symbol not in self._subscribed_symbols]
-            if not missing_symbols:
-                # Even when no new symbols, re-register the composite handler
-                # so the newly appended callback is wired into set_on_quote.
+        with self._subscription_lock:
+            with self._lock:
+                added_callback = False
+                if callback not in self._quote_callbacks:
+                    self._quote_callbacks.append(callback)
+                    added_callback = True
+                missing_symbols = [
+                    symbol
+                    for symbol in unique_symbols
+                    if symbol not in self._subscribed_symbols
+                ]
                 self._init_clients()
                 quote_ctx = self._quote_ctx
-                if quote_ctx is not None:
-                    quote_ctx.set_on_quote(_on_quote)
-                    depth_handler = getattr(quote_ctx, "set_on_depth", None)
-                    if callable(depth_handler):
-                        depth_handler(_on_depth)
-                return
-            self._init_clients()
-            quote_ctx = self._quote_ctx
             if quote_ctx is None:
-                if added_callback:
-                    self._quote_callbacks.remove(callback)
+                with self._lock:
+                    if added_callback and callback in self._quote_callbacks:
+                        self._quote_callbacks.remove(callback)
                 raise RuntimeError("quote context is not initialized")
-            module = _import_openapi()
-            SubType = getattr(module, "SubType", None)
 
-            quote_ctx.set_on_quote(_on_quote)
-            if SubType is None:
-                if added_callback and callback in self._quote_callbacks:
-                    self._quote_callbacks.remove(callback)
-                raise RuntimeError(
-                    "longport SDK SubType not available — cannot subscribe to quotes. "
-                    "Install the longport package."
-                )
-            topics = [SubType.Quote]
-            depth_type = getattr(SubType, "Depth", None)
-            depth_handler = getattr(quote_ctx, "set_on_depth", None)
-            if depth_type is not None and callable(depth_handler):
-                depth_handler(_on_depth)
-                topics.append(depth_type)
-            else:
-                logger.warning(
-                    "longport SDK depth subscription unavailable; executable BBO "
-                    "will rely on pull depth"
-                )
+            # The Longbridge SDK may synchronously wait for its callback thread
+            # while registering a handler. Never hold ``self._lock`` here:
+            # both handlers acquire it before reading cached quote state.
             try:
+                quote_ctx.set_on_quote(_on_quote)
+                depth_handler = getattr(quote_ctx, "set_on_depth", None)
+                if callable(depth_handler):
+                    depth_handler(_on_depth)
+                if not missing_symbols:
+                    return
+
+                module = _import_openapi()
+                SubType = getattr(module, "SubType", None)
+                if SubType is None:
+                    raise RuntimeError(
+                        "longport SDK SubType not available — cannot subscribe "
+                        "to quotes. Install the longport package."
+                    )
+                topics = [SubType.Quote]
+                depth_type = getattr(SubType, "Depth", None)
+                if depth_type is not None and callable(depth_handler):
+                    topics.append(depth_type)
+                else:
+                    logger.warning(
+                        "longport SDK depth subscription unavailable; executable "
+                        "BBO will rely on pull depth"
+                    )
                 quote_ctx.subscribe(missing_symbols, topics)
             except Exception:
-                if added_callback and callback in self._quote_callbacks:
-                    self._quote_callbacks.remove(callback)
+                with self._lock:
+                    if added_callback and callback in self._quote_callbacks:
+                        self._quote_callbacks.remove(callback)
                 raise
-            self._subscribed_symbols.update(missing_symbols)
+            with self._lock:
+                self._subscribed_symbols.update(missing_symbols)
+
     def submit_limit_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal) -> OrderResult:
         # NOTE: submit_limit_order 故意不使用 _call_with_retry。
         # 下单是 non-idempotent 操作 — 网络重试可能导致重复下单(双倍仓位)。
@@ -1260,32 +1264,36 @@ class BrokerGateway:
         )
 
     def close(self) -> None:
-        with self._lock:
-            self._quote_callbacks.clear()
-            self._subscribed_symbols.clear()
-            self._last_trade_by_symbol.clear()
-            self._bbo_by_symbol.clear()
-            for ctx in (self._quote_ctx, self._trade_ctx):
+        with self._subscription_lock:
+            with self._lock:
+                contexts = (self._quote_ctx, self._trade_ctx)
+                self._quote_callbacks.clear()
+                self._subscribed_symbols.clear()
+                self._last_trade_by_symbol.clear()
+                self._bbo_by_symbol.clear()
+                self._quote_ctx = None
+                self._trade_ctx = None
+            for ctx in contexts:
                 if ctx is not None:
                     try:
                         ctx.close()
                     except Exception as exc:
                         logger.debug("broker context close error (ignored): %s", exc)
-            self._quote_ctx = None
-            self._trade_ctx = None
 
     def unsubscribe_quotes(self) -> None:
-        with self._lock:
-            symbols = sorted(self._subscribed_symbols)
-            if symbols and self._quote_ctx is not None:
+        with self._subscription_lock:
+            with self._lock:
+                symbols = sorted(self._subscribed_symbols)
+                quote_ctx = self._quote_ctx
+                self._quote_callbacks.clear()
+                self._subscribed_symbols.clear()
+                self._last_trade_by_symbol.clear()
+                self._bbo_by_symbol.clear()
+            if symbols and quote_ctx is not None:
                 try:
-                    self._quote_ctx.unsubscribe(symbols)
+                    quote_ctx.unsubscribe(symbols)
                 except Exception:
                     logger.warning("failed to unsubscribe from %s", ", ".join(symbols))
-            self._quote_callbacks.clear()
-            self._subscribed_symbols.clear()
-            self._last_trade_by_symbol.clear()
-            self._bbo_by_symbol.clear()
 
     def get_cash(self, currency: str | None = None) -> Decimal:
         """Return available cash for the given currency.
