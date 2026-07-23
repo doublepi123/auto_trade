@@ -2590,7 +2590,10 @@ class TestAppRunner:
         assert runner._trade_svc.has_pending_order is False
         assert runner.engine.state == EngineState.LONG
 
-    def test_execute_llm_order_decision_stop_loss_sell_bypasses_profit_guard(self) -> None:
+    def test_execute_llm_order_decision_stop_loss_sell_bypasses_profit_guard(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         class Broker:
             def __init__(self) -> None:
                 self.submitted = []
@@ -2620,6 +2623,13 @@ class TestAppRunner:
         runner._trade_svc._record_risk_event = lambda reason: None
         runner._trade_svc._record_order_skipped = lambda *args: None
         runner._llm_order_execution_enabled = True
+        monkeypatch.setattr(
+            runner,
+            "_entry_reference_quantity_for_exit",
+            lambda *_args: pytest.fail(
+                "stop-loss execution must not query entry reference history"
+            ),
+        )
 
         result = runner.execute_llm_order_decision({
             "order_action": "STOP_LOSS_SELL_NOW",
@@ -5001,9 +5011,18 @@ class TestAppRunner:
         broker = Broker()
         runner.broker = broker
         runner._running = True
-        runner.engine.params = StrategyParams(symbol="AAPL.US", buy_low=100.0, sell_high=200.0)
+        runner.engine.params = StrategyParams(
+            symbol="AAPL.US",
+            buy_low=100.0,
+            sell_high=200.0,
+            fee_rate_us=0.007,
+        )
         runner.notifier = _NoopNotifier()
         self._stub_trade_callbacks(runner)
+        recorded_metadata: list[dict[str, object]] = []
+        runner._trade_svc._record_order = (
+            lambda *args: recorded_metadata.append(args[9])
+        )
 
         def broadcast_status() -> None:
             nonlocal broadcast_calls
@@ -5017,13 +5036,105 @@ class TestAppRunner:
         thread.start()
         try:
             assert entered_first_broadcast.wait(timeout=1)
-            runner.engine.params = StrategyParams(symbol="MSFT.US", buy_low=50.0, sell_high=80.0)
+            runner.engine.params = StrategyParams(
+                symbol="MSFT.US",
+                buy_low=50.0,
+                sell_high=80.0,
+                fee_rate_us=0.0001,
+            )
         finally:
             release_first_broadcast.set()
             thread.join(timeout=2)
 
         assert thread.is_alive() is False
         assert broker.submitted_symbols == ["AAPL.US"]
+        assert recorded_metadata
+        assert recorded_metadata[0]["expected_exit_price"] == 200.0
+        assert recorded_metadata[0]["fee_rate"] == 0.007
+
+    def test_exit_profit_floor_uses_requested_entry_quantity(self) -> None:
+        from app.models import OrderRecord
+
+        symbol = "PARTIALREF.US"
+        runner = AppRunner()
+        filled_at = datetime.now(timezone.utc)
+        runner._trade_svc.load_tracked_entries(
+            {
+                symbol: (
+                    Decimal("10"),
+                    Decimal("1000"),
+                    "LONG",
+                    filled_at,
+                )
+            }
+        )
+        with runner._db_session() as db:
+            db.query(OrderRecord).filter(
+                OrderRecord.symbol == symbol
+            ).delete()
+            db.add(
+                OrderRecord(
+                    broker_order_id="partial-reference-order",
+                    symbol=symbol,
+                    side="BUY",
+                    quantity=1000,
+                    price=100,
+                    executed_quantity=10,
+                    executed_price=100,
+                    status="CANCELLED",
+                    filled_at=filled_at,
+                )
+            )
+            db.commit()
+
+        reference = runner._entry_reference_quantity_for_exit(
+            symbol,
+            "SELL",
+        )
+
+        assert reference == Decimal("1000")
+
+    def test_exit_profit_floor_ignores_unrelated_historical_entry(self) -> None:
+        from app.models import OrderRecord
+
+        symbol = "STALEPARTIALREF.US"
+        runner = AppRunner()
+        tracked_opened_at = datetime.now(timezone.utc)
+        runner._trade_svc.load_tracked_entries(
+            {
+                symbol: (
+                    Decimal("10"),
+                    Decimal("1000"),
+                    "LONG",
+                    tracked_opened_at,
+                )
+            }
+        )
+        with runner._db_session() as db:
+            db.query(OrderRecord).filter(
+                OrderRecord.symbol == symbol
+            ).delete()
+            db.add(
+                OrderRecord(
+                    broker_order_id="stale-partial-reference-order",
+                    symbol=symbol,
+                    side="BUY",
+                    quantity=1000,
+                    price=100,
+                    executed_quantity=10,
+                    executed_price=100,
+                    status="CANCELLED",
+                    filled_at=tracked_opened_at - timedelta(days=1),
+                )
+            )
+            db.commit()
+
+        reference = runner._entry_reference_quantity_for_exit(
+            symbol,
+            "SELL",
+        )
+
+        assert reference is None
 
     def test_stop_closes_broker_after_fast_submit_tracking(self) -> None:
         class Broker:
@@ -5508,6 +5619,13 @@ class TestRecentQuotesDequeBound:
             return True
 
         monkeypatch.setattr(runner, "_persist_reduction", persist_reduction)
+        monkeypatch.setattr(
+            runner,
+            "_entry_reference_quantity_for_exit",
+            lambda *_args: pytest.fail(
+                "deterministic stop-loss must not query entry reference history"
+            ),
+        )
         def complete_reduction(symbol: str, cause: str, reason: str) -> None:
             runner._reduction_intents.pop(symbol, None)
             completed.append(cause)

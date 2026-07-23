@@ -322,7 +322,7 @@ class TestIntervalApplicationService:
             current_price=200.0,
             suggestion={
                 "suggested_buy_low": 199.75,
-                "suggested_sell_high": 200.25,
+                "suggested_sell_high": 200.45,
                 "confidence_score": 0.85,
             },
             reference_quantity=10,
@@ -332,7 +332,35 @@ class TestIntervalApplicationService:
         assert result["success"] is True
         assert result["applied"] is True
         assert config.buy_low == 199.75
-        assert config.sell_high == 200.25
+        assert config.sell_high == 200.45
+
+    def test_apply_direct_rejects_interval_that_exit_guard_cannot_realize(
+        self,
+        service: IntervalApplicationService,
+    ) -> None:
+        self._cleanup()
+        db = self._get_db()
+        config = self._create_config(db)
+        config.min_profit_amount = 0.0
+        config.fee_rate_us = 0.0005
+        db.commit()
+
+        result = service.apply_direct_suggestion(
+            db,
+            current_price=200.0,
+            suggestion={
+                "suggested_buy_low": 199.75,
+                "suggested_sell_high": 200.25,
+                "confidence_score": 0.85,
+            },
+            reference_quantity=1000,
+        )
+
+        assert result["success"] is False
+        assert result["policy_code"] == "INTERVAL_TOO_NARROW"
+        assert result["gross_profit"] == 500.0
+        assert result["estimated_costs"] > 200.0
+        assert result["net_profit"] < result["required_profit"]
 
     def test_apply_direct_rejects_non_finite_suggestion_values(self, service: IntervalApplicationService) -> None:
         self._cleanup()
@@ -364,6 +392,7 @@ class TestIntervalApplicationService:
             db,
             engine_state="long",
             current_price=200.0,
+            position_avg_price=200.0,
             suggestion={
                 "suggested_buy_low": 196.0,
                 "suggested_sell_high": 210.0,
@@ -374,6 +403,7 @@ class TestIntervalApplicationService:
         assert result["success"] is True
         assert result["applied"] is True
         assert result["sell_high"] == 210.0
+        assert result["gross_profit"] == 10.0
         assert "LONG state" in result["reason"]
 
     def test_apply_long_sell_lower(self, service: IntervalApplicationService) -> None:
@@ -385,6 +415,7 @@ class TestIntervalApplicationService:
             db,
             engine_state="long",
             current_price=200.0,
+            position_avg_price=200.0,
             suggestion={
                 "suggested_buy_low": 195.0,
                 "suggested_sell_high": 210.0,
@@ -408,6 +439,7 @@ class TestIntervalApplicationService:
             db,
             engine_state="long",
             current_price=222.0,
+            position_avg_price=220.0,
             suggestion={
                 "suggested_buy_low": 221.0,
                 "suggested_sell_high": 226.0,
@@ -437,6 +469,7 @@ class TestIntervalApplicationService:
             db,
             engine_state="long",
             current_price=222.0,
+            position_avg_price=220.0,
             suggestion={
                 "suggested_buy_low": 217.0,
                 "suggested_sell_high": 226.0,
@@ -447,6 +480,87 @@ class TestIntervalApplicationService:
         assert result["success"] is True
         assert config.buy_low == 217.0
         assert config.sell_high == 226.0
+
+    def test_apply_long_rejects_target_that_is_unprofitable_from_position_cost(
+        self,
+        service: IntervalApplicationService,
+    ) -> None:
+        self._cleanup()
+        db = self._get_db()
+        config = self._create_config(db)
+
+        result = service.apply_suggestion(
+            db,
+            engine_state="long",
+            current_price=95.0,
+            position_avg_price=100.0,
+            suggestion={
+                "suggested_buy_low": 91.0,
+                "suggested_sell_high": 95.9,
+                "confidence_score": 0.85,
+            },
+            reference_quantity=100,
+        )
+
+        db.refresh(config)
+        assert result["success"] is False
+        assert result["policy_code"] == "INTERVAL_TOO_NARROW"
+        assert result["gross_profit"] < 0
+        assert config.buy_low == 180.0
+        assert config.sell_high == 220.0
+
+    def test_apply_long_rejects_missing_position_cost_basis(
+        self,
+        service: IntervalApplicationService,
+    ) -> None:
+        self._cleanup()
+        db = self._get_db()
+        config = self._create_config(db)
+
+        result = service.apply_suggestion(
+            db,
+            engine_state="long",
+            current_price=200.0,
+            suggestion={
+                "suggested_buy_low": 196.0,
+                "suggested_sell_high": 210.0,
+                "confidence_score": 0.85,
+            },
+        )
+
+        db.refresh(config)
+        assert result["success"] is False
+        assert result["policy_code"] == "INVALID_POSITION_COST_BASIS"
+        assert config.buy_low == 180.0
+        assert config.sell_high == 220.0
+
+    @pytest.mark.parametrize(
+        "position_avg_price",
+        [0.0, -1.0, float("nan"), float("inf")],
+    )
+    def test_apply_long_rejects_invalid_position_cost_basis(
+        self,
+        service: IntervalApplicationService,
+        position_avg_price: float,
+    ) -> None:
+        self._cleanup()
+        db = self._get_db()
+        self._create_config(db)
+
+        result = service.apply_suggestion(
+            db,
+            engine_state="long",
+            current_price=200.0,
+            position_avg_price=position_avg_price,
+            suggestion={
+                "suggested_buy_low": 196.0,
+                "suggested_sell_high": 210.0,
+                "confidence_score": 0.85,
+            },
+        )
+
+        assert result["success"] is False
+        assert result["policy_code"] == "INVALID_POSITION_COST_BASIS"
 
     def test_apply_short_buy_lower(self, service: IntervalApplicationService) -> None:
         self._cleanup()

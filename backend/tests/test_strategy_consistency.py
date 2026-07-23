@@ -13,6 +13,7 @@ def _config(**overrides):
         max_daily_loss=500.0,
         fee_rate_us=0.0005,
         fee_rate_hk=0.003,
+        max_position_quantity=100,
     )
     base.update(overrides)
     return StrategyConfig(**base)
@@ -23,18 +24,27 @@ def test_consistency_clean_returns_no_issues():
     assert issues == []
 
 
-def test_consistency_flags_min_profit_below_fees():
-    # Per-share fee = 0.0005 * 2 = 0.001; min_profit = 0.0005 < 0.001
-    config = _config(min_profit_amount=0.0005, fee_rate_us=0.0005)
+def test_consistency_flags_interval_without_sufficient_net_edge():
+    config = _config(
+        buy_low=100.0,
+        sell_high=100.25,
+        min_profit_amount=0.0,
+        fee_rate_us=0.0005,
+    )
     issues = validate_strategy_consistency(config)
-    assert any(i["field"] == "min_profit_amount" for i in issues)
+    assert any(i["field"] == "sell_high" for i in issues)
 
 
 def test_consistency_hk_uses_hk_fee():
-    # HK fee is 10x US, so a reasonable US setup trips the HK warning.
-    config = _config(market="HK", min_profit_amount=0.001, fee_rate_hk=0.003)
+    config = _config(
+        market="HK",
+        buy_low=100.0,
+        sell_high=101.0,
+        min_profit_amount=0.0,
+        fee_rate_hk=0.003,
+    )
     issues = validate_strategy_consistency(config)
-    assert any(i["field"] == "min_profit_amount" for i in issues)
+    assert any(i["field"] == "sell_high" for i in issues)
 
 
 def test_consistency_flags_daily_loss_below_min_profit():

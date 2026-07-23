@@ -25,7 +25,11 @@ from app.schemas import (
     WatchlistScoredSnapshot,
     WatchlistSnapshot,
 )
-from app.services.watchlist_quant_service import WatchlistQuantService
+from app.services.watchlist_quant_service import (
+    QuantScoringOutsideRTHError,
+    WatchlistQuantService,
+    list_latest_current_quant_scores,
+)
 from app.services.watchlist_service import WatchlistService
 from app.services.watchlist_score_service import WatchlistScoreService
 
@@ -123,16 +127,28 @@ def rank_watchlist_quantitatively(
             detail="runner not initialized",
         ) from None
     try:
-        rows = WatchlistQuantService(db, broker).score_items(
+        WatchlistQuantService(db, broker).score_items(
             items,
             ttl_minutes=ttl_minutes,
         )
+    except QuantScoringOutsideRTHError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=str(exc),
+        ) from exc
     except Exception:
         logger.exception("failed to rank watchlist quantitatively")
         raise HTTPException(
             status_code=503,
             detail="broker market data unavailable",
         ) from None
+    current_symbols = {item.symbol for item in items}
+    rows = [
+        row
+        for row in list_latest_current_quant_scores(db)
+        if row.symbol in current_symbols
+    ]
+    rows.sort(key=lambda row: (-float(row.score), row.symbol))
     score_service = WatchlistScoreService(db)
     responses: list[WatchlistScoreResponse] = []
     for row in rows:
@@ -223,7 +239,15 @@ def get_watchlist_scored_snapshots(
     trading_symbol = _trading_symbol(db)
 
     score_svc = WatchlistScoreService(db)
-    latest_scores = {row.symbol: row for row in score_svc.list_latest_per_symbol()}
+    latest_scores = {
+        row.symbol: row
+        for row in score_svc.list_latest_per_symbol_and_family()
+        if score_svc.source_family(row.source) == "review"
+    }
+    latest_scores.update({
+        row.symbol: row
+        for row in list_latest_current_quant_scores(db)
+    })
 
     rows: list[tuple[float, WatchlistScoredSnapshot]] = []
     for item in items:
@@ -299,11 +323,7 @@ def get_watchlist_scores(db: Session = Depends(get_db)) -> WatchlistScoreListRes
             responses.append(response)
         return responses
 
-    quant_scores = [
-        row
-        for row in family_rows
-        if svc.source_family(row.source) == "quant"
-    ]
+    quant_scores = list_latest_current_quant_scores(db)
     reviews = [
         row
         for row in family_rows

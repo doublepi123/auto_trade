@@ -30,6 +30,7 @@ def teardown_module() -> None:
         runner.stop()
     else:
         runner._running = False
+    _clean_credentials()
 
 
 def _clean_strategy() -> None:
@@ -2095,6 +2096,31 @@ class TestAPI:
                 }
 
         class Runner:
+            class Broker:
+                @staticmethod
+                def get_positions():
+                    return [
+                        SimpleNamespace(
+                            symbol="AAPL.US",
+                            side="LONG",
+                            quantity=10.0,
+                            avg_price=200.0,
+                        )
+                    ]
+
+                @staticmethod
+                def get_cash(_currency=None):
+                    return 10000.0
+
+                @staticmethod
+                def estimate_margin_max_quantity(
+                    _symbol,
+                    _side,
+                    _price,
+                    _currency=None,
+                ):
+                    return 10.0
+
             class Engine:
                 last_price = 200.0
 
@@ -2104,7 +2130,7 @@ class TestAPI:
                 state = State()
 
             engine = Engine()
-            broker = None
+            broker = Broker()
 
             @staticmethod
             def fresh_market_price(_symbol):
@@ -2782,20 +2808,23 @@ def test_strategy_update_no_change_still_writes_audit() -> None:
 def test_strategy_update_returns_consistency_warnings() -> None:
     """Verify consistency_warnings field is present in strategy update response."""
     _clean_strategy()
-    # min_profit_amount below round-trip fee triggers a consistency warning.
+    # A narrow interval that cannot clear fees and slippage triggers a warning.
     resp = client.put("/api/strategy", json={
         "symbol": "AAPL.US",
         "market": "US",
         "buy_low": 100.0,
-        "sell_high": 200.0,
-        "min_profit_amount": 0.0001,
+        "sell_high": 100.25,
+        "min_profit_amount": 0.0,
         "fee_rate_us": 0.005,
     })
     assert resp.status_code == 200
     data = resp.json()
     assert "consistency_warnings" in data
     assert len(data["consistency_warnings"]) > 0
-    assert any(w["field"] == "min_profit_amount" for w in data["consistency_warnings"])
+    assert any(
+        warning["field"] == "sell_high"
+        for warning in data["consistency_warnings"]
+    )
 
 
 def test_cancel_order_returns_200_when_local_db_update_fails(monkeypatch) -> None:

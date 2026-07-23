@@ -327,6 +327,7 @@ def analyze_llm_interval(
             current_price=current_price,
             trade_service=getattr(runner, "_trade_svc", None),
         ),
+        position_avg_price=position_context["avg_price"],
         runtime_reload=_reload_strategy_after_save,
     )
     order_result = {"executed": False, "status": "NO_ACTION", "order_id": None}

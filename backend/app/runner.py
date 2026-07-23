@@ -130,6 +130,7 @@ class _QuoteTriggerDecision:
     engine_snapshot: EngineSnapshot | None = None
     trigger_symbol: str | None = None
     trigger_engine: StrategyEngine | None = None
+    trigger_params: StrategyParams | None = None
     trigger_market: str = ""
     allow_loss_exit: bool = False
     reduce_only: bool = False
@@ -1770,6 +1771,9 @@ class AppRunner:
                         return decision
                     decision.trigger_symbol = active_engine.params.symbol or quote.symbol
                     decision.trigger_engine = active_engine
+                    decision.trigger_params = dataclass_replace(
+                        active_engine.params
+                    )
                     decision.trigger_market = active_market
                     self._trigger_in_flight = True
                     decision.processing_started = True
@@ -1785,6 +1789,10 @@ class AppRunner:
         trigger_engine = decision.trigger_engine
         if result is None or not result.triggered or trigger_engine is None:
             return
+        trigger_params = (
+            decision.trigger_params
+            or dataclass_replace(trigger_engine.params)
+        )
         self._set_last_action_message(result.description)
 
         restore_engine_snapshot = lambda snapshot, eng=trigger_engine: eng.restore(snapshot)
@@ -1809,6 +1817,17 @@ class AppRunner:
                 quote,
                 result.description,
             )
+            entry_reference_quantity = None
+            if (
+                not decision.allow_loss_exit
+                and trigger_params.min_profit_amount > 0
+            ):
+                entry_reference_quantity = (
+                    self._entry_reference_quantity_for_exit(
+                        decision.trigger_symbol or quote.symbol,
+                        result.action,
+                    )
+                )
             execution_quote = quote
             if decision.reduce_only:
                 executable_price = (
@@ -1835,9 +1854,18 @@ class AppRunner:
                 cash_currency=self._cash_currency_for_market(decision.trigger_market),
                 market=decision.trigger_market,
                 trading_session_mode=self._get_trading_session_mode(),
-                min_profit_amount=trigger_engine.params.min_profit_amount,
+                min_profit_amount=trigger_params.min_profit_amount,
                 allow_loss_exit=decision.allow_loss_exit,
-                fee_rate=self._live_fee_rate_for_market(decision.trigger_market),
+                fee_rate=self._fee_rate_for_params(
+                    trigger_params,
+                    decision.trigger_market,
+                ),
+                expected_exit_price=(
+                    trigger_params.sell_high
+                    if result.action == "BUY"
+                    else None
+                ),
+                entry_reference_quantity=entry_reference_quantity,
                 engine_snapshot=engine_snapshot,
                 restore_engine_snapshot=restore_engine_snapshot,
                 notify_risk_event=self.notifier.notify_risk_event,
@@ -1913,9 +1941,12 @@ class AppRunner:
         midpoint = (bid + ask) / 2 if bid > 0 and ask > 0 else 0.0
         spread = ask - bid if midpoint > 0 else 0.0
         params = (
-            decision.trigger_engine.params
-            if decision.trigger_engine is not None
-            else self.engine.params
+            decision.trigger_params
+            or (
+                dataclass_replace(decision.trigger_engine.params)
+                if decision.trigger_engine is not None
+                else dataclass_replace(self.engine.params)
+            )
         )
         snapshot = {
             "strategy": asdict(params),
@@ -2337,6 +2368,15 @@ class AppRunner:
             return {"executed": False, "status": "NO_QUOTE", "order_id": None, "action": action}
 
         try:
+            target_params = dataclass_replace(target_engine.params)
+            entry_reference_quantity = None
+            if not allow_loss_exit and target_params.min_profit_amount > 0:
+                entry_reference_quantity = (
+                    self._entry_reference_quantity_for_exit(
+                        target_symbol,
+                        action,
+                    )
+                )
             llm_decision = _QuoteTriggerDecision(
                 result=TriggerResult(
                     triggered=True,
@@ -2345,6 +2385,7 @@ class AppRunner:
                 ),
                 trigger_symbol=target_symbol,
                 trigger_engine=target_engine,
+                trigger_params=target_params,
                 trigger_market=target_market,
                 allow_loss_exit=allow_loss_exit,
                 reduce_only=action in _POSITION_REDUCING_ACTIONS,
@@ -2362,9 +2403,18 @@ class AppRunner:
                 cash_currency=self._cash_currency_for_market(target_market),
                 market=target_market,
                 trading_session_mode=self._get_trading_session_mode(),
-                min_profit_amount=self.engine.params.min_profit_amount,
+                min_profit_amount=target_params.min_profit_amount,
                 allow_loss_exit=allow_loss_exit,
-                fee_rate=self._live_fee_rate_for_market(target_market),
+                fee_rate=self._fee_rate_for_params(
+                    target_params,
+                    target_market,
+                ),
+                expected_exit_price=(
+                    target_params.sell_high
+                    if action == "BUY"
+                    else None
+                ),
+                entry_reference_quantity=entry_reference_quantity,
                 engine_snapshot=engine_snapshot,
                 restore_engine_snapshot=lambda snapshot: target_engine.restore(snapshot),
                 notify_risk_event=self.notifier.notify_risk_event,
@@ -2492,12 +2542,108 @@ class AppRunner:
     def _live_fee_rate(self) -> Decimal:
         return self._live_fee_rate_for_market(self.engine.params.market)
 
-    def _live_fee_rate_for_market(self, market: str) -> Decimal:
+    @staticmethod
+    def _fee_rate_for_params(
+        params: StrategyParams,
+        market: str,
+    ) -> Decimal:
         return one_side_fee_rate(
             market,
-            Decimal(str(self.engine.params.fee_rate_us or 0)),
-            Decimal(str(self.engine.params.fee_rate_hk or 0)),
+            Decimal(str(params.fee_rate_us or 0)),
+            Decimal(str(params.fee_rate_hk or 0)),
         )
+
+    def _live_fee_rate_for_market(self, market: str) -> Decimal:
+        return self._fee_rate_for_params(
+            self.engine.params,
+            market,
+        )
+
+    def _entry_reference_quantity_for_exit(
+        self,
+        symbol: str,
+        action: str,
+    ) -> Decimal | None:
+        if action not in _POSITION_REDUCING_ACTIONS:
+            return None
+        entry_action = "BUY" if action == "SELL" else "SELL_SHORT"
+        expected_side = "LONG" if action == "SELL" else "SHORT"
+        tracked = self._trade_svc.tracked_position(symbol)
+        if (
+            tracked is None
+            or tracked.side != expected_side
+            or tracked.opened_at is None
+            or not tracked.quantity.is_finite()
+            or not tracked.cost.is_finite()
+            or tracked.quantity <= 0
+            or tracked.cost <= 0
+        ):
+            return None
+        try:
+            with self._db_session() as db:
+                row = (
+                    db.query(OrderRecord)
+                    .filter(
+                        OrderRecord.symbol == symbol,
+                        OrderRecord.side == entry_action,
+                        OrderRecord.executed_quantity.is_not(None),
+                        OrderRecord.executed_quantity > 0,
+                        OrderRecord.filled_at.is_not(None),
+                    )
+                    .order_by(
+                        OrderRecord.filled_at.desc(),
+                        OrderRecord.created_at.desc(),
+                        OrderRecord.id.desc(),
+                    )
+                    .first()
+                )
+        except Exception:
+            logger.warning(
+                "failed to load entry reference quantity for %s %s; "
+                "using the full configured profit floor",
+                action,
+                symbol,
+                exc_info=True,
+            )
+            return None
+        if row is None:
+            return None
+        try:
+            requested = Decimal(str(row.quantity))
+            executed = Decimal(str(row.executed_quantity))
+            executed_price = Decimal(str(row.executed_price))
+        except Exception:
+            return None
+        filled_at = row.filled_at
+        if filled_at is None:
+            return None
+        quantity_tolerance = Decimal("0.000001")
+        tracked_avg_price = tracked.avg_price
+        price_tolerance = max(
+            Decimal("0.000001"),
+            abs(tracked_avg_price) * Decimal("0.000001"),
+        )
+        if (
+            not requested.is_finite()
+            or not executed.is_finite()
+            or not executed_price.is_finite()
+            or not tracked_avg_price.is_finite()
+            or requested <= 0
+            or executed <= 0
+            or executed_price <= 0
+            or requested < executed
+            or tracked.quantity > executed + quantity_tolerance
+            or abs(executed_price - tracked_avg_price) > price_tolerance
+            or abs(
+                (
+                    self._as_utc(filled_at)
+                    - self._as_utc(tracked.opened_at)
+                ).total_seconds()
+            )
+            > _POST_FILL_SETTLEMENT_GRACE_SECONDS
+        ):
+            return None
+        return requested
 
     def _broadcast_status(self) -> None:
         try:
@@ -2744,7 +2890,11 @@ class AppRunner:
                 "submitted limit price deviates from fresh executable BBO by "
                 f"{float(deviation) * 100:.2f}%"
             )
-        return FinalOrderQuoteCheckResult(executable_price=executable)
+        return FinalOrderQuoteCheckResult(
+            executable_price=executable,
+            bid=Decimal(str(quote.bid)),
+            ask=Decimal(str(quote.ask)),
+        )
 
     @staticmethod
     def _evaluate_quote_quality(recent: dict[str, Any] | None) -> dict[str, Any]:

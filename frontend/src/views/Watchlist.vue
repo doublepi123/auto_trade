@@ -281,10 +281,13 @@
                     </div>
                   </template>
                 </el-table-column>
-                <el-table-column label="候选分" width="76" align="right">
+                <el-table-column label="融合优先" width="96" align="right">
                   <template #default="{ row }">
-                    <strong>#{{ row.rank }}</strong>
-                    <small class="promotion-secondary">{{ formatScore(row.selection_score) }}</small>
+                    <strong>#{{ row.priority_rank }}</strong>
+                    <small class="promotion-secondary">
+                      {{ formatScore(row.priority_score) }}
+                      · 原 #{{ row.rank }}
+                    </small>
                   </template>
                 </el-table-column>
                 <el-table-column label="量化适配" width="116">
@@ -389,7 +392,11 @@
                 <div class="promotion-mobile-heading">
                   <div>
                     <strong>{{ row.symbol }}</strong>
-                    <small>#{{ row.rank }} · 候选分 {{ formatScore(row.selection_score) }}</small>
+                    <small>
+                      融合 #{{ row.priority_rank }}
+                      · {{ formatScore(row.priority_score) }}
+                      · 原 #{{ row.rank }}
+                    </small>
                   </div>
                   <div class="promotion-mobile-tags">
                     <el-tag v-if="row.is_trading_target" type="danger" size="small">当前实盘</el-tag>
@@ -882,9 +889,11 @@ const universeRows = computed<UniverseSelectionItem[]>(() => {
 const promotionRows = computed<UniversePromotionReadinessItem[]>(() => {
   if (!promotionReadiness.value) return []
   return [...promotionReadiness.value.items].sort((left, right) => {
-    if (left.rank !== right.rank) return left.rank - right.rank
-    if (left.selection_score !== right.selection_score) {
-      return right.selection_score - left.selection_score
+    if (left.priority_rank !== right.priority_rank) {
+      return left.priority_rank - right.priority_rank
+    }
+    if (left.priority_score !== right.priority_score) {
+      return right.priority_score - left.priority_score
     }
     return left.symbol.localeCompare(right.symbol)
   })
@@ -1064,10 +1073,11 @@ function promotionQuantTitle(row: UniversePromotionReadinessItem): string {
   const confidence = row.quant_confidence === null
     ? '-'
     : `${(row.quant_confidence * 100).toFixed(0)}%`
+  const weight = `${(row.quant_weight * 100).toFixed(1)}%`
   const expiresAt = row.quant_expires_at
     ? formatDateTime(row.quant_expires_at)
     : '-'
-  return `来源 ${row.quant_source || '-'} · 置信度 ${confidence} · 过期 ${expiresAt}`
+  return `来源 ${row.quant_source || '-'} · 置信度 ${confidence} · 融合权重 ${weight} · 过期 ${expiresAt}`
 }
 
 const promotionBlockerLabels: Record<string, string> = {
@@ -1180,7 +1190,7 @@ function scoreTagType(
   if (isQuantScore(score)) {
     if (score.recommended_action === 'CANDIDATE') return 'success'
     if (score.recommended_action === 'WATCH') return 'warning'
-    return score.source === 'quant_error' ? 'danger' : 'info'
+    return score.source.startsWith('quant_error') ? 'danger' : 'info'
   }
   if (score.recommended_action === 'BUY') return 'success'
   if (score.recommended_action === 'SELL') return 'warning'
@@ -1211,13 +1221,14 @@ function scoreActionLabel(action: string): string {
 
 function scoreOutcomeLabel(score: WatchlistScore): string {
   if (score.source.startsWith('fallback')) return '中性兜底'
-  if (score.source === 'quant_error') return '数据异常'
+  if (score.source.startsWith('quant_error')) return '数据异常'
   return scoreActionLabel(score.recommended_action)
 }
 
 function scoreSourceLabel(source: string): string {
   if (source === 'quant_v1') return '量化 v1'
-  if (source === 'quant_error') return '数据异常'
+  if (source === 'quant_v2') return '量化 v2'
+  if (source.startsWith('quant_error')) return '数据异常'
   if (source === 'llm') return 'AI 复核'
   if (source.startsWith('fallback')) return 'AI 降级结果'
   return source
@@ -1226,7 +1237,7 @@ function scoreSourceLabel(source: string): string {
 function scoreSourceTagType(
   source: string,
 ): 'success' | 'warning' | 'info' {
-  if (source === 'quant_error') return 'warning'
+  if (source.startsWith('quant_error')) return 'warning'
   if (source.startsWith('fallback')) return 'info'
   return 'success'
 }
@@ -1554,7 +1565,7 @@ async function handleQuantRank() {
       (score) => score.recommended_action === 'CANDIDATE',
     ).length
     ElMessage.success(
-      `量化评分完成：${scores.length} 个标的，优选 ${preferred} 个`,
+      `当前量化快照：${scores.length} 个标的，优选 ${preferred} 个；闭市市场保留最近结果`,
     )
   } catch (e: unknown) {
     if (generation === quantScoreGeneration) {

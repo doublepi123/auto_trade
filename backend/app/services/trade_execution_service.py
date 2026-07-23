@@ -12,7 +12,10 @@ from threading import RLock
 from typing import TYPE_CHECKING, Callable, Optional, cast
 
 from app.config import settings
-from app.core.fees import estimate_round_trip_fee
+from app.core.fees import (
+    estimate_round_trip_fee,
+    evaluate_long_round_trip_edge,
+)
 from app.core.market_calendar import is_closing_window, is_opening_warmup, is_trading_hours
 
 if TYPE_CHECKING:
@@ -110,6 +113,8 @@ class FinalOrderQuoteCheckResult:
 
     executable_price: Decimal | None = None
     issue: str = ""
+    bid: Decimal | None = None
+    ask: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -681,6 +686,8 @@ class TradeExecutionService:
         min_profit_amount: Decimal | float | int = Decimal("0"),
         allow_loss_exit: bool = False,
         fee_rate: Decimal | float | int = Decimal("0"),
+        expected_exit_price: Decimal | float | int | None = None,
+        entry_reference_quantity: Decimal | float | int | None = None,
         engine_snapshot: EngineSnapshot | None = None,
         restore_engine_snapshot: Callable[[EngineSnapshot], None] | None = None,
         notify_risk_event: _NotifyRiskEvent | None = None,
@@ -691,6 +698,16 @@ class TradeExecutionService:
             self._active_execution_context = dict(execution_context or {})
             self._active_execution_context.setdefault("market", market)
             self._active_execution_context.setdefault("fee_rate", float(fee_rate))
+            if expected_exit_price is not None:
+                self._active_execution_context.setdefault(
+                    "expected_exit_price",
+                    float(expected_exit_price),
+                )
+            if entry_reference_quantity is not None:
+                self._active_execution_context.setdefault(
+                    "entry_reference_quantity",
+                    float(entry_reference_quantity),
+                )
             try:
                 return self._execute_under_submission_guard(
                     action,
@@ -705,6 +722,8 @@ class TradeExecutionService:
                     min_profit_amount=min_profit_amount,
                     allow_loss_exit=allow_loss_exit,
                     fee_rate=fee_rate,
+                    expected_exit_price=expected_exit_price,
+                    entry_reference_quantity=entry_reference_quantity,
                     engine_snapshot=engine_snapshot,
                     restore_engine_snapshot=restore_engine_snapshot,
                     notify_risk_event=notify_risk_event,
@@ -728,6 +747,8 @@ class TradeExecutionService:
         min_profit_amount: Decimal | float | int = Decimal("0"),
         allow_loss_exit: bool = False,
         fee_rate: Decimal | float | int = Decimal("0"),
+        expected_exit_price: Decimal | float | int | None = None,
+        entry_reference_quantity: Decimal | float | int | None = None,
         engine_snapshot: EngineSnapshot | None = None,
         restore_engine_snapshot: Callable[[EngineSnapshot], None] | None = None,
         notify_risk_event: _NotifyRiskEvent | None = None,
@@ -890,13 +911,54 @@ class TradeExecutionService:
                 return self._skip_order(symbol, action, "pending order in flight", skip_category="PENDING")
 
         if action == "BUY":
-            return self._execute_buy(symbol, quote, broker, risk, notifier, cash_currency, engine_snapshot=engine_snapshot, restore_engine_snapshot=restore_engine_snapshot, notify_risk_event=notify_risk_event)
+            return self._execute_buy(
+                symbol,
+                quote,
+                broker,
+                risk,
+                notifier,
+                cash_currency,
+                min_profit_amount=min_profit_amount,
+                fee_rate=fee_rate,
+                expected_exit_price=expected_exit_price,
+                engine_snapshot=engine_snapshot,
+                restore_engine_snapshot=restore_engine_snapshot,
+                notify_risk_event=notify_risk_event,
+            )
         if action == "SELL":
-            return self._execute_sell(symbol, quote, broker, risk, notifier, min_profit_amount=min_profit_amount, allow_loss_exit=allow_loss_exit, fee_rate=fee_rate, engine_snapshot=engine_snapshot, restore_engine_snapshot=restore_engine_snapshot, notify_risk_event=notify_risk_event, reduce_only=reduce_only)
+            return self._execute_sell(
+                symbol,
+                quote,
+                broker,
+                risk,
+                notifier,
+                min_profit_amount=min_profit_amount,
+                allow_loss_exit=allow_loss_exit,
+                fee_rate=fee_rate,
+                entry_reference_quantity=entry_reference_quantity,
+                engine_snapshot=engine_snapshot,
+                restore_engine_snapshot=restore_engine_snapshot,
+                notify_risk_event=notify_risk_event,
+                reduce_only=reduce_only,
+            )
         if action == "SELL_SHORT":
             return self._execute_sell_short(symbol, quote, broker, risk, notifier, cash_currency, engine_snapshot=engine_snapshot, restore_engine_snapshot=restore_engine_snapshot, notify_risk_event=notify_risk_event)
         if action == "BUY_TO_COVER":
-            return self._execute_buy_to_cover(symbol, quote, broker, risk, notifier, min_profit_amount=min_profit_amount, allow_loss_exit=allow_loss_exit, fee_rate=fee_rate, engine_snapshot=engine_snapshot, restore_engine_snapshot=restore_engine_snapshot, notify_risk_event=notify_risk_event, reduce_only=reduce_only)
+            return self._execute_buy_to_cover(
+                symbol,
+                quote,
+                broker,
+                risk,
+                notifier,
+                min_profit_amount=min_profit_amount,
+                allow_loss_exit=allow_loss_exit,
+                fee_rate=fee_rate,
+                entry_reference_quantity=entry_reference_quantity,
+                engine_snapshot=engine_snapshot,
+                restore_engine_snapshot=restore_engine_snapshot,
+                notify_risk_event=notify_risk_event,
+                reduce_only=reduce_only,
+            )
         logger.warning("unknown action: %s", action)
         return None
 
@@ -1152,10 +1214,19 @@ class TradeExecutionService:
         avg_price: Decimal,
         quantity: Decimal,
         min_profit_amount: Decimal | float | int,
+        entry_reference_quantity: Decimal | float | int | None = None,
     ) -> Decimal:
         buffer_pct = Decimal(str(settings.min_exit_profit_pct or 0)) / Decimal("100")
         pct_profit_amount = avg_price * quantity * buffer_pct
         configured_amount = TradeExecutionService._coerce_non_negative_decimal(min_profit_amount)
+        reference_quantity = TradeExecutionService._coerce_non_negative_decimal(
+            entry_reference_quantity
+        )
+        if reference_quantity > 0:
+            configured_amount *= min(
+                Decimal("1"),
+                quantity / reference_quantity,
+            )
         return max(pct_profit_amount, configured_amount)
 
     def _profit_guard_for_exit(
@@ -1169,6 +1240,7 @@ class TradeExecutionService:
         min_profit_amount: Decimal | float | int,
         allow_loss_exit: bool,
         fee_rate: Decimal | float | int = Decimal("0"),
+        entry_reference_quantity: Decimal | float | int | None = None,
     ) -> OrderStatus | None:
         if allow_loss_exit or quantity <= 0 or avg_price <= 0:
             return None
@@ -1177,7 +1249,12 @@ class TradeExecutionService:
             if action == "SELL"
             else (avg_price - exit_price) * quantity
         )
-        required_profit = self._minimum_required_profit_amount(avg_price, quantity, min_profit_amount)
+        required_profit = self._minimum_required_profit_amount(
+            avg_price,
+            quantity,
+            min_profit_amount,
+            entry_reference_quantity,
+        )
         rate = self._coerce_non_negative_decimal(fee_rate)
         estimated_fees = estimate_round_trip_fee(
             entry_price=avg_price,
@@ -1202,6 +1279,109 @@ class TradeExecutionService:
             required_profit=float(required_profit),
             quantity=float(quantity),
             price=float(exit_price),
+        )
+
+    def _profit_guard_for_entry(
+        self,
+        *,
+        symbol: str,
+        entry_price: Decimal,
+        expected_exit_price: Decimal | float | int | None,
+        quantity: Decimal,
+        bid: object,
+        ask: object,
+        min_profit_amount: Decimal | float | int,
+        fee_rate: Decimal | float | int,
+    ) -> OrderStatus | None:
+        if expected_exit_price is None:
+            return None
+        target = self._coerce_non_negative_decimal(expected_exit_price)
+        if target <= 0:
+            return self._skip_order(
+                symbol,
+                "BUY",
+                "expected exit price is unavailable; fee-adjusted entry denied",
+                skip_category="FEE",
+            )
+        try:
+            bid_price = Decimal(str(bid))
+            ask_price = Decimal(str(ask))
+        except Exception:
+            bid_price = Decimal("0")
+            ask_price = Decimal("0")
+        if (
+            not bid_price.is_finite()
+            or not ask_price.is_finite()
+            or bid_price <= 0
+            or ask_price < bid_price
+        ):
+            return self._skip_order(
+                symbol,
+                "BUY",
+                "valid BBO is unavailable; fee-adjusted entry denied",
+                skip_category="FEE",
+            )
+
+        spread_cost = (ask_price - bid_price) * quantity
+        slippage_cost = (
+            entry_price
+            * quantity
+            * Decimal(str(settings.entry_round_trip_slippage_bps))
+            / Decimal("10000")
+        )
+        edge = evaluate_long_round_trip_edge(
+            entry_price=entry_price,
+            exit_price=target,
+            quantity=quantity,
+            one_side_rate=self._coerce_non_negative_decimal(fee_rate),
+            minimum_profit_amount=self._coerce_non_negative_decimal(
+                min_profit_amount
+            ),
+            minimum_profit_pct=Decimal(
+                str(settings.min_exit_profit_pct or 0)
+            ),
+            extra_costs=spread_cost + slippage_cost,
+        )
+        minimum_ratio = Decimal(
+            str(settings.min_entry_edge_cost_ratio)
+        )
+        edge_payload: dict[str, object] = {
+            "entry_cost_gate_version": "v1",
+            "expected_profit": float(edge.gross_profit),
+            "estimated_fees": float(edge.estimated_fees),
+            "estimated_spread_cost": float(spread_cost),
+            "estimated_slippage_cost": float(slippage_cost),
+            "estimated_total_cost": float(edge.total_costs),
+            "net_expected_profit": float(edge.net_profit),
+            "required_profit": float(edge.required_profit),
+            "edge_cost_ratio": (
+                float(edge.edge_cost_ratio)
+                if edge.edge_cost_ratio is not None
+                else None
+            ),
+            "minimum_edge_cost_ratio": float(minimum_ratio),
+            "quantity": float(quantity),
+            "price": float(entry_price),
+            "expected_exit_price": float(target),
+        }
+        self._active_execution_context.update(edge_payload)
+        if edge.meets(minimum_ratio):
+            return None
+        ratio = (
+            f"{edge.edge_cost_ratio:.3f}"
+            if edge.edge_cost_ratio is not None
+            else "unbounded"
+        )
+        return self._skip_order(
+            symbol,
+            "BUY",
+            (
+                f"fee-adjusted entry net profit {edge.net_profit:.2f} is below "
+                f"required minimum profit {edge.required_profit:.2f}, or "
+                f"edge/cost ratio {ratio} is below {minimum_ratio:.3f}"
+            ),
+            skip_category="FEE",
+            **edge_payload,
         )
 
     def _skip_order(
@@ -1251,6 +1431,9 @@ class TradeExecutionService:
         notifier: "NotifierInterface",
         cash_currency: str,
         *,
+        min_profit_amount: Decimal | float | int = Decimal("0"),
+        fee_rate: Decimal | float | int = Decimal("0"),
+        expected_exit_price: Decimal | float | int | None = None,
         engine_snapshot: EngineSnapshot | None = None,
         restore_engine_snapshot: Callable[[EngineSnapshot], None] | None = None,
         notify_risk_event: _NotifyRiskEvent | None = None,
@@ -1267,6 +1450,18 @@ class TradeExecutionService:
                 "entry quantity is zero after buying-power and position checks",
                 skip_category="POSITION",
             )
+        entry_guard = self._profit_guard_for_entry(
+            symbol=symbol,
+            entry_price=price,
+            expected_exit_price=expected_exit_price,
+            quantity=Decimal(qty),
+            bid=quote.bid,
+            ask=quote.ask,
+            min_profit_amount=min_profit_amount,
+            fee_rate=fee_rate,
+        )
+        if entry_guard is not None:
+            return entry_guard
 
         order_status = self._submit_limit_order(
             "BUY",
@@ -1280,6 +1475,11 @@ class TradeExecutionService:
             engine_snapshot=engine_snapshot,
             restore_engine_snapshot=restore_engine_snapshot,
             notify_risk_event=notify_risk_event,
+            entry_expected_exit_price=expected_exit_price,
+            entry_min_profit_amount=min_profit_amount,
+            entry_fee_rate=fee_rate,
+            entry_bid=quote.bid,
+            entry_ask=quote.ask,
         )
         if (
             order_status is None
@@ -1330,6 +1530,7 @@ class TradeExecutionService:
         min_profit_amount: Decimal | float | int = Decimal("0"),
         allow_loss_exit: bool = False,
         fee_rate: Decimal | float | int = Decimal("0"),
+        entry_reference_quantity: Decimal | float | int | None = None,
         engine_snapshot: EngineSnapshot | None = None,
         restore_engine_snapshot: Callable[[EngineSnapshot], None] | None = None,
         notify_risk_event: _NotifyRiskEvent | None = None,
@@ -1359,6 +1560,7 @@ class TradeExecutionService:
             min_profit_amount=min_profit_amount,
             allow_loss_exit=allow_loss_exit,
             fee_rate=fee_rate,
+            entry_reference_quantity=entry_reference_quantity,
         )
         if profit_guard is not None:
             return profit_guard
@@ -1377,6 +1579,10 @@ class TradeExecutionService:
             notify_risk_event=notify_risk_event,
             avg_price=pos_avg_price,
             bind_final_executable_price=reduce_only,
+            exit_min_profit_amount=min_profit_amount,
+            exit_allow_loss_exit=allow_loss_exit,
+            exit_fee_rate=fee_rate,
+            exit_entry_reference_quantity=entry_reference_quantity,
         )
         if (
             order_status is None
@@ -1534,6 +1740,7 @@ class TradeExecutionService:
         min_profit_amount: Decimal | float | int = Decimal("0"),
         allow_loss_exit: bool = False,
         fee_rate: Decimal | float | int = Decimal("0"),
+        entry_reference_quantity: Decimal | float | int | None = None,
         engine_snapshot: EngineSnapshot | None = None,
         restore_engine_snapshot: Callable[[EngineSnapshot], None] | None = None,
         notify_risk_event: _NotifyRiskEvent | None = None,
@@ -1563,6 +1770,7 @@ class TradeExecutionService:
             min_profit_amount=min_profit_amount,
             allow_loss_exit=allow_loss_exit,
             fee_rate=fee_rate,
+            entry_reference_quantity=entry_reference_quantity,
         )
         if profit_guard is not None:
             return profit_guard
@@ -1581,6 +1789,10 @@ class TradeExecutionService:
             notify_risk_event=notify_risk_event,
             avg_price=pos_avg_price,
             bind_final_executable_price=reduce_only,
+            exit_min_profit_amount=min_profit_amount,
+            exit_allow_loss_exit=allow_loss_exit,
+            exit_fee_rate=fee_rate,
+            exit_entry_reference_quantity=entry_reference_quantity,
         )
         if (
             order_status is None
@@ -1665,6 +1877,15 @@ class TradeExecutionService:
         notify_risk_event: _NotifyRiskEvent | None = None,
         avg_price: Decimal | None = None,
         bind_final_executable_price: bool = False,
+        entry_expected_exit_price: Decimal | float | int | None = None,
+        entry_min_profit_amount: Decimal | float | int = Decimal("0"),
+        entry_fee_rate: Decimal | float | int = Decimal("0"),
+        entry_bid: object = None,
+        entry_ask: object = None,
+        exit_min_profit_amount: Decimal | float | int = Decimal("0"),
+        exit_allow_loss_exit: bool = False,
+        exit_fee_rate: Decimal | float | int = Decimal("0"),
+        exit_entry_reference_quantity: Decimal | float | int | None = None,
     ) -> OrderStatus | None:
         """Submit a limit order, persist it, and handle immediate live/terminal/filled outcomes.
 
@@ -1681,6 +1902,16 @@ class TradeExecutionService:
                 broker,
                 risk,
                 bind_final_executable_price=bind_final_executable_price,
+                entry_expected_exit_price=entry_expected_exit_price,
+                entry_min_profit_amount=entry_min_profit_amount,
+                entry_fee_rate=entry_fee_rate,
+                entry_bid=entry_bid,
+                entry_ask=entry_ask,
+                exit_avg_price=avg_price,
+                exit_min_profit_amount=exit_min_profit_amount,
+                exit_allow_loss_exit=exit_allow_loss_exit,
+                exit_fee_rate=exit_fee_rate,
+                exit_entry_reference_quantity=exit_entry_reference_quantity,
             )
             if isinstance(precheck_result, OrderStatus):
                 return precheck_result
@@ -1714,6 +1945,16 @@ class TradeExecutionService:
         risk: RiskController,
         *,
         bind_final_executable_price: bool = False,
+        entry_expected_exit_price: Decimal | float | int | None = None,
+        entry_min_profit_amount: Decimal | float | int = Decimal("0"),
+        entry_fee_rate: Decimal | float | int = Decimal("0"),
+        entry_bid: object = None,
+        entry_ask: object = None,
+        exit_avg_price: Decimal | None = None,
+        exit_min_profit_amount: Decimal | float | int = Decimal("0"),
+        exit_allow_loss_exit: bool = False,
+        exit_fee_rate: Decimal | float | int = Decimal("0"),
+        exit_entry_reference_quantity: Decimal | float | int | None = None,
     ) -> OrderStatus | Decimal | None:
         if action in _ENTRY_ACTIONS:
             position_check = self._entry_position_check(broker, symbol, action)
@@ -1784,6 +2025,8 @@ class TradeExecutionService:
                     risk,
                 )
         final_executable_price: Decimal | None = None
+        final_bid: Decimal | None = None
+        final_ask: Decimal | None = None
         if self._final_order_quote_check is not None:
             try:
                 quote_check_result = self._final_order_quote_check(
@@ -1802,6 +2045,8 @@ class TradeExecutionService:
             if isinstance(quote_check_result, FinalOrderQuoteCheckResult):
                 quote_issue = quote_check_result.issue
                 final_executable_price = quote_check_result.executable_price
+                final_bid = quote_check_result.bid
+                final_ask = quote_check_result.ask
             else:
                 quote_issue = quote_check_result
             if quote_issue:
@@ -1811,6 +2056,19 @@ class TradeExecutionService:
                     quote_issue,
                     skip_category="RISK",
                 )
+        if action == "BUY" and entry_expected_exit_price is not None:
+            entry_guard = self._profit_guard_for_entry(
+                symbol=symbol,
+                entry_price=price,
+                expected_exit_price=entry_expected_exit_price,
+                quantity=qty,
+                bid=final_bid if final_bid is not None else entry_bid,
+                ask=final_ask if final_ask is not None else entry_ask,
+                min_profit_amount=entry_min_profit_amount,
+                fee_rate=entry_fee_rate,
+            )
+            if entry_guard is not None:
+                return entry_guard
         if bind_final_executable_price:
             if final_executable_price is None:
                 return self._skip_order(
@@ -1831,6 +2089,24 @@ class TradeExecutionService:
                     "fresh executable BBO price is unavailable",
                     skip_category="RISK",
                 )
+            if (
+                action in _POSITION_REDUCING_ACTIONS
+                and not exit_allow_loss_exit
+                and exit_avg_price is not None
+            ):
+                final_profit_guard = self._profit_guard_for_exit(
+                    action=action,
+                    symbol=symbol,
+                    avg_price=exit_avg_price,
+                    exit_price=marketable_price,
+                    quantity=qty,
+                    min_profit_amount=exit_min_profit_amount,
+                    allow_loss_exit=False,
+                    fee_rate=exit_fee_rate,
+                    entry_reference_quantity=exit_entry_reference_quantity,
+                )
+                if final_profit_guard is not None:
+                    return final_profit_guard
         else:
             marketable_price = None
         risk_result = risk.check()

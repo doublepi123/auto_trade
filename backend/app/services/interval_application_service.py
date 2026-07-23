@@ -4,10 +4,16 @@ import logging
 import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal
 from enum import Enum
 from typing import Any, Callable
 
 from app.config import settings
+from app.core.fees import (
+    LongRoundTripEdge,
+    evaluate_long_round_trip_edge,
+    one_side_fee_rate,
+)
 from app.services.strategy_service import StrategyService
 
 logger = logging.getLogger("auto_trade.interval_application")
@@ -28,6 +34,11 @@ class LLMIntervalPolicyDecision:
     sell_high: float | None = None
     confidence: float | None = None
     deviation_pct: float | None = None
+    gross_profit: float | None = None
+    estimated_costs: float | None = None
+    net_profit: float | None = None
+    required_profit: float | None = None
+    edge_cost_ratio: float | None = None
 
 
 class IntervalApplicationService:
@@ -41,6 +52,7 @@ class IntervalApplicationService:
         suggestion: dict[str, Any],
         reference_quantity: float = 1.0,
         runtime_reload: Callable[[], None] | None = None,
+        position_avg_price: object = None,
     ) -> dict[str, Any]:
         """Apply LLM suggestion based on current engine state."""
         svc = StrategyService(db)
@@ -53,6 +65,11 @@ class IntervalApplicationService:
             suggestion.get("confidence_score"),
             min_profit_amount=config.min_profit_amount,
             reference_quantity=reference_quantity,
+            one_side_fee_rate=self._fee_rate(config),
+            round_trip_slippage_bps=settings.entry_round_trip_slippage_bps,
+            minimum_edge_cost_ratio=settings.min_entry_edge_cost_ratio,
+            edge_entry_price=position_avg_price,
+            require_edge_entry_price=engine_state == "long",
         )
         if policy.disposition != LLMIntervalDisposition.ALLOW:
             return self._record_non_application(db, config, policy)
@@ -94,6 +111,7 @@ class IntervalApplicationService:
             "policy_status": policy.disposition.value,
             "policy_code": policy.code,
             "deviation_pct": policy.deviation_pct,
+            **self._edge_audit_fields(policy),
         }
 
     def apply_direct_suggestion(
@@ -115,6 +133,9 @@ class IntervalApplicationService:
             suggestion.get("confidence_score"),
             min_profit_amount=config.min_profit_amount,
             reference_quantity=reference_quantity,
+            one_side_fee_rate=self._fee_rate(config),
+            round_trip_slippage_bps=settings.entry_round_trip_slippage_bps,
+            minimum_edge_cost_ratio=settings.min_entry_edge_cost_ratio,
         )
         now = datetime.now(timezone.utc)
         if policy.disposition != LLMIntervalDisposition.ALLOW:
@@ -148,6 +169,7 @@ class IntervalApplicationService:
             "policy_status": policy.disposition.value,
             "policy_code": policy.code,
             "deviation_pct": policy.deviation_pct,
+            **self._edge_audit_fields(policy),
         }
 
     @staticmethod
@@ -202,6 +224,7 @@ class IntervalApplicationService:
             "policy_status": policy.disposition.value,
             "policy_code": policy.code,
             "deviation_pct": policy.deviation_pct,
+            **IntervalApplicationService._edge_audit_fields(policy),
         }
 
     @staticmethod
@@ -259,6 +282,11 @@ class IntervalApplicationService:
         *,
         min_profit_amount: float = 0.0,
         reference_quantity: float = 1.0,
+        one_side_fee_rate: float = 0.0,
+        round_trip_slippage_bps: float = 0.0,
+        minimum_edge_cost_ratio: float = 0.0,
+        edge_entry_price: Any = None,
+        require_edge_entry_price: bool = False,
     ) -> LLMIntervalPolicyDecision:
         """Validate first, then downgrade an otherwise valid suggestion to shadow."""
         normalized_price = IntervalApplicationService._finite_number(current_price)
@@ -328,25 +356,85 @@ class IntervalApplicationService:
                 confidence=normalized_confidence,
             )
 
-        interval_width = normalized_sell_high - normalized_buy_low
-        minimum_width = IntervalApplicationService._minimum_interval_width(
-            normalized_price,
-            min_profit_amount,
-            reference_quantity,
+        normalized_edge_entry = normalized_buy_low
+        if require_edge_entry_price:
+            normalized_edge_entry = IntervalApplicationService._finite_number(
+                edge_entry_price
+            )
+            if normalized_edge_entry is None or normalized_edge_entry <= 0:
+                return LLMIntervalPolicyDecision(
+                    LLMIntervalDisposition.REJECT,
+                    "INVALID_POSITION_COST_BASIS",
+                    (
+                        "LONG interval evaluation requires a positive finite "
+                        "position average price"
+                    ),
+                    buy_low=normalized_buy_low,
+                    sell_high=normalized_sell_high,
+                    confidence=normalized_confidence,
+                )
+
+        edge = IntervalApplicationService._interval_edge(
+            normalized_edge_entry,
+            normalized_sell_high,
+            min_profit_amount=min_profit_amount,
+            reference_quantity=reference_quantity,
+            one_side_fee_rate=one_side_fee_rate,
+            round_trip_slippage_bps=round_trip_slippage_bps,
         )
-        if interval_width < minimum_width:
+        minimum_ratio = IntervalApplicationService._finite_number(
+            minimum_edge_cost_ratio
+        )
+        if minimum_ratio is None or minimum_ratio < 0:
             return LLMIntervalPolicyDecision(
                 LLMIntervalDisposition.REJECT,
-                "INTERVAL_TOO_NARROW",
-                (
-                    f"interval width ({interval_width:.2f}) below minimum profit width "
-                    f"{minimum_width:.2f}"
-                ),
+                "INVALID_COST_ASSUMPTION",
+                "minimum edge-to-cost ratio must be a non-negative finite number",
                 buy_low=normalized_buy_low,
                 sell_high=normalized_sell_high,
                 confidence=normalized_confidence,
             )
+        if edge is None:
+            return LLMIntervalPolicyDecision(
+                LLMIntervalDisposition.REJECT,
+                "INVALID_COST_ASSUMPTION",
+                "fee, slippage, quantity, and minimum profit assumptions must be valid",
+                buy_low=normalized_buy_low,
+                sell_high=normalized_sell_high,
+                confidence=normalized_confidence,
+            )
+        edge_fields = {
+            "gross_profit": float(edge.gross_profit),
+            "estimated_costs": float(edge.total_costs),
+            "net_profit": float(edge.net_profit),
+            "required_profit": float(edge.required_profit),
+            "edge_cost_ratio": (
+                float(edge.edge_cost_ratio)
+                if edge.edge_cost_ratio is not None
+                else None
+            ),
+        }
+        if not edge.meets(Decimal(str(minimum_ratio))):
+            ratio_text = (
+                f"{edge.edge_cost_ratio:.3f}"
+                if edge.edge_cost_ratio is not None
+                else "unbounded"
+            )
+            return LLMIntervalPolicyDecision(
+                LLMIntervalDisposition.REJECT,
+                "INTERVAL_TOO_NARROW",
+                (
+                    f"fee-adjusted net interval profit {edge.net_profit:.2f} is below "
+                    f"minimum profit {edge.required_profit:.2f}, or edge/cost ratio "
+                    f"{ratio_text} is below {minimum_ratio:.3f}"
+                ),
+                buy_low=normalized_buy_low,
+                sell_high=normalized_sell_high,
+                confidence=normalized_confidence,
+                **edge_fields,
+            )
 
+        interval_width = normalized_sell_high - normalized_buy_low
         stripe_width_pct = interval_width / normalized_price * 100
         if stripe_width_pct > settings.llm_max_stripe_width_pct:
             return LLMIntervalPolicyDecision(
@@ -396,6 +484,7 @@ class IntervalApplicationService:
             sell_high=normalized_sell_high,
             confidence=normalized_confidence,
             deviation_pct=deviation_pct,
+            **edge_fields,
         )
 
     @staticmethod
@@ -409,20 +498,77 @@ class IntervalApplicationService:
         return normalized if math.isfinite(normalized) else None
 
     @staticmethod
-    def _minimum_interval_width(
-        current_price: float,
+    def _interval_edge(
+        entry_price: float,
+        sell_high: float,
+        *,
         min_profit_amount: float,
         reference_quantity: float,
-    ) -> float:
-        min_exit_pct = settings.min_exit_profit_pct or 0.0
-        pct_width = current_price * min_exit_pct / 100 if current_price > 0 else 0.0
-        try:
-            quantity = float(reference_quantity)
-        except (TypeError, ValueError):
-            quantity = 0.0
-        try:
-            configured_amount = float(min_profit_amount)
-        except (TypeError, ValueError):
-            configured_amount = 0.0
-        amount_width = configured_amount / quantity if configured_amount > 0 and quantity > 0 else 0.0
-        return max(pct_width, amount_width)
+        one_side_fee_rate: float,
+        round_trip_slippage_bps: float,
+    ) -> LongRoundTripEdge | None:
+        quantity = IntervalApplicationService._finite_number(
+            reference_quantity
+        )
+        configured_amount = IntervalApplicationService._finite_number(
+            min_profit_amount
+        )
+        fee_rate = IntervalApplicationService._finite_number(
+            one_side_fee_rate
+        )
+        slippage_bps = IntervalApplicationService._finite_number(
+            round_trip_slippage_bps
+        )
+        if (
+            quantity is None
+            or quantity <= 0
+            or configured_amount is None
+            or configured_amount < 0
+            or fee_rate is None
+            or fee_rate < 0
+            or slippage_bps is None
+            or slippage_bps < 0
+        ):
+            return None
+        entry = Decimal(str(entry_price))
+        exit_price = Decimal(str(sell_high))
+        size = Decimal(str(quantity))
+        slippage = (
+            entry
+            * size
+            * Decimal(str(slippage_bps))
+            / Decimal("10000")
+        )
+        return evaluate_long_round_trip_edge(
+            entry_price=entry,
+            exit_price=exit_price,
+            quantity=size,
+            one_side_rate=Decimal(str(fee_rate)),
+            minimum_profit_amount=Decimal(str(configured_amount)),
+            minimum_profit_pct=Decimal(
+                str(settings.min_exit_profit_pct or 0)
+            ),
+            extra_costs=slippage,
+        )
+
+    @staticmethod
+    def _fee_rate(config: Any) -> float:
+        return float(
+            one_side_fee_rate(
+                str(getattr(config, "market", "US")),
+                Decimal(str(getattr(config, "fee_rate_us", 0) or 0)),
+                Decimal(str(getattr(config, "fee_rate_hk", 0) or 0)),
+            )
+        )
+
+    @staticmethod
+    def _edge_audit_fields(
+        policy: LLMIntervalPolicyDecision,
+    ) -> dict[str, float | None]:
+        return {
+            "gross_profit": policy.gross_profit,
+            "estimated_costs": policy.estimated_costs,
+            "net_profit": policy.net_profit,
+            "required_profit": policy.required_profit,
+            "edge_cost_ratio": policy.edge_cost_ratio,
+        }

@@ -1,13 +1,21 @@
 from __future__ import annotations
 
+import math
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
+import pytest
+from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.api import watchlist as watchlist_api
 from app.core.broker import BrokerCandle, Quote
+from app.core.market_calendar import get_session
 from app.models import Base, WatchlistItem, WatchlistScore
+from app.services import watchlist_quant_service as quant_module
 from app.services.watchlist_quant_service import (
+    QuantScoringOutsideRTHError,
     WatchlistQuantService,
     build_watchlist_quant_metrics,
     score_watchlist_quant_metrics,
@@ -35,30 +43,50 @@ def _daily_bars() -> list[BrokerCandle]:
                 high=max(price, close) * 1.007,
                 low=min(price, close) * 0.993,
                 close=close,
-                volume=2_000_000,
+                volume=12_000_000,
             )
         )
         price = close
     return result
 
 
-def _intraday_bars() -> list[BrokerCandle]:
+def _rth_timestamps(
+    count: int,
+    *,
+    now: datetime = _NOW,
+) -> list[datetime]:
+    session = get_session("US")
+    cursor = now - timedelta(minutes=5)
+    timestamps: list[datetime] = []
+    while len(timestamps) < count:
+        if session.is_rth(cursor):
+            timestamps.append(cursor)
+        cursor -= timedelta(minutes=5)
+    return list(reversed(timestamps))
+
+
+def _intraday_bars(
+    *,
+    count: int = 700,
+    now: datetime = _NOW,
+) -> list[BrokerCandle]:
     result: list[BrokerCandle] = []
-    price = 100.0
-    end = _NOW - timedelta(minutes=5)
-    for index in range(700):
-        close = price * (1.001 if index % 2 == 0 else 0.999)
+    previous = 100.0
+    for index, timestamp in enumerate(_rth_timestamps(count, now=now)):
+        close = 100 * math.exp(
+            0.006 * math.sin(2 * math.pi * index / 8)
+        )
         result.append(
             BrokerCandle(
-                timestamp=end - timedelta(minutes=5 * (699 - index)),
-                open=price,
-                high=max(price, close) * 1.0002,
-                low=min(price, close) * 0.9998,
+                timestamp=timestamp,
+                open=previous,
+                high=max(previous, close) * 1.0002,
+                low=min(previous, close) * 0.9998,
                 close=close,
                 volume=100_000,
             )
         )
-        price = close
+        previous = close
     return result
 
 
@@ -79,16 +107,17 @@ def test_quant_score_rewards_liquid_mean_reverting_candidate() -> None:
         daily=_daily_bars(),
         intraday=_intraday_bars(),
         quote=_quote(),
+        observed_at=_NOW,
     )
 
     score = score_watchlist_quant_metrics(metrics)
 
     assert metrics.blockers == ()
-    assert metrics.intraday_autocorrelation < 0
-    assert metrics.intraday_reversal_rate > 0.9
+    assert metrics.conditional_reversal_bps > 40
+    assert metrics.conditional_reversal_hit_rate > 0.9
     assert score.score >= 50
     assert score.recommended_action == "CANDIDATE"
-    assert score.rationale.startswith("quant-v1;")
+    assert score.rationale.startswith("quant-v2;")
 
 
 def test_quant_score_caps_candidate_with_hard_data_blockers() -> None:
@@ -98,6 +127,7 @@ def test_quant_score_caps_candidate_with_hard_data_blockers() -> None:
         daily=_daily_bars()[:10],
         intraday=_intraday_bars()[:20],
         quote=None,
+        observed_at=_NOW,
     )
 
     score = score_watchlist_quant_metrics(metrics)
@@ -112,8 +142,10 @@ def test_quant_score_caps_candidate_with_hard_data_blockers() -> None:
 class _Broker:
     def __init__(self, *, fail_symbol: str = "") -> None:
         self.fail_symbol = fail_symbol
+        self.quote_requests: list[list[str]] = []
 
     def get_quotes(self, symbols: list[str]) -> list[Quote]:
+        self.quote_requests.append(list(symbols))
         return [_quote(symbol) for symbol in symbols]
 
     def get_candlesticks(
@@ -169,9 +201,290 @@ def test_service_persists_scores_and_isolates_symbol_failures() -> None:
             "BROKEN.US",
         ]
         by_symbol = {row.symbol: row for row in rows}
-        assert by_symbol["AAPL.US"].source == "quant_v1"
-        assert by_symbol["BROKEN.US"].source == "quant_error"
+        assert by_symbol["AAPL.US"].source == "quant_v2"
+        assert by_symbol["BROKEN.US"].source == "quant_error_v2"
         assert by_symbol["BROKEN.US"].recommended_action == "AVOID"
         assert db.query(WatchlistScore).count() == 2
+    finally:
+        db.close()
+
+
+class _NoMarketDataBroker:
+    def get_quotes(self, symbols: list[str]) -> list[Quote]:
+        raise AssertionError(f"unexpected quote access: {symbols}")
+
+    def get_candlesticks(
+        self,
+        symbol: str,
+        period: str,
+        count: int,
+    ) -> list[BrokerCandle]:
+        raise AssertionError(
+            f"unexpected candle access: {symbol} {period} {count}"
+        )
+
+
+def test_service_rejects_outside_rth_before_market_data_or_writes() -> None:
+    db = _db()
+    try:
+        item = WatchlistItem(
+            symbol="AAPL.US",
+            market="US",
+            alias="Apple",
+        )
+        db.add(item)
+        db.commit()
+
+        with pytest.raises(
+            QuantScoringOutsideRTHError,
+            match="regular trading hours.*US",
+        ):
+            WatchlistQuantService(
+                db,
+                _NoMarketDataBroker(),
+                now=datetime(2026, 7, 23, 23, 0, tzinfo=timezone.utc),
+            ).score_items([item])
+
+        assert db.query(WatchlistScore).count() == 0
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize(
+    ("symbol", "market", "observed_at"),
+    [
+        (
+            "AAPL.US",
+            "US",
+            datetime(2026, 7, 23, 13, 32, tzinfo=timezone.utc),
+        ),
+        (
+            "700.HK",
+            "HK",
+            datetime(2026, 7, 24, 1, 32, tzinfo=timezone.utc),
+        ),
+        (
+            "700.HK",
+            "HK",
+            datetime(2026, 7, 24, 5, 2, tzinfo=timezone.utc),
+        ),
+    ],
+)
+def test_service_preserves_score_until_first_segment_bar_completes(
+    symbol: str,
+    market: str,
+    observed_at: datetime,
+) -> None:
+    db = _db()
+    try:
+        item = WatchlistItem(
+            symbol=symbol,
+            market=market,
+            alias=symbol,
+        )
+        previous = WatchlistScore(
+            symbol=symbol,
+            market=market,
+            score=72,
+            confidence=0.8,
+            recommended_action="CANDIDATE",
+            source="quant_v2",
+            rationale="previous valid score",
+            created_at=observed_at - timedelta(hours=1),
+            expires_at=observed_at + timedelta(hours=1),
+        )
+        db.add_all([item, previous])
+        db.commit()
+        previous_id = previous.id
+
+        rows = WatchlistQuantService(
+            db,
+            _NoMarketDataBroker(),
+            now=observed_at,
+        ).score_items([item])
+
+        assert rows == []
+        stored = db.query(WatchlistScore).all()
+        assert len(stored) == 1
+        assert stored[0].id == previous_id
+        assert stored[0].rationale == "previous valid score"
+    finally:
+        db.close()
+
+
+def test_quant_rank_api_maps_closed_market_to_conflict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = _db()
+    try:
+        db.add(
+            WatchlistItem(
+                symbol="AAPL.US",
+                market="US",
+                alias="Apple",
+            )
+        )
+        db.commit()
+        monkeypatch.setattr(
+            watchlist_api,
+            "get_runner",
+            lambda: SimpleNamespace(broker=_NoMarketDataBroker()),
+        )
+        monkeypatch.setattr(
+            quant_module,
+            "is_trading_hours",
+            lambda _market, _now: False,
+        )
+
+        with pytest.raises(HTTPException) as captured:
+            watchlist_api.rank_watchlist_quantitatively(
+                ttl_minutes=360,
+                db=db,
+            )
+
+        assert captured.value.status_code == 409
+        assert "regular trading hours" in str(captured.value.detail)
+        assert db.query(WatchlistScore).count() == 0
+    finally:
+        db.close()
+
+
+def test_service_updates_open_market_and_leaves_closed_market_unchanged() -> None:
+    db = _db()
+    try:
+        items = [
+            WatchlistItem(
+                symbol="AAPL.US",
+                market="US",
+                alias="Apple",
+            ),
+            WatchlistItem(
+                symbol="700.HK",
+                market="HK",
+                alias="Tencent",
+            ),
+        ]
+        db.add_all(items)
+        db.commit()
+        broker = _Broker()
+
+        rows = WatchlistQuantService(
+            db,
+            broker,
+            now=_NOW,
+        ).score_items(items)
+
+        assert broker.quote_requests == [["AAPL.US"]]
+        assert [row.symbol for row in rows] == ["AAPL.US"]
+        assert rows[0].source == "quant_v2"
+        assert db.query(WatchlistScore).count() == 1
+    finally:
+        db.close()
+
+
+def test_quant_rank_api_returns_complete_current_snapshot_for_mixed_markets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = _db()
+    try:
+        items = [
+            WatchlistItem(
+                symbol="AAPL.US",
+                market="US",
+                alias="Apple",
+            ),
+            WatchlistItem(
+                symbol="700.HK",
+                market="HK",
+                alias="Tencent",
+            ),
+        ]
+        db.add_all(items)
+        db.add(
+            WatchlistScore(
+                symbol="700.HK",
+                market="HK",
+                score=0,
+                confidence=0,
+                recommended_action="AVOID",
+                source="quant_error_v2",
+                rationale="current HK data error",
+                created_at=_NOW - timedelta(minutes=30),
+                expires_at=_NOW + timedelta(days=7),
+            )
+        )
+        db.commit()
+        broker = _Broker()
+        service_class = WatchlistQuantService
+        monkeypatch.setattr(
+            watchlist_api,
+            "get_runner",
+            lambda: SimpleNamespace(broker=broker),
+        )
+        monkeypatch.setattr(
+            watchlist_api,
+            "WatchlistQuantService",
+            lambda service_db, service_broker: service_class(
+                service_db,
+                service_broker,
+                now=_NOW,
+            ),
+        )
+
+        response = watchlist_api.rank_watchlist_quantitatively(
+            ttl_minutes=360,
+            db=db,
+        )
+
+        assert broker.quote_requests == [["AAPL.US"]]
+        by_symbol = {
+            row.symbol: row
+            for row in response.scores
+        }
+        assert set(by_symbol) == {"AAPL.US", "700.HK"}
+        assert by_symbol["AAPL.US"].source == "quant_v2"
+        assert by_symbol["700.HK"].source == "quant_error_v2"
+    finally:
+        db.close()
+
+
+class _OldLastTradeBroker(_Broker):
+    def get_quotes(self, symbols: list[str]) -> list[Quote]:
+        self.quote_requests.append(list(symbols))
+        return [
+            Quote(
+                symbol=symbol,
+                last_price=100,
+                bid=99.99,
+                ask=100.01,
+                timestamp=(
+                    _NOW - timedelta(minutes=2)
+                ).isoformat(),
+            )
+            for symbol in symbols
+        ]
+
+
+def test_service_does_not_treat_last_trade_age_as_bbo_age() -> None:
+    db = _db()
+    try:
+        item = WatchlistItem(
+            symbol="AAPL.US",
+            market="US",
+            alias="Apple",
+        )
+        db.add(item)
+        db.commit()
+
+        rows = WatchlistQuantService(
+            db,
+            _OldLastTradeBroker(),
+            now=_NOW,
+        ).score_items([item])
+
+        assert len(rows) == 1
+        assert rows[0].source == "quant_v2"
+        assert rows[0].score > 0
+        assert "STALE_BBO" not in rows[0].rationale
     finally:
         db.close()

@@ -1,7 +1,13 @@
 import logging
 from decimal import Decimal
 
-from app.core.fees import estimate_round_trip_fee, one_side_fee_rate
+import pytest
+
+from app.core.fees import (
+    estimate_round_trip_fee,
+    evaluate_long_round_trip_edge,
+    one_side_fee_rate,
+)
 
 
 def test_estimate_round_trip_fee_uses_entry_and_exit_notional() -> None:
@@ -52,3 +58,47 @@ def test_estimate_round_trip_fee_warns_for_non_positive_quantity(caplog) -> None
         one_side_rate=Decimal("0.001"),
     )
     assert "quantity=-5" in caplog.text
+
+
+def test_evaluate_long_round_trip_edge_reports_fee_adjusted_profit() -> None:
+    edge = evaluate_long_round_trip_edge(
+        entry_price=Decimal("199.75"),
+        exit_price=Decimal("200.25"),
+        quantity=Decimal("1000"),
+        one_side_rate=Decimal("0.0005"),
+        minimum_profit_pct=Decimal("0.2"),
+        extra_costs=Decimal("79.9"),
+    )
+
+    assert edge.gross_profit == Decimal("500.00")
+    assert edge.estimated_fees == Decimal("200.00000")
+    assert edge.total_costs == Decimal("279.90000")
+    assert edge.net_profit == Decimal("220.10000")
+    assert edge.required_profit == Decimal("399.5000")
+    assert edge.meets(Decimal("2")) is False
+
+
+def test_evaluate_long_round_trip_edge_accepts_sufficient_net_edge() -> None:
+    edge = evaluate_long_round_trip_edge(
+        entry_price=Decimal("100"),
+        exit_price=Decimal("101"),
+        quantity=Decimal("100"),
+        one_side_rate=Decimal("0.0005"),
+        minimum_profit_amount=Decimal("10"),
+        minimum_profit_pct=Decimal("0.2"),
+        extra_costs=Decimal("4"),
+    )
+
+    assert edge.net_profit == Decimal("85.9500")
+    assert edge.required_profit == Decimal("20.0")
+    assert edge.meets(Decimal("2")) is True
+
+
+def test_evaluate_long_round_trip_edge_rejects_invalid_inputs() -> None:
+    with pytest.raises(ValueError, match="positive"):
+        evaluate_long_round_trip_edge(
+            entry_price=Decimal("100"),
+            exit_price=Decimal("101"),
+            quantity=Decimal("0"),
+            one_side_rate=Decimal("0.0005"),
+        )

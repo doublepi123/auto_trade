@@ -2209,6 +2209,17 @@ class UniversePromotionReadinessItem(BaseModel):
         le=100,
         allow_inf_nan=False,
     )
+    priority_rank: int = Field(ge=1)
+    priority_score: float = Field(
+        ge=0,
+        le=100,
+        allow_inf_nan=False,
+    )
+    quant_weight: float = Field(
+        ge=0,
+        le=0.35,
+        allow_inf_nan=False,
+    )
     is_trading_target: bool
     shadow_enabled: bool
     quant_score: Optional[float] = Field(
@@ -2258,6 +2269,7 @@ class UniversePromotionReadinessResponse(BaseModel):
     universe_run_id: int = Field(ge=1)
     as_of_date: date
     generated_at: datetime
+    priority_algorithm_version: str = Field(min_length=1, max_length=100)
     items: list[UniversePromotionReadinessItem] = Field(
         default_factory=list,
     )

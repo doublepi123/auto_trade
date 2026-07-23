@@ -93,6 +93,7 @@ describe('Dynamic universe observation pool', () => {
       cy.contains('仅人工升级').should('be.visible')
       cy.contains('不自动切换').should('be.visible')
       cy.contains('Run #7').should('be.visible')
+      cy.contains('融合优先').should('be.visible')
       cy.get('[data-testid="promotion-manual-note"]')
         .should('contain', '人工复核')
         .and('contain', '不提供自动升级或自动切换')
@@ -128,6 +129,7 @@ describe('Dynamic universe observation pool', () => {
         universe_run_id: 7,
         as_of_date: '2026-07-23',
         generated_at: '2026-07-24T01:05:00Z',
+        priority_algorithm_version: 'selection-quant-shrinkage-v1',
         items: {},
       },
     }).as('getUniversePromotionReadinessInvalid')
@@ -253,6 +255,7 @@ describe('Dynamic universe observation pool', () => {
     cy.get('[data-testid="promotion-readiness-mobile-list"]')
       .should('be.visible')
       .and('contain', 'NVDA.US')
+      .and('contain', '融合 #1')
       .and('contain', '24.0 · 回避')
       .and('contain', '2/20')
     cy.get('body').then(($body) => {

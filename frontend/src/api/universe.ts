@@ -98,6 +98,14 @@ function assertPromotionReadinessItem(value: unknown, index: number): void {
   assertString(value.symbol, `${prefix}.symbol`)
   assertPositiveInteger(value.rank, `${prefix}.rank`)
   assertFiniteNumber(value.selection_score, `${prefix}.selection_score`)
+  assertPositiveInteger(value.priority_rank, `${prefix}.priority_rank`)
+  assertFiniteNumber(value.priority_score, `${prefix}.priority_score`)
+  assertFiniteNumber(value.quant_weight, `${prefix}.quant_weight`)
+  if (value.quant_weight < 0 || value.quant_weight > 0.35) {
+    throw new Error(
+      `Unexpected /api/universe/promotion-readiness response: ${prefix}.quant_weight is outside [0, 0.35]`,
+    )
+  }
   assertNullableFiniteNumber(value.quant_score, `${prefix}.quant_score`)
   assertNullableFiniteNumber(value.quant_confidence, `${prefix}.quant_confidence`)
   assertString(value.quant_recommended_action, `${prefix}.quant_recommended_action`)
@@ -183,6 +191,7 @@ export async function getUniversePromotionReadiness(): Promise<UniversePromotion
   assertPositiveInteger(resp.data.universe_run_id, 'universe_run_id')
   assertString(resp.data.as_of_date, 'as_of_date')
   assertString(resp.data.generated_at, 'generated_at')
+  assertString(resp.data.priority_algorithm_version, 'priority_algorithm_version')
   if (!Array.isArray(resp.data.items)) {
     throw new Error(
       'Unexpected /api/universe/promotion-readiness response: items is not an array',

@@ -713,6 +713,8 @@ auto_trade/
 | `AUTO_TRADE_HARD_MAX_POSITION_NOTIONAL` | 单标的最大名义金额硬上限（报价币种） | `5000` |
 | `AUTO_TRADE_HARD_MAX_RISK_PER_TRADE` | 单笔最大价格风险硬上限（报价币种） | `250` |
 | `AUTO_TRADE_FULL_BUYING_POWER_USAGE_ENABLED` | 仅模拟账户使用；按券商最大保证金购买力的 100% 开仓，并绕过数量、名义金额和单笔风险三项定仓上限 | `false` |
+| `AUTO_TRADE_ENTRY_ROUND_TRIP_SLIPPAGE_BPS` | 入场净边际估算采用的往返总滑点（bp）；另计实时 BBO 价差与双边费率 | `4` |
+| `AUTO_TRADE_MIN_ENTRY_EDGE_COST_RATIO` | 入场目标毛利与估算总成本的最低比值 | `2` |
 | `AUTO_TRADE_UNIVERSE_SELECTION_ENABLED` | 按已完成的 T-1 日线刷新 Nasdaq-100 / DJIA 动态候选池 | `false` |
 | `AUTO_TRADE_UNIVERSE_SELECTION_APPLY_TO_WATCHLIST` | 将完整候选池结果同步到只读 watchlist；不会切换主交易标的 | `false` |
 | `AUTO_TRADE_UNIVERSE_SELECTION_ENABLE_SHADOW` | 为入选标的启用 Strategy v2 shadow 观察；要求 `APPLY_TO_WATCHLIST=true` | `false` |

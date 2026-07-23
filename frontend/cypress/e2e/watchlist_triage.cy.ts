@@ -63,7 +63,10 @@ describe('Watchlist triage helpers', () => {
 
     cy.get('[data-testid="watchlist-quant-rank"]').click()
     cy.wait('@quantRankWatchlist')
-    cy.contains('.el-message', '量化评分完成：2 个标的，优选 1 个').should('be.visible')
+    cy.contains(
+      '.el-message',
+      '当前量化快照：2 个标的，优选 1 个；闭市市场保留最近结果',
+    ).should('be.visible')
     cy.get('[data-testid="watchlist-table"]').should('contain', '56')
       .and('contain', '优选')
 

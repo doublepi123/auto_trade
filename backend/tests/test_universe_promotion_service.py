@@ -100,7 +100,7 @@ def _candidate(
     )
 
 
-def test_readiness_uses_latest_terminal_selected_items_in_rank_order() -> None:
+def test_readiness_uses_latest_terminal_and_shrunk_quant_priority() -> None:
     engine, db = _db()
     try:
         terminal = _run(
@@ -221,30 +221,42 @@ def test_readiness_uses_latest_terminal_selected_items_in_rank_order() -> None:
         assert response.universe_run_id == terminal.id
         assert response.as_of_date == date(2026, 7, 23)
         assert response.generated_at == _NOW
+        assert (
+            response.priority_algorithm_version
+            == "selection-quant-shrinkage-v1"
+        )
         assert [item.symbol for item in response.items] == [
             "AAPL.US",
             "MSFT.US",
         ]
         assert [item.rank for item in response.items] == [1, 2]
-        assert response.items[0].selection_score == 91.25
-        assert response.items[0].shadow_enabled is True
-        assert response.items[0].is_trading_target is False
-        assert response.items[0].quant_score == 23.5
-        assert response.items[0].quant_confidence == 0.92
-        assert response.items[0].quant_recommended_action == "AVOID"
-        assert response.items[0].quant_source == "quant_v2"
-        assert response.items[0].quant_fresh is True
-        assert response.items[0].quant_expires_at == (
+        assert [item.priority_rank for item in response.items] == [1, 2]
+        by_symbol = {item.symbol: item for item in response.items}
+        aapl = by_symbol["AAPL.US"]
+        msft = by_symbol["MSFT.US"]
+        assert aapl.selection_score == 91.25
+        assert aapl.priority_score == 82.72
+        assert aapl.quant_weight == 0.322
+        assert aapl.shadow_enabled is True
+        assert aapl.is_trading_target is False
+        assert aapl.quant_score == 23.5
+        assert aapl.quant_confidence == 0.92
+        assert aapl.quant_recommended_action == "AVOID"
+        assert aapl.quant_source == "quant_v2"
+        assert aapl.quant_fresh is True
+        assert aapl.quant_expires_at == (
             _NOW + timedelta(minutes=30)
         )
-        assert response.items[1].shadow_enabled is False
-        assert response.items[1].is_trading_target is True
-        assert response.items[1].quant_score is None
-        assert response.items[1].quant_confidence is None
-        assert response.items[1].quant_recommended_action == ""
-        assert response.items[1].quant_source == ""
-        assert response.items[1].quant_fresh is False
-        assert response.items[1].quant_expires_at is None
+        assert msft.priority_score == 82.5
+        assert msft.quant_weight == 0
+        assert msft.shadow_enabled is False
+        assert msft.is_trading_target is True
+        assert msft.quant_score is None
+        assert msft.quant_confidence is None
+        assert msft.quant_recommended_action == ""
+        assert msft.quant_source == ""
+        assert msft.quant_fresh is False
+        assert msft.quant_expires_at is None
         for item in response.items:
             assert item.forward_status == "NOT_REGISTERED"
             assert item.included_pairs == 0
@@ -258,6 +270,110 @@ def test_readiness_uses_latest_terminal_selected_items_in_rank_order() -> None:
             assert item.review_ready is False
             assert item.mature_evidence is False
             assert item.automatic_promotion_allowed is False
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_priority_ignores_legacy_and_stale_quant_scores() -> None:
+    engine, db = _db()
+    try:
+        run = _run(
+            db,
+            as_of_date=date(2026, 7, 23),
+            status="COMPLETE",
+            created_at=_NOW - timedelta(hours=1),
+        )
+        _candidate(
+            db,
+            run,
+            symbol="MSFT.US",
+            selected=True,
+            rank=1,
+            score=80.0,
+        )
+        _candidate(
+            db,
+            run,
+            symbol="AMD.US",
+            selected=True,
+            rank=2,
+            score=79.0,
+        )
+        _candidate(
+            db,
+            run,
+            symbol="AAPL.US",
+            selected=True,
+            rank=3,
+            score=70.0,
+        )
+        db.add_all(
+            [
+                WatchlistScore(
+                    symbol="AAPL.US",
+                    market="US",
+                    score=100.0,
+                    confidence=1.0,
+                    recommended_action="CANDIDATE",
+                    source="quant_v2",
+                    created_at=_NOW - timedelta(minutes=5),
+                    expires_at=_NOW + timedelta(minutes=30),
+                ),
+                WatchlistScore(
+                    symbol="MSFT.US",
+                    market="US",
+                    score=100.0,
+                    confidence=1.0,
+                    recommended_action="CANDIDATE",
+                    source="quant_v1",
+                    created_at=_NOW - timedelta(minutes=5),
+                    expires_at=_NOW + timedelta(minutes=30),
+                ),
+                WatchlistScore(
+                    symbol="MSFT.US",
+                    market="US",
+                    score=0.0,
+                    confidence=0.0,
+                    recommended_action="AVOID",
+                    source="quant_error_v2",
+                    created_at=_NOW - timedelta(minutes=10),
+                    expires_at=_NOW + timedelta(minutes=20),
+                ),
+                WatchlistScore(
+                    symbol="AMD.US",
+                    market="US",
+                    score=100.0,
+                    confidence=1.0,
+                    recommended_action="CANDIDATE",
+                    source="quant_v2",
+                    created_at=_NOW - timedelta(hours=2),
+                    expires_at=_NOW - timedelta(minutes=1),
+                ),
+            ]
+        )
+        db.commit()
+
+        response = UniversePromotionService(db, now=_NOW).get_readiness()
+
+        assert response is not None
+        assert [item.symbol for item in response.items] == [
+            "AAPL.US",
+            "MSFT.US",
+            "AMD.US",
+        ]
+        by_symbol = {item.symbol: item for item in response.items}
+        assert by_symbol["AAPL.US"].priority_score == 87.5
+        assert by_symbol["AAPL.US"].quant_weight == 0.35
+        assert by_symbol["MSFT.US"].priority_score == 80.0
+        assert by_symbol["MSFT.US"].quant_weight == 0
+        assert by_symbol["MSFT.US"].quant_score == 0
+        assert by_symbol["MSFT.US"].quant_source == "quant_error_v2"
+        assert by_symbol["MSFT.US"].quant_fresh is True
+        assert by_symbol["AMD.US"].priority_score == 79.0
+        assert by_symbol["AMD.US"].quant_weight == 0
+        assert by_symbol["AMD.US"].quant_source == "quant_v2"
+        assert by_symbol["AMD.US"].quant_fresh is False
     finally:
         db.close()
         engine.dispose()

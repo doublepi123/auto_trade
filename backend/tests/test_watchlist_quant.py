@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import math
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.broker import BrokerCandle, Quote
+from app.core.market_calendar import get_session
 from app.models import Base, WatchlistItem, WatchlistScore
+from app.services import watchlist_quant_service as quant_module
 from app.services.watchlist_quant_service import (
     WatchlistQuantMetrics,
     WatchlistQuantService,
@@ -44,24 +49,43 @@ def _daily_bars() -> list[BrokerCandle]:
     return bars
 
 
-def _intraday_bars() -> list[BrokerCandle]:
+def _rth_timestamps(
+    count: int,
+    *,
+    now: datetime = _NOW,
+) -> list[datetime]:
+    session = get_session("US")
+    cursor = now - timedelta(minutes=5)
+    timestamps: list[datetime] = []
+    while len(timestamps) < count:
+        if session.is_rth(cursor):
+            timestamps.append(cursor)
+        cursor -= timedelta(minutes=5)
+    return list(reversed(timestamps))
+
+
+def _intraday_bars(
+    *,
+    count: int = 700,
+    now: datetime = _NOW,
+) -> list[BrokerCandle]:
     bars: list[BrokerCandle] = []
-    price = 110.0
-    start = _NOW - timedelta(minutes=5 * 450)
-    for index in range(420):
-        move = 0.0015 if index % 2 == 0 else -0.0014
-        close = price * (1 + move)
+    previous = 110.0
+    for index, timestamp in enumerate(_rth_timestamps(count, now=now)):
+        close = 110 * math.exp(
+            0.006 * math.sin(2 * math.pi * index / 8)
+        )
         bars.append(
             BrokerCandle(
-                timestamp=start + timedelta(minutes=5 * index),
-                open=price,
-                high=max(price, close) * 1.0005,
-                low=min(price, close) * 0.9995,
+                timestamp=timestamp,
+                open=previous,
+                high=max(previous, close) * 1.0005,
+                low=min(previous, close) * 0.9995,
                 close=close,
                 volume=100_000,
             )
         )
-        price = close
+        previous = close
     return bars
 
 
@@ -86,6 +110,10 @@ def _strong_metrics(
         intraday_reversal_rate=0.62,
         intraday_efficiency=0.04,
         horizon_move_p75_bps=65.0,
+        conditional_reversal_bps=65.0,
+        conditional_reversal_hit_rate=0.70,
+        reversal_observations=250,
+        latest_intraday_at=_NOW - timedelta(minutes=5),
         blockers=blockers,
     )
 
@@ -96,7 +124,43 @@ def test_strong_liquid_mean_reverting_symbol_is_preferred() -> None:
     assert result.score >= 50
     assert result.recommended_action == "CANDIDATE"
     assert result.confidence >= 0.9
-    assert "move30m_p75=65.0bp" in result.rationale
+    assert "reversal30m=+65.0bp" in result.rationale
+    assert "net_reversal30m=+50.4bp" in result.rationale
+
+
+def test_candidate_requires_positive_cost_adjusted_reversal_edge() -> None:
+    result = score_watchlist_quant_metrics(
+        replace(
+            _strong_metrics(),
+            conditional_reversal_bps=10.0,
+        )
+    )
+
+    assert result.score <= 49
+    assert result.recommended_action != "CANDIDATE"
+    assert "net_reversal30m=-4.6bp" in result.rationale
+
+
+def test_candidate_requires_configured_minimum_edge_cost_ratio(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        quant_module.settings,
+        "min_entry_edge_cost_ratio",
+        2.0,
+    )
+
+    result = score_watchlist_quant_metrics(
+        replace(
+            _strong_metrics(),
+            conditional_reversal_bps=20.0,
+        )
+    )
+
+    assert result.score == 49
+    assert result.recommended_action != "CANDIDATE"
+    assert "edge_cost_ratio=1.370x" in result.rationale
+    assert "required_edge_cost_ratio=2.000x" in result.rationale
 
 
 def test_hard_blocker_caps_score_and_forces_avoid() -> None:
@@ -166,8 +230,8 @@ def test_service_persists_sorted_scores_and_isolates_symbol_failure() -> None:
             "AAPL.US",
             "BROKEN.US",
         ]
-        assert rows[0].source == "quant_v1"
-        assert rows[1].source == "quant_error"
+        assert rows[0].source == "quant_v2"
+        assert rows[1].source == "quant_error_v2"
         assert rows[1].score == 0
         assert rows[1].recommended_action == "AVOID"
         assert db.query(WatchlistScore).count() == 2
@@ -201,6 +265,100 @@ def test_incomplete_current_intraday_bar_is_excluded() -> None:
         ]
     finally:
         db.close()
+
+
+def test_stale_intraday_data_blocks_even_when_last_trade_is_old() -> None:
+    metrics = build_watchlist_quant_metrics(
+        symbol="AAPL.US",
+        market="US",
+        daily=_daily_bars(),
+        intraday=_intraday_bars(now=_NOW - timedelta(minutes=30)),
+        quote=Quote(
+            symbol="AAPL.US",
+            last_price=110,
+            bid=109.99,
+            ask=110.01,
+            timestamp=(_NOW - timedelta(minutes=2)).isoformat(),
+        ),
+        observed_at=_NOW,
+    )
+    result = score_watchlist_quant_metrics(metrics)
+
+    assert "STALE_INTRADAY_DATA" in metrics.blockers
+    assert "STALE_BBO" not in metrics.blockers
+    assert result.score <= 39
+    assert result.recommended_action == "AVOID"
+
+
+def test_extended_hours_bars_do_not_change_rth_edge_metrics() -> None:
+    regular = _intraday_bars()
+    quote = Quote(
+        symbol="AAPL.US",
+        last_price=110,
+        bid=109.99,
+        ask=110.01,
+        timestamp=_NOW.isoformat(),
+    )
+    baseline = build_watchlist_quant_metrics(
+        symbol="AAPL.US",
+        market="US",
+        daily=_daily_bars(),
+        intraday=regular,
+        quote=quote,
+        observed_at=_NOW,
+    )
+    extended = [
+        BrokerCandle(
+            timestamp=datetime(
+                2026,
+                7,
+                24,
+                12,
+                0,
+                tzinfo=timezone.utc,
+            ),
+            open=110,
+            high=220,
+            low=55,
+            close=220,
+            volume=1,
+        ),
+        *regular,
+        BrokerCandle(
+            timestamp=datetime(
+                2026,
+                7,
+                23,
+                21,
+                0,
+                tzinfo=timezone.utc,
+            ),
+            open=110,
+            high=220,
+            low=55,
+            close=55,
+            volume=1,
+        ),
+    ]
+    observed = build_watchlist_quant_metrics(
+        symbol="AAPL.US",
+        market="US",
+        daily=_daily_bars(),
+        intraday=extended,
+        quote=quote,
+        observed_at=_NOW,
+    )
+
+    assert observed.intraday_bars == baseline.intraday_bars
+    assert (
+        observed.conditional_reversal_bps
+        == baseline.conditional_reversal_bps
+    )
+    assert (
+        observed.conditional_reversal_hit_rate
+        == baseline.conditional_reversal_hit_rate
+    )
+    assert observed.reversal_observations == baseline.reversal_observations
 
 
 def test_overnight_gap_does_not_inflate_intraday_edge_metrics() -> None:

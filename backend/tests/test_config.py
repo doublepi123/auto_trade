@@ -68,6 +68,8 @@ class TestSettings:
         assert s.hard_max_position_notional == 5000
         assert s.hard_max_risk_per_trade == 250
         assert s.full_buying_power_usage_enabled is False
+        assert s.entry_round_trip_slippage_bps == 4
+        assert s.min_entry_edge_cost_ratio == 2
         assert s.hard_stop_loss_pct == 1
         assert s.hard_max_holding_minutes == 60
         assert s.hard_entry_cutoff_minutes_before_close == 45
@@ -131,6 +133,24 @@ class TestSettings:
         assert settings.hard_max_position_quantity == 100
         assert settings.hard_max_position_notional == 5000
         assert settings.hard_max_risk_per_trade == 250
+
+    def test_entry_cost_gate_reads_environment(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv(
+            "AUTO_TRADE_ENTRY_ROUND_TRIP_SLIPPAGE_BPS",
+            "6.5",
+        )
+        monkeypatch.setenv(
+            "AUTO_TRADE_MIN_ENTRY_EDGE_COST_RATIO",
+            "2.5",
+        )
+
+        configured = Settings()
+
+        assert configured.entry_round_trip_slippage_bps == 6.5
+        assert configured.min_entry_edge_cost_ratio == 2.5
 
     def test_universe_and_live_regime_controls_read_environment(
         self,

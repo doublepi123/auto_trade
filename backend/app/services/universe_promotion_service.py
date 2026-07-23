@@ -15,10 +15,17 @@ from app.schemas import (
     UniversePromotionReadinessResponse,
 )
 from app.services.strategy_v2_shadow_service import StrategyV2ShadowService
+from app.services.watchlist_quant_service import (
+    QUANT_SCORE_SOURCE,
+    list_latest_current_quant_scores,
+)
 from app.services.watchlist_score_service import WatchlistScoreService
 
 _TERMINAL_RUN_STATUSES = ("COMPLETE", "DEGRADED")
 _REVIEW_READY_STATUSES = {"READY_FOR_REVIEW", "MATURE_EVIDENCE"}
+_PRIORITY_ALGORITHM_VERSION = "selection-quant-shrinkage-v1"
+_MAX_QUANT_WEIGHT = 0.35
+_QUANT_NEUTRAL_SCORE = 50.0
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -77,8 +84,7 @@ class UniversePromotionService:
         score_service = WatchlistScoreService(self.db)
         quant_scores = {
             row.symbol: row
-            for row in score_service.list_latest_per_symbol_and_family()
-            if score_service.source_family(row.source) == "quant"
+            for row in list_latest_current_quant_scores(self.db)
         }
         shadow_service = StrategyV2ShadowService(self.db)
         items: list[UniversePromotionReadinessItem] = []
@@ -89,11 +95,50 @@ class UniversePromotionService:
                 )
             forward = shadow_service.get_forward_validation(candidate.symbol)
             quant = quant_scores.get(candidate.symbol)
+            quant_fresh = (
+                quant is not None
+                and score_service.is_fresh(
+                    quant,
+                    self.now,
+                )
+            )
+            quant_confidence = (
+                max(0.0, min(1.0, float(quant.confidence)))
+                if quant is not None
+                else 0.0
+            )
+            quant_weight = (
+                round(_MAX_QUANT_WEIGHT * quant_confidence, 4)
+                if quant is not None
+                and quant.source == QUANT_SCORE_SOURCE
+                and quant_fresh
+                else 0.0
+            )
+            selection_score = float(candidate.score)
+            priority_score = round(
+                max(
+                    0.0,
+                    min(
+                        100.0,
+                        selection_score
+                        + (
+                            float(quant.score) - _QUANT_NEUTRAL_SCORE
+                            if quant is not None and quant_weight > 0
+                            else 0.0
+                        )
+                        * quant_weight,
+                    ),
+                ),
+                2,
+            )
             items.append(
                 UniversePromotionReadinessItem(
                     symbol=candidate.symbol,
                     rank=candidate.rank,
-                    selection_score=candidate.score,
+                    selection_score=selection_score,
+                    priority_rank=1,
+                    priority_score=priority_score,
+                    quant_weight=quant_weight,
                     is_trading_target=candidate.symbol == trading_symbol,
                     shadow_enabled=(
                         candidate.symbol in enabled_shadow_symbols
@@ -111,11 +156,7 @@ class UniversePromotionService:
                         quant.source if quant is not None else ""
                     ),
                     quant_fresh=(
-                        quant is not None
-                        and score_service.is_fresh(
-                            quant,
-                            self.now,
-                        )
+                        quant_fresh
                     ),
                     quant_expires_at=(
                         _as_utc(quant.expires_at)
@@ -139,10 +180,22 @@ class UniversePromotionService:
                     ),
                 )
             )
+        items.sort(
+            key=lambda item: (
+                -item.priority_score,
+                item.rank,
+                item.symbol,
+            )
+        )
+        items = [
+            item.model_copy(update={"priority_rank": priority_rank})
+            for priority_rank, item in enumerate(items, start=1)
+        ]
         return UniversePromotionReadinessResponse(
             universe_run_id=run.id,
             as_of_date=run.as_of_date,
             generated_at=self.now,
+            priority_algorithm_version=_PRIORITY_ALGORITHM_VERSION,
             items=items,
         )
 

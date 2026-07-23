@@ -8,6 +8,8 @@ from typing import Any
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.config import settings
+from app.core.fees import evaluate_long_round_trip_edge, one_side_fee_rate
 from app.models import RuntimeState, StrategyConfig, WatchlistItem
 
 logger = logging.getLogger("auto_trade.strategy_service")
@@ -206,10 +208,10 @@ def validate_strategy_consistency(config: StrategyConfig) -> list[dict[str, str]
     prevent profitable exits.
 
     Currently checks:
-      * ``min_profit_amount`` vs the round-trip fee on a notional 1-share
-        exit. If fees alone exceed the configured floor, every exit will
-        be skipped with ``skip_category=FEE`` and the strategy cannot
-        realise any profit.
+      * The configured interval's estimated net edge after round-trip fees
+        and slippage, using the configured reference quantity. This mirrors
+        the live entry gate except for the live BBO spread, which is only
+        available when an order is evaluated.
       * ``max_daily_loss`` vs ``min_profit_amount`` — a daily-loss limit
         that is smaller than a single-round profit floor makes the
         strategy impossible to honour under any trade.
@@ -222,21 +224,59 @@ def validate_strategy_consistency(config: StrategyConfig) -> list[dict[str, str]
     issues: list[dict[str, str]] = []
     market = (config.market or "US").upper()
     fee_rate_field = "fee_rate_hk" if market == "HK" else "fee_rate_us"
-    fee_rate = Decimal(str(getattr(config, fee_rate_field, 0) or 0))
+    fee_rate = one_side_fee_rate(
+        market,
+        Decimal(str(getattr(config, "fee_rate_us", 0) or 0)),
+        Decimal(str(getattr(config, "fee_rate_hk", 0) or 0)),
+    )
     min_profit = Decimal(str(config.min_profit_amount or 0))
-    if min_profit > 0 and fee_rate > 0:
-        # Per-share round-trip fee (entry + exit) at the configured rate.
-        per_share_fee = fee_rate * 2
-        if per_share_fee > min_profit:
+    if (
+        config.buy_low > 0
+        and config.sell_high > config.buy_low
+        and fee_rate >= 0
+    ):
+        quantity = Decimal(
+            str(max(1, int(config.max_position_quantity or 1)))
+        )
+        entry_price = Decimal(str(config.buy_low))
+        slippage = (
+            entry_price
+            * quantity
+            * Decimal(str(settings.entry_round_trip_slippage_bps))
+            / Decimal("10000")
+        )
+        edge = evaluate_long_round_trip_edge(
+            entry_price=entry_price,
+            exit_price=Decimal(str(config.sell_high)),
+            quantity=quantity,
+            one_side_rate=fee_rate,
+            minimum_profit_amount=min_profit,
+            minimum_profit_pct=Decimal(
+                str(settings.min_exit_profit_pct or 0)
+            ),
+            extra_costs=slippage,
+        )
+        minimum_ratio = Decimal(
+            str(settings.min_entry_edge_cost_ratio)
+        )
+        if not edge.meets(minimum_ratio):
+            ratio = (
+                f"{edge.edge_cost_ratio:.3f}"
+                if edge.edge_cost_ratio is not None
+                else "unbounded"
+            )
             issues.append(
                 {
-                    "field": "min_profit_amount",
+                    "field": "sell_high",
                     "level": "warning",
                     "message": (
-                        f"min_profit_amount={min_profit} is below the per-share "
-                        f"round-trip fee ({per_share_fee}). Exits will be "
-                        f"skipped with skip_category=FEE. Lower {fee_rate_field} "
-                        f"or raise min_profit_amount."
+                        f"configured interval has fee-adjusted net profit "
+                        f"{edge.net_profit:.2f} versus required "
+                        f"{edge.required_profit:.2f}, with edge/cost ratio "
+                        f"{ratio} versus minimum {minimum_ratio:.3f}, at "
+                        f"quantity={quantity}. Widen the interval, lower "
+                        f"{fee_rate_field}/cost assumptions, or reduce the "
+                        "minimum profit requirement before live entry."
                     ),
                 }
             )

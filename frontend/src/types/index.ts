@@ -1340,6 +1340,9 @@ export interface UniversePromotionReadinessItem {
   symbol: string
   rank: number
   selection_score: number
+  priority_rank: number
+  priority_score: number
+  quant_weight: number
   quant_score: number | null
   quant_confidence: number | null
   quant_recommended_action: string
@@ -1366,6 +1369,7 @@ export interface UniversePromotionReadinessResponse {
   universe_run_id: number
   as_of_date: string
   generated_at: string
+  priority_algorithm_version: string
   items: UniversePromotionReadinessItem[]
 }
 

@@ -432,6 +432,7 @@ async def _llm_analysis_tick() -> None:
                                 current_price=current_price,
                                 trade_service=getattr(runner, "_trade_svc", None),
                             ),
+                            position_avg_price=position_context["avg_price"],
                             runtime_reload=_reload_strategy_after_save,
                         )
                     order_result = {"status": "NO_ACTION", "order_id": None}
@@ -714,7 +715,10 @@ def _universe_selection_tick_sync() -> None:
         return
     from app.api.universe import build_universe_selection_service
     from app.models import WatchlistItem
-    from app.services.watchlist_quant_service import WatchlistQuantService
+    from app.services.watchlist_quant_service import (
+        QuantScoringOutsideRTHError,
+        WatchlistQuantService,
+    )
 
     db = SessionLocal()
     try:
@@ -747,6 +751,11 @@ def _universe_selection_tick_sync() -> None:
                             60,
                             settings.universe_selection_interval_minutes * 2,
                         ),
+                    )
+                except QuantScoringOutsideRTHError as exc:
+                    logger.info(
+                        "post-selection watchlist quant scoring skipped: %s",
+                        exc,
                     )
                 except Exception:
                     db.rollback()

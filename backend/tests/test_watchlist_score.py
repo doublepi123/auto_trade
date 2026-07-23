@@ -324,6 +324,121 @@ class TestWatchlistScoreAPI:
         assert {"AAPL.US", "MSFT.US"}.issubset(symbols)
         assert sum(1 for row in reviews if row["symbol"] == "AAPL.US") == 1
 
+    def test_get_scores_exposes_only_current_quant_generation(
+        self,
+        client: TestClient,
+        db_session,
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        svc = WatchlistScoreService(db_session)
+        current = svc.record_score(
+            symbol="AAPL.US",
+            market="US",
+            score=61,
+            recommended_action="CANDIDATE",
+            source="quant_v2",
+        )
+        current.created_at = now - timedelta(minutes=10)
+        current.expires_at = now + timedelta(minutes=30)
+        legacy_newer = svc.record_score(
+            symbol="AAPL.US",
+            market="US",
+            score=99,
+            recommended_action="CANDIDATE",
+            source="quant_v1",
+        )
+        legacy_newer.created_at = now - timedelta(minutes=1)
+        svc.record_score(
+            symbol="MSFT.US",
+            market="US",
+            score=0,
+            recommended_action="AVOID",
+            source="quant_error_v2",
+        )
+        svc.record_score(
+            symbol="AMD.US",
+            market="US",
+            score=88,
+            recommended_action="CANDIDATE",
+            source="quant_v1",
+        )
+        svc.record_score(
+            symbol="NVDA.US",
+            market="US",
+            score=0,
+            recommended_action="AVOID",
+            source="quant_error",
+        )
+        db_session.commit()
+
+        response = client.get("/api/watchlist/scores")
+
+        assert response.status_code == 200
+        scores = {
+            row["symbol"]: row
+            for row in response.json()["scores"]
+        }
+        assert set(scores) == {"AAPL.US", "MSFT.US"}
+        assert scores["AAPL.US"]["source"] == "quant_v2"
+        assert scores["AAPL.US"]["score"] == 61
+        assert scores["MSFT.US"]["source"] == "quant_error_v2"
+        assert scores["MSFT.US"]["recommended_action"] == "AVOID"
+
+    def test_scored_snapshots_ignore_newer_legacy_quant_generation(
+        self,
+        client: TestClient,
+        db_session,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from types import SimpleNamespace
+
+        from app.core.broker import Quote
+
+        db_session.add(
+            WatchlistItem(
+                symbol="AAPL.US",
+                market="US",
+                alias="Apple",
+            )
+        )
+        svc = WatchlistScoreService(db_session)
+        current = svc.record_score(
+            symbol="AAPL.US",
+            market="US",
+            score=61,
+            recommended_action="CANDIDATE",
+            source="quant_v2",
+        )
+        current.created_at = datetime.now(timezone.utc) - timedelta(minutes=10)
+        svc.record_score(
+            symbol="AAPL.US",
+            market="US",
+            score=99,
+            recommended_action="CANDIDATE",
+            source="quant_v1",
+        )
+        db_session.commit()
+        broker = SimpleNamespace(
+            get_quotes=lambda _symbols: [
+                Quote(
+                    "AAPL.US",
+                    210.0,
+                    209.99,
+                    210.01,
+                    datetime.now(timezone.utc).isoformat(),
+                )
+            ]
+        )
+        monkeypatch.setattr(
+            "app.api.watchlist.get_runner",
+            lambda: SimpleNamespace(broker=broker),
+        )
+
+        response = client.get("/api/watchlist/scored-snapshots")
+
+        assert response.status_code == 200
+        assert response.json()[0]["score"] == 61
+
     def test_post_score_rejects_bad_market(self, client: TestClient) -> None:
         resp = client.post(
             "/api/watchlist/score",

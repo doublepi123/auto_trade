@@ -839,6 +839,7 @@ class TestLLMAnalysisTick:
         assert calls[0]["persist"] is True
         assert calls[1]["persist"] is False
         assert apply_calls and apply_calls[0]["reference_quantity"] == 1.0
+        assert apply_calls[0]["position_avg_price"] == 0.0
 
     @pytest.mark.asyncio
     async def test_tick_shadow_still_delegates_to_interval_policy(

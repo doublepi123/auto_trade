@@ -201,6 +201,20 @@ class Settings(BaseSettings):
     )
     llm_experiment_name: str = Field(default="", validation_alias="AUTO_TRADE_LLM_EXPERIMENT_NAME")
     min_exit_profit_pct: float = Field(default=0.2, ge=0, le=20, allow_inf_nan=False)
+    entry_round_trip_slippage_bps: float = Field(
+        default=4.0,
+        ge=0,
+        le=100,
+        allow_inf_nan=False,
+        validation_alias="AUTO_TRADE_ENTRY_ROUND_TRIP_SLIPPAGE_BPS",
+    )
+    min_entry_edge_cost_ratio: float = Field(
+        default=2.0,
+        ge=0,
+        le=100,
+        allow_inf_nan=False,
+        validation_alias="AUTO_TRADE_MIN_ENTRY_EDGE_COST_RATIO",
+    )
     engine_cooldown_seconds: int = Field(default=60, ge=0, le=3600, validation_alias="AUTO_TRADE_ENGINE_COOLDOWN_SECONDS")
     trading_open_warmup_minutes: int = Field(
         default=5,

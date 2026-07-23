@@ -41,6 +41,17 @@ class TestOrderStatus:
         assert s.executed_price is None
         assert OrderStatus._positive(s.executed_quantity) == Decimal("0")
 
+    def test_final_quote_result_preserves_positional_issue_argument(self) -> None:
+        result = FinalOrderQuoteCheckResult(
+            Decimal("100"),
+            "fresh quote rejected",
+        )
+
+        assert result.executable_price == Decimal("100")
+        assert result.issue == "fresh quote rejected"
+        assert result.bid is None
+        assert result.ask is None
+
 
 class TestTradeExecutionServiceBasics:
     @pytest.fixture(autouse=True)
@@ -828,6 +839,159 @@ class TestTradeExecutionServiceBasics:
             Decimal("1237"),
             Decimal("209.62"),
         )
+
+    def test_buy_rejects_target_without_fee_adjusted_net_edge(
+        self,
+        svc: TradeExecutionService,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from app.config import settings
+
+        monkeypatch.setattr(settings, "min_exit_profit_pct", 0.2)
+        monkeypatch.setattr(
+            settings,
+            "entry_round_trip_slippage_bps",
+            4.0,
+        )
+        monkeypatch.setattr(
+            settings,
+            "min_entry_edge_cost_ratio",
+            2.0,
+        )
+        broker = MagicMock()
+        broker.get_positions.return_value = []
+        broker.estimate_margin_max_quantity.return_value = Decimal("1000")
+
+        status = svc.execute(
+            "BUY",
+            "AAPL.US",
+            Quote("AAPL.US", 199.75, 199.74, 199.76, ""),
+            broker,
+            RiskController(),
+            ServerChanNotifier(""),
+            "USD",
+            fee_rate=Decimal("0.0005"),
+            expected_exit_price=Decimal("200.25"),
+        )
+
+        assert status is not None
+        assert status.status == "SKIPPED"
+        assert "fee-adjusted entry net profit" in status.reason
+        broker.submit_limit_order.assert_not_called()
+
+    def test_buy_submits_when_target_covers_live_cost_gate(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from app.config import settings
+
+        monkeypatch.setattr(settings, "min_exit_profit_pct", 0.2)
+        monkeypatch.setattr(
+            settings,
+            "entry_round_trip_slippage_bps",
+            4.0,
+        )
+        monkeypatch.setattr(
+            settings,
+            "min_entry_edge_cost_ratio",
+            2.0,
+        )
+        broker = MagicMock()
+        broker.get_positions.return_value = []
+        broker.estimate_margin_max_quantity.return_value = Decimal("1237")
+        broker.submit_limit_order.return_value = OrderResult(
+            "cost-gated-order",
+            "NVDA.US",
+            "BUY",
+            Decimal("23"),
+            Decimal("209.65"),
+            "SUBMITTED",
+        )
+        recorded: list[tuple[object, ...]] = []
+        svc = TradeExecutionService(
+            record_order=lambda *args: recorded.append(args),
+            update_order_status=lambda *args: None,
+            record_risk_event=lambda *args: None,
+            final_order_quote_check=lambda _broker, _symbol, _action, price: (
+                FinalOrderQuoteCheckResult(executable_price=price)
+            ),
+        )
+
+        status = svc.execute(
+            "BUY",
+            "NVDA.US",
+            Quote("NVDA.US", 209.65, 209.64, 209.66, ""),
+            broker,
+            RiskController(),
+            ServerChanNotifier(""),
+            "USD",
+            fee_rate=Decimal("0.0005"),
+            expected_exit_price=Decimal("212.63025"),
+        )
+
+        assert status is not None
+        assert status.status == "SUBMITTED"
+        broker.submit_limit_order.assert_called_once()
+        assert len(recorded) == 1
+        metadata = recorded[0][9]
+        assert isinstance(metadata, dict)
+        assert metadata["entry_cost_gate_version"] == "v1"
+        assert metadata["expected_exit_price"] == pytest.approx(212.63025)
+        assert metadata["estimated_total_cost"] > 0
+        assert metadata["net_expected_profit"] > metadata["required_profit"]
+        assert metadata["edge_cost_ratio"] >= 2
+
+    def test_buy_rechecks_fee_adjusted_edge_with_final_bbo(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from app.config import settings
+
+        monkeypatch.setattr(settings, "min_exit_profit_pct", 0.2)
+        monkeypatch.setattr(
+            settings,
+            "entry_round_trip_slippage_bps",
+            4.0,
+        )
+        monkeypatch.setattr(
+            settings,
+            "min_entry_edge_cost_ratio",
+            2.0,
+        )
+        broker = MagicMock()
+        broker.get_positions.return_value = []
+        broker.estimate_margin_max_quantity.return_value = Decimal("1000")
+        final_quote_check = MagicMock(
+            return_value=FinalOrderQuoteCheckResult(
+                executable_price=Decimal("200.50"),
+                bid=Decimal("199.00"),
+                ask=Decimal("200.50"),
+            )
+        )
+        svc = TradeExecutionService(
+            record_order=lambda *args: None,
+            update_order_status=lambda *args: None,
+            record_risk_event=lambda *args: None,
+            final_order_quote_check=final_quote_check,
+        )
+
+        status = svc.execute(
+            "BUY",
+            "AAPL.US",
+            Quote("AAPL.US", 199.75, 199.74, 199.76, ""),
+            broker,
+            RiskController(),
+            ServerChanNotifier(""),
+            "USD",
+            fee_rate=Decimal("0.0005"),
+            expected_exit_price=Decimal("200.50"),
+        )
+
+        assert status is not None
+        assert status.status == "SKIPPED"
+        assert "fee-adjusted entry net profit" in status.reason
+        final_quote_check.assert_called_once()
+        broker.submit_limit_order.assert_not_called()
 
     def test_full_buying_power_still_denies_position_addons(
         self,
@@ -2017,6 +2181,83 @@ class TestTradeExecutionServiceBasics:
         assert status.status == "FILLED"
         assert submitted_prices == [expected_price]
 
+    @pytest.mark.parametrize(
+        (
+            "action",
+            "position_side",
+            "initial_price",
+            "final_executable_price",
+        ),
+        [
+            (
+                "SELL",
+                "LONG",
+                Decimal("101"),
+                Decimal("100.60"),
+            ),
+            (
+                "BUY_TO_COVER",
+                "SHORT",
+                Decimal("99"),
+                Decimal("99.40"),
+            ),
+        ],
+    )
+    def test_reduce_only_normal_exit_rechecks_profit_at_final_bbo(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        action: str,
+        position_side: str,
+        initial_price: Decimal,
+        final_executable_price: Decimal,
+    ) -> None:
+        from app.config import settings
+
+        monkeypatch.setattr(settings, "min_exit_profit_pct", 0.0)
+        broker = MagicMock()
+        broker.get_positions.return_value = [
+            SimpleNamespace(
+                symbol="AAPL.US",
+                side=position_side,
+                quantity=Decimal("10"),
+                available_quantity=Decimal("10"),
+                avg_price=Decimal("100"),
+            )
+        ]
+        svc = TradeExecutionService(
+            record_order=lambda *args: None,
+            update_order_status=lambda *args: None,
+            record_risk_event=lambda *args: None,
+            final_order_quote_check=lambda *_args: (
+                FinalOrderQuoteCheckResult(
+                    executable_price=final_executable_price,
+                )
+            ),
+        )
+
+        status = svc.execute(
+            action,
+            "AAPL.US",
+            Quote(
+                "AAPL.US",
+                float(initial_price),
+                float(initial_price - Decimal("0.01")),
+                float(initial_price + Decimal("0.01")),
+                "",
+            ),
+            broker,
+            RiskController(),
+            ServerChanNotifier(""),
+            "USD",
+            min_profit_amount=Decimal("10"),
+            reduce_only=True,
+        )
+
+        assert status is not None
+        assert status.status == "SKIPPED"
+        assert "below required minimum profit" in status.reason
+        broker.submit_limit_order.assert_not_called()
+
     def test_reduce_only_submission_rejects_quote_check_without_bound_price(
         self,
     ) -> None:
@@ -2518,6 +2759,52 @@ class TestTradeExecutionServiceBasics:
         assert status.status == "SKIPPED"
         assert "below required minimum profit" in status.reason
         broker.submit_limit_order.assert_not_called()
+
+    def test_execute_sell_scales_fixed_profit_floor_for_partial_entry_fill(
+        self,
+        svc: TradeExecutionService,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from app.config import settings
+        from app.core.broker import OrderResult, Position, Quote
+        from app.core.notify import ServerChanNotifier
+        from app.core.risk import RiskController
+
+        monkeypatch.setattr(settings, "min_exit_profit_pct", 0.0)
+        broker = MagicMock()
+        broker.get_positions.return_value = [
+            Position(
+                "NVDA.US",
+                "LONG",
+                Decimal("10"),
+                Decimal("100"),
+            )
+        ]
+        broker.submit_limit_order.return_value = OrderResult(
+            "partial-entry-exit",
+            "NVDA.US",
+            "SELL",
+            Decimal("10"),
+            Decimal("101"),
+            "FILLED",
+        )
+
+        status = svc.execute(
+            "SELL",
+            "NVDA.US",
+            Quote("NVDA.US", 101, 100.99, 101.01, ""),
+            broker,
+            RiskController(),
+            ServerChanNotifier(""),
+            "USD",
+            min_profit_amount=Decimal("100"),
+            fee_rate=Decimal("0.0005"),
+            entry_reference_quantity=Decimal("1000"),
+        )
+
+        assert status is not None
+        assert status.status == "FILLED"
+        broker.submit_limit_order.assert_called_once()
 
     def test_execute_sell_records_skipped_precheck_event(self, monkeypatch) -> None:
         from app.config import settings
