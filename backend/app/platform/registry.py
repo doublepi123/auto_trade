@@ -71,13 +71,14 @@ class StrategyRegistry:
                 required = ("name", "version", "parameter_schema", "on_bar", "on_quote", "on_fill")
                 if not all(hasattr(obj, attr) for attr in required):
                     continue
+                strategy_class = cast(type[Strategy], obj)
                 try:
-                    instance = _instantiate_strategy(obj)
+                    instance = _instantiate_strategy(strategy_class)
                     if not isinstance(instance, Strategy):
                         continue
                 except Exception:
                     continue
-                self.register(obj)
+                self.register(strategy_class)
 
 
 def get_default_registry() -> StrategyRegistry:
