@@ -781,6 +781,54 @@ class TestTradeExecutionServiceBasics:
 
         assert qty == 1237
 
+    def test_full_buying_power_execute_submits_broker_max_quantity(
+        self,
+        svc: TradeExecutionService,
+    ) -> None:
+        broker = MagicMock()
+        broker.get_positions.return_value = []
+        broker.estimate_margin_max_quantity.return_value = Decimal("1237")
+        broker.submit_limit_order.return_value = OrderResult(
+            "full-power-order",
+            "NVDA.US",
+            "BUY",
+            Decimal("1237"),
+            Decimal("209.62"),
+            "SUBMITTED",
+        )
+        svc.full_buying_power_usage_enabled = True
+        svc.margin_safety_factor = 0.35
+        svc.max_position_quantity = 100
+        svc.max_position_notional = 5000
+        svc.max_risk_per_trade = 250
+        svc.stop_loss_pct = 1.0
+
+        status = svc.execute(
+            "BUY",
+            "NVDA.US",
+            Quote("NVDA.US", 209.62, 209.61, 209.63, ""),
+            broker,
+            RiskController(),
+            ServerChanNotifier(""),
+            "USD",
+            market="US",
+        )
+
+        assert status is not None
+        assert status.status == "SUBMITTED"
+        broker.estimate_margin_max_quantity.assert_called_once_with(
+            "NVDA.US",
+            "BUY",
+            Decimal("209.62"),
+            "USD",
+        )
+        broker.submit_limit_order.assert_called_once_with(
+            "NVDA.US",
+            "BUY",
+            Decimal("1237"),
+            Decimal("209.62"),
+        )
+
     def test_full_buying_power_still_denies_position_addons(
         self,
         svc: TradeExecutionService,

@@ -21,6 +21,11 @@ class TestPromptModule:
         module = SystemModule()
         result = module.render({})
         assert "量化交易顾问" in result
+        assert "不以交易频次本身为目标" in result
+        assert "仓位数量由确定性执行与风控层" in result
+        assert "扣费后期望收益为正" in result
+        assert "多次触发交易" not in result
+        assert "少量多次" not in result
         assert len(result) > 10
 
 
@@ -227,6 +232,8 @@ class TestOutputModule:
         assert "sell_high 必须严格大于当前价格" in result
         assert "buy_low 必须严格小于当前价格" in result
         assert "confidence_score >= 0.7" in result
+        assert "覆盖手续费、滑点和最低盈利门槛" in result
+        assert "促进高频交易" not in result
 
 
 from app.domain.prompt.selection_module import SelectionModule

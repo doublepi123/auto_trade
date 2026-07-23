@@ -719,6 +719,8 @@ class StrategyV2ForwardValidationResponse(BaseModel):
     evaluation_scope: Literal["FORWARD_OUT_OF_SAMPLE"] = "FORWARD_OUT_OF_SAMPLE"
     included_pairs: int = 0
     excluded_targets: int = 0
+    minimum_ready_pairs: Literal[5] = 5
+    minimum_mature_pairs: Literal[20] = 20
     remaining_ready_pairs: int = 5
     remaining_mature_pairs: int = 20
     blockers: list[str] = Field(default_factory=list)
@@ -2197,6 +2199,70 @@ class UniverseSelectionRunResponse(BaseModel):
                 else raw
             )
         return decoded
+
+
+class UniversePromotionReadinessItem(BaseModel):
+    symbol: str = Field(min_length=1, max_length=50)
+    rank: int = Field(ge=1)
+    selection_score: float = Field(
+        ge=0,
+        le=100,
+        allow_inf_nan=False,
+    )
+    is_trading_target: bool
+    shadow_enabled: bool
+    quant_score: Optional[float] = Field(
+        default=None,
+        ge=0,
+        le=100,
+        allow_inf_nan=False,
+    )
+    quant_confidence: Optional[float] = Field(
+        default=None,
+        ge=0,
+        le=1,
+        allow_inf_nan=False,
+    )
+    quant_recommended_action: str = ""
+    quant_source: str = ""
+    quant_fresh: bool = False
+    quant_expires_at: Optional[datetime] = None
+    forward_status: Literal[
+        "NOT_REGISTERED",
+        "FROZEN",
+        "COLLECTING",
+        "READY_FOR_REVIEW",
+        "MATURE_EVIDENCE",
+        "BLOCKED",
+    ]
+    included_pairs: int = Field(ge=0)
+    minimum_ready_pairs: int = Field(ge=1)
+    minimum_mature_pairs: int = Field(ge=1)
+    remaining_ready_pairs: int = Field(ge=0)
+    remaining_mature_pairs: int = Field(ge=0)
+    blockers: list[str] = Field(default_factory=list)
+    baseline_metrics: StrategyV2ShadowMetrics = Field(
+        default_factory=StrategyV2ShadowMetrics,
+    )
+    candidate_metrics: StrategyV2ShadowMetrics = Field(
+        default_factory=StrategyV2ShadowMetrics,
+    )
+    review_ready: bool
+    mature_evidence: bool
+    automatic_promotion_allowed: Literal[False] = False
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class UniversePromotionReadinessResponse(BaseModel):
+    universe_run_id: int = Field(ge=1)
+    as_of_date: date
+    generated_at: datetime
+    items: list[UniversePromotionReadinessItem] = Field(
+        default_factory=list,
+    )
+
+    model_config = ConfigDict(extra="forbid")
 
 
 class UniverseSelectionRefreshResponse(BaseModel):

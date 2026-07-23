@@ -1040,6 +1040,82 @@ Cypress.Commands.add('stubApi', () => {
     },
   }).as('getUniverseLatest')
 
+  cy.intercept('GET', '/api/universe/promotion-readiness', {
+    body: {
+      universe_run_id: 7,
+      as_of_date: '2026-07-23',
+      generated_at: '2026-07-24T01:05:00Z',
+      items: [
+        {
+          symbol: 'NVDA.US',
+          rank: 1,
+          selection_score: 92.4,
+          quant_score: 24,
+          quant_confidence: 0.84,
+          quant_recommended_action: 'AVOID',
+          quant_source: 'quant_v1',
+          quant_fresh: false,
+          quant_expires_at: '2026-07-23T20:00:00Z',
+          is_trading_target: true,
+          shadow_enabled: true,
+          forward_status: 'COLLECTING',
+          included_pairs: 2,
+          minimum_ready_pairs: 5,
+          minimum_mature_pairs: 20,
+          remaining_ready_pairs: 3,
+          remaining_mature_pairs: 18,
+          blockers: [],
+          baseline_metrics: {
+            ...strategyShadowMetrics,
+            closed_trades: 3,
+            net_pnl: 6.2,
+          },
+          candidate_metrics: {
+            ...strategyShadowMetrics,
+            closed_trades: 4,
+            net_pnl: 18.7,
+          },
+          review_ready: false,
+          mature_evidence: false,
+          automatic_promotion_allowed: false,
+        },
+        {
+          symbol: 'JPM.US',
+          rank: 2,
+          selection_score: 78.6,
+          quant_score: 0,
+          quant_confidence: 0,
+          quant_recommended_action: 'AVOID',
+          quant_source: 'quant_error',
+          quant_fresh: true,
+          quant_expires_at: '2026-07-24T08:00:00Z',
+          is_trading_target: false,
+          shadow_enabled: true,
+          forward_status: 'BLOCKED',
+          included_pairs: 5,
+          minimum_ready_pairs: 5,
+          minimum_mature_pairs: 20,
+          remaining_ready_pairs: 0,
+          remaining_mature_pairs: 15,
+          blockers: ['TARGET_INPUT_HASH_MISMATCH'],
+          baseline_metrics: {
+            ...strategyShadowMetrics,
+            closed_trades: 2,
+            net_pnl: -4.5,
+          },
+          candidate_metrics: {
+            ...strategyShadowMetrics,
+            closed_trades: 3,
+            net_pnl: 2.4,
+          },
+          review_ready: false,
+          mature_evidence: false,
+          automatic_promotion_allowed: false,
+        },
+      ],
+    },
+  }).as('getUniversePromotionReadiness')
+
   cy.intercept('POST', '/api/watchlist/score', {
     body: {
       id: 3,

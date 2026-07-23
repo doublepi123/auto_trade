@@ -1328,6 +1328,47 @@ export interface UniverseSelectionRefreshResponse {
   reason: string
 }
 
+export type UniversePromotionForwardStatus =
+  | 'NOT_REGISTERED'
+  | 'FROZEN'
+  | 'COLLECTING'
+  | 'READY_FOR_REVIEW'
+  | 'MATURE_EVIDENCE'
+  | 'BLOCKED'
+
+export interface UniversePromotionReadinessItem {
+  symbol: string
+  rank: number
+  selection_score: number
+  quant_score: number | null
+  quant_confidence: number | null
+  quant_recommended_action: string
+  quant_source: string
+  quant_fresh: boolean
+  quant_expires_at: string | null
+  is_trading_target: boolean
+  shadow_enabled: boolean
+  forward_status: UniversePromotionForwardStatus
+  included_pairs: number
+  minimum_ready_pairs: number
+  minimum_mature_pairs: number
+  remaining_ready_pairs: number
+  remaining_mature_pairs: number
+  blockers: string[]
+  baseline_metrics: StrategyShadowMetrics
+  candidate_metrics: StrategyShadowMetrics
+  review_ready: boolean
+  mature_evidence: boolean
+  automatic_promotion_allowed: false
+}
+
+export interface UniversePromotionReadinessResponse {
+  universe_run_id: number
+  as_of_date: string
+  generated_at: string
+  items: UniversePromotionReadinessItem[]
+}
+
 export interface PromptVersion {
   id: number
   name: string
@@ -1829,6 +1870,8 @@ export interface StrategyShadowForwardValidationResponse {
   evaluation_scope: 'FORWARD_OUT_OF_SAMPLE'
   included_pairs: number
   excluded_targets: number
+  minimum_ready_pairs: number
+  minimum_mature_pairs: number
   remaining_ready_pairs: number
   remaining_mature_pairs: number
   blockers: string[]

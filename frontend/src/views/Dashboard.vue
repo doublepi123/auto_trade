@@ -528,7 +528,7 @@
               <span data-testid="max-risk-per-trade-value">
                 {{
                   diagnostics.live_safety.full_buying_power_usage_enabled
-                    ? '由券商购买力决定'
+                    ? '固定风险上限已旁路，止损仍启用'
                     : `$${formatNumber(diagnostics.live_safety.max_risk_per_trade)}`
                 }}
               </span>

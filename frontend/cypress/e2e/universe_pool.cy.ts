@@ -60,6 +60,7 @@ describe('Dynamic universe observation pool', () => {
     cy.visit('/#/watchlist')
     cy.wait('@getUniverseCatalog')
     cy.wait('@getUniverseLatest')
+    cy.wait('@getUniversePromotionReadiness')
   })
 
   it('shows provenance, coverage, ranking metrics and selection reasons', () => {
@@ -84,6 +85,60 @@ describe('Dynamic universe observation pool', () => {
     cy.get('[data-testid="universe-table"] tbody tr')
       .contains('tr', 'JPM.US')
       .should('not.contain', '当前实盘')
+  })
+
+  it('shows manual forward evidence and makes selection conflicts visible', () => {
+    cy.get('[data-testid="promotion-readiness"]').within(() => {
+      cy.contains('前瞻证据').should('be.visible')
+      cy.contains('仅人工升级').should('be.visible')
+      cy.contains('不自动切换').should('be.visible')
+      cy.contains('Run #7').should('be.visible')
+      cy.get('[data-testid="promotion-manual-note"]')
+        .should('contain', '人工复核')
+        .and('contain', '不提供自动升级或自动切换')
+      cy.get('button').should('not.exist')
+    })
+
+    cy.get('[data-testid="promotion-readiness-table"] tbody tr')
+      .contains('tr', 'NVDA.US')
+      .should('contain', '当前实盘')
+      .and('contain', '#1')
+      .and('contain', '92.4')
+      .and('contain', '24.0')
+      .and('contain', '回避')
+      .and('contain', '已过期')
+      .and('contain', '前向采集中')
+      .and('contain', '2/20')
+      .and('contain', '+$18.70')
+      .and('contain', '+$6.20')
+      .and('contain', '候选 4')
+      .and('contain', '基线 3')
+
+    cy.get('[data-testid="promotion-readiness-table"] tbody tr')
+      .contains('tr', 'JPM.US')
+      .should('contain', '数据异常')
+      .and('not.contain', '0.0')
+      .and('contain', '已阻塞')
+      .and('contain', '基线与候选输入不一致')
+  })
+
+  it('isolates malformed forward evidence from the candidate pool', () => {
+    cy.intercept('GET', '/api/universe/promotion-readiness', {
+      body: {
+        universe_run_id: 7,
+        as_of_date: '2026-07-23',
+        generated_at: '2026-07-24T01:05:00Z',
+        items: {},
+      },
+    }).as('getUniversePromotionReadinessInvalid')
+
+    cy.reload()
+    cy.wait('@getUniversePromotionReadinessInvalid')
+    cy.get('[data-testid="promotion-readiness-error"]')
+      .should('contain', 'items is not an array')
+    cy.get('[data-testid="universe-table"]')
+      .should('be.visible')
+      .and('contain', 'NVDA.US')
   })
 
   it('uses the candidate API marker when the trading target is absent from watchlist', () => {
@@ -188,12 +243,18 @@ describe('Dynamic universe observation pool', () => {
     cy.reload()
     cy.wait('@getUniverseCatalog')
     cy.wait('@getUniverseLatest')
+    cy.wait('@getUniversePromotionReadiness')
     cy.get('[data-testid="desktop-nav"]').should('not.exist')
     cy.get('[data-testid="bottom-nav"]').should('be.visible')
     cy.get('[data-testid="universe-mobile-list"]').should('be.visible')
     cy.get('[data-testid="universe-mobile-list"]').should('contain', 'NVDA.US')
       .and('contain', '纳指 100')
       .and('contain', '道指')
+    cy.get('[data-testid="promotion-readiness-mobile-list"]')
+      .should('be.visible')
+      .and('contain', 'NVDA.US')
+      .and('contain', '24.0 · 回避')
+      .and('contain', '2/20')
     cy.get('body').then(($body) => {
       const viewportWidth = $body[0].clientWidth
       const overflowing = Array.from(
@@ -216,6 +277,20 @@ describe('Dynamic universe observation pool', () => {
         $body[0].scrollWidth,
         `overflowing elements: ${JSON.stringify(overflowing)}`,
       ).to.be.lte(viewportWidth)
+    })
+  })
+
+  it('uses the compact evidence list across the app mobile breakpoint', () => {
+    cy.viewport(750, 900)
+    cy.reload()
+    cy.wait('@getUniverseCatalog')
+    cy.wait('@getUniverseLatest')
+    cy.wait('@getUniversePromotionReadiness')
+    cy.get('[data-testid="desktop-nav"]').should('not.exist')
+    cy.get('[data-testid="promotion-readiness-table"]').should('not.be.visible')
+    cy.get('[data-testid="promotion-readiness-mobile-list"]').should('be.visible')
+    cy.get('body').then(($body) => {
+      expect($body[0].scrollWidth).to.be.lte($body[0].clientWidth)
     })
   })
 })

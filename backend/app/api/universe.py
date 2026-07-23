@@ -19,10 +19,12 @@ from app.models import (
 from app.runner import get_runner
 from app.schemas import (
     UniverseCatalogItem,
+    UniversePromotionReadinessResponse,
     UniverseSelectionCandidateResponse,
     UniverseSelectionRefreshResponse,
     UniverseSelectionRunResponse,
 )
+from app.services.universe_promotion_service import UniversePromotionService
 from app.services.universe_selection_service import (
     UniverseRefreshResult,
     UniverseSelectionService,
@@ -152,6 +154,22 @@ def get_latest_universe_run(
             detail="no universe selection run available",
         )
     return _run_response(latest, service.items_for_run(latest.id), db)
+
+
+@router.get(
+    "/promotion-readiness",
+    response_model=UniversePromotionReadinessResponse,
+)
+def get_universe_promotion_readiness(
+    db: Session = Depends(get_db),
+) -> UniversePromotionReadinessResponse:
+    readiness = UniversePromotionService(db).get_readiness()
+    if readiness is None:
+        raise HTTPException(
+            status_code=404,
+            detail="no universe selection run available",
+        )
+    return readiness
 
 
 @router.post("/refresh", response_model=UniverseSelectionRefreshResponse)

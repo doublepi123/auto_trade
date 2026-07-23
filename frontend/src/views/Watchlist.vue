@@ -215,6 +215,246 @@
             : '尚无动态候选池记录'"
         />
       </div>
+
+      <section class="promotion-readiness" data-testid="promotion-readiness">
+        <div class="promotion-header">
+          <div class="promotion-heading">
+            <div class="promotion-title">
+              <strong>前瞻证据</strong>
+              <el-tag type="warning" size="small" effect="plain">仅人工升级</el-tag>
+              <el-tag type="info" size="small" effect="plain">不自动切换</el-tag>
+            </div>
+            <p>前向样本只用于人工复核；证据达标也不会自动修改当前实盘标的。</p>
+          </div>
+          <div v-if="promotionReadiness" class="promotion-meta">
+            <span>Run #{{ promotionReadiness.universe_run_id }}</span>
+            <span>{{ promotionReadiness.as_of_date }}</span>
+            <span>生成 {{ formatDateTime(promotionReadiness.generated_at) }}</span>
+          </div>
+        </div>
+
+        <el-alert
+          v-if="promotionError"
+          :title="promotionError"
+          type="error"
+          :closable="false"
+          show-icon
+          class="promotion-alert"
+          data-testid="promotion-readiness-error"
+        />
+
+        <div
+          v-loading="promotionLoading && !promotionReadiness"
+          class="promotion-content"
+        >
+          <template v-if="promotionReadiness?.items.length">
+            <div class="promotion-table-view">
+              <el-table
+                :data="promotionRows"
+                size="small"
+                max-height="360"
+                style="width: 100%"
+                data-testid="promotion-readiness-table"
+              >
+                <el-table-column label="入选标的" width="124">
+                  <template #default="{ row }">
+                    <div class="promotion-symbol">
+                      <strong>{{ row.symbol }}</strong>
+                      <div class="promotion-badges">
+                        <el-tag
+                          v-if="row.is_trading_target"
+                          type="danger"
+                          size="small"
+                          data-testid="promotion-trading-badge"
+                        >
+                          当前实盘
+                        </el-tag>
+                        <el-tag
+                          v-if="row.shadow_enabled"
+                          type="warning"
+                          size="small"
+                          effect="plain"
+                        >
+                          Shadow
+                        </el-tag>
+                      </div>
+                    </div>
+                  </template>
+                </el-table-column>
+                <el-table-column label="候选分" width="76" align="right">
+                  <template #default="{ row }">
+                    <strong>#{{ row.rank }}</strong>
+                    <small class="promotion-secondary">{{ formatScore(row.selection_score) }}</small>
+                  </template>
+                </el-table-column>
+                <el-table-column label="量化适配" width="116">
+                  <template #default="{ row }">
+                    <div
+                      class="promotion-quant"
+                      :title="promotionQuantTitle(row)"
+                      data-testid="promotion-quant-fit"
+                    >
+                      <div>
+                        <strong>{{ promotionQuantScoreLabel(row) }}</strong>
+                        <span>{{ promotionQuantOutcomeLabel(row) }}</span>
+                      </div>
+                      <el-tag
+                        v-if="promotionQuantState(row) === 'ERROR'"
+                        type="warning"
+                        size="small"
+                        effect="plain"
+                        data-testid="promotion-quant-error"
+                      >
+                        数据异常
+                      </el-tag>
+                      <el-tag
+                        v-else-if="promotionQuantState(row) === 'STALE'"
+                        type="danger"
+                        size="small"
+                        effect="plain"
+                        data-testid="promotion-quant-stale"
+                      >
+                        已过期
+                      </el-tag>
+                    </div>
+                  </template>
+                </el-table-column>
+                <el-table-column label="前瞻状态" width="112">
+                  <template #default="{ row }">
+                    <el-tag
+                      :type="promotionStatusMeta(row.forward_status).type"
+                      size="small"
+                      effect="plain"
+                    >
+                      {{ promotionStatusMeta(row.forward_status).label }}
+                    </el-tag>
+                  </template>
+                </el-table-column>
+                <el-table-column label="证据进度" width="128">
+                  <template #default="{ row }">
+                    <div class="promotion-progress">
+                      <div>
+                        <strong>{{ row.included_pairs }}/{{ row.minimum_mature_pairs }}</strong>
+                        <span>距复核 {{ row.remaining_ready_pairs }}</span>
+                      </div>
+                      <el-progress
+                        :percentage="promotionProgressPercent(
+                          row.included_pairs,
+                          row.minimum_mature_pairs,
+                        )"
+                        :stroke-width="5"
+                        :show-text="false"
+                      />
+                      <small>距成熟 {{ row.remaining_mature_pairs }}</small>
+                    </div>
+                  </template>
+                </el-table-column>
+                <el-table-column label="净 PnL" width="126" align="right">
+                  <template #default="{ row }">
+                    <div class="promotion-comparison">
+                      <span>候选 <strong :class="pnlClass(row.candidate_metrics.net_pnl)">{{ formatSignedPnl(row.candidate_metrics.net_pnl) }}</strong></span>
+                      <span>基线 <strong :class="pnlClass(row.baseline_metrics.net_pnl)">{{ formatSignedPnl(row.baseline_metrics.net_pnl) }}</strong></span>
+                    </div>
+                  </template>
+                </el-table-column>
+                <el-table-column label="闭合交易" width="94" align="right">
+                  <template #default="{ row }">
+                    <div class="promotion-comparison">
+                      <span>候选 <strong>{{ row.candidate_metrics.closed_trades }}</strong></span>
+                      <span>基线 <strong>{{ row.baseline_metrics.closed_trades }}</strong></span>
+                    </div>
+                  </template>
+                </el-table-column>
+                <el-table-column label="阻塞项" min-width="140">
+                  <template #default="{ row }">
+                    <div
+                      v-if="row.blockers.length"
+                      class="promotion-blockers"
+                      data-testid="promotion-blockers"
+                    >
+                      {{ row.blockers.map(promotionBlockerLabel).join('；') }}
+                    </div>
+                    <span v-else class="promotion-clear">无阻塞</span>
+                  </template>
+                </el-table-column>
+              </el-table>
+            </div>
+
+            <div class="promotion-mobile-list" data-testid="promotion-readiness-mobile-list">
+              <article
+                v-for="row in promotionRows"
+                :key="row.symbol"
+                class="promotion-mobile-row"
+              >
+                <div class="promotion-mobile-heading">
+                  <div>
+                    <strong>{{ row.symbol }}</strong>
+                    <small>#{{ row.rank }} · 候选分 {{ formatScore(row.selection_score) }}</small>
+                  </div>
+                  <div class="promotion-mobile-tags">
+                    <el-tag v-if="row.is_trading_target" type="danger" size="small">当前实盘</el-tag>
+                    <el-tag
+                      :type="promotionStatusMeta(row.forward_status).type"
+                      size="small"
+                      effect="plain"
+                    >
+                      {{ promotionStatusMeta(row.forward_status).label }}
+                    </el-tag>
+                  </div>
+                </div>
+                <div class="promotion-mobile-metrics">
+                  <div>
+                    <span>量化适配</span>
+                    <strong>
+                      {{ promotionQuantScoreLabel(row) }}
+                      · {{ promotionQuantOutcomeLabel(row) }}
+                    </strong>
+                    <el-tag
+                      v-if="promotionQuantState(row) === 'ERROR'"
+                      type="warning"
+                      size="small"
+                      effect="plain"
+                    >
+                      数据异常
+                    </el-tag>
+                    <el-tag
+                      v-else-if="promotionQuantState(row) === 'STALE'"
+                      type="danger"
+                      size="small"
+                      effect="plain"
+                    >
+                      已过期
+                    </el-tag>
+                  </div>
+                  <div><span>证据进度</span><strong>{{ row.included_pairs }}/{{ row.minimum_mature_pairs }}</strong></div>
+                  <div><span>距复核/成熟</span><strong>{{ row.remaining_ready_pairs }}/{{ row.remaining_mature_pairs }}</strong></div>
+                  <div><span>候选净 PnL</span><strong :class="pnlClass(row.candidate_metrics.net_pnl)">{{ formatSignedPnl(row.candidate_metrics.net_pnl) }}</strong></div>
+                  <div><span>基线净 PnL</span><strong :class="pnlClass(row.baseline_metrics.net_pnl)">{{ formatSignedPnl(row.baseline_metrics.net_pnl) }}</strong></div>
+                  <div><span>闭合交易 候选/基线</span><strong>{{ row.candidate_metrics.closed_trades }}/{{ row.baseline_metrics.closed_trades }}</strong></div>
+                </div>
+                <div class="promotion-mobile-blockers">
+                  <span>阻塞项</span>
+                  <strong>
+                    {{ row.blockers.length
+                      ? row.blockers.map(promotionBlockerLabel).join('；')
+                      : '无阻塞' }}
+                  </strong>
+                </div>
+              </article>
+            </div>
+          </template>
+
+          <DataState
+            v-else-if="!promotionLoading && !promotionError"
+            empty
+            empty-text="当前候选池尚无前瞻证据"
+          />
+        </div>
+
+        <div class="promotion-manual-note" data-testid="promotion-manual-note">
+          晋级与实盘切换始终由人工复核后执行，系统不提供自动升级或自动切换。
+        </div>
+      </section>
     </el-card>
 
     <el-card style="margin-bottom: 20px">
@@ -536,6 +776,9 @@ import { DataAnalysis, Refresh } from '@element-plus/icons-vue'
 import { isAxiosError } from 'axios'
 import type {
   UniverseCatalogItem,
+  UniversePromotionForwardStatus,
+  UniversePromotionReadinessItem,
+  UniversePromotionReadinessResponse,
   UniverseSelectionItem,
   UniverseSelectionRunResponse,
   WatchlistItem,
@@ -554,6 +797,7 @@ import {
 } from '../api/watchlist'
 import {
   getLatestUniverseSelection,
+  getUniversePromotionReadiness,
   getUniverseCatalog,
   refreshUniverseSelection,
 } from '../api/universe'
@@ -575,6 +819,9 @@ const universeRun = ref<UniverseSelectionRunResponse | null>(null)
 const universeLoading = ref(false)
 const universeRefreshing = ref(false)
 const universeError = ref('')
+const promotionReadiness = ref<UniversePromotionReadinessResponse | null>(null)
+const promotionLoading = ref(false)
+const promotionError = ref('')
 const addError = ref('')
 const activatingId = ref<number | null>(null)
 const removingId = ref<number | null>(null)
@@ -601,6 +848,7 @@ const QUOTE_FAILURE_TOAST_THRESHOLD = 3
 const QUOTE_FAILURE_TOAST_COOLDOWN_MS = 60_000
 let lastQuoteFailureToastAt = 0
 let universeRequestGeneration = 0
+let promotionRequestGeneration = 0
 let quantScoreGeneration = 0
 let reviewScoreGeneration = 0
 
@@ -627,6 +875,17 @@ const universeRows = computed<UniverseSelectionItem[]>(() => {
     if (left.rank !== null) return -1
     if (right.rank !== null) return 1
     if (left.score !== right.score) return right.score - left.score
+    return left.symbol.localeCompare(right.symbol)
+  })
+})
+
+const promotionRows = computed<UniversePromotionReadinessItem[]>(() => {
+  if (!promotionReadiness.value) return []
+  return [...promotionReadiness.value.items].sort((left, right) => {
+    if (left.rank !== right.rank) return left.rank - right.rank
+    if (left.selection_score !== right.selection_score) {
+      return right.selection_score - left.selection_score
+    }
     return left.symbol.localeCompare(right.symbol)
   })
 })
@@ -727,6 +986,110 @@ function universeStatusTagType(status: string): 'success' | 'warning' | 'danger'
     default:
       return 'info'
   }
+}
+
+function promotionStatusMeta(status: UniversePromotionForwardStatus): {
+  label: string
+  type: 'success' | 'warning' | 'danger' | 'info'
+} {
+  switch (status) {
+    case 'FROZEN':
+      return { label: '已冻结', type: 'info' }
+    case 'COLLECTING':
+      return { label: '前向采集中', type: 'warning' }
+    case 'READY_FOR_REVIEW':
+      return { label: '可人工复核', type: 'success' }
+    case 'MATURE_EVIDENCE':
+      return { label: '证据成熟', type: 'success' }
+    case 'BLOCKED':
+      return { label: '已阻塞', type: 'danger' }
+    case 'NOT_REGISTERED':
+    default:
+      return { label: '尚未注册', type: 'info' }
+  }
+}
+
+function promotionProgressPercent(includedPairs: number, minimumMaturePairs: number): number {
+  if (!Number.isFinite(minimumMaturePairs) || minimumMaturePairs <= 0) return 0
+  return Math.min(100, Math.max(0, (includedPairs / minimumMaturePairs) * 100))
+}
+
+function formatSignedPnl(value: number): string {
+  if (!Number.isFinite(value)) return '-'
+  const sign = value > 0 ? '+' : value < 0 ? '-' : ''
+  return `${sign}$${Math.abs(value).toFixed(2)}`
+}
+
+function pnlClass(value: number): string {
+  if (value > 0) return 'promotion-pnl-positive'
+  if (value < 0) return 'promotion-pnl-negative'
+  return ''
+}
+
+function promotionQuantActionLabel(action: string): string {
+  switch (action.toUpperCase()) {
+    case 'CANDIDATE': return '优选'
+    case 'WATCH': return '观察'
+    case 'AVOID': return '回避'
+    case 'BUY': return '买入'
+    case 'SELL': return '卖出'
+    case 'HOLD': return '观望'
+    default: return action || '未评分'
+  }
+}
+
+function promotionQuantState(
+  row: UniversePromotionReadinessItem,
+): 'MISSING' | 'ERROR' | 'STALE' | 'FRESH' {
+  if (!row.quant_source || row.quant_score === null) return 'MISSING'
+  if (row.quant_source.startsWith('quant_error')) return 'ERROR'
+  return row.quant_fresh ? 'FRESH' : 'STALE'
+}
+
+function promotionQuantScoreLabel(row: UniversePromotionReadinessItem): string {
+  const state = promotionQuantState(row)
+  return state === 'MISSING' || state === 'ERROR'
+    ? '-'
+    : formatScore(row.quant_score)
+}
+
+function promotionQuantOutcomeLabel(row: UniversePromotionReadinessItem): string {
+  const state = promotionQuantState(row)
+  if (state === 'MISSING') return '未评分'
+  if (state === 'ERROR') return '数据异常'
+  return promotionQuantActionLabel(row.quant_recommended_action)
+}
+
+function promotionQuantTitle(row: UniversePromotionReadinessItem): string {
+  const confidence = row.quant_confidence === null
+    ? '-'
+    : `${(row.quant_confidence * 100).toFixed(0)}%`
+  const expiresAt = row.quant_expires_at
+    ? formatDateTime(row.quant_expires_at)
+    : '-'
+  return `来源 ${row.quant_source || '-'} · 置信度 ${confidence} · 过期 ${expiresAt}`
+}
+
+const promotionBlockerLabels: Record<string, string> = {
+  BASELINE_REPLAY_MISMATCH: '基线回放不一致',
+  EVALUATOR_DEFINITION_MISMATCH: '评估器定义不一致',
+  EVIDENCE_DIGEST_MISMATCH: '证据摘要校验失败',
+  EVIDENCE_DISPOSITION_INVALID: '证据资格字段无效',
+  EVIDENCE_EXCLUSION_INVALID: '排除证据语义无效',
+  EVIDENCE_PAYLOAD_INVALID: '证据载荷无效',
+  EVIDENCE_TARGET_BOUNDARY_INVALID: '目标会话早于注册边界',
+  FORWARD_EVALUATION_FAILED: '前向评估失败',
+  REGISTRATION_BOUNDARY_INVALID: '注册纳入边界无效',
+  REGISTRATION_METADATA_INVALID: '注册元数据无效',
+  SESSION_LOCAL_FEATURE_DRIFT: '日内特征发生偏移',
+  SOURCE_VERSION_SUPERSEDED: '冻结源版本已被替换',
+  TARGET_EVIDENCE_NOT_KNOWN_AT_EVALUATION: '评估时目标证据尚不可用',
+  TARGET_INPUT_HASH_MISMATCH: '基线与候选输入不一致',
+  TARGET_STATE_NOT_FLAT: '会话结束时影子状态仍有持仓',
+}
+
+function promotionBlockerLabel(blocker: string): string {
+  return promotionBlockerLabels[blocker] ?? blocker.replace(/_/g, ' ')
 }
 
 function membershipLabel(membership: string): string {
@@ -905,6 +1268,28 @@ async function loadUniverse() {
   }
 }
 
+async function loadPromotionReadiness() {
+  const generation = ++promotionRequestGeneration
+  promotionLoading.value = true
+  promotionError.value = ''
+  try {
+    const response = await getUniversePromotionReadiness()
+    if (generation !== promotionRequestGeneration) return
+    promotionReadiness.value = response
+  } catch (e: unknown) {
+    if (generation !== promotionRequestGeneration) return
+    if (isAxiosError(e) && e.response?.status === 404) {
+      promotionReadiness.value = null
+    } else {
+      promotionError.value = resolveErrorMessage(e, '加载前瞻证据失败')
+    }
+  } finally {
+    if (generation === promotionRequestGeneration) {
+      promotionLoading.value = false
+    }
+  }
+}
+
 async function handleUniverseRefresh() {
   const generation = ++universeRequestGeneration
   universeRefreshing.value = true
@@ -914,6 +1299,7 @@ async function handleUniverseRefresh() {
     const response = await refreshUniverseSelection()
     if (generation !== universeRequestGeneration) return
     universeRun.value = response.run
+    void loadPromotionReadiness()
     if (response.applied) {
       await loadItems()
       await loadQuotes()
@@ -1261,12 +1647,12 @@ function exportSnapshot() {
 }
 
 useRegisterViewRefresh(() => {
-  void Promise.all([loadItems(), loadUniverse()])
+  void Promise.all([loadItems(), loadUniverse(), loadPromotionReadiness()])
 })
 
 onMounted(() => {
   scoreClockMs.value = Date.now()
-  void loadUniverse()
+  void Promise.all([loadUniverse(), loadPromotionReadiness()])
   loadItems().then(() => {
     loadQuotes()
     loadScores()
@@ -1284,6 +1670,7 @@ watch([searchText, marketFilter, statusFilter, scoreBucket, hideStaleScores], ()
 
 onUnmounted(() => {
   universeRequestGeneration += 1
+  promotionRequestGeneration += 1
   quantScoreGeneration += 1
   reviewScoreGeneration += 1
   if (quoteTimer) clearInterval(quoteTimer)
@@ -1441,6 +1828,160 @@ onUnmounted(() => {
   line-height: 1.5;
 }
 
+.promotion-readiness {
+  min-width: 0;
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid #dcdfe6;
+}
+
+.promotion-header {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.promotion-heading {
+  min-width: 0;
+}
+
+.promotion-title,
+.promotion-badges,
+.promotion-mobile-tags {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.promotion-heading p {
+  margin: 5px 0 0;
+  color: #7a8089;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.promotion-meta {
+  display: flex;
+  flex-shrink: 0;
+  align-items: flex-end;
+  flex-direction: column;
+  gap: 2px;
+  color: #909399;
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.promotion-alert {
+  margin-bottom: 12px;
+}
+
+.promotion-content {
+  min-height: 64px;
+}
+
+.promotion-table-view {
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.promotion-mobile-list {
+  display: none;
+}
+
+.promotion-symbol,
+.promotion-quant,
+.promotion-progress,
+.promotion-comparison {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.promotion-symbol {
+  align-items: flex-start;
+  gap: 5px;
+}
+
+.promotion-secondary {
+  display: block;
+  color: #909399;
+  font-size: 10px;
+}
+
+.promotion-quant {
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.promotion-quant > div {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+}
+
+.promotion-quant span,
+.promotion-progress span,
+.promotion-progress small,
+.promotion-comparison span {
+  color: #909399;
+  font-size: 10px;
+}
+
+.promotion-progress {
+  gap: 4px;
+}
+
+.promotion-progress > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 5px;
+}
+
+.promotion-comparison {
+  align-items: flex-end;
+  gap: 3px;
+}
+
+.promotion-comparison strong {
+  color: #303133;
+  font-size: 11px;
+}
+
+.promotion-pnl-positive {
+  color: #14884f !important;
+}
+
+.promotion-pnl-negative {
+  color: #c45656 !important;
+}
+
+.promotion-blockers {
+  color: #c45656;
+  font-size: 11px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.promotion-clear {
+  color: #14884f;
+  font-size: 11px;
+}
+
+.promotion-manual-note {
+  margin-top: 10px;
+  padding: 7px 9px;
+  border-left: 3px solid #e6a23c;
+  background: #fdf6ec;
+  color: #6b5a38;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
 .score-tag {
   cursor: pointer;
 }
@@ -1574,7 +2115,7 @@ onUnmounted(() => {
   word-break: break-word;
 }
 
-@media (max-width: 720px) {
+@media (max-width: 768px) {
   .watchlist-page {
     padding: 10px;
   }
@@ -1692,6 +2233,99 @@ onUnmounted(() => {
   .universe-footer {
     flex-direction: column;
     gap: 2px;
+  }
+
+  .promotion-header {
+    flex-direction: column;
+    gap: 7px;
+  }
+
+  .promotion-meta {
+    align-items: flex-start;
+    flex-direction: row;
+    gap: 5px 10px;
+    flex-wrap: wrap;
+  }
+
+  .promotion-table-view {
+    display: none;
+  }
+
+  .promotion-mobile-list {
+    display: block;
+    border-top: 1px solid #ebeef5;
+    border-bottom: 1px solid #ebeef5;
+  }
+
+  .promotion-mobile-row {
+    min-width: 0;
+    padding: 12px 0;
+    border-bottom: 1px solid #ebeef5;
+  }
+
+  .promotion-mobile-row:last-child {
+    border-bottom: 0;
+  }
+
+  .promotion-mobile-heading {
+    display: flex;
+    min-width: 0;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 10px;
+  }
+
+  .promotion-mobile-heading > div:first-child {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .promotion-mobile-heading small {
+    color: #909399;
+    font-size: 10px;
+  }
+
+  .promotion-mobile-tags {
+    flex-shrink: 0;
+    justify-content: flex-end;
+  }
+
+  .promotion-mobile-metrics {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 9px 12px;
+    margin-top: 11px;
+  }
+
+  .promotion-mobile-metrics > div {
+    display: flex;
+    min-width: 0;
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .promotion-mobile-metrics span,
+  .promotion-mobile-blockers span {
+    color: #909399;
+    font-size: 10px;
+  }
+
+  .promotion-mobile-metrics strong,
+  .promotion-mobile-blockers strong {
+    max-width: 100%;
+    font-size: 11px;
+    overflow-wrap: anywhere;
+  }
+
+  .promotion-mobile-blockers {
+    display: flex;
+    min-width: 0;
+    margin-top: 10px;
+    flex-direction: column;
+    gap: 3px;
   }
 }
 </style>
