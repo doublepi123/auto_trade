@@ -61,3 +61,4 @@ Thumbs.db
 
 # Local agent/iteration scratch artifacts
 state/
+.omo/
