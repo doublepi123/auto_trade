@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation as _DecimalInvalidOp
 from typing import TYPE_CHECKING, Any, Callable
+from zoneinfo import ZoneInfo
 
 from app.config import settings
 
@@ -56,6 +57,13 @@ _BBO_CACHE_MAX_AGE_SECONDS = 30.0
 _POSITION_PROBE_LOCK = threading.Lock()
 _POSITION_PROBE_COMMAND = (sys.executable, "-m", "app.core.position_probe")
 _POSITION_PROBE_MAX_OUTPUT_BYTES = 1_048_576
+_HISTORY_BOUNDARY_TIMEZONES = {
+    "US": ZoneInfo("America/New_York"),
+    "HK": ZoneInfo("Asia/Hong_Kong"),
+    "CN": ZoneInfo("Asia/Shanghai"),
+    "SH": ZoneInfo("Asia/Shanghai"),
+    "SZ": ZoneInfo("Asia/Shanghai"),
+}
 
 
 def _is_retryable_message(exc: BaseException) -> bool:
@@ -657,6 +665,21 @@ def _normalize_period_name(period: str) -> str:
     return text.capitalize()
 
 
+def _history_boundary_for_sdk(
+    symbol: str,
+    boundary: datetime,
+) -> datetime:
+    """Convert aware instants to the exchange wall clock expected by the SDK."""
+
+    if boundary.tzinfo is None:
+        return boundary
+    market = symbol.rsplit(".", 1)[-1].upper()
+    exchange_timezone = _HISTORY_BOUNDARY_TIMEZONES.get(market)
+    if exchange_timezone is None:
+        return boundary
+    return boundary.astimezone(exchange_timezone)
+
+
 def _parse_candle_timestamp(value: Any) -> datetime | None:
     if value is None:
         return None
@@ -1115,7 +1138,7 @@ class BrokerGateway:
                 adjust_enum,
                 forward,
                 count,
-                after,
+                _history_boundary_for_sdk(symbol, after),
             )
             return _normalize_candlestick_response(
                 response,

@@ -5,6 +5,7 @@ import threading
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -24,6 +25,7 @@ from app.core.broker import (
     Quote,
     _decimal_attr,
     _get_value,
+    _history_boundary_for_sdk,
     _iter_order_items,
     _import_openapi,
     _iter_position_items,
@@ -45,6 +47,36 @@ class TestQuote:
     def test_quote_defaults(self) -> None:
         q = Quote(symbol="TSLA.US", last_price=0, bid=0, ask=0, timestamp="")
         assert q.last_price == 0
+
+
+def test_history_boundary_uses_exchange_local_wall_clock() -> None:
+    instant = datetime(2026, 7, 10, 13, 30, tzinfo=timezone.utc)
+    naive = datetime(2026, 7, 10, 13, 30)
+
+    assert _history_boundary_for_sdk(
+        "AAPL.US",
+        instant,
+    ) == datetime(
+        2026,
+        7,
+        10,
+        9,
+        30,
+        tzinfo=ZoneInfo("America/New_York"),
+    )
+    assert _history_boundary_for_sdk(
+        "700.HK",
+        instant,
+    ) == datetime(
+        2026,
+        7,
+        10,
+        21,
+        30,
+        tzinfo=ZoneInfo("Asia/Hong_Kong"),
+    )
+    assert _history_boundary_for_sdk("UNKNOWN", instant) == instant
+    assert _history_boundary_for_sdk("AAPL.US", naive) == naive
 
 
 class TestBrokerGateway:
@@ -1064,7 +1096,16 @@ class TestBrokerGateway:
             datetime(2026, 7, 10, 13, 31, tzinfo=timezone.utc)
         ]
         assert quote_context.calls == [
-            ("AAPL.US", "MIN_1", "noadj", True, 500, watermark)
+            (
+                "AAPL.US",
+                "MIN_1",
+                "noadj",
+                True,
+                500,
+                watermark.astimezone(
+                    ZoneInfo("America/New_York")
+                ),
+            )
         ]
 
         gateway.get_forward_adjusted_history_candlesticks_by_offset(
@@ -1080,7 +1121,7 @@ class TestBrokerGateway:
             "forward",
             True,
             500,
-            watermark,
+            watermark.astimezone(ZoneInfo("America/New_York")),
         )
 
     def test_get_history_candlesticks_pages_backward_before_cursor(
@@ -1158,7 +1199,14 @@ class TestBrokerGateway:
             )
         ]
         assert quote_context.calls == [
-            ("AAPL.US", "MIN_5", "noadj", False, 1000, cursor)
+            (
+                "AAPL.US",
+                "MIN_5",
+                "noadj",
+                False,
+                1000,
+                cursor.astimezone(ZoneInfo("America/New_York")),
+            )
         ]
 
         gateway.get_forward_adjusted_history_candlesticks_before(
@@ -1174,7 +1222,7 @@ class TestBrokerGateway:
             "forward",
             False,
             1000,
-            cursor,
+            cursor.astimezone(ZoneInfo("America/New_York")),
         )
 
     def test_get_candlesticks_drops_invalid_upstream_ohlcv(self, monkeypatch, caplog) -> None:
