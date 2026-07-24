@@ -67,6 +67,7 @@
 ### 行情与运行时
 - 长桥 WebSocket 推送行情；若 RTH 内推送静默超过约 90 秒，runner 自动退订并重订
 - 推送中断时仍可通过每 15 秒主动 `get_quote` 续命；主动拉取不计入「推送活跃」检测
+- 动态候选池与量化 v5 的跨日特征统一使用前复权 K 线，避免拆股制造虚假收益、波动率和 ATR；交易触发与成交台账仍使用实际未复权价格
 - FastAPI `lifespan` 在后台线程启动 runner，避免启动期阻塞 `/api/health`
 - Runner 后台约每 15 秒将券商当日订单同步到本地库
 
@@ -720,9 +721,9 @@ auto_trade/
 | `AUTO_TRADE_UNIVERSE_SELECTION_APPLY_TO_WATCHLIST` | 将完整候选池结果同步到只读 watchlist；不会切换主交易标的 | `false` |
 | `AUTO_TRADE_UNIVERSE_SELECTION_ENABLE_SHADOW` | 为入选标的启用 Strategy v2 shadow，并在状态激活后自动冻结下一完整交易日开始的 forward-only 对照；不会自动晋级或下单；要求 `APPLY_TO_WATCHLIST=true` | `false` |
 | `AUTO_TRADE_UNIVERSE_SELECTION_INTERVAL_MINUTES` | 候选池幂等刷新周期（分钟） | `60` |
-| `AUTO_TRADE_WATCHLIST_QUANT_AUTO_SCORE_ENABLED` | RTH 内自动刷新到期的确定性量化 v4 评分；分页读取最多 3000 根 5 分钟线；不切换主交易标的 | `false` |
-| `AUTO_TRADE_WATCHLIST_QUANT_INTERVAL_MINUTES` | 同一标的两次量化 v4 评分的最小间隔（分钟） | `30` |
-| `AUTO_TRADE_WATCHLIST_QUANT_SCORE_TTL_MINUTES` | 量化 v4 证据有效期（分钟），与盘中刷新频率分离 | `1440` |
+| `AUTO_TRADE_WATCHLIST_QUANT_AUTO_SCORE_ENABLED` | RTH 内自动刷新到期的确定性量化 v5 评分；分页读取最多 3000 根前复权 5 分钟线；不切换主交易标的 | `false` |
+| `AUTO_TRADE_WATCHLIST_QUANT_INTERVAL_MINUTES` | 同一标的两次量化 v5 评分的最小间隔（分钟） | `30` |
+| `AUTO_TRADE_WATCHLIST_QUANT_SCORE_TTL_MINUTES` | 量化 v5 证据有效期（分钟），与盘中刷新频率分离 | `1440` |
 | `AUTO_TRADE_WATCHLIST_QUANT_BATCH_SIZE` | 每次自动量化刷新最多处理的到期标的数，分批为实时行情与影子策略保留 API 配额 | `3` |
 | `AUTO_TRADE_UNIVERSE_SELECTION_MAX_SYMBOLS` | 每次最多入选标的数 | `12` |
 | `AUTO_TRADE_UNIVERSE_SELECTION_MAX_PER_SECTOR` | 每行业最多入选标的数 | `2` |

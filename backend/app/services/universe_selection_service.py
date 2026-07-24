@@ -10,7 +10,7 @@ import uuid
 from collections import Counter
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
-from typing import Protocol, Sequence
+from typing import Protocol, Sequence, cast
 
 from sqlalchemy import and_, or_, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -66,6 +66,25 @@ class UniverseMarketDataProvider(Protocol):
         period: str,
         count: int,
     ) -> list[BrokerCandle]: ...
+
+
+def _research_candlesticks(
+    broker: UniverseMarketDataProvider,
+    symbol: str,
+    period: str,
+    count: int,
+) -> list[BrokerCandle]:
+    adjusted_reader = getattr(
+        broker,
+        "get_forward_adjusted_candlesticks",
+        None,
+    )
+    if callable(adjusted_reader):
+        return cast(
+            list[BrokerCandle],
+            adjusted_reader(symbol, period, count),
+        )
+    return broker.get_candlesticks(symbol, period, count)
 
 
 @dataclass(frozen=True)
@@ -587,7 +606,8 @@ class UniverseSelectionService:
         for candidate in self.catalog:
             data_errors: list[str] = []
             try:
-                raw_bars = self.broker.get_candlesticks(
+                raw_bars = _research_candlesticks(
+                    self.broker,
                     candidate.symbol,
                     "DAY",
                     _DAILY_BAR_COUNT,

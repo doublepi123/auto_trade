@@ -10,7 +10,7 @@ from app.domain.universe_selection.catalog import IndexCandidate
 from app.core.market_calendar import get_session
 
 
-UNIVERSE_ALGORITHM_VERSION = "index-liquidity-opportunity-v2"
+UNIVERSE_ALGORITHM_VERSION = "index-liquidity-opportunity-v3"
 
 
 class DailyBar(Protocol):

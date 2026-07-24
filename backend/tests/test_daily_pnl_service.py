@@ -1477,6 +1477,40 @@ class TestDailyPnlService:
             for rec in caplog.records
         )
 
+    def test_historical_unclosed_remainder_does_not_warn_for_later_day(
+        self,
+        caplog: LogCaptureFixture,
+    ) -> None:
+        self._cleanup()
+        historical_day = date(2026, 5, 22)
+        target_day = date(2026, 5, 26)
+        db = self._get_db()
+        db.add(
+            OrderRecord(
+                broker_order_id="historical-sell-without-holding",
+                symbol="AAPL.US",
+                side="SELL",
+                quantity=10,
+                price=110,
+                executed_quantity=10,
+                executed_price=110,
+                status="FILLED",
+                created_at=self._dt(historical_day, 10),
+                filled_at=self._dt(historical_day, 10, 1),
+            )
+        )
+        db.commit()
+
+        import logging
+        caplog.set_level(logging.WARNING)
+        _ = DailyPnlService(db).calculate(trade_day=target_day)
+        db.close()
+
+        assert not any(
+            "close quantity exceeds tracked position by" in rec.message
+            for rec in caplog.records
+        )
+
     def test_unclosed_remainder_warning_is_logged_once(self, caplog: LogCaptureFixture) -> None:
         self._cleanup()
         trade_day = date(2026, 5, 22)

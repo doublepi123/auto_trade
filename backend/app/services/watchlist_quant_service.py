@@ -6,7 +6,7 @@ import statistics
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Protocol, Sequence
+from typing import Protocol, Sequence, cast
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -21,8 +21,8 @@ from app.services.watchlist_score_service import WatchlistScoreService
 
 logger = logging.getLogger("auto_trade.watchlist_quant_service")
 
-QUANT_SCORE_SOURCE = "quant_v4"
-QUANT_ERROR_SOURCE = "quant_error_v4"
+QUANT_SCORE_SOURCE = "quant_v5"
+QUANT_ERROR_SOURCE = "quant_error_v5"
 CURRENT_QUANT_SOURCES = (
     QUANT_SCORE_SOURCE,
     QUANT_ERROR_SOURCE,
@@ -774,7 +774,8 @@ def score_watchlist_quant_metrics(
         else ""
     )
     rationale = (
-        "quant-v4"
+        "quant-v5"
+        "; adjustment=forward"
         f"; daily_bars={metrics.daily_bars}"
         f"; intraday_bars={metrics.intraday_bars}"
         f"; dollar_volume={metrics.median_daily_dollar_volume / 1_000_000:.1f}m"
@@ -968,7 +969,7 @@ class WatchlistQuantService:
         for item in scorable_items:
             try:
                 daily = completed_daily_bars(
-                    self.broker.get_candlesticks(
+                    self._research_candlesticks(
                         item.symbol,
                         "DAY",
                         _DAILY_COUNT,
@@ -1034,7 +1035,7 @@ class WatchlistQuantService:
                     symbol=item.symbol,
                     market=item.market,
                     score=0.0,
-                    rationale=f"quant-v4 data error: {type(exc).__name__}",
+                    rationale=f"quant-v5 data error: {type(exc).__name__}",
                     confidence=0.0,
                     recommended_action="AVOID",
                     source=QUANT_ERROR_SOURCE,
@@ -1091,7 +1092,7 @@ class WatchlistQuantService:
         self,
         symbol: str,
     ) -> list[BrokerCandle]:
-        recent = self.broker.get_candlesticks(
+        recent = self._research_candlesticks(
             symbol,
             "MIN_5",
             _INTRADAY_RECENT_COUNT,
@@ -1105,9 +1106,15 @@ class WatchlistQuantService:
 
         history_reader = getattr(
             self.broker,
-            "get_history_candlesticks_before",
+            "get_forward_adjusted_history_candlesticks_before",
             None,
         )
+        if not callable(history_reader):
+            history_reader = getattr(
+                self.broker,
+                "get_history_candlesticks_before",
+                None,
+            )
         if not callable(history_reader):
             return self._latest_intraday_values(combined)
 
@@ -1136,6 +1143,24 @@ class WatchlistQuantService:
                 break
             cursor = next_cursor
         return self._latest_intraday_values(combined)
+
+    def _research_candlesticks(
+        self,
+        symbol: str,
+        period: str,
+        count: int,
+    ) -> list[BrokerCandle]:
+        adjusted_reader = getattr(
+            self.broker,
+            "get_forward_adjusted_candlesticks",
+            None,
+        )
+        if callable(adjusted_reader):
+            return cast(
+                list[BrokerCandle],
+                adjusted_reader(symbol, period, count),
+            )
+        return self.broker.get_candlesticks(symbol, period, count)
 
     @staticmethod
     def _candle_timestamp(bar: BrokerCandle) -> datetime:

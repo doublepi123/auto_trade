@@ -11,7 +11,7 @@ describe('Watchlist Snapshot & Derived Columns', () => {
     // NVDA.US: ask 180.6 - bid 180.4 = 0.20
     cy.get('[data-testid="watchlist-spread"]').first().should('contain', '0.20')
     cy.get('[data-testid="watchlist-stale-badge"]').should('exist')
-    cy.get('.score-source').should('contain.text', '量化 v4')
+    cy.get('.score-source').should('contain.text', '量化 v5')
   })
 
   it('export snapshot button is enabled and triggers a success toast', () => {

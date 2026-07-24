@@ -926,7 +926,33 @@ class BrokerGateway:
             base_ms=settings.broker_retry_base_ms,
         )
 
-    def _get_candlesticks_inner(self, symbol: str, period: str, count: int) -> list[BrokerCandle]:
+    def get_forward_adjusted_candlesticks(
+        self,
+        symbol: str,
+        period: str,
+        count: int,
+    ) -> list[BrokerCandle]:
+        """Fetch candles adjusted to the latest share basis for research features."""
+        return self._call_with_retry(
+            lambda: self._get_candlesticks_inner(
+                symbol,
+                period,
+                count,
+                adjustment="ForwardAdjust",
+            ),
+            op="get_forward_adjusted_candlesticks",
+            max_retries=settings.broker_quote_retry_max,
+            base_ms=settings.broker_retry_base_ms,
+        )
+
+    def _get_candlesticks_inner(
+        self,
+        symbol: str,
+        period: str,
+        count: int,
+        *,
+        adjustment: str = "NoAdjust",
+    ) -> list[BrokerCandle]:
         if count <= 0:
             return []
         with self._lock:
@@ -940,9 +966,11 @@ class BrokerGateway:
             period_enum = getattr(Period, _normalize_period_name(period), None)
             if period_enum is None:
                 raise ValueError(f"unsupported candlestick period: {period}")
-            adjust_enum = getattr(AdjustType, "NoAdjust", None)
+            adjust_enum = getattr(AdjustType, adjustment, None)
             if adjust_enum is None:
-                raise RuntimeError("AdjustType.NoAdjust not found in SDK")
+                raise RuntimeError(
+                    f"AdjustType.{adjustment} not found in SDK"
+                )
 
             quote_ctx = self._quote_ctx
             if quote_ctx is None:
@@ -995,6 +1023,49 @@ class BrokerGateway:
             base_ms=settings.broker_retry_base_ms,
         )
 
+    def get_forward_adjusted_history_candlesticks_by_offset(
+        self,
+        symbol: str,
+        period: str,
+        count: int,
+        after: datetime,
+    ) -> list[BrokerCandle]:
+        """Fetch a forward historical page adjusted to the latest share basis."""
+        return self._call_with_retry(
+            lambda: self._get_history_candlesticks_by_offset_inner(
+                symbol,
+                period,
+                count,
+                after,
+                adjustment="ForwardAdjust",
+            ),
+            op="get_forward_adjusted_history_candlesticks_by_offset",
+            max_retries=settings.broker_quote_retry_max,
+            base_ms=settings.broker_retry_base_ms,
+        )
+
+    def get_forward_adjusted_history_candlesticks_before(
+        self,
+        symbol: str,
+        period: str,
+        count: int,
+        before: datetime,
+    ) -> list[BrokerCandle]:
+        """Fetch a backward historical page adjusted to the latest share basis."""
+        return self._call_with_retry(
+            lambda: self._get_history_candlesticks_by_offset_inner(
+                symbol,
+                period,
+                count,
+                before,
+                forward=False,
+                adjustment="ForwardAdjust",
+            ),
+            op="get_forward_adjusted_history_candlesticks_before",
+            max_retries=settings.broker_quote_retry_max,
+            base_ms=settings.broker_retry_base_ms,
+        )
+
     def _get_history_candlesticks_by_offset_inner(
         self,
         symbol: str,
@@ -1003,6 +1074,7 @@ class BrokerGateway:
         after: datetime,
         *,
         forward: bool = True,
+        adjustment: str = "NoAdjust",
     ) -> list[BrokerCandle]:
         if count <= 0:
             return []
@@ -1018,11 +1090,13 @@ class BrokerGateway:
                 raise ValueError(f"unsupported candlestick period: {period}")
             adjust_enum = getattr(
                 getattr(module, "AdjustType", None),
-                "NoAdjust",
+                adjustment,
                 None,
             )
             if adjust_enum is None:
-                raise RuntimeError("AdjustType.NoAdjust not found in SDK")
+                raise RuntimeError(
+                    f"AdjustType.{adjustment} not found in SDK"
+                )
             quote_ctx = self._quote_ctx
             if quote_ctx is None:
                 raise RuntimeError("quote context is not initialized")

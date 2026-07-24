@@ -122,6 +122,33 @@ class _FakeBroker:
         return _daily_bars(symbol)[-count:]
 
 
+class _ForwardAdjustedBroker(_FakeBroker):
+    def __init__(self) -> None:
+        super().__init__()
+        self.adjusted_candle_calls = 0
+
+    def get_candlesticks(
+        self,
+        symbol: str,
+        period: str,
+        count: int,
+    ) -> list[BrokerCandle]:
+        raise AssertionError(
+            f"raw candles must not feed universe selection: "
+            f"{symbol} {period} {count}"
+        )
+
+    def get_forward_adjusted_candlesticks(
+        self,
+        symbol: str,
+        period: str,
+        count: int,
+    ) -> list[BrokerCandle]:
+        assert period == "DAY"
+        self.adjusted_candle_calls += 1
+        return _daily_bars(symbol)[-count:]
+
+
 class _EventLike(Protocol):
     def set(self) -> None: ...
 
@@ -251,6 +278,18 @@ def test_default_selection_config_uses_active_strategy_fee_rate() -> None:
 
         assert service.config.round_trip_fee_bps == 24.0
         assert not db.dirty
+    finally:
+        db.close()
+
+
+def test_refresh_prefers_forward_adjusted_daily_candles() -> None:
+    db = _db()
+    broker = _ForwardAdjustedBroker()
+    try:
+        result = _service(db, broker).refresh()
+
+        assert result.run.status == "COMPLETE"
+        assert broker.adjusted_candle_calls == len(_CATALOG)
     finally:
         db.close()
 

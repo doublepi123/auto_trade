@@ -957,6 +957,7 @@ class TestBrokerGateway:
     def test_get_candlesticks_returns_normalized_bars(self, monkeypatch) -> None:
         class FakeAdjust:
             NoAdjust = "noadj"
+            ForwardAdjust = "forward"
 
         class FakePeriod:
             Day = "DAY"
@@ -999,12 +1000,27 @@ class TestBrokerGateway:
         assert candles[1].close == 103.0
         assert gw._quote_ctx.calls[0] == ("AAPL.US", "DAY", 2, "noadj")
 
+        adjusted = gw.get_forward_adjusted_candlesticks(
+            "AAPL.US",
+            "Day",
+            2,
+        )
+
+        assert len(adjusted) == 2
+        assert gw._quote_ctx.calls[1] == (
+            "AAPL.US",
+            "DAY",
+            2,
+            "forward",
+        )
+
     def test_get_history_candlesticks_pages_forward_from_watermark(
         self,
         monkeypatch,
     ) -> None:
         class FakeAdjust:
             NoAdjust = "noadj"
+            ForwardAdjust = "forward"
 
         class FakePeriod:
             Min_1 = "MIN_1"
@@ -1051,12 +1067,29 @@ class TestBrokerGateway:
             ("AAPL.US", "MIN_1", "noadj", True, 500, watermark)
         ]
 
+        gateway.get_forward_adjusted_history_candlesticks_by_offset(
+            "AAPL.US",
+            "MIN_1",
+            500,
+            watermark,
+        )
+
+        assert quote_context.calls[1] == (
+            "AAPL.US",
+            "MIN_1",
+            "forward",
+            True,
+            500,
+            watermark,
+        )
+
     def test_get_history_candlesticks_pages_backward_before_cursor(
         self,
         monkeypatch,
     ) -> None:
         class FakeAdjust:
             NoAdjust = "noadj"
+            ForwardAdjust = "forward"
 
         class FakePeriod:
             Min_5 = "MIN_5"
@@ -1128,6 +1161,22 @@ class TestBrokerGateway:
             ("AAPL.US", "MIN_5", "noadj", False, 1000, cursor)
         ]
 
+        gateway.get_forward_adjusted_history_candlesticks_before(
+            "AAPL.US",
+            "MIN_5",
+            1000,
+            cursor,
+        )
+
+        assert quote_context.calls[1] == (
+            "AAPL.US",
+            "MIN_5",
+            "forward",
+            False,
+            1000,
+            cursor,
+        )
+
     def test_get_candlesticks_drops_invalid_upstream_ohlcv(self, monkeypatch, caplog) -> None:
         class FakeAdjust:
             NoAdjust = "NO_ADJUST"
@@ -1198,6 +1247,28 @@ class TestBrokerGateway:
         gw._trade_ctx = object()
         with pytest.raises(RuntimeError, match="AdjustType.NoAdjust not found in SDK"):
             gw.get_candlesticks("AAPL.US", "Day", 1)
+
+    def test_forward_adjusted_candlesticks_raise_when_enum_missing(
+        self,
+        monkeypatch,
+    ) -> None:
+        class FakeModule:
+            class Period:
+                Day = "DAY"
+
+            class AdjustType:
+                NoAdjust = "noadj"
+
+        monkeypatch.setattr(broker_module, "_import_openapi", lambda: FakeModule)
+        gw = BrokerGateway()
+        gw._quote_ctx = object()
+        gw._trade_ctx = object()
+
+        with pytest.raises(
+            RuntimeError,
+            match="AdjustType.ForwardAdjust not found in SDK",
+        ):
+            gw.get_forward_adjusted_candlesticks("AAPL.US", "Day", 1)
 
     def test_normalize_period_name(self) -> None:
         assert _normalize_period_name("Day") == "Day"

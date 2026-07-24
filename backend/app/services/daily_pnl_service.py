@@ -351,6 +351,7 @@ class DailyPnlService:
                 fill,
                 fee_rate_us=fee_rate_us,
                 fee_rate_hk=fee_rate_hk,
+                warn_unclosed=fill_trade_day == target_day,
             )
             if fill.side not in {"SELL", "BUY_TO_COVER"}:
                 continue
@@ -1339,6 +1340,7 @@ class DailyPnlService:
         *,
         fee_rate_us: float,
         fee_rate_hk: float,
+        warn_unclosed: bool = True,
     ) -> tuple[Decimal, Decimal]:
         from app.core.fees import one_side_fee_rate
 
@@ -1372,7 +1374,7 @@ class DailyPnlService:
                 fill.quantity,
                 fill.price,
             )
-            if unclosed > _ZERO:
+            if warn_unclosed and unclosed > _ZERO:
                 DailyPnlService._warn_unclosed_remainder_once(fill, unclosed)
             entry_fee = (
                 fees_before * matched_quantity / quantity_before
@@ -1391,7 +1393,7 @@ class DailyPnlService:
                 fill.quantity,
                 fill.price,
             )
-            if unclosed > _ZERO:
+            if warn_unclosed and unclosed > _ZERO:
                 DailyPnlService._warn_unclosed_remainder_once(fill, unclosed)
             entry_fee = (
                 fees_before * matched_quantity / quantity_before
