@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import date, datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine
@@ -342,6 +343,19 @@ def test_tick_opens_then_closes_one_cost_adjusted_shadow_trade(
         assert opened.latest.estimated_cost_bps == 14.0
         assert opened.latest.universe == list(_SYMBOLS)
         assert opened.latest.excluded_symbols == {}
+        assert opened.latest.candidate_first_five_return_bps == 0.0
+        assert opened.latest.candidate_last_five_return_bps == pytest.approx(
+            100.0
+        )
+        assert opened.latest.candidate_path_efficiency == pytest.approx(
+            1.0
+        )
+        assert opened.latest.candidate_max_pullback_bps == pytest.approx(
+            (99.9 / 101.1 - 1) * 10_000
+        )
+        assert opened.latest.candidate_opening_range_bps == pytest.approx(
+            120.0
+        )
 
         closed = service.tick(
             now=_SESSION_OPEN + timedelta(minutes=62, seconds=10),
@@ -365,6 +379,40 @@ def test_tick_opens_then_closes_one_cost_adjusted_shadow_trade(
     finally:
         db.close()
         Base.metadata.drop_all(bind=engine)
+
+
+def test_candle_coercion_keeps_decision_prices_when_range_is_missing() -> None:
+    candle = SimpleNamespace(
+        timestamp=_SESSION_OPEN,
+        open=100.0,
+        close=101.0,
+    )
+
+    result = OpeningMomentumShadowService._coerce_candles([candle])
+
+    assert len(result) == 1
+    assert result[0].open == 100.0
+    assert result[0].high == 101.0
+    assert result[0].low == 100.0
+    assert result[0].close == 101.0
+
+
+def test_opening_path_efficiency_is_bounded_for_compounding_path() -> None:
+    candles = [
+        SimpleNamespace(
+            timestamp=_SESSION_OPEN + timedelta(minutes=index),
+            open=100.0 + index,
+            high=101.0 + index,
+            low=100.0 + index,
+            close=101.0 + index,
+        )
+        for index in range(5)
+    ]
+    coerced = OpeningMomentumShadowService._coerce_candles(candles)
+
+    features = OpeningMomentumShadowService._opening_path_features(coerced)
+
+    assert features.path_efficiency == 1.0
 
 
 def test_challengers_use_one_market_snapshot_and_close_all_variants(

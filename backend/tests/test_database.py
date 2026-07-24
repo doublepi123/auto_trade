@@ -274,6 +274,38 @@ def test_universe_selection_table_migration_is_complete_and_idempotent(
         assert session.query(UniverseSelectionCandidate).count() == 1
 
 
+def test_opening_momentum_path_feature_migration_is_idempotent(
+    tmp_path,
+) -> None:
+    db_path = tmp_path / "legacy_opening_momentum.db"
+    legacy_engine = create_engine(f"sqlite:///{db_path}")
+    with legacy_engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE opening_momentum_shadow_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT
+            )
+            """
+        )
+
+    database._ensure_opening_momentum_shadow_table(legacy_engine)
+    database._ensure_opening_momentum_shadow_table(legacy_engine)
+
+    columns = {
+        column["name"]
+        for column in inspect(legacy_engine).get_columns(
+            "opening_momentum_shadow_runs"
+        )
+    }
+    assert {
+        "candidate_first_five_return_bps",
+        "candidate_last_five_return_bps",
+        "candidate_path_efficiency",
+        "candidate_max_pullback_bps",
+        "candidate_opening_range_bps",
+    } <= columns
+
+
 def test_llm_interaction_token_migration_adds_nullable_columns(tmp_path) -> None:
     db_path = tmp_path / "legacy_llm_tokens.db"
     legacy_engine = create_engine(f"sqlite:///{db_path}")

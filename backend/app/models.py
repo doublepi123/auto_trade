@@ -677,6 +677,26 @@ class OpeningMomentumShadowRun(Base):
     market_return_bps: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     candidate_return_bps: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     excess_return_bps: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    candidate_first_five_return_bps: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+    )
+    candidate_last_five_return_bps: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+    )
+    candidate_path_efficiency: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+    )
+    candidate_max_pullback_bps: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+    )
+    candidate_opening_range_bps: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+    )
     entry_at: Mapped[Optional[datetime]] = mapped_column(_TZDateTime, nullable=True)
     entry_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     exit_due_at: Mapped[Optional[datetime]] = mapped_column(_TZDateTime, nullable=True)

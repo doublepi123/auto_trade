@@ -108,6 +108,11 @@ class TestOpeningMomentumShadowApi:
                     market_return_bps=10.0,
                     candidate_return_bps=80.0,
                     excess_return_bps=70.0,
+                    candidate_first_five_return_bps=25.0,
+                    candidate_last_five_return_bps=18.0,
+                    candidate_path_efficiency=0.42,
+                    candidate_max_pullback_bps=-35.0,
+                    candidate_opening_range_bps=130.0,
                     entry_at=_NOW,
                     entry_price=100.0,
                     exit_due_at=_NOW,
@@ -131,6 +136,9 @@ class TestOpeningMomentumShadowApi:
         assert runs.status_code == 200
         assert runs.json()[0]["candidate_symbol"] == "AAPL.US"
         assert runs.json()[0]["ranking"][0]["opening_return_bps"] == 80.0
+        assert runs.json()[0]["candidate_first_five_return_bps"] == 25.0
+        assert runs.json()[0]["candidate_path_efficiency"] == 0.42
+        assert runs.json()[0]["candidate_max_pullback_bps"] == -35.0
         assert status.json()["metrics"]["closed_trades"] == 1
         assert status.json()["metrics"]["cumulative_net_return_bps"] == 86.0
 

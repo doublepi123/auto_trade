@@ -374,6 +374,26 @@
                     <strong>{{ formatNullableBps(openingMomentumStatus.latest.excess_return_bps) }}</strong>
                   </div>
                   <div>
+                    <span>前 5 分钟</span>
+                    <strong>{{ formatNullableBps(openingMomentumStatus.latest.candidate_first_five_return_bps) }}</strong>
+                  </div>
+                  <div>
+                    <span>后 5 分钟</span>
+                    <strong>{{ formatNullableBps(openingMomentumStatus.latest.candidate_last_five_return_bps) }}</strong>
+                  </div>
+                  <div>
+                    <span>路径效率</span>
+                    <strong>{{ formatNullablePercent(openingMomentumStatus.latest.candidate_path_efficiency) }}</strong>
+                  </div>
+                  <div>
+                    <span>窗口回撤</span>
+                    <strong>{{ formatNullableBps(openingMomentumStatus.latest.candidate_max_pullback_bps) }}</strong>
+                  </div>
+                  <div>
+                    <span>开盘振幅</span>
+                    <strong>{{ formatNullableBps(openingMomentumStatus.latest.candidate_opening_range_bps) }}</strong>
+                  </div>
+                  <div>
                     <span>成本后收益</span>
                     <strong :class="{ negative: (openingMomentumStatus.latest.net_return_bps ?? 0) < 0 }">
                       {{ formatNullableBps(openingMomentumStatus.latest.net_return_bps) }}
@@ -433,6 +453,16 @@
                   <el-table-column label="当日候选" min-width="110">
                     <template #default="{ row }">
                       {{ row.latest?.candidate_symbol || '-' }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="路径效率" min-width="100">
+                    <template #default="{ row }">
+                      {{ formatNullablePercent(row.latest?.candidate_path_efficiency ?? null) }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="窗口回撤" min-width="100">
+                    <template #default="{ row }">
+                      {{ formatNullableBps(row.latest?.candidate_max_pullback_bps ?? null) }}
                     </template>
                   </el-table-column>
                   <el-table-column

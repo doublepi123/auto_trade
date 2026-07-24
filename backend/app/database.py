@@ -1470,6 +1470,27 @@ def _ensure_opening_momentum_shadow_table(db_engine: Engine) -> None:
         db_engine,
         checkfirst=True,
     )
+    inspector = inspect(db_engine)
+    columns = {
+        column["name"]
+        for column in inspector.get_columns(
+            "opening_momentum_shadow_runs"
+        )
+    }
+    path_feature_columns = {
+        "candidate_first_five_return_bps": "FLOAT",
+        "candidate_last_five_return_bps": "FLOAT",
+        "candidate_path_efficiency": "FLOAT",
+        "candidate_max_pullback_bps": "FLOAT",
+        "candidate_opening_range_bps": "FLOAT",
+    }
+    with db_engine.begin() as connection:
+        for name, column_type in path_feature_columns.items():
+            if name not in columns:
+                connection.exec_driver_sql(
+                    "ALTER TABLE opening_momentum_shadow_runs "
+                    f"ADD COLUMN {name} {column_type}"
+                )
 
 
 def _ensure_llm_interaction_variant_column(db_engine: Engine) -> None:

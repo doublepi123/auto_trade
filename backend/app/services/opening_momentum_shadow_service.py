@@ -84,7 +84,18 @@ class CandleProvider(Protocol):
 class _Candle:
     timestamp: datetime
     open: float
+    high: float
+    low: float
     close: float
+
+
+@dataclass(frozen=True)
+class _OpeningPathFeatures:
+    first_five_return_bps: float
+    last_five_return_bps: float
+    path_efficiency: float
+    max_pullback_bps: float
+    opening_range_bps: float
 
 
 @dataclass(frozen=True)
@@ -191,6 +202,9 @@ class OpeningMomentumShadowService:
         observations_by_symbol: dict[
             str, OpeningMomentumObservation
         ] = {}
+        path_features_by_symbol: dict[
+            str, _OpeningPathFeatures
+        ] = {}
         fetch_errors: dict[str, str] = {}
         signal_at = (
             session_open
@@ -246,6 +260,15 @@ class OpeningMomentumShadowService:
                         ),
                     )
                 )
+                signal_candles = [
+                    by_timestamp[timestamp]
+                    for timestamp in sorted(
+                        expected_signal_bars
+                    )
+                ]
+                path_features_by_symbol[symbol] = (
+                    self._opening_path_features(signal_candles)
+                )
             except Exception as exc:
                 fetch_errors[symbol] = (
                     f"BROKER_ERROR:{type(exc).__name__}"
@@ -270,6 +293,13 @@ class OpeningMomentumShadowService:
             decision = evaluate_opening_momentum(
                 observations,
                 variant.decision_config,
+            )
+            path_features = (
+                path_features_by_symbol.get(
+                    decision.candidate_symbol
+                )
+                if decision.candidate_symbol is not None
+                else None
             )
             data_complete = not excluded
             status = (
@@ -320,6 +350,31 @@ class OpeningMomentumShadowService:
                         decision.candidate_return_bps
                     ),
                     excess_return_bps=decision.excess_return_bps,
+                    candidate_first_five_return_bps=(
+                        path_features.first_five_return_bps
+                        if path_features is not None
+                        else None
+                    ),
+                    candidate_last_five_return_bps=(
+                        path_features.last_five_return_bps
+                        if path_features is not None
+                        else None
+                    ),
+                    candidate_path_efficiency=(
+                        path_features.path_efficiency
+                        if path_features is not None
+                        else None
+                    ),
+                    candidate_max_pullback_bps=(
+                        path_features.max_pullback_bps
+                        if path_features is not None
+                        else None
+                    ),
+                    candidate_opening_range_bps=(
+                        path_features.opening_range_bps
+                        if path_features is not None
+                        else None
+                    ),
                     entry_at=(
                         entry_at
                         if status == "OPEN"
@@ -855,6 +910,55 @@ class OpeningMomentumShadowService:
         )
 
     @staticmethod
+    def _opening_path_features(
+        candles: list[_Candle],
+    ) -> _OpeningPathFeatures:
+        if len(candles) < 5:
+            raise ValueError(
+                "opening path features require at least five candles"
+            )
+        opening_price = candles[0].open
+        signal_close = candles[-1].close
+        first_five_return_bps = (
+            candles[4].close / opening_price - 1
+        ) * 10_000
+        last_five_return_bps = (
+            signal_close / candles[-5].open - 1
+        ) * 10_000
+
+        previous_price = opening_price
+        path_distance = 0.0
+        for candle in candles:
+            path_distance += abs(candle.close - previous_price)
+            previous_price = candle.close
+        displacement = abs(signal_close - opening_price)
+        path_efficiency = (
+            displacement / path_distance
+            if path_distance > 0
+            else 0.0
+        )
+
+        running_high = candles[0].high
+        max_pullback_bps = 0.0
+        for candle in candles:
+            running_high = max(running_high, candle.high)
+            max_pullback_bps = min(
+                max_pullback_bps,
+                (candle.low / running_high - 1) * 10_000,
+            )
+        opening_range_bps = (
+            max(candle.high for candle in candles)
+            - min(candle.low for candle in candles)
+        ) / opening_price * 10_000
+        return _OpeningPathFeatures(
+            first_five_return_bps=first_five_return_bps,
+            last_five_return_bps=last_five_return_bps,
+            path_efficiency=path_efficiency,
+            max_pullback_bps=max_pullback_bps,
+            opening_range_bps=opening_range_bps,
+        )
+
+    @staticmethod
     def _coerce_candles(values: list[Any]) -> list[_Candle]:
         by_timestamp: dict[datetime, _Candle] = {}
         for value in values:
@@ -869,9 +973,35 @@ class OpeningMomentumShadowService:
                 for price in (open_price, close_price)
             ):
                 continue
+            try:
+                high_price = float(getattr(value, "high"))
+                low_price = float(getattr(value, "low"))
+            except (AttributeError, TypeError, ValueError):
+                high_price = max(open_price, close_price)
+                low_price = min(open_price, close_price)
+            if (
+                not math.isfinite(high_price)
+                or not math.isfinite(low_price)
+                or high_price <= 0
+                or low_price <= 0
+                or high_price < max(
+                    open_price,
+                    low_price,
+                    close_price,
+                )
+                or low_price > min(
+                    open_price,
+                    high_price,
+                    close_price,
+                )
+            ):
+                high_price = max(open_price, close_price)
+                low_price = min(open_price, close_price)
             by_timestamp[timestamp] = _Candle(
                 timestamp=timestamp,
                 open=open_price,
+                high=high_price,
+                low=low_price,
                 close=close_price,
             )
         return [
@@ -917,6 +1047,21 @@ class OpeningMomentumShadowService:
             market_return_bps=row.market_return_bps,
             candidate_return_bps=row.candidate_return_bps,
             excess_return_bps=row.excess_return_bps,
+            candidate_first_five_return_bps=(
+                row.candidate_first_five_return_bps
+            ),
+            candidate_last_five_return_bps=(
+                row.candidate_last_five_return_bps
+            ),
+            candidate_path_efficiency=(
+                row.candidate_path_efficiency
+            ),
+            candidate_max_pullback_bps=(
+                row.candidate_max_pullback_bps
+            ),
+            candidate_opening_range_bps=(
+                row.candidate_opening_range_bps
+            ),
             entry_at=_optional_utc(row.entry_at),
             entry_price=row.entry_price,
             exit_due_at=_optional_utc(row.exit_due_at),

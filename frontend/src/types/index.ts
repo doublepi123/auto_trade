@@ -1592,6 +1592,11 @@ export interface OpeningMomentumShadowRun {
   market_return_bps: number | null
   candidate_return_bps: number | null
   excess_return_bps: number | null
+  candidate_first_five_return_bps: number | null
+  candidate_last_five_return_bps: number | null
+  candidate_path_efficiency: number | null
+  candidate_max_pullback_bps: number | null
+  candidate_opening_range_bps: number | null
   entry_at: string | null
   entry_price: number | null
   exit_due_at: string | null
