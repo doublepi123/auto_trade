@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.api import watchlist as watchlist_api
 from app.core.broker import BrokerCandle, Quote
 from app.core.market_calendar import get_session
-from app.models import Base, WatchlistItem, WatchlistScore
+from app.models import Base, StrategyConfig, WatchlistItem, WatchlistScore
 from app.services import watchlist_quant_service as quant_module
 from app.services.watchlist_quant_service import (
     QuantScoringOutsideRTHError,
@@ -22,6 +22,7 @@ from app.services.watchlist_quant_service import (
 )
 
 _NOW = datetime(2026, 7, 23, 15, 0, tzinfo=timezone.utc)
+_US_ONE_SIDE_FEE_RATE = 0.0005
 
 
 def _db() -> Session:
@@ -110,7 +111,10 @@ def test_quant_score_rewards_liquid_mean_reverting_candidate() -> None:
         observed_at=_NOW,
     )
 
-    score = score_watchlist_quant_metrics(metrics)
+    score = score_watchlist_quant_metrics(
+        metrics,
+        estimated_one_side_fee_rate=_US_ONE_SIDE_FEE_RATE,
+    )
 
     assert metrics.blockers == ()
     assert metrics.conditional_reversal_bps > 40
@@ -130,7 +134,10 @@ def test_quant_score_caps_candidate_with_hard_data_blockers() -> None:
         observed_at=_NOW,
     )
 
-    score = score_watchlist_quant_metrics(metrics)
+    score = score_watchlist_quant_metrics(
+        metrics,
+        estimated_one_side_fee_rate=_US_ONE_SIDE_FEE_RATE,
+    )
 
     assert "INSUFFICIENT_DAILY_DATA" in metrics.blockers
     assert "INSUFFICIENT_INTRADAY_DATA" in metrics.blockers
@@ -172,6 +179,21 @@ class _Broker:
         return values
 
 
+class _QuoteFailureBroker:
+    def get_quotes(self, symbols: list[str]) -> list[Quote]:
+        raise RuntimeError(f"quote request failed: {symbols}")
+
+    def get_candlesticks(
+        self,
+        symbol: str,
+        period: str,
+        count: int,
+    ) -> list[BrokerCandle]:
+        raise AssertionError(
+            f"unexpected candle access: {symbol} {period} {count}"
+        )
+
+
 def test_service_persists_scores_and_isolates_symbol_failures() -> None:
     db = _db()
     try:
@@ -205,6 +227,77 @@ def test_service_persists_scores_and_isolates_symbol_failures() -> None:
         assert by_symbol["BROKEN.US"].source == "quant_error_v2"
         assert by_symbol["BROKEN.US"].recommended_action == "AVOID"
         assert db.query(WatchlistScore).count() == 2
+    finally:
+        db.close()
+
+
+def test_market_data_failure_does_not_commit_pending_session_state() -> None:
+    db = _db()
+    try:
+        scored_item = WatchlistItem(
+            symbol="AAPL.US",
+            market="US",
+            alias="Apple",
+        )
+        db.add(scored_item)
+        db.commit()
+        db.refresh(scored_item)
+        pending_item = WatchlistItem(
+            symbol="PENDING.US",
+            market="US",
+            alias="Pending",
+        )
+        db.add(pending_item)
+
+        with pytest.raises(RuntimeError, match="quote request failed"):
+            WatchlistQuantService(
+                db,
+                _QuoteFailureBroker(),
+                now=_NOW,
+            ).score_items([scored_item])
+        assert pending_item in db.new
+        db.rollback()
+
+        assert db.query(WatchlistItem).count() == 1
+        assert (
+            db.query(WatchlistItem)
+            .filter(WatchlistItem.symbol == "PENDING.US")
+            .count()
+            == 0
+        )
+        assert db.query(StrategyConfig).count() == 0
+        assert db.query(WatchlistScore).count() == 0
+    finally:
+        db.close()
+
+
+def test_service_uses_latest_strategy_fee_to_downgrade_candidate() -> None:
+    db = _db()
+    try:
+        strategy = StrategyConfig(
+            fee_rate_us=_US_ONE_SIDE_FEE_RATE,
+            fee_rate_hk=0.003,
+        )
+        item = WatchlistItem(
+            symbol="AAPL.US",
+            market="US",
+            alias="Apple",
+        )
+        db.add_all([strategy, item])
+        db.commit()
+        service = WatchlistQuantService(db, _Broker(), now=_NOW)
+
+        baseline = service.score_items([item])[0]
+        strategy.fee_rate_us = 0.005
+        db.commit()
+        high_fee = service.score_items([item])[0]
+
+        assert baseline.recommended_action == "CANDIDATE"
+        assert "one_side_fee=5.0bp" in baseline.rationale
+        assert high_fee.score <= 49
+        assert high_fee.recommended_action != "CANDIDATE"
+        assert "one_side_fee=50.0bp" in high_fee.rationale
+        assert "round_trip_fee=100.0bp" in high_fee.rationale
     finally:
         db.close()
 
@@ -246,6 +339,7 @@ def test_service_rejects_outside_rth_before_market_data_or_writes() -> None:
             ).score_items([item])
 
         assert db.query(WatchlistScore).count() == 0
+        assert db.query(StrategyConfig).count() == 0
     finally:
         db.close()
 
@@ -308,6 +402,7 @@ def test_service_preserves_score_until_first_segment_bar_completes(
         assert len(stored) == 1
         assert stored[0].id == previous_id
         assert stored[0].rationale == "previous valid score"
+        assert db.query(StrategyConfig).count() == 0
     finally:
         db.close()
 

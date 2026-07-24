@@ -20,6 +20,7 @@ from app.services.watchlist_quant_service import (
 )
 
 _NOW = datetime(2026, 7, 24, 18, 0, tzinfo=timezone.utc)
+_US_ONE_SIDE_FEE_RATE = 0.0005
 
 
 def _db() -> Session:
@@ -119,13 +120,18 @@ def _strong_metrics(
 
 
 def test_strong_liquid_mean_reverting_symbol_is_preferred() -> None:
-    result = score_watchlist_quant_metrics(_strong_metrics())
+    result = score_watchlist_quant_metrics(
+        _strong_metrics(),
+        estimated_one_side_fee_rate=_US_ONE_SIDE_FEE_RATE,
+    )
 
     assert result.score >= 50
     assert result.recommended_action == "CANDIDATE"
     assert result.confidence >= 0.9
     assert "reversal30m=+65.0bp" in result.rationale
     assert "net_reversal30m=+50.4bp" in result.rationale
+    assert "one_side_fee=5.0bp" in result.rationale
+    assert "round_trip_fee=10.0bp" in result.rationale
 
 
 def test_candidate_requires_positive_cost_adjusted_reversal_edge() -> None:
@@ -133,7 +139,8 @@ def test_candidate_requires_positive_cost_adjusted_reversal_edge() -> None:
         replace(
             _strong_metrics(),
             conditional_reversal_bps=10.0,
-        )
+        ),
+        estimated_one_side_fee_rate=_US_ONE_SIDE_FEE_RATE,
     )
 
     assert result.score <= 49
@@ -154,7 +161,8 @@ def test_candidate_requires_configured_minimum_edge_cost_ratio(
         replace(
             _strong_metrics(),
             conditional_reversal_bps=20.0,
-        )
+        ),
+        estimated_one_side_fee_rate=_US_ONE_SIDE_FEE_RATE,
     )
 
     assert result.score == 49
@@ -163,12 +171,30 @@ def test_candidate_requires_configured_minimum_edge_cost_ratio(
     assert "required_edge_cost_ratio=2.000x" in result.rationale
 
 
+def test_high_configured_fee_downgrades_an_otherwise_valid_candidate() -> None:
+    baseline = score_watchlist_quant_metrics(
+        _strong_metrics(),
+        estimated_one_side_fee_rate=_US_ONE_SIDE_FEE_RATE,
+    )
+    high_fee = score_watchlist_quant_metrics(
+        _strong_metrics(),
+        estimated_one_side_fee_rate=0.005,
+    )
+
+    assert baseline.recommended_action == "CANDIDATE"
+    assert high_fee.score <= 49
+    assert high_fee.recommended_action != "CANDIDATE"
+    assert "one_side_fee=50.0bp" in high_fee.rationale
+    assert "round_trip_fee=100.0bp" in high_fee.rationale
+
+
 def test_hard_blocker_caps_score_and_forces_avoid() -> None:
     result = score_watchlist_quant_metrics(
         _strong_metrics(
             blockers=("WIDE_SPREAD",),
             spread_bps=25.0,
-        )
+        ),
+        estimated_one_side_fee_rate=_US_ONE_SIDE_FEE_RATE,
     )
 
     assert result.score <= 39
@@ -282,7 +308,10 @@ def test_stale_intraday_data_blocks_even_when_last_trade_is_old() -> None:
         ),
         observed_at=_NOW,
     )
-    result = score_watchlist_quant_metrics(metrics)
+    result = score_watchlist_quant_metrics(
+        metrics,
+        estimated_one_side_fee_rate=_US_ONE_SIDE_FEE_RATE,
+    )
 
     assert "STALE_INTRADAY_DATA" in metrics.blockers
     assert "STALE_BBO" not in metrics.blockers

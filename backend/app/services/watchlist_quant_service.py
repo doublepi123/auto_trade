@@ -12,9 +12,10 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.core.broker import BrokerCandle, Quote
+from app.core.fees import one_side_fee_rate
 from app.core.market_calendar import get_session, is_trading_hours
 from app.domain.universe_selection import DailyBar, completed_daily_bars
-from app.models import WatchlistItem, WatchlistScore
+from app.models import StrategyConfig, WatchlistItem, WatchlistScore
 from app.services.watchlist_score_service import WatchlistScoreService
 
 logger = logging.getLogger("auto_trade.watchlist_quant_service")
@@ -35,6 +36,8 @@ _MAX_INTRADAY_AGE = timedelta(minutes=15)
 _INTRADAY_BAR_DURATION = timedelta(minutes=5)
 _REVERSAL_HORIZON_BARS = 6
 _MIN_REVERSAL_OBSERVATIONS = 60
+_DEFAULT_ONE_SIDE_FEE_RATE_US = Decimal("0.0005")
+_DEFAULT_ONE_SIDE_FEE_RATE_HK = Decimal("0.003")
 _DATA_QUALITY_BLOCKERS = frozenset(
     {
         "INSUFFICIENT_DAILY_DATA",
@@ -519,7 +522,16 @@ def build_watchlist_quant_metrics(
 
 def score_watchlist_quant_metrics(
     metrics: WatchlistQuantMetrics,
+    *,
+    estimated_one_side_fee_rate: float,
 ) -> WatchlistQuantScore:
+    if (
+        not math.isfinite(estimated_one_side_fee_rate)
+        or estimated_one_side_fee_rate < 0
+    ):
+        raise ValueError(
+            "estimated_one_side_fee_rate must be a non-negative finite number"
+        )
     dollar_volume = max(metrics.median_daily_dollar_volume, 1.0)
     liquidity = _clamp((math.log10(dollar_volume) - 8.0) / 2.0)
     spread = _clamp(
@@ -556,7 +568,7 @@ def score_watchlist_quant_metrics(
         + low_efficiency * 0.20
     )
 
-    estimated_fee_bps = 60.0 if metrics.market.upper() == "HK" else 10.0
+    estimated_fee_bps = estimated_one_side_fee_rate * 2 * 10_000
     estimated_cost_bps = (
         estimated_fee_bps
         + (metrics.spread_bps if metrics.spread_bps is not None else 12.0)
@@ -649,6 +661,8 @@ def score_watchlist_quant_metrics(
         f"; reversal30m={metrics.conditional_reversal_bps:+.1f}bp"
         f"; reversal30m_hit={metrics.conditional_reversal_hit_rate * 100:.1f}%"
         f"; reversal_n={metrics.reversal_observations}"
+        f"; one_side_fee={estimated_one_side_fee_rate * 10_000:.1f}bp"
+        f"; round_trip_fee={estimated_fee_bps:.1f}bp"
         f"; estimated_cost={estimated_cost_bps:.1f}bp"
         f"; net_reversal30m={net_reversal_edge_bps:+.1f}bp"
         f"; edge_cost_ratio={edge_to_cost:.3f}x"
@@ -730,6 +744,18 @@ class WatchlistQuantService:
             )
         if not scorable_items:
             return []
+        with self.db.no_autoflush:
+            strategy = (
+                self.db.query(StrategyConfig)
+                .order_by(StrategyConfig.id.desc())
+                .first()
+            )
+        if strategy is None:
+            fee_rate_us = _DEFAULT_ONE_SIDE_FEE_RATE_US
+            fee_rate_hk = _DEFAULT_ONE_SIDE_FEE_RATE_HK
+        else:
+            fee_rate_us = Decimal(str(strategy.fee_rate_us or 0))
+            fee_rate_hk = Decimal(str(strategy.fee_rate_hk or 0))
         symbols = [item.symbol for item in scorable_items]
         quotes = {
             quote.symbol: quote
@@ -763,7 +789,16 @@ class WatchlistQuantService:
                     quote=quotes.get(item.symbol),
                     observed_at=self.now,
                 )
-                result = score_watchlist_quant_metrics(metrics)
+                result = score_watchlist_quant_metrics(
+                    metrics,
+                    estimated_one_side_fee_rate=float(
+                        one_side_fee_rate(
+                            item.market,
+                            fee_rate_us,
+                            fee_rate_hk,
+                        )
+                    ),
+                )
                 has_data_quality_blocker = bool(
                     _DATA_QUALITY_BLOCKERS.intersection(metrics.blockers)
                 )
