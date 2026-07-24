@@ -175,7 +175,7 @@ class TestStrategyV2ShadowApi:
         assert body["automatic_promotion_allowed"] is False
         assert body["historical_backfill_allowed"] is False
         assert body["capital_slots"] == 1
-        assert len(body["variants"]) == 4
+        assert len(body["variants"]) == 6
         assert {
             item["policy"] for item in body["variants"]
         } == {
@@ -183,7 +183,15 @@ class TestStrategyV2ShadowApi:
             "SELECTED_UNIVERSE",
             "QUANT_CANDIDATE",
             "QUANT_WATCH_PLUS",
+            "SELECTED_VWAP_EDGE",
+            "VWAP_EDGE_POOL",
         }
+        assert {
+            item["edge_filter"]
+            for item in body["variants"]
+            if item["policy"].endswith("VWAP_EDGE")
+            or item["policy"] == "VWAP_EDGE_POOL"
+        } == {"COST_TO_STOP_VWAP_DISCOUNT"}
 
     def test_config_contract_update_audit_and_forbidden_hard_fields(self) -> None:
         response = self.client.get("/api/strategy-shadow/config")

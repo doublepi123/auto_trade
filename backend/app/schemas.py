@@ -926,11 +926,17 @@ class StrategyV2PortfolioRoutingVariant(BaseModel):
         "SELECTED_UNIVERSE",
         "QUANT_CANDIDATE",
         "QUANT_WATCH_PLUS",
+        "SELECTED_VWAP_EDGE",
+        "VWAP_EDGE_POOL",
     ]
     algorithm_version: str
     evaluator_digest: str
     registered_at: datetime
     eligible_after: datetime
+    edge_filter: Literal[
+        "NONE",
+        "COST_TO_STOP_VWAP_DISCOUNT",
+    ] = "NONE"
     status: Literal["COLLECTING", "READY_FOR_REVIEW", "MATURE_EVIDENCE"]
     metrics: StrategyV2PortfolioRoutingMetrics = Field(
         default_factory=StrategyV2PortfolioRoutingMetrics

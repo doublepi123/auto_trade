@@ -10,6 +10,8 @@ PortfolioRoutingPolicy = Literal[
     "SELECTED_UNIVERSE",
     "QUANT_CANDIDATE",
     "QUANT_WATCH_PLUS",
+    "SELECTED_VWAP_EDGE",
+    "VWAP_EDGE_POOL",
 ]
 
 
@@ -25,6 +27,10 @@ class PortfolioRoutingCandidate:
     quant_action: str = ""
     quant_score: float | None = None
     quant_confidence: float | None = None
+    residual_1m_bps: float | None = None
+    residual_5m_bps: float | None = None
+    round_trip_cost_bps: float | None = None
+    stop_distance_bps: float | None = None
 
     def __post_init__(self) -> None:
         normalized_symbol = self.symbol.strip().upper()
@@ -44,16 +50,67 @@ class PortfolioRoutingCandidate:
             self.selection_score,
             self.quant_score,
             self.quant_confidence,
+            self.residual_1m_bps,
+            self.residual_5m_bps,
+            self.round_trip_cost_bps,
+            self.stop_distance_bps,
         ):
             if value is not None and not math.isfinite(value):
                 raise ValueError(
                     "portfolio routing candidate metrics must be finite"
                 )
+        if (
+            self.round_trip_cost_bps is not None
+            and self.round_trip_cost_bps < 0
+        ):
+            raise ValueError(
+                "portfolio routing round-trip cost must be non-negative"
+            )
+        if (
+            self.stop_distance_bps is not None
+            and self.stop_distance_bps <= 0
+        ):
+            raise ValueError(
+                "portfolio routing stop distance must be positive"
+            )
         object.__setattr__(self, "symbol", normalized_symbol)
         object.__setattr__(
             self,
             "quant_action",
             self.quant_action.strip().upper(),
+        )
+
+    @property
+    def vwap_edge_eligible(self) -> bool:
+        values = (
+            self.residual_1m_bps,
+            self.residual_5m_bps,
+            self.round_trip_cost_bps,
+            self.stop_distance_bps,
+        )
+        if any(value is None for value in values):
+            return False
+        residual_1m = float(self.residual_1m_bps or 0.0)
+        residual_5m = float(self.residual_5m_bps or 0.0)
+        cost = float(self.round_trip_cost_bps or 0.0)
+        stop = float(self.stop_distance_bps or 0.0)
+        if cost >= stop:
+            return False
+        return (
+            -stop <= residual_1m <= -cost
+            and -stop <= residual_5m <= -cost
+        )
+
+    @property
+    def vwap_edge_score_bps(self) -> float:
+        if not self.vwap_edge_eligible:
+            return -1.0
+        minimum_discount = min(
+            -float(self.residual_1m_bps or 0.0),
+            -float(self.residual_5m_bps or 0.0),
+        )
+        return minimum_discount - float(
+            self.round_trip_cost_bps or 0.0
         )
 
 
@@ -91,6 +148,41 @@ def rank_portfolio_candidates(
             key=lambda candidate: (
                 candidate.selection_rank or 10_000,
                 -_metric(candidate.selection_score),
+                candidate.symbol,
+            ),
+        ))
+    if policy == "SELECTED_VWAP_EDGE":
+        eligible = [
+            candidate
+            for candidate in by_symbol.values()
+            if candidate.selection_selected
+            and candidate.selection_rank is not None
+            and candidate.vwap_edge_eligible
+        ]
+        return tuple(sorted(
+            eligible,
+            key=lambda candidate: (
+                candidate.selection_rank or 10_000,
+                -candidate.vwap_edge_score_bps,
+                candidate.symbol,
+            ),
+        ))
+    if policy == "VWAP_EDGE_POOL":
+        eligible = [
+            candidate
+            for candidate in by_symbol.values()
+            if candidate.vwap_edge_eligible
+        ]
+        return tuple(sorted(
+            eligible,
+            key=lambda candidate: (
+                -candidate.vwap_edge_score_bps,
+                0 if candidate.selection_selected else 1,
+                (
+                    candidate.selection_rank
+                    if candidate.selection_rank is not None
+                    else 10_000
+                ),
                 candidate.symbol,
             ),
         ))

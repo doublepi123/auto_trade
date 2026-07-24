@@ -20,6 +20,7 @@ from app.models import (
     StrategyV2PortfolioRegistration,
     StrategyV2ShadowDecision,
     StrategyV2ShadowTrade,
+    StrategyV2ShadowVersion,
     UniverseSelectionCandidate,
     UniverseSelectionRun,
     WatchlistScore,
@@ -55,9 +56,20 @@ _ROUTING_SPECS = (
         policy="QUANT_WATCH_PLUS",
         algorithm_version="strategy-v2-portfolio-quant-watch-plus-v1",
     ),
+    _RoutingSpec(
+        policy="SELECTED_VWAP_EDGE",
+        algorithm_version=(
+            "strategy-v2-portfolio-selected-vwap-edge-v1"
+        ),
+    ),
+    _RoutingSpec(
+        policy="VWAP_EDGE_POOL",
+        algorithm_version="strategy-v2-portfolio-vwap-edge-pool-v1",
+    ),
 )
 _EVALUATOR_VERSION = "strategy-v2-single-capital-slot-forward-router-v1"
 _TERMINAL_UNIVERSE_STATUSES = ("COMPLETE", "DEGRADED")
+_VWAP_EDGE_POLICIES = {"SELECTED_VWAP_EDGE", "VWAP_EDGE_POOL"}
 _ENTRY_BIND_TIMEOUT = timedelta(minutes=10)
 _MIN_READY_TRADES = 20
 _MIN_MATURE_TRADES = 50
@@ -330,10 +342,15 @@ class StrategyV2PortfolioService:
             tuple(by_symbol),
             observed_at=observed_at,
         )
+        vwap_edges = self._vwap_edge_context(
+            tuple(by_symbol.values()),
+            observed_at=observed_at,
+        )
         candidates: list[PortfolioRoutingCandidate] = []
         for symbol, decision in sorted(by_symbol.items()):
             selection_row = selection.get(symbol)
             quant_row = quant.get(symbol)
+            vwap_edge = vwap_edges.get(decision.id)
             candidates.append(PortfolioRoutingCandidate(
                 symbol=symbol,
                 signal_decision_id=decision.id,
@@ -373,8 +390,126 @@ class StrategyV2PortfolioService:
                     if quant_row is not None
                     else None
                 ),
+                residual_1m_bps=(
+                    vwap_edge[0]
+                    if vwap_edge is not None
+                    else None
+                ),
+                residual_5m_bps=(
+                    vwap_edge[1]
+                    if vwap_edge is not None
+                    else None
+                ),
+                round_trip_cost_bps=(
+                    vwap_edge[2]
+                    if vwap_edge is not None
+                    else None
+                ),
+                stop_distance_bps=(
+                    vwap_edge[3]
+                    if vwap_edge is not None
+                    else None
+                ),
             ))
         return candidates
+
+    def _vwap_edge_context(
+        self,
+        decisions: tuple[StrategyV2ShadowDecision, ...],
+        *,
+        observed_at: datetime,
+    ) -> dict[int, tuple[float, float, float, float]]:
+        if not decisions:
+            return {}
+        symbols = tuple({row.symbol for row in decisions})
+        config_versions = tuple({
+            row.config_version for row in decisions
+        })
+        versions = self.db.query(StrategyV2ShadowVersion).filter(
+            StrategyV2ShadowVersion.symbol.in_(symbols),
+            StrategyV2ShadowVersion.config_version.in_(config_versions),
+            StrategyV2ShadowVersion.activated_at <= observed_at,
+        ).all()
+        by_key = {
+            (row.symbol, row.config_version): row
+            for row in versions
+        }
+        result: dict[int, tuple[float, float, float, float]] = {}
+        for decision in decisions:
+            version = by_key.get((
+                decision.symbol,
+                decision.config_version,
+            ))
+            if version is None:
+                continue
+            values = self._vwap_edge_values(decision, version)
+            if values is not None:
+                result[decision.id] = values
+        return result
+
+    @staticmethod
+    def _vwap_edge_values(
+        decision: StrategyV2ShadowDecision,
+        version: StrategyV2ShadowVersion,
+    ) -> tuple[float, float, float, float] | None:
+        try:
+            config = json.loads(version.config_json)
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(config, dict):
+            return None
+        try:
+            features = json.loads(decision.features_json)
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(features, dict):
+            return None
+        fee_key = (
+            "estimated_fee_rate_us"
+            if decision.market == "US"
+            else "estimated_fee_rate_hk"
+            if decision.market == "HK"
+            else ""
+        )
+        if not fee_key:
+            return None
+        try:
+            fee_rate = float(config[fee_key])
+            slippage_bps = float(config["slippage_bps"])
+            stop_loss_pct = float(config["stop_loss_pct"])
+            residual_1m = float(features["residual_1m"])
+            residual_5m = float(features["residual_5m"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        values = (
+            fee_rate,
+            slippage_bps,
+            stop_loss_pct,
+            residual_1m,
+            residual_5m,
+        )
+        if (
+            any(not math.isfinite(value) for value in values)
+            or fee_rate < 0
+            or slippage_bps < 0
+            or stop_loss_pct <= 0
+        ):
+            return None
+        residual_1m_bps = residual_1m * 10_000
+        residual_5m_bps = residual_5m * 10_000
+        round_trip_cost_bps = 2 * (
+            fee_rate * 10_000 + slippage_bps
+        )
+        stop_distance_bps = stop_loss_pct * 100
+        result = (
+            residual_1m_bps,
+            residual_5m_bps,
+            round_trip_cost_bps,
+            stop_distance_bps,
+        )
+        if any(not math.isfinite(value) for value in result):
+            return None
+        return result
 
     def _selection_context(
         self,
@@ -713,7 +848,7 @@ class StrategyV2PortfolioService:
         if is_baseline:
             blockers.append("BASELINE_COMPARATOR")
         else:
-            if baseline.closed_trades < _MIN_READY_TRADES:
+            if baseline.observed_sessions < _MIN_READY_SESSIONS:
                 blockers.append("BASELINE_EVIDENCE_INSUFFICIENT")
             elif (
                 metrics.compounded_return_pct
@@ -733,6 +868,11 @@ class StrategyV2PortfolioService:
             evaluator_digest=registration.evaluator_digest,
             registered_at=registration.registered_at,
             eligible_after=registration.eligible_after,
+            edge_filter=(
+                "COST_TO_STOP_VWAP_DISCOUNT"
+                if registration.policy in _VWAP_EDGE_POLICIES
+                else "NONE"
+            ),
             status=(
                 "MATURE_EVIDENCE"
                 if metrics.closed_trades >= _MIN_MATURE_TRADES
@@ -770,6 +910,19 @@ class StrategyV2PortfolioService:
             ),
             "universe_freshness": "COMPLETED_BEFORE_SIGNAL_BAR_END",
         }
+        if spec.policy in _VWAP_EDGE_POLICIES:
+            payload["vwap_edge_filter"] = {
+                "price_reference": (
+                    "FROZEN_SIGNAL_FEATURE_RESIDUALS"
+                ),
+                "minimum_discount": "FROZEN_ROUND_TRIP_COST_BPS",
+                "maximum_discount": "FROZEN_STOP_DISTANCE_BPS",
+                "required_references": [
+                    "SESSION_VWAP_1M",
+                    "SESSION_VWAP_5M",
+                ],
+                "bounds": "INCLUSIVE",
+            }
         encoded = json.dumps(
             payload,
             sort_keys=True,
@@ -799,6 +952,8 @@ def _routing_policy(value: str) -> PortfolioRoutingPolicy:
         "SELECTED_UNIVERSE",
         "QUANT_CANDIDATE",
         "QUANT_WATCH_PLUS",
+        "SELECTED_VWAP_EDGE",
+        "VWAP_EDGE_POOL",
     }:
         raise ValueError(f"unsupported portfolio routing policy: {value}")
     return cast(PortfolioRoutingPolicy, value)
