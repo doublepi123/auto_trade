@@ -951,12 +951,14 @@ def _watchlist_quant_tick_sync() -> None:
     """Refresh due deterministic watchlist scores during open sessions."""
     if not settings.watchlist_quant_auto_score_enabled:
         return
-    from app.models import WatchlistItem
-    from app.services.watchlist_quant_service import WatchlistQuantService
+    from app.services.watchlist_quant_service import (
+        WatchlistQuantService,
+        list_quant_observation_items,
+    )
 
     db = SessionLocal()
     try:
-        watchlist_items = db.query(WatchlistItem).all()
+        watchlist_items = list_quant_observation_items(db)
         if not watchlist_items:
             return
         with _watchlist_quant_sync_lock:
@@ -1030,10 +1032,10 @@ def _universe_selection_tick_sync() -> None:
     if not settings.universe_selection_enabled:
         return
     from app.api.universe import build_universe_selection_service
-    from app.models import WatchlistItem
     from app.services.watchlist_quant_service import (
         QuantScoringOutsideRTHError,
         WatchlistQuantService,
+        list_quant_observation_items,
     )
 
     db = SessionLocal()
@@ -1056,7 +1058,7 @@ def _universe_selection_tick_sync() -> None:
             # when the next refresh has no watchlist delta.
             get_runner().reload_strategy()
         if response.run.status == "COMPLETE":
-            watchlist_items = db.query(WatchlistItem).all()
+            watchlist_items = list_quant_observation_items(db)
             if watchlist_items:
                 try:
                     with _watchlist_quant_sync_lock:

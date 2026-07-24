@@ -97,6 +97,41 @@ def list_latest_current_quant_scores(
     )
 
 
+def list_quant_observation_items(
+    db: Session,
+) -> list[WatchlistItem]:
+    """Include the current trading target without persisting it to the pool."""
+    items = db.query(WatchlistItem).order_by(WatchlistItem.id.asc()).all()
+    strategy = (
+        db.query(StrategyConfig)
+        .order_by(StrategyConfig.id.desc())
+        .first()
+    )
+    if strategy is None:
+        return items
+
+    trading_symbol = strategy.symbol.strip().upper()
+    if not trading_symbol:
+        return items
+    observed_symbols = {
+        item.symbol.strip().upper()
+        for item in items
+    }
+    if trading_symbol in observed_symbols:
+        return items
+
+    return [
+        *items,
+        WatchlistItem(
+            symbol=trading_symbol,
+            market=strategy.market.strip().upper(),
+            alias="",
+            source="trading_target",
+            is_active=True,
+        ),
+    ]
+
+
 class WatchlistMarketDataProvider(Protocol):
     def get_quotes(self, symbols: list[str]) -> list[Quote]: ...
 

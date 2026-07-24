@@ -18,6 +18,7 @@ from app.services.watchlist_quant_service import (
     QuantScoringOutsideRTHError,
     WatchlistQuantService,
     build_watchlist_quant_metrics,
+    list_quant_observation_items,
     score_watchlist_quant_metrics,
 )
 
@@ -117,6 +118,68 @@ def _quote(symbol: str = "AAPL.US") -> Quote:
         ask=100.01,
         timestamp=_NOW.isoformat(),
     )
+
+
+def test_quant_observation_items_include_unlisted_trading_target() -> None:
+    db = _db()
+    try:
+        db.add(
+            WatchlistItem(
+                symbol="AAPL.US",
+                market="US",
+                alias="Apple",
+                source="universe",
+            )
+        )
+        db.add(
+            StrategyConfig(
+                symbol="NVDA.US",
+                market="US",
+            )
+        )
+        db.commit()
+
+        items = list_quant_observation_items(db)
+
+        assert [item.symbol for item in items] == [
+            "AAPL.US",
+            "NVDA.US",
+        ]
+        target = items[-1]
+        assert target.market == "US"
+        assert target.source == "trading_target"
+        assert target.is_active is True
+        assert target.id is None
+        assert db.query(WatchlistItem).count() == 1
+    finally:
+        db.close()
+
+
+def test_quant_observation_items_do_not_duplicate_trading_target() -> None:
+    db = _db()
+    try:
+        db.add(
+            WatchlistItem(
+                symbol="NVDA.US",
+                market="US",
+                alias="NVIDIA",
+                source="universe",
+            )
+        )
+        db.add(
+            StrategyConfig(
+                symbol="NVDA.US",
+                market="US",
+            )
+        )
+        db.commit()
+
+        items = list_quant_observation_items(db)
+
+        assert [item.symbol for item in items] == ["NVDA.US"]
+        assert items[0].source == "universe"
+    finally:
+        db.close()
 
 
 def test_quant_score_rewards_liquid_mean_reverting_candidate() -> None:

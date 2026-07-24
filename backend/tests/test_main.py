@@ -247,6 +247,11 @@ def test_watchlist_quant_tick_scores_due_items_and_closes_db(
         "WatchlistQuantService",
         FakeQuantService,
     )
+    monkeypatch.setattr(
+        watchlist_quant_service,
+        "list_quant_observation_items",
+        lambda _db: items,
+    )
 
     main_module._watchlist_quant_tick_sync()
 
@@ -331,6 +336,11 @@ def test_universe_tick_reloads_before_optional_quant_failure(
         watchlist_quant_service.WatchlistQuantService,
         "score_due_items",
         fail_score,
+    )
+    monkeypatch.setattr(
+        watchlist_quant_service,
+        "list_quant_observation_items",
+        lambda _db: [SimpleNamespace(symbol="AAPL.US", market="US")],
     )
 
     main_module._universe_selection_tick_sync()
