@@ -79,6 +79,13 @@ _watchlist_quant_lock = asyncio.Lock()
 _llm_globals_lock = threading.Lock()
 _watchlist_quant_sync_lock = threading.Lock()
 _WATCHLIST_QUANT_POLL_SECONDS = 60
+_LLM_SECONDARY_ACTION_PRIORITY = {
+    "CANDIDATE": 0,
+    "WATCH": 1,
+}
+_LLM_QUANT_GATE_SKIP_REASON = (
+    "fresh quant evidence is not actionable for secondary LLM analysis"
+)
 
 
 def _price_drift_pct(current_price: float, last_price: float) -> float:
@@ -174,6 +181,97 @@ def _llm_runtime_targets(runner: Any, primary_symbol: str, primary_market: str) 
     return targets
 
 
+def _llm_target_last_analysis_at(
+    state: Any,
+) -> datetime:
+    value = getattr(state, "last_analysis_at", None)
+    if not isinstance(value, datetime):
+        return datetime.min.replace(tzinfo=timezone.utc)
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _llm_quant_score_is_fresh(score: Any, now: datetime) -> bool:
+    expires_at = getattr(score, "expires_at", None)
+    if not isinstance(expires_at, datetime):
+        return False
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    else:
+        expires_at = expires_at.astimezone(timezone.utc)
+    return expires_at > now
+
+
+def _prioritize_llm_runtime_targets(
+    targets: list[tuple[str, str, Any, bool]],
+    *,
+    quant_scores: dict[str, Any],
+    schedule_states: dict[str, Any],
+    now: datetime,
+) -> tuple[
+    list[tuple[str, str, Any, bool]],
+    list[tuple[str, str, Any, bool]],
+]:
+    """Prioritize actionable secondary research without delaying primary."""
+    primary_targets: list[tuple[str, str, Any, bool]] = []
+    secondary_targets: list[
+        tuple[
+            tuple[int, datetime, float, str, int],
+            tuple[str, str, Any, bool],
+        ]
+    ] = []
+    excluded_targets: list[tuple[str, str, Any, bool]] = []
+    for target_index, target in enumerate(targets):
+        symbol, _market, _engine, is_primary = target
+        if is_primary:
+            primary_targets.append(target)
+            continue
+
+        quant_score = quant_scores.get(symbol)
+        action = ""
+        score_value = -1.0
+        if (
+            quant_score is not None
+            and _llm_quant_score_is_fresh(quant_score, now)
+        ):
+            action = str(
+                getattr(quant_score, "recommended_action", "")
+            ).upper()
+            try:
+                score_value = float(getattr(quant_score, "score", -1.0))
+            except (TypeError, ValueError):
+                score_value = -1.0
+            if action == "AVOID":
+                excluded_targets.append(target)
+                continue
+
+        action_priority = _LLM_SECONDARY_ACTION_PRIORITY.get(action, 2)
+        secondary_targets.append(
+            (
+                (
+                    action_priority,
+                    _llm_target_last_analysis_at(
+                        schedule_states.get(symbol)
+                    ),
+                    -score_value,
+                    symbol if action else "",
+                    target_index,
+                ),
+                target,
+            )
+        )
+
+    secondary_targets.sort(key=lambda item: item[0])
+    return (
+        [
+            *primary_targets,
+            *(target for _priority, target in secondary_targets),
+        ],
+        excluded_targets,
+    )
+
+
 def _recent_price_context_for_target(runtime_engine: Any, runtime: Any | None, symbol: str) -> list[dict[str, Any]]:
     entries = list(getattr(runtime, "recent_quotes", []) or [])
     if not entries and getattr(runtime_engine, "last_price", 0.0) > 0:
@@ -254,9 +352,61 @@ async def _llm_analysis_tick() -> None:
             logger.info("LLM analysis skipped: hourly budget exhausted")
             return
 
-        targets = _llm_runtime_targets(runner, config.symbol, config.market)
-        if not targets:
+        raw_targets = _llm_runtime_targets(
+            runner,
+            config.symbol,
+            config.market,
+        )
+        if not raw_targets:
             return
+        schedule_states: dict[str, Any] = {}
+        for symbol, market, _engine, _is_primary in raw_targets:
+            schedule_states[symbol] = state_svc.get_state(symbol, market)
+        db.commit()
+
+        from app.services.watchlist_quant_service import (
+            list_latest_current_quant_scores,
+        )
+
+        quant_scores = {
+            row.symbol: row
+            for row in list_latest_current_quant_scores(db)
+        }
+        targets, quant_excluded_targets = (
+            _prioritize_llm_runtime_targets(
+                raw_targets,
+                quant_scores=quant_scores,
+                schedule_states=schedule_states,
+                now=now,
+            )
+        )
+        quant_skip_changed = False
+        for symbol, market, _engine, _is_primary in (
+            quant_excluded_targets
+        ):
+            state = schedule_states[symbol]
+            if (
+                getattr(state, "last_status", "") == "SKIPPED"
+                and getattr(state, "last_skip_reason", "")
+                == _LLM_QUANT_GATE_SKIP_REASON
+            ):
+                continue
+            state_svc.record_skip(
+                symbol,
+                market,
+                _LLM_QUANT_GATE_SKIP_REASON,
+                next_analysis_at=None,
+            )
+            quant_skip_changed = True
+        if quant_skip_changed:
+            db.commit()
+        if quant_excluded_targets:
+            logger.info(
+                "LLM secondary quant gate excluded %d/%d targets",
+                len(quant_excluded_targets),
+                max(0, len(raw_targets) - 1),
+            )
+
         cycle_budget = min(settings.llm_max_symbols_per_cycle, remaining_hour_budget)
         attempted_count = 0
 
@@ -270,12 +420,12 @@ async def _llm_analysis_tick() -> None:
         for symbol, market, engine, is_primary in targets:
             try:
                 symbol_state = state_svc.get_state(symbol, market)
+                # The loop can replace its SQLAlchemy session after a prior
+                # symbol fails, so resolve state from the current session.
+                db.commit()
                 symbol_last_analysis_at = symbol_state.last_analysis_at
                 symbol_next_analysis_at = symbol_state.next_analysis_at
                 symbol_last_status = getattr(symbol_state, "last_status", "")
-                # A newly created schedule row is flushed by get_state(). End
-                # that transaction before broker context and the long LLM call.
-                db.commit()
                 if symbol_next_analysis_at is not None:
                     if symbol_next_analysis_at.tzinfo is None:
                         symbol_next_analysis_at = symbol_next_analysis_at.replace(

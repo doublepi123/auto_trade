@@ -644,6 +644,10 @@ class TestLLMAnalysisTick:
             "app.services.llm_interaction_service.LLMInteractionService",
             lambda db: MagicMock(update_outcome=lambda *a, **kw: None),
         )
+        monkeypatch.setattr(
+            "app.services.watchlist_quant_service.list_latest_current_quant_scores",
+            lambda db: [],
+        )
         class FakeStateService:
             def __init__(self, db: object) -> None:
                 pass
@@ -970,6 +974,147 @@ class TestLLMAnalysisTick:
         assert calls[1]["persist"] is False
         assert apply_calls and apply_calls[0]["reference_quantity"] == 1.0
         assert apply_calls[0]["position_avg_price"] == 0.0
+
+    @pytest.mark.asyncio
+    async def test_tick_prioritizes_watch_over_fresh_avoid(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        config = self._make_fake_config(
+            symbol="AAPL.US",
+            market="US",
+            llm_last_analysis_at=now - timedelta(minutes=3),
+        )
+        runner = self._make_fake_runner(last_price=101.0)
+        runner.engine.params = StrategyParams(
+            symbol="AAPL.US",
+            market="US",
+            buy_low=100.0,
+            sell_high=110.0,
+        )
+        runner._symbol_runtimes = {
+            "AAPL.US": SimpleNamespace(
+                symbol="AAPL.US",
+                market="US",
+                engine=runner.engine,
+            ),
+            "NVDA.US": SimpleNamespace(
+                symbol="NVDA.US",
+                market="US",
+                engine=SimpleNamespace(
+                    last_price=220.0,
+                    params=StrategyParams(
+                        symbol="NVDA.US",
+                        market="US",
+                    ),
+                ),
+            ),
+            "MSFT.US": SimpleNamespace(
+                symbol="MSFT.US",
+                market="US",
+                engine=SimpleNamespace(
+                    last_price=330.0,
+                    params=StrategyParams(
+                        symbol="MSFT.US",
+                        market="US",
+                    ),
+                ),
+            ),
+        }
+        runner.fresh_market_price.side_effect = lambda symbol: {
+            "AAPL.US": 101.0,
+            "NVDA.US": 220.0,
+            "MSFT.US": 330.0,
+        }[symbol]
+        calls = self._patch_tick_deps(monkeypatch, config, runner)
+        monkeypatch.setattr(
+            "app.services.watchlist_quant_service.list_latest_current_quant_scores",
+            lambda db: [
+                SimpleNamespace(
+                    symbol="NVDA.US",
+                    score=39.0,
+                    recommended_action="AVOID",
+                    expires_at=now + timedelta(hours=1),
+                ),
+                SimpleNamespace(
+                    symbol="MSFT.US",
+                    score=49.0,
+                    recommended_action="WATCH",
+                    expires_at=now + timedelta(hours=1),
+                ),
+            ],
+        )
+        monkeypatch.setattr(
+            main_module.settings,
+            "llm_max_symbols_per_cycle",
+            2,
+        )
+        monkeypatch.setattr(
+            main_module.settings,
+            "llm_max_analyses_per_hour",
+            10,
+        )
+
+        await main_module._llm_analysis_tick()
+
+        assert [call["symbol"] for call in calls] == [
+            "AAPL.US",
+            "MSFT.US",
+        ]
+
+    def test_target_priority_rotates_oldest_watch_first(self) -> None:
+        now = datetime(2026, 7, 24, 18, 0, tzinfo=timezone.utc)
+        engine = SimpleNamespace()
+        targets = [
+            ("AAPL.US", "US", engine, True),
+            ("MSFT.US", "US", engine, False),
+            ("GOOGL.US", "US", engine, False),
+            ("NVDA.US", "US", engine, False),
+        ]
+        quant_scores = {
+            "MSFT.US": SimpleNamespace(
+                score=49.0,
+                recommended_action="WATCH",
+                expires_at=now + timedelta(hours=1),
+            ),
+            "GOOGL.US": SimpleNamespace(
+                score=49.0,
+                recommended_action="WATCH",
+                expires_at=now + timedelta(hours=1),
+            ),
+            "NVDA.US": SimpleNamespace(
+                score=39.0,
+                recommended_action="AVOID",
+                expires_at=now + timedelta(hours=1),
+            ),
+        }
+        schedule_states = {
+            "AAPL.US": SimpleNamespace(last_analysis_at=None),
+            "MSFT.US": SimpleNamespace(
+                last_analysis_at=now - timedelta(minutes=10),
+            ),
+            "GOOGL.US": SimpleNamespace(
+                last_analysis_at=now - timedelta(minutes=30),
+            ),
+            "NVDA.US": SimpleNamespace(last_analysis_at=None),
+        }
+
+        prioritized, excluded = (
+            main_module._prioritize_llm_runtime_targets(
+                targets,
+                quant_scores=quant_scores,
+                schedule_states=schedule_states,
+                now=now,
+            )
+        )
+
+        assert [target[0] for target in prioritized] == [
+            "AAPL.US",
+            "GOOGL.US",
+            "MSFT.US",
+        ]
+        assert [target[0] for target in excluded] == ["NVDA.US"]
 
     @pytest.mark.asyncio
     async def test_tick_shadow_still_delegates_to_interval_policy(
