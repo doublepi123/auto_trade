@@ -858,6 +858,11 @@ class TestTradeExecutionServiceBasics:
             "min_entry_edge_cost_ratio",
             2.0,
         )
+        monkeypatch.setattr(
+            settings,
+            "min_entry_reward_risk_ratio",
+            1.0,
+        )
         broker = MagicMock()
         broker.get_positions.return_value = []
         broker.estimate_margin_max_quantity.return_value = Decimal("1000")
@@ -896,6 +901,11 @@ class TestTradeExecutionServiceBasics:
             "min_entry_edge_cost_ratio",
             2.0,
         )
+        monkeypatch.setattr(
+            settings,
+            "min_entry_reward_risk_ratio",
+            1.0,
+        )
         broker = MagicMock()
         broker.get_positions.return_value = []
         broker.estimate_margin_max_quantity.return_value = Decimal("1237")
@@ -912,6 +922,7 @@ class TestTradeExecutionServiceBasics:
             record_order=lambda *args: recorded.append(args),
             update_order_status=lambda *args: None,
             record_risk_event=lambda *args: None,
+            stop_loss_pct=1.0,
             final_order_quote_check=lambda _broker, _symbol, _action, price: (
                 FinalOrderQuoteCheckResult(executable_price=price)
             ),
@@ -935,11 +946,75 @@ class TestTradeExecutionServiceBasics:
         assert len(recorded) == 1
         metadata = recorded[0][9]
         assert isinstance(metadata, dict)
-        assert metadata["entry_cost_gate_version"] == "v1"
+        assert metadata["entry_cost_gate_version"] == "v2"
         assert metadata["expected_exit_price"] == pytest.approx(212.63025)
         assert metadata["estimated_total_cost"] > 0
         assert metadata["net_expected_profit"] > metadata["required_profit"]
         assert metadata["edge_cost_ratio"] >= 2
+        assert metadata["expected_stop_price"] == pytest.approx(207.5535)
+        assert metadata["downside_risk_amount"] > 0
+        assert metadata["reward_risk_ratio"] > 1
+        assert metadata["minimum_reward_risk_ratio"] == 1
+
+    def test_buy_rejects_cost_adjusted_reward_below_stop_risk(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from app.config import settings
+
+        monkeypatch.setattr(settings, "min_exit_profit_pct", 0.2)
+        monkeypatch.setattr(
+            settings,
+            "entry_round_trip_slippage_bps",
+            4.0,
+        )
+        monkeypatch.setattr(
+            settings,
+            "min_entry_edge_cost_ratio",
+            2.0,
+        )
+        monkeypatch.setattr(
+            settings,
+            "min_entry_reward_risk_ratio",
+            1.2,
+        )
+        broker = MagicMock()
+        broker.get_positions.return_value = []
+        broker.estimate_margin_max_quantity.return_value = Decimal("1240")
+        skipped: list[dict[str, object]] = []
+        svc = TradeExecutionService(
+            record_order=lambda *args: None,
+            update_order_status=lambda *args: None,
+            record_risk_event=lambda *args: None,
+            record_order_skipped=lambda _symbol, _action, _reason, payload: (
+                skipped.append(payload)
+            ),
+            stop_loss_pct=1.0,
+        )
+
+        status = svc.execute(
+            "BUY",
+            "NVDA.US",
+            Quote("NVDA.US", 209.65, 209.64, 209.66, ""),
+            broker,
+            RiskController(),
+            ServerChanNotifier(""),
+            "USD",
+            fee_rate=Decimal("0.0005"),
+            expected_exit_price=Decimal("212.63025"),
+        )
+
+        assert status is not None
+        assert status.status == "SKIPPED"
+        assert "reward/risk ratio" in status.reason
+        broker.submit_limit_order.assert_not_called()
+        assert skipped[0]["skip_category"] == "RISK"
+        edge_cost_ratio = skipped[0]["edge_cost_ratio"]
+        reward_risk_ratio = skipped[0]["reward_risk_ratio"]
+        assert isinstance(edge_cost_ratio, (int, float))
+        assert isinstance(reward_risk_ratio, (int, float))
+        assert edge_cost_ratio > 2
+        assert reward_risk_ratio < 1.2
 
     def test_buy_rechecks_fee_adjusted_edge_with_final_bbo(
         self,

@@ -1967,6 +1967,17 @@ class AppRunner:
                 ),
                 "stop_loss_required_for_entry": True,
             },
+            "entry_policy": {
+                "round_trip_slippage_bps": (
+                    settings.entry_round_trip_slippage_bps
+                ),
+                "minimum_edge_cost_ratio": (
+                    settings.min_entry_edge_cost_ratio
+                ),
+                "minimum_reward_risk_ratio": (
+                    settings.min_entry_reward_risk_ratio
+                ),
+            },
             "buying_power_usage_mode": (
                 "FULL_BUYING_POWER"
                 if self._trade_svc.full_buying_power_usage_enabled

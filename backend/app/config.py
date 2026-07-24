@@ -215,6 +215,13 @@ class Settings(BaseSettings):
         allow_inf_nan=False,
         validation_alias="AUTO_TRADE_MIN_ENTRY_EDGE_COST_RATIO",
     )
+    min_entry_reward_risk_ratio: float = Field(
+        default=1.0,
+        ge=0,
+        le=100,
+        allow_inf_nan=False,
+        validation_alias="AUTO_TRADE_MIN_ENTRY_REWARD_RISK_RATIO",
+    )
     engine_cooldown_seconds: int = Field(default=60, ge=0, le=3600, validation_alias="AUTO_TRADE_ENGINE_COOLDOWN_SECONDS")
     trading_open_warmup_minutes: int = Field(
         default=5,

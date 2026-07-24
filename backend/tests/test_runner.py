@@ -2426,6 +2426,17 @@ class TestAppRunner:
             snapshot["hard_limits"]["stop_loss_required_for_entry"]
             is True
         )
+        assert snapshot["entry_policy"] == {
+            "round_trip_slippage_bps": (
+                runner_module.settings.entry_round_trip_slippage_bps
+            ),
+            "minimum_edge_cost_ratio": (
+                runner_module.settings.min_entry_edge_cost_ratio
+            ),
+            "minimum_reward_risk_ratio": (
+                runner_module.settings.min_entry_reward_risk_ratio
+            ),
+        }
         assert snapshot["buying_power_usage_mode"] == (
             "FULL_BUYING_POWER" if full_buying_power_usage else "GUARDED"
         )
@@ -2556,7 +2567,7 @@ class TestAppRunner:
         broker = Broker()
         runner = AppRunner()
         runner._running = True
-        runner.engine.params = StrategyParams(symbol="NVDA.US", market="US", buy_low=218, sell_high=225)
+        runner.engine.params = StrategyParams(symbol="NVDA.US", market="US", buy_low=218, sell_high=226)
         runner.engine.state = EngineState.LONG
         runner.broker = broker
         runner.notifier = _NoopNotifier()

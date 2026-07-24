@@ -72,6 +72,7 @@ class TestSettings:
         assert s.full_buying_power_usage_enabled is False
         assert s.entry_round_trip_slippage_bps == 4
         assert s.min_entry_edge_cost_ratio == 2
+        assert s.min_entry_reward_risk_ratio == 1
         assert s.hard_stop_loss_pct == 1
         assert s.hard_max_holding_minutes == 60
         assert s.hard_entry_cutoff_minutes_before_close == 45
@@ -148,11 +149,16 @@ class TestSettings:
             "AUTO_TRADE_MIN_ENTRY_EDGE_COST_RATIO",
             "2.5",
         )
+        monkeypatch.setenv(
+            "AUTO_TRADE_MIN_ENTRY_REWARD_RISK_RATIO",
+            "1.25",
+        )
 
         configured = Settings()
 
         assert configured.entry_round_trip_slippage_bps == 6.5
         assert configured.min_entry_edge_cost_ratio == 2.5
+        assert configured.min_entry_reward_risk_ratio == 1.25
 
     def test_universe_and_live_regime_controls_read_environment(
         self,

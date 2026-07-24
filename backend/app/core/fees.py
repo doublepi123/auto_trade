@@ -26,6 +26,23 @@ class LongRoundTripEdge:
         )
 
 
+@dataclass(frozen=True)
+class LongRoundTripRewardRisk:
+    target_edge: LongRoundTripEdge
+    stop_edge: LongRoundTripEdge
+    downside_risk: Decimal
+    reward_risk_ratio: Decimal | None
+
+    def meets(self, minimum_reward_risk_ratio: Decimal = Decimal("0")) -> bool:
+        return (
+            self.target_edge.net_profit > 0
+            and (
+                self.reward_risk_ratio is None
+                or self.reward_risk_ratio >= minimum_reward_risk_ratio
+            )
+        )
+
+
 def one_side_fee_rate(market: str, fee_rate_us: Decimal, fee_rate_hk: Decimal) -> Decimal:
     return fee_rate_hk if market.upper() == "HK" else fee_rate_us
 
@@ -103,4 +120,51 @@ def evaluate_long_round_trip_edge(
         net_profit=net_profit,
         required_profit=required_profit,
         edge_cost_ratio=edge_cost_ratio,
+    )
+
+
+def evaluate_long_round_trip_reward_risk(
+    *,
+    entry_price: Decimal,
+    target_exit_price: Decimal,
+    stop_exit_price: Decimal,
+    quantity: Decimal,
+    one_side_rate: Decimal,
+    minimum_profit_amount: Decimal = Decimal("0"),
+    minimum_profit_pct: Decimal = Decimal("0"),
+    extra_costs: Decimal = Decimal("0"),
+) -> LongRoundTripRewardRisk:
+    if target_exit_price <= entry_price:
+        raise ValueError("long target exit price must be greater than entry price")
+    if stop_exit_price <= 0 or stop_exit_price >= entry_price:
+        raise ValueError(
+            "long stop exit price must be positive and below entry price"
+        )
+    target_edge = evaluate_long_round_trip_edge(
+        entry_price=entry_price,
+        exit_price=target_exit_price,
+        quantity=quantity,
+        one_side_rate=one_side_rate,
+        minimum_profit_amount=minimum_profit_amount,
+        minimum_profit_pct=minimum_profit_pct,
+        extra_costs=extra_costs,
+    )
+    stop_edge = evaluate_long_round_trip_edge(
+        entry_price=entry_price,
+        exit_price=stop_exit_price,
+        quantity=quantity,
+        one_side_rate=one_side_rate,
+        extra_costs=extra_costs,
+    )
+    downside_risk = max(Decimal("0"), -stop_edge.net_profit)
+    reward_risk_ratio = (
+        target_edge.net_profit / downside_risk
+        if downside_risk > 0
+        else None
+    )
+    return LongRoundTripRewardRisk(
+        target_edge=target_edge,
+        stop_edge=stop_edge,
+        downside_risk=downside_risk,
+        reward_risk_ratio=reward_risk_ratio,
     )

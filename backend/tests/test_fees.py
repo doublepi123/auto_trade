@@ -6,6 +6,7 @@ import pytest
 from app.core.fees import (
     estimate_round_trip_fee,
     evaluate_long_round_trip_edge,
+    evaluate_long_round_trip_reward_risk,
     one_side_fee_rate,
 )
 
@@ -101,4 +102,44 @@ def test_evaluate_long_round_trip_edge_rejects_invalid_inputs() -> None:
             exit_price=Decimal("101"),
             quantity=Decimal("0"),
             one_side_rate=Decimal("0.0005"),
+        )
+
+
+def test_evaluate_long_round_trip_reward_risk_includes_stop_costs() -> None:
+    result = evaluate_long_round_trip_reward_risk(
+        entry_price=Decimal("100"),
+        target_exit_price=Decimal("102"),
+        stop_exit_price=Decimal("99"),
+        quantity=Decimal("100"),
+        one_side_rate=Decimal("0.001"),
+        extra_costs=Decimal("5"),
+    )
+
+    assert result.target_edge.net_profit == Decimal("174.800")
+    assert result.stop_edge.net_profit == Decimal("-124.900")
+    assert result.downside_risk == Decimal("124.900")
+    assert result.reward_risk_ratio == Decimal("174.800") / Decimal("124.900")
+    assert result.meets(Decimal("1.3")) is True
+    assert result.meets(Decimal("1.5")) is False
+
+
+@pytest.mark.parametrize(
+    ("target", "stop"),
+    [
+        (Decimal("100"), Decimal("99")),
+        (Decimal("102"), Decimal("100")),
+        (Decimal("102"), Decimal("0")),
+    ],
+)
+def test_evaluate_long_round_trip_reward_risk_rejects_invalid_bounds(
+    target: Decimal,
+    stop: Decimal,
+) -> None:
+    with pytest.raises(ValueError):
+        evaluate_long_round_trip_reward_risk(
+            entry_price=Decimal("100"),
+            target_exit_price=target,
+            stop_exit_price=stop,
+            quantity=Decimal("100"),
+            one_side_rate=Decimal("0.001"),
         )

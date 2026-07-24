@@ -35,6 +35,20 @@ def test_consistency_flags_interval_without_sufficient_net_edge():
     assert any(i["field"] == "sell_high" for i in issues)
 
 
+def test_consistency_flags_interval_below_cost_adjusted_reward_risk():
+    config = _config(
+        buy_low=100.0,
+        sell_high=101.1,
+        min_profit_amount=0.0,
+        fee_rate_us=0.0005,
+        stop_loss_pct=1.0,
+    )
+
+    issues = validate_strategy_consistency(config)
+
+    assert any("reward/risk ratio" in issue["message"] for issue in issues)
+
+
 def test_consistency_hk_uses_hk_fee():
     config = _config(
         market="HK",

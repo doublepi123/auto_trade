@@ -15,6 +15,7 @@ from app.config import settings
 from app.core.fees import (
     estimate_round_trip_fee,
     evaluate_long_round_trip_edge,
+    evaluate_long_round_trip_reward_risk,
 )
 from app.core.market_calendar import is_closing_window, is_opening_warmup, is_trading_hours
 
@@ -1329,24 +1330,63 @@ class TradeExecutionService:
             * Decimal(str(settings.entry_round_trip_slippage_bps))
             / Decimal("10000")
         )
+        one_side_rate = self._coerce_non_negative_decimal(fee_rate)
+        minimum_profit = self._coerce_non_negative_decimal(
+            min_profit_amount
+        )
+        minimum_profit_pct = Decimal(
+            str(settings.min_exit_profit_pct or 0)
+        )
+        extra_costs = spread_cost + slippage_cost
         edge = evaluate_long_round_trip_edge(
             entry_price=entry_price,
             exit_price=target,
             quantity=quantity,
-            one_side_rate=self._coerce_non_negative_decimal(fee_rate),
-            minimum_profit_amount=self._coerce_non_negative_decimal(
-                min_profit_amount
-            ),
-            minimum_profit_pct=Decimal(
-                str(settings.min_exit_profit_pct or 0)
-            ),
-            extra_costs=spread_cost + slippage_cost,
+            one_side_rate=one_side_rate,
+            minimum_profit_amount=minimum_profit,
+            minimum_profit_pct=minimum_profit_pct,
+            extra_costs=extra_costs,
         )
         minimum_ratio = Decimal(
             str(settings.min_entry_edge_cost_ratio)
         )
+        minimum_reward_risk_ratio = Decimal(
+            str(settings.min_entry_reward_risk_ratio)
+        )
+        stop_loss_pct = self._coerce_non_negative_decimal(
+            self.stop_loss_pct
+        )
+        stop_price: Decimal | None = None
+        stop_gross_loss: Decimal | None = None
+        stop_costs: Decimal | None = None
+        downside_risk: Decimal | None = None
+        reward_risk_ratio: Decimal | None = None
+        reward_risk_meets = True
+        if stop_loss_pct > 0 and target > entry_price:
+            stop_price = (
+                entry_price
+                * (Decimal("1") - stop_loss_pct / Decimal("100"))
+            )
+            reward_risk = evaluate_long_round_trip_reward_risk(
+                entry_price=entry_price,
+                target_exit_price=target,
+                stop_exit_price=stop_price,
+                quantity=quantity,
+                one_side_rate=one_side_rate,
+                minimum_profit_amount=minimum_profit,
+                minimum_profit_pct=minimum_profit_pct,
+                extra_costs=extra_costs,
+            )
+            edge = reward_risk.target_edge
+            stop_gross_loss = -reward_risk.stop_edge.gross_profit
+            stop_costs = reward_risk.stop_edge.total_costs
+            downside_risk = reward_risk.downside_risk
+            reward_risk_ratio = reward_risk.reward_risk_ratio
+            reward_risk_meets = reward_risk.meets(
+                minimum_reward_risk_ratio
+            )
         edge_payload: dict[str, object] = {
-            "entry_cost_gate_version": "v1",
+            "entry_cost_gate_version": "v2",
             "expected_profit": float(edge.gross_profit),
             "estimated_fees": float(edge.estimated_fees),
             "estimated_spread_cost": float(spread_cost),
@@ -1360,17 +1400,50 @@ class TradeExecutionService:
                 else None
             ),
             "minimum_edge_cost_ratio": float(minimum_ratio),
+            "stop_loss_pct": (
+                float(stop_loss_pct) if stop_loss_pct > 0 else None
+            ),
+            "expected_stop_price": (
+                float(stop_price) if stop_price is not None else None
+            ),
+            "estimated_stop_gross_loss": (
+                float(stop_gross_loss)
+                if stop_gross_loss is not None
+                else None
+            ),
+            "estimated_stop_costs": (
+                float(stop_costs) if stop_costs is not None else None
+            ),
+            "downside_risk_amount": (
+                float(downside_risk)
+                if downside_risk is not None
+                else None
+            ),
+            "reward_risk_ratio": (
+                float(reward_risk_ratio)
+                if reward_risk_ratio is not None
+                else None
+            ),
+            "minimum_reward_risk_ratio": float(
+                minimum_reward_risk_ratio
+            ),
             "quantity": float(quantity),
             "price": float(entry_price),
             "expected_exit_price": float(target),
         }
         self._active_execution_context.update(edge_payload)
-        if edge.meets(minimum_ratio):
+        edge_meets = edge.meets(minimum_ratio)
+        if edge_meets and reward_risk_meets:
             return None
         ratio = (
             f"{edge.edge_cost_ratio:.3f}"
             if edge.edge_cost_ratio is not None
             else "unbounded"
+        )
+        reward_risk_text = (
+            f"{reward_risk_ratio:.3f}"
+            if reward_risk_ratio is not None
+            else "unavailable"
         )
         return self._skip_order(
             symbol,
@@ -1378,9 +1451,11 @@ class TradeExecutionService:
             (
                 f"fee-adjusted entry net profit {edge.net_profit:.2f} is below "
                 f"required minimum profit {edge.required_profit:.2f}, or "
-                f"edge/cost ratio {ratio} is below {minimum_ratio:.3f}"
+                f"edge/cost ratio {ratio} is below {minimum_ratio:.3f}, or "
+                f"reward/risk ratio {reward_risk_text} is below "
+                f"{minimum_reward_risk_ratio:.3f}"
             ),
-            skip_category="FEE",
+            skip_category="FEE" if not edge_meets else "RISK",
             **edge_payload,
         )
 

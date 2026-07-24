@@ -9,7 +9,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.core.fees import evaluate_long_round_trip_edge, one_side_fee_rate
+from app.core.fees import (
+    evaluate_long_round_trip_edge,
+    evaluate_long_round_trip_reward_risk,
+    one_side_fee_rate,
+)
 from app.models import RuntimeState, StrategyConfig, WatchlistItem
 
 logger = logging.getLogger("auto_trade.strategy_service")
@@ -212,6 +216,8 @@ def validate_strategy_consistency(config: StrategyConfig) -> list[dict[str, str]
         and slippage, using the configured reference quantity. This mirrors
         the live entry gate except for the live BBO spread, which is only
         available when an order is evaluated.
+      * Target net reward versus the configured stop loss plus the same
+        estimated round-trip costs.
       * ``max_daily_loss`` vs ``min_profit_amount`` — a daily-loss limit
         that is smaller than a single-round profit floor makes the
         strategy impossible to honour under any trade.
@@ -280,6 +286,51 @@ def validate_strategy_consistency(config: StrategyConfig) -> list[dict[str, str]
                     ),
                 }
             )
+        stop_loss_pct = Decimal(
+            str(getattr(config, "stop_loss_pct", 0) or 0)
+        )
+        if 0 < stop_loss_pct < 100:
+            reward_risk = evaluate_long_round_trip_reward_risk(
+                entry_price=entry_price,
+                target_exit_price=Decimal(str(config.sell_high)),
+                stop_exit_price=(
+                    entry_price
+                    * (
+                        Decimal("1")
+                        - stop_loss_pct / Decimal("100")
+                    )
+                ),
+                quantity=quantity,
+                one_side_rate=fee_rate,
+                minimum_profit_amount=min_profit,
+                minimum_profit_pct=Decimal(
+                    str(settings.min_exit_profit_pct or 0)
+                ),
+                extra_costs=slippage,
+            )
+            minimum_reward_risk = Decimal(
+                str(settings.min_entry_reward_risk_ratio)
+            )
+            if not reward_risk.meets(minimum_reward_risk):
+                ratio = (
+                    f"{reward_risk.reward_risk_ratio:.3f}"
+                    if reward_risk.reward_risk_ratio is not None
+                    else "unbounded"
+                )
+                issues.append(
+                    {
+                        "field": "sell_high",
+                        "level": "warning",
+                        "message": (
+                            "configured interval has cost-adjusted "
+                            f"reward/risk ratio {ratio} versus minimum "
+                            f"{minimum_reward_risk:.3f}, at "
+                            f"stop_loss_pct={stop_loss_pct}. Widen the "
+                            "target interval or tighten the stop before "
+                            "live entry."
+                        ),
+                    }
+                )
     max_daily_loss = Decimal(str(config.max_daily_loss or 0))
     if min_profit > 0 and 0 < max_daily_loss < min_profit:
         issues.append(

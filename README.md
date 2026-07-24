@@ -717,6 +717,7 @@ auto_trade/
 | `AUTO_TRADE_FULL_BUYING_POWER_USAGE_ENABLED` | 仅模拟账户使用；按券商最大保证金购买力的 100% 开仓，并绕过数量、名义金额和单笔风险三项定仓上限 | `false` |
 | `AUTO_TRADE_ENTRY_ROUND_TRIP_SLIPPAGE_BPS` | 入场净边际估算采用的往返总滑点（bp）；另计实时 BBO 价差与双边费率 | `4` |
 | `AUTO_TRADE_MIN_ENTRY_EDGE_COST_RATIO` | 入场目标毛利与估算总成本的最低比值 | `2` |
+| `AUTO_TRADE_MIN_ENTRY_REWARD_RISK_RATIO` | 入场目标净收益与止损价格损失加往返成本的最低比值；不改变下单数量 | `1` |
 | `AUTO_TRADE_UNIVERSE_SELECTION_ENABLED` | 按已完成的 T-1 日线刷新 Nasdaq-100 / DJIA 动态候选池 | `false` |
 | `AUTO_TRADE_UNIVERSE_SELECTION_APPLY_TO_WATCHLIST` | 将完整候选池结果同步到只读 watchlist；不会切换主交易标的 | `false` |
 | `AUTO_TRADE_UNIVERSE_SELECTION_ENABLE_SHADOW` | 为入选标的启用 Strategy v2 shadow，并在状态激活后自动冻结下一完整交易日开始的 forward-only 对照；不会自动晋级或下单；要求 `APPLY_TO_WATCHLIST=true` | `false` |
