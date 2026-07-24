@@ -20,6 +20,7 @@ class TestSettings:
         assert s.universe_selection_apply_to_watchlist is False
         assert s.universe_selection_enable_shadow is False
         assert s.universe_selection_max_symbols == 12
+        assert s.universe_selection_exploration_max_symbols == 8
         assert s.live_regime_gate_enabled is False
         assert s.live_regime_max_data_age_seconds == 600
         assert s.live_max_entries_per_symbol_per_day == 1
@@ -189,6 +190,10 @@ class TestSettings:
             "4",
         )
         monkeypatch.setenv(
+            "AUTO_TRADE_UNIVERSE_SELECTION_EXPLORATION_MAX_SYMBOLS",
+            "6",
+        )
+        monkeypatch.setenv(
             "AUTO_TRADE_LIVE_REGIME_GATE_ENABLED",
             "true",
         )
@@ -211,6 +216,7 @@ class TestSettings:
         assert configured.watchlist_quant_interval_minutes == 20
         assert configured.watchlist_quant_score_ttl_minutes == 120
         assert configured.watchlist_quant_batch_size == 4
+        assert configured.universe_selection_exploration_max_symbols == 6
         assert configured.live_regime_gate_enabled is True
         assert configured.live_regime_max_data_age_seconds == 300
         assert configured.live_max_entries_per_symbol_per_day == 1

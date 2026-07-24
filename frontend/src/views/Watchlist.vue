@@ -14,7 +14,7 @@
               <el-tag type="info" size="small" effect="plain">动态筛选</el-tag>
               <el-tag type="warning" size="small" effect="plain">只读观察</el-tag>
             </div>
-            <p>每日按指数成分、流动性与交易成本筛选；入选不等于切换实盘，也不会自动下单。</p>
+            <p>每日先筛正式候选，再让跨行业探索层补充量化与影子证据；入选不等于切换实盘，两层都不会自动下单。</p>
           </div>
           <el-button
             type="primary"
@@ -59,6 +59,10 @@
             <div class="universe-summary-item">
               <span>候选入选</span>
               <strong>{{ universeRun.selected_count }}/{{ universeRun.evaluable_count }}</strong>
+            </div>
+            <div class="universe-summary-item">
+              <span>探索观察</span>
+              <strong>{{ universeExplorationCount }}</strong>
             </div>
             <div class="universe-summary-item">
               <span>候选目录</span>
@@ -113,7 +117,10 @@
                     <el-tag :type="row.selected ? 'success' : 'info'" size="small" effect="plain">
                       {{ row.selected ? '候选入选' : '未入选' }}
                     </el-tag>
-                    <el-tag v-if="row.shadow_enabled" type="warning" size="small" effect="plain">
+                    <el-tag v-if="row.exploration_selected" type="warning" size="small" effect="plain">
+                      探索观察
+                    </el-tag>
+                    <el-tag v-else-if="row.shadow_enabled" type="warning" size="small" effect="plain">
                       Shadow 已启用
                     </el-tag>
                   </div>
@@ -168,7 +175,10 @@
                   <el-tag :type="row.selected ? 'success' : 'info'" size="small" effect="plain">
                     {{ row.selected ? `候选 #${row.rank ?? '-'}` : '未入选' }}
                   </el-tag>
-                  <el-tag v-if="row.shadow_enabled" type="warning" size="small" effect="plain">
+                  <el-tag v-if="row.exploration_selected" type="warning" size="small" effect="plain">
+                    探索观察
+                  </el-tag>
+                  <el-tag v-else-if="row.shadow_enabled" type="warning" size="small" effect="plain">
                     Shadow 已启用
                   </el-tag>
                 </div>
@@ -886,6 +896,11 @@ const universeRows = computed<UniverseSelectionItem[]>(() => {
   })
 })
 
+const universeExplorationCount = computed(() => (
+  universeRun.value?.items.filter((item) => item.exploration_selected).length
+  ?? 0
+))
+
 const promotionRows = computed<UniversePromotionReadinessItem[]>(() => {
   if (!promotionReadiness.value) return []
   return [...promotionReadiness.value.items].sort((left, right) => {
@@ -1338,7 +1353,7 @@ async function handleUniverseRefresh() {
       await loadItems()
       await loadQuotes()
     }
-    const summary = `候选池已刷新：候选入选 ${response.run.selected_count} 个，覆盖率 ${formatCoverage(response.run.coverage_ratio)}`
+    const summary = `候选池已刷新：正式入选 ${response.run.selected_count} 个，探索观察 ${response.exploration_symbols.length} 个，覆盖率 ${formatCoverage(response.run.coverage_ratio)}`
     if (response.run.status.toUpperCase() !== 'COMPLETE') {
       ElMessage.warning(`${summary}；${response.run.error || response.reason || '数据覆盖不足'}`)
     } else if (response.shadow_failed_symbols.length > 0) {
@@ -1776,7 +1791,7 @@ onUnmounted(() => {
 
 .universe-summary {
   display: grid;
-  grid-template-columns: repeat(6, minmax(86px, 1fr));
+  grid-template-columns: repeat(7, minmax(86px, 1fr));
   gap: 1px;
   margin-bottom: 14px;
   overflow: hidden;

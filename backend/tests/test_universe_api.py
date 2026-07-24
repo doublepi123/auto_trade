@@ -204,11 +204,13 @@ def test_universe_endpoints_return_typed_snapshot(
         assert payload["run"]["selected_count"] == 2
         assert len(payload["run"]["items"]) == 2
         assert payload["applied"] is False
+        assert payload["exploration_symbols"] == []
         items = {
             item["symbol"]: item
             for item in payload["run"]["items"]
         }
         assert items["AAPL.US"]["is_trading_target"] is True
+        assert items["AAPL.US"]["exploration_selected"] is False
         assert items["AAPL.US"]["shadow_enabled"] is False
 
         latest = client.get("/api/universe/latest")

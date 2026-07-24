@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from multiprocessing import get_context
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -23,7 +24,10 @@ from app.models import (
     WatchlistItem,
 )
 from app.schemas import StrategyV2ShadowConfigUpdate
-from app.services.universe_selection_service import UniverseSelectionService
+from app.services.universe_selection_service import (
+    UniverseSelectionService,
+    select_exploration_candidates,
+)
 
 _NOW = datetime(2026, 7, 24, 18, 0, tzinfo=timezone.utc)
 _CATALOG = (
@@ -257,6 +261,126 @@ def _service(
         enable_shadow=enable_shadow,
         now=_NOW,
     )
+
+
+def test_exploration_candidates_are_diverse_hard_gate_passers() -> None:
+    def candidate(
+        symbol: str,
+        sector: str,
+        score: float,
+        reasons: list[str],
+    ) -> UniverseSelectionCandidate:
+        return UniverseSelectionCandidate(
+            run_id=1,
+            symbol=symbol,
+            market="US",
+            alias=symbol,
+            sector=sector,
+            memberships_json='["NASDAQ_100"]',
+            selected=False,
+            score=score,
+            metrics_json="{}",
+            exclusion_reasons_json=json.dumps(reasons),
+            created_at=_NOW,
+        )
+
+    items = [
+        candidate("INTC.US", "Semiconductors", 90, ["SECTOR_CAP"]),
+        candidate("AMAT.US", "Semiconductors", 85, ["SECTOR_CAP"]),
+        candidate(
+            "GOOGL.US",
+            "Communication Services",
+            80,
+            ["BELOW_SELECTION_CUTOFF"],
+        ),
+        candidate("ARM.US", "Semiconductors", 79, ["ATR_OUTSIDE_RANGE"]),
+        candidate(
+            "UNH.US",
+            "Healthcare",
+            75,
+            ["BELOW_SELECTION_CUTOFF"],
+        ),
+    ]
+
+    selected = select_exploration_candidates(
+        items,
+        max_symbols=3,
+        max_per_sector=1,
+    )
+
+    assert [item.symbol for item in selected] == [
+        "INTC.US",
+        "GOOGL.US",
+        "UNH.US",
+    ]
+
+
+def test_refresh_reconciles_exploration_into_read_only_evidence() -> None:
+    catalog = (
+        IndexCandidate(
+            "AAPL.US",
+            "Apple",
+            "Technology Hardware",
+            ("NASDAQ_100", "DJIA"),
+        ),
+        IndexCandidate(
+            "JPM.US",
+            "JPMorgan Chase",
+            "Financials",
+            ("DJIA",),
+        ),
+        IndexCandidate(
+            "MSFT.US",
+            "Microsoft",
+            "Software",
+            ("NASDAQ_100", "DJIA"),
+        ),
+    )
+    db = _db()
+    try:
+        result = UniverseSelectionService(
+            db,
+            _FakeBroker(),
+            catalog=catalog,
+            config=UniverseSelectionConfig(
+                max_selected=1,
+                max_per_sector=1,
+                min_avg_dollar_volume=100_000_000,
+                max_relative_spread_bps=20,
+                min_realized_vol_20d=0.01,
+                max_realized_vol_20d=3.0,
+                min_atr_pct_14d=0.1,
+                max_atr_pct_14d=20.0,
+            ),
+            minimum_evaluable_ratio=0.5,
+            minimum_residency_days=1,
+            exploration_max_symbols=2,
+            apply_to_watchlist=True,
+            enable_shadow=True,
+            now=_NOW,
+        ).refresh()
+
+        selected_symbols = {
+            item.symbol for item in result.items if item.selected
+        }
+        assert len(selected_symbols) == 1
+        assert len(result.exploration_symbols) == 2
+        assert selected_symbols.isdisjoint(result.exploration_symbols)
+        assert {
+            row.symbol for row in db.query(WatchlistItem).all()
+        } == selected_symbols | set(result.exploration_symbols)
+        assert {
+            row.symbol
+            for row in db.query(StrategyV2ShadowConfig)
+            .filter(StrategyV2ShadowConfig.enabled.is_(True))
+            .all()
+        } == selected_symbols | set(result.exploration_symbols)
+        assert all(
+            row.is_active is False
+            for row in db.query(WatchlistItem).all()
+        )
+    finally:
+        db.close()
 
 
 def test_default_selection_config_uses_active_strategy_fee_rate() -> None:
@@ -562,6 +686,7 @@ def test_stale_consensus_session_fails_closed_on_expected_run_date() -> None:
         assert result.run.status == "DEGRADED"
         assert result.run.selected_count == 0
         assert result.run.evaluable_count == 0
+        assert result.exploration_symbols == ()
         assert all(
             "DATA_STALE_SESSION_DATE" in row.exclusion_reasons_json
             for row in result.items

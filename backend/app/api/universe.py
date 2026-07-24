@@ -27,6 +27,7 @@ from app.services.universe_promotion_service import UniversePromotionService
 from app.services.universe_selection_service import (
     UniverseRefreshResult,
     UniverseSelectionService,
+    select_exploration_candidates,
 )
 
 router = APIRouter(
@@ -72,9 +73,27 @@ def _run_response(
         .filter(StrategyV2ShadowConfig.enabled.is_(True))
         .all()
     }
+    exploration_symbols = (
+        {
+            item.symbol
+            for item in select_exploration_candidates(
+                items,
+                max_symbols=(
+                    settings.universe_selection_exploration_max_symbols
+                ),
+                max_per_sector=(
+                    settings.universe_selection_max_per_sector
+                ),
+            )
+        }
+        if run.status == "COMPLETE"
+        else set()
+    )
     item_responses = [
         UniverseSelectionCandidateResponse.model_validate(item).model_copy(
             update={
+                "exploration_selected": item.symbol
+                in exploration_symbols,
                 "shadow_enabled": item.symbol
                 in enabled_shadow_symbols,
                 "is_trading_target": item.symbol == trading_symbol,
@@ -97,6 +116,7 @@ def _refresh_response(
 ) -> UniverseSelectionRefreshResponse:
     return UniverseSelectionRefreshResponse(
         run=_run_response(result.run, list(result.items), db),
+        exploration_symbols=list(result.exploration_symbols),
         added_symbols=list(result.added_symbols),
         removed_symbols=list(result.removed_symbols),
         retained_symbols=list(result.retained_symbols),

@@ -294,6 +294,7 @@ def test_universe_tick_reloads_before_optional_quant_failure(
             selected_count=1,
         ),
         applied=True,
+        exploration_symbols=(),
         added_symbols=(),
         removed_symbols=(),
     )

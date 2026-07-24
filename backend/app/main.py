@@ -857,12 +857,13 @@ def _universe_selection_tick_sync() -> None:
         response = build_universe_selection_service(db).refresh()
         logger.info(
             "universe selection run=%d as_of=%s status=%s coverage=%.3f "
-            "selected=%d applied=%s",
+            "selected=%d exploration=%d applied=%s",
             response.run.id,
             response.run.as_of_date,
             response.run.status,
             response.run.coverage_ratio,
             response.run.selected_count,
+            len(response.exploration_symbols),
             response.applied,
         )
         if response.applied:

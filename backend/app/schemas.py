@@ -2294,6 +2294,7 @@ class UniverseSelectionCandidateResponse(BaseModel):
     sector: str = Field(default="", max_length=100)
     memberships: list[str] = Field(default_factory=list, max_length=20)
     selected: bool
+    exploration_selected: bool = False
     shadow_enabled: bool = False
     is_trading_target: bool = False
     rank: Optional[int] = Field(default=None, ge=1)
@@ -2455,6 +2456,10 @@ class UniversePromotionReadinessResponse(BaseModel):
 
 class UniverseSelectionRefreshResponse(BaseModel):
     run: UniverseSelectionRunResponse
+    exploration_symbols: list[str] = Field(
+        default_factory=list,
+        max_length=100,
+    )
     added_symbols: list[str] = Field(default_factory=list, max_length=100)
     removed_symbols: list[str] = Field(default_factory=list, max_length=100)
     retained_symbols: list[str] = Field(default_factory=list, max_length=100)

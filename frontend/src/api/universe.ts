@@ -177,6 +177,7 @@ export async function refreshUniverseSelection(): Promise<UniverseSelectionRefre
     throw new Error('Unexpected /api/universe/refresh response: run.items is not an array')
   }
   for (const field of [
+    'exploration_symbols',
     'added_symbols',
     'removed_symbols',
     'retained_symbols',

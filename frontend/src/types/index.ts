@@ -1289,6 +1289,7 @@ export interface UniverseSelectionItem {
   sector: string
   memberships: string[]
   selected: boolean
+  exploration_selected: boolean
   shadow_enabled: boolean
   is_trading_target: boolean
   rank: number | null
@@ -1318,6 +1319,7 @@ export interface UniverseSelectionRunResponse {
 
 export interface UniverseSelectionRefreshResponse {
   run: UniverseSelectionRunResponse
+  exploration_symbols: string[]
   added_symbols: string[]
   removed_symbols: string[]
   retained_symbols: string[]

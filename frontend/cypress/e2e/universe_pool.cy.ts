@@ -21,6 +21,7 @@ const refreshedRun = {
       sector: 'Financials',
       memberships: ['DJIA'],
       selected: true,
+      exploration_selected: false,
       shadow_enabled: true,
       is_trading_target: false,
       rank: 1,
@@ -47,6 +48,7 @@ describe('Dynamic universe observation pool', () => {
     cy.intercept('POST', '/api/universe/refresh', {
       body: {
         run: refreshedRun,
+        exploration_symbols: [],
         added_symbols: ['JPM.US'],
         removed_symbols: ['NVDA.US'],
         retained_symbols: [],
@@ -72,6 +74,7 @@ describe('Dynamic universe observation pool', () => {
       cy.get('[data-testid="universe-coverage"]').should('contain', '95.0%')
       cy.contains('当前实盘').should('be.visible')
       cy.contains('候选入选').should('be.visible')
+      cy.contains('探索观察').should('be.visible')
       cy.contains('Shadow 已启用').should('be.visible')
       cy.contains('$12.40B').should('be.visible')
       cy.contains('1.8 bp').should('be.visible')
@@ -191,7 +194,10 @@ describe('Dynamic universe observation pool', () => {
     cy.get('[data-testid="universe-table"] tbody tr')
       .contains('tr', 'JPM.US')
       .should('not.contain', '当前实盘')
-    cy.contains('.el-message', '候选池已刷新：候选入选 1 个，覆盖率 100.0%').should('be.visible')
+    cy.contains(
+      '.el-message',
+      '候选池已刷新：正式入选 1 个，探索观察 0 个，覆盖率 100.0%',
+    ).should('be.visible')
     cy.get('[data-testid="universe-panel"]').should('contain', '入选不等于切换实盘')
   })
 
@@ -211,6 +217,7 @@ describe('Dynamic universe observation pool', () => {
     cy.intercept('POST', '/api/universe/refresh', {
       body: {
         run: refreshedRun,
+        exploration_symbols: [],
         added_symbols: ['JPM.US'],
         removed_symbols: [],
         retained_symbols: [],

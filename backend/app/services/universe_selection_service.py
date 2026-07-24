@@ -57,6 +57,9 @@ _RUN_WAIT_POLL_SECONDS = 0.05
 _RUN_CLAIM_LEASE_SECONDS = 300.0
 _RUN_WAIT_TIMEOUT_SECONDS = _RUN_CLAIM_LEASE_SECONDS + 30.0
 _CLAIM_PREFIX = "refresh-claim:"
+_EXPLORATION_ELIGIBLE_REASONS = frozenset(
+    {"SECTOR_CAP", "BELOW_SELECTION_CUTOFF"}
+)
 
 
 class UniverseMarketDataProvider(Protocol):
@@ -91,6 +94,7 @@ def _research_candlesticks(
 class UniverseRefreshResult:
     run: UniverseSelectionRun
     items: tuple[UniverseSelectionCandidate, ...]
+    exploration_symbols: tuple[str, ...] = ()
     added_symbols: tuple[str, ...] = ()
     removed_symbols: tuple[str, ...] = ()
     retained_symbols: tuple[str, ...] = ()
@@ -105,6 +109,51 @@ class UniverseRefreshResult:
 class _RunClaim:
     run_id: int
     token: str
+
+
+def select_exploration_candidates(
+    items: Sequence[UniverseSelectionCandidate],
+    *,
+    max_symbols: int,
+    max_per_sector: int,
+) -> list[UniverseSelectionCandidate]:
+    """Choose a diverse, read-only research tier from hard-gate passers."""
+    if max_symbols < 0:
+        raise ValueError("exploration max_symbols must not be negative")
+    if max_per_sector < 1:
+        raise ValueError("exploration max_per_sector must be positive")
+    if max_symbols == 0:
+        return []
+
+    eligible: list[UniverseSelectionCandidate] = []
+    for item in items:
+        score = float(item.score)
+        if item.selected or not math.isfinite(score) or score <= 0:
+            continue
+        try:
+            decoded = json.loads(item.exclusion_reasons_json)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if (
+            not isinstance(decoded, list)
+            or not decoded
+            or any(not isinstance(reason, str) for reason in decoded)
+            or not set(decoded).issubset(_EXPLORATION_ELIGIBLE_REASONS)
+        ):
+            continue
+        eligible.append(item)
+
+    eligible.sort(key=lambda item: (-float(item.score), item.symbol))
+    selected: list[UniverseSelectionCandidate] = []
+    sector_counts: dict[str, int] = {}
+    for item in eligible:
+        if sector_counts.get(item.sector, 0) >= max_per_sector:
+            continue
+        selected.append(item)
+        sector_counts[item.sector] = sector_counts.get(item.sector, 0) + 1
+        if len(selected) >= max_symbols:
+            break
+    return selected
 
 
 def selection_config_from_settings(
@@ -162,6 +211,7 @@ class UniverseSelectionService:
         config: UniverseSelectionConfig | None = None,
         minimum_evaluable_ratio: float | None = None,
         minimum_residency_days: int | None = None,
+        exploration_max_symbols: int | None = None,
         apply_to_watchlist: bool | None = None,
         enable_shadow: bool | None = None,
         now: datetime | None = None,
@@ -188,6 +238,15 @@ class UniverseSelectionService:
             raise ValueError("minimum_evaluable_ratio must be in (0, 1]")
         if self.minimum_residency_days < 1:
             raise ValueError("minimum_residency_days must be positive")
+        self.exploration_max_symbols = (
+            settings.universe_selection_exploration_max_symbols
+            if exploration_max_symbols is None
+            else exploration_max_symbols
+        )
+        if self.exploration_max_symbols < 0:
+            raise ValueError(
+                "exploration_max_symbols must not be negative"
+            )
         self.apply_to_watchlist = (
             settings.universe_selection_apply_to_watchlist
             if apply_to_watchlist is None
@@ -727,26 +786,36 @@ class UniverseSelectionService:
         *,
         should_apply: bool,
     ) -> UniverseRefreshResult:
-        if not should_apply:
-            return UniverseRefreshResult(
-                run=run,
-                items=tuple(items),
-                reason="watchlist application disabled",
-            )
         if run.status != "COMPLETE":
             return UniverseRefreshResult(
                 run=run,
                 items=tuple(items),
                 reason=run.error or "selection run is not complete",
             )
+        exploration = select_exploration_candidates(
+            items,
+            max_symbols=self.exploration_max_symbols,
+            max_per_sector=self.config.max_per_sector,
+        )
+        exploration_symbols = tuple(
+            item.symbol for item in exploration
+        )
+        if not should_apply:
+            return UniverseRefreshResult(
+                run=run,
+                items=tuple(items),
+                exploration_symbols=exploration_symbols,
+                reason="watchlist application disabled",
+            )
         selected = [item for item in items if item.selected]
-        added, removed, retained = self._reconcile_watchlist(selected)
+        observed = [*selected, *exploration]
+        added, removed, retained = self._reconcile_watchlist(observed)
         shadow_enabled, shadow_disabled, shadow_failures = (
-            self._sync_selected_shadows(
-                selected_symbols={item.symbol for item in selected},
+            self._sync_observation_shadows(
+                observed_symbols={item.symbol for item in observed},
             )
         )
-        reason = "candidate watchlist reconciled"
+        reason = "candidate and exploration watchlist reconciled"
         if shadow_failures:
             reason += "; shadow sync failed for " + ", ".join(
                 shadow_failures
@@ -754,6 +823,7 @@ class UniverseSelectionService:
         return UniverseRefreshResult(
             run=run,
             items=tuple(items),
+            exploration_symbols=exploration_symbols,
             added_symbols=tuple(added),
             removed_symbols=tuple(removed),
             retained_symbols=tuple(retained),
@@ -868,10 +938,10 @@ class UniverseSelectionService:
         )
         return live_order is not None
 
-    def _sync_selected_shadows(
+    def _sync_observation_shadows(
         self,
         *,
-        selected_symbols: set[str],
+        observed_symbols: set[str],
     ) -> tuple[list[str], list[str], list[str]]:
         if not self.enable_shadow:
             return [], [], []
@@ -879,7 +949,7 @@ class UniverseSelectionService:
         disabled: list[str] = []
         failures: list[str] = []
         service = StrategyV2ShadowService(self.db)
-        for symbol in sorted(selected_symbols):
+        for symbol in sorted(observed_symbols):
             try:
                 row = (
                     self.db.query(StrategyV2ShadowConfig)
@@ -922,7 +992,7 @@ class UniverseSelectionService:
         )
         for managed in managed_rows:
             symbol = managed.symbol
-            if symbol in selected_symbols:
+            if symbol in observed_symbols:
                 continue
             try:
                 if managed.enabled:
