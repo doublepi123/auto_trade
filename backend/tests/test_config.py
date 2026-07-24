@@ -165,6 +165,14 @@ class TestSettings:
             "true",
         )
         monkeypatch.setenv(
+            "AUTO_TRADE_WATCHLIST_QUANT_AUTO_SCORE_ENABLED",
+            "true",
+        )
+        monkeypatch.setenv(
+            "AUTO_TRADE_WATCHLIST_QUANT_INTERVAL_MINUTES",
+            "20",
+        )
+        monkeypatch.setenv(
             "AUTO_TRADE_LIVE_REGIME_GATE_ENABLED",
             "true",
         )
@@ -181,6 +189,8 @@ class TestSettings:
 
         assert configured.universe_selection_enabled is True
         assert configured.universe_selection_apply_to_watchlist is True
+        assert configured.watchlist_quant_auto_score_enabled is True
+        assert configured.watchlist_quant_interval_minutes == 20
         assert configured.live_regime_gate_enabled is True
         assert configured.live_regime_max_data_age_seconds == 300
         assert configured.live_max_entries_per_symbol_per_day == 1

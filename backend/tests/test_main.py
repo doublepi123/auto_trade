@@ -138,6 +138,104 @@ async def test_universe_selection_waits_for_worker_during_cancel(
         await task
 
 
+async def test_watchlist_quant_waits_for_worker_during_cancel(
+    monkeypatch,
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_tick() -> None:
+        started.set()
+        assert release.wait(2)
+
+    monkeypatch.setattr(
+        main_module,
+        "_watchlist_quant_tick_sync",
+        blocking_tick,
+    )
+    task = asyncio.create_task(
+        main_module._run_watchlist_quant_tick()
+    )
+    assert await asyncio.to_thread(started.wait, 2)
+
+    task.cancel()
+    await asyncio.sleep(0)
+    assert task.done() is False
+
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+def test_watchlist_quant_tick_scores_due_items_and_closes_db(
+    monkeypatch,
+) -> None:
+    from app.services import watchlist_quant_service
+
+    items = [
+        SimpleNamespace(symbol="AAPL.US", market="US"),
+        SimpleNamespace(symbol="MSFT.US", market="US"),
+    ]
+    calls: list[tuple[object, int]] = []
+
+    class FakeQuery:
+        def all(self) -> list[SimpleNamespace]:
+            return items
+
+    class FakeDB:
+        closed = False
+        rolled_back = 0
+
+        def query(self, *_args: object) -> FakeQuery:
+            return FakeQuery()
+
+        def rollback(self) -> None:
+            self.rolled_back += 1
+
+        def close(self) -> None:
+            self.closed = True
+
+    class FakeQuantService:
+        def __init__(self, received_db: object, broker: object) -> None:
+            assert received_db is db
+            assert broker is runner.broker
+
+        def score_due_items(
+            self,
+            received_items: object,
+            *,
+            ttl_minutes: int,
+        ) -> list[SimpleNamespace]:
+            calls.append((received_items, ttl_minutes))
+            return [SimpleNamespace(symbol="MSFT.US")]
+
+    db = FakeDB()
+    runner = SimpleNamespace(broker=object())
+    monkeypatch.setattr(
+        main_module.settings,
+        "watchlist_quant_auto_score_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        main_module.settings,
+        "watchlist_quant_interval_minutes",
+        30,
+    )
+    monkeypatch.setattr(main_module, "SessionLocal", lambda: db)
+    monkeypatch.setattr(main_module, "get_runner", lambda: runner)
+    monkeypatch.setattr(
+        watchlist_quant_service,
+        "WatchlistQuantService",
+        FakeQuantService,
+    )
+
+    main_module._watchlist_quant_tick_sync()
+
+    assert calls == [(items, 30)]
+    assert db.rolled_back == 0
+    assert db.closed is True
+
+
 def test_universe_tick_reloads_before_optional_quant_failure(
     monkeypatch,
 ) -> None:
@@ -201,13 +299,13 @@ def test_universe_tick_reloads_before_optional_quant_failure(
         *,
         ttl_minutes: int,
     ) -> None:
-        assert ttl_minutes >= 60
+        assert ttl_minutes == 30
         assert runner.reloads == 1
         raise RuntimeError("quote batch unavailable")
 
     monkeypatch.setattr(
         watchlist_quant_service.WatchlistQuantService,
-        "score_items",
+        "score_due_items",
         fail_score,
     )
 

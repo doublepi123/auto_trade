@@ -291,6 +291,24 @@ class Settings(BaseSettings):
         le=1_440,
         validation_alias="AUTO_TRADE_UNIVERSE_SELECTION_INTERVAL_MINUTES",
     )
+    watchlist_quant_auto_score_enabled: bool = Field(
+        default=False,
+        validation_alias="AUTO_TRADE_WATCHLIST_QUANT_AUTO_SCORE_ENABLED",
+        description=(
+            "Automatically refresh deterministic watchlist quant scores "
+            "during regular trading hours without changing the live symbol."
+        ),
+    )
+    watchlist_quant_interval_minutes: int = Field(
+        default=30,
+        ge=5,
+        le=360,
+        validation_alias="AUTO_TRADE_WATCHLIST_QUANT_INTERVAL_MINUTES",
+        description=(
+            "Minimum interval between current-generation quant scores for "
+            "each watchlist symbol."
+        ),
+    )
     universe_selection_max_symbols: int = Field(
         default=12,
         ge=1,

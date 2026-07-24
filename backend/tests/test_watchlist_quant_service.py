@@ -613,6 +613,75 @@ def test_current_quant_snapshot_excludes_retained_v2_history() -> None:
         db.close()
 
 
+def test_due_scoring_skips_fresh_symbols_and_scores_missing_rows() -> None:
+    db = _db()
+    try:
+        items = [
+            WatchlistItem(
+                symbol="AAPL.US",
+                market="US",
+                alias="Apple",
+            ),
+            WatchlistItem(
+                symbol="MSFT.US",
+                market="US",
+                alias="Microsoft",
+            ),
+        ]
+        db.add_all(items)
+        db.add(
+            WatchlistScore(
+                symbol="AAPL.US",
+                market="US",
+                score=70,
+                confidence=0.8,
+                recommended_action="CANDIDATE",
+                source="quant_v3",
+                rationale="fresh current score",
+                created_at=_NOW - timedelta(minutes=5),
+                expires_at=_NOW + timedelta(minutes=25),
+            )
+        )
+        db.commit()
+        broker = _Broker()
+
+        rows = WatchlistQuantService(
+            db,
+            broker,
+            now=_NOW,
+        ).score_due_items(items, ttl_minutes=30)
+
+        assert broker.quote_requests == [["MSFT.US"]]
+        assert [row.symbol for row in rows] == ["MSFT.US"]
+        assert rows[0].source == "quant_v3"
+    finally:
+        db.close()
+
+
+def test_due_scoring_is_silent_outside_regular_hours() -> None:
+    db = _db()
+    try:
+        item = WatchlistItem(
+            symbol="AAPL.US",
+            market="US",
+            alias="Apple",
+        )
+        db.add(item)
+        db.commit()
+        broker = _Broker()
+
+        rows = WatchlistQuantService(
+            db,
+            broker,
+            now=datetime(2026, 7, 23, 12, 0, tzinfo=timezone.utc),
+        ).score_due_items([item], ttl_minutes=30)
+
+        assert rows == []
+        assert broker.quote_requests == []
+    finally:
+        db.close()
+
+
 class _OldLastTradeBroker(_Broker):
     def get_quotes(self, symbols: list[str]) -> list[Quote]:
         self.quote_requests.append(list(symbols))

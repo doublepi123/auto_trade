@@ -71,7 +71,10 @@ _report_schedule_lock = asyncio.Lock()
 _alert_rules_lock = asyncio.Lock()
 _strategy_v2_shadow_lock = asyncio.Lock()
 _universe_selection_lock = asyncio.Lock()
+_watchlist_quant_lock = asyncio.Lock()
 _llm_globals_lock = threading.Lock()
+_watchlist_quant_sync_lock = threading.Lock()
+_WATCHLIST_QUANT_POLL_SECONDS = 60
 
 
 def _price_drift_pct(current_price: float, last_price: float) -> float:
@@ -709,6 +712,77 @@ async def _strategy_v2_shadow_cron() -> None:
                 logger.exception("Strategy v2 shadow cron failed")
 
 
+def _watchlist_quant_tick_sync() -> None:
+    """Refresh due deterministic watchlist scores during open sessions."""
+    if not settings.watchlist_quant_auto_score_enabled:
+        return
+    from app.models import WatchlistItem
+    from app.services.watchlist_quant_service import WatchlistQuantService
+
+    db = SessionLocal()
+    try:
+        watchlist_items = db.query(WatchlistItem).all()
+        if not watchlist_items:
+            return
+        with _watchlist_quant_sync_lock:
+            rows = WatchlistQuantService(
+                db,
+                get_runner().broker,
+            ).score_due_items(
+                watchlist_items,
+                ttl_minutes=settings.watchlist_quant_interval_minutes,
+            )
+        if rows:
+            logger.info(
+                "automatic watchlist quant scoring refreshed %d symbols: %s",
+                len(rows),
+                ", ".join(row.symbol for row in rows),
+            )
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+async def _run_watchlist_quant_tick() -> None:
+    """Join an active scoring worker before application shutdown."""
+    worker = asyncio.create_task(
+        asyncio.to_thread(_watchlist_quant_tick_sync)
+    )
+    try:
+        await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        try:
+            await worker
+        except Exception:
+            logger.exception(
+                "watchlist quant scoring failed during shutdown"
+            )
+        raise
+
+
+async def _watchlist_quant_cron() -> None:
+    """Poll cheaply and fetch market data only for expired RTH scores."""
+    if not settings.watchlist_quant_auto_score_enabled:
+        return
+    logger.info(
+        "automatic watchlist quant scoring enabled: interval=%dm poll=%ds",
+        settings.watchlist_quant_interval_minutes,
+        _WATCHLIST_QUANT_POLL_SECONDS,
+    )
+    await asyncio.sleep(45)
+    while True:
+        async with _watchlist_quant_lock:
+            try:
+                await _run_watchlist_quant_tick()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("automatic watchlist quant scoring failed")
+        await asyncio.sleep(_WATCHLIST_QUANT_POLL_SECONDS)
+
+
 def _universe_selection_tick_sync() -> None:
     """Refresh the candidate pool and its short-horizon suitability scores."""
     if not settings.universe_selection_enabled:
@@ -742,16 +816,16 @@ def _universe_selection_tick_sync() -> None:
             watchlist_items = db.query(WatchlistItem).all()
             if watchlist_items:
                 try:
-                    WatchlistQuantService(
-                        db,
-                        get_runner().broker,
-                    ).score_items(
-                        watchlist_items,
-                        ttl_minutes=max(
-                            60,
-                            settings.universe_selection_interval_minutes * 2,
-                        ),
-                    )
+                    with _watchlist_quant_sync_lock:
+                        WatchlistQuantService(
+                            db,
+                            get_runner().broker,
+                        ).score_due_items(
+                            watchlist_items,
+                            ttl_minutes=(
+                                settings.watchlist_quant_interval_minutes
+                            ),
+                        )
                 except QuantScoringOutsideRTHError as exc:
                     logger.info(
                         "post-selection watchlist quant scoring skipped: %s",
@@ -852,6 +926,7 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         asyncio.create_task(_llm_storage_maintenance_cron()),
         asyncio.create_task(_strategy_v2_shadow_cron()),
         asyncio.create_task(_universe_selection_cron()),
+        asyncio.create_task(_watchlist_quant_cron()),
     )
     try:
         yield

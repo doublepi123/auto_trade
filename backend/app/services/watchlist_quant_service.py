@@ -8,6 +8,7 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Protocol, Sequence
 
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -64,20 +65,29 @@ def list_latest_current_quant_scores(
     Previous generations remain in the append-only history, but must not be
     promoted back into current views merely because their TTL has not elapsed.
     """
-    rows = (
-        db.query(WatchlistScore)
-        .filter(WatchlistScore.source.in_(CURRENT_QUANT_SOURCES))
-        .order_by(
-            WatchlistScore.symbol.asc(),
-            WatchlistScore.created_at.desc(),
-            WatchlistScore.id.desc(),
+    ranked = (
+        select(
+            WatchlistScore.id.label("score_id"),
+            func.row_number()
+            .over(
+                partition_by=WatchlistScore.symbol,
+                order_by=(
+                    WatchlistScore.created_at.desc(),
+                    WatchlistScore.id.desc(),
+                ),
+            )
+            .label("generation_rank"),
         )
+        .where(WatchlistScore.source.in_(CURRENT_QUANT_SOURCES))
+        .subquery()
+    )
+    return (
+        db.query(WatchlistScore)
+        .join(ranked, ranked.c.score_id == WatchlistScore.id)
+        .filter(ranked.c.generation_rank == 1)
+        .order_by(WatchlistScore.symbol.asc())
         .all()
     )
-    latest_by_symbol: dict[str, WatchlistScore] = {}
-    for row in rows:
-        latest_by_symbol.setdefault(row.symbol, row)
-    return list(latest_by_symbol.values())
 
 
 class WatchlistMarketDataProvider(Protocol):
@@ -801,6 +811,33 @@ class WatchlistQuantService:
             raise ValueError("now must be timezone-aware")
         self.now = observed_at.astimezone(timezone.utc)
 
+    def score_due_items(
+        self,
+        items: Sequence[WatchlistItem],
+        *,
+        ttl_minutes: int = 30,
+    ) -> list[WatchlistScore]:
+        """Score open-market items only when their current v3 row expired."""
+        open_items = [
+            item
+            for item in items
+            if is_trading_hours(item.market, self.now)
+        ]
+        if not open_items:
+            return []
+        latest_by_symbol = {
+            row.symbol: row
+            for row in list_latest_current_quant_scores(self.db)
+        }
+        due_items: list[WatchlistItem] = []
+        for item in open_items:
+            latest = latest_by_symbol.get(item.symbol)
+            if latest is None or self._is_expired(latest.expires_at):
+                due_items.append(item)
+        if not due_items:
+            return []
+        return self.score_items(due_items, ttl_minutes=ttl_minutes)
+
     def score_items(
         self,
         items: Sequence[WatchlistItem],
@@ -958,6 +995,15 @@ class WatchlistQuantService:
             self.db.refresh(row)
         rows.sort(key=lambda row: (-float(row.score), row.symbol))
         return rows
+
+    def _is_expired(self, expires_at: datetime | None) -> bool:
+        if expires_at is None:
+            return True
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        else:
+            expires_at = expires_at.astimezone(timezone.utc)
+        return expires_at <= self.now
 
     def _completed_intraday_bars(
         self,
