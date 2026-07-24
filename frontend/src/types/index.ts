@@ -1621,10 +1621,12 @@ export interface OpeningMomentumShadowVariant {
     | 'INCUMBENT'
     | 'CONTINUATION_CHALLENGER'
     | 'BREADTH_GATED_CHALLENGER'
+    | 'BREADTH_GATED_60M_CHALLENGER'
   universe_source: string
   algorithm_version: string
   config_version: string
   minimum_market_return_bps: number
+  holding_minutes: number
   comparison_sessions: number
   latest: OpeningMomentumShadowRun | null
   metrics: OpeningMomentumShadowMetrics

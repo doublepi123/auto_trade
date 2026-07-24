@@ -57,11 +57,17 @@ _BREADTH_GATE_SOURCE = "OPENING_CONTINUATION_BREADTH_GATE"
 _BREADTH_GATE_ALGORITHM_VERSION = (
     f"{_CONTINUATION_ALGORITHM_VERSION}+{_BREADTH_GATE_VERSION}"
 )
+_BREADTH_LONG_HOLD_VERSION = "holding-60m-v1"
+_BREADTH_LONG_HOLD_SOURCE = "OPENING_CONTINUATION_BREADTH_60M"
+_BREADTH_LONG_HOLD_ALGORITHM_VERSION = (
+    f"{_BREADTH_GATE_ALGORITHM_VERSION}+{_BREADTH_LONG_HOLD_VERSION}"
+)
 
 _VariantName = Literal[
     "INCUMBENT",
     "CONTINUATION_CHALLENGER",
     "BREADTH_GATED_CHALLENGER",
+    "BREADTH_GATED_60M_CHALLENGER",
 ]
 
 
@@ -327,7 +333,9 @@ class OpeningMomentumShadowService:
                     exit_due_at=(
                         entry_at
                         + timedelta(
-                            minutes=self.config.holding_minutes
+                            minutes=(
+                                variant.decision_config.holding_minutes
+                            )
                         )
                         if status == "OPEN"
                         else None
@@ -512,6 +520,7 @@ class OpeningMomentumShadowService:
         for variant_name in (
             "CONTINUATION_CHALLENGER",
             "BREADTH_GATED_CHALLENGER",
+            "BREADTH_GATED_60M_CHALLENGER",
         ):
             identity = identities_by_variant[variant_name]
             variants.append(
@@ -540,6 +549,9 @@ class OpeningMomentumShadowService:
         if settings.opening_momentum_challenger_enabled:
             universe_config = self._continuation_config()
             breadth_config = self._breadth_gate_config()
+            breadth_long_hold_config = (
+                self._breadth_long_hold_config()
+            )
             variants.append(
                 _UniverseVariant(
                     variant="CONTINUATION_CHALLENGER",
@@ -575,6 +587,25 @@ class OpeningMomentumShadowService:
                     decision_config=breadth_config,
                 )
             )
+            variants.append(
+                _UniverseVariant(
+                    variant="BREADTH_GATED_60M_CHALLENGER",
+                    algorithm_version=(
+                        _BREADTH_LONG_HOLD_ALGORITHM_VERSION
+                    ),
+                    config_version=(
+                        opening_momentum_variant_config_version(
+                            (
+                                f"{breadth_long_hold_config.version_hash()}:"
+                                f"{_BREADTH_LONG_HOLD_VERSION}"
+                            ),
+                            universe_config,
+                        )
+                    ),
+                    universe_source=_BREADTH_LONG_HOLD_SOURCE,
+                    decision_config=breadth_long_hold_config,
+                )
+            )
         return variants
 
     @staticmethod
@@ -593,6 +624,12 @@ class OpeningMomentumShadowService:
                 0.0,
                 self.config.minimum_market_return_bps,
             ),
+        )
+
+    def _breadth_long_hold_config(self) -> OpeningMomentumConfig:
+        return replace(
+            self._breadth_gate_config(),
+            holding_minutes=60,
         )
 
     def _close_if_due(
@@ -734,6 +771,9 @@ class OpeningMomentumShadowService:
                 config_version=identity.config_version,
                 minimum_market_return_bps=(
                     identity.decision_config.minimum_market_return_bps
+                ),
+                holding_minutes=(
+                    identity.decision_config.holding_minutes
                 ),
                 comparison_sessions=len(comparison_dates),
                 latest=(

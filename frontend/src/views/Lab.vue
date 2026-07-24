@@ -413,7 +413,7 @@
                   <el-table-column label="策略" min-width="140">
                     <template #default="{ row }">
                       <el-tag
-                        :type="row.variant === 'INCUMBENT' ? 'primary' : row.variant === 'BREADTH_GATED_CHALLENGER' ? 'success' : 'warning'"
+                        :type="row.variant === 'INCUMBENT' ? 'primary' : row.variant.startsWith('BREADTH_GATED') ? 'success' : 'warning'"
                         effect="plain"
                       >
                         {{ openingMomentumVariantLabel(row.variant) }}
@@ -423,6 +423,11 @@
                   <el-table-column label="市场门槛" min-width="100">
                     <template #default="{ row }">
                       {{ formatBps(row.minimum_market_return_bps) }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="持仓" min-width="90">
+                    <template #default="{ row }">
+                      {{ row.holding_minutes }} 分钟
                     </template>
                   </el-table-column>
                   <el-table-column label="当日候选" min-width="110">
@@ -1729,7 +1734,8 @@ function openingMomentumVariantLabel(
 ): string {
   if (variant === 'INCUMBENT') return '现行选池'
   if (variant === 'CONTINUATION_CHALLENGER') return '动量延续'
-  return '广度过滤'
+  if (variant === 'BREADTH_GATED_CHALLENGER') return '广度过滤'
+  return '广度 60m'
 }
 const shadowForm = reactive<StrategyShadowConfigUpdate>({
   enabled: false,

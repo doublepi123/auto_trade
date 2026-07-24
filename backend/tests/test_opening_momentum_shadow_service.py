@@ -56,7 +56,7 @@ class _FakeCandles:
             100.0 if symbol_index == 7 else float(symbol_index),
         )
         bars: list[BrokerCandle] = []
-        for index in range(62):
+        for index in range(93):
             if (
                 symbol == self.missing_entry_for
                 and index == 31
@@ -72,6 +72,8 @@ class _FakeCandles:
                 open_price = 100.5 if symbol_index == 7 else 100.0
             if index == 61:
                 open_price = 101.5 if symbol_index == 7 else 100.0
+            if index == 91:
+                open_price = 102.5 if symbol_index == 7 else 100.0
             bars.append(
                 BrokerCandle(
                     timestamp=_SESSION_OPEN
@@ -405,52 +407,91 @@ def test_challengers_use_one_market_snapshot_and_close_all_variants(
             now=_SESSION_OPEN + timedelta(minutes=32, seconds=10),
         )
 
-        assert db.query(OpeningMomentumShadowRun).count() == 3
+        assert db.query(OpeningMomentumShadowRun).count() == 4
         assert candles.calls == list(_SYMBOLS[:4])
         assert opened.state == "OPEN"
         assert opened.latest is not None
         assert opened.latest.universe_source == "UNIVERSE_SELECTION"
         assert opened.latest.candidate_symbol == "S1.US"
         assert opened.latest.selection_run_id == run.id
-        assert len(opened.variants) == 3
-        incumbent, challenger, breadth = opened.variants
+        assert len(opened.variants) == 4
+        incumbent, challenger, breadth, breadth_long = opened.variants
         assert incumbent.variant == "INCUMBENT"
         assert incumbent.comparison_sessions == 1
         assert incumbent.minimum_market_return_bps == -25.0
+        assert incumbent.holding_minutes == 30
         assert incumbent.latest is not None
         assert incumbent.latest.candidate_symbol == "S1.US"
         assert challenger.variant == "CONTINUATION_CHALLENGER"
         assert challenger.comparison_sessions == 1
         assert challenger.minimum_market_return_bps == -25.0
+        assert challenger.holding_minutes == 30
         assert challenger.latest is not None
         assert challenger.latest.universe == ["S2.US", "S3.US"]
         assert challenger.latest.candidate_symbol == "S3.US"
         assert breadth.variant == "BREADTH_GATED_CHALLENGER"
         assert breadth.comparison_sessions == 1
         assert breadth.minimum_market_return_bps == 0.0
+        assert breadth.holding_minutes == 30
         assert breadth.latest is not None
         assert breadth.latest.universe == ["S2.US", "S3.US"]
         assert breadth.latest.candidate_symbol == "S3.US"
+        assert breadth_long.variant == (
+            "BREADTH_GATED_60M_CHALLENGER"
+        )
+        assert breadth_long.comparison_sessions == 1
+        assert breadth_long.minimum_market_return_bps == 0.0
+        assert breadth_long.holding_minutes == 60
+        assert breadth_long.latest is not None
+        assert breadth_long.latest.universe == ["S2.US", "S3.US"]
+        assert breadth_long.latest.candidate_symbol == "S3.US"
+        assert breadth_long.latest.exit_due_at == (
+            _SESSION_OPEN + timedelta(minutes=91)
+        )
         assert len(
             {
                 item.config_version
                 for item in opened.variants
             }
-        ) == 3
+        ) == 4
+
+        partially_closed = service.tick(
+            now=_SESSION_OPEN + timedelta(minutes=62, seconds=10),
+        )
+
+        rows = db.query(OpeningMomentumShadowRun).all()
+        assert {row.status for row in rows} == {"CLOSED", "OPEN"}
+        assert partially_closed.state == "OPEN"
+        assert [
+            item.metrics.closed_trades
+            for item in partially_closed.variants
+        ] == [
+            1,
+            1,
+            1,
+            0,
+        ]
 
         closed = service.tick(
-            now=_SESSION_OPEN + timedelta(minutes=62, seconds=10),
+            now=_SESSION_OPEN + timedelta(minutes=92, seconds=10),
         )
 
         rows = db.query(OpeningMomentumShadowRun).all()
         assert {row.status for row in rows} == {"CLOSED"}
         assert closed.state == "COLLECTING"
-        assert [item.metrics.closed_trades for item in closed.variants] == [
+        assert [
+            item.metrics.closed_trades for item in closed.variants
+        ] == [
+            1,
             1,
             1,
             1,
         ]
-        assert [item.metrics.cumulative_net_return_bps for item in closed.variants] == [
+        assert [
+            item.metrics.cumulative_net_return_bps
+            for item in closed.variants
+        ] == [
+            -14.0,
             -14.0,
             -14.0,
             -14.0,
@@ -507,8 +548,10 @@ def test_breadth_challenger_skips_a_negative_market_snapshot(
         )
 
         assert candles.calls == list(_SYMBOLS[:4])
-        assert len(status.variants) == 3
-        incumbent, continuation, breadth = status.variants
+        assert len(status.variants) == 4
+        incumbent, continuation, breadth, breadth_long = (
+            status.variants
+        )
         assert incumbent.latest is not None
         assert incumbent.latest.status == "OPEN"
         assert continuation.latest is not None
@@ -518,6 +561,15 @@ def test_breadth_challenger_skips_a_negative_market_snapshot(
         assert breadth.latest.reason == "MARKET_FILTER"
         assert breadth.latest.market_return_bps == pytest.approx(-30.0)
         assert breadth.minimum_market_return_bps == 0.0
+        assert breadth.holding_minutes == 30
+        assert breadth_long.latest is not None
+        assert breadth_long.latest.status == "SKIPPED"
+        assert breadth_long.latest.reason == "MARKET_FILTER"
+        assert breadth_long.latest.market_return_bps == pytest.approx(
+            -30.0
+        )
+        assert breadth_long.minimum_market_return_bps == 0.0
+        assert breadth_long.holding_minutes == 60
     finally:
         db.close()
         Base.metadata.drop_all(bind=engine)

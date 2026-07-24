@@ -563,11 +563,13 @@ class OpeningMomentumShadowVariantResponse(BaseModel):
         "INCUMBENT",
         "CONTINUATION_CHALLENGER",
         "BREADTH_GATED_CHALLENGER",
+        "BREADTH_GATED_60M_CHALLENGER",
     ]
     universe_source: str
     algorithm_version: str
     config_version: str
     minimum_market_return_bps: float
+    holding_minutes: int
     comparison_sessions: int = 0
     latest: Optional[OpeningMomentumShadowRunResponse] = None
     metrics: OpeningMomentumShadowMetrics

@@ -1779,6 +1779,7 @@ Cypress.Commands.add('stubApi', () => {
           ),
           config_version: 'opening-momentum-stub-v1',
           minimum_market_return_bps: -25,
+          holding_minutes: 30,
           comparison_sessions: 4,
           latest: { candidate_symbol: 'META.US' },
           metrics: {
@@ -1804,6 +1805,7 @@ Cypress.Commands.add('stubApi', () => {
           ),
           config_version: 'opening-continuation-stub-v1',
           minimum_market_return_bps: -25,
+          holding_minutes: 30,
           comparison_sessions: 4,
           latest: { candidate_symbol: 'PLTR.US' },
           metrics: {
@@ -1830,6 +1832,7 @@ Cypress.Commands.add('stubApi', () => {
           ),
           config_version: 'opening-breadth-stub-v1',
           minimum_market_return_bps: 0,
+          holding_minutes: 30,
           comparison_sessions: 4,
           latest: { candidate_symbol: 'PLTR.US' },
           metrics: {
@@ -1844,6 +1847,34 @@ Cypress.Commands.add('stubApi', () => {
             cumulative_net_return_bps: 132,
             max_drawdown_bps: 0,
             profit_factor: null,
+          },
+        },
+        {
+          variant: 'BREADTH_GATED_60M_CHALLENGER',
+          universe_source: 'OPENING_CONTINUATION_BREADTH_60M',
+          algorithm_version: (
+            'cross-sectional-opening-momentum-v3-preopen-frozen-universe+'
+            + 'opening-continuation-universe-v1+'
+            + 'nonnegative-market-breadth-v1+'
+            + 'holding-60m-v1'
+          ),
+          config_version: 'opening-breadth-60m-stub-v1',
+          minimum_market_return_bps: 0,
+          holding_minutes: 60,
+          comparison_sessions: 4,
+          latest: { candidate_symbol: 'PLTR.US' },
+          metrics: {
+            observed_sessions: 4,
+            skipped_sessions: 1,
+            signals: 3,
+            open_trades: 0,
+            closed_trades: 3,
+            wins: 2,
+            win_rate: 0.6667,
+            mean_net_return_bps: 56,
+            cumulative_net_return_bps: 168,
+            max_drawdown_bps: 36,
+            profit_factor: 3.4,
           },
         },
       ],
