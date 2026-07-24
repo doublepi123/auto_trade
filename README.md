@@ -722,6 +722,7 @@ auto_trade/
 | `AUTO_TRADE_WATCHLIST_QUANT_AUTO_SCORE_ENABLED` | RTH 内自动刷新到期的确定性量化 v4 评分；分页读取最多 3000 根 5 分钟线；不切换主交易标的 | `false` |
 | `AUTO_TRADE_WATCHLIST_QUANT_INTERVAL_MINUTES` | 同一标的两次量化 v4 评分的最小间隔（分钟） | `30` |
 | `AUTO_TRADE_WATCHLIST_QUANT_SCORE_TTL_MINUTES` | 量化 v4 证据有效期（分钟），与盘中刷新频率分离 | `1440` |
+| `AUTO_TRADE_WATCHLIST_QUANT_BATCH_SIZE` | 每次自动量化刷新最多处理的到期标的数，分批为实时行情与影子策略保留 API 配额 | `3` |
 | `AUTO_TRADE_UNIVERSE_SELECTION_MAX_SYMBOLS` | 每次最多入选标的数 | `12` |
 | `AUTO_TRADE_UNIVERSE_SELECTION_MAX_PER_SECTOR` | 每行业最多入选标的数 | `2` |
 | `AUTO_TRADE_LIVE_REGIME_GATE_ENABLED` | live 开仓前要求当前主标的最新 Strategy v2 shadow 门禁通过；减仓不受影响 | `false` |

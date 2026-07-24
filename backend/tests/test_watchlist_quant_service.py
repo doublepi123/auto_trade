@@ -768,6 +768,89 @@ def test_due_scoring_skips_fresh_symbols_and_scores_missing_rows() -> None:
         db.close()
 
 
+def test_due_scoring_batches_missing_then_oldest_scores() -> None:
+    db = _db()
+    try:
+        items = [
+            WatchlistItem(
+                symbol="MSFT.US",
+                market="US",
+                alias="Microsoft",
+            ),
+            WatchlistItem(
+                symbol="AAPL.US",
+                market="US",
+                alias="Apple",
+            ),
+            WatchlistItem(
+                symbol="NVDA.US",
+                market="US",
+                alias="NVIDIA",
+            ),
+        ]
+        db.add_all(items)
+        db.add(
+            WatchlistScore(
+                symbol="MSFT.US",
+                market="US",
+                score=50,
+                confidence=0.7,
+                recommended_action="WATCH",
+                source="quant_v4",
+                rationale="oldest due score",
+                created_at=_NOW - timedelta(minutes=90),
+                expires_at=_NOW + timedelta(hours=1),
+            )
+        )
+        db.add(
+            WatchlistScore(
+                symbol="AAPL.US",
+                market="US",
+                score=50,
+                confidence=0.7,
+                recommended_action="WATCH",
+                source="quant_v4",
+                rationale="newer due score",
+                created_at=_NOW - timedelta(minutes=60),
+                expires_at=_NOW + timedelta(hours=1),
+            )
+        )
+        db.commit()
+        broker = _Broker()
+
+        rows = WatchlistQuantService(
+            db,
+            broker,
+            now=_NOW,
+        ).score_due_items(
+            items,
+            refresh_interval_minutes=30,
+            ttl_minutes=1_440,
+            max_items=2,
+        )
+
+        assert broker.quote_requests == [["NVDA.US", "MSFT.US"]]
+        assert {row.symbol for row in rows} == {
+            "MSFT.US",
+            "NVDA.US",
+        }
+    finally:
+        db.close()
+
+
+def test_due_scoring_rejects_non_positive_batch_size() -> None:
+    db = _db()
+    try:
+        with pytest.raises(ValueError, match="max_items must be positive"):
+            WatchlistQuantService(
+                db,
+                _Broker(),
+                now=_NOW,
+            ).score_due_items([], max_items=0)
+    finally:
+        db.close()
+
+
 def test_due_scoring_refreshes_on_cadence_before_evidence_expires() -> None:
     db = _db()
     try:

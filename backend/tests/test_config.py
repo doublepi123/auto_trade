@@ -177,6 +177,10 @@ class TestSettings:
             "120",
         )
         monkeypatch.setenv(
+            "AUTO_TRADE_WATCHLIST_QUANT_BATCH_SIZE",
+            "4",
+        )
+        monkeypatch.setenv(
             "AUTO_TRADE_LIVE_REGIME_GATE_ENABLED",
             "true",
         )
@@ -196,6 +200,7 @@ class TestSettings:
         assert configured.watchlist_quant_auto_score_enabled is True
         assert configured.watchlist_quant_interval_minutes == 20
         assert configured.watchlist_quant_score_ttl_minutes == 120
+        assert configured.watchlist_quant_batch_size == 4
         assert configured.live_regime_gate_enabled is True
         assert configured.live_regime_max_data_age_seconds == 300
         assert configured.live_max_entries_per_symbol_per_day == 1

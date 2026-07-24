@@ -319,6 +319,17 @@ class Settings(BaseSettings):
             "from the shorter automatic refresh interval."
         ),
     )
+    watchlist_quant_batch_size: int = Field(
+        default=3,
+        ge=1,
+        le=20,
+        validation_alias="AUTO_TRADE_WATCHLIST_QUANT_BATCH_SIZE",
+        description=(
+            "Maximum number of due symbols refreshed by one automatic quant "
+            "tick. Small batches leave quote API capacity for the live runner "
+            "and shadow strategies."
+        ),
+    )
     universe_selection_max_symbols: int = Field(
         default=12,
         ge=1,

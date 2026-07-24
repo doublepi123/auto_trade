@@ -747,6 +747,7 @@ def _watchlist_quant_tick_sync() -> None:
                     settings.watchlist_quant_interval_minutes
                 ),
                 ttl_minutes=settings.watchlist_quant_score_ttl_minutes,
+                max_items=settings.watchlist_quant_batch_size,
             )
         if rows:
             logger.info(
@@ -784,9 +785,10 @@ async def _watchlist_quant_cron() -> None:
         return
     logger.info(
         "automatic watchlist quant scoring enabled: "
-        "interval=%dm ttl=%dm poll=%ds",
+        "interval=%dm ttl=%dm batch=%d poll=%ds",
         settings.watchlist_quant_interval_minutes,
         settings.watchlist_quant_score_ttl_minutes,
+        settings.watchlist_quant_batch_size,
         _WATCHLIST_QUANT_POLL_SECONDS,
     )
     await asyncio.sleep(45)
@@ -845,6 +847,9 @@ def _universe_selection_tick_sync() -> None:
                             ),
                             ttl_minutes=(
                                 settings.watchlist_quant_score_ttl_minutes
+                            ),
+                            max_items=(
+                                settings.watchlist_quant_batch_size
                             ),
                         )
                 except QuantScoringOutsideRTHError as exc:

@@ -826,6 +826,7 @@ class WatchlistQuantService:
         *,
         refresh_interval_minutes: int = 30,
         ttl_minutes: int = 1_440,
+        max_items: int | None = None,
     ) -> list[WatchlistScore]:
         """Refresh due open-market rows without shortening evidence validity."""
         if refresh_interval_minutes < 1:
@@ -834,6 +835,8 @@ class WatchlistQuantService:
             raise ValueError(
                 "ttl_minutes must not be shorter than refresh_interval_minutes"
             )
+        if max_items is not None and max_items < 1:
+            raise ValueError("max_items must be positive")
         open_items = [
             item
             for item in items
@@ -866,9 +869,31 @@ class WatchlistQuantService:
                 )
             ):
                 due_items.append(item)
+        due_items.sort(
+            key=lambda item: self._due_item_sort_key(
+                item,
+                latest_by_symbol.get(item.symbol),
+            )
+        )
+        if max_items is not None:
+            due_items = due_items[:max_items]
         if not due_items:
             return []
         return self.score_items(due_items, ttl_minutes=ttl_minutes)
+
+    @staticmethod
+    def _due_item_sort_key(
+        item: WatchlistItem,
+        latest: WatchlistScore | None,
+    ) -> tuple[bool, datetime, str]:
+        if latest is None:
+            return False, datetime.min.replace(tzinfo=timezone.utc), item.symbol
+        created_at = latest.created_at
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        else:
+            created_at = created_at.astimezone(timezone.utc)
+        return True, created_at, item.symbol
 
     def score_items(
         self,
