@@ -101,9 +101,15 @@ function assertPromotionReadinessItem(value: unknown, index: number): void {
   assertPositiveInteger(value.priority_rank, `${prefix}.priority_rank`)
   assertFiniteNumber(value.priority_score, `${prefix}.priority_score`)
   assertFiniteNumber(value.quant_weight, `${prefix}.quant_weight`)
+  assertFiniteNumber(value.quant_adjustment, `${prefix}.quant_adjustment`)
   if (value.quant_weight < 0 || value.quant_weight > 0.35) {
     throw new Error(
       `Unexpected /api/universe/promotion-readiness response: ${prefix}.quant_weight is outside [0, 0.35]`,
+    )
+  }
+  if (value.quant_adjustment < -25 || value.quant_adjustment > 17.5) {
+    throw new Error(
+      `Unexpected /api/universe/promotion-readiness response: ${prefix}.quant_adjustment is outside [-25, 17.5]`,
     )
   }
   assertNullableFiniteNumber(value.quant_score, `${prefix}.quant_score`)

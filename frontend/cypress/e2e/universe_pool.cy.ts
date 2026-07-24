@@ -118,6 +118,7 @@ describe('Dynamic universe observation pool', () => {
     cy.get('[data-testid="promotion-readiness-table"] tbody tr')
       .contains('tr', 'JPM.US')
       .should('contain', '数据异常')
+      .and('contain', '-25.0')
       .and('not.contain', '0.0')
       .and('contain', '已阻塞')
       .and('contain', '基线与候选输入不一致')
@@ -129,7 +130,7 @@ describe('Dynamic universe observation pool', () => {
         universe_run_id: 7,
         as_of_date: '2026-07-23',
         generated_at: '2026-07-24T01:05:00Z',
-        priority_algorithm_version: 'selection-quant-shrinkage-v1',
+        priority_algorithm_version: 'selection-quant-gated-v2',
         items: {},
       },
     }).as('getUniversePromotionReadinessInvalid')

@@ -9,6 +9,7 @@ from app.models import (
     StrategyV2ShadowConfig,
     UniverseSelectionCandidate,
     UniverseSelectionRun,
+    WatchlistScore,
 )
 from app.schemas import (
     UniversePromotionReadinessItem,
@@ -23,15 +24,45 @@ from app.services.watchlist_score_service import WatchlistScoreService
 
 _TERMINAL_RUN_STATUSES = ("COMPLETE", "DEGRADED")
 _REVIEW_READY_STATUSES = {"READY_FOR_REVIEW", "MATURE_EVIDENCE"}
-_PRIORITY_ALGORITHM_VERSION = "selection-quant-shrinkage-v1"
+_PRIORITY_ALGORITHM_VERSION = "selection-quant-gated-v2"
 _MAX_QUANT_WEIGHT = 0.35
 _QUANT_NEUTRAL_SCORE = 50.0
+_QUANT_DATA_ERROR_PENALTY = -25.0
+_QUANT_AVOID_PENALTY = -20.0
+_QUANT_WATCH_PENALTY = -10.0
 
 
 def _as_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
+
+
+def _quant_priority_adjustment(
+    quant: WatchlistScore | None,
+    *,
+    fresh: bool,
+    weight: float,
+) -> float:
+    if quant is None or not fresh:
+        return 0.0
+    if quant.source != QUANT_SCORE_SOURCE:
+        return _QUANT_DATA_ERROR_PENALTY
+    confidence = max(0.0, min(1.0, float(quant.confidence)))
+    action = quant.recommended_action.upper()
+    if action == "CANDIDATE":
+        return round(
+            max(0.0, float(quant.score) - _QUANT_NEUTRAL_SCORE)
+            * weight,
+            2,
+        )
+    confidence_scale = 0.5 + confidence * 0.5
+    penalty = (
+        _QUANT_WATCH_PENALTY
+        if action == "WATCH"
+        else _QUANT_AVOID_PENALTY
+    )
+    return round(penalty * confidence_scale, 2)
 
 
 class UniversePromotionService:
@@ -114,19 +145,18 @@ class UniversePromotionService:
                 and quant_fresh
                 else 0.0
             )
+            quant_adjustment = _quant_priority_adjustment(
+                quant,
+                fresh=quant_fresh,
+                weight=quant_weight,
+            )
             selection_score = float(candidate.score)
             priority_score = round(
                 max(
                     0.0,
                     min(
                         100.0,
-                        selection_score
-                        + (
-                            float(quant.score) - _QUANT_NEUTRAL_SCORE
-                            if quant is not None and quant_weight > 0
-                            else 0.0
-                        )
-                        * quant_weight,
+                        selection_score + quant_adjustment,
                     ),
                 ),
                 2,
@@ -139,6 +169,7 @@ class UniversePromotionService:
                     priority_rank=1,
                     priority_score=priority_score,
                     quant_weight=quant_weight,
+                    quant_adjustment=quant_adjustment,
                     is_trading_target=candidate.symbol == trading_symbol,
                     shadow_enabled=(
                         candidate.symbol in enabled_shadow_symbols

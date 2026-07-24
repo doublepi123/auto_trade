@@ -309,6 +309,16 @@ class Settings(BaseSettings):
             "each watchlist symbol."
         ),
     )
+    watchlist_quant_score_ttl_minutes: int = Field(
+        default=1_440,
+        ge=30,
+        le=10_080,
+        validation_alias="AUTO_TRADE_WATCHLIST_QUANT_SCORE_TTL_MINUTES",
+        description=(
+            "Validity window for a completed quant score. This is separate "
+            "from the shorter automatic refresh interval."
+        ),
+    )
     universe_selection_max_symbols: int = Field(
         default=12,
         ge=1,
@@ -511,6 +521,14 @@ class Settings(BaseSettings):
         ):
             raise ValueError(
                 "universe selection shadow requires watchlist application"
+            )
+        if (
+            self.watchlist_quant_score_ttl_minutes
+            < self.watchlist_quant_interval_minutes
+        ):
+            raise ValueError(
+                "watchlist quant score TTL must not be shorter than its "
+                "refresh interval"
             )
         self.llm_min_confidence = max(self.llm_min_confidence, 0.7)
         self.llm_max_stripe_width_pct = min(self.llm_max_stripe_width_pct, 8.0)

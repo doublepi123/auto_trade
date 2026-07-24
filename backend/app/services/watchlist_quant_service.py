@@ -39,6 +39,7 @@ _REVERSAL_HORIZON_BARS = 6
 _MIN_REVERSAL_TRAINING_RETURNS = 120
 _MIN_REVERSAL_OBSERVATIONS = 60
 _WILSON_Z = 1.6448536269514722
+_QUANT_ERROR_RETRY_MINUTES = 5
 _DEFAULT_ONE_SIDE_FEE_RATE_US = Decimal("0.0005")
 _DEFAULT_ONE_SIDE_FEE_RATE_HK = Decimal("0.003")
 _DATA_QUALITY_BLOCKERS = frozenset(
@@ -815,9 +816,16 @@ class WatchlistQuantService:
         self,
         items: Sequence[WatchlistItem],
         *,
-        ttl_minutes: int = 30,
+        refresh_interval_minutes: int = 30,
+        ttl_minutes: int = 1_440,
     ) -> list[WatchlistScore]:
-        """Score open-market items only when their current v3 row expired."""
+        """Refresh due open-market rows without shortening evidence validity."""
+        if refresh_interval_minutes < 1:
+            raise ValueError("refresh_interval_minutes must be positive")
+        if ttl_minutes < refresh_interval_minutes:
+            raise ValueError(
+                "ttl_minutes must not be shorter than refresh_interval_minutes"
+            )
         open_items = [
             item
             for item in items
@@ -832,7 +840,23 @@ class WatchlistQuantService:
         due_items: list[WatchlistItem] = []
         for item in open_items:
             latest = latest_by_symbol.get(item.symbol)
-            if latest is None or self._is_expired(latest.expires_at):
+            retry_minutes = (
+                min(
+                    refresh_interval_minutes,
+                    _QUANT_ERROR_RETRY_MINUTES,
+                )
+                if latest is not None
+                and latest.source == QUANT_ERROR_SOURCE
+                else refresh_interval_minutes
+            )
+            if (
+                latest is None
+                or self._is_expired(latest.expires_at)
+                or self._is_refresh_due(
+                    latest.created_at,
+                    retry_minutes,
+                )
+            ):
                 due_items.append(item)
         if not due_items:
             return []
@@ -1004,6 +1028,20 @@ class WatchlistQuantService:
         else:
             expires_at = expires_at.astimezone(timezone.utc)
         return expires_at <= self.now
+
+    def _is_refresh_due(
+        self,
+        created_at: datetime,
+        refresh_interval_minutes: int,
+    ) -> bool:
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        else:
+            created_at = created_at.astimezone(timezone.utc)
+        return (
+            created_at + timedelta(minutes=refresh_interval_minutes)
+            <= self.now
+        )
 
     def _completed_intraday_bars(
         self,

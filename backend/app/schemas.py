@@ -2265,6 +2265,11 @@ class UniversePromotionReadinessItem(BaseModel):
         le=0.35,
         allow_inf_nan=False,
     )
+    quant_adjustment: float = Field(
+        ge=-25,
+        le=17.5,
+        allow_inf_nan=False,
+    )
     is_trading_target: bool
     shadow_enabled: bool
     quant_score: Optional[float] = Field(

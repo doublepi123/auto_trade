@@ -173,6 +173,10 @@ class TestSettings:
             "20",
         )
         monkeypatch.setenv(
+            "AUTO_TRADE_WATCHLIST_QUANT_SCORE_TTL_MINUTES",
+            "120",
+        )
+        monkeypatch.setenv(
             "AUTO_TRADE_LIVE_REGIME_GATE_ENABLED",
             "true",
         )
@@ -191,6 +195,7 @@ class TestSettings:
         assert configured.universe_selection_apply_to_watchlist is True
         assert configured.watchlist_quant_auto_score_enabled is True
         assert configured.watchlist_quant_interval_minutes == 20
+        assert configured.watchlist_quant_score_ttl_minutes == 120
         assert configured.live_regime_gate_enabled is True
         assert configured.live_regime_max_data_age_seconds == 300
         assert configured.live_max_entries_per_symbol_per_day == 1
@@ -211,6 +216,25 @@ class TestSettings:
         with pytest.raises(
             ValidationError,
             match="shadow requires watchlist application",
+        ):
+            Settings()
+
+    def test_watchlist_quant_ttl_cannot_be_shorter_than_refresh(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv(
+            "AUTO_TRADE_WATCHLIST_QUANT_INTERVAL_MINUTES",
+            "60",
+        )
+        monkeypatch.setenv(
+            "AUTO_TRADE_WATCHLIST_QUANT_SCORE_TTL_MINUTES",
+            "30",
+        )
+
+        with pytest.raises(
+            ValidationError,
+            match="score TTL must not be shorter",
         ):
             Settings()
 

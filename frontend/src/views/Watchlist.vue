@@ -1035,6 +1035,12 @@ function pnlClass(value: number): string {
   return ''
 }
 
+function formatSignedScore(value: number): string {
+  if (!Number.isFinite(value)) return '-'
+  const sign = value > 0 ? '+' : ''
+  return `${sign}${value.toFixed(1)}`
+}
+
 function promotionQuantActionLabel(action: string): string {
   switch (action.toUpperCase()) {
     case 'CANDIDATE': return '优选'
@@ -1065,8 +1071,13 @@ function promotionQuantScoreLabel(row: UniversePromotionReadinessItem): string {
 function promotionQuantOutcomeLabel(row: UniversePromotionReadinessItem): string {
   const state = promotionQuantState(row)
   if (state === 'MISSING') return '未评分'
-  if (state === 'ERROR') return '数据异常'
-  return promotionQuantActionLabel(row.quant_recommended_action)
+  if (state === 'ERROR') {
+    return `数据异常 · ${formatSignedScore(row.quant_adjustment)}`
+  }
+  const action = promotionQuantActionLabel(row.quant_recommended_action)
+  return state === 'FRESH'
+    ? `${action} · ${formatSignedScore(row.quant_adjustment)}`
+    : action
 }
 
 function promotionQuantTitle(row: UniversePromotionReadinessItem): string {
@@ -1077,7 +1088,8 @@ function promotionQuantTitle(row: UniversePromotionReadinessItem): string {
   const expiresAt = row.quant_expires_at
     ? formatDateTime(row.quant_expires_at)
     : '-'
-  return `来源 ${row.quant_source || '-'} · 置信度 ${confidence} · 融合权重 ${weight} · 过期 ${expiresAt}`
+  const adjustment = formatSignedScore(row.quant_adjustment)
+  return `来源 ${row.quant_source || '-'} · 置信度 ${confidence} · 融合权重 ${weight} · 融合调整 ${adjustment} · 过期 ${expiresAt}`
 }
 
 const promotionBlockerLabels: Record<string, string> = {

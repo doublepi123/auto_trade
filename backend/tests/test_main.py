@@ -176,7 +176,7 @@ def test_watchlist_quant_tick_scores_due_items_and_closes_db(
         SimpleNamespace(symbol="AAPL.US", market="US"),
         SimpleNamespace(symbol="MSFT.US", market="US"),
     ]
-    calls: list[tuple[object, int]] = []
+    calls: list[tuple[object, int, int]] = []
 
     class FakeQuery:
         def all(self) -> list[SimpleNamespace]:
@@ -204,9 +204,16 @@ def test_watchlist_quant_tick_scores_due_items_and_closes_db(
             self,
             received_items: object,
             *,
+            refresh_interval_minutes: int,
             ttl_minutes: int,
         ) -> list[SimpleNamespace]:
-            calls.append((received_items, ttl_minutes))
+            calls.append(
+                (
+                    received_items,
+                    refresh_interval_minutes,
+                    ttl_minutes,
+                )
+            )
             return [SimpleNamespace(symbol="MSFT.US")]
 
     db = FakeDB()
@@ -221,6 +228,11 @@ def test_watchlist_quant_tick_scores_due_items_and_closes_db(
         "watchlist_quant_interval_minutes",
         30,
     )
+    monkeypatch.setattr(
+        main_module.settings,
+        "watchlist_quant_score_ttl_minutes",
+        1_440,
+    )
     monkeypatch.setattr(main_module, "SessionLocal", lambda: db)
     monkeypatch.setattr(main_module, "get_runner", lambda: runner)
     monkeypatch.setattr(
@@ -231,7 +243,7 @@ def test_watchlist_quant_tick_scores_due_items_and_closes_db(
 
     main_module._watchlist_quant_tick_sync()
 
-    assert calls == [(items, 30)]
+    assert calls == [(items, 30, 1_440)]
     assert db.rolled_back == 0
     assert db.closed is True
 
@@ -297,9 +309,11 @@ def test_universe_tick_reloads_before_optional_quant_failure(
         _service: object,
         _items: object,
         *,
+        refresh_interval_minutes: int,
         ttl_minutes: int,
     ) -> None:
-        assert ttl_minutes == 30
+        assert refresh_interval_minutes == 30
+        assert ttl_minutes == 1_440
         assert runner.reloads == 1
         raise RuntimeError("quote batch unavailable")
 

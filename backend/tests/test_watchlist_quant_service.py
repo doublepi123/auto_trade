@@ -658,6 +658,92 @@ def test_due_scoring_skips_fresh_symbols_and_scores_missing_rows() -> None:
         db.close()
 
 
+def test_due_scoring_refreshes_on_cadence_before_evidence_expires() -> None:
+    db = _db()
+    try:
+        item = WatchlistItem(
+            symbol="AAPL.US",
+            market="US",
+            alias="Apple",
+        )
+        db.add(item)
+        db.add(
+            WatchlistScore(
+                symbol="AAPL.US",
+                market="US",
+                score=70,
+                confidence=0.8,
+                recommended_action="CANDIDATE",
+                source="quant_v3",
+                rationale="valid but due for refresh",
+                created_at=_NOW - timedelta(minutes=31),
+                expires_at=_NOW + timedelta(hours=23),
+            )
+        )
+        db.commit()
+        broker = _Broker()
+
+        rows = WatchlistQuantService(
+            db,
+            broker,
+            now=_NOW,
+        ).score_due_items(
+            [item],
+            refresh_interval_minutes=30,
+            ttl_minutes=1_440,
+        )
+
+        assert broker.quote_requests == [["AAPL.US"]]
+        assert [row.symbol for row in rows] == ["AAPL.US"]
+        assert (
+            rows[0].expires_at - rows[0].created_at
+            == timedelta(days=1)
+        )
+    finally:
+        db.close()
+
+
+def test_due_scoring_retries_current_data_error_after_five_minutes() -> None:
+    db = _db()
+    try:
+        item = WatchlistItem(
+            symbol="AAPL.US",
+            market="US",
+            alias="Apple",
+        )
+        db.add(item)
+        db.add(
+            WatchlistScore(
+                symbol="AAPL.US",
+                market="US",
+                score=0,
+                confidence=0,
+                recommended_action="AVOID",
+                source="quant_error_v3",
+                rationale="temporary BBO gap",
+                created_at=_NOW - timedelta(minutes=6),
+                expires_at=_NOW + timedelta(hours=23),
+            )
+        )
+        db.commit()
+        broker = _Broker()
+
+        rows = WatchlistQuantService(
+            db,
+            broker,
+            now=_NOW,
+        ).score_due_items(
+            [item],
+            refresh_interval_minutes=30,
+            ttl_minutes=1_440,
+        )
+
+        assert broker.quote_requests == [["AAPL.US"]]
+        assert [row.symbol for row in rows] == ["AAPL.US"]
+    finally:
+        db.close()
+
+
 def test_due_scoring_is_silent_outside_regular_hours() -> None:
     db = _db()
     try:

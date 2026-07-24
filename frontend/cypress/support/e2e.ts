@@ -1065,7 +1065,7 @@ Cypress.Commands.add('stubApi', () => {
       universe_run_id: 7,
       as_of_date: '2026-07-23',
       generated_at: '2026-07-24T01:05:00Z',
-      priority_algorithm_version: 'selection-quant-shrinkage-v1',
+      priority_algorithm_version: 'selection-quant-gated-v2',
       items: [
         {
           symbol: 'NVDA.US',
@@ -1074,6 +1074,7 @@ Cypress.Commands.add('stubApi', () => {
           priority_rank: 1,
           priority_score: 92.4,
           quant_weight: 0,
+          quant_adjustment: 0,
           quant_score: 24,
           quant_confidence: 0.84,
           quant_recommended_action: 'AVOID',
@@ -1108,8 +1109,9 @@ Cypress.Commands.add('stubApi', () => {
           rank: 2,
           selection_score: 78.6,
           priority_rank: 2,
-          priority_score: 78.6,
+          priority_score: 53.6,
           quant_weight: 0,
+          quant_adjustment: -25,
           quant_score: 0,
           quant_confidence: 0,
           quant_recommended_action: 'AVOID',

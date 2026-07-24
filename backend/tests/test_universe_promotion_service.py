@@ -100,7 +100,7 @@ def _candidate(
     )
 
 
-def test_readiness_uses_latest_terminal_and_shrunk_quant_priority() -> None:
+def test_readiness_uses_latest_terminal_and_gated_quant_priority() -> None:
     engine, db = _db()
     try:
         terminal = _run(
@@ -223,20 +223,21 @@ def test_readiness_uses_latest_terminal_and_shrunk_quant_priority() -> None:
         assert response.generated_at == _NOW
         assert (
             response.priority_algorithm_version
-            == "selection-quant-shrinkage-v1"
+            == "selection-quant-gated-v2"
         )
         assert [item.symbol for item in response.items] == [
-            "AAPL.US",
             "MSFT.US",
+            "AAPL.US",
         ]
-        assert [item.rank for item in response.items] == [1, 2]
+        assert [item.rank for item in response.items] == [2, 1]
         assert [item.priority_rank for item in response.items] == [1, 2]
         by_symbol = {item.symbol: item for item in response.items}
         aapl = by_symbol["AAPL.US"]
         msft = by_symbol["MSFT.US"]
         assert aapl.selection_score == 91.25
-        assert aapl.priority_score == 82.72
+        assert aapl.priority_score == 72.05
         assert aapl.quant_weight == 0.322
+        assert aapl.quant_adjustment == -19.2
         assert aapl.shadow_enabled is True
         assert aapl.is_trading_target is False
         assert aapl.quant_score == 23.5
@@ -249,6 +250,7 @@ def test_readiness_uses_latest_terminal_and_shrunk_quant_priority() -> None:
         )
         assert msft.priority_score == 82.5
         assert msft.quant_weight == 0
+        assert msft.quant_adjustment == 0
         assert msft.shadow_enabled is False
         assert msft.is_trading_target is True
         assert msft.quant_score is None
@@ -359,19 +361,22 @@ def test_priority_ignores_legacy_and_stale_quant_scores() -> None:
         assert response is not None
         assert [item.symbol for item in response.items] == [
             "AAPL.US",
-            "MSFT.US",
             "AMD.US",
+            "MSFT.US",
         ]
         by_symbol = {item.symbol: item for item in response.items}
         assert by_symbol["AAPL.US"].priority_score == 87.5
         assert by_symbol["AAPL.US"].quant_weight == 0.35
-        assert by_symbol["MSFT.US"].priority_score == 80.0
+        assert by_symbol["AAPL.US"].quant_adjustment == 17.5
+        assert by_symbol["MSFT.US"].priority_score == 55.0
         assert by_symbol["MSFT.US"].quant_weight == 0
+        assert by_symbol["MSFT.US"].quant_adjustment == -25.0
         assert by_symbol["MSFT.US"].quant_score == 0
         assert by_symbol["MSFT.US"].quant_source == "quant_error_v3"
         assert by_symbol["MSFT.US"].quant_fresh is True
         assert by_symbol["AMD.US"].priority_score == 79.0
         assert by_symbol["AMD.US"].quant_weight == 0
+        assert by_symbol["AMD.US"].quant_adjustment == 0
         assert by_symbol["AMD.US"].quant_source == "quant_v3"
         assert by_symbol["AMD.US"].quant_fresh is False
     finally:

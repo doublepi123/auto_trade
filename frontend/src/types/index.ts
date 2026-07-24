@@ -1343,6 +1343,7 @@ export interface UniversePromotionReadinessItem {
   priority_rank: number
   priority_score: number
   quant_weight: number
+  quant_adjustment: number
   quant_score: number | null
   quant_confidence: number | null
   quant_recommended_action: string
