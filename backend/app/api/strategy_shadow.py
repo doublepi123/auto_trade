@@ -13,6 +13,7 @@ from app.database import get_db
 from app.schemas import (
     StrategyV2AdxChallengerRequest,
     StrategyV2AdxChallengerResponse,
+    StrategyV2ExitChallengerReport,
     StrategyV2ForwardRegistrationRequest,
     StrategyV2ForwardValidationResponse,
     StrategyV2ShadowConfigResponse,
@@ -196,6 +197,20 @@ def get_forward_validation(
 ) -> StrategyV2ForwardValidationResponse:
     try:
         return StrategyV2ShadowService(db).get_forward_validation(symbol)
+    except ValueError as exc:
+        raise _bad_request(exc) from exc
+
+
+@router.get(
+    "/exit-challengers",
+    response_model=StrategyV2ExitChallengerReport,
+)
+def get_exit_challengers(
+    symbol: str | None = Query(default=None, max_length=50),
+    db: Session = Depends(get_db),
+) -> StrategyV2ExitChallengerReport:
+    try:
+        return StrategyV2ShadowService(db).get_exit_challengers(symbol)
     except ValueError as exc:
         raise _bad_request(exc) from exc
 

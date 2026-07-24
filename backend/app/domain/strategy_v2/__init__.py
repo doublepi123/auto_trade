@@ -24,6 +24,12 @@ from app.domain.strategy_v2.costs import (
     DEFAULT_EDGE_SAFETY_BUFFER_BPS,
     minimum_profit_target_pct,
 )
+from app.domain.strategy_v2.profit_lock import (
+    ProfitLockAction,
+    ProfitLockConfig,
+    ProfitLockDecision,
+    evaluate_profit_lock_bar,
+)
 
 __all__ = [
     "CausalTrendPrewarmFeatureEngine",
@@ -46,4 +52,8 @@ __all__ = [
     "VirtualPosition",
     "DEFAULT_EDGE_SAFETY_BUFFER_BPS",
     "minimum_profit_target_pct",
+    "ProfitLockAction",
+    "ProfitLockConfig",
+    "ProfitLockDecision",
+    "evaluate_profit_lock_bar",
 ]

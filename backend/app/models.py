@@ -210,6 +210,153 @@ class StrategyV2ForwardEvidence(Base):
     created_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow, nullable=False)
 
 
+class StrategyV2ExitChallengerRegistration(Base):
+    """Immutable forward registration for one Strategy v2 exit policy."""
+
+    __tablename__ = "strategy_v2_exit_challenger_registrations"
+    __table_args__ = (
+        UniqueConstraint(
+            "symbol",
+            "source_config_version",
+            "algorithm_version",
+            name="uq_strategy_v2_exit_challenger_registration",
+        ),
+        Index(
+            "ix_strategy_v2_exit_challenger_registration_symbol",
+            "symbol",
+            "registered_at",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(50), nullable=False)
+    market: Mapped[str] = mapped_column(String(10), nullable=False)
+    source_config_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    algorithm_version: Mapped[str] = mapped_column(String(100), nullable=False)
+    activation_pct: Mapped[float] = mapped_column(Float, nullable=False)
+    locked_profit_pct: Mapped[float] = mapped_column(Float, nullable=False)
+    slippage_bps: Mapped[float] = mapped_column(Float, nullable=False)
+    evaluator_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    registered_at: Mapped[datetime] = mapped_column(_TZDateTime, nullable=False)
+    eligible_after: Mapped[datetime] = mapped_column(_TZDateTime, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        _TZDateTime,
+        default=_utcnow,
+        nullable=False,
+    )
+
+
+class StrategyV2ExitChallengerTrade(Base):
+    """A forward-only exit-policy observation paired to one baseline trade."""
+
+    __tablename__ = "strategy_v2_exit_challenger_trades"
+    __table_args__ = (
+        UniqueConstraint(
+            "registration_id",
+            "baseline_trade_id",
+            name="uq_strategy_v2_exit_challenger_trade_pair",
+        ),
+        Index(
+            "ix_strategy_v2_exit_challenger_trade_registration",
+            "registration_id",
+            "baseline_exit_at",
+        ),
+        Index(
+            "ix_strategy_v2_exit_challenger_trade_open",
+            "symbol",
+            "status",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    registration_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey(
+            "strategy_v2_exit_challenger_registrations.id",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+    )
+    baseline_trade_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("strategy_v2_shadow_trades.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    symbol: Mapped[str] = mapped_column(String(50), nullable=False)
+    source_config_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), default="OPEN", nullable=False)
+    entry_at: Mapped[datetime] = mapped_column(_TZDateTime, nullable=False)
+    entry_price: Mapped[float] = mapped_column(Float, nullable=False)
+    quantity: Mapped[float] = mapped_column(Float, nullable=False)
+    estimated_fee_rate: Mapped[float] = mapped_column(Float, nullable=False)
+    last_bar_at: Mapped[datetime] = mapped_column(_TZDateTime, nullable=False)
+    activation_at: Mapped[Optional[datetime]] = mapped_column(
+        _TZDateTime,
+        nullable=True,
+    )
+    activation_effective_at: Mapped[Optional[datetime]] = mapped_column(
+        _TZDateTime,
+        nullable=True,
+    )
+    activation_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    floor_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    challenger_exit_at: Mapped[Optional[datetime]] = mapped_column(
+        _TZDateTime,
+        nullable=True,
+    )
+    challenger_exit_price: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+    )
+    challenger_exit_reason: Mapped[str] = mapped_column(
+        Text,
+        default="",
+        nullable=False,
+    )
+    challenger_gross_pnl: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+    )
+    challenger_estimated_fees: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+    )
+    challenger_net_pnl: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+    )
+    baseline_exit_at: Mapped[Optional[datetime]] = mapped_column(
+        _TZDateTime,
+        nullable=True,
+    )
+    baseline_exit_price: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+    )
+    baseline_exit_reason: Mapped[str] = mapped_column(
+        Text,
+        default="",
+        nullable=False,
+    )
+    baseline_net_pnl: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    net_pnl_delta: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    paired_at: Mapped[Optional[datetime]] = mapped_column(
+        _TZDateTime,
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        _TZDateTime,
+        default=_utcnow,
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        _TZDateTime,
+        default=_utcnow,
+        onupdate=_utcnow,
+        nullable=False,
+    )
+
+
 class StrategyParamVersion(Base):
     """Immutable snapshot of the tunable strategy params at a point in time.
 

@@ -53,6 +53,7 @@ from app.schemas import (
     StrategyV2ForwardRegistrationRequest,
     StrategyV2ForwardRegistrationResponse,
     StrategyV2ForwardValidationResponse,
+    StrategyV2ExitChallengerReport,
     StrategyV2ShadowConfigResponse,
     StrategyV2ShadowConfigUpdate,
     StrategyV2ShadowConfigValues,
@@ -72,6 +73,9 @@ from app.schemas import (
     StrategyV2WarmupDaily,
     StrategyV2WarmupDiagnostic,
     StrategyV2WarmupVariant,
+)
+from app.services.strategy_v2_exit_challenger_service import (
+    StrategyV2ExitChallengerService,
 )
 from app.services.strategy_service import StrategyService
 
@@ -168,6 +172,7 @@ class StrategyV2ShadowService:
     def __init__(self, db: Session, candle_provider: CandleProvider | None = None) -> None:
         self.db = db
         self.candle_provider = candle_provider
+        self.exit_challengers = StrategyV2ExitChallengerService(db)
 
     def get_config(self, symbol: str | None = None) -> StrategyV2ShadowConfigResponse:
         row = self._get_or_create_config(symbol)
@@ -456,6 +461,13 @@ class StrategyV2ShadowService:
             last_poll_error=state.last_poll_error if state is not None else "",
         )
 
+    def get_exit_challengers(
+        self,
+        symbol: str | None = None,
+    ) -> StrategyV2ExitChallengerReport:
+        normalized = self._resolve_symbol(symbol)
+        return self.exit_challengers.get_report(normalized)
+
     def list_decisions(
         self,
         *,
@@ -550,6 +562,14 @@ class StrategyV2ShadowService:
             self.db.commit()
             return self.get_status(normalized)
 
+        if config.enabled:
+            self.exit_challengers.ensure_registrations(
+                symbol=normalized,
+                market=market,
+                source_config_version=current_version,
+                slippage_bps=config.slippage_bps,
+                now=current,
+            )
         if not config.enabled and open_trade is None:
             return self.get_status(normalized)
         if open_trade is None:
@@ -2309,6 +2329,12 @@ class StrategyV2ShadowService:
                 ):
                     exited_managed_position = True
                 existing_keys.add(key)
+            if before_step.position is not None or step.position is not None:
+                self.exit_challengers.advance_bar(
+                    symbol=config.symbol,
+                    bar=bar,
+                    observed_at=observed_at,
+                )
             if exited_managed_position:
                 break
 

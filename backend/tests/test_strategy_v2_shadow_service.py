@@ -23,6 +23,8 @@ from app.domain.strategy_v2 import (
 from app.models import (
     Base,
     StrategyConfig,
+    StrategyV2ExitChallengerRegistration,
+    StrategyV2ExitChallengerTrade,
     StrategyV2ForwardEvidence,
     StrategyV2ForwardRegistration,
     StrategyV2ShadowConfig,
@@ -130,6 +132,8 @@ class TestStrategyV2ShadowService:
     def setup_method(self) -> None:
         with Session(bind=self.engine) as db:
             for model in (
+                StrategyV2ExitChallengerTrade,
+                StrategyV2ExitChallengerRegistration,
                 StrategyV2ForwardEvidence,
                 StrategyV2ForwardRegistration,
                 StrategyV2ShadowDecision,

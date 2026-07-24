@@ -18,6 +18,8 @@ from app.database import get_db
 from app.models import (
     Base,
     StrategyConfig,
+    StrategyV2ExitChallengerRegistration,
+    StrategyV2ExitChallengerTrade,
     StrategyV2ForwardEvidence,
     StrategyV2ForwardRegistration,
     StrategyV2ShadowConfig,
@@ -82,6 +84,8 @@ class TestStrategyV2ShadowApi:
         self.audit.records.clear()
         with self.session_factory() as db:
             for model in (
+                StrategyV2ExitChallengerTrade,
+                StrategyV2ExitChallengerRegistration,
                 StrategyV2ForwardEvidence,
                 StrategyV2ForwardRegistration,
                 StrategyV2ShadowDecision,
@@ -113,6 +117,34 @@ class TestStrategyV2ShadowApi:
 
         assert response.status_code == 200
         assert response.json()["mode"] == "SHADOW"
+
+    def test_exit_challenger_report_is_read_only_shadow_evidence(self) -> None:
+        config = self.client.get("/api/strategy-shadow/config").json()
+        with self.session_factory() as db:
+            StrategyV2ShadowService(db).exit_challengers.ensure_registrations(
+                symbol="AAPL.US",
+                market="US",
+                source_config_version=config["config_version"],
+                slippage_bps=config["slippage_bps"],
+                now=_NOW,
+            )
+
+        response = self.client.get(
+            "/api/strategy-shadow/exit-challengers",
+            params={"symbol": "AAPL.US"},
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["mode"] == "SHADOW"
+        assert body["order_submission_allowed"] is False
+        assert body["automatic_promotion_allowed"] is False
+        assert body["historical_backfill_allowed"] is False
+        assert len(body["variants"]) == 3
+        assert {
+            item["locked_profit_pct"] for item in body["variants"]
+        } == {0.1, 0.2, 0.3}
+        assert all(item["status"] == "COLLECTING" for item in body["variants"])
 
     def test_config_contract_update_audit_and_forbidden_hard_fields(self) -> None:
         response = self.client.get("/api/strategy-shadow/config")
