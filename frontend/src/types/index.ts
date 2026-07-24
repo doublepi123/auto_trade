@@ -1338,9 +1338,15 @@ export type UniversePromotionForwardStatus =
   | 'MATURE_EVIDENCE'
   | 'BLOCKED'
 
+export type UniversePromotionRole =
+  | 'SELECTED'
+  | 'EXPLORATION'
+  | 'TRADING_TARGET'
+
 export interface UniversePromotionReadinessItem {
   symbol: string
-  rank: number
+  universe_role: UniversePromotionRole
+  rank: number | null
   selection_score: number
   priority_rank: number
   priority_score: number

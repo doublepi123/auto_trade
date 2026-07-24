@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.models import (
     StrategyConfig,
     StrategyV2ShadowConfig,
@@ -21,10 +22,13 @@ from app.services.watchlist_quant_service import (
     list_latest_current_quant_scores,
 )
 from app.services.watchlist_score_service import WatchlistScoreService
+from app.services.universe_selection_service import (
+    select_exploration_candidates,
+)
 
 _TERMINAL_RUN_STATUSES = ("COMPLETE", "DEGRADED")
 _REVIEW_READY_STATUSES = {"READY_FOR_REVIEW", "MATURE_EVIDENCE"}
-_PRIORITY_ALGORITHM_VERSION = "selection-quant-required-v3"
+_PRIORITY_ALGORITHM_VERSION = "selection-exploration-quant-required-v4"
 _MAX_QUANT_WEIGHT = 0.35
 _QUANT_NEUTRAL_SCORE = 50.0
 _QUANT_DATA_ERROR_PENALTY = -25.0
@@ -132,13 +136,13 @@ class UniversePromotionService:
         if run is None:
             return None
 
-        selected = (
+        candidates = (
             self.db.query(UniverseSelectionCandidate)
             .filter(
                 UniverseSelectionCandidate.run_id == run.id,
-                UniverseSelectionCandidate.selected.is_(True),
             )
             .order_by(
+                UniverseSelectionCandidate.selected.desc(),
                 UniverseSelectionCandidate.rank.asc(),
                 UniverseSelectionCandidate.score.desc(),
                 UniverseSelectionCandidate.symbol.asc(),
@@ -151,6 +155,27 @@ class UniversePromotionService:
             .first()
         )
         trading_symbol = strategy.symbol if strategy is not None else ""
+        exploration_symbols = {
+            candidate.symbol
+            for candidate in select_exploration_candidates(
+                candidates,
+                max_symbols=(
+                    settings.universe_selection_exploration_max_symbols
+                ),
+                max_per_sector=(
+                    settings.universe_selection_max_per_sector
+                ),
+            )
+        }
+        observed = [
+            candidate
+            for candidate in candidates
+            if (
+                candidate.selected
+                or candidate.symbol in exploration_symbols
+                or candidate.symbol == trading_symbol
+            )
+        ]
         enabled_shadow_symbols = {
             row.symbol
             for row in self.db.query(StrategyV2ShadowConfig)
@@ -164,11 +189,20 @@ class UniversePromotionService:
         }
         shadow_service = StrategyV2ShadowService(self.db)
         items: list[UniversePromotionReadinessItem] = []
-        for candidate in selected:
-            if candidate.rank is None:
+        for candidate in observed:
+            if candidate.selected and candidate.rank is None:
                 raise ValueError(
                     "selected universe candidate must have a rank"
                 )
+            universe_role = (
+                "SELECTED"
+                if candidate.selected
+                else (
+                    "EXPLORATION"
+                    if candidate.symbol in exploration_symbols
+                    else "TRADING_TARGET"
+                )
+            )
             forward = shadow_service.get_forward_validation(candidate.symbol)
             quant = quant_scores.get(candidate.symbol)
             quant_fresh = (
@@ -225,6 +259,7 @@ class UniversePromotionService:
             items.append(
                 UniversePromotionReadinessItem(
                     symbol=candidate.symbol,
+                    universe_role=universe_role,
                     rank=candidate.rank,
                     selection_score=selection_score,
                     priority_rank=1,
@@ -274,7 +309,7 @@ class UniversePromotionService:
         items.sort(
             key=lambda item: (
                 -item.priority_score,
-                item.rank,
+                item.rank or 10_000,
                 item.symbol,
             )
         )

@@ -1068,10 +1068,11 @@ Cypress.Commands.add('stubApi', () => {
       universe_run_id: 7,
       as_of_date: '2026-07-23',
       generated_at: '2026-07-24T01:05:00Z',
-      priority_algorithm_version: 'selection-quant-required-v3',
+      priority_algorithm_version: 'selection-exploration-quant-required-v4',
       items: [
         {
           symbol: 'NVDA.US',
+          universe_role: 'SELECTED',
           rank: 1,
           selection_score: 92.4,
           priority_rank: 1,
@@ -1109,7 +1110,8 @@ Cypress.Commands.add('stubApi', () => {
         },
         {
           symbol: 'JPM.US',
-          rank: 2,
+          universe_role: 'EXPLORATION',
+          rank: null,
           selection_score: 78.6,
           priority_rank: 2,
           priority_score: 53.6,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import date, datetime, timedelta, timezone
 from typing import Generator
 
@@ -84,6 +85,8 @@ def _candidate(
     selected: bool,
     rank: int | None,
     score: float,
+    sector: str = "Technology",
+    exclusion_reasons: tuple[str, ...] = (),
 ) -> None:
     db.add(
         UniverseSelectionCandidate(
@@ -91,13 +94,13 @@ def _candidate(
             symbol=symbol,
             market="US",
             alias=symbol,
-            sector="Technology",
+            sector=sector,
             memberships_json='["NASDAQ_100"]',
             selected=selected,
             rank=rank,
             score=score,
             metrics_json="{}",
-            exclusion_reasons_json="[]",
+            exclusion_reasons_json=json.dumps(exclusion_reasons),
             created_at=run.created_at,
         )
     )
@@ -302,7 +305,7 @@ def test_readiness_uses_latest_terminal_and_gated_quant_priority() -> None:
         assert response.generated_at == _NOW
         assert (
             response.priority_algorithm_version
-            == "selection-quant-required-v3"
+            == "selection-exploration-quant-required-v4"
         )
         assert [item.symbol for item in response.items] == [
             "MSFT.US",
@@ -313,6 +316,8 @@ def test_readiness_uses_latest_terminal_and_gated_quant_priority() -> None:
         by_symbol = {item.symbol: item for item in response.items}
         aapl = by_symbol["AAPL.US"]
         msft = by_symbol["MSFT.US"]
+        assert aapl.universe_role == "SELECTED"
+        assert msft.universe_role == "SELECTED"
         assert aapl.selection_score == 91.25
         assert aapl.priority_score == 72.05
         assert aapl.quant_weight == 0.322
@@ -355,6 +360,84 @@ def test_readiness_uses_latest_terminal_and_gated_quant_priority() -> None:
             assert item.review_ready is False
             assert item.mature_evidence is False
             assert item.automatic_promotion_allowed is False
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_readiness_includes_exploration_and_unselected_trading_target() -> None:
+    engine, db = _db()
+    try:
+        run = _run(
+            db,
+            as_of_date=date(2026, 7, 23),
+            status="COMPLETE",
+            created_at=_NOW - timedelta(hours=1),
+        )
+        _candidate(
+            db,
+            run,
+            symbol="AAPL.US",
+            selected=True,
+            rank=1,
+            score=90.0,
+            sector="Technology",
+        )
+        _candidate(
+            db,
+            run,
+            symbol="JPM.US",
+            selected=False,
+            rank=None,
+            score=70.0,
+            sector="Financials",
+            exclusion_reasons=("BELOW_SELECTION_CUTOFF",),
+        )
+        _candidate(
+            db,
+            run,
+            symbol="NVDA.US",
+            selected=False,
+            rank=None,
+            score=80.0,
+            sector="Semiconductors",
+            exclusion_reasons=("ATR_OUTSIDE_RANGE",),
+        )
+        db.add(StrategyConfig(symbol="NVDA.US", market="US"))
+        db.add_all(
+            [
+                StrategyV2ShadowConfig(
+                    symbol="AAPL.US",
+                    enabled=True,
+                ),
+                StrategyV2ShadowConfig(
+                    symbol="JPM.US",
+                    enabled=True,
+                ),
+                StrategyV2ShadowConfig(
+                    symbol="NVDA.US",
+                    enabled=True,
+                ),
+            ]
+        )
+        db.commit()
+
+        response = UniversePromotionService(db, now=_NOW).get_readiness()
+
+        assert response is not None
+        by_symbol = {item.symbol: item for item in response.items}
+        assert set(by_symbol) == {"AAPL.US", "JPM.US", "NVDA.US"}
+        assert by_symbol["AAPL.US"].universe_role == "SELECTED"
+        assert by_symbol["AAPL.US"].rank == 1
+        assert by_symbol["JPM.US"].universe_role == "EXPLORATION"
+        assert by_symbol["JPM.US"].rank is None
+        assert by_symbol["NVDA.US"].universe_role == "TRADING_TARGET"
+        assert by_symbol["NVDA.US"].rank is None
+        assert by_symbol["NVDA.US"].is_trading_target is True
+        assert all(
+            item.automatic_promotion_allowed is False
+            for item in response.items
+        )
     finally:
         db.close()
         engine.dispose()

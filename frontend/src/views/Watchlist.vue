@@ -266,7 +266,7 @@
                 style="width: 100%"
                 data-testid="promotion-readiness-table"
               >
-                <el-table-column label="入选标的" width="124">
+                <el-table-column label="池内标的" width="124">
                   <template #default="{ row }">
                     <div class="promotion-symbol">
                       <strong>{{ row.symbol }}</strong>
@@ -278,6 +278,14 @@
                           data-testid="promotion-trading-badge"
                         >
                           当前实盘
+                        </el-tag>
+                        <el-tag
+                          v-if="row.universe_role === 'EXPLORATION'"
+                          type="info"
+                          size="small"
+                          effect="plain"
+                        >
+                          探索
                         </el-tag>
                         <el-tag
                           v-if="row.shadow_enabled"
@@ -296,7 +304,7 @@
                     <strong>#{{ row.priority_rank }}</strong>
                     <small class="promotion-secondary">
                       {{ formatScore(row.priority_score) }}
-                      · 原 #{{ row.rank }}
+                      · {{ promotionSourceLabel(row) }}
                     </small>
                   </template>
                 </el-table-column>
@@ -405,11 +413,19 @@
                     <small>
                       融合 #{{ row.priority_rank }}
                       · {{ formatScore(row.priority_score) }}
-                      · 原 #{{ row.rank }}
+                      · {{ promotionSourceLabel(row) }}
                     </small>
                   </div>
                   <div class="promotion-mobile-tags">
                     <el-tag v-if="row.is_trading_target" type="danger" size="small">当前实盘</el-tag>
+                    <el-tag
+                      v-if="row.universe_role === 'EXPLORATION'"
+                      type="info"
+                      size="small"
+                      effect="plain"
+                    >
+                      探索
+                    </el-tag>
                     <el-tag
                       :type="promotionStatusMeta(row.forward_status).type"
                       size="small"
@@ -1031,6 +1047,12 @@ function promotionStatusMeta(status: UniversePromotionForwardStatus): {
     default:
       return { label: '尚未注册', type: 'info' }
   }
+}
+
+function promotionSourceLabel(row: UniversePromotionReadinessItem): string {
+  if (row.rank !== null) return `原 #${row.rank}`
+  if (row.universe_role === 'EXPLORATION') return '探索池'
+  return '池外实盘'
 }
 
 function promotionProgressPercent(includedPairs: number, minimumMaturePairs: number): number {

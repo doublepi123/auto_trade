@@ -15,6 +15,12 @@ const PROMOTION_FORWARD_STATUSES = new Set([
   'BLOCKED',
 ])
 
+const PROMOTION_UNIVERSE_ROLES = new Set([
+  'SELECTED',
+  'EXPLORATION',
+  'TRADING_TARGET',
+])
+
 function assertObject(value: unknown, endpoint: string): asserts value is Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error(`Unexpected ${endpoint} response`)
@@ -57,6 +63,10 @@ function assertNullableFiniteNumber(value: unknown, field: string): void {
   if (value !== null) assertFiniteNumber(value, field)
 }
 
+function assertNullablePositiveInteger(value: unknown, field: string): void {
+  if (value !== null) assertPositiveInteger(value, field)
+}
+
 function assertNullableString(value: unknown, field: string): void {
   if (value !== null) assertString(value, field)
 }
@@ -96,7 +106,13 @@ function assertPromotionReadinessItem(value: unknown, index: number): void {
   const prefix = `items[${index}]`
   assertObject(value, `/api/universe/promotion-readiness.${prefix}`)
   assertString(value.symbol, `${prefix}.symbol`)
-  assertPositiveInteger(value.rank, `${prefix}.rank`)
+  assertString(value.universe_role, `${prefix}.universe_role`)
+  if (!PROMOTION_UNIVERSE_ROLES.has(value.universe_role)) {
+    throw new Error(
+      `Unexpected /api/universe/promotion-readiness response: ${prefix}.universe_role is invalid`,
+    )
+  }
+  assertNullablePositiveInteger(value.rank, `${prefix}.rank`)
   assertFiniteNumber(value.selection_score, `${prefix}.selection_score`)
   assertPositiveInteger(value.priority_rank, `${prefix}.priority_rank`)
   assertFiniteNumber(value.priority_score, `${prefix}.priority_score`)

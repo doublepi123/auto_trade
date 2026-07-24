@@ -2487,7 +2487,12 @@ class UniverseSelectionRunResponse(BaseModel):
 
 class UniversePromotionReadinessItem(BaseModel):
     symbol: str = Field(min_length=1, max_length=50)
-    rank: int = Field(ge=1)
+    universe_role: Literal[
+        "SELECTED",
+        "EXPLORATION",
+        "TRADING_TARGET",
+    ]
+    rank: Optional[int] = Field(default=None, ge=1)
     selection_score: float = Field(
         ge=0,
         le=100,
