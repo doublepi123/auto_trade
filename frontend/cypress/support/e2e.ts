@@ -1709,11 +1709,12 @@ Cypress.Commands.add('stubApi', () => {
     body: {
       config: {
         enabled: true,
-        algorithm_version: 'cross-sectional-opening-momentum-v1',
+        algorithm_version: 'cross-sectional-opening-momentum-v2-causal-entry',
         config_version: 'opening-momentum-stub-v1',
         mode: 'SHADOW',
         order_submission_allowed: false,
         signal_minutes: 30,
+        execution_delay_minutes: 1,
         holding_minutes: 30,
         minimum_universe_size: 8,
         minimum_market_return_bps: -25,
@@ -1727,7 +1728,7 @@ Cypress.Commands.add('stubApi', () => {
       latest: {
         id: 1,
         session_date: '2026-07-23',
-        algorithm_version: 'cross-sectional-opening-momentum-v1',
+        algorithm_version: 'cross-sectional-opening-momentum-v2-causal-entry',
         config_version: 'opening-momentum-stub-v1',
         status: 'CLOSED',
         reason: 'FIXED_HOLD_EXIT',
@@ -1769,7 +1770,7 @@ Cypress.Commands.add('stubApi', () => {
         {
           variant: 'INCUMBENT',
           universe_source: 'UNIVERSE_SELECTION',
-          algorithm_version: 'cross-sectional-opening-momentum-v1',
+          algorithm_version: 'cross-sectional-opening-momentum-v2-causal-entry',
           config_version: 'opening-momentum-stub-v1',
           comparison_sessions: 4,
           latest: { candidate_symbol: 'META.US' },
@@ -1791,7 +1792,7 @@ Cypress.Commands.add('stubApi', () => {
           variant: 'CONTINUATION_CHALLENGER',
           universe_source: 'OPENING_CONTINUATION',
           algorithm_version: (
-            'cross-sectional-opening-momentum-v1+'
+            'cross-sectional-opening-momentum-v2-causal-entry+'
             + 'opening-continuation-universe-v1'
           ),
           config_version: 'opening-continuation-stub-v1',

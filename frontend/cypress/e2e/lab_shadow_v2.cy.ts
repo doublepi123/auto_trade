@@ -68,6 +68,8 @@ describe('Strategy v2 shadow lab', () => {
       .and('contain', '影子观察')
       .and('contain', '永不下单')
       .and('contain', '30 分钟')
+      .and('contain', '执行延迟')
+      .and('contain', '1 分钟')
     cy.get('[data-testid="opening-momentum-latest"]')
       .should('contain', 'META.US')
       .and('contain', '67.5 bps')

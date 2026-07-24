@@ -1557,6 +1557,7 @@ export interface OpeningMomentumShadowConfig {
   mode: 'SHADOW'
   order_submission_allowed: false
   signal_minutes: number
+  execution_delay_minutes: number
   holding_minutes: number
   minimum_universe_size: number
   minimum_market_return_bps: number

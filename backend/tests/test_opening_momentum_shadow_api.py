@@ -80,6 +80,7 @@ class TestOpeningMomentumShadowApi:
         assert body["config"]["mode"] == "SHADOW"
         assert body["config"]["order_submission_allowed"] is False
         assert body["config"]["signal_minutes"] == 30
+        assert body["config"]["execution_delay_minutes"] == 1
         assert body["config"]["holding_minutes"] == 30
         assert body["config"]["round_trip_cost_bps"] == 14.0
 

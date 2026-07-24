@@ -127,7 +127,10 @@ class OpeningMomentumShadowService:
             tzinfo=session.timezone,
         ).astimezone(timezone.utc)
         entry_at = session_open + timedelta(
-            minutes=self.config.signal_minutes
+            minutes=(
+                self.config.signal_minutes
+                + self.config.execution_delay_minutes
+            )
         )
         decision_start = entry_at + _BAR_DURATION + _SETTLEMENT_GRACE
         decision_end = decision_start + _DECISION_WINDOW
@@ -168,7 +171,11 @@ class OpeningMomentumShadowService:
             str, OpeningMomentumObservation
         ] = {}
         fetch_errors: dict[str, str] = {}
-        signal_at = entry_at - _BAR_DURATION
+        signal_at = (
+            session_open
+            + timedelta(minutes=self.config.signal_minutes)
+            - _BAR_DURATION
+        )
         expected_signal_bars = {
             session_open + timedelta(minutes=index)
             for index in range(self.config.signal_minutes)
@@ -599,6 +606,9 @@ class OpeningMomentumShadowService:
             algorithm_version=ALGORITHM_VERSION,
             config_version=self.config.version_hash(),
             signal_minutes=self.config.signal_minutes,
+            execution_delay_minutes=(
+                self.config.execution_delay_minutes
+            ),
             holding_minutes=self.config.holding_minutes,
             minimum_universe_size=self.config.minimum_universe_size,
             minimum_market_return_bps=(

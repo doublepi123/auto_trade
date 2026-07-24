@@ -499,6 +499,7 @@ class OpeningMomentumShadowConfigResponse(BaseModel):
     mode: Literal["SHADOW"] = "SHADOW"
     order_submission_allowed: Literal[False] = False
     signal_minutes: int
+    execution_delay_minutes: int
     holding_minutes: int
     minimum_universe_size: int
     minimum_market_return_bps: float

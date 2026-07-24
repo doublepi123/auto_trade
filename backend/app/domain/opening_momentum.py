@@ -8,7 +8,7 @@ from statistics import median
 from typing import Literal, Sequence
 
 
-ALGORITHM_VERSION = "cross-sectional-opening-momentum-v1"
+ALGORITHM_VERSION = "cross-sectional-opening-momentum-v2-causal-entry"
 
 
 @dataclass(frozen=True)
@@ -16,6 +16,7 @@ class OpeningMomentumConfig:
     """Frozen parameters for the prospective opening-momentum shadow."""
 
     signal_minutes: int = 30
+    execution_delay_minutes: int = 1
     holding_minutes: int = 30
     minimum_universe_size: int = 8
     minimum_market_return_bps: float = -25.0
@@ -36,6 +37,13 @@ class OpeningMomentumConfig:
             raise ValueError("opening momentum parameters must be finite")
         if self.signal_minutes <= 0 or self.signal_minutes > 120:
             raise ValueError("signal_minutes must be in [1, 120]")
+        if (
+            self.execution_delay_minutes < 1
+            or self.execution_delay_minutes > 5
+        ):
+            raise ValueError(
+                "execution_delay_minutes must be in [1, 5]"
+            )
         if self.holding_minutes <= 0 or self.holding_minutes > 120:
             raise ValueError("holding_minutes must be in [1, 120]")
         if self.minimum_universe_size < 2:

@@ -310,6 +310,10 @@
                   <strong>{{ openingMomentumStatus.config.signal_minutes }} 分钟</strong>
                 </div>
                 <div>
+                  <span>执行延迟</span>
+                  <strong>{{ openingMomentumStatus.config.execution_delay_minutes }} 分钟</strong>
+                </div>
+                <div>
                   <span>虚拟持仓</span>
                   <strong>{{ openingMomentumStatus.config.holding_minutes }} 分钟</strong>
                 </div>

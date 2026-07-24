@@ -120,6 +120,19 @@ def test_round_trip_cost_is_applied_after_raw_return() -> None:
     assert net == pytest.approx(86.0)
 
 
+def test_execution_delay_cannot_reintroduce_same_bar_lookahead() -> None:
+    with pytest.raises(
+        ValueError,
+        match="execution_delay_minutes",
+    ):
+        OpeningMomentumConfig(execution_delay_minutes=0)
+
+    causal = OpeningMomentumConfig(execution_delay_minutes=1)
+    slower = OpeningMomentumConfig(execution_delay_minutes=2)
+
+    assert causal.version_hash() != slower.version_hash()
+
+
 def test_duplicate_symbols_are_rejected() -> None:
     item = _observation("AAPL.US", 50)
 

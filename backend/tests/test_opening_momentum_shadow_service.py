@@ -53,10 +53,10 @@ class _FakeCandles:
             100.0 if symbol_index == 7 else float(symbol_index)
         )
         bars: list[BrokerCandle] = []
-        for index in range(61):
+        for index in range(62):
             if (
                 symbol == self.missing_entry_for
-                and index == 30
+                and index == 31
             ):
                 continue
             open_price = 100.0
@@ -65,9 +65,9 @@ class _FakeCandles:
                 close_price = 100.0 * (
                     1 + opening_return_bps / 10_000
                 )
-            if index == 30:
+            if index == 31:
                 open_price = 100.5 if symbol_index == 7 else 100.0
-            if index == 60:
+            if index == 61:
                 open_price = 101.5 if symbol_index == 7 else 100.0
             bars.append(
                 BrokerCandle(
@@ -230,8 +230,16 @@ def test_tick_opens_then_closes_one_cost_adjusted_shadow_trade(
         candles = _FakeCandles()
         service = OpeningMomentumShadowService(db, candles)
 
-        opened = service.tick(
+        waiting = service.tick(
             now=_SESSION_OPEN + timedelta(minutes=31, seconds=10),
+        )
+
+        assert waiting.state == "WAITING"
+        assert db.query(OpeningMomentumShadowRun).count() == 0
+        assert candles.calls == []
+
+        opened = service.tick(
+            now=_SESSION_OPEN + timedelta(minutes=32, seconds=10),
         )
 
         assert opened.state == "OPEN"
@@ -239,14 +247,14 @@ def test_tick_opens_then_closes_one_cost_adjusted_shadow_trade(
         assert opened.latest.status == "OPEN"
         assert opened.latest.selection_run_id == run.id
         assert opened.latest.candidate_symbol == "S7.US"
-        assert opened.latest.entry_at == _SESSION_OPEN + timedelta(minutes=30)
+        assert opened.latest.entry_at == _SESSION_OPEN + timedelta(minutes=31)
         assert opened.latest.entry_price == 100.5
         assert opened.latest.estimated_cost_bps == 14.0
         assert opened.latest.universe == list(_SYMBOLS)
         assert opened.latest.excluded_symbols == {}
 
         closed = service.tick(
-            now=_SESSION_OPEN + timedelta(minutes=61, seconds=10),
+            now=_SESSION_OPEN + timedelta(minutes=62, seconds=10),
         )
 
         assert closed.state == "COLLECTING"
@@ -306,7 +314,7 @@ def test_challenger_uses_one_market_snapshot_and_closes_both_variants(
         )
 
         opened = service.tick(
-            now=_SESSION_OPEN + timedelta(minutes=31, seconds=10),
+            now=_SESSION_OPEN + timedelta(minutes=32, seconds=10),
         )
 
         assert db.query(OpeningMomentumShadowRun).count() == 2
@@ -329,7 +337,7 @@ def test_challenger_uses_one_market_snapshot_and_closes_both_variants(
         assert challenger.latest.candidate_symbol == "S3.US"
 
         closed = service.tick(
-            now=_SESSION_OPEN + timedelta(minutes=61, seconds=10),
+            now=_SESSION_OPEN + timedelta(minutes=62, seconds=10),
         )
 
         rows = db.query(OpeningMomentumShadowRun).all()
@@ -365,7 +373,7 @@ def test_missing_leader_entry_bar_records_skip_without_substitution(
         )
 
         status = service.tick(
-            now=_SESSION_OPEN + timedelta(minutes=31, seconds=10),
+            now=_SESSION_OPEN + timedelta(minutes=32, seconds=10),
         )
 
         assert status.latest is not None
