@@ -37,9 +37,11 @@ class _FakeCandles:
         *,
         missing_entry_for: str | None = None,
         opening_returns_bps: dict[str, float] | None = None,
+        negative_last_five_for: str | None = None,
     ) -> None:
         self.missing_entry_for = missing_entry_for
         self.opening_returns_bps = opening_returns_bps or {}
+        self.negative_last_five_for = negative_last_five_for
         self.calls: list[str] = []
 
     def get_candlesticks(
@@ -69,6 +71,11 @@ class _FakeCandles:
                 close_price = 100.0 * (
                     1 + opening_return_bps / 10_000
                 )
+            if (
+                index == 25
+                and symbol == self.negative_last_five_for
+            ):
+                open_price = 102.0
             if index == 31:
                 open_price = 100.5 if symbol_index == 7 else 100.0
             if index == 61:
@@ -415,7 +422,7 @@ def test_opening_path_efficiency_is_bounded_for_compounding_path() -> None:
     assert features.path_efficiency == 1.0
 
 
-def test_sector_relaxed_challenger_only_raises_sector_capacity(
+def test_challenger_variants_isolate_entry_and_exit_changes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -428,47 +435,93 @@ def test_sector_relaxed_challenger_only_raises_sector_capacity(
         "universe_selection_max_symbols",
         12,
     )
-    monkeypatch.setattr(
-        settings,
-        "universe_selection_max_per_sector",
-        2,
-    )
     engine, db = _database()
     try:
         service = OpeningMomentumShadowService(db)
-        incumbent = service._continuation_config()
-        relaxed = service._sector_relaxed_config()
         identities = service._variant_identities()
+        by_variant = {
+            identity.variant: identity for identity in identities
+        }
 
-        assert incumbent.max_per_sector == 2
-        assert relaxed.max_per_sector == 3
-        assert relaxed.max_selected == incumbent.max_selected
-        assert relaxed.liquidity_weight == incumbent.liquidity_weight
-        assert relaxed.spread_weight == incumbent.spread_weight
-        assert (
-            relaxed.opportunity_weight
-            == incumbent.opportunity_weight
-        )
-        assert relaxed.momentum_weight == incumbent.momentum_weight
-        assert (
-            relaxed.trend_efficiency_weight
-            == incumbent.trend_efficiency_weight
-        )
-        assert {
-            identity.variant for identity in identities
-        } == {
+        assert set(by_variant) == {
             "INCUMBENT",
             "CONTINUATION_CHALLENGER",
-            "SECTOR_RELAXED_CHALLENGER",
             "BREADTH_GATED_CHALLENGER",
-            "BREADTH_GATED_60M_CHALLENGER",
+            "LAST5_POSITIVE_CHALLENGER",
+            "BREADTH_GATED_15M_CHALLENGER",
         }
+        continuation = by_variant["CONTINUATION_CHALLENGER"]
+        breadth = by_variant["BREADTH_GATED_CHALLENGER"]
+        last_five = by_variant["LAST5_POSITIVE_CHALLENGER"]
+        short_hold = by_variant["BREADTH_GATED_15M_CHALLENGER"]
+        assert continuation.decision_config.holding_minutes == 30
+        assert (
+            continuation.decision_config.minimum_market_return_bps
+            == -25.0
+        )
+        assert breadth.decision_config.holding_minutes == 30
+        assert breadth.decision_config.minimum_market_return_bps == 0.0
+        assert last_five.decision_config == breadth.decision_config
+        assert last_five.require_nonnegative_last_five is True
+        assert short_hold.decision_config.holding_minutes == 15
+        assert (
+            short_hold.decision_config.minimum_market_return_bps
+            == 0.0
+        )
         assert len(
             {
                 identity.config_version
                 for identity in identities
             }
         ) == 5
+    finally:
+        db.close()
+        Base.metadata.drop_all(bind=engine)
+
+
+def test_variant_comparisons_are_paired_independently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        settings,
+        "opening_momentum_challenger_enabled",
+        True,
+    )
+    engine, db = _database()
+    try:
+        service = OpeningMomentumShadowService(db)
+        identities = service._variant_identities()
+        for identity in identities[:2]:
+            db.add(
+                OpeningMomentumShadowRun(
+                    session_date=date(2026, 7, 22),
+                    algorithm_version=identity.algorithm_version,
+                    config_version=identity.config_version,
+                    status="SKIPPED",
+                    reason="MARKET_FILTER",
+                    signal_at=_SESSION_OPEN - timedelta(days=1),
+                    observed_at=_SESSION_OPEN - timedelta(days=1),
+                    universe_source=identity.universe_source,
+                    universe_size=12,
+                    estimated_cost_bps=14.0,
+                )
+            )
+        db.commit()
+
+        by_variant = {
+            item.variant: item
+            for item in service._variant_responses()
+        }
+
+        continuation = by_variant["CONTINUATION_CHALLENGER"]
+        breadth = by_variant["BREADTH_GATED_CHALLENGER"]
+        assert continuation.comparison_sessions == 1
+        assert continuation.comparison is not None
+        assert continuation.comparison.resolved_sessions == 1
+        assert continuation.comparison.mean_delta_bps == 0.0
+        assert breadth.comparison_sessions == 0
+        assert breadth.comparison is not None
+        assert breadth.comparison.resolved_sessions == 0
     finally:
         db.close()
         Base.metadata.drop_all(bind=engine)
@@ -525,9 +578,9 @@ def test_challengers_use_one_market_snapshot_and_close_all_variants(
         (
             incumbent,
             challenger,
-            sector_relaxed,
             breadth,
-            breadth_long,
+            last_five,
+            breadth_short,
         ) = opened.variants
         assert incumbent.variant == "INCUMBENT"
         assert incumbent.comparison_sessions == 1
@@ -543,18 +596,6 @@ def test_challengers_use_one_market_snapshot_and_close_all_variants(
         assert challenger.latest is not None
         assert challenger.latest.universe == ["S2.US", "S3.US"]
         assert challenger.latest.candidate_symbol == "S3.US"
-        assert sector_relaxed.variant == (
-            "SECTOR_RELAXED_CHALLENGER"
-        )
-        assert sector_relaxed.comparison_sessions == 1
-        assert sector_relaxed.minimum_market_return_bps == -25.0
-        assert sector_relaxed.holding_minutes == 30
-        assert sector_relaxed.latest is not None
-        assert sector_relaxed.latest.universe == [
-            "S2.US",
-            "S3.US",
-        ]
-        assert sector_relaxed.latest.candidate_symbol == "S3.US"
         assert breadth.variant == "BREADTH_GATED_CHALLENGER"
         assert breadth.comparison_sessions == 1
         assert breadth.minimum_market_return_bps == 0.0
@@ -562,17 +603,26 @@ def test_challengers_use_one_market_snapshot_and_close_all_variants(
         assert breadth.latest is not None
         assert breadth.latest.universe == ["S2.US", "S3.US"]
         assert breadth.latest.candidate_symbol == "S3.US"
-        assert breadth_long.variant == (
-            "BREADTH_GATED_60M_CHALLENGER"
+        assert last_five.variant == (
+            "LAST5_POSITIVE_CHALLENGER"
         )
-        assert breadth_long.comparison_sessions == 1
-        assert breadth_long.minimum_market_return_bps == 0.0
-        assert breadth_long.holding_minutes == 60
-        assert breadth_long.latest is not None
-        assert breadth_long.latest.universe == ["S2.US", "S3.US"]
-        assert breadth_long.latest.candidate_symbol == "S3.US"
-        assert breadth_long.latest.exit_due_at == (
-            _SESSION_OPEN + timedelta(minutes=91)
+        assert last_five.comparison_sessions == 1
+        assert last_five.minimum_market_return_bps == 0.0
+        assert last_five.holding_minutes == 30
+        assert last_five.latest is not None
+        assert last_five.latest.universe == ["S2.US", "S3.US"]
+        assert last_five.latest.candidate_symbol == "S3.US"
+        assert breadth_short.variant == (
+            "BREADTH_GATED_15M_CHALLENGER"
+        )
+        assert breadth_short.comparison_sessions == 1
+        assert breadth_short.minimum_market_return_bps == 0.0
+        assert breadth_short.holding_minutes == 15
+        assert breadth_short.latest is not None
+        assert breadth_short.latest.universe == ["S2.US", "S3.US"]
+        assert breadth_short.latest.candidate_symbol == "S3.US"
+        assert breadth_short.latest.exit_due_at == (
+            _SESSION_OPEN + timedelta(minutes=46)
         )
         for item in opened.variants[1:]:
             assert item.comparison is not None
@@ -587,7 +637,7 @@ def test_challengers_use_one_market_snapshot_and_close_all_variants(
         ) == 5
 
         partially_closed = service.tick(
-            now=_SESSION_OPEN + timedelta(minutes=62, seconds=10),
+            now=_SESSION_OPEN + timedelta(minutes=47, seconds=10),
         )
 
         rows = db.query(OpeningMomentumShadowRun).all()
@@ -597,15 +647,15 @@ def test_challengers_use_one_market_snapshot_and_close_all_variants(
             item.metrics.closed_trades
             for item in partially_closed.variants
         ] == [
-            1,
-            1,
-            1,
-            1,
             0,
+            0,
+            0,
+            0,
+            1,
         ]
 
         closed = service.tick(
-            now=_SESSION_OPEN + timedelta(minutes=92, seconds=10),
+            now=_SESSION_OPEN + timedelta(minutes=62, seconds=10),
         )
 
         rows = db.query(OpeningMomentumShadowRun).all()
@@ -692,32 +742,99 @@ def test_breadth_challenger_skips_a_negative_market_snapshot(
         (
             incumbent,
             continuation,
-            sector_relaxed,
             breadth,
-            breadth_long,
+            last_five,
+            breadth_short,
         ) = status.variants
         assert incumbent.latest is not None
         assert incumbent.latest.status == "OPEN"
         assert continuation.latest is not None
         assert continuation.latest.status == "OPEN"
-        assert sector_relaxed.latest is not None
-        assert sector_relaxed.latest.status == "OPEN"
-        assert sector_relaxed.minimum_market_return_bps == -50.0
-        assert sector_relaxed.holding_minutes == 30
         assert breadth.latest is not None
         assert breadth.latest.status == "SKIPPED"
         assert breadth.latest.reason == "MARKET_FILTER"
         assert breadth.latest.market_return_bps == pytest.approx(-30.0)
         assert breadth.minimum_market_return_bps == 0.0
         assert breadth.holding_minutes == 30
-        assert breadth_long.latest is not None
-        assert breadth_long.latest.status == "SKIPPED"
-        assert breadth_long.latest.reason == "MARKET_FILTER"
-        assert breadth_long.latest.market_return_bps == pytest.approx(
+        assert last_five.latest is not None
+        assert last_five.latest.status == "SKIPPED"
+        assert last_five.latest.reason == "MARKET_FILTER"
+        assert last_five.latest.market_return_bps == pytest.approx(
             -30.0
         )
-        assert breadth_long.minimum_market_return_bps == 0.0
-        assert breadth_long.holding_minutes == 60
+        assert last_five.minimum_market_return_bps == 0.0
+        assert last_five.holding_minutes == 30
+        assert breadth_short.latest is not None
+        assert breadth_short.latest.status == "SKIPPED"
+        assert breadth_short.latest.reason == "MARKET_FILTER"
+        assert breadth_short.latest.market_return_bps == pytest.approx(
+            -30.0
+        )
+        assert breadth_short.minimum_market_return_bps == 0.0
+        assert breadth_short.holding_minutes == 15
+    finally:
+        db.close()
+        Base.metadata.drop_all(bind=engine)
+
+
+def test_last_five_challenger_skips_a_fading_leader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        settings,
+        "opening_momentum_shadow_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        settings,
+        "opening_momentum_challenger_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        settings,
+        "universe_selection_max_symbols",
+        2,
+    )
+    monkeypatch.setattr(
+        settings,
+        "universe_selection_max_per_sector",
+        2,
+    )
+    engine, db = _database()
+    try:
+        _seed_variant_universe(db)
+        service = OpeningMomentumShadowService(
+            db,
+            _FakeCandles(negative_last_five_for="S3.US"),
+            config=OpeningMomentumConfig(
+                minimum_universe_size=2,
+                minimum_excess_return_bps=0,
+            ),
+        )
+
+        status = service.tick(
+            now=_SESSION_OPEN + timedelta(minutes=32, seconds=10),
+        )
+
+        by_variant = {
+            item.variant: item for item in status.variants
+        }
+        breadth = by_variant["BREADTH_GATED_CHALLENGER"]
+        last_five = by_variant["LAST5_POSITIVE_CHALLENGER"]
+        short_hold = by_variant["BREADTH_GATED_15M_CHALLENGER"]
+        assert breadth.latest is not None
+        assert breadth.latest.status == "OPEN"
+        assert short_hold.latest is not None
+        assert short_hold.latest.status == "OPEN"
+        assert last_five.latest is not None
+        assert last_five.latest.status == "SKIPPED"
+        assert last_five.latest.reason == "LAST_FIVE_RETURN_FILTER"
+        assert (
+            last_five.latest.candidate_last_five_return_bps
+            is not None
+        )
+        assert last_five.latest.candidate_last_five_return_bps < 0
+        assert last_five.latest.entry_price is None
     finally:
         db.close()
         Base.metadata.drop_all(bind=engine)
@@ -735,6 +852,12 @@ def test_paired_policy_return_excludes_unresolved_and_data_failures() -> None:
         OpeningMomentumShadowRun(
             status="SKIPPED",
             reason="MARKET_FILTER",
+        )
+    ) == 0.0
+    assert OpeningMomentumShadowService._paired_policy_return(
+        OpeningMomentumShadowRun(
+            status="SKIPPED",
+            reason="LAST_FIVE_RETURN_FILTER",
         )
     ) == 0.0
     for status, reason in (

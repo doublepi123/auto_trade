@@ -56,20 +56,20 @@ _CONTINUATION_SOURCE = "OPENING_CONTINUATION"
 _CONTINUATION_ALGORITHM_VERSION = (
     f"{ALGORITHM_VERSION}+{OPENING_CONTINUATION_UNIVERSE_VERSION}"
 )
-_SECTOR_RELAXED_VERSION = "sector-cap-floor-3-v1"
-_SECTOR_RELAXED_SOURCE = "OPENING_CONTINUATION_SECTOR_CAP_3"
-_SECTOR_RELAXED_ALGORITHM_VERSION = (
-    f"{_CONTINUATION_ALGORITHM_VERSION}+{_SECTOR_RELAXED_VERSION}"
-)
 _BREADTH_GATE_VERSION = "nonnegative-market-breadth-v1"
 _BREADTH_GATE_SOURCE = "OPENING_CONTINUATION_BREADTH_GATE"
 _BREADTH_GATE_ALGORITHM_VERSION = (
     f"{_CONTINUATION_ALGORITHM_VERSION}+{_BREADTH_GATE_VERSION}"
 )
-_BREADTH_LONG_HOLD_VERSION = "holding-60m-v1"
-_BREADTH_LONG_HOLD_SOURCE = "OPENING_CONTINUATION_BREADTH_60M"
-_BREADTH_LONG_HOLD_ALGORITHM_VERSION = (
-    f"{_BREADTH_GATE_ALGORITHM_VERSION}+{_BREADTH_LONG_HOLD_VERSION}"
+_LAST_FIVE_GATE_VERSION = "last-five-nonnegative-v1"
+_LAST_FIVE_GATE_SOURCE = "OPENING_CONTINUATION_LAST5"
+_LAST_FIVE_GATE_ALGORITHM_VERSION = (
+    f"{_BREADTH_GATE_ALGORITHM_VERSION}+{_LAST_FIVE_GATE_VERSION}"
+)
+_BREADTH_SHORT_HOLD_VERSION = "holding-15m-v1"
+_BREADTH_SHORT_HOLD_SOURCE = "OPENING_CONTINUATION_BREADTH_15M"
+_BREADTH_SHORT_HOLD_ALGORITHM_VERSION = (
+    f"{_BREADTH_GATE_ALGORITHM_VERSION}+{_BREADTH_SHORT_HOLD_VERSION}"
 )
 _NON_COMPARABLE_SKIP_REASONS = frozenset(
     {
@@ -83,9 +83,9 @@ _NON_COMPARABLE_SKIP_REASONS = frozenset(
 _VariantName = Literal[
     "INCUMBENT",
     "CONTINUATION_CHALLENGER",
-    "SECTOR_RELAXED_CHALLENGER",
     "BREADTH_GATED_CHALLENGER",
-    "BREADTH_GATED_60M_CHALLENGER",
+    "LAST5_POSITIVE_CHALLENGER",
+    "BREADTH_GATED_15M_CHALLENGER",
 ]
 
 
@@ -123,6 +123,7 @@ class _UniverseVariant:
     config_version: str
     universe_source: str
     decision_config: OpeningMomentumConfig
+    require_nonnegative_last_five: bool = False
     symbols: tuple[str, ...] = ()
     selection_run_id: int | None = None
 
@@ -320,15 +321,29 @@ class OpeningMomentumShadowService:
                 else None
             )
             data_complete = not excluded
+            last_five_gate_failed = (
+                variant.require_nonnegative_last_five
+                and decision.action == "ENTER_LONG"
+                and (
+                    path_features is None
+                    or path_features.last_five_return_bps < 0
+                )
+            )
             status = (
                 "OPEN"
-                if decision.action == "ENTER_LONG" and data_complete
+                if (
+                    decision.action == "ENTER_LONG"
+                    and data_complete
+                    and not last_five_gate_failed
+                )
                 else "SKIPPED"
             )
             if variant.selection_run_id is None:
                 reason = "PREOPEN_UNIVERSE_UNAVAILABLE"
             elif not data_complete:
                 reason = "DATA_INCOMPLETE"
+            elif last_five_gate_failed:
+                reason = "LAST_FIVE_RETURN_FILTER"
             else:
                 reason = decision.reason
             self.db.add(
@@ -582,10 +597,6 @@ class OpeningMomentumShadowService:
             challenger_candidates,
             self._continuation_config(),
         )
-        sector_relaxed_selection = select_opening_momentum_universe(
-            challenger_candidates,
-            self._sector_relaxed_config(),
-        )
         identities_by_variant = {
             identity.variant: identity for identity in identities
         }
@@ -594,16 +605,11 @@ class OpeningMomentumShadowService:
             for row in challenger_selection
             if row.selected
         )
-        sector_relaxed_symbols = tuple(
-            row.symbol
-            for row in sector_relaxed_selection
-            if row.selected
-        )
         for variant_name in (
             "CONTINUATION_CHALLENGER",
-            "SECTOR_RELAXED_CHALLENGER",
             "BREADTH_GATED_CHALLENGER",
-            "BREADTH_GATED_60M_CHALLENGER",
+            "LAST5_POSITIVE_CHALLENGER",
+            "BREADTH_GATED_15M_CHALLENGER",
         ):
             identity = identities_by_variant[variant_name]
             variants.append(
@@ -613,12 +619,10 @@ class OpeningMomentumShadowService:
                     config_version=identity.config_version,
                     universe_source=identity.universe_source,
                     decision_config=identity.decision_config,
-                    symbols=(
-                        sector_relaxed_symbols
-                        if variant_name
-                        == "SECTOR_RELAXED_CHALLENGER"
-                        else challenger_symbols
+                    require_nonnegative_last_five=(
+                        identity.require_nonnegative_last_five
                     ),
+                    symbols=challenger_symbols,
                     selection_run_id=run.id,
                 )
             )
@@ -636,12 +640,9 @@ class OpeningMomentumShadowService:
         ]
         if settings.opening_momentum_challenger_enabled:
             universe_config = self._continuation_config()
-            sector_relaxed_config = (
-                self._sector_relaxed_config()
-            )
             breadth_config = self._breadth_gate_config()
-            breadth_long_hold_config = (
-                self._breadth_long_hold_config()
+            breadth_short_hold_config = (
+                self._breadth_short_hold_config()
             )
             variants.append(
                 _UniverseVariant(
@@ -656,25 +657,6 @@ class OpeningMomentumShadowService:
                         )
                     ),
                     universe_source=_CONTINUATION_SOURCE,
-                    decision_config=self.config,
-                )
-            )
-            variants.append(
-                _UniverseVariant(
-                    variant="SECTOR_RELAXED_CHALLENGER",
-                    algorithm_version=(
-                        _SECTOR_RELAXED_ALGORITHM_VERSION
-                    ),
-                    config_version=(
-                        opening_momentum_variant_config_version(
-                            (
-                                f"{self.config.version_hash()}:"
-                                f"{_SECTOR_RELAXED_VERSION}"
-                            ),
-                            sector_relaxed_config,
-                        )
-                    ),
-                    universe_source=_SECTOR_RELAXED_SOURCE,
                     decision_config=self.config,
                 )
             )
@@ -699,21 +681,41 @@ class OpeningMomentumShadowService:
             )
             variants.append(
                 _UniverseVariant(
-                    variant="BREADTH_GATED_60M_CHALLENGER",
+                    variant="LAST5_POSITIVE_CHALLENGER",
                     algorithm_version=(
-                        _BREADTH_LONG_HOLD_ALGORITHM_VERSION
+                        _LAST_FIVE_GATE_ALGORITHM_VERSION
                     ),
                     config_version=(
                         opening_momentum_variant_config_version(
                             (
-                                f"{breadth_long_hold_config.version_hash()}:"
-                                f"{_BREADTH_LONG_HOLD_VERSION}"
+                                f"{breadth_config.version_hash()}:"
+                                f"{_LAST_FIVE_GATE_VERSION}"
                             ),
                             universe_config,
                         )
                     ),
-                    universe_source=_BREADTH_LONG_HOLD_SOURCE,
-                    decision_config=breadth_long_hold_config,
+                    universe_source=_LAST_FIVE_GATE_SOURCE,
+                    decision_config=breadth_config,
+                    require_nonnegative_last_five=True,
+                )
+            )
+            variants.append(
+                _UniverseVariant(
+                    variant="BREADTH_GATED_15M_CHALLENGER",
+                    algorithm_version=(
+                        _BREADTH_SHORT_HOLD_ALGORITHM_VERSION
+                    ),
+                    config_version=(
+                        opening_momentum_variant_config_version(
+                            (
+                                f"{breadth_short_hold_config.version_hash()}:"
+                                f"{_BREADTH_SHORT_HOLD_VERSION}"
+                            ),
+                            universe_config,
+                        )
+                    ),
+                    universe_source=_BREADTH_SHORT_HOLD_SOURCE,
+                    decision_config=breadth_short_hold_config,
                 )
             )
         return variants
@@ -727,17 +729,6 @@ class OpeningMomentumShadowService:
             ),
         )
 
-    def _sector_relaxed_config(
-        self,
-    ) -> OpeningMomentumUniverseConfig:
-        return replace(
-            self._continuation_config(),
-            max_per_sector=max(
-                3,
-                settings.universe_selection_max_per_sector,
-            ),
-        )
-
     def _breadth_gate_config(self) -> OpeningMomentumConfig:
         return replace(
             self.config,
@@ -747,10 +738,10 @@ class OpeningMomentumShadowService:
             ),
         )
 
-    def _breadth_long_hold_config(self) -> OpeningMomentumConfig:
+    def _breadth_short_hold_config(self) -> OpeningMomentumConfig:
         return replace(
             self._breadth_gate_config(),
-            holding_minutes=60,
+            holding_minutes=15,
         )
 
     def _close_if_due(
@@ -873,17 +864,6 @@ class OpeningMomentumShadowService:
                 )
                 .all()
             )
-        session_sets = [
-            {row.session_date for row in rows}
-            for rows in rows_by_version.values()
-        ]
-        comparison_dates = (
-            session_sets[0].intersection(*session_sets[1:])
-            if len(session_sets) > 1
-            else session_sets[0]
-            if session_sets
-            else set()
-        )
         rows_by_date = {
             config_version: {
                 row.session_date: row
@@ -891,51 +871,58 @@ class OpeningMomentumShadowService:
             }
             for config_version, rows in rows_by_version.items()
         }
-        resolved_comparison_dates = [
-            session_date
-            for session_date in sorted(comparison_dates)
-            if all(
-                self._paired_policy_return(
-                    rows_by_date[identity.config_version][
-                        session_date
-                    ]
-                )
-                is not None
-                for identity in identities
-            )
-        ]
-        metrics_by_version = {
-            identity.config_version: self._metrics(
-                identity.config_version,
-                session_dates=comparison_dates,
-            )
-            for identity in identities
-        }
         incumbent_identity = identities[0]
-        incumbent_returns = [
-            cast(
-                float,
-                self._paired_policy_return(
-                    rows_by_date[
-                        incumbent_identity.config_version
-                    ][session_date]
-                ),
-            )
-            for session_date in resolved_comparison_dates
+        incumbent_rows_by_date = rows_by_date[
+            incumbent_identity.config_version
         ]
+        incumbent_dates = set(incumbent_rows_by_date)
 
         responses: list[OpeningMomentumShadowVariantResponse] = []
         for identity in identities:
-            metrics = metrics_by_version[identity.config_version]
+            identity_rows_by_date = rows_by_date[
+                identity.config_version
+            ]
+            comparison_dates = (
+                incumbent_dates
+                if identity.variant == "INCUMBENT"
+                else incumbent_dates.intersection(
+                    identity_rows_by_date
+                )
+            )
+            metrics = self._metrics(
+                identity.config_version,
+                session_dates=comparison_dates,
+            )
             comparison_response = None
             if identity.variant != "INCUMBENT":
+                resolved_comparison_dates = [
+                    session_date
+                    for session_date in sorted(comparison_dates)
+                    if (
+                        self._paired_policy_return(
+                            incumbent_rows_by_date[session_date]
+                        )
+                        is not None
+                        and self._paired_policy_return(
+                            identity_rows_by_date[session_date]
+                        )
+                        is not None
+                    )
+                ]
+                incumbent_returns = [
+                    cast(
+                        float,
+                        self._paired_policy_return(
+                            incumbent_rows_by_date[session_date]
+                        ),
+                    )
+                    for session_date in resolved_comparison_dates
+                ]
                 challenger_returns = [
                     cast(
                         float,
                         self._paired_policy_return(
-                            rows_by_date[identity.config_version][
-                                session_date
-                            ]
+                            identity_rows_by_date[session_date]
                         ),
                     )
                     for session_date in resolved_comparison_dates

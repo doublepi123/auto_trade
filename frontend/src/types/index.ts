@@ -1647,9 +1647,9 @@ export interface OpeningMomentumShadowVariant {
   variant:
     | 'INCUMBENT'
     | 'CONTINUATION_CHALLENGER'
-    | 'SECTOR_RELAXED_CHALLENGER'
     | 'BREADTH_GATED_CHALLENGER'
-    | 'BREADTH_GATED_60M_CHALLENGER'
+    | 'LAST5_POSITIVE_CHALLENGER'
+    | 'BREADTH_GATED_15M_CHALLENGER'
   universe_source: string
   algorithm_version: string
   config_version: string
