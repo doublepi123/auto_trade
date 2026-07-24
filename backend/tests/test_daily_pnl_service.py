@@ -383,6 +383,90 @@ class TestDailyPnlService:
         assert refreshed.net_pnl is not None and refreshed.net_pnl > 0
         db.close()
 
+    @pytest.mark.parametrize(
+        "pnl_source",
+        ["TRACKED_ENTRY", "BROKER_POSITION"],
+    )
+    def test_refresh_enriches_authoritative_outcome_with_excursions(
+        self,
+        pnl_source: str,
+    ) -> None:
+        self._cleanup()
+        trade_day = date(2026, 7, 24)
+        entry_at = self._dt(trade_day, 10)
+        exit_at = self._dt(trade_day, 11)
+        db = self._get_db()
+        db.add_all([
+            OrderRecord(
+                broker_order_id=f"{pnl_source}-buy",
+                symbol="NVDA.US",
+                side="BUY",
+                quantity=10,
+                price=100,
+                executed_quantity=10,
+                executed_price=100,
+                actual_fee=1,
+                fee_source="ACTUAL",
+                status="FILLED",
+                created_at=entry_at,
+                filled_at=entry_at,
+            ),
+            OrderRecord(
+                broker_order_id=f"{pnl_source}-sell",
+                symbol="NVDA.US",
+                side="SELL",
+                quantity=10,
+                price=110,
+                executed_quantity=10,
+                executed_price=110,
+                actual_fee=2,
+                fee_source="ACTUAL",
+                status="FILLED",
+                created_at=exit_at,
+                filled_at=exit_at,
+                cost_basis_price=100,
+                cost_basis_quantity=10,
+                cost_basis_opened_at=entry_at,
+                position_quantity_before=10,
+                gross_pnl=100,
+                pnl_fee=3,
+                pnl_fee_source="ACTUAL",
+                pnl_fee_rate=0.0005,
+                net_pnl=97,
+                pnl_source=pnl_source,
+            ),
+            RuntimeStateSnapshot(
+                symbol="NVDA.US",
+                last_price=115,
+                created_at=self._dt(trade_day, 10, 30),
+            ),
+            RuntimeStateSnapshot(
+                symbol="NVDA.US",
+                last_price=97,
+                created_at=self._dt(trade_day, 10, 45),
+            ),
+        ])
+        db.commit()
+        service = DailyPnlService(db)
+
+        first_updated = service.refresh_execution_outcomes(symbol="NVDA.US")
+        second_updated = service.refresh_execution_outcomes(symbol="NVDA.US")
+        db.expire_all()
+        refreshed = db.query(OrderRecord).filter(
+            OrderRecord.broker_order_id == f"{pnl_source}-sell"
+        ).one()
+
+        assert first_updated == 1
+        assert second_updated == 0
+        assert refreshed.pnl_source == pnl_source
+        assert refreshed.gross_pnl == approx(100)
+        assert refreshed.net_pnl == approx(97)
+        assert refreshed.mfe_amount == approx(150)
+        assert refreshed.mae_amount == approx(-30)
+        assert refreshed.mfe_pct == approx(15)
+        assert refreshed.mae_pct == approx(-3)
+        db.close()
+
     def test_authoritative_reset_drives_risk_but_not_performance_stats(
         self,
         caplog: LogCaptureFixture,

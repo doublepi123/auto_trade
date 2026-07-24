@@ -1007,7 +1007,10 @@ class DailyPnlService:
                 "TRACKED_ENTRY",
                 "BROKER_POSITION",
             }:
-                if self._repair_ambiguous_zero_actual_fee(order, trade):
+                changed = self._repair_ambiguous_zero_actual_fee(order, trade)
+                if self._refresh_order_excursions(order, trade):
+                    changed = True
+                if changed:
                     updated += 1
                 continue
             order.gross_pnl = trade.gross_pnl
@@ -1027,6 +1030,30 @@ class DailyPnlService:
         if updated:
             self._db.commit()
         return updated
+
+    @staticmethod
+    def _refresh_order_excursions(
+        order: Any,
+        trade: ClosedRoundTrip,
+    ) -> bool:
+        """Refresh optional path metrics without touching authoritative P&L."""
+        changed = False
+        for field_name in (
+            "mfe_amount",
+            "mae_amount",
+            "mfe_pct",
+            "mae_pct",
+        ):
+            raw_value = getattr(trade, field_name)
+            if raw_value is None:
+                continue
+            value = float(raw_value)
+            current = getattr(order, field_name, None)
+            if current is not None and float(current) == value:
+                continue
+            setattr(order, field_name, value)
+            changed = True
+        return changed
 
     @staticmethod
     def _executed_quantity(order: Any) -> Decimal:
