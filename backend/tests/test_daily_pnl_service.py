@@ -5,6 +5,7 @@ from datetime import date, datetime, time, timezone
 from pytest import approx
 import pytest
 from pytest import LogCaptureFixture
+from sqlalchemy import event
 
 from app import database
 from app.models import OrderRecord, RuntimeStateSnapshot
@@ -90,6 +91,92 @@ class TestDailyPnlService:
         assert trip.mfe_pct == approx(15.0)
         assert trip.mae_pct == approx(-3.0)
         assert trip.exit_cause == "TIME_STOP"
+        db.close()
+
+    def test_reuses_persisted_excursions_without_snapshot_query(self) -> None:
+        self._cleanup()
+        trade_day = date(2026, 7, 11)
+        entry_at = self._dt(trade_day, 10)
+        exit_at = self._dt(trade_day, 11)
+        db = self._get_db()
+        db.add_all([
+            OrderRecord(
+                broker_order_id="persisted-excursion-buy",
+                symbol="AAPL.US",
+                side="BUY",
+                quantity=10,
+                price=100,
+                executed_quantity=10,
+                executed_price=100,
+                actual_fee=1,
+                fee_source="ACTUAL",
+                status="FILLED",
+                created_at=entry_at,
+                filled_at=entry_at,
+            ),
+            OrderRecord(
+                broker_order_id="persisted-excursion-sell",
+                symbol="AAPL.US",
+                side="SELL",
+                quantity=10,
+                price=110,
+                executed_quantity=10,
+                executed_price=110,
+                actual_fee=2,
+                fee_source="ACTUAL",
+                status="FILLED",
+                created_at=exit_at,
+                filled_at=exit_at,
+                mfe_amount=42,
+                mae_amount=-7,
+                mfe_pct=4.2,
+                mae_pct=-0.7,
+            ),
+            RuntimeStateSnapshot(
+                symbol="AAPL.US",
+                last_price=150,
+                created_at=self._dt(trade_day, 10, 30),
+            ),
+            RuntimeStateSnapshot(
+                symbol="AAPL.US",
+                last_price=50,
+                created_at=self._dt(trade_day, 10, 45),
+            ),
+        ])
+        db.commit()
+        without_excursions = DailyPnlService(db).pair_round_trips(
+            include_excursions=False
+        )[0]
+        statements: list[str] = []
+
+        def capture_statement(
+            _connection: object,
+            _cursor: object,
+            statement: str,
+            _parameters: object,
+            _context: object,
+            _executemany: bool,
+        ) -> None:
+            statements.append(statement)
+
+        event.listen(database.engine, "before_cursor_execute", capture_statement)
+        try:
+            trip = DailyPnlService(db).pair_round_trips()[0]
+        finally:
+            event.remove(database.engine, "before_cursor_execute", capture_statement)
+
+        assert trip.mfe_amount == approx(42)
+        assert trip.mae_amount == approx(-7)
+        assert trip.mfe_pct == approx(4.2)
+        assert trip.mae_pct == approx(-0.7)
+        assert without_excursions.mfe_amount is None
+        assert without_excursions.mae_amount is None
+        assert without_excursions.mfe_pct is None
+        assert without_excursions.mae_pct is None
+        assert not any(
+            "runtime_state_snapshots" in statement.lower()
+            for statement in statements
+        )
         db.close()
 
     def test_zero_actual_fee_uses_persisted_estimate_or_fee_schedule_once(

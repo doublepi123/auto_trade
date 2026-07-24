@@ -575,6 +575,36 @@ class DailyPnlService:
         ]
         if not include_excursions:
             return RoundTripReplayResult(filtered, filtered_issues)
+        persisted_excursions: dict[int, tuple[float, float, float, float]] = {}
+        for order in latest_orders.values():
+            mfe_amount = getattr(order, "mfe_amount", None)
+            mae_amount = getattr(order, "mae_amount", None)
+            mfe_pct = getattr(order, "mfe_pct", None)
+            mae_pct = getattr(order, "mae_pct", None)
+            if (
+                mfe_amount is None
+                or mae_amount is None
+                or mfe_pct is None
+                or mae_pct is None
+            ):
+                continue
+            persisted_excursions[int(order.id)] = (
+                float(mfe_amount),
+                float(mae_amount),
+                float(mfe_pct),
+                float(mae_pct),
+            )
+        for index, trade in enumerate(filtered):
+            excursion = persisted_excursions.get(trade.exit_order_id)
+            if excursion is None:
+                continue
+            filtered[index] = replace(
+                trade,
+                mfe_amount=excursion[0],
+                mae_amount=excursion[1],
+                mfe_pct=excursion[2],
+                mae_pct=excursion[3],
+            )
         try:
             enriched = self._attach_excursions(filtered)
         except (AttributeError, TypeError):
@@ -935,9 +965,21 @@ class DailyPnlService:
 
         if not trades:
             return []
-        symbols = {trade.symbol for trade in trades}
-        start = min(trade.entry_at for trade in trades)
-        end = max(trade.exit_at for trade in trades)
+        missing = [
+            trade
+            for trade in trades
+            if (
+                trade.mfe_amount is None
+                or trade.mae_amount is None
+                or trade.mfe_pct is None
+                or trade.mae_pct is None
+            )
+        ]
+        if not missing:
+            return trades
+        symbols = {trade.symbol for trade in missing}
+        start = min(trade.entry_at for trade in missing)
+        end = max(trade.exit_at for trade in missing)
         snapshots_by_symbol: dict[str, list[tuple[datetime, float]]] = {}
         for created_at, symbol, last_price in self._db.query(
             RuntimeStateSnapshot.created_at,
@@ -955,6 +997,14 @@ class DailyPnlService:
 
         enriched: list[ClosedRoundTrip] = []
         for trade in trades:
+            if (
+                trade.mfe_amount is not None
+                and trade.mae_amount is not None
+                and trade.mfe_pct is not None
+                and trade.mae_pct is not None
+            ):
+                enriched.append(trade)
+                continue
             prices = [
                 price
                 for captured_at, price in snapshots_by_symbol.get(trade.symbol, [])
