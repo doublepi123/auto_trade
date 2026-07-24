@@ -1923,17 +1923,16 @@ Cypress.Commands.add('stubApi', () => {
           },
         },
         {
-          variant: 'BREADTH_GATED_15M_CHALLENGER',
-          universe_source: 'OPENING_CONTINUATION_BREADTH_15M',
+          variant: 'LAST5_ONLY_CHALLENGER',
+          universe_source: 'OPENING_CONTINUATION_LAST5_ONLY',
           algorithm_version: (
             'cross-sectional-opening-momentum-v3-preopen-frozen-universe+'
             + 'opening-continuation-universe-v1+'
-            + 'nonnegative-market-breadth-v1+'
-            + 'holding-15m-v1'
+            + 'last-five-nonnegative-v1'
           ),
-          config_version: 'opening-breadth-15m-stub-v1',
-          minimum_market_return_bps: 0,
-          holding_minutes: 15,
+          config_version: 'opening-last5-only-stub-v1',
+          minimum_market_return_bps: -25,
+          holding_minutes: 30,
           comparison_sessions: 4,
           latest: { candidate_symbol: 'PLTR.US' },
           metrics: {

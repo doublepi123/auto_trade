@@ -422,7 +422,7 @@ def test_opening_path_efficiency_is_bounded_for_compounding_path() -> None:
     assert features.path_efficiency == 1.0
 
 
-def test_challenger_variants_isolate_entry_and_exit_changes(
+def test_challenger_variants_isolate_universe_and_entry_gates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -448,12 +448,12 @@ def test_challenger_variants_isolate_entry_and_exit_changes(
             "CONTINUATION_CHALLENGER",
             "BREADTH_GATED_CHALLENGER",
             "LAST5_POSITIVE_CHALLENGER",
-            "BREADTH_GATED_15M_CHALLENGER",
+            "LAST5_ONLY_CHALLENGER",
         }
         continuation = by_variant["CONTINUATION_CHALLENGER"]
         breadth = by_variant["BREADTH_GATED_CHALLENGER"]
         last_five = by_variant["LAST5_POSITIVE_CHALLENGER"]
-        short_hold = by_variant["BREADTH_GATED_15M_CHALLENGER"]
+        last_five_only = by_variant["LAST5_ONLY_CHALLENGER"]
         assert continuation.decision_config.holding_minutes == 30
         assert (
             continuation.decision_config.minimum_market_return_bps
@@ -463,11 +463,12 @@ def test_challenger_variants_isolate_entry_and_exit_changes(
         assert breadth.decision_config.minimum_market_return_bps == 0.0
         assert last_five.decision_config == breadth.decision_config
         assert last_five.require_nonnegative_last_five is True
-        assert short_hold.decision_config.holding_minutes == 15
+        assert last_five_only.decision_config.holding_minutes == 30
         assert (
-            short_hold.decision_config.minimum_market_return_bps
-            == 0.0
+            last_five_only.decision_config.minimum_market_return_bps
+            == -25.0
         )
+        assert last_five_only.require_nonnegative_last_five is True
         assert len(
             {
                 identity.config_version
@@ -580,7 +581,7 @@ def test_challengers_use_one_market_snapshot_and_close_all_variants(
             challenger,
             breadth,
             last_five,
-            breadth_short,
+            last_five_only,
         ) = opened.variants
         assert incumbent.variant == "INCUMBENT"
         assert incumbent.comparison_sessions == 1
@@ -612,17 +613,17 @@ def test_challengers_use_one_market_snapshot_and_close_all_variants(
         assert last_five.latest is not None
         assert last_five.latest.universe == ["S2.US", "S3.US"]
         assert last_five.latest.candidate_symbol == "S3.US"
-        assert breadth_short.variant == (
-            "BREADTH_GATED_15M_CHALLENGER"
+        assert last_five_only.variant == (
+            "LAST5_ONLY_CHALLENGER"
         )
-        assert breadth_short.comparison_sessions == 1
-        assert breadth_short.minimum_market_return_bps == 0.0
-        assert breadth_short.holding_minutes == 15
-        assert breadth_short.latest is not None
-        assert breadth_short.latest.universe == ["S2.US", "S3.US"]
-        assert breadth_short.latest.candidate_symbol == "S3.US"
-        assert breadth_short.latest.exit_due_at == (
-            _SESSION_OPEN + timedelta(minutes=46)
+        assert last_five_only.comparison_sessions == 1
+        assert last_five_only.minimum_market_return_bps == -25.0
+        assert last_five_only.holding_minutes == 30
+        assert last_five_only.latest is not None
+        assert last_five_only.latest.universe == ["S2.US", "S3.US"]
+        assert last_five_only.latest.candidate_symbol == "S3.US"
+        assert last_five_only.latest.exit_due_at == (
+            _SESSION_OPEN + timedelta(minutes=61)
         )
         for item in opened.variants[1:]:
             assert item.comparison is not None
@@ -636,22 +637,22 @@ def test_challengers_use_one_market_snapshot_and_close_all_variants(
             }
         ) == 5
 
-        partially_closed = service.tick(
+        still_open = service.tick(
             now=_SESSION_OPEN + timedelta(minutes=47, seconds=10),
         )
 
         rows = db.query(OpeningMomentumShadowRun).all()
-        assert {row.status for row in rows} == {"CLOSED", "OPEN"}
-        assert partially_closed.state == "OPEN"
+        assert {row.status for row in rows} == {"OPEN"}
+        assert still_open.state == "OPEN"
         assert [
             item.metrics.closed_trades
-            for item in partially_closed.variants
+            for item in still_open.variants
         ] == [
             0,
             0,
             0,
             0,
-            1,
+            0,
         ]
 
         closed = service.tick(
@@ -744,7 +745,7 @@ def test_breadth_challenger_skips_a_negative_market_snapshot(
             continuation,
             breadth,
             last_five,
-            breadth_short,
+            last_five_only,
         ) = status.variants
         assert incumbent.latest is not None
         assert incumbent.latest.status == "OPEN"
@@ -764,14 +765,14 @@ def test_breadth_challenger_skips_a_negative_market_snapshot(
         )
         assert last_five.minimum_market_return_bps == 0.0
         assert last_five.holding_minutes == 30
-        assert breadth_short.latest is not None
-        assert breadth_short.latest.status == "SKIPPED"
-        assert breadth_short.latest.reason == "MARKET_FILTER"
-        assert breadth_short.latest.market_return_bps == pytest.approx(
+        assert last_five_only.latest is not None
+        assert last_five_only.latest.status == "OPEN"
+        assert last_five_only.latest.reason == "OPENING_LEADER"
+        assert last_five_only.latest.market_return_bps == pytest.approx(
             -30.0
         )
-        assert breadth_short.minimum_market_return_bps == 0.0
-        assert breadth_short.holding_minutes == 15
+        assert last_five_only.minimum_market_return_bps == -50.0
+        assert last_five_only.holding_minutes == 30
     finally:
         db.close()
         Base.metadata.drop_all(bind=engine)
@@ -821,11 +822,9 @@ def test_last_five_challenger_skips_a_fading_leader(
         }
         breadth = by_variant["BREADTH_GATED_CHALLENGER"]
         last_five = by_variant["LAST5_POSITIVE_CHALLENGER"]
-        short_hold = by_variant["BREADTH_GATED_15M_CHALLENGER"]
+        last_five_only = by_variant["LAST5_ONLY_CHALLENGER"]
         assert breadth.latest is not None
         assert breadth.latest.status == "OPEN"
-        assert short_hold.latest is not None
-        assert short_hold.latest.status == "OPEN"
         assert last_five.latest is not None
         assert last_five.latest.status == "SKIPPED"
         assert last_five.latest.reason == "LAST_FIVE_RETURN_FILTER"
@@ -835,6 +834,13 @@ def test_last_five_challenger_skips_a_fading_leader(
         )
         assert last_five.latest.candidate_last_five_return_bps < 0
         assert last_five.latest.entry_price is None
+        assert last_five_only.latest is not None
+        assert last_five_only.latest.status == "SKIPPED"
+        assert (
+            last_five_only.latest.reason
+            == "LAST_FIVE_RETURN_FILTER"
+        )
+        assert last_five_only.latest.entry_price is None
     finally:
         db.close()
         Base.metadata.drop_all(bind=engine)
@@ -967,13 +973,14 @@ def test_disabled_service_closes_stale_open_run_from_history(
     )
     engine, db = _database()
     try:
-        config = OpeningMomentumConfig()
         exit_at = _SESSION_OPEN + timedelta(minutes=60)
+        candles = _HistoricalExitCandles(exit_at)
+        service = OpeningMomentumShadowService(db, candles)
         db.add(
             OpeningMomentumShadowRun(
                 session_date=date(2026, 7, 23),
                 algorithm_version=ALGORITHM_VERSION,
-                config_version=config.version_hash(),
+                config_version=service._incumbent_config_version(),
                 status="OPEN",
                 reason="OPENING_LEADER",
                 signal_at=_SESSION_OPEN + timedelta(minutes=29),
@@ -991,12 +998,8 @@ def test_disabled_service_closes_stale_open_run_from_history(
             )
         )
         db.commit()
-        candles = _HistoricalExitCandles(exit_at)
 
-        status = OpeningMomentumShadowService(
-            db,
-            candles,
-        ).tick(
+        status = service.tick(
             now=_SESSION_OPEN + timedelta(days=3),
         )
 

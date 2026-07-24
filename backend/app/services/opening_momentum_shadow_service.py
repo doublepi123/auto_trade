@@ -26,8 +26,13 @@ from app.domain.opening_momentum_universe import (
     OPENING_CONTINUATION_UNIVERSE_VERSION,
     OpeningMomentumUniverseCandidate,
     OpeningMomentumUniverseConfig,
+    opening_momentum_evidence_config_version,
     opening_momentum_variant_config_version,
     select_opening_momentum_universe,
+)
+from app.domain.universe_selection import (
+    CATALOG_SOURCE_VERSION,
+    UNIVERSE_ALGORITHM_VERSION,
 )
 from app.models import (
     OpeningMomentumShadowRun,
@@ -66,10 +71,9 @@ _LAST_FIVE_GATE_SOURCE = "OPENING_CONTINUATION_LAST5"
 _LAST_FIVE_GATE_ALGORITHM_VERSION = (
     f"{_BREADTH_GATE_ALGORITHM_VERSION}+{_LAST_FIVE_GATE_VERSION}"
 )
-_BREADTH_SHORT_HOLD_VERSION = "holding-15m-v1"
-_BREADTH_SHORT_HOLD_SOURCE = "OPENING_CONTINUATION_BREADTH_15M"
-_BREADTH_SHORT_HOLD_ALGORITHM_VERSION = (
-    f"{_BREADTH_GATE_ALGORITHM_VERSION}+{_BREADTH_SHORT_HOLD_VERSION}"
+_LAST_FIVE_ONLY_SOURCE = "OPENING_CONTINUATION_LAST5_ONLY"
+_LAST_FIVE_ONLY_ALGORITHM_VERSION = (
+    f"{_CONTINUATION_ALGORITHM_VERSION}+{_LAST_FIVE_GATE_VERSION}"
 )
 _NON_COMPARABLE_SKIP_REASONS = frozenset(
     {
@@ -85,7 +89,7 @@ _VariantName = Literal[
     "CONTINUATION_CHALLENGER",
     "BREADTH_GATED_CHALLENGER",
     "LAST5_POSITIVE_CHALLENGER",
-    "BREADTH_GATED_15M_CHALLENGER",
+    "LAST5_ONLY_CHALLENGER",
 ]
 
 
@@ -440,7 +444,7 @@ class OpeningMomentumShadowService:
         return self.get_status()
 
     def get_status(self) -> OpeningMomentumShadowStatusResponse:
-        incumbent_version = self.config.version_hash()
+        incumbent_version = self._incumbent_config_version()
         latest = (
             self.db.query(OpeningMomentumShadowRun)
             .filter(
@@ -553,7 +557,7 @@ class OpeningMomentumShadowService:
             _UniverseVariant(
                 variant="INCUMBENT",
                 algorithm_version=ALGORITHM_VERSION,
-                config_version=self.config.version_hash(),
+                config_version=self._incumbent_config_version(),
                 universe_source=_INCUMBENT_SOURCE,
                 decision_config=self.config,
                 symbols=incumbent_symbols,
@@ -609,7 +613,7 @@ class OpeningMomentumShadowService:
             "CONTINUATION_CHALLENGER",
             "BREADTH_GATED_CHALLENGER",
             "LAST5_POSITIVE_CHALLENGER",
-            "BREADTH_GATED_15M_CHALLENGER",
+            "LAST5_ONLY_CHALLENGER",
         ):
             identity = identities_by_variant[variant_name]
             variants.append(
@@ -633,7 +637,7 @@ class OpeningMomentumShadowService:
             _UniverseVariant(
                 variant="INCUMBENT",
                 algorithm_version=ALGORITHM_VERSION,
-                config_version=self.config.version_hash(),
+                config_version=self._incumbent_config_version(),
                 universe_source=_INCUMBENT_SOURCE,
                 decision_config=self.config,
             )
@@ -641,9 +645,6 @@ class OpeningMomentumShadowService:
         if settings.opening_momentum_challenger_enabled:
             universe_config = self._continuation_config()
             breadth_config = self._breadth_gate_config()
-            breadth_short_hold_config = (
-                self._breadth_short_hold_config()
-            )
             variants.append(
                 _UniverseVariant(
                     variant="CONTINUATION_CHALLENGER",
@@ -652,7 +653,9 @@ class OpeningMomentumShadowService:
                     ),
                     config_version=(
                         opening_momentum_variant_config_version(
-                            self.config.version_hash(),
+                            self._evidence_config_version(
+                                self.config.version_hash()
+                            ),
                             universe_config,
                         )
                     ),
@@ -668,7 +671,7 @@ class OpeningMomentumShadowService:
                     ),
                     config_version=(
                         opening_momentum_variant_config_version(
-                            (
+                            self._evidence_config_version(
                                 f"{breadth_config.version_hash()}:"
                                 f"{_BREADTH_GATE_VERSION}"
                             ),
@@ -687,7 +690,7 @@ class OpeningMomentumShadowService:
                     ),
                     config_version=(
                         opening_momentum_variant_config_version(
-                            (
+                            self._evidence_config_version(
                                 f"{breadth_config.version_hash()}:"
                                 f"{_LAST_FIVE_GATE_VERSION}"
                             ),
@@ -701,21 +704,22 @@ class OpeningMomentumShadowService:
             )
             variants.append(
                 _UniverseVariant(
-                    variant="BREADTH_GATED_15M_CHALLENGER",
+                    variant="LAST5_ONLY_CHALLENGER",
                     algorithm_version=(
-                        _BREADTH_SHORT_HOLD_ALGORITHM_VERSION
+                        _LAST_FIVE_ONLY_ALGORITHM_VERSION
                     ),
                     config_version=(
                         opening_momentum_variant_config_version(
-                            (
-                                f"{breadth_short_hold_config.version_hash()}:"
-                                f"{_BREADTH_SHORT_HOLD_VERSION}"
+                            self._evidence_config_version(
+                                f"{self.config.version_hash()}:"
+                                f"{_LAST_FIVE_GATE_VERSION}"
                             ),
                             universe_config,
                         )
                     ),
-                    universe_source=_BREADTH_SHORT_HOLD_SOURCE,
-                    decision_config=breadth_short_hold_config,
+                    universe_source=_LAST_FIVE_ONLY_SOURCE,
+                    decision_config=self.config,
+                    require_nonnegative_last_five=True,
                 )
             )
         return variants
@@ -738,10 +742,19 @@ class OpeningMomentumShadowService:
             ),
         )
 
-    def _breadth_short_hold_config(self) -> OpeningMomentumConfig:
-        return replace(
-            self._breadth_gate_config(),
-            holding_minutes=15,
+    def _incumbent_config_version(self) -> str:
+        return self._evidence_config_version(
+            self.config.version_hash()
+        )
+
+    @staticmethod
+    def _evidence_config_version(
+        opening_config_version: str,
+    ) -> str:
+        return opening_momentum_evidence_config_version(
+            opening_config_version,
+            universe_algorithm_version=UNIVERSE_ALGORITHM_VERSION,
+            catalog_source_version=CATALOG_SOURCE_VERSION,
         )
 
     def _close_if_due(
@@ -821,7 +834,7 @@ class OpeningMomentumShadowService:
         return OpeningMomentumShadowConfigResponse(
             enabled=settings.opening_momentum_shadow_enabled,
             algorithm_version=ALGORITHM_VERSION,
-            config_version=self.config.version_hash(),
+            config_version=self._incumbent_config_version(),
             signal_minutes=self.config.signal_minutes,
             execution_delay_minutes=(
                 self.config.execution_delay_minutes

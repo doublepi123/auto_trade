@@ -96,6 +96,25 @@ def opening_momentum_variant_config_version(
     return hashlib.sha256(payload.encode("ascii")).hexdigest()
 
 
+def opening_momentum_evidence_config_version(
+    opening_config_version: str,
+    *,
+    universe_algorithm_version: str,
+    catalog_source_version: str,
+) -> str:
+    payload = {
+        "catalog_source_version": catalog_source_version,
+        "opening_config_version": opening_config_version,
+        "universe_algorithm_version": universe_algorithm_version,
+    }
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("ascii")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def select_opening_momentum_universe(
     candidates: Sequence[OpeningMomentumUniverseCandidate],
     config: OpeningMomentumUniverseConfig | None = None,

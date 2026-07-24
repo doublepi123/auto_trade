@@ -590,7 +590,7 @@ class OpeningMomentumShadowVariantResponse(BaseModel):
         "CONTINUATION_CHALLENGER",
         "BREADTH_GATED_CHALLENGER",
         "LAST5_POSITIVE_CHALLENGER",
-        "BREADTH_GATED_15M_CHALLENGER",
+        "LAST5_ONLY_CHALLENGER",
     ]
     universe_source: str
     algorithm_version: str

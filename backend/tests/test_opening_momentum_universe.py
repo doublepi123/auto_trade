@@ -3,6 +3,7 @@ from __future__ import annotations
 from app.domain.opening_momentum_universe import (
     OpeningMomentumUniverseCandidate,
     OpeningMomentumUniverseConfig,
+    opening_momentum_evidence_config_version,
     opening_momentum_variant_config_version,
     select_opening_momentum_universe,
 )
@@ -151,3 +152,24 @@ def test_selection_and_variant_version_are_order_deterministic() -> None:
         "other-base-version",
         config,
     )
+
+
+def test_evidence_version_partitions_selection_and_catalog_changes() -> None:
+    def version(
+        *,
+        opening: str = "opening-v1",
+        universe: str = "universe-v1",
+        catalog: str = "catalog-v1",
+    ) -> str:
+        return opening_momentum_evidence_config_version(
+            opening,
+            universe_algorithm_version=universe,
+            catalog_source_version=catalog,
+        )
+
+    baseline = version()
+
+    assert baseline == version()
+    assert baseline != version(opening="opening-v2")
+    assert baseline != version(universe="universe-v2")
+    assert baseline != version(catalog="catalog-v2")

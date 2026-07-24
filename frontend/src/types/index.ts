@@ -1649,7 +1649,7 @@ export interface OpeningMomentumShadowVariant {
     | 'CONTINUATION_CHALLENGER'
     | 'BREADTH_GATED_CHALLENGER'
     | 'LAST5_POSITIVE_CHALLENGER'
-    | 'BREADTH_GATED_15M_CHALLENGER'
+    | 'LAST5_ONLY_CHALLENGER'
   universe_source: string
   algorithm_version: string
   config_version: string

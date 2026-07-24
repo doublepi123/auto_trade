@@ -106,6 +106,10 @@ describe('Review Workbench Enhancements', () => {
     cy.get('[data-testid="review-compact-mode"]').click()
 
     cy.reload()
+    cy.get(
+      '[data-testid="review-page-root"]',
+      { timeout: 20000 },
+    ).should('be.visible')
 
     cy.get('input[placeholder="例如 AAPL.US"]').invoke('val', 'AAPL.US').trigger('input').trigger('change')
     cy.get('.el-form-item').eq(1).find('input').first().invoke('val', '2026-06-01').trigger('input').trigger('change')

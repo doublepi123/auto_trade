@@ -17,6 +17,9 @@ from app.domain.opening_momentum import (
     OpeningMomentumConfig,
 )
 from app.models import Base, OpeningMomentumShadowRun
+from app.services.opening_momentum_shadow_service import (
+    OpeningMomentumShadowService,
+)
 
 
 _NOW = datetime(2026, 7, 23, 14, 31, tzinfo=timezone.utc)
@@ -87,11 +90,14 @@ class TestOpeningMomentumShadowApi:
     def test_runs_endpoint_serializes_evidence_and_metrics(self) -> None:
         config = OpeningMomentumConfig()
         with self.session_factory() as db:
+            service = OpeningMomentumShadowService(db, config=config)
             db.add(
                 OpeningMomentumShadowRun(
                     session_date=date(2026, 7, 23),
                     algorithm_version=ALGORITHM_VERSION,
-                    config_version=config.version_hash(),
+                    config_version=(
+                        service._incumbent_config_version()
+                    ),
                     status="CLOSED",
                     reason="FIXED_HOLD_EXIT",
                     signal_at=_NOW,

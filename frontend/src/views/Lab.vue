@@ -1793,14 +1793,14 @@ function openingMomentumVariantLabel(
   if (variant === 'INCUMBENT') return '现行选池'
   if (variant === 'CONTINUATION_CHALLENGER') return '动量延续'
   if (variant === 'BREADTH_GATED_CHALLENGER') return '广度过滤'
-  if (variant === 'LAST5_POSITIVE_CHALLENGER') return '末 5 分钟延续'
-  return '广度 15m'
+  if (variant === 'LAST5_POSITIVE_CHALLENGER') return '广度 + 末 5 分钟'
+  return '末 5 分钟过滤'
 }
 function openingMomentumVariantTagType(
   variant: OpeningMomentumShadowStatus['variants'][number]['variant'],
 ): 'primary' | 'warning' | 'info' | 'success' {
   if (variant === 'INCUMBENT') return 'primary'
-  if (variant === 'LAST5_POSITIVE_CHALLENGER') return 'warning'
+  if (variant.includes('LAST5')) return 'warning'
   if (variant.startsWith('BREADTH_GATED')) return 'success'
   return 'info'
 }
