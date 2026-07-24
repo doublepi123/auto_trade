@@ -116,6 +116,9 @@ def _strong_metrics(
         reversal_observations=250,
         latest_intraday_at=_NOW - timedelta(minutes=5),
         blockers=blockers,
+        reversal_gross_outcomes_bps=(
+            (65.0,) * 175 + (-20.0,) * 75
+        ),
     )
 
 
@@ -134,11 +137,13 @@ def test_strong_liquid_mean_reverting_symbol_is_preferred() -> None:
     assert "round_trip_fee=10.0bp" in result.rationale
 
 
-def test_candidate_requires_positive_cost_adjusted_reversal_edge() -> None:
+def test_gross_positive_after_cost_negative_cannot_be_candidate() -> None:
     result = score_watchlist_quant_metrics(
         replace(
             _strong_metrics(),
             conditional_reversal_bps=10.0,
+            conditional_reversal_hit_rate=1.0,
+            reversal_gross_outcomes_bps=(10.0,) * 250,
         ),
         estimated_one_side_fee_rate=_US_ONE_SIDE_FEE_RATE,
     )
@@ -146,6 +151,8 @@ def test_candidate_requires_positive_cost_adjusted_reversal_edge() -> None:
     assert result.score <= 49
     assert result.recommended_action != "CANDIDATE"
     assert "net_reversal30m=-4.6bp" in result.rationale
+    assert "net_reversal30m_hit=0.0%" in result.rationale
+    assert "net_hit_wilson_lower=0.0%" in result.rationale
 
 
 def test_candidate_requires_configured_minimum_edge_cost_ratio(
@@ -161,6 +168,8 @@ def test_candidate_requires_configured_minimum_edge_cost_ratio(
         replace(
             _strong_metrics(),
             conditional_reversal_bps=20.0,
+            conditional_reversal_hit_rate=1.0,
+            reversal_gross_outcomes_bps=(20.0,) * 250,
         ),
         estimated_one_side_fee_rate=_US_ONE_SIDE_FEE_RATE,
     )
@@ -186,6 +195,104 @@ def test_high_configured_fee_downgrades_an_otherwise_valid_candidate() -> None:
     assert high_fee.recommended_action != "CANDIDATE"
     assert "one_side_fee=50.0bp" in high_fee.rationale
     assert "round_trip_fee=100.0bp" in high_fee.rationale
+
+
+def test_high_configured_slippage_downgrades_an_otherwise_valid_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    outcomes = (45.0,) * 175 + (-20.0,) * 75
+    metrics = replace(
+        _strong_metrics(),
+        conditional_reversal_bps=45.0,
+        reversal_gross_outcomes_bps=outcomes,
+    )
+    monkeypatch.setattr(
+        quant_module.settings,
+        "entry_round_trip_slippage_bps",
+        4.0,
+    )
+    baseline = score_watchlist_quant_metrics(
+        metrics,
+        estimated_one_side_fee_rate=_US_ONE_SIDE_FEE_RATE,
+    )
+    monkeypatch.setattr(
+        quant_module.settings,
+        "entry_round_trip_slippage_bps",
+        20.0,
+    )
+    high_slippage = score_watchlist_quant_metrics(
+        metrics,
+        estimated_one_side_fee_rate=_US_ONE_SIDE_FEE_RATE,
+    )
+
+    assert baseline.recommended_action == "CANDIDATE"
+    assert high_slippage.score <= 49
+    assert high_slippage.recommended_action != "CANDIDATE"
+    assert "estimated_cost=30.6bp" in high_slippage.rationale
+
+
+def test_normal_live_spread_is_included_in_candidate_cost() -> None:
+    outcomes = (45.0,) * 175 + (-20.0,) * 75
+    baseline = score_watchlist_quant_metrics(
+        replace(
+            _strong_metrics(spread_bps=0.6),
+            conditional_reversal_bps=45.0,
+            reversal_gross_outcomes_bps=outcomes,
+        ),
+        estimated_one_side_fee_rate=_US_ONE_SIDE_FEE_RATE,
+    )
+    wider = score_watchlist_quant_metrics(
+        replace(
+            _strong_metrics(spread_bps=11.5),
+            conditional_reversal_bps=45.0,
+            reversal_gross_outcomes_bps=outcomes,
+        ),
+        estimated_one_side_fee_rate=_US_ONE_SIDE_FEE_RATE,
+    )
+
+    assert baseline.recommended_action == "CANDIDATE"
+    assert "WIDE_SPREAD" not in wider.rationale
+    assert wider.score <= 49
+    assert wider.recommended_action != "CANDIDATE"
+    assert "estimated_cost=25.5bp" in wider.rationale
+
+
+def test_positive_edge_with_zero_cost_has_unbounded_edge_cost_ratio(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        quant_module.settings,
+        "entry_round_trip_slippage_bps",
+        0.0,
+    )
+    result = score_watchlist_quant_metrics(
+        replace(
+            _strong_metrics(spread_bps=0.0),
+            reversal_gross_outcomes_bps=(65.0,) * 250,
+        ),
+        estimated_one_side_fee_rate=0.0,
+    )
+
+    assert result.recommended_action == "CANDIDATE"
+    assert "estimated_cost=0.0bp" in result.rationale
+    assert "edge_cost_ratio=infx" in result.rationale
+
+
+def test_small_noisy_edge_is_rejected_by_wilson_lower_bound() -> None:
+    outcomes = (65.0,) * 33 + (-20.0,) * 27
+    result = score_watchlist_quant_metrics(
+        replace(
+            _strong_metrics(),
+            conditional_reversal_hit_rate=0.55,
+            reversal_observations=len(outcomes),
+            reversal_gross_outcomes_bps=outcomes,
+        ),
+        estimated_one_side_fee_rate=_US_ONE_SIDE_FEE_RATE,
+    )
+
+    assert "net_reversal30m=+50.4bp" in result.rationale
+    assert "net_reversal30m_hit=55.0%" in result.rationale
+    assert result.recommended_action != "CANDIDATE"
 
 
 def test_hard_blocker_caps_score_and_forces_avoid() -> None:
@@ -225,7 +332,7 @@ class _FakeBroker:
             raise RuntimeError("intraday unavailable")
         if period == "DAY":
             return _daily_bars()[-count:]
-        return _intraday_bars()[-count:]
+        return _intraday_bars(count=count)[-count:]
 
 
 def test_service_persists_sorted_scores_and_isolates_symbol_failure() -> None:
@@ -256,8 +363,8 @@ def test_service_persists_sorted_scores_and_isolates_symbol_failure() -> None:
             "AAPL.US",
             "BROKEN.US",
         ]
-        assert rows[0].source == "quant_v2"
-        assert rows[1].source == "quant_error_v2"
+        assert rows[0].source == "quant_v3"
+        assert rows[1].source == "quant_error_v3"
         assert rows[1].score == 0
         assert rows[1].recommended_action == "AVOID"
         assert db.query(WatchlistScore).count() == 2
@@ -388,6 +495,156 @@ def test_extended_hours_bars_do_not_change_rth_edge_metrics() -> None:
         == baseline.conditional_reversal_hit_rate
     )
     assert observed.reversal_observations == baseline.reversal_observations
+    assert (
+        observed.reversal_gross_outcomes_bps
+        == baseline.reversal_gross_outcomes_bps
+    )
+
+
+def _closes_from_returns(returns: list[float]) -> list[float]:
+    closes = [100.0]
+    for value in returns:
+        closes.append(closes[-1] * math.exp(value))
+    return closes
+
+
+def _walk_forward_training_segments() -> list[list[float]]:
+    return [
+        _closes_from_returns(
+            [
+                (0.001 + (index % 5) * 0.0002)
+                * (-1 if index % 2 else 1)
+                for index in range(70)
+            ]
+        ),
+        _closes_from_returns(
+            [
+                (0.0012 + (index % 7) * 0.00015)
+                * (-1 if index % 3 else 1)
+                for index in range(70)
+            ]
+        ),
+    ]
+
+
+def test_upward_shock_reversals_are_not_long_entry_evidence() -> None:
+    upward_reversal_segments = [
+        _closes_from_returns(
+            [0.02, -0.003, -0.003, -0.003, -0.003, -0.003, -0.003]
+        )
+        for _ in range(80)
+    ]
+    median_bps, hit_rate, outcomes = quant_module._conditional_reversal_stats(
+        [*_walk_forward_training_segments(), *upward_reversal_segments]
+    )
+    events = quant_module._walk_forward_reversal_events(
+        [*_walk_forward_training_segments(), *upward_reversal_segments]
+    )
+    result = score_watchlist_quant_metrics(
+        replace(
+            _strong_metrics(),
+            conditional_reversal_bps=median_bps,
+            conditional_reversal_hit_rate=hit_rate,
+            reversal_observations=len(outcomes),
+            reversal_gross_outcomes_bps=outcomes,
+        ),
+        estimated_one_side_fee_rate=_US_ONE_SIDE_FEE_RATE,
+    )
+
+    assert events
+    assert all(event.shock_direction > 0 for event in events)
+    assert outcomes == ()
+    assert result.recommended_action != "CANDIDATE"
+
+
+def test_downward_shock_rebounds_can_prove_long_entry_edge() -> None:
+    downward_rebound_segments = [
+        _closes_from_returns(
+            [-0.02, 0.003, 0.003, 0.003, 0.003, 0.003, 0.003]
+        )
+        for _ in range(80)
+    ]
+    median_bps, hit_rate, outcomes = quant_module._conditional_reversal_stats(
+        [*_walk_forward_training_segments(), *downward_rebound_segments]
+    )
+    result = score_watchlist_quant_metrics(
+        replace(
+            _strong_metrics(),
+            conditional_reversal_bps=median_bps,
+            conditional_reversal_hit_rate=hit_rate,
+            reversal_observations=len(outcomes),
+            reversal_gross_outcomes_bps=outcomes,
+        ),
+        estimated_one_side_fee_rate=_US_ONE_SIDE_FEE_RATE,
+    )
+
+    assert len(outcomes) >= quant_module._MIN_REVERSAL_OBSERVATIONS
+    assert median_bps > 0
+    assert hit_rate == 1.0
+    assert result.recommended_action == "CANDIDATE"
+
+
+def test_walk_forward_threshold_ignores_current_validation_segment() -> None:
+    training = _walk_forward_training_segments()
+    ordinary_validation = _closes_from_returns(
+        [0.02, -0.003, -0.003, -0.003, -0.003, -0.003, -0.003]
+    )
+    extreme_validation = _closes_from_returns(
+        [0.50, -0.08, -0.08, -0.08, -0.08, -0.08, -0.08]
+    )
+
+    ordinary_events = quant_module._walk_forward_reversal_events(
+        [*training, ordinary_validation]
+    )
+    extreme_events = quant_module._walk_forward_reversal_events(
+        [*training, extreme_validation]
+    )
+    ordinary_thresholds = {
+        event.shock_threshold_bps
+        for event in ordinary_events
+        if event.validation_segment_index == 2
+    }
+    extreme_thresholds = {
+        event.shock_threshold_bps
+        for event in extreme_events
+        if event.validation_segment_index == 2
+    }
+
+    assert {
+        event.validation_segment_index
+        for event in ordinary_events
+    } == {2}
+    assert ordinary_thresholds
+    assert ordinary_thresholds == extreme_thresholds
+
+
+def test_walk_forward_reversal_horizons_do_not_overlap() -> None:
+    training = [
+        _closes_from_returns(
+            [0.001 * (-1 if index % 2 else 1) for index in range(70)]
+        ),
+        _closes_from_returns(
+            [0.0015 * (-1 if index % 2 else 1) for index in range(70)]
+        ),
+    ]
+    validation = _closes_from_returns(
+        [0.02 * (-1 if index % 2 else 1) for index in range(40)]
+    )
+
+    events = [
+        event
+        for event in quant_module._walk_forward_reversal_events(
+            [*training, validation]
+        )
+        if event.validation_segment_index == 2
+    ]
+
+    assert len(events) > 1
+    assert all(
+        right.shock_index - left.shock_index
+        >= quant_module._REVERSAL_HORIZON_BARS
+        for left, right in zip(events, events[1:])
+    )
 
 
 def test_overnight_gap_does_not_inflate_intraday_edge_metrics() -> None:

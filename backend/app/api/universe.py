@@ -9,7 +9,6 @@ from app.config import settings
 from app.core.audit import AuditLogger
 from app.database import get_db
 from app.domain.universe_selection.catalog import INDEX_CANDIDATE_CATALOG
-from app.domain.universe_selection.selector import UniverseSelectionConfig
 from app.models import (
     StrategyConfig,
     StrategyV2ShadowConfig,
@@ -43,25 +42,6 @@ def build_universe_selection_service(
     return UniverseSelectionService(
         db,
         get_runner().broker,
-        config=UniverseSelectionConfig(
-            max_selected=settings.universe_selection_max_symbols,
-            max_per_sector=settings.universe_selection_max_per_sector,
-            min_price=settings.universe_selection_min_price,
-            min_avg_dollar_volume=(
-                settings.universe_selection_min_avg_dollar_volume
-            ),
-            max_relative_spread_bps=(
-                settings.universe_selection_max_spread_bps
-            ),
-            min_realized_vol_20d=(
-                settings.universe_selection_min_realized_vol
-            ),
-            max_realized_vol_20d=(
-                settings.universe_selection_max_realized_vol
-            ),
-            min_atr_pct_14d=settings.universe_selection_min_atr_pct,
-            max_atr_pct_14d=settings.universe_selection_max_atr_pct,
-        ),
         minimum_evaluable_ratio=(
             settings.universe_selection_min_evaluable_ratio
         ),

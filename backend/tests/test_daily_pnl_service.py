@@ -383,7 +383,9 @@ class TestDailyPnlService:
         assert refreshed.net_pnl is not None and refreshed.net_pnl > 0
         db.close()
 
-    def test_authoritative_outcome_drives_calculate_and_risk_reconcile(self) -> None:
+    def test_authoritative_reset_drives_risk_but_not_performance_stats(
+        self,
+    ) -> None:
         self._cleanup()
         trade_day = date(2026, 7, 15)
         db = self._get_db()
@@ -393,7 +395,10 @@ class TestDailyPnlService:
         )
         svc = DailyPnlService(db)
 
-        trips = svc.pair_round_trips(symbol="NVDA.US")
+        replay = svc.pair_round_trips_with_issues(
+            symbol="NVDA.US",
+            include_excursions=False,
+        )
         result = svc.calculate(trade_day=trade_day, symbol="NVDA.US")
         fresh_net_pnl = 10.0 - (205.0 + 206.0) * 10 * 0.0005
         expected_daily_pnl = authoritative_net + fresh_net_pnl
@@ -404,16 +409,24 @@ class TestDailyPnlService:
             result,
         )
 
-        assert len(trips) == 2
-        assert trips[0].quantity == approx(1088.0)
-        assert trips[0].entry_price == approx(206.329)
-        assert trips[0].gross_pnl == approx((208.16 - 206.329) * 1088)
-        assert trips[0].net_pnl == approx(authoritative_net)
-        assert trips[1].exit_broker_order_id == "fresh-sell-after-reset"
-        assert trips[1].quantity == approx(10.0)
-        assert trips[1].entry_price == approx(205.0)
-        assert trips[1].gross_pnl == approx(10.0)
-        assert trips[1].net_pnl == approx(fresh_net_pnl)
+        assert len(replay.trades) == 1
+        assert (
+            replay.trades[0].exit_broker_order_id
+            == "fresh-sell-after-reset"
+        )
+        assert replay.trades[0].quantity == approx(10.0)
+        assert replay.trades[0].entry_price == approx(205.0)
+        assert replay.trades[0].gross_pnl == approx(10.0)
+        assert replay.trades[0].net_pnl == approx(fresh_net_pnl)
+        assert len(replay.issues) == 1
+        assert (
+            replay.issues[0].issue_code
+            is PnlReplayIssueCode.UNVERIFIED_COST_BASIS
+        )
+        assert (
+            replay.issues[0].exit_broker_order_id
+            == "tracked-entry-sell"
+        )
         assert result.realized_pnl == approx(expected_daily_pnl)
         assert [(trade.broker_order_id, trade.quantity) for trade in result.trades] == [
             ("tracked-entry-sell", approx(1088.0)),
@@ -482,6 +495,160 @@ class TestDailyPnlService:
         assert result.is_complete is False
         assert result.realized_pnl == 0.0
         assert result.trades == []
+        db.close()
+
+    def test_malformed_authoritative_outcome_with_inventory_drift_fails_closed(
+        self,
+    ) -> None:
+        self._cleanup()
+        trade_day = date(2026, 7, 17)
+        db = self._get_db()
+        db.add_all([
+            OrderRecord(
+                broker_order_id="stale-buy-before-malformed-exit",
+                symbol="AAPL.US",
+                side="BUY",
+                quantity=12,
+                price=95,
+                executed_quantity=12,
+                executed_price=95,
+                actual_fee=0,
+                status="FILLED",
+                filled_at=self._dt(trade_day, 10),
+            ),
+            OrderRecord(
+                broker_order_id="malformed-authoritative-drift-sell",
+                symbol="AAPL.US",
+                side="SELL",
+                quantity=10,
+                price=100,
+                executed_quantity=10,
+                executed_price=100,
+                actual_fee=0,
+                status="FILLED",
+                filled_at=self._dt(trade_day, 11),
+                cost_basis_price=90,
+                cost_basis_quantity=10,
+                position_quantity_before=10,
+                gross_pnl=100,
+                pnl_fee=0,
+                net_pnl=-100,
+                pnl_source="TRACKED_ENTRY",
+            ),
+        ])
+        db.commit()
+
+        result = DailyPnlService(db).calculate(
+            trade_day=trade_day,
+            symbol="AAPL.US",
+        )
+
+        assert result.is_complete is False
+        assert result.realized_pnl == 0.0
+        assert result.trades == []
+        assert len(result.issues) == 1
+        assert (
+            result.issues[0].issue_code
+            is PnlReplayIssueCode.UNVERIFIED_COST_BASIS
+        )
+        assert (
+            result.issues[0].exit_broker_order_id
+            == "malformed-authoritative-drift-sell"
+        )
+        assert DailyPnlService.reconcile_risk_state(
+            -25.0,
+            2,
+            trade_day,
+            result,
+        ) == (-25.0, 2)
+        db.close()
+
+    def test_partial_authoritative_reset_does_not_validate_residual_position(
+        self,
+    ) -> None:
+        self._cleanup()
+        reset_day = date(2026, 7, 17)
+        residual_exit_day = date(2026, 7, 18)
+        db = self._get_db()
+        db.add_all([
+            OrderRecord(
+                broker_order_id="stale-buy-before-partial-reset",
+                symbol="AAPL.US",
+                side="BUY",
+                quantity=12,
+                price=95,
+                executed_quantity=12,
+                executed_price=95,
+                actual_fee=0,
+                status="FILLED",
+                filled_at=self._dt(reset_day, 10),
+            ),
+            OrderRecord(
+                broker_order_id="valid-partial-authoritative-reset",
+                symbol="AAPL.US",
+                side="SELL",
+                quantity=10,
+                price=100,
+                executed_quantity=10,
+                executed_price=100,
+                actual_fee=0,
+                status="FILLED",
+                filled_at=self._dt(reset_day, 11),
+                cost_basis_price=90,
+                cost_basis_quantity=10,
+                position_quantity_before=20,
+                gross_pnl=100,
+                pnl_fee=0,
+                net_pnl=100,
+                pnl_source="TRACKED_ENTRY",
+            ),
+            OrderRecord(
+                broker_order_id="unverified-residual-sell",
+                symbol="AAPL.US",
+                side="SELL",
+                quantity=10,
+                price=200,
+                executed_quantity=10,
+                executed_price=200,
+                actual_fee=0,
+                status="FILLED",
+                filled_at=self._dt(residual_exit_day, 11),
+            ),
+        ])
+        db.commit()
+        service = DailyPnlService(db)
+
+        reset_result = service.calculate(
+            trade_day=reset_day,
+            symbol="AAPL.US",
+        )
+        residual_result = service.calculate(
+            trade_day=residual_exit_day,
+            symbol="AAPL.US",
+        )
+        replay = service.pair_round_trips_with_issues(
+            symbol="AAPL.US",
+            include_excursions=False,
+        )
+
+        assert reset_result.is_complete is True
+        assert reset_result.realized_pnl == approx(100)
+        assert residual_result.is_complete is False
+        assert residual_result.realized_pnl == 0
+        assert residual_result.trades == []
+        assert len(residual_result.issues) == 1
+        assert (
+            residual_result.issues[0].issue_code
+            is PnlReplayIssueCode.FULL_UNMATCHED_EXIT
+        )
+        assert replay.trades == []
+        assert [
+            issue.issue_code
+            for issue in replay.issues
+        ] == [
+            PnlReplayIssueCode.UNVERIFIED_COST_BASIS,
+            PnlReplayIssueCode.FULL_UNMATCHED_EXIT,
+        ]
         db.close()
 
     def test_near_zero_authoritative_sign_flip_is_not_trusted(self) -> None:

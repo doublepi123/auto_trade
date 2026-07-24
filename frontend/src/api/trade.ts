@@ -1,5 +1,11 @@
 import { api } from './client'
-import type { AccountInfo, OrderCancelAllResult, OrderCancelResult, OrderPage } from '../types'
+import type {
+  AccountInfo,
+  OrderCancelAllResult,
+  OrderCancelResult,
+  OrderPage,
+  StatisticsQuality,
+} from '../types'
 
 export interface GetOrdersParams {
   scope?: 'today' | 'history'
@@ -79,14 +85,35 @@ export async function stopTrading(reason = 'manual'): Promise<{ message: string 
   return resp.data
 }
 
-export interface MetricsSummary {
+export interface MetricsValueSummary {
   trade_count: number
   win_rate: number
   profit_factor: number | null
   sharpe_ratio: number | null
   avg_pnl: number
+  total_pnl: number
   max_drawdown: number
+  max_drawdown_amount: number
+}
+
+export interface MetricsCurrencySummary extends MetricsValueSummary {
+  currency: 'USD' | 'HKD'
+}
+
+export interface MetricsSummary {
+  trade_count: number
+  win_rate: number
+  profit_factor: number | null
+  sharpe_ratio: number | null
+  avg_pnl?: number | null
+  total_pnl?: number | null
+  max_drawdown?: number | null
+  max_drawdown_amount?: number | null
   window_days: number
+  currency?: 'USD' | 'HKD' | 'MIXED' | null
+  totals_comparable?: boolean
+  by_currency?: MetricsCurrencySummary[]
+  statistics_quality?: StatisticsQuality
 }
 
 export interface GetMetricsParams {

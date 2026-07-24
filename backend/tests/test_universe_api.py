@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Generator
 
 from fastapi import FastAPI
@@ -115,6 +116,46 @@ def _service(db: Session) -> UniverseSelectionService:
         enable_shadow=False,
         now=_NOW,
     )
+
+
+def test_production_builder_uses_active_strategy_costs(
+    monkeypatch,
+) -> None:
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    try:
+        db.add(
+            StrategyConfig(
+                symbol="AAPL.US",
+                market="US",
+                fee_rate_us=0.0012,
+            )
+        )
+        db.commit()
+        monkeypatch.setattr(
+            universe_api,
+            "get_runner",
+            lambda: SimpleNamespace(broker=_Broker()),
+        )
+        monkeypatch.setattr(
+            universe_api.settings,
+            "entry_round_trip_slippage_bps",
+            7.5,
+        )
+
+        service = universe_api.build_universe_selection_service(db)
+
+        assert service.config.round_trip_fee_bps == 24.0
+        assert service.config.round_trip_slippage_bps == 7.5
+        assert not db.dirty
+    finally:
+        db.close()
+        engine.dispose()
 
 
 def test_universe_endpoints_return_typed_snapshot(

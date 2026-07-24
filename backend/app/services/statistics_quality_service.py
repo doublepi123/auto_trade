@@ -59,6 +59,9 @@ _ISSUE_REASONS = {
     PnlReplayIssueCode.COST_BASIS_CONFLICT: (
         "persisted authoritative cost basis conflicts with ledger replay"
     ),
+    PnlReplayIssueCode.UNVERIFIED_COST_BASIS: (
+        "authoritative cost basis cannot be verified against local inventory"
+    ),
 }
 
 

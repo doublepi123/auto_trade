@@ -292,7 +292,7 @@ class Settings(BaseSettings):
         validation_alias="AUTO_TRADE_UNIVERSE_SELECTION_INTERVAL_MINUTES",
     )
     universe_selection_max_symbols: int = Field(
-        default=8,
+        default=12,
         ge=1,
         le=20,
         validation_alias="AUTO_TRADE_UNIVERSE_SELECTION_MAX_SYMBOLS",

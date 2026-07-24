@@ -502,6 +502,275 @@ class TestPairRoundTrips:
         assert issue.unmatched_quantity == 0
         db.close()
 
+    def test_authoritative_inventory_reset_is_excluded_from_statistics(
+        self,
+    ) -> None:
+        self._cleanup()
+        day = date(2026, 1, 1)
+        db = self._get_db()
+        db.add_all([
+            OrderRecord(
+                broker_order_id="stale-local-inventory",
+                symbol="AAPL.US",
+                side="BUY",
+                quantity=12,
+                price=95,
+                executed_quantity=12,
+                executed_price=95,
+                actual_fee=0,
+                status="FILLED",
+                filled_at=self._dt(day, 10),
+            ),
+            OrderRecord(
+                broker_order_id="authoritative-reset-sell",
+                symbol="AAPL.US",
+                side="SELL",
+                quantity=10,
+                price=100,
+                executed_quantity=10,
+                executed_price=100,
+                actual_fee=0,
+                status="FILLED",
+                filled_at=self._dt(day, 11),
+                cost_basis_price=90,
+                cost_basis_quantity=10,
+                position_quantity_before=10,
+                gross_pnl=100,
+                pnl_fee=0,
+                net_pnl=100,
+                pnl_source="TRACKED_ENTRY",
+            ),
+            OrderRecord(
+                broker_order_id="fresh-buy-after-reset",
+                symbol="AAPL.US",
+                side="BUY",
+                quantity=1,
+                price=200,
+                executed_quantity=1,
+                executed_price=200,
+                actual_fee=0,
+                status="FILLED",
+                filled_at=self._dt(day, 12),
+            ),
+            OrderRecord(
+                broker_order_id="fresh-sell-after-reset",
+                symbol="AAPL.US",
+                side="SELL",
+                quantity=1,
+                price=210,
+                executed_quantity=1,
+                executed_price=210,
+                actual_fee=0,
+                status="FILLED",
+                filled_at=self._dt(day, 13),
+            ),
+        ])
+        db.commit()
+
+        replay = DailyPnlService(db).pair_round_trips_with_issues(
+            include_excursions=False
+        )
+
+        assert [trade.exit_broker_order_id for trade in replay.trades] == [
+            "fresh-sell-after-reset"
+        ]
+        assert replay.trades[0].gross_pnl == approx(10)
+        assert len(replay.issues) == 1
+        issue = replay.issues[0]
+        assert (
+            issue.issue_code
+            is PnlReplayIssueCode.UNVERIFIED_COST_BASIS
+        )
+        assert issue.exit_broker_order_id == "authoritative-reset-sell"
+        assert issue.filled_quantity == approx(10)
+        assert issue.matched_quantity == approx(10)
+        assert issue.unmatched_quantity == 0
+        db.close()
+
+    def test_malformed_authoritative_reset_is_excluded_from_statistics(
+        self,
+    ) -> None:
+        self._cleanup()
+        day = date(2026, 1, 1)
+        db = self._get_db()
+        db.add_all([
+            OrderRecord(
+                broker_order_id="stale-inventory-before-malformed-reset",
+                symbol="AAPL.US",
+                side="BUY",
+                quantity=12,
+                price=95,
+                executed_quantity=12,
+                executed_price=95,
+                actual_fee=0,
+                status="FILLED",
+                filled_at=self._dt(day, 10),
+            ),
+            OrderRecord(
+                broker_order_id="malformed-authoritative-reset",
+                symbol="AAPL.US",
+                side="SELL",
+                quantity=10,
+                price=100,
+                executed_quantity=10,
+                executed_price=100,
+                actual_fee=0,
+                status="FILLED",
+                filled_at=self._dt(day, 11),
+                cost_basis_price=90,
+                cost_basis_quantity=10,
+                position_quantity_before=10,
+                gross_pnl=100,
+                pnl_fee=0,
+                net_pnl=-100,
+                pnl_source="TRACKED_ENTRY",
+            ),
+            OrderRecord(
+                broker_order_id="fresh-buy-after-malformed-reset",
+                symbol="AAPL.US",
+                side="BUY",
+                quantity=1,
+                price=200,
+                executed_quantity=1,
+                executed_price=200,
+                actual_fee=0,
+                status="FILLED",
+                filled_at=self._dt(day, 12),
+            ),
+            OrderRecord(
+                broker_order_id="fresh-sell-after-malformed-reset",
+                symbol="AAPL.US",
+                side="SELL",
+                quantity=1,
+                price=210,
+                executed_quantity=1,
+                executed_price=210,
+                actual_fee=0,
+                status="FILLED",
+                filled_at=self._dt(day, 13),
+            ),
+        ])
+        db.commit()
+
+        replay = DailyPnlService(db).pair_round_trips_with_issues(
+            include_excursions=False
+        )
+
+        assert [trade.exit_broker_order_id for trade in replay.trades] == [
+            "fresh-sell-after-malformed-reset"
+        ]
+        assert replay.trades[0].gross_pnl == approx(10)
+        assert len(replay.issues) == 1
+        assert (
+            replay.issues[0].issue_code
+            is PnlReplayIssueCode.UNVERIFIED_COST_BASIS
+        )
+        assert (
+            replay.issues[0].exit_broker_order_id
+            == "malformed-authoritative-reset"
+        )
+        db.close()
+
+    def test_partial_malformed_short_reset_does_not_validate_residual_lot(
+        self,
+    ) -> None:
+        self._cleanup()
+        reset_day = date(2026, 1, 1)
+        residual_exit_day = date(2026, 1, 2)
+        db = self._get_db()
+        db.add_all([
+            OrderRecord(
+                broker_order_id="stale-short-before-partial-reset",
+                symbol="AAPL.US",
+                side="SELL_SHORT",
+                quantity=12,
+                price=105,
+                executed_quantity=12,
+                executed_price=105,
+                actual_fee=0,
+                status="FILLED",
+                filled_at=self._dt(reset_day, 10),
+            ),
+            OrderRecord(
+                broker_order_id="malformed-partial-short-reset",
+                symbol="AAPL.US",
+                side="BUY_TO_COVER",
+                quantity=10,
+                price=100,
+                executed_quantity=10,
+                executed_price=100,
+                actual_fee=0,
+                status="FILLED",
+                filled_at=self._dt(reset_day, 11),
+                cost_basis_price=110,
+                cost_basis_quantity=10,
+                position_quantity_before=20,
+                gross_pnl=100,
+                pnl_fee=0,
+                net_pnl=-100,
+                pnl_source="TRACKED_ENTRY",
+            ),
+            OrderRecord(
+                broker_order_id="unverified-residual-cover",
+                symbol="AAPL.US",
+                side="BUY_TO_COVER",
+                quantity=10,
+                price=50,
+                executed_quantity=10,
+                executed_price=50,
+                actual_fee=0,
+                status="FILLED",
+                filled_at=self._dt(residual_exit_day, 11),
+            ),
+        ])
+        db.commit()
+
+        service = DailyPnlService(db)
+        reset_result = service.calculate(
+            trade_day=reset_day,
+            symbol="AAPL.US",
+        )
+        residual_result = service.calculate(
+            trade_day=residual_exit_day,
+            symbol="AAPL.US",
+        )
+        replay = service.pair_round_trips_with_issues(
+            include_excursions=False,
+        )
+
+        assert reset_result.is_complete is False
+        assert reset_result.realized_pnl == 0
+        assert DailyPnlService.reconcile_risk_state(
+            -25.0,
+            2,
+            reset_day,
+            reset_result,
+        ) == (-25.0, 2)
+        assert residual_result.is_complete is False
+        assert residual_result.realized_pnl == 0
+        assert residual_result.trades == []
+        assert len(residual_result.issues) == 1
+        assert (
+            residual_result.issues[0].issue_code
+            is PnlReplayIssueCode.FULL_UNMATCHED_EXIT
+        )
+        assert replay.trades == []
+        assert [
+            issue.issue_code
+            for issue in replay.issues
+        ] == [
+            PnlReplayIssueCode.UNVERIFIED_COST_BASIS,
+            PnlReplayIssueCode.FULL_UNMATCHED_EXIT,
+        ]
+        assert [
+            issue.exit_broker_order_id
+            for issue in replay.issues
+        ] == [
+            "malformed-partial-short-reset",
+            "unverified-residual-cover",
+        ]
+        db.close()
+
     def test_issue_trade_day_is_resolved_per_symbol_market(self) -> None:
         self._cleanup()
         filled_at = datetime(2026, 5, 23, 1, tzinfo=timezone.utc)

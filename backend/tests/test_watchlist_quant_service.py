@@ -68,15 +68,32 @@ def _rth_timestamps(
 
 def _intraday_bars(
     *,
-    count: int = 700,
+    count: int = 1000,
     now: datetime = _NOW,
 ) -> list[BrokerCandle]:
     result: list[BrokerCandle] = []
     previous = 100.0
-    for index, timestamp in enumerate(_rth_timestamps(count, now=now)):
-        close = 100 * math.exp(
-            0.006 * math.sin(2 * math.pi * index / 8)
-        )
+    previous_timestamp: datetime | None = None
+    segment_index = -1
+    bar_index = 0
+    for timestamp in _rth_timestamps(count, now=now):
+        if (
+            previous_timestamp is None
+            or timestamp - previous_timestamp > timedelta(minutes=7)
+        ):
+            segment_index += 1
+            bar_index = 0
+        else:
+            bar_index += 1
+        if segment_index < 2:
+            log_return = 0.003 * (-1 if bar_index % 2 else 1)
+        elif bar_index % 8 == 1:
+            log_return = -0.01
+        elif 2 <= bar_index % 8 <= 7:
+            log_return = 0.001
+        else:
+            log_return = 0.0
+        close = previous * math.exp(log_return)
         result.append(
             BrokerCandle(
                 timestamp=timestamp,
@@ -88,6 +105,7 @@ def _intraday_bars(
             )
         )
         previous = close
+        previous_timestamp = timestamp
     return result
 
 
@@ -121,7 +139,7 @@ def test_quant_score_rewards_liquid_mean_reverting_candidate() -> None:
     assert metrics.conditional_reversal_hit_rate > 0.9
     assert score.score >= 50
     assert score.recommended_action == "CANDIDATE"
-    assert score.rationale.startswith("quant-v2;")
+    assert score.rationale.startswith("quant-v3;")
 
 
 def test_quant_score_caps_candidate_with_hard_data_blockers() -> None:
@@ -223,8 +241,8 @@ def test_service_persists_scores_and_isolates_symbol_failures() -> None:
             "BROKEN.US",
         ]
         by_symbol = {row.symbol: row for row in rows}
-        assert by_symbol["AAPL.US"].source == "quant_v2"
-        assert by_symbol["BROKEN.US"].source == "quant_error_v2"
+        assert by_symbol["AAPL.US"].source == "quant_v3"
+        assert by_symbol["BROKEN.US"].source == "quant_error_v3"
         assert by_symbol["BROKEN.US"].recommended_action == "AVOID"
         assert db.query(WatchlistScore).count() == 2
     finally:
@@ -382,7 +400,7 @@ def test_service_preserves_score_until_first_segment_bar_completes(
             score=72,
             confidence=0.8,
             recommended_action="CANDIDATE",
-            source="quant_v2",
+            source="quant_v3",
             rationale="previous valid score",
             created_at=observed_at - timedelta(hours=1),
             expires_at=observed_at + timedelta(hours=1),
@@ -471,7 +489,7 @@ def test_service_updates_open_market_and_leaves_closed_market_unchanged() -> Non
 
         assert broker.quote_requests == [["AAPL.US"]]
         assert [row.symbol for row in rows] == ["AAPL.US"]
-        assert rows[0].source == "quant_v2"
+        assert rows[0].source == "quant_v3"
         assert db.query(WatchlistScore).count() == 1
     finally:
         db.close()
@@ -502,7 +520,7 @@ def test_quant_rank_api_returns_complete_current_snapshot_for_mixed_markets(
                 score=0,
                 confidence=0,
                 recommended_action="AVOID",
-                source="quant_error_v2",
+                source="quant_error_v3",
                 rationale="current HK data error",
                 created_at=_NOW - timedelta(minutes=30),
                 expires_at=_NOW + timedelta(days=7),
@@ -537,8 +555,60 @@ def test_quant_rank_api_returns_complete_current_snapshot_for_mixed_markets(
             for row in response.scores
         }
         assert set(by_symbol) == {"AAPL.US", "700.HK"}
-        assert by_symbol["AAPL.US"].source == "quant_v2"
-        assert by_symbol["700.HK"].source == "quant_error_v2"
+        assert by_symbol["AAPL.US"].source == "quant_v3"
+        assert by_symbol["700.HK"].source == "quant_error_v3"
+    finally:
+        db.close()
+
+
+def test_current_quant_snapshot_excludes_retained_v2_history() -> None:
+    db = _db()
+    try:
+        db.add_all(
+            [
+                WatchlistScore(
+                    symbol="AAPL.US",
+                    market="US",
+                    score=90,
+                    confidence=0.9,
+                    recommended_action="CANDIDATE",
+                    source="quant_v2",
+                    rationale="retained legacy score",
+                    created_at=_NOW - timedelta(minutes=5),
+                    expires_at=_NOW + timedelta(days=1),
+                ),
+                WatchlistScore(
+                    symbol="AAPL.US",
+                    market="US",
+                    score=70,
+                    confidence=0.8,
+                    recommended_action="CANDIDATE",
+                    source="quant_v3",
+                    rationale="current score",
+                    created_at=_NOW,
+                    expires_at=_NOW + timedelta(days=1),
+                ),
+                WatchlistScore(
+                    symbol="MSFT.US",
+                    market="US",
+                    score=85,
+                    confidence=0.9,
+                    recommended_action="CANDIDATE",
+                    source="quant_v2",
+                    rationale="legacy only",
+                    created_at=_NOW,
+                    expires_at=_NOW + timedelta(days=1),
+                ),
+            ]
+        )
+        db.commit()
+
+        rows = quant_module.list_latest_current_quant_scores(db)
+
+        assert [(row.symbol, row.source) for row in rows] == [
+            ("AAPL.US", "quant_v3")
+        ]
+        assert db.query(WatchlistScore).count() == 3
     finally:
         db.close()
 
@@ -578,7 +648,7 @@ def test_service_does_not_treat_last_trade_age_as_bbo_age() -> None:
         ).score_items([item])
 
         assert len(rows) == 1
-        assert rows[0].source == "quant_v2"
+        assert rows[0].source == "quant_v3"
         assert rows[0].score > 0
         assert "STALE_BBO" not in rows[0].rationale
     finally:

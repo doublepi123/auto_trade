@@ -43,6 +43,129 @@ describe('Dashboard', () => {
     cy.get('[data-testid="session-status"]').should('contain', '交易中')
   })
 
+  it('shows fee-adjusted net metrics and drawdown amount', () => {
+    cy.get('[data-testid="metric-trade-count"]').should('contain', '8')
+    cy.get('[data-testid="metric-max-drawdown"]').should('contain', '$60.00')
+    cy.get('[data-testid="metric-total-pnl"]').should('contain', '+$250.00')
+  })
+
+  it('warns when the metrics quality contract is missing', () => {
+    cy.intercept('GET', '/api/metrics/summary*', {
+      body: {
+        trade_count: 1,
+        win_rate: 100,
+        profit_factor: null,
+        sharpe_ratio: null,
+        avg_pnl: 10,
+        total_pnl: 10,
+        max_drawdown: 0,
+        max_drawdown_amount: 0,
+        window_days: 30,
+        currency: 'USD',
+        totals_comparable: true,
+        by_currency: [],
+      },
+    }).as('metricsWithoutQuality')
+
+    cy.visit('/')
+    cy.wait('@metricsWithoutQuality')
+
+    cy.get('[data-testid="statistics-quality-alert"]')
+      .should('have.attr', 'data-quality-status', 'UNKNOWN')
+  })
+
+  it('does not disguise a metrics request failure as zero trades', () => {
+    cy.intercept('GET', '/api/metrics/summary*', {
+      statusCode: 503,
+      body: { detail: 'unavailable' },
+    }).as('metricsFailure')
+
+    cy.visit('/')
+    cy.wait('@metricsFailure')
+
+    cy.get('[data-testid="metrics-error"]')
+      .should('contain', '交易指标加载失败')
+    cy.get('[data-testid="metric-trade-count"]').should('not.exist')
+    cy.get('[data-testid="metrics-panel"]').should('not.contain', '尚无成交记录')
+  })
+
+  it('keeps the last successful metrics visible after refresh failure', () => {
+    cy.get('[data-testid="metric-trade-count"]').should('contain', '8')
+    cy.intercept('GET', '/api/metrics/summary*', {
+      statusCode: 503,
+      delay: 250,
+      body: { detail: 'unavailable' },
+    }).as('metricsRefreshFailure')
+
+    cy.get('[data-testid="metrics-refresh"]').click()
+    cy.get('[data-testid="metrics-refresh"]').should('be.disabled')
+    cy.wait('@metricsRefreshFailure')
+
+    cy.get('[data-testid="metrics-error"]')
+      .should('contain', '当前显示上次成功数据')
+    cy.get('[data-testid="metric-trade-count"]').should('contain', '8')
+  })
+
+  it('does not combine USD and HKD performance values', () => {
+    cy.intercept('GET', '/api/metrics/summary*', {
+      body: {
+        trade_count: 2,
+        win_rate: 50,
+        profit_factor: null,
+        sharpe_ratio: null,
+        avg_pnl: null,
+        total_pnl: null,
+        max_drawdown: null,
+        max_drawdown_amount: null,
+        window_days: 30,
+        currency: 'MIXED',
+        totals_comparable: false,
+        by_currency: [
+          {
+            currency: 'USD',
+            trade_count: 1,
+            win_rate: 100,
+            profit_factor: null,
+            sharpe_ratio: null,
+            avg_pnl: 10,
+            total_pnl: 10,
+            max_drawdown: 0,
+            max_drawdown_amount: 0,
+          },
+          {
+            currency: 'HKD',
+            trade_count: 1,
+            win_rate: 0,
+            profit_factor: 0,
+            sharpe_ratio: null,
+            avg_pnl: -20,
+            total_pnl: -20,
+            max_drawdown: 0,
+            max_drawdown_amount: 20,
+          },
+        ],
+        statistics_quality: {
+          status: 'COMPLETE',
+          known_exclusion_count: 0,
+          unresolved_issue_count: 0,
+          omitted_day_count: 0,
+          items: [],
+        },
+      },
+    }).as('mixedCurrencyMetrics')
+
+    cy.visit('/')
+    cy.wait('@mixedCurrencyMetrics')
+
+    cy.get('[data-testid="metric-profit-factor"]').should('contain', '—')
+    cy.get('[data-testid="metric-sharpe"]').should('contain', '—')
+    cy.get('[data-testid="metric-total-pnl"]')
+      .should('contain', 'USD +$10.00')
+      .and('contain', 'HKD -HK$20.00')
+      .and('not.have.class', 'metric-positive')
+      .and('not.have.class', 'metric-negative')
+  })
+
   it('shows strategy info section', () => {
     cy.contains('行情信息').should('be.visible')
   })

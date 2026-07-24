@@ -336,7 +336,7 @@ class TestWatchlistScoreAPI:
             market="US",
             score=61,
             recommended_action="CANDIDATE",
-            source="quant_v2",
+            source="quant_v3",
         )
         current.created_at = now - timedelta(minutes=10)
         current.expires_at = now + timedelta(minutes=30)
@@ -345,7 +345,7 @@ class TestWatchlistScoreAPI:
             market="US",
             score=99,
             recommended_action="CANDIDATE",
-            source="quant_v1",
+            source="quant_v2",
         )
         legacy_newer.created_at = now - timedelta(minutes=1)
         svc.record_score(
@@ -353,7 +353,7 @@ class TestWatchlistScoreAPI:
             market="US",
             score=0,
             recommended_action="AVOID",
-            source="quant_error_v2",
+            source="quant_error_v3",
         )
         svc.record_score(
             symbol="AMD.US",
@@ -379,9 +379,9 @@ class TestWatchlistScoreAPI:
             for row in response.json()["scores"]
         }
         assert set(scores) == {"AAPL.US", "MSFT.US"}
-        assert scores["AAPL.US"]["source"] == "quant_v2"
+        assert scores["AAPL.US"]["source"] == "quant_v3"
         assert scores["AAPL.US"]["score"] == 61
-        assert scores["MSFT.US"]["source"] == "quant_error_v2"
+        assert scores["MSFT.US"]["source"] == "quant_error_v3"
         assert scores["MSFT.US"]["recommended_action"] == "AVOID"
 
     def test_scored_snapshots_ignore_newer_legacy_quant_generation(
@@ -407,7 +407,7 @@ class TestWatchlistScoreAPI:
             market="US",
             score=61,
             recommended_action="CANDIDATE",
-            source="quant_v2",
+            source="quant_v3",
         )
         current.created_at = datetime.now(timezone.utc) - timedelta(minutes=10)
         svc.record_score(
@@ -415,7 +415,7 @@ class TestWatchlistScoreAPI:
             market="US",
             score=99,
             recommended_action="CANDIDATE",
-            source="quant_v1",
+            source="quant_v2",
         )
         db_session.commit()
         broker = SimpleNamespace(

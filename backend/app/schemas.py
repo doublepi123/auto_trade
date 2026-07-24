@@ -941,6 +941,51 @@ class StatisticsQuality(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class MetricsValueSummary(BaseModel):
+    trade_count: int = Field(ge=0)
+    win_rate: float = Field(ge=0, le=100)
+    profit_factor: float | None = Field(default=None, ge=0)
+    sharpe_ratio: float | None = None
+    avg_pnl: float
+    total_pnl: float
+    max_drawdown: float = Field(
+        ge=0,
+        description="Legacy cumulative-PnL drawdown percentage.",
+    )
+    max_drawdown_amount: float = Field(
+        ge=0,
+        description="Maximum cumulative realized-PnL drawdown in currency units.",
+    )
+
+
+class MetricsCurrencySummary(MetricsValueSummary):
+    currency: Literal["USD", "HKD"]
+
+
+class MetricsSummaryResponse(BaseModel):
+    trade_count: int = Field(ge=0)
+    win_rate: float = Field(ge=0, le=100)
+    profit_factor: float | None = Field(default=None, ge=0)
+    sharpe_ratio: float | None = None
+    avg_pnl: float | None = None
+    total_pnl: float | None = None
+    max_drawdown: float | None = Field(
+        default=None,
+        ge=0,
+        description="Legacy cumulative-PnL drawdown percentage.",
+    )
+    max_drawdown_amount: float | None = Field(
+        default=None,
+        ge=0,
+        description="Maximum cumulative realized-PnL drawdown in currency units.",
+    )
+    window_days: int = Field(ge=1, le=365)
+    currency: Literal["USD", "HKD", "MIXED"] | None = None
+    totals_comparable: bool = True
+    by_currency: list[MetricsCurrencySummary] = Field(default_factory=list)
+    statistics_quality: StatisticsQuality
+
+
 class ReportResponse(BaseModel):
     period_type: str
     symbol: str

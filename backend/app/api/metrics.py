@@ -1,48 +1,45 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 import math
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.api.auth import require_api_key
+from app.api.trades import _active_fee_rates
+from app.core.market_calendar import trade_day_for
 from app.database import get_db
-from app.models import OrderRecord
+from app.schemas import MetricsSummaryResponse
+from app.services.daily_pnl_service import ClosedRoundTrip, DailyPnlService
+from app.services.statistics_quality_service import select_statistics_sample
 
 router = APIRouter(prefix="/api/metrics", tags=["metrics"])
 
 
-def _order_pnl(order: OrderRecord) -> Optional[float]:
-    """Realised PnL for a filled order, or None if not yet closed.
+def _compute_sharpe(daily_pnls: list[float]) -> Optional[float]:
+    """Annualized realized-PnL Sharpe from weekday observations.
 
-    For BUY orders, PnL is (current_price - filled_price) * qty, but we
-    don't have a reliable mark-to-market at the API layer. Instead, we
-    treat the realised PnL as the price difference between consecutive
-    BUY/SELL pairs on the same symbol, computed in the caller.
+    Absolute currency scale cancels in the ratio. This remains a realized-PnL
+    statistic rather than a mark-to-market account-return Sharpe.
     """
-    if order.status != "FILLED" or order.executed_price is None or order.executed_quantity is None:
+    if len(daily_pnls) < 2:
         return None
-    return float(order.executed_price) * float(order.executed_quantity)
-
-
-def _compute_sharpe(pnls: list[float]) -> Optional[float]:
-    """Annualised Sharpe ratio assuming per-trade observations (252 trading days).
-
-    Returns None when fewer than 2 trades or zero standard deviation.
-    """
-    if len(pnls) < 2:
-        return None
-    n = len(pnls)
-    mean = sum(pnls) / n
-    var = sum((p - mean) ** 2 for p in pnls) / (n - 1)
+    n = len(daily_pnls)
+    mean = sum(daily_pnls) / n
+    var = sum((pnl - mean) ** 2 for pnl in daily_pnls) / (n - 1)
     if var <= 0:
         return None
     return (mean / math.sqrt(var)) * math.sqrt(252)
 
 
-def _compute_metrics(pnls: list[float]) -> dict[str, Any]:
+def _compute_metrics(
+    pnls: list[float],
+    *,
+    daily_pnls: list[float],
+) -> dict[str, Any]:
     if not pnls:
         return {
             "trade_count": 0,
@@ -50,88 +47,154 @@ def _compute_metrics(pnls: list[float]) -> dict[str, Any]:
             "profit_factor": None,
             "sharpe_ratio": None,
             "avg_pnl": 0.0,
+            "total_pnl": 0.0,
             "max_drawdown": 0.0,
+            "max_drawdown_amount": 0.0,
         }
     wins = [p for p in pnls if p > 0]
     losses = [p for p in pnls if p < 0]
     gross_win = sum(wins)
     gross_loss = abs(sum(losses))
     profit_factor = (gross_win / gross_loss) if gross_loss > 0 else None
-    # Max drawdown from cumulative PnL series.
+
     cumulative: list[float] = []
     running = 0.0
+    peak = 0.0
+    max_drawdown_amount = 0.0
     for p in pnls:
         running += p
         cumulative.append(running)
-    peak = cumulative[0]
-    max_dd = 0.0
-    for c in cumulative:
-        if c > peak:
-            peak = c
-        # Drawdown is a percentage drop from the high-water mark. Only
-        # meaningful when the peak is strictly positive; if the entire curve
-        # is below zero (never recovered above the starting point) there is no
-        # positive reference to measure a percentage drop from, so skip.
-        if peak > 0:
-            dd = (peak - c) / peak
-            if dd > max_dd:
-                max_dd = dd
+        peak = max(peak, running)
+        max_drawdown_amount = max(max_drawdown_amount, peak - running)
+
+    # Preserve the legacy percentage field exactly for existing clients. It is
+    # a percentage of the cumulative realized-PnL high-water mark, not account
+    # equity; new clients should use max_drawdown_amount.
+    legacy_peak = cumulative[0]
+    legacy_max_drawdown = 0.0
+    for cumulative_pnl in cumulative:
+        legacy_peak = max(legacy_peak, cumulative_pnl)
+        if legacy_peak > 0:
+            legacy_max_drawdown = max(
+                legacy_max_drawdown,
+                (legacy_peak - cumulative_pnl) / legacy_peak,
+            )
+
+    total_pnl = sum(pnls)
     return {
         "trade_count": len(pnls),
         "win_rate": (len(wins) / len(pnls)) * 100.0,
         "profit_factor": profit_factor,
-        "sharpe_ratio": _compute_sharpe(pnls),
-        "avg_pnl": sum(pnls) / len(pnls),
-        "max_drawdown": max_dd * 100.0,
+        "sharpe_ratio": _compute_sharpe(daily_pnls),
+        "avg_pnl": total_pnl / len(pnls),
+        "total_pnl": total_pnl,
+        "max_drawdown": legacy_max_drawdown * 100.0,
+        "max_drawdown_amount": max_drawdown_amount,
     }
 
 
-@router.get("/summary", dependencies=[Depends(require_api_key())])
+def _trade_currency(symbol: str) -> str:
+    return "HKD" if symbol.upper().endswith(".HK") else "USD"
+
+
+def _realized_daily_pnls(
+    trades: list[ClosedRoundTrip],
+    *,
+    cutoff: datetime,
+    now: datetime,
+) -> list[float]:
+    totals: dict[date, float] = {}
+    for trade in trades:
+        market = "HK" if trade.symbol.upper().endswith(".HK") else "US"
+        trade_day = trade_day_for(market, trade.exit_at)
+        totals[trade_day] = totals.get(trade_day, 0.0) + trade.net_pnl
+
+    observations: list[float] = []
+    cursor = cutoff.date()
+    end = now.date()
+    while cursor <= end:
+        if cursor.weekday() < 5:
+            observations.append(totals.get(cursor, 0.0))
+        cursor += timedelta(days=1)
+    return observations
+
+
+@router.get(
+    "/summary",
+    response_model=MetricsSummaryResponse,
+    dependencies=[Depends(require_api_key())],
+)
 def metrics_summary(
     days: int = Query(default=30, ge=1, le=365, description="Lookback window in days"),
     db: Session = Depends(get_db),
-) -> dict[str, Any]:
+) -> MetricsSummaryResponse:
     """Aggregate trading metrics over the last ``days`` days.
 
-    Computes simple round-trip PnL by pairing SELL orders with their most
-    recent BUY on the same symbol and using the broker's filled price.
-    The metric is a coarse proxy (no lot-level FIFO) and is intended for
-    dashboard at-a-glance only — for precise reporting use the
-    ``/api/reports`` endpoint.
+    Uses the same authoritative FIFO replay, fee schedule, exit-time window,
+    and unresolved-day exclusion policy as ``/api/trades/stats``. Entries
+    before the lookback remain available to match exits inside the window.
     """
-    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-    orders = (
-        db.query(OrderRecord)
-        .filter(OrderRecord.created_at >= cutoff)
-        .filter(OrderRecord.status == "FILLED")
-        .order_by(OrderRecord.created_at.asc())
-        .all()
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=days)
+    fee_rate_us, fee_rate_hk = _active_fee_rates(db)
+    replay = DailyPnlService(db).pair_round_trips_with_issues(
+        fee_rate_us=fee_rate_us,
+        fee_rate_hk=fee_rate_hk,
+        include_excursions=False,
     )
-    # Pair each SELL with the most recent BUY on the same symbol.
-    # Track remaining buy quantity in a side-car float instead of mutating the
-    # ORM instance, which would dirty the session and risk a spurious flush.
-    buy_queue: dict[str, list[tuple[OrderRecord, float]]] = {}
-    pnls: list[float] = []
-    for order in orders:
-        if order.side == "BUY" and order.executed_price is not None and order.executed_quantity is not None:
-            buy_queue.setdefault(order.symbol, []).append((order, float(order.executed_quantity)))
-        elif order.side == "SELL" and order.executed_price is not None and order.executed_quantity is not None:
-            symbol_queue = buy_queue.get(order.symbol, [])
-            if not symbol_queue:
-                continue
-            # Consume from the head of the queue to approximate FIFO.
-            matched_buy, remaining_qty = symbol_queue[0]
-            if matched_buy.executed_price is None:
-                continue
-            qty = min(remaining_qty, float(order.executed_quantity))
-            pnl = (float(order.executed_price) - float(matched_buy.executed_price)) * qty
-            pnls.append(pnl)
-            remaining_qty -= qty
-            if remaining_qty <= 0:
-                symbol_queue.pop(0)
-            else:
-                symbol_queue[0] = (matched_buy, remaining_qty)
+    sample = select_statistics_sample(replay, from_dt=cutoff)
+    ordered_trades = sorted(sample.trades, key=lambda trade: trade.exit_at)
+    pnls = [trade.net_pnl for trade in ordered_trades]
+    trades_by_currency: dict[str, list[ClosedRoundTrip]] = {}
+    for trade in ordered_trades:
+        trades_by_currency.setdefault(
+            _trade_currency(trade.symbol),
+            [],
+        ).append(trade)
 
-    metrics = _compute_metrics(pnls)
+    metrics = _compute_metrics(
+        pnls,
+        daily_pnls=_realized_daily_pnls(
+            ordered_trades,
+            cutoff=cutoff,
+            now=now,
+        ),
+    )
     metrics["window_days"] = days
-    return metrics
+    currencies = sorted(trades_by_currency)
+    metrics["currency"] = (
+        currencies[0]
+        if len(currencies) == 1
+        else "MIXED"
+        if currencies
+        else None
+    )
+    metrics["totals_comparable"] = len(currencies) <= 1
+    if len(currencies) > 1:
+        # Counts and hit rate are dimensionless. Currency-denominated values,
+        # their ratios, and their path statistics are not comparable without
+        # an FX conversion, so fail closed instead of adding USD to HKD.
+        metrics.update(
+            {
+                "profit_factor": None,
+                "sharpe_ratio": None,
+                "avg_pnl": None,
+                "total_pnl": None,
+                "max_drawdown": None,
+                "max_drawdown_amount": None,
+            }
+        )
+    metrics["by_currency"] = [
+        _compute_metrics(
+            [trade.net_pnl for trade in trades_by_currency[currency]],
+            daily_pnls=_realized_daily_pnls(
+                trades_by_currency[currency],
+                cutoff=cutoff,
+                now=now,
+            ),
+        )
+        | {"currency": currency}
+        for currency in currencies
+    ]
+    metrics["statistics_quality"] = asdict(sample.quality)
+    return MetricsSummaryResponse.model_validate(metrics)

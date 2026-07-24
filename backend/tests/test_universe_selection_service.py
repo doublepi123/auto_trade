@@ -232,6 +232,29 @@ def _service(
     )
 
 
+def test_default_selection_config_uses_active_strategy_fee_rate() -> None:
+    db = _db()
+    try:
+        db.add(StrategyConfig(symbol="NVDA.US", fee_rate_us=0.0012))
+        db.commit()
+
+        service = UniverseSelectionService(
+            db,
+            _FakeBroker(),
+            catalog=_CATALOG,
+            minimum_evaluable_ratio=0.5,
+            minimum_residency_days=1,
+            apply_to_watchlist=False,
+            enable_shadow=False,
+            now=_NOW,
+        )
+
+        assert service.config.round_trip_fee_bps == 24.0
+        assert not db.dirty
+    finally:
+        db.close()
+
+
 def test_refresh_persists_and_applies_read_only_candidates_idempotently() -> None:
     db = _db()
     broker = _FakeBroker()

@@ -88,6 +88,7 @@ class PnlReplayIssueCode(str, Enum):
     FULL_UNMATCHED_EXIT = "FULL_UNMATCHED_EXIT"
     PARTIAL_OVERCLOSE = "PARTIAL_OVERCLOSE"
     COST_BASIS_CONFLICT = "COST_BASIS_CONFLICT"
+    UNVERIFIED_COST_BASIS = "UNVERIFIED_COST_BASIS"
 
 
 @dataclass(frozen=True)
@@ -279,9 +280,28 @@ class DailyPnlService:
             fill_trade_day = resolve_day(fill.filled_at)
             authoritative_outcome = self._authoritative_outcome(fill)
             authoritative = authoritative_outcome is not None
+            authoritative_inventory = self._has_authoritative_inventory_snapshot(
+                fill
+            )
+            represented_quantity = (
+                position.long_quantity
+                if fill.side == "SELL"
+                else position.short_quantity
+                if fill.side == "BUY_TO_COVER"
+                else _ZERO
+            )
+            declared_position_quantity = (
+                fill.position_quantity_before or _ZERO
+            )
+            unverified_inventory = (
+                authoritative_inventory
+                and represented_quantity > 0
+                and declared_position_quantity > 0
+                and represented_quantity != declared_position_quantity
+            )
             replay_cost_basis = (
                 self._fully_covered_replay_cost_basis(position, fill)
-                if authoritative
+                if authoritative_inventory
                 else None
             )
             cost_basis_conflict = (
@@ -309,7 +329,23 @@ class DailyPnlService:
                     fill.position_quantity_before,
                 )
             elif authoritative:
-                self._rebase_position_from_authoritative_exit(position, fill)
+                self._rebase_position_from_authoritative_exit(
+                    position,
+                    fill,
+                    position_quantity=(
+                        fill.quantity
+                        if unverified_inventory
+                        else None
+                    ),
+                )
+            elif unverified_inventory:
+                # Consume this disputed close without carrying an unverifiable
+                # residual cost basis into later trade days.
+                self._rebase_position_from_authoritative_exit(
+                    position,
+                    fill,
+                    position_quantity=fill.quantity,
+                )
             matched_quantity, replay_pnl = self._apply_fill_net(
                 position,
                 fill,
@@ -324,6 +360,25 @@ class DailyPnlService:
                 # _apply_fill_net has already consumed the closing fill from
                 # the fully represented ledger position. Keep later replay
                 # state accurate, but do not credit either disputed PnL value.
+                continue
+            if unverified_inventory and not authoritative:
+                is_complete = False
+                issues.append(self._replay_issue(
+                    fill,
+                    trade_day=fill_trade_day,
+                    matched_quantity=matched_quantity,
+                    issue_code=PnlReplayIssueCode.UNVERIFIED_COST_BASIS,
+                ))
+                logger.error(
+                    "daily PnL replay cannot verify malformed authoritative "
+                    "inventory for %s order %s on %s: ledger_quantity=%s "
+                    "position_quantity=%s; refusing suspect realized PnL",
+                    fill.symbol,
+                    fill.broker_order_id or fill.id,
+                    fill_trade_day,
+                    represented_quantity,
+                    declared_position_quantity,
+                )
                 continue
             if authoritative:
                 matched_quantity = fill.cost_basis_quantity or fill.quantity
@@ -539,9 +594,29 @@ class DailyPnlService:
 
         authoritative_outcome = DailyPnlService._authoritative_outcome(exit_fill)
         authoritative = authoritative_outcome is not None
+        authoritative_inventory = (
+            DailyPnlService._has_authoritative_inventory_snapshot(exit_fill)
+        )
+        represented_quantity = sum(
+            (
+                lot.quantity
+                for lot in lot_queue
+                if lot.quantity > 0
+            ),
+            start=_ZERO,
+        )
+        declared_position_quantity = (
+            exit_fill.position_quantity_before or _ZERO
+        )
+        unverified_cost_basis = (
+            authoritative_inventory
+            and represented_quantity > 0
+            and declared_position_quantity > 0
+            and represented_quantity != declared_position_quantity
+        )
         replay_cost_basis = (
             DailyPnlService._fully_covered_lot_cost_basis(lot_queue, exit_fill)
-            if authoritative
+            if authoritative_inventory
             else None
         )
         cost_basis_conflict = (
@@ -551,18 +626,24 @@ class DailyPnlService:
                 replay_cost_basis,
             )
         )
-        if authoritative and not cost_basis_conflict:
+        if (
+            authoritative_inventory
+            and not cost_basis_conflict
+            and (authoritative or unverified_cost_basis)
+        ):
             basis_price = exit_fill.cost_basis_price or _ZERO
-            position_quantity = exit_fill.position_quantity_before or _ZERO
+            synthetic_quantity = declared_position_quantity
+            if unverified_cost_basis:
+                synthetic_quantity = exit_fill.quantity
             opened_at = exit_fill.cost_basis_opened_at or exit_fill.filled_at
             fee_rate = exit_fill.pnl_fee_rate or _ZERO
             lot_queue[:] = [
                 _Lot(
                     order_id=0,
-                    quantity=position_quantity,
+                    quantity=synthetic_quantity,
                     price=basis_price,
                     filled_at=opened_at,
-                    fee_remaining=basis_price * position_quantity * fee_rate,
+                    fee_remaining=basis_price * synthetic_quantity * fee_rate,
                     fee_source="ESTIMATED",
                 )
             ]
@@ -615,6 +696,27 @@ class DailyPnlService:
 
         if matched_quantity <= 0 or first_entry_at is None:
             return [], None
+
+        if unverified_cost_basis:
+            logger.error(
+                "round-trip replay cannot verify authoritative cost basis for "
+                "%s order %s: ledger_quantity=%s position_quantity=%s "
+                "declared_basis=%s; refusing suspect closed trade",
+                exit_fill.symbol,
+                exit_fill.broker_order_id or exit_fill.id,
+                represented_quantity,
+                declared_position_quantity,
+                exit_fill.cost_basis_price,
+            )
+            return [], DailyPnlService._replay_issue(
+                exit_fill,
+                trade_day=to_trade_day(
+                    exit_fill.symbol,
+                    exit_fill.filled_at,
+                ),
+                matched_quantity=matched_quantity,
+                issue_code=PnlReplayIssueCode.UNVERIFIED_COST_BASIS,
+            )
 
         if cost_basis_conflict:
             logger.error(
@@ -1029,14 +1131,7 @@ class DailyPnlService:
         fill: _Fill,
     ) -> tuple[Decimal, Decimal] | None:
         structurally_valid = (
-            fill.side in {"SELL", "BUY_TO_COVER"}
-            and fill.pnl_source in {"TRACKED_ENTRY", "BROKER_POSITION"}
-            and fill.cost_basis_price is not None
-            and fill.cost_basis_price > 0
-            and fill.cost_basis_quantity is not None
-            and fill.cost_basis_quantity == fill.quantity
-            and fill.position_quantity_before is not None
-            and fill.position_quantity_before >= fill.cost_basis_quantity
+            DailyPnlService._has_authoritative_inventory_snapshot(fill)
             and fill.gross_pnl is not None
             and fill.net_pnl is not None
             and fill.pnl_fee is not None
@@ -1073,6 +1168,19 @@ class DailyPnlService:
         effective_fee, _ = DailyPnlService._effective_authoritative_fee(fill)
         expected_net = expected_gross - effective_fee
         return expected_gross, expected_net
+
+    @staticmethod
+    def _has_authoritative_inventory_snapshot(fill: _Fill) -> bool:
+        return (
+            fill.side in {"SELL", "BUY_TO_COVER"}
+            and fill.pnl_source in {"TRACKED_ENTRY", "BROKER_POSITION"}
+            and fill.cost_basis_price is not None
+            and fill.cost_basis_price > 0
+            and fill.cost_basis_quantity is not None
+            and fill.cost_basis_quantity == fill.quantity
+            and fill.position_quantity_before is not None
+            and fill.position_quantity_before >= fill.cost_basis_quantity
+        )
 
     @staticmethod
     def _effective_authoritative_fee(fill: _Fill) -> tuple[Decimal, str]:
@@ -1205,18 +1313,24 @@ class DailyPnlService:
     def _rebase_position_from_authoritative_exit(
         position: _LedgerPosition,
         fill: _Fill,
+        *,
+        position_quantity: Decimal | None = None,
     ) -> None:
         basis_price = fill.cost_basis_price or _ZERO
-        position_quantity = fill.position_quantity_before or _ZERO
+        quantity = (
+            position_quantity
+            if position_quantity is not None
+            else fill.position_quantity_before or _ZERO
+        )
         fee_rate = fill.pnl_fee_rate or _ZERO
         if fill.side == "SELL":
-            position.long_quantity = position_quantity
-            position.long_cost = basis_price * position_quantity
-            position.long_fees = basis_price * position_quantity * fee_rate
+            position.long_quantity = quantity
+            position.long_cost = basis_price * quantity
+            position.long_fees = basis_price * quantity * fee_rate
         else:
-            position.short_quantity = position_quantity
-            position.short_proceeds = basis_price * position_quantity
-            position.short_fees = basis_price * position_quantity * fee_rate
+            position.short_quantity = quantity
+            position.short_proceeds = basis_price * quantity
+            position.short_fees = basis_price * quantity * fee_rate
 
     @staticmethod
     def _apply_fill_net(

@@ -19,7 +19,7 @@ class TestSettings:
         assert s.universe_selection_enabled is False
         assert s.universe_selection_apply_to_watchlist is False
         assert s.universe_selection_enable_shadow is False
-        assert s.universe_selection_max_symbols == 8
+        assert s.universe_selection_max_symbols == 12
         assert s.live_regime_gate_enabled is False
         assert s.live_regime_max_data_age_seconds == 600
         assert s.live_max_entries_per_symbol_per_day == 2

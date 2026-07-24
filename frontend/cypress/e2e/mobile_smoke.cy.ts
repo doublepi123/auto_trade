@@ -9,6 +9,13 @@ describe('Mobile smoke tests', { viewportWidth: 390, viewportHeight: 844 }, () =
     cy.get('body').then(($body) => {
       expect($body[0].scrollWidth).to.be.lte($body[0].clientWidth)
     })
+    cy.get('[data-testid="metrics-panel"]').then(($panel) => {
+      const bounds = $panel[0].getBoundingClientRect()
+      const viewportWidth = $panel[0].ownerDocument.defaultView?.innerWidth
+      expect(viewportWidth).to.be.a('number')
+      expect(bounds.left).to.be.gte(0)
+      expect(bounds.right).to.be.lte(viewportWidth as number)
+    })
   })
 
   it('Kill Switch button is visible and clickable', () => {

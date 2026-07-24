@@ -170,11 +170,22 @@
             <el-button
               link
               size="small"
+              :loading="metricsLoading"
+              :disabled="metricsLoading"
               @click="loadMetrics"
               data-testid="metrics-refresh"
             >刷新</el-button>
           </div>
-          <div class="metrics-grid">
+          <el-alert
+            v-if="metricsError"
+            data-testid="metrics-error"
+            :title="metricsErrorTitle"
+            :description="metricsErrorDescription"
+            type="error"
+            show-icon
+            :closable="false"
+          />
+          <div v-if="metricsLoaded" class="metrics-grid">
             <div class="metric-cell">
               <span class="metric-label">交易笔数</span>
               <strong data-testid="metric-trade-count">{{ metrics.trade_count }}</strong>
@@ -187,14 +198,14 @@
               >{{ metrics.win_rate.toFixed(1) }}%</strong>
             </div>
             <div class="metric-cell">
-              <span class="metric-label">盈亏比</span>
+              <span class="metric-label">利润因子</span>
               <strong
                 :class="(metrics.profit_factor ?? 0) >= 1 ? 'metric-positive' : 'metric-negative'"
                 data-testid="metric-profit-factor"
               >{{ metrics.profit_factor === null ? '—' : metrics.profit_factor.toFixed(2) }}</strong>
             </div>
             <div class="metric-cell">
-              <span class="metric-label">Sharpe</span>
+              <span class="metric-label">日已实现 Sharpe</span>
               <strong
                 :class="(metrics.sharpe_ratio ?? 0) >= 0 ? 'metric-positive' : 'metric-negative'"
                 data-testid="metric-sharpe"
@@ -203,19 +214,26 @@
             <div class="metric-cell">
               <span class="metric-label">最大回撤</span>
               <strong
-                :class="metrics.max_drawdown > 20 ? 'metric-negative' : ''"
+                :class="(metrics.max_drawdown_amount ?? 0) > 0 ? 'metric-negative' : ''"
                 data-testid="metric-max-drawdown"
-              >{{ metrics.max_drawdown.toFixed(1) }}%</strong>
+              >{{ metricsMaxDrawdownText }}</strong>
             </div>
             <div class="metric-cell">
-              <span class="metric-label">均 PnL</span>
+              <span class="metric-label">净 PnL</span>
               <strong
-                :class="metrics.avg_pnl >= 0 ? 'metric-positive' : 'metric-negative'"
-                data-testid="metric-avg-pnl"
-              >${{ formatNumber(metrics.avg_pnl) }}</strong>
+                :class="metricsTotalPnlClass"
+                data-testid="metric-total-pnl"
+              >{{ metricsTotalPnlText }}</strong>
             </div>
           </div>
-          <p v-if="metrics.trade_count === 0 && !metricsLoading" class="empty-note">尚无成交记录</p>
+          <StatisticsQualityAlert
+            v-if="metricsLoaded"
+            :quality="metrics.statistics_quality"
+          />
+          <p
+            v-if="metricsLoaded && metrics.trade_count === 0 && !metricsLoading && !metricsError"
+            class="empty-note"
+          >{{ metricsEmptyMessage }}</p>
         </section>
 
         <section class="cockpit-panel llm-panel" data-testid="llm-panel" v-loading="llmStatusLoading">
@@ -754,6 +772,7 @@ import RiskHistoryPanel from '../components/RiskHistoryPanel.vue'
 import EquityCurvePanel from '../components/EquityCurvePanel.vue'
 import SymbolAttributionPanel from '../components/SymbolAttributionPanel.vue'
 import SessionClockPanel from '../components/SessionClockPanel.vue'
+import StatisticsQualityAlert from '../components/StatisticsQualityAlert.vue'
 import { useDashboardData } from '../composables/useDashboardData'
 import { useConnectionHealth } from '../composables/useConnectionHealth'
 import { useAccountRefresh } from '../composables/useAccountRefresh'
@@ -764,12 +783,12 @@ import { usePinnedSymbols } from '../composables/usePinnedSymbols'
 import { useRegisterViewRefresh } from '../composables/useViewRefreshRegistry'
 import { useDiagnosticsSnapshot } from '../composables/useDiagnosticsSnapshot'
 import { startTrading, stopTrading, pauseTrading, resumeTrading, enableProtectiveExits, disableProtectiveExits, activateKillSwitch, disableKillSwitch, getLLMIntervalStatus, getNotifications, getOrders, getTradeEvents, getMetricsSummary } from '../api'
-import type { LLMIntervalStatus, NotificationLogOut, OrderRecord, Position, StatusHistoryPoint, TradeEventRecord } from '../types'
+import type { LLMIntervalStatus, NotificationLogOut, OrderRecord, Position, StatisticsQuality, StatusHistoryPoint, TradeEventRecord } from '../types'
 import { engineStateLabel, auditActionLabel, marketLabel, positionSideLabel, skipCategoryLabel, tradeEventTypeLabel } from '../utils/labels'
 import { EVENT_TYPE } from '../utils/constants'
 import { downloadCsv } from '../utils/csv'
 import { relativeAgeLabel } from '../utils/time'
-import { formatNumber, signedCurrency, signedPercent } from '../utils/format'
+import { formatCurrency, formatNumber, signedCurrency, signedPercent } from '../utils/format'
 import { resolveErrorMessage } from '../utils/error'
 
 type CypressWindow = Window & { Cypress?: unknown }
@@ -1085,13 +1104,26 @@ async function loadStatusHistory() {
 
 const metricsWindowDays = ref(30)
 const metricsLoading = ref(false)
+const metricsLoaded = ref(false)
+const metricsError = ref(false)
+const metricsUpdatedAt = ref<number | null>(null)
+interface DashboardCurrencyMetrics {
+  currency: 'USD' | 'HKD'
+  total_pnl: number
+  max_drawdown_amount: number
+}
 interface DashboardMetrics {
   trade_count: number
   win_rate: number
   profit_factor: number | null
   sharpe_ratio: number | null
   avg_pnl: number
-  max_drawdown: number
+  total_pnl: number | null
+  max_drawdown_amount: number | null
+  currency: 'USD' | 'HKD' | 'MIXED' | null
+  totals_comparable: boolean
+  by_currency: DashboardCurrencyMetrics[]
+  statistics_quality: StatisticsQuality | null
 }
 const metrics = ref<DashboardMetrics>({
   trade_count: 0,
@@ -1099,11 +1131,87 @@ const metrics = ref<DashboardMetrics>({
   profit_factor: null,
   sharpe_ratio: null,
   avg_pnl: 0,
-  max_drawdown: 0,
+  total_pnl: null,
+  max_drawdown_amount: null,
+  currency: null,
+  totals_comparable: true,
+  by_currency: [],
+  statistics_quality: null,
 })
 
+function metricsCurrencyMarket(currency: 'USD' | 'HKD'): 'US' | 'HK' {
+  return currency === 'HKD' ? 'HK' : 'US'
+}
+
+const metricsTotalPnlText = computed(() => {
+  if (!metrics.value.totals_comparable) {
+    return metrics.value.by_currency
+      .map((row) => (
+        `${row.currency} ${signedCurrency(row.total_pnl, metricsCurrencyMarket(row.currency))}`
+      ))
+      .join(' / ') || '—'
+  }
+  if (metrics.value.total_pnl === null) return '—'
+  const market = metrics.value.currency === 'HKD' ? 'HK' : 'US'
+  return signedCurrency(metrics.value.total_pnl, market)
+})
+
+const metricsMaxDrawdownText = computed(() => {
+  if (!metrics.value.totals_comparable) {
+    return metrics.value.by_currency
+      .map((row) => (
+        `${row.currency} ${formatCurrency(row.max_drawdown_amount, metricsCurrencyMarket(row.currency))}`
+      ))
+      .join(' / ') || '—'
+  }
+  if (metrics.value.max_drawdown_amount === null) return '—'
+  const market = metrics.value.currency === 'HKD' ? 'HK' : 'US'
+  return formatCurrency(metrics.value.max_drawdown_amount, market)
+})
+
+const metricsTotalPnlClass = computed(() => {
+  if (!metrics.value.totals_comparable) {
+    const values = metrics.value.by_currency.map((row) => row.total_pnl)
+    if (values.length > 0 && values.every((value) => value >= 0)) {
+      return 'metric-positive'
+    }
+    if (values.length > 0 && values.every((value) => value <= 0)) {
+      return 'metric-negative'
+    }
+    return ''
+  }
+  if (metrics.value.total_pnl === null) return ''
+  return metrics.value.total_pnl >= 0
+    ? 'metric-positive'
+    : 'metric-negative'
+})
+
+const metricsErrorTitle = computed(() => (
+  metricsLoaded.value
+    ? '交易指标刷新失败，当前显示上次成功数据'
+    : '交易指标加载失败'
+))
+
+const metricsErrorDescription = computed(() => {
+  if (metricsUpdatedAt.value === null) return '请稍后重试。'
+  const observedAt = new Date(metricsUpdatedAt.value).toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  })
+  return `上次成功更新：${observedAt}`
+})
+
+const metricsEmptyMessage = computed(() => (
+  metrics.value.statistics_quality?.status === 'COMPLETE'
+    ? '尚无成交记录'
+    : '当前窗口暂无可验证的完整往返交易'
+))
+
 async function loadMetrics() {
+  if (metricsLoading.value) return
   metricsLoading.value = true
+  metricsError.value = false
   try {
     const data = await getMetricsSummary({ days: metricsWindowDays.value })
     metrics.value = {
@@ -1112,11 +1220,17 @@ async function loadMetrics() {
       profit_factor: data.profit_factor ?? null,
       sharpe_ratio: data.sharpe_ratio ?? null,
       avg_pnl: data.avg_pnl ?? 0,
-      max_drawdown: data.max_drawdown ?? 0,
+      total_pnl: data.total_pnl ?? null,
+      max_drawdown_amount: data.max_drawdown_amount ?? null,
+      currency: data.currency ?? null,
+      totals_comparable: data.totals_comparable ?? true,
+      by_currency: data.by_currency ?? [],
+      statistics_quality: data.statistics_quality ?? null,
     }
+    metricsLoaded.value = true
+    metricsUpdatedAt.value = Date.now()
   } catch {
-    // Leave previous values in place; the panel shows a load error via
-    // the section's v-loading state.
+    metricsError.value = true
   } finally {
     metricsLoading.value = false
   }
@@ -1581,6 +1695,7 @@ function severityType(s: string): string {
 }
 
 .cockpit-panel {
+  min-width: 0;
   min-height: 248px;
   padding: 14px;
 }
@@ -1734,6 +1849,38 @@ function severityType(s: string): string {
 }
 
 .pnl-box {
+  margin-top: 10px;
+}
+
+.metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.metric-cell {
+  min-width: 0;
+  border-radius: 6px;
+  padding: 9px 10px;
+  background: #f8fafc;
+}
+
+.metric-label {
+  display: block;
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.metric-cell strong {
+  display: block;
+  margin-top: 3px;
+  overflow-wrap: anywhere;
+  color: #172033;
+  font-size: 17px;
+}
+
+.metrics-panel :deep(.statistics-quality-alert) {
   margin-top: 10px;
 }
 
@@ -2113,7 +2260,7 @@ function severityType(s: string): string {
   .chart-panels,
   .position-main,
   .strategy-list {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .action-grid {

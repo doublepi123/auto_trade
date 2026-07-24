@@ -38,7 +38,7 @@ class DailyBar(Protocol):
 
 @dataclass(frozen=True)
 class UniverseSelectionConfig:
-    max_selected: int = 8
+    max_selected: int = 12
     max_per_sector: int = 2
     min_completed_bars: int = 21
     min_price: float = 10.0

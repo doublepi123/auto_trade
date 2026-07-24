@@ -112,7 +112,9 @@ function connectWebSocket(): void {
       if (
         typeof raw === 'object' &&
         raw !== null &&
-        (raw as { type?: string }).type === 'pong'
+        ['ping', 'pong'].includes(
+          (raw as { type?: string }).type ?? '',
+        )
       ) {
         return
       }

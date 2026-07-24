@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import threading
 import time
 import uuid
@@ -87,7 +88,10 @@ class _RunClaim:
     token: str
 
 
-def selection_config_from_settings() -> UniverseSelectionConfig:
+def selection_config_from_settings(
+    *,
+    round_trip_fee_bps: float | None = None,
+) -> UniverseSelectionConfig:
     return UniverseSelectionConfig(
         max_selected=settings.universe_selection_max_symbols,
         max_per_sector=settings.universe_selection_max_per_sector,
@@ -100,7 +104,33 @@ def selection_config_from_settings() -> UniverseSelectionConfig:
         max_realized_vol_20d=settings.universe_selection_max_realized_vol,
         min_atr_pct_14d=settings.universe_selection_min_atr_pct,
         max_atr_pct_14d=settings.universe_selection_max_atr_pct,
+        round_trip_fee_bps=(
+            10.0
+            if round_trip_fee_bps is None
+            else round_trip_fee_bps
+        ),
+        round_trip_slippage_bps=settings.entry_round_trip_slippage_bps,
     )
+
+
+def _active_round_trip_fee_bps(db: Session) -> float | None:
+    with db.no_autoflush:
+        config = (
+            db.query(StrategyConfig)
+            .order_by(StrategyConfig.id.desc())
+            .first()
+        )
+    fee_rate = getattr(config, "fee_rate_us", None)
+    if fee_rate is None:
+        return None
+    value = float(fee_rate)
+    if not math.isfinite(value) or value < 0:
+        logger.warning(
+            "ignoring invalid US fee rate for universe selection: %r",
+            fee_rate,
+        )
+        return None
+    return round(value * 2 * 10_000, 10)
 
 
 class UniverseSelectionService:
@@ -122,7 +152,9 @@ class UniverseSelectionService:
         self.db = db
         self.broker = broker
         self.catalog = tuple(catalog)
-        self.config = config or selection_config_from_settings()
+        self.config = config or selection_config_from_settings(
+            round_trip_fee_bps=_active_round_trip_fee_bps(db),
+        )
         self.minimum_evaluable_ratio = (
             settings.universe_selection_min_evaluable_ratio
             if minimum_evaluable_ratio is None

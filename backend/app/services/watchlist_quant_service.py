@@ -20,8 +20,8 @@ from app.services.watchlist_score_service import WatchlistScoreService
 
 logger = logging.getLogger("auto_trade.watchlist_quant_service")
 
-QUANT_SCORE_SOURCE = "quant_v2"
-QUANT_ERROR_SOURCE = "quant_error_v2"
+QUANT_SCORE_SOURCE = "quant_v3"
+QUANT_ERROR_SOURCE = "quant_error_v3"
 CURRENT_QUANT_SOURCES = (
     QUANT_SCORE_SOURCE,
     QUANT_ERROR_SOURCE,
@@ -35,7 +35,9 @@ _MAX_INTRADAY_GAP = timedelta(minutes=7)
 _MAX_INTRADAY_AGE = timedelta(minutes=15)
 _INTRADAY_BAR_DURATION = timedelta(minutes=5)
 _REVERSAL_HORIZON_BARS = 6
+_MIN_REVERSAL_TRAINING_RETURNS = 120
 _MIN_REVERSAL_OBSERVATIONS = 60
+_WILSON_Z = 1.6448536269514722
 _DEFAULT_ONE_SIDE_FEE_RATE_US = Decimal("0.0005")
 _DEFAULT_ONE_SIDE_FEE_RATE_HK = Decimal("0.003")
 _DATA_QUALITY_BLOCKERS = frozenset(
@@ -111,6 +113,7 @@ class WatchlistQuantMetrics:
     reversal_observations: int
     latest_intraday_at: datetime | None
     blockers: tuple[str, ...]
+    reversal_gross_outcomes_bps: tuple[float, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -119,6 +122,15 @@ class WatchlistQuantScore:
     confidence: float
     recommended_action: str
     rationale: str
+
+
+@dataclass(frozen=True)
+class _WalkForwardReversalEvent:
+    validation_segment_index: int
+    shock_index: int
+    shock_threshold_bps: float
+    shock_direction: int
+    gross_outcome_bps: float
 
 
 def _clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
@@ -189,21 +201,25 @@ def _percentile(values: Sequence[float], quantile: float) -> float:
     return ordered[lower] * (1 - fraction) + ordered[upper] * fraction
 
 
-def _conditional_reversal_stats(
+def _walk_forward_reversal_events(
     close_segments: Sequence[Sequence[float]],
-) -> tuple[float, float, int]:
-    return_segments = [_log_returns(segment) for segment in close_segments]
-    absolute_returns = [
-        abs(value)
-        for segment in return_segments
-        for value in segment
-    ]
-    shock_threshold = _percentile(absolute_returns, 0.75)
-    if shock_threshold <= 0:
-        return 0.0, 0.0, 0
-
-    outcomes: list[float] = []
-    for segment in close_segments:
+) -> list[_WalkForwardReversalEvent]:
+    """Evaluate each RTH segment using only strictly earlier segments."""
+    training_absolute_returns: list[float] = []
+    events: list[_WalkForwardReversalEvent] = []
+    for segment_index, segment in enumerate(close_segments):
+        segment_returns = _log_returns(segment)
+        if len(training_absolute_returns) < _MIN_REVERSAL_TRAINING_RETURNS:
+            training_absolute_returns.extend(
+                abs(value) for value in segment_returns
+            )
+            continue
+        shock_threshold = _percentile(training_absolute_returns, 0.75)
+        if shock_threshold <= 0:
+            training_absolute_returns.extend(
+                abs(value) for value in segment_returns
+            )
+            continue
         index = 1
         while index < len(segment) - _REVERSAL_HORIZON_BARS:
             shock = math.log(segment[index] / segment[index - 1])
@@ -214,17 +230,81 @@ def _conditional_reversal_stats(
                 segment[index + _REVERSAL_HORIZON_BARS]
                 / segment[index]
             )
-            outcomes.append(
-                -math.copysign(1.0, shock) * future * 10_000
+            events.append(
+                _WalkForwardReversalEvent(
+                    validation_segment_index=segment_index,
+                    shock_index=index,
+                    shock_threshold_bps=shock_threshold * 10_000,
+                    shock_direction=1 if shock > 0 else -1,
+                    gross_outcome_bps=(
+                        -math.copysign(1.0, shock) * future * 10_000
+                    ),
+                )
             )
             index += _REVERSAL_HORIZON_BARS
+        training_absolute_returns.extend(
+            abs(value) for value in segment_returns
+        )
+    return events
+
+
+def _conditional_reversal_stats(
+    close_segments: Sequence[Sequence[float]],
+) -> tuple[float, float, tuple[float, ...]]:
+    # Live entries are long-only: only a downward shock followed by a rebound
+    # represents an executable flat-to-long edge.
+    outcomes = tuple(
+        event.gross_outcome_bps
+        for event in _walk_forward_reversal_events(close_segments)
+        if event.shock_direction < 0
+    )
     if not outcomes:
-        return 0.0, 0.0, 0
+        return 0.0, 0.0, ()
     return (
         statistics.median(outcomes),
         sum(value > 0 for value in outcomes) / len(outcomes),
-        len(outcomes),
+        outcomes,
     )
+
+
+def _walk_forward_intraday_reversal_rate(
+    return_segments: Sequence[Sequence[float]],
+) -> float:
+    training_absolute_returns: list[float] = []
+    reversal_pairs = 0
+    observations = 0
+    for segment in return_segments:
+        if len(training_absolute_returns) >= _MIN_REVERSAL_TRAINING_RETURNS:
+            shock_threshold = _percentile(
+                training_absolute_returns,
+                0.50,
+            )
+            if shock_threshold > 0:
+                for current, following in zip(segment, segment[1:]):
+                    if abs(current) < shock_threshold:
+                        continue
+                    observations += 1
+                    if current * following < 0:
+                        reversal_pairs += 1
+        training_absolute_returns.extend(abs(value) for value in segment)
+    return reversal_pairs / observations if observations else 0.0
+
+
+def _wilson_lower_bound(successes: int, observations: int) -> float:
+    if observations <= 0:
+        return 0.0
+    proportion = successes / observations
+    z_squared = _WILSON_Z**2
+    denominator = 1 + z_squared / observations
+    center = proportion + z_squared / (2 * observations)
+    margin = _WILSON_Z * math.sqrt(
+        (
+            proportion * (1 - proportion)
+            + z_squared / (4 * observations)
+        )
+        / observations
+    )
+    return _clamp((center - margin) / denominator)
 
 
 def _intraday_close_segments(
@@ -424,22 +504,8 @@ def build_watchlist_quant_metrics(
     drawdown_60d_pct = _max_drawdown(daily_closes[-60:]) * 100
 
     absolute_intraday_returns = [abs(value) for value in intraday_returns]
-    shock_threshold = (
-        statistics.median(absolute_intraday_returns)
-        if absolute_intraday_returns
-        else 0.0
-    )
-    shock_pairs = [
-        (current, following)
-        for segment in intraday_return_segments
-        for current, following in zip(segment, segment[1:])
-        if shock_threshold > 0 and abs(current) >= shock_threshold
-    ]
-    intraday_reversal_rate = (
-        sum(1 for current, following in shock_pairs if current * following < 0)
-        / len(shock_pairs)
-        if shock_pairs
-        else 0.0
+    intraday_reversal_rate = _walk_forward_intraday_reversal_rate(
+        intraday_return_segments
     )
     total_path = sum(absolute_intraday_returns)
     intraday_efficiency = (
@@ -457,8 +523,9 @@ def build_watchlist_quant_metrics(
     (
         conditional_reversal_bps,
         conditional_reversal_hit_rate,
-        reversal_observations,
+        reversal_gross_outcomes_bps,
     ) = _conditional_reversal_stats(intraday_close_segments)
+    reversal_observations = len(reversal_gross_outcomes_bps)
 
     # BrokerGateway only exposes a non-zero BBO from a live snapshot or its
     # independently age-bounded depth cache. Quote.timestamp is the latest
@@ -517,6 +584,7 @@ def build_watchlist_quant_metrics(
         reversal_observations=reversal_observations,
         latest_intraday_at=latest_intraday_at,
         blockers=tuple(blockers),
+        reversal_gross_outcomes_bps=reversal_gross_outcomes_bps,
     )
 
 
@@ -574,34 +642,68 @@ def score_watchlist_quant_metrics(
         + (metrics.spread_bps if metrics.spread_bps is not None else 12.0)
         + settings.entry_round_trip_slippage_bps
     )
-    gross_reversal_edge_bps = max(
-        0.0,
-        metrics.conditional_reversal_bps,
+    gross_outcomes_bps = tuple(
+        value
+        for value in metrics.reversal_gross_outcomes_bps
+        if math.isfinite(value)
     )
-    edge_to_cost = (
-        gross_reversal_edge_bps / estimated_cost_bps
-        if estimated_cost_bps > 0
+    gross_reversal_median_bps = (
+        statistics.median(gross_outcomes_bps)
+        if gross_outcomes_bps
         else 0.0
     )
+    gross_reversal_hit_rate = (
+        sum(value > 0 for value in gross_outcomes_bps)
+        / len(gross_outcomes_bps)
+        if gross_outcomes_bps
+        else 0.0
+    )
+    net_outcomes_bps = tuple(
+        value - estimated_cost_bps
+        for value in gross_outcomes_bps
+    )
+    net_reversal_edge_bps = (
+        statistics.median(net_outcomes_bps)
+        if net_outcomes_bps
+        else 0.0
+    )
+    net_reversal_successes = sum(
+        value > 0 for value in net_outcomes_bps
+    )
+    reversal_observations = len(net_outcomes_bps)
+    net_reversal_hit_rate = (
+        net_reversal_successes / reversal_observations
+        if reversal_observations
+        else 0.0
+    )
+    net_reversal_hit_wilson_lower = _wilson_lower_bound(
+        net_reversal_successes,
+        reversal_observations,
+    )
+    gross_reversal_edge_bps = max(0.0, gross_reversal_median_bps)
+    if estimated_cost_bps > 0:
+        edge_to_cost = gross_reversal_edge_bps / estimated_cost_bps
+    elif gross_reversal_edge_bps > 0:
+        edge_to_cost = math.inf
+    else:
+        edge_to_cost = 0.0
     minimum_edge_cost_ratio = settings.min_entry_edge_cost_ratio
     edge_strength = _clamp(
         (edge_to_cost - minimum_edge_cost_ratio) / 1.5
     )
     edge_consistency = _clamp(
-        (metrics.conditional_reversal_hit_rate - 0.50) / 0.20
+        (net_reversal_hit_wilson_lower - 0.50) / 0.20
     )
     reversal_sample_strength = _clamp(
-        metrics.reversal_observations / 200
+        reversal_observations / 200
     )
     tradable_edge = (
         edge_strength * 0.70
         + edge_consistency * 0.30
     ) * reversal_sample_strength
-    net_reversal_edge_bps = (
-        metrics.conditional_reversal_bps - estimated_cost_bps
-    )
     meets_minimum_entry_edge = (
         net_reversal_edge_bps > 0
+        and net_reversal_hit_wilson_lower > 0.50
         and edge_to_cost >= minimum_edge_cost_ratio
     )
     drawdown = _clamp(1.0 - metrics.drawdown_60d_pct / 35.0)
@@ -633,9 +735,13 @@ def score_watchlist_quant_metrics(
 
     confidence = round(
         _clamp(
-            0.50
-            + data_completeness * 0.30
+            0.45
+            + data_completeness * 0.25
             + reversal_sample_strength * 0.15
+            + _clamp(
+                (net_reversal_hit_wilson_lower - 0.50) / 0.25
+            )
+            * 0.15
             - len(metrics.blockers) * 0.10
         ),
         4,
@@ -651,20 +757,22 @@ def score_watchlist_quant_metrics(
         else ""
     )
     rationale = (
-        "quant-v2"
+        "quant-v3"
         f"; dollar_volume={metrics.median_daily_dollar_volume / 1_000_000:.1f}m"
         f"; spread={spread_label}"
         f"; atr={metrics.atr_pct:.2f}%"
         f"; return20={metrics.return_20d_pct:+.2f}%"
         f"; reversal5m={metrics.intraday_reversal_rate * 100:.1f}%"
         f"; autocorr5m={metrics.intraday_autocorrelation:+.3f}"
-        f"; reversal30m={metrics.conditional_reversal_bps:+.1f}bp"
-        f"; reversal30m_hit={metrics.conditional_reversal_hit_rate * 100:.1f}%"
-        f"; reversal_n={metrics.reversal_observations}"
+        f"; reversal30m={gross_reversal_median_bps:+.1f}bp"
+        f"; reversal30m_hit={gross_reversal_hit_rate * 100:.1f}%"
+        f"; reversal_n={reversal_observations}"
         f"; one_side_fee={estimated_one_side_fee_rate * 10_000:.1f}bp"
         f"; round_trip_fee={estimated_fee_bps:.1f}bp"
         f"; estimated_cost={estimated_cost_bps:.1f}bp"
         f"; net_reversal30m={net_reversal_edge_bps:+.1f}bp"
+        f"; net_reversal30m_hit={net_reversal_hit_rate * 100:.1f}%"
+        f"; net_hit_wilson_lower={net_reversal_hit_wilson_lower * 100:.1f}%"
         f"; edge_cost_ratio={edge_to_cost:.3f}x"
         f"; required_edge_cost_ratio={minimum_edge_cost_ratio:.3f}x"
         f"; drawdown60={metrics.drawdown_60d_pct:.2f}%"
@@ -836,7 +944,7 @@ class WatchlistQuantService:
                     symbol=item.symbol,
                     market=item.market,
                     score=0.0,
-                    rationale=f"quant-v2 data error: {type(exc).__name__}",
+                    rationale=f"quant-v3 data error: {type(exc).__name__}",
                     confidence=0.0,
                     recommended_action="AVOID",
                     source=QUANT_ERROR_SOURCE,
