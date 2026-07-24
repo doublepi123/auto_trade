@@ -3,8 +3,8 @@
     <div class="orders-header">
       <h3>{{ scope === 'today' ? '今日订单' : '历史订单' }}</h3>
       <el-radio-group v-model="scope" size="small" @change="handleScopeChange">
-        <el-radio-button label="today">今日订单</el-radio-button>
-        <el-radio-button label="history">历史订单</el-radio-button>
+        <el-radio-button value="today">今日订单</el-radio-button>
+        <el-radio-button value="history">历史订单</el-radio-button>
       </el-radio-group>
     </div>
     <StatisticsQualityAlert v-if="statisticsQualityLoaded" :quality="statisticsQuality" />
