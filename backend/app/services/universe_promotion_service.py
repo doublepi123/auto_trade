@@ -24,12 +24,14 @@ from app.services.watchlist_score_service import WatchlistScoreService
 
 _TERMINAL_RUN_STATUSES = ("COMPLETE", "DEGRADED")
 _REVIEW_READY_STATUSES = {"READY_FOR_REVIEW", "MATURE_EVIDENCE"}
-_PRIORITY_ALGORITHM_VERSION = "selection-quant-gated-v2"
+_PRIORITY_ALGORITHM_VERSION = "selection-quant-required-v3"
 _MAX_QUANT_WEIGHT = 0.35
 _QUANT_NEUTRAL_SCORE = 50.0
 _QUANT_DATA_ERROR_PENALTY = -25.0
 _QUANT_AVOID_PENALTY = -20.0
 _QUANT_WATCH_PENALTY = -10.0
+_MIN_FORWARD_REVIEW_TRADES = 5
+_MIN_FORWARD_MATURE_TRADES = 20
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -63,6 +65,49 @@ def _quant_priority_adjustment(
         else _QUANT_AVOID_PENALTY
     )
     return round(penalty * confidence_scale, 2)
+
+
+def _promotion_blockers(
+    *,
+    forward_blockers: list[str],
+    forward_status: str,
+    shadow_enabled: bool,
+    quant: WatchlistScore | None,
+    quant_fresh: bool,
+    baseline_closed_trades: int,
+    baseline_net_pnl: float,
+    candidate_closed_trades: int,
+    candidate_net_pnl: float,
+) -> list[str]:
+    blockers = list(forward_blockers)
+    if not shadow_enabled:
+        blockers.append("SHADOW_DISABLED")
+    if quant is None:
+        blockers.append("QUANT_SCORE_MISSING")
+    elif quant.source != QUANT_SCORE_SOURCE:
+        blockers.append("QUANT_SCORE_DATA_ERROR")
+    elif not quant_fresh:
+        blockers.append("QUANT_SCORE_STALE")
+    elif quant.recommended_action.upper() != "CANDIDATE":
+        blockers.append("QUANT_ACTION_NOT_CANDIDATE")
+
+    if forward_status in _REVIEW_READY_STATUSES:
+        required_trades = (
+            _MIN_FORWARD_MATURE_TRADES
+            if forward_status == "MATURE_EVIDENCE"
+            else _MIN_FORWARD_REVIEW_TRADES
+        )
+        if candidate_closed_trades < required_trades:
+            blockers.append("FORWARD_CANDIDATE_TRADES_INSUFFICIENT")
+        else:
+            if candidate_net_pnl <= 0:
+                blockers.append("FORWARD_CANDIDATE_NET_PNL_NON_POSITIVE")
+            if (
+                baseline_closed_trades > 0
+                and candidate_net_pnl <= baseline_net_pnl
+            ):
+                blockers.append("FORWARD_CANDIDATE_NOT_BETTER_THAN_BASELINE")
+    return list(dict.fromkeys(blockers))
 
 
 class UniversePromotionService:
@@ -150,6 +195,22 @@ class UniversePromotionService:
                 fresh=quant_fresh,
                 weight=quant_weight,
             )
+            shadow_enabled = candidate.symbol in enabled_shadow_symbols
+            blockers = _promotion_blockers(
+                forward_blockers=list(forward.blockers),
+                forward_status=forward.status,
+                shadow_enabled=shadow_enabled,
+                quant=quant,
+                quant_fresh=quant_fresh,
+                baseline_closed_trades=(
+                    forward.baseline_metrics.closed_trades
+                ),
+                baseline_net_pnl=forward.baseline_metrics.net_pnl,
+                candidate_closed_trades=(
+                    forward.candidate_metrics.closed_trades
+                ),
+                candidate_net_pnl=forward.candidate_metrics.net_pnl,
+            )
             selection_score = float(candidate.score)
             priority_score = round(
                 max(
@@ -171,9 +232,7 @@ class UniversePromotionService:
                     quant_weight=quant_weight,
                     quant_adjustment=quant_adjustment,
                     is_trading_target=candidate.symbol == trading_symbol,
-                    shadow_enabled=(
-                        candidate.symbol in enabled_shadow_symbols
-                    ),
+                    shadow_enabled=shadow_enabled,
                     quant_score=quant.score if quant is not None else None,
                     quant_confidence=(
                         quant.confidence if quant is not None else None
@@ -200,11 +259,12 @@ class UniversePromotionService:
                     minimum_mature_pairs=forward.minimum_mature_pairs,
                     remaining_ready_pairs=forward.remaining_ready_pairs,
                     remaining_mature_pairs=forward.remaining_mature_pairs,
-                    blockers=list(forward.blockers),
+                    blockers=blockers,
                     baseline_metrics=forward.baseline_metrics,
                     candidate_metrics=forward.candidate_metrics,
                     review_ready=(
                         forward.status in _REVIEW_READY_STATUSES
+                        and not blockers
                     ),
                     mature_evidence=(
                         forward.status == "MATURE_EVIDENCE"

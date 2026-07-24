@@ -418,6 +418,7 @@ auto_trade/
 | `GET` | `/api/strategy-shadow/decisions` | 当前配置版本的分页逐 bar 决策；支持 symbol/action/from/to |
 | `GET` | `/api/strategy-shadow/trades` | 当前配置版本的虚拟闭环交易与估算费用 |
 | `POST` | `/api/strategy-shadow/replay` | 对调用方提供的 1 分钟 bars 做确定性零写入回放 |
+| `GET` | `/api/universe/promotion-readiness` | 汇总入选标的的前向证据；人工复核必须同时满足影子启用、当前代量化评分新鲜且为 `CANDIDATE`、候选闭合交易达到初审 5 笔/成熟 20 笔、候选净收益为正且优于基线；不会自动晋级或切换实盘 |
 
 ### 回测
 

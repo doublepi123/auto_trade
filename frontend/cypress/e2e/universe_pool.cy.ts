@@ -114,6 +114,7 @@ describe('Dynamic universe observation pool', () => {
       .and('contain', '+$6.20')
       .and('contain', '候选 4')
       .and('contain', '基线 3')
+      .and('contain', '当前代量化评分已过期')
 
     cy.get('[data-testid="promotion-readiness-table"] tbody tr')
       .contains('tr', 'JPM.US')
@@ -122,6 +123,7 @@ describe('Dynamic universe observation pool', () => {
       .and('not.contain', '0.0')
       .and('contain', '已阻塞')
       .and('contain', '基线与候选输入不一致')
+      .and('contain', '量化评分数据异常')
   })
 
   it('isolates malformed forward evidence from the candidate pool', () => {
@@ -130,7 +132,7 @@ describe('Dynamic universe observation pool', () => {
         universe_run_id: 7,
         as_of_date: '2026-07-23',
         generated_at: '2026-07-24T01:05:00Z',
-        priority_algorithm_version: 'selection-quant-gated-v2',
+        priority_algorithm_version: 'selection-quant-required-v3',
         items: {},
       },
     }).as('getUniversePromotionReadinessInvalid')
@@ -259,6 +261,7 @@ describe('Dynamic universe observation pool', () => {
       .and('contain', '融合 #1')
       .and('contain', '24.0 · 回避')
       .and('contain', '2/20')
+      .and('contain', '当前代量化评分已过期')
     cy.get('body').then(($body) => {
       const viewportWidth = $body[0].clientWidth
       const overflowing = Array.from(

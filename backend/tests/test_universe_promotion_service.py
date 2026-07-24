@@ -27,7 +27,10 @@ from app.schemas import (
     StrategyV2ShadowMetrics,
 )
 from app.services.strategy_v2_shadow_service import StrategyV2ShadowService
-from app.services.universe_promotion_service import UniversePromotionService
+from app.services.universe_promotion_service import (
+    UniversePromotionService,
+    _promotion_blockers,
+)
 
 _NOW = datetime(2026, 7, 24, 8, 30, tzinfo=timezone.utc)
 
@@ -98,6 +101,82 @@ def _candidate(
             created_at=run.created_at,
         )
     )
+
+
+def _quant_score(
+    *,
+    source: str = "quant_v4",
+    action: str = "CANDIDATE",
+) -> WatchlistScore:
+    return WatchlistScore(
+        symbol="AAPL.US",
+        market="US",
+        score=80.0,
+        confidence=0.9,
+        recommended_action=action,
+        source=source,
+        created_at=_NOW - timedelta(minutes=5),
+        expires_at=_NOW + timedelta(minutes=30),
+    )
+
+
+def test_promotion_blockers_fail_closed_until_all_evidence_gates_pass() -> None:
+    def blockers(
+        *,
+        forward_status: str = "READY_FOR_REVIEW",
+        shadow_enabled: bool = True,
+        quant: WatchlistScore | None,
+        quant_fresh: bool = True,
+        baseline_net_pnl: float = 1.0,
+        candidate_closed_trades: int = 5,
+        candidate_net_pnl: float = 2.0,
+    ) -> list[str]:
+        return _promotion_blockers(
+            forward_blockers=[],
+            forward_status=forward_status,
+            shadow_enabled=shadow_enabled,
+            quant=quant,
+            quant_fresh=quant_fresh,
+            baseline_closed_trades=5,
+            baseline_net_pnl=baseline_net_pnl,
+            candidate_closed_trades=candidate_closed_trades,
+            candidate_net_pnl=candidate_net_pnl,
+        )
+
+    assert blockers(
+        shadow_enabled=False,
+        quant=None,
+    ) == ["SHADOW_DISABLED", "QUANT_SCORE_MISSING"]
+    assert blockers(
+        quant=_quant_score(source="quant_error_v4"),
+    ) == ["QUANT_SCORE_DATA_ERROR"]
+    assert blockers(
+        quant=_quant_score(),
+        quant_fresh=False,
+    ) == ["QUANT_SCORE_STALE"]
+    assert blockers(
+        quant=_quant_score(action="AVOID"),
+    ) == ["QUANT_ACTION_NOT_CANDIDATE"]
+    assert blockers(
+        quant=_quant_score(),
+        candidate_closed_trades=4,
+    ) == ["FORWARD_CANDIDATE_TRADES_INSUFFICIENT"]
+    assert blockers(
+        forward_status="MATURE_EVIDENCE",
+        quant=_quant_score(),
+        candidate_closed_trades=19,
+    ) == ["FORWARD_CANDIDATE_TRADES_INSUFFICIENT"]
+    assert blockers(
+        quant=_quant_score(),
+        candidate_net_pnl=-1.0,
+        baseline_net_pnl=-2.0,
+    ) == ["FORWARD_CANDIDATE_NET_PNL_NON_POSITIVE"]
+    assert blockers(
+        quant=_quant_score(),
+        candidate_net_pnl=1.0,
+        baseline_net_pnl=2.0,
+    ) == ["FORWARD_CANDIDATE_NOT_BETTER_THAN_BASELINE"]
+    assert blockers(quant=_quant_score()) == []
 
 
 def test_readiness_uses_latest_terminal_and_gated_quant_priority() -> None:
@@ -223,7 +302,7 @@ def test_readiness_uses_latest_terminal_and_gated_quant_priority() -> None:
         assert response.generated_at == _NOW
         assert (
             response.priority_algorithm_version
-            == "selection-quant-gated-v2"
+            == "selection-quant-required-v3"
         )
         assert [item.symbol for item in response.items] == [
             "MSFT.US",
@@ -259,6 +338,11 @@ def test_readiness_uses_latest_terminal_and_gated_quant_priority() -> None:
         assert msft.quant_source == ""
         assert msft.quant_fresh is False
         assert msft.quant_expires_at is None
+        assert aapl.blockers == ["QUANT_ACTION_NOT_CANDIDATE"]
+        assert msft.blockers == [
+            "SHADOW_DISABLED",
+            "QUANT_SCORE_MISSING",
+        ]
         for item in response.items:
             assert item.forward_status == "NOT_REGISTERED"
             assert item.included_pairs == 0
@@ -266,7 +350,6 @@ def test_readiness_uses_latest_terminal_and_gated_quant_priority() -> None:
             assert item.minimum_mature_pairs == 20
             assert item.remaining_ready_pairs == 5
             assert item.remaining_mature_pairs == 20
-            assert item.blockers == []
             assert item.baseline_metrics == StrategyV2ShadowMetrics()
             assert item.candidate_metrics == StrategyV2ShadowMetrics()
             assert item.review_ready is False
@@ -412,6 +495,38 @@ def test_readiness_maps_review_flags_without_writes(
             score=80.0,
         )
         db.add(StrategyConfig(symbol="NVDA.US", market="US"))
+        db.add_all(
+            [
+                StrategyV2ShadowConfig(
+                    symbol="AAPL.US",
+                    enabled=True,
+                ),
+                StrategyV2ShadowConfig(
+                    symbol="MSFT.US",
+                    enabled=True,
+                ),
+                WatchlistScore(
+                    symbol="AAPL.US",
+                    market="US",
+                    score=80.0,
+                    confidence=0.9,
+                    recommended_action="CANDIDATE",
+                    source="quant_v4",
+                    created_at=_NOW - timedelta(minutes=5),
+                    expires_at=_NOW + timedelta(minutes=30),
+                ),
+                WatchlistScore(
+                    symbol="MSFT.US",
+                    market="US",
+                    score=75.0,
+                    confidence=0.8,
+                    recommended_action="CANDIDATE",
+                    source="quant_v4",
+                    created_at=_NOW - timedelta(minutes=5),
+                    expires_at=_NOW + timedelta(minutes=30),
+                ),
+            ]
+        )
         db.commit()
 
         def get_forward_validation(
@@ -425,11 +540,11 @@ def test_readiness_maps_review_flags_without_writes(
                     remaining_ready_pairs=0,
                     remaining_mature_pairs=0,
                     baseline_metrics=StrategyV2ShadowMetrics(
-                        closed_trades=10,
+                        closed_trades=20,
                         net_pnl=12.5,
                     ),
                     candidate_metrics=StrategyV2ShadowMetrics(
-                        closed_trades=11,
+                        closed_trades=21,
                         net_pnl=25.0,
                     ),
                 )
@@ -438,6 +553,14 @@ def test_readiness_maps_review_flags_without_writes(
                 included_pairs=5,
                 remaining_ready_pairs=0,
                 remaining_mature_pairs=15,
+                baseline_metrics=StrategyV2ShadowMetrics(
+                    closed_trades=5,
+                    net_pnl=1.0,
+                ),
+                candidate_metrics=StrategyV2ShadowMetrics(
+                    closed_trades=5,
+                    net_pnl=2.0,
+                ),
             )
 
         monkeypatch.setattr(
@@ -468,12 +591,14 @@ def test_readiness_maps_review_flags_without_writes(
         assert mature.forward_status == "MATURE_EVIDENCE"
         assert mature.minimum_ready_pairs == 5
         assert mature.minimum_mature_pairs == 20
+        assert mature.blockers == []
         assert mature.review_ready is True
         assert mature.mature_evidence is True
         assert mature.candidate_metrics.net_pnl == 25.0
         assert ready.forward_status == "READY_FOR_REVIEW"
         assert ready.minimum_ready_pairs == 5
         assert ready.minimum_mature_pairs == 20
+        assert ready.blockers == []
         assert ready.review_ready is True
         assert ready.mature_evidence is False
         assert all(

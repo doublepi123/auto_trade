@@ -1065,7 +1065,7 @@ Cypress.Commands.add('stubApi', () => {
       universe_run_id: 7,
       as_of_date: '2026-07-23',
       generated_at: '2026-07-24T01:05:00Z',
-      priority_algorithm_version: 'selection-quant-gated-v2',
+      priority_algorithm_version: 'selection-quant-required-v3',
       items: [
         {
           symbol: 'NVDA.US',
@@ -1089,7 +1089,7 @@ Cypress.Commands.add('stubApi', () => {
           minimum_mature_pairs: 20,
           remaining_ready_pairs: 3,
           remaining_mature_pairs: 18,
-          blockers: [],
+          blockers: ['QUANT_SCORE_STALE'],
           baseline_metrics: {
             ...strategyShadowMetrics,
             closed_trades: 3,
@@ -1126,7 +1126,10 @@ Cypress.Commands.add('stubApi', () => {
           minimum_mature_pairs: 20,
           remaining_ready_pairs: 0,
           remaining_mature_pairs: 15,
-          blockers: ['TARGET_INPUT_HASH_MISMATCH'],
+          blockers: [
+            'TARGET_INPUT_HASH_MISMATCH',
+            'QUANT_SCORE_DATA_ERROR',
+          ],
           baseline_metrics: {
             ...strategyShadowMetrics,
             closed_trades: 2,
