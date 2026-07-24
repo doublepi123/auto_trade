@@ -567,6 +567,7 @@ class OpeningMomentumShadowVariantResponse(BaseModel):
     variant: Literal[
         "INCUMBENT",
         "CONTINUATION_CHALLENGER",
+        "SECTOR_RELAXED_CHALLENGER",
         "BREADTH_GATED_CHALLENGER",
         "BREADTH_GATED_60M_CHALLENGER",
     ]

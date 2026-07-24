@@ -415,6 +415,65 @@ def test_opening_path_efficiency_is_bounded_for_compounding_path() -> None:
     assert features.path_efficiency == 1.0
 
 
+def test_sector_relaxed_challenger_only_raises_sector_capacity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        settings,
+        "opening_momentum_challenger_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        settings,
+        "universe_selection_max_symbols",
+        12,
+    )
+    monkeypatch.setattr(
+        settings,
+        "universe_selection_max_per_sector",
+        2,
+    )
+    engine, db = _database()
+    try:
+        service = OpeningMomentumShadowService(db)
+        incumbent = service._continuation_config()
+        relaxed = service._sector_relaxed_config()
+        identities = service._variant_identities()
+
+        assert incumbent.max_per_sector == 2
+        assert relaxed.max_per_sector == 3
+        assert relaxed.max_selected == incumbent.max_selected
+        assert relaxed.liquidity_weight == incumbent.liquidity_weight
+        assert relaxed.spread_weight == incumbent.spread_weight
+        assert (
+            relaxed.opportunity_weight
+            == incumbent.opportunity_weight
+        )
+        assert relaxed.momentum_weight == incumbent.momentum_weight
+        assert (
+            relaxed.trend_efficiency_weight
+            == incumbent.trend_efficiency_weight
+        )
+        assert {
+            identity.variant for identity in identities
+        } == {
+            "INCUMBENT",
+            "CONTINUATION_CHALLENGER",
+            "SECTOR_RELAXED_CHALLENGER",
+            "BREADTH_GATED_CHALLENGER",
+            "BREADTH_GATED_60M_CHALLENGER",
+        }
+        assert len(
+            {
+                identity.config_version
+                for identity in identities
+            }
+        ) == 5
+    finally:
+        db.close()
+        Base.metadata.drop_all(bind=engine)
+
+
 def test_challengers_use_one_market_snapshot_and_close_all_variants(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -455,15 +514,21 @@ def test_challengers_use_one_market_snapshot_and_close_all_variants(
             now=_SESSION_OPEN + timedelta(minutes=32, seconds=10),
         )
 
-        assert db.query(OpeningMomentumShadowRun).count() == 4
+        assert db.query(OpeningMomentumShadowRun).count() == 5
         assert candles.calls == list(_SYMBOLS[:4])
         assert opened.state == "OPEN"
         assert opened.latest is not None
         assert opened.latest.universe_source == "UNIVERSE_SELECTION"
         assert opened.latest.candidate_symbol == "S1.US"
         assert opened.latest.selection_run_id == run.id
-        assert len(opened.variants) == 4
-        incumbent, challenger, breadth, breadth_long = opened.variants
+        assert len(opened.variants) == 5
+        (
+            incumbent,
+            challenger,
+            sector_relaxed,
+            breadth,
+            breadth_long,
+        ) = opened.variants
         assert incumbent.variant == "INCUMBENT"
         assert incumbent.comparison_sessions == 1
         assert incumbent.minimum_market_return_bps == -25.0
@@ -477,6 +542,18 @@ def test_challengers_use_one_market_snapshot_and_close_all_variants(
         assert challenger.latest is not None
         assert challenger.latest.universe == ["S2.US", "S3.US"]
         assert challenger.latest.candidate_symbol == "S3.US"
+        assert sector_relaxed.variant == (
+            "SECTOR_RELAXED_CHALLENGER"
+        )
+        assert sector_relaxed.comparison_sessions == 1
+        assert sector_relaxed.minimum_market_return_bps == -25.0
+        assert sector_relaxed.holding_minutes == 30
+        assert sector_relaxed.latest is not None
+        assert sector_relaxed.latest.universe == [
+            "S2.US",
+            "S3.US",
+        ]
+        assert sector_relaxed.latest.candidate_symbol == "S3.US"
         assert breadth.variant == "BREADTH_GATED_CHALLENGER"
         assert breadth.comparison_sessions == 1
         assert breadth.minimum_market_return_bps == 0.0
@@ -501,7 +578,7 @@ def test_challengers_use_one_market_snapshot_and_close_all_variants(
                 item.config_version
                 for item in opened.variants
             }
-        ) == 4
+        ) == 5
 
         partially_closed = service.tick(
             now=_SESSION_OPEN + timedelta(minutes=62, seconds=10),
@@ -514,6 +591,7 @@ def test_challengers_use_one_market_snapshot_and_close_all_variants(
             item.metrics.closed_trades
             for item in partially_closed.variants
         ] == [
+            1,
             1,
             1,
             1,
@@ -534,11 +612,13 @@ def test_challengers_use_one_market_snapshot_and_close_all_variants(
             1,
             1,
             1,
+            1,
         ]
         assert [
             item.metrics.cumulative_net_return_bps
             for item in closed.variants
         ] == [
+            -14.0,
             -14.0,
             -14.0,
             -14.0,
@@ -596,14 +676,22 @@ def test_breadth_challenger_skips_a_negative_market_snapshot(
         )
 
         assert candles.calls == list(_SYMBOLS[:4])
-        assert len(status.variants) == 4
-        incumbent, continuation, breadth, breadth_long = (
-            status.variants
-        )
+        assert len(status.variants) == 5
+        (
+            incumbent,
+            continuation,
+            sector_relaxed,
+            breadth,
+            breadth_long,
+        ) = status.variants
         assert incumbent.latest is not None
         assert incumbent.latest.status == "OPEN"
         assert continuation.latest is not None
         assert continuation.latest.status == "OPEN"
+        assert sector_relaxed.latest is not None
+        assert sector_relaxed.latest.status == "OPEN"
+        assert sector_relaxed.minimum_market_return_bps == -50.0
+        assert sector_relaxed.holding_minutes == 30
         assert breadth.latest is not None
         assert breadth.latest.status == "SKIPPED"
         assert breadth.latest.reason == "MARKET_FILTER"

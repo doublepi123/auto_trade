@@ -1828,6 +1828,33 @@ Cypress.Commands.add('stubApi', () => {
           },
         },
         {
+          variant: 'SECTOR_RELAXED_CHALLENGER',
+          universe_source: 'OPENING_CONTINUATION_SECTOR_CAP_3',
+          algorithm_version: (
+            'cross-sectional-opening-momentum-v3-preopen-frozen-universe+'
+            + 'opening-continuation-universe-v1+'
+            + 'sector-cap-floor-3-v1'
+          ),
+          config_version: 'opening-sector-cap-3-stub-v1',
+          minimum_market_return_bps: -25,
+          holding_minutes: 30,
+          comparison_sessions: 4,
+          latest: { candidate_symbol: 'INTC.US' },
+          metrics: {
+            observed_sessions: 4,
+            skipped_sessions: 0,
+            signals: 4,
+            open_trades: 0,
+            closed_trades: 4,
+            wins: 3,
+            win_rate: 0.75,
+            mean_net_return_bps: 41,
+            cumulative_net_return_bps: 164,
+            max_drawdown_bps: 24,
+            profit_factor: 3.3,
+          },
+        },
+        {
           variant: 'BREADTH_GATED_CHALLENGER',
           universe_source: 'OPENING_CONTINUATION_BREADTH_GATE',
           algorithm_version: (

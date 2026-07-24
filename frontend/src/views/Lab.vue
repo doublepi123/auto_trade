@@ -433,7 +433,7 @@
                   <el-table-column label="策略" min-width="140">
                     <template #default="{ row }">
                       <el-tag
-                        :type="row.variant === 'INCUMBENT' ? 'primary' : row.variant.startsWith('BREADTH_GATED') ? 'success' : 'warning'"
+                        :type="openingMomentumVariantTagType(row.variant)"
                         effect="plain"
                       >
                         {{ openingMomentumVariantLabel(row.variant) }}
@@ -1764,8 +1764,17 @@ function openingMomentumVariantLabel(
 ): string {
   if (variant === 'INCUMBENT') return '现行选池'
   if (variant === 'CONTINUATION_CHALLENGER') return '动量延续'
+  if (variant === 'SECTOR_RELAXED_CHALLENGER') return '行业上限 3'
   if (variant === 'BREADTH_GATED_CHALLENGER') return '广度过滤'
   return '广度 60m'
+}
+function openingMomentumVariantTagType(
+  variant: OpeningMomentumShadowStatus['variants'][number]['variant'],
+): 'primary' | 'warning' | 'info' | 'success' {
+  if (variant === 'INCUMBENT') return 'primary'
+  if (variant === 'SECTOR_RELAXED_CHALLENGER') return 'info'
+  if (variant.startsWith('BREADTH_GATED')) return 'success'
+  return 'warning'
 }
 const shadowForm = reactive<StrategyShadowConfigUpdate>({
   enabled: false,

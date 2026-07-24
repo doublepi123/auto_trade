@@ -52,6 +52,11 @@ _CONTINUATION_SOURCE = "OPENING_CONTINUATION"
 _CONTINUATION_ALGORITHM_VERSION = (
     f"{ALGORITHM_VERSION}+{OPENING_CONTINUATION_UNIVERSE_VERSION}"
 )
+_SECTOR_RELAXED_VERSION = "sector-cap-floor-3-v1"
+_SECTOR_RELAXED_SOURCE = "OPENING_CONTINUATION_SECTOR_CAP_3"
+_SECTOR_RELAXED_ALGORITHM_VERSION = (
+    f"{_CONTINUATION_ALGORITHM_VERSION}+{_SECTOR_RELAXED_VERSION}"
+)
 _BREADTH_GATE_VERSION = "nonnegative-market-breadth-v1"
 _BREADTH_GATE_SOURCE = "OPENING_CONTINUATION_BREADTH_GATE"
 _BREADTH_GATE_ALGORITHM_VERSION = (
@@ -66,6 +71,7 @@ _BREADTH_LONG_HOLD_ALGORITHM_VERSION = (
 _VariantName = Literal[
     "INCUMBENT",
     "CONTINUATION_CHALLENGER",
+    "SECTOR_RELAXED_CHALLENGER",
     "BREADTH_GATED_CHALLENGER",
     "BREADTH_GATED_60M_CHALLENGER",
 ]
@@ -564,6 +570,10 @@ class OpeningMomentumShadowService:
             challenger_candidates,
             self._continuation_config(),
         )
+        sector_relaxed_selection = select_opening_momentum_universe(
+            challenger_candidates,
+            self._sector_relaxed_config(),
+        )
         identities_by_variant = {
             identity.variant: identity for identity in identities
         }
@@ -572,8 +582,14 @@ class OpeningMomentumShadowService:
             for row in challenger_selection
             if row.selected
         )
+        sector_relaxed_symbols = tuple(
+            row.symbol
+            for row in sector_relaxed_selection
+            if row.selected
+        )
         for variant_name in (
             "CONTINUATION_CHALLENGER",
+            "SECTOR_RELAXED_CHALLENGER",
             "BREADTH_GATED_CHALLENGER",
             "BREADTH_GATED_60M_CHALLENGER",
         ):
@@ -585,7 +601,12 @@ class OpeningMomentumShadowService:
                     config_version=identity.config_version,
                     universe_source=identity.universe_source,
                     decision_config=identity.decision_config,
-                    symbols=challenger_symbols,
+                    symbols=(
+                        sector_relaxed_symbols
+                        if variant_name
+                        == "SECTOR_RELAXED_CHALLENGER"
+                        else challenger_symbols
+                    ),
                     selection_run_id=run.id,
                 )
             )
@@ -603,6 +624,9 @@ class OpeningMomentumShadowService:
         ]
         if settings.opening_momentum_challenger_enabled:
             universe_config = self._continuation_config()
+            sector_relaxed_config = (
+                self._sector_relaxed_config()
+            )
             breadth_config = self._breadth_gate_config()
             breadth_long_hold_config = (
                 self._breadth_long_hold_config()
@@ -620,6 +644,25 @@ class OpeningMomentumShadowService:
                         )
                     ),
                     universe_source=_CONTINUATION_SOURCE,
+                    decision_config=self.config,
+                )
+            )
+            variants.append(
+                _UniverseVariant(
+                    variant="SECTOR_RELAXED_CHALLENGER",
+                    algorithm_version=(
+                        _SECTOR_RELAXED_ALGORITHM_VERSION
+                    ),
+                    config_version=(
+                        opening_momentum_variant_config_version(
+                            (
+                                f"{self.config.version_hash()}:"
+                                f"{_SECTOR_RELAXED_VERSION}"
+                            ),
+                            sector_relaxed_config,
+                        )
+                    ),
+                    universe_source=_SECTOR_RELAXED_SOURCE,
                     decision_config=self.config,
                 )
             )
@@ -669,6 +712,17 @@ class OpeningMomentumShadowService:
             max_selected=settings.universe_selection_max_symbols,
             max_per_sector=(
                 settings.universe_selection_max_per_sector
+            ),
+        )
+
+    def _sector_relaxed_config(
+        self,
+    ) -> OpeningMomentumUniverseConfig:
+        return replace(
+            self._continuation_config(),
+            max_per_sector=max(
+                3,
+                settings.universe_selection_max_per_sector,
             ),
         )
 
