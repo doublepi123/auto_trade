@@ -333,6 +333,7 @@ def test_universe_tick_reloads_before_optional_quant_failure(
 def test_strategy_v2_shadow_tick_is_isolated_from_execution(monkeypatch) -> None:
     calls: list[dict[str, object]] = []
     collections: list[dict[str, object]] = []
+    registrations: list[str] = []
 
     class FakeQuery:
         def __init__(self, values: list[tuple[str]]) -> None:
@@ -392,6 +393,12 @@ def test_strategy_v2_shadow_tick_is_isolated_from_execution(monkeypatch) -> None
         def collect_forward_validation(self, **kwargs: object) -> None:
             collections.append(kwargs)
 
+        def ensure_universe_forward_registration(self, symbol: str) -> bool:
+            registrations.append(symbol)
+            if symbol == "MSFT.US":
+                raise RuntimeError("isolated registration failure")
+            return symbol == "0700.HK"
+
     monkeypatch.setattr(main_module, "SessionLocal", lambda: db)
     monkeypatch.setattr(main_module, "StrategyService", FakeStrategyService)
     monkeypatch.setattr(main_module, "get_runner", lambda: runner)
@@ -408,7 +415,8 @@ def test_strategy_v2_shadow_tick_is_isolated_from_execution(monkeypatch) -> None
         {"symbol": "NVDA.US", "market": "US"},
     ]
     assert collections == calls
-    assert db.rolled_back == 1
+    assert registrations == ["0700.HK", "MSFT.US", "NVDA.US"]
+    assert db.rolled_back == 2
     assert db.closed is True
     runner._trade_svc.execute.assert_not_called()
 

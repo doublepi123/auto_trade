@@ -717,7 +717,7 @@ auto_trade/
 | `AUTO_TRADE_MIN_ENTRY_EDGE_COST_RATIO` | 入场目标毛利与估算总成本的最低比值 | `2` |
 | `AUTO_TRADE_UNIVERSE_SELECTION_ENABLED` | 按已完成的 T-1 日线刷新 Nasdaq-100 / DJIA 动态候选池 | `false` |
 | `AUTO_TRADE_UNIVERSE_SELECTION_APPLY_TO_WATCHLIST` | 将完整候选池结果同步到只读 watchlist；不会切换主交易标的 | `false` |
-| `AUTO_TRADE_UNIVERSE_SELECTION_ENABLE_SHADOW` | 为入选标的启用 Strategy v2 shadow 观察；要求 `APPLY_TO_WATCHLIST=true` | `false` |
+| `AUTO_TRADE_UNIVERSE_SELECTION_ENABLE_SHADOW` | 为入选标的启用 Strategy v2 shadow，并在状态激活后自动冻结下一完整交易日开始的 forward-only 对照；不会自动晋级或下单；要求 `APPLY_TO_WATCHLIST=true` | `false` |
 | `AUTO_TRADE_UNIVERSE_SELECTION_INTERVAL_MINUTES` | 候选池幂等刷新周期（分钟） | `60` |
 | `AUTO_TRADE_WATCHLIST_QUANT_AUTO_SCORE_ENABLED` | RTH 内自动刷新到期的确定性量化评分；不切换主交易标的 | `false` |
 | `AUTO_TRADE_WATCHLIST_QUANT_INTERVAL_MINUTES` | 同一标的两次量化 v3 评分的最小间隔（分钟） | `30` |

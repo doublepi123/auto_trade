@@ -2215,6 +2215,80 @@ class TestStrategyV2ShadowService:
             datetime(2026, 11, 27, 18, 15, tzinfo=timezone.utc),
         ) == "MISSED"
 
+    def test_universe_shadow_auto_registers_forward_evidence_once(self) -> None:
+        with self._db() as db:
+            config = self._enabled_config(
+                db,
+                activated_at=_SESSION_OPEN - timedelta(days=1),
+            )
+            config.universe_managed = True
+            db.commit()
+            service = StrategyV2ShadowService(db)
+
+            created = service.ensure_universe_forward_registration(
+                "AAPL.US",
+                now=_SESSION_OPEN - timedelta(minutes=1),
+            )
+            repeated = service.ensure_universe_forward_registration(
+                "AAPL.US",
+                now=_SESSION_OPEN + timedelta(days=30),
+            )
+
+            registration = db.query(StrategyV2ForwardRegistration).one()
+            assert created is True
+            assert repeated is False
+            assert registration.source_config_version == service._config_version(
+                config
+            )
+            assert registration.eligible_after.replace(
+                tzinfo=timezone.utc
+            ) == _SESSION_OPEN
+            assert service.get_forward_validation("AAPL.US").status == "FROZEN"
+
+    @pytest.mark.parametrize(
+        ("managed", "enabled", "state_version", "phase"),
+        [
+            (False, True, "current", StrategyV2State.READY.value),
+            (True, False, "current", StrategyV2State.READY.value),
+            (True, True, "stale", StrategyV2State.READY.value),
+            (True, True, "current", StrategyV2State.LONG.value),
+        ],
+    )
+    def test_universe_shadow_auto_registration_fails_closed(
+        self,
+        managed: bool,
+        enabled: bool,
+        state_version: str,
+        phase: str,
+    ) -> None:
+        with self._db() as db:
+            config = self._enabled_config(
+                db,
+                activated_at=_SESSION_OPEN - timedelta(days=1),
+            )
+            service = StrategyV2ShadowService(db)
+            current_version = service._config_version(config)
+            config.universe_managed = managed
+            config.enabled = enabled
+            state = db.query(StrategyV2ShadowState).filter_by(
+                symbol="AAPL.US"
+            ).one()
+            state.config_version = (
+                current_version
+                if state_version == "current"
+                else "0" * 64
+            )
+            state.phase = phase
+            db.commit()
+
+            created = service.ensure_universe_forward_registration(
+                "AAPL.US",
+                now=_SESSION_OPEN - timedelta(minutes=1),
+            )
+
+            assert created is False
+            assert db.query(StrategyV2ForwardRegistration).count() == 0
+
     def test_forward_registration_is_immutable_idempotent_and_read_only(self) -> None:
         with self._db() as db:
             config = self._enabled_config(

@@ -946,6 +946,56 @@ class StrategyV2ShadowService:
         self.db.refresh(registration)
         return self._forward_registration_response(registration)
 
+    def ensure_universe_forward_registration(
+        self,
+        symbol: str,
+        *,
+        now: datetime | None = None,
+    ) -> bool:
+        """Freeze forward evidence for a newly activated universe shadow."""
+        normalized = self._resolve_symbol(symbol)
+        existing = self.db.query(StrategyV2ForwardRegistration).filter(
+            StrategyV2ForwardRegistration.symbol == normalized,
+        ).first()
+        if existing is not None:
+            return False
+
+        config = self.db.query(StrategyV2ShadowConfig).filter(
+            StrategyV2ShadowConfig.symbol == normalized,
+        ).first()
+        if (
+            config is None
+            or not config.enabled
+            or not config.universe_managed
+        ):
+            return False
+
+        current_version = self._config_version(config)
+        state = self.db.query(StrategyV2ShadowState).filter(
+            StrategyV2ShadowState.symbol == normalized,
+        ).first()
+        open_trade = self._open_trade(normalized)
+        if (
+            state is None
+            or state.config_version != current_version
+            or open_trade is not None
+            or state.open_trade_id is not None
+            or state.phase == StrategyV2State.LONG.value
+        ):
+            return False
+
+        self._ensure_version_snapshot(config)
+        self.register_forward_validation(
+            StrategyV2ForwardRegistrationRequest(
+                symbol=normalized,
+                source_config_version=current_version,
+                confirm_forward_only=True,
+                confirm_no_automatic_promotion=True,
+            ),
+            now=now,
+        )
+        return True
+
     def get_forward_validation(
         self,
         symbol: str,

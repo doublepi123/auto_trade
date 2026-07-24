@@ -690,6 +690,19 @@ def _strategy_v2_shadow_tick_sync() -> None:
                 db.rollback()
                 logger.exception("Strategy v2 shadow tick failed for symbol=%s", symbol)
             try:
+                if shadow.ensure_universe_forward_registration(symbol):
+                    logger.info(
+                        "registered universe forward validation for symbol=%s",
+                        symbol,
+                    )
+            except Exception:
+                db.rollback()
+                logger.exception(
+                    "Strategy v2 universe forward registration failed "
+                    "for symbol=%s",
+                    symbol,
+                )
+            try:
                 shadow.collect_forward_validation(symbol=symbol, market=market)
             except Exception:
                 db.rollback()
