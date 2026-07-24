@@ -899,6 +899,67 @@ class StrategyV2ExitChallengerReport(BaseModel):
     variants: list[StrategyV2ExitChallengerVariant] = Field(default_factory=list)
 
 
+class StrategyV2PortfolioRoutingMetrics(BaseModel):
+    signal_groups: int = 0
+    selected_signals: int = 0
+    skipped_occupied: int = 0
+    no_eligible: int = 0
+    pending_entries: int = 0
+    open_trades: int = 0
+    missed_entries: int = 0
+    closed_trades: int = 0
+    observed_sessions: int = 0
+    distinct_symbols: int = 0
+    win_rate: float = 0.0
+    mean_net_return_pct: float = 0.0
+    cumulative_net_return_pct: float = 0.0
+    compounded_return_pct: float = 0.0
+    max_drawdown_pct: float = 0.0
+    selections_by_symbol: dict[str, int] = Field(default_factory=dict)
+    latest_signal_at: Optional[datetime] = None
+
+
+class StrategyV2PortfolioRoutingVariant(BaseModel):
+    registration_id: int
+    policy: Literal[
+        "FIXED_PRIMARY",
+        "SELECTED_UNIVERSE",
+        "QUANT_CANDIDATE",
+        "QUANT_WATCH_PLUS",
+    ]
+    algorithm_version: str
+    evaluator_digest: str
+    registered_at: datetime
+    eligible_after: datetime
+    status: Literal["COLLECTING", "READY_FOR_REVIEW", "MATURE_EVIDENCE"]
+    metrics: StrategyV2PortfolioRoutingMetrics = Field(
+        default_factory=StrategyV2PortfolioRoutingMetrics
+    )
+    fixed_primary_compounded_return_pct: float = 0.0
+    compounded_return_delta_pct: float = 0.0
+    minimum_ready_trades: Literal[20] = 20
+    minimum_mature_trades: Literal[50] = 50
+    minimum_ready_sessions: Literal[10] = 10
+    minimum_routed_symbols: Literal[3] = 3
+    promotion_ready: bool = False
+    blockers: list[str] = Field(default_factory=list)
+
+
+class StrategyV2PortfolioRoutingReport(BaseModel):
+    primary_symbol: str = ""
+    mode: Literal["SHADOW"] = "SHADOW"
+    order_submission_allowed: Literal[False] = False
+    automatic_promotion_allowed: Literal[False] = False
+    historical_backfill_allowed: Literal[False] = False
+    capital_slots: Literal[1] = 1
+    evaluation_scope: Literal["FORWARD_OUT_OF_SAMPLE"] = (
+        "FORWARD_OUT_OF_SAMPLE"
+    )
+    variants: list[StrategyV2PortfolioRoutingVariant] = Field(
+        default_factory=list
+    )
+
+
 class StrategyV2AdxChallengerResponse(BaseModel):
     persisted: Literal[False] = False
     mode: Literal["SHADOW"] = "SHADOW"

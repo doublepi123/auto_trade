@@ -30,6 +30,11 @@ from app.domain.strategy_v2.profit_lock import (
     ProfitLockDecision,
     evaluate_profit_lock_bar,
 )
+from app.domain.strategy_v2.portfolio_routing import (
+    PortfolioRoutingCandidate,
+    PortfolioRoutingPolicy,
+    rank_portfolio_candidates,
+)
 
 __all__ = [
     "CausalTrendPrewarmFeatureEngine",
@@ -56,4 +61,7 @@ __all__ = [
     "ProfitLockConfig",
     "ProfitLockDecision",
     "evaluate_profit_lock_bar",
+    "PortfolioRoutingCandidate",
+    "PortfolioRoutingPolicy",
+    "rank_portfolio_candidates",
 ]

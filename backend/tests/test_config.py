@@ -19,6 +19,7 @@ class TestSettings:
         assert s.universe_selection_enabled is False
         assert s.universe_selection_apply_to_watchlist is False
         assert s.universe_selection_enable_shadow is False
+        assert s.strategy_v2_portfolio_shadow_enabled is False
         assert s.universe_selection_max_symbols == 12
         assert s.universe_selection_exploration_max_symbols == 8
         assert s.live_regime_gate_enabled is False
@@ -174,6 +175,14 @@ class TestSettings:
             "true",
         )
         monkeypatch.setenv(
+            "AUTO_TRADE_UNIVERSE_SELECTION_ENABLE_SHADOW",
+            "true",
+        )
+        monkeypatch.setenv(
+            "AUTO_TRADE_STRATEGY_V2_PORTFOLIO_SHADOW_ENABLED",
+            "true",
+        )
+        monkeypatch.setenv(
             "AUTO_TRADE_WATCHLIST_QUANT_AUTO_SCORE_ENABLED",
             "true",
         )
@@ -212,6 +221,8 @@ class TestSettings:
         assert configured.universe_selection_apply_to_watchlist is True
         assert configured.opening_momentum_shadow_enabled is True
         assert configured.opening_momentum_challenger_enabled is True
+        assert configured.universe_selection_enable_shadow is True
+        assert configured.strategy_v2_portfolio_shadow_enabled is True
         assert configured.watchlist_quant_auto_score_enabled is True
         assert configured.watchlist_quant_interval_minutes == 20
         assert configured.watchlist_quant_score_ttl_minutes == 120
@@ -276,6 +287,25 @@ class TestSettings:
             ValidationError,
             match="opening momentum challenger requires opening momentum "
             "shadow",
+        ):
+            Settings()
+
+    def test_portfolio_shadow_requires_universe_shadow(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv(
+            "AUTO_TRADE_STRATEGY_V2_PORTFOLIO_SHADOW_ENABLED",
+            "true",
+        )
+        monkeypatch.setenv(
+            "AUTO_TRADE_UNIVERSE_SELECTION_ENABLE_SHADOW",
+            "false",
+        )
+
+        with pytest.raises(
+            ValidationError,
+            match="portfolio shadow requires universe selection shadow",
         ):
             Settings()
 

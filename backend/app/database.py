@@ -1417,6 +1417,8 @@ def _ensure_strategy_v2_shadow_tables(db_engine: Engine) -> None:
         "strategy_v2_forward_evidence",
         "strategy_v2_exit_challenger_registrations",
         "strategy_v2_exit_challenger_trades",
+        "strategy_v2_portfolio_registrations",
+        "strategy_v2_portfolio_observations",
     ):
         Base.metadata.tables[table_name].create(db_engine, checkfirst=True)
 

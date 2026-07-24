@@ -357,6 +357,120 @@ class StrategyV2ExitChallengerTrade(Base):
     )
 
 
+class StrategyV2PortfolioRegistration(Base):
+    """Immutable registration for one causal, single-slot routing policy."""
+
+    __tablename__ = "strategy_v2_portfolio_registrations"
+    __table_args__ = (
+        UniqueConstraint(
+            "baseline_symbol",
+            "algorithm_version",
+            name="uq_strategy_v2_portfolio_registration",
+        ),
+        Index(
+            "ix_strategy_v2_portfolio_registration_eligible",
+            "eligible_after",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    baseline_symbol: Mapped[str] = mapped_column(String(50), nullable=False)
+    policy: Mapped[str] = mapped_column(String(32), nullable=False)
+    algorithm_version: Mapped[str] = mapped_column(String(100), nullable=False)
+    evaluator_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    registered_at: Mapped[datetime] = mapped_column(_TZDateTime, nullable=False)
+    eligible_after: Mapped[datetime] = mapped_column(_TZDateTime, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        _TZDateTime,
+        default=_utcnow,
+        nullable=False,
+    )
+
+
+class StrategyV2PortfolioObservation(Base):
+    """One forward-only signal-group result for a single capital slot."""
+
+    __tablename__ = "strategy_v2_portfolio_observations"
+    __table_args__ = (
+        UniqueConstraint(
+            "registration_id",
+            "signal_at",
+            name="uq_strategy_v2_portfolio_observation_signal",
+        ),
+        UniqueConstraint(
+            "registration_id",
+            "source_trade_id",
+            name="uq_strategy_v2_portfolio_observation_trade",
+        ),
+        Index(
+            "ix_strategy_v2_portfolio_observation_status",
+            "registration_id",
+            "status",
+        ),
+        Index(
+            "ix_strategy_v2_portfolio_observation_symbol",
+            "selected_symbol",
+            "signal_at",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    registration_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey(
+            "strategy_v2_portfolio_registrations.id",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+    )
+    signal_at: Mapped[datetime] = mapped_column(_TZDateTime, nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(_TZDateTime, nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    candidate_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    candidates_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    selected_symbol: Mapped[str] = mapped_column(String(50), default="", nullable=False)
+    source_config_version: Mapped[str] = mapped_column(
+        String(64),
+        default="",
+        nullable=False,
+    )
+    source_signal_decision_id: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        ForeignKey("strategy_v2_shadow_decisions.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    source_trade_id: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        ForeignKey("strategy_v2_shadow_trades.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    selection_rank: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    selection_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    quant_source: Mapped[str] = mapped_column(String(32), default="", nullable=False)
+    quant_action: Mapped[str] = mapped_column(String(24), default="", nullable=False)
+    quant_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    quant_confidence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    entry_at: Mapped[Optional[datetime]] = mapped_column(_TZDateTime, nullable=True)
+    entry_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    exit_at: Mapped[Optional[datetime]] = mapped_column(_TZDateTime, nullable=True)
+    exit_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    exit_reason: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    gross_return_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    net_return_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        _TZDateTime,
+        default=_utcnow,
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        _TZDateTime,
+        default=_utcnow,
+        onupdate=_utcnow,
+        nullable=False,
+    )
+
+
 class StrategyParamVersion(Base):
     """Immutable snapshot of the tunable strategy params at a point in time.
 

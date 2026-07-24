@@ -1,0 +1,810 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+from collections import Counter
+from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta, timezone
+from typing import cast
+
+from sqlalchemy.orm import Session
+
+from app.domain.strategy_v2 import (
+    PortfolioRoutingCandidate,
+    PortfolioRoutingPolicy,
+    rank_portfolio_candidates,
+)
+from app.models import (
+    StrategyV2PortfolioObservation,
+    StrategyV2PortfolioRegistration,
+    StrategyV2ShadowDecision,
+    StrategyV2ShadowTrade,
+    UniverseSelectionCandidate,
+    UniverseSelectionRun,
+    WatchlistScore,
+)
+from app.schemas import (
+    StrategyV2PortfolioRoutingMetrics,
+    StrategyV2PortfolioRoutingReport,
+    StrategyV2PortfolioRoutingVariant,
+)
+from app.services.watchlist_quant_service import CURRENT_QUANT_SOURCES
+
+
+@dataclass(frozen=True)
+class _RoutingSpec:
+    policy: PortfolioRoutingPolicy
+    algorithm_version: str
+
+
+_ROUTING_SPECS = (
+    _RoutingSpec(
+        policy="FIXED_PRIMARY",
+        algorithm_version="strategy-v2-portfolio-fixed-primary-v1",
+    ),
+    _RoutingSpec(
+        policy="SELECTED_UNIVERSE",
+        algorithm_version="strategy-v2-portfolio-selected-universe-v1",
+    ),
+    _RoutingSpec(
+        policy="QUANT_CANDIDATE",
+        algorithm_version="strategy-v2-portfolio-quant-candidate-v1",
+    ),
+    _RoutingSpec(
+        policy="QUANT_WATCH_PLUS",
+        algorithm_version="strategy-v2-portfolio-quant-watch-plus-v1",
+    ),
+)
+_EVALUATOR_VERSION = "strategy-v2-single-capital-slot-forward-router-v1"
+_TERMINAL_UNIVERSE_STATUSES = ("COMPLETE", "DEGRADED")
+_ENTRY_BIND_TIMEOUT = timedelta(minutes=10)
+_MIN_READY_TRADES = 20
+_MIN_MATURE_TRADES = 50
+_MIN_READY_SESSIONS = 10
+_MIN_ROUTED_SYMBOLS = 3
+_EPSILON = 1e-9
+
+
+class StrategyV2PortfolioService:
+    """Compare causal cross-symbol routing policies with one capital slot."""
+
+    def __init__(self, db: Session) -> None:
+        self.db = db
+
+    def ensure_registrations(
+        self,
+        *,
+        primary_symbol: str,
+        now: datetime,
+    ) -> bool:
+        normalized_primary = primary_symbol.strip().upper()
+        if not normalized_primary:
+            raise ValueError("portfolio routing primary symbol is required")
+        current = _as_utc(now)
+        eligible_after = current.replace(
+            second=0,
+            microsecond=0,
+        ) + timedelta(minutes=1)
+        existing = {
+            row.algorithm_version: row
+            for row in self.db.query(
+                StrategyV2PortfolioRegistration
+            ).filter(
+                StrategyV2PortfolioRegistration.baseline_symbol
+                == normalized_primary
+            ).all()
+        }
+        created = False
+        for spec in _ROUTING_SPECS:
+            digest = self._evaluator_digest(spec)
+            row = existing.get(spec.algorithm_version)
+            if row is not None:
+                if (
+                    row.policy != spec.policy
+                    or row.evaluator_digest != digest
+                ):
+                    raise ValueError(
+                        "persisted portfolio routing registration differs "
+                        "from the frozen evaluator"
+                    )
+                continue
+            self.db.add(StrategyV2PortfolioRegistration(
+                baseline_symbol=normalized_primary,
+                policy=spec.policy,
+                algorithm_version=spec.algorithm_version,
+                evaluator_digest=digest,
+                registered_at=current,
+                eligible_after=eligible_after,
+            ))
+            created = True
+        if created:
+            self.db.commit()
+        return created
+
+    def advance(self, *, now: datetime) -> None:
+        current = _as_utc(now)
+        registrations = self.db.query(
+            StrategyV2PortfolioRegistration
+        ).order_by(
+            StrategyV2PortfolioRegistration.registered_at.asc(),
+            StrategyV2PortfolioRegistration.id.asc(),
+        ).all()
+        for registration in registrations:
+            self._sync_selected_observations(
+                registration,
+                current=current,
+            )
+            self._advance_registration(
+                registration,
+                current=current,
+            )
+        self.db.commit()
+
+    def get_report(
+        self,
+        primary_symbol: str | None = None,
+    ) -> StrategyV2PortfolioRoutingReport:
+        normalized = (primary_symbol or "").strip().upper()
+        query = self.db.query(StrategyV2PortfolioRegistration)
+        if normalized:
+            query = query.filter(
+                StrategyV2PortfolioRegistration.baseline_symbol
+                == normalized
+            )
+        registrations = query.order_by(
+            StrategyV2PortfolioRegistration.registered_at.asc(),
+            StrategyV2PortfolioRegistration.id.asc(),
+        ).all()
+        if not registrations:
+            return StrategyV2PortfolioRoutingReport(
+                primary_symbol=normalized,
+            )
+        if not normalized:
+            normalized = registrations[-1].baseline_symbol
+            registrations = [
+                row
+                for row in registrations
+                if row.baseline_symbol == normalized
+            ]
+
+        metrics = {
+            row.id: self._metrics(row)
+            for row in registrations
+        }
+        baseline = next(
+            (
+                metrics[row.id]
+                for row in registrations
+                if row.policy == "FIXED_PRIMARY"
+            ),
+            StrategyV2PortfolioRoutingMetrics(),
+        )
+        variants = [
+            self._variant_report(
+                row,
+                metrics[row.id],
+                baseline=baseline,
+            )
+            for row in registrations
+        ]
+        return StrategyV2PortfolioRoutingReport(
+            primary_symbol=normalized,
+            variants=variants,
+        )
+
+    def _advance_registration(
+        self,
+        registration: StrategyV2PortfolioRegistration,
+        *,
+        current: datetime,
+    ) -> None:
+        latest_observation = self.db.query(
+            StrategyV2PortfolioObservation
+        ).filter(
+            StrategyV2PortfolioObservation.registration_id
+            == registration.id
+        ).order_by(
+            StrategyV2PortfolioObservation.signal_at.desc(),
+            StrategyV2PortfolioObservation.id.desc(),
+        ).first()
+        lower_bound = (
+            latest_observation.signal_at
+            if latest_observation is not None
+            else registration.eligible_after
+        )
+        query = self.db.query(StrategyV2ShadowDecision).filter(
+            StrategyV2ShadowDecision.action == "SUBMIT_ENTRY",
+            StrategyV2ShadowDecision.observed_at <= current,
+        )
+        if latest_observation is None:
+            query = query.filter(
+                StrategyV2ShadowDecision.bar_at >= lower_bound
+            )
+        else:
+            query = query.filter(
+                StrategyV2ShadowDecision.bar_at > lower_bound
+            )
+        decisions = query.order_by(
+            StrategyV2ShadowDecision.bar_at.asc(),
+            StrategyV2ShadowDecision.symbol.asc(),
+            StrategyV2ShadowDecision.id.asc(),
+        ).all()
+        grouped: dict[datetime, list[StrategyV2ShadowDecision]] = {}
+        for decision in decisions:
+            signal_at = _as_utc(decision.bar_at)
+            grouped.setdefault(signal_at, []).append(decision)
+
+        for signal_at in sorted(grouped):
+            signal_decisions = grouped[signal_at]
+            observed_at = max(
+                _as_utc(row.observed_at)
+                for row in signal_decisions
+            )
+            context_cutoff = signal_at + timedelta(minutes=1)
+            candidates = self._candidate_context(
+                signal_decisions,
+                observed_at=context_cutoff,
+            )
+            ranked = rank_portfolio_candidates(
+                candidates,
+                policy=_routing_policy(registration.policy),
+                primary_symbol=registration.baseline_symbol,
+            )
+            candidates_json = json.dumps(
+                [asdict(item) for item in ranked],
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            occupied = self._occupant_at(
+                registration,
+                signal_at=signal_at,
+            )
+            if occupied is not None:
+                self.db.add(StrategyV2PortfolioObservation(
+                    registration_id=registration.id,
+                    signal_at=signal_at,
+                    observed_at=observed_at,
+                    status="SKIPPED_OCCUPIED",
+                    reason=(
+                        "SINGLE_CAPITAL_SLOT_OCCUPIED:"
+                        f"{occupied.selected_symbol}"
+                    ),
+                    candidate_count=len(ranked),
+                    candidates_json=candidates_json,
+                ))
+                self.db.flush()
+                continue
+            if not ranked:
+                self.db.add(StrategyV2PortfolioObservation(
+                    registration_id=registration.id,
+                    signal_at=signal_at,
+                    observed_at=observed_at,
+                    status="NO_ELIGIBLE",
+                    reason=f"NO_ELIGIBLE_{registration.policy}",
+                    candidate_count=0,
+                    candidates_json="[]",
+                ))
+                self.db.flush()
+                continue
+
+            selected = ranked[0]
+            observation = StrategyV2PortfolioObservation(
+                registration_id=registration.id,
+                signal_at=signal_at,
+                observed_at=observed_at,
+                status="PENDING_ENTRY",
+                reason="ROUTED_NEXT_BAR_ENTRY",
+                candidate_count=len(ranked),
+                candidates_json=candidates_json,
+                selected_symbol=selected.symbol,
+                source_config_version=selected.source_config_version,
+                source_signal_decision_id=selected.signal_decision_id,
+                selection_rank=selected.selection_rank,
+                selection_score=selected.selection_score,
+                quant_source=selected.quant_source,
+                quant_action=selected.quant_action,
+                quant_score=selected.quant_score,
+                quant_confidence=selected.quant_confidence,
+            )
+            self.db.add(observation)
+            self.db.flush()
+            self._sync_observation(observation, current=current)
+
+    def _candidate_context(
+        self,
+        decisions: list[StrategyV2ShadowDecision],
+        *,
+        observed_at: datetime,
+    ) -> list[PortfolioRoutingCandidate]:
+        by_symbol: dict[str, StrategyV2ShadowDecision] = {}
+        for decision in decisions:
+            current = by_symbol.get(decision.symbol)
+            if current is None or decision.id > current.id:
+                by_symbol[decision.symbol] = decision
+        selection = self._selection_context(
+            tuple(by_symbol),
+            observed_at=observed_at,
+        )
+        quant = self._quant_context(
+            tuple(by_symbol),
+            observed_at=observed_at,
+        )
+        candidates: list[PortfolioRoutingCandidate] = []
+        for symbol, decision in sorted(by_symbol.items()):
+            selection_row = selection.get(symbol)
+            quant_row = quant.get(symbol)
+            candidates.append(PortfolioRoutingCandidate(
+                symbol=symbol,
+                signal_decision_id=decision.id,
+                source_config_version=decision.config_version,
+                selection_selected=(
+                    bool(selection_row.selected)
+                    if selection_row is not None
+                    else False
+                ),
+                selection_rank=(
+                    selection_row.rank
+                    if selection_row is not None
+                    else None
+                ),
+                selection_score=(
+                    float(selection_row.score)
+                    if selection_row is not None
+                    else None
+                ),
+                quant_source=(
+                    quant_row.source
+                    if quant_row is not None
+                    else ""
+                ),
+                quant_action=(
+                    quant_row.recommended_action
+                    if quant_row is not None
+                    else ""
+                ),
+                quant_score=(
+                    float(quant_row.score)
+                    if quant_row is not None
+                    else None
+                ),
+                quant_confidence=(
+                    float(quant_row.confidence)
+                    if quant_row is not None
+                    else None
+                ),
+            ))
+        return candidates
+
+    def _selection_context(
+        self,
+        symbols: tuple[str, ...],
+        *,
+        observed_at: datetime,
+    ) -> dict[str, UniverseSelectionCandidate]:
+        if not symbols:
+            return {}
+        run = self.db.query(UniverseSelectionRun).filter(
+            UniverseSelectionRun.status.in_(
+                _TERMINAL_UNIVERSE_STATUSES
+            ),
+            UniverseSelectionRun.completed_at.is_not(None),
+            UniverseSelectionRun.completed_at <= observed_at,
+        ).order_by(
+            UniverseSelectionRun.completed_at.desc(),
+            UniverseSelectionRun.id.desc(),
+        ).first()
+        if run is None:
+            return {}
+        return {
+            row.symbol: row
+            for row in self.db.query(
+                UniverseSelectionCandidate
+            ).filter(
+                UniverseSelectionCandidate.run_id == run.id,
+                UniverseSelectionCandidate.symbol.in_(symbols),
+            ).all()
+        }
+
+    def _quant_context(
+        self,
+        symbols: tuple[str, ...],
+        *,
+        observed_at: datetime,
+    ) -> dict[str, WatchlistScore]:
+        if not symbols:
+            return {}
+        rows = self.db.query(WatchlistScore).filter(
+            WatchlistScore.symbol.in_(symbols),
+            WatchlistScore.source.in_(CURRENT_QUANT_SOURCES),
+            WatchlistScore.created_at <= observed_at,
+        ).order_by(
+            WatchlistScore.created_at.desc(),
+            WatchlistScore.id.desc(),
+        ).all()
+        latest: dict[str, WatchlistScore] = {}
+        seen: set[str] = set()
+        for row in rows:
+            if row.symbol in seen:
+                continue
+            seen.add(row.symbol)
+            if _as_utc(row.expires_at) <= observed_at:
+                continue
+            latest[row.symbol] = row
+        return latest
+
+    def _sync_selected_observations(
+        self,
+        registration: StrategyV2PortfolioRegistration,
+        *,
+        current: datetime,
+    ) -> None:
+        rows = self.db.query(
+            StrategyV2PortfolioObservation
+        ).filter(
+            StrategyV2PortfolioObservation.registration_id
+            == registration.id,
+            StrategyV2PortfolioObservation.status.in_(
+                ("PENDING_ENTRY", "OPEN")
+            ),
+        ).order_by(
+            StrategyV2PortfolioObservation.signal_at.asc(),
+            StrategyV2PortfolioObservation.id.asc(),
+        ).all()
+        for row in rows:
+            self._sync_observation(row, current=current)
+
+    def _sync_observation(
+        self,
+        row: StrategyV2PortfolioObservation,
+        *,
+        current: datetime,
+    ) -> None:
+        source: StrategyV2ShadowTrade | None = None
+        if row.source_trade_id is not None:
+            source = self.db.get(
+                StrategyV2ShadowTrade,
+                row.source_trade_id,
+            )
+            if source is None:
+                raise ValueError(
+                    "portfolio routing source trade linkage is incomplete"
+                )
+        elif row.status == "PENDING_ENTRY":
+            expected_entry = _as_utc(row.signal_at) + timedelta(minutes=1)
+            source = self.db.query(StrategyV2ShadowTrade).filter(
+                StrategyV2ShadowTrade.symbol == row.selected_symbol,
+                StrategyV2ShadowTrade.config_version
+                == row.source_config_version,
+                StrategyV2ShadowTrade.entry_at == expected_entry,
+            ).order_by(
+                StrategyV2ShadowTrade.id.asc()
+            ).first()
+            if source is None:
+                if current >= expected_entry + _ENTRY_BIND_TIMEOUT:
+                    row.status = "MISSED"
+                    row.reason = "SOURCE_ENTRY_MISSING"
+                    self.db.add(row)
+                return
+            self._validate_source_trade(row, source)
+            row.source_trade_id = source.id
+            row.entry_at = source.entry_at
+            row.entry_price = source.entry_price
+            row.status = "OPEN"
+            row.reason = "SOURCE_ENTRY_BOUND"
+        elif row.status == "OPEN":
+            raise ValueError(
+                "open portfolio routing observation has no source trade"
+            )
+
+        if source is not None and source.status == "CLOSED":
+            self._close_from_source(row, source)
+        self.db.add(row)
+        self.db.flush()
+
+    def _validate_source_trade(
+        self,
+        row: StrategyV2PortfolioObservation,
+        source: StrategyV2ShadowTrade,
+    ) -> None:
+        if (
+            row.source_signal_decision_id is None
+            or source.entry_decision_id is None
+        ):
+            raise ValueError(
+                "portfolio routing source linkage has a missing decision"
+            )
+        signal = self.db.get(
+            StrategyV2ShadowDecision,
+            row.source_signal_decision_id,
+        )
+        entry = self.db.get(
+            StrategyV2ShadowDecision,
+            source.entry_decision_id,
+        )
+        expected_entry = _as_utc(row.signal_at) + timedelta(minutes=1)
+        if (
+            signal is None
+            or signal.action != "SUBMIT_ENTRY"
+            or signal.symbol != row.selected_symbol
+            or signal.config_version != row.source_config_version
+            or _as_utc(signal.bar_at) != _as_utc(row.signal_at)
+            or entry is None
+            or entry.action != "FILL_ENTRY"
+            or entry.symbol != row.selected_symbol
+            or entry.config_version != row.source_config_version
+            or _as_utc(entry.bar_at) != expected_entry
+            or _as_utc(source.entry_at) != expected_entry
+        ):
+            raise ValueError(
+                "portfolio routing source trade is not the causal next-bar fill"
+            )
+
+    @staticmethod
+    def _close_from_source(
+        row: StrategyV2PortfolioObservation,
+        source: StrategyV2ShadowTrade,
+    ) -> None:
+        values = (
+            source.entry_price,
+            source.exit_price,
+            source.quantity,
+            source.gross_pnl,
+            source.net_pnl,
+        )
+        if (
+            source.exit_at is None
+            or any(
+                value is None or not math.isfinite(float(value))
+                for value in values
+            )
+            or source.entry_price <= 0
+            or source.quantity <= 0
+        ):
+            raise ValueError(
+                "closed portfolio routing source trade has incomplete outcome"
+            )
+        entry_notional = source.entry_price * source.quantity
+        row.status = "CLOSED"
+        row.reason = "SOURCE_TRADE_CLOSED"
+        row.exit_at = source.exit_at
+        row.exit_price = source.exit_price
+        row.exit_reason = source.exit_reason
+        row.gross_return_pct = (
+            float(source.gross_pnl or 0.0) / entry_notional * 100
+        )
+        row.net_return_pct = (
+            float(source.net_pnl or 0.0) / entry_notional * 100
+        )
+
+    def _occupant_at(
+        self,
+        registration: StrategyV2PortfolioRegistration,
+        *,
+        signal_at: datetime,
+    ) -> StrategyV2PortfolioObservation | None:
+        rows = self.db.query(
+            StrategyV2PortfolioObservation
+        ).filter(
+            StrategyV2PortfolioObservation.registration_id
+            == registration.id,
+            StrategyV2PortfolioObservation.selected_symbol != "",
+            StrategyV2PortfolioObservation.signal_at < signal_at,
+        ).order_by(
+            StrategyV2PortfolioObservation.signal_at.desc(),
+            StrategyV2PortfolioObservation.id.desc(),
+        ).all()
+        for row in rows:
+            if row.status in {"PENDING_ENTRY", "OPEN"}:
+                return row
+            if (
+                row.status == "CLOSED"
+                and row.exit_at is not None
+                and _as_utc(row.exit_at) > signal_at
+            ):
+                return row
+        return None
+
+    def _metrics(
+        self,
+        registration: StrategyV2PortfolioRegistration,
+    ) -> StrategyV2PortfolioRoutingMetrics:
+        rows = self.db.query(
+            StrategyV2PortfolioObservation
+        ).filter(
+            StrategyV2PortfolioObservation.registration_id
+            == registration.id
+        ).order_by(
+            StrategyV2PortfolioObservation.signal_at.asc(),
+            StrategyV2PortfolioObservation.id.asc(),
+        ).all()
+        closed = [
+            row
+            for row in rows
+            if row.status == "CLOSED"
+            and row.net_return_pct is not None
+        ]
+        returns = [
+            float(row.net_return_pct or 0.0)
+            for row in closed
+        ]
+        compounded, max_drawdown = _compounded_metrics(returns)
+        selected = [
+            row
+            for row in rows
+            if row.selected_symbol
+        ]
+        return StrategyV2PortfolioRoutingMetrics(
+            signal_groups=len(rows),
+            selected_signals=len(selected),
+            skipped_occupied=sum(
+                row.status == "SKIPPED_OCCUPIED"
+                for row in rows
+            ),
+            no_eligible=sum(
+                row.status == "NO_ELIGIBLE"
+                for row in rows
+            ),
+            pending_entries=sum(
+                row.status == "PENDING_ENTRY"
+                for row in rows
+            ),
+            open_trades=sum(row.status == "OPEN" for row in rows),
+            missed_entries=sum(row.status == "MISSED" for row in rows),
+            closed_trades=len(closed),
+            observed_sessions=len({
+                _as_utc(row.signal_at).date()
+                for row in rows
+            }),
+            distinct_symbols=len({
+                row.selected_symbol
+                for row in closed
+                if row.selected_symbol
+            }),
+            win_rate=(
+                sum(value > 0 for value in returns) / len(returns)
+                if returns
+                else 0.0
+            ),
+            mean_net_return_pct=(
+                sum(returns) / len(returns)
+                if returns
+                else 0.0
+            ),
+            cumulative_net_return_pct=sum(returns),
+            compounded_return_pct=compounded,
+            max_drawdown_pct=max_drawdown,
+            selections_by_symbol=dict(sorted(
+                Counter(
+                    row.selected_symbol
+                    for row in selected
+                ).items()
+            )),
+            latest_signal_at=(
+                rows[-1].signal_at
+                if rows
+                else None
+            ),
+        )
+
+    def _variant_report(
+        self,
+        registration: StrategyV2PortfolioRegistration,
+        metrics: StrategyV2PortfolioRoutingMetrics,
+        *,
+        baseline: StrategyV2PortfolioRoutingMetrics,
+    ) -> StrategyV2PortfolioRoutingVariant:
+        blockers: list[str] = []
+        is_baseline = registration.policy == "FIXED_PRIMARY"
+        if metrics.closed_trades < _MIN_READY_TRADES:
+            blockers.append("MIN_CLOSED_TRADES")
+        if metrics.observed_sessions < _MIN_READY_SESSIONS:
+            blockers.append("MIN_OBSERVED_SESSIONS")
+        if (
+            not is_baseline
+            and metrics.distinct_symbols < _MIN_ROUTED_SYMBOLS
+        ):
+            blockers.append("MIN_DISTINCT_SYMBOLS")
+        if (
+            metrics.closed_trades
+            and metrics.compounded_return_pct <= 0
+        ):
+            blockers.append("COMPOUNDED_RETURN_NON_POSITIVE")
+        if is_baseline:
+            blockers.append("BASELINE_COMPARATOR")
+        else:
+            if baseline.closed_trades < _MIN_READY_TRADES:
+                blockers.append("BASELINE_EVIDENCE_INSUFFICIENT")
+            elif (
+                metrics.compounded_return_pct
+                <= baseline.compounded_return_pct + _EPSILON
+            ):
+                blockers.append("NOT_BETTER_THAN_FIXED_PRIMARY")
+            if (
+                baseline.closed_trades
+                and metrics.max_drawdown_pct
+                > baseline.max_drawdown_pct + _EPSILON
+            ):
+                blockers.append("MAX_DRAWDOWN_WORSE_THAN_FIXED_PRIMARY")
+        return StrategyV2PortfolioRoutingVariant(
+            registration_id=registration.id,
+            policy=_routing_policy(registration.policy),
+            algorithm_version=registration.algorithm_version,
+            evaluator_digest=registration.evaluator_digest,
+            registered_at=registration.registered_at,
+            eligible_after=registration.eligible_after,
+            status=(
+                "MATURE_EVIDENCE"
+                if metrics.closed_trades >= _MIN_MATURE_TRADES
+                else "READY_FOR_REVIEW"
+                if metrics.closed_trades >= _MIN_READY_TRADES
+                else "COLLECTING"
+            ),
+            metrics=metrics,
+            fixed_primary_compounded_return_pct=(
+                baseline.compounded_return_pct
+            ),
+            compounded_return_delta_pct=(
+                metrics.compounded_return_pct
+                - baseline.compounded_return_pct
+            ),
+            promotion_ready=not blockers,
+            blockers=blockers,
+        )
+
+    @staticmethod
+    def _evaluator_digest(spec: _RoutingSpec) -> str:
+        payload = {
+            "evaluator_version": _EVALUATOR_VERSION,
+            "algorithm_version": spec.algorithm_version,
+            "policy": spec.policy,
+            "position_side": "LONG",
+            "signal_action": "SUBMIT_ENTRY",
+            "fill_rule": "SOURCE_NEXT_BAR_FILL",
+            "capital_slots": 1,
+            "historical_backfill": False,
+            "quant_sources": list(CURRENT_QUANT_SOURCES),
+            "context_cutoff": "SIGNAL_BAR_END",
+            "quant_freshness": (
+                "CREATED_BEFORE_AND_UNEXPIRED_AT_SIGNAL_BAR_END"
+            ),
+            "universe_freshness": "COMPLETED_BEFORE_SIGNAL_BAR_END",
+        }
+        encoded = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _compounded_metrics(returns_pct: list[float]) -> tuple[float, float]:
+    equity = 1.0
+    peak = 1.0
+    max_drawdown = 0.0
+    for value in returns_pct:
+        equity *= 1 + value / 100
+        peak = max(peak, equity)
+        if peak > 0:
+            max_drawdown = max(
+                max_drawdown,
+                (peak - equity) / peak * 100,
+            )
+    return (equity - 1) * 100, max_drawdown
+
+
+def _routing_policy(value: str) -> PortfolioRoutingPolicy:
+    if value not in {
+        "FIXED_PRIMARY",
+        "SELECTED_UNIVERSE",
+        "QUANT_CANDIDATE",
+        "QUANT_WATCH_PLUS",
+    }:
+        raise ValueError(f"unsupported portfolio routing policy: {value}")
+    return cast(PortfolioRoutingPolicy, value)
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)

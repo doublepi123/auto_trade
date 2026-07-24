@@ -344,6 +344,7 @@ def test_strategy_v2_shadow_tick_is_isolated_from_execution(monkeypatch) -> None
     calls: list[dict[str, object]] = []
     collections: list[dict[str, object]] = []
     registrations: list[str] = []
+    portfolio_calls: list[tuple[str, object]] = []
 
     class FakeQuery:
         def __init__(self, values: list[tuple[str]]) -> None:
@@ -409,12 +410,38 @@ def test_strategy_v2_shadow_tick_is_isolated_from_execution(monkeypatch) -> None
                 raise RuntimeError("isolated registration failure")
             return symbol == "0700.HK"
 
+    class FakePortfolioService:
+        def __init__(self, received_db: object) -> None:
+            assert received_db is db
+
+        def ensure_registrations(
+            self,
+            *,
+            primary_symbol: str,
+            now: object,
+        ) -> bool:
+            portfolio_calls.append((primary_symbol, now))
+            return True
+
+        def advance(self, *, now: object) -> None:
+            portfolio_calls.append(("advance", now))
+
     monkeypatch.setattr(main_module, "SessionLocal", lambda: db)
     monkeypatch.setattr(main_module, "StrategyService", FakeStrategyService)
     monkeypatch.setattr(main_module, "get_runner", lambda: runner)
     monkeypatch.setattr(
+        main_module.settings,
+        "strategy_v2_portfolio_shadow_enabled",
+        True,
+    )
+    monkeypatch.setattr(
         "app.services.strategy_v2_shadow_service.StrategyV2ShadowService",
         FakeShadowService,
+    )
+    monkeypatch.setattr(
+        "app.services.strategy_v2_portfolio_service."
+        "StrategyV2PortfolioService",
+        FakePortfolioService,
     )
 
     main_module._strategy_v2_shadow_tick_sync()
@@ -426,6 +453,10 @@ def test_strategy_v2_shadow_tick_is_isolated_from_execution(monkeypatch) -> None
     ]
     assert collections == calls
     assert registrations == ["0700.HK", "MSFT.US", "NVDA.US"]
+    assert [item[0] for item in portfolio_calls] == [
+        "NVDA.US",
+        "advance",
+    ]
     assert db.rolled_back == 2
     assert db.closed is True
     runner._trade_svc.execute.assert_not_called()

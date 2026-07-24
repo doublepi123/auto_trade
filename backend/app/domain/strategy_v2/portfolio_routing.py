@@ -1,0 +1,135 @@
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+from typing import Literal, Sequence
+
+
+PortfolioRoutingPolicy = Literal[
+    "FIXED_PRIMARY",
+    "SELECTED_UNIVERSE",
+    "QUANT_CANDIDATE",
+    "QUANT_WATCH_PLUS",
+]
+
+
+@dataclass(frozen=True)
+class PortfolioRoutingCandidate:
+    symbol: str
+    signal_decision_id: int
+    source_config_version: str
+    selection_selected: bool = False
+    selection_rank: int | None = None
+    selection_score: float | None = None
+    quant_source: str = ""
+    quant_action: str = ""
+    quant_score: float | None = None
+    quant_confidence: float | None = None
+
+    def __post_init__(self) -> None:
+        normalized_symbol = self.symbol.strip().upper()
+        if not normalized_symbol:
+            raise ValueError("portfolio routing candidate symbol is required")
+        if self.signal_decision_id <= 0:
+            raise ValueError(
+                "portfolio routing signal decision id must be positive"
+            )
+        if not self.source_config_version:
+            raise ValueError(
+                "portfolio routing source config version is required"
+            )
+        if self.selection_rank is not None and self.selection_rank <= 0:
+            raise ValueError("portfolio routing selection rank must be positive")
+        for value in (
+            self.selection_score,
+            self.quant_score,
+            self.quant_confidence,
+        ):
+            if value is not None and not math.isfinite(value):
+                raise ValueError(
+                    "portfolio routing candidate metrics must be finite"
+                )
+        object.__setattr__(self, "symbol", normalized_symbol)
+        object.__setattr__(
+            self,
+            "quant_action",
+            self.quant_action.strip().upper(),
+        )
+
+
+def rank_portfolio_candidates(
+    candidates: Sequence[PortfolioRoutingCandidate],
+    *,
+    policy: PortfolioRoutingPolicy,
+    primary_symbol: str,
+) -> tuple[PortfolioRoutingCandidate, ...]:
+    """Return a deterministic causal ranking for one signal minute."""
+
+    normalized_primary = primary_symbol.strip().upper()
+    if not normalized_primary:
+        raise ValueError("portfolio routing primary symbol is required")
+    by_symbol: dict[str, PortfolioRoutingCandidate] = {}
+    for candidate in candidates:
+        if candidate.symbol in by_symbol:
+            raise ValueError(
+                f"duplicate portfolio routing candidate: {candidate.symbol}"
+            )
+        by_symbol[candidate.symbol] = candidate
+
+    if policy == "FIXED_PRIMARY":
+        primary = by_symbol.get(normalized_primary)
+        return (primary,) if primary is not None else ()
+    if policy == "SELECTED_UNIVERSE":
+        eligible = [
+            candidate
+            for candidate in by_symbol.values()
+            if candidate.selection_selected
+            and candidate.selection_rank is not None
+        ]
+        return tuple(sorted(
+            eligible,
+            key=lambda candidate: (
+                candidate.selection_rank or 10_000,
+                -_metric(candidate.selection_score),
+                candidate.symbol,
+            ),
+        ))
+    if policy == "QUANT_CANDIDATE":
+        eligible = [
+            candidate
+            for candidate in by_symbol.values()
+            if (
+                candidate.quant_source == "quant_v5"
+                and candidate.quant_action == "CANDIDATE"
+            )
+        ]
+    elif policy == "QUANT_WATCH_PLUS":
+        eligible = [
+            candidate
+            for candidate in by_symbol.values()
+            if (
+                candidate.quant_source == "quant_v5"
+                and candidate.quant_action in {"CANDIDATE", "WATCH"}
+            )
+        ]
+    else:
+        raise ValueError(f"unsupported portfolio routing policy: {policy}")
+
+    return tuple(sorted(
+        eligible,
+        key=lambda candidate: (
+            0 if candidate.quant_action == "CANDIDATE" else 1,
+            -_metric(candidate.quant_score),
+            -_metric(candidate.quant_confidence),
+            (
+                candidate.selection_rank
+                if candidate.selection_rank is not None
+                else 10_000
+            ),
+            candidate.symbol,
+        ),
+    ))
+
+
+def _metric(value: float | None) -> float:
+    return float(value) if value is not None else -1.0

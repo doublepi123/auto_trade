@@ -817,6 +817,9 @@ def _strategy_v2_shadow_tick_sync() -> None:
         StrategyV2ShadowTrade,
     )
     from app.services.strategy_v2_shadow_service import StrategyV2ShadowService
+    from app.services.strategy_v2_portfolio_service import (
+        StrategyV2PortfolioService,
+    )
 
     db = SessionLocal()
     try:
@@ -835,6 +838,29 @@ def _strategy_v2_shadow_tick_sync() -> None:
             targets.setdefault(symbol, market_for_symbol(symbol))
         if not targets:
             return
+
+        portfolio: StrategyV2PortfolioService | None = None
+        if (
+            settings.strategy_v2_portfolio_shadow_enabled
+            and strategy.symbol
+        ):
+            portfolio = StrategyV2PortfolioService(db)
+            try:
+                if portfolio.ensure_registrations(
+                    primary_symbol=strategy.symbol,
+                    now=datetime.now(timezone.utc),
+                ):
+                    logger.info(
+                        "registered Strategy v2 portfolio routing "
+                        "variants for primary=%s",
+                        strategy.symbol,
+                    )
+            except Exception:
+                db.rollback()
+                portfolio = None
+                logger.exception(
+                    "Strategy v2 portfolio routing registration failed"
+                )
 
         shadow = StrategyV2ShadowService(db, get_runner().broker)
         for symbol, market in sorted(targets.items()):
@@ -863,6 +889,14 @@ def _strategy_v2_shadow_tick_sync() -> None:
                 logger.exception(
                     "Strategy v2 forward validation failed for symbol=%s",
                     symbol,
+                )
+        if portfolio is not None:
+            try:
+                portfolio.advance(now=datetime.now(timezone.utc))
+            except Exception:
+                db.rollback()
+                logger.exception(
+                    "Strategy v2 portfolio routing advance failed"
                 )
     finally:
         db.close()

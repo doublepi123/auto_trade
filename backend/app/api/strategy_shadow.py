@@ -16,6 +16,7 @@ from app.schemas import (
     StrategyV2ExitChallengerReport,
     StrategyV2ForwardRegistrationRequest,
     StrategyV2ForwardValidationResponse,
+    StrategyV2PortfolioRoutingReport,
     StrategyV2ShadowConfigResponse,
     StrategyV2ShadowConfigUpdate,
     StrategyV2ShadowDecisionPage,
@@ -27,6 +28,9 @@ from app.schemas import (
     StrategyV2ShadowVersionResponse,
 )
 from app.services.strategy_v2_shadow_service import StrategyV2ShadowService
+from app.services.strategy_v2_portfolio_service import (
+    StrategyV2PortfolioService,
+)
 
 
 router = APIRouter(
@@ -211,6 +215,20 @@ def get_exit_challengers(
 ) -> StrategyV2ExitChallengerReport:
     try:
         return StrategyV2ShadowService(db).get_exit_challengers(symbol)
+    except ValueError as exc:
+        raise _bad_request(exc) from exc
+
+
+@router.get(
+    "/portfolio-routing",
+    response_model=StrategyV2PortfolioRoutingReport,
+)
+def get_portfolio_routing(
+    symbol: str | None = Query(default=None, max_length=50),
+    db: Session = Depends(get_db),
+) -> StrategyV2PortfolioRoutingReport:
+    try:
+        return StrategyV2PortfolioService(db).get_report(symbol)
     except ValueError as exc:
         raise _bad_request(exc) from exc
 

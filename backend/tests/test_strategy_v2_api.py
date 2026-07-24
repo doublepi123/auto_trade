@@ -22,6 +22,8 @@ from app.models import (
     StrategyV2ExitChallengerTrade,
     StrategyV2ForwardEvidence,
     StrategyV2ForwardRegistration,
+    StrategyV2PortfolioObservation,
+    StrategyV2PortfolioRegistration,
     StrategyV2ShadowConfig,
     StrategyV2ShadowDecision,
     StrategyV2ShadowState,
@@ -30,6 +32,9 @@ from app.models import (
 )
 from app.schemas import StrategyV2ShadowDailyEvidence
 from app.services.strategy_v2_shadow_service import StrategyV2ShadowService
+from app.services.strategy_v2_portfolio_service import (
+    StrategyV2PortfolioService,
+)
 
 
 _NOW = datetime(2026, 7, 10, 15, 0, tzinfo=timezone.utc)
@@ -84,6 +89,8 @@ class TestStrategyV2ShadowApi:
         self.audit.records.clear()
         with self.session_factory() as db:
             for model in (
+                StrategyV2PortfolioObservation,
+                StrategyV2PortfolioRegistration,
                 StrategyV2ExitChallengerTrade,
                 StrategyV2ExitChallengerRegistration,
                 StrategyV2ForwardEvidence,
@@ -145,6 +152,38 @@ class TestStrategyV2ShadowApi:
             item["locked_profit_pct"] for item in body["variants"]
         } == {0.1, 0.2, 0.3}
         assert all(item["status"] == "COLLECTING" for item in body["variants"])
+
+    def test_portfolio_routing_report_is_forward_only_and_read_only(
+        self,
+    ) -> None:
+        with self.session_factory() as db:
+            StrategyV2PortfolioService(db).ensure_registrations(
+                primary_symbol="AAPL.US",
+                now=_NOW,
+            )
+
+        response = self.client.get(
+            "/api/strategy-shadow/portfolio-routing",
+            params={"symbol": "AAPL.US"},
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["primary_symbol"] == "AAPL.US"
+        assert body["mode"] == "SHADOW"
+        assert body["order_submission_allowed"] is False
+        assert body["automatic_promotion_allowed"] is False
+        assert body["historical_backfill_allowed"] is False
+        assert body["capital_slots"] == 1
+        assert len(body["variants"]) == 4
+        assert {
+            item["policy"] for item in body["variants"]
+        } == {
+            "FIXED_PRIMARY",
+            "SELECTED_UNIVERSE",
+            "QUANT_CANDIDATE",
+            "QUANT_WATCH_PLUS",
+        }
 
     def test_config_contract_update_audit_and_forbidden_hard_fields(self) -> None:
         response = self.client.get("/api/strategy-shadow/config")

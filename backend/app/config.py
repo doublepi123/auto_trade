@@ -305,6 +305,17 @@ class Settings(BaseSettings):
             "remain observation-only and cannot submit orders."
         ),
     )
+    strategy_v2_portfolio_shadow_enabled: bool = Field(
+        default=False,
+        validation_alias=(
+            "AUTO_TRADE_STRATEGY_V2_PORTFOLIO_SHADOW_ENABLED"
+        ),
+        description=(
+            "Compare fixed-primary, selected-universe, and quant-gated "
+            "Strategy v2 routing with one shadow capital slot. This observer "
+            "cannot submit orders or promote a policy automatically."
+        ),
+    )
     universe_selection_interval_minutes: int = Field(
         default=60,
         ge=15,
@@ -579,6 +590,14 @@ class Settings(BaseSettings):
         ):
             raise ValueError(
                 "opening momentum challenger requires opening momentum "
+                "shadow"
+            )
+        if (
+            self.strategy_v2_portfolio_shadow_enabled
+            and not self.universe_selection_enable_shadow
+        ):
+            raise ValueError(
+                "Strategy v2 portfolio shadow requires universe selection "
                 "shadow"
             )
         if (

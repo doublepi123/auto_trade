@@ -355,6 +355,8 @@ def test_strategy_v2_shadow_table_migration_is_complete_and_idempotent(tmp_path)
         "strategy_v2_forward_evidence",
         "strategy_v2_exit_challenger_registrations",
         "strategy_v2_exit_challenger_trades",
+        "strategy_v2_portfolio_registrations",
+        "strategy_v2_portfolio_observations",
     }
     assert expected_tables <= set(inspector.get_table_names())
     assert {
@@ -438,6 +440,24 @@ def test_strategy_v2_shadow_table_migration_is_complete_and_idempotent(tmp_path)
         constraint["name"]
         for constraint in inspector.get_unique_constraints(
             "strategy_v2_exit_challenger_trades"
+        )
+    }
+    assert "uq_strategy_v2_portfolio_registration" in {
+        constraint["name"]
+        for constraint in inspector.get_unique_constraints(
+            "strategy_v2_portfolio_registrations"
+        )
+    }
+    assert "uq_strategy_v2_portfolio_observation_signal" in {
+        constraint["name"]
+        for constraint in inspector.get_unique_constraints(
+            "strategy_v2_portfolio_observations"
+        )
+    }
+    assert "uq_strategy_v2_portfolio_observation_trade" in {
+        constraint["name"]
+        for constraint in inspector.get_unique_constraints(
+            "strategy_v2_portfolio_observations"
         )
     }
 
