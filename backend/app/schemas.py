@@ -1058,6 +1058,9 @@ class DiagnosticLiveSafety(BaseModel):
     flatten_minutes_before_close: int
     llm_shadow_mode: bool
     llm_order_execution_enabled: bool
+    live_regime_gate_enabled: bool
+    live_regime_max_data_age_seconds: int
+    live_max_entries_per_symbol_per_day: int
 
 
 class DiagnosticsResponse(BaseModel):

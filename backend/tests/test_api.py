@@ -1666,6 +1666,9 @@ class TestAPI:
                         "flatten_minutes_before_close": 15,
                         "llm_shadow_mode": True,
                         "llm_order_execution_enabled": False,
+                        "live_regime_gate_enabled": False,
+                        "live_regime_max_data_age_seconds": 600,
+                        "live_max_entries_per_symbol_per_day": 1,
                     },
                     "quote_stream": {
                         "last_push_age_seconds": 3.0,
@@ -1716,6 +1719,9 @@ class TestAPI:
         assert data["live_safety"]["short_entries_enabled"] is False
         assert data["live_safety"]["max_position_notional"] == 5000.0
         assert data["live_safety"]["llm_shadow_mode"] is True
+        assert data["live_safety"]["live_regime_gate_enabled"] is False
+        assert data["live_safety"]["live_regime_max_data_age_seconds"] == 600
+        assert data["live_safety"]["live_max_entries_per_symbol_per_day"] == 1
         assert data["dedup_suppressed_total"] == 7
         assert data["dedup_window_seconds"] == 45.0
         assert data["symbol_runtimes"][1]["symbol"] == "AAPL.US"
