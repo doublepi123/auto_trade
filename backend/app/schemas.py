@@ -559,10 +559,15 @@ class OpeningMomentumShadowMetrics(BaseModel):
 
 
 class OpeningMomentumShadowVariantResponse(BaseModel):
-    variant: Literal["INCUMBENT", "CONTINUATION_CHALLENGER"]
+    variant: Literal[
+        "INCUMBENT",
+        "CONTINUATION_CHALLENGER",
+        "BREADTH_GATED_CHALLENGER",
+    ]
     universe_source: str
     algorithm_version: str
     config_version: str
+    minimum_market_return_bps: float
     comparison_sessions: int = 0
     latest: Optional[OpeningMomentumShadowRunResponse] = None
     metrics: OpeningMomentumShadowMetrics

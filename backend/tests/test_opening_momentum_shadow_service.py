@@ -35,8 +35,10 @@ class _FakeCandles:
         self,
         *,
         missing_entry_for: str | None = None,
+        opening_returns_bps: dict[str, float] | None = None,
     ) -> None:
         self.missing_entry_for = missing_entry_for
+        self.opening_returns_bps = opening_returns_bps or {}
         self.calls: list[str] = []
 
     def get_candlesticks(
@@ -49,8 +51,9 @@ class _FakeCandles:
         assert period == "MIN_1"
         assert count == 500
         symbol_index = _SYMBOLS.index(symbol)
-        opening_return_bps = (
-            100.0 if symbol_index == 7 else float(symbol_index)
+        opening_return_bps = self.opening_returns_bps.get(
+            symbol,
+            100.0 if symbol_index == 7 else float(symbol_index),
         )
         bars: list[BrokerCandle] = []
         for index in range(62):
@@ -362,7 +365,7 @@ def test_tick_opens_then_closes_one_cost_adjusted_shadow_trade(
         Base.metadata.drop_all(bind=engine)
 
 
-def test_challenger_uses_one_market_snapshot_and_closes_both_variants(
+def test_challengers_use_one_market_snapshot_and_close_all_variants(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -402,24 +405,38 @@ def test_challenger_uses_one_market_snapshot_and_closes_both_variants(
             now=_SESSION_OPEN + timedelta(minutes=32, seconds=10),
         )
 
-        assert db.query(OpeningMomentumShadowRun).count() == 2
+        assert db.query(OpeningMomentumShadowRun).count() == 3
         assert candles.calls == list(_SYMBOLS[:4])
         assert opened.state == "OPEN"
         assert opened.latest is not None
         assert opened.latest.universe_source == "UNIVERSE_SELECTION"
         assert opened.latest.candidate_symbol == "S1.US"
         assert opened.latest.selection_run_id == run.id
-        assert len(opened.variants) == 2
-        incumbent, challenger = opened.variants
+        assert len(opened.variants) == 3
+        incumbent, challenger, breadth = opened.variants
         assert incumbent.variant == "INCUMBENT"
         assert incumbent.comparison_sessions == 1
+        assert incumbent.minimum_market_return_bps == -25.0
         assert incumbent.latest is not None
         assert incumbent.latest.candidate_symbol == "S1.US"
         assert challenger.variant == "CONTINUATION_CHALLENGER"
         assert challenger.comparison_sessions == 1
+        assert challenger.minimum_market_return_bps == -25.0
         assert challenger.latest is not None
         assert challenger.latest.universe == ["S2.US", "S3.US"]
         assert challenger.latest.candidate_symbol == "S3.US"
+        assert breadth.variant == "BREADTH_GATED_CHALLENGER"
+        assert breadth.comparison_sessions == 1
+        assert breadth.minimum_market_return_bps == 0.0
+        assert breadth.latest is not None
+        assert breadth.latest.universe == ["S2.US", "S3.US"]
+        assert breadth.latest.candidate_symbol == "S3.US"
+        assert len(
+            {
+                item.config_version
+                for item in opened.variants
+            }
+        ) == 3
 
         closed = service.tick(
             now=_SESSION_OPEN + timedelta(minutes=62, seconds=10),
@@ -431,11 +448,76 @@ def test_challenger_uses_one_market_snapshot_and_closes_both_variants(
         assert [item.metrics.closed_trades for item in closed.variants] == [
             1,
             1,
+            1,
         ]
         assert [item.metrics.cumulative_net_return_bps for item in closed.variants] == [
             -14.0,
             -14.0,
+            -14.0,
         ]
+    finally:
+        db.close()
+        Base.metadata.drop_all(bind=engine)
+
+
+def test_breadth_challenger_skips_a_negative_market_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        settings,
+        "opening_momentum_shadow_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        settings,
+        "opening_momentum_challenger_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        settings,
+        "universe_selection_max_symbols",
+        2,
+    )
+    monkeypatch.setattr(
+        settings,
+        "universe_selection_max_per_sector",
+        2,
+    )
+    engine, db = _database()
+    try:
+        _seed_variant_universe(db)
+        candles = _FakeCandles(
+            opening_returns_bps={
+                symbol: -80.0 if index % 2 == 0 else 20.0
+                for index, symbol in enumerate(_SYMBOLS[:4])
+            }
+        )
+        service = OpeningMomentumShadowService(
+            db,
+            candles,
+            config=OpeningMomentumConfig(
+                minimum_universe_size=2,
+                minimum_market_return_bps=-50.0,
+                minimum_excess_return_bps=0,
+            ),
+        )
+
+        status = service.tick(
+            now=_SESSION_OPEN + timedelta(minutes=32, seconds=10),
+        )
+
+        assert candles.calls == list(_SYMBOLS[:4])
+        assert len(status.variants) == 3
+        incumbent, continuation, breadth = status.variants
+        assert incumbent.latest is not None
+        assert incumbent.latest.status == "OPEN"
+        assert continuation.latest is not None
+        assert continuation.latest.status == "OPEN"
+        assert breadth.latest is not None
+        assert breadth.latest.status == "SKIPPED"
+        assert breadth.latest.reason == "MARKET_FILTER"
+        assert breadth.latest.market_return_bps == pytest.approx(-30.0)
+        assert breadth.minimum_market_return_bps == 0.0
     finally:
         db.close()
         Base.metadata.drop_all(bind=engine)

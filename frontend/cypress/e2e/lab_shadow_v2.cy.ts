@@ -80,6 +80,8 @@ describe('Strategy v2 shadow lab', () => {
     cy.get('[data-testid="opening-momentum-variants"]')
       .should('contain', '现行选池')
       .and('contain', '动量延续')
+      .and('contain', '广度过滤')
+      .and('contain', '0.0 bps')
       .and('contain', 'META.US')
       .and('contain', 'PLTR.US')
       .and('contain', '154.0 bps')

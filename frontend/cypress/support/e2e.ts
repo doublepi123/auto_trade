@@ -1778,6 +1778,7 @@ Cypress.Commands.add('stubApi', () => {
             'cross-sectional-opening-momentum-v3-preopen-frozen-universe'
           ),
           config_version: 'opening-momentum-stub-v1',
+          minimum_market_return_bps: -25,
           comparison_sessions: 4,
           latest: { candidate_symbol: 'META.US' },
           metrics: {
@@ -1802,6 +1803,7 @@ Cypress.Commands.add('stubApi', () => {
             + 'opening-continuation-universe-v1'
           ),
           config_version: 'opening-continuation-stub-v1',
+          minimum_market_return_bps: -25,
           comparison_sessions: 4,
           latest: { candidate_symbol: 'PLTR.US' },
           metrics: {
@@ -1816,6 +1818,32 @@ Cypress.Commands.add('stubApi', () => {
             cumulative_net_return_bps: 154,
             max_drawdown_bps: 28,
             profit_factor: 3.1,
+          },
+        },
+        {
+          variant: 'BREADTH_GATED_CHALLENGER',
+          universe_source: 'OPENING_CONTINUATION_BREADTH_GATE',
+          algorithm_version: (
+            'cross-sectional-opening-momentum-v3-preopen-frozen-universe+'
+            + 'opening-continuation-universe-v1+'
+            + 'nonnegative-market-breadth-v1'
+          ),
+          config_version: 'opening-breadth-stub-v1',
+          minimum_market_return_bps: 0,
+          comparison_sessions: 4,
+          latest: { candidate_symbol: 'PLTR.US' },
+          metrics: {
+            observed_sessions: 4,
+            skipped_sessions: 1,
+            signals: 3,
+            open_trades: 0,
+            closed_trades: 3,
+            wins: 3,
+            win_rate: 1,
+            mean_net_return_bps: 44,
+            cumulative_net_return_bps: 132,
+            max_drawdown_bps: 0,
+            profit_factor: null,
           },
         },
       ],

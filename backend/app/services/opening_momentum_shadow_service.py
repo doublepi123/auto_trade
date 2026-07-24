@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import math
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Literal, Protocol, cast
 
@@ -52,6 +52,17 @@ _CONTINUATION_SOURCE = "OPENING_CONTINUATION"
 _CONTINUATION_ALGORITHM_VERSION = (
     f"{ALGORITHM_VERSION}+{OPENING_CONTINUATION_UNIVERSE_VERSION}"
 )
+_BREADTH_GATE_VERSION = "nonnegative-market-breadth-v1"
+_BREADTH_GATE_SOURCE = "OPENING_CONTINUATION_BREADTH_GATE"
+_BREADTH_GATE_ALGORITHM_VERSION = (
+    f"{_CONTINUATION_ALGORITHM_VERSION}+{_BREADTH_GATE_VERSION}"
+)
+
+_VariantName = Literal[
+    "INCUMBENT",
+    "CONTINUATION_CHALLENGER",
+    "BREADTH_GATED_CHALLENGER",
+]
 
 
 class CandleProvider(Protocol):
@@ -72,10 +83,11 @@ class _Candle:
 
 @dataclass(frozen=True)
 class _UniverseVariant:
-    variant: Literal["INCUMBENT", "CONTINUATION_CHALLENGER"]
+    variant: _VariantName
     algorithm_version: str
     config_version: str
     universe_source: str
+    decision_config: OpeningMomentumConfig
     symbols: tuple[str, ...] = ()
     selection_run_id: int | None = None
 
@@ -251,7 +263,7 @@ class OpeningMomentumShadowService:
             }
             decision = evaluate_opening_momentum(
                 observations,
-                self.config,
+                variant.decision_config,
             )
             data_complete = not excluded
             status = (
@@ -321,7 +333,7 @@ class OpeningMomentumShadowService:
                         else None
                     ),
                     estimated_cost_bps=(
-                        self.config.round_trip_cost_bps
+                        variant.decision_config.round_trip_cost_bps
                     ),
                 )
             )
@@ -418,6 +430,7 @@ class OpeningMomentumShadowService:
                     algorithm_version=identity.algorithm_version,
                     config_version=identity.config_version,
                     universe_source="NONE",
+                    decision_config=identity.decision_config,
                 )
                 for identity in identities
             ]
@@ -446,6 +459,7 @@ class OpeningMomentumShadowService:
                 algorithm_version=ALGORITHM_VERSION,
                 config_version=self.config.version_hash(),
                 universe_source=_INCUMBENT_SOURCE,
+                decision_config=self.config,
                 symbols=incumbent_symbols,
                 selection_run_id=run.id,
             )
@@ -487,23 +501,30 @@ class OpeningMomentumShadowService:
             challenger_candidates,
             self._continuation_config(),
         )
-        challenger_identity = identities[1]
-        variants.append(
-            _UniverseVariant(
-                variant=challenger_identity.variant,
-                algorithm_version=(
-                    challenger_identity.algorithm_version
-                ),
-                config_version=challenger_identity.config_version,
-                universe_source=_CONTINUATION_SOURCE,
-                symbols=tuple(
-                    row.symbol
-                    for row in challenger_selection
-                    if row.selected
-                ),
-                selection_run_id=run.id,
-            )
+        identities_by_variant = {
+            identity.variant: identity for identity in identities
+        }
+        challenger_symbols = tuple(
+            row.symbol
+            for row in challenger_selection
+            if row.selected
         )
+        for variant_name in (
+            "CONTINUATION_CHALLENGER",
+            "BREADTH_GATED_CHALLENGER",
+        ):
+            identity = identities_by_variant[variant_name]
+            variants.append(
+                _UniverseVariant(
+                    variant=identity.variant,
+                    algorithm_version=identity.algorithm_version,
+                    config_version=identity.config_version,
+                    universe_source=identity.universe_source,
+                    decision_config=identity.decision_config,
+                    symbols=challenger_symbols,
+                    selection_run_id=run.id,
+                )
+            )
         return variants
 
     def _variant_identities(self) -> list[_UniverseVariant]:
@@ -513,10 +534,12 @@ class OpeningMomentumShadowService:
                 algorithm_version=ALGORITHM_VERSION,
                 config_version=self.config.version_hash(),
                 universe_source=_INCUMBENT_SOURCE,
+                decision_config=self.config,
             )
         ]
         if settings.opening_momentum_challenger_enabled:
             universe_config = self._continuation_config()
+            breadth_config = self._breadth_gate_config()
             variants.append(
                 _UniverseVariant(
                     variant="CONTINUATION_CHALLENGER",
@@ -530,6 +553,26 @@ class OpeningMomentumShadowService:
                         )
                     ),
                     universe_source=_CONTINUATION_SOURCE,
+                    decision_config=self.config,
+                )
+            )
+            variants.append(
+                _UniverseVariant(
+                    variant="BREADTH_GATED_CHALLENGER",
+                    algorithm_version=(
+                        _BREADTH_GATE_ALGORITHM_VERSION
+                    ),
+                    config_version=(
+                        opening_momentum_variant_config_version(
+                            (
+                                f"{breadth_config.version_hash()}:"
+                                f"{_BREADTH_GATE_VERSION}"
+                            ),
+                            universe_config,
+                        )
+                    ),
+                    universe_source=_BREADTH_GATE_SOURCE,
+                    decision_config=breadth_config,
                 )
             )
         return variants
@@ -540,6 +583,15 @@ class OpeningMomentumShadowService:
             max_selected=settings.universe_selection_max_symbols,
             max_per_sector=(
                 settings.universe_selection_max_per_sector
+            ),
+        )
+
+    def _breadth_gate_config(self) -> OpeningMomentumConfig:
+        return replace(
+            self.config,
+            minimum_market_return_bps=max(
+                0.0,
+                self.config.minimum_market_return_bps,
             ),
         )
 
@@ -680,6 +732,9 @@ class OpeningMomentumShadowService:
                 universe_source=identity.universe_source,
                 algorithm_version=identity.algorithm_version,
                 config_version=identity.config_version,
+                minimum_market_return_bps=(
+                    identity.decision_config.minimum_market_return_bps
+                ),
                 comparison_sessions=len(comparison_dates),
                 latest=(
                     self._run_response(

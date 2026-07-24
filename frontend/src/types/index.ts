@@ -1617,10 +1617,14 @@ export interface OpeningMomentumShadowMetrics {
 }
 
 export interface OpeningMomentumShadowVariant {
-  variant: 'INCUMBENT' | 'CONTINUATION_CHALLENGER'
+  variant:
+    | 'INCUMBENT'
+    | 'CONTINUATION_CHALLENGER'
+    | 'BREADTH_GATED_CHALLENGER'
   universe_source: string
   algorithm_version: string
   config_version: string
+  minimum_market_return_bps: number
   comparison_sessions: number
   latest: OpeningMomentumShadowRun | null
   metrics: OpeningMomentumShadowMetrics
