@@ -76,6 +76,7 @@ def init_db() -> None:
     _ensure_strategy_config_p0_safety_columns(engine)
     _ensure_strategy_config_report_schedule_columns(engine)
     _ensure_strategy_v2_shadow_tables(engine)
+    _ensure_opening_momentum_shadow_table(engine)
     _ensure_llm_interaction_variant_column(engine)
     _ensure_llm_interaction_token_columns(engine)
     _ensure_report_query_indexes(engine)
@@ -1459,6 +1460,16 @@ def _ensure_strategy_v2_shadow_tables(db_engine: Engine) -> None:
                 "ALTER TABLE strategy_v2_forward_evidence ADD COLUMN "
                 "evidence_digest_sha256 VARCHAR(64) NOT NULL DEFAULT ''"
             )
+
+
+def _ensure_opening_momentum_shadow_table(db_engine: Engine) -> None:
+    """Create the prospective cross-sectional shadow table in place."""
+    from app.models import Base
+
+    Base.metadata.tables["opening_momentum_shadow_runs"].create(
+        db_engine,
+        checkfirst=True,
+    )
 
 
 def _ensure_llm_interaction_variant_column(db_engine: Engine) -> None:

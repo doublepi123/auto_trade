@@ -273,6 +273,131 @@
 
       <el-tab-pane label="策略 v2 影子" name="strategy-shadow">
         <div data-testid="tab-strategy-shadow" v-loading="shadowLoading">
+          <section
+            class="shadow-section opening-momentum-section"
+            data-testid="opening-momentum-shadow"
+          >
+            <div class="shadow-section-header">
+              <div>
+                <h3>开盘横截面动量</h3>
+                <small v-if="openingMomentumStatus">
+                  {{ openingMomentumStatus.config.algorithm_version }} ·
+                  {{ shortVersion(openingMomentumStatus.config.config_version) }}
+                </small>
+              </div>
+              <div class="shadow-tags">
+                <el-tag type="warning">影子观察</el-tag>
+                <el-tag type="danger" effect="plain">永不下单</el-tag>
+                <el-tag :type="openingMomentumStateType" effect="plain">
+                  {{ openingMomentumStateLabel }}
+                </el-tag>
+              </div>
+            </div>
+
+            <el-alert
+              v-if="openingMomentumLoadError"
+              :title="openingMomentumLoadError"
+              type="warning"
+              :closable="false"
+              show-icon
+              data-testid="opening-momentum-error"
+            />
+
+            <template v-if="openingMomentumStatus">
+              <div class="shadow-facts" data-testid="opening-momentum-config">
+                <div>
+                  <span>信号窗口</span>
+                  <strong>{{ openingMomentumStatus.config.signal_minutes }} 分钟</strong>
+                </div>
+                <div>
+                  <span>虚拟持仓</span>
+                  <strong>{{ openingMomentumStatus.config.holding_minutes }} 分钟</strong>
+                </div>
+                <div>
+                  <span>最小池规模</span>
+                  <strong>{{ openingMomentumStatus.config.minimum_universe_size }}</strong>
+                </div>
+                <div>
+                  <span>市场门槛</span>
+                  <strong>{{ formatBps(openingMomentumStatus.config.minimum_market_return_bps) }}</strong>
+                </div>
+                <div>
+                  <span>相对强度门槛</span>
+                  <strong>{{ formatBps(openingMomentumStatus.config.minimum_excess_return_bps) }}</strong>
+                </div>
+                <div>
+                  <span>往返成本</span>
+                  <strong>{{ formatBps(openingMomentumStatus.config.round_trip_cost_bps) }}</strong>
+                </div>
+              </div>
+
+              <div
+                v-if="openingMomentumStatus.latest"
+                class="opening-momentum-latest"
+                data-testid="opening-momentum-latest"
+              >
+                <div class="shadow-section-header">
+                  <div>
+                    <h3>{{ openingMomentumStatus.latest.session_date }}</h3>
+                    <small>{{ openingMomentumStatus.latest.reason }}</small>
+                  </div>
+                  <el-tag
+                    :type="openingMomentumStatus.latest.status === 'CLOSED' ? 'success' : openingMomentumStatus.latest.status === 'OPEN' ? 'warning' : 'info'"
+                    effect="plain"
+                  >
+                    {{ openingMomentumStatus.latest.status }}
+                  </el-tag>
+                </div>
+                <div class="shadow-facts">
+                  <div>
+                    <span>候选</span>
+                    <strong>{{ openingMomentumStatus.latest.candidate_symbol || '-' }}</strong>
+                  </div>
+                  <div>
+                    <span>有效池</span>
+                    <strong>{{ openingMomentumStatus.latest.universe_size }}</strong>
+                  </div>
+                  <div>
+                    <span>市场中位</span>
+                    <strong>{{ formatNullableBps(openingMomentumStatus.latest.market_return_bps) }}</strong>
+                  </div>
+                  <div>
+                    <span>候选涨幅</span>
+                    <strong>{{ formatNullableBps(openingMomentumStatus.latest.candidate_return_bps) }}</strong>
+                  </div>
+                  <div>
+                    <span>相对强度</span>
+                    <strong>{{ formatNullableBps(openingMomentumStatus.latest.excess_return_bps) }}</strong>
+                  </div>
+                  <div>
+                    <span>成本后收益</span>
+                    <strong :class="{ negative: (openingMomentumStatus.latest.net_return_bps ?? 0) < 0 }">
+                      {{ formatNullableBps(openingMomentumStatus.latest.net_return_bps) }}
+                    </strong>
+                  </div>
+                </div>
+              </div>
+              <el-empty v-else description="等待下一次美股开盘观测" />
+
+              <div
+                class="shadow-metrics-grid opening-momentum-metrics"
+                data-testid="opening-momentum-metrics"
+              >
+                <el-statistic title="观测日" :value="openingMomentumStatus.metrics.observed_sessions" />
+                <el-statistic title="闭环交易" :value="openingMomentumStatus.metrics.closed_trades" />
+                <el-statistic title="胜率" :value="openingMomentumStatus.metrics.win_rate * 100" suffix="%" :precision="1" />
+                <el-statistic title="平均净收益" :value="openingMomentumStatus.metrics.mean_net_return_bps" suffix=" bps" :precision="1" />
+                <el-statistic title="累计净收益" :value="openingMomentumStatus.metrics.cumulative_net_return_bps" suffix=" bps" :precision="1" />
+                <el-statistic title="最大回撤" :value="openingMomentumStatus.metrics.max_drawdown_bps" suffix=" bps" :precision="1" />
+                <el-statistic title="跳过日" :value="openingMomentumStatus.metrics.skipped_sessions" />
+                <div class="opening-momentum-stat">
+                  <span>利润因子</span>
+                  <strong>{{ formatNullable(openingMomentumStatus.metrics.profit_factor) }}</strong>
+                </div>
+              </div>
+            </template>
+          </section>
+
           <div class="shadow-toolbar">
             <div class="shadow-tags" data-testid="shadow-safety-tags">
               <el-tag type="warning">影子观察</el-tag>
@@ -1224,6 +1349,7 @@ import {
   getIndicators, getLLMUsageSummary,
 } from '../api/lab'
 import { getLLMInteractions, getLLMIntervalStatus } from '../api/llm_advisor'
+import { getOpeningMomentumShadowStatus } from '../api/opening_momentum_shadow'
 import DataState from '../components/DataState.vue'
 import MetricStat from '../components/MetricStat.vue'
 import {
@@ -1241,6 +1367,7 @@ import {
 import type {
   PromptVersion, ExperimentSummary, PerformanceStats,
   PerformanceVariant, IndicatorsResponse, LLMInteractionRecord, LLMIntervalStatus, LLMUsageSummary,
+  OpeningMomentumShadowStatus,
   StrategyShadowAdxChallengerResponse,
   StrategyShadowConfig, StrategyShadowConfigUpdate, StrategyShadowDecision,
   StrategyShadowEvaluation, StrategyShadowForwardValidationDaily,
@@ -1476,6 +1603,8 @@ function formatTokenCount(value: number): string {
 }
 
 // --- Tab 5: strategy v2 shadow observability ---
+const openingMomentumStatus = ref<OpeningMomentumShadowStatus | null>(null)
+const openingMomentumLoadError = ref('')
 const shadowConfig = ref<StrategyShadowConfig | null>(null)
 const shadowConfigs = ref<StrategyShadowConfig[]>([])
 const selectedShadowSymbol = ref('')
@@ -1506,6 +1635,23 @@ const shadowDecisionRequestGeneration = ref(0)
 const shadowStatusFetchedAtMs = ref(0)
 const shadowNowMs = ref(Date.now())
 const shadowForwardCandidateVersion = 'strategy-v2-causal-trend-prewarm-v1' as const
+const openingMomentumStateLabel = computed(() => {
+  const labels: Record<OpeningMomentumShadowStatus['state'], string> = {
+    DISABLED: '已停用',
+    WAITING: '等待开盘',
+    OPEN: '虚拟持仓',
+    COLLECTING: '采集中',
+  }
+  return openingMomentumStatus.value
+    ? labels[openingMomentumStatus.value.state]
+    : '加载中'
+})
+const openingMomentumStateType = computed(() => {
+  const state = openingMomentumStatus.value?.state
+  if (state === 'OPEN') return 'warning'
+  if (state === 'COLLECTING') return 'success'
+  return 'info'
+})
 const shadowForm = reactive<StrategyShadowConfigUpdate>({
   enabled: false,
   zscore_window_1m_bars: 30,
@@ -1553,7 +1699,20 @@ function applyShadowConfig(config: StrategyShadowConfig) {
   })
 }
 
+async function loadOpeningMomentumShadow() {
+  openingMomentumLoadError.value = ''
+  try {
+    openingMomentumStatus.value = await getOpeningMomentumShadowStatus()
+  } catch (error: unknown) {
+    openingMomentumLoadError.value = resolveErrorMessage(
+      error,
+      '加载开盘横截面动量状态失败',
+    )
+  }
+}
+
 async function loadStrategyShadow(symbol = selectedShadowSymbol.value || undefined) {
+  void loadOpeningMomentumShadow()
   const generation = ++shadowRequestGeneration.value
   shadowDecisionRequestGeneration.value += 1
   shadowLoading.value = true
@@ -2274,6 +2433,7 @@ async function registerShadowForwardValidation() {
 }
 
 async function pollStrategyShadow() {
+  void loadOpeningMomentumShadow()
   const symbol = shadowConfig.value?.symbol
   if (!symbol || !selectedShadowVersion.value) return
   const version = selectedShadowVersion.value
@@ -2303,6 +2463,14 @@ function gateShare(count: number): string {
 
 function formatNullable(value: number | null, precision = 2): string {
   return value == null || !Number.isFinite(value) ? '-' : value.toFixed(precision)
+}
+
+function formatBps(value: number): string {
+  return Number.isFinite(value) ? `${value.toFixed(1)} bps` : '-'
+}
+
+function formatNullableBps(value: number | null): string {
+  return value == null ? '-' : formatBps(value)
 }
 
 function formatPercent(value: number): string {
@@ -2639,6 +2807,16 @@ onBeforeUnmount(() => {
   border-bottom: 0;
 }
 
+.opening-momentum-section {
+  padding-top: 0;
+  margin-bottom: 16px;
+}
+
+.opening-momentum-latest,
+.opening-momentum-metrics {
+  margin-top: 16px;
+}
+
 .shadow-section-header {
   margin-bottom: 12px;
 }
@@ -2781,6 +2959,28 @@ onBeforeUnmount(() => {
   min-width: 0;
   padding: 10px 12px;
   border-left: 3px solid #409eff;
+}
+
+.opening-momentum-stat {
+  min-width: 0;
+  padding: 10px 12px;
+  border-left: 3px solid #409eff;
+}
+
+.opening-momentum-stat span,
+.opening-momentum-stat strong {
+  display: block;
+}
+
+.opening-momentum-stat span {
+  margin-bottom: 10px;
+  color: #606266;
+  font-size: 13px;
+}
+
+.opening-momentum-stat strong {
+  font-size: 20px;
+  font-weight: 400;
 }
 
 .shadow-excursions {

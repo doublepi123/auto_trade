@@ -48,6 +48,7 @@ describe('Strategy v2 shadow lab', () => {
   function openShadowTab() {
     cy.contains('.el-tabs__item', '策略 v2 影子').click()
     cy.wait([
+      '@getOpeningMomentumShadowStatus',
       '@getStrategyShadowConfigs',
       '@getStrategyShadowConfig',
       '@getStrategyShadowVersions',
@@ -61,6 +62,19 @@ describe('Strategy v2 shadow lab', () => {
 
   it('shows fixed dual-timeframe and hard no-order safety state', () => {
     openShadowTab()
+
+    cy.get('[data-testid="opening-momentum-shadow"]')
+      .should('contain', '开盘横截面动量')
+      .and('contain', '影子观察')
+      .and('contain', '永不下单')
+      .and('contain', '30 分钟')
+    cy.get('[data-testid="opening-momentum-latest"]')
+      .should('contain', 'META.US')
+      .and('contain', '67.5 bps')
+      .and('contain', '46.0 bps')
+    cy.get('[data-testid="opening-momentum-metrics"]')
+      .should('contain', '66')
+      .and('contain', '93.6 bps')
 
     cy.get('[data-testid="shadow-safety-tags"]')
       .should('contain', '影子观察')

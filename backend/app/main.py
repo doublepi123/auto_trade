@@ -39,6 +39,9 @@ from app.api.notifications import router as notifications_router
 from app.api.credentials import router as credentials_router
 from app.api.experiments import router as experiments_router
 from app.api.metrics import router as metrics_router
+from app.api.opening_momentum_shadow import (
+    router as opening_momentum_shadow_router,
+)
 from app.api.indicators import router as indicators_router
 from app.api.performance import router as performance_router
 from app.api.llm_advisor import router as llm_advisor_router
@@ -70,6 +73,7 @@ _llm_analysis_lock = asyncio.Lock()
 _report_schedule_lock = asyncio.Lock()
 _alert_rules_lock = asyncio.Lock()
 _strategy_v2_shadow_lock = asyncio.Lock()
+_opening_momentum_shadow_lock = asyncio.Lock()
 _universe_selection_lock = asyncio.Lock()
 _watchlist_quant_lock = asyncio.Lock()
 _llm_globals_lock = threading.Lock()
@@ -725,6 +729,40 @@ async def _strategy_v2_shadow_cron() -> None:
                 logger.exception("Strategy v2 shadow cron failed")
 
 
+def _opening_momentum_shadow_tick_sync() -> None:
+    """Advance the isolated cross-sectional opening-momentum observer."""
+    from app.services.opening_momentum_shadow_service import (
+        OpeningMomentumShadowService,
+    )
+
+    db = SessionLocal()
+    try:
+        OpeningMomentumShadowService(
+            db,
+            get_runner().broker,
+        ).tick()
+    except Exception:
+        db.rollback()
+        logger.exception("opening momentum shadow tick failed")
+    finally:
+        db.close()
+
+
+async def _opening_momentum_shadow_cron() -> None:
+    """Poll the frozen once-daily opening-momentum shadow."""
+    while True:
+        await asyncio.sleep(15)
+        async with _opening_momentum_shadow_lock:
+            try:
+                await asyncio.to_thread(
+                    _opening_momentum_shadow_tick_sync
+                )
+            except Exception:
+                logger.exception(
+                    "opening momentum shadow cron failed"
+                )
+
+
 def _watchlist_quant_tick_sync() -> None:
     """Refresh due deterministic watchlist scores during open sessions."""
     if not settings.watchlist_quant_auto_score_enabled:
@@ -951,6 +989,7 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         asyncio.create_task(_alert_rules_cron()),
         asyncio.create_task(_llm_storage_maintenance_cron()),
         asyncio.create_task(_strategy_v2_shadow_cron()),
+        asyncio.create_task(_opening_momentum_shadow_cron()),
         asyncio.create_task(_universe_selection_cron()),
         asyncio.create_task(_watchlist_quant_cron()),
     )
@@ -972,6 +1011,10 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
 _OPENAPI_TAGS: list[dict[str, str]] = [
     {"name": "strategy", "description": "区间策略配置、状态与历史。"},
     {"name": "strategy-v2-shadow", "description": "Strategy v2 前向影子决策与回放。"},
+    {
+        "name": "opening-momentum-shadow",
+        "description": "横截面开盘动量前向影子观测。",
+    },
     {"name": "universe", "description": "版本化动态候选池与只读观察标的。"},
     {"name": "trade", "description": "订单、账户、事件与交易控制。"},
     {"name": "credentials", "description": "长桥凭据与多渠道通知。"},
@@ -1007,6 +1050,7 @@ app.include_router(platform_router, prefix="/api/platform")
 app.include_router(portfolio_router, prefix="/api/portfolio")
 app.include_router(strategy_router)
 app.include_router(strategy_shadow_router)
+app.include_router(opening_momentum_shadow_router)
 app.include_router(strategy_experiments_router)
 app.include_router(credentials_router)
 app.include_router(trade_router)

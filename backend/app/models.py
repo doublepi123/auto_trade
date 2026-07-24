@@ -638,6 +638,61 @@ class StrategyV2ShadowTrade(Base):
     updated_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow, onupdate=_utcnow)
 
 
+class OpeningMomentumShadowRun(Base):
+    """One prospective cross-sectional opening-momentum observation."""
+
+    __tablename__ = "opening_momentum_shadow_runs"
+    __table_args__ = (
+        UniqueConstraint(
+            "session_date",
+            "config_version",
+            name="uq_opening_momentum_shadow_session_version",
+        ),
+        Index(
+            "ix_opening_momentum_shadow_status_session",
+            "status",
+            "session_date",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_date: Mapped[date] = mapped_column(Date, nullable=False)
+    algorithm_version: Mapped[str] = mapped_column(String(100), nullable=False)
+    config_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    signal_at: Mapped[datetime] = mapped_column(_TZDateTime, nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(_TZDateTime, nullable=False)
+    selection_run_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    universe_source: Mapped[str] = mapped_column(String(32), default="", nullable=False)
+    universe_size: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    universe_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    excluded_symbols_json: Mapped[str] = mapped_column(
+        Text,
+        default="{}",
+        nullable=False,
+    )
+    ranking_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    candidate_symbol: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    market_return_bps: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    candidate_return_bps: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    excess_return_bps: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    entry_at: Mapped[Optional[datetime]] = mapped_column(_TZDateTime, nullable=True)
+    entry_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    exit_due_at: Mapped[Optional[datetime]] = mapped_column(_TZDateTime, nullable=True)
+    exit_at: Mapped[Optional[datetime]] = mapped_column(_TZDateTime, nullable=True)
+    exit_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    gross_return_bps: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    estimated_cost_bps: Mapped[float] = mapped_column(Float, nullable=False)
+    net_return_bps: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        _TZDateTime,
+        default=_utcnow,
+        onupdate=_utcnow,
+    )
+
+
 class AuditLog(Base):
     __tablename__ = "audit_logs"
 

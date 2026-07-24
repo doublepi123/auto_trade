@@ -1705,6 +1705,69 @@ Cypress.Commands.add('stubApi', () => {
     req.reply({ body: strategyShadowConfig })
   }).as('getStrategyShadowConfig')
 
+  cy.intercept('GET', '/api/opening-momentum-shadow/status', {
+    body: {
+      config: {
+        enabled: true,
+        algorithm_version: 'cross-sectional-opening-momentum-v1',
+        config_version: 'opening-momentum-stub-v1',
+        mode: 'SHADOW',
+        order_submission_allowed: false,
+        signal_minutes: 30,
+        holding_minutes: 30,
+        minimum_universe_size: 8,
+        minimum_market_return_bps: -25,
+        minimum_candidate_return_bps: 0,
+        minimum_excess_return_bps: 25,
+        one_side_fee_rate: 0.0005,
+        one_side_slippage_bps: 2,
+        round_trip_cost_bps: 14,
+      },
+      state: 'COLLECTING',
+      latest: {
+        id: 1,
+        session_date: '2026-07-23',
+        algorithm_version: 'cross-sectional-opening-momentum-v1',
+        config_version: 'opening-momentum-stub-v1',
+        status: 'CLOSED',
+        reason: 'FIXED_HOLD_EXIT',
+        signal_at: '2026-07-23T13:59:00Z',
+        observed_at: '2026-07-23T14:01:10Z',
+        selection_run_id: 7,
+        universe_source: 'UNIVERSE_SELECTION',
+        universe_size: 12,
+        universe: ['MU.US', 'AMD.US', 'AAPL.US', 'META.US'],
+        excluded_symbols: {},
+        ranking: [{ symbol: 'META.US', opening_return_bps: 80 }],
+        candidate_symbol: 'META.US',
+        market_return_bps: 12.5,
+        candidate_return_bps: 80,
+        excess_return_bps: 67.5,
+        entry_at: '2026-07-23T14:00:00Z',
+        entry_price: 700,
+        exit_due_at: '2026-07-23T14:30:00Z',
+        exit_at: '2026-07-23T14:30:00Z',
+        exit_price: 704.2,
+        gross_return_bps: 60,
+        estimated_cost_bps: 14,
+        net_return_bps: 46,
+      },
+      metrics: {
+        observed_sessions: 4,
+        skipped_sessions: 1,
+        signals: 3,
+        open_trades: 0,
+        closed_trades: 3,
+        wins: 2,
+        win_rate: 0.6667,
+        mean_net_return_bps: 31.2,
+        cumulative_net_return_bps: 93.6,
+        max_drawdown_bps: 40,
+        profit_factor: 2.4,
+      },
+    },
+  }).as('getOpeningMomentumShadowStatus')
+
   cy.intercept('GET', '/api/strategy-shadow/configs', (req) => {
     req.reply({ body: [strategyShadowConfig] })
   }).as('getStrategyShadowConfigs')

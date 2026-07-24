@@ -17,7 +17,8 @@ LLM_FIELDS_REVISION = '20260602_add_llm_interval_fields'
 LLM_INTERVAL_REVISION = '20260520_add_llm_interval_minutes'
 MIN_PROFIT_REVISION = '20260522_add_min_profit_amount'
 AUTO_RESUME_REVISION = '20260522_auto_resume_pause'
-HEAD_REVISION = '20260522_add_llm_interactions'
+LLM_INTERACTIONS_REVISION = '20260522_add_llm_interactions'
+HEAD_REVISION = '20260724_opening_momentum'
 # IMPORTANT: 每次新增 alembic 迁移时，必须同步更新 HEAD_REVISION 及 mark_migrated_if_needed 的列检测逻辑
 
 
@@ -70,6 +71,11 @@ def mark_migrated_if_needed():
         ):
             version_num = AUTO_RESUME_REVISION
         if version_num == AUTO_RESUME_REVISION and 'llm_interactions' in tables:
+            version_num = LLM_INTERACTIONS_REVISION
+        if (
+            version_num == LLM_INTERACTIONS_REVISION
+            and 'opening_momentum_shadow_runs' in tables
+        ):
             version_num = HEAD_REVISION
 
         conn.execute(text(\"CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32) NOT NULL PRIMARY KEY)\"))

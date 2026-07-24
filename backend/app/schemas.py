@@ -492,6 +492,78 @@ class StrategyV2ShadowStatusResponse(BaseModel):
     last_poll_error: str = ""
 
 
+class OpeningMomentumShadowConfigResponse(BaseModel):
+    enabled: bool
+    algorithm_version: str
+    config_version: str
+    mode: Literal["SHADOW"] = "SHADOW"
+    order_submission_allowed: Literal[False] = False
+    signal_minutes: int
+    holding_minutes: int
+    minimum_universe_size: int
+    minimum_market_return_bps: float
+    minimum_candidate_return_bps: float
+    minimum_excess_return_bps: float
+    one_side_fee_rate: float
+    one_side_slippage_bps: float
+    round_trip_cost_bps: float
+
+
+class OpeningMomentumRankResponse(BaseModel):
+    symbol: str
+    opening_return_bps: float
+
+
+class OpeningMomentumShadowRunResponse(BaseModel):
+    id: int
+    session_date: date
+    algorithm_version: str
+    config_version: str
+    status: Literal["SKIPPED", "OPEN", "CLOSED"]
+    reason: str
+    signal_at: datetime
+    observed_at: datetime
+    selection_run_id: Optional[int] = None
+    universe_source: str
+    universe_size: int
+    universe: list[str] = Field(default_factory=list)
+    excluded_symbols: dict[str, str] = Field(default_factory=dict)
+    ranking: list[OpeningMomentumRankResponse] = Field(default_factory=list)
+    candidate_symbol: Optional[str] = None
+    market_return_bps: Optional[float] = None
+    candidate_return_bps: Optional[float] = None
+    excess_return_bps: Optional[float] = None
+    entry_at: Optional[datetime] = None
+    entry_price: Optional[float] = None
+    exit_due_at: Optional[datetime] = None
+    exit_at: Optional[datetime] = None
+    exit_price: Optional[float] = None
+    gross_return_bps: Optional[float] = None
+    estimated_cost_bps: float
+    net_return_bps: Optional[float] = None
+
+
+class OpeningMomentumShadowMetrics(BaseModel):
+    observed_sessions: int = 0
+    skipped_sessions: int = 0
+    signals: int = 0
+    open_trades: int = 0
+    closed_trades: int = 0
+    wins: int = 0
+    win_rate: float = 0.0
+    mean_net_return_bps: float = 0.0
+    cumulative_net_return_bps: float = 0.0
+    max_drawdown_bps: float = 0.0
+    profit_factor: Optional[float] = None
+
+
+class OpeningMomentumShadowStatusResponse(BaseModel):
+    config: OpeningMomentumShadowConfigResponse
+    state: Literal["DISABLED", "WAITING", "OPEN", "COLLECTING"]
+    latest: Optional[OpeningMomentumShadowRunResponse] = None
+    metrics: OpeningMomentumShadowMetrics
+
+
 class StrategyV2ShadowVersionResponse(BaseModel):
     symbol: str
     config_version: str

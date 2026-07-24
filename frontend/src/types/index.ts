@@ -1550,6 +1550,78 @@ export interface LLMEvaluationResponse {
 export type StrategyShadowMode = 'SHADOW'
 export type StrategyShadowPosition = 'FLAT' | 'LONG'
 
+export interface OpeningMomentumShadowConfig {
+  enabled: boolean
+  algorithm_version: string
+  config_version: string
+  mode: 'SHADOW'
+  order_submission_allowed: false
+  signal_minutes: number
+  holding_minutes: number
+  minimum_universe_size: number
+  minimum_market_return_bps: number
+  minimum_candidate_return_bps: number
+  minimum_excess_return_bps: number
+  one_side_fee_rate: number
+  one_side_slippage_bps: number
+  round_trip_cost_bps: number
+}
+
+export interface OpeningMomentumRank {
+  symbol: string
+  opening_return_bps: number
+}
+
+export interface OpeningMomentumShadowRun {
+  id: number
+  session_date: string
+  algorithm_version: string
+  config_version: string
+  status: 'SKIPPED' | 'OPEN' | 'CLOSED'
+  reason: string
+  signal_at: string
+  observed_at: string
+  selection_run_id: number | null
+  universe_source: string
+  universe_size: number
+  universe: string[]
+  excluded_symbols: Record<string, string>
+  ranking: OpeningMomentumRank[]
+  candidate_symbol: string | null
+  market_return_bps: number | null
+  candidate_return_bps: number | null
+  excess_return_bps: number | null
+  entry_at: string | null
+  entry_price: number | null
+  exit_due_at: string | null
+  exit_at: string | null
+  exit_price: number | null
+  gross_return_bps: number | null
+  estimated_cost_bps: number
+  net_return_bps: number | null
+}
+
+export interface OpeningMomentumShadowMetrics {
+  observed_sessions: number
+  skipped_sessions: number
+  signals: number
+  open_trades: number
+  closed_trades: number
+  wins: number
+  win_rate: number
+  mean_net_return_bps: number
+  cumulative_net_return_bps: number
+  max_drawdown_bps: number
+  profit_factor: number | null
+}
+
+export interface OpeningMomentumShadowStatus {
+  config: OpeningMomentumShadowConfig
+  state: 'DISABLED' | 'WAITING' | 'OPEN' | 'COLLECTING'
+  latest: OpeningMomentumShadowRun | null
+  metrics: OpeningMomentumShadowMetrics
+}
+
 export interface StrategyShadowConfig {
   enabled: boolean
   symbol: string

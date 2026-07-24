@@ -285,6 +285,15 @@ class Settings(BaseSettings):
         default=False,
         validation_alias="AUTO_TRADE_UNIVERSE_SELECTION_ENABLE_SHADOW",
     )
+    opening_momentum_shadow_enabled: bool = Field(
+        default=False,
+        validation_alias="AUTO_TRADE_OPENING_MOMENTUM_SHADOW_ENABLED",
+        description=(
+            "Collect one daily, cross-sectional US opening-momentum "
+            "observation from the selected universe. This is shadow-only and "
+            "has no order submission path."
+        ),
+    )
     universe_selection_interval_minutes: int = Field(
         default=60,
         ge=15,
@@ -532,6 +541,13 @@ class Settings(BaseSettings):
         ):
             raise ValueError(
                 "universe selection shadow requires watchlist application"
+            )
+        if (
+            self.opening_momentum_shadow_enabled
+            and not self.universe_selection_enabled
+        ):
+            raise ValueError(
+                "opening momentum shadow requires universe selection"
             )
         if (
             self.watchlist_quant_score_ttl_minutes
