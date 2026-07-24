@@ -21,8 +21,8 @@ from app.services.watchlist_score_service import WatchlistScoreService
 
 logger = logging.getLogger("auto_trade.watchlist_quant_service")
 
-QUANT_SCORE_SOURCE = "quant_v3"
-QUANT_ERROR_SOURCE = "quant_error_v3"
+QUANT_SCORE_SOURCE = "quant_v4"
+QUANT_ERROR_SOURCE = "quant_error_v4"
 CURRENT_QUANT_SOURCES = (
     QUANT_SCORE_SOURCE,
     QUANT_ERROR_SOURCE,
@@ -30,7 +30,13 @@ CURRENT_QUANT_SOURCES = (
 _MIN_DAILY_BARS = 60
 _MIN_INTRADAY_BARS = 300
 _DAILY_COUNT = 120
-_INTRADAY_COUNT = 1000
+_INTRADAY_RECENT_COUNT = 1000
+_INTRADAY_HISTORY_PAGE_COUNT = 1000
+_INTRADAY_HISTORY_PAGES = 2
+_INTRADAY_TARGET_COUNT = (
+    _INTRADAY_RECENT_COUNT
+    + _INTRADAY_HISTORY_PAGE_COUNT * _INTRADAY_HISTORY_PAGES
+)
 _MIN_DOLLAR_VOLUME = 100_000_000.0
 _MAX_INTRADAY_GAP = timedelta(minutes=7)
 _MAX_INTRADAY_AGE = timedelta(minutes=15)
@@ -768,7 +774,9 @@ def score_watchlist_quant_metrics(
         else ""
     )
     rationale = (
-        "quant-v3"
+        "quant-v4"
+        f"; daily_bars={metrics.daily_bars}"
+        f"; intraday_bars={metrics.intraday_bars}"
         f"; dollar_volume={metrics.median_daily_dollar_volume / 1_000_000:.1f}m"
         f"; spread={spread_label}"
         f"; atr={metrics.atr_pct:.2f}%"
@@ -944,11 +952,7 @@ class WatchlistQuantService:
                     now=self.now,
                 )
                 intraday = self._completed_intraday_bars(
-                    self.broker.get_candlesticks(
-                        item.symbol,
-                        "MIN_5",
-                        _INTRADAY_COUNT,
-                    )
+                    self._paged_intraday_bars(item.symbol)
                 )
                 metrics = build_watchlist_quant_metrics(
                     symbol=item.symbol,
@@ -1005,7 +1009,7 @@ class WatchlistQuantService:
                     symbol=item.symbol,
                     market=item.market,
                     score=0.0,
-                    rationale=f"quant-v3 data error: {type(exc).__name__}",
+                    rationale=f"quant-v4 data error: {type(exc).__name__}",
                     confidence=0.0,
                     recommended_action="AVOID",
                     source=QUANT_ERROR_SOURCE,
@@ -1057,3 +1061,69 @@ class WatchlistQuantService:
             if timestamp + _INTRADAY_BAR_DURATION <= self.now:
                 completed.append(bar)
         return sorted(completed, key=lambda bar: bar.timestamp)
+
+    def _paged_intraday_bars(
+        self,
+        symbol: str,
+    ) -> list[BrokerCandle]:
+        recent = self.broker.get_candlesticks(
+            symbol,
+            "MIN_5",
+            _INTRADAY_RECENT_COUNT,
+        )
+        combined = {
+            self._candle_timestamp(bar): bar
+            for bar in recent
+        }
+        if not combined:
+            return []
+
+        history_reader = getattr(
+            self.broker,
+            "get_history_candlesticks_before",
+            None,
+        )
+        if not callable(history_reader):
+            return self._latest_intraday_values(combined)
+
+        cursor = min(combined)
+        for _ in range(_INTRADAY_HISTORY_PAGES):
+            page = history_reader(
+                symbol,
+                "MIN_5",
+                _INTRADAY_HISTORY_PAGE_COUNT,
+                cursor,
+            )
+            if not isinstance(page, list):
+                raise ValueError(
+                    "historical candle provider returned a non-list response"
+                )
+            if not page:
+                break
+            before_count = len(combined)
+            page_by_timestamp = {
+                self._candle_timestamp(bar): bar
+                for bar in page
+            }
+            combined.update(page_by_timestamp)
+            next_cursor = min(page_by_timestamp)
+            if next_cursor >= cursor or len(combined) == before_count:
+                break
+            cursor = next_cursor
+        return self._latest_intraday_values(combined)
+
+    @staticmethod
+    def _candle_timestamp(bar: BrokerCandle) -> datetime:
+        timestamp = bar.timestamp
+        if timestamp.tzinfo is None:
+            return timestamp.replace(tzinfo=timezone.utc)
+        return timestamp.astimezone(timezone.utc)
+
+    @staticmethod
+    def _latest_intraday_values(
+        values: dict[datetime, BrokerCandle],
+    ) -> list[BrokerCandle]:
+        return [
+            values[timestamp]
+            for timestamp in sorted(values)[-_INTRADAY_TARGET_COUNT:]
+        ]

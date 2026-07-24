@@ -1241,6 +1241,7 @@ function scoreSourceLabel(source: string): string {
   if (source === 'quant_v1') return '量化 v1'
   if (source === 'quant_v2') return '量化 v2'
   if (source === 'quant_v3') return '量化 v3'
+  if (source === 'quant_v4') return '量化 v4'
   if (source.startsWith('quant_error')) return '数据异常'
   if (source === 'llm') return 'AI 复核'
   if (source.startsWith('fallback')) return 'AI 降级结果'

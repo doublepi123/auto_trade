@@ -974,12 +974,35 @@ class BrokerGateway:
             base_ms=settings.broker_retry_base_ms,
         )
 
+    def get_history_candlesticks_before(
+        self,
+        symbol: str,
+        period: str,
+        count: int,
+        before: datetime,
+    ) -> list[BrokerCandle]:
+        """Fetch the historical page immediately preceding ``before``."""
+        return self._call_with_retry(
+            lambda: self._get_history_candlesticks_by_offset_inner(
+                symbol,
+                period,
+                count,
+                before,
+                forward=False,
+            ),
+            op="get_history_candlesticks_before",
+            max_retries=settings.broker_quote_retry_max,
+            base_ms=settings.broker_retry_base_ms,
+        )
+
     def _get_history_candlesticks_by_offset_inner(
         self,
         symbol: str,
         period: str,
         count: int,
         after: datetime,
+        *,
+        forward: bool = True,
     ) -> list[BrokerCandle]:
         if count <= 0:
             return []
@@ -1016,7 +1039,7 @@ class BrokerGateway:
                 symbol,
                 period_enum,
                 adjust_enum,
-                True,
+                forward,
                 count,
                 after,
             )

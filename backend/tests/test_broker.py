@@ -1051,6 +1051,83 @@ class TestBrokerGateway:
             ("AAPL.US", "MIN_1", "noadj", True, 500, watermark)
         ]
 
+    def test_get_history_candlesticks_pages_backward_before_cursor(
+        self,
+        monkeypatch,
+    ) -> None:
+        class FakeAdjust:
+            NoAdjust = "noadj"
+
+        class FakePeriod:
+            Min_5 = "MIN_5"
+
+        class FakeCandle:
+            timestamp = datetime(
+                2026,
+                7,
+                9,
+                19,
+                55,
+                tzinfo=timezone.utc,
+            )
+            open = 100
+            high = 101
+            low = 99
+            close = 100.5
+            volume = 1000
+            turnover = 100500
+
+        class FakeQuoteContext:
+            def __init__(self) -> None:
+                self.calls: list[tuple[Any, ...]] = []
+
+            def history_candlesticks_by_offset(self, *args: Any):
+                self.calls.append(args)
+                return [FakeCandle()]
+
+        class FakeModule:
+            Period = FakePeriod
+            AdjustType = FakeAdjust
+
+        monkeypatch.setattr(
+            broker_module,
+            "_import_openapi",
+            lambda: FakeModule,
+        )
+        gateway = BrokerGateway()
+        quote_context = FakeQuoteContext()
+        gateway._quote_ctx = quote_context
+        gateway._trade_ctx = object()
+        cursor = datetime(
+            2026,
+            7,
+            10,
+            13,
+            30,
+            tzinfo=timezone.utc,
+        )
+
+        candles = gateway.get_history_candlesticks_before(
+            "AAPL.US",
+            "MIN_5",
+            1000,
+            cursor,
+        )
+
+        assert [candle.timestamp for candle in candles] == [
+            datetime(
+                2026,
+                7,
+                9,
+                19,
+                55,
+                tzinfo=timezone.utc,
+            )
+        ]
+        assert quote_context.calls == [
+            ("AAPL.US", "MIN_5", "noadj", False, 1000, cursor)
+        ]
+
     def test_get_candlesticks_drops_invalid_upstream_ohlcv(self, monkeypatch, caplog) -> None:
         class FakeAdjust:
             NoAdjust = "NO_ADJUST"

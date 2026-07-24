@@ -363,8 +363,8 @@ def test_service_persists_sorted_scores_and_isolates_symbol_failure() -> None:
             "AAPL.US",
             "BROKEN.US",
         ]
-        assert rows[0].source == "quant_v3"
-        assert rows[1].source == "quant_error_v3"
+        assert rows[0].source == "quant_v4"
+        assert rows[1].source == "quant_error_v4"
         assert rows[1].score == 0
         assert rows[1].recommended_action == "AVOID"
         assert db.query(WatchlistScore).count() == 2

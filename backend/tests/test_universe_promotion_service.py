@@ -187,7 +187,7 @@ def test_readiness_uses_latest_terminal_and_gated_quant_priority() -> None:
                     score=23.5,
                     confidence=0.92,
                     recommended_action="AVOID",
-                    source="quant_v3",
+                    source="quant_v4",
                     created_at=_NOW - timedelta(minutes=5),
                     expires_at=_NOW + timedelta(minutes=30),
                 ),
@@ -243,7 +243,7 @@ def test_readiness_uses_latest_terminal_and_gated_quant_priority() -> None:
         assert aapl.quant_score == 23.5
         assert aapl.quant_confidence == 0.92
         assert aapl.quant_recommended_action == "AVOID"
-        assert aapl.quant_source == "quant_v3"
+        assert aapl.quant_source == "quant_v4"
         assert aapl.quant_fresh is True
         assert aapl.quant_expires_at == (
             _NOW + timedelta(minutes=30)
@@ -318,7 +318,7 @@ def test_priority_ignores_legacy_and_stale_quant_scores() -> None:
                     score=100.0,
                     confidence=1.0,
                     recommended_action="CANDIDATE",
-                    source="quant_v3",
+                    source="quant_v4",
                     created_at=_NOW - timedelta(minutes=5),
                     expires_at=_NOW + timedelta(minutes=30),
                 ),
@@ -328,7 +328,7 @@ def test_priority_ignores_legacy_and_stale_quant_scores() -> None:
                     score=100.0,
                     confidence=1.0,
                     recommended_action="CANDIDATE",
-                    source="quant_v2",
+                    source="quant_v3",
                     created_at=_NOW - timedelta(minutes=5),
                     expires_at=_NOW + timedelta(minutes=30),
                 ),
@@ -338,7 +338,7 @@ def test_priority_ignores_legacy_and_stale_quant_scores() -> None:
                     score=0.0,
                     confidence=0.0,
                     recommended_action="AVOID",
-                    source="quant_error_v3",
+                    source="quant_error_v4",
                     created_at=_NOW - timedelta(minutes=10),
                     expires_at=_NOW + timedelta(minutes=20),
                 ),
@@ -348,7 +348,7 @@ def test_priority_ignores_legacy_and_stale_quant_scores() -> None:
                     score=100.0,
                     confidence=1.0,
                     recommended_action="CANDIDATE",
-                    source="quant_v3",
+                    source="quant_v4",
                     created_at=_NOW - timedelta(hours=2),
                     expires_at=_NOW - timedelta(minutes=1),
                 ),
@@ -372,12 +372,12 @@ def test_priority_ignores_legacy_and_stale_quant_scores() -> None:
         assert by_symbol["MSFT.US"].quant_weight == 0
         assert by_symbol["MSFT.US"].quant_adjustment == -25.0
         assert by_symbol["MSFT.US"].quant_score == 0
-        assert by_symbol["MSFT.US"].quant_source == "quant_error_v3"
+        assert by_symbol["MSFT.US"].quant_source == "quant_error_v4"
         assert by_symbol["MSFT.US"].quant_fresh is True
         assert by_symbol["AMD.US"].priority_score == 79.0
         assert by_symbol["AMD.US"].quant_weight == 0
         assert by_symbol["AMD.US"].quant_adjustment == 0
-        assert by_symbol["AMD.US"].quant_source == "quant_v3"
+        assert by_symbol["AMD.US"].quant_source == "quant_v4"
         assert by_symbol["AMD.US"].quant_fresh is False
     finally:
         db.close()

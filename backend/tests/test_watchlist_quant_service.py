@@ -139,7 +139,7 @@ def test_quant_score_rewards_liquid_mean_reverting_candidate() -> None:
     assert metrics.conditional_reversal_hit_rate > 0.9
     assert score.score >= 50
     assert score.recommended_action == "CANDIDATE"
-    assert score.rationale.startswith("quant-v3;")
+    assert score.rationale.startswith("quant-v4;")
 
 
 def test_quant_score_caps_candidate_with_hard_data_blockers() -> None:
@@ -197,6 +197,116 @@ class _Broker:
         return values
 
 
+class _PagedBroker(_Broker):
+    def __init__(self) -> None:
+        super().__init__()
+        self.intraday = _intraday_bars(count=3000)
+        self.history_requests: list[
+            tuple[str, str, int, datetime]
+        ] = []
+
+    def get_candlesticks(
+        self,
+        symbol: str,
+        period: str,
+        count: int,
+    ) -> list[BrokerCandle]:
+        if period == "DAY":
+            return _daily_bars()
+        return self.intraday[-count:]
+
+    def get_history_candlesticks_before(
+        self,
+        symbol: str,
+        period: str,
+        count: int,
+        before: datetime,
+    ) -> list[BrokerCandle]:
+        self.history_requests.append(
+            (symbol, period, count, before)
+        )
+        eligible = [
+            bar
+            for bar in self.intraday
+            if bar.timestamp < before
+        ]
+        return eligible[-count:]
+
+
+class _InvalidHistoryBroker(_Broker):
+    def get_history_candlesticks_before(
+        self,
+        symbol: str,
+        period: str,
+        count: int,
+        before: datetime,
+    ) -> tuple[BrokerCandle, ...]:
+        del symbol, period, count, before
+        return ()
+
+
+def test_service_pages_three_thousand_intraday_bars() -> None:
+    db = _db()
+    try:
+        item = WatchlistItem(
+            symbol="AAPL.US",
+            market="US",
+            alias="Apple",
+        )
+        db.add(item)
+        db.commit()
+        broker = _PagedBroker()
+
+        rows = WatchlistQuantService(
+            db,
+            broker,
+            now=_NOW,
+        ).score_items([item])
+
+        assert len(rows) == 1
+        assert rows[0].source == "quant_v4"
+        assert "intraday_bars=3000" in rows[0].rationale
+        assert [
+            (symbol, period, count)
+            for symbol, period, count, _before
+            in broker.history_requests
+        ] == [
+            ("AAPL.US", "MIN_5", 1000),
+            ("AAPL.US", "MIN_5", 1000),
+        ]
+        assert (
+            broker.history_requests[1][3]
+            < broker.history_requests[0][3]
+        )
+    finally:
+        db.close()
+
+
+def test_service_rejects_malformed_historical_page() -> None:
+    db = _db()
+    try:
+        item = WatchlistItem(
+            symbol="AAPL.US",
+            market="US",
+            alias="Apple",
+        )
+        db.add(item)
+        db.commit()
+
+        rows = WatchlistQuantService(
+            db,
+            _InvalidHistoryBroker(),
+            now=_NOW,
+        ).score_items([item])
+
+        assert len(rows) == 1
+        assert rows[0].source == "quant_error_v4"
+        assert rows[0].recommended_action == "AVOID"
+        assert rows[0].rationale == "quant-v4 data error: ValueError"
+    finally:
+        db.close()
+
+
 class _QuoteFailureBroker:
     def get_quotes(self, symbols: list[str]) -> list[Quote]:
         raise RuntimeError(f"quote request failed: {symbols}")
@@ -241,8 +351,8 @@ def test_service_persists_scores_and_isolates_symbol_failures() -> None:
             "BROKEN.US",
         ]
         by_symbol = {row.symbol: row for row in rows}
-        assert by_symbol["AAPL.US"].source == "quant_v3"
-        assert by_symbol["BROKEN.US"].source == "quant_error_v3"
+        assert by_symbol["AAPL.US"].source == "quant_v4"
+        assert by_symbol["BROKEN.US"].source == "quant_error_v4"
         assert by_symbol["BROKEN.US"].recommended_action == "AVOID"
         assert db.query(WatchlistScore).count() == 2
     finally:
@@ -400,7 +510,7 @@ def test_service_preserves_score_until_first_segment_bar_completes(
             score=72,
             confidence=0.8,
             recommended_action="CANDIDATE",
-            source="quant_v3",
+            source="quant_v4",
             rationale="previous valid score",
             created_at=observed_at - timedelta(hours=1),
             expires_at=observed_at + timedelta(hours=1),
@@ -489,7 +599,7 @@ def test_service_updates_open_market_and_leaves_closed_market_unchanged() -> Non
 
         assert broker.quote_requests == [["AAPL.US"]]
         assert [row.symbol for row in rows] == ["AAPL.US"]
-        assert rows[0].source == "quant_v3"
+        assert rows[0].source == "quant_v4"
         assert db.query(WatchlistScore).count() == 1
     finally:
         db.close()
@@ -520,7 +630,7 @@ def test_quant_rank_api_returns_complete_current_snapshot_for_mixed_markets(
                 score=0,
                 confidence=0,
                 recommended_action="AVOID",
-                source="quant_error_v3",
+                source="quant_error_v4",
                 rationale="current HK data error",
                 created_at=_NOW - timedelta(minutes=30),
                 expires_at=_NOW + timedelta(days=7),
@@ -555,13 +665,13 @@ def test_quant_rank_api_returns_complete_current_snapshot_for_mixed_markets(
             for row in response.scores
         }
         assert set(by_symbol) == {"AAPL.US", "700.HK"}
-        assert by_symbol["AAPL.US"].source == "quant_v3"
-        assert by_symbol["700.HK"].source == "quant_error_v3"
+        assert by_symbol["AAPL.US"].source == "quant_v4"
+        assert by_symbol["700.HK"].source == "quant_error_v4"
     finally:
         db.close()
 
 
-def test_current_quant_snapshot_excludes_retained_v2_history() -> None:
+def test_current_quant_snapshot_excludes_retained_legacy_history() -> None:
     db = _db()
     try:
         db.add_all(
@@ -572,8 +682,8 @@ def test_current_quant_snapshot_excludes_retained_v2_history() -> None:
                     score=90,
                     confidence=0.9,
                     recommended_action="CANDIDATE",
-                    source="quant_v2",
-                    rationale="retained legacy score",
+                    source="quant_v3",
+                    rationale="retained previous-generation score",
                     created_at=_NOW - timedelta(minutes=5),
                     expires_at=_NOW + timedelta(days=1),
                 ),
@@ -583,7 +693,7 @@ def test_current_quant_snapshot_excludes_retained_v2_history() -> None:
                     score=70,
                     confidence=0.8,
                     recommended_action="CANDIDATE",
-                    source="quant_v3",
+                    source="quant_v4",
                     rationale="current score",
                     created_at=_NOW,
                     expires_at=_NOW + timedelta(days=1),
@@ -594,8 +704,8 @@ def test_current_quant_snapshot_excludes_retained_v2_history() -> None:
                     score=85,
                     confidence=0.9,
                     recommended_action="CANDIDATE",
-                    source="quant_v2",
-                    rationale="legacy only",
+                    source="quant_v3",
+                    rationale="previous generation only",
                     created_at=_NOW,
                     expires_at=_NOW + timedelta(days=1),
                 ),
@@ -606,7 +716,7 @@ def test_current_quant_snapshot_excludes_retained_v2_history() -> None:
         rows = quant_module.list_latest_current_quant_scores(db)
 
         assert [(row.symbol, row.source) for row in rows] == [
-            ("AAPL.US", "quant_v3")
+            ("AAPL.US", "quant_v4")
         ]
         assert db.query(WatchlistScore).count() == 3
     finally:
@@ -636,7 +746,7 @@ def test_due_scoring_skips_fresh_symbols_and_scores_missing_rows() -> None:
                 score=70,
                 confidence=0.8,
                 recommended_action="CANDIDATE",
-                source="quant_v3",
+                source="quant_v4",
                 rationale="fresh current score",
                 created_at=_NOW - timedelta(minutes=5),
                 expires_at=_NOW + timedelta(minutes=25),
@@ -653,7 +763,7 @@ def test_due_scoring_skips_fresh_symbols_and_scores_missing_rows() -> None:
 
         assert broker.quote_requests == [["MSFT.US"]]
         assert [row.symbol for row in rows] == ["MSFT.US"]
-        assert rows[0].source == "quant_v3"
+        assert rows[0].source == "quant_v4"
     finally:
         db.close()
 
@@ -674,7 +784,7 @@ def test_due_scoring_refreshes_on_cadence_before_evidence_expires() -> None:
                 score=70,
                 confidence=0.8,
                 recommended_action="CANDIDATE",
-                source="quant_v3",
+                source="quant_v4",
                 rationale="valid but due for refresh",
                 created_at=_NOW - timedelta(minutes=31),
                 expires_at=_NOW + timedelta(hours=23),
@@ -719,7 +829,7 @@ def test_due_scoring_retries_current_data_error_after_five_minutes() -> None:
                 score=0,
                 confidence=0,
                 recommended_action="AVOID",
-                source="quant_error_v3",
+                source="quant_error_v4",
                 rationale="temporary BBO gap",
                 created_at=_NOW - timedelta(minutes=6),
                 expires_at=_NOW + timedelta(hours=23),
@@ -803,7 +913,7 @@ def test_service_does_not_treat_last_trade_age_as_bbo_age() -> None:
         ).score_items([item])
 
         assert len(rows) == 1
-        assert rows[0].source == "quant_v3"
+        assert rows[0].source == "quant_v4"
         assert rows[0].score > 0
         assert "STALE_BBO" not in rows[0].rationale
     finally:
