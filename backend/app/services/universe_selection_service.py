@@ -117,7 +117,7 @@ def select_exploration_candidates(
     max_symbols: int,
     max_per_sector: int,
 ) -> list[UniverseSelectionCandidate]:
-    """Choose a diverse, read-only research tier from hard-gate passers."""
+    """Choose a read-only research tier that complements the selected pool."""
     if max_symbols < 0:
         raise ValueError("exploration max_symbols must not be negative")
     if max_per_sector < 1:
@@ -145,7 +145,11 @@ def select_exploration_candidates(
 
     eligible.sort(key=lambda item: (-float(item.score), item.symbol))
     selected: list[UniverseSelectionCandidate] = []
-    sector_counts: dict[str, int] = {}
+    sector_counts = Counter(
+        item.sector
+        for item in items
+        if item.selected
+    )
     for item in eligible:
         if sector_counts.get(item.sector, 0) >= max_per_sector:
             continue

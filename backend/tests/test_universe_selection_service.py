@@ -315,6 +315,50 @@ def test_exploration_candidates_are_diverse_hard_gate_passers() -> None:
     ]
 
 
+def test_exploration_candidates_count_selected_sector_exposure() -> None:
+    def candidate(
+        symbol: str,
+        sector: str,
+        score: float,
+        *,
+        selected: bool = False,
+    ) -> UniverseSelectionCandidate:
+        return UniverseSelectionCandidate(
+            run_id=1,
+            symbol=symbol,
+            market="US",
+            alias=symbol,
+            sector=sector,
+            memberships_json='["NASDAQ_100"]',
+            selected=selected,
+            score=score,
+            metrics_json="{}",
+            exclusion_reasons_json=json.dumps(
+                [] if selected else ["SECTOR_CAP"]
+            ),
+            created_at=_NOW,
+        )
+
+    items = [
+        candidate(
+            "AMD.US",
+            "Semiconductors",
+            95,
+            selected=True,
+        ),
+        candidate("INTC.US", "Semiconductors", 90),
+        candidate("GOOGL.US", "Communication Services", 80),
+    ]
+
+    selected = select_exploration_candidates(
+        items,
+        max_symbols=2,
+        max_per_sector=1,
+    )
+
+    assert [item.symbol for item in selected] == ["GOOGL.US"]
+
+
 def test_refresh_reconciles_exploration_into_read_only_evidence() -> None:
     catalog = (
         IndexCandidate(
