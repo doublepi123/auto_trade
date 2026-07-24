@@ -417,7 +417,7 @@ class Settings(BaseSettings):
         validation_alias="AUTO_TRADE_LIVE_REGIME_MAX_DATA_AGE_SECONDS",
     )
     live_max_entries_per_symbol_per_day: int = Field(
-        default=2,
+        default=1,
         ge=0,
         le=20,
         validation_alias=(
