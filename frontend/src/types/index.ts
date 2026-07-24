@@ -1615,11 +1615,22 @@ export interface OpeningMomentumShadowMetrics {
   profit_factor: number | null
 }
 
+export interface OpeningMomentumShadowVariant {
+  variant: 'INCUMBENT' | 'CONTINUATION_CHALLENGER'
+  universe_source: string
+  algorithm_version: string
+  config_version: string
+  comparison_sessions: number
+  latest: OpeningMomentumShadowRun | null
+  metrics: OpeningMomentumShadowMetrics
+}
+
 export interface OpeningMomentumShadowStatus {
   config: OpeningMomentumShadowConfig
   state: 'DISABLED' | 'WAITING' | 'OPEN' | 'COLLECTING'
   latest: OpeningMomentumShadowRun | null
   metrics: OpeningMomentumShadowMetrics
+  variants: OpeningMomentumShadowVariant[]
 }
 
 export interface StrategyShadowConfig {

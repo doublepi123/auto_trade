@@ -395,6 +395,69 @@
                   <strong>{{ formatNullable(openingMomentumStatus.metrics.profit_factor) }}</strong>
                 </div>
               </div>
+
+              <div
+                v-if="openingMomentumStatus.variants.length > 1"
+                class="opening-momentum-variants"
+                data-testid="opening-momentum-variants"
+              >
+                <h4 class="shadow-subsection-title">同场选池对照</h4>
+                <el-table
+                  :data="openingMomentumStatus.variants"
+                  size="small"
+                >
+                  <el-table-column label="策略" min-width="140">
+                    <template #default="{ row }">
+                      <el-tag
+                        :type="row.variant === 'INCUMBENT' ? 'primary' : 'warning'"
+                        effect="plain"
+                      >
+                        {{ openingMomentumVariantLabel(row.variant) }}
+                      </el-tag>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="当日候选" min-width="110">
+                    <template #default="{ row }">
+                      {{ row.latest?.candidate_symbol || '-' }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column
+                    prop="comparison_sessions"
+                    label="同场样本"
+                    min-width="90"
+                  />
+                  <el-table-column label="信号" min-width="70">
+                    <template #default="{ row }">
+                      {{ row.metrics.signals }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="闭环" min-width="70">
+                    <template #default="{ row }">
+                      {{ row.metrics.closed_trades }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="胜率" min-width="85">
+                    <template #default="{ row }">
+                      {{ (row.metrics.win_rate * 100).toFixed(1) }}%
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="平均净收益" min-width="110">
+                    <template #default="{ row }">
+                      {{ formatBps(row.metrics.mean_net_return_bps) }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="累计净收益" min-width="110">
+                    <template #default="{ row }">
+                      {{ formatBps(row.metrics.cumulative_net_return_bps) }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="利润因子" min-width="90">
+                    <template #default="{ row }">
+                      {{ formatNullable(row.metrics.profit_factor) }}
+                    </template>
+                  </el-table-column>
+                </el-table>
+              </div>
             </template>
           </section>
 
@@ -1652,6 +1715,11 @@ const openingMomentumStateType = computed(() => {
   if (state === 'COLLECTING') return 'success'
   return 'info'
 })
+function openingMomentumVariantLabel(
+  variant: OpeningMomentumShadowStatus['variants'][number]['variant'],
+): string {
+  return variant === 'INCUMBENT' ? '现行选池' : '动量延续'
+}
 const shadowForm = reactive<StrategyShadowConfigUpdate>({
   enabled: false,
   zscore_window_1m_bars: 30,
@@ -2813,8 +2881,17 @@ onBeforeUnmount(() => {
 }
 
 .opening-momentum-latest,
-.opening-momentum-metrics {
+.opening-momentum-metrics,
+.opening-momentum-variants {
   margin-top: 16px;
+}
+
+.opening-momentum-variants {
+  overflow-x: auto;
+}
+
+.opening-momentum-variants :deep(.el-table) {
+  min-width: 900px;
 }
 
 .shadow-section-header {

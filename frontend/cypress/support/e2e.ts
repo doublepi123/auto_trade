@@ -1765,6 +1765,53 @@ Cypress.Commands.add('stubApi', () => {
         max_drawdown_bps: 40,
         profit_factor: 2.4,
       },
+      variants: [
+        {
+          variant: 'INCUMBENT',
+          universe_source: 'UNIVERSE_SELECTION',
+          algorithm_version: 'cross-sectional-opening-momentum-v1',
+          config_version: 'opening-momentum-stub-v1',
+          comparison_sessions: 4,
+          latest: { candidate_symbol: 'META.US' },
+          metrics: {
+            observed_sessions: 4,
+            skipped_sessions: 1,
+            signals: 3,
+            open_trades: 0,
+            closed_trades: 3,
+            wins: 2,
+            win_rate: 0.6667,
+            mean_net_return_bps: 31.2,
+            cumulative_net_return_bps: 93.6,
+            max_drawdown_bps: 40,
+            profit_factor: 2.4,
+          },
+        },
+        {
+          variant: 'CONTINUATION_CHALLENGER',
+          universe_source: 'OPENING_CONTINUATION',
+          algorithm_version: (
+            'cross-sectional-opening-momentum-v1+'
+            + 'opening-continuation-universe-v1'
+          ),
+          config_version: 'opening-continuation-stub-v1',
+          comparison_sessions: 4,
+          latest: { candidate_symbol: 'PLTR.US' },
+          metrics: {
+            observed_sessions: 4,
+            skipped_sessions: 0,
+            signals: 4,
+            open_trades: 0,
+            closed_trades: 4,
+            wins: 3,
+            win_rate: 0.75,
+            mean_net_return_bps: 38.5,
+            cumulative_net_return_bps: 154,
+            max_drawdown_bps: 28,
+            profit_factor: 3.1,
+          },
+        },
+      ],
     },
   }).as('getOpeningMomentumShadowStatus')
 

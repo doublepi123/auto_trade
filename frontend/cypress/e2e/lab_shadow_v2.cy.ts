@@ -75,6 +75,12 @@ describe('Strategy v2 shadow lab', () => {
     cy.get('[data-testid="opening-momentum-metrics"]')
       .should('contain', '66')
       .and('contain', '93.6 bps')
+    cy.get('[data-testid="opening-momentum-variants"]')
+      .should('contain', '现行选池')
+      .and('contain', '动量延续')
+      .and('contain', 'META.US')
+      .and('contain', 'PLTR.US')
+      .and('contain', '154.0 bps')
 
     cy.get('[data-testid="shadow-safety-tags"]')
       .should('contain', '影子观察')

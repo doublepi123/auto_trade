@@ -59,6 +59,7 @@ class TestOpeningMomentumShadowApi:
     def setup_method(self) -> None:
         settings.api_key = ""
         settings.opening_momentum_shadow_enabled = False
+        settings.opening_momentum_challenger_enabled = False
         with self.session_factory() as db:
             db.query(OpeningMomentumShadowRun).delete()
             db.commit()
@@ -66,6 +67,7 @@ class TestOpeningMomentumShadowApi:
     def teardown_method(self) -> None:
         settings.api_key = ""
         settings.opening_momentum_shadow_enabled = False
+        settings.opening_momentum_challenger_enabled = False
 
     def test_status_is_explicitly_shadow_only(self) -> None:
         response = self.client.get(

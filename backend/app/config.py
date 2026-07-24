@@ -294,6 +294,17 @@ class Settings(BaseSettings):
             "has no order submission path."
         ),
     )
+    opening_momentum_challenger_enabled: bool = Field(
+        default=False,
+        validation_alias=(
+            "AUTO_TRADE_OPENING_MOMENTUM_CHALLENGER_ENABLED"
+        ),
+        description=(
+            "Evaluate a T-1 trend-continuation universe alongside the "
+            "incumbent opening-momentum shadow universe. Both variants "
+            "remain observation-only and cannot submit orders."
+        ),
+    )
     universe_selection_interval_minutes: int = Field(
         default=60,
         ge=15,
@@ -548,6 +559,14 @@ class Settings(BaseSettings):
         ):
             raise ValueError(
                 "opening momentum shadow requires universe selection"
+            )
+        if (
+            self.opening_momentum_challenger_enabled
+            and not self.opening_momentum_shadow_enabled
+        ):
+            raise ValueError(
+                "opening momentum challenger requires opening momentum "
+                "shadow"
             )
         if (
             self.watchlist_quant_score_ttl_minutes

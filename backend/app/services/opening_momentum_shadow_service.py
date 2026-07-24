@@ -4,7 +4,7 @@ import json
 import logging
 import math
 from dataclasses import asdict, dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Literal, Protocol, cast
 
 from sqlalchemy.exc import IntegrityError
@@ -19,6 +19,13 @@ from app.domain.opening_momentum import (
     evaluate_opening_momentum,
     shadow_round_trip_return_bps,
 )
+from app.domain.opening_momentum_universe import (
+    OPENING_CONTINUATION_UNIVERSE_VERSION,
+    OpeningMomentumUniverseCandidate,
+    OpeningMomentumUniverseConfig,
+    opening_momentum_variant_config_version,
+    select_opening_momentum_universe,
+)
 from app.models import (
     OpeningMomentumShadowRun,
     UniverseSelectionCandidate,
@@ -30,6 +37,7 @@ from app.schemas import (
     OpeningMomentumShadowMetrics,
     OpeningMomentumShadowRunResponse,
     OpeningMomentumShadowStatusResponse,
+    OpeningMomentumShadowVariantResponse,
 )
 
 
@@ -39,6 +47,11 @@ _CANDLE_COUNT = 500
 _BAR_DURATION = timedelta(minutes=1)
 _SETTLEMENT_GRACE = timedelta(seconds=5)
 _DECISION_WINDOW = timedelta(minutes=5)
+_INCUMBENT_SOURCE = "UNIVERSE_SELECTION"
+_CONTINUATION_SOURCE = "OPENING_CONTINUATION"
+_CONTINUATION_ALGORITHM_VERSION = (
+    f"{ALGORITHM_VERSION}+{OPENING_CONTINUATION_UNIVERSE_VERSION}"
+)
 
 
 class CandleProvider(Protocol):
@@ -55,6 +68,16 @@ class _Candle:
     timestamp: datetime
     open: float
     close: float
+
+
+@dataclass(frozen=True)
+class _UniverseVariant:
+    variant: Literal["INCUMBENT", "CONTINUATION_CHALLENGER"]
+    algorithm_version: str
+    config_version: str
+    universe_source: str
+    symbols: tuple[str, ...] = ()
+    selection_run_id: int | None = None
 
 
 class OpeningMomentumShadowService:
@@ -77,14 +100,18 @@ class OpeningMomentumShadowService:
         now: datetime | None = None,
     ) -> OpeningMomentumShadowStatusResponse:
         current = _as_utc(now or datetime.now(timezone.utc))
-        open_run = (
+        open_runs = (
             self.db.query(OpeningMomentumShadowRun)
             .filter(OpeningMomentumShadowRun.status == "OPEN")
-            .order_by(OpeningMomentumShadowRun.session_date.asc())
-            .first()
+            .order_by(
+                OpeningMomentumShadowRun.session_date.asc(),
+                OpeningMomentumShadowRun.id.asc(),
+            )
+            .all()
         )
-        if open_run is not None:
+        for open_run in open_runs:
             self._close_if_due(open_run, current)
+        if any(open_run.status == "OPEN" for open_run in open_runs):
             return self.get_status()
 
         if not settings.opening_momentum_shadow_enabled:
@@ -107,32 +134,52 @@ class OpeningMomentumShadowService:
         if current < decision_start or current > decision_end:
             return self.get_status()
 
-        config_version = self.config.version_hash()
-        existing = (
-            self.db.query(OpeningMomentumShadowRun)
-            .filter(
-                OpeningMomentumShadowRun.session_date == local.date(),
-                OpeningMomentumShadowRun.config_version == config_version,
+        variants = self._universe_variants()
+        variant_versions = [
+            variant.config_version for variant in variants
+        ]
+        existing_versions = {
+            row.config_version
+            for row in (
+                self.db.query(OpeningMomentumShadowRun)
+                .filter(
+                    OpeningMomentumShadowRun.session_date
+                    == local.date(),
+                    OpeningMomentumShadowRun.config_version.in_(
+                        variant_versions
+                    ),
+                )
+                .all()
             )
-            .first()
-        )
-        if existing is not None:
+        }
+        pending_variants = [
+            variant
+            for variant in variants
+            if variant.config_version not in existing_versions
+        ]
+        if not pending_variants:
             return self.get_status()
         if self.candle_provider is None:
             raise RuntimeError(
                 "opening momentum shadow candle provider is unavailable"
             )
 
-        symbols, selection_run_id, universe_source = (
-            self._selected_universe()
-        )
-        observations: list[OpeningMomentumObservation] = []
-        excluded: dict[str, str] = {}
+        observations_by_symbol: dict[
+            str, OpeningMomentumObservation
+        ] = {}
+        fetch_errors: dict[str, str] = {}
         signal_at = entry_at - _BAR_DURATION
         expected_signal_bars = {
             session_open + timedelta(minutes=index)
             for index in range(self.config.signal_minutes)
         }
+        symbols = tuple(
+            dict.fromkeys(
+                symbol
+                for variant in pending_variants
+                for symbol in variant.symbols
+            )
+        )
         for symbol in symbols:
             try:
                 bars = self.candle_provider.get_candlesticks(
@@ -148,7 +195,7 @@ class OpeningMomentumShadowService:
                     expected_signal_bars - by_timestamp.keys()
                 )
                 if missing_signal_bars:
-                    excluded[symbol] = (
+                    fetch_errors[symbol] = (
                         "SIGNAL_BARS_MISSING:"
                         f"{len(missing_signal_bars)}"
                     )
@@ -157,9 +204,9 @@ class OpeningMomentumShadowService:
                 signal_bar = by_timestamp.get(signal_at)
                 entry_bar = by_timestamp.get(entry_at)
                 if opening_bar is None or signal_bar is None:
-                    excluded[symbol] = "SIGNAL_BARS_MISSING"
+                    fetch_errors[symbol] = "SIGNAL_BARS_MISSING"
                     continue
-                observations.append(
+                observations_by_symbol[symbol] = (
                     OpeningMomentumObservation(
                         symbol=symbol,
                         session_open=opening_bar.open,
@@ -172,7 +219,7 @@ class OpeningMomentumShadowService:
                     )
                 )
             except Exception as exc:
-                excluded[symbol] = (
+                fetch_errors[symbol] = (
                     f"BROKER_ERROR:{type(exc).__name__}"
                 )
                 logger.warning(
@@ -181,70 +228,92 @@ class OpeningMomentumShadowService:
                     exc,
                 )
 
-        decision = evaluate_opening_momentum(
-            observations,
-            self.config,
-        )
-        data_complete = not excluded
-        status = (
-            "OPEN"
-            if decision.action == "ENTER_LONG" and data_complete
-            else "SKIPPED"
-        )
-        reason = (
-            decision.reason
-            if data_complete
-            else "DATA_INCOMPLETE"
-        )
-        row = OpeningMomentumShadowRun(
-            session_date=local.date(),
-            algorithm_version=ALGORITHM_VERSION,
-            config_version=config_version,
-            status=status,
-            reason=reason,
-            signal_at=signal_at,
-            observed_at=current,
-            selection_run_id=selection_run_id,
-            universe_source=universe_source,
-            universe_size=decision.universe_size,
-            universe_json=json.dumps(
-                symbols,
-                ensure_ascii=True,
-                separators=(",", ":"),
-            ),
-            excluded_symbols_json=json.dumps(
-                excluded,
-                ensure_ascii=True,
-                sort_keys=True,
-                separators=(",", ":"),
-            ),
-            ranking_json=json.dumps(
-                [asdict(item) for item in decision.ranking],
-                ensure_ascii=True,
-                separators=(",", ":"),
-            ),
-            candidate_symbol=decision.candidate_symbol,
-            market_return_bps=decision.market_return_bps,
-            candidate_return_bps=decision.candidate_return_bps,
-            excess_return_bps=decision.excess_return_bps,
-            entry_at=(
-                entry_at
-                if status == "OPEN"
-                else None
-            ),
-            entry_price=(
-                decision.entry_price if status == "OPEN" else None
-            ),
-            exit_due_at=(
-                entry_at + timedelta(
-                    minutes=self.config.holding_minutes
+        for variant in pending_variants:
+            observations = [
+                observations_by_symbol[symbol]
+                for symbol in variant.symbols
+                if symbol in observations_by_symbol
+            ]
+            excluded = {
+                symbol: fetch_errors[symbol]
+                for symbol in variant.symbols
+                if symbol in fetch_errors
+            }
+            decision = evaluate_opening_momentum(
+                observations,
+                self.config,
+            )
+            data_complete = not excluded
+            status = (
+                "OPEN"
+                if decision.action == "ENTER_LONG" and data_complete
+                else "SKIPPED"
+            )
+            reason = (
+                decision.reason
+                if data_complete
+                else "DATA_INCOMPLETE"
+            )
+            self.db.add(
+                OpeningMomentumShadowRun(
+                    session_date=local.date(),
+                    algorithm_version=variant.algorithm_version,
+                    config_version=variant.config_version,
+                    status=status,
+                    reason=reason,
+                    signal_at=signal_at,
+                    observed_at=current,
+                    selection_run_id=variant.selection_run_id,
+                    universe_source=variant.universe_source,
+                    universe_size=decision.universe_size,
+                    universe_json=json.dumps(
+                        variant.symbols,
+                        ensure_ascii=True,
+                        separators=(",", ":"),
+                    ),
+                    excluded_symbols_json=json.dumps(
+                        excluded,
+                        ensure_ascii=True,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    ranking_json=json.dumps(
+                        [
+                            asdict(item)
+                            for item in decision.ranking
+                        ],
+                        ensure_ascii=True,
+                        separators=(",", ":"),
+                    ),
+                    candidate_symbol=decision.candidate_symbol,
+                    market_return_bps=decision.market_return_bps,
+                    candidate_return_bps=(
+                        decision.candidate_return_bps
+                    ),
+                    excess_return_bps=decision.excess_return_bps,
+                    entry_at=(
+                        entry_at
+                        if status == "OPEN"
+                        else None
+                    ),
+                    entry_price=(
+                        decision.entry_price
+                        if status == "OPEN"
+                        else None
+                    ),
+                    exit_due_at=(
+                        entry_at
+                        + timedelta(
+                            minutes=self.config.holding_minutes
+                        )
+                        if status == "OPEN"
+                        else None
+                    ),
+                    estimated_cost_bps=(
+                        self.config.round_trip_cost_bps
+                    ),
                 )
-                if status == "OPEN"
-                else None
-            ),
-            estimated_cost_bps=self.config.round_trip_cost_bps,
-        )
-        self.db.add(row)
+            )
         try:
             self.db.commit()
         except IntegrityError:
@@ -252,15 +321,28 @@ class OpeningMomentumShadowService:
         return self.get_status()
 
     def get_status(self) -> OpeningMomentumShadowStatusResponse:
+        incumbent_version = self.config.version_hash()
         latest = (
             self.db.query(OpeningMomentumShadowRun)
+            .filter(
+                OpeningMomentumShadowRun.config_version
+                == incumbent_version
+            )
             .order_by(
                 OpeningMomentumShadowRun.session_date.desc(),
                 OpeningMomentumShadowRun.id.desc(),
             )
             .first()
         )
-        if latest is not None and latest.status == "OPEN":
+        has_open_run = (
+            self.db.query(OpeningMomentumShadowRun)
+            .filter(
+                OpeningMomentumShadowRun.status == "OPEN"
+            )
+            .first()
+            is not None
+        )
+        if has_open_run:
             state = "OPEN"
         elif not settings.opening_momentum_shadow_enabled:
             state = "DISABLED"
@@ -272,7 +354,8 @@ class OpeningMomentumShadowService:
             config=self._config_response(),
             state=state,
             latest=self._run_response(latest) if latest else None,
-            metrics=self._metrics(),
+            metrics=self._metrics(incumbent_version),
+            variants=self._variant_responses(),
         )
 
     def list_runs(
@@ -291,15 +374,12 @@ class OpeningMomentumShadowService:
         )
         return [self._run_response(row) for row in rows]
 
-    def _selected_universe(
-        self,
-    ) -> tuple[list[str], int | None, str]:
+    def _universe_variants(self) -> list[_UniverseVariant]:
+        identities = self._variant_identities()
         run = (
             self.db.query(UniverseSelectionRun)
             .filter(
                 UniverseSelectionRun.status == "COMPLETE",
-                UniverseSelectionRun.selected_count
-                >= self.config.minimum_universe_size,
             )
             .order_by(
                 UniverseSelectionRun.as_of_date.desc(),
@@ -309,25 +389,135 @@ class OpeningMomentumShadowService:
             .first()
         )
         if run is None:
-            return [], None, "NONE"
+            return [
+                _UniverseVariant(
+                    variant=identity.variant,
+                    algorithm_version=identity.algorithm_version,
+                    config_version=identity.config_version,
+                    universe_source="NONE",
+                )
+                for identity in identities
+            ]
         candidates = (
             self.db.query(UniverseSelectionCandidate)
             .filter(
                 UniverseSelectionCandidate.run_id == run.id,
-                UniverseSelectionCandidate.selected.is_(True),
                 UniverseSelectionCandidate.market == "US",
             )
             .order_by(
+                UniverseSelectionCandidate.selected.desc(),
                 UniverseSelectionCandidate.rank.asc(),
                 UniverseSelectionCandidate.score.desc(),
                 UniverseSelectionCandidate.symbol.asc(),
             )
             .all()
         )
-        return (
-            list(dict.fromkeys(row.symbol for row in candidates)),
-            run.id,
-            "UNIVERSE_SELECTION",
+        incumbent_symbols = tuple(
+            dict.fromkeys(
+                row.symbol for row in candidates if row.selected
+            )
+        )
+        variants = [
+            _UniverseVariant(
+                variant="INCUMBENT",
+                algorithm_version=ALGORITHM_VERSION,
+                config_version=self.config.version_hash(),
+                universe_source=_INCUMBENT_SOURCE,
+                symbols=incumbent_symbols,
+                selection_run_id=run.id,
+            )
+        ]
+        if not settings.opening_momentum_challenger_enabled:
+            return variants
+
+        challenger_candidates = [
+            OpeningMomentumUniverseCandidate(
+                symbol=row.symbol,
+                sector=row.sector,
+                avg_dollar_volume=_optional_metric(
+                    row.metrics_json,
+                    "avg_dollar_volume",
+                ),
+                relative_spread_bps=_optional_metric(
+                    row.metrics_json,
+                    "relative_spread_bps",
+                ),
+                opportunity_to_cost_ratio=_optional_metric(
+                    row.metrics_json,
+                    "opportunity_to_cost_ratio",
+                ),
+                momentum_5d_pct=_optional_metric(
+                    row.metrics_json,
+                    "momentum_5d_pct",
+                ),
+                trend_efficiency_10d=_optional_metric(
+                    row.metrics_json,
+                    "trend_efficiency_10d",
+                ),
+                exclusion_reasons=_json_string_tuple(
+                    row.exclusion_reasons_json
+                ),
+            )
+            for row in candidates
+        ]
+        challenger_selection = select_opening_momentum_universe(
+            challenger_candidates,
+            self._continuation_config(),
+        )
+        challenger_identity = identities[1]
+        variants.append(
+            _UniverseVariant(
+                variant=challenger_identity.variant,
+                algorithm_version=(
+                    challenger_identity.algorithm_version
+                ),
+                config_version=challenger_identity.config_version,
+                universe_source=_CONTINUATION_SOURCE,
+                symbols=tuple(
+                    row.symbol
+                    for row in challenger_selection
+                    if row.selected
+                ),
+                selection_run_id=run.id,
+            )
+        )
+        return variants
+
+    def _variant_identities(self) -> list[_UniverseVariant]:
+        variants = [
+            _UniverseVariant(
+                variant="INCUMBENT",
+                algorithm_version=ALGORITHM_VERSION,
+                config_version=self.config.version_hash(),
+                universe_source=_INCUMBENT_SOURCE,
+            )
+        ]
+        if settings.opening_momentum_challenger_enabled:
+            universe_config = self._continuation_config()
+            variants.append(
+                _UniverseVariant(
+                    variant="CONTINUATION_CHALLENGER",
+                    algorithm_version=(
+                        _CONTINUATION_ALGORITHM_VERSION
+                    ),
+                    config_version=(
+                        opening_momentum_variant_config_version(
+                            self.config.version_hash(),
+                            universe_config,
+                        )
+                    ),
+                    universe_source=_CONTINUATION_SOURCE,
+                )
+            )
+        return variants
+
+    @staticmethod
+    def _continuation_config() -> OpeningMomentumUniverseConfig:
+        return OpeningMomentumUniverseConfig(
+            max_selected=settings.universe_selection_max_symbols,
+            max_per_sector=(
+                settings.universe_selection_max_per_sector
+            ),
         )
 
     def _close_if_due(
@@ -427,16 +617,80 @@ class OpeningMomentumShadowService:
             round_trip_cost_bps=self.config.round_trip_cost_bps,
         )
 
-    def _metrics(self) -> OpeningMomentumShadowMetrics:
+    def _variant_responses(
+        self,
+    ) -> list[OpeningMomentumShadowVariantResponse]:
+        identities = self._variant_identities()
+        rows_by_version: dict[
+            str, list[OpeningMomentumShadowRun]
+        ] = {}
+        for identity in identities:
+            rows_by_version[identity.config_version] = (
+                self.db.query(OpeningMomentumShadowRun)
+                .filter(
+                    OpeningMomentumShadowRun.config_version
+                    == identity.config_version
+                )
+                .order_by(
+                    OpeningMomentumShadowRun.session_date.asc(),
+                    OpeningMomentumShadowRun.id.asc(),
+                )
+                .all()
+            )
+        session_sets = [
+            {row.session_date for row in rows}
+            for rows in rows_by_version.values()
+        ]
+        comparison_dates = (
+            session_sets[0].intersection(*session_sets[1:])
+            if len(session_sets) > 1
+            else session_sets[0]
+            if session_sets
+            else set()
+        )
+        return [
+            OpeningMomentumShadowVariantResponse(
+                variant=identity.variant,
+                universe_source=identity.universe_source,
+                algorithm_version=identity.algorithm_version,
+                config_version=identity.config_version,
+                comparison_sessions=len(comparison_dates),
+                latest=(
+                    self._run_response(
+                        rows_by_version[identity.config_version][-1]
+                    )
+                    if rows_by_version[identity.config_version]
+                    else None
+                ),
+                metrics=self._metrics(
+                    identity.config_version,
+                    session_dates=comparison_dates,
+                ),
+            )
+            for identity in identities
+        ]
+
+    def _metrics(
+        self,
+        config_version: str,
+        *,
+        session_dates: set[date] | None = None,
+    ) -> OpeningMomentumShadowMetrics:
         rows = (
             self.db.query(OpeningMomentumShadowRun)
             .filter(
                 OpeningMomentumShadowRun.config_version
-                == self.config.version_hash()
+                == config_version
             )
             .order_by(OpeningMomentumShadowRun.session_date.asc())
             .all()
         )
+        if session_dates is not None:
+            rows = [
+                row
+                for row in rows
+                if row.session_date in session_dates
+            ]
         closed = [row for row in rows if row.status == "CLOSED"]
         net_values = [
             float(row.net_return_bps)
@@ -585,3 +839,21 @@ def _json_dict(raw: str) -> dict[str, str]:
         str(key): str(item)
         for key, item in value.items()
     }
+
+
+def _json_string_tuple(raw: str) -> tuple[str, ...]:
+    value = _json_value(raw, [])
+    if not isinstance(value, list):
+        return ("DATA_INVALID_EXCLUSION_REASONS",)
+    return tuple(str(item) for item in value)
+
+
+def _optional_metric(raw: str, key: str) -> float | None:
+    value = _json_value(raw, {})
+    if not isinstance(value, dict):
+        return None
+    try:
+        metric = float(value[key])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return metric if math.isfinite(metric) else None

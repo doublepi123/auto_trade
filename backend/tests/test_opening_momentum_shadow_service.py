@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
@@ -154,6 +155,67 @@ def _seed_universe(db: Session) -> UniverseSelectionRun:
     return run
 
 
+def _seed_variant_universe(db: Session) -> UniverseSelectionRun:
+    run = UniverseSelectionRun(
+        as_of_date=date(2026, 7, 22),
+        algorithm_version="test-v1",
+        source_version="test",
+        status="COMPLETE",
+        candidate_count=4,
+        evaluable_count=4,
+        selected_count=2,
+        coverage_ratio=1.0,
+        completed_at=_SESSION_OPEN - timedelta(days=1),
+    )
+    db.add(run)
+    db.flush()
+    for index, symbol in enumerate(_SYMBOLS[:4]):
+        incumbent_selected = index < 2
+        strong_continuation = index >= 2
+        metrics = {
+            "avg_dollar_volume": (
+                2_000_000_000.0
+                if strong_continuation
+                else 600_000_000.0
+            ),
+            "relative_spread_bps": (
+                0.5 if strong_continuation else 5.0
+            ),
+            "opportunity_to_cost_ratio": (
+                20.0 if strong_continuation else 5.0
+            ),
+            "momentum_5d_pct": (
+                float(index + 5)
+                if strong_continuation
+                else float(index - 5)
+            ),
+            "trend_efficiency_10d": (
+                0.8 + index / 100
+                if strong_continuation
+                else 0.1 + index / 100
+            ),
+        }
+        db.add(
+            UniverseSelectionCandidate(
+                run_id=run.id,
+                symbol=symbol,
+                market="US",
+                sector=f"Sector {index}",
+                selected=incumbent_selected,
+                rank=index + 1 if incumbent_selected else None,
+                score=float(100 - index),
+                metrics_json=json.dumps(metrics),
+                exclusion_reasons_json=(
+                    "[]"
+                    if incumbent_selected
+                    else '["BELOW_SELECTION_CUTOFF"]'
+                ),
+            )
+        )
+    db.commit()
+    return run
+
+
 def test_tick_opens_then_closes_one_cost_adjusted_shadow_trade(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -202,6 +264,85 @@ def test_tick_opens_then_closes_one_cost_adjusted_shadow_trade(
         assert closed.metrics.closed_trades == 1
         assert closed.metrics.wins == 1
         assert closed.metrics.win_rate == 1.0
+    finally:
+        db.close()
+        Base.metadata.drop_all(bind=engine)
+
+
+def test_challenger_uses_one_market_snapshot_and_closes_both_variants(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        settings,
+        "opening_momentum_shadow_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        settings,
+        "opening_momentum_challenger_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        settings,
+        "universe_selection_max_symbols",
+        2,
+    )
+    monkeypatch.setattr(
+        settings,
+        "universe_selection_max_per_sector",
+        2,
+    )
+    engine, db = _database()
+    try:
+        run = _seed_variant_universe(db)
+        candles = _FakeCandles()
+        service = OpeningMomentumShadowService(
+            db,
+            candles,
+            config=OpeningMomentumConfig(
+                minimum_universe_size=2,
+                minimum_excess_return_bps=0,
+            ),
+        )
+
+        opened = service.tick(
+            now=_SESSION_OPEN + timedelta(minutes=31, seconds=10),
+        )
+
+        assert db.query(OpeningMomentumShadowRun).count() == 2
+        assert candles.calls == list(_SYMBOLS[:4])
+        assert opened.state == "OPEN"
+        assert opened.latest is not None
+        assert opened.latest.universe_source == "UNIVERSE_SELECTION"
+        assert opened.latest.candidate_symbol == "S1.US"
+        assert opened.latest.selection_run_id == run.id
+        assert len(opened.variants) == 2
+        incumbent, challenger = opened.variants
+        assert incumbent.variant == "INCUMBENT"
+        assert incumbent.comparison_sessions == 1
+        assert incumbent.latest is not None
+        assert incumbent.latest.candidate_symbol == "S1.US"
+        assert challenger.variant == "CONTINUATION_CHALLENGER"
+        assert challenger.comparison_sessions == 1
+        assert challenger.latest is not None
+        assert challenger.latest.universe == ["S2.US", "S3.US"]
+        assert challenger.latest.candidate_symbol == "S3.US"
+
+        closed = service.tick(
+            now=_SESSION_OPEN + timedelta(minutes=61, seconds=10),
+        )
+
+        rows = db.query(OpeningMomentumShadowRun).all()
+        assert {row.status for row in rows} == {"CLOSED"}
+        assert closed.state == "COLLECTING"
+        assert [item.metrics.closed_trades for item in closed.variants] == [
+            1,
+            1,
+        ]
+        assert [item.metrics.cumulative_net_return_bps for item in closed.variants] == [
+            -14.0,
+            -14.0,
+        ]
     finally:
         db.close()
         Base.metadata.drop_all(bind=engine)

@@ -557,11 +557,24 @@ class OpeningMomentumShadowMetrics(BaseModel):
     profit_factor: Optional[float] = None
 
 
+class OpeningMomentumShadowVariantResponse(BaseModel):
+    variant: Literal["INCUMBENT", "CONTINUATION_CHALLENGER"]
+    universe_source: str
+    algorithm_version: str
+    config_version: str
+    comparison_sessions: int = 0
+    latest: Optional[OpeningMomentumShadowRunResponse] = None
+    metrics: OpeningMomentumShadowMetrics
+
+
 class OpeningMomentumShadowStatusResponse(BaseModel):
     config: OpeningMomentumShadowConfigResponse
     state: Literal["DISABLED", "WAITING", "OPEN", "COLLECTING"]
     latest: Optional[OpeningMomentumShadowRunResponse] = None
     metrics: OpeningMomentumShadowMetrics
+    variants: list[OpeningMomentumShadowVariantResponse] = Field(
+        default_factory=list
+    )
 
 
 class StrategyV2ShadowVersionResponse(BaseModel):

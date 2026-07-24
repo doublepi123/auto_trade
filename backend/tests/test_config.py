@@ -169,6 +169,10 @@ class TestSettings:
             "true",
         )
         monkeypatch.setenv(
+            "AUTO_TRADE_OPENING_MOMENTUM_CHALLENGER_ENABLED",
+            "true",
+        )
+        monkeypatch.setenv(
             "AUTO_TRADE_WATCHLIST_QUANT_AUTO_SCORE_ENABLED",
             "true",
         )
@@ -202,6 +206,7 @@ class TestSettings:
         assert configured.universe_selection_enabled is True
         assert configured.universe_selection_apply_to_watchlist is True
         assert configured.opening_momentum_shadow_enabled is True
+        assert configured.opening_momentum_challenger_enabled is True
         assert configured.watchlist_quant_auto_score_enabled is True
         assert configured.watchlist_quant_interval_minutes == 20
         assert configured.watchlist_quant_score_ttl_minutes == 120
@@ -245,6 +250,26 @@ class TestSettings:
         with pytest.raises(
             ValidationError,
             match="opening momentum shadow requires universe selection",
+        ):
+            Settings()
+
+    def test_opening_momentum_challenger_requires_shadow(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv(
+            "AUTO_TRADE_OPENING_MOMENTUM_CHALLENGER_ENABLED",
+            "true",
+        )
+        monkeypatch.setenv(
+            "AUTO_TRADE_OPENING_MOMENTUM_SHADOW_ENABLED",
+            "false",
+        )
+
+        with pytest.raises(
+            ValidationError,
+            match="opening momentum challenger requires opening momentum "
+            "shadow",
         ):
             Settings()
 
