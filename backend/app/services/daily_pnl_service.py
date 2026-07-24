@@ -188,8 +188,6 @@ class DailyPnlService:
     _missing_executed_price_warn_lock = Lock()
     _unclosed_remainder_warned_keys: set[str] = set()
     _unclosed_remainder_warn_lock = Lock()
-    _round_trip_overclose_warned_keys: set[str] = set()
-    _round_trip_overclose_warn_lock = Lock()
 
     def __init__(self, db: Any) -> None:
         self._db = db
@@ -471,8 +469,12 @@ class DailyPnlService:
 
         Date filtering is on the *exit* fill time: a round trip that closed
         inside ``[from_dt, to_dt]`` is included even when its entry pre-dates the
-        window. This method writes nothing and never calls ``calculate`` /
-        ``_apply_fill``, so the risk controller's source of truth is untouched.
+        window. Replay inconsistencies are returned through ``issues`` rather
+        than logged: analytics endpoints call this method frequently, and a
+        historical data-quality issue must not emit a fresh operational alert
+        on every read. This method writes nothing and never calls ``calculate``
+        / ``_apply_fill``, so the risk controller's source of truth is
+        untouched.
         """
         from app.models import OrderRecord
 
@@ -686,9 +688,8 @@ class DailyPnlService:
 
         if remaining > 0:
             # A close that exceeds the available entry lots (data inconsistency,
-            # an unhandled split/dividend, or a short opened outside this ledger).
-            # Mirrors the warning _close_long/_close_short emit in calculate().
-            DailyPnlService._warn_round_trip_overclose_once(exit_fill, remaining)
+            # an unhandled split/dividend, or a position opened outside this
+            # ledger) remains visible through the structured quality result.
             return [], DailyPnlService._replay_issue(
                 exit_fill,
                 trade_day=to_trade_day(exit_fill.symbol, exit_fill.filled_at),
@@ -699,16 +700,6 @@ class DailyPnlService:
             return [], None
 
         if unverified_cost_basis:
-            logger.error(
-                "round-trip replay cannot verify authoritative cost basis for "
-                "%s order %s: ledger_quantity=%s position_quantity=%s "
-                "declared_basis=%s; refusing suspect closed trade",
-                exit_fill.symbol,
-                exit_fill.broker_order_id or exit_fill.id,
-                represented_quantity,
-                declared_position_quantity,
-                exit_fill.cost_basis_price,
-            )
             return [], DailyPnlService._replay_issue(
                 exit_fill,
                 trade_day=to_trade_day(
@@ -720,16 +711,6 @@ class DailyPnlService:
             )
 
         if cost_basis_conflict:
-            logger.error(
-                "round-trip replay found conflicting tracked cost basis for %s "
-                "order %s: declared=%s replayed=%s position=%s; refusing "
-                "suspect closed trade",
-                exit_fill.symbol,
-                exit_fill.broker_order_id or exit_fill.id,
-                exit_fill.cost_basis_price,
-                replay_cost_basis,
-                exit_fill.position_quantity_before,
-            )
             return [], DailyPnlService._replay_issue(
                 exit_fill,
                 trade_day=to_trade_day(exit_fill.symbol, exit_fill.filled_at),
@@ -858,24 +839,6 @@ class DailyPnlService:
             matched_quantity=float(matched_quantity),
             unmatched_quantity=float(unmatched_quantity),
         )
-
-    @staticmethod
-    def _warn_round_trip_overclose_once(exit_fill: _Fill, remaining: Decimal) -> None:
-        fill_key = exit_fill.broker_order_id or f"local:{exit_fill.id}"
-        warning_key = f"{fill_key}:{exit_fill.symbol}:{exit_fill.side}:{remaining}"
-        with DailyPnlService._round_trip_overclose_warn_lock:
-            should_warn = warning_key not in DailyPnlService._round_trip_overclose_warned_keys
-            if should_warn:
-                DailyPnlService._round_trip_overclose_warned_keys.add(warning_key)
-        if should_warn:
-            logger.warning(
-                "round-trip close of %s for %s exceeds matched entry lots; "
-                "close quantity exceeds tracked position by %s — possible "
-                "data inconsistency",
-                exit_fill.quantity,
-                exit_fill.symbol,
-                remaining,
-            )
 
     def _fill_from_order(self, order: Any) -> _Fill | None:
         quantity = self._executed_quantity(order)

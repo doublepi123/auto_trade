@@ -349,7 +349,7 @@ class TestPairRoundTrips:
         assert len(trades) == 1
         assert trades[0].gross_pnl == approx(100.0)
 
-    def test_over_close_logs_warning(self, caplog) -> None:
+    def test_over_close_returns_issue_without_read_side_warning(self, caplog) -> None:
         """A partially matched exit is an issue, never a closed trade subset."""
         self._cleanup()
         day = date(2026, 1, 1)
@@ -385,7 +385,10 @@ class TestPairRoundTrips:
         assert issue.filled_quantity == approx(200)
         assert issue.matched_quantity == approx(100)
         assert issue.unmatched_quantity == approx(100)
-        assert any("exceeds matched entry lots" in rec.message for rec in caplog.records)
+        assert not any(
+            "exceeds matched entry lots" in rec.message
+            for rec in caplog.records
+        )
 
     def test_full_unmatched_exit_is_a_structured_issue(self) -> None:
         self._cleanup()

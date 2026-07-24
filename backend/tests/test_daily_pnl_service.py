@@ -385,6 +385,7 @@ class TestDailyPnlService:
 
     def test_authoritative_reset_drives_risk_but_not_performance_stats(
         self,
+        caplog: LogCaptureFixture,
     ) -> None:
         self._cleanup()
         trade_day = date(2026, 7, 15)
@@ -426,6 +427,10 @@ class TestDailyPnlService:
         assert (
             replay.issues[0].exit_broker_order_id
             == "tracked-entry-sell"
+        )
+        assert not any(
+            "round-trip replay" in record.message
+            for record in caplog.records
         )
         assert result.realized_pnl == approx(expected_daily_pnl)
         assert [(trade.broker_order_id, trade.quantity) for trade in result.trades] == [
@@ -795,7 +800,12 @@ class TestDailyPnlService:
         ])
         db.commit()
 
-        result = DailyPnlService(db).calculate(
+        service = DailyPnlService(db)
+        replay = service.pair_round_trips_with_issues(
+            symbol="AAPL.US",
+            include_excursions=False,
+        )
+        result = service.calculate(
             trade_day=trade_day,
             symbol="AAPL.US",
         )
@@ -811,8 +821,17 @@ class TestDailyPnlService:
         assert [trade.broker_order_id for trade in result.trades] == [
             "fresh-sell-after-drift"
         ]
+        assert [issue.issue_code for issue in replay.issues] == [
+            PnlReplayIssueCode.COST_BASIS_CONFLICT
+        ]
         assert reconciled == (-7.0, 2)
-        assert "conflicting tracked cost basis" in caplog.text
+        conflict_logs = [
+            record
+            for record in caplog.records
+            if "conflicting tracked cost basis" in record.message
+        ]
+        assert len(conflict_logs) == 1
+        assert conflict_logs[0].message.startswith("daily PnL replay")
         db.close()
 
     def test_external_tracked_position_without_full_ledger_remains_authoritative(
@@ -1544,7 +1563,10 @@ class TestDailyPnlService:
         ]
         assert len(records) == 1
 
-    def test_round_trip_overclose_warning_is_logged_once(self, caplog: LogCaptureFixture) -> None:
+    def test_round_trip_overclose_is_structured_without_logging(
+        self,
+        caplog: LogCaptureFixture,
+    ) -> None:
         self._cleanup()
         trade_day = date(2026, 5, 22)
         db = self._get_db()
@@ -1578,13 +1600,20 @@ class TestDailyPnlService:
 
         import logging
         caplog.set_level(logging.WARNING)
-        _ = DailyPnlService(db).pair_round_trips()
-        _ = DailyPnlService(db).pair_round_trips()
+        first = DailyPnlService(db).pair_round_trips_with_issues(
+            include_excursions=False,
+        )
+        second = DailyPnlService(db).pair_round_trips_with_issues(
+            include_excursions=False,
+        )
         db.close()
 
-        records = [
-            rec
-            for rec in caplog.records
-            if "round-trip close of" in rec.message
+        assert first == second
+        assert first.trades == []
+        assert [issue.issue_code for issue in first.issues] == [
+            PnlReplayIssueCode.PARTIAL_OVERCLOSE
         ]
-        assert len(records) == 1
+        assert not any(
+            "round-trip close of" in record.message
+            for record in caplog.records
+        )
