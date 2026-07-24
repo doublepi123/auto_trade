@@ -531,6 +531,7 @@ def test_challengers_use_one_market_snapshot_and_close_all_variants(
         ) = opened.variants
         assert incumbent.variant == "INCUMBENT"
         assert incumbent.comparison_sessions == 1
+        assert incumbent.comparison is None
         assert incumbent.minimum_market_return_bps == -25.0
         assert incumbent.holding_minutes == 30
         assert incumbent.latest is not None
@@ -573,6 +574,11 @@ def test_challengers_use_one_market_snapshot_and_close_all_variants(
         assert breadth_long.latest.exit_due_at == (
             _SESSION_OPEN + timedelta(minutes=91)
         )
+        for item in opened.variants[1:]:
+            assert item.comparison is not None
+            assert item.comparison.resolved_sessions == 0
+            assert item.comparison.recommendation == "COLLECTING"
+            assert item.comparison.promotion_ready is False
         assert len(
             {
                 item.config_version
@@ -624,6 +630,12 @@ def test_challengers_use_one_market_snapshot_and_close_all_variants(
             -14.0,
             -14.0,
         ]
+        for item in closed.variants[1:]:
+            assert item.comparison is not None
+            assert item.comparison.resolved_sessions == 1
+            assert item.comparison.mean_delta_bps == 0.0
+            assert item.comparison.confidence_lower_bps is None
+            assert item.comparison.recommendation == "COLLECTING"
     finally:
         db.close()
         Base.metadata.drop_all(bind=engine)
@@ -709,6 +721,34 @@ def test_breadth_challenger_skips_a_negative_market_snapshot(
     finally:
         db.close()
         Base.metadata.drop_all(bind=engine)
+
+
+def test_paired_policy_return_excludes_unresolved_and_data_failures() -> None:
+    assert OpeningMomentumShadowService._paired_policy_return(
+        OpeningMomentumShadowRun(
+            status="CLOSED",
+            reason="FIXED_HOLD_EXIT",
+            net_return_bps=12.5,
+        )
+    ) == 12.5
+    assert OpeningMomentumShadowService._paired_policy_return(
+        OpeningMomentumShadowRun(
+            status="SKIPPED",
+            reason="MARKET_FILTER",
+        )
+    ) == 0.0
+    for status, reason in (
+        ("OPEN", "OPENING_LEADER"),
+        ("SKIPPED", "DATA_INCOMPLETE"),
+        ("SKIPPED", "ENTRY_BAR_MISSING"),
+        ("SKIPPED", "INSUFFICIENT_UNIVERSE"),
+    ):
+        assert OpeningMomentumShadowService._paired_policy_return(
+            OpeningMomentumShadowRun(
+                status=status,
+                reason=reason,
+            )
+        ) is None
 
 
 def test_missing_leader_entry_bar_records_skip_without_substitution(

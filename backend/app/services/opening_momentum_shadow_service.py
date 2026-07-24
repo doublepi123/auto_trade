@@ -19,6 +19,9 @@ from app.domain.opening_momentum import (
     evaluate_opening_momentum,
     shadow_round_trip_return_bps,
 )
+from app.domain.opening_momentum_comparison import (
+    compare_opening_momentum_variants,
+)
 from app.domain.opening_momentum_universe import (
     OPENING_CONTINUATION_UNIVERSE_VERSION,
     OpeningMomentumUniverseCandidate,
@@ -32,6 +35,7 @@ from app.models import (
     UniverseSelectionRun,
 )
 from app.schemas import (
+    OpeningMomentumPairedComparisonResponse,
     OpeningMomentumRankResponse,
     OpeningMomentumShadowConfigResponse,
     OpeningMomentumShadowMetrics,
@@ -66,6 +70,14 @@ _BREADTH_LONG_HOLD_VERSION = "holding-60m-v1"
 _BREADTH_LONG_HOLD_SOURCE = "OPENING_CONTINUATION_BREADTH_60M"
 _BREADTH_LONG_HOLD_ALGORITHM_VERSION = (
     f"{_BREADTH_GATE_ALGORITHM_VERSION}+{_BREADTH_LONG_HOLD_VERSION}"
+)
+_NON_COMPARABLE_SKIP_REASONS = frozenset(
+    {
+        "PREOPEN_UNIVERSE_UNAVAILABLE",
+        "DATA_INCOMPLETE",
+        "ENTRY_BAR_MISSING",
+        "INSUFFICIENT_UNIVERSE",
+    }
 )
 
 _VariantName = Literal[
@@ -872,33 +884,98 @@ class OpeningMomentumShadowService:
             if session_sets
             else set()
         )
-        return [
-            OpeningMomentumShadowVariantResponse(
-                variant=identity.variant,
-                universe_source=identity.universe_source,
-                algorithm_version=identity.algorithm_version,
-                config_version=identity.config_version,
-                minimum_market_return_bps=(
-                    identity.decision_config.minimum_market_return_bps
-                ),
-                holding_minutes=(
-                    identity.decision_config.holding_minutes
-                ),
-                comparison_sessions=len(comparison_dates),
-                latest=(
-                    self._run_response(
-                        rows_by_version[identity.config_version][-1]
-                    )
-                    if rows_by_version[identity.config_version]
-                    else None
-                ),
-                metrics=self._metrics(
-                    identity.config_version,
-                    session_dates=comparison_dates,
-                ),
+        rows_by_date = {
+            config_version: {
+                row.session_date: row
+                for row in rows
+            }
+            for config_version, rows in rows_by_version.items()
+        }
+        resolved_comparison_dates = [
+            session_date
+            for session_date in sorted(comparison_dates)
+            if all(
+                self._paired_policy_return(
+                    rows_by_date[identity.config_version][
+                        session_date
+                    ]
+                )
+                is not None
+                for identity in identities
+            )
+        ]
+        metrics_by_version = {
+            identity.config_version: self._metrics(
+                identity.config_version,
+                session_dates=comparison_dates,
             )
             for identity in identities
+        }
+        incumbent_identity = identities[0]
+        incumbent_returns = [
+            cast(
+                float,
+                self._paired_policy_return(
+                    rows_by_date[
+                        incumbent_identity.config_version
+                    ][session_date]
+                ),
+            )
+            for session_date in resolved_comparison_dates
         ]
+
+        responses: list[OpeningMomentumShadowVariantResponse] = []
+        for identity in identities:
+            metrics = metrics_by_version[identity.config_version]
+            comparison_response = None
+            if identity.variant != "INCUMBENT":
+                challenger_returns = [
+                    cast(
+                        float,
+                        self._paired_policy_return(
+                            rows_by_date[identity.config_version][
+                                session_date
+                            ]
+                        ),
+                    )
+                    for session_date in resolved_comparison_dates
+                ]
+                comparison = compare_opening_momentum_variants(
+                    incumbent_returns,
+                    challenger_returns,
+                )
+                comparison_response = (
+                    OpeningMomentumPairedComparisonResponse.model_validate(
+                        asdict(comparison)
+                    )
+                )
+            responses.append(
+                OpeningMomentumShadowVariantResponse(
+                    variant=identity.variant,
+                    universe_source=identity.universe_source,
+                    algorithm_version=identity.algorithm_version,
+                    config_version=identity.config_version,
+                    minimum_market_return_bps=(
+                        identity.decision_config.minimum_market_return_bps
+                    ),
+                    holding_minutes=(
+                        identity.decision_config.holding_minutes
+                    ),
+                    comparison_sessions=len(comparison_dates),
+                    latest=(
+                        self._run_response(
+                            rows_by_version[
+                                identity.config_version
+                            ][-1]
+                        )
+                        if rows_by_version[identity.config_version]
+                        else None
+                    ),
+                    metrics=metrics,
+                    comparison=comparison_response,
+                )
+            )
+        return responses
 
     def _metrics(
         self,
@@ -962,6 +1039,22 @@ class OpeningMomentumShadowService:
                 else None
             ),
         )
+
+    @staticmethod
+    def _paired_policy_return(
+        row: OpeningMomentumShadowRun,
+    ) -> float | None:
+        if row.status == "CLOSED":
+            if row.net_return_bps is None:
+                return None
+            value = float(row.net_return_bps)
+            return value if math.isfinite(value) else None
+        if (
+            row.status == "SKIPPED"
+            and row.reason not in _NON_COMPARABLE_SKIP_REASONS
+        ):
+            return 0.0
+        return None
 
     @staticmethod
     def _opening_path_features(

@@ -563,6 +563,27 @@ class OpeningMomentumShadowMetrics(BaseModel):
     profit_factor: Optional[float] = None
 
 
+class OpeningMomentumPairedComparisonResponse(BaseModel):
+    resolved_sessions: int = 0
+    cumulative_delta_bps: float = 0.0
+    mean_delta_bps: float = 0.0
+    outperformance_rate: float = 0.0
+    confidence_lower_bps: Optional[float] = None
+    confidence_upper_bps: Optional[float] = None
+    max_drawdown_delta_bps: float = 0.0
+    risk_guard_passed: bool = False
+    minimum_promotion_sessions: int = 20
+    promotion_ready: bool = False
+    recommendation: Literal[
+        "COLLECTING",
+        "EARLY_LEADER",
+        "LAGGING",
+        "INCONCLUSIVE",
+        "UNDERPERFORMING",
+        "PROMOTION_CANDIDATE",
+    ] = "COLLECTING"
+
+
 class OpeningMomentumShadowVariantResponse(BaseModel):
     variant: Literal[
         "INCUMBENT",
@@ -579,6 +600,9 @@ class OpeningMomentumShadowVariantResponse(BaseModel):
     comparison_sessions: int = 0
     latest: Optional[OpeningMomentumShadowRunResponse] = None
     metrics: OpeningMomentumShadowMetrics
+    comparison: Optional[
+        OpeningMomentumPairedComparisonResponse
+    ] = None
 
 
 class OpeningMomentumShadowStatusResponse(BaseModel):

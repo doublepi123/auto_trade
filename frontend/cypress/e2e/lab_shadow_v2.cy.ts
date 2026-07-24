@@ -91,6 +91,9 @@ describe('Strategy v2 shadow lab', () => {
       .and('contain', 'META.US')
       .and('contain', 'PLTR.US')
       .and('contain', 'INTC.US')
+      .and('contain', '配对闭环')
+      .and('contain', '17.6 bps')
+      .and('contain', '采集中')
       .and('contain', '154.0 bps')
 
     cy.get('[data-testid="shadow-safety-tags"]')

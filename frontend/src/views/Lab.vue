@@ -467,9 +467,36 @@
                   </el-table-column>
                   <el-table-column
                     prop="comparison_sessions"
-                    label="同场样本"
+                    label="同场观测"
                     min-width="90"
                   />
+                  <el-table-column label="配对闭环" min-width="90">
+                    <template #default="{ row }">
+                      {{ row.comparison?.resolved_sessions ?? '-' }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="相对现行" min-width="100">
+                    <template #default="{ row }">
+                      {{ row.comparison ? formatBps(row.comparison.mean_delta_bps) : '-' }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="保守下界" min-width="100">
+                    <template #default="{ row }">
+                      {{ row.comparison ? formatNullableBps(row.comparison.confidence_lower_bps) : '-' }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="评估" min-width="110">
+                    <template #default="{ row }">
+                      <el-tag
+                        v-if="row.comparison"
+                        :type="openingMomentumRecommendationTagType(row.comparison.recommendation)"
+                        effect="plain"
+                      >
+                        {{ openingMomentumRecommendationLabel(row.comparison.recommendation) }}
+                      </el-tag>
+                      <span v-else>基准</span>
+                    </template>
+                  </el-table-column>
                   <el-table-column label="信号" min-width="70">
                     <template #default="{ row }">
                       {{ row.metrics.signals }}
@@ -1474,6 +1501,7 @@ import {
 import type {
   PromptVersion, ExperimentSummary, PerformanceStats,
   PerformanceVariant, IndicatorsResponse, LLMInteractionRecord, LLMIntervalStatus, LLMUsageSummary,
+  OpeningMomentumRecommendation,
   OpeningMomentumShadowStatus,
   StrategyShadowAdxChallengerResponse,
   StrategyShadowConfig, StrategyShadowConfigUpdate, StrategyShadowDecision,
@@ -1775,6 +1803,29 @@ function openingMomentumVariantTagType(
   if (variant === 'SECTOR_RELAXED_CHALLENGER') return 'info'
   if (variant.startsWith('BREADTH_GATED')) return 'success'
   return 'warning'
+}
+function openingMomentumRecommendationLabel(
+  recommendation: OpeningMomentumRecommendation,
+): string {
+  const labels: Record<OpeningMomentumRecommendation, string> = {
+    COLLECTING: '采集中',
+    EARLY_LEADER: '早期领先',
+    LAGGING: '暂时落后',
+    INCONCLUSIVE: '证据未定',
+    UNDERPERFORMING: '确认落后',
+    PROMOTION_CANDIDATE: '晋级候选',
+  }
+  return labels[recommendation]
+}
+function openingMomentumRecommendationTagType(
+  recommendation: OpeningMomentumRecommendation,
+): 'success' | 'warning' | 'info' | 'danger' {
+  if (recommendation === 'PROMOTION_CANDIDATE') return 'success'
+  if (recommendation === 'EARLY_LEADER') return 'warning'
+  if (recommendation === 'LAGGING' || recommendation === 'UNDERPERFORMING') {
+    return 'danger'
+  }
+  return 'info'
 }
 const shadowForm = reactive<StrategyShadowConfigUpdate>({
   enabled: false,

@@ -1621,6 +1621,28 @@ export interface OpeningMomentumShadowMetrics {
   profit_factor: number | null
 }
 
+export type OpeningMomentumRecommendation =
+  | 'COLLECTING'
+  | 'EARLY_LEADER'
+  | 'LAGGING'
+  | 'INCONCLUSIVE'
+  | 'UNDERPERFORMING'
+  | 'PROMOTION_CANDIDATE'
+
+export interface OpeningMomentumPairedComparison {
+  resolved_sessions: number
+  cumulative_delta_bps: number
+  mean_delta_bps: number
+  outperformance_rate: number
+  confidence_lower_bps: number | null
+  confidence_upper_bps: number | null
+  max_drawdown_delta_bps: number
+  risk_guard_passed: boolean
+  minimum_promotion_sessions: number
+  promotion_ready: boolean
+  recommendation: OpeningMomentumRecommendation
+}
+
 export interface OpeningMomentumShadowVariant {
   variant:
     | 'INCUMBENT'
@@ -1636,6 +1658,7 @@ export interface OpeningMomentumShadowVariant {
   comparison_sessions: number
   latest: OpeningMomentumShadowRun | null
   metrics: OpeningMomentumShadowMetrics
+  comparison: OpeningMomentumPairedComparison | null
 }
 
 export interface OpeningMomentumShadowStatus {
