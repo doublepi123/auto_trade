@@ -28,10 +28,14 @@ from app.services.universe_selection_service import (
 
 _TERMINAL_RUN_STATUSES = ("COMPLETE", "DEGRADED")
 _REVIEW_READY_STATUSES = {"READY_FOR_REVIEW", "MATURE_EVIDENCE"}
-_PRIORITY_ALGORITHM_VERSION = "selection-exploration-quant-required-v4"
+_PRIORITY_ALGORITHM_VERSION = (
+    "selection-exploration-quant-fail-closed-v5"
+)
 _MAX_QUANT_WEIGHT = 0.35
 _QUANT_NEUTRAL_SCORE = 50.0
 _QUANT_DATA_ERROR_PENALTY = -25.0
+_QUANT_MISSING_PENALTY = -25.0
+_QUANT_STALE_PENALTY = -15.0
 _QUANT_AVOID_PENALTY = -20.0
 _QUANT_WATCH_PENALTY = -10.0
 _MIN_FORWARD_REVIEW_TRADES = 5
@@ -50,10 +54,12 @@ def _quant_priority_adjustment(
     fresh: bool,
     weight: float,
 ) -> float:
-    if quant is None or not fresh:
-        return 0.0
+    if quant is None:
+        return _QUANT_MISSING_PENALTY
     if quant.source != QUANT_SCORE_SOURCE:
         return _QUANT_DATA_ERROR_PENALTY
+    if not fresh:
+        return _QUANT_STALE_PENALTY
     confidence = max(0.0, min(1.0, float(quant.confidence)))
     action = quant.recommended_action.upper()
     if action == "CANDIDATE":

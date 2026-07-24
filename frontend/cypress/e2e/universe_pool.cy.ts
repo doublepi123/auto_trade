@@ -136,7 +136,7 @@ describe('Dynamic universe observation pool', () => {
         universe_run_id: 7,
         as_of_date: '2026-07-23',
         generated_at: '2026-07-24T01:05:00Z',
-        priority_algorithm_version: 'selection-exploration-quant-required-v4',
+        priority_algorithm_version: 'selection-exploration-quant-fail-closed-v5',
         items: {},
       },
     }).as('getUniversePromotionReadinessInvalid')

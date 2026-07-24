@@ -305,13 +305,13 @@ def test_readiness_uses_latest_terminal_and_gated_quant_priority() -> None:
         assert response.generated_at == _NOW
         assert (
             response.priority_algorithm_version
-            == "selection-exploration-quant-required-v4"
+            == "selection-exploration-quant-fail-closed-v5"
         )
         assert [item.symbol for item in response.items] == [
-            "MSFT.US",
             "AAPL.US",
+            "MSFT.US",
         ]
-        assert [item.rank for item in response.items] == [2, 1]
+        assert [item.rank for item in response.items] == [1, 2]
         assert [item.priority_rank for item in response.items] == [1, 2]
         by_symbol = {item.symbol: item for item in response.items}
         aapl = by_symbol["AAPL.US"]
@@ -332,9 +332,9 @@ def test_readiness_uses_latest_terminal_and_gated_quant_priority() -> None:
         assert aapl.quant_expires_at == (
             _NOW + timedelta(minutes=30)
         )
-        assert msft.priority_score == 82.5
+        assert msft.priority_score == 57.5
         assert msft.quant_weight == 0
-        assert msft.quant_adjustment == 0
+        assert msft.quant_adjustment == -25.0
         assert msft.shadow_enabled is False
         assert msft.is_trading_target is True
         assert msft.quant_score is None
@@ -443,7 +443,7 @@ def test_readiness_includes_exploration_and_unselected_trading_target() -> None:
         engine.dispose()
 
 
-def test_priority_ignores_legacy_and_stale_quant_scores() -> None:
+def test_priority_penalizes_missing_stale_and_error_quant_scores() -> None:
     engine, db = _db()
     try:
         run = _run(
@@ -540,9 +540,9 @@ def test_priority_ignores_legacy_and_stale_quant_scores() -> None:
         assert by_symbol["MSFT.US"].quant_score == 0
         assert by_symbol["MSFT.US"].quant_source == "quant_error_v5"
         assert by_symbol["MSFT.US"].quant_fresh is True
-        assert by_symbol["AMD.US"].priority_score == 79.0
+        assert by_symbol["AMD.US"].priority_score == 64.0
         assert by_symbol["AMD.US"].quant_weight == 0
-        assert by_symbol["AMD.US"].quant_adjustment == 0
+        assert by_symbol["AMD.US"].quant_adjustment == -15.0
         assert by_symbol["AMD.US"].quant_source == "quant_v5"
         assert by_symbol["AMD.US"].quant_fresh is False
     finally:
