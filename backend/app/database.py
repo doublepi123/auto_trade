@@ -1192,6 +1192,14 @@ def _ensure_universe_selection_tables(db_engine: Engine) -> None:
 def _ensure_watchlist_scores_table(db_engine: Engine) -> None:
     inspector = inspect(db_engine)
     table_exists = "watchlist_scores" in inspector.get_table_names()
+    columns = (
+        {
+            str(column["name"])
+            for column in inspector.get_columns("watchlist_scores")
+        }
+        if table_exists
+        else set()
+    )
     with db_engine.begin() as connection:
         if not table_exists:
             connection.exec_driver_sql(
@@ -1205,10 +1213,16 @@ def _ensure_watchlist_scores_table(db_engine: Engine) -> None:
                     confidence FLOAT DEFAULT 0.0 NOT NULL,
                     recommended_action VARCHAR(16) DEFAULT 'HOLD' NOT NULL,
                     source VARCHAR(32) DEFAULT 'llm' NOT NULL,
+                    estimated_round_trip_cost_bps FLOAT,
                     created_at DATETIME NOT NULL,
                     expires_at DATETIME NOT NULL
                 )
                 """
+            )
+        elif "estimated_round_trip_cost_bps" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE watchlist_scores ADD COLUMN "
+                "estimated_round_trip_cost_bps FLOAT"
             )
         connection.exec_driver_sql(
             "CREATE INDEX IF NOT EXISTS ix_watchlist_scores_symbol_created_at "

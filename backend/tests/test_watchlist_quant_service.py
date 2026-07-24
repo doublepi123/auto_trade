@@ -140,6 +140,7 @@ def test_quant_score_rewards_liquid_mean_reverting_candidate() -> None:
     assert score.score >= 50
     assert score.recommended_action == "CANDIDATE"
     assert score.rationale.startswith("quant-v5;")
+    assert score.estimated_round_trip_cost_bps == pytest.approx(16)
 
 
 def test_quant_score_caps_candidate_with_hard_data_blockers() -> None:
@@ -195,6 +196,21 @@ class _Broker:
             )
         )
         return values
+
+
+class _MissingBboBroker(_Broker):
+    def get_quotes(self, symbols: list[str]) -> list[Quote]:
+        self.quote_requests.append(list(symbols))
+        return [
+            Quote(
+                symbol=symbol,
+                last_price=100,
+                bid=0,
+                ask=0,
+                timestamp=_NOW.isoformat(),
+            )
+            for symbol in symbols
+        ]
 
 
 class _PagedBroker(_Broker):
@@ -452,9 +468,41 @@ def test_service_persists_scores_and_isolates_symbol_failures() -> None:
         ]
         by_symbol = {row.symbol: row for row in rows}
         assert by_symbol["AAPL.US"].source == "quant_v5"
+        assert (
+            by_symbol["AAPL.US"].estimated_round_trip_cost_bps
+            == pytest.approx(16)
+        )
         assert by_symbol["BROKEN.US"].source == "quant_error_v5"
+        assert (
+            by_symbol["BROKEN.US"].estimated_round_trip_cost_bps
+            is None
+        )
         assert by_symbol["BROKEN.US"].recommended_action == "AVOID"
         assert db.query(WatchlistScore).count() == 2
+    finally:
+        db.close()
+
+
+def test_service_does_not_persist_fallback_cost_without_valid_bbo() -> None:
+    db = _db()
+    try:
+        item = WatchlistItem(
+            symbol="AAPL.US",
+            market="US",
+            alias="Apple",
+        )
+        db.add(item)
+        db.commit()
+
+        row = WatchlistQuantService(
+            db,
+            _MissingBboBroker(),
+            now=_NOW,
+        ).score_items([item])[0]
+
+        assert row.source == "quant_error_v5"
+        assert row.estimated_round_trip_cost_bps is None
+        assert "MISSING_BBO" in row.rationale
     finally:
         db.close()
 
@@ -521,9 +569,11 @@ def test_service_uses_latest_strategy_fee_to_downgrade_candidate() -> None:
         high_fee = service.score_items([item])[0]
 
         assert baseline.recommended_action == "CANDIDATE"
+        assert baseline.estimated_round_trip_cost_bps == pytest.approx(16)
         assert "one_side_fee=5.0bp" in baseline.rationale
         assert high_fee.score <= 49
         assert high_fee.recommended_action != "CANDIDATE"
+        assert high_fee.estimated_round_trip_cost_bps == pytest.approx(106)
         assert "one_side_fee=50.0bp" in high_fee.rationale
         assert "round_trip_fee=100.0bp" in high_fee.rationale
     finally:

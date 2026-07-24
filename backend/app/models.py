@@ -1104,6 +1104,10 @@ class WatchlistScore(Base):
     confidence: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     recommended_action: Mapped[str] = mapped_column(String(16), default="HOLD", nullable=False)
     source: Mapped[str] = mapped_column(String(32), default="llm", nullable=False)
+    estimated_round_trip_cost_bps: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow, nullable=False)
     expires_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow, nullable=False)
 

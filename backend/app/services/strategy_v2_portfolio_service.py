@@ -66,10 +66,23 @@ _ROUTING_SPECS = (
         policy="VWAP_EDGE_POOL",
         algorithm_version="strategy-v2-portfolio-vwap-edge-pool-v1",
     ),
+    _RoutingSpec(
+        policy="VWAP_EDGE_OBSERVED_COST_POOL",
+        algorithm_version=(
+            "strategy-v2-portfolio-vwap-observed-cost-pool-v1"
+        ),
+    ),
 )
 _EVALUATOR_VERSION = "strategy-v2-single-capital-slot-forward-router-v1"
 _TERMINAL_UNIVERSE_STATUSES = ("COMPLETE", "DEGRADED")
-_VWAP_EDGE_POLICIES = {"SELECTED_VWAP_EDGE", "VWAP_EDGE_POOL"}
+_FIXED_COST_VWAP_EDGE_POLICIES = {
+    "SELECTED_VWAP_EDGE",
+    "VWAP_EDGE_POOL",
+}
+_OBSERVED_COST_VWAP_EDGE_POLICIES = {
+    "VWAP_EDGE_OBSERVED_COST_POOL",
+}
+_OBSERVED_COST_MAX_AGE = timedelta(minutes=60)
 _ENTRY_BIND_TIMEOUT = timedelta(minutes=10)
 _MIN_READY_TRADES = 20
 _MIN_MATURE_TRADES = 50
@@ -264,7 +277,16 @@ class StrategyV2PortfolioService:
                 primary_symbol=registration.baseline_symbol,
             )
             candidates_json = json.dumps(
-                [asdict(item) for item in ranked],
+                [
+                    _candidate_payload(
+                        item,
+                        include_observed_cost=(
+                            registration.policy
+                            in _OBSERVED_COST_VWAP_EDGE_POLICIES
+                        ),
+                    )
+                    for item in ranked
+                ],
                 sort_keys=True,
                 separators=(",", ":"),
             )
@@ -405,6 +427,12 @@ class StrategyV2PortfolioService:
                     if vwap_edge is not None
                     else None
                 ),
+                observed_round_trip_cost_bps=(
+                    self._fresh_observed_cost_bps(
+                        quant_row,
+                        observed_at=observed_at,
+                    )
+                ),
                 stop_distance_bps=(
                     vwap_edge[3]
                     if vwap_edge is not None
@@ -412,6 +440,21 @@ class StrategyV2PortfolioService:
                 ),
             ))
         return candidates
+
+    @staticmethod
+    def _fresh_observed_cost_bps(
+        row: WatchlistScore | None,
+        *,
+        observed_at: datetime,
+    ) -> float | None:
+        if (
+            row is None
+            or row.estimated_round_trip_cost_bps is None
+            or _as_utc(row.created_at)
+            < observed_at - _OBSERVED_COST_MAX_AGE
+        ):
+            return None
+        return float(row.estimated_round_trip_cost_bps)
 
     def _vwap_edge_context(
         self,
@@ -869,9 +912,15 @@ class StrategyV2PortfolioService:
             registered_at=registration.registered_at,
             eligible_after=registration.eligible_after,
             edge_filter=(
-                "COST_TO_STOP_VWAP_DISCOUNT"
-                if registration.policy in _VWAP_EDGE_POLICIES
-                else "NONE"
+                "OBSERVED_COST_TO_STOP_VWAP_DISCOUNT"
+                if registration.policy
+                in _OBSERVED_COST_VWAP_EDGE_POLICIES
+                else (
+                    "COST_TO_STOP_VWAP_DISCOUNT"
+                    if registration.policy
+                    in _FIXED_COST_VWAP_EDGE_POLICIES
+                    else "NONE"
+                )
             ),
             status=(
                 "MATURE_EVIDENCE"
@@ -910,12 +959,36 @@ class StrategyV2PortfolioService:
             ),
             "universe_freshness": "COMPLETED_BEFORE_SIGNAL_BAR_END",
         }
-        if spec.policy in _VWAP_EDGE_POLICIES:
+        if spec.policy in _FIXED_COST_VWAP_EDGE_POLICIES:
             payload["vwap_edge_filter"] = {
                 "price_reference": (
                     "FROZEN_SIGNAL_FEATURE_RESIDUALS"
                 ),
                 "minimum_discount": "FROZEN_ROUND_TRIP_COST_BPS",
+                "maximum_discount": "FROZEN_STOP_DISTANCE_BPS",
+                "required_references": [
+                    "SESSION_VWAP_1M",
+                    "SESSION_VWAP_5M",
+                ],
+                "bounds": "INCLUSIVE",
+            }
+        elif spec.policy in _OBSERVED_COST_VWAP_EDGE_POLICIES:
+            payload["vwap_edge_filter"] = {
+                "price_reference": (
+                    "FROZEN_SIGNAL_FEATURE_RESIDUALS"
+                ),
+                "minimum_discount": (
+                    "MAX_FROZEN_ROUND_TRIP_COST_AND_CAUSAL_QUANT_"
+                    "ESTIMATED_ROUND_TRIP_COST_BPS"
+                ),
+                "observed_cost_source": (
+                    "LATEST_CURRENT_QUANT_SCORE_BEFORE_SIGNAL_BAR_END"
+                ),
+                "observed_cost_freshness": (
+                    "UNEXPIRED_AND_AT_MOST_60_MINUTES_OLD_AT_"
+                    "SIGNAL_BAR_END"
+                ),
+                "missing_observed_cost": "FAIL_CLOSED",
                 "maximum_discount": "FROZEN_STOP_DISTANCE_BPS",
                 "required_references": [
                     "SESSION_VWAP_1M",
@@ -929,6 +1002,17 @@ class StrategyV2PortfolioService:
             separators=(",", ":"),
         )
         return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _candidate_payload(
+    candidate: PortfolioRoutingCandidate,
+    *,
+    include_observed_cost: bool,
+) -> dict[str, object]:
+    payload = asdict(candidate)
+    if not include_observed_cost:
+        payload.pop("observed_round_trip_cost_bps", None)
+    return payload
 
 
 def _compounded_metrics(returns_pct: list[float]) -> tuple[float, float]:
@@ -954,6 +1038,7 @@ def _routing_policy(value: str) -> PortfolioRoutingPolicy:
         "QUANT_WATCH_PLUS",
         "SELECTED_VWAP_EDGE",
         "VWAP_EDGE_POOL",
+        "VWAP_EDGE_OBSERVED_COST_POOL",
     }:
         raise ValueError(f"unsupported portfolio routing policy: {value}")
     return cast(PortfolioRoutingPolicy, value)

@@ -12,6 +12,7 @@ PortfolioRoutingPolicy = Literal[
     "QUANT_WATCH_PLUS",
     "SELECTED_VWAP_EDGE",
     "VWAP_EDGE_POOL",
+    "VWAP_EDGE_OBSERVED_COST_POOL",
 ]
 
 
@@ -30,6 +31,7 @@ class PortfolioRoutingCandidate:
     residual_1m_bps: float | None = None
     residual_5m_bps: float | None = None
     round_trip_cost_bps: float | None = None
+    observed_round_trip_cost_bps: float | None = None
     stop_distance_bps: float | None = None
 
     def __post_init__(self) -> None:
@@ -53,6 +55,7 @@ class PortfolioRoutingCandidate:
             self.residual_1m_bps,
             self.residual_5m_bps,
             self.round_trip_cost_bps,
+            self.observed_round_trip_cost_bps,
             self.stop_distance_bps,
         ):
             if value is not None and not math.isfinite(value):
@@ -65,6 +68,14 @@ class PortfolioRoutingCandidate:
         ):
             raise ValueError(
                 "portfolio routing round-trip cost must be non-negative"
+            )
+        if (
+            self.observed_round_trip_cost_bps is not None
+            and self.observed_round_trip_cost_bps < 0
+        ):
+            raise ValueError(
+                "portfolio routing observed round-trip cost must be "
+                "non-negative"
             )
         if (
             self.stop_distance_bps is not None
@@ -111,6 +122,52 @@ class PortfolioRoutingCandidate:
         )
         return minimum_discount - float(
             self.round_trip_cost_bps or 0.0
+        )
+
+    @property
+    def effective_observed_cost_bps(self) -> float | None:
+        if (
+            self.round_trip_cost_bps is None
+            or self.observed_round_trip_cost_bps is None
+        ):
+            return None
+        return max(
+            float(self.round_trip_cost_bps),
+            float(self.observed_round_trip_cost_bps),
+        )
+
+    @property
+    def observed_cost_vwap_edge_eligible(self) -> bool:
+        cost = self.effective_observed_cost_bps
+        values = (
+            self.residual_1m_bps,
+            self.residual_5m_bps,
+            cost,
+            self.stop_distance_bps,
+        )
+        if any(value is None for value in values):
+            return False
+        residual_1m = float(self.residual_1m_bps or 0.0)
+        residual_5m = float(self.residual_5m_bps or 0.0)
+        effective_cost = float(cost or 0.0)
+        stop = float(self.stop_distance_bps or 0.0)
+        if effective_cost >= stop:
+            return False
+        return (
+            -stop <= residual_1m <= -effective_cost
+            and -stop <= residual_5m <= -effective_cost
+        )
+
+    @property
+    def observed_cost_vwap_edge_score_bps(self) -> float:
+        if not self.observed_cost_vwap_edge_eligible:
+            return -1.0
+        minimum_discount = min(
+            -float(self.residual_1m_bps or 0.0),
+            -float(self.residual_5m_bps or 0.0),
+        )
+        return minimum_discount - float(
+            self.effective_observed_cost_bps or 0.0
         )
 
 
@@ -177,6 +234,25 @@ def rank_portfolio_candidates(
             eligible,
             key=lambda candidate: (
                 -candidate.vwap_edge_score_bps,
+                0 if candidate.selection_selected else 1,
+                (
+                    candidate.selection_rank
+                    if candidate.selection_rank is not None
+                    else 10_000
+                ),
+                candidate.symbol,
+            ),
+        ))
+    if policy == "VWAP_EDGE_OBSERVED_COST_POOL":
+        eligible = [
+            candidate
+            for candidate in by_symbol.values()
+            if candidate.observed_cost_vwap_edge_eligible
+        ]
+        return tuple(sorted(
+            eligible,
+            key=lambda candidate: (
+                -candidate.observed_cost_vwap_edge_score_bps,
                 0 if candidate.selection_selected else 1,
                 (
                     candidate.selection_rank

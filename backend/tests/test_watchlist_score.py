@@ -90,6 +90,30 @@ class TestWatchlistScoreService:
         row = svc.record_score(symbol="AAPL.US", market="US", score=50.0, rationale=huge)
         assert len(row.rationale) == 4000
 
+    def test_record_score_validates_and_persists_estimated_cost(
+        self,
+        db_session,
+    ) -> None:
+        svc = WatchlistScoreService(db_session)
+        row = svc.record_score(
+            symbol="AAPL.US",
+            market="US",
+            score=50,
+            estimated_round_trip_cost_bps=18.5,
+        )
+
+        assert row.estimated_round_trip_cost_bps == 18.5
+        with pytest.raises(
+            ValueError,
+            match="must be finite and non-negative",
+        ):
+            svc.record_score(
+                symbol="AAPL.US",
+                market="US",
+                score=50,
+                estimated_round_trip_cost_bps=float("nan"),
+            )
+
     def test_list_latest_per_symbol_returns_one_row(self, db_session) -> None:
         svc = WatchlistScoreService(db_session)
         svc.record_score(symbol="AAPL.US", market="US", score=10.0)

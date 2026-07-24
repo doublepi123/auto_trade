@@ -127,6 +127,8 @@ class TestStrategyV2PortfolioService:
         score: float,
         *,
         created_at: datetime | None = None,
+        expires_at: datetime | None = None,
+        estimated_cost_bps: float | None = None,
     ) -> None:
         observed = created_at or (
             _REGISTERED_AT - timedelta(minutes=1)
@@ -137,8 +139,9 @@ class TestStrategyV2PortfolioService:
             confidence=0.8,
             recommended_action=action,
             source="quant_v5",
+            estimated_round_trip_cost_bps=estimated_cost_bps,
             created_at=observed,
-            expires_at=observed + timedelta(hours=2),
+            expires_at=expires_at or observed + timedelta(hours=2),
         ))
         db.commit()
 
@@ -278,7 +281,7 @@ class TestStrategyV2PortfolioService:
             registrations = db.query(
                 StrategyV2PortfolioRegistration
             ).all()
-            assert len(registrations) == 6
+            assert len(registrations) == 7
             assert {
                 row.eligible_after.replace(tzinfo=timezone.utc)
                 for row in registrations
@@ -338,6 +341,7 @@ class TestStrategyV2PortfolioService:
                 "QUANT_WATCH_PLUS": "MSFT.US",
                 "SELECTED_VWAP_EDGE": "",
                 "VWAP_EDGE_POOL": "",
+                "VWAP_EDGE_OBSERVED_COST_POOL": "",
             }
 
             self._signal(
@@ -354,7 +358,7 @@ class TestStrategyV2PortfolioService:
                 StrategyV2PortfolioObservation.signal_at
                 == _FIRST_SIGNAL + timedelta(minutes=2)
             ).all()
-            assert len(overlap_rows) == 6
+            assert len(overlap_rows) == 7
             registrations_by_id = {
                 row.id: row.policy
                 for row in db.query(
@@ -372,6 +376,7 @@ class TestStrategyV2PortfolioService:
                 "QUANT_WATCH_PLUS": "SKIPPED_OCCUPIED",
                 "SELECTED_VWAP_EDGE": "NO_ELIGIBLE",
                 "VWAP_EDGE_POOL": "NO_ELIGIBLE",
+                "VWAP_EDGE_OBSERVED_COST_POOL": "NO_ELIGIBLE",
             }
 
             exit_at = _FIRST_SIGNAL + timedelta(minutes=5)
@@ -537,6 +542,7 @@ class TestStrategyV2PortfolioService:
             for policy in (
                 "SELECTED_VWAP_EDGE",
                 "VWAP_EDGE_POOL",
+                "VWAP_EDGE_OBSERVED_COST_POOL",
             ):
                 observation = db.query(
                     StrategyV2PortfolioObservation
@@ -545,6 +551,130 @@ class TestStrategyV2PortfolioService:
                     == registrations[policy].id
                 ).one()
                 assert observation.status == "NO_ELIGIBLE"
+
+    def test_observed_cost_vwap_pool_uses_only_causal_fresh_costs(
+        self,
+    ) -> None:
+        with self._db() as db:
+            service = StrategyV2PortfolioService(db)
+            self._register(service)
+            for symbol in (
+                "AAPL.US",
+                "MSFT.US",
+                "TER.US",
+                "NVDA.US",
+                "AMZN.US",
+            ):
+                self._version(db, symbol)
+            self._quant(
+                db,
+                "AAPL.US",
+                "AVOID",
+                39,
+                estimated_cost_bps=24,
+            )
+            self._quant(
+                db,
+                "MSFT.US",
+                "AVOID",
+                39,
+                created_at=(
+                    _FIRST_SIGNAL
+                    + timedelta(minutes=1, seconds=1)
+                ),
+                estimated_cost_bps=15,
+            )
+            self._quant(
+                db,
+                "TER.US",
+                "AVOID",
+                39,
+                created_at=_FIRST_SIGNAL - timedelta(hours=2),
+                expires_at=_FIRST_SIGNAL - timedelta(seconds=1),
+                estimated_cost_bps=15,
+            )
+            self._quant(
+                db,
+                "NVDA.US",
+                "AVOID",
+                39,
+            )
+            self._quant(
+                db,
+                "AMZN.US",
+                "AVOID",
+                39,
+                created_at=_FIRST_SIGNAL - timedelta(hours=2),
+                expires_at=_FIRST_SIGNAL + timedelta(hours=2),
+                estimated_cost_bps=15,
+            )
+            signal_inputs = {
+                "AAPL.US": (99.7, 100.0, 100.1),
+                "MSFT.US": (99.6, 100.0, 100.1),
+                "TER.US": (99.65, 100.0, 100.1),
+                "NVDA.US": (99.68, 100.0, 100.1),
+                "AMZN.US": (99.62, 100.0, 100.1),
+            }
+            for symbol, values in signal_inputs.items():
+                self._signal(
+                    db,
+                    symbol,
+                    _FIRST_SIGNAL,
+                    close_price=values[0],
+                    vwap_1m=values[1],
+                    vwap_5m=values[2],
+                )
+
+            service.advance(
+                now=_FIRST_SIGNAL + timedelta(minutes=3)
+            )
+
+            registrations = {
+                row.policy: row
+                for row in db.query(
+                    StrategyV2PortfolioRegistration
+                ).all()
+            }
+            fixed_pool = db.query(
+                StrategyV2PortfolioObservation
+            ).filter(
+                StrategyV2PortfolioObservation.registration_id
+                == registrations["VWAP_EDGE_POOL"].id
+            ).one()
+            observed_pool = db.query(
+                StrategyV2PortfolioObservation
+            ).filter(
+                StrategyV2PortfolioObservation.registration_id
+                == registrations[
+                    "VWAP_EDGE_OBSERVED_COST_POOL"
+                ].id
+            ).one()
+
+            assert fixed_pool.selected_symbol == "MSFT.US"
+            assert observed_pool.selected_symbol == "AAPL.US"
+            fixed_candidates = json.loads(
+                fixed_pool.candidates_json
+            )
+            assert "observed_round_trip_cost_bps" not in (
+                fixed_candidates[0]
+            )
+            candidates = json.loads(observed_pool.candidates_json)
+            assert len(candidates) == 1
+            assert (
+                candidates[0]["observed_round_trip_cost_bps"]
+                == 24
+            )
+            report = service.get_report("NVDA.US")
+            observed_variant = next(
+                row
+                for row in report.variants
+                if row.policy
+                == "VWAP_EDGE_OBSERVED_COST_POOL"
+            )
+            assert (
+                observed_variant.edge_filter
+                == "OBSERVED_COST_TO_STOP_VWAP_DISCOUNT"
+            )
 
     def test_cash_baseline_uses_observed_sessions_not_trade_count(
         self,

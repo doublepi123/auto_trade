@@ -10,6 +10,7 @@ export interface WatchlistScore {
   confidence: number
   recommended_action: 'BUY' | 'SELL' | 'HOLD' | 'AVOID' | string
   source: string
+  estimated_round_trip_cost_bps?: number | null
   created_at: string
   expires_at: string
   is_stale: boolean

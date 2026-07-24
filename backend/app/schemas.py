@@ -928,6 +928,7 @@ class StrategyV2PortfolioRoutingVariant(BaseModel):
         "QUANT_WATCH_PLUS",
         "SELECTED_VWAP_EDGE",
         "VWAP_EDGE_POOL",
+        "VWAP_EDGE_OBSERVED_COST_POOL",
     ]
     algorithm_version: str
     evaluator_digest: str
@@ -936,6 +937,7 @@ class StrategyV2PortfolioRoutingVariant(BaseModel):
     edge_filter: Literal[
         "NONE",
         "COST_TO_STOP_VWAP_DISCOUNT",
+        "OBSERVED_COST_TO_STOP_VWAP_DISCOUNT",
     ] = "NONE"
     status: Literal["COLLECTING", "READY_FOR_REVIEW", "MATURE_EVIDENCE"]
     metrics: StrategyV2PortfolioRoutingMetrics = Field(
@@ -2654,6 +2656,11 @@ class WatchlistScoreResponse(BaseModel):
     confidence: float
     recommended_action: str
     source: str
+    estimated_round_trip_cost_bps: float | None = Field(
+        default=None,
+        ge=0,
+        allow_inf_nan=False,
+    )
     created_at: datetime
     expires_at: datetime
     is_stale: bool = False

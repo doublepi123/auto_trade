@@ -139,6 +139,7 @@ class WatchlistQuantScore:
     confidence: float
     recommended_action: str
     rationale: str
+    estimated_round_trip_cost_bps: float
 
 
 @dataclass(frozen=True)
@@ -803,6 +804,7 @@ def score_watchlist_quant_metrics(
         confidence=confidence,
         recommended_action=recommended_action,
         rationale=rationale,
+        estimated_round_trip_cost_bps=estimated_cost_bps,
     )
 
 
@@ -1020,6 +1022,11 @@ class WatchlistQuantService:
                         QUANT_ERROR_SOURCE
                         if has_data_quality_blocker
                         else QUANT_SCORE_SOURCE
+                    ),
+                    estimated_round_trip_cost_bps=(
+                        result.estimated_round_trip_cost_bps
+                        if metrics.spread_bps is not None
+                        else None
                     ),
                     ttl_minutes=ttl_minutes,
                     commit=False,

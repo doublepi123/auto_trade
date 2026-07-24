@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -166,9 +167,21 @@ class WatchlistScoreService:
         confidence: float = DEFAULT_CONFIDENCE,
         recommended_action: str = DEFAULT_ACTION,
         source: str = "llm",
+        estimated_round_trip_cost_bps: float | None = None,
         ttl_minutes: int = 60,
         commit: bool = True,
     ) -> WatchlistScore:
+        if (
+            estimated_round_trip_cost_bps is not None
+            and (
+                not math.isfinite(estimated_round_trip_cost_bps)
+                or estimated_round_trip_cost_bps < 0
+            )
+        ):
+            raise ValueError(
+                "estimated_round_trip_cost_bps must be finite and "
+                "non-negative"
+            )
         now = _utcnow()
         expires = now + timedelta(minutes=max(1, int(ttl_minutes)))
         row = WatchlistScore(
@@ -179,6 +192,11 @@ class WatchlistScoreService:
             confidence=_clamp(float(confidence), 0.0, 1.0),
             recommended_action=(recommended_action or DEFAULT_ACTION).upper()[:16],
             source=(source or "llm")[:32],
+            estimated_round_trip_cost_bps=(
+                float(estimated_round_trip_cost_bps)
+                if estimated_round_trip_cost_bps is not None
+                else None
+            ),
             created_at=now,
             expires_at=expires,
         )

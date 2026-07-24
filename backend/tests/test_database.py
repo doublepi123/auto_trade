@@ -178,6 +178,62 @@ def test_watchlist_source_migration_backfills_manual_and_is_idempotent(tmp_path)
     assert source == "manual"
 
 
+def test_watchlist_score_cost_migration_preserves_rows_and_is_idempotent(
+    tmp_path,
+) -> None:
+    db_path = tmp_path / "legacy_watchlist_scores.db"
+    legacy_engine = create_engine(f"sqlite:///{db_path}")
+    with legacy_engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE watchlist_scores (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol VARCHAR(50) NOT NULL,
+                market VARCHAR(10) DEFAULT 'US' NOT NULL,
+                score FLOAT DEFAULT 0.0 NOT NULL,
+                rationale TEXT DEFAULT '' NOT NULL,
+                confidence FLOAT DEFAULT 0.0 NOT NULL,
+                recommended_action VARCHAR(16) DEFAULT 'HOLD' NOT NULL,
+                source VARCHAR(32) DEFAULT 'llm' NOT NULL,
+                created_at DATETIME NOT NULL,
+                expires_at DATETIME NOT NULL
+            )
+            """
+        )
+        connection.exec_driver_sql(
+            """
+            INSERT INTO watchlist_scores (
+                symbol,
+                score,
+                created_at,
+                expires_at
+            ) VALUES (
+                'AAPL.US',
+                50,
+                '2026-07-24 14:00:00',
+                '2026-07-24 15:00:00'
+            )
+            """
+        )
+
+    database._ensure_watchlist_scores_table(legacy_engine)
+    database._ensure_watchlist_scores_table(legacy_engine)
+
+    inspector = inspect(legacy_engine)
+    columns = {
+        column["name"]
+        for column in inspector.get_columns("watchlist_scores")
+    }
+    with legacy_engine.connect() as connection:
+        row = connection.exec_driver_sql(
+            "SELECT symbol, estimated_round_trip_cost_bps "
+            "FROM watchlist_scores"
+        ).one()
+
+    assert "estimated_round_trip_cost_bps" in columns
+    assert row == ("AAPL.US", None)
+
+
 def test_universe_selection_table_migration_is_complete_and_idempotent(
     tmp_path,
 ) -> None:
