@@ -8,7 +8,9 @@ from statistics import median
 from typing import Literal, Sequence
 
 
-ALGORITHM_VERSION = "cross-sectional-opening-momentum-v2-causal-entry"
+ALGORITHM_VERSION = (
+    "cross-sectional-opening-momentum-v3-preopen-frozen-universe"
+)
 
 
 @dataclass(frozen=True)

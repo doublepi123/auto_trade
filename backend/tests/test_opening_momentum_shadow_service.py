@@ -126,21 +126,28 @@ def _database() -> tuple[Engine, Session]:
     return engine, Session(bind=engine)
 
 
-def _seed_universe(db: Session) -> UniverseSelectionRun:
+def _seed_universe(
+    db: Session,
+    *,
+    symbols: tuple[str, ...] = _SYMBOLS,
+    algorithm_version: str = "test-v1",
+    as_of_date: date = date(2026, 7, 22),
+    completed_at: datetime = _SESSION_OPEN - timedelta(days=1),
+) -> UniverseSelectionRun:
     run = UniverseSelectionRun(
-        as_of_date=date(2026, 7, 22),
-        algorithm_version="test-v1",
+        as_of_date=as_of_date,
+        algorithm_version=algorithm_version,
         source_version="test",
         status="COMPLETE",
-        candidate_count=8,
-        evaluable_count=8,
-        selected_count=8,
+        candidate_count=len(symbols),
+        evaluable_count=len(symbols),
+        selected_count=len(symbols),
         coverage_ratio=1.0,
-        completed_at=_SESSION_OPEN - timedelta(days=1),
+        completed_at=completed_at,
     )
     db.add(run)
     db.flush()
-    for rank, symbol in enumerate(_SYMBOLS, start=1):
+    for rank, symbol in enumerate(symbols, start=1):
         db.add(
             UniverseSelectionCandidate(
                 run_id=run.id,
@@ -153,6 +160,84 @@ def _seed_universe(db: Session) -> UniverseSelectionRun:
         )
     db.commit()
     return run
+
+
+def test_tick_uses_only_a_universe_completed_before_session_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        settings,
+        "opening_momentum_shadow_enabled",
+        True,
+    )
+    engine, db = _database()
+    try:
+        frozen = _seed_universe(db)
+        late = _seed_universe(
+            db,
+            symbols=tuple(reversed(_SYMBOLS)),
+            algorithm_version="test-v2",
+            completed_at=_SESSION_OPEN + timedelta(minutes=1),
+        )
+        same_session = _seed_universe(
+            db,
+            symbols=_SYMBOLS[1:] + _SYMBOLS[:1],
+            algorithm_version="test-v3",
+            as_of_date=date(2026, 7, 23),
+            completed_at=_SESSION_OPEN - timedelta(minutes=1),
+        )
+        candles = _FakeCandles()
+
+        status = OpeningMomentumShadowService(
+            db,
+            candles,
+        ).tick(
+            now=_SESSION_OPEN + timedelta(minutes=32, seconds=10),
+        )
+
+        assert status.latest is not None
+        assert status.latest.selection_run_id == frozen.id
+        assert status.latest.selection_run_id != late.id
+        assert status.latest.selection_run_id != same_session.id
+        assert status.latest.universe == list(_SYMBOLS)
+        assert candles.calls == list(_SYMBOLS)
+    finally:
+        db.close()
+        Base.metadata.drop_all(bind=engine)
+
+
+def test_tick_skips_when_no_preopen_universe_is_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        settings,
+        "opening_momentum_shadow_enabled",
+        True,
+    )
+    engine, db = _database()
+    try:
+        _seed_universe(
+            db,
+            completed_at=_SESSION_OPEN + timedelta(minutes=1),
+        )
+        candles = _FakeCandles()
+
+        status = OpeningMomentumShadowService(
+            db,
+            candles,
+        ).tick(
+            now=_SESSION_OPEN + timedelta(minutes=32, seconds=10),
+        )
+
+        assert status.latest is not None
+        assert status.latest.status == "SKIPPED"
+        assert status.latest.reason == "PREOPEN_UNIVERSE_UNAVAILABLE"
+        assert status.latest.selection_run_id is None
+        assert status.latest.universe == []
+        assert candles.calls == []
+    finally:
+        db.close()
+        Base.metadata.drop_all(bind=engine)
 
 
 def _seed_variant_universe(db: Session) -> UniverseSelectionRun:

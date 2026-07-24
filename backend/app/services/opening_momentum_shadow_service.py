@@ -137,7 +137,10 @@ class OpeningMomentumShadowService:
         if current < decision_start or current > decision_end:
             return self.get_status()
 
-        variants = self._universe_variants()
+        variants = self._universe_variants(
+            session_date=local.date(),
+            completed_before=session_open,
+        )
         variant_versions = [
             variant.config_version for variant in variants
         ]
@@ -256,11 +259,12 @@ class OpeningMomentumShadowService:
                 if decision.action == "ENTER_LONG" and data_complete
                 else "SKIPPED"
             )
-            reason = (
-                decision.reason
-                if data_complete
-                else "DATA_INCOMPLETE"
-            )
+            if variant.selection_run_id is None:
+                reason = "PREOPEN_UNIVERSE_UNAVAILABLE"
+            elif not data_complete:
+                reason = "DATA_INCOMPLETE"
+            else:
+                reason = decision.reason
             self.db.add(
                 OpeningMomentumShadowRun(
                     session_date=local.date(),
@@ -381,20 +385,32 @@ class OpeningMomentumShadowService:
         )
         return [self._run_response(row) for row in rows]
 
-    def _universe_variants(self) -> list[_UniverseVariant]:
+    def _universe_variants(
+        self,
+        *,
+        session_date: date | None = None,
+        completed_before: datetime | None = None,
+    ) -> list[_UniverseVariant]:
         identities = self._variant_identities()
-        run = (
-            self.db.query(UniverseSelectionRun)
-            .filter(
-                UniverseSelectionRun.status == "COMPLETE",
-            )
-            .order_by(
-                UniverseSelectionRun.as_of_date.desc(),
-                UniverseSelectionRun.created_at.desc(),
-                UniverseSelectionRun.id.desc(),
-            )
-            .first()
+        run_query = self.db.query(UniverseSelectionRun).filter(
+            UniverseSelectionRun.status == "COMPLETE",
         )
+        if session_date is not None:
+            run_query = run_query.filter(
+                UniverseSelectionRun.as_of_date < session_date,
+            )
+        if completed_before is not None:
+            cutoff = _as_utc(completed_before)
+            run_query = run_query.filter(
+                UniverseSelectionRun.completed_at.is_not(None),
+                UniverseSelectionRun.completed_at <= cutoff,
+            )
+        run = run_query.order_by(
+            UniverseSelectionRun.as_of_date.desc(),
+            UniverseSelectionRun.completed_at.desc(),
+            UniverseSelectionRun.created_at.desc(),
+            UniverseSelectionRun.id.desc(),
+        ).first()
         if run is None:
             return [
                 _UniverseVariant(
