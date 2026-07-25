@@ -176,7 +176,10 @@ def test_watchlist_quant_tick_scores_due_items_and_closes_db(
         SimpleNamespace(symbol="AAPL.US", market="US"),
         SimpleNamespace(symbol="MSFT.US", market="US"),
     ]
-    calls: list[tuple[object, int, int, int | None]] = []
+    priority_symbols = ("MSFT.US",)
+    calls: list[
+        tuple[object, int, int, int | None, object]
+    ] = []
 
     class FakeQuery:
         def all(self) -> list[SimpleNamespace]:
@@ -207,6 +210,7 @@ def test_watchlist_quant_tick_scores_due_items_and_closes_db(
             refresh_interval_minutes: int,
             ttl_minutes: int,
             max_items: int | None = None,
+            priority_symbols: object = (),
         ) -> list[SimpleNamespace]:
             calls.append(
                 (
@@ -214,6 +218,7 @@ def test_watchlist_quant_tick_scores_due_items_and_closes_db(
                     refresh_interval_minutes,
                     ttl_minutes,
                     max_items,
+                    priority_symbols,
                 )
             )
             return [SimpleNamespace(symbol="MSFT.US")]
@@ -249,13 +254,16 @@ def test_watchlist_quant_tick_scores_due_items_and_closes_db(
     )
     monkeypatch.setattr(
         watchlist_quant_service,
-        "list_quant_observation_items",
-        lambda _db: items,
+        "build_quant_observation_plan",
+        lambda _db: SimpleNamespace(
+            items=items,
+            priority_symbols=priority_symbols,
+        ),
     )
 
     main_module._watchlist_quant_tick_sync()
 
-    assert calls == [(items, 30, 1_440, 3)]
+    assert calls == [(items, 30, 1_440, 3, priority_symbols)]
     assert db.rolled_back == 0
     assert db.closed is True
 
@@ -325,10 +333,12 @@ def test_universe_tick_reloads_before_optional_quant_failure(
         refresh_interval_minutes: int,
         ttl_minutes: int,
         max_items: int | None = None,
+        priority_symbols: object = (),
     ) -> None:
         assert refresh_interval_minutes == 30
         assert ttl_minutes == 1_440
         assert max_items == 3
+        assert priority_symbols == ("AAPL.US",)
         assert runner.reloads == 1
         raise RuntimeError("quote batch unavailable")
 
@@ -339,8 +349,11 @@ def test_universe_tick_reloads_before_optional_quant_failure(
     )
     monkeypatch.setattr(
         watchlist_quant_service,
-        "list_quant_observation_items",
-        lambda _db: [SimpleNamespace(symbol="AAPL.US", market="US")],
+        "build_quant_observation_plan",
+        lambda _db: SimpleNamespace(
+            items=[SimpleNamespace(symbol="AAPL.US", market="US")],
+            priority_symbols=("AAPL.US",),
+        ),
     )
 
     main_module._universe_selection_tick_sync()

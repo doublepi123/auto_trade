@@ -12,11 +12,19 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.api import watchlist as watchlist_api
 from app.core.broker import BrokerCandle, Quote
 from app.core.market_calendar import get_session
-from app.models import Base, StrategyConfig, WatchlistItem, WatchlistScore
+from app.models import (
+    Base,
+    StrategyConfig,
+    UniverseSelectionCandidate,
+    UniverseSelectionRun,
+    WatchlistItem,
+    WatchlistScore,
+)
 from app.services import watchlist_quant_service as quant_module
 from app.services.watchlist_quant_service import (
     QuantScoringOutsideRTHError,
     WatchlistQuantService,
+    build_quant_observation_plan,
     build_watchlist_quant_metrics,
     list_quant_observation_items,
     score_watchlist_quant_metrics,
@@ -142,10 +150,10 @@ def test_quant_observation_items_include_unlisted_trading_target() -> None:
         items = list_quant_observation_items(db)
 
         assert [item.symbol for item in items] == [
-            "AAPL.US",
             "NVDA.US",
+            "AAPL.US",
         ]
-        target = items[-1]
+        target = items[0]
         assert target.market == "US"
         assert target.source == "trading_target"
         assert target.is_active is True
@@ -178,6 +186,107 @@ def test_quant_observation_items_do_not_duplicate_trading_target() -> None:
 
         assert [item.symbol for item in items] == ["NVDA.US"]
         assert items[0].source == "universe"
+    finally:
+        db.close()
+
+
+def test_quant_observation_plan_prioritizes_target_then_selected_rank() -> None:
+    db = _db()
+    try:
+        db.add_all(
+            [
+                WatchlistItem(
+                    symbol="AAPL.US",
+                    market="US",
+                    alias="Apple",
+                    source="universe",
+                ),
+                WatchlistItem(
+                    symbol="MSFT.US",
+                    market="US",
+                    alias="Microsoft",
+                    source="universe",
+                ),
+                WatchlistItem(
+                    symbol="NVDA.US",
+                    market="US",
+                    alias="NVIDIA",
+                    source="manual",
+                ),
+                WatchlistItem(
+                    symbol="GOOGL.US",
+                    market="US",
+                    alias="Alphabet",
+                    source="universe",
+                ),
+                StrategyConfig(symbol="NVDA.US", market="US"),
+            ]
+        )
+        run = UniverseSelectionRun(
+            as_of_date=_NOW.date(),
+            algorithm_version="test",
+            source_version="test",
+            status="COMPLETE",
+            candidate_count=3,
+            evaluable_count=3,
+            selected_count=2,
+            coverage_ratio=1.0,
+            completed_at=_NOW,
+            created_at=_NOW,
+        )
+        db.add(run)
+        db.flush()
+        db.add_all(
+            [
+                UniverseSelectionCandidate(
+                    run_id=run.id,
+                    symbol="AAPL.US",
+                    market="US",
+                    alias="Apple",
+                    sector="Technology Hardware",
+                    memberships_json='["NASDAQ_100"]',
+                    selected=True,
+                    rank=2,
+                    score=80,
+                ),
+                UniverseSelectionCandidate(
+                    run_id=run.id,
+                    symbol="MSFT.US",
+                    market="US",
+                    alias="Microsoft",
+                    sector="Software",
+                    memberships_json='["NASDAQ_100"]',
+                    selected=True,
+                    rank=1,
+                    score=90,
+                ),
+                UniverseSelectionCandidate(
+                    run_id=run.id,
+                    symbol="GOOGL.US",
+                    market="US",
+                    alias="Alphabet",
+                    sector="Communication Services",
+                    memberships_json='["NASDAQ_100"]',
+                    selected=False,
+                    score=70,
+                ),
+            ]
+        )
+        db.commit()
+
+        plan = build_quant_observation_plan(db)
+
+        assert [item.symbol for item in plan.items] == [
+            "NVDA.US",
+            "MSFT.US",
+            "AAPL.US",
+            "GOOGL.US",
+        ]
+        assert plan.priority_symbols == (
+            "NVDA.US",
+            "MSFT.US",
+            "AAPL.US",
+        )
     finally:
         db.close()
 
@@ -1072,6 +1181,39 @@ def test_due_scoring_batches_missing_then_oldest_scores() -> None:
         assert {row.symbol for row in rows} == {
             "MSFT.US",
             "NVDA.US",
+        }
+    finally:
+        db.close()
+
+
+def test_due_scoring_prioritizes_formal_pool_before_missing_exploration() -> None:
+    db = _db()
+    try:
+        items = [
+            WatchlistItem(symbol="AAPL.US", market="US"),
+            WatchlistItem(symbol="MSFT.US", market="US"),
+            WatchlistItem(symbol="NVDA.US", market="US"),
+        ]
+        db.add_all(items)
+        db.commit()
+        broker = _Broker()
+
+        rows = WatchlistQuantService(
+            db,
+            broker,
+            now=_NOW,
+        ).score_due_items(
+            items,
+            refresh_interval_minutes=30,
+            ttl_minutes=1_440,
+            max_items=2,
+            priority_symbols=("NVDA.US", "AAPL.US"),
+        )
+
+        assert broker.quote_requests == [["NVDA.US", "AAPL.US"]]
+        assert {row.symbol for row in rows} == {
+            "NVDA.US",
+            "AAPL.US",
         }
     finally:
         db.close()

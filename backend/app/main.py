@@ -983,25 +983,26 @@ def _watchlist_quant_tick_sync() -> None:
         return
     from app.services.watchlist_quant_service import (
         WatchlistQuantService,
-        list_quant_observation_items,
+        build_quant_observation_plan,
     )
 
     db = SessionLocal()
     try:
-        watchlist_items = list_quant_observation_items(db)
-        if not watchlist_items:
+        observation_plan = build_quant_observation_plan(db)
+        if not observation_plan.items:
             return
         with _watchlist_quant_sync_lock:
             rows = WatchlistQuantService(
                 db,
                 get_runner().broker,
             ).score_due_items(
-                watchlist_items,
+                observation_plan.items,
                 refresh_interval_minutes=(
                     settings.watchlist_quant_interval_minutes
                 ),
                 ttl_minutes=settings.watchlist_quant_score_ttl_minutes,
                 max_items=settings.watchlist_quant_batch_size,
+                priority_symbols=observation_plan.priority_symbols,
             )
         if rows:
             logger.info(
@@ -1065,7 +1066,7 @@ def _universe_selection_tick_sync() -> None:
     from app.services.watchlist_quant_service import (
         QuantScoringOutsideRTHError,
         WatchlistQuantService,
-        list_quant_observation_items,
+        build_quant_observation_plan,
     )
 
     db = SessionLocal()
@@ -1088,15 +1089,15 @@ def _universe_selection_tick_sync() -> None:
             # when the next refresh has no watchlist delta.
             get_runner().reload_strategy()
         if response.run.status == "COMPLETE":
-            watchlist_items = list_quant_observation_items(db)
-            if watchlist_items:
+            observation_plan = build_quant_observation_plan(db)
+            if observation_plan.items:
                 try:
                     with _watchlist_quant_sync_lock:
                         WatchlistQuantService(
                             db,
                             get_runner().broker,
                         ).score_due_items(
-                            watchlist_items,
+                            observation_plan.items,
                             refresh_interval_minutes=(
                                 settings.watchlist_quant_interval_minutes
                             ),
@@ -1105,6 +1106,9 @@ def _universe_selection_tick_sync() -> None:
                             ),
                             max_items=(
                                 settings.watchlist_quant_batch_size
+                            ),
+                            priority_symbols=(
+                                observation_plan.priority_symbols
                             ),
                         )
                 except QuantScoringOutsideRTHError as exc:

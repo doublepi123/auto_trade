@@ -16,7 +16,13 @@ from app.core.broker import BrokerCandle, Quote
 from app.core.fees import one_side_fee_rate
 from app.core.market_calendar import get_session, is_trading_hours
 from app.domain.universe_selection import DailyBar, completed_daily_bars
-from app.models import StrategyConfig, WatchlistItem, WatchlistScore
+from app.models import (
+    StrategyConfig,
+    UniverseSelectionCandidate,
+    UniverseSelectionRun,
+    WatchlistItem,
+    WatchlistScore,
+)
 from app.services.watchlist_score_service import WatchlistScoreService
 
 logger = logging.getLogger("auto_trade.watchlist_quant_service")
@@ -100,36 +106,105 @@ def list_latest_current_quant_scores(
 def list_quant_observation_items(
     db: Session,
 ) -> list[WatchlistItem]:
-    """Include the current trading target without persisting it to the pool."""
+    """Return the prioritized observation pool without persisting additions."""
+    return list(build_quant_observation_plan(db).items)
+
+
+@dataclass(frozen=True)
+class QuantObservationPlan:
+    items: tuple[WatchlistItem, ...]
+    priority_symbols: tuple[str, ...]
+
+
+def build_quant_observation_plan(
+    db: Session,
+) -> QuantObservationPlan:
+    """Prioritize the live target and latest formal universe candidates."""
     items = db.query(WatchlistItem).order_by(WatchlistItem.id.asc()).all()
     strategy = (
         db.query(StrategyConfig)
         .order_by(StrategyConfig.id.desc())
         .first()
     )
-    if strategy is None:
-        return items
+    latest_run = (
+        db.query(UniverseSelectionRun)
+        .filter(
+            UniverseSelectionRun.status == "COMPLETE",
+            UniverseSelectionRun.completed_at.is_not(None),
+        )
+        .order_by(
+            UniverseSelectionRun.as_of_date.desc(),
+            UniverseSelectionRun.created_at.desc(),
+            UniverseSelectionRun.id.desc(),
+        )
+        .first()
+    )
+    selected_candidates = (
+        []
+        if latest_run is None
+        else (
+            db.query(UniverseSelectionCandidate)
+            .filter(
+                UniverseSelectionCandidate.run_id == latest_run.id,
+                UniverseSelectionCandidate.selected.is_(True),
+            )
+            .order_by(
+                UniverseSelectionCandidate.rank.asc(),
+                UniverseSelectionCandidate.score.desc(),
+                UniverseSelectionCandidate.symbol.asc(),
+            )
+            .all()
+        )
+    )
 
-    trading_symbol = strategy.symbol.strip().upper()
-    if not trading_symbol:
-        return items
-    observed_symbols = {
-        item.symbol.strip().upper()
+    by_symbol = {
+        item.symbol.strip().upper(): item
         for item in items
+        if item.symbol.strip()
     }
-    if trading_symbol in observed_symbols:
-        return items
-
-    return [
-        *items,
-        WatchlistItem(
+    trading_symbol = (
+        strategy.symbol.strip().upper()
+        if strategy is not None
+        else ""
+    )
+    if (
+        strategy is not None
+        and trading_symbol
+        and trading_symbol not in by_symbol
+    ):
+        by_symbol[trading_symbol] = WatchlistItem(
             symbol=trading_symbol,
             market=strategy.market.strip().upper(),
             alias="",
             source="trading_target",
             is_active=True,
-        ),
-    ]
+        )
+
+    prioritized: list[WatchlistItem] = []
+    priority_symbols: list[str] = []
+    added_symbols: set[str] = set()
+
+    def append_symbol(symbol: str, *, priority: bool) -> None:
+        normalized = symbol.strip().upper()
+        item = by_symbol.get(normalized)
+        if item is None or normalized in added_symbols:
+            return
+        prioritized.append(item)
+        added_symbols.add(normalized)
+        if priority:
+            priority_symbols.append(normalized)
+
+    if trading_symbol:
+        append_symbol(trading_symbol, priority=True)
+    for candidate in selected_candidates:
+        append_symbol(candidate.symbol, priority=True)
+    for item in items:
+        append_symbol(item.symbol, priority=False)
+
+    return QuantObservationPlan(
+        items=tuple(prioritized),
+        priority_symbols=tuple(priority_symbols),
+    )
 
 
 class WatchlistMarketDataProvider(Protocol):
@@ -870,6 +945,7 @@ class WatchlistQuantService:
         refresh_interval_minutes: int = 30,
         ttl_minutes: int = 1_440,
         max_items: int | None = None,
+        priority_symbols: Sequence[str] = (),
     ) -> list[WatchlistScore]:
         """Refresh due open-market rows without shortening evidence validity."""
         if refresh_interval_minutes < 1:
@@ -912,10 +988,18 @@ class WatchlistQuantService:
                 )
             ):
                 due_items.append(item)
+        priority_by_symbol = {
+            symbol.strip().upper(): rank
+            for rank, symbol in enumerate(priority_symbols)
+            if symbol.strip()
+        }
         due_items.sort(
             key=lambda item: self._due_item_sort_key(
                 item,
                 latest_by_symbol.get(item.symbol),
+                priority_rank=priority_by_symbol.get(
+                    item.symbol.strip().upper()
+                ),
             )
         )
         if max_items is not None:
@@ -928,15 +1012,34 @@ class WatchlistQuantService:
     def _due_item_sort_key(
         item: WatchlistItem,
         latest: WatchlistScore | None,
-    ) -> tuple[bool, datetime, str]:
+        *,
+        priority_rank: int | None,
+    ) -> tuple[bool, int, bool, datetime, str]:
+        priority_key = (
+            priority_rank
+            if priority_rank is not None
+            else 0
+        )
         if latest is None:
-            return False, datetime.min.replace(tzinfo=timezone.utc), item.symbol
+            return (
+                priority_rank is None,
+                priority_key,
+                False,
+                datetime.min.replace(tzinfo=timezone.utc),
+                item.symbol,
+            )
         created_at = latest.created_at
         if created_at.tzinfo is None:
             created_at = created_at.replace(tzinfo=timezone.utc)
         else:
             created_at = created_at.astimezone(timezone.utc)
-        return True, created_at, item.symbol
+        return (
+            priority_rank is None,
+            priority_key,
+            True,
+            created_at,
+            item.symbol,
+        )
 
     def score_items(
         self,
