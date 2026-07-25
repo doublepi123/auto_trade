@@ -590,6 +590,7 @@ class OpeningMomentumPairedComparisonResponse(BaseModel):
 class OpeningMomentumShadowVariantResponse(BaseModel):
     variant: Literal[
         "INCUMBENT",
+        "REVERSAL_CHALLENGER",
         "CONTINUATION_CHALLENGER",
         "BREADTH_GATED_CHALLENGER",
         "LAST5_POSITIVE_CHALLENGER",

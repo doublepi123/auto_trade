@@ -11,6 +11,7 @@ from typing import Literal, Sequence
 ALGORITHM_VERSION = (
     "cross-sectional-opening-momentum-v3-preopen-frozen-universe"
 )
+REVERSAL_ALGORITHM_VERSION = "cross-sectional-opening-reversal-v1"
 
 
 @dataclass(frozen=True)
@@ -179,6 +180,89 @@ def evaluate_opening_momentum(
     elif excess_return_bps < params.minimum_excess_return_bps:
         action = "SKIP"
         reason = "EXCESS_RETURN_FILTER"
+    elif observation.entry_open is None:
+        action = "SKIP"
+        reason = "ENTRY_BAR_MISSING"
+
+    return OpeningMomentumDecision(
+        action=action,
+        reason=reason,
+        universe_size=len(ranking),
+        market_return_bps=market_return_bps,
+        candidate_symbol=candidate.symbol,
+        candidate_return_bps=candidate.opening_return_bps,
+        excess_return_bps=excess_return_bps,
+        entry_price=(
+            observation.entry_open
+            if action == "ENTER_LONG"
+            else None
+        ),
+        ranking=ranking,
+    )
+
+
+def evaluate_opening_reversal(
+    observations: Sequence[OpeningMomentumObservation],
+    config: OpeningMomentumConfig | None = None,
+) -> OpeningMomentumDecision:
+    """Select the opening laggard for a causal, long-only reversal shadow."""
+
+    params = config or OpeningMomentumConfig()
+    by_symbol: dict[str, OpeningMomentumObservation] = {}
+    for item in observations:
+        if item.symbol in by_symbol:
+            raise ValueError(f"duplicate opening observation: {item.symbol}")
+        by_symbol[item.symbol] = item
+
+    ranking = tuple(
+        OpeningMomentumRank(
+            symbol=item.symbol,
+            opening_return_bps=item.opening_return_bps,
+        )
+        for item in sorted(
+            by_symbol.values(),
+            key=lambda row: (row.opening_return_bps, row.symbol),
+        )
+    )
+    if len(ranking) < params.minimum_universe_size:
+        return OpeningMomentumDecision(
+            action="SKIP",
+            reason="INSUFFICIENT_UNIVERSE",
+            universe_size=len(ranking),
+            market_return_bps=None,
+            candidate_symbol=None,
+            candidate_return_bps=None,
+            excess_return_bps=None,
+            entry_price=None,
+            ranking=ranking,
+        )
+
+    market_return_bps = median(
+        item.opening_return_bps for item in ranking
+    )
+    candidate = ranking[0]
+    excess_return_bps = (
+        candidate.opening_return_bps - market_return_bps
+    )
+    minimum_lag_bps = params.minimum_excess_return_bps
+    maximum_candidate_return_bps = -abs(
+        params.minimum_candidate_return_bps
+    )
+    observation = by_symbol[candidate.symbol]
+    action: Literal["ENTER_LONG", "SKIP"] = "ENTER_LONG"
+    reason = "OPENING_LAGGARD_REVERSAL"
+    if market_return_bps < params.minimum_market_return_bps:
+        action = "SKIP"
+        reason = "MARKET_FILTER"
+    elif (
+        candidate.opening_return_bps
+        >= maximum_candidate_return_bps
+    ):
+        action = "SKIP"
+        reason = "CANDIDATE_NOT_NEGATIVE"
+    elif -excess_return_bps < minimum_lag_bps:
+        action = "SKIP"
+        reason = "RELATIVE_LOSS_FILTER"
     elif observation.entry_open is None:
         action = "SKIP"
         reason = "ENTRY_BAR_MISSING"

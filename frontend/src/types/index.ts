@@ -1654,6 +1654,7 @@ export interface OpeningMomentumPairedComparison {
 export interface OpeningMomentumShadowVariant {
   variant:
     | 'INCUMBENT'
+    | 'REVERSAL_CHALLENGER'
     | 'CONTINUATION_CHALLENGER'
     | 'BREADTH_GATED_CHALLENGER'
     | 'LAST5_POSITIVE_CHALLENGER'

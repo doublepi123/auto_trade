@@ -279,7 +279,7 @@
           >
             <div class="shadow-section-header">
               <div>
-                <h3>开盘横截面动量</h3>
+                <h3>开盘横截面策略</h3>
                 <small v-if="openingMomentumStatus">
                   {{ openingMomentumStatus.config.algorithm_version }} ·
                   {{ shortVersion(openingMomentumStatus.config.config_version) }}
@@ -425,7 +425,7 @@
                 class="opening-momentum-variants"
                 data-testid="opening-momentum-variants"
               >
-                <h4 class="shadow-subsection-title">同场选池对照</h4>
+                <h4 class="shadow-subsection-title">同场策略对照</h4>
                 <el-table
                   :data="openingMomentumStatus.variants"
                   size="small"
@@ -2007,6 +2007,7 @@ function openingMomentumVariantLabel(
   variant: OpeningMomentumShadowStatus['variants'][number]['variant'],
 ): string {
   if (variant === 'INCUMBENT') return '现行选池'
+  if (variant === 'REVERSAL_CHALLENGER') return '弱者反弹'
   if (variant === 'CONTINUATION_CHALLENGER') return '动量延续'
   if (variant === 'BREADTH_GATED_CHALLENGER') return '广度过滤'
   if (variant === 'LAST5_POSITIVE_CHALLENGER') return '广度 + 末 5 分钟'
@@ -2016,6 +2017,7 @@ function openingMomentumVariantTagType(
   variant: OpeningMomentumShadowStatus['variants'][number]['variant'],
 ): 'primary' | 'warning' | 'info' | 'success' {
   if (variant === 'INCUMBENT') return 'primary'
+  if (variant === 'REVERSAL_CHALLENGER') return 'success'
   if (variant.includes('LAST5')) return 'warning'
   if (variant.startsWith('BREADTH_GATED')) return 'success'
   return 'info'

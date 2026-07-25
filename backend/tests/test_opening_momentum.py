@@ -6,6 +6,7 @@ from app.domain.opening_momentum import (
     OpeningMomentumConfig,
     OpeningMomentumObservation,
     evaluate_opening_momentum,
+    evaluate_opening_reversal,
     shadow_round_trip_return_bps,
 )
 
@@ -103,6 +104,86 @@ def test_missing_next_bar_does_not_fall_through_to_second_rank() -> None:
     assert decision.candidate_symbol == "S7.US"
 
 
+def test_selects_deterministic_opening_laggard_for_reversal() -> None:
+    observations = [
+        _observation(f"S{index}.US", value)
+        for index, value in enumerate(
+            (-80, -25, -20, -10, 0, 10, 20, 30),
+        )
+    ]
+
+    decision = evaluate_opening_reversal(observations)
+
+    assert decision.action == "ENTER_LONG"
+    assert decision.reason == "OPENING_LAGGARD_REVERSAL"
+    assert decision.candidate_symbol == "S0.US"
+    assert decision.market_return_bps == pytest.approx(-5.0)
+    assert decision.candidate_return_bps == pytest.approx(-80.0)
+    assert decision.excess_return_bps == pytest.approx(-75.0)
+    assert decision.entry_price == 100.0
+    assert decision.ranking[0].symbol == "S0.US"
+
+
+@pytest.mark.parametrize(
+    ("observations", "reason"),
+    [
+        (
+            [_observation(f"S{index}.US", -index) for index in range(7)],
+            "INSUFFICIENT_UNIVERSE",
+        ),
+        (
+            [
+                _observation(f"S{index}.US", value)
+                for index, value in enumerate(
+                    (-100, -90, -80, -70, -60, -50, -40, -30),
+                )
+            ],
+            "MARKET_FILTER",
+        ),
+        (
+            [
+                _observation(f"S{index}.US", 10 + index)
+                for index in range(8)
+            ],
+            "CANDIDATE_NOT_NEGATIVE",
+        ),
+        (
+            [
+                _observation(f"S{index}.US", -10 + index)
+                for index in range(8)
+            ],
+            "RELATIVE_LOSS_FILTER",
+        ),
+    ],
+)
+def test_reversal_entry_gates_fail_closed(
+    observations: list[OpeningMomentumObservation],
+    reason: str,
+) -> None:
+    decision = evaluate_opening_reversal(observations)
+
+    assert decision.action == "SKIP"
+    assert decision.reason == reason
+    assert decision.entry_price is None
+
+
+def test_reversal_missing_entry_does_not_substitute_runner_up() -> None:
+    observations = [
+        _observation(
+            f"S{index}.US",
+            -100 if index == 0 else index,
+            entry_open=None if index == 0 else 100.0,
+        )
+        for index in range(8)
+    ]
+
+    decision = evaluate_opening_reversal(observations)
+
+    assert decision.action == "SKIP"
+    assert decision.reason == "ENTRY_BAR_MISSING"
+    assert decision.candidate_symbol == "S0.US"
+
+
 def test_round_trip_cost_is_applied_after_raw_return() -> None:
     config = OpeningMomentumConfig(
         one_side_fee_rate=0.0005,
@@ -138,3 +219,5 @@ def test_duplicate_symbols_are_rejected() -> None:
 
     with pytest.raises(ValueError, match="duplicate"):
         evaluate_opening_momentum([item, item])
+    with pytest.raises(ValueError, match="duplicate"):
+        evaluate_opening_reversal([item, item])

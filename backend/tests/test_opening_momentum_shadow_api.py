@@ -87,6 +87,29 @@ class TestOpeningMomentumShadowApi:
         assert body["config"]["holding_minutes"] == 30
         assert body["config"]["round_trip_cost_bps"] == 14.0
 
+    def test_status_serializes_reversal_challenger(self) -> None:
+        settings.opening_momentum_challenger_enabled = True
+
+        response = self.client.get(
+            "/api/opening-momentum-shadow/status"
+        )
+
+        assert response.status_code == 200
+        variants = {
+            item["variant"]: item
+            for item in response.json()["variants"]
+        }
+        reversal = variants["REVERSAL_CHALLENGER"]
+        assert reversal["universe_source"] == "OPENING_REVERSAL"
+        assert (
+            reversal["algorithm_version"]
+            == "cross-sectional-opening-reversal-v1"
+        )
+        assert reversal["minimum_market_return_bps"] == -25.0
+        assert reversal["holding_minutes"] == 30
+        assert reversal["comparison"] is not None
+        assert reversal["comparison"]["promotion_ready"] is False
+
     def test_runs_endpoint_serializes_evidence_and_metrics(self) -> None:
         config = OpeningMomentumConfig()
         with self.session_factory() as db:

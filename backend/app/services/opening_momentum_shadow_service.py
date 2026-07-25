@@ -14,9 +14,11 @@ from app.config import settings
 from app.core.market_calendar import get_session, is_trading_hours
 from app.domain.opening_momentum import (
     ALGORITHM_VERSION,
+    REVERSAL_ALGORITHM_VERSION,
     OpeningMomentumConfig,
     OpeningMomentumObservation,
     evaluate_opening_momentum,
+    evaluate_opening_reversal,
     shadow_round_trip_return_bps,
 )
 from app.domain.opening_momentum_comparison import (
@@ -75,6 +77,7 @@ _LAST_FIVE_ONLY_SOURCE = "OPENING_CONTINUATION_LAST5_ONLY"
 _LAST_FIVE_ONLY_ALGORITHM_VERSION = (
     f"{_CONTINUATION_ALGORITHM_VERSION}+{_LAST_FIVE_GATE_VERSION}"
 )
+_REVERSAL_SOURCE = "OPENING_REVERSAL"
 _NON_COMPARABLE_SKIP_REASONS = frozenset(
     {
         "PREOPEN_UNIVERSE_UNAVAILABLE",
@@ -86,11 +89,13 @@ _NON_COMPARABLE_SKIP_REASONS = frozenset(
 
 _VariantName = Literal[
     "INCUMBENT",
+    "REVERSAL_CHALLENGER",
     "CONTINUATION_CHALLENGER",
     "BREADTH_GATED_CHALLENGER",
     "LAST5_POSITIVE_CHALLENGER",
     "LAST5_ONLY_CHALLENGER",
 ]
+_SignalModel = Literal["MOMENTUM", "REVERSAL"]
 
 
 class CandleProvider(Protocol):
@@ -127,6 +132,7 @@ class _UniverseVariant:
     config_version: str
     universe_source: str
     decision_config: OpeningMomentumConfig
+    signal_model: _SignalModel = "MOMENTUM"
     require_nonnegative_last_five: bool = False
     symbols: tuple[str, ...] = ()
     selection_run_id: int | None = None
@@ -313,9 +319,16 @@ class OpeningMomentumShadowService:
                 for symbol in variant.symbols
                 if symbol in fetch_errors
             }
-            decision = evaluate_opening_momentum(
-                observations,
-                variant.decision_config,
+            decision = (
+                evaluate_opening_reversal(
+                    observations,
+                    variant.decision_config,
+                )
+                if variant.signal_model == "REVERSAL"
+                else evaluate_opening_momentum(
+                    observations,
+                    variant.decision_config,
+                )
             )
             path_features = (
                 path_features_by_symbol.get(
@@ -531,6 +544,10 @@ class OpeningMomentumShadowService:
                     config_version=identity.config_version,
                     universe_source="NONE",
                     decision_config=identity.decision_config,
+                    signal_model=identity.signal_model,
+                    require_nonnegative_last_five=(
+                        identity.require_nonnegative_last_five
+                    ),
                 )
                 for identity in identities
             ]
@@ -604,6 +621,23 @@ class OpeningMomentumShadowService:
         identities_by_variant = {
             identity.variant: identity for identity in identities
         }
+        reversal_identity = identities_by_variant[
+            "REVERSAL_CHALLENGER"
+        ]
+        variants.append(
+            _UniverseVariant(
+                variant=reversal_identity.variant,
+                algorithm_version=(
+                    reversal_identity.algorithm_version
+                ),
+                config_version=reversal_identity.config_version,
+                universe_source=reversal_identity.universe_source,
+                decision_config=reversal_identity.decision_config,
+                signal_model=reversal_identity.signal_model,
+                symbols=incumbent_symbols,
+                selection_run_id=run.id,
+            )
+        )
         challenger_symbols = tuple(
             row.symbol
             for row in challenger_selection
@@ -623,6 +657,7 @@ class OpeningMomentumShadowService:
                     config_version=identity.config_version,
                     universe_source=identity.universe_source,
                     decision_config=identity.decision_config,
+                    signal_model=identity.signal_model,
                     require_nonnegative_last_five=(
                         identity.require_nonnegative_last_five
                     ),
@@ -645,6 +680,19 @@ class OpeningMomentumShadowService:
         if settings.opening_momentum_challenger_enabled:
             universe_config = self._continuation_config()
             breadth_config = self._breadth_gate_config()
+            variants.append(
+                _UniverseVariant(
+                    variant="REVERSAL_CHALLENGER",
+                    algorithm_version=REVERSAL_ALGORITHM_VERSION,
+                    config_version=self._evidence_config_version(
+                        f"{self.config.version_hash()}:"
+                        f"{REVERSAL_ALGORITHM_VERSION}"
+                    ),
+                    universe_source=_REVERSAL_SOURCE,
+                    decision_config=self.config,
+                    signal_model="REVERSAL",
+                )
+            )
             variants.append(
                 _UniverseVariant(
                     variant="CONTINUATION_CHALLENGER",

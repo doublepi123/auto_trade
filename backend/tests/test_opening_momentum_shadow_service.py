@@ -445,11 +445,13 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
 
         assert set(by_variant) == {
             "INCUMBENT",
+            "REVERSAL_CHALLENGER",
             "CONTINUATION_CHALLENGER",
             "BREADTH_GATED_CHALLENGER",
             "LAST5_POSITIVE_CHALLENGER",
             "LAST5_ONLY_CHALLENGER",
         }
+        reversal = by_variant["REVERSAL_CHALLENGER"]
         continuation = by_variant["CONTINUATION_CHALLENGER"]
         breadth = by_variant["BREADTH_GATED_CHALLENGER"]
         last_five = by_variant["LAST5_POSITIVE_CHALLENGER"]
@@ -459,6 +461,9 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
             continuation.decision_config.minimum_market_return_bps
             == -25.0
         )
+        assert reversal.decision_config == continuation.decision_config
+        assert reversal.signal_model == "REVERSAL"
+        assert reversal.universe_source == "OPENING_REVERSAL"
         assert breadth.decision_config.holding_minutes == 30
         assert breadth.decision_config.minimum_market_return_bps == 0.0
         assert last_five.decision_config == breadth.decision_config
@@ -474,7 +479,7 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
                 identity.config_version
                 for identity in identities
             }
-        ) == 5
+        ) == 6
     finally:
         db.close()
         Base.metadata.drop_all(bind=engine)
@@ -492,7 +497,14 @@ def test_variant_comparisons_are_paired_independently(
     try:
         service = OpeningMomentumShadowService(db)
         identities = service._variant_identities()
-        for identity in identities[:2]:
+        identities_by_variant = {
+            identity.variant: identity for identity in identities
+        }
+        for variant in (
+            "INCUMBENT",
+            "CONTINUATION_CHALLENGER",
+        ):
+            identity = identities_by_variant[variant]
             db.add(
                 OpeningMomentumShadowRun(
                     session_date=date(2026, 7, 22),
@@ -554,7 +566,9 @@ def test_challengers_use_one_market_snapshot_and_close_all_variants(
     engine, db = _database()
     try:
         run = _seed_variant_universe(db)
-        candles = _FakeCandles()
+        candles = _FakeCandles(
+            opening_returns_bps={"S0.US": -40.0},
+        )
         service = OpeningMomentumShadowService(
             db,
             candles,
@@ -568,16 +582,17 @@ def test_challengers_use_one_market_snapshot_and_close_all_variants(
             now=_SESSION_OPEN + timedelta(minutes=32, seconds=10),
         )
 
-        assert db.query(OpeningMomentumShadowRun).count() == 5
+        assert db.query(OpeningMomentumShadowRun).count() == 6
         assert candles.calls == list(_SYMBOLS[:4])
         assert opened.state == "OPEN"
         assert opened.latest is not None
         assert opened.latest.universe_source == "UNIVERSE_SELECTION"
         assert opened.latest.candidate_symbol == "S1.US"
         assert opened.latest.selection_run_id == run.id
-        assert len(opened.variants) == 5
+        assert len(opened.variants) == 6
         (
             incumbent,
+            reversal,
             challenger,
             breadth,
             last_five,
@@ -590,6 +605,23 @@ def test_challengers_use_one_market_snapshot_and_close_all_variants(
         assert incumbent.holding_minutes == 30
         assert incumbent.latest is not None
         assert incumbent.latest.candidate_symbol == "S1.US"
+        assert reversal.variant == "REVERSAL_CHALLENGER"
+        assert reversal.comparison_sessions == 1
+        assert reversal.minimum_market_return_bps == -25.0
+        assert reversal.holding_minutes == 30
+        assert reversal.latest is not None
+        assert reversal.latest.universe == ["S0.US", "S1.US"]
+        assert reversal.latest.candidate_symbol == "S0.US"
+        assert reversal.latest.candidate_return_bps == pytest.approx(
+            -40.0
+        )
+        assert reversal.latest.excess_return_bps == pytest.approx(
+            -20.5
+        )
+        assert (
+            reversal.latest.reason
+            == "OPENING_LAGGARD_REVERSAL"
+        )
         assert challenger.variant == "CONTINUATION_CHALLENGER"
         assert challenger.comparison_sessions == 1
         assert challenger.minimum_market_return_bps == -25.0
@@ -635,7 +667,7 @@ def test_challengers_use_one_market_snapshot_and_close_all_variants(
                 item.config_version
                 for item in opened.variants
             }
-        ) == 5
+        ) == 6
 
         still_open = service.tick(
             now=_SESSION_OPEN + timedelta(minutes=47, seconds=10),
@@ -648,6 +680,7 @@ def test_challengers_use_one_market_snapshot_and_close_all_variants(
             item.metrics.closed_trades
             for item in still_open.variants
         ] == [
+            0,
             0,
             0,
             0,
@@ -670,11 +703,13 @@ def test_challengers_use_one_market_snapshot_and_close_all_variants(
             1,
             1,
             1,
+            1,
         ]
         assert [
             item.metrics.cumulative_net_return_bps
             for item in closed.variants
         ] == [
+            -14.0,
             -14.0,
             -14.0,
             -14.0,
@@ -739,9 +774,10 @@ def test_breadth_challenger_skips_a_negative_market_snapshot(
         )
 
         assert candles.calls == list(_SYMBOLS[:4])
-        assert len(status.variants) == 5
+        assert len(status.variants) == 6
         (
             incumbent,
+            reversal,
             continuation,
             breadth,
             last_five,
@@ -749,6 +785,10 @@ def test_breadth_challenger_skips_a_negative_market_snapshot(
         ) = status.variants
         assert incumbent.latest is not None
         assert incumbent.latest.status == "OPEN"
+        assert reversal.latest is not None
+        assert reversal.latest.status == "OPEN"
+        assert reversal.latest.reason == "OPENING_LAGGARD_REVERSAL"
+        assert reversal.latest.candidate_symbol == "S0.US"
         assert continuation.latest is not None
         assert continuation.latest.status == "OPEN"
         assert breadth.latest is not None
