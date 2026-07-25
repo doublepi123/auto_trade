@@ -22,7 +22,7 @@ from app.domain.universe_selection.selector import (
 )
 
 
-ROTATION_WALK_FORWARD_VERSION = "rotation-monthly-open-walk-forward-v3"
+ROTATION_WALK_FORWARD_VERSION = "rotation-monthly-open-walk-forward-v4"
 ROTATION_BENCHMARK_SYMBOLS = ("QQQ.US", "DIA.US")
 _CASH = "__CASH__"
 _EXPANDING_VALIDATION_MIN_TRAINING_PERIODS = 12
@@ -37,8 +37,13 @@ class RotationVariant:
     sma_bars: int
     max_selected: int
     max_per_risk_group: int
-    weighting: Literal["equal", "inverse_volatility"] = "equal"
+    weighting: Literal[
+        "equal",
+        "inverse_volatility",
+        "equal_inverse_volatility_blend",
+    ] = "equal"
     max_position_weight_pct: float = 100.0
+    inverse_volatility_blend_pct: float = 0.0
 
     def __post_init__(self) -> None:
         if not self.name:
@@ -49,7 +54,11 @@ class RotationVariant:
             raise ValueError("skip_bars and sma_bars are invalid")
         if self.max_selected < 1 or self.max_per_risk_group < 1:
             raise ValueError("selection limits must be positive")
-        if self.weighting not in {"equal", "inverse_volatility"}:
+        if self.weighting not in {
+            "equal",
+            "inverse_volatility",
+            "equal_inverse_volatility_blend",
+        }:
             raise ValueError("rotation weighting is invalid")
         if (
             not math.isfinite(self.max_position_weight_pct)
@@ -57,6 +66,24 @@ class RotationVariant:
         ):
             raise ValueError(
                 "max_position_weight_pct must be in (0, 100]"
+            )
+        if (
+            not math.isfinite(self.inverse_volatility_blend_pct)
+            or not 0 <= self.inverse_volatility_blend_pct <= 100
+        ):
+            raise ValueError(
+                "inverse_volatility_blend_pct must be in [0, 100]"
+            )
+        if self.weighting == "equal_inverse_volatility_blend":
+            if not 0 < self.inverse_volatility_blend_pct < 100:
+                raise ValueError(
+                    "blended weighting requires an inverse-volatility "
+                    "share in (0, 100)"
+                )
+        elif self.inverse_volatility_blend_pct != 0:
+            raise ValueError(
+                "inverse_volatility_blend_pct is only valid for "
+                "blended weighting"
             )
 
 
@@ -89,6 +116,18 @@ DIVERSIFIED_INVERSE_VOLATILITY_VARIANT = RotationVariant(
     max_position_weight_pct=25.0,
 )
 
+DIVERSIFIED_SHRINKAGE_ROTATION_VARIANT = RotationVariant(
+    name="diversified_top8_12_1_eq75_iv25_cap15",
+    lookback_bars=252,
+    skip_bars=21,
+    sma_bars=200,
+    max_selected=8,
+    max_per_risk_group=1,
+    weighting="equal_inverse_volatility_blend",
+    max_position_weight_pct=15.0,
+    inverse_volatility_blend_pct=25.0,
+)
+
 
 DEFAULT_ROTATION_VARIANTS: tuple[RotationVariant, ...] = (
     RotationVariant(
@@ -118,6 +157,7 @@ DEFAULT_ROTATION_VARIANTS: tuple[RotationVariant, ...] = (
     ),
     DIVERSIFIED_ROTATION_VARIANT,
     DIVERSIFIED_INVERSE_VOLATILITY_VARIANT,
+    DIVERSIFIED_SHRINKAGE_ROTATION_VARIANT,
 )
 
 
@@ -388,13 +428,21 @@ def _capped_weights(
     raw_weights: Mapping[str, float],
     *,
     max_position_weight_pct: float,
+    total_weight: float = 1.0,
 ) -> dict[str, float]:
+    if (
+        not math.isfinite(total_weight)
+        or total_weight < 0
+        or total_weight > 1 + 1e-12
+    ):
+        raise ValueError("total_weight must be in [0, 1]")
+    total_weight = min(1.0, max(0.0, total_weight))
     if not raw_weights:
         return {_CASH: 1.0}
     cap = max_position_weight_pct / 100
     remaining_assets = set(raw_weights)
     weights: dict[str, float] = {}
-    remaining_weight = 1.0
+    remaining_weight = total_weight
     while remaining_assets and remaining_weight > 1e-12:
         raw_total = sum(
             raw_weights[symbol]
@@ -434,30 +482,60 @@ def rotation_target_weights(
     rows: Sequence[CandidateSelection],
     variant: RotationVariant,
 ) -> dict[str, float]:
+    equal_raw = {
+        row.candidate.symbol: 1.0
+        for row in rows
+    }
     if variant.weighting == "equal":
-        raw_weights = {
-            row.candidate.symbol: 1.0
-            for row in rows
-        }
-    else:
-        raw_weights = {}
-        for row in rows:
-            volatility = row.metrics.realized_vol_20d
-            if (
-                volatility is None
-                or not math.isfinite(volatility)
-                or volatility <= 0
-            ):
-                raise ValueError(
-                    "inverse-volatility weighting requires "
-                    "positive realized volatility"
-                )
-            raw_weights[row.candidate.symbol] = 1.0 / volatility
-    return _capped_weights(
-        raw_weights,
+        return _capped_weights(
+            equal_raw,
+            max_position_weight_pct=(
+                variant.max_position_weight_pct
+            ),
+        )
+
+    inverse_raw: dict[str, float] = {}
+    for row in rows:
+        volatility = row.metrics.realized_vol_20d
+        if (
+            volatility is None
+            or not math.isfinite(volatility)
+            or volatility <= 0
+        ):
+            raise ValueError(
+                "inverse-volatility weighting requires "
+                "positive realized volatility"
+            )
+        inverse_raw[row.candidate.symbol] = 1.0 / volatility
+    inverse_weights = _capped_weights(
+        inverse_raw,
         max_position_weight_pct=(
             variant.max_position_weight_pct
         ),
+    )
+    if variant.weighting == "inverse_volatility":
+        return inverse_weights
+
+    equal_weights = _capped_weights(
+        equal_raw,
+        max_position_weight_pct=100.0,
+    )
+    inverse_share = variant.inverse_volatility_blend_pct / 100
+    equal_share = 1.0 - inverse_share
+    assets = (set(equal_weights) | set(inverse_weights)) - {_CASH}
+    blended_assets = {
+        symbol: (
+            equal_share * equal_weights.get(symbol, 0.0)
+            + inverse_share * inverse_weights.get(symbol, 0.0)
+        )
+        for symbol in assets
+    }
+    return _capped_weights(
+        blended_assets,
+        max_position_weight_pct=(
+            variant.max_position_weight_pct
+        ),
+        total_weight=sum(blended_assets.values()),
     )
 
 

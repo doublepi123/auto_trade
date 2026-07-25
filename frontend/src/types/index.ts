@@ -1316,8 +1316,9 @@ export interface UniverseRotationVariantConfig {
   sma_bars: number
   max_selected: number
   max_per_risk_group: number
-  weighting?: 'equal' | 'inverse_volatility'
+  weighting?: 'equal' | 'inverse_volatility' | 'equal_inverse_volatility_blend'
   max_position_weight_pct?: number
+  inverse_volatility_blend_pct?: number
 }
 
 export interface UniverseRotationValidationFold {

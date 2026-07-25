@@ -273,17 +273,20 @@ python3 scripts/evaluate_rotation_walk_forward.py --history-bars 1000
 python3 scripts/build_index_membership_snapshot.py
 ```
 
-轮动研究采用上月最后一个完整交易日信号、下月首个共同交易日开盘成交。`walk-forward-v3`
+轮动研究采用上月最后一个完整交易日信号、下月首个共同交易日开盘成交。`walk-forward-v4`
 除最后 12 个月留出集外，还按时间顺序执行扩展训练窗口验证。等权 Top8 是当前冻结基线；
 既有参数集中的等权 Top6（每风险组最多 2 只）作为收益集中度挑战者，逆 20 日波动率、
-单票不超过 25% 的 Top8 作为配权挑战者，剩余权重保留现金。三套组合在月末同时预登记，
-下月开盘后才累计前向证据，均不会自动晋级或下单。风险配权方向参考
+单票不超过 25% 的 Top8 作为纯风险配权挑战者，剩余权重保留现金；另有 75% 等权与
+25% 逆波动率混合、单票不超过 15% 的 Top8 收缩配权挑战者。四套组合在月末同时预登记，
+下月开盘后才累计前向证据，均不会自动晋级或下单。等权基准与收缩思路参考
+[Optimal Versus Naive Diversification](https://academic.oup.com/rfs/article-abstract/22/5/1915/1592901)
+和 [Volatility Managed Portfolios](https://www.nber.org/papers/w22208)，风险配权方向另参考
 [Momentum Has Its Moments](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2041429)
 与 QuantConnect 的
 [Risk Parity Model](https://www.quantconnect.com/docs/v2/writing-algorithms/algorithm-framework/portfolio-construction/supported-models)；
 本项目实现的是更简单、可审计的逆波动率近似，不宣称复制论文组合。
 
-`walk-forward-v3` 另行输出只读的点时成分敏感性：每个信号日会排除当时尚未进入指数的
+`walk-forward-v4` 另行输出只读的点时成分敏感性：每个信号日会排除当时尚未进入指数的
 当前目录股票。纳斯达克 100 历史来自固定提交的
 [jmccarrell/n100tickers](https://github.com/jmccarrell/n100tickers/tree/9a23023b59707c5372ae1fff4ed983b3ad025c74)，
 道琼斯历史来自固定提交的

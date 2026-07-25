@@ -47,7 +47,7 @@ const rotationPerformanceStub = {
 }
 
 const rotationEvaluationStub = {
-  algorithm_version: 'rotation-monthly-open-walk-forward-v3',
+  algorithm_version: 'rotation-monthly-open-walk-forward-v4',
   status: 'COMPLETE',
   benchmark_symbols: ['QQQ.US', 'DIA.US'],
   data_scope: 'CURRENT_CONSTITUENTS_ONLY',
@@ -219,6 +219,24 @@ const rotationPointInTimeSensitivityStub = {
       },
       {
         ...rotationEvaluationStub.variants[0],
+        variant: {
+          ...rotationEvaluationStub.variants[0].variant,
+          name: 'diversified_top8_12_1_eq75_iv25_cap15',
+          weighting: 'equal_inverse_volatility_blend',
+          max_position_weight_pct: 15,
+          inverse_volatility_blend_pct: 25,
+        },
+        expanding_validation_passed: true,
+        expanding_folds_passed: 3,
+        expanding_validation: {
+          ...rotationEvaluationStub.variants[0].expanding_validation,
+          annualized_return_pct: 40.6,
+          sharpe: 1.79,
+          max_drawdown_pct: 12.4,
+        },
+      },
+      {
+        ...rotationEvaluationStub.variants[0],
         expanding_validation_passed: false,
         expanding_validation_blockers: ['EXPANDING_FOLDS_INSUFFICIENT'],
         expanding_folds_passed: 2,
@@ -311,6 +329,22 @@ const rotationWeightingChallengerStub = {
   net_liquidation_return_pct: 5.8,
   excess_return_vs_qqq_pct: 2.6,
   excess_return_vs_dia_pct: 4.0,
+}
+
+const rotationShrinkageChallengerStub = {
+  ...rotationForwardStub,
+  variant_name: 'diversified_top8_12_1_eq75_iv25_cap15',
+  holdings: rotationForwardStub.holdings.map((holding) => ({
+    ...holding,
+    weight_pct: 15,
+  })),
+  gross_return_pct: 6.57,
+  entry_cost_pct: 0.09,
+  estimated_exit_cost_pct: 0.08,
+  total_estimated_cost_pct: 0.17,
+  net_liquidation_return_pct: 6.4,
+  excess_return_vs_qqq_pct: 3.2,
+  excess_return_vs_dia_pct: 4.6,
 }
 
 const rotationConcentrationChallengerStub = {
@@ -1290,6 +1324,7 @@ Cypress.Commands.add('stubApi', () => {
         rotation_forward_snapshot: rotationForwardStub,
         rotation_concentration_challenger_snapshot: rotationConcentrationChallengerStub,
         rotation_weighting_challenger_snapshot: rotationWeightingChallengerStub,
+        rotation_shrinkage_challenger_snapshot: rotationShrinkageChallengerStub,
       },
       error: '',
       started_at: '2026-07-24T01:00:00Z',

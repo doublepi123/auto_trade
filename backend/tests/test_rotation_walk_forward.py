@@ -8,6 +8,7 @@ from typing import Any, cast
 from app.core.broker import BrokerCandle
 from app.domain.universe_selection import (
     DIVERSIFIED_INVERSE_VOLATILITY_VARIANT,
+    DIVERSIFIED_SHRINKAGE_ROTATION_VARIANT,
     IndexMembershipHistory,
     IndexCandidate,
     MembershipInterval,
@@ -415,6 +416,66 @@ def test_inverse_volatility_weighting_caps_and_reduces_risk_weight() -> None:
     assert sum(weights.values()) <= 100.0
 
 
+def test_shrinkage_weighting_blends_equal_and_inverse_volatility() -> None:
+    candidates = (
+        _candidate("CALM.US", "Healthcare"),
+        _candidate("VOLATILE.US", "Semiconductors"),
+    )
+    common: dict[str, Any] = {
+        "candidates": candidates,
+        "bars_by_symbol": {
+            "CALM.US": _bars(
+                drift=0.0012,
+                volatility_scale=0.5,
+            ),
+            "VOLATILE.US": _bars(
+                drift=0.0025,
+                volatility_scale=2.5,
+            ),
+        },
+        "benchmark_bars_by_symbol": {
+            "QQQ.US": _bars(drift=0.0005),
+            "DIA.US": _bars(drift=0.0003),
+        },
+        "base_config": _config(),
+        "validation_periods": 12,
+    }
+    inverse = evaluate_rotation_walk_forward(
+        **common,
+        variants=(
+            replace(
+                DIVERSIFIED_INVERSE_VOLATILITY_VARIANT,
+                max_selected=2,
+                max_position_weight_pct=60.0,
+            ),
+        ),
+    )
+    shrinkage = evaluate_rotation_walk_forward(
+        **common,
+        variants=(
+            replace(
+                DIVERSIFIED_SHRINKAGE_ROTATION_VARIANT,
+                max_selected=2,
+                max_position_weight_pct=60.0,
+            ),
+        ),
+    )
+
+    inverse_weights = dict(
+        inverse.selected_variant_periods[0].target_weights_pct
+    )
+    shrinkage_weights = dict(
+        shrinkage.selected_variant_periods[0].target_weights_pct
+    )
+    assert inverse_weights["VOLATILE.US"] < (
+        shrinkage_weights["VOLATILE.US"]
+    ) < 50.0
+    assert 50.0 < shrinkage_weights["CALM.US"] < (
+        inverse_weights["CALM.US"]
+    )
+    assert round(sum(shrinkage_weights.values()), 10) == 100.0
+
+
 def test_rotation_walk_forward_serializes_expanding_fold_dates() -> None:
     payload = _evaluate().to_dict()
 
@@ -450,3 +511,20 @@ def test_rotation_variant_rejects_invalid_weighting_controls() -> None:
         assert "max_position_weight_pct" in str(exc)
     else:
         raise AssertionError("invalid position cap was accepted")
+
+    try:
+        replace(
+            base,
+            weighting="equal_inverse_volatility_blend",
+        )
+    except ValueError as exc:
+        assert "inverse-volatility share" in str(exc)
+    else:
+        raise AssertionError("empty blend share was accepted")
+
+    try:
+        replace(base, inverse_volatility_blend_pct=25)
+    except ValueError as exc:
+        assert "only valid" in str(exc)
+    else:
+        raise AssertionError("ignored blend share was accepted")

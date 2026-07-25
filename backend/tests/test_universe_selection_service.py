@@ -909,7 +909,7 @@ def test_refresh_persists_rotation_shadow_evidence() -> None:
         parameters = json.loads(result.run.parameters_json)
         evaluation = parameters["rotation_evaluation"]
         assert evaluation["algorithm_version"] == (
-            "rotation-monthly-open-walk-forward-v3"
+            "rotation-monthly-open-walk-forward-v4"
         )
         assert evaluation["benchmark_symbols"] == [
             "QQQ.US",
@@ -1012,6 +1012,27 @@ def test_refresh_persists_rotation_shadow_evidence() -> None:
         assert parameters[
             "rotation_next_weighting_challenger_registration_status"
         ] == "NOT_DUE"
+        shrinkage = parameters[
+            "rotation_shrinkage_challenger_snapshot"
+        ]
+        assert shrinkage["variant_name"] == (
+            "diversified_top8_12_1_eq75_iv25_cap15"
+        )
+        assert shrinkage["evidence_mode"] == (
+            "BACKFILLED_AFTER_ENTRY"
+        )
+        assert shrinkage["order_execution_allowed"] is False
+        shrinkage_registration = parameters[
+            "rotation_shrinkage_challenger_registration"
+        ]
+        assert shrinkage_registration["target_signals"]
+        assert all(
+            0 < signal["target_weight_pct"] <= 15
+            for signal in shrinkage_registration["target_signals"]
+        )
+        assert parameters[
+            "rotation_next_shrinkage_challenger_registration_status"
+        ] == "NOT_DUE"
     finally:
         db.close()
 
@@ -1100,6 +1121,26 @@ def test_refresh_reuses_frozen_rotation_registration_next_day() -> None:
             for holding in first_challenger["holdings"]
         ]
         assert second_challenger[
+            "selection_drift_detected"
+        ] is False
+        first_shrinkage = first_parameters[
+            "rotation_shrinkage_challenger_snapshot"
+        ]
+        second_shrinkage = second_parameters[
+            "rotation_shrinkage_challenger_snapshot"
+        ]
+        assert second_shrinkage["registered_as_of_date"] == (
+            "2026-07-23"
+        )
+        assert second_shrinkage["mark_date"] == "2026-07-24"
+        assert [
+            (holding["symbol"], holding["weight_pct"])
+            for holding in second_shrinkage["holdings"]
+        ] == [
+            (holding["symbol"], holding["weight_pct"])
+            for holding in first_shrinkage["holdings"]
+        ]
+        assert second_shrinkage[
             "selection_drift_detected"
         ] is False
         first_rotation = {
@@ -1191,6 +1232,27 @@ def test_month_end_refresh_preregisters_next_rotation_cohort() -> None:
             "diversified_top8_12_1_inverse_vol_25"
         )
         assert challenger_registration["target_signals"]
+        assert parameters[
+            "rotation_next_shrinkage_challenger_registration_status"
+        ] == "REGISTERED"
+        shrinkage_registration = parameters[
+            "rotation_next_shrinkage_challenger_registration"
+        ]
+        assert shrinkage_registration["cohort_month"] == (
+            "2026-08-01"
+        )
+        assert shrinkage_registration["signal_date"] == (
+            "2026-07-31"
+        )
+        assert shrinkage_registration["forward_eligible"] is True
+        assert shrinkage_registration["variant_name"] == (
+            "diversified_top8_12_1_eq75_iv25_cap15"
+        )
+        assert shrinkage_registration["target_signals"]
+        assert all(
+            0 < signal["target_weight_pct"] <= 15
+            for signal in shrinkage_registration["target_signals"]
+        )
     finally:
         db.close()
 
@@ -1265,6 +1327,10 @@ def test_next_month_refresh_reuses_all_preregistered_rotation_tracks() -> None:
             (
                 "rotation_next_weighting_challenger_registration",
                 "rotation_weighting_challenger_snapshot",
+            ),
+            (
+                "rotation_next_shrinkage_challenger_registration",
+                "rotation_shrinkage_challenger_snapshot",
             ),
         )
         for registration_key, snapshot_key in track_keys:

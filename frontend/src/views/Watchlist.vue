@@ -371,6 +371,107 @@
           </section>
 
           <section
+            v-if="universeRotationShrinkageChallenger"
+            class="rotation-forward rotation-shrinkage-challenger"
+            data-testid="rotation-shrinkage-challenger"
+          >
+            <div class="rotation-forward-header">
+              <div>
+                <div class="rotation-forward-title">
+                  <strong>收缩配权影子</strong>
+                  <el-tag
+                    :type="rotationForwardTagType(universeRotationShrinkageChallenger.evidence_mode)"
+                    size="small"
+                    effect="plain"
+                  >
+                    {{ rotationForwardModeLabel(universeRotationShrinkageChallenger.evidence_mode) }}
+                  </el-tag>
+                  <el-tag type="info" size="small" effect="plain">75% 等权 + 25% 逆波动</el-tag>
+                  <el-tag type="info" size="small" effect="plain">15% 上限</el-tag>
+                </div>
+                <small>{{ universeRotationShrinkageChallenger.algorithm_version }}</small>
+              </div>
+              <div class="rotation-forward-dates">
+                <span>
+                  信号
+                  <strong>{{ universeRotationShrinkageChallenger.signal_date || '-' }}</strong>
+                </span>
+                <span>
+                  入场
+                  <strong>{{ universeRotationShrinkageChallenger.entry_date || '-' }}</strong>
+                </span>
+                <span>
+                  估值
+                  <strong>{{ universeRotationShrinkageChallenger.mark_date || '-' }}</strong>
+                </span>
+              </div>
+            </div>
+
+            <div
+              class="rotation-forward-symbols"
+              data-testid="rotation-shrinkage-symbols"
+            >
+              <span>冻结权重</span>
+              <div v-if="universeRotationShrinkageChallenger.holdings.length">
+                <el-tag
+                  v-for="holding in universeRotationShrinkageChallenger.holdings"
+                  :key="holding.symbol"
+                  size="small"
+                  effect="plain"
+                >
+                  {{ holding.symbol }} {{ formatPercent(holding.weight_pct) }}
+                </el-tag>
+              </div>
+              <strong v-else>现金观察</strong>
+            </div>
+
+            <div
+              class="rotation-forward-metrics"
+              data-testid="rotation-shrinkage-metrics"
+            >
+              <div>
+                <span>净清算收益</span>
+                <strong>{{ formatSignedPercent(universeRotationShrinkageChallenger.net_liquidation_return_pct) }}</strong>
+              </div>
+              <div>
+                <span>相对等权</span>
+                <strong>{{ formatSignedPercent(rotationShrinkageReturnDelta) }}</strong>
+              </div>
+              <div>
+                <span>超额 QQQ</span>
+                <strong>{{ formatSignedPercent(universeRotationShrinkageChallenger.excess_return_vs_qqq_pct) }}</strong>
+              </div>
+              <div>
+                <span>完整估算成本</span>
+                <strong>{{ formatPercent(universeRotationShrinkageChallenger.total_estimated_cost_pct) }}</strong>
+              </div>
+              <div>
+                <span>前向会话</span>
+                <strong>
+                  {{ universeRotationShrinkageChallenger.forward_observation_sessions }}/{{ universeRotationShrinkageChallenger.elapsed_sessions }}
+                </strong>
+              </div>
+            </div>
+
+            <div class="rotation-forward-footer">
+              <span>
+                登记 {{ universeRotationShrinkageChallenger.registered_as_of_date || '-' }}
+                · {{ rotationVariantLabel(universeRotationShrinkageChallenger.variant_name) }}
+                · 并行只读
+              </span>
+              <strong v-if="universeRotationShrinkageChallenger.evidence_mode === 'BACKFILLED_AFTER_ENTRY'">
+                当前仅作回填对照；月末会与其他权重同时预登记下月组合。
+              </strong>
+              <strong v-else-if="universeRotationShrinkageChallenger.evidence_mode === 'FORWARD_PRECOMMITTED'">
+                已在入场前冻结；只验证收缩配权，不改变选股或触发订单。
+              </strong>
+              <strong v-else>
+                收缩配权证据暂不可用，不会回退到事后重算。
+              </strong>
+            </div>
+          </section>
+
+          <section
             v-if="universeRotationEvaluation"
             class="rotation-evaluation"
             data-testid="rotation-walk-forward"
@@ -508,7 +609,7 @@
             </div>
 
             <div
-              v-if="rotationPointInTimeConcentrated || rotationPointInTimeEqual || rotationPointInTimeInverse"
+              v-if="rotationPointInTimeConcentrated || rotationPointInTimeEqual || rotationPointInTimeShrinkage || rotationPointInTimeInverse"
               class="rotation-point-in-time-variants"
               data-testid="rotation-point-in-time-metrics"
             >
@@ -578,6 +679,40 @@
                 <span>
                   窗口
                   <strong>{{ rotationPointInTimeEqual.expanding_folds_passed ?? 0 }}/{{ rotationPointInTimeEqual.expanding_folds_total ?? 0 }}</strong>
+                </span>
+              </div>
+              <div
+                v-if="rotationPointInTimeShrinkage"
+                class="rotation-point-in-time-variant"
+              >
+                <div class="rotation-point-in-time-variant-title">
+                  <strong>收缩配权 Top8</strong>
+                  <small>75% 等权 + 25% 逆波动</small>
+                </div>
+                <span>
+                  多窗年化
+                  <strong>{{ formatSignedPercent(
+                    rotationPointInTimeShrinkage.expanding_validation?.annualized_return_pct
+                      ?? rotationPointInTimeShrinkage.validation.annualized_return_pct,
+                  ) }}</strong>
+                </span>
+                <span>
+                  Sharpe
+                  <strong>{{ formatDecimal(
+                    rotationPointInTimeShrinkage.expanding_validation?.sharpe
+                      ?? rotationPointInTimeShrinkage.validation.sharpe,
+                  ) }}</strong>
+                </span>
+                <span>
+                  最大回撤
+                  <strong>{{ formatPercent(
+                    rotationPointInTimeShrinkage.expanding_validation?.max_drawdown_pct
+                      ?? rotationPointInTimeShrinkage.validation.max_drawdown_pct,
+                  ) }}</strong>
+                </span>
+                <span>
+                  窗口
+                  <strong>{{ rotationPointInTimeShrinkage.expanding_folds_passed ?? 0 }}/{{ rotationPointInTimeShrinkage.expanding_folds_total ?? 0 }}</strong>
                 </span>
               </div>
               <div
@@ -1528,6 +1663,12 @@ const rotationPointInTimeEqual = computed<UniverseRotationVariantEvaluation | nu
   ) ?? null
 ))
 
+const rotationPointInTimeShrinkage = computed<UniverseRotationVariantEvaluation | null>(() => (
+  universeRotationPointInTime.value?.evaluation?.variants.find(
+    (variant) => variant.variant.name === 'diversified_top8_12_1_eq75_iv25_cap15',
+  ) ?? null
+))
+
 const rotationPointInTimeInverse = computed<UniverseRotationVariantEvaluation | null>(() => (
   universeRotationPointInTime.value?.evaluation?.variants.find(
     (variant) => variant.variant.name === 'diversified_top8_12_1_inverse_vol_25',
@@ -1549,6 +1690,11 @@ const universeRotationWeightingChallenger = computed<UniverseRotationForwardSnap
   return isRotationForwardSnapshot(raw) ? raw : null
 })
 
+const universeRotationShrinkageChallenger = computed<UniverseRotationForwardSnapshot | null>(() => {
+  const raw = universeRun.value?.parameters.rotation_shrinkage_challenger_snapshot
+  return isRotationForwardSnapshot(raw) ? raw : null
+})
+
 const rotationConcentrationReturnDelta = computed<number | null>(() => {
   const incumbent = universeRotationForward.value?.net_liquidation_return_pct
   const challenger = universeRotationConcentrationChallenger.value?.net_liquidation_return_pct
@@ -1560,6 +1706,14 @@ const rotationConcentrationReturnDelta = computed<number | null>(() => {
 const rotationWeightingReturnDelta = computed<number | null>(() => {
   const incumbent = universeRotationForward.value?.net_liquidation_return_pct
   const challenger = universeRotationWeightingChallenger.value?.net_liquidation_return_pct
+  if (incumbent === null || incumbent === undefined) return null
+  if (challenger === null || challenger === undefined) return null
+  return challenger - incumbent
+})
+
+const rotationShrinkageReturnDelta = computed<number | null>(() => {
+  const incumbent = universeRotationForward.value?.net_liquidation_return_pct
+  const challenger = universeRotationShrinkageChallenger.value?.net_liquidation_return_pct
   if (incumbent === null || incumbent === undefined) return null
   if (challenger === null || challenger === undefined) return null
   return challenger - incumbent
@@ -1880,6 +2034,7 @@ function isRotationVariantConfig(value: unknown): value is UniverseRotationVaria
     value.weighting === undefined
     || value.weighting === 'equal'
     || value.weighting === 'inverse_volatility'
+    || value.weighting === 'equal_inverse_volatility_blend'
   )
   const capValid = (
     value.max_position_weight_pct === undefined
@@ -1890,7 +2045,34 @@ function isRotationVariantConfig(value: unknown): value is UniverseRotationVaria
       && value.max_position_weight_pct <= 100
     )
   )
-  return numericFieldsValid && weightingValid && capValid
+  const blendPctValid = (
+    value.inverse_volatility_blend_pct === undefined
+    || (
+      typeof value.inverse_volatility_blend_pct === 'number'
+      && Number.isFinite(value.inverse_volatility_blend_pct)
+      && value.inverse_volatility_blend_pct >= 0
+      && value.inverse_volatility_blend_pct <= 100
+    )
+  )
+  const blendSemanticsValid = (
+    value.weighting === 'equal_inverse_volatility_blend'
+      ? (
+          typeof value.inverse_volatility_blend_pct === 'number'
+          && value.inverse_volatility_blend_pct > 0
+          && value.inverse_volatility_blend_pct < 100
+        )
+      : (
+          value.inverse_volatility_blend_pct === undefined
+          || value.inverse_volatility_blend_pct === 0
+        )
+  )
+  return (
+    numericFieldsValid
+    && weightingValid
+    && capValid
+    && blendPctValid
+    && blendSemanticsValid
+  )
 }
 
 function isRotationValidationFold(value: unknown): boolean {
@@ -2122,6 +2304,7 @@ function rotationVariantLabel(value: string | null): string {
     faster_top8_6_1: '快速 Top8',
     diversified_top8_12_1: '分散 Top8',
     diversified_top8_12_1_inverse_vol_25: '波动配权 Top8',
+    diversified_top8_12_1_eq75_iv25_cap15: '收缩配权 Top8',
   }
   return value ? (labels[value] ?? value) : '无'
 }

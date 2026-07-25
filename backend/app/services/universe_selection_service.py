@@ -24,6 +24,7 @@ from app.domain.universe_selection import (
     CONCENTRATED_ROTATION_VARIANT,
     DIVERSIFIED_INVERSE_VOLATILITY_VARIANT,
     DIVERSIFIED_ROTATION_VARIANT,
+    DIVERSIFIED_SHRINKAGE_ROTATION_VARIANT,
     DEFAULT_ROTATION_VARIANTS,
     INDEX_CANDIDATE_CATALOG,
     INDEX_MEMBERSHIP_HISTORY,
@@ -1335,6 +1336,18 @@ class UniverseSelectionService:
                 )
             )
             rotation_weighting_challenger_registration = None
+            rotation_shrinkage_challenger_snapshot = (
+                unavailable_rotation_forward_snapshot(
+                    "BENCHMARK_DATA_UNAVAILABLE",
+                    blocker=(
+                        "ROTATION_BENCHMARK_HISTORY_UNAVAILABLE"
+                    ),
+                    variant=(
+                        DIVERSIFIED_SHRINKAGE_ROTATION_VARIANT
+                    ),
+                )
+            )
+            rotation_shrinkage_challenger_registration = None
             rotation_point_in_time_sensitivity: dict[
                 str,
                 object,
@@ -1601,6 +1614,60 @@ class UniverseSelectionService:
                     )
                 )
                 rotation_weighting_challenger_registration = None
+            try:
+                frozen_shrinkage_challenger_registration = (
+                    self._rotation_registration_for_month(
+                        cohort_month,
+                        available_as_of_date=expected_as_of_date,
+                        variant_name=(
+                            DIVERSIFIED_SHRINKAGE_ROTATION_VARIANT.name
+                        ),
+                        parameter_keys=(
+                            "rotation_shrinkage_challenger_registration",
+                            "rotation_next_shrinkage_challenger_registration",
+                        ),
+                    )
+                    if cohort_month is not None
+                    else None
+                )
+                shrinkage_challenger_evaluation = (
+                    evaluate_rotation_forward(
+                        candidates=self.catalog,
+                        bars_by_symbol=complete_by_symbol,
+                        benchmark_bars_by_symbol=benchmark_bars,
+                        base_config=self.config,
+                        as_of_date=expected_as_of_date,
+                        frozen_registration=(
+                            frozen_shrinkage_challenger_registration
+                        ),
+                        variant=(
+                            DIVERSIFIED_SHRINKAGE_ROTATION_VARIANT
+                        ),
+                    )
+                )
+                rotation_shrinkage_challenger_snapshot = (
+                    shrinkage_challenger_evaluation.snapshot
+                )
+                rotation_shrinkage_challenger_registration = (
+                    shrinkage_challenger_evaluation.registration
+                )
+            except Exception:
+                logger.exception(
+                    "rotation shrinkage challenger evaluation failed"
+                )
+                rotation_shrinkage_challenger_snapshot = (
+                    unavailable_rotation_forward_snapshot(
+                        "EVALUATION_FAILED",
+                        blocker=(
+                            "ROTATION_SHRINKAGE_CHALLENGER_"
+                            "EVALUATION_FAILED"
+                        ),
+                        variant=(
+                            DIVERSIFIED_SHRINKAGE_ROTATION_VARIANT
+                        ),
+                    )
+                )
+                rotation_shrinkage_challenger_registration = None
         rotation_evaluation["as_of_date"] = (
             expected_as_of_date.isoformat()
         )
@@ -1656,6 +1723,19 @@ class UniverseSelectionService:
                 "NOT_DUE"
             ),
             "rotation_next_weighting_challenger_registration": None,
+            "rotation_shrinkage_challenger_snapshot": (
+                rotation_shrinkage_challenger_snapshot.to_dict()
+            ),
+            "rotation_shrinkage_challenger_registration": (
+                rotation_shrinkage_challenger_registration.to_dict()
+                if rotation_shrinkage_challenger_registration
+                is not None
+                else None
+            ),
+            "rotation_next_shrinkage_challenger_registration_status": (
+                "NOT_DUE"
+            ),
+            "rotation_next_shrinkage_challenger_registration": None,
         }
         if (
             not benchmark_errors
@@ -1680,6 +1760,9 @@ class UniverseSelectionService:
                 ] = "BLOCKED_INSUFFICIENT_COVERAGE"
                 rotation_parameters[
                     "rotation_next_weighting_challenger_registration_status"
+                ] = "BLOCKED_INSUFFICIENT_COVERAGE"
+                rotation_parameters[
+                    "rotation_next_shrinkage_challenger_registration_status"
                 ] = "BLOCKED_INSUFFICIENT_COVERAGE"
             else:
                 next_registration = (
@@ -1743,6 +1826,29 @@ class UniverseSelectionService:
                     "rotation_next_weighting_challenger_registration"
                 ] = (
                     next_weighting_challenger_registration.to_dict()
+                )
+                next_shrinkage_challenger_registration = (
+                    build_rotation_cohort_registration(
+                        candidates=self.catalog,
+                        bars_by_symbol=complete_by_symbol,
+                        base_config=self.config,
+                        cohort_month=next_cohort_month(
+                            expected_as_of_date
+                        ),
+                        signal_date=expected_as_of_date,
+                        registered_as_of_date=expected_as_of_date,
+                        variant=(
+                            DIVERSIFIED_SHRINKAGE_ROTATION_VARIANT
+                        ),
+                    )
+                )
+                rotation_parameters[
+                    "rotation_next_shrinkage_challenger_registration_status"
+                ] = "REGISTERED"
+                rotation_parameters[
+                    "rotation_next_shrinkage_challenger_registration"
+                ] = (
+                    next_shrinkage_challenger_registration.to_dict()
                 )
         return selections, expected_as_of_date, rotation_parameters
 
@@ -2066,6 +2172,9 @@ class UniverseSelectionService:
             "rotation_weighting_challenger_variant": asdict(
                 DIVERSIFIED_INVERSE_VOLATILITY_VARIANT
             ),
+            "rotation_shrinkage_challenger_variant": asdict(
+                DIVERSIFIED_SHRINKAGE_ROTATION_VARIANT
+            ),
             "rotation_forward_registration_policy": (
                 "previous-month-final-session-signal/"
                 "next-month-first-session-open/equal-weight/"
@@ -2078,6 +2187,12 @@ class UniverseSelectionService:
             "rotation_weighting_challenger_registration_policy": (
                 "same-frozen-top8/inverse-20d-volatility/"
                 "25pct-position-cap/cash-residual/"
+                "estimated-round-trip-cost"
+            ),
+            "rotation_shrinkage_challenger_registration_policy": (
+                "same-frozen-top8/75pct-equal/"
+                "25pct-inverse-20d-volatility/"
+                "15pct-inverse-leg-position-cap/"
                 "estimated-round-trip-cost"
             ),
             "rotation_walk_forward_history_bars": (
