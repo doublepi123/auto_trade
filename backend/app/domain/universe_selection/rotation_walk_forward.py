@@ -43,6 +43,16 @@ class RotationVariant:
             raise ValueError("selection limits must be positive")
 
 
+DIVERSIFIED_ROTATION_VARIANT = RotationVariant(
+    name="diversified_top8_12_1",
+    lookback_bars=252,
+    skip_bars=21,
+    sma_bars=200,
+    max_selected=8,
+    max_per_risk_group=1,
+)
+
+
 DEFAULT_ROTATION_VARIANTS: tuple[RotationVariant, ...] = (
     RotationVariant(
         name="incumbent_top10_12_1",
@@ -76,14 +86,7 @@ DEFAULT_ROTATION_VARIANTS: tuple[RotationVariant, ...] = (
         max_selected=8,
         max_per_risk_group=2,
     ),
-    RotationVariant(
-        name="diversified_top8_12_1",
-        lookback_bars=252,
-        skip_bars=21,
-        sma_bars=200,
-        max_selected=8,
-        max_per_risk_group=1,
-    ),
+    DIVERSIFIED_ROTATION_VARIANT,
 )
 
 

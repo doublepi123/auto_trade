@@ -111,6 +111,69 @@ const rotationEvaluationStub = {
   ],
 }
 
+const rotationForwardStub = {
+  algorithm_version: 'rotation-monthly-open-forward-v1',
+  rotation_algorithm_version: 'index-momentum-12-1-diversified-monthly-shadow-v3',
+  status: 'BACKFILLED_OPEN',
+  evidence_mode: 'BACKFILLED_AFTER_ENTRY',
+  cohort_month: '2026-07-01',
+  variant_name: 'diversified_top8_12_1',
+  signal_date: '2026-06-30',
+  entry_date: '2026-07-01',
+  mark_date: '2026-07-23',
+  registered_as_of_date: '2026-07-23',
+  forward_eligible: false,
+  selection_drift_detected: false,
+  target_symbols: ['NVDA.US', 'AAPL.US'],
+  holdings: [
+    {
+      symbol: 'NVDA.US',
+      rank: 1,
+      risk_group: 'semiconductors',
+      weight_pct: 50,
+      momentum_pct: 46.8,
+      entry_price: 158.2,
+      mark_price: 181.2,
+      gross_return_pct: 14.54,
+      signal_spread_bps: 1.8,
+      mark_spread_bps: 1.7,
+      data_status: 'COMPLETE',
+    },
+    {
+      symbol: 'AAPL.US',
+      rank: 2,
+      risk_group: 'technology_hardware',
+      weight_pct: 50,
+      momentum_pct: 20.4,
+      entry_price: 215.4,
+      mark_price: 214.8,
+      gross_return_pct: -0.28,
+      signal_spread_bps: 1.5,
+      mark_spread_bps: 1.5,
+      data_status: 'COMPLETE',
+    },
+  ],
+  elapsed_sessions: 16,
+  forward_observation_sessions: 0,
+  gross_return_pct: 7.13,
+  entry_cost_pct: 0.11,
+  estimated_exit_cost_pct: 0.11,
+  total_estimated_cost_pct: 0.22,
+  net_liquidation_return_pct: 6.91,
+  qqq_return_pct: 3.2,
+  dia_return_pct: 1.8,
+  excess_return_vs_qqq_pct: 3.71,
+  excess_return_vs_dia_pct: 5.11,
+  survivorship_bias: true,
+  order_execution_allowed: false,
+  automatic_promotion_allowed: false,
+  blockers: [
+    'CURRENT_CONSTITUENTS_SURVIVORSHIP_BIAS',
+    'ROTATION_FORWARD_OBSERVATIONS_REQUIRED',
+    'COHORT_REGISTERED_AFTER_SIGNAL',
+  ],
+}
+
 function initialStatus(): StatusStub {
   return {
     engine_state: 'flat',
@@ -1062,7 +1125,7 @@ Cypress.Commands.add('stubApi', () => {
     body: {
       id: 7,
       as_of_date: '2026-07-23',
-      algorithm_version: 'index-liquidity-opportunity-v4',
+      algorithm_version: 'index-liquidity-opportunity-v10',
       source_version: 'nasdaq-100_djia-v1',
       status: 'COMPLETE',
       candidate_count: 3,
@@ -1072,6 +1135,7 @@ Cypress.Commands.add('stubApi', () => {
       parameters: {
         max_selected: 8,
         rotation_evaluation: rotationEvaluationStub,
+        rotation_forward_snapshot: rotationForwardStub,
       },
       error: '',
       started_at: '2026-07-24T01:00:00Z',
@@ -1100,7 +1164,7 @@ Cypress.Commands.add('stubApi', () => {
             trend_efficiency_10d: 0.31,
             opportunity_to_cost_ratio: 8.2,
             rotation: {
-              algorithm_version: 'index-momentum-12-1-diversified-shadow-v2',
+              algorithm_version: 'index-momentum-12-1-diversified-monthly-shadow-v3',
               lookback_bars: 252,
               skip_bars: 21,
               sma_bars: 200,
@@ -1139,7 +1203,7 @@ Cypress.Commands.add('stubApi', () => {
             trend_efficiency_10d: 0.22,
             opportunity_to_cost_ratio: 5.9,
             rotation: {
-              algorithm_version: 'index-momentum-12-1-diversified-shadow-v2',
+              algorithm_version: 'index-momentum-12-1-diversified-monthly-shadow-v3',
               lookback_bars: 252,
               skip_bars: 21,
               sma_bars: 200,
@@ -1178,7 +1242,7 @@ Cypress.Commands.add('stubApi', () => {
             trend_efficiency_10d: 0.46,
             opportunity_to_cost_ratio: 6.1,
             rotation: {
-              algorithm_version: 'index-momentum-12-1-diversified-shadow-v2',
+              algorithm_version: 'index-momentum-12-1-diversified-monthly-shadow-v3',
               lookback_bars: 252,
               skip_bars: 21,
               sma_bars: 200,

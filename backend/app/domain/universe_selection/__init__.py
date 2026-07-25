@@ -20,6 +20,7 @@ from app.domain.universe_selection.selector import (
     select_candidates,
 )
 from app.domain.universe_selection.rotation_walk_forward import (
+    DIVERSIFIED_ROTATION_VARIANT,
     DEFAULT_ROTATION_VARIANTS,
     ROTATION_BENCHMARK_SYMBOLS,
     ROTATION_WALK_FORWARD_VERSION,
@@ -30,12 +31,27 @@ from app.domain.universe_selection.rotation_walk_forward import (
     RotationWalkForwardResult,
     evaluate_rotation_walk_forward,
 )
+from app.domain.universe_selection.rotation_forward import (
+    ROTATION_FORWARD_VERSION,
+    RotationCohortRegistration,
+    RotationCohortSignal,
+    RotationForwardEvaluation,
+    RotationForwardHolding,
+    RotationForwardSnapshot,
+    build_rotation_cohort_registration,
+    evaluate_rotation_forward,
+    is_last_us_session_of_month,
+    next_cohort_month,
+    rotation_cohort_month,
+    unavailable_rotation_forward_snapshot,
+)
 
 __all__ = [
     "CATALOG_SOURCE_VERSION",
     "INDEX_CANDIDATE_CATALOG",
     "ROTATION_ALGORITHM_VERSION",
     "ROTATION_BENCHMARK_SYMBOLS",
+    "ROTATION_FORWARD_VERSION",
     "ROTATION_WALK_FORWARD_VERSION",
     "UNIVERSE_ALGORITHM_VERSION",
     "CandidateInput",
@@ -44,6 +60,11 @@ __all__ = [
     "DailyBar",
     "IndexCandidate",
     "RotationSelectionEvidence",
+    "RotationCohortRegistration",
+    "RotationCohortSignal",
+    "RotationForwardEvaluation",
+    "RotationForwardHolding",
+    "RotationForwardSnapshot",
     "RotationPerformance",
     "RotationPeriod",
     "RotationVariant",
@@ -51,6 +72,8 @@ __all__ = [
     "RotationWalkForwardResult",
     "UniverseSelectionConfig",
     "DEFAULT_ROTATION_VARIANTS",
+    "DIVERSIFIED_ROTATION_VARIANT",
+    "build_rotation_cohort_registration",
     "completed_daily_bars",
     "latest_closed_session_date",
     "liquidity_spread_proxy_bps",
@@ -58,4 +81,9 @@ __all__ = [
     "risk_group_for_sector",
     "select_candidates",
     "evaluate_rotation_walk_forward",
+    "evaluate_rotation_forward",
+    "is_last_us_session_of_month",
+    "next_cohort_month",
+    "rotation_cohort_month",
+    "unavailable_rotation_forward_snapshot",
 ]

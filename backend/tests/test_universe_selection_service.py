@@ -11,6 +11,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.broker import BrokerCandle, Quote
+from app.core.holiday_calendar import is_market_closed
 from app.domain.universe_selection import (
     IndexCandidate,
     UniverseSelectionConfig,
@@ -158,9 +159,20 @@ class _ForwardAdjustedBroker(_FakeBroker):
 
 
 class _LongHistoryBroker(_ForwardAdjustedBroker):
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        end_date: datetime | None = None,
+    ) -> None:
         super().__init__()
         self.requested_counts: list[int] = []
+        self.end_date = end_date or datetime(
+            2026,
+            7,
+            23,
+            20,
+            tzinfo=timezone.utc,
+        )
 
     def get_forward_adjusted_candlesticks(
         self,
@@ -173,14 +185,31 @@ class _LongHistoryBroker(_ForwardAdjustedBroker):
         self.requested_counts.append(count)
         price = 100.0 if symbol == "AAPL.US" else 200.0
         drift = 0.0025 if symbol == "AAPL.US" else 0.0015
-        end = datetime(2026, 7, 23, 4, tzinfo=timezone.utc)
+        timestamps: list[datetime] = []
+        cursor = self.end_date.date()
+        while len(timestamps) < 330:
+            if (
+                cursor.weekday() < 5
+                and not is_market_closed("US", cursor)
+            ):
+                timestamps.append(
+                    datetime(
+                        cursor.year,
+                        cursor.month,
+                        cursor.day,
+                        20,
+                        tzinfo=timezone.utc,
+                    )
+                )
+            cursor -= timedelta(days=1)
+        timestamps.reverse()
         result: list[BrokerCandle] = []
-        for index in range(270):
+        for index, timestamp in enumerate(timestamps):
             move = drift + (0.012 if index % 2 == 0 else -0.012)
             close = price * (1 + move)
             result.append(
                 BrokerCandle(
-                    timestamp=end - timedelta(days=269 - index),
+                    timestamp=timestamp,
                     open=price,
                     high=max(price, close) * 1.01,
                     low=min(price, close) * 0.99,
@@ -869,7 +898,7 @@ def test_refresh_persists_rotation_shadow_evidence() -> None:
         metrics = json.loads(result.items[0].metrics_json)
         rotation = metrics["rotation"]
         assert rotation["algorithm_version"] == (
-            "index-momentum-12-1-diversified-shadow-v2"
+            "index-momentum-12-1-diversified-monthly-shadow-v3"
         )
         assert rotation["lookback_bars"] == 252
         assert rotation["skip_bars"] == 21
@@ -889,6 +918,141 @@ def test_refresh_persists_rotation_shadow_evidence() -> None:
             "CURRENT_CONSTITUENTS_SURVIVORSHIP_BIAS"
             in evaluation["promotion_blockers"]
         )
+        registration = parameters["rotation_cohort_registration"]
+        assert registration["cohort_month"] == "2026-07-01"
+        assert registration["signal_date"] == "2026-06-30"
+        assert registration["registered_as_of_date"] == (
+            result.run.as_of_date.isoformat()
+        )
+        assert registration["forward_eligible"] is False
+        assert registration["target_signals"]
+        snapshot = parameters["rotation_forward_snapshot"]
+        assert snapshot["algorithm_version"] == (
+            "rotation-monthly-open-forward-v1"
+        )
+        assert snapshot["evidence_mode"] == (
+            "BACKFILLED_AFTER_ENTRY"
+        )
+        assert snapshot["entry_date"] == "2026-07-01"
+        assert snapshot["mark_date"] == (
+            result.run.as_of_date.isoformat()
+        )
+        assert snapshot["forward_observation_sessions"] == 0
+        assert snapshot["total_estimated_cost_pct"] > 0
+        assert snapshot["order_execution_allowed"] is False
+        assert snapshot["automatic_promotion_allowed"] is False
+        assert parameters[
+            "rotation_next_cohort_registration_status"
+        ] == "NOT_DUE"
+    finally:
+        db.close()
+
+
+def test_refresh_reuses_frozen_rotation_registration_next_day() -> None:
+    db = _db()
+    try:
+        first = _service(db, _LongHistoryBroker()).refresh()
+        second = UniverseSelectionService(
+            db,
+            _LongHistoryBroker(
+                end_date=datetime(
+                    2026,
+                    7,
+                    24,
+                    20,
+                    tzinfo=timezone.utc,
+                )
+            ),
+            catalog=_CATALOG,
+            config=_config(),
+            minimum_evaluable_ratio=0.5,
+            minimum_residency_days=1,
+            apply_to_watchlist=True,
+            enable_shadow=False,
+            now=datetime(
+                2026,
+                7,
+                24,
+                22,
+                tzinfo=timezone.utc,
+            ),
+        ).refresh()
+
+        assert first.run.as_of_date.isoformat() == "2026-07-23"
+        assert second.run.as_of_date.isoformat() == "2026-07-24"
+        first_parameters = json.loads(first.run.parameters_json)
+        second_parameters = json.loads(second.run.parameters_json)
+        assert second_parameters[
+            "rotation_cohort_registration"
+        ] == first_parameters["rotation_cohort_registration"]
+        second_snapshot = second_parameters[
+            "rotation_forward_snapshot"
+        ]
+        assert second_snapshot["registered_as_of_date"] == (
+            "2026-07-23"
+        )
+        assert second_snapshot["mark_date"] == "2026-07-24"
+        assert second_snapshot["target_symbols"] == (
+            first_parameters["rotation_forward_snapshot"][
+                "target_symbols"
+            ]
+        )
+        assert second_snapshot["selection_drift_detected"] is False
+        first_rotation = {
+            row.symbol: json.loads(row.metrics_json)["rotation"]
+            for row in first.items
+        }
+        second_rotation = {
+            row.symbol: json.loads(row.metrics_json)["rotation"]
+            for row in second.items
+        }
+        assert second_rotation == first_rotation
+    finally:
+        db.close()
+
+
+def test_month_end_refresh_preregisters_next_rotation_cohort() -> None:
+    db = _db()
+    try:
+        result = UniverseSelectionService(
+            db,
+            _LongHistoryBroker(
+                end_date=datetime(
+                    2026,
+                    7,
+                    31,
+                    20,
+                    tzinfo=timezone.utc,
+                )
+            ),
+            catalog=_CATALOG,
+            config=_config(),
+            minimum_evaluable_ratio=0.5,
+            minimum_residency_days=1,
+            apply_to_watchlist=False,
+            enable_shadow=False,
+            now=datetime(
+                2026,
+                8,
+                1,
+                2,
+                tzinfo=timezone.utc,
+            ),
+        ).refresh()
+
+        parameters = json.loads(result.run.parameters_json)
+        assert result.run.as_of_date.isoformat() == "2026-07-31"
+        assert parameters[
+            "rotation_next_cohort_registration_status"
+        ] == "REGISTERED"
+        registration = parameters[
+            "rotation_next_cohort_registration"
+        ]
+        assert registration["cohort_month"] == "2026-08-01"
+        assert registration["signal_date"] == "2026-07-31"
+        assert registration["registered_as_of_date"] == "2026-07-31"
+        assert registration["forward_eligible"] is True
+        assert registration["target_signals"]
     finally:
         db.close()
 

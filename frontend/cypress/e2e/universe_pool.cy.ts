@@ -1,7 +1,7 @@
 const refreshedRun = {
   id: 8,
   as_of_date: '2026-07-24',
-  algorithm_version: 'index-liquidity-opportunity-v4',
+  algorithm_version: 'index-liquidity-opportunity-v10',
   source_version: 'nasdaq-100_djia-v1',
   status: 'COMPLETE',
   candidate_count: 3,
@@ -36,7 +36,7 @@ const refreshedRun = {
         trend_efficiency_10d: 0.2,
         opportunity_to_cost_ratio: 6.4,
         rotation: {
-          algorithm_version: 'index-momentum-12-1-diversified-shadow-v2',
+          algorithm_version: 'index-momentum-12-1-diversified-monthly-shadow-v3',
           lookback_bars: 252,
           skip_bars: 21,
           sma_bars: 200,
@@ -92,6 +92,21 @@ describe('Dynamic universe observation pool', () => {
       cy.contains('Shadow 已启用').should('be.visible')
       cy.contains('轮动影子').should('be.visible')
       cy.get('[data-testid="universe-rotation-count"]').should('contain', '2')
+      cy.get('[data-testid="rotation-forward"]').within(() => {
+        cy.contains('本月固定组合').should('be.visible')
+        cy.contains('回填观察').should('be.visible')
+        cy.get('[data-testid="rotation-forward-symbols"]')
+          .should('contain', 'NVDA.US')
+          .and('contain', 'AAPL.US')
+        cy.get('[data-testid="rotation-forward-metrics"]')
+          .should('contain', '+6.9%')
+          .and('contain', '+3.7%')
+          .and('contain', '+5.1%')
+          .and('contain', '0.2%')
+          .and('contain', '0/16')
+        cy.contains('不计入前向晋级').should('be.visible')
+        cy.contains('下月将在入场前冻结').should('be.visible')
+      })
       cy.get('[data-testid="rotation-walk-forward"]').within(() => {
         cy.contains('评估完成').should('be.visible')
         cy.get('[data-testid="rotation-training-winner"]').should('contain', '集中 Top6')

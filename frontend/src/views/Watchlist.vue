@@ -88,6 +88,89 @@
           />
 
           <section
+            v-if="universeRotationForward"
+            class="rotation-forward"
+            data-testid="rotation-forward"
+          >
+            <div class="rotation-forward-header">
+              <div>
+                <div class="rotation-forward-title">
+                  <strong>本月固定组合</strong>
+                  <el-tag
+                    :type="rotationForwardTagType(universeRotationForward.evidence_mode)"
+                    size="small"
+                    effect="plain"
+                  >
+                    {{ rotationForwardModeLabel(universeRotationForward.evidence_mode) }}
+                  </el-tag>
+                  <el-tag type="info" size="small" effect="plain">等权影子</el-tag>
+                </div>
+                <small>{{ universeRotationForward.algorithm_version }}</small>
+              </div>
+              <div class="rotation-forward-dates">
+                <span>信号<strong>{{ universeRotationForward.signal_date || '-' }}</strong></span>
+                <span>入场<strong>{{ universeRotationForward.entry_date || '-' }}</strong></span>
+                <span>估值<strong>{{ universeRotationForward.mark_date || '-' }}</strong></span>
+              </div>
+            </div>
+
+            <div class="rotation-forward-symbols" data-testid="rotation-forward-symbols">
+              <span>固定成分</span>
+              <div v-if="universeRotationForward.target_symbols.length">
+                <el-tag
+                  v-for="symbol in universeRotationForward.target_symbols"
+                  :key="symbol"
+                  size="small"
+                  effect="plain"
+                >
+                  {{ symbol }}
+                </el-tag>
+              </div>
+              <strong v-else>现金观察</strong>
+            </div>
+
+            <div class="rotation-forward-metrics" data-testid="rotation-forward-metrics">
+              <div>
+                <span>净清算收益</span>
+                <strong>{{ formatSignedPercent(universeRotationForward.net_liquidation_return_pct) }}</strong>
+              </div>
+              <div>
+                <span>超额 QQQ</span>
+                <strong>{{ formatSignedPercent(universeRotationForward.excess_return_vs_qqq_pct) }}</strong>
+              </div>
+              <div>
+                <span>超额 DIA</span>
+                <strong>{{ formatSignedPercent(universeRotationForward.excess_return_vs_dia_pct) }}</strong>
+              </div>
+              <div>
+                <span>完整估算成本</span>
+                <strong>{{ formatPercent(universeRotationForward.total_estimated_cost_pct) }}</strong>
+              </div>
+              <div>
+                <span>前向会话</span>
+                <strong>{{ universeRotationForward.forward_observation_sessions }}/{{ universeRotationForward.elapsed_sessions }}</strong>
+              </div>
+            </div>
+
+            <div class="rotation-forward-footer">
+              <span>
+                登记 {{ universeRotationForward.registered_as_of_date || '-' }}
+                · {{ rotationVariantLabel(universeRotationForward.variant_name) }}
+                · 只读观察
+              </span>
+              <strong v-if="universeRotationForward.evidence_mode === 'BACKFILLED_AFTER_ENTRY'">
+                本月组合在月初后登记，不计入前向晋级；下月将在入场前冻结。
+              </strong>
+              <strong v-else-if="universeRotationForward.evidence_mode === 'FORWARD_PRECOMMITTED'">
+                已在入场前冻结；本月会话计入前向证据，但仍不会自动晋级或下单。
+              </strong>
+              <strong v-else>
+                月度证据暂不可用；轮动选择已关闭，不会回退为每日重排。
+              </strong>
+            </div>
+          </section>
+
+          <section
             v-if="universeRotationEvaluation"
             class="rotation-evaluation"
             data-testid="rotation-walk-forward"
@@ -914,6 +997,8 @@ import type {
   UniversePromotionReadinessItem,
   UniversePromotionReadinessResponse,
   UniverseRotationPerformance,
+  UniverseRotationForwardHolding,
+  UniverseRotationForwardSnapshot,
   UniverseRotationVariantConfig,
   UniverseRotationVariantEvaluation,
   UniverseRotationWalkForwardEvaluation,
@@ -1043,6 +1128,11 @@ const universeRotationCount = computed(() => (
 const universeRotationEvaluation = computed<UniverseRotationWalkForwardEvaluation | null>(() => {
   const raw = universeRun.value?.parameters.rotation_evaluation
   return isRotationWalkForwardEvaluation(raw) ? raw : null
+})
+
+const universeRotationForward = computed<UniverseRotationForwardSnapshot | null>(() => {
+  const raw = universeRun.value?.parameters.rotation_forward_snapshot
+  return isRotationForwardSnapshot(raw) ? raw : null
 })
 
 const rotationTrainingWinner = computed<UniverseRotationVariantEvaluation | null>(() => {
@@ -1377,6 +1467,78 @@ function isNullableString(value: unknown): value is string | null {
   return value === null || typeof value === 'string'
 }
 
+function isNullableFiniteNumber(value: unknown): value is number | null {
+  return value === null || (typeof value === 'number' && Number.isFinite(value))
+}
+
+function isRotationForwardHolding(
+  value: unknown,
+): value is UniverseRotationForwardHolding {
+  if (!isRecord(value)) return false
+  return (
+    typeof value.symbol === 'string'
+    && typeof value.rank === 'number'
+    && Number.isFinite(value.rank)
+    && typeof value.risk_group === 'string'
+    && typeof value.weight_pct === 'number'
+    && Number.isFinite(value.weight_pct)
+    && typeof value.momentum_pct === 'number'
+    && Number.isFinite(value.momentum_pct)
+    && isNullableFiniteNumber(value.entry_price)
+    && isNullableFiniteNumber(value.mark_price)
+    && isNullableFiniteNumber(value.gross_return_pct)
+    && typeof value.signal_spread_bps === 'number'
+    && Number.isFinite(value.signal_spread_bps)
+    && isNullableFiniteNumber(value.mark_spread_bps)
+    && typeof value.data_status === 'string'
+  )
+}
+
+function isRotationForwardSnapshot(
+  value: unknown,
+): value is UniverseRotationForwardSnapshot {
+  if (!isRecord(value)) return false
+  const nullableNumbers = [
+    value.gross_return_pct,
+    value.entry_cost_pct,
+    value.estimated_exit_cost_pct,
+    value.total_estimated_cost_pct,
+    value.net_liquidation_return_pct,
+    value.qqq_return_pct,
+    value.dia_return_pct,
+    value.excess_return_vs_qqq_pct,
+    value.excess_return_vs_dia_pct,
+  ]
+  return (
+    typeof value.algorithm_version === 'string'
+    && typeof value.rotation_algorithm_version === 'string'
+    && typeof value.status === 'string'
+    && typeof value.evidence_mode === 'string'
+    && isNullableString(value.cohort_month)
+    && typeof value.variant_name === 'string'
+    && isNullableString(value.signal_date)
+    && isNullableString(value.entry_date)
+    && isNullableString(value.mark_date)
+    && isNullableString(value.registered_as_of_date)
+    && typeof value.forward_eligible === 'boolean'
+    && typeof value.selection_drift_detected === 'boolean'
+    && Array.isArray(value.target_symbols)
+    && value.target_symbols.every((symbol) => typeof symbol === 'string')
+    && Array.isArray(value.holdings)
+    && value.holdings.every(isRotationForwardHolding)
+    && typeof value.elapsed_sessions === 'number'
+    && Number.isFinite(value.elapsed_sessions)
+    && typeof value.forward_observation_sessions === 'number'
+    && Number.isFinite(value.forward_observation_sessions)
+    && nullableNumbers.every(isNullableFiniteNumber)
+    && typeof value.survivorship_bias === 'boolean'
+    && value.order_execution_allowed === false
+    && value.automatic_promotion_allowed === false
+    && Array.isArray(value.blockers)
+    && value.blockers.every((blocker) => typeof blocker === 'string')
+  )
+}
+
 function isRotationWalkForwardEvaluation(
   value: unknown,
 ): value is UniverseRotationWalkForwardEvaluation {
@@ -1418,6 +1580,20 @@ function rotationWalkForwardStatusLabel(value: string): string {
   if (value === 'BENCHMARK_DATA_UNAVAILABLE') return '基准不可用'
   if (value === 'EVALUATION_FAILED') return '评估失败'
   return value.replace(/_/g, ' ')
+}
+
+function rotationForwardModeLabel(value: string): string {
+  if (value === 'FORWARD_PRECOMMITTED') return '前向观察'
+  if (value === 'BACKFILLED_AFTER_ENTRY') return '回填观察'
+  return '暂不可用'
+}
+
+function rotationForwardTagType(
+  value: string,
+): 'success' | 'warning' | 'info' {
+  if (value === 'FORWARD_PRECOMMITTED') return 'success'
+  if (value === 'BACKFILLED_AFTER_ENTRY') return 'warning'
+  return 'info'
 }
 
 const exclusionReasonLabels: Record<string, string> = {
@@ -2119,6 +2295,140 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 
+.rotation-forward {
+  min-width: 0;
+  margin-bottom: 14px;
+  padding: 12px 0;
+  border-top: 1px solid var(--el-border-color);
+  border-bottom: 1px solid var(--el-border-color);
+}
+
+.rotation-forward-header {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.rotation-forward-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.rotation-forward-header small {
+  display: block;
+  overflow: hidden;
+  max-width: 360px;
+  margin-top: 4px;
+  color: var(--el-text-color-secondary);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rotation-forward-dates {
+  display: flex;
+  flex-shrink: 0;
+  gap: 14px;
+}
+
+.rotation-forward-dates span {
+  display: flex;
+  align-items: flex-end;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--el-text-color-secondary);
+  font-size: 10px;
+}
+
+.rotation-forward-dates strong {
+  color: var(--el-text-color-primary);
+  font-size: 12px;
+}
+
+.rotation-forward-symbols {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 10px;
+  margin-top: 11px;
+}
+
+.rotation-forward-symbols > span {
+  flex-shrink: 0;
+  padding-top: 4px;
+  color: var(--el-text-color-regular);
+  font-size: 11px;
+}
+
+.rotation-forward-symbols > div {
+  display: flex;
+  min-width: 0;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+
+.rotation-forward-symbols > strong {
+  padding-top: 3px;
+  color: var(--el-text-color-regular);
+  font-size: 12px;
+}
+
+.rotation-forward-metrics {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 1px;
+  margin-top: 11px;
+  overflow: hidden;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 4px;
+  background: var(--el-border-color-lighter);
+}
+
+.rotation-forward-metrics div {
+  display: flex;
+  min-width: 0;
+  min-height: 50px;
+  padding: 8px;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+  background: var(--el-bg-color);
+}
+
+.rotation-forward-metrics span {
+  color: var(--el-text-color-secondary);
+  font-size: 10px;
+}
+
+.rotation-forward-metrics strong {
+  overflow: hidden;
+  color: var(--el-text-color-primary);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rotation-forward-footer {
+  display: flex;
+  min-width: 0;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 8px;
+  color: var(--el-text-color-secondary);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.rotation-forward-footer strong {
+  color: var(--el-color-warning-dark-2);
+  font-weight: 500;
+  text-align: right;
+}
+
 .rotation-evaluation {
   min-width: 0;
   margin-bottom: 14px;
@@ -2618,6 +2928,34 @@ onUnmounted(() => {
 
   .universe-summary {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .rotation-forward-header,
+  .rotation-forward-footer {
+    flex-direction: column;
+    gap: 7px;
+  }
+
+  .rotation-forward-dates {
+    width: 100%;
+    justify-content: space-between;
+    gap: 6px;
+  }
+
+  .rotation-forward-dates span:first-child {
+    align-items: flex-start;
+  }
+
+  .rotation-forward-dates span:last-child {
+    align-items: flex-end;
+  }
+
+  .rotation-forward-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .rotation-forward-footer strong {
+    text-align: left;
   }
 
   .rotation-evaluation-header,

@@ -1343,6 +1343,52 @@ export interface UniverseRotationWalkForwardEvaluation {
   variants: UniverseRotationVariantEvaluation[]
 }
 
+export interface UniverseRotationForwardHolding {
+  symbol: string
+  rank: number
+  risk_group: string
+  weight_pct: number
+  momentum_pct: number
+  entry_price: number | null
+  mark_price: number | null
+  gross_return_pct: number | null
+  signal_spread_bps: number
+  mark_spread_bps: number | null
+  data_status: string
+}
+
+export interface UniverseRotationForwardSnapshot {
+  algorithm_version: string
+  rotation_algorithm_version: string
+  status: string
+  evidence_mode: string
+  cohort_month: string | null
+  variant_name: string
+  signal_date: string | null
+  entry_date: string | null
+  mark_date: string | null
+  registered_as_of_date: string | null
+  forward_eligible: boolean
+  selection_drift_detected: boolean
+  target_symbols: string[]
+  holdings: UniverseRotationForwardHolding[]
+  elapsed_sessions: number
+  forward_observation_sessions: number
+  gross_return_pct: number | null
+  entry_cost_pct: number | null
+  estimated_exit_cost_pct: number | null
+  total_estimated_cost_pct: number | null
+  net_liquidation_return_pct: number | null
+  qqq_return_pct: number | null
+  dia_return_pct: number | null
+  excess_return_vs_qqq_pct: number | null
+  excess_return_vs_dia_pct: number | null
+  survivorship_bias: boolean
+  order_execution_allowed: false
+  automatic_promotion_allowed: false
+  blockers: string[]
+}
+
 export interface UniverseSelectionMetrics {
   price: number | null
   avg_dollar_volume: number | null

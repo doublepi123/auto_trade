@@ -8,7 +8,7 @@ import threading
 import time
 import uuid
 from collections import Counter
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from typing import Collection, Protocol, Sequence, cast
 
@@ -21,24 +21,33 @@ from app.core.broker import BrokerCandle
 from app.domain.strategy_v2 import RISK_GROUP_RELATIVE_MIN_PEERS
 from app.domain.universe_selection import (
     CATALOG_SOURCE_VERSION,
+    DIVERSIFIED_ROTATION_VARIANT,
     DEFAULT_ROTATION_VARIANTS,
     INDEX_CANDIDATE_CATALOG,
     ROTATION_ALGORITHM_VERSION,
     ROTATION_BENCHMARK_SYMBOLS,
+    ROTATION_FORWARD_VERSION,
     ROTATION_WALK_FORWARD_VERSION,
     UNIVERSE_ALGORITHM_VERSION,
     CandidateInput,
     CandidateSelection,
     DailyBar,
     IndexCandidate,
+    RotationCohortRegistration,
     UniverseSelectionConfig,
+    build_rotation_cohort_registration,
     completed_daily_bars,
     evaluate_rotation_walk_forward,
+    evaluate_rotation_forward,
+    is_last_us_session_of_month,
     latest_closed_session_date,
     liquidity_spread_proxy_bps,
     latest_complete_session_date,
     risk_group_for_sector,
+    next_cohort_month,
+    rotation_cohort_month,
     select_candidates,
+    unavailable_rotation_forward_snapshot,
 )
 from app.models import (
     OrderRecord,
@@ -628,6 +637,126 @@ class UniverseSelectionService:
             .all()
         )
 
+    def _rotation_registration_for_month(
+        self,
+        cohort_month: date,
+        *,
+        available_as_of_date: date,
+    ) -> RotationCohortRegistration | None:
+        runs = (
+            self.db.query(UniverseSelectionRun)
+            .filter(
+                UniverseSelectionRun.status.in_(
+                    ("COMPLETE", "DEGRADED")
+                ),
+                UniverseSelectionRun.completed_at.is_not(None),
+                UniverseSelectionRun.as_of_date
+                <= available_as_of_date,
+            )
+            .order_by(
+                UniverseSelectionRun.as_of_date.desc(),
+                UniverseSelectionRun.completed_at.desc(),
+                UniverseSelectionRun.id.desc(),
+            )
+            .limit(400)
+            .all()
+        )
+        for run in runs:
+            try:
+                raw_parameters = json.loads(run.parameters_json)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(raw_parameters, dict):
+                continue
+            for key in (
+                "rotation_cohort_registration",
+                "rotation_next_cohort_registration",
+            ):
+                raw_registration = raw_parameters.get(key)
+                if not isinstance(raw_registration, dict):
+                    continue
+                try:
+                    registration = (
+                        RotationCohortRegistration.from_dict(
+                            cast(
+                                dict[str, object],
+                                raw_registration,
+                            )
+                        )
+                    )
+                except (KeyError, TypeError, ValueError):
+                    logger.warning(
+                        "ignored invalid %s in universe run %s",
+                        key,
+                        run.id,
+                    )
+                    continue
+                if (
+                    registration.cohort_month == cohort_month
+                    and registration.registered_as_of_date
+                    <= available_as_of_date
+                    and registration.rotation_algorithm_version
+                    == ROTATION_ALGORITHM_VERSION
+                    and registration.variant_name
+                    == DIVERSIFIED_ROTATION_VARIANT.name
+                ):
+                    return registration
+        return None
+
+    @staticmethod
+    def _disable_rotation(
+        selections: Sequence[CandidateSelection],
+        *,
+        reason: str,
+    ) -> list[CandidateSelection]:
+        result: list[CandidateSelection] = []
+        for row in selections:
+            evidence = replace(
+                row.rotation,
+                algorithm_version=ROTATION_ALGORITHM_VERSION,
+                momentum_pct=None,
+                sma_price=None,
+                above_sma=None,
+                eligible=False,
+                selected=False,
+                rank=None,
+                score=0.0,
+                exclusion_reasons=tuple(
+                    dict.fromkeys(
+                        (
+                            *row.rotation.exclusion_reasons,
+                            reason,
+                        )
+                    )
+                ),
+            )
+            result.append(replace(row, rotation=evidence))
+        return result
+
+    @classmethod
+    def _merge_fixed_rotation(
+        cls,
+        selections: Sequence[CandidateSelection],
+        fixed_selections: Sequence[CandidateSelection],
+    ) -> list[CandidateSelection]:
+        fixed_by_symbol = {
+            row.candidate.symbol: row.rotation
+            for row in fixed_selections
+        }
+        result: list[CandidateSelection] = []
+        for row in selections:
+            evidence = fixed_by_symbol.get(row.candidate.symbol)
+            if evidence is None:
+                result.extend(
+                    cls._disable_rotation(
+                        (row,),
+                        reason="ROTATION_MONTHLY_SIGNAL_UNAVAILABLE",
+                    )
+                )
+            else:
+                result.append(replace(row, rotation=evidence))
+        return result
+
     def refresh(
         self,
         *,
@@ -688,13 +817,13 @@ class UniverseSelectionService:
             (
                 selections,
                 as_of_date,
-                rotation_evaluation,
+                rotation_parameters,
             ) = self._evaluate_catalog(
                 expected_as_of_date=expected_as_of_date,
             )
             published_parameters = {
                 **parameters,
-                "rotation_evaluation": rotation_evaluation,
+                **rotation_parameters,
             }
             evaluable_count = sum(item.evaluable for item in selections)
             selected_count = sum(item.selected for item in selections)
@@ -1150,6 +1279,19 @@ class UniverseSelectionService:
                 "selected_variant_periods": [],
                 "validated_challenger_periods": [],
             }
+            rotation_snapshot = (
+                unavailable_rotation_forward_snapshot(
+                    "BENCHMARK_DATA_UNAVAILABLE",
+                    blocker=(
+                        "ROTATION_BENCHMARK_HISTORY_UNAVAILABLE"
+                    ),
+                )
+            )
+            rotation_registration = None
+            selections = self._disable_rotation(
+                selections,
+                reason="ROTATION_MONTHLY_SIGNAL_UNAVAILABLE",
+            )
         else:
             try:
                 rotation_evaluation = (
@@ -1193,11 +1335,111 @@ class UniverseSelectionService:
                     "selected_variant_periods": [],
                     "validated_challenger_periods": [],
                 }
+            try:
+                cohort_month = rotation_cohort_month(
+                    benchmark_bars,
+                    as_of_date=expected_as_of_date,
+                )
+                frozen_registration = (
+                    self._rotation_registration_for_month(
+                        cohort_month,
+                        available_as_of_date=expected_as_of_date,
+                    )
+                    if cohort_month is not None
+                    else None
+                )
+                forward_evaluation = evaluate_rotation_forward(
+                    candidates=self.catalog,
+                    bars_by_symbol=complete_by_symbol,
+                    benchmark_bars_by_symbol=benchmark_bars,
+                    base_config=self.config,
+                    as_of_date=expected_as_of_date,
+                    frozen_registration=frozen_registration,
+                )
+                rotation_snapshot = forward_evaluation.snapshot
+                rotation_registration = (
+                    forward_evaluation.registration
+                )
+                if forward_evaluation.selections:
+                    selections = self._merge_fixed_rotation(
+                        selections,
+                        forward_evaluation.selections,
+                    )
+                else:
+                    selections = self._disable_rotation(
+                        selections,
+                        reason=(
+                            "ROTATION_MONTHLY_SIGNAL_UNAVAILABLE"
+                        ),
+                    )
+            except Exception:
+                logger.exception("rotation forward evaluation failed")
+                rotation_snapshot = (
+                    unavailable_rotation_forward_snapshot(
+                        "EVALUATION_FAILED",
+                        blocker="ROTATION_FORWARD_EVALUATION_FAILED",
+                    )
+                )
+                rotation_registration = None
+                selections = self._disable_rotation(
+                    selections,
+                    reason="ROTATION_MONTHLY_SIGNAL_UNAVAILABLE",
+                )
         rotation_evaluation["as_of_date"] = (
             expected_as_of_date.isoformat()
         )
         rotation_evaluation["history_bars_requested"] = daily_bar_count
-        return selections, expected_as_of_date, rotation_evaluation
+        rotation_parameters: dict[str, object] = {
+            "rotation_evaluation": rotation_evaluation,
+            "rotation_forward_snapshot": (
+                rotation_snapshot.to_dict()
+            ),
+            "rotation_cohort_registration": (
+                rotation_registration.to_dict()
+                if rotation_registration is not None
+                else None
+            ),
+            "rotation_next_cohort_registration_status": "NOT_DUE",
+            "rotation_next_cohort_registration": None,
+        }
+        if (
+            not benchmark_errors
+            and is_last_us_session_of_month(
+                expected_as_of_date
+            )
+        ):
+            evaluable_count = sum(
+                row.evaluable for row in selections
+            )
+            coverage_ratio = (
+                evaluable_count / len(selections)
+                if selections
+                else 0.0
+            )
+            if coverage_ratio < self.minimum_evaluable_ratio:
+                rotation_parameters[
+                    "rotation_next_cohort_registration_status"
+                ] = "BLOCKED_INSUFFICIENT_COVERAGE"
+            else:
+                next_registration = (
+                    build_rotation_cohort_registration(
+                        candidates=self.catalog,
+                        bars_by_symbol=complete_by_symbol,
+                        base_config=self.config,
+                        cohort_month=next_cohort_month(
+                            expected_as_of_date
+                        ),
+                        signal_date=expected_as_of_date,
+                        registered_as_of_date=expected_as_of_date,
+                    )
+                )
+                rotation_parameters[
+                    "rotation_next_cohort_registration_status"
+                ] = "REGISTERED"
+                rotation_parameters[
+                    "rotation_next_cohort_registration"
+                ] = next_registration.to_dict()
+        return selections, expected_as_of_date, rotation_parameters
 
     def _consensus_as_of_date(
         self,
@@ -1503,6 +1745,17 @@ class UniverseSelectionService:
             "rotation_algorithm_version": ROTATION_ALGORITHM_VERSION,
             "rotation_walk_forward_algorithm_version": (
                 ROTATION_WALK_FORWARD_VERSION
+            ),
+            "rotation_forward_algorithm_version": (
+                ROTATION_FORWARD_VERSION
+            ),
+            "rotation_forward_variant": asdict(
+                DIVERSIFIED_ROTATION_VARIANT
+            ),
+            "rotation_forward_registration_policy": (
+                "previous-month-final-session-signal/"
+                "next-month-first-session-open/equal-weight/"
+                "estimated-round-trip-cost"
             ),
             "rotation_walk_forward_history_bars": (
                 _ROTATION_EVALUATION_HISTORY_BARS

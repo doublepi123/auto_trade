@@ -214,10 +214,11 @@ def test_universe_endpoints_return_typed_snapshot(
         assert items["AAPL.US"]["shadow_enabled"] is False
         rotation = items["AAPL.US"]["metrics"]["rotation"]
         assert rotation["algorithm_version"] == (
-            "index-momentum-12-1-diversified-shadow-v2"
+            "index-momentum-12-1-diversified-monthly-shadow-v3"
         )
         assert rotation["selected"] is False
         assert rotation["exclusion_reasons"] == [
+            "DATA_INSUFFICIENT_DAILY_BARS",
             "ROTATION_HISTORY_INSUFFICIENT"
         ]
 

@@ -11,9 +11,9 @@ from app.core.market_calendar import get_session
 from app.domain.universe_selection.catalog import IndexCandidate
 
 
-UNIVERSE_ALGORITHM_VERSION = "index-liquidity-opportunity-v9"
+UNIVERSE_ALGORITHM_VERSION = "index-liquidity-opportunity-v10"
 ROTATION_ALGORITHM_VERSION = (
-    "index-momentum-12-1-diversified-shadow-v2"
+    "index-momentum-12-1-diversified-monthly-shadow-v3"
 )
 _DAILY_BAR_FINALIZATION_DELAY = timedelta(minutes=15)
 
