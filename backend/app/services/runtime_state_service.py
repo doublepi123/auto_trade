@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
 from app.core.engine import EngineState, StrategyEngine, StrategyParams
@@ -10,6 +10,10 @@ from app.core.risk import RiskConfig, RiskController
 from app.config import settings
 
 logger = logging.getLogger("auto_trade.runtime_state")
+
+
+_PRICE_SNAPSHOT_INTERVAL = timedelta(minutes=1)
+_SNAPSHOT_FLOAT_TOLERANCE = 1e-9
 
 
 def hard_ceiling_float(value: object, hard_value: float) -> float:
@@ -158,9 +162,11 @@ class RuntimeStateService:
         runtime_state.last_trigger_price = engine.last_trigger_price
         runtime_state.last_trigger_at = engine.last_trigger_at
         runtime_state.long_entry_rearm_required = engine.long_entry_rearm_required
-        runtime_state.updated_at = datetime.now(timezone.utc)
+        captured_at = datetime.now(timezone.utc)
+        runtime_state.updated_at = captured_at
         db.add(runtime_state)
-        db.add(
+        self._stage_snapshot_if_needed(
+            db,
             RuntimeStateSnapshot(
                 symbol=primary_symbol,
                 engine_state=engine.state.value,
@@ -172,7 +178,8 @@ class RuntimeStateService:
                 last_trigger_price=engine.last_trigger_price,
                 execution_state=runtime_state.execution_state or "IDLE",
                 reduction_reason=runtime_state.reduction_reason or "",
-            )
+                created_at=captured_at,
+            ),
         )
 
     def persist_risk(self, db: Any, risk: RiskController, *, symbol: str = "") -> None:
@@ -213,24 +220,65 @@ class RuntimeStateService:
         )
 
     def persist_symbol(self, db: Any, engine: StrategyEngine, symbol: str | None = None, risk: RiskController | None = None) -> None:
-        from app.services.strategy_service import StrategyService
+        self.stage_symbol(db, engine, symbol=symbol, risk=risk)
+        db.commit()
+
+    def stage_symbol(
+        self,
+        db: Any,
+        engine: StrategyEngine,
+        symbol: str | None = None,
+        risk: RiskController | None = None,
+    ) -> None:
+        """Stage one secondary runtime for a caller-managed transaction."""
+        from app.models import RuntimeState, RuntimeStateSnapshot
 
         runtime_symbol = (symbol if symbol is not None else engine.params.symbol or "").strip().upper()
-        StrategyService(db).update_runtime_state(
-            symbol=runtime_symbol,
-            engine_state=engine.state.value,
-            last_price=engine.last_price,
-            last_trigger_price=engine.last_trigger_price,
-            last_trigger_at=engine.last_trigger_at,
-            long_entry_rearm_required=engine.long_entry_rearm_required,
+        runtime_state = db.query(RuntimeState).filter(
+            RuntimeState.symbol == runtime_symbol
+        ).first()
+        if runtime_state is None:
+            runtime_state = RuntimeState(symbol=runtime_symbol)
+        captured_at = datetime.now(timezone.utc)
+        runtime_state.engine_state = engine.state.value
+        runtime_state.last_price = engine.last_price
+        runtime_state.last_trigger_price = engine.last_trigger_price
+        runtime_state.last_trigger_at = engine.last_trigger_at
+        runtime_state.long_entry_rearm_required = (
+            engine.long_entry_rearm_required
         )
-        self.record_snapshot(db, engine, risk or RiskController(), symbol=runtime_symbol)
+        runtime_state.updated_at = captured_at
+        db.add(runtime_state)
+
+        snapshot_risk = risk or RiskController()
+        self._stage_snapshot_if_needed(
+            db,
+            RuntimeStateSnapshot(
+                symbol=runtime_symbol,
+                engine_state=engine.state.value,
+                paused=snapshot_risk.paused,
+                kill_switch=snapshot_risk.kill_switch,
+                daily_pnl=snapshot_risk.daily_pnl,
+                consecutive_losses=snapshot_risk.consecutive_losses,
+                last_price=engine.last_price,
+                last_trigger_price=engine.last_trigger_price,
+                execution_state=(
+                    getattr(runtime_state, "execution_state", "IDLE")
+                    or "IDLE"
+                ),
+                reduction_reason=(
+                    getattr(runtime_state, "reduction_reason", "") or ""
+                ),
+                created_at=captured_at,
+            ),
+        )
 
     def record_snapshot(self, db: Any, engine: StrategyEngine, risk: RiskController, *, symbol: str = "") -> None:
         from app.models import RuntimeStateSnapshot
         from app.services.strategy_service import StrategyService
 
         runtime_state = StrategyService(db).get_runtime_state(symbol=symbol)
+        captured_at = datetime.now(timezone.utc)
 
         snapshot = RuntimeStateSnapshot(
             symbol=symbol,
@@ -243,9 +291,75 @@ class RuntimeStateService:
             last_trigger_price=engine.last_trigger_price,
             execution_state=getattr(runtime_state, "execution_state", "IDLE"),
             reduction_reason=getattr(runtime_state, "reduction_reason", ""),
+            created_at=captured_at,
         )
-        db.add(snapshot)
+        self._stage_snapshot_if_needed(db, snapshot)
         db.commit()
+
+    @classmethod
+    def _stage_snapshot_if_needed(
+        cls,
+        db: Any,
+        candidate: Any,
+    ) -> bool:
+        """Keep state transitions immediately and coalesce quote-only churn."""
+        from app.models import RuntimeStateSnapshot
+
+        latest = (
+            db.query(RuntimeStateSnapshot)
+            .filter(RuntimeStateSnapshot.symbol == candidate.symbol)
+            .order_by(RuntimeStateSnapshot.id.desc())
+            .first()
+        )
+        if not cls._should_record_snapshot(latest, candidate):
+            return False
+        db.add(candidate)
+        return True
+
+    @classmethod
+    def _should_record_snapshot(
+        cls,
+        latest: Any | None,
+        candidate: Any,
+    ) -> bool:
+        if latest is None:
+            return True
+        if (
+            latest.engine_state != candidate.engine_state
+            or latest.paused != candidate.paused
+            or latest.kill_switch != candidate.kill_switch
+            or not cls._same_snapshot_number(
+                latest.daily_pnl,
+                candidate.daily_pnl,
+            )
+            or latest.consecutive_losses != candidate.consecutive_losses
+            or not cls._same_snapshot_number(
+                latest.last_trigger_price,
+                candidate.last_trigger_price,
+            )
+            or latest.execution_state != candidate.execution_state
+            or latest.reduction_reason != candidate.reduction_reason
+        ):
+            return True
+        if cls._same_snapshot_number(latest.last_price, candidate.last_price):
+            return False
+        latest_at = _coerce_datetime(latest.created_at)
+        candidate_at = _coerce_datetime(candidate.created_at)
+        if latest_at is None or candidate_at is None:
+            return True
+        return candidate_at - latest_at >= _PRICE_SNAPSHOT_INTERVAL
+
+    @staticmethod
+    def _same_snapshot_number(left: Any, right: Any) -> bool:
+        try:
+            return math.isclose(
+                float(left),
+                float(right),
+                rel_tol=0.0,
+                abs_tol=_SNAPSHOT_FLOAT_TOLERANCE,
+            )
+        except (TypeError, ValueError, OverflowError):
+            return left == right
 
     def load_reduction(self, db: Any, *, symbol: str) -> dict[str, Any] | None:
         from app.services.strategy_service import StrategyService

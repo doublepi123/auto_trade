@@ -324,6 +324,72 @@ class TestRuntimeStateService:
         assert points[0].last_price == 221.5
         assert points[0].daily_pnl == 12.25
 
+    def test_persist_coalesces_unchanged_and_quote_only_snapshot_churn(
+        self,
+    ) -> None:
+        self._cleanup()
+        engine = StrategyEngine(
+            StrategyParams(symbol="NVDA.US", market="US")
+        )
+        engine.last_price = 221.5
+        risk = RiskController()
+        state_svc = RuntimeStateService()
+
+        db = self._get_db()
+        try:
+            state_svc.persist(db, engine, risk)
+            state_svc.persist(db, engine, risk)
+            engine.last_price = 221.75
+            state_svc.persist(db, engine, risk)
+
+            snapshots = db.query(RuntimeStateSnapshot).filter(
+                RuntimeStateSnapshot.symbol == "NVDA.US"
+            ).all()
+            runtime = StrategyService(db).get_runtime_state(
+                symbol="NVDA.US"
+            )
+        finally:
+            db.close()
+
+        assert len(snapshots) == 1
+        assert snapshots[0].last_price == 221.5
+        assert runtime.last_price == 221.75
+
+    def test_persist_samples_changed_price_after_one_minute(self) -> None:
+        from datetime import datetime, timedelta, timezone
+
+        self._cleanup()
+        engine = StrategyEngine(
+            StrategyParams(symbol="NVDA.US", market="US")
+        )
+        engine.last_price = 221.5
+        risk = RiskController()
+        state_svc = RuntimeStateService()
+
+        db = self._get_db()
+        try:
+            state_svc.persist(db, engine, risk)
+            first = db.query(RuntimeStateSnapshot).filter(
+                RuntimeStateSnapshot.symbol == "NVDA.US"
+            ).one()
+            first.created_at = datetime.now(timezone.utc) - timedelta(
+                minutes=2
+            )
+            db.commit()
+
+            engine.last_price = 222.0
+            state_svc.persist(db, engine, risk)
+            snapshots = (
+                db.query(RuntimeStateSnapshot)
+                .filter(RuntimeStateSnapshot.symbol == "NVDA.US")
+                .order_by(RuntimeStateSnapshot.id.asc())
+                .all()
+            )
+        finally:
+            db.close()
+
+        assert [point.last_price for point in snapshots] == [221.5, 222.0]
+
     def test_query_history_returns_points_in_time_order(self) -> None:
         self._cleanup()
         from datetime import datetime, timezone
@@ -402,6 +468,38 @@ class TestRuntimeStateService:
         assert nvda.last_price == 222.5
         assert aapl.engine_state == "short"
         assert aapl.last_price == 199.5
+
+    def test_stage_symbol_keeps_multiple_runtimes_in_caller_transaction(
+        self,
+    ) -> None:
+        self._cleanup()
+        nvda_engine = StrategyEngine(
+            StrategyParams(symbol="NVDA.US", market="US")
+        )
+        nvda_engine.last_price = 222.5
+        aapl_engine = StrategyEngine(
+            StrategyParams(symbol="AAPL.US", market="US")
+        )
+        aapl_engine.last_price = 199.5
+
+        state_svc = RuntimeStateService()
+        db = self._get_db()
+        try:
+            state_svc.stage_symbol(db, nvda_engine)
+            state_svc.stage_symbol(db, aapl_engine)
+            db.flush()
+            assert db.query(RuntimeState).count() == 2
+            assert db.query(RuntimeStateSnapshot).count() == 2
+            db.rollback()
+        finally:
+            db.close()
+
+        db = self._get_db()
+        try:
+            assert db.query(RuntimeState).count() == 0
+            assert db.query(RuntimeStateSnapshot).count() == 0
+        finally:
+            db.close()
 
     def test_query_history_filters_by_symbol(self) -> None:
         self._cleanup()

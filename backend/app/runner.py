@@ -3894,7 +3894,7 @@ class AppRunner:
                 logger.exception("error resubscribing stale quote stream")
             try:
                 with self._db_session() as db:
-                    self._state_svc.persist(db, self.engine, self.risk)
+                    self._state_svc.stage(db, self.engine, self.risk)
                     with self._state_lock:
                         secondary_runtimes = [
                             runtime
@@ -3902,7 +3902,12 @@ class AppRunner:
                             if symbol != self.engine.params.symbol
                         ]
                     for runtime in secondary_runtimes:
-                        self._state_svc.persist_symbol(db, runtime.engine, runtime.symbol)
+                        self._state_svc.stage_symbol(
+                            db,
+                            runtime.engine,
+                            runtime.symbol,
+                        )
+                    db.commit()
             except Exception:
                 logger.exception("error persisting state")
             time.sleep(5)
