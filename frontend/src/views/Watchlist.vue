@@ -2954,6 +2954,10 @@ onUnmounted(() => {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .rotation-forward-metrics div:last-child {
+    grid-column: 1 / -1;
+  }
+
   .rotation-forward-footer strong {
     text-align: left;
   }
