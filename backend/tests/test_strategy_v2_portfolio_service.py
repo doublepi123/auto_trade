@@ -171,6 +171,8 @@ class TestStrategyV2PortfolioService:
         close_price: float = 100,
         vwap_1m: float | None = None,
         vwap_5m: float | None = None,
+        zscore_1m: float | None = None,
+        zscore_5m: float | None = None,
     ) -> StrategyV2ShadowDecision:
         features: dict[str, float] = {}
         if vwap_1m is not None:
@@ -188,7 +190,9 @@ class TestStrategyV2PortfolioService:
             action="SUBMIT_ENTRY",
             close_price=close_price,
             vwap_1m=vwap_1m,
+            zscore_1m=zscore_1m,
             vwap_5m=vwap_5m,
+            zscore_5m=zscore_5m,
             features_json=json.dumps(features),
         )
         db.add(row)
@@ -299,7 +303,7 @@ class TestStrategyV2PortfolioService:
             registrations = db.query(
                 StrategyV2PortfolioRegistration
             ).all()
-            assert len(registrations) == 13
+            assert len(registrations) == 14
             assert {
                 row.eligible_after.replace(tzinfo=timezone.utc)
                 for row in registrations
@@ -329,6 +333,11 @@ class TestStrategyV2PortfolioService:
                 if row.policy
                 == "SELECTED_SECTOR_LOO_OBS_75BPS_POOL"
             )
+            selected_zscore = next(
+                row
+                for row in registrations
+                if row.policy == "SELECTED_ZSCORE_OBS_75BPS_POOL"
+            )
             assert risk_group_v1.evaluator_digest == (
                 "9fa13dbedfbeb508e4b3ecca23d1a63c7"
                 "fe6c559dc71356922dda4c11528806e"
@@ -344,6 +353,10 @@ class TestStrategyV2PortfolioService:
             assert (
                 selected_sector_loo.evaluator_digest
                 != sector_loo.evaluator_digest
+            )
+            assert selected_zscore.evaluator_digest == (
+                "4935c83dc7d73e9a1335fd9f8b6205c3"
+                "565790ba517d1fd0db53c4a8fbe32157"
             )
             assert db.query(
                 StrategyV2PortfolioObservation
@@ -374,7 +387,7 @@ class TestStrategyV2PortfolioService:
             )
             report = service.get_report("NVDA.US")
 
-            assert len(report.variants) == 13
+            assert len(report.variants) == 14
             assert sum(
                 row.algorithm_version.endswith("-v2")
                 for row in report.variants
@@ -560,6 +573,7 @@ class TestStrategyV2PortfolioService:
                 "RISK_GROUP_LOO_OBS_75BPS_POOL": "",
                 "SECTOR_LOO_OBS_75BPS_POOL": "",
                 "SELECTED_SECTOR_LOO_OBS_75BPS_POOL": "",
+                "SELECTED_ZSCORE_OBS_75BPS_POOL": "",
             }
 
             self._signal(
@@ -576,7 +590,7 @@ class TestStrategyV2PortfolioService:
                 StrategyV2PortfolioObservation.signal_at
                 == _FIRST_SIGNAL + timedelta(minutes=2)
             ).all()
-            assert len(overlap_rows) == 13
+            assert len(overlap_rows) == 14
             registrations_by_id = {
                 row.id: row.policy
                 for row in db.query(
@@ -603,6 +617,7 @@ class TestStrategyV2PortfolioService:
                 "SELECTED_SECTOR_LOO_OBS_75BPS_POOL": (
                     "NO_ELIGIBLE"
                 ),
+                "SELECTED_ZSCORE_OBS_75BPS_POOL": "NO_ELIGIBLE",
             }
 
             exit_at = _FIRST_SIGNAL + timedelta(minutes=5)
@@ -898,6 +913,7 @@ class TestStrategyV2PortfolioService:
                 "RISK_GROUP_LOO_OBS_75BPS_POOL",
                 "SECTOR_LOO_OBS_75BPS_POOL",
                 "SELECTED_SECTOR_LOO_OBS_75BPS_POOL",
+                "SELECTED_ZSCORE_OBS_75BPS_POOL",
             ):
                 observation = db.query(
                     StrategyV2PortfolioObservation
@@ -1049,6 +1065,77 @@ class TestStrategyV2PortfolioService:
                 fixed_band_variant.edge_filter
                 == "OBSERVED_COST_TO_75BPS_VWAP_DISCOUNT"
             )
+
+    def test_selected_zscore_route_uses_frozen_standardized_edge(
+        self,
+    ) -> None:
+        with self._db() as db:
+            service = StrategyV2PortfolioService(db)
+            self._register(service)
+            self._universe(db)
+            for symbol in ("AAPL.US", "MSFT.US"):
+                self._version(db, symbol)
+                self._quant(
+                    db,
+                    symbol,
+                    "WATCH",
+                    49,
+                    estimated_cost_bps=20,
+                )
+            self._signal(
+                db,
+                "AAPL.US",
+                _FIRST_SIGNAL,
+                close_price=99.55,
+                vwap_1m=100,
+                vwap_5m=100.05,
+                zscore_1m=-2.4,
+                zscore_5m=-1.6,
+            )
+            self._signal(
+                db,
+                "MSFT.US",
+                _FIRST_SIGNAL,
+                close_price=99.4,
+                vwap_1m=100,
+                vwap_5m=100.05,
+                zscore_1m=-1.8,
+                zscore_5m=-1.2,
+            )
+
+            service.advance(
+                now=_FIRST_SIGNAL + timedelta(minutes=3)
+            )
+
+            registration = db.query(
+                StrategyV2PortfolioRegistration
+            ).filter(
+                StrategyV2PortfolioRegistration.policy
+                == "SELECTED_ZSCORE_OBS_75BPS_POOL"
+            ).one()
+            observation = db.query(
+                StrategyV2PortfolioObservation
+            ).filter(
+                StrategyV2PortfolioObservation.registration_id
+                == registration.id
+            ).one()
+            assert observation.status == "PENDING_ENTRY"
+            assert observation.selected_symbol == "AAPL.US"
+            candidates = json.loads(observation.candidates_json)
+            assert [row["symbol"] for row in candidates] == [
+                "AAPL.US",
+                "MSFT.US",
+            ]
+            assert candidates[0]["zscore_1m"] == -2.4
+            assert candidates[0]["zscore_5m"] == -1.6
+            assert candidates[0]["observed_round_trip_cost_bps"] == 20
+
+            variant = next(
+                row
+                for row in service.get_report("NVDA.US").variants
+                if row.policy == "SELECTED_ZSCORE_OBS_75BPS_POOL"
+            )
+            assert variant.edge_filter == "ZSCORE_OBS_COST_TO_75BPS"
 
     def test_risk_group_routes_use_causal_inclusive_and_leave_one_out_medians(
         self,

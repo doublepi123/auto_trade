@@ -118,6 +118,13 @@ _ROUTING_SPECS = (
             "observed-cost-75bps-v1"
         ),
     ),
+    _RoutingSpec(
+        policy="SELECTED_ZSCORE_OBS_75BPS_POOL",
+        algorithm_version=(
+            "strategy-v2-portfolio-selected-zscore-observed-cost-"
+            "75bps-v1"
+        ),
+    ),
 )
 _EVALUATOR_VERSION = "strategy-v2-single-capital-slot-forward-router-v2"
 _CURRENT_ROUTING_ALGORITHM_VERSIONS = tuple(
@@ -136,6 +143,9 @@ _OBSERVED_COST_TO_STOP_VWAP_EDGE_POLICIES = {
 }
 _OBSERVED_COST_TO_75BPS_VWAP_EDGE_POLICIES = {
     "VWAP_EDGE_OBS_COST_75BPS_POOL",
+}
+_ZSCORE_OBSERVED_COST_POLICIES = {
+    "SELECTED_ZSCORE_OBS_75BPS_POOL",
 }
 _RISK_GROUP_INCLUDED_OBSERVED_COST_POLICIES = {
     "RISK_GROUP_REL_OBS_75BPS_POOL",
@@ -156,6 +166,7 @@ _OBSERVED_COST_VWAP_EDGE_POLICIES = (
     _OBSERVED_COST_TO_STOP_VWAP_EDGE_POLICIES
     | _OBSERVED_COST_TO_75BPS_VWAP_EDGE_POLICIES
     | _RELATIVE_OBSERVED_COST_POLICIES
+    | _ZSCORE_OBSERVED_COST_POLICIES
 )
 _OBSERVED_COST_MAX_AGE = timedelta(minutes=60)
 _ENTRY_BIND_TIMEOUT = timedelta(minutes=10)
@@ -404,6 +415,10 @@ class StrategyV2PortfolioService:
                             registration.policy
                             in _RELATIVE_OBSERVED_COST_POLICIES
                         ),
+                        include_zscore=(
+                            registration.policy
+                            in _ZSCORE_OBSERVED_COST_POLICIES
+                        ),
                     )
                     for item in ranked
                 ],
@@ -573,6 +588,8 @@ class StrategyV2PortfolioService:
                     if vwap_edge is not None
                     else None
                 ),
+                zscore_1m=decision.zscore_1m,
+                zscore_5m=decision.zscore_5m,
                 round_trip_cost_bps=(
                     vwap_edge[2]
                     if vwap_edge is not None
@@ -1299,34 +1316,38 @@ class StrategyV2PortfolioService:
             registered_at=registration.registered_at,
             eligible_after=registration.eligible_after,
             edge_filter=(
-                "SECTOR_LOO_OBS_COST_TO_75BPS"
-                if registration.policy
-                in _SECTOR_LEAVE_ONE_OUT_OBSERVED_COST_POLICIES
+                "ZSCORE_OBS_COST_TO_75BPS"
+                if registration.policy in _ZSCORE_OBSERVED_COST_POLICIES
                 else (
-                    "RISK_GROUP_LOO_OBS_COST_TO_75BPS"
+                    "SECTOR_LOO_OBS_COST_TO_75BPS"
                     if registration.policy
-                    in _RISK_GROUP_LEAVE_ONE_OUT_OBSERVED_COST_POLICIES
+                    in _SECTOR_LEAVE_ONE_OUT_OBSERVED_COST_POLICIES
                     else (
-                        "RISK_GROUP_REL_OBS_COST_TO_75BPS"
+                        "RISK_GROUP_LOO_OBS_COST_TO_75BPS"
                         if registration.policy
-                        in _RISK_GROUP_INCLUDED_OBSERVED_COST_POLICIES
+                        in _RISK_GROUP_LEAVE_ONE_OUT_OBSERVED_COST_POLICIES
                         else (
-                            "OBSERVED_COST_TO_STOP_VWAP_DISCOUNT"
+                            "RISK_GROUP_REL_OBS_COST_TO_75BPS"
                             if registration.policy
-                            in _OBSERVED_COST_TO_STOP_VWAP_EDGE_POLICIES
+                            in _RISK_GROUP_INCLUDED_OBSERVED_COST_POLICIES
                             else (
-                                "OBSERVED_COST_TO_75BPS_VWAP_DISCOUNT"
+                                "OBSERVED_COST_TO_STOP_VWAP_DISCOUNT"
                                 if registration.policy
-                                in _OBSERVED_COST_TO_75BPS_VWAP_EDGE_POLICIES
+                                in _OBSERVED_COST_TO_STOP_VWAP_EDGE_POLICIES
                                 else (
-                                    "COST_TO_75BPS_VWAP_DISCOUNT"
+                                    "OBSERVED_COST_TO_75BPS_VWAP_DISCOUNT"
                                     if registration.policy
-                                    in _FIXED_75BPS_VWAP_EDGE_POLICIES
+                                    in _OBSERVED_COST_TO_75BPS_VWAP_EDGE_POLICIES
                                     else (
-                                        "COST_TO_STOP_VWAP_DISCOUNT"
+                                        "COST_TO_75BPS_VWAP_DISCOUNT"
                                         if registration.policy
-                                        in _FIXED_COST_VWAP_EDGE_POLICIES
-                                        else "NONE"
+                                        in _FIXED_75BPS_VWAP_EDGE_POLICIES
+                                        else (
+                                            "COST_TO_STOP_VWAP_DISCOUNT"
+                                            if registration.policy
+                                            in _FIXED_COST_VWAP_EDGE_POLICIES
+                                            else "NONE"
+                                        )
                                     )
                                 )
                             )
@@ -1585,6 +1606,42 @@ class StrategyV2PortfolioService:
                 ],
                 "bounds": "INCLUSIVE",
             }
+        elif spec.policy in _ZSCORE_OBSERVED_COST_POLICIES:
+            payload["candidate_universe"] = (
+                "SELECTED_TRUE_IN_LATEST_COMPLETED_UNIVERSE_RUN_"
+                "BEFORE_CONTEXT_CUTOFF"
+            )
+            payload["vwap_edge_filter"] = {
+                "price_reference": "FROZEN_SIGNAL_FEATURE_RESIDUALS",
+                "minimum_discount": (
+                    "MAX_FROZEN_ROUND_TRIP_COST_AND_CAUSAL_QUANT_"
+                    "ESTIMATED_ROUND_TRIP_COST_BPS"
+                ),
+                "observed_cost_source": (
+                    "LATEST_CURRENT_QUANT_SCORE_BEFORE_CONTEXT_CUTOFF"
+                ),
+                "observed_cost_freshness": (
+                    "UNEXPIRED_AND_AT_MOST_60_MINUTES_OLD_AT_"
+                    "CONTEXT_CUTOFF"
+                ),
+                "missing_observed_cost": "FAIL_CLOSED",
+                "maximum_discount": "FIXED_ABSOLUTE_VWAP_DISCOUNT_BPS",
+                "maximum_discount_bps": VWAP_EDGE_FIXED_MAX_DISCOUNT_BPS,
+                "required_references": [
+                    "SESSION_VWAP_1M",
+                    "SESSION_VWAP_5M",
+                    "FROZEN_SIGNAL_ZSCORE_1M",
+                    "FROZEN_SIGNAL_ZSCORE_5M",
+                ],
+                "bounds": "INCLUSIVE",
+                "zscore_sign": "STRICTLY_NEGATIVE_BOTH_HORIZONS",
+                "ranking_score": (
+                    "MIN_ABSOLUTE_NEGATIVE_ZSCORE_ACROSS_1M_AND_5M"
+                ),
+                "ranking_tiebreaker": (
+                    "OBSERVED_COST_ADJUSTED_VWAP_DISCOUNT_BPS"
+                ),
+            }
         elif spec.policy in _OBSERVED_COST_TO_75BPS_VWAP_EDGE_POLICIES:
             payload["vwap_edge_filter"] = {
                 "price_reference": (
@@ -1625,6 +1682,7 @@ def _candidate_payload(
     *,
     include_observed_cost: bool,
     include_relative_adjustment: bool,
+    include_zscore: bool,
 ) -> dict[str, object]:
     payload = asdict(candidate)
     if not include_observed_cost:
@@ -1634,6 +1692,9 @@ def _candidate_payload(
         payload.pop("risk_group_peer_count", None)
         payload.pop("risk_group_relative_1m_bps", None)
         payload.pop("risk_group_relative_5m_bps", None)
+    if not include_zscore:
+        payload.pop("zscore_1m", None)
+        payload.pop("zscore_5m", None)
     return payload
 
 
@@ -1667,6 +1728,7 @@ def _routing_policy(value: str) -> PortfolioRoutingPolicy:
         "RISK_GROUP_LOO_OBS_75BPS_POOL",
         "SECTOR_LOO_OBS_75BPS_POOL",
         "SELECTED_SECTOR_LOO_OBS_75BPS_POOL",
+        "SELECTED_ZSCORE_OBS_75BPS_POOL",
     }:
         raise ValueError(f"unsupported portfolio routing policy: {value}")
     return cast(PortfolioRoutingPolicy, value)

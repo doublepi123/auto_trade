@@ -19,6 +19,7 @@ PortfolioRoutingPolicy = Literal[
     "RISK_GROUP_LOO_OBS_75BPS_POOL",
     "SECTOR_LOO_OBS_75BPS_POOL",
     "SELECTED_SECTOR_LOO_OBS_75BPS_POOL",
+    "SELECTED_ZSCORE_OBS_75BPS_POOL",
 ]
 
 VWAP_EDGE_FIXED_MAX_DISCOUNT_BPS = 75.0
@@ -40,6 +41,8 @@ class PortfolioRoutingCandidate:
     quant_confidence: float | None = None
     residual_1m_bps: float | None = None
     residual_5m_bps: float | None = None
+    zscore_1m: float | None = None
+    zscore_5m: float | None = None
     round_trip_cost_bps: float | None = None
     observed_round_trip_cost_bps: float | None = None
     stop_distance_bps: float | None = None
@@ -68,6 +71,8 @@ class PortfolioRoutingCandidate:
             self.quant_confidence,
             self.residual_1m_bps,
             self.residual_5m_bps,
+            self.zscore_1m,
+            self.zscore_5m,
             self.round_trip_cost_bps,
             self.observed_round_trip_cost_bps,
             self.stop_distance_bps,
@@ -182,6 +187,23 @@ class PortfolioRoutingCandidate:
         return self._vwap_edge_score_bps(
             cost_bps=self.effective_observed_cost_bps,
             max_discount_bps=VWAP_EDGE_FIXED_MAX_DISCOUNT_BPS,
+        )
+
+    @property
+    def zscore_observed_cost_fixed_75bps_eligible(self) -> bool:
+        if not self.observed_cost_fixed_75bps_vwap_edge_eligible:
+            return False
+        if self.zscore_1m is None or self.zscore_5m is None:
+            return False
+        return self.zscore_1m < 0 and self.zscore_5m < 0
+
+    @property
+    def zscore_observed_cost_fixed_75bps_score(self) -> float:
+        if not self.zscore_observed_cost_fixed_75bps_eligible:
+            return -1.0
+        return min(
+            -float(self.zscore_1m or 0.0),
+            -float(self.zscore_5m or 0.0),
         )
 
     @property
@@ -456,6 +478,23 @@ def rank_portfolio_candidates(
                     if candidate.selection_rank is not None
                     else 10_000
                 ),
+                candidate.symbol,
+            ),
+        ))
+    if policy == "SELECTED_ZSCORE_OBS_75BPS_POOL":
+        eligible = [
+            candidate
+            for candidate in by_symbol.values()
+            if candidate.selection_selected
+            and candidate.selection_rank is not None
+            and candidate.zscore_observed_cost_fixed_75bps_eligible
+        ]
+        return tuple(sorted(
+            eligible,
+            key=lambda candidate: (
+                -candidate.zscore_observed_cost_fixed_75bps_score,
+                -candidate.observed_cost_fixed_75bps_vwap_edge_score_bps,
+                candidate.selection_rank or 10_000,
                 candidate.symbol,
             ),
         ))

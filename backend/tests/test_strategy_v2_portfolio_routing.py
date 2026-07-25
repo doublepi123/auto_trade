@@ -21,6 +21,8 @@ def _candidate(
     confidence: float | None = None,
     residual_1m_bps: float | None = None,
     residual_5m_bps: float | None = None,
+    zscore_1m: float | None = None,
+    zscore_5m: float | None = None,
     round_trip_cost_bps: float | None = None,
     observed_round_trip_cost_bps: float | None = None,
     stop_distance_bps: float | None = None,
@@ -42,6 +44,8 @@ def _candidate(
         quant_confidence=confidence,
         residual_1m_bps=residual_1m_bps,
         residual_5m_bps=residual_5m_bps,
+        zscore_1m=zscore_1m,
+        zscore_5m=zscore_5m,
         round_trip_cost_bps=round_trip_cost_bps,
         observed_round_trip_cost_bps=observed_round_trip_cost_bps,
         stop_distance_bps=stop_distance_bps,
@@ -476,6 +480,83 @@ def test_observed_cost_fixed_75bps_pool_completes_factorial() -> None:
         item.observed_cost_fixed_75bps_vwap_edge_score_bps
         for item in ranked
     ] == [44, 36]
+
+
+def test_selected_zscore_pool_ranks_standardized_two_horizon_edge() -> None:
+    ranked = rank_portfolio_candidates(
+        [
+            _candidate(
+                "AAPL.US",
+                1,
+                selected=True,
+                rank=1,
+                residual_1m_bps=-60,
+                residual_5m_bps=-65,
+                zscore_1m=-1.8,
+                zscore_5m=-1.2,
+                round_trip_cost_bps=14,
+                observed_round_trip_cost_bps=24,
+                stop_distance_bps=45,
+            ),
+            _candidate(
+                "MSFT.US",
+                2,
+                selected=True,
+                rank=2,
+                residual_1m_bps=-45,
+                residual_5m_bps=-50,
+                zscore_1m=-2.4,
+                zscore_5m=-1.6,
+                round_trip_cost_bps=14,
+                observed_round_trip_cost_bps=20,
+                stop_distance_bps=45,
+            ),
+            _candidate(
+                "AMD.US",
+                3,
+                selected=False,
+                residual_1m_bps=-55,
+                residual_5m_bps=-60,
+                zscore_1m=-3.0,
+                zscore_5m=-2.0,
+                round_trip_cost_bps=14,
+                observed_round_trip_cost_bps=20,
+                stop_distance_bps=45,
+            ),
+            _candidate(
+                "META.US",
+                4,
+                selected=True,
+                rank=3,
+                residual_1m_bps=-55,
+                residual_5m_bps=-60,
+                round_trip_cost_bps=14,
+                observed_round_trip_cost_bps=20,
+                stop_distance_bps=45,
+            ),
+        ],
+        policy="SELECTED_ZSCORE_OBS_75BPS_POOL",
+        primary_symbol="NVDA.US",
+    )
+
+    assert [item.symbol for item in ranked] == [
+        "MSFT.US",
+        "AAPL.US",
+    ]
+    assert ranked[0].zscore_observed_cost_fixed_75bps_score == 1.6
+    assert (
+        ranked[0].observed_cost_fixed_75bps_vwap_edge_score_bps
+        == 25
+    )
+
+
+@pytest.mark.parametrize(
+    "zscore",
+    [float("inf"), float("nan")],
+)
+def test_zscore_pool_rejects_non_finite_score(zscore: float) -> None:
+    with pytest.raises(ValueError):
+        _candidate("AAPL.US", 1, zscore_1m=zscore)
 
 
 def test_risk_group_relative_pool_requires_peers_and_ranks_residual_edge() -> None:

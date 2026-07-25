@@ -2684,6 +2684,13 @@ Cypress.Commands.add('stubApi', () => {
             0.74,
             { 'AAPL.US': 3, 'MSFT.US': 2 },
           ),
+          variant(
+            14,
+            'SELECTED_ZSCORE_OBS_75BPS_POOL',
+            'ZSCORE_OBS_COST_TO_75BPS',
+            0.79,
+            { 'MSFT.US': 3, 'AAPL.US': 2 },
+          ),
         ],
       },
     })

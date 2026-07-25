@@ -2510,6 +2510,7 @@ const portfolioRoutingPolicyLabels: Record<
   RISK_GROUP_LOO_OBS_75BPS_POOL: '风险组留一残差 · 观测成本 75bp',
   SECTOR_LOO_OBS_75BPS_POOL: '细行业留一残差 · 观测成本 75bp',
   SELECTED_SECTOR_LOO_OBS_75BPS_POOL: '核心池 · 细行业留一 · 观测成本 75bp',
+  SELECTED_ZSCORE_OBS_75BPS_POOL: '核心池 · 双周期标准化偏离',
 }
 
 function portfolioRoutingPolicyLabel(
@@ -2530,6 +2531,7 @@ const portfolioRoutingEdgeLabels: Record<
   RISK_GROUP_REL_OBS_COST_TO_75BPS: '风险组残差 + 观测成本 → 75bp',
   RISK_GROUP_LOO_OBS_COST_TO_75BPS: '风险组留一残差 + 观测成本 → 75bp',
   SECTOR_LOO_OBS_COST_TO_75BPS: '细行业留一残差 + 观测成本 → 75bp',
+  ZSCORE_OBS_COST_TO_75BPS: '双周期 z-score + 观测成本 → 75bp',
 }
 
 function portfolioRoutingEdgeLabel(
