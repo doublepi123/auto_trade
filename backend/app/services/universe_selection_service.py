@@ -10,7 +10,7 @@ import uuid
 from collections import Counter
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
-from typing import Protocol, Sequence, cast
+from typing import Collection, Protocol, Sequence, cast
 
 from sqlalchemy import and_, or_, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.core.broker import BrokerCandle
+from app.domain.strategy_v2 import RISK_GROUP_RELATIVE_MIN_PEERS
 from app.domain.universe_selection import (
     CATALOG_SOURCE_VERSION,
     INDEX_CANDIDATE_CATALOG,
@@ -57,6 +58,7 @@ _RUN_WAIT_POLL_SECONDS = 0.05
 _RUN_CLAIM_LEASE_SECONDS = 300.0
 _RUN_WAIT_TIMEOUT_SECONDS = _RUN_CLAIM_LEASE_SECONDS + 30.0
 _CLAIM_PREFIX = "refresh-claim:"
+_EXPLORATION_ALGORITHM_VERSION = "risk-group-peer-benchmark-v1"
 _EXPLORATION_ELIGIBLE_REASONS = frozenset(
     {"SECTOR_CAP", "BELOW_SELECTION_CUTOFF"}
 )
@@ -111,24 +113,117 @@ class _RunClaim:
     token: str
 
 
+@dataclass(frozen=True)
+class ObservationPoolOverrides:
+    already_observed_symbols: frozenset[str]
+    unobservable_symbols: frozenset[str]
+
+
+def observation_pool_overrides(
+    db: Session,
+) -> ObservationPoolOverrides:
+    """Return durable observers and explicit operator shadow opt-outs."""
+    with db.no_autoflush:
+        strategy = (
+            db.query(StrategyConfig)
+            .order_by(StrategyConfig.id.desc())
+            .first()
+        )
+        unmanaged = (
+            db.query(StrategyV2ShadowConfig)
+            .filter(
+                StrategyV2ShadowConfig.universe_managed.is_(False),
+            )
+            .all()
+        )
+
+    already_observed = {
+        row.symbol.strip().upper()
+        for row in unmanaged
+        if row.enabled and row.symbol.strip()
+    }
+    unobservable = {
+        row.symbol.strip().upper()
+        for row in unmanaged
+        if not row.enabled and row.symbol.strip()
+    }
+    if strategy is not None and strategy.symbol.strip():
+        primary_symbol = strategy.symbol.strip().upper()
+        # The main runner observes its trading target independently of the
+        # per-symbol shadow toggle.
+        already_observed.add(primary_symbol)
+        unobservable.discard(primary_symbol)
+    return ObservationPoolOverrides(
+        already_observed_symbols=frozenset(already_observed),
+        unobservable_symbols=frozenset(unobservable),
+    )
+
+
 def select_exploration_candidates(
     items: Sequence[UniverseSelectionCandidate],
     *,
     max_symbols: int,
     max_per_sector: int,
+    already_observed_symbols: Collection[str] = (),
+    unobservable_symbols: Collection[str] = (),
+    minimum_risk_group_peers: int = RISK_GROUP_RELATIVE_MIN_PEERS,
 ) -> list[UniverseSelectionCandidate]:
-    """Choose a read-only research tier that complements the selected pool."""
+    """Choose read-only peers before filling a diversified research tier."""
     if max_symbols < 0:
         raise ValueError("exploration max_symbols must not be negative")
     if max_per_sector < 1:
         raise ValueError("exploration max_per_sector must be positive")
+    if minimum_risk_group_peers < 1:
+        raise ValueError(
+            "exploration minimum_risk_group_peers must be positive"
+        )
     if max_symbols == 0:
         return []
 
+    observed_symbols = {
+        symbol.strip().upper()
+        for symbol in already_observed_symbols
+        if symbol.strip()
+    }
+    blocked_symbols = {
+        symbol.strip().upper()
+        for symbol in unobservable_symbols
+        if symbol.strip()
+    }
+    items_by_symbol = {
+        item.symbol.strip().upper(): item
+        for item in items
+        if item.symbol.strip()
+    }
+    planned_observed_symbols = {
+        item.symbol.strip().upper()
+        for item in items
+        if (
+            item.selected
+            and item.symbol.strip().upper() not in blocked_symbols
+        )
+    } | observed_symbols
+    group_counts = Counter(
+        risk_group_for_sector(items_by_symbol[symbol].sector)
+        for symbol in planned_observed_symbols
+        if symbol in items_by_symbol
+    )
+    selected_groups = {
+        risk_group_for_sector(item.sector)
+        for item in items
+        if item.selected
+    }
+
     eligible: list[UniverseSelectionCandidate] = []
     for item in items:
+        normalized_symbol = item.symbol.strip().upper()
         score = float(item.score)
-        if item.selected or not math.isfinite(score) or score <= 0:
+        if (
+            item.selected
+            or normalized_symbol in blocked_symbols
+            or not math.isfinite(score)
+            or score <= 0
+        ):
             continue
         try:
             decoded = json.loads(item.exclusion_reasons_json)
@@ -145,18 +240,66 @@ def select_exploration_candidates(
 
     eligible.sort(key=lambda item: (-float(item.score), item.symbol))
     selected: list[UniverseSelectionCandidate] = []
-    sector_counts = Counter(
-        risk_group_for_sector(item.sector)
-        for item in items
-        if item.selected
+    selected_symbols: set[str] = set()
+    peer_target = max(
+        max_per_sector,
+        minimum_risk_group_peers,
     )
+
+    # First make selected risk groups usable by the cross-symbol residual
+    # evaluator. These are observers only and do not relax the live selection
+    # concentration limit.
     for item in eligible:
+        normalized_symbol = item.symbol.strip().upper()
+        if normalized_symbol in observed_symbols:
+            continue
         risk_group = risk_group_for_sector(item.sector)
-        if sector_counts.get(risk_group, 0) >= max_per_sector:
+        if (
+            risk_group not in selected_groups
+            or group_counts.get(risk_group, 0) >= peer_target
+        ):
             continue
         selected.append(item)
-        sector_counts[risk_group] = (
-            sector_counts.get(risk_group, 0) + 1
+        selected_symbols.add(normalized_symbol)
+        group_counts[risk_group] = (
+            group_counts.get(risk_group, 0) + 1
+        )
+        if len(selected) >= max_symbols:
+            return selected
+
+    # Durable manual observers and the active trading target retain an
+    # exploration role when they pass the exploration gates, but they do not
+    # consume peer-filling work because they were counted above.
+    for item in eligible:
+        normalized_symbol = item.symbol.strip().upper()
+        if (
+            normalized_symbol not in observed_symbols
+            or normalized_symbol in selected_symbols
+        ):
+            continue
+        selected.append(item)
+        selected_symbols.add(normalized_symbol)
+        if len(selected) >= max_symbols:
+            return selected
+
+    # Spend any remaining observer budget on broad research while retaining
+    # the normal per-risk-group diversification cap.
+    for item in eligible:
+        normalized_symbol = item.symbol.strip().upper()
+        if normalized_symbol in selected_symbols:
+            continue
+        risk_group = risk_group_for_sector(item.sector)
+        group_cap = (
+            peer_target
+            if risk_group in selected_groups
+            else max_per_sector
+        )
+        if group_counts.get(risk_group, 0) >= group_cap:
+            continue
+        selected.append(item)
+        selected_symbols.add(normalized_symbol)
+        group_counts[risk_group] = (
+            group_counts.get(risk_group, 0) + 1
         )
         if len(selected) >= max_symbols:
             break
@@ -793,10 +936,17 @@ class UniverseSelectionService:
                 items=tuple(items),
                 reason=run.error or "selection run is not complete",
             )
+        observation_overrides = observation_pool_overrides(self.db)
         exploration = select_exploration_candidates(
             items,
             max_symbols=self.exploration_max_symbols,
             max_per_sector=self.config.max_per_sector,
+            already_observed_symbols=(
+                observation_overrides.already_observed_symbols
+            ),
+            unobservable_symbols=(
+                observation_overrides.unobservable_symbols
+            ),
         )
         exploration_symbols = tuple(
             item.symbol for item in exploration
@@ -813,7 +963,12 @@ class UniverseSelectionService:
         added, removed, retained = self._reconcile_watchlist(observed)
         shadow_enabled, shadow_disabled, shadow_failures = (
             self._sync_observation_shadows(
-                observed_symbols={item.symbol for item in observed},
+                observed_symbols=(
+                    {item.symbol for item in observed}
+                    | set(
+                        observation_overrides.already_observed_symbols
+                    )
+                ),
             )
         )
         reason = "candidate and exploration watchlist reconciled"
@@ -1018,6 +1173,13 @@ class UniverseSelectionService:
         return {
             **asdict(self.config),
             "catalog_size": len(self.catalog),
+            "exploration_algorithm_version": (
+                _EXPLORATION_ALGORITHM_VERSION
+            ),
+            "exploration_max_symbols": self.exploration_max_symbols,
+            "exploration_min_risk_group_peers": (
+                RISK_GROUP_RELATIVE_MIN_PEERS
+            ),
             "minimum_evaluable_ratio": self.minimum_evaluable_ratio,
             "minimum_residency_days": self.minimum_residency_days,
         }

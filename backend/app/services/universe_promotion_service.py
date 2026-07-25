@@ -23,6 +23,7 @@ from app.services.watchlist_quant_service import (
 )
 from app.services.watchlist_score_service import WatchlistScoreService
 from app.services.universe_selection_service import (
+    observation_pool_overrides,
     select_exploration_candidates,
 )
 
@@ -161,6 +162,7 @@ class UniversePromotionService:
             .first()
         )
         trading_symbol = strategy.symbol if strategy is not None else ""
+        observation_overrides = observation_pool_overrides(self.db)
         exploration_symbols = {
             candidate.symbol
             for candidate in select_exploration_candidates(
@@ -170,6 +172,12 @@ class UniversePromotionService:
                 ),
                 max_per_sector=(
                     settings.universe_selection_max_per_sector
+                ),
+                already_observed_symbols=(
+                    observation_overrides.already_observed_symbols
+                ),
+                unobservable_symbols=(
+                    observation_overrides.unobservable_symbols
                 ),
             )
         }

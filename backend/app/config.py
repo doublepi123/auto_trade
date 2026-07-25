@@ -384,16 +384,17 @@ class Settings(BaseSettings):
         validation_alias="AUTO_TRADE_UNIVERSE_SELECTION_MAX_SYMBOLS",
     )
     universe_selection_exploration_max_symbols: int = Field(
-        default=8,
+        default=14,
         ge=0,
         le=20,
         validation_alias=(
             "AUTO_TRADE_UNIVERSE_SELECTION_EXPLORATION_MAX_SYMBOLS"
         ),
         description=(
-            "Maximum number of hard-gate-passing, non-selected candidates "
-            "added to the read-only watchlist for quant and shadow evidence. "
-            "Zero disables the exploration tier."
+            "Maximum number of hard-gate-passing, non-selected observers. "
+            "Selected risk groups are filled to the portfolio peer minimum "
+            "before remaining capacity is diversified. Zero disables the "
+            "exploration tier."
         ),
     )
     universe_selection_max_per_sector: int = Field(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 from multiprocessing import get_context
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -13,6 +14,7 @@ from app.core.broker import BrokerCandle, Quote
 from app.domain.universe_selection import (
     IndexCandidate,
     UniverseSelectionConfig,
+    risk_group_for_sector,
 )
 from app.models import (
     Base,
@@ -26,6 +28,7 @@ from app.models import (
 from app.schemas import StrategyV2ShadowConfigUpdate
 from app.services.universe_selection_service import (
     UniverseSelectionService,
+    observation_pool_overrides,
     select_exploration_candidates,
 )
 
@@ -315,7 +318,7 @@ def test_exploration_candidates_are_diverse_hard_gate_passers() -> None:
     ]
 
 
-def test_exploration_candidates_count_selected_sector_exposure() -> None:
+def test_exploration_candidates_prioritize_selected_risk_group_peers() -> None:
     def candidate(
         symbol: str,
         sector: str,
@@ -357,7 +360,156 @@ def test_exploration_candidates_count_selected_sector_exposure() -> None:
         max_per_sector=1,
     )
 
-    assert [item.symbol for item in selected] == ["GOOGL.US"]
+    assert [item.symbol for item in selected] == [
+        "MSFT.US",
+        "INTC.US",
+    ]
+
+
+def test_exploration_candidates_reuse_durable_observers() -> None:
+    def candidate(
+        symbol: str,
+        sector: str,
+        score: float,
+        *,
+        selected: bool = False,
+    ) -> UniverseSelectionCandidate:
+        return UniverseSelectionCandidate(
+            run_id=1,
+            symbol=symbol,
+            market="US",
+            alias=symbol,
+            sector=sector,
+            memberships_json='["NASDAQ_100"]',
+            selected=selected,
+            score=score,
+            metrics_json="{}",
+            exclusion_reasons_json=json.dumps(
+                [] if selected else ["SECTOR_CAP"]
+            ),
+            created_at=_NOW,
+        )
+
+    items = [
+        candidate("AMD.US", "Semiconductors", 95, selected=True),
+        candidate("MSFT.US", "Software", 92),
+        candidate("INTC.US", "Semiconductors", 90),
+        candidate("GOOGL.US", "Communication Services", 80),
+    ]
+
+    selected = select_exploration_candidates(
+        items,
+        max_symbols=3,
+        max_per_sector=1,
+        already_observed_symbols={"MSFT.US"},
+    )
+
+    assert [item.symbol for item in selected] == [
+        "INTC.US",
+        "MSFT.US",
+        "GOOGL.US",
+    ]
+
+
+def test_observation_pool_overrides_separate_durable_and_opt_out() -> None:
+    db = _db()
+    try:
+        db.add(StrategyConfig(symbol="NVDA.US", market="US"))
+        db.add_all(
+            [
+                StrategyV2ShadowConfig(
+                    symbol="MRVL.US",
+                    enabled=True,
+                    universe_managed=False,
+                ),
+                StrategyV2ShadowConfig(
+                    symbol="TER.US",
+                    enabled=False,
+                    universe_managed=False,
+                ),
+                StrategyV2ShadowConfig(
+                    symbol="AAPL.US",
+                    enabled=True,
+                    universe_managed=True,
+                ),
+            ]
+        )
+        db.commit()
+
+        overrides = observation_pool_overrides(db)
+
+        assert overrides.already_observed_symbols == frozenset(
+            {"NVDA.US", "MRVL.US"}
+        )
+        assert overrides.unobservable_symbols == frozenset({"TER.US"})
+    finally:
+        db.close()
+
+
+def test_exploration_candidates_fill_every_selected_risk_group() -> None:
+    def candidate(
+        symbol: str,
+        sector: str,
+        score: float,
+        *,
+        selected: bool = False,
+    ) -> UniverseSelectionCandidate:
+        return UniverseSelectionCandidate(
+            run_id=1,
+            symbol=symbol,
+            market="US",
+            alias=symbol,
+            sector=sector,
+            memberships_json='["NASDAQ_100"]',
+            selected=selected,
+            score=score,
+            metrics_json="{}",
+            exclusion_reasons_json=json.dumps(
+                [] if selected else ["BELOW_SELECTION_CUTOFF"]
+            ),
+            created_at=_NOW,
+        )
+
+    items = [
+        candidate("AMD.US", "Semiconductors", 99, selected=True),
+        candidate("AMAT.US", "Semiconductors", 98, selected=True),
+        candidate("JPM.US", "Financials", 97, selected=True),
+        candidate("GS.US", "Financials", 96, selected=True),
+        candidate("CVX.US", "Energy", 95, selected=True),
+        candidate("CEG.US", "Utilities", 94, selected=True),
+        candidate("V.US", "Financials", 93),
+        candidate("BKR.US", "Energy", 92),
+        candidate("XOM.US", "Energy", 91),
+        candidate("AEP.US", "Utilities", 90),
+        candidate("XEL.US", "Utilities", 89),
+        candidate("LIN.US", "Materials", 88),
+        candidate("NVDA.US", "Technology Hardware", 87),
+    ]
+
+    exploration = select_exploration_candidates(
+        items,
+        max_symbols=6,
+        max_per_sector=2,
+        already_observed_symbols={"NVDA.US"},
+    )
+
+    observed = {
+        item.symbol
+        for item in items
+        if item.selected
+    } | {"NVDA.US"} | {item.symbol for item in exploration}
+    sector_by_symbol = {item.symbol: item.sector for item in items}
+    counts = Counter(
+        risk_group_for_sector(sector_by_symbol[symbol])
+        for symbol in observed
+    )
+    selected_groups = {
+        risk_group_for_sector(item.sector)
+        for item in items
+        if item.selected
+    }
+    assert all(counts[group] >= 3 for group in selected_groups)
+    assert "LIN.US" not in {item.symbol for item in exploration}
 
 
 def test_refresh_reconciles_exploration_into_read_only_evidence() -> None:
@@ -409,7 +561,7 @@ def test_refresh_reconciles_exploration_into_read_only_evidence() -> None:
             item.symbol for item in result.items if item.selected
         }
         assert len(selected_symbols) == 1
-        assert result.exploration_symbols == ("JPM.US",)
+        assert result.exploration_symbols == ("AAPL.US", "JPM.US")
         assert selected_symbols.isdisjoint(result.exploration_symbols)
         assert {
             row.symbol for row in db.query(WatchlistItem).all()

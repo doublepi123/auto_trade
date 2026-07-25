@@ -27,6 +27,7 @@ from app.services.universe_promotion_service import UniversePromotionService
 from app.services.universe_selection_service import (
     UniverseRefreshResult,
     UniverseSelectionService,
+    observation_pool_overrides,
     select_exploration_candidates,
 )
 
@@ -73,6 +74,7 @@ def _run_response(
         .filter(StrategyV2ShadowConfig.enabled.is_(True))
         .all()
     }
+    observation_overrides = observation_pool_overrides(db)
     exploration_symbols = (
         {
             item.symbol
@@ -83,6 +85,12 @@ def _run_response(
                 ),
                 max_per_sector=(
                     settings.universe_selection_max_per_sector
+                ),
+                already_observed_symbols=(
+                    observation_overrides.already_observed_symbols
+                ),
+                unobservable_symbols=(
+                    observation_overrides.unobservable_symbols
                 ),
             )
         }
