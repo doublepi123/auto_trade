@@ -902,6 +902,60 @@ class StrategyV2ExitChallengerReport(BaseModel):
     variants: list[StrategyV2ExitChallengerVariant] = Field(default_factory=list)
 
 
+class StrategyV2BracketChallengerVariant(BaseModel):
+    registration_id: int
+    algorithm_version: str
+    source_config_version: str
+    evaluator_digest: str
+    stop_loss_pct: float
+    profit_target_pct: float
+    slippage_bps: float
+    estimated_fee_rate: float
+    max_holding_minutes: int
+    flatten_minutes_before_close: int
+    estimated_round_trip_cost_pct: float
+    estimated_net_reward_risk_ratio: float
+    registered_at: datetime
+    eligible_after: datetime
+    status: Literal["COLLECTING", "READY_FOR_REVIEW", "MATURE_EVIDENCE"]
+    paired_trades: int = 0
+    open_trades: int = 0
+    awaiting_baseline_trades: int = 0
+    changed_exits: int = 0
+    exit_reasons: dict[str, int] = Field(default_factory=dict)
+    baseline_exit_reasons: dict[str, int] = Field(default_factory=dict)
+    improved_trades: int = 0
+    worsened_trades: int = 0
+    unchanged_trades: int = 0
+    baseline_win_rate: float = 0.0
+    challenger_win_rate: float = 0.0
+    baseline_net_pnl: float = 0.0
+    challenger_net_pnl: float = 0.0
+    net_pnl_delta: float = 0.0
+    mean_net_pnl_delta: float = 0.0
+    baseline_max_drawdown: float = 0.0
+    challenger_max_drawdown: float = 0.0
+    minimum_ready_pairs: Literal[20] = 20
+    minimum_mature_pairs: Literal[50] = 50
+    minimum_changed_exits: Literal[5] = 5
+    promotion_ready: bool = False
+    blockers: list[str] = Field(default_factory=list)
+
+
+class StrategyV2BracketChallengerReport(BaseModel):
+    symbol: str
+    mode: Literal["SHADOW"] = "SHADOW"
+    order_submission_allowed: Literal[False] = False
+    automatic_promotion_allowed: Literal[False] = False
+    historical_backfill_allowed: Literal[False] = False
+    evaluation_scope: Literal[
+        "FORWARD_OUT_OF_SAMPLE"
+    ] = "FORWARD_OUT_OF_SAMPLE"
+    variants: list[StrategyV2BracketChallengerVariant] = Field(
+        default_factory=list
+    )
+
+
 class LiveExitChallengerVariant(BaseModel):
     registration_id: int
     algorithm_version: str

@@ -812,6 +812,7 @@ def _strategy_v2_shadow_tick_sync() -> None:
     """Advance every active Strategy v2 simulator without touching orders."""
     from app.core.market_calendar import market_for_symbol
     from app.models import (
+        StrategyV2BracketChallengerTrade,
         StrategyV2ForwardRegistration,
         StrategyV2ShadowConfig,
         StrategyV2ShadowTrade,
@@ -833,8 +834,18 @@ def _strategy_v2_shadow_tick_sync() -> None:
         open_symbols = db.query(StrategyV2ShadowTrade.symbol).filter(
             StrategyV2ShadowTrade.status == "OPEN"
         ).distinct().all()
+        open_bracket_symbols = db.query(
+            StrategyV2BracketChallengerTrade.symbol
+        ).filter(
+            StrategyV2BracketChallengerTrade.status == "OPEN"
+        ).distinct().all()
         registered_symbols = db.query(StrategyV2ForwardRegistration.symbol).all()
-        for (symbol,) in (*enabled_symbols, *open_symbols, *registered_symbols):
+        for (symbol,) in (
+            *enabled_symbols,
+            *open_symbols,
+            *open_bracket_symbols,
+            *registered_symbols,
+        ):
             targets.setdefault(symbol, market_for_symbol(symbol))
         if not targets:
             return

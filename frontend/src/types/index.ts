@@ -1889,6 +1889,56 @@ export interface StrategyShadowEvaluation {
   daily: StrategyShadowDailyEvidence[]
 }
 
+export interface StrategyShadowBracketChallengerVariant {
+  registration_id: number
+  algorithm_version: string
+  source_config_version: string
+  evaluator_digest: string
+  stop_loss_pct: number
+  profit_target_pct: number
+  slippage_bps: number
+  estimated_fee_rate: number
+  max_holding_minutes: number
+  flatten_minutes_before_close: number
+  estimated_round_trip_cost_pct: number
+  estimated_net_reward_risk_ratio: number
+  registered_at: string
+  eligible_after: string
+  status: 'COLLECTING' | 'READY_FOR_REVIEW' | 'MATURE_EVIDENCE'
+  paired_trades: number
+  open_trades: number
+  awaiting_baseline_trades: number
+  changed_exits: number
+  exit_reasons: Record<string, number>
+  baseline_exit_reasons: Record<string, number>
+  improved_trades: number
+  worsened_trades: number
+  unchanged_trades: number
+  baseline_win_rate: number
+  challenger_win_rate: number
+  baseline_net_pnl: number
+  challenger_net_pnl: number
+  net_pnl_delta: number
+  mean_net_pnl_delta: number
+  baseline_max_drawdown: number
+  challenger_max_drawdown: number
+  minimum_ready_pairs: 20
+  minimum_mature_pairs: 50
+  minimum_changed_exits: 5
+  promotion_ready: boolean
+  blockers: string[]
+}
+
+export interface StrategyShadowBracketChallengerReport {
+  symbol: string
+  mode: StrategyShadowMode
+  order_submission_allowed: false
+  automatic_promotion_allowed: false
+  historical_backfill_allowed: false
+  evaluation_scope: 'FORWARD_OUT_OF_SAMPLE'
+  variants: StrategyShadowBracketChallengerVariant[]
+}
+
 export interface StrategyShadowAdxChallengerRequest {
   symbol: string
   config_version?: string

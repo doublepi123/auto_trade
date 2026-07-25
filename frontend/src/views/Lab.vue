@@ -773,6 +773,97 @@
               </div>
             </section>
 
+            <section
+              class="shadow-section"
+              data-testid="shadow-bracket-challengers"
+            >
+              <div class="shadow-section-header">
+                <div>
+                  <h3>止损 / 止盈前向对照</h3>
+                  <small>
+                    {{ shortVersion(selectedShadowVersion) }} ·
+                    仅纳入注册后的新交易，同一分钟双触发按止损计
+                  </small>
+                </div>
+                <div class="shadow-tags">
+                  <el-tag effect="plain">只读影子</el-tag>
+                  <el-tag type="warning" effect="plain">不自动应用</el-tag>
+                </div>
+              </div>
+              <el-alert
+                v-if="shadowBracketError"
+                :title="shadowBracketError"
+                type="warning"
+                :closable="false"
+                show-icon
+                class="shadow-evidence-alert"
+                data-testid="shadow-bracket-error"
+              />
+              <el-empty
+                v-else-if="shadowBracketRows.length === 0"
+                description="等待当前配置的首个前向注册"
+              />
+              <div v-else class="shadow-bracket-table">
+                <el-table
+                  :data="shadowBracketRows"
+                  size="small"
+                  stripe
+                  data-testid="shadow-bracket-table"
+                >
+                  <el-table-column label="方案" min-width="142">
+                    <template #default="{ row }">
+                      <strong>
+                        -{{ row.stop_loss_pct.toFixed(2) }}% /
+                        +{{ row.profit_target_pct.toFixed(2) }}%
+                      </strong>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="状态" width="96">
+                    <template #default="{ row }">
+                      <el-tag
+                        :type="shadowBracketStatusMeta(row.status).type"
+                        effect="plain"
+                      >
+                        {{ shadowBracketStatusMeta(row.status).label }}
+                      </el-tag>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="扣费盈亏比" width="110">
+                    <template #default="{ row }">
+                      {{ row.estimated_net_reward_risk_ratio.toFixed(2) }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="配对 / 变化" width="110">
+                    <template #default="{ row }">
+                      {{ row.paired_trades }} / {{ row.changed_exits }}
+                      <small v-if="row.open_trades"> · 开 {{ row.open_trades }}</small>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="净收益增量" width="112">
+                    <template #default="{ row }">
+                      {{ formatSignedNullable(row.net_pnl_delta) }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="最大回撤" min-width="142">
+                    <template #default="{ row }">
+                      {{ row.baseline_max_drawdown.toFixed(2) }} →
+                      {{ row.challenger_max_drawdown.toFixed(2) }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="候选退出" min-width="180">
+                    <template #default="{ row }">
+                      {{ formatExitReasons(row.exit_reasons) }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="复核门槛" min-width="220">
+                    <template #default="{ row }">
+                      {{ shadowBracketBlockerSummary(row) }}
+                    </template>
+                  </el-table-column>
+                </el-table>
+              </div>
+            </section>
+
             <section v-if="shadowEvaluation" class="shadow-section" data-testid="shadow-evaluation">
               <div class="shadow-section-header">
                 <div>
@@ -1496,6 +1587,7 @@ import DataState from '../components/DataState.vue'
 import MetricStat from '../components/MetricStat.vue'
 import {
   evaluateStrategyShadowAdxChallengers,
+  getStrategyShadowBracketChallengers,
   getStrategyShadowConfig,
   getStrategyShadowConfigs,
   getStrategyShadowDecisions,
@@ -1512,6 +1604,8 @@ import type {
   OpeningMomentumRecommendation,
   OpeningMomentumShadowStatus,
   StrategyShadowAdxChallengerResponse,
+  StrategyShadowBracketChallengerReport,
+  StrategyShadowBracketChallengerVariant,
   StrategyShadowConfig, StrategyShadowConfigUpdate, StrategyShadowDecision,
   StrategyShadowEvaluation, StrategyShadowForwardValidationDaily,
   StrategyShadowForwardValidationResponse, StrategyShadowStatus, StrategyShadowVersion,
@@ -1755,6 +1849,8 @@ const shadowStatus = ref<StrategyShadowStatus | null>(null)
 const shadowVersions = ref<StrategyShadowVersion[]>([])
 const selectedShadowVersion = ref('')
 const shadowEvaluation = ref<StrategyShadowEvaluation | null>(null)
+const shadowBracketChallengers = ref<StrategyShadowBracketChallengerReport | null>(null)
+const shadowBracketError = ref('')
 const shadowAdxChallengers = ref<StrategyShadowAdxChallengerResponse | null>(null)
 const shadowAdxChallengerError = ref('')
 const shadowAdxLoading = ref(false)
@@ -1905,6 +2001,8 @@ async function loadStrategyShadow(symbol = selectedShadowSymbol.value || undefin
   shadowVersions.value = []
   selectedShadowVersion.value = ''
   shadowEvaluation.value = null
+  shadowBracketChallengers.value = null
+  shadowBracketError.value = ''
   shadowDecisions.value = []
   shadowDecisionTotal.value = 0
   shadowDecisionPage.value = 1
@@ -1946,6 +2044,7 @@ async function loadStrategyShadow(symbol = selectedShadowSymbol.value || undefin
     shadowDecisionTotal.value = decisions.total
     shadowDecisionPage.value = decisions.page
     shadowLoaded.value = true
+    void loadShadowBracketChallengers(config.symbol, generation)
     void loadShadowAdxChallengers(config.symbol, currentVersion, generation)
     void loadShadowForwardValidation(config.symbol, currentVersion, generation)
   } catch (error: unknown) {
@@ -1973,6 +2072,8 @@ async function loadShadowEvidence() {
   shadowForwardValidation.value = null
   shadowForwardError.value = ''
   shadowForwardLoading.value = false
+  shadowBracketChallengers.value = null
+  shadowBracketError.value = ''
   try {
     const [evaluation, decisions] = await Promise.all([
       getStrategyShadowEvaluation(symbol, version),
@@ -1992,6 +2093,7 @@ async function loadShadowEvidence() {
     shadowDecisions.value = decisions.items
     shadowDecisionTotal.value = decisions.total
     shadowDecisionPage.value = decisions.page
+    void loadShadowBracketChallengers(symbol, generation)
     void loadShadowAdxChallengers(symbol, version, generation)
     void loadShadowForwardValidation(symbol, version, generation)
   } catch (error: unknown) {
@@ -2001,6 +2103,35 @@ async function loadShadowEvidence() {
       || selectedShadowVersion.value !== version
     ) return
     ElMessage.error(resolveErrorMessage(error, '加载证据版本失败'))
+  }
+}
+
+async function loadShadowBracketChallengers(
+  symbol: string,
+  generation: number,
+) {
+  if (
+    generation !== shadowRequestGeneration.value
+    || selectedShadowSymbol.value !== symbol
+  ) return
+  shadowBracketError.value = ''
+  try {
+    const result = await getStrategyShadowBracketChallengers(symbol)
+    if (
+      generation !== shadowRequestGeneration.value
+      || selectedShadowSymbol.value !== symbol
+    ) return
+    shadowBracketChallengers.value = result
+  } catch (error: unknown) {
+    if (
+      generation !== shadowRequestGeneration.value
+      || selectedShadowSymbol.value !== symbol
+    ) return
+    shadowBracketChallengers.value = null
+    shadowBracketError.value = resolveErrorMessage(
+      error,
+      '加载止损止盈前向对照失败',
+    )
   }
 }
 
@@ -2220,6 +2351,43 @@ const shadowBlockerSummary = computed(() => (
     .map((item) => shadowBlockerLabels[item] ?? item)
     .join('；') ?? ''
 ))
+
+const shadowBracketRows = computed(() => (
+  shadowBracketChallengers.value?.variants.filter(
+    (item) => item.source_config_version === selectedShadowVersion.value,
+  ) ?? []
+))
+
+const shadowBracketBlockerLabels: Record<string, string> = {
+  MIN_PAIRED_TRADES: '配对交易不足',
+  MIN_CHANGED_EXITS: '产生差异的退出不足',
+  NET_PNL_DELTA_NON_POSITIVE: '累计净收益增量未转正',
+  MAX_DRAWDOWN_WORSE: '最大回撤变差',
+  NET_REWARD_RISK_BELOW_ONE: '扣费后盈亏比低于 1',
+}
+
+function shadowBracketBlockerSummary(
+  variant: StrategyShadowBracketChallengerVariant,
+): string {
+  return variant.blockers
+    .map((item) => shadowBracketBlockerLabels[item] ?? item)
+    .join('；') || '可进入人工复核'
+}
+
+function shadowBracketStatusMeta(
+  status: StrategyShadowBracketChallengerVariant['status'],
+): {
+  label: string
+  type: 'success' | 'warning' | 'info'
+} {
+  if (status === 'MATURE_EVIDENCE') {
+    return { label: '成熟证据', type: 'success' }
+  }
+  if (status === 'READY_FOR_REVIEW') {
+    return { label: '可复核', type: 'warning' }
+  }
+  return { label: '采集中', type: 'info' }
+}
 
 const shadowAdxStatusMeta = computed<{
   label: string
@@ -2635,6 +2803,7 @@ async function pollStrategyShadow() {
     shadowStatus.value = status
     shadowStatusFetchedAtMs.value = Date.now()
     shadowEvaluation.value = evaluation
+    void loadShadowBracketChallengers(symbol, generation)
   } catch {
     // Keep the last good snapshot; the next manual refresh exposes the error.
   }
@@ -3008,6 +3177,14 @@ onBeforeUnmount(() => {
 
 .opening-momentum-variants :deep(.el-table) {
   min-width: 900px;
+}
+
+.shadow-bracket-table {
+  overflow-x: auto;
+}
+
+.shadow-bracket-table :deep(.el-table) {
+  min-width: 1080px;
 }
 
 .shadow-section-header {

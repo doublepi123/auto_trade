@@ -14,6 +14,7 @@ from app.schemas import (
     LiveExitChallengerReport,
     StrategyV2AdxChallengerRequest,
     StrategyV2AdxChallengerResponse,
+    StrategyV2BracketChallengerReport,
     StrategyV2ExitChallengerReport,
     StrategyV2ForwardRegistrationRequest,
     StrategyV2ForwardValidationResponse,
@@ -217,6 +218,22 @@ def get_exit_challengers(
 ) -> StrategyV2ExitChallengerReport:
     try:
         return StrategyV2ShadowService(db).get_exit_challengers(symbol)
+    except ValueError as exc:
+        raise _bad_request(exc) from exc
+
+
+@router.get(
+    "/bracket-challengers",
+    response_model=StrategyV2BracketChallengerReport,
+)
+def get_bracket_challengers(
+    symbol: str | None = Query(default=None, max_length=50),
+    db: Session = Depends(get_db),
+) -> StrategyV2BracketChallengerReport:
+    try:
+        return StrategyV2ShadowService(db).get_bracket_challengers(
+            symbol
+        )
     except ValueError as exc:
         raise _bad_request(exc) from exc
 

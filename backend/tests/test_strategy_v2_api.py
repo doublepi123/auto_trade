@@ -20,6 +20,8 @@ from app.models import (
     LiveExitChallengerRegistration,
     LiveExitChallengerTrade,
     StrategyConfig,
+    StrategyV2BracketChallengerRegistration,
+    StrategyV2BracketChallengerTrade,
     StrategyV2ExitChallengerRegistration,
     StrategyV2ExitChallengerTrade,
     StrategyV2ForwardEvidence,
@@ -96,6 +98,8 @@ class TestStrategyV2ShadowApi:
             for model in (
                 LiveExitChallengerTrade,
                 LiveExitChallengerRegistration,
+                StrategyV2BracketChallengerTrade,
+                StrategyV2BracketChallengerRegistration,
                 StrategyV2PortfolioObservation,
                 StrategyV2PortfolioRegistration,
                 StrategyV2ExitChallengerTrade,
@@ -158,6 +162,44 @@ class TestStrategyV2ShadowApi:
         assert {
             item["locked_profit_pct"] for item in body["variants"]
         } == {0.1, 0.2, 0.3}
+        assert all(item["status"] == "COLLECTING" for item in body["variants"])
+
+    def test_bracket_challenger_report_is_forward_only_shadow_evidence(
+        self,
+    ) -> None:
+        config = self.client.get("/api/strategy-shadow/config").json()
+        with self.session_factory() as db:
+            service = StrategyV2ShadowService(db)
+            service.bracket_challengers.ensure_registrations(
+                symbol="AAPL.US",
+                market="US",
+                source_config_version=config["config_version"],
+                slippage_bps=config["slippage_bps"],
+                estimated_fee_rate=config["estimated_fee_rate_us"],
+                max_holding_minutes=config["max_holding_minutes"],
+                flatten_minutes_before_close=(
+                    config["flatten_minutes_before_close"]
+                ),
+                now=_NOW,
+            )
+
+        response = self.client.get(
+            "/api/strategy-shadow/bracket-challengers",
+            params={"symbol": "aapl.us"},
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["symbol"] == "AAPL.US"
+        assert body["mode"] == "SHADOW"
+        assert body["order_submission_allowed"] is False
+        assert body["automatic_promotion_allowed"] is False
+        assert body["historical_backfill_allowed"] is False
+        assert body["evaluation_scope"] == "FORWARD_OUT_OF_SAMPLE"
+        assert {
+            (item["stop_loss_pct"], item["profit_target_pct"])
+            for item in body["variants"]
+        } == {(0.4, 0.7), (0.5, 1.0)}
         assert all(item["status"] == "COLLECTING" for item in body["variants"])
 
     def test_live_exit_challenger_report_is_forward_only_and_read_only(

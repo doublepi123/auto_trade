@@ -32,6 +32,12 @@ from app.domain.strategy_v2.profit_lock import (
     ProfitLockDecision,
     evaluate_profit_lock_bar,
 )
+from app.domain.strategy_v2.bracket import (
+    BracketAction,
+    BracketConfig,
+    BracketDecision,
+    evaluate_bracket_bar,
+)
 from app.domain.strategy_v2.portfolio_routing import (
     PortfolioRoutingCandidate,
     PortfolioRoutingPolicy,
@@ -65,6 +71,10 @@ __all__ = [
     "ProfitLockConfig",
     "ProfitLockDecision",
     "evaluate_profit_lock_bar",
+    "BracketAction",
+    "BracketConfig",
+    "BracketDecision",
+    "evaluate_bracket_bar",
     "PortfolioRoutingCandidate",
     "PortfolioRoutingPolicy",
     "rank_portfolio_candidates",

@@ -55,6 +55,7 @@ describe('Strategy v2 shadow lab', () => {
       '@getStrategyShadowStatus',
       '@getStrategyShadowDecisions',
       '@getStrategyShadowEvaluation',
+      '@getStrategyShadowBracketChallengers',
       '@evaluateStrategyShadowAdxChallengers',
       '@getStrategyShadowForwardValidation',
     ])
@@ -118,6 +119,19 @@ describe('Strategy v2 shadow lab', () => {
       .and('contain', '做空')
       .and('contain', '订单提交')
       .and('contain', '禁止')
+
+    cy.get('[data-testid="shadow-bracket-challengers"]')
+      .should('contain', '止损 / 止盈前向对照')
+      .and('contain', '只读影子')
+      .and('contain', '不自动应用')
+      .and('contain', '-0.40% / +0.70%')
+      .and('contain', '-0.50% / +1.00%')
+    cy.get('[data-testid="shadow-bracket-table"]')
+      .should('contain', '1.04')
+      .and('contain', '1.34')
+      .and('contain', '+4.40')
+      .and('contain', '-2.40')
+      .and('contain', '配对交易不足')
 
     cy.get('[data-testid="tab-strategy-shadow"]').should('not.contain', '实盘应用')
     cy.get('[data-testid="shadow-adx-challengers"]').should('not.contain', '应用参数')

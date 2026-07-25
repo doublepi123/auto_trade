@@ -2,6 +2,7 @@ import { api } from './client'
 import type {
   StrategyShadowAdxChallengerRequest,
   StrategyShadowAdxChallengerResponse,
+  StrategyShadowBracketChallengerReport,
   StrategyShadowConfig,
   StrategyShadowConfigUpdate,
   StrategyShadowDecisionPage,
@@ -11,6 +12,15 @@ import type {
   StrategyShadowEvaluation,
   StrategyShadowVersion,
 } from '../types'
+
+export async function getStrategyShadowBracketChallengers(
+  symbol?: string,
+): Promise<StrategyShadowBracketChallengerReport> {
+  const response = await api.get('/api/strategy-shadow/bracket-challengers', {
+    params: symbol ? { symbol } : {},
+  })
+  return response.data
+}
 
 export async function getStrategyShadowForwardValidation(
   symbol?: string,

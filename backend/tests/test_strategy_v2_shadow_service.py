@@ -25,6 +25,8 @@ from app.models import (
     LiveExitChallengerRegistration,
     LiveExitChallengerTrade,
     StrategyConfig,
+    StrategyV2BracketChallengerRegistration,
+    StrategyV2BracketChallengerTrade,
     StrategyV2ExitChallengerRegistration,
     StrategyV2ExitChallengerTrade,
     StrategyV2ForwardEvidence,
@@ -136,6 +138,8 @@ class TestStrategyV2ShadowService:
             for model in (
                 LiveExitChallengerTrade,
                 LiveExitChallengerRegistration,
+                StrategyV2BracketChallengerTrade,
+                StrategyV2BracketChallengerRegistration,
                 StrategyV2ExitChallengerTrade,
                 StrategyV2ExitChallengerRegistration,
                 StrategyV2ForwardEvidence,
@@ -813,6 +817,60 @@ class TestStrategyV2ShadowService:
             reenabled = service.update_config(StrategyV2ShadowConfigUpdate(enabled=True))
             assert reenabled.config_version == version_before
 
+    def test_disabled_baseline_finishes_open_bracket_without_new_signals(
+        self,
+        monkeypatch,
+    ) -> None:
+        class _BracketSpy:
+            def __init__(self) -> None:
+                self.bars: list[datetime] = []
+
+            def has_open_trades(self, symbol: str) -> bool:
+                assert symbol == "AAPL.US"
+                return True
+
+            def advance_bar(
+                self,
+                *,
+                symbol: str,
+                bar: StrategyBar,
+                observed_at: datetime,
+            ) -> None:
+                del observed_at
+                assert symbol == "AAPL.US"
+                self.bars.append(bar.timestamp)
+
+        provider = _FakeCandles(_candles())
+        with self._db() as db:
+            self._enabled_config(db, activated_at=_SESSION_OPEN)
+            service = StrategyV2ShadowService(db, provider)
+            spy = _BracketSpy()
+            monkeypatch.setattr(service, "bracket_challengers", spy)
+
+            disabled = service.update_config(
+                StrategyV2ShadowConfigUpdate(enabled=False)
+            )
+            assert disabled.enabled is False
+            with pytest.raises(
+                ValueError,
+                match="bracket challenger trade is open",
+            ):
+                service.update_config(
+                    StrategyV2ShadowConfigUpdate(max_adx=18.0)
+                )
+
+            status = service.tick(
+                "AAPL.US",
+                "US",
+                now=_SESSION_OPEN + timedelta(minutes=181, seconds=5),
+            )
+
+            assert provider.calls == [("AAPL.US", "MIN_1", 500)]
+            assert spy.bars
+            assert spy.bars == sorted(spy.bars)
+            assert status.phase == "DISABLED"
+            assert db.query(StrategyV2ShadowDecision).count() == 0
+
     def test_tick_is_forward_only_rate_limited_and_idempotent(self) -> None:
         provider = _FakeCandles(_candles())
         with self._db() as db:
@@ -828,6 +886,22 @@ class TestStrategyV2ShadowService:
             assert min(row.bar_at.replace(tzinfo=timezone.utc) for row in rows) >= (
                 _SESSION_OPEN + timedelta(minutes=100)
             )
+            registrations = db.query(
+                StrategyV2BracketChallengerRegistration
+            ).order_by(
+                StrategyV2BracketChallengerRegistration.stop_loss_pct
+            ).all()
+            assert [
+                (row.stop_loss_pct, row.profit_target_pct)
+                for row in registrations
+            ] == [(0.40, 0.70), (0.50, 1.00)]
+            assert {
+                row.eligible_after.replace(tzinfo=timezone.utc)
+                for row in registrations
+            } == {
+                first_now.replace(second=0, microsecond=0)
+                + timedelta(minutes=1)
+            }
             first_count = len(rows)
             assert provider.calls == [("AAPL.US", "MIN_1", 500)]
 

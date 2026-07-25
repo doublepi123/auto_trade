@@ -2130,6 +2130,86 @@ Cypress.Commands.add('stubApi', () => {
     },
   }).as('getStrategyShadowEvaluation')
 
+  cy.intercept('GET', '/api/strategy-shadow/bracket-challengers*', (req) => {
+    const common = {
+      source_config_version: strategyShadowConfig.config_version,
+      slippage_bps: 2,
+      estimated_fee_rate: 0.0005,
+      max_holding_minutes: 60,
+      flatten_minutes_before_close: 15,
+      estimated_round_trip_cost_pct: 0.14,
+      registered_at: '2026-07-24T20:15:10Z',
+      eligible_after: '2026-07-24T20:16:00Z',
+      status: 'COLLECTING',
+      paired_trades: 4,
+      open_trades: 0,
+      awaiting_baseline_trades: 0,
+      changed_exits: 2,
+      baseline_exit_reasons: { PROFIT_TARGET: 3, PRICE_STOP: 1 },
+      improved_trades: 2,
+      worsened_trades: 1,
+      unchanged_trades: 1,
+      baseline_win_rate: 0.75,
+      minimum_ready_pairs: 20,
+      minimum_mature_pairs: 50,
+      minimum_changed_exits: 5,
+      promotion_ready: false,
+      blockers: ['MIN_PAIRED_TRADES', 'MIN_CHANGED_EXITS'],
+    }
+    req.reply({
+      body: {
+        symbol: strategyShadowConfig.symbol,
+        mode: 'SHADOW',
+        order_submission_allowed: false,
+        automatic_promotion_allowed: false,
+        historical_backfill_allowed: false,
+        evaluation_scope: 'FORWARD_OUT_OF_SAMPLE',
+        variants: [
+          {
+            ...common,
+            registration_id: 1,
+            algorithm_version: 'strategy-v2-bracket-s40-t70-v1',
+            evaluator_digest: 'a'.repeat(64),
+            stop_loss_pct: 0.4,
+            profit_target_pct: 0.7,
+            estimated_net_reward_risk_ratio: 1.04,
+            exit_reasons: { PROFIT_TARGET: 3, PRICE_STOP: 1 },
+            challenger_win_rate: 0.75,
+            baseline_net_pnl: 34.2,
+            challenger_net_pnl: 38.6,
+            net_pnl_delta: 4.4,
+            mean_net_pnl_delta: 1.1,
+            baseline_max_drawdown: 8.2,
+            challenger_max_drawdown: 7.4,
+          },
+          {
+            ...common,
+            registration_id: 2,
+            algorithm_version: 'strategy-v2-bracket-s50-t100-v1',
+            evaluator_digest: 'b'.repeat(64),
+            stop_loss_pct: 0.5,
+            profit_target_pct: 1,
+            estimated_net_reward_risk_ratio: 1.34,
+            exit_reasons: { PROFIT_TARGET: 2, MAX_HOLD: 2 },
+            challenger_win_rate: 0.5,
+            baseline_net_pnl: 34.2,
+            challenger_net_pnl: 31.8,
+            net_pnl_delta: -2.4,
+            mean_net_pnl_delta: -0.6,
+            baseline_max_drawdown: 8.2,
+            challenger_max_drawdown: 9.1,
+            blockers: [
+              'MIN_PAIRED_TRADES',
+              'MIN_CHANGED_EXITS',
+              'NET_PNL_DELTA_NON_POSITIVE',
+              'MAX_DRAWDOWN_WORSE',
+            ],
+          },
+        ],
+      },
+    })
+  }).as('getStrategyShadowBracketChallengers')
+
   cy.intercept('GET', '/api/strategy-shadow/forward-validation*', (req) => {
     req.reply({ body: strategyShadowForwardValidation })
   }).as('getStrategyShadowForwardValidation')

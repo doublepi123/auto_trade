@@ -52,6 +52,7 @@ from app.schemas import (
     StrategyV2AdxChallengerRequest,
     StrategyV2AdxChallengerResponse,
     StrategyV2AdxChallengerResult,
+    StrategyV2BracketChallengerReport,
     StrategyV2ForwardDailyEvidence,
     StrategyV2ForwardRegistrationRequest,
     StrategyV2ForwardRegistrationResponse,
@@ -79,6 +80,9 @@ from app.schemas import (
 )
 from app.services.strategy_v2_exit_challenger_service import (
     StrategyV2ExitChallengerService,
+)
+from app.services.strategy_v2_bracket_challenger_service import (
+    StrategyV2BracketChallengerService,
 )
 from app.services.live_exit_challenger_service import (
     LiveExitChallengerService,
@@ -184,6 +188,7 @@ class StrategyV2ShadowService:
         self.db = db
         self.candle_provider = candle_provider
         self.exit_challengers = StrategyV2ExitChallengerService(db)
+        self.bracket_challengers = StrategyV2BracketChallengerService(db)
         self.live_exit_challengers = LiveExitChallengerService(db)
 
     def get_config(self, symbol: str | None = None) -> StrategyV2ShadowConfigResponse:
@@ -408,6 +413,12 @@ class StrategyV2ShadowService:
         open_trade = self._open_trade(row.symbol)
         if open_trade is not None and tunable_updates:
             raise ValueError("strategy v2 shadow config cannot change while a virtual trade is open")
+        bracket_open = self.bracket_challengers.has_open_trades(row.symbol)
+        if bracket_open and tunable_updates:
+            raise ValueError(
+                "strategy v2 shadow config cannot change while a bracket "
+                "challenger trade is open"
+            )
         if not updates:
             return self._config_response(row)
         ownership_changed = False
@@ -521,6 +532,13 @@ class StrategyV2ShadowService:
         normalized = self._resolve_symbol(symbol)
         return self.exit_challengers.get_report(normalized)
 
+    def get_bracket_challengers(
+        self,
+        symbol: str | None = None,
+    ) -> StrategyV2BracketChallengerReport:
+        normalized = self._resolve_symbol(symbol)
+        return self.bracket_challengers.get_report(normalized)
+
     def list_decisions(
         self,
         *,
@@ -599,6 +617,7 @@ class StrategyV2ShadowService:
         config = self._get_or_create_config(normalized)
         state = self._get_or_create_state(normalized)
         open_trade = self._open_trade(normalized)
+        bracket_open = self.bracket_challengers.has_open_trades(normalized)
 
         # A flat algorithm revision is activated at the first observation, even
         # when that observation is outside RTH. A pre-market deployment can then
@@ -623,6 +642,19 @@ class StrategyV2ShadowService:
                 slippage_bps=config.slippage_bps,
                 now=current,
             )
+            if market.upper() == "US":
+                self.bracket_challengers.ensure_registrations(
+                    symbol=normalized,
+                    market=market,
+                    source_config_version=current_version,
+                    slippage_bps=config.slippage_bps,
+                    estimated_fee_rate=config.estimated_fee_rate_us,
+                    max_holding_minutes=config.max_holding_minutes,
+                    flatten_minutes_before_close=(
+                        config.flatten_minutes_before_close
+                    ),
+                    now=current,
+                )
             if settings.live_exit_challenger_enabled:
                 self.live_exit_challengers.ensure_registrations(
                     symbol=normalized,
@@ -633,9 +665,13 @@ class StrategyV2ShadowService:
                     symbol=normalized,
                     now=current,
                 )
-        if not config.enabled and open_trade is None:
+        if (
+            not config.enabled
+            and open_trade is None
+            and not bracket_open
+        ):
             return self.get_status(normalized)
-        if open_trade is None:
+        if open_trade is None and config.enabled:
             self._validate_minimum_net_edge(self._config_values(config))
         if (
             not is_trading_hours(market, current)
@@ -667,13 +703,22 @@ class StrategyV2ShadowService:
                 recent=one_minute,
                 observed_at=current,
             )
-            self._evaluate_candles(
-                config=config,
-                state=state,
-                market=market,
-                one_minute=one_minute,
-                observed_at=current,
-            )
+            if not config.enabled and open_trade is None:
+                self._advance_bracket_candles(
+                    config=config,
+                    state=state,
+                    market=market,
+                    one_minute=one_minute,
+                    observed_at=current,
+                )
+            else:
+                self._evaluate_candles(
+                    config=config,
+                    state=state,
+                    market=market,
+                    one_minute=one_minute,
+                    observed_at=current,
+                )
             if settings.live_exit_challenger_enabled:
                 self.live_exit_challengers.sync_baseline_outcomes(
                     symbol=normalized,
@@ -2185,6 +2230,70 @@ class StrategyV2ShadowService:
         self._validate_minimum_net_edge(self._config_values(config))
         return self._replay_payload(payload, config)
 
+    def _advance_bracket_candles(
+        self,
+        *,
+        config: StrategyV2ShadowConfig,
+        state: StrategyV2ShadowState,
+        market: str,
+        one_minute: list[Any],
+        observed_at: datetime,
+    ) -> None:
+        """Finish an existing challenger after its baseline is disabled."""
+        if not one_minute:
+            raise ValueError("empty candle response")
+        bars = self._coerce_strategy_bars(
+            one_minute,
+            symbol=config.symbol,
+        )
+        session = get_session(market)
+        grace = timedelta(
+            seconds=self._domain_config(
+                config,
+                market,
+            ).settlement_grace_seconds
+        )
+        bars = [
+            bar
+            for bar in bars
+            if (
+                session.is_rth(bar.timestamp)
+                and bar.end_at + grace <= observed_at
+            )
+        ]
+        if not bars:
+            raise ValueError("no processable one-minute bars")
+
+        frontier = (
+            _as_utc(state.last_bar_at)
+            if state.last_bar_at is not None
+            else None
+        )
+        for bar in bars:
+            if frontier is not None and bar.timestamp <= frontier:
+                continue
+            if frontier is not None:
+                missing_at = self._missing_rth_minute(
+                    market,
+                    previous=frontier,
+                    current=bar.timestamp,
+                )
+                if missing_at is not None:
+                    raise ValueError(
+                        f"DATA_GAP_WAITING:{missing_at.isoformat()}"
+                    )
+            self.bracket_challengers.advance_bar(
+                symbol=config.symbol,
+                bar=bar,
+                observed_at=observed_at,
+            )
+            frontier = bar.timestamp
+        if frontier is not None:
+            state.last_bar_at = frontier
+        state.last_poll_error = ""
+        self.db.add(state)
+        self.db.commit()
+
     def _evaluate_candles(
         self,
         *,
@@ -2404,6 +2513,11 @@ class StrategyV2ShadowService:
                     bar=bar,
                     observed_at=observed_at,
                 )
+            self.bracket_challengers.advance_bar(
+                symbol=config.symbol,
+                bar=bar,
+                observed_at=observed_at,
+            )
             if settings.live_exit_challenger_enabled:
                 self.live_exit_challengers.advance_bar(
                     symbol=config.symbol,
