@@ -107,6 +107,18 @@ describe('Dynamic universe observation pool', () => {
     cy.get('[data-testid="universe-table"] tbody tr')
       .contains('tr', 'JPM.US')
       .should('not.contain', '当前实盘')
+    cy.get('.universe-table-view').then(($view) => {
+      const viewRect = $view[0].getBoundingClientRect()
+      cy.get('[data-testid="universe-table"] tbody tr')
+        .first()
+        .find('td')
+        .last()
+        .then(($lastCell) => {
+          const cellRect = $lastCell[0].getBoundingClientRect()
+          expect(cellRect.right).to.be.at.most(viewRect.right + 1)
+          expect(cellRect.left).to.be.at.least(viewRect.left - 1)
+        })
+    })
   })
 
   it('shows manual forward evidence and makes selection conflicts visible', () => {

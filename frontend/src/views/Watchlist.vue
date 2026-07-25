@@ -94,7 +94,7 @@
               style="width: 100%"
               data-testid="universe-table"
             >
-              <el-table-column label="候选" min-width="190">
+              <el-table-column label="候选" width="180">
                 <template #default="{ row }">
                   <div class="universe-symbol">
                     <strong>{{ row.symbol }}</strong>
@@ -149,19 +149,19 @@
                   </div>
                 </template>
               </el-table-column>
-              <el-table-column label="日均流动性" width="118" align="right">
+              <el-table-column label="日均流动性" width="110" align="right">
                 <template #default="{ row }">{{ formatDollarVolume(row.metrics.avg_dollar_volume) }}</template>
               </el-table-column>
-              <el-table-column label="T-1 成本" width="92" align="right">
-                <template #default="{ row }">{{ formatBps(row.metrics.relative_spread_bps) }}</template>
+              <el-table-column label="成本/波动" width="130" align="right">
+                <template #default="{ row }">
+                  <div class="universe-risk-metrics">
+                    <span><small>成本</small>{{ formatBps(row.metrics.relative_spread_bps) }}</span>
+                    <span><small>波动</small>{{ formatVolatility(row.metrics.realized_vol_20d) }}</span>
+                    <span><small>ATR</small>{{ formatAtr(row.metrics.atr_pct_14d) }}</span>
+                  </div>
+                </template>
               </el-table-column>
-              <el-table-column label="20日波动" width="88" align="right">
-                <template #default="{ row }">{{ formatVolatility(row.metrics.realized_vol_20d) }}</template>
-              </el-table-column>
-              <el-table-column label="14日 ATR" width="86" align="right">
-                <template #default="{ row }">{{ formatAtr(row.metrics.atr_pct_14d) }}</template>
-              </el-table-column>
-              <el-table-column label="筛选结论" min-width="190">
+              <el-table-column label="筛选结论" min-width="180">
                 <template #default="{ row }">
                   <div v-if="row.exclusion_reasons.length" class="universe-reasons">
                     <el-tag
@@ -1917,6 +1917,25 @@ onUnmounted(() => {
 
 .universe-rank > span {
   display: block;
+}
+
+.universe-risk-metrics {
+  display: flex;
+  min-height: 54px;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  line-height: 1.25;
+}
+
+.universe-risk-metrics span {
+  white-space: nowrap;
+}
+
+.universe-risk-metrics small {
+  margin-right: 5px;
+  color: #909399;
+  font-size: 10px;
 }
 
 .universe-memberships,
