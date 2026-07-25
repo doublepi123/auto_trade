@@ -330,6 +330,50 @@ def test_universe_selection_table_migration_is_complete_and_idempotent(
         assert session.query(UniverseSelectionCandidate).count() == 1
 
 
+def test_universe_selection_timestamp_migration_is_idempotent(
+    tmp_path,
+) -> None:
+    db_path = tmp_path / "universe_selection_timestamps.db"
+    legacy_engine = create_engine(f"sqlite:///{db_path}")
+    database._ensure_universe_selection_tables(legacy_engine)
+    with legacy_engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            INSERT INTO universe_selection_runs (
+                as_of_date,
+                algorithm_version,
+                source_version,
+                status,
+                started_at,
+                completed_at,
+                created_at
+            ) VALUES (
+                '2026-07-24',
+                'algorithm-v1',
+                'catalog-v1',
+                'COMPLETE',
+                '2026-07-25 17:03:07.067602',
+                '2026-07-25 17:03:07.062440',
+                '2026-07-25 17:03:07.062440'
+            )
+            """
+        )
+
+    database._normalize_universe_selection_run_timestamps(
+        legacy_engine
+    )
+    database._normalize_universe_selection_run_timestamps(
+        legacy_engine
+    )
+
+    with legacy_engine.connect() as connection:
+        row = connection.exec_driver_sql(
+            "SELECT started_at, completed_at "
+            "FROM universe_selection_runs"
+        ).one()
+    assert row[1] == row[0]
+
+
 def test_opening_momentum_path_feature_migration_is_idempotent(
     tmp_path,
 ) -> None:

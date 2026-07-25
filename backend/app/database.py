@@ -66,6 +66,7 @@ def init_db() -> None:
     _ensure_watchlist_items_table(engine)
     _ensure_watchlist_item_source_column(engine)
     _ensure_universe_selection_tables(engine)
+    _normalize_universe_selection_run_timestamps(engine)
     _ensure_watchlist_scores_table(engine)
     _ensure_prompt_versions_table(engine)
     _ensure_experiment_results_table(engine)
@@ -1186,6 +1187,28 @@ def _ensure_universe_selection_tables(db_engine: Engine) -> None:
         connection.exec_driver_sql(
             "CREATE INDEX IF NOT EXISTS ix_universe_selection_candidates_run_id "
             "ON universe_selection_candidates (run_id)"
+        )
+
+
+def _normalize_universe_selection_run_timestamps(
+    db_engine: Engine,
+) -> None:
+    inspector = inspect(db_engine)
+    if "universe_selection_runs" not in inspector.get_table_names():
+        return
+    with db_engine.begin() as connection:
+        result = connection.execute(
+            text(
+                "UPDATE universe_selection_runs "
+                "SET completed_at = started_at "
+                "WHERE completed_at IS NOT NULL "
+                "AND completed_at < started_at"
+            )
+        )
+    if result.rowcount > 0:
+        logger.info(
+            "normalized %s universe selection run timestamps",
+            result.rowcount,
         )
 
 
