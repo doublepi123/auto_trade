@@ -253,7 +253,7 @@ class TestStrategyV2ShadowApi:
         assert body["automatic_promotion_allowed"] is False
         assert body["historical_backfill_allowed"] is False
         assert body["capital_slots"] == 1
-        assert len(body["variants"]) == 7
+        assert len(body["variants"]) == 8
         assert {
             item["policy"] for item in body["variants"]
         } == {
@@ -263,6 +263,7 @@ class TestStrategyV2ShadowApi:
             "QUANT_WATCH_PLUS",
             "SELECTED_VWAP_EDGE",
             "VWAP_EDGE_POOL",
+            "VWAP_EDGE_75BPS_POOL",
             "VWAP_EDGE_OBSERVED_COST_POOL",
         }
         assert {
@@ -279,6 +280,15 @@ class TestStrategyV2ShadowApi:
         assert (
             observed_cost["edge_filter"]
             == "OBSERVED_COST_TO_STOP_VWAP_DISCOUNT"
+        )
+        fixed_75bps = next(
+            item
+            for item in body["variants"]
+            if item["policy"] == "VWAP_EDGE_75BPS_POOL"
+        )
+        assert (
+            fixed_75bps["edge_filter"]
+            == "COST_TO_75BPS_VWAP_DISCOUNT"
         )
 
     def test_config_contract_update_audit_and_forbidden_hard_fields(self) -> None:

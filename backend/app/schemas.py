@@ -1031,6 +1031,7 @@ class StrategyV2PortfolioRoutingVariant(BaseModel):
         "QUANT_WATCH_PLUS",
         "SELECTED_VWAP_EDGE",
         "VWAP_EDGE_POOL",
+        "VWAP_EDGE_75BPS_POOL",
         "VWAP_EDGE_OBSERVED_COST_POOL",
     ]
     algorithm_version: str
@@ -1040,6 +1041,7 @@ class StrategyV2PortfolioRoutingVariant(BaseModel):
     edge_filter: Literal[
         "NONE",
         "COST_TO_STOP_VWAP_DISCOUNT",
+        "COST_TO_75BPS_VWAP_DISCOUNT",
         "OBSERVED_COST_TO_STOP_VWAP_DISCOUNT",
     ] = "NONE"
     status: Literal["COLLECTING", "READY_FOR_REVIEW", "MATURE_EVIDENCE"]

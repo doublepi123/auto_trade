@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from app.domain.strategy_v2 import (
     PortfolioRoutingCandidate,
     PortfolioRoutingPolicy,
+    VWAP_EDGE_FIXED_MAX_DISCOUNT_BPS,
     rank_portfolio_candidates,
 )
 from app.models import (
@@ -67,6 +68,12 @@ _ROUTING_SPECS = (
         algorithm_version="strategy-v2-portfolio-vwap-edge-pool-v1",
     ),
     _RoutingSpec(
+        policy="VWAP_EDGE_75BPS_POOL",
+        algorithm_version=(
+            "strategy-v2-portfolio-vwap-edge-75bps-pool-v1"
+        ),
+    ),
+    _RoutingSpec(
         policy="VWAP_EDGE_OBSERVED_COST_POOL",
         algorithm_version=(
             "strategy-v2-portfolio-vwap-observed-cost-pool-v1"
@@ -78,6 +85,9 @@ _TERMINAL_UNIVERSE_STATUSES = ("COMPLETE", "DEGRADED")
 _FIXED_COST_VWAP_EDGE_POLICIES = {
     "SELECTED_VWAP_EDGE",
     "VWAP_EDGE_POOL",
+}
+_FIXED_75BPS_VWAP_EDGE_POLICIES = {
+    "VWAP_EDGE_75BPS_POOL",
 }
 _OBSERVED_COST_VWAP_EDGE_POLICIES = {
     "VWAP_EDGE_OBSERVED_COST_POOL",
@@ -916,10 +926,15 @@ class StrategyV2PortfolioService:
                 if registration.policy
                 in _OBSERVED_COST_VWAP_EDGE_POLICIES
                 else (
-                    "COST_TO_STOP_VWAP_DISCOUNT"
+                    "COST_TO_75BPS_VWAP_DISCOUNT"
                     if registration.policy
-                    in _FIXED_COST_VWAP_EDGE_POLICIES
-                    else "NONE"
+                    in _FIXED_75BPS_VWAP_EDGE_POLICIES
+                    else (
+                        "COST_TO_STOP_VWAP_DISCOUNT"
+                        if registration.policy
+                        in _FIXED_COST_VWAP_EDGE_POLICIES
+                        else "NONE"
+                    )
                 )
             ),
             status=(
@@ -966,6 +981,22 @@ class StrategyV2PortfolioService:
                 ),
                 "minimum_discount": "FROZEN_ROUND_TRIP_COST_BPS",
                 "maximum_discount": "FROZEN_STOP_DISTANCE_BPS",
+                "required_references": [
+                    "SESSION_VWAP_1M",
+                    "SESSION_VWAP_5M",
+                ],
+                "bounds": "INCLUSIVE",
+            }
+        elif spec.policy in _FIXED_75BPS_VWAP_EDGE_POLICIES:
+            payload["vwap_edge_filter"] = {
+                "price_reference": (
+                    "FROZEN_SIGNAL_FEATURE_RESIDUALS"
+                ),
+                "minimum_discount": "FROZEN_ROUND_TRIP_COST_BPS",
+                "maximum_discount": "FIXED_ABSOLUTE_VWAP_DISCOUNT_BPS",
+                "maximum_discount_bps": (
+                    VWAP_EDGE_FIXED_MAX_DISCOUNT_BPS
+                ),
                 "required_references": [
                     "SESSION_VWAP_1M",
                     "SESSION_VWAP_5M",
@@ -1038,6 +1069,7 @@ def _routing_policy(value: str) -> PortfolioRoutingPolicy:
         "QUANT_WATCH_PLUS",
         "SELECTED_VWAP_EDGE",
         "VWAP_EDGE_POOL",
+        "VWAP_EDGE_75BPS_POOL",
         "VWAP_EDGE_OBSERVED_COST_POOL",
     }:
         raise ValueError(f"unsupported portfolio routing policy: {value}")

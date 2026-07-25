@@ -41,6 +41,7 @@ from app.domain.strategy_v2.bracket import (
 from app.domain.strategy_v2.portfolio_routing import (
     PortfolioRoutingCandidate,
     PortfolioRoutingPolicy,
+    VWAP_EDGE_FIXED_MAX_DISCOUNT_BPS,
     rank_portfolio_candidates,
 )
 
@@ -77,5 +78,6 @@ __all__ = [
     "evaluate_bracket_bar",
     "PortfolioRoutingCandidate",
     "PortfolioRoutingPolicy",
+    "VWAP_EDGE_FIXED_MAX_DISCOUNT_BPS",
     "rank_portfolio_candidates",
 ]

@@ -258,6 +258,60 @@ def test_vwap_edge_pool_ranks_guaranteed_discount_after_cost() -> None:
     ]
 
 
+def test_fixed_75bps_pool_decouples_entry_band_from_exit_stop() -> None:
+    ranked = rank_portfolio_candidates(
+        [
+            _candidate(
+                "AAPL.US",
+                1,
+                selected=True,
+                rank=1,
+                residual_1m_bps=-60,
+                residual_5m_bps=-70,
+                round_trip_cost_bps=14,
+                stop_distance_bps=45,
+            ),
+            _candidate(
+                "MSFT.US",
+                2,
+                residual_1m_bps=-75,
+                residual_5m_bps=-75,
+                round_trip_cost_bps=14,
+                stop_distance_bps=45,
+            ),
+            _candidate(
+                "AMD.US",
+                3,
+                residual_1m_bps=-76,
+                residual_5m_bps=-40,
+                round_trip_cost_bps=14,
+                stop_distance_bps=45,
+            ),
+            _candidate(
+                "NVDA.US",
+                4,
+                residual_1m_bps=-10,
+                residual_5m_bps=-30,
+                round_trip_cost_bps=14,
+                stop_distance_bps=45,
+            ),
+        ],
+        policy="VWAP_EDGE_75BPS_POOL",
+        primary_symbol="NVDA.US",
+    )
+
+    assert [item.symbol for item in ranked] == [
+        "MSFT.US",
+        "AAPL.US",
+    ]
+    assert ranked[0].vwap_edge_eligible is False
+    assert ranked[0].fixed_75bps_vwap_edge_eligible is True
+    assert [
+        item.fixed_75bps_vwap_edge_score_bps
+        for item in ranked
+    ] == [61, 46]
+
+
 def test_vwap_edge_supports_valid_zero_cost_configuration() -> None:
     candidate = _candidate(
         "AAPL.US",
