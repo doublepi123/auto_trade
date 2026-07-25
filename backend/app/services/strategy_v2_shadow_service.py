@@ -127,6 +127,8 @@ _MIN_COMPLETE_SESSION_COVERAGE = 0.995
 _MIN_NET_REWARD_RISK_RATIO = 1.0
 _US_DEFAULT_STOP_LOSS_PCT = 0.45
 _US_DEFAULT_PROFIT_TARGET_PCT = 0.80
+_US_LEGACY_STOP_LOSS_PCT = 0.75
+_US_LEGACY_PROFIT_TARGET_PCT = 0.50
 _ADX_CHALLENGER_VALUES = (20.0, 25.0, 30.0)
 _MIN_CHALLENGER_COMPLETE_SESSIONS = 5
 _MAX_CHALLENGER_COMPLETE_SESSIONS = 20
@@ -188,6 +190,47 @@ class StrategyV2ShadowService:
         row = self._get_or_create_config(symbol)
         self._ensure_version_snapshot(row)
         return self._config_response(row)
+
+    def ensure_universe_managed_enabled(
+        self,
+        symbol: str,
+    ) -> StrategyV2ShadowConfigResponse:
+        """Enable a managed observer and migrate only the legacy US bracket."""
+        row = self._get_or_create_config(symbol)
+        if not row.universe_managed:
+            raise ValueError(
+                "strategy v2 shadow config is not universe managed"
+            )
+        legacy_us_bracket = (
+            row.symbol.endswith(".US")
+            and math.isclose(
+                row.stop_loss_pct,
+                _US_LEGACY_STOP_LOSS_PCT,
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            )
+            and math.isclose(
+                row.profit_target_pct,
+                _US_LEGACY_PROFIT_TARGET_PCT,
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            )
+        )
+        if row.enabled and not legacy_us_bracket:
+            self._ensure_version_snapshot(row)
+            return self._config_response(row)
+
+        payload: dict[str, object] = {"enabled": True}
+        if legacy_us_bracket:
+            payload.update(
+                stop_loss_pct=_US_DEFAULT_STOP_LOSS_PCT,
+                profit_target_pct=_US_DEFAULT_PROFIT_TARGET_PCT,
+            )
+        return self.update_config(
+            StrategyV2ShadowConfigUpdate.model_validate(payload),
+            symbol=row.symbol,
+            preserve_universe_management=True,
+        )
 
     def list_configs(self) -> list[StrategyV2ShadowConfigResponse]:
         rows = self.db.query(StrategyV2ShadowConfig).all()

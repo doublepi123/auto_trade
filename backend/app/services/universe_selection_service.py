@@ -961,20 +961,22 @@ class UniverseSelectionService:
                         .filter(StrategyV2ShadowConfig.symbol == symbol)
                         .one()
                     )
-                if row.enabled:
+                was_enabled = row.enabled
+                if row.enabled and not row.universe_managed:
                     continue
-                if not created_for_universe and not row.universe_managed:
+                if (
+                    not row.enabled
+                    and not created_for_universe
+                    and not row.universe_managed
+                ):
                     # Existing disabled unmanaged configs are explicit
                     # operator opt-outs. Never silently re-enable them.
                     continue
                 row.universe_managed = True
                 self.db.add(row)
-                service.update_config(
-                    StrategyV2ShadowConfigUpdate(enabled=True),
-                    symbol=symbol,
-                    preserve_universe_management=True,
-                )
-                enabled.append(symbol)
+                service.ensure_universe_managed_enabled(symbol)
+                if not was_enabled:
+                    enabled.append(symbol)
             except Exception:
                 self.db.rollback()
                 logger.exception(

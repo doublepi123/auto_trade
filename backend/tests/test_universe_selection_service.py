@@ -899,6 +899,72 @@ def test_reconcile_never_disables_manually_enabled_shadow() -> None:
         db.close()
 
 
+def test_reconcile_upgrades_enabled_managed_legacy_us_bracket() -> None:
+    db = _db()
+    try:
+        db.add(
+            StrategyV2ShadowConfig(
+                symbol="AAPL.US",
+                enabled=True,
+                universe_managed=True,
+                stop_loss_pct=0.75,
+                profit_target_pct=0.50,
+            ),
+        )
+        db.commit()
+
+        result = _service(
+            db,
+            _FakeBroker(),
+            enable_shadow=True,
+        ).refresh()
+        config = (
+            db.query(StrategyV2ShadowConfig)
+            .filter(StrategyV2ShadowConfig.symbol == "AAPL.US")
+            .one()
+        )
+
+        assert config.enabled is True
+        assert config.universe_managed is True
+        assert config.stop_loss_pct == 0.45
+        assert config.profit_target_pct == 0.80
+        assert "AAPL.US" not in result.shadow_enabled_symbols
+    finally:
+        db.close()
+
+
+def test_reconcile_preserves_enabled_unmanaged_legacy_us_bracket() -> None:
+    db = _db()
+    try:
+        db.add(
+            StrategyV2ShadowConfig(
+                symbol="AAPL.US",
+                enabled=True,
+                universe_managed=False,
+                stop_loss_pct=0.75,
+                profit_target_pct=0.50,
+            ),
+        )
+        db.commit()
+
+        _service(
+            db,
+            _FakeBroker(),
+            enable_shadow=True,
+        ).refresh()
+        config = (
+            db.query(StrategyV2ShadowConfig)
+            .filter(StrategyV2ShadowConfig.symbol == "AAPL.US")
+            .one()
+        )
+
+        assert config.universe_managed is False
+        assert config.stop_loss_pct == 0.75
+        assert config.profit_target_pct == 0.50
+    finally:
+        db.close()
+
+
 def test_manual_disable_is_not_undone_by_next_universe_refresh() -> None:
     from app.services.strategy_v2_shadow_service import (
         StrategyV2ShadowService,
