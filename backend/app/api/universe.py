@@ -19,11 +19,15 @@ from app.runner import get_runner
 from app.schemas import (
     UniverseCatalogItem,
     UniversePromotionReadinessResponse,
+    UniverseRotationForwardScorecardResponse,
     UniverseSelectionCandidateResponse,
     UniverseSelectionRefreshResponse,
     UniverseSelectionRunResponse,
 )
 from app.services.universe_promotion_service import UniversePromotionService
+from app.services.rotation_forward_scorecard_service import (
+    RotationForwardScorecardService,
+)
 from app.services.universe_selection_service import (
     UniverseRefreshResult,
     UniverseSelectionService,
@@ -184,6 +188,22 @@ def get_universe_promotion_readiness(
             detail="no universe selection run available",
         )
     return readiness
+
+
+@router.get(
+    "/rotation-forward-scorecard",
+    response_model=UniverseRotationForwardScorecardResponse,
+)
+def get_rotation_forward_scorecard(
+    db: Session = Depends(get_db),
+) -> UniverseRotationForwardScorecardResponse:
+    scorecard = RotationForwardScorecardService(db).get_scorecard()
+    if scorecard is None:
+        raise HTTPException(
+            status_code=404,
+            detail="no universe selection run available",
+        )
+    return scorecard
 
 
 @router.post("/refresh", response_model=UniverseSelectionRefreshResponse)

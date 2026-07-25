@@ -2,6 +2,7 @@ import { api } from './client'
 import type {
   UniverseCatalogItem,
   UniversePromotionReadinessResponse,
+  UniverseRotationForwardScorecardResponse,
   UniverseSelectionRefreshResponse,
   UniverseSelectionRunResponse,
 } from '../types'
@@ -19,6 +20,15 @@ const PROMOTION_UNIVERSE_ROLES = new Set([
   'SELECTED',
   'EXPLORATION',
   'TRADING_TARGET',
+])
+
+const ROTATION_SCORECARD_STATUSES = new Set([
+  'NOT_REGISTERED',
+  'AWAITING_PRECOMMITMENT',
+  'COLLECTING',
+  'DATA_BLOCKED',
+  'PERFORMANCE_BLOCKED',
+  'READY_FOR_MANUAL_REVIEW',
 ])
 
 function assertObject(value: unknown, endpoint: string): asserts value is Record<string, unknown> {
@@ -168,6 +178,151 @@ function assertPromotionReadinessItem(value: unknown, index: number): void {
   }
 }
 
+function scorecardError(field: string): Error {
+  return new Error(
+    `Unexpected /api/universe/rotation-forward-scorecard response: ${field} is invalid`,
+  )
+}
+
+function assertScorecardString(
+  value: unknown,
+  field: string,
+): asserts value is string {
+  if (typeof value !== 'string' || !value) throw scorecardError(field)
+}
+
+function assertScorecardInteger(
+  value: unknown,
+  field: string,
+  minimum = 0,
+): asserts value is number {
+  if (
+    typeof value !== 'number'
+    || !Number.isInteger(value)
+    || value < minimum
+  ) throw scorecardError(field)
+}
+
+function assertScorecardNullableNumber(
+  value: unknown,
+  field: string,
+): asserts value is number | null {
+  if (value !== null && (typeof value !== 'number' || !Number.isFinite(value))) {
+    throw scorecardError(field)
+  }
+}
+
+function assertScorecardStringArray(
+  value: unknown,
+  field: string,
+): asserts value is string[] {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== 'string')) {
+    throw scorecardError(field)
+  }
+}
+
+function assertScorecardCohort(value: unknown, field: string): void {
+  assertObject(value, `/api/universe/rotation-forward-scorecard.${field}`)
+  assertScorecardInteger(value.source_run_id, `${field}.source_run_id`, 1)
+  for (const key of [
+    'source_as_of_date',
+    'cohort_month',
+    'status',
+    'signal_date',
+    'entry_date',
+    'mark_date',
+  ]) assertScorecardString(value[key], `${field}.${key}`)
+  assertScorecardStringArray(value.target_symbols, `${field}.target_symbols`)
+  assertScorecardInteger(
+    value.forward_observation_sessions,
+    `${field}.forward_observation_sessions`,
+  )
+  for (const key of [
+    'net_return_pct',
+    'qqq_return_pct',
+    'dia_return_pct',
+    'excess_return_vs_qqq_pct',
+    'excess_return_vs_dia_pct',
+  ]) assertScorecardNullableNumber(value[key], `${field}.${key}`)
+  if (typeof value.selection_drift_detected !== 'boolean') {
+    throw scorecardError(`${field}.selection_drift_detected`)
+  }
+  if (typeof value.survivorship_bias !== 'boolean') {
+    throw scorecardError(`${field}.survivorship_bias`)
+  }
+  assertScorecardStringArray(value.blockers, `${field}.blockers`)
+}
+
+function assertScorecardTrack(value: unknown, index: number): void {
+  const field = `tracks[${index}]`
+  assertObject(value, `/api/universe/rotation-forward-scorecard.${field}`)
+  assertScorecardString(value.variant_name, `${field}.variant_name`)
+  assertScorecardString(value.status, `${field}.status`)
+  if (!ROTATION_SCORECARD_STATUSES.has(value.status)) {
+    throw scorecardError(`${field}.status`)
+  }
+  assertScorecardInteger(value.observed_cohorts, `${field}.observed_cohorts`)
+  assertScorecardInteger(
+    value.forward_eligible_cohorts,
+    `${field}.forward_eligible_cohorts`,
+  )
+  assertScorecardInteger(value.completed_cohorts, `${field}.completed_cohorts`)
+  assertScorecardInteger(
+    value.remaining_completed_cohorts,
+    `${field}.remaining_completed_cohorts`,
+  )
+  for (const key of [
+    'backfilled_cohorts',
+    'incomplete_closed_cohorts',
+    'selection_drift_cohorts',
+    'invalid_evidence_records',
+  ]) assertScorecardInteger(value[key], `${field}.${key}`)
+  assertScorecardInteger(
+    value.minimum_completed_cohorts,
+    `${field}.minimum_completed_cohorts`,
+    1,
+  )
+  if (
+    value.completed_cohorts > value.forward_eligible_cohorts
+    || value.forward_eligible_cohorts > value.observed_cohorts
+    || value.remaining_completed_cohorts
+      !== Math.max(0, value.minimum_completed_cohorts - value.completed_cohorts)
+  ) throw scorecardError(`${field}.cohort_counts`)
+  for (const key of [
+    'first_completed_cohort_month',
+    'latest_completed_cohort_month',
+  ]) {
+    if (value[key] !== null) assertScorecardString(value[key], `${field}.${key}`)
+  }
+  if (value.open_cohort !== null) {
+    assertScorecardCohort(value.open_cohort, `${field}.open_cohort`)
+  }
+  for (const key of [
+    'compounded_return_pct',
+    'qqq_compounded_return_pct',
+    'dia_compounded_return_pct',
+    'compounded_excess_vs_qqq_pct',
+    'compounded_excess_vs_dia_pct',
+    'positive_cohort_rate_pct',
+    'excess_win_rate_vs_qqq_pct',
+    'excess_win_rate_vs_dia_pct',
+    'average_cohort_return_pct',
+    'worst_cohort_return_pct',
+  ]) assertScorecardNullableNumber(value[key], `${field}.${key}`)
+  if (typeof value.manual_review_ready !== 'boolean') {
+    throw scorecardError(`${field}.manual_review_ready`)
+  }
+  if (value.automatic_promotion_allowed !== false) {
+    throw scorecardError(`${field}.automatic_promotion_allowed`)
+  }
+  assertScorecardStringArray(value.blockers, `${field}.blockers`)
+  assertScorecardStringArray(value.warnings, `${field}.warnings`)
+  if (
+    value.manual_review_ready !== (value.status === 'READY_FOR_MANUAL_REVIEW')
+    || (value.manual_review_ready && value.blockers.length > 0)
+  ) throw scorecardError(`${field}.manual_review_ready`)
+}
+
 export async function getUniverseCatalog(): Promise<UniverseCatalogItem[]> {
   const resp = await api.get('/api/universe/catalog')
   if (!Array.isArray(resp.data)) {
@@ -222,4 +377,20 @@ export async function getUniversePromotionReadiness(): Promise<UniversePromotion
   }
   resp.data.items.forEach(assertPromotionReadinessItem)
   return resp.data as unknown as UniversePromotionReadinessResponse
+}
+
+export async function getRotationForwardScorecard(): Promise<UniverseRotationForwardScorecardResponse> {
+  const resp = await api.get('/api/universe/rotation-forward-scorecard')
+  assertObject(resp.data, '/api/universe/rotation-forward-scorecard')
+  assertScorecardString(resp.data.algorithm_version, 'algorithm_version')
+  assertScorecardInteger(resp.data.universe_run_id, 'universe_run_id', 1)
+  assertScorecardString(resp.data.as_of_date, 'as_of_date')
+  assertScorecardString(resp.data.generated_at, 'generated_at')
+  assertScorecardInteger(resp.data.source_run_count, 'source_run_count', 1)
+  if (!Array.isArray(resp.data.tracks)) throw scorecardError('tracks')
+  resp.data.tracks.forEach(assertScorecardTrack)
+  if (resp.data.automatic_promotion_allowed !== false) {
+    throw scorecardError('automatic_promotion_allowed')
+  }
+  return resp.data as unknown as UniverseRotationForwardScorecardResponse
 }

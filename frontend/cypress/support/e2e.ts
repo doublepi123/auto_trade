@@ -419,6 +419,37 @@ const rotationConcentrationChallengerStub = {
   excess_return_vs_dia_pct: 6.62,
 }
 
+const rotationForwardScorecardTrackStub = {
+  variant_name: 'diversified_top8_12_1',
+  status: 'AWAITING_PRECOMMITMENT',
+  observed_cohorts: 1,
+  forward_eligible_cohorts: 0,
+  completed_cohorts: 0,
+  minimum_completed_cohorts: 3,
+  remaining_completed_cohorts: 3,
+  backfilled_cohorts: 1,
+  incomplete_closed_cohorts: 0,
+  selection_drift_cohorts: 0,
+  invalid_evidence_records: 0,
+  first_completed_cohort_month: null,
+  latest_completed_cohort_month: null,
+  open_cohort: null,
+  compounded_return_pct: null,
+  qqq_compounded_return_pct: null,
+  dia_compounded_return_pct: null,
+  compounded_excess_vs_qqq_pct: null,
+  compounded_excess_vs_dia_pct: null,
+  positive_cohort_rate_pct: null,
+  excess_win_rate_vs_qqq_pct: null,
+  excess_win_rate_vs_dia_pct: null,
+  average_cohort_return_pct: null,
+  worst_cohort_return_pct: null,
+  manual_review_ready: false,
+  automatic_promotion_allowed: false,
+  blockers: ['FORWARD_COMPLETED_COHORTS_INSUFFICIENT'],
+  warnings: ['BACKFILLED_COHORTS_EXCLUDED'],
+}
+
 function initialStatus(): StatusStub {
   return {
     engine_state: 'flat',
@@ -1605,6 +1636,36 @@ Cypress.Commands.add('stubApi', () => {
       ],
     },
   }).as('getUniversePromotionReadiness')
+
+  cy.intercept('GET', '/api/universe/rotation-forward-scorecard', {
+    body: {
+      algorithm_version: 'rotation-forward-scorecard-v1',
+      universe_run_id: 7,
+      as_of_date: '2026-07-23',
+      generated_at: '2026-07-24T01:05:00Z',
+      source_run_count: 19,
+      tracks: [
+        rotationForwardScorecardTrackStub,
+        {
+          ...rotationForwardScorecardTrackStub,
+          variant_name: 'concentrated_top6_12_1',
+        },
+        {
+          ...rotationForwardScorecardTrackStub,
+          variant_name: 'diversified_top8_12_1_inverse_vol_25',
+        },
+        {
+          ...rotationForwardScorecardTrackStub,
+          variant_name: 'diversified_top8_12_1_eq75_iv25_cap15',
+        },
+        {
+          ...rotationForwardScorecardTrackStub,
+          variant_name: 'diversified_top8_12_1_return_to_variance',
+        },
+      ],
+      automatic_promotion_allowed: false,
+    },
+  }).as('getRotationForwardScorecard')
 
   cy.intercept('POST', '/api/watchlist/score', {
     body: {

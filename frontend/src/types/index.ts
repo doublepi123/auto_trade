@@ -1446,6 +1446,75 @@ export interface UniverseRotationForwardSnapshot {
   blockers: string[]
 }
 
+export type UniverseRotationForwardScorecardStatus =
+  | 'NOT_REGISTERED'
+  | 'AWAITING_PRECOMMITMENT'
+  | 'COLLECTING'
+  | 'DATA_BLOCKED'
+  | 'PERFORMANCE_BLOCKED'
+  | 'READY_FOR_MANUAL_REVIEW'
+
+export interface UniverseRotationForwardCohortScore {
+  source_run_id: number
+  source_as_of_date: string
+  cohort_month: string
+  status: string
+  signal_date: string
+  entry_date: string
+  mark_date: string
+  target_symbols: string[]
+  forward_observation_sessions: number
+  net_return_pct: number | null
+  qqq_return_pct: number | null
+  dia_return_pct: number | null
+  excess_return_vs_qqq_pct: number | null
+  excess_return_vs_dia_pct: number | null
+  selection_drift_detected: boolean
+  survivorship_bias: boolean
+  blockers: string[]
+}
+
+export interface UniverseRotationForwardTrackScore {
+  variant_name: string
+  status: UniverseRotationForwardScorecardStatus
+  observed_cohorts: number
+  forward_eligible_cohorts: number
+  completed_cohorts: number
+  minimum_completed_cohorts: number
+  remaining_completed_cohorts: number
+  backfilled_cohorts: number
+  incomplete_closed_cohorts: number
+  selection_drift_cohorts: number
+  invalid_evidence_records: number
+  first_completed_cohort_month: string | null
+  latest_completed_cohort_month: string | null
+  open_cohort: UniverseRotationForwardCohortScore | null
+  compounded_return_pct: number | null
+  qqq_compounded_return_pct: number | null
+  dia_compounded_return_pct: number | null
+  compounded_excess_vs_qqq_pct: number | null
+  compounded_excess_vs_dia_pct: number | null
+  positive_cohort_rate_pct: number | null
+  excess_win_rate_vs_qqq_pct: number | null
+  excess_win_rate_vs_dia_pct: number | null
+  average_cohort_return_pct: number | null
+  worst_cohort_return_pct: number | null
+  manual_review_ready: boolean
+  automatic_promotion_allowed: false
+  blockers: string[]
+  warnings: string[]
+}
+
+export interface UniverseRotationForwardScorecardResponse {
+  algorithm_version: string
+  universe_run_id: number
+  as_of_date: string
+  generated_at: string
+  source_run_count: number
+  tracks: UniverseRotationForwardTrackScore[]
+  automatic_promotion_allowed: false
+}
+
 export interface UniverseSelectionMetrics {
   price: number | null
   avg_dollar_volume: number | null

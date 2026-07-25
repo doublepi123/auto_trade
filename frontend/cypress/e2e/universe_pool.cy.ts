@@ -77,6 +77,7 @@ describe('Dynamic universe observation pool', () => {
     cy.wait('@getUniverseCatalog')
     cy.wait('@getUniverseLatest')
     cy.wait('@getUniversePromotionReadiness')
+    cy.wait('@getRotationForwardScorecard')
   })
 
   it('shows provenance, coverage, ranking metrics and selection reasons', () => {
@@ -163,6 +164,24 @@ describe('Dynamic universe observation pool', () => {
           .and('contain', '0.1%')
           .and('contain', '0/16')
         cy.contains('月末会按形成期收益/方差预登记下月组合').should('be.visible')
+      })
+      cy.get('[data-testid="rotation-forward-scorecard"]').within(() => {
+        cy.contains('跨月前向记分牌').should('be.visible')
+        cy.contains('完整月 3 期起').should('be.visible')
+        cy.contains('Run #7').should('be.visible')
+        cy.contains('19 次历史运行').should('be.visible')
+        cy.get('[data-testid="rotation-forward-scorecard-table"] tbody tr')
+          .should('have.length', 5)
+          .first()
+          .should('contain', '分散 Top8')
+          .and('contain', '等待预登记')
+          .and('contain', '0/3')
+          .and('contain', '完整月样本不足')
+          .and('contain', '回填月份已排除')
+        cy.get('[data-testid="rotation-forward-scorecard-note"]')
+          .should('contain', '同时跑赢 QQQ 与 DIA')
+          .and('contain', '只开放人工复核')
+        cy.get('button').should('not.exist')
       })
       cy.get('[data-testid="rotation-walk-forward"]').within(() => {
         cy.contains('评估完成').should('be.visible')
@@ -295,6 +314,28 @@ describe('Dynamic universe observation pool', () => {
     cy.wait('@getUniversePromotionReadinessInvalid')
     cy.get('[data-testid="promotion-readiness-error"]')
       .should('contain', 'items is not an array')
+    cy.get('[data-testid="universe-table"]')
+      .should('be.visible')
+      .and('contain', 'NVDA.US')
+  })
+
+  it('isolates a malformed rotation scorecard from the candidate pool', () => {
+    cy.intercept('GET', '/api/universe/rotation-forward-scorecard', {
+      body: {
+        algorithm_version: 'rotation-forward-scorecard-v1',
+        universe_run_id: 7,
+        as_of_date: '2026-07-23',
+        generated_at: '2026-07-24T01:05:00Z',
+        source_run_count: 19,
+        tracks: {},
+        automatic_promotion_allowed: false,
+      },
+    }).as('getRotationForwardScorecardInvalid')
+
+    cy.reload()
+    cy.wait('@getRotationForwardScorecardInvalid')
+    cy.get('[data-testid="rotation-forward-scorecard-error"]')
+      .should('contain', 'tracks is invalid')
     cy.get('[data-testid="universe-table"]')
       .should('be.visible')
       .and('contain', 'NVDA.US')

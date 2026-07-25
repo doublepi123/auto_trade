@@ -573,6 +573,166 @@
           </section>
 
           <section
+            class="rotation-scorecard"
+            data-testid="rotation-forward-scorecard"
+          >
+            <div class="rotation-scorecard-header">
+              <div>
+                <div class="rotation-scorecard-title">
+                  <strong>跨月前向记分牌</strong>
+                  <el-tag type="info" size="small" effect="plain">完整月 3 期起</el-tag>
+                  <el-tag type="warning" size="small" effect="plain">仅人工复核</el-tag>
+                </div>
+                <p>只累计入场前预登记并持有至月末的证据；回填结果不计分。</p>
+              </div>
+              <div v-if="rotationForwardScorecard" class="rotation-scorecard-meta">
+                <span>截至 {{ rotationForwardScorecard.as_of_date }}</span>
+                <span>Run #{{ rotationForwardScorecard.universe_run_id }}</span>
+                <span>{{ rotationForwardScorecard.source_run_count }} 次历史运行</span>
+              </div>
+            </div>
+
+            <el-alert
+              v-if="rotationScorecardError"
+              :title="rotationScorecardError"
+              type="error"
+              :closable="false"
+              show-icon
+              class="rotation-scorecard-alert"
+              data-testid="rotation-forward-scorecard-error"
+            />
+
+            <div
+              v-loading="rotationScorecardLoading && !rotationForwardScorecard"
+              class="rotation-scorecard-content"
+            >
+              <template v-if="rotationScorecardRows.length">
+                <div class="rotation-scorecard-table-view">
+                  <el-table
+                    :data="rotationScorecardRows"
+                    size="small"
+                    table-layout="fixed"
+                    data-testid="rotation-forward-scorecard-table"
+                  >
+                    <el-table-column label="轨道" min-width="146">
+                      <template #default="{ row }">
+                        <div class="rotation-scorecard-variant">
+                          <strong>{{ rotationVariantLabel(row.variant_name) }}</strong>
+                          <small v-if="row.open_cohort">
+                            {{ row.open_cohort.cohort_month.slice(0, 7) }} 采集中
+                            · {{ formatSignedPercent(row.open_cohort.net_return_pct) }}
+                          </small>
+                          <small v-else-if="row.backfilled_cohorts">
+                            {{ row.backfilled_cohorts }} 期回填已排除
+                          </small>
+                          <small v-else>尚无前向月份</small>
+                        </div>
+                      </template>
+                    </el-table-column>
+                    <el-table-column label="状态" width="104">
+                      <template #default="{ row }">
+                        <el-tag
+                          :type="rotationScorecardStatusMeta(row.status).type"
+                          size="small"
+                          effect="plain"
+                        >
+                          {{ rotationScorecardStatusMeta(row.status).label }}
+                        </el-tag>
+                      </template>
+                    </el-table-column>
+                    <el-table-column label="完整月" width="76" align="center">
+                      <template #default="{ row }">
+                        <strong>{{ row.completed_cohorts }}/{{ row.minimum_completed_cohorts }}</strong>
+                      </template>
+                    </el-table-column>
+                    <el-table-column label="累计收益" width="84" align="right">
+                      <template #default="{ row }">
+                        <strong :class="rotationScorecardMetricClass(row.compounded_return_pct)">
+                          {{ formatSignedPercent(row.compounded_return_pct) }}
+                        </strong>
+                      </template>
+                    </el-table-column>
+                    <el-table-column label="累计超额" width="108">
+                      <template #default="{ row }">
+                        <div class="rotation-scorecard-pair">
+                          <span>QQQ {{ formatSignedPercent(row.compounded_excess_vs_qqq_pct) }}</span>
+                          <span>DIA {{ formatSignedPercent(row.compounded_excess_vs_dia_pct) }}</span>
+                        </div>
+                      </template>
+                    </el-table-column>
+                    <el-table-column label="超额月胜率" width="104">
+                      <template #default="{ row }">
+                        <div class="rotation-scorecard-pair">
+                          <span>QQQ {{ formatPercent(row.excess_win_rate_vs_qqq_pct) }}</span>
+                          <span>DIA {{ formatPercent(row.excess_win_rate_vs_dia_pct) }}</span>
+                        </div>
+                      </template>
+                    </el-table-column>
+                    <el-table-column label="复核门槛" min-width="154">
+                      <template #default="{ row }">
+                        <span
+                          v-if="row.blockers.length || row.warnings.length"
+                          class="rotation-scorecard-blockers"
+                        >
+                          {{ rotationScorecardEvidenceLabel(row) }}
+                        </span>
+                        <span v-else class="rotation-scorecard-clear">已满足，可人工复核</span>
+                      </template>
+                    </el-table-column>
+                  </el-table>
+                </div>
+
+                <div
+                  class="rotation-scorecard-mobile-list"
+                  data-testid="rotation-forward-scorecard-mobile-list"
+                >
+                  <article
+                    v-for="row in rotationScorecardRows"
+                    :key="row.variant_name"
+                    class="rotation-scorecard-mobile-row"
+                  >
+                    <div class="rotation-scorecard-mobile-heading">
+                      <div>
+                        <strong>{{ rotationVariantLabel(row.variant_name) }}</strong>
+                        <small v-if="row.open_cohort">
+                          {{ row.open_cohort.cohort_month.slice(0, 7) }}
+                          · {{ formatSignedPercent(row.open_cohort.net_return_pct) }}
+                        </small>
+                        <small v-else>尚无完整前向持有月</small>
+                      </div>
+                      <el-tag
+                        :type="rotationScorecardStatusMeta(row.status).type"
+                        size="small"
+                        effect="plain"
+                      >
+                        {{ rotationScorecardStatusMeta(row.status).label }}
+                      </el-tag>
+                    </div>
+                    <div class="rotation-scorecard-mobile-metrics">
+                      <div><span>完整月</span><strong>{{ row.completed_cohorts }}/{{ row.minimum_completed_cohorts }}</strong></div>
+                      <div><span>累计收益</span><strong :class="rotationScorecardMetricClass(row.compounded_return_pct)">{{ formatSignedPercent(row.compounded_return_pct) }}</strong></div>
+                      <div><span>超额 QQQ</span><strong>{{ formatSignedPercent(row.compounded_excess_vs_qqq_pct) }}</strong></div>
+                      <div><span>超额 DIA</span><strong>{{ formatSignedPercent(row.compounded_excess_vs_dia_pct) }}</strong></div>
+                      <div><span>胜率 QQQ/DIA</span><strong>{{ formatPercent(row.excess_win_rate_vs_qqq_pct) }} / {{ formatPercent(row.excess_win_rate_vs_dia_pct) }}</strong></div>
+                    </div>
+                    <p>{{ rotationScorecardEvidenceLabel(row) }}</p>
+                  </article>
+                </div>
+              </template>
+
+              <DataState
+                v-else-if="!rotationScorecardLoading && !rotationScorecardError"
+                empty
+                empty-text="尚无跨月前向证据"
+              />
+            </div>
+
+            <div class="rotation-scorecard-note" data-testid="rotation-forward-scorecard-note">
+              至少 3 个完整月、累计收益为正、同时跑赢 QQQ 与 DIA，且两项超额月胜率均不低于 60%；达标后也只开放人工复核。
+            </div>
+          </section>
+
+          <section
             v-if="universeRotationEvaluation"
             class="rotation-evaluation"
             data-testid="rotation-walk-forward"
@@ -1649,7 +1809,10 @@ import type {
   UniverseRotationPointInTimeSensitivity,
   UniverseRotationPerformance,
   UniverseRotationForwardHolding,
+  UniverseRotationForwardScorecardResponse,
+  UniverseRotationForwardScorecardStatus,
   UniverseRotationForwardSnapshot,
+  UniverseRotationForwardTrackScore,
   UniverseRotationVariantConfig,
   UniverseRotationVariantEvaluation,
   UniverseRotationWalkForwardEvaluation,
@@ -1671,6 +1834,7 @@ import {
 } from '../api/watchlist'
 import {
   getLatestUniverseSelection,
+  getRotationForwardScorecard,
   getUniversePromotionReadiness,
   getUniverseCatalog,
   refreshUniverseSelection,
@@ -1690,6 +1854,9 @@ const adding = ref(false)
 const quantRanking = ref(false)
 const universeCatalog = ref<UniverseCatalogItem[]>([])
 const universeRun = ref<UniverseSelectionRunResponse | null>(null)
+const rotationForwardScorecard = ref<UniverseRotationForwardScorecardResponse | null>(null)
+const rotationScorecardLoading = ref(false)
+const rotationScorecardError = ref('')
 const universeLoading = ref(false)
 const universeRefreshing = ref(false)
 const universeError = ref('')
@@ -1722,6 +1889,7 @@ const QUOTE_FAILURE_TOAST_THRESHOLD = 3
 const QUOTE_FAILURE_TOAST_COOLDOWN_MS = 60_000
 let lastQuoteFailureToastAt = 0
 let universeRequestGeneration = 0
+let rotationScorecardRequestGeneration = 0
 let promotionRequestGeneration = 0
 let quantScoreGeneration = 0
 let reviewScoreGeneration = 0
@@ -1891,6 +2059,10 @@ const rotationValidatedChallenger = computed<UniverseRotationVariantEvaluation |
 
 const rotationDisplayVariant = computed<UniverseRotationVariantEvaluation | null>(() => (
   rotationValidatedChallenger.value ?? rotationTrainingWinner.value
+))
+
+const rotationScorecardRows = computed<UniverseRotationForwardTrackScore[]>(() => (
+  rotationForwardScorecard.value?.tracks ?? []
 ))
 
 const promotionRows = computed<UniversePromotionReadinessItem[]>(() => {
@@ -2508,6 +2680,60 @@ function rotationForwardTagType(
   return 'info'
 }
 
+function rotationScorecardStatusMeta(
+  status: UniverseRotationForwardScorecardStatus,
+): {
+  label: string
+  type: 'success' | 'warning' | 'danger' | 'info'
+} {
+  switch (status) {
+    case 'AWAITING_PRECOMMITMENT':
+      return { label: '等待预登记', type: 'info' }
+    case 'COLLECTING':
+      return { label: '前向采集中', type: 'warning' }
+    case 'DATA_BLOCKED':
+      return { label: '数据阻塞', type: 'danger' }
+    case 'PERFORMANCE_BLOCKED':
+      return { label: '表现未达标', type: 'danger' }
+    case 'READY_FOR_MANUAL_REVIEW':
+      return { label: '可人工复核', type: 'success' }
+    case 'NOT_REGISTERED':
+    default:
+      return { label: '尚未登记', type: 'info' }
+  }
+}
+
+const rotationScorecardEvidenceLabels: Record<string, string> = {
+  FORWARD_COMPLETED_COHORTS_INSUFFICIENT: '完整月样本不足',
+  FORWARD_EVIDENCE_INVALID: '证据格式异常',
+  FORWARD_SELECTION_DRIFT: '冻结成分发生漂移',
+  FORWARD_COHORT_DATA_INCOMPLETE: '前向月份数据不完整',
+  FORWARD_COMPOUNDED_RETURN_NON_POSITIVE: '累计收益未转正',
+  FORWARD_EXCESS_VS_QQQ_NON_POSITIVE: '累计未跑赢 QQQ',
+  FORWARD_EXCESS_VS_DIA_NON_POSITIVE: '累计未跑赢 DIA',
+  FORWARD_WIN_RATE_VS_QQQ_INSUFFICIENT: '跑赢 QQQ 的月胜率不足',
+  FORWARD_WIN_RATE_VS_DIA_INSUFFICIENT: '跑赢 DIA 的月胜率不足',
+  BACKFILLED_COHORTS_EXCLUDED: '回填月份已排除',
+  SURVIVORSHIP_BIAS: '当前成分口径含幸存者偏差',
+}
+
+function rotationScorecardEvidenceLabel(
+  row: UniverseRotationForwardTrackScore,
+): string {
+  const evidence = [...row.blockers, ...row.warnings]
+  if (!evidence.length) return '已满足，可人工复核'
+  return evidence
+    .map((item) => rotationScorecardEvidenceLabels[item] ?? item.replace(/_/g, ' '))
+    .join('；')
+}
+
+function rotationScorecardMetricClass(value: number | null): string {
+  if (value === null) return ''
+  if (value > 0) return 'rotation-scorecard-positive'
+  if (value < 0) return 'rotation-scorecard-negative'
+  return ''
+}
+
 const exclusionReasonLabels: Record<string, string> = {
   DATA_INSUFFICIENT_DAILY_BARS: '日线数据不足',
   DATA_NON_FINITE_DAILY_BAR: '日线含无效值',
@@ -2722,6 +2948,31 @@ async function loadPromotionReadiness() {
   }
 }
 
+async function loadRotationForwardScorecard() {
+  const generation = ++rotationScorecardRequestGeneration
+  rotationScorecardLoading.value = true
+  rotationScorecardError.value = ''
+  try {
+    const response = await getRotationForwardScorecard()
+    if (generation !== rotationScorecardRequestGeneration) return
+    rotationForwardScorecard.value = response
+  } catch (e: unknown) {
+    if (generation !== rotationScorecardRequestGeneration) return
+    if (isAxiosError(e) && e.response?.status === 404) {
+      rotationForwardScorecard.value = null
+    } else {
+      rotationScorecardError.value = resolveErrorMessage(
+        e,
+        '加载跨月前向记分牌失败',
+      )
+    }
+  } finally {
+    if (generation === rotationScorecardRequestGeneration) {
+      rotationScorecardLoading.value = false
+    }
+  }
+}
+
 async function handleUniverseRefresh() {
   const generation = ++universeRequestGeneration
   universeRefreshing.value = true
@@ -2732,6 +2983,7 @@ async function handleUniverseRefresh() {
     if (generation !== universeRequestGeneration) return
     universeRun.value = response.run
     void loadPromotionReadiness()
+    void loadRotationForwardScorecard()
     if (response.applied) {
       await loadItems()
       await loadQuotes()
@@ -3079,12 +3331,21 @@ function exportSnapshot() {
 }
 
 useRegisterViewRefresh(() => {
-  void Promise.all([loadItems(), loadUniverse(), loadPromotionReadiness()])
+  void Promise.all([
+    loadItems(),
+    loadUniverse(),
+    loadPromotionReadiness(),
+    loadRotationForwardScorecard(),
+  ])
 })
 
 onMounted(() => {
   scoreClockMs.value = Date.now()
-  void Promise.all([loadUniverse(), loadPromotionReadiness()])
+  void Promise.all([
+    loadUniverse(),
+    loadPromotionReadiness(),
+    loadRotationForwardScorecard(),
+  ])
   loadItems().then(() => {
     loadQuotes()
     loadScores()
@@ -3102,6 +3363,7 @@ watch([searchText, marketFilter, statusFilter, scoreBucket, hideStaleScores], ()
 
 onUnmounted(() => {
   universeRequestGeneration += 1
+  rotationScorecardRequestGeneration += 1
   promotionRequestGeneration += 1
   quantScoreGeneration += 1
   reviewScoreGeneration += 1
@@ -3339,6 +3601,114 @@ onUnmounted(() => {
   color: var(--el-color-warning-dark-2);
   font-weight: 500;
   text-align: right;
+}
+
+.rotation-scorecard {
+  min-width: 0;
+  margin-bottom: 14px;
+  padding: 12px 0;
+  border-top: 1px solid var(--el-border-color);
+  border-bottom: 1px solid var(--el-border-color);
+}
+
+.rotation-scorecard-header {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.rotation-scorecard-title {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.rotation-scorecard-header p {
+  margin: 5px 0 0;
+  color: var(--el-text-color-secondary);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.rotation-scorecard-meta {
+  display: flex;
+  flex-shrink: 0;
+  align-items: flex-end;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--el-text-color-secondary);
+  font-size: 10px;
+}
+
+.rotation-scorecard-alert {
+  margin-top: 10px;
+}
+
+.rotation-scorecard-content {
+  min-height: 24px;
+  margin-top: 10px;
+}
+
+.rotation-scorecard-table-view {
+  display: block;
+  overflow: hidden;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 4px;
+}
+
+.rotation-scorecard-mobile-list {
+  display: none;
+}
+
+.rotation-scorecard-variant,
+.rotation-scorecard-pair {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.rotation-scorecard-variant strong {
+  overflow: hidden;
+  color: var(--el-text-color-primary);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rotation-scorecard-variant small,
+.rotation-scorecard-pair span {
+  color: var(--el-text-color-secondary);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.rotation-scorecard-blockers {
+  display: block;
+  color: var(--el-color-warning-dark-2);
+  font-size: 10px;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.rotation-scorecard-clear,
+.rotation-scorecard-positive {
+  color: var(--el-color-success-dark-2);
+}
+
+.rotation-scorecard-negative {
+  color: var(--el-color-danger);
+}
+
+.rotation-scorecard-note {
+  margin-top: 8px;
+  color: var(--el-text-color-secondary);
+  font-size: 10px;
+  line-height: 1.5;
 }
 
 .rotation-evaluation {
@@ -3921,6 +4291,102 @@ onUnmounted(() => {
 
   .rotation-forward-footer strong {
     text-align: left;
+  }
+
+  .rotation-scorecard-header {
+    flex-direction: column;
+    gap: 7px;
+  }
+
+  .rotation-scorecard-meta {
+    width: 100%;
+    align-items: flex-start;
+    flex-direction: row;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .rotation-scorecard-table-view {
+    display: none;
+  }
+
+  .rotation-scorecard-mobile-list {
+    display: block;
+    border-top: 1px solid var(--el-border-color-lighter);
+  }
+
+  .rotation-scorecard-mobile-row {
+    padding: 11px 0;
+    border-bottom: 1px solid var(--el-border-color-lighter);
+  }
+
+  .rotation-scorecard-mobile-row:last-child {
+    border-bottom: 0;
+  }
+
+  .rotation-scorecard-mobile-heading {
+    display: flex;
+    min-width: 0;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .rotation-scorecard-mobile-heading > div {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  .rotation-scorecard-mobile-heading small {
+    color: var(--el-text-color-secondary);
+    font-size: 10px;
+  }
+
+  .rotation-scorecard-mobile-metrics {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1px;
+    margin-top: 9px;
+    overflow: hidden;
+    border: 1px solid var(--el-border-color-lighter);
+    border-radius: 4px;
+    background: var(--el-border-color-lighter);
+  }
+
+  .rotation-scorecard-mobile-metrics > div {
+    display: flex;
+    min-width: 0;
+    min-height: 45px;
+    padding: 7px;
+    flex-direction: column;
+    justify-content: center;
+    gap: 3px;
+    background: var(--el-bg-color);
+  }
+
+  .rotation-scorecard-mobile-metrics > div:last-child {
+    grid-column: 1 / -1;
+  }
+
+  .rotation-scorecard-mobile-metrics span {
+    color: var(--el-text-color-secondary);
+    font-size: 10px;
+  }
+
+  .rotation-scorecard-mobile-metrics strong {
+    overflow: hidden;
+    font-size: 12px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .rotation-scorecard-mobile-row p {
+    margin: 7px 0 0;
+    color: var(--el-color-warning-dark-2);
+    font-size: 10px;
+    line-height: 1.5;
   }
 
   .rotation-evaluation-header,

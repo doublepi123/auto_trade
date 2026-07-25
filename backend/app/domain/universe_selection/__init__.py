@@ -58,6 +58,15 @@ from app.domain.universe_selection.rotation_forward import (
     rotation_cohort_month,
     unavailable_rotation_forward_snapshot,
 )
+from app.domain.universe_selection.rotation_forward_scorecard import (
+    MINIMUM_COMPLETED_FORWARD_COHORTS,
+    MINIMUM_EXCESS_WIN_RATE_PCT,
+    ROTATION_FORWARD_SCORECARD_VERSION,
+    RotationForwardCohortEvidence,
+    RotationForwardTrackScore,
+    build_rotation_forward_track_score,
+    parse_rotation_forward_cohort,
+)
 
 __all__ = [
     "CATALOG_SOURCE_VERSION",
@@ -65,6 +74,7 @@ __all__ = [
     "ROTATION_ALGORITHM_VERSION",
     "ROTATION_BENCHMARK_SYMBOLS",
     "ROTATION_FORWARD_VERSION",
+    "ROTATION_FORWARD_SCORECARD_VERSION",
     "ROTATION_WALK_FORWARD_VERSION",
     "UNIVERSE_ALGORITHM_VERSION",
     "CandidateInput",
@@ -81,6 +91,8 @@ __all__ = [
     "RotationForwardEvaluation",
     "RotationForwardHolding",
     "RotationForwardSnapshot",
+    "RotationForwardCohortEvidence",
+    "RotationForwardTrackScore",
     "RotationPerformance",
     "RotationPeriod",
     "RotationVariant",
@@ -95,7 +107,10 @@ __all__ = [
     "DIVERSIFIED_SHRINKAGE_ROTATION_VARIANT",
     "RETURN_TO_VARIANCE_ROTATION_VARIANT",
     "INDEX_MEMBERSHIP_HISTORY",
+    "MINIMUM_COMPLETED_FORWARD_COHORTS",
+    "MINIMUM_EXCESS_WIN_RATE_PCT",
     "build_rotation_cohort_registration",
+    "build_rotation_forward_track_score",
     "completed_daily_bars",
     "latest_closed_session_date",
     "liquidity_spread_proxy_bps",
@@ -108,6 +123,7 @@ __all__ = [
     "evaluate_rotation_forward",
     "is_last_us_session_of_month",
     "next_cohort_month",
+    "parse_rotation_forward_cohort",
     "rotation_cohort_month",
     "unavailable_rotation_forward_snapshot",
 ]

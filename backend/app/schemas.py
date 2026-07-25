@@ -2726,6 +2726,134 @@ class UniversePromotionReadinessResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class UniverseRotationForwardCohortResponse(BaseModel):
+    source_run_id: int = Field(ge=1)
+    source_as_of_date: date
+    cohort_month: date
+    status: str = Field(min_length=1, max_length=50)
+    signal_date: date
+    entry_date: date
+    mark_date: date
+    target_symbols: list[str] = Field(default_factory=list, max_length=20)
+    forward_observation_sessions: int = Field(ge=0)
+    net_return_pct: Optional[float] = Field(
+        default=None,
+        allow_inf_nan=False,
+    )
+    qqq_return_pct: Optional[float] = Field(
+        default=None,
+        allow_inf_nan=False,
+    )
+    dia_return_pct: Optional[float] = Field(
+        default=None,
+        allow_inf_nan=False,
+    )
+    excess_return_vs_qqq_pct: Optional[float] = Field(
+        default=None,
+        allow_inf_nan=False,
+    )
+    excess_return_vs_dia_pct: Optional[float] = Field(
+        default=None,
+        allow_inf_nan=False,
+    )
+    selection_drift_detected: bool
+    survivorship_bias: bool
+    blockers: list[str] = Field(default_factory=list, max_length=100)
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class UniverseRotationForwardTrackResponse(BaseModel):
+    variant_name: str = Field(min_length=1, max_length=100)
+    status: Literal[
+        "NOT_REGISTERED",
+        "AWAITING_PRECOMMITMENT",
+        "COLLECTING",
+        "DATA_BLOCKED",
+        "PERFORMANCE_BLOCKED",
+        "READY_FOR_MANUAL_REVIEW",
+    ]
+    observed_cohorts: int = Field(ge=0)
+    forward_eligible_cohorts: int = Field(ge=0)
+    completed_cohorts: int = Field(ge=0)
+    minimum_completed_cohorts: int = Field(ge=1)
+    remaining_completed_cohorts: int = Field(ge=0)
+    backfilled_cohorts: int = Field(ge=0)
+    incomplete_closed_cohorts: int = Field(ge=0)
+    selection_drift_cohorts: int = Field(ge=0)
+    invalid_evidence_records: int = Field(ge=0)
+    first_completed_cohort_month: Optional[date] = None
+    latest_completed_cohort_month: Optional[date] = None
+    open_cohort: Optional[UniverseRotationForwardCohortResponse] = None
+    compounded_return_pct: Optional[float] = Field(
+        default=None,
+        allow_inf_nan=False,
+    )
+    qqq_compounded_return_pct: Optional[float] = Field(
+        default=None,
+        allow_inf_nan=False,
+    )
+    dia_compounded_return_pct: Optional[float] = Field(
+        default=None,
+        allow_inf_nan=False,
+    )
+    compounded_excess_vs_qqq_pct: Optional[float] = Field(
+        default=None,
+        allow_inf_nan=False,
+    )
+    compounded_excess_vs_dia_pct: Optional[float] = Field(
+        default=None,
+        allow_inf_nan=False,
+    )
+    positive_cohort_rate_pct: Optional[float] = Field(
+        default=None,
+        ge=0,
+        le=100,
+        allow_inf_nan=False,
+    )
+    excess_win_rate_vs_qqq_pct: Optional[float] = Field(
+        default=None,
+        ge=0,
+        le=100,
+        allow_inf_nan=False,
+    )
+    excess_win_rate_vs_dia_pct: Optional[float] = Field(
+        default=None,
+        ge=0,
+        le=100,
+        allow_inf_nan=False,
+    )
+    average_cohort_return_pct: Optional[float] = Field(
+        default=None,
+        allow_inf_nan=False,
+    )
+    worst_cohort_return_pct: Optional[float] = Field(
+        default=None,
+        allow_inf_nan=False,
+    )
+    manual_review_ready: bool
+    automatic_promotion_allowed: Literal[False] = False
+    blockers: list[str] = Field(default_factory=list, max_length=100)
+    warnings: list[str] = Field(default_factory=list, max_length=100)
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class UniverseRotationForwardScorecardResponse(BaseModel):
+    algorithm_version: str = Field(min_length=1, max_length=100)
+    universe_run_id: int = Field(ge=1)
+    as_of_date: date
+    generated_at: datetime
+    source_run_count: int = Field(ge=1)
+    tracks: list[UniverseRotationForwardTrackResponse] = Field(
+        default_factory=list,
+        max_length=20,
+    )
+    automatic_promotion_allowed: Literal[False] = False
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class UniverseSelectionRefreshResponse(BaseModel):
     run: UniverseSelectionRunResponse
     exploration_symbols: list[str] = Field(
