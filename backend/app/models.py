@@ -148,6 +148,9 @@ class StrategyV2ForwardRegistration(Base):
     __table_args__ = (
         UniqueConstraint(
             "symbol",
+            "source_config_version",
+            "candidate_algorithm_version",
+            "evaluator_digest",
             name="uq_strategy_v2_forward_registration_candidate",
         ),
         Index(

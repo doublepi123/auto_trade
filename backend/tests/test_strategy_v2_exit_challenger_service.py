@@ -112,7 +112,7 @@ class TestStrategyV2ExitChallengerService:
             entry_at=entry_at,
             entry_price=100.0,
             quantity=1.0,
-            entry_reason="NEXT_BAR_OPEN_FILL",
+            entry_reason="FIRST_CAUSAL_BAR_OPEN_FILL",
             estimated_fees=0.05,
             estimated_fee_rate=0.0005,
         )

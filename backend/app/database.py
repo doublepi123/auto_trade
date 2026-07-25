@@ -1440,6 +1440,7 @@ def _ensure_strategy_v2_shadow_tables(db_engine: Engine) -> None:
     ):
         Base.metadata.tables[table_name].create(db_engine, checkfirst=True)
 
+    _ensure_strategy_v2_forward_registration_uniqueness(db_engine)
     inspector = inspect(db_engine)
     config_columns = {
         column["name"]
@@ -1482,6 +1483,72 @@ def _ensure_strategy_v2_shadow_tables(db_engine: Engine) -> None:
                 "ALTER TABLE strategy_v2_forward_evidence ADD COLUMN "
                 "evidence_digest_sha256 VARCHAR(64) NOT NULL DEFAULT ''"
             )
+
+
+def _ensure_strategy_v2_forward_registration_uniqueness(
+    db_engine: Engine,
+) -> None:
+    """Preserve old evidence while allowing one registration per frozen version."""
+    from app.models import Base
+
+    table_name = "strategy_v2_forward_registrations"
+    desired_columns = {
+        "symbol",
+        "source_config_version",
+        "candidate_algorithm_version",
+        "evaluator_digest",
+    }
+    inspector = inspect(db_engine)
+    constraints = inspector.get_unique_constraints(table_name)
+    if any(
+        set(constraint.get("column_names") or ()) == desired_columns
+        for constraint in constraints
+    ):
+        return
+    if db_engine.dialect.name != "sqlite":
+        raise RuntimeError(
+            "strategy v2 forward registration migration requires SQLite"
+        )
+
+    legacy_table = f"{table_name}__symbol_unique_legacy"
+    columns = (
+        "id",
+        "symbol",
+        "market",
+        "candidate_algorithm_version",
+        "source_config_version",
+        "evaluator_digest",
+        "candidate_spec_json",
+        "registered_at",
+        "eligible_after",
+    )
+    column_sql = ", ".join(columns)
+    with db_engine.begin() as connection:
+        legacy_exists = connection.exec_driver_sql(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type = 'table' AND name = ?",
+            (legacy_table,),
+        ).first()
+        if legacy_exists is not None:
+            raise RuntimeError(
+                "unfinished strategy v2 forward registration migration"
+            )
+        connection.exec_driver_sql(
+            f"ALTER TABLE {table_name} RENAME TO {legacy_table}"
+        )
+        connection.exec_driver_sql(
+            "DROP INDEX IF EXISTS "
+            "ix_strategy_v2_forward_registration_symbol_eligible"
+        )
+        Base.metadata.tables[table_name].create(
+            connection,
+            checkfirst=False,
+        )
+        connection.exec_driver_sql(
+            f"INSERT INTO {table_name} ({column_sql}) "
+            f"SELECT {column_sql} FROM {legacy_table}"
+        )
+        connection.exec_driver_sql(f"DROP TABLE {legacy_table}")
 
 
 def _ensure_opening_momentum_shadow_table(db_engine: Engine) -> None:

@@ -307,8 +307,8 @@ class StrategyV2ShadowConfigValues(BaseModel):
         le=0.1,
         allow_inf_nan=False,
     )
-    algorithm_version: Literal["strategy-v2-rth-mr-v4-frozen-config"] = (
-        "strategy-v2-rth-mr-v4-frozen-config"
+    algorithm_version: Literal["strategy-v2-rth-mr-v5-causal-entry"] = (
+        "strategy-v2-rth-mr-v5-causal-entry"
     )
     mode: Literal["SHADOW"] = "SHADOW"
     order_submission_allowed: Literal[False] = False

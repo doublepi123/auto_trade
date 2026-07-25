@@ -115,7 +115,7 @@ def _drive_to_pending(engine: StrategyV2Engine) -> StrategyV2FeatureSnapshot:
     return reclaim_feature
 
 
-def test_breach_must_precede_later_reclaim_and_fill_next_bar_open() -> None:
+def test_breach_reclaim_fills_first_causal_future_bar_open() -> None:
     engine = StrategyV2Engine()
     signal = _drive_to_pending(engine)
 
@@ -123,10 +123,24 @@ def test_breach_must_precede_later_reclaim_and_fill_next_bar_open() -> None:
     assert duplicate.decisions == ()
     assert duplicate.state == StrategyV2State.ENTRY_PENDING
 
-    fill_feature = _feature(5, -0.7, open_price=101.0, high=101.3, low=100.8)
+    already_started = engine.on_feature(_feature(5, -0.7))
+    assert already_started.decisions[0].action == StrategyV2Action.WAIT
+    assert (
+        already_started.decisions[0].reason
+        == "WAITING_FOR_CAUSAL_ENTRY_OPEN"
+    )
+    assert already_started.state == StrategyV2State.ENTRY_PENDING
+
+    fill_feature = _feature(
+        6,
+        -0.7,
+        open_price=101.0,
+        high=101.3,
+        low=100.8,
+    )
     filled = engine.on_feature(fill_feature)
     assert filled.decisions[0].action == StrategyV2Action.FILL_ENTRY
-    assert filled.decisions[0].reason == "NEXT_BAR_OPEN_FILL"
+    assert filled.decisions[0].reason == "FIRST_CAUSAL_BAR_OPEN_FILL"
     assert filled.decisions[0].price == pytest.approx(101.0 * 1.0002)
     assert filled.state == StrategyV2State.LONG
     assert filled.position is not None
@@ -134,20 +148,30 @@ def test_breach_must_precede_later_reclaim_and_fill_next_bar_open() -> None:
     assert len(filled.position.config_version) == 64
 
 
-def test_entry_pending_cancels_on_noncontiguous_next_bar() -> None:
+def test_entry_pending_cancels_on_noncontiguous_causal_fill_bar() -> None:
     engine = StrategyV2Engine()
     _drive_to_pending(engine)
-    gap = engine.on_feature(_feature(6, -0.7, timestamp=_START + timedelta(minutes=6)))
+    gap = engine.on_feature(
+        _feature(
+            7,
+            -0.7,
+            timestamp=_START + timedelta(minutes=7),
+        )
+    )
     assert gap.decisions[0].action == StrategyV2Action.CANCEL_ENTRY
-    assert gap.decisions[0].reason == "NEXT_BAR_NOT_CONTIGUOUS"
+    assert (
+        gap.decisions[0].reason
+        == "CAUSAL_FILL_BAR_NOT_CONTIGUOUS"
+    )
     assert gap.position is None
 
 
 def test_fill_bar_close_features_do_not_cancel_open_fill() -> None:
     engine = StrategyV2Engine()
     _drive_to_pending(engine)
+    engine.on_feature(_feature(5, -0.7))
     failed_close_regime = engine.on_feature(_feature(
-        5,
+        6,
         3.0,
         open_price=101.0,
         high=101.2,
@@ -162,7 +186,10 @@ def test_fill_bar_close_features_do_not_cancel_open_fill() -> None:
         volume=0,
     ))
     assert failed_close_regime.decisions[0].action == StrategyV2Action.FILL_ENTRY
-    assert failed_close_regime.decisions[0].reason == "NEXT_BAR_OPEN_FILL"
+    assert (
+        failed_close_regime.decisions[0].reason
+        == "FIRST_CAUSAL_BAR_OPEN_FILL"
+    )
     assert all(
         decision.action != StrategyV2Action.CANCEL_ENTRY
         for decision in failed_close_regime.decisions
@@ -183,8 +210,13 @@ def test_reclaim_jump_above_zero_is_cancelled_as_chase() -> None:
 def test_long_state_ignores_new_entry_cycles() -> None:
     engine = StrategyV2Engine()
     _drive_to_pending(engine)
-    engine.on_feature(_feature(5, -0.7, open_price=101, high=101.2, low=100.8))
-    result = engine.on_feature(_feature(6, -2.5, open_price=101, high=101.2, low=100.8))
+    engine.on_feature(_feature(5, -0.7))
+    engine.on_feature(
+        _feature(6, -0.7, open_price=101, high=101.2, low=100.8)
+    )
+    result = engine.on_feature(
+        _feature(7, -2.5, open_price=101, high=101.2, low=100.8)
+    )
     assert result.state == StrategyV2State.LONG
     assert all(decision.action != StrategyV2Action.ARM_LONG for decision in result.decisions)
     assert engine.entries_this_session == 1
@@ -365,7 +397,11 @@ def test_pending_entry_snapshot_round_trip_survives_restart() -> None:
 
     restored = StrategyV2Engine()
     restored.restore(restored_snapshot)
-    result = restored.on_feature(_feature(5, -0.7, open_price=101, high=101.3, low=100.8))
+    waiting = restored.on_feature(_feature(5, -0.7))
+    assert waiting.state == StrategyV2State.ENTRY_PENDING
+    result = restored.on_feature(
+        _feature(6, -0.7, open_price=101, high=101.3, low=100.8)
+    )
     assert result.decisions[0].action == StrategyV2Action.FILL_ENTRY
     assert result.state == StrategyV2State.LONG
     assert restored.snapshot().to_dict()["position"] is not None

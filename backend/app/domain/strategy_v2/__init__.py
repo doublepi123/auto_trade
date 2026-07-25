@@ -11,6 +11,7 @@ from app.domain.strategy_v2.features import (
     wilder_adx,
 )
 from app.domain.strategy_v2.engine import (
+    CAUSAL_ENTRY_FILL_OFFSET_BARS,
     StrategyV2Action,
     StrategyV2Config,
     StrategyV2Decision,
@@ -56,6 +57,7 @@ __all__ = [
     "leave_one_out_zscore",
     "session_vwap",
     "wilder_adx",
+    "CAUSAL_ENTRY_FILL_OFFSET_BARS",
     "StrategyV2Action",
     "StrategyV2Config",
     "StrategyV2Decision",

@@ -316,7 +316,7 @@ class TestStrategyV2ShadowApi:
         body = response.json()
         assert body["enabled"] is True
         assert body["max_adx"] == 19.5
-        assert body["algorithm_version"] == "strategy-v2-rth-mr-v4-frozen-config"
+        assert body["algorithm_version"] == "strategy-v2-rth-mr-v5-causal-entry"
         assert body["estimated_fee_rate_us"] == 0.0005
         assert body["mode"] == "SHADOW"
         assert body["order_submission_allowed"] is False
@@ -430,7 +430,7 @@ class TestStrategyV2ShadowApi:
                     entry_price=100.0,
                     exit_price=101.0,
                     quantity=1.0,
-                    entry_reason="NEXT_BAR_OPEN_FILL",
+                    entry_reason="FIRST_CAUSAL_BAR_OPEN_FILL",
                     exit_reason="PROFIT_TARGET",
                     gross_pnl=1.0,
                     estimated_fees=0.1005,

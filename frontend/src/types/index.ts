@@ -1701,7 +1701,7 @@ export interface StrategyShadowConfig {
   slippage_bps: number
   estimated_fee_rate_us: number
   estimated_fee_rate_hk: number
-  algorithm_version: 'strategy-v2-rth-mr-v4-frozen-config'
+  algorithm_version: 'strategy-v2-rth-mr-v5-causal-entry'
   mode: StrategyShadowMode
   order_submission_allowed: boolean
   allow_position_addons: boolean

@@ -124,7 +124,7 @@ class TestStrategyV2BracketChallengerService:
             target_price=100.8,
             signal_vwap=100.0,
             holding_deadline=entry_at + timedelta(minutes=holding_minutes),
-            entry_reason="NEXT_BAR_OPEN_FILL",
+            entry_reason="FIRST_CAUSAL_BAR_OPEN_FILL",
             estimated_fees=100.0 * 2.0 * fee_rate,
             estimated_fee_rate=fee_rate,
         )

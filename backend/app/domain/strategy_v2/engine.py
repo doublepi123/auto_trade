@@ -36,6 +36,9 @@ class StrategyV2Action(str, Enum):
     EXIT_LONG = "EXIT_LONG"
 
 
+CAUSAL_ENTRY_FILL_OFFSET_BARS = 2
+
+
 @dataclass(frozen=True)
 class StrategyV2Config:
     market: str = "US"
@@ -565,6 +568,15 @@ class StrategyV2Engine:
         pending = self._pending_entry
         if pending is None:
             raise RuntimeError("ENTRY_PENDING state has no pending entry")
+        if (
+            feature.bar_index == pending.signal_bar_index + 1
+            and feature.bar.timestamp
+            == pending.signal_at + timedelta(minutes=1)
+        ):
+            return self._wait(
+                feature,
+                ("WAITING_FOR_CAUSAL_ENTRY_OPEN",),
+            )
         before = self.state
         structure_reasons = self._pending_entry_structure_reasons(feature, pending)
         if structure_reasons:
@@ -599,7 +611,7 @@ class StrategyV2Engine:
         return self._decision(
             feature,
             StrategyV2Action.FILL_ENTRY,
-            "NEXT_BAR_OPEN_FILL",
+            "FIRST_CAUSAL_BAR_OPEN_FILL",
             before,
             price=price,
             quantity=self.position.quantity,
@@ -612,15 +624,18 @@ class StrategyV2Engine:
         feature: StrategyV2FeatureSnapshot,
         pending: _PendingEntry,
     ) -> tuple[str, ...]:
-        """Validate only facts available at the pending bar's open."""
+        """Validate only facts available at the causal fill bar's open."""
         bar = feature.bar
         if feature.session_day != self._session_day:
             return ("SESSION_CHANGED",)
         if (
-            feature.bar_index != pending.signal_bar_index + 1
-            or bar.timestamp != pending.signal_at + timedelta(minutes=1)
+            feature.bar_index
+            != pending.signal_bar_index + CAUSAL_ENTRY_FILL_OFFSET_BARS
+            or bar.timestamp
+            != pending.signal_at
+            + timedelta(minutes=CAUSAL_ENTRY_FILL_OFFSET_BARS)
         ):
-            return ("NEXT_BAR_NOT_CONTIGUOUS",)
+            return ("CAUSAL_FILL_BAR_NOT_CONTIGUOUS",)
         session = get_session(self.config.market)
         if not session.is_rth(bar.timestamp):
             return ("OUTSIDE_RTH",)

@@ -85,7 +85,7 @@ Cypress.Commands.add('stubApi', () => {
     slippage_bps: 2,
     estimated_fee_rate_us: 0.0005,
     estimated_fee_rate_hk: 0.003,
-    algorithm_version: 'strategy-v2-rth-mr-v4-frozen-config',
+    algorithm_version: 'strategy-v2-rth-mr-v5-causal-entry',
     mode: 'SHADOW',
     order_submission_allowed: false,
     allow_position_addons: false,

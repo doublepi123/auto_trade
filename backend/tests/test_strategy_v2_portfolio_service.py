@@ -210,7 +210,7 @@ class TestStrategyV2PortfolioService:
         *,
         price: float,
     ) -> StrategyV2ShadowTrade:
-        entry_at = signal.bar_at + timedelta(minutes=1)
+        entry_at = signal.bar_at + timedelta(minutes=2)
         entry = StrategyV2ShadowDecision(
             idempotency_key=f"fill-{signal.symbol}-{entry_at.isoformat()}",
             symbol=signal.symbol,
@@ -295,6 +295,157 @@ class TestStrategyV2PortfolioService:
                 StrategyV2PortfolioObservation
             ).count() == 0
 
+    def test_legacy_router_registration_is_hidden_and_not_advanced(
+        self,
+    ) -> None:
+        with self._db() as db:
+            legacy = StrategyV2PortfolioRegistration(
+                baseline_symbol="NVDA.US",
+                policy="FIXED_PRIMARY",
+                algorithm_version=(
+                    "strategy-v2-portfolio-fixed-primary-v1"
+                ),
+                evaluator_digest="0" * 64,
+                registered_at=_REGISTERED_AT - timedelta(days=1),
+                eligible_after=_REGISTERED_AT - timedelta(days=1),
+            )
+            db.add(legacy)
+            db.commit()
+            service = StrategyV2PortfolioService(db)
+            self._register(service)
+            self._signal(db, "NVDA.US", _FIRST_SIGNAL)
+
+            service.advance(
+                now=_FIRST_SIGNAL + timedelta(minutes=3)
+            )
+            report = service.get_report("NVDA.US")
+
+            assert len(report.variants) == 9
+            assert all(
+                row.algorithm_version.endswith("-v2")
+                for row in report.variants
+            )
+            assert (
+                db.query(StrategyV2PortfolioObservation)
+                .filter(
+                    StrategyV2PortfolioObservation.registration_id
+                    == legacy.id
+                )
+                .count()
+                == 0
+            )
+
+    def test_signal_observed_at_fill_open_is_ineligible(self) -> None:
+        with self._db() as db:
+            service = StrategyV2PortfolioService(db)
+            self._register(service)
+            signal = self._signal(
+                db,
+                "NVDA.US",
+                _FIRST_SIGNAL,
+            )
+            signal.observed_at = _FIRST_SIGNAL + timedelta(minutes=2)
+            db.add(signal)
+            db.commit()
+
+            service.advance(
+                now=_FIRST_SIGNAL + timedelta(minutes=3)
+            )
+
+            registration = db.query(
+                StrategyV2PortfolioRegistration
+            ).filter(
+                StrategyV2PortfolioRegistration.policy
+                == "FIXED_PRIMARY"
+            ).one()
+            observation = db.query(
+                StrategyV2PortfolioObservation
+            ).filter(
+                StrategyV2PortfolioObservation.registration_id
+                == registration.id
+            ).one()
+            assert observation.status == "NO_ELIGIBLE"
+            assert observation.candidate_count == 0
+            assert observation.selected_symbol == ""
+
+    def test_stale_peer_does_not_move_causal_routing_timestamp(self) -> None:
+        with self._db() as db:
+            service = StrategyV2PortfolioService(db)
+            self._register(service)
+            timely = self._signal(
+                db,
+                "NVDA.US",
+                _FIRST_SIGNAL,
+            )
+            stale = self._signal(
+                db,
+                "MSFT.US",
+                _FIRST_SIGNAL,
+            )
+            stale.observed_at = _FIRST_SIGNAL + timedelta(
+                minutes=2,
+                seconds=5,
+            )
+            db.add(stale)
+            db.commit()
+
+            service.advance(
+                now=_FIRST_SIGNAL + timedelta(minutes=3)
+            )
+
+            registration = db.query(
+                StrategyV2PortfolioRegistration
+            ).filter(
+                StrategyV2PortfolioRegistration.policy
+                == "FIXED_PRIMARY"
+            ).one()
+            observation = db.query(
+                StrategyV2PortfolioObservation
+            ).filter(
+                StrategyV2PortfolioObservation.registration_id
+                == registration.id
+            ).one()
+            assert observation.status == "PENDING_ENTRY"
+            assert observation.selected_symbol == "NVDA.US"
+            assert observation.candidate_count == 1
+            assert observation.observed_at == timely.observed_at
+
+    def test_source_fill_is_bound_only_after_decision_is_observed(
+        self,
+    ) -> None:
+        with self._db() as db:
+            service = StrategyV2PortfolioService(db)
+            self._register(service)
+            signal = self._signal(
+                db,
+                "NVDA.US",
+                _FIRST_SIGNAL,
+            )
+            self._fill(db, signal, price=100)
+
+            service.advance(
+                now=_FIRST_SIGNAL + timedelta(minutes=3)
+            )
+            registration = db.query(
+                StrategyV2PortfolioRegistration
+            ).filter(
+                StrategyV2PortfolioRegistration.policy
+                == "FIXED_PRIMARY"
+            ).one()
+            observation = db.query(
+                StrategyV2PortfolioObservation
+            ).filter(
+                StrategyV2PortfolioObservation.registration_id
+                == registration.id
+            ).one()
+            assert observation.status == "PENDING_ENTRY"
+
+            service.advance(
+                now=_FIRST_SIGNAL + timedelta(minutes=4)
+            )
+            db.refresh(observation)
+            assert observation.status == "OPEN"
+
     def test_policies_route_causally_and_single_slot_skips_overlap(
         self,
     ) -> None:
@@ -321,7 +472,7 @@ class TestStrategyV2PortfolioService:
             )
 
             service.advance(
-                now=_FIRST_SIGNAL + timedelta(minutes=3)
+                now=_FIRST_SIGNAL + timedelta(minutes=4)
             )
 
             selected = {
@@ -465,7 +616,7 @@ class TestStrategyV2PortfolioService:
             self._fill(db, signals["TER.US"], price=99.62)
 
             service.advance(
-                now=_FIRST_SIGNAL + timedelta(minutes=3)
+                now=_FIRST_SIGNAL + timedelta(minutes=4)
             )
 
             registrations = {
@@ -563,7 +714,7 @@ class TestStrategyV2PortfolioService:
             self._fill(db, aapl_signal, price=99.42)
 
             service.advance(
-                now=_FIRST_SIGNAL + timedelta(minutes=3)
+                now=_FIRST_SIGNAL + timedelta(minutes=4)
             )
 
             registrations = {
@@ -645,7 +796,7 @@ class TestStrategyV2PortfolioService:
                 "AAPL.US",
                 activated_at=(
                     _FIRST_SIGNAL
-                    + timedelta(minutes=1, seconds=1)
+                    + timedelta(minutes=1, seconds=6)
                 ),
             )
             self._signal(
@@ -710,7 +861,7 @@ class TestStrategyV2PortfolioService:
                 39,
                 created_at=(
                     _FIRST_SIGNAL
-                    + timedelta(minutes=1, seconds=1)
+                    + timedelta(minutes=1, seconds=6)
                 ),
                 estimated_cost_bps=15,
             )
@@ -875,7 +1026,7 @@ class TestStrategyV2PortfolioService:
                 90,
                 created_at=(
                     _FIRST_SIGNAL
-                    + timedelta(minutes=1, seconds=1)
+                    + timedelta(minutes=1, seconds=6)
                 ),
             )
 
@@ -957,7 +1108,7 @@ class TestStrategyV2PortfolioService:
                 selected_count=1,
                 completed_at=(
                     _FIRST_SIGNAL
-                    + timedelta(minutes=1, seconds=1)
+                    + timedelta(minutes=1, seconds=6)
                 ),
             )
             db.add_all([old_run, future_run])

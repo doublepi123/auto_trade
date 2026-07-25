@@ -484,6 +484,20 @@ def test_strategy_v2_shadow_table_migration_is_complete_and_idempotent(tmp_path)
             "strategy_v2_forward_registrations"
         )
     }
+    forward_unique = next(
+        constraint
+        for constraint in inspector.get_unique_constraints(
+            "strategy_v2_forward_registrations"
+        )
+        if constraint["name"]
+        == "uq_strategy_v2_forward_registration_candidate"
+    )
+    assert set(forward_unique["column_names"]) == {
+        "symbol",
+        "source_config_version",
+        "candidate_algorithm_version",
+        "evaluator_digest",
+    }
     assert "uq_strategy_v2_forward_evidence_target" in {
         constraint["name"]
         for constraint in inspector.get_unique_constraints(
@@ -546,6 +560,117 @@ def test_strategy_v2_shadow_table_migration_is_complete_and_idempotent(tmp_path)
     }
 
     Base.metadata.drop_all(bind=engine)
+    engine.dispose()
+
+
+def test_strategy_v2_forward_registration_migration_preserves_history(
+    tmp_path,
+) -> None:
+    db_path = tmp_path / "legacy_strategy_v2_forward.db"
+    engine = create_engine(f"sqlite:///{db_path}")
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE strategy_v2_forward_registrations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol VARCHAR(50) NOT NULL,
+                market VARCHAR(10) NOT NULL,
+                candidate_algorithm_version VARCHAR(100) NOT NULL,
+                source_config_version VARCHAR(64) NOT NULL,
+                evaluator_digest VARCHAR(64) NOT NULL,
+                candidate_spec_json TEXT NOT NULL,
+                registered_at DATETIME NOT NULL,
+                eligible_after DATETIME NOT NULL,
+                CONSTRAINT uq_strategy_v2_forward_registration_candidate
+                    UNIQUE (symbol)
+            )
+            """
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX "
+            "ix_strategy_v2_forward_registration_symbol_eligible "
+            "ON strategy_v2_forward_registrations "
+            "(symbol, eligible_after)"
+        )
+        connection.exec_driver_sql(
+            """
+            INSERT INTO strategy_v2_forward_registrations (
+                id,
+                symbol,
+                market,
+                candidate_algorithm_version,
+                source_config_version,
+                evaluator_digest,
+                candidate_spec_json,
+                registered_at,
+                eligible_after
+            ) VALUES (
+                7,
+                'AAPL.US',
+                'US',
+                'candidate-v1',
+                'version-v1',
+                'digest-v1',
+                '{}',
+                '2026-07-01 00:00:00',
+                '2026-07-02 13:30:00'
+            )
+            """
+        )
+
+    database._ensure_strategy_v2_shadow_tables(engine)
+    database._ensure_strategy_v2_shadow_tables(engine)
+
+    inspector = inspect(engine)
+    constraint = next(
+        item
+        for item in inspector.get_unique_constraints(
+            "strategy_v2_forward_registrations"
+        )
+        if item["name"]
+        == "uq_strategy_v2_forward_registration_candidate"
+    )
+    assert set(constraint["column_names"]) == {
+        "symbol",
+        "source_config_version",
+        "candidate_algorithm_version",
+        "evaluator_digest",
+    }
+    with engine.begin() as connection:
+        preserved = connection.exec_driver_sql(
+            "SELECT id, symbol, source_config_version "
+            "FROM strategy_v2_forward_registrations"
+        ).one()
+        connection.exec_driver_sql(
+            """
+            INSERT INTO strategy_v2_forward_registrations (
+                symbol,
+                market,
+                candidate_algorithm_version,
+                source_config_version,
+                evaluator_digest,
+                candidate_spec_json,
+                registered_at,
+                eligible_after
+            ) VALUES (
+                'AAPL.US',
+                'US',
+                'candidate-v1',
+                'version-v2',
+                'digest-v2',
+                '{}',
+                '2026-07-25 00:00:00',
+                '2026-07-27 13:30:00'
+            )
+            """
+        )
+        count = connection.exec_driver_sql(
+            "SELECT COUNT(*) "
+            "FROM strategy_v2_forward_registrations"
+        ).scalar_one()
+
+    assert tuple(preserved) == (7, "AAPL.US", "version-v1")
+    assert count == 2
     engine.dispose()
 
 

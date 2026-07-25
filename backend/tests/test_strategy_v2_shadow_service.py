@@ -4,7 +4,6 @@ import json
 import math
 import random
 from datetime import date, datetime, timedelta, timezone
-
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
@@ -17,6 +16,7 @@ from app.domain.strategy_v2 import (
     StrategyV2Action,
     StrategyV2Decision,
     StrategyV2EngineSnapshot,
+    StrategyV2FeatureSnapshot,
     StrategyV2State,
     VirtualPosition,
 )
@@ -79,6 +79,54 @@ class _PagedFakeCandles(_FakeCandles):
     ) -> list[BrokerCandle]:
         self.history_calls.append((symbol, period, count, after))
         return list(self.historical)
+
+
+class _ScheduledObservationShadowService(StrategyV2ShadowService):
+    """Materialize full-session fixtures as if every bar settled on schedule."""
+
+    @staticmethod
+    def _scheduled_observation(
+        feature: StrategyV2FeatureSnapshot,
+    ) -> datetime:
+        return feature.bar.end_at + timedelta(seconds=5)
+
+    @staticmethod
+    def _causal_entry_feature(
+        feature: StrategyV2FeatureSnapshot,
+        *,
+        observed_at: datetime,
+    ) -> StrategyV2FeatureSnapshot:
+        del observed_at
+        return StrategyV2ShadowService._causal_entry_feature(
+            feature,
+            observed_at=_ScheduledObservationShadowService._scheduled_observation(
+                feature
+            ),
+        )
+
+    def _new_decision_row(
+        self,
+        *,
+        key: str,
+        symbol: str,
+        market: str,
+        config_version: str,
+        feature: StrategyV2FeatureSnapshot,
+        decision: StrategyV2Decision,
+        gate_reasons: tuple[str, ...],
+        observed_at: datetime,
+    ) -> StrategyV2ShadowDecision:
+        del observed_at
+        return super()._new_decision_row(
+            key=key,
+            symbol=symbol,
+            market=market,
+            config_version=config_version,
+            feature=feature,
+            decision=decision,
+            gate_reasons=gate_reasons,
+            observed_at=self._scheduled_observation(feature),
+        )
 
 
 def _candles(
@@ -196,7 +244,10 @@ class TestStrategyV2ShadowService:
             db,
             activated_at=_SESSION_OPEN - timedelta(days=1),
         )
-        service = StrategyV2ShadowService(db, _FakeCandles(_candles(390)))
+        service = _ScheduledObservationShadowService(
+            db,
+            _FakeCandles(_candles(390)),
+        )
         service.tick(
             "AAPL.US",
             "US",
@@ -228,7 +279,7 @@ class TestStrategyV2ShadowService:
         )
         db.add(config)
         db.commit()
-        service = StrategyV2ShadowService(
+        service = _ScheduledObservationShadowService(
             db,
             _FakeCandles(_closed_trade_candles()),
         )
@@ -257,7 +308,7 @@ class TestStrategyV2ShadowService:
             activated_at=_SESSION_OPEN - timedelta(days=1),
         )
         candles = _FakeCandles(_candles(390))
-        service = StrategyV2ShadowService(db, candles)
+        service = _ScheduledObservationShadowService(db, candles)
         service.tick(
             "AAPL.US",
             "US",
@@ -297,7 +348,7 @@ class TestStrategyV2ShadowService:
             activated_at=_SESSION_OPEN - timedelta(days=1),
         )
         candles = _FakeCandles(_candles(390))
-        service = StrategyV2ShadowService(db, candles)
+        service = _ScheduledObservationShadowService(db, candles)
         service.tick(
             "AAPL.US",
             "US",
@@ -1365,6 +1416,118 @@ class TestStrategyV2ShadowService:
             )
             assert len(provider.calls) == 2
 
+    def test_entry_feature_fails_closed_after_causal_fill_window(
+        self,
+    ) -> None:
+        bar = StrategyBar(
+            timestamp=_SESSION_OPEN + timedelta(minutes=100),
+            open=100,
+            high=101,
+            low=99,
+            close=100,
+            volume=1_000,
+            symbol="AAPL.US",
+        )
+        feature = StrategyV2FeatureSnapshot(
+            bar=bar,
+            session_day=bar.timestamp.date(),
+            bar_index=100,
+            bar_timestamp_5m=bar.timestamp,
+            session_vwap_1m=100,
+            residual_1m=-0.01,
+            residual_mean_1m=0,
+            residual_sigma_1m=0.001,
+            zscore_1m=-1,
+            session_vwap_5m=100,
+            residual_5m=-0.01,
+            residual_mean_5m=0,
+            residual_sigma_5m=0.001,
+            zscore_5m=-1,
+            adx_5m=10,
+            realized_vol_1m=0.2,
+            ready=True,
+            gate_reasons=(),
+        )
+
+        timely = StrategyV2ShadowService._causal_entry_feature(
+            feature,
+            observed_at=bar.timestamp + timedelta(minutes=1, seconds=59),
+        )
+        stale = StrategyV2ShadowService._causal_entry_feature(
+            feature,
+            observed_at=bar.timestamp + timedelta(minutes=2),
+        )
+
+        assert timely is feature
+        assert stale.gate_reasons == (
+            "ENTRY_EXECUTION_WINDOW_MISSED",
+        )
+
+    def test_late_full_session_backfill_cannot_create_retroactive_entry(
+        self,
+    ) -> None:
+        with self._db() as db:
+            config = StrategyV2ShadowConfig(
+                symbol="AAPL.US",
+                enabled=True,
+                zscore_window_1m_bars=10,
+                zscore_window_5m_bars=5,
+                breach_zscore=-0.5,
+                reclaim_zscore=-0.1,
+                five_minute_zscore_max=0.0,
+                adx_period=5,
+                max_adx=40.0,
+                realized_vol_window_bars=10,
+                min_realized_vol=0.0,
+                max_realized_vol=3.0,
+                profit_target_pct=0.05,
+                updated_at=_SESSION_OPEN - timedelta(days=1),
+            )
+            db.add(config)
+            db.commit()
+            service = StrategyV2ShadowService(
+                db,
+                _FakeCandles(_closed_trade_candles()),
+            )
+            version = service._config_version(config)
+            db.add(StrategyV2ShadowState(
+                symbol=config.symbol,
+                config_version=version,
+                state_json="{}",
+            ))
+            service._ensure_version_snapshot(config)
+
+            service.tick(
+                "AAPL.US",
+                "US",
+                now=_SESSION_OPEN + timedelta(minutes=390, seconds=10),
+            )
+
+            decisions = db.query(StrategyV2ShadowDecision).filter_by(
+                symbol="AAPL.US",
+                config_version=version,
+            ).all()
+            assert decisions
+            assert all(
+                row.action not in {
+                    StrategyV2Action.ARM_LONG.value,
+                    StrategyV2Action.SUBMIT_ENTRY.value,
+                    StrategyV2Action.FILL_ENTRY.value,
+                }
+                for row in decisions
+            )
+            assert any(
+                "ENTRY_EXECUTION_WINDOW_MISSED"
+                in json.loads(row.gate_reasons_json)
+                for row in decisions
+            )
+            assert db.query(StrategyV2ShadowTrade).count() == 0
+            comparison = service.compare_adx_challengers(
+                StrategyV2AdxChallengerRequest(symbol="AAPL.US")
+            )
+            assert comparison.status == "INSUFFICIENT_EVIDENCE"
+            assert comparison.baseline_replay_match is True
+
     def test_contiguous_frontier_skips_lunch_weekend_and_detects_first_rth_gap(self) -> None:
         service = StrategyV2ShadowService(self._db())
         try:
@@ -1558,7 +1721,7 @@ class TestStrategyV2ShadowService:
             entry = StrategyV2Decision(
                 timestamp=_SESSION_OPEN,
                 action=StrategyV2Action.FILL_ENTRY,
-                reason="NEXT_BAR_OPEN_FILL",
+                reason="FIRST_CAUSAL_BAR_OPEN_FILL",
                 state_before=StrategyV2State.ENTRY_PENDING,
                 state_after=StrategyV2State.LONG,
                 price=100.02,
@@ -1651,7 +1814,7 @@ class TestStrategyV2ShadowService:
             next_entry = StrategyV2Decision(
                 timestamp=_SESSION_OPEN + timedelta(minutes=20),
                 action=StrategyV2Action.FILL_ENTRY,
-                reason="NEXT_BAR_OPEN_FILL",
+                reason="FIRST_CAUSAL_BAR_OPEN_FILL",
                 state_before=StrategyV2State.ENTRY_PENDING,
                 state_after=StrategyV2State.LONG,
                 price=100.02,
@@ -2431,6 +2594,52 @@ class TestStrategyV2ShadowService:
             ) == _SESSION_OPEN
             assert service.get_forward_validation("AAPL.US").status == "FROZEN"
 
+    def test_universe_shadow_registers_new_version_without_deleting_history(
+        self,
+    ) -> None:
+        with self._db() as db:
+            config = self._enabled_config(
+                db,
+                activated_at=_SESSION_OPEN - timedelta(days=1),
+            )
+            config.universe_managed = True
+            legacy = StrategyV2ForwardRegistration(
+                symbol="AAPL.US",
+                market="US",
+                candidate_algorithm_version=(
+                    "strategy-v2-causal-trend-prewarm-v1"
+                ),
+                source_config_version="0" * 64,
+                evaluator_digest="1" * 64,
+                candidate_spec_json="{}",
+                registered_at=_SESSION_OPEN - timedelta(days=30),
+                eligible_after=_SESSION_OPEN - timedelta(days=27),
+            )
+            db.add(legacy)
+            db.commit()
+            service = StrategyV2ShadowService(db)
+
+            stale_view = service.get_forward_validation("AAPL.US")
+            created = service.ensure_universe_forward_registration(
+                "AAPL.US",
+                now=_SESSION_OPEN - timedelta(minutes=1),
+            )
+
+            assert stale_view.status == "NOT_REGISTERED"
+            registrations = db.query(
+                StrategyV2ForwardRegistration
+            ).order_by(StrategyV2ForwardRegistration.id).all()
+            assert created is True
+            assert len(registrations) == 2
+            assert registrations[0].id == legacy.id
+            assert registrations[0].source_config_version == "0" * 64
+            current_version = service._config_version(config)
+            assert registrations[1].source_config_version == current_version
+            view = service.get_forward_validation("AAPL.US")
+            assert view.status == "FROZEN"
+            assert view.registration is not None
+            assert view.registration.source_config_version == current_version
+
     @pytest.mark.parametrize(
         ("managed", "enabled", "state_version", "phase"),
         [
@@ -2669,6 +2878,14 @@ class TestStrategyV2ShadowService:
                 len(item.candidate_result_sha256),
                 len(item.evidence_digest_sha256),
             } == {64}
+            assert (
+                item.baseline_input_sha256
+                == item.candidate_input_sha256
+            )
+            assert (
+                item.target_bars_sha256
+                != item.baseline_input_sha256
+            )
             assert item.baseline is not None
             assert item.candidate is not None
             assert item.baseline.warmup_lost_bars == 139
@@ -3245,6 +3462,27 @@ class TestStrategyV2ShadowService:
             evidence = json.loads(row.features_json)
             evidence["bar"]["high"] = float(evidence["bar"]["high"]) + 0.01
             row.features_json = json.dumps(evidence, default=str, sort_keys=True)
+            db.commit()
+
+            response = service.compare_adx_challengers(
+                StrategyV2AdxChallengerRequest(symbol="AAPL.US")
+            )
+
+            assert response.status == "BLOCKED"
+            assert response.baseline_replay_match is False
+            assert "BASELINE_REPLAY_MISMATCH" in response.blockers
+
+    def test_adx_challengers_block_late_entry_observation(self) -> None:
+        with self._db() as db:
+            service, version = self._collect_complete_trade_session(db)
+            row = db.query(StrategyV2ShadowDecision).filter_by(
+                symbol="AAPL.US",
+                config_version=version,
+                action=StrategyV2Action.SUBMIT_ENTRY.value,
+            ).one()
+            row.observed_at = row.bar_at + timedelta(
+                minutes=2,
+            )
             db.commit()
 
             response = service.compare_adx_challengers(

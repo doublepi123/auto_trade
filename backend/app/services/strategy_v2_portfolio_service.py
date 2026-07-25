@@ -11,6 +11,7 @@ from typing import cast
 from sqlalchemy.orm import Session
 
 from app.domain.strategy_v2 import (
+    CAUSAL_ENTRY_FILL_OFFSET_BARS,
     PortfolioRoutingCandidate,
     PortfolioRoutingPolicy,
     VWAP_EDGE_FIXED_MAX_DISCOUNT_BPS,
@@ -43,50 +44,53 @@ class _RoutingSpec:
 _ROUTING_SPECS = (
     _RoutingSpec(
         policy="FIXED_PRIMARY",
-        algorithm_version="strategy-v2-portfolio-fixed-primary-v1",
+        algorithm_version="strategy-v2-portfolio-fixed-primary-v2",
     ),
     _RoutingSpec(
         policy="SELECTED_UNIVERSE",
-        algorithm_version="strategy-v2-portfolio-selected-universe-v1",
+        algorithm_version="strategy-v2-portfolio-selected-universe-v2",
     ),
     _RoutingSpec(
         policy="QUANT_CANDIDATE",
-        algorithm_version="strategy-v2-portfolio-quant-candidate-v1",
+        algorithm_version="strategy-v2-portfolio-quant-candidate-v2",
     ),
     _RoutingSpec(
         policy="QUANT_WATCH_PLUS",
-        algorithm_version="strategy-v2-portfolio-quant-watch-plus-v1",
+        algorithm_version="strategy-v2-portfolio-quant-watch-plus-v2",
     ),
     _RoutingSpec(
         policy="SELECTED_VWAP_EDGE",
         algorithm_version=(
-            "strategy-v2-portfolio-selected-vwap-edge-v1"
+            "strategy-v2-portfolio-selected-vwap-edge-v2"
         ),
     ),
     _RoutingSpec(
         policy="VWAP_EDGE_POOL",
-        algorithm_version="strategy-v2-portfolio-vwap-edge-pool-v1",
+        algorithm_version="strategy-v2-portfolio-vwap-edge-pool-v2",
     ),
     _RoutingSpec(
         policy="VWAP_EDGE_75BPS_POOL",
         algorithm_version=(
-            "strategy-v2-portfolio-vwap-edge-75bps-pool-v1"
+            "strategy-v2-portfolio-vwap-edge-75bps-pool-v2"
         ),
     ),
     _RoutingSpec(
         policy="VWAP_EDGE_OBSERVED_COST_POOL",
         algorithm_version=(
-            "strategy-v2-portfolio-vwap-observed-cost-pool-v1"
+            "strategy-v2-portfolio-vwap-observed-cost-pool-v2"
         ),
     ),
     _RoutingSpec(
         policy="VWAP_EDGE_OBS_COST_75BPS_POOL",
         algorithm_version=(
-            "strategy-v2-portfolio-vwap-observed-cost-75bps-pool-v1"
+            "strategy-v2-portfolio-vwap-observed-cost-75bps-pool-v2"
         ),
     ),
 )
-_EVALUATOR_VERSION = "strategy-v2-single-capital-slot-forward-router-v1"
+_EVALUATOR_VERSION = "strategy-v2-single-capital-slot-forward-router-v2"
+_CURRENT_ROUTING_ALGORITHM_VERSIONS = tuple(
+    spec.algorithm_version for spec in _ROUTING_SPECS
+)
 _TERMINAL_UNIVERSE_STATUSES = ("COMPLETE", "DEGRADED")
 _FIXED_COST_VWAP_EDGE_POLICIES = {
     "SELECTED_VWAP_EDGE",
@@ -174,6 +178,10 @@ class StrategyV2PortfolioService:
         current = _as_utc(now)
         registrations = self.db.query(
             StrategyV2PortfolioRegistration
+        ).filter(
+            StrategyV2PortfolioRegistration.algorithm_version.in_(
+                _CURRENT_ROUTING_ALGORITHM_VERSIONS
+            )
         ).order_by(
             StrategyV2PortfolioRegistration.registered_at.asc(),
             StrategyV2PortfolioRegistration.id.asc(),
@@ -195,6 +203,11 @@ class StrategyV2PortfolioService:
     ) -> StrategyV2PortfolioRoutingReport:
         normalized = (primary_symbol or "").strip().upper()
         query = self.db.query(StrategyV2PortfolioRegistration)
+        query = query.filter(
+            StrategyV2PortfolioRegistration.algorithm_version.in_(
+                _CURRENT_ROUTING_ALGORITHM_VERSIONS
+            )
+        )
         if normalized:
             query = query.filter(
                 StrategyV2PortfolioRegistration.baseline_symbol
@@ -285,13 +298,33 @@ class StrategyV2PortfolioService:
 
         for signal_at in sorted(grouped):
             signal_decisions = grouped[signal_at]
-            observed_at = max(
+            latest_signal_observed_at = max(
                 _as_utc(row.observed_at)
                 for row in signal_decisions
             )
-            context_cutoff = signal_at + timedelta(minutes=1)
+            first_executable_open = signal_at + timedelta(
+                minutes=CAUSAL_ENTRY_FILL_OFFSET_BARS
+            )
+            causal_signal_decisions = [
+                row
+                for row in signal_decisions
+                if _as_utc(row.observed_at) < first_executable_open
+            ]
+            context_cutoff = (
+                max(
+                    _as_utc(row.observed_at)
+                    for row in causal_signal_decisions
+                )
+                if causal_signal_decisions
+                else first_executable_open
+            )
+            routing_observed_at = (
+                context_cutoff
+                if causal_signal_decisions
+                else latest_signal_observed_at
+            )
             candidates = self._candidate_context(
-                signal_decisions,
+                causal_signal_decisions,
                 observed_at=context_cutoff,
             )
             ranked = rank_portfolio_candidates(
@@ -321,7 +354,7 @@ class StrategyV2PortfolioService:
                 self.db.add(StrategyV2PortfolioObservation(
                     registration_id=registration.id,
                     signal_at=signal_at,
-                    observed_at=observed_at,
+                    observed_at=routing_observed_at,
                     status="SKIPPED_OCCUPIED",
                     reason=(
                         "SINGLE_CAPITAL_SLOT_OCCUPIED:"
@@ -336,7 +369,7 @@ class StrategyV2PortfolioService:
                 self.db.add(StrategyV2PortfolioObservation(
                     registration_id=registration.id,
                     signal_at=signal_at,
-                    observed_at=observed_at,
+                    observed_at=routing_observed_at,
                     status="NO_ELIGIBLE",
                     reason=f"NO_ELIGIBLE_{registration.policy}",
                     candidate_count=0,
@@ -349,9 +382,9 @@ class StrategyV2PortfolioService:
             observation = StrategyV2PortfolioObservation(
                 registration_id=registration.id,
                 signal_at=signal_at,
-                observed_at=observed_at,
+                observed_at=routing_observed_at,
                 status="PENDING_ENTRY",
-                reason="ROUTED_NEXT_BAR_ENTRY",
+                reason="ROUTED_CAUSAL_ENTRY",
                 candidate_count=len(ranked),
                 candidates_json=candidates_json,
                 selected_symbol=selected.symbol,
@@ -672,12 +705,19 @@ class StrategyV2PortfolioService:
                     "portfolio routing source trade linkage is incomplete"
                 )
         elif row.status == "PENDING_ENTRY":
-            expected_entry = _as_utc(row.signal_at) + timedelta(minutes=1)
-            source = self.db.query(StrategyV2ShadowTrade).filter(
+            expected_entry = _as_utc(row.signal_at) + timedelta(
+                minutes=CAUSAL_ENTRY_FILL_OFFSET_BARS
+            )
+            source = self.db.query(StrategyV2ShadowTrade).join(
+                StrategyV2ShadowDecision,
+                StrategyV2ShadowDecision.id
+                == StrategyV2ShadowTrade.entry_decision_id,
+            ).filter(
                 StrategyV2ShadowTrade.symbol == row.selected_symbol,
                 StrategyV2ShadowTrade.config_version
                 == row.source_config_version,
                 StrategyV2ShadowTrade.entry_at == expected_entry,
+                StrategyV2ShadowDecision.observed_at <= current,
             ).order_by(
                 StrategyV2ShadowTrade.id.asc()
             ).first()
@@ -723,13 +763,16 @@ class StrategyV2PortfolioService:
             StrategyV2ShadowDecision,
             source.entry_decision_id,
         )
-        expected_entry = _as_utc(row.signal_at) + timedelta(minutes=1)
+        expected_entry = _as_utc(row.signal_at) + timedelta(
+            minutes=CAUSAL_ENTRY_FILL_OFFSET_BARS
+        )
         if (
             signal is None
             or signal.action != "SUBMIT_ENTRY"
             or signal.symbol != row.selected_symbol
             or signal.config_version != row.source_config_version
             or _as_utc(signal.bar_at) != _as_utc(row.signal_at)
+            or _as_utc(signal.observed_at) >= expected_entry
             or entry is None
             or entry.action != "FILL_ENTRY"
             or entry.symbol != row.selected_symbol
@@ -738,7 +781,7 @@ class StrategyV2PortfolioService:
             or _as_utc(source.entry_at) != expected_entry
         ):
             raise ValueError(
-                "portfolio routing source trade is not the causal next-bar fill"
+                "portfolio routing source trade is not the causal future-bar fill"
             )
 
     @staticmethod
@@ -982,15 +1025,24 @@ class StrategyV2PortfolioService:
             "policy": spec.policy,
             "position_side": "LONG",
             "signal_action": "SUBMIT_ENTRY",
-            "fill_rule": "SOURCE_NEXT_BAR_FILL",
+            "fill_rule": "SOURCE_FIRST_CAUSAL_FUTURE_BAR_OPEN",
+            "fill_offset_bars": CAUSAL_ENTRY_FILL_OFFSET_BARS,
+            "signal_observation_deadline": (
+                "STRICTLY_BEFORE_SOURCE_FILL_OPEN"
+            ),
+            "source_fill_visibility": (
+                "ENTRY_DECISION_OBSERVED_NO_LATER_THAN_EVALUATION"
+            ),
             "capital_slots": 1,
             "historical_backfill": False,
             "quant_sources": list(CURRENT_QUANT_SOURCES),
-            "context_cutoff": "SIGNAL_BAR_END",
-            "quant_freshness": (
-                "CREATED_BEFORE_AND_UNEXPIRED_AT_SIGNAL_BAR_END"
+            "context_cutoff": (
+                "LATEST_CAUSAL_SIGNAL_OBSERVATION_BEFORE_FILL_OPEN"
             ),
-            "universe_freshness": "COMPLETED_BEFORE_SIGNAL_BAR_END",
+            "quant_freshness": (
+                "CREATED_BEFORE_AND_UNEXPIRED_AT_CONTEXT_CUTOFF"
+            ),
+            "universe_freshness": "COMPLETED_BEFORE_CONTEXT_CUTOFF",
         }
         if spec.policy in _FIXED_COST_VWAP_EDGE_POLICIES:
             payload["vwap_edge_filter"] = {
@@ -1031,11 +1083,11 @@ class StrategyV2PortfolioService:
                     "ESTIMATED_ROUND_TRIP_COST_BPS"
                 ),
                 "observed_cost_source": (
-                    "LATEST_CURRENT_QUANT_SCORE_BEFORE_SIGNAL_BAR_END"
+                    "LATEST_CURRENT_QUANT_SCORE_BEFORE_CONTEXT_CUTOFF"
                 ),
                 "observed_cost_freshness": (
                     "UNEXPIRED_AND_AT_MOST_60_MINUTES_OLD_AT_"
-                    "SIGNAL_BAR_END"
+                    "CONTEXT_CUTOFF"
                 ),
                 "missing_observed_cost": "FAIL_CLOSED",
                 "maximum_discount": "FROZEN_STOP_DISTANCE_BPS",
@@ -1055,11 +1107,11 @@ class StrategyV2PortfolioService:
                     "ESTIMATED_ROUND_TRIP_COST_BPS"
                 ),
                 "observed_cost_source": (
-                    "LATEST_CURRENT_QUANT_SCORE_BEFORE_SIGNAL_BAR_END"
+                    "LATEST_CURRENT_QUANT_SCORE_BEFORE_CONTEXT_CUTOFF"
                 ),
                 "observed_cost_freshness": (
                     "UNEXPIRED_AND_AT_MOST_60_MINUTES_OLD_AT_"
-                    "SIGNAL_BAR_END"
+                    "CONTEXT_CUTOFF"
                 ),
                 "missing_observed_cost": "FAIL_CLOSED",
                 "maximum_discount": "FIXED_ABSOLUTE_VWAP_DISCOUNT_BPS",
