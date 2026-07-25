@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from statistics import mean, stdev
 from typing import Protocol, Sequence
 
-from app.domain.universe_selection.catalog import IndexCandidate
+from app.core.holiday_calendar import is_market_closed
 from app.core.market_calendar import get_session
+from app.domain.universe_selection.catalog import IndexCandidate
 
 
-UNIVERSE_ALGORITHM_VERSION = "index-liquidity-opportunity-v3"
+UNIVERSE_ALGORITHM_VERSION = "index-liquidity-opportunity-v4"
+_DAILY_BAR_FINALIZATION_DELAY = timedelta(minutes=15)
 
 
 class DailyBar(Protocol):
@@ -401,25 +403,66 @@ def completed_daily_bars(
     market: str,
     now: datetime | None = None,
 ) -> list[DailyBar]:
-    """Exclude the broker's still-forming daily candle.
+    """Keep only candles whose exchange session has fully settled.
 
     Longbridge labels a US daily candle at local midnight and exposes today's
     row during the session. Treating that timestamp as a completed bar would
-    leak partial same-day OHLCV into the selector.
+    leak partial same-day OHLCV into the selector. After the official close,
+    a short finalization delay lets the completed session feed the next run
+    without imposing an unnecessary extra trading-day lag.
     """
     observed_at = now or datetime.now(timezone.utc)
     if observed_at.tzinfo is None:
         raise ValueError("now must be timezone-aware")
     session = get_session(market)
-    current_market_date = session.local(observed_at).date()
+    completed_through = latest_closed_session_date(
+        market=market,
+        now=observed_at,
+    )
     return sorted(
         (
             bar
             for bar in bars
-            if session.local(bar.timestamp).date() < current_market_date
+            if session.local(bar.timestamp).date() <= completed_through
         ),
         key=lambda bar: bar.timestamp,
     )
+
+
+def latest_closed_session_date(
+    *,
+    market: str,
+    now: datetime | None = None,
+) -> date:
+    """Return the latest session date whose daily candle should be final."""
+    observed_at = now or datetime.now(timezone.utc)
+    if observed_at.tzinfo is None:
+        raise ValueError("now must be timezone-aware")
+    session = get_session(market)
+    local = session.local(observed_at)
+    candidate = local.date()
+    is_session_day = (
+        candidate.weekday() < 5
+        and not is_market_closed(session.code, candidate)
+    )
+    if is_session_day:
+        close_at = datetime.combine(
+            candidate,
+            session.close_time(candidate),
+            tzinfo=session.timezone,
+        )
+        if local >= close_at + _DAILY_BAR_FINALIZATION_DELAY:
+            return candidate
+        candidate -= timedelta(days=1)
+
+    for _ in range(14):
+        if (
+            candidate.weekday() < 5
+            and not is_market_closed(session.code, candidate)
+        ):
+            return candidate
+        candidate -= timedelta(days=1)
+    raise RuntimeError(f"no completed {session.code} session in 14 days")
 
 
 def latest_complete_session_date(

@@ -740,6 +740,51 @@ def test_stale_consensus_session_fails_closed_on_expected_run_date() -> None:
         db.close()
 
 
+def test_post_close_refresh_uses_current_completed_session() -> None:
+    class _PostCloseBroker(_FakeBroker):
+        def get_candlesticks(
+            self,
+            symbol: str,
+            period: str,
+            count: int,
+        ) -> list[BrokerCandle]:
+            bars = super().get_candlesticks(symbol, period, count)
+            previous = bars[-1]
+            close = previous.close * 1.01
+            return [
+                *bars,
+                BrokerCandle(
+                    timestamp=previous.timestamp + timedelta(days=1),
+                    open=previous.close,
+                    high=close * 1.01,
+                    low=previous.close * 0.99,
+                    close=close,
+                    volume=20_000_000,
+                ),
+            ][-count:]
+
+    db = _db()
+    try:
+        result = UniverseSelectionService(
+            db,
+            _PostCloseBroker(),
+            catalog=_CATALOG,
+            config=_config(),
+            minimum_evaluable_ratio=0.5,
+            minimum_residency_days=1,
+            apply_to_watchlist=False,
+            enable_shadow=False,
+            now=datetime(2026, 7, 24, 20, 15, tzinfo=timezone.utc),
+        ).refresh(apply_to_watchlist=False)
+
+        assert result.run.as_of_date.isoformat() == "2026-07-24"
+        assert result.run.status == "COMPLETE"
+        assert result.run.evaluable_count == 2
+        assert result.run.selected_count == 2
+    finally:
+        db.close()
+
+
 def test_reconcile_removes_expired_auto_item_but_keeps_live_exposure() -> None:
     db = _db()
     broker = _FakeBroker()

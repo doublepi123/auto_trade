@@ -8,6 +8,7 @@ from app.domain.universe_selection.selector import (
     CandidateInput,
     UniverseSelectionConfig,
     completed_daily_bars,
+    latest_closed_session_date,
     liquidity_spread_proxy_bps,
     select_candidates,
 )
@@ -213,3 +214,45 @@ def test_completed_daily_bars_excludes_current_partial_us_candle() -> None:
     )
 
     assert [bar.timestamp.day for bar in complete] == [21, 22]
+
+
+def test_completed_daily_bars_includes_current_us_candle_after_delay() -> None:
+    bars = [
+        _Bar(
+            timestamp=datetime(2026, 7, day, 4, tzinfo=timezone.utc),
+            open=100,
+            high=102,
+            low=99,
+            close=101,
+            volume=1_000_000,
+        )
+        for day in (21, 22, 23)
+    ]
+
+    before_delay = completed_daily_bars(
+        bars,
+        market="US",
+        now=datetime(2026, 7, 23, 20, 14, tzinfo=timezone.utc),
+    )
+    after_delay = completed_daily_bars(
+        bars,
+        market="US",
+        now=datetime(2026, 7, 23, 20, 15, tzinfo=timezone.utc),
+    )
+
+    assert [bar.timestamp.day for bar in before_delay] == [21, 22]
+    assert [bar.timestamp.day for bar in after_delay] == [21, 22, 23]
+
+
+def test_latest_closed_session_date_uses_friday_on_weekend() -> None:
+    assert latest_closed_session_date(
+        market="US",
+        now=datetime(2026, 7, 25, 12, tzinfo=timezone.utc),
+    ).isoformat() == "2026-07-24"
+
+
+def test_latest_closed_session_date_honors_us_half_day_close() -> None:
+    assert latest_closed_session_date(
+        market="US",
+        now=datetime(2026, 12, 24, 18, 15, tzinfo=timezone.utc),
+    ).isoformat() == "2026-12-24"

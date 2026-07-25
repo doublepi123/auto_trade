@@ -18,8 +18,6 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.core.broker import BrokerCandle
-from app.core.holiday_calendar import is_market_closed
-from app.core.market_calendar import get_session
 from app.domain.universe_selection import (
     CATALOG_SOURCE_VERSION,
     INDEX_CANDIDATE_CATALOG,
@@ -30,6 +28,7 @@ from app.domain.universe_selection import (
     IndexCandidate,
     UniverseSelectionConfig,
     completed_daily_bars,
+    latest_closed_session_date,
     liquidity_spread_proxy_bps,
     latest_complete_session_date,
     select_candidates,
@@ -740,16 +739,10 @@ class UniverseSelectionService:
         if latest_by_symbol:
             counts = Counter(latest_by_symbol.values())
             return max(counts, key=lambda value: (counts[value], value))
-        session = get_session("US")
-        candidate = session.local(self.now).date() - timedelta(days=1)
-        for _ in range(14):
-            if (
-                candidate.weekday() < 5
-                and not is_market_closed("US", candidate)
-            ):
-                return candidate
-            candidate -= timedelta(days=1)
-        return candidate
+        return latest_closed_session_date(
+            market="US",
+            now=self.now,
+        )
 
     def _candidate_row(
         self,

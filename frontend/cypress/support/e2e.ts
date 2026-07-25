@@ -974,7 +974,7 @@ Cypress.Commands.add('stubApi', () => {
     body: {
       id: 7,
       as_of_date: '2026-07-23',
-      algorithm_version: 'index-liquidity-opportunity-v3',
+      algorithm_version: 'index-liquidity-opportunity-v4',
       source_version: 'nasdaq-100_djia-v1',
       status: 'COMPLETE',
       candidate_count: 3,

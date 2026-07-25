@@ -21,7 +21,7 @@ class IndexCandidate:
 # This is intentionally a liquid, diversified screening seed rather than a
 # hard-coded portfolio. Daily market-data gates decide which names enter the
 # observed pool. Membership was verified against Nasdaq's NDX weighting page
-# dated 2026-07-23 and S&P DJI's 2026-06-23 announcement for the DJIA changes
+# dated 2026-07-24 and S&P DJI's 2026-06-23 announcement for the DJIA changes
 # effective 2026-06-29. The DJIA portion is complete; the Nasdaq-100 portion
 # favors liquid names across sectors so daily screening remains bounded.
 INDEX_CANDIDATE_CATALOG: tuple[IndexCandidate, ...] = (
