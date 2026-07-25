@@ -2640,6 +2640,27 @@ class TestStrategyV2ShadowService:
             assert view.registration is not None
             assert view.registration.source_config_version == current_version
 
+    def test_unmanaged_universe_observer_registers_without_changing_ownership(
+        self,
+    ) -> None:
+        with self._db() as db:
+            config = self._enabled_config(
+                db,
+                activated_at=_SESSION_OPEN - timedelta(days=1),
+            )
+            assert config.universe_managed is False
+            service = StrategyV2ShadowService(db)
+
+            created = service.ensure_universe_forward_registration(
+                "AAPL.US",
+                now=_SESSION_OPEN - timedelta(minutes=1),
+                observed_by_universe=True,
+            )
+
+            assert created is True
+            assert config.universe_managed is False
+            assert service.get_forward_validation("AAPL.US").status == "FROZEN"
+
     @pytest.mark.parametrize(
         ("managed", "enabled", "state_version", "phase"),
         [

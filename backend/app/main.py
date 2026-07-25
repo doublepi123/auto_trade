@@ -821,6 +821,9 @@ def _strategy_v2_shadow_tick_sync() -> None:
     from app.services.strategy_v2_portfolio_service import (
         StrategyV2PortfolioService,
     )
+    from app.services.universe_promotion_service import (
+        UniversePromotionService,
+    )
 
     db = SessionLocal()
     try:
@@ -849,6 +852,17 @@ def _strategy_v2_shadow_tick_sync() -> None:
             targets.setdefault(symbol, market_for_symbol(symbol))
         if not targets:
             return
+
+        universe_observed_symbols: frozenset[str] = frozenset()
+        try:
+            universe_observed_symbols = (
+                UniversePromotionService(db).get_observed_symbols()
+            )
+        except Exception:
+            db.rollback()
+            logger.exception(
+                "Strategy v2 universe observation lookup failed"
+            )
 
         portfolio: StrategyV2PortfolioService | None = None
         if (
@@ -881,7 +895,12 @@ def _strategy_v2_shadow_tick_sync() -> None:
                 db.rollback()
                 logger.exception("Strategy v2 shadow tick failed for symbol=%s", symbol)
             try:
-                if shadow.ensure_universe_forward_registration(symbol):
+                if shadow.ensure_universe_forward_registration(
+                    symbol,
+                    observed_by_universe=(
+                        symbol in universe_observed_symbols
+                    ),
+                ):
                     logger.info(
                         "registered universe forward validation for symbol=%s",
                         symbol,

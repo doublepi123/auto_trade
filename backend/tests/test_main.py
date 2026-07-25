@@ -353,7 +353,7 @@ def test_universe_tick_reloads_before_optional_quant_failure(
 def test_strategy_v2_shadow_tick_is_isolated_from_execution(monkeypatch) -> None:
     calls: list[dict[str, object]] = []
     collections: list[dict[str, object]] = []
-    registrations: list[str] = []
+    registrations: list[tuple[str, bool]] = []
     portfolio_calls: list[tuple[str, object]] = []
 
     class FakeQuery:
@@ -414,11 +414,23 @@ def test_strategy_v2_shadow_tick_is_isolated_from_execution(monkeypatch) -> None
         def collect_forward_validation(self, **kwargs: object) -> None:
             collections.append(kwargs)
 
-        def ensure_universe_forward_registration(self, symbol: str) -> bool:
-            registrations.append(symbol)
+        def ensure_universe_forward_registration(
+            self,
+            symbol: str,
+            *,
+            observed_by_universe: bool = False,
+        ) -> bool:
+            registrations.append((symbol, observed_by_universe))
             if symbol == "MSFT.US":
                 raise RuntimeError("isolated registration failure")
             return symbol == "0700.HK"
+
+    class FakePromotionService:
+        def __init__(self, received_db: object) -> None:
+            assert received_db is db
+
+        def get_observed_symbols(self) -> frozenset[str]:
+            return frozenset({"NVDA.US"})
 
     class FakePortfolioService:
         def __init__(self, received_db: object) -> None:
@@ -453,6 +465,10 @@ def test_strategy_v2_shadow_tick_is_isolated_from_execution(monkeypatch) -> None
         "StrategyV2PortfolioService",
         FakePortfolioService,
     )
+    monkeypatch.setattr(
+        "app.services.universe_promotion_service.UniversePromotionService",
+        FakePromotionService,
+    )
 
     main_module._strategy_v2_shadow_tick_sync()
 
@@ -462,7 +478,11 @@ def test_strategy_v2_shadow_tick_is_isolated_from_execution(monkeypatch) -> None
         {"symbol": "NVDA.US", "market": "US"},
     ]
     assert collections == calls
-    assert registrations == ["0700.HK", "MSFT.US", "NVDA.US"]
+    assert registrations == [
+        ("0700.HK", False),
+        ("MSFT.US", False),
+        ("NVDA.US", True),
+    ]
     assert [item[0] for item in portfolio_calls] == [
         "NVDA.US",
         "advance",

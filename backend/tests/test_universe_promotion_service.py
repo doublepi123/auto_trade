@@ -297,9 +297,14 @@ def test_readiness_uses_latest_terminal_and_gated_quant_priority() -> None:
         )
         db.commit()
 
-        response = UniversePromotionService(db, now=_NOW).get_readiness()
+        service = UniversePromotionService(db, now=_NOW)
+        response = service.get_readiness()
 
         assert response is not None
+        assert service.get_observed_symbols() == frozenset({
+            "AAPL.US",
+            "MSFT.US",
+        })
         assert response.universe_run_id == terminal.id
         assert response.as_of_date == date(2026, 7, 23)
         assert response.generated_at == _NOW
@@ -422,9 +427,15 @@ def test_readiness_includes_exploration_and_unselected_trading_target() -> None:
         )
         db.commit()
 
-        response = UniversePromotionService(db, now=_NOW).get_readiness()
+        service = UniversePromotionService(db, now=_NOW)
+        response = service.get_readiness()
 
         assert response is not None
+        assert service.get_observed_symbols() == frozenset({
+            "AAPL.US",
+            "JPM.US",
+            "NVDA.US",
+        })
         by_symbol = {item.symbol: item for item in response.items}
         assert set(by_symbol) == {"AAPL.US", "JPM.US", "NVDA.US"}
         assert by_symbol["AAPL.US"].universe_role == "SELECTED"

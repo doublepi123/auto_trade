@@ -1096,8 +1096,9 @@ class StrategyV2ShadowService:
         symbol: str,
         *,
         now: datetime | None = None,
+        observed_by_universe: bool = False,
     ) -> bool:
-        """Freeze forward evidence for a newly activated universe shadow."""
+        """Freeze forward evidence for an active universe observation."""
         normalized = self._resolve_symbol(symbol)
         config = self.db.query(StrategyV2ShadowConfig).filter(
             StrategyV2ShadowConfig.symbol == normalized,
@@ -1105,7 +1106,10 @@ class StrategyV2ShadowService:
         if (
             config is None
             or not config.enabled
-            or not config.universe_managed
+            or (
+                not config.universe_managed
+                and not observed_by_universe
+            )
         ):
             return False
 

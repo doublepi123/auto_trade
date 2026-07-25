@@ -140,62 +140,10 @@ class UniversePromotionService:
     def get_readiness(
         self,
     ) -> UniversePromotionReadinessResponse | None:
-        run = self._latest_terminal_run()
-        if run is None:
+        context = self._observation_context()
+        if context is None:
             return None
-
-        candidates = (
-            self.db.query(UniverseSelectionCandidate)
-            .filter(
-                UniverseSelectionCandidate.run_id == run.id,
-            )
-            .order_by(
-                UniverseSelectionCandidate.selected.desc(),
-                UniverseSelectionCandidate.rank.asc(),
-                UniverseSelectionCandidate.score.desc(),
-                UniverseSelectionCandidate.symbol.asc(),
-            )
-            .all()
-        )
-        strategy = (
-            self.db.query(StrategyConfig)
-            .order_by(StrategyConfig.id.desc())
-            .first()
-        )
-        trading_symbol = strategy.symbol if strategy is not None else ""
-        observation_overrides = observation_pool_overrides(self.db)
-        exploration_symbols = {
-            candidate.symbol
-            for candidate in select_exploration_candidates(
-                candidates,
-                max_symbols=(
-                    settings.universe_selection_exploration_max_symbols
-                ),
-                max_per_sector=(
-                    settings.universe_selection_max_per_sector
-                ),
-                already_observed_symbols=(
-                    observation_overrides.already_observed_symbols
-                ),
-                unobservable_symbols=(
-                    observation_overrides.unobservable_symbols
-                ),
-                minimum_peer_dollar_volume=(
-                    minimum_peer_observation_dollar_volume(
-                        settings.universe_selection_min_avg_dollar_volume
-                    )
-                ),
-            )
-        }
-        observed = [
-            candidate
-            for candidate in candidates
-            if (
-                candidate.selected
-                or candidate.symbol in exploration_symbols
-                or candidate.symbol == trading_symbol
-            )
-        ]
+        run, observed, exploration_symbols, trading_symbol = context
         enabled_shadow_symbols = {
             row.symbol
             for row in self.db.query(StrategyV2ShadowConfig)
@@ -344,6 +292,78 @@ class UniversePromotionService:
             priority_algorithm_version=_PRIORITY_ALGORITHM_VERSION,
             items=items,
         )
+
+    def get_observed_symbols(self) -> frozenset[str]:
+        """Return the current selected, exploration, and trading observations."""
+        context = self._observation_context()
+        if context is None:
+            return frozenset()
+        return frozenset(candidate.symbol for candidate in context[1])
+
+    def _observation_context(
+        self,
+    ) -> tuple[
+        UniverseSelectionRun,
+        list[UniverseSelectionCandidate],
+        set[str],
+        str,
+    ] | None:
+        run = self._latest_terminal_run()
+        if run is None:
+            return None
+        candidates = (
+            self.db.query(UniverseSelectionCandidate)
+            .filter(
+                UniverseSelectionCandidate.run_id == run.id,
+            )
+            .order_by(
+                UniverseSelectionCandidate.selected.desc(),
+                UniverseSelectionCandidate.rank.asc(),
+                UniverseSelectionCandidate.score.desc(),
+                UniverseSelectionCandidate.symbol.asc(),
+            )
+            .all()
+        )
+        strategy = (
+            self.db.query(StrategyConfig)
+            .order_by(StrategyConfig.id.desc())
+            .first()
+        )
+        trading_symbol = strategy.symbol if strategy is not None else ""
+        observation_overrides = observation_pool_overrides(self.db)
+        exploration_symbols = {
+            candidate.symbol
+            for candidate in select_exploration_candidates(
+                candidates,
+                max_symbols=(
+                    settings.universe_selection_exploration_max_symbols
+                ),
+                max_per_sector=(
+                    settings.universe_selection_max_per_sector
+                ),
+                already_observed_symbols=(
+                    observation_overrides.already_observed_symbols
+                ),
+                unobservable_symbols=(
+                    observation_overrides.unobservable_symbols
+                ),
+                minimum_peer_dollar_volume=(
+                    minimum_peer_observation_dollar_volume(
+                        settings.universe_selection_min_avg_dollar_volume
+                    )
+                ),
+            )
+        }
+        observed = [
+            candidate
+            for candidate in candidates
+            if (
+                candidate.selected
+                or candidate.symbol in exploration_symbols
+                or candidate.symbol == trading_symbol
+            )
+        ]
+        return run, observed, exploration_symbols, trading_symbol
 
     def _latest_terminal_run(self) -> UniverseSelectionRun | None:
         return (
