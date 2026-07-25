@@ -393,8 +393,8 @@ class Settings(BaseSettings):
         description=(
             "Maximum number of hard-gate-passing, non-selected observers. "
             "Selected risk groups are filled to the portfolio peer minimum "
-            "before remaining capacity is diversified. Zero disables the "
-            "exploration tier."
+            "with a peer-only near-liquidity fallback before remaining "
+            "capacity is diversified. Zero disables the exploration tier."
         ),
     )
     universe_selection_max_per_sector: int = Field(

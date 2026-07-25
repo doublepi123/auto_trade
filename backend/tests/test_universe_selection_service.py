@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import json
 from collections import Counter
-from multiprocessing import get_context
 from datetime import datetime, timedelta, timezone
+from multiprocessing import get_context
 from pathlib import Path
 from typing import Protocol, cast
 
@@ -28,6 +28,7 @@ from app.models import (
 from app.schemas import StrategyV2ShadowConfigUpdate
 from app.services.universe_selection_service import (
     UniverseSelectionService,
+    minimum_peer_observation_dollar_volume,
     observation_pool_overrides,
     select_exploration_candidates,
 )
@@ -510,6 +511,119 @@ def test_exploration_candidates_fill_every_selected_risk_group() -> None:
     }
     assert all(counts[group] >= 3 for group in selected_groups)
     assert "LIN.US" not in {item.symbol for item in exploration}
+
+
+def test_exploration_peer_fallback_is_observation_only_and_narrow() -> None:
+    def candidate(
+        symbol: str,
+        sector: str,
+        score: float,
+        reasons: list[str],
+        avg_dollar_volume: float,
+        *,
+        selected: bool = False,
+    ) -> UniverseSelectionCandidate:
+        return UniverseSelectionCandidate(
+            run_id=1,
+            symbol=symbol,
+            market="US",
+            alias=symbol,
+            sector=sector,
+            memberships_json='["NASDAQ_100"]',
+            selected=selected,
+            score=score,
+            metrics_json=json.dumps(
+                {"avg_dollar_volume": avg_dollar_volume}
+            ),
+            exclusion_reasons_json=json.dumps(
+                [] if selected else reasons
+            ),
+            created_at=_NOW,
+        )
+
+    items = [
+        candidate(
+            "CVX.US",
+            "Energy",
+            95,
+            [],
+            1_500_000_000,
+            selected=True,
+        ),
+        candidate(
+            "CEG.US",
+            "Utilities",
+            94,
+            [],
+            800_000_000,
+            selected=True,
+        ),
+        candidate(
+            "BKR.US",
+            "Energy",
+            90,
+            ["BELOW_SELECTION_CUTOFF"],
+            535_000_000,
+        ),
+        candidate(
+            "AEP.US",
+            "Utilities",
+            89,
+            ["BELOW_SELECTION_CUTOFF"],
+            640_000_000,
+        ),
+        candidate(
+            "EXC.US",
+            "Utilities",
+            0,
+            ["DOLLAR_VOLUME_BELOW_MINIMUM"],
+            435_000_000,
+        ),
+        candidate(
+            "XEL.US",
+            "Utilities",
+            0,
+            ["DOLLAR_VOLUME_BELOW_MINIMUM"],
+            408_000_000,
+        ),
+        candidate(
+            "FANG.US",
+            "Energy",
+            0,
+            ["DOLLAR_VOLUME_BELOW_MINIMUM"],
+            400_000_000,
+        ),
+        candidate(
+            "LOW.US",
+            "Energy",
+            0,
+            ["DOLLAR_VOLUME_BELOW_MINIMUM"],
+            300_000_000,
+        ),
+        candidate(
+            "WIDE.US",
+            "Energy",
+            0,
+            ["SPREAD_ABOVE_MAXIMUM"],
+            900_000_000,
+        ),
+    ]
+
+    exploration = select_exploration_candidates(
+        items,
+        max_symbols=4,
+        max_per_sector=2,
+        minimum_peer_dollar_volume=(
+            minimum_peer_observation_dollar_volume(500_000_000)
+        ),
+    )
+
+    assert [item.symbol for item in exploration] == [
+        "BKR.US",
+        "AEP.US",
+        "EXC.US",
+        "FANG.US",
+    ]
 
 
 def test_refresh_reconciles_exploration_into_read_only_evidence() -> None:

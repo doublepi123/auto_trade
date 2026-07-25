@@ -23,6 +23,7 @@ from app.services.watchlist_quant_service import (
 )
 from app.services.watchlist_score_service import WatchlistScoreService
 from app.services.universe_selection_service import (
+    minimum_peer_observation_dollar_volume,
     observation_pool_overrides,
     select_exploration_candidates,
 )
@@ -178,6 +179,11 @@ class UniversePromotionService:
                 ),
                 unobservable_symbols=(
                     observation_overrides.unobservable_symbols
+                ),
+                minimum_peer_dollar_volume=(
+                    minimum_peer_observation_dollar_volume(
+                        settings.universe_selection_min_avg_dollar_volume
+                    )
                 ),
             )
         }

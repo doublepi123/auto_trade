@@ -58,9 +58,13 @@ _RUN_WAIT_POLL_SECONDS = 0.05
 _RUN_CLAIM_LEASE_SECONDS = 300.0
 _RUN_WAIT_TIMEOUT_SECONDS = _RUN_CLAIM_LEASE_SECONDS + 30.0
 _CLAIM_PREFIX = "refresh-claim:"
-_EXPLORATION_ALGORITHM_VERSION = "risk-group-peer-benchmark-v1"
+_EXPLORATION_ALGORITHM_VERSION = "risk-group-peer-benchmark-v2"
+_PEER_DOLLAR_VOLUME_RATIO = 0.75
 _EXPLORATION_ELIGIBLE_REASONS = frozenset(
     {"SECTOR_CAP", "BELOW_SELECTION_CUTOFF"}
+)
+_PEER_ONLY_ELIGIBLE_REASONS = frozenset(
+    {"DOLLAR_VOLUME_BELOW_MINIMUM"}
 )
 
 
@@ -159,6 +163,29 @@ def observation_pool_overrides(
     )
 
 
+def minimum_peer_observation_dollar_volume(
+    selection_minimum: float,
+) -> float:
+    if not math.isfinite(selection_minimum) or selection_minimum <= 0:
+        raise ValueError(
+            "selection minimum dollar volume must be positive"
+        )
+    return selection_minimum * _PEER_DOLLAR_VOLUME_RATIO
+
+
+def _candidate_avg_dollar_volume(
+    item: UniverseSelectionCandidate,
+) -> float | None:
+    try:
+        decoded = json.loads(item.metrics_json)
+        value = float(decoded["avg_dollar_volume"])
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not math.isfinite(value) or value <= 0:
+        return None
+    return value
+
+
 def select_exploration_candidates(
     items: Sequence[UniverseSelectionCandidate],
     *,
@@ -167,6 +194,7 @@ def select_exploration_candidates(
     already_observed_symbols: Collection[str] = (),
     unobservable_symbols: Collection[str] = (),
     minimum_risk_group_peers: int = RISK_GROUP_RELATIVE_MIN_PEERS,
+    minimum_peer_dollar_volume: float | None = None,
 ) -> list[UniverseSelectionCandidate]:
     """Choose read-only peers before filling a diversified research tier."""
     if max_symbols < 0:
@@ -176,6 +204,16 @@ def select_exploration_candidates(
     if minimum_risk_group_peers < 1:
         raise ValueError(
             "exploration minimum_risk_group_peers must be positive"
+        )
+    if (
+        minimum_peer_dollar_volume is not None
+        and (
+            not math.isfinite(minimum_peer_dollar_volume)
+            or minimum_peer_dollar_volume <= 0
+        )
+    ):
+        raise ValueError(
+            "exploration minimum_peer_dollar_volume must be positive"
         )
     if max_symbols == 0:
         return []
@@ -215,14 +253,15 @@ def select_exploration_candidates(
     }
 
     eligible: list[UniverseSelectionCandidate] = []
+    peer_only_eligible: list[
+        tuple[float, UniverseSelectionCandidate]
+    ] = []
     for item in items:
         normalized_symbol = item.symbol.strip().upper()
         score = float(item.score)
         if (
             item.selected
             or normalized_symbol in blocked_symbols
-            or not math.isfinite(score)
-            or score <= 0
         ):
             continue
         try:
@@ -233,12 +272,32 @@ def select_exploration_candidates(
             not isinstance(decoded, list)
             or not decoded
             or any(not isinstance(reason, str) for reason in decoded)
-            or not set(decoded).issubset(_EXPLORATION_ELIGIBLE_REASONS)
         ):
             continue
-        eligible.append(item)
+        reasons = set(decoded)
+        if (
+            reasons.issubset(_EXPLORATION_ELIGIBLE_REASONS)
+            and math.isfinite(score)
+            and score > 0
+        ):
+            eligible.append(item)
+            continue
+        if (
+            minimum_peer_dollar_volume is None
+            or reasons != _PEER_ONLY_ELIGIBLE_REASONS
+        ):
+            continue
+        avg_dollar_volume = _candidate_avg_dollar_volume(item)
+        if (
+            avg_dollar_volume is not None
+            and avg_dollar_volume >= minimum_peer_dollar_volume
+        ):
+            peer_only_eligible.append((avg_dollar_volume, item))
 
     eligible.sort(key=lambda item: (-float(item.score), item.symbol))
+    peer_only_eligible.sort(
+        key=lambda pair: (-pair[0], pair[1].symbol)
+    )
     selected: list[UniverseSelectionCandidate] = []
     selected_symbols: set[str] = set()
     peer_target = max(
@@ -250,6 +309,27 @@ def select_exploration_candidates(
     # evaluator. These are observers only and do not relax the live selection
     # concentration limit.
     for item in eligible:
+        normalized_symbol = item.symbol.strip().upper()
+        if normalized_symbol in observed_symbols:
+            continue
+        risk_group = risk_group_for_sector(item.sector)
+        if (
+            risk_group not in selected_groups
+            or group_counts.get(risk_group, 0) >= peer_target
+        ):
+            continue
+        selected.append(item)
+        selected_symbols.add(normalized_symbol)
+        group_counts[risk_group] = (
+            group_counts.get(risk_group, 0) + 1
+        )
+        if len(selected) >= max_symbols:
+            return selected
+
+    # A narrow liquidity fallback may complete a selected group's observation
+    # baseline. These candidates remain ineligible for formal selection and
+    # are never used by the broad exploration phase.
+    for _, item in peer_only_eligible:
         normalized_symbol = item.symbol.strip().upper()
         if normalized_symbol in observed_symbols:
             continue
@@ -947,6 +1027,11 @@ class UniverseSelectionService:
             unobservable_symbols=(
                 observation_overrides.unobservable_symbols
             ),
+            minimum_peer_dollar_volume=(
+                minimum_peer_observation_dollar_volume(
+                    self.config.min_avg_dollar_volume
+                )
+            ),
         )
         exploration_symbols = tuple(
             item.symbol for item in exploration
@@ -1179,6 +1264,11 @@ class UniverseSelectionService:
             "exploration_max_symbols": self.exploration_max_symbols,
             "exploration_min_risk_group_peers": (
                 RISK_GROUP_RELATIVE_MIN_PEERS
+            ),
+            "exploration_min_peer_dollar_volume": (
+                minimum_peer_observation_dollar_volume(
+                    self.config.min_avg_dollar_volume
+                )
             ),
             "minimum_evaluable_ratio": self.minimum_evaluable_ratio,
             "minimum_residency_days": self.minimum_residency_days,

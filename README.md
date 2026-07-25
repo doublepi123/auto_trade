@@ -728,7 +728,7 @@ auto_trade/
 | `AUTO_TRADE_WATCHLIST_QUANT_SCORE_TTL_MINUTES` | 量化 v5 证据有效期（分钟），与盘中刷新频率分离 | `1440` |
 | `AUTO_TRADE_WATCHLIST_QUANT_BATCH_SIZE` | 每次自动量化刷新最多处理的到期标的数，分批为实时行情与影子策略保留 API 配额 | `3` |
 | `AUTO_TRADE_UNIVERSE_SELECTION_MAX_SYMBOLS` | 每次最多入选标的数 | `12` |
-| `AUTO_TRADE_UNIVERSE_SELECTION_EXPLORATION_MAX_SYMBOLS` | 从通过硬门槛但因行业/名额未入选的标的中，先补足已入选风险组的残差基准同伴，再分散加入量化评分与 shadow；不会切换主标的或下单，`0` 表示关闭 | `14` |
+| `AUTO_TRADE_UNIVERSE_SELECTION_EXPLORATION_MAX_SYMBOLS` | 先补足已入选风险组的残差基准同伴（可使用仅成交额处于实盘门槛 75%-100% 的 peer-only 标的），再分散加入量化评分与 shadow；不会正式入选、切换主标的或下单，`0` 表示关闭 | `14` |
 | `AUTO_TRADE_UNIVERSE_SELECTION_MAX_PER_SECTOR` | 每行业最多入选标的数 | `2` |
 | `AUTO_TRADE_LIVE_REGIME_GATE_ENABLED` | live 开仓前要求当前主标的最新 Strategy v2 shadow 门禁通过；减仓不受影响 | `false` |
 | `AUTO_TRADE_LIVE_REGIME_MAX_DATA_AGE_SECONDS` | live regime 证据最大允许延迟（秒） | `600` |
