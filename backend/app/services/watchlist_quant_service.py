@@ -133,7 +133,12 @@ def list_quant_observation_items(
 
 
 class WatchlistMarketDataProvider(Protocol):
-    def get_quotes(self, symbols: list[str]) -> list[Quote]: ...
+    def get_quotes(
+        self,
+        symbols: list[str],
+        *,
+        pull_missing_depth: bool = False,
+    ) -> list[Quote]: ...
 
     def get_candlesticks(
         self,
@@ -999,7 +1004,10 @@ class WatchlistQuantService:
         symbols = [item.symbol for item in scorable_items]
         quotes = {
             quote.symbol: quote
-            for quote in self.broker.get_quotes(symbols)
+            for quote in self.broker.get_quotes(
+                symbols,
+                pull_missing_depth=True,
+            )
         }
         score_service = WatchlistScoreService(self.db)
         rows: list[WatchlistScore] = []

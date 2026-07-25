@@ -1160,17 +1160,30 @@ class BrokerGateway:
             raise ValueError(f"no quote data for {symbol}")
         return quotes[0]
 
-    def get_quotes(self, symbols: list[str]) -> list[Quote]:
+    def get_quotes(
+        self,
+        symbols: list[str],
+        *,
+        pull_missing_depth: bool = False,
+    ) -> list[Quote]:
         if not symbols:
             return []
         return self._call_with_retry(
-            lambda: self._get_quotes_inner(symbols),
+            lambda: self._get_quotes_inner(
+                symbols,
+                pull_missing_depth=pull_missing_depth,
+            ),
             op="get_quotes",
             max_retries=settings.broker_quote_retry_max,
             base_ms=settings.broker_retry_base_ms,
         )
 
-    def _get_quotes_inner(self, symbols: list[str]) -> list[Quote]:
+    def _get_quotes_inner(
+        self,
+        symbols: list[str],
+        *,
+        pull_missing_depth: bool = False,
+    ) -> list[Quote]:
         with self._lock:
             self._init_clients()
             response = self._quote_ctx.quote(symbols)
@@ -1189,7 +1202,7 @@ class BrokerGateway:
             if not item_by_symbol and len(items) == len(symbols):
                 item_by_symbol = dict(zip(symbols, items))
             quotes: list[Quote] = []
-            allow_depth_pull = len(symbols) == 1
+            allow_depth_pull = pull_missing_depth or len(symbols) == 1
             for fallback_symbol in symbols:
                 item = item_by_symbol.get(fallback_symbol)
                 if item is None:

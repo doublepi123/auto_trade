@@ -310,7 +310,13 @@ def test_hard_blocker_caps_score_and_forces_avoid() -> None:
 
 
 class _FakeBroker:
-    def get_quotes(self, symbols: list[str]) -> list[Quote]:
+    def get_quotes(
+        self,
+        symbols: list[str],
+        *,
+        pull_missing_depth: bool = False,
+    ) -> list[Quote]:
+        del pull_missing_depth
         return [
             Quote(
                 symbol=symbol,

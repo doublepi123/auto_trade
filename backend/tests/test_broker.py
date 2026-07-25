@@ -973,6 +973,48 @@ class TestBrokerGateway:
         assert all(result.ask == 0.0 for result in results)
         assert quote_ctx.depth_calls == 0
 
+    def test_get_quotes_batch_can_pull_missing_depth_explicitly(self) -> None:
+        class QuoteItem:
+            def __init__(self, symbol: str, price: float) -> None:
+                self.symbol = symbol
+                self.last_done = price
+                self.timestamp = "2026-07-13T17:00:00Z"
+
+        class Level:
+            def __init__(self, price: float) -> None:
+                self.price = price
+
+        class QuoteContext:
+            def __init__(self) -> None:
+                self.depth_symbols: list[str] = []
+
+            def quote(self, symbols):
+                return [
+                    QuoteItem(symbol, 150.0 + index)
+                    for index, symbol in enumerate(symbols)
+                ]
+
+            def depth(self, symbol):
+                self.depth_symbols.append(symbol)
+                return SimpleNamespace(
+                    bids=[Level(149.9)],
+                    asks=[Level(150.1)],
+                )
+
+        quote_ctx = QuoteContext()
+        gw = BrokerGateway()
+        gw._quote_ctx = quote_ctx
+        gw._trade_ctx = object()
+
+        results = gw.get_quotes(
+            ["AAPL.US", "MSFT.US"],
+            pull_missing_depth=True,
+        )
+
+        assert [result.bid for result in results] == [149.9, 149.9]
+        assert [result.ask for result in results] == [150.1, 150.1]
+        assert quote_ctx.depth_symbols == ["AAPL.US", "MSFT.US"]
+
     def test_get_quote_with_dict_response(self) -> None:
         gw = BrokerGateway()
         gw._quote_ctx = object()

@@ -232,9 +232,16 @@ class _Broker:
     def __init__(self, *, fail_symbol: str = "") -> None:
         self.fail_symbol = fail_symbol
         self.quote_requests: list[list[str]] = []
+        self.quote_depth_requests: list[bool] = []
 
-    def get_quotes(self, symbols: list[str]) -> list[Quote]:
+    def get_quotes(
+        self,
+        symbols: list[str],
+        *,
+        pull_missing_depth: bool = False,
+    ) -> list[Quote]:
         self.quote_requests.append(list(symbols))
+        self.quote_depth_requests.append(pull_missing_depth)
         return [_quote(symbol) for symbol in symbols]
 
     def get_candlesticks(
@@ -262,8 +269,14 @@ class _Broker:
 
 
 class _MissingBboBroker(_Broker):
-    def get_quotes(self, symbols: list[str]) -> list[Quote]:
+    def get_quotes(
+        self,
+        symbols: list[str],
+        *,
+        pull_missing_depth: bool = False,
+    ) -> list[Quote]:
         self.quote_requests.append(list(symbols))
+        self.quote_depth_requests.append(pull_missing_depth)
         return [
             Quote(
                 symbol=symbol,
@@ -405,6 +418,7 @@ def test_service_pages_three_thousand_intraday_bars() -> None:
         assert len(rows) == 1
         assert rows[0].source == "quant_v5"
         assert "intraday_bars=3000" in rows[0].rationale
+        assert broker.quote_depth_requests == [True]
         assert [
             (symbol, period, count)
             for symbol, period, count, _before
@@ -487,7 +501,13 @@ def test_service_rejects_malformed_historical_page() -> None:
 
 
 class _QuoteFailureBroker:
-    def get_quotes(self, symbols: list[str]) -> list[Quote]:
+    def get_quotes(
+        self,
+        symbols: list[str],
+        *,
+        pull_missing_depth: bool = False,
+    ) -> list[Quote]:
+        del pull_missing_depth
         raise RuntimeError(f"quote request failed: {symbols}")
 
     def get_candlesticks(
@@ -644,7 +664,13 @@ def test_service_uses_latest_strategy_fee_to_downgrade_candidate() -> None:
 
 
 class _NoMarketDataBroker:
-    def get_quotes(self, symbols: list[str]) -> list[Quote]:
+    def get_quotes(
+        self,
+        symbols: list[str],
+        *,
+        pull_missing_depth: bool = False,
+    ) -> list[Quote]:
+        del pull_missing_depth
         raise AssertionError(f"unexpected quote access: {symbols}")
 
     def get_candlesticks(
@@ -1175,8 +1201,14 @@ def test_due_scoring_is_silent_outside_regular_hours() -> None:
 
 
 class _OldLastTradeBroker(_Broker):
-    def get_quotes(self, symbols: list[str]) -> list[Quote]:
+    def get_quotes(
+        self,
+        symbols: list[str],
+        *,
+        pull_missing_depth: bool = False,
+    ) -> list[Quote]:
         self.quote_requests.append(list(symbols))
+        self.quote_depth_requests.append(pull_missing_depth)
         return [
             Quote(
                 symbol=symbol,
