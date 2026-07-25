@@ -892,6 +892,8 @@ def test_refresh_persists_rotation_shadow_evidence() -> None:
         result = _service(db, broker).refresh()
 
         assert result.run.status == "COMPLETE"
+        assert result.run.completed_at is not None
+        assert result.run.completed_at >= result.run.started_at
         assert broker.requested_counts
         assert min(broker.requested_counts) >= 253
         assert max(broker.requested_counts) == 1000

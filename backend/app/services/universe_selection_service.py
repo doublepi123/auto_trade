@@ -138,6 +138,7 @@ class UniverseRefreshResult:
 class _RunClaim:
     run_id: int
     token: str
+    started_at: datetime
 
 
 @dataclass(frozen=True)
@@ -993,7 +994,11 @@ class UniverseSelectionService:
         self.db.commit()
         if claimed_id is None:
             return None
-        return _RunClaim(run_id=claimed_id, token=token)
+        return _RunClaim(
+            run_id=claimed_id,
+            token=token,
+            started_at=claim_started_at,
+        )
 
     def _wait_for_winner(
         self,
@@ -1058,6 +1063,10 @@ class UniverseSelectionService:
         UniverseSelectionRun,
         list[UniverseSelectionCandidate],
     ] | None:
+        completed_at = max(
+            datetime.now(timezone.utc),
+            claim.started_at,
+        )
         claimed_id = self.db.execute(
             update(UniverseSelectionRun)
             .where(
@@ -1077,7 +1086,7 @@ class UniverseSelectionService:
                     separators=(",", ":"),
                 ),
                 error=error,
-                completed_at=self.now,
+                completed_at=completed_at,
             )
             .execution_options(synchronize_session=False)
             .returning(UniverseSelectionRun.id)
