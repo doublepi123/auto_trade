@@ -11,7 +11,7 @@ from app.core.market_calendar import get_session
 from app.domain.universe_selection.catalog import IndexCandidate
 
 
-UNIVERSE_ALGORITHM_VERSION = "index-liquidity-opportunity-v4"
+UNIVERSE_ALGORITHM_VERSION = "index-liquidity-opportunity-v5"
 _DAILY_BAR_FINALIZATION_DELAY = timedelta(minutes=15)
 
 
@@ -348,13 +348,18 @@ def select_candidates(
 
     eligible.sort(key=lambda row: (-scored[row.candidate.symbol], row.candidate.symbol))
     selected_symbols: set[str] = set()
-    sector_counts: dict[str, int] = {}
+    risk_group_counts: dict[str, int] = {}
     for row in eligible:
-        sector = row.candidate.sector
-        if sector_counts.get(sector, 0) >= selection_config.max_per_sector:
+        risk_group = row.candidate.risk_group
+        if (
+            risk_group_counts.get(risk_group, 0)
+            >= selection_config.max_per_sector
+        ):
             continue
         selected_symbols.add(row.candidate.symbol)
-        sector_counts[sector] = sector_counts.get(sector, 0) + 1
+        risk_group_counts[risk_group] = (
+            risk_group_counts.get(risk_group, 0) + 1
+        )
         if len(selected_symbols) >= selection_config.max_selected:
             break
 
@@ -372,7 +377,10 @@ def select_candidates(
         symbol = row.candidate.symbol
         reasons = list(row.exclusion_reasons)
         if not reasons and symbol not in selected_symbols:
-            if sector_counts.get(row.candidate.sector, 0) >= selection_config.max_per_sector:
+            if (
+                risk_group_counts.get(row.candidate.risk_group, 0)
+                >= selection_config.max_per_sector
+            ):
                 reasons.append("SECTOR_CAP")
             else:
                 reasons.append("BELOW_SELECTION_CUTOFF")

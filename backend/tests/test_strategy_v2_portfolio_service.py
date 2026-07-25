@@ -99,6 +99,7 @@ class TestStrategyV2PortfolioService:
             UniverseSelectionCandidate(
                 run_id=run.id,
                 symbol="MSFT.US",
+                sector="Software",
                 selected=True,
                 rank=1,
                 score=75,
@@ -106,6 +107,7 @@ class TestStrategyV2PortfolioService:
             UniverseSelectionCandidate(
                 run_id=run.id,
                 symbol="AAPL.US",
+                sector="Technology Hardware",
                 selected=True,
                 rank=2,
                 score=80,
@@ -113,6 +115,7 @@ class TestStrategyV2PortfolioService:
             UniverseSelectionCandidate(
                 run_id=run.id,
                 symbol="NVDA.US",
+                sector="Semiconductors",
                 selected=False,
                 score=90,
             ),
@@ -282,7 +285,7 @@ class TestStrategyV2PortfolioService:
             registrations = db.query(
                 StrategyV2PortfolioRegistration
             ).all()
-            assert len(registrations) == 9
+            assert len(registrations) == 10
             assert {
                 row.eligible_after.replace(tzinfo=timezone.utc)
                 for row in registrations
@@ -320,9 +323,15 @@ class TestStrategyV2PortfolioService:
             )
             report = service.get_report("NVDA.US")
 
-            assert len(report.variants) == 9
-            assert all(
+            assert len(report.variants) == 10
+            assert sum(
                 row.algorithm_version.endswith("-v2")
+                for row in report.variants
+            ) == 9
+            assert any(
+                row.algorithm_version.endswith("-v1")
+                and row.policy
+                == "RISK_GROUP_REL_OBS_75BPS_POOL"
                 for row in report.variants
             )
             assert (
@@ -496,6 +505,7 @@ class TestStrategyV2PortfolioService:
                 "VWAP_EDGE_75BPS_POOL": "",
                 "VWAP_EDGE_OBSERVED_COST_POOL": "",
                 "VWAP_EDGE_OBS_COST_75BPS_POOL": "",
+                "RISK_GROUP_REL_OBS_75BPS_POOL": "",
             }
 
             self._signal(
@@ -512,7 +522,7 @@ class TestStrategyV2PortfolioService:
                 StrategyV2PortfolioObservation.signal_at
                 == _FIRST_SIGNAL + timedelta(minutes=2)
             ).all()
-            assert len(overlap_rows) == 9
+            assert len(overlap_rows) == 10
             registrations_by_id = {
                 row.id: row.policy
                 for row in db.query(
@@ -533,6 +543,7 @@ class TestStrategyV2PortfolioService:
                 "VWAP_EDGE_75BPS_POOL": "NO_ELIGIBLE",
                 "VWAP_EDGE_OBSERVED_COST_POOL": "NO_ELIGIBLE",
                 "VWAP_EDGE_OBS_COST_75BPS_POOL": "NO_ELIGIBLE",
+                "RISK_GROUP_REL_OBS_75BPS_POOL": "NO_ELIGIBLE",
             }
 
             exit_at = _FIRST_SIGNAL + timedelta(minutes=5)
@@ -824,6 +835,7 @@ class TestStrategyV2PortfolioService:
                 "VWAP_EDGE_75BPS_POOL",
                 "VWAP_EDGE_OBSERVED_COST_POOL",
                 "VWAP_EDGE_OBS_COST_75BPS_POOL",
+                "RISK_GROUP_REL_OBS_75BPS_POOL",
             ):
                 observation = db.query(
                     StrategyV2PortfolioObservation
@@ -975,6 +987,173 @@ class TestStrategyV2PortfolioService:
                 fixed_band_variant.edge_filter
                 == "OBSERVED_COST_TO_75BPS_VWAP_DISCOUNT"
             )
+
+    def test_risk_group_relative_pool_uses_causal_peer_median(
+        self,
+    ) -> None:
+        with self._db() as db:
+            service = StrategyV2PortfolioService(db)
+            self._register(service)
+            self._universe(db)
+            for symbol in ("AAPL.US", "MSFT.US", "NVDA.US"):
+                self._version(db, symbol)
+                self._quant(
+                    db,
+                    symbol,
+                    "WATCH",
+                    49,
+                    estimated_cost_bps=24,
+                )
+            aapl = self._signal(
+                db,
+                "AAPL.US",
+                _FIRST_SIGNAL,
+                close_price=99.4,
+                vwap_1m=100,
+                vwap_5m=100.1,
+            )
+            msft = self._signal(
+                db,
+                "MSFT.US",
+                _FIRST_SIGNAL,
+                close_price=99.8,
+                vwap_1m=100,
+                vwap_5m=100,
+            )
+            nvda = self._signal(
+                db,
+                "NVDA.US",
+                _FIRST_SIGNAL,
+                close_price=99.9,
+                vwap_1m=100,
+                vwap_5m=100,
+            )
+            msft.action = "WAIT"
+            msft.observed_at = _FIRST_SIGNAL + timedelta(
+                minutes=1,
+                seconds=4,
+            )
+            nvda.action = "WAIT"
+            nvda.observed_at = _FIRST_SIGNAL + timedelta(
+                minutes=1,
+                seconds=3,
+            )
+            db.add_all([msft, nvda])
+            db.commit()
+            self._fill(db, aapl, price=99.42)
+
+            service.advance(
+                now=_FIRST_SIGNAL + timedelta(minutes=4)
+            )
+
+            registration = db.query(
+                StrategyV2PortfolioRegistration
+            ).filter(
+                StrategyV2PortfolioRegistration.policy
+                == "RISK_GROUP_REL_OBS_75BPS_POOL"
+            ).one()
+            observation = db.query(
+                StrategyV2PortfolioObservation
+            ).filter(
+                StrategyV2PortfolioObservation.registration_id
+                == registration.id
+            ).one()
+            assert observation.status == "OPEN"
+            assert observation.selected_symbol == "AAPL.US"
+            candidates = json.loads(observation.candidates_json)
+            assert len(candidates) == 1
+            assert candidates[0]["risk_group"] == (
+                "Information Technology"
+            )
+            assert candidates[0]["risk_group_peer_count"] == 3
+            assert candidates[0][
+                "risk_group_relative_1m_bps"
+            ] == pytest.approx(-40, abs=0.1)
+            assert candidates[0][
+                "risk_group_relative_5m_bps"
+            ] == pytest.approx(-50, abs=0.1)
+            report = service.get_report("NVDA.US")
+            challenger = next(
+                row
+                for row in report.variants
+                if row.policy
+                == "RISK_GROUP_REL_OBS_75BPS_POOL"
+            )
+            assert (
+                challenger.edge_filter
+                == "RISK_GROUP_REL_OBS_COST_TO_75BPS"
+            )
+
+    def test_risk_group_relative_pool_excludes_late_peer(
+        self,
+    ) -> None:
+        with self._db() as db:
+            service = StrategyV2PortfolioService(db)
+            self._register(service)
+            self._universe(db)
+            self._version(db, "AAPL.US")
+            self._quant(
+                db,
+                "AAPL.US",
+                "WATCH",
+                49,
+                estimated_cost_bps=24,
+            )
+            self._signal(
+                db,
+                "AAPL.US",
+                _FIRST_SIGNAL,
+                close_price=99.4,
+                vwap_1m=100,
+                vwap_5m=100.1,
+            )
+            timely = self._signal(
+                db,
+                "MSFT.US",
+                _FIRST_SIGNAL,
+                close_price=99.8,
+                vwap_1m=100,
+                vwap_5m=100,
+            )
+            late = self._signal(
+                db,
+                "NVDA.US",
+                _FIRST_SIGNAL,
+                close_price=99.9,
+                vwap_1m=100,
+                vwap_5m=100,
+            )
+            timely.action = "WAIT"
+            timely.observed_at = _FIRST_SIGNAL + timedelta(
+                minutes=1,
+                seconds=4,
+            )
+            late.action = "WAIT"
+            late.observed_at = _FIRST_SIGNAL + timedelta(
+                minutes=1,
+                seconds=6,
+            )
+            db.add_all([timely, late])
+            db.commit()
+
+            service.advance(
+                now=_FIRST_SIGNAL + timedelta(minutes=3)
+            )
+
+            registration = db.query(
+                StrategyV2PortfolioRegistration
+            ).filter(
+                StrategyV2PortfolioRegistration.policy
+                == "RISK_GROUP_REL_OBS_75BPS_POOL"
+            ).one()
+            observation = db.query(
+                StrategyV2PortfolioObservation
+            ).filter(
+                StrategyV2PortfolioObservation.registration_id
+                == registration.id
+            ).one()
+            assert observation.status == "NO_ELIGIBLE"
+            assert observation.candidate_count == 0
 
     def test_cash_baseline_uses_observed_sessions_not_trade_count(
         self,

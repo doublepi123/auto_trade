@@ -31,6 +31,7 @@ from app.domain.universe_selection import (
     latest_closed_session_date,
     liquidity_spread_proxy_bps,
     latest_complete_session_date,
+    risk_group_for_sector,
     select_candidates,
 )
 from app.models import (
@@ -145,15 +146,18 @@ def select_exploration_candidates(
     eligible.sort(key=lambda item: (-float(item.score), item.symbol))
     selected: list[UniverseSelectionCandidate] = []
     sector_counts = Counter(
-        item.sector
+        risk_group_for_sector(item.sector)
         for item in items
         if item.selected
     )
     for item in eligible:
-        if sector_counts.get(item.sector, 0) >= max_per_sector:
+        risk_group = risk_group_for_sector(item.sector)
+        if sector_counts.get(risk_group, 0) >= max_per_sector:
             continue
         selected.append(item)
-        sector_counts[item.sector] = sector_counts.get(item.sector, 0) + 1
+        sector_counts[risk_group] = (
+            sector_counts.get(risk_group, 0) + 1
+        )
         if len(selected) >= max_symbols:
             break
     return selected

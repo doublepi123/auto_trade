@@ -1034,6 +1034,7 @@ class StrategyV2PortfolioRoutingVariant(BaseModel):
         "VWAP_EDGE_75BPS_POOL",
         "VWAP_EDGE_OBSERVED_COST_POOL",
         "VWAP_EDGE_OBS_COST_75BPS_POOL",
+        "RISK_GROUP_REL_OBS_75BPS_POOL",
     ]
     algorithm_version: str
     evaluator_digest: str
@@ -1045,6 +1046,7 @@ class StrategyV2PortfolioRoutingVariant(BaseModel):
         "COST_TO_75BPS_VWAP_DISCOUNT",
         "OBSERVED_COST_TO_STOP_VWAP_DISCOUNT",
         "OBSERVED_COST_TO_75BPS_VWAP_DISCOUNT",
+        "RISK_GROUP_REL_OBS_COST_TO_75BPS",
     ] = "NONE"
     status: Literal["COLLECTING", "READY_FOR_REVIEW", "MATURE_EVIDENCE"]
     metrics: StrategyV2PortfolioRoutingMetrics = Field(

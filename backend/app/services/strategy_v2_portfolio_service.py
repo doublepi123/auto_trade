@@ -6,6 +6,7 @@ import math
 from collections import Counter
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
+from statistics import median
 from typing import cast
 
 from sqlalchemy.orm import Session
@@ -14,9 +15,11 @@ from app.domain.strategy_v2 import (
     CAUSAL_ENTRY_FILL_OFFSET_BARS,
     PortfolioRoutingCandidate,
     PortfolioRoutingPolicy,
+    RISK_GROUP_RELATIVE_MIN_PEERS,
     VWAP_EDGE_FIXED_MAX_DISCOUNT_BPS,
     rank_portfolio_candidates,
 )
+from app.domain.universe_selection import risk_group_for_sector
 from app.models import (
     StrategyV2PortfolioObservation,
     StrategyV2PortfolioRegistration,
@@ -86,6 +89,13 @@ _ROUTING_SPECS = (
             "strategy-v2-portfolio-vwap-observed-cost-75bps-pool-v2"
         ),
     ),
+    _RoutingSpec(
+        policy="RISK_GROUP_REL_OBS_75BPS_POOL",
+        algorithm_version=(
+            "strategy-v2-portfolio-risk-group-relative-observed-"
+            "cost-75bps-v1"
+        ),
+    ),
 )
 _EVALUATOR_VERSION = "strategy-v2-single-capital-slot-forward-router-v2"
 _CURRENT_ROUTING_ALGORITHM_VERSIONS = tuple(
@@ -105,9 +115,13 @@ _OBSERVED_COST_TO_STOP_VWAP_EDGE_POLICIES = {
 _OBSERVED_COST_TO_75BPS_VWAP_EDGE_POLICIES = {
     "VWAP_EDGE_OBS_COST_75BPS_POOL",
 }
+_RISK_GROUP_RELATIVE_OBSERVED_COST_POLICIES = {
+    "RISK_GROUP_REL_OBS_75BPS_POOL",
+}
 _OBSERVED_COST_VWAP_EDGE_POLICIES = (
     _OBSERVED_COST_TO_STOP_VWAP_EDGE_POLICIES
     | _OBSERVED_COST_TO_75BPS_VWAP_EDGE_POLICIES
+    | _RISK_GROUP_RELATIVE_OBSERVED_COST_POLICIES
 )
 _OBSERVED_COST_MAX_AGE = timedelta(minutes=60)
 _ENTRY_BIND_TIMEOUT = timedelta(minutes=10)
@@ -326,6 +340,10 @@ class StrategyV2PortfolioService:
             candidates = self._candidate_context(
                 causal_signal_decisions,
                 observed_at=context_cutoff,
+                include_risk_group_adjustment=(
+                    registration.policy
+                    in _RISK_GROUP_RELATIVE_OBSERVED_COST_POLICIES
+                ),
             )
             ranked = rank_portfolio_candidates(
                 candidates,
@@ -339,6 +357,10 @@ class StrategyV2PortfolioService:
                         include_observed_cost=(
                             registration.policy
                             in _OBSERVED_COST_VWAP_EDGE_POLICIES
+                        ),
+                        include_risk_group_adjustment=(
+                            registration.policy
+                            in _RISK_GROUP_RELATIVE_OBSERVED_COST_POLICIES
                         ),
                     )
                     for item in ranked
@@ -406,6 +428,7 @@ class StrategyV2PortfolioService:
         decisions: list[StrategyV2ShadowDecision],
         *,
         observed_at: datetime,
+        include_risk_group_adjustment: bool,
     ) -> list[PortfolioRoutingCandidate]:
         by_symbol: dict[str, StrategyV2ShadowDecision] = {}
         for decision in decisions:
@@ -424,11 +447,23 @@ class StrategyV2PortfolioService:
             tuple(by_symbol.values()),
             observed_at=observed_at,
         )
+        risk_group_adjustments = (
+            self._risk_group_relative_context(
+                tuple(by_symbol.values()),
+                vwap_edges=vwap_edges,
+                observed_at=observed_at,
+            )
+            if include_risk_group_adjustment
+            else {}
+        )
         candidates: list[PortfolioRoutingCandidate] = []
         for symbol, decision in sorted(by_symbol.items()):
             selection_row = selection.get(symbol)
             quant_row = quant.get(symbol)
             vwap_edge = vwap_edges.get(decision.id)
+            risk_group_adjustment = risk_group_adjustments.get(
+                decision.id
+            )
             candidates.append(PortfolioRoutingCandidate(
                 symbol=symbol,
                 signal_decision_id=decision.id,
@@ -494,8 +529,124 @@ class StrategyV2PortfolioService:
                     if vwap_edge is not None
                     else None
                 ),
+                risk_group=(
+                    risk_group_adjustment[0]
+                    if risk_group_adjustment is not None
+                    else ""
+                ),
+                risk_group_peer_count=(
+                    risk_group_adjustment[1]
+                    if risk_group_adjustment is not None
+                    else 0
+                ),
+                risk_group_relative_1m_bps=(
+                    risk_group_adjustment[2]
+                    if risk_group_adjustment is not None
+                    else None
+                ),
+                risk_group_relative_5m_bps=(
+                    risk_group_adjustment[3]
+                    if risk_group_adjustment is not None
+                    else None
+                ),
             ))
         return candidates
+
+    def _risk_group_relative_context(
+        self,
+        decisions: tuple[StrategyV2ShadowDecision, ...],
+        *,
+        vwap_edges: dict[int, tuple[float, float, float, float]],
+        observed_at: datetime,
+    ) -> dict[int, tuple[str, int, float, float]]:
+        if not decisions:
+            return {}
+        signal_times = {_as_utc(row.bar_at) for row in decisions}
+        if len(signal_times) != 1:
+            raise ValueError(
+                "risk-group routing context requires one signal minute"
+            )
+        signal_at = next(iter(signal_times))
+        rows = self.db.query(StrategyV2ShadowDecision).filter(
+            StrategyV2ShadowDecision.bar_at == signal_at,
+            StrategyV2ShadowDecision.observed_at <= observed_at,
+        ).order_by(
+            StrategyV2ShadowDecision.observed_at.desc(),
+            StrategyV2ShadowDecision.id.desc(),
+        ).all()
+        latest_by_symbol: dict[str, StrategyV2ShadowDecision] = {}
+        for row in rows:
+            latest_by_symbol.setdefault(row.symbol, row)
+        selection = self._selection_context(
+            tuple(latest_by_symbol),
+            observed_at=observed_at,
+        )
+        residuals_by_group: dict[
+            str,
+            list[tuple[float, float]],
+        ] = {}
+        for symbol, row in latest_by_symbol.items():
+            selection_row = selection.get(symbol)
+            if selection_row is None:
+                continue
+            residuals = self._decision_residuals_bps(row)
+            if residuals is None:
+                continue
+            risk_group = risk_group_for_sector(selection_row.sector)
+            if not risk_group:
+                continue
+            residuals_by_group.setdefault(
+                risk_group,
+                [],
+            ).append(residuals)
+
+        medians = {
+            risk_group: (
+                len(values),
+                median(value[0] for value in values),
+                median(value[1] for value in values),
+            )
+            for risk_group, values in residuals_by_group.items()
+        }
+        result: dict[int, tuple[str, int, float, float]] = {}
+        for decision in decisions:
+            selection_row = selection.get(decision.symbol)
+            edge = vwap_edges.get(decision.id)
+            if selection_row is None or edge is None:
+                continue
+            risk_group = risk_group_for_sector(selection_row.sector)
+            group = medians.get(risk_group)
+            if group is None:
+                continue
+            peer_count, median_1m, median_5m = group
+            result[decision.id] = (
+                risk_group,
+                peer_count,
+                edge[0] - median_1m,
+                edge[1] - median_5m,
+            )
+        return result
+
+    @staticmethod
+    def _decision_residuals_bps(
+        decision: StrategyV2ShadowDecision,
+    ) -> tuple[float, float] | None:
+        try:
+            features = json.loads(decision.features_json)
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(features, dict):
+            return None
+        try:
+            residual_1m = float(features["residual_1m"]) * 10_000
+            residual_5m = float(features["residual_5m"]) * 10_000
+        except (KeyError, TypeError, ValueError):
+            return None
+        if not math.isfinite(residual_1m) or not math.isfinite(
+            residual_5m
+        ):
+            return None
+        return residual_1m, residual_5m
 
     @staticmethod
     def _fresh_observed_cost_bps(
@@ -978,22 +1129,27 @@ class StrategyV2PortfolioService:
             registered_at=registration.registered_at,
             eligible_after=registration.eligible_after,
             edge_filter=(
-                "OBSERVED_COST_TO_STOP_VWAP_DISCOUNT"
+                "RISK_GROUP_REL_OBS_COST_TO_75BPS"
                 if registration.policy
-                in _OBSERVED_COST_TO_STOP_VWAP_EDGE_POLICIES
+                in _RISK_GROUP_RELATIVE_OBSERVED_COST_POLICIES
                 else (
-                    "OBSERVED_COST_TO_75BPS_VWAP_DISCOUNT"
+                    "OBSERVED_COST_TO_STOP_VWAP_DISCOUNT"
                     if registration.policy
-                    in _OBSERVED_COST_TO_75BPS_VWAP_EDGE_POLICIES
+                    in _OBSERVED_COST_TO_STOP_VWAP_EDGE_POLICIES
                     else (
-                        "COST_TO_75BPS_VWAP_DISCOUNT"
+                        "OBSERVED_COST_TO_75BPS_VWAP_DISCOUNT"
                         if registration.policy
-                        in _FIXED_75BPS_VWAP_EDGE_POLICIES
+                        in _OBSERVED_COST_TO_75BPS_VWAP_EDGE_POLICIES
                         else (
-                            "COST_TO_STOP_VWAP_DISCOUNT"
+                            "COST_TO_75BPS_VWAP_DISCOUNT"
                             if registration.policy
-                            in _FIXED_COST_VWAP_EDGE_POLICIES
-                            else "NONE"
+                            in _FIXED_75BPS_VWAP_EDGE_POLICIES
+                            else (
+                                "COST_TO_STOP_VWAP_DISCOUNT"
+                                if registration.policy
+                                in _FIXED_COST_VWAP_EDGE_POLICIES
+                                else "NONE"
+                            )
                         )
                     )
                 )
@@ -1044,7 +1200,50 @@ class StrategyV2PortfolioService:
             ),
             "universe_freshness": "COMPLETED_BEFORE_CONTEXT_CUTOFF",
         }
-        if spec.policy in _FIXED_COST_VWAP_EDGE_POLICIES:
+        if spec.policy in _RISK_GROUP_RELATIVE_OBSERVED_COST_POLICIES:
+            payload["vwap_edge_filter"] = {
+                "price_reference": (
+                    "FROZEN_SIGNAL_FEATURE_RESIDUALS"
+                ),
+                "relative_reference": (
+                    "CAUSALLY_OBSERVED_SAME_MINUTE_RISK_GROUP_"
+                    "MEDIAN_RESIDUALS"
+                ),
+                "risk_group_source": (
+                    "LATEST_COMPLETED_UNIVERSE_RUN_BEFORE_CONTEXT_"
+                    "CUTOFF_WITH_TECH_INDUSTRIES_COLLAPSED"
+                ),
+                "relative_formula": (
+                    "CANDIDATE_RESIDUAL_MINUS_RISK_GROUP_MEDIAN"
+                ),
+                "minimum_risk_group_peers": (
+                    RISK_GROUP_RELATIVE_MIN_PEERS
+                ),
+                "minimum_discount": (
+                    "MAX_FROZEN_ROUND_TRIP_COST_AND_CAUSAL_QUANT_"
+                    "ESTIMATED_ROUND_TRIP_COST_BPS"
+                ),
+                "observed_cost_source": (
+                    "LATEST_CURRENT_QUANT_SCORE_BEFORE_CONTEXT_CUTOFF"
+                ),
+                "observed_cost_freshness": (
+                    "UNEXPIRED_AND_AT_MOST_60_MINUTES_OLD_AT_"
+                    "CONTEXT_CUTOFF"
+                ),
+                "missing_observed_cost": "FAIL_CLOSED",
+                "maximum_discount": "FIXED_ABSOLUTE_VWAP_DISCOUNT_BPS",
+                "maximum_discount_bps": (
+                    VWAP_EDGE_FIXED_MAX_DISCOUNT_BPS
+                ),
+                "required_references": [
+                    "SESSION_VWAP_1M",
+                    "SESSION_VWAP_5M",
+                    "RISK_GROUP_MEDIAN_1M",
+                    "RISK_GROUP_MEDIAN_5M",
+                ],
+                "bounds": "INCLUSIVE_FOR_OWN_AND_RELATIVE_RESIDUALS",
+            }
+        elif spec.policy in _FIXED_COST_VWAP_EDGE_POLICIES:
             payload["vwap_edge_filter"] = {
                 "price_reference": (
                     "FROZEN_SIGNAL_FEATURE_RESIDUALS"
@@ -1136,10 +1335,16 @@ def _candidate_payload(
     candidate: PortfolioRoutingCandidate,
     *,
     include_observed_cost: bool,
+    include_risk_group_adjustment: bool,
 ) -> dict[str, object]:
     payload = asdict(candidate)
     if not include_observed_cost:
         payload.pop("observed_round_trip_cost_bps", None)
+    if not include_risk_group_adjustment:
+        payload.pop("risk_group", None)
+        payload.pop("risk_group_peer_count", None)
+        payload.pop("risk_group_relative_1m_bps", None)
+        payload.pop("risk_group_relative_5m_bps", None)
     return payload
 
 
@@ -1169,6 +1374,7 @@ def _routing_policy(value: str) -> PortfolioRoutingPolicy:
         "VWAP_EDGE_75BPS_POOL",
         "VWAP_EDGE_OBSERVED_COST_POOL",
         "VWAP_EDGE_OBS_COST_75BPS_POOL",
+        "RISK_GROUP_REL_OBS_75BPS_POOL",
     }:
         raise ValueError(f"unsupported portfolio routing policy: {value}")
     return cast(PortfolioRoutingPolicy, value)

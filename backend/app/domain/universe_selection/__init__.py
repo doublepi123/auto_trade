@@ -2,6 +2,7 @@ from app.domain.universe_selection.catalog import (
     CATALOG_SOURCE_VERSION,
     INDEX_CANDIDATE_CATALOG,
     IndexCandidate,
+    risk_group_for_sector,
 )
 from app.domain.universe_selection.selector import (
     UNIVERSE_ALGORITHM_VERSION,
@@ -31,5 +32,6 @@ __all__ = [
     "latest_closed_session_date",
     "liquidity_spread_proxy_bps",
     "latest_complete_session_date",
+    "risk_group_for_sector",
     "select_candidates",
 ]

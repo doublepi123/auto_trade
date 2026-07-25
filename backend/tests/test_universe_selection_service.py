@@ -346,6 +346,7 @@ def test_exploration_candidates_count_selected_sector_exposure() -> None:
             95,
             selected=True,
         ),
+        candidate("MSFT.US", "Software", 92),
         candidate("INTC.US", "Semiconductors", 90),
         candidate("GOOGL.US", "Communication Services", 80),
     ]
@@ -408,7 +409,7 @@ def test_refresh_reconciles_exploration_into_read_only_evidence() -> None:
             item.symbol for item in result.items if item.selected
         }
         assert len(selected_symbols) == 1
-        assert len(result.exploration_symbols) == 2
+        assert result.exploration_symbols == ("JPM.US",)
         assert selected_symbols.isdisjoint(result.exploration_symbols)
         assert {
             row.symbol for row in db.query(WatchlistItem).all()

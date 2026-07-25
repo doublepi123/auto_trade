@@ -6,9 +6,11 @@ import math
 from dataclasses import asdict, dataclass
 from typing import Sequence
 
+from app.domain.universe_selection.catalog import risk_group_for_sector
+
 
 OPENING_CONTINUATION_UNIVERSE_VERSION = (
-    "opening-continuation-universe-v1"
+    "opening-continuation-universe-v2"
 )
 
 _SOFT_EXCLUSION_REASONS = frozenset(
@@ -220,16 +222,17 @@ def select_opening_momentum_universe(
         )
     )
     selected_symbols: list[str] = []
-    sector_counts: dict[str, int] = {}
+    risk_group_counts: dict[str, int] = {}
     for candidate in eligible:
+        risk_group = risk_group_for_sector(candidate.sector)
         if (
-            sector_counts.get(candidate.sector, 0)
+            risk_group_counts.get(risk_group, 0)
             >= selection_config.max_per_sector
         ):
             continue
         selected_symbols.append(candidate.symbol)
-        sector_counts[candidate.sector] = (
-            sector_counts.get(candidate.sector, 0) + 1
+        risk_group_counts[risk_group] = (
+            risk_group_counts.get(risk_group, 0) + 1
         )
         if len(selected_symbols) >= selection_config.max_selected:
             break
@@ -244,8 +247,9 @@ def select_opening_momentum_universe(
         symbol = candidate.symbol
         reasons = list(hard_reasons[symbol])
         if not reasons and symbol not in selected_set:
+            risk_group = risk_group_for_sector(candidate.sector)
             if (
-                sector_counts.get(candidate.sector, 0)
+                risk_group_counts.get(risk_group, 0)
                 >= selection_config.max_per_sector
             ):
                 reasons.append("SECTOR_CAP")

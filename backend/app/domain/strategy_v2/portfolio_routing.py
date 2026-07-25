@@ -15,9 +15,11 @@ PortfolioRoutingPolicy = Literal[
     "VWAP_EDGE_75BPS_POOL",
     "VWAP_EDGE_OBSERVED_COST_POOL",
     "VWAP_EDGE_OBS_COST_75BPS_POOL",
+    "RISK_GROUP_REL_OBS_75BPS_POOL",
 ]
 
 VWAP_EDGE_FIXED_MAX_DISCOUNT_BPS = 75.0
+RISK_GROUP_RELATIVE_MIN_PEERS = 3
 
 
 @dataclass(frozen=True)
@@ -37,6 +39,10 @@ class PortfolioRoutingCandidate:
     round_trip_cost_bps: float | None = None
     observed_round_trip_cost_bps: float | None = None
     stop_distance_bps: float | None = None
+    risk_group: str = ""
+    risk_group_peer_count: int = 0
+    risk_group_relative_1m_bps: float | None = None
+    risk_group_relative_5m_bps: float | None = None
 
     def __post_init__(self) -> None:
         normalized_symbol = self.symbol.strip().upper()
@@ -61,6 +67,8 @@ class PortfolioRoutingCandidate:
             self.round_trip_cost_bps,
             self.observed_round_trip_cost_bps,
             self.stop_distance_bps,
+            self.risk_group_relative_1m_bps,
+            self.risk_group_relative_5m_bps,
         ):
             if value is not None and not math.isfinite(value):
                 raise ValueError(
@@ -88,7 +96,16 @@ class PortfolioRoutingCandidate:
             raise ValueError(
                 "portfolio routing stop distance must be positive"
             )
+        if self.risk_group_peer_count < 0:
+            raise ValueError(
+                "portfolio routing risk-group peer count must not be negative"
+            )
         object.__setattr__(self, "symbol", normalized_symbol)
+        object.__setattr__(
+            self,
+            "risk_group",
+            self.risk_group.strip(),
+        )
         object.__setattr__(
             self,
             "quant_action",
@@ -162,6 +179,57 @@ class PortfolioRoutingCandidate:
             cost_bps=self.effective_observed_cost_bps,
             max_discount_bps=VWAP_EDGE_FIXED_MAX_DISCOUNT_BPS,
         )
+
+    @property
+    def risk_group_relative_observed_cost_fixed_75bps_eligible(
+        self,
+    ) -> bool:
+        if (
+            not self.risk_group
+            or self.risk_group_peer_count
+            < RISK_GROUP_RELATIVE_MIN_PEERS
+            or not self.observed_cost_fixed_75bps_vwap_edge_eligible
+        ):
+            return False
+        values = (
+            self.risk_group_relative_1m_bps,
+            self.risk_group_relative_5m_bps,
+            self.effective_observed_cost_bps,
+        )
+        if any(value is None for value in values):
+            return False
+        relative_1m = float(
+            self.risk_group_relative_1m_bps or 0.0
+        )
+        relative_5m = float(
+            self.risk_group_relative_5m_bps or 0.0
+        )
+        cost = float(self.effective_observed_cost_bps or 0.0)
+        return (
+            -VWAP_EDGE_FIXED_MAX_DISCOUNT_BPS
+            <= relative_1m
+            <= -cost
+            and -VWAP_EDGE_FIXED_MAX_DISCOUNT_BPS
+            <= relative_5m
+            <= -cost
+        )
+
+    @property
+    def risk_group_relative_observed_cost_fixed_75bps_score_bps(
+        self,
+    ) -> float:
+        if (
+            not self.risk_group_relative_observed_cost_fixed_75bps_eligible
+        ):
+            return -1.0
+        cost = float(self.effective_observed_cost_bps or 0.0)
+        guaranteed_discount = min(
+            -float(self.residual_1m_bps or 0.0),
+            -float(self.residual_5m_bps or 0.0),
+            -float(self.risk_group_relative_1m_bps or 0.0),
+            -float(self.risk_group_relative_5m_bps or 0.0),
+        )
+        return guaranteed_discount - cost
 
     def _vwap_edge_eligible(
         self,
@@ -326,6 +394,31 @@ def rank_portfolio_candidates(
             eligible,
             key=lambda candidate: (
                 -candidate.observed_cost_fixed_75bps_vwap_edge_score_bps,
+                0 if candidate.selection_selected else 1,
+                (
+                    candidate.selection_rank
+                    if candidate.selection_rank is not None
+                    else 10_000
+                ),
+                candidate.symbol,
+            ),
+        ))
+    if policy == "RISK_GROUP_REL_OBS_75BPS_POOL":
+        eligible = [
+            candidate
+            for candidate in by_symbol.values()
+            if (
+                candidate
+                .risk_group_relative_observed_cost_fixed_75bps_eligible
+            )
+        ]
+        return tuple(sorted(
+            eligible,
+            key=lambda candidate: (
+                -(
+                    candidate
+                    .risk_group_relative_observed_cost_fixed_75bps_score_bps
+                ),
                 0 if candidate.selection_selected else 1,
                 (
                     candidate.selection_rank

@@ -5,8 +5,21 @@ from typing import Literal
 
 
 CATALOG_SOURCE_VERSION = (
-    "nasdaq-100-2026-07-24_djia-2026-06-29_expanded-v3"
+    "nasdaq-100-2026-07-24_djia-2026-06-29_expanded-v4"
 )
+
+_RISK_GROUP_BY_SECTOR = {
+    "Semiconductors": "Information Technology",
+    "Software": "Information Technology",
+    "Technology Hardware": "Information Technology",
+    "Technology Infrastructure": "Information Technology",
+}
+
+
+def risk_group_for_sector(sector: str) -> str:
+    """Collapse industry labels into broad portfolio-risk groups."""
+    normalized = sector.strip()
+    return _RISK_GROUP_BY_SECTOR.get(normalized, normalized)
 
 
 @dataclass(frozen=True)
@@ -16,6 +29,10 @@ class IndexCandidate:
     sector: str
     memberships: tuple[str, ...]
     market: Literal["US", "HK"] = "US"
+
+    @property
+    def risk_group(self) -> str:
+        return risk_group_for_sector(self.sector)
 
 
 # This is intentionally a liquid, diversified screening seed rather than a
@@ -84,6 +101,7 @@ INDEX_CANDIDATE_CATALOG: tuple[IndexCandidate, ...] = (
         ("NASDAQ_100", "DJIA"),
     ),
     IndexCandidate("ADBE.US", "Adobe", "Software", ("NASDAQ_100",)),
+    IndexCandidate("ADSK.US", "Autodesk", "Software", ("NASDAQ_100",)),
     IndexCandidate(
         "ABNB.US",
         "Airbnb",
@@ -125,11 +143,18 @@ INDEX_CANDIDATE_CATALOG: tuple[IndexCandidate, ...] = (
         ("NASDAQ_100",),
     ),
     IndexCandidate(
+        "CCEP.US",
+        "Coca-Cola Europacific Partners",
+        "Consumer Staples",
+        ("NASDAQ_100",),
+    ),
+    IndexCandidate(
         "CMCSA.US",
         "Comcast",
         "Communication Services",
         ("NASDAQ_100",),
     ),
+    IndexCandidate("CSX.US", "CSX", "Industrials", ("NASDAQ_100",)),
     IndexCandidate(
         "DASH.US",
         "DoorDash",
@@ -137,9 +162,21 @@ INDEX_CANDIDATE_CATALOG: tuple[IndexCandidate, ...] = (
         ("NASDAQ_100",),
     ),
     IndexCandidate("DDOG.US", "Datadog", "Software", ("NASDAQ_100",)),
+    IndexCandidate(
+        "EA.US",
+        "Electronic Arts",
+        "Communication Services",
+        ("NASDAQ_100",),
+    ),
     IndexCandidate("FANG.US", "Diamondback Energy", "Energy", ("NASDAQ_100",)),
     IndexCandidate("EXC.US", "Exelon", "Utilities", ("NASDAQ_100",)),
     IndexCandidate("FTNT.US", "Fortinet", "Software", ("NASDAQ_100",)),
+    IndexCandidate(
+        "GEHC.US",
+        "GE HealthCare Technologies",
+        "Healthcare",
+        ("NASDAQ_100",),
+    ),
     IndexCandidate("GILD.US", "Gilead Sciences", "Healthcare", ("NASDAQ_100",)),
     IndexCandidate("INTU.US", "Intuit", "Software", ("NASDAQ_100",)),
     IndexCandidate("LIN.US", "Linde", "Materials", ("NASDAQ_100",)),
@@ -150,12 +187,43 @@ INDEX_CANDIDATE_CATALOG: tuple[IndexCandidate, ...] = (
         ("NASDAQ_100",),
     ),
     IndexCandidate(
+        "MCHP.US",
+        "Microchip Technology",
+        "Semiconductors",
+        ("NASDAQ_100",),
+    ),
+    IndexCandidate(
         "MELI.US",
         "MercadoLibre",
         "Consumer Discretionary",
         ("NASDAQ_100",),
     ),
+    IndexCandidate(
+        "NXPI.US",
+        "NXP Semiconductors",
+        "Semiconductors",
+        ("NASDAQ_100",),
+    ),
     IndexCandidate("PEP.US", "PepsiCo", "Consumer Staples", ("NASDAQ_100",)),
+    IndexCandidate("PYPL.US", "PayPal Holdings", "Financials", ("NASDAQ_100",)),
+    IndexCandidate(
+        "REGN.US",
+        "Regeneron Pharmaceuticals",
+        "Healthcare",
+        ("NASDAQ_100",),
+    ),
+    IndexCandidate(
+        "ROST.US",
+        "Ross Stores",
+        "Consumer Discretionary",
+        ("NASDAQ_100",),
+    ),
+    IndexCandidate(
+        "SBUX.US",
+        "Starbucks",
+        "Consumer Discretionary",
+        ("NASDAQ_100",),
+    ),
     IndexCandidate(
         "SHOP.US",
         "Shopify",
@@ -186,6 +254,7 @@ INDEX_CANDIDATE_CATALOG: tuple[IndexCandidate, ...] = (
         "Technology Hardware",
         ("NASDAQ_100",),
     ),
+    IndexCandidate("XEL.US", "Xcel Energy", "Utilities", ("NASDAQ_100",)),
     IndexCandidate("AXP.US", "American Express", "Financials", ("DJIA",)),
     IndexCandidate("CVX.US", "Chevron", "Energy", ("DJIA",)),
     IndexCandidate(

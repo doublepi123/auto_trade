@@ -24,6 +24,10 @@ def _candidate(
     round_trip_cost_bps: float | None = None,
     observed_round_trip_cost_bps: float | None = None,
     stop_distance_bps: float | None = None,
+    risk_group: str = "",
+    risk_group_peer_count: int = 0,
+    risk_group_relative_1m_bps: float | None = None,
+    risk_group_relative_5m_bps: float | None = None,
 ) -> PortfolioRoutingCandidate:
     return PortfolioRoutingCandidate(
         symbol=symbol,
@@ -41,6 +45,10 @@ def _candidate(
         round_trip_cost_bps=round_trip_cost_bps,
         observed_round_trip_cost_bps=observed_round_trip_cost_bps,
         stop_distance_bps=stop_distance_bps,
+        risk_group=risk_group,
+        risk_group_peer_count=risk_group_peer_count,
+        risk_group_relative_1m_bps=risk_group_relative_1m_bps,
+        risk_group_relative_5m_bps=risk_group_relative_5m_bps,
     )
 
 
@@ -468,6 +476,79 @@ def test_observed_cost_fixed_75bps_pool_completes_factorial() -> None:
         item.observed_cost_fixed_75bps_vwap_edge_score_bps
         for item in ranked
     ] == [44, 36]
+
+
+def test_risk_group_relative_pool_requires_peers_and_ranks_residual_edge() -> None:
+    ranked = rank_portfolio_candidates(
+        [
+            _candidate(
+                "AAPL.US",
+                1,
+                selected=True,
+                rank=1,
+                residual_1m_bps=-60,
+                residual_5m_bps=-70,
+                round_trip_cost_bps=14,
+                observed_round_trip_cost_bps=24,
+                stop_distance_bps=45,
+                risk_group="Information Technology",
+                risk_group_peer_count=3,
+                risk_group_relative_1m_bps=-40,
+                risk_group_relative_5m_bps=-50,
+            ),
+            _candidate(
+                "MSFT.US",
+                2,
+                residual_1m_bps=-70,
+                residual_5m_bps=-70,
+                round_trip_cost_bps=14,
+                observed_round_trip_cost_bps=31,
+                stop_distance_bps=45,
+                risk_group="Information Technology",
+                risk_group_peer_count=3,
+                risk_group_relative_1m_bps=-30,
+                risk_group_relative_5m_bps=-35,
+            ),
+            _candidate(
+                "AMD.US",
+                3,
+                residual_1m_bps=-55,
+                residual_5m_bps=-60,
+                round_trip_cost_bps=14,
+                observed_round_trip_cost_bps=20,
+                stop_distance_bps=45,
+                risk_group="Information Technology",
+                risk_group_peer_count=3,
+                risk_group_relative_1m_bps=-45,
+                risk_group_relative_5m_bps=-50,
+            ),
+            _candidate(
+                "NVDA.US",
+                4,
+                residual_1m_bps=-65,
+                residual_5m_bps=-65,
+                round_trip_cost_bps=14,
+                observed_round_trip_cost_bps=20,
+                stop_distance_bps=45,
+                risk_group="Information Technology",
+                risk_group_peer_count=2,
+                risk_group_relative_1m_bps=-45,
+                risk_group_relative_5m_bps=-45,
+            ),
+        ],
+        policy="RISK_GROUP_REL_OBS_75BPS_POOL",
+        primary_symbol="NVDA.US",
+    )
+
+    assert [item.symbol for item in ranked] == [
+        "AMD.US",
+        "AAPL.US",
+    ]
+    assert (
+        ranked[0]
+        .risk_group_relative_observed_cost_fixed_75bps_score_bps
+        == 25
+    )
 
 
 @pytest.mark.parametrize(

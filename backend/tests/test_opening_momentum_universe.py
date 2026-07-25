@@ -118,6 +118,38 @@ def test_sector_cap_is_applied_before_global_cutoff() -> None:
     assert by_symbol["TECH2.US"].exclusion_reasons == ("SECTOR_CAP",)
 
 
+def test_technology_industries_share_one_risk_group_cap() -> None:
+    selected = select_opening_momentum_universe(
+        [
+            _candidate(
+                "CHIP.US",
+                sector="Semiconductors",
+                trend_efficiency=1.0,
+            ),
+            _candidate(
+                "SOFTWARE.US",
+                sector="Software",
+                trend_efficiency=0.9,
+            ),
+            _candidate(
+                "HEALTH.US",
+                sector="Healthcare",
+                trend_efficiency=0.8,
+            ),
+        ],
+        _trend_only_config(
+            max_selected=2,
+            max_per_sector=1,
+        ),
+    )
+    by_symbol = {row.symbol: row for row in selected}
+
+    assert [
+        row.symbol for row in selected if row.selected
+    ] == ["CHIP.US", "HEALTH.US"]
+    assert by_symbol["SOFTWARE.US"].exclusion_reasons == ("SECTOR_CAP",)
+
+
 def test_selection_and_variant_version_are_order_deterministic() -> None:
     config = _trend_only_config(max_selected=2)
     candidates = [

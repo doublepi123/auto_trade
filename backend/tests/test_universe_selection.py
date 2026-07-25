@@ -133,6 +133,28 @@ def test_select_candidates_enforces_sector_diversification() -> None:
     assert rejected_chip.exclusion_reasons == ("SECTOR_CAP",)
 
 
+def test_select_candidates_caps_related_technology_industries_together() -> None:
+    rows = select_candidates(
+        [
+            _input("CHIP.US", sector="Semiconductors", volume=30_000_000),
+            _input("SOFT.US", sector="Software", volume=20_000_000),
+            _input("BANK.US", sector="Financials", volume=10_000_000),
+        ],
+        _config(max_selected=2, max_per_sector=1),
+    )
+
+    selected = {
+        row.candidate.symbol
+        for row in rows
+        if row.selected
+    }
+    assert selected == {"CHIP.US", "BANK.US"}
+    software = next(
+        row for row in rows if row.candidate.symbol == "SOFT.US"
+    )
+    assert software.exclusion_reasons == ("SECTOR_CAP",)
+
+
 def test_select_candidates_records_data_quality_failures() -> None:
     candidate = IndexCandidate(
         symbol="BROKEN.US",
