@@ -299,7 +299,7 @@ class TestStrategyV2PortfolioService:
             registrations = db.query(
                 StrategyV2PortfolioRegistration
             ).all()
-            assert len(registrations) == 12
+            assert len(registrations) == 13
             assert {
                 row.eligible_after.replace(tzinfo=timezone.utc)
                 for row in registrations
@@ -323,6 +323,12 @@ class TestStrategyV2PortfolioService:
                 for row in registrations
                 if row.policy == "SECTOR_LOO_OBS_75BPS_POOL"
             )
+            selected_sector_loo = next(
+                row
+                for row in registrations
+                if row.policy
+                == "SELECTED_SECTOR_LOO_OBS_75BPS_POOL"
+            )
             assert risk_group_v1.evaluator_digest == (
                 "9fa13dbedfbeb508e4b3ecca23d1a63c7"
                 "fe6c559dc71356922dda4c11528806e"
@@ -335,6 +341,10 @@ class TestStrategyV2PortfolioService:
                 risk_group_v1.evaluator_digest,
                 risk_group_loo.evaluator_digest,
             }
+            assert (
+                selected_sector_loo.evaluator_digest
+                != sector_loo.evaluator_digest
+            )
             assert db.query(
                 StrategyV2PortfolioObservation
             ).count() == 0
@@ -364,7 +374,7 @@ class TestStrategyV2PortfolioService:
             )
             report = service.get_report("NVDA.US")
 
-            assert len(report.variants) == 12
+            assert len(report.variants) == 13
             assert sum(
                 row.algorithm_version.endswith("-v2")
                 for row in report.variants
@@ -549,6 +559,7 @@ class TestStrategyV2PortfolioService:
                 "RISK_GROUP_REL_OBS_75BPS_POOL": "",
                 "RISK_GROUP_LOO_OBS_75BPS_POOL": "",
                 "SECTOR_LOO_OBS_75BPS_POOL": "",
+                "SELECTED_SECTOR_LOO_OBS_75BPS_POOL": "",
             }
 
             self._signal(
@@ -565,7 +576,7 @@ class TestStrategyV2PortfolioService:
                 StrategyV2PortfolioObservation.signal_at
                 == _FIRST_SIGNAL + timedelta(minutes=2)
             ).all()
-            assert len(overlap_rows) == 12
+            assert len(overlap_rows) == 13
             registrations_by_id = {
                 row.id: row.policy
                 for row in db.query(
@@ -589,6 +600,9 @@ class TestStrategyV2PortfolioService:
                 "RISK_GROUP_REL_OBS_75BPS_POOL": "NO_ELIGIBLE",
                 "RISK_GROUP_LOO_OBS_75BPS_POOL": "NO_ELIGIBLE",
                 "SECTOR_LOO_OBS_75BPS_POOL": "NO_ELIGIBLE",
+                "SELECTED_SECTOR_LOO_OBS_75BPS_POOL": (
+                    "NO_ELIGIBLE"
+                ),
             }
 
             exit_at = _FIRST_SIGNAL + timedelta(minutes=5)
@@ -883,6 +897,7 @@ class TestStrategyV2PortfolioService:
                 "RISK_GROUP_REL_OBS_75BPS_POOL",
                 "RISK_GROUP_LOO_OBS_75BPS_POOL",
                 "SECTOR_LOO_OBS_75BPS_POOL",
+                "SELECTED_SECTOR_LOO_OBS_75BPS_POOL",
             ):
                 observation = db.query(
                     StrategyV2PortfolioObservation
@@ -1262,6 +1277,103 @@ class TestStrategyV2PortfolioService:
                 challenger.edge_filter
                 == "SECTOR_LOO_OBS_COST_TO_75BPS"
             )
+            selected_registration = db.query(
+                StrategyV2PortfolioRegistration
+            ).filter(
+                StrategyV2PortfolioRegistration.policy
+                == "SELECTED_SECTOR_LOO_OBS_75BPS_POOL"
+            ).one()
+            selected_observation = db.query(
+                StrategyV2PortfolioObservation
+            ).filter(
+                StrategyV2PortfolioObservation.registration_id
+                == selected_registration.id
+            ).one()
+            assert selected_observation.status == "OPEN"
+            assert selected_observation.selected_symbol == "AAPL.US"
+
+    def test_selected_sector_route_excludes_non_selected_signal(
+        self,
+    ) -> None:
+        with self._db() as db:
+            service = StrategyV2PortfolioService(db)
+            self._register(service)
+            self._universe(db)
+            self._version(db, "IBM.US")
+            self._quant(
+                db,
+                "IBM.US",
+                "WATCH",
+                49,
+                estimated_cost_bps=24,
+            )
+            ibm = self._signal(
+                db,
+                "IBM.US",
+                _FIRST_SIGNAL,
+                close_price=99.4,
+                vwap_1m=100,
+                vwap_5m=100,
+            )
+            aapl = self._signal(
+                db,
+                "AAPL.US",
+                _FIRST_SIGNAL,
+                close_price=99.9,
+                vwap_1m=100,
+                vwap_5m=100,
+            )
+            csco = self._signal(
+                db,
+                "CSCO.US",
+                _FIRST_SIGNAL,
+                close_price=99.8,
+                vwap_1m=100,
+                vwap_5m=100,
+            )
+            aapl.action = "WAIT"
+            aapl.observed_at = _FIRST_SIGNAL + timedelta(
+                minutes=1,
+                seconds=4,
+            )
+            csco.action = "WAIT"
+            csco.observed_at = _FIRST_SIGNAL + timedelta(
+                minutes=1,
+                seconds=3,
+            )
+            db.add_all([aapl, csco])
+            db.commit()
+            self._fill(db, ibm, price=99.42)
+
+            service.advance(
+                now=_FIRST_SIGNAL + timedelta(minutes=4)
+            )
+
+            registrations = {
+                row.policy: row
+                for row in db.query(
+                    StrategyV2PortfolioRegistration
+                ).all()
+            }
+            unrestricted = db.query(
+                StrategyV2PortfolioObservation
+            ).filter(
+                StrategyV2PortfolioObservation.registration_id
+                == registrations["SECTOR_LOO_OBS_75BPS_POOL"].id
+            ).one()
+            selected_only = db.query(
+                StrategyV2PortfolioObservation
+            ).filter(
+                StrategyV2PortfolioObservation.registration_id
+                == registrations[
+                    "SELECTED_SECTOR_LOO_OBS_75BPS_POOL"
+                ].id
+            ).one()
+
+            assert unrestricted.status == "OPEN"
+            assert unrestricted.selected_symbol == "IBM.US"
+            assert selected_only.status == "NO_ELIGIBLE"
+            assert selected_only.selected_symbol == ""
 
     def test_sector_leave_one_out_excludes_late_exact_peer(
         self,

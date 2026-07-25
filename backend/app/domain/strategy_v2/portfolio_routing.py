@@ -18,6 +18,7 @@ PortfolioRoutingPolicy = Literal[
     "RISK_GROUP_REL_OBS_75BPS_POOL",
     "RISK_GROUP_LOO_OBS_75BPS_POOL",
     "SECTOR_LOO_OBS_75BPS_POOL",
+    "SELECTED_SECTOR_LOO_OBS_75BPS_POOL",
 ]
 
 VWAP_EDGE_FIXED_MAX_DISCOUNT_BPS = 75.0
@@ -486,6 +487,7 @@ def rank_portfolio_candidates(
     if policy in {
         "RISK_GROUP_LOO_OBS_75BPS_POOL",
         "SECTOR_LOO_OBS_75BPS_POOL",
+        "SELECTED_SECTOR_LOO_OBS_75BPS_POOL",
     }:
         eligible = [
             candidate
@@ -493,6 +495,10 @@ def rank_portfolio_candidates(
             if (
                 candidate
                 .risk_group_leave_one_out_observed_cost_fixed_75bps_eligible
+            )
+            and (
+                policy != "SELECTED_SECTOR_LOO_OBS_75BPS_POOL"
+                or candidate.selection_selected
             )
         ]
         return tuple(sorted(

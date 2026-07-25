@@ -111,6 +111,13 @@ _ROUTING_SPECS = (
             "observed-cost-75bps-v1"
         ),
     ),
+    _RoutingSpec(
+        policy="SELECTED_SECTOR_LOO_OBS_75BPS_POOL",
+        algorithm_version=(
+            "strategy-v2-portfolio-selected-sector-leave-one-out-"
+            "observed-cost-75bps-v1"
+        ),
+    ),
 )
 _EVALUATOR_VERSION = "strategy-v2-single-capital-slot-forward-router-v2"
 _CURRENT_ROUTING_ALGORITHM_VERSIONS = tuple(
@@ -138,6 +145,7 @@ _RISK_GROUP_LEAVE_ONE_OUT_OBSERVED_COST_POLICIES = {
 }
 _SECTOR_LEAVE_ONE_OUT_OBSERVED_COST_POLICIES = {
     "SECTOR_LOO_OBS_75BPS_POOL",
+    "SELECTED_SECTOR_LOO_OBS_75BPS_POOL",
 }
 _RELATIVE_OBSERVED_COST_POLICIES = (
     _RISK_GROUP_INCLUDED_OBSERVED_COST_POLICIES
@@ -1376,6 +1384,11 @@ class StrategyV2PortfolioService:
             spec.policy
             in _SECTOR_LEAVE_ONE_OUT_OBSERVED_COST_POLICIES
         ):
+            if spec.policy == "SELECTED_SECTOR_LOO_OBS_75BPS_POOL":
+                payload["candidate_universe"] = (
+                    "SELECTED_TRUE_IN_LATEST_COMPLETED_UNIVERSE_RUN_"
+                    "BEFORE_CONTEXT_CUTOFF"
+                )
             payload["vwap_edge_filter"] = {
                 "price_reference": (
                     "FROZEN_SIGNAL_FEATURE_RESIDUALS"
@@ -1653,6 +1666,7 @@ def _routing_policy(value: str) -> PortfolioRoutingPolicy:
         "RISK_GROUP_REL_OBS_75BPS_POOL",
         "RISK_GROUP_LOO_OBS_75BPS_POOL",
         "SECTOR_LOO_OBS_75BPS_POOL",
+        "SELECTED_SECTOR_LOO_OBS_75BPS_POOL",
     }:
         raise ValueError(f"unsupported portfolio routing policy: {value}")
     return cast(PortfolioRoutingPolicy, value)

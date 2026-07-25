@@ -587,6 +587,16 @@ def test_risk_group_relative_pool_requires_peers_and_ranks_residual_edge() -> No
         == 25
     )
 
+    selected_sector_ranked = rank_portfolio_candidates(
+        candidates,
+        policy="SELECTED_SECTOR_LOO_OBS_75BPS_POOL",
+        primary_symbol="NVDA.US",
+    )
+
+    assert [item.symbol for item in selected_sector_ranked] == [
+        "AAPL.US",
+    ]
+
 
 @pytest.mark.parametrize(
     "observed_cost",

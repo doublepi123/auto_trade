@@ -1952,6 +1952,7 @@ export type StrategyShadowPortfolioRoutingPolicy =
   | 'RISK_GROUP_REL_OBS_75BPS_POOL'
   | 'RISK_GROUP_LOO_OBS_75BPS_POOL'
   | 'SECTOR_LOO_OBS_75BPS_POOL'
+  | 'SELECTED_SECTOR_LOO_OBS_75BPS_POOL'
 
 export type StrategyShadowPortfolioEdgeFilter =
   | 'NONE'
