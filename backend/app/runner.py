@@ -5471,6 +5471,7 @@ class AppRunner:
                     payload={
                         "source": source,
                         "symbols": sorted(set(unsafe_symbols)),
+                        "position_snapshot_error_type": type(exc).__name__,
                     },
                 )
                 db.commit()

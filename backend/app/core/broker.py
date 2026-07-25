@@ -435,15 +435,24 @@ def _decode_position_probe_output(
 
     status = payload.get("status")
     if status == "error":
-        if set(payload) != {"status", "error_type"} or returncode == 0:
+        if (
+            set(payload) != {"status", "error_type", "retryable"}
+            or returncode == 0
+        ):
             raise RuntimeError("malformed broker position probe payload")
         error_type = payload.get("error_type")
+        retryable = payload.get("retryable")
         if (
             not isinstance(error_type, str)
             or not error_type.isidentifier()
             or len(error_type) > 80
+            or not isinstance(retryable, bool)
         ):
             raise RuntimeError("malformed broker position probe payload")
+        if retryable:
+            raise ConnectionError(
+                f"isolated broker position snapshot failed ({error_type})"
+            )
         raise RuntimeError(
             f"isolated broker position snapshot failed ({error_type})"
         )
@@ -1527,7 +1536,12 @@ class BrokerGateway:
 
     def get_positions(self) -> list[Position]:
         if settings.broker_position_snapshot_isolation_enabled:
-            return self._get_positions_isolated()
+            return self._call_with_retry(
+                self._get_positions_isolated,
+                op="get_positions_isolated",
+                max_retries=settings.broker_retry_max,
+                base_ms=settings.broker_retry_base_ms,
+            )
         return self._call_with_retry(
             self._get_positions_direct,
             op="get_positions",

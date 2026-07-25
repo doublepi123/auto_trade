@@ -24,13 +24,16 @@ def _write_protocol_payload(fd: int, payload: dict[str, Any]) -> None:
 def main() -> int:
     sys.stdout.flush()
     protocol_fd = os.dup(sys.stdout.fileno())
+    classify_retryable = None
     try:
         os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
         try:
             from app.core.broker import (
                 _fetch_position_snapshot_payload_from_env,
+                _is_retryable_exception,
             )
 
+            classify_retryable = _is_retryable_exception
             positions = _fetch_position_snapshot_payload_from_env()
         except Exception as exc:
             _write_protocol_payload(
@@ -38,6 +41,11 @@ def main() -> int:
                 {
                     "status": "error",
                     "error_type": type(exc).__name__,
+                    "retryable": bool(
+                        classify_retryable(exc)
+                        if classify_retryable is not None
+                        else False
+                    ),
                 },
             )
             return 1

@@ -1961,7 +1961,7 @@ class TestBrokerGateway:
         assert "env" not in calls[0][1]
         assert calls[0][1]["stderr"] is subprocess.DEVNULL
 
-    def test_get_positions_isolated_timeout_releases_probe_lock(
+    def test_get_positions_isolated_timeout_retries_and_releases_probe_lock(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -1988,16 +1988,45 @@ class TestBrokerGateway:
             "broker_position_snapshot_timeout_seconds",
             1.0,
         )
+        monkeypatch.setattr(broker_module.settings, "broker_retry_max", 1)
+        monkeypatch.setattr(broker_module.settings, "broker_retry_base_ms", 0)
         monkeypatch.setattr(broker_module.subprocess, "run", fake_run)
         gw = BrokerGateway()
-
-        with pytest.raises(TimeoutError, match="exceeded 1s timeout"):
-            gw.get_positions()
 
         assert gw.get_positions() == []
         assert calls == 2
         assert gw._quote_ctx is None
         assert gw._trade_ctx is None
+
+    def test_get_positions_isolated_persistent_timeout_fails_after_retry_budget(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        calls = 0
+
+        def fake_run(command, **kwargs):
+            nonlocal calls
+            calls += 1
+            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+        monkeypatch.setattr(
+            broker_module.settings,
+            "broker_position_snapshot_isolation_enabled",
+            True,
+        )
+        monkeypatch.setattr(
+            broker_module.settings,
+            "broker_position_snapshot_timeout_seconds",
+            1.0,
+        )
+        monkeypatch.setattr(broker_module.settings, "broker_retry_max", 2)
+        monkeypatch.setattr(broker_module.settings, "broker_retry_base_ms", 0)
+        monkeypatch.setattr(broker_module.subprocess, "run", fake_run)
+
+        with pytest.raises(TimeoutError, match="exceeded 1s timeout"):
+            BrokerGateway().get_positions()
+
+        assert calls == 3
 
     def test_get_positions_isolated_real_probe_kills_and_reaps_timeout(
         self,
@@ -2053,6 +2082,7 @@ class TestBrokerGateway:
             "broker_position_snapshot_timeout_seconds",
             1.0,
         )
+        monkeypatch.setattr(broker_module.settings, "broker_retry_max", 0)
         monkeypatch.setenv("PYTHONPATH", str(tmp_path))
         monkeypatch.setenv("LONGPORT_ACCESS_TOKEN", "probe-secret-output")
         monkeypatch.setenv("POSITION_PROBE_PID_FILE", str(pid_file))
@@ -2079,30 +2109,134 @@ class TestBrokerGateway:
         assert gw._quote_ctx is None
         assert gw._trade_ctx is None
 
-    def test_get_positions_isolated_surfaces_sanitized_child_error(
+    def test_get_positions_isolated_real_probe_retries_classified_sdk_timeout(
         self,
         monkeypatch: pytest.MonkeyPatch,
+        tmp_path,
     ) -> None:
+        package_dir = tmp_path / "longport"
+        package_dir.mkdir()
+        (package_dir / "__init__.py").write_text("", encoding="utf-8")
+        (package_dir / "openapi.py").write_text(
+            "\n".join(
+                [
+                    "import os",
+                    "from pathlib import Path",
+                    "",
+                    "class OpenApiException(Exception):",
+                    "    pass",
+                    "",
+                    "class Config:",
+                    "    @staticmethod",
+                    "    def from_env():",
+                    "        return object()",
+                    "",
+                    "class TradeContext:",
+                    "    def __init__(self, _config):",
+                    "        pass",
+                    "",
+                    "    def stock_positions(self):",
+                    "        counter = Path(os.environ['POSITION_PROBE_COUNTER'])",
+                    "        calls = int(counter.read_text()) if counter.exists() else 0",
+                    "        counter.write_text(str(calls + 1))",
+                    "        if calls == 0:",
+                    "            raise OpenApiException('temporary timeout')",
+                    "        return []",
+                    "",
+                    "    def close(self):",
+                    "        pass",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        counter = tmp_path / "counter.txt"
         monkeypatch.setattr(
             broker_module.settings,
             "broker_position_snapshot_isolation_enabled",
             True,
         )
         monkeypatch.setattr(
-            broker_module.subprocess,
-            "run",
-            lambda command, **_kwargs: subprocess.CompletedProcess(
+            broker_module.settings,
+            "broker_position_snapshot_timeout_seconds",
+            2.0,
+        )
+        monkeypatch.setattr(broker_module.settings, "broker_retry_max", 1)
+        monkeypatch.setattr(broker_module.settings, "broker_retry_base_ms", 0)
+        monkeypatch.setenv("PYTHONPATH", str(tmp_path))
+        monkeypatch.setenv("POSITION_PROBE_COUNTER", str(counter))
+
+        assert BrokerGateway().get_positions() == []
+        assert counter.read_text(encoding="utf-8") == "2"
+
+    def test_get_positions_isolated_surfaces_sanitized_child_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        calls = 0
+
+        def fake_run(command, **_kwargs):
+            nonlocal calls
+            calls += 1
+            return subprocess.CompletedProcess(
                 command,
                 1,
-                stdout='{"status":"error","error_type":"OpenApiException"}',
-            ),
+                stdout=(
+                    '{"status":"error","error_type":"OpenApiException",'
+                    '"retryable":false}'
+                ),
+            )
+
+        monkeypatch.setattr(
+            broker_module.settings,
+            "broker_position_snapshot_isolation_enabled",
+            True,
         )
+        monkeypatch.setattr(broker_module.settings, "broker_retry_max", 3)
+        monkeypatch.setattr(broker_module.settings, "broker_retry_base_ms", 0)
+        monkeypatch.setattr(broker_module.subprocess, "run", fake_run)
 
         with pytest.raises(
             RuntimeError,
             match=r"failed \(OpenApiException\)",
         ):
             BrokerGateway().get_positions()
+        assert calls == 1
+
+    def test_get_positions_isolated_retries_child_classified_transient_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        calls = 0
+
+        def fake_run(command, **_kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return subprocess.CompletedProcess(
+                    command,
+                    1,
+                    stdout=(
+                        '{"status":"error","error_type":"OpenApiException",'
+                        '"retryable":true}'
+                    ),
+                )
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout='{"status":"ok","positions":[]}',
+            )
+
+        monkeypatch.setattr(
+            broker_module.settings,
+            "broker_position_snapshot_isolation_enabled",
+            True,
+        )
+        monkeypatch.setattr(broker_module.settings, "broker_retry_max", 1)
+        monkeypatch.setattr(broker_module.settings, "broker_retry_base_ms", 0)
+        monkeypatch.setattr(broker_module.subprocess, "run", fake_run)
+
+        assert BrokerGateway().get_positions() == []
+        assert calls == 2
 
     @pytest.mark.parametrize(
         ("output", "returncode"),
@@ -2118,6 +2252,11 @@ class TestBrokerGateway:
             ),
             ('{"status":"ok","positions":[]}', 1),
             ('{"status":"error","error_type":"bad value"}', 1),
+            (
+                '{"status":"error","error_type":"OpenApiException",'
+                '"retryable":"yes"}',
+                1,
+            ),
         ],
     )
     def test_get_positions_isolated_rejects_malformed_protocol(

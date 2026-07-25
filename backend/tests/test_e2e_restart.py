@@ -1043,6 +1043,18 @@ class TestE2EOfflineFillRecovery:
                 assert persisted.pause_reason.startswith(
                     "POSITION_RECONCILIATION_UNCERTAIN:"
                 )
+                recovery_event = (
+                    db.query(TradeEvent)
+                    .filter(
+                        TradeEvent.event_type
+                        == "TRACKED_ENTRY_RECOVERY_FAILED"
+                    )
+                    .order_by(TradeEvent.id.desc())
+                    .first()
+                )
+                assert recovery_event is not None
+                payload = json.loads(recovery_event.payload_json)
+                assert payload["position_snapshot_error_type"] == "TimeoutError"
             finally:
                 db.close()
         finally:
