@@ -513,6 +513,96 @@ def test_exploration_candidates_fill_every_selected_risk_group() -> None:
     assert "LIN.US" not in {item.symbol for item in exploration}
 
 
+def test_exploration_candidates_complete_refined_sector_peers_atomically() -> None:
+    def candidate(
+        symbol: str,
+        sector: str,
+        score: float,
+        *,
+        selected: bool = False,
+        reasons: list[str] | None = None,
+    ) -> UniverseSelectionCandidate:
+        return UniverseSelectionCandidate(
+            run_id=1,
+            symbol=symbol,
+            market="US",
+            alias=symbol,
+            sector=sector,
+            memberships_json='["NASDAQ_100"]',
+            selected=selected,
+            score=score,
+            metrics_json="{}",
+            exclusion_reasons_json=json.dumps(
+                []
+                if selected
+                else reasons or ["SECTOR_CAP"]
+            ),
+            created_at=_NOW,
+        )
+
+    items = [
+        candidate("AMD.US", "Semiconductors", 99, selected=True),
+        candidate("AMAT.US", "Semiconductors", 98, selected=True),
+        candidate("NVDA.US", "Semiconductors", 97),
+        candidate("PLTR.US", "Software", 96),
+        candidate("MSFT.US", "Software", 95),
+        candidate("PANW.US", "Software", 92),
+        candidate("IBM.US", "Technology Hardware", 94),
+        candidate("AAPL.US", "Technology Hardware", 93),
+        candidate("CSCO.US", "Technology Hardware", 91),
+        candidate("LIN.US", "Materials", 89),
+        candidate("SHW.US", "Materials", 88),
+        candidate(
+            "CRWD.US",
+            "Software",
+            90,
+            reasons=["ATR_OUTSIDE_RANGE"],
+        ),
+    ]
+
+    full = select_exploration_candidates(
+        items,
+        max_symbols=7,
+        max_per_sector=2,
+    )
+    tight = select_exploration_candidates(
+        items,
+        max_symbols=6,
+        max_per_sector=2,
+    )
+
+    assert [item.symbol for item in full] == [
+        "NVDA.US",
+        "PLTR.US",
+        "MSFT.US",
+        "PANW.US",
+        "IBM.US",
+        "AAPL.US",
+        "CSCO.US",
+    ]
+    full_sector_counts = Counter(item.sector for item in full)
+    assert full_sector_counts == {
+        "Semiconductors": 1,
+        "Software": 3,
+        "Technology Hardware": 3,
+    }
+    assert [item.symbol for item in tight] == [
+        "NVDA.US",
+        "PLTR.US",
+        "MSFT.US",
+        "PANW.US",
+        "LIN.US",
+        "SHW.US",
+    ]
+    assert len(full) == 7
+    assert len(tight) == 6
+    assert all(
+        item.sector != "Technology Hardware"
+        for item in tight
+    )
+    assert all(item.symbol != "CRWD.US" for item in full)
+
+
 def test_exploration_peer_fallback_is_observation_only_and_narrow() -> None:
     def candidate(
         symbol: str,

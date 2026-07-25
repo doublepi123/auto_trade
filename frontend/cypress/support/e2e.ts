@@ -2245,6 +2245,13 @@ Cypress.Commands.add('stubApi', () => {
             0.66,
             { 'AAPL.US': 3, 'MSFT.US': 2 },
           ),
+          variant(
+            12,
+            'SECTOR_LOO_OBS_75BPS_POOL',
+            'SECTOR_LOO_OBS_COST_TO_75BPS',
+            0.71,
+            { 'AAPL.US': 3, 'IBM.US': 2 },
+          ),
         ],
       },
     })

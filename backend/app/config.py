@@ -384,7 +384,7 @@ class Settings(BaseSettings):
         validation_alias="AUTO_TRADE_UNIVERSE_SELECTION_MAX_SYMBOLS",
     )
     universe_selection_exploration_max_symbols: int = Field(
-        default=14,
+        default=20,
         ge=0,
         le=20,
         validation_alias=(
@@ -393,8 +393,10 @@ class Settings(BaseSettings):
         description=(
             "Maximum number of hard-gate-passing, non-selected observers. "
             "Selected risk groups are filled to the portfolio peer minimum "
-            "with a peer-only near-liquidity fallback before remaining "
-            "capacity is diversified. Zero disables the exploration tier."
+            "with a peer-only near-liquidity fallback, then eligible nested "
+            "industries are completed for leave-one-out research before "
+            "remaining capacity is diversified. Zero disables the "
+            "exploration tier."
         ),
     )
     universe_selection_max_per_sector: int = Field(

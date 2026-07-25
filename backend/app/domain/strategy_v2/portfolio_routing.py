@@ -17,6 +17,7 @@ PortfolioRoutingPolicy = Literal[
     "VWAP_EDGE_OBS_COST_75BPS_POOL",
     "RISK_GROUP_REL_OBS_75BPS_POOL",
     "RISK_GROUP_LOO_OBS_75BPS_POOL",
+    "SECTOR_LOO_OBS_75BPS_POOL",
 ]
 
 VWAP_EDGE_FIXED_MAX_DISCOUNT_BPS = 75.0
@@ -482,7 +483,10 @@ def rank_portfolio_candidates(
                 candidate.symbol,
             ),
         ))
-    if policy == "RISK_GROUP_LOO_OBS_75BPS_POOL":
+    if policy in {
+        "RISK_GROUP_LOO_OBS_75BPS_POOL",
+        "SECTOR_LOO_OBS_75BPS_POOL",
+    }:
         eligible = [
             candidate
             for candidate in by_symbol.values()

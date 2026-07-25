@@ -568,6 +568,25 @@ def test_risk_group_relative_pool_requires_peers_and_ranks_residual_edge() -> No
         == 25
     )
 
+    sector_leave_one_out_ranked = rank_portfolio_candidates(
+        candidates,
+        policy="SECTOR_LOO_OBS_75BPS_POOL",
+        primary_symbol="NVDA.US",
+    )
+
+    assert [
+        item.symbol for item in sector_leave_one_out_ranked
+    ] == [
+        "AMD.US",
+        "NVDA.US",
+        "AAPL.US",
+    ]
+    assert (
+        sector_leave_one_out_ranked[1]
+        .risk_group_leave_one_out_observed_cost_fixed_75bps_score_bps
+        == 25
+    )
+
 
 @pytest.mark.parametrize(
     "observed_cost",

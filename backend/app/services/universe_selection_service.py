@@ -58,7 +58,9 @@ _RUN_WAIT_POLL_SECONDS = 0.05
 _RUN_CLAIM_LEASE_SECONDS = 300.0
 _RUN_WAIT_TIMEOUT_SECONDS = _RUN_CLAIM_LEASE_SECONDS + 30.0
 _CLAIM_PREFIX = "refresh-claim:"
-_EXPLORATION_ALGORITHM_VERSION = "risk-group-peer-benchmark-v2"
+_EXPLORATION_ALGORITHM_VERSION = (
+    "risk-group-and-refined-sector-peer-benchmark-v3"
+)
 _PEER_DOLLAR_VOLUME_RATIO = 0.75
 _EXPLORATION_ELIGIBLE_REASONS = frozenset(
     {"SECTOR_CAP", "BELOW_SELECTION_CUTOFF"}
@@ -196,7 +198,7 @@ def select_exploration_candidates(
     minimum_risk_group_peers: int = RISK_GROUP_RELATIVE_MIN_PEERS,
     minimum_peer_dollar_volume: float | None = None,
 ) -> list[UniverseSelectionCandidate]:
-    """Choose read-only peers before filling a diversified research tier."""
+    """Choose broad and refined-sector peers before diversified research."""
     if max_symbols < 0:
         raise ValueError("exploration max_symbols must not be negative")
     if max_per_sector < 1:
@@ -245,6 +247,12 @@ def select_exploration_candidates(
         risk_group_for_sector(items_by_symbol[symbol].sector)
         for symbol in planned_observed_symbols
         if symbol in items_by_symbol
+    )
+    sector_counts = Counter(
+        items_by_symbol[symbol].sector.strip()
+        for symbol in planned_observed_symbols
+        if symbol in items_by_symbol
+        and items_by_symbol[symbol].sector.strip()
     )
     selected_groups = {
         risk_group_for_sector(item.sector)
@@ -298,6 +306,25 @@ def select_exploration_candidates(
     peer_only_eligible.sort(
         key=lambda pair: (-pair[0], pair[1].symbol)
     )
+    sector_capacity = Counter(sector_counts)
+    for item in eligible:
+        normalized_symbol = item.symbol.strip().upper()
+        sector = item.sector.strip()
+        if (
+            not sector
+            or normalized_symbol in planned_observed_symbols
+        ):
+            continue
+        sector_capacity[sector] += 1
+    refined_peer_sectors = {
+        sector
+        for sector, capacity in sector_capacity.items()
+        if (
+            risk_group_for_sector(sector) in selected_groups
+            and risk_group_for_sector(sector) != sector
+            and capacity >= minimum_risk_group_peers
+        )
+    }
     selected: list[UniverseSelectionCandidate] = []
     selected_symbols: set[str] = set()
     peer_target = max(
@@ -323,6 +350,9 @@ def select_exploration_candidates(
         group_counts[risk_group] = (
             group_counts.get(risk_group, 0) + 1
         )
+        sector = item.sector.strip()
+        if sector:
+            sector_counts[sector] = sector_counts.get(sector, 0) + 1
         if len(selected) >= max_symbols:
             return selected
 
@@ -344,6 +374,9 @@ def select_exploration_candidates(
         group_counts[risk_group] = (
             group_counts.get(risk_group, 0) + 1
         )
+        sector = item.sector.strip()
+        if sector:
+            sector_counts[sector] = sector_counts.get(sector, 0) + 1
         if len(selected) >= max_symbols:
             return selected
 
@@ -362,9 +395,66 @@ def select_exploration_candidates(
         if len(selected) >= max_symbols:
             return selected
 
+    # Broad risk groups can hide distinct industries. Complete a nested
+    # industry atomically so a tight observer budget never leaves a thin,
+    # unusable reference set.
+    refined_batches: list[
+        tuple[
+            float,
+            str,
+            int,
+            list[UniverseSelectionCandidate],
+        ]
+    ] = []
+    for sector in refined_peer_sectors:
+        needed = (
+            minimum_risk_group_peers
+            - sector_counts.get(sector, 0)
+        )
+        if needed <= 0:
+            continue
+        candidates = [
+            item
+            for item in eligible
+            if (
+                item.sector.strip() == sector
+                and item.symbol.strip().upper()
+                not in selected_symbols
+                and item.symbol.strip().upper()
+                not in observed_symbols
+            )
+        ]
+        if len(candidates) < needed:
+            continue
+        refined_batches.append(
+            (
+                -float(candidates[0].score),
+                sector,
+                needed,
+                candidates,
+            )
+        )
+    refined_batches.sort(key=lambda batch: (batch[0], batch[1]))
+    for _, sector, needed, candidates in refined_batches:
+        if max_symbols - len(selected) < needed:
+            continue
+        for item in candidates[:needed]:
+            normalized_symbol = item.symbol.strip().upper()
+            selected.append(item)
+            selected_symbols.add(normalized_symbol)
+            sector_counts[sector] = (
+                sector_counts.get(sector, 0) + 1
+            )
+            risk_group = risk_group_for_sector(sector)
+            group_counts[risk_group] = (
+                group_counts.get(risk_group, 0) + 1
+            )
+
     # Spend any remaining observer budget on broad research while retaining
     # the normal per-risk-group diversification cap.
     for item in eligible:
+        if len(selected) >= max_symbols:
+            break
         normalized_symbol = item.symbol.strip().upper()
         if normalized_symbol in selected_symbols:
             continue
@@ -381,6 +471,9 @@ def select_exploration_candidates(
         group_counts[risk_group] = (
             group_counts.get(risk_group, 0) + 1
         )
+        sector = item.sector.strip()
+        if sector:
+            sector_counts[sector] = sector_counts.get(sector, 0) + 1
         if len(selected) >= max_symbols:
             break
     return selected
@@ -1263,6 +1356,9 @@ class UniverseSelectionService:
             ),
             "exploration_max_symbols": self.exploration_max_symbols,
             "exploration_min_risk_group_peers": (
+                RISK_GROUP_RELATIVE_MIN_PEERS
+            ),
+            "exploration_refined_sector_peer_target": (
                 RISK_GROUP_RELATIVE_MIN_PEERS
             ),
             "exploration_min_peer_dollar_volume": (

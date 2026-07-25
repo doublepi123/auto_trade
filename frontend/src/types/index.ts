@@ -1951,6 +1951,7 @@ export type StrategyShadowPortfolioRoutingPolicy =
   | 'VWAP_EDGE_OBS_COST_75BPS_POOL'
   | 'RISK_GROUP_REL_OBS_75BPS_POOL'
   | 'RISK_GROUP_LOO_OBS_75BPS_POOL'
+  | 'SECTOR_LOO_OBS_75BPS_POOL'
 
 export type StrategyShadowPortfolioEdgeFilter =
   | 'NONE'
@@ -1960,6 +1961,7 @@ export type StrategyShadowPortfolioEdgeFilter =
   | 'OBSERVED_COST_TO_75BPS_VWAP_DISCOUNT'
   | 'RISK_GROUP_REL_OBS_COST_TO_75BPS'
   | 'RISK_GROUP_LOO_OBS_COST_TO_75BPS'
+  | 'SECTOR_LOO_OBS_COST_TO_75BPS'
 
 export interface StrategyShadowPortfolioRoutingMetrics {
   signal_groups: number
