@@ -14,6 +14,7 @@ from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.core.fees import one_side_fee_rate
 from app.core.market_calendar import (
     get_session,
@@ -76,6 +77,9 @@ from app.schemas import (
 )
 from app.services.strategy_v2_exit_challenger_service import (
     StrategyV2ExitChallengerService,
+)
+from app.services.live_exit_challenger_service import (
+    LiveExitChallengerService,
 )
 from app.services.strategy_service import StrategyService
 
@@ -173,6 +177,7 @@ class StrategyV2ShadowService:
         self.db = db
         self.candle_provider = candle_provider
         self.exit_challengers = StrategyV2ExitChallengerService(db)
+        self.live_exit_challengers = LiveExitChallengerService(db)
 
     def get_config(self, symbol: str | None = None) -> StrategyV2ShadowConfigResponse:
         row = self._get_or_create_config(symbol)
@@ -570,6 +575,16 @@ class StrategyV2ShadowService:
                 slippage_bps=config.slippage_bps,
                 now=current,
             )
+            if settings.live_exit_challenger_enabled:
+                self.live_exit_challengers.ensure_registrations(
+                    symbol=normalized,
+                    market=market,
+                    now=current,
+                )
+                self.live_exit_challengers.prepare_open_position(
+                    symbol=normalized,
+                    now=current,
+                )
         if not config.enabled and open_trade is None:
             return self.get_status(normalized)
         if open_trade is None:
@@ -611,6 +626,12 @@ class StrategyV2ShadowService:
                 one_minute=one_minute,
                 observed_at=current,
             )
+            if settings.live_exit_challenger_enabled:
+                self.live_exit_challengers.sync_baseline_outcomes(
+                    symbol=normalized,
+                    paired_at=current,
+                )
+                self.db.commit()
         except Exception as exc:
             self.db.rollback()
             state = self._get_or_create_state(normalized)
@@ -2331,6 +2352,12 @@ class StrategyV2ShadowService:
                 existing_keys.add(key)
             if before_step.position is not None or step.position is not None:
                 self.exit_challengers.advance_bar(
+                    symbol=config.symbol,
+                    bar=bar,
+                    observed_at=observed_at,
+                )
+            if settings.live_exit_challenger_enabled:
+                self.live_exit_challengers.advance_bar(
                     symbol=config.symbol,
                     bar=bar,
                     observed_at=observed_at,

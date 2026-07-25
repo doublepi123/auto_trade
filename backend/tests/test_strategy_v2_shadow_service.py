@@ -22,6 +22,8 @@ from app.domain.strategy_v2 import (
 )
 from app.models import (
     Base,
+    LiveExitChallengerRegistration,
+    LiveExitChallengerTrade,
     StrategyConfig,
     StrategyV2ExitChallengerRegistration,
     StrategyV2ExitChallengerTrade,
@@ -132,6 +134,8 @@ class TestStrategyV2ShadowService:
     def setup_method(self) -> None:
         with Session(bind=self.engine) as db:
             for model in (
+                LiveExitChallengerTrade,
+                LiveExitChallengerRegistration,
                 StrategyV2ExitChallengerTrade,
                 StrategyV2ExitChallengerRegistration,
                 StrategyV2ForwardEvidence,
@@ -815,6 +819,81 @@ class TestStrategyV2ShadowService:
             state = db.query(StrategyV2ShadowState).filter_by(symbol="AAPL.US").one()
             snapshot = state.state_json
             assert "last_processed_at" in snapshot
+
+    def test_tick_advances_live_exit_observer_when_enabled(
+        self,
+        monkeypatch,
+    ) -> None:
+        class _LiveExitSpy:
+            def __init__(self) -> None:
+                self.registrations: list[tuple[str, str]] = []
+                self.prepared: list[str] = []
+                self.bars: list[datetime] = []
+                self.synced: list[str] = []
+
+            def ensure_registrations(
+                self,
+                *,
+                symbol: str,
+                market: str,
+                now: datetime,
+            ) -> bool:
+                del now
+                self.registrations.append((symbol, market))
+                return True
+
+            def prepare_open_position(
+                self,
+                *,
+                symbol: str,
+                now: datetime,
+            ) -> bool:
+                del now
+                self.prepared.append(symbol)
+                return False
+
+            def advance_bar(
+                self,
+                *,
+                symbol: str,
+                bar: StrategyBar,
+                observed_at: datetime,
+            ) -> None:
+                del symbol, observed_at
+                self.bars.append(bar.timestamp)
+
+            def sync_baseline_outcomes(
+                self,
+                *,
+                symbol: str,
+                paired_at: datetime,
+            ) -> None:
+                del paired_at
+                self.synced.append(symbol)
+
+        provider = _FakeCandles(_candles())
+        with self._db() as db:
+            self._enabled_config(db, activated_at=_SESSION_OPEN)
+            service = StrategyV2ShadowService(db, provider)
+            spy = _LiveExitSpy()
+            monkeypatch.setattr(
+                shadow_service_module.settings,
+                "live_exit_challenger_enabled",
+                True,
+            )
+            monkeypatch.setattr(service, "live_exit_challengers", spy)
+
+            service.tick(
+                "AAPL.US",
+                "US",
+                now=_SESSION_OPEN + timedelta(minutes=181, seconds=5),
+            )
+
+            assert spy.registrations == [("AAPL.US", "US")]
+            assert spy.prepared == ["AAPL.US"]
+            assert spy.bars
+            assert spy.bars == sorted(spy.bars)
+            assert spy.synced == ["AAPL.US"]
 
     def test_empty_legacy_version_first_tick_only_advances_watermark(self) -> None:
         provider = _FakeCandles(_candles(180))

@@ -899,6 +899,52 @@ class StrategyV2ExitChallengerReport(BaseModel):
     variants: list[StrategyV2ExitChallengerVariant] = Field(default_factory=list)
 
 
+class LiveExitChallengerVariant(BaseModel):
+    registration_id: int
+    algorithm_version: str
+    evaluator_digest: str
+    activation_pct: float
+    locked_profit_pct: float
+    slippage_bps: float
+    registered_at: datetime
+    eligible_after: datetime
+    status: Literal["COLLECTING", "READY_FOR_REVIEW", "MATURE_EVIDENCE"]
+    entry_config_versions: list[str] = Field(default_factory=list)
+    paired_trades: int = 0
+    open_trades: int = 0
+    awaiting_baseline_trades: int = 0
+    profit_lock_exits: int = 0
+    improved_trades: int = 0
+    worsened_trades: int = 0
+    unchanged_trades: int = 0
+    baseline_win_rate: float = 0.0
+    challenger_win_rate: float = 0.0
+    baseline_net_pnl: float = 0.0
+    challenger_net_pnl: float = 0.0
+    net_pnl_delta: float = 0.0
+    mean_net_pnl_delta: float = 0.0
+    baseline_max_drawdown: float = 0.0
+    challenger_max_drawdown: float = 0.0
+    minimum_ready_pairs: Literal[20] = 20
+    minimum_mature_pairs: Literal[50] = 50
+    minimum_profit_lock_exits: Literal[5] = 5
+    promotion_ready: bool = False
+    blockers: list[str] = Field(default_factory=list)
+
+
+class LiveExitChallengerReport(BaseModel):
+    symbol: str
+    enabled: bool
+    mode: Literal["LIVE_BASELINE_SHADOW"] = "LIVE_BASELINE_SHADOW"
+    order_submission_allowed: Literal[False] = False
+    automatic_promotion_allowed: Literal[False] = False
+    historical_backfill_allowed: Literal[False] = False
+    evaluation_scope: Literal[
+        "FORWARD_LIVE_BASELINE"
+    ] = "FORWARD_LIVE_BASELINE"
+    variants: list[LiveExitChallengerVariant] = Field(default_factory=list)
+
+
 class StrategyV2PortfolioRoutingMetrics(BaseModel):
     signal_groups: int = 0
     selected_signals: int = 0

@@ -323,6 +323,15 @@ class Settings(BaseSettings):
             "cannot submit orders or promote a policy automatically."
         ),
     )
+    live_exit_challenger_enabled: bool = Field(
+        default=False,
+        validation_alias="AUTO_TRADE_LIVE_EXIT_CHALLENGER_ENABLED",
+        description=(
+            "Collect forward-only profit-lock alternatives against real "
+            "filled long trades. The observer cannot submit orders or "
+            "promote a policy automatically."
+        ),
+    )
     universe_selection_interval_minutes: int = Field(
         default=60,
         ge=15,

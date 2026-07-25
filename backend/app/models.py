@@ -357,6 +357,163 @@ class StrategyV2ExitChallengerTrade(Base):
     )
 
 
+class LiveExitChallengerRegistration(Base):
+    """Immutable forward registration for one live-baseline exit observer."""
+
+    __tablename__ = "live_exit_challenger_registrations"
+    __table_args__ = (
+        UniqueConstraint(
+            "symbol",
+            "algorithm_version",
+            name="uq_live_exit_challenger_registration",
+        ),
+        Index(
+            "ix_live_exit_challenger_registration_symbol",
+            "symbol",
+            "registered_at",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(50), nullable=False)
+    market: Mapped[str] = mapped_column(String(10), nullable=False)
+    algorithm_version: Mapped[str] = mapped_column(String(100), nullable=False)
+    activation_pct: Mapped[float] = mapped_column(Float, nullable=False)
+    locked_profit_pct: Mapped[float] = mapped_column(Float, nullable=False)
+    slippage_bps: Mapped[float] = mapped_column(Float, nullable=False)
+    evaluator_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    registered_at: Mapped[datetime] = mapped_column(_TZDateTime, nullable=False)
+    eligible_after: Mapped[datetime] = mapped_column(_TZDateTime, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        _TZDateTime,
+        default=_utcnow,
+        nullable=False,
+    )
+
+
+class LiveExitChallengerTrade(Base):
+    """Forward-only alternative exit paired to a real broker round trip."""
+
+    __tablename__ = "live_exit_challenger_trades"
+    __table_args__ = (
+        UniqueConstraint(
+            "registration_id",
+            "entry_order_id",
+            name="uq_live_exit_challenger_entry",
+        ),
+        Index(
+            "ix_live_exit_challenger_trade_registration",
+            "registration_id",
+            "baseline_exit_at",
+        ),
+        Index(
+            "ix_live_exit_challenger_trade_open",
+            "symbol",
+            "status",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    registration_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey(
+            "live_exit_challenger_registrations.id",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+    )
+    entry_order_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("orders.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    baseline_exit_order_id: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        ForeignKey("orders.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    symbol: Mapped[str] = mapped_column(String(50), nullable=False)
+    entry_config_version: Mapped[str] = mapped_column(
+        String(64),
+        default="",
+        nullable=False,
+    )
+    status: Mapped[str] = mapped_column(String(16), default="OPEN", nullable=False)
+    entry_at: Mapped[datetime] = mapped_column(_TZDateTime, nullable=False)
+    entry_price: Mapped[float] = mapped_column(Float, nullable=False)
+    quantity: Mapped[float] = mapped_column(Float, nullable=False)
+    estimated_fee_rate: Mapped[float] = mapped_column(Float, nullable=False)
+    last_bar_at: Mapped[datetime] = mapped_column(_TZDateTime, nullable=False)
+    activation_at: Mapped[Optional[datetime]] = mapped_column(
+        _TZDateTime,
+        nullable=True,
+    )
+    activation_effective_at: Mapped[Optional[datetime]] = mapped_column(
+        _TZDateTime,
+        nullable=True,
+    )
+    activation_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    floor_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    challenger_exit_at: Mapped[Optional[datetime]] = mapped_column(
+        _TZDateTime,
+        nullable=True,
+    )
+    challenger_exit_price: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+    )
+    challenger_exit_reason: Mapped[str] = mapped_column(
+        Text,
+        default="",
+        nullable=False,
+    )
+    challenger_gross_pnl: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+    )
+    challenger_estimated_fees: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+    )
+    challenger_net_pnl: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+    )
+    baseline_exit_at: Mapped[Optional[datetime]] = mapped_column(
+        _TZDateTime,
+        nullable=True,
+    )
+    baseline_exit_price: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+    )
+    baseline_exit_reason: Mapped[str] = mapped_column(
+        Text,
+        default="",
+        nullable=False,
+    )
+    baseline_net_pnl: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+    )
+    net_pnl_delta: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    paired_at: Mapped[Optional[datetime]] = mapped_column(
+        _TZDateTime,
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        _TZDateTime,
+        default=_utcnow,
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        _TZDateTime,
+        default=_utcnow,
+        onupdate=_utcnow,
+        nullable=False,
+    )
+
+
 class StrategyV2PortfolioRegistration(Base):
     """Immutable registration for one causal, single-slot routing policy."""
 

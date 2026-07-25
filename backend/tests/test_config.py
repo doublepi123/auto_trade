@@ -73,6 +73,7 @@ class TestSettings:
         assert s.entry_round_trip_slippage_bps == 4
         assert s.min_entry_edge_cost_ratio == 2
         assert s.min_entry_reward_risk_ratio == 1
+        assert s.live_exit_challenger_enabled is False
         assert s.hard_stop_loss_pct == 1
         assert s.hard_max_holding_minutes == 60
         assert s.hard_entry_cutoff_minutes_before_close == 45
@@ -189,6 +190,10 @@ class TestSettings:
             "true",
         )
         monkeypatch.setenv(
+            "AUTO_TRADE_LIVE_EXIT_CHALLENGER_ENABLED",
+            "true",
+        )
+        monkeypatch.setenv(
             "AUTO_TRADE_WATCHLIST_QUANT_AUTO_SCORE_ENABLED",
             "true",
         )
@@ -229,6 +234,7 @@ class TestSettings:
         assert configured.opening_momentum_challenger_enabled is True
         assert configured.universe_selection_enable_shadow is True
         assert configured.strategy_v2_portfolio_shadow_enabled is True
+        assert configured.live_exit_challenger_enabled is True
         assert configured.watchlist_quant_auto_score_enabled is True
         assert configured.watchlist_quant_interval_minutes == 20
         assert configured.watchlist_quant_score_ttl_minutes == 120

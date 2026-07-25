@@ -11,6 +11,7 @@ from app.api.deps import extract_actor, get_audit_logger
 from app.core.audit import AuditLogger
 from app.database import get_db
 from app.schemas import (
+    LiveExitChallengerReport,
     StrategyV2AdxChallengerRequest,
     StrategyV2AdxChallengerResponse,
     StrategyV2ExitChallengerReport,
@@ -27,6 +28,7 @@ from app.schemas import (
     StrategyV2ShadowTradeResponse,
     StrategyV2ShadowVersionResponse,
 )
+from app.services.live_exit_challenger_service import LiveExitChallengerService
 from app.services.strategy_v2_shadow_service import StrategyV2ShadowService
 from app.services.strategy_v2_portfolio_service import (
     StrategyV2PortfolioService,
@@ -215,6 +217,20 @@ def get_exit_challengers(
 ) -> StrategyV2ExitChallengerReport:
     try:
         return StrategyV2ShadowService(db).get_exit_challengers(symbol)
+    except ValueError as exc:
+        raise _bad_request(exc) from exc
+
+
+@router.get(
+    "/live-exit-challengers",
+    response_model=LiveExitChallengerReport,
+)
+def get_live_exit_challengers(
+    symbol: str = Query(max_length=50),
+    db: Session = Depends(get_db),
+) -> LiveExitChallengerReport:
+    try:
+        return LiveExitChallengerService(db).get_report(symbol)
     except ValueError as exc:
         raise _bad_request(exc) from exc
 

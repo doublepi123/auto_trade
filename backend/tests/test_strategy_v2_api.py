@@ -17,6 +17,8 @@ from app.config import settings
 from app.database import get_db
 from app.models import (
     Base,
+    LiveExitChallengerRegistration,
+    LiveExitChallengerTrade,
     StrategyConfig,
     StrategyV2ExitChallengerRegistration,
     StrategyV2ExitChallengerTrade,
@@ -31,6 +33,9 @@ from app.models import (
     StrategyV2ShadowVersion,
 )
 from app.schemas import StrategyV2ShadowDailyEvidence
+from app.services.live_exit_challenger_service import (
+    LiveExitChallengerService,
+)
 from app.services.strategy_v2_shadow_service import StrategyV2ShadowService
 from app.services.strategy_v2_portfolio_service import (
     StrategyV2PortfolioService,
@@ -89,6 +94,8 @@ class TestStrategyV2ShadowApi:
         self.audit.records.clear()
         with self.session_factory() as db:
             for model in (
+                LiveExitChallengerTrade,
+                LiveExitChallengerRegistration,
                 StrategyV2PortfolioObservation,
                 StrategyV2PortfolioRegistration,
                 StrategyV2ExitChallengerTrade,
@@ -147,6 +154,35 @@ class TestStrategyV2ShadowApi:
         assert body["order_submission_allowed"] is False
         assert body["automatic_promotion_allowed"] is False
         assert body["historical_backfill_allowed"] is False
+        assert len(body["variants"]) == 3
+        assert {
+            item["locked_profit_pct"] for item in body["variants"]
+        } == {0.1, 0.2, 0.3}
+        assert all(item["status"] == "COLLECTING" for item in body["variants"])
+
+    def test_live_exit_challenger_report_is_forward_only_and_read_only(
+        self,
+    ) -> None:
+        with self.session_factory() as db:
+            LiveExitChallengerService(db).ensure_registrations(
+                symbol="AAPL.US",
+                market="US",
+                now=_NOW,
+            )
+
+        response = self.client.get(
+            "/api/strategy-shadow/live-exit-challengers",
+            params={"symbol": "aapl.us"},
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["symbol"] == "AAPL.US"
+        assert body["mode"] == "LIVE_BASELINE_SHADOW"
+        assert body["order_submission_allowed"] is False
+        assert body["automatic_promotion_allowed"] is False
+        assert body["historical_backfill_allowed"] is False
+        assert body["evaluation_scope"] == "FORWARD_LIVE_BASELINE"
         assert len(body["variants"]) == 3
         assert {
             item["locked_profit_pct"] for item in body["variants"]
