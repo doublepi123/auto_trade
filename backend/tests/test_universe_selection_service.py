@@ -157,6 +157,41 @@ class _ForwardAdjustedBroker(_FakeBroker):
         return _daily_bars(symbol)[-count:]
 
 
+class _LongHistoryBroker(_ForwardAdjustedBroker):
+    def __init__(self) -> None:
+        super().__init__()
+        self.requested_counts: list[int] = []
+
+    def get_forward_adjusted_candlesticks(
+        self,
+        symbol: str,
+        period: str,
+        count: int,
+    ) -> list[BrokerCandle]:
+        assert period == "DAY"
+        self.adjusted_candle_calls += 1
+        self.requested_counts.append(count)
+        price = 100.0 if symbol == "AAPL.US" else 200.0
+        drift = 0.0025 if symbol == "AAPL.US" else 0.0015
+        end = datetime(2026, 7, 23, 4, tzinfo=timezone.utc)
+        result: list[BrokerCandle] = []
+        for index in range(270):
+            move = drift + (0.012 if index % 2 == 0 else -0.012)
+            close = price * (1 + move)
+            result.append(
+                BrokerCandle(
+                    timestamp=end - timedelta(days=269 - index),
+                    open=price,
+                    high=max(price, close) * 1.01,
+                    low=min(price, close) * 0.99,
+                    close=close,
+                    volume=20_000_000,
+                )
+            )
+            price = close
+        return result[-count:]
+
+
 class _EventLike(Protocol):
     def set(self) -> None: ...
 
@@ -815,6 +850,28 @@ def test_refresh_prefers_forward_adjusted_daily_candles() -> None:
 
         assert result.run.status == "COMPLETE"
         assert broker.adjusted_candle_calls == len(_CATALOG)
+    finally:
+        db.close()
+
+
+def test_refresh_persists_rotation_shadow_evidence() -> None:
+    db = _db()
+    broker = _LongHistoryBroker()
+    try:
+        result = _service(db, broker).refresh()
+
+        assert result.run.status == "COMPLETE"
+        assert broker.requested_counts
+        assert min(broker.requested_counts) >= 253
+        metrics = json.loads(result.items[0].metrics_json)
+        rotation = metrics["rotation"]
+        assert rotation["algorithm_version"] == (
+            "index-momentum-12-1-shadow-v1"
+        )
+        assert rotation["lookback_bars"] == 252
+        assert rotation["skip_bars"] == 21
+        assert rotation["momentum_pct"] > 0
+        assert rotation["selected"] is True
     finally:
         db.close()
 

@@ -14,7 +14,7 @@
               <el-tag type="info" size="small" effect="plain">动态筛选</el-tag>
               <el-tag type="warning" size="small" effect="plain">只读观察</el-tag>
             </div>
-            <p>每日先筛正式候选，再让跨行业探索层补充量化与影子证据；入选不等于切换实盘，两层都不会自动下单。</p>
+            <p>每日先筛正式候选，再补充跨行业探索与 12-1 中期轮动证据；入选不等于切换实盘，三层都不会自动下单。</p>
           </div>
           <el-button
             type="primary"
@@ -63,6 +63,10 @@
             <div class="universe-summary-item">
               <span>探索观察</span>
               <strong>{{ universeExplorationCount }}</strong>
+            </div>
+            <div class="universe-summary-item">
+              <span>中期轮动</span>
+              <strong data-testid="universe-rotation-count">{{ universeRotationCount }}</strong>
             </div>
             <div class="universe-summary-item">
               <span>候选目录</span>
@@ -123,13 +127,26 @@
                     <el-tag v-else-if="row.shadow_enabled" type="warning" size="small" effect="plain">
                       Shadow 已启用
                     </el-tag>
+                    <el-tag v-if="row.metrics.rotation?.selected" size="small" effect="plain">
+                      轮动影子
+                    </el-tag>
                   </div>
                 </template>
               </el-table-column>
-              <el-table-column label="排名/分数" width="96" align="right">
+              <el-table-column label="排名/轮动" width="96" align="right">
                 <template #default="{ row }">
-                  <strong>{{ row.rank ? `#${row.rank}` : '-' }}</strong>
-                  <small class="universe-score">{{ formatScore(row.score) }}</small>
+                  <div class="universe-rank">
+                    <span>
+                      <strong>{{ row.rank ? `#${row.rank}` : '-' }}</strong>
+                      <small class="universe-score">{{ formatScore(row.score) }}</small>
+                    </span>
+                    <span v-if="row.metrics.rotation">
+                      <small>轮动 {{ row.metrics.rotation.rank ? `#${row.metrics.rotation.rank}` : '-' }}</small>
+                      <small class="universe-score">
+                        {{ formatSignedPercent(row.metrics.rotation.momentum_pct) }}
+                      </small>
+                    </span>
+                  </div>
                 </template>
               </el-table-column>
               <el-table-column label="日均流动性" width="118" align="right">
@@ -181,6 +198,9 @@
                   <el-tag v-else-if="row.shadow_enabled" type="warning" size="small" effect="plain">
                     Shadow 已启用
                   </el-tag>
+                  <el-tag v-if="row.metrics.rotation?.selected" size="small" effect="plain">
+                    轮动影子
+                  </el-tag>
                 </div>
               </div>
               <div class="universe-mobile-memberships">
@@ -199,6 +219,8 @@
                 <div><span>T-1 成本</span><strong>{{ formatBps(row.metrics.relative_spread_bps) }}</strong></div>
                 <div><span>波动</span><strong>{{ formatVolatility(row.metrics.realized_vol_20d) }}</strong></div>
                 <div><span>ATR</span><strong>{{ formatAtr(row.metrics.atr_pct_14d) }}</strong></div>
+                <div><span>轮动排名</span><strong>{{ row.metrics.rotation?.rank ? `#${row.metrics.rotation.rank}` : '-' }}</strong></div>
+                <div><span>12-1 动量</span><strong>{{ formatSignedPercent(row.metrics.rotation?.momentum_pct) }}</strong></div>
               </div>
               <div class="universe-mobile-reason">
                 {{ row.exclusion_reasons.length
@@ -213,7 +235,7 @@
               完成于 {{ formatDateTime(universeRun.completed_at || universeRun.created_at) }}
               · 来源 {{ universeRun.source_version }}
             </span>
-            <span>候选池是观察信号；当前实盘标的仍由下方“交易中”状态明确标识。</span>
+            <span>轮动结果仅是月频影子证据；当前实盘标的仍由下方“交易中”状态明确标识。</span>
           </div>
         </template>
 
@@ -907,6 +929,19 @@ const universeRows = computed<UniverseSelectionItem[]>(() => {
     if (left.rank !== null && right.rank !== null) return left.rank - right.rank
     if (left.rank !== null) return -1
     if (right.rank !== null) return 1
+    const leftRotation = left.metrics.rotation
+    const rightRotation = right.metrics.rotation
+    if (Boolean(leftRotation?.selected) !== Boolean(rightRotation?.selected)) {
+      return leftRotation?.selected ? -1 : 1
+    }
+    if (
+      leftRotation?.rank !== null
+      && leftRotation?.rank !== undefined
+      && rightRotation?.rank !== null
+      && rightRotation?.rank !== undefined
+    ) {
+      return leftRotation.rank - rightRotation.rank
+    }
     if (left.score !== right.score) return right.score - left.score
     return left.symbol.localeCompare(right.symbol)
   })
@@ -914,6 +949,11 @@ const universeRows = computed<UniverseSelectionItem[]>(() => {
 
 const universeExplorationCount = computed(() => (
   universeRun.value?.items.filter((item) => item.exploration_selected).length
+  ?? 0
+))
+
+const universeRotationCount = computed(() => (
+  universeRun.value?.items.filter((item) => item.metrics.rotation?.selected).length
   ?? 0
 ))
 
@@ -1216,6 +1256,12 @@ function formatVolatility(value: number | null): string {
 
 function formatAtr(value: number | null): string {
   return value !== null && Number.isFinite(value) ? `${value.toFixed(2)}%` : '-'
+}
+
+function formatSignedPercent(value: number | null | undefined): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) return '-'
+  const sign = value > 0 ? '+' : ''
+  return `${sign}${value.toFixed(1)}%`
 }
 
 function isQuantScore(score: WatchlistScore): boolean {
@@ -1813,7 +1859,7 @@ onUnmounted(() => {
 
 .universe-summary {
   display: grid;
-  grid-template-columns: repeat(7, minmax(86px, 1fr));
+  grid-template-columns: repeat(8, minmax(76px, 1fr));
   gap: 1px;
   margin-bottom: 14px;
   overflow: hidden;
@@ -1859,6 +1905,18 @@ onUnmounted(() => {
   display: block;
   color: #909399;
   font-size: 11px;
+}
+
+.universe-rank {
+  display: flex;
+  min-height: 42px;
+  flex-direction: column;
+  justify-content: center;
+  gap: 3px;
+}
+
+.universe-rank > span {
+  display: block;
 }
 
 .universe-memberships,

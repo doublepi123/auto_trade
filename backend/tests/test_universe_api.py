@@ -212,6 +212,14 @@ def test_universe_endpoints_return_typed_snapshot(
         assert items["AAPL.US"]["is_trading_target"] is True
         assert items["AAPL.US"]["exploration_selected"] is False
         assert items["AAPL.US"]["shadow_enabled"] is False
+        rotation = items["AAPL.US"]["metrics"]["rotation"]
+        assert rotation["algorithm_version"] == (
+            "index-momentum-12-1-shadow-v1"
+        )
+        assert rotation["selected"] is False
+        assert rotation["exclusion_reasons"] == [
+            "ROTATION_HISTORY_INSUFFICIENT"
+        ]
 
         latest = client.get("/api/universe/latest")
         assert latest.status_code == 200

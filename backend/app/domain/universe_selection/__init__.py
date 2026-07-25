@@ -5,11 +5,13 @@ from app.domain.universe_selection.catalog import (
     risk_group_for_sector,
 )
 from app.domain.universe_selection.selector import (
+    ROTATION_ALGORITHM_VERSION,
     UNIVERSE_ALGORITHM_VERSION,
     CandidateInput,
     CandidateMetrics,
     CandidateSelection,
     DailyBar,
+    RotationSelectionEvidence,
     UniverseSelectionConfig,
     completed_daily_bars,
     latest_closed_session_date,
@@ -21,12 +23,14 @@ from app.domain.universe_selection.selector import (
 __all__ = [
     "CATALOG_SOURCE_VERSION",
     "INDEX_CANDIDATE_CATALOG",
+    "ROTATION_ALGORITHM_VERSION",
     "UNIVERSE_ALGORITHM_VERSION",
     "CandidateInput",
     "CandidateMetrics",
     "CandidateSelection",
     "DailyBar",
     "IndexCandidate",
+    "RotationSelectionEvidence",
     "UniverseSelectionConfig",
     "completed_daily_bars",
     "latest_closed_session_date",

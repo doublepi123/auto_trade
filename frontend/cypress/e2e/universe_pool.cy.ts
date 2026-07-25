@@ -35,6 +35,20 @@ const refreshedRun = {
         momentum_5d_pct: 2.2,
         trend_efficiency_10d: 0.2,
         opportunity_to_cost_ratio: 6.4,
+        rotation: {
+          algorithm_version: 'index-momentum-12-1-shadow-v1',
+          lookback_bars: 252,
+          skip_bars: 21,
+          sma_bars: 200,
+          momentum_pct: 28.9,
+          sma_price: 248.7,
+          above_sma: true,
+          eligible: true,
+          selected: true,
+          rank: 1,
+          score: 100,
+          exclusion_reasons: [],
+        },
       },
       exclusion_reasons: [],
       created_at: '2026-07-24T02:00:09Z',
@@ -76,6 +90,9 @@ describe('Dynamic universe observation pool', () => {
       cy.contains('候选入选').should('be.visible')
       cy.contains('探索观察').should('be.visible')
       cy.contains('Shadow 已启用').should('be.visible')
+      cy.contains('轮动影子').should('be.visible')
+      cy.get('[data-testid="universe-rotation-count"]').should('contain', '2')
+      cy.contains('+46.8%').should('be.visible')
       cy.contains('$12.40B').should('be.visible')
       cy.contains('1.8 bp').should('be.visible')
       cy.contains('42.0%').should('be.visible')
@@ -85,6 +102,8 @@ describe('Dynamic universe observation pool', () => {
     cy.get('[data-testid="universe-table"] tbody tr')
       .contains('tr', 'NVDA.US')
       .should('contain', '当前实盘')
+      .and('contain', '轮动影子')
+      .and('contain', '#1')
     cy.get('[data-testid="universe-table"] tbody tr')
       .contains('tr', 'JPM.US')
       .should('not.contain', '当前实盘')

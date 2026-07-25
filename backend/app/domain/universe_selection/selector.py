@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from statistics import mean, stdev
 from typing import Protocol, Sequence
@@ -11,7 +11,8 @@ from app.core.market_calendar import get_session
 from app.domain.universe_selection.catalog import IndexCandidate
 
 
-UNIVERSE_ALGORITHM_VERSION = "index-liquidity-opportunity-v7"
+UNIVERSE_ALGORITHM_VERSION = "index-liquidity-opportunity-v8"
+ROTATION_ALGORITHM_VERSION = "index-momentum-12-1-shadow-v1"
 _DAILY_BAR_FINALIZATION_DELAY = timedelta(minutes=15)
 
 
@@ -42,6 +43,10 @@ class DailyBar(Protocol):
 class UniverseSelectionConfig:
     max_selected: int = 12
     max_per_sector: int = 2
+    rotation_max_selected: int = 10
+    rotation_lookback_bars: int = 252
+    rotation_skip_bars: int = 21
+    rotation_sma_bars: int = 200
     min_completed_bars: int = 21
     min_price: float = 10.0
     min_avg_dollar_volume: float = 500_000_000.0
@@ -58,6 +63,16 @@ class UniverseSelectionConfig:
             raise ValueError("max_selected must be positive")
         if self.max_per_sector < 1:
             raise ValueError("max_per_sector must be positive")
+        if self.rotation_max_selected < 1:
+            raise ValueError("rotation_max_selected must be positive")
+        if self.rotation_skip_bars < 1:
+            raise ValueError("rotation_skip_bars must be positive")
+        if self.rotation_lookback_bars <= self.rotation_skip_bars:
+            raise ValueError(
+                "rotation_lookback_bars must exceed rotation_skip_bars"
+            )
+        if self.rotation_sma_bars < 2:
+            raise ValueError("rotation_sma_bars must be at least 2")
         if self.min_completed_bars < 21:
             raise ValueError("min_completed_bars must be at least 21")
         positive_values = (
@@ -100,6 +115,22 @@ class CandidateMetrics:
 
 
 @dataclass(frozen=True)
+class RotationSelectionEvidence:
+    algorithm_version: str = ROTATION_ALGORITHM_VERSION
+    lookback_bars: int = 252
+    skip_bars: int = 21
+    sma_bars: int = 200
+    momentum_pct: float | None = None
+    sma_price: float | None = None
+    above_sma: bool | None = None
+    eligible: bool = False
+    selected: bool = False
+    rank: int | None = None
+    score: float = 0.0
+    exclusion_reasons: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class CandidateSelection:
     candidate: IndexCandidate
     metrics: CandidateMetrics
@@ -107,6 +138,9 @@ class CandidateSelection:
     selected: bool = False
     rank: int | None = None
     score: float = 0.0
+    rotation: RotationSelectionEvidence = field(
+        default_factory=RotationSelectionEvidence,
+    )
 
     @property
     def evaluable(self) -> bool:
@@ -282,6 +316,131 @@ def _percentile_ranks(
     }
 
 
+def _rotation_evidence(
+    inputs: Sequence[CandidateInput],
+    evaluated: Sequence[CandidateSelection],
+    config: UniverseSelectionConfig,
+) -> dict[str, RotationSelectionEvidence]:
+    input_by_symbol = {
+        item.candidate.symbol: item
+        for item in inputs
+    }
+    evidence_by_symbol: dict[str, RotationSelectionEvidence] = {}
+    required_bars = max(
+        config.rotation_lookback_bars + 1,
+        config.rotation_sma_bars,
+    )
+    for row in evaluated:
+        symbol = row.candidate.symbol
+        item = input_by_symbol[symbol]
+        reasons = list(row.exclusion_reasons)
+        bars = sorted(
+            item.completed_daily_bars,
+            key=lambda bar: bar.timestamp,
+        )
+        momentum_pct: float | None = None
+        sma_price: float | None = None
+        above_sma: bool | None = None
+        if len(bars) < required_bars:
+            reasons.append("ROTATION_HISTORY_INSUFFICIENT")
+        else:
+            closes = [
+                float(bar.close)
+                for bar in bars[-required_bars:]
+            ]
+            if any(
+                not math.isfinite(value) or value <= 0
+                for value in closes
+            ):
+                reasons.append("ROTATION_DATA_INVALID_CLOSE")
+            else:
+                formation_start = closes[
+                    -(config.rotation_lookback_bars + 1)
+                ]
+                formation_end = closes[
+                    -(config.rotation_skip_bars + 1)
+                ]
+                momentum_pct = (
+                    formation_end / formation_start - 1.0
+                ) * 100
+                sma_price = mean(closes[-config.rotation_sma_bars :])
+                above_sma = closes[-1] > sma_price
+                if momentum_pct <= 0:
+                    reasons.append("ROTATION_NON_POSITIVE_MOMENTUM")
+                if not above_sma:
+                    reasons.append("ROTATION_BELOW_SMA")
+        evidence_by_symbol[symbol] = RotationSelectionEvidence(
+            lookback_bars=config.rotation_lookback_bars,
+            skip_bars=config.rotation_skip_bars,
+            sma_bars=config.rotation_sma_bars,
+            momentum_pct=momentum_pct,
+            sma_price=sma_price,
+            above_sma=above_sma,
+            eligible=not reasons,
+            exclusion_reasons=tuple(reasons),
+        )
+
+    eligible = [
+        row
+        for row in evaluated
+        if evidence_by_symbol[row.candidate.symbol].eligible
+    ]
+    eligible.sort(
+        key=lambda row: (
+            -(
+                evidence_by_symbol[
+                    row.candidate.symbol
+                ].momentum_pct
+                or 0.0
+            ),
+            row.candidate.symbol,
+        )
+    )
+    scores = _percentile_ranks(
+        {
+            row.candidate.symbol: (
+                evidence_by_symbol[
+                    row.candidate.symbol
+                ].momentum_pct
+                or 0.0
+            )
+            for row in eligible
+        },
+        higher_is_better=True,
+    )
+    selected_symbols: list[str] = []
+    risk_group_counts: dict[str, int] = {}
+    for row in eligible:
+        symbol = row.candidate.symbol
+        evidence = evidence_by_symbol[symbol]
+        reasons = list(evidence.exclusion_reasons)
+        risk_group = row.candidate.risk_group
+        if (
+            risk_group_counts.get(risk_group, 0)
+            >= config.max_per_sector
+        ):
+            reasons.append("ROTATION_RISK_GROUP_CAP")
+        elif len(selected_symbols) >= config.rotation_max_selected:
+            reasons.append("ROTATION_BELOW_SELECTION_CUTOFF")
+        else:
+            selected_symbols.append(symbol)
+            risk_group_counts[risk_group] = (
+                risk_group_counts.get(risk_group, 0) + 1
+            )
+        evidence_by_symbol[symbol] = replace(
+            evidence,
+            selected=symbol in selected_symbols,
+            rank=(
+                selected_symbols.index(symbol) + 1
+                if symbol in selected_symbols
+                else None
+            ),
+            score=100 * scores[symbol],
+            exclusion_reasons=tuple(reasons),
+        )
+    return evidence_by_symbol
+
+
 def select_candidates(
     inputs: Sequence[CandidateInput],
     config: UniverseSelectionConfig | None = None,
@@ -372,6 +531,11 @@ def select_candidates(
         symbol: index + 1 for index, symbol in enumerate(ranked_symbols)
     }
 
+    rotation_by_symbol = _rotation_evidence(
+        inputs,
+        evaluated,
+        selection_config,
+    )
     result: list[CandidateSelection] = []
     for row in evaluated:
         symbol = row.candidate.symbol
@@ -392,6 +556,7 @@ def select_candidates(
                 selected=symbol in selected_symbols,
                 rank=rank_by_symbol.get(symbol),
                 score=scored.get(symbol, 0.0),
+                rotation=rotation_by_symbol[symbol],
             )
         )
     return sorted(

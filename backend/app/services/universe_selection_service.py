@@ -22,6 +22,7 @@ from app.domain.strategy_v2 import RISK_GROUP_RELATIVE_MIN_PEERS
 from app.domain.universe_selection import (
     CATALOG_SOURCE_VERSION,
     INDEX_CANDIDATE_CATALOG,
+    ROTATION_ALGORITHM_VERSION,
     UNIVERSE_ALGORITHM_VERSION,
     CandidateInput,
     CandidateSelection,
@@ -52,6 +53,7 @@ logger = logging.getLogger("auto_trade.universe_selection_service")
 
 _WATCHLIST_SOURCE = "universe"
 _DAILY_BAR_COUNT = 35
+_ROTATION_DAILY_BAR_BUFFER = 10
 _LIVE_ORDER_STATUSES = ("SUBMITTED", "PARTIAL_FILLED")
 _REFRESH_LOCK = threading.Lock()
 _RUN_WAIT_POLL_SECONDS = 0.05
@@ -985,6 +987,11 @@ class UniverseSelectionService:
         spread_by_symbol: dict[str, float] = {}
         latest_by_symbol: dict[str, date] = {}
         errors_by_symbol: dict[str, list[str]] = {}
+        daily_bar_count = max(
+            _DAILY_BAR_COUNT,
+            self.config.rotation_lookback_bars + 1,
+            self.config.rotation_sma_bars,
+        ) + _ROTATION_DAILY_BAR_BUFFER
         for candidate in self.catalog:
             data_errors: list[str] = []
             try:
@@ -992,7 +999,7 @@ class UniverseSelectionService:
                     self.broker,
                     candidate.symbol,
                     "DAY",
-                    _DAILY_BAR_COUNT,
+                    daily_bar_count,
                 )
                 bars = completed_daily_bars(
                     raw_bars,
@@ -1084,8 +1091,10 @@ class UniverseSelectionService:
         candidate_row.selected = selection.selected
         candidate_row.rank = selection.rank
         candidate_row.score = round(selection.score, 6)
+        metrics = asdict(selection.metrics)
+        metrics["rotation"] = asdict(selection.rotation)
         candidate_row.metrics_json = json.dumps(
-            asdict(selection.metrics),
+            metrics,
             sort_keys=True,
             separators=(",", ":"),
         )
@@ -1351,6 +1360,7 @@ class UniverseSelectionService:
         return {
             **asdict(self.config),
             "catalog_size": len(self.catalog),
+            "rotation_algorithm_version": ROTATION_ALGORITHM_VERSION,
             "exploration_algorithm_version": (
                 _EXPLORATION_ALGORITHM_VERSION
             ),

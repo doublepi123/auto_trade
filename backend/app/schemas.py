@@ -2467,6 +2467,30 @@ class UniverseCatalogItem(BaseModel):
         return self
 
 
+class UniverseRotationMetrics(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    algorithm_version: str = Field(min_length=1, max_length=100)
+    lookback_bars: int = Field(ge=2)
+    skip_bars: int = Field(ge=1)
+    sma_bars: int = Field(ge=2)
+    momentum_pct: Optional[float] = Field(
+        default=None,
+        allow_inf_nan=False,
+    )
+    sma_price: Optional[float] = Field(
+        default=None,
+        gt=0,
+        allow_inf_nan=False,
+    )
+    above_sma: Optional[bool] = None
+    eligible: bool = False
+    selected: bool = False
+    rank: Optional[int] = Field(default=None, ge=1)
+    score: float = Field(default=0.0, ge=0, le=100, allow_inf_nan=False)
+    exclusion_reasons: list[str] = Field(default_factory=list, max_length=50)
+
+
 class UniverseSelectionMetrics(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -2510,6 +2534,7 @@ class UniverseSelectionMetrics(BaseModel):
         ge=0,
         allow_inf_nan=False,
     )
+    rotation: Optional[UniverseRotationMetrics] = None
 
 
 class UniverseSelectionCandidateResponse(BaseModel):

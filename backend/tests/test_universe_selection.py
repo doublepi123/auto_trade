@@ -74,6 +74,58 @@ def _input(
     )
 
 
+def _rotation_bars(
+    *,
+    drift: float,
+    recent_move: float | None = None,
+    volume: float = 20_000_000,
+) -> list[_Bar]:
+    result: list[_Bar] = []
+    price = 100.0
+    start = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    for index in range(270):
+        noise = 0.012 if index % 2 == 0 else -0.012
+        move = drift + noise
+        if recent_move is not None and index >= 249:
+            move = recent_move
+        close = price * (1 + move)
+        result.append(
+            _Bar(
+                timestamp=start + timedelta(days=index),
+                open=price,
+                high=max(price, close) * 1.008,
+                low=min(price, close) * 0.992,
+                close=close,
+                volume=volume,
+            )
+        )
+        price = close
+    return result
+
+
+def _rotation_input(
+    symbol: str,
+    *,
+    sector: str,
+    drift: float,
+    recent_move: float | None = None,
+) -> CandidateInput:
+    return CandidateInput(
+        candidate=IndexCandidate(
+            symbol=symbol,
+            alias=symbol,
+            sector=sector,
+            memberships=("NASDAQ_100",),
+        ),
+        completed_daily_bars=_rotation_bars(
+            drift=drift,
+            recent_move=recent_move,
+        ),
+        bid=99.98,
+        ask=100.02,
+    )
+
+
 def _config(**overrides: object) -> UniverseSelectionConfig:
     values: dict[str, object] = {
         "max_selected": 3,
@@ -189,6 +241,92 @@ def test_select_candidates_exposes_cost_aware_metrics() -> None:
     assert row.metrics.relative_spread_bps is not None
     assert row.metrics.opportunity_to_cost_ratio is not None
     assert row.metrics.opportunity_to_cost_ratio > 1
+
+
+def test_rotation_shadow_selects_strongest_diversified_momentum() -> None:
+    rows = select_candidates(
+        [
+            _rotation_input(
+                "CHIP.US",
+                sector="Semiconductors",
+                drift=0.0030,
+            ),
+            _rotation_input(
+                "SOFT.US",
+                sector="Software",
+                drift=0.0025,
+            ),
+            _rotation_input(
+                "BANK.US",
+                sector="Financials",
+                drift=0.0020,
+            ),
+        ],
+        _config(
+            max_per_sector=1,
+            rotation_max_selected=2,
+        ),
+    )
+
+    by_symbol = {row.candidate.symbol: row for row in rows}
+    assert by_symbol["CHIP.US"].rotation.selected is True
+    assert by_symbol["CHIP.US"].rotation.rank == 1
+    assert by_symbol["BANK.US"].rotation.selected is True
+    assert by_symbol["BANK.US"].rotation.rank == 2
+    assert by_symbol["SOFT.US"].rotation.selected is False
+    assert (
+        "ROTATION_RISK_GROUP_CAP"
+        in by_symbol["SOFT.US"].rotation.exclusion_reasons
+    )
+
+
+def test_rotation_history_does_not_block_intraday_selection() -> None:
+    row = select_candidates(
+        [_input("AAPL.US", sector="Technology")],
+        _config(),
+    )[0]
+
+    assert row.selected is True
+    assert row.evaluable is True
+    assert row.rotation.selected is False
+    assert row.rotation.momentum_pct is None
+    assert row.rotation.exclusion_reasons == (
+        "ROTATION_HISTORY_INSUFFICIENT",
+    )
+
+
+def test_rotation_momentum_skips_the_most_recent_month() -> None:
+    steady = select_candidates(
+        [
+            _rotation_input(
+                "STEADY.US",
+                sector="Financials",
+                drift=0.0020,
+                recent_move=0.001,
+            )
+        ],
+        _config(),
+    )[0]
+    reversed_row = select_candidates(
+        [
+            _rotation_input(
+                "REVERSED.US",
+                sector="Financials",
+                drift=0.0020,
+                recent_move=-0.01,
+            )
+        ],
+        _config(),
+    )[0]
+
+    assert steady.rotation.momentum_pct is not None
+    assert reversed_row.rotation.momentum_pct is not None
+    assert (
+        steady.rotation.momentum_pct
+        == reversed_row.rotation.momentum_pct
+    )
+    assert steady.rotation.above_sma is True
+    assert reversed_row.rotation.above_sma is False
 
 
 def test_t1_liquidity_spread_proxy_is_bounded_and_tightens_with_volume() -> None:

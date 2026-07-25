@@ -1271,6 +1271,21 @@ export interface UniverseCatalogItem {
   memberships: string[]
 }
 
+export interface UniverseRotationMetrics {
+  algorithm_version: string
+  lookback_bars: number
+  skip_bars: number
+  sma_bars: number
+  momentum_pct: number | null
+  sma_price: number | null
+  above_sma: boolean | null
+  eligible: boolean
+  selected: boolean
+  rank: number | null
+  score: number
+  exclusion_reasons: string[]
+}
+
 export interface UniverseSelectionMetrics {
   price: number | null
   avg_dollar_volume: number | null
@@ -1280,6 +1295,7 @@ export interface UniverseSelectionMetrics {
   momentum_5d_pct: number | null
   trend_efficiency_10d: number | null
   opportunity_to_cost_ratio: number | null
+  rotation?: UniverseRotationMetrics | null
 }
 
 export interface UniverseSelectionItem {
