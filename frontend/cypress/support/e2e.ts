@@ -23,6 +23,94 @@ interface StatusStub {
   reduction_started_at: string | null
 }
 
+const rotationPerformanceStub = {
+  periods: 47,
+  total_return_pct: 216.4,
+  annualized_return_pct: 34.2,
+  annualized_volatility_pct: 21.7,
+  sharpe: 1.48,
+  max_drawdown_pct: 14.7,
+  win_rate_pct: 53.2,
+  average_turnover_pct: 31.3,
+  total_cost_pct: 2.2,
+  average_holdings: 5.6,
+  qqq_total_return_pct: 138.2,
+  qqq_annualized_return_pct: 24.8,
+  qqq_sharpe: 1.3,
+  qqq_max_drawdown_pct: 14.1,
+  dia_total_return_pct: 70.6,
+  dia_annualized_return_pct: 14.6,
+  dia_sharpe: 1.05,
+  dia_max_drawdown_pct: 10.9,
+  excess_annualized_return_vs_qqq_pct: 9.4,
+  excess_annualized_return_vs_dia_pct: 19.6,
+}
+
+const rotationEvaluationStub = {
+  algorithm_version: 'rotation-monthly-open-walk-forward-v1',
+  status: 'COMPLETE',
+  benchmark_symbols: ['QQQ.US', 'DIA.US'],
+  data_scope: 'CURRENT_CONSTITUENTS_ONLY',
+  survivorship_bias: true,
+  validation_periods: 12,
+  selected_variant: 'concentrated_top6_12_1',
+  selected_variant_validation_passed: false,
+  validated_challenger_variant: 'diversified_top8_12_1',
+  automatic_promotion_allowed: false,
+  promotion_blockers: [
+    'CURRENT_CONSTITUENTS_SURVIVORSHIP_BIAS',
+    'ROTATION_FORWARD_OBSERVATIONS_REQUIRED',
+  ],
+  variants: [
+    {
+      variant: {
+        name: 'diversified_top8_12_1',
+        lookback_bars: 252,
+        skip_bars: 21,
+        sma_bars: 200,
+        max_selected: 8,
+        max_per_risk_group: 1,
+      },
+      training_score: 2.15,
+      validation_passed: true,
+      validation_blockers: [],
+      full: rotationPerformanceStub,
+      training: {
+        ...rotationPerformanceStub,
+        periods: 35,
+        annualized_return_pct: 24.3,
+        sharpe: 1.21,
+        max_drawdown_pct: 14.7,
+        average_turnover_pct: 32.1,
+        total_cost_pct: 1.7,
+        excess_annualized_return_vs_qqq_pct: 2.3,
+      },
+      validation: {
+        ...rotationPerformanceStub,
+        periods: 12,
+        total_return_pct: 67.7,
+        annualized_return_pct: 67.7,
+        annualized_volatility_pct: 26.5,
+        sharpe: 2.11,
+        max_drawdown_pct: 9.5,
+        win_rate_pct: 75,
+        average_turnover_pct: 29,
+        total_cost_pct: 0.54,
+        qqq_total_return_pct: 33.3,
+        qqq_annualized_return_pct: 33.3,
+        qqq_sharpe: 1.54,
+        qqq_max_drawdown_pct: 8.2,
+        dia_total_return_pct: 20.2,
+        dia_annualized_return_pct: 20.2,
+        dia_sharpe: 2.06,
+        dia_max_drawdown_pct: 4.4,
+        excess_annualized_return_vs_qqq_pct: 34.4,
+        excess_annualized_return_vs_dia_pct: 47.5,
+      },
+    },
+  ],
+}
+
 function initialStatus(): StatusStub {
   return {
     engine_state: 'flat',
@@ -981,7 +1069,10 @@ Cypress.Commands.add('stubApi', () => {
       evaluable_count: 3,
       selected_count: 2,
       coverage_ratio: 0.95,
-      parameters: { max_selected: 8 },
+      parameters: {
+        max_selected: 8,
+        rotation_evaluation: rotationEvaluationStub,
+      },
       error: '',
       started_at: '2026-07-24T01:00:00Z',
       completed_at: '2026-07-24T01:00:10Z',
@@ -1009,7 +1100,7 @@ Cypress.Commands.add('stubApi', () => {
             trend_efficiency_10d: 0.31,
             opportunity_to_cost_ratio: 8.2,
             rotation: {
-              algorithm_version: 'index-momentum-12-1-shadow-v1',
+              algorithm_version: 'index-momentum-12-1-diversified-shadow-v2',
               lookback_bars: 252,
               skip_bars: 21,
               sma_bars: 200,
@@ -1048,7 +1139,7 @@ Cypress.Commands.add('stubApi', () => {
             trend_efficiency_10d: 0.22,
             opportunity_to_cost_ratio: 5.9,
             rotation: {
-              algorithm_version: 'index-momentum-12-1-shadow-v1',
+              algorithm_version: 'index-momentum-12-1-diversified-shadow-v2',
               lookback_bars: 252,
               skip_bars: 21,
               sma_bars: 200,
@@ -1087,7 +1178,7 @@ Cypress.Commands.add('stubApi', () => {
             trend_efficiency_10d: 0.46,
             opportunity_to_cost_ratio: 6.1,
             rotation: {
-              algorithm_version: 'index-momentum-12-1-shadow-v1',
+              algorithm_version: 'index-momentum-12-1-diversified-shadow-v2',
               lookback_bars: 252,
               skip_bars: 21,
               sma_bars: 200,

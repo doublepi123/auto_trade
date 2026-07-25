@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from app.core.market_calendar import trade_day_for
 from app.main import app
 from app.models import Base, OrderRecord, StrategyConfig
 
@@ -41,7 +42,19 @@ def metrics_db(tmp_path, monkeypatch):
 
 
 def _make_order(symbol, side, price, qty, hours_ago=1, status="FILLED"):
-    filled_at = datetime.now(timezone.utc) - timedelta(hours=hours_ago)
+    market = "HK" if symbol.upper().endswith(".HK") else "US"
+    now = datetime.now(timezone.utc)
+    anchor = now.replace(
+        hour=8 if market == "HK" else 20,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+    if anchor > now:
+        anchor -= timedelta(days=1)
+    while trade_day_for(market, anchor).weekday() >= 5:
+        anchor -= timedelta(days=1)
+    filled_at = anchor - timedelta(hours=hours_ago)
     return OrderRecord(
         broker_order_id=f"ord-{side}-{symbol}-{price}-{qty}-{hours_ago}-{status}",
         symbol=symbol,

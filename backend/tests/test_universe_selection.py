@@ -265,6 +265,7 @@ def test_rotation_shadow_selects_strongest_diversified_momentum() -> None:
         _config(
             max_per_sector=1,
             rotation_max_selected=2,
+            rotation_max_per_risk_group=1,
         ),
     )
 

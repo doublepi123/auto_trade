@@ -87,6 +87,85 @@
             class="universe-alert"
           />
 
+          <section
+            v-if="universeRotationEvaluation"
+            class="rotation-evaluation"
+            data-testid="rotation-walk-forward"
+          >
+            <div class="rotation-evaluation-header">
+              <div>
+                <div class="rotation-evaluation-title">
+                  <strong>月频 Walk-forward</strong>
+                  <el-tag
+                    :type="universeRotationEvaluation.status === 'COMPLETE' ? 'success' : 'warning'"
+                    size="small"
+                    effect="plain"
+                  >
+                    {{ rotationWalkForwardStatusLabel(universeRotationEvaluation.status) }}
+                  </el-tag>
+                  <el-tag type="info" size="small" effect="plain">当前成分股样本</el-tag>
+                </div>
+                <small>{{ universeRotationEvaluation.algorithm_version }}</small>
+              </div>
+              <div class="rotation-evaluation-selection">
+                <span>
+                  训练优胜
+                  <strong data-testid="rotation-training-winner">
+                    {{ rotationVariantLabel(universeRotationEvaluation.selected_variant) }}
+                  </strong>
+                </span>
+                <span>
+                  验证挑战者
+                  <strong data-testid="rotation-validated-challenger">
+                    {{ rotationVariantLabel(universeRotationEvaluation.validated_challenger_variant) }}
+                  </strong>
+                </span>
+              </div>
+            </div>
+
+            <div
+              v-if="rotationDisplayVariant"
+              class="rotation-evaluation-metrics"
+              data-testid="rotation-validation-metrics"
+            >
+              <div>
+                <span>训练年化</span>
+                <strong>{{ formatSignedPercent(rotationDisplayVariant.training.annualized_return_pct) }}</strong>
+              </div>
+              <div>
+                <span>验证年化</span>
+                <strong>{{ formatSignedPercent(rotationDisplayVariant.validation.annualized_return_pct) }}</strong>
+              </div>
+              <div>
+                <span>验证超额 QQQ</span>
+                <strong>{{ formatSignedPercent(rotationDisplayVariant.validation.excess_annualized_return_vs_qqq_pct) }}</strong>
+              </div>
+              <div>
+                <span>验证 Sharpe</span>
+                <strong>{{ formatDecimal(rotationDisplayVariant.validation.sharpe) }}</strong>
+              </div>
+              <div>
+                <span>验证最大回撤</span>
+                <strong>{{ formatPercent(rotationDisplayVariant.validation.max_drawdown_pct) }}</strong>
+              </div>
+              <div>
+                <span>验证平均换手</span>
+                <strong>{{ formatPercent(rotationDisplayVariant.validation.average_turnover_pct) }}</strong>
+              </div>
+            </div>
+
+            <div class="rotation-evaluation-footer">
+              <span v-if="rotationDisplayVariant">
+                训练 {{ rotationDisplayVariant.training.periods }} 月
+                · 验证 {{ rotationDisplayVariant.validation.periods }} 月
+                · 验证成本 {{ formatPercent(rotationDisplayVariant.validation.total_cost_pct) }}
+              </span>
+              <strong>
+                当前成分股存在幸存者偏差，仍需前向样本；不会自动晋级或下单。
+              </strong>
+            </div>
+          </section>
+
           <div class="universe-table-view">
             <el-table
               :data="universeRows"
@@ -834,6 +913,10 @@ import type {
   UniversePromotionForwardStatus,
   UniversePromotionReadinessItem,
   UniversePromotionReadinessResponse,
+  UniverseRotationPerformance,
+  UniverseRotationVariantConfig,
+  UniverseRotationVariantEvaluation,
+  UniverseRotationWalkForwardEvaluation,
   UniverseSelectionItem,
   UniverseSelectionRunResponse,
   WatchlistItem,
@@ -955,6 +1038,31 @@ const universeExplorationCount = computed(() => (
 const universeRotationCount = computed(() => (
   universeRun.value?.items.filter((item) => item.metrics.rotation?.selected).length
   ?? 0
+))
+
+const universeRotationEvaluation = computed<UniverseRotationWalkForwardEvaluation | null>(() => {
+  const raw = universeRun.value?.parameters.rotation_evaluation
+  return isRotationWalkForwardEvaluation(raw) ? raw : null
+})
+
+const rotationTrainingWinner = computed<UniverseRotationVariantEvaluation | null>(() => {
+  const evaluation = universeRotationEvaluation.value
+  if (!evaluation?.selected_variant) return null
+  return evaluation.variants.find(
+    (variant) => variant.variant.name === evaluation.selected_variant,
+  ) ?? null
+})
+
+const rotationValidatedChallenger = computed<UniverseRotationVariantEvaluation | null>(() => {
+  const evaluation = universeRotationEvaluation.value
+  if (!evaluation?.validated_challenger_variant) return null
+  return evaluation.variants.find(
+    (variant) => variant.variant.name === evaluation.validated_challenger_variant,
+  ) ?? null
+})
+
+const rotationDisplayVariant = computed<UniverseRotationVariantEvaluation | null>(() => (
+  rotationValidatedChallenger.value ?? rotationTrainingWinner.value
 ))
 
 const promotionRows = computed<UniversePromotionReadinessItem[]>(() => {
@@ -1205,6 +1313,113 @@ function membershipLabel(membership: string): string {
   return membership
 }
 
+const rotationPerformanceFields: (keyof UniverseRotationPerformance)[] = [
+  'periods',
+  'total_return_pct',
+  'annualized_return_pct',
+  'annualized_volatility_pct',
+  'sharpe',
+  'max_drawdown_pct',
+  'win_rate_pct',
+  'average_turnover_pct',
+  'total_cost_pct',
+  'average_holdings',
+  'qqq_total_return_pct',
+  'qqq_annualized_return_pct',
+  'qqq_sharpe',
+  'qqq_max_drawdown_pct',
+  'dia_total_return_pct',
+  'dia_annualized_return_pct',
+  'dia_sharpe',
+  'dia_max_drawdown_pct',
+  'excess_annualized_return_vs_qqq_pct',
+  'excess_annualized_return_vs_dia_pct',
+]
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+function isRotationPerformance(value: unknown): value is UniverseRotationPerformance {
+  if (!isRecord(value)) return false
+  return rotationPerformanceFields.every((field) => (
+    typeof value[field] === 'number' && Number.isFinite(value[field])
+  ))
+}
+
+function isRotationVariantConfig(value: unknown): value is UniverseRotationVariantConfig {
+  if (!isRecord(value) || typeof value.name !== 'string') return false
+  return [
+    value.lookback_bars,
+    value.skip_bars,
+    value.sma_bars,
+    value.max_selected,
+    value.max_per_risk_group,
+  ].every((field) => typeof field === 'number' && Number.isFinite(field))
+}
+
+function isRotationVariantEvaluation(value: unknown): value is UniverseRotationVariantEvaluation {
+  if (!isRecord(value)) return false
+  return (
+    isRotationVariantConfig(value.variant)
+    && typeof value.training_score === 'number'
+    && Number.isFinite(value.training_score)
+    && typeof value.validation_passed === 'boolean'
+    && Array.isArray(value.validation_blockers)
+    && value.validation_blockers.every((blocker) => typeof blocker === 'string')
+    && isRotationPerformance(value.full)
+    && isRotationPerformance(value.training)
+    && isRotationPerformance(value.validation)
+  )
+}
+
+function isNullableString(value: unknown): value is string | null {
+  return value === null || typeof value === 'string'
+}
+
+function isRotationWalkForwardEvaluation(
+  value: unknown,
+): value is UniverseRotationWalkForwardEvaluation {
+  if (!isRecord(value)) return false
+  return (
+    typeof value.algorithm_version === 'string'
+    && typeof value.status === 'string'
+    && Array.isArray(value.benchmark_symbols)
+    && value.benchmark_symbols.every((symbol) => typeof symbol === 'string')
+    && typeof value.data_scope === 'string'
+    && typeof value.survivorship_bias === 'boolean'
+    && typeof value.validation_periods === 'number'
+    && Number.isFinite(value.validation_periods)
+    && isNullableString(value.selected_variant)
+    && typeof value.selected_variant_validation_passed === 'boolean'
+    && isNullableString(value.validated_challenger_variant)
+    && value.automatic_promotion_allowed === false
+    && Array.isArray(value.promotion_blockers)
+    && value.promotion_blockers.every((blocker) => typeof blocker === 'string')
+    && Array.isArray(value.variants)
+    && value.variants.every(isRotationVariantEvaluation)
+  )
+}
+
+function rotationVariantLabel(value: string | null): string {
+  const labels: Record<string, string> = {
+    incumbent_top10_12_1: '基线 Top10',
+    concentrated_top8_12_1: '集中 Top8',
+    concentrated_top6_12_1: '集中 Top6',
+    faster_top8_6_1: '快速 Top8',
+    diversified_top8_12_1: '分散 Top8',
+  }
+  return value ? (labels[value] ?? value) : '无'
+}
+
+function rotationWalkForwardStatusLabel(value: string): string {
+  if (value === 'COMPLETE') return '评估完成'
+  if (value === 'HISTORY_INSUFFICIENT') return '样本不足'
+  if (value === 'BENCHMARK_DATA_UNAVAILABLE') return '基准不可用'
+  if (value === 'EVALUATION_FAILED') return '评估失败'
+  return value.replace(/_/g, ' ')
+}
+
 const exclusionReasonLabels: Record<string, string> = {
   DATA_INSUFFICIENT_DAILY_BARS: '日线数据不足',
   DATA_NON_FINITE_DAILY_BAR: '日线含无效值',
@@ -1262,6 +1477,18 @@ function formatSignedPercent(value: number | null | undefined): string {
   if (value === null || value === undefined || !Number.isFinite(value)) return '-'
   const sign = value > 0 ? '+' : ''
   return `${sign}${value.toFixed(1)}%`
+}
+
+function formatPercent(value: number | null | undefined): string {
+  return value !== null && value !== undefined && Number.isFinite(value)
+    ? `${value.toFixed(1)}%`
+    : '-'
+}
+
+function formatDecimal(value: number | null | undefined): string {
+  return value !== null && value !== undefined && Number.isFinite(value)
+    ? value.toFixed(2)
+    : '-'
 }
 
 function isQuantScore(score: WatchlistScore): boolean {
@@ -1892,6 +2119,112 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 
+.rotation-evaluation {
+  min-width: 0;
+  margin-bottom: 14px;
+  padding: 12px 0;
+  border-top: 1px solid #dcdfe6;
+  border-bottom: 1px solid #dcdfe6;
+}
+
+.rotation-evaluation-header {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.rotation-evaluation-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.rotation-evaluation-header small {
+  display: block;
+  overflow: hidden;
+  max-width: 360px;
+  margin-top: 4px;
+  color: #909399;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rotation-evaluation-selection {
+  display: flex;
+  flex-shrink: 0;
+  gap: 14px;
+}
+
+.rotation-evaluation-selection span {
+  display: flex;
+  align-items: flex-end;
+  flex-direction: column;
+  gap: 2px;
+  color: #909399;
+  font-size: 10px;
+}
+
+.rotation-evaluation-selection strong {
+  color: #303133;
+  font-size: 12px;
+}
+
+.rotation-evaluation-metrics {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 1px;
+  margin-top: 11px;
+  overflow: hidden;
+  border: 1px solid #ebeef5;
+  border-radius: 4px;
+  background: #ebeef5;
+}
+
+.rotation-evaluation-metrics div {
+  display: flex;
+  min-width: 0;
+  min-height: 50px;
+  padding: 8px;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+  background: var(--el-bg-color);
+}
+
+.rotation-evaluation-metrics span {
+  color: #909399;
+  font-size: 10px;
+}
+
+.rotation-evaluation-metrics strong {
+  overflow: hidden;
+  color: #303133;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rotation-evaluation-footer {
+  display: flex;
+  min-width: 0;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 8px;
+  color: #909399;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.rotation-evaluation-footer strong {
+  color: #b26a00;
+  font-weight: 500;
+  text-align: right;
+}
+
 .universe-symbol {
   display: flex;
   min-width: 0;
@@ -2285,6 +2618,34 @@ onUnmounted(() => {
 
   .universe-summary {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .rotation-evaluation-header,
+  .rotation-evaluation-footer {
+    flex-direction: column;
+    gap: 7px;
+  }
+
+  .rotation-evaluation-selection {
+    width: 100%;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .rotation-evaluation-selection span:first-child {
+    align-items: flex-start;
+  }
+
+  .rotation-evaluation-selection span:last-child {
+    align-items: flex-end;
+  }
+
+  .rotation-evaluation-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .rotation-evaluation-footer strong {
+    text-align: left;
   }
 
   .universe-table-view {

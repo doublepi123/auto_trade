@@ -68,7 +68,8 @@
 - 长桥 WebSocket 推送行情；若 RTH 内推送静默超过约 90 秒，runner 自动退订并重订
 - 推送中断时仍可通过每 15 秒主动 `get_quote` 续命；主动拉取不计入「推送活跃」检测
 - 动态候选池与量化 v5 的跨日特征统一使用前复权 K 线，避免拆股制造虚假收益、波动率和 ATR；交易触发与成交台账仍使用实际未复权价格
-- 动态候选池同时记录 12-1 月度动量轮动影子证据（252 日回看、跳过最近 21 日、200 日均线与风险组限额）；该结果只用于前向观察，不会自动切换实盘或下单
+- 动态候选池同时记录分散型 12-1 月度动量轮动 Shadow v2（252 日回看、跳过最近 21 日、200 日均线、Top 8、每风险组最多 1 只）；该结果只用于前向观察，不会自动切换实盘或下单
+- 每次候选池刷新使用最多 1000 根前复权日线执行严格月频 walk-forward：信号只看上月末，按次月首个交易日开盘成交，逐笔计入费用、滑点与流动性价差，并分别输出训练段、最近 12 个月验证段及 QQQ/DIA 基准；当前成分股幸存者偏差和前向样本不足始终阻止自动晋级
 - FastAPI `lifespan` 在后台线程启动 runner，避免启动期阻塞 `/api/health`
 - Runner 后台约每 15 秒将券商当日订单同步到本地库
 
@@ -263,6 +264,9 @@ cd backend
 python3 -m pytest tests/ -v                     # 全部测试
 python3 -m pytest tests/ --cov=app --cov-report=term  # 含覆盖率
 python3 -m pytest tests/test_engine.py -v        # 单模块
+
+# 只读复算轮动证据；不读取持仓、不提交订单
+python3 scripts/evaluate_rotation_walk_forward.py --history-bars 1000
 ```
 
 ---

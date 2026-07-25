@@ -849,7 +849,9 @@ def test_refresh_prefers_forward_adjusted_daily_candles() -> None:
         result = _service(db, broker).refresh()
 
         assert result.run.status == "COMPLETE"
-        assert broker.adjusted_candle_calls == len(_CATALOG)
+        assert broker.adjusted_candle_calls == (
+            len(_CATALOG) + 2
+        )
     finally:
         db.close()
 
@@ -863,15 +865,30 @@ def test_refresh_persists_rotation_shadow_evidence() -> None:
         assert result.run.status == "COMPLETE"
         assert broker.requested_counts
         assert min(broker.requested_counts) >= 253
+        assert max(broker.requested_counts) == 1000
         metrics = json.loads(result.items[0].metrics_json)
         rotation = metrics["rotation"]
         assert rotation["algorithm_version"] == (
-            "index-momentum-12-1-shadow-v1"
+            "index-momentum-12-1-diversified-shadow-v2"
         )
         assert rotation["lookback_bars"] == 252
         assert rotation["skip_bars"] == 21
         assert rotation["momentum_pct"] > 0
         assert rotation["selected"] is True
+        parameters = json.loads(result.run.parameters_json)
+        evaluation = parameters["rotation_evaluation"]
+        assert evaluation["algorithm_version"] == (
+            "rotation-monthly-open-walk-forward-v1"
+        )
+        assert evaluation["benchmark_symbols"] == [
+            "QQQ.US",
+            "DIA.US",
+        ]
+        assert evaluation["automatic_promotion_allowed"] is False
+        assert (
+            "CURRENT_CONSTITUENTS_SURVIVORSHIP_BIAS"
+            in evaluation["promotion_blockers"]
+        )
     finally:
         db.close()
 

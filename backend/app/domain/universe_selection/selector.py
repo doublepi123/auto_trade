@@ -11,8 +11,10 @@ from app.core.market_calendar import get_session
 from app.domain.universe_selection.catalog import IndexCandidate
 
 
-UNIVERSE_ALGORITHM_VERSION = "index-liquidity-opportunity-v8"
-ROTATION_ALGORITHM_VERSION = "index-momentum-12-1-shadow-v1"
+UNIVERSE_ALGORITHM_VERSION = "index-liquidity-opportunity-v9"
+ROTATION_ALGORITHM_VERSION = (
+    "index-momentum-12-1-diversified-shadow-v2"
+)
 _DAILY_BAR_FINALIZATION_DELAY = timedelta(minutes=15)
 
 
@@ -43,7 +45,8 @@ class DailyBar(Protocol):
 class UniverseSelectionConfig:
     max_selected: int = 12
     max_per_sector: int = 2
-    rotation_max_selected: int = 10
+    rotation_max_selected: int = 8
+    rotation_max_per_risk_group: int = 1
     rotation_lookback_bars: int = 252
     rotation_skip_bars: int = 21
     rotation_sma_bars: int = 200
@@ -65,6 +68,10 @@ class UniverseSelectionConfig:
             raise ValueError("max_per_sector must be positive")
         if self.rotation_max_selected < 1:
             raise ValueError("rotation_max_selected must be positive")
+        if self.rotation_max_per_risk_group < 1:
+            raise ValueError(
+                "rotation_max_per_risk_group must be positive"
+            )
         if self.rotation_skip_bars < 1:
             raise ValueError("rotation_skip_bars must be positive")
         if self.rotation_lookback_bars <= self.rotation_skip_bars:
@@ -417,7 +424,7 @@ def _rotation_evidence(
         risk_group = row.candidate.risk_group
         if (
             risk_group_counts.get(risk_group, 0)
-            >= config.max_per_sector
+            >= config.rotation_max_per_risk_group
         ):
             reasons.append("ROTATION_RISK_GROUP_CAP")
         elif len(selected_symbols) >= config.rotation_max_selected:

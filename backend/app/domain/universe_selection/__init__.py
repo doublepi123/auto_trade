@@ -19,11 +19,24 @@ from app.domain.universe_selection.selector import (
     latest_complete_session_date,
     select_candidates,
 )
+from app.domain.universe_selection.rotation_walk_forward import (
+    DEFAULT_ROTATION_VARIANTS,
+    ROTATION_BENCHMARK_SYMBOLS,
+    ROTATION_WALK_FORWARD_VERSION,
+    RotationPerformance,
+    RotationPeriod,
+    RotationVariant,
+    RotationVariantEvaluation,
+    RotationWalkForwardResult,
+    evaluate_rotation_walk_forward,
+)
 
 __all__ = [
     "CATALOG_SOURCE_VERSION",
     "INDEX_CANDIDATE_CATALOG",
     "ROTATION_ALGORITHM_VERSION",
+    "ROTATION_BENCHMARK_SYMBOLS",
+    "ROTATION_WALK_FORWARD_VERSION",
     "UNIVERSE_ALGORITHM_VERSION",
     "CandidateInput",
     "CandidateMetrics",
@@ -31,11 +44,18 @@ __all__ = [
     "DailyBar",
     "IndexCandidate",
     "RotationSelectionEvidence",
+    "RotationPerformance",
+    "RotationPeriod",
+    "RotationVariant",
+    "RotationVariantEvaluation",
+    "RotationWalkForwardResult",
     "UniverseSelectionConfig",
+    "DEFAULT_ROTATION_VARIANTS",
     "completed_daily_bars",
     "latest_closed_session_date",
     "liquidity_spread_proxy_bps",
     "latest_complete_session_date",
     "risk_group_for_sector",
     "select_candidates",
+    "evaluate_rotation_walk_forward",
 ]

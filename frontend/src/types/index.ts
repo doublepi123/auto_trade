@@ -1286,6 +1286,63 @@ export interface UniverseRotationMetrics {
   exclusion_reasons: string[]
 }
 
+export interface UniverseRotationPerformance {
+  periods: number
+  total_return_pct: number
+  annualized_return_pct: number
+  annualized_volatility_pct: number
+  sharpe: number
+  max_drawdown_pct: number
+  win_rate_pct: number
+  average_turnover_pct: number
+  total_cost_pct: number
+  average_holdings: number
+  qqq_total_return_pct: number
+  qqq_annualized_return_pct: number
+  qqq_sharpe: number
+  qqq_max_drawdown_pct: number
+  dia_total_return_pct: number
+  dia_annualized_return_pct: number
+  dia_sharpe: number
+  dia_max_drawdown_pct: number
+  excess_annualized_return_vs_qqq_pct: number
+  excess_annualized_return_vs_dia_pct: number
+}
+
+export interface UniverseRotationVariantConfig {
+  name: string
+  lookback_bars: number
+  skip_bars: number
+  sma_bars: number
+  max_selected: number
+  max_per_risk_group: number
+}
+
+export interface UniverseRotationVariantEvaluation {
+  variant: UniverseRotationVariantConfig
+  training_score: number
+  validation_passed: boolean
+  validation_blockers: string[]
+  full: UniverseRotationPerformance
+  training: UniverseRotationPerformance
+  validation: UniverseRotationPerformance
+}
+
+export interface UniverseRotationWalkForwardEvaluation {
+  algorithm_version: string
+  status: string
+  benchmark_symbols: string[]
+  data_scope: string
+  survivorship_bias: boolean
+  validation_periods: number
+  selected_variant: string | null
+  selected_variant_validation_passed: boolean
+  validated_challenger_variant: string | null
+  automatic_promotion_allowed: false
+  promotion_blockers: string[]
+  variants: UniverseRotationVariantEvaluation[]
+}
+
 export interface UniverseSelectionMetrics {
   price: number | null
   avg_dollar_volume: number | null

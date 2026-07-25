@@ -36,7 +36,7 @@ const refreshedRun = {
         trend_efficiency_10d: 0.2,
         opportunity_to_cost_ratio: 6.4,
         rotation: {
-          algorithm_version: 'index-momentum-12-1-shadow-v1',
+          algorithm_version: 'index-momentum-12-1-diversified-shadow-v2',
           lookback_bars: 252,
           skip_bars: 21,
           sma_bars: 200,
@@ -92,6 +92,20 @@ describe('Dynamic universe observation pool', () => {
       cy.contains('Shadow 已启用').should('be.visible')
       cy.contains('轮动影子').should('be.visible')
       cy.get('[data-testid="universe-rotation-count"]').should('contain', '2')
+      cy.get('[data-testid="rotation-walk-forward"]').within(() => {
+        cy.contains('评估完成').should('be.visible')
+        cy.get('[data-testid="rotation-training-winner"]').should('contain', '集中 Top6')
+        cy.get('[data-testid="rotation-validated-challenger"]').should('contain', '分散 Top8')
+        cy.get('[data-testid="rotation-validation-metrics"]')
+          .should('contain', '+24.3%')
+          .and('contain', '+67.7%')
+          .and('contain', '+34.4%')
+          .and('contain', '2.11')
+          .and('contain', '9.5%')
+          .and('contain', '29.0%')
+        cy.contains('幸存者偏差').should('be.visible')
+        cy.contains('不会自动晋级或下单').should('be.visible')
+      })
       cy.contains('+46.8%').should('be.visible')
       cy.contains('$12.40B').should('be.visible')
       cy.contains('1.8 bp').should('be.visible')

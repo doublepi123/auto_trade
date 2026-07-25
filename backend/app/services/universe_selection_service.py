@@ -21,8 +21,11 @@ from app.core.broker import BrokerCandle
 from app.domain.strategy_v2 import RISK_GROUP_RELATIVE_MIN_PEERS
 from app.domain.universe_selection import (
     CATALOG_SOURCE_VERSION,
+    DEFAULT_ROTATION_VARIANTS,
     INDEX_CANDIDATE_CATALOG,
     ROTATION_ALGORITHM_VERSION,
+    ROTATION_BENCHMARK_SYMBOLS,
+    ROTATION_WALK_FORWARD_VERSION,
     UNIVERSE_ALGORITHM_VERSION,
     CandidateInput,
     CandidateSelection,
@@ -30,6 +33,7 @@ from app.domain.universe_selection import (
     IndexCandidate,
     UniverseSelectionConfig,
     completed_daily_bars,
+    evaluate_rotation_walk_forward,
     latest_closed_session_date,
     liquidity_spread_proxy_bps,
     latest_complete_session_date,
@@ -53,7 +57,9 @@ logger = logging.getLogger("auto_trade.universe_selection_service")
 
 _WATCHLIST_SOURCE = "universe"
 _DAILY_BAR_COUNT = 35
-_ROTATION_DAILY_BAR_BUFFER = 10
+_MAX_RESEARCH_DAILY_BARS = 1000
+_ROTATION_EVALUATION_HISTORY_BARS = 1000
+_ROTATION_EVALUATION_VALIDATION_PERIODS = 12
 _LIVE_ORDER_STATUSES = ("SUBMITTED", "PARTIAL_FILLED")
 _REFRESH_LOCK = threading.Lock()
 _RUN_WAIT_POLL_SECONDS = 0.05
@@ -549,6 +555,14 @@ class UniverseSelectionService:
         self.config = config or selection_config_from_settings(
             round_trip_fee_bps=_active_round_trip_fee_bps(db),
         )
+        required_rotation_bars = max(
+            self.config.rotation_lookback_bars + 1,
+            self.config.rotation_sma_bars,
+        )
+        if required_rotation_bars > _MAX_RESEARCH_DAILY_BARS:
+            raise ValueError(
+                "rotation history exceeds broker daily-bar limit"
+            )
         self.minimum_evaluable_ratio = (
             settings.universe_selection_min_evaluable_ratio
             if minimum_evaluable_ratio is None
@@ -671,9 +685,17 @@ class UniverseSelectionService:
                 )
 
         try:
-            selections, as_of_date = self._evaluate_catalog(
+            (
+                selections,
+                as_of_date,
+                rotation_evaluation,
+            ) = self._evaluate_catalog(
                 expected_as_of_date=expected_as_of_date,
             )
+            published_parameters = {
+                **parameters,
+                "rotation_evaluation": rotation_evaluation,
+            }
             evaluable_count = sum(item.evaluable for item in selections)
             selected_count = sum(item.selected for item in selections)
             candidate_count = len(selections)
@@ -701,7 +723,7 @@ class UniverseSelectionService:
                 evaluable_count=evaluable_count,
                 selected_count=selected_count,
                 coverage_ratio=coverage_ratio,
-                parameters=parameters,
+                parameters=published_parameters,
                 error="; ".join(errors),
             )
         except Exception as exc:
@@ -725,7 +747,7 @@ class UniverseSelectionService:
                     evaluable_count=evaluable_count,
                     selected_count=selected_count,
                     coverage_ratio=coverage_ratio,
-                    parameters=parameters,
+                    parameters=published_parameters,
                     error="; ".join(errors),
                 )
                 if published is None:
@@ -982,16 +1004,24 @@ class UniverseSelectionService:
         self,
         *,
         expected_as_of_date: date,
-    ) -> tuple[list[CandidateSelection], date]:
+    ) -> tuple[
+        list[CandidateSelection],
+        date,
+        dict[str, object],
+    ]:
         complete_by_symbol: dict[str, Sequence[DailyBar]] = {}
         spread_by_symbol: dict[str, float] = {}
         latest_by_symbol: dict[str, date] = {}
         errors_by_symbol: dict[str, list[str]] = {}
-        daily_bar_count = max(
-            _DAILY_BAR_COUNT,
-            self.config.rotation_lookback_bars + 1,
-            self.config.rotation_sma_bars,
-        ) + _ROTATION_DAILY_BAR_BUFFER
+        daily_bar_count = min(
+            _MAX_RESEARCH_DAILY_BARS,
+            max(
+                _DAILY_BAR_COUNT,
+                self.config.rotation_lookback_bars + 1,
+                self.config.rotation_sma_bars,
+                _ROTATION_EVALUATION_HISTORY_BARS,
+            ),
+        )
         for candidate in self.catalog:
             data_errors: list[str] = []
             try:
@@ -1057,7 +1087,117 @@ class UniverseSelectionService:
                     data_errors=tuple(data_errors),
                 )
             )
-        return select_candidates(inputs, self.config), expected_as_of_date
+        selections = select_candidates(inputs, self.config)
+        benchmark_bars: dict[str, Sequence[DailyBar]] = {}
+        benchmark_errors: list[str] = []
+        for symbol in ROTATION_BENCHMARK_SYMBOLS:
+            try:
+                raw_bars = _research_candlesticks(
+                    self.broker,
+                    symbol,
+                    "DAY",
+                    daily_bar_count,
+                )
+                bars = completed_daily_bars(
+                    raw_bars,
+                    market="US",
+                    now=self.now,
+                )
+                latest = latest_complete_session_date(
+                    raw_bars,
+                    market="US",
+                    now=self.now,
+                )
+                if latest != expected_as_of_date:
+                    benchmark_errors.append(
+                        f"{symbol}:DATA_STALE_SESSION_DATE"
+                    )
+                benchmark_bars[symbol] = bars
+            except Exception as exc:
+                benchmark_errors.append(
+                    f"{symbol}:DATA_DAILY_BARS_"
+                    f"{type(exc).__name__.upper()}"
+                )
+                logger.warning(
+                    "rotation benchmark daily bars failed for %s: %s",
+                    symbol,
+                    exc,
+                    exc_info=True,
+                )
+        if benchmark_errors:
+            rotation_evaluation: dict[str, object] = {
+                "algorithm_version": ROTATION_WALK_FORWARD_VERSION,
+                "status": "BENCHMARK_DATA_UNAVAILABLE",
+                "benchmark_symbols": list(
+                    ROTATION_BENCHMARK_SYMBOLS
+                ),
+                "data_scope": "CURRENT_CONSTITUENTS_ONLY",
+                "survivorship_bias": True,
+                "validation_periods": (
+                    _ROTATION_EVALUATION_VALIDATION_PERIODS
+                ),
+                "selected_variant": None,
+                "selected_variant_validation_passed": False,
+                "validated_challenger_variant": None,
+                "automatic_promotion_allowed": False,
+                "promotion_blockers": [
+                    "ROTATION_BENCHMARK_HISTORY_UNAVAILABLE",
+                    "CURRENT_CONSTITUENTS_SURVIVORSHIP_BIAS",
+                    "ROTATION_FORWARD_OBSERVATIONS_REQUIRED",
+                ],
+                "errors": benchmark_errors,
+                "variants": [],
+                "selected_variant_periods": [],
+                "validated_challenger_periods": [],
+            }
+        else:
+            try:
+                rotation_evaluation = (
+                    evaluate_rotation_walk_forward(
+                        candidates=self.catalog,
+                        bars_by_symbol=complete_by_symbol,
+                        benchmark_bars_by_symbol=benchmark_bars,
+                        base_config=self.config,
+                        variants=DEFAULT_ROTATION_VARIANTS,
+                        validation_periods=(
+                            _ROTATION_EVALUATION_VALIDATION_PERIODS
+                        ),
+                    ).to_dict()
+                )
+            except Exception as exc:
+                logger.exception("rotation walk-forward evaluation failed")
+                rotation_evaluation = {
+                    "algorithm_version": (
+                        ROTATION_WALK_FORWARD_VERSION
+                    ),
+                    "status": "EVALUATION_FAILED",
+                    "benchmark_symbols": list(
+                        ROTATION_BENCHMARK_SYMBOLS
+                    ),
+                    "data_scope": "CURRENT_CONSTITUENTS_ONLY",
+                    "survivorship_bias": True,
+                    "validation_periods": (
+                        _ROTATION_EVALUATION_VALIDATION_PERIODS
+                    ),
+                    "selected_variant": None,
+                    "selected_variant_validation_passed": False,
+                    "validated_challenger_variant": None,
+                    "automatic_promotion_allowed": False,
+                    "promotion_blockers": [
+                        "ROTATION_EVALUATION_FAILED",
+                        "CURRENT_CONSTITUENTS_SURVIVORSHIP_BIAS",
+                        "ROTATION_FORWARD_OBSERVATIONS_REQUIRED",
+                    ],
+                    "errors": [type(exc).__name__],
+                    "variants": [],
+                    "selected_variant_periods": [],
+                    "validated_challenger_periods": [],
+                }
+        rotation_evaluation["as_of_date"] = (
+            expected_as_of_date.isoformat()
+        )
+        rotation_evaluation["history_bars_requested"] = daily_bar_count
+        return selections, expected_as_of_date, rotation_evaluation
 
     def _consensus_as_of_date(
         self,
@@ -1361,6 +1501,22 @@ class UniverseSelectionService:
             **asdict(self.config),
             "catalog_size": len(self.catalog),
             "rotation_algorithm_version": ROTATION_ALGORITHM_VERSION,
+            "rotation_walk_forward_algorithm_version": (
+                ROTATION_WALK_FORWARD_VERSION
+            ),
+            "rotation_walk_forward_history_bars": (
+                _ROTATION_EVALUATION_HISTORY_BARS
+            ),
+            "rotation_walk_forward_validation_periods": (
+                _ROTATION_EVALUATION_VALIDATION_PERIODS
+            ),
+            "rotation_walk_forward_benchmarks": list(
+                ROTATION_BENCHMARK_SYMBOLS
+            ),
+            "rotation_walk_forward_variants": [
+                asdict(variant)
+                for variant in DEFAULT_ROTATION_VARIANTS
+            ],
             "exploration_algorithm_version": (
                 _EXPLORATION_ALGORITHM_VERSION
             ),
