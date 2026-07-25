@@ -47,7 +47,7 @@ const rotationPerformanceStub = {
 }
 
 const rotationEvaluationStub = {
-  algorithm_version: 'rotation-monthly-open-walk-forward-v4',
+  algorithm_version: 'rotation-monthly-open-walk-forward-v5',
   status: 'COMPLETE',
   benchmark_symbols: ['QQQ.US', 'DIA.US'],
   data_scope: 'CURRENT_CONSTITUENTS_ONLY',
@@ -247,13 +247,40 @@ const rotationPointInTimeSensitivityStub = {
           max_drawdown_pct: 11.3,
         },
       },
+      {
+        ...rotationEvaluationStub.variants[0],
+        variant: {
+          ...rotationEvaluationStub.variants[0].variant,
+          name: 'diversified_top8_12_1_return_to_variance',
+          ranking: 'return_to_variance',
+          weighting: 'equal',
+          max_position_weight_pct: 100,
+        },
+        validation_passed: false,
+        validation_blockers: ['SHARPE_NOT_ABOVE_BOTH_BENCHMARKS'],
+        expanding_validation_passed: false,
+        expanding_validation_blockers: ['EXPANDING_FOLDS_INSUFFICIENT'],
+        expanding_folds_passed: 1,
+        expanding_validation: {
+          ...rotationEvaluationStub.variants[0].expanding_validation,
+          annualized_return_pct: 32.9,
+          sharpe: 1.57,
+          max_drawdown_pct: 13.9,
+        },
+        validation: {
+          ...rotationEvaluationStub.variants[0].validation,
+          annualized_return_pct: 46.8,
+          sharpe: 2.04,
+          max_drawdown_pct: 2.7,
+        },
+      },
     ],
   },
   errors: [],
 }
 
 const rotationForwardStub = {
-  algorithm_version: 'rotation-monthly-open-forward-v1',
+  algorithm_version: 'rotation-monthly-open-forward-v2',
   rotation_algorithm_version: 'index-momentum-12-1-diversified-monthly-shadow-v3',
   status: 'BACKFILLED_OPEN',
   evidence_mode: 'BACKFILLED_AFTER_ENTRY',
@@ -345,6 +372,39 @@ const rotationShrinkageChallengerStub = {
   net_liquidation_return_pct: 6.4,
   excess_return_vs_qqq_pct: 3.2,
   excess_return_vs_dia_pct: 4.6,
+}
+
+const rotationReturnToVarianceChallengerStub = {
+  ...rotationForwardStub,
+  variant_name: 'diversified_top8_12_1_return_to_variance',
+  target_symbols: ['JNJ.US', 'GOOGL.US'],
+  holdings: [
+    {
+      ...rotationForwardStub.holdings[0],
+      symbol: 'JNJ.US',
+      risk_group: 'healthcare',
+      momentum_pct: 18.4,
+      ranking_method: 'return_to_variance',
+      formation_realized_volatility: 0.21,
+      ranking_metric: 417.23,
+    },
+    {
+      ...rotationForwardStub.holdings[1],
+      symbol: 'GOOGL.US',
+      risk_group: 'software',
+      momentum_pct: 31.2,
+      ranking_method: 'return_to_variance',
+      formation_realized_volatility: 0.28,
+      ranking_metric: 397.96,
+    },
+  ],
+  gross_return_pct: 8.13,
+  entry_cost_pct: 0.06,
+  estimated_exit_cost_pct: 0.06,
+  total_estimated_cost_pct: 0.12,
+  net_liquidation_return_pct: 7.91,
+  excess_return_vs_qqq_pct: 4.71,
+  excess_return_vs_dia_pct: 6.11,
 }
 
 const rotationConcentrationChallengerStub = {
@@ -1310,7 +1370,7 @@ Cypress.Commands.add('stubApi', () => {
     body: {
       id: 7,
       as_of_date: '2026-07-23',
-      algorithm_version: 'index-liquidity-opportunity-v10',
+      algorithm_version: 'index-liquidity-opportunity-v11',
       source_version: 'nasdaq-100_djia-v1',
       status: 'COMPLETE',
       candidate_count: 3,
@@ -1325,6 +1385,7 @@ Cypress.Commands.add('stubApi', () => {
         rotation_concentration_challenger_snapshot: rotationConcentrationChallengerStub,
         rotation_weighting_challenger_snapshot: rotationWeightingChallengerStub,
         rotation_shrinkage_challenger_snapshot: rotationShrinkageChallengerStub,
+        rotation_return_to_variance_challenger_snapshot: rotationReturnToVarianceChallengerStub,
       },
       error: '',
       started_at: '2026-07-24T01:00:00Z',

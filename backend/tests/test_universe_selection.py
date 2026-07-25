@@ -78,13 +78,15 @@ def _rotation_bars(
     *,
     drift: float,
     recent_move: float | None = None,
+    formation_noise: float = 0.012,
     volume: float = 20_000_000,
 ) -> list[_Bar]:
     result: list[_Bar] = []
     price = 100.0
     start = datetime(2025, 1, 1, tzinfo=timezone.utc)
     for index in range(270):
-        noise = 0.012 if index % 2 == 0 else -0.012
+        noise_scale = formation_noise if index < 249 else 0.012
+        noise = noise_scale if index % 2 == 0 else -noise_scale
         move = drift + noise
         if recent_move is not None and index >= 249:
             move = recent_move
@@ -109,6 +111,7 @@ def _rotation_input(
     sector: str,
     drift: float,
     recent_move: float | None = None,
+    formation_noise: float = 0.012,
 ) -> CandidateInput:
     return CandidateInput(
         candidate=IndexCandidate(
@@ -120,6 +123,7 @@ def _rotation_input(
         completed_daily_bars=_rotation_bars(
             drift=drift,
             recent_move=recent_move,
+            formation_noise=formation_noise,
         ),
         bid=99.98,
         ask=100.02,
@@ -330,6 +334,58 @@ def test_rotation_momentum_skips_the_most_recent_month() -> None:
     assert reversed_row.rotation.above_sma is False
 
 
+def test_return_to_variance_ranking_penalizes_formation_volatility() -> None:
+    inputs = [
+        _rotation_input(
+            "VOLATILE.US",
+            sector="Semiconductors",
+            drift=0.0030,
+            formation_noise=0.025,
+        ),
+        _rotation_input(
+            "STEADY.US",
+            sector="Financials",
+            drift=0.0020,
+            formation_noise=0.004,
+        ),
+    ]
+
+    raw = select_candidates(
+        inputs,
+        _config(
+            rotation_max_selected=1,
+            rotation_ranking="raw_momentum",
+        ),
+    )
+    adjusted = select_candidates(
+        inputs,
+        _config(
+            rotation_max_selected=1,
+            rotation_ranking="return_to_variance",
+        ),
+    )
+
+    raw_selected = next(row for row in raw if row.rotation.selected)
+    adjusted_by_symbol = {
+        row.candidate.symbol: row
+        for row in adjusted
+    }
+    steady = adjusted_by_symbol["STEADY.US"].rotation
+    volatile = adjusted_by_symbol["VOLATILE.US"].rotation
+    assert raw_selected.candidate.symbol == "VOLATILE.US"
+    assert steady.selected is True
+    assert volatile.selected is False
+    assert steady.ranking_method == "return_to_variance"
+    assert steady.formation_realized_volatility is not None
+    assert volatile.formation_realized_volatility is not None
+    assert steady.formation_realized_volatility < (
+        volatile.formation_realized_volatility
+    )
+    assert steady.ranking_metric is not None
+    assert volatile.ranking_metric is not None
+    assert steady.ranking_metric > volatile.ranking_metric
+
+
 def test_t1_liquidity_spread_proxy_is_bounded_and_tightens_with_volume() -> None:
     lower_volume = liquidity_spread_proxy_bps(
         _bars(volume=5_000_000),
@@ -353,6 +409,15 @@ def test_selection_config_rejects_invalid_ranges() -> None:
         assert "realized-volatility" in str(exc)
     else:
         raise AssertionError("invalid realized volatility range was accepted")
+
+    try:
+        UniverseSelectionConfig(
+            rotation_ranking="unsupported",  # type: ignore[arg-type]
+        )
+    except ValueError as exc:
+        assert "rotation_ranking" in str(exc)
+    else:
+        raise AssertionError("invalid rotation ranking was accepted")
 
 
 def test_completed_daily_bars_excludes_current_partial_us_candle() -> None:

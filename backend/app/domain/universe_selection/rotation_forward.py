@@ -27,7 +27,7 @@ from app.domain.universe_selection.selector import (
 )
 
 
-ROTATION_FORWARD_VERSION = "rotation-monthly-open-forward-v1"
+ROTATION_FORWARD_VERSION = "rotation-monthly-open-forward-v2"
 
 
 def _required_bool(value: object, *, field_name: str) -> bool:
@@ -46,6 +46,9 @@ class RotationCohortSignal:
     above_sma: bool
     score: float
     signal_spread_bps: float
+    ranking_method: str = "raw_momentum"
+    formation_realized_volatility: float | None = None
+    ranking_metric: float | None = None
     target_weight_pct: float = 0.0
 
     def __post_init__(self) -> None:
@@ -71,6 +74,40 @@ class RotationCohortSignal:
             or not 0 <= self.target_weight_pct <= 100
         ):
             raise ValueError("rotation signal values are invalid")
+        if self.ranking_method not in {
+            "raw_momentum",
+            "return_to_variance",
+        }:
+            raise ValueError("rotation signal ranking method is invalid")
+        if self.formation_realized_volatility is not None and (
+            not math.isfinite(self.formation_realized_volatility)
+            or self.formation_realized_volatility <= 0
+        ):
+            raise ValueError(
+                "rotation signal formation volatility is invalid"
+            )
+        if self.ranking_metric is None:
+            if self.ranking_method != "raw_momentum":
+                raise ValueError(
+                    "risk-adjusted rotation signal ranking is missing"
+                )
+            object.__setattr__(
+                self,
+                "ranking_metric",
+                self.momentum_pct,
+            )
+        elif (
+            not math.isfinite(self.ranking_metric)
+            or self.ranking_metric <= 0
+        ):
+            raise ValueError("rotation signal ranking metric is invalid")
+        if (
+            self.ranking_method == "return_to_variance"
+            and self.formation_realized_volatility is None
+        ):
+            raise ValueError(
+                "return-to-variance signal volatility is missing"
+            )
 
     @classmethod
     def from_dict(
@@ -90,6 +127,24 @@ class RotationCohortSignal:
             score=float(str(payload["score"])),
             signal_spread_bps=float(
                 str(payload["signal_spread_bps"])
+            ),
+            ranking_method=str(
+                payload.get("ranking_method", "raw_momentum")
+            ),
+            formation_realized_volatility=(
+                float(
+                    str(
+                        payload["formation_realized_volatility"]
+                    )
+                )
+                if payload.get("formation_realized_volatility")
+                is not None
+                else None
+            ),
+            ranking_metric=(
+                float(str(payload["ranking_metric"]))
+                if payload.get("ranking_metric") is not None
+                else None
             ),
             target_weight_pct=float(
                 str(payload.get("target_weight_pct", 0.0))
@@ -222,6 +277,9 @@ class RotationForwardHolding:
     risk_group: str
     weight_pct: float
     momentum_pct: float
+    ranking_method: str
+    formation_realized_volatility: float | None
+    ranking_metric: float | None
     entry_price: float | None
     mark_price: float | None
     gross_return_pct: float | None
@@ -382,6 +440,7 @@ def _variant_config(
         rotation_lookback_bars=variant.lookback_bars,
         rotation_skip_bars=variant.skip_bars,
         rotation_sma_bars=variant.sma_bars,
+        rotation_ranking=variant.ranking,
         rotation_max_selected=variant.max_selected,
         rotation_max_per_risk_group=(
             variant.max_per_risk_group
@@ -453,6 +512,11 @@ def _registration_and_selections(
                 above_sma=evidence.above_sma,
                 score=evidence.score,
                 signal_spread_bps=spread,
+                ranking_method=evidence.ranking_method,
+                formation_realized_volatility=(
+                    evidence.formation_realized_volatility
+                ),
+                ranking_metric=evidence.ranking_metric,
                 target_weight_pct=(
                     target_weights.get(
                         row.candidate.symbol,
@@ -586,7 +650,12 @@ def _apply_frozen_registration(
                 lookback_bars=variant.lookback_bars,
                 skip_bars=variant.skip_bars,
                 sma_bars=variant.sma_bars,
+                ranking_method=signal.ranking_method,
                 momentum_pct=signal.momentum_pct,
+                formation_realized_volatility=(
+                    signal.formation_realized_volatility
+                ),
+                ranking_metric=signal.ranking_metric,
                 sma_price=signal.sma_price,
                 above_sma=signal.above_sma,
                 eligible=True,
@@ -807,6 +876,11 @@ def evaluate_rotation_forward(
                 risk_group=signal.risk_group,
                 weight_pct=weight * 100,
                 momentum_pct=signal.momentum_pct,
+                ranking_method=signal.ranking_method,
+                formation_realized_volatility=(
+                    signal.formation_realized_volatility
+                ),
+                ranking_metric=signal.ranking_metric,
                 entry_price=entry_price,
                 mark_price=mark_price,
                 gross_return_pct=(

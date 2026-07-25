@@ -22,7 +22,7 @@ from app.domain.universe_selection.selector import (
 )
 
 
-ROTATION_WALK_FORWARD_VERSION = "rotation-monthly-open-walk-forward-v4"
+ROTATION_WALK_FORWARD_VERSION = "rotation-monthly-open-walk-forward-v5"
 ROTATION_BENCHMARK_SYMBOLS = ("QQQ.US", "DIA.US")
 _CASH = "__CASH__"
 _EXPANDING_VALIDATION_MIN_TRAINING_PERIODS = 12
@@ -37,6 +37,10 @@ class RotationVariant:
     sma_bars: int
     max_selected: int
     max_per_risk_group: int
+    ranking: Literal[
+        "raw_momentum",
+        "return_to_variance",
+    ] = "raw_momentum"
     weighting: Literal[
         "equal",
         "inverse_volatility",
@@ -54,6 +58,11 @@ class RotationVariant:
             raise ValueError("skip_bars and sma_bars are invalid")
         if self.max_selected < 1 or self.max_per_risk_group < 1:
             raise ValueError("selection limits must be positive")
+        if self.ranking not in {
+            "raw_momentum",
+            "return_to_variance",
+        }:
+            raise ValueError("rotation ranking is invalid")
         if self.weighting not in {
             "equal",
             "inverse_volatility",
@@ -128,6 +137,16 @@ DIVERSIFIED_SHRINKAGE_ROTATION_VARIANT = RotationVariant(
     inverse_volatility_blend_pct=25.0,
 )
 
+RETURN_TO_VARIANCE_ROTATION_VARIANT = RotationVariant(
+    name="diversified_top8_12_1_return_to_variance",
+    lookback_bars=252,
+    skip_bars=21,
+    sma_bars=200,
+    max_selected=8,
+    max_per_risk_group=1,
+    ranking="return_to_variance",
+)
+
 
 DEFAULT_ROTATION_VARIANTS: tuple[RotationVariant, ...] = (
     RotationVariant(
@@ -158,6 +177,7 @@ DEFAULT_ROTATION_VARIANTS: tuple[RotationVariant, ...] = (
     DIVERSIFIED_ROTATION_VARIANT,
     DIVERSIFIED_INVERSE_VOLATILITY_VARIANT,
     DIVERSIFIED_SHRINKAGE_ROTATION_VARIANT,
+    RETURN_TO_VARIANCE_ROTATION_VARIANT,
 )
 
 
@@ -564,6 +584,7 @@ def _simulate_variant(
         rotation_lookback_bars=variant.lookback_bars,
         rotation_skip_bars=variant.skip_bars,
         rotation_sma_bars=variant.sma_bars,
+        rotation_ranking=variant.ranking,
         rotation_max_selected=variant.max_selected,
         rotation_max_per_risk_group=(
             variant.max_per_risk_group

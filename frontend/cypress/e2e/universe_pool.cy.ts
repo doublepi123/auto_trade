@@ -1,7 +1,7 @@
 const refreshedRun = {
   id: 8,
   as_of_date: '2026-07-24',
-  algorithm_version: 'index-liquidity-opportunity-v10',
+  algorithm_version: 'index-liquidity-opportunity-v11',
   source_version: 'nasdaq-100_djia-v1',
   status: 'COMPLETE',
   candidate_count: 3,
@@ -150,6 +150,20 @@ describe('Dynamic universe observation pool', () => {
           .and('contain', '0/16')
         cy.contains('与其他权重同时预登记').should('be.visible')
       })
+      cy.get('[data-testid="rotation-return-to-variance-challenger"]').within(() => {
+        cy.contains('收益/方差排名影子').should('be.visible')
+        cy.contains('12-1 形成期').should('be.visible')
+        cy.get('[data-testid="rotation-return-to-variance-symbols"]')
+          .should('contain', 'JNJ.US 50.0%')
+          .and('contain', 'GOOGL.US 50.0%')
+        cy.get('[data-testid="rotation-return-to-variance-metrics"]')
+          .should('contain', '+7.9%')
+          .and('contain', '+1.0%')
+          .and('contain', '+4.7%')
+          .and('contain', '0.1%')
+          .and('contain', '0/16')
+        cy.contains('月末会按形成期收益/方差预登记下月组合').should('be.visible')
+      })
       cy.get('[data-testid="rotation-walk-forward"]').within(() => {
         cy.contains('评估完成').should('be.visible')
         cy.get('[data-testid="rotation-training-winner"]').should('contain', '集中 Top6')
@@ -175,6 +189,11 @@ describe('Dynamic universe observation pool', () => {
           .and('contain', '1.92')
           .and('contain', '13.0%')
           .and('contain', '2/3')
+          .and('contain', '收益/方差 Top8')
+          .and('contain', '+32.9%')
+          .and('contain', '1.57')
+          .and('contain', '13.9%')
+          .and('contain', '1/3')
           .and('contain', '等权 Top8')
           .and('contain', '+42.1%')
           .and('contain', '1.79')

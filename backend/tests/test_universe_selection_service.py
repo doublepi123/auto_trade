@@ -909,7 +909,7 @@ def test_refresh_persists_rotation_shadow_evidence() -> None:
         parameters = json.loads(result.run.parameters_json)
         evaluation = parameters["rotation_evaluation"]
         assert evaluation["algorithm_version"] == (
-            "rotation-monthly-open-walk-forward-v4"
+            "rotation-monthly-open-walk-forward-v5"
         )
         assert evaluation["benchmark_symbols"] == [
             "QQQ.US",
@@ -955,7 +955,7 @@ def test_refresh_persists_rotation_shadow_evidence() -> None:
         assert registration["target_signals"]
         snapshot = parameters["rotation_forward_snapshot"]
         assert snapshot["algorithm_version"] == (
-            "rotation-monthly-open-forward-v1"
+            "rotation-monthly-open-forward-v2"
         )
         assert snapshot["evidence_mode"] == (
             "BACKFILLED_AFTER_ENTRY"
@@ -1032,6 +1032,31 @@ def test_refresh_persists_rotation_shadow_evidence() -> None:
         )
         assert parameters[
             "rotation_next_shrinkage_challenger_registration_status"
+        ] == "NOT_DUE"
+        return_to_variance = parameters[
+            "rotation_return_to_variance_challenger_snapshot"
+        ]
+        assert return_to_variance["variant_name"] == (
+            "diversified_top8_12_1_return_to_variance"
+        )
+        assert return_to_variance["evidence_mode"] == (
+            "BACKFILLED_AFTER_ENTRY"
+        )
+        assert return_to_variance["order_execution_allowed"] is False
+        return_to_variance_registration = parameters[
+            "rotation_return_to_variance_challenger_registration"
+        ]
+        assert return_to_variance_registration["target_signals"]
+        assert all(
+            signal["ranking_method"] == "return_to_variance"
+            and signal["formation_realized_volatility"] > 0
+            and signal["ranking_metric"] > 0
+            for signal in return_to_variance_registration[
+                "target_signals"
+            ]
+        )
+        assert parameters[
+            "rotation_next_return_to_variance_challenger_registration_status"
         ] == "NOT_DUE"
     finally:
         db.close()
@@ -1141,6 +1166,34 @@ def test_refresh_reuses_frozen_rotation_registration_next_day() -> None:
             for holding in first_shrinkage["holdings"]
         ]
         assert second_shrinkage[
+            "selection_drift_detected"
+        ] is False
+        first_return_to_variance = first_parameters[
+            "rotation_return_to_variance_challenger_snapshot"
+        ]
+        second_return_to_variance = second_parameters[
+            "rotation_return_to_variance_challenger_snapshot"
+        ]
+        assert second_return_to_variance[
+            "registered_as_of_date"
+        ] == "2026-07-23"
+        assert second_return_to_variance["mark_date"] == "2026-07-24"
+        assert [
+            (
+                holding["symbol"],
+                holding["weight_pct"],
+                holding["ranking_metric"],
+            )
+            for holding in second_return_to_variance["holdings"]
+        ] == [
+            (
+                holding["symbol"],
+                holding["weight_pct"],
+                holding["ranking_metric"],
+            )
+            for holding in first_return_to_variance["holdings"]
+        ]
+        assert second_return_to_variance[
             "selection_drift_detected"
         ] is False
         first_rotation = {
@@ -1253,6 +1306,33 @@ def test_month_end_refresh_preregisters_next_rotation_cohort() -> None:
             0 < signal["target_weight_pct"] <= 15
             for signal in shrinkage_registration["target_signals"]
         )
+        assert parameters[
+            "rotation_next_return_to_variance_challenger_registration_status"
+        ] == "REGISTERED"
+        return_to_variance_registration = parameters[
+            "rotation_next_return_to_variance_challenger_registration"
+        ]
+        assert return_to_variance_registration["cohort_month"] == (
+            "2026-08-01"
+        )
+        assert return_to_variance_registration["signal_date"] == (
+            "2026-07-31"
+        )
+        assert return_to_variance_registration[
+            "forward_eligible"
+        ] is True
+        assert return_to_variance_registration["variant_name"] == (
+            "diversified_top8_12_1_return_to_variance"
+        )
+        assert return_to_variance_registration["target_signals"]
+        assert all(
+            signal["ranking_method"] == "return_to_variance"
+            and signal["formation_realized_volatility"] > 0
+            and signal["ranking_metric"] > 0
+            for signal in return_to_variance_registration[
+                "target_signals"
+            ]
+        )
     finally:
         db.close()
 
@@ -1331,6 +1411,10 @@ def test_next_month_refresh_reuses_all_preregistered_rotation_tracks() -> None:
             (
                 "rotation_next_shrinkage_challenger_registration",
                 "rotation_shrinkage_challenger_snapshot",
+            ),
+            (
+                "rotation_next_return_to_variance_challenger_registration",
+                "rotation_return_to_variance_challenger_snapshot",
             ),
         )
         for registration_key, snapshot_key in track_keys:

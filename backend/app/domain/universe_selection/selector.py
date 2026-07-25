@@ -4,14 +4,14 @@ import math
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from statistics import mean, stdev
-from typing import Protocol, Sequence
+from typing import Literal, Protocol, Sequence
 
 from app.core.holiday_calendar import is_market_closed
 from app.core.market_calendar import get_session
 from app.domain.universe_selection.catalog import IndexCandidate
 
 
-UNIVERSE_ALGORITHM_VERSION = "index-liquidity-opportunity-v10"
+UNIVERSE_ALGORITHM_VERSION = "index-liquidity-opportunity-v11"
 ROTATION_ALGORITHM_VERSION = (
     "index-momentum-12-1-diversified-monthly-shadow-v3"
 )
@@ -50,6 +50,10 @@ class UniverseSelectionConfig:
     rotation_lookback_bars: int = 252
     rotation_skip_bars: int = 21
     rotation_sma_bars: int = 200
+    rotation_ranking: Literal[
+        "raw_momentum",
+        "return_to_variance",
+    ] = "raw_momentum"
     min_completed_bars: int = 21
     min_price: float = 10.0
     min_avg_dollar_volume: float = 500_000_000.0
@@ -80,6 +84,11 @@ class UniverseSelectionConfig:
             )
         if self.rotation_sma_bars < 2:
             raise ValueError("rotation_sma_bars must be at least 2")
+        if self.rotation_ranking not in {
+            "raw_momentum",
+            "return_to_variance",
+        }:
+            raise ValueError("rotation_ranking is invalid")
         if self.min_completed_bars < 21:
             raise ValueError("min_completed_bars must be at least 21")
         positive_values = (
@@ -127,7 +136,10 @@ class RotationSelectionEvidence:
     lookback_bars: int = 252
     skip_bars: int = 21
     sma_bars: int = 200
+    ranking_method: str = "raw_momentum"
     momentum_pct: float | None = None
+    formation_realized_volatility: float | None = None
+    ranking_metric: float | None = None
     sma_price: float | None = None
     above_sma: bool | None = None
     eligible: bool = False
@@ -346,6 +358,8 @@ def _rotation_evidence(
             key=lambda bar: bar.timestamp,
         )
         momentum_pct: float | None = None
+        formation_realized_volatility: float | None = None
+        ranking_metric: float | None = None
         sma_price: float | None = None
         above_sma: bool | None = None
         if len(bars) < required_bars:
@@ -370,6 +384,37 @@ def _rotation_evidence(
                 momentum_pct = (
                     formation_end / formation_start - 1.0
                 ) * 100
+                formation_closes = closes[
+                    -(config.rotation_lookback_bars + 1) :
+                    -config.rotation_skip_bars
+                ]
+                formation_returns = [
+                    math.log(
+                        formation_closes[index]
+                        / formation_closes[index - 1]
+                    )
+                    for index in range(1, len(formation_closes))
+                ]
+                if len(formation_returns) >= 2:
+                    formation_realized_volatility = (
+                        stdev(formation_returns) * math.sqrt(252)
+                    )
+                if config.rotation_ranking == "raw_momentum":
+                    ranking_metric = momentum_pct
+                elif (
+                    formation_realized_volatility is None
+                    or not math.isfinite(
+                        formation_realized_volatility
+                    )
+                    or formation_realized_volatility <= 0
+                ):
+                    reasons.append(
+                        "ROTATION_FORMATION_VOLATILITY_UNAVAILABLE"
+                    )
+                else:
+                    ranking_metric = momentum_pct / (
+                        formation_realized_volatility**2
+                    )
                 sma_price = mean(closes[-config.rotation_sma_bars :])
                 above_sma = closes[-1] > sma_price
                 if momentum_pct <= 0:
@@ -380,7 +425,12 @@ def _rotation_evidence(
             lookback_bars=config.rotation_lookback_bars,
             skip_bars=config.rotation_skip_bars,
             sma_bars=config.rotation_sma_bars,
+            ranking_method=config.rotation_ranking,
             momentum_pct=momentum_pct,
+            formation_realized_volatility=(
+                formation_realized_volatility
+            ),
+            ranking_metric=ranking_metric,
             sma_price=sma_price,
             above_sma=above_sma,
             eligible=not reasons,
@@ -397,7 +447,7 @@ def _rotation_evidence(
             -(
                 evidence_by_symbol[
                     row.candidate.symbol
-                ].momentum_pct
+                ].ranking_metric
                 or 0.0
             ),
             row.candidate.symbol,
@@ -408,7 +458,7 @@ def _rotation_evidence(
             row.candidate.symbol: (
                 evidence_by_symbol[
                     row.candidate.symbol
-                ].momentum_pct
+                ].ranking_metric
                 or 0.0
             )
             for row in eligible

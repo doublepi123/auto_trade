@@ -9,6 +9,7 @@ from app.core.broker import BrokerCandle
 from app.domain.universe_selection import (
     DIVERSIFIED_INVERSE_VOLATILITY_VARIANT,
     DIVERSIFIED_SHRINKAGE_ROTATION_VARIANT,
+    RETURN_TO_VARIANCE_ROTATION_VARIANT,
     IndexMembershipHistory,
     IndexCandidate,
     MembershipInterval,
@@ -476,6 +477,44 @@ def test_shrinkage_weighting_blends_equal_and_inverse_volatility() -> None:
     assert round(sum(shrinkage_weights.values()), 10) == 100.0
 
 
+def test_return_to_variance_variant_prefers_steadier_formation_period() -> None:
+    candidates = (
+        _candidate("CALM.US", "Healthcare"),
+        _candidate("VOLATILE.US", "Semiconductors"),
+    )
+    result = evaluate_rotation_walk_forward(
+        candidates=candidates,
+        bars_by_symbol={
+            "CALM.US": _bars(
+                drift=0.0012,
+                volatility_scale=0.5,
+            ),
+            "VOLATILE.US": _bars(
+                drift=0.0025,
+                volatility_scale=2.5,
+            ),
+        },
+        benchmark_bars_by_symbol={
+            "QQQ.US": _bars(drift=0.0005),
+            "DIA.US": _bars(drift=0.0003),
+        },
+        base_config=_config(),
+        variants=(
+            replace(
+                RETURN_TO_VARIANCE_ROTATION_VARIANT,
+                max_selected=1,
+            ),
+        ),
+        validation_periods=12,
+    )
+
+    assert result.selected_variant_periods
+    assert all(
+        period.selected_symbols == ("CALM.US",)
+        for period in result.selected_variant_periods
+    )
+
+
 def test_rotation_walk_forward_serializes_expanding_fold_dates() -> None:
     payload = _evaluate().to_dict()
 
@@ -504,6 +543,13 @@ def test_rotation_variant_rejects_invalid_weighting_controls() -> None:
         assert "weighting" in str(exc)
     else:
         raise AssertionError("invalid weighting was accepted")
+
+    try:
+        replace(base, ranking=cast(Any, "unsupported"))
+    except ValueError as exc:
+        assert "ranking" in str(exc)
+    else:
+        raise AssertionError("invalid ranking was accepted")
 
     try:
         replace(base, max_position_weight_pct=0)

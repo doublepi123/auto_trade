@@ -1276,7 +1276,10 @@ export interface UniverseRotationMetrics {
   lookback_bars: number
   skip_bars: number
   sma_bars: number
+  ranking_method?: 'raw_momentum' | 'return_to_variance'
   momentum_pct: number | null
+  formation_realized_volatility?: number | null
+  ranking_metric?: number | null
   sma_price: number | null
   above_sma: boolean | null
   eligible: boolean
@@ -1316,6 +1319,7 @@ export interface UniverseRotationVariantConfig {
   sma_bars: number
   max_selected: number
   max_per_risk_group: number
+  ranking?: 'raw_momentum' | 'return_to_variance'
   weighting?: 'equal' | 'inverse_volatility' | 'equal_inverse_volatility_blend'
   max_position_weight_pct?: number
   inverse_volatility_blend_pct?: number
@@ -1399,6 +1403,9 @@ export interface UniverseRotationForwardHolding {
   risk_group: string
   weight_pct: number
   momentum_pct: number
+  ranking_method?: 'raw_momentum' | 'return_to_variance'
+  formation_realized_volatility?: number | null
+  ranking_metric?: number | null
   entry_price: number | null
   mark_price: number | null
   gross_return_pct: number | null

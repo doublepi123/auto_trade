@@ -7,6 +7,7 @@ from app.core.broker import BrokerCandle
 from app.core.holiday_calendar import is_market_closed
 from app.domain.universe_selection import (
     DIVERSIFIED_INVERSE_VOLATILITY_VARIANT,
+    RETURN_TO_VARIANCE_ROTATION_VARIANT,
     IndexCandidate,
     RotationCohortRegistration,
     UniverseSelectionConfig,
@@ -313,6 +314,9 @@ def test_registration_round_trip_and_strict_boolean() -> None:
     for signal in legacy_signals:
         assert isinstance(signal, dict)
         signal.pop("target_weight_pct")
+        signal.pop("ranking_method")
+        signal.pop("formation_realized_volatility")
+        signal.pop("ranking_metric")
     legacy_registration = RotationCohortRegistration.from_dict(legacy)
     assert legacy_registration.target_symbols == (
         registration.target_symbols
@@ -327,6 +331,11 @@ def test_registration_round_trip_and_strict_boolean() -> None:
             legacy_registration.target_signals,
             registration.target_signals,
         )
+    )
+    assert all(
+        signal.ranking_method == "raw_momentum"
+        and signal.ranking_metric == signal.momentum_pct
+        for signal in legacy_registration.target_signals
     )
     invalid = registration.to_dict()
     invalid["forward_eligible"] = "false"
@@ -418,6 +427,62 @@ def test_inverse_volatility_forward_registration_freezes_weights() -> None:
         registered_weights["SLOW.US"]
     )
     assert max(registered_weights.values()) <= 60.0
+
+
+def test_return_to_variance_forward_freezes_ranking_evidence() -> None:
+    candidates = (
+        _candidate("CALM.US", "Healthcare"),
+        _candidate("VOLATILE.US", "Semiconductors"),
+    )
+    bars = {
+        "CALM.US": _bars(
+            drift=0.0012,
+            volatility_scale=0.5,
+        ),
+        "VOLATILE.US": _bars(
+            drift=0.0025,
+            volatility_scale=2.5,
+        ),
+    }
+    benchmarks = {
+        "QQQ.US": _bars(drift=0.0005),
+        "DIA.US": _bars(drift=0.0003),
+    }
+    variant = replace(
+        RETURN_TO_VARIANCE_ROTATION_VARIANT,
+        max_selected=1,
+    )
+    registration = build_rotation_cohort_registration(
+        candidates=candidates,
+        bars_by_symbol=bars,
+        base_config=_config(),
+        cohort_month=date(2025, 7, 1),
+        signal_date=date(2025, 6, 30),
+        registered_as_of_date=date(2025, 6, 30),
+        variant=variant,
+    )
+
+    result = evaluate_rotation_forward(
+        candidates=candidates,
+        bars_by_symbol=bars,
+        benchmark_bars_by_symbol=benchmarks,
+        base_config=_config(),
+        as_of_date=date(2025, 7, 18),
+        frozen_registration=registration,
+        variant=variant,
+    )
+
+    assert registration.target_symbols == ("CALM.US",)
+    signal = registration.target_signals[0]
+    holding = result.snapshot.holdings[0]
+    assert signal.ranking_method == "return_to_variance"
+    assert signal.formation_realized_volatility is not None
+    assert signal.ranking_metric is not None
+    assert holding.ranking_method == signal.ranking_method
+    assert holding.formation_realized_volatility == (
+        signal.formation_realized_volatility
+    )
+    assert holding.ranking_metric == signal.ranking_metric
 
 
 def test_unavailable_forward_snapshot_keeps_requested_variant() -> None:

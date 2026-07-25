@@ -2476,7 +2476,20 @@ class UniverseRotationMetrics(BaseModel):
     lookback_bars: int = Field(ge=2)
     skip_bars: int = Field(ge=1)
     sma_bars: int = Field(ge=2)
+    ranking_method: Literal[
+        "raw_momentum",
+        "return_to_variance",
+    ] = "raw_momentum"
     momentum_pct: Optional[float] = Field(
+        default=None,
+        allow_inf_nan=False,
+    )
+    formation_realized_volatility: Optional[float] = Field(
+        default=None,
+        gt=0,
+        allow_inf_nan=False,
+    )
+    ranking_metric: Optional[float] = Field(
         default=None,
         allow_inf_nan=False,
     )

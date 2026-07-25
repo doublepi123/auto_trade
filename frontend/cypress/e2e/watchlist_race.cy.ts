@@ -86,7 +86,7 @@ describe('Watchlist latest-response wins', () => {
         run: {
           id: 21,
           as_of_date: '2026-07-24',
-          algorithm_version: 'index-liquidity-opportunity-v10',
+          algorithm_version: 'index-liquidity-opportunity-v11',
           source_version: 'current-catalog',
           status: 'COMPLETE',
           candidate_count: 1,
