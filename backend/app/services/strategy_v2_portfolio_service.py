@@ -79,6 +79,12 @@ _ROUTING_SPECS = (
             "strategy-v2-portfolio-vwap-observed-cost-pool-v1"
         ),
     ),
+    _RoutingSpec(
+        policy="VWAP_EDGE_OBS_COST_75BPS_POOL",
+        algorithm_version=(
+            "strategy-v2-portfolio-vwap-observed-cost-75bps-pool-v1"
+        ),
+    ),
 )
 _EVALUATOR_VERSION = "strategy-v2-single-capital-slot-forward-router-v1"
 _TERMINAL_UNIVERSE_STATUSES = ("COMPLETE", "DEGRADED")
@@ -89,9 +95,16 @@ _FIXED_COST_VWAP_EDGE_POLICIES = {
 _FIXED_75BPS_VWAP_EDGE_POLICIES = {
     "VWAP_EDGE_75BPS_POOL",
 }
-_OBSERVED_COST_VWAP_EDGE_POLICIES = {
+_OBSERVED_COST_TO_STOP_VWAP_EDGE_POLICIES = {
     "VWAP_EDGE_OBSERVED_COST_POOL",
 }
+_OBSERVED_COST_TO_75BPS_VWAP_EDGE_POLICIES = {
+    "VWAP_EDGE_OBS_COST_75BPS_POOL",
+}
+_OBSERVED_COST_VWAP_EDGE_POLICIES = (
+    _OBSERVED_COST_TO_STOP_VWAP_EDGE_POLICIES
+    | _OBSERVED_COST_TO_75BPS_VWAP_EDGE_POLICIES
+)
 _OBSERVED_COST_MAX_AGE = timedelta(minutes=60)
 _ENTRY_BIND_TIMEOUT = timedelta(minutes=10)
 _MIN_READY_TRADES = 20
@@ -924,16 +937,21 @@ class StrategyV2PortfolioService:
             edge_filter=(
                 "OBSERVED_COST_TO_STOP_VWAP_DISCOUNT"
                 if registration.policy
-                in _OBSERVED_COST_VWAP_EDGE_POLICIES
+                in _OBSERVED_COST_TO_STOP_VWAP_EDGE_POLICIES
                 else (
-                    "COST_TO_75BPS_VWAP_DISCOUNT"
+                    "OBSERVED_COST_TO_75BPS_VWAP_DISCOUNT"
                     if registration.policy
-                    in _FIXED_75BPS_VWAP_EDGE_POLICIES
+                    in _OBSERVED_COST_TO_75BPS_VWAP_EDGE_POLICIES
                     else (
-                        "COST_TO_STOP_VWAP_DISCOUNT"
+                        "COST_TO_75BPS_VWAP_DISCOUNT"
                         if registration.policy
-                        in _FIXED_COST_VWAP_EDGE_POLICIES
-                        else "NONE"
+                        in _FIXED_75BPS_VWAP_EDGE_POLICIES
+                        else (
+                            "COST_TO_STOP_VWAP_DISCOUNT"
+                            if registration.policy
+                            in _FIXED_COST_VWAP_EDGE_POLICIES
+                            else "NONE"
+                        )
                     )
                 )
             ),
@@ -1003,7 +1021,7 @@ class StrategyV2PortfolioService:
                 ],
                 "bounds": "INCLUSIVE",
             }
-        elif spec.policy in _OBSERVED_COST_VWAP_EDGE_POLICIES:
+        elif spec.policy in _OBSERVED_COST_TO_STOP_VWAP_EDGE_POLICIES:
             payload["vwap_edge_filter"] = {
                 "price_reference": (
                     "FROZEN_SIGNAL_FEATURE_RESIDUALS"
@@ -1021,6 +1039,33 @@ class StrategyV2PortfolioService:
                 ),
                 "missing_observed_cost": "FAIL_CLOSED",
                 "maximum_discount": "FROZEN_STOP_DISTANCE_BPS",
+                "required_references": [
+                    "SESSION_VWAP_1M",
+                    "SESSION_VWAP_5M",
+                ],
+                "bounds": "INCLUSIVE",
+            }
+        elif spec.policy in _OBSERVED_COST_TO_75BPS_VWAP_EDGE_POLICIES:
+            payload["vwap_edge_filter"] = {
+                "price_reference": (
+                    "FROZEN_SIGNAL_FEATURE_RESIDUALS"
+                ),
+                "minimum_discount": (
+                    "MAX_FROZEN_ROUND_TRIP_COST_AND_CAUSAL_QUANT_"
+                    "ESTIMATED_ROUND_TRIP_COST_BPS"
+                ),
+                "observed_cost_source": (
+                    "LATEST_CURRENT_QUANT_SCORE_BEFORE_SIGNAL_BAR_END"
+                ),
+                "observed_cost_freshness": (
+                    "UNEXPIRED_AND_AT_MOST_60_MINUTES_OLD_AT_"
+                    "SIGNAL_BAR_END"
+                ),
+                "missing_observed_cost": "FAIL_CLOSED",
+                "maximum_discount": "FIXED_ABSOLUTE_VWAP_DISCOUNT_BPS",
+                "maximum_discount_bps": (
+                    VWAP_EDGE_FIXED_MAX_DISCOUNT_BPS
+                ),
                 "required_references": [
                     "SESSION_VWAP_1M",
                     "SESSION_VWAP_5M",
@@ -1071,6 +1116,7 @@ def _routing_policy(value: str) -> PortfolioRoutingPolicy:
         "VWAP_EDGE_POOL",
         "VWAP_EDGE_75BPS_POOL",
         "VWAP_EDGE_OBSERVED_COST_POOL",
+        "VWAP_EDGE_OBS_COST_75BPS_POOL",
     }:
         raise ValueError(f"unsupported portfolio routing policy: {value}")
     return cast(PortfolioRoutingPolicy, value)

@@ -1939,6 +1939,75 @@ export interface StrategyShadowBracketChallengerReport {
   variants: StrategyShadowBracketChallengerVariant[]
 }
 
+export type StrategyShadowPortfolioRoutingPolicy =
+  | 'FIXED_PRIMARY'
+  | 'SELECTED_UNIVERSE'
+  | 'QUANT_CANDIDATE'
+  | 'QUANT_WATCH_PLUS'
+  | 'SELECTED_VWAP_EDGE'
+  | 'VWAP_EDGE_POOL'
+  | 'VWAP_EDGE_75BPS_POOL'
+  | 'VWAP_EDGE_OBSERVED_COST_POOL'
+  | 'VWAP_EDGE_OBS_COST_75BPS_POOL'
+
+export type StrategyShadowPortfolioEdgeFilter =
+  | 'NONE'
+  | 'COST_TO_STOP_VWAP_DISCOUNT'
+  | 'COST_TO_75BPS_VWAP_DISCOUNT'
+  | 'OBSERVED_COST_TO_STOP_VWAP_DISCOUNT'
+  | 'OBSERVED_COST_TO_75BPS_VWAP_DISCOUNT'
+
+export interface StrategyShadowPortfolioRoutingMetrics {
+  signal_groups: number
+  selected_signals: number
+  skipped_occupied: number
+  no_eligible: number
+  pending_entries: number
+  open_trades: number
+  missed_entries: number
+  closed_trades: number
+  observed_sessions: number
+  distinct_symbols: number
+  win_rate: number
+  mean_net_return_pct: number
+  cumulative_net_return_pct: number
+  compounded_return_pct: number
+  max_drawdown_pct: number
+  selections_by_symbol: Record<string, number>
+  latest_signal_at: string | null
+}
+
+export interface StrategyShadowPortfolioRoutingVariant {
+  registration_id: number
+  policy: StrategyShadowPortfolioRoutingPolicy
+  algorithm_version: string
+  evaluator_digest: string
+  registered_at: string
+  eligible_after: string
+  edge_filter: StrategyShadowPortfolioEdgeFilter
+  status: 'COLLECTING' | 'READY_FOR_REVIEW' | 'MATURE_EVIDENCE'
+  metrics: StrategyShadowPortfolioRoutingMetrics
+  fixed_primary_compounded_return_pct: number
+  compounded_return_delta_pct: number
+  minimum_ready_trades: 20
+  minimum_mature_trades: 50
+  minimum_ready_sessions: 10
+  minimum_routed_symbols: 3
+  promotion_ready: boolean
+  blockers: string[]
+}
+
+export interface StrategyShadowPortfolioRoutingReport {
+  primary_symbol: string
+  mode: StrategyShadowMode
+  order_submission_allowed: false
+  automatic_promotion_allowed: false
+  historical_backfill_allowed: false
+  capital_slots: 1
+  evaluation_scope: 'FORWARD_OUT_OF_SAMPLE'
+  variants: StrategyShadowPortfolioRoutingVariant[]
+}
+
 export interface StrategyShadowAdxChallengerRequest {
   symbol: string
   config_version?: string

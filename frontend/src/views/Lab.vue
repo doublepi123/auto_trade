@@ -532,6 +532,111 @@
             </template>
           </section>
 
+          <section
+            class="shadow-section portfolio-routing-section"
+            data-testid="shadow-portfolio-routing"
+          >
+            <div class="shadow-section-header">
+              <div>
+                <h3>单资金槽选股路由</h3>
+                <small v-if="shadowPortfolioRouting">
+                  {{ shadowPortfolioRouting.primary_symbol }} ·
+                  {{ shadowPortfolioRouting.capital_slots }} 个资金槽 ·
+                  前向样本
+                </small>
+              </div>
+              <div class="shadow-tags">
+                <el-tag effect="plain">只读影子</el-tag>
+                <el-tag type="warning" effect="plain">禁止自动晋级</el-tag>
+                <el-tag type="danger" effect="plain">禁止回填</el-tag>
+              </div>
+            </div>
+            <el-alert
+              v-if="shadowPortfolioError"
+              :title="shadowPortfolioError"
+              type="warning"
+              :closable="false"
+              show-icon
+              class="shadow-evidence-alert"
+              data-testid="shadow-portfolio-error"
+            />
+            <el-empty
+              v-else-if="shadowPortfolioRows.length === 0"
+              description="等待前向路由注册"
+            />
+            <div v-else class="shadow-portfolio-table">
+              <el-table
+                :data="shadowPortfolioRows"
+                size="small"
+                stripe
+                data-testid="shadow-portfolio-table"
+              >
+                <el-table-column label="策略" min-width="200">
+                  <template #default="{ row }">
+                    <strong>{{ portfolioRoutingPolicyLabel(row.policy) }}</strong>
+                  </template>
+                </el-table-column>
+                <el-table-column label="入场带" min-width="150">
+                  <template #default="{ row }">
+                    {{ portfolioRoutingEdgeLabel(row.edge_filter) }}
+                  </template>
+                </el-table-column>
+                <el-table-column label="状态" width="96">
+                  <template #default="{ row }">
+                    <el-tag
+                      :type="portfolioRoutingStatusMeta(row.status).type"
+                      effect="plain"
+                    >
+                      {{ portfolioRoutingStatusMeta(row.status).label }}
+                    </el-tag>
+                  </template>
+                </el-table-column>
+                <el-table-column label="信号 / 入选" width="105">
+                  <template #default="{ row }">
+                    {{ row.metrics.signal_groups }} /
+                    {{ row.metrics.selected_signals }}
+                  </template>
+                </el-table-column>
+                <el-table-column label="闭环 / 标的" width="105">
+                  <template #default="{ row }">
+                    {{ row.metrics.closed_trades }} /
+                    {{ row.metrics.distinct_symbols }}
+                  </template>
+                </el-table-column>
+                <el-table-column label="胜率" width="82">
+                  <template #default="{ row }">
+                    {{ (row.metrics.win_rate * 100).toFixed(1) }}%
+                  </template>
+                </el-table-column>
+                <el-table-column label="复合收益" width="108">
+                  <template #default="{ row }">
+                    {{ formatSignedPercent(row.metrics.compounded_return_pct) }}
+                  </template>
+                </el-table-column>
+                <el-table-column label="相对主标的" width="110">
+                  <template #default="{ row }">
+                    {{ formatSignedPercent(row.compounded_return_delta_pct) }}
+                  </template>
+                </el-table-column>
+                <el-table-column label="最大回撤" width="105">
+                  <template #default="{ row }">
+                    {{ formatPercentPoints(row.metrics.max_drawdown_pct) }}
+                  </template>
+                </el-table-column>
+                <el-table-column label="路由分布" min-width="190">
+                  <template #default="{ row }">
+                    {{ formatRoutingSelections(row.metrics.selections_by_symbol) }}
+                  </template>
+                </el-table-column>
+                <el-table-column label="复核门槛" min-width="230">
+                  <template #default="{ row }">
+                    {{ portfolioRoutingBlockerSummary(row) }}
+                  </template>
+                </el-table-column>
+              </el-table>
+            </div>
+          </section>
+
           <div class="shadow-toolbar">
             <div class="shadow-tags" data-testid="shadow-safety-tags">
               <el-tag type="warning">影子观察</el-tag>
@@ -1593,6 +1698,7 @@ import {
   getStrategyShadowDecisions,
   getStrategyShadowEvaluation,
   getStrategyShadowForwardValidation,
+  getStrategyShadowPortfolioRouting,
   getStrategyShadowStatus,
   getStrategyShadowVersions,
   registerStrategyShadowForwardValidation,
@@ -1609,6 +1715,10 @@ import type {
   StrategyShadowConfig, StrategyShadowConfigUpdate, StrategyShadowDecision,
   StrategyShadowEvaluation, StrategyShadowForwardValidationDaily,
   StrategyShadowForwardValidationResponse, StrategyShadowStatus, StrategyShadowVersion,
+  StrategyShadowPortfolioEdgeFilter,
+  StrategyShadowPortfolioRoutingPolicy,
+  StrategyShadowPortfolioRoutingReport,
+  StrategyShadowPortfolioRoutingVariant,
   StrategyShadowWarmupVariant,
 } from '../types'
 import { resolveErrorMessage } from '../utils/error'
@@ -1851,6 +1961,8 @@ const selectedShadowVersion = ref('')
 const shadowEvaluation = ref<StrategyShadowEvaluation | null>(null)
 const shadowBracketChallengers = ref<StrategyShadowBracketChallengerReport | null>(null)
 const shadowBracketError = ref('')
+const shadowPortfolioRouting = ref<StrategyShadowPortfolioRoutingReport | null>(null)
+const shadowPortfolioError = ref('')
 const shadowAdxChallengers = ref<StrategyShadowAdxChallengerResponse | null>(null)
 const shadowAdxChallengerError = ref('')
 const shadowAdxLoading = ref(false)
@@ -1993,6 +2105,7 @@ async function loadOpeningMomentumShadow() {
 async function loadStrategyShadow(symbol = selectedShadowSymbol.value || undefined) {
   void loadOpeningMomentumShadow()
   const generation = ++shadowRequestGeneration.value
+  void loadShadowPortfolioRouting(generation)
   shadowDecisionRequestGeneration.value += 1
   shadowLoading.value = true
   shadowLoadError.value = ''
@@ -2053,6 +2166,22 @@ async function loadStrategyShadow(symbol = selectedShadowSymbol.value || undefin
     shadowLoaded.value = false
   } finally {
     if (generation === shadowRequestGeneration.value) shadowLoading.value = false
+  }
+}
+
+async function loadShadowPortfolioRouting(generation: number) {
+  shadowPortfolioError.value = ''
+  try {
+    const result = await getStrategyShadowPortfolioRouting()
+    if (generation !== shadowRequestGeneration.value) return
+    shadowPortfolioRouting.value = result
+  } catch (error: unknown) {
+    if (generation !== shadowRequestGeneration.value) return
+    shadowPortfolioRouting.value = null
+    shadowPortfolioError.value = resolveErrorMessage(
+      error,
+      '加载单资金槽选股路由失败',
+    )
   }
 }
 
@@ -2357,6 +2486,94 @@ const shadowBracketRows = computed(() => (
     (item) => item.source_config_version === selectedShadowVersion.value,
   ) ?? []
 ))
+
+const shadowPortfolioRows = computed(() => (
+  shadowPortfolioRouting.value?.variants ?? []
+))
+
+const portfolioRoutingPolicyLabels: Record<
+  StrategyShadowPortfolioRoutingPolicy,
+  string
+> = {
+  FIXED_PRIMARY: '固定主标的',
+  SELECTED_UNIVERSE: '核心选股池',
+  QUANT_CANDIDATE: '量化候选',
+  QUANT_WATCH_PLUS: '量化候选 + 观察',
+  SELECTED_VWAP_EDGE: '核心池 · VWAP 成本带',
+  VWAP_EDGE_POOL: '全池 · 成本至止损',
+  VWAP_EDGE_75BPS_POOL: '全池 · 固定 75bp',
+  VWAP_EDGE_OBSERVED_COST_POOL: '全池 · 观测成本至止损',
+  VWAP_EDGE_OBS_COST_75BPS_POOL: '全池 · 观测成本 75bp',
+}
+
+function portfolioRoutingPolicyLabel(
+  policy: StrategyShadowPortfolioRoutingPolicy,
+): string {
+  return portfolioRoutingPolicyLabels[policy]
+}
+
+const portfolioRoutingEdgeLabels: Record<
+  StrategyShadowPortfolioEdgeFilter,
+  string
+> = {
+  NONE: '-',
+  COST_TO_STOP_VWAP_DISCOUNT: '固定成本 → 止损',
+  COST_TO_75BPS_VWAP_DISCOUNT: '固定成本 → 75bp',
+  OBSERVED_COST_TO_STOP_VWAP_DISCOUNT: '观测成本 → 止损',
+  OBSERVED_COST_TO_75BPS_VWAP_DISCOUNT: '观测成本 → 75bp',
+}
+
+function portfolioRoutingEdgeLabel(
+  edgeFilter: StrategyShadowPortfolioEdgeFilter,
+): string {
+  return portfolioRoutingEdgeLabels[edgeFilter]
+}
+
+function portfolioRoutingStatusMeta(
+  status: StrategyShadowPortfolioRoutingVariant['status'],
+): {
+  label: string
+  type: 'success' | 'warning' | 'info'
+} {
+  if (status === 'MATURE_EVIDENCE') {
+    return { label: '成熟证据', type: 'success' }
+  }
+  if (status === 'READY_FOR_REVIEW') {
+    return { label: '可复核', type: 'warning' }
+  }
+  return { label: '采集中', type: 'info' }
+}
+
+const portfolioRoutingBlockerLabels: Record<string, string> = {
+  MIN_CLOSED_TRADES: '闭环交易不足',
+  MIN_OBSERVED_SESSIONS: '观察交易日不足',
+  MIN_DISTINCT_SYMBOLS: '路由标的不足',
+  COMPOUNDED_RETURN_NON_POSITIVE: '复合收益未转正',
+  BASELINE_COMPARATOR: '基准对照',
+  BASELINE_EVIDENCE_INSUFFICIENT: '主标的证据不足',
+  NOT_BETTER_THAN_FIXED_PRIMARY: '尚未优于主标的',
+  MAX_DRAWDOWN_WORSE_THAN_FIXED_PRIMARY: '最大回撤高于主标的',
+}
+
+function portfolioRoutingBlockerSummary(
+  variant: StrategyShadowPortfolioRoutingVariant,
+): string {
+  return variant.blockers
+    .map((item) => portfolioRoutingBlockerLabels[item] ?? item)
+    .join('；') || '可进入人工复核'
+}
+
+function formatRoutingSelections(
+  selections: Record<string, number>,
+): string {
+  return Object.entries(selections)
+    .sort(([leftSymbol, leftCount], [rightSymbol, rightCount]) => (
+      rightCount - leftCount || leftSymbol.localeCompare(rightSymbol)
+    ))
+    .slice(0, 4)
+    .map(([symbol, count]) => `${symbol} ${count}`)
+    .join('；') || '-'
+}
 
 const shadowBracketBlockerLabels: Record<string, string> = {
   MIN_PAIRED_TRADES: '配对交易不足',
@@ -2786,10 +3003,11 @@ async function registerShadowForwardValidation() {
 
 async function pollStrategyShadow() {
   void loadOpeningMomentumShadow()
+  const generation = shadowRequestGeneration.value
+  void loadShadowPortfolioRouting(generation)
   const symbol = shadowConfig.value?.symbol
   if (!symbol || !selectedShadowVersion.value) return
   const version = selectedShadowVersion.value
-  const generation = shadowRequestGeneration.value
   try {
     const [status, evaluation] = await Promise.all([
       getStrategyShadowStatus(symbol),
@@ -2907,6 +3125,16 @@ function formatSignedNullable(value: number | null, precision = 2): string {
   if (value == null || !Number.isFinite(value)) return '-'
   const formatted = value.toFixed(precision)
   return value > 0 ? `+${formatted}` : formatted
+}
+
+function formatSignedPercent(value: number, precision = 3): string {
+  if (!Number.isFinite(value)) return '-'
+  const formatted = value.toFixed(precision)
+  return `${value > 0 ? '+' : ''}${formatted}%`
+}
+
+function formatPercentPoints(value: number, precision = 3): string {
+  return Number.isFinite(value) ? `${value.toFixed(precision)}%` : '-'
 }
 
 function formatNullableBoolean(value: boolean | null): string {
@@ -3185,6 +3413,19 @@ onBeforeUnmount(() => {
 
 .shadow-bracket-table :deep(.el-table) {
   min-width: 1080px;
+}
+
+.portfolio-routing-section {
+  padding-top: 0;
+  margin-bottom: 16px;
+}
+
+.shadow-portfolio-table {
+  overflow-x: auto;
+}
+
+.shadow-portfolio-table :deep(.el-table) {
+  min-width: 1380px;
 }
 
 .shadow-section-header {

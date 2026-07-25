@@ -410,6 +410,66 @@ def test_observed_cost_vwap_edge_pool_ranks_remaining_net_discount() -> None:
     ] == [10, 6, 4]
 
 
+def test_observed_cost_fixed_75bps_pool_completes_factorial() -> None:
+    ranked = rank_portfolio_candidates(
+        [
+            _candidate(
+                "AAPL.US",
+                1,
+                selected=True,
+                rank=1,
+                residual_1m_bps=-60,
+                residual_5m_bps=-70,
+                round_trip_cost_bps=14,
+                observed_round_trip_cost_bps=24,
+                stop_distance_bps=45,
+            ),
+            _candidate(
+                "MSFT.US",
+                2,
+                residual_1m_bps=-75,
+                residual_5m_bps=-75,
+                round_trip_cost_bps=14,
+                observed_round_trip_cost_bps=31,
+                stop_distance_bps=45,
+            ),
+            _candidate(
+                "AMD.US",
+                3,
+                residual_1m_bps=-30,
+                residual_5m_bps=-40,
+                round_trip_cost_bps=14,
+                observed_round_trip_cost_bps=35,
+                stop_distance_bps=45,
+            ),
+            _candidate(
+                "NVDA.US",
+                4,
+                residual_1m_bps=-60,
+                residual_5m_bps=-70,
+                round_trip_cost_bps=14,
+                stop_distance_bps=45,
+            ),
+        ],
+        policy="VWAP_EDGE_OBS_COST_75BPS_POOL",
+        primary_symbol="NVDA.US",
+    )
+
+    assert [item.symbol for item in ranked] == [
+        "MSFT.US",
+        "AAPL.US",
+    ]
+    assert ranked[0].observed_cost_vwap_edge_eligible is False
+    assert (
+        ranked[0].observed_cost_fixed_75bps_vwap_edge_eligible
+        is True
+    )
+    assert [
+        item.observed_cost_fixed_75bps_vwap_edge_score_bps
+        for item in ranked
+    ] == [44, 36]
+
+
 @pytest.mark.parametrize(
     "observed_cost",
     [-1.0, float("inf"), float("nan")],

@@ -14,6 +14,7 @@ PortfolioRoutingPolicy = Literal[
     "VWAP_EDGE_POOL",
     "VWAP_EDGE_75BPS_POOL",
     "VWAP_EDGE_OBSERVED_COST_POOL",
+    "VWAP_EDGE_OBS_COST_75BPS_POOL",
 ]
 
 VWAP_EDGE_FIXED_MAX_DISCOUNT_BPS = 75.0
@@ -146,6 +147,20 @@ class PortfolioRoutingCandidate:
         return self._vwap_edge_score_bps(
             cost_bps=self.effective_observed_cost_bps,
             max_discount_bps=self.stop_distance_bps,
+        )
+
+    @property
+    def observed_cost_fixed_75bps_vwap_edge_eligible(self) -> bool:
+        return self._vwap_edge_eligible(
+            cost_bps=self.effective_observed_cost_bps,
+            max_discount_bps=VWAP_EDGE_FIXED_MAX_DISCOUNT_BPS,
+        )
+
+    @property
+    def observed_cost_fixed_75bps_vwap_edge_score_bps(self) -> float:
+        return self._vwap_edge_score_bps(
+            cost_bps=self.effective_observed_cost_bps,
+            max_discount_bps=VWAP_EDGE_FIXED_MAX_DISCOUNT_BPS,
         )
 
     def _vwap_edge_eligible(
@@ -292,6 +307,25 @@ def rank_portfolio_candidates(
             eligible,
             key=lambda candidate: (
                 -candidate.observed_cost_vwap_edge_score_bps,
+                0 if candidate.selection_selected else 1,
+                (
+                    candidate.selection_rank
+                    if candidate.selection_rank is not None
+                    else 10_000
+                ),
+                candidate.symbol,
+            ),
+        ))
+    if policy == "VWAP_EDGE_OBS_COST_75BPS_POOL":
+        eligible = [
+            candidate
+            for candidate in by_symbol.values()
+            if candidate.observed_cost_fixed_75bps_vwap_edge_eligible
+        ]
+        return tuple(sorted(
+            eligible,
+            key=lambda candidate: (
+                -candidate.observed_cost_fixed_75bps_vwap_edge_score_bps,
                 0 if candidate.selection_selected else 1,
                 (
                     candidate.selection_rank

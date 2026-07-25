@@ -282,7 +282,7 @@ class TestStrategyV2PortfolioService:
             registrations = db.query(
                 StrategyV2PortfolioRegistration
             ).all()
-            assert len(registrations) == 8
+            assert len(registrations) == 9
             assert {
                 row.eligible_after.replace(tzinfo=timezone.utc)
                 for row in registrations
@@ -344,6 +344,7 @@ class TestStrategyV2PortfolioService:
                 "VWAP_EDGE_POOL": "",
                 "VWAP_EDGE_75BPS_POOL": "",
                 "VWAP_EDGE_OBSERVED_COST_POOL": "",
+                "VWAP_EDGE_OBS_COST_75BPS_POOL": "",
             }
 
             self._signal(
@@ -360,7 +361,7 @@ class TestStrategyV2PortfolioService:
                 StrategyV2PortfolioObservation.signal_at
                 == _FIRST_SIGNAL + timedelta(minutes=2)
             ).all()
-            assert len(overlap_rows) == 8
+            assert len(overlap_rows) == 9
             registrations_by_id = {
                 row.id: row.policy
                 for row in db.query(
@@ -380,6 +381,7 @@ class TestStrategyV2PortfolioService:
                 "VWAP_EDGE_POOL": "NO_ELIGIBLE",
                 "VWAP_EDGE_75BPS_POOL": "NO_ELIGIBLE",
                 "VWAP_EDGE_OBSERVED_COST_POOL": "NO_ELIGIBLE",
+                "VWAP_EDGE_OBS_COST_75BPS_POOL": "NO_ELIGIBLE",
             }
 
             exit_at = _FIRST_SIGNAL + timedelta(minutes=5)
@@ -535,6 +537,13 @@ class TestStrategyV2PortfolioService:
                     symbol,
                     stop_loss_pct=0.45,
                 )
+            self._quant(
+                db,
+                "AAPL.US",
+                "AVOID",
+                39,
+                estimated_cost_bps=24,
+            )
             aapl_signal = self._signal(
                 db,
                 "AAPL.US",
@@ -575,10 +584,20 @@ class TestStrategyV2PortfolioService:
                 StrategyV2PortfolioObservation.registration_id
                 == registrations["VWAP_EDGE_75BPS_POOL"].id
             ).one()
+            observed_fixed_band = db.query(
+                StrategyV2PortfolioObservation
+            ).filter(
+                StrategyV2PortfolioObservation.registration_id
+                == registrations[
+                    "VWAP_EDGE_OBS_COST_75BPS_POOL"
+                ].id
+            ).one()
 
             assert stop_band.status == "NO_ELIGIBLE"
             assert fixed_band.status == "OPEN"
             assert fixed_band.selected_symbol == "AAPL.US"
+            assert observed_fixed_band.status == "OPEN"
+            assert observed_fixed_band.selected_symbol == "AAPL.US"
             candidates = json.loads(fixed_band.candidates_json)
             assert len(candidates) == 1
             assert candidates[0]["stop_distance_bps"] == 45
@@ -594,6 +613,25 @@ class TestStrategyV2PortfolioService:
             assert (
                 challenger.edge_filter
                 == "COST_TO_75BPS_VWAP_DISCOUNT"
+            )
+            observed_challenger = next(
+                row
+                for row in report.variants
+                if row.policy
+                == "VWAP_EDGE_OBS_COST_75BPS_POOL"
+            )
+            assert (
+                observed_challenger.edge_filter
+                == "OBSERVED_COST_TO_75BPS_VWAP_DISCOUNT"
+            )
+            observed_candidates = json.loads(
+                observed_fixed_band.candidates_json
+            )
+            assert (
+                observed_candidates[0][
+                    "observed_round_trip_cost_bps"
+                ]
+                == 24
             )
 
     def test_future_shadow_version_is_not_visible_to_vwap_edge(
@@ -634,6 +672,7 @@ class TestStrategyV2PortfolioService:
                 "VWAP_EDGE_POOL",
                 "VWAP_EDGE_75BPS_POOL",
                 "VWAP_EDGE_OBSERVED_COST_POOL",
+                "VWAP_EDGE_OBS_COST_75BPS_POOL",
             ):
                 observation = db.query(
                     StrategyV2PortfolioObservation
@@ -740,9 +779,18 @@ class TestStrategyV2PortfolioService:
                     "VWAP_EDGE_OBSERVED_COST_POOL"
                 ].id
             ).one()
+            observed_fixed_pool = db.query(
+                StrategyV2PortfolioObservation
+            ).filter(
+                StrategyV2PortfolioObservation.registration_id
+                == registrations[
+                    "VWAP_EDGE_OBS_COST_75BPS_POOL"
+                ].id
+            ).one()
 
             assert fixed_pool.selected_symbol == "MSFT.US"
             assert observed_pool.selected_symbol == "AAPL.US"
+            assert observed_fixed_pool.selected_symbol == "AAPL.US"
             fixed_candidates = json.loads(
                 fixed_pool.candidates_json
             )
@@ -765,6 +813,16 @@ class TestStrategyV2PortfolioService:
             assert (
                 observed_variant.edge_filter
                 == "OBSERVED_COST_TO_STOP_VWAP_DISCOUNT"
+            )
+            fixed_band_variant = next(
+                row
+                for row in report.variants
+                if row.policy
+                == "VWAP_EDGE_OBS_COST_75BPS_POOL"
+            )
+            assert (
+                fixed_band_variant.edge_filter
+                == "OBSERVED_COST_TO_75BPS_VWAP_DISCOUNT"
             )
 
     def test_cash_baseline_uses_observed_sessions_not_trade_count(

@@ -55,6 +55,7 @@ describe('Strategy v2 shadow lab', () => {
       '@getStrategyShadowStatus',
       '@getStrategyShadowDecisions',
       '@getStrategyShadowEvaluation',
+      '@getStrategyShadowPortfolioRouting',
       '@getStrategyShadowBracketChallengers',
       '@evaluateStrategyShadowAdxChallengers',
       '@getStrategyShadowForwardValidation',
@@ -97,6 +98,23 @@ describe('Strategy v2 shadow lab', () => {
       .and('contain', '采集中')
       .and('contain', '154.0 bps')
 
+    cy.get('[data-testid="shadow-portfolio-routing"]')
+      .should('contain', '单资金槽选股路由')
+      .and('contain', 'NVDA.US')
+      .and('contain', '只读影子')
+      .and('contain', '禁止自动晋级')
+      .and('contain', '禁止回填')
+    cy.get('[data-testid="shadow-portfolio-table"]')
+      .should('contain', '固定主标的')
+      .and('contain', '全池 · 固定 75bp')
+      .and('contain', '全池 · 观测成本 75bp')
+      .and('contain', '固定成本 → 75bp')
+      .and('contain', '观测成本 → 75bp')
+      .and('contain', '+0.520%')
+      .and('contain', '+0.320%')
+      .and('contain', 'AAPL.US 3')
+      .and('contain', '闭环交易不足')
+
     cy.get('[data-testid="shadow-safety-tags"]')
       .should('contain', '影子观察')
       .and('contain', '永不下单')
@@ -134,6 +152,7 @@ describe('Strategy v2 shadow lab', () => {
       .and('contain', '配对交易不足')
 
     cy.get('[data-testid="tab-strategy-shadow"]').should('not.contain', '实盘应用')
+    cy.get('[data-testid="shadow-portfolio-routing"]').should('not.contain', '实盘应用')
     cy.get('[data-testid="shadow-adx-challengers"]').should('not.contain', '应用参数')
     cy.get('[data-testid="shadow-warmup-diagnostic"]').should('not.contain', '应用参数')
     cy.get('[data-testid="shadow-forward-validation"]')

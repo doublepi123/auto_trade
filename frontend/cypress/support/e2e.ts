@@ -2130,6 +2130,112 @@ Cypress.Commands.add('stubApi', () => {
     },
   }).as('getStrategyShadowEvaluation')
 
+  cy.intercept('GET', '/api/strategy-shadow/portfolio-routing*', (req) => {
+    const metrics = (
+      compoundedReturnPct: number,
+      closedTrades: number,
+      selectionsBySymbol: Record<string, number>,
+    ) => ({
+      signal_groups: 24,
+      selected_signals: 8,
+      skipped_occupied: 2,
+      no_eligible: 14,
+      pending_entries: 0,
+      open_trades: 0,
+      missed_entries: 0,
+      closed_trades: closedTrades,
+      observed_sessions: 6,
+      distinct_symbols: Object.keys(selectionsBySymbol).length,
+      win_rate: 0.625,
+      mean_net_return_pct: 0.08,
+      cumulative_net_return_pct: compoundedReturnPct,
+      compounded_return_pct: compoundedReturnPct,
+      max_drawdown_pct: 0.19,
+      selections_by_symbol: selectionsBySymbol,
+      latest_signal_at: '2026-07-24T19:45:00Z',
+    })
+    const variant = (
+      registrationId: number,
+      policy: string,
+      edgeFilter: string,
+      compoundedReturnPct: number,
+      selectionsBySymbol: Record<string, number>,
+    ) => ({
+      registration_id: registrationId,
+      policy,
+      algorithm_version: `strategy-v2-portfolio-${registrationId}`,
+      evaluator_digest: `${registrationId}`.repeat(64),
+      registered_at: '2026-07-24T20:07:05Z',
+      eligible_after: '2026-07-24T20:08:00Z',
+      edge_filter: edgeFilter,
+      status: 'COLLECTING',
+      metrics: metrics(compoundedReturnPct, 5, selectionsBySymbol),
+      fixed_primary_compounded_return_pct: 0.2,
+      compounded_return_delta_pct: compoundedReturnPct - 0.2,
+      minimum_ready_trades: 20,
+      minimum_mature_trades: 50,
+      minimum_ready_sessions: 10,
+      minimum_routed_symbols: 3,
+      promotion_ready: false,
+      blockers: [
+        'MIN_CLOSED_TRADES',
+        'MIN_OBSERVED_SESSIONS',
+      ],
+    })
+    req.reply({
+      body: {
+        primary_symbol: 'NVDA.US',
+        mode: 'SHADOW',
+        order_submission_allowed: false,
+        automatic_promotion_allowed: false,
+        historical_backfill_allowed: false,
+        capital_slots: 1,
+        evaluation_scope: 'FORWARD_OUT_OF_SAMPLE',
+        variants: [
+          variant(1, 'FIXED_PRIMARY', 'NONE', 0.2, { 'NVDA.US': 5 }),
+          variant(2, 'SELECTED_UNIVERSE', 'NONE', 0.31, { 'MSFT.US': 3, 'NVDA.US': 2 }),
+          variant(3, 'QUANT_CANDIDATE', 'NONE', 0.28, { 'AAPL.US': 3, 'NVDA.US': 2 }),
+          variant(4, 'QUANT_WATCH_PLUS', 'NONE', 0.26, { 'META.US': 3, 'NVDA.US': 2 }),
+          variant(
+            5,
+            'SELECTED_VWAP_EDGE',
+            'COST_TO_STOP_VWAP_DISCOUNT',
+            0.35,
+            { 'AAPL.US': 3, 'CAT.US': 2 },
+          ),
+          variant(
+            6,
+            'VWAP_EDGE_POOL',
+            'COST_TO_STOP_VWAP_DISCOUNT',
+            0.38,
+            { 'TER.US': 3, 'MRVL.US': 2 },
+          ),
+          variant(
+            7,
+            'VWAP_EDGE_75BPS_POOL',
+            'COST_TO_75BPS_VWAP_DISCOUNT',
+            0.44,
+            { 'TER.US': 3, 'AAPL.US': 2 },
+          ),
+          variant(
+            8,
+            'VWAP_EDGE_OBSERVED_COST_POOL',
+            'OBSERVED_COST_TO_STOP_VWAP_DISCOUNT',
+            0.41,
+            { 'AAPL.US': 3, 'CAT.US': 2 },
+          ),
+          variant(
+            9,
+            'VWAP_EDGE_OBS_COST_75BPS_POOL',
+            'OBSERVED_COST_TO_75BPS_VWAP_DISCOUNT',
+            0.52,
+            { 'AAPL.US': 3, 'TER.US': 2 },
+          ),
+        ],
+      },
+    })
+  }).as('getStrategyShadowPortfolioRouting')
+
   cy.intercept('GET', '/api/strategy-shadow/bracket-challengers*', (req) => {
     const common = {
       source_config_version: strategyShadowConfig.config_version,

@@ -8,10 +8,16 @@ import type {
   StrategyShadowDecisionPage,
   StrategyShadowForwardValidationRegisterRequest,
   StrategyShadowForwardValidationResponse,
+  StrategyShadowPortfolioRoutingReport,
   StrategyShadowStatus,
   StrategyShadowEvaluation,
   StrategyShadowVersion,
 } from '../types'
+
+export async function getStrategyShadowPortfolioRouting(): Promise<StrategyShadowPortfolioRoutingReport> {
+  const response = await api.get('/api/strategy-shadow/portfolio-routing')
+  return response.data
+}
 
 export async function getStrategyShadowBracketChallengers(
   symbol?: string,
