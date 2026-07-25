@@ -479,63 +479,64 @@ def test_observed_cost_fixed_75bps_pool_completes_factorial() -> None:
 
 
 def test_risk_group_relative_pool_requires_peers_and_ranks_residual_edge() -> None:
+    candidates = [
+        _candidate(
+            "AAPL.US",
+            1,
+            selected=True,
+            rank=1,
+            residual_1m_bps=-60,
+            residual_5m_bps=-70,
+            round_trip_cost_bps=14,
+            observed_round_trip_cost_bps=24,
+            stop_distance_bps=45,
+            risk_group="Information Technology",
+            risk_group_peer_count=3,
+            risk_group_relative_1m_bps=-40,
+            risk_group_relative_5m_bps=-50,
+        ),
+        _candidate(
+            "MSFT.US",
+            2,
+            residual_1m_bps=-70,
+            residual_5m_bps=-70,
+            round_trip_cost_bps=14,
+            observed_round_trip_cost_bps=31,
+            stop_distance_bps=45,
+            risk_group="Information Technology",
+            risk_group_peer_count=3,
+            risk_group_relative_1m_bps=-30,
+            risk_group_relative_5m_bps=-35,
+        ),
+        _candidate(
+            "AMD.US",
+            3,
+            residual_1m_bps=-55,
+            residual_5m_bps=-60,
+            round_trip_cost_bps=14,
+            observed_round_trip_cost_bps=20,
+            stop_distance_bps=45,
+            risk_group="Information Technology",
+            risk_group_peer_count=3,
+            risk_group_relative_1m_bps=-45,
+            risk_group_relative_5m_bps=-50,
+        ),
+        _candidate(
+            "NVDA.US",
+            4,
+            residual_1m_bps=-65,
+            residual_5m_bps=-65,
+            round_trip_cost_bps=14,
+            observed_round_trip_cost_bps=20,
+            stop_distance_bps=45,
+            risk_group="Information Technology",
+            risk_group_peer_count=2,
+            risk_group_relative_1m_bps=-45,
+            risk_group_relative_5m_bps=-45,
+        ),
+    ]
     ranked = rank_portfolio_candidates(
-        [
-            _candidate(
-                "AAPL.US",
-                1,
-                selected=True,
-                rank=1,
-                residual_1m_bps=-60,
-                residual_5m_bps=-70,
-                round_trip_cost_bps=14,
-                observed_round_trip_cost_bps=24,
-                stop_distance_bps=45,
-                risk_group="Information Technology",
-                risk_group_peer_count=3,
-                risk_group_relative_1m_bps=-40,
-                risk_group_relative_5m_bps=-50,
-            ),
-            _candidate(
-                "MSFT.US",
-                2,
-                residual_1m_bps=-70,
-                residual_5m_bps=-70,
-                round_trip_cost_bps=14,
-                observed_round_trip_cost_bps=31,
-                stop_distance_bps=45,
-                risk_group="Information Technology",
-                risk_group_peer_count=3,
-                risk_group_relative_1m_bps=-30,
-                risk_group_relative_5m_bps=-35,
-            ),
-            _candidate(
-                "AMD.US",
-                3,
-                residual_1m_bps=-55,
-                residual_5m_bps=-60,
-                round_trip_cost_bps=14,
-                observed_round_trip_cost_bps=20,
-                stop_distance_bps=45,
-                risk_group="Information Technology",
-                risk_group_peer_count=3,
-                risk_group_relative_1m_bps=-45,
-                risk_group_relative_5m_bps=-50,
-            ),
-            _candidate(
-                "NVDA.US",
-                4,
-                residual_1m_bps=-65,
-                residual_5m_bps=-65,
-                round_trip_cost_bps=14,
-                observed_round_trip_cost_bps=20,
-                stop_distance_bps=45,
-                risk_group="Information Technology",
-                risk_group_peer_count=2,
-                risk_group_relative_1m_bps=-45,
-                risk_group_relative_5m_bps=-45,
-            ),
-        ],
+        candidates,
         policy="RISK_GROUP_REL_OBS_75BPS_POOL",
         primary_symbol="NVDA.US",
     )
@@ -547,6 +548,23 @@ def test_risk_group_relative_pool_requires_peers_and_ranks_residual_edge() -> No
     assert (
         ranked[0]
         .risk_group_relative_observed_cost_fixed_75bps_score_bps
+        == 25
+    )
+
+    leave_one_out_ranked = rank_portfolio_candidates(
+        candidates,
+        policy="RISK_GROUP_LOO_OBS_75BPS_POOL",
+        primary_symbol="NVDA.US",
+    )
+
+    assert [item.symbol for item in leave_one_out_ranked] == [
+        "AMD.US",
+        "NVDA.US",
+        "AAPL.US",
+    ]
+    assert (
+        leave_one_out_ranked[1]
+        .risk_group_leave_one_out_observed_cost_fixed_75bps_score_bps
         == 25
     )
 

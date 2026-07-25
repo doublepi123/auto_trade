@@ -42,6 +42,7 @@ from app.domain.strategy_v2.bracket import (
 from app.domain.strategy_v2.portfolio_routing import (
     PortfolioRoutingCandidate,
     PortfolioRoutingPolicy,
+    RISK_GROUP_LEAVE_ONE_OUT_MIN_PEERS,
     RISK_GROUP_RELATIVE_MIN_PEERS,
     VWAP_EDGE_FIXED_MAX_DISCOUNT_BPS,
     rank_portfolio_candidates,
@@ -81,6 +82,7 @@ __all__ = [
     "evaluate_bracket_bar",
     "PortfolioRoutingCandidate",
     "PortfolioRoutingPolicy",
+    "RISK_GROUP_LEAVE_ONE_OUT_MIN_PEERS",
     "RISK_GROUP_RELATIVE_MIN_PEERS",
     "VWAP_EDGE_FIXED_MAX_DISCOUNT_BPS",
     "rank_portfolio_candidates",

@@ -2505,6 +2505,7 @@ const portfolioRoutingPolicyLabels: Record<
   VWAP_EDGE_OBSERVED_COST_POOL: '全池 · 观测成本至止损',
   VWAP_EDGE_OBS_COST_75BPS_POOL: '全池 · 观测成本 75bp',
   RISK_GROUP_REL_OBS_75BPS_POOL: '风险组残差 · 观测成本 75bp',
+  RISK_GROUP_LOO_OBS_75BPS_POOL: '风险组留一残差 · 观测成本 75bp',
 }
 
 function portfolioRoutingPolicyLabel(
@@ -2523,6 +2524,7 @@ const portfolioRoutingEdgeLabels: Record<
   OBSERVED_COST_TO_STOP_VWAP_DISCOUNT: '观测成本 → 止损',
   OBSERVED_COST_TO_75BPS_VWAP_DISCOUNT: '观测成本 → 75bp',
   RISK_GROUP_REL_OBS_COST_TO_75BPS: '风险组残差 + 观测成本 → 75bp',
+  RISK_GROUP_LOO_OBS_COST_TO_75BPS: '风险组留一残差 + 观测成本 → 75bp',
 }
 
 function portfolioRoutingEdgeLabel(

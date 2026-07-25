@@ -285,7 +285,7 @@ class TestStrategyV2PortfolioService:
             registrations = db.query(
                 StrategyV2PortfolioRegistration
             ).all()
-            assert len(registrations) == 10
+            assert len(registrations) == 11
             assert {
                 row.eligible_after.replace(tzinfo=timezone.utc)
                 for row in registrations
@@ -293,6 +293,24 @@ class TestStrategyV2PortfolioService:
             assert all(
                 len(row.evaluator_digest) == 64
                 for row in registrations
+            )
+            risk_group_v1 = next(
+                row
+                for row in registrations
+                if row.policy == "RISK_GROUP_REL_OBS_75BPS_POOL"
+            )
+            risk_group_loo = next(
+                row
+                for row in registrations
+                if row.policy == "RISK_GROUP_LOO_OBS_75BPS_POOL"
+            )
+            assert risk_group_v1.evaluator_digest == (
+                "9fa13dbedfbeb508e4b3ecca23d1a63c7"
+                "fe6c559dc71356922dda4c11528806e"
+            )
+            assert (
+                risk_group_loo.evaluator_digest
+                != risk_group_v1.evaluator_digest
             )
             assert db.query(
                 StrategyV2PortfolioObservation
@@ -323,7 +341,7 @@ class TestStrategyV2PortfolioService:
             )
             report = service.get_report("NVDA.US")
 
-            assert len(report.variants) == 10
+            assert len(report.variants) == 11
             assert sum(
                 row.algorithm_version.endswith("-v2")
                 for row in report.variants
@@ -506,6 +524,7 @@ class TestStrategyV2PortfolioService:
                 "VWAP_EDGE_OBSERVED_COST_POOL": "",
                 "VWAP_EDGE_OBS_COST_75BPS_POOL": "",
                 "RISK_GROUP_REL_OBS_75BPS_POOL": "",
+                "RISK_GROUP_LOO_OBS_75BPS_POOL": "",
             }
 
             self._signal(
@@ -522,7 +541,7 @@ class TestStrategyV2PortfolioService:
                 StrategyV2PortfolioObservation.signal_at
                 == _FIRST_SIGNAL + timedelta(minutes=2)
             ).all()
-            assert len(overlap_rows) == 10
+            assert len(overlap_rows) == 11
             registrations_by_id = {
                 row.id: row.policy
                 for row in db.query(
@@ -544,6 +563,7 @@ class TestStrategyV2PortfolioService:
                 "VWAP_EDGE_OBSERVED_COST_POOL": "NO_ELIGIBLE",
                 "VWAP_EDGE_OBS_COST_75BPS_POOL": "NO_ELIGIBLE",
                 "RISK_GROUP_REL_OBS_75BPS_POOL": "NO_ELIGIBLE",
+                "RISK_GROUP_LOO_OBS_75BPS_POOL": "NO_ELIGIBLE",
             }
 
             exit_at = _FIRST_SIGNAL + timedelta(minutes=5)
@@ -836,6 +856,7 @@ class TestStrategyV2PortfolioService:
                 "VWAP_EDGE_OBSERVED_COST_POOL",
                 "VWAP_EDGE_OBS_COST_75BPS_POOL",
                 "RISK_GROUP_REL_OBS_75BPS_POOL",
+                "RISK_GROUP_LOO_OBS_75BPS_POOL",
             ):
                 observation = db.query(
                     StrategyV2PortfolioObservation
@@ -988,7 +1009,7 @@ class TestStrategyV2PortfolioService:
                 == "OBSERVED_COST_TO_75BPS_VWAP_DISCOUNT"
             )
 
-    def test_risk_group_relative_pool_uses_causal_peer_median(
+    def test_risk_group_routes_use_causal_inclusive_and_leave_one_out_medians(
         self,
     ) -> None:
         with self._db() as db:
@@ -1072,6 +1093,34 @@ class TestStrategyV2PortfolioService:
             assert candidates[0][
                 "risk_group_relative_5m_bps"
             ] == pytest.approx(-50, abs=0.1)
+            leave_one_out_registration = db.query(
+                StrategyV2PortfolioRegistration
+            ).filter(
+                StrategyV2PortfolioRegistration.policy
+                == "RISK_GROUP_LOO_OBS_75BPS_POOL"
+            ).one()
+            leave_one_out_observation = db.query(
+                StrategyV2PortfolioObservation
+            ).filter(
+                StrategyV2PortfolioObservation.registration_id
+                == leave_one_out_registration.id
+            ).one()
+            assert leave_one_out_observation.status == "OPEN"
+            assert leave_one_out_observation.selected_symbol == "AAPL.US"
+            leave_one_out_candidates = json.loads(
+                leave_one_out_observation.candidates_json
+            )
+            assert len(leave_one_out_candidates) == 1
+            assert (
+                leave_one_out_candidates[0]["risk_group_peer_count"]
+                == 2
+            )
+            assert leave_one_out_candidates[0][
+                "risk_group_relative_1m_bps"
+            ] == pytest.approx(-45, abs=0.1)
+            assert leave_one_out_candidates[0][
+                "risk_group_relative_5m_bps"
+            ] == pytest.approx(-55, abs=0.1)
             report = service.get_report("NVDA.US")
             challenger = next(
                 row
@@ -1082,6 +1131,16 @@ class TestStrategyV2PortfolioService:
             assert (
                 challenger.edge_filter
                 == "RISK_GROUP_REL_OBS_COST_TO_75BPS"
+            )
+            leave_one_out_challenger = next(
+                row
+                for row in report.variants
+                if row.policy
+                == "RISK_GROUP_LOO_OBS_75BPS_POOL"
+            )
+            assert (
+                leave_one_out_challenger.edge_filter
+                == "RISK_GROUP_LOO_OBS_COST_TO_75BPS"
             )
 
     def test_risk_group_relative_pool_excludes_late_peer(
@@ -1154,6 +1213,20 @@ class TestStrategyV2PortfolioService:
             ).one()
             assert observation.status == "NO_ELIGIBLE"
             assert observation.candidate_count == 0
+            leave_one_out_registration = db.query(
+                StrategyV2PortfolioRegistration
+            ).filter(
+                StrategyV2PortfolioRegistration.policy
+                == "RISK_GROUP_LOO_OBS_75BPS_POOL"
+            ).one()
+            leave_one_out_observation = db.query(
+                StrategyV2PortfolioObservation
+            ).filter(
+                StrategyV2PortfolioObservation.registration_id
+                == leave_one_out_registration.id
+            ).one()
+            assert leave_one_out_observation.status == "NO_ELIGIBLE"
+            assert leave_one_out_observation.candidate_count == 0
 
     def test_cash_baseline_uses_observed_sessions_not_trade_count(
         self,
