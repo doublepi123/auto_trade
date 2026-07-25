@@ -971,6 +971,26 @@ def test_refresh_persists_rotation_shadow_evidence() -> None:
         assert parameters[
             "rotation_next_cohort_registration_status"
         ] == "NOT_DUE"
+        concentration = parameters[
+            "rotation_concentration_challenger_snapshot"
+        ]
+        assert concentration["variant_name"] == (
+            "concentrated_top6_12_1"
+        )
+        assert concentration["evidence_mode"] == (
+            "BACKFILLED_AFTER_ENTRY"
+        )
+        assert concentration["order_execution_allowed"] is False
+        concentration_registration = parameters[
+            "rotation_concentration_challenger_registration"
+        ]
+        assert concentration_registration["target_signals"]
+        assert len(
+            concentration_registration["target_signals"]
+        ) <= 6
+        assert parameters[
+            "rotation_next_concentration_challenger_registration_status"
+        ] == "NOT_DUE"
         challenger = parameters[
             "rotation_weighting_challenger_snapshot"
         ]
@@ -1046,6 +1066,22 @@ def test_refresh_reuses_frozen_rotation_registration_next_day() -> None:
             ]
         )
         assert second_snapshot["selection_drift_detected"] is False
+        first_concentration = first_parameters[
+            "rotation_concentration_challenger_snapshot"
+        ]
+        second_concentration = second_parameters[
+            "rotation_concentration_challenger_snapshot"
+        ]
+        assert second_concentration["registered_as_of_date"] == (
+            "2026-07-23"
+        )
+        assert second_concentration["mark_date"] == "2026-07-24"
+        assert second_concentration["target_symbols"] == (
+            first_concentration["target_symbols"]
+        )
+        assert second_concentration[
+            "selection_drift_detected"
+        ] is False
         first_challenger = first_parameters[
             "rotation_weighting_challenger_snapshot"
         ]
@@ -1122,6 +1158,23 @@ def test_month_end_refresh_preregisters_next_rotation_cohort() -> None:
         assert registration["forward_eligible"] is True
         assert registration["target_signals"]
         assert parameters[
+            "rotation_next_concentration_challenger_registration_status"
+        ] == "REGISTERED"
+        concentration_registration = parameters[
+            "rotation_next_concentration_challenger_registration"
+        ]
+        assert concentration_registration["cohort_month"] == (
+            "2026-08-01"
+        )
+        assert concentration_registration["signal_date"] == (
+            "2026-07-31"
+        )
+        assert concentration_registration["forward_eligible"] is True
+        assert concentration_registration["variant_name"] == (
+            "concentrated_top6_12_1"
+        )
+        assert concentration_registration["target_signals"]
+        assert parameters[
             "rotation_next_weighting_challenger_registration_status"
         ] == "REGISTERED"
         challenger_registration = parameters[
@@ -1138,6 +1191,96 @@ def test_month_end_refresh_preregisters_next_rotation_cohort() -> None:
             "diversified_top8_12_1_inverse_vol_25"
         )
         assert challenger_registration["target_signals"]
+    finally:
+        db.close()
+
+
+def test_next_month_refresh_reuses_all_preregistered_rotation_tracks() -> None:
+    db = _db()
+    try:
+        month_end = UniverseSelectionService(
+            db,
+            _LongHistoryBroker(
+                end_date=datetime(
+                    2026,
+                    7,
+                    31,
+                    20,
+                    tzinfo=timezone.utc,
+                )
+            ),
+            catalog=_CATALOG,
+            config=_config(),
+            minimum_evaluable_ratio=0.5,
+            minimum_residency_days=1,
+            apply_to_watchlist=False,
+            enable_shadow=False,
+            now=datetime(
+                2026,
+                8,
+                1,
+                2,
+                tzinfo=timezone.utc,
+            ),
+        ).refresh()
+        august = UniverseSelectionService(
+            db,
+            _LongHistoryBroker(
+                end_date=datetime(
+                    2026,
+                    8,
+                    3,
+                    20,
+                    tzinfo=timezone.utc,
+                )
+            ),
+            catalog=_CATALOG,
+            config=_config(),
+            minimum_evaluable_ratio=0.5,
+            minimum_residency_days=1,
+            apply_to_watchlist=False,
+            enable_shadow=False,
+            now=datetime(
+                2026,
+                8,
+                4,
+                2,
+                tzinfo=timezone.utc,
+            ),
+        ).refresh()
+
+        month_end_parameters = json.loads(
+            month_end.run.parameters_json
+        )
+        august_parameters = json.loads(august.run.parameters_json)
+        track_keys = (
+            (
+                "rotation_next_cohort_registration",
+                "rotation_forward_snapshot",
+            ),
+            (
+                "rotation_next_concentration_challenger_registration",
+                "rotation_concentration_challenger_snapshot",
+            ),
+            (
+                "rotation_next_weighting_challenger_registration",
+                "rotation_weighting_challenger_snapshot",
+            ),
+        )
+        for registration_key, snapshot_key in track_keys:
+            registration = month_end_parameters[registration_key]
+            snapshot = august_parameters[snapshot_key]
+            assert snapshot["evidence_mode"] == (
+                "FORWARD_PRECOMMITTED"
+            )
+            assert snapshot["registered_as_of_date"] == "2026-07-31"
+            assert snapshot["entry_date"] == "2026-08-03"
+            assert snapshot["forward_observation_sessions"] == 1
+            assert snapshot["target_symbols"] == [
+                signal["symbol"]
+                for signal in registration["target_signals"]
+            ]
+            assert snapshot["order_execution_allowed"] is False
     finally:
         db.close()
 

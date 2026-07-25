@@ -172,14 +172,34 @@ const rotationPointInTimeSensitivityStub = {
   evaluation: {
     ...rotationEvaluationStub,
     data_scope: 'POINT_IN_TIME_CURRENT_CATALOG',
-    selected_variant: 'diversified_top8_12_1',
-    validated_challenger_variant: null,
+    selected_variant: 'concentrated_top6_12_1',
+    selected_variant_validation_passed: true,
+    validated_challenger_variant: 'concentrated_top6_12_1',
     promotion_blockers: [
       'HISTORICAL_CONSTITUENTS_OMITTED',
       'POINT_IN_TIME_MEMBERSHIP_HISTORY_PARTIAL',
       'ROTATION_FORWARD_OBSERVATIONS_REQUIRED',
     ],
     variants: [
+      {
+        ...rotationEvaluationStub.variants[0],
+        variant: {
+          ...rotationEvaluationStub.variants[0].variant,
+          name: 'concentrated_top6_12_1',
+          max_selected: 6,
+          max_per_risk_group: 2,
+          weighting: 'equal',
+          max_position_weight_pct: 100,
+        },
+        expanding_validation_passed: true,
+        expanding_folds_passed: 2,
+        expanding_validation: {
+          ...rotationEvaluationStub.variants[0].expanding_validation,
+          annualized_return_pct: 57.4,
+          sharpe: 1.92,
+          max_drawdown_pct: 13.0,
+        },
+      },
       {
         ...rotationEvaluationStub.variants[0],
         variant: {
@@ -291,6 +311,18 @@ const rotationWeightingChallengerStub = {
   net_liquidation_return_pct: 5.8,
   excess_return_vs_qqq_pct: 2.6,
   excess_return_vs_dia_pct: 4.0,
+}
+
+const rotationConcentrationChallengerStub = {
+  ...rotationForwardStub,
+  variant_name: 'concentrated_top6_12_1',
+  gross_return_pct: 8.64,
+  entry_cost_pct: 0.11,
+  estimated_exit_cost_pct: 0.11,
+  total_estimated_cost_pct: 0.22,
+  net_liquidation_return_pct: 8.42,
+  excess_return_vs_qqq_pct: 5.22,
+  excess_return_vs_dia_pct: 6.62,
 }
 
 function initialStatus(): StatusStub {
@@ -1256,6 +1288,7 @@ Cypress.Commands.add('stubApi', () => {
         rotation_evaluation: rotationEvaluationStub,
         rotation_point_in_time_sensitivity: rotationPointInTimeSensitivityStub,
         rotation_forward_snapshot: rotationForwardStub,
+        rotation_concentration_challenger_snapshot: rotationConcentrationChallengerStub,
         rotation_weighting_challenger_snapshot: rotationWeightingChallengerStub,
       },
       error: '',

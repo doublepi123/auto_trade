@@ -27,6 +27,7 @@ from app.domain.universe_selection.membership_history import (
     load_index_membership_history,
 )
 from app.domain.universe_selection.rotation_walk_forward import (
+    CONCENTRATED_ROTATION_VARIANT,
     DIVERSIFIED_INVERSE_VOLATILITY_VARIANT,
     DIVERSIFIED_ROTATION_VARIANT,
     DEFAULT_ROTATION_VARIANTS,
@@ -85,6 +86,7 @@ __all__ = [
     "RotationValidationFold",
     "RotationWalkForwardResult",
     "UniverseSelectionConfig",
+    "CONCENTRATED_ROTATION_VARIANT",
     "DEFAULT_ROTATION_VARIANTS",
     "DIVERSIFIED_ROTATION_VARIANT",
     "DIVERSIFIED_INVERSE_VOLATILITY_VARIANT",

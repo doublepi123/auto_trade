@@ -171,6 +171,106 @@
           </section>
 
           <section
+            v-if="universeRotationConcentrationChallenger"
+            class="rotation-forward rotation-concentration-challenger"
+            data-testid="rotation-concentration-challenger"
+          >
+            <div class="rotation-forward-header">
+              <div>
+                <div class="rotation-forward-title">
+                  <strong>集中 Top6 影子</strong>
+                  <el-tag
+                    :type="rotationForwardTagType(universeRotationConcentrationChallenger.evidence_mode)"
+                    size="small"
+                    effect="plain"
+                  >
+                    {{ rotationForwardModeLabel(universeRotationConcentrationChallenger.evidence_mode) }}
+                  </el-tag>
+                  <el-tag type="warning" size="small" effect="plain">每风险组最多 2 只</el-tag>
+                </div>
+                <small>{{ universeRotationConcentrationChallenger.algorithm_version }}</small>
+              </div>
+              <div class="rotation-forward-dates">
+                <span>
+                  信号
+                  <strong>{{ universeRotationConcentrationChallenger.signal_date || '-' }}</strong>
+                </span>
+                <span>
+                  入场
+                  <strong>{{ universeRotationConcentrationChallenger.entry_date || '-' }}</strong>
+                </span>
+                <span>
+                  估值
+                  <strong>{{ universeRotationConcentrationChallenger.mark_date || '-' }}</strong>
+                </span>
+              </div>
+            </div>
+
+            <div
+              class="rotation-forward-symbols"
+              data-testid="rotation-concentration-symbols"
+            >
+              <span>冻结成分</span>
+              <div v-if="universeRotationConcentrationChallenger.holdings.length">
+                <el-tag
+                  v-for="holding in universeRotationConcentrationChallenger.holdings"
+                  :key="holding.symbol"
+                  size="small"
+                  effect="plain"
+                >
+                  {{ holding.symbol }} {{ formatPercent(holding.weight_pct) }}
+                </el-tag>
+              </div>
+              <strong v-else>现金观察</strong>
+            </div>
+
+            <div
+              class="rotation-forward-metrics"
+              data-testid="rotation-concentration-metrics"
+            >
+              <div>
+                <span>净清算收益</span>
+                <strong>{{ formatSignedPercent(universeRotationConcentrationChallenger.net_liquidation_return_pct) }}</strong>
+              </div>
+              <div>
+                <span>相对 Top8</span>
+                <strong>{{ formatSignedPercent(rotationConcentrationReturnDelta) }}</strong>
+              </div>
+              <div>
+                <span>超额 QQQ</span>
+                <strong>{{ formatSignedPercent(universeRotationConcentrationChallenger.excess_return_vs_qqq_pct) }}</strong>
+              </div>
+              <div>
+                <span>完整估算成本</span>
+                <strong>{{ formatPercent(universeRotationConcentrationChallenger.total_estimated_cost_pct) }}</strong>
+              </div>
+              <div>
+                <span>前向会话</span>
+                <strong>
+                  {{ universeRotationConcentrationChallenger.forward_observation_sessions }}/{{ universeRotationConcentrationChallenger.elapsed_sessions }}
+                </strong>
+              </div>
+            </div>
+
+            <div class="rotation-forward-footer">
+              <span>
+                登记 {{ universeRotationConcentrationChallenger.registered_as_of_date || '-' }}
+                · {{ rotationVariantLabel(universeRotationConcentrationChallenger.variant_name) }}
+                · 并行只读
+              </span>
+              <strong v-if="universeRotationConcentrationChallenger.evidence_mode === 'BACKFILLED_AFTER_ENTRY'">
+                当前仅作回填对照；月末会与 Top8 同时预登记下月组合。
+              </strong>
+              <strong v-else-if="universeRotationConcentrationChallenger.evidence_mode === 'FORWARD_PRECOMMITTED'">
+                已在入场前冻结；只验证集中度溢价，不改变当前选股或触发订单。
+              </strong>
+              <strong v-else>
+                集中度证据暂不可用，不会回退到事后重算。
+              </strong>
+            </div>
+          </section>
+
+          <section
             v-if="universeRotationWeightingChallenger"
             class="rotation-forward rotation-weighting-challenger"
             data-testid="rotation-weighting-challenger"
@@ -408,10 +508,44 @@
             </div>
 
             <div
-              v-if="rotationPointInTimeEqual || rotationPointInTimeInverse"
+              v-if="rotationPointInTimeConcentrated || rotationPointInTimeEqual || rotationPointInTimeInverse"
               class="rotation-point-in-time-variants"
               data-testid="rotation-point-in-time-metrics"
             >
+              <div
+                v-if="rotationPointInTimeConcentrated"
+                class="rotation-point-in-time-variant"
+              >
+                <div class="rotation-point-in-time-variant-title">
+                  <strong>集中 Top6</strong>
+                  <small>每风险组最多 2 只</small>
+                </div>
+                <span>
+                  多窗年化
+                  <strong>{{ formatSignedPercent(
+                    rotationPointInTimeConcentrated.expanding_validation?.annualized_return_pct
+                      ?? rotationPointInTimeConcentrated.validation.annualized_return_pct,
+                  ) }}</strong>
+                </span>
+                <span>
+                  Sharpe
+                  <strong>{{ formatDecimal(
+                    rotationPointInTimeConcentrated.expanding_validation?.sharpe
+                      ?? rotationPointInTimeConcentrated.validation.sharpe,
+                  ) }}</strong>
+                </span>
+                <span>
+                  最大回撤
+                  <strong>{{ formatPercent(
+                    rotationPointInTimeConcentrated.expanding_validation?.max_drawdown_pct
+                      ?? rotationPointInTimeConcentrated.validation.max_drawdown_pct,
+                  ) }}</strong>
+                </span>
+                <span>
+                  窗口
+                  <strong>{{ rotationPointInTimeConcentrated.expanding_folds_passed ?? 0 }}/{{ rotationPointInTimeConcentrated.expanding_folds_total ?? 0 }}</strong>
+                </span>
+              </div>
               <div
                 v-if="rotationPointInTimeEqual"
                 class="rotation-point-in-time-variant"
@@ -1382,6 +1516,12 @@ const universeRotationPointInTime = computed<UniverseRotationPointInTimeSensitiv
   return isRotationPointInTimeSensitivity(raw) ? raw : null
 })
 
+const rotationPointInTimeConcentrated = computed<UniverseRotationVariantEvaluation | null>(() => (
+  universeRotationPointInTime.value?.evaluation?.variants.find(
+    (variant) => variant.variant.name === 'concentrated_top6_12_1',
+  ) ?? null
+))
+
 const rotationPointInTimeEqual = computed<UniverseRotationVariantEvaluation | null>(() => (
   universeRotationPointInTime.value?.evaluation?.variants.find(
     (variant) => variant.variant.name === 'diversified_top8_12_1',
@@ -1399,9 +1539,22 @@ const universeRotationForward = computed<UniverseRotationForwardSnapshot | null>
   return isRotationForwardSnapshot(raw) ? raw : null
 })
 
+const universeRotationConcentrationChallenger = computed<UniverseRotationForwardSnapshot | null>(() => {
+  const raw = universeRun.value?.parameters.rotation_concentration_challenger_snapshot
+  return isRotationForwardSnapshot(raw) ? raw : null
+})
+
 const universeRotationWeightingChallenger = computed<UniverseRotationForwardSnapshot | null>(() => {
   const raw = universeRun.value?.parameters.rotation_weighting_challenger_snapshot
   return isRotationForwardSnapshot(raw) ? raw : null
+})
+
+const rotationConcentrationReturnDelta = computed<number | null>(() => {
+  const incumbent = universeRotationForward.value?.net_liquidation_return_pct
+  const challenger = universeRotationConcentrationChallenger.value?.net_liquidation_return_pct
+  if (incumbent === null || incumbent === undefined) return null
+  if (challenger === null || challenger === undefined) return null
+  return challenger - incumbent
 })
 
 const rotationWeightingReturnDelta = computed<number | null>(() => {

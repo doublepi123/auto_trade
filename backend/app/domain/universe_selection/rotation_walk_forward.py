@@ -69,6 +69,15 @@ DIVERSIFIED_ROTATION_VARIANT = RotationVariant(
     max_per_risk_group=1,
 )
 
+CONCENTRATED_ROTATION_VARIANT = RotationVariant(
+    name="concentrated_top6_12_1",
+    lookback_bars=252,
+    skip_bars=21,
+    sma_bars=200,
+    max_selected=6,
+    max_per_risk_group=2,
+)
+
 DIVERSIFIED_INVERSE_VOLATILITY_VARIANT = RotationVariant(
     name="diversified_top8_12_1_inverse_vol_25",
     lookback_bars=252,
@@ -98,14 +107,7 @@ DEFAULT_ROTATION_VARIANTS: tuple[RotationVariant, ...] = (
         max_selected=8,
         max_per_risk_group=2,
     ),
-    RotationVariant(
-        name="concentrated_top6_12_1",
-        lookback_bars=252,
-        skip_bars=21,
-        sma_bars=200,
-        max_selected=6,
-        max_per_risk_group=2,
-    ),
+    CONCENTRATED_ROTATION_VARIANT,
     RotationVariant(
         name="faster_top8_6_1",
         lookback_bars=126,

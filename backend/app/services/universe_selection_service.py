@@ -21,6 +21,7 @@ from app.core.broker import BrokerCandle
 from app.domain.strategy_v2 import RISK_GROUP_RELATIVE_MIN_PEERS
 from app.domain.universe_selection import (
     CATALOG_SOURCE_VERSION,
+    CONCENTRATED_ROTATION_VARIANT,
     DIVERSIFIED_INVERSE_VOLATILITY_VARIANT,
     DIVERSIFIED_ROTATION_VARIANT,
     DEFAULT_ROTATION_VARIANTS,
@@ -1312,6 +1313,16 @@ class UniverseSelectionService:
                 )
             )
             rotation_registration = None
+            rotation_concentration_challenger_snapshot = (
+                unavailable_rotation_forward_snapshot(
+                    "BENCHMARK_DATA_UNAVAILABLE",
+                    blocker=(
+                        "ROTATION_BENCHMARK_HISTORY_UNAVAILABLE"
+                    ),
+                    variant=CONCENTRATED_ROTATION_VARIANT,
+                )
+            )
+            rotation_concentration_challenger_registration = None
             rotation_weighting_challenger_snapshot = (
                 unavailable_rotation_forward_snapshot(
                     "BENCHMARK_DATA_UNAVAILABLE",
@@ -1487,6 +1498,56 @@ class UniverseSelectionService:
                     reason="ROTATION_MONTHLY_SIGNAL_UNAVAILABLE",
                 )
             try:
+                frozen_concentration_challenger_registration = (
+                    self._rotation_registration_for_month(
+                        cohort_month,
+                        available_as_of_date=expected_as_of_date,
+                        variant_name=(
+                            CONCENTRATED_ROTATION_VARIANT.name
+                        ),
+                        parameter_keys=(
+                            "rotation_concentration_challenger_registration",
+                            "rotation_next_concentration_challenger_registration",
+                        ),
+                    )
+                    if cohort_month is not None
+                    else None
+                )
+                concentration_challenger_evaluation = (
+                    evaluate_rotation_forward(
+                        candidates=self.catalog,
+                        bars_by_symbol=complete_by_symbol,
+                        benchmark_bars_by_symbol=benchmark_bars,
+                        base_config=self.config,
+                        as_of_date=expected_as_of_date,
+                        frozen_registration=(
+                            frozen_concentration_challenger_registration
+                        ),
+                        variant=CONCENTRATED_ROTATION_VARIANT,
+                    )
+                )
+                rotation_concentration_challenger_snapshot = (
+                    concentration_challenger_evaluation.snapshot
+                )
+                rotation_concentration_challenger_registration = (
+                    concentration_challenger_evaluation.registration
+                )
+            except Exception:
+                logger.exception(
+                    "rotation concentration challenger evaluation failed"
+                )
+                rotation_concentration_challenger_snapshot = (
+                    unavailable_rotation_forward_snapshot(
+                        "EVALUATION_FAILED",
+                        blocker=(
+                            "ROTATION_CONCENTRATION_CHALLENGER_"
+                            "EVALUATION_FAILED"
+                        ),
+                        variant=CONCENTRATED_ROTATION_VARIANT,
+                    )
+                )
+                rotation_concentration_challenger_registration = None
+            try:
                 frozen_weighting_challenger_registration = (
                     self._rotation_registration_for_month(
                         cohort_month,
@@ -1569,6 +1630,19 @@ class UniverseSelectionService:
             ),
             "rotation_next_cohort_registration_status": "NOT_DUE",
             "rotation_next_cohort_registration": None,
+            "rotation_concentration_challenger_snapshot": (
+                rotation_concentration_challenger_snapshot.to_dict()
+            ),
+            "rotation_concentration_challenger_registration": (
+                rotation_concentration_challenger_registration.to_dict()
+                if rotation_concentration_challenger_registration
+                is not None
+                else None
+            ),
+            "rotation_next_concentration_challenger_registration_status": (
+                "NOT_DUE"
+            ),
+            "rotation_next_concentration_challenger_registration": None,
             "rotation_weighting_challenger_snapshot": (
                 rotation_weighting_challenger_snapshot.to_dict()
             ),
@@ -1602,6 +1676,9 @@ class UniverseSelectionService:
                     "rotation_next_cohort_registration_status"
                 ] = "BLOCKED_INSUFFICIENT_COVERAGE"
                 rotation_parameters[
+                    "rotation_next_concentration_challenger_registration_status"
+                ] = "BLOCKED_INSUFFICIENT_COVERAGE"
+                rotation_parameters[
                     "rotation_next_weighting_challenger_registration_status"
                 ] = "BLOCKED_INSUFFICIENT_COVERAGE"
             else:
@@ -1623,6 +1700,27 @@ class UniverseSelectionService:
                 rotation_parameters[
                     "rotation_next_cohort_registration"
                 ] = next_registration.to_dict()
+                next_concentration_challenger_registration = (
+                    build_rotation_cohort_registration(
+                        candidates=self.catalog,
+                        bars_by_symbol=complete_by_symbol,
+                        base_config=self.config,
+                        cohort_month=next_cohort_month(
+                            expected_as_of_date
+                        ),
+                        signal_date=expected_as_of_date,
+                        registered_as_of_date=expected_as_of_date,
+                        variant=CONCENTRATED_ROTATION_VARIANT,
+                    )
+                )
+                rotation_parameters[
+                    "rotation_next_concentration_challenger_registration_status"
+                ] = "REGISTERED"
+                rotation_parameters[
+                    "rotation_next_concentration_challenger_registration"
+                ] = (
+                    next_concentration_challenger_registration.to_dict()
+                )
                 next_weighting_challenger_registration = (
                     build_rotation_cohort_registration(
                         candidates=self.catalog,
@@ -1962,6 +2060,9 @@ class UniverseSelectionService:
             "rotation_forward_variant": asdict(
                 DIVERSIFIED_ROTATION_VARIANT
             ),
+            "rotation_concentration_challenger_variant": asdict(
+                CONCENTRATED_ROTATION_VARIANT
+            ),
             "rotation_weighting_challenger_variant": asdict(
                 DIVERSIFIED_INVERSE_VOLATILITY_VARIANT
             ),
@@ -1969,6 +2070,10 @@ class UniverseSelectionService:
                 "previous-month-final-session-signal/"
                 "next-month-first-session-open/equal-weight/"
                 "estimated-round-trip-cost"
+            ),
+            "rotation_concentration_challenger_registration_policy": (
+                "same-12-1-signal/top6/two-per-risk-group/"
+                "equal-weight/estimated-round-trip-cost"
             ),
             "rotation_weighting_challenger_registration_policy": (
                 "same-frozen-top8/inverse-20d-volatility/"
