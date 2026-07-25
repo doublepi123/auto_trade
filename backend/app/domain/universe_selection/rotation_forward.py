@@ -4,7 +4,6 @@ import math
 from bisect import bisect_right
 from dataclasses import asdict, dataclass, replace
 from datetime import date
-from statistics import mean
 from typing import Mapping, Sequence
 
 from app.core.holiday_calendar import is_market_closed
@@ -14,6 +13,7 @@ from app.domain.universe_selection.rotation_walk_forward import (
     DIVERSIFIED_ROTATION_VARIANT,
     ROTATION_BENCHMARK_SYMBOLS,
     RotationVariant,
+    rotation_target_weights,
 )
 from app.domain.universe_selection.selector import (
     ROTATION_ALGORITHM_VERSION,
@@ -46,6 +46,7 @@ class RotationCohortSignal:
     above_sma: bool
     score: float
     signal_spread_bps: float
+    target_weight_pct: float = 0.0
 
     def __post_init__(self) -> None:
         if not self.symbol.strip() or not self.risk_group.strip():
@@ -57,6 +58,7 @@ class RotationCohortSignal:
             self.sma_price,
             self.score,
             self.signal_spread_bps,
+            self.target_weight_pct,
         )
         if any(not math.isfinite(value) for value in finite_values):
             raise ValueError("rotation signal values must be finite")
@@ -66,6 +68,7 @@ class RotationCohortSignal:
             or not self.above_sma
             or self.score < 0
             or self.signal_spread_bps < 0
+            or not 0 <= self.target_weight_pct <= 100
         ):
             raise ValueError("rotation signal values are invalid")
 
@@ -87,6 +90,9 @@ class RotationCohortSignal:
             score=float(str(payload["score"])),
             signal_spread_bps=float(
                 str(payload["signal_spread_bps"])
+            ),
+            target_weight_pct=float(
+                str(payload.get("target_weight_pct", 0.0))
             ),
         )
 
@@ -122,6 +128,39 @@ class RotationCohortRegistration:
         ranks = [signal.rank for signal in self.target_signals]
         if ranks != list(range(1, len(ranks) + 1)):
             raise ValueError("rotation target ranks must be contiguous")
+        if self.target_signals and all(
+            signal.target_weight_pct == 0
+            for signal in self.target_signals
+        ):
+            equal_weight = (
+                1.0 / len(self.target_signals)
+            ) * 100
+            object.__setattr__(
+                self,
+                "target_signals",
+                tuple(
+                    replace(
+                        signal,
+                        target_weight_pct=equal_weight,
+                    )
+                    for signal in self.target_signals
+                ),
+            )
+        elif any(
+            signal.target_weight_pct <= 0
+            for signal in self.target_signals
+        ):
+            raise ValueError(
+                "rotation target weights must all be positive"
+            )
+        total_weight = sum(
+            signal.target_weight_pct
+            for signal in self.target_signals
+        )
+        if total_weight > 100.0 + 1e-9:
+            raise ValueError(
+                "rotation target weights exceed 100 percent"
+            )
 
     @property
     def target_symbols(self) -> tuple[str, ...]:
@@ -388,6 +427,10 @@ def _registration_and_selections(
         ),
         key=lambda row: row.rotation.rank or 10_000,
     )
+    target_weights = rotation_target_weights(
+        selected,
+        variant,
+    )
     signals: list[RotationCohortSignal] = []
     for row in selected:
         evidence = row.rotation
@@ -410,6 +453,13 @@ def _registration_and_selections(
                 above_sma=evidence.above_sma,
                 score=evidence.score,
                 signal_spread_bps=spread,
+                target_weight_pct=(
+                    target_weights.get(
+                        row.candidate.symbol,
+                        0.0,
+                    )
+                    * 100
+                ),
             )
         )
     registration = RotationCohortRegistration(
@@ -566,6 +616,7 @@ def unavailable_rotation_forward_snapshot(
     status: str,
     *,
     blocker: str,
+    variant: RotationVariant = DIVERSIFIED_ROTATION_VARIANT,
 ) -> RotationForwardSnapshot:
     return RotationForwardSnapshot(
         algorithm_version=ROTATION_FORWARD_VERSION,
@@ -573,7 +624,7 @@ def unavailable_rotation_forward_snapshot(
         status=status,
         evidence_mode="UNAVAILABLE",
         cohort_month=None,
-        variant_name=DIVERSIFIED_ROTATION_VARIANT.name,
+        variant_name=variant.name,
         signal_date=None,
         entry_date=None,
         mark_date=None,
@@ -629,6 +680,7 @@ def evaluate_rotation_forward(
             snapshot=unavailable_rotation_forward_snapshot(
                 "BENCHMARK_HISTORY_UNAVAILABLE",
                 blocker="ROTATION_BENCHMARK_HISTORY_UNAVAILABLE",
+                variant=variant,
             ),
             selections=(),
         )
@@ -678,9 +730,8 @@ def evaluate_rotation_forward(
     if selection_drift:
         blockers.append("PRECOMMITTED_COHORT_SELECTION_DRIFT")
 
-    target_count = len(registration.target_signals)
-    weight = 1.0 / target_count if target_count else 0.0
     holdings: list[RotationForwardHolding] = []
+    holding_weights: list[float] = []
     returns: list[float] = []
     entry_side_costs: list[float] = []
     exit_side_costs: list[float] = []
@@ -690,6 +741,7 @@ def evaluate_rotation_forward(
         + base_config.round_trip_slippage_bps
     )
     for signal in registration.target_signals:
+        weight = signal.target_weight_pct / 100
         symbol_map = candidate_maps.get(signal.symbol, {})
         entry_bar = symbol_map.get(entry_date)
         mark_bar = symbol_map.get(mark_date)
@@ -730,6 +782,7 @@ def evaluate_rotation_forward(
             )
         else:
             assert mark_spread is not None
+            holding_weights.append(weight)
             returns.append(gross_return)
             entry_side_costs.append(
                 (
@@ -796,13 +849,32 @@ def evaluate_rotation_forward(
             if registration.forward_eligible
             else "BACKFILLED_OPEN"
         )
-        gross_return = mean(returns)
-        entry_cost = mean(entry_side_costs)
+        gross_return = sum(
+            weight * asset_return
+            for weight, asset_return in zip(
+                holding_weights,
+                returns,
+            )
+        )
+        entry_cost = sum(
+            weight * side_cost
+            for weight, side_cost in zip(
+                holding_weights,
+                entry_side_costs,
+            )
+        )
         ending_values = [
             weight * (1.0 + asset_return)
-            for asset_return in returns
+            for weight, asset_return in zip(
+                holding_weights,
+                returns,
+            )
         ]
-        ending_total = sum(ending_values)
+        cash_weight = max(
+            0.0,
+            1.0 - sum(holding_weights),
+        )
+        ending_total = cash_weight + sum(ending_values)
         exit_cost_amount = sum(
             value * side_cost
             for value, side_cost in zip(
@@ -816,16 +888,19 @@ def evaluate_rotation_forward(
             else 0.0
         )
         net_return = (
-            sum(
+            cash_weight
+            + sum(
                 weight
                 * (1.0 - entry_side_cost)
                 * (1.0 + asset_return)
                 * (1.0 - exit_side_cost)
                 for (
+                    weight,
                     asset_return,
                     entry_side_cost,
                     exit_side_cost,
                 ) in zip(
+                    holding_weights,
                     returns,
                     entry_side_costs,
                     exit_side_costs,

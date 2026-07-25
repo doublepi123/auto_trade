@@ -1316,6 +1316,21 @@ export interface UniverseRotationVariantConfig {
   sma_bars: number
   max_selected: number
   max_per_risk_group: number
+  weighting?: 'equal' | 'inverse_volatility'
+  max_position_weight_pct?: number
+}
+
+export interface UniverseRotationValidationFold {
+  fold: number
+  training_periods: number
+  training_end_date: string
+  validation_periods: number
+  validation_start_date: string
+  validation_end_date: string
+  training_score: number
+  passed: boolean
+  blockers: string[]
+  performance: UniverseRotationPerformance
 }
 
 export interface UniverseRotationVariantEvaluation {
@@ -1323,6 +1338,12 @@ export interface UniverseRotationVariantEvaluation {
   training_score: number
   validation_passed: boolean
   validation_blockers: string[]
+  expanding_validation_passed?: boolean
+  expanding_validation_blockers?: string[]
+  expanding_folds_passed?: number
+  expanding_folds_total?: number
+  expanding_validation?: UniverseRotationPerformance
+  expanding_folds?: UniverseRotationValidationFold[]
   full: UniverseRotationPerformance
   training: UniverseRotationPerformance
   validation: UniverseRotationPerformance
@@ -1335,6 +1356,8 @@ export interface UniverseRotationWalkForwardEvaluation {
   data_scope: string
   survivorship_bias: boolean
   validation_periods: number
+  expanding_validation_min_training_periods?: number
+  expanding_validation_fold_periods?: number
   selected_variant: string | null
   selected_variant_validation_passed: boolean
   validated_challenger_variant: string | null

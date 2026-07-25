@@ -20,6 +20,7 @@ from app.domain.universe_selection.selector import (
     select_candidates,
 )
 from app.domain.universe_selection.rotation_walk_forward import (
+    DIVERSIFIED_INVERSE_VOLATILITY_VARIANT,
     DIVERSIFIED_ROTATION_VARIANT,
     DEFAULT_ROTATION_VARIANTS,
     ROTATION_BENCHMARK_SYMBOLS,
@@ -28,8 +29,10 @@ from app.domain.universe_selection.rotation_walk_forward import (
     RotationPeriod,
     RotationVariant,
     RotationVariantEvaluation,
+    RotationValidationFold,
     RotationWalkForwardResult,
     evaluate_rotation_walk_forward,
+    rotation_target_weights,
 )
 from app.domain.universe_selection.rotation_forward import (
     ROTATION_FORWARD_VERSION,
@@ -69,10 +72,12 @@ __all__ = [
     "RotationPeriod",
     "RotationVariant",
     "RotationVariantEvaluation",
+    "RotationValidationFold",
     "RotationWalkForwardResult",
     "UniverseSelectionConfig",
     "DEFAULT_ROTATION_VARIANTS",
     "DIVERSIFIED_ROTATION_VARIANT",
+    "DIVERSIFIED_INVERSE_VOLATILITY_VARIANT",
     "build_rotation_cohort_registration",
     "completed_daily_bars",
     "latest_closed_session_date",
@@ -81,6 +86,7 @@ __all__ = [
     "risk_group_for_sector",
     "select_candidates",
     "evaluate_rotation_walk_forward",
+    "rotation_target_weights",
     "evaluate_rotation_forward",
     "is_last_us_session_of_month",
     "next_cohort_month",

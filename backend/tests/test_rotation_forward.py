@@ -6,6 +6,7 @@ from datetime import date, datetime, timedelta, timezone
 from app.core.broker import BrokerCandle
 from app.core.holiday_calendar import is_market_closed
 from app.domain.universe_selection import (
+    DIVERSIFIED_INVERSE_VOLATILITY_VARIANT,
     IndexCandidate,
     RotationCohortRegistration,
     UniverseSelectionConfig,
@@ -45,11 +46,14 @@ def _bars(
     drift: float,
     dates: list[datetime] | None = None,
     shock_from: date | None = None,
+    volatility_scale: float = 1.0,
 ) -> list[BrokerCandle]:
     price = 100.0
     result: list[BrokerCandle] = []
     for index, timestamp in enumerate(dates or _DATES):
-        move = drift + (0.009 if index % 2 == 0 else -0.007)
+        move = drift + (
+            0.009 if index % 2 == 0 else -0.007
+        ) * volatility_scale
         if shock_from is not None and timestamp.date() >= shock_from:
             move = -0.025
         open_price = price
@@ -145,6 +149,13 @@ def test_rotation_forward_uses_prior_signal_and_month_open() -> None:
         "STEADY.US",
     )
     assert registration.forward_eligible is False
+    assert abs(
+        sum(
+            signal.target_weight_pct
+            for signal in registration.target_signals
+        )
+        - 100.0
+    ) < 1e-9
     assert result.snapshot.entry_date == date(2025, 7, 1)
     assert result.snapshot.mark_date == date(2025, 7, 18)
     assert result.snapshot.evidence_mode == "BACKFILLED_AFTER_ENTRY"
@@ -296,6 +307,27 @@ def test_registration_round_trip_and_strict_boolean() -> None:
     assert RotationCohortRegistration.from_dict(
         registration.to_dict()
     ) == registration
+    legacy = registration.to_dict()
+    legacy_signals = legacy["target_signals"]
+    assert isinstance(legacy_signals, list)
+    for signal in legacy_signals:
+        assert isinstance(signal, dict)
+        signal.pop("target_weight_pct")
+    legacy_registration = RotationCohortRegistration.from_dict(legacy)
+    assert legacy_registration.target_symbols == (
+        registration.target_symbols
+    )
+    assert all(
+        abs(
+            legacy_signal.target_weight_pct
+            - current_signal.target_weight_pct
+        )
+        < 1e-9
+        for legacy_signal, current_signal in zip(
+            legacy_registration.target_signals,
+            registration.target_signals,
+        )
+    )
     invalid = registration.to_dict()
     invalid["forward_eligible"] = "false"
     try:
@@ -339,3 +371,68 @@ def test_month_end_registration_helpers_are_holiday_aware() -> None:
     assert is_last_us_session_of_month(date(2025, 7, 30)) is False
     assert is_last_us_session_of_month(date(2025, 8, 31)) is False
     assert next_cohort_month(date(2025, 12, 31)) == date(2026, 1, 1)
+
+
+def test_inverse_volatility_forward_registration_freezes_weights() -> None:
+    candidates, bars, benchmarks = _inputs(
+        fast_bars=_bars(
+            drift=0.0025,
+            volatility_scale=2.5,
+        )
+    )
+    variant = replace(
+        DIVERSIFIED_INVERSE_VOLATILITY_VARIANT,
+        max_selected=3,
+        max_position_weight_pct=60.0,
+    )
+    registration = build_rotation_cohort_registration(
+        candidates=candidates,
+        bars_by_symbol=bars,
+        base_config=_config(),
+        cohort_month=date(2025, 7, 1),
+        signal_date=date(2025, 6, 30),
+        registered_as_of_date=date(2025, 6, 30),
+        variant=variant,
+    )
+
+    result = evaluate_rotation_forward(
+        candidates=candidates,
+        bars_by_symbol=bars,
+        benchmark_bars_by_symbol=benchmarks,
+        base_config=_config(),
+        as_of_date=date(2025, 7, 18),
+        frozen_registration=registration,
+        variant=variant,
+    )
+
+    registered_weights = {
+        signal.symbol: signal.target_weight_pct
+        for signal in registration.target_signals
+    }
+    snapshot_weights = {
+        holding.symbol: holding.weight_pct
+        for holding in result.snapshot.holdings
+    }
+    assert registered_weights == snapshot_weights
+    assert registered_weights["FAST.US"] < (
+        registered_weights["SLOW.US"]
+    )
+    assert max(registered_weights.values()) <= 60.0
+
+
+def test_unavailable_forward_snapshot_keeps_requested_variant() -> None:
+    candidates, bars, _ = _inputs()
+
+    result = evaluate_rotation_forward(
+        candidates=candidates,
+        bars_by_symbol=bars,
+        benchmark_bars_by_symbol={},
+        base_config=_config(),
+        as_of_date=date(2025, 7, 18),
+        variant=DIVERSIFIED_INVERSE_VOLATILITY_VARIANT,
+    )
+
+    assert result.snapshot.status == "BENCHMARK_HISTORY_UNAVAILABLE"
+    assert result.snapshot.variant_name == (
+        DIVERSIFIED_INVERSE_VOLATILITY_VARIANT.name
+    )

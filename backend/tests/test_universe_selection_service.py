@@ -907,7 +907,7 @@ def test_refresh_persists_rotation_shadow_evidence() -> None:
         parameters = json.loads(result.run.parameters_json)
         evaluation = parameters["rotation_evaluation"]
         assert evaluation["algorithm_version"] == (
-            "rotation-monthly-open-walk-forward-v1"
+            "rotation-monthly-open-walk-forward-v2"
         )
         assert evaluation["benchmark_symbols"] == [
             "QQQ.US",
@@ -943,6 +943,27 @@ def test_refresh_persists_rotation_shadow_evidence() -> None:
         assert snapshot["automatic_promotion_allowed"] is False
         assert parameters[
             "rotation_next_cohort_registration_status"
+        ] == "NOT_DUE"
+        challenger = parameters[
+            "rotation_weighting_challenger_snapshot"
+        ]
+        assert challenger["variant_name"] == (
+            "diversified_top8_12_1_inverse_vol_25"
+        )
+        assert challenger["evidence_mode"] == (
+            "BACKFILLED_AFTER_ENTRY"
+        )
+        assert challenger["order_execution_allowed"] is False
+        challenger_registration = parameters[
+            "rotation_weighting_challenger_registration"
+        ]
+        assert challenger_registration["target_signals"]
+        assert all(
+            0 < signal["target_weight_pct"] <= 25
+            for signal in challenger_registration["target_signals"]
+        )
+        assert parameters[
+            "rotation_next_weighting_challenger_registration_status"
         ] == "NOT_DUE"
     finally:
         db.close()
@@ -998,6 +1019,26 @@ def test_refresh_reuses_frozen_rotation_registration_next_day() -> None:
             ]
         )
         assert second_snapshot["selection_drift_detected"] is False
+        first_challenger = first_parameters[
+            "rotation_weighting_challenger_snapshot"
+        ]
+        second_challenger = second_parameters[
+            "rotation_weighting_challenger_snapshot"
+        ]
+        assert second_challenger["registered_as_of_date"] == (
+            "2026-07-23"
+        )
+        assert second_challenger["mark_date"] == "2026-07-24"
+        assert [
+            (holding["symbol"], holding["weight_pct"])
+            for holding in second_challenger["holdings"]
+        ] == [
+            (holding["symbol"], holding["weight_pct"])
+            for holding in first_challenger["holdings"]
+        ]
+        assert second_challenger[
+            "selection_drift_detected"
+        ] is False
         first_rotation = {
             row.symbol: json.loads(row.metrics_json)["rotation"]
             for row in first.items
@@ -1053,6 +1094,23 @@ def test_month_end_refresh_preregisters_next_rotation_cohort() -> None:
         assert registration["registered_as_of_date"] == "2026-07-31"
         assert registration["forward_eligible"] is True
         assert registration["target_signals"]
+        assert parameters[
+            "rotation_next_weighting_challenger_registration_status"
+        ] == "REGISTERED"
+        challenger_registration = parameters[
+            "rotation_next_weighting_challenger_registration"
+        ]
+        assert challenger_registration["cohort_month"] == (
+            "2026-08-01"
+        )
+        assert challenger_registration["signal_date"] == (
+            "2026-07-31"
+        )
+        assert challenger_registration["forward_eligible"] is True
+        assert challenger_registration["variant_name"] == (
+            "diversified_top8_12_1_inverse_vol_25"
+        )
+        assert challenger_registration["target_signals"]
     finally:
         db.close()
 

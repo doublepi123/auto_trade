@@ -171,6 +171,106 @@
           </section>
 
           <section
+            v-if="universeRotationWeightingChallenger"
+            class="rotation-forward rotation-weighting-challenger"
+            data-testid="rotation-weighting-challenger"
+          >
+            <div class="rotation-forward-header">
+              <div>
+                <div class="rotation-forward-title">
+                  <strong>波动配权影子</strong>
+                  <el-tag
+                    :type="rotationForwardTagType(universeRotationWeightingChallenger.evidence_mode)"
+                    size="small"
+                    effect="plain"
+                  >
+                    {{ rotationForwardModeLabel(universeRotationWeightingChallenger.evidence_mode) }}
+                  </el-tag>
+                  <el-tag type="info" size="small" effect="plain">25% 单票上限</el-tag>
+                </div>
+                <small>{{ universeRotationWeightingChallenger.algorithm_version }}</small>
+              </div>
+              <div class="rotation-forward-dates">
+                <span>
+                  信号
+                  <strong>{{ universeRotationWeightingChallenger.signal_date || '-' }}</strong>
+                </span>
+                <span>
+                  入场
+                  <strong>{{ universeRotationWeightingChallenger.entry_date || '-' }}</strong>
+                </span>
+                <span>
+                  估值
+                  <strong>{{ universeRotationWeightingChallenger.mark_date || '-' }}</strong>
+                </span>
+              </div>
+            </div>
+
+            <div
+              class="rotation-forward-symbols"
+              data-testid="rotation-weighting-symbols"
+            >
+              <span>冻结权重</span>
+              <div v-if="universeRotationWeightingChallenger.holdings.length">
+                <el-tag
+                  v-for="holding in universeRotationWeightingChallenger.holdings"
+                  :key="holding.symbol"
+                  size="small"
+                  effect="plain"
+                >
+                  {{ holding.symbol }} {{ formatPercent(holding.weight_pct) }}
+                </el-tag>
+              </div>
+              <strong v-else>现金观察</strong>
+            </div>
+
+            <div
+              class="rotation-forward-metrics"
+              data-testid="rotation-weighting-metrics"
+            >
+              <div>
+                <span>净清算收益</span>
+                <strong>{{ formatSignedPercent(universeRotationWeightingChallenger.net_liquidation_return_pct) }}</strong>
+              </div>
+              <div>
+                <span>相对等权</span>
+                <strong>{{ formatSignedPercent(rotationWeightingReturnDelta) }}</strong>
+              </div>
+              <div>
+                <span>超额 QQQ</span>
+                <strong>{{ formatSignedPercent(universeRotationWeightingChallenger.excess_return_vs_qqq_pct) }}</strong>
+              </div>
+              <div>
+                <span>完整估算成本</span>
+                <strong>{{ formatPercent(universeRotationWeightingChallenger.total_estimated_cost_pct) }}</strong>
+              </div>
+              <div>
+                <span>前向会话</span>
+                <strong>
+                  {{ universeRotationWeightingChallenger.forward_observation_sessions }}/{{ universeRotationWeightingChallenger.elapsed_sessions }}
+                </strong>
+              </div>
+            </div>
+
+            <div class="rotation-forward-footer">
+              <span>
+                登记 {{ universeRotationWeightingChallenger.registered_as_of_date || '-' }}
+                · {{ rotationVariantLabel(universeRotationWeightingChallenger.variant_name) }}
+                · 并行只读
+              </span>
+              <strong v-if="universeRotationWeightingChallenger.evidence_mode === 'BACKFILLED_AFTER_ENTRY'">
+                当前仅作回填对照；月末会与等权组合同时预登记下月权重。
+              </strong>
+              <strong v-else-if="universeRotationWeightingChallenger.evidence_mode === 'FORWARD_PRECOMMITTED'">
+                已在入场前冻结；只比较配权效果，不改变选股或触发订单。
+              </strong>
+              <strong v-else>
+                配权证据暂不可用，不会回退到事后重算。
+              </strong>
+            </div>
+          </section>
+
+          <section
             v-if="universeRotationEvaluation"
             class="rotation-evaluation"
             data-testid="rotation-walk-forward"
@@ -198,7 +298,7 @@
                   </strong>
                 </span>
                 <span>
-                  验证挑战者
+                  稳健挑战者
                   <strong data-testid="rotation-validated-challenger">
                     {{ rotationVariantLabel(universeRotationEvaluation.validated_challenger_variant) }}
                   </strong>
@@ -212,36 +312,60 @@
               data-testid="rotation-validation-metrics"
             >
               <div>
-                <span>训练年化</span>
-                <strong>{{ formatSignedPercent(rotationDisplayVariant.training.annualized_return_pct) }}</strong>
-              </div>
-              <div>
-                <span>验证年化</span>
+                <span>留出年化</span>
                 <strong>{{ formatSignedPercent(rotationDisplayVariant.validation.annualized_return_pct) }}</strong>
               </div>
               <div>
-                <span>验证超额 QQQ</span>
-                <strong>{{ formatSignedPercent(rotationDisplayVariant.validation.excess_annualized_return_vs_qqq_pct) }}</strong>
+                <span>多窗年化</span>
+                <strong>
+                  {{ formatSignedPercent(
+                    rotationDisplayVariant.expanding_validation?.annualized_return_pct
+                      ?? rotationDisplayVariant.validation.annualized_return_pct,
+                  ) }}
+                </strong>
               </div>
               <div>
-                <span>验证 Sharpe</span>
-                <strong>{{ formatDecimal(rotationDisplayVariant.validation.sharpe) }}</strong>
+                <span>多窗超额 QQQ</span>
+                <strong>
+                  {{ formatSignedPercent(
+                    rotationDisplayVariant.expanding_validation?.excess_annualized_return_vs_qqq_pct
+                      ?? rotationDisplayVariant.validation.excess_annualized_return_vs_qqq_pct,
+                  ) }}
+                </strong>
               </div>
               <div>
-                <span>验证最大回撤</span>
-                <strong>{{ formatPercent(rotationDisplayVariant.validation.max_drawdown_pct) }}</strong>
+                <span>多窗 Sharpe</span>
+                <strong>
+                  {{ formatDecimal(
+                    rotationDisplayVariant.expanding_validation?.sharpe
+                      ?? rotationDisplayVariant.validation.sharpe,
+                  ) }}
+                </strong>
               </div>
               <div>
-                <span>验证平均换手</span>
-                <strong>{{ formatPercent(rotationDisplayVariant.validation.average_turnover_pct) }}</strong>
+                <span>多窗最大回撤</span>
+                <strong>
+                  {{ formatPercent(
+                    rotationDisplayVariant.expanding_validation?.max_drawdown_pct
+                      ?? rotationDisplayVariant.validation.max_drawdown_pct,
+                  ) }}
+                </strong>
+              </div>
+              <div>
+                <span>窗口通过</span>
+                <strong>
+                  {{ rotationDisplayVariant.expanding_folds_passed ?? 0 }}/{{ rotationDisplayVariant.expanding_folds_total ?? 0 }}
+                </strong>
               </div>
             </div>
 
             <div class="rotation-evaluation-footer">
               <span v-if="rotationDisplayVariant">
                 训练 {{ rotationDisplayVariant.training.periods }} 月
-                · 验证 {{ rotationDisplayVariant.validation.periods }} 月
-                · 验证成本 {{ formatPercent(rotationDisplayVariant.validation.total_cost_pct) }}
+                · 训练分 {{ formatDecimal(rotationDisplayVariant.training_score) }}
+                · 留出 {{ rotationDisplayVariant.validation.periods }} 月
+                · 多窗 {{ rotationDisplayVariant.expanding_validation?.periods ?? 0 }} 月
+                · 留出成本 {{ formatPercent(rotationDisplayVariant.validation.total_cost_pct) }}
               </span>
               <strong>
                 当前成分股存在幸存者偏差，仍需前向样本；不会自动晋级或下单。
@@ -1135,6 +1259,19 @@ const universeRotationForward = computed<UniverseRotationForwardSnapshot | null>
   return isRotationForwardSnapshot(raw) ? raw : null
 })
 
+const universeRotationWeightingChallenger = computed<UniverseRotationForwardSnapshot | null>(() => {
+  const raw = universeRun.value?.parameters.rotation_weighting_challenger_snapshot
+  return isRotationForwardSnapshot(raw) ? raw : null
+})
+
+const rotationWeightingReturnDelta = computed<number | null>(() => {
+  const incumbent = universeRotationForward.value?.net_liquidation_return_pct
+  const challenger = universeRotationWeightingChallenger.value?.net_liquidation_return_pct
+  if (incumbent === null || incumbent === undefined) return null
+  if (challenger === null || challenger === undefined) return null
+  return challenger - incumbent
+})
+
 const rotationTrainingWinner = computed<UniverseRotationVariantEvaluation | null>(() => {
   const evaluation = universeRotationEvaluation.value
   if (!evaluation?.selected_variant) return null
@@ -1439,17 +1576,73 @@ function isRotationPerformance(value: unknown): value is UniverseRotationPerform
 
 function isRotationVariantConfig(value: unknown): value is UniverseRotationVariantConfig {
   if (!isRecord(value) || typeof value.name !== 'string') return false
-  return [
+  const numericFieldsValid = [
     value.lookback_bars,
     value.skip_bars,
     value.sma_bars,
     value.max_selected,
     value.max_per_risk_group,
   ].every((field) => typeof field === 'number' && Number.isFinite(field))
+  const weightingValid = (
+    value.weighting === undefined
+    || value.weighting === 'equal'
+    || value.weighting === 'inverse_volatility'
+  )
+  const capValid = (
+    value.max_position_weight_pct === undefined
+    || (
+      typeof value.max_position_weight_pct === 'number'
+      && Number.isFinite(value.max_position_weight_pct)
+      && value.max_position_weight_pct > 0
+      && value.max_position_weight_pct <= 100
+    )
+  )
+  return numericFieldsValid && weightingValid && capValid
+}
+
+function isRotationValidationFold(value: unknown): boolean {
+  if (!isRecord(value)) return false
+  const finiteNumbers = [
+    value.fold,
+    value.training_periods,
+    value.validation_periods,
+    value.training_score,
+  ]
+  return (
+    finiteNumbers.every((field) => typeof field === 'number' && Number.isFinite(field))
+    && typeof value.training_end_date === 'string'
+    && typeof value.validation_start_date === 'string'
+    && typeof value.validation_end_date === 'string'
+    && typeof value.passed === 'boolean'
+    && Array.isArray(value.blockers)
+    && value.blockers.every((blocker) => typeof blocker === 'string')
+    && isRotationPerformance(value.performance)
+  )
 }
 
 function isRotationVariantEvaluation(value: unknown): value is UniverseRotationVariantEvaluation {
   if (!isRecord(value)) return false
+  const expandingFields = [
+    value.expanding_validation_passed,
+    value.expanding_validation_blockers,
+    value.expanding_folds_passed,
+    value.expanding_folds_total,
+    value.expanding_validation,
+    value.expanding_folds,
+  ]
+  const hasExpandingFields = expandingFields.some((field) => field !== undefined)
+  const expandingFieldsValid = !hasExpandingFields || (
+    typeof value.expanding_validation_passed === 'boolean'
+    && Array.isArray(value.expanding_validation_blockers)
+    && value.expanding_validation_blockers.every((blocker) => typeof blocker === 'string')
+    && typeof value.expanding_folds_passed === 'number'
+    && Number.isFinite(value.expanding_folds_passed)
+    && typeof value.expanding_folds_total === 'number'
+    && Number.isFinite(value.expanding_folds_total)
+    && isRotationPerformance(value.expanding_validation)
+    && Array.isArray(value.expanding_folds)
+    && value.expanding_folds.every(isRotationValidationFold)
+  )
   return (
     isRotationVariantConfig(value.variant)
     && typeof value.training_score === 'number'
@@ -1457,6 +1650,7 @@ function isRotationVariantEvaluation(value: unknown): value is UniverseRotationV
     && typeof value.validation_passed === 'boolean'
     && Array.isArray(value.validation_blockers)
     && value.validation_blockers.every((blocker) => typeof blocker === 'string')
+    && expandingFieldsValid
     && isRotationPerformance(value.full)
     && isRotationPerformance(value.training)
     && isRotationPerformance(value.validation)
@@ -1543,6 +1737,18 @@ function isRotationWalkForwardEvaluation(
   value: unknown,
 ): value is UniverseRotationWalkForwardEvaluation {
   if (!isRecord(value)) return false
+  const expandingRootFieldsValid = (
+    (
+      value.expanding_validation_min_training_periods === undefined
+      && value.expanding_validation_fold_periods === undefined
+    )
+    || (
+      typeof value.expanding_validation_min_training_periods === 'number'
+      && Number.isFinite(value.expanding_validation_min_training_periods)
+      && typeof value.expanding_validation_fold_periods === 'number'
+      && Number.isFinite(value.expanding_validation_fold_periods)
+    )
+  )
   return (
     typeof value.algorithm_version === 'string'
     && typeof value.status === 'string'
@@ -1552,6 +1758,7 @@ function isRotationWalkForwardEvaluation(
     && typeof value.survivorship_bias === 'boolean'
     && typeof value.validation_periods === 'number'
     && Number.isFinite(value.validation_periods)
+    && expandingRootFieldsValid
     && isNullableString(value.selected_variant)
     && typeof value.selected_variant_validation_passed === 'boolean'
     && isNullableString(value.validated_challenger_variant)
@@ -1570,6 +1777,7 @@ function rotationVariantLabel(value: string | null): string {
     concentrated_top6_12_1: '集中 Top6',
     faster_top8_6_1: '快速 Top8',
     diversified_top8_12_1: '分散 Top8',
+    diversified_top8_12_1_inverse_vol_25: '波动配权 Top8',
   }
   return value ? (labels[value] ?? value) : '无'
 }

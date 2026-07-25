@@ -5,12 +5,13 @@ from bisect import bisect_right
 from dataclasses import asdict, dataclass, replace
 from datetime import date
 from statistics import mean, stdev
-from typing import Mapping, Sequence
+from typing import Literal, Mapping, Sequence
 
 from app.core.market_calendar import get_session
 from app.domain.universe_selection.catalog import IndexCandidate
 from app.domain.universe_selection.selector import (
     CandidateInput,
+    CandidateSelection,
     DailyBar,
     UniverseSelectionConfig,
     liquidity_spread_proxy_bps,
@@ -18,9 +19,11 @@ from app.domain.universe_selection.selector import (
 )
 
 
-ROTATION_WALK_FORWARD_VERSION = "rotation-monthly-open-walk-forward-v1"
+ROTATION_WALK_FORWARD_VERSION = "rotation-monthly-open-walk-forward-v2"
 ROTATION_BENCHMARK_SYMBOLS = ("QQQ.US", "DIA.US")
 _CASH = "__CASH__"
+_EXPANDING_VALIDATION_MIN_TRAINING_PERIODS = 12
+_EXPANDING_VALIDATION_FOLD_PERIODS = 12
 
 
 @dataclass(frozen=True)
@@ -31,6 +34,8 @@ class RotationVariant:
     sma_bars: int
     max_selected: int
     max_per_risk_group: int
+    weighting: Literal["equal", "inverse_volatility"] = "equal"
+    max_position_weight_pct: float = 100.0
 
     def __post_init__(self) -> None:
         if not self.name:
@@ -41,6 +46,15 @@ class RotationVariant:
             raise ValueError("skip_bars and sma_bars are invalid")
         if self.max_selected < 1 or self.max_per_risk_group < 1:
             raise ValueError("selection limits must be positive")
+        if self.weighting not in {"equal", "inverse_volatility"}:
+            raise ValueError("rotation weighting is invalid")
+        if (
+            not math.isfinite(self.max_position_weight_pct)
+            or not 0 < self.max_position_weight_pct <= 100
+        ):
+            raise ValueError(
+                "max_position_weight_pct must be in (0, 100]"
+            )
 
 
 DIVERSIFIED_ROTATION_VARIANT = RotationVariant(
@@ -50,6 +64,17 @@ DIVERSIFIED_ROTATION_VARIANT = RotationVariant(
     sma_bars=200,
     max_selected=8,
     max_per_risk_group=1,
+)
+
+DIVERSIFIED_INVERSE_VOLATILITY_VARIANT = RotationVariant(
+    name="diversified_top8_12_1_inverse_vol_25",
+    lookback_bars=252,
+    skip_bars=21,
+    sma_bars=200,
+    max_selected=8,
+    max_per_risk_group=1,
+    weighting="inverse_volatility",
+    max_position_weight_pct=25.0,
 )
 
 
@@ -87,6 +112,7 @@ DEFAULT_ROTATION_VARIANTS: tuple[RotationVariant, ...] = (
         max_per_risk_group=2,
     ),
     DIVERSIFIED_ROTATION_VARIANT,
+    DIVERSIFIED_INVERSE_VOLATILITY_VARIANT,
 )
 
 
@@ -96,6 +122,7 @@ class RotationPeriod:
     entry_date: date
     exit_date: date
     selected_symbols: tuple[str, ...]
+    target_weights_pct: tuple[tuple[str, float], ...]
     gross_return_pct: float
     net_return_pct: float
     transaction_cost_pct: float
@@ -129,11 +156,31 @@ class RotationPerformance:
 
 
 @dataclass(frozen=True)
+class RotationValidationFold:
+    fold: int
+    training_periods: int
+    training_end_date: date
+    validation_periods: int
+    validation_start_date: date
+    validation_end_date: date
+    training_score: float
+    passed: bool
+    blockers: tuple[str, ...]
+    performance: RotationPerformance
+
+
+@dataclass(frozen=True)
 class RotationVariantEvaluation:
     variant: RotationVariant
     training_score: float
     validation_passed: bool
     validation_blockers: tuple[str, ...]
+    expanding_validation_passed: bool
+    expanding_validation_blockers: tuple[str, ...]
+    expanding_folds_passed: int
+    expanding_folds_total: int
+    expanding_validation: RotationPerformance
+    expanding_folds: tuple[RotationValidationFold, ...]
     full: RotationPerformance
     training: RotationPerformance
     validation: RotationPerformance
@@ -147,6 +194,8 @@ class RotationWalkForwardResult:
     data_scope: str
     survivorship_bias: bool
     validation_periods: int
+    expanding_validation_min_training_periods: int
+    expanding_validation_fold_periods: int
     selected_variant: str | None
     selected_variant_validation_passed: bool
     validated_challenger_variant: str | None
@@ -158,6 +207,32 @@ class RotationWalkForwardResult:
 
     def to_dict(self) -> dict[str, object]:
         payload = asdict(self)
+        raw_variants = payload["variants"]
+        if isinstance(raw_variants, (list, tuple)):
+            for raw_variant, evaluation in zip(
+                raw_variants,
+                self.variants,
+            ):
+                if not isinstance(raw_variant, dict):
+                    continue
+                raw_folds = raw_variant.get("expanding_folds")
+                if not isinstance(raw_folds, (list, tuple)):
+                    continue
+                for raw_fold, fold in zip(
+                    raw_folds,
+                    evaluation.expanding_folds,
+                ):
+                    if not isinstance(raw_fold, dict):
+                        continue
+                    raw_fold["training_end_date"] = (
+                        fold.training_end_date.isoformat()
+                    )
+                    raw_fold["validation_start_date"] = (
+                        fold.validation_start_date.isoformat()
+                    )
+                    raw_fold["validation_end_date"] = (
+                        fold.validation_end_date.isoformat()
+                    )
         payload["selected_variant_periods"] = [
             {
                 **asdict(period),
@@ -295,11 +370,81 @@ def _trade_cost_and_turnover(
     return cost, turnover
 
 
-def _target_weights(symbols: Sequence[str]) -> dict[str, float]:
-    if not symbols:
+def _capped_weights(
+    raw_weights: Mapping[str, float],
+    *,
+    max_position_weight_pct: float,
+) -> dict[str, float]:
+    if not raw_weights:
         return {_CASH: 1.0}
-    weight = 1.0 / len(symbols)
-    return {symbol: weight for symbol in symbols} | {_CASH: 0.0}
+    cap = max_position_weight_pct / 100
+    remaining_assets = set(raw_weights)
+    weights: dict[str, float] = {}
+    remaining_weight = 1.0
+    while remaining_assets and remaining_weight > 1e-12:
+        raw_total = sum(
+            raw_weights[symbol]
+            for symbol in remaining_assets
+        )
+        if not math.isfinite(raw_total) or raw_total <= 0:
+            break
+        proposed = {
+            symbol: (
+                remaining_weight
+                * raw_weights[symbol]
+                / raw_total
+            )
+            for symbol in remaining_assets
+        }
+        capped = sorted(
+            symbol
+            for symbol, weight in proposed.items()
+            if weight > cap
+        )
+        if not capped:
+            weights.update(proposed)
+            remaining_weight = 0.0
+            break
+        for symbol in capped:
+            weights[symbol] = cap
+            remaining_assets.remove(symbol)
+            remaining_weight = max(
+                0.0,
+                remaining_weight - cap,
+            )
+    allocated = sum(weights.values())
+    return weights | {_CASH: max(0.0, 1.0 - allocated)}
+
+
+def rotation_target_weights(
+    rows: Sequence[CandidateSelection],
+    variant: RotationVariant,
+) -> dict[str, float]:
+    if variant.weighting == "equal":
+        raw_weights = {
+            row.candidate.symbol: 1.0
+            for row in rows
+        }
+    else:
+        raw_weights = {}
+        for row in rows:
+            volatility = row.metrics.realized_vol_20d
+            if (
+                volatility is None
+                or not math.isfinite(volatility)
+                or volatility <= 0
+            ):
+                raise ValueError(
+                    "inverse-volatility weighting requires "
+                    "positive realized volatility"
+                )
+            raw_weights[row.candidate.symbol] = 1.0 / volatility
+    return _capped_weights(
+        raw_weights,
+        max_position_weight_pct=(
+            variant.max_position_weight_pct
+        ),
+    )
 
 
 def _simulate_variant(
@@ -380,7 +525,7 @@ def _simulate_variant(
             ),
             key=lambda row: row.rotation.rank or 10_000,
         )
-        tradable: list[str] = []
+        tradable_rows: list[CandidateSelection] = []
         returns: dict[str, float] = {}
         for row in ranked:
             symbol = row.candidate.symbol
@@ -391,13 +536,16 @@ def _simulate_variant(
             entry_price = float(entry_bar.open)
             if entry_price <= 0:
                 continue
-            tradable.append(symbol)
+            tradable_rows.append(row)
             returns[symbol] = (
                 float(exit_bar.open) / entry_price - 1.0
                 if exit_bar is not None
                 else -1.0
             )
-        new_weights = _target_weights(tradable)
+        new_weights = rotation_target_weights(
+            tradable_rows,
+            variant,
+        )
         cost, turnover = _trade_cost_and_turnover(
             current_weights,
             new_weights,
@@ -434,7 +582,21 @@ def _simulate_variant(
                 signal_date=signal_date,
                 entry_date=entry_date,
                 exit_date=exit_date,
-                selected_symbols=tuple(tradable),
+                selected_symbols=tuple(
+                    row.candidate.symbol
+                    for row in tradable_rows
+                ),
+                target_weights_pct=tuple(
+                    (
+                        row.candidate.symbol,
+                        new_weights.get(
+                            row.candidate.symbol,
+                            0.0,
+                        )
+                        * 100,
+                    )
+                    for row in tradable_rows
+                ),
                 gross_return_pct=gross_return * 100,
                 net_return_pct=net_return * 100,
                 transaction_cost_pct=cost * 100,
@@ -564,9 +726,11 @@ def _training_score(performance: RotationPerformance) -> float:
 
 def _validation_blockers(
     performance: RotationPerformance,
+    *,
+    minimum_periods: int = 12,
 ) -> tuple[str, ...]:
     blockers: list[str] = []
-    if performance.periods < 12:
+    if performance.periods < minimum_periods:
         blockers.append("ROTATION_VALIDATION_HISTORY_INSUFFICIENT")
     if performance.annualized_return_pct <= 0:
         blockers.append("ROTATION_VALIDATION_RETURN_NON_POSITIVE")
@@ -587,6 +751,92 @@ def _validation_blockers(
     return tuple(blockers)
 
 
+def _expanding_validation_folds(
+    periods: Sequence[RotationPeriod],
+    *,
+    minimum_training_periods: int,
+    fold_periods: int,
+) -> tuple[
+    tuple[RotationValidationFold, ...],
+    RotationPerformance,
+    tuple[str, ...],
+]:
+    folds: list[RotationValidationFold] = []
+    validation_periods: list[RotationPeriod] = []
+    validation_start = minimum_training_periods
+    fold_number = 1
+    while validation_start < len(periods):
+        validation_end = min(
+            len(periods),
+            validation_start + fold_periods,
+        )
+        validation_slice = periods[
+            validation_start:validation_end
+        ]
+        minimum_fold_periods = min(
+            fold_periods,
+            max(6, fold_periods // 2),
+        )
+        if len(validation_slice) < minimum_fold_periods:
+            break
+        training_slice = periods[:validation_start]
+        training_performance = _performance(training_slice)
+        validation_performance = _performance(validation_slice)
+        blockers = _validation_blockers(
+            validation_performance,
+            minimum_periods=len(validation_slice),
+        )
+        folds.append(
+            RotationValidationFold(
+                fold=fold_number,
+                training_periods=len(training_slice),
+                training_end_date=training_slice[-1].exit_date,
+                validation_periods=len(validation_slice),
+                validation_start_date=(
+                    validation_slice[0].entry_date
+                ),
+                validation_end_date=(
+                    validation_slice[-1].exit_date
+                ),
+                training_score=_training_score(
+                    training_performance
+                ),
+                passed=not blockers,
+                blockers=blockers,
+                performance=validation_performance,
+            )
+        )
+        validation_periods.extend(validation_slice)
+        fold_number += 1
+        validation_start = validation_end
+
+    combined = _performance(validation_periods)
+    combined_blockers = list(
+        _validation_blockers(
+            combined,
+            minimum_periods=(
+                min(24, len(validation_periods))
+                if validation_periods
+                else 1
+            ),
+        )
+    )
+    if len(folds) < 2:
+        combined_blockers.append(
+            "ROTATION_EXPANDING_FOLDS_INSUFFICIENT"
+        )
+    folds_passed = sum(fold.passed for fold in folds)
+    if folds and folds_passed * 3 < len(folds) * 2:
+        combined_blockers.append(
+            "ROTATION_EXPANDING_FOLD_STABILITY_INSUFFICIENT"
+        )
+    return (
+        tuple(folds),
+        combined,
+        tuple(dict.fromkeys(combined_blockers)),
+    )
+
+
 def evaluate_rotation_walk_forward(
     *,
     candidates: Sequence[IndexCandidate],
@@ -595,6 +845,12 @@ def evaluate_rotation_walk_forward(
     base_config: UniverseSelectionConfig,
     variants: Sequence[RotationVariant] = DEFAULT_ROTATION_VARIANTS,
     validation_periods: int = 12,
+    expanding_validation_min_training_periods: int = (
+        _EXPANDING_VALIDATION_MIN_TRAINING_PERIODS
+    ),
+    expanding_validation_fold_periods: int = (
+        _EXPANDING_VALIDATION_FOLD_PERIODS
+    ),
 ) -> RotationWalkForwardResult:
     if not candidates:
         raise ValueError("candidates must not be empty")
@@ -605,6 +861,14 @@ def evaluate_rotation_walk_forward(
         raise ValueError("rotation variant names must be unique")
     if validation_periods < 1:
         raise ValueError("validation_periods must be positive")
+    if expanding_validation_min_training_periods < 12:
+        raise ValueError(
+            "expanding validation needs at least 12 training periods"
+        )
+    if expanding_validation_fold_periods < 6:
+        raise ValueError(
+            "expanding validation folds need at least 6 periods"
+        )
     benchmark_maps = {
         symbol: _bar_map(bars)
         for symbol, bars in benchmark_bars_by_symbol.items()
@@ -636,6 +900,12 @@ def evaluate_rotation_walk_forward(
             data_scope="CURRENT_CONSTITUENTS_ONLY",
             survivorship_bias=True,
             validation_periods=validation_periods,
+            expanding_validation_min_training_periods=(
+                expanding_validation_min_training_periods
+            ),
+            expanding_validation_fold_periods=(
+                expanding_validation_fold_periods
+            ),
             selected_variant=None,
             selected_variant_validation_passed=False,
             validated_challenger_variant=None,
@@ -693,12 +963,38 @@ def evaluate_rotation_walk_forward(
         training = _performance(training_periods)
         validation = _performance(validation_slice)
         blockers = _validation_blockers(validation)
+        (
+            expanding_folds,
+            expanding_validation,
+            expanding_blockers,
+        ) = _expanding_validation_folds(
+            periods,
+            minimum_training_periods=(
+                expanding_validation_min_training_periods
+            ),
+            fold_periods=(
+                expanding_validation_fold_periods
+            ),
+        )
         evaluations.append(
             RotationVariantEvaluation(
                 variant=variant,
                 training_score=_training_score(training),
                 validation_passed=not blockers,
                 validation_blockers=blockers,
+                expanding_validation_passed=(
+                    not expanding_blockers
+                ),
+                expanding_validation_blockers=(
+                    expanding_blockers
+                ),
+                expanding_folds_passed=sum(
+                    fold.passed
+                    for fold in expanding_folds
+                ),
+                expanding_folds_total=len(expanding_folds),
+                expanding_validation=expanding_validation,
+                expanding_folds=expanding_folds,
                 full=_performance(periods),
                 training=training,
                 validation=validation,
@@ -726,8 +1022,8 @@ def evaluate_rotation_walk_forward(
         for evaluation in evaluations
         if (
             evaluation.validation_passed
+            and evaluation.expanding_validation_passed
             and evaluation.training.periods >= 12
-            and evaluation.training_score > 0
         )
     ]
     validated_challenger = (
@@ -749,6 +1045,9 @@ def evaluate_rotation_walk_forward(
         promotion_blockers.append("ROTATION_TRAINING_HISTORY_INSUFFICIENT")
     elif validated_challenger is None:
         promotion_blockers.extend(selected.validation_blockers)
+        promotion_blockers.extend(
+            selected.expanding_validation_blockers
+        )
     return RotationWalkForwardResult(
         algorithm_version=ROTATION_WALK_FORWARD_VERSION,
         status=(
@@ -760,6 +1059,12 @@ def evaluate_rotation_walk_forward(
         data_scope="CURRENT_CONSTITUENTS_ONLY",
         survivorship_bias=True,
         validation_periods=validation_periods,
+        expanding_validation_min_training_periods=(
+            expanding_validation_min_training_periods
+        ),
+        expanding_validation_fold_periods=(
+            expanding_validation_fold_periods
+        ),
         selected_variant=selected.variant.name if selected else None,
         selected_variant_validation_passed=(
             selected.validation_passed if selected else False

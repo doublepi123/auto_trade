@@ -270,6 +270,15 @@ python3 -m pytest tests/test_engine.py -v        # 单模块
 python3 scripts/evaluate_rotation_walk_forward.py --history-bars 1000
 ```
 
+轮动研究采用上月最后一个完整交易日信号、下月首个共同交易日开盘成交。`walk-forward-v2`
+除最后 12 个月留出集外，还按时间顺序执行扩展训练窗口验证。等权 Top8 是当前冻结基线；
+逆 20 日波动率、单票不超过 25% 的 Top8 只作为并行影子，剩余权重保留现金。两套组合在
+月末同时预登记，下月开盘后才累计前向证据，均不会自动晋级或下单。风险配权方向参考
+[Momentum Has Its Moments](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2041429)
+与 QuantConnect 的
+[Risk Parity Model](https://www.quantconnect.com/docs/v2/writing-algorithms/algorithm-framework/portfolio-construction/supported-models)；
+本项目实现的是更简单、可审计的逆波动率近似，不宣称复制论文组合。
+
 ---
 
 ## 项目结构

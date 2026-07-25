@@ -21,6 +21,7 @@ from app.core.broker import BrokerCandle
 from app.domain.strategy_v2 import RISK_GROUP_RELATIVE_MIN_PEERS
 from app.domain.universe_selection import (
     CATALOG_SOURCE_VERSION,
+    DIVERSIFIED_INVERSE_VOLATILITY_VARIANT,
     DIVERSIFIED_ROTATION_VARIANT,
     DEFAULT_ROTATION_VARIANTS,
     INDEX_CANDIDATE_CATALOG,
@@ -69,6 +70,8 @@ _DAILY_BAR_COUNT = 35
 _MAX_RESEARCH_DAILY_BARS = 1000
 _ROTATION_EVALUATION_HISTORY_BARS = 1000
 _ROTATION_EVALUATION_VALIDATION_PERIODS = 12
+_ROTATION_EXPANDING_MIN_TRAINING_PERIODS = 12
+_ROTATION_EXPANDING_FOLD_PERIODS = 12
 _LIVE_ORDER_STATUSES = ("SUBMITTED", "PARTIAL_FILLED")
 _REFRESH_LOCK = threading.Lock()
 _RUN_WAIT_POLL_SECONDS = 0.05
@@ -642,6 +645,11 @@ class UniverseSelectionService:
         cohort_month: date,
         *,
         available_as_of_date: date,
+        variant_name: str = DIVERSIFIED_ROTATION_VARIANT.name,
+        parameter_keys: tuple[str, ...] = (
+            "rotation_cohort_registration",
+            "rotation_next_cohort_registration",
+        ),
     ) -> RotationCohortRegistration | None:
         runs = (
             self.db.query(UniverseSelectionRun)
@@ -668,10 +676,7 @@ class UniverseSelectionService:
                 continue
             if not isinstance(raw_parameters, dict):
                 continue
-            for key in (
-                "rotation_cohort_registration",
-                "rotation_next_cohort_registration",
-            ):
+            for key in parameter_keys:
                 raw_registration = raw_parameters.get(key)
                 if not isinstance(raw_registration, dict):
                     continue
@@ -698,7 +703,7 @@ class UniverseSelectionService:
                     and registration.rotation_algorithm_version
                     == ROTATION_ALGORITHM_VERSION
                     and registration.variant_name
-                    == DIVERSIFIED_ROTATION_VARIANT.name
+                    == variant_name
                 ):
                     return registration
         return None
@@ -1265,6 +1270,12 @@ class UniverseSelectionService:
                 "validation_periods": (
                     _ROTATION_EVALUATION_VALIDATION_PERIODS
                 ),
+                "expanding_validation_min_training_periods": (
+                    _ROTATION_EXPANDING_MIN_TRAINING_PERIODS
+                ),
+                "expanding_validation_fold_periods": (
+                    _ROTATION_EXPANDING_FOLD_PERIODS
+                ),
                 "selected_variant": None,
                 "selected_variant_validation_passed": False,
                 "validated_challenger_variant": None,
@@ -1288,6 +1299,18 @@ class UniverseSelectionService:
                 )
             )
             rotation_registration = None
+            rotation_weighting_challenger_snapshot = (
+                unavailable_rotation_forward_snapshot(
+                    "BENCHMARK_DATA_UNAVAILABLE",
+                    blocker=(
+                        "ROTATION_BENCHMARK_HISTORY_UNAVAILABLE"
+                    ),
+                    variant=(
+                        DIVERSIFIED_INVERSE_VOLATILITY_VARIANT
+                    ),
+                )
+            )
+            rotation_weighting_challenger_registration = None
             selections = self._disable_rotation(
                 selections,
                 reason="ROTATION_MONTHLY_SIGNAL_UNAVAILABLE",
@@ -1303,6 +1326,12 @@ class UniverseSelectionService:
                         variants=DEFAULT_ROTATION_VARIANTS,
                         validation_periods=(
                             _ROTATION_EVALUATION_VALIDATION_PERIODS
+                        ),
+                        expanding_validation_min_training_periods=(
+                            _ROTATION_EXPANDING_MIN_TRAINING_PERIODS
+                        ),
+                        expanding_validation_fold_periods=(
+                            _ROTATION_EXPANDING_FOLD_PERIODS
                         ),
                     ).to_dict()
                 )
@@ -1321,6 +1350,12 @@ class UniverseSelectionService:
                     "validation_periods": (
                         _ROTATION_EVALUATION_VALIDATION_PERIODS
                     ),
+                    "expanding_validation_min_training_periods": (
+                        _ROTATION_EXPANDING_MIN_TRAINING_PERIODS
+                    ),
+                    "expanding_validation_fold_periods": (
+                        _ROTATION_EXPANDING_FOLD_PERIODS
+                    ),
                     "selected_variant": None,
                     "selected_variant_validation_passed": False,
                     "validated_challenger_variant": None,
@@ -1335,11 +1370,11 @@ class UniverseSelectionService:
                     "selected_variant_periods": [],
                     "validated_challenger_periods": [],
                 }
+            cohort_month = rotation_cohort_month(
+                benchmark_bars,
+                as_of_date=expected_as_of_date,
+            )
             try:
-                cohort_month = rotation_cohort_month(
-                    benchmark_bars,
-                    as_of_date=expected_as_of_date,
-                )
                 frozen_registration = (
                     self._rotation_registration_for_month(
                         cohort_month,
@@ -1385,6 +1420,60 @@ class UniverseSelectionService:
                     selections,
                     reason="ROTATION_MONTHLY_SIGNAL_UNAVAILABLE",
                 )
+            try:
+                frozen_weighting_challenger_registration = (
+                    self._rotation_registration_for_month(
+                        cohort_month,
+                        available_as_of_date=expected_as_of_date,
+                        variant_name=(
+                            DIVERSIFIED_INVERSE_VOLATILITY_VARIANT.name
+                        ),
+                        parameter_keys=(
+                            "rotation_weighting_challenger_registration",
+                            "rotation_next_weighting_challenger_registration",
+                        ),
+                    )
+                    if cohort_month is not None
+                    else None
+                )
+                weighting_challenger_evaluation = (
+                    evaluate_rotation_forward(
+                        candidates=self.catalog,
+                        bars_by_symbol=complete_by_symbol,
+                        benchmark_bars_by_symbol=benchmark_bars,
+                        base_config=self.config,
+                        as_of_date=expected_as_of_date,
+                        frozen_registration=(
+                            frozen_weighting_challenger_registration
+                        ),
+                        variant=(
+                            DIVERSIFIED_INVERSE_VOLATILITY_VARIANT
+                        ),
+                    )
+                )
+                rotation_weighting_challenger_snapshot = (
+                    weighting_challenger_evaluation.snapshot
+                )
+                rotation_weighting_challenger_registration = (
+                    weighting_challenger_evaluation.registration
+                )
+            except Exception:
+                logger.exception(
+                    "rotation weighting challenger evaluation failed"
+                )
+                rotation_weighting_challenger_snapshot = (
+                    unavailable_rotation_forward_snapshot(
+                        "EVALUATION_FAILED",
+                        blocker=(
+                            "ROTATION_WEIGHTING_CHALLENGER_"
+                            "EVALUATION_FAILED"
+                        ),
+                        variant=(
+                            DIVERSIFIED_INVERSE_VOLATILITY_VARIANT
+                        ),
+                    )
+                )
+                rotation_weighting_challenger_registration = None
         rotation_evaluation["as_of_date"] = (
             expected_as_of_date.isoformat()
         )
@@ -1401,6 +1490,19 @@ class UniverseSelectionService:
             ),
             "rotation_next_cohort_registration_status": "NOT_DUE",
             "rotation_next_cohort_registration": None,
+            "rotation_weighting_challenger_snapshot": (
+                rotation_weighting_challenger_snapshot.to_dict()
+            ),
+            "rotation_weighting_challenger_registration": (
+                rotation_weighting_challenger_registration.to_dict()
+                if rotation_weighting_challenger_registration
+                is not None
+                else None
+            ),
+            "rotation_next_weighting_challenger_registration_status": (
+                "NOT_DUE"
+            ),
+            "rotation_next_weighting_challenger_registration": None,
         }
         if (
             not benchmark_errors
@@ -1419,6 +1521,9 @@ class UniverseSelectionService:
             if coverage_ratio < self.minimum_evaluable_ratio:
                 rotation_parameters[
                     "rotation_next_cohort_registration_status"
+                ] = "BLOCKED_INSUFFICIENT_COVERAGE"
+                rotation_parameters[
+                    "rotation_next_weighting_challenger_registration_status"
                 ] = "BLOCKED_INSUFFICIENT_COVERAGE"
             else:
                 next_registration = (
@@ -1439,6 +1544,29 @@ class UniverseSelectionService:
                 rotation_parameters[
                     "rotation_next_cohort_registration"
                 ] = next_registration.to_dict()
+                next_weighting_challenger_registration = (
+                    build_rotation_cohort_registration(
+                        candidates=self.catalog,
+                        bars_by_symbol=complete_by_symbol,
+                        base_config=self.config,
+                        cohort_month=next_cohort_month(
+                            expected_as_of_date
+                        ),
+                        signal_date=expected_as_of_date,
+                        registered_as_of_date=expected_as_of_date,
+                        variant=(
+                            DIVERSIFIED_INVERSE_VOLATILITY_VARIANT
+                        ),
+                    )
+                )
+                rotation_parameters[
+                    "rotation_next_weighting_challenger_registration_status"
+                ] = "REGISTERED"
+                rotation_parameters[
+                    "rotation_next_weighting_challenger_registration"
+                ] = (
+                    next_weighting_challenger_registration.to_dict()
+                )
         return selections, expected_as_of_date, rotation_parameters
 
     def _consensus_as_of_date(
@@ -1752,9 +1880,17 @@ class UniverseSelectionService:
             "rotation_forward_variant": asdict(
                 DIVERSIFIED_ROTATION_VARIANT
             ),
+            "rotation_weighting_challenger_variant": asdict(
+                DIVERSIFIED_INVERSE_VOLATILITY_VARIANT
+            ),
             "rotation_forward_registration_policy": (
                 "previous-month-final-session-signal/"
                 "next-month-first-session-open/equal-weight/"
+                "estimated-round-trip-cost"
+            ),
+            "rotation_weighting_challenger_registration_policy": (
+                "same-frozen-top8/inverse-20d-volatility/"
+                "25pct-position-cap/cash-residual/"
                 "estimated-round-trip-cost"
             ),
             "rotation_walk_forward_history_bars": (
@@ -1762,6 +1898,12 @@ class UniverseSelectionService:
             ),
             "rotation_walk_forward_validation_periods": (
                 _ROTATION_EVALUATION_VALIDATION_PERIODS
+            ),
+            "rotation_expanding_min_training_periods": (
+                _ROTATION_EXPANDING_MIN_TRAINING_PERIODS
+            ),
+            "rotation_expanding_fold_periods": (
+                _ROTATION_EXPANDING_FOLD_PERIODS
             ),
             "rotation_walk_forward_benchmarks": list(
                 ROTATION_BENCHMARK_SYMBOLS

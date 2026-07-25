@@ -55,12 +55,31 @@ def _summary(payload: dict[str, object]) -> dict[str, object]:
                         if isinstance(raw.get("variant"), dict)
                         else None
                     ),
+                    "variant": raw.get("variant"),
                     "training_score": raw.get("training_score"),
                     "validation_passed": raw.get(
                         "validation_passed"
                     ),
                     "validation_blockers": raw.get(
                         "validation_blockers"
+                    ),
+                    "expanding_validation_passed": raw.get(
+                        "expanding_validation_passed"
+                    ),
+                    "expanding_validation_blockers": raw.get(
+                        "expanding_validation_blockers"
+                    ),
+                    "expanding_folds_passed": raw.get(
+                        "expanding_folds_passed"
+                    ),
+                    "expanding_folds_total": raw.get(
+                        "expanding_folds_total"
+                    ),
+                    "expanding_validation": raw.get(
+                        "expanding_validation"
+                    ),
+                    "expanding_folds": raw.get(
+                        "expanding_folds"
                     ),
                     "full": raw.get("full"),
                     "training": raw.get("training"),
@@ -72,6 +91,15 @@ def _summary(payload: dict[str, object]) -> dict[str, object]:
         "status": payload.get("status"),
         "data_scope": payload.get("data_scope"),
         "survivorship_bias": payload.get("survivorship_bias"),
+        "validation_periods": payload.get("validation_periods"),
+        "expanding_validation_min_training_periods": (
+            payload.get(
+                "expanding_validation_min_training_periods"
+            )
+        ),
+        "expanding_validation_fold_periods": payload.get(
+            "expanding_validation_fold_periods"
+        ),
         "selected_variant": payload.get("selected_variant"),
         "selected_variant_validation_passed": payload.get(
             "selected_variant_validation_passed"

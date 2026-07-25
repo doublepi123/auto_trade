@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from typing import Any, cast
 
 from app.core.broker import BrokerCandle
 from app.domain.universe_selection import (
+    DIVERSIFIED_INVERSE_VOLATILITY_VARIANT,
     IndexCandidate,
     RotationVariant,
     UniverseSelectionConfig,
@@ -30,11 +33,14 @@ def _bars(
     drift: float,
     dates: list[datetime] | None = None,
     shock_after: int | None = None,
+    volatility_scale: float = 1.0,
 ) -> list[BrokerCandle]:
     price = 100.0
     result: list[BrokerCandle] = []
     for index, timestamp in enumerate(dates or _DATES):
-        noise = 0.008 if index % 2 == 0 else -0.006
+        noise = (
+            0.008 if index % 2 == 0 else -0.006
+        ) * volatility_scale
         move = drift + noise
         if shock_after is not None and index >= shock_after:
             move = -0.03
@@ -120,6 +126,9 @@ def test_rotation_walk_forward_uses_prior_close_and_next_month_open() -> None:
     assert result.status == "COMPLETE"
     assert result.selected_variant == "baseline"
     assert result.validated_challenger_variant == "baseline"
+    assert result.variants[0].expanding_validation_passed is True
+    assert result.variants[0].expanding_folds_passed >= 2
+    assert result.variants[0].expanding_folds_total >= 2
     assert result.automatic_promotion_allowed is False
     assert "CURRENT_CONSTITUENTS_SURVIVORSHIP_BIAS" in (
         result.promotion_blockers
@@ -137,6 +146,10 @@ def test_rotation_walk_forward_uses_prior_close_and_next_month_open() -> None:
     assert 0.1 < first.transaction_cost_pct < 0.2
     assert first.turnover_pct == 100.0
     assert first.selected_symbols == ("FAST.US", "SLOW.US")
+    assert first.target_weights_pct == (
+        ("FAST.US", 50.0),
+        ("SLOW.US", 50.0),
+    )
 
 
 def test_rotation_walk_forward_does_not_rewrite_earlier_periods() -> None:
@@ -310,3 +323,79 @@ def test_rotation_cost_assumption_changes_net_but_not_gross_return() -> None:
     no_cost_period = no_cost.selected_variant_periods[0]
     assert with_cost_period.gross_return_pct == no_cost_period.gross_return_pct
     assert with_cost_period.net_return_pct < no_cost_period.net_return_pct
+
+
+def test_inverse_volatility_weighting_caps_and_reduces_risk_weight() -> None:
+    candidates = (
+        _candidate("CALM.US", "Healthcare"),
+        _candidate("VOLATILE.US", "Semiconductors"),
+    )
+    result = evaluate_rotation_walk_forward(
+        candidates=candidates,
+        bars_by_symbol={
+            "CALM.US": _bars(
+                drift=0.0012,
+                volatility_scale=0.5,
+            ),
+            "VOLATILE.US": _bars(
+                drift=0.0025,
+                volatility_scale=2.5,
+            ),
+        },
+        benchmark_bars_by_symbol={
+            "QQQ.US": _bars(drift=0.0005),
+            "DIA.US": _bars(drift=0.0003),
+        },
+        base_config=_config(),
+        variants=(
+            replace(
+                DIVERSIFIED_INVERSE_VOLATILITY_VARIANT,
+                max_selected=2,
+                max_position_weight_pct=60.0,
+            ),
+        ),
+        validation_periods=12,
+    )
+
+    first = result.selected_variant_periods[0]
+    weights = dict(first.target_weights_pct)
+    assert 0 < weights["VOLATILE.US"] < weights["CALM.US"]
+    assert weights["CALM.US"] <= 60.0
+    assert sum(weights.values()) <= 100.0
+
+
+def test_rotation_walk_forward_serializes_expanding_fold_dates() -> None:
+    payload = _evaluate().to_dict()
+
+    serialized = json.dumps(payload)
+
+    assert "training_end_date" in serialized
+    assert "validation_start_date" in serialized
+
+
+def test_rotation_variant_rejects_invalid_weighting_controls() -> None:
+    base = RotationVariant(
+        name="valid",
+        lookback_bars=252,
+        skip_bars=21,
+        sma_bars=200,
+        max_selected=8,
+        max_per_risk_group=1,
+    )
+
+    try:
+        replace(
+            base,
+            weighting=cast(Any, "unsupported"),
+        )
+    except ValueError as exc:
+        assert "weighting" in str(exc)
+    else:
+        raise AssertionError("invalid weighting was accepted")
+
+    try:
+        replace(base, max_position_weight_pct=0)
+    except ValueError as exc:
+        assert "max_position_weight_pct" in str(exc)
+    else:
+        raise AssertionError("invalid position cap was accepted")
