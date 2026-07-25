@@ -13,7 +13,11 @@ from app.domain.strategy_v2.engine import (
     StrategyV2State,
     VirtualPosition,
 )
-from app.domain.strategy_v2.costs import minimum_profit_target_pct
+from app.domain.strategy_v2.costs import (
+    estimated_net_reward_risk_ratio,
+    estimated_round_trip_cost_pct,
+    minimum_profit_target_pct,
+)
 from app.domain.strategy_v2.features import StrategyBar, StrategyV2FeatureSnapshot
 
 
@@ -26,6 +30,25 @@ def test_minimum_profit_target_covers_round_trip_costs_and_edge_buffer() -> None
         one_side_fee_rate=0.003,
         slippage_bps=2.0,
     ) == pytest.approx(0.74)
+
+
+def test_shadow_cost_diagnostics_include_both_sides() -> None:
+    assumptions = {
+        "one_side_fee_rate": 0.0005,
+        "slippage_bps": 2.0,
+    }
+
+    assert estimated_round_trip_cost_pct(**assumptions) == pytest.approx(0.14)
+    assert estimated_net_reward_risk_ratio(
+        profit_target_pct=0.50,
+        stop_loss_pct=0.75,
+        **assumptions,
+    ) == pytest.approx(0.36 / 0.89)
+    assert estimated_net_reward_risk_ratio(
+        profit_target_pct=0.80,
+        stop_loss_pct=0.45,
+        **assumptions,
+    ) == pytest.approx(0.66 / 0.59)
 
 
 def _feature(

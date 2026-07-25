@@ -22,6 +22,8 @@ from app.domain.strategy_v2.engine import (
 )
 from app.domain.strategy_v2.costs import (
     DEFAULT_EDGE_SAFETY_BUFFER_BPS,
+    estimated_net_reward_risk_ratio,
+    estimated_round_trip_cost_pct,
     minimum_profit_target_pct,
 )
 from app.domain.strategy_v2.profit_lock import (
@@ -56,6 +58,8 @@ __all__ = [
     "StrategyV2Step",
     "VirtualPosition",
     "DEFAULT_EDGE_SAFETY_BUFFER_BPS",
+    "estimated_net_reward_risk_ratio",
+    "estimated_round_trip_cost_pct",
     "minimum_profit_target_pct",
     "ProfitLockAction",
     "ProfitLockConfig",

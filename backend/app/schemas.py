@@ -365,6 +365,9 @@ class StrategyV2ShadowConfigUpdate(BaseModel):
 class StrategyV2ShadowConfigResponse(StrategyV2ShadowConfigValues):
     config_version: str
     updated_at: datetime
+    estimated_round_trip_cost_pct: float = Field(ge=0.0, allow_inf_nan=False)
+    estimated_net_reward_risk_ratio: float = Field(allow_inf_nan=False)
+    minimum_net_reward_risk_ratio: float = 1.0
 
 
 class StrategyV2ShadowDecisionResponse(BaseModel):

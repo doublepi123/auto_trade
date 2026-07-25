@@ -1708,6 +1708,9 @@ export interface StrategyShadowConfig {
   short_entries_enabled: boolean
   config_version: string
   updated_at: string
+  estimated_round_trip_cost_pct: number
+  estimated_net_reward_risk_ratio: number
+  minimum_net_reward_risk_ratio: number
 }
 
 export interface StrategyShadowConfigUpdate {

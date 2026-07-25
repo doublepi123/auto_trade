@@ -32,6 +32,8 @@ from app.domain.strategy_v2 import (
     StrategyV2State,
     VirtualPosition,
     aggregate_complete_five_minute_bars,
+    estimated_net_reward_risk_ratio,
+    estimated_round_trip_cost_pct,
     minimum_profit_target_pct,
 )
 from app.platform.strategy_quality import strategy_quality_report
@@ -122,6 +124,9 @@ _POST_CLOSE_COLLECTION_MINUTES = 15
 _MIN_REVIEW_TRADING_DAYS = 20
 _MIN_REVIEW_CLOSED_TRADES = 50
 _MIN_COMPLETE_SESSION_COVERAGE = 0.995
+_MIN_NET_REWARD_RISK_RATIO = 1.0
+_US_DEFAULT_STOP_LOSS_PCT = 0.45
+_US_DEFAULT_PROFIT_TARGET_PCT = 0.80
 _ADX_CHALLENGER_VALUES = (20.0, 25.0, 30.0)
 _MIN_CHALLENGER_COMPLETE_SESSIONS = 5
 _MAX_CHALLENGER_COMPLETE_SESSIONS = 20
@@ -3880,8 +3885,6 @@ class StrategyV2ShadowService:
         symbol: str,
         params: dict[str, Any],
     ) -> str | None:
-        if not symbol.endswith(".HK"):
-            return None
         values = dict(params)
         values.setdefault("symbol", symbol)
         try:
@@ -3892,7 +3895,35 @@ class StrategyV2ShadowService:
                 if "must be at least" in str(exc)
                 else "CONFIG_COST_SNAPSHOT_INCOMPLETE"
             )
+        if symbol.endswith(".US"):
+            try:
+                _cost_pct, reward_risk = cls._cost_diagnostics(values)
+            except (KeyError, TypeError, ValueError, OverflowError):
+                return "CONFIG_COST_SNAPSHOT_INCOMPLETE"
+            if reward_risk + 1e-12 < _MIN_NET_REWARD_RISK_RATIO:
+                return "NET_REWARD_RISK_BELOW_ONE"
         return None
+
+    @staticmethod
+    def _cost_diagnostics(values: dict[str, Any]) -> tuple[float, float]:
+        symbol = str(values["symbol"]).upper()
+        fee_key = (
+            "estimated_fee_rate_hk"
+            if symbol.endswith(".HK")
+            else "estimated_fee_rate_us"
+        )
+        assumptions = {
+            "one_side_fee_rate": float(values[fee_key]),
+            "slippage_bps": float(values["slippage_bps"]),
+        }
+        return (
+            estimated_round_trip_cost_pct(**assumptions),
+            estimated_net_reward_risk_ratio(
+                profit_target_pct=float(values["profit_target_pct"]),
+                stop_loss_pct=float(values["stop_loss_pct"]),
+                **assumptions,
+            ),
+        )
 
     @staticmethod
     def _readiness_quality(
@@ -4315,8 +4346,12 @@ class StrategyV2ShadowService:
         live = self.db.query(StrategyConfig).order_by(StrategyConfig.id.desc()).first()
         fee_rate_us = float(live.fee_rate_us) if live is not None else 0.0005
         fee_rate_hk = float(live.fee_rate_hk) if live is not None else 0.003
+        default_stop_loss = 0.75
         default_profit_target = 0.50
-        if normalized.endswith(".HK"):
+        if normalized.endswith(".US"):
+            default_stop_loss = _US_DEFAULT_STOP_LOSS_PCT
+            default_profit_target = _US_DEFAULT_PROFIT_TARGET_PCT
+        else:
             default_profit_target = min(
                 5.0,
                 max(
@@ -4330,6 +4365,7 @@ class StrategyV2ShadowService:
         row = StrategyV2ShadowConfig(
             symbol=normalized,
             enabled=False,
+            stop_loss_pct=default_stop_loss,
             profit_target_pct=default_profit_target,
             estimated_fee_rate_us=fee_rate_us,
             estimated_fee_rate_hk=fee_rate_hk,
@@ -4352,8 +4388,12 @@ class StrategyV2ShadowService:
         live = self.db.query(StrategyConfig).order_by(StrategyConfig.id.desc()).first()
         fee_rate_us = float(live.fee_rate_us) if live is not None else 0.0005
         fee_rate_hk = float(live.fee_rate_hk) if live is not None else 0.003
+        default_stop_loss = 0.75
         default_profit_target = 0.50
-        if symbol.endswith(".HK"):
+        if symbol.endswith(".US"):
+            default_stop_loss = _US_DEFAULT_STOP_LOSS_PCT
+            default_profit_target = _US_DEFAULT_PROFIT_TARGET_PCT
+        else:
             default_profit_target = min(
                 5.0,
                 max(
@@ -4366,6 +4406,7 @@ class StrategyV2ShadowService:
             )
         values = StrategyV2ShadowConfigValues(
             symbol=symbol,
+            stop_loss_pct=default_stop_loss,
             profit_target_pct=default_profit_target,
             estimated_fee_rate_us=fee_rate_us,
             estimated_fee_rate_hk=fee_rate_hk,
@@ -4464,10 +4505,15 @@ class StrategyV2ShadowService:
         self,
         row: StrategyV2ShadowConfig,
     ) -> StrategyV2ShadowConfigResponse:
+        values = self._config_values(row)
+        round_trip_cost, reward_risk = self._cost_diagnostics(values)
         return StrategyV2ShadowConfigResponse(
-            **self._config_values(row),
+            **values,
             config_version=self._config_version(row),
             updated_at=row.updated_at,
+            estimated_round_trip_cost_pct=round_trip_cost,
+            estimated_net_reward_risk_ratio=reward_risk,
+            minimum_net_reward_risk_ratio=_MIN_NET_REWARD_RISK_RATIO,
         )
 
     def _config_version(self, row: StrategyV2ShadowConfig) -> str:

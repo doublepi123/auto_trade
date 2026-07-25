@@ -326,6 +326,35 @@ class TestStrategyV2ShadowService:
         assert config.max_holding_minutes == 60
         assert config.entry_cutoff_minutes_before_close == 45
         assert config.flatten_minutes_before_close == 15
+        assert config.stop_loss_pct == pytest.approx(0.45)
+        assert config.profit_target_pct == pytest.approx(0.80)
+        assert config.estimated_round_trip_cost_pct == pytest.approx(0.14)
+        assert config.estimated_net_reward_risk_ratio == pytest.approx(0.66 / 0.59)
+        assert config.minimum_net_reward_risk_ratio == pytest.approx(1.0)
+
+    def test_us_readiness_blocks_cost_adjusted_reward_risk_below_one(self) -> None:
+        baseline = {
+            "symbol": "AAPL.US",
+            "stop_loss_pct": 0.75,
+            "profit_target_pct": 0.50,
+            "estimated_fee_rate_us": 0.0005,
+            "estimated_fee_rate_hk": 0.003,
+            "slippage_bps": 2.0,
+        }
+        improved = {
+            **baseline,
+            "stop_loss_pct": 0.45,
+            "profit_target_pct": 0.80,
+        }
+
+        assert (
+            StrategyV2ShadowService._net_edge_blocker("AAPL.US", baseline)
+            == "NET_REWARD_RISK_BELOW_ONE"
+        )
+        assert StrategyV2ShadowService._net_edge_blocker(
+            "AAPL.US",
+            improved,
+        ) is None
 
     def test_daily_evidence_requires_a_complete_contiguous_rth_session(self) -> None:
         rows = [

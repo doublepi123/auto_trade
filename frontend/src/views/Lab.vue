@@ -704,6 +704,14 @@
                 <div><span>虚拟滑点</span><strong>{{ shadowConfig.slippage_bps.toFixed(1) }} bps</strong></div>
                 <div><span>美股单边费率</span><strong>{{ formatPercent(shadowConfig.estimated_fee_rate_us) }}</strong></div>
                 <div><span>港股单边费率</span><strong>{{ formatPercent(shadowConfig.estimated_fee_rate_hk) }}</strong></div>
+                <div><span>预估往返成本</span><strong>{{ shadowConfig.estimated_round_trip_cost_pct.toFixed(2) }}%</strong></div>
+                <div>
+                  <span>扣费后盈亏比</span>
+                  <strong>
+                    {{ shadowConfig.estimated_net_reward_risk_ratio.toFixed(2) }}
+                    / {{ shadowConfig.minimum_net_reward_risk_ratio.toFixed(2) }}
+                  </strong>
+                </div>
                 <div><span>加仓</span><strong>{{ shadowConfig.allow_position_addons ? '允许' : '禁止' }}</strong></div>
                 <div><span>做空</span><strong>{{ shadowConfig.short_entries_enabled ? '允许' : '禁止' }}</strong></div>
                 <div><span>订单提交</span><strong>{{ shadowConfig.order_submission_allowed ? '允许' : '禁止' }}</strong></div>
@@ -1839,8 +1847,8 @@ const shadowForm = reactive<StrategyShadowConfigUpdate>({
   realized_vol_window_bars: 20,
   min_realized_vol: 0.001,
   max_realized_vol: 0.04,
-  stop_loss_pct: 0.5,
-  profit_target_pct: 0.5,
+  stop_loss_pct: 0.45,
+  profit_target_pct: 0.8,
 })
 const shadowMax5mWindow = computed(() => shadowConfig.value?.symbol.endsWith('.HK') ? 56 : 68)
 const shadowMaxAdxPeriod = computed(() => shadowConfig.value?.symbol.endsWith('.HK') ? 28 : 34)
@@ -2203,6 +2211,7 @@ const shadowBlockerLabels: Record<string, string> = {
   MAX_DRAWDOWN_EXCEEDS_NET_PNL: '最大回撤超过净收益',
   QUALITY_DATA_INCOMPLETE: '交易收益证据不完整',
   HK_MIN_NET_EDGE: '港股目标收益不足以覆盖成本',
+  NET_REWARD_RISK_BELOW_ONE: '美股扣费后盈亏比低于 1',
   CONFIG_COST_SNAPSHOT_INCOMPLETE: '成本配置证据不完整',
 }
 

@@ -102,6 +102,11 @@ describe('Strategy v2 shadow lab', () => {
       .and('contain', '1m 触发')
       .and('contain', '5m 确认')
       .and('contain', '采集中')
+    cy.get('[data-testid="shadow-hard-safety"]')
+      .should('contain', '预估往返成本')
+      .and('contain', '0.14%')
+      .and('contain', '扣费后盈亏比')
+      .and('contain', '1.12 / 1.00')
 
     cy.get('[data-testid="shadow-symbol-select"]').should('contain', 'NVDA.US')
 
@@ -695,6 +700,9 @@ describe('Strategy v2 shadow lab', () => {
           short_entries_enabled: false,
           config_version: 'shadow-test-v2',
           updated_at: '2026-07-12T02:10:00Z',
+          estimated_round_trip_cost_pct: 0.14,
+          estimated_net_reward_risk_ratio: 0.71875,
+          minimum_net_reward_risk_ratio: 1,
         },
       })
     }).as('assertShadowSave')

@@ -697,6 +697,27 @@ class TestStrategyV2ShadowApi:
         assert response.status_code == 400
         assert "must not exceed 68" in response.json()["detail"]
 
+    def test_us_low_net_reward_risk_is_visible_in_evaluation(self) -> None:
+        updated = self.client.put(
+            "/api/strategy-shadow/config",
+            params={"symbol": "AAPL.US"},
+            json={"stop_loss_pct": 0.75, "profit_target_pct": 0.50},
+        )
+
+        assert updated.status_code == 200
+        assert updated.json()["estimated_net_reward_risk_ratio"] < 1.0
+
+        evaluation = self.client.get(
+            "/api/strategy-shadow/evaluation",
+            params={"symbol": "AAPL.US"},
+        )
+
+        assert evaluation.status_code == 200
+        assert (
+            "NET_REWARD_RISK_BELOW_ONE"
+            in evaluation.json()["readiness_blockers"]
+        )
+
     def test_hk_profit_target_must_cover_round_trip_costs_and_buffer(self) -> None:
         created = self.client.get(
             "/api/strategy-shadow/config",

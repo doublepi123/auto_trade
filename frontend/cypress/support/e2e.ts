@@ -74,8 +74,8 @@ Cypress.Commands.add('stubApi', () => {
     realized_vol_window_bars: 20,
     min_realized_vol: 0.001,
     max_realized_vol: 0.04,
-    stop_loss_pct: 0.5,
-    profit_target_pct: 0.6,
+    stop_loss_pct: 0.45,
+    profit_target_pct: 0.8,
     max_holding_minutes: 60,
     entry_cutoff_minutes_before_close: 45,
     flatten_minutes_before_close: 15,
@@ -92,6 +92,9 @@ Cypress.Commands.add('stubApi', () => {
     short_entries_enabled: false,
     config_version: 'shadow-stub-v1',
     updated_at: '2026-07-12T02:00:00Z',
+    estimated_round_trip_cost_pct: 0.14,
+    estimated_net_reward_risk_ratio: 1.118644,
+    minimum_net_reward_risk_ratio: 1,
   }
   const strategyShadowMetrics = {
     bars: 120,
