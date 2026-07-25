@@ -1366,6 +1366,32 @@ export interface UniverseRotationWalkForwardEvaluation {
   variants: UniverseRotationVariantEvaluation[]
 }
 
+export interface UniverseIndexMembershipHistorySource {
+  name: string
+  commit: string
+  url: string
+  license: string
+}
+
+export interface UniverseIndexMembershipHistoryMetadata {
+  source_version: string
+  effective_start_date: string
+  catalog_snapshot_date: string
+  sources: UniverseIndexMembershipHistorySource[]
+  catalog_size: number
+  authoritative_symbols: number
+  authoritative_ratio: number
+  snapshot_only_symbols: string[]
+  missing_symbols: string[]
+}
+
+export interface UniverseRotationPointInTimeSensitivity {
+  status: string
+  membership_history: UniverseIndexMembershipHistoryMetadata
+  evaluation: UniverseRotationWalkForwardEvaluation | null
+  errors: string[]
+}
+
 export interface UniverseRotationForwardHolding {
   symbol: string
   rank: number

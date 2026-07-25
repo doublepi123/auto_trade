@@ -16,6 +16,9 @@ env
 
 # Local data
 data/
+!app/domain/universe_selection/data/
+!app/domain/universe_selection/data/index_membership_history.json
+!app/domain/universe_selection/data/THIRD_PARTY_NOTICES.md
 .env
 .env.*
 !.env.example

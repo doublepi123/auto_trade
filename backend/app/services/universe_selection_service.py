@@ -25,6 +25,7 @@ from app.domain.universe_selection import (
     DIVERSIFIED_ROTATION_VARIANT,
     DEFAULT_ROTATION_VARIANTS,
     INDEX_CANDIDATE_CATALOG,
+    INDEX_MEMBERSHIP_HISTORY,
     ROTATION_ALGORITHM_VERSION,
     ROTATION_BENCHMARK_SYMBOLS,
     ROTATION_FORWARD_VERSION,
@@ -1258,6 +1259,9 @@ class UniverseSelectionService:
                     exc,
                     exc_info=True,
                 )
+        membership_history_metadata = (
+            INDEX_MEMBERSHIP_HISTORY.metadata(self.catalog)
+        )
         if benchmark_errors:
             rotation_evaluation: dict[str, object] = {
                 "algorithm_version": ROTATION_WALK_FORWARD_VERSION,
@@ -1311,6 +1315,17 @@ class UniverseSelectionService:
                 )
             )
             rotation_weighting_challenger_registration = None
+            rotation_point_in_time_sensitivity: dict[
+                str,
+                object,
+            ] = {
+                "status": "BENCHMARK_DATA_UNAVAILABLE",
+                "membership_history": (
+                    membership_history_metadata
+                ),
+                "evaluation": None,
+                "errors": list(benchmark_errors),
+            }
             selections = self._disable_rotation(
                 selections,
                 reason="ROTATION_MONTHLY_SIGNAL_UNAVAILABLE",
@@ -1369,6 +1384,48 @@ class UniverseSelectionService:
                     "variants": [],
                     "selected_variant_periods": [],
                     "validated_challenger_periods": [],
+                }
+            try:
+                point_in_time_evaluation = (
+                    evaluate_rotation_walk_forward(
+                        candidates=self.catalog,
+                        bars_by_symbol=complete_by_symbol,
+                        benchmark_bars_by_symbol=benchmark_bars,
+                        base_config=self.config,
+                        variants=DEFAULT_ROTATION_VARIANTS,
+                        validation_periods=(
+                            _ROTATION_EVALUATION_VALIDATION_PERIODS
+                        ),
+                        expanding_validation_min_training_periods=(
+                            _ROTATION_EXPANDING_MIN_TRAINING_PERIODS
+                        ),
+                        expanding_validation_fold_periods=(
+                            _ROTATION_EXPANDING_FOLD_PERIODS
+                        ),
+                        membership_history=(
+                            INDEX_MEMBERSHIP_HISTORY
+                        ),
+                    ).to_dict()
+                )
+                rotation_point_in_time_sensitivity = {
+                    "status": point_in_time_evaluation["status"],
+                    "membership_history": (
+                        membership_history_metadata
+                    ),
+                    "evaluation": point_in_time_evaluation,
+                    "errors": [],
+                }
+            except Exception as exc:
+                logger.exception(
+                    "rotation point-in-time sensitivity failed"
+                )
+                rotation_point_in_time_sensitivity = {
+                    "status": "EVALUATION_FAILED",
+                    "membership_history": (
+                        membership_history_metadata
+                    ),
+                    "evaluation": None,
+                    "errors": [type(exc).__name__],
                 }
             cohort_month = rotation_cohort_month(
                 benchmark_bars,
@@ -1478,8 +1535,21 @@ class UniverseSelectionService:
             expected_as_of_date.isoformat()
         )
         rotation_evaluation["history_bars_requested"] = daily_bar_count
+        raw_point_in_time_evaluation = (
+            rotation_point_in_time_sensitivity.get("evaluation")
+        )
+        if isinstance(raw_point_in_time_evaluation, dict):
+            raw_point_in_time_evaluation["as_of_date"] = (
+                expected_as_of_date.isoformat()
+            )
+            raw_point_in_time_evaluation[
+                "history_bars_requested"
+            ] = daily_bar_count
         rotation_parameters: dict[str, object] = {
             "rotation_evaluation": rotation_evaluation,
+            "rotation_point_in_time_sensitivity": (
+                rotation_point_in_time_sensitivity
+            ),
             "rotation_forward_snapshot": (
                 rotation_snapshot.to_dict()
             ),
@@ -1867,6 +1937,9 @@ class UniverseSelectionService:
         return enabled, disabled, failures
 
     def _parameters(self) -> dict[str, object]:
+        membership_history_metadata = (
+            INDEX_MEMBERSHIP_HISTORY.metadata(self.catalog)
+        )
         return {
             **asdict(self.config),
             "catalog_size": len(self.catalog),
@@ -1912,6 +1985,9 @@ class UniverseSelectionService:
                 asdict(variant)
                 for variant in DEFAULT_ROTATION_VARIANTS
             ],
+            "rotation_point_in_time_membership_history": (
+                membership_history_metadata
+            ),
             "exploration_algorithm_version": (
                 _EXPLORATION_ALGORITHM_VERSION
             ),

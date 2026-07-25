@@ -47,7 +47,7 @@ const rotationPerformanceStub = {
 }
 
 const rotationEvaluationStub = {
-  algorithm_version: 'rotation-monthly-open-walk-forward-v2',
+  algorithm_version: 'rotation-monthly-open-walk-forward-v3',
   status: 'COMPLETE',
   benchmark_symbols: ['QQQ.US', 'DIA.US'],
   data_scope: 'CURRENT_CONSTITUENTS_ONLY',
@@ -141,6 +141,77 @@ const rotationEvaluationStub = {
       },
     },
   ],
+}
+
+const rotationPointInTimeSensitivityStub = {
+  status: 'COMPLETE',
+  membership_history: {
+    source_version: 'n100tickers-9a23023b_index-constitution-650596e3_catalog-snapshot-2026-07-24',
+    effective_start_date: '2022-01-01',
+    catalog_snapshot_date: '2026-07-24',
+    sources: [
+      {
+        name: 'jmccarrell/n100tickers',
+        commit: '9a23023b59707c5372ae1fff4ed983b3ad025c74',
+        url: 'https://github.com/jmccarrell/n100tickers',
+        license: 'MIT',
+      },
+      {
+        name: 'unliftedq/index-constitution',
+        commit: '650596e3c59a19d9c8767c8b504e3728da0fd07f',
+        url: 'https://github.com/unliftedq/index-constitution',
+        license: 'MIT',
+      },
+    ],
+    catalog_size: 97,
+    authoritative_symbols: 95,
+    authoritative_ratio: 95 / 97,
+    snapshot_only_symbols: ['HONA.US', 'SPCX.US'],
+    missing_symbols: [],
+  },
+  evaluation: {
+    ...rotationEvaluationStub,
+    data_scope: 'POINT_IN_TIME_CURRENT_CATALOG',
+    selected_variant: 'diversified_top8_12_1',
+    validated_challenger_variant: null,
+    promotion_blockers: [
+      'HISTORICAL_CONSTITUENTS_OMITTED',
+      'POINT_IN_TIME_MEMBERSHIP_HISTORY_PARTIAL',
+      'ROTATION_FORWARD_OBSERVATIONS_REQUIRED',
+    ],
+    variants: [
+      {
+        ...rotationEvaluationStub.variants[0],
+        variant: {
+          ...rotationEvaluationStub.variants[0].variant,
+          name: 'diversified_top8_12_1',
+          weighting: 'equal',
+          max_position_weight_pct: 100,
+        },
+        expanding_validation_passed: true,
+        expanding_folds_passed: 3,
+        expanding_validation: {
+          ...rotationEvaluationStub.variants[0].expanding_validation,
+          annualized_return_pct: 42.1,
+          sharpe: 1.79,
+          max_drawdown_pct: 12.7,
+        },
+      },
+      {
+        ...rotationEvaluationStub.variants[0],
+        expanding_validation_passed: false,
+        expanding_validation_blockers: ['EXPANDING_FOLDS_INSUFFICIENT'],
+        expanding_folds_passed: 2,
+        expanding_validation: {
+          ...rotationEvaluationStub.variants[0].expanding_validation,
+          annualized_return_pct: 33.2,
+          sharpe: 1.74,
+          max_drawdown_pct: 11.3,
+        },
+      },
+    ],
+  },
+  errors: [],
 }
 
 const rotationForwardStub = {
@@ -1183,6 +1254,7 @@ Cypress.Commands.add('stubApi', () => {
       parameters: {
         max_selected: 8,
         rotation_evaluation: rotationEvaluationStub,
+        rotation_point_in_time_sensitivity: rotationPointInTimeSensitivityStub,
         rotation_forward_snapshot: rotationForwardStub,
         rotation_weighting_challenger_snapshot: rotationWeightingChallengerStub,
       },

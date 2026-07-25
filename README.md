@@ -268,9 +268,12 @@ python3 -m pytest tests/test_engine.py -v        # 单模块
 
 # 只读复算轮动证据；不读取持仓、不提交订单
 python3 scripts/evaluate_rotation_walk_forward.py --history-bars 1000
+
+# 维护点时指数成分快照；下载源固定到 commit，并校验 SHA-256
+python3 scripts/build_index_membership_snapshot.py
 ```
 
-轮动研究采用上月最后一个完整交易日信号、下月首个共同交易日开盘成交。`walk-forward-v2`
+轮动研究采用上月最后一个完整交易日信号、下月首个共同交易日开盘成交。`walk-forward-v3`
 除最后 12 个月留出集外，还按时间顺序执行扩展训练窗口验证。等权 Top8 是当前冻结基线；
 逆 20 日波动率、单票不超过 25% 的 Top8 只作为并行影子，剩余权重保留现金。两套组合在
 月末同时预登记，下月开盘后才累计前向证据，均不会自动晋级或下单。风险配权方向参考
@@ -278,6 +281,15 @@ python3 scripts/evaluate_rotation_walk_forward.py --history-bars 1000
 与 QuantConnect 的
 [Risk Parity Model](https://www.quantconnect.com/docs/v2/writing-algorithms/algorithm-framework/portfolio-construction/supported-models)；
 本项目实现的是更简单、可审计的逆波动率近似，不宣称复制论文组合。
+
+`walk-forward-v3` 另行输出只读的点时成分敏感性：每个信号日会排除当时尚未进入指数的
+当前目录股票。纳斯达克 100 历史来自固定提交的
+[jmccarrell/n100tickers](https://github.com/jmccarrell/n100tickers/tree/9a23023b59707c5372ae1fff4ed983b3ad025c74)，
+道琼斯历史来自固定提交的
+[unliftedq/index-constitution](https://github.com/unliftedq/index-constitution/tree/650596e3c59a19d9c8767c8b504e3728da0fd07f)；
+构建脚本会校验每个源文件的 SHA-256，运行时只读取随代码发布的快照。该评估尚未纳入
+已经退市或已调出、且不在当前目录中的历史股票，因此只是部分消除幸存者偏差，不能作为
+自动晋级或下单依据。
 
 ---
 

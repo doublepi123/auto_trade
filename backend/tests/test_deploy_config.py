@@ -218,3 +218,29 @@ def test_frontend_healthcheck_uses_ipv4_loopback() -> None:
 
     assert "http://127.0.0.1/" in dockerfile
     assert "http://localhost/" not in dockerfile
+
+
+def test_backend_image_includes_index_membership_snapshot() -> None:
+    dockerignore = (ROOT / "backend" / ".dockerignore").read_text(
+        encoding="utf-8"
+    )
+    dockerfile = (ROOT / "backend" / "Dockerfile").read_text(
+        encoding="utf-8"
+    )
+    snapshot = (
+        ROOT
+        / "backend"
+        / "app"
+        / "domain"
+        / "universe_selection"
+        / "data"
+        / "index_membership_history.json"
+    )
+
+    assert "!app/domain/universe_selection/data/" in dockerignore
+    assert (
+        "!app/domain/universe_selection/data/"
+        "index_membership_history.json"
+    ) in dockerignore
+    assert "COPY --chown=appuser:appuser app/ ./app/" in dockerfile
+    assert snapshot.is_file()

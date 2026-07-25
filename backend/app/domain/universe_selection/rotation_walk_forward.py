@@ -9,6 +9,9 @@ from typing import Literal, Mapping, Sequence
 
 from app.core.market_calendar import get_session
 from app.domain.universe_selection.catalog import IndexCandidate
+from app.domain.universe_selection.membership_history import (
+    IndexMembershipHistory,
+)
 from app.domain.universe_selection.selector import (
     CandidateInput,
     CandidateSelection,
@@ -19,7 +22,7 @@ from app.domain.universe_selection.selector import (
 )
 
 
-ROTATION_WALK_FORWARD_VERSION = "rotation-monthly-open-walk-forward-v2"
+ROTATION_WALK_FORWARD_VERSION = "rotation-monthly-open-walk-forward-v3"
 ROTATION_BENCHMARK_SYMBOLS = ("QQQ.US", "DIA.US")
 _CASH = "__CASH__"
 _EXPANDING_VALIDATION_MIN_TRAINING_PERIODS = 12
@@ -304,6 +307,7 @@ def _candidate_inputs_at(
     ],
     signal_date: date,
     max_bars: int,
+    membership_history: IndexMembershipHistory | None = None,
 ) -> list[CandidateInput]:
     inputs: list[CandidateInput] = []
     for candidate in candidates:
@@ -314,9 +318,17 @@ def _candidate_inputs_at(
         end = bisect_right(dates, signal_date)
         start = max(0, end - max_bars)
         bars = ordered_bars[start:end]
-        errors: tuple[str, ...] = ()
+        errors: list[str] = []
+        if (
+            membership_history is not None
+            and not membership_history.is_active(
+                candidate,
+                signal_date,
+            )
+        ):
+            errors.append("INDEX_MEMBERSHIP_INACTIVE")
         if not bars or dates[end - 1] != signal_date:
-            errors = ("DATA_STALE_SESSION_DATE",)
+            errors.append("DATA_STALE_SESSION_DATE")
         inputs.append(
             CandidateInput(
                 candidate=candidate,
@@ -324,7 +336,7 @@ def _candidate_inputs_at(
                 bid=None,
                 ask=None,
                 estimated_spread_bps=liquidity_spread_proxy_bps(bars),
-                data_errors=errors,
+                data_errors=tuple(errors),
             )
         )
     return inputs
@@ -460,6 +472,7 @@ def _simulate_variant(
     rebalance_dates: Sequence[date],
     base_config: UniverseSelectionConfig,
     variant: RotationVariant,
+    membership_history: IndexMembershipHistory | None,
 ) -> list[RotationPeriod]:
     if len(rebalance_dates) < 2:
         return []
@@ -501,6 +514,7 @@ def _simulate_variant(
                 histories_by_symbol=histories_by_symbol,
                 signal_date=signal_date,
                 max_bars=required_bars,
+                membership_history=membership_history,
             ),
             selection_config,
         )
@@ -851,6 +865,7 @@ def evaluate_rotation_walk_forward(
     expanding_validation_fold_periods: int = (
         _EXPANDING_VALIDATION_FOLD_PERIODS
     ),
+    membership_history: IndexMembershipHistory | None = None,
 ) -> RotationWalkForwardResult:
     if not candidates:
         raise ValueError("candidates must not be empty")
@@ -892,12 +907,33 @@ def evaluate_rotation_walk_forward(
     common_dates, rebalance_dates = _monthly_rebalance_dates(
         benchmark_maps,
     )
+    data_scope = (
+        "POINT_IN_TIME_CURRENT_CATALOG"
+        if membership_history is not None
+        else "CURRENT_CONSTITUENTS_ONLY"
+    )
+    scope_blockers = [
+        (
+            "HISTORICAL_CONSTITUENTS_OMITTED"
+            if membership_history is not None
+            else "CURRENT_CONSTITUENTS_SURVIVORSHIP_BIAS"
+        ),
+    ]
+    if membership_history is not None:
+        coverage = membership_history.coverage(candidates)
+        if (
+            coverage.snapshot_only_symbols
+            or coverage.missing_symbols
+        ):
+            scope_blockers.append(
+                "POINT_IN_TIME_MEMBERSHIP_HISTORY_PARTIAL"
+            )
     if len(rebalance_dates) < 2:
         return RotationWalkForwardResult(
             algorithm_version=ROTATION_WALK_FORWARD_VERSION,
             status="BENCHMARK_HISTORY_UNAVAILABLE",
             benchmark_symbols=ROTATION_BENCHMARK_SYMBOLS,
-            data_scope="CURRENT_CONSTITUENTS_ONLY",
+            data_scope=data_scope,
             survivorship_bias=True,
             validation_periods=validation_periods,
             expanding_validation_min_training_periods=(
@@ -912,7 +948,7 @@ def evaluate_rotation_walk_forward(
             automatic_promotion_allowed=False,
             promotion_blockers=(
                 "ROTATION_BENCHMARK_HISTORY_UNAVAILABLE",
-                "CURRENT_CONSTITUENTS_SURVIVORSHIP_BIAS",
+                *scope_blockers,
                 "ROTATION_FORWARD_OBSERVATIONS_REQUIRED",
             ),
             variants=(),
@@ -932,6 +968,7 @@ def evaluate_rotation_walk_forward(
                 rebalance_dates=rebalance_dates,
                 base_config=base_config,
                 variant=variant,
+                membership_history=membership_history,
             )
         )
 
@@ -1038,7 +1075,7 @@ def evaluate_rotation_walk_forward(
         else None
     )
     promotion_blockers = [
-        "CURRENT_CONSTITUENTS_SURVIVORSHIP_BIAS",
+        *scope_blockers,
         "ROTATION_FORWARD_OBSERVATIONS_REQUIRED",
     ]
     if selected is None:
@@ -1056,7 +1093,7 @@ def evaluate_rotation_walk_forward(
             else "HISTORY_INSUFFICIENT"
         ),
         benchmark_symbols=ROTATION_BENCHMARK_SYMBOLS,
-        data_scope="CURRENT_CONSTITUENTS_ONLY",
+        data_scope=data_scope,
         survivorship_bias=True,
         validation_periods=validation_periods,
         expanding_validation_min_training_periods=(

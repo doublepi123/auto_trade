@@ -19,6 +19,13 @@ from app.domain.universe_selection.selector import (
     latest_complete_session_date,
     select_candidates,
 )
+from app.domain.universe_selection.membership_history import (
+    INDEX_MEMBERSHIP_HISTORY,
+    IndexMembershipHistory,
+    MembershipHistoryCoverage,
+    MembershipInterval,
+    load_index_membership_history,
+)
 from app.domain.universe_selection.rotation_walk_forward import (
     DIVERSIFIED_INVERSE_VOLATILITY_VARIANT,
     DIVERSIFIED_ROTATION_VARIANT,
@@ -62,6 +69,9 @@ __all__ = [
     "CandidateSelection",
     "DailyBar",
     "IndexCandidate",
+    "IndexMembershipHistory",
+    "MembershipHistoryCoverage",
+    "MembershipInterval",
     "RotationSelectionEvidence",
     "RotationCohortRegistration",
     "RotationCohortSignal",
@@ -78,11 +88,13 @@ __all__ = [
     "DEFAULT_ROTATION_VARIANTS",
     "DIVERSIFIED_ROTATION_VARIANT",
     "DIVERSIFIED_INVERSE_VOLATILITY_VARIANT",
+    "INDEX_MEMBERSHIP_HISTORY",
     "build_rotation_cohort_registration",
     "completed_daily_bars",
     "latest_closed_session_date",
     "liquidity_spread_proxy_bps",
     "latest_complete_session_date",
+    "load_index_membership_history",
     "risk_group_for_sector",
     "select_candidates",
     "evaluate_rotation_walk_forward",

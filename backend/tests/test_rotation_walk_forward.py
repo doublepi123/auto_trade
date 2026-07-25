@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, cast
 
 from app.core.broker import BrokerCandle
 from app.domain.universe_selection import (
     DIVERSIFIED_INVERSE_VOLATILITY_VARIANT,
+    IndexMembershipHistory,
     IndexCandidate,
+    MembershipInterval,
     RotationVariant,
     UniverseSelectionConfig,
     evaluate_rotation_walk_forward,
@@ -89,6 +91,7 @@ def _config() -> UniverseSelectionConfig:
 def _evaluate(
     *,
     fast_bars: list[BrokerCandle] | None = None,
+    membership_history: IndexMembershipHistory | None = None,
 ):
     candidates = (
         _candidate("FAST.US", "Semiconductors"),
@@ -117,6 +120,7 @@ def _evaluate(
         base_config=_config(),
         variants=(variant,),
         validation_periods=12,
+        membership_history=membership_history,
     )
 
 
@@ -149,6 +153,53 @@ def test_rotation_walk_forward_uses_prior_close_and_next_month_open() -> None:
     assert first.target_weights_pct == (
         ("FAST.US", 50.0),
         ("SLOW.US", 50.0),
+    )
+
+
+def test_point_in_time_membership_filters_future_periods() -> None:
+    history = IndexMembershipHistory(
+        source_version="test-history",
+        effective_start_date=date(2021, 1, 1),
+        catalog_snapshot_date=date(2021, 1, 1),
+        sources=(),
+        intervals={
+            "NASDAQ_100": {
+                "FAST": (
+                    MembershipInterval(
+                        date(2021, 1, 1),
+                        date(2024, 1, 1),
+                    ),
+                ),
+                "SLOW": (
+                    MembershipInterval(
+                        date(2021, 1, 1),
+                        None,
+                    ),
+                ),
+                "STEADY": (
+                    MembershipInterval(
+                        date(2021, 1, 1),
+                        None,
+                    ),
+                ),
+            },
+        },
+        snapshot_overrides={},
+    )
+
+    result = _evaluate(membership_history=history)
+
+    assert result.data_scope == "POINT_IN_TIME_CURRENT_CATALOG"
+    assert "HISTORICAL_CONSTITUENTS_OMITTED" in (
+        result.promotion_blockers
+    )
+    assert "CURRENT_CONSTITUENTS_SURVIVORSHIP_BIAS" not in (
+        result.promotion_blockers
+    )
+    assert all(
+        "FAST.US" not in period.selected_symbols
+        for period in result.selected_variant_periods
+        if period.signal_date >= date(2024, 1, 1)
     )
 
 

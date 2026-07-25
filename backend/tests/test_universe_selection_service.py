@@ -907,7 +907,7 @@ def test_refresh_persists_rotation_shadow_evidence() -> None:
         parameters = json.loads(result.run.parameters_json)
         evaluation = parameters["rotation_evaluation"]
         assert evaluation["algorithm_version"] == (
-            "rotation-monthly-open-walk-forward-v2"
+            "rotation-monthly-open-walk-forward-v3"
         )
         assert evaluation["benchmark_symbols"] == [
             "QQQ.US",
@@ -917,6 +917,31 @@ def test_refresh_persists_rotation_shadow_evidence() -> None:
         assert (
             "CURRENT_CONSTITUENTS_SURVIVORSHIP_BIAS"
             in evaluation["promotion_blockers"]
+        )
+        point_in_time = parameters[
+            "rotation_point_in_time_sensitivity"
+        ]
+        assert point_in_time["status"] == "HISTORY_INSUFFICIENT"
+        assert point_in_time["membership_history"][
+            "source_version"
+        ].startswith("n100tickers-")
+        assert point_in_time["membership_history"][
+            "authoritative_symbols"
+        ] == 2
+        assert point_in_time["membership_history"][
+            "missing_symbols"
+        ] == []
+        point_in_time_evaluation = point_in_time["evaluation"]
+        assert point_in_time_evaluation["data_scope"] == (
+            "POINT_IN_TIME_CURRENT_CATALOG"
+        )
+        assert (
+            "HISTORICAL_CONSTITUENTS_OMITTED"
+            in point_in_time_evaluation["promotion_blockers"]
+        )
+        assert (
+            "POINT_IN_TIME_MEMBERSHIP_HISTORY_PARTIAL"
+            not in point_in_time_evaluation["promotion_blockers"]
         )
         registration = parameters["rotation_cohort_registration"]
         assert registration["cohort_month"] == "2026-07-01"

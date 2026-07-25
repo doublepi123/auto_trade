@@ -373,6 +373,127 @@
             </div>
           </section>
 
+          <section
+            v-if="universeRotationPointInTime"
+            class="rotation-evaluation rotation-point-in-time"
+            data-testid="rotation-point-in-time"
+          >
+            <div class="rotation-evaluation-header">
+              <div>
+                <div class="rotation-evaluation-title">
+                  <strong>点时成分敏感性</strong>
+                  <el-tag
+                    :type="universeRotationPointInTime.status === 'COMPLETE' ? 'success' : 'warning'"
+                    size="small"
+                    effect="plain"
+                  >
+                    {{ rotationWalkForwardStatusLabel(universeRotationPointInTime.status) }}
+                  </el-tag>
+                  <el-tag type="warning" size="small" effect="plain">部分消偏</el-tag>
+                </div>
+                <small>{{ universeRotationPointInTime.membership_history.source_version }}</small>
+              </div>
+              <div class="rotation-evaluation-selection">
+                <span>
+                  权威覆盖
+                  <strong data-testid="rotation-point-in-time-coverage">
+                    {{ universeRotationPointInTime.membership_history.authoritative_symbols }}/{{ universeRotationPointInTime.membership_history.catalog_size }}
+                  </strong>
+                </span>
+                <span>
+                  生效起点
+                  <strong>{{ universeRotationPointInTime.membership_history.effective_start_date }}</strong>
+                </span>
+              </div>
+            </div>
+
+            <div
+              v-if="rotationPointInTimeEqual || rotationPointInTimeInverse"
+              class="rotation-point-in-time-variants"
+              data-testid="rotation-point-in-time-metrics"
+            >
+              <div
+                v-if="rotationPointInTimeEqual"
+                class="rotation-point-in-time-variant"
+              >
+                <div class="rotation-point-in-time-variant-title">
+                  <strong>等权 Top8</strong>
+                  <small>按信号日成分过滤</small>
+                </div>
+                <span>
+                  多窗年化
+                  <strong>{{ formatSignedPercent(
+                    rotationPointInTimeEqual.expanding_validation?.annualized_return_pct
+                      ?? rotationPointInTimeEqual.validation.annualized_return_pct,
+                  ) }}</strong>
+                </span>
+                <span>
+                  Sharpe
+                  <strong>{{ formatDecimal(
+                    rotationPointInTimeEqual.expanding_validation?.sharpe
+                      ?? rotationPointInTimeEqual.validation.sharpe,
+                  ) }}</strong>
+                </span>
+                <span>
+                  最大回撤
+                  <strong>{{ formatPercent(
+                    rotationPointInTimeEqual.expanding_validation?.max_drawdown_pct
+                      ?? rotationPointInTimeEqual.validation.max_drawdown_pct,
+                  ) }}</strong>
+                </span>
+                <span>
+                  窗口
+                  <strong>{{ rotationPointInTimeEqual.expanding_folds_passed ?? 0 }}/{{ rotationPointInTimeEqual.expanding_folds_total ?? 0 }}</strong>
+                </span>
+              </div>
+              <div
+                v-if="rotationPointInTimeInverse"
+                class="rotation-point-in-time-variant"
+              >
+                <div class="rotation-point-in-time-variant-title">
+                  <strong>波动配权 Top8</strong>
+                  <small>25% 单票上限</small>
+                </div>
+                <span>
+                  多窗年化
+                  <strong>{{ formatSignedPercent(
+                    rotationPointInTimeInverse.expanding_validation?.annualized_return_pct
+                      ?? rotationPointInTimeInverse.validation.annualized_return_pct,
+                  ) }}</strong>
+                </span>
+                <span>
+                  Sharpe
+                  <strong>{{ formatDecimal(
+                    rotationPointInTimeInverse.expanding_validation?.sharpe
+                      ?? rotationPointInTimeInverse.validation.sharpe,
+                  ) }}</strong>
+                </span>
+                <span>
+                  最大回撤
+                  <strong>{{ formatPercent(
+                    rotationPointInTimeInverse.expanding_validation?.max_drawdown_pct
+                      ?? rotationPointInTimeInverse.validation.max_drawdown_pct,
+                  ) }}</strong>
+                </span>
+                <span>
+                  窗口
+                  <strong>{{ rotationPointInTimeInverse.expanding_folds_passed ?? 0 }}/{{ rotationPointInTimeInverse.expanding_folds_total ?? 0 }}</strong>
+                </span>
+              </div>
+            </div>
+
+            <div class="rotation-evaluation-footer">
+              <span>
+                信号日排除尚未入指的股票
+                · 快照补录 {{ universeRotationPointInTime.membership_history.snapshot_only_symbols.length }}
+                · 缺失 {{ universeRotationPointInTime.membership_history.missing_symbols.length }}
+              </span>
+              <strong>
+                历史退市或已调出标的仍未补齐，仅作敏感性诊断，不参与晋级或下单。
+              </strong>
+            </div>
+          </section>
+
           <div class="universe-table-view">
             <el-table
               :data="universeRows"
@@ -1117,9 +1238,11 @@ import { DataAnalysis, Refresh } from '@element-plus/icons-vue'
 import { isAxiosError } from 'axios'
 import type {
   UniverseCatalogItem,
+  UniverseIndexMembershipHistoryMetadata,
   UniversePromotionForwardStatus,
   UniversePromotionReadinessItem,
   UniversePromotionReadinessResponse,
+  UniverseRotationPointInTimeSensitivity,
   UniverseRotationPerformance,
   UniverseRotationForwardHolding,
   UniverseRotationForwardSnapshot,
@@ -1253,6 +1376,23 @@ const universeRotationEvaluation = computed<UniverseRotationWalkForwardEvaluatio
   const raw = universeRun.value?.parameters.rotation_evaluation
   return isRotationWalkForwardEvaluation(raw) ? raw : null
 })
+
+const universeRotationPointInTime = computed<UniverseRotationPointInTimeSensitivity | null>(() => {
+  const raw = universeRun.value?.parameters.rotation_point_in_time_sensitivity
+  return isRotationPointInTimeSensitivity(raw) ? raw : null
+})
+
+const rotationPointInTimeEqual = computed<UniverseRotationVariantEvaluation | null>(() => (
+  universeRotationPointInTime.value?.evaluation?.variants.find(
+    (variant) => variant.variant.name === 'diversified_top8_12_1',
+  ) ?? null
+))
+
+const rotationPointInTimeInverse = computed<UniverseRotationVariantEvaluation | null>(() => (
+  universeRotationPointInTime.value?.evaluation?.variants.find(
+    (variant) => variant.variant.name === 'diversified_top8_12_1_inverse_vol_25',
+  ) ?? null
+))
 
 const universeRotationForward = computed<UniverseRotationForwardSnapshot | null>(() => {
   const raw = universeRun.value?.parameters.rotation_forward_snapshot
@@ -1767,6 +1907,57 @@ function isRotationWalkForwardEvaluation(
     && value.promotion_blockers.every((blocker) => typeof blocker === 'string')
     && Array.isArray(value.variants)
     && value.variants.every(isRotationVariantEvaluation)
+  )
+}
+
+function isMembershipHistorySource(value: unknown): boolean {
+  return (
+    isRecord(value)
+    && typeof value.name === 'string'
+    && typeof value.commit === 'string'
+    && typeof value.url === 'string'
+    && typeof value.license === 'string'
+  )
+}
+
+function isMembershipHistoryMetadata(
+  value: unknown,
+): value is UniverseIndexMembershipHistoryMetadata {
+  if (!isRecord(value)) return false
+  const finiteNumbers = [
+    value.catalog_size,
+    value.authoritative_symbols,
+    value.authoritative_ratio,
+  ]
+  return (
+    typeof value.source_version === 'string'
+    && typeof value.effective_start_date === 'string'
+    && typeof value.catalog_snapshot_date === 'string'
+    && Array.isArray(value.sources)
+    && value.sources.every(isMembershipHistorySource)
+    && finiteNumbers.every(
+      (field) => typeof field === 'number' && Number.isFinite(field),
+    )
+    && Array.isArray(value.snapshot_only_symbols)
+    && value.snapshot_only_symbols.every((symbol) => typeof symbol === 'string')
+    && Array.isArray(value.missing_symbols)
+    && value.missing_symbols.every((symbol) => typeof symbol === 'string')
+  )
+}
+
+function isRotationPointInTimeSensitivity(
+  value: unknown,
+): value is UniverseRotationPointInTimeSensitivity {
+  return (
+    isRecord(value)
+    && typeof value.status === 'string'
+    && isMembershipHistoryMetadata(value.membership_history)
+    && (
+      value.evaluation === null
+      || isRotationWalkForwardEvaluation(value.evaluation)
+    )
+    && Array.isArray(value.errors)
+    && value.errors.every((error) => typeof error === 'string')
   )
 }
 
@@ -2743,6 +2934,55 @@ onUnmounted(() => {
   text-align: right;
 }
 
+.rotation-point-in-time {
+  border-top: 0;
+}
+
+.rotation-point-in-time-variants {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 1px;
+  margin-top: 11px;
+  overflow: hidden;
+  border: 1px solid #ebeef5;
+  border-radius: 4px;
+  background: #ebeef5;
+}
+
+.rotation-point-in-time-variant {
+  display: grid;
+  min-width: 0;
+  min-height: 54px;
+  grid-template-columns: minmax(150px, 1.4fr) repeat(4, minmax(74px, 1fr));
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  background: var(--el-bg-color);
+}
+
+.rotation-point-in-time-variant-title,
+.rotation-point-in-time-variant > span {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.rotation-point-in-time-variant-title strong,
+.rotation-point-in-time-variant > span strong {
+  overflow: hidden;
+  color: #303133;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rotation-point-in-time-variant-title small,
+.rotation-point-in-time-variant > span {
+  color: #909399;
+  font-size: 10px;
+}
+
 .universe-symbol {
   display: flex;
   min-width: 0;
@@ -3196,6 +3436,15 @@ onUnmounted(() => {
 
   .rotation-evaluation-footer strong {
     text-align: left;
+  }
+
+  .rotation-point-in-time-variant {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 9px 12px;
+  }
+
+  .rotation-point-in-time-variant-title {
+    grid-column: 1 / -1;
   }
 
   .universe-table-view {
