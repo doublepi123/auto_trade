@@ -554,6 +554,12 @@ def test_strategy_v2_shadow_table_migration_is_complete_and_idempotent(tmp_path)
             "strategy_v2_exit_challenger_registrations"
         )
     }
+    assert {"policy_type", "max_holding_minutes"} <= {
+        column["name"]
+        for column in inspector.get_columns(
+            "strategy_v2_exit_challenger_registrations"
+        )
+    }
     assert "uq_strategy_v2_exit_challenger_trade_pair" in {
         constraint["name"]
         for constraint in inspector.get_unique_constraints(
@@ -604,6 +610,87 @@ def test_strategy_v2_shadow_table_migration_is_complete_and_idempotent(tmp_path)
     }
 
     Base.metadata.drop_all(bind=engine)
+    engine.dispose()
+
+
+def test_exit_challenger_policy_migration_preserves_profit_lock_rows(
+    tmp_path,
+) -> None:
+    db_path = tmp_path / "legacy_exit_challenger.db"
+    engine = create_engine(f"sqlite:///{db_path}")
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE strategy_v2_exit_challenger_registrations (
+                id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+                symbol VARCHAR(50) NOT NULL,
+                market VARCHAR(10) NOT NULL,
+                source_config_version VARCHAR(64) NOT NULL,
+                algorithm_version VARCHAR(100) NOT NULL,
+                activation_pct FLOAT NOT NULL,
+                locked_profit_pct FLOAT NOT NULL,
+                slippage_bps FLOAT NOT NULL,
+                evaluator_digest VARCHAR(64) NOT NULL,
+                registered_at DATETIME NOT NULL,
+                eligible_after DATETIME NOT NULL,
+                created_at DATETIME NOT NULL,
+                CONSTRAINT uq_strategy_v2_exit_challenger_registration
+                    UNIQUE (
+                        symbol,
+                        source_config_version,
+                        algorithm_version
+                    )
+            )
+            """
+        )
+        connection.exec_driver_sql(
+            """
+            INSERT INTO strategy_v2_exit_challenger_registrations (
+                id,
+                symbol,
+                market,
+                source_config_version,
+                algorithm_version,
+                activation_pct,
+                locked_profit_pct,
+                slippage_bps,
+                evaluator_digest,
+                registered_at,
+                eligible_after,
+                created_at
+            ) VALUES (
+                7,
+                'AAPL.US',
+                'US',
+                'source-v1',
+                'strategy-v2-profit-lock-a40-f20-v1',
+                0.4,
+                0.2,
+                2.0,
+                'digest-v1',
+                '2026-07-24 20:15:10',
+                '2026-07-24 20:16:00',
+                '2026-07-24 20:15:10'
+            )
+            """
+        )
+
+    database._ensure_strategy_v2_shadow_tables(engine)
+    database._ensure_strategy_v2_shadow_tables(engine)
+
+    inspector = inspect(engine)
+    assert {"policy_type", "max_holding_minutes"} <= {
+        column["name"]
+        for column in inspector.get_columns(
+            "strategy_v2_exit_challenger_registrations"
+        )
+    }
+    with engine.begin() as connection:
+        preserved = connection.exec_driver_sql(
+            "SELECT id, policy_type, max_holding_minutes "
+            "FROM strategy_v2_exit_challenger_registrations"
+        ).one()
+    assert tuple(preserved) == (7, "PROFIT_LOCK", None)
     engine.dispose()
 
 

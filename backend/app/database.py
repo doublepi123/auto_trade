@@ -1477,6 +1477,12 @@ def _ensure_strategy_v2_shadow_tables(db_engine: Engine) -> None:
         column["name"]
         for column in inspector.get_columns("strategy_v2_forward_evidence")
     }
+    exit_registration_columns = {
+        column["name"]
+        for column in inspector.get_columns(
+            "strategy_v2_exit_challenger_registrations"
+        )
+    }
     with db_engine.begin() as connection:
         if "estimated_fee_rate_us" not in config_columns:
             connection.exec_driver_sql(
@@ -1505,6 +1511,17 @@ def _ensure_strategy_v2_shadow_tables(db_engine: Engine) -> None:
             connection.exec_driver_sql(
                 "ALTER TABLE strategy_v2_forward_evidence ADD COLUMN "
                 "evidence_digest_sha256 VARCHAR(64) NOT NULL DEFAULT ''"
+            )
+        if "policy_type" not in exit_registration_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE strategy_v2_exit_challenger_registrations "
+                "ADD COLUMN policy_type VARCHAR(24) NOT NULL "
+                "DEFAULT 'PROFIT_LOCK'"
+            )
+        if "max_holding_minutes" not in exit_registration_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE strategy_v2_exit_challenger_registrations "
+                "ADD COLUMN max_holding_minutes INTEGER"
             )
 
 

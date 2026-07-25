@@ -865,8 +865,10 @@ class StrategyV2ExitChallengerVariant(BaseModel):
     algorithm_version: str
     source_config_version: str
     evaluator_digest: str
+    policy_type: Literal["PROFIT_LOCK", "TIME_STOP"] = "PROFIT_LOCK"
     activation_pct: float
     locked_profit_pct: float
+    max_holding_minutes: int | None = None
     slippage_bps: float
     registered_at: datetime
     eligible_after: datetime
@@ -875,6 +877,7 @@ class StrategyV2ExitChallengerVariant(BaseModel):
     open_trades: int = 0
     awaiting_baseline_trades: int = 0
     profit_lock_exits: int = 0
+    time_stop_exits: int = 0
     improved_trades: int = 0
     worsened_trades: int = 0
     unchanged_trades: int = 0
@@ -889,6 +892,7 @@ class StrategyV2ExitChallengerVariant(BaseModel):
     minimum_ready_pairs: Literal[20] = 20
     minimum_mature_pairs: Literal[50] = 50
     minimum_profit_lock_exits: Literal[5] = 5
+    minimum_time_stop_exits: Literal[5] = 5
     promotion_ready: bool = False
     blockers: list[str] = Field(default_factory=list)
 

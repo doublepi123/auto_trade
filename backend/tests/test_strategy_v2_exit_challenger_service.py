@@ -156,12 +156,30 @@ class TestStrategyV2ExitChallengerService:
                 slippage_bps=2.0,
                 now=_REGISTERED_AT + timedelta(minutes=5),
             ) is False
-            rows = db.query(StrategyV2ExitChallengerRegistration).order_by(
-                StrategyV2ExitChallengerRegistration.locked_profit_pct
-            ).all()
+            rows = db.query(StrategyV2ExitChallengerRegistration).all()
+            profit_lock_rows = sorted(
+                (row for row in rows if row.policy_type == "PROFIT_LOCK"),
+                key=lambda row: row.locked_profit_pct,
+            )
+            time_stop_rows = sorted(
+                (row for row in rows if row.policy_type == "TIME_STOP"),
+                key=lambda row: int(row.max_holding_minutes or 0),
+            )
 
-            assert [row.locked_profit_pct for row in rows] == [0.10, 0.20, 0.30]
-            assert {row.activation_pct for row in rows} == {0.40}
+            assert len(rows) == 6
+            assert [row.locked_profit_pct for row in profit_lock_rows] == [
+                0.10,
+                0.20,
+                0.30,
+            ]
+            assert {row.activation_pct for row in profit_lock_rows} == {0.40}
+            assert [row.max_holding_minutes for row in time_stop_rows] == [
+                15,
+                30,
+                45,
+            ]
+            assert {row.activation_pct for row in time_stop_rows} == {0.0}
+            assert {row.locked_profit_pct for row in time_stop_rows} == {0.0}
             assert {
                 row.eligible_after.replace(tzinfo=timezone.utc)
                 for row in rows
@@ -313,7 +331,7 @@ class TestStrategyV2ExitChallengerService:
             )
 
             rows = db.query(StrategyV2ExitChallengerTrade).all()
-            assert len(rows) == 3
+            assert len(rows) == 6
             assert {
                 row.challenger_exit_reason for row in rows
             } == {"BASELINE_MAX_HOLD"}
@@ -322,3 +340,121 @@ class TestStrategyV2ExitChallengerService:
                 for row in rows
             )
             assert all(row.net_pnl_delta == pytest.approx(0.0) for row in rows)
+
+    def test_time_stops_exit_at_frozen_deadlines_and_pair_later_baseline(
+        self,
+    ) -> None:
+        with self._db() as db:
+            service = StrategyV2ExitChallengerService(db)
+            self._register(service)
+            baseline = self._baseline_entry(db)
+
+            service.advance_bar(
+                symbol="AAPL.US",
+                bar=_bar(14, open_price=100.1, high=100.2, low=100.0),
+                observed_at=_ELIGIBLE_ENTRY + timedelta(minutes=15, seconds=5),
+            )
+            time_rows = (
+                db.query(StrategyV2ExitChallengerTrade)
+                .join(
+                    StrategyV2ExitChallengerRegistration,
+                    StrategyV2ExitChallengerRegistration.id
+                    == StrategyV2ExitChallengerTrade.registration_id,
+                )
+                .filter(
+                    StrategyV2ExitChallengerRegistration.policy_type
+                    == "TIME_STOP"
+                )
+                .order_by(
+                    StrategyV2ExitChallengerRegistration.max_holding_minutes
+                )
+                .all()
+            )
+            assert len(time_rows) == 3
+            assert all(row.status == "OPEN" for row in time_rows)
+
+            service.advance_bar(
+                symbol="AAPL.US",
+                bar=_bar(15, open_price=99.8, high=99.9, low=99.7),
+                observed_at=_ELIGIBLE_ENTRY + timedelta(minutes=16, seconds=5),
+            )
+            for row in time_rows:
+                db.refresh(row)
+            assert time_rows[0].status == "CLOSED"
+            assert time_rows[0].challenger_exit_reason == "TIME_STOP"
+            assert time_rows[0].challenger_exit_price == pytest.approx(
+                99.8 * 0.9998
+            )
+            assert all(row.status == "OPEN" for row in time_rows[1:])
+
+            service.advance_bar(
+                symbol="AAPL.US",
+                bar=_bar(30, open_price=100.1, high=100.2, low=100.0),
+                observed_at=_ELIGIBLE_ENTRY + timedelta(minutes=31, seconds=5),
+            )
+            service.advance_bar(
+                symbol="AAPL.US",
+                bar=_bar(45, open_price=99.7, high=99.8, low=99.6),
+                observed_at=_ELIGIBLE_ENTRY + timedelta(minutes=46, seconds=5),
+            )
+            for row in time_rows:
+                db.refresh(row)
+            assert all(row.status == "CLOSED" for row in time_rows)
+
+            baseline_exit_at = _ELIGIBLE_ENTRY + timedelta(minutes=60)
+            self._close_baseline(
+                db,
+                baseline,
+                exit_at=baseline_exit_at,
+                exit_price=99.4,
+                reason="MAX_HOLD",
+            )
+            service.advance_bar(
+                symbol="AAPL.US",
+                bar=_bar(60, open_price=99.4, high=99.5, low=99.3),
+                observed_at=baseline_exit_at + timedelta(minutes=1, seconds=5),
+            )
+
+            report = service.get_report("AAPL.US")
+            variant = next(
+                item
+                for item in report.variants
+                if item.max_holding_minutes == 15
+            )
+            assert variant.policy_type == "TIME_STOP"
+            assert variant.paired_trades == 1
+            assert variant.time_stop_exits == 1
+            assert variant.profit_lock_exits == 0
+            assert "MIN_TIME_STOP_EXITS" in variant.blockers
+            assert "MIN_PROFIT_LOCK_EXITS" not in variant.blockers
+
+    def test_eod_flatten_at_deadline_precedes_time_stop(self) -> None:
+        with self._db() as db:
+            service = StrategyV2ExitChallengerService(db)
+            self._register(service)
+            baseline = self._baseline_entry(db)
+            service.advance_bar(
+                symbol="AAPL.US",
+                bar=_bar(14, open_price=100.1, high=100.2, low=100.0),
+                observed_at=_ELIGIBLE_ENTRY + timedelta(minutes=15, seconds=5),
+            )
+            exit_at = _ELIGIBLE_ENTRY + timedelta(minutes=15)
+            self._close_baseline(
+                db,
+                baseline,
+                exit_at=exit_at,
+                exit_price=100.25,
+                reason="EOD_FLATTEN",
+            )
+
+            service.advance_bar(
+                symbol="AAPL.US",
+                bar=_bar(15, open_price=100.25, high=100.4, low=100.1),
+                observed_at=exit_at + timedelta(minutes=1, seconds=5),
+            )
+
+            rows = db.query(StrategyV2ExitChallengerTrade).all()
+            assert len(rows) == 6
+            assert {
+                row.challenger_exit_reason for row in rows
+            } == {"BASELINE_EOD_FLATTEN"}

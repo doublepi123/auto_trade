@@ -5,6 +5,7 @@ import json
 import math
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
+from typing import Literal
 
 from sqlalchemy.orm import Session
 
@@ -12,7 +13,10 @@ from app.domain.strategy_v2 import (
     ProfitLockAction,
     ProfitLockConfig,
     StrategyBar,
+    TimeExitAction,
+    TimeExitConfig,
     evaluate_profit_lock_bar,
+    evaluate_time_exit_bar,
 )
 from app.models import (
     StrategyV2ExitChallengerRegistration,
@@ -40,15 +44,34 @@ class _ProfitLockSpec:
         )
 
 
+@dataclass(frozen=True)
+class _TimeExitSpec:
+    algorithm_version: str
+    max_holding_minutes: int
+
+    def config(self, *, slippage_bps: float) -> TimeExitConfig:
+        return TimeExitConfig(
+            max_holding_minutes=self.max_holding_minutes,
+            slippage_bps=slippage_bps,
+        )
+
+
 _PROFIT_LOCK_SPECS = (
     _ProfitLockSpec("strategy-v2-profit-lock-a40-f10-v1", 0.40, 0.10),
     _ProfitLockSpec("strategy-v2-profit-lock-a40-f20-v1", 0.40, 0.20),
     _ProfitLockSpec("strategy-v2-profit-lock-a40-f30-v1", 0.40, 0.30),
 )
+_TIME_EXIT_SPECS = (
+    _TimeExitSpec("strategy-v2-time-stop-m15-v1", 15),
+    _TimeExitSpec("strategy-v2-time-stop-m30-v1", 30),
+    _TimeExitSpec("strategy-v2-time-stop-m45-v1", 45),
+)
 _EVALUATOR_VERSION = "strategy-v2-profit-lock-forward-evaluator-v1"
+_TIME_EXIT_EVALUATOR_VERSION = "strategy-v2-time-stop-forward-evaluator-v1"
 _MIN_READY_PAIRS = 20
 _MIN_MATURE_PAIRS = 50
 _MIN_PROFIT_LOCK_EXITS = 5
+_MIN_TIME_STOP_EXITS = 5
 _UNCHANGED_EPSILON = 1e-9
 _OPEN_PRIORITY_EXIT_REASONS = frozenset({"EOD_FLATTEN", "MAX_HOLD"})
 
@@ -103,8 +126,41 @@ class StrategyV2ExitChallengerService:
                 market=market.upper(),
                 source_config_version=source_config_version,
                 algorithm_version=spec.algorithm_version,
+                policy_type="PROFIT_LOCK",
                 activation_pct=spec.activation_pct,
                 locked_profit_pct=spec.locked_profit_pct,
+                max_holding_minutes=None,
+                slippage_bps=slippage_bps,
+                evaluator_digest=digest,
+                registered_at=current,
+                eligible_after=eligible_after,
+            ))
+            created = True
+        for spec in _TIME_EXIT_SPECS:
+            spec.config(slippage_bps=slippage_bps)
+            digest = self._time_exit_evaluator_digest(
+                spec,
+                slippage_bps=slippage_bps,
+            )
+            row = existing.get(spec.algorithm_version)
+            if row is not None:
+                self._validate_frozen_time_exit_registration(
+                    row,
+                    market=market,
+                    spec=spec,
+                    slippage_bps=slippage_bps,
+                    digest=digest,
+                )
+                continue
+            self.db.add(StrategyV2ExitChallengerRegistration(
+                symbol=symbol,
+                market=market.upper(),
+                source_config_version=source_config_version,
+                algorithm_version=spec.algorithm_version,
+                policy_type="TIME_STOP",
+                activation_pct=0.0,
+                locked_profit_pct=0.0,
+                max_holding_minutes=spec.max_holding_minutes,
                 slippage_bps=slippage_bps,
                 evaluator_digest=digest,
                 registered_at=current,
@@ -145,6 +201,44 @@ class StrategyV2ExitChallengerService:
                 and baseline.exit_at is not None
                 and _as_utc(baseline.exit_at) == _as_utc(bar.timestamp)
             )
+            if registration.policy_type == "TIME_STOP":
+                if (
+                    baseline_closed_this_bar
+                    and baseline.exit_reason == "EOD_FLATTEN"
+                ):
+                    self._close_from_baseline(row, baseline)
+                else:
+                    if registration.max_holding_minutes is None:
+                        raise ValueError(
+                            "time-stop registration has no holding limit"
+                        )
+                    decision = evaluate_time_exit_bar(
+                        config=TimeExitConfig(
+                            max_holding_minutes=(
+                                registration.max_holding_minutes
+                            ),
+                            slippage_bps=registration.slippage_bps,
+                        ),
+                        entry_at=_as_utc(row.entry_at),
+                        bar=bar,
+                    )
+                    if decision.action == TimeExitAction.EXIT:
+                        if decision.exit_price is None:
+                            raise ValueError(
+                                "time-stop exit is missing its price"
+                            )
+                        self._close_with_time_stop(
+                            row,
+                            exit_at=decision.event_at,
+                            exit_price=decision.exit_price,
+                        )
+                    elif baseline.status == "CLOSED":
+                        self._close_from_baseline(row, baseline)
+                row.last_bar_at = bar.timestamp
+                self.db.add(row)
+                continue
+            if registration.policy_type != "PROFIT_LOCK":
+                raise ValueError("unsupported exit challenger policy type")
             if (
                 baseline_closed_this_bar
                 and baseline.exit_reason in _OPEN_PRIORITY_EXIT_REASONS
@@ -290,6 +384,27 @@ class StrategyV2ExitChallengerService:
         row.challenger_net_pnl = gross - fees
 
     @staticmethod
+    def _close_with_time_stop(
+        row: StrategyV2ExitChallengerTrade,
+        *,
+        exit_at: datetime,
+        exit_price: float,
+    ) -> None:
+        gross = (exit_price - row.entry_price) * row.quantity
+        fees = (
+            (row.entry_price + exit_price)
+            * row.quantity
+            * row.estimated_fee_rate
+        )
+        row.status = "CLOSED"
+        row.challenger_exit_at = exit_at
+        row.challenger_exit_price = exit_price
+        row.challenger_exit_reason = "TIME_STOP"
+        row.challenger_gross_pnl = gross
+        row.challenger_estimated_fees = fees
+        row.challenger_net_pnl = gross - fees
+
+    @staticmethod
     def _close_from_baseline(
         row: StrategyV2ExitChallengerTrade,
         baseline: StrategyV2ShadowTrade,
@@ -344,6 +459,13 @@ class StrategyV2ExitChallengerService:
         self,
         registration: StrategyV2ExitChallengerRegistration,
     ) -> StrategyV2ExitChallengerVariant:
+        policy_type: Literal["PROFIT_LOCK", "TIME_STOP"]
+        if registration.policy_type == "PROFIT_LOCK":
+            policy_type = "PROFIT_LOCK"
+        elif registration.policy_type == "TIME_STOP":
+            policy_type = "TIME_STOP"
+        else:
+            raise ValueError("unsupported exit challenger policy type")
         rows = self.db.query(StrategyV2ExitChallengerTrade).filter(
             StrategyV2ExitChallengerTrade.registration_id == registration.id
         ).order_by(
@@ -369,6 +491,10 @@ class StrategyV2ExitChallengerService:
             row.challenger_exit_reason == "PROFIT_LOCK"
             for row in rows
         )
+        time_stop_exits = sum(
+            row.challenger_exit_reason == "TIME_STOP"
+            for row in rows
+        )
         baseline_net = sum(baseline_values)
         challenger_net = sum(challenger_values)
         net_delta = sum(deltas)
@@ -377,7 +503,15 @@ class StrategyV2ExitChallengerService:
         blockers: list[str] = []
         if len(paired) < _MIN_READY_PAIRS:
             blockers.append("MIN_PAIRED_TRADES")
-        if profit_lock_exits < _MIN_PROFIT_LOCK_EXITS:
+        if (
+            registration.policy_type == "TIME_STOP"
+            and time_stop_exits < _MIN_TIME_STOP_EXITS
+        ):
+            blockers.append("MIN_TIME_STOP_EXITS")
+        elif (
+            registration.policy_type == "PROFIT_LOCK"
+            and profit_lock_exits < _MIN_PROFIT_LOCK_EXITS
+        ):
             blockers.append("MIN_PROFIT_LOCK_EXITS")
         if paired and net_delta <= 0:
             blockers.append("NET_PNL_DELTA_NON_POSITIVE")
@@ -395,8 +529,10 @@ class StrategyV2ExitChallengerService:
             algorithm_version=registration.algorithm_version,
             source_config_version=registration.source_config_version,
             evaluator_digest=registration.evaluator_digest,
+            policy_type=policy_type,
             activation_pct=registration.activation_pct,
             locked_profit_pct=registration.locked_profit_pct,
+            max_holding_minutes=registration.max_holding_minutes,
             slippage_bps=registration.slippage_bps,
             registered_at=registration.registered_at,
             eligible_after=registration.eligible_after,
@@ -408,6 +544,7 @@ class StrategyV2ExitChallengerService:
                 for row in rows
             ),
             profit_lock_exits=profit_lock_exits,
+            time_stop_exits=time_stop_exits,
             improved_trades=sum(value > _UNCHANGED_EPSILON for value in deltas),
             worsened_trades=sum(value < -_UNCHANGED_EPSILON for value in deltas),
             unchanged_trades=sum(
@@ -461,13 +598,60 @@ class StrategyV2ExitChallengerService:
     ) -> None:
         if (
             row.market.upper() != market.upper()
+            or row.policy_type != "PROFIT_LOCK"
             or row.activation_pct != spec.activation_pct
             or row.locked_profit_pct != spec.locked_profit_pct
+            or row.max_holding_minutes is not None
             or row.slippage_bps != slippage_bps
             or row.evaluator_digest != digest
         ):
             raise ValueError(
                 "persisted profit-lock registration differs from frozen evaluator"
+            )
+
+    @staticmethod
+    def _time_exit_evaluator_digest(
+        spec: _TimeExitSpec,
+        *,
+        slippage_bps: float,
+    ) -> str:
+        payload = {
+            "evaluator_version": _TIME_EXIT_EVALUATOR_VERSION,
+            **asdict(spec),
+            "slippage_bps": slippage_bps,
+            "exit_trigger": "FIRST_BAR_OPEN_AT_OR_AFTER_ENTRY_PLUS_TTL",
+            "same_bar_priority": (
+                "EOD_FLATTEN_THEN_TIME_STOP_THEN_INTRABAR_BASELINE"
+            ),
+            "position_side": "LONG",
+        }
+        encoded = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _validate_frozen_time_exit_registration(
+        row: StrategyV2ExitChallengerRegistration,
+        *,
+        market: str,
+        spec: _TimeExitSpec,
+        slippage_bps: float,
+        digest: str,
+    ) -> None:
+        if (
+            row.market.upper() != market.upper()
+            or row.policy_type != "TIME_STOP"
+            or row.activation_pct != 0.0
+            or row.locked_profit_pct != 0.0
+            or row.max_holding_minutes != spec.max_holding_minutes
+            or row.slippage_bps != slippage_bps
+            or row.evaluator_digest != digest
+        ):
+            raise ValueError(
+                "persisted time-stop registration differs from frozen evaluator"
             )
 
 

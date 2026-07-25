@@ -56,6 +56,7 @@ describe('Strategy v2 shadow lab', () => {
       '@getStrategyShadowDecisions',
       '@getStrategyShadowEvaluation',
       '@getStrategyShadowPortfolioRouting',
+      '@getStrategyShadowExitChallengers',
       '@getStrategyShadowBracketChallengers',
       '@evaluateStrategyShadowAdxChallengers',
       '@getStrategyShadowForwardValidation',
@@ -161,6 +162,20 @@ describe('Strategy v2 shadow lab', () => {
       .and('contain', '+4.40')
       .and('contain', '-2.40')
       .and('contain', '配对交易不足')
+
+    cy.get('[data-testid="shadow-exit-challengers"]')
+      .should('contain', '止盈锁 / 持仓期限前向对照')
+      .and('contain', '只读影子')
+      .and('contain', '不自动应用')
+      .and('contain', '+0.40% → +0.10%')
+      .and('contain', '15 分钟持仓期限')
+      .and('contain', '30 分钟持仓期限')
+      .and('contain', '45 分钟持仓期限')
+    cy.get('[data-testid="shadow-exit-table"]')
+      .should('contain', '止盈锁')
+      .and('contain', '限时退出')
+      .and('contain', '+4.40')
+      .and('contain', '持仓期限触发不足')
 
     cy.get('[data-testid="tab-strategy-shadow"]').should('not.contain', '实盘应用')
     cy.get('[data-testid="shadow-portfolio-routing"]').should('not.contain', '实盘应用')

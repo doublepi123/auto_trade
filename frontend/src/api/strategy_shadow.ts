@@ -6,6 +6,7 @@ import type {
   StrategyShadowConfig,
   StrategyShadowConfigUpdate,
   StrategyShadowDecisionPage,
+  StrategyShadowExitChallengerReport,
   StrategyShadowForwardValidationRegisterRequest,
   StrategyShadowForwardValidationResponse,
   StrategyShadowPortfolioRoutingReport,
@@ -13,6 +14,15 @@ import type {
   StrategyShadowEvaluation,
   StrategyShadowVersion,
 } from '../types'
+
+export async function getStrategyShadowExitChallengers(
+  symbol?: string,
+): Promise<StrategyShadowExitChallengerReport> {
+  const response = await api.get('/api/strategy-shadow/exit-challengers', {
+    params: symbol ? { symbol } : {},
+  })
+  return response.data
+}
 
 export async function getStrategyShadowPortfolioRouting(): Promise<StrategyShadowPortfolioRoutingReport> {
   const response = await api.get('/api/strategy-shadow/portfolio-routing')

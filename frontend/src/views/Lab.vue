@@ -880,6 +880,95 @@
 
             <section
               class="shadow-section"
+              data-testid="shadow-exit-challengers"
+            >
+              <div class="shadow-section-header">
+                <div>
+                  <h3>止盈锁 / 持仓期限前向对照</h3>
+                  <small>
+                    {{ shortVersion(selectedShadowVersion) }} ·
+                    仅纳入注册后的新交易，到期按首根可用 bar 开盘价计滑点
+                  </small>
+                </div>
+                <div class="shadow-tags">
+                  <el-tag effect="plain">只读影子</el-tag>
+                  <el-tag type="warning" effect="plain">不自动应用</el-tag>
+                </div>
+              </div>
+              <el-alert
+                v-if="shadowExitError"
+                :title="shadowExitError"
+                type="warning"
+                :closable="false"
+                show-icon
+                class="shadow-evidence-alert"
+                data-testid="shadow-exit-error"
+              />
+              <el-empty
+                v-else-if="shadowExitRows.length === 0"
+                description="等待当前配置的首个前向注册"
+              />
+              <div v-else class="shadow-bracket-table">
+                <el-table
+                  :data="shadowExitRows"
+                  size="small"
+                  stripe
+                  data-testid="shadow-exit-table"
+                >
+                  <el-table-column label="方案" min-width="168">
+                    <template #default="{ row }">
+                      <strong>{{ shadowExitPolicyLabel(row) }}</strong>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="类型" width="86">
+                    <template #default="{ row }">
+                      {{ shadowExitTypeLabel(row.policy_type) }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="状态" width="96">
+                    <template #default="{ row }">
+                      <el-tag
+                        :type="shadowExitStatusMeta(row.status).type"
+                        effect="plain"
+                      >
+                        {{ shadowExitStatusMeta(row.status).label }}
+                      </el-tag>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="配对 / 触发" width="110">
+                    <template #default="{ row }">
+                      {{ row.paired_trades }} / {{ shadowExitChangedExits(row) }}
+                      <small v-if="row.open_trades"> · 开 {{ row.open_trades }}</small>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="胜率" min-width="132">
+                    <template #default="{ row }">
+                      {{ formatPercent(row.baseline_win_rate) }} →
+                      {{ formatPercent(row.challenger_win_rate) }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="净收益增量" width="112">
+                    <template #default="{ row }">
+                      {{ formatSignedNullable(row.net_pnl_delta) }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="最大回撤" min-width="142">
+                    <template #default="{ row }">
+                      {{ row.baseline_max_drawdown.toFixed(2) }} →
+                      {{ row.challenger_max_drawdown.toFixed(2) }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="复核门槛" min-width="220">
+                    <template #default="{ row }">
+                      {{ shadowExitBlockerSummary(row) }}
+                    </template>
+                  </el-table-column>
+                </el-table>
+              </div>
+            </section>
+
+            <section
+              class="shadow-section"
               data-testid="shadow-bracket-challengers"
             >
               <div class="shadow-section-header">
@@ -1697,6 +1786,7 @@ import {
   getStrategyShadowConfigs,
   getStrategyShadowDecisions,
   getStrategyShadowEvaluation,
+  getStrategyShadowExitChallengers,
   getStrategyShadowForwardValidation,
   getStrategyShadowPortfolioRouting,
   getStrategyShadowStatus,
@@ -1714,6 +1804,7 @@ import type {
   StrategyShadowBracketChallengerVariant,
   StrategyShadowConfig, StrategyShadowConfigUpdate, StrategyShadowDecision,
   StrategyShadowEvaluation, StrategyShadowForwardValidationDaily,
+  StrategyShadowExitChallengerReport, StrategyShadowExitChallengerVariant,
   StrategyShadowForwardValidationResponse, StrategyShadowStatus, StrategyShadowVersion,
   StrategyShadowPortfolioEdgeFilter,
   StrategyShadowPortfolioRoutingPolicy,
@@ -1959,6 +2050,8 @@ const shadowStatus = ref<StrategyShadowStatus | null>(null)
 const shadowVersions = ref<StrategyShadowVersion[]>([])
 const selectedShadowVersion = ref('')
 const shadowEvaluation = ref<StrategyShadowEvaluation | null>(null)
+const shadowExitChallengers = ref<StrategyShadowExitChallengerReport | null>(null)
+const shadowExitError = ref('')
 const shadowBracketChallengers = ref<StrategyShadowBracketChallengerReport | null>(null)
 const shadowBracketError = ref('')
 const shadowPortfolioRouting = ref<StrategyShadowPortfolioRoutingReport | null>(null)
@@ -2116,6 +2209,8 @@ async function loadStrategyShadow(symbol = selectedShadowSymbol.value || undefin
   shadowVersions.value = []
   selectedShadowVersion.value = ''
   shadowEvaluation.value = null
+  shadowExitChallengers.value = null
+  shadowExitError.value = ''
   shadowBracketChallengers.value = null
   shadowBracketError.value = ''
   shadowDecisions.value = []
@@ -2159,6 +2254,7 @@ async function loadStrategyShadow(symbol = selectedShadowSymbol.value || undefin
     shadowDecisionTotal.value = decisions.total
     shadowDecisionPage.value = decisions.page
     shadowLoaded.value = true
+    void loadShadowExitChallengers(config.symbol, generation)
     void loadShadowBracketChallengers(config.symbol, generation)
     void loadShadowAdxChallengers(config.symbol, currentVersion, generation)
     void loadShadowForwardValidation(config.symbol, currentVersion, generation)
@@ -2203,6 +2299,8 @@ async function loadShadowEvidence() {
   shadowForwardValidation.value = null
   shadowForwardError.value = ''
   shadowForwardLoading.value = false
+  shadowExitChallengers.value = null
+  shadowExitError.value = ''
   shadowBracketChallengers.value = null
   shadowBracketError.value = ''
   try {
@@ -2224,6 +2322,7 @@ async function loadShadowEvidence() {
     shadowDecisions.value = decisions.items
     shadowDecisionTotal.value = decisions.total
     shadowDecisionPage.value = decisions.page
+    void loadShadowExitChallengers(symbol, generation)
     void loadShadowBracketChallengers(symbol, generation)
     void loadShadowAdxChallengers(symbol, version, generation)
     void loadShadowForwardValidation(symbol, version, generation)
@@ -2234,6 +2333,35 @@ async function loadShadowEvidence() {
       || selectedShadowVersion.value !== version
     ) return
     ElMessage.error(resolveErrorMessage(error, '加载证据版本失败'))
+  }
+}
+
+async function loadShadowExitChallengers(
+  symbol: string,
+  generation: number,
+) {
+  if (
+    generation !== shadowRequestGeneration.value
+    || selectedShadowSymbol.value !== symbol
+  ) return
+  shadowExitError.value = ''
+  try {
+    const result = await getStrategyShadowExitChallengers(symbol)
+    if (
+      generation !== shadowRequestGeneration.value
+      || selectedShadowSymbol.value !== symbol
+    ) return
+    shadowExitChallengers.value = result
+  } catch (error: unknown) {
+    if (
+      generation !== shadowRequestGeneration.value
+      || selectedShadowSymbol.value !== symbol
+    ) return
+    shadowExitChallengers.value = null
+    shadowExitError.value = resolveErrorMessage(
+      error,
+      '加载退出策略前向对照失败',
+    )
   }
 }
 
@@ -2483,6 +2611,12 @@ const shadowBlockerSummary = computed(() => (
     .join('；') ?? ''
 ))
 
+const shadowExitRows = computed(() => (
+  shadowExitChallengers.value?.variants.filter(
+    (item) => item.source_config_version === selectedShadowVersion.value,
+  ) ?? []
+))
+
 const shadowBracketRows = computed(() => (
   shadowBracketChallengers.value?.variants.filter(
     (item) => item.source_config_version === selectedShadowVersion.value,
@@ -2592,6 +2726,58 @@ const shadowBracketBlockerLabels: Record<string, string> = {
   NET_PNL_DELTA_NON_POSITIVE: '累计净收益增量未转正',
   MAX_DRAWDOWN_WORSE: '最大回撤变差',
   NET_REWARD_RISK_BELOW_ONE: '扣费后盈亏比低于 1',
+}
+
+const shadowExitBlockerLabels: Record<string, string> = {
+  MIN_PAIRED_TRADES: '配对交易不足',
+  MIN_PROFIT_LOCK_EXITS: '止盈锁触发不足',
+  MIN_TIME_STOP_EXITS: '持仓期限触发不足',
+  NET_PNL_DELTA_NON_POSITIVE: '累计净收益增量未转正',
+  MAX_DRAWDOWN_WORSE: '最大回撤变差',
+}
+
+function shadowExitPolicyLabel(
+  variant: StrategyShadowExitChallengerVariant,
+): string {
+  if (variant.policy_type === 'TIME_STOP') {
+    return `${variant.max_holding_minutes ?? '-'} 分钟持仓期限`
+  }
+  return `+${variant.activation_pct.toFixed(2)}% → +${variant.locked_profit_pct.toFixed(2)}%`
+}
+
+function shadowExitTypeLabel(
+  policyType: StrategyShadowExitChallengerVariant['policy_type'],
+): string {
+  return policyType === 'TIME_STOP' ? '限时退出' : '止盈锁'
+}
+
+function shadowExitChangedExits(
+  variant: StrategyShadowExitChallengerVariant,
+): number {
+  return variant.profit_lock_exits + variant.time_stop_exits
+}
+
+function shadowExitBlockerSummary(
+  variant: StrategyShadowExitChallengerVariant,
+): string {
+  return variant.blockers
+    .map((item) => shadowExitBlockerLabels[item] ?? item)
+    .join('；') || '可进入人工复核'
+}
+
+function shadowExitStatusMeta(
+  status: StrategyShadowExitChallengerVariant['status'],
+): {
+  label: string
+  type: 'success' | 'warning' | 'info'
+} {
+  if (status === 'MATURE_EVIDENCE') {
+    return { label: '成熟证据', type: 'success' }
+  }
+  if (status === 'READY_FOR_REVIEW') {
+    return { label: '可复核', type: 'warning' }
+  }
+  return { label: '采集中', type: 'info' }
 }
 
 function shadowBracketBlockerSummary(

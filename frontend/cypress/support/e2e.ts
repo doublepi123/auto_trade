@@ -2818,6 +2818,76 @@ Cypress.Commands.add('stubApi', () => {
     })
   }).as('getStrategyShadowPortfolioRouting')
 
+  cy.intercept('GET', '/api/strategy-shadow/exit-challengers*', (req) => {
+    const variant = (
+      registrationId: number,
+      policyType: 'PROFIT_LOCK' | 'TIME_STOP',
+      algorithmVersion: string,
+      activationPct: number,
+      lockedProfitPct: number,
+      maxHoldingMinutes: number | null,
+      netPnlDelta: number,
+    ) => ({
+      registration_id: registrationId,
+      algorithm_version: algorithmVersion,
+      source_config_version: strategyShadowConfig.config_version,
+      evaluator_digest: String(registrationId).repeat(64).slice(0, 64),
+      policy_type: policyType,
+      activation_pct: activationPct,
+      locked_profit_pct: lockedProfitPct,
+      max_holding_minutes: maxHoldingMinutes,
+      slippage_bps: 2,
+      registered_at: '2026-07-25T20:15:10Z',
+      eligible_after: '2026-07-25T20:16:00Z',
+      status: 'COLLECTING',
+      paired_trades: 4,
+      open_trades: 0,
+      awaiting_baseline_trades: 0,
+      profit_lock_exits: policyType === 'PROFIT_LOCK' ? 2 : 0,
+      time_stop_exits: policyType === 'TIME_STOP' ? 3 : 0,
+      improved_trades: 2,
+      worsened_trades: 1,
+      unchanged_trades: 1,
+      baseline_win_rate: 0.5,
+      challenger_win_rate: 0.75,
+      baseline_net_pnl: -3.2,
+      challenger_net_pnl: -3.2 + netPnlDelta,
+      net_pnl_delta: netPnlDelta,
+      mean_net_pnl_delta: netPnlDelta / 4,
+      baseline_max_drawdown: 8.2,
+      challenger_max_drawdown: 7.4,
+      minimum_ready_pairs: 20,
+      minimum_mature_pairs: 50,
+      minimum_profit_lock_exits: 5,
+      minimum_time_stop_exits: 5,
+      promotion_ready: false,
+      blockers: [
+        'MIN_PAIRED_TRADES',
+        policyType === 'TIME_STOP'
+          ? 'MIN_TIME_STOP_EXITS'
+          : 'MIN_PROFIT_LOCK_EXITS',
+      ],
+    })
+    req.reply({
+      body: {
+        symbol: strategyShadowConfig.symbol,
+        mode: 'SHADOW',
+        order_submission_allowed: false,
+        automatic_promotion_allowed: false,
+        historical_backfill_allowed: false,
+        evaluation_scope: 'FORWARD_OUT_OF_SAMPLE',
+        variants: [
+          variant(1, 'PROFIT_LOCK', 'strategy-v2-profit-lock-a40-f10-v1', 0.4, 0.1, null, 1.2),
+          variant(2, 'PROFIT_LOCK', 'strategy-v2-profit-lock-a40-f20-v1', 0.4, 0.2, null, 2.4),
+          variant(3, 'PROFIT_LOCK', 'strategy-v2-profit-lock-a40-f30-v1', 0.4, 0.3, null, -0.8),
+          variant(4, 'TIME_STOP', 'strategy-v2-time-stop-m15-v1', 0, 0, 15, 4.4),
+          variant(5, 'TIME_STOP', 'strategy-v2-time-stop-m30-v1', 0, 0, 30, 3.1),
+          variant(6, 'TIME_STOP', 'strategy-v2-time-stop-m45-v1', 0, 0, 45, 1.8),
+        ],
+      },
+    })
+  }).as('getStrategyShadowExitChallengers')
+
   cy.intercept('GET', '/api/strategy-shadow/bracket-challengers*', (req) => {
     const common = {
       source_config_version: strategyShadowConfig.config_version,

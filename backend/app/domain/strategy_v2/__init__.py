@@ -33,6 +33,12 @@ from app.domain.strategy_v2.profit_lock import (
     ProfitLockDecision,
     evaluate_profit_lock_bar,
 )
+from app.domain.strategy_v2.time_exit import (
+    TimeExitAction,
+    TimeExitConfig,
+    TimeExitDecision,
+    evaluate_time_exit_bar,
+)
 from app.domain.strategy_v2.bracket import (
     BracketAction,
     BracketConfig,
@@ -76,6 +82,10 @@ __all__ = [
     "ProfitLockConfig",
     "ProfitLockDecision",
     "evaluate_profit_lock_bar",
+    "TimeExitAction",
+    "TimeExitConfig",
+    "TimeExitDecision",
+    "evaluate_time_exit_bar",
     "BracketAction",
     "BracketConfig",
     "BracketDecision",
