@@ -1015,6 +1015,10 @@
                         -{{ row.stop_loss_pct.toFixed(2) }}% /
                         +{{ row.profit_target_pct.toFixed(2) }}%
                       </strong>
+                      <small v-if="row.vwap_target_cap_bps !== null">
+                        · VWAP 上限
+                        {{ row.vwap_target_cap_bps.toFixed(0) }}bp
+                      </small>
                     </template>
                   </el-table-column>
                   <el-table-column label="状态" width="96">

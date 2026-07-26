@@ -914,6 +914,7 @@ class StrategyV2BracketChallengerVariant(BaseModel):
     evaluator_digest: str
     stop_loss_pct: float
     profit_target_pct: float
+    vwap_target_cap_bps: float | None = None
     slippage_bps: float
     estimated_fee_rate: float
     max_holding_minutes: int

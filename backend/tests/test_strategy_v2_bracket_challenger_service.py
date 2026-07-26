@@ -96,6 +96,7 @@ class TestStrategyV2BracketChallengerService:
         entry_at: datetime = _ELIGIBLE_ENTRY,
         fee_rate: float = 0.0005,
         holding_minutes: int = 60,
+        signal_vwap: float = 100.0,
     ) -> StrategyV2ShadowTrade:
         decision = StrategyV2ShadowDecision(
             idempotency_key=f"entry-{entry_at.isoformat()}",
@@ -121,8 +122,8 @@ class TestStrategyV2BracketChallengerService:
             entry_price=100.0,
             quantity=2.0,
             stop_price=99.55,
-            target_price=100.8,
-            signal_vwap=100.0,
+            target_price=max(100.8, signal_vwap),
+            signal_vwap=signal_vwap,
             holding_deadline=entry_at + timedelta(minutes=holding_minutes),
             entry_reason="FIRST_CAUSAL_BAR_OPEN_FILL",
             estimated_fees=100.0 * 2.0 * fee_rate,
@@ -182,10 +183,18 @@ class TestStrategyV2BracketChallengerService:
                 StrategyV2BracketChallengerRegistration.stop_loss_pct
             ).all()
 
-            assert [
-                (row.stop_loss_pct, row.profit_target_pct)
+            assert {
+                (
+                    row.stop_loss_pct,
+                    row.profit_target_pct,
+                    row.vwap_target_cap_bps,
+                )
                 for row in rows
-            ] == [(0.40, 0.70), (0.50, 1.00)]
+            } == {
+                (0.40, 0.70, None),
+                (0.40, 0.70, 75.0),
+                (0.50, 1.00, None),
+            }
             assert {
                 row.eligible_after.replace(tzinfo=timezone.utc)
                 for row in rows
@@ -319,7 +328,7 @@ class TestStrategyV2BracketChallengerService:
             )
 
             rows = db.query(StrategyV2BracketChallengerTrade).all()
-            assert len(rows) == 2
+            assert len(rows) == 3
             assert {
                 row.challenger_exit_reason for row in rows
             } == {"PRICE_STOP"}
@@ -385,4 +394,57 @@ class TestStrategyV2BracketChallengerService:
                 observed_at=_ELIGIBLE_ENTRY + timedelta(minutes=1),
             )
 
-            assert db.query(StrategyV2BracketChallengerTrade).count() == 2
+            assert db.query(StrategyV2BracketChallengerTrade).count() == 3
+
+    def test_capped_vwap_target_is_evaluated_on_entry_bar(self) -> None:
+        with self._db() as db:
+            service = StrategyV2BracketChallengerService(db)
+            self._register(service)
+            self._baseline_entry(db, signal_vwap=101.0)
+
+            service.advance_bar(
+                symbol="AAPL.US",
+                bar=_bar(
+                    0,
+                    open_price=100.0,
+                    high=100.80,
+                    low=99.90,
+                ),
+                observed_at=_ELIGIBLE_ENTRY + timedelta(minutes=1),
+            )
+
+            capped = (
+                db.query(StrategyV2BracketChallengerTrade)
+                .join(
+                    StrategyV2BracketChallengerRegistration,
+                    StrategyV2BracketChallengerRegistration.id
+                    == StrategyV2BracketChallengerTrade.registration_id,
+                )
+                .filter(
+                    StrategyV2BracketChallengerRegistration.vwap_target_cap_bps
+                    == 75.0
+                )
+                .one()
+            )
+            uncapped = (
+                db.query(StrategyV2BracketChallengerTrade)
+                .join(
+                    StrategyV2BracketChallengerRegistration,
+                    StrategyV2BracketChallengerRegistration.id
+                    == StrategyV2BracketChallengerTrade.registration_id,
+                )
+                .filter(
+                    StrategyV2BracketChallengerRegistration.stop_loss_pct
+                    == 0.40,
+                    StrategyV2BracketChallengerRegistration.vwap_target_cap_bps.is_(
+                        None
+                    ),
+                )
+                .one()
+            )
+
+            assert capped.status == "CLOSED"
+            assert capped.challenger_exit_reason == "PROFIT_TARGET"
+            assert capped.target_price == pytest.approx(100.75)
+            assert uncapped.status == "OPEN"
+            assert uncapped.target_price == pytest.approx(101.0)

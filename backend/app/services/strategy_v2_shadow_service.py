@@ -2562,6 +2562,7 @@ class StrategyV2ShadowService:
             before_step = engine.snapshot()
             step = engine.on_feature(feature)
             latest_feature = feature
+            filled_this_bar = False
             for index, decision in enumerate(step.decisions):
                 if decision.action == StrategyV2Action.ARM_LONG:
                     armed_at = decision.timestamp
@@ -2602,13 +2603,37 @@ class StrategyV2ShadowService:
                     position=step.position,
                     pending_signal_vwap=before_step.pending_signal_vwap,
                 )
+                if decision.action == StrategyV2Action.FILL_ENTRY:
+                    filled_this_bar = True
+                    self.exit_challengers.advance_bar(
+                        symbol=config.symbol,
+                        bar=bar,
+                        observed_at=observed_at,
+                    )
+                    self.bracket_challengers.advance_bar(
+                        symbol=config.symbol,
+                        bar=bar,
+                        observed_at=observed_at,
+                    )
                 if (
                     manage_existing_position_only
                     and decision.action == StrategyV2Action.EXIT_LONG
                 ):
                     exited_managed_position = True
                 existing_keys.add(key)
-            if before_step.position is not None or step.position is not None:
+            if filled_this_bar:
+                surviving_trade = self._open_trade(config.symbol)
+                if surviving_trade is not None:
+                    self._update_trade_full_bar_excursion(
+                        surviving_trade,
+                        bar,
+                    )
+                    self.db.add(surviving_trade)
+            if (
+                before_step.position is not None
+                or step.position is not None
+                or filled_this_bar
+            ):
                 self.exit_challengers.advance_bar(
                     symbol=config.symbol,
                     bar=bar,
@@ -2845,6 +2870,7 @@ class StrategyV2ShadowService:
             before_step = engine.snapshot()
             gate_reasons = engine.entry_gate_reasons(feature)
             step = engine.on_feature(feature)
+            filled_this_bar = False
             feature_evidence = (
                 json.loads(json.dumps(asdict(feature), default=str, sort_keys=True))
                 if include_feature_evidence
@@ -2870,6 +2896,7 @@ class StrategyV2ShadowService:
                     item["_feature_evidence"] = feature_evidence
                 decisions.append(item)
                 if decision.action == StrategyV2Action.FILL_ENTRY and decision.price is not None:
+                    filled_this_bar = True
                     entry_price = decision.price
                     entry_fee = entry_price * decision.quantity * fee_rate
                     position = step.position
@@ -2900,9 +2927,6 @@ class StrategyV2ShadowService:
                         ),
                         "signal_vwap": signal_vwap,
                         "holding_deadline": holding_deadline,
-                        # Fill occurs at the open. Intrabar ordering before and
-                        # after that fill is unknowable, so the entry bar does
-                        # not contribute an excursion.
                         "highest_price": entry_price,
                         "lowest_price": entry_price,
                     }
@@ -2952,6 +2976,8 @@ class StrategyV2ShadowService:
                         open_trade = None
                     else:
                         self._update_replay_full_bar_excursion(open_trade, bar)
+            if filled_this_bar and open_trade is not None:
+                self._update_replay_full_bar_excursion(open_trade, bar)
 
         return StrategyV2ShadowReplayResponse(
             persisted=False,

@@ -404,6 +404,10 @@ class StrategyV2BracketChallengerRegistration(Base):
     )
     stop_loss_pct: Mapped[float] = mapped_column(Float, nullable=False)
     profit_target_pct: Mapped[float] = mapped_column(Float, nullable=False)
+    vwap_target_cap_bps: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+    )
     slippage_bps: Mapped[float] = mapped_column(Float, nullable=False)
     estimated_fee_rate: Mapped[float] = mapped_column(Float, nullable=False)
     max_holding_minutes: Mapped[int] = mapped_column(

@@ -1483,6 +1483,12 @@ def _ensure_strategy_v2_shadow_tables(db_engine: Engine) -> None:
             "strategy_v2_exit_challenger_registrations"
         )
     }
+    bracket_registration_columns = {
+        column["name"]
+        for column in inspector.get_columns(
+            "strategy_v2_bracket_challenger_registrations"
+        )
+    }
     with db_engine.begin() as connection:
         if "estimated_fee_rate_us" not in config_columns:
             connection.exec_driver_sql(
@@ -1522,6 +1528,11 @@ def _ensure_strategy_v2_shadow_tables(db_engine: Engine) -> None:
             connection.exec_driver_sql(
                 "ALTER TABLE strategy_v2_exit_challenger_registrations "
                 "ADD COLUMN max_holding_minutes INTEGER"
+            )
+        if "vwap_target_cap_bps" not in bracket_registration_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE strategy_v2_bracket_challenger_registrations "
+                "ADD COLUMN vwap_target_cap_bps FLOAT"
             )
 
 

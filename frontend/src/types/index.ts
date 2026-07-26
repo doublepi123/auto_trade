@@ -2189,6 +2189,7 @@ export interface StrategyShadowBracketChallengerVariant {
   evaluator_digest: string
   stop_loss_pct: number
   profit_target_pct: number
+  vwap_target_cap_bps: number | null
   slippage_bps: number
   estimated_fee_rate: number
   max_holding_minutes: number

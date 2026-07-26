@@ -204,9 +204,17 @@ class TestStrategyV2ShadowApi:
         assert body["historical_backfill_allowed"] is False
         assert body["evaluation_scope"] == "FORWARD_OUT_OF_SAMPLE"
         assert {
-            (item["stop_loss_pct"], item["profit_target_pct"])
+            (
+                item["stop_loss_pct"],
+                item["profit_target_pct"],
+                item["vwap_target_cap_bps"],
+            )
             for item in body["variants"]
-        } == {(0.4, 0.7), (0.5, 1.0)}
+        } == {
+            (0.4, 0.7, None),
+            (0.4, 0.7, 75.0),
+            (0.5, 1.0, None),
+        }
         assert all(item["status"] == "COLLECTING" for item in body["variants"])
 
     def test_live_exit_challenger_report_is_forward_only_and_read_only(

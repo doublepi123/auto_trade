@@ -214,7 +214,47 @@ class TestStrategyV2ExitChallengerService:
 
             assert db.query(StrategyV2ExitChallengerTrade).count() == 0
 
-    def test_activation_is_next_bar_causal_and_pairs_later_baseline_outcome(
+    def test_same_entry_bar_baseline_exit_is_paired_after_evaluation(
+        self,
+    ) -> None:
+        with self._db() as db:
+            service = StrategyV2ExitChallengerService(db)
+            self._register(service)
+            baseline = self._baseline_entry(db)
+            entry_bar = _bar(
+                0,
+                open_price=100.0,
+                high=100.1,
+                low=99.9,
+            )
+
+            service.advance_bar(
+                symbol="AAPL.US",
+                bar=entry_bar,
+                observed_at=_ELIGIBLE_ENTRY + timedelta(minutes=1),
+            )
+            self._close_baseline(
+                db,
+                baseline,
+                exit_at=_ELIGIBLE_ENTRY,
+                exit_price=99.9,
+                reason="PRICE_STOP",
+            )
+            service.advance_bar(
+                symbol="AAPL.US",
+                bar=entry_bar,
+                observed_at=_ELIGIBLE_ENTRY + timedelta(minutes=1),
+            )
+
+            rows = db.query(StrategyV2ExitChallengerTrade).all()
+            assert len(rows) == 6
+            assert {row.status for row in rows} == {"CLOSED"}
+            assert {
+                row.challenger_exit_reason for row in rows
+            } == {"BASELINE_PRICE_STOP"}
+            assert all(row.baseline_net_pnl is not None for row in rows)
+
+    def test_entry_bar_activation_is_next_bar_causal_and_pairs_outcome(
         self,
     ) -> None:
         with self._db() as db:
@@ -226,11 +266,6 @@ class TestStrategyV2ExitChallengerService:
                 symbol="AAPL.US",
                 bar=_bar(0, open_price=100.0, high=100.6, low=99.9),
                 observed_at=_ELIGIBLE_ENTRY + timedelta(minutes=1, seconds=5),
-            )
-            service.advance_bar(
-                symbol="AAPL.US",
-                bar=_bar(1, open_price=100.1, high=100.5, low=100.0),
-                observed_at=_ELIGIBLE_ENTRY + timedelta(minutes=2, seconds=5),
             )
 
             floor_twenty = (
@@ -250,18 +285,18 @@ class TestStrategyV2ExitChallengerService:
             assert floor_twenty.activation_at is not None
             assert floor_twenty.activation_at.replace(
                 tzinfo=timezone.utc
-            ) == _ELIGIBLE_ENTRY + timedelta(minutes=1)
+            ) == _ELIGIBLE_ENTRY
 
             service.advance_bar(
                 symbol="AAPL.US",
-                bar=_bar(2, open_price=100.3, high=100.35, low=100.05),
-                observed_at=_ELIGIBLE_ENTRY + timedelta(minutes=3, seconds=5),
+                bar=_bar(1, open_price=100.1, high=100.5, low=100.0),
+                observed_at=_ELIGIBLE_ENTRY + timedelta(minutes=2, seconds=5),
             )
             db.refresh(floor_twenty)
             assert floor_twenty.status == "CLOSED"
             assert floor_twenty.challenger_exit_reason == "PROFIT_LOCK"
             assert floor_twenty.challenger_exit_price == pytest.approx(
-                100.2 * 0.9998
+                100.1 * 0.9998
             )
             assert floor_twenty.baseline_net_pnl is None
 

@@ -34,6 +34,7 @@ class _BracketSpec:
     algorithm_version: str
     stop_loss_pct: float
     profit_target_pct: float
+    vwap_target_cap_bps: float | None = None
 
     def config(
         self,
@@ -46,14 +47,24 @@ class _BracketSpec:
             profit_target_pct=self.profit_target_pct,
             slippage_bps=slippage_bps,
             flatten_minutes_before_close=flatten_minutes_before_close,
+            vwap_target_cap_bps=self.vwap_target_cap_bps,
         )
 
 
 _BRACKET_SPECS = (
-    _BracketSpec("strategy-v2-bracket-s40-t70-v1", 0.40, 0.70),
-    _BracketSpec("strategy-v2-bracket-s50-t100-v1", 0.50, 1.00),
+    _BracketSpec("strategy-v2-bracket-s40-t70-v2", 0.40, 0.70),
+    _BracketSpec("strategy-v2-bracket-s50-t100-v2", 0.50, 1.00),
+    _BracketSpec(
+        "strategy-v2-bracket-s40-t70-vwap-cap75-v1",
+        0.40,
+        0.70,
+        75.0,
+    ),
 )
-_EVALUATOR_VERSION = "strategy-v2-bracket-forward-evaluator-v1"
+_CURRENT_ALGORITHM_VERSIONS = tuple(
+    spec.algorithm_version for spec in _BRACKET_SPECS
+)
+_EVALUATOR_VERSION = "strategy-v2-bracket-forward-evaluator-v2"
 _MIN_READY_PAIRS = 20
 _MIN_MATURE_PAIRS = 50
 _MIN_CHANGED_EXITS = 5
@@ -154,6 +165,7 @@ class StrategyV2BracketChallengerService:
                 algorithm_version=spec.algorithm_version,
                 stop_loss_pct=spec.stop_loss_pct,
                 profit_target_pct=spec.profit_target_pct,
+                vwap_target_cap_bps=spec.vwap_target_cap_bps,
                 slippage_bps=slippage_bps,
                 estimated_fee_rate=estimated_fee_rate,
                 max_holding_minutes=max_holding_minutes,
@@ -212,6 +224,9 @@ class StrategyV2BracketChallengerService:
                     flatten_minutes_before_close=(
                         registration.flatten_minutes_before_close
                     ),
+                    vwap_target_cap_bps=(
+                        registration.vwap_target_cap_bps
+                    ),
                 ),
                 market=registration.market,
                 entry_price=row.entry_price,
@@ -245,7 +260,10 @@ class StrategyV2BracketChallengerService:
         registrations = self.db.query(
             StrategyV2BracketChallengerRegistration
         ).filter(
-            StrategyV2BracketChallengerRegistration.symbol == symbol
+            StrategyV2BracketChallengerRegistration.symbol == symbol,
+            StrategyV2BracketChallengerRegistration.algorithm_version.in_(
+                _CURRENT_ALGORITHM_VERSIONS
+            ),
         ).order_by(
             StrategyV2BracketChallengerRegistration.registered_at.asc(),
             StrategyV2BracketChallengerRegistration.id.asc(),
@@ -311,6 +329,9 @@ class StrategyV2BracketChallengerService:
             StrategyV2BracketChallengerRegistration.symbol == symbol,
             StrategyV2BracketChallengerRegistration.source_config_version
             == baseline.config_version,
+            StrategyV2BracketChallengerRegistration.algorithm_version.in_(
+                _CURRENT_ALGORITHM_VERSIONS
+            ),
         ).all()
         for registration in registrations:
             if _as_utc(baseline.entry_at) < _as_utc(
@@ -351,6 +372,9 @@ class StrategyV2BracketChallengerService:
                 flatten_minutes_before_close=(
                     registration.flatten_minutes_before_close
                 ),
+                vwap_target_cap_bps=(
+                    registration.vwap_target_cap_bps
+                ),
             )
             signal_vwap = float(baseline.signal_vwap or 0.0)
             self.db.add(StrategyV2BracketChallengerTrade(
@@ -365,7 +389,9 @@ class StrategyV2BracketChallengerService:
                 signal_vwap=signal_vwap,
                 holding_deadline=baseline.holding_deadline,
                 estimated_fee_rate=fee_rate,
-                last_bar_at=baseline.entry_at,
+                last_bar_at=_as_utc(baseline.entry_at) - timedelta(
+                    microseconds=1
+                ),
                 stop_price=config.stop_price(baseline.entry_price),
                 target_price=config.target_price(
                     baseline.entry_price,
@@ -503,6 +529,7 @@ class StrategyV2BracketChallengerService:
             evaluator_digest=registration.evaluator_digest,
             stop_loss_pct=registration.stop_loss_pct,
             profit_target_pct=registration.profit_target_pct,
+            vwap_target_cap_bps=registration.vwap_target_cap_bps,
             slippage_bps=registration.slippage_bps,
             estimated_fee_rate=registration.estimated_fee_rate,
             max_holding_minutes=registration.max_holding_minutes,
@@ -604,6 +631,7 @@ class StrategyV2BracketChallengerService:
             "max_holding_minutes": max_holding_minutes,
             "flatten_minutes_before_close": flatten_minutes_before_close,
             "entry_effective": "NEXT_BAR_OPEN",
+            "entry_bar_evaluation": "INCLUDED_AFTER_OPEN_FILL",
             "exit_priority": [
                 "PRICE_STOP",
                 "EOD_FLATTEN",
@@ -611,7 +639,11 @@ class StrategyV2BracketChallengerService:
                 "MAX_HOLD",
             ],
             "ambiguous_stop_target": "PRICE_STOP",
-            "target_rule": "MAX_PARAMETER_TARGET_SIGNAL_VWAP",
+            "target_rule": (
+                "MAX_PARAMETER_TARGET_CAPPED_SIGNAL_VWAP"
+                if spec.vwap_target_cap_bps is not None
+                else "MAX_PARAMETER_TARGET_SIGNAL_VWAP"
+            ),
             "position_side": "LONG",
         }
         encoded = json.dumps(
@@ -651,6 +683,10 @@ class StrategyV2BracketChallengerService:
         )
         if (
             row.market.upper() != market.upper()
+            or not _optional_float_equal(
+                row.vwap_target_cap_bps,
+                spec.vwap_target_cap_bps,
+            )
             or row.max_holding_minutes != max_holding_minutes
             or row.flatten_minutes_before_close
             != flatten_minutes_before_close
@@ -668,6 +704,15 @@ class StrategyV2BracketChallengerService:
             raise ValueError(
                 "persisted bracket registration differs from frozen evaluator"
             )
+
+
+def _optional_float_equal(
+    actual: float | None,
+    expected: float | None,
+) -> bool:
+    if actual is None or expected is None:
+        return actual is expected
+    return math.isclose(actual, expected, rel_tol=0.0, abs_tol=1e-12)
 
 
 def _max_drawdown(values: list[float]) -> float:

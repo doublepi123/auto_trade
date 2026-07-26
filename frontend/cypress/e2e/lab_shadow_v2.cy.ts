@@ -161,6 +161,7 @@ describe('Strategy v2 shadow lab', () => {
       .and('contain', '不自动应用')
       .and('contain', '-0.40% / +0.70%')
       .and('contain', '-0.50% / +1.00%')
+      .and('contain', 'VWAP 上限 75bp')
     cy.get('[data-testid="shadow-bracket-table"]')
       .should('contain', '1.04')
       .and('contain', '1.34')

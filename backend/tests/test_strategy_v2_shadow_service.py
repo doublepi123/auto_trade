@@ -12,6 +12,7 @@ from sqlalchemy.pool import StaticPool
 import app.services.strategy_v2_shadow_service as shadow_service_module
 from app.core.broker import BrokerCandle
 from app.domain.strategy_v2 import (
+    CausalTrendPrewarmFeatureEngine,
     StrategyBar,
     StrategyV2Action,
     StrategyV2Decision,
@@ -43,6 +44,7 @@ from app.schemas import (
     StrategyV2ReplayBar,
     StrategyV2ShadowConfigUpdate,
     StrategyV2ShadowMetrics,
+    StrategyV2ShadowReplayRequest,
 )
 from app.services.strategy_v2_shadow_service import StrategyV2ShadowService
 
@@ -127,6 +129,42 @@ class _ScheduledObservationShadowService(StrategyV2ShadowService):
             gate_reasons=gate_reasons,
             observed_at=self._scheduled_observation(feature),
         )
+
+
+class _ReplayFeatureSequence(CausalTrendPrewarmFeatureEngine):
+    def __init__(self, zscores: list[float]) -> None:
+        self._zscores = iter(zscores)
+        self._bar_index = 0
+
+    def on_bar(
+        self,
+        bar: StrategyBar,
+        *,
+        observed_at: datetime | None = None,
+    ) -> StrategyV2FeatureSnapshot:
+        del observed_at
+        snapshot = StrategyV2FeatureSnapshot(
+            bar=bar,
+            session_day=bar.timestamp.date(),
+            bar_index=self._bar_index,
+            bar_timestamp_5m=bar.timestamp,
+            session_vwap_1m=100.0,
+            residual_1m=0.0,
+            residual_mean_1m=0.0,
+            residual_sigma_1m=1.0,
+            zscore_1m=next(self._zscores),
+            session_vwap_5m=100.0,
+            residual_5m=0.0,
+            residual_mean_5m=0.0,
+            residual_sigma_5m=1.0,
+            zscore_5m=-1.0,
+            adx_5m=10.0,
+            realized_vol_1m=0.2,
+            ready=True,
+            gate_reasons=(),
+        )
+        self._bar_index += 1
+        return snapshot
 
 
 def _candles(
@@ -942,10 +980,18 @@ class TestStrategyV2ShadowService:
             ).order_by(
                 StrategyV2BracketChallengerRegistration.stop_loss_pct
             ).all()
-            assert [
-                (row.stop_loss_pct, row.profit_target_pct)
+            assert {
+                (
+                    row.stop_loss_pct,
+                    row.profit_target_pct,
+                    row.vwap_target_cap_bps,
+                )
                 for row in registrations
-            ] == [(0.40, 0.70), (0.50, 1.00)]
+            } == {
+                (0.40, 0.70, None),
+                (0.40, 0.70, 75.0),
+                (0.50, 1.00, None),
+            }
             assert {
                 row.eligible_after.replace(tzinfo=timezone.utc)
                 for row in registrations
@@ -3375,6 +3421,49 @@ class TestStrategyV2ShadowService:
             assert actual.model_dump(mode="json") == expected
             assert restarted_db.query(StrategyV2ForwardEvidence).count() == 1
             assert not restarted_db.new and not restarted_db.dirty
+
+    def test_replay_excursion_includes_causal_open_fill_bar(self) -> None:
+        bars = [
+            StrategyV2ReplayBar(
+                timestamp=_SESSION_OPEN + timedelta(minutes=index),
+                open=100.0 if index != 4 else 100.1,
+                high=100.4 if index == 3 else 100.2,
+                low=99.9 if index == 3 else 100.0,
+                close=100.1,
+                volume=1000.0,
+            )
+            for index in range(5)
+        ]
+        with self._db() as db:
+            config = self._enabled_config(
+                db,
+                activated_at=_SESSION_OPEN - timedelta(days=1),
+                establish_current_state=False,
+            )
+            config.max_holding_minutes = 1
+            db.commit()
+            result = StrategyV2ShadowService(db)._replay_payload(
+                StrategyV2ShadowReplayRequest(
+                    symbol="AAPL.US",
+                    market="US",
+                    bars=bars,
+                ),
+                config,
+                features=_ReplayFeatureSequence(
+                    [-2.5, -0.5, -0.4, -0.4, -0.4]
+                ),
+            )
+
+        assert len(result.trades) == 1
+        trade = result.trades[0]
+        entry_price = float(trade["entry_price"])
+        assert trade["exit_reason"] == "MAX_HOLD"
+        assert float(trade["mfe_pct"]) == pytest.approx(
+            (100.4 - entry_price) / entry_price
+        )
+        assert float(trade["mae_pct"]) == pytest.approx(
+            (99.9 - entry_price) / entry_price
+        )
 
     def test_replay_metrics_count_unique_gate_eligible_bars(self) -> None:
         metrics = StrategyV2ShadowService._metrics_from_replay(

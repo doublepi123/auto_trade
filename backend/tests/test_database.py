@@ -572,6 +572,12 @@ def test_strategy_v2_shadow_table_migration_is_complete_and_idempotent(tmp_path)
             "strategy_v2_bracket_challenger_registrations"
         )
     }
+    assert "vwap_target_cap_bps" in {
+        column["name"]
+        for column in inspector.get_columns(
+            "strategy_v2_bracket_challenger_registrations"
+        )
+    }
     assert "uq_strategy_v2_bracket_challenger_trade_pair" in {
         constraint["name"]
         for constraint in inspector.get_unique_constraints(
@@ -691,6 +697,89 @@ def test_exit_challenger_policy_migration_preserves_profit_lock_rows(
             "FROM strategy_v2_exit_challenger_registrations"
         ).one()
     assert tuple(preserved) == (7, "PROFIT_LOCK", None)
+    engine.dispose()
+
+
+def test_bracket_challenger_cap_migration_preserves_existing_rows(
+    tmp_path,
+) -> None:
+    db_path = tmp_path / "legacy_bracket_challenger.db"
+    engine = create_engine(f"sqlite:///{db_path}")
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE strategy_v2_bracket_challenger_registrations (
+                id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+                symbol VARCHAR(50) NOT NULL,
+                market VARCHAR(10) NOT NULL,
+                source_config_version VARCHAR(64) NOT NULL,
+                algorithm_version VARCHAR(100) NOT NULL,
+                stop_loss_pct FLOAT NOT NULL,
+                profit_target_pct FLOAT NOT NULL,
+                slippage_bps FLOAT NOT NULL,
+                estimated_fee_rate FLOAT NOT NULL,
+                max_holding_minutes INTEGER NOT NULL,
+                flatten_minutes_before_close INTEGER NOT NULL,
+                estimated_round_trip_cost_pct FLOAT NOT NULL,
+                estimated_net_reward_risk_ratio FLOAT NOT NULL,
+                evaluator_digest VARCHAR(64) NOT NULL,
+                registered_at DATETIME NOT NULL,
+                eligible_after DATETIME NOT NULL,
+                created_at DATETIME NOT NULL
+            )
+            """
+        )
+        connection.exec_driver_sql(
+            """
+            INSERT INTO strategy_v2_bracket_challenger_registrations (
+                id,
+                symbol,
+                market,
+                source_config_version,
+                algorithm_version,
+                stop_loss_pct,
+                profit_target_pct,
+                slippage_bps,
+                estimated_fee_rate,
+                max_holding_minutes,
+                flatten_minutes_before_close,
+                estimated_round_trip_cost_pct,
+                estimated_net_reward_risk_ratio,
+                evaluator_digest,
+                registered_at,
+                eligible_after,
+                created_at
+            ) VALUES (
+                7,
+                'AAPL.US',
+                'US',
+                'source-v1',
+                'strategy-v2-bracket-s40-t70-v1',
+                0.4,
+                0.7,
+                2.0,
+                0.0005,
+                60,
+                15,
+                0.14,
+                1.0,
+                'digest-v1',
+                '2026-07-24 20:15:10',
+                '2026-07-24 20:16:00',
+                '2026-07-24 20:15:10'
+            )
+            """
+        )
+
+    database._ensure_strategy_v2_shadow_tables(engine)
+    database._ensure_strategy_v2_shadow_tables(engine)
+
+    with engine.connect() as connection:
+        preserved = connection.exec_driver_sql(
+            "SELECT id, vwap_target_cap_bps "
+            "FROM strategy_v2_bracket_challenger_registrations"
+        ).one()
+    assert tuple(preserved) == (7, None)
     engine.dispose()
 
 

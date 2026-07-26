@@ -57,17 +57,20 @@ class _TimeExitSpec:
 
 
 _PROFIT_LOCK_SPECS = (
-    _ProfitLockSpec("strategy-v2-profit-lock-a40-f10-v1", 0.40, 0.10),
-    _ProfitLockSpec("strategy-v2-profit-lock-a40-f20-v1", 0.40, 0.20),
-    _ProfitLockSpec("strategy-v2-profit-lock-a40-f30-v1", 0.40, 0.30),
+    _ProfitLockSpec("strategy-v2-profit-lock-a40-f10-v2", 0.40, 0.10),
+    _ProfitLockSpec("strategy-v2-profit-lock-a40-f20-v2", 0.40, 0.20),
+    _ProfitLockSpec("strategy-v2-profit-lock-a40-f30-v2", 0.40, 0.30),
 )
 _TIME_EXIT_SPECS = (
-    _TimeExitSpec("strategy-v2-time-stop-m15-v1", 15),
-    _TimeExitSpec("strategy-v2-time-stop-m30-v1", 30),
-    _TimeExitSpec("strategy-v2-time-stop-m45-v1", 45),
+    _TimeExitSpec("strategy-v2-time-stop-m15-v2", 15),
+    _TimeExitSpec("strategy-v2-time-stop-m30-v2", 30),
+    _TimeExitSpec("strategy-v2-time-stop-m45-v2", 45),
 )
-_EVALUATOR_VERSION = "strategy-v2-profit-lock-forward-evaluator-v1"
-_TIME_EXIT_EVALUATOR_VERSION = "strategy-v2-time-stop-forward-evaluator-v1"
+_CURRENT_ALGORITHM_VERSIONS = tuple(
+    spec.algorithm_version for spec in (*_PROFIT_LOCK_SPECS, *_TIME_EXIT_SPECS)
+)
+_EVALUATOR_VERSION = "strategy-v2-profit-lock-forward-evaluator-v2"
+_TIME_EXIT_EVALUATOR_VERSION = "strategy-v2-time-stop-forward-evaluator-v2"
 _MIN_READY_PAIRS = 20
 _MIN_MATURE_PAIRS = 50
 _MIN_PROFIT_LOCK_EXITS = 5
@@ -186,8 +189,6 @@ class StrategyV2ExitChallengerService:
             StrategyV2ExitChallengerTrade.status == "OPEN",
         ).all()
         for row in rows:
-            if _as_utc(bar.timestamp) <= _as_utc(row.last_bar_at):
-                continue
             registration = self.db.get(
                 StrategyV2ExitChallengerRegistration,
                 row.registration_id,
@@ -195,6 +196,19 @@ class StrategyV2ExitChallengerService:
             baseline = self.db.get(StrategyV2ShadowTrade, row.baseline_trade_id)
             if registration is None or baseline is None:
                 raise ValueError("profit-lock challenger linkage is incomplete")
+
+            bar_at = _as_utc(bar.timestamp)
+            last_bar_at = _as_utc(row.last_bar_at)
+            if bar_at <= last_bar_at:
+                if (
+                    bar_at == last_bar_at
+                    and baseline.status == "CLOSED"
+                    and baseline.exit_at is not None
+                    and _as_utc(baseline.exit_at) == bar_at
+                ):
+                    self._close_from_baseline(row, baseline)
+                    self.db.add(row)
+                continue
 
             baseline_closed_this_bar = (
                 baseline.status == "CLOSED"
@@ -285,7 +299,10 @@ class StrategyV2ExitChallengerService:
         registrations = self.db.query(
             StrategyV2ExitChallengerRegistration
         ).filter(
-            StrategyV2ExitChallengerRegistration.symbol == symbol
+            StrategyV2ExitChallengerRegistration.symbol == symbol,
+            StrategyV2ExitChallengerRegistration.algorithm_version.in_(
+                _CURRENT_ALGORITHM_VERSIONS
+            ),
         ).order_by(
             StrategyV2ExitChallengerRegistration.registered_at.asc(),
             StrategyV2ExitChallengerRegistration.id.asc(),
@@ -331,6 +348,9 @@ class StrategyV2ExitChallengerService:
             StrategyV2ExitChallengerRegistration.symbol == symbol,
             StrategyV2ExitChallengerRegistration.source_config_version
             == baseline.config_version,
+            StrategyV2ExitChallengerRegistration.algorithm_version.in_(
+                _CURRENT_ALGORITHM_VERSIONS
+            ),
         ).all()
         for registration in registrations:
             if _as_utc(baseline.entry_at) < _as_utc(registration.eligible_after):
@@ -358,7 +378,9 @@ class StrategyV2ExitChallengerService:
                 entry_price=baseline.entry_price,
                 quantity=baseline.quantity,
                 estimated_fee_rate=float(fee_rate),
-                last_bar_at=baseline.entry_at,
+                last_bar_at=_as_utc(baseline.entry_at) - timedelta(
+                    microseconds=1
+                ),
             ))
         self.db.flush()
 
@@ -580,6 +602,7 @@ class StrategyV2ExitChallengerService:
             "evaluator_version": _EVALUATOR_VERSION,
             **asdict(spec),
             "slippage_bps": slippage_bps,
+            "entry_bar_evaluation": "INCLUDED_AFTER_OPEN_FILL",
             "activation_effective": "NEXT_BAR",
             "forced_exit_priority": sorted(_OPEN_PRIORITY_EXIT_REASONS),
             "position_side": "LONG",
@@ -619,6 +642,7 @@ class StrategyV2ExitChallengerService:
             "evaluator_version": _TIME_EXIT_EVALUATOR_VERSION,
             **asdict(spec),
             "slippage_bps": slippage_bps,
+            "entry_bar_evaluation": "INCLUDED_AFTER_OPEN_FILL",
             "exit_trigger": "FIRST_BAR_OPEN_AT_OR_AFTER_ENTRY_PLUS_TTL",
             "same_bar_priority": (
                 "EOD_FLATTEN_THEN_TIME_STOP_THEN_INTRABAR_BASELINE"

@@ -116,6 +116,30 @@ def test_signal_vwap_remains_the_target_floor() -> None:
     assert exit_decision.exit_price == pytest.approx(101.0 * 0.9998)
 
 
+def test_signal_vwap_target_can_be_capped_by_frozen_challenger() -> None:
+    config = BracketConfig(
+        stop_loss_pct=0.40,
+        profit_target_pct=0.70,
+        slippage_bps=2.0,
+        flatten_minutes_before_close=15,
+        vwap_target_cap_bps=75.0,
+    )
+
+    assert config.target_price(100.0, 101.5) == pytest.approx(100.75)
+    assert config.target_price(100.0, 100.72) == pytest.approx(100.72)
+
+
+def test_signal_vwap_cap_cannot_undercut_parameter_target() -> None:
+    with pytest.raises(ValueError, match="must not be below"):
+        BracketConfig(
+            stop_loss_pct=0.40,
+            profit_target_pct=0.80,
+            slippage_bps=2.0,
+            flatten_minutes_before_close=15,
+            vwap_target_cap_bps=75.0,
+        )
+
+
 def test_eod_flatten_precedes_target_but_not_stop() -> None:
     eod_bar = StrategyBar(
         timestamp=datetime(2026, 7, 27, 19, 45, tzinfo=timezone.utc),

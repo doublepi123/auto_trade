@@ -20,6 +20,7 @@ class BracketConfig:
     profit_target_pct: float
     slippage_bps: float
     flatten_minutes_before_close: int
+    vwap_target_cap_bps: float | None = None
 
     def __post_init__(self) -> None:
         values = (
@@ -39,6 +40,18 @@ class BracketConfig:
             raise ValueError(
                 "flatten_minutes_before_close must be in [1, 180]"
             )
+        if self.vwap_target_cap_bps is not None:
+            if (
+                not math.isfinite(self.vwap_target_cap_bps)
+                or not 0 < self.vwap_target_cap_bps <= 500
+            ):
+                raise ValueError("vwap_target_cap_bps must be in (0, 500]")
+            if self.vwap_target_cap_bps + 1e-12 < (
+                self.profit_target_pct * 100.0
+            ):
+                raise ValueError(
+                    "vwap_target_cap_bps must not be below the profit target"
+                )
 
     def stop_price(self, entry_price: float) -> float:
         return entry_price * (1.0 - self.stop_loss_pct / 100.0)
@@ -48,9 +61,16 @@ class BracketConfig:
         entry_price: float,
         signal_vwap: float,
     ) -> float:
+        vwap_target = signal_vwap
+        if self.vwap_target_cap_bps is not None:
+            vwap_target = min(
+                vwap_target,
+                entry_price
+                * (1.0 + self.vwap_target_cap_bps / 10_000.0),
+            )
         return max(
             entry_price * (1.0 + self.profit_target_pct / 100.0),
-            signal_vwap,
+            vwap_target,
         )
 
 
