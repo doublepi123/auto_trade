@@ -15,7 +15,11 @@ from app.config import settings
 from app.core.broker import BrokerCandle, Quote
 from app.core.fees import one_side_fee_rate
 from app.core.market_calendar import get_session, is_trading_hours
-from app.domain.universe_selection import DailyBar, completed_daily_bars
+from app.domain.universe_selection import (
+    DailyBar,
+    completed_daily_bars,
+    parse_frozen_rotation_selection,
+)
 from app.models import (
     StrategyConfig,
     UniverseSelectionCandidate,
@@ -119,7 +123,7 @@ class QuantObservationPlan:
 def build_quant_observation_plan(
     db: Session,
 ) -> QuantObservationPlan:
-    """Prioritize the live target and latest formal universe candidates."""
+    """Prioritize live, formal, and frozen-rotation routing candidates."""
     items = db.query(WatchlistItem).order_by(WatchlistItem.id.asc()).all()
     strategy = (
         db.query(StrategyConfig)
@@ -154,6 +158,30 @@ def build_quant_observation_plan(
                 UniverseSelectionCandidate.symbol.asc(),
             )
             .all()
+        )
+    )
+    rotation_candidates = (
+        []
+        if latest_run is None
+        else [
+            (priority, item)
+            for item in db.query(UniverseSelectionCandidate).filter(
+                UniverseSelectionCandidate.run_id == latest_run.id,
+            ).all()
+            if (
+                (
+                    priority
+                    := parse_frozen_rotation_selection(item.metrics_json)
+                )
+                is not None
+            )
+        ]
+    )
+    rotation_candidates.sort(
+        key=lambda pair: (
+            pair[0][0],
+            -pair[0][1],
+            pair[1].symbol,
         )
     )
 
@@ -197,6 +225,8 @@ def build_quant_observation_plan(
     if trading_symbol:
         append_symbol(trading_symbol, priority=True)
     for candidate in selected_candidates:
+        append_symbol(candidate.symbol, priority=True)
+    for _, candidate in rotation_candidates:
         append_symbol(candidate.symbol, priority=True)
     for item in items:
         append_symbol(item.symbol, priority=False)

@@ -48,8 +48,9 @@ from app.domain.universe_selection import (
     latest_closed_session_date,
     liquidity_spread_proxy_bps,
     latest_complete_session_date,
-    risk_group_for_sector,
     next_cohort_month,
+    parse_frozen_rotation_selection,
+    risk_group_for_sector,
     rotation_cohort_month,
     select_candidates,
     unavailable_rotation_forward_snapshot,
@@ -216,32 +217,7 @@ def _candidate_avg_dollar_volume(
 def _candidate_rotation_priority(
     item: UniverseSelectionCandidate,
 ) -> tuple[int, float] | None:
-    try:
-        decoded = json.loads(item.metrics_json)
-    except (TypeError, json.JSONDecodeError):
-        return None
-    if not isinstance(decoded, dict):
-        return None
-    rotation = decoded.get("rotation")
-    if (
-        not isinstance(rotation, dict)
-        or rotation.get("algorithm_version")
-        != ROTATION_ALGORITHM_VERSION
-        or rotation.get("selected") is not True
-    ):
-        return None
-    rank = rotation.get("rank")
-    score = rotation.get("score")
-    if (
-        isinstance(rank, bool)
-        or not isinstance(rank, int)
-        or rank <= 0
-        or isinstance(score, bool)
-        or not isinstance(score, (int, float))
-        or not math.isfinite(float(score))
-    ):
-        return None
-    return rank, float(score)
+    return parse_frozen_rotation_selection(item.metrics_json)
 
 
 def select_exploration_candidates(

@@ -22,6 +22,7 @@ from app.domain.strategy_v2 import (
 )
 from app.domain.universe_selection import (
     ROTATION_ALGORITHM_VERSION,
+    parse_frozen_rotation_selection,
     risk_group_for_sector,
 )
 from app.models import (
@@ -1013,32 +1014,11 @@ class StrategyV2PortfolioService:
     ) -> tuple[bool, int | None, float | None]:
         if row is None:
             return False, None, None
-        try:
-            metrics = json.loads(row.metrics_json)
-        except (TypeError, ValueError):
+        selection = parse_frozen_rotation_selection(row.metrics_json)
+        if selection is None:
             return False, None, None
-        if not isinstance(metrics, dict):
-            return False, None, None
-        rotation = metrics.get("rotation")
-        if (
-            not isinstance(rotation, dict)
-            or rotation.get("algorithm_version")
-            != ROTATION_ALGORITHM_VERSION
-            or rotation.get("selected") is not True
-        ):
-            return False, None, None
-        rank = rotation.get("rank")
-        score = rotation.get("score")
-        if (
-            isinstance(rank, bool)
-            or not isinstance(rank, int)
-            or rank <= 0
-            or isinstance(score, bool)
-            or not isinstance(score, (int, float))
-            or not math.isfinite(float(score))
-        ):
-            return False, None, None
-        return True, rank, float(score)
+        rank, score = selection
+        return True, rank, score
 
     def _quant_context(
         self,

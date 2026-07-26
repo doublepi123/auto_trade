@@ -17,6 +17,7 @@ from app.domain.universe_selection.selector import (
     latest_closed_session_date,
     liquidity_spread_proxy_bps,
     latest_complete_session_date,
+    parse_frozen_rotation_selection,
     select_candidates,
 )
 from app.domain.universe_selection.membership_history import (
@@ -123,6 +124,7 @@ __all__ = [
     "evaluate_rotation_forward",
     "is_last_us_session_of_month",
     "next_cohort_month",
+    "parse_frozen_rotation_selection",
     "parse_rotation_forward_cohort",
     "rotation_cohort_month",
     "unavailable_rotation_forward_snapshot",

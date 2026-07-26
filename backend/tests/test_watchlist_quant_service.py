@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -12,6 +13,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.api import watchlist as watchlist_api
 from app.core.broker import BrokerCandle, Quote
 from app.core.market_calendar import get_session
+from app.domain.universe_selection import ROTATION_ALGORITHM_VERSION
 from app.models import (
     Base,
     StrategyConfig,
@@ -219,6 +221,18 @@ def test_quant_observation_plan_prioritizes_target_then_selected_rank() -> None:
                     alias="Alphabet",
                     source="universe",
                 ),
+                WatchlistItem(
+                    symbol="ROST.US",
+                    market="US",
+                    alias="Ross Stores",
+                    source="universe_exploration",
+                ),
+                WatchlistItem(
+                    symbol="MRK.US",
+                    market="US",
+                    alias="Merck",
+                    source="universe_exploration",
+                ),
                 StrategyConfig(symbol="NVDA.US", market="US"),
             ]
         )
@@ -227,8 +241,8 @@ def test_quant_observation_plan_prioritizes_target_then_selected_rank() -> None:
             algorithm_version="test",
             source_version="test",
             status="COMPLETE",
-            candidate_count=3,
-            evaluable_count=3,
+            candidate_count=5,
+            evaluable_count=5,
             selected_count=2,
             coverage_ratio=1.0,
             completed_at=_NOW,
@@ -269,6 +283,54 @@ def test_quant_observation_plan_prioritizes_target_then_selected_rank() -> None:
                     memberships_json='["NASDAQ_100"]',
                     selected=False,
                     score=70,
+                    metrics_json=json.dumps({
+                        "rotation": {
+                            "algorithm_version": "stale-rotation-v1",
+                            "selected": True,
+                            "rank": 1,
+                            "score": 99,
+                        }
+                    }),
+                ),
+                UniverseSelectionCandidate(
+                    run_id=run.id,
+                    symbol="ROST.US",
+                    market="US",
+                    alias="Ross Stores",
+                    sector="Consumer Discretionary",
+                    memberships_json='["NASDAQ_100"]',
+                    selected=False,
+                    score=50,
+                    metrics_json=json.dumps({
+                        "rotation": {
+                            "algorithm_version": (
+                                ROTATION_ALGORITHM_VERSION
+                            ),
+                            "selected": True,
+                            "rank": 4,
+                            "score": 76,
+                        }
+                    }),
+                ),
+                UniverseSelectionCandidate(
+                    run_id=run.id,
+                    symbol="MRK.US",
+                    market="US",
+                    alias="Merck",
+                    sector="Healthcare",
+                    memberships_json='["DJIA"]',
+                    selected=False,
+                    score=40,
+                    metrics_json=json.dumps({
+                        "rotation": {
+                            "algorithm_version": (
+                                ROTATION_ALGORITHM_VERSION
+                            ),
+                            "selected": True,
+                            "rank": 5,
+                            "score": 64,
+                        }
+                    }),
                 ),
             ]
         )
@@ -280,12 +342,16 @@ def test_quant_observation_plan_prioritizes_target_then_selected_rank() -> None:
             "NVDA.US",
             "MSFT.US",
             "AAPL.US",
+            "ROST.US",
+            "MRK.US",
             "GOOGL.US",
         ]
         assert plan.priority_symbols == (
             "NVDA.US",
             "MSFT.US",
             "AAPL.US",
+            "ROST.US",
+            "MRK.US",
         )
     finally:
         db.close()

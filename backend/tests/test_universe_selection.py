@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from app.domain.universe_selection.catalog import IndexCandidate
 from app.domain.universe_selection.selector import (
+    ROTATION_ALGORITHM_VERSION,
     CandidateInput,
     UniverseSelectionConfig,
     completed_daily_bars,
     latest_closed_session_date,
     liquidity_spread_proxy_bps,
+    parse_frozen_rotation_selection,
     select_candidates,
 )
 
@@ -482,3 +485,34 @@ def test_latest_closed_session_date_honors_us_half_day_close() -> None:
         market="US",
         now=datetime(2026, 12, 24, 18, 15, tzinfo=timezone.utc),
     ).isoformat() == "2026-12-24"
+
+
+def test_frozen_rotation_selection_parser_fails_closed() -> None:
+    valid = json.dumps({
+        "rotation": {
+            "algorithm_version": ROTATION_ALGORITHM_VERSION,
+            "selected": True,
+            "rank": 4,
+            "score": 76.0,
+        }
+    })
+
+    assert parse_frozen_rotation_selection(valid) == (4, 76.0)
+    assert parse_frozen_rotation_selection("not-json") is None
+    assert parse_frozen_rotation_selection("[]") is None
+    assert parse_frozen_rotation_selection(json.dumps({
+        "rotation": {
+            "algorithm_version": "stale-version",
+            "selected": True,
+            "rank": 1,
+            "score": 99,
+        }
+    })) is None
+    assert parse_frozen_rotation_selection(json.dumps({
+        "rotation": {
+            "algorithm_version": ROTATION_ALGORITHM_VERSION,
+            "selected": True,
+            "rank": True,
+            "score": 99,
+        }
+    })) is None

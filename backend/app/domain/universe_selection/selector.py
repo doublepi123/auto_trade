@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
@@ -147,6 +148,38 @@ class RotationSelectionEvidence:
     rank: int | None = None
     score: float = 0.0
     exclusion_reasons: tuple[str, ...] = ()
+
+
+def parse_frozen_rotation_selection(
+    metrics_json: str,
+) -> tuple[int, float] | None:
+    """Return rank and score for valid current-version frozen selections."""
+    try:
+        metrics = json.loads(metrics_json)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(metrics, dict):
+        return None
+    rotation = metrics.get("rotation")
+    if (
+        not isinstance(rotation, dict)
+        or rotation.get("algorithm_version")
+        != ROTATION_ALGORITHM_VERSION
+        or rotation.get("selected") is not True
+    ):
+        return None
+    rank = rotation.get("rank")
+    score = rotation.get("score")
+    if (
+        isinstance(rank, bool)
+        or not isinstance(rank, int)
+        or rank <= 0
+        or isinstance(score, bool)
+        or not isinstance(score, (int, float))
+        or not math.isfinite(float(score))
+    ):
+        return None
+    return rank, float(score)
 
 
 @dataclass(frozen=True)
