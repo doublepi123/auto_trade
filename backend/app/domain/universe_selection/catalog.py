@@ -5,7 +5,7 @@ from typing import Literal
 
 
 CATALOG_SOURCE_VERSION = (
-    "nasdaq-100-2026-07-24_djia-2026-06-29_expanded-v6"
+    "nasdaq-100-2026-07-24_djia-2026-06-29_expanded-v7"
 )
 
 _RISK_GROUP_BY_SECTOR = {
@@ -42,7 +42,9 @@ class IndexCandidate:
 # effective 2026-06-29. The DJIA portion is complete; the Nasdaq-100 portion
 # favors liquid names across sectors so daily screening remains bounded. The
 # v6 additions passed the same liquidity, volatility, and cost-opportunity
-# gates as the incumbent catalog before admission.
+# gates as the incumbent catalog before admission. V7 adds the liquid LITE
+# and SNDK research candidates from the verified Nasdaq snapshot; daily gates
+# keep them out of the selected pool while their volatility remains excessive.
 INDEX_CANDIDATE_CATALOG: tuple[IndexCandidate, ...] = (
     IndexCandidate("NVDA.US", "NVIDIA", "Semiconductors", ("NASDAQ_100", "DJIA")),
     IndexCandidate("AAPL.US", "Apple", "Technology Hardware", ("NASDAQ_100", "DJIA")),
@@ -183,6 +185,12 @@ INDEX_CANDIDATE_CATALOG: tuple[IndexCandidate, ...] = (
     IndexCandidate("INTU.US", "Intuit", "Software", ("NASDAQ_100",)),
     IndexCandidate("LIN.US", "Linde", "Materials", ("NASDAQ_100",)),
     IndexCandidate(
+        "LITE.US",
+        "Lumentum Holdings",
+        "Technology Hardware",
+        ("NASDAQ_100",),
+    ),
+    IndexCandidate(
         "MDLZ.US",
         "Mondelez International",
         "Consumer Staples",
@@ -269,6 +277,12 @@ INDEX_CANDIDATE_CATALOG: tuple[IndexCandidate, ...] = (
         ("NASDAQ_100",),
     ),
     IndexCandidate("SNPS.US", "Synopsys", "Software", ("NASDAQ_100",)),
+    IndexCandidate(
+        "SNDK.US",
+        "Sandisk",
+        "Technology Hardware",
+        ("NASDAQ_100",),
+    ),
     IndexCandidate(
         "STX.US",
         "Seagate Technology",

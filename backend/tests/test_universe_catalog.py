@@ -13,9 +13,9 @@ def test_catalog_tracks_current_verified_index_snapshot() -> None:
     }
 
     assert len(by_symbol) == len(INDEX_CANDIDATE_CATALOG)
-    assert len(by_symbol) == 107
+    assert len(by_symbol) == 109
     assert CATALOG_SOURCE_VERSION == (
-        "nasdaq-100-2026-07-24_djia-2026-06-29_expanded-v6"
+        "nasdaq-100-2026-07-24_djia-2026-06-29_expanded-v7"
     )
     assert {
         "SPCX.US",
@@ -57,11 +57,13 @@ def test_catalog_tracks_current_verified_index_snapshot() -> None:
         "TTWO.US",
         "WBD.US",
         "WDAY.US",
+        "LITE.US",
+        "SNDK.US",
     } <= by_symbol.keys()
     assert sum(
         "NASDAQ_100" in candidate.memberships
         for candidate in by_symbol.values()
-    ) == 86
+    ) == 88
     assert sum(
         "DJIA" in candidate.memberships
         for candidate in by_symbol.values()

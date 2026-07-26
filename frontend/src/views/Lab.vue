@@ -461,6 +461,11 @@
                       {{ formatPercent(row.minimum_data_coverage) }}
                     </template>
                   </el-table-column>
+                  <el-table-column label="强制标的" min-width="110">
+                    <template #default="{ row }">
+                      {{ row.required_symbols?.length ? row.required_symbols.join(', ') : '-' }}
+                    </template>
+                  </el-table-column>
                   <el-table-column label="持仓" min-width="90">
                     <template #default="{ row }">
                       {{ row.holding_minutes }} 分钟
@@ -491,7 +496,12 @@
                       {{ row.comparison?.resolved_sessions ?? '-' }}
                     </template>
                   </el-table-column>
-                  <el-table-column label="相对现行" min-width="100">
+                  <el-table-column label="比较基线" min-width="110">
+                    <template #default="{ row }">
+                      {{ row.comparison_baseline ? openingMomentumVariantLabel(row.comparison_baseline) : '-' }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="相对基线" min-width="100">
                     <template #default="{ row }">
                       {{ row.comparison ? formatBps(row.comparison.mean_delta_bps) : '-' }}
                     </template>
@@ -2131,14 +2141,18 @@ function openingMomentumVariantLabel(
   if (variant === 'BREADTH_GATED_CHALLENGER') return '广度过滤'
   if (variant === 'LAST5_POSITIVE_CHALLENGER') return '广度 + 末 5 分钟'
   if (variant === 'LAST5_ONLY_CHALLENGER') return '末 5 分钟过滤'
-  return '3 分钟宽池'
+  if (variant === 'EARLY_BROAD_CHALLENGER') return '3 分钟宽池'
+  return '3 分钟 + SNDK'
 }
 function openingMomentumVariantTagType(
   variant: OpeningMomentumShadowStatus['variants'][number]['variant'],
 ): 'primary' | 'warning' | 'info' | 'success' {
   if (variant === 'INCUMBENT') return 'primary'
   if (variant === 'REVERSAL_CHALLENGER') return 'success'
-  if (variant === 'EARLY_BROAD_CHALLENGER') return 'warning'
+  if (
+    variant === 'EARLY_BROAD_CHALLENGER'
+    || variant === 'EARLY_SNDK_CHALLENGER'
+  ) return 'warning'
   if (variant.includes('LAST5')) return 'warning'
   if (variant.startsWith('BREADTH_GATED')) return 'success'
   return 'info'

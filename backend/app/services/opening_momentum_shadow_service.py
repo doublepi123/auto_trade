@@ -84,6 +84,14 @@ _EARLY_BROAD_ALGORITHM_VERSION = (
     f"{ALGORITHM_VERSION}+{_EARLY_BROAD_VERSION}"
 )
 _EARLY_BROAD_MINIMUM_COVERAGE = 0.95
+_EARLY_SNDK_VERSION = (
+    "active-broad-plus-sndk-3m-signal-120m-hold-v1"
+)
+_EARLY_SNDK_SOURCE = "OPENING_EARLY_SNDK"
+_EARLY_SNDK_ALGORITHM_VERSION = (
+    f"{ALGORITHM_VERSION}+{_EARLY_SNDK_VERSION}"
+)
+_EARLY_SNDK_REQUIRED_SYMBOLS = ("SNDK.US",)
 _REVERSAL_SOURCE = "OPENING_REVERSAL"
 _NON_COMPARABLE_SKIP_REASONS = frozenset(
     {
@@ -102,6 +110,7 @@ _VariantName = Literal[
     "LAST5_POSITIVE_CHALLENGER",
     "LAST5_ONLY_CHALLENGER",
     "EARLY_BROAD_CHALLENGER",
+    "EARLY_SNDK_CHALLENGER",
 ]
 _SignalModel = Literal["MOMENTUM", "REVERSAL"]
 
@@ -143,6 +152,7 @@ class _UniverseVariant:
     signal_model: _SignalModel = "MOMENTUM"
     require_nonnegative_last_five: bool = False
     minimum_data_coverage: float = 1.0
+    required_symbols: tuple[str, ...] = ()
     symbols: tuple[str, ...] = ()
     selection_run_id: int | None = None
 
@@ -396,6 +406,9 @@ class OpeningMomentumShadowService:
             data_complete = (
                 bool(variant.symbols)
                 and len(observations) >= required_observations
+                and set(variant.required_symbols).issubset(
+                    {item.symbol for item in observations}
+                )
             )
             last_five_gate_failed = (
                 variant.require_nonnegative_last_five
@@ -585,6 +598,7 @@ class OpeningMomentumShadowService:
                     minimum_data_coverage=(
                         identity.minimum_data_coverage
                     ),
+                    required_symbols=identity.required_symbols,
                 )
                 for identity in identities
             ]
@@ -658,6 +672,7 @@ class OpeningMomentumShadowService:
         identities_by_variant = {
             identity.variant: identity for identity in identities
         }
+        active_broad_symbols = self._active_broad_symbols()
         early_identity = identities_by_variant[
             "EARLY_BROAD_CHALLENGER"
         ]
@@ -670,7 +685,28 @@ class OpeningMomentumShadowService:
             minimum_data_coverage=(
                 early_identity.minimum_data_coverage
             ),
-            symbols=self._active_broad_symbols(),
+            symbols=active_broad_symbols,
+            selection_run_id=run.id,
+        ))
+        early_sndk_identity = identities_by_variant[
+            "EARLY_SNDK_CHALLENGER"
+        ]
+        variants.append(_UniverseVariant(
+            variant=early_sndk_identity.variant,
+            algorithm_version=early_sndk_identity.algorithm_version,
+            config_version=early_sndk_identity.config_version,
+            universe_source=early_sndk_identity.universe_source,
+            decision_config=early_sndk_identity.decision_config,
+            minimum_data_coverage=(
+                early_sndk_identity.minimum_data_coverage
+            ),
+            required_symbols=(
+                early_sndk_identity.required_symbols
+            ),
+            symbols=tuple(dict.fromkeys(
+                active_broad_symbols
+                + _EARLY_SNDK_REQUIRED_SYMBOLS
+            )),
             selection_run_id=run.id,
         ))
         reversal_identity = identities_by_variant[
@@ -745,6 +781,20 @@ class OpeningMomentumShadowService:
                 minimum_data_coverage=(
                     _EARLY_BROAD_MINIMUM_COVERAGE
                 ),
+            ))
+            variants.append(_UniverseVariant(
+                variant="EARLY_SNDK_CHALLENGER",
+                algorithm_version=_EARLY_SNDK_ALGORITHM_VERSION,
+                config_version=self._evidence_config_version(
+                    f"{early_config.version_hash()}:"
+                    f"{_EARLY_SNDK_VERSION}"
+                ),
+                universe_source=_EARLY_SNDK_SOURCE,
+                decision_config=early_config,
+                minimum_data_coverage=(
+                    _EARLY_BROAD_MINIMUM_COVERAGE
+                ),
+                required_symbols=_EARLY_SNDK_REQUIRED_SYMBOLS,
             ))
             variants.append(
                 _UniverseVariant(
@@ -1020,21 +1070,41 @@ class OpeningMomentumShadowService:
             }
             for config_version, rows in rows_by_version.items()
         }
-        incumbent_identity = identities[0]
-        incumbent_rows_by_date = rows_by_date[
-            incumbent_identity.config_version
-        ]
-        incumbent_dates = set(incumbent_rows_by_date)
+        identities_by_variant = {
+            identity.variant: identity for identity in identities
+        }
+        incumbent_identity = identities_by_variant["INCUMBENT"]
 
         responses: list[OpeningMomentumShadowVariantResponse] = []
         for identity in identities:
             identity_rows_by_date = rows_by_date[
                 identity.config_version
             ]
+            comparison_baseline: Literal[
+                "INCUMBENT",
+                "EARLY_BROAD_CHALLENGER",
+            ] | None
+            if identity.variant == "INCUMBENT":
+                comparison_baseline = None
+            elif identity.variant == "EARLY_SNDK_CHALLENGER":
+                comparison_baseline = "EARLY_BROAD_CHALLENGER"
+            else:
+                comparison_baseline = "INCUMBENT"
+            comparison_identity = (
+                identities_by_variant["EARLY_BROAD_CHALLENGER"]
+                if identity.variant == "EARLY_SNDK_CHALLENGER"
+                else incumbent_identity
+            )
+            comparison_rows_by_date = rows_by_date[
+                comparison_identity.config_version
+            ]
+            comparison_dates_available = set(
+                comparison_rows_by_date
+            )
             comparison_dates = (
-                incumbent_dates
+                comparison_dates_available
                 if identity.variant == "INCUMBENT"
-                else incumbent_dates.intersection(
+                else comparison_dates_available.intersection(
                     identity_rows_by_date
                 )
             )
@@ -1049,7 +1119,7 @@ class OpeningMomentumShadowService:
                     for session_date in sorted(comparison_dates)
                     if (
                         self._paired_policy_return(
-                            incumbent_rows_by_date[session_date]
+                            comparison_rows_by_date[session_date]
                         )
                         is not None
                         and self._paired_policy_return(
@@ -1062,7 +1132,7 @@ class OpeningMomentumShadowService:
                     cast(
                         float,
                         self._paired_policy_return(
-                            incumbent_rows_by_date[session_date]
+                            comparison_rows_by_date[session_date]
                         ),
                     )
                     for session_date in resolved_comparison_dates
@@ -1106,10 +1176,14 @@ class OpeningMomentumShadowService:
                     minimum_data_coverage=(
                         identity.minimum_data_coverage
                     ),
+                    required_symbols=list(
+                        identity.required_symbols
+                    ),
                     holding_minutes=(
                         identity.decision_config.holding_minutes
                     ),
                     comparison_sessions=len(comparison_dates),
+                    comparison_baseline=comparison_baseline,
                     latest=(
                         self._run_response(
                             rows_by_version[

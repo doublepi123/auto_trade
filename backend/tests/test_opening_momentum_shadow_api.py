@@ -101,6 +101,7 @@ class TestOpeningMomentumShadowApi:
         }
         reversal = variants["REVERSAL_CHALLENGER"]
         early = variants["EARLY_BROAD_CHALLENGER"]
+        early_sndk = variants["EARLY_SNDK_CHALLENGER"]
         assert early["universe_source"] == "OPENING_EARLY_BROAD"
         assert early["signal_minutes"] == 3
         assert early["minimum_market_return_bps"] == -50.0
@@ -108,6 +109,17 @@ class TestOpeningMomentumShadowApi:
         assert early["minimum_excess_return_bps"] == 25.0
         assert early["minimum_data_coverage"] == 0.95
         assert early["holding_minutes"] == 120
+        assert early["required_symbols"] == []
+        assert early["comparison_baseline"] == "INCUMBENT"
+        assert early_sndk["universe_source"] == "OPENING_EARLY_SNDK"
+        assert early_sndk["signal_minutes"] == 3
+        assert early_sndk["holding_minutes"] == 120
+        assert early_sndk["minimum_data_coverage"] == 0.95
+        assert early_sndk["required_symbols"] == ["SNDK.US"]
+        assert (
+            early_sndk["comparison_baseline"]
+            == "EARLY_BROAD_CHALLENGER"
+        )
         assert reversal["universe_source"] == "OPENING_REVERSAL"
         assert (
             reversal["algorithm_version"]

@@ -86,6 +86,8 @@ describe('Strategy v2 shadow lab', () => {
     cy.get('[data-testid="opening-momentum-variants"]')
       .should('contain', '现行选池')
       .and('contain', '3 分钟宽池')
+      .and('contain', '3 分钟 + SNDK')
+      .and('contain', 'SNDK.US')
       .and('contain', '弱者反弹')
       .and('contain', '动量延续')
       .and('contain', '广度过滤')

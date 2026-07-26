@@ -1905,6 +1905,7 @@ export interface OpeningMomentumShadowVariant {
     | 'LAST5_POSITIVE_CHALLENGER'
     | 'LAST5_ONLY_CHALLENGER'
     | 'EARLY_BROAD_CHALLENGER'
+    | 'EARLY_SNDK_CHALLENGER'
   universe_source: string
   algorithm_version: string
   config_version: string
@@ -1913,8 +1914,10 @@ export interface OpeningMomentumShadowVariant {
   minimum_candidate_return_bps: number
   minimum_excess_return_bps: number
   minimum_data_coverage: number
+  required_symbols: string[]
   holding_minutes: number
   comparison_sessions: number
+  comparison_baseline: 'INCUMBENT' | 'EARLY_BROAD_CHALLENGER' | null
   latest: OpeningMomentumShadowRun | null
   metrics: OpeningMomentumShadowMetrics
   comparison: OpeningMomentumPairedComparison | null

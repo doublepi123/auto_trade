@@ -596,6 +596,7 @@ class OpeningMomentumShadowVariantResponse(BaseModel):
         "LAST5_POSITIVE_CHALLENGER",
         "LAST5_ONLY_CHALLENGER",
         "EARLY_BROAD_CHALLENGER",
+        "EARLY_SNDK_CHALLENGER",
     ]
     universe_source: str
     algorithm_version: str
@@ -605,8 +606,15 @@ class OpeningMomentumShadowVariantResponse(BaseModel):
     minimum_candidate_return_bps: float
     minimum_excess_return_bps: float
     minimum_data_coverage: float = 1.0
+    required_symbols: list[str] = Field(default_factory=list)
     holding_minutes: int
     comparison_sessions: int = 0
+    comparison_baseline: Optional[
+        Literal[
+            "INCUMBENT",
+            "EARLY_BROAD_CHALLENGER",
+        ]
+    ] = None
     latest: Optional[OpeningMomentumShadowRunResponse] = None
     metrics: OpeningMomentumShadowMetrics
     comparison: Optional[
