@@ -20,7 +20,10 @@ from app.domain.strategy_v2 import (
     VWAP_EDGE_FIXED_MAX_DISCOUNT_BPS,
     rank_portfolio_candidates,
 )
-from app.domain.universe_selection import risk_group_for_sector
+from app.domain.universe_selection import (
+    ROTATION_ALGORITHM_VERSION,
+    risk_group_for_sector,
+)
 from app.models import (
     StrategyV2PortfolioObservation,
     StrategyV2PortfolioRegistration,
@@ -125,6 +128,13 @@ _ROUTING_SPECS = (
             "75bps-v1"
         ),
     ),
+    _RoutingSpec(
+        policy="ROTATION_ZSCORE_OBS_75BPS_POOL",
+        algorithm_version=(
+            "strategy-v2-portfolio-rotation-zscore-observed-cost-"
+            "75bps-v1"
+        ),
+    ),
 )
 _EVALUATOR_VERSION = "strategy-v2-single-capital-slot-forward-router-v2"
 _CURRENT_ROUTING_ALGORITHM_VERSIONS = tuple(
@@ -144,9 +154,16 @@ _OBSERVED_COST_TO_STOP_VWAP_EDGE_POLICIES = {
 _OBSERVED_COST_TO_75BPS_VWAP_EDGE_POLICIES = {
     "VWAP_EDGE_OBS_COST_75BPS_POOL",
 }
-_ZSCORE_OBSERVED_COST_POLICIES = {
+_SELECTED_ZSCORE_OBSERVED_COST_POLICIES = {
     "SELECTED_ZSCORE_OBS_75BPS_POOL",
 }
+_ROTATION_ZSCORE_OBSERVED_COST_POLICIES = {
+    "ROTATION_ZSCORE_OBS_75BPS_POOL",
+}
+_ZSCORE_OBSERVED_COST_POLICIES = (
+    _SELECTED_ZSCORE_OBSERVED_COST_POLICIES
+    | _ROTATION_ZSCORE_OBSERVED_COST_POLICIES
+)
 _RISK_GROUP_INCLUDED_OBSERVED_COST_POLICIES = {
     "RISK_GROUP_REL_OBS_75BPS_POOL",
 }
@@ -419,6 +436,10 @@ class StrategyV2PortfolioService:
                             registration.policy
                             in _ZSCORE_OBSERVED_COST_POLICIES
                         ),
+                        include_rotation=(
+                            registration.policy
+                            in _ROTATION_ZSCORE_OBSERVED_COST_POLICIES
+                        ),
                     )
                     for item in ranked
                 ],
@@ -539,6 +560,11 @@ class StrategyV2PortfolioService:
             relative_adjustment = relative_adjustments.get(
                 decision.id
             )
+            (
+                rotation_selected,
+                rotation_rank,
+                rotation_score,
+            ) = self._rotation_selection_values(selection_row)
             candidates.append(PortfolioRoutingCandidate(
                 symbol=symbol,
                 signal_decision_id=decision.id,
@@ -558,6 +584,9 @@ class StrategyV2PortfolioService:
                     if selection_row is not None
                     else None
                 ),
+                rotation_selected=rotation_selected,
+                rotation_rank=rotation_rank,
+                rotation_score=rotation_score,
                 quant_source=(
                     quant_row.source
                     if quant_row is not None
@@ -977,6 +1006,39 @@ class StrategyV2PortfolioService:
                 UniverseSelectionCandidate.symbol.in_(symbols),
             ).all()
         }
+
+    @staticmethod
+    def _rotation_selection_values(
+        row: UniverseSelectionCandidate | None,
+    ) -> tuple[bool, int | None, float | None]:
+        if row is None:
+            return False, None, None
+        try:
+            metrics = json.loads(row.metrics_json)
+        except (TypeError, ValueError):
+            return False, None, None
+        if not isinstance(metrics, dict):
+            return False, None, None
+        rotation = metrics.get("rotation")
+        if (
+            not isinstance(rotation, dict)
+            or rotation.get("algorithm_version")
+            != ROTATION_ALGORITHM_VERSION
+            or rotation.get("selected") is not True
+        ):
+            return False, None, None
+        rank = rotation.get("rank")
+        score = rotation.get("score")
+        if (
+            isinstance(rank, bool)
+            or not isinstance(rank, int)
+            or rank <= 0
+            or isinstance(score, bool)
+            or not isinstance(score, (int, float))
+            or not math.isfinite(float(score))
+        ):
+            return False, None, None
+        return True, rank, float(score)
 
     def _quant_context(
         self,
@@ -1607,10 +1669,19 @@ class StrategyV2PortfolioService:
                 "bounds": "INCLUSIVE",
             }
         elif spec.policy in _ZSCORE_OBSERVED_COST_POLICIES:
-            payload["candidate_universe"] = (
-                "SELECTED_TRUE_IN_LATEST_COMPLETED_UNIVERSE_RUN_"
-                "BEFORE_CONTEXT_CUTOFF"
-            )
+            if spec.policy in _ROTATION_ZSCORE_OBSERVED_COST_POLICIES:
+                payload["candidate_universe"] = (
+                    "ROTATION_SELECTED_TRUE_IN_LATEST_COMPLETED_"
+                    "UNIVERSE_RUN_BEFORE_CONTEXT_CUTOFF"
+                )
+                payload["rotation_algorithm_version"] = (
+                    ROTATION_ALGORITHM_VERSION
+                )
+            else:
+                payload["candidate_universe"] = (
+                    "SELECTED_TRUE_IN_LATEST_COMPLETED_UNIVERSE_RUN_"
+                    "BEFORE_CONTEXT_CUTOFF"
+                )
             payload["vwap_edge_filter"] = {
                 "price_reference": "FROZEN_SIGNAL_FEATURE_RESIDUALS",
                 "minimum_discount": (
@@ -1683,6 +1754,7 @@ def _candidate_payload(
     include_observed_cost: bool,
     include_relative_adjustment: bool,
     include_zscore: bool,
+    include_rotation: bool,
 ) -> dict[str, object]:
     payload = asdict(candidate)
     if not include_observed_cost:
@@ -1695,6 +1767,10 @@ def _candidate_payload(
     if not include_zscore:
         payload.pop("zscore_1m", None)
         payload.pop("zscore_5m", None)
+    if not include_rotation:
+        payload.pop("rotation_selected", None)
+        payload.pop("rotation_rank", None)
+        payload.pop("rotation_score", None)
     return payload
 
 
@@ -1729,6 +1805,7 @@ def _routing_policy(value: str) -> PortfolioRoutingPolicy:
         "SECTOR_LOO_OBS_75BPS_POOL",
         "SELECTED_SECTOR_LOO_OBS_75BPS_POOL",
         "SELECTED_ZSCORE_OBS_75BPS_POOL",
+        "ROTATION_ZSCORE_OBS_75BPS_POOL",
     }:
         raise ValueError(f"unsupported portfolio routing policy: {value}")
     return cast(PortfolioRoutingPolicy, value)

@@ -2813,6 +2813,13 @@ Cypress.Commands.add('stubApi', () => {
             0.79,
             { 'MSFT.US': 3, 'AAPL.US': 2 },
           ),
+          variant(
+            15,
+            'ROTATION_ZSCORE_OBS_75BPS_POOL',
+            'ZSCORE_OBS_COST_TO_75BPS',
+            0.83,
+            { 'ROST.US': 3, 'CAT.US': 2 },
+          ),
         ],
       },
     })

@@ -15,6 +15,9 @@ def _candidate(
     selected: bool = False,
     rank: int | None = None,
     selection_score: float | None = None,
+    rotation_selected: bool = False,
+    rotation_rank: int | None = None,
+    rotation_score: float | None = None,
     quant_source: str = "",
     quant_action: str = "",
     quant_score: float | None = None,
@@ -38,6 +41,9 @@ def _candidate(
         selection_selected=selected,
         selection_rank=rank,
         selection_score=selection_score,
+        rotation_selected=rotation_selected,
+        rotation_rank=rotation_rank,
+        rotation_score=rotation_score,
         quant_source=quant_source,
         quant_action=quant_action,
         quant_score=quant_score,
@@ -557,6 +563,58 @@ def test_selected_zscore_pool_ranks_standardized_two_horizon_edge() -> None:
 def test_zscore_pool_rejects_non_finite_score(zscore: float) -> None:
     with pytest.raises(ValueError):
         _candidate("AAPL.US", 1, zscore_1m=zscore)
+
+
+def test_rotation_zscore_pool_uses_only_frozen_rotation_cohort() -> None:
+    ranked = rank_portfolio_candidates(
+        [
+            _candidate(
+                "CAT.US",
+                1,
+                rotation_selected=True,
+                rotation_rank=2,
+                rotation_score=88,
+                residual_1m_bps=-48,
+                residual_5m_bps=-52,
+                zscore_1m=-2.0,
+                zscore_5m=-1.5,
+                round_trip_cost_bps=14,
+                observed_round_trip_cost_bps=20,
+                stop_distance_bps=45,
+            ),
+            _candidate(
+                "ROST.US",
+                2,
+                rotation_selected=True,
+                rotation_rank=4,
+                rotation_score=76,
+                residual_1m_bps=-55,
+                residual_5m_bps=-60,
+                zscore_1m=-2.6,
+                zscore_5m=-1.8,
+                round_trip_cost_bps=14,
+                observed_round_trip_cost_bps=20,
+                stop_distance_bps=45,
+            ),
+            _candidate(
+                "AAPL.US",
+                3,
+                selected=True,
+                rank=1,
+                residual_1m_bps=-60,
+                residual_5m_bps=-60,
+                zscore_1m=-3.0,
+                zscore_5m=-2.0,
+                round_trip_cost_bps=14,
+                observed_round_trip_cost_bps=20,
+                stop_distance_bps=45,
+            ),
+        ],
+        policy="ROTATION_ZSCORE_OBS_75BPS_POOL",
+        primary_symbol="NVDA.US",
+    )
+
+    assert [item.symbol for item in ranked] == ["ROST.US", "CAT.US"]
 
 
 def test_risk_group_relative_pool_requires_peers_and_ranks_residual_edge() -> None:

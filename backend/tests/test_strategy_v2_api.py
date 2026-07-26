@@ -260,7 +260,7 @@ class TestStrategyV2ShadowApi:
         assert body["automatic_promotion_allowed"] is False
         assert body["historical_backfill_allowed"] is False
         assert body["capital_slots"] == 1
-        assert len(body["variants"]) == 14
+        assert len(body["variants"]) == 15
         assert {
             item["policy"] for item in body["variants"]
         } == {
@@ -278,6 +278,7 @@ class TestStrategyV2ShadowApi:
             "SECTOR_LOO_OBS_75BPS_POOL",
             "SELECTED_SECTOR_LOO_OBS_75BPS_POOL",
             "SELECTED_ZSCORE_OBS_75BPS_POOL",
+            "ROTATION_ZSCORE_OBS_75BPS_POOL",
         }
         assert {
             item["edge_filter"]
@@ -360,6 +361,15 @@ class TestStrategyV2ShadowApi:
         )
         assert (
             selected_zscore["edge_filter"]
+            == "ZSCORE_OBS_COST_TO_75BPS"
+        )
+        rotation_zscore = next(
+            item
+            for item in body["variants"]
+            if item["policy"] == "ROTATION_ZSCORE_OBS_75BPS_POOL"
+        )
+        assert (
+            rotation_zscore["edge_filter"]
             == "ZSCORE_OBS_COST_TO_75BPS"
         )
 

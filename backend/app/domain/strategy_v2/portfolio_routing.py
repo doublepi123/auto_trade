@@ -20,6 +20,7 @@ PortfolioRoutingPolicy = Literal[
     "SECTOR_LOO_OBS_75BPS_POOL",
     "SELECTED_SECTOR_LOO_OBS_75BPS_POOL",
     "SELECTED_ZSCORE_OBS_75BPS_POOL",
+    "ROTATION_ZSCORE_OBS_75BPS_POOL",
 ]
 
 VWAP_EDGE_FIXED_MAX_DISCOUNT_BPS = 75.0
@@ -35,6 +36,9 @@ class PortfolioRoutingCandidate:
     selection_selected: bool = False
     selection_rank: int | None = None
     selection_score: float | None = None
+    rotation_selected: bool = False
+    rotation_rank: int | None = None
+    rotation_score: float | None = None
     quant_source: str = ""
     quant_action: str = ""
     quant_score: float | None = None
@@ -65,8 +69,11 @@ class PortfolioRoutingCandidate:
             )
         if self.selection_rank is not None and self.selection_rank <= 0:
             raise ValueError("portfolio routing selection rank must be positive")
+        if self.rotation_rank is not None and self.rotation_rank <= 0:
+            raise ValueError("portfolio routing rotation rank must be positive")
         for value in (
             self.selection_score,
+            self.rotation_score,
             self.quant_score,
             self.quant_confidence,
             self.residual_1m_bps,
@@ -495,6 +502,23 @@ def rank_portfolio_candidates(
                 -candidate.zscore_observed_cost_fixed_75bps_score,
                 -candidate.observed_cost_fixed_75bps_vwap_edge_score_bps,
                 candidate.selection_rank or 10_000,
+                candidate.symbol,
+            ),
+        ))
+    if policy == "ROTATION_ZSCORE_OBS_75BPS_POOL":
+        eligible = [
+            candidate
+            for candidate in by_symbol.values()
+            if candidate.rotation_selected
+            and candidate.rotation_rank is not None
+            and candidate.zscore_observed_cost_fixed_75bps_eligible
+        ]
+        return tuple(sorted(
+            eligible,
+            key=lambda candidate: (
+                -candidate.zscore_observed_cost_fixed_75bps_score,
+                -candidate.observed_cost_fixed_75bps_vwap_edge_score_bps,
+                candidate.rotation_rank or 10_000,
                 candidate.symbol,
             ),
         ))

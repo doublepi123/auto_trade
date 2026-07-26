@@ -116,6 +116,7 @@ describe('Strategy v2 shadow lab', () => {
       .and('contain', '细行业留一残差 · 观测成本 75bp')
       .and('contain', '核心池 · 细行业留一 · 观测成本 75bp')
       .and('contain', '核心池 · 双周期标准化偏离')
+      .and('contain', '12-1 轮动池 · 双周期标准化偏离')
       .and('contain', '固定成本 → 75bp')
       .and('contain', '观测成本 → 75bp')
       .and('contain', '风险组残差 + 观测成本 → 75bp')

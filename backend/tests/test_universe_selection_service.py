@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.core.broker import BrokerCandle, Quote
 from app.core.holiday_calendar import is_market_closed
 from app.domain.universe_selection import (
+    ROTATION_ALGORITHM_VERSION,
     IndexCandidate,
     UniverseSelectionConfig,
     risk_group_for_sector,
@@ -380,6 +381,53 @@ def test_exploration_candidates_are_diverse_hard_gate_passers() -> None:
         "INTC.US",
         "GOOGL.US",
         "UNH.US",
+    ]
+
+
+def test_exploration_candidates_reserve_frozen_rotation_observers() -> None:
+    def candidate(
+        symbol: str,
+        score: float,
+        *,
+        rotation_rank: int | None = None,
+    ) -> UniverseSelectionCandidate:
+        rotation = (
+            {}
+            if rotation_rank is None
+            else {
+                "algorithm_version": ROTATION_ALGORITHM_VERSION,
+                "selected": True,
+                "rank": rotation_rank,
+                "score": 100 - rotation_rank,
+            }
+        )
+        return UniverseSelectionCandidate(
+            run_id=1,
+            symbol=symbol,
+            market="US",
+            alias=symbol,
+            sector="Consumer Discretionary",
+            memberships_json='["NASDAQ_100"]',
+            selected=False,
+            score=score,
+            metrics_json=json.dumps({"rotation": rotation}),
+            exclusion_reasons_json='["SECTOR_CAP"]',
+            created_at=_NOW,
+        )
+
+    selected = select_exploration_candidates(
+        [
+            candidate("HIGH.US", 99),
+            candidate("ROST.US", 20, rotation_rank=2),
+            candidate("MRK.US", 10, rotation_rank=1),
+        ],
+        max_symbols=2,
+        max_per_sector=1,
+    )
+
+    assert [item.symbol for item in selected] == [
+        "MRK.US",
+        "ROST.US",
     ]
 
 

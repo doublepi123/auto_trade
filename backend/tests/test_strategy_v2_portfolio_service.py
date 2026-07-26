@@ -8,6 +8,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
+from app.domain.universe_selection import ROTATION_ALGORITHM_VERSION
 from app.models import (
     Base,
     StrategyV2PortfolioObservation,
@@ -103,6 +104,14 @@ class TestStrategyV2PortfolioService:
                 selected=True,
                 rank=1,
                 score=75,
+                metrics_json=json.dumps({
+                    "rotation": {
+                        "algorithm_version": ROTATION_ALGORITHM_VERSION,
+                        "selected": True,
+                        "rank": 2,
+                        "score": 90,
+                    }
+                }),
             ),
             UniverseSelectionCandidate(
                 run_id=run.id,
@@ -125,6 +134,14 @@ class TestStrategyV2PortfolioService:
                 sector="Technology Hardware",
                 selected=False,
                 score=74,
+                metrics_json=json.dumps({
+                    "rotation": {
+                        "algorithm_version": ROTATION_ALGORITHM_VERSION,
+                        "selected": True,
+                        "rank": 1,
+                        "score": 100,
+                    }
+                }),
             ),
             UniverseSelectionCandidate(
                 run_id=run.id,
@@ -303,7 +320,7 @@ class TestStrategyV2PortfolioService:
             registrations = db.query(
                 StrategyV2PortfolioRegistration
             ).all()
-            assert len(registrations) == 14
+            assert len(registrations) == 15
             assert {
                 row.eligible_after.replace(tzinfo=timezone.utc)
                 for row in registrations
@@ -338,6 +355,11 @@ class TestStrategyV2PortfolioService:
                 for row in registrations
                 if row.policy == "SELECTED_ZSCORE_OBS_75BPS_POOL"
             )
+            rotation_zscore = next(
+                row
+                for row in registrations
+                if row.policy == "ROTATION_ZSCORE_OBS_75BPS_POOL"
+            )
             assert risk_group_v1.evaluator_digest == (
                 "9fa13dbedfbeb508e4b3ecca23d1a63c7"
                 "fe6c559dc71356922dda4c11528806e"
@@ -357,6 +379,11 @@ class TestStrategyV2PortfolioService:
             assert selected_zscore.evaluator_digest == (
                 "4935c83dc7d73e9a1335fd9f8b6205c3"
                 "565790ba517d1fd0db53c4a8fbe32157"
+            )
+            assert len(rotation_zscore.evaluator_digest) == 64
+            assert (
+                rotation_zscore.evaluator_digest
+                != selected_zscore.evaluator_digest
             )
             assert db.query(
                 StrategyV2PortfolioObservation
@@ -387,7 +414,7 @@ class TestStrategyV2PortfolioService:
             )
             report = service.get_report("NVDA.US")
 
-            assert len(report.variants) == 14
+            assert len(report.variants) == 15
             assert sum(
                 row.algorithm_version.endswith("-v2")
                 for row in report.variants
@@ -574,6 +601,7 @@ class TestStrategyV2PortfolioService:
                 "SECTOR_LOO_OBS_75BPS_POOL": "",
                 "SELECTED_SECTOR_LOO_OBS_75BPS_POOL": "",
                 "SELECTED_ZSCORE_OBS_75BPS_POOL": "",
+                "ROTATION_ZSCORE_OBS_75BPS_POOL": "",
             }
 
             self._signal(
@@ -590,7 +618,7 @@ class TestStrategyV2PortfolioService:
                 StrategyV2PortfolioObservation.signal_at
                 == _FIRST_SIGNAL + timedelta(minutes=2)
             ).all()
-            assert len(overlap_rows) == 14
+            assert len(overlap_rows) == 15
             registrations_by_id = {
                 row.id: row.policy
                 for row in db.query(
@@ -618,6 +646,7 @@ class TestStrategyV2PortfolioService:
                     "NO_ELIGIBLE"
                 ),
                 "SELECTED_ZSCORE_OBS_75BPS_POOL": "NO_ELIGIBLE",
+                "ROTATION_ZSCORE_OBS_75BPS_POOL": "NO_ELIGIBLE",
             }
 
             exit_at = _FIRST_SIGNAL + timedelta(minutes=5)
@@ -914,6 +943,7 @@ class TestStrategyV2PortfolioService:
                 "SECTOR_LOO_OBS_75BPS_POOL",
                 "SELECTED_SECTOR_LOO_OBS_75BPS_POOL",
                 "SELECTED_ZSCORE_OBS_75BPS_POOL",
+                "ROTATION_ZSCORE_OBS_75BPS_POOL",
             ):
                 observation = db.query(
                     StrategyV2PortfolioObservation
@@ -1129,6 +1159,31 @@ class TestStrategyV2PortfolioService:
             assert candidates[0]["zscore_1m"] == -2.4
             assert candidates[0]["zscore_5m"] == -1.6
             assert candidates[0]["observed_round_trip_cost_bps"] == 20
+            assert "rotation_selected" not in candidates[0]
+
+            rotation_registration = db.query(
+                StrategyV2PortfolioRegistration
+            ).filter(
+                StrategyV2PortfolioRegistration.policy
+                == "ROTATION_ZSCORE_OBS_75BPS_POOL"
+            ).one()
+            rotation_observation = db.query(
+                StrategyV2PortfolioObservation
+            ).filter(
+                StrategyV2PortfolioObservation.registration_id
+                == rotation_registration.id
+            ).one()
+            assert rotation_observation.status == "PENDING_ENTRY"
+            assert rotation_observation.selected_symbol == "MSFT.US"
+            rotation_candidates = json.loads(
+                rotation_observation.candidates_json
+            )
+            assert [row["symbol"] for row in rotation_candidates] == [
+                "MSFT.US"
+            ]
+            assert rotation_candidates[0]["rotation_selected"] is True
+            assert rotation_candidates[0]["rotation_rank"] == 2
+            assert rotation_candidates[0]["rotation_score"] == 90
 
             variant = next(
                 row
@@ -1136,6 +1191,15 @@ class TestStrategyV2PortfolioService:
                 if row.policy == "SELECTED_ZSCORE_OBS_75BPS_POOL"
             )
             assert variant.edge_filter == "ZSCORE_OBS_COST_TO_75BPS"
+            rotation_variant = next(
+                row
+                for row in service.get_report("NVDA.US").variants
+                if row.policy == "ROTATION_ZSCORE_OBS_75BPS_POOL"
+            )
+            assert (
+                rotation_variant.edge_filter
+                == "ZSCORE_OBS_COST_TO_75BPS"
+            )
 
     def test_risk_group_routes_use_causal_inclusive_and_leave_one_out_medians(
         self,

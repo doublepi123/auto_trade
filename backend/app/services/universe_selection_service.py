@@ -213,6 +213,37 @@ def _candidate_avg_dollar_volume(
     return value
 
 
+def _candidate_rotation_priority(
+    item: UniverseSelectionCandidate,
+) -> tuple[int, float] | None:
+    try:
+        decoded = json.loads(item.metrics_json)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(decoded, dict):
+        return None
+    rotation = decoded.get("rotation")
+    if (
+        not isinstance(rotation, dict)
+        or rotation.get("algorithm_version")
+        != ROTATION_ALGORITHM_VERSION
+        or rotation.get("selected") is not True
+    ):
+        return None
+    rank = rotation.get("rank")
+    score = rotation.get("score")
+    if (
+        isinstance(rank, bool)
+        or not isinstance(rank, int)
+        or rank <= 0
+        or isinstance(score, bool)
+        or not isinstance(score, (int, float))
+        or not math.isfinite(float(score))
+    ):
+        return None
+    return rank, float(score)
+
+
 def select_exploration_candidates(
     items: Sequence[UniverseSelectionCandidate],
     *,
@@ -399,6 +430,40 @@ def select_exploration_candidates(
         group_counts[risk_group] = (
             group_counts.get(risk_group, 0) + 1
         )
+        sector = item.sector.strip()
+        if sector:
+            sector_counts[sector] = sector_counts.get(sector, 0) + 1
+        if len(selected) >= max_symbols:
+            return selected
+
+    # Preserve causal intraday coverage for the frozen 12-1 rotation cohort.
+    # These remain read-only observers and still consume the exploration
+    # budget; they do not relax the formal universe concentration limits.
+    rotation_candidates = [
+        (priority, item)
+        for item in eligible
+        if (
+            (priority := _candidate_rotation_priority(item))
+            is not None
+            and item.symbol.strip().upper()
+            not in observed_symbols
+            and item.symbol.strip().upper()
+            not in selected_symbols
+        )
+    ]
+    rotation_candidates.sort(
+        key=lambda pair: (
+            pair[0][0],
+            -pair[0][1],
+            pair[1].symbol,
+        )
+    )
+    for _, item in rotation_candidates:
+        normalized_symbol = item.symbol.strip().upper()
+        selected.append(item)
+        selected_symbols.add(normalized_symbol)
+        risk_group = risk_group_for_sector(item.sector)
+        group_counts[risk_group] = group_counts.get(risk_group, 0) + 1
         sector = item.sector.strip()
         if sector:
             sector_counts[sector] = sector_counts.get(sector, 0) + 1

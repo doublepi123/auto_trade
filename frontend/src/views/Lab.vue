@@ -2645,6 +2645,7 @@ const portfolioRoutingPolicyLabels: Record<
   SECTOR_LOO_OBS_75BPS_POOL: '细行业留一残差 · 观测成本 75bp',
   SELECTED_SECTOR_LOO_OBS_75BPS_POOL: '核心池 · 细行业留一 · 观测成本 75bp',
   SELECTED_ZSCORE_OBS_75BPS_POOL: '核心池 · 双周期标准化偏离',
+  ROTATION_ZSCORE_OBS_75BPS_POOL: '12-1 轮动池 · 双周期标准化偏离',
 }
 
 function portfolioRoutingPolicyLabel(
