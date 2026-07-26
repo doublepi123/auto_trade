@@ -11,6 +11,7 @@ from app.cli.opening_extension_research import (
     _baseline_session_dates,
     _build_sessions,
     _fetch_symbol_bars,
+    _frozen_selection_grid,
     _grid_summary,
     _load_cache,
     _parse_integer_grid,
@@ -340,6 +341,27 @@ def test_grid_selection_never_uses_holdout_performance() -> None:
     assert selected.grid.signal_minutes == 2
     assert status == "REJECTED"
     assert "HOLDOUT_DELTA_NOT_POSITIVE" in blockers
+
+
+def test_formal_selection_is_frozen_to_production_grid() -> None:
+    sensitivity = _grid(
+        2,
+        discovery_exit=105.0,
+        holdout_exit=105.0,
+    )
+    production = GridEvaluation(
+        signal_minutes=3,
+        holding_minutes=120,
+        report=_grid(
+            3,
+            discovery_exit=100.5,
+            holdout_exit=100.5,
+        ).report,
+    )
+
+    assert _frozen_selection_grid((sensitivity, production)) is production
+    with pytest.raises(ValueError, match="frozen 3m/120m"):
+        _frozen_selection_grid((sensitivity,))
 
 
 def test_selected_status_requires_robust_holdout() -> None:

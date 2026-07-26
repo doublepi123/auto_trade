@@ -32,12 +32,14 @@ from app.domain.opening_momentum_extension import (
 from app.models import StrategyV2ShadowConfig
 
 
-OPENING_EXTENSION_CLI_VERSION = "opening-extension-research-cli-v1"
+OPENING_EXTENSION_CLI_VERSION = "opening-extension-research-cli-v2"
 _CACHE_VERSION = "opening-extension-minute-cache-v2"
 _BAR_DURATION = timedelta(minutes=1)
 _DEFAULT_SIGNAL_MINUTES = (2, 3, 5, 10)
 _DEFAULT_HOLDING_MINUTES = (30, 60, 90, 120)
 _DEFAULT_COST_STRESS_BPS = (14.0, 20.0, 30.0)
+_FROZEN_SELECTION_SIGNAL_MINUTES = 3
+_FROZEN_SELECTION_HOLDING_MINUTES = 120
 
 
 class HistoricalCandleProvider(Protocol):
@@ -445,6 +447,26 @@ def _select_discovery_winner(
     )
 
 
+def _frozen_selection_grid(
+    grids: Sequence[GridEvaluation],
+) -> GridEvaluation:
+    matches = tuple(
+        value
+        for value in grids
+        if (
+            value.signal_minutes == _FROZEN_SELECTION_SIGNAL_MINUTES
+            and value.holding_minutes
+            == _FROZEN_SELECTION_HOLDING_MINUTES
+        )
+    )
+    if len(matches) != 1:
+        raise ValueError(
+            "research grid must contain exactly one frozen 3m/120m "
+            "production configuration"
+        )
+    return matches[0]
+
+
 def _selected_status(
     selection: DiscoverySelection,
 ) -> tuple[str, tuple[str, ...]]:
@@ -524,7 +546,7 @@ def _selected_payload(
         "symbol": selection.candidate.symbol,
         "signal_minutes": selection.grid.signal_minutes,
         "holding_minutes": selection.grid.holding_minutes,
-        "selected_using": "DISCOVERY_ONLY",
+        "selected_using": "DISCOVERY_ONLY_FROZEN_PRODUCTION_GRID",
         "discovery": _slice_payload(selection.discovery),
         "holdout": _slice_payload(_slice(selection.candidate, "HOLDOUT")),
         "cost_stress": [
@@ -649,6 +671,14 @@ def main() -> int:
             minimum=1,
             maximum=120,
         )
+        if (
+            _FROZEN_SELECTION_SIGNAL_MINUTES not in signal_grid
+            or _FROZEN_SELECTION_HOLDING_MINUTES not in holding_grid
+        ):
+            raise ValueError(
+                "parameter grids must include the frozen 3m/120m "
+                "production configuration"
+            )
         baseline_symbols = (
             _parse_symbols(
                 args.baseline_symbols,
@@ -773,7 +803,11 @@ def main() -> int:
                 report=report,
             ))
 
-    selection = _select_discovery_winner(grids)
+    try:
+        selection_grid = _frozen_selection_grid(grids)
+    except ValueError as exc:
+        parser.error(str(exc))
+    selection = _select_discovery_winner((selection_grid,))
     status, blockers = _selected_status(selection)
     generated = datetime.now(timezone.utc)
     generated_at = generated.isoformat()
@@ -815,6 +849,11 @@ def main() -> int:
                 _DEFAULT_COST_STRESS_BPS
             ),
             "selection_uses_holdout": False,
+            "selection_grid": {
+                "signal_minutes": _FROZEN_SELECTION_SIGNAL_MINUTES,
+                "holding_minutes": _FROZEN_SELECTION_HOLDING_MINUTES,
+            },
+            "sensitivity_grid_selection_allowed": False,
             "grid_search_bias": True,
             "survivorship_bias": "CURRENT_BASELINE_SYMBOLS",
         },
