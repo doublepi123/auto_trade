@@ -3327,6 +3327,69 @@ class TestAppRunner:
         assert events[-1]["payload"]["cost_authority"] == "DURABLE_TRACKED_ENTRY"
         assert len(events) == 1
 
+    def test_reconcile_infers_legacy_side_without_overwriting_fill_cost(self) -> None:
+        from app.models import TrackedEntry
+
+        opened_at = datetime.now(timezone.utc) - timedelta(minutes=5)
+        runner = AppRunner()
+        runner.engine.params = StrategyParams(symbol="AAPL.US", market="US")
+        runner._trade_svc.load_tracked_entries({
+            "AAPL.US": (
+                Decimal("10"),
+                Decimal("1500"),
+                "",
+                opened_at,
+            )
+        })
+
+        class Broker:
+            def get_positions(self) -> list[Position]:
+                return [
+                    Position(
+                        "AAPL.US",
+                        "LONG",
+                        Decimal("10"),
+                        Decimal("160"),
+                    )
+                ]
+
+        runner.broker = Broker()
+        events: list[dict[str, Any]] = []
+        with database.SessionLocal() as db:
+            db.query(TrackedEntry).filter(
+                TrackedEntry.symbol == "AAPL.US"
+            ).delete()
+            db.add(TrackedEntry(
+                symbol="AAPL.US",
+                side="",
+                quantity=10,
+                cost=1500,
+                opened_at=opened_at,
+            ))
+            db.commit()
+            with patch(
+                "app.runner.record_trade_event",
+                side_effect=lambda _db, **kwargs: events.append(kwargs),
+            ):
+                runner._reconcile_tracked_entries_with_broker(db)
+            row = db.query(TrackedEntry).filter(
+                TrackedEntry.symbol == "AAPL.US"
+            ).one()
+            assert row.side == "LONG"
+            assert row.quantity == 10
+            assert row.cost == 1500
+
+        tracked = runner._trade_svc.tracked_position("AAPL.US")
+        assert tracked is not None
+        assert tracked.side == "LONG"
+        assert tracked.avg_price == Decimal("150.0")
+        assert len(events) == 1
+        payload = events[0]["payload"]
+        assert payload["legacy_side_inferred"] is True
+        assert payload["repaired"] is True
+        assert payload["preserved"] is True
+        assert payload["cost_authority"] == "DURABLE_TRACKED_ENTRY"
+
     def test_reconcile_uses_broker_average_when_inventory_grows(self) -> None:
         from app.models import TrackedEntry
 

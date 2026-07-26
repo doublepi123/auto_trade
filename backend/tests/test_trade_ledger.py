@@ -590,6 +590,82 @@ class TestPairRoundTrips:
         assert issue.unmatched_quantity == 0
         db.close()
 
+    def test_tracked_open_window_discards_stale_pre_position_lot(self) -> None:
+        self._cleanup()
+        day = date(2026, 1, 1)
+        db = self._get_db()
+        db.add_all([
+            OrderRecord(
+                broker_order_id="stale-buy-before-tracked-window",
+                symbol="AAPL.US",
+                side="BUY",
+                quantity=4,
+                price=50,
+                executed_quantity=4,
+                executed_price=50,
+                actual_fee=0,
+                status="FILLED",
+                filled_at=self._dt(day, 8),
+            ),
+            OrderRecord(
+                broker_order_id="tracked-window-buy-one",
+                symbol="AAPL.US",
+                side="BUY",
+                quantity=4,
+                price=100,
+                executed_quantity=4,
+                executed_price=100,
+                actual_fee=0,
+                status="FILLED",
+                filled_at=self._dt(day, 9),
+            ),
+            OrderRecord(
+                broker_order_id="tracked-window-buy-two",
+                symbol="AAPL.US",
+                side="BUY",
+                quantity=6,
+                price=110,
+                executed_quantity=6,
+                executed_price=110,
+                actual_fee=0,
+                status="FILLED",
+                filled_at=self._dt(day, 10),
+            ),
+            OrderRecord(
+                broker_order_id="tracked-window-sell",
+                symbol="AAPL.US",
+                side="SELL",
+                quantity=10,
+                price=120,
+                executed_quantity=10,
+                executed_price=120,
+                actual_fee=0,
+                status="FILLED",
+                filled_at=self._dt(day, 11),
+                cost_basis_price=106,
+                cost_basis_quantity=10,
+                cost_basis_opened_at=self._dt(day, 9),
+                position_quantity_before=10,
+                gross_pnl=140,
+                pnl_fee=0,
+                net_pnl=140,
+                pnl_source="TRACKED_ENTRY",
+            ),
+        ])
+        db.commit()
+
+        replay = DailyPnlService(db).pair_round_trips_with_issues(
+            include_excursions=False,
+        )
+
+        assert replay.issues == []
+        assert len(replay.trades) == 1
+        trade = replay.trades[0]
+        assert trade.entry_at == self._dt(day, 9)
+        assert trade.entry_price == approx(106)
+        assert trade.gross_pnl == approx(140)
+        db.close()
+
     def test_malformed_authoritative_reset_is_excluded_from_statistics(
         self,
     ) -> None:

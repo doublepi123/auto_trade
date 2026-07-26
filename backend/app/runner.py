@@ -5698,9 +5698,20 @@ class AppRunner:
             broker_avg = broker_cost / broker_qty if broker_qty > 0 and all_broker_prices_known else Decimal("0")
             row = db.query(TrackedEntry).filter(TrackedEntry.symbol == symbol).first()
 
+            legacy_side_inferred = bool(
+                tracked is not None
+                and not tracked_side
+                and broker_side in {"LONG", "SHORT"}
+                and broker_qty > 0
+                and broker_qty == tracked_qty
+            )
+            tracked_side_matches = bool(
+                tracked_side == broker_side or legacy_side_inferred
+            )
+
             quantity_grew_without_cost = bool(
                 tracked is not None
-                and tracked_side == broker_side
+                and tracked_side_matches
                 and broker_qty > tracked_qty
                 and broker_avg <= 0
             )
@@ -5740,7 +5751,11 @@ class AppRunner:
                 continue
 
             quantity_drift = tracked_qty != broker_qty
-            side_drift = bool(broker_side and tracked_side and broker_side != tracked_side)
+            side_drift = bool(
+                tracked is not None
+                and broker_side
+                and broker_side != tracked_side
+            )
             avg_price_drift = bool(
                 tracked is not None
                 and broker_avg > 0
@@ -5787,7 +5802,7 @@ class AppRunner:
             else:
                 recovery_price = Decimal("0")
                 recovered_opened_at: datetime | None = None
-                if tracked is None or tracked_side != broker_side or broker_avg <= 0:
+                if tracked is None or not tracked_side_matches or broker_avg <= 0:
                     recovery_price, recovered_opened_at = self._recovery_entry_fill(
                         db,
                         symbol,
@@ -5797,7 +5812,7 @@ class AppRunner:
                 recovery_engine = runtime[2] if runtime is not None else self.engine
                 tracked_avg_is_durable = bool(
                     tracked is not None
-                    and tracked_side == broker_side
+                    and tracked_side_matches
                     and tracked.avg_price > 0
                     and broker_qty <= tracked_qty
                 )
@@ -5808,7 +5823,7 @@ class AppRunner:
                     desired_avg = tracked.avg_price
                 elif broker_avg > 0:
                     desired_avg = broker_avg
-                elif tracked is not None and tracked_side == broker_side and tracked.avg_price > 0:
+                elif tracked is not None and tracked_side_matches and tracked.avg_price > 0:
                     desired_avg = tracked.avg_price
                 else:
                     desired_avg = recovery_price
@@ -5836,7 +5851,7 @@ class AppRunner:
 
                 opened_at = (
                     tracked.opened_at
-                    if tracked is not None and tracked_side == broker_side and tracked.opened_at is not None
+                    if tracked is not None and tracked_side_matches and tracked.opened_at is not None
                     else (
                         recovered_opened_at
                         or datetime.now(timezone.utc)
@@ -5871,6 +5886,7 @@ class AppRunner:
                     "tracked_quantity": float(tracked_qty),
                     "tracked_avg_price": float(tracked_cost / tracked_qty) if tracked_qty > 0 else 0.0,
                     "tracked_side": tracked_side,
+                    "legacy_side_inferred": legacy_side_inferred,
                     "broker_quantity": float(broker_qty),
                     "broker_avg_price": float(broker_avg),
                     "broker_sides": sorted(sides),

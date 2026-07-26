@@ -630,6 +630,11 @@ class DailyPnlService:
         authoritative_inventory = (
             DailyPnlService._has_authoritative_inventory_snapshot(exit_fill)
         )
+        if authoritative_inventory:
+            DailyPnlService._rebase_lot_queue_from_tracked_window(
+                lot_queue,
+                exit_fill,
+            )
         represented_quantity = sum(
             (
                 lot.quantity
@@ -1337,6 +1342,44 @@ class DailyPnlService:
             start=_ZERO,
         )
         return represented_cost / represented_quantity
+
+    @staticmethod
+    def _rebase_lot_queue_from_tracked_window(
+        lot_queue: list[_Lot],
+        fill: _Fill,
+    ) -> None:
+        """Drop stale pre-position lots when the tracked window is complete.
+
+        A durable tracked entry records when the current broker position was
+        opened. If fills at or after that exact timestamp independently cover
+        the full declared inventory, earlier FIFO lots belong to stale local
+        state and must not contaminate the current position's replay.
+        """
+        opened_at = fill.cost_basis_opened_at
+        position_quantity = fill.position_quantity_before
+        if (
+            fill.pnl_source != "TRACKED_ENTRY"
+            or opened_at is None
+            or position_quantity is None
+            or position_quantity <= 0
+        ):
+            return
+        tracked_lots = [
+            lot
+            for lot in lot_queue
+            if lot.quantity > 0 and lot.filled_at >= opened_at
+        ]
+        if not tracked_lots:
+            return
+        if min(lot.filled_at for lot in tracked_lots) != opened_at:
+            return
+        tracked_quantity = sum(
+            (lot.quantity for lot in tracked_lots),
+            start=_ZERO,
+        )
+        if tracked_quantity != position_quantity:
+            return
+        lot_queue[:] = tracked_lots
 
     @staticmethod
     def _cost_basis_conflicts(fill: _Fill, replay_cost_basis: Decimal) -> bool:
