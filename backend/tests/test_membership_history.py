@@ -67,8 +67,8 @@ def test_membership_history_reports_partial_catalog_coverage() -> None:
         INDEX_CANDIDATE_CATALOG
     )
 
-    assert coverage.catalog_size == 109
-    assert coverage.authoritative_symbols == 107
+    assert coverage.catalog_size == 123
+    assert coverage.authoritative_symbols == 121
     assert coverage.snapshot_only_symbols == (
         "HONA.US",
         "SPCX.US",
@@ -89,6 +89,20 @@ def test_expanded_candidates_are_active_at_catalog_snapshot() -> None:
         "WDAY.US",
         "LITE.US",
         "SNDK.US",
+        "ALNY.US",
+        "CPRT.US",
+        "CTAS.US",
+        "DXCM.US",
+        "FAST.US",
+        "FER.US",
+        "IDXX.US",
+        "KDP.US",
+        "KHC.US",
+        "ODFL.US",
+        "PAYX.US",
+        "PCAR.US",
+        "ROP.US",
+        "TRI.US",
     ):
         assert INDEX_MEMBERSHIP_HISTORY.is_active(
             _candidate(symbol),

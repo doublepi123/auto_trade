@@ -5,7 +5,7 @@ from typing import Literal
 
 
 CATALOG_SOURCE_VERSION = (
-    "nasdaq-100-2026-07-24_djia-2026-06-29_expanded-v7"
+    "nasdaq-100-2026-07-24_djia-2026-06-29_full-company-v8"
 )
 
 _RISK_GROUP_BY_SECTOR = {
@@ -39,12 +39,13 @@ class IndexCandidate:
 # hard-coded portfolio. Daily market-data gates decide which names enter the
 # observed pool. Membership was verified against Nasdaq's NDX weighting page
 # dated 2026-07-24 and S&P DJI's 2026-06-23 announcement for the DJIA changes
-# effective 2026-06-29. The DJIA portion is complete; the Nasdaq-100 portion
-# favors liquid names across sectors so daily screening remains bounded. The
-# v6 additions passed the same liquidity, volatility, and cost-opportunity
-# gates as the incumbent catalog before admission. V7 adds the liquid LITE
-# and SNDK research candidates from the verified Nasdaq snapshot; daily gates
-# keep them out of the selected pool while their volatility remains excessive.
+# effective 2026-06-29. The DJIA portion is complete. The Nasdaq-100 portion
+# includes one security per current constituent company so daily market-data
+# gates, rather than a static liquidity snapshot, decide which names remain
+# observable. Alphabet is represented by GOOGL only to prevent the two share
+# classes from consuming separate sector or observation capacity. V8 closes
+# the remaining company-level gaps in the verified Nasdaq snapshot; the daily
+# liquidity, volatility, and cost-opportunity gates still fail closed.
 INDEX_CANDIDATE_CATALOG: tuple[IndexCandidate, ...] = (
     IndexCandidate("NVDA.US", "NVIDIA", "Semiconductors", ("NASDAQ_100", "DJIA")),
     IndexCandidate("AAPL.US", "Apple", "Technology Hardware", ("NASDAQ_100", "DJIA")),
@@ -321,6 +322,55 @@ INDEX_CANDIDATE_CATALOG: tuple[IndexCandidate, ...] = (
     ),
     IndexCandidate("WDAY.US", "Workday", "Software", ("NASDAQ_100",)),
     IndexCandidate("XEL.US", "Xcel Energy", "Utilities", ("NASDAQ_100",)),
+    IndexCandidate(
+        "ALNY.US",
+        "Alnylam Pharmaceuticals",
+        "Healthcare",
+        ("NASDAQ_100",),
+    ),
+    IndexCandidate("CPRT.US", "Copart", "Industrials", ("NASDAQ_100",)),
+    IndexCandidate("CTAS.US", "Cintas", "Industrials", ("NASDAQ_100",)),
+    IndexCandidate("DXCM.US", "DexCom", "Healthcare", ("NASDAQ_100",)),
+    IndexCandidate("FAST.US", "Fastenal", "Industrials", ("NASDAQ_100",)),
+    IndexCandidate("FER.US", "Ferrovial", "Industrials", ("NASDAQ_100",)),
+    IndexCandidate(
+        "IDXX.US",
+        "IDEXX Laboratories",
+        "Healthcare",
+        ("NASDAQ_100",),
+    ),
+    IndexCandidate(
+        "KDP.US",
+        "Keurig Dr Pepper",
+        "Consumer Staples",
+        ("NASDAQ_100",),
+    ),
+    IndexCandidate(
+        "KHC.US",
+        "Kraft Heinz",
+        "Consumer Staples",
+        ("NASDAQ_100",),
+    ),
+    IndexCandidate(
+        "ODFL.US",
+        "Old Dominion Freight Line",
+        "Industrials",
+        ("NASDAQ_100",),
+    ),
+    IndexCandidate("PAYX.US", "Paychex", "Industrials", ("NASDAQ_100",)),
+    IndexCandidate("PCAR.US", "PACCAR", "Industrials", ("NASDAQ_100",)),
+    IndexCandidate(
+        "ROP.US",
+        "Roper Technologies",
+        "Industrials",
+        ("NASDAQ_100",),
+    ),
+    IndexCandidate(
+        "TRI.US",
+        "Thomson Reuters",
+        "Industrials",
+        ("NASDAQ_100",),
+    ),
     IndexCandidate("AXP.US", "American Express", "Financials", ("DJIA",)),
     IndexCandidate("CVX.US", "Chevron", "Energy", ("DJIA",)),
     IndexCandidate(

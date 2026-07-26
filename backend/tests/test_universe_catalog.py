@@ -13,9 +13,9 @@ def test_catalog_tracks_current_verified_index_snapshot() -> None:
     }
 
     assert len(by_symbol) == len(INDEX_CANDIDATE_CATALOG)
-    assert len(by_symbol) == 109
+    assert len(by_symbol) == 123
     assert CATALOG_SOURCE_VERSION == (
-        "nasdaq-100-2026-07-24_djia-2026-06-29_expanded-v7"
+        "nasdaq-100-2026-07-24_djia-2026-06-29_full-company-v8"
     )
     assert {
         "SPCX.US",
@@ -59,11 +59,25 @@ def test_catalog_tracks_current_verified_index_snapshot() -> None:
         "WDAY.US",
         "LITE.US",
         "SNDK.US",
+        "ALNY.US",
+        "CPRT.US",
+        "CTAS.US",
+        "DXCM.US",
+        "FAST.US",
+        "FER.US",
+        "IDXX.US",
+        "KDP.US",
+        "KHC.US",
+        "ODFL.US",
+        "PAYX.US",
+        "PCAR.US",
+        "ROP.US",
+        "TRI.US",
     } <= by_symbol.keys()
     assert sum(
         "NASDAQ_100" in candidate.memberships
         for candidate in by_symbol.values()
-    ) == 88
+    ) == 102
     assert sum(
         "DJIA" in candidate.memberships
         for candidate in by_symbol.values()
@@ -84,6 +98,7 @@ def test_catalog_tracks_current_verified_index_snapshot() -> None:
         by_symbol["WMT.US"].memberships
     )
     assert "VZ.US" not in by_symbol
+    assert "GOOG.US" not in by_symbol
 
 
 def test_catalog_collapses_technology_industries_into_one_risk_group() -> None:
