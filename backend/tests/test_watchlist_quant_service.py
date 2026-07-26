@@ -17,6 +17,7 @@ from app.domain.universe_selection import ROTATION_ALGORITHM_VERSION
 from app.models import (
     Base,
     StrategyConfig,
+    StrategyV2ShadowConfig,
     UniverseSelectionCandidate,
     UniverseSelectionRun,
     WatchlistItem,
@@ -353,6 +354,50 @@ def test_quant_observation_plan_prioritizes_target_then_selected_rank() -> None:
             "ROST.US",
             "MRK.US",
         )
+    finally:
+        db.close()
+
+
+def test_quant_observation_plan_prioritizes_enabled_manual_observers() -> None:
+    db = _db()
+    try:
+        db.add_all(
+            [
+                WatchlistItem(symbol="AAPL.US", market="US"),
+                WatchlistItem(symbol="MNST.US", market="US"),
+                WatchlistItem(symbol="MPWR.US", market="US"),
+                StrategyV2ShadowConfig(
+                    symbol="MNST.US",
+                    enabled=True,
+                    universe_managed=False,
+                ),
+                StrategyV2ShadowConfig(
+                    symbol="MPWR.US",
+                    enabled=False,
+                    universe_managed=False,
+                ),
+                StrategyV2ShadowConfig(
+                    symbol="AAPL.US",
+                    enabled=True,
+                    universe_managed=True,
+                ),
+                StrategyV2ShadowConfig(
+                    symbol="TER.US",
+                    enabled=True,
+                    universe_managed=False,
+                ),
+            ]
+        )
+        db.commit()
+
+        plan = build_quant_observation_plan(db)
+
+        assert [item.symbol for item in plan.items] == [
+            "MNST.US",
+            "AAPL.US",
+            "MPWR.US",
+        ]
+        assert plan.priority_symbols == ("MNST.US",)
     finally:
         db.close()
 

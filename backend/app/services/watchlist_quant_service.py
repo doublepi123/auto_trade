@@ -22,6 +22,7 @@ from app.domain.universe_selection import (
 )
 from app.models import (
     StrategyConfig,
+    StrategyV2ShadowConfig,
     UniverseSelectionCandidate,
     UniverseSelectionRun,
     WatchlistItem,
@@ -123,7 +124,7 @@ class QuantObservationPlan:
 def build_quant_observation_plan(
     db: Session,
 ) -> QuantObservationPlan:
-    """Prioritize live, formal, and frozen-rotation routing candidates."""
+    """Prioritize live, formal, rotation, and manual challenger candidates."""
     items = db.query(WatchlistItem).order_by(WatchlistItem.id.asc()).all()
     strategy = (
         db.query(StrategyConfig)
@@ -184,6 +185,18 @@ def build_quant_observation_plan(
             pair[1].symbol,
         )
     )
+    manual_observer_symbols = [
+        row.symbol
+        for row in (
+            db.query(StrategyV2ShadowConfig)
+            .filter(
+                StrategyV2ShadowConfig.enabled.is_(True),
+                StrategyV2ShadowConfig.universe_managed.is_(False),
+            )
+            .order_by(StrategyV2ShadowConfig.symbol.asc())
+            .all()
+        )
+    ]
 
     by_symbol = {
         item.symbol.strip().upper(): item
@@ -228,6 +241,8 @@ def build_quant_observation_plan(
         append_symbol(candidate.symbol, priority=True)
     for _, candidate in rotation_candidates:
         append_symbol(candidate.symbol, priority=True)
+    for symbol in manual_observer_symbols:
+        append_symbol(symbol, priority=True)
     for item in items:
         append_symbol(item.symbol, priority=False)
 
