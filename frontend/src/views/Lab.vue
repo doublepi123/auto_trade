@@ -448,6 +448,9 @@
                   <el-table-column label="市场门槛" min-width="100">
                     <template #default="{ row }">
                       {{ formatBps(row.minimum_market_return_bps) }}
+                      <template v-if="row.maximum_market_return_bps != null">
+                        至 {{ formatBps(row.maximum_market_return_bps) }}
+                      </template>
                     </template>
                   </el-table-column>
                   <el-table-column label="候选 / 超额" min-width="130">
@@ -2184,6 +2187,7 @@ function openingMomentumVariantLabel(
   if (variant === 'EARLY_BROAD_CHALLENGER') return '3 分钟宽池'
   if (variant === 'EXECUTION_BROAD_CHALLENGER') return '3 分钟执行基线'
   if (variant === 'EXECUTION_PATH_EFFICIENCY_CHALLENGER') return '执行 + 路径效率'
+  if (variant === 'WEAK_BREADTH_PATH_CHALLENGER') return '弱广度 + 路径效率'
   const execution = /^EXECUTION_(.+)_CHALLENGER$/.exec(variant)
   if (execution) return `执行 + ${execution[1]}`
   const extension = /^EARLY_(.+)_CHALLENGER$/.exec(variant)
@@ -2194,6 +2198,7 @@ function openingMomentumVariantTagType(
 ): 'primary' | 'warning' | 'info' | 'success' {
   if (variant === 'INCUMBENT') return 'primary'
   if (variant === 'REVERSAL_CHALLENGER') return 'success'
+  if (variant === 'WEAK_BREADTH_PATH_CHALLENGER') return 'warning'
   if (variant.startsWith('EXECUTION_')) return 'success'
   if (variant.startsWith('EARLY_')) return 'warning'
   if (variant.includes('LAST5')) return 'warning'

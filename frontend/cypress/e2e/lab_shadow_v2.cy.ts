@@ -89,6 +89,7 @@ describe('Strategy v2 shadow lab', () => {
       .and('contain', '3 分钟 + SNDK')
       .and('contain', '3 分钟执行基线')
       .and('contain', '执行 + 路径效率')
+      .and('contain', '弱广度 + 路径效率')
       .and('contain', '执行 + SNDK')
       .and('contain', '1.00%')
       .and('contain', '70.00%')

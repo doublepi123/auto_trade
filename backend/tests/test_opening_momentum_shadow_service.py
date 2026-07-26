@@ -66,6 +66,7 @@ _ALL_CHALLENGER_VARIANTS = (
     *_EXTENSION_VARIANTS,
     "EXECUTION_BROAD_CHALLENGER",
     "EXECUTION_PATH_EFFICIENCY_CHALLENGER",
+    "WEAK_BREADTH_PATH_CHALLENGER",
     *_EXECUTION_EXTENSION_VARIANTS,
 )
 
@@ -604,6 +605,7 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
             "EARLY_QCOM_CHALLENGER",
             "EXECUTION_BROAD_CHALLENGER",
             "EXECUTION_PATH_EFFICIENCY_CHALLENGER",
+            "WEAK_BREADTH_PATH_CHALLENGER",
             "EXECUTION_SNDK_CHALLENGER",
             "EXECUTION_INTC_CHALLENGER",
             "EXECUTION_QCOM_CHALLENGER",
@@ -620,6 +622,9 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
         execution = by_variant["EXECUTION_BROAD_CHALLENGER"]
         path_efficiency = by_variant[
             "EXECUTION_PATH_EFFICIENCY_CHALLENGER"
+        ]
+        weak_breadth_path = by_variant[
+            "WEAK_BREADTH_PATH_CHALLENGER"
         ]
         reversal = by_variant["REVERSAL_CHALLENGER"]
         continuation = by_variant["CONTINUATION_CHALLENGER"]
@@ -669,6 +674,17 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
         assert path_efficiency.universe_source == (
             "OPENING_EXECUTION_PATH_EFFICIENCY"
         )
+        assert (
+            weak_breadth_path.decision_config
+            == execution.decision_config
+        )
+        assert weak_breadth_path.minimum_data_coverage == 0.95
+        assert weak_breadth_path.minimum_path_efficiency == 0.70
+        assert weak_breadth_path.maximum_market_return_bps == 0.0
+        assert weak_breadth_path.required_symbols == ()
+        assert weak_breadth_path.universe_source == (
+            "OPENING_EXECUTION_WEAK_BREADTH_PATH"
+        )
         for variant, symbol in zip(
             _EXECUTION_EXTENSION_VARIANTS,
             _EXECUTION_EXTENSION_SYMBOLS,
@@ -704,7 +720,7 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
                 identity.config_version
                 for identity in identities
             }
-        ) == 20
+        ) == 21
     finally:
         db.close()
         Base.metadata.drop_all(bind=engine)
@@ -931,7 +947,7 @@ def test_challengers_use_one_market_snapshot_and_close_all_variants(
         assert opened.latest.universe_source == "UNIVERSE_SELECTION"
         assert opened.latest.candidate_symbol == "S1.US"
         assert opened.latest.selection_run_id == run.id
-        assert len(opened.variants) == 20
+        assert len(opened.variants) == 21
         by_variant = {
             item.variant: item for item in opened.variants
         }
@@ -1029,7 +1045,7 @@ def test_challengers_use_one_market_snapshot_and_close_all_variants(
                 item.config_version
                 for item in opened.variants
             }
-        ) == 20
+        ) == 21
 
         still_open = service.tick(
             now=_SESSION_OPEN + timedelta(minutes=47, seconds=10),
@@ -1129,7 +1145,7 @@ def test_early_broad_challenger_keeps_independent_observation_window(
         )
 
         rows = db.query(OpeningMomentumShadowRun).all()
-        assert len(rows) == 14
+        assert len(rows) == 15
         assert candles.calls == [
             *_SYMBOLS,
             *_EXTENSION_SYMBOLS,
@@ -1228,7 +1244,7 @@ def test_early_broad_challenger_keeps_independent_observation_window(
             now=_SESSION_OPEN + timedelta(minutes=32, seconds=10),
         )
 
-        assert db.query(OpeningMomentumShadowRun).count() == 20
+        assert db.query(OpeningMomentumShadowRun).count() == 21
         assert candles.calls == list(_SYMBOLS[:4])
         by_variant = {
             item.variant: item for item in standard_opened.variants
@@ -1249,7 +1265,7 @@ def test_early_broad_challenger_keeps_independent_observation_window(
         rows = db.query(OpeningMomentumShadowRun).all()
         assert sum(row.status == "CLOSED" for row in rows) == 5
         assert sum(row.status == "SKIPPED" for row in rows) == 1
-        assert sum(row.status == "OPEN" for row in rows) == 14
+        assert sum(row.status == "OPEN" for row in rows) == 15
         by_variant = {
             item.variant: item for item in standard_closed.variants
         }
@@ -1275,7 +1291,7 @@ def test_early_broad_challenger_keeps_independent_observation_window(
         rows = db.query(OpeningMomentumShadowRun).all()
         assert candles.calls == ["S7.US"]
         assert execution_closed.state == "OPEN"
-        assert sum(row.status == "CLOSED" for row in rows) == 12
+        assert sum(row.status == "CLOSED" for row in rows) == 13
         assert sum(row.status == "SKIPPED" for row in rows) == 1
         assert sum(row.status == "OPEN" for row in rows) == 7
         execution_by_variant = {
@@ -1289,6 +1305,12 @@ def test_early_broad_challenger_keeps_independent_observation_window(
         assert (
             execution_by_variant[
                 "EXECUTION_PATH_EFFICIENCY_CHALLENGER"
+            ].metrics.closed_trades
+            == 1
+        )
+        assert (
+            execution_by_variant[
+                "WEAK_BREADTH_PATH_CHALLENGER"
             ].metrics.closed_trades
             == 1
         )
@@ -1453,6 +1475,80 @@ def test_execution_path_efficiency_challenger_skips_choppy_leader(
         Base.metadata.drop_all(bind=engine)
 
 
+@pytest.mark.parametrize(
+    ("market_return_bps", "expected_status", "expected_reason"),
+    [
+        (20.0, "SKIPPED", "MAXIMUM_MARKET_RETURN_FILTER"),
+        (-20.0, "OPEN", "OPENING_LEADER"),
+    ],
+)
+def test_weak_breadth_path_challenger_applies_maximum_market_gate(
+    monkeypatch: pytest.MonkeyPatch,
+    market_return_bps: float,
+    expected_status: str,
+    expected_reason: str,
+) -> None:
+    monkeypatch.setattr(
+        settings,
+        "opening_momentum_shadow_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        settings,
+        "opening_momentum_challenger_enabled",
+        True,
+    )
+    engine, db = _database()
+    try:
+        _seed_variant_universe(db)
+        _seed_active_broad_pool(db)
+        early_returns = {
+            symbol: (
+                100.0 if symbol == "S7.US" else market_return_bps
+            )
+            for symbol in _SYMBOLS
+        }
+        service = OpeningMomentumShadowService(
+            db,
+            _FakeCandles(
+                early_opening_returns_bps=early_returns,
+            ),
+            config=OpeningMomentumConfig(
+                minimum_universe_size=2,
+                minimum_excess_return_bps=0,
+            ),
+        )
+
+        status = service.tick(
+            now=_SESSION_OPEN + timedelta(minutes=5, seconds=10),
+        )
+
+        by_variant = {
+            item.variant: item for item in status.variants
+        }
+        baseline = by_variant["EXECUTION_BROAD_CHALLENGER"]
+        challenger = by_variant["WEAK_BREADTH_PATH_CHALLENGER"]
+        assert baseline.latest is not None
+        assert baseline.latest.status == "OPEN"
+        assert challenger.latest is not None
+        assert challenger.latest.status == expected_status
+        assert challenger.latest.reason == expected_reason
+        assert challenger.latest.market_return_bps == pytest.approx(
+            market_return_bps
+        )
+        assert challenger.minimum_path_efficiency == 0.70
+        assert challenger.maximum_market_return_bps == 0.0
+        assert challenger.comparison_baseline == (
+            "EXECUTION_BROAD_CHALLENGER"
+        )
+        assert challenger.latest.entry_price == (
+            100.5 if expected_status == "OPEN" else None
+        )
+    finally:
+        db.close()
+        Base.metadata.drop_all(bind=engine)
+
+
 def test_breadth_challenger_skips_a_negative_market_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1500,7 +1596,7 @@ def test_breadth_challenger_skips_a_negative_market_snapshot(
         )
 
         assert candles.calls == list(_SYMBOLS[:4])
-        assert len(status.variants) == 20
+        assert len(status.variants) == 21
         by_variant = {
             item.variant: item for item in status.variants
         }

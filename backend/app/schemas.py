@@ -612,6 +612,7 @@ class OpeningMomentumShadowVariantResponse(BaseModel):
         "EARLY_QCOM_CHALLENGER",
         "EXECUTION_BROAD_CHALLENGER",
         "EXECUTION_PATH_EFFICIENCY_CHALLENGER",
+        "WEAK_BREADTH_PATH_CHALLENGER",
         "EXECUTION_SNDK_CHALLENGER",
         "EXECUTION_INTC_CHALLENGER",
         "EXECUTION_QCOM_CHALLENGER",
@@ -631,6 +632,7 @@ class OpeningMomentumShadowVariantResponse(BaseModel):
         ge=0,
         le=1,
     )
+    maximum_market_return_bps: Optional[float] = None
     required_symbols: list[str] = Field(default_factory=list)
     holding_minutes: int
     stop_loss_pct: Optional[float] = None

@@ -104,6 +104,15 @@ _EXECUTION_PATH_EFFICIENCY_SOURCE = (
 _EXECUTION_PATH_EFFICIENCY_ALGORITHM_VERSION = (
     f"{ALGORITHM_VERSION}+{_EXECUTION_PATH_EFFICIENCY_VERSION}"
 )
+_WEAK_BREADTH_PATH_VERSION = (
+    "forward-only-max-median0-path-efficiency-070-"
+    "precommitted-20260727-v1"
+)
+_WEAK_BREADTH_PATH_SOURCE = "OPENING_EXECUTION_WEAK_BREADTH_PATH"
+_WEAK_BREADTH_PATH_ALGORITHM_VERSION = (
+    f"{ALGORITHM_VERSION}+{_WEAK_BREADTH_PATH_VERSION}"
+)
+_WEAK_BREADTH_MAXIMUM_MARKET_RETURN_BPS = 0.0
 _EXECUTION_EXTENSION_COHORT_VERSION = (
     "discovery-top6-positive-delta-min4-stop1-v1-20260724"
 )
@@ -148,6 +157,7 @@ _VariantName = Literal[
     "EARLY_QCOM_CHALLENGER",
     "EXECUTION_BROAD_CHALLENGER",
     "EXECUTION_PATH_EFFICIENCY_CHALLENGER",
+    "WEAK_BREADTH_PATH_CHALLENGER",
     "EXECUTION_SNDK_CHALLENGER",
     "EXECUTION_INTC_CHALLENGER",
     "EXECUTION_QCOM_CHALLENGER",
@@ -204,6 +214,7 @@ class _UniverseVariant:
     require_nonnegative_last_five: bool = False
     minimum_data_coverage: float = 1.0
     minimum_path_efficiency: float | None = None
+    maximum_market_return_bps: float | None = None
     required_symbols: tuple[str, ...] = ()
     symbols: tuple[str, ...] = ()
     selection_run_id: int | None = None
@@ -216,6 +227,19 @@ class _UniverseVariant:
             raise ValueError(
                 "minimum_path_efficiency must be in [0, 1] when set"
             )
+        if self.maximum_market_return_bps is not None:
+            if not math.isfinite(self.maximum_market_return_bps):
+                raise ValueError(
+                    "maximum_market_return_bps must be finite when set"
+                )
+            if (
+                self.maximum_market_return_bps
+                < self.decision_config.minimum_market_return_bps
+            ):
+                raise ValueError(
+                    "maximum_market_return_bps must not be below the "
+                    "minimum market return"
+                )
 
 
 @dataclass(frozen=True)
@@ -584,6 +608,15 @@ class OpeningMomentumShadowService:
                     < variant.minimum_path_efficiency
                 )
             )
+            maximum_market_return_gate_failed = (
+                variant.maximum_market_return_bps is not None
+                and decision.action == "ENTER_LONG"
+                and (
+                    decision.market_return_bps is None
+                    or decision.market_return_bps
+                    > variant.maximum_market_return_bps
+                )
+            )
             status = (
                 "OPEN"
                 if (
@@ -591,6 +624,7 @@ class OpeningMomentumShadowService:
                     and data_complete
                     and not last_five_gate_failed
                     and not path_efficiency_gate_failed
+                    and not maximum_market_return_gate_failed
                 )
                 else "SKIPPED"
             )
@@ -602,6 +636,8 @@ class OpeningMomentumShadowService:
                 reason = "LAST_FIVE_RETURN_FILTER"
             elif path_efficiency_gate_failed:
                 reason = "PATH_EFFICIENCY_FILTER"
+            elif maximum_market_return_gate_failed:
+                reason = "MAXIMUM_MARKET_RETURN_FILTER"
             else:
                 reason = decision.reason
             self.db.add(OpeningMomentumShadowRun(
@@ -911,6 +947,35 @@ class OpeningMomentumShadowService:
             symbols=active_broad_symbols,
             selection_run_id=run.id,
         ))
+        weak_breadth_path_identity = identities_by_variant[
+            "WEAK_BREADTH_PATH_CHALLENGER"
+        ]
+        variants.append(_UniverseVariant(
+            variant=weak_breadth_path_identity.variant,
+            algorithm_version=(
+                weak_breadth_path_identity.algorithm_version
+            ),
+            config_version=(
+                weak_breadth_path_identity.config_version
+            ),
+            universe_source=(
+                weak_breadth_path_identity.universe_source
+            ),
+            decision_config=(
+                weak_breadth_path_identity.decision_config
+            ),
+            minimum_data_coverage=(
+                weak_breadth_path_identity.minimum_data_coverage
+            ),
+            minimum_path_efficiency=(
+                weak_breadth_path_identity.minimum_path_efficiency
+            ),
+            maximum_market_return_bps=(
+                weak_breadth_path_identity.maximum_market_return_bps
+            ),
+            symbols=active_broad_symbols,
+            selection_run_id=run.id,
+        ))
         for spec in _EXECUTION_EXTENSION_SPECS:
             identity = identities_by_variant[spec.variant]
             variants.append(_UniverseVariant(
@@ -1054,6 +1119,29 @@ class OpeningMomentumShadowService:
                 ),
                 minimum_path_efficiency=(
                     _EXECUTION_PATH_EFFICIENCY_MINIMUM
+                ),
+            ))
+            variants.append(_UniverseVariant(
+                variant="WEAK_BREADTH_PATH_CHALLENGER",
+                algorithm_version=(
+                    _WEAK_BREADTH_PATH_ALGORITHM_VERSION
+                ),
+                config_version=self._evidence_config_version(
+                    f"{execution_config.version_hash()}:"
+                    f"{_WEAK_BREADTH_PATH_VERSION}:"
+                    f"{_EXECUTION_PATH_EFFICIENCY_MINIMUM:.2f}:"
+                    f"{_WEAK_BREADTH_MAXIMUM_MARKET_RETURN_BPS:.1f}"
+                ),
+                universe_source=_WEAK_BREADTH_PATH_SOURCE,
+                decision_config=execution_config,
+                minimum_data_coverage=(
+                    _EARLY_BROAD_MINIMUM_COVERAGE
+                ),
+                minimum_path_efficiency=(
+                    _EXECUTION_PATH_EFFICIENCY_MINIMUM
+                ),
+                maximum_market_return_bps=(
+                    _WEAK_BREADTH_MAXIMUM_MARKET_RETURN_BPS
                 ),
             ))
             for spec in _EXECUTION_EXTENSION_SPECS:
@@ -1514,8 +1602,10 @@ class OpeningMomentumShadowService:
             )
             uses_execution_baseline = (
                 is_execution_extension
-                or identity.variant
-                == "EXECUTION_PATH_EFFICIENCY_CHALLENGER"
+                or identity.variant in {
+                    "EXECUTION_PATH_EFFICIENCY_CHALLENGER",
+                    "WEAK_BREADTH_PATH_CHALLENGER",
+                }
             )
             is_extension = (
                 is_early_extension or is_execution_extension
@@ -1644,6 +1734,9 @@ class OpeningMomentumShadowService:
                     ),
                     minimum_path_efficiency=(
                         identity.minimum_path_efficiency
+                    ),
+                    maximum_market_return_bps=(
+                        identity.maximum_market_return_bps
                     ),
                     required_symbols=list(
                         identity.required_symbols
