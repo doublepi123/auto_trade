@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import date
 from functools import reduce
 from operator import mul
-from typing import Literal, Mapping, Sequence
+from typing import Literal, Mapping, Sequence, cast
 
 from app.domain.universe_selection.rotation_forward import (
     ROTATION_FORWARD_VERSION,
@@ -26,6 +26,10 @@ RotationForwardTrackStatus = Literal[
     "DATA_BLOCKED",
     "PERFORMANCE_BLOCKED",
     "READY_FOR_MANUAL_REVIEW",
+]
+RotationForwardEvidenceMode = Literal[
+    "FORWARD_PRECOMMITTED",
+    "BACKFILLED_AFTER_ENTRY",
 ]
 
 _FORWARD_STATUSES = {"FORWARD_OPEN", "FORWARD_CASH"}
@@ -110,7 +114,7 @@ class RotationForwardCohortEvidence:
     cohort_month: date
     variant_name: str
     status: str
-    evidence_mode: str
+    evidence_mode: RotationForwardEvidenceMode
     signal_date: date
     entry_date: date
     mark_date: date
@@ -165,6 +169,7 @@ class RotationForwardTrackScore:
     first_completed_cohort_month: date | None
     latest_completed_cohort_month: date | None
     open_cohort: RotationForwardCohortEvidence | None
+    diagnostic_cohort: RotationForwardCohortEvidence | None
     compounded_return_pct: float | None
     qqq_compounded_return_pct: float | None
     dia_compounded_return_pct: float | None
@@ -217,12 +222,16 @@ def parse_rotation_forward_cohort(
     status = _required_string(payload.get("status"), field_name="status")
     if status not in _SNAPSHOT_STATUSES:
         raise ValueError("rotation forward status is invalid")
-    evidence_mode = _required_string(
+    raw_evidence_mode = _required_string(
         payload.get("evidence_mode"),
         field_name="evidence_mode",
     )
-    if evidence_mode not in _EVIDENCE_MODES:
+    if raw_evidence_mode not in _EVIDENCE_MODES:
         raise ValueError("rotation forward evidence mode is invalid")
+    evidence_mode = cast(
+        RotationForwardEvidenceMode,
+        raw_evidence_mode,
+    )
     signal_date = _required_date(
         payload.get("signal_date"),
         field_name="signal_date",
@@ -478,7 +487,13 @@ def build_rotation_forward_track_score(
         if not item.complete and item.cohort_month == as_of_month
     )
     open_cohort = open_items[-1] if open_items else None
-    backfilled_count = sum(not item.forward_eligible for item in observed)
+    diagnostic_items = tuple(
+        item for item in observed if not item.forward_eligible
+    )
+    diagnostic_cohort = (
+        diagnostic_items[-1] if diagnostic_items else None
+    )
+    backfilled_count = len(diagnostic_items)
     drift_count = sum(
         item.selection_drift_detected for item in eligible
     )
@@ -635,6 +650,7 @@ def build_rotation_forward_track_score(
             completed[-1].cohort_month if completed else None
         ),
         open_cohort=open_cohort,
+        diagnostic_cohort=diagnostic_cohort,
         compounded_return_pct=compounded_return,
         qqq_compounded_return_pct=qqq_compounded,
         dia_compounded_return_pct=dia_compounded,

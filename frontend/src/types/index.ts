@@ -1459,9 +1459,12 @@ export interface UniverseRotationForwardCohortScore {
   source_as_of_date: string
   cohort_month: string
   status: string
+  evidence_mode: 'FORWARD_PRECOMMITTED' | 'BACKFILLED_AFTER_ENTRY'
   signal_date: string
   entry_date: string
   mark_date: string
+  registered_as_of_date: string
+  forward_eligible: boolean
   target_symbols: string[]
   forward_observation_sessions: number
   net_return_pct: number | null
@@ -1489,6 +1492,7 @@ export interface UniverseRotationForwardTrackScore {
   first_completed_cohort_month: string | null
   latest_completed_cohort_month: string | null
   open_cohort: UniverseRotationForwardCohortScore | null
+  diagnostic_cohort: UniverseRotationForwardCohortScore | null
   compounded_return_pct: number | null
   qqq_compounded_return_pct: number | null
   dia_compounded_return_pct: number | null

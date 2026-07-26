@@ -79,9 +79,12 @@ def _cohort_response(
         source_as_of_date=evidence.source_as_of_date,
         cohort_month=evidence.cohort_month,
         status=evidence.status,
+        evidence_mode=evidence.evidence_mode,
         signal_date=evidence.signal_date,
         entry_date=evidence.entry_date,
         mark_date=evidence.mark_date,
+        registered_as_of_date=evidence.registered_as_of_date,
+        forward_eligible=evidence.forward_eligible,
         target_symbols=list(evidence.target_symbols),
         forward_observation_sessions=(
             evidence.forward_observation_sessions
@@ -242,6 +245,11 @@ class RotationForwardScorecardService:
                     open_cohort=(
                         _cohort_response(score.open_cohort)
                         if score.open_cohort is not None
+                        else None
+                    ),
+                    diagnostic_cohort=(
+                        _cohort_response(score.diagnostic_cohort)
+                        if score.diagnostic_cohort is not None
                         else None
                     ),
                     compounded_return_pct=(

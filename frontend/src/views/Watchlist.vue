@@ -618,13 +618,22 @@
                       <template #default="{ row }">
                         <div class="rotation-scorecard-variant">
                           <strong>{{ rotationVariantLabel(row.variant_name) }}</strong>
-                          <small v-if="row.open_cohort">
-                            {{ row.open_cohort.cohort_month.slice(0, 7) }} 采集中
-                            · {{ formatSignedPercent(row.open_cohort.net_return_pct) }}
-                          </small>
-                          <small v-else-if="row.backfilled_cohorts">
-                            {{ row.backfilled_cohorts }} 期回填已排除
-                          </small>
+                          <template v-if="row.open_cohort">
+                            <small>
+                              {{ row.open_cohort.cohort_month.slice(0, 7) }} 采集中
+                              · {{ formatSignedPercent(row.open_cohort.net_return_pct) }}
+                            </small>
+                          </template>
+                          <template v-else-if="row.diagnostic_cohort">
+                            <small>
+                              {{ row.diagnostic_cohort.cohort_month.slice(0, 7) }} 回填诊断
+                              · {{ formatSignedPercent(row.diagnostic_cohort.net_return_pct) }}
+                            </small>
+                            <small>
+                              QQQ {{ formatSignedPercent(row.diagnostic_cohort.excess_return_vs_qqq_pct) }}
+                              · DIA {{ formatSignedPercent(row.diagnostic_cohort.excess_return_vs_dia_pct) }}
+                            </small>
+                          </template>
                           <small v-else>尚无前向月份</small>
                         </div>
                       </template>
@@ -694,10 +703,22 @@
                     <div class="rotation-scorecard-mobile-heading">
                       <div>
                         <strong>{{ rotationVariantLabel(row.variant_name) }}</strong>
-                        <small v-if="row.open_cohort">
-                          {{ row.open_cohort.cohort_month.slice(0, 7) }}
-                          · {{ formatSignedPercent(row.open_cohort.net_return_pct) }}
-                        </small>
+                        <template v-if="row.open_cohort">
+                          <small>
+                            {{ row.open_cohort.cohort_month.slice(0, 7) }}
+                            · {{ formatSignedPercent(row.open_cohort.net_return_pct) }}
+                          </small>
+                        </template>
+                        <template v-else-if="row.diagnostic_cohort">
+                          <small>
+                            {{ row.diagnostic_cohort.cohort_month.slice(0, 7) }} 回填诊断
+                            · {{ formatSignedPercent(row.diagnostic_cohort.net_return_pct) }}
+                          </small>
+                          <small>
+                            QQQ {{ formatSignedPercent(row.diagnostic_cohort.excess_return_vs_qqq_pct) }}
+                            · DIA {{ formatSignedPercent(row.diagnostic_cohort.excess_return_vs_dia_pct) }}
+                          </small>
+                        </template>
                         <small v-else>尚无完整前向持有月</small>
                       </div>
                       <el-tag
@@ -728,7 +749,7 @@
             </div>
 
             <div class="rotation-scorecard-note" data-testid="rotation-forward-scorecard-note">
-              至少 3 个完整月、累计收益为正、同时跑赢 QQQ 与 DIA，且两项超额月胜率均不低于 60%；达标后也只开放人工复核。
+              回填诊断仅展示当前表现，永不计入评分或晋级。至少 3 个完整月、累计收益为正、同时跑赢 QQQ 与 DIA，且两项超额月胜率均不低于 60%；达标后也只开放人工复核。
             </div>
           </section>
 

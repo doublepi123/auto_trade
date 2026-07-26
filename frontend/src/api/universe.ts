@@ -31,6 +31,11 @@ const ROTATION_SCORECARD_STATUSES = new Set([
   'READY_FOR_MANUAL_REVIEW',
 ])
 
+const ROTATION_SCORECARD_EVIDENCE_MODES = new Set([
+  'FORWARD_PRECOMMITTED',
+  'BACKFILLED_AFTER_ENTRY',
+])
+
 function assertObject(value: unknown, endpoint: string): asserts value is Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error(`Unexpected ${endpoint} response`)
@@ -232,6 +237,23 @@ function assertScorecardCohort(value: unknown, field: string): void {
     'entry_date',
     'mark_date',
   ]) assertScorecardString(value[key], `${field}.${key}`)
+  assertScorecardString(value.evidence_mode, `${field}.evidence_mode`)
+  assertScorecardString(
+    value.registered_as_of_date,
+    `${field}.registered_as_of_date`,
+  )
+  if (!ROTATION_SCORECARD_EVIDENCE_MODES.has(value.evidence_mode)) {
+    throw scorecardError(`${field}.evidence_mode`)
+  }
+  if (typeof value.forward_eligible !== 'boolean') {
+    throw scorecardError(`${field}.forward_eligible`)
+  }
+  if (
+    value.forward_eligible !== (
+      value.evidence_mode === 'FORWARD_PRECOMMITTED'
+      && value.registered_as_of_date === value.signal_date
+    )
+  ) throw scorecardError(`${field}.forward_eligible`)
   assertScorecardStringArray(value.target_symbols, `${field}.target_symbols`)
   assertScorecardInteger(
     value.forward_observation_sessions,
@@ -271,12 +293,22 @@ function assertScorecardTrack(value: unknown, index: number): void {
     value.remaining_completed_cohorts,
     `${field}.remaining_completed_cohorts`,
   )
-  for (const key of [
-    'backfilled_cohorts',
-    'incomplete_closed_cohorts',
-    'selection_drift_cohorts',
-    'invalid_evidence_records',
-  ]) assertScorecardInteger(value[key], `${field}.${key}`)
+  assertScorecardInteger(
+    value.backfilled_cohorts,
+    `${field}.backfilled_cohorts`,
+  )
+  assertScorecardInteger(
+    value.incomplete_closed_cohorts,
+    `${field}.incomplete_closed_cohorts`,
+  )
+  assertScorecardInteger(
+    value.selection_drift_cohorts,
+    `${field}.selection_drift_cohorts`,
+  )
+  assertScorecardInteger(
+    value.invalid_evidence_records,
+    `${field}.invalid_evidence_records`,
+  )
   assertScorecardInteger(
     value.minimum_completed_cohorts,
     `${field}.minimum_completed_cohorts`,
@@ -284,7 +316,8 @@ function assertScorecardTrack(value: unknown, index: number): void {
   )
   if (
     value.completed_cohorts > value.forward_eligible_cohorts
-    || value.forward_eligible_cohorts > value.observed_cohorts
+    || value.forward_eligible_cohorts + value.backfilled_cohorts
+      !== value.observed_cohorts
     || value.remaining_completed_cohorts
       !== Math.max(0, value.minimum_completed_cohorts - value.completed_cohorts)
   ) throw scorecardError(`${field}.cohort_counts`)
@@ -294,8 +327,29 @@ function assertScorecardTrack(value: unknown, index: number): void {
   ]) {
     if (value[key] !== null) assertScorecardString(value[key], `${field}.${key}`)
   }
-  if (value.open_cohort !== null) {
-    assertScorecardCohort(value.open_cohort, `${field}.open_cohort`)
+  const openCohort = value.open_cohort
+  if (openCohort !== null) {
+    assertObject(openCohort, `${field}.open_cohort`)
+    assertScorecardCohort(openCohort, `${field}.open_cohort`)
+    if (openCohort.forward_eligible !== true) {
+      throw scorecardError(`${field}.open_cohort.forward_eligible`)
+    }
+  }
+  const diagnosticCohort = value.diagnostic_cohort
+  if (diagnosticCohort !== null) {
+    assertObject(diagnosticCohort, `${field}.diagnostic_cohort`)
+    assertScorecardCohort(
+      diagnosticCohort,
+      `${field}.diagnostic_cohort`,
+    )
+    if (diagnosticCohort.forward_eligible !== false) {
+      throw scorecardError(`${field}.diagnostic_cohort.forward_eligible`)
+    }
+  }
+  if (
+    (value.backfilled_cohorts > 0) !== (diagnosticCohort !== null)
+  ) {
+    throw scorecardError(`${field}.diagnostic_cohort`)
   }
   for (const key of [
     'compounded_return_pct',

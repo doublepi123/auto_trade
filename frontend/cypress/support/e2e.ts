@@ -419,6 +419,29 @@ const rotationConcentrationChallengerStub = {
   excess_return_vs_dia_pct: 6.62,
 }
 
+const rotationForwardDiagnosticCohortStub = {
+  source_run_id: 7,
+  source_as_of_date: '2026-07-23',
+  cohort_month: '2026-07-01',
+  status: 'BACKFILLED_OPEN',
+  evidence_mode: 'BACKFILLED_AFTER_ENTRY',
+  signal_date: '2026-06-30',
+  entry_date: '2026-07-01',
+  mark_date: '2026-07-23',
+  registered_as_of_date: '2026-07-02',
+  forward_eligible: false,
+  target_symbols: ['INTC.US', 'CAT.US', 'GOOGL.US', 'ROST.US'],
+  forward_observation_sessions: 0,
+  net_return_pct: -2.03,
+  qqq_return_pct: -6.16,
+  dia_return_pct: -0.48,
+  excess_return_vs_qqq_pct: 4.13,
+  excess_return_vs_dia_pct: -1.55,
+  selection_drift_detected: true,
+  survivorship_bias: true,
+  blockers: ['BACKFILLED_AFTER_ENTRY'],
+}
+
 const rotationForwardScorecardTrackStub = {
   variant_name: 'diversified_top8_12_1',
   status: 'AWAITING_PRECOMMITMENT',
@@ -434,6 +457,7 @@ const rotationForwardScorecardTrackStub = {
   first_completed_cohort_month: null,
   latest_completed_cohort_month: null,
   open_cohort: null,
+  diagnostic_cohort: rotationForwardDiagnosticCohortStub,
   compounded_return_pct: null,
   qqq_compounded_return_pct: null,
   dia_compounded_return_pct: null,

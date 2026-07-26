@@ -2784,9 +2784,15 @@ class UniverseRotationForwardCohortResponse(BaseModel):
     source_as_of_date: date
     cohort_month: date
     status: str = Field(min_length=1, max_length=50)
+    evidence_mode: Literal[
+        "FORWARD_PRECOMMITTED",
+        "BACKFILLED_AFTER_ENTRY",
+    ]
     signal_date: date
     entry_date: date
     mark_date: date
+    registered_as_of_date: date
+    forward_eligible: bool
     target_symbols: list[str] = Field(default_factory=list, max_length=20)
     forward_observation_sessions: int = Field(ge=0)
     net_return_pct: Optional[float] = Field(
@@ -2838,6 +2844,9 @@ class UniverseRotationForwardTrackResponse(BaseModel):
     first_completed_cohort_month: Optional[date] = None
     latest_completed_cohort_month: Optional[date] = None
     open_cohort: Optional[UniverseRotationForwardCohortResponse] = None
+    diagnostic_cohort: Optional[
+        UniverseRotationForwardCohortResponse
+    ] = None
     compounded_return_pct: Optional[float] = Field(
         default=None,
         allow_inf_nan=False,

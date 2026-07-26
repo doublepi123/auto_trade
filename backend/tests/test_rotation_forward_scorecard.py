@@ -250,6 +250,13 @@ def test_scorecard_counts_only_deduplicated_month_end_forward_evidence() -> None
     assert score.completed_cohorts == 3
     assert score.backfilled_cohorts == 1
     assert score.open_cohort is None
+    diagnostic = score.diagnostic_cohort
+    assert diagnostic == backfilled
+    assert diagnostic is not None
+    assert diagnostic.forward_eligible is False
+    assert diagnostic.evidence_mode == (
+        "BACKFILLED_AFTER_ENTRY"
+    )
     assert score.compounded_return_pct == pytest.approx(4.0094)
     assert score.qqq_compounded_return_pct == pytest.approx(1.49995)
     assert score.compounded_excess_vs_qqq_pct == pytest.approx(2.50945)
@@ -410,6 +417,17 @@ def test_scorecard_service_and_endpoint_are_read_only() -> None:
             qqq_return=-0.5,
             dia_return=-1.5,
         ),
+        _payload(
+            cohort_month=date(2025, 10, 1),
+            signal_date=date(2025, 9, 30),
+            entry_date=date(2025, 10, 1),
+            mark_date=date(2025, 10, 15),
+            net_return=-2.03,
+            qqq_return=-6.16,
+            dia_return=-0.48,
+            forward_eligible=False,
+            selection_drift=True,
+        ),
     )
     for payload in payloads:
         _run_with_snapshot(
@@ -427,17 +445,34 @@ def test_scorecard_service_and_endpoint_are_read_only() -> None:
 
     response = RotationForwardScorecardService(
         db,
-        now=datetime(2025, 10, 1, tzinfo=timezone.utc),
+        now=datetime(2025, 10, 16, tzinfo=timezone.utc),
     ).get_scorecard()
 
     assert response is not None
     assert response.algorithm_version == ROTATION_FORWARD_SCORECARD_VERSION
-    assert response.source_run_count == 3
+    assert response.source_run_count == 4
     assert len(response.tracks) == 5
     incumbent = response.tracks[0]
     assert incumbent.status == "READY_FOR_MANUAL_REVIEW"
     assert incumbent.completed_cohorts == 3
     assert incumbent.manual_review_ready is True
+    assert incumbent.diagnostic_cohort is not None
+    assert incumbent.diagnostic_cohort.net_return_pct == -2.03
+    assert incumbent.diagnostic_cohort.excess_return_vs_qqq_pct == (
+        pytest.approx(4.13)
+    )
+    assert incumbent.diagnostic_cohort.excess_return_vs_dia_pct == (
+        pytest.approx(-1.55)
+    )
+    assert incumbent.diagnostic_cohort.evidence_mode == (
+        "BACKFILLED_AFTER_ENTRY"
+    )
+    assert incumbent.diagnostic_cohort.registered_as_of_date == date(
+        2025,
+        10,
+        1,
+    )
+    assert incumbent.diagnostic_cohort.forward_eligible is False
     assert response.automatic_promotion_allowed is False
     assert writes_before == (
         db.query(UniverseSelectionRun).count(),
@@ -465,6 +500,11 @@ def test_scorecard_service_and_endpoint_are_read_only() -> None:
         )
         assert body["tracks"][0]["completed_cohorts"] == 3
         assert body["tracks"][0]["automatic_promotion_allowed"] is False
+        diagnostic = body["tracks"][0]["diagnostic_cohort"]
+        assert diagnostic["net_return_pct"] == -2.03
+        assert diagnostic["evidence_mode"] == "BACKFILLED_AFTER_ENTRY"
+        assert diagnostic["registered_as_of_date"] == "2025-10-01"
+        assert diagnostic["forward_eligible"] is False
     finally:
         client.close()
         db.close()
