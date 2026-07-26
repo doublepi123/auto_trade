@@ -1863,6 +1863,10 @@ export interface OpeningMomentumShadowRun {
   candidate_path_efficiency: number | null
   candidate_max_pullback_bps: number | null
   candidate_opening_range_bps: number | null
+  candidate_overnight_gap_bps: number | null
+  candidate_prev_close_to_signal_bps: number | null
+  benchmark_qqq_return_bps: number | null
+  benchmark_dia_return_bps: number | null
   entry_at: string | null
   entry_price: number | null
   exit_due_at: string | null

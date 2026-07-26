@@ -394,6 +394,20 @@
                     <strong>{{ formatNullableBps(openingMomentumStatus.latest.candidate_opening_range_bps) }}</strong>
                   </div>
                   <div>
+                    <span>隔夜 / 昨收到信号</span>
+                    <strong>
+                      {{ formatNullableBps(openingMomentumStatus.latest.candidate_overnight_gap_bps) }} /
+                      {{ formatNullableBps(openingMomentumStatus.latest.candidate_prev_close_to_signal_bps) }}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>同期 QQQ / DIA</span>
+                    <strong>
+                      {{ formatNullableBps(openingMomentumStatus.latest.benchmark_qqq_return_bps) }} /
+                      {{ formatNullableBps(openingMomentumStatus.latest.benchmark_dia_return_bps) }}
+                    </strong>
+                  </div>
+                  <div>
                     <span>成本后收益</span>
                     <strong :class="{ negative: (openingMomentumStatus.latest.net_return_bps ?? 0) < 0 }">
                       {{ formatNullableBps(openingMomentumStatus.latest.net_return_bps) }}
@@ -491,6 +505,18 @@
                   <el-table-column label="当日候选" min-width="110">
                     <template #default="{ row }">
                       {{ row.latest?.candidate_symbol || '-' }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="隔夜 / 昨收" min-width="150">
+                    <template #default="{ row }">
+                      {{ formatNullableBps(row.latest?.candidate_overnight_gap_bps ?? null) }} /
+                      {{ formatNullableBps(row.latest?.candidate_prev_close_to_signal_bps ?? null) }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="QQQ / DIA" min-width="140">
+                    <template #default="{ row }">
+                      {{ formatNullableBps(row.latest?.benchmark_qqq_return_bps ?? null) }} /
+                      {{ formatNullableBps(row.latest?.benchmark_dia_return_bps ?? null) }}
                     </template>
                   </el-table-column>
                   <el-table-column label="路径效率" min-width="100">

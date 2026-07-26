@@ -543,6 +543,10 @@ class OpeningMomentumShadowRunResponse(BaseModel):
     candidate_path_efficiency: Optional[float] = None
     candidate_max_pullback_bps: Optional[float] = None
     candidate_opening_range_bps: Optional[float] = None
+    candidate_overnight_gap_bps: Optional[float] = None
+    candidate_prev_close_to_signal_bps: Optional[float] = None
+    benchmark_qqq_return_bps: Optional[float] = None
+    benchmark_dia_return_bps: Optional[float] = None
     entry_at: Optional[datetime] = None
     entry_price: Optional[float] = None
     exit_due_at: Optional[datetime] = None

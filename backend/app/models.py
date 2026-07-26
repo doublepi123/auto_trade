@@ -1343,6 +1343,22 @@ class OpeningMomentumShadowRun(Base):
         Float,
         nullable=True,
     )
+    candidate_overnight_gap_bps: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+    )
+    candidate_prev_close_to_signal_bps: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+    )
+    benchmark_qqq_return_bps: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+    )
+    benchmark_dia_return_bps: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+    )
     entry_at: Mapped[Optional[datetime]] = mapped_column(_TZDateTime, nullable=True)
     entry_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     exit_due_at: Mapped[Optional[datetime]] = mapped_column(_TZDateTime, nullable=True)

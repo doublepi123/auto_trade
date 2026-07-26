@@ -168,6 +168,56 @@ class _FakeCandles:
         return bars
 
 
+class _OpeningContextCandles(_FakeCandles):
+    def __init__(self) -> None:
+        super().__init__()
+        self.history_calls: list[tuple[str, str, datetime]] = []
+
+    def get_forward_adjusted_history_candlesticks_before(
+        self,
+        symbol: str,
+        period: str,
+        count: int,
+        before: datetime,
+    ) -> list[BrokerCandle]:
+        self.history_calls.append((symbol, period, before))
+        if period == "DAY":
+            assert count == 10
+            return [
+                BrokerCandle(
+                    timestamp=_SESSION_OPEN - timedelta(days=1),
+                    open=98.0,
+                    high=100.0,
+                    low=97.5,
+                    close=99.0,
+                    volume=1_000,
+                )
+            ]
+
+        assert period == "MIN_1"
+        assert count == 500
+        terminal_return_bps = {
+            "QQQ.US": 20.0,
+            "DIA.US": -10.0,
+        }[symbol]
+        bars: list[BrokerCandle] = []
+        for index in range(30):
+            close = (
+                100.0 * (1 + terminal_return_bps / 10_000)
+                if index == 29
+                else 100.0
+            )
+            bars.append(BrokerCandle(
+                timestamp=_SESSION_OPEN + timedelta(minutes=index),
+                open=100.0,
+                high=max(100.0, close) + 0.1,
+                low=min(100.0, close) - 0.1,
+                close=close,
+                volume=1_000,
+            ))
+        return bars
+
+
 class _HistoricalExitCandles:
     def __init__(self, exit_at: datetime) -> None:
         self.exit_at = exit_at
@@ -470,6 +520,55 @@ def test_tick_opens_then_closes_one_cost_adjusted_shadow_trade(
         assert closed.metrics.closed_trades == 1
         assert closed.metrics.wins == 1
         assert closed.metrics.win_rate == 1.0
+    finally:
+        db.close()
+        Base.metadata.drop_all(bind=engine)
+
+
+def test_tick_records_only_causal_opening_context_telemetry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        settings,
+        "opening_momentum_shadow_enabled",
+        True,
+    )
+    engine, db = _database()
+    try:
+        _seed_universe(db)
+        candles = _OpeningContextCandles()
+
+        status = OpeningMomentumShadowService(db, candles).tick(
+            now=_SESSION_OPEN + timedelta(minutes=32, seconds=10),
+        )
+
+        assert status.latest is not None
+        assert status.latest.candidate_symbol == "S7.US"
+        assert status.latest.candidate_overnight_gap_bps == pytest.approx(
+            (100.0 / 99.0 - 1) * 10_000
+        )
+        assert (
+            status.latest.candidate_prev_close_to_signal_bps
+            == pytest.approx((101.0 / 99.0 - 1) * 10_000)
+        )
+        assert status.latest.benchmark_qqq_return_bps == pytest.approx(
+            20.0
+        )
+        assert status.latest.benchmark_dia_return_bps == pytest.approx(
+            -10.0
+        )
+        assert {
+            (symbol, period)
+            for symbol, period, _ in candles.history_calls
+        } == {
+            ("QQQ.US", "MIN_1"),
+            ("DIA.US", "MIN_1"),
+            ("S7.US", "DAY"),
+        }
+        assert all(
+            before <= _SESSION_OPEN + timedelta(minutes=32, seconds=10)
+            for _, _, before in candles.history_calls
+        )
     finally:
         db.close()
         Base.metadata.drop_all(bind=engine)

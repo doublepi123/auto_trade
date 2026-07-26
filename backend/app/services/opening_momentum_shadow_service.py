@@ -59,6 +59,7 @@ _CANDLE_COUNT = 500
 _BAR_DURATION = timedelta(minutes=1)
 _SETTLEMENT_GRACE = timedelta(seconds=5)
 _DECISION_WINDOW = timedelta(minutes=5)
+_OPENING_CONTEXT_BENCHMARKS = ("QQQ.US", "DIA.US")
 _INCUMBENT_SOURCE = "UNIVERSE_SELECTION"
 _CONTINUATION_SOURCE = "OPENING_CONTINUATION"
 _CONTINUATION_ALGORITHM_VERSION = (
@@ -509,6 +510,28 @@ class OpeningMomentumShadowService:
                     exc,
                 )
 
+        benchmark_bars: dict[str, dict[datetime, _Candle]] = {}
+        for symbol in _OPENING_CONTEXT_BENCHMARKS:
+            try:
+                values = self._historical_candles_before(
+                    symbol,
+                    period="MIN_1",
+                    count=_CANDLE_COUNT,
+                    before=current,
+                )
+                if values is not None:
+                    benchmark_bars[symbol] = {
+                        bar.timestamp: bar for bar in values
+                    }
+            except Exception as exc:
+                logger.warning(
+                    "opening context candle fetch failed for %s: %s",
+                    symbol,
+                    exc,
+                )
+
+        previous_close_by_symbol: dict[str, float | None] = {}
+
         for variant in variants:
             config = variant.decision_config
             signal_at = (
@@ -579,6 +602,77 @@ class OpeningMomentumShadowService:
                 if variant.signal_model == "REVERSAL"
                 else evaluate_opening_momentum(observations, config)
             )
+            candidate_observation = next(
+                (
+                    item
+                    for item in observations
+                    if item.symbol == decision.candidate_symbol
+                ),
+                None,
+            )
+            previous_close: float | None = None
+            if decision.candidate_symbol is not None:
+                candidate_symbol = decision.candidate_symbol
+                if candidate_symbol not in previous_close_by_symbol:
+                    try:
+                        daily_candles = self._historical_candles_before(
+                            candidate_symbol,
+                            period="DAY",
+                            count=10,
+                            before=session_open,
+                        )
+                        previous_close_by_symbol[candidate_symbol] = (
+                            self._previous_session_close(
+                                daily_candles or [],
+                                session_date=session_date,
+                            )
+                            if daily_candles is not None
+                            else None
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "opening context previous-close fetch failed "
+                            "for %s: %s",
+                            candidate_symbol,
+                            exc,
+                        )
+                        previous_close_by_symbol[candidate_symbol] = None
+                previous_close = previous_close_by_symbol[candidate_symbol]
+            candidate_overnight_gap_bps = (
+                (
+                    candidate_observation.session_open
+                    / previous_close
+                    - 1
+                )
+                * 10_000
+                if (
+                    candidate_observation is not None
+                    and previous_close is not None
+                    and previous_close > 0
+                )
+                else None
+            )
+            candidate_prev_close_to_signal_bps = (
+                (
+                    candidate_observation.signal_close
+                    / previous_close
+                    - 1
+                )
+                * 10_000
+                if (
+                    candidate_observation is not None
+                    and previous_close is not None
+                    and previous_close > 0
+                )
+                else None
+            )
+            benchmark_returns = {
+                symbol: self._opening_return_bps(
+                    benchmark_bars.get(symbol, {}),
+                    expected_signal_bars=expected_signal_bars,
+                )
+                for symbol in _OPENING_CONTEXT_BENCHMARKS
+            }
             path_features = (
                 path_features_by_symbol.get(decision.candidate_symbol)
                 if decision.candidate_symbol is not None
@@ -707,6 +801,18 @@ class OpeningMomentumShadowService:
                     path_features.opening_range_bps
                     if path_features is not None
                     else None
+                ),
+                candidate_overnight_gap_bps=(
+                    candidate_overnight_gap_bps
+                ),
+                candidate_prev_close_to_signal_bps=(
+                    candidate_prev_close_to_signal_bps
+                ),
+                benchmark_qqq_return_bps=(
+                    benchmark_returns["QQQ.US"]
+                ),
+                benchmark_dia_return_bps=(
+                    benchmark_returns["DIA.US"]
                 ),
                 entry_at=entry_at if status == "OPEN" else None,
                 entry_price=(
@@ -2039,6 +2145,69 @@ class OpeningMomentumShadowService:
         return None
 
     @staticmethod
+    def _opening_return_bps(
+        candles_by_timestamp: dict[datetime, _Candle],
+        *,
+        expected_signal_bars: set[datetime],
+    ) -> float | None:
+        if (
+            not expected_signal_bars
+            or not expected_signal_bars.issubset(
+                candles_by_timestamp
+            )
+        ):
+            return None
+        ordered = sorted(expected_signal_bars)
+        opening_price = candles_by_timestamp[ordered[0]].open
+        signal_close = candles_by_timestamp[ordered[-1]].close
+        return (signal_close / opening_price - 1) * 10_000
+
+    @staticmethod
+    def _previous_session_close(
+        candles: list[_Candle],
+        *,
+        session_date: date,
+    ) -> float | None:
+        market_session = get_session("US")
+        completed = [
+            candle
+            for candle in candles
+            if market_session.local(candle.timestamp).date()
+            < session_date
+        ]
+        if not completed:
+            return None
+        return max(completed, key=lambda candle: candle.timestamp).close
+
+    def _historical_candles_before(
+        self,
+        symbol: str,
+        *,
+        period: str,
+        count: int,
+        before: datetime,
+    ) -> list[_Candle] | None:
+        if self.candle_provider is None:
+            return None
+        reader = getattr(
+            self.candle_provider,
+            "get_forward_adjusted_history_candlesticks_before",
+            None,
+        )
+        if not callable(reader):
+            reader = getattr(
+                self.candle_provider,
+                "get_history_candlesticks_before",
+                None,
+            )
+        if not callable(reader):
+            return None
+        values = reader(symbol, period, count, before)
+        if not isinstance(values, list):
+            return []
+        return self._coerce_candles(values)
+
+    @staticmethod
     def _opening_path_features(
         candles: list[_Candle],
     ) -> _OpeningPathFeatures:
@@ -2204,6 +2373,18 @@ class OpeningMomentumShadowService:
             ),
             candidate_opening_range_bps=(
                 row.candidate_opening_range_bps
+            ),
+            candidate_overnight_gap_bps=(
+                row.candidate_overnight_gap_bps
+            ),
+            candidate_prev_close_to_signal_bps=(
+                row.candidate_prev_close_to_signal_bps
+            ),
+            benchmark_qqq_return_bps=(
+                row.benchmark_qqq_return_bps
+            ),
+            benchmark_dia_return_bps=(
+                row.benchmark_dia_return_bps
             ),
             entry_at=_optional_utc(row.entry_at),
             entry_price=row.entry_price,
