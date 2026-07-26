@@ -496,6 +496,26 @@
                       {{ row.comparison?.resolved_sessions ?? '-' }}
                     </template>
                   </el-table-column>
+                  <el-table-column label="有效换选" min-width="100">
+                    <template #default="{ row }">
+                      <el-tag
+                        v-if="row.comparison?.policy_displacement_sessions != null"
+                        :type="row.comparison.evidence_gate_passed ? 'success' : 'info'"
+                        effect="plain"
+                      >
+                        {{ row.comparison.policy_displacement_sessions }} /
+                        {{ row.comparison.minimum_policy_displacement_sessions }}
+                      </el-tag>
+                      <span v-else>-</span>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="换选胜率" min-width="90">
+                    <template #default="{ row }">
+                      {{ row.comparison?.displacement_outperformance_rate == null
+                        ? '-'
+                        : formatPercent(row.comparison.displacement_outperformance_rate) }}
+                    </template>
+                  </el-table-column>
                   <el-table-column label="比较基线" min-width="110">
                     <template #default="{ row }">
                       {{ row.comparison_baseline ? openingMomentumVariantLabel(row.comparison_baseline) : '-' }}
@@ -2142,17 +2162,15 @@ function openingMomentumVariantLabel(
   if (variant === 'LAST5_POSITIVE_CHALLENGER') return '广度 + 末 5 分钟'
   if (variant === 'LAST5_ONLY_CHALLENGER') return '末 5 分钟过滤'
   if (variant === 'EARLY_BROAD_CHALLENGER') return '3 分钟宽池'
-  return '3 分钟 + SNDK'
+  const extension = /^EARLY_(.+)_CHALLENGER$/.exec(variant)
+  return extension ? `3 分钟 + ${extension[1]}` : variant
 }
 function openingMomentumVariantTagType(
   variant: OpeningMomentumShadowStatus['variants'][number]['variant'],
 ): 'primary' | 'warning' | 'info' | 'success' {
   if (variant === 'INCUMBENT') return 'primary'
   if (variant === 'REVERSAL_CHALLENGER') return 'success'
-  if (
-    variant === 'EARLY_BROAD_CHALLENGER'
-    || variant === 'EARLY_SNDK_CHALLENGER'
-  ) return 'warning'
+  if (variant.startsWith('EARLY_')) return 'warning'
   if (variant.includes('LAST5')) return 'warning'
   if (variant.startsWith('BREADTH_GATED')) return 'success'
   return 'info'

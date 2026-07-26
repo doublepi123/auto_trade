@@ -120,6 +120,37 @@ class TestOpeningMomentumShadowApi:
             early_sndk["comparison_baseline"]
             == "EARLY_BROAD_CHALLENGER"
         )
+        extension_symbols = {
+            "EARLY_RKLB_CHALLENGER": "RKLB.US",
+            "EARLY_WDAY_CHALLENGER": "WDAY.US",
+            "EARLY_SNDK_CHALLENGER": "SNDK.US",
+            "EARLY_ALAB_CHALLENGER": "ALAB.US",
+            "EARLY_LITE_CHALLENGER": "LITE.US",
+            "EARLY_QCOM_CHALLENGER": "QCOM.US",
+        }
+        for variant, symbol in extension_symbols.items():
+            extension = variants[variant]
+            assert extension["required_symbols"] == [symbol]
+            assert (
+                extension["comparison_baseline"]
+                == "EARLY_BROAD_CHALLENGER"
+            )
+            assert (
+                extension["comparison"][
+                    "policy_displacement_sessions"
+                ]
+                == 0
+            )
+            assert (
+                extension["comparison"][
+                    "minimum_policy_displacement_sessions"
+                ]
+                == 3
+            )
+            assert (
+                extension["comparison"]["evidence_gate_passed"]
+                is False
+            )
         assert reversal["universe_source"] == "OPENING_REVERSAL"
         assert (
             reversal["algorithm_version"]

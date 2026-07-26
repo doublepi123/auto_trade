@@ -296,9 +296,9 @@ class Settings(BaseSettings):
         default=False,
         validation_alias="AUTO_TRADE_OPENING_MOMENTUM_SHADOW_ENABLED",
         description=(
-            "Collect one daily, cross-sectional US opening-momentum "
-            "observation from the selected universe. This is shadow-only and "
-            "has no order submission path."
+            "Collect daily, paired US opening-momentum observations for the "
+            "selected universe and frozen extension cohort. This is "
+            "shadow-only and has no order submission path."
         ),
     )
     opening_momentum_challenger_enabled: bool = Field(

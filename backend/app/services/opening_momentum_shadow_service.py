@@ -84,14 +84,11 @@ _EARLY_BROAD_ALGORITHM_VERSION = (
     f"{ALGORITHM_VERSION}+{_EARLY_BROAD_VERSION}"
 )
 _EARLY_BROAD_MINIMUM_COVERAGE = 0.95
-_EARLY_SNDK_VERSION = (
-    "active-broad-plus-sndk-3m-signal-120m-hold-v1"
+_EARLY_EXTENSION_COHORT_VERSION = (
+    "discovery-top6-positive-delta-min4-20260724-v1"
 )
-_EARLY_SNDK_SOURCE = "OPENING_EARLY_SNDK"
-_EARLY_SNDK_ALGORITHM_VERSION = (
-    f"{ALGORITHM_VERSION}+{_EARLY_SNDK_VERSION}"
-)
-_EARLY_SNDK_REQUIRED_SYMBOLS = ("SNDK.US",)
+_EARLY_EXTENSION_MINIMUM_DISPLACEMENT_SESSIONS = 3
+_EARLY_EXTENSION_MINIMUM_OUTPERFORMANCE_RATE = 0.55
 _REVERSAL_SOURCE = "OPENING_REVERSAL"
 _NON_COMPARABLE_SKIP_REASONS = frozenset(
     {
@@ -102,6 +99,14 @@ _NON_COMPARABLE_SKIP_REASONS = frozenset(
     }
 )
 
+_EarlyExtensionVariantName = Literal[
+    "EARLY_RKLB_CHALLENGER",
+    "EARLY_WDAY_CHALLENGER",
+    "EARLY_SNDK_CHALLENGER",
+    "EARLY_ALAB_CHALLENGER",
+    "EARLY_LITE_CHALLENGER",
+    "EARLY_QCOM_CHALLENGER",
+]
 _VariantName = Literal[
     "INCUMBENT",
     "REVERSAL_CHALLENGER",
@@ -110,7 +115,12 @@ _VariantName = Literal[
     "LAST5_POSITIVE_CHALLENGER",
     "LAST5_ONLY_CHALLENGER",
     "EARLY_BROAD_CHALLENGER",
+    "EARLY_RKLB_CHALLENGER",
+    "EARLY_WDAY_CHALLENGER",
     "EARLY_SNDK_CHALLENGER",
+    "EARLY_ALAB_CHALLENGER",
+    "EARLY_LITE_CHALLENGER",
+    "EARLY_QCOM_CHALLENGER",
 ]
 _SignalModel = Literal["MOMENTUM", "REVERSAL"]
 
@@ -157,8 +167,50 @@ class _UniverseVariant:
     selection_run_id: int | None = None
 
 
+@dataclass(frozen=True)
+class _EarlyExtensionSpec:
+    variant: _EarlyExtensionVariantName
+    symbol: str
+
+    @property
+    def ticker(self) -> str:
+        return self.symbol.removesuffix(".US")
+
+    @property
+    def version(self) -> str:
+        return (
+            f"active-broad-plus-{self.ticker.lower()}-3m-signal-"
+            f"120m-hold-{_EARLY_EXTENSION_COHORT_VERSION}"
+        )
+
+    @property
+    def algorithm_version(self) -> str:
+        return f"{ALGORITHM_VERSION}+{self.version}"
+
+    @property
+    def universe_source(self) -> str:
+        return f"OPENING_EARLY_{self.ticker}"
+
+
+# Frozen from the discovery slice only: the six highest positive cumulative
+# extension deltas among candidates with at least four actual baseline
+# displacements. Holdout results did not determine membership, so observations
+# after this deployment remain causal.
+_EARLY_EXTENSION_SPECS = (
+    _EarlyExtensionSpec("EARLY_RKLB_CHALLENGER", "RKLB.US"),
+    _EarlyExtensionSpec("EARLY_WDAY_CHALLENGER", "WDAY.US"),
+    _EarlyExtensionSpec("EARLY_SNDK_CHALLENGER", "SNDK.US"),
+    _EarlyExtensionSpec("EARLY_ALAB_CHALLENGER", "ALAB.US"),
+    _EarlyExtensionSpec("EARLY_LITE_CHALLENGER", "LITE.US"),
+    _EarlyExtensionSpec("EARLY_QCOM_CHALLENGER", "QCOM.US"),
+)
+_EARLY_EXTENSION_VARIANTS = frozenset(
+    spec.variant for spec in _EARLY_EXTENSION_SPECS
+)
+
+
 class OpeningMomentumShadowService:
-    """Collect one daily cross-sectional observation without placing orders."""
+    """Collect paired daily cross-sectional observations without orders."""
 
     def __init__(
         self,
@@ -688,27 +740,24 @@ class OpeningMomentumShadowService:
             symbols=active_broad_symbols,
             selection_run_id=run.id,
         ))
-        early_sndk_identity = identities_by_variant[
-            "EARLY_SNDK_CHALLENGER"
-        ]
-        variants.append(_UniverseVariant(
-            variant=early_sndk_identity.variant,
-            algorithm_version=early_sndk_identity.algorithm_version,
-            config_version=early_sndk_identity.config_version,
-            universe_source=early_sndk_identity.universe_source,
-            decision_config=early_sndk_identity.decision_config,
-            minimum_data_coverage=(
-                early_sndk_identity.minimum_data_coverage
-            ),
-            required_symbols=(
-                early_sndk_identity.required_symbols
-            ),
-            symbols=tuple(dict.fromkeys(
-                active_broad_symbols
-                + _EARLY_SNDK_REQUIRED_SYMBOLS
-            )),
-            selection_run_id=run.id,
-        ))
+        for spec in _EARLY_EXTENSION_SPECS:
+            identity = identities_by_variant[spec.variant]
+            variants.append(_UniverseVariant(
+                variant=identity.variant,
+                algorithm_version=identity.algorithm_version,
+                config_version=identity.config_version,
+                universe_source=identity.universe_source,
+                decision_config=identity.decision_config,
+                minimum_data_coverage=(
+                    identity.minimum_data_coverage
+                ),
+                required_symbols=identity.required_symbols,
+                symbols=tuple(dict.fromkeys(
+                    active_broad_symbols
+                    + identity.required_symbols
+                )),
+                selection_run_id=run.id,
+            ))
         reversal_identity = identities_by_variant[
             "REVERSAL_CHALLENGER"
         ]
@@ -782,20 +831,21 @@ class OpeningMomentumShadowService:
                     _EARLY_BROAD_MINIMUM_COVERAGE
                 ),
             ))
-            variants.append(_UniverseVariant(
-                variant="EARLY_SNDK_CHALLENGER",
-                algorithm_version=_EARLY_SNDK_ALGORITHM_VERSION,
-                config_version=self._evidence_config_version(
-                    f"{early_config.version_hash()}:"
-                    f"{_EARLY_SNDK_VERSION}"
-                ),
-                universe_source=_EARLY_SNDK_SOURCE,
-                decision_config=early_config,
-                minimum_data_coverage=(
-                    _EARLY_BROAD_MINIMUM_COVERAGE
-                ),
-                required_symbols=_EARLY_SNDK_REQUIRED_SYMBOLS,
-            ))
+            for spec in _EARLY_EXTENSION_SPECS:
+                variants.append(_UniverseVariant(
+                    variant=spec.variant,
+                    algorithm_version=spec.algorithm_version,
+                    config_version=self._evidence_config_version(
+                        f"{early_config.version_hash()}:"
+                        f"{spec.version}"
+                    ),
+                    universe_source=spec.universe_source,
+                    decision_config=early_config,
+                    minimum_data_coverage=(
+                        _EARLY_BROAD_MINIMUM_COVERAGE
+                    ),
+                    required_symbols=(spec.symbol,),
+                ))
             variants.append(
                 _UniverseVariant(
                     variant="REVERSAL_CHALLENGER",
@@ -1077,6 +1127,9 @@ class OpeningMomentumShadowService:
 
         responses: list[OpeningMomentumShadowVariantResponse] = []
         for identity in identities:
+            is_early_extension = (
+                identity.variant in _EARLY_EXTENSION_VARIANTS
+            )
             identity_rows_by_date = rows_by_date[
                 identity.config_version
             ]
@@ -1086,13 +1139,13 @@ class OpeningMomentumShadowService:
             ] | None
             if identity.variant == "INCUMBENT":
                 comparison_baseline = None
-            elif identity.variant == "EARLY_SNDK_CHALLENGER":
+            elif is_early_extension:
                 comparison_baseline = "EARLY_BROAD_CHALLENGER"
             else:
                 comparison_baseline = "INCUMBENT"
             comparison_identity = (
                 identities_by_variant["EARLY_BROAD_CHALLENGER"]
-                if identity.variant == "EARLY_SNDK_CHALLENGER"
+                if is_early_extension
                 else incumbent_identity
             )
             comparison_rows_by_date = rows_by_date[
@@ -1155,6 +1208,21 @@ class OpeningMomentumShadowService:
                         asdict(comparison)
                     )
                 )
+                if is_early_extension:
+                    comparison_response = (
+                        self._apply_extension_evidence_gate(
+                            comparison_response,
+                            comparison_rows_by_date=(
+                                comparison_rows_by_date
+                            ),
+                            challenger_rows_by_date=(
+                                identity_rows_by_date
+                            ),
+                            resolved_dates=(
+                                resolved_comparison_dates
+                            ),
+                        )
+                    )
             responses.append(
                 OpeningMomentumShadowVariantResponse(
                     variant=identity.variant,
@@ -1198,6 +1266,120 @@ class OpeningMomentumShadowService:
                 )
             )
         return responses
+
+    @classmethod
+    def _apply_extension_evidence_gate(
+        cls,
+        comparison: OpeningMomentumPairedComparisonResponse,
+        *,
+        comparison_rows_by_date: dict[
+            date, OpeningMomentumShadowRun
+        ],
+        challenger_rows_by_date: dict[
+            date, OpeningMomentumShadowRun
+        ],
+        resolved_dates: list[date],
+    ) -> OpeningMomentumPairedComparisonResponse:
+        displacement_deltas: list[float] = []
+        for session_date in resolved_dates:
+            baseline_row = comparison_rows_by_date[session_date]
+            challenger_row = challenger_rows_by_date[session_date]
+            if not cls._policy_displaced(
+                baseline_row,
+                challenger_row,
+            ):
+                continue
+            baseline_return = cls._paired_policy_return(baseline_row)
+            challenger_return = cls._paired_policy_return(
+                challenger_row
+            )
+            if baseline_return is None or challenger_return is None:
+                continue
+            displacement_deltas.append(
+                challenger_return - baseline_return
+            )
+
+        displacement_sessions = len(displacement_deltas)
+        displacement_outperformance_rate = (
+            sum(value > 0 for value in displacement_deltas)
+            / displacement_sessions
+            if displacement_sessions
+            else 0.0
+        )
+        evidence_gate_passed = (
+            displacement_sessions
+            >= _EARLY_EXTENSION_MINIMUM_DISPLACEMENT_SESSIONS
+        )
+        promotion_ready = (
+            comparison.resolved_sessions
+            >= comparison.minimum_promotion_sessions
+            and evidence_gate_passed
+            and comparison.confidence_lower_bps is not None
+            and comparison.confidence_lower_bps > 0
+            and displacement_outperformance_rate
+            >= _EARLY_EXTENSION_MINIMUM_OUTPERFORMANCE_RATE
+            and comparison.risk_guard_passed
+        )
+        if promotion_ready:
+            recommendation = "PROMOTION_CANDIDATE"
+        elif not evidence_gate_passed:
+            recommendation = "COLLECTING"
+        elif (
+            comparison.resolved_sessions
+            >= comparison.minimum_promotion_sessions
+            and comparison.confidence_upper_bps is not None
+            and comparison.confidence_upper_bps < 0
+        ):
+            recommendation = "UNDERPERFORMING"
+        elif (
+            comparison.resolved_sessions
+            < comparison.minimum_promotion_sessions
+            and comparison.mean_delta_bps > 0
+        ):
+            recommendation = "EARLY_LEADER"
+        elif comparison.mean_delta_bps < 0:
+            recommendation = "LAGGING"
+        else:
+            recommendation = "INCONCLUSIVE"
+
+        payload = comparison.model_dump()
+        payload.update({
+            "policy_displacement_sessions": displacement_sessions,
+            "minimum_policy_displacement_sessions": (
+                _EARLY_EXTENSION_MINIMUM_DISPLACEMENT_SESSIONS
+            ),
+            "displacement_outperformance_rate": (
+                displacement_outperformance_rate
+            ),
+            "evidence_gate_passed": evidence_gate_passed,
+            "promotion_ready": promotion_ready,
+            "recommendation": recommendation,
+        })
+        return OpeningMomentumPairedComparisonResponse.model_validate(
+            payload
+        )
+
+    @classmethod
+    def _policy_displaced(
+        cls,
+        baseline: OpeningMomentumShadowRun,
+        challenger: OpeningMomentumShadowRun,
+    ) -> bool:
+        baseline_return = cls._paired_policy_return(baseline)
+        challenger_return = cls._paired_policy_return(challenger)
+        if baseline_return is None or challenger_return is None:
+            return False
+        return (
+            baseline.status != challenger.status
+            or baseline.candidate_symbol
+            != challenger.candidate_symbol
+            or not math.isclose(
+                baseline_return,
+                challenger_return,
+                rel_tol=0.0,
+                abs_tol=1e-9,
+            )
+        )
 
     def _metrics(
         self,

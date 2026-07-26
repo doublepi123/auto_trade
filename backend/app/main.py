@@ -963,7 +963,7 @@ def _opening_momentum_shadow_tick_sync() -> None:
 
 
 async def _opening_momentum_shadow_cron() -> None:
-    """Poll the frozen once-daily opening-momentum shadow."""
+    """Poll the frozen daily opening-momentum shadow variants."""
     while True:
         await asyncio.sleep(15)
         async with _opening_momentum_shadow_lock:

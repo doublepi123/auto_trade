@@ -1892,6 +1892,10 @@ export interface OpeningMomentumPairedComparison {
   max_drawdown_delta_bps: number
   risk_guard_passed: boolean
   minimum_promotion_sessions: number
+  policy_displacement_sessions: number | null
+  minimum_policy_displacement_sessions: number | null
+  displacement_outperformance_rate: number | null
+  evidence_gate_passed: boolean | null
   promotion_ready: boolean
   recommendation: OpeningMomentumRecommendation
 }
@@ -1905,7 +1909,12 @@ export interface OpeningMomentumShadowVariant {
     | 'LAST5_POSITIVE_CHALLENGER'
     | 'LAST5_ONLY_CHALLENGER'
     | 'EARLY_BROAD_CHALLENGER'
+    | 'EARLY_RKLB_CHALLENGER'
+    | 'EARLY_WDAY_CHALLENGER'
     | 'EARLY_SNDK_CHALLENGER'
+    | 'EARLY_ALAB_CHALLENGER'
+    | 'EARLY_LITE_CHALLENGER'
+    | 'EARLY_QCOM_CHALLENGER'
   universe_source: string
   algorithm_version: string
   config_version: string

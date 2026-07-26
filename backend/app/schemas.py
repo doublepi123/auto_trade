@@ -576,6 +576,10 @@ class OpeningMomentumPairedComparisonResponse(BaseModel):
     max_drawdown_delta_bps: float = 0.0
     risk_guard_passed: bool = False
     minimum_promotion_sessions: int = 20
+    policy_displacement_sessions: Optional[int] = None
+    minimum_policy_displacement_sessions: Optional[int] = None
+    displacement_outperformance_rate: Optional[float] = None
+    evidence_gate_passed: Optional[bool] = None
     promotion_ready: bool = False
     recommendation: Literal[
         "COLLECTING",
@@ -596,7 +600,12 @@ class OpeningMomentumShadowVariantResponse(BaseModel):
         "LAST5_POSITIVE_CHALLENGER",
         "LAST5_ONLY_CHALLENGER",
         "EARLY_BROAD_CHALLENGER",
+        "EARLY_RKLB_CHALLENGER",
+        "EARLY_WDAY_CHALLENGER",
         "EARLY_SNDK_CHALLENGER",
+        "EARLY_ALAB_CHALLENGER",
+        "EARLY_LITE_CHALLENGER",
+        "EARLY_QCOM_CHALLENGER",
     ]
     universe_source: str
     algorithm_version: str
