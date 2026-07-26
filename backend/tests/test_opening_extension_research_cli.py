@@ -145,6 +145,23 @@ class _PagedProvider:
         return [bar for bar in self.bars if bar.timestamp >= after][:count]
 
 
+class _ClampedProvider(_PagedProvider):
+    def get_history_candlesticks_by_offset(
+        self,
+        symbol: str,
+        period: str,
+        count: int,
+        after: datetime,
+    ) -> list[BrokerCandle]:
+        page = super().get_history_candlesticks_by_offset(
+            symbol,
+            period,
+            count,
+            after,
+        )
+        return page or [self.bars[-1]]
+
+
 def _broker_bar(timestamp: datetime, price: float) -> BrokerCandle:
     return BrokerCandle(
         timestamp=timestamp,
@@ -178,6 +195,30 @@ def test_history_fetch_pages_and_keeps_only_opening_window() -> None:
     ]
     assert len(provider.calls) == 4
     assert provider.calls[-1] == _timestamp(session_date, 201)
+
+
+def test_history_fetch_bounds_repeated_terminal_page() -> None:
+    session_date = date(2026, 7, 6)
+    provider = _ClampedProvider(tuple(
+        _broker_bar(_timestamp(session_date, offset), 100.0 + offset)
+        for offset in (0, 1, 2, 3, 200)
+    ))
+
+    result = _fetch_symbol_bars(
+        provider,
+        "AAA.US",
+        start_date=session_date,
+        end_date=session_date,
+        retained_minutes_after_open=3,
+        page_size=2,
+    )
+
+    assert len(result) == 4
+    assert len(provider.calls) == 5
+    assert provider.calls[-2:] == [
+        _timestamp(session_date, 201),
+        _timestamp(session_date, 201),
+    ]
 
 
 def test_cache_round_trip_and_scope_mismatch(tmp_path: Path) -> None:

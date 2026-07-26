@@ -146,6 +146,7 @@ def _fetch_symbol_bars(
         tzinfo=session.timezone,
     ).astimezone(timezone.utc)
     cursor = start
+    non_advancing_pages = 0
     retained: dict[datetime, RawMinuteBar] = {}
     while cursor < stop:
         page = provider.get_history_candlesticks_by_offset(
@@ -159,9 +160,11 @@ def _fetch_symbol_bars(
         timestamps = tuple(_as_utc(item.timestamp) for item in page)
         latest = max(timestamps)
         if latest < cursor:
-            raise RuntimeError(
-                f"historical candle cursor did not advance for {symbol}"
-            )
+            non_advancing_pages += 1
+            if non_advancing_pages >= 2:
+                break
+            continue
+        non_advancing_pages = 0
         for candle, timestamp in zip(page, timestamps, strict=True):
             if not start <= timestamp < stop:
                 continue
