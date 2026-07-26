@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 
 from app.config import settings
+from app.core.market_calendar import trade_day_for
 from app.models import (
     StrategyConfig,
     StrategyV2ShadowConfig,
@@ -26,6 +27,7 @@ from app.services.universe_selection_service import (
     minimum_peer_observation_dollar_volume,
     observation_pool_overrides,
     select_exploration_candidates,
+    validated_inverse_volatility_observation_symbols,
 )
 
 _TERMINAL_RUN_STATUSES = ("COMPLETE", "DEGRADED")
@@ -143,7 +145,13 @@ class UniversePromotionService:
         context = self._observation_context()
         if context is None:
             return None
-        run, observed, exploration_symbols, trading_symbol = context
+        (
+            run,
+            observed,
+            exploration_symbols,
+            trading_symbol,
+            _,
+        ) = context
         enabled_shadow_symbols = {
             row.symbol
             for row in self.db.query(StrategyV2ShadowConfig)
@@ -294,11 +302,13 @@ class UniversePromotionService:
         )
 
     def get_observed_symbols(self) -> frozenset[str]:
-        """Return the current selected, exploration, and trading observations."""
+        """Return all current daily and frozen-rotation observations."""
         context = self._observation_context()
         if context is None:
             return frozenset()
-        return frozenset(candidate.symbol for candidate in context[1])
+        return frozenset(
+            candidate.symbol for candidate in context[1]
+        ) | context[4]
 
     def _observation_context(
         self,
@@ -307,6 +317,7 @@ class UniversePromotionService:
         list[UniverseSelectionCandidate],
         set[str],
         str,
+        frozenset[str],
     ] | None:
         run = self._latest_terminal_run()
         if run is None:
@@ -331,6 +342,14 @@ class UniversePromotionService:
         )
         trading_symbol = strategy.symbol if strategy is not None else ""
         observation_overrides = observation_pool_overrides(self.db)
+        rotation_observation_symbols = (
+            validated_inverse_volatility_observation_symbols(
+                run,
+                candidates,
+                session_date=trade_day_for("US", self.now),
+            )
+            - observation_overrides.unobservable_symbols
+        )
         exploration_symbols = {
             candidate.symbol
             for candidate in select_exploration_candidates(
@@ -367,7 +386,13 @@ class UniversePromotionService:
                 or candidate.symbol == trading_symbol
             )
         ]
-        return run, observed, exploration_symbols, trading_symbol
+        return (
+            run,
+            observed,
+            exploration_symbols,
+            trading_symbol,
+            rotation_observation_symbols,
+        )
 
     def _latest_terminal_run(self) -> UniverseSelectionRun | None:
         return (
@@ -375,6 +400,7 @@ class UniversePromotionService:
             .filter(
                 UniverseSelectionRun.status.in_(_TERMINAL_RUN_STATUSES),
                 UniverseSelectionRun.completed_at.is_not(None),
+                UniverseSelectionRun.completed_at <= self.now,
             )
             .order_by(
                 UniverseSelectionRun.as_of_date.desc(),

@@ -13,6 +13,11 @@ from sqlalchemy.pool import StaticPool
 
 from app.api import universe as universe_api
 from app.database import get_db
+from app.domain.universe_selection import (
+    DIVERSIFIED_INVERSE_VOLATILITY_VARIANT,
+    ROTATION_ALGORITHM_VERSION,
+    ROTATION_WALK_FORWARD_VERSION,
+)
 from app.models import (
     Base,
     StrategyConfig,
@@ -77,6 +82,50 @@ def _run(
     return run
 
 
+def _validated_rotation_parameters(
+    targets: tuple[tuple[str, float], ...],
+) -> str:
+    assert len(targets) == 4
+    variant_name = DIVERSIFIED_INVERSE_VOLATILITY_VARIANT.name
+    return json.dumps({
+        "rotation_evaluation": {
+            "algorithm_version": ROTATION_WALK_FORWARD_VERSION,
+            "status": "COMPLETE",
+            "validated_challenger_variant": variant_name,
+            "variants": [{
+                "variant": {"name": variant_name},
+                "validation_passed": True,
+                "expanding_validation_passed": True,
+            }],
+        },
+        "rotation_weighting_challenger_registration": {
+            "cohort_month": "2026-07-01",
+            "rotation_algorithm_version": ROTATION_ALGORITHM_VERSION,
+            "variant_name": variant_name,
+            "signal_date": "2026-06-30",
+            "registered_as_of_date": "2026-07-23",
+            "forward_eligible": False,
+            "target_signals": [
+                {
+                    "symbol": symbol,
+                    "rank": rank,
+                    "risk_group": "Test",
+                    "momentum_pct": score,
+                    "sma_price": 100.0,
+                    "above_sma": True,
+                    "score": score,
+                    "signal_spread_bps": 1.0,
+                    "target_weight_pct": 25.0,
+                }
+                for rank, (symbol, score) in enumerate(
+                    targets,
+                    start=1,
+                )
+            ],
+        },
+    })
+
+
 def _candidate(
     db: Session,
     run: UniverseSelectionRun,
@@ -87,7 +136,19 @@ def _candidate(
     score: float,
     sector: str = "Technology",
     exclusion_reasons: tuple[str, ...] = (),
+    rotation_rank: int | None = None,
+    rotation_score: float | None = None,
 ) -> None:
+    metrics_json = "{}"
+    if rotation_rank is not None and rotation_score is not None:
+        metrics_json = json.dumps({
+            "rotation": {
+                "algorithm_version": ROTATION_ALGORITHM_VERSION,
+                "selected": True,
+                "rank": rotation_rank,
+                "score": rotation_score,
+            }
+        })
     db.add(
         UniverseSelectionCandidate(
             run_id=run.id,
@@ -99,7 +160,7 @@ def _candidate(
             selected=selected,
             rank=rank,
             score=score,
-            metrics_json="{}",
+            metrics_json=metrics_json,
             exclusion_reasons_json=json.dumps(exclusion_reasons),
             created_at=run.created_at,
         )
@@ -449,6 +510,88 @@ def test_readiness_includes_exploration_and_unselected_trading_target() -> None:
             item.automatic_promotion_allowed is False
             for item in response.items
         )
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_observed_symbols_include_validated_rotation_shadow_targets() -> None:
+    engine, db = _db()
+    targets = (
+        ("INTC.US", 100.0),
+        ("CAT.US", 90.0),
+        ("GS.US", 80.0),
+        ("AEP.US", 70.0),
+    )
+    try:
+        run = _run(
+            db,
+            as_of_date=date(2026, 7, 23),
+            status="COMPLETE",
+            created_at=_NOW - timedelta(hours=1),
+        )
+        run.parameters_json = _validated_rotation_parameters(targets)
+        _candidate(
+            db,
+            run,
+            symbol="AAPL.US",
+            selected=True,
+            rank=1,
+            score=95.0,
+        )
+        for rotation_rank, (symbol, score) in enumerate(
+            targets,
+            start=1,
+        ):
+            _candidate(
+                db,
+                run,
+                symbol=symbol,
+                selected=False,
+                rank=None,
+                score=score,
+                exclusion_reasons=("ATR_OUTSIDE_RANGE",),
+                rotation_rank=rotation_rank,
+                rotation_score=score,
+            )
+        db.add(
+            StrategyV2ShadowConfig(
+                symbol="GS.US",
+                enabled=False,
+                universe_managed=False,
+            )
+        )
+        db.commit()
+
+        observed = UniversePromotionService(
+            db,
+            now=_NOW,
+        ).get_observed_symbols()
+
+        assert observed == frozenset({
+            "AAPL.US",
+            "INTC.US",
+            "CAT.US",
+            "AEP.US",
+        })
+
+        intc = db.query(UniverseSelectionCandidate).filter(
+            UniverseSelectionCandidate.run_id == run.id,
+            UniverseSelectionCandidate.symbol == "INTC.US",
+        ).one()
+        intc.metrics_json = json.dumps({
+            "rotation": {
+                "algorithm_version": ROTATION_ALGORITHM_VERSION,
+                "selected": True,
+                "rank": 1,
+                "score": 99.0,
+            }
+        })
+        db.commit()
+        assert UniversePromotionService(
+            db,
+            now=_NOW,
+        ).get_observed_symbols() == frozenset({"AAPL.US"})
     finally:
         db.close()
         engine.dispose()

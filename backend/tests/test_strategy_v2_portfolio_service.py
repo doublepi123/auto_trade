@@ -1432,6 +1432,18 @@ class TestStrategyV2PortfolioService:
                 == {}
             )
 
+            self._validated_inverse_volatility_registration(db)
+            db.refresh(run)
+            run.status = "DEGRADED"
+            assert (
+                StrategyV2PortfolioService
+                ._validated_inverse_volatility_targets(
+                    run,
+                    session_date=_FIRST_SIGNAL.date(),
+                )
+                == {}
+            )
+
     def test_risk_group_routes_use_causal_inclusive_and_leave_one_out_medians(
         self,
     ) -> None:

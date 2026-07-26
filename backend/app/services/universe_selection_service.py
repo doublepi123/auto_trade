@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.core.broker import BrokerCandle
+from app.core.market_calendar import trade_day_for
 from app.domain.strategy_v2 import RISK_GROUP_RELATIVE_MIN_PEERS
 from app.domain.universe_selection import (
     CATALOG_SOURCE_VERSION,
@@ -50,6 +51,7 @@ from app.domain.universe_selection import (
     latest_complete_session_date,
     next_cohort_month,
     parse_frozen_rotation_selection,
+    parse_validated_inverse_volatility_targets,
     risk_group_for_sector,
     rotation_cohort_month,
     select_candidates,
@@ -189,6 +191,49 @@ def observation_pool_overrides(
         already_observed_symbols=frozenset(already_observed),
         unobservable_symbols=frozenset(unobservable),
     )
+
+
+def validated_inverse_volatility_observation_symbols(
+    run: UniverseSelectionRun,
+    candidates: Sequence[UniverseSelectionCandidate],
+    *,
+    session_date: date,
+) -> frozenset[str]:
+    """Return a fully consistent frozen rotation cohort for observation."""
+    if run.status != "COMPLETE":
+        return frozenset()
+    targets = parse_validated_inverse_volatility_targets(
+        run.parameters_json,
+        run_as_of_date=run.as_of_date,
+        session_date=session_date,
+    )
+    if not targets:
+        return frozenset()
+    candidates_by_symbol: dict[str, UniverseSelectionCandidate] = {}
+    for candidate in candidates:
+        if candidate.run_id != run.id or candidate.symbol not in targets:
+            continue
+        if candidate.symbol in candidates_by_symbol:
+            return frozenset()
+        candidates_by_symbol[candidate.symbol] = candidate
+    if set(candidates_by_symbol) != set(targets):
+        return frozenset()
+    for symbol, (target_rank, target_score, _) in targets.items():
+        frozen = parse_frozen_rotation_selection(
+            candidates_by_symbol[symbol].metrics_json
+        )
+        if (
+            frozen is None
+            or frozen[0] != target_rank
+            or not math.isclose(
+                frozen[1],
+                target_score,
+                rel_tol=0.0,
+                abs_tol=1e-9,
+            )
+        ):
+            return frozenset()
+    return frozenset(targets)
 
 
 def minimum_peer_observation_dollar_volume(
@@ -2121,6 +2166,13 @@ class UniverseSelectionService:
         exploration_symbols = tuple(
             item.symbol for item in exploration
         )
+        rotation_observation_symbols = (
+            validated_inverse_volatility_observation_symbols(
+                run,
+                items,
+                session_date=trade_day_for("US", self.now),
+            )
+        )
         if not should_apply:
             return UniverseRefreshResult(
                 run=run,
@@ -2135,6 +2187,7 @@ class UniverseSelectionService:
             self._sync_observation_shadows(
                 observed_symbols=(
                     {item.symbol for item in observed}
+                    | set(rotation_observation_symbols)
                     | set(
                         observation_overrides.already_observed_symbols
                     )

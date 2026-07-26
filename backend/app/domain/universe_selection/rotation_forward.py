@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 from bisect import bisect_right
 from dataclasses import asdict, dataclass, replace
@@ -10,8 +11,10 @@ from app.core.holiday_calendar import is_market_closed
 from app.core.market_calendar import get_session
 from app.domain.universe_selection.catalog import IndexCandidate
 from app.domain.universe_selection.rotation_walk_forward import (
+    DIVERSIFIED_INVERSE_VOLATILITY_VARIANT,
     DIVERSIFIED_ROTATION_VARIANT,
     ROTATION_BENCHMARK_SYMBOLS,
+    ROTATION_WALK_FORWARD_VERSION,
     RotationVariant,
     rotation_target_weights,
 )
@@ -268,6 +271,126 @@ class RotationCohortRegistration:
             ),
             target_signals=tuple(signals),
         )
+
+
+def parse_validated_inverse_volatility_targets(
+    parameters_json: str,
+    *,
+    run_as_of_date: date,
+    session_date: date,
+) -> dict[str, tuple[int, float, float]]:
+    """Parse the exact validated inverse-volatility cohort for a session."""
+    if run_as_of_date > session_date:
+        return {}
+    try:
+        parameters = json.loads(parameters_json)
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(parameters, dict):
+        return {}
+    evaluation = parameters.get("rotation_evaluation")
+    expected_variant = DIVERSIFIED_INVERSE_VOLATILITY_VARIANT
+    if (
+        not isinstance(evaluation, dict)
+        or evaluation.get("algorithm_version")
+        != ROTATION_WALK_FORWARD_VERSION
+        or evaluation.get("status") != "COMPLETE"
+        or evaluation.get("validated_challenger_variant")
+        != expected_variant.name
+    ):
+        return {}
+    raw_variants = evaluation.get("variants")
+    if not isinstance(raw_variants, list):
+        return {}
+    validated_variants = [
+        item
+        for item in raw_variants
+        if isinstance(item, dict)
+        and isinstance(item.get("variant"), dict)
+        and item["variant"].get("name") == expected_variant.name
+    ]
+    if (
+        len(validated_variants) != 1
+        or validated_variants[0].get("validation_passed") is not True
+        or validated_variants[0].get("expanding_validation_passed")
+        is not True
+    ):
+        return {}
+
+    cohort_month = session_date.replace(day=1)
+    registrations: list[RotationCohortRegistration] = []
+    for key in (
+        "rotation_weighting_challenger_registration",
+        "rotation_next_weighting_challenger_registration",
+    ):
+        raw_registration = parameters.get(key)
+        if not isinstance(raw_registration, dict):
+            continue
+        raw_signals = raw_registration.get("target_signals")
+        if (
+            not isinstance(raw_signals, list)
+            or not raw_signals
+            or any(
+                not isinstance(item, dict)
+                or isinstance(item.get("target_weight_pct"), bool)
+                or not isinstance(
+                    item.get("target_weight_pct"),
+                    (int, float),
+                )
+                or not math.isfinite(float(item["target_weight_pct"]))
+                or float(item["target_weight_pct"]) <= 0
+                for item in raw_signals
+            )
+        ):
+            return {}
+        try:
+            registration = RotationCohortRegistration.from_dict(
+                raw_registration
+            )
+        except (KeyError, TypeError, ValueError):
+            return {}
+        if registration.cohort_month != cohort_month:
+            continue
+        if (
+            registration.rotation_algorithm_version
+            != ROTATION_ALGORITHM_VERSION
+            or registration.variant_name != expected_variant.name
+            or registration.registered_as_of_date > run_as_of_date
+            or registration.signal_date > run_as_of_date
+        ):
+            return {}
+        registrations.append(registration)
+    if not registrations:
+        return {}
+    registration = registrations[0]
+    if any(item != registration for item in registrations[1:]):
+        return {}
+    signals = registration.target_signals
+    if not 0 < len(signals) <= expected_variant.max_selected:
+        return {}
+    if not math.isclose(
+        sum(signal.target_weight_pct for signal in signals),
+        100.0,
+        rel_tol=0.0,
+        abs_tol=1e-6,
+    ):
+        return {}
+    result: dict[str, tuple[int, float, float]] = {}
+    for signal in signals:
+        symbol = signal.symbol.strip().upper()
+        if (
+            symbol != signal.symbol
+            or signal.target_weight_pct
+            > expected_variant.max_position_weight_pct + 1e-9
+            or symbol in result
+        ):
+            return {}
+        result[symbol] = (
+            signal.rank,
+            signal.score,
+            signal.target_weight_pct,
+        )
+    return result
 
 
 @dataclass(frozen=True)

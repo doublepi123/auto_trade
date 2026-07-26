@@ -13,7 +13,9 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.core.broker import BrokerCandle, Quote
 from app.core.holiday_calendar import is_market_closed
 from app.domain.universe_selection import (
+    DIVERSIFIED_INVERSE_VOLATILITY_VARIANT,
     ROTATION_ALGORITHM_VERSION,
+    ROTATION_WALK_FORWARD_VERSION,
     IndexCandidate,
     UniverseSelectionConfig,
     risk_group_for_sector,
@@ -69,6 +71,50 @@ def _config() -> UniverseSelectionConfig:
         min_atr_pct_14d=0.1,
         max_atr_pct_14d=20.0,
     )
+
+
+def _validated_rotation_parameters(
+    targets: tuple[tuple[str, float], ...],
+) -> str:
+    assert len(targets) == 4
+    variant_name = DIVERSIFIED_INVERSE_VOLATILITY_VARIANT.name
+    return json.dumps({
+        "rotation_evaluation": {
+            "algorithm_version": ROTATION_WALK_FORWARD_VERSION,
+            "status": "COMPLETE",
+            "validated_challenger_variant": variant_name,
+            "variants": [{
+                "variant": {"name": variant_name},
+                "validation_passed": True,
+                "expanding_validation_passed": True,
+            }],
+        },
+        "rotation_weighting_challenger_registration": {
+            "cohort_month": "2026-07-01",
+            "rotation_algorithm_version": ROTATION_ALGORITHM_VERSION,
+            "variant_name": variant_name,
+            "signal_date": "2026-06-30",
+            "registered_as_of_date": "2026-07-23",
+            "forward_eligible": False,
+            "target_signals": [
+                {
+                    "symbol": symbol,
+                    "rank": rank,
+                    "risk_group": "Test",
+                    "momentum_pct": score,
+                    "sma_price": 100.0,
+                    "above_sma": True,
+                    "score": score,
+                    "signal_spread_bps": 1.0,
+                    "target_weight_pct": 25.0,
+                }
+                for rank, (symbol, score) in enumerate(
+                    targets,
+                    start=1,
+                )
+            ],
+        },
+    })
 
 
 def _daily_bars(symbol: str) -> list[BrokerCandle]:
@@ -1947,6 +1993,101 @@ def test_reconcile_disables_shadow_owned_by_removed_universe_item() -> None:
         assert config.enabled is False
         assert config.universe_managed is True
         assert result.shadow_disabled_symbols == ("REMOVE.US",)
+    finally:
+        db.close()
+
+
+def test_reconcile_keeps_validated_rotation_targets_shadow_only() -> None:
+    db = _db()
+    targets = (
+        ("INTC.US", 100.0),
+        ("CAT.US", 90.0),
+        ("GS.US", 80.0),
+        ("AEP.US", 70.0),
+    )
+    try:
+        run = UniverseSelectionRun(
+            as_of_date=_NOW.date() - timedelta(days=1),
+            algorithm_version="selector-v1",
+            source_version="catalog-v1",
+            status="COMPLETE",
+            candidate_count=5,
+            evaluable_count=5,
+            selected_count=1,
+            coverage_ratio=1.0,
+            parameters_json=_validated_rotation_parameters(targets),
+            started_at=_NOW - timedelta(hours=2),
+            completed_at=_NOW - timedelta(hours=1),
+            created_at=_NOW - timedelta(hours=2),
+        )
+        db.add(run)
+        db.flush()
+        db.add(
+            UniverseSelectionCandidate(
+                run_id=run.id,
+                symbol="AAPL.US",
+                sector="Technology Hardware",
+                selected=True,
+                rank=1,
+                score=95.0,
+            )
+        )
+        for rank, (symbol, score) in enumerate(targets, start=1):
+            db.add(
+                UniverseSelectionCandidate(
+                    run_id=run.id,
+                    symbol=symbol,
+                    sector="Test",
+                    selected=False,
+                    score=score,
+                    metrics_json=json.dumps({
+                        "rotation": {
+                            "algorithm_version": (
+                                ROTATION_ALGORITHM_VERSION
+                            ),
+                            "selected": True,
+                            "rank": rank,
+                            "score": score,
+                        }
+                    }),
+                    exclusion_reasons_json=json.dumps([
+                        "ATR_OUTSIDE_RANGE"
+                    ]),
+                )
+            )
+        db.add(
+            StrategyV2ShadowConfig(
+                symbol="INTC.US",
+                enabled=False,
+                universe_managed=True,
+            )
+        )
+        db.commit()
+
+        service = _service(db, _FakeBroker(), enable_shadow=True)
+        result = service._result_for_existing(
+            run,
+            service.items_for_run(run.id),
+            should_apply=True,
+        )
+
+        watchlist_symbols = {
+            row.symbol for row in db.query(WatchlistItem).all()
+        }
+        shadow_rows = {
+            row.symbol: row
+            for row in db.query(StrategyV2ShadowConfig).all()
+        }
+        assert watchlist_symbols == {"AAPL.US"}
+        assert result.exploration_symbols == ()
+        assert set(result.shadow_enabled_symbols) >= {
+            symbol for symbol, _ in targets
+        }
+        assert all(
+            shadow_rows[symbol].enabled
+            and shadow_rows[symbol].universe_managed
+            for symbol, _ in targets
+        )
     finally:
         db.close()
 

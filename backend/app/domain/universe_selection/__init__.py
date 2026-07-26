@@ -56,6 +56,7 @@ from app.domain.universe_selection.rotation_forward import (
     evaluate_rotation_forward,
     is_last_us_session_of_month,
     next_cohort_month,
+    parse_validated_inverse_volatility_targets,
     rotation_cohort_month,
     unavailable_rotation_forward_snapshot,
 )
@@ -125,6 +126,7 @@ __all__ = [
     "is_last_us_session_of_month",
     "next_cohort_month",
     "parse_frozen_rotation_selection",
+    "parse_validated_inverse_volatility_targets",
     "parse_rotation_forward_cohort",
     "rotation_cohort_month",
     "unavailable_rotation_forward_snapshot",
