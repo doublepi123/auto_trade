@@ -1252,6 +1252,9 @@ class AppRunner:
                     "max_risk_per_trade": float(self._trade_svc.max_risk_per_trade or 0),
                     "stop_loss_pct": float(self._trade_svc.stop_loss_pct or 0),
                     "max_holding_minutes": int(self.engine.params.max_holding_minutes),
+                    "opening_warmup_minutes": int(
+                        settings.trading_open_warmup_minutes
+                    ),
                     "entry_cutoff_minutes_before_close": int(
                         self._trade_svc.entry_cutoff_minutes_before_close
                     ),
@@ -1968,6 +1971,9 @@ class AppRunner:
                 "stop_loss_required_for_entry": True,
             },
             "entry_policy": {
+                "opening_warmup_minutes": int(
+                    settings.trading_open_warmup_minutes
+                ),
                 "round_trip_slippage_bps": (
                     settings.entry_round_trip_slippage_bps
                 ),

@@ -1662,6 +1662,7 @@ class TestAPI:
                         "max_risk_per_trade": 250.0,
                         "stop_loss_pct": 1.0,
                         "max_holding_minutes": 60,
+                        "opening_warmup_minutes": 90,
                         "entry_cutoff_minutes_before_close": 45,
                         "flatten_minutes_before_close": 15,
                         "llm_shadow_mode": True,
@@ -1719,6 +1720,7 @@ class TestAPI:
         assert data["live_safety"]["short_entries_enabled"] is False
         assert data["live_safety"]["max_position_notional"] == 5000.0
         assert data["live_safety"]["llm_shadow_mode"] is True
+        assert data["live_safety"]["opening_warmup_minutes"] == 90
         assert data["live_safety"]["live_regime_gate_enabled"] is False
         assert data["live_safety"]["live_regime_max_data_age_seconds"] == 600
         assert data["live_safety"]["live_max_entries_per_symbol_per_day"] == 1

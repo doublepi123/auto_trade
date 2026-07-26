@@ -165,6 +165,7 @@ export interface DiagnosticLiveSafety {
   max_risk_per_trade: number
   stop_loss_pct: number
   max_holding_minutes: number
+  opening_warmup_minutes: number
   entry_cutoff_minutes_before_close: number
   flatten_minutes_before_close: number
   llm_shadow_mode: boolean

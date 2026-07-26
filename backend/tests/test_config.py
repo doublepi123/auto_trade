@@ -77,6 +77,7 @@ class TestSettings:
         assert s.entry_round_trip_slippage_bps == 4
         assert s.min_entry_edge_cost_ratio == 2
         assert s.min_entry_reward_risk_ratio == 1
+        assert s.trading_open_warmup_minutes == 5
         assert s.live_exit_challenger_enabled is False
         assert s.hard_stop_loss_pct == 1
         assert s.hard_max_holding_minutes == 60
@@ -164,6 +165,24 @@ class TestSettings:
         assert configured.entry_round_trip_slippage_bps == 6.5
         assert configured.min_entry_edge_cost_ratio == 2.5
         assert configured.min_entry_reward_risk_ratio == 1.25
+
+    def test_opening_warmup_supports_delayed_fixed_range_entry(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv(
+            "AUTO_TRADE_TRADING_OPEN_WARMUP_MINUTES",
+            "90",
+        )
+
+        assert Settings().trading_open_warmup_minutes == 90
+
+        monkeypatch.setenv(
+            "AUTO_TRADE_TRADING_OPEN_WARMUP_MINUTES",
+            "181",
+        )
+        with pytest.raises(ValidationError):
+            Settings()
 
     def test_universe_and_live_regime_controls_read_environment(
         self,

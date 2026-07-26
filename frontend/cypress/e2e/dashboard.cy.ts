@@ -339,6 +339,7 @@ describe('Dashboard', () => {
           max_risk_per_trade: 200,
           stop_loss_pct: 0.8,
           max_holding_minutes: 45,
+          opening_warmup_minutes: 90,
           entry_cutoff_minutes_before_close: 50,
           flatten_minutes_before_close: 20,
           llm_shadow_mode: true,
@@ -418,6 +419,7 @@ describe('Dashboard', () => {
     cy.get('[data-testid="live-regime-gate-mode"]').should('contain.text', '启用')
     cy.get('[data-testid="live-regime-max-age"]').should('contain.text', '600.0s')
     cy.get('[data-testid="live-max-entries-per-symbol"]').should('contain.text', '2 次')
+    cy.get('[data-testid="opening-warmup-minutes"]').should('contain.text', '90 分钟')
   })
 
   it('makes full buying-power sizing unmistakable in diagnostics', () => {
@@ -443,6 +445,7 @@ describe('Dashboard', () => {
           max_risk_per_trade: 250,
           stop_loss_pct: 1,
           max_holding_minutes: 60,
+          opening_warmup_minutes: 90,
           entry_cutoff_minutes_before_close: 45,
           flatten_minutes_before_close: 15,
           llm_shadow_mode: true,

@@ -161,6 +161,7 @@ function pausedDiagnostics(pauseReason: string) {
       max_risk_per_trade: 250,
       stop_loss_pct: 1,
       max_holding_minutes: 60,
+      opening_warmup_minutes: 90,
       entry_cutoff_minutes_before_close: 45,
       flatten_minutes_before_close: 15,
       llm_shadow_mode: true,

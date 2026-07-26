@@ -1459,6 +1459,7 @@ class DiagnosticLiveSafety(BaseModel):
     max_risk_per_trade: float
     stop_loss_pct: float
     max_holding_minutes: int
+    opening_warmup_minutes: int = 5
     entry_cutoff_minutes_before_close: int
     flatten_minutes_before_close: int
     llm_shadow_mode: bool

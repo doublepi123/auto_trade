@@ -557,6 +557,11 @@
             <el-descriptions-item label="最长持仓">
               {{ diagnostics.live_safety.max_holding_minutes }} 分钟
             </el-descriptions-item>
+            <el-descriptions-item label="开盘等待">
+              <span data-testid="opening-warmup-minutes">
+                {{ diagnostics.live_safety.opening_warmup_minutes }} 分钟
+              </span>
+            </el-descriptions-item>
             <el-descriptions-item label="停止开仓">
               收盘前 {{ diagnostics.live_safety.entry_cutoff_minutes_before_close }} 分钟
             </el-descriptions-item>

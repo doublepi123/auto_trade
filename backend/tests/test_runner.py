@@ -1478,6 +1478,9 @@ class TestAppRunner:
             "max_risk_per_trade": runner._trade_svc.max_risk_per_trade,
             "stop_loss_pct": runner._trade_svc.stop_loss_pct,
             "max_holding_minutes": runner.engine.params.max_holding_minutes,
+            "opening_warmup_minutes": (
+                runner_module.settings.trading_open_warmup_minutes
+            ),
             "entry_cutoff_minutes_before_close": (
                 runner._trade_svc.entry_cutoff_minutes_before_close
             ),
@@ -2427,6 +2430,9 @@ class TestAppRunner:
             is True
         )
         assert snapshot["entry_policy"] == {
+            "opening_warmup_minutes": (
+                runner_module.settings.trading_open_warmup_minutes
+            ),
             "round_trip_slippage_bps": (
                 runner_module.settings.entry_round_trip_slippage_bps
             ),

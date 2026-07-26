@@ -226,7 +226,7 @@ class Settings(BaseSettings):
     trading_open_warmup_minutes: int = Field(
         default=5,
         ge=0,
-        le=60,
+        le=180,
         validation_alias="AUTO_TRADE_TRADING_OPEN_WARMUP_MINUTES",
     )
     allow_short_entries: bool = Field(
