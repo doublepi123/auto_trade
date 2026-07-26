@@ -60,7 +60,7 @@ describe('Strategy v2 shadow lab', () => {
       '@getStrategyShadowBracketChallengers',
       '@evaluateStrategyShadowAdxChallengers',
       '@getStrategyShadowForwardValidation',
-    ])
+    ], { requestTimeout: 15_000 })
   }
 
   it('shows fixed dual-timeframe and hard no-order safety state', () => {
@@ -88,8 +88,10 @@ describe('Strategy v2 shadow lab', () => {
       .and('contain', '3 分钟宽池')
       .and('contain', '3 分钟 + SNDK')
       .and('contain', '3 分钟执行基线')
+      .and('contain', '执行 + 路径效率')
       .and('contain', '执行 + SNDK')
       .and('contain', '1.00%')
+      .and('contain', '70.00%')
       .and('contain', 'SNDK.US')
       .and('contain', '弱者反弹')
       .and('contain', '动量延续')

@@ -611,6 +611,7 @@ class OpeningMomentumShadowVariantResponse(BaseModel):
         "EARLY_LITE_CHALLENGER",
         "EARLY_QCOM_CHALLENGER",
         "EXECUTION_BROAD_CHALLENGER",
+        "EXECUTION_PATH_EFFICIENCY_CHALLENGER",
         "EXECUTION_SNDK_CHALLENGER",
         "EXECUTION_INTC_CHALLENGER",
         "EXECUTION_QCOM_CHALLENGER",
@@ -625,6 +626,11 @@ class OpeningMomentumShadowVariantResponse(BaseModel):
     minimum_candidate_return_bps: float
     minimum_excess_return_bps: float
     minimum_data_coverage: float = 1.0
+    minimum_path_efficiency: Optional[float] = Field(
+        default=None,
+        ge=0,
+        le=1,
+    )
     required_symbols: list[str] = Field(default_factory=list)
     holding_minutes: int
     stop_loss_pct: Optional[float] = None

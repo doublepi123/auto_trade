@@ -103,7 +103,11 @@ class TestOpeningMomentumShadowApi:
         early = variants["EARLY_BROAD_CHALLENGER"]
         early_sndk = variants["EARLY_SNDK_CHALLENGER"]
         execution = variants["EXECUTION_BROAD_CHALLENGER"]
+        path_efficiency = variants[
+            "EXECUTION_PATH_EFFICIENCY_CHALLENGER"
+        ]
         execution_sndk = variants["EXECUTION_SNDK_CHALLENGER"]
+        assert len(variants) == 20
         assert early["universe_source"] == "OPENING_EARLY_BROAD"
         assert early["signal_minutes"] == 3
         assert early["minimum_market_return_bps"] == -50.0
@@ -160,6 +164,20 @@ class TestOpeningMomentumShadowApi:
         assert execution["minimum_data_coverage"] == 0.95
         assert execution["required_symbols"] == []
         assert execution["comparison_baseline"] == "INCUMBENT"
+        assert execution["minimum_path_efficiency"] is None
+        assert path_efficiency["universe_source"] == (
+            "OPENING_EXECUTION_PATH_EFFICIENCY"
+        )
+        assert path_efficiency["signal_minutes"] == 3
+        assert path_efficiency["holding_minutes"] == 60
+        assert path_efficiency["stop_loss_pct"] == 1.0
+        assert path_efficiency["minimum_data_coverage"] == 0.95
+        assert path_efficiency["minimum_path_efficiency"] == 0.70
+        assert path_efficiency["required_symbols"] == []
+        assert path_efficiency["comparison_baseline"] == (
+            "EXECUTION_BROAD_CHALLENGER"
+        )
+        assert path_efficiency["comparison"] is not None
         assert execution_sndk["required_symbols"] == ["SNDK.US"]
         assert (
             execution_sndk["comparison_baseline"]

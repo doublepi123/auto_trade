@@ -461,6 +461,13 @@
                       {{ formatPercent(row.minimum_data_coverage) }}
                     </template>
                   </el-table-column>
+                  <el-table-column label="路径门槛" min-width="90">
+                    <template #default="{ row }">
+                      {{ row.minimum_path_efficiency == null
+                        ? '-'
+                        : formatPercent(row.minimum_path_efficiency) }}
+                    </template>
+                  </el-table-column>
                   <el-table-column label="强制标的" min-width="110">
                     <template #default="{ row }">
                       {{ row.required_symbols?.length ? row.required_symbols.join(', ') : '-' }}
@@ -2176,6 +2183,7 @@ function openingMomentumVariantLabel(
   if (variant === 'LAST5_ONLY_CHALLENGER') return '末 5 分钟过滤'
   if (variant === 'EARLY_BROAD_CHALLENGER') return '3 分钟宽池'
   if (variant === 'EXECUTION_BROAD_CHALLENGER') return '3 分钟执行基线'
+  if (variant === 'EXECUTION_PATH_EFFICIENCY_CHALLENGER') return '执行 + 路径效率'
   const execution = /^EXECUTION_(.+)_CHALLENGER$/.exec(variant)
   if (execution) return `执行 + ${execution[1]}`
   const extension = /^EARLY_(.+)_CHALLENGER$/.exec(variant)

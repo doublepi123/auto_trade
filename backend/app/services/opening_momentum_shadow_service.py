@@ -94,6 +94,16 @@ _EXECUTION_BROAD_SOURCE = "OPENING_EXECUTION_BROAD"
 _EXECUTION_BROAD_ALGORITHM_VERSION = (
     f"{ALGORITHM_VERSION}+{_EXECUTION_BROAD_VERSION}"
 )
+_EXECUTION_PATH_EFFICIENCY_MINIMUM = 0.70
+_EXECUTION_PATH_EFFICIENCY_VERSION = (
+    "active-broad-3m-signal-60m-hold-stop1-path-efficiency-070-v1"
+)
+_EXECUTION_PATH_EFFICIENCY_SOURCE = (
+    "OPENING_EXECUTION_PATH_EFFICIENCY"
+)
+_EXECUTION_PATH_EFFICIENCY_ALGORITHM_VERSION = (
+    f"{ALGORITHM_VERSION}+{_EXECUTION_PATH_EFFICIENCY_VERSION}"
+)
 _EXECUTION_EXTENSION_COHORT_VERSION = (
     "discovery-top6-positive-delta-min4-stop1-v1-20260724"
 )
@@ -137,6 +147,7 @@ _VariantName = Literal[
     "EARLY_LITE_CHALLENGER",
     "EARLY_QCOM_CHALLENGER",
     "EXECUTION_BROAD_CHALLENGER",
+    "EXECUTION_PATH_EFFICIENCY_CHALLENGER",
     "EXECUTION_SNDK_CHALLENGER",
     "EXECUTION_INTC_CHALLENGER",
     "EXECUTION_QCOM_CHALLENGER",
@@ -192,9 +203,19 @@ class _UniverseVariant:
     signal_model: _SignalModel = "MOMENTUM"
     require_nonnegative_last_five: bool = False
     minimum_data_coverage: float = 1.0
+    minimum_path_efficiency: float | None = None
     required_symbols: tuple[str, ...] = ()
     symbols: tuple[str, ...] = ()
     selection_run_id: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.minimum_path_efficiency is not None and (
+            not math.isfinite(self.minimum_path_efficiency)
+            or not 0 <= self.minimum_path_efficiency <= 1
+        ):
+            raise ValueError(
+                "minimum_path_efficiency must be in [0, 1] when set"
+            )
 
 
 @dataclass(frozen=True)
@@ -469,6 +490,7 @@ class OpeningMomentumShadowService:
             path_features_by_symbol: dict[
                 str, _OpeningPathFeatures
             ] = {}
+            path_efficiency_by_symbol: dict[str, float] = {}
             excluded = {
                 symbol: fetch_errors[symbol]
                 for symbol in variant.symbols
@@ -506,6 +528,9 @@ class OpeningMomentumShadowService:
                     by_timestamp[timestamp]
                     for timestamp in sorted(expected_signal_bars)
                 ]
+                path_efficiency_by_symbol[symbol] = (
+                    self._opening_path_efficiency(signal_candles)
+                )
                 if len(signal_candles) >= 5:
                     path_features_by_symbol[symbol] = (
                         self._opening_path_features(signal_candles)
@@ -518,6 +543,13 @@ class OpeningMomentumShadowService:
             )
             path_features = (
                 path_features_by_symbol.get(decision.candidate_symbol)
+                if decision.candidate_symbol is not None
+                else None
+            )
+            path_efficiency = (
+                path_efficiency_by_symbol.get(
+                    decision.candidate_symbol
+                )
                 if decision.candidate_symbol is not None
                 else None
             )
@@ -543,12 +575,22 @@ class OpeningMomentumShadowService:
                     or path_features.last_five_return_bps < 0
                 )
             )
+            path_efficiency_gate_failed = (
+                variant.minimum_path_efficiency is not None
+                and decision.action == "ENTER_LONG"
+                and (
+                    path_efficiency is None
+                    or path_efficiency
+                    < variant.minimum_path_efficiency
+                )
+            )
             status = (
                 "OPEN"
                 if (
                     decision.action == "ENTER_LONG"
                     and data_complete
                     and not last_five_gate_failed
+                    and not path_efficiency_gate_failed
                 )
                 else "SKIPPED"
             )
@@ -558,6 +600,8 @@ class OpeningMomentumShadowService:
                 reason = "DATA_INCOMPLETE"
             elif last_five_gate_failed:
                 reason = "LAST_FIVE_RETURN_FILTER"
+            elif path_efficiency_gate_failed:
+                reason = "PATH_EFFICIENCY_FILTER"
             else:
                 reason = decision.reason
             self.db.add(OpeningMomentumShadowRun(
@@ -602,9 +646,7 @@ class OpeningMomentumShadowService:
                     else None
                 ),
                 candidate_path_efficiency=(
-                    path_features.path_efficiency
-                    if path_features is not None
-                    else None
+                    path_efficiency
                 ),
                 candidate_max_pullback_bps=(
                     path_features.max_pullback_bps
@@ -847,6 +889,28 @@ class OpeningMomentumShadowService:
             symbols=active_broad_symbols,
             selection_run_id=run.id,
         ))
+        path_efficiency_identity = identities_by_variant[
+            "EXECUTION_PATH_EFFICIENCY_CHALLENGER"
+        ]
+        variants.append(_UniverseVariant(
+            variant=path_efficiency_identity.variant,
+            algorithm_version=(
+                path_efficiency_identity.algorithm_version
+            ),
+            config_version=path_efficiency_identity.config_version,
+            universe_source=path_efficiency_identity.universe_source,
+            decision_config=(
+                path_efficiency_identity.decision_config
+            ),
+            minimum_data_coverage=(
+                path_efficiency_identity.minimum_data_coverage
+            ),
+            minimum_path_efficiency=(
+                path_efficiency_identity.minimum_path_efficiency
+            ),
+            symbols=active_broad_symbols,
+            selection_run_id=run.id,
+        ))
         for spec in _EXECUTION_EXTENSION_SPECS:
             identity = identities_by_variant[spec.variant]
             variants.append(_UniverseVariant(
@@ -967,6 +1031,29 @@ class OpeningMomentumShadowService:
                 decision_config=execution_config,
                 minimum_data_coverage=(
                     _EARLY_BROAD_MINIMUM_COVERAGE
+                ),
+            ))
+            variants.append(_UniverseVariant(
+                variant=(
+                    "EXECUTION_PATH_EFFICIENCY_CHALLENGER"
+                ),
+                algorithm_version=(
+                    _EXECUTION_PATH_EFFICIENCY_ALGORITHM_VERSION
+                ),
+                config_version=self._evidence_config_version(
+                    f"{execution_config.version_hash()}:"
+                    f"{_EXECUTION_PATH_EFFICIENCY_VERSION}:"
+                    f"{_EXECUTION_PATH_EFFICIENCY_MINIMUM:.2f}"
+                ),
+                universe_source=(
+                    _EXECUTION_PATH_EFFICIENCY_SOURCE
+                ),
+                decision_config=execution_config,
+                minimum_data_coverage=(
+                    _EARLY_BROAD_MINIMUM_COVERAGE
+                ),
+                minimum_path_efficiency=(
+                    _EXECUTION_PATH_EFFICIENCY_MINIMUM
                 ),
             ))
             for spec in _EXECUTION_EXTENSION_SPECS:
@@ -1425,6 +1512,11 @@ class OpeningMomentumShadowService:
             is_execution_extension = (
                 identity.variant in _EXECUTION_EXTENSION_VARIANTS
             )
+            uses_execution_baseline = (
+                is_execution_extension
+                or identity.variant
+                == "EXECUTION_PATH_EFFICIENCY_CHALLENGER"
+            )
             is_extension = (
                 is_early_extension or is_execution_extension
             )
@@ -1440,7 +1532,7 @@ class OpeningMomentumShadowService:
                 comparison_baseline = None
             elif is_early_extension:
                 comparison_baseline = "EARLY_BROAD_CHALLENGER"
-            elif is_execution_extension:
+            elif uses_execution_baseline:
                 comparison_baseline = "EXECUTION_BROAD_CHALLENGER"
             else:
                 comparison_baseline = "INCUMBENT"
@@ -1448,7 +1540,7 @@ class OpeningMomentumShadowService:
                 comparison_identity = identities_by_variant[
                     "EARLY_BROAD_CHALLENGER"
                 ]
-            elif is_execution_extension:
+            elif uses_execution_baseline:
                 comparison_identity = identities_by_variant[
                     "EXECUTION_BROAD_CHALLENGER"
                 ]
@@ -1549,6 +1641,9 @@ class OpeningMomentumShadowService:
                     ),
                     minimum_data_coverage=(
                         identity.minimum_data_coverage
+                    ),
+                    minimum_path_efficiency=(
+                        identity.minimum_path_efficiency
                     ),
                     required_symbols=list(
                         identity.required_symbols
@@ -1786,16 +1881,10 @@ class OpeningMomentumShadowService:
             signal_close / candles[-5].open - 1
         ) * 10_000
 
-        previous_price = opening_price
-        path_distance = 0.0
-        for candle in candles:
-            path_distance += abs(candle.close - previous_price)
-            previous_price = candle.close
-        displacement = abs(signal_close - opening_price)
         path_efficiency = (
-            displacement / path_distance
-            if path_distance > 0
-            else 0.0
+            OpeningMomentumShadowService._opening_path_efficiency(
+                candles
+            )
         )
 
         running_high = candles[0].high
@@ -1816,6 +1905,26 @@ class OpeningMomentumShadowService:
             path_efficiency=path_efficiency,
             max_pullback_bps=max_pullback_bps,
             opening_range_bps=opening_range_bps,
+        )
+
+    @staticmethod
+    def _opening_path_efficiency(candles: list[_Candle]) -> float:
+        if not candles:
+            raise ValueError(
+                "opening path efficiency requires at least one candle"
+            )
+        opening_price = candles[0].open
+        signal_close = candles[-1].close
+        previous_price = opening_price
+        path_distance = 0.0
+        for candle in candles:
+            path_distance += abs(candle.close - previous_price)
+            previous_price = candle.close
+        if path_distance <= 0:
+            return 0.0
+        return min(
+            1.0,
+            abs(signal_close - opening_price) / path_distance,
         )
 
     @staticmethod

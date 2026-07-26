@@ -1920,6 +1920,7 @@ export interface OpeningMomentumShadowVariant {
     | 'EARLY_LITE_CHALLENGER'
     | 'EARLY_QCOM_CHALLENGER'
     | 'EXECUTION_BROAD_CHALLENGER'
+    | 'EXECUTION_PATH_EFFICIENCY_CHALLENGER'
     | 'EXECUTION_SNDK_CHALLENGER'
     | 'EXECUTION_INTC_CHALLENGER'
     | 'EXECUTION_QCOM_CHALLENGER'
@@ -1933,6 +1934,7 @@ export interface OpeningMomentumShadowVariant {
   minimum_candidate_return_bps: number
   minimum_excess_return_bps: number
   minimum_data_coverage: number
+  minimum_path_efficiency: number | null
   required_symbols: string[]
   holding_minutes: number
   stop_loss_pct: number | null

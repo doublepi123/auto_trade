@@ -65,6 +65,7 @@ _ALL_CHALLENGER_VARIANTS = (
     "EARLY_BROAD_CHALLENGER",
     *_EXTENSION_VARIANTS,
     "EXECUTION_BROAD_CHALLENGER",
+    "EXECUTION_PATH_EFFICIENCY_CHALLENGER",
     *_EXECUTION_EXTENSION_VARIANTS,
 )
 
@@ -77,6 +78,7 @@ class _FakeCandles:
         opening_returns_bps: dict[str, float] | None = None,
         early_opening_returns_bps: dict[str, float] | None = None,
         negative_last_five_for: str | None = None,
+        low_efficiency_for: str | None = None,
         unavailable_symbols: set[str] | None = None,
     ) -> None:
         self.missing_entry_for = missing_entry_for
@@ -85,6 +87,7 @@ class _FakeCandles:
             early_opening_returns_bps or {}
         )
         self.negative_last_five_for = negative_last_five_for
+        self.low_efficiency_for = low_efficiency_for
         self.unavailable_symbols = unavailable_symbols or set()
         self.calls: list[str] = []
 
@@ -117,7 +120,12 @@ class _FakeCandles:
                 continue
             open_price = 100.0
             close_price = 100.0
-            if index == 2:
+            if symbol == self.low_efficiency_for and index < 3:
+                choppy_returns = (200.0, -100.0, 100.0)
+                close_price = 100.0 * (
+                    1 + choppy_returns[index] / 10_000
+                )
+            elif index == 2:
                 early_return_bps = self.early_opening_returns_bps.get(
                     symbol,
                     0.0,
@@ -544,6 +552,26 @@ def test_opening_path_efficiency_is_bounded_for_compounding_path() -> None:
     assert features.path_efficiency == 1.0
 
 
+def test_opening_path_efficiency_measures_choppy_three_minute_path() -> None:
+    candles = [
+        SimpleNamespace(
+            timestamp=_SESSION_OPEN + timedelta(minutes=index),
+            open=100.0,
+            high=max(100.0, close),
+            low=min(100.0, close),
+            close=close,
+        )
+        for index, close in enumerate((102.0, 99.0, 101.0))
+    ]
+    coerced = OpeningMomentumShadowService._coerce_candles(candles)
+
+    efficiency = OpeningMomentumShadowService._opening_path_efficiency(
+        coerced
+    )
+
+    assert efficiency == pytest.approx(1 / 7)
+
+
 def test_challenger_variants_isolate_universe_and_entry_gates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -575,6 +603,7 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
             "EARLY_LITE_CHALLENGER",
             "EARLY_QCOM_CHALLENGER",
             "EXECUTION_BROAD_CHALLENGER",
+            "EXECUTION_PATH_EFFICIENCY_CHALLENGER",
             "EXECUTION_SNDK_CHALLENGER",
             "EXECUTION_INTC_CHALLENGER",
             "EXECUTION_QCOM_CHALLENGER",
@@ -589,6 +618,9 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
         early = by_variant["EARLY_BROAD_CHALLENGER"]
         early_sndk = by_variant["EARLY_SNDK_CHALLENGER"]
         execution = by_variant["EXECUTION_BROAD_CHALLENGER"]
+        path_efficiency = by_variant[
+            "EXECUTION_PATH_EFFICIENCY_CHALLENGER"
+        ]
         reversal = by_variant["REVERSAL_CHALLENGER"]
         continuation = by_variant["CONTINUATION_CHALLENGER"]
         breadth = by_variant["BREADTH_GATED_CHALLENGER"]
@@ -630,6 +662,13 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
         assert execution.minimum_data_coverage == 0.95
         assert execution.universe_source == "OPENING_EXECUTION_BROAD"
         assert execution.required_symbols == ()
+        assert path_efficiency.decision_config == execution.decision_config
+        assert path_efficiency.minimum_data_coverage == 0.95
+        assert path_efficiency.minimum_path_efficiency == 0.70
+        assert path_efficiency.required_symbols == ()
+        assert path_efficiency.universe_source == (
+            "OPENING_EXECUTION_PATH_EFFICIENCY"
+        )
         for variant, symbol in zip(
             _EXECUTION_EXTENSION_VARIANTS,
             _EXECUTION_EXTENSION_SYMBOLS,
@@ -665,7 +704,7 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
                 identity.config_version
                 for identity in identities
             }
-        ) == 19
+        ) == 20
     finally:
         db.close()
         Base.metadata.drop_all(bind=engine)
@@ -892,7 +931,7 @@ def test_challengers_use_one_market_snapshot_and_close_all_variants(
         assert opened.latest.universe_source == "UNIVERSE_SELECTION"
         assert opened.latest.candidate_symbol == "S1.US"
         assert opened.latest.selection_run_id == run.id
-        assert len(opened.variants) == 19
+        assert len(opened.variants) == 20
         by_variant = {
             item.variant: item for item in opened.variants
         }
@@ -990,7 +1029,7 @@ def test_challengers_use_one_market_snapshot_and_close_all_variants(
                 item.config_version
                 for item in opened.variants
             }
-        ) == 19
+        ) == 20
 
         still_open = service.tick(
             now=_SESSION_OPEN + timedelta(minutes=47, seconds=10),
@@ -1090,7 +1129,7 @@ def test_early_broad_challenger_keeps_independent_observation_window(
         )
 
         rows = db.query(OpeningMomentumShadowRun).all()
-        assert len(rows) == 13
+        assert len(rows) == 14
         assert candles.calls == [
             *_SYMBOLS,
             *_EXTENSION_SYMBOLS,
@@ -1118,7 +1157,7 @@ def test_early_broad_challenger_keeps_independent_observation_window(
             _SESSION_OPEN + timedelta(minutes=124)
         )
         assert early.latest.entry_price == 100.5
-        assert early.latest.candidate_path_efficiency is None
+        assert early.latest.candidate_path_efficiency == pytest.approx(1.0)
         assert early.latest.candidate_max_pullback_bps is None
         early_sndk = {
             item.variant: item for item in early_opened.variants
@@ -1161,6 +1200,15 @@ def test_early_broad_challenger_keeps_independent_observation_window(
         assert execution.latest.stop_loss_pct == 1.0
         assert execution.holding_minutes == 60
         assert execution.comparison_baseline == "INCUMBENT"
+        path_efficiency = early_by_variant[
+            "EXECUTION_PATH_EFFICIENCY_CHALLENGER"
+        ]
+        assert path_efficiency.latest is not None
+        assert path_efficiency.latest.status == "OPEN"
+        assert path_efficiency.minimum_path_efficiency == 0.70
+        assert path_efficiency.comparison_baseline == (
+            "EXECUTION_BROAD_CHALLENGER"
+        )
         for variant, symbol in zip(
             _EXECUTION_EXTENSION_VARIANTS,
             _EXECUTION_EXTENSION_SYMBOLS,
@@ -1180,7 +1228,7 @@ def test_early_broad_challenger_keeps_independent_observation_window(
             now=_SESSION_OPEN + timedelta(minutes=32, seconds=10),
         )
 
-        assert db.query(OpeningMomentumShadowRun).count() == 19
+        assert db.query(OpeningMomentumShadowRun).count() == 20
         assert candles.calls == list(_SYMBOLS[:4])
         by_variant = {
             item.variant: item for item in standard_opened.variants
@@ -1201,7 +1249,7 @@ def test_early_broad_challenger_keeps_independent_observation_window(
         rows = db.query(OpeningMomentumShadowRun).all()
         assert sum(row.status == "CLOSED" for row in rows) == 5
         assert sum(row.status == "SKIPPED" for row in rows) == 1
-        assert sum(row.status == "OPEN" for row in rows) == 13
+        assert sum(row.status == "OPEN" for row in rows) == 14
         by_variant = {
             item.variant: item for item in standard_closed.variants
         }
@@ -1227,7 +1275,7 @@ def test_early_broad_challenger_keeps_independent_observation_window(
         rows = db.query(OpeningMomentumShadowRun).all()
         assert candles.calls == ["S7.US"]
         assert execution_closed.state == "OPEN"
-        assert sum(row.status == "CLOSED" for row in rows) == 11
+        assert sum(row.status == "CLOSED" for row in rows) == 12
         assert sum(row.status == "SKIPPED" for row in rows) == 1
         assert sum(row.status == "OPEN" for row in rows) == 7
         execution_by_variant = {
@@ -1236,6 +1284,12 @@ def test_early_broad_challenger_keeps_independent_observation_window(
         assert (
             execution_by_variant["EXECUTION_BROAD_CHALLENGER"]
             .metrics.closed_trades
+            == 1
+        )
+        assert (
+            execution_by_variant[
+                "EXECUTION_PATH_EFFICIENCY_CHALLENGER"
+            ].metrics.closed_trades
             == 1
         )
         for variant in _EXECUTION_EXTENSION_VARIANTS:
@@ -1341,6 +1395,64 @@ def test_early_sndk_challenger_requires_sndk_market_data(
         Base.metadata.drop_all(bind=engine)
 
 
+def test_execution_path_efficiency_challenger_skips_choppy_leader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        settings,
+        "opening_momentum_shadow_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        settings,
+        "opening_momentum_challenger_enabled",
+        True,
+    )
+    engine, db = _database()
+    try:
+        _seed_variant_universe(db)
+        _seed_active_broad_pool(db)
+        service = OpeningMomentumShadowService(
+            db,
+            _FakeCandles(low_efficiency_for="S7.US"),
+            config=OpeningMomentumConfig(
+                minimum_universe_size=2,
+                minimum_excess_return_bps=0,
+            ),
+        )
+
+        status = service.tick(
+            now=_SESSION_OPEN + timedelta(minutes=5, seconds=10),
+        )
+
+        by_variant = {
+            item.variant: item for item in status.variants
+        }
+        baseline = by_variant["EXECUTION_BROAD_CHALLENGER"]
+        challenger = by_variant[
+            "EXECUTION_PATH_EFFICIENCY_CHALLENGER"
+        ]
+        assert baseline.latest is not None
+        assert baseline.latest.status == "OPEN"
+        assert baseline.latest.candidate_symbol == "S7.US"
+        assert challenger.latest is not None
+        assert challenger.latest.status == "SKIPPED"
+        assert challenger.latest.reason == "PATH_EFFICIENCY_FILTER"
+        assert challenger.latest.candidate_symbol == "S7.US"
+        assert (
+            challenger.latest.candidate_path_efficiency
+            == pytest.approx(1 / 7)
+        )
+        assert challenger.latest.entry_price is None
+        assert challenger.minimum_path_efficiency == 0.70
+        assert challenger.comparison_baseline == (
+            "EXECUTION_BROAD_CHALLENGER"
+        )
+    finally:
+        db.close()
+        Base.metadata.drop_all(bind=engine)
+
+
 def test_breadth_challenger_skips_a_negative_market_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1388,7 +1500,7 @@ def test_breadth_challenger_skips_a_negative_market_snapshot(
         )
 
         assert candles.calls == list(_SYMBOLS[:4])
-        assert len(status.variants) == 19
+        assert len(status.variants) == 20
         by_variant = {
             item.variant: item for item in status.variants
         }
@@ -1525,6 +1637,12 @@ def test_paired_policy_return_excludes_unresolved_and_data_failures() -> None:
         OpeningMomentumShadowRun(
             status="SKIPPED",
             reason="LAST_FIVE_RETURN_FILTER",
+        )
+    ) == 0.0
+    assert OpeningMomentumShadowService._paired_policy_return(
+        OpeningMomentumShadowRun(
+            status="SKIPPED",
+            reason="PATH_EFFICIENCY_FILTER",
         )
     ) == 0.0
     for status, reason in (
