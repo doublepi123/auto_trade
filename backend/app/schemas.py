@@ -511,6 +511,7 @@ class OpeningMomentumShadowConfigResponse(BaseModel):
     one_side_fee_rate: float
     one_side_slippage_bps: float
     round_trip_cost_bps: float
+    stop_loss_pct: Optional[float] = None
 
 
 class OpeningMomentumRankResponse(BaseModel):
@@ -550,6 +551,9 @@ class OpeningMomentumShadowRunResponse(BaseModel):
     gross_return_bps: Optional[float] = None
     estimated_cost_bps: float
     net_return_bps: Optional[float] = None
+    stop_loss_pct: Optional[float] = None
+    maximum_adverse_excursion_bps: Optional[float] = None
+    maximum_favorable_excursion_bps: Optional[float] = None
 
 
 class OpeningMomentumShadowMetrics(BaseModel):
@@ -606,6 +610,12 @@ class OpeningMomentumShadowVariantResponse(BaseModel):
         "EARLY_ALAB_CHALLENGER",
         "EARLY_LITE_CHALLENGER",
         "EARLY_QCOM_CHALLENGER",
+        "EXECUTION_BROAD_CHALLENGER",
+        "EXECUTION_SNDK_CHALLENGER",
+        "EXECUTION_INTC_CHALLENGER",
+        "EXECUTION_QCOM_CHALLENGER",
+        "EXECUTION_RKLB_CHALLENGER",
+        "EXECUTION_PANW_CHALLENGER",
     ]
     universe_source: str
     algorithm_version: str
@@ -617,11 +627,13 @@ class OpeningMomentumShadowVariantResponse(BaseModel):
     minimum_data_coverage: float = 1.0
     required_symbols: list[str] = Field(default_factory=list)
     holding_minutes: int
+    stop_loss_pct: Optional[float] = None
     comparison_sessions: int = 0
     comparison_baseline: Optional[
         Literal[
             "INCUMBENT",
             "EARLY_BROAD_CHALLENGER",
+            "EXECUTION_BROAD_CHALLENGER",
         ]
     ] = None
     latest: Optional[OpeningMomentumShadowRunResponse] = None

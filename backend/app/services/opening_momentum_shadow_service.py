@@ -87,8 +87,16 @@ _EARLY_BROAD_MINIMUM_COVERAGE = 0.95
 _EARLY_EXTENSION_COHORT_VERSION = (
     "discovery-top6-positive-delta-min4-20260724-v1"
 )
-_EARLY_EXTENSION_MINIMUM_DISPLACEMENT_SESSIONS = 3
-_EARLY_EXTENSION_MINIMUM_OUTPERFORMANCE_RATE = 0.55
+_EXTENSION_MINIMUM_DISPLACEMENT_SESSIONS = 3
+_EXTENSION_MINIMUM_OUTPERFORMANCE_RATE = 0.55
+_EXECUTION_BROAD_VERSION = "active-broad-3m-signal-60m-hold-stop1-v1"
+_EXECUTION_BROAD_SOURCE = "OPENING_EXECUTION_BROAD"
+_EXECUTION_BROAD_ALGORITHM_VERSION = (
+    f"{ALGORITHM_VERSION}+{_EXECUTION_BROAD_VERSION}"
+)
+_EXECUTION_EXTENSION_COHORT_VERSION = (
+    "discovery-top6-positive-delta-min4-stop1-v1-20260724"
+)
 _REVERSAL_SOURCE = "OPENING_REVERSAL"
 _NON_COMPARABLE_SKIP_REASONS = frozenset(
     {
@@ -107,6 +115,13 @@ _EarlyExtensionVariantName = Literal[
     "EARLY_LITE_CHALLENGER",
     "EARLY_QCOM_CHALLENGER",
 ]
+_ExecutionExtensionVariantName = Literal[
+    "EXECUTION_SNDK_CHALLENGER",
+    "EXECUTION_INTC_CHALLENGER",
+    "EXECUTION_QCOM_CHALLENGER",
+    "EXECUTION_RKLB_CHALLENGER",
+    "EXECUTION_PANW_CHALLENGER",
+]
 _VariantName = Literal[
     "INCUMBENT",
     "REVERSAL_CHALLENGER",
@@ -121,6 +136,12 @@ _VariantName = Literal[
     "EARLY_ALAB_CHALLENGER",
     "EARLY_LITE_CHALLENGER",
     "EARLY_QCOM_CHALLENGER",
+    "EXECUTION_BROAD_CHALLENGER",
+    "EXECUTION_SNDK_CHALLENGER",
+    "EXECUTION_INTC_CHALLENGER",
+    "EXECUTION_QCOM_CHALLENGER",
+    "EXECUTION_RKLB_CHALLENGER",
+    "EXECUTION_PANW_CHALLENGER",
 ]
 _SignalModel = Literal["MOMENTUM", "REVERSAL"]
 
@@ -150,6 +171,15 @@ class _OpeningPathFeatures:
     path_efficiency: float
     max_pullback_bps: float
     opening_range_bps: float
+
+
+@dataclass(frozen=True)
+class _ExitOutcome:
+    exited_at: datetime
+    price: float
+    reason: Literal["FIXED_HOLD_EXIT", "STOP_LOSS_EXIT"]
+    maximum_adverse_excursion_bps: float
+    maximum_favorable_excursion_bps: float
 
 
 @dataclass(frozen=True)
@@ -192,6 +222,31 @@ class _EarlyExtensionSpec:
         return f"OPENING_EARLY_{self.ticker}"
 
 
+@dataclass(frozen=True)
+class _ExecutionExtensionSpec:
+    variant: _ExecutionExtensionVariantName
+    symbol: str
+
+    @property
+    def ticker(self) -> str:
+        return self.symbol.removesuffix(".US")
+
+    @property
+    def version(self) -> str:
+        return (
+            f"active-broad-plus-{self.ticker.lower()}-3m-signal-"
+            f"60m-hold-stop1-{_EXECUTION_EXTENSION_COHORT_VERSION}"
+        )
+
+    @property
+    def algorithm_version(self) -> str:
+        return f"{ALGORITHM_VERSION}+{self.version}"
+
+    @property
+    def universe_source(self) -> str:
+        return f"OPENING_EXECUTION_{self.ticker}"
+
+
 # Frozen from the discovery slice only: the six highest positive cumulative
 # extension deltas among candidates with at least four actual baseline
 # displacements. Holdout results did not determine membership, so observations
@@ -206,6 +261,19 @@ _EARLY_EXTENSION_SPECS = (
 )
 _EARLY_EXTENSION_VARIANTS = frozenset(
     spec.variant for spec in _EARLY_EXTENSION_SPECS
+)
+
+# Frozen from the discovery slice of the 3m/60m/1% stop research grid only.
+# The 2026-06-23..2026-07-24 holdout did not determine membership.
+_EXECUTION_EXTENSION_SPECS = (
+    _ExecutionExtensionSpec("EXECUTION_SNDK_CHALLENGER", "SNDK.US"),
+    _ExecutionExtensionSpec("EXECUTION_INTC_CHALLENGER", "INTC.US"),
+    _ExecutionExtensionSpec("EXECUTION_QCOM_CHALLENGER", "QCOM.US"),
+    _ExecutionExtensionSpec("EXECUTION_RKLB_CHALLENGER", "RKLB.US"),
+    _ExecutionExtensionSpec("EXECUTION_PANW_CHALLENGER", "PANW.US"),
+)
+_EXECUTION_EXTENSION_VARIANTS = frozenset(
+    spec.variant for spec in _EXECUTION_EXTENSION_SPECS
 )
 
 
@@ -238,8 +306,13 @@ class OpeningMomentumShadowService:
             )
             .all()
         )
+        settlement_candles: dict[str, dict[datetime, _Candle]] = {}
         for open_run in open_runs:
-            self._close_if_due(open_run, current)
+            self._close_if_due(
+                open_run,
+                current,
+                settlement_candles=settlement_candles,
+            )
 
         if not settings.opening_momentum_shadow_enabled:
             return self.get_status()
@@ -553,6 +626,7 @@ class OpeningMomentumShadowService:
                     else None
                 ),
                 estimated_cost_bps=config.round_trip_cost_bps,
+                stop_loss_pct=config.stop_loss_pct,
             ))
 
     def get_status(self) -> OpeningMomentumShadowStatusResponse:
@@ -758,6 +832,39 @@ class OpeningMomentumShadowService:
                 )),
                 selection_run_id=run.id,
             ))
+        execution_identity = identities_by_variant[
+            "EXECUTION_BROAD_CHALLENGER"
+        ]
+        variants.append(_UniverseVariant(
+            variant=execution_identity.variant,
+            algorithm_version=execution_identity.algorithm_version,
+            config_version=execution_identity.config_version,
+            universe_source=execution_identity.universe_source,
+            decision_config=execution_identity.decision_config,
+            minimum_data_coverage=(
+                execution_identity.minimum_data_coverage
+            ),
+            symbols=active_broad_symbols,
+            selection_run_id=run.id,
+        ))
+        for spec in _EXECUTION_EXTENSION_SPECS:
+            identity = identities_by_variant[spec.variant]
+            variants.append(_UniverseVariant(
+                variant=identity.variant,
+                algorithm_version=identity.algorithm_version,
+                config_version=identity.config_version,
+                universe_source=identity.universe_source,
+                decision_config=identity.decision_config,
+                minimum_data_coverage=(
+                    identity.minimum_data_coverage
+                ),
+                required_symbols=identity.required_symbols,
+                symbols=tuple(dict.fromkeys(
+                    active_broad_symbols
+                    + identity.required_symbols
+                )),
+                selection_run_id=run.id,
+            ))
         reversal_identity = identities_by_variant[
             "REVERSAL_CHALLENGER"
         ]
@@ -818,6 +925,7 @@ class OpeningMomentumShadowService:
             universe_config = self._continuation_config()
             breadth_config = self._breadth_gate_config()
             early_config = self._early_broad_config()
+            execution_config = self._execution_broad_config()
             variants.append(_UniverseVariant(
                 variant="EARLY_BROAD_CHALLENGER",
                 algorithm_version=_EARLY_BROAD_ALGORITHM_VERSION,
@@ -841,6 +949,36 @@ class OpeningMomentumShadowService:
                     ),
                     universe_source=spec.universe_source,
                     decision_config=early_config,
+                    minimum_data_coverage=(
+                        _EARLY_BROAD_MINIMUM_COVERAGE
+                    ),
+                    required_symbols=(spec.symbol,),
+                ))
+            variants.append(_UniverseVariant(
+                variant="EXECUTION_BROAD_CHALLENGER",
+                algorithm_version=(
+                    _EXECUTION_BROAD_ALGORITHM_VERSION
+                ),
+                config_version=self._evidence_config_version(
+                    f"{execution_config.version_hash()}:"
+                    f"{_EXECUTION_BROAD_VERSION}"
+                ),
+                universe_source=_EXECUTION_BROAD_SOURCE,
+                decision_config=execution_config,
+                minimum_data_coverage=(
+                    _EARLY_BROAD_MINIMUM_COVERAGE
+                ),
+            ))
+            for spec in _EXECUTION_EXTENSION_SPECS:
+                variants.append(_UniverseVariant(
+                    variant=spec.variant,
+                    algorithm_version=spec.algorithm_version,
+                    config_version=self._evidence_config_version(
+                        f"{execution_config.version_hash()}:"
+                        f"{spec.version}"
+                    ),
+                    universe_source=spec.universe_source,
+                    decision_config=execution_config,
                     minimum_data_coverage=(
                         _EARLY_BROAD_MINIMUM_COVERAGE
                     ),
@@ -966,6 +1104,13 @@ class OpeningMomentumShadowService:
             minimum_excess_return_bps=25.0,
         )
 
+    def _execution_broad_config(self) -> OpeningMomentumConfig:
+        return replace(
+            self._early_broad_config(),
+            holding_minutes=60,
+            stop_loss_pct=1.0,
+        )
+
     def _active_broad_symbols(self) -> tuple[str, ...]:
         rows = (
             self.db.query(StrategyV2ShadowConfig)
@@ -997,6 +1142,10 @@ class OpeningMomentumShadowService:
         self,
         row: OpeningMomentumShadowRun,
         current: datetime,
+        *,
+        settlement_candles: dict[
+            str, dict[datetime, _Candle]
+        ] | None = None,
     ) -> None:
         if row.exit_due_at is None or row.candidate_symbol is None:
             return
@@ -1007,33 +1156,72 @@ class OpeningMomentumShadowService:
             raise RuntimeError(
                 "opening momentum shadow candle provider is unavailable"
             )
-        bars = self.candle_provider.get_candlesticks(
-            row.candidate_symbol,
-            "MIN_1",
-            _CANDLE_COUNT,
+        candle_cache = (
+            settlement_candles
+            if settlement_candles is not None
+            else {}
         )
-        exit_bar = {
-            bar.timestamp: bar
-            for bar in self._coerce_candles(bars)
-        }.get(exit_due_at)
-        if exit_bar is None:
-            history_reader = getattr(
-                self.candle_provider,
-                "get_history_candlesticks_by_offset",
-                None,
+        if row.candidate_symbol not in candle_cache:
+            raw_bars = self.candle_provider.get_candlesticks(
+                row.candidate_symbol,
+                "MIN_1",
+                _CANDLE_COUNT,
             )
-            if callable(history_reader):
-                historical = history_reader(
-                    row.candidate_symbol,
-                    "MIN_1",
-                    10,
-                    exit_due_at - _BAR_DURATION,
+            candle_cache[row.candidate_symbol] = {
+                bar.timestamp: bar
+                for bar in self._coerce_candles(raw_bars)
+            }
+        candles_by_timestamp = candle_cache[row.candidate_symbol]
+        history_reader = getattr(
+            self.candle_provider,
+            "get_history_candlesticks_by_offset",
+            None,
+        )
+        needs_stop_path = row.stop_loss_pct is not None
+        entry_at = _optional_utc(row.entry_at)
+        stop_path_complete = (
+            not needs_stop_path
+            or entry_at is None
+            or self._minute_path_complete(
+                candles_by_timestamp,
+                start_at=entry_at,
+                end_at=exit_due_at,
+            )
+        )
+        if callable(history_reader) and (
+            exit_due_at not in candles_by_timestamp
+            or not stop_path_complete
+        ):
+            history_start = (
+                entry_at - _BAR_DURATION
+                if needs_stop_path and entry_at is not None
+                else exit_due_at - _BAR_DURATION
+            )
+            history_count = 10
+            if entry_at is not None:
+                history_count = min(
+                    1_000,
+                    max(
+                        history_count,
+                        int(
+                            (exit_due_at - entry_at).total_seconds()
+                            // 60
+                        )
+                        + 10,
+                    ),
                 )
-                if isinstance(historical, list):
-                    exit_bar = {
-                        bar.timestamp: bar
-                        for bar in self._coerce_candles(historical)
-                    }.get(exit_due_at)
+            historical = history_reader(
+                row.candidate_symbol,
+                "MIN_1",
+                history_count,
+                history_start,
+            )
+            if isinstance(historical, list):
+                candles_by_timestamp.update({
+                    bar.timestamp: bar
+                    for bar in self._coerce_candles(historical)
+                })
+        exit_bar = candles_by_timestamp.get(exit_due_at)
         if exit_bar is None:
             logger.warning(
                 "opening momentum exit bar unavailable for %s at %s",
@@ -1045,24 +1233,127 @@ class OpeningMomentumShadowService:
             raise ValueError(
                 "open opening-momentum run has no entry price"
             )
-        gross_return_bps, _ = (
-            shadow_round_trip_return_bps(
-                entry_price=row.entry_price,
-                exit_price=exit_bar.open,
-                config=self.config,
+        entry_at = _optional_utc(row.entry_at)
+        if entry_at is None:
+            raise ValueError(
+                "open opening-momentum run has no entry timestamp"
             )
+        outcome = self._exit_outcome(
+            tuple(candles_by_timestamp.values()),
+            entry_at=entry_at,
+            exit_due_at=exit_due_at,
+            entry_price=row.entry_price,
+            stop_loss_pct=row.stop_loss_pct,
+        )
+        gross_return_bps, _ = shadow_round_trip_return_bps(
+            entry_price=row.entry_price,
+            exit_price=outcome.price,
         )
         net_return_bps = (
             gross_return_bps - float(row.estimated_cost_bps)
         )
         row.status = "CLOSED"
-        row.reason = "FIXED_HOLD_EXIT"
-        row.exit_at = exit_due_at
-        row.exit_price = exit_bar.open
+        row.reason = outcome.reason
+        row.exit_at = outcome.exited_at
+        row.exit_price = outcome.price
         row.gross_return_bps = gross_return_bps
         row.net_return_bps = net_return_bps
+        row.maximum_adverse_excursion_bps = (
+            outcome.maximum_adverse_excursion_bps
+        )
+        row.maximum_favorable_excursion_bps = (
+            outcome.maximum_favorable_excursion_bps
+        )
         self.db.add(row)
         self.db.commit()
+
+    @staticmethod
+    def _minute_path_complete(
+        candles_by_timestamp: dict[datetime, _Candle],
+        *,
+        start_at: datetime,
+        end_at: datetime,
+    ) -> bool:
+        if end_at < start_at:
+            return False
+        expected_bars = int(
+            (end_at - start_at).total_seconds() // 60
+        ) + 1
+        return all(
+            start_at + timedelta(minutes=offset)
+            in candles_by_timestamp
+            for offset in range(expected_bars)
+        )
+
+    @staticmethod
+    def _exit_outcome(
+        candles: tuple[_Candle, ...],
+        *,
+        entry_at: datetime,
+        exit_due_at: datetime,
+        entry_price: float,
+        stop_loss_pct: float | None,
+    ) -> _ExitOutcome:
+        by_timestamp = {item.timestamp: item for item in candles}
+        exit_bar = by_timestamp.get(exit_due_at)
+        if exit_bar is None:
+            raise ValueError("opening-momentum exit bar is unavailable")
+        highest = entry_price
+        lowest = entry_price
+        stop_price = (
+            entry_price * (1 - stop_loss_pct / 100)
+            if stop_loss_pct is not None
+            else None
+        )
+        for timestamp in sorted(
+            value
+            for value in by_timestamp
+            if entry_at <= value < exit_due_at
+        ):
+            bar = by_timestamp[timestamp]
+            if stop_price is not None and bar.open <= stop_price:
+                highest = max(highest, bar.open)
+                lowest = min(lowest, bar.open)
+                return _ExitOutcome(
+                    exited_at=timestamp,
+                    price=bar.open,
+                    reason="STOP_LOSS_EXIT",
+                    maximum_adverse_excursion_bps=(
+                        (lowest / entry_price - 1) * 10_000
+                    ),
+                    maximum_favorable_excursion_bps=(
+                        (highest / entry_price - 1) * 10_000
+                    ),
+                )
+            if stop_price is not None and bar.low <= stop_price:
+                highest = max(highest, bar.open)
+                lowest = min(lowest, stop_price)
+                return _ExitOutcome(
+                    exited_at=timestamp,
+                    price=stop_price,
+                    reason="STOP_LOSS_EXIT",
+                    maximum_adverse_excursion_bps=(
+                        (lowest / entry_price - 1) * 10_000
+                    ),
+                    maximum_favorable_excursion_bps=(
+                        (highest / entry_price - 1) * 10_000
+                    ),
+                )
+            highest = max(highest, bar.high)
+            lowest = min(lowest, bar.low)
+        highest = max(highest, exit_bar.open)
+        lowest = min(lowest, exit_bar.open)
+        return _ExitOutcome(
+            exited_at=exit_due_at,
+            price=exit_bar.open,
+            reason="FIXED_HOLD_EXIT",
+            maximum_adverse_excursion_bps=(
+                (lowest / entry_price - 1) * 10_000
+            ),
+            maximum_favorable_excursion_bps=(
+                (highest / entry_price - 1) * 10_000
+            ),
+        )
 
     def _config_response(
         self,
@@ -1091,6 +1382,7 @@ class OpeningMomentumShadowService:
                 self.config.one_side_slippage_bps
             ),
             round_trip_cost_bps=self.config.round_trip_cost_bps,
+            stop_loss_pct=self.config.stop_loss_pct,
         )
 
     def _variant_responses(
@@ -1130,24 +1422,38 @@ class OpeningMomentumShadowService:
             is_early_extension = (
                 identity.variant in _EARLY_EXTENSION_VARIANTS
             )
+            is_execution_extension = (
+                identity.variant in _EXECUTION_EXTENSION_VARIANTS
+            )
+            is_extension = (
+                is_early_extension or is_execution_extension
+            )
             identity_rows_by_date = rows_by_date[
                 identity.config_version
             ]
             comparison_baseline: Literal[
                 "INCUMBENT",
                 "EARLY_BROAD_CHALLENGER",
+                "EXECUTION_BROAD_CHALLENGER",
             ] | None
             if identity.variant == "INCUMBENT":
                 comparison_baseline = None
             elif is_early_extension:
                 comparison_baseline = "EARLY_BROAD_CHALLENGER"
+            elif is_execution_extension:
+                comparison_baseline = "EXECUTION_BROAD_CHALLENGER"
             else:
                 comparison_baseline = "INCUMBENT"
-            comparison_identity = (
-                identities_by_variant["EARLY_BROAD_CHALLENGER"]
-                if is_early_extension
-                else incumbent_identity
-            )
+            if is_early_extension:
+                comparison_identity = identities_by_variant[
+                    "EARLY_BROAD_CHALLENGER"
+                ]
+            elif is_execution_extension:
+                comparison_identity = identities_by_variant[
+                    "EXECUTION_BROAD_CHALLENGER"
+                ]
+            else:
+                comparison_identity = incumbent_identity
             comparison_rows_by_date = rows_by_date[
                 comparison_identity.config_version
             ]
@@ -1208,7 +1514,7 @@ class OpeningMomentumShadowService:
                         asdict(comparison)
                     )
                 )
-                if is_early_extension:
+                if is_extension:
                     comparison_response = (
                         self._apply_extension_evidence_gate(
                             comparison_response,
@@ -1249,6 +1555,9 @@ class OpeningMomentumShadowService:
                     ),
                     holding_minutes=(
                         identity.decision_config.holding_minutes
+                    ),
+                    stop_loss_pct=(
+                        identity.decision_config.stop_loss_pct
                     ),
                     comparison_sessions=len(comparison_dates),
                     comparison_baseline=comparison_baseline,
@@ -1308,7 +1617,7 @@ class OpeningMomentumShadowService:
         )
         evidence_gate_passed = (
             displacement_sessions
-            >= _EARLY_EXTENSION_MINIMUM_DISPLACEMENT_SESSIONS
+            >= _EXTENSION_MINIMUM_DISPLACEMENT_SESSIONS
         )
         promotion_ready = (
             comparison.resolved_sessions
@@ -1317,7 +1626,7 @@ class OpeningMomentumShadowService:
             and comparison.confidence_lower_bps is not None
             and comparison.confidence_lower_bps > 0
             and displacement_outperformance_rate
-            >= _EARLY_EXTENSION_MINIMUM_OUTPERFORMANCE_RATE
+            >= _EXTENSION_MINIMUM_OUTPERFORMANCE_RATE
             and comparison.risk_guard_passed
         )
         if promotion_ready:
@@ -1346,7 +1655,7 @@ class OpeningMomentumShadowService:
         payload.update({
             "policy_displacement_sessions": displacement_sessions,
             "minimum_policy_displacement_sessions": (
-                _EARLY_EXTENSION_MINIMUM_DISPLACEMENT_SESSIONS
+                _EXTENSION_MINIMUM_DISPLACEMENT_SESSIONS
             ),
             "displacement_outperformance_rate": (
                 displacement_outperformance_rate
@@ -1621,6 +1930,13 @@ class OpeningMomentumShadowService:
             gross_return_bps=row.gross_return_bps,
             estimated_cost_bps=row.estimated_cost_bps,
             net_return_bps=row.net_return_bps,
+            stop_loss_pct=row.stop_loss_pct,
+            maximum_adverse_excursion_bps=(
+                row.maximum_adverse_excursion_bps
+            ),
+            maximum_favorable_excursion_bps=(
+                row.maximum_favorable_excursion_bps
+            ),
         )
 
 

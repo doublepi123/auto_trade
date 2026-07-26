@@ -214,6 +214,18 @@ def test_execution_delay_cannot_reintroduce_same_bar_lookahead() -> None:
     assert causal.version_hash() != slower.version_hash()
 
 
+def test_stop_loss_is_versioned_and_validated() -> None:
+    fixed_hold = OpeningMomentumConfig(stop_loss_pct=None)
+    stop_first = OpeningMomentumConfig(stop_loss_pct=1.0)
+
+    assert fixed_hold.version_hash() == (
+        "04870d0a9d7b9dd823321182bca02120c0ad42ff0675e4758540d6058b35c86e"
+    )
+    assert fixed_hold.version_hash() != stop_first.version_hash()
+    with pytest.raises(ValueError, match="stop_loss_pct"):
+        OpeningMomentumConfig(stop_loss_pct=0)
+
+
 def test_duplicate_symbols_are_rejected() -> None:
     item = _observation("AAPL.US", 50)
 

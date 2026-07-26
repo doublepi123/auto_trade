@@ -710,7 +710,12 @@ def _parse_candle_timestamp(value: Any) -> datetime | None:
     if value is None:
         return None
     if isinstance(value, datetime):
-        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        if value.tzinfo is not None:
+            return value.astimezone(timezone.utc)
+        # longport 3.0.x returns candle datetimes as naive host-local wall
+        # time. Converting through astimezone() keeps Linux/UTC behavior and
+        # removes the eight-hour shift on Asia/Shanghai development hosts.
+        return value.astimezone(timezone.utc)
     if isinstance(value, (int, float)):
         try:
             return datetime.fromtimestamp(float(value), tz=timezone.utc)

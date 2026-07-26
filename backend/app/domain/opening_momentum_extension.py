@@ -18,7 +18,7 @@ from app.domain.opening_momentum_comparison import (
 
 
 OPENING_EXTENSION_RESEARCH_VERSION = (
-    "opening-extension-causal-holdout-v1"
+    "opening-extension-causal-holdout-stop-aware-v2"
 )
 _SliceName = Literal["ALL", "DISCOVERY", "HOLDOUT"]
 
@@ -27,6 +27,7 @@ _SliceName = Literal["ALL", "DISCOVERY", "HOLDOUT"]
 class OpeningExtensionExitPrice:
     symbol: str
     price: float
+    stop_triggered: bool = False
 
     def __post_init__(self) -> None:
         normalized = self.symbol.strip().upper()
@@ -56,6 +57,7 @@ class OpeningExtensionSession:
 class OpeningExtensionReturnMetrics:
     sessions: int
     signals: int
+    stop_exits: int
     wins: int
     win_rate: float
     cumulative_return_bps: float
@@ -107,6 +109,7 @@ class OpeningExtensionResearchReport:
     opening_config_version: str
     discovery_ratio: float
     minimum_data_coverage: float
+    stop_loss_pct: float | None
     baseline_symbols: tuple[str, ...]
     extension_symbols: tuple[str, ...]
     source_sessions: int
@@ -131,6 +134,7 @@ class _PolicyOutcome:
     candidate_symbol: str | None
     reason: str
     gross_return_bps: float
+    stop_triggered: bool = False
 
 
 def evaluate_opening_extension_candidates(
@@ -294,6 +298,7 @@ def evaluate_opening_extension_candidates(
         opening_config_version=config.version_hash(),
         discovery_ratio=discovery_ratio,
         minimum_data_coverage=minimum_data_coverage,
+        stop_loss_pct=config.stop_loss_pct,
         baseline_symbols=baseline,
         extension_symbols=extensions,
         source_sessions=len(ordered_sessions),
@@ -356,14 +361,14 @@ def _evaluate_policy(
         )
 
     exit_by_symbol = {
-        item.symbol: item.price for item in session.exit_prices
+        item.symbol: item for item in session.exit_prices
     }
     candidate_symbol = decision.candidate_symbol
-    exit_price = exit_by_symbol.get(candidate_symbol or "")
+    exit_outcome = exit_by_symbol.get(candidate_symbol or "")
     if (
         candidate_symbol is None
         or decision.entry_price is None
-        or exit_price is None
+        or exit_outcome is None
     ):
         return _PolicyOutcome(
             session_date=session.session_date,
@@ -374,7 +379,7 @@ def _evaluate_policy(
             gross_return_bps=0.0,
         )
     gross_return_bps = (
-        exit_price / decision.entry_price - 1
+        exit_outcome.price / decision.entry_price - 1
     ) * 10_000
     return _PolicyOutcome(
         session_date=session.session_date,
@@ -383,6 +388,7 @@ def _evaluate_policy(
         candidate_symbol=candidate_symbol,
         reason=decision.reason,
         gross_return_bps=gross_return_bps,
+        stop_triggered=exit_outcome.stop_triggered,
     )
 
 
@@ -437,11 +443,19 @@ def _evaluation_slice(
                 baseline_outcomes[value].signal
                 for value in resolved_dates
             ),
+            tuple(
+                baseline_outcomes[value].stop_triggered
+                for value in resolved_dates
+            ),
         ),
         challenger=_return_metrics(
             challenger_returns,
             tuple(
                 challenger_outcomes[value].signal
+                for value in resolved_dates
+            ),
+            tuple(
+                challenger_outcomes[value].stop_triggered
                 for value in resolved_dates
             ),
         ),
@@ -491,6 +505,10 @@ def _cost_stress(
             challenger_outcomes[value].signal
             for value in resolved_dates
         ),
+        tuple(
+            challenger_outcomes[value].stop_triggered
+            for value in resolved_dates
+        ),
     )
     return OpeningExtensionCostStress(
         round_trip_cost_bps=round_trip_cost_bps,
@@ -524,9 +542,12 @@ def _net_returns(
 def _return_metrics(
     returns_bps: Sequence[float],
     signals: Sequence[bool],
+    stop_exits: Sequence[bool],
 ) -> OpeningExtensionReturnMetrics:
-    if len(returns_bps) != len(signals):
-        raise ValueError("return and signal series must have equal length")
+    if not len(returns_bps) == len(signals) == len(stop_exits):
+        raise ValueError(
+            "return, signal, and stop series must have equal length"
+        )
     returns = tuple(float(value) for value in returns_bps)
     signal_returns = tuple(
         value for value, signal in zip(returns, signals, strict=True)
@@ -543,6 +564,7 @@ def _return_metrics(
     return OpeningExtensionReturnMetrics(
         sessions=len(returns),
         signals=len(signal_returns),
+        stop_exits=sum(stop_exits),
         wins=sum(value > 0 for value in signal_returns),
         win_rate=(
             sum(value > 0 for value in signal_returns)

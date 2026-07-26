@@ -403,6 +403,9 @@ def test_opening_momentum_path_feature_migration_is_idempotent(
         "candidate_path_efficiency",
         "candidate_max_pullback_bps",
         "candidate_opening_range_bps",
+        "stop_loss_pct",
+        "maximum_adverse_excursion_bps",
+        "maximum_favorable_excursion_bps",
     } <= columns
 
 

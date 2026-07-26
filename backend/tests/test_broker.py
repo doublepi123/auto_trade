@@ -79,6 +79,12 @@ def test_history_boundary_uses_exchange_local_wall_clock() -> None:
     assert _history_boundary_for_sdk("AAPL.US", naive) == naive
 
 
+def test_naive_sdk_candle_timestamp_uses_host_local_timezone() -> None:
+    naive = datetime(2026, 7, 10, 21, 30)
+
+    assert _parse_candle_timestamp(naive) == naive.astimezone(timezone.utc)
+
+
 class TestBrokerGateway:
     def test_position_snapshot_isolation_config_defaults_enabled_and_bounded(
         self,

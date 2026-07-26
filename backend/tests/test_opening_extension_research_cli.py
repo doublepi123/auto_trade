@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -10,6 +11,7 @@ from app.cli.opening_extension_research import (
     RawMinuteBar,
     _baseline_session_dates,
     _build_sessions,
+    _execution_cohort_payload,
     _fetch_symbol_bars,
     _frozen_selection_grid,
     _grid_summary,
@@ -129,6 +131,39 @@ def test_session_builder_excludes_incomplete_signal_path() -> None:
     }
 
 
+def test_session_builder_applies_intraday_stop_before_fixed_exit() -> None:
+    session_date = date(2026, 7, 6)
+    extension_bars = list(_raw_bars("EXT.US", session_date))
+    extension_bars[10] = replace(
+        extension_bars[10],
+        open=100.12,
+        high=100.20,
+        low=98.00,
+        close=99.50,
+    )
+    bars = {
+        "AAA.US": _raw_bars("AAA.US", session_date),
+        "BBB.US": _raw_bars("BBB.US", session_date),
+        "EXT.US": tuple(extension_bars),
+    }
+
+    session = _build_sessions(
+        bars,
+        symbols=("AAA.US", "BBB.US", "EXT.US"),
+        session_dates=(session_date,),
+        signal_minutes=3,
+        execution_delay_minutes=1,
+        holding_minutes=30,
+        stop_loss_pct=1.0,
+    )[0]
+
+    outcome = next(
+        item for item in session.exit_prices if item.symbol == "EXT.US"
+    )
+    assert outcome.stop_triggered is True
+    assert outcome.price == pytest.approx(100.06 * 0.99)
+
+
 class _PagedProvider:
     def __init__(self, bars: tuple[BrokerCandle, ...]) -> None:
         self.bars = bars
@@ -246,6 +281,12 @@ def test_cache_round_trip_and_scope_mismatch(tmp_path: Path) -> None:
         start_date=session_date,
         end_date=session_date,
         retained_minutes_after_open=34,
+    ) == bars
+    assert _load_cache(
+        path,
+        start_date=session_date,
+        end_date=session_date,
+        retained_minutes_after_open=36,
     ) == {}
 
 
@@ -295,14 +336,17 @@ def _grid(
     *,
     discovery_exit: float,
     holdout_exit: float,
+    holding_minutes: int = 30,
+    stop_loss_pct: float | None = None,
 ) -> GridEvaluation:
     config = OpeningMomentumConfig(
         signal_minutes=signal_minutes,
-        holding_minutes=30,
+        holding_minutes=holding_minutes,
         minimum_universe_size=2,
         minimum_market_return_bps=-50.0,
         minimum_candidate_return_bps=50.0,
         minimum_excess_return_bps=25.0,
+        stop_loss_pct=stop_loss_pct,
     )
     report = evaluate_opening_extension_candidates(
         _research_sessions(
@@ -315,7 +359,7 @@ def _grid(
     )
     return GridEvaluation(
         signal_minutes=signal_minutes,
-        holding_minutes=30,
+        holding_minutes=holding_minutes,
         report=report,
     )
 
@@ -351,16 +395,18 @@ def test_formal_selection_is_frozen_to_production_grid() -> None:
     )
     production = GridEvaluation(
         signal_minutes=3,
-        holding_minutes=120,
+        holding_minutes=60,
         report=_grid(
             3,
             discovery_exit=100.5,
             holdout_exit=100.5,
+            holding_minutes=60,
+            stop_loss_pct=1.0,
         ).report,
     )
 
     assert _frozen_selection_grid((sensitivity, production)) is production
-    with pytest.raises(ValueError, match="frozen 3m/120m"):
+    with pytest.raises(ValueError, match="frozen 3m/60m"):
         _frozen_selection_grid((sensitivity,))
 
 
@@ -379,6 +425,21 @@ def test_selected_status_requires_robust_holdout() -> None:
     assert blockers == ()
     assert summary["discovery_winner"] == "EXT.US"
     assert "candidates" not in summary
+
+
+def test_execution_cohort_is_frozen_from_discovery_only() -> None:
+    grid = _grid(
+        3,
+        discovery_exit=101.0,
+        holdout_exit=95.0,
+        holding_minutes=60,
+        stop_loss_pct=1.0,
+    )
+
+    payload = _execution_cohort_payload(grid)
+
+    assert payload["selection_uses_holdout"] is False
+    assert payload["symbols"] == ["EXT.US"]
 
 
 def test_cli_list_parsers_fail_closed() -> None:

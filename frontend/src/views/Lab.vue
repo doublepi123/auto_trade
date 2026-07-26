@@ -471,6 +471,13 @@
                       {{ row.holding_minutes }} 分钟
                     </template>
                   </el-table-column>
+                  <el-table-column label="止损" min-width="80">
+                    <template #default="{ row }">
+                      {{ row.stop_loss_pct == null
+                        ? '-'
+                        : formatPercent(row.stop_loss_pct / 100) }}
+                    </template>
+                  </el-table-column>
                   <el-table-column label="当日候选" min-width="110">
                     <template #default="{ row }">
                       {{ row.latest?.candidate_symbol || '-' }}
@@ -484,6 +491,12 @@
                   <el-table-column label="窗口回撤" min-width="100">
                     <template #default="{ row }">
                       {{ formatNullableBps(row.latest?.candidate_max_pullback_bps ?? null) }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="持仓 MAE / MFE" min-width="150">
+                    <template #default="{ row }">
+                      {{ formatNullableBps(row.latest?.maximum_adverse_excursion_bps ?? null) }} /
+                      {{ formatNullableBps(row.latest?.maximum_favorable_excursion_bps ?? null) }}
                     </template>
                   </el-table-column>
                   <el-table-column
@@ -2162,6 +2175,9 @@ function openingMomentumVariantLabel(
   if (variant === 'LAST5_POSITIVE_CHALLENGER') return '广度 + 末 5 分钟'
   if (variant === 'LAST5_ONLY_CHALLENGER') return '末 5 分钟过滤'
   if (variant === 'EARLY_BROAD_CHALLENGER') return '3 分钟宽池'
+  if (variant === 'EXECUTION_BROAD_CHALLENGER') return '3 分钟执行基线'
+  const execution = /^EXECUTION_(.+)_CHALLENGER$/.exec(variant)
+  if (execution) return `执行 + ${execution[1]}`
   const extension = /^EARLY_(.+)_CHALLENGER$/.exec(variant)
   return extension ? `3 分钟 + ${extension[1]}` : variant
 }
@@ -2170,6 +2186,7 @@ function openingMomentumVariantTagType(
 ): 'primary' | 'warning' | 'info' | 'success' {
   if (variant === 'INCUMBENT') return 'primary'
   if (variant === 'REVERSAL_CHALLENGER') return 'success'
+  if (variant.startsWith('EXECUTION_')) return 'success'
   if (variant.startsWith('EARLY_')) return 'warning'
   if (variant.includes('LAST5')) return 'warning'
   if (variant.startsWith('BREADTH_GATED')) return 'success'

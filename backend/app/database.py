@@ -1617,15 +1617,18 @@ def _ensure_opening_momentum_shadow_table(db_engine: Engine) -> None:
             "opening_momentum_shadow_runs"
         )
     }
-    path_feature_columns = {
+    evidence_columns = {
         "candidate_first_five_return_bps": "FLOAT",
         "candidate_last_five_return_bps": "FLOAT",
         "candidate_path_efficiency": "FLOAT",
         "candidate_max_pullback_bps": "FLOAT",
         "candidate_opening_range_bps": "FLOAT",
+        "stop_loss_pct": "FLOAT",
+        "maximum_adverse_excursion_bps": "FLOAT",
+        "maximum_favorable_excursion_bps": "FLOAT",
     }
     with db_engine.begin() as connection:
-        for name, column_type in path_feature_columns.items():
+        for name, column_type in evidence_columns.items():
             if name not in columns:
                 connection.exec_driver_sql(
                     "ALTER TABLE opening_momentum_shadow_runs "

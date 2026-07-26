@@ -47,6 +47,26 @@ _EXTENSION_VARIANTS = (
     "EARLY_LITE_CHALLENGER",
     "EARLY_QCOM_CHALLENGER",
 )
+_EXECUTION_EXTENSION_SYMBOLS = (
+    _SNDK_SYMBOL,
+    "INTC.US",
+    "QCOM.US",
+    "RKLB.US",
+    "PANW.US",
+)
+_EXECUTION_EXTENSION_VARIANTS = (
+    "EXECUTION_SNDK_CHALLENGER",
+    "EXECUTION_INTC_CHALLENGER",
+    "EXECUTION_QCOM_CHALLENGER",
+    "EXECUTION_RKLB_CHALLENGER",
+    "EXECUTION_PANW_CHALLENGER",
+)
+_ALL_CHALLENGER_VARIANTS = (
+    "EARLY_BROAD_CHALLENGER",
+    *_EXTENSION_VARIANTS,
+    "EXECUTION_BROAD_CHALLENGER",
+    *_EXECUTION_EXTENSION_VARIANTS,
+)
 
 
 class _FakeCandles:
@@ -461,6 +481,51 @@ def test_candle_coercion_keeps_decision_prices_when_range_is_missing() -> None:
     assert result[0].close == 101.0
 
 
+def test_stop_aware_exit_uses_first_intraday_breach_and_tracks_path() -> None:
+    entry_at = _SESSION_OPEN + timedelta(minutes=4)
+    exit_at = entry_at + timedelta(minutes=2)
+    candles = tuple(OpeningMomentumShadowService._coerce_candles([
+        BrokerCandle(
+            timestamp=entry_at,
+            open=100.0,
+            high=101.0,
+            low=99.5,
+            close=100.5,
+            volume=1000,
+        ),
+        BrokerCandle(
+            timestamp=entry_at + timedelta(minutes=1),
+            open=100.0,
+            high=100.2,
+            low=98.0,
+            close=98.5,
+            volume=1000,
+        ),
+        BrokerCandle(
+            timestamp=exit_at,
+            open=102.0,
+            high=102.1,
+            low=101.9,
+            close=102.0,
+            volume=1000,
+        ),
+    ]))
+
+    outcome = OpeningMomentumShadowService._exit_outcome(
+        candles,
+        entry_at=entry_at,
+        exit_due_at=exit_at,
+        entry_price=100.0,
+        stop_loss_pct=1.0,
+    )
+
+    assert outcome.reason == "STOP_LOSS_EXIT"
+    assert outcome.exited_at == entry_at + timedelta(minutes=1)
+    assert outcome.price == 99.0
+    assert outcome.maximum_adverse_excursion_bps == pytest.approx(-100.0)
+    assert outcome.maximum_favorable_excursion_bps == pytest.approx(100.0)
+
+
 def test_opening_path_efficiency_is_bounded_for_compounding_path() -> None:
     candles = [
         SimpleNamespace(
@@ -509,6 +574,12 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
             "EARLY_ALAB_CHALLENGER",
             "EARLY_LITE_CHALLENGER",
             "EARLY_QCOM_CHALLENGER",
+            "EXECUTION_BROAD_CHALLENGER",
+            "EXECUTION_SNDK_CHALLENGER",
+            "EXECUTION_INTC_CHALLENGER",
+            "EXECUTION_QCOM_CHALLENGER",
+            "EXECUTION_RKLB_CHALLENGER",
+            "EXECUTION_PANW_CHALLENGER",
             "REVERSAL_CHALLENGER",
             "CONTINUATION_CHALLENGER",
             "BREADTH_GATED_CHALLENGER",
@@ -517,6 +588,7 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
         }
         early = by_variant["EARLY_BROAD_CHALLENGER"]
         early_sndk = by_variant["EARLY_SNDK_CHALLENGER"]
+        execution = by_variant["EXECUTION_BROAD_CHALLENGER"]
         reversal = by_variant["REVERSAL_CHALLENGER"]
         continuation = by_variant["CONTINUATION_CHALLENGER"]
         breadth = by_variant["BREADTH_GATED_CHALLENGER"]
@@ -552,6 +624,24 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
             assert extension.universe_source == (
                 f"OPENING_EARLY_{symbol.removesuffix('.US')}"
             )
+        assert execution.decision_config.signal_minutes == 3
+        assert execution.decision_config.holding_minutes == 60
+        assert execution.decision_config.stop_loss_pct == 1.0
+        assert execution.minimum_data_coverage == 0.95
+        assert execution.universe_source == "OPENING_EXECUTION_BROAD"
+        assert execution.required_symbols == ()
+        for variant, symbol in zip(
+            _EXECUTION_EXTENSION_VARIANTS,
+            _EXECUTION_EXTENSION_SYMBOLS,
+            strict=True,
+        ):
+            extension = by_variant[variant]
+            assert extension.decision_config == execution.decision_config
+            assert extension.minimum_data_coverage == 0.95
+            assert extension.required_symbols == (symbol,)
+            assert extension.universe_source == (
+                f"OPENING_EXECUTION_{symbol.removesuffix('.US')}"
+            )
         assert continuation.decision_config.holding_minutes == 30
         assert (
             continuation.decision_config.minimum_market_return_bps
@@ -575,7 +665,7 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
                 identity.config_version
                 for identity in identities
             }
-        ) == 13
+        ) == 19
     finally:
         db.close()
         Base.metadata.drop_all(bind=engine)
@@ -601,6 +691,8 @@ def test_variant_comparisons_are_paired_independently(
             "CONTINUATION_CHALLENGER",
             "EARLY_BROAD_CHALLENGER",
             "EARLY_SNDK_CHALLENGER",
+            "EXECUTION_BROAD_CHALLENGER",
+            "EXECUTION_SNDK_CHALLENGER",
         ):
             identity = identities_by_variant[variant]
             db.add(
@@ -626,6 +718,7 @@ def test_variant_comparisons_are_paired_independently(
 
         continuation = by_variant["CONTINUATION_CHALLENGER"]
         early_sndk = by_variant["EARLY_SNDK_CHALLENGER"]
+        execution_sndk = by_variant["EXECUTION_SNDK_CHALLENGER"]
         breadth = by_variant["BREADTH_GATED_CHALLENGER"]
         assert continuation.comparison_sessions == 1
         assert continuation.comparison is not None
@@ -639,6 +732,14 @@ def test_variant_comparisons_are_paired_independently(
         assert (
             early_sndk.comparison_baseline
             == "EARLY_BROAD_CHALLENGER"
+        )
+        assert execution_sndk.comparison_sessions == 1
+        assert execution_sndk.comparison is not None
+        assert execution_sndk.comparison.resolved_sessions == 1
+        assert execution_sndk.comparison.mean_delta_bps == 0.0
+        assert (
+            execution_sndk.comparison_baseline
+            == "EXECUTION_BROAD_CHALLENGER"
         )
         assert breadth.comparison_sessions == 0
         assert breadth.comparison is not None
@@ -791,7 +892,7 @@ def test_challengers_use_one_market_snapshot_and_close_all_variants(
         assert opened.latest.universe_source == "UNIVERSE_SELECTION"
         assert opened.latest.candidate_symbol == "S1.US"
         assert opened.latest.selection_run_id == run.id
-        assert len(opened.variants) == 13
+        assert len(opened.variants) == 19
         by_variant = {
             item.variant: item for item in opened.variants
         }
@@ -889,7 +990,7 @@ def test_challengers_use_one_market_snapshot_and_close_all_variants(
                 item.config_version
                 for item in opened.variants
             }
-        ) == 13
+        ) == 19
 
         still_open = service.tick(
             now=_SESSION_OPEN + timedelta(minutes=47, seconds=10),
@@ -925,10 +1026,7 @@ def test_challengers_use_one_market_snapshot_and_close_all_variants(
             metrics = closed_by_variant[variant].metrics
             assert metrics.closed_trades == 1
             assert metrics.cumulative_net_return_bps == -14.0
-        for variant in (
-            "EARLY_BROAD_CHALLENGER",
-            *_EXTENSION_VARIANTS,
-        ):
+        for variant in _ALL_CHALLENGER_VARIANTS:
             metrics = closed_by_variant[variant].metrics
             assert metrics.closed_trades == 0
             assert metrics.cumulative_net_return_bps == 0.0
@@ -992,8 +1090,13 @@ def test_early_broad_challenger_keeps_independent_observation_window(
         )
 
         rows = db.query(OpeningMomentumShadowRun).all()
-        assert len(rows) == 7
-        assert candles.calls == [*_SYMBOLS, *_EXTENSION_SYMBOLS]
+        assert len(rows) == 13
+        assert candles.calls == [
+            *_SYMBOLS,
+            *_EXTENSION_SYMBOLS,
+            "INTC.US",
+            "PANW.US",
+        ]
         assert early_opened.state == "OPEN"
         assert early_opened.latest is None
         early = {
@@ -1048,12 +1151,36 @@ def test_early_broad_challenger_keeps_independent_observation_window(
                 == "EARLY_BROAD_CHALLENGER"
             )
 
+        execution = early_by_variant["EXECUTION_BROAD_CHALLENGER"]
+        assert execution.latest is not None
+        assert execution.latest.status == "OPEN"
+        assert execution.latest.universe == list(_SYMBOLS)
+        assert execution.latest.exit_due_at == (
+            _SESSION_OPEN + timedelta(minutes=64)
+        )
+        assert execution.latest.stop_loss_pct == 1.0
+        assert execution.holding_minutes == 60
+        assert execution.comparison_baseline == "INCUMBENT"
+        for variant, symbol in zip(
+            _EXECUTION_EXTENSION_VARIANTS,
+            _EXECUTION_EXTENSION_SYMBOLS,
+            strict=True,
+        ):
+            extension = early_by_variant[variant]
+            assert extension.latest is not None
+            assert extension.latest.universe == [*_SYMBOLS, symbol]
+            assert extension.required_symbols == [symbol]
+            assert (
+                extension.comparison_baseline
+                == "EXECUTION_BROAD_CHALLENGER"
+            )
+
         candles.calls.clear()
         standard_opened = service.tick(
             now=_SESSION_OPEN + timedelta(minutes=32, seconds=10),
         )
 
-        assert db.query(OpeningMomentumShadowRun).count() == 13
+        assert db.query(OpeningMomentumShadowRun).count() == 19
         assert candles.calls == list(_SYMBOLS[:4])
         by_variant = {
             item.variant: item for item in standard_opened.variants
@@ -1074,7 +1201,7 @@ def test_early_broad_challenger_keeps_independent_observation_window(
         rows = db.query(OpeningMomentumShadowRun).all()
         assert sum(row.status == "CLOSED" for row in rows) == 5
         assert sum(row.status == "SKIPPED" for row in rows) == 1
-        assert sum(row.status == "OPEN" for row in rows) == 7
+        assert sum(row.status == "OPEN" for row in rows) == 13
         by_variant = {
             item.variant: item for item in standard_closed.variants
         }
@@ -1089,8 +1216,33 @@ def test_early_broad_challenger_keeps_independent_observation_window(
             .metrics.closed_trades
             == 0
         )
-        for variant in _EXTENSION_VARIANTS:
+        for variant in _ALL_CHALLENGER_VARIANTS:
             assert by_variant[variant].metrics.closed_trades == 0
+
+        candles.calls.clear()
+        execution_closed = service.tick(
+            now=_SESSION_OPEN + timedelta(minutes=65, seconds=10),
+        )
+
+        rows = db.query(OpeningMomentumShadowRun).all()
+        assert candles.calls == ["S7.US"]
+        assert execution_closed.state == "OPEN"
+        assert sum(row.status == "CLOSED" for row in rows) == 11
+        assert sum(row.status == "SKIPPED" for row in rows) == 1
+        assert sum(row.status == "OPEN" for row in rows) == 7
+        execution_by_variant = {
+            item.variant: item for item in execution_closed.variants
+        }
+        assert (
+            execution_by_variant["EXECUTION_BROAD_CHALLENGER"]
+            .metrics.closed_trades
+            == 1
+        )
+        for variant in _EXECUTION_EXTENSION_VARIANTS:
+            assert (
+                execution_by_variant[variant].metrics.closed_trades
+                == 1
+            )
 
         all_closed = service.tick(
             now=_SESSION_OPEN + timedelta(minutes=125, seconds=10),
@@ -1236,7 +1388,7 @@ def test_breadth_challenger_skips_a_negative_market_snapshot(
         )
 
         assert candles.calls == list(_SYMBOLS[:4])
-        assert len(status.variants) == 13
+        assert len(status.variants) == 19
         by_variant = {
             item.variant: item for item in status.variants
         }

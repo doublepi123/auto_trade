@@ -18,7 +18,8 @@ LLM_INTERVAL_REVISION = '20260520_add_llm_interval_minutes'
 MIN_PROFIT_REVISION = '20260522_add_min_profit_amount'
 AUTO_RESUME_REVISION = '20260522_auto_resume_pause'
 LLM_INTERACTIONS_REVISION = '20260522_add_llm_interactions'
-HEAD_REVISION = '20260724_opening_momentum'
+OPENING_MOMENTUM_REVISION = '20260724_opening_momentum'
+HEAD_REVISION = '20260726_opening_stop'
 # IMPORTANT: 每次新增 alembic 迁移时，必须同步更新 HEAD_REVISION 及 mark_migrated_if_needed 的列检测逻辑
 
 
@@ -36,6 +37,11 @@ def mark_migrated_if_needed():
         runtime_state_columns = (
             {column['name'] for column in inspector.get_columns('runtime_state')}
             if 'runtime_state' in tables
+            else set()
+        )
+        opening_columns = (
+            {column['name'] for column in inspector.get_columns('opening_momentum_shadow_runs')}
+            if 'opening_momentum_shadow_runs' in tables
             else set()
         )
         required_columns = {
@@ -75,6 +81,16 @@ def mark_migrated_if_needed():
         if (
             version_num == LLM_INTERACTIONS_REVISION
             and 'opening_momentum_shadow_runs' in tables
+        ):
+            version_num = OPENING_MOMENTUM_REVISION
+        opening_stop_columns = {
+            'stop_loss_pct',
+            'maximum_adverse_excursion_bps',
+            'maximum_favorable_excursion_bps',
+        }
+        if (
+            version_num == OPENING_MOMENTUM_REVISION
+            and opening_stop_columns.issubset(opening_columns)
         ):
             version_num = HEAD_REVISION
 

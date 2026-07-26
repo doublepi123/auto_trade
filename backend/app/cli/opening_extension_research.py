@@ -32,14 +32,20 @@ from app.domain.opening_momentum_extension import (
 from app.models import StrategyV2ShadowConfig
 
 
-OPENING_EXTENSION_CLI_VERSION = "opening-extension-research-cli-v2"
-_CACHE_VERSION = "opening-extension-minute-cache-v2"
+OPENING_EXTENSION_CLI_VERSION = "opening-extension-research-cli-v3"
+_CACHE_VERSION = "opening-extension-minute-cache-ohlc-v3"
 _BAR_DURATION = timedelta(minutes=1)
 _DEFAULT_SIGNAL_MINUTES = (2, 3, 5, 10)
 _DEFAULT_HOLDING_MINUTES = (30, 60, 90, 120)
 _DEFAULT_COST_STRESS_BPS = (14.0, 20.0, 30.0)
 _FROZEN_SELECTION_SIGNAL_MINUTES = 3
-_FROZEN_SELECTION_HOLDING_MINUTES = 120
+_FROZEN_SELECTION_HOLDING_MINUTES = 60
+_FROZEN_SELECTION_STOP_LOSS_PCT = 1.0
+_EXECUTION_COHORT_MAX_SYMBOLS = 6
+_EXECUTION_COHORT_MINIMUM_DISPLACEMENTS = 4
+_EXECUTION_COHORT_SELECTION_VERSION = (
+    "discovery-top6-positive-delta-min4-stop1-v1"
+)
 
 
 class HistoricalCandleProvider(Protocol):
@@ -57,17 +63,34 @@ class RawMinuteBar:
     timestamp: datetime
     open: float
     close: float
+    high: float | None = None
+    low: float | None = None
 
     def __post_init__(self) -> None:
         timestamp = _as_utc(self.timestamp)
         if timestamp.second or timestamp.microsecond:
             raise ValueError("minute bar timestamp must be minute-aligned")
+        high = float(self.high) if self.high is not None else max(
+            self.open,
+            self.close,
+        )
+        low = float(self.low) if self.low is not None else min(
+            self.open,
+            self.close,
+        )
         if any(
             not math.isfinite(value) or value <= 0
-            for value in (self.open, self.close)
+            for value in (self.open, self.close, high, low)
         ):
             raise ValueError("minute bar prices must be positive")
+        if high < max(self.open, self.close) or low > min(
+            self.open,
+            self.close,
+        ):
+            raise ValueError("minute bar OHLC range is inconsistent")
         object.__setattr__(self, "timestamp", timestamp)
+        object.__setattr__(self, "high", high)
+        object.__setattr__(self, "low", low)
 
 
 @dataclass(frozen=True)
@@ -179,6 +202,8 @@ def _fetch_symbol_bars(
                 timestamp=timestamp,
                 open=float(candle.open),
                 close=float(candle.close),
+                high=float(candle.high),
+                low=float(candle.low),
             )
         next_cursor = latest + _BAR_DURATION
         if next_cursor <= cursor:
@@ -248,6 +273,7 @@ def _build_sessions(
     signal_minutes: int,
     execution_delay_minutes: int,
     holding_minutes: int,
+    stop_loss_pct: float | None = None,
 ) -> tuple[OpeningExtensionSession, ...]:
     if signal_minutes <= 0:
         raise ValueError("signal_minutes must be positive")
@@ -255,6 +281,11 @@ def _build_sessions(
         raise ValueError("execution_delay_minutes must be positive")
     if holding_minutes <= 0:
         raise ValueError("holding_minutes must be positive")
+    if stop_loss_pct is not None and (
+        not math.isfinite(stop_loss_pct)
+        or not 0 < stop_loss_pct <= 20
+    ):
+        raise ValueError("stop_loss_pct must be in (0, 20] when set")
 
     normalized_symbols = tuple(
         dict.fromkeys(symbol.strip().upper() for symbol in symbols)
@@ -295,11 +326,20 @@ def _build_sessions(
                 signal_close=signal_bar.close,
                 entry_open=entry_bar.open if entry_bar is not None else None,
             ))
-            exit_bar = indexed.get(exit_at)
-            if exit_bar is not None:
+            exit_outcome = _session_exit_outcome(
+                indexed,
+                entry_at=entry_at,
+                exit_at=exit_at,
+                entry_price=(
+                    entry_bar.open if entry_bar is not None else None
+                ),
+                stop_loss_pct=stop_loss_pct,
+            )
+            if exit_outcome is not None:
                 exit_prices.append(OpeningExtensionExitPrice(
                     symbol=symbol,
-                    price=exit_bar.open,
+                    price=exit_outcome[0],
+                    stop_triggered=exit_outcome[1],
                 ))
         result.append(OpeningExtensionSession(
             session_date=session_date,
@@ -307,6 +347,32 @@ def _build_sessions(
             exit_prices=tuple(exit_prices),
         ))
     return tuple(result)
+
+
+def _session_exit_outcome(
+    indexed: dict[datetime, RawMinuteBar],
+    *,
+    entry_at: datetime,
+    exit_at: datetime,
+    entry_price: float | None,
+    stop_loss_pct: float | None,
+) -> tuple[float, bool] | None:
+    exit_bar = indexed.get(exit_at)
+    if exit_bar is None or entry_price is None:
+        return None
+    if stop_loss_pct is None:
+        return exit_bar.open, False
+
+    stop_price = entry_price * (1 - stop_loss_pct / 100)
+    for timestamp in sorted(
+        value for value in indexed if entry_at <= value < exit_at
+    ):
+        bar = indexed[timestamp]
+        if bar.open <= stop_price:
+            return bar.open, True
+        if bar.low is not None and bar.low <= stop_price:
+            return stop_price, True
+    return exit_bar.open, False
 
 
 def _load_cache(
@@ -326,9 +392,14 @@ def _load_cache(
         "cache_version": _CACHE_VERSION,
         "start_date": start_date.isoformat(),
         "end_date": end_date.isoformat(),
-        "retained_minutes_after_open": retained_minutes_after_open,
     }
     if any(raw.get(key) != value for key, value in expected_metadata.items()):
+        return {}
+    cached_retained_minutes = raw.get("retained_minutes_after_open")
+    if (
+        not isinstance(cached_retained_minutes, int)
+        or cached_retained_minutes < retained_minutes_after_open
+    ):
         return {}
     raw_symbols = raw.get("bars_by_symbol")
     if not isinstance(raw_symbols, dict):
@@ -339,14 +410,16 @@ def _load_cache(
             raise ValueError("opening research cache symbol entry is invalid")
         parsed: list[RawMinuteBar] = []
         for raw_bar in raw_bars:
-            if not isinstance(raw_bar, list) or len(raw_bar) != 3:
+            if not isinstance(raw_bar, list) or len(raw_bar) != 5:
                 raise ValueError("opening research cache bar is invalid")
-            timestamp_raw, open_raw, close_raw = raw_bar
+            timestamp_raw, open_raw, high_raw, low_raw, close_raw = raw_bar
             if not isinstance(timestamp_raw, str):
                 raise ValueError("opening research cache timestamp is invalid")
             parsed.append(RawMinuteBar(
                 timestamp=datetime.fromisoformat(timestamp_raw),
                 open=float(open_raw),
+                high=float(high_raw),
+                low=float(low_raw),
                 close=float(close_raw),
             ))
         result[raw_symbol.strip().upper()] = tuple(parsed)
@@ -368,7 +441,13 @@ def _save_cache(
         "retained_minutes_after_open": retained_minutes_after_open,
         "bars_by_symbol": {
             symbol: [
-                [bar.timestamp.isoformat(), bar.open, bar.close]
+                [
+                    bar.timestamp.isoformat(),
+                    bar.open,
+                    bar.high,
+                    bar.low,
+                    bar.close,
+                ]
                 for bar in values
             ]
             for symbol, values in sorted(bars_by_symbol.items())
@@ -457,12 +536,14 @@ def _frozen_selection_grid(
             value.signal_minutes == _FROZEN_SELECTION_SIGNAL_MINUTES
             and value.holding_minutes
             == _FROZEN_SELECTION_HOLDING_MINUTES
+            and value.report.stop_loss_pct
+            == _FROZEN_SELECTION_STOP_LOSS_PCT
         )
     )
     if len(matches) != 1:
         raise ValueError(
-            "research grid must contain exactly one frozen 3m/120m "
-            "production configuration"
+            "research grid must contain exactly one frozen 3m/60m "
+            "execution configuration"
         )
     return matches[0]
 
@@ -523,6 +604,7 @@ def _grid_summary(value: GridEvaluation) -> dict[str, object]:
     return {
         "signal_minutes": value.signal_minutes,
         "holding_minutes": value.holding_minutes,
+        "stop_loss_pct": value.report.stop_loss_pct,
         "opening_config_version": value.report.opening_config_version,
         "discovery_winner": selection.candidate.symbol,
         "diagnostic_status": status,
@@ -546,11 +628,57 @@ def _selected_payload(
         "symbol": selection.candidate.symbol,
         "signal_minutes": selection.grid.signal_minutes,
         "holding_minutes": selection.grid.holding_minutes,
-        "selected_using": "DISCOVERY_ONLY_FROZEN_PRODUCTION_GRID",
+        "stop_loss_pct": selection.grid.report.stop_loss_pct,
+        "selected_using": "DISCOVERY_ONLY_FROZEN_EXECUTION_GRID",
         "discovery": _slice_payload(selection.discovery),
         "holdout": _slice_payload(_slice(selection.candidate, "HOLDOUT")),
         "cost_stress": [
             asdict(item) for item in selection.candidate.cost_stress
+        ],
+    }
+
+
+def _execution_cohort_payload(
+    grid: GridEvaluation,
+) -> dict[str, object]:
+    eligible: list[
+        tuple[float, str, OpeningExtensionSlice]
+    ] = []
+    for candidate in grid.report.candidates:
+        discovery = _slice(candidate, "DISCOVERY")
+        delta = discovery.comparison.cumulative_delta_bps
+        if (
+            discovery.displaced_baseline_sessions
+            < _EXECUTION_COHORT_MINIMUM_DISPLACEMENTS
+            or delta <= 0
+        ):
+            continue
+        eligible.append((delta, candidate.symbol, discovery))
+    eligible.sort(key=lambda item: (-item[0], item[1]))
+    selected = eligible[:_EXECUTION_COHORT_MAX_SYMBOLS]
+    return {
+        "selection_version": _EXECUTION_COHORT_SELECTION_VERSION,
+        "selection_uses_holdout": False,
+        "maximum_symbols": _EXECUTION_COHORT_MAX_SYMBOLS,
+        "minimum_displacement_sessions": (
+            _EXECUTION_COHORT_MINIMUM_DISPLACEMENTS
+        ),
+        "symbols": [symbol for _, symbol, _ in selected],
+        "candidates": [
+            {
+                "symbol": symbol,
+                "displaced_baseline_sessions": (
+                    discovery.displaced_baseline_sessions
+                ),
+                "extension_signal_sessions": (
+                    discovery.extension_signal_sessions
+                ),
+                "cumulative_delta_bps": delta,
+                "mean_delta_bps": (
+                    discovery.comparison.mean_delta_bps
+                ),
+            }
+            for delta, symbol, discovery in selected
         ],
     }
 
@@ -633,6 +761,12 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--discovery-ratio", type=float, default=0.60)
     parser.add_argument("--minimum-data-coverage", type=float, default=0.95)
+    parser.add_argument(
+        "--stop-loss-pct",
+        type=float,
+        default=_FROZEN_SELECTION_STOP_LOSS_PCT,
+        help="fixed intraday stop used by every research grid",
+    )
     parser.add_argument("--cache-path")
     parser.add_argument("--output")
     parser.add_argument(
@@ -655,6 +789,10 @@ def main() -> int:
             raise ValueError("discovery_ratio must be in (0, 1)")
         if not 0 < args.minimum_data_coverage <= 1:
             raise ValueError("minimum_data_coverage must be in (0, 1]")
+        if args.stop_loss_pct != _FROZEN_SELECTION_STOP_LOSS_PCT:
+            raise ValueError(
+                "formal selection requires the frozen 1% production stop"
+            )
         extension_symbols = _parse_symbols(
             args.extension_symbols,
             field_name="extension_symbols",
@@ -676,8 +814,8 @@ def main() -> int:
             or _FROZEN_SELECTION_HOLDING_MINUTES not in holding_grid
         ):
             raise ValueError(
-                "parameter grids must include the frozen 3m/120m "
-                "production configuration"
+                "parameter grids must include the frozen 3m/60m "
+                "execution configuration"
             )
         baseline_symbols = (
             _parse_symbols(
@@ -703,7 +841,7 @@ def main() -> int:
     cache_path = Path(args.cache_path) if args.cache_path else Path(
         "data/research/"
         f"opening-extension-{start_date.isoformat()}-{end_date.isoformat()}"
-        ".json.gz"
+        "-ohlc-v3.json.gz"
     )
     try:
         bars_by_symbol = _load_cache(
@@ -719,7 +857,9 @@ def main() -> int:
         (*baseline_symbols, *extension_symbols)
     ))
     missing_symbols = tuple(
-        symbol for symbol in all_symbols if symbol not in bars_by_symbol
+        symbol
+        for symbol in all_symbols
+        if not bars_by_symbol.get(symbol)
     )
     broker: BrokerGateway | None = None
     if missing_symbols:
@@ -779,6 +919,7 @@ def main() -> int:
                 minimum_excess_return_bps=25.0,
                 one_side_fee_rate=0.0005,
                 one_side_slippage_bps=2.0,
+                stop_loss_pct=args.stop_loss_pct,
             )
             sessions = _build_sessions(
                 bars_by_symbol,
@@ -787,6 +928,7 @@ def main() -> int:
                 signal_minutes=signal_minutes,
                 execution_delay_minutes=execution_delay_minutes,
                 holding_minutes=holding_minutes,
+                stop_loss_pct=args.stop_loss_pct,
             )
             report = evaluate_opening_extension_candidates(
                 sessions,
@@ -816,6 +958,9 @@ def main() -> int:
         status=status,
         blockers=blockers,
     )
+    execution_cohort_payload = _execution_cohort_payload(
+        selection_grid
+    )
     full_payload: dict[str, object] = {
         "cli_version": OPENING_EXTENSION_CLI_VERSION,
         "algorithm_version": OPENING_EXTENSION_RESEARCH_VERSION,
@@ -843,6 +988,7 @@ def main() -> int:
             "signal_minutes_grid": list(signal_grid),
             "holding_minutes_grid": list(holding_grid),
             "execution_delay_minutes": execution_delay_minutes,
+            "stop_loss_pct": args.stop_loss_pct,
             "discovery_ratio": args.discovery_ratio,
             "minimum_data_coverage": args.minimum_data_coverage,
             "round_trip_cost_scenarios_bps": list(
@@ -852,17 +998,20 @@ def main() -> int:
             "selection_grid": {
                 "signal_minutes": _FROZEN_SELECTION_SIGNAL_MINUTES,
                 "holding_minutes": _FROZEN_SELECTION_HOLDING_MINUTES,
+                "stop_loss_pct": _FROZEN_SELECTION_STOP_LOSS_PCT,
             },
             "sensitivity_grid_selection_allowed": False,
             "grid_search_bias": True,
             "survivorship_bias": "CURRENT_BASELINE_SYMBOLS",
         },
         "selected": selected_payload,
+        "execution_cohort": execution_cohort_payload,
         "automatic_promotion_allowed": False,
         "grid": [
             {
                 "signal_minutes": value.signal_minutes,
                 "holding_minutes": value.holding_minutes,
+                "stop_loss_pct": value.report.stop_loss_pct,
                 "report": value.report.to_dict(),
             }
             for value in grids
@@ -892,6 +1041,7 @@ def main() -> int:
         "generated_at": generated_at,
         "data_scope": full_payload["data_scope"],
         "selected": selected_payload,
+        "execution_cohort": execution_cohort_payload,
         "automatic_promotion_allowed": False,
         "full_report_path": str(output_path),
         "grid": [_grid_summary(value) for value in grids],

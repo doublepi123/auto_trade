@@ -1351,6 +1351,15 @@ class OpeningMomentumShadowRun(Base):
     gross_return_bps: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     estimated_cost_bps: Mapped[float] = mapped_column(Float, nullable=False)
     net_return_bps: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    stop_loss_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    maximum_adverse_excursion_bps: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+    )
+    maximum_favorable_excursion_bps: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         _TZDateTime,

@@ -102,6 +102,8 @@ class TestOpeningMomentumShadowApi:
         reversal = variants["REVERSAL_CHALLENGER"]
         early = variants["EARLY_BROAD_CHALLENGER"]
         early_sndk = variants["EARLY_SNDK_CHALLENGER"]
+        execution = variants["EXECUTION_BROAD_CHALLENGER"]
+        execution_sndk = variants["EXECUTION_SNDK_CHALLENGER"]
         assert early["universe_source"] == "OPENING_EARLY_BROAD"
         assert early["signal_minutes"] == 3
         assert early["minimum_market_return_bps"] == -50.0
@@ -150,6 +152,40 @@ class TestOpeningMomentumShadowApi:
             assert (
                 extension["comparison"]["evidence_gate_passed"]
                 is False
+            )
+        assert execution["universe_source"] == "OPENING_EXECUTION_BROAD"
+        assert execution["signal_minutes"] == 3
+        assert execution["holding_minutes"] == 60
+        assert execution["stop_loss_pct"] == 1.0
+        assert execution["minimum_data_coverage"] == 0.95
+        assert execution["required_symbols"] == []
+        assert execution["comparison_baseline"] == "INCUMBENT"
+        assert execution_sndk["required_symbols"] == ["SNDK.US"]
+        assert (
+            execution_sndk["comparison_baseline"]
+            == "EXECUTION_BROAD_CHALLENGER"
+        )
+        execution_symbols = {
+            "EXECUTION_SNDK_CHALLENGER": "SNDK.US",
+            "EXECUTION_INTC_CHALLENGER": "INTC.US",
+            "EXECUTION_QCOM_CHALLENGER": "QCOM.US",
+            "EXECUTION_RKLB_CHALLENGER": "RKLB.US",
+            "EXECUTION_PANW_CHALLENGER": "PANW.US",
+        }
+        for variant, symbol in execution_symbols.items():
+            extension = variants[variant]
+            assert extension["required_symbols"] == [symbol]
+            assert extension["holding_minutes"] == 60
+            assert extension["stop_loss_pct"] == 1.0
+            assert (
+                extension["comparison_baseline"]
+                == "EXECUTION_BROAD_CHALLENGER"
+            )
+            assert (
+                extension["comparison"][
+                    "minimum_policy_displacement_sessions"
+                ]
+                == 3
             )
         assert reversal["universe_source"] == "OPENING_REVERSAL"
         assert (

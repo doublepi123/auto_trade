@@ -27,6 +27,7 @@ class OpeningMomentumConfig:
     minimum_excess_return_bps: float = 25.0
     one_side_fee_rate: float = 0.0005
     one_side_slippage_bps: float = 2.0
+    stop_loss_pct: float | None = None
 
     def __post_init__(self) -> None:
         numeric_values = (
@@ -57,6 +58,11 @@ class OpeningMomentumConfig:
             raise ValueError("one_side_fee_rate must be in [0, 0.1]")
         if not 0 <= self.one_side_slippage_bps <= 50:
             raise ValueError("one_side_slippage_bps must be in [0, 50]")
+        if self.stop_loss_pct is not None and (
+            not math.isfinite(self.stop_loss_pct)
+            or not 0 < self.stop_loss_pct <= 20
+        ):
+            raise ValueError("stop_loss_pct must be in (0, 20] when set")
 
     @property
     def round_trip_cost_bps(self) -> float:
@@ -66,9 +72,14 @@ class OpeningMomentumConfig:
         )
 
     def version_hash(self) -> str:
+        config_payload = asdict(self)
+        if self.stop_loss_pct is None:
+            # Preserve every pre-stop config hash so adding the optional
+            # execution field cannot orphan already-collected evidence.
+            config_payload.pop("stop_loss_pct")
         payload = {
             "algorithm_version": ALGORITHM_VERSION,
-            **asdict(self),
+            **config_payload,
         }
         encoded = json.dumps(
             payload,

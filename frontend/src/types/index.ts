@@ -1819,6 +1819,7 @@ export interface OpeningMomentumShadowConfig {
   one_side_fee_rate: number
   one_side_slippage_bps: number
   round_trip_cost_bps: number
+  stop_loss_pct: number | null
 }
 
 export interface OpeningMomentumRank {
@@ -1858,6 +1859,9 @@ export interface OpeningMomentumShadowRun {
   gross_return_bps: number | null
   estimated_cost_bps: number
   net_return_bps: number | null
+  stop_loss_pct: number | null
+  maximum_adverse_excursion_bps: number | null
+  maximum_favorable_excursion_bps: number | null
 }
 
 export interface OpeningMomentumShadowMetrics {
@@ -1915,6 +1919,12 @@ export interface OpeningMomentumShadowVariant {
     | 'EARLY_ALAB_CHALLENGER'
     | 'EARLY_LITE_CHALLENGER'
     | 'EARLY_QCOM_CHALLENGER'
+    | 'EXECUTION_BROAD_CHALLENGER'
+    | 'EXECUTION_SNDK_CHALLENGER'
+    | 'EXECUTION_INTC_CHALLENGER'
+    | 'EXECUTION_QCOM_CHALLENGER'
+    | 'EXECUTION_RKLB_CHALLENGER'
+    | 'EXECUTION_PANW_CHALLENGER'
   universe_source: string
   algorithm_version: string
   config_version: string
@@ -1925,8 +1935,13 @@ export interface OpeningMomentumShadowVariant {
   minimum_data_coverage: number
   required_symbols: string[]
   holding_minutes: number
+  stop_loss_pct: number | null
   comparison_sessions: number
-  comparison_baseline: 'INCUMBENT' | 'EARLY_BROAD_CHALLENGER' | null
+  comparison_baseline:
+    | 'INCUMBENT'
+    | 'EARLY_BROAD_CHALLENGER'
+    | 'EXECUTION_BROAD_CHALLENGER'
+    | null
   latest: OpeningMomentumShadowRun | null
   metrics: OpeningMomentumShadowMetrics
   comparison: OpeningMomentumPairedComparison | null

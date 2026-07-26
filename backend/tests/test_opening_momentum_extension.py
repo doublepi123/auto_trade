@@ -272,6 +272,32 @@ def test_tail_dependency_and_json_payload_are_reported() -> None:
     )
 
 
+def test_stop_exits_are_reported_separately_from_losing_signals() -> None:
+    sessions = tuple(
+        OpeningExtensionSession(
+            session_date=date(2026, 1, 2) + timedelta(days=index),
+            observations=_session(index).observations,
+            exit_prices=(
+                OpeningExtensionExitPrice("AAA.US", 100.0),
+                OpeningExtensionExitPrice("BBB.US", 99.0, True),
+                OpeningExtensionExitPrice("EXT.US", 99.0, True),
+            ),
+        )
+        for index in range(10)
+    )
+
+    result = evaluate_opening_extension_candidates(
+        sessions,
+        baseline_symbols=_BASELINE,
+        extension_symbols=("EXT.US",),
+        config=_config(),
+    )
+    holdout = _slice(result.candidates[0], "HOLDOUT")
+
+    assert holdout.baseline.stop_exits == 4
+    assert holdout.challenger.stop_exits == 4
+
+
 def test_extension_research_rejects_invalid_inputs() -> None:
     sessions = (_session(0), _session(1))
     with pytest.raises(ValueError, match="already exist"):
