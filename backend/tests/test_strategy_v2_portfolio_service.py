@@ -10,6 +10,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.domain.universe_selection import (
     DIVERSIFIED_INVERSE_VOLATILITY_VARIANT,
+    DIVERSIFIED_SHRINKAGE_ROTATION_VARIANT,
     ROTATION_ALGORITHM_VERSION,
     ROTATION_WALK_FORWARD_VERSION,
 )
@@ -214,6 +215,74 @@ class TestStrategyV2PortfolioService:
         db.commit()
 
     @staticmethod
+    def _validated_point_in_time_shrinkage_registration(
+        db: Session,
+    ) -> None:
+        run = db.query(UniverseSelectionRun).one()
+        variant_name = DIVERSIFIED_SHRINKAGE_ROTATION_VARIANT.name
+
+        def signal(
+            symbol: str,
+            rank: int,
+            score: float,
+            target_weight_pct: float,
+        ) -> dict[str, object]:
+            return {
+                "symbol": symbol,
+                "rank": rank,
+                "risk_group": "Test",
+                "momentum_pct": score,
+                "sma_price": 100.0,
+                "above_sma": True,
+                "score": score,
+                "signal_spread_bps": 1.0,
+                "ranking_method": "raw_momentum",
+                "formation_realized_volatility": None,
+                "ranking_metric": score,
+                "target_weight_pct": target_weight_pct,
+            }
+
+        run.parameters_json = json.dumps({
+            "rotation_point_in_time_sensitivity": {
+                "status": "COMPLETE",
+                "membership_history": {
+                    "authoritative_ratio": 0.98,
+                    "source_version": "pit-membership-v1",
+                },
+                "evaluation": {
+                    "algorithm_version": ROTATION_WALK_FORWARD_VERSION,
+                    "status": "COMPLETE",
+                    "data_scope": "POINT_IN_TIME_CURRENT_CATALOG",
+                    "validated_challenger_variant": variant_name,
+                    "variants": [{
+                        "variant": {"name": variant_name},
+                        "validation_passed": True,
+                        "expanding_validation_passed": True,
+                    }],
+                },
+            },
+            "rotation_shrinkage_challenger_registration": {
+                "cohort_month": "2026-07-01",
+                "rotation_algorithm_version": ROTATION_ALGORITHM_VERSION,
+                "variant_name": variant_name,
+                "signal_date": "2026-06-30",
+                "registered_as_of_date": "2026-07-23",
+                "forward_eligible": False,
+                "target_signals": [
+                    signal("IBM.US", 1, 100, 15),
+                    signal("MSFT.US", 2, 90, 10),
+                    signal("CAT.US", 3, 80, 12.5),
+                    signal("GS.US", 4, 70, 12.5),
+                    signal("AEP.US", 5, 60, 12.5),
+                    signal("ROST.US", 6, 50, 12.5),
+                    signal("MRK.US", 7, 40, 12.5),
+                    signal("GOOGL.US", 8, 30, 12.5),
+                ],
+            },
+        })
+        db.commit()
+
+    @staticmethod
     def _quant(
         db: Session,
         symbol: str,
@@ -380,7 +449,7 @@ class TestStrategyV2PortfolioService:
             registrations = db.query(
                 StrategyV2PortfolioRegistration
             ).all()
-            assert len(registrations) == 17
+            assert len(registrations) == 19
             assert {
                 row.eligible_after.replace(tzinfo=timezone.utc)
                 for row in registrations
@@ -430,6 +499,18 @@ class TestStrategyV2PortfolioService:
                 for row in registrations
                 if row.policy == "ROTATION_IV_NET_EDGE_ZSCORE_POOL"
             )
+            pit_shrinkage_weighted = next(
+                row
+                for row in registrations
+                if row.policy
+                == "PIT_SHRINK_WEIGHTED_ZSCORE_POOL"
+            )
+            pit_shrinkage_net_edge = next(
+                row
+                for row in registrations
+                if row.policy
+                == "PIT_SHRINK_NET_EDGE_ZSCORE_POOL"
+            )
             assert risk_group_v1.evaluator_digest == (
                 "9fa13dbedfbeb508e4b3ecca23d1a63c7"
                 "fe6c559dc71356922dda4c11528806e"
@@ -464,6 +545,14 @@ class TestStrategyV2PortfolioService:
                 rotation_zscore.evaluator_digest,
                 weighted_rotation_zscore.evaluator_digest,
             }
+            assert pit_shrinkage_weighted.evaluator_digest not in {
+                weighted_rotation_zscore.evaluator_digest,
+                net_edge_rotation_zscore.evaluator_digest,
+            }
+            assert pit_shrinkage_net_edge.evaluator_digest not in {
+                pit_shrinkage_weighted.evaluator_digest,
+                net_edge_rotation_zscore.evaluator_digest,
+            }
             assert db.query(
                 StrategyV2PortfolioObservation
             ).count() == 0
@@ -493,7 +582,7 @@ class TestStrategyV2PortfolioService:
             )
             report = service.get_report("NVDA.US")
 
-            assert len(report.variants) == 17
+            assert len(report.variants) == 19
             assert sum(
                 row.algorithm_version.endswith("-v2")
                 for row in report.variants
@@ -685,6 +774,8 @@ class TestStrategyV2PortfolioService:
                 "ROTATION_ZSCORE_OBS_75BPS_POOL": "",
                 "ROTATION_IV_WEIGHTED_ZSCORE_POOL": "",
                 "ROTATION_IV_NET_EDGE_ZSCORE_POOL": "",
+                "PIT_SHRINK_WEIGHTED_ZSCORE_POOL": "",
+                "PIT_SHRINK_NET_EDGE_ZSCORE_POOL": "",
             }
 
             self._signal(
@@ -701,7 +792,7 @@ class TestStrategyV2PortfolioService:
                 StrategyV2PortfolioObservation.signal_at
                 == _FIRST_SIGNAL + timedelta(minutes=2)
             ).all()
-            assert len(overlap_rows) == 17
+            assert len(overlap_rows) == 19
             registrations_by_id = {
                 row.id: row.policy
                 for row in db.query(
@@ -732,6 +823,12 @@ class TestStrategyV2PortfolioService:
                 "ROTATION_ZSCORE_OBS_75BPS_POOL": "NO_ELIGIBLE",
                 "ROTATION_IV_WEIGHTED_ZSCORE_POOL": "NO_ELIGIBLE",
                 "ROTATION_IV_NET_EDGE_ZSCORE_POOL": "NO_ELIGIBLE",
+                "PIT_SHRINK_WEIGHTED_ZSCORE_POOL": (
+                    "NO_ELIGIBLE"
+                ),
+                "PIT_SHRINK_NET_EDGE_ZSCORE_POOL": (
+                    "NO_ELIGIBLE"
+                ),
             }
 
             exit_at = _FIRST_SIGNAL + timedelta(minutes=5)
@@ -1031,6 +1128,8 @@ class TestStrategyV2PortfolioService:
                 "ROTATION_ZSCORE_OBS_75BPS_POOL",
                 "ROTATION_IV_WEIGHTED_ZSCORE_POOL",
                 "ROTATION_IV_NET_EDGE_ZSCORE_POOL",
+                "PIT_SHRINK_WEIGHTED_ZSCORE_POOL",
+                "PIT_SHRINK_NET_EDGE_ZSCORE_POOL",
             ):
                 observation = db.query(
                     StrategyV2PortfolioObservation
@@ -1495,6 +1594,132 @@ class TestStrategyV2PortfolioService:
             assert (
                 StrategyV2PortfolioService
                 ._validated_inverse_volatility_targets(
+                    run,
+                    session_date=_FIRST_SIGNAL.date(),
+                )
+                == {}
+            )
+
+    def test_point_in_time_shrinkage_routes_compare_priority(self) -> None:
+        with self._db() as db:
+            service = StrategyV2PortfolioService(db)
+            self._register(service)
+            self._universe(db)
+            self._validated_point_in_time_shrinkage_registration(db)
+            for symbol in ("IBM.US", "MSFT.US"):
+                self._version(db, symbol)
+                self._quant(
+                    db,
+                    symbol,
+                    "WATCH",
+                    49,
+                    estimated_cost_bps=20,
+                )
+            self._signal(
+                db,
+                "IBM.US",
+                _FIRST_SIGNAL,
+                close_price=99.7,
+                vwap_1m=100,
+                vwap_5m=100,
+                zscore_1m=-2.5,
+                zscore_5m=-2.0,
+            )
+            self._signal(
+                db,
+                "MSFT.US",
+                _FIRST_SIGNAL,
+                close_price=99.5,
+                vwap_1m=100,
+                vwap_5m=100,
+                zscore_1m=-1.5,
+                zscore_5m=-1.2,
+            )
+
+            service.advance(
+                now=_FIRST_SIGNAL + timedelta(minutes=3)
+            )
+
+            registrations = {
+                row.policy: row
+                for row in db.query(
+                    StrategyV2PortfolioRegistration
+                ).all()
+            }
+            weighted = db.query(
+                StrategyV2PortfolioObservation
+            ).filter(
+                StrategyV2PortfolioObservation.registration_id
+                == registrations[
+                    "PIT_SHRINK_WEIGHTED_ZSCORE_POOL"
+                ].id
+            ).one()
+            net_edge = db.query(
+                StrategyV2PortfolioObservation
+            ).filter(
+                StrategyV2PortfolioObservation.registration_id
+                == registrations[
+                    "PIT_SHRINK_NET_EDGE_ZSCORE_POOL"
+                ].id
+            ).one()
+
+            assert weighted.status == "PENDING_ENTRY"
+            assert weighted.selected_symbol == "IBM.US"
+            assert net_edge.selected_symbol == "MSFT.US"
+            candidates = json.loads(weighted.candidates_json)
+            assert [row["symbol"] for row in candidates] == [
+                "IBM.US",
+                "MSFT.US",
+            ]
+            assert candidates[0]["rotation_target_weight_pct"] == 15
+            assert candidates[1]["rotation_target_weight_pct"] == 10
+
+    def test_point_in_time_shrinkage_targets_fail_closed(self) -> None:
+        with self._db() as db:
+            self._universe(db)
+            self._validated_point_in_time_shrinkage_registration(db)
+            run = db.query(UniverseSelectionRun).one()
+            assert set(
+                StrategyV2PortfolioService
+                ._validated_point_in_time_shrinkage_targets(
+                    run,
+                    session_date=_FIRST_SIGNAL.date(),
+                )
+            ) == {
+                "IBM.US",
+                "MSFT.US",
+                "CAT.US",
+                "GS.US",
+                "AEP.US",
+                "ROST.US",
+                "MRK.US",
+                "GOOGL.US",
+            }
+
+            parameters = json.loads(run.parameters_json)
+            parameters["rotation_point_in_time_sensitivity"][
+                "membership_history"
+            ]["source_version"] = ""
+            run.parameters_json = json.dumps(parameters)
+            assert (
+                StrategyV2PortfolioService
+                ._validated_point_in_time_shrinkage_targets(
+                    run,
+                    session_date=_FIRST_SIGNAL.date(),
+                )
+                == {}
+            )
+
+            self._validated_point_in_time_shrinkage_registration(db)
+            db.refresh(run)
+            parameters = json.loads(run.parameters_json)
+            parameters["rotation_point_in_time_sensitivity"][
+                "evaluation"
+            ]["variants"][0]["expanding_validation_passed"] = False
+            run.parameters_json = json.dumps(parameters)
+            assert (
+                StrategyV2PortfolioService
+                ._validated_point_in_time_shrinkage_targets(
                     run,
                     session_date=_FIRST_SIGNAL.date(),
                 )

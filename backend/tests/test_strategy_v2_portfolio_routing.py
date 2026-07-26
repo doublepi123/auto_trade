@@ -86,6 +86,8 @@ def _candidate(
         "ROTATION_ZSCORE_OBS_75BPS_POOL",
         "ROTATION_IV_WEIGHTED_ZSCORE_POOL",
         "ROTATION_IV_NET_EDGE_ZSCORE_POOL",
+        "PIT_SHRINK_WEIGHTED_ZSCORE_POOL",
+        "PIT_SHRINK_NET_EDGE_ZSCORE_POOL",
     ),
 )
 def test_eligible_candidate_has_no_rejection_reasons(
@@ -126,6 +128,8 @@ def test_eligible_candidate_has_no_rejection_reasons(
     (
         "ROTATION_IV_WEIGHTED_ZSCORE_POOL",
         "ROTATION_IV_NET_EDGE_ZSCORE_POOL",
+        "PIT_SHRINK_WEIGHTED_ZSCORE_POOL",
+        "PIT_SHRINK_NET_EDGE_ZSCORE_POOL",
     ),
 )
 def test_target_weight_rotation_rejections_preserve_independent_blockers(

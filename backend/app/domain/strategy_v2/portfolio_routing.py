@@ -23,6 +23,8 @@ PortfolioRoutingPolicy = Literal[
     "ROTATION_ZSCORE_OBS_75BPS_POOL",
     "ROTATION_IV_WEIGHTED_ZSCORE_POOL",
     "ROTATION_IV_NET_EDGE_ZSCORE_POOL",
+    "PIT_SHRINK_WEIGHTED_ZSCORE_POOL",
+    "PIT_SHRINK_NET_EDGE_ZSCORE_POOL",
 ]
 
 VWAP_EDGE_FIXED_MAX_DISCOUNT_BPS = 75.0
@@ -546,7 +548,10 @@ def rank_portfolio_candidates(
                 candidate.symbol,
             ),
         ))
-    if policy == "ROTATION_IV_WEIGHTED_ZSCORE_POOL":
+    if policy in {
+        "ROTATION_IV_WEIGHTED_ZSCORE_POOL",
+        "PIT_SHRINK_WEIGHTED_ZSCORE_POOL",
+    }:
         eligible = [
             candidate
             for candidate in by_symbol.values()
@@ -565,7 +570,10 @@ def rank_portfolio_candidates(
                 candidate.symbol,
             ),
         ))
-    if policy == "ROTATION_IV_NET_EDGE_ZSCORE_POOL":
+    if policy in {
+        "ROTATION_IV_NET_EDGE_ZSCORE_POOL",
+        "PIT_SHRINK_NET_EDGE_ZSCORE_POOL",
+    }:
         eligible = [
             candidate
             for candidate in by_symbol.values()
@@ -710,6 +718,8 @@ def portfolio_candidate_rejection_reasons(
         "ROTATION_ZSCORE_OBS_75BPS_POOL",
         "ROTATION_IV_WEIGHTED_ZSCORE_POOL",
         "ROTATION_IV_NET_EDGE_ZSCORE_POOL",
+        "PIT_SHRINK_WEIGHTED_ZSCORE_POOL",
+        "PIT_SHRINK_NET_EDGE_ZSCORE_POOL",
     }:
         if not candidate.rotation_selected:
             reasons.append("NOT_ROTATION_SELECTED")
@@ -719,6 +729,8 @@ def portfolio_candidate_rejection_reasons(
         policy in {
             "ROTATION_IV_WEIGHTED_ZSCORE_POOL",
             "ROTATION_IV_NET_EDGE_ZSCORE_POOL",
+            "PIT_SHRINK_WEIGHTED_ZSCORE_POOL",
+            "PIT_SHRINK_NET_EDGE_ZSCORE_POOL",
         }
         and candidate.rotation_target_weight_pct is None
     ):
@@ -765,6 +777,8 @@ def portfolio_candidate_rejection_reasons(
         "ROTATION_ZSCORE_OBS_75BPS_POOL",
         "ROTATION_IV_WEIGHTED_ZSCORE_POOL",
         "ROTATION_IV_NET_EDGE_ZSCORE_POOL",
+        "PIT_SHRINK_WEIGHTED_ZSCORE_POOL",
+        "PIT_SHRINK_NET_EDGE_ZSCORE_POOL",
     }:
         reasons.extend(_vwap_band_rejection_reasons(
             candidate,
@@ -777,6 +791,8 @@ def portfolio_candidate_rejection_reasons(
         "ROTATION_ZSCORE_OBS_75BPS_POOL",
         "ROTATION_IV_WEIGHTED_ZSCORE_POOL",
         "ROTATION_IV_NET_EDGE_ZSCORE_POOL",
+        "PIT_SHRINK_WEIGHTED_ZSCORE_POOL",
+        "PIT_SHRINK_NET_EDGE_ZSCORE_POOL",
     }:
         if candidate.zscore_1m is None:
             reasons.append("MISSING_ZSCORE_1M")

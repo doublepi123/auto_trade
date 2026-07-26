@@ -268,7 +268,7 @@ class TestStrategyV2ShadowApi:
         assert body["automatic_promotion_allowed"] is False
         assert body["historical_backfill_allowed"] is False
         assert body["capital_slots"] == 1
-        assert len(body["variants"]) == 17
+        assert len(body["variants"]) == 19
         assert all(
             item["metrics"]["diagnosed_no_eligible"] == 0
             and item["metrics"]["no_causal_signal_groups"] == 0
@@ -295,6 +295,8 @@ class TestStrategyV2ShadowApi:
             "ROTATION_ZSCORE_OBS_75BPS_POOL",
             "ROTATION_IV_WEIGHTED_ZSCORE_POOL",
             "ROTATION_IV_NET_EDGE_ZSCORE_POOL",
+            "PIT_SHRINK_WEIGHTED_ZSCORE_POOL",
+            "PIT_SHRINK_NET_EDGE_ZSCORE_POOL",
         }
         assert {
             item["edge_filter"]
@@ -405,6 +407,19 @@ class TestStrategyV2ShadowApi:
         assert (
             net_edge_rotation_zscore["edge_filter"]
             == "ZSCORE_OBS_COST_TO_75BPS"
+        )
+        pit_shrinkage = [
+            item
+            for item in body["variants"]
+            if item["policy"] in {
+                "PIT_SHRINK_WEIGHTED_ZSCORE_POOL",
+                "PIT_SHRINK_NET_EDGE_ZSCORE_POOL",
+            }
+        ]
+        assert len(pit_shrinkage) == 2
+        assert all(
+            item["edge_filter"] == "ZSCORE_OBS_COST_TO_75BPS"
+            for item in pit_shrinkage
         )
 
     def test_config_contract_update_audit_and_forbidden_hard_fields(self) -> None:

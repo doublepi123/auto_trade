@@ -3111,6 +3111,20 @@ Cypress.Commands.add('stubApi', () => {
             0.87,
             { 'ROST.US': 3, 'CAT.US': 2 },
           ),
+          variant(
+            18,
+            'PIT_SHRINK_WEIGHTED_ZSCORE_POOL',
+            'ZSCORE_OBS_COST_TO_75BPS',
+            0.89,
+            { 'CAT.US': 3, 'GOOGL.US': 2 },
+          ),
+          variant(
+            19,
+            'PIT_SHRINK_NET_EDGE_ZSCORE_POOL',
+            'ZSCORE_OBS_COST_TO_75BPS',
+            0.91,
+            { 'GOOGL.US': 3, 'CAT.US': 2 },
+          ),
         ],
       },
     })

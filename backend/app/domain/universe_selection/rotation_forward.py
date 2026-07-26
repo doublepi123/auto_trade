@@ -13,6 +13,7 @@ from app.domain.universe_selection.catalog import IndexCandidate
 from app.domain.universe_selection.rotation_walk_forward import (
     DIVERSIFIED_INVERSE_VOLATILITY_VARIANT,
     DIVERSIFIED_ROTATION_VARIANT,
+    DIVERSIFIED_SHRINKAGE_ROTATION_VARIANT,
     ROTATION_BENCHMARK_SYMBOLS,
     ROTATION_WALK_FORWARD_VERSION,
     RotationVariant,
@@ -280,8 +281,6 @@ def parse_validated_inverse_volatility_targets(
     session_date: date,
 ) -> dict[str, tuple[int, float, float]]:
     """Parse the exact validated inverse-volatility cohort for a session."""
-    if run_as_of_date > session_date:
-        return {}
     try:
         parameters = json.loads(parameters_json)
     except (TypeError, ValueError):
@@ -289,10 +288,81 @@ def parse_validated_inverse_volatility_targets(
     if not isinstance(parameters, dict):
         return {}
     evaluation = parameters.get("rotation_evaluation")
-    expected_variant = DIVERSIFIED_INVERSE_VOLATILITY_VARIANT
+    if not isinstance(evaluation, dict):
+        return {}
+    return _parse_validated_rotation_targets(
+        parameters,
+        evaluation=evaluation,
+        expected_variant=DIVERSIFIED_INVERSE_VOLATILITY_VARIANT,
+        registration_keys=(
+            "rotation_weighting_challenger_registration",
+            "rotation_next_weighting_challenger_registration",
+        ),
+        run_as_of_date=run_as_of_date,
+        session_date=session_date,
+    )
+
+
+def parse_point_in_time_validated_shrinkage_targets(
+    parameters_json: str,
+    *,
+    run_as_of_date: date,
+    session_date: date,
+) -> dict[str, tuple[int, float, float]]:
+    """Parse a PIT-validated shrinkage cohort for forward shadow routing."""
+    try:
+        parameters = json.loads(parameters_json)
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(parameters, dict):
+        return {}
+    sensitivity = parameters.get("rotation_point_in_time_sensitivity")
     if (
-        not isinstance(evaluation, dict)
-        or evaluation.get("algorithm_version")
+        not isinstance(sensitivity, dict)
+        or sensitivity.get("status") != "COMPLETE"
+    ):
+        return {}
+    membership = sensitivity.get("membership_history")
+    evaluation = sensitivity.get("evaluation")
+    if not isinstance(membership, dict) or not isinstance(evaluation, dict):
+        return {}
+    authoritative_ratio = membership.get("authoritative_ratio")
+    if (
+        isinstance(authoritative_ratio, bool)
+        or not isinstance(authoritative_ratio, (int, float))
+        or not math.isfinite(float(authoritative_ratio))
+        or not 0 < float(authoritative_ratio) <= 1
+        or not str(membership.get("source_version") or "").strip()
+        or evaluation.get("data_scope")
+        != "POINT_IN_TIME_CURRENT_CATALOG"
+    ):
+        return {}
+    return _parse_validated_rotation_targets(
+        parameters,
+        evaluation=evaluation,
+        expected_variant=DIVERSIFIED_SHRINKAGE_ROTATION_VARIANT,
+        registration_keys=(
+            "rotation_shrinkage_challenger_registration",
+            "rotation_next_shrinkage_challenger_registration",
+        ),
+        run_as_of_date=run_as_of_date,
+        session_date=session_date,
+    )
+
+
+def _parse_validated_rotation_targets(
+    parameters: dict[str, object],
+    *,
+    evaluation: dict[str, object],
+    expected_variant: RotationVariant,
+    registration_keys: tuple[str, ...],
+    run_as_of_date: date,
+    session_date: date,
+) -> dict[str, tuple[int, float, float]]:
+    if run_as_of_date > session_date:
+        return {}
+    if (
+        evaluation.get("algorithm_version")
         != ROTATION_WALK_FORWARD_VERSION
         or evaluation.get("status") != "COMPLETE"
         or evaluation.get("validated_challenger_variant")
@@ -319,10 +389,7 @@ def parse_validated_inverse_volatility_targets(
 
     cohort_month = session_date.replace(day=1)
     registrations: list[RotationCohortRegistration] = []
-    for key in (
-        "rotation_weighting_challenger_registration",
-        "rotation_next_weighting_challenger_registration",
-    ):
+    for key in registration_keys:
         raw_registration = parameters.get(key)
         if not isinstance(raw_registration, dict):
             continue

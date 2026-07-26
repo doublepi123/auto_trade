@@ -28,6 +28,7 @@ from app.services.universe_selection_service import (
     observation_pool_overrides,
     select_exploration_candidates,
     validated_inverse_volatility_observation_symbols,
+    validated_point_in_time_shrinkage_observation_symbols,
 )
 
 _TERMINAL_RUN_STATUSES = ("COMPLETE", "DEGRADED")
@@ -348,8 +349,12 @@ class UniversePromotionService:
                 candidates,
                 session_date=trade_day_for("US", self.now),
             )
-            - observation_overrides.unobservable_symbols
-        )
+            | validated_point_in_time_shrinkage_observation_symbols(
+                run,
+                candidates,
+                session_date=trade_day_for("US", self.now),
+            )
+        ) - observation_overrides.unobservable_symbols
         exploration_symbols = {
             candidate.symbol
             for candidate in select_exploration_candidates(

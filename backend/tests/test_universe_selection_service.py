@@ -7,6 +7,7 @@ from multiprocessing import get_context
 from pathlib import Path
 from typing import Protocol, cast
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -14,6 +15,7 @@ from app.core.broker import BrokerCandle, Quote
 from app.core.holiday_calendar import is_market_closed
 from app.domain.universe_selection import (
     DIVERSIFIED_INVERSE_VOLATILITY_VARIANT,
+    DIVERSIFIED_SHRINKAGE_ROTATION_VARIANT,
     ROTATION_ALGORITHM_VERSION,
     ROTATION_WALK_FORWARD_VERSION,
     IndexCandidate,
@@ -75,45 +77,68 @@ def _config() -> UniverseSelectionConfig:
 
 def _validated_rotation_parameters(
     targets: tuple[tuple[str, float], ...],
+    *,
+    point_in_time_shrinkage: bool = False,
 ) -> str:
-    assert len(targets) == 4
-    variant_name = DIVERSIFIED_INVERSE_VOLATILITY_VARIANT.name
+    variant = (
+        DIVERSIFIED_SHRINKAGE_ROTATION_VARIANT
+        if point_in_time_shrinkage
+        else DIVERSIFIED_INVERSE_VOLATILITY_VARIANT
+    )
+    assert variant.max_position_weight_pct is not None
+    target_weight_pct = 100.0 / len(targets)
+    assert target_weight_pct <= variant.max_position_weight_pct
+    evaluation = {
+        "algorithm_version": ROTATION_WALK_FORWARD_VERSION,
+        "status": "COMPLETE",
+        "validated_challenger_variant": variant.name,
+        "variants": [{
+            "variant": {"name": variant.name},
+            "validation_passed": True,
+            "expanding_validation_passed": True,
+        }],
+    }
+    registration = {
+        "cohort_month": "2026-07-01",
+        "rotation_algorithm_version": ROTATION_ALGORITHM_VERSION,
+        "variant_name": variant.name,
+        "signal_date": "2026-06-30",
+        "registered_as_of_date": "2026-07-23",
+        "forward_eligible": False,
+        "target_signals": [
+            {
+                "symbol": symbol,
+                "rank": rank,
+                "risk_group": "Test",
+                "momentum_pct": score,
+                "sma_price": 100.0,
+                "above_sma": True,
+                "score": score,
+                "signal_spread_bps": 1.0,
+                "target_weight_pct": target_weight_pct,
+            }
+            for rank, (symbol, score) in enumerate(
+                targets,
+                start=1,
+            )
+        ],
+    }
+    if point_in_time_shrinkage:
+        evaluation["data_scope"] = "POINT_IN_TIME_CURRENT_CATALOG"
+        return json.dumps({
+            "rotation_point_in_time_sensitivity": {
+                "status": "COMPLETE",
+                "membership_history": {
+                    "authoritative_ratio": 0.98,
+                    "source_version": "pit-membership-v1",
+                },
+                "evaluation": evaluation,
+            },
+            "rotation_shrinkage_challenger_registration": registration,
+        })
     return json.dumps({
-        "rotation_evaluation": {
-            "algorithm_version": ROTATION_WALK_FORWARD_VERSION,
-            "status": "COMPLETE",
-            "validated_challenger_variant": variant_name,
-            "variants": [{
-                "variant": {"name": variant_name},
-                "validation_passed": True,
-                "expanding_validation_passed": True,
-            }],
-        },
-        "rotation_weighting_challenger_registration": {
-            "cohort_month": "2026-07-01",
-            "rotation_algorithm_version": ROTATION_ALGORITHM_VERSION,
-            "variant_name": variant_name,
-            "signal_date": "2026-06-30",
-            "registered_as_of_date": "2026-07-23",
-            "forward_eligible": False,
-            "target_signals": [
-                {
-                    "symbol": symbol,
-                    "rank": rank,
-                    "risk_group": "Test",
-                    "momentum_pct": score,
-                    "sma_price": 100.0,
-                    "above_sma": True,
-                    "score": score,
-                    "signal_spread_bps": 1.0,
-                    "target_weight_pct": 25.0,
-                }
-                for rank, (symbol, score) in enumerate(
-                    targets,
-                    start=1,
-                )
-            ],
-        },
+        "rotation_evaluation": evaluation,
+        "rotation_weighting_challenger_registration": registration,
     })
 
 
@@ -1997,25 +2022,52 @@ def test_reconcile_disables_shadow_owned_by_removed_universe_item() -> None:
         db.close()
 
 
-def test_reconcile_keeps_validated_rotation_targets_shadow_only() -> None:
+@pytest.mark.parametrize(
+    ("targets", "point_in_time_shrinkage"),
+    (
+        (
+            (
+                ("INTC.US", 100.0),
+                ("CAT.US", 90.0),
+                ("GS.US", 80.0),
+                ("AEP.US", 70.0),
+            ),
+            False,
+        ),
+        (
+            (
+                ("INTC.US", 100.0),
+                ("CAT.US", 90.0),
+                ("GOOGL.US", 80.0),
+                ("ROST.US", 70.0),
+                ("MRK.US", 60.0),
+                ("GS.US", 50.0),
+                ("FANG.US", 40.0),
+                ("AEP.US", 30.0),
+            ),
+            True,
+        ),
+    ),
+)
+def test_reconcile_keeps_validated_rotation_targets_shadow_only(
+    targets: tuple[tuple[str, float], ...],
+    point_in_time_shrinkage: bool,
+) -> None:
     db = _db()
-    targets = (
-        ("INTC.US", 100.0),
-        ("CAT.US", 90.0),
-        ("GS.US", 80.0),
-        ("AEP.US", 70.0),
-    )
     try:
         run = UniverseSelectionRun(
             as_of_date=_NOW.date() - timedelta(days=1),
             algorithm_version="selector-v1",
             source_version="catalog-v1",
             status="COMPLETE",
-            candidate_count=5,
-            evaluable_count=5,
+            candidate_count=len(targets) + 1,
+            evaluable_count=len(targets) + 1,
             selected_count=1,
             coverage_ratio=1.0,
-            parameters_json=_validated_rotation_parameters(targets),
+            parameters_json=_validated_rotation_parameters(
+                targets,
+                point_in_time_shrinkage=point_in_time_shrinkage,
+            ),
             started_at=_NOW - timedelta(hours=2),
             completed_at=_NOW - timedelta(hours=1),
             created_at=_NOW - timedelta(hours=2),

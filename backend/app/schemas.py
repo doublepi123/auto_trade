@@ -1091,6 +1091,8 @@ class StrategyV2PortfolioRoutingVariant(BaseModel):
         "ROTATION_ZSCORE_OBS_75BPS_POOL",
         "ROTATION_IV_WEIGHTED_ZSCORE_POOL",
         "ROTATION_IV_NET_EDGE_ZSCORE_POOL",
+        "PIT_SHRINK_WEIGHTED_ZSCORE_POOL",
+        "PIT_SHRINK_NET_EDGE_ZSCORE_POOL",
     ]
     algorithm_version: str
     evaluator_digest: str

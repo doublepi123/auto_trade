@@ -51,6 +51,7 @@ from app.domain.universe_selection import (
     latest_complete_session_date,
     next_cohort_month,
     parse_frozen_rotation_selection,
+    parse_point_in_time_validated_shrinkage_targets,
     parse_validated_inverse_volatility_targets,
     risk_group_for_sector,
     rotation_cohort_month,
@@ -207,6 +208,40 @@ def validated_inverse_volatility_observation_symbols(
         run_as_of_date=run.as_of_date,
         session_date=session_date,
     )
+    return _validated_rotation_observation_symbols(
+        run,
+        candidates,
+        targets=targets,
+    )
+
+
+def validated_point_in_time_shrinkage_observation_symbols(
+    run: UniverseSelectionRun,
+    candidates: Sequence[UniverseSelectionCandidate],
+    *,
+    session_date: date,
+) -> frozenset[str]:
+    """Return the PIT-validated shrinkage cohort for shadow observation."""
+    if run.status != "COMPLETE":
+        return frozenset()
+    targets = parse_point_in_time_validated_shrinkage_targets(
+        run.parameters_json,
+        run_as_of_date=run.as_of_date,
+        session_date=session_date,
+    )
+    return _validated_rotation_observation_symbols(
+        run,
+        candidates,
+        targets=targets,
+    )
+
+
+def _validated_rotation_observation_symbols(
+    run: UniverseSelectionRun,
+    candidates: Sequence[UniverseSelectionCandidate],
+    *,
+    targets: dict[str, tuple[int, float, float]],
+) -> frozenset[str]:
     if not targets:
         return frozenset()
     candidates_by_symbol: dict[str, UniverseSelectionCandidate] = {}
@@ -2168,6 +2203,11 @@ class UniverseSelectionService:
         )
         rotation_observation_symbols = (
             validated_inverse_volatility_observation_symbols(
+                run,
+                items,
+                session_date=trade_day_for("US", self.now),
+            )
+            | validated_point_in_time_shrinkage_observation_symbols(
                 run,
                 items,
                 session_date=trade_day_for("US", self.now),

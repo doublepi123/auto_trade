@@ -131,6 +131,8 @@ describe('Strategy v2 shadow lab', () => {
       .and('contain', '12-1 轮动池 · 双周期标准化偏离')
       .and('contain', '12-1 轮动池 · 逆波动加权偏离')
       .and('contain', '12-1 轮动池 · 净 VWAP 边际优先')
+      .and('contain', '点时稳健轮动池 · 权重偏离优先')
+      .and('contain', '点时稳健轮动池 · 净 VWAP 优先')
       .and('contain', '固定成本 → 75bp')
       .and('contain', '观测成本 → 75bp')
       .and('contain', '风险组残差 + 观测成本 → 75bp')

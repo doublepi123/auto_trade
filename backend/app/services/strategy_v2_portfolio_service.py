@@ -23,9 +23,11 @@ from app.domain.strategy_v2 import (
 )
 from app.domain.universe_selection import (
     DIVERSIFIED_INVERSE_VOLATILITY_VARIANT,
+    DIVERSIFIED_SHRINKAGE_ROTATION_VARIANT,
     ROTATION_ALGORITHM_VERSION,
     ROTATION_WALK_FORWARD_VERSION,
     parse_frozen_rotation_selection,
+    parse_point_in_time_validated_shrinkage_targets,
     parse_validated_inverse_volatility_targets,
     risk_group_for_sector,
 )
@@ -154,6 +156,20 @@ _ROUTING_SPECS = (
             "vwap-edge-zscore-observed-cost-75bps-v1"
         ),
     ),
+    _RoutingSpec(
+        policy="PIT_SHRINK_WEIGHTED_ZSCORE_POOL",
+        algorithm_version=(
+            "strategy-v2-portfolio-rotation-pit-shrinkage-weighted-"
+            "zscore-observed-cost-75bps-v1"
+        ),
+    ),
+    _RoutingSpec(
+        policy="PIT_SHRINK_NET_EDGE_ZSCORE_POOL",
+        algorithm_version=(
+            "strategy-v2-portfolio-rotation-pit-shrinkage-target-net-"
+            "vwap-edge-zscore-observed-cost-75bps-v1"
+        ),
+    ),
 )
 _EVALUATOR_VERSION = "strategy-v2-single-capital-slot-forward-router-v2"
 _CURRENT_ROUTING_ALGORITHM_VERSIONS = tuple(
@@ -180,16 +196,28 @@ _ROTATION_ZSCORE_OBSERVED_COST_POLICIES = {
     "ROTATION_ZSCORE_OBS_75BPS_POOL",
     "ROTATION_IV_WEIGHTED_ZSCORE_POOL",
     "ROTATION_IV_NET_EDGE_ZSCORE_POOL",
+    "PIT_SHRINK_WEIGHTED_ZSCORE_POOL",
+    "PIT_SHRINK_NET_EDGE_ZSCORE_POOL",
 }
-_ROTATION_TARGET_WEIGHT_POLICIES = {
+_ROTATION_INVERSE_VOLATILITY_TARGET_POLICIES = {
     "ROTATION_IV_WEIGHTED_ZSCORE_POOL",
     "ROTATION_IV_NET_EDGE_ZSCORE_POOL",
 }
+_ROTATION_PIT_SHRINKAGE_TARGET_POLICIES = {
+    "PIT_SHRINK_WEIGHTED_ZSCORE_POOL",
+    "PIT_SHRINK_NET_EDGE_ZSCORE_POOL",
+}
+_ROTATION_TARGET_WEIGHT_POLICIES = (
+    _ROTATION_INVERSE_VOLATILITY_TARGET_POLICIES
+    | _ROTATION_PIT_SHRINKAGE_TARGET_POLICIES
+)
 _ROTATION_WEIGHTED_ZSCORE_POLICIES = {
     "ROTATION_IV_WEIGHTED_ZSCORE_POOL",
+    "PIT_SHRINK_WEIGHTED_ZSCORE_POOL",
 }
 _ROTATION_NET_EDGE_ZSCORE_POLICIES = {
     "ROTATION_IV_NET_EDGE_ZSCORE_POOL",
+    "PIT_SHRINK_NET_EDGE_ZSCORE_POOL",
 }
 _ZSCORE_OBSERVED_COST_POLICIES = (
     _SELECTED_ZSCORE_OBSERVED_COST_POLICIES
@@ -445,9 +473,11 @@ class StrategyV2PortfolioService:
                     registration.policy
                     in _SECTOR_LEAVE_ONE_OUT_OBSERVED_COST_POLICIES
                 ),
-                include_rotation_weight=(
+                rotation_weight_policy=(
                     registration.policy
+                    if registration.policy
                     in _ROTATION_TARGET_WEIGHT_POLICIES
+                    else None
                 ),
             )
             ranked = rank_portfolio_candidates(
@@ -596,7 +626,7 @@ class StrategyV2PortfolioService:
         include_relative_adjustment: bool,
         risk_group_leave_one_out: bool,
         sector_leave_one_out: bool,
-        include_rotation_weight: bool,
+        rotation_weight_policy: str | None,
     ) -> list[PortfolioRoutingCandidate]:
         by_symbol: dict[str, StrategyV2ShadowDecision] = {}
         for decision in decisions:
@@ -615,11 +645,13 @@ class StrategyV2PortfolioService:
             for decision in by_symbol.values()
         }
         rotation_targets = (
-            self._validated_inverse_volatility_targets(
+            self._validated_rotation_targets(
                 selection_run,
                 session_date=next(iter(session_dates)),
+                policy=rotation_weight_policy,
             )
-            if include_rotation_weight and len(session_dates) == 1
+            if rotation_weight_policy is not None
+            and len(session_dates) == 1
             else {}
         )
         quant = self._quant_context(
@@ -1156,6 +1188,40 @@ class StrategyV2PortfolioService:
             run_as_of_date=run.as_of_date,
             session_date=session_date,
         )
+
+    @staticmethod
+    def _validated_point_in_time_shrinkage_targets(
+        run: UniverseSelectionRun | None,
+        *,
+        session_date: date,
+    ) -> dict[str, tuple[int, float, float]]:
+        if run is None or run.status != "COMPLETE":
+            return {}
+        return parse_point_in_time_validated_shrinkage_targets(
+            run.parameters_json,
+            run_as_of_date=run.as_of_date,
+            session_date=session_date,
+        )
+
+    @classmethod
+    def _validated_rotation_targets(
+        cls,
+        run: UniverseSelectionRun | None,
+        *,
+        session_date: date,
+        policy: str,
+    ) -> dict[str, tuple[int, float, float]]:
+        if policy in _ROTATION_INVERSE_VOLATILITY_TARGET_POLICIES:
+            return cls._validated_inverse_volatility_targets(
+                run,
+                session_date=session_date,
+            )
+        if policy in _ROTATION_PIT_SHRINKAGE_TARGET_POLICIES:
+            return cls._validated_point_in_time_shrinkage_targets(
+                run,
+                session_date=session_date,
+            )
+        return {}
 
     @staticmethod
     def _rotation_selection_values(
@@ -1836,13 +1902,31 @@ class StrategyV2PortfolioService:
                     ROTATION_ALGORITHM_VERSION
                 )
                 if spec.policy in _ROTATION_TARGET_WEIGHT_POLICIES:
-                    payload["rotation_weighting"] = {
+                    point_in_time_shrinkage = (
+                        spec.policy
+                        in _ROTATION_PIT_SHRINKAGE_TARGET_POLICIES
+                    )
+                    weighting_variant = (
+                        DIVERSIFIED_SHRINKAGE_ROTATION_VARIANT
+                        if point_in_time_shrinkage
+                        else DIVERSIFIED_INVERSE_VOLATILITY_VARIANT
+                    )
+                    registration_keys = (
+                        [
+                            "rotation_shrinkage_challenger_registration",
+                            "rotation_next_shrinkage_challenger_registration",
+                        ]
+                        if point_in_time_shrinkage
+                        else [
+                            "rotation_weighting_challenger_registration",
+                            "rotation_next_weighting_challenger_registration",
+                        ]
+                    )
+                    rotation_weighting: dict[str, object] = {
                         "evaluation_version": (
                             ROTATION_WALK_FORWARD_VERSION
                         ),
-                        "variant_name": (
-                            DIVERSIFIED_INVERSE_VOLATILITY_VARIANT.name
-                        ),
+                        "variant_name": weighting_variant.name,
                         "required_validation": [
                             "FIXED_HOLDOUT_PASSED",
                             "EXPANDING_WALK_FORWARD_PASSED",
@@ -1851,14 +1935,10 @@ class StrategyV2PortfolioService:
                             "EXACT_SIGNAL_SESSION_MONTH_FROM_LATEST_"
                             "COMPLETED_UNIVERSE_RUN_BEFORE_CONTEXT_CUTOFF"
                         ),
-                        "registration_keys": [
-                            "rotation_weighting_challenger_registration",
-                            "rotation_next_weighting_challenger_registration",
-                        ],
+                        "registration_keys": registration_keys,
                         "required_total_weight_pct": 100.0,
                         "maximum_position_weight_pct": (
-                            DIVERSIFIED_INVERSE_VOLATILITY_VARIANT
-                            .max_position_weight_pct
+                            weighting_variant.max_position_weight_pct
                         ),
                         "candidate_consistency": (
                             "FROZEN_ROTATION_RANK_AND_SCORE_MUST_MATCH_"
@@ -1869,6 +1949,21 @@ class StrategyV2PortfolioService:
                             "FORWARD_ONLY_EXPLORATORY_SINGLE_SLOT_ROUTING"
                         ),
                     }
+                    if point_in_time_shrinkage:
+                        rotation_weighting["evaluation_source"] = (
+                            "ROTATION_POINT_IN_TIME_SENSITIVITY"
+                        )
+                        rotation_weighting[
+                            "membership_history_requirements"
+                        ] = {
+                            "status": "COMPLETE",
+                            "authoritative_ratio": "FINITE_IN_(0,1]",
+                            "source_version": "NON_EMPTY",
+                            "data_scope": (
+                                "POINT_IN_TIME_CURRENT_CATALOG"
+                            ),
+                        }
+                    payload["rotation_weighting"] = rotation_weighting
             else:
                 payload["candidate_universe"] = (
                     "SELECTED_TRUE_IN_LATEST_COMPLETED_UNIVERSE_RUN_"
@@ -2023,6 +2118,8 @@ def _routing_policy(value: str) -> PortfolioRoutingPolicy:
         "ROTATION_ZSCORE_OBS_75BPS_POOL",
         "ROTATION_IV_WEIGHTED_ZSCORE_POOL",
         "ROTATION_IV_NET_EDGE_ZSCORE_POOL",
+        "PIT_SHRINK_WEIGHTED_ZSCORE_POOL",
+        "PIT_SHRINK_NET_EDGE_ZSCORE_POOL",
     }:
         raise ValueError(f"unsupported portfolio routing policy: {value}")
     return cast(PortfolioRoutingPolicy, value)

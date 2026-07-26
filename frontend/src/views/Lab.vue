@@ -2733,6 +2733,8 @@ const portfolioRoutingPolicyLabels: Record<
   ROTATION_ZSCORE_OBS_75BPS_POOL: '12-1 轮动池 · 双周期标准化偏离',
   ROTATION_IV_WEIGHTED_ZSCORE_POOL: '12-1 轮动池 · 逆波动加权偏离',
   ROTATION_IV_NET_EDGE_ZSCORE_POOL: '12-1 轮动池 · 净 VWAP 边际优先',
+  PIT_SHRINK_WEIGHTED_ZSCORE_POOL: '点时稳健轮动池 · 权重偏离优先',
+  PIT_SHRINK_NET_EDGE_ZSCORE_POOL: '点时稳健轮动池 · 净 VWAP 优先',
 }
 
 function portfolioRoutingPolicyLabel(
