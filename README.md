@@ -1,25 +1,38 @@
 # Auto Trade
 
-基于 [长桥 Longbridge](https://open.longbridge.com/) OpenAPI 的自动化区间交易系统。
+基于 [长桥 Longbridge](https://open.longbridge.com/) OpenAPI 的自动化区间交易系统，并附带只读研究层：动态候选池 / 量化评分、Strategy v2 与开盘动量影子、组合路由对照、以及大量 `/api/platform/*` 研究计算端点。**实盘路径默认 P0 安全边界**（禁做空开仓、禁加仓、LLM 仅影子、影子策略永不下单）。
 
 ## 架构
 
 ```mermaid
 flowchart LR
-  FE["Vue 3 前端<br/>(Vite)"]
+  FE["Vue 3 前端<br/>(Vite + Element Plus)"]
 
   subgraph BE["FastAPI 后端"]
     direction TB
-    ENG["策略引擎<br/>(状态机)"]
-    SDK["长桥 SDK<br/>(行情 + 交易)"]
-    RISK["风控模块"]
-    NOTIFY["Server酱<br/>通知推送"]
+    RUN["AppRunner<br/>行情 / 策略循环"]
+    ENG["区间策略引擎<br/>FLAT / LONG"]
+    EXEC["交易执行 + 风控"]
+    SHADOW["只读影子层<br/>v2 / 开盘动量 / 组合路由"]
+    UNI["候选池 + 量化评分"]
+    PLAT["platform 研究 API"]
     DB[("SQLite")]
-    ENG --> SDK --> RISK --> NOTIFY
-    ENG -.-> DB
+    RUN --> ENG --> EXEC
+    RUN --> SHADOW
+    RUN --> UNI
+    EXEC --> DB
+    SHADOW --> DB
+    UNI --> DB
+    PLAT -.-> DB
   end
 
+  BR["长桥 SDK<br/>行情 + 交易"]
+  N["通知<br/>Server酱 / Telegram / Webhook"]
+
   FE <-- REST / WS --> BE
+  EXEC --> BR
+  RUN --> BR
+  EXEC --> N
 ```
 
 数据流：`长桥 WebSocket 行情 → 策略引擎 → 风控判断 → 订单执行 → DB 存档 + Web UI 展示 + 通知推送`
@@ -87,14 +100,19 @@ flowchart LR
 - **参数扫描**（`POST /api/backtest/sweep`）：在当前 CSV 上对 `buy_low` / `sell_high` / `min_profit_amount`（可选 `quantity` / `fee_rate` / `slippage_pct` / `stop_loss_pct`）做网格搜索，按 Sharpe / Sortino / Calmar / 盈亏比 / 总回报 排名，返回 Top-N 结果表 + `(buy_low, sell_high)` 热力图；`buy_low ≥ sell_high` 的无效组合自动跳过。即时、离线、纯内存，与「实验」页的保存式批量回测不同。
 - Web UI **Backtest** 页：上传/粘贴 CSV、查看收益曲线与交易明细、参数扫描（点击结果行可把最优配置回填表单）
 
-### 策略复盘（规划中 — P7）
+### 策略复盘与观察列表
 
-- 按交易日 × 当前 symbol 复盘价格走势、LLM 建议、实际成交、真实 PnL
-- 5 类错误标签（错过止损 / 过早进场 / 频繁重挂 / 收益不足 / 正常交易）查询时计算
-- 导出 JSON（细粒度，含 prompt 全文）或 CSV（扁平），用于 prompt 调优
-- `list_days` 仅返回“有数据的交易日”（基于 orders / llm_interactions / runtime_state_snapshots 并集），不补齐空白日历日
-- API 口径：参数非法返回 `422`；参数合法即使无数据也返回 `200` 空结构（不使用 `404` 表示“合法但无数据”）
-- 规划详情见 `docs/superpowers/specs/2026-05-26-replay-llm-workshop-design.md`
+- **复盘**（`/#/review`，`GET /api/review`）：按交易日 × 标的聚合订单、事件、运行时快照与 LLM 交互；支持导出
+- **观察列表**（`/#/watchlist`）：多标的行情与量化评分；动态候选池结果可同步为只读 watchlist，**不会自动切换主交易标的**
+- **交易报告**（`/#/reports`）：区间报告与定时日报（可选推送）
+- **告警 / 通知中心**：条件告警规则 + 已发送通知分发日志
+
+### 动态候选池与量化评分（默认关闭）
+
+- Nasdaq-100 / DJIA 目录上的日频筛选；前复权 K 线做特征，成交触发仍用未复权价格
+- 月频 walk-forward 轮动影子（12-1 动量等）只累积前向证据，**不自动晋级、不自动下单**
+- 量化 v5 评分可在 RTH 内自动刷新到期标的；主交易标的优先
+- 晋级 readiness（`GET /api/universe/promotion-readiness`）仅供人工复核
 
 ### LLM 区间顾问（可选）
 - DeepSeek 或 MiniMax 分析建议 `buy_low` / `sell_high`；预览接口仅读，不应用区间、不下单
@@ -103,13 +121,14 @@ flowchart LR
 - P0 永久禁用 LLM 实盘下单，不能通过策略字段、API 或环境变量开启
 - `CANCEL_REPLACE`、订单价格偏离和发单冷却参数仅保留兼容性；P0 不会进入对应的券商下单路径
 
-### Strategy v2 前向影子（P2）
-- RTH 内使用已结算 1 分钟 bar 计算 session VWAP、因果 residual z-score，并从同一数据流聚合完整 5 分钟确认信号
-- ADX 与实现波动率过滤趋势/异常波动环境；只有“先跌破、后收复”才生成下一根 bar 开盘的虚拟入场
-- 固定 long-only、禁止加仓，虚拟成交采用不利滑点与冻结费率估算净收益，记录 stop / target / 最大持仓 / 收盘前强平、MAE 与 MFE
-- 硬安全线为最长持仓 60 分钟、实际收盘前 45 分钟停止入场、前 15 分钟强制虚拟平仓；默认关闭，且服务没有订单执行依赖或真实下单模式
-- Lab 的「策略 v2 影子」页展示当前因果特征、gate、状态、虚拟绩效与决策导出；离线 replay 永不写数据库
-- 开盘横截面观察在同一盘前冻结股票池上同时记录强者延续与弱者反弹；反转挑战者选择前 30 分钟相对最弱且绝对下跌的标的，下一可执行 bar 虚拟买入，固定持有 30 分钟并扣除往返成本，永不连接订单服务
+### Strategy v2 / 开盘动量 / 组合路由影子（只读）
+
+- **Strategy v2**：RTH 内已结算 1 分钟 bar → session VWAP、因果 residual z-score、5 分钟确认；ADX / 实现波动率门禁；long-only、禁止加仓；不利滑点 + 冻结费率估算净收益；stop / target / 最大持仓 / 收盘前强平、MAE / MFE
+- 硬安全线：最长持仓 60 分钟、收盘前 45 分钟停入场、前 15 分钟强制虚拟平仓；**无订单执行依赖**
+- Lab「策略 v2 影子」：特征、gate、状态、虚拟绩效、决策导出；离线 replay 永不写库
+- **开盘动量影子**（`/api/opening-momentum-shadow`）：盘前冻结池上的开盘路径效率 / 强弱延续对照，仅记录
+- **组合路由影子**：单资金槽跨标的路由对照；**live exit challenger** 对真实成交做 forward-only 锁盈对照——均不下单、不自动晋级
+- 可选 **live regime gate**：开仓前要求主标的最新 v2 shadow 门禁通过（默认关）
 
 ### 交易执行安全
 - 普通平仓（非止损）在满足 `min_profit_amount` 之前，还需扣除按 `fee_rate_us` / `fee_rate_hk` 估算的双边手续费；费用后净收益仍不足时跳过并记录 `FEE` 原因
@@ -292,70 +311,40 @@ python3 scripts/build_index_membership_snapshot.py
 auto_trade/
 ├── backend/
 │   ├── app/
-│   │   ├── main.py                         # FastAPI 入口、lifespan、LLM 定时任务
-│   │   ├── config.py                       # pydantic-settings（AUTO_TRADE_* / LONGPORT_*）
-│   │   ├── database.py                     # 引擎、init_db、SQLite 列级迁移（_ensure_*）
-│   │   ├── models.py                       # ORM：策略、订单、tracked_entries、事件、LLM、运行时状态等
-│   │   ├── schemas.py                      # Pydantic 请求/响应
-│   │   ├── runner.py                       # AppRunner：行情订阅、策略循环、WS 广播
-│   │   ├── api/
-│   │   │   ├── strategy.py                 # 策略配置、状态、状态历史
-│   │   │   ├── trade.py                    # 订单、账户、事件、运行时控制
-│   │   │   ├── credentials.py              # 加密凭证 CRUD
-│   │   │   ├── llm_advisor.py              # LLM 区间分析与自动区间开关
-│   │   │   ├── backtest.py                 # POST /api/backtest/run
-│   │   │   ├── ws.py                       # WebSocket /ws
-│   │   │   └── auth.py                     # API Key 依赖（可选，默认内网不启用）
-│   │   ├── core/
-│   │   │   ├── broker.py                   # 长桥 SDK（行情、K 线、批量 quote、下单、持仓）
-│   │   │   ├── market_calendar.py          # US/HK 交易日与 RTH 判断（本地日历日）
-│   │   │   ├── engine.py                   # 区间策略状态机
-│   │   │   ├── risk.py                     # 日亏损、连续亏损、暂停、kill switch
-│   │   │   ├── backtest.py                 # 离线回测引擎
-│   │   │   ├── notify.py                   # Server酱通知
-│   │   │   └── credential_crypto.py        # RSA + AES-GCM 凭证加密
-│   │   └── services/
-│   │       ├── strategy_service.py         # 策略与运行时状态 CRUD
-│   │       ├── trade_execution_service.py  # 下单、pending 对账、tracked 入场成本、HK/US tick
-│   │       ├── runtime_state_service.py    # 状态持久化与历史快照
-│   │       ├── daily_pnl_service.py        # 订单账本日盈亏重算
-│   │       ├── credentials_service.py      # 凭证存取（掩码响应）
-│   │       ├── llm_advisor_service.py      # DeepSeek 区间建议
-│   │       ├── interval_application_service.py  # 区间建议应用规则
-│   │       ├── llm_interaction_service.py  # LLM 调用记录
-│   │       ├── trade_event_service.py      # 决策时间线事件
-│   │       └── data_aggregator.py          # LLM 行情聚合（真实 K 线、ATR/布林带）
-│   ├── tests/                              # pytest
-│   ├── alembic/                            # 历史迁移（运行时以 database._ensure_* 为准）
-│   ├── requirements.txt
-│   ├── requirements-dev.txt
-│   ├── Dockerfile
-│   └── docker-entrypoint.sh
+│   │   ├── main.py              # FastAPI 入口、lifespan、cron、路由挂载（30+ routers）
+│   │   ├── config.py            # pydantic-settings（AUTO_TRADE_* / LONGPORT_*）
+│   │   ├── database.py          # SQLAlchemy + 运行时 _ensure_* 列迁移
+│   │   ├── models.py / schemas.py
+│   │   ├── runner.py            # AppRunner：行情、区间策略、影子任务、WS 广播
+│   │   ├── api/                 # 路由：strategy / trade / watchlist / universe /
+│   │   │                        # strategy_shadow / opening_momentum_shadow /
+│   │   │                        # review / reports / alerts / platform ...
+│   │   ├── core/                # broker、engine、risk、fees、backtest、audit、calendar、notifiers
+│   │   ├── domain/              # 纯计算：prompt、strategy_v2、universe_selection、opening_momentum
+│   │   ├── services/            # 业务：执行、LLM、候选池、量化评分、影子/challenger、复盘
+│   │   ├── platform/            # 研究/组合/Paper 插件层 + /api/platform/* 只读计算
+│   │   ├── strategies/          # 平台策略插件示例（mean_reversion / momentum / trend）
+│   │   └── cli/                 # 研究 CLI（如 opening_extension_research）
+│   ├── tests/                   # pytest（含 platform/ 子目录）
+│   ├── scripts/                 # walk-forward 复算、指数成分快照、setup_venv
+│   ├── alembic/                 # 历史迁移（运行时以 database._ensure_* 为主）
+│   ├── requirements.txt / requirements-dev.txt
+│   └── Dockerfile
 ├── frontend/
 │   ├── src/
-│   │   ├── App.vue                         # 布局与导航
-│   │   ├── router/index.ts                 # Hash 路由（见下表）
-│   │   ├── api/                            # 按域拆分的 HTTP 客户端
-│   │   │   ├── client.ts                   # axios 实例
-│   │   │   ├── strategy.ts / trade.ts / credentials.ts
-│   │   │   ├── llm_advisor.ts / backtest.ts / events.ts
-│   │   ├── composables/                    # useDashboardData、useStatusStream 等
-│   │   ├── components/                     # PriceChart、PnLChart、BacktestChart
-│   │   ├── types/index.ts
-│   │   └── views/
-│   │       ├── Dashboard.vue               # 实时面板、图表、启停控制
-│   │       ├── Strategy.vue                # 策略参数 + LLM 区间
-│   │       ├── TradeHistory.vue            # 订单列表与撤单
-│   │       ├── DecisionTimeline.vue        # 决策事件时间线（/events）
-│   │       ├── Backtest.vue                # CSV 回测
-│   │       └── Credentials.vue             # 凭证配置（不回显明文）
-│   ├── cypress/e2e/                        # E2E（navigation、dashboard、backtest、events…）
-│   ├── nginx.conf                          # 生产：/api、/ws 反代到 backend
-│   ├── vite.config.ts
+│   │   ├── router/index.ts      # Hash 路由（13 页 + catch-all）
+│   │   ├── api/                 # 按域 axios 客户端
+│   │   ├── composables/         # 状态与实时连接
+│   │   ├── components/          # 图表与面板组件
+│   │   ├── views/               # Dashboard / Watchlist / Lab / Review / Reports ...
+│   │   └── types/index.ts
+│   ├── cypress/e2e/             # E2E（API 全部 cy.intercept 桩）
 │   └── Dockerfile
-├── docker-compose.yaml                     # frontend 0.0.0.0:8080，backend 仅内网
-├── docs/Roadmap.md
+├── docker-compose.yaml
+├── docker-compose.dockerhub.yaml
 ├── .env.example
+├── AGENTS.md                    # 给编码 agent 的仓库约定
+├── CLAUDE.md                    # Claude Code 工作约定
 └── README.md
 ```
 
@@ -363,13 +352,19 @@ auto_trade/
 
 | 路径 | 页面 |
 |------|------|
-| `/#/` | Dashboard — 实时状态、图表、启停/暂停/kill switch |
-| `/#/strategy` | Strategy — 区间参数、LLM 顾问 |
-| `/#/history` | Trade History — 今日/历史订单、撤单；今日列表默认读本地库，点「刷新」时 `refresh=true` 强制同步券商 |
-| `/#/events` | Decision Timeline — 交易与 LLM 决策事件 + 审计事件（`source` 切换） |
-| `/#/backtest` | Backtest — CSV 回测 |
-| `/#/credentials` | Credentials — 长桥凭证 + 多渠道通知（Server 酱 / Telegram / Webhook） |
-| `/#/lab` | 研究与观测工作台 — Prompt 实验、性能、指标、LLM 运行状态与 Strategy v2 前向影子 |
+| `/#/` | Dashboard — 实时状态、图表、启停/暂停/kill switch、浮盈/权益/归因 |
+| `/#/watchlist` | 观察列表 — 多标的行情、量化评分、候选池相关只读信息 |
+| `/#/review` | 复盘 — 按交易日聚合订单 / 事件 / 快照 / LLM |
+| `/#/reports` | 交易报告 — 区间报告与定时日报相关 UI |
+| `/#/strategy` | Strategy — 区间参数、LLM 顾问、定时报告、预设 |
+| `/#/history` | Trade History — 订单、已实现成交、笔记；`refresh=true` 强制同步券商 |
+| `/#/events` | Decision Timeline — trade / audit / llm / risk 统一事件流 |
+| `/#/backtest` | Backtest — CSV / 行情拉取、参数扫描 |
+| `/#/experiments` | 策略实验 — 批量回测与排行榜 |
+| `/#/credentials` | Credentials — 长桥凭证 + 多渠道通知 |
+| `/#/alerts` | 告警规则 — 条件告警 CRUD 与触发历史 |
+| `/#/notifications` | 通知中心 — 已发送通知日志 |
+| `/#/lab` | 优化工作台 — Prompt/性能、Strategy v2 与开盘动量等影子观测 |
 
 ## API 参考
 
@@ -563,13 +558,27 @@ auto_trade/
 | `GET` | `/api/performance/recommendations?experiment=` | 基于历史数据的文字优化建议列表 |
 | `GET` | `/api/indicators?symbol=` | 实时技术指标快照（ATR、RSI、MACD、布林带、成交量分析、市场情绪、多时间框架趋势）；只读，不触发 LLM；broker 凭证缺失时 `available=false` |
 
-### 策略复盘（规划中，P7）
+### 策略复盘
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/api/replay/days` | 最近交易日列表；`limit=1..90`，仅返回有数据日 |
-| `GET` | `/api/replay/{trade_day}` | 单日复盘明细；可选 `symbol`，合法但空数据返回 `200` 空结构 |
-| `GET` | `/api/replay/{trade_day}/export` | 导出复盘；`format=json\|csv`，浏览器原生下载 |
+| `GET` | `/api/review` | 复盘聚合；查询参数含交易日 / 标的等，合法但无数据时返回空结构 |
+| `GET` | `/api/review/export` | 导出复盘数据 |
+
+### 候选池（Universe）
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/universe/catalog` | 指数目录项 |
+| `GET` | `/api/universe/latest` | 最近一次候选池运行结果 |
+| `POST` | `/api/universe/refresh` | 触发幂等刷新（受配置与权限约束） |
+| `GET` | `/api/universe/promotion-readiness` | 入选标的前向证据汇总；仅供人工复核，不自动晋级 |
+
+### 开盘动量影子
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/opening-momentum-shadow/*` | 开盘动量影子配置 / 状态 / 决策等只读接口（详见 OpenAPI / Lab UI） |
 
 ### WebSocket
 
@@ -577,9 +586,9 @@ auto_trade/
 |----------|------|-------------|
 | `WS` | `/ws` | 实时推送引擎状态、价格、风控标志等 JSON |
 
-### 平台层（/api/platform/*）— P149+ 量化深度
+### 平台层（/api/platform/*）— 研究计算
 
-> 全部需 `X-API-Key`（`AUTO_TRADE_API_KEY` 为空时仅 `dev/test` 放行）；422 表示缺参/非法输入。
+> 研究 / Paper / 组合分析插件层，**默认不接入实盘下单路径**。全部需 `X-API-Key`（`AUTO_TRADE_API_KEY` 为空时仅 `dev/test` 放行）；422 表示缺参/非法输入。下列为代表性端点；完整列表以运行中 OpenAPI（`/docs`）为准。
 
 | Method | Path | 描述 |
 |--------|------|------|
@@ -787,9 +796,6 @@ Telegram 没有对应环境变量；其 `bot_token` / `chat_id` 与 Webhook 配�
 - 今日订单列表默认读 SQLite；Dashboard 最近订单最多落后 runner 后台同步间隔（约 15s），需最新数据请在订单页点「刷新」
 - 回测为离线 CSV 模拟，与实盘滑点/成交可能有差异
 
-## License
-
-MIT
 | `POST` | `/api/platform/pareto-optimize` | 多目标 Pareto 前沿筛选 |
 | `POST` | `/api/platform/volume-profile` | 成交量剖面 POC/价值区间 |
 | `POST` | `/api/platform/cost-surface` | 交易成本三维曲面 |
@@ -870,3 +876,14 @@ MIT
 | `POST` | `/api/platform/regime-factor-betas` | Regime 条件因子 Beta |
 | `POST` | `/api/platform/strategy-correlation-bootstrap` | 策略相关 Bootstrap CI |
 | `POST` | `/api/platform/tail-diversification` | 尾部分散化度量 |
+
+## 文档约定
+
+- **用户向说明以本 `README.md` 为准**（架构、快速开始、API 摘要、环境变量）。
+- **编码 agent 约定**见根目录 `AGENTS.md` 与 `CLAUDE.md`；LLM prompt 插件细节见 `backend/app/domain/prompt/AGENTS.md`。
+- 历史迭代的设计稿 / plan / review 报告**不入库**；中间产物请放本地，勿提交。
+- 第三方指数成分数据说明见 `backend/app/domain/universe_selection/data/THIRD_PARTY_NOTICES.md`。
+
+## License
+
+MIT

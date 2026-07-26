@@ -1,67 +1,75 @@
 # auto_trade backend
 
-## 快速开始
+## Quick start
 
-### 1. 准备 Python 3.11+
+### 1. Python 3.11+
 
 ```bash
-python3.11 --version    # 必须 3.11+（CLAUDE.md 强约束）
+python3.11 --version
 ```
 
-### 2. 重建虚拟环境
+### 2. Virtualenv
 
 ```bash
-# 用 requirements.txt 的 ~= 范围（推荐开发环境）
+# Prefer setup helper when available
 ./scripts/setup_venv.sh --reset
 
-# 用 requirements.lock.txt 的精确版本（推荐 CI / 生产）
-./scripts/setup_venv.sh --reset --locked
+# Or manual:
+python3 -m venv .venv
+source .venv/bin/activate   # Windows: .venv\\Scripts\\activate
+pip install -r requirements.txt
+pip install -r requirements-dev.txt
 ```
 
-> **如果遇到 `bad interpreter` 或 venv 指向 host 路径**：说明 `.venv/bin/python` 符号链接损坏了（sandbox / 不同机器之间 venv 不可移植）。`--reset` 会删除重建。
-
-### 3. 激活 & 验证
+### 3. Verify
 
 ```bash
 source .venv/bin/activate
 python -c "import fastapi, sqlalchemy, pydantic; print('ok')"
-pytest tests/test_database.py -q     # 冒烟测试
-pytest tests/ -v                     # 全部测试
+pytest tests/test_database.py -q
+pytest tests/ -v
 ```
 
-### 4. 启动 API
+### 4. Run API
+
+From repo root, ensure `.env` exists (`cp .env.example .env`). Then:
 
 ```bash
 uvicorn app.main:app --reload --port 8000
 ```
 
-## 依赖管理
+OpenAPI: `http://localhost:8000/docs`
 
-| 文件 | 用途 |
+## Dependencies
+
+| File | Purpose |
+|------|---------|
+| `requirements.txt` | Runtime (`~=` ranges for day-to-day dev) |
+| `requirements-dev.txt` | pytest / basedpyright / tools |
+| `requirements.lock.txt` | Optional exact pin file if present for CI/prod |
+
+## SQLite
+
+`app/database.py` enables WAL, busy timeout, foreign keys, and runtime `_ensure_*` column migrations.
+
+Backup: copy `data/auto_trade.db` **and** `-wal` / `-shm` when using WAL.
+
+## Layout (high level)
+
+| Path | Role |
 |------|------|
-| `requirements.in` | pip-compile 的输入源（手维护） |
-| `requirements.txt` | `~=` 范围约束（适合日常开发） |
-| `requirements.lock.txt` | `==` 精确锁定（适合 CI / 生产） |
-| `requirements-dev.txt` | pytest / basedpyright 等开发工具 |
+| `app/main.py` | Lifespan, crons, router mounts |
+| `app/runner.py` | Live loop + shadow job orchestration |
+| `app/core/` | Broker, engine, risk, fees, audit |
+| `app/domain/` | Pure logic (prompt, strategy_v2, universe, opening momentum) |
+| `app/services/` | Execution, LLM, universe, quant, shadows, review |
+| `app/platform/` | Research plugin layer (`/api/platform/*`) |
+| `app/api/` | HTTP routers |
+| `scripts/` | Read-only research scripts (walk-forward, index membership) |
+| `tests/` | pytest suite |
 
-### 更新 lock
+## Docs
 
-```bash
-pip install pip-tools
-pip-compile requirements.in --generate-hashes --output-file=requirements.lock.txt
-```
-
-## SQLite 注意事项
-
-`backend/app/database.py` 已启用以下 PRAGMA（P46）：
-
-- `journal_mode=WAL` — 并发读写（runner 线程 + FastAPI 处理器）
-- `busy_timeout=5000` — 写锁等待最多 5 秒
-- `synchronous=NORMAL` — WAL 模式下足够安全
-- `foreign_keys=ON` — 显式启用外键
-
-**备份**：直接复制 `data/auto_trade.db`（SQLite 文件，WAL 模式下也需要 `-wal` / `-shm` 一起备份，否则可能有未刷盘数据）。
-
-## 已知问题
-
-详见 `/docs/Roadmap.md` 与各 `P##` 迭代规格文档。
+User-facing product docs: repo root `README.md`.  
+Agent conventions: root `AGENTS.md` / `CLAUDE.md`.  
+Prompt plugins: `app/domain/prompt/AGENTS.md`.

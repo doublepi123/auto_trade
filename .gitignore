@@ -23,6 +23,12 @@ data/
 .claude/
 .firecrawl/
 
+# Intermediate design/plan/review docs and agent scratch (not product docs)
+docs/
+.agents/skills/review-fix-loop/reports/
+batteryreport.html
+pyrightconfig.json
+
 # Frontend
 node_modules/
 frontend/dist/
