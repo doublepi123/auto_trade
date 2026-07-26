@@ -51,6 +51,7 @@ from app.domain.strategy_v2.portfolio_routing import (
     RISK_GROUP_LEAVE_ONE_OUT_MIN_PEERS,
     RISK_GROUP_RELATIVE_MIN_PEERS,
     VWAP_EDGE_FIXED_MAX_DISCOUNT_BPS,
+    portfolio_candidate_rejection_reasons,
     rank_portfolio_candidates,
 )
 
@@ -95,5 +96,6 @@ __all__ = [
     "RISK_GROUP_LEAVE_ONE_OUT_MIN_PEERS",
     "RISK_GROUP_RELATIVE_MIN_PEERS",
     "VWAP_EDGE_FIXED_MAX_DISCOUNT_BPS",
+    "portfolio_candidate_rejection_reasons",
     "rank_portfolio_candidates",
 ]

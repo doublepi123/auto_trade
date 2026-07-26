@@ -4,6 +4,8 @@ import pytest
 
 from app.domain.strategy_v2 import (
     PortfolioRoutingCandidate,
+    PortfolioRoutingPolicy,
+    portfolio_candidate_rejection_reasons,
     rank_portfolio_candidates,
 )
 
@@ -62,6 +64,89 @@ def _candidate(
         risk_group_relative_1m_bps=risk_group_relative_1m_bps,
         risk_group_relative_5m_bps=risk_group_relative_5m_bps,
     )
+
+
+@pytest.mark.parametrize(
+    "policy",
+    (
+        "FIXED_PRIMARY",
+        "SELECTED_UNIVERSE",
+        "QUANT_CANDIDATE",
+        "QUANT_WATCH_PLUS",
+        "SELECTED_VWAP_EDGE",
+        "VWAP_EDGE_POOL",
+        "VWAP_EDGE_75BPS_POOL",
+        "VWAP_EDGE_OBSERVED_COST_POOL",
+        "VWAP_EDGE_OBS_COST_75BPS_POOL",
+        "RISK_GROUP_REL_OBS_75BPS_POOL",
+        "RISK_GROUP_LOO_OBS_75BPS_POOL",
+        "SECTOR_LOO_OBS_75BPS_POOL",
+        "SELECTED_SECTOR_LOO_OBS_75BPS_POOL",
+        "SELECTED_ZSCORE_OBS_75BPS_POOL",
+        "ROTATION_ZSCORE_OBS_75BPS_POOL",
+        "ROTATION_IV_WEIGHTED_ZSCORE_POOL",
+    ),
+)
+def test_eligible_candidate_has_no_rejection_reasons(
+    policy: PortfolioRoutingPolicy,
+) -> None:
+    candidate = _candidate(
+        "NVDA.US",
+        1,
+        selected=True,
+        rank=1,
+        rotation_selected=True,
+        rotation_rank=1,
+        rotation_target_weight_pct=12.5,
+        quant_source="quant_v5",
+        quant_action="CANDIDATE",
+        residual_1m_bps=-40,
+        residual_5m_bps=-50,
+        zscore_1m=-1.2,
+        zscore_5m=-1.1,
+        round_trip_cost_bps=14,
+        observed_round_trip_cost_bps=20,
+        stop_distance_bps=75,
+        risk_group="MEGA_CAP_TECH",
+        risk_group_peer_count=3,
+        risk_group_relative_1m_bps=-30,
+        risk_group_relative_5m_bps=-35,
+    )
+
+    assert portfolio_candidate_rejection_reasons(
+        candidate,
+        policy=policy,
+        primary_symbol="NVDA.US",
+    ) == ()
+
+
+def test_weighted_rotation_rejections_preserve_independent_blockers() -> None:
+    candidate = _candidate(
+        "AAPL.US",
+        1,
+        residual_1m_bps=5,
+        residual_5m_bps=-80,
+        zscore_1m=0.2,
+        zscore_5m=-1.0,
+        round_trip_cost_bps=14,
+        stop_distance_bps=45,
+    )
+
+    reasons = portfolio_candidate_rejection_reasons(
+        candidate,
+        policy="ROTATION_IV_WEIGHTED_ZSCORE_POOL",
+        primary_symbol="NVDA.US",
+    )
+
+    assert set(reasons) == {
+        "NOT_ROTATION_SELECTED",
+        "MISSING_ROTATION_RANK",
+        "MISSING_ROTATION_TARGET_WEIGHT",
+        "MISSING_OBSERVED_COST",
+        "VWAP_1M_NOT_DISCOUNTED_AFTER_COST",
+        "VWAP_5M_BELOW_MAX_DISCOUNT",
+        "ZSCORE_1M_NOT_NEGATIVE",
+    }
 
 
 def test_fixed_primary_ignores_higher_ranked_secondary() -> None:

@@ -628,6 +628,11 @@
                     {{ formatRoutingSelections(row.metrics.selections_by_symbol) }}
                   </template>
                 </el-table-column>
+                <el-table-column label="未入选诊断" min-width="250">
+                  <template #default="{ row }">
+                    {{ formatPortfolioRejections(row.metrics) }}
+                  </template>
+                </el-table-column>
                 <el-table-column label="复核门槛" min-width="230">
                   <template #default="{ row }">
                     {{ portfolioRoutingBlockerSummary(row) }}
@@ -1807,6 +1812,7 @@ import type {
   StrategyShadowExitChallengerReport, StrategyShadowExitChallengerVariant,
   StrategyShadowForwardValidationResponse, StrategyShadowStatus, StrategyShadowVersion,
   StrategyShadowPortfolioEdgeFilter,
+  StrategyShadowPortfolioRoutingMetrics,
   StrategyShadowPortfolioRoutingPolicy,
   StrategyShadowPortfolioRoutingReport,
   StrategyShadowPortfolioRoutingVariant,
@@ -2720,6 +2726,57 @@ function formatRoutingSelections(
     .slice(0, 4)
     .map(([symbol, count]) => `${symbol} ${count}`)
     .join('；') || '-'
+}
+
+const portfolioRejectionLabels: Record<string, string> = {
+  NOT_PRIMARY_SYMBOL: '非主标的',
+  NOT_SELECTED_UNIVERSE: '未进入核心池',
+  MISSING_SELECTION_RANK: '核心池排名缺失',
+  NOT_ROTATION_SELECTED: '未进入轮动池',
+  MISSING_ROTATION_RANK: '轮动排名缺失',
+  MISSING_ROTATION_TARGET_WEIGHT: '轮动目标权重缺失',
+  QUANT_SOURCE_NOT_CURRENT: '量化评分非当前版本',
+  QUANT_ACTION_NOT_ELIGIBLE: '量化评级未达标',
+  MISSING_FROZEN_COST: '固定成本缺失',
+  MISSING_OBSERVED_COST: '观测成本缺失',
+  MISSING_MAX_DISCOUNT: '最大折价带缺失',
+  MISSING_VWAP_RESIDUAL_1M: '1 分钟 VWAP 残差缺失',
+  MISSING_VWAP_RESIDUAL_5M: '5 分钟 VWAP 残差缺失',
+  COST_NOT_BELOW_MAX_DISCOUNT: '成本超过折价带',
+  VWAP_1M_BELOW_MAX_DISCOUNT: '1 分钟折价过深',
+  VWAP_5M_BELOW_MAX_DISCOUNT: '5 分钟折价过深',
+  VWAP_1M_NOT_DISCOUNTED_AFTER_COST: '1 分钟折价不足',
+  VWAP_5M_NOT_DISCOUNTED_AFTER_COST: '5 分钟折价不足',
+  MISSING_ZSCORE_1M: '1 分钟 z-score 缺失',
+  MISSING_ZSCORE_5M: '5 分钟 z-score 缺失',
+  ZSCORE_1M_NOT_NEGATIVE: '1 分钟 z-score 非负',
+  ZSCORE_5M_NOT_NEGATIVE: '5 分钟 z-score 非负',
+  MISSING_RELATIVE_GROUP: '相对强弱分组缺失',
+  INSUFFICIENT_RELATIVE_PEERS: '相对强弱同组样本不足',
+  MISSING_RELATIVE_VWAP_RESIDUAL_1M: '1 分钟相对残差缺失',
+  MISSING_RELATIVE_VWAP_RESIDUAL_5M: '5 分钟相对残差缺失',
+  RELATIVE_VWAP_1M_BELOW_MAX_DISCOUNT: '1 分钟相对折价过深',
+  RELATIVE_VWAP_5M_BELOW_MAX_DISCOUNT: '5 分钟相对折价过深',
+  RELATIVE_VWAP_1M_NOT_DISCOUNTED_AFTER_COST: '1 分钟相对折价不足',
+  RELATIVE_VWAP_5M_NOT_DISCOUNTED_AFTER_COST: '5 分钟相对折价不足',
+  POLICY_INELIGIBLE: '策略条件未满足',
+}
+
+function formatPortfolioRejections(
+  metrics: StrategyShadowPortfolioRoutingMetrics,
+): string {
+  const summary = Object.entries(metrics.rejection_counts)
+    .sort(([leftReason, leftCount], [rightReason, rightCount]) => (
+      rightCount - leftCount || leftReason.localeCompare(rightReason)
+    ))
+    .slice(0, 3)
+    .map(([reason, count]) => (
+      `${portfolioRejectionLabels[reason] ?? reason} ${count}`
+    ))
+  if (metrics.no_causal_signal_groups > 0) {
+    summary.push(`无因果候选 ${metrics.no_causal_signal_groups}`)
+  }
+  return summary.join('；') || '-'
 }
 
 const shadowBracketBlockerLabels: Record<string, string> = {

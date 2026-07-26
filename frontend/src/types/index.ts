@@ -2266,6 +2266,9 @@ export interface StrategyShadowPortfolioRoutingMetrics {
   selected_signals: number
   skipped_occupied: number
   no_eligible: number
+  diagnosed_no_eligible: number
+  no_causal_signal_groups: number
+  rejection_counts: Record<string, number>
   pending_entries: number
   open_trades: number
   missed_entries: number

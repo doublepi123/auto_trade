@@ -536,6 +536,8 @@ class TestStrategyV2PortfolioService:
             assert observation.status == "NO_ELIGIBLE"
             assert observation.candidate_count == 0
             assert observation.selected_symbol == ""
+            assert observation.reason == "NO_CAUSAL_SIGNALS"
+            assert observation.candidates_json == "[]"
 
     def test_stale_peer_does_not_move_causal_routing_timestamp(self) -> None:
         with self._db() as db:
@@ -1285,7 +1287,30 @@ class TestStrategyV2PortfolioService:
                 == weighted_registration.id
             ).one()
             assert weighted_observation.status == "NO_ELIGIBLE"
-            assert weighted_observation.candidates_json == "[]"
+            weighted_candidates = json.loads(
+                weighted_observation.candidates_json
+            )
+            assert [
+                row["symbol"] for row in weighted_candidates
+            ] == ["AAPL.US", "MSFT.US"]
+            assert all(
+                "MISSING_ROTATION_TARGET_WEIGHT"
+                in row["rejection_reasons"]
+                for row in weighted_candidates
+            )
+            weighted_metrics = next(
+                row.metrics
+                for row in service.get_report("NVDA.US").variants
+                if row.policy == "ROTATION_IV_WEIGHTED_ZSCORE_POOL"
+            )
+            assert weighted_metrics.diagnosed_no_eligible == 1
+            assert weighted_metrics.no_causal_signal_groups == 0
+            assert (
+                weighted_metrics.rejection_counts[
+                    "MISSING_ROTATION_TARGET_WEIGHT"
+                ]
+                == 2
+            )
 
     def test_validated_inverse_volatility_weights_rotation_priority(
         self,

@@ -659,5 +659,199 @@ def rank_portfolio_candidates(
     ))
 
 
+def portfolio_candidate_rejection_reasons(
+    candidate: PortfolioRoutingCandidate,
+    *,
+    policy: PortfolioRoutingPolicy,
+    primary_symbol: str,
+) -> tuple[str, ...]:
+    """Explain why one causal candidate is excluded by a routing policy."""
+
+    if rank_portfolio_candidates(
+        (candidate,),
+        policy=policy,
+        primary_symbol=primary_symbol,
+    ):
+        return ()
+
+    reasons: list[str] = []
+    if policy == "FIXED_PRIMARY":
+        reasons.append("NOT_PRIMARY_SYMBOL")
+    if policy in {
+        "SELECTED_UNIVERSE",
+        "SELECTED_VWAP_EDGE",
+        "SELECTED_SECTOR_LOO_OBS_75BPS_POOL",
+        "SELECTED_ZSCORE_OBS_75BPS_POOL",
+    }:
+        if not candidate.selection_selected:
+            reasons.append("NOT_SELECTED_UNIVERSE")
+        if candidate.selection_rank is None:
+            reasons.append("MISSING_SELECTION_RANK")
+    if policy in {
+        "ROTATION_ZSCORE_OBS_75BPS_POOL",
+        "ROTATION_IV_WEIGHTED_ZSCORE_POOL",
+    }:
+        if not candidate.rotation_selected:
+            reasons.append("NOT_ROTATION_SELECTED")
+        if candidate.rotation_rank is None:
+            reasons.append("MISSING_ROTATION_RANK")
+    if (
+        policy == "ROTATION_IV_WEIGHTED_ZSCORE_POOL"
+        and candidate.rotation_target_weight_pct is None
+    ):
+        reasons.append("MISSING_ROTATION_TARGET_WEIGHT")
+    if policy in {"QUANT_CANDIDATE", "QUANT_WATCH_PLUS"}:
+        if candidate.quant_source != "quant_v5":
+            reasons.append("QUANT_SOURCE_NOT_CURRENT")
+        accepted_actions = (
+            {"CANDIDATE"}
+            if policy == "QUANT_CANDIDATE"
+            else {"CANDIDATE", "WATCH"}
+        )
+        if candidate.quant_action not in accepted_actions:
+            reasons.append("QUANT_ACTION_NOT_ELIGIBLE")
+
+    if policy in {"SELECTED_VWAP_EDGE", "VWAP_EDGE_POOL"}:
+        reasons.extend(_vwap_band_rejection_reasons(
+            candidate,
+            cost_bps=candidate.round_trip_cost_bps,
+            max_discount_bps=candidate.stop_distance_bps,
+            observed_cost_required=False,
+        ))
+    if policy == "VWAP_EDGE_75BPS_POOL":
+        reasons.extend(_vwap_band_rejection_reasons(
+            candidate,
+            cost_bps=candidate.round_trip_cost_bps,
+            max_discount_bps=VWAP_EDGE_FIXED_MAX_DISCOUNT_BPS,
+            observed_cost_required=False,
+        ))
+    if policy == "VWAP_EDGE_OBSERVED_COST_POOL":
+        reasons.extend(_vwap_band_rejection_reasons(
+            candidate,
+            cost_bps=candidate.effective_observed_cost_bps,
+            max_discount_bps=candidate.stop_distance_bps,
+            observed_cost_required=True,
+        ))
+    if policy in {
+        "VWAP_EDGE_OBS_COST_75BPS_POOL",
+        "RISK_GROUP_REL_OBS_75BPS_POOL",
+        "RISK_GROUP_LOO_OBS_75BPS_POOL",
+        "SECTOR_LOO_OBS_75BPS_POOL",
+        "SELECTED_SECTOR_LOO_OBS_75BPS_POOL",
+        "SELECTED_ZSCORE_OBS_75BPS_POOL",
+        "ROTATION_ZSCORE_OBS_75BPS_POOL",
+        "ROTATION_IV_WEIGHTED_ZSCORE_POOL",
+    }:
+        reasons.extend(_vwap_band_rejection_reasons(
+            candidate,
+            cost_bps=candidate.effective_observed_cost_bps,
+            max_discount_bps=VWAP_EDGE_FIXED_MAX_DISCOUNT_BPS,
+            observed_cost_required=True,
+        ))
+    if policy in {
+        "SELECTED_ZSCORE_OBS_75BPS_POOL",
+        "ROTATION_ZSCORE_OBS_75BPS_POOL",
+        "ROTATION_IV_WEIGHTED_ZSCORE_POOL",
+    }:
+        if candidate.zscore_1m is None:
+            reasons.append("MISSING_ZSCORE_1M")
+        elif candidate.zscore_1m >= 0:
+            reasons.append("ZSCORE_1M_NOT_NEGATIVE")
+        if candidate.zscore_5m is None:
+            reasons.append("MISSING_ZSCORE_5M")
+        elif candidate.zscore_5m >= 0:
+            reasons.append("ZSCORE_5M_NOT_NEGATIVE")
+    if policy in {
+        "RISK_GROUP_REL_OBS_75BPS_POOL",
+        "RISK_GROUP_LOO_OBS_75BPS_POOL",
+        "SECTOR_LOO_OBS_75BPS_POOL",
+        "SELECTED_SECTOR_LOO_OBS_75BPS_POOL",
+    }:
+        minimum_peers = (
+            RISK_GROUP_RELATIVE_MIN_PEERS
+            if policy == "RISK_GROUP_REL_OBS_75BPS_POOL"
+            else RISK_GROUP_LEAVE_ONE_OUT_MIN_PEERS
+        )
+        if not candidate.risk_group:
+            reasons.append("MISSING_RELATIVE_GROUP")
+        if candidate.risk_group_peer_count < minimum_peers:
+            reasons.append("INSUFFICIENT_RELATIVE_PEERS")
+        reasons.extend(_residual_band_rejection_reasons(
+            residual_1m_bps=candidate.risk_group_relative_1m_bps,
+            residual_5m_bps=candidate.risk_group_relative_5m_bps,
+            cost_bps=(
+                candidate.effective_observed_cost_bps
+                if candidate.effective_observed_cost_bps is not None
+                else candidate.round_trip_cost_bps
+            ),
+            max_discount_bps=VWAP_EDGE_FIXED_MAX_DISCOUNT_BPS,
+            prefix="RELATIVE_VWAP",
+        ))
+
+    return tuple(dict.fromkeys(reasons or ["POLICY_INELIGIBLE"]))
+
+
+def _vwap_band_rejection_reasons(
+    candidate: PortfolioRoutingCandidate,
+    *,
+    cost_bps: float | None,
+    max_discount_bps: float | None,
+    observed_cost_required: bool,
+) -> tuple[str, ...]:
+    reasons: list[str] = []
+    if candidate.round_trip_cost_bps is None:
+        reasons.append("MISSING_FROZEN_COST")
+    if (
+        observed_cost_required
+        and candidate.observed_round_trip_cost_bps is None
+    ):
+        reasons.append("MISSING_OBSERVED_COST")
+    if max_discount_bps is None:
+        reasons.append("MISSING_MAX_DISCOUNT")
+    reasons.extend(_residual_band_rejection_reasons(
+        residual_1m_bps=candidate.residual_1m_bps,
+        residual_5m_bps=candidate.residual_5m_bps,
+        cost_bps=(
+            cost_bps
+            if cost_bps is not None
+            else candidate.round_trip_cost_bps
+        ),
+        max_discount_bps=max_discount_bps,
+        prefix="VWAP",
+    ))
+    return tuple(reasons)
+
+
+def _residual_band_rejection_reasons(
+    *,
+    residual_1m_bps: float | None,
+    residual_5m_bps: float | None,
+    cost_bps: float | None,
+    max_discount_bps: float | None,
+    prefix: str,
+) -> tuple[str, ...]:
+    reasons: list[str] = []
+    if residual_1m_bps is None:
+        reasons.append(f"MISSING_{prefix}_RESIDUAL_1M")
+    if residual_5m_bps is None:
+        reasons.append(f"MISSING_{prefix}_RESIDUAL_5M")
+    if cost_bps is None or max_discount_bps is None:
+        return tuple(reasons)
+    if cost_bps >= max_discount_bps:
+        reasons.append("COST_NOT_BELOW_MAX_DISCOUNT")
+        return tuple(reasons)
+    for horizon, residual in (
+        ("1M", residual_1m_bps),
+        ("5M", residual_5m_bps),
+    ):
+        if residual is None:
+            continue
+        if residual < -max_discount_bps:
+            reasons.append(f"{prefix}_{horizon}_BELOW_MAX_DISCOUNT")
+        elif residual > -cost_bps:
+            reasons.append(f"{prefix}_{horizon}_NOT_DISCOUNTED_AFTER_COST")
+    return tuple(reasons)
+
+
 def _metric(value: float | None) -> float:
     return float(value) if value is not None else -1.0

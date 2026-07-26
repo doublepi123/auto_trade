@@ -18,6 +18,7 @@ from app.domain.strategy_v2 import (
     RISK_GROUP_LEAVE_ONE_OUT_MIN_PEERS,
     RISK_GROUP_RELATIVE_MIN_PEERS,
     VWAP_EDGE_FIXED_MAX_DISCOUNT_BPS,
+    portfolio_candidate_rejection_reasons,
     rank_portfolio_candidates,
 )
 from app.domain.universe_selection import (
@@ -489,14 +490,62 @@ class StrategyV2PortfolioService:
                 self.db.flush()
                 continue
             if not ranked:
+                diagnostic_candidates_json = json.dumps(
+                    [
+                        _candidate_payload(
+                            item,
+                            include_observed_cost=(
+                                registration.policy
+                                in _OBSERVED_COST_VWAP_EDGE_POLICIES
+                            ),
+                            include_relative_adjustment=(
+                                registration.policy
+                                in _RELATIVE_OBSERVED_COST_POLICIES
+                            ),
+                            include_zscore=(
+                                registration.policy
+                                in _ZSCORE_OBSERVED_COST_POLICIES
+                            ),
+                            include_rotation=(
+                                registration.policy
+                                in _ROTATION_ZSCORE_OBSERVED_COST_POLICIES
+                            ),
+                            include_rotation_weight=(
+                                registration.policy
+                                in _ROTATION_WEIGHTED_ZSCORE_POLICIES
+                            ),
+                            rejection_reasons=(
+                                portfolio_candidate_rejection_reasons(
+                                    item,
+                                    policy=_routing_policy(
+                                        registration.policy
+                                    ),
+                                    primary_symbol=(
+                                        registration.baseline_symbol
+                                    ),
+                                )
+                            ),
+                        )
+                        for item in sorted(
+                            candidates,
+                            key=lambda candidate: candidate.symbol,
+                        )
+                    ],
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
                 self.db.add(StrategyV2PortfolioObservation(
                     registration_id=registration.id,
                     signal_at=signal_at,
                     observed_at=routing_observed_at,
                     status="NO_ELIGIBLE",
-                    reason=f"NO_ELIGIBLE_{registration.policy}",
+                    reason=(
+                        f"NO_ELIGIBLE_{registration.policy}"
+                        if candidates
+                        else "NO_CAUSAL_SIGNALS"
+                    ),
                     candidate_count=0,
-                    candidates_json="[]",
+                    candidates_json=diagnostic_candidates_json,
                 ))
                 self.db.flush()
                 continue
@@ -1343,6 +1392,32 @@ class StrategyV2PortfolioService:
             for row in rows
             if row.selected_symbol
         ]
+        rejection_counts: Counter[str] = Counter()
+        diagnosed_no_eligible = 0
+        no_causal_signal_groups = 0
+        for row in rows:
+            if row.status != "NO_ELIGIBLE":
+                continue
+            if row.reason == "NO_CAUSAL_SIGNALS":
+                no_causal_signal_groups += 1
+            try:
+                payloads = json.loads(row.candidates_json)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(payloads, list) or not payloads:
+                continue
+            diagnosed_no_eligible += 1
+            for payload in payloads:
+                if not isinstance(payload, dict):
+                    continue
+                reasons = payload.get("rejection_reasons")
+                if not isinstance(reasons, list):
+                    continue
+                rejection_counts.update(
+                    reason
+                    for reason in reasons
+                    if isinstance(reason, str) and reason
+                )
         return StrategyV2PortfolioRoutingMetrics(
             signal_groups=len(rows),
             selected_signals=len(selected),
@@ -1354,6 +1429,9 @@ class StrategyV2PortfolioService:
                 row.status == "NO_ELIGIBLE"
                 for row in rows
             ),
+            diagnosed_no_eligible=diagnosed_no_eligible,
+            no_causal_signal_groups=no_causal_signal_groups,
+            rejection_counts=dict(sorted(rejection_counts.items())),
             pending_entries=sum(
                 row.status == "PENDING_ENTRY"
                 for row in rows
@@ -1863,6 +1941,7 @@ def _candidate_payload(
     include_zscore: bool,
     include_rotation: bool,
     include_rotation_weight: bool,
+    rejection_reasons: tuple[str, ...] | None = None,
 ) -> dict[str, object]:
     payload = asdict(candidate)
     if not include_observed_cost:
@@ -1881,6 +1960,8 @@ def _candidate_payload(
         payload.pop("rotation_score", None)
     if not include_rotation_weight:
         payload.pop("rotation_target_weight_pct", None)
+    if rejection_reasons is not None:
+        payload["rejection_reasons"] = list(rejection_reasons)
     return payload
 
 

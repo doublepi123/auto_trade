@@ -261,6 +261,12 @@ class TestStrategyV2ShadowApi:
         assert body["historical_backfill_allowed"] is False
         assert body["capital_slots"] == 1
         assert len(body["variants"]) == 16
+        assert all(
+            item["metrics"]["diagnosed_no_eligible"] == 0
+            and item["metrics"]["no_causal_signal_groups"] == 0
+            and item["metrics"]["rejection_counts"] == {}
+            for item in body["variants"]
+        )
         assert {
             item["policy"] for item in body["variants"]
         } == {

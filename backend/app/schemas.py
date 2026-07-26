@@ -1012,6 +1012,9 @@ class StrategyV2PortfolioRoutingMetrics(BaseModel):
     selected_signals: int = 0
     skipped_occupied: int = 0
     no_eligible: int = 0
+    diagnosed_no_eligible: int = 0
+    no_causal_signal_groups: int = 0
+    rejection_counts: dict[str, int] = Field(default_factory=dict)
     pending_entries: int = 0
     open_trades: int = 0
     missed_entries: int = 0
