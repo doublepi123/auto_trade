@@ -67,6 +67,7 @@ _ALL_CHALLENGER_VARIANTS = (
     "EXECUTION_BROAD_CHALLENGER",
     "EXECUTION_PATH_EFFICIENCY_CHALLENGER",
     "WEAK_BREADTH_PATH_CHALLENGER",
+    "WEAK_BREADTH_WIDE_STOP_CHALLENGER",
     *_EXECUTION_EXTENSION_VARIANTS,
 )
 
@@ -606,6 +607,7 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
             "EXECUTION_BROAD_CHALLENGER",
             "EXECUTION_PATH_EFFICIENCY_CHALLENGER",
             "WEAK_BREADTH_PATH_CHALLENGER",
+            "WEAK_BREADTH_WIDE_STOP_CHALLENGER",
             "EXECUTION_SNDK_CHALLENGER",
             "EXECUTION_INTC_CHALLENGER",
             "EXECUTION_QCOM_CHALLENGER",
@@ -625,6 +627,9 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
         ]
         weak_breadth_path = by_variant[
             "WEAK_BREADTH_PATH_CHALLENGER"
+        ]
+        weak_breadth_wide_stop = by_variant[
+            "WEAK_BREADTH_WIDE_STOP_CHALLENGER"
         ]
         reversal = by_variant["REVERSAL_CHALLENGER"]
         continuation = by_variant["CONTINUATION_CHALLENGER"]
@@ -685,6 +690,28 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
         assert weak_breadth_path.universe_source == (
             "OPENING_EXECUTION_WEAK_BREADTH_PATH"
         )
+        assert (
+            weak_breadth_wide_stop.decision_config.signal_minutes
+            == weak_breadth_path.decision_config.signal_minutes
+        )
+        assert (
+            weak_breadth_wide_stop.decision_config.holding_minutes
+            == 60
+        )
+        assert (
+            weak_breadth_wide_stop.decision_config.stop_loss_pct
+            == 4.0
+        )
+        assert weak_breadth_wide_stop.minimum_data_coverage == 0.95
+        assert weak_breadth_wide_stop.minimum_path_efficiency == 0.70
+        assert (
+            weak_breadth_wide_stop.maximum_market_return_bps
+            == 0.0
+        )
+        assert weak_breadth_wide_stop.required_symbols == ()
+        assert weak_breadth_wide_stop.universe_source == (
+            "OPENING_EXECUTION_WEAK_BREADTH_WIDE_STOP"
+        )
         for variant, symbol in zip(
             _EXECUTION_EXTENSION_VARIANTS,
             _EXECUTION_EXTENSION_SYMBOLS,
@@ -720,7 +747,7 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
                 identity.config_version
                 for identity in identities
             }
-        ) == 21
+        ) == 22
     finally:
         db.close()
         Base.metadata.drop_all(bind=engine)
@@ -747,6 +774,8 @@ def test_variant_comparisons_are_paired_independently(
             "EARLY_BROAD_CHALLENGER",
             "EARLY_SNDK_CHALLENGER",
             "EXECUTION_BROAD_CHALLENGER",
+            "WEAK_BREADTH_PATH_CHALLENGER",
+            "WEAK_BREADTH_WIDE_STOP_CHALLENGER",
             "EXECUTION_SNDK_CHALLENGER",
         ):
             identity = identities_by_variant[variant]
@@ -774,6 +803,9 @@ def test_variant_comparisons_are_paired_independently(
         continuation = by_variant["CONTINUATION_CHALLENGER"]
         early_sndk = by_variant["EARLY_SNDK_CHALLENGER"]
         execution_sndk = by_variant["EXECUTION_SNDK_CHALLENGER"]
+        weak_breadth_wide_stop = by_variant[
+            "WEAK_BREADTH_WIDE_STOP_CHALLENGER"
+        ]
         breadth = by_variant["BREADTH_GATED_CHALLENGER"]
         assert continuation.comparison_sessions == 1
         assert continuation.comparison is not None
@@ -795,6 +827,16 @@ def test_variant_comparisons_are_paired_independently(
         assert (
             execution_sndk.comparison_baseline
             == "EXECUTION_BROAD_CHALLENGER"
+        )
+        assert weak_breadth_wide_stop.comparison_sessions == 1
+        assert weak_breadth_wide_stop.comparison is not None
+        assert (
+            weak_breadth_wide_stop.comparison.resolved_sessions
+            == 1
+        )
+        assert weak_breadth_wide_stop.comparison.mean_delta_bps == 0.0
+        assert weak_breadth_wide_stop.comparison_baseline == (
+            "WEAK_BREADTH_PATH_CHALLENGER"
         )
         assert breadth.comparison_sessions == 0
         assert breadth.comparison is not None
@@ -947,7 +989,7 @@ def test_challengers_use_one_market_snapshot_and_close_all_variants(
         assert opened.latest.universe_source == "UNIVERSE_SELECTION"
         assert opened.latest.candidate_symbol == "S1.US"
         assert opened.latest.selection_run_id == run.id
-        assert len(opened.variants) == 21
+        assert len(opened.variants) == 22
         by_variant = {
             item.variant: item for item in opened.variants
         }
@@ -1045,7 +1087,7 @@ def test_challengers_use_one_market_snapshot_and_close_all_variants(
                 item.config_version
                 for item in opened.variants
             }
-        ) == 21
+        ) == 22
 
         still_open = service.tick(
             now=_SESSION_OPEN + timedelta(minutes=47, seconds=10),
@@ -1145,7 +1187,7 @@ def test_early_broad_challenger_keeps_independent_observation_window(
         )
 
         rows = db.query(OpeningMomentumShadowRun).all()
-        assert len(rows) == 15
+        assert len(rows) == 16
         assert candles.calls == [
             *_SYMBOLS,
             *_EXTENSION_SYMBOLS,
@@ -1225,6 +1267,15 @@ def test_early_broad_challenger_keeps_independent_observation_window(
         assert path_efficiency.comparison_baseline == (
             "EXECUTION_BROAD_CHALLENGER"
         )
+        weak_breadth_wide_stop = early_by_variant[
+            "WEAK_BREADTH_WIDE_STOP_CHALLENGER"
+        ]
+        assert weak_breadth_wide_stop.latest is not None
+        assert weak_breadth_wide_stop.latest.status == "OPEN"
+        assert weak_breadth_wide_stop.latest.stop_loss_pct == 4.0
+        assert weak_breadth_wide_stop.comparison_baseline == (
+            "WEAK_BREADTH_PATH_CHALLENGER"
+        )
         for variant, symbol in zip(
             _EXECUTION_EXTENSION_VARIANTS,
             _EXECUTION_EXTENSION_SYMBOLS,
@@ -1244,7 +1295,7 @@ def test_early_broad_challenger_keeps_independent_observation_window(
             now=_SESSION_OPEN + timedelta(minutes=32, seconds=10),
         )
 
-        assert db.query(OpeningMomentumShadowRun).count() == 21
+        assert db.query(OpeningMomentumShadowRun).count() == 22
         assert candles.calls == list(_SYMBOLS[:4])
         by_variant = {
             item.variant: item for item in standard_opened.variants
@@ -1265,7 +1316,7 @@ def test_early_broad_challenger_keeps_independent_observation_window(
         rows = db.query(OpeningMomentumShadowRun).all()
         assert sum(row.status == "CLOSED" for row in rows) == 5
         assert sum(row.status == "SKIPPED" for row in rows) == 1
-        assert sum(row.status == "OPEN" for row in rows) == 15
+        assert sum(row.status == "OPEN" for row in rows) == 16
         by_variant = {
             item.variant: item for item in standard_closed.variants
         }
@@ -1291,7 +1342,7 @@ def test_early_broad_challenger_keeps_independent_observation_window(
         rows = db.query(OpeningMomentumShadowRun).all()
         assert candles.calls == ["S7.US"]
         assert execution_closed.state == "OPEN"
-        assert sum(row.status == "CLOSED" for row in rows) == 13
+        assert sum(row.status == "CLOSED" for row in rows) == 14
         assert sum(row.status == "SKIPPED" for row in rows) == 1
         assert sum(row.status == "OPEN" for row in rows) == 7
         execution_by_variant = {
@@ -1311,6 +1362,12 @@ def test_early_broad_challenger_keeps_independent_observation_window(
         assert (
             execution_by_variant[
                 "WEAK_BREADTH_PATH_CHALLENGER"
+            ].metrics.closed_trades
+            == 1
+        )
+        assert (
+            execution_by_variant[
+                "WEAK_BREADTH_WIDE_STOP_CHALLENGER"
             ].metrics.closed_trades
             == 1
         )
@@ -1596,7 +1653,7 @@ def test_breadth_challenger_skips_a_negative_market_snapshot(
         )
 
         assert candles.calls == list(_SYMBOLS[:4])
-        assert len(status.variants) == 21
+        assert len(status.variants) == 22
         by_variant = {
             item.variant: item for item in status.variants
         }

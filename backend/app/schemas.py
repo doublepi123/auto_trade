@@ -613,6 +613,7 @@ class OpeningMomentumShadowVariantResponse(BaseModel):
         "EXECUTION_BROAD_CHALLENGER",
         "EXECUTION_PATH_EFFICIENCY_CHALLENGER",
         "WEAK_BREADTH_PATH_CHALLENGER",
+        "WEAK_BREADTH_WIDE_STOP_CHALLENGER",
         "EXECUTION_SNDK_CHALLENGER",
         "EXECUTION_INTC_CHALLENGER",
         "EXECUTION_QCOM_CHALLENGER",
@@ -642,6 +643,7 @@ class OpeningMomentumShadowVariantResponse(BaseModel):
             "INCUMBENT",
             "EARLY_BROAD_CHALLENGER",
             "EXECUTION_BROAD_CHALLENGER",
+            "WEAK_BREADTH_PATH_CHALLENGER",
         ]
     ] = None
     latest: Optional[OpeningMomentumShadowRunResponse] = None

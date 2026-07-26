@@ -2188,6 +2188,7 @@ function openingMomentumVariantLabel(
   if (variant === 'EXECUTION_BROAD_CHALLENGER') return '3 分钟执行基线'
   if (variant === 'EXECUTION_PATH_EFFICIENCY_CHALLENGER') return '执行 + 路径效率'
   if (variant === 'WEAK_BREADTH_PATH_CHALLENGER') return '弱广度 + 路径效率'
+  if (variant === 'WEAK_BREADTH_WIDE_STOP_CHALLENGER') return '弱广度 + 4% 灾难止损'
   const execution = /^EXECUTION_(.+)_CHALLENGER$/.exec(variant)
   if (execution) return `执行 + ${execution[1]}`
   const extension = /^EARLY_(.+)_CHALLENGER$/.exec(variant)
@@ -2198,7 +2199,10 @@ function openingMomentumVariantTagType(
 ): 'primary' | 'warning' | 'info' | 'success' {
   if (variant === 'INCUMBENT') return 'primary'
   if (variant === 'REVERSAL_CHALLENGER') return 'success'
-  if (variant === 'WEAK_BREADTH_PATH_CHALLENGER') return 'warning'
+  if (
+    variant === 'WEAK_BREADTH_PATH_CHALLENGER'
+    || variant === 'WEAK_BREADTH_WIDE_STOP_CHALLENGER'
+  ) return 'warning'
   if (variant.startsWith('EXECUTION_')) return 'success'
   if (variant.startsWith('EARLY_')) return 'warning'
   if (variant.includes('LAST5')) return 'warning'

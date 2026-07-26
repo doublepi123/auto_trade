@@ -1934,6 +1934,7 @@ export interface OpeningMomentumShadowVariant {
     | 'EXECUTION_BROAD_CHALLENGER'
     | 'EXECUTION_PATH_EFFICIENCY_CHALLENGER'
     | 'WEAK_BREADTH_PATH_CHALLENGER'
+    | 'WEAK_BREADTH_WIDE_STOP_CHALLENGER'
     | 'EXECUTION_SNDK_CHALLENGER'
     | 'EXECUTION_INTC_CHALLENGER'
     | 'EXECUTION_QCOM_CHALLENGER'
@@ -1957,6 +1958,7 @@ export interface OpeningMomentumShadowVariant {
     | 'INCUMBENT'
     | 'EARLY_BROAD_CHALLENGER'
     | 'EXECUTION_BROAD_CHALLENGER'
+    | 'WEAK_BREADTH_PATH_CHALLENGER'
     | null
   latest: OpeningMomentumShadowRun | null
   metrics: OpeningMomentumShadowMetrics

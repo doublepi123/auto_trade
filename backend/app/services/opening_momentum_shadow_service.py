@@ -113,6 +113,19 @@ _WEAK_BREADTH_PATH_ALGORITHM_VERSION = (
     f"{ALGORITHM_VERSION}+{_WEAK_BREADTH_PATH_VERSION}"
 )
 _WEAK_BREADTH_MAXIMUM_MARKET_RETURN_BPS = 0.0
+# Selected on data through 2026-07-24; only post-deployment rows count as
+# forward evidence for the wider catastrophic stop.
+_WEAK_BREADTH_WIDE_STOP_PCT = 4.0
+_WEAK_BREADTH_WIDE_STOP_VERSION = (
+    "forward-only-max-median0-path-efficiency-070-hold60-stop4-"
+    "precommitted-20260727-v1"
+)
+_WEAK_BREADTH_WIDE_STOP_SOURCE = (
+    "OPENING_EXECUTION_WEAK_BREADTH_WIDE_STOP"
+)
+_WEAK_BREADTH_WIDE_STOP_ALGORITHM_VERSION = (
+    f"{ALGORITHM_VERSION}+{_WEAK_BREADTH_WIDE_STOP_VERSION}"
+)
 _EXECUTION_EXTENSION_COHORT_VERSION = (
     "discovery-top6-positive-delta-min4-stop1-v1-20260724"
 )
@@ -158,6 +171,7 @@ _VariantName = Literal[
     "EXECUTION_BROAD_CHALLENGER",
     "EXECUTION_PATH_EFFICIENCY_CHALLENGER",
     "WEAK_BREADTH_PATH_CHALLENGER",
+    "WEAK_BREADTH_WIDE_STOP_CHALLENGER",
     "EXECUTION_SNDK_CHALLENGER",
     "EXECUTION_INTC_CHALLENGER",
     "EXECUTION_QCOM_CHALLENGER",
@@ -976,6 +990,35 @@ class OpeningMomentumShadowService:
             symbols=active_broad_symbols,
             selection_run_id=run.id,
         ))
+        weak_breadth_wide_stop_identity = identities_by_variant[
+            "WEAK_BREADTH_WIDE_STOP_CHALLENGER"
+        ]
+        variants.append(_UniverseVariant(
+            variant=weak_breadth_wide_stop_identity.variant,
+            algorithm_version=(
+                weak_breadth_wide_stop_identity.algorithm_version
+            ),
+            config_version=(
+                weak_breadth_wide_stop_identity.config_version
+            ),
+            universe_source=(
+                weak_breadth_wide_stop_identity.universe_source
+            ),
+            decision_config=(
+                weak_breadth_wide_stop_identity.decision_config
+            ),
+            minimum_data_coverage=(
+                weak_breadth_wide_stop_identity.minimum_data_coverage
+            ),
+            minimum_path_efficiency=(
+                weak_breadth_wide_stop_identity.minimum_path_efficiency
+            ),
+            maximum_market_return_bps=(
+                weak_breadth_wide_stop_identity.maximum_market_return_bps
+            ),
+            symbols=active_broad_symbols,
+            selection_run_id=run.id,
+        ))
         for spec in _EXECUTION_EXTENSION_SPECS:
             identity = identities_by_variant[spec.variant]
             variants.append(_UniverseVariant(
@@ -1055,6 +1098,10 @@ class OpeningMomentumShadowService:
             breadth_config = self._breadth_gate_config()
             early_config = self._early_broad_config()
             execution_config = self._execution_broad_config()
+            weak_breadth_wide_stop_config = replace(
+                execution_config,
+                stop_loss_pct=_WEAK_BREADTH_WIDE_STOP_PCT,
+            )
             variants.append(_UniverseVariant(
                 variant="EARLY_BROAD_CHALLENGER",
                 algorithm_version=_EARLY_BROAD_ALGORITHM_VERSION,
@@ -1134,6 +1181,29 @@ class OpeningMomentumShadowService:
                 ),
                 universe_source=_WEAK_BREADTH_PATH_SOURCE,
                 decision_config=execution_config,
+                minimum_data_coverage=(
+                    _EARLY_BROAD_MINIMUM_COVERAGE
+                ),
+                minimum_path_efficiency=(
+                    _EXECUTION_PATH_EFFICIENCY_MINIMUM
+                ),
+                maximum_market_return_bps=(
+                    _WEAK_BREADTH_MAXIMUM_MARKET_RETURN_BPS
+                ),
+            ))
+            variants.append(_UniverseVariant(
+                variant="WEAK_BREADTH_WIDE_STOP_CHALLENGER",
+                algorithm_version=(
+                    _WEAK_BREADTH_WIDE_STOP_ALGORITHM_VERSION
+                ),
+                config_version=self._evidence_config_version(
+                    f"{weak_breadth_wide_stop_config.version_hash()}:"
+                    f"{_WEAK_BREADTH_WIDE_STOP_VERSION}:"
+                    f"{_EXECUTION_PATH_EFFICIENCY_MINIMUM:.2f}:"
+                    f"{_WEAK_BREADTH_MAXIMUM_MARKET_RETURN_BPS:.1f}"
+                ),
+                universe_source=_WEAK_BREADTH_WIDE_STOP_SOURCE,
+                decision_config=weak_breadth_wide_stop_config,
                 minimum_data_coverage=(
                     _EARLY_BROAD_MINIMUM_COVERAGE
                 ),
@@ -1607,6 +1677,10 @@ class OpeningMomentumShadowService:
                     "WEAK_BREADTH_PATH_CHALLENGER",
                 }
             )
+            uses_weak_breadth_baseline = (
+                identity.variant
+                == "WEAK_BREADTH_WIDE_STOP_CHALLENGER"
+            )
             is_extension = (
                 is_early_extension or is_execution_extension
             )
@@ -1617,6 +1691,7 @@ class OpeningMomentumShadowService:
                 "INCUMBENT",
                 "EARLY_BROAD_CHALLENGER",
                 "EXECUTION_BROAD_CHALLENGER",
+                "WEAK_BREADTH_PATH_CHALLENGER",
             ] | None
             if identity.variant == "INCUMBENT":
                 comparison_baseline = None
@@ -1624,6 +1699,8 @@ class OpeningMomentumShadowService:
                 comparison_baseline = "EARLY_BROAD_CHALLENGER"
             elif uses_execution_baseline:
                 comparison_baseline = "EXECUTION_BROAD_CHALLENGER"
+            elif uses_weak_breadth_baseline:
+                comparison_baseline = "WEAK_BREADTH_PATH_CHALLENGER"
             else:
                 comparison_baseline = "INCUMBENT"
             if is_early_extension:
@@ -1633,6 +1710,10 @@ class OpeningMomentumShadowService:
             elif uses_execution_baseline:
                 comparison_identity = identities_by_variant[
                     "EXECUTION_BROAD_CHALLENGER"
+                ]
+            elif uses_weak_breadth_baseline:
+                comparison_identity = identities_by_variant[
+                    "WEAK_BREADTH_PATH_CHALLENGER"
                 ]
             else:
                 comparison_identity = incumbent_identity
