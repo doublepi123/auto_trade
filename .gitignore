@@ -27,7 +27,8 @@ data/
 docs/
 .agents/skills/review-fix-loop/reports/
 batteryreport.html
-pyrightconfig.json
+# Root-level pyrightconfig is per-developer; backend/pyrightconfig.json is tracked for CI
+/pyrightconfig.json
 
 # Frontend
 node_modules/

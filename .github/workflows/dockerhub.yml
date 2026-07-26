@@ -49,7 +49,7 @@ jobs:
         run: pytest tests/ -v
 
       - name: Run basedpyright
-        run: basedpyright --project ../pyrightconfig.json
+        run: basedpyright
 
   frontend-check:
     name: Frontend Type Check and Build

@@ -1,0 +1,14 @@
+{
+  "include": ["app", "tests", "scripts"],
+  "exclude": [
+    "**/__pycache__",
+    "**/node_modules",
+    ".venv",
+    ".venv312",
+    ".pytest_cache",
+    "alembic"
+  ],
+  "pythonVersion": "3.11",
+  "typeCheckingMode": "basic",
+  "reportMissingTypeStubs": false
+}
