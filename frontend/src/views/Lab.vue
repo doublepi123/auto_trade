@@ -2646,6 +2646,7 @@ const portfolioRoutingPolicyLabels: Record<
   SELECTED_SECTOR_LOO_OBS_75BPS_POOL: '核心池 · 细行业留一 · 观测成本 75bp',
   SELECTED_ZSCORE_OBS_75BPS_POOL: '核心池 · 双周期标准化偏离',
   ROTATION_ZSCORE_OBS_75BPS_POOL: '12-1 轮动池 · 双周期标准化偏离',
+  ROTATION_IV_WEIGHTED_ZSCORE_POOL: '12-1 轮动池 · 逆波动加权偏离',
 }
 
 function portfolioRoutingPolicyLabel(

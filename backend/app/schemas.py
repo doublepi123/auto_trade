@@ -1045,6 +1045,7 @@ class StrategyV2PortfolioRoutingVariant(BaseModel):
         "SELECTED_SECTOR_LOO_OBS_75BPS_POOL",
         "SELECTED_ZSCORE_OBS_75BPS_POOL",
         "ROTATION_ZSCORE_OBS_75BPS_POOL",
+        "ROTATION_IV_WEIGHTED_ZSCORE_POOL",
     ]
     algorithm_version: str
     evaluator_digest: str

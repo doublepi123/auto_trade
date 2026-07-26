@@ -8,7 +8,11 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
-from app.domain.universe_selection import ROTATION_ALGORITHM_VERSION
+from app.domain.universe_selection import (
+    DIVERSIFIED_INVERSE_VOLATILITY_VARIANT,
+    ROTATION_ALGORITHM_VERSION,
+    ROTATION_WALK_FORWARD_VERSION,
+)
 from app.models import (
     Base,
     StrategyV2PortfolioObservation,
@@ -151,6 +155,62 @@ class TestStrategyV2PortfolioService:
                 score=63,
             ),
         ])
+        db.commit()
+
+    @staticmethod
+    def _validated_inverse_volatility_registration(db: Session) -> None:
+        run = db.query(UniverseSelectionRun).one()
+        variant_name = DIVERSIFIED_INVERSE_VOLATILITY_VARIANT.name
+
+        def signal(
+            symbol: str,
+            rank: int,
+            score: float,
+            target_weight_pct: float,
+        ) -> dict[str, object]:
+            return {
+                "symbol": symbol,
+                "rank": rank,
+                "risk_group": "Test",
+                "momentum_pct": score,
+                "sma_price": 100.0,
+                "above_sma": True,
+                "score": score,
+                "signal_spread_bps": 1.0,
+                "ranking_method": "raw_momentum",
+                "formation_realized_volatility": None,
+                "ranking_metric": score,
+                "target_weight_pct": target_weight_pct,
+            }
+
+        remaining_weight = 65.0 / 3
+        run.parameters_json = json.dumps({
+            "rotation_evaluation": {
+                "algorithm_version": ROTATION_WALK_FORWARD_VERSION,
+                "status": "COMPLETE",
+                "validated_challenger_variant": variant_name,
+                "variants": [{
+                    "variant": {"name": variant_name},
+                    "validation_passed": True,
+                    "expanding_validation_passed": True,
+                }],
+            },
+            "rotation_weighting_challenger_registration": {
+                "cohort_month": "2026-07-01",
+                "rotation_algorithm_version": ROTATION_ALGORITHM_VERSION,
+                "variant_name": variant_name,
+                "signal_date": "2026-06-30",
+                "registered_as_of_date": "2026-07-23",
+                "forward_eligible": False,
+                "target_signals": [
+                    signal("IBM.US", 1, 100, 25),
+                    signal("MSFT.US", 2, 90, 10),
+                    signal("CAT.US", 3, 80, remaining_weight),
+                    signal("GS.US", 4, 70, remaining_weight),
+                    signal("AEP.US", 5, 60, remaining_weight),
+                ],
+            },
+        })
         db.commit()
 
     @staticmethod
@@ -320,7 +380,7 @@ class TestStrategyV2PortfolioService:
             registrations = db.query(
                 StrategyV2PortfolioRegistration
             ).all()
-            assert len(registrations) == 15
+            assert len(registrations) == 16
             assert {
                 row.eligible_after.replace(tzinfo=timezone.utc)
                 for row in registrations
@@ -360,6 +420,11 @@ class TestStrategyV2PortfolioService:
                 for row in registrations
                 if row.policy == "ROTATION_ZSCORE_OBS_75BPS_POOL"
             )
+            weighted_rotation_zscore = next(
+                row
+                for row in registrations
+                if row.policy == "ROTATION_IV_WEIGHTED_ZSCORE_POOL"
+            )
             assert risk_group_v1.evaluator_digest == (
                 "9fa13dbedfbeb508e4b3ecca23d1a63c7"
                 "fe6c559dc71356922dda4c11528806e"
@@ -385,6 +450,10 @@ class TestStrategyV2PortfolioService:
                 rotation_zscore.evaluator_digest
                 != selected_zscore.evaluator_digest
             )
+            assert weighted_rotation_zscore.evaluator_digest not in {
+                selected_zscore.evaluator_digest,
+                rotation_zscore.evaluator_digest,
+            }
             assert db.query(
                 StrategyV2PortfolioObservation
             ).count() == 0
@@ -414,7 +483,7 @@ class TestStrategyV2PortfolioService:
             )
             report = service.get_report("NVDA.US")
 
-            assert len(report.variants) == 15
+            assert len(report.variants) == 16
             assert sum(
                 row.algorithm_version.endswith("-v2")
                 for row in report.variants
@@ -602,6 +671,7 @@ class TestStrategyV2PortfolioService:
                 "SELECTED_SECTOR_LOO_OBS_75BPS_POOL": "",
                 "SELECTED_ZSCORE_OBS_75BPS_POOL": "",
                 "ROTATION_ZSCORE_OBS_75BPS_POOL": "",
+                "ROTATION_IV_WEIGHTED_ZSCORE_POOL": "",
             }
 
             self._signal(
@@ -618,7 +688,7 @@ class TestStrategyV2PortfolioService:
                 StrategyV2PortfolioObservation.signal_at
                 == _FIRST_SIGNAL + timedelta(minutes=2)
             ).all()
-            assert len(overlap_rows) == 15
+            assert len(overlap_rows) == 16
             registrations_by_id = {
                 row.id: row.policy
                 for row in db.query(
@@ -647,6 +717,7 @@ class TestStrategyV2PortfolioService:
                 ),
                 "SELECTED_ZSCORE_OBS_75BPS_POOL": "NO_ELIGIBLE",
                 "ROTATION_ZSCORE_OBS_75BPS_POOL": "NO_ELIGIBLE",
+                "ROTATION_IV_WEIGHTED_ZSCORE_POOL": "NO_ELIGIBLE",
             }
 
             exit_at = _FIRST_SIGNAL + timedelta(minutes=5)
@@ -944,6 +1015,7 @@ class TestStrategyV2PortfolioService:
                 "SELECTED_SECTOR_LOO_OBS_75BPS_POOL",
                 "SELECTED_ZSCORE_OBS_75BPS_POOL",
                 "ROTATION_ZSCORE_OBS_75BPS_POOL",
+                "ROTATION_IV_WEIGHTED_ZSCORE_POOL",
             ):
                 observation = db.query(
                     StrategyV2PortfolioObservation
@@ -1199,6 +1271,165 @@ class TestStrategyV2PortfolioService:
             assert (
                 rotation_variant.edge_filter
                 == "ZSCORE_OBS_COST_TO_75BPS"
+            )
+            weighted_registration = db.query(
+                StrategyV2PortfolioRegistration
+            ).filter(
+                StrategyV2PortfolioRegistration.policy
+                == "ROTATION_IV_WEIGHTED_ZSCORE_POOL"
+            ).one()
+            weighted_observation = db.query(
+                StrategyV2PortfolioObservation
+            ).filter(
+                StrategyV2PortfolioObservation.registration_id
+                == weighted_registration.id
+            ).one()
+            assert weighted_observation.status == "NO_ELIGIBLE"
+            assert weighted_observation.candidates_json == "[]"
+
+    def test_validated_inverse_volatility_weights_rotation_priority(
+        self,
+    ) -> None:
+        with self._db() as db:
+            service = StrategyV2PortfolioService(db)
+            self._register(service)
+            self._universe(db)
+            self._validated_inverse_volatility_registration(db)
+            for symbol in ("IBM.US", "MSFT.US"):
+                self._version(db, symbol)
+                self._quant(
+                    db,
+                    symbol,
+                    "WATCH",
+                    49,
+                    estimated_cost_bps=20,
+                )
+            self._signal(
+                db,
+                "IBM.US",
+                _FIRST_SIGNAL,
+                close_price=99.5,
+                vwap_1m=100,
+                vwap_5m=100,
+                zscore_1m=-1.5,
+                zscore_5m=-1.2,
+            )
+            self._signal(
+                db,
+                "MSFT.US",
+                _FIRST_SIGNAL,
+                close_price=99.5,
+                vwap_1m=100,
+                vwap_5m=100,
+                zscore_1m=-2.5,
+                zscore_5m=-2.0,
+            )
+
+            service.advance(
+                now=_FIRST_SIGNAL + timedelta(minutes=3)
+            )
+
+            registrations = {
+                row.policy: row
+                for row in db.query(
+                    StrategyV2PortfolioRegistration
+                ).all()
+            }
+            weighted = db.query(
+                StrategyV2PortfolioObservation
+            ).filter(
+                StrategyV2PortfolioObservation.registration_id
+                == registrations[
+                    "ROTATION_IV_WEIGHTED_ZSCORE_POOL"
+                ].id
+            ).one()
+            unweighted = db.query(
+                StrategyV2PortfolioObservation
+            ).filter(
+                StrategyV2PortfolioObservation.registration_id
+                == registrations[
+                    "ROTATION_ZSCORE_OBS_75BPS_POOL"
+                ].id
+            ).one()
+
+            assert weighted.status == "PENDING_ENTRY"
+            assert weighted.selected_symbol == "IBM.US"
+            assert unweighted.selected_symbol == "MSFT.US"
+            candidates = json.loads(weighted.candidates_json)
+            assert [row["symbol"] for row in candidates] == [
+                "IBM.US",
+                "MSFT.US",
+            ]
+            assert candidates[0]["rotation_target_weight_pct"] == 25
+            assert candidates[1]["rotation_target_weight_pct"] == 10
+            variant = next(
+                row
+                for row in service.get_report("NVDA.US").variants
+                if row.policy == "ROTATION_IV_WEIGHTED_ZSCORE_POOL"
+            )
+            assert variant.edge_filter == "ZSCORE_OBS_COST_TO_75BPS"
+
+    def test_inverse_volatility_targets_fail_closed_on_invalid_context(
+        self,
+    ) -> None:
+        with self._db() as db:
+            self._universe(db)
+            self._validated_inverse_volatility_registration(db)
+            run = db.query(UniverseSelectionRun).one()
+            valid = (
+                StrategyV2PortfolioService
+                ._validated_inverse_volatility_targets(
+                    run,
+                    session_date=_FIRST_SIGNAL.date(),
+                )
+            )
+            assert set(valid) == {
+                "IBM.US",
+                "MSFT.US",
+                "CAT.US",
+                "GS.US",
+                "AEP.US",
+            }
+            assert (
+                StrategyV2PortfolioService
+                ._validated_inverse_volatility_targets(
+                    run,
+                    session_date=date(2026, 8, 3),
+                )
+                == {}
+            )
+
+            parameters = json.loads(run.parameters_json)
+            registration = parameters[
+                "rotation_weighting_challenger_registration"
+            ]
+            del registration["target_signals"][0][
+                "target_weight_pct"
+            ]
+            run.parameters_json = json.dumps(parameters)
+            assert (
+                StrategyV2PortfolioService
+                ._validated_inverse_volatility_targets(
+                    run,
+                    session_date=_FIRST_SIGNAL.date(),
+                )
+                == {}
+            )
+
+            self._validated_inverse_volatility_registration(db)
+            db.refresh(run)
+            parameters = json.loads(run.parameters_json)
+            parameters["rotation_evaluation"]["variants"][0][
+                "expanding_validation_passed"
+            ] = False
+            run.parameters_json = json.dumps(parameters)
+            assert (
+                StrategyV2PortfolioService
+                ._validated_inverse_volatility_targets(
+                    run,
+                    session_date=_FIRST_SIGNAL.date(),
+                )
+                == {}
             )
 
     def test_risk_group_routes_use_causal_inclusive_and_leave_one_out_medians(

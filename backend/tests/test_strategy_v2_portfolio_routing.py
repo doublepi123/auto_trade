@@ -18,6 +18,7 @@ def _candidate(
     rotation_selected: bool = False,
     rotation_rank: int | None = None,
     rotation_score: float | None = None,
+    rotation_target_weight_pct: float | None = None,
     quant_source: str = "",
     quant_action: str = "",
     quant_score: float | None = None,
@@ -44,6 +45,7 @@ def _candidate(
         rotation_selected=rotation_selected,
         rotation_rank=rotation_rank,
         rotation_score=rotation_score,
+        rotation_target_weight_pct=rotation_target_weight_pct,
         quant_source=quant_source,
         quant_action=quant_action,
         quant_score=quant_score,
@@ -615,6 +617,75 @@ def test_rotation_zscore_pool_uses_only_frozen_rotation_cohort() -> None:
     )
 
     assert [item.symbol for item in ranked] == ["ROST.US", "CAT.US"]
+
+
+def test_inverse_volatility_rotation_weights_zscore_priority() -> None:
+    ranked = rank_portfolio_candidates(
+        [
+            _candidate(
+                "CAT.US",
+                1,
+                rotation_selected=True,
+                rotation_rank=1,
+                rotation_score=90,
+                rotation_target_weight_pct=8,
+                residual_1m_bps=-55,
+                residual_5m_bps=-60,
+                zscore_1m=-2.8,
+                zscore_5m=-2.5,
+                round_trip_cost_bps=14,
+                observed_round_trip_cost_bps=20,
+                stop_distance_bps=45,
+            ),
+            _candidate(
+                "AEP.US",
+                2,
+                rotation_selected=True,
+                rotation_rank=2,
+                rotation_score=80,
+                rotation_target_weight_pct=24,
+                residual_1m_bps=-45,
+                residual_5m_bps=-50,
+                zscore_1m=-1.4,
+                zscore_5m=-1.2,
+                round_trip_cost_bps=14,
+                observed_round_trip_cost_bps=20,
+                stop_distance_bps=45,
+            ),
+            _candidate(
+                "GS.US",
+                3,
+                rotation_selected=True,
+                rotation_rank=3,
+                rotation_score=70,
+                residual_1m_bps=-60,
+                residual_5m_bps=-60,
+                zscore_1m=-3.0,
+                zscore_5m=-2.0,
+                round_trip_cost_bps=14,
+                observed_round_trip_cost_bps=20,
+                stop_distance_bps=45,
+            ),
+        ],
+        policy="ROTATION_IV_WEIGHTED_ZSCORE_POOL",
+        primary_symbol="NVDA.US",
+    )
+
+    assert [item.symbol for item in ranked] == ["AEP.US", "CAT.US"]
+    assert ranked[0].rotation_weighted_zscore_score == pytest.approx(28.8)
+
+
+@pytest.mark.parametrize(
+    "target_weight",
+    [0.0, -1.0, 101.0, float("inf"), float("nan")],
+)
+def test_rotation_target_weight_must_be_valid(target_weight: float) -> None:
+    with pytest.raises(ValueError):
+        _candidate(
+            "AAPL.US",
+            1,
+            rotation_target_weight_pct=target_weight,
+        )
 
 
 def test_risk_group_relative_pool_requires_peers_and_ranks_residual_edge() -> None:

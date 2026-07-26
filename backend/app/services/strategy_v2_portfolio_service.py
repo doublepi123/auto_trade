@@ -5,7 +5,7 @@ import json
 import math
 from collections import Counter
 from dataclasses import asdict, dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from statistics import median
 from typing import cast
 
@@ -21,7 +21,10 @@ from app.domain.strategy_v2 import (
     rank_portfolio_candidates,
 )
 from app.domain.universe_selection import (
+    DIVERSIFIED_INVERSE_VOLATILITY_VARIANT,
     ROTATION_ALGORITHM_VERSION,
+    ROTATION_WALK_FORWARD_VERSION,
+    RotationCohortRegistration,
     parse_frozen_rotation_selection,
     risk_group_for_sector,
 )
@@ -136,6 +139,13 @@ _ROUTING_SPECS = (
             "75bps-v1"
         ),
     ),
+    _RoutingSpec(
+        policy="ROTATION_IV_WEIGHTED_ZSCORE_POOL",
+        algorithm_version=(
+            "strategy-v2-portfolio-rotation-inverse-vol-weighted-"
+            "zscore-observed-cost-75bps-v1"
+        ),
+    ),
 )
 _EVALUATOR_VERSION = "strategy-v2-single-capital-slot-forward-router-v2"
 _CURRENT_ROUTING_ALGORITHM_VERSIONS = tuple(
@@ -160,6 +170,10 @@ _SELECTED_ZSCORE_OBSERVED_COST_POLICIES = {
 }
 _ROTATION_ZSCORE_OBSERVED_COST_POLICIES = {
     "ROTATION_ZSCORE_OBS_75BPS_POOL",
+    "ROTATION_IV_WEIGHTED_ZSCORE_POOL",
+}
+_ROTATION_WEIGHTED_ZSCORE_POLICIES = {
+    "ROTATION_IV_WEIGHTED_ZSCORE_POOL",
 }
 _ZSCORE_OBSERVED_COST_POLICIES = (
     _SELECTED_ZSCORE_OBSERVED_COST_POLICIES
@@ -415,6 +429,10 @@ class StrategyV2PortfolioService:
                     registration.policy
                     in _SECTOR_LEAVE_ONE_OUT_OBSERVED_COST_POLICIES
                 ),
+                include_rotation_weight=(
+                    registration.policy
+                    in _ROTATION_WEIGHTED_ZSCORE_POLICIES
+                ),
             )
             ranked = rank_portfolio_candidates(
                 candidates,
@@ -440,6 +458,10 @@ class StrategyV2PortfolioService:
                         include_rotation=(
                             registration.policy
                             in _ROTATION_ZSCORE_OBSERVED_COST_POLICIES
+                        ),
+                        include_rotation_weight=(
+                            registration.policy
+                            in _ROTATION_WEIGHTED_ZSCORE_POLICIES
                         ),
                     )
                     for item in ranked
@@ -510,15 +532,31 @@ class StrategyV2PortfolioService:
         include_relative_adjustment: bool,
         risk_group_leave_one_out: bool,
         sector_leave_one_out: bool,
+        include_rotation_weight: bool,
     ) -> list[PortfolioRoutingCandidate]:
         by_symbol: dict[str, StrategyV2ShadowDecision] = {}
         for decision in decisions:
             current = by_symbol.get(decision.symbol)
             if current is None or decision.id > current.id:
                 by_symbol[decision.symbol] = decision
-        selection = self._selection_context(
-            tuple(by_symbol),
+        selection_run = self._latest_selection_run(
             observed_at=observed_at,
+        )
+        selection = self._selection_rows_for_run(
+            tuple(by_symbol),
+            run=selection_run,
+        )
+        session_dates = {
+            decision.session_date
+            for decision in by_symbol.values()
+        }
+        rotation_targets = (
+            self._validated_inverse_volatility_targets(
+                selection_run,
+                session_date=next(iter(session_dates)),
+            )
+            if include_rotation_weight and len(session_dates) == 1
+            else {}
         )
         quant = self._quant_context(
             tuple(by_symbol),
@@ -566,6 +604,23 @@ class StrategyV2PortfolioService:
                 rotation_rank,
                 rotation_score,
             ) = self._rotation_selection_values(selection_row)
+            rotation_target = rotation_targets.get(symbol)
+            rotation_target_weight_pct = (
+                rotation_target[2]
+                if (
+                    rotation_target is not None
+                    and rotation_selected
+                    and rotation_rank == rotation_target[0]
+                    and rotation_score is not None
+                    and math.isclose(
+                        rotation_score,
+                        rotation_target[1],
+                        rel_tol=0.0,
+                        abs_tol=_EPSILON,
+                    )
+                )
+                else None
+            )
             candidates.append(PortfolioRoutingCandidate(
                 symbol=symbol,
                 signal_decision_id=decision.id,
@@ -588,6 +643,9 @@ class StrategyV2PortfolioService:
                 rotation_selected=rotation_selected,
                 rotation_rank=rotation_rank,
                 rotation_score=rotation_score,
+                rotation_target_weight_pct=(
+                    rotation_target_weight_pct
+                ),
                 quant_source=(
                     quant_row.source
                     if quant_row is not None
@@ -984,9 +1042,15 @@ class StrategyV2PortfolioService:
         *,
         observed_at: datetime,
     ) -> dict[str, UniverseSelectionCandidate]:
-        if not symbols:
-            return {}
-        run = self.db.query(UniverseSelectionRun).filter(
+        run = self._latest_selection_run(observed_at=observed_at)
+        return self._selection_rows_for_run(symbols, run=run)
+
+    def _latest_selection_run(
+        self,
+        *,
+        observed_at: datetime,
+    ) -> UniverseSelectionRun | None:
+        return self.db.query(UniverseSelectionRun).filter(
             UniverseSelectionRun.status.in_(
                 _TERMINAL_UNIVERSE_STATUSES
             ),
@@ -996,7 +1060,14 @@ class StrategyV2PortfolioService:
             UniverseSelectionRun.completed_at.desc(),
             UniverseSelectionRun.id.desc(),
         ).first()
-        if run is None:
+
+    def _selection_rows_for_run(
+        self,
+        symbols: tuple[str, ...],
+        *,
+        run: UniverseSelectionRun | None,
+    ) -> dict[str, UniverseSelectionCandidate]:
+        if not symbols or run is None:
             return {}
         return {
             row.symbol: row
@@ -1007,6 +1078,126 @@ class StrategyV2PortfolioService:
                 UniverseSelectionCandidate.symbol.in_(symbols),
             ).all()
         }
+
+    @staticmethod
+    def _validated_inverse_volatility_targets(
+        run: UniverseSelectionRun | None,
+        *,
+        session_date: date,
+    ) -> dict[str, tuple[int, float, float]]:
+        if run is None:
+            return {}
+        try:
+            parameters = json.loads(run.parameters_json)
+        except (TypeError, ValueError):
+            return {}
+        if not isinstance(parameters, dict):
+            return {}
+        evaluation = parameters.get("rotation_evaluation")
+        expected_variant = DIVERSIFIED_INVERSE_VOLATILITY_VARIANT
+        if (
+            not isinstance(evaluation, dict)
+            or evaluation.get("algorithm_version")
+            != ROTATION_WALK_FORWARD_VERSION
+            or evaluation.get("status") != "COMPLETE"
+            or evaluation.get("validated_challenger_variant")
+            != expected_variant.name
+        ):
+            return {}
+        raw_variants = evaluation.get("variants")
+        if not isinstance(raw_variants, list):
+            return {}
+        validated_variants = [
+            item
+            for item in raw_variants
+            if isinstance(item, dict)
+            and isinstance(item.get("variant"), dict)
+            and item["variant"].get("name") == expected_variant.name
+        ]
+        if (
+            len(validated_variants) != 1
+            or validated_variants[0].get("validation_passed") is not True
+            or validated_variants[0].get("expanding_validation_passed")
+            is not True
+        ):
+            return {}
+
+        cohort_month = session_date.replace(day=1)
+        registrations: list[RotationCohortRegistration] = []
+        for key in (
+            "rotation_weighting_challenger_registration",
+            "rotation_next_weighting_challenger_registration",
+        ):
+            raw_registration = parameters.get(key)
+            if not isinstance(raw_registration, dict):
+                continue
+            raw_signals = raw_registration.get("target_signals")
+            if (
+                not isinstance(raw_signals, list)
+                or not raw_signals
+                or any(
+                    not isinstance(item, dict)
+                    or isinstance(item.get("target_weight_pct"), bool)
+                    or not isinstance(
+                        item.get("target_weight_pct"),
+                        (int, float),
+                    )
+                    or not math.isfinite(
+                        float(item["target_weight_pct"])
+                    )
+                    or float(item["target_weight_pct"]) <= 0
+                    for item in raw_signals
+                )
+            ):
+                return {}
+            try:
+                registration = RotationCohortRegistration.from_dict(
+                    raw_registration
+                )
+            except (KeyError, TypeError, ValueError):
+                return {}
+            if registration.cohort_month != cohort_month:
+                continue
+            if (
+                registration.rotation_algorithm_version
+                != ROTATION_ALGORITHM_VERSION
+                or registration.variant_name != expected_variant.name
+                or registration.registered_as_of_date > run.as_of_date
+                or registration.signal_date > run.as_of_date
+            ):
+                return {}
+            registrations.append(registration)
+        if not registrations:
+            return {}
+        registration = registrations[0]
+        if any(item != registration for item in registrations[1:]):
+            return {}
+        signals = registration.target_signals
+        if not 0 < len(signals) <= expected_variant.max_selected:
+            return {}
+        if not math.isclose(
+            sum(signal.target_weight_pct for signal in signals),
+            100.0,
+            rel_tol=0.0,
+            abs_tol=1e-6,
+        ):
+            return {}
+        result: dict[str, tuple[int, float, float]] = {}
+        for signal in signals:
+            symbol = signal.symbol.strip().upper()
+            if (
+                symbol != signal.symbol
+                or signal.target_weight_pct
+                > expected_variant.max_position_weight_pct + _EPSILON
+                or symbol in result
+            ):
+                return {}
+            result[symbol] = (
+                signal.rank,
+                signal.score,
+                signal.target_weight_pct,
+            )
+        return result
 
     @staticmethod
     def _rotation_selection_values(
@@ -1657,6 +1848,40 @@ class StrategyV2PortfolioService:
                 payload["rotation_algorithm_version"] = (
                     ROTATION_ALGORITHM_VERSION
                 )
+                if spec.policy in _ROTATION_WEIGHTED_ZSCORE_POLICIES:
+                    payload["rotation_weighting"] = {
+                        "evaluation_version": (
+                            ROTATION_WALK_FORWARD_VERSION
+                        ),
+                        "variant_name": (
+                            DIVERSIFIED_INVERSE_VOLATILITY_VARIANT.name
+                        ),
+                        "required_validation": [
+                            "FIXED_HOLDOUT_PASSED",
+                            "EXPANDING_WALK_FORWARD_PASSED",
+                        ],
+                        "registration_source": (
+                            "EXACT_SIGNAL_SESSION_MONTH_FROM_LATEST_"
+                            "COMPLETED_UNIVERSE_RUN_BEFORE_CONTEXT_CUTOFF"
+                        ),
+                        "registration_keys": [
+                            "rotation_weighting_challenger_registration",
+                            "rotation_next_weighting_challenger_registration",
+                        ],
+                        "required_total_weight_pct": 100.0,
+                        "maximum_position_weight_pct": (
+                            DIVERSIFIED_INVERSE_VOLATILITY_VARIANT
+                            .max_position_weight_pct
+                        ),
+                        "candidate_consistency": (
+                            "FROZEN_ROTATION_RANK_AND_SCORE_MUST_MATCH_"
+                            "WEIGHTED_REGISTRATION"
+                        ),
+                        "missing_or_invalid_weight": "FAIL_CLOSED",
+                        "execution_scope": (
+                            "FORWARD_ONLY_EXPLORATORY_SINGLE_SLOT_ROUTING"
+                        ),
+                    }
             else:
                 payload["candidate_universe"] = (
                     "SELECTED_TRUE_IN_LATEST_COMPLETED_UNIVERSE_RUN_"
@@ -1687,10 +1912,18 @@ class StrategyV2PortfolioService:
                 "bounds": "INCLUSIVE",
                 "zscore_sign": "STRICTLY_NEGATIVE_BOTH_HORIZONS",
                 "ranking_score": (
-                    "MIN_ABSOLUTE_NEGATIVE_ZSCORE_ACROSS_1M_AND_5M"
+                    "MIN_ABSOLUTE_NEGATIVE_ZSCORE_ACROSS_1M_AND_5M_"
+                    "TIMES_FROZEN_TARGET_WEIGHT_PCT"
+                    if spec.policy in _ROTATION_WEIGHTED_ZSCORE_POLICIES
+                    else (
+                        "MIN_ABSOLUTE_NEGATIVE_ZSCORE_ACROSS_1M_AND_5M"
+                    )
                 ),
                 "ranking_tiebreaker": (
-                    "OBSERVED_COST_ADJUSTED_VWAP_DISCOUNT_BPS"
+                    "UNWEIGHTED_ZSCORE_THEN_OBSERVED_COST_ADJUSTED_"
+                    "VWAP_DISCOUNT_BPS"
+                    if spec.policy in _ROTATION_WEIGHTED_ZSCORE_POLICIES
+                    else "OBSERVED_COST_ADJUSTED_VWAP_DISCOUNT_BPS"
                 ),
             }
         elif spec.policy in _OBSERVED_COST_TO_75BPS_VWAP_EDGE_POLICIES:
@@ -1735,6 +1968,7 @@ def _candidate_payload(
     include_relative_adjustment: bool,
     include_zscore: bool,
     include_rotation: bool,
+    include_rotation_weight: bool,
 ) -> dict[str, object]:
     payload = asdict(candidate)
     if not include_observed_cost:
@@ -1751,6 +1985,8 @@ def _candidate_payload(
         payload.pop("rotation_selected", None)
         payload.pop("rotation_rank", None)
         payload.pop("rotation_score", None)
+    if not include_rotation_weight:
+        payload.pop("rotation_target_weight_pct", None)
     return payload
 
 
@@ -1786,6 +2022,7 @@ def _routing_policy(value: str) -> PortfolioRoutingPolicy:
         "SELECTED_SECTOR_LOO_OBS_75BPS_POOL",
         "SELECTED_ZSCORE_OBS_75BPS_POOL",
         "ROTATION_ZSCORE_OBS_75BPS_POOL",
+        "ROTATION_IV_WEIGHTED_ZSCORE_POOL",
     }:
         raise ValueError(f"unsupported portfolio routing policy: {value}")
     return cast(PortfolioRoutingPolicy, value)

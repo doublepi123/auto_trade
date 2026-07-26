@@ -21,6 +21,7 @@ PortfolioRoutingPolicy = Literal[
     "SELECTED_SECTOR_LOO_OBS_75BPS_POOL",
     "SELECTED_ZSCORE_OBS_75BPS_POOL",
     "ROTATION_ZSCORE_OBS_75BPS_POOL",
+    "ROTATION_IV_WEIGHTED_ZSCORE_POOL",
 ]
 
 VWAP_EDGE_FIXED_MAX_DISCOUNT_BPS = 75.0
@@ -39,6 +40,7 @@ class PortfolioRoutingCandidate:
     rotation_selected: bool = False
     rotation_rank: int | None = None
     rotation_score: float | None = None
+    rotation_target_weight_pct: float | None = None
     quant_source: str = ""
     quant_action: str = ""
     quant_score: float | None = None
@@ -71,9 +73,18 @@ class PortfolioRoutingCandidate:
             raise ValueError("portfolio routing selection rank must be positive")
         if self.rotation_rank is not None and self.rotation_rank <= 0:
             raise ValueError("portfolio routing rotation rank must be positive")
+        if (
+            self.rotation_target_weight_pct is not None
+            and not 0 < self.rotation_target_weight_pct <= 100
+        ):
+            raise ValueError(
+                "portfolio routing rotation target weight must be in "
+                "(0, 100]"
+            )
         for value in (
             self.selection_score,
             self.rotation_score,
+            self.rotation_target_weight_pct,
             self.quant_score,
             self.quant_confidence,
             self.residual_1m_bps,
@@ -211,6 +222,18 @@ class PortfolioRoutingCandidate:
         return min(
             -float(self.zscore_1m or 0.0),
             -float(self.zscore_5m or 0.0),
+        )
+
+    @property
+    def rotation_weighted_zscore_score(self) -> float:
+        if (
+            not self.zscore_observed_cost_fixed_75bps_eligible
+            or self.rotation_target_weight_pct is None
+        ):
+            return -1.0
+        return (
+            self.zscore_observed_cost_fixed_75bps_score
+            * self.rotation_target_weight_pct
         )
 
     @property
@@ -516,6 +539,25 @@ def rank_portfolio_candidates(
         return tuple(sorted(
             eligible,
             key=lambda candidate: (
+                -candidate.zscore_observed_cost_fixed_75bps_score,
+                -candidate.observed_cost_fixed_75bps_vwap_edge_score_bps,
+                candidate.rotation_rank or 10_000,
+                candidate.symbol,
+            ),
+        ))
+    if policy == "ROTATION_IV_WEIGHTED_ZSCORE_POOL":
+        eligible = [
+            candidate
+            for candidate in by_symbol.values()
+            if candidate.rotation_selected
+            and candidate.rotation_rank is not None
+            and candidate.rotation_target_weight_pct is not None
+            and candidate.zscore_observed_cost_fixed_75bps_eligible
+        ]
+        return tuple(sorted(
+            eligible,
+            key=lambda candidate: (
+                -candidate.rotation_weighted_zscore_score,
                 -candidate.zscore_observed_cost_fixed_75bps_score,
                 -candidate.observed_cost_fixed_75bps_vwap_edge_score_bps,
                 candidate.rotation_rank or 10_000,

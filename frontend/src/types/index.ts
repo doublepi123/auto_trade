@@ -2248,6 +2248,7 @@ export type StrategyShadowPortfolioRoutingPolicy =
   | 'SELECTED_SECTOR_LOO_OBS_75BPS_POOL'
   | 'SELECTED_ZSCORE_OBS_75BPS_POOL'
   | 'ROTATION_ZSCORE_OBS_75BPS_POOL'
+  | 'ROTATION_IV_WEIGHTED_ZSCORE_POOL'
 
 export type StrategyShadowPortfolioEdgeFilter =
   | 'NONE'
