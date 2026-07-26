@@ -1371,7 +1371,10 @@ async function handleProtectiveExits() {
     await Promise.all([refreshStatus(), loadDiagnostics()])
   } catch (error) {
     const message = resolveErrorMessage(error, '启用仅减仓许可失败')
-    if (message.includes('first coherent empty broker proof')) {
+    if (
+      message.includes('first coherent empty broker proof') ||
+      message.includes('first coherent broker-state proof')
+    ) {
       ElMessage.warning('第一轮券商校验已通过，请至少等待 5 秒后再次确认')
     } else {
       ElMessage.error(message)

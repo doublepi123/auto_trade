@@ -4359,6 +4359,150 @@ class TestAppRunner:
         finally:
             clean()
 
+    def test_position_snapshot_failure_auto_resumes_after_two_complete_proofs(
+        self,
+        monkeypatch,
+    ) -> None:
+        from app.models import (
+            OrderRecord,
+            RuntimeState,
+            RuntimeStateSnapshot,
+            TrackedEntry,
+            TradeEvent,
+        )
+
+        symbol = "AUTO-POSITION-PROOF.US"
+        reason = (
+            f"{runner_module._POSITION_SNAPSHOT_FETCH_FAILURE_PREFIX} "
+            f"{symbol}"
+        )
+
+        def clean() -> None:
+            with database.SessionLocal() as db:
+                db.query(OrderRecord).filter(
+                    OrderRecord.status.in_(["SUBMITTED", "PARTIAL_FILLED"])
+                ).delete(synchronize_session=False)
+                db.query(TradeEvent).filter(
+                    TradeEvent.event_type == "RISK_AUTO_RESUMED",
+                    TradeEvent.message == reason,
+                ).delete(synchronize_session=False)
+                db.query(RuntimeStateSnapshot).filter(
+                    RuntimeStateSnapshot.symbol == symbol
+                ).delete(synchronize_session=False)
+                db.query(RuntimeState).filter(
+                    RuntimeState.symbol == symbol
+                ).delete(synchronize_session=False)
+                db.query(TrackedEntry).filter(
+                    TrackedEntry.symbol == symbol
+                ).delete(synchronize_session=False)
+                db.commit()
+
+        class Broker:
+            def __init__(self) -> None:
+                self.order_reads = 0
+                self.position_reads = 0
+
+            def get_today_orders(self) -> list[object]:
+                self.order_reads += 1
+                return []
+
+            def get_positions(self) -> list[object]:
+                self.position_reads += 1
+                return []
+
+        clean()
+        try:
+            with database.SessionLocal() as db:
+                db.add(RuntimeState(symbol=symbol))
+                db.commit()
+            runner = AppRunner()
+            broker = Broker()
+            runner.broker = cast(Any, broker)
+
+            def reconcile(*_args, **_kwargs) -> list[object]:
+                runner._unsettled_position_symbols.clear()
+                return []
+
+            monkeypatch.setattr(
+                runner,
+                "_reconcile_tracked_entries_with_broker",
+                reconcile,
+            )
+            runner.engine.params = StrategyParams(
+                symbol=symbol,
+                market="US",
+                auto_resume_minutes=0,
+            )
+            runner._unsettled_position_symbols.add(symbol)
+            now = datetime.now(timezone.utc)
+            runner.risk.pause(
+                reason,
+                auto_resumable=False,
+                paused_at=now - timedelta(seconds=61),
+            )
+
+            resumed, error = runner.resume_after_verification()
+            assert resumed is False
+            assert "first coherent broker-state proof" in error
+            assert runner.risk.paused is True
+            assert runner.risk.pause_reason == reason
+            assert runner._unknown_submission_proof_at > 0
+
+            runner._unknown_submission_proof_at -= 6
+            assert runner._auto_resume_pause_if_due(now=now) is True
+            assert runner.risk.paused is False
+            assert broker.order_reads >= 2
+            assert broker.position_reads >= 2
+
+            with database.SessionLocal() as db:
+                event = (
+                    db.query(TradeEvent)
+                    .filter(
+                        TradeEvent.event_type == "RISK_AUTO_RESUMED",
+                        TradeEvent.message == reason,
+                    )
+                    .one()
+                )
+                assert (
+                    '"source": "verified_position_snapshot_reconciliation"'
+                    in event.payload_json
+                )
+                state = (
+                    db.query(RuntimeState)
+                    .filter(RuntimeState.symbol == symbol)
+                    .one()
+                )
+                assert state.paused is False
+        finally:
+            clean()
+
+    def test_other_position_reconciliation_pause_never_auto_resumes(
+        self,
+        monkeypatch,
+    ) -> None:
+        runner = AppRunner()
+        now = datetime.now(timezone.utc)
+        reason = (
+            "POSITION_RECONCILIATION_UNCERTAIN: both long and short broker "
+            "positions found for AAPL.US"
+        )
+        runner.risk.pause(
+            reason,
+            auto_resumable=True,
+            paused_at=now - timedelta(minutes=10),
+        )
+        monkeypatch.setattr(
+            runner,
+            "resume_after_verification",
+            lambda *, on_resumed=None: pytest.fail(
+                "ambiguous position reconciliation pause was auto-verified"
+            ),
+        )
+
+        assert runner._auto_resume_pause_if_due(now=now) is False
+        assert runner.risk.paused is True
+        assert runner.risk.pause_reason == reason
+
     def test_empty_order_snapshot_pause_stays_paused_when_proof_changes_state(
         self,
         monkeypatch,

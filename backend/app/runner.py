@@ -89,6 +89,10 @@ _EMPTY_ORDER_SNAPSHOT_RECONCILIATION_REASON = (
     "unresolved live orders require manual reconciliation; "
     f"live_orders=none; representation_issues={_ORDER_SNAPSHOT_FETCH_ISSUE}"
 )
+_POSITION_SNAPSHOT_FETCH_FAILURE_PREFIX = (
+    f"{_POSITION_RECONCILIATION_UNCERTAIN_PREFIX} "
+    "broker position reconciliation failed with unprotected local state:"
+)
 DISCONNECT_RETRY_EXHAUSTED_THRESHOLD = 3
 
 _QUOTE_SPREAD_THRESHOLD_PCT = 0.05  # Reject quotes with >5% bid-ask spread
@@ -112,6 +116,10 @@ _OPERATIONAL_PAUSE_PREFIXES = (
     ORDER_STATUS_PERSISTENCE_UNCERTAIN_PREFIX,
     _PNL_RECONCILIATION_UNCERTAIN_PREFIX,
 )
+
+
+def _is_recoverable_position_snapshot_pause(reason: str) -> bool:
+    return reason.startswith(_POSITION_SNAPSHOT_FETCH_FAILURE_PREFIX)
 
 
 @dataclass
@@ -3305,18 +3313,25 @@ class AppRunner:
             if self._trigger_in_flight:
                 return False, "an order trigger is still in flight"
 
-        delayed_resume_proof = pause_reason.startswith(
-            (
-                _ORDER_SUBMISSION_UNCERTAIN_PREFIX,
-                _ORDER_RECONCILIATION_UNCERTAIN_PREFIX,
+        recoverable_position_snapshot_pause = (
+            _is_recoverable_position_snapshot_pause(pause_reason)
+        )
+        delayed_resume_proof = (
+            pause_reason.startswith(
+                (
+                    _ORDER_SUBMISSION_UNCERTAIN_PREFIX,
+                    _ORDER_RECONCILIATION_UNCERTAIN_PREFIX,
+                )
             )
+            or recoverable_position_snapshot_pause
         )
         if delayed_resume_proof:
-            proof_subject = (
-                "unknown order submission"
-                if pause_reason.startswith(_ORDER_SUBMISSION_UNCERTAIN_PREFIX)
-                else "uncertain order reconciliation"
-            )
+            if pause_reason.startswith(_ORDER_SUBMISSION_UNCERTAIN_PREFIX):
+                proof_subject = "unknown order submission"
+            elif recoverable_position_snapshot_pause:
+                proof_subject = "uncertain position reconciliation"
+            else:
+                proof_subject = "uncertain order reconciliation"
             if paused_at is None:
                 return False, f"{proof_subject} pause time is unavailable"
             normalized_paused_at = self._as_utc(paused_at)
@@ -3488,9 +3503,15 @@ class AppRunner:
                             and previous_proof_at > 0
                             else proof_now
                         )
+                proof_description = (
+                    "broker-state"
+                    if recoverable_position_snapshot_pause
+                    else "empty broker"
+                )
                 return (
                     False,
-                    "first coherent empty broker proof recorded; a second proof "
+                    f"first coherent {proof_description} proof recorded; "
+                    "a second proof "
                     f"is required after {_UNKNOWN_SUBMISSION_SECOND_PROOF_SECONDS:.0f}s",
                 )
         return True, ""
@@ -4208,16 +4229,25 @@ class AppRunner:
                 and self.risk.pause_reason
                 == _EMPTY_ORDER_SNAPSHOT_RECONCILIATION_REASON
             )
+            position_snapshot_pause = (
+                self.risk.paused
+                and _is_recoverable_position_snapshot_pause(
+                    self.risk.pause_reason
+                )
+            )
             other_operational_pause = (
                 self.risk.paused
                 and self.risk.pause_reason.startswith(_OPERATIONAL_PAUSE_PREFIXES)
                 and not empty_snapshot_pause
+                and not position_snapshot_pause
             )
         if empty_snapshot_pause:
             # This operational pause must never fall through to the generic,
             # timer-only auto-resume path, even if old persisted data happened
             # to mark it auto-resumable.
             return self._auto_resume_empty_order_snapshot_pause(now)
+        if position_snapshot_pause:
+            return self._auto_resume_position_snapshot_pause(now)
         if other_operational_pause:
             return False
         with self._trade_svc.submission_guard():
@@ -4271,12 +4301,46 @@ class AppRunner:
 
     def _auto_resume_empty_order_snapshot_pause(self, now: datetime) -> bool:
         """Recover the one reconciliation pause that has no order ambiguity."""
+        return self._auto_resume_verified_snapshot_pause(
+            now,
+            expected_reason=_EMPTY_ORDER_SNAPSHOT_RECONCILIATION_REASON,
+            event_source="verified_empty_order_snapshot_reconciliation",
+            log_label="empty order snapshot",
+        )
+
+    def _auto_resume_position_snapshot_pause(self, now: datetime) -> bool:
+        """Recover only the position pause caused by a failed snapshot read."""
         with self._state_lock:
             if (
                 not self.risk.paused
                 or self.risk.kill_switch
-                or self.risk.pause_reason
-                != _EMPTY_ORDER_SNAPSHOT_RECONCILIATION_REASON
+                or not _is_recoverable_position_snapshot_pause(
+                    self.risk.pause_reason
+                )
+            ):
+                return False
+            expected_reason = self.risk.pause_reason
+        return self._auto_resume_verified_snapshot_pause(
+            now,
+            expected_reason=expected_reason,
+            event_source="verified_position_snapshot_reconciliation",
+            log_label="position snapshot",
+        )
+
+    def _auto_resume_verified_snapshot_pause(
+        self,
+        now: datetime,
+        *,
+        expected_reason: str,
+        event_source: str,
+        log_label: str,
+    ) -> bool:
+        """Resume a recognized snapshot pause only after full broker proof."""
+        with self._state_lock:
+            if (
+                not self.risk.paused
+                or self.risk.kill_switch
+                or self.risk.pause_reason != expected_reason
             ):
                 return False
             paused_at = self.risk.paused_at
@@ -4290,17 +4354,17 @@ class AppRunner:
             return False
 
         # Keep order submission serialized until the verified resume is durable.
-        # resume_after_verification supplies the existing two independent empty
-        # broker proofs, position/tracked-entry checks, and safety-generation CAS.
+        # resume_after_verification supplies two independent coherent broker
+        # proofs, position/tracked-entry checks, and safety-generation CAS.
         with self._trade_svc.submission_guard():
             with self._state_lock:
                 if (
                     not self.risk.paused
                     or self.risk.kill_switch
-                    or self.risk.pause_reason
-                    != _EMPTY_ORDER_SNAPSHOT_RECONCILIATION_REASON
+                    or self.risk.pause_reason != expected_reason
                 ):
                     return False
+
             def persist_resumed_state() -> None:
                 with self._db_session() as db:
                     self._state_svc.stage(db, self.engine, self.risk)
@@ -4308,10 +4372,8 @@ class AppRunner:
                         db,
                         event_type="RISK_AUTO_RESUMED",
                         status="RUNNING",
-                        message=_EMPTY_ORDER_SNAPSHOT_RECONCILIATION_REASON,
-                        payload={
-                            "source": "verified_empty_order_snapshot_reconciliation",
-                        },
+                        message=expected_reason,
+                        payload={"source": event_source},
                     )
                     db.commit()
 
@@ -4321,7 +4383,8 @@ class AppRunner:
                 )
             except Exception:
                 logger.exception(
-                    "verified empty-order snapshot auto-resume could not be persisted"
+                    "verified %s auto-resume could not be persisted",
+                    log_label,
                 )
                 self._persist_risk_pause_best_effort()
                 self._broadcast_status()
@@ -4329,14 +4392,13 @@ class AppRunner:
             if not resumed:
                 if error:
                     logger.info(
-                        "verified empty-order snapshot auto-resume deferred: %s",
+                        "verified %s auto-resume deferred: %s",
+                        log_label,
                         error,
                     )
                 return False
 
-        logger.info(
-            "auto-resumed trading after verified empty order snapshot recovery"
-        )
+        logger.info("auto-resumed trading after verified %s recovery", log_label)
         self._broadcast_status()
         return True
 
