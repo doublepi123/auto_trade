@@ -384,6 +384,66 @@ def test_exploration_candidates_are_diverse_hard_gate_passers() -> None:
     ]
 
 
+def test_exploration_uses_idle_capacity_for_top_score_challengers() -> None:
+    def candidate(
+        symbol: str,
+        sector: str,
+        score: float,
+        *,
+        selected: bool = False,
+    ) -> UniverseSelectionCandidate:
+        return UniverseSelectionCandidate(
+            run_id=1,
+            symbol=symbol,
+            market="US",
+            alias=symbol,
+            sector=sector,
+            memberships_json='["NASDAQ_100"]',
+            selected=selected,
+            score=score,
+            metrics_json="{}",
+            exclusion_reasons_json=json.dumps(
+                [] if selected else ["SECTOR_CAP"]
+            ),
+            created_at=_NOW,
+        )
+
+    items = [
+        candidate("AMD.US", "Semiconductors", 99, selected=True),
+        candidate("AMAT.US", "Semiconductors", 98, selected=True),
+        candidate("NVDA.US", "Semiconductors", 90),
+        candidate("AVGO.US", "Semiconductors", 85),
+        candidate("LRCX.US", "Semiconductors", 80),
+        candidate("GOOGL.US", "Communication Services", 75),
+    ]
+
+    baseline = select_exploration_candidates(
+        items,
+        max_symbols=4,
+        max_per_sector=2,
+    )
+    challenged = select_exploration_candidates(
+        items,
+        max_symbols=4,
+        max_per_sector=2,
+        top_score_challengers=2,
+    )
+
+    assert [item.symbol for item in baseline] == [
+        "NVDA.US",
+        "GOOGL.US",
+    ]
+    assert [item.symbol for item in challenged] == [
+        "NVDA.US",
+        "AVGO.US",
+        "LRCX.US",
+        "GOOGL.US",
+    ]
+    assert {item.symbol for item in baseline}.issubset(
+        {item.symbol for item in challenged}
+    )
+
+
 def test_exploration_candidates_reserve_frozen_rotation_observers() -> None:
     def candidate(
         symbol: str,

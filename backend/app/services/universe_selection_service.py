@@ -84,7 +84,7 @@ _RUN_CLAIM_LEASE_SECONDS = 300.0
 _RUN_WAIT_TIMEOUT_SECONDS = _RUN_CLAIM_LEASE_SECONDS + 30.0
 _CLAIM_PREFIX = "refresh-claim:"
 _EXPLORATION_ALGORITHM_VERSION = (
-    "risk-group-and-refined-sector-peer-benchmark-v3"
+    "risk-group-refined-sector-and-top-score-challenger-v4"
 )
 _PEER_DOLLAR_VOLUME_RATIO = 0.75
 _EXPLORATION_ELIGIBLE_REASONS = frozenset(
@@ -225,6 +225,7 @@ def select_exploration_candidates(
     *,
     max_symbols: int,
     max_per_sector: int,
+    top_score_challengers: int = 0,
     already_observed_symbols: Collection[str] = (),
     unobservable_symbols: Collection[str] = (),
     minimum_risk_group_peers: int = RISK_GROUP_RELATIVE_MIN_PEERS,
@@ -235,6 +236,10 @@ def select_exploration_candidates(
         raise ValueError("exploration max_symbols must not be negative")
     if max_per_sector < 1:
         raise ValueError("exploration max_per_sector must be positive")
+    if top_score_challengers < 0:
+        raise ValueError(
+            "exploration top_score_challengers must not be negative"
+        )
     if minimum_risk_group_peers < 1:
         raise ValueError(
             "exploration minimum_risk_group_peers must be positive"
@@ -516,6 +521,26 @@ def select_exploration_candidates(
                 group_counts.get(risk_group, 0) + 1
             )
 
+    # Reserve a small cohort for liquid, high-scoring names that passed every
+    # hard gate but lost a formal slot to concentration limits. Peer,
+    # rotation, and refined-sector coverage above always has precedence.
+    challengers_added = 0
+    for item in eligible:
+        if (
+            len(selected) >= max_symbols
+            or challengers_added >= top_score_challengers
+        ):
+            break
+        normalized_symbol = item.symbol.strip().upper()
+        if (
+            normalized_symbol in selected_symbols
+            or normalized_symbol in observed_symbols
+        ):
+            continue
+        selected.append(item)
+        selected_symbols.add(normalized_symbol)
+        challengers_added += 1
+
     # Spend any remaining observer budget on broad research while retaining
     # the normal per-risk-group diversification cap.
     for item in eligible:
@@ -601,6 +626,7 @@ class UniverseSelectionService:
         minimum_evaluable_ratio: float | None = None,
         minimum_residency_days: int | None = None,
         exploration_max_symbols: int | None = None,
+        exploration_top_score_challengers: int | None = None,
         apply_to_watchlist: bool | None = None,
         enable_shadow: bool | None = None,
         now: datetime | None = None,
@@ -643,6 +669,15 @@ class UniverseSelectionService:
         if self.exploration_max_symbols < 0:
             raise ValueError(
                 "exploration_max_symbols must not be negative"
+            )
+        self.exploration_top_score_challengers = (
+            settings.universe_selection_exploration_top_score_challengers
+            if exploration_top_score_challengers is None
+            else exploration_top_score_challengers
+        )
+        if self.exploration_top_score_challengers < 0:
+            raise ValueError(
+                "exploration_top_score_challengers must not be negative"
             )
         self.apply_to_watchlist = (
             settings.universe_selection_apply_to_watchlist
@@ -2068,6 +2103,9 @@ class UniverseSelectionService:
             items,
             max_symbols=self.exploration_max_symbols,
             max_per_sector=self.config.max_per_sector,
+            top_score_challengers=(
+                self.exploration_top_score_challengers
+            ),
             already_observed_symbols=(
                 observation_overrides.already_observed_symbols
             ),
@@ -2382,6 +2420,9 @@ class UniverseSelectionService:
                 _EXPLORATION_ALGORITHM_VERSION
             ),
             "exploration_max_symbols": self.exploration_max_symbols,
+            "exploration_top_score_challengers": (
+                self.exploration_top_score_challengers
+            ),
             "exploration_min_risk_group_peers": (
                 RISK_GROUP_RELATIVE_MIN_PEERS
             ),

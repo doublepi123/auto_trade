@@ -384,9 +384,9 @@ class Settings(BaseSettings):
         validation_alias="AUTO_TRADE_UNIVERSE_SELECTION_MAX_SYMBOLS",
     )
     universe_selection_exploration_max_symbols: int = Field(
-        default=20,
+        default=22,
         ge=0,
-        le=20,
+        le=24,
         validation_alias=(
             "AUTO_TRADE_UNIVERSE_SELECTION_EXPLORATION_MAX_SYMBOLS"
         ),
@@ -397,6 +397,21 @@ class Settings(BaseSettings):
             "industries are completed for leave-one-out research before "
             "remaining capacity is diversified. Zero disables the "
             "exploration tier."
+        ),
+    )
+    universe_selection_exploration_top_score_challengers: int = Field(
+        default=2,
+        ge=0,
+        le=5,
+        validation_alias=(
+            "AUTO_TRADE_UNIVERSE_SELECTION_EXPLORATION_"
+            "TOP_SCORE_CHALLENGERS"
+        ),
+        description=(
+            "Maximum number of exploration slots reserved for the "
+            "highest-scoring hard-gate passers after peer, rotation, and "
+            "refined-sector coverage is complete but before remaining "
+            "diversified research. These remain read-only observers."
         ),
     )
     universe_selection_max_per_sector: int = Field(

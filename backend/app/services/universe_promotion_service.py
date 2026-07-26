@@ -341,6 +341,10 @@ class UniversePromotionService:
                 max_per_sector=(
                     settings.universe_selection_max_per_sector
                 ),
+                top_score_challengers=(
+                    settings
+                    .universe_selection_exploration_top_score_challengers
+                ),
                 already_observed_symbols=(
                     observation_overrides.already_observed_symbols
                 ),
