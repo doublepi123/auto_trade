@@ -166,13 +166,17 @@ class TestStrategyV2ExitChallengerService:
                 key=lambda row: int(row.max_holding_minutes or 0),
             )
 
-            assert len(rows) == 6
+            assert len(rows) == 7
             assert [row.locked_profit_pct for row in profit_lock_rows] == [
                 0.10,
                 0.20,
                 0.30,
+                0.40,
             ]
-            assert {row.activation_pct for row in profit_lock_rows} == {0.40}
+            assert {row.activation_pct for row in profit_lock_rows} == {
+                0.40,
+                0.60,
+            }
             assert [row.max_holding_minutes for row in time_stop_rows] == [
                 15,
                 30,
@@ -247,7 +251,7 @@ class TestStrategyV2ExitChallengerService:
             )
 
             rows = db.query(StrategyV2ExitChallengerTrade).all()
-            assert len(rows) == 6
+            assert len(rows) == 7
             assert {row.status for row in rows} == {"CLOSED"}
             assert {
                 row.challenger_exit_reason for row in rows
@@ -366,7 +370,7 @@ class TestStrategyV2ExitChallengerService:
             )
 
             rows = db.query(StrategyV2ExitChallengerTrade).all()
-            assert len(rows) == 6
+            assert len(rows) == 7
             assert {
                 row.challenger_exit_reason for row in rows
             } == {"BASELINE_MAX_HOLD"}
@@ -489,7 +493,7 @@ class TestStrategyV2ExitChallengerService:
             )
 
             rows = db.query(StrategyV2ExitChallengerTrade).all()
-            assert len(rows) == 6
+            assert len(rows) == 7
             assert {
                 row.challenger_exit_reason for row in rows
             } == {"BASELINE_EOD_FLATTEN"}

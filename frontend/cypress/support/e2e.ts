@@ -3178,9 +3178,10 @@ Cypress.Commands.add('stubApi', () => {
           variant(1, 'PROFIT_LOCK', 'strategy-v2-profit-lock-a40-f10-v2', 0.4, 0.1, null, 1.2),
           variant(2, 'PROFIT_LOCK', 'strategy-v2-profit-lock-a40-f20-v2', 0.4, 0.2, null, 2.4),
           variant(3, 'PROFIT_LOCK', 'strategy-v2-profit-lock-a40-f30-v2', 0.4, 0.3, null, -0.8),
-          variant(4, 'TIME_STOP', 'strategy-v2-time-stop-m15-v2', 0, 0, 15, 4.4),
-          variant(5, 'TIME_STOP', 'strategy-v2-time-stop-m30-v2', 0, 0, 30, 3.1),
-          variant(6, 'TIME_STOP', 'strategy-v2-time-stop-m45-v2', 0, 0, 45, 1.8),
+          variant(4, 'PROFIT_LOCK', 'strategy-v2-profit-lock-a60-f40-v1', 0.6, 0.4, null, 3.8),
+          variant(5, 'TIME_STOP', 'strategy-v2-time-stop-m15-v2', 0, 0, 15, 4.4),
+          variant(6, 'TIME_STOP', 'strategy-v2-time-stop-m30-v2', 0, 0, 30, 3.1),
+          variant(7, 'TIME_STOP', 'strategy-v2-time-stop-m45-v2', 0, 0, 45, 1.8),
         ],
       },
     })

@@ -186,6 +186,7 @@ describe('Strategy v2 shadow lab', () => {
       .and('contain', '只读影子')
       .and('contain', '不自动应用')
       .and('contain', '+0.40% → +0.10%')
+      .and('contain', '+0.60% → +0.40%')
       .and('contain', '15 分钟持仓期限')
       .and('contain', '30 分钟持仓期限')
       .and('contain', '45 分钟持仓期限')

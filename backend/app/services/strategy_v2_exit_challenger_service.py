@@ -60,6 +60,7 @@ _PROFIT_LOCK_SPECS = (
     _ProfitLockSpec("strategy-v2-profit-lock-a40-f10-v2", 0.40, 0.10),
     _ProfitLockSpec("strategy-v2-profit-lock-a40-f20-v2", 0.40, 0.20),
     _ProfitLockSpec("strategy-v2-profit-lock-a40-f30-v2", 0.40, 0.30),
+    _ProfitLockSpec("strategy-v2-profit-lock-a60-f40-v1", 0.60, 0.40),
 )
 _TIME_EXIT_SPECS = (
     _TimeExitSpec("strategy-v2-time-stop-m15-v2", 15),

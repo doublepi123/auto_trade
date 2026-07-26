@@ -168,8 +168,13 @@ class TestLiveExitChallengerService:
                 LiveExitChallengerRegistration.locked_profit_pct
             ).all()
 
-            assert [row.locked_profit_pct for row in rows] == [0.1, 0.2, 0.3]
-            assert {row.activation_pct for row in rows} == {0.4}
+            assert [row.locked_profit_pct for row in rows] == [
+                0.1,
+                0.2,
+                0.3,
+                0.4,
+            ]
+            assert {row.activation_pct for row in rows} == {0.4, 0.6}
             assert {
                 row.eligible_after.replace(tzinfo=timezone.utc)
                 for row in rows
@@ -217,7 +222,7 @@ class TestLiveExitChallengerService:
                 bar=_bar(
                     1,
                     open_price=100.2,
-                    high=100.5,
+                    high=100.7,
                     low=100.1,
                 ),
                 observed_at=_ENTRY_AT + timedelta(minutes=2, seconds=5),
@@ -234,7 +239,7 @@ class TestLiveExitChallengerService:
             )
 
             rows = db.query(LiveExitChallengerTrade).all()
-            assert len(rows) == 3
+            assert len(rows) == 4
             assert {row.status for row in rows} == {"CLOSED"}
             assert {
                 row.challenger_exit_reason for row in rows
@@ -271,7 +276,7 @@ class TestLiveExitChallengerService:
             assert report.order_submission_allowed is False
             assert report.automatic_promotion_allowed is False
             assert report.historical_backfill_allowed is False
-            assert len(report.variants) == 3
+            assert len(report.variants) == 4
             assert all(item.paired_trades == 1 for item in report.variants)
             assert all(item.profit_lock_exits == 1 for item in report.variants)
             assert all(
