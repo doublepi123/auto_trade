@@ -176,7 +176,8 @@ def test_history_fetch_pages_and_keeps_only_opening_window() -> None:
     assert [bar.timestamp for bar in result] == [
         _timestamp(session_date, offset) for offset in range(4)
     ]
-    assert len(provider.calls) == 3
+    assert len(provider.calls) == 4
+    assert provider.calls[-1] == _timestamp(session_date, 201)
 
 
 def test_cache_round_trip_and_scope_mismatch(tmp_path: Path) -> None:

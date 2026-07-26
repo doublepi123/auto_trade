@@ -33,7 +33,7 @@ from app.models import StrategyV2ShadowConfig
 
 
 OPENING_EXTENSION_CLI_VERSION = "opening-extension-research-cli-v1"
-_CACHE_VERSION = "opening-extension-minute-cache-v1"
+_CACHE_VERSION = "opening-extension-minute-cache-v2"
 _BAR_DURATION = timedelta(minutes=1)
 _DEFAULT_SIGNAL_MINUTES = (2, 3, 5, 10)
 _DEFAULT_HOLDING_MINUTES = (30, 60, 90, 120)
@@ -182,8 +182,6 @@ def _fetch_symbol_bars(
             )
         cursor = next_cursor
         if latest >= stop:
-            break
-        if len(page) < page_size:
             break
     return tuple(retained[value] for value in sorted(retained))
 
