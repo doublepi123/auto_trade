@@ -334,7 +334,7 @@ def parse_point_in_time_validated_shrinkage_targets(
         or not 0 < float(authoritative_ratio) <= 1
         or not str(membership.get("source_version") or "").strip()
         or evaluation.get("data_scope")
-        != "POINT_IN_TIME_CURRENT_CATALOG"
+        != "POINT_IN_TIME_RESEARCH_CATALOG"
     ):
         return {}
     return _parse_validated_rotation_targets(

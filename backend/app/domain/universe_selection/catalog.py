@@ -5,7 +5,7 @@ from typing import Literal
 
 
 CATALOG_SOURCE_VERSION = (
-    "nasdaq-100-2026-07-24_djia-2026-06-29_full-company-v8"
+    "nasdaq-100-2026-07-24_djia-2026-06-29_historical-pit-v9"
 )
 
 _RISK_GROUP_BY_SECTOR = {
@@ -43,9 +43,10 @@ class IndexCandidate:
 # includes one security per current constituent company so daily market-data
 # gates, rather than a static liquidity snapshot, decide which names remain
 # observable. Alphabet is represented by GOOGL only to prevent the two share
-# classes from consuming separate sector or observation capacity. V8 closes
-# the remaining company-level gaps in the verified Nasdaq snapshot; the daily
-# liquidity, volatility, and cost-opportunity gates still fail closed.
+# classes from consuming separate sector or observation capacity. The live
+# catalog remains company-level; former constituents are isolated below for
+# point-in-time research. Daily liquidity, volatility, and cost-opportunity
+# gates still fail closed.
 INDEX_CANDIDATE_CATALOG: tuple[IndexCandidate, ...] = (
     IndexCandidate("NVDA.US", "NVIDIA", "Semiconductors", ("NASDAQ_100", "DJIA")),
     IndexCandidate("AAPL.US", "Apple", "Technology Hardware", ("NASDAQ_100", "DJIA")),
@@ -405,4 +406,75 @@ INDEX_CANDIDATE_CATALOG: tuple[IndexCandidate, ...] = (
     IndexCandidate("SHW.US", "Sherwin-Williams", "Materials", ("DJIA",)),
     IndexCandidate("TRV.US", "Travelers", "Financials", ("DJIA",)),
     IndexCandidate("UNH.US", "UnitedHealth", "Healthcare", ("DJIA",)),
+)
+
+
+# Research-only former constituents represented in the bundled point-in-time
+# membership history. They are fetched for walk-forward evaluation, but never
+# enter the current live screening or observation pool.
+HISTORICAL_INDEX_CANDIDATE_CATALOG: tuple[IndexCandidate, ...] = (
+    IndexCandidate("ALGN.US", "Align Technology", "Healthcare", ("NASDAQ_100",)),
+    IndexCandidate("ANSS.US", "ANSYS", "Software", ("NASDAQ_100",)),
+    IndexCandidate("ATVI.US", "Activision Blizzard", "Communication Services", ("NASDAQ_100",)),
+    IndexCandidate("AZN.US", "AstraZeneca", "Healthcare", ("NASDAQ_100",)),
+    IndexCandidate("BIDU.US", "Baidu", "Communication Services", ("NASDAQ_100",)),
+    IndexCandidate("BIIB.US", "Biogen", "Healthcare", ("NASDAQ_100",)),
+    IndexCandidate("CDW.US", "CDW", "Technology Hardware", ("NASDAQ_100",)),
+    IndexCandidate("CHTR.US", "Charter Communications", "Communication Services", ("NASDAQ_100",)),
+    IndexCandidate("CSGP.US", "CoStar Group", "Real Estate", ("NASDAQ_100",)),
+    IndexCandidate("CTSH.US", "Cognizant", "Software", ("NASDAQ_100",)),
+    IndexCandidate("DLTR.US", "Dollar Tree", "Consumer Staples", ("NASDAQ_100",)),
+    IndexCandidate("DOCU.US", "DocuSign", "Software", ("NASDAQ_100",)),
+    IndexCandidate("DOW.US", "Dow", "Materials", ("DJIA",)),
+    IndexCandidate("EBAY.US", "eBay", "Consumer Discretionary", ("NASDAQ_100",)),
+    IndexCandidate("ENPH.US", "Enphase Energy", "Technology Hardware", ("NASDAQ_100",)),
+    IndexCandidate(
+        "FB.US",
+        "Meta Platforms (legacy ticker)",
+        "Communication Services",
+        ("NASDAQ_100",),
+    ),
+    IndexCandidate("FISV.US", "Fiserv (legacy ticker)", "Financials", ("NASDAQ_100",)),
+    IndexCandidate("GFS.US", "GlobalFoundries", "Semiconductors", ("NASDAQ_100",)),
+    IndexCandidate("GOOG.US", "Alphabet Class C", "Communication Services", ("NASDAQ_100",)),
+    IndexCandidate("ILMN.US", "Illumina", "Healthcare", ("NASDAQ_100",)),
+    IndexCandidate("INSM.US", "Insmed", "Healthcare", ("NASDAQ_100",)),
+    IndexCandidate("JD.US", "JD.com", "Consumer Discretionary", ("NASDAQ_100",)),
+    IndexCandidate("LCID.US", "Lucid Group", "Consumer Discretionary", ("NASDAQ_100",)),
+    IndexCandidate("LULU.US", "Lululemon Athletica", "Consumer Discretionary", ("NASDAQ_100",)),
+    IndexCandidate("MDB.US", "MongoDB", "Software", ("NASDAQ_100",)),
+    IndexCandidate("MRNA.US", "Moderna", "Healthcare", ("NASDAQ_100",)),
+    IndexCandidate("MTCH.US", "Match Group", "Communication Services", ("NASDAQ_100",)),
+    IndexCandidate("NTES.US", "NetEase", "Communication Services", ("NASDAQ_100",)),
+    IndexCandidate("OKTA.US", "Okta", "Software", ("NASDAQ_100",)),
+    IndexCandidate("ON.US", "ON Semiconductor", "Semiconductors", ("NASDAQ_100",)),
+    IndexCandidate("PTON.US", "Peloton", "Consumer Discretionary", ("NASDAQ_100",)),
+    IndexCandidate("RIVN.US", "Rivian Automotive", "Consumer Discretionary", ("NASDAQ_100",)),
+    IndexCandidate("SGEN.US", "Seagen", "Healthcare", ("NASDAQ_100",)),
+    IndexCandidate("SIRI.US", "Sirius XM", "Communication Services", ("NASDAQ_100",)),
+    IndexCandidate("SMCI.US", "Super Micro Computer", "Technology Hardware", ("NASDAQ_100",)),
+    IndexCandidate("SOLS.US", "Solstice Advanced Materials", "Materials", ("NASDAQ_100",)),
+    IndexCandidate("SPLK.US", "Splunk", "Software", ("NASDAQ_100",)),
+    IndexCandidate("SWKS.US", "Skyworks Solutions", "Semiconductors", ("NASDAQ_100",)),
+    IndexCandidate("TEAM.US", "Atlassian", "Software", ("NASDAQ_100",)),
+    IndexCandidate("TTD.US", "Trade Desk", "Communication Services", ("NASDAQ_100",)),
+    IndexCandidate("VRSK.US", "Verisk Analytics", "Industrials", ("NASDAQ_100",)),
+    IndexCandidate("VRSN.US", "VeriSign", "Technology Infrastructure", ("NASDAQ_100",)),
+    IndexCandidate("VSNT.US", "Versant Media", "Communication Services", ("NASDAQ_100",)),
+    IndexCandidate("VZ.US", "Verizon", "Communication Services", ("DJIA",)),
+    IndexCandidate(
+        "WBA.US",
+        "Walgreens Boots Alliance",
+        "Consumer Staples",
+        ("NASDAQ_100", "DJIA"),
+    ),
+    IndexCandidate("XLNX.US", "Xilinx", "Semiconductors", ("NASDAQ_100",)),
+    IndexCandidate("ZM.US", "Zoom Communications", "Software", ("NASDAQ_100",)),
+    IndexCandidate("ZS.US", "Zscaler", "Software", ("NASDAQ_100",)),
+)
+
+
+ROTATION_RESEARCH_CANDIDATE_CATALOG: tuple[IndexCandidate, ...] = (
+    *INDEX_CANDIDATE_CATALOG,
+    *HISTORICAL_INDEX_CANDIDATE_CATALOG,
 )

@@ -1368,6 +1368,7 @@ export interface UniverseRotationWalkForwardEvaluation {
   validated_challenger_variant: string | null
   automatic_promotion_allowed: false
   promotion_blockers: string[]
+  point_in_time_data_missing_symbols: string[]
   variants: UniverseRotationVariantEvaluation[]
 }
 
@@ -1388,6 +1389,10 @@ export interface UniverseIndexMembershipHistoryMetadata {
   authoritative_ratio: number
   snapshot_only_symbols: string[]
   missing_symbols: string[]
+  historical_symbol_count: number
+  historical_symbols_present: number
+  historical_coverage_ratio: number
+  historical_symbols_missing: string[]
 }
 
 export interface UniverseRotationPointInTimeSensitivity {

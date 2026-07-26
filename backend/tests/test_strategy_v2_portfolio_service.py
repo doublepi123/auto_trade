@@ -252,7 +252,7 @@ class TestStrategyV2PortfolioService:
                 "evaluation": {
                     "algorithm_version": ROTATION_WALK_FORWARD_VERSION,
                     "status": "COMPLETE",
-                    "data_scope": "POINT_IN_TIME_CURRENT_CATALOG",
+                    "data_scope": "POINT_IN_TIME_RESEARCH_CATALOG",
                     "validated_challenger_variant": variant_name,
                     "variants": [{
                         "variant": {"name": variant_name},

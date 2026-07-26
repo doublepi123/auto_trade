@@ -30,6 +30,7 @@ from app.domain.universe_selection import (
     DEFAULT_ROTATION_VARIANTS,
     INDEX_CANDIDATE_CATALOG,
     INDEX_MEMBERSHIP_HISTORY,
+    ROTATION_RESEARCH_CANDIDATE_CATALOG,
     ROTATION_ALGORITHM_VERSION,
     ROTATION_BENCHMARK_SYMBOLS,
     ROTATION_FORWARD_VERSION,
@@ -96,6 +97,11 @@ _EXPLORATION_ELIGIBLE_REASONS = frozenset(
 _PEER_ONLY_ELIGIBLE_REASONS = frozenset(
     {"DOLLAR_VOLUME_BELOW_MINIMUM"}
 )
+_HISTORICAL_RESEARCH_BARS_CACHE: dict[
+    tuple[str, int, date],
+    tuple[BrokerCandle, ...],
+] = {}
+_HISTORICAL_RESEARCH_BARS_CACHE_LOCK = threading.Lock()
 
 
 class UniverseMarketDataProvider(Protocol):
@@ -124,6 +130,66 @@ def _research_candlesticks(
             adjusted_reader(symbol, period, count),
         )
     return broker.get_candlesticks(symbol, period, count)
+
+
+def _historical_membership_end(
+    candidate: IndexCandidate,
+) -> date | None:
+    intervals = tuple(
+        interval
+        for membership in candidate.memberships
+        for interval in INDEX_MEMBERSHIP_HISTORY.intervals.get(
+            membership,
+            {},
+        ).get(candidate.symbol.removesuffix(".US"), ())
+    )
+    if not intervals or any(
+        interval.end is None for interval in intervals
+    ):
+        return None
+    return max(
+        interval.end
+        for interval in intervals
+        if interval.end is not None
+    )
+
+
+def _historical_research_candlesticks(
+    broker: UniverseMarketDataProvider,
+    candidate: IndexCandidate,
+    *,
+    count: int,
+) -> list[BrokerCandle] | None:
+    membership_end = _historical_membership_end(candidate)
+    history_reader = getattr(
+        broker,
+        "get_forward_adjusted_history_candlesticks_before",
+        None,
+    )
+    if membership_end is None or not callable(history_reader):
+        return None
+    cache_key = (candidate.symbol, count, membership_end)
+    with _HISTORICAL_RESEARCH_BARS_CACHE_LOCK:
+        cached = _HISTORICAL_RESEARCH_BARS_CACHE.get(cache_key)
+    if cached is not None:
+        return list(cached)
+    boundary = datetime.combine(
+        membership_end,
+        datetime.min.time(),
+        tzinfo=timezone.utc,
+    ) + timedelta(hours=12)
+    bars = cast(
+        list[BrokerCandle],
+        history_reader(
+            candidate.symbol,
+            "DAY",
+            count,
+            boundary,
+        ),
+    )
+    with _HISTORICAL_RESEARCH_BARS_CACHE_LOCK:
+        _HISTORICAL_RESEARCH_BARS_CACHE[cache_key] = tuple(bars)
+    return bars
 
 
 @dataclass(frozen=True)
@@ -702,6 +768,7 @@ class UniverseSelectionService:
         broker: UniverseMarketDataProvider,
         *,
         catalog: Sequence[IndexCandidate] = INDEX_CANDIDATE_CATALOG,
+        rotation_research_catalog: Sequence[IndexCandidate] | None = None,
         config: UniverseSelectionConfig | None = None,
         minimum_evaluable_ratio: float | None = None,
         minimum_residency_days: int | None = None,
@@ -716,6 +783,36 @@ class UniverseSelectionService:
         self.db = db
         self.broker = broker
         self.catalog = tuple(catalog)
+        self.rotation_research_catalog = tuple(
+            ROTATION_RESEARCH_CANDIDATE_CATALOG
+            if (
+                rotation_research_catalog is None
+                and catalog is INDEX_CANDIDATE_CATALOG
+            )
+            else (
+                self.catalog
+                if rotation_research_catalog is None
+                else rotation_research_catalog
+            )
+        )
+        research_symbols = {
+            candidate.symbol
+            for candidate in self.rotation_research_catalog
+        }
+        if len(research_symbols) != len(
+            self.rotation_research_catalog
+        ):
+            raise ValueError(
+                "rotation research catalog symbols must be unique"
+            )
+        live_symbols = {
+            candidate.symbol for candidate in self.catalog
+        }
+        self._live_symbols = frozenset(live_symbols)
+        if not live_symbols.issubset(research_symbols):
+            raise ValueError(
+                "rotation research catalog must contain live catalog"
+            )
         self.config = config or selection_config_from_settings(
             round_trip_fee_bps=_active_round_trip_fee_bps(db),
         )
@@ -1325,15 +1422,25 @@ class UniverseSelectionService:
                 _ROTATION_EVALUATION_HISTORY_BARS,
             ),
         )
-        for candidate in self.catalog:
+        for candidate in self.rotation_research_catalog:
             data_errors: list[str] = []
             try:
-                raw_bars = _research_candlesticks(
-                    self.broker,
-                    candidate.symbol,
-                    "DAY",
-                    daily_bar_count,
+                raw_bars = (
+                    _historical_research_candlesticks(
+                        self.broker,
+                        candidate,
+                        count=daily_bar_count,
+                    )
+                    if candidate.symbol not in self._live_symbols
+                    else None
                 )
+                if raw_bars is None:
+                    raw_bars = _research_candlesticks(
+                        self.broker,
+                        candidate.symbol,
+                        "DAY",
+                        daily_bar_count,
+                    )
                 bars = completed_daily_bars(
                     raw_bars,
                     market=candidate.market,
@@ -1428,7 +1535,9 @@ class UniverseSelectionService:
                     exc_info=True,
                 )
         membership_history_metadata = (
-            INDEX_MEMBERSHIP_HISTORY.metadata(self.catalog)
+            INDEX_MEMBERSHIP_HISTORY.metadata(
+                self.rotation_research_catalog
+            )
         )
         if benchmark_errors:
             rotation_evaluation: dict[str, object] = {
@@ -1592,7 +1701,7 @@ class UniverseSelectionService:
             try:
                 point_in_time_evaluation = (
                     evaluate_rotation_walk_forward(
-                        candidates=self.catalog,
+                        candidates=self.rotation_research_catalog,
                         bars_by_symbol=complete_by_symbol,
                         benchmark_bars_by_symbol=benchmark_bars,
                         base_config=self.config,
@@ -2434,11 +2543,16 @@ class UniverseSelectionService:
 
     def _parameters(self) -> dict[str, object]:
         membership_history_metadata = (
-            INDEX_MEMBERSHIP_HISTORY.metadata(self.catalog)
+            INDEX_MEMBERSHIP_HISTORY.metadata(
+                self.rotation_research_catalog
+            )
         )
         return {
             **asdict(self.config),
             "catalog_size": len(self.catalog),
+            "rotation_research_catalog_size": len(
+                self.rotation_research_catalog
+            ),
             "rotation_algorithm_version": ROTATION_ALGORITHM_VERSION,
             "rotation_walk_forward_algorithm_version": (
                 ROTATION_WALK_FORWARD_VERSION

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from app.domain.universe_selection.catalog import (
     CATALOG_SOURCE_VERSION,
+    HISTORICAL_INDEX_CANDIDATE_CATALOG,
     INDEX_CANDIDATE_CATALOG,
+    ROTATION_RESEARCH_CANDIDATE_CATALOG,
 )
 
 
@@ -15,7 +17,7 @@ def test_catalog_tracks_current_verified_index_snapshot() -> None:
     assert len(by_symbol) == len(INDEX_CANDIDATE_CATALOG)
     assert len(by_symbol) == 123
     assert CATALOG_SOURCE_VERSION == (
-        "nasdaq-100-2026-07-24_djia-2026-06-29_full-company-v8"
+        "nasdaq-100-2026-07-24_djia-2026-06-29_historical-pit-v9"
     )
     assert {
         "SPCX.US",
@@ -99,6 +101,25 @@ def test_catalog_tracks_current_verified_index_snapshot() -> None:
     )
     assert "VZ.US" not in by_symbol
     assert "GOOG.US" not in by_symbol
+
+
+def test_rotation_research_catalog_adds_only_former_constituents() -> None:
+    live_symbols = {
+        candidate.symbol for candidate in INDEX_CANDIDATE_CATALOG
+    }
+    historical_symbols = {
+        candidate.symbol
+        for candidate in HISTORICAL_INDEX_CANDIDATE_CATALOG
+    }
+    research_symbols = {
+        candidate.symbol
+        for candidate in ROTATION_RESEARCH_CANDIDATE_CATALOG
+    }
+
+    assert len(historical_symbols) == 48
+    assert not live_symbols & historical_symbols
+    assert research_symbols == live_symbols | historical_symbols
+    assert len(research_symbols) == 171
 
 
 def test_catalog_collapses_technology_industries_into_one_risk_group() -> None:

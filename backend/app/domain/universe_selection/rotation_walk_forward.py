@@ -22,7 +22,7 @@ from app.domain.universe_selection.selector import (
 )
 
 
-ROTATION_WALK_FORWARD_VERSION = "rotation-monthly-open-walk-forward-v5"
+ROTATION_WALK_FORWARD_VERSION = "rotation-monthly-open-walk-forward-v6"
 ROTATION_BENCHMARK_SYMBOLS = ("QQQ.US", "DIA.US")
 _CASH = "__CASH__"
 _EXPANDING_VALIDATION_MIN_TRAINING_PERIODS = 12
@@ -266,6 +266,7 @@ class RotationWalkForwardResult:
     validated_challenger_variant: str | None
     automatic_promotion_allowed: bool
     promotion_blockers: tuple[str, ...]
+    point_in_time_data_missing_symbols: tuple[str, ...]
     variants: tuple[RotationVariantEvaluation, ...]
     selected_variant_periods: tuple[RotationPeriod, ...]
     validated_challenger_periods: tuple[RotationPeriod, ...]
@@ -340,6 +341,35 @@ def _bar_map(bars: Sequence[DailyBar]) -> dict[date, DailyBar]:
         ):
             result[session_date] = bar
     return result
+
+
+def _point_in_time_data_missing_symbols(
+    *,
+    candidates: Sequence[IndexCandidate],
+    candidate_maps: Mapping[str, Mapping[date, DailyBar]],
+    membership_history: IndexMembershipHistory,
+) -> tuple[str, ...]:
+    missing: list[str] = []
+    for candidate in candidates:
+        symbol = candidate.symbol.removesuffix(".US")
+        has_authoritative_history = any(
+            symbol in membership_history.intervals.get(
+                membership,
+                {},
+            )
+            for membership in candidate.memberships
+        )
+        if not has_authoritative_history:
+            continue
+        if not any(
+            membership_history.is_active(candidate, session_date)
+            for session_date in candidate_maps.get(
+                candidate.symbol,
+                {},
+            )
+        ):
+            missing.append(candidate.symbol)
+    return tuple(sorted(missing))
 
 
 def _monthly_rebalance_dates(
@@ -1009,25 +1039,39 @@ def evaluate_rotation_walk_forward(
         benchmark_maps,
     )
     data_scope = (
-        "POINT_IN_TIME_CURRENT_CATALOG"
+        "POINT_IN_TIME_RESEARCH_CATALOG"
         if membership_history is not None
         else "CURRENT_CONSTITUENTS_ONLY"
     )
-    scope_blockers = [
-        (
-            "HISTORICAL_CONSTITUENTS_OMITTED"
-            if membership_history is not None
-            else "CURRENT_CONSTITUENTS_SURVIVORSHIP_BIAS"
-        ),
-    ]
+    scope_blockers = (
+        []
+        if membership_history is not None
+        else ["CURRENT_CONSTITUENTS_SURVIVORSHIP_BIAS"]
+    )
+    point_in_time_data_missing_symbols: tuple[str, ...] = ()
     if membership_history is not None:
         coverage = membership_history.coverage(candidates)
+        if coverage.historical_symbols_missing:
+            scope_blockers.append(
+                "HISTORICAL_CONSTITUENTS_OMITTED"
+            )
         if (
             coverage.snapshot_only_symbols
             or coverage.missing_symbols
         ):
             scope_blockers.append(
                 "POINT_IN_TIME_MEMBERSHIP_HISTORY_PARTIAL"
+            )
+        point_in_time_data_missing_symbols = (
+            _point_in_time_data_missing_symbols(
+                candidates=candidates,
+                candidate_maps=candidate_maps,
+                membership_history=membership_history,
+            )
+        )
+        if point_in_time_data_missing_symbols:
+            scope_blockers.append(
+                "POINT_IN_TIME_MEMBER_DATA_PARTIAL"
             )
     if len(rebalance_dates) < 2:
         return RotationWalkForwardResult(
@@ -1051,6 +1095,9 @@ def evaluate_rotation_walk_forward(
                 "ROTATION_BENCHMARK_HISTORY_UNAVAILABLE",
                 *scope_blockers,
                 "ROTATION_FORWARD_OBSERVATIONS_REQUIRED",
+            ),
+            point_in_time_data_missing_symbols=(
+                point_in_time_data_missing_symbols
             ),
             variants=(),
             selected_variant_periods=(),
@@ -1214,6 +1261,9 @@ def evaluate_rotation_walk_forward(
         ),
         automatic_promotion_allowed=False,
         promotion_blockers=tuple(dict.fromkeys(promotion_blockers)),
+        point_in_time_data_missing_symbols=(
+            point_in_time_data_missing_symbols
+        ),
         variants=tuple(evaluations),
         selected_variant_periods=(
             periods_by_variant.get(selected.variant.name, ())

@@ -1,6 +1,8 @@
 from app.domain.universe_selection.catalog import (
     CATALOG_SOURCE_VERSION,
+    HISTORICAL_INDEX_CANDIDATE_CATALOG,
     INDEX_CANDIDATE_CATALOG,
+    ROTATION_RESEARCH_CANDIDATE_CATALOG,
     IndexCandidate,
     risk_group_for_sector,
 )
@@ -73,7 +75,9 @@ from app.domain.universe_selection.rotation_forward_scorecard import (
 
 __all__ = [
     "CATALOG_SOURCE_VERSION",
+    "HISTORICAL_INDEX_CANDIDATE_CATALOG",
     "INDEX_CANDIDATE_CATALOG",
+    "ROTATION_RESEARCH_CANDIDATE_CATALOG",
     "ROTATION_ALGORITHM_VERSION",
     "ROTATION_BENCHMARK_SYMBOLS",
     "ROTATION_FORWARD_VERSION",

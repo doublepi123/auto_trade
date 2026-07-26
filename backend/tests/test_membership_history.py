@@ -5,6 +5,7 @@ from datetime import date
 from app.domain.universe_selection import (
     INDEX_CANDIDATE_CATALOG,
     INDEX_MEMBERSHIP_HISTORY,
+    ROTATION_RESEARCH_CANDIDATE_CATALOG,
     IndexCandidate,
 )
 
@@ -75,6 +76,26 @@ def test_membership_history_reports_partial_catalog_coverage() -> None:
     )
     assert coverage.missing_symbols == ()
     assert 0.98 < coverage.authoritative_ratio < 0.99
+    assert coverage.historical_symbol_count == 169
+    assert coverage.historical_symbols_present == 121
+    assert len(coverage.historical_symbols_missing) == 48
+
+
+def test_research_catalog_covers_all_historical_membership_symbols() -> None:
+    coverage = INDEX_MEMBERSHIP_HISTORY.coverage(
+        ROTATION_RESEARCH_CANDIDATE_CATALOG
+    )
+
+    assert coverage.catalog_size == 171
+    assert coverage.authoritative_symbols == 169
+    assert coverage.snapshot_only_symbols == (
+        "HONA.US",
+        "SPCX.US",
+    )
+    assert coverage.missing_symbols == ()
+    assert coverage.historical_symbols_present == 169
+    assert coverage.historical_symbols_missing == ()
+    assert coverage.historical_coverage_ratio == 1.0
 
 
 def test_expanded_candidates_are_active_at_catalog_snapshot() -> None:

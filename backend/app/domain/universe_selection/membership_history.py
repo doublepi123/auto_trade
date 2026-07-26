@@ -34,12 +34,24 @@ class MembershipHistoryCoverage:
     authoritative_symbols: int
     snapshot_only_symbols: tuple[str, ...]
     missing_symbols: tuple[str, ...]
+    historical_symbol_count: int
+    historical_symbols_present: int
+    historical_symbols_missing: tuple[str, ...]
 
     @property
     def authoritative_ratio(self) -> float:
         if self.catalog_size == 0:
             return 0.0
         return self.authoritative_symbols / self.catalog_size
+
+    @property
+    def historical_coverage_ratio(self) -> float:
+        if self.historical_symbol_count == 0:
+            return 0.0
+        return (
+            self.historical_symbols_present
+            / self.historical_symbol_count
+        )
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -50,6 +62,18 @@ class MembershipHistoryCoverage:
                 self.snapshot_only_symbols
             ),
             "missing_symbols": list(self.missing_symbols),
+            "historical_symbol_count": (
+                self.historical_symbol_count
+            ),
+            "historical_symbols_present": (
+                self.historical_symbols_present
+            ),
+            "historical_coverage_ratio": (
+                self.historical_coverage_ratio
+            ),
+            "historical_symbols_missing": list(
+                self.historical_symbols_missing
+            ),
         }
 
 
@@ -118,11 +142,32 @@ class IndexMembershipHistory:
                 snapshot_only.append(candidate.symbol)
             else:
                 missing.append(candidate.symbol)
+        candidate_symbols = {
+            candidate.symbol.removesuffix(".US")
+            for candidate in candidates
+        }
+        historical_symbols = set().union(
+            *(
+                set(symbols)
+                for symbols in self.intervals.values()
+            )
+        )
+        historical_symbols_missing = tuple(
+            sorted(historical_symbols - candidate_symbols)
+        )
         return MembershipHistoryCoverage(
             catalog_size=len(candidates),
             authoritative_symbols=authoritative,
             snapshot_only_symbols=tuple(sorted(snapshot_only)),
             missing_symbols=tuple(sorted(missing)),
+            historical_symbol_count=len(historical_symbols),
+            historical_symbols_present=(
+                len(historical_symbols)
+                - len(historical_symbols_missing)
+            ),
+            historical_symbols_missing=(
+                historical_symbols_missing
+            ),
         )
 
     def metadata(

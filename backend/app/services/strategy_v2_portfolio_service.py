@@ -1960,7 +1960,7 @@ class StrategyV2PortfolioService:
                             "authoritative_ratio": "FINITE_IN_(0,1]",
                             "source_version": "NON_EMPTY",
                             "data_scope": (
-                                "POINT_IN_TIME_CURRENT_CATALOG"
+                                "POINT_IN_TIME_RESEARCH_CATALOG"
                             ),
                         }
                     payload["rotation_weighting"] = rotation_weighting

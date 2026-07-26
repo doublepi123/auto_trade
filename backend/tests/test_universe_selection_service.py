@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from multiprocessing import get_context
 from pathlib import Path
 from typing import Protocol, cast
@@ -16,6 +16,7 @@ from app.core.holiday_calendar import is_market_closed
 from app.domain.universe_selection import (
     DIVERSIFIED_INVERSE_VOLATILITY_VARIANT,
     DIVERSIFIED_SHRINKAGE_ROTATION_VARIANT,
+    HISTORICAL_INDEX_CANDIDATE_CATALOG,
     ROTATION_ALGORITHM_VERSION,
     ROTATION_WALK_FORWARD_VERSION,
     IndexCandidate,
@@ -33,6 +34,9 @@ from app.models import (
 )
 from app.schemas import StrategyV2ShadowConfigUpdate
 from app.services.universe_selection_service import (
+    _HISTORICAL_RESEARCH_BARS_CACHE,
+    _historical_membership_end,
+    _historical_research_candlesticks,
     UniverseSelectionService,
     minimum_peer_observation_dollar_volume,
     observation_pool_overrides,
@@ -54,6 +58,78 @@ _CATALOG = (
         ("DJIA",),
     ),
 )
+
+
+def test_historical_research_bars_use_membership_end_and_cache() -> None:
+    candidate = next(
+        row
+        for row in HISTORICAL_INDEX_CANDIDATE_CATALOG
+        if row.symbol == "PTON.US"
+    )
+
+    class _HistoricalBroker:
+        def __init__(self) -> None:
+            self.boundaries: list[datetime] = []
+
+        def get_candlesticks(
+            self,
+            symbol: str,
+            period: str,
+            count: int,
+        ) -> list[BrokerCandle]:
+            raise AssertionError("latest bars must not be used")
+
+        def get_forward_adjusted_history_candlesticks_before(
+            self,
+            symbol: str,
+            period: str,
+            count: int,
+            before: datetime,
+        ) -> list[BrokerCandle]:
+            self.boundaries.append(before)
+            return [
+                BrokerCandle(
+                    timestamp=datetime(
+                        2022,
+                        1,
+                        21,
+                        tzinfo=timezone.utc,
+                    ),
+                    open=10,
+                    high=11,
+                    low=9,
+                    close=10.5,
+                    volume=1_000_000,
+                    turnover=10_000_000,
+                )
+            ]
+
+    broker = _HistoricalBroker()
+    _HISTORICAL_RESEARCH_BARS_CACHE.clear()
+    try:
+        first = _historical_research_candlesticks(
+            broker,
+            candidate,
+            count=1000,
+        )
+        second = _historical_research_candlesticks(
+            broker,
+            candidate,
+            count=1000,
+        )
+    finally:
+        _HISTORICAL_RESEARCH_BARS_CACHE.clear()
+
+    assert _historical_membership_end(candidate) == date(2022, 1, 24)
+    assert first == second
+    assert len(broker.boundaries) == 1
+    assert broker.boundaries[0] == datetime(
+        2022,
+        1,
+        24,
+        12,
+        tzinfo=timezone.utc,
+    )
 
 
 def _db() -> Session:
@@ -124,7 +200,7 @@ def _validated_rotation_parameters(
         ],
     }
     if point_in_time_shrinkage:
-        evaluation["data_scope"] = "POINT_IN_TIME_CURRENT_CATALOG"
+        evaluation["data_scope"] = "POINT_IN_TIME_RESEARCH_CATALOG"
         return json.dumps({
             "rotation_point_in_time_sensitivity": {
                 "status": "COMPLETE",
@@ -1088,7 +1164,7 @@ def test_refresh_persists_rotation_shadow_evidence() -> None:
         parameters = json.loads(result.run.parameters_json)
         evaluation = parameters["rotation_evaluation"]
         assert evaluation["algorithm_version"] == (
-            "rotation-monthly-open-walk-forward-v5"
+            "rotation-monthly-open-walk-forward-v6"
         )
         assert evaluation["benchmark_symbols"] == [
             "QQQ.US",
@@ -1114,7 +1190,7 @@ def test_refresh_persists_rotation_shadow_evidence() -> None:
         ] == []
         point_in_time_evaluation = point_in_time["evaluation"]
         assert point_in_time_evaluation["data_scope"] == (
-            "POINT_IN_TIME_CURRENT_CATALOG"
+            "POINT_IN_TIME_RESEARCH_CATALOG"
         )
         assert (
             "HISTORICAL_CONSTITUENTS_OMITTED"

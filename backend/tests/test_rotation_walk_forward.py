@@ -191,10 +191,14 @@ def test_point_in_time_membership_filters_future_periods() -> None:
 
     result = _evaluate(membership_history=history)
 
-    assert result.data_scope == "POINT_IN_TIME_CURRENT_CATALOG"
-    assert "HISTORICAL_CONSTITUENTS_OMITTED" in (
+    assert result.data_scope == "POINT_IN_TIME_RESEARCH_CATALOG"
+    assert "HISTORICAL_CONSTITUENTS_OMITTED" not in (
         result.promotion_blockers
     )
+    assert "POINT_IN_TIME_MEMBER_DATA_PARTIAL" not in (
+        result.promotion_blockers
+    )
+    assert result.point_in_time_data_missing_symbols == ()
     assert "CURRENT_CONSTITUENTS_SURVIVORSHIP_BIAS" not in (
         result.promotion_blockers
     )
@@ -202,6 +206,61 @@ def test_point_in_time_membership_filters_future_periods() -> None:
         "FAST.US" not in period.selected_symbols
         for period in result.selected_variant_periods
         if period.signal_date >= date(2024, 1, 1)
+    )
+
+
+def test_point_in_time_reports_member_without_overlapping_data() -> None:
+    available = _candidate("FAST.US", "Semiconductors")
+    unavailable = _candidate("MISSING.US", "Healthcare")
+    history = IndexMembershipHistory(
+        source_version="test-history",
+        effective_start_date=date(2021, 1, 1),
+        catalog_snapshot_date=date(2021, 1, 1),
+        sources=(),
+        intervals={
+            "NASDAQ_100": {
+                "FAST": (MembershipInterval(date(2021, 1, 1), None),),
+                "MISSING": (
+                    MembershipInterval(date(2021, 1, 1), None),
+                ),
+            },
+        },
+        snapshot_overrides={},
+    )
+
+    result = evaluate_rotation_walk_forward(
+        candidates=(available, unavailable),
+        bars_by_symbol={
+            "FAST.US": _bars(drift=0.0025),
+            "MISSING.US": (),
+        },
+        benchmark_bars_by_symbol={
+            "QQQ.US": _bars(drift=0.0005),
+            "DIA.US": _bars(drift=0.0003),
+        },
+        base_config=_config(),
+        variants=(
+            RotationVariant(
+                name="baseline",
+                lookback_bars=252,
+                skip_bars=21,
+                sma_bars=200,
+                max_selected=2,
+                max_per_risk_group=1,
+            ),
+        ),
+        validation_periods=12,
+        membership_history=history,
+    )
+
+    assert result.point_in_time_data_missing_symbols == (
+        "MISSING.US",
+    )
+    assert "POINT_IN_TIME_MEMBER_DATA_PARTIAL" in (
+        result.promotion_blockers
+    )
+    assert "HISTORICAL_CONSTITUENTS_OMITTED" not in (
+        result.promotion_blockers
     )
 
 

@@ -47,7 +47,7 @@ const rotationPerformanceStub = {
 }
 
 const rotationEvaluationStub = {
-  algorithm_version: 'rotation-monthly-open-walk-forward-v5',
+  algorithm_version: 'rotation-monthly-open-walk-forward-v6',
   status: 'COMPLETE',
   benchmark_symbols: ['QQQ.US', 'DIA.US'],
   data_scope: 'CURRENT_CONSTITUENTS_ONLY',
@@ -63,6 +63,7 @@ const rotationEvaluationStub = {
     'CURRENT_CONSTITUENTS_SURVIVORSHIP_BIAS',
     'ROTATION_FORWARD_OBSERVATIONS_REQUIRED',
   ],
+  point_in_time_data_missing_symbols: [],
   variants: [
     {
       variant: {
@@ -163,22 +164,33 @@ const rotationPointInTimeSensitivityStub = {
         license: 'MIT',
       },
     ],
-    catalog_size: 97,
-    authoritative_symbols: 95,
-    authoritative_ratio: 95 / 97,
+    catalog_size: 171,
+    authoritative_symbols: 169,
+    authoritative_ratio: 169 / 171,
     snapshot_only_symbols: ['HONA.US', 'SPCX.US'],
     missing_symbols: [],
+    historical_symbol_count: 169,
+    historical_symbols_present: 169,
+    historical_coverage_ratio: 1,
+    historical_symbols_missing: [],
   },
   evaluation: {
     ...rotationEvaluationStub,
-    data_scope: 'POINT_IN_TIME_CURRENT_CATALOG',
+    data_scope: 'POINT_IN_TIME_RESEARCH_CATALOG',
     selected_variant: 'concentrated_top6_12_1',
     selected_variant_validation_passed: true,
     validated_challenger_variant: 'concentrated_top6_12_1',
     promotion_blockers: [
-      'HISTORICAL_CONSTITUENTS_OMITTED',
       'POINT_IN_TIME_MEMBERSHIP_HISTORY_PARTIAL',
+      'POINT_IN_TIME_MEMBER_DATA_PARTIAL',
       'ROTATION_FORWARD_OBSERVATIONS_REQUIRED',
+    ],
+    point_in_time_data_missing_symbols: [
+      'ATVI.US',
+      'FB.US',
+      'SGEN.US',
+      'SPLK.US',
+      'XLNX.US',
     ],
     variants: [
       {

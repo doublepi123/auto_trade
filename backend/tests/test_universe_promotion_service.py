@@ -132,7 +132,7 @@ def _validated_rotation_parameters(
         ],
     }
     if point_in_time_shrinkage:
-        evaluation["data_scope"] = "POINT_IN_TIME_CURRENT_CATALOG"
+        evaluation["data_scope"] = "POINT_IN_TIME_RESEARCH_CATALOG"
         return json.dumps({
             "rotation_point_in_time_sensitivity": {
                 "status": "COMPLETE",

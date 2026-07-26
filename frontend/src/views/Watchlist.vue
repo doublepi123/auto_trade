@@ -887,6 +887,12 @@
                   生效起点
                   <strong>{{ universeRotationPointInTime.membership_history.effective_start_date }}</strong>
                 </span>
+                <span>
+                  历史成员
+                  <strong data-testid="rotation-point-in-time-historical-coverage">
+                    {{ universeRotationPointInTime.membership_history.historical_symbols_present }}/{{ universeRotationPointInTime.membership_history.historical_symbol_count }}
+                  </strong>
+                </span>
               </div>
             </div>
 
@@ -1071,10 +1077,11 @@
               <span>
                 信号日排除尚未入指的股票
                 · 快照补录 {{ universeRotationPointInTime.membership_history.snapshot_only_symbols.length }}
-                · 缺失 {{ universeRotationPointInTime.membership_history.missing_symbols.length }}
+                · 历史名单缺失 {{ universeRotationPointInTime.membership_history.historical_symbols_missing.length }}
+                · 同期行情缺失 {{ universeRotationPointInTime.evaluation?.point_in_time_data_missing_symbols.length ?? 0 }}
               </span>
               <strong>
-                历史退市或已调出标的仍未补齐，仅作敏感性诊断，不参与晋级或下单。
+                历史成员清单已独立补入研究池；受行情缺口与起始年份限制，仍仅作敏感性诊断，不参与晋级或下单。
               </strong>
             </div>
           </section>
@@ -2609,6 +2616,10 @@ function isRotationWalkForwardEvaluation(
     && value.automatic_promotion_allowed === false
     && Array.isArray(value.promotion_blockers)
     && value.promotion_blockers.every((blocker) => typeof blocker === 'string')
+    && Array.isArray(value.point_in_time_data_missing_symbols)
+    && value.point_in_time_data_missing_symbols.every(
+      (symbol) => typeof symbol === 'string',
+    )
     && Array.isArray(value.variants)
     && value.variants.every(isRotationVariantEvaluation)
   )
@@ -2632,6 +2643,9 @@ function isMembershipHistoryMetadata(
     value.catalog_size,
     value.authoritative_symbols,
     value.authoritative_ratio,
+    value.historical_symbol_count,
+    value.historical_symbols_present,
+    value.historical_coverage_ratio,
   ]
   return (
     typeof value.source_version === 'string'
@@ -2646,6 +2660,10 @@ function isMembershipHistoryMetadata(
     && value.snapshot_only_symbols.every((symbol) => typeof symbol === 'string')
     && Array.isArray(value.missing_symbols)
     && value.missing_symbols.every((symbol) => typeof symbol === 'string')
+    && Array.isArray(value.historical_symbols_missing)
+    && value.historical_symbols_missing.every(
+      (symbol) => typeof symbol === 'string',
+    )
   )
 }
 
