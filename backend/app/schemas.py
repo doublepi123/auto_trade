@@ -1460,6 +1460,8 @@ class DiagnosticLiveSafety(BaseModel):
     stop_loss_pct: float
     max_holding_minutes: int
     opening_warmup_minutes: int = 5
+    live_entry_crossing_required: bool = False
+    live_entry_crossing_max_age_seconds: int = 30
     entry_cutoff_minutes_before_close: int
     flatten_minutes_before_close: int
     llm_shadow_mode: bool

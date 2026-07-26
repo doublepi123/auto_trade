@@ -511,6 +511,20 @@
                 {{ formatAgeSeconds(diagnostics.live_safety.live_regime_max_data_age_seconds) }}
               </span>
             </el-descriptions-item>
+            <el-descriptions-item label="新鲜触线入场">
+              <el-tag
+                :type="diagnostics.live_safety.live_entry_crossing_required ? 'success' : 'warning'"
+                size="small"
+                data-testid="live-entry-crossing-mode"
+              >
+                {{ diagnostics.live_safety.live_entry_crossing_required ? '启用' : '关闭' }}
+              </el-tag>
+            </el-descriptions-item>
+            <el-descriptions-item label="触线证据窗口">
+              <span data-testid="live-entry-crossing-max-age">
+                {{ formatAgeSeconds(diagnostics.live_safety.live_entry_crossing_max_age_seconds) }}
+              </span>
+            </el-descriptions-item>
             <el-descriptions-item label="单标的日内入场">
               <span data-testid="live-max-entries-per-symbol">
                 {{ formatDailyEntryCap(diagnostics.live_safety.live_max_entries_per_symbol_per_day) }}

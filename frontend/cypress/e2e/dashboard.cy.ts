@@ -340,6 +340,8 @@ describe('Dashboard', () => {
           stop_loss_pct: 0.8,
           max_holding_minutes: 45,
           opening_warmup_minutes: 90,
+          live_entry_crossing_required: true,
+          live_entry_crossing_max_age_seconds: 30,
           entry_cutoff_minutes_before_close: 50,
           flatten_minutes_before_close: 20,
           llm_shadow_mode: true,
@@ -413,11 +415,15 @@ describe('Dashboard', () => {
       .and('contain', '45 分钟')
       .and('contain', '市场状态门控')
       .and('contain', '状态数据时效')
+      .and('contain', '新鲜触线入场')
+      .and('contain', '触线证据窗口')
       .and('contain', '单标的日内入场')
       .and('contain', '影子')
       .and('contain', '禁下单')
     cy.get('[data-testid="live-regime-gate-mode"]').should('contain.text', '启用')
     cy.get('[data-testid="live-regime-max-age"]').should('contain.text', '600.0s')
+    cy.get('[data-testid="live-entry-crossing-mode"]').should('contain.text', '启用')
+    cy.get('[data-testid="live-entry-crossing-max-age"]').should('contain.text', '30.0s')
     cy.get('[data-testid="live-max-entries-per-symbol"]').should('contain.text', '2 次')
     cy.get('[data-testid="opening-warmup-minutes"]').should('contain.text', '90 分钟')
   })
@@ -446,6 +452,8 @@ describe('Dashboard', () => {
           stop_loss_pct: 1,
           max_holding_minutes: 60,
           opening_warmup_minutes: 90,
+          live_entry_crossing_required: true,
+          live_entry_crossing_max_age_seconds: 30,
           entry_cutoff_minutes_before_close: 45,
           flatten_minutes_before_close: 15,
           llm_shadow_mode: true,

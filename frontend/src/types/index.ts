@@ -166,6 +166,8 @@ export interface DiagnosticLiveSafety {
   stop_loss_pct: number
   max_holding_minutes: number
   opening_warmup_minutes: number
+  live_entry_crossing_required: boolean
+  live_entry_crossing_max_age_seconds: number
   entry_cutoff_minutes_before_close: number
   flatten_minutes_before_close: number
   llm_shadow_mode: boolean

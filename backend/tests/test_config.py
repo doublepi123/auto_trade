@@ -29,6 +29,8 @@ class TestSettings:
         assert s.live_regime_gate_enabled is False
         assert s.live_regime_max_data_age_seconds == 600
         assert s.live_max_entries_per_symbol_per_day == 1
+        assert s.live_entry_crossing_required is False
+        assert s.live_entry_crossing_max_age_seconds == 30
 
     def test_default_strategy_empty(self) -> None:
         s = Settings()
@@ -253,6 +255,14 @@ class TestSettings:
             "AUTO_TRADE_LIVE_MAX_ENTRIES_PER_SYMBOL_PER_DAY",
             "1",
         )
+        monkeypatch.setenv(
+            "AUTO_TRADE_LIVE_ENTRY_CROSSING_REQUIRED",
+            "true",
+        )
+        monkeypatch.setenv(
+            "AUTO_TRADE_LIVE_ENTRY_CROSSING_MAX_AGE_SECONDS",
+            "45",
+        )
 
         configured = Settings()
 
@@ -275,6 +285,25 @@ class TestSettings:
         assert configured.live_regime_gate_enabled is True
         assert configured.live_regime_max_data_age_seconds == 300
         assert configured.live_max_entries_per_symbol_per_day == 1
+        assert configured.live_entry_crossing_required is True
+        assert configured.live_entry_crossing_max_age_seconds == 45
+
+    @pytest.mark.parametrize(
+        "value",
+        ["4", "301"],
+    )
+    def test_rejects_invalid_live_entry_crossing_window(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        value: str,
+    ) -> None:
+        monkeypatch.setenv(
+            "AUTO_TRADE_LIVE_ENTRY_CROSSING_MAX_AGE_SECONDS",
+            value,
+        )
+
+        with pytest.raises(ValidationError):
+            Settings()
 
     def test_universe_shadow_requires_watchlist_application(
         self,

@@ -229,6 +229,23 @@ class Settings(BaseSettings):
         le=180,
         validation_alias="AUTO_TRADE_TRADING_OPEN_WARMUP_MINUTES",
     )
+    live_entry_crossing_required: bool = Field(
+        default=False,
+        validation_alias="AUTO_TRADE_LIVE_ENTRY_CROSSING_REQUIRED",
+        description=(
+            "Require fresh quote evidence that price crossed the configured "
+            "entry threshold before a position-increasing order. Position "
+            "reductions always bypass it."
+        ),
+    )
+    live_entry_crossing_max_age_seconds: int = Field(
+        default=30,
+        ge=5,
+        le=300,
+        validation_alias=(
+            "AUTO_TRADE_LIVE_ENTRY_CROSSING_MAX_AGE_SECONDS"
+        ),
+    )
     allow_short_entries: bool = Field(
         default=False,
         validation_alias="AUTO_TRADE_ALLOW_SHORT_ENTRIES",

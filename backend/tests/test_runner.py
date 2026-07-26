@@ -77,6 +77,215 @@ class TestAppRunner:
             runner._cash_currency(),
         )
 
+    @staticmethod
+    def _runner_with_primary_quote_runtime() -> AppRunner:
+        runner = AppRunner()
+        runner.engine.params = StrategyParams(
+            symbol="NVDA.US",
+            market="US",
+            buy_low=100.0,
+            sell_high=110.0,
+        )
+        runner._symbol_runtimes = {
+            "NVDA.US": runner._build_symbol_runtime(
+                "NVDA.US",
+                "US",
+                primary=True,
+            )
+        }
+        return runner
+
+    @staticmethod
+    def _remember_test_quote(runner: AppRunner, price: float) -> None:
+        runner._remember_quote(
+            Quote(
+                "NVDA.US",
+                price,
+                price - 0.01,
+                price + 0.01,
+                _fresh_timestamp(),
+            )
+        )
+
+    def test_live_entry_crossing_disabled_and_reductions_bypass(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        runner = self._runner_with_primary_quote_runtime()
+        monkeypatch.setattr(
+            runner_module.settings,
+            "live_entry_crossing_required",
+            False,
+        )
+
+        assert runner._validate_live_entry_crossing("NVDA.US", "BUY") is None
+
+        monkeypatch.setattr(
+            runner_module.settings,
+            "live_entry_crossing_required",
+            True,
+        )
+        assert runner._validate_live_entry_policy("NVDA.US", "SELL", "US") is None
+        assert (
+            runner._validate_live_entry_policy(
+                "NVDA.US",
+                "BUY_TO_COVER",
+                "US",
+            )
+            is None
+        )
+
+    def test_live_entry_crossing_blocks_restart_below_threshold(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        runner = self._runner_with_primary_quote_runtime()
+        monkeypatch.setattr(
+            runner_module.settings,
+            "live_entry_crossing_required",
+            True,
+        )
+        monkeypatch.setattr(
+            runner_module.settings,
+            "live_entry_crossing_max_age_seconds",
+            30,
+        )
+        self._remember_test_quote(runner, 99.8)
+        self._remember_test_quote(runner, 99.7)
+
+        result = runner._validate_live_entry_crossing("NVDA.US", "BUY")
+
+        assert result is not None
+        assert result.skip_category == "REPRICING"
+        assert result.details["entry_policy"] == "FRESH_THRESHOLD_CROSSING"
+        assert result.details["policy_reason"] == "CROSSING_NOT_OBSERVED"
+        assert result.details["threshold"] == 100.0
+        assert result.details["current_price"] == 99.7
+
+    def test_live_entry_crossing_requires_two_fresh_executable_quotes(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        runner = self._runner_with_primary_quote_runtime()
+        monkeypatch.setattr(
+            runner_module.settings,
+            "live_entry_crossing_required",
+            True,
+        )
+        monkeypatch.setattr(
+            runner_module.settings,
+            "live_entry_crossing_max_age_seconds",
+            30,
+        )
+        stale_at = datetime.now(timezone.utc) - timedelta(seconds=31)
+        runner._symbol_runtimes["NVDA.US"].recent_quotes.append(
+            {
+                "symbol": "NVDA.US",
+                "last_price": 100.2,
+                "bid": 100.19,
+                "ask": 100.21,
+                "timestamp": stale_at.isoformat(),
+                "observed_at": stale_at,
+                "trusted": True,
+            }
+        )
+        self._remember_test_quote(runner, 99.8)
+
+        result = runner._validate_live_entry_crossing("NVDA.US", "BUY")
+
+        assert result is not None
+        assert result.details["policy_reason"] == "INSUFFICIENT_FRESH_QUOTES"
+        assert result.details["fresh_quote_count"] == 1
+
+    def test_live_entry_crossing_allows_fresh_buy_downcross(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        runner = self._runner_with_primary_quote_runtime()
+        monkeypatch.setattr(
+            runner_module.settings,
+            "live_entry_crossing_required",
+            True,
+        )
+        monkeypatch.setattr(
+            runner_module.settings,
+            "live_entry_crossing_max_age_seconds",
+            30,
+        )
+        self._remember_test_quote(runner, 100.2)
+        self._remember_test_quote(runner, 99.9)
+
+        assert runner._validate_live_entry_crossing("NVDA.US", "BUY") is None
+
+    def test_quote_trigger_waits_without_consuming_engine_cooldown(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        runner = self._runner_with_primary_quote_runtime()
+        runner._running = True
+        monkeypatch.setattr(
+            runner_module.settings,
+            "live_entry_crossing_required",
+            True,
+        )
+        monkeypatch.setattr(
+            runner_module.settings,
+            "live_entry_crossing_max_age_seconds",
+            30,
+        )
+
+        first = runner._evaluate_quote_trigger(
+            Quote("NVDA.US", 99.8, 99.79, 99.81, _fresh_timestamp())
+        )
+        second = runner._evaluate_quote_trigger(
+            Quote("NVDA.US", 99.7, 99.69, 99.71, _fresh_timestamp())
+        )
+
+        assert first.result is None
+        assert second.result is None
+        assert runner.engine.state == EngineState.FLAT
+        assert runner.engine.last_trigger_at is None
+        assert "fresh entry-threshold crossing was not observed" in (
+            runner.last_action_message
+        )
+
+        runner._evaluate_quote_trigger(
+            Quote("NVDA.US", 100.2, 100.19, 100.21, _fresh_timestamp())
+        )
+        crossed = runner._evaluate_quote_trigger(
+            Quote("NVDA.US", 99.9, 99.89, 99.91, _fresh_timestamp())
+        )
+
+        assert crossed.result is not None
+        assert crossed.result.action == "BUY"
+        assert runner.engine.state == EngineState.LONG
+
+    def test_live_entry_crossing_allows_fresh_short_upcross(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        runner = self._runner_with_primary_quote_runtime()
+        monkeypatch.setattr(
+            runner_module.settings,
+            "live_entry_crossing_required",
+            True,
+        )
+        monkeypatch.setattr(
+            runner_module.settings,
+            "live_entry_crossing_max_age_seconds",
+            30,
+        )
+        self._remember_test_quote(runner, 109.8)
+        self._remember_test_quote(runner, 110.1)
+
+        assert (
+            runner._validate_live_entry_crossing(
+                "NVDA.US",
+                "SELL_SHORT",
+            )
+            is None
+        )
+
     def test_repeated_reconciliation_hazard_revokes_protective_exits(
         self,
         monkeypatch,
@@ -1481,6 +1690,12 @@ class TestAppRunner:
             "opening_warmup_minutes": (
                 runner_module.settings.trading_open_warmup_minutes
             ),
+            "live_entry_crossing_required": (
+                runner_module.settings.live_entry_crossing_required
+            ),
+            "live_entry_crossing_max_age_seconds": (
+                runner_module.settings.live_entry_crossing_max_age_seconds
+            ),
             "entry_cutoff_minutes_before_close": (
                 runner._trade_svc.entry_cutoff_minutes_before_close
             ),
@@ -2432,6 +2647,12 @@ class TestAppRunner:
         assert snapshot["entry_policy"] == {
             "opening_warmup_minutes": (
                 runner_module.settings.trading_open_warmup_minutes
+            ),
+            "fresh_threshold_crossing_required": (
+                runner_module.settings.live_entry_crossing_required
+            ),
+            "fresh_threshold_crossing_max_age_seconds": (
+                runner_module.settings.live_entry_crossing_max_age_seconds
             ),
             "round_trip_slippage_bps": (
                 runner_module.settings.entry_round_trip_slippage_bps

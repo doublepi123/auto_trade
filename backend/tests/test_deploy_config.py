@@ -179,6 +179,8 @@ def test_deploy_files_expose_universe_and_live_regime_controls() -> None:
         "AUTO_TRADE_LIVE_REGIME_GATE_ENABLED",
         "AUTO_TRADE_LIVE_REGIME_MAX_DATA_AGE_SECONDS",
         "AUTO_TRADE_LIVE_MAX_ENTRIES_PER_SYMBOL_PER_DAY",
+        "AUTO_TRADE_LIVE_ENTRY_CROSSING_REQUIRED",
+        "AUTO_TRADE_LIVE_ENTRY_CROSSING_MAX_AGE_SECONDS",
     }
     env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
     for filename in ("docker-compose.yaml", "docker-compose.dockerhub.yaml"):

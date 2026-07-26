@@ -162,6 +162,8 @@ function pausedDiagnostics(pauseReason: string) {
       stop_loss_pct: 1,
       max_holding_minutes: 60,
       opening_warmup_minutes: 90,
+      live_entry_crossing_required: true,
+      live_entry_crossing_max_age_seconds: 30,
       entry_cutoff_minutes_before_close: 45,
       flatten_minutes_before_close: 15,
       llm_shadow_mode: true,

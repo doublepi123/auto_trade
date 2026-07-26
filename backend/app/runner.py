@@ -1263,6 +1263,12 @@ class AppRunner:
                     "opening_warmup_minutes": int(
                         settings.trading_open_warmup_minutes
                     ),
+                    "live_entry_crossing_required": bool(
+                        settings.live_entry_crossing_required
+                    ),
+                    "live_entry_crossing_max_age_seconds": int(
+                        settings.live_entry_crossing_max_age_seconds
+                    ),
                     "entry_cutoff_minutes_before_close": int(
                         self._trade_svc.entry_cutoff_minutes_before_close
                     ),
@@ -1768,6 +1774,34 @@ class AppRunner:
                     else:
                         active_engine.record_price(quote.last_price)
                 else:
+                    prospective_entry_action = ""
+                    current_price = float(quote.last_price)
+                    if (
+                        active_engine.state == EngineState.FLAT
+                        and not active_engine.long_entry_rearm_required
+                    ):
+                        if current_price <= active_engine.params.buy_low:
+                            prospective_entry_action = "BUY"
+                        elif (
+                            active_engine.params.short_selling
+                            and current_price >= active_engine.params.sell_high
+                        ):
+                            prospective_entry_action = "SELL_SHORT"
+                    crossing_block = (
+                        self._validate_live_entry_crossing(
+                            active_engine.params.symbol or quote.symbol,
+                            prospective_entry_action,
+                        )
+                        if prospective_entry_action
+                        else None
+                    )
+                    if crossing_block is not None:
+                        active_engine.record_price(quote.last_price)
+                        self._last_action_message = (
+                            f"{prospective_entry_action} waiting: "
+                            f"{crossing_block.issue}"
+                        )
+                        return decision
                     decision.engine_snapshot = active_engine.snapshot()
                     decision.result = active_engine.update_price(quote.last_price)
                 if decision.result is not None and decision.result.triggered:
@@ -1981,6 +2015,12 @@ class AppRunner:
             "entry_policy": {
                 "opening_warmup_minutes": int(
                     settings.trading_open_warmup_minutes
+                ),
+                "fresh_threshold_crossing_required": bool(
+                    settings.live_entry_crossing_required
+                ),
+                "fresh_threshold_crossing_max_age_seconds": int(
+                    settings.live_entry_crossing_max_age_seconds
                 ),
                 "round_trip_slippage_bps": (
                     settings.entry_round_trip_slippage_bps
@@ -2748,6 +2788,7 @@ class AppRunner:
                 "ask": ask,
                 "timestamp": quote.timestamp,
                 "observed_at": now,
+                "trusted": trusted,
             }
         )
         # Sliding-window prune: deque is already capped by maxlen, so the
@@ -2859,6 +2900,15 @@ class AppRunner:
             LiveEntryPolicyService,
         )
 
+        normalized_action = str(action or "").upper()
+        if normalized_action not in _ENTRY_ACTIONS:
+            return None
+        crossing_result = self._validate_live_entry_crossing(
+            symbol,
+            normalized_action,
+        )
+        if crossing_result is not None:
+            return crossing_result
         with self._db_session() as db:
             return LiveEntryPolicyService(
                 db,
@@ -2869,7 +2919,152 @@ class AppRunner:
                 max_entries_per_symbol_per_day=(
                     settings.live_max_entries_per_symbol_per_day
                 ),
-            ).evaluate(symbol, action, market)
+            ).evaluate(symbol, normalized_action, market)
+
+    def _validate_live_entry_crossing(
+        self,
+        symbol: str,
+        action: str,
+    ) -> EntryPolicyCheckResult | None:
+        normalized_action = str(action or "").upper()
+        if (
+            not settings.live_entry_crossing_required
+            or normalized_action not in _ENTRY_ACTIONS
+        ):
+            return None
+
+        requested_symbol = str(symbol or "").strip().upper()
+        max_age_seconds = int(
+            settings.live_entry_crossing_max_age_seconds
+        )
+        cutoff = datetime.now(timezone.utc) - timedelta(
+            seconds=max_age_seconds
+        )
+        with self._state_lock:
+            runtime = self._symbol_runtimes.get(requested_symbol)
+            if runtime is not None:
+                params = runtime.engine.params
+                candidates = list(runtime.recent_quotes)
+            elif requested_symbol == self.engine.params.symbol:
+                params = self.engine.params
+                candidates = list(self._recent_quotes)
+            else:
+                return self._entry_crossing_block(
+                    requested_symbol,
+                    normalized_action,
+                    "entry symbol runtime is unavailable",
+                    "SYMBOL_RUNTIME_UNAVAILABLE",
+                    max_age_seconds=max_age_seconds,
+                )
+            threshold = float(
+                params.buy_low
+                if normalized_action == "BUY"
+                else params.sell_high
+            )
+        if not math.isfinite(threshold) or threshold <= 0:
+            return self._entry_crossing_block(
+                requested_symbol,
+                normalized_action,
+                "entry threshold is unavailable",
+                "THRESHOLD_UNAVAILABLE",
+                max_age_seconds=max_age_seconds,
+            )
+
+        trusted_quotes: list[dict[str, Any]] = []
+        for item in reversed(candidates):
+            if str(item.get("symbol") or "").strip().upper() != requested_symbol:
+                continue
+            observed_at = item.get("observed_at")
+            if not isinstance(observed_at, datetime):
+                continue
+            normalized_observed_at = (
+                observed_at.replace(tzinfo=timezone.utc)
+                if observed_at.tzinfo is None
+                else observed_at.astimezone(timezone.utc)
+            )
+            if normalized_observed_at < cutoff:
+                break
+            trusted_at_observation = item.get("trusted")
+            if trusted_at_observation is True:
+                trusted_quotes.append(item)
+                continue
+            if trusted_at_observation is False:
+                continue
+            quality = self._evaluate_quote_quality(item)
+            if all(
+                bool(quality[name])
+                for name in (
+                    "price_positive",
+                    "spread_reasonable",
+                    "last_bbo_consistent",
+                    "source_timestamp_fresh",
+                )
+            ):
+                trusted_quotes.append(item)
+
+        if len(trusted_quotes) < 2:
+            return self._entry_crossing_block(
+                requested_symbol,
+                normalized_action,
+                "two fresh executable quotes are required for entry",
+                "INSUFFICIENT_FRESH_QUOTES",
+                threshold=threshold,
+                fresh_quote_count=len(trusted_quotes),
+                max_age_seconds=max_age_seconds,
+            )
+
+        current_price = float(trusted_quotes[0]["last_price"])
+        current_is_entry_side = (
+            current_price <= threshold
+            if normalized_action == "BUY"
+            else current_price >= threshold
+        )
+        crossed = current_is_entry_side and any(
+            (
+                float(older["last_price"]) > threshold
+                and float(newer["last_price"]) <= threshold
+            )
+            if normalized_action == "BUY"
+            else (
+                float(older["last_price"]) < threshold
+                and float(newer["last_price"]) >= threshold
+            )
+            for newer, older in zip(
+                trusted_quotes,
+                trusted_quotes[1:],
+                strict=False,
+            )
+        )
+        if crossed:
+            return None
+        return self._entry_crossing_block(
+            requested_symbol,
+            normalized_action,
+            "fresh entry-threshold crossing was not observed",
+            "CROSSING_NOT_OBSERVED",
+            threshold=threshold,
+            current_price=current_price,
+            fresh_quote_count=len(trusted_quotes),
+            max_age_seconds=max_age_seconds,
+        )
+
+    @staticmethod
+    def _entry_crossing_block(
+        symbol: str,
+        action: str,
+        issue: str,
+        policy_reason: str,
+        **details: object,
+    ) -> EntryPolicyCheckResult:
+        return EntryPolicyCheckResult(
+            issue=f"{issue} for {action} {symbol}",
+            skip_category="REPRICING",
+            details={
+                "entry_policy": "FRESH_THRESHOLD_CROSSING",
+                "policy_reason": policy_reason,
+                **details,
+            },
+        )
 
     def _validate_final_order_quote(
         self,
@@ -6456,6 +6651,7 @@ class AppRunner:
                     "ask": float(quote.ask),
                     "timestamp": quote.timestamp,
                     "observed_at": observed_at,
+                    "trusted": trusted,
                 }
             )
             # Sliding-window prune: deque is bounded by maxlen, so we only
