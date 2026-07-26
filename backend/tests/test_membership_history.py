@@ -67,8 +67,8 @@ def test_membership_history_reports_partial_catalog_coverage() -> None:
         INDEX_CANDIDATE_CATALOG
     )
 
-    assert coverage.catalog_size == 97
-    assert coverage.authoritative_symbols == 95
+    assert coverage.catalog_size == 99
+    assert coverage.authoritative_symbols == 97
     assert coverage.snapshot_only_symbols == (
         "HONA.US",
         "SPCX.US",

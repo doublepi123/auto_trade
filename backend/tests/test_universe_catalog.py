@@ -13,9 +13,9 @@ def test_catalog_tracks_current_verified_index_snapshot() -> None:
     }
 
     assert len(by_symbol) == len(INDEX_CANDIDATE_CATALOG)
-    assert len(by_symbol) == 97
+    assert len(by_symbol) == 99
     assert CATALOG_SOURCE_VERSION == (
-        "nasdaq-100-2026-07-24_djia-2026-06-29_expanded-v4"
+        "nasdaq-100-2026-07-24_djia-2026-06-29_expanded-v5"
     )
     assert {
         "SPCX.US",
@@ -41,6 +41,8 @@ def test_catalog_tracks_current_verified_index_snapshot() -> None:
         "EA.US",
         "GEHC.US",
         "MCHP.US",
+        "MNST.US",
+        "MPWR.US",
         "NXPI.US",
         "PYPL.US",
         "REGN.US",
@@ -51,7 +53,7 @@ def test_catalog_tracks_current_verified_index_snapshot() -> None:
     assert sum(
         "NASDAQ_100" in candidate.memberships
         for candidate in by_symbol.values()
-    ) == 76
+    ) == 78
     assert sum(
         "DJIA" in candidate.memberships
         for candidate in by_symbol.values()
@@ -82,6 +84,13 @@ def test_catalog_collapses_technology_industries_into_one_risk_group() -> None:
 
     assert {
         by_symbol[symbol].risk_group
-        for symbol in ("NVDA.US", "MSFT.US", "IBM.US", "CRWV.US")
+        for symbol in (
+            "NVDA.US",
+            "MSFT.US",
+            "IBM.US",
+            "CRWV.US",
+            "MPWR.US",
+        )
     } == {"Information Technology"}
     assert by_symbol["META.US"].risk_group == "Communication Services"
+    assert by_symbol["MNST.US"].risk_group == "Consumer Staples"

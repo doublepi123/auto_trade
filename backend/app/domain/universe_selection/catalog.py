@@ -5,7 +5,7 @@ from typing import Literal
 
 
 CATALOG_SOURCE_VERSION = (
-    "nasdaq-100-2026-07-24_djia-2026-06-29_expanded-v4"
+    "nasdaq-100-2026-07-24_djia-2026-06-29_expanded-v5"
 )
 
 _RISK_GROUP_BY_SECTOR = {
@@ -196,6 +196,18 @@ INDEX_CANDIDATE_CATALOG: tuple[IndexCandidate, ...] = (
         "MELI.US",
         "MercadoLibre",
         "Consumer Discretionary",
+        ("NASDAQ_100",),
+    ),
+    IndexCandidate(
+        "MNST.US",
+        "Monster Beverage",
+        "Consumer Staples",
+        ("NASDAQ_100",),
+    ),
+    IndexCandidate(
+        "MPWR.US",
+        "Monolithic Power Systems",
+        "Semiconductors",
         ("NASDAQ_100",),
     ),
     IndexCandidate(
