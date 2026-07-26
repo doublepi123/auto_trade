@@ -10,7 +10,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation as _DecimalInvalidOp
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, cast
 from zoneinfo import ZoneInfo
 
 from app.config import settings
@@ -117,6 +117,23 @@ class BrokerCandle:
     close: float
     volume: float
     turnover: float = 0.0
+
+
+class _IncompleteCandlestickPayload(OSError):
+    def __init__(
+        self,
+        *,
+        candles: list[BrokerCandle],
+        symbol: str,
+        period: str,
+        dropped: int,
+        received: int,
+    ) -> None:
+        super().__init__(
+            f"incomplete {period} candlestick payload for {symbol}: "
+            f"dropped={dropped}, received={received}"
+        )
+        self.candles = candles
 
 
 @dataclass
@@ -742,6 +759,7 @@ def _normalize_candlestick_response(
             dropped += 1
             continue
         candles.append(candle)
+    candles.sort(key=lambda candle: candle.timestamp)
     if dropped:
         logger.warning(
             "dropped %d invalid %s candlesticks for %s (received=%d)",
@@ -750,7 +768,13 @@ def _normalize_candlestick_response(
             symbol,
             len(items),
         )
-    candles.sort(key=lambda candle: candle.timestamp)
+        raise _IncompleteCandlestickPayload(
+            candles=candles,
+            symbol=symbol,
+            period=period,
+            dropped=dropped,
+            received=len(items),
+        )
     return candles
 
 
@@ -940,6 +964,27 @@ class BrokerGateway:
                 time.sleep(delay_s)
         raise RuntimeError("unreachable")
 
+    def _call_candlesticks_with_retry(
+        self,
+        fn: Callable[[], list[BrokerCandle]],
+        *,
+        op: str,
+    ) -> list[BrokerCandle]:
+        try:
+            return cast(
+                list[BrokerCandle],
+                self._call_with_retry(
+                    fn,
+                    op=op,
+                    max_retries=settings.broker_quote_retry_max,
+                    base_ms=settings.broker_retry_base_ms,
+                ),
+            )
+        except _IncompleteCandlestickPayload as exc:
+            # Preserve the established fail-closed behavior after the bounded
+            # retry: invalid rows stay out, while valid rows remain usable.
+            return exc.candles
+
     def _init_clients(self) -> None:
         with self._lock:
             if self._quote_ctx is None:
@@ -951,11 +996,9 @@ class BrokerGateway:
 
     def get_candlesticks(self, symbol: str, period: str, count: int) -> list[BrokerCandle]:
         """Fetch recent candlesticks. ``period`` is one of ``DAY``, ``MIN_1``, ``MIN_5``, etc."""
-        return self._call_with_retry(
+        return self._call_candlesticks_with_retry(
             lambda: self._get_candlesticks_inner(symbol, period, count),
             op="get_candlesticks",
-            max_retries=settings.broker_quote_retry_max,
-            base_ms=settings.broker_retry_base_ms,
         )
 
     def get_forward_adjusted_candlesticks(
@@ -965,7 +1008,7 @@ class BrokerGateway:
         count: int,
     ) -> list[BrokerCandle]:
         """Fetch candles adjusted to the latest share basis for research features."""
-        return self._call_with_retry(
+        return self._call_candlesticks_with_retry(
             lambda: self._get_candlesticks_inner(
                 symbol,
                 period,
@@ -973,8 +1016,6 @@ class BrokerGateway:
                 adjustment="ForwardAdjust",
             ),
             op="get_forward_adjusted_candlesticks",
-            max_retries=settings.broker_quote_retry_max,
-            base_ms=settings.broker_retry_base_ms,
         )
 
     def _get_candlesticks_inner(
@@ -1022,7 +1063,7 @@ class BrokerGateway:
         after: datetime,
     ) -> list[BrokerCandle]:
         """Fetch a forward historical page beginning at ``after``."""
-        return self._call_with_retry(
+        return self._call_candlesticks_with_retry(
             lambda: self._get_history_candlesticks_by_offset_inner(
                 symbol,
                 period,
@@ -1030,8 +1071,6 @@ class BrokerGateway:
                 after,
             ),
             op="get_history_candlesticks_by_offset",
-            max_retries=settings.broker_quote_retry_max,
-            base_ms=settings.broker_retry_base_ms,
         )
 
     def get_history_candlesticks_before(
@@ -1042,7 +1081,7 @@ class BrokerGateway:
         before: datetime,
     ) -> list[BrokerCandle]:
         """Fetch the historical page immediately preceding ``before``."""
-        return self._call_with_retry(
+        return self._call_candlesticks_with_retry(
             lambda: self._get_history_candlesticks_by_offset_inner(
                 symbol,
                 period,
@@ -1051,8 +1090,6 @@ class BrokerGateway:
                 forward=False,
             ),
             op="get_history_candlesticks_before",
-            max_retries=settings.broker_quote_retry_max,
-            base_ms=settings.broker_retry_base_ms,
         )
 
     def get_forward_adjusted_history_candlesticks_by_offset(
@@ -1063,7 +1100,7 @@ class BrokerGateway:
         after: datetime,
     ) -> list[BrokerCandle]:
         """Fetch a forward historical page adjusted to the latest share basis."""
-        return self._call_with_retry(
+        return self._call_candlesticks_with_retry(
             lambda: self._get_history_candlesticks_by_offset_inner(
                 symbol,
                 period,
@@ -1072,8 +1109,6 @@ class BrokerGateway:
                 adjustment="ForwardAdjust",
             ),
             op="get_forward_adjusted_history_candlesticks_by_offset",
-            max_retries=settings.broker_quote_retry_max,
-            base_ms=settings.broker_retry_base_ms,
         )
 
     def get_forward_adjusted_history_candlesticks_before(
@@ -1084,7 +1119,7 @@ class BrokerGateway:
         before: datetime,
     ) -> list[BrokerCandle]:
         """Fetch a backward historical page adjusted to the latest share basis."""
-        return self._call_with_retry(
+        return self._call_candlesticks_with_retry(
             lambda: self._get_history_candlesticks_by_offset_inner(
                 symbol,
                 period,
@@ -1094,8 +1129,6 @@ class BrokerGateway:
                 adjustment="ForwardAdjust",
             ),
             op="get_forward_adjusted_history_candlesticks_before",
-            max_retries=settings.broker_quote_retry_max,
-            base_ms=settings.broker_retry_base_ms,
         )
 
     def _get_history_candlesticks_by_offset_inner(

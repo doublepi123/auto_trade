@@ -1289,18 +1289,77 @@ class TestBrokerGateway:
                 self.turnover = 1000
 
         class QuoteContext:
+            calls = 0
+
             def candlesticks(self, _symbol, _period, _count, _adjust):
+                self.calls += 1
                 return [Candle(30, -1), Candle(31, 100)]
 
         monkeypatch.setattr(broker_module, "_import_openapi", lambda: FakeModule)
+        monkeypatch.setattr(broker_module.settings, "broker_quote_retry_max", 1)
+        monkeypatch.setattr(broker_module.settings, "broker_retry_base_ms", 0)
         gw = BrokerGateway()
-        gw._quote_ctx = QuoteContext()
+        quote_context = QuoteContext()
+        gw._quote_ctx = quote_context
         gw._trade_ctx = object()
 
         result = gw.get_candlesticks("AAPL.US", "MIN_1", 2)
 
         assert [item.volume for item in result] == [100]
+        assert quote_context.calls == 2
         assert "dropped 1 invalid MIN_1 candlesticks for AAPL.US" in caplog.text
+
+    def test_get_candlesticks_recovers_transient_invalid_upstream_ohlcv(
+        self,
+        monkeypatch,
+    ) -> None:
+        class FakeAdjust:
+            NoAdjust = "NO_ADJUST"
+
+        class FakePeriod:
+            Min_1 = "MIN_1"
+
+        class FakeModule:
+            Period = FakePeriod
+            AdjustType = FakeAdjust
+
+        class Candle:
+            def __init__(self, minute: int, volume: float) -> None:
+                self.timestamp = datetime(
+                    2026,
+                    7,
+                    13,
+                    13,
+                    minute,
+                    tzinfo=timezone.utc,
+                )
+                self.open = 100
+                self.high = 101
+                self.low = 99
+                self.close = 100.5
+                self.volume = volume
+                self.turnover = 1000
+
+        class QuoteContext:
+            calls = 0
+
+            def candlesticks(self, _symbol, _period, _count, _adjust):
+                self.calls += 1
+                volume = -1 if self.calls == 1 else 100
+                return [Candle(30, volume), Candle(31, 100)]
+
+        monkeypatch.setattr(broker_module, "_import_openapi", lambda: FakeModule)
+        monkeypatch.setattr(broker_module.settings, "broker_quote_retry_max", 1)
+        monkeypatch.setattr(broker_module.settings, "broker_retry_base_ms", 0)
+        gw = BrokerGateway()
+        quote_context = QuoteContext()
+        gw._quote_ctx = quote_context
+        gw._trade_ctx = object()
+
+        result = gw.get_candlesticks("AAPL.US", "MIN_1", 2)
+
+        assert [item.volume for item in result] == [100, 100]
+        assert quote_context.calls == 2
 
     def test_get_candlesticks_handles_zero_count(self) -> None:
         gw = BrokerGateway()

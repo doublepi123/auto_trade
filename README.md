@@ -88,7 +88,7 @@
 - 默认 `ANY`，用户主动切到 `RTH_ONLY` 才生效；RTH 判定包含 2024–2027 年 NYSE / HKEX 静态休市日历和提前收盘时间
 
 ### 券商韧性
-- `BrokerGateway._call_with_retry` 分档退避：订单（默认 3 次）全量指数退避；行情（默认 1 次）轻量重试
+- `BrokerGateway._call_with_retry` 分档退避：订单（默认 3 次）全量指数退避；行情（默认 1 次）轻量重试；K 线响应含非法 OHLCV 时也先按同一上限重拉，仍异常才过滤坏行并保留有效行
 - 每次重试写 `audit_logs.action=BROKER_RETRY`；重试耗尽走原 `_is_auto_resumable_pause_reason` → pause 路径
 
 ### 回测
