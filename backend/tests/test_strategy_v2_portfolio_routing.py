@@ -85,6 +85,7 @@ def _candidate(
         "SELECTED_ZSCORE_OBS_75BPS_POOL",
         "ROTATION_ZSCORE_OBS_75BPS_POOL",
         "ROTATION_IV_WEIGHTED_ZSCORE_POOL",
+        "ROTATION_IV_NET_EDGE_ZSCORE_POOL",
     ),
 )
 def test_eligible_candidate_has_no_rejection_reasons(
@@ -120,7 +121,16 @@ def test_eligible_candidate_has_no_rejection_reasons(
     ) == ()
 
 
-def test_weighted_rotation_rejections_preserve_independent_blockers() -> None:
+@pytest.mark.parametrize(
+    "policy",
+    (
+        "ROTATION_IV_WEIGHTED_ZSCORE_POOL",
+        "ROTATION_IV_NET_EDGE_ZSCORE_POOL",
+    ),
+)
+def test_target_weight_rotation_rejections_preserve_independent_blockers(
+    policy: PortfolioRoutingPolicy,
+) -> None:
     candidate = _candidate(
         "AAPL.US",
         1,
@@ -134,7 +144,7 @@ def test_weighted_rotation_rejections_preserve_independent_blockers() -> None:
 
     reasons = portfolio_candidate_rejection_reasons(
         candidate,
-        policy="ROTATION_IV_WEIGHTED_ZSCORE_POOL",
+        policy=policy,
         primary_symbol="NVDA.US",
     )
 
@@ -758,6 +768,65 @@ def test_inverse_volatility_rotation_weights_zscore_priority() -> None:
 
     assert [item.symbol for item in ranked] == ["AEP.US", "CAT.US"]
     assert ranked[0].rotation_weighted_zscore_score == pytest.approx(28.8)
+
+
+def test_inverse_volatility_rotation_net_edge_priority() -> None:
+    ranked = rank_portfolio_candidates(
+        [
+            _candidate(
+                "CAT.US",
+                1,
+                rotation_selected=True,
+                rotation_rank=1,
+                rotation_score=90,
+                rotation_target_weight_pct=24,
+                residual_1m_bps=-35,
+                residual_5m_bps=-40,
+                zscore_1m=-2.5,
+                zscore_5m=-2.0,
+                round_trip_cost_bps=14,
+                observed_round_trip_cost_bps=20,
+                stop_distance_bps=45,
+            ),
+            _candidate(
+                "AEP.US",
+                2,
+                rotation_selected=True,
+                rotation_rank=2,
+                rotation_score=80,
+                rotation_target_weight_pct=8,
+                residual_1m_bps=-55,
+                residual_5m_bps=-60,
+                zscore_1m=-1.5,
+                zscore_5m=-1.2,
+                round_trip_cost_bps=14,
+                observed_round_trip_cost_bps=20,
+                stop_distance_bps=45,
+            ),
+            _candidate(
+                "GS.US",
+                3,
+                rotation_selected=True,
+                rotation_rank=3,
+                rotation_score=70,
+                residual_1m_bps=-70,
+                residual_5m_bps=-70,
+                zscore_1m=-3.0,
+                zscore_5m=-2.5,
+                round_trip_cost_bps=14,
+                observed_round_trip_cost_bps=20,
+                stop_distance_bps=45,
+            ),
+        ],
+        policy="ROTATION_IV_NET_EDGE_ZSCORE_POOL",
+        primary_symbol="NVDA.US",
+    )
+
+    assert [item.symbol for item in ranked] == ["AEP.US", "CAT.US"]
+    assert [
+        item.observed_cost_fixed_75bps_vwap_edge_score_bps
+        for item in ranked
+    ] == [35, 15]
 
 
 @pytest.mark.parametrize(

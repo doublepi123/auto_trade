@@ -147,6 +147,13 @@ _ROUTING_SPECS = (
             "zscore-observed-cost-75bps-v1"
         ),
     ),
+    _RoutingSpec(
+        policy="ROTATION_IV_NET_EDGE_ZSCORE_POOL",
+        algorithm_version=(
+            "strategy-v2-portfolio-rotation-inverse-vol-target-net-"
+            "vwap-edge-zscore-observed-cost-75bps-v1"
+        ),
+    ),
 )
 _EVALUATOR_VERSION = "strategy-v2-single-capital-slot-forward-router-v2"
 _CURRENT_ROUTING_ALGORITHM_VERSIONS = tuple(
@@ -172,9 +179,17 @@ _SELECTED_ZSCORE_OBSERVED_COST_POLICIES = {
 _ROTATION_ZSCORE_OBSERVED_COST_POLICIES = {
     "ROTATION_ZSCORE_OBS_75BPS_POOL",
     "ROTATION_IV_WEIGHTED_ZSCORE_POOL",
+    "ROTATION_IV_NET_EDGE_ZSCORE_POOL",
+}
+_ROTATION_TARGET_WEIGHT_POLICIES = {
+    "ROTATION_IV_WEIGHTED_ZSCORE_POOL",
+    "ROTATION_IV_NET_EDGE_ZSCORE_POOL",
 }
 _ROTATION_WEIGHTED_ZSCORE_POLICIES = {
     "ROTATION_IV_WEIGHTED_ZSCORE_POOL",
+}
+_ROTATION_NET_EDGE_ZSCORE_POLICIES = {
+    "ROTATION_IV_NET_EDGE_ZSCORE_POOL",
 }
 _ZSCORE_OBSERVED_COST_POLICIES = (
     _SELECTED_ZSCORE_OBSERVED_COST_POLICIES
@@ -432,7 +447,7 @@ class StrategyV2PortfolioService:
                 ),
                 include_rotation_weight=(
                     registration.policy
-                    in _ROTATION_WEIGHTED_ZSCORE_POLICIES
+                    in _ROTATION_TARGET_WEIGHT_POLICIES
                 ),
             )
             ranked = rank_portfolio_candidates(
@@ -462,7 +477,7 @@ class StrategyV2PortfolioService:
                         ),
                         include_rotation_weight=(
                             registration.policy
-                            in _ROTATION_WEIGHTED_ZSCORE_POLICIES
+                            in _ROTATION_TARGET_WEIGHT_POLICIES
                         ),
                     )
                     for item in ranked
@@ -512,7 +527,7 @@ class StrategyV2PortfolioService:
                             ),
                             include_rotation_weight=(
                                 registration.policy
-                                in _ROTATION_WEIGHTED_ZSCORE_POLICIES
+                                in _ROTATION_TARGET_WEIGHT_POLICIES
                             ),
                             rejection_reasons=(
                                 portfolio_candidate_rejection_reasons(
@@ -1820,7 +1835,7 @@ class StrategyV2PortfolioService:
                 payload["rotation_algorithm_version"] = (
                     ROTATION_ALGORITHM_VERSION
                 )
-                if spec.policy in _ROTATION_WEIGHTED_ZSCORE_POLICIES:
+                if spec.policy in _ROTATION_TARGET_WEIGHT_POLICIES:
                     payload["rotation_weighting"] = {
                         "evaluation_version": (
                             ROTATION_WALK_FORWARD_VERSION
@@ -1884,18 +1899,27 @@ class StrategyV2PortfolioService:
                 "bounds": "INCLUSIVE",
                 "zscore_sign": "STRICTLY_NEGATIVE_BOTH_HORIZONS",
                 "ranking_score": (
-                    "MIN_ABSOLUTE_NEGATIVE_ZSCORE_ACROSS_1M_AND_5M_"
-                    "TIMES_FROZEN_TARGET_WEIGHT_PCT"
-                    if spec.policy in _ROTATION_WEIGHTED_ZSCORE_POLICIES
+                    "OBSERVED_COST_ADJUSTED_VWAP_DISCOUNT_BPS"
+                    if spec.policy in _ROTATION_NET_EDGE_ZSCORE_POLICIES
                     else (
-                        "MIN_ABSOLUTE_NEGATIVE_ZSCORE_ACROSS_1M_AND_5M"
+                        "MIN_ABSOLUTE_NEGATIVE_ZSCORE_ACROSS_1M_AND_5M_"
+                        "TIMES_FROZEN_TARGET_WEIGHT_PCT"
+                        if spec.policy in _ROTATION_WEIGHTED_ZSCORE_POLICIES
+                        else (
+                            "MIN_ABSOLUTE_NEGATIVE_ZSCORE_ACROSS_1M_"
+                            "AND_5M"
+                        )
                     )
                 ),
                 "ranking_tiebreaker": (
-                    "UNWEIGHTED_ZSCORE_THEN_OBSERVED_COST_ADJUSTED_"
-                    "VWAP_DISCOUNT_BPS"
-                    if spec.policy in _ROTATION_WEIGHTED_ZSCORE_POLICIES
-                    else "OBSERVED_COST_ADJUSTED_VWAP_DISCOUNT_BPS"
+                    "UNWEIGHTED_ZSCORE_THEN_ROTATION_RANK"
+                    if spec.policy in _ROTATION_NET_EDGE_ZSCORE_POLICIES
+                    else (
+                        "UNWEIGHTED_ZSCORE_THEN_OBSERVED_COST_ADJUSTED_"
+                        "VWAP_DISCOUNT_BPS"
+                        if spec.policy in _ROTATION_WEIGHTED_ZSCORE_POLICIES
+                        else "OBSERVED_COST_ADJUSTED_VWAP_DISCOUNT_BPS"
+                    )
                 ),
             }
         elif spec.policy in _OBSERVED_COST_TO_75BPS_VWAP_EDGE_POLICIES:
@@ -1998,6 +2022,7 @@ def _routing_policy(value: str) -> PortfolioRoutingPolicy:
         "SELECTED_ZSCORE_OBS_75BPS_POOL",
         "ROTATION_ZSCORE_OBS_75BPS_POOL",
         "ROTATION_IV_WEIGHTED_ZSCORE_POOL",
+        "ROTATION_IV_NET_EDGE_ZSCORE_POOL",
     }:
         raise ValueError(f"unsupported portfolio routing policy: {value}")
     return cast(PortfolioRoutingPolicy, value)

@@ -380,7 +380,7 @@ class TestStrategyV2PortfolioService:
             registrations = db.query(
                 StrategyV2PortfolioRegistration
             ).all()
-            assert len(registrations) == 16
+            assert len(registrations) == 17
             assert {
                 row.eligible_after.replace(tzinfo=timezone.utc)
                 for row in registrations
@@ -425,6 +425,11 @@ class TestStrategyV2PortfolioService:
                 for row in registrations
                 if row.policy == "ROTATION_IV_WEIGHTED_ZSCORE_POOL"
             )
+            net_edge_rotation_zscore = next(
+                row
+                for row in registrations
+                if row.policy == "ROTATION_IV_NET_EDGE_ZSCORE_POOL"
+            )
             assert risk_group_v1.evaluator_digest == (
                 "9fa13dbedfbeb508e4b3ecca23d1a63c7"
                 "fe6c559dc71356922dda4c11528806e"
@@ -453,6 +458,11 @@ class TestStrategyV2PortfolioService:
             assert weighted_rotation_zscore.evaluator_digest not in {
                 selected_zscore.evaluator_digest,
                 rotation_zscore.evaluator_digest,
+            }
+            assert net_edge_rotation_zscore.evaluator_digest not in {
+                selected_zscore.evaluator_digest,
+                rotation_zscore.evaluator_digest,
+                weighted_rotation_zscore.evaluator_digest,
             }
             assert db.query(
                 StrategyV2PortfolioObservation
@@ -483,7 +493,7 @@ class TestStrategyV2PortfolioService:
             )
             report = service.get_report("NVDA.US")
 
-            assert len(report.variants) == 16
+            assert len(report.variants) == 17
             assert sum(
                 row.algorithm_version.endswith("-v2")
                 for row in report.variants
@@ -674,6 +684,7 @@ class TestStrategyV2PortfolioService:
                 "SELECTED_ZSCORE_OBS_75BPS_POOL": "",
                 "ROTATION_ZSCORE_OBS_75BPS_POOL": "",
                 "ROTATION_IV_WEIGHTED_ZSCORE_POOL": "",
+                "ROTATION_IV_NET_EDGE_ZSCORE_POOL": "",
             }
 
             self._signal(
@@ -690,7 +701,7 @@ class TestStrategyV2PortfolioService:
                 StrategyV2PortfolioObservation.signal_at
                 == _FIRST_SIGNAL + timedelta(minutes=2)
             ).all()
-            assert len(overlap_rows) == 16
+            assert len(overlap_rows) == 17
             registrations_by_id = {
                 row.id: row.policy
                 for row in db.query(
@@ -720,6 +731,7 @@ class TestStrategyV2PortfolioService:
                 "SELECTED_ZSCORE_OBS_75BPS_POOL": "NO_ELIGIBLE",
                 "ROTATION_ZSCORE_OBS_75BPS_POOL": "NO_ELIGIBLE",
                 "ROTATION_IV_WEIGHTED_ZSCORE_POOL": "NO_ELIGIBLE",
+                "ROTATION_IV_NET_EDGE_ZSCORE_POOL": "NO_ELIGIBLE",
             }
 
             exit_at = _FIRST_SIGNAL + timedelta(minutes=5)
@@ -1018,6 +1030,7 @@ class TestStrategyV2PortfolioService:
                 "SELECTED_ZSCORE_OBS_75BPS_POOL",
                 "ROTATION_ZSCORE_OBS_75BPS_POOL",
                 "ROTATION_IV_WEIGHTED_ZSCORE_POOL",
+                "ROTATION_IV_NET_EDGE_ZSCORE_POOL",
             ):
                 observation = db.query(
                     StrategyV2PortfolioObservation
@@ -1274,45 +1287,48 @@ class TestStrategyV2PortfolioService:
                 rotation_variant.edge_filter
                 == "ZSCORE_OBS_COST_TO_75BPS"
             )
-            weighted_registration = db.query(
-                StrategyV2PortfolioRegistration
-            ).filter(
-                StrategyV2PortfolioRegistration.policy
-                == "ROTATION_IV_WEIGHTED_ZSCORE_POOL"
-            ).one()
-            weighted_observation = db.query(
-                StrategyV2PortfolioObservation
-            ).filter(
-                StrategyV2PortfolioObservation.registration_id
-                == weighted_registration.id
-            ).one()
-            assert weighted_observation.status == "NO_ELIGIBLE"
-            weighted_candidates = json.loads(
-                weighted_observation.candidates_json
-            )
-            assert [
-                row["symbol"] for row in weighted_candidates
-            ] == ["AAPL.US", "MSFT.US"]
-            assert all(
-                "MISSING_ROTATION_TARGET_WEIGHT"
-                in row["rejection_reasons"]
-                for row in weighted_candidates
-            )
-            weighted_metrics = next(
-                row.metrics
-                for row in service.get_report("NVDA.US").variants
-                if row.policy == "ROTATION_IV_WEIGHTED_ZSCORE_POOL"
-            )
-            assert weighted_metrics.diagnosed_no_eligible == 1
-            assert weighted_metrics.no_causal_signal_groups == 0
-            assert (
-                weighted_metrics.rejection_counts[
+            for policy in (
+                "ROTATION_IV_WEIGHTED_ZSCORE_POOL",
+                "ROTATION_IV_NET_EDGE_ZSCORE_POOL",
+            ):
+                registration = db.query(
+                    StrategyV2PortfolioRegistration
+                ).filter(
+                    StrategyV2PortfolioRegistration.policy == policy
+                ).one()
+                observation = db.query(
+                    StrategyV2PortfolioObservation
+                ).filter(
+                    StrategyV2PortfolioObservation.registration_id
+                    == registration.id
+                ).one()
+                assert observation.status == "NO_ELIGIBLE"
+                diagnostic_candidates = json.loads(
+                    observation.candidates_json
+                )
+                assert [
+                    row["symbol"] for row in diagnostic_candidates
+                ] == ["AAPL.US", "MSFT.US"]
+                assert all(
                     "MISSING_ROTATION_TARGET_WEIGHT"
-                ]
-                == 2
-            )
+                    in row["rejection_reasons"]
+                    for row in diagnostic_candidates
+                )
+                metrics = next(
+                    row.metrics
+                    for row in service.get_report("NVDA.US").variants
+                    if row.policy == policy
+                )
+                assert metrics.diagnosed_no_eligible == 1
+                assert metrics.no_causal_signal_groups == 0
+                assert (
+                    metrics.rejection_counts[
+                        "MISSING_ROTATION_TARGET_WEIGHT"
+                    ]
+                    == 2
+                )
 
-    def test_validated_inverse_volatility_weights_rotation_priority(
+    def test_validated_inverse_volatility_routes_compare_priority(
         self,
     ) -> None:
         with self._db() as db:
@@ -1333,11 +1349,11 @@ class TestStrategyV2PortfolioService:
                 db,
                 "IBM.US",
                 _FIRST_SIGNAL,
-                close_price=99.5,
+                close_price=99.7,
                 vwap_1m=100,
                 vwap_5m=100,
-                zscore_1m=-1.5,
-                zscore_5m=-1.2,
+                zscore_1m=-2.5,
+                zscore_5m=-2.0,
             )
             self._signal(
                 db,
@@ -1346,8 +1362,8 @@ class TestStrategyV2PortfolioService:
                 close_price=99.5,
                 vwap_1m=100,
                 vwap_5m=100,
-                zscore_1m=-2.5,
-                zscore_5m=-2.0,
+                zscore_1m=-1.5,
+                zscore_5m=-1.2,
             )
 
             service.advance(
@@ -1376,10 +1392,19 @@ class TestStrategyV2PortfolioService:
                     "ROTATION_ZSCORE_OBS_75BPS_POOL"
                 ].id
             ).one()
+            net_edge = db.query(
+                StrategyV2PortfolioObservation
+            ).filter(
+                StrategyV2PortfolioObservation.registration_id
+                == registrations[
+                    "ROTATION_IV_NET_EDGE_ZSCORE_POOL"
+                ].id
+            ).one()
 
             assert weighted.status == "PENDING_ENTRY"
             assert weighted.selected_symbol == "IBM.US"
-            assert unweighted.selected_symbol == "MSFT.US"
+            assert unweighted.selected_symbol == "IBM.US"
+            assert net_edge.selected_symbol == "MSFT.US"
             candidates = json.loads(weighted.candidates_json)
             assert [row["symbol"] for row in candidates] == [
                 "IBM.US",
@@ -1387,12 +1412,19 @@ class TestStrategyV2PortfolioService:
             ]
             assert candidates[0]["rotation_target_weight_pct"] == 25
             assert candidates[1]["rotation_target_weight_pct"] == 10
-            variant = next(
-                row
+            net_edge_candidates = json.loads(net_edge.candidates_json)
+            assert [row["symbol"] for row in net_edge_candidates] == [
+                "MSFT.US",
+                "IBM.US",
+            ]
+            assert all(
+                row.edge_filter == "ZSCORE_OBS_COST_TO_75BPS"
                 for row in service.get_report("NVDA.US").variants
-                if row.policy == "ROTATION_IV_WEIGHTED_ZSCORE_POOL"
+                if row.policy in {
+                    "ROTATION_IV_WEIGHTED_ZSCORE_POOL",
+                    "ROTATION_IV_NET_EDGE_ZSCORE_POOL",
+                }
             )
-            assert variant.edge_filter == "ZSCORE_OBS_COST_TO_75BPS"
 
     def test_inverse_volatility_targets_fail_closed_on_invalid_context(
         self,

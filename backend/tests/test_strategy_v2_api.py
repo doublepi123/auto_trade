@@ -260,7 +260,7 @@ class TestStrategyV2ShadowApi:
         assert body["automatic_promotion_allowed"] is False
         assert body["historical_backfill_allowed"] is False
         assert body["capital_slots"] == 1
-        assert len(body["variants"]) == 16
+        assert len(body["variants"]) == 17
         assert all(
             item["metrics"]["diagnosed_no_eligible"] == 0
             and item["metrics"]["no_causal_signal_groups"] == 0
@@ -286,6 +286,7 @@ class TestStrategyV2ShadowApi:
             "SELECTED_ZSCORE_OBS_75BPS_POOL",
             "ROTATION_ZSCORE_OBS_75BPS_POOL",
             "ROTATION_IV_WEIGHTED_ZSCORE_POOL",
+            "ROTATION_IV_NET_EDGE_ZSCORE_POOL",
         }
         assert {
             item["edge_filter"]
@@ -386,6 +387,15 @@ class TestStrategyV2ShadowApi:
         )
         assert (
             weighted_rotation_zscore["edge_filter"]
+            == "ZSCORE_OBS_COST_TO_75BPS"
+        )
+        net_edge_rotation_zscore = next(
+            item
+            for item in body["variants"]
+            if item["policy"] == "ROTATION_IV_NET_EDGE_ZSCORE_POOL"
+        )
+        assert (
+            net_edge_rotation_zscore["edge_filter"]
             == "ZSCORE_OBS_COST_TO_75BPS"
         )
 
