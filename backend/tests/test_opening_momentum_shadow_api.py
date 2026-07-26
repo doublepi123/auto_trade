@@ -100,12 +100,22 @@ class TestOpeningMomentumShadowApi:
             for item in response.json()["variants"]
         }
         reversal = variants["REVERSAL_CHALLENGER"]
+        early = variants["EARLY_BROAD_CHALLENGER"]
+        assert early["universe_source"] == "OPENING_EARLY_BROAD"
+        assert early["signal_minutes"] == 3
+        assert early["minimum_market_return_bps"] == -50.0
+        assert early["minimum_candidate_return_bps"] == 50.0
+        assert early["minimum_excess_return_bps"] == 25.0
+        assert early["minimum_data_coverage"] == 0.95
+        assert early["holding_minutes"] == 120
         assert reversal["universe_source"] == "OPENING_REVERSAL"
         assert (
             reversal["algorithm_version"]
             == "cross-sectional-opening-reversal-v1"
         )
         assert reversal["minimum_market_return_bps"] == -25.0
+        assert reversal["signal_minutes"] == 30
+        assert reversal["minimum_data_coverage"] == 1.0
         assert reversal["holding_minutes"] == 30
         assert reversal["comparison"] is not None
         assert reversal["comparison"]["promotion_ready"] is False

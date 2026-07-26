@@ -38,6 +38,7 @@ from app.domain.universe_selection import (
 )
 from app.models import (
     OpeningMomentumShadowRun,
+    StrategyV2ShadowConfig,
     UniverseSelectionCandidate,
     UniverseSelectionRun,
 )
@@ -77,6 +78,12 @@ _LAST_FIVE_ONLY_SOURCE = "OPENING_CONTINUATION_LAST5_ONLY"
 _LAST_FIVE_ONLY_ALGORITHM_VERSION = (
     f"{_CONTINUATION_ALGORITHM_VERSION}+{_LAST_FIVE_GATE_VERSION}"
 )
+_EARLY_BROAD_VERSION = "active-broad-3m-signal-120m-hold-v1"
+_EARLY_BROAD_SOURCE = "OPENING_EARLY_BROAD"
+_EARLY_BROAD_ALGORITHM_VERSION = (
+    f"{ALGORITHM_VERSION}+{_EARLY_BROAD_VERSION}"
+)
+_EARLY_BROAD_MINIMUM_COVERAGE = 0.95
 _REVERSAL_SOURCE = "OPENING_REVERSAL"
 _NON_COMPARABLE_SKIP_REASONS = frozenset(
     {
@@ -94,6 +101,7 @@ _VariantName = Literal[
     "BREADTH_GATED_CHALLENGER",
     "LAST5_POSITIVE_CHALLENGER",
     "LAST5_ONLY_CHALLENGER",
+    "EARLY_BROAD_CHALLENGER",
 ]
 _SignalModel = Literal["MOMENTUM", "REVERSAL"]
 
@@ -134,6 +142,7 @@ class _UniverseVariant:
     decision_config: OpeningMomentumConfig
     signal_model: _SignalModel = "MOMENTUM"
     require_nonnegative_last_five: bool = False
+    minimum_data_coverage: float = 1.0
     symbols: tuple[str, ...] = ()
     selection_run_id: int | None = None
 
@@ -169,8 +178,6 @@ class OpeningMomentumShadowService:
         )
         for open_run in open_runs:
             self._close_if_due(open_run, current)
-        if any(open_run.status == "OPEN" for open_run in open_runs):
-            return self.get_status()
 
         if not settings.opening_momentum_shadow_enabled:
             return self.get_status()
@@ -184,17 +191,6 @@ class OpeningMomentumShadowService:
             session.rth_open,
             tzinfo=session.timezone,
         ).astimezone(timezone.utc)
-        entry_at = session_open + timedelta(
-            minutes=(
-                self.config.signal_minutes
-                + self.config.execution_delay_minutes
-            )
-        )
-        decision_start = entry_at + _BAR_DURATION + _SETTLEMENT_GRACE
-        decision_end = decision_start + _DECISION_WINDOW
-        if current < decision_start or current > decision_end:
-            return self.get_status()
-
         variants = self._universe_variants(
             session_date=local.date(),
             completed_before=session_open,
@@ -221,83 +217,94 @@ class OpeningMomentumShadowService:
             for variant in variants
             if variant.config_version not in existing_versions
         ]
-        if not pending_variants:
+        due_variants = [
+            variant
+            for variant in pending_variants
+            if self._variant_decision_due(
+                variant,
+                session_open=session_open,
+                current=current,
+            )
+        ]
+        if not due_variants:
             return self.get_status()
         if self.candle_provider is None:
             raise RuntimeError(
                 "opening momentum shadow candle provider is unavailable"
             )
-
-        observations_by_symbol: dict[
-            str, OpeningMomentumObservation
-        ] = {}
-        path_features_by_symbol: dict[
-            str, _OpeningPathFeatures
-        ] = {}
-        fetch_errors: dict[str, str] = {}
-        signal_at = (
-            session_open
-            + timedelta(minutes=self.config.signal_minutes)
-            - _BAR_DURATION
+        self._observe_variants(
+            due_variants,
+            session_date=local.date(),
+            session_open=session_open,
+            current=current,
         )
-        expected_signal_bars = {
-            session_open + timedelta(minutes=index)
-            for index in range(self.config.signal_minutes)
-        }
-        symbols = tuple(
-            dict.fromkeys(
-                symbol
-                for variant in pending_variants
-                for symbol in variant.symbols
+        try:
+            self.db.commit()
+        except IntegrityError:
+            self.db.rollback()
+        return self.get_status()
+
+    @staticmethod
+    def _variant_entry_at(
+        variant: _UniverseVariant,
+        *,
+        session_open: datetime,
+    ) -> datetime:
+        config = variant.decision_config
+        return session_open + timedelta(
+            minutes=(
+                config.signal_minutes
+                + config.execution_delay_minutes
             )
         )
+
+    @classmethod
+    def _variant_decision_due(
+        cls,
+        variant: _UniverseVariant,
+        *,
+        session_open: datetime,
+        current: datetime,
+    ) -> bool:
+        entry_at = cls._variant_entry_at(
+            variant,
+            session_open=session_open,
+        )
+        decision_start = entry_at + _BAR_DURATION + _SETTLEMENT_GRACE
+        return decision_start <= current <= (
+            decision_start + _DECISION_WINDOW
+        )
+
+    def _observe_variants(
+        self,
+        variants: list[_UniverseVariant],
+        *,
+        session_date: date,
+        session_open: datetime,
+        current: datetime,
+    ) -> None:
+        if self.candle_provider is None:
+            raise RuntimeError(
+                "opening momentum shadow candle provider is unavailable"
+            )
+        symbols = tuple(dict.fromkeys(
+            symbol
+            for variant in variants
+            for symbol in variant.symbols
+        ))
+        bars_by_symbol: dict[str, dict[datetime, _Candle]] = {}
+        fetch_errors: dict[str, str] = {}
         for symbol in symbols:
             try:
-                bars = self.candle_provider.get_candlesticks(
+                values = self.candle_provider.get_candlesticks(
                     symbol,
                     "MIN_1",
                     _CANDLE_COUNT,
                 )
-                by_timestamp = {
+                bars_by_symbol[symbol] = {
                     bar.timestamp: bar
-                    for bar in self._coerce_candles(bars)
+                    for bar in self._coerce_candles(values)
                 }
-                missing_signal_bars = (
-                    expected_signal_bars - by_timestamp.keys()
-                )
-                if missing_signal_bars:
-                    fetch_errors[symbol] = (
-                        "SIGNAL_BARS_MISSING:"
-                        f"{len(missing_signal_bars)}"
-                    )
-                    continue
-                opening_bar = by_timestamp.get(session_open)
-                signal_bar = by_timestamp.get(signal_at)
-                entry_bar = by_timestamp.get(entry_at)
-                if opening_bar is None or signal_bar is None:
-                    fetch_errors[symbol] = "SIGNAL_BARS_MISSING"
-                    continue
-                observations_by_symbol[symbol] = (
-                    OpeningMomentumObservation(
-                        symbol=symbol,
-                        session_open=opening_bar.open,
-                        signal_close=signal_bar.close,
-                        entry_open=(
-                            entry_bar.open
-                            if entry_bar is not None
-                            else None
-                        ),
-                    )
-                )
-                signal_candles = [
-                    by_timestamp[timestamp]
-                    for timestamp in sorted(
-                        expected_signal_bars
-                    )
-                ]
-                path_features_by_symbol[symbol] = (
-                    self._opening_path_features(signal_candles)
-                )
             except Exception as exc:
                 fetch_errors[symbol] = (
                     f"BROKER_ERROR:{type(exc).__name__}"
@@ -308,36 +315,88 @@ class OpeningMomentumShadowService:
                     exc,
                 )
 
-        for variant in pending_variants:
-            observations = [
-                observations_by_symbol[symbol]
-                for symbol in variant.symbols
-                if symbol in observations_by_symbol
-            ]
+        for variant in variants:
+            config = variant.decision_config
+            signal_at = (
+                session_open
+                + timedelta(minutes=config.signal_minutes)
+                - _BAR_DURATION
+            )
+            entry_at = self._variant_entry_at(
+                variant,
+                session_open=session_open,
+            )
+            expected_signal_bars = {
+                session_open + timedelta(minutes=index)
+                for index in range(config.signal_minutes)
+            }
+            observations: list[OpeningMomentumObservation] = []
+            path_features_by_symbol: dict[
+                str, _OpeningPathFeatures
+            ] = {}
             excluded = {
                 symbol: fetch_errors[symbol]
                 for symbol in variant.symbols
                 if symbol in fetch_errors
             }
+            for symbol in variant.symbols:
+                by_timestamp = bars_by_symbol.get(symbol)
+                if by_timestamp is None:
+                    continue
+                missing_signal_bars = (
+                    expected_signal_bars - by_timestamp.keys()
+                )
+                if missing_signal_bars:
+                    excluded[symbol] = (
+                        "SIGNAL_BARS_MISSING:"
+                        f"{len(missing_signal_bars)}"
+                    )
+                    continue
+                opening_bar = by_timestamp.get(session_open)
+                signal_bar = by_timestamp.get(signal_at)
+                if opening_bar is None or signal_bar is None:
+                    excluded[symbol] = "SIGNAL_BARS_MISSING"
+                    continue
+                observations.append(OpeningMomentumObservation(
+                    symbol=symbol,
+                    session_open=opening_bar.open,
+                    signal_close=signal_bar.close,
+                    entry_open=(
+                        by_timestamp[entry_at].open
+                        if entry_at in by_timestamp
+                        else None
+                    ),
+                ))
+                signal_candles = [
+                    by_timestamp[timestamp]
+                    for timestamp in sorted(expected_signal_bars)
+                ]
+                if len(signal_candles) >= 5:
+                    path_features_by_symbol[symbol] = (
+                        self._opening_path_features(signal_candles)
+                    )
+
             decision = (
-                evaluate_opening_reversal(
-                    observations,
-                    variant.decision_config,
-                )
+                evaluate_opening_reversal(observations, config)
                 if variant.signal_model == "REVERSAL"
-                else evaluate_opening_momentum(
-                    observations,
-                    variant.decision_config,
-                )
+                else evaluate_opening_momentum(observations, config)
             )
             path_features = (
-                path_features_by_symbol.get(
-                    decision.candidate_symbol
-                )
+                path_features_by_symbol.get(decision.candidate_symbol)
                 if decision.candidate_symbol is not None
                 else None
             )
-            data_complete = not excluded
+            required_observations = max(
+                config.minimum_universe_size,
+                math.ceil(
+                    len(variant.symbols)
+                    * variant.minimum_data_coverage
+                ),
+            )
+            data_complete = (
+                bool(variant.symbols)
+                and len(observations) >= required_observations
+            )
             last_five_gate_failed = (
                 variant.require_nonnegative_last_five
                 and decision.action == "ENTER_LONG"
@@ -363,98 +422,73 @@ class OpeningMomentumShadowService:
                 reason = "LAST_FIVE_RETURN_FILTER"
             else:
                 reason = decision.reason
-            self.db.add(
-                OpeningMomentumShadowRun(
-                    session_date=local.date(),
-                    algorithm_version=variant.algorithm_version,
-                    config_version=variant.config_version,
-                    status=status,
-                    reason=reason,
-                    signal_at=signal_at,
-                    observed_at=current,
-                    selection_run_id=variant.selection_run_id,
-                    universe_source=variant.universe_source,
-                    universe_size=decision.universe_size,
-                    universe_json=json.dumps(
-                        variant.symbols,
-                        ensure_ascii=True,
-                        separators=(",", ":"),
-                    ),
-                    excluded_symbols_json=json.dumps(
-                        excluded,
-                        ensure_ascii=True,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    ),
-                    ranking_json=json.dumps(
-                        [
-                            asdict(item)
-                            for item in decision.ranking
-                        ],
-                        ensure_ascii=True,
-                        separators=(",", ":"),
-                    ),
-                    candidate_symbol=decision.candidate_symbol,
-                    market_return_bps=decision.market_return_bps,
-                    candidate_return_bps=(
-                        decision.candidate_return_bps
-                    ),
-                    excess_return_bps=decision.excess_return_bps,
-                    candidate_first_five_return_bps=(
-                        path_features.first_five_return_bps
-                        if path_features is not None
-                        else None
-                    ),
-                    candidate_last_five_return_bps=(
-                        path_features.last_five_return_bps
-                        if path_features is not None
-                        else None
-                    ),
-                    candidate_path_efficiency=(
-                        path_features.path_efficiency
-                        if path_features is not None
-                        else None
-                    ),
-                    candidate_max_pullback_bps=(
-                        path_features.max_pullback_bps
-                        if path_features is not None
-                        else None
-                    ),
-                    candidate_opening_range_bps=(
-                        path_features.opening_range_bps
-                        if path_features is not None
-                        else None
-                    ),
-                    entry_at=(
-                        entry_at
-                        if status == "OPEN"
-                        else None
-                    ),
-                    entry_price=(
-                        decision.entry_price
-                        if status == "OPEN"
-                        else None
-                    ),
-                    exit_due_at=(
-                        entry_at
-                        + timedelta(
-                            minutes=(
-                                variant.decision_config.holding_minutes
-                            )
-                        )
-                        if status == "OPEN"
-                        else None
-                    ),
-                    estimated_cost_bps=(
-                        variant.decision_config.round_trip_cost_bps
-                    ),
-                )
-            )
-        try:
-            self.db.commit()
-        except IntegrityError:
-            self.db.rollback()
-        return self.get_status()
+            self.db.add(OpeningMomentumShadowRun(
+                session_date=session_date,
+                algorithm_version=variant.algorithm_version,
+                config_version=variant.config_version,
+                status=status,
+                reason=reason,
+                signal_at=signal_at,
+                observed_at=current,
+                selection_run_id=variant.selection_run_id,
+                universe_source=variant.universe_source,
+                universe_size=decision.universe_size,
+                universe_json=json.dumps(
+                    variant.symbols,
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                ),
+                excluded_symbols_json=json.dumps(
+                    excluded,
+                    ensure_ascii=True,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                ranking_json=json.dumps(
+                    [asdict(item) for item in decision.ranking],
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                ),
+                candidate_symbol=decision.candidate_symbol,
+                market_return_bps=decision.market_return_bps,
+                candidate_return_bps=decision.candidate_return_bps,
+                excess_return_bps=decision.excess_return_bps,
+                candidate_first_five_return_bps=(
+                    path_features.first_five_return_bps
+                    if path_features is not None
+                    else None
+                ),
+                candidate_last_five_return_bps=(
+                    path_features.last_five_return_bps
+                    if path_features is not None
+                    else None
+                ),
+                candidate_path_efficiency=(
+                    path_features.path_efficiency
+                    if path_features is not None
+                    else None
+                ),
+                candidate_max_pullback_bps=(
+                    path_features.max_pullback_bps
+                    if path_features is not None
+                    else None
+                ),
+                candidate_opening_range_bps=(
+                    path_features.opening_range_bps
+                    if path_features is not None
+                    else None
+                ),
+                entry_at=entry_at if status == "OPEN" else None,
+                entry_price=(
+                    decision.entry_price if status == "OPEN" else None
+                ),
+                exit_due_at=(
+                    entry_at + timedelta(minutes=config.holding_minutes)
+                    if status == "OPEN"
+                    else None
+                ),
+                estimated_cost_bps=config.round_trip_cost_bps,
+            ))
 
     def get_status(self) -> OpeningMomentumShadowStatusResponse:
         incumbent_version = self._incumbent_config_version()
@@ -548,6 +582,9 @@ class OpeningMomentumShadowService:
                     require_nonnegative_last_five=(
                         identity.require_nonnegative_last_five
                     ),
+                    minimum_data_coverage=(
+                        identity.minimum_data_coverage
+                    ),
                 )
                 for identity in identities
             ]
@@ -621,6 +658,21 @@ class OpeningMomentumShadowService:
         identities_by_variant = {
             identity.variant: identity for identity in identities
         }
+        early_identity = identities_by_variant[
+            "EARLY_BROAD_CHALLENGER"
+        ]
+        variants.append(_UniverseVariant(
+            variant=early_identity.variant,
+            algorithm_version=early_identity.algorithm_version,
+            config_version=early_identity.config_version,
+            universe_source=early_identity.universe_source,
+            decision_config=early_identity.decision_config,
+            minimum_data_coverage=(
+                early_identity.minimum_data_coverage
+            ),
+            symbols=self._active_broad_symbols(),
+            selection_run_id=run.id,
+        ))
         reversal_identity = identities_by_variant[
             "REVERSAL_CHALLENGER"
         ]
@@ -680,6 +732,20 @@ class OpeningMomentumShadowService:
         if settings.opening_momentum_challenger_enabled:
             universe_config = self._continuation_config()
             breadth_config = self._breadth_gate_config()
+            early_config = self._early_broad_config()
+            variants.append(_UniverseVariant(
+                variant="EARLY_BROAD_CHALLENGER",
+                algorithm_version=_EARLY_BROAD_ALGORITHM_VERSION,
+                config_version=self._evidence_config_version(
+                    f"{early_config.version_hash()}:"
+                    f"{_EARLY_BROAD_VERSION}"
+                ),
+                universe_source=_EARLY_BROAD_SOURCE,
+                decision_config=early_config,
+                minimum_data_coverage=(
+                    _EARLY_BROAD_MINIMUM_COVERAGE
+                ),
+            ))
             variants.append(
                 _UniverseVariant(
                     variant="REVERSAL_CHALLENGER",
@@ -789,6 +855,28 @@ class OpeningMomentumShadowService:
                 self.config.minimum_market_return_bps,
             ),
         )
+
+    def _early_broad_config(self) -> OpeningMomentumConfig:
+        return replace(
+            self.config,
+            signal_minutes=3,
+            holding_minutes=120,
+            minimum_market_return_bps=-50.0,
+            minimum_candidate_return_bps=50.0,
+            minimum_excess_return_bps=25.0,
+        )
+
+    def _active_broad_symbols(self) -> tuple[str, ...]:
+        rows = (
+            self.db.query(StrategyV2ShadowConfig)
+            .filter(
+                StrategyV2ShadowConfig.enabled.is_(True),
+                StrategyV2ShadowConfig.symbol.like("%.US"),
+            )
+            .order_by(StrategyV2ShadowConfig.symbol.asc())
+            .all()
+        )
+        return tuple(row.symbol for row in rows)
 
     def _incumbent_config_version(self) -> str:
         return self._evidence_config_version(
@@ -1003,8 +1091,20 @@ class OpeningMomentumShadowService:
                     universe_source=identity.universe_source,
                     algorithm_version=identity.algorithm_version,
                     config_version=identity.config_version,
+                    signal_minutes=(
+                        identity.decision_config.signal_minutes
+                    ),
                     minimum_market_return_bps=(
                         identity.decision_config.minimum_market_return_bps
+                    ),
+                    minimum_candidate_return_bps=(
+                        identity.decision_config.minimum_candidate_return_bps
+                    ),
+                    minimum_excess_return_bps=(
+                        identity.decision_config.minimum_excess_return_bps
+                    ),
+                    minimum_data_coverage=(
+                        identity.minimum_data_coverage
                     ),
                     holding_minutes=(
                         identity.decision_config.holding_minutes

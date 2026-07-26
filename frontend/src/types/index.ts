@@ -1904,10 +1904,15 @@ export interface OpeningMomentumShadowVariant {
     | 'BREADTH_GATED_CHALLENGER'
     | 'LAST5_POSITIVE_CHALLENGER'
     | 'LAST5_ONLY_CHALLENGER'
+    | 'EARLY_BROAD_CHALLENGER'
   universe_source: string
   algorithm_version: string
   config_version: string
+  signal_minutes: number
   minimum_market_return_bps: number
+  minimum_candidate_return_bps: number
+  minimum_excess_return_bps: number
+  minimum_data_coverage: number
   holding_minutes: number
   comparison_sessions: number
   latest: OpeningMomentumShadowRun | null

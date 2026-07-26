@@ -440,9 +440,25 @@
                       </el-tag>
                     </template>
                   </el-table-column>
+                  <el-table-column label="信号" min-width="80">
+                    <template #default="{ row }">
+                      {{ row.signal_minutes }} 分钟
+                    </template>
+                  </el-table-column>
                   <el-table-column label="市场门槛" min-width="100">
                     <template #default="{ row }">
                       {{ formatBps(row.minimum_market_return_bps) }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="候选 / 超额" min-width="130">
+                    <template #default="{ row }">
+                      {{ formatBps(row.minimum_candidate_return_bps) }} /
+                      {{ formatBps(row.minimum_excess_return_bps) }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="数据覆盖" min-width="90">
+                    <template #default="{ row }">
+                      {{ formatPercent(row.minimum_data_coverage) }}
                     </template>
                   </el-table-column>
                   <el-table-column label="持仓" min-width="90">
@@ -2114,13 +2130,15 @@ function openingMomentumVariantLabel(
   if (variant === 'CONTINUATION_CHALLENGER') return '动量延续'
   if (variant === 'BREADTH_GATED_CHALLENGER') return '广度过滤'
   if (variant === 'LAST5_POSITIVE_CHALLENGER') return '广度 + 末 5 分钟'
-  return '末 5 分钟过滤'
+  if (variant === 'LAST5_ONLY_CHALLENGER') return '末 5 分钟过滤'
+  return '3 分钟宽池'
 }
 function openingMomentumVariantTagType(
   variant: OpeningMomentumShadowStatus['variants'][number]['variant'],
 ): 'primary' | 'warning' | 'info' | 'success' {
   if (variant === 'INCUMBENT') return 'primary'
   if (variant === 'REVERSAL_CHALLENGER') return 'success'
+  if (variant === 'EARLY_BROAD_CHALLENGER') return 'warning'
   if (variant.includes('LAST5')) return 'warning'
   if (variant.startsWith('BREADTH_GATED')) return 'success'
   return 'info'
