@@ -5,7 +5,7 @@ from typing import Literal
 
 
 CATALOG_SOURCE_VERSION = (
-    "nasdaq-100-2026-07-24_djia-2026-06-29_expanded-v5"
+    "nasdaq-100-2026-07-24_djia-2026-06-29_expanded-v6"
 )
 
 _RISK_GROUP_BY_SECTOR = {
@@ -40,7 +40,9 @@ class IndexCandidate:
 # observed pool. Membership was verified against Nasdaq's NDX weighting page
 # dated 2026-07-24 and S&P DJI's 2026-06-23 announcement for the DJIA changes
 # effective 2026-06-29. The DJIA portion is complete; the Nasdaq-100 portion
-# favors liquid names across sectors so daily screening remains bounded.
+# favors liquid names across sectors so daily screening remains bounded. The
+# v6 additions passed the same liquidity, volatility, and cost-opportunity
+# gates as the incumbent catalog before admission.
 INDEX_CANDIDATE_CATALOG: tuple[IndexCandidate, ...] = (
     IndexCandidate("NVDA.US", "NVIDIA", "Semiconductors", ("NASDAQ_100", "DJIA")),
     IndexCandidate("AAPL.US", "Apple", "Technology Hardware", ("NASDAQ_100", "DJIA")),
@@ -199,9 +201,21 @@ INDEX_CANDIDATE_CATALOG: tuple[IndexCandidate, ...] = (
         ("NASDAQ_100",),
     ),
     IndexCandidate(
+        "MAR.US",
+        "Marriott International",
+        "Consumer Discretionary",
+        ("NASDAQ_100",),
+    ),
+    IndexCandidate(
         "MNST.US",
         "Monster Beverage",
         "Consumer Staples",
+        ("NASDAQ_100",),
+    ),
+    IndexCandidate(
+        "MSTR.US",
+        "Strategy",
+        "Software",
         ("NASDAQ_100",),
     ),
     IndexCandidate(
@@ -214,6 +228,18 @@ INDEX_CANDIDATE_CATALOG: tuple[IndexCandidate, ...] = (
         "NXPI.US",
         "NXP Semiconductors",
         "Semiconductors",
+        ("NASDAQ_100",),
+    ),
+    IndexCandidate(
+        "ORLY.US",
+        "O'Reilly Automotive",
+        "Consumer Discretionary",
+        ("NASDAQ_100",),
+    ),
+    IndexCandidate(
+        "PDD.US",
+        "PDD Holdings",
+        "Consumer Discretionary",
         ("NASDAQ_100",),
     ),
     IndexCandidate("PEP.US", "PepsiCo", "Consumer Staples", ("NASDAQ_100",)),
@@ -242,6 +268,7 @@ INDEX_CANDIDATE_CATALOG: tuple[IndexCandidate, ...] = (
         "Consumer Discretionary",
         ("NASDAQ_100",),
     ),
+    IndexCandidate("SNPS.US", "Synopsys", "Software", ("NASDAQ_100",)),
     IndexCandidate(
         "STX.US",
         "Seagate Technology",
@@ -255,9 +282,21 @@ INDEX_CANDIDATE_CATALOG: tuple[IndexCandidate, ...] = (
         ("NASDAQ_100",),
     ),
     IndexCandidate(
+        "TTWO.US",
+        "Take-Two Interactive",
+        "Communication Services",
+        ("NASDAQ_100",),
+    ),
+    IndexCandidate(
         "VRTX.US",
         "Vertex Pharmaceuticals",
         "Healthcare",
+        ("NASDAQ_100",),
+    ),
+    IndexCandidate(
+        "WBD.US",
+        "Warner Bros. Discovery",
+        "Communication Services",
         ("NASDAQ_100",),
     ),
     IndexCandidate(
@@ -266,6 +305,7 @@ INDEX_CANDIDATE_CATALOG: tuple[IndexCandidate, ...] = (
         "Technology Hardware",
         ("NASDAQ_100",),
     ),
+    IndexCandidate("WDAY.US", "Workday", "Software", ("NASDAQ_100",)),
     IndexCandidate("XEL.US", "Xcel Energy", "Utilities", ("NASDAQ_100",)),
     IndexCandidate("AXP.US", "American Express", "Financials", ("DJIA",)),
     IndexCandidate("CVX.US", "Chevron", "Energy", ("DJIA",)),

@@ -67,14 +67,31 @@ def test_membership_history_reports_partial_catalog_coverage() -> None:
         INDEX_CANDIDATE_CATALOG
     )
 
-    assert coverage.catalog_size == 99
-    assert coverage.authoritative_symbols == 97
+    assert coverage.catalog_size == 107
+    assert coverage.authoritative_symbols == 105
     assert coverage.snapshot_only_symbols == (
         "HONA.US",
         "SPCX.US",
     )
     assert coverage.missing_symbols == ()
-    assert 0.97 < coverage.authoritative_ratio < 0.99
+    assert 0.98 < coverage.authoritative_ratio < 0.99
+
+
+def test_expanded_candidates_are_active_at_catalog_snapshot() -> None:
+    for symbol in (
+        "MAR.US",
+        "MSTR.US",
+        "ORLY.US",
+        "PDD.US",
+        "SNPS.US",
+        "TTWO.US",
+        "WBD.US",
+        "WDAY.US",
+    ):
+        assert INDEX_MEMBERSHIP_HISTORY.is_active(
+            _candidate(symbol),
+            date(2026, 7, 24),
+        ) is True
 
 
 def test_snapshot_only_membership_fails_closed_before_snapshot() -> None:
