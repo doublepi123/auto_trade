@@ -571,7 +571,18 @@ class TestStrategyV2PortfolioService:
                 registered_at=_REGISTERED_AT - timedelta(days=1),
                 eligible_after=_REGISTERED_AT - timedelta(days=1),
             )
-            db.add(legacy)
+            legacy_rotation = StrategyV2PortfolioRegistration(
+                baseline_symbol="NVDA.US",
+                policy="PIT_SHRINK_WEIGHTED_ZSCORE_POOL",
+                algorithm_version=(
+                    "strategy-v2-portfolio-rotation-pit-shrinkage-"
+                    "weighted-zscore-observed-cost-75bps-v1"
+                ),
+                evaluator_digest="1" * 64,
+                registered_at=_REGISTERED_AT - timedelta(days=1),
+                eligible_after=_REGISTERED_AT - timedelta(days=1),
+            )
+            db.add_all((legacy, legacy_rotation))
             db.commit()
             service = StrategyV2PortfolioService(db)
             self._register(service)
@@ -586,11 +597,16 @@ class TestStrategyV2PortfolioService:
             assert sum(
                 row.algorithm_version.endswith("-v2")
                 for row in report.variants
-            ) == 9
+            ) == 13
             assert any(
                 row.algorithm_version.endswith("-v1")
                 and row.policy
                 == "RISK_GROUP_REL_OBS_75BPS_POOL"
+                for row in report.variants
+            )
+            assert any(
+                row.algorithm_version.endswith("-v2")
+                and row.policy == "PIT_SHRINK_WEIGHTED_ZSCORE_POOL"
                 for row in report.variants
             )
             assert (
@@ -598,6 +614,15 @@ class TestStrategyV2PortfolioService:
                 .filter(
                     StrategyV2PortfolioObservation.registration_id
                     == legacy.id
+                )
+                .count()
+                == 0
+            )
+            assert (
+                db.query(StrategyV2PortfolioObservation)
+                .filter(
+                    StrategyV2PortfolioObservation.registration_id
+                    == legacy_rotation.id
                 )
                 .count()
                 == 0
