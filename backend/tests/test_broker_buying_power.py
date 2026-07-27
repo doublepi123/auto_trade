@@ -11,6 +11,27 @@ from app.main import app
 client = TestClient(app)
 
 
+def test_sliding_window_request_budget_reserves_capacity() -> None:
+    import app.api.broker as broker_api
+
+    now = [100.0]
+    budget = broker_api._SlidingWindowRequestBudget(
+        limit=2,
+        window_seconds=30.0,
+        clock=lambda: now[0],
+    )
+
+    assert budget.consume() == 0.0
+    assert budget.consume() == 0.0
+    assert budget.consume() == 30.0
+
+    now[0] = 129.5
+    assert budget.consume() == 0.5
+
+    now[0] = 130.0
+    assert budget.consume() == 0.0
+
+
 class _FakeBroker:
     def __init__(self, *, fail: bool = False) -> None:
         self.fail = fail
@@ -50,6 +71,38 @@ class _FakeBroker:
 class _FakeRunner:
     def __init__(self, broker: object | None) -> None:
         self.broker = broker
+
+
+def test_buying_power_rate_limit_does_not_call_broker(
+    monkeypatch,
+) -> None:
+    import app.api.broker as broker_api
+
+    class _DeniedBudget:
+        @staticmethod
+        def consume() -> float:
+            return 12.1
+
+    broker = _FakeBroker()
+    monkeypatch.setattr(
+        broker_api,
+        "_buying_power_probe_budget",
+        _DeniedBudget(),
+    )
+    monkeypatch.setattr(
+        broker_api,
+        "get_runner",
+        lambda: _FakeRunner(broker),
+    )
+
+    response = client.get(
+        "/api/broker/buying-power",
+        params={"symbol": "NVDA.US", "price": 100},
+    )
+
+    assert response.status_code == 429
+    assert response.headers["Retry-After"] == "13"
+    assert broker.estimate_call is None
 
 
 def test_buying_power_uses_explicit_us_limit_price(

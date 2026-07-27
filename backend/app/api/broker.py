@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import math
+import threading
+import time
+from collections import deque
 from decimal import Decimal
 from datetime import datetime, timezone
 from typing import Literal, Optional
@@ -24,6 +27,47 @@ router = APIRouter(
 )
 
 _ALLOWED_PERIODS = {"DAY", "WEEK", "MIN_1", "MIN_5", "MIN_15", "MIN_30", "MIN_60"}
+# A probe can consume multiple TradeContext calls. Keep diagnostics well below
+# Longbridge's shared 30-calls-per-30-seconds quota so order flow retains room.
+_BUYING_POWER_PROBE_LIMIT = 5
+_BUYING_POWER_PROBE_WINDOW_SECONDS = 30.0
+
+
+class _SlidingWindowRequestBudget:
+    def __init__(
+        self,
+        *,
+        limit: int,
+        window_seconds: float,
+        clock=time.monotonic,
+    ) -> None:
+        self._limit = limit
+        self._window_seconds = window_seconds
+        self._clock = clock
+        self._timestamps: deque[float] = deque()
+        self._lock = threading.Lock()
+
+    def consume(self) -> float:
+        """Return zero when allowed, otherwise seconds until capacity returns."""
+
+        now = self._clock()
+        cutoff = now - self._window_seconds
+        with self._lock:
+            while self._timestamps and self._timestamps[0] <= cutoff:
+                self._timestamps.popleft()
+            if len(self._timestamps) >= self._limit:
+                return max(
+                    0.001,
+                    self._timestamps[0] + self._window_seconds - now,
+                )
+            self._timestamps.append(now)
+        return 0.0
+
+
+_buying_power_probe_budget = _SlidingWindowRequestBudget(
+    limit=_BUYING_POWER_PROBE_LIMIT,
+    window_seconds=_BUYING_POWER_PROBE_WINDOW_SECONDS,
+)
 
 
 def _is_valid_bar(o: float, h: float, l: float, c: float) -> bool:
@@ -118,6 +162,18 @@ def get_broker_buying_power(
         raise HTTPException(
             status_code=422,
             detail="buying-power preflight supports only .US and .HK symbols",
+        )
+
+    retry_after = _buying_power_probe_budget.consume()
+    if retry_after > 0:
+        retry_after_seconds = max(1, math.ceil(retry_after))
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                "buying-power preflight rate limit exceeded; "
+                "live trading capacity is reserved"
+            ),
+            headers={"Retry-After": str(retry_after_seconds)},
         )
 
     try:
