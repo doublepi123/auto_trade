@@ -1725,9 +1725,36 @@ class BrokerGateway:
                     fractional_shares=False,
                 )
                 return _decimal_attr(response, "margin_max_qty")
-        return self._call_with_retry(
+
+        quantity = self._call_with_retry(
             _fetch,
             op="estimate_margin_max_quantity",
+            max_retries=settings.broker_retry_max,
+            base_ms=settings.broker_retry_base_ms,
+        )
+        if quantity != 0:
+            return quantity
+
+        # The estimate endpoint can occasionally return a transient zero with
+        # no error while the same account still has margin buying power. A
+        # single confirmation avoids missing an entry without trusting stale
+        # capacity when zero is genuine.
+        delay_s = max(
+            0.0,
+            min(float(settings.broker_retry_base_ms), 1_000.0) / 1_000.0,
+        )
+        logger.warning(
+            "estimate_margin_max_quantity returned zero for %s %s; "
+            "confirming once after %.3fs",
+            symbol,
+            side,
+            delay_s,
+        )
+        if delay_s > 0:
+            time.sleep(delay_s)
+        return self._call_with_retry(
+            _fetch,
+            op="estimate_margin_max_quantity_zero_confirmation",
             max_retries=settings.broker_retry_max,
             base_ms=settings.broker_retry_base_ms,
         )

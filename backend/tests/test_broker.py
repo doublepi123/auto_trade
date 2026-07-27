@@ -1755,6 +1755,96 @@ class TestBrokerGateway:
         assert qty == Decimal("88")
         assert called["side"] == "OrderSide.Sell"
 
+    def test_estimate_margin_max_quantity_rechecks_transient_zero(
+        self,
+        monkeypatch,
+    ) -> None:
+        responses = iter(("0", "45"))
+        calls = 0
+
+        class TradeContext:
+            def estimate_max_purchase_quantity(self, **_kwargs):
+                nonlocal calls
+                calls += 1
+
+                class Response:
+                    margin_max_qty = next(responses)
+
+                return Response()
+
+        class OrderSide:
+            Buy = "OrderSide.Buy"
+
+        class OrderType:
+            LO = "OrderType.LO"
+
+        class FakeModule:
+            pass
+
+        FakeModule.OrderSide = OrderSide
+        FakeModule.OrderType = OrderType
+        monkeypatch.setattr(broker_module, "_import_openapi", lambda: FakeModule)
+        sleeps: list[float] = []
+        monkeypatch.setattr(broker_module.time, "sleep", sleeps.append)
+
+        gateway = BrokerGateway()
+        gateway._quote_ctx = object()
+        gateway._trade_ctx = TradeContext()
+
+        quantity = gateway.estimate_margin_max_quantity(
+            "NVDA.US",
+            "BUY",
+            Decimal("222.50"),
+            "USD",
+        )
+
+        assert quantity == Decimal("45")
+        assert calls == 2
+        assert sleeps == [1.0]
+
+    def test_estimate_margin_max_quantity_returns_confirmed_zero(
+        self,
+        monkeypatch,
+    ) -> None:
+        calls = 0
+
+        class Response:
+            margin_max_qty = "0"
+
+        class TradeContext:
+            def estimate_max_purchase_quantity(self, **_kwargs):
+                nonlocal calls
+                calls += 1
+                return Response()
+
+        class OrderSide:
+            Buy = "OrderSide.Buy"
+
+        class OrderType:
+            LO = "OrderType.LO"
+
+        class FakeModule:
+            pass
+
+        FakeModule.OrderSide = OrderSide
+        FakeModule.OrderType = OrderType
+        monkeypatch.setattr(broker_module, "_import_openapi", lambda: FakeModule)
+        monkeypatch.setattr(broker_module.time, "sleep", lambda _delay: None)
+
+        gateway = BrokerGateway()
+        gateway._quote_ctx = object()
+        gateway._trade_ctx = TradeContext()
+
+        quantity = gateway.estimate_margin_max_quantity(
+            "NVDA.US",
+            "BUY",
+            Decimal("222.50"),
+            "USD",
+        )
+
+        assert quantity == Decimal("0")
+        assert calls == 2
+
     def test_get_quote_with_non_list_response(self) -> None:
         class QuoteItem:
             symbol = "TSLA.US"
