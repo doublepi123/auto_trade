@@ -317,6 +317,12 @@ def test_cli_replays_existing_cache_without_broker(
     assert stored["data_scope"]["resolved_session_count"] == 2
     assert stored["report"]["source_sessions"] == 2
     assert stored["research_design"]["automatic_promotion_allowed"] is False
+    assert stored["research_design"]["chronological_split"] == (
+        "BASELINE_DATE_ANCHORED"
+    )
+    assert stored["research_design"]["discovery_end_date"] == (
+        stored["report"]["discovery_end_date"]
+    )
 
 
 def test_cli_emits_joint_cohort_diagnostic(
@@ -358,6 +364,7 @@ def test_cli_emits_joint_cohort_diagnostic(
     stored = json.loads(output_path.read_text(encoding="utf-8"))
     assert stdout["cohort"]["cohort_symbols"] == [_COHORT_SYMBOL]
     assert stdout["cohort"]["paired_sessions"] == 2
+    assert stdout["cohort"]["discovery_end_date"] == first.isoformat()
     assert len(stdout["cohort_cost_stress"]) == 3
     assert stored["cohort_diagnostic"]["diagnostic_only"] is True
     assert stored["cohort_diagnostic"][
@@ -414,6 +421,7 @@ def test_cli_emits_paired_holding_horizon_rejections(
     horizon = stdout["holding_horizons"]
     assert horizon["baseline_holding_minutes"] == 60
     assert horizon["paired_sessions"] == 2
+    assert horizon["discovery_end_date"] == first.isoformat()
     assert [value["holding_minutes"] for value in horizon["results"]] == [
         90,
         120,

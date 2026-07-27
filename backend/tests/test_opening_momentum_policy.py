@@ -102,6 +102,7 @@ def test_policy_grid_uses_chronological_holdout_and_paired_skips() -> None:
     assert report.algorithm_version == OPENING_POLICY_DIAGNOSTIC_VERSION
     assert report.discovery_sessions == 6
     assert report.holdout_sessions == 4
+    assert report.discovery_end_date == _sessions()[5].session_date
     assert discovery.start_date == _sessions()[0].session_date
     assert discovery.end_date == _sessions()[5].session_date
     assert holdout.metrics.entries == 1
@@ -375,6 +376,28 @@ def test_cohort_report_requires_unique_paired_sessions_and_symbols() -> None:
         )
 
 
+def test_cohort_split_stays_anchored_when_early_data_is_missing() -> None:
+    baseline = _sessions()[:6]
+    cohort = baseline[1:]
+
+    report = evaluate_opening_policy_cohort(
+        baseline,
+        cohort,
+        policy=OpeningPolicySpec(PRODUCTION_POLICY_NAME),
+        cohort_symbols=("EXTRA.US",),
+        round_trip_cost_bps=14.0,
+    )
+
+    discovery = _cohort_slice(report, "DISCOVERY")
+    holdout = _cohort_slice(report, "HOLDOUT")
+    assert report.discovery_end_date == baseline[2].session_date
+    assert report.discovery_sessions == 2
+    assert report.holdout_sessions == 3
+    assert discovery.start_date == baseline[1].session_date
+    assert discovery.end_date == baseline[2].session_date
+    assert holdout.start_date == baseline[3].session_date
+
+
 def test_horizon_report_pairs_identical_decisions_and_exit_returns() -> None:
     first = date(2026, 1, 2)
     baseline_values = (100.0, -50.0, 40.0, 80.0, -20.0, 30.0)
@@ -451,6 +474,26 @@ def test_horizon_report_pairs_identical_decisions_and_exit_returns() -> None:
     assert report.diagnostic_only is True
     assert report.automatic_promotion_allowed is False
     assert report.to_dict()["baseline_holding_minutes"] == 60
+
+
+def test_horizon_split_stays_anchored_when_early_data_is_missing() -> None:
+    baseline = _sessions()[:6]
+
+    report = evaluate_opening_policy_horizons(
+        {60: baseline, 90: baseline[1:]},
+        baseline_holding_minutes=60,
+        policy=OpeningPolicySpec(PRODUCTION_POLICY_NAME),
+        round_trip_cost_bps=14.0,
+    )
+
+    discovery = _horizon_slice(report, 90, "DISCOVERY")
+    holdout = _horizon_slice(report, 90, "HOLDOUT")
+    assert report.discovery_end_date == baseline[2].session_date
+    assert report.discovery_sessions == 2
+    assert report.holdout_sessions == 3
+    assert discovery.start_date == baseline[1].session_date
+    assert discovery.end_date == baseline[2].session_date
+    assert holdout.start_date == baseline[3].session_date
 
 
 def test_horizon_report_rejects_changed_signal_decisions() -> None:

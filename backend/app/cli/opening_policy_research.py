@@ -58,7 +58,7 @@ from app.domain.opening_momentum_policy import (
 )
 
 
-OPENING_POLICY_CLI_VERSION = "opening-policy-research-cli-v5"
+OPENING_POLICY_CLI_VERSION = "opening-policy-research-cli-v6"
 _DEFAULT_PATH_THRESHOLDS = (0.50, 0.60, 0.70, 0.80, 0.90)
 _DEFAULT_MARKET_MAXIMUMS_BPS = (-10.0, -5.0, 0.0, 5.0, 10.0, 20.0)
 _DEFAULT_MINIMUM_DATA_COVERAGE = 0.95
@@ -353,6 +353,7 @@ def _compact_cohort_payload(
         "cohort_symbols": list(report.cohort_symbols),
         "round_trip_cost_bps": report.round_trip_cost_bps,
         "paired_sessions": report.paired_sessions,
+        "discovery_end_date": report.discovery_end_date.isoformat(),
         "discovery": discovery.to_dict(),
         "holdout": holdout.to_dict(),
         "diagnostic_only": report.diagnostic_only,
@@ -638,6 +639,7 @@ def _compact_horizon_payload(
         "paired_sessions": report.paired_sessions,
         "discovery_sessions": report.discovery_sessions,
         "holdout_sessions": report.holdout_sessions,
+        "discovery_end_date": report.discovery_end_date.isoformat(),
         "results": results,
         "diagnostic_only": report.diagnostic_only,
         "automatic_promotion_allowed": (
@@ -1067,6 +1069,8 @@ def main() -> int:
             "round_trip_cost_bps": config.round_trip_cost_bps,
             "minimum_data_coverage": args.minimum_data_coverage,
             "discovery_ratio": args.discovery_ratio,
+            "chronological_split": "BASELINE_DATE_ANCHORED",
+            "discovery_end_date": report.discovery_end_date.isoformat(),
             "production_policy_precommitted": True,
             "sensitivity_grid_selection_allowed": False,
             "holding_horizon_selection_allowed": False,

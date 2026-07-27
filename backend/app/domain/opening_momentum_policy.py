@@ -18,10 +18,10 @@ OPENING_POLICY_DIAGNOSTIC_VERSION = (
     "opening-policy-chronological-holdout-v2"
 )
 OPENING_POLICY_COHORT_DIAGNOSTIC_VERSION = (
-    "opening-policy-cohort-paired-chronological-holdout-v1"
+    "opening-policy-cohort-paired-baseline-anchored-holdout-v2"
 )
 OPENING_POLICY_HORIZON_DIAGNOSTIC_VERSION = (
-    "opening-policy-horizon-paired-chronological-holdout-v1"
+    "opening-policy-horizon-paired-baseline-anchored-holdout-v2"
 )
 PRODUCTION_POLICY_NAME = "WEAK_BREADTH_PATH_CHALLENGER"
 PRODUCTION_MINIMUM_PATH_EFFICIENCY = 0.70
@@ -229,6 +229,7 @@ class OpeningPolicyDiagnosticReport:
     source_sessions: int
     discovery_sessions: int
     holdout_sessions: int
+    discovery_end_date: date
     baseline_policy_name: str
     production_policy_name: str
     policies: tuple[OpeningPolicyResult, ...]
@@ -289,6 +290,7 @@ class OpeningPolicyCohortReport:
     paired_sessions: int
     discovery_sessions: int
     holdout_sessions: int
+    discovery_end_date: date
     cohort_symbols: tuple[str, ...]
     slices: tuple[OpeningPolicyCohortSlice, ...]
     diagnostic_only: Literal[True]
@@ -356,6 +358,7 @@ class OpeningPolicyHorizonReport:
     paired_sessions: int
     discovery_sessions: int
     holdout_sessions: int
+    discovery_end_date: date
     results: tuple[OpeningPolicyHorizonResult, ...]
     diagnostic_only: Literal[True]
     automatic_promotion_allowed: Literal[False]
@@ -414,19 +417,22 @@ def evaluate_opening_policy_grid(
     if production_name not in policy_by_name:
         raise ValueError("production policy is missing")
 
-    split_index = max(
-        1,
-        min(
-            len(ordered_sessions) - 1,
-            math.floor(len(ordered_sessions) * discovery_ratio),
-        ),
+    discovery_end_date, discovery_dates, _ = (
+        _baseline_anchored_split(
+            tuple(value.session_date for value in ordered_sessions),
+            tuple(value.session_date for value in ordered_sessions),
+            discovery_ratio=discovery_ratio,
+            comparison_name="policy",
+        )
     )
+    discovery_sessions = ordered_sessions[:len(discovery_dates)]
+    holdout_sessions = ordered_sessions[len(discovery_dates):]
     slice_specs: tuple[
         tuple[OpeningPolicySliceName, tuple[OpeningPolicySession, ...]], ...
     ] = (
         ("ALL", ordered_sessions),
-        ("DISCOVERY", ordered_sessions[:split_index]),
-        ("HOLDOUT", ordered_sessions[split_index:]),
+        ("DISCOVERY", discovery_sessions),
+        ("HOLDOUT", holdout_sessions),
     )
     results = tuple(
         OpeningPolicyResult(
@@ -448,8 +454,9 @@ def evaluate_opening_policy_grid(
         discovery_ratio=discovery_ratio,
         round_trip_cost_bps=round_trip_cost_bps,
         source_sessions=len(ordered_sessions),
-        discovery_sessions=split_index,
-        holdout_sessions=len(ordered_sessions) - split_index,
+        discovery_sessions=len(discovery_sessions),
+        holdout_sessions=len(holdout_sessions),
+        discovery_end_date=discovery_end_date,
         baseline_policy_name=baseline_name,
         production_policy_name=production_name,
         policies=results,
@@ -468,9 +475,11 @@ def evaluate_opening_policy_cohort(
 ) -> OpeningPolicyCohortReport:
     """Pair two frozen universes under the same post-signal policy.
 
-    Only dates resolved by both universes enter the comparison. This prevents
-    missing cohort data from being treated as a zero-return skip and keeps the
-    result diagnostic-only even when historical metrics appear favorable.
+    Only dates resolved by both universes enter the comparison. The baseline
+    date series freezes the chronological boundary before unpaired dates are
+    removed, so candidate data gaps cannot move holdout observations into the
+    discovery slice. The result remains diagnostic-only even when historical
+    metrics appear favorable.
     """
 
     if not math.isfinite(round_trip_cost_bps) or round_trip_cost_bps < 0:
@@ -497,13 +506,18 @@ def evaluate_opening_policy_cohort(
     if len(paired_dates) < 2:
         raise ValueError("at least two paired cohort sessions are required")
 
-    split_index = max(
-        1,
-        min(
-            len(paired_dates) - 1,
-            math.floor(len(paired_dates) * discovery_ratio),
-        ),
+    discovery_end_date, discovery_dates, holdout_dates = (
+        _baseline_anchored_split(
+            tuple(sorted(baseline_by_date)),
+            paired_dates,
+            discovery_ratio=discovery_ratio,
+            comparison_name="cohort",
+        )
     )
+    paired_by_date = {
+        value: (baseline_by_date[value], cohort_by_date[value])
+        for value in paired_dates
+    }
     paired = tuple(
         (baseline_by_date[value], cohort_by_date[value])
         for value in paired_dates
@@ -516,8 +530,14 @@ def evaluate_opening_policy_cohort(
         ...,
     ] = (
         ("ALL", paired),
-        ("DISCOVERY", paired[:split_index]),
-        ("HOLDOUT", paired[split_index:]),
+        (
+            "DISCOVERY",
+            tuple(paired_by_date[value] for value in discovery_dates),
+        ),
+        (
+            "HOLDOUT",
+            tuple(paired_by_date[value] for value in holdout_dates),
+        ),
     )
     return OpeningPolicyCohortReport(
         algorithm_version=OPENING_POLICY_COHORT_DIAGNOSTIC_VERSION,
@@ -527,8 +547,9 @@ def evaluate_opening_policy_cohort(
         baseline_source_sessions=len(baseline_by_date),
         cohort_source_sessions=len(cohort_by_date),
         paired_sessions=len(paired_dates),
-        discovery_sessions=split_index,
-        holdout_sessions=len(paired_dates) - split_index,
+        discovery_sessions=len(discovery_dates),
+        holdout_sessions=len(holdout_dates),
+        discovery_end_date=discovery_end_date,
         cohort_symbols=normalized_cohort,
         slices=tuple(
             _cohort_evaluation_slice(
@@ -556,7 +577,7 @@ def evaluate_opening_policy_horizons(
     round_trip_cost_bps: float,
     discovery_ratio: float = 0.60,
 ) -> OpeningPolicyHorizonReport:
-    """Compare fixed exits while holding every signal decision constant."""
+    """Compare fixed exits under one baseline-anchored chronological split."""
 
     if not math.isfinite(round_trip_cost_bps) or round_trip_cost_bps < 0:
         raise ValueError("round_trip_cost_bps must be finite and non-negative")
@@ -604,19 +625,20 @@ def evaluate_opening_policy_horizons(
                 holding_minutes=holding_minutes,
             )
 
-    split_index = max(
-        1,
-        min(
-            len(paired_dates) - 1,
-            math.floor(len(paired_dates) * discovery_ratio),
-        ),
+    discovery_end_date, discovery_dates, holdout_dates = (
+        _baseline_anchored_split(
+            tuple(sorted(baseline_by_date)),
+            paired_dates,
+            discovery_ratio=discovery_ratio,
+            comparison_name="holding horizon",
+        )
     )
     slice_specs: tuple[
         tuple[OpeningPolicySliceName, tuple[date, ...]], ...
     ] = (
         ("ALL", paired_dates),
-        ("DISCOVERY", paired_dates[:split_index]),
-        ("HOLDOUT", paired_dates[split_index:]),
+        ("DISCOVERY", discovery_dates),
+        ("HOLDOUT", holdout_dates),
     )
     return OpeningPolicyHorizonReport(
         algorithm_version=OPENING_POLICY_HORIZON_DIAGNOSTIC_VERSION,
@@ -634,8 +656,9 @@ def evaluate_opening_policy_horizons(
             )
         ),
         paired_sessions=len(paired_dates),
-        discovery_sessions=split_index,
-        holdout_sessions=len(paired_dates) - split_index,
+        discovery_sessions=len(discovery_dates),
+        holdout_sessions=len(holdout_dates),
+        discovery_end_date=discovery_end_date,
         results=tuple(
             OpeningPolicyHorizonResult(
                 holding_minutes=holding_minutes,
@@ -672,6 +695,45 @@ def _sessions_by_date(
             raise ValueError(f"{field_name} dates must be unique")
         result[value.session_date] = value
     return result
+
+
+def _baseline_anchored_split(
+    baseline_dates: Sequence[date],
+    paired_dates: Sequence[date],
+    *,
+    discovery_ratio: float,
+    comparison_name: str,
+) -> tuple[date, tuple[date, ...], tuple[date, ...]]:
+    """Freeze the split on the baseline before dropping unpaired dates."""
+
+    ordered_baseline = tuple(sorted(baseline_dates))
+    if len(ordered_baseline) < 2:
+        raise ValueError("at least two baseline sessions are required")
+    split_index = max(
+        1,
+        min(
+            len(ordered_baseline) - 1,
+            math.floor(len(ordered_baseline) * discovery_ratio),
+        ),
+    )
+    discovery_end_date = ordered_baseline[split_index - 1]
+    ordered_paired = tuple(sorted(paired_dates))
+    discovery_dates = tuple(
+        value
+        for value in ordered_paired
+        if value <= discovery_end_date
+    )
+    holdout_dates = tuple(
+        value
+        for value in ordered_paired
+        if value > discovery_end_date
+    )
+    if not discovery_dates or not holdout_dates:
+        raise ValueError(
+            f"paired {comparison_name} sessions must cover both the "
+            "baseline discovery and holdout periods"
+        )
+    return discovery_end_date, discovery_dates, holdout_dates
 
 
 def _validate_same_horizon_decision(
