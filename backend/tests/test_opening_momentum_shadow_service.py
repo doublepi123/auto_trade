@@ -2170,6 +2170,33 @@ def test_relaxed_weak_breadth_challenger_is_forward_only_at_three_bps(
         assert relaxed.comparison_baseline == (
             "WEAK_BREADTH_PATH_CHALLENGER"
         )
+
+        closed_status = service.tick(
+            now=_SESSION_OPEN + timedelta(minutes=65, seconds=10),
+        )
+        closed_relaxed = {
+            item.variant: item for item in closed_status.variants
+        }["WEAK_BREADTH_RELAXED_CHALLENGER"]
+        assert closed_relaxed.latest is not None
+        assert closed_relaxed.latest.status == "CLOSED"
+        assert closed_relaxed.comparison is not None
+        assert closed_relaxed.comparison.resolved_sessions == 1
+        assert (
+            closed_relaxed.comparison.policy_displacement_sessions
+            == 1
+        )
+        assert (
+            closed_relaxed.comparison
+            .minimum_policy_displacement_sessions
+            == 3
+        )
+        assert (
+            closed_relaxed.comparison.displacement_outperformance_rate
+            == 0.0
+        )
+        assert closed_relaxed.comparison.evidence_gate_passed is False
+        assert closed_relaxed.comparison.promotion_ready is False
+        assert closed_relaxed.comparison.recommendation == "COLLECTING"
     finally:
         db.close()
         Base.metadata.drop_all(bind=engine)

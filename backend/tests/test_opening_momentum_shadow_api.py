@@ -277,6 +277,13 @@ class TestOpeningMomentumShadowApi:
             "WEAK_BREADTH_PATH_CHALLENGER"
         )
         assert weak_breadth_relaxed["comparison"] is not None
+        relaxed_comparison = weak_breadth_relaxed["comparison"]
+        assert relaxed_comparison["policy_displacement_sessions"] == 0
+        assert (
+            relaxed_comparison["minimum_policy_displacement_sessions"]
+            == 3
+        )
+        assert relaxed_comparison["evidence_gate_passed"] is False
         assert weak_breadth_index_cohort["universe_source"] == (
             "OPENING_EXECUTION_WEAK_BREADTH_INDEX_COHORT"
         )

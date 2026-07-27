@@ -2399,10 +2399,6 @@ class OpeningMomentumShadowService:
             is_execution_extension = (
                 identity.variant in _EXECUTION_EXTENSION_VARIANTS
             )
-            is_weak_breadth_extension = (
-                identity.variant
-                == "WEAK_BREADTH_INDEX_COHORT_CHALLENGER"
-            )
             uses_execution_baseline = (
                 is_execution_extension
                 or identity.variant in {
@@ -2422,10 +2418,10 @@ class OpeningMomentumShadowService:
             uses_etf_regime_baseline = (
                 identity.variant in _ETF_REGIME_EXTENSION_VARIANTS
             )
-            is_extension = (
+            requires_displacement_evidence = (
                 is_early_extension
                 or is_execution_extension
-                or is_weak_breadth_extension
+                or uses_weak_breadth_baseline
                 or uses_etf_regime_baseline
             )
             identity_rows_by_date = rows_by_date[
@@ -2536,7 +2532,7 @@ class OpeningMomentumShadowService:
                         asdict(comparison)
                     )
                 )
-                if is_extension:
+                if requires_displacement_evidence:
                     comparison_response = (
                         self._apply_extension_evidence_gate(
                             comparison_response,
