@@ -252,7 +252,7 @@ def observation_pool_overrides(
     }
     already_observed = {
         row.symbol.strip().upper()
-        for row in unmanaged
+        for row in configs
         if (
             row.enabled
             and row.opening_momentum_execution_eligible

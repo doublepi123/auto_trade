@@ -816,7 +816,7 @@ def test_observation_pool_overrides_separate_durable_and_opt_out() -> None:
         overrides = observation_pool_overrides(db)
 
         assert overrides.already_observed_symbols == frozenset(
-            {"NVDA.US", "MRVL.US"}
+            {"NVDA.US", "MRVL.US", "AAPL.US"}
         )
         assert overrides.durable_observed_symbols == frozenset(
             {"NVDA.US", "MRVL.US", "CRWD.US", "AAPL.US"}
@@ -825,7 +825,7 @@ def test_observation_pool_overrides_separate_durable_and_opt_out() -> None:
             {"MRVL.US", "AAPL.US"}
         )
         assert overrides.exploration_excluded_symbols == frozenset(
-            {"AAPL.US", "CRWD.US", "TER.US"}
+            {"CRWD.US", "TER.US"}
         )
         assert overrides.unobservable_symbols == frozenset({"TER.US"})
     finally:
@@ -1284,8 +1284,8 @@ def test_reconcile_keeps_execution_pool_and_challengers_stable() -> None:
             algorithm_version="selector-v1",
             source_version="catalog-v1",
             status="COMPLETE",
-            candidate_count=5,
-            evaluable_count=5,
+            candidate_count=6,
+            evaluable_count=6,
             selected_count=1,
             coverage_ratio=1.0,
             parameters_json="{}",
@@ -1328,6 +1328,7 @@ def test_reconcile_keeps_execution_pool_and_challengers_stable() -> None:
                 candidate("KLAC.US", 98),
                 candidate("AVGO.US", 97),
                 candidate("LRCX.US", 96),
+                candidate("APP.US", 95),
                 StrategyV2ShadowConfig(
                     symbol="AVGO.US",
                     enabled=True,
@@ -1350,7 +1351,7 @@ def test_reconcile_keeps_execution_pool_and_challengers_stable() -> None:
             config=_config(),
             minimum_evaluable_ratio=0.5,
             minimum_residency_days=1,
-            exploration_max_symbols=2,
+            exploration_max_symbols=4,
             exploration_top_score_challengers=2,
             apply_to_watchlist=True,
             enable_shadow=True,
@@ -1369,7 +1370,12 @@ def test_reconcile_keeps_execution_pool_and_challengers_stable() -> None:
             should_apply=True,
         )
 
-        assert first.exploration_symbols == ("ASML.US", "KLAC.US")
+        assert first.exploration_symbols == (
+            "ASML.US",
+            "KLAC.US",
+            "AVGO.US",
+            "LRCX.US",
+        )
         assert second.exploration_symbols == first.exploration_symbols
         assert first.shadow_enabled_symbols == (
             "AAPL.US",
