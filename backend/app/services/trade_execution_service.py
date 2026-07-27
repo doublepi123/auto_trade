@@ -827,39 +827,14 @@ class TradeExecutionService:
 
         if action in _ENTRY_ACTIONS:
             policy_check = entry_policy_check or self._entry_policy_check
-            if policy_check is not None:
-                try:
-                    policy_result = policy_check(symbol, action, market)
-                except Exception:
-                    logger.exception(
-                        "entry policy check unavailable for %s %s",
-                        action,
-                        symbol,
-                    )
-                    return self._skip_order(
-                        symbol,
-                        action,
-                        "entry policy check unavailable; entry denied",
-                        skip_category="RISK",
-                    )
-                if isinstance(policy_result, str):
-                    if policy_result:
-                        return self._skip_order(
-                            symbol,
-                            action,
-                            policy_result,
-                            skip_category="RISK",
-                        )
-                elif policy_result is not None and policy_result.issue:
-                    policy_details = dict(policy_result.details)
-                    policy_details.pop("skip_category", None)
-                    return self._skip_order(
-                        symbol,
-                        action,
-                        policy_result.issue,
-                        skip_category=policy_result.skip_category,
-                        **policy_details,
-                    )
+            policy_rejection = self._entry_policy_rejection(
+                policy_check,
+                symbol,
+                action,
+                market,
+            )
+            if policy_rejection is not None:
+                return policy_rejection
 
             unresolved_order_ids = self.pending_order_ids()
             if unresolved_order_ids:
@@ -934,6 +909,8 @@ class TradeExecutionService:
                 engine_snapshot=engine_snapshot,
                 restore_engine_snapshot=restore_engine_snapshot,
                 notify_risk_event=notify_risk_event,
+                final_entry_policy_check=entry_policy_check,
+                market=market,
             )
         if action == "SELL":
             return self._execute_sell(
@@ -952,7 +929,19 @@ class TradeExecutionService:
                 reduce_only=reduce_only,
             )
         if action == "SELL_SHORT":
-            return self._execute_sell_short(symbol, quote, broker, risk, notifier, cash_currency, engine_snapshot=engine_snapshot, restore_engine_snapshot=restore_engine_snapshot, notify_risk_event=notify_risk_event)
+            return self._execute_sell_short(
+                symbol,
+                quote,
+                broker,
+                risk,
+                notifier,
+                cash_currency,
+                engine_snapshot=engine_snapshot,
+                restore_engine_snapshot=restore_engine_snapshot,
+                notify_risk_event=notify_risk_event,
+                final_entry_policy_check=entry_policy_check,
+                market=market,
+            )
         if action == "BUY_TO_COVER":
             return self._execute_buy_to_cover(
                 symbol,
@@ -971,6 +960,50 @@ class TradeExecutionService:
             )
         logger.warning("unknown action: %s", action)
         return None
+
+    def _entry_policy_rejection(
+        self,
+        policy_check: EntryPolicyCheck | None,
+        symbol: str,
+        action: str,
+        market: str,
+    ) -> OrderStatus | None:
+        if policy_check is None:
+            return None
+        try:
+            policy_result = policy_check(symbol, action, market)
+        except Exception:
+            logger.exception(
+                "entry policy check unavailable for %s %s",
+                action,
+                symbol,
+            )
+            return self._skip_order(
+                symbol,
+                action,
+                "entry policy check unavailable; entry denied",
+                skip_category="RISK",
+            )
+        if isinstance(policy_result, str):
+            if not policy_result:
+                return None
+            return self._skip_order(
+                symbol,
+                action,
+                policy_result,
+                skip_category="RISK",
+            )
+        if policy_result is None or not policy_result.issue:
+            return None
+        policy_details = dict(policy_result.details)
+        policy_details.pop("skip_category", None)
+        return self._skip_order(
+            symbol,
+            action,
+            policy_result.issue,
+            skip_category=policy_result.skip_category,
+            **policy_details,
+        )
 
     @staticmethod
     def _risk_rejection_allows_action(action: str, risk: RiskController) -> bool:
@@ -1521,6 +1554,8 @@ class TradeExecutionService:
         engine_snapshot: EngineSnapshot | None = None,
         restore_engine_snapshot: Callable[[EngineSnapshot], None] | None = None,
         notify_risk_event: _NotifyRiskEvent | None = None,
+        final_entry_policy_check: EntryPolicyCheck | None = None,
+        market: str = "US",
     ) -> OrderStatus | None:
         price = self._normalize_limit_price(symbol, "BUY", Decimal(str(quote.last_price)))
         if price <= 0:
@@ -1564,6 +1599,8 @@ class TradeExecutionService:
             entry_fee_rate=fee_rate,
             entry_bid=quote.bid,
             entry_ask=quote.ask,
+            final_entry_policy_check=final_entry_policy_check,
+            market=market,
         )
         if (
             order_status is None
@@ -1747,6 +1784,8 @@ class TradeExecutionService:
         engine_snapshot: EngineSnapshot | None = None,
         restore_engine_snapshot: Callable[[EngineSnapshot], None] | None = None,
         notify_risk_event: _NotifyRiskEvent | None = None,
+        final_entry_policy_check: EntryPolicyCheck | None = None,
+        market: str = "US",
     ) -> OrderStatus | None:
         price = self._normalize_limit_price(symbol, "SELL_SHORT", Decimal(str(quote.last_price)))
         if price <= 0:
@@ -1774,6 +1813,8 @@ class TradeExecutionService:
             engine_snapshot=engine_snapshot,
             restore_engine_snapshot=restore_engine_snapshot,
             notify_risk_event=notify_risk_event,
+            final_entry_policy_check=final_entry_policy_check,
+            market=market,
         )
         if (
             order_status is None
@@ -1970,6 +2011,8 @@ class TradeExecutionService:
         exit_allow_loss_exit: bool = False,
         exit_fee_rate: Decimal | float | int = Decimal("0"),
         exit_entry_reference_quantity: Decimal | float | int | None = None,
+        final_entry_policy_check: EntryPolicyCheck | None = None,
+        market: str = "US",
     ) -> OrderStatus | None:
         """Submit a limit order, persist it, and handle immediate live/terminal/filled outcomes.
 
@@ -1996,6 +2039,8 @@ class TradeExecutionService:
                 exit_allow_loss_exit=exit_allow_loss_exit,
                 exit_fee_rate=exit_fee_rate,
                 exit_entry_reference_quantity=exit_entry_reference_quantity,
+                final_entry_policy_check=final_entry_policy_check,
+                market=market,
             )
             if isinstance(precheck_result, OrderStatus):
                 return precheck_result
@@ -2039,6 +2084,8 @@ class TradeExecutionService:
         exit_allow_loss_exit: bool = False,
         exit_fee_rate: Decimal | float | int = Decimal("0"),
         exit_entry_reference_quantity: Decimal | float | int | None = None,
+        final_entry_policy_check: EntryPolicyCheck | None = None,
+        market: str = "US",
     ) -> OrderStatus | Decimal | None:
         if action in _ENTRY_ACTIONS:
             position_check = self._entry_position_check(broker, symbol, action)
@@ -2140,6 +2187,15 @@ class TradeExecutionService:
                     quote_issue,
                     skip_category="RISK",
                 )
+        if action in _ENTRY_ACTIONS and final_entry_policy_check is not None:
+            policy_rejection = self._entry_policy_rejection(
+                final_entry_policy_check,
+                symbol,
+                action,
+                market,
+            )
+            if policy_rejection is not None:
+                return policy_rejection
         if action == "BUY" and entry_expected_exit_price is not None:
             entry_guard = self._profit_guard_for_entry(
                 symbol=symbol,

@@ -2556,6 +2556,7 @@ class AppRunner:
                             checked_symbol,
                             checked_action,
                             checked_market,
+                            entry_deadline_at=deadline,
                         )
                     )
                 ),
@@ -2565,6 +2566,11 @@ class AppRunner:
                 target_engine.restore(engine_snapshot)
                 return result("NO_ORDER")
             status = str(order_status.status or "UNKNOWN").upper()
+            if (
+                status == "SKIPPED"
+                and order_status.reason == "ENTRY_WINDOW_EXPIRED"
+            ):
+                status = "ENTRY_WINDOW_EXPIRED"
             executed = status in {
                 "FILLED",
                 "SUBMITTED",
@@ -3353,6 +3359,8 @@ class AppRunner:
         symbol: str,
         action: str,
         market: str,
+        *,
+        entry_deadline_at: datetime | None = None,
     ) -> EntryPolicyCheckResult | str | None:
         normalized_symbol = str(symbol or "").strip().upper()
         normalized_action = str(action or "").upper()
@@ -3380,6 +3388,19 @@ class AppRunner:
                 details={
                     "entry_policy": "OPENING_MOMENTUM_EXECUTION",
                     "policy_reason": "EXECUTION_NOT_ACTIVE",
+                    "opening_execution_id": execution_id,
+                },
+            )
+        if (
+            entry_deadline_at is not None
+            and datetime.now(timezone.utc) > self._as_utc(entry_deadline_at)
+        ):
+            return EntryPolicyCheckResult(
+                issue="ENTRY_WINDOW_EXPIRED",
+                skip_category="SESSION",
+                details={
+                    "entry_policy": "OPENING_MOMENTUM_EXECUTION",
+                    "policy_reason": "ENTRY_WINDOW_EXPIRED",
                     "opening_execution_id": execution_id,
                 },
             )

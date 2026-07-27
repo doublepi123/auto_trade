@@ -20,7 +20,7 @@ from app.core.broker import OrderResult, Position, Quote
 from app.core.engine import EngineSnapshot, EngineState, StrategyParams
 from app.runner import AppRunner, _ReductionIntent, get_runner
 from app.services import trade_execution_service as trade_execution_service_module
-from app.services.trade_execution_service import EntryPolicyCheckResult
+from app.services.trade_execution_service import EntryPolicyCheckResult, OrderStatus
 
 
 database.init_db()
@@ -6886,7 +6886,7 @@ class TestOpeningMomentumExecution:
         monkeypatch.setattr(
             runner,
             "_validate_opening_momentum_entry_policy",
-            lambda *_args: None,
+            lambda *_args, **_kwargs: None,
         )
         captured: dict[str, Any] = {}
 
@@ -7102,6 +7102,71 @@ class TestOpeningMomentumExecution:
         assert result["status"] == "ENTRY_WINDOW_EXPIRED"
         assert runner.engine.state == EngineState.FLAT
         assert runner._trigger_in_flight is False
+
+    def test_entry_expiring_during_broker_preflight_is_reported_as_expired(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        runner = TestAppRunner._runner_with_primary_quote_runtime()
+        self._enable(runner, monkeypatch)
+        runner._opening_execution_policies = {
+            "NVDA.US": self._policy()
+        }
+        monkeypatch.setattr(
+            runner.broker,
+            "get_quotes",
+            lambda _symbols: [Quote(
+                "NVDA.US",
+                100.0,
+                99.99,
+                100.01,
+                _fresh_timestamp(),
+            )],
+        )
+        monkeypatch.setattr(
+            runner._trade_svc,
+            "execute",
+            lambda **_kwargs: OrderStatus(
+                "",
+                "SKIPPED",
+                reason="ENTRY_WINDOW_EXPIRED",
+            ),
+        )
+
+        result = runner.execute_opening_momentum_entry(
+            execution_id=17,
+            symbol="NVDA.US",
+            reference_entry_price=100.0,
+            entry_deadline_at=datetime.now(timezone.utc) + timedelta(minutes=1),
+            max_price_deviation_bps=200.0,
+            stop_loss_pct=1.0,
+            max_holding_minutes=60,
+            signal_context={},
+        )
+
+        assert result["status"] == "ENTRY_WINDOW_EXPIRED"
+        assert result["reason"] == "ENTRY_WINDOW_EXPIRED"
+        assert runner.engine.state == EngineState.FLAT
+        assert runner._trigger_in_flight is False
+
+    def test_opening_policy_recheck_rejects_an_expired_deadline(self) -> None:
+        runner = TestAppRunner._runner_with_primary_quote_runtime()
+        runner._opening_execution_policies = {
+            "NVDA.US": self._policy()
+        }
+
+        result = runner._validate_opening_momentum_entry_policy(
+            17,
+            "NVDA.US",
+            "BUY",
+            "US",
+            entry_deadline_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+        )
+
+        assert isinstance(result, EntryPolicyCheckResult)
+        assert result.issue == "ENTRY_WINDOW_EXPIRED"
+        assert result.skip_category == "SESSION"
+        assert result.details["policy_reason"] == "ENTRY_WINDOW_EXPIRED"
 
     def test_secondary_opening_position_gets_fixed_stop_exit(self) -> None:
         runner = TestAppRunner._runner_with_primary_quote_runtime()

@@ -7,7 +7,7 @@ import time
 from datetime import datetime, timezone
 from decimal import Decimal
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 import pytest
 
@@ -185,6 +185,58 @@ class TestTradeExecutionServiceBasics:
         assert status.status == "FILLED"
         entry_policy_check.assert_called_once_with("NVDA.US", "BUY", "US")
         broker.submit_limit_order.assert_called_once()
+
+    def test_explicit_entry_policy_is_rechecked_immediately_before_submission(
+        self,
+    ) -> None:
+        skipped: list[tuple[str, str, str, dict[str, object]]] = []
+        entry_policy_check = MagicMock(
+            side_effect=[
+                None,
+                EntryPolicyCheckResult(
+                    issue="ENTRY_WINDOW_EXPIRED",
+                    skip_category="SESSION",
+                    details={"policy_reason": "ENTRY_WINDOW_EXPIRED"},
+                ),
+            ]
+        )
+        broker = MagicMock()
+        broker.get_positions.return_value = []
+        broker.estimate_margin_max_quantity.return_value = Decimal("10")
+        svc = TradeExecutionService(
+            record_order=lambda *args: None,
+            update_order_status=lambda *args: None,
+            record_risk_event=lambda *args: None,
+            record_order_skipped=lambda symbol, action, reason, payload: skipped.append(
+                (symbol, action, reason, payload)
+            ),
+        )
+
+        status = svc.execute(
+            "BUY",
+            "NVDA.US",
+            Quote("NVDA.US", 220, 219.9, 220.1, ""),
+            broker,
+            RiskController(),
+            ServerChanNotifier(""),
+            "USD",
+            market="US",
+            entry_policy_check=entry_policy_check,
+        )
+
+        assert status is not None
+        assert status.status == "SKIPPED"
+        assert status.reason == "ENTRY_WINDOW_EXPIRED"
+        assert entry_policy_check.call_args_list == [
+            call("NVDA.US", "BUY", "US"),
+            call("NVDA.US", "BUY", "US"),
+        ]
+        assert skipped[-1][3] == {
+            "skip_category": "SESSION",
+            "policy_reason": "ENTRY_WINDOW_EXPIRED",
+        }
+        broker.estimate_margin_max_quantity.assert_called_once()
+        broker.submit_limit_order.assert_not_called()
 
     def test_entry_policy_structured_block_preserves_payload_and_precedes_pending_guard(
         self,
