@@ -32,7 +32,7 @@ from app.domain.opening_momentum_extension import (
 from app.models import StrategyV2ShadowConfig
 
 
-OPENING_EXTENSION_CLI_VERSION = "opening-extension-research-cli-v3"
+OPENING_EXTENSION_CLI_VERSION = "opening-extension-research-cli-v4"
 _CACHE_VERSION = "opening-extension-minute-cache-ohlc-v3"
 _BAR_DURATION = timedelta(minutes=1)
 _DEFAULT_SIGNAL_MINUTES = (2, 3, 5, 10)
@@ -45,6 +45,12 @@ _EXECUTION_COHORT_MAX_SYMBOLS = 6
 _EXECUTION_COHORT_MINIMUM_DISPLACEMENTS = 4
 _EXECUTION_COHORT_SELECTION_VERSION = (
     "individual-discovery-top6-positive-delta-min4-stop1-shortlist-v2"
+)
+_JOINT_EXPLORATION_MAX_SYMBOLS = 6
+_JOINT_EXPLORATION_MINIMUM_DISPLACEMENTS = 1
+_JOINT_EXPLORATION_SELECTION_VERSION = (
+    "individual-discovery-top6-positive-tail-risk-min1-"
+    "joint-exploration-v1"
 )
 
 
@@ -701,6 +707,73 @@ def _execution_cohort_payload(
     }
 
 
+def _joint_exploration_shortlist_payload(
+    grid: GridEvaluation,
+) -> dict[str, object]:
+    """Keep sparse positive candidates for a later joint-subset search."""
+
+    eligible: list[
+        tuple[float, float, str, OpeningExtensionSlice]
+    ] = []
+    for candidate in grid.report.candidates:
+        discovery = _slice(candidate, "DISCOVERY")
+        delta = discovery.comparison.cumulative_delta_bps
+        tail_delta = (
+            discovery.challenger.cumulative_without_best_3_bps
+            - discovery.baseline.cumulative_without_best_3_bps
+        )
+        if (
+            discovery.resolved_sessions < 20
+            or discovery.displaced_baseline_sessions
+            < _JOINT_EXPLORATION_MINIMUM_DISPLACEMENTS
+            or delta <= 0
+            or tail_delta <= 0
+            or not discovery.comparison.risk_guard_passed
+        ):
+            continue
+        eligible.append((
+            delta,
+            tail_delta,
+            candidate.symbol,
+            discovery,
+        ))
+    eligible.sort(key=lambda item: (-item[0], -item[1], item[2]))
+    selected = eligible[:_JOINT_EXPLORATION_MAX_SYMBOLS]
+    return {
+        "selection_version": _JOINT_EXPLORATION_SELECTION_VERSION,
+        "selection_stage": "JOINT_EXPLORATION_CANDIDATE_SHORTLIST",
+        "selection_uses_holdout": False,
+        "joint_subset_selection_required": True,
+        "diagnostic_only": True,
+        "automatic_execution_cohort_allowed": False,
+        "maximum_symbols": _JOINT_EXPLORATION_MAX_SYMBOLS,
+        "minimum_displacement_sessions": (
+            _JOINT_EXPLORATION_MINIMUM_DISPLACEMENTS
+        ),
+        "symbols": [symbol for _, _, symbol, _ in selected],
+        "candidates": [
+            {
+                "symbol": symbol,
+                "displaced_baseline_sessions": (
+                    discovery.displaced_baseline_sessions
+                ),
+                "extension_signal_sessions": (
+                    discovery.extension_signal_sessions
+                ),
+                "cumulative_delta_bps": delta,
+                "tail_delta_bps": tail_delta,
+                "mean_delta_bps": (
+                    discovery.comparison.mean_delta_bps
+                ),
+                "risk_guard_passed": (
+                    discovery.comparison.risk_guard_passed
+                ),
+            }
+            for delta, tail_delta, symbol, discovery in selected
+        ],
+    }
+
+
 def _parse_symbols(value: str, *, field_name: str) -> tuple[str, ...]:
     symbols = tuple(
         part.strip().upper()
@@ -982,6 +1055,9 @@ def main() -> int:
     execution_cohort_payload = _execution_cohort_payload(
         selection_grid
     )
+    joint_exploration_shortlist_payload = (
+        _joint_exploration_shortlist_payload(selection_grid)
+    )
     full_payload: dict[str, object] = {
         "cli_version": OPENING_EXTENSION_CLI_VERSION,
         "algorithm_version": OPENING_EXTENSION_RESEARCH_VERSION,
@@ -1027,6 +1103,9 @@ def main() -> int:
         },
         "selected": selected_payload,
         "execution_cohort": execution_cohort_payload,
+        "joint_exploration_shortlist": (
+            joint_exploration_shortlist_payload
+        ),
         "automatic_promotion_allowed": False,
         "grid": [
             {
@@ -1063,6 +1142,9 @@ def main() -> int:
         "data_scope": full_payload["data_scope"],
         "selected": selected_payload,
         "execution_cohort": execution_cohort_payload,
+        "joint_exploration_shortlist": (
+            joint_exploration_shortlist_payload
+        ),
         "automatic_promotion_allowed": False,
         "full_report_path": str(output_path),
         "grid": [_grid_summary(value) for value in grids],

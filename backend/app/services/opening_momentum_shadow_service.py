@@ -236,6 +236,30 @@ _WEAK_BREADTH_INDEX_COHORT_SOURCE = (
 _WEAK_BREADTH_INDEX_COHORT_ALGORITHM_VERSION = (
     f"{ALGORITHM_VERSION}+{_WEAK_BREADTH_INDEX_COHORT_VERSION}"
 )
+# The sparse-candidate shortlist was selected from discovery data only, then
+# exhaustively evaluated as joint subsets. This five-symbol subset had eight
+# execution displacements and passed 30bp cost, tail, and drawdown guards.
+# Its historical holdout was inspected after selection, so only later sessions
+# are valid evidence and automatic promotion remains unavailable.
+_WEAK_BREADTH_SPARSE_INDEX_COHORT_SYMBOLS = (
+    "SNDK.US",
+    "STX.US",
+    "CRWD.US",
+    "ABNB.US",
+    "CPRT.US",
+)
+_WEAK_BREADTH_SPARSE_INDEX_COHORT_VERSION = (
+    "forward-only-discovery-joint-sparse-index-"
+    "sndk-stx-crwd-abnb-cprt-cost30-tail-dd-"
+    "max-median0-path-efficiency-070-20260728-v1"
+)
+_WEAK_BREADTH_SPARSE_INDEX_COHORT_SOURCE = (
+    "OPENING_EXECUTION_WEAK_BREADTH_SPARSE_INDEX_COHORT"
+)
+_WEAK_BREADTH_SPARSE_INDEX_COHORT_ALGORITHM_VERSION = (
+    f"{ALGORITHM_VERSION}+"
+    f"{_WEAK_BREADTH_SPARSE_INDEX_COHORT_VERSION}"
+)
 _EXECUTION_CRWD_FORWARD_COHORT_VERSION = (
     "forward-only-two-slice-positive-tail-backward-sparse-"
     "precommitted-20260727-v1"
@@ -286,6 +310,7 @@ _VariantName = Literal[
     "WEAK_BREADTH_PATH_CHALLENGER",
     "WEAK_BREADTH_RELAXED_CHALLENGER",
     "WEAK_BREADTH_INDEX_COHORT_CHALLENGER",
+    "WEAK_BREADTH_SPARSE_INDEX_COHORT_CHALLENGER",
     "WEAK_BREADTH_WIDE_STOP_CHALLENGER",
     "ETF_REGIME_PATH_CHALLENGER",
     "ETF_REGIME_CRWD_CHALLENGER",
@@ -1566,6 +1591,19 @@ class OpeningMomentumShadowService:
             )),
             selection_run_id=run.id,
         ))
+        weak_breadth_sparse_index_cohort_identity = (
+            identities_by_variant[
+                "WEAK_BREADTH_SPARSE_INDEX_COHORT_CHALLENGER"
+            ]
+        )
+        variants.append(replace(
+            weak_breadth_sparse_index_cohort_identity,
+            symbols=tuple(dict.fromkeys(
+                active_broad_symbols
+                + weak_breadth_sparse_index_cohort_identity.required_symbols
+            )),
+            selection_run_id=run.id,
+        ))
         for variant_name in _ETF_REGIME_VARIANTS:
             identity = identities_by_variant[
                 cast(_VariantName, variant_name)
@@ -1815,6 +1853,36 @@ class OpeningMomentumShadowService:
                 ),
                 required_symbols=(
                     _WEAK_BREADTH_INDEX_COHORT_SYMBOLS
+                ),
+            ))
+            variants.append(_UniverseVariant(
+                variant=(
+                    "WEAK_BREADTH_SPARSE_INDEX_COHORT_CHALLENGER"
+                ),
+                algorithm_version=(
+                    _WEAK_BREADTH_SPARSE_INDEX_COHORT_ALGORITHM_VERSION
+                ),
+                config_version=self._evidence_config_version(
+                    f"{execution_config.version_hash()}:"
+                    f"{_WEAK_BREADTH_SPARSE_INDEX_COHORT_VERSION}:"
+                    f"{_EXECUTION_PATH_EFFICIENCY_MINIMUM:.2f}:"
+                    f"{_WEAK_BREADTH_MAXIMUM_MARKET_RETURN_BPS:.1f}"
+                ),
+                universe_source=(
+                    _WEAK_BREADTH_SPARSE_INDEX_COHORT_SOURCE
+                ),
+                decision_config=execution_config,
+                minimum_data_coverage=(
+                    _EARLY_BROAD_MINIMUM_COVERAGE
+                ),
+                minimum_path_efficiency=(
+                    _EXECUTION_PATH_EFFICIENCY_MINIMUM
+                ),
+                maximum_market_return_bps=(
+                    _WEAK_BREADTH_MAXIMUM_MARKET_RETURN_BPS
+                ),
+                required_symbols=(
+                    _WEAK_BREADTH_SPARSE_INDEX_COHORT_SYMBOLS
                 ),
             ))
             variants.append(_UniverseVariant(
@@ -2411,6 +2479,7 @@ class OpeningMomentumShadowService:
                 identity.variant in {
                     "WEAK_BREADTH_RELAXED_CHALLENGER",
                     "WEAK_BREADTH_INDEX_COHORT_CHALLENGER",
+                    "WEAK_BREADTH_SPARSE_INDEX_COHORT_CHALLENGER",
                     "WEAK_BREADTH_WIDE_STOP_CHALLENGER",
                     "ETF_REGIME_PATH_CHALLENGER",
                 }

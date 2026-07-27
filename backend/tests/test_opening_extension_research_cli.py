@@ -15,6 +15,7 @@ from app.cli.opening_extension_research import (
     _fetch_symbol_bars,
     _frozen_selection_grid,
     _grid_summary,
+    _joint_exploration_shortlist_payload,
     _load_current_baseline_symbols,
     _load_cache,
     _parse_integer_grid,
@@ -457,6 +458,47 @@ def test_execution_cohort_is_frozen_from_discovery_only() -> None:
     assert payload["joint_subset_selection_required"] is True
     assert payload["automatic_execution_cohort_allowed"] is False
     assert payload["symbols"] == ["EXT.US"]
+
+
+def test_joint_exploration_shortlist_keeps_sparse_robust_candidate() -> None:
+    grid = _grid(
+        3,
+        discovery_exit=101.0,
+        holdout_exit=95.0,
+        holding_minutes=60,
+        stop_loss_pct=1.0,
+    )
+    candidate = grid.report.candidates[0]
+    sparse_slices = tuple(
+        replace(
+            value,
+            displaced_baseline_sessions=1,
+            extension_signal_sessions=1,
+        )
+        if value.name == "DISCOVERY"
+        else value
+        for value in candidate.slices
+    )
+    sparse_grid = replace(
+        grid,
+        report=replace(
+            grid.report,
+            candidates=(replace(candidate, slices=sparse_slices),),
+        ),
+    )
+
+    robust = _execution_cohort_payload(sparse_grid)
+    exploratory = _joint_exploration_shortlist_payload(sparse_grid)
+
+    assert robust["symbols"] == []
+    assert exploratory["selection_uses_holdout"] is False
+    assert exploratory["selection_stage"] == (
+        "JOINT_EXPLORATION_CANDIDATE_SHORTLIST"
+    )
+    assert exploratory["joint_subset_selection_required"] is True
+    assert exploratory["automatic_execution_cohort_allowed"] is False
+    assert exploratory["minimum_displacement_sessions"] == 1
+    assert exploratory["symbols"] == ["EXT.US"]
 
 
 def test_cli_list_parsers_fail_closed() -> None:

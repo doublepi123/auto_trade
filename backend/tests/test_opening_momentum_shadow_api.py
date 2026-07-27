@@ -152,6 +152,9 @@ class TestOpeningMomentumShadowApi:
         weak_breadth_index_cohort = variants[
             "WEAK_BREADTH_INDEX_COHORT_CHALLENGER"
         ]
+        weak_breadth_sparse_index_cohort = variants[
+            "WEAK_BREADTH_SPARSE_INDEX_COHORT_CHALLENGER"
+        ]
         weak_breadth_wide_stop = variants[
             "WEAK_BREADTH_WIDE_STOP_CHALLENGER"
         ]
@@ -160,7 +163,7 @@ class TestOpeningMomentumShadowApi:
             "OPENING_RANGE_STOP_CHALLENGER"
         ]
         execution_sndk = variants["EXECUTION_SNDK_CHALLENGER"]
-        assert len(variants) == 29
+        assert len(variants) == 30
         assert early["universe_source"] == "OPENING_EARLY_BROAD"
         assert early["signal_minutes"] == 3
         assert early["minimum_market_return_bps"] == -50.0
@@ -309,13 +312,52 @@ class TestOpeningMomentumShadowApi:
             cohort_comparison["minimum_policy_displacement_sessions"]
             == 3
         )
+        assert weak_breadth_sparse_index_cohort["universe_source"] == (
+            "OPENING_EXECUTION_WEAK_BREADTH_SPARSE_INDEX_COHORT"
+        )
+        assert (
+            weak_breadth_sparse_index_cohort[
+                "minimum_path_efficiency"
+            ]
+            == 0.70
+        )
+        assert (
+            weak_breadth_sparse_index_cohort[
+                "maximum_market_return_bps"
+            ]
+            == 0.0
+        )
+        assert weak_breadth_sparse_index_cohort["required_symbols"] == [
+            "SNDK.US",
+            "STX.US",
+            "CRWD.US",
+            "ABNB.US",
+            "CPRT.US",
+        ]
+        assert weak_breadth_sparse_index_cohort["comparison_baseline"] == (
+            "WEAK_BREADTH_PATH_CHALLENGER"
+        )
+        assert weak_breadth_sparse_index_cohort["comparison"] is not None
+        sparse_cohort_comparison = (
+            weak_breadth_sparse_index_cohort["comparison"]
+        )
+        assert (
+            sparse_cohort_comparison[
+                "minimum_policy_displacement_sessions"
+            ]
+            == 3
+        )
+        assert (
+            sparse_cohort_comparison["multiple_testing_family_size"]
+            == 5
+        )
         assert (
             cohort_comparison["evidence_gate_passed"]
             is False
         )
         assert (
             cohort_comparison["multiple_testing_family_size"]
-            == 4
+            == 5
         )
         assert weak_breadth_wide_stop["universe_source"] == (
             "OPENING_EXECUTION_WEAK_BREADTH_WIDE_STOP"

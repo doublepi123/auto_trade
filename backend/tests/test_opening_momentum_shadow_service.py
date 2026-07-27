@@ -76,6 +76,7 @@ _ALL_CHALLENGER_VARIANTS = (
     "WEAK_BREADTH_PATH_CHALLENGER",
     "WEAK_BREADTH_RELAXED_CHALLENGER",
     "WEAK_BREADTH_INDEX_COHORT_CHALLENGER",
+    "WEAK_BREADTH_SPARSE_INDEX_COHORT_CHALLENGER",
     "WEAK_BREADTH_WIDE_STOP_CHALLENGER",
     *_ETF_REGIME_VARIANTS,
     "OPENING_RANGE_STOP_CHALLENGER",
@@ -943,6 +944,7 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
             "WEAK_BREADTH_PATH_CHALLENGER",
             "WEAK_BREADTH_RELAXED_CHALLENGER",
             "WEAK_BREADTH_INDEX_COHORT_CHALLENGER",
+            "WEAK_BREADTH_SPARSE_INDEX_COHORT_CHALLENGER",
             "WEAK_BREADTH_WIDE_STOP_CHALLENGER",
             "ETF_REGIME_PATH_CHALLENGER",
             "ETF_REGIME_CRWD_CHALLENGER",
@@ -974,6 +976,9 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
         ]
         weak_breadth_index_cohort = by_variant[
             "WEAK_BREADTH_INDEX_COHORT_CHALLENGER"
+        ]
+        weak_breadth_sparse_index_cohort = by_variant[
+            "WEAK_BREADTH_SPARSE_INDEX_COHORT_CHALLENGER"
         ]
         weak_breadth_wide_stop = by_variant[
             "WEAK_BREADTH_WIDE_STOP_CHALLENGER"
@@ -1065,6 +1070,35 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
         )
         assert "forward-only-discovery-joint-subset" in (
             weak_breadth_index_cohort.algorithm_version
+        )
+        assert (
+            weak_breadth_sparse_index_cohort.decision_config
+            == execution.decision_config
+        )
+        assert (
+            weak_breadth_sparse_index_cohort.minimum_data_coverage
+            == 0.95
+        )
+        assert (
+            weak_breadth_sparse_index_cohort.minimum_path_efficiency
+            == 0.70
+        )
+        assert (
+            weak_breadth_sparse_index_cohort.maximum_market_return_bps
+            == 0.0
+        )
+        assert weak_breadth_sparse_index_cohort.required_symbols == (
+            "SNDK.US",
+            "STX.US",
+            "CRWD.US",
+            "ABNB.US",
+            "CPRT.US",
+        )
+        assert weak_breadth_sparse_index_cohort.universe_source == (
+            "OPENING_EXECUTION_WEAK_BREADTH_SPARSE_INDEX_COHORT"
+        )
+        assert "forward-only-discovery-joint-sparse-index" in (
+            weak_breadth_sparse_index_cohort.algorithm_version
         )
         assert etf_regime.decision_config == execution.decision_config
         assert etf_regime.minimum_data_coverage == 0.95
@@ -1438,7 +1472,7 @@ def test_challengers_use_one_market_snapshot_and_close_all_variants(
         assert opened.latest.universe_source == "UNIVERSE_SELECTION"
         assert opened.latest.candidate_symbol == "S1.US"
         assert opened.latest.selection_run_id == run.id
-        assert len(opened.variants) == 29
+        assert len(opened.variants) == 30
         by_variant = {
             item.variant: item for item in opened.variants
         }
@@ -1637,12 +1671,15 @@ def test_early_broad_challenger_keeps_independent_observation_window(
         )
 
         rows = db.query(OpeningMomentumShadowRun).all()
-        assert len(rows) == 23
+        assert len(rows) == 24
         assert candles.calls == [
             *_SYMBOLS,
             *_EXTENSION_SYMBOLS,
             "PANW.US",
+            "STX.US",
             "CRWD.US",
+            "ABNB.US",
+            "CPRT.US",
             "TRV.US",
             "INTC.US",
         ]
@@ -1770,7 +1807,7 @@ def test_early_broad_challenger_keeps_independent_observation_window(
             now=_SESSION_OPEN + timedelta(minutes=32, seconds=10),
         )
 
-        assert db.query(OpeningMomentumShadowRun).count() == 29
+        assert db.query(OpeningMomentumShadowRun).count() == 30
         assert candles.calls == list(_SYMBOLS[:4])
         by_variant = {
             item.variant: item for item in standard_opened.variants
@@ -1791,7 +1828,7 @@ def test_early_broad_challenger_keeps_independent_observation_window(
         rows = db.query(OpeningMomentumShadowRun).all()
         assert sum(row.status == "CLOSED" for row in rows) == 5
         assert sum(row.status == "SKIPPED" for row in rows) == 4
-        assert sum(row.status == "OPEN" for row in rows) == 20
+        assert sum(row.status == "OPEN" for row in rows) == 21
         by_variant = {
             item.variant: item for item in standard_closed.variants
         }
@@ -1822,7 +1859,7 @@ def test_early_broad_challenger_keeps_independent_observation_window(
         rows = db.query(OpeningMomentumShadowRun).all()
         assert candles.calls == ["S7.US"]
         assert execution_closed.state == "OPEN"
-        assert sum(row.status == "CLOSED" for row in rows) == 18
+        assert sum(row.status == "CLOSED" for row in rows) == 19
         assert sum(row.status == "SKIPPED" for row in rows) == 4
         assert sum(row.status == "OPEN" for row in rows) == 7
         execution_by_variant = {
@@ -2242,6 +2279,9 @@ def test_weak_breadth_index_cohort_can_displace_production_candidate(
         cohort = by_variant[
             "WEAK_BREADTH_INDEX_COHORT_CHALLENGER"
         ]
+        sparse_cohort = by_variant[
+            "WEAK_BREADTH_SPARSE_INDEX_COHORT_CHALLENGER"
+        ]
         assert production.latest is not None
         assert production.latest.status == "OPEN"
         assert production.latest.candidate_symbol == "S7.US"
@@ -2263,6 +2303,27 @@ def test_weak_breadth_index_cohort_can_displace_production_candidate(
         )
         assert cohort.comparison is not None
         assert cohort.comparison.minimum_policy_displacement_sessions == 3
+        assert sparse_cohort.latest is not None
+        assert sparse_cohort.latest.status == "OPEN"
+        assert sparse_cohort.latest.candidate_symbol == "S7.US"
+        assert sparse_cohort.latest.universe == [
+            *_SYMBOLS,
+            "SNDK.US",
+            "STX.US",
+            "CRWD.US",
+            "ABNB.US",
+            "CPRT.US",
+        ]
+        assert sparse_cohort.required_symbols == [
+            "SNDK.US",
+            "STX.US",
+            "CRWD.US",
+            "ABNB.US",
+            "CPRT.US",
+        ]
+        assert sparse_cohort.comparison_baseline == (
+            "WEAK_BREADTH_PATH_CHALLENGER"
+        )
     finally:
         db.close()
         Base.metadata.drop_all(bind=engine)
@@ -2417,7 +2478,7 @@ def test_breadth_challenger_skips_a_negative_market_snapshot(
         )
 
         assert candles.calls == list(_SYMBOLS[:4])
-        assert len(status.variants) == 29
+        assert len(status.variants) == 30
         by_variant = {
             item.variant: item for item in status.variants
         }
