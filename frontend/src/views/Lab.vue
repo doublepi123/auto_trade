@@ -669,7 +669,10 @@
                 <el-table-column label="策略" min-width="200">
                   <template #default="{ row }">
                     <strong>{{ portfolioRoutingPolicyLabel(row.policy) }}</strong>
-                    <small v-if="row.target_symbol">
+                    <small
+                      v-if="row.target_symbol"
+                      class="portfolio-target-symbol"
+                    >
                       {{ row.target_symbol }}
                     </small>
                   </template>
@@ -3803,6 +3806,12 @@ onBeforeUnmount(() => {
 
 .shadow-portfolio-table :deep(.el-table) {
   min-width: 1380px;
+}
+
+.portfolio-target-symbol {
+  display: block;
+  margin-top: 2px;
+  color: #6b7280;
 }
 
 .shadow-section-header {
