@@ -218,6 +218,7 @@ class _RunClaim:
 class ObservationPoolOverrides:
     already_observed_symbols: frozenset[str]
     durable_observed_symbols: frozenset[str]
+    challenger_excluded_symbols: frozenset[str]
     exploration_excluded_symbols: frozenset[str]
     unobservable_symbols: frozenset[str]
 
@@ -232,13 +233,8 @@ def observation_pool_overrides(
             .order_by(StrategyConfig.id.desc())
             .first()
         )
-        unmanaged = (
-            db.query(StrategyV2ShadowConfig)
-            .filter(
-                StrategyV2ShadowConfig.universe_managed.is_(False),
-            )
-            .all()
-        )
+        configs = db.query(StrategyV2ShadowConfig).all()
+        unmanaged = [row for row in configs if not row.universe_managed]
 
     durable_observed = {
         row.symbol.strip().upper()
@@ -255,6 +251,11 @@ def observation_pool_overrides(
         )
     }
     observation_only = durable_observed - already_observed
+    challenger_excluded = {
+        row.symbol.strip().upper()
+        for row in configs
+        if row.enabled and row.symbol.strip()
+    }
     unobservable = {
         row.symbol.strip().upper()
         for row in unmanaged
@@ -271,6 +272,7 @@ def observation_pool_overrides(
     return ObservationPoolOverrides(
         already_observed_symbols=frozenset(already_observed),
         durable_observed_symbols=frozenset(durable_observed),
+        challenger_excluded_symbols=frozenset(challenger_excluded),
         exploration_excluded_symbols=frozenset(
             unobservable | observation_only
         ),
@@ -391,11 +393,12 @@ def select_exploration_candidates(
     max_per_sector: int,
     top_score_challengers: int = 0,
     already_observed_symbols: Collection[str] = (),
+    challenger_excluded_symbols: Collection[str] = (),
     unobservable_symbols: Collection[str] = (),
     minimum_risk_group_peers: int = RISK_GROUP_RELATIVE_MIN_PEERS,
     minimum_peer_dollar_volume: float | None = None,
 ) -> list[UniverseSelectionCandidate]:
-    """Choose broad and refined-sector peers before diversified research."""
+    """Choose required peers, fresh challengers, then durable research."""
     if max_symbols < 0:
         raise ValueError("exploration max_symbols must not be negative")
     if max_per_sector < 1:
@@ -424,6 +427,11 @@ def select_exploration_candidates(
     observed_symbols = {
         symbol.strip().upper()
         for symbol in already_observed_symbols
+        if symbol.strip()
+    }
+    excluded_challengers = {
+        symbol.strip().upper()
+        for symbol in challenger_excluded_symbols
         if symbol.strip()
     }
     blocked_symbols = {
@@ -615,10 +623,33 @@ def select_exploration_candidates(
         if len(selected) >= max_symbols:
             return selected
 
+    # Reserve a small cohort for liquid, high-scoring names that passed every
+    # hard gate but lost a formal slot to concentration limits. Existing
+    # durable observers must not consume these fresh-research slots.
+    challengers_added = 0
+    for item in eligible:
+        if (
+            len(selected) >= max_symbols
+            or challengers_added >= top_score_challengers
+        ):
+            break
+        normalized_symbol = item.symbol.strip().upper()
+        if (
+            normalized_symbol in selected_symbols
+            or normalized_symbol in observed_symbols
+            or normalized_symbol in excluded_challengers
+        ):
+            continue
+        selected.append(item)
+        selected_symbols.add(normalized_symbol)
+        challengers_added += 1
+
     # Durable manual observers and the active trading target retain an
     # exploration role when they pass the exploration gates, but they do not
     # consume peer-filling work because they were counted above.
     for item in eligible:
+        if len(selected) >= max_symbols:
+            return selected
         normalized_symbol = item.symbol.strip().upper()
         if (
             normalized_symbol not in observed_symbols
@@ -684,26 +715,6 @@ def select_exploration_candidates(
             group_counts[risk_group] = (
                 group_counts.get(risk_group, 0) + 1
             )
-
-    # Reserve a small cohort for liquid, high-scoring names that passed every
-    # hard gate but lost a formal slot to concentration limits. Peer,
-    # rotation, and refined-sector coverage above always has precedence.
-    challengers_added = 0
-    for item in eligible:
-        if (
-            len(selected) >= max_symbols
-            or challengers_added >= top_score_challengers
-        ):
-            break
-        normalized_symbol = item.symbol.strip().upper()
-        if (
-            normalized_symbol in selected_symbols
-            or normalized_symbol in observed_symbols
-        ):
-            continue
-        selected.append(item)
-        selected_symbols.add(normalized_symbol)
-        challengers_added += 1
 
     # Spend any remaining observer budget on broad research while retaining
     # the normal per-risk-group diversification cap.
@@ -2316,6 +2327,9 @@ class UniverseSelectionService:
             already_observed_symbols=(
                 observation_overrides.already_observed_symbols
             ),
+            challenger_excluded_symbols=(
+                observation_overrides.challenger_excluded_symbols
+            ),
             unobservable_symbols=(
                 observation_overrides.exploration_excluded_symbols
             ),
@@ -2527,6 +2541,10 @@ class UniverseSelectionService:
                     # operator opt-outs. Never silently re-enable them.
                     continue
                 row.universe_managed = True
+                if not was_enabled:
+                    # New and returning universe observers need forward
+                    # evidence before they can join live opening execution.
+                    row.opening_momentum_execution_eligible = False
                 self.db.add(row)
                 service.ensure_universe_managed_enabled(symbol)
                 if not was_enabled:

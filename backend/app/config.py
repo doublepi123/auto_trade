@@ -438,7 +438,7 @@ class Settings(BaseSettings):
         validation_alias="AUTO_TRADE_UNIVERSE_SELECTION_MAX_SYMBOLS",
     )
     universe_selection_exploration_max_symbols: int = Field(
-        default=22,
+        default=24,
         ge=0,
         le=24,
         validation_alias=(
@@ -447,10 +447,10 @@ class Settings(BaseSettings):
         description=(
             "Maximum number of hard-gate-passing, non-selected observers. "
             "Selected risk groups are filled to the portfolio peer minimum "
-            "with a peer-only near-liquidity fallback, then eligible nested "
-            "industries are completed for leave-one-out research before "
-            "remaining capacity is diversified. Zero disables the "
-            "exploration tier."
+            "with a peer-only near-liquidity fallback, followed by frozen "
+            "rotation coverage and fresh top-score challengers. Eligible "
+            "nested industries and durable observers use the remaining "
+            "capacity. Zero disables the exploration tier."
         ),
     )
     universe_selection_exploration_top_score_challengers: int = Field(
@@ -463,9 +463,9 @@ class Settings(BaseSettings):
         ),
         description=(
             "Maximum number of exploration slots reserved for the "
-            "highest-scoring hard-gate passers after peer, rotation, and "
-            "refined-sector coverage is complete but before remaining "
-            "diversified research. These remain read-only observers."
+            "highest-scoring hard-gate passers after peer and rotation "
+            "coverage but before durable observers and remaining diversified "
+            "research. These remain read-only observers."
         ),
     )
     universe_selection_max_per_sector: int = Field(

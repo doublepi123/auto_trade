@@ -21,7 +21,7 @@ class TestSettings:
         assert s.universe_selection_enable_shadow is False
         assert s.strategy_v2_portfolio_shadow_enabled is False
         assert s.universe_selection_max_symbols == 12
-        assert s.universe_selection_exploration_max_symbols == 22
+        assert s.universe_selection_exploration_max_symbols == 24
         assert (
             s.universe_selection_exploration_top_score_challengers
             == 2

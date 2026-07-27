@@ -98,6 +98,9 @@ def _run_response(
                 already_observed_symbols=(
                     observation_overrides.already_observed_symbols
                 ),
+                challenger_excluded_symbols=(
+                    observation_overrides.challenger_excluded_symbols
+                ),
                 unobservable_symbols=(
                     observation_overrides.exploration_excluded_symbols
                 ),

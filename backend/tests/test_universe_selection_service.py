@@ -591,6 +591,51 @@ def test_exploration_uses_idle_capacity_for_top_score_challengers() -> None:
     )
 
 
+def test_exploration_reserves_fresh_challengers_before_durable_observers(
+) -> None:
+    def candidate(
+        symbol: str,
+        sector: str,
+        score: float,
+        *,
+        selected: bool = False,
+    ) -> UniverseSelectionCandidate:
+        return UniverseSelectionCandidate(
+            run_id=1,
+            symbol=symbol,
+            market="US",
+            alias=symbol,
+            sector=sector,
+            memberships_json='["NASDAQ_100"]',
+            selected=selected,
+            score=score,
+            metrics_json="{}",
+            exclusion_reasons_json=json.dumps(
+                [] if selected else ["SECTOR_CAP"]
+            ),
+            created_at=_NOW,
+        )
+
+    selected = select_exploration_candidates(
+        [
+            candidate("BASE.US", "Financials", 100, selected=True),
+            candidate("FRESH1.US", "Software", 99),
+            candidate("FRESH2.US", "Healthcare", 98),
+            candidate("OLD1.US", "Energy", 97),
+            candidate("OLD2.US", "Utilities", 96),
+        ],
+        max_symbols=2,
+        max_per_sector=1,
+        top_score_challengers=2,
+        challenger_excluded_symbols={"OLD1.US", "OLD2.US"},
+    )
+
+    assert [item.symbol for item in selected] == [
+        "FRESH1.US",
+        "FRESH2.US",
+    ]
+
+
 def test_exploration_candidates_reserve_frozen_rotation_observers() -> None:
     def candidate(
         symbol: str,
@@ -775,6 +820,9 @@ def test_observation_pool_overrides_separate_durable_and_opt_out() -> None:
         )
         assert overrides.durable_observed_symbols == frozenset(
             {"NVDA.US", "MRVL.US", "CRWD.US"}
+        )
+        assert overrides.challenger_excluded_symbols == frozenset(
+            {"NVDA.US", "MRVL.US", "CRWD.US", "AAPL.US"}
         )
         assert overrides.exploration_excluded_symbols == frozenset(
             {"CRWD.US", "TER.US"}
@@ -1216,6 +1264,10 @@ def test_refresh_reconciles_exploration_into_read_only_evidence() -> None:
             .filter(StrategyV2ShadowConfig.enabled.is_(True))
             .all()
         } == selected_symbols | set(result.exploration_symbols)
+        assert all(
+            row.opening_momentum_execution_eligible is False
+            for row in db.query(StrategyV2ShadowConfig).all()
+        )
         assert all(
             row.is_active is False
             for row in db.query(WatchlistItem).all()
@@ -2335,6 +2387,9 @@ def test_reconcile_keeps_validated_rotation_targets_shadow_only(
         assert all(
             shadow_rows[symbol].enabled
             and shadow_rows[symbol].universe_managed
+            and not shadow_rows[
+                symbol
+            ].opening_momentum_execution_eligible
             for symbol, _ in targets
         )
     finally:
@@ -2397,6 +2452,7 @@ def test_reconcile_upgrades_enabled_managed_legacy_us_bracket() -> None:
 
         assert config.enabled is True
         assert config.universe_managed is True
+        assert config.opening_momentum_execution_eligible is True
         assert config.stop_loss_pct == 0.45
         assert config.profit_target_pct == 0.80
         assert "AAPL.US" not in result.shadow_enabled_symbols
