@@ -15,6 +15,7 @@ from app.cli.opening_extension_research import (
     _fetch_symbol_bars,
     _frozen_selection_grid,
     _grid_summary,
+    _load_current_baseline_symbols,
     _load_cache,
     _parse_integer_grid,
     _parse_symbols,
@@ -24,6 +25,7 @@ from app.cli.opening_extension_research import (
 )
 from app.core.broker import BrokerCandle
 from app.core.market_calendar import get_session
+from app.database import SessionLocal, engine
 from app.domain.opening_momentum import (
     OpeningMomentumConfig,
     OpeningMomentumObservation,
@@ -33,6 +35,10 @@ from app.domain.opening_momentum_extension import (
     OpeningExtensionSession,
     evaluate_opening_extension_candidates,
 )
+from app.models import Base, StrategyV2ShadowConfig
+
+
+Base.metadata.create_all(bind=engine)
 
 
 def _timestamp(
@@ -462,3 +468,42 @@ def test_cli_list_parsers_fail_closed() -> None:
             minimum=1,
             maximum=120,
         )
+
+
+def test_default_baseline_excludes_observation_only_symbols() -> None:
+    symbols = ("EXECUTION.US", "OBSERVATION.US", "DISABLED.US")
+    db = SessionLocal()
+    try:
+        db.query(StrategyV2ShadowConfig).filter(
+            StrategyV2ShadowConfig.symbol.in_(symbols)
+        ).delete(synchronize_session=False)
+        db.add_all([
+            StrategyV2ShadowConfig(
+                symbol="EXECUTION.US",
+                enabled=True,
+                opening_momentum_execution_eligible=True,
+            ),
+            StrategyV2ShadowConfig(
+                symbol="OBSERVATION.US",
+                enabled=True,
+                opening_momentum_execution_eligible=False,
+            ),
+            StrategyV2ShadowConfig(
+                symbol="DISABLED.US",
+                enabled=False,
+                opening_momentum_execution_eligible=True,
+            ),
+        ])
+        db.commit()
+
+        baseline = set(_load_current_baseline_symbols())
+
+        assert "EXECUTION.US" in baseline
+        assert "OBSERVATION.US" not in baseline
+        assert "DISABLED.US" not in baseline
+    finally:
+        db.query(StrategyV2ShadowConfig).filter(
+            StrategyV2ShadowConfig.symbol.in_(symbols)
+        ).delete(synchronize_session=False)
+        db.commit()
+        db.close()

@@ -124,12 +124,16 @@ def _configure_longport_environment() -> None:
 
 
 def _load_current_baseline_symbols() -> tuple[str, ...]:
+    """Load the symbols that can actually enter the opening strategy."""
     db = SessionLocal()
     try:
         rows = (
             db.query(StrategyV2ShadowConfig)
             .filter(
                 StrategyV2ShadowConfig.enabled.is_(True),
+                StrategyV2ShadowConfig.opening_momentum_execution_eligible.is_(
+                    True
+                ),
                 StrategyV2ShadowConfig.symbol.like("%.US"),
             )
             .order_by(StrategyV2ShadowConfig.symbol.asc())
@@ -139,7 +143,9 @@ def _load_current_baseline_symbols() -> tuple[str, ...]:
     finally:
         db.close()
     if not symbols:
-        raise RuntimeError("current enabled US baseline universe is empty")
+        raise RuntimeError(
+            "current opening-execution US baseline universe is empty"
+        )
     return symbols
 
 
@@ -749,7 +755,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--end-date", required=True)
     parser.add_argument(
         "--baseline-symbols",
-        help="optional frozen comma-separated baseline; defaults to enabled DB rows",
+        help=(
+            "optional frozen comma-separated baseline; defaults to current "
+            "opening-execution eligible DB rows"
+        ),
     )
     parser.add_argument(
         "--signal-minutes",
@@ -981,7 +990,7 @@ def main() -> int:
             "baseline_source": (
                 "CLI_FROZEN_SYMBOLS"
                 if args.baseline_symbols
-                else "CURRENT_ENABLED_STRATEGY_V2_SHADOW_CONFIG"
+                else "CURRENT_OPENING_EXECUTION_ELIGIBLE_STRATEGY_V2_CONFIG"
             ),
             "baseline_symbols": list(baseline_symbols),
             "extension_symbols": list(extension_symbols),
