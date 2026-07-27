@@ -1945,6 +1945,7 @@ export interface OpeningMomentumShadowVariant {
     | 'EXECUTION_QCOM_CHALLENGER'
     | 'EXECUTION_RKLB_CHALLENGER'
     | 'EXECUTION_PANW_CHALLENGER'
+    | 'EXECUTION_CRWD_CHALLENGER'
   universe_source: string
   algorithm_version: string
   config_version: string

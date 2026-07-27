@@ -624,6 +624,7 @@ class OpeningMomentumShadowVariantResponse(BaseModel):
         "EXECUTION_QCOM_CHALLENGER",
         "EXECUTION_RKLB_CHALLENGER",
         "EXECUTION_PANW_CHALLENGER",
+        "EXECUTION_CRWD_CHALLENGER",
     ]
     universe_source: str
     algorithm_version: str

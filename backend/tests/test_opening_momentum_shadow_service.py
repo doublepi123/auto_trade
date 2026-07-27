@@ -53,6 +53,7 @@ _EXECUTION_EXTENSION_SYMBOLS = (
     "QCOM.US",
     "RKLB.US",
     "PANW.US",
+    "CRWD.US",
 )
 _EXECUTION_EXTENSION_VARIANTS = (
     "EXECUTION_SNDK_CHALLENGER",
@@ -60,6 +61,7 @@ _EXECUTION_EXTENSION_VARIANTS = (
     "EXECUTION_QCOM_CHALLENGER",
     "EXECUTION_RKLB_CHALLENGER",
     "EXECUTION_PANW_CHALLENGER",
+    "EXECUTION_CRWD_CHALLENGER",
 )
 _ALL_CHALLENGER_VARIANTS = (
     "EARLY_BROAD_CHALLENGER",
@@ -751,6 +753,7 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
             "EXECUTION_QCOM_CHALLENGER",
             "EXECUTION_RKLB_CHALLENGER",
             "EXECUTION_PANW_CHALLENGER",
+            "EXECUTION_CRWD_CHALLENGER",
             "REVERSAL_CHALLENGER",
             "CONTINUATION_CHALLENGER",
             "BREADTH_GATED_CHALLENGER",
@@ -874,6 +877,13 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
             assert extension.universe_source == (
                 f"OPENING_EXECUTION_{symbol.removesuffix('.US')}"
             )
+        crwd = by_variant["EXECUTION_CRWD_CHALLENGER"]
+        assert "forward-only-two-slice-positive-tail" in (
+            crwd.algorithm_version
+        )
+        assert crwd.config_version != by_variant[
+            "EXECUTION_PANW_CHALLENGER"
+        ].config_version
         assert continuation.decision_config.holding_minutes == 30
         assert (
             continuation.decision_config.minimum_market_return_bps
@@ -897,7 +907,7 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
                 identity.config_version
                 for identity in identities
             }
-        ) == 23
+        ) == 24
     finally:
         db.close()
         Base.metadata.drop_all(bind=engine)
@@ -1150,7 +1160,7 @@ def test_challengers_use_one_market_snapshot_and_close_all_variants(
         assert opened.latest.universe_source == "UNIVERSE_SELECTION"
         assert opened.latest.candidate_symbol == "S1.US"
         assert opened.latest.selection_run_id == run.id
-        assert len(opened.variants) == 23
+        assert len(opened.variants) == 24
         by_variant = {
             item.variant: item for item in opened.variants
         }
@@ -1248,7 +1258,7 @@ def test_challengers_use_one_market_snapshot_and_close_all_variants(
                 item.config_version
                 for item in opened.variants
             }
-        ) == 23
+        ) == 24
 
         still_open = service.tick(
             now=_SESSION_OPEN + timedelta(minutes=47, seconds=10),
@@ -1349,12 +1359,13 @@ def test_early_broad_challenger_keeps_independent_observation_window(
         )
 
         rows = db.query(OpeningMomentumShadowRun).all()
-        assert len(rows) == 17
+        assert len(rows) == 18
         assert candles.calls == [
             *_SYMBOLS,
             *_EXTENSION_SYMBOLS,
             "INTC.US",
             "PANW.US",
+            "CRWD.US",
         ]
         assert early_opened.state == "OPEN"
         assert early_opened.latest is None
@@ -1468,7 +1479,7 @@ def test_early_broad_challenger_keeps_independent_observation_window(
             now=_SESSION_OPEN + timedelta(minutes=32, seconds=10),
         )
 
-        assert db.query(OpeningMomentumShadowRun).count() == 23
+        assert db.query(OpeningMomentumShadowRun).count() == 24
         assert candles.calls == list(_SYMBOLS[:4])
         by_variant = {
             item.variant: item for item in standard_opened.variants
@@ -1489,7 +1500,7 @@ def test_early_broad_challenger_keeps_independent_observation_window(
         rows = db.query(OpeningMomentumShadowRun).all()
         assert sum(row.status == "CLOSED" for row in rows) == 5
         assert sum(row.status == "SKIPPED" for row in rows) == 1
-        assert sum(row.status == "OPEN" for row in rows) == 17
+        assert sum(row.status == "OPEN" for row in rows) == 18
         by_variant = {
             item.variant: item for item in standard_closed.variants
         }
@@ -1520,7 +1531,7 @@ def test_early_broad_challenger_keeps_independent_observation_window(
         rows = db.query(OpeningMomentumShadowRun).all()
         assert candles.calls == ["S7.US"]
         assert execution_closed.state == "OPEN"
-        assert sum(row.status == "CLOSED" for row in rows) == 15
+        assert sum(row.status == "CLOSED" for row in rows) == 16
         assert sum(row.status == "SKIPPED" for row in rows) == 1
         assert sum(row.status == "OPEN" for row in rows) == 7
         execution_by_variant = {
@@ -1846,7 +1857,7 @@ def test_breadth_challenger_skips_a_negative_market_snapshot(
         )
 
         assert candles.calls == list(_SYMBOLS[:4])
-        assert len(status.variants) == 23
+        assert len(status.variants) == 24
         by_variant = {
             item.variant: item for item in status.variants
         }

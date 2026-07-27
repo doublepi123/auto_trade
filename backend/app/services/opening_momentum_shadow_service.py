@@ -143,6 +143,10 @@ _OPENING_RANGE_STOP_ALGORITHM_VERSION = (
 _EXECUTION_EXTENSION_COHORT_VERSION = (
     "discovery-top6-positive-delta-min4-stop1-v1-20260724"
 )
+_EXECUTION_CRWD_FORWARD_COHORT_VERSION = (
+    "forward-only-two-slice-positive-tail-backward-sparse-"
+    "precommitted-20260727-v1"
+)
 _REVERSAL_SOURCE = "OPENING_REVERSAL"
 _NON_COMPARABLE_SKIP_REASONS = frozenset(
     {
@@ -167,6 +171,7 @@ _ExecutionExtensionVariantName = Literal[
     "EXECUTION_QCOM_CHALLENGER",
     "EXECUTION_RKLB_CHALLENGER",
     "EXECUTION_PANW_CHALLENGER",
+    "EXECUTION_CRWD_CHALLENGER",
 ]
 _VariantName = Literal[
     "INCUMBENT",
@@ -192,6 +197,7 @@ _VariantName = Literal[
     "EXECUTION_QCOM_CHALLENGER",
     "EXECUTION_RKLB_CHALLENGER",
     "EXECUTION_PANW_CHALLENGER",
+    "EXECUTION_CRWD_CHALLENGER",
 ]
 _SignalModel = Literal["MOMENTUM", "REVERSAL"]
 
@@ -308,6 +314,7 @@ class _EarlyExtensionSpec:
 class _ExecutionExtensionSpec:
     variant: _ExecutionExtensionVariantName
     symbol: str
+    cohort_version: str = _EXECUTION_EXTENSION_COHORT_VERSION
 
     @property
     def ticker(self) -> str:
@@ -317,7 +324,7 @@ class _ExecutionExtensionSpec:
     def version(self) -> str:
         return (
             f"active-broad-plus-{self.ticker.lower()}-3m-signal-"
-            f"60m-hold-stop1-{_EXECUTION_EXTENSION_COHORT_VERSION}"
+            f"60m-hold-stop1-{self.cohort_version}"
         )
 
     @property
@@ -347,12 +354,27 @@ _EARLY_EXTENSION_VARIANTS = frozenset(
 
 # Frozen from the discovery slice of the 3m/60m/1% stop research grid only.
 # The 2026-06-23..2026-07-24 holdout did not determine membership.
-_EXECUTION_EXTENSION_SPECS = (
+_DISCOVERY_EXECUTION_EXTENSION_SPECS = (
     _ExecutionExtensionSpec("EXECUTION_SNDK_CHALLENGER", "SNDK.US"),
     _ExecutionExtensionSpec("EXECUTION_INTC_CHALLENGER", "INTC.US"),
     _ExecutionExtensionSpec("EXECUTION_QCOM_CHALLENGER", "QCOM.US"),
     _ExecutionExtensionSpec("EXECUTION_RKLB_CHALLENGER", "RKLB.US"),
     _ExecutionExtensionSpec("EXECUTION_PANW_CHALLENGER", "PANW.US"),
+)
+
+# CRWD was selected after inspecting three historical slices. Its sparse
+# backward displacement count is insufficient for promotion, so the unique
+# config version below intentionally starts a forward-only evidence series.
+_FORWARD_ONLY_EXECUTION_EXTENSION_SPECS = (
+    _ExecutionExtensionSpec(
+        "EXECUTION_CRWD_CHALLENGER",
+        "CRWD.US",
+        _EXECUTION_CRWD_FORWARD_COHORT_VERSION,
+    ),
+)
+_EXECUTION_EXTENSION_SPECS = (
+    *_DISCOVERY_EXECUTION_EXTENSION_SPECS,
+    *_FORWARD_ONLY_EXECUTION_EXTENSION_SPECS,
 )
 _EXECUTION_EXTENSION_VARIANTS = frozenset(
     spec.variant for spec in _EXECUTION_EXTENSION_SPECS

@@ -116,7 +116,7 @@ class TestOpeningMomentumShadowApi:
             "OPENING_RANGE_STOP_CHALLENGER"
         ]
         execution_sndk = variants["EXECUTION_SNDK_CHALLENGER"]
-        assert len(variants) == 23
+        assert len(variants) == 24
         assert early["universe_source"] == "OPENING_EARLY_BROAD"
         assert early["signal_minutes"] == 3
         assert early["minimum_market_return_bps"] == -50.0
@@ -246,6 +246,7 @@ class TestOpeningMomentumShadowApi:
             "EXECUTION_QCOM_CHALLENGER": "QCOM.US",
             "EXECUTION_RKLB_CHALLENGER": "RKLB.US",
             "EXECUTION_PANW_CHALLENGER": "PANW.US",
+            "EXECUTION_CRWD_CHALLENGER": "CRWD.US",
         }
         for variant, symbol in execution_symbols.items():
             extension = variants[variant]
@@ -262,6 +263,9 @@ class TestOpeningMomentumShadowApi:
                 ]
                 == 3
             )
+        assert "forward-only-two-slice-positive-tail" in variants[
+            "EXECUTION_CRWD_CHALLENGER"
+        ]["algorithm_version"]
         assert reversal["universe_source"] == "OPENING_REVERSAL"
         assert (
             reversal["algorithm_version"]
