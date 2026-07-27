@@ -449,7 +449,7 @@ class TestStrategyV2PortfolioService:
             registrations = db.query(
                 StrategyV2PortfolioRegistration
             ).all()
-            assert len(registrations) == 19
+            assert len(registrations) == 20
             assert {
                 row.eligible_after.replace(tzinfo=timezone.utc)
                 for row in registrations
@@ -593,7 +593,7 @@ class TestStrategyV2PortfolioService:
             )
             report = service.get_report("NVDA.US")
 
-            assert len(report.variants) == 19
+            assert len(report.variants) == 20
             assert sum(
                 row.algorithm_version.endswith("-v2")
                 for row in report.variants
@@ -627,6 +627,52 @@ class TestStrategyV2PortfolioService:
                 .count()
                 == 0
             )
+
+    def test_fixed_candidate_is_forward_only_and_names_target(self) -> None:
+        with self._db() as db:
+            service = StrategyV2PortfolioService(db)
+            self._register(service)
+            signal = self._signal(db, "SPCX.US", _FIRST_SIGNAL)
+            trade = self._fill(db, signal, price=100)
+
+            service.advance(
+                now=_FIRST_SIGNAL + timedelta(minutes=4)
+            )
+            registration = db.query(
+                StrategyV2PortfolioRegistration
+            ).filter(
+                StrategyV2PortfolioRegistration.policy
+                == "FIXED_CANDIDATE"
+            ).one()
+            observation = db.query(
+                StrategyV2PortfolioObservation
+            ).filter(
+                StrategyV2PortfolioObservation.registration_id
+                == registration.id
+            ).one()
+            assert observation.selected_symbol == "SPCX.US"
+            assert observation.status == "OPEN"
+
+            self._close(
+                db,
+                trade,
+                exit_at=_FIRST_SIGNAL + timedelta(minutes=10),
+                exit_price=101,
+            )
+            service.advance(
+                now=_FIRST_SIGNAL + timedelta(minutes=11)
+            )
+            variant = next(
+                row
+                for row in service.get_report("NVDA.US").variants
+                if row.policy == "FIXED_CANDIDATE"
+            )
+            assert variant.target_symbol == "SPCX.US"
+            assert variant.minimum_routed_symbols == 1
+            assert variant.metrics.closed_trades == 1
+            assert variant.metrics.selections_by_symbol == {
+                "SPCX.US": 1
+            }
 
     def test_signal_observed_at_fill_open_is_ineligible(self) -> None:
         with self._db() as db:
@@ -783,6 +829,7 @@ class TestStrategyV2PortfolioService:
             }
             assert selected == {
                 "FIXED_PRIMARY": "NVDA.US",
+                "FIXED_CANDIDATE": "",
                 "SELECTED_UNIVERSE": "MSFT.US",
                 "QUANT_CANDIDATE": "MSFT.US",
                 "QUANT_WATCH_PLUS": "MSFT.US",
@@ -817,7 +864,7 @@ class TestStrategyV2PortfolioService:
                 StrategyV2PortfolioObservation.signal_at
                 == _FIRST_SIGNAL + timedelta(minutes=2)
             ).all()
-            assert len(overlap_rows) == 19
+            assert len(overlap_rows) == 20
             registrations_by_id = {
                 row.id: row.policy
                 for row in db.query(
@@ -830,6 +877,7 @@ class TestStrategyV2PortfolioService:
             }
             assert status_by_policy == {
                 "FIXED_PRIMARY": "SKIPPED_OCCUPIED",
+                "FIXED_CANDIDATE": "NO_ELIGIBLE",
                 "SELECTED_UNIVERSE": "SKIPPED_OCCUPIED",
                 "QUANT_CANDIDATE": "SKIPPED_OCCUPIED",
                 "QUANT_WATCH_PLUS": "SKIPPED_OCCUPIED",

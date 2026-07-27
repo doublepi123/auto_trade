@@ -128,6 +128,8 @@ describe('Strategy v2 shadow lab', () => {
       .and('contain', '禁止回填')
     cy.get('[data-testid="shadow-portfolio-table"]')
       .should('contain', '固定主标的')
+      .and('contain', '定向前向候选')
+      .and('contain', 'SPCX.US')
       .and('contain', '全池 · 固定 75bp')
       .and('contain', '全池 · 观测成本 75bp')
       .and('contain', '风险组残差 · 观测成本 75bp')

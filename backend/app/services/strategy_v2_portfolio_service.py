@@ -53,12 +53,33 @@ from app.services.watchlist_quant_service import CURRENT_QUANT_SOURCES
 class _RoutingSpec:
     policy: PortfolioRoutingPolicy
     algorithm_version: str
+    fixed_candidate_symbol: str | None = None
+
+    def __post_init__(self) -> None:
+        normalized = (self.fixed_candidate_symbol or "").strip().upper()
+        if self.policy == "FIXED_CANDIDATE":
+            if not normalized:
+                raise ValueError(
+                    "fixed candidate routing spec requires a symbol"
+                )
+            object.__setattr__(self, "fixed_candidate_symbol", normalized)
+        elif normalized:
+            raise ValueError(
+                "only fixed candidate routing specs may set a symbol"
+            )
 
 
 _ROUTING_SPECS = (
     _RoutingSpec(
         policy="FIXED_PRIMARY",
         algorithm_version="strategy-v2-portfolio-fixed-primary-v2",
+    ),
+    # Chosen on data through 2026-07-24. Registration time makes all scored
+    # observations forward-only rather than replaying the selection sample.
+    _RoutingSpec(
+        policy="FIXED_CANDIDATE",
+        algorithm_version="strategy-v2-portfolio-fixed-spcx-forward-v1",
+        fixed_candidate_symbol="SPCX.US",
     ),
     _RoutingSpec(
         policy="SELECTED_UNIVERSE",
@@ -175,6 +196,9 @@ _EVALUATOR_VERSION = "strategy-v2-single-capital-slot-forward-router-v2"
 _CURRENT_ROUTING_ALGORITHM_VERSIONS = tuple(
     spec.algorithm_version for spec in _ROUTING_SPECS
 )
+_ROUTING_SPEC_BY_ALGORITHM_VERSION = {
+    spec.algorithm_version: spec for spec in _ROUTING_SPECS
+}
 _TERMINAL_UNIVERSE_STATUSES = ("COMPLETE", "DEGRADED")
 _FIXED_COST_VWAP_EDGE_POLICIES = {
     "SELECTED_VWAP_EDGE",
@@ -395,6 +419,7 @@ class StrategyV2PortfolioService:
         *,
         current: datetime,
     ) -> None:
+        routing_spec = _routing_spec_for_registration(registration)
         latest_observation = self.db.query(
             StrategyV2PortfolioObservation
         ).filter(
@@ -484,6 +509,9 @@ class StrategyV2PortfolioService:
                 candidates,
                 policy=_routing_policy(registration.policy),
                 primary_symbol=registration.baseline_symbol,
+                fixed_candidate_symbol=(
+                    routing_spec.fixed_candidate_symbol
+                ),
             )
             candidates_json = json.dumps(
                 [
@@ -567,6 +595,9 @@ class StrategyV2PortfolioService:
                                     ),
                                     primary_symbol=(
                                         registration.baseline_symbol
+                                    ),
+                                    fixed_candidate_symbol=(
+                                        routing_spec.fixed_candidate_symbol
                                     ),
                                 )
                             ),
@@ -1563,14 +1594,23 @@ class StrategyV2PortfolioService:
         baseline: StrategyV2PortfolioRoutingMetrics,
     ) -> StrategyV2PortfolioRoutingVariant:
         blockers: list[str] = []
+        routing_spec = _routing_spec_for_registration(registration)
         is_baseline = registration.policy == "FIXED_PRIMARY"
+        minimum_routed_symbols = (
+            1
+            if registration.policy in {
+                "FIXED_PRIMARY",
+                "FIXED_CANDIDATE",
+            }
+            else _MIN_ROUTED_SYMBOLS
+        )
         if metrics.closed_trades < _MIN_READY_TRADES:
             blockers.append("MIN_CLOSED_TRADES")
         if metrics.observed_sessions < _MIN_READY_SESSIONS:
             blockers.append("MIN_OBSERVED_SESSIONS")
         if (
             not is_baseline
-            and metrics.distinct_symbols < _MIN_ROUTED_SYMBOLS
+            and metrics.distinct_symbols < minimum_routed_symbols
         ):
             blockers.append("MIN_DISTINCT_SYMBOLS")
         if (
@@ -1601,6 +1641,7 @@ class StrategyV2PortfolioService:
             evaluator_digest=registration.evaluator_digest,
             registered_at=registration.registered_at,
             eligible_after=registration.eligible_after,
+            target_symbol=routing_spec.fixed_candidate_symbol,
             edge_filter=(
                 "ZSCORE_OBS_COST_TO_75BPS"
                 if registration.policy in _ZSCORE_OBSERVED_COST_POLICIES
@@ -1656,6 +1697,7 @@ class StrategyV2PortfolioService:
                 metrics.compounded_return_pct
                 - baseline.compounded_return_pct
             ),
+            minimum_routed_symbols=minimum_routed_symbols,
             promotion_ready=not blockers,
             blockers=blockers,
         )
@@ -2044,6 +2086,10 @@ class StrategyV2PortfolioService:
                 ],
                 "bounds": "INCLUSIVE",
             }
+        if spec.fixed_candidate_symbol is not None:
+            payload["fixed_candidate_symbol"] = (
+                spec.fixed_candidate_symbol
+            )
         encoded = json.dumps(
             payload,
             sort_keys=True,
@@ -2102,6 +2148,7 @@ def _compounded_metrics(returns_pct: list[float]) -> tuple[float, float]:
 def _routing_policy(value: str) -> PortfolioRoutingPolicy:
     if value not in {
         "FIXED_PRIMARY",
+        "FIXED_CANDIDATE",
         "SELECTED_UNIVERSE",
         "QUANT_CANDIDATE",
         "QUANT_WATCH_PLUS",
@@ -2123,6 +2170,19 @@ def _routing_policy(value: str) -> PortfolioRoutingPolicy:
     }:
         raise ValueError(f"unsupported portfolio routing policy: {value}")
     return cast(PortfolioRoutingPolicy, value)
+
+
+def _routing_spec_for_registration(
+    registration: StrategyV2PortfolioRegistration,
+) -> _RoutingSpec:
+    spec = _ROUTING_SPEC_BY_ALGORITHM_VERSION.get(
+        registration.algorithm_version
+    )
+    if spec is None or spec.policy != registration.policy:
+        raise ValueError(
+            "portfolio routing registration is not a current frozen spec"
+        )
+    return spec
 
 
 def _as_utc(value: datetime) -> datetime:

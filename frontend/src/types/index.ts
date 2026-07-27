@@ -2289,6 +2289,7 @@ export interface StrategyShadowBracketChallengerReport {
 
 export type StrategyShadowPortfolioRoutingPolicy =
   | 'FIXED_PRIMARY'
+  | 'FIXED_CANDIDATE'
   | 'SELECTED_UNIVERSE'
   | 'QUANT_CANDIDATE'
   | 'QUANT_WATCH_PLUS'
@@ -2349,6 +2350,7 @@ export interface StrategyShadowPortfolioRoutingVariant {
   evaluator_digest: string
   registered_at: string
   eligible_after: string
+  target_symbol: string | null
   edge_filter: StrategyShadowPortfolioEdgeFilter
   status: 'COLLECTING' | 'READY_FOR_REVIEW' | 'MATURE_EVIDENCE'
   metrics: StrategyShadowPortfolioRoutingMetrics
@@ -2357,7 +2359,7 @@ export interface StrategyShadowPortfolioRoutingVariant {
   minimum_ready_trades: 20
   minimum_mature_trades: 50
   minimum_ready_sessions: 10
-  minimum_routed_symbols: 3
+  minimum_routed_symbols: number
   promotion_ready: boolean
   blockers: string[]
 }

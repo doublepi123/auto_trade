@@ -7,6 +7,7 @@ from typing import Literal, Sequence
 
 PortfolioRoutingPolicy = Literal[
     "FIXED_PRIMARY",
+    "FIXED_CANDIDATE",
     "SELECTED_UNIVERSE",
     "QUANT_CANDIDATE",
     "QUANT_WATCH_PLUS",
@@ -390,6 +391,7 @@ def rank_portfolio_candidates(
     *,
     policy: PortfolioRoutingPolicy,
     primary_symbol: str,
+    fixed_candidate_symbol: str | None = None,
 ) -> tuple[PortfolioRoutingCandidate, ...]:
     """Return a deterministic causal ranking for one signal minute."""
 
@@ -407,6 +409,14 @@ def rank_portfolio_candidates(
     if policy == "FIXED_PRIMARY":
         primary = by_symbol.get(normalized_primary)
         return (primary,) if primary is not None else ()
+    if policy == "FIXED_CANDIDATE":
+        normalized_candidate = (fixed_candidate_symbol or "").strip().upper()
+        if not normalized_candidate:
+            raise ValueError(
+                "fixed portfolio routing candidate symbol is required"
+            )
+        candidate = by_symbol.get(normalized_candidate)
+        return (candidate,) if candidate is not None else ()
     if policy == "SELECTED_UNIVERSE":
         eligible = [
             candidate
@@ -691,6 +701,7 @@ def portfolio_candidate_rejection_reasons(
     *,
     policy: PortfolioRoutingPolicy,
     primary_symbol: str,
+    fixed_candidate_symbol: str | None = None,
 ) -> tuple[str, ...]:
     """Explain why one causal candidate is excluded by a routing policy."""
 
@@ -698,12 +709,15 @@ def portfolio_candidate_rejection_reasons(
         (candidate,),
         policy=policy,
         primary_symbol=primary_symbol,
+        fixed_candidate_symbol=fixed_candidate_symbol,
     ):
         return ()
 
     reasons: list[str] = []
     if policy == "FIXED_PRIMARY":
         reasons.append("NOT_PRIMARY_SYMBOL")
+    if policy == "FIXED_CANDIDATE":
+        reasons.append("NOT_FIXED_CANDIDATE_SYMBOL")
     if policy in {
         "SELECTED_UNIVERSE",
         "SELECTED_VWAP_EDGE",

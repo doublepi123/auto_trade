@@ -669,6 +669,9 @@
                 <el-table-column label="策略" min-width="200">
                   <template #default="{ row }">
                     <strong>{{ portfolioRoutingPolicyLabel(row.policy) }}</strong>
+                    <small v-if="row.target_symbol">
+                      {{ row.target_symbol }}
+                    </small>
                   </template>
                 </el-table-column>
                 <el-table-column label="入场带" min-width="150">
@@ -2752,6 +2755,7 @@ const portfolioRoutingPolicyLabels: Record<
   string
 > = {
   FIXED_PRIMARY: '固定主标的',
+  FIXED_CANDIDATE: '定向前向候选',
   SELECTED_UNIVERSE: '核心选股池',
   QUANT_CANDIDATE: '量化候选',
   QUANT_WATCH_PLUS: '量化候选 + 观察',

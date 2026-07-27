@@ -3142,6 +3142,7 @@ Cypress.Commands.add('stubApi', () => {
       evaluator_digest: `${registrationId}`.repeat(64),
       registered_at: '2026-07-24T20:07:05Z',
       eligible_after: '2026-07-24T20:08:00Z',
+      target_symbol: policy === 'FIXED_CANDIDATE' ? 'SPCX.US' : null,
       edge_filter: edgeFilter,
       status: 'COLLECTING',
       metrics: metrics(compoundedReturnPct, 5, selectionsBySymbol),
@@ -3150,7 +3151,7 @@ Cypress.Commands.add('stubApi', () => {
       minimum_ready_trades: 20,
       minimum_mature_trades: 50,
       minimum_ready_sessions: 10,
-      minimum_routed_symbols: 3,
+      minimum_routed_symbols: policy === 'FIXED_CANDIDATE' ? 1 : 3,
       promotion_ready: false,
       blockers: [
         'MIN_CLOSED_TRADES',
@@ -3168,6 +3169,7 @@ Cypress.Commands.add('stubApi', () => {
         evaluation_scope: 'FORWARD_OUT_OF_SAMPLE',
         variants: [
           variant(1, 'FIXED_PRIMARY', 'NONE', 0.2, { 'NVDA.US': 5 }),
+          variant(20, 'FIXED_CANDIDATE', 'NONE', 0.24, { 'SPCX.US': 5 }),
           variant(2, 'SELECTED_UNIVERSE', 'NONE', 0.31, { 'MSFT.US': 3, 'NVDA.US': 2 }),
           variant(3, 'QUANT_CANDIDATE', 'NONE', 0.28, { 'AAPL.US': 3, 'NVDA.US': 2 }),
           variant(4, 'QUANT_WATCH_PLUS', 'NONE', 0.26, { 'META.US': 3, 'NVDA.US': 2 }),

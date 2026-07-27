@@ -70,6 +70,7 @@ def _candidate(
     "policy",
     (
         "FIXED_PRIMARY",
+        "FIXED_CANDIDATE",
         "SELECTED_UNIVERSE",
         "QUANT_CANDIDATE",
         "QUANT_WATCH_PLUS",
@@ -120,6 +121,9 @@ def test_eligible_candidate_has_no_rejection_reasons(
         candidate,
         policy=policy,
         primary_symbol="NVDA.US",
+        fixed_candidate_symbol=(
+            "NVDA.US" if policy == "FIXED_CANDIDATE" else None
+        ),
     ) == ()
 
 
@@ -174,6 +178,38 @@ def test_fixed_primary_ignores_higher_ranked_secondary() -> None:
     )
 
     assert [item.symbol for item in ranked] == ["NVDA.US"]
+
+
+def test_fixed_candidate_routes_only_precommitted_symbol() -> None:
+    ranked = rank_portfolio_candidates(
+        [
+            _candidate("NVDA.US", 1),
+            _candidate("SPCX.US", 2),
+        ],
+        policy="FIXED_CANDIDATE",
+        primary_symbol="NVDA.US",
+        fixed_candidate_symbol="spcx.us",
+    )
+
+    assert [item.symbol for item in ranked] == ["SPCX.US"]
+    assert portfolio_candidate_rejection_reasons(
+        _candidate("NVDA.US", 3),
+        policy="FIXED_CANDIDATE",
+        primary_symbol="NVDA.US",
+        fixed_candidate_symbol="SPCX.US",
+    ) == ("NOT_FIXED_CANDIDATE_SYMBOL",)
+
+
+def test_fixed_candidate_requires_frozen_symbol() -> None:
+    with pytest.raises(
+        ValueError,
+        match="fixed portfolio routing candidate symbol is required",
+    ):
+        rank_portfolio_candidates(
+            [_candidate("SPCX.US", 1)],
+            policy="FIXED_CANDIDATE",
+            primary_symbol="NVDA.US",
+        )
 
 
 def test_selected_universe_uses_frozen_run_rank() -> None:

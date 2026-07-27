@@ -1083,6 +1083,7 @@ class StrategyV2PortfolioRoutingVariant(BaseModel):
     registration_id: int
     policy: Literal[
         "FIXED_PRIMARY",
+        "FIXED_CANDIDATE",
         "SELECTED_UNIVERSE",
         "QUANT_CANDIDATE",
         "QUANT_WATCH_PLUS",
@@ -1106,6 +1107,7 @@ class StrategyV2PortfolioRoutingVariant(BaseModel):
     evaluator_digest: str
     registered_at: datetime
     eligible_after: datetime
+    target_symbol: Optional[str] = None
     edge_filter: Literal[
         "NONE",
         "COST_TO_STOP_VWAP_DISCOUNT",
@@ -1126,7 +1128,7 @@ class StrategyV2PortfolioRoutingVariant(BaseModel):
     minimum_ready_trades: Literal[20] = 20
     minimum_mature_trades: Literal[50] = 50
     minimum_ready_sessions: Literal[10] = 10
-    minimum_routed_symbols: Literal[3] = 3
+    minimum_routed_symbols: int = Field(default=3, ge=1)
     promotion_ready: bool = False
     blockers: list[str] = Field(default_factory=list)
 

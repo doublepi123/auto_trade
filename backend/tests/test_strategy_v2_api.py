@@ -268,7 +268,7 @@ class TestStrategyV2ShadowApi:
         assert body["automatic_promotion_allowed"] is False
         assert body["historical_backfill_allowed"] is False
         assert body["capital_slots"] == 1
-        assert len(body["variants"]) == 19
+        assert len(body["variants"]) == 20
         assert all(
             item["metrics"]["diagnosed_no_eligible"] == 0
             and item["metrics"]["no_causal_signal_groups"] == 0
@@ -279,6 +279,7 @@ class TestStrategyV2ShadowApi:
             item["policy"] for item in body["variants"]
         } == {
             "FIXED_PRIMARY",
+            "FIXED_CANDIDATE",
             "SELECTED_UNIVERSE",
             "QUANT_CANDIDATE",
             "QUANT_WATCH_PLUS",
