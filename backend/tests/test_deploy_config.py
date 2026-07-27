@@ -200,6 +200,19 @@ def test_compose_healthchecks_use_strict_readiness_endpoint() -> None:
         assert "/api/health" not in healthcheck
 
 
+def test_compose_caps_backend_and_frontend_json_logs() -> None:
+    for filename in ("docker-compose.yaml", "docker-compose.dockerhub.yaml"):
+        compose = (ROOT / filename).read_text(encoding="utf-8")
+        backend_block, frontend_block = compose.split(
+            "\n  frontend:",
+            maxsplit=1,
+        )
+        for service_block in (backend_block, frontend_block):
+            assert "driver: json-file" in service_block
+            assert 'max-size: "10m"' in service_block
+            assert 'max-file: "3"' in service_block
+
+
 def test_env_example_defaults_deployments_to_production_mode() -> None:
     env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
 
