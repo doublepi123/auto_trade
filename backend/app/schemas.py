@@ -711,6 +711,12 @@ class OpeningMomentumExecutionConfigResponse(BaseModel):
     algorithm_version: str
     config_version: str
     universe_source: str
+    selection_run_id: Optional[int] = Field(default=None, ge=1)
+    universe_size: int = Field(default=0, ge=0)
+    universe: list[str] = Field(default_factory=list)
+    required_symbols: list[str] = Field(default_factory=list)
+    excluded_symbols: list[str] = Field(default_factory=list)
+    universe_ready: bool = False
     signal_minutes: int
     execution_delay_minutes: int
     holding_minutes: int

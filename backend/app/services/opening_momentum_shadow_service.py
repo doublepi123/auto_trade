@@ -767,18 +767,9 @@ class OpeningMomentumShadowService:
             session.rth_open,
             tzinfo=session.timezone,
         ).astimezone(timezone.utc)
-        variants = self._universe_variants(
+        variant = self.paper_execution_variant(
             session_date=local.date(),
             completed_before=session_open,
-        )
-        execution_identity = self.paper_execution_variant_identity()
-        variant = next(
-            (
-                item
-                for item in variants
-                if item.variant == execution_identity.variant
-            ),
-            None,
         )
         if variant is None:
             return None
@@ -1587,13 +1578,12 @@ class OpeningMomentumShadowService:
         )
         return [self._run_response(row) for row in rows]
 
-    def _universe_variants(
+    def _latest_universe_selection_run(
         self,
         *,
         session_date: date | None = None,
         completed_before: datetime | None = None,
-    ) -> list[_UniverseVariant]:
-        identities = self._variant_identities()
+    ) -> UniverseSelectionRun | None:
         run_query = self.db.query(UniverseSelectionRun).filter(
             UniverseSelectionRun.status == "COMPLETE",
         )
@@ -1607,12 +1597,24 @@ class OpeningMomentumShadowService:
                 UniverseSelectionRun.completed_at.is_not(None),
                 UniverseSelectionRun.completed_at <= cutoff,
             )
-        run = run_query.order_by(
+        return run_query.order_by(
             UniverseSelectionRun.as_of_date.desc(),
             UniverseSelectionRun.completed_at.desc(),
             UniverseSelectionRun.created_at.desc(),
             UniverseSelectionRun.id.desc(),
         ).first()
+
+    def _universe_variants(
+        self,
+        *,
+        session_date: date | None = None,
+        completed_before: datetime | None = None,
+    ) -> list[_UniverseVariant]:
+        identities = self._variant_identities()
+        run = self._latest_universe_selection_run(
+            session_date=session_date,
+            completed_before=completed_before,
+        )
         if run is None:
             return [
                 replace(identity, universe_source="NONE")
@@ -2485,6 +2487,36 @@ class OpeningMomentumShadowService:
         if identity.variant != _PAPER_EXECUTION_VARIANT:
             raise RuntimeError("paper execution variant identity mismatch")
         return identity
+
+    def paper_execution_variant(
+        self,
+        *,
+        session_date: date | None = None,
+        completed_before: datetime | None = None,
+    ) -> _UniverseVariant | None:
+        """Resolve the populated universe used by the paper executor."""
+        if not settings.opening_momentum_challenger_enabled:
+            return None
+        identity = self.paper_execution_variant_identity()
+        run = self._latest_universe_selection_run(
+            session_date=session_date,
+            completed_before=completed_before,
+        )
+        if run is None:
+            return replace(identity, universe_source="NONE")
+        excluded_symbols = set(identity.excluded_symbols)
+        symbols = tuple(
+            symbol
+            for symbol in dict.fromkeys(
+                self._active_broad_symbols() + identity.required_symbols
+            )
+            if symbol not in excluded_symbols
+        )
+        return replace(
+            identity,
+            symbols=symbols,
+            selection_run_id=run.id,
+        )
 
     def _active_broad_symbols(self) -> tuple[str, ...]:
         rows = (

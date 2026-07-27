@@ -2025,6 +2025,12 @@ export interface OpeningMomentumExecutionConfig {
   algorithm_version: string
   config_version: string
   universe_source: string
+  selection_run_id: number | null
+  universe_size: number
+  universe: string[]
+  required_symbols: string[]
+  excluded_symbols: string[]
+  universe_ready: boolean
   signal_minutes: number
   execution_delay_minutes: number
   holding_minutes: number

@@ -147,7 +147,26 @@ class OpeningMomentumExecutionService:
         return self.get_status()
 
     def get_status(self) -> OpeningMomentumExecutionStatusResponse:
-        identity = self._execution_identity()
+        variant = self._execution_variant()
+        identity = variant or self._execution_identity()
+        universe = variant.symbols if variant is not None else ()
+        required_symbols = (
+            variant.required_symbols
+            if variant is not None
+            else identity.required_symbols
+        )
+        excluded_symbols = (
+            variant.excluded_symbols
+            if variant is not None
+            else identity.excluded_symbols
+        )
+        universe_ready = bool(
+            variant is not None
+            and variant.universe_source != "NONE"
+            and len(universe) >= identity.decision_config.minimum_universe_size
+            and set(required_symbols).issubset(universe)
+            and not set(excluded_symbols).intersection(universe)
+        )
         latest = (
             self.db.query(OpeningMomentumExecution)
             .filter(
@@ -165,6 +184,7 @@ class OpeningMomentumExecutionService:
             enabled
             and settings.opening_momentum_execution_paper_confirmed
             and settings.full_buying_power_usage_enabled
+            and universe_ready
         )
         state = (
             str(latest.status)
@@ -182,7 +202,21 @@ class OpeningMomentumExecutionService:
                 order_submission_allowed=order_submission_allowed,
                 algorithm_version=identity.algorithm_version,
                 config_version=identity.config_version,
-                universe_source=identity.universe_source,
+                universe_source=(
+                    variant.universe_source
+                    if variant is not None
+                    else "NONE"
+                ),
+                selection_run_id=(
+                    variant.selection_run_id
+                    if variant is not None
+                    else None
+                ),
+                universe_size=len(universe),
+                universe=list(universe),
+                required_symbols=list(required_symbols),
+                excluded_symbols=list(excluded_symbols),
+                universe_ready=universe_ready,
                 signal_minutes=identity.decision_config.signal_minutes,
                 execution_delay_minutes=(
                     identity.decision_config.execution_delay_minutes
@@ -297,6 +331,11 @@ class OpeningMomentumExecutionService:
         return OpeningMomentumShadowService(
             self.db
         ).paper_execution_variant_identity()
+
+    def _execution_variant(self):
+        return OpeningMomentumShadowService(
+            self.db
+        ).paper_execution_variant()
 
     def _execution_for_session(
         self,

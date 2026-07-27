@@ -392,6 +392,18 @@
                   <span>下单许可</span>
                   <strong>{{ openingExecutionStatus.config.order_submission_allowed ? '已启用' : '已关闭' }}</strong>
                 </div>
+                <div>
+                  <span>执行池</span>
+                  <el-tooltip
+                    :disabled="openingExecutionStatus.config.universe.length === 0"
+                    :content="openingExecutionStatus.config.universe.join(', ')"
+                    placement="top"
+                  >
+                    <strong data-testid="opening-execution-universe">
+                      {{ openingExecutionStatus.config.universe_size }} 只 · 选池 #{{ openingExecutionStatus.config.selection_run_id ?? '-' }}
+                    </strong>
+                  </el-tooltip>
+                </div>
               </div>
               <div
                 v-if="openingExecutionStatus.latest"

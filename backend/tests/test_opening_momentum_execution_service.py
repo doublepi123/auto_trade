@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
@@ -141,6 +142,57 @@ def test_paper_execution_uses_the_exceptional_path_identity() -> None:
         Base.metadata.drop_all(bind=engine)
 
 
+def test_status_exposes_resolved_universe_and_fails_closed_without_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enable_execution(monkeypatch)
+    engine, db = _database()
+    try:
+        service = OpeningMomentumExecutionService(db)
+        identity = service._execution_identity()
+        symbols = tuple(
+            f"TEST{index}.US"
+            for index in range(
+                identity.decision_config.minimum_universe_size
+            )
+        )
+        populated = replace(
+            identity,
+            symbols=symbols,
+            selection_run_id=7,
+        )
+        monkeypatch.setattr(
+            service,
+            "_execution_variant",
+            lambda: populated,
+        )
+
+        ready = service.get_status()
+
+        assert ready.config.universe_source == identity.universe_source
+        assert ready.config.selection_run_id == 7
+        assert ready.config.universe_size == len(symbols)
+        assert ready.config.universe == list(symbols)
+        assert ready.config.universe_ready is True
+        assert ready.config.order_submission_allowed is True
+
+        monkeypatch.setattr(
+            service,
+            "_execution_variant",
+            lambda: replace(populated, universe_source="NONE", symbols=()),
+        )
+
+        unavailable = service.get_status()
+
+        assert unavailable.config.universe_source == "NONE"
+        assert unavailable.config.universe_size == 0
+        assert unavailable.config.universe_ready is False
+        assert unavailable.config.order_submission_allowed is False
+    finally:
+        db.close()
+        Base.metadata.drop_all(bind=engine)
+
+
 def test_tick_does_not_evaluate_before_forward_evidence_start(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -195,9 +247,12 @@ def test_status_ignores_execution_from_a_superseded_policy(
 
         assert status.state == "WAITING"
         assert status.latest is None
-        assert status.config.universe_source == (
-            "OPENING_EXECUTION_WEAK_BREADTH_EXCEPTIONAL_PATH"
+        assert status.config.universe_source == "NONE"
+        assert status.config.algorithm_version == (
+            service._execution_identity().algorithm_version
         )
+        assert status.config.universe_ready is False
+        assert status.config.order_submission_allowed is False
     finally:
         db.close()
         Base.metadata.drop_all(bind=engine)

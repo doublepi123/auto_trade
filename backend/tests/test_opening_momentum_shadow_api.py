@@ -111,8 +111,14 @@ class TestOpeningMomentumShadowApi:
             "2026-07-28"
         )
         assert body["config"]["universe_source"] == (
-            "OPENING_EXECUTION_WEAK_BREADTH_EXCEPTIONAL_PATH"
+            "NONE"
         )
+        assert body["config"]["selection_run_id"] is None
+        assert body["config"]["universe_size"] == 0
+        assert body["config"]["universe"] == []
+        assert body["config"]["required_symbols"] == []
+        assert body["config"]["excluded_symbols"] == []
+        assert body["config"]["universe_ready"] is False
 
         runs = self.client.get(
             "/api/opening-momentum-shadow/execution/runs"

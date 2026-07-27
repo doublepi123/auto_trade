@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -577,6 +578,42 @@ def test_observation_only_symbols_are_isolated_from_opening_execution_pool(
         assert "TRV.US" in by_variant[
             "ETF_REGIME_TRV_CHALLENGER"
         ].symbols
+    finally:
+        db.close()
+        Base.metadata.drop_all(bind=engine)
+
+
+def test_paper_execution_variant_applies_required_and_excluded_symbols(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        settings,
+        "opening_momentum_challenger_enabled",
+        True,
+    )
+    engine, db = _database()
+    try:
+        run = _seed_universe(db)
+        _seed_active_broad_pool(db)
+        service = OpeningMomentumShadowService(db)
+        identity = service.paper_execution_variant_identity()
+        monkeypatch.setattr(
+            service,
+            "paper_execution_variant_identity",
+            lambda: replace(
+                identity,
+                required_symbols=("REQUIRED.US",),
+                excluded_symbols=(_SYMBOLS[0],),
+            ),
+        )
+
+        variant = service.paper_execution_variant()
+
+        assert variant is not None
+        assert variant.selection_run_id == run.id
+        assert variant.symbols == (*_SYMBOLS[1:], "REQUIRED.US")
+        assert variant.required_symbols == ("REQUIRED.US",)
+        assert variant.excluded_symbols == (_SYMBOLS[0],)
     finally:
         db.close()
         Base.metadata.drop_all(bind=engine)

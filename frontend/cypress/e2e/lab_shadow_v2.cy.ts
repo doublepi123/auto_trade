@@ -86,6 +86,7 @@ describe('Strategy v2 shadow lab', () => {
       .and('contain', '5.0 bps')
       .and('contain', '前向计分起点')
       .and('contain', '2026-07-28')
+      .and('contain', '8 只 · 选池 #7')
       .and('contain', '82.00%')
       .and('contain', '$25.00M')
       .and('contain', '$1.00B')
