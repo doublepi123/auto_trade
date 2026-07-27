@@ -19,10 +19,17 @@ from app.domain.opening_momentum import (
     OpeningMomentumObservation,
     evaluate_opening_momentum,
     evaluate_opening_reversal,
+    opening_path_efficiency,
     shadow_round_trip_return_bps,
 )
 from app.domain.opening_momentum_comparison import (
     compare_opening_momentum_variants,
+)
+from app.domain.opening_momentum_policy import (
+    PRODUCTION_MAXIMUM_MARKET_RETURN_BPS,
+    PRODUCTION_MINIMUM_PATH_EFFICIENCY,
+    PRODUCTION_POLICY_NAME,
+    opening_execution_config,
 )
 from app.domain.opening_momentum_universe import (
     OPENING_CONTINUATION_UNIVERSE_VERSION,
@@ -95,7 +102,9 @@ _EXECUTION_BROAD_SOURCE = "OPENING_EXECUTION_BROAD"
 _EXECUTION_BROAD_ALGORITHM_VERSION = (
     f"{ALGORITHM_VERSION}+{_EXECUTION_BROAD_VERSION}"
 )
-_EXECUTION_PATH_EFFICIENCY_MINIMUM = 0.70
+_EXECUTION_PATH_EFFICIENCY_MINIMUM = (
+    PRODUCTION_MINIMUM_PATH_EFFICIENCY
+)
 _EXECUTION_PATH_EFFICIENCY_VERSION = (
     "active-broad-3m-signal-60m-hold-stop1-path-efficiency-070-v1"
 )
@@ -113,11 +122,13 @@ _WEAK_BREADTH_PATH_SOURCE = "OPENING_EXECUTION_WEAK_BREADTH_PATH"
 _WEAK_BREADTH_PATH_ALGORITHM_VERSION = (
     f"{ALGORITHM_VERSION}+{_WEAK_BREADTH_PATH_VERSION}"
 )
-_WEAK_BREADTH_MAXIMUM_MARKET_RETURN_BPS = 0.0
+_WEAK_BREADTH_MAXIMUM_MARKET_RETURN_BPS = (
+    PRODUCTION_MAXIMUM_MARKET_RETURN_BPS
+)
 # Paper execution uses the same frozen identity as the paired shadow variant.
 # The broad policy remains the comparison baseline, so every skipped or
 # entered session continues to produce a causal counterfactual.
-_PAPER_EXECUTION_VARIANT = "WEAK_BREADTH_PATH_CHALLENGER"
+_PAPER_EXECUTION_VARIANT = PRODUCTION_POLICY_NAME
 # The active ranking pool is intentionally decoupled from this regime signal.
 # Adding one symbol can move a cross-sectional median across zero merely by
 # changing the pool parity; the QQQ/DIA average stays comparable as the pool
@@ -1924,11 +1935,7 @@ class OpeningMomentumShadowService:
         )
 
     def _execution_broad_config(self) -> OpeningMomentumConfig:
-        return replace(
-            self._early_broad_config(),
-            holding_minutes=60,
-            stop_loss_pct=1.0,
-        )
+        return opening_execution_config(self.config)
 
     def execution_variant_identity(self) -> _UniverseVariant:
         config = self._execution_broad_config()
@@ -2778,18 +2785,9 @@ class OpeningMomentumShadowService:
             raise ValueError(
                 "opening path efficiency requires at least one candle"
             )
-        opening_price = candles[0].open
-        signal_close = candles[-1].close
-        previous_price = opening_price
-        path_distance = 0.0
-        for candle in candles:
-            path_distance += abs(candle.close - previous_price)
-            previous_price = candle.close
-        if path_distance <= 0:
-            return 0.0
-        return min(
-            1.0,
-            abs(signal_close - opening_price) / path_distance,
+        return opening_path_efficiency(
+            opening_price=candles[0].open,
+            closing_prices=tuple(candle.close for candle in candles),
         )
 
     @staticmethod

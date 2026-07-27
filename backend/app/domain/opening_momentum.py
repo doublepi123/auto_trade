@@ -313,3 +313,31 @@ def shadow_round_trip_return_bps(
     return gross_return_bps, (
         gross_return_bps - params.round_trip_cost_bps
     )
+
+
+def opening_path_efficiency(
+    *,
+    opening_price: float,
+    closing_prices: Sequence[float],
+) -> float:
+    """Measure how directly completed bars travel from open to signal close."""
+
+    closes = tuple(float(value) for value in closing_prices)
+    if not math.isfinite(opening_price) or opening_price <= 0:
+        raise ValueError("opening_price must be positive")
+    if not closes:
+        raise ValueError("closing_prices must contain at least one price")
+    if any(not math.isfinite(value) or value <= 0 for value in closes):
+        raise ValueError("closing_prices must be positive")
+
+    previous_price = opening_price
+    path_distance = 0.0
+    for close in closes:
+        path_distance += abs(close - previous_price)
+        previous_price = close
+    if path_distance <= 0:
+        return 0.0
+    return min(
+        1.0,
+        abs(closes[-1] - opening_price) / path_distance,
+    )

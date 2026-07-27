@@ -7,6 +7,7 @@ from app.domain.opening_momentum import (
     OpeningMomentumObservation,
     evaluate_opening_momentum,
     evaluate_opening_reversal,
+    opening_path_efficiency,
     shadow_round_trip_return_bps,
 )
 
@@ -233,3 +234,37 @@ def test_duplicate_symbols_are_rejected() -> None:
         evaluate_opening_momentum([item, item])
     with pytest.raises(ValueError, match="duplicate"):
         evaluate_opening_reversal([item, item])
+
+
+def test_opening_path_efficiency_uses_completed_close_path() -> None:
+    assert opening_path_efficiency(
+        opening_price=100.0,
+        closing_prices=(102.0, 99.0, 101.0),
+    ) == pytest.approx(1 / 7)
+    assert opening_path_efficiency(
+        opening_price=100.0,
+        closing_prices=(101.0, 102.0, 103.0),
+    ) == 1.0
+    assert opening_path_efficiency(
+        opening_price=100.0,
+        closing_prices=(100.0, 100.0),
+    ) == 0.0
+
+
+@pytest.mark.parametrize(
+    ("opening_price", "closing_prices"),
+    (
+        (0.0, (100.0,)),
+        (100.0, ()),
+        (100.0, (float("nan"),)),
+    ),
+)
+def test_opening_path_efficiency_rejects_invalid_prices(
+    opening_price: float,
+    closing_prices: tuple[float, ...],
+) -> None:
+    with pytest.raises(ValueError):
+        opening_path_efficiency(
+            opening_price=opening_price,
+            closing_prices=closing_prices,
+        )
