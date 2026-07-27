@@ -545,6 +545,12 @@ class OpeningMomentumShadowRunResponse(BaseModel):
     candidate_path_efficiency: Optional[float] = None
     candidate_max_pullback_bps: Optional[float] = None
     candidate_opening_range_bps: Optional[float] = None
+    candidate_signal_turnover: Optional[float] = Field(default=None, ge=0)
+    candidate_avg_dollar_volume: Optional[float] = Field(default=None, ge=0)
+    candidate_signal_turnover_ratio: Optional[float] = Field(
+        default=None,
+        ge=0,
+    )
     candidate_overnight_gap_bps: Optional[float] = None
     candidate_prev_close_to_signal_bps: Optional[float] = None
     benchmark_qqq_return_bps: Optional[float] = None
@@ -744,6 +750,12 @@ class OpeningMomentumExecutionResponse(BaseModel):
     candidate_return_bps: Optional[float] = None
     excess_return_bps: Optional[float] = None
     candidate_path_efficiency: Optional[float] = None
+    candidate_signal_turnover: Optional[float] = Field(default=None, ge=0)
+    candidate_avg_dollar_volume: Optional[float] = Field(default=None, ge=0)
+    candidate_signal_turnover_ratio: Optional[float] = Field(
+        default=None,
+        ge=0,
+    )
     reference_entry_price: Optional[float] = None
     max_price_deviation_bps: float
     stop_loss_pct: float

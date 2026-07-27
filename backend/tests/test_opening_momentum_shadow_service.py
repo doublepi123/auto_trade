@@ -98,6 +98,7 @@ class _FakeCandles:
         negative_last_five_for: str | None = None,
         low_efficiency_for: str | None = None,
         unavailable_symbols: set[str] | None = None,
+        turnover_per_minute_by_symbol: dict[str, float] | None = None,
     ) -> None:
         self.missing_entry_for = missing_entry_for
         self.opening_returns_bps = opening_returns_bps or {}
@@ -108,6 +109,9 @@ class _FakeCandles:
         self.negative_last_five_for = negative_last_five_for
         self.low_efficiency_for = low_efficiency_for
         self.unavailable_symbols = unavailable_symbols or set()
+        self.turnover_per_minute_by_symbol = (
+            turnover_per_minute_by_symbol or {}
+        )
         self.calls: list[str] = []
 
     def get_candlesticks(
@@ -186,6 +190,10 @@ class _FakeCandles:
                     low=min(open_price, close_price) - 0.1,
                     close=close_price,
                     volume=1000,
+                    turnover=self.turnover_per_minute_by_symbol.get(
+                        symbol,
+                        0.0,
+                    ),
                 )
             )
         return bars
@@ -300,6 +308,7 @@ def _seed_universe(
     algorithm_version: str = "test-v1",
     as_of_date: date = date(2026, 7, 22),
     completed_at: datetime = _SESSION_OPEN - timedelta(days=1),
+    avg_dollar_volume: float | None = None,
 ) -> UniverseSelectionRun:
     run = UniverseSelectionRun(
         as_of_date=as_of_date,
@@ -323,6 +332,13 @@ def _seed_universe(
                 selected=True,
                 rank=rank,
                 score=float(100 - rank),
+                metrics_json=(
+                    json.dumps({
+                        "avg_dollar_volume": avg_dollar_volume,
+                    })
+                    if avg_dollar_volume is not None
+                    else "{}"
+                ),
             )
         )
     db.commit()
@@ -558,10 +574,13 @@ def test_execution_signal_uses_only_completed_three_minute_bars(
 
     engine, db = _database()
     try:
-        run = _seed_universe(db)
+        run = _seed_universe(db, avg_dollar_volume=120_000_000.0)
         _seed_active_broad_pool(db)
         candles = _SignalOnlyCandles(
-            early_opening_returns_bps={_SYMBOLS[-1]: 100.0}
+            early_opening_returns_bps={_SYMBOLS[-1]: 100.0},
+            turnover_per_minute_by_symbol={
+                _SYMBOLS[-1]: 2_000_000.0,
+            },
         )
 
         signal = OpeningMomentumShadowService(
@@ -584,6 +603,16 @@ def test_execution_signal_uses_only_completed_three_minute_bars(
             "OPENING_EXECUTION_WEAK_BREADTH_PATH"
         )
         assert signal.context["candidate_path_efficiency"] == 1.0
+        assert signal.context["candidate_signal_turnover"] == pytest.approx(
+            6_000_000.0
+        )
+        assert signal.context["candidate_avg_dollar_volume"] == pytest.approx(
+            120_000_000.0
+        )
+        assert (
+            signal.context["candidate_signal_turnover_ratio"]
+            == pytest.approx(0.05)
+        )
         assert signal.context["minimum_path_efficiency"] == 0.70
         assert signal.context["maximum_market_return_bps"] == 0.0
         assert sorted(candles.calls) == sorted(_SYMBOLS)
@@ -784,6 +813,42 @@ def test_tick_records_only_causal_opening_context_telemetry(
         Base.metadata.drop_all(bind=engine)
 
 
+def test_tick_records_signal_turnover_against_frozen_liquidity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        settings,
+        "opening_momentum_shadow_enabled",
+        True,
+    )
+    engine, db = _database()
+    try:
+        _seed_universe(db, avg_dollar_volume=100_000_000.0)
+        candles = _FakeCandles(
+            turnover_per_minute_by_symbol={"S7.US": 1_000_000.0},
+        )
+
+        status = OpeningMomentumShadowService(db, candles).tick(
+            now=_SESSION_OPEN + timedelta(minutes=32, seconds=10),
+        )
+
+        assert status.latest is not None
+        assert status.latest.candidate_symbol == "S7.US"
+        assert status.latest.candidate_signal_turnover == pytest.approx(
+            30_000_000.0
+        )
+        assert status.latest.candidate_avg_dollar_volume == pytest.approx(
+            100_000_000.0
+        )
+        assert (
+            status.latest.candidate_signal_turnover_ratio
+            == pytest.approx(0.30)
+        )
+    finally:
+        db.close()
+        Base.metadata.drop_all(bind=engine)
+
+
 def test_candle_coercion_keeps_decision_prices_when_range_is_missing() -> None:
     candle = SimpleNamespace(
         timestamp=_SESSION_OPEN,
@@ -798,6 +863,7 @@ def test_candle_coercion_keeps_decision_prices_when_range_is_missing() -> None:
     assert result[0].high == 101.0
     assert result[0].low == 100.0
     assert result[0].close == 101.0
+    assert result[0].turnover is None
 
 
 def test_stop_aware_exit_uses_first_intraday_breach_and_tracks_path() -> None:

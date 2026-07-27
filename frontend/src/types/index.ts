@@ -1863,6 +1863,9 @@ export interface OpeningMomentumShadowRun {
   candidate_path_efficiency: number | null
   candidate_max_pullback_bps: number | null
   candidate_opening_range_bps: number | null
+  candidate_signal_turnover: number | null
+  candidate_avg_dollar_volume: number | null
+  candidate_signal_turnover_ratio: number | null
   candidate_overnight_gap_bps: number | null
   candidate_prev_close_to_signal_bps: number | null
   benchmark_qqq_return_bps: number | null
@@ -2049,6 +2052,9 @@ export interface OpeningMomentumExecution {
   candidate_return_bps: number | null
   excess_return_bps: number | null
   candidate_path_efficiency: number | null
+  candidate_signal_turnover: number | null
+  candidate_avg_dollar_volume: number | null
+  candidate_signal_turnover_ratio: number | null
   reference_entry_price: number | null
   max_price_deviation_bps: number
   stop_loss_pct: number

@@ -361,6 +361,7 @@ class _Candle:
     high: float
     low: float
     close: float
+    turnover: float | None = None
 
 
 @dataclass(frozen=True)
@@ -789,6 +790,7 @@ class OpeningMomentumShadowService:
         }
         observations: list[OpeningMomentumObservation] = []
         path_efficiency_by_symbol: dict[str, float] = {}
+        signal_turnover_by_symbol: dict[str, float] = {}
         excluded: dict[str, str] = {}
         for symbol in variant.symbols:
             try:
@@ -824,6 +826,9 @@ class OpeningMomentumShadowService:
             path_efficiency_by_symbol[symbol] = (
                 self._opening_path_efficiency(signal_candles)
             )
+            signal_turnover = self._signal_turnover(signal_candles)
+            if signal_turnover is not None:
+                signal_turnover_by_symbol[symbol] = signal_turnover
             observations.append(OpeningMomentumObservation(
                 symbol=symbol,
                 session_open=opening_bar.open,
@@ -838,6 +843,34 @@ class OpeningMomentumShadowService:
         candidate_path_efficiency = (
             path_efficiency_by_symbol.get(decision.candidate_symbol)
             if decision.candidate_symbol is not None
+            else None
+        )
+        candidate_signal_turnover = (
+            signal_turnover_by_symbol.get(decision.candidate_symbol)
+            if decision.candidate_symbol is not None
+            else None
+        )
+        avg_dollar_volume_by_candidate = (
+            self._candidate_avg_dollar_volume_by_run([variant])
+        )
+        candidate_avg_dollar_volume = (
+            avg_dollar_volume_by_candidate.get((
+                variant.selection_run_id,
+                decision.candidate_symbol,
+            ))
+            if (
+                variant.selection_run_id is not None
+                and decision.candidate_symbol is not None
+            )
+            else None
+        )
+        candidate_signal_turnover_ratio = (
+            candidate_signal_turnover / candidate_avg_dollar_volume
+            if (
+                candidate_signal_turnover is not None
+                and candidate_avg_dollar_volume is not None
+                and candidate_avg_dollar_volume > 0
+            )
             else None
         )
         required_observations = max(
@@ -922,6 +955,13 @@ class OpeningMomentumShadowService:
                 "candidate_path_efficiency": (
                     candidate_path_efficiency
                 ),
+                "candidate_signal_turnover": candidate_signal_turnover,
+                "candidate_avg_dollar_volume": (
+                    candidate_avg_dollar_volume
+                ),
+                "candidate_signal_turnover_ratio": (
+                    candidate_signal_turnover_ratio
+                ),
                 "candidate_symbol": decision.candidate_symbol,
                 "minimum_path_efficiency": (
                     variant.minimum_path_efficiency
@@ -945,6 +985,35 @@ class OpeningMomentumShadowService:
                 ],
             },
         )
+
+    def _candidate_avg_dollar_volume_by_run(
+        self,
+        variants: list[_UniverseVariant],
+    ) -> dict[tuple[int, str], float]:
+        run_ids = {
+            variant.selection_run_id
+            for variant in variants
+            if variant.selection_run_id is not None
+        }
+        if not run_ids:
+            return {}
+        rows = (
+            self.db.query(UniverseSelectionCandidate)
+            .filter(
+                UniverseSelectionCandidate.run_id.in_(run_ids),
+                UniverseSelectionCandidate.market == "US",
+            )
+            .all()
+        )
+        result: dict[tuple[int, str], float] = {}
+        for row in rows:
+            value = _optional_metric(
+                row.metrics_json,
+                "avg_dollar_volume",
+            )
+            if value is not None and value > 0:
+                result[(row.run_id, row.symbol)] = value
+        return result
 
     @staticmethod
     def _variant_entry_at(
@@ -1038,6 +1107,9 @@ class OpeningMomentumShadowService:
                 )
 
         previous_close_by_symbol: dict[str, float | None] = {}
+        avg_dollar_volume_by_candidate = (
+            self._candidate_avg_dollar_volume_by_run(variants)
+        )
 
         for variant in variants:
             config = variant.decision_config
@@ -1060,6 +1132,7 @@ class OpeningMomentumShadowService:
             ] = {}
             path_efficiency_by_symbol: dict[str, float] = {}
             opening_range_low_by_symbol: dict[str, float] = {}
+            signal_turnover_by_symbol: dict[str, float] = {}
             excluded = {
                 symbol: fetch_errors[symbol]
                 for symbol in variant.symbols
@@ -1103,6 +1176,9 @@ class OpeningMomentumShadowService:
                 opening_range_low_by_symbol[symbol] = min(
                     candle.low for candle in signal_candles
                 )
+                signal_turnover = self._signal_turnover(signal_candles)
+                if signal_turnover is not None:
+                    signal_turnover_by_symbol[symbol] = signal_turnover
                 if len(signal_candles) >= 5:
                     path_features_by_symbol[symbol] = (
                         self._opening_path_features(signal_candles)
@@ -1203,6 +1279,31 @@ class OpeningMomentumShadowService:
                     decision.candidate_symbol
                 )
                 if decision.candidate_symbol is not None
+                else None
+            )
+            candidate_signal_turnover = (
+                signal_turnover_by_symbol.get(decision.candidate_symbol)
+                if decision.candidate_symbol is not None
+                else None
+            )
+            candidate_avg_dollar_volume = (
+                avg_dollar_volume_by_candidate.get((
+                    variant.selection_run_id,
+                    decision.candidate_symbol,
+                ))
+                if (
+                    variant.selection_run_id is not None
+                    and decision.candidate_symbol is not None
+                )
+                else None
+            )
+            candidate_signal_turnover_ratio = (
+                candidate_signal_turnover / candidate_avg_dollar_volume
+                if (
+                    candidate_signal_turnover is not None
+                    and candidate_avg_dollar_volume is not None
+                    and candidate_avg_dollar_volume > 0
+                )
                 else None
             )
             required_observations = max(
@@ -1371,6 +1472,11 @@ class OpeningMomentumShadowService:
                     path_features.opening_range_bps
                     if path_features is not None
                     else None
+                ),
+                candidate_signal_turnover=candidate_signal_turnover,
+                candidate_avg_dollar_volume=candidate_avg_dollar_volume,
+                candidate_signal_turnover_ratio=(
+                    candidate_signal_turnover_ratio
                 ),
                 candidate_overnight_gap_bps=(
                     candidate_overnight_gap_bps
@@ -3215,6 +3321,17 @@ class OpeningMomentumShadowService:
         )
 
     @staticmethod
+    def _signal_turnover(candles: list[_Candle]) -> float | None:
+        if not candles or any(
+            candle.turnover is None for candle in candles
+        ):
+            return None
+        turnover = sum(
+            cast(float, candle.turnover) for candle in candles
+        )
+        return turnover if turnover > 0 and math.isfinite(turnover) else None
+
+    @staticmethod
     def _opening_range_stop_loss_pct(
         *,
         opening_range_low: float | None,
@@ -3276,12 +3393,21 @@ class OpeningMomentumShadowService:
             ):
                 high_price = max(open_price, close_price)
                 low_price = min(open_price, close_price)
+            try:
+                turnover = float(getattr(value, "turnover"))
+            except (AttributeError, TypeError, ValueError):
+                turnover = None
+            if turnover is not None and (
+                not math.isfinite(turnover) or turnover < 0
+            ):
+                turnover = None
             by_timestamp[timestamp] = _Candle(
                 timestamp=timestamp,
                 open=open_price,
                 high=high_price,
                 low=low_price,
                 close=close_price,
+                turnover=turnover,
             )
         return [
             by_timestamp[timestamp]
@@ -3340,6 +3466,13 @@ class OpeningMomentumShadowService:
             ),
             candidate_opening_range_bps=(
                 row.candidate_opening_range_bps
+            ),
+            candidate_signal_turnover=row.candidate_signal_turnover,
+            candidate_avg_dollar_volume=(
+                row.candidate_avg_dollar_volume
+            ),
+            candidate_signal_turnover_ratio=(
+                row.candidate_signal_turnover_ratio
             ),
             candidate_overnight_gap_bps=(
                 row.candidate_overnight_gap_bps

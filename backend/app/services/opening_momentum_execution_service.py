@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol, cast
 
@@ -593,14 +594,6 @@ class OpeningMomentumExecutionService:
         row: OpeningMomentumExecution,
     ) -> OpeningMomentumExecutionResponse:
         signal_context = _json_object(row.signal_context_json)
-        candidate_path_efficiency_raw = signal_context.get(
-            "candidate_path_efficiency"
-        )
-        candidate_path_efficiency = (
-            float(candidate_path_efficiency_raw)
-            if isinstance(candidate_path_efficiency_raw, (int, float))
-            else None
-        )
         return OpeningMomentumExecutionResponse(
             id=row.id,
             session_date=row.session_date,
@@ -620,7 +613,24 @@ class OpeningMomentumExecutionService:
             market_return_bps=row.market_return_bps,
             candidate_return_bps=row.candidate_return_bps,
             excess_return_bps=row.excess_return_bps,
-            candidate_path_efficiency=candidate_path_efficiency,
+            candidate_path_efficiency=_nonnegative_context_float(
+                signal_context,
+                "candidate_path_efficiency",
+            ),
+            candidate_signal_turnover=_nonnegative_context_float(
+                signal_context,
+                "candidate_signal_turnover",
+            ),
+            candidate_avg_dollar_volume=_nonnegative_context_float(
+                signal_context,
+                "candidate_avg_dollar_volume",
+            ),
+            candidate_signal_turnover_ratio=(
+                _nonnegative_context_float(
+                    signal_context,
+                    "candidate_signal_turnover_ratio",
+                )
+            ),
             reference_entry_price=row.reference_entry_price,
             max_price_deviation_bps=row.max_price_deviation_bps,
             stop_loss_pct=row.stop_loss_pct,
@@ -644,6 +654,17 @@ def _json_object(value: object) -> dict[str, object]:
     except (TypeError, ValueError, json.JSONDecodeError):
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _nonnegative_context_float(
+    context: dict[str, object],
+    key: str,
+) -> float | None:
+    value = context.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    parsed = float(value)
+    return parsed if math.isfinite(parsed) and parsed >= 0 else None
 
 
 def _as_utc(value: datetime) -> datetime:

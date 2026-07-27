@@ -107,6 +107,9 @@ def _signal(service: OpeningMomentumExecutionService) -> OpeningMomentumExecutio
         context={
             "ranking": ["NVDA.US", "AAPL.US"],
             "candidate_path_efficiency": 0.82,
+            "candidate_signal_turnover": 25_000_000.0,
+            "candidate_avg_dollar_volume": 1_000_000_000.0,
+            "candidate_signal_turnover_ratio": 0.025,
         },
     )
 
@@ -140,6 +143,15 @@ def test_tick_submits_a_session_signal_exactly_once(
         assert runner.calls[0]["symbol"] == "NVDA.US"
         assert first.state == "SUBMITTED"
         assert first.latest.candidate_path_efficiency == pytest.approx(0.82)
+        assert first.latest.candidate_signal_turnover == pytest.approx(
+            25_000_000.0
+        )
+        assert first.latest.candidate_avg_dollar_volume == pytest.approx(
+            1_000_000_000.0
+        )
+        assert first.latest.candidate_signal_turnover_ratio == pytest.approx(
+            0.025
+        )
         assert second.state == "SUBMITTED"
         assert second.latest is not None
         assert second.latest.submit_attempts == 1

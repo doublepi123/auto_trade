@@ -1348,6 +1348,18 @@ class OpeningMomentumShadowRun(Base):
         Float,
         nullable=True,
     )
+    candidate_signal_turnover: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+    )
+    candidate_avg_dollar_volume: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+    )
+    candidate_signal_turnover_ratio: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+    )
     candidate_overnight_gap_bps: Mapped[Optional[float]] = mapped_column(
         Float,
         nullable=True,

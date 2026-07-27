@@ -409,6 +409,17 @@
                   <strong>{{ formatNullablePercent(openingExecutionStatus.latest.candidate_path_efficiency) }}</strong>
                 </div>
                 <div>
+                  <span>信号窗 / 日均成交额</span>
+                  <strong>
+                    {{ formatNullableDollarAmount(openingExecutionStatus.latest.candidate_signal_turnover) }} /
+                    {{ formatNullableDollarAmount(openingExecutionStatus.latest.candidate_avg_dollar_volume) }}
+                  </strong>
+                </div>
+                <div>
+                  <span>信号窗占日均</span>
+                  <strong>{{ formatNullablePercent(openingExecutionStatus.latest.candidate_signal_turnover_ratio) }}</strong>
+                </div>
+                <div>
                   <span>入场订单</span>
                   <strong>{{ openingExecutionStatus.latest.entry_order_id || '-' }}</strong>
                 </div>
@@ -524,6 +535,17 @@
                   <div>
                     <span>开盘振幅</span>
                     <strong>{{ formatNullableBps(openingMomentumStatus.latest.candidate_opening_range_bps) }}</strong>
+                  </div>
+                  <div>
+                    <span>信号窗 / 日均成交额</span>
+                    <strong>
+                      {{ formatNullableDollarAmount(openingMomentumStatus.latest.candidate_signal_turnover) }} /
+                      {{ formatNullableDollarAmount(openingMomentumStatus.latest.candidate_avg_dollar_volume) }}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>信号窗占日均</span>
+                    <strong>{{ formatNullablePercent(openingMomentumStatus.latest.candidate_signal_turnover_ratio) }}</strong>
                   </div>
                   <div>
                     <span>隔夜 / 昨收到信号</span>
@@ -675,6 +697,11 @@
                   <el-table-column label="路径效率" min-width="100">
                     <template #default="{ row }">
                       {{ formatNullablePercent(row.latest?.candidate_path_efficiency ?? null) }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="成交活跃度" min-width="110">
+                    <template #default="{ row }">
+                      {{ formatNullablePercent(row.latest?.candidate_signal_turnover_ratio ?? null) }}
                     </template>
                   </el-table-column>
                   <el-table-column label="窗口回撤" min-width="100">
@@ -3659,6 +3686,14 @@ function gateShare(count: number): string {
 
 function formatNullable(value: number | null, precision = 2): string {
   return value == null || !Number.isFinite(value) ? '-' : value.toFixed(precision)
+}
+
+function formatNullableDollarAmount(value: number | null): string {
+  if (value == null || !Number.isFinite(value) || value < 0) return '-'
+  if (value >= 1_000_000_000) return `$${(value / 1_000_000_000).toFixed(2)}B`
+  if (value >= 1_000_000) return `$${(value / 1_000_000).toFixed(2)}M`
+  if (value >= 1_000) return `$${(value / 1_000).toFixed(1)}K`
+  return `$${value.toFixed(0)}`
 }
 
 function formatBps(value: number): string {

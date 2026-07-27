@@ -537,6 +537,9 @@ class TestOpeningMomentumShadowApi:
                     candidate_path_efficiency=0.42,
                     candidate_max_pullback_bps=-35.0,
                     candidate_opening_range_bps=130.0,
+                    candidate_signal_turnover=31_000_000.0,
+                    candidate_avg_dollar_volume=1_250_000_000.0,
+                    candidate_signal_turnover_ratio=0.0248,
                     candidate_overnight_gap_bps=25.0,
                     candidate_prev_close_to_signal_bps=105.0,
                     benchmark_qqq_return_bps=-8.0,
@@ -567,6 +570,12 @@ class TestOpeningMomentumShadowApi:
         assert runs.json()[0]["candidate_first_five_return_bps"] == 25.0
         assert runs.json()[0]["candidate_path_efficiency"] == 0.42
         assert runs.json()[0]["candidate_max_pullback_bps"] == -35.0
+        assert runs.json()[0]["candidate_signal_turnover"] == 31_000_000.0
+        assert (
+            runs.json()[0]["candidate_avg_dollar_volume"]
+            == 1_250_000_000.0
+        )
+        assert runs.json()[0]["candidate_signal_turnover_ratio"] == 0.0248
         assert runs.json()[0]["candidate_overnight_gap_bps"] == 25.0
         assert (
             runs.json()[0]["candidate_prev_close_to_signal_bps"]
