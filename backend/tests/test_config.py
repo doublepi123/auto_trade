@@ -363,6 +363,137 @@ class TestSettings:
         ):
             Settings()
 
+    def test_opening_momentum_execution_requires_challenger(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv(
+            "AUTO_TRADE_OPENING_MOMENTUM_EXECUTION_ENABLED",
+            "true",
+        )
+        monkeypatch.setenv(
+            "AUTO_TRADE_OPENING_MOMENTUM_CHALLENGER_ENABLED",
+            "false",
+        )
+
+        with pytest.raises(
+            ValidationError,
+            match="opening momentum execution requires the paired challenger",
+        ):
+            Settings()
+
+    def test_opening_momentum_execution_requires_paper_confirmation(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("AUTO_TRADE_UNIVERSE_SELECTION_ENABLED", "true")
+        monkeypatch.setenv(
+            "AUTO_TRADE_OPENING_MOMENTUM_SHADOW_ENABLED",
+            "true",
+        )
+        monkeypatch.setenv(
+            "AUTO_TRADE_OPENING_MOMENTUM_CHALLENGER_ENABLED",
+            "true",
+        )
+        monkeypatch.setenv(
+            "AUTO_TRADE_OPENING_MOMENTUM_EXECUTION_ENABLED",
+            "true",
+        )
+        monkeypatch.setenv(
+            "AUTO_TRADE_OPENING_MOMENTUM_EXECUTION_PAPER_CONFIRMED",
+            "false",
+        )
+        monkeypatch.setenv(
+            "AUTO_TRADE_FULL_BUYING_POWER_USAGE_ENABLED",
+            "true",
+        )
+
+        with pytest.raises(
+            ValidationError,
+            match="explicit paper-account confirmation",
+        ):
+            Settings()
+
+    def test_opening_momentum_execution_requires_full_buying_power_mode(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("AUTO_TRADE_UNIVERSE_SELECTION_ENABLED", "true")
+        monkeypatch.setenv(
+            "AUTO_TRADE_OPENING_MOMENTUM_SHADOW_ENABLED",
+            "true",
+        )
+        monkeypatch.setenv(
+            "AUTO_TRADE_OPENING_MOMENTUM_CHALLENGER_ENABLED",
+            "true",
+        )
+        monkeypatch.setenv(
+            "AUTO_TRADE_OPENING_MOMENTUM_EXECUTION_ENABLED",
+            "true",
+        )
+        monkeypatch.setenv(
+            "AUTO_TRADE_OPENING_MOMENTUM_EXECUTION_PAPER_CONFIRMED",
+            "true",
+        )
+        monkeypatch.setenv(
+            "AUTO_TRADE_FULL_BUYING_POWER_USAGE_ENABLED",
+            "false",
+        )
+
+        with pytest.raises(
+            ValidationError,
+            match="full buying-power paper mode",
+        ):
+            Settings()
+
+    def test_opening_momentum_execution_accepts_explicit_paper_mode(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("AUTO_TRADE_UNIVERSE_SELECTION_ENABLED", "true")
+        monkeypatch.setenv(
+            "AUTO_TRADE_OPENING_MOMENTUM_SHADOW_ENABLED",
+            "true",
+        )
+        monkeypatch.setenv(
+            "AUTO_TRADE_OPENING_MOMENTUM_CHALLENGER_ENABLED",
+            "true",
+        )
+        monkeypatch.setenv(
+            "AUTO_TRADE_OPENING_MOMENTUM_EXECUTION_ENABLED",
+            "true",
+        )
+        monkeypatch.setenv(
+            "AUTO_TRADE_OPENING_MOMENTUM_EXECUTION_PAPER_CONFIRMED",
+            "true",
+        )
+        monkeypatch.setenv(
+            "AUTO_TRADE_FULL_BUYING_POWER_USAGE_ENABLED",
+            "true",
+        )
+        monkeypatch.setenv(
+            "AUTO_TRADE_OPENING_MOMENTUM_EXECUTION_MAX_ENTRY_DELAY_SECONDS",
+            "45",
+        )
+        monkeypatch.setenv(
+            "AUTO_TRADE_OPENING_MOMENTUM_EXECUTION_MAX_PRICE_DEVIATION_BPS",
+            "150",
+        )
+
+        configured = Settings()
+
+        assert configured.opening_momentum_execution_enabled is True
+        assert configured.opening_momentum_execution_paper_confirmed is True
+        assert configured.full_buying_power_usage_enabled is True
+        assert (
+            configured.opening_momentum_execution_max_entry_delay_seconds
+            == 45
+        )
+        assert (
+            configured.opening_momentum_execution_max_price_deviation_bps
+            == 150
+        )
+
     def test_portfolio_shadow_requires_universe_shadow(
         self,
         monkeypatch: pytest.MonkeyPatch,

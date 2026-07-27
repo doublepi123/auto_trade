@@ -329,6 +329,43 @@ class Settings(BaseSettings):
             "remain observation-only and cannot submit orders."
         ),
     )
+    opening_momentum_execution_enabled: bool = Field(
+        default=False,
+        validation_alias=(
+            "AUTO_TRADE_OPENING_MOMENTUM_EXECUTION_ENABLED"
+        ),
+        description=(
+            "Submit at most one fixed-risk opening-momentum entry per US "
+            "session through the normal broker, ledger, and risk pipeline."
+        ),
+    )
+    opening_momentum_execution_paper_confirmed: bool = Field(
+        default=False,
+        validation_alias=(
+            "AUTO_TRADE_OPENING_MOMENTUM_EXECUTION_PAPER_CONFIRMED"
+        ),
+        description=(
+            "Explicit operator acknowledgement that the connected broker "
+            "account is a paper account. Required for opening execution."
+        ),
+    )
+    opening_momentum_execution_max_entry_delay_seconds: int = Field(
+        default=30,
+        ge=5,
+        le=120,
+        validation_alias=(
+            "AUTO_TRADE_OPENING_MOMENTUM_EXECUTION_MAX_ENTRY_DELAY_SECONDS"
+        ),
+    )
+    opening_momentum_execution_max_price_deviation_bps: float = Field(
+        default=200.0,
+        ge=0,
+        le=200,
+        allow_inf_nan=False,
+        validation_alias=(
+            "AUTO_TRADE_OPENING_MOMENTUM_EXECUTION_MAX_PRICE_DEVIATION_BPS"
+        ),
+    )
     strategy_v2_portfolio_shadow_enabled: bool = Field(
         default=False,
         validation_alias=(
@@ -642,6 +679,30 @@ class Settings(BaseSettings):
             raise ValueError(
                 "opening momentum challenger requires opening momentum "
                 "shadow"
+            )
+        if (
+            self.opening_momentum_execution_enabled
+            and not self.opening_momentum_challenger_enabled
+        ):
+            raise ValueError(
+                "opening momentum execution requires the paired challenger "
+                "observer"
+            )
+        if (
+            self.opening_momentum_execution_enabled
+            and not self.opening_momentum_execution_paper_confirmed
+        ):
+            raise ValueError(
+                "opening momentum execution requires explicit paper-account "
+                "confirmation"
+            )
+        if (
+            self.opening_momentum_execution_enabled
+            and not self.full_buying_power_usage_enabled
+        ):
+            raise ValueError(
+                "opening momentum execution requires the explicitly selected "
+                "full buying-power paper mode"
             )
         if (
             self.strategy_v2_portfolio_shadow_enabled

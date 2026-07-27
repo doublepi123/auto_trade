@@ -239,6 +239,30 @@ class _ExitOutcome:
 
 
 @dataclass(frozen=True)
+class OpeningMomentumExecutionSignal:
+    """Causal fixed-stop signal frozen before an order can be submitted."""
+
+    session_date: date
+    algorithm_version: str
+    config_version: str
+    universe_source: str
+    selection_run_id: int | None
+    action: Literal["ENTER_LONG", "SKIP"]
+    reason: str
+    symbol: str | None
+    signal_at: datetime
+    entry_due_at: datetime
+    universe_size: int
+    market_return_bps: float | None
+    candidate_return_bps: float | None
+    excess_return_bps: float | None
+    reference_entry_price: float | None
+    stop_loss_pct: float
+    max_holding_minutes: int
+    context: dict[str, object]
+
+
+@dataclass(frozen=True)
 class _UniverseVariant:
     variant: _VariantName
     algorithm_version: str
@@ -482,6 +506,166 @@ class OpeningMomentumShadowService:
         except IntegrityError:
             self.db.rollback()
         return self.get_status()
+
+    def evaluate_execution_signal(
+        self,
+        *,
+        now: datetime | None = None,
+    ) -> OpeningMomentumExecutionSignal | None:
+        """Build the fixed-stop decision using completed signal bars only."""
+        current = _as_utc(now or datetime.now(timezone.utc))
+        if not is_trading_hours("US", current):
+            return None
+        session = get_session("US")
+        local = session.local(current)
+        session_open = datetime.combine(
+            local.date(),
+            session.rth_open,
+            tzinfo=session.timezone,
+        ).astimezone(timezone.utc)
+        variants = self._universe_variants(
+            session_date=local.date(),
+            completed_before=session_open,
+        )
+        variant = next(
+            (
+                item
+                for item in variants
+                if item.variant == "EXECUTION_BROAD_CHALLENGER"
+            ),
+            None,
+        )
+        if variant is None:
+            return None
+        config = variant.decision_config
+        signal_at = (
+            session_open
+            + timedelta(minutes=config.signal_minutes)
+            - _BAR_DURATION
+        )
+        signal_ready_at = (
+            session_open
+            + timedelta(minutes=config.signal_minutes)
+            + _SETTLEMENT_GRACE
+        )
+        entry_due_at = self._variant_entry_at(
+            variant,
+            session_open=session_open,
+        )
+        deadline = entry_due_at + timedelta(
+            seconds=(
+                settings.opening_momentum_execution_max_entry_delay_seconds
+            )
+        )
+        if current < signal_ready_at or current > deadline:
+            return None
+        if self.candle_provider is None:
+            raise RuntimeError(
+                "opening momentum execution candle provider is unavailable"
+            )
+
+        expected_signal_bars = {
+            session_open + timedelta(minutes=index)
+            for index in range(config.signal_minutes)
+        }
+        observations: list[OpeningMomentumObservation] = []
+        excluded: dict[str, str] = {}
+        for symbol in variant.symbols:
+            try:
+                values = self.candle_provider.get_candlesticks(
+                    symbol,
+                    "MIN_1",
+                    _CANDLE_COUNT,
+                )
+                by_timestamp = {
+                    bar.timestamp: bar
+                    for bar in self._coerce_candles(values)
+                }
+            except Exception as exc:
+                excluded[symbol] = (
+                    f"BROKER_ERROR:{type(exc).__name__}"
+                )
+                continue
+            missing = expected_signal_bars - by_timestamp.keys()
+            if missing:
+                excluded[symbol] = (
+                    f"SIGNAL_BARS_MISSING:{len(missing)}"
+                )
+                continue
+            opening_bar = by_timestamp.get(session_open)
+            signal_bar = by_timestamp.get(signal_at)
+            if opening_bar is None or signal_bar is None:
+                excluded[symbol] = "SIGNAL_BARS_MISSING"
+                continue
+            observations.append(OpeningMomentumObservation(
+                symbol=symbol,
+                session_open=opening_bar.open,
+                signal_close=signal_bar.close,
+                # The BBO at submission owns the actual entry price. This
+                # positive value only makes the already-complete signal
+                # actionable without reading the future delayed-entry bar.
+                entry_open=signal_bar.close,
+            ))
+
+        decision = evaluate_opening_momentum(observations, config)
+        required_observations = max(
+            config.minimum_universe_size,
+            math.ceil(
+                len(variant.symbols)
+                * variant.minimum_data_coverage
+            ),
+        )
+        data_complete = (
+            bool(variant.symbols)
+            and len(observations) >= required_observations
+        )
+        action: Literal["ENTER_LONG", "SKIP"] = decision.action
+        reason = decision.reason
+        if variant.selection_run_id is None:
+            action = "SKIP"
+            reason = "PREOPEN_UNIVERSE_UNAVAILABLE"
+        elif not data_complete:
+            action = "SKIP"
+            reason = "DATA_INCOMPLETE"
+
+        return OpeningMomentumExecutionSignal(
+            session_date=local.date(),
+            algorithm_version=variant.algorithm_version,
+            config_version=variant.config_version,
+            universe_source=variant.universe_source,
+            selection_run_id=variant.selection_run_id,
+            action=action,
+            reason=reason,
+            symbol=(
+                decision.candidate_symbol
+                if action == "ENTER_LONG"
+                else None
+            ),
+            signal_at=signal_at,
+            entry_due_at=entry_due_at,
+            universe_size=decision.universe_size,
+            market_return_bps=decision.market_return_bps,
+            candidate_return_bps=decision.candidate_return_bps,
+            excess_return_bps=decision.excess_return_bps,
+            reference_entry_price=(
+                decision.entry_price
+                if action == "ENTER_LONG"
+                else None
+            ),
+            stop_loss_pct=float(config.stop_loss_pct or 0),
+            max_holding_minutes=config.holding_minutes,
+            context={
+                "signal_ready_at": signal_ready_at.isoformat(),
+                "observed_at": current.isoformat(),
+                "required_observations": required_observations,
+                "observed_symbols": len(observations),
+                "universe": list(variant.symbols),
+                "excluded_symbols": excluded,
+                "ranking": [
+                    asdict(item) for item in decision.ranking
+                ],
+            },
+        )
 
     @staticmethod
     def _variant_entry_at(
@@ -1343,21 +1527,7 @@ class OpeningMomentumShadowService:
                     ),
                     required_symbols=(spec.symbol,),
                 ))
-            variants.append(_UniverseVariant(
-                variant="EXECUTION_BROAD_CHALLENGER",
-                algorithm_version=(
-                    _EXECUTION_BROAD_ALGORITHM_VERSION
-                ),
-                config_version=self._evidence_config_version(
-                    f"{execution_config.version_hash()}:"
-                    f"{_EXECUTION_BROAD_VERSION}"
-                ),
-                universe_source=_EXECUTION_BROAD_SOURCE,
-                decision_config=execution_config,
-                minimum_data_coverage=(
-                    _EARLY_BROAD_MINIMUM_COVERAGE
-                ),
-            ))
+            variants.append(self.execution_variant_identity())
             variants.append(_UniverseVariant(
                 variant=(
                     "EXECUTION_PATH_EFFICIENCY_CHALLENGER"
@@ -1583,6 +1753,19 @@ class OpeningMomentumShadowService:
             self._early_broad_config(),
             holding_minutes=60,
             stop_loss_pct=1.0,
+        )
+
+    def execution_variant_identity(self) -> _UniverseVariant:
+        config = self._execution_broad_config()
+        return _UniverseVariant(
+            variant="EXECUTION_BROAD_CHALLENGER",
+            algorithm_version=_EXECUTION_BROAD_ALGORITHM_VERSION,
+            config_version=self._evidence_config_version(
+                f"{config.version_hash()}:{_EXECUTION_BROAD_VERSION}"
+            ),
+            universe_source=_EXECUTION_BROAD_SOURCE,
+            decision_config=config,
+            minimum_data_coverage=_EARLY_BROAD_MINIMUM_COVERAGE,
         )
 
     def _active_broad_symbols(self) -> tuple[str, ...]:

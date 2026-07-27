@@ -16,7 +16,11 @@ from app.domain.opening_momentum import (
     ALGORITHM_VERSION,
     OpeningMomentumConfig,
 )
-from app.models import Base, OpeningMomentumShadowRun
+from app.models import (
+    Base,
+    OpeningMomentumExecution,
+    OpeningMomentumShadowRun,
+)
 from app.services.opening_momentum_shadow_service import (
     OpeningMomentumShadowService,
 )
@@ -63,14 +67,42 @@ class TestOpeningMomentumShadowApi:
         settings.api_key = ""
         settings.opening_momentum_shadow_enabled = False
         settings.opening_momentum_challenger_enabled = False
+        settings.opening_momentum_execution_enabled = False
+        settings.opening_momentum_execution_paper_confirmed = False
         with self.session_factory() as db:
             db.query(OpeningMomentumShadowRun).delete()
+            db.query(OpeningMomentumExecution).delete()
             db.commit()
 
     def teardown_method(self) -> None:
         settings.api_key = ""
         settings.opening_momentum_shadow_enabled = False
         settings.opening_momentum_challenger_enabled = False
+        settings.opening_momentum_execution_enabled = False
+        settings.opening_momentum_execution_paper_confirmed = False
+
+    def test_execution_status_is_disabled_and_fail_closed(self) -> None:
+        response = self.client.get(
+            "/api/opening-momentum-shadow/execution/status"
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["state"] == "DISABLED"
+        assert body["latest"] is None
+        assert body["config"]["enabled"] is False
+        assert body["config"]["paper_account_confirmed"] is False
+        assert body["config"]["order_submission_allowed"] is False
+        assert body["config"]["signal_minutes"] == 3
+        assert body["config"]["execution_delay_minutes"] == 1
+        assert body["config"]["holding_minutes"] == 60
+        assert body["config"]["stop_loss_pct"] == 1.0
+
+        runs = self.client.get(
+            "/api/opening-momentum-shadow/execution/runs"
+        )
+        assert runs.status_code == 200
+        assert runs.json() == []
 
     def test_status_is_explicitly_shadow_only(self) -> None:
         response = self.client.get(

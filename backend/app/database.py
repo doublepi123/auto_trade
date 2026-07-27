@@ -78,6 +78,7 @@ def init_db() -> None:
     _ensure_strategy_config_report_schedule_columns(engine)
     _ensure_strategy_v2_shadow_tables(engine)
     _ensure_opening_momentum_shadow_table(engine)
+    _ensure_opening_momentum_execution_table(engine)
     _ensure_llm_interaction_variant_column(engine)
     _ensure_llm_interaction_token_columns(engine)
     _ensure_report_query_indexes(engine)
@@ -1638,6 +1639,16 @@ def _ensure_opening_momentum_shadow_table(db_engine: Engine) -> None:
                     "ALTER TABLE opening_momentum_shadow_runs "
                     f"ADD COLUMN {name} {column_type}"
                 )
+
+
+def _ensure_opening_momentum_execution_table(db_engine: Engine) -> None:
+    """Create the idempotent opening-execution journal in place."""
+    from app.models import Base
+
+    Base.metadata.tables["opening_momentum_executions"].create(
+        db_engine,
+        checkfirst=True,
+    )
 
 
 def _ensure_llm_interaction_variant_column(db_engine: Engine) -> None:

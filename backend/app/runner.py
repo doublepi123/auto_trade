@@ -159,6 +159,17 @@ class _ReductionIntent:
 
 
 @dataclass(frozen=True)
+class _OpeningExecutionPolicy:
+    execution_id: int
+    symbol: str
+    status: str
+    stop_loss_pct: float
+    max_holding_minutes: int
+    reference_entry_price: float
+    max_price_deviation_bps: float
+
+
+@dataclass(frozen=True)
 class _PostFillExpectation:
     side: str
     quantity: Decimal
@@ -270,6 +281,9 @@ class AppRunner:
         self._last_llm_action_at: dict[tuple[str, str], float] = {}
         self._llm_order_execution_enabled = False
         self._reduction_intents: dict[str, _ReductionIntent] = {}
+        self._opening_execution_policies: dict[
+            str, _OpeningExecutionPolicy
+        ] = {}
         # Per-symbol last fill timestamp. Previously a single float, which
         # caused a fill on symbol B to skip a position sync on symbol A
         # even though they are unrelated.
@@ -353,6 +367,19 @@ class AppRunner:
                             if runtime is not None and runtime.engine is not self.engine:
                                 self._state_svc.persist_symbol(db, runtime.engine, fill_symbol)
                         reconciliation_complete = True
+                    if fill_symbol:
+                        from app.services.opening_momentum_execution_service import (
+                            OpeningMomentumExecutionService,
+                        )
+
+                        OpeningMomentumExecutionService.reconcile_fill(
+                            db,
+                            symbol=fill_symbol,
+                            action=action,
+                        )
+                        db.commit()
+                if fill_symbol:
+                    self.refresh_opening_execution_registry()
             except Exception:
                 logger.exception("post-fill persist failed for %s", fill_symbol)
             finally:
@@ -544,6 +571,7 @@ class AppRunner:
             self._configure_live_safety(config)
             self._load_tracked_entries(db)
             self._sync_symbol_runtimes(db)
+            self._load_opening_execution_registry(db)
             self._restore_reduction(db)
             self._apply_credentials(self._load_credentials(), resubscribe=False)
         self._register_broker_disconnect_hook()
@@ -615,6 +643,95 @@ class AppRunner:
             except Exception as exc:
                 logger.error("quote subscription failed for %s: %s", ", ".join(symbols), exc)
                 logger.error("system running without quote updates")
+
+    def _load_opening_execution_registry(self, db: Session) -> None:
+        from app.services.opening_momentum_execution_service import (
+            OpeningMomentumExecutionService,
+        )
+
+        try:
+            rows = OpeningMomentumExecutionService.active_policies(db)
+        except Exception:
+            if settings.opening_momentum_execution_enabled:
+                raise
+            logger.warning(
+                "opening-execution registry unavailable while execution is disabled",
+                exc_info=True,
+            )
+            rows = []
+        policies: dict[str, _OpeningExecutionPolicy] = {}
+        for row in rows:
+            if not all(
+                hasattr(row, field)
+                for field in (
+                    "id",
+                    "symbol",
+                    "status",
+                    "stop_loss_pct",
+                    "max_holding_minutes",
+                    "reference_entry_price",
+                    "max_price_deviation_bps",
+                )
+            ):
+                logger.warning(
+                    "ignoring malformed opening-execution registry row"
+                )
+                continue
+            symbol = str(row.symbol or "").strip().upper()
+            if not symbol:
+                continue
+            policies[symbol] = _OpeningExecutionPolicy(
+                execution_id=int(row.id),
+                symbol=symbol,
+                status=str(row.status or ""),
+                stop_loss_pct=float(row.stop_loss_pct or 0),
+                max_holding_minutes=int(row.max_holding_minutes or 0),
+                reference_entry_price=float(
+                    row.reference_entry_price or 0
+                ),
+                max_price_deviation_bps=float(
+                    row.max_price_deviation_bps or 0
+                ),
+            )
+        with self._state_lock:
+            self._opening_execution_policies = policies
+
+    def refresh_opening_execution_registry(self) -> None:
+        with self._state_lock:
+            previous_symbols = set(self._desired_quote_symbols_locked())
+        with self._db_session() as db:
+            self._sync_symbol_runtimes(db)
+            self._load_opening_execution_registry(db)
+        with self._state_lock:
+            desired_symbols = self._desired_quote_symbols_locked()
+            should_resubscribe = (
+                self._running
+                and self._quotes_subscribed
+                and previous_symbols != set(desired_symbols)
+            )
+        if should_resubscribe:
+            try:
+                self._resubscribe_quote_symbols(
+                    self.broker,
+                    desired_symbols,
+                )
+            except Exception as exc:
+                reason = (
+                    "opening-execution quote subscription refresh failed: "
+                    f"{exc}"
+                )
+                logger.exception(reason)
+                with self._state_lock:
+                    self._quotes_subscribed = False
+                self.risk.pause(reason, auto_resumable=False)
+
+    def _managed_opening_symbols(self) -> set[str]:
+        with self._state_lock:
+            return {
+                symbol
+                for symbol, policy in self._opening_execution_policies.items()
+                if policy.status != "ARMED"
+            }
 
     def _resume_stale_post_fill_pause_after_startup(self) -> bool:
         with self._state_lock:
@@ -1677,6 +1794,7 @@ class AppRunner:
             self._remember_quote(quote)
             runtime = self._symbol_runtimes.get(quote.symbol)
             is_primary_symbol = quote.symbol == self.engine.params.symbol
+            opening_policy = self._opening_execution_policies.get(quote.symbol)
             if runtime is None and not is_primary_symbol:
                 decision.early_return = True
                 logger.debug(
@@ -1684,7 +1802,7 @@ class AppRunner:
                     quote.symbol,
                 )
                 return decision
-            if not is_primary_symbol:
+            if not is_primary_symbol and opening_policy is None:
                 decision.early_return = True
                 return decision
             if is_primary_symbol:
@@ -1751,6 +1869,13 @@ class AppRunner:
                             active_engine.state.value,
                             transition_status,
                         )
+                elif self._opening_execution_policies:
+                    # The opening strategy owns the single capital slot from
+                    # ARMED through settlement. Its selected position uses the
+                    # fixed stop/time policy; other symbols remain observation
+                    # only until the slot is released.
+                    active_engine.record_price(quote.last_price)
+                    decision.early_return = True
                 elif (
                     active_engine.state == EngineState.FLAT
                     and active_engine.long_entry_rearm_required
@@ -1861,6 +1986,10 @@ class AppRunner:
                 decision,
                 quote,
                 result.description,
+            )
+            ledger_context = self._opening_execution_ledger_context(
+                decision.trigger_symbol or quote.symbol,
+                ledger_context,
             )
             entry_reference_quantity = None
             if (
@@ -2063,6 +2192,48 @@ class AppRunner:
             "exit_reason": reason if is_exit else "",
         }
 
+    def _opening_execution_ledger_context(
+        self,
+        symbol: str,
+        context: dict[str, object],
+        *,
+        signal_context: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        with self._state_lock:
+            policy = self._opening_execution_policies.get(symbol)
+        if policy is None:
+            return context
+        try:
+            snapshot = json.loads(str(context.get("config_snapshot") or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            snapshot = {}
+        if not isinstance(snapshot, dict):
+            snapshot = {}
+        execution_signal: dict[str, object] = {
+            "strategy_source": "OPENING_MOMENTUM",
+            "opening_execution_id": policy.execution_id,
+            "reference_entry_price": policy.reference_entry_price,
+            "max_price_deviation_bps": policy.max_price_deviation_bps,
+            "stop_loss_pct": policy.stop_loss_pct,
+            "max_holding_minutes": policy.max_holding_minutes,
+        }
+        if signal_context:
+            execution_signal["signal_context"] = signal_context
+        snapshot["execution_signal"] = execution_signal
+        snapshot_json = json.dumps(
+            snapshot,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return {
+            **context,
+            "config_version": hashlib.sha256(
+                snapshot_json.encode("utf-8")
+            ).hexdigest(),
+            "config_snapshot": snapshot_json,
+        }
+
     @staticmethod
     def _quote_age_ms(value: object, now: datetime | None = None) -> float | None:
         raw = str(value or "").strip()
@@ -2100,7 +2271,10 @@ class AppRunner:
                 }
             )
             if (
-                quote.symbol == self.engine.params.symbol
+                (
+                    quote.symbol == self.engine.params.symbol
+                    or self._trade_svc.tracked_position(quote.symbol) is not None
+                )
                 and quote_quality["price_positive"]
                 and quote_quality["spread_reasonable"]
                 and quote_quality["last_bbo_consistent"]
@@ -2178,6 +2352,248 @@ class AppRunner:
         if runtime is None:
             return None
         return runtime.symbol, runtime.market, runtime.engine
+
+    def execute_opening_momentum_entry(
+        self,
+        *,
+        execution_id: int,
+        symbol: str,
+        reference_entry_price: float,
+        entry_deadline_at: datetime,
+        max_price_deviation_bps: float,
+        stop_loss_pct: float,
+        max_holding_minutes: int,
+        signal_context: dict[str, object],
+    ) -> dict[str, object]:
+        action = "BUY"
+
+        def result(
+            status: str,
+            *,
+            executed: bool = False,
+            order_id: str | None = None,
+            reason: str = "",
+        ) -> dict[str, object]:
+            return {
+                "executed": executed,
+                "status": status,
+                "order_id": order_id,
+                "action": action,
+                "reason": reason or status,
+            }
+
+        if not settings.opening_momentum_execution_enabled:
+            return result("EXECUTION_DISABLED")
+        if not settings.opening_momentum_execution_paper_confirmed:
+            return result("PAPER_ACCOUNT_NOT_CONFIRMED")
+        if not (
+            settings.full_buying_power_usage_enabled
+            and self._trade_svc.full_buying_power_usage_enabled
+        ):
+            return result("FULL_BUYING_POWER_DISABLED")
+        if not self._running:
+            return result("RUNNER_STOPPED")
+        deadline = self._as_utc(entry_deadline_at)
+        if datetime.now(timezone.utc) > deadline:
+            return result("ENTRY_WINDOW_EXPIRED")
+
+        target_symbol = str(symbol or "").strip().upper()
+        if not target_symbol:
+            return result("NO_SYMBOL")
+        if (
+            not math.isfinite(reference_entry_price)
+            or reference_entry_price <= 0
+        ):
+            return result("INVALID_REFERENCE_PRICE")
+        if (
+            not math.isfinite(max_price_deviation_bps)
+            or max_price_deviation_bps < 0
+        ):
+            return result("INVALID_PRICE_DEVIATION_LIMIT")
+        if (
+            not math.isfinite(stop_loss_pct)
+            or stop_loss_pct <= 0
+            or stop_loss_pct > settings.hard_stop_loss_pct
+        ):
+            return result("INVALID_STOP_LOSS")
+        if (
+            max_holding_minutes <= 0
+            or max_holding_minutes > settings.hard_max_holding_minutes
+        ):
+            return result("INVALID_HOLDING_LIMIT")
+
+        with self._state_lock:
+            policy = self._opening_execution_policies.get(target_symbol)
+            if policy is None or policy.execution_id != execution_id:
+                return result("EXECUTION_NOT_ACTIVE")
+            if policy.status != "SUBMITTING":
+                return result("EXECUTION_NOT_SUBMITTING")
+            if self._trigger_in_flight:
+                return result("BUSY")
+            runtime = self._runtime_for_symbol(target_symbol)
+            if runtime is None:
+                return result("UNKNOWN_SYMBOL")
+            self._trigger_in_flight = True
+
+        target_symbol, target_market, target_engine = runtime
+        engine_snapshot: EngineSnapshot | None = None
+        try:
+            tracked_entries = self._trade_svc.snapshot_tracked_entries()
+            if any(
+                quantity > 0
+                for quantity, _cost in tracked_entries.values()
+            ):
+                return result(
+                    "CAPITAL_SLOT_BUSY",
+                    reason="another tracked position already owns the capital slot",
+                )
+            if self._trade_svc.has_pending_order:
+                return result(
+                    "BUSY",
+                    reason="another order is still pending",
+                )
+            quote = self._trusted_quote_for_llm_policy(target_symbol)
+            if quote is None:
+                return result("NO_QUOTE")
+            quote_quality = self._evaluate_quote_quality({
+                "last_price": quote.last_price,
+                "bid": quote.bid,
+                "ask": quote.ask,
+                "timestamp": quote.timestamp,
+            })
+            if not all(
+                bool(quote_quality[name])
+                for name in (
+                    "price_positive",
+                    "spread_reasonable",
+                    "last_bbo_consistent",
+                    "source_timestamp_fresh",
+                )
+            ):
+                return result("NO_QUOTE", reason="live quote failed quality gate")
+            executable_price = float(quote.ask)
+            deviation_bps = abs(
+                executable_price / reference_entry_price - 1
+            ) * 10_000
+            if deviation_bps > max_price_deviation_bps:
+                return result(
+                    "QUOTE_DEVIATION",
+                    reason=(
+                        f"entry ask deviation {deviation_bps:.2f}bps exceeds "
+                        f"{max_price_deviation_bps:.2f}bps"
+                    ),
+                )
+            risk_result = self.risk.check()
+            if not risk_result.approved:
+                return result("RISK_REJECTED", reason=risk_result.reason)
+
+            engine_snapshot = target_engine.snapshot()
+            transition_status = target_engine.transition_for_action(action)
+            if transition_status != "OK":
+                return result(transition_status)
+            execution_params = dataclass_replace(target_engine.params)
+            execution_params.stop_loss_pct = stop_loss_pct
+            execution_params.max_holding_minutes = max_holding_minutes
+            execution_params.min_profit_amount = 0
+            execution_params.allow_position_addons = False
+            execution_quote = Quote(
+                symbol=quote.symbol,
+                last_price=executable_price,
+                bid=quote.bid,
+                ask=quote.ask,
+                timestamp=quote.timestamp,
+            )
+            decision = _QuoteTriggerDecision(
+                result=TriggerResult(
+                    triggered=True,
+                    action=action,
+                    description="opening momentum entry",
+                ),
+                trigger_symbol=target_symbol,
+                trigger_engine=target_engine,
+                trigger_params=execution_params,
+                trigger_market=target_market,
+            )
+            ledger_context = self._opening_execution_ledger_context(
+                target_symbol,
+                self._execution_ledger_context(
+                    decision,
+                    execution_quote,
+                    "opening momentum entry",
+                ),
+                signal_context=signal_context,
+            )
+            if datetime.now(timezone.utc) > deadline:
+                target_engine.restore(engine_snapshot)
+                return result("ENTRY_WINDOW_EXPIRED")
+            order_status = self._trade_svc.execute(
+                action=action,
+                symbol=target_symbol,
+                quote=execution_quote,
+                broker=self.broker,
+                risk=self.risk,
+                notifier=self.notifier,
+                cash_currency=self._cash_currency_for_market(target_market),
+                market=target_market,
+                trading_session_mode="RTH_ONLY",
+                min_profit_amount=0,
+                allow_loss_exit=False,
+                fee_rate=self._fee_rate_for_params(
+                    execution_params,
+                    target_market,
+                ),
+                expected_exit_price=None,
+                engine_snapshot=engine_snapshot,
+                restore_engine_snapshot=lambda snapshot: target_engine.restore(
+                    snapshot
+                ),
+                notify_risk_event=self.notifier.notify_risk_event,
+                execution_context=ledger_context,
+                entry_policy_check=(
+                    lambda checked_symbol, checked_action, checked_market: (
+                        self._validate_opening_momentum_entry_policy(
+                            execution_id,
+                            checked_symbol,
+                            checked_action,
+                            checked_market,
+                        )
+                    )
+                ),
+                allow_opening_warmup_entry=True,
+            )
+            if order_status is None:
+                target_engine.restore(engine_snapshot)
+                return result("NO_ORDER")
+            status = str(order_status.status or "UNKNOWN").upper()
+            executed = status in {
+                "FILLED",
+                "SUBMITTED",
+                "PARTIAL_FILLED",
+            }
+            if not executed:
+                target_engine.restore(engine_snapshot)
+            order_id = str(order_status.broker_order_id or "") or None
+            return result(
+                status,
+                executed=executed,
+                order_id=order_id,
+                reason=str(order_status.reason or status),
+            )
+        except Exception:
+            if engine_snapshot is not None:
+                target_engine.restore(engine_snapshot)
+            reason = (
+                f"{_ORDER_SUBMISSION_UNCERTAIN_PREFIX} opening momentum "
+                f"entry outcome is unknown for {target_symbol}"
+            )
+            self.risk.pause(reason, auto_resumable=False)
+            self._set_last_action_message(reason)
+            self._persist_risk_pause_best_effort()
+            logger.exception(reason)
+            raise
+        finally:
+            with self._state_lock:
+                self._trigger_in_flight = False
 
     def execute_llm_order_decision(self, decision: dict[str, Any]) -> dict[str, Any]:
         result = self._execute_llm_order_decision(decision)
@@ -2903,6 +3319,16 @@ class AppRunner:
         normalized_action = str(action or "").upper()
         if normalized_action not in _ENTRY_ACTIONS:
             return None
+        with self._state_lock:
+            if self._opening_execution_policies:
+                return EntryPolicyCheckResult(
+                    issue="opening momentum execution owns the capital slot",
+                    skip_category="PENDING",
+                    details={
+                        "entry_policy": "OPENING_MOMENTUM_CAPITAL_SLOT",
+                        "policy_reason": "CAPITAL_SLOT_RESERVED",
+                    },
+                )
         crossing_result = self._validate_live_entry_crossing(
             symbol,
             normalized_action,
@@ -2920,6 +3346,58 @@ class AppRunner:
                     settings.live_max_entries_per_symbol_per_day
                 ),
             ).evaluate(symbol, normalized_action, market)
+
+    def _validate_opening_momentum_entry_policy(
+        self,
+        execution_id: int,
+        symbol: str,
+        action: str,
+        market: str,
+    ) -> EntryPolicyCheckResult | str | None:
+        normalized_symbol = str(symbol or "").strip().upper()
+        normalized_action = str(action or "").upper()
+        if normalized_action != "BUY" or market != "US":
+            return EntryPolicyCheckResult(
+                issue=(
+                    "opening momentum execution only permits US long entries"
+                ),
+                skip_category="RISK",
+                details={
+                    "entry_policy": "OPENING_MOMENTUM_EXECUTION",
+                    "policy_reason": "ACTION_OR_MARKET_NOT_ALLOWED",
+                },
+            )
+        with self._state_lock:
+            policy = self._opening_execution_policies.get(normalized_symbol)
+        if (
+            policy is None
+            or policy.execution_id != execution_id
+            or policy.status != "SUBMITTING"
+        ):
+            return EntryPolicyCheckResult(
+                issue="opening momentum execution is no longer active",
+                skip_category="RISK",
+                details={
+                    "entry_policy": "OPENING_MOMENTUM_EXECUTION",
+                    "policy_reason": "EXECUTION_NOT_ACTIVE",
+                    "opening_execution_id": execution_id,
+                },
+            )
+        from app.services.live_entry_policy_service import (
+            LiveEntryPolicyService,
+        )
+
+        with self._db_session() as db:
+            return LiveEntryPolicyService(
+                db,
+                regime_gate_enabled=False,
+                max_data_age_seconds=(
+                    settings.live_regime_max_data_age_seconds
+                ),
+                max_entries_per_symbol_per_day=(
+                    settings.live_max_entries_per_symbol_per_day
+                ),
+            ).evaluate(normalized_symbol, normalized_action, market)
 
     def _validate_live_entry_crossing(
         self,
@@ -4712,10 +5190,22 @@ class AppRunner:
             unrealized_pnl = (executable_price - avg_price) * quantity
         else:
             unrealized_pnl = (avg_price - executable_price) * quantity
+        opening_policy = self._opening_execution_policies.get(quote.symbol)
+        stop_loss_pct = (
+            opening_policy.stop_loss_pct
+            if opening_policy is not None and opening_policy.stop_loss_pct > 0
+            else engine.params.stop_loss_pct
+        )
+        max_holding_minutes = (
+            opening_policy.max_holding_minutes
+            if opening_policy is not None
+            and opening_policy.max_holding_minutes > 0
+            else engine.params.max_holding_minutes
+        )
         decision = evaluate_exit_policy(
             config=ExitPolicyConfig(
-                stop_loss_pct=engine.params.stop_loss_pct,
-                max_holding_minutes=engine.params.max_holding_minutes,
+                stop_loss_pct=stop_loss_pct,
+                max_holding_minutes=max_holding_minutes,
             ),
             position=PositionExitContext(
                 symbol=quote.symbol,
@@ -4753,9 +5243,14 @@ class AppRunner:
         )
 
     def _restore_reduction(self, db: Session) -> None:
-        symbol = self.engine.params.symbol
-        if not symbol:
-            return
+        symbols = set(self._trade_svc.snapshot_tracked_entries())
+        symbols.update(self._opening_execution_policies)
+        if self.engine.params.symbol:
+            symbols.add(self.engine.params.symbol)
+        for symbol in sorted(symbols):
+            self._restore_reduction_for_symbol(db, symbol)
+
+    def _restore_reduction_for_symbol(self, db: Session, symbol: str) -> None:
         payload = self._state_svc.load_reduction(db, symbol=symbol)
         if payload is None:
             return
@@ -4834,9 +5329,25 @@ class AppRunner:
                         "trigger_price": intent.trigger_price,
                     },
                 )
+                from app.services.opening_momentum_execution_service import (
+                    OpeningMomentumExecutionService,
+                )
+
+                OpeningMomentumExecutionService.mark_exiting(
+                    db,
+                    symbol=symbol,
+                    reason=intent.reason,
+                )
                 db.commit()
         except Exception:
             logger.exception("failed to record reduction event for %s", symbol)
+        try:
+            self.refresh_opening_execution_registry()
+        except Exception:
+            logger.exception(
+                "failed to refresh opening execution after reduction for %s",
+                symbol,
+            )
         return True
 
     def _clear_reduction(self, symbol: str, *, reason: str) -> bool:
@@ -5889,11 +6400,16 @@ class AppRunner:
         if primary_symbol:
             managed_symbols.add(primary_symbol)
 
-        unexpected_exposure = sorted(set(broker_positions) - {primary_symbol})
+        allowed_exposure_symbols = self._managed_opening_symbols()
+        if primary_symbol:
+            allowed_exposure_symbols.add(primary_symbol)
+        unexpected_exposure = sorted(
+            set(broker_positions) - allowed_exposure_symbols
+        )
         if unexpected_exposure:
             reason = (
                 f"{_POSITION_RECONCILIATION_UNCERTAIN_PREFIX} "
-                "broker exposure exists outside the primary strategy: "
+                "broker exposure exists outside managed strategies: "
                 + ", ".join(unexpected_exposure)
             )
             self.risk.revoke_protective_exits()
@@ -5909,7 +6425,13 @@ class AppRunner:
                 event_type="UNMANAGED_BROKER_EXPOSURE",
                 status="ERROR",
                 message=reason,
-                payload={"source": source, "symbols": unexpected_exposure},
+                payload={
+                    "source": source,
+                    "symbols": unexpected_exposure,
+                    "managed_opening_symbols": sorted(
+                        self._managed_opening_symbols()
+                    ),
+                },
             )
 
         completed_reductions: list[tuple[str, _ReductionIntent]] = []
@@ -6573,6 +7095,24 @@ class AppRunner:
             if not symbol:
                 continue
             symbol_markets[symbol] = getattr(item, "market", "US") or "US"
+        try:
+            from app.services.opening_momentum_execution_service import (
+                OpeningMomentumExecutionService,
+            )
+
+            for execution in OpeningMomentumExecutionService.active_policies(
+                db
+            ):
+                execution_symbol = str(
+                    execution.symbol or ""
+                ).strip().upper()
+                if execution_symbol:
+                    symbol_markets[execution_symbol] = "US"
+        except Exception:
+            logger.warning(
+                "failed to load opening-execution symbol runtimes",
+                exc_info=True,
+            )
 
         with self._state_lock:
             for symbol, market in symbol_markets.items():

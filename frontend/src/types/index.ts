@@ -1979,6 +1979,79 @@ export interface OpeningMomentumShadowStatus {
   variants: OpeningMomentumShadowVariant[]
 }
 
+export type OpeningMomentumExecutionState =
+  | 'DISABLED'
+  | 'WAITING'
+  | 'ARMED'
+  | 'SUBMITTING'
+  | 'SUBMITTED'
+  | 'OPEN'
+  | 'EXITING'
+  | 'CLOSED'
+  | 'SKIPPED'
+  | 'REJECTED'
+  | 'EXPIRED'
+  | 'FAILED'
+  | 'UNCERTAIN'
+
+export interface OpeningMomentumExecutionConfig {
+  enabled: boolean
+  paper_account_confirmed: boolean
+  mode: 'PAPER_LIVE'
+  order_submission_allowed: boolean
+  algorithm_version: string
+  config_version: string
+  universe_source: string
+  signal_minutes: number
+  execution_delay_minutes: number
+  holding_minutes: number
+  stop_loss_pct: number
+  max_entry_delay_seconds: number
+  max_price_deviation_bps: number
+  capital_slots: 1
+}
+
+export interface OpeningMomentumExecution {
+  id: number
+  session_date: string
+  algorithm_version: string
+  config_version: string
+  universe_source: string
+  selection_run_id: number | null
+  status: Exclude<OpeningMomentumExecutionState, 'DISABLED' | 'WAITING'>
+  reason: string
+  symbol: string | null
+  signal_at: string
+  armed_at: string
+  entry_due_at: string
+  entry_deadline_at: string
+  requested_at: string | null
+  universe_size: number
+  market_return_bps: number | null
+  candidate_return_bps: number | null
+  excess_return_bps: number | null
+  reference_entry_price: number | null
+  max_price_deviation_bps: number
+  stop_loss_pct: number
+  max_holding_minutes: number
+  signal_context: Record<string, unknown>
+  submit_attempts: number
+  entry_order_id: string
+  exit_order_id: string
+  entry_filled_at: string | null
+  entry_price: number | null
+  quantity: number | null
+  exit_filled_at: string | null
+  exit_price: number | null
+  net_pnl: number | null
+}
+
+export interface OpeningMomentumExecutionStatus {
+  config: OpeningMomentumExecutionConfig
+  state: OpeningMomentumExecutionState
+  latest: OpeningMomentumExecution | null
+}
+
 export interface StrategyShadowConfig {
   enabled: boolean
   symbol: string

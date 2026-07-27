@@ -49,6 +49,7 @@ describe('Strategy v2 shadow lab', () => {
     cy.contains('.el-tabs__item', '策略 v2 影子').click()
     cy.wait([
       '@getOpeningMomentumShadowStatus',
+      '@getOpeningMomentumExecutionStatus',
       '@getStrategyShadowConfigs',
       '@getStrategyShadowConfig',
       '@getStrategyShadowVersions',
@@ -63,16 +64,26 @@ describe('Strategy v2 shadow lab', () => {
     ], { requestTimeout: 15_000 })
   }
 
-  it('shows fixed dual-timeframe and hard no-order safety state', () => {
+  it('shows shadow evidence and paper execution state', () => {
     openShadowTab()
 
     cy.get('[data-testid="opening-momentum-shadow"]')
       .should('contain', '开盘横截面策略')
       .and('contain', '影子观察')
-      .and('contain', '永不下单')
+      .and('contain', '全资金模拟盘')
       .and('contain', '30 分钟')
       .and('contain', '执行延迟')
       .and('contain', '1 分钟')
+    cy.get('[data-testid="opening-execution-status"]')
+      .should('contain', '3 分钟动量模拟执行')
+      .and('contain', '单资金槽')
+      .and('contain', '已闭环')
+      .and('contain', '1.00%')
+      .and('contain', '200.0 bps')
+      .and('contain', 'NVDA.US')
+      .and('contain', 'opening-entry-17')
+      .and('contain', 'opening-exit-17')
+      .and('contain', '51.25')
     cy.get('[data-testid="opening-momentum-latest"]')
       .should('contain', 'META.US')
       .and('contain', '67.5 bps')

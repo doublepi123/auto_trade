@@ -454,6 +454,68 @@ def _seed_active_broad_pool(db: Session) -> None:
     db.commit()
 
 
+def test_execution_signal_uses_only_completed_three_minute_bars(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        settings,
+        "opening_momentum_challenger_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        settings,
+        "opening_momentum_execution_max_entry_delay_seconds",
+        30,
+    )
+
+    class _SignalOnlyCandles(_FakeCandles):
+        def get_candlesticks(
+            self,
+            symbol: str,
+            period: str,
+            count: int,
+        ) -> list[BrokerCandle]:
+            return [
+                bar
+                for bar in super().get_candlesticks(
+                    symbol,
+                    period,
+                    count,
+                )
+                if bar.timestamp
+                <= _SESSION_OPEN + timedelta(minutes=2)
+            ]
+
+    engine, db = _database()
+    try:
+        run = _seed_universe(db)
+        _seed_active_broad_pool(db)
+        candles = _SignalOnlyCandles(
+            early_opening_returns_bps={_SYMBOLS[-1]: 100.0}
+        )
+
+        signal = OpeningMomentumShadowService(
+            db,
+            candles,
+        ).evaluate_execution_signal(
+            now=_SESSION_OPEN + timedelta(minutes=3, seconds=5),
+        )
+
+        assert signal is not None
+        assert signal.action == "ENTER_LONG"
+        assert signal.symbol == _SYMBOLS[-1]
+        assert signal.selection_run_id == run.id
+        assert signal.signal_at == _SESSION_OPEN + timedelta(minutes=2)
+        assert signal.entry_due_at == _SESSION_OPEN + timedelta(minutes=4)
+        assert signal.reference_entry_price == pytest.approx(101.0)
+        assert signal.stop_loss_pct == 1.0
+        assert signal.max_holding_minutes == 60
+        assert sorted(candles.calls) == sorted(_SYMBOLS)
+    finally:
+        db.close()
+        Base.metadata.drop_all(bind=engine)
+
+
 def test_tick_opens_then_closes_one_cost_adjusted_shadow_trade(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

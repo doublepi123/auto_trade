@@ -413,6 +413,43 @@ def test_opening_momentum_path_feature_migration_is_idempotent(
     } <= columns
 
 
+def test_opening_momentum_execution_table_migration_is_idempotent(
+    tmp_path,
+) -> None:
+    db_path = tmp_path / "legacy_opening_execution.db"
+    legacy_engine = create_engine(f"sqlite:///{db_path}")
+
+    database._ensure_opening_momentum_execution_table(legacy_engine)
+    database._ensure_opening_momentum_execution_table(legacy_engine)
+
+    inspector = inspect(legacy_engine)
+    assert "opening_momentum_executions" in inspector.get_table_names()
+    columns = {
+        column["name"]
+        for column in inspector.get_columns(
+            "opening_momentum_executions"
+        )
+    }
+    assert {
+        "session_date",
+        "config_version",
+        "status",
+        "symbol",
+        "entry_due_at",
+        "entry_deadline_at",
+        "entry_order_id",
+        "exit_order_id",
+        "net_pnl",
+    } <= columns
+    indexes = {
+        index["name"]
+        for index in inspector.get_indexes(
+            "opening_momentum_executions"
+        )
+    }
+    assert "ix_opening_momentum_execution_status_session" in indexes
+
+
 def test_llm_interaction_token_migration_adds_nullable_columns(tmp_path) -> None:
     db_path = tmp_path / "legacy_llm_tokens.db"
     legacy_engine = create_engine(f"sqlite:///{db_path}")

@@ -944,20 +944,34 @@ async def _strategy_v2_shadow_cron() -> None:
 
 
 def _opening_momentum_shadow_tick_sync() -> None:
-    """Advance the isolated cross-sectional opening-momentum observer."""
+    """Advance opening-momentum execution and its shadow observers."""
+    from app.services.opening_momentum_execution_service import (
+        OpeningMomentumExecutionService,
+    )
     from app.services.opening_momentum_shadow_service import (
         OpeningMomentumShadowService,
     )
 
     db = SessionLocal()
     try:
-        OpeningMomentumShadowService(
-            db,
-            get_runner().broker,
-        ).tick()
-    except Exception:
-        db.rollback()
-        logger.exception("opening momentum shadow tick failed")
+        runner = get_runner()
+        try:
+            OpeningMomentumExecutionService(
+                db,
+                runner.broker,
+                runner,
+            ).tick()
+        except Exception:
+            db.rollback()
+            logger.exception("opening momentum execution tick failed")
+        try:
+            OpeningMomentumShadowService(
+                db,
+                runner.broker,
+            ).tick()
+        except Exception:
+            db.rollback()
+            logger.exception("opening momentum shadow tick failed")
     finally:
         db.close()
 

@@ -669,6 +669,90 @@ class OpeningMomentumShadowStatusResponse(BaseModel):
     )
 
 
+class OpeningMomentumExecutionConfigResponse(BaseModel):
+    enabled: bool
+    paper_account_confirmed: bool
+    mode: Literal["PAPER_LIVE"] = "PAPER_LIVE"
+    order_submission_allowed: bool
+    algorithm_version: str
+    config_version: str
+    universe_source: str
+    signal_minutes: int
+    execution_delay_minutes: int
+    holding_minutes: int
+    stop_loss_pct: float
+    max_entry_delay_seconds: int
+    max_price_deviation_bps: float
+    capital_slots: Literal[1] = 1
+
+
+class OpeningMomentumExecutionResponse(BaseModel):
+    id: int
+    session_date: date
+    algorithm_version: str
+    config_version: str
+    universe_source: str
+    selection_run_id: Optional[int] = None
+    status: Literal[
+        "SKIPPED",
+        "ARMED",
+        "SUBMITTING",
+        "SUBMITTED",
+        "OPEN",
+        "EXITING",
+        "CLOSED",
+        "REJECTED",
+        "EXPIRED",
+        "FAILED",
+        "UNCERTAIN",
+    ]
+    reason: str
+    symbol: Optional[str] = None
+    signal_at: datetime
+    armed_at: datetime
+    entry_due_at: datetime
+    entry_deadline_at: datetime
+    requested_at: Optional[datetime] = None
+    universe_size: int
+    market_return_bps: Optional[float] = None
+    candidate_return_bps: Optional[float] = None
+    excess_return_bps: Optional[float] = None
+    reference_entry_price: Optional[float] = None
+    max_price_deviation_bps: float
+    stop_loss_pct: float
+    max_holding_minutes: int
+    signal_context: dict[str, Any] = Field(default_factory=dict)
+    submit_attempts: int
+    entry_order_id: str
+    exit_order_id: str
+    entry_filled_at: Optional[datetime] = None
+    entry_price: Optional[float] = None
+    quantity: Optional[float] = None
+    exit_filled_at: Optional[datetime] = None
+    exit_price: Optional[float] = None
+    net_pnl: Optional[float] = None
+
+
+class OpeningMomentumExecutionStatusResponse(BaseModel):
+    config: OpeningMomentumExecutionConfigResponse
+    state: Literal[
+        "DISABLED",
+        "WAITING",
+        "ARMED",
+        "SUBMITTING",
+        "SUBMITTED",
+        "OPEN",
+        "EXITING",
+        "CLOSED",
+        "SKIPPED",
+        "REJECTED",
+        "EXPIRED",
+        "FAILED",
+        "UNCERTAIN",
+    ]
+    latest: Optional[OpeningMomentumExecutionResponse] = None
+
+
 class StrategyV2ShadowVersionResponse(BaseModel):
     symbol: str
     config_version: str

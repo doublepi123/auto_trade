@@ -287,7 +287,13 @@
               </div>
               <div class="shadow-tags">
                 <el-tag type="warning">影子观察</el-tag>
-                <el-tag type="danger" effect="plain">永不下单</el-tag>
+                <el-tag
+                  :type="openingExecutionStatus?.config.order_submission_allowed ? 'warning' : 'info'"
+                  effect="plain"
+                  data-testid="opening-execution-mode"
+                >
+                  {{ openingExecutionStatus?.config.order_submission_allowed ? '全资金模拟盘' : '执行关闭' }}
+                </el-tag>
                 <el-tag :type="openingMomentumStateType" effect="plain">
                   {{ openingMomentumStateLabel }}
                 </el-tag>
@@ -302,6 +308,113 @@
               show-icon
               data-testid="opening-momentum-error"
             />
+
+            <el-alert
+              v-if="openingExecutionLoadError"
+              :title="openingExecutionLoadError"
+              type="error"
+              :closable="false"
+              show-icon
+              data-testid="opening-execution-error"
+            />
+
+            <div
+              v-if="openingExecutionStatus"
+              class="opening-execution-band"
+              data-testid="opening-execution-status"
+            >
+              <div class="shadow-section-header">
+                <div>
+                  <h3>3 分钟动量模拟执行</h3>
+                  <small>
+                    {{ openingExecutionStatus.config.algorithm_version }} ·
+                    {{ shortVersion(openingExecutionStatus.config.config_version) }}
+                  </small>
+                </div>
+                <div class="shadow-tags">
+                  <el-tag
+                    :type="openingExecutionStateType"
+                    effect="plain"
+                  >
+                    {{ openingExecutionStateLabel }}
+                  </el-tag>
+                  <el-tag type="info" effect="plain">
+                    单资金槽
+                  </el-tag>
+                </div>
+              </div>
+              <div class="shadow-facts opening-execution-facts">
+                <div>
+                  <span>信号 / 入场</span>
+                  <strong>
+                    {{ openingExecutionStatus.config.signal_minutes }} / +{{ openingExecutionStatus.config.execution_delay_minutes }} 分钟
+                  </strong>
+                </div>
+                <div>
+                  <span>固定止损</span>
+                  <strong>{{ openingExecutionStatus.config.stop_loss_pct.toFixed(2) }}%</strong>
+                </div>
+                <div>
+                  <span>最长持有</span>
+                  <strong>{{ openingExecutionStatus.config.holding_minutes }} 分钟</strong>
+                </div>
+                <div>
+                  <span>入场窗口</span>
+                  <strong>{{ openingExecutionStatus.config.max_entry_delay_seconds }} 秒</strong>
+                </div>
+                <div>
+                  <span>最大价格偏离</span>
+                  <strong>{{ formatBps(openingExecutionStatus.config.max_price_deviation_bps) }}</strong>
+                </div>
+                <div>
+                  <span>下单许可</span>
+                  <strong>{{ openingExecutionStatus.config.order_submission_allowed ? '已启用' : '已关闭' }}</strong>
+                </div>
+              </div>
+              <div
+                v-if="openingExecutionStatus.latest"
+                class="shadow-facts opening-execution-latest"
+              >
+                <div>
+                  <span>会话 / 标的</span>
+                  <strong>
+                    {{ openingExecutionStatus.latest.session_date }} ·
+                    {{ openingExecutionStatus.latest.symbol || '-' }}
+                  </strong>
+                </div>
+                <div>
+                  <span>状态 / 原因</span>
+                  <strong>
+                    {{ openingExecutionStatus.latest.status }} ·
+                    {{ openingExecutionStatus.latest.reason }}
+                  </strong>
+                </div>
+                <div>
+                  <span>入场订单</span>
+                  <strong>{{ openingExecutionStatus.latest.entry_order_id || '-' }}</strong>
+                </div>
+                <div>
+                  <span>入场价 / 数量</span>
+                  <strong>
+                    {{ formatNullable(openingExecutionStatus.latest.entry_price) }} /
+                    {{ formatNullable(openingExecutionStatus.latest.quantity) }}
+                  </strong>
+                </div>
+                <div>
+                  <span>退出订单 / 价格</span>
+                  <strong>
+                    {{ openingExecutionStatus.latest.exit_order_id || '-' }} /
+                    {{ formatNullable(openingExecutionStatus.latest.exit_price) }}
+                  </strong>
+                </div>
+                <div>
+                  <span>净收益</span>
+                  <strong :class="{ negative: (openingExecutionStatus.latest.net_pnl ?? 0) < 0 }">
+                    {{ formatNullable(openingExecutionStatus.latest.net_pnl) }}
+                  </strong>
+                </div>
+              </div>
+            </div>
 
             <template v-if="openingMomentumStatus">
               <div class="shadow-facts" data-testid="opening-momentum-config">
@@ -1891,7 +2004,10 @@ import {
   getIndicators, getLLMUsageSummary,
 } from '../api/lab'
 import { getLLMInteractions, getLLMIntervalStatus } from '../api/llm_advisor'
-import { getOpeningMomentumShadowStatus } from '../api/opening_momentum_shadow'
+import {
+  getOpeningMomentumExecutionStatus,
+  getOpeningMomentumShadowStatus,
+} from '../api/opening_momentum_shadow'
 import DataState from '../components/DataState.vue'
 import MetricStat from '../components/MetricStat.vue'
 import {
@@ -1913,6 +2029,7 @@ import type {
   PromptVersion, ExperimentSummary, PerformanceStats,
   PerformanceVariant, IndicatorsResponse, LLMInteractionRecord, LLMIntervalStatus, LLMUsageSummary,
   OpeningMomentumRecommendation,
+  OpeningMomentumExecutionStatus,
   OpeningMomentumShadowStatus,
   StrategyShadowAdxChallengerResponse,
   StrategyShadowBracketChallengerReport,
@@ -2159,6 +2276,8 @@ function formatTokenCount(value: number): string {
 // --- Tab 5: strategy v2 shadow observability ---
 const openingMomentumStatus = ref<OpeningMomentumShadowStatus | null>(null)
 const openingMomentumLoadError = ref('')
+const openingExecutionStatus = ref<OpeningMomentumExecutionStatus | null>(null)
+const openingExecutionLoadError = ref('')
 const shadowConfig = ref<StrategyShadowConfig | null>(null)
 const shadowConfigs = ref<StrategyShadowConfig[]>([])
 const selectedShadowSymbol = ref('')
@@ -2210,6 +2329,33 @@ const openingMomentumStateType = computed(() => {
   const state = openingMomentumStatus.value?.state
   if (state === 'OPEN') return 'warning'
   if (state === 'COLLECTING') return 'success'
+  return 'info'
+})
+const openingExecutionStateLabel = computed(() => {
+  const state = openingExecutionStatus.value?.state
+  if (!state) return '加载中'
+  const labels: Record<OpeningMomentumExecutionStatus['state'], string> = {
+    DISABLED: '已停用',
+    WAITING: '等待信号',
+    ARMED: '等待入场',
+    SUBMITTING: '提交中',
+    SUBMITTED: '已提交',
+    OPEN: '持仓中',
+    EXITING: '退出中',
+    CLOSED: '已闭环',
+    SKIPPED: '本日跳过',
+    REJECTED: '已拒绝',
+    EXPIRED: '窗口过期',
+    FAILED: '执行失败',
+    UNCERTAIN: '待人工核对',
+  }
+  return labels[state]
+})
+const openingExecutionStateType = computed(() => {
+  const state = openingExecutionStatus.value?.state
+  if (state === 'OPEN' || state === 'SUBMITTED' || state === 'EXITING') return 'warning'
+  if (state === 'CLOSED') return 'success'
+  if (state === 'UNCERTAIN' || state === 'FAILED' || state === 'REJECTED') return 'danger'
   return 'info'
 })
 function openingMomentumVariantLabel(
@@ -2330,8 +2476,22 @@ async function loadOpeningMomentumShadow() {
   }
 }
 
+async function loadOpeningMomentumExecution() {
+  openingExecutionLoadError.value = ''
+  try {
+    openingExecutionStatus.value = await getOpeningMomentumExecutionStatus()
+  } catch (error: unknown) {
+    openingExecutionStatus.value = null
+    openingExecutionLoadError.value = resolveErrorMessage(
+      error,
+      '加载开盘动量模拟执行状态失败',
+    )
+  }
+}
+
 async function loadStrategyShadow(symbol = selectedShadowSymbol.value || undefined) {
   void loadOpeningMomentumShadow()
+  void loadOpeningMomentumExecution()
   const generation = ++shadowRequestGeneration.value
   void loadShadowPortfolioRouting(generation)
   shadowDecisionRequestGeneration.value += 1
@@ -3784,6 +3944,18 @@ onBeforeUnmount(() => {
 .opening-momentum-metrics,
 .opening-momentum-variants {
   margin-top: 16px;
+}
+
+.opening-execution-band {
+  margin-top: 16px;
+  padding: 16px 0;
+  border-top: 1px solid #e5e7eb;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.opening-execution-facts,
+.opening-execution-latest {
+  margin-top: 12px;
 }
 
 .opening-momentum-variants {

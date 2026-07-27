@@ -2263,6 +2263,66 @@ Cypress.Commands.add('stubApi', () => {
     req.reply({ body: strategyShadowConfig })
   }).as('getStrategyShadowConfig')
 
+  cy.intercept(
+    'GET',
+    '/api/opening-momentum-shadow/execution/status',
+    {
+      body: {
+        config: {
+          enabled: true,
+          paper_account_confirmed: true,
+          mode: 'PAPER_LIVE',
+          order_submission_allowed: true,
+          algorithm_version: 'opening-execution-fixed-stop-v1',
+          config_version: 'opening-execution-stub-v1',
+          universe_source: 'OPENING_EXECUTION_BROAD',
+          signal_minutes: 3,
+          execution_delay_minutes: 1,
+          holding_minutes: 60,
+          stop_loss_pct: 1,
+          max_entry_delay_seconds: 30,
+          max_price_deviation_bps: 200,
+          capital_slots: 1,
+        },
+        state: 'CLOSED',
+        latest: {
+          id: 17,
+          session_date: '2026-07-23',
+          algorithm_version: 'opening-execution-fixed-stop-v1',
+          config_version: 'opening-execution-stub-v1',
+          universe_source: 'OPENING_EXECUTION_BROAD',
+          selection_run_id: 7,
+          status: 'CLOSED',
+          reason: 'TIME_STOP',
+          symbol: 'NVDA.US',
+          signal_at: '2026-07-23T13:32:00Z',
+          armed_at: '2026-07-23T13:33:05Z',
+          entry_due_at: '2026-07-23T13:34:00Z',
+          entry_deadline_at: '2026-07-23T13:34:30Z',
+          requested_at: '2026-07-23T13:34:01Z',
+          universe_size: 41,
+          market_return_bps: 8,
+          candidate_return_bps: 76,
+          excess_return_bps: 68,
+          reference_entry_price: 100,
+          max_price_deviation_bps: 200,
+          stop_loss_pct: 1,
+          max_holding_minutes: 60,
+          signal_context: {},
+          submit_attempts: 1,
+          entry_order_id: 'opening-entry-17',
+          exit_order_id: 'opening-exit-17',
+          entry_filled_at: '2026-07-23T13:34:02Z',
+          entry_price: 100.02,
+          quantity: 50,
+          exit_filled_at: '2026-07-23T14:34:02Z',
+          exit_price: 101.1,
+          net_pnl: 51.25,
+        },
+      },
+    },
+  ).as('getOpeningMomentumExecutionStatus')
+
   cy.intercept('GET', '/api/opening-momentum-shadow/status', {
     body: {
       config: {

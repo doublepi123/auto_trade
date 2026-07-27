@@ -694,6 +694,8 @@ class TradeExecutionService:
         notify_risk_event: _NotifyRiskEvent | None = None,
         reduce_only: bool = False,
         execution_context: Mapping[str, object] | None = None,
+        entry_policy_check: EntryPolicyCheck | None = None,
+        allow_opening_warmup_entry: bool = False,
     ) -> OrderStatus | None:
         with self._submission_lock:
             self._active_execution_context = dict(execution_context or {})
@@ -729,6 +731,10 @@ class TradeExecutionService:
                     restore_engine_snapshot=restore_engine_snapshot,
                     notify_risk_event=notify_risk_event,
                     reduce_only=reduce_only,
+                    entry_policy_check=entry_policy_check,
+                    allow_opening_warmup_entry=(
+                        allow_opening_warmup_entry
+                    ),
                 )
             finally:
                 self._active_execution_context = {}
@@ -754,6 +760,8 @@ class TradeExecutionService:
         restore_engine_snapshot: Callable[[EngineSnapshot], None] | None = None,
         notify_risk_event: _NotifyRiskEvent | None = None,
         reduce_only: bool = False,
+        entry_policy_check: EntryPolicyCheck | None = None,
+        allow_opening_warmup_entry: bool = False,
     ) -> OrderStatus | None:
         if reduce_only and action not in _POSITION_REDUCING_ACTIONS:
             return self._skip_order(
@@ -792,7 +800,7 @@ class TradeExecutionService:
             if action in _ENTRY_ACTIONS and is_opening_warmup(
                 market,
                 settings.trading_open_warmup_minutes,
-            ):
+            ) and not allow_opening_warmup_entry:
                 return self._skip_order(
                     symbol,
                     action,
@@ -818,9 +826,10 @@ class TradeExecutionService:
             logger.info("allowing position-reducing %s despite risk rejection: %s", action, risk_result.reason)
 
         if action in _ENTRY_ACTIONS:
-            if self._entry_policy_check is not None:
+            policy_check = entry_policy_check or self._entry_policy_check
+            if policy_check is not None:
                 try:
-                    policy_result = self._entry_policy_check(symbol, action, market)
+                    policy_result = policy_check(symbol, action, market)
                 except Exception:
                     logger.exception(
                         "entry policy check unavailable for %s %s",

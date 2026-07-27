@@ -1384,6 +1384,85 @@ class OpeningMomentumShadowRun(Base):
     )
 
 
+class OpeningMomentumExecution(Base):
+    """Crash-safe single-slot execution of one causal opening signal."""
+
+    __tablename__ = "opening_momentum_executions"
+    __table_args__ = (
+        UniqueConstraint(
+            "session_date",
+            name="uq_opening_momentum_execution_session",
+        ),
+        Index(
+            "ix_opening_momentum_execution_status_session",
+            "status",
+            "session_date",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_date: Mapped[date] = mapped_column(Date, nullable=False)
+    algorithm_version: Mapped[str] = mapped_column(String(160), nullable=False)
+    config_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    universe_source: Mapped[str] = mapped_column(String(48), nullable=False)
+    selection_run_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(20),
+        default="ARMED",
+        nullable=False,
+    )
+    reason: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    symbol: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    signal_at: Mapped[datetime] = mapped_column(_TZDateTime, nullable=False)
+    armed_at: Mapped[datetime] = mapped_column(_TZDateTime, nullable=False)
+    entry_due_at: Mapped[datetime] = mapped_column(_TZDateTime, nullable=False)
+    entry_deadline_at: Mapped[datetime] = mapped_column(
+        _TZDateTime,
+        nullable=False,
+    )
+    requested_at: Mapped[Optional[datetime]] = mapped_column(
+        _TZDateTime,
+        nullable=True,
+    )
+    universe_size: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    market_return_bps: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    candidate_return_bps: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    excess_return_bps: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    reference_entry_price: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+    )
+    max_price_deviation_bps: Mapped[float] = mapped_column(Float, nullable=False)
+    stop_loss_pct: Mapped[float] = mapped_column(Float, nullable=False)
+    max_holding_minutes: Mapped[int] = mapped_column(Integer, nullable=False)
+    signal_context_json: Mapped[str] = mapped_column(
+        Text,
+        default="{}",
+        nullable=False,
+    )
+    submit_attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    entry_order_id: Mapped[str] = mapped_column(String(100), default="", nullable=False)
+    exit_order_id: Mapped[str] = mapped_column(String(100), default="", nullable=False)
+    entry_filled_at: Mapped[Optional[datetime]] = mapped_column(
+        _TZDateTime,
+        nullable=True,
+    )
+    entry_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    quantity: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    exit_filled_at: Mapped[Optional[datetime]] = mapped_column(
+        _TZDateTime,
+        nullable=True,
+    )
+    exit_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    net_pnl: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        _TZDateTime,
+        default=_utcnow,
+        onupdate=_utcnow,
+    )
+
+
 class AuditLog(Base):
     __tablename__ = "audit_logs"
 
