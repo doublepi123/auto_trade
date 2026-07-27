@@ -217,6 +217,25 @@ _OPENING_RANGE_STOP_ALGORITHM_VERSION = (
 _EXECUTION_EXTENSION_COHORT_VERSION = (
     "discovery-top6-positive-delta-min4-stop1-v1-20260724"
 )
+# The research execution cohort was selected from the discovery slice only,
+# but this combined policy was created after the full report was inspected.
+# Its separate identity therefore accepts only post-deployment evidence.
+_WEAK_BREADTH_INDEX_COHORT_SYMBOLS = (
+    "QCOM.US",
+    "PANW.US",
+    "RKLB.US",
+)
+_WEAK_BREADTH_INDEX_COHORT_VERSION = (
+    "forward-only-posthoc-combined-active-broad-plus-qcom-panw-rklb-"
+    "max-median0-path-efficiency-070-"
+    f"{_EXECUTION_EXTENSION_COHORT_VERSION}-20260727-v1"
+)
+_WEAK_BREADTH_INDEX_COHORT_SOURCE = (
+    "OPENING_EXECUTION_WEAK_BREADTH_INDEX_COHORT"
+)
+_WEAK_BREADTH_INDEX_COHORT_ALGORITHM_VERSION = (
+    f"{ALGORITHM_VERSION}+{_WEAK_BREADTH_INDEX_COHORT_VERSION}"
+)
 _EXECUTION_CRWD_FORWARD_COHORT_VERSION = (
     "forward-only-two-slice-positive-tail-backward-sparse-"
     "precommitted-20260727-v1"
@@ -266,6 +285,7 @@ _VariantName = Literal[
     "EXECUTION_PATH_EFFICIENCY_CHALLENGER",
     "WEAK_BREADTH_PATH_CHALLENGER",
     "WEAK_BREADTH_RELAXED_CHALLENGER",
+    "WEAK_BREADTH_INDEX_COHORT_CHALLENGER",
     "WEAK_BREADTH_WIDE_STOP_CHALLENGER",
     "ETF_REGIME_PATH_CHALLENGER",
     "ETF_REGIME_CRWD_CHALLENGER",
@@ -1535,6 +1555,17 @@ class OpeningMomentumShadowService:
             symbols=active_broad_symbols,
             selection_run_id=run.id,
         ))
+        weak_breadth_index_cohort_identity = identities_by_variant[
+            "WEAK_BREADTH_INDEX_COHORT_CHALLENGER"
+        ]
+        variants.append(replace(
+            weak_breadth_index_cohort_identity,
+            symbols=tuple(dict.fromkeys(
+                active_broad_symbols
+                + weak_breadth_index_cohort_identity.required_symbols
+            )),
+            selection_run_id=run.id,
+        ))
         for variant_name in _ETF_REGIME_VARIANTS:
             identity = identities_by_variant[
                 cast(_VariantName, variant_name)
@@ -1756,6 +1787,34 @@ class OpeningMomentumShadowService:
                 ),
                 maximum_market_return_bps=(
                     _WEAK_BREADTH_RELAXED_MAXIMUM_MARKET_RETURN_BPS
+                ),
+            ))
+            variants.append(_UniverseVariant(
+                variant="WEAK_BREADTH_INDEX_COHORT_CHALLENGER",
+                algorithm_version=(
+                    _WEAK_BREADTH_INDEX_COHORT_ALGORITHM_VERSION
+                ),
+                config_version=self._evidence_config_version(
+                    f"{execution_config.version_hash()}:"
+                    f"{_WEAK_BREADTH_INDEX_COHORT_VERSION}:"
+                    f"{_EXECUTION_PATH_EFFICIENCY_MINIMUM:.2f}:"
+                    f"{_WEAK_BREADTH_MAXIMUM_MARKET_RETURN_BPS:.1f}"
+                ),
+                universe_source=(
+                    _WEAK_BREADTH_INDEX_COHORT_SOURCE
+                ),
+                decision_config=execution_config,
+                minimum_data_coverage=(
+                    _EARLY_BROAD_MINIMUM_COVERAGE
+                ),
+                minimum_path_efficiency=(
+                    _EXECUTION_PATH_EFFICIENCY_MINIMUM
+                ),
+                maximum_market_return_bps=(
+                    _WEAK_BREADTH_MAXIMUM_MARKET_RETURN_BPS
+                ),
+                required_symbols=(
+                    _WEAK_BREADTH_INDEX_COHORT_SYMBOLS
                 ),
             ))
             variants.append(_UniverseVariant(
@@ -2340,6 +2399,10 @@ class OpeningMomentumShadowService:
             is_execution_extension = (
                 identity.variant in _EXECUTION_EXTENSION_VARIANTS
             )
+            is_weak_breadth_extension = (
+                identity.variant
+                == "WEAK_BREADTH_INDEX_COHORT_CHALLENGER"
+            )
             uses_execution_baseline = (
                 is_execution_extension
                 or identity.variant in {
@@ -2351,6 +2414,7 @@ class OpeningMomentumShadowService:
             uses_weak_breadth_baseline = (
                 identity.variant in {
                     "WEAK_BREADTH_RELAXED_CHALLENGER",
+                    "WEAK_BREADTH_INDEX_COHORT_CHALLENGER",
                     "WEAK_BREADTH_WIDE_STOP_CHALLENGER",
                     "ETF_REGIME_PATH_CHALLENGER",
                 }
@@ -2361,6 +2425,7 @@ class OpeningMomentumShadowService:
             is_extension = (
                 is_early_extension
                 or is_execution_extension
+                or is_weak_breadth_extension
                 or uses_etf_regime_baseline
             )
             identity_rows_by_date = rows_by_date[

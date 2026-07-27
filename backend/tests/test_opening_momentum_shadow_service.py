@@ -75,6 +75,7 @@ _ALL_CHALLENGER_VARIANTS = (
     "EXECUTION_PATH_EFFICIENCY_CHALLENGER",
     "WEAK_BREADTH_PATH_CHALLENGER",
     "WEAK_BREADTH_RELAXED_CHALLENGER",
+    "WEAK_BREADTH_INDEX_COHORT_CHALLENGER",
     "WEAK_BREADTH_WIDE_STOP_CHALLENGER",
     *_ETF_REGIME_VARIANTS,
     "OPENING_RANGE_STOP_CHALLENGER",
@@ -941,6 +942,7 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
             "EXECUTION_PATH_EFFICIENCY_CHALLENGER",
             "WEAK_BREADTH_PATH_CHALLENGER",
             "WEAK_BREADTH_RELAXED_CHALLENGER",
+            "WEAK_BREADTH_INDEX_COHORT_CHALLENGER",
             "WEAK_BREADTH_WIDE_STOP_CHALLENGER",
             "ETF_REGIME_PATH_CHALLENGER",
             "ETF_REGIME_CRWD_CHALLENGER",
@@ -969,6 +971,9 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
         ]
         weak_breadth_relaxed = by_variant[
             "WEAK_BREADTH_RELAXED_CHALLENGER"
+        ]
+        weak_breadth_index_cohort = by_variant[
+            "WEAK_BREADTH_INDEX_COHORT_CHALLENGER"
         ]
         weak_breadth_wide_stop = by_variant[
             "WEAK_BREADTH_WIDE_STOP_CHALLENGER"
@@ -1046,6 +1051,24 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
         assert weak_breadth_relaxed.required_symbols == ()
         assert weak_breadth_relaxed.universe_source == (
             "OPENING_EXECUTION_WEAK_BREADTH_RELAXED"
+        )
+        assert (
+            weak_breadth_index_cohort.decision_config
+            == execution.decision_config
+        )
+        assert weak_breadth_index_cohort.minimum_data_coverage == 0.95
+        assert weak_breadth_index_cohort.minimum_path_efficiency == 0.70
+        assert weak_breadth_index_cohort.maximum_market_return_bps == 0.0
+        assert weak_breadth_index_cohort.required_symbols == (
+            "QCOM.US",
+            "PANW.US",
+            "RKLB.US",
+        )
+        assert weak_breadth_index_cohort.universe_source == (
+            "OPENING_EXECUTION_WEAK_BREADTH_INDEX_COHORT"
+        )
+        assert "forward-only-posthoc-combined" in (
+            weak_breadth_index_cohort.algorithm_version
         )
         assert etf_regime.decision_config == execution.decision_config
         assert etf_regime.minimum_data_coverage == 0.95
@@ -1419,7 +1442,7 @@ def test_challengers_use_one_market_snapshot_and_close_all_variants(
         assert opened.latest.universe_source == "UNIVERSE_SELECTION"
         assert opened.latest.candidate_symbol == "S1.US"
         assert opened.latest.selection_run_id == run.id
-        assert len(opened.variants) == 28
+        assert len(opened.variants) == 29
         by_variant = {
             item.variant: item for item in opened.variants
         }
@@ -1618,14 +1641,14 @@ def test_early_broad_challenger_keeps_independent_observation_window(
         )
 
         rows = db.query(OpeningMomentumShadowRun).all()
-        assert len(rows) == 22
+        assert len(rows) == 23
         assert candles.calls == [
             *_SYMBOLS,
             *_EXTENSION_SYMBOLS,
+            "PANW.US",
             "CRWD.US",
             "TRV.US",
             "INTC.US",
-            "PANW.US",
         ]
         assert early_opened.state == "OPEN"
         assert early_opened.latest is None
@@ -1751,7 +1774,7 @@ def test_early_broad_challenger_keeps_independent_observation_window(
             now=_SESSION_OPEN + timedelta(minutes=32, seconds=10),
         )
 
-        assert db.query(OpeningMomentumShadowRun).count() == 28
+        assert db.query(OpeningMomentumShadowRun).count() == 29
         assert candles.calls == list(_SYMBOLS[:4])
         by_variant = {
             item.variant: item for item in standard_opened.variants
@@ -1772,7 +1795,7 @@ def test_early_broad_challenger_keeps_independent_observation_window(
         rows = db.query(OpeningMomentumShadowRun).all()
         assert sum(row.status == "CLOSED" for row in rows) == 5
         assert sum(row.status == "SKIPPED" for row in rows) == 4
-        assert sum(row.status == "OPEN" for row in rows) == 19
+        assert sum(row.status == "OPEN" for row in rows) == 20
         by_variant = {
             item.variant: item for item in standard_closed.variants
         }
@@ -1803,7 +1826,7 @@ def test_early_broad_challenger_keeps_independent_observation_window(
         rows = db.query(OpeningMomentumShadowRun).all()
         assert candles.calls == ["S7.US"]
         assert execution_closed.state == "OPEN"
-        assert sum(row.status == "CLOSED" for row in rows) == 17
+        assert sum(row.status == "CLOSED" for row in rows) == 18
         assert sum(row.status == "SKIPPED" for row in rows) == 4
         assert sum(row.status == "OPEN" for row in rows) == 7
         execution_by_variant = {
@@ -1829,6 +1852,12 @@ def test_early_broad_challenger_keeps_independent_observation_window(
         assert (
             execution_by_variant[
                 "WEAK_BREADTH_RELAXED_CHALLENGER"
+            ].metrics.closed_trades
+            == 1
+        )
+        assert (
+            execution_by_variant[
+                "WEAK_BREADTH_INDEX_COHORT_CHALLENGER"
             ].metrics.closed_trades
             == 1
         )
@@ -2146,6 +2175,82 @@ def test_relaxed_weak_breadth_challenger_is_forward_only_at_three_bps(
         Base.metadata.drop_all(bind=engine)
 
 
+def test_weak_breadth_index_cohort_can_displace_production_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        settings,
+        "opening_momentum_shadow_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        settings,
+        "opening_momentum_challenger_enabled",
+        True,
+    )
+    engine, db = _database()
+    try:
+        _seed_variant_universe(db)
+        _seed_active_broad_pool(db)
+        early_returns = {
+            symbol: 100.0 if symbol == "S7.US" else 0.0
+            for symbol in _SYMBOLS
+        }
+        early_returns["QCOM.US"] = 200.0
+        service = OpeningMomentumShadowService(
+            db,
+            _FakeCandles(
+                early_opening_returns_bps=early_returns,
+            ),
+            config=OpeningMomentumConfig(
+                minimum_universe_size=2,
+                minimum_excess_return_bps=0,
+            ),
+        )
+
+        status = service.tick(
+            now=_SESSION_OPEN + timedelta(minutes=5, seconds=10),
+        )
+
+        by_variant = {
+            item.variant: item for item in status.variants
+        }
+        production = by_variant["WEAK_BREADTH_PATH_CHALLENGER"]
+        cohort = by_variant[
+            "WEAK_BREADTH_INDEX_COHORT_CHALLENGER"
+        ]
+        assert production.latest is not None
+        assert production.latest.status == "OPEN"
+        assert production.latest.candidate_symbol == "S7.US"
+        assert cohort.latest is not None
+        assert cohort.latest.status == "OPEN"
+        assert cohort.latest.reason == "OPENING_LEADER"
+        assert cohort.latest.candidate_symbol == "QCOM.US"
+        assert cohort.latest.entry_price == 100.0
+        assert cohort.latest.market_return_bps == pytest.approx(0.0)
+        assert cohort.latest.universe == [
+            *_SYMBOLS,
+            "QCOM.US",
+            "PANW.US",
+            "RKLB.US",
+        ]
+        assert cohort.minimum_path_efficiency == 0.70
+        assert cohort.maximum_market_return_bps == 0.0
+        assert cohort.required_symbols == [
+            "QCOM.US",
+            "PANW.US",
+            "RKLB.US",
+        ]
+        assert cohort.comparison_baseline == (
+            "WEAK_BREADTH_PATH_CHALLENGER"
+        )
+        assert cohort.comparison is not None
+        assert cohort.comparison.minimum_policy_displacement_sessions == 3
+    finally:
+        db.close()
+        Base.metadata.drop_all(bind=engine)
+
+
 @pytest.mark.parametrize(
     (
         "benchmark_qqq_return_bps",
@@ -2295,7 +2400,7 @@ def test_breadth_challenger_skips_a_negative_market_snapshot(
         )
 
         assert candles.calls == list(_SYMBOLS[:4])
-        assert len(status.variants) == 28
+        assert len(status.variants) == 29
         by_variant = {
             item.variant: item for item in status.variants
         }

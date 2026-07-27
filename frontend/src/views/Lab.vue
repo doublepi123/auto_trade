@@ -2422,6 +2422,7 @@ function openingMomentumVariantLabel(
   if (variant === 'EXECUTION_PATH_EFFICIENCY_CHALLENGER') return '执行 + 路径效率'
   if (variant === 'WEAK_BREADTH_PATH_CHALLENGER') return '弱广度 + 路径效率'
   if (variant === 'WEAK_BREADTH_RELAXED_CHALLENGER') return '弱广度 + 5bp 上限'
+  if (variant === 'WEAK_BREADTH_INDEX_COHORT_CHALLENGER') return '弱广度 + QCOM/PANW/RKLB'
   if (variant === 'WEAK_BREADTH_WIDE_STOP_CHALLENGER') return '弱广度 + 4% 灾难止损'
   if (variant === 'ETF_REGIME_PATH_CHALLENGER') return 'ETF 状态 + 路径效率'
   if (variant === 'ETF_REGIME_CRWD_CHALLENGER') return 'ETF 状态 + CRWD'
@@ -2440,6 +2441,7 @@ function openingMomentumVariantTagType(
   if (
     variant === 'WEAK_BREADTH_PATH_CHALLENGER'
     || variant === 'WEAK_BREADTH_RELAXED_CHALLENGER'
+    || variant === 'WEAK_BREADTH_INDEX_COHORT_CHALLENGER'
     || variant === 'WEAK_BREADTH_WIDE_STOP_CHALLENGER'
     || variant.startsWith('ETF_REGIME_')
     || variant === 'OPENING_RANGE_STOP_CHALLENGER'
