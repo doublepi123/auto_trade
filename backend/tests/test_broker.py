@@ -1315,6 +1315,14 @@ class TestBrokerGateway:
         assert quote_context.calls == 2
         assert "dropped 1 invalid MIN_1 candlesticks for AAPL.US" in caplog.text
 
+        repeated = gw.get_candlesticks("AAPL.US", "MIN_1", 1)
+
+        assert [item.volume for item in repeated] == [100]
+        assert quote_context.calls == 3
+        assert caplog.text.count(
+            "dropped 1 invalid MIN_1 candlesticks for AAPL.US"
+        ) == 1
+
     def test_get_candlesticks_recovers_transient_invalid_upstream_ohlcv(
         self,
         monkeypatch,

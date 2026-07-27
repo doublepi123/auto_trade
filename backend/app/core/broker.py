@@ -54,6 +54,7 @@ _RETRYABLE_MESSAGE_MARKERS = (
 )
 
 _BBO_CACHE_MAX_AGE_SECONDS = 30.0
+_INCOMPLETE_CANDLE_FINGERPRINT_CACHE_SIZE = 256
 _POSITION_PROBE_LOCK = threading.Lock()
 _POSITION_PROBE_COMMAND = (sys.executable, "-m", "app.core.position_probe")
 _POSITION_PROBE_MAX_OUTPUT_BYTES = 1_048_576
@@ -128,12 +129,22 @@ class _IncompleteCandlestickPayload(OSError):
         period: str,
         dropped: int,
         received: int,
+        invalid_signatures: tuple[tuple[str, ...], ...],
     ) -> None:
         super().__init__(
             f"incomplete {period} candlestick payload for {symbol}: "
             f"dropped={dropped}, received={received}"
         )
         self.candles = candles
+        self.symbol = symbol
+        self.period = period
+        self.dropped = dropped
+        self.received = received
+        self.fingerprint = (
+            symbol,
+            period,
+            invalid_signatures,
+        )
 
 
 @dataclass
@@ -733,10 +744,24 @@ def _normalize_candlestick_response(
     items = response if isinstance(response, list) else [response]
     candles: list[BrokerCandle] = []
     dropped = 0
+    invalid_signatures: list[tuple[str, ...]] = []
     for item in items:
+        signature = tuple(
+            repr(getattr(item, field, None))
+            for field in (
+                "timestamp",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "turnover",
+            )
+        )
         ts = _parse_candle_timestamp(getattr(item, "timestamp", None))
         if ts is None:
             dropped += 1
+            invalid_signatures.append(signature)
             continue
         try:
             candle = BrokerCandle(
@@ -750,6 +775,7 @@ def _normalize_candlestick_response(
             )
         except (TypeError, ValueError):
             dropped += 1
+            invalid_signatures.append(signature)
             continue
         prices = (candle.open, candle.high, candle.low, candle.close)
         if (
@@ -762,23 +788,18 @@ def _normalize_candlestick_response(
             or candle.turnover < 0
         ):
             dropped += 1
+            invalid_signatures.append(signature)
             continue
         candles.append(candle)
     candles.sort(key=lambda candle: candle.timestamp)
     if dropped:
-        logger.warning(
-            "dropped %d invalid %s candlesticks for %s (received=%d)",
-            dropped,
-            period,
-            symbol,
-            len(items),
-        )
         raise _IncompleteCandlestickPayload(
             candles=candles,
             symbol=symbol,
             period=period,
             dropped=dropped,
             received=len(items),
+            invalid_signatures=tuple(invalid_signatures),
         )
     return candles
 
@@ -808,6 +829,10 @@ class BrokerGateway:
         self._depth_handler_registered = False
         self._last_trade_by_symbol: dict[str, tuple[float, str]] = {}
         self._bbo_by_symbol: dict[str, tuple[float, float, float]] = {}
+        self._persistent_incomplete_candle_fingerprints: dict[
+            tuple[str, str, tuple[tuple[str, ...], ...]],
+            None,
+        ] = {}
 
     @staticmethod
     def _best_depth_price(levels: Any, *, side: str) -> float:
@@ -975,20 +1000,64 @@ class BrokerGateway:
         *,
         op: str,
     ) -> list[BrokerCandle]:
+        last_incomplete: _IncompleteCandlestickPayload | None = None
+
+        def cache_aware_call() -> list[BrokerCandle]:
+            nonlocal last_incomplete
+            try:
+                return fn()
+            except _IncompleteCandlestickPayload as exc:
+                last_incomplete = exc
+                with self._lock:
+                    already_confirmed = (
+                        exc.fingerprint
+                        in self._persistent_incomplete_candle_fingerprints
+                    )
+                if already_confirmed:
+                    return exc.candles
+                raise
+
         try:
-            return cast(
+            result = cast(
                 list[BrokerCandle],
                 self._call_with_retry(
-                    fn,
+                    cache_aware_call,
                     op=op,
                     max_retries=settings.broker_quote_retry_max,
                     base_ms=settings.broker_retry_base_ms,
                 ),
             )
         except _IncompleteCandlestickPayload as exc:
-            # Preserve the established fail-closed behavior after the bounded
-            # retry: invalid rows stay out, while valid rows remain usable.
+            with self._lock:
+                cache = self._persistent_incomplete_candle_fingerprints
+                cache[exc.fingerprint] = None
+                while len(cache) > _INCOMPLETE_CANDLE_FINGERPRINT_CACHE_SIZE:
+                    cache.pop(next(iter(cache)))
+            logger.warning(
+                "dropped %d invalid %s candlesticks for %s "
+                "after bounded retry (received=%d)",
+                exc.dropped,
+                exc.period,
+                exc.symbol,
+                exc.received,
+            )
             return exc.candles
+        if last_incomplete is not None:
+            with self._lock:
+                already_confirmed = (
+                    last_incomplete.fingerprint
+                    in self._persistent_incomplete_candle_fingerprints
+                )
+            if not already_confirmed:
+                logger.warning(
+                    "dropped %d invalid %s candlesticks for %s; "
+                    "retry recovered the complete payload (received=%d)",
+                    last_incomplete.dropped,
+                    last_incomplete.period,
+                    last_incomplete.symbol,
+                    last_incomplete.received,
+                )
+        return result
 
     def _init_clients(self) -> None:
         with self._lock:
