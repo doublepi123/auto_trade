@@ -1,14 +1,21 @@
 from __future__ import annotations
 
+import math
+from decimal import Decimal
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.api.auth import require_api_key
+from app.core.market_calendar import is_trading_hours
 from app.database import get_db
 from app.runner import get_runner
-from app.schemas import BacktestPricePoint, BrokerCandlesResponse
+from app.schemas import (
+    BacktestPricePoint,
+    BrokerBuyingPowerResponse,
+    BrokerCandlesResponse,
+)
 
 router = APIRouter(
     prefix="/api/broker",
@@ -45,7 +52,13 @@ def get_broker_candles(
     if period not in _ALLOWED_PERIODS:
         raise HTTPException(status_code=422, detail=f"unsupported period: {period}")
 
-    runner = get_runner()
+    try:
+        runner = get_runner()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="runner is not available",
+        ) from exc
     broker = getattr(runner, "broker", None)
     if broker is None:
         raise HTTPException(status_code=503, detail="broker is not available")
@@ -73,4 +86,98 @@ def get_broker_candles(
         count=len(bars),
         bars=bars,
         csv_text=csv_text,
+    )
+
+
+@router.get(
+    "/buying-power",
+    response_model=BrokerBuyingPowerResponse,
+)
+def get_broker_buying_power(
+    symbol: str = Query(..., min_length=2, max_length=50),
+    side: Literal["BUY", "SELL"] = Query(default="BUY"),
+    price: Optional[float] = Query(
+        default=None,
+        gt=0,
+        allow_inf_nan=False,
+    ),
+) -> BrokerBuyingPowerResponse:
+    """Estimate broker-authoritative capacity without submitting an order."""
+
+    normalized_symbol = symbol.strip().upper()
+    market_suffix = normalized_symbol.rsplit(".", 1)[-1]
+    market: Literal["US", "HK"]
+    currency: Literal["USD", "HKD"]
+    if market_suffix == "US":
+        market = "US"
+        currency = "USD"
+    elif market_suffix == "HK":
+        market = "HK"
+        currency = "HKD"
+    else:
+        raise HTTPException(
+            status_code=422,
+            detail="buying-power preflight supports only .US and .HK symbols",
+        )
+
+    try:
+        runner = get_runner()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="runner is not available",
+        ) from exc
+    broker = getattr(runner, "broker", None)
+    if broker is None:
+        raise HTTPException(
+            status_code=503,
+            detail="broker is not available",
+        )
+
+    try:
+        effective_price = float(price or 0.0)
+        if effective_price <= 0.0:
+            quote = broker.get_quote(normalized_symbol)
+            effective_price = float(
+                quote.ask if side == "BUY" else quote.bid
+            )
+            if effective_price <= 0.0:
+                effective_price = float(quote.last_price)
+        if not math.isfinite(effective_price) or effective_price <= 0.0:
+            raise ValueError("broker returned no positive executable price")
+
+        price_decimal = Decimal(str(effective_price))
+        available_cash = Decimal(str(broker.get_cash(currency)))
+        max_quantity = Decimal(str(
+            broker.estimate_margin_max_quantity(
+                normalized_symbol,
+                side,
+                price_decimal,
+                currency,
+            )
+        ))
+        if (
+            not available_cash.is_finite()
+            or not max_quantity.is_finite()
+            or max_quantity < 0
+        ):
+            raise ValueError("broker returned invalid buying-power values")
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="failed to estimate broker buying power",
+        ) from exc
+
+    estimated_at = datetime.now(timezone.utc)
+    return BrokerBuyingPowerResponse(
+        symbol=normalized_symbol,
+        side=side,
+        market=market,
+        currency=currency,
+        price=effective_price,
+        available_cash=float(available_cash),
+        max_quantity=float(max_quantity),
+        buying_power=float(max_quantity * price_decimal),
+        is_trading_hours=is_trading_hours(market, estimated_at),
+        estimated_at=estimated_at,
     )

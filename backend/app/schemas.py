@@ -1773,6 +1773,20 @@ class BrokerCandlesResponse(BaseModel):
     csv_text: str
 
 
+class BrokerBuyingPowerResponse(BaseModel):
+    """Read-only broker capacity estimate for one security and limit price."""
+
+    symbol: str
+    side: Literal["BUY", "SELL"]
+    market: Literal["US", "HK"]
+    currency: Literal["USD", "HKD"]
+    price: float = Field(gt=0, allow_inf_nan=False)
+    available_cash: float = Field(allow_inf_nan=False)
+    max_quantity: float = Field(ge=0, allow_inf_nan=False)
+    buying_power: float = Field(ge=0, allow_inf_nan=False)
+    is_trading_hours: bool
+    estimated_at: datetime
+
 
 class BacktestParams(BaseModel):
     symbol: str = Field(default="", max_length=50)
