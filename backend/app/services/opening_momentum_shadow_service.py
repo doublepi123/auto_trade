@@ -127,6 +127,19 @@ _WEAK_BREADTH_WIDE_STOP_SOURCE = (
 _WEAK_BREADTH_WIDE_STOP_ALGORITHM_VERSION = (
     f"{ALGORITHM_VERSION}+{_WEAK_BREADTH_WIDE_STOP_VERSION}"
 )
+# Frozen after a three-slice study through 2026-07-24. The rule itself is
+# causal: the stop is fixed from the completed three-minute opening range and
+# capped at four percent from the delayed entry. Only later rows are forward
+# evidence.
+_OPENING_RANGE_STOP_MAX_PCT = 4.0
+_OPENING_RANGE_STOP_VERSION = (
+    "forward-only-opening-range-low-stop-cap4-"
+    "precommitted-20260727-v1"
+)
+_OPENING_RANGE_STOP_SOURCE = "OPENING_EXECUTION_RANGE_STOP"
+_OPENING_RANGE_STOP_ALGORITHM_VERSION = (
+    f"{ALGORITHM_VERSION}+{_OPENING_RANGE_STOP_VERSION}"
+)
 _EXECUTION_EXTENSION_COHORT_VERSION = (
     "discovery-top6-positive-delta-min4-stop1-v1-20260724"
 )
@@ -173,6 +186,7 @@ _VariantName = Literal[
     "EXECUTION_PATH_EFFICIENCY_CHALLENGER",
     "WEAK_BREADTH_PATH_CHALLENGER",
     "WEAK_BREADTH_WIDE_STOP_CHALLENGER",
+    "OPENING_RANGE_STOP_CHALLENGER",
     "EXECUTION_SNDK_CHALLENGER",
     "EXECUTION_INTC_CHALLENGER",
     "EXECUTION_QCOM_CHALLENGER",
@@ -230,6 +244,7 @@ class _UniverseVariant:
     minimum_data_coverage: float = 1.0
     minimum_path_efficiency: float | None = None
     maximum_market_return_bps: float | None = None
+    opening_range_stop: bool = False
     required_symbols: tuple[str, ...] = ()
     symbols: tuple[str, ...] = ()
     selection_run_id: int | None = None
@@ -255,6 +270,13 @@ class _UniverseVariant:
                     "maximum_market_return_bps must not be below the "
                     "minimum market return"
                 )
+        if (
+            self.opening_range_stop
+            and self.decision_config.stop_loss_pct is None
+        ):
+            raise ValueError(
+                "opening-range stop requires a maximum stop-loss percent"
+            )
 
 
 @dataclass(frozen=True)
@@ -552,6 +574,7 @@ class OpeningMomentumShadowService:
                 str, _OpeningPathFeatures
             ] = {}
             path_efficiency_by_symbol: dict[str, float] = {}
+            opening_range_low_by_symbol: dict[str, float] = {}
             excluded = {
                 symbol: fetch_errors[symbol]
                 for symbol in variant.symbols
@@ -591,6 +614,9 @@ class OpeningMomentumShadowService:
                 ]
                 path_efficiency_by_symbol[symbol] = (
                     self._opening_path_efficiency(signal_candles)
+                )
+                opening_range_low_by_symbol[symbol] = min(
+                    candle.low for candle in signal_candles
                 )
                 if len(signal_candles) >= 5:
                     path_features_by_symbol[symbol] = (
@@ -725,6 +751,30 @@ class OpeningMomentumShadowService:
                     > variant.maximum_market_return_bps
                 )
             )
+            opening_range_stop_loss_pct: float | None = None
+            if (
+                variant.opening_range_stop
+                and decision.action == "ENTER_LONG"
+                and decision.candidate_symbol is not None
+                and decision.entry_price is not None
+                and config.stop_loss_pct is not None
+            ):
+                opening_range_stop_loss_pct = (
+                    self._opening_range_stop_loss_pct(
+                        opening_range_low=(
+                            opening_range_low_by_symbol.get(
+                                decision.candidate_symbol
+                            )
+                        ),
+                        entry_price=decision.entry_price,
+                        maximum_stop_loss_pct=config.stop_loss_pct,
+                    )
+                )
+            opening_range_stop_invalid = (
+                variant.opening_range_stop
+                and decision.action == "ENTER_LONG"
+                and opening_range_stop_loss_pct is None
+            )
             status = (
                 "OPEN"
                 if (
@@ -733,6 +783,7 @@ class OpeningMomentumShadowService:
                     and not last_five_gate_failed
                     and not path_efficiency_gate_failed
                     and not maximum_market_return_gate_failed
+                    and not opening_range_stop_invalid
                 )
                 else "SKIPPED"
             )
@@ -746,6 +797,8 @@ class OpeningMomentumShadowService:
                 reason = "PATH_EFFICIENCY_FILTER"
             elif maximum_market_return_gate_failed:
                 reason = "MAXIMUM_MARKET_RETURN_FILTER"
+            elif opening_range_stop_invalid:
+                reason = "OPENING_RANGE_STOP_INVALID"
             else:
                 reason = decision.reason
             self.db.add(OpeningMomentumShadowRun(
@@ -824,7 +877,12 @@ class OpeningMomentumShadowService:
                     else None
                 ),
                 estimated_cost_bps=config.round_trip_cost_bps,
-                stop_loss_pct=config.stop_loss_pct,
+                stop_loss_pct=(
+                    opening_range_stop_loss_pct
+                    if variant.opening_range_stop
+                    and status == "OPEN"
+                    else config.stop_loss_pct
+                ),
             ))
 
     def get_status(self) -> OpeningMomentumShadowStatusResponse:
@@ -921,6 +979,9 @@ class OpeningMomentumShadowService:
                     ),
                     minimum_data_coverage=(
                         identity.minimum_data_coverage
+                    ),
+                    opening_range_stop=(
+                        identity.opening_range_stop
                     ),
                     required_symbols=identity.required_symbols,
                 )
@@ -1125,6 +1186,26 @@ class OpeningMomentumShadowService:
             symbols=active_broad_symbols,
             selection_run_id=run.id,
         ))
+        opening_range_stop_identity = identities_by_variant[
+            "OPENING_RANGE_STOP_CHALLENGER"
+        ]
+        variants.append(_UniverseVariant(
+            variant=opening_range_stop_identity.variant,
+            algorithm_version=(
+                opening_range_stop_identity.algorithm_version
+            ),
+            config_version=opening_range_stop_identity.config_version,
+            universe_source=opening_range_stop_identity.universe_source,
+            decision_config=(
+                opening_range_stop_identity.decision_config
+            ),
+            minimum_data_coverage=(
+                opening_range_stop_identity.minimum_data_coverage
+            ),
+            opening_range_stop=True,
+            symbols=active_broad_symbols,
+            selection_run_id=run.id,
+        ))
         for spec in _EXECUTION_EXTENSION_SPECS:
             identity = identities_by_variant[spec.variant]
             variants.append(_UniverseVariant(
@@ -1207,6 +1288,10 @@ class OpeningMomentumShadowService:
             weak_breadth_wide_stop_config = replace(
                 execution_config,
                 stop_loss_pct=_WEAK_BREADTH_WIDE_STOP_PCT,
+            )
+            opening_range_stop_config = replace(
+                execution_config,
+                stop_loss_pct=_OPENING_RANGE_STOP_MAX_PCT,
             )
             variants.append(_UniverseVariant(
                 variant="EARLY_BROAD_CHALLENGER",
@@ -1319,6 +1404,22 @@ class OpeningMomentumShadowService:
                 maximum_market_return_bps=(
                     _WEAK_BREADTH_MAXIMUM_MARKET_RETURN_BPS
                 ),
+            ))
+            variants.append(_UniverseVariant(
+                variant="OPENING_RANGE_STOP_CHALLENGER",
+                algorithm_version=(
+                    _OPENING_RANGE_STOP_ALGORITHM_VERSION
+                ),
+                config_version=self._evidence_config_version(
+                    f"{opening_range_stop_config.version_hash()}:"
+                    f"{_OPENING_RANGE_STOP_VERSION}"
+                ),
+                universe_source=_OPENING_RANGE_STOP_SOURCE,
+                decision_config=opening_range_stop_config,
+                minimum_data_coverage=(
+                    _EARLY_BROAD_MINIMUM_COVERAGE
+                ),
+                opening_range_stop=True,
             ))
             for spec in _EXECUTION_EXTENSION_SPECS:
                 variants.append(_UniverseVariant(
@@ -1781,6 +1882,7 @@ class OpeningMomentumShadowService:
                 or identity.variant in {
                     "EXECUTION_PATH_EFFICIENCY_CHALLENGER",
                     "WEAK_BREADTH_PATH_CHALLENGER",
+                    "OPENING_RANGE_STOP_CHALLENGER",
                 }
             )
             uses_weak_breadth_baseline = (
@@ -2269,6 +2371,29 @@ class OpeningMomentumShadowService:
             1.0,
             abs(signal_close - opening_price) / path_distance,
         )
+
+    @staticmethod
+    def _opening_range_stop_loss_pct(
+        *,
+        opening_range_low: float | None,
+        entry_price: float,
+        maximum_stop_loss_pct: float,
+    ) -> float | None:
+        if opening_range_low is None:
+            return None
+        values = (opening_range_low, entry_price, maximum_stop_loss_pct)
+        if any(
+            not math.isfinite(value) or value <= 0
+            for value in values
+        ):
+            return None
+        maximum_stop_price = entry_price * (
+            1 - maximum_stop_loss_pct / 100
+        )
+        stop_price = max(opening_range_low, maximum_stop_price)
+        if stop_price >= entry_price:
+            return None
+        return (1 - stop_price / entry_price) * 100
 
     @staticmethod
     def _coerce_candles(values: list[Any]) -> list[_Candle]:

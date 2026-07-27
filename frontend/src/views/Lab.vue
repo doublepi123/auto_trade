@@ -497,9 +497,14 @@
                   </el-table-column>
                   <el-table-column label="止损" min-width="80">
                     <template #default="{ row }">
-                      {{ row.stop_loss_pct == null
-                        ? '-'
-                        : formatPercent(row.stop_loss_pct / 100) }}
+                      <template v-if="row.variant === 'OPENING_RANGE_STOP_CHALLENGER'">
+                        区间低点 / 4%上限
+                      </template>
+                      <template v-else>
+                        {{ row.stop_loss_pct == null
+                          ? '-'
+                          : formatPercent(row.stop_loss_pct / 100) }}
+                      </template>
                     </template>
                   </el-table-column>
                   <el-table-column label="当日候选" min-width="110">
@@ -2221,6 +2226,7 @@ function openingMomentumVariantLabel(
   if (variant === 'EXECUTION_PATH_EFFICIENCY_CHALLENGER') return '执行 + 路径效率'
   if (variant === 'WEAK_BREADTH_PATH_CHALLENGER') return '弱广度 + 路径效率'
   if (variant === 'WEAK_BREADTH_WIDE_STOP_CHALLENGER') return '弱广度 + 4% 灾难止损'
+  if (variant === 'OPENING_RANGE_STOP_CHALLENGER') return '开盘区间止损'
   const execution = /^EXECUTION_(.+)_CHALLENGER$/.exec(variant)
   if (execution) return `执行 + ${execution[1]}`
   const extension = /^EARLY_(.+)_CHALLENGER$/.exec(variant)
@@ -2234,6 +2240,7 @@ function openingMomentumVariantTagType(
   if (
     variant === 'WEAK_BREADTH_PATH_CHALLENGER'
     || variant === 'WEAK_BREADTH_WIDE_STOP_CHALLENGER'
+    || variant === 'OPENING_RANGE_STOP_CHALLENGER'
   ) return 'warning'
   if (variant.startsWith('EXECUTION_')) return 'success'
   if (variant.startsWith('EARLY_')) return 'warning'

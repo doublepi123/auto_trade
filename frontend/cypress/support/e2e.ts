@@ -2673,6 +2673,57 @@ Cypress.Commands.add('stubApi', () => {
           },
         },
         {
+          variant: 'OPENING_RANGE_STOP_CHALLENGER',
+          universe_source: 'OPENING_EXECUTION_RANGE_STOP',
+          algorithm_version: (
+            'cross-sectional-opening-momentum-v3-preopen-frozen-universe+'
+            + 'forward-only-opening-range-low-stop-cap4-'
+            + 'precommitted-20260727-v1'
+          ),
+          config_version: 'opening-range-stop-stub-v1',
+          signal_minutes: 3,
+          minimum_market_return_bps: -50,
+          minimum_candidate_return_bps: 50,
+          minimum_excess_return_bps: 25,
+          minimum_data_coverage: 0.95,
+          required_symbols: [],
+          holding_minutes: 60,
+          stop_loss_pct: 4,
+          comparison_sessions: 4,
+          comparison_baseline: 'EXECUTION_BROAD_CHALLENGER',
+          latest: {
+            candidate_symbol: 'PANW.US',
+            maximum_adverse_excursion_bps: -98,
+            maximum_favorable_excursion_bps: 158,
+          },
+          metrics: {
+            observed_sessions: 4,
+            skipped_sessions: 1,
+            signals: 3,
+            open_trades: 0,
+            closed_trades: 3,
+            wins: 2,
+            win_rate: 0.6667,
+            mean_net_return_bps: 43,
+            cumulative_net_return_bps: 129,
+            max_drawdown_bps: 37,
+            profit_factor: 2.5,
+          },
+          comparison: {
+            resolved_sessions: 4,
+            cumulative_delta_bps: 15,
+            mean_delta_bps: 3.75,
+            outperformance_rate: 0.5,
+            confidence_lower_bps: -11,
+            confidence_upper_bps: 20,
+            max_drawdown_delta_bps: -3,
+            risk_guard_passed: true,
+            minimum_promotion_sessions: 20,
+            promotion_ready: false,
+            recommendation: 'COLLECTING',
+          },
+        },
+        {
           variant: 'EXECUTION_SNDK_CHALLENGER',
           universe_source: 'OPENING_EXECUTION_SNDK',
           algorithm_version: (

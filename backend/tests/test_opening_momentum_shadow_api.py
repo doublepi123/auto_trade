@@ -112,8 +112,11 @@ class TestOpeningMomentumShadowApi:
         weak_breadth_wide_stop = variants[
             "WEAK_BREADTH_WIDE_STOP_CHALLENGER"
         ]
+        opening_range_stop = variants[
+            "OPENING_RANGE_STOP_CHALLENGER"
+        ]
         execution_sndk = variants["EXECUTION_SNDK_CHALLENGER"]
-        assert len(variants) == 22
+        assert len(variants) == 23
         assert early["universe_source"] == "OPENING_EARLY_BROAD"
         assert early["signal_minutes"] == 3
         assert early["minimum_market_return_bps"] == -50.0
@@ -218,6 +221,20 @@ class TestOpeningMomentumShadowApi:
             "WEAK_BREADTH_PATH_CHALLENGER"
         )
         assert weak_breadth_wide_stop["comparison"] is not None
+        assert opening_range_stop["universe_source"] == (
+            "OPENING_EXECUTION_RANGE_STOP"
+        )
+        assert opening_range_stop["signal_minutes"] == 3
+        assert opening_range_stop["holding_minutes"] == 60
+        assert opening_range_stop["stop_loss_pct"] == 4.0
+        assert opening_range_stop["minimum_data_coverage"] == 0.95
+        assert opening_range_stop["minimum_path_efficiency"] is None
+        assert opening_range_stop["maximum_market_return_bps"] is None
+        assert opening_range_stop["required_symbols"] == []
+        assert opening_range_stop["comparison_baseline"] == (
+            "EXECUTION_BROAD_CHALLENGER"
+        )
+        assert opening_range_stop["comparison"] is not None
         assert execution_sndk["required_symbols"] == ["SNDK.US"]
         assert (
             execution_sndk["comparison_baseline"]
