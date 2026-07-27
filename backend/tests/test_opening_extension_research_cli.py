@@ -288,12 +288,20 @@ def test_cache_round_trip_and_scope_mismatch(tmp_path: Path) -> None:
         end_date=session_date,
         retained_minutes_after_open=34,
     ) == bars
-    assert _load_cache(
-        path,
-        start_date=session_date,
-        end_date=session_date,
-        retained_minutes_after_open=36,
-    ) == {}
+    with pytest.raises(ValueError, match="covers only 35 minutes"):
+        _load_cache(
+            path,
+            start_date=session_date,
+            end_date=session_date,
+            retained_minutes_after_open=36,
+        )
+    with pytest.raises(ValueError, match="metadata does not match"):
+        _load_cache(
+            path,
+            start_date=session_date - timedelta(days=1),
+            end_date=session_date,
+            retained_minutes_after_open=35,
+        )
 
 
 def _research_sessions(

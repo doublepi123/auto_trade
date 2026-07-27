@@ -158,3 +158,41 @@ def test_cli_replays_existing_cache_without_broker(
     assert stored["data_scope"]["resolved_session_count"] == 2
     assert stored["report"]["source_sessions"] == 2
     assert stored["research_design"]["automatic_promotion_allowed"] is False
+
+
+def test_cli_refuses_to_overwrite_incompatible_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = date(2026, 7, 6)
+    second = date(2026, 7, 7)
+    cache_path = tmp_path / "opening.json.gz"
+    output_path = tmp_path / "report.json"
+    _save_cache(
+        cache_path,
+        _bars_by_symbol(first, second),
+        start_date=first,
+        end_date=second,
+        retained_minutes_after_open=63,
+    )
+    original_cache = cache_path.read_bytes()
+    monkeypatch.setattr(sys, "argv", [
+        "opening_policy_research",
+        "--start-date",
+        first.isoformat(),
+        "--end-date",
+        second.isoformat(),
+        "--baseline-symbols",
+        ",".join(_SYMBOLS),
+        "--cache-path",
+        str(cache_path),
+        "--output",
+        str(output_path),
+    ])
+
+    with pytest.raises(SystemExit) as exc_info:
+        main()
+
+    assert exc_info.value.code == 2
+    assert cache_path.read_bytes() == original_cache
+    assert not output_path.exists()

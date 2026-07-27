@@ -400,13 +400,22 @@ def _load_cache(
         "end_date": end_date.isoformat(),
     }
     if any(raw.get(key) != value for key, value in expected_metadata.items()):
-        return {}
+        raise ValueError(
+            "opening research cache metadata does not match the requested "
+            "scope; choose a different cache path"
+        )
     cached_retained_minutes = raw.get("retained_minutes_after_open")
-    if (
-        not isinstance(cached_retained_minutes, int)
-        or cached_retained_minutes < retained_minutes_after_open
-    ):
-        return {}
+    if not isinstance(cached_retained_minutes, int):
+        raise ValueError(
+            "opening research cache retained-minute metadata is invalid"
+        )
+    if cached_retained_minutes < retained_minutes_after_open:
+        raise ValueError(
+            "opening research cache covers only "
+            f"{cached_retained_minutes} minutes after open but "
+            f"{retained_minutes_after_open} are required; choose a "
+            "different cache path"
+        )
     raw_symbols = raw.get("bars_by_symbol")
     if not isinstance(raw_symbols, dict):
         raise ValueError("opening research cache has no symbol map")
