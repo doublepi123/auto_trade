@@ -217,13 +217,15 @@ class _RunClaim:
 @dataclass(frozen=True)
 class ObservationPoolOverrides:
     already_observed_symbols: frozenset[str]
+    durable_observed_symbols: frozenset[str]
+    exploration_excluded_symbols: frozenset[str]
     unobservable_symbols: frozenset[str]
 
 
 def observation_pool_overrides(
     db: Session,
 ) -> ObservationPoolOverrides:
-    """Return durable observers and explicit operator shadow opt-outs."""
+    """Separate durable observers from the exploration allocation inputs."""
     with db.no_autoflush:
         strategy = (
             db.query(StrategyConfig)
@@ -238,11 +240,21 @@ def observation_pool_overrides(
             .all()
         )
 
-    already_observed = {
+    durable_observed = {
         row.symbol.strip().upper()
         for row in unmanaged
         if row.enabled and row.symbol.strip()
     }
+    already_observed = {
+        row.symbol.strip().upper()
+        for row in unmanaged
+        if (
+            row.enabled
+            and row.opening_momentum_execution_eligible
+            and row.symbol.strip()
+        )
+    }
+    observation_only = durable_observed - already_observed
     unobservable = {
         row.symbol.strip().upper()
         for row in unmanaged
@@ -253,9 +265,15 @@ def observation_pool_overrides(
         # The main runner observes its trading target independently of the
         # per-symbol shadow toggle.
         already_observed.add(primary_symbol)
+        durable_observed.add(primary_symbol)
+        observation_only.discard(primary_symbol)
         unobservable.discard(primary_symbol)
     return ObservationPoolOverrides(
         already_observed_symbols=frozenset(already_observed),
+        durable_observed_symbols=frozenset(durable_observed),
+        exploration_excluded_symbols=frozenset(
+            unobservable | observation_only
+        ),
         unobservable_symbols=frozenset(unobservable),
     )
 
@@ -2299,7 +2317,7 @@ class UniverseSelectionService:
                 observation_overrides.already_observed_symbols
             ),
             unobservable_symbols=(
-                observation_overrides.unobservable_symbols
+                observation_overrides.exploration_excluded_symbols
             ),
             minimum_peer_dollar_volume=(
                 minimum_peer_observation_dollar_volume(
@@ -2330,7 +2348,12 @@ class UniverseSelectionService:
                 reason="watchlist application disabled",
             )
         selected = [item for item in items if item.selected]
-        observed = [*selected, *exploration]
+        observed_symbols = {
+            item.symbol for item in (*selected, *exploration)
+        } | set(observation_overrides.durable_observed_symbols)
+        observed = [
+            item for item in items if item.symbol in observed_symbols
+        ]
         added, removed, retained = self._reconcile_watchlist(observed)
         shadow_enabled, shadow_disabled, shadow_failures = (
             self._sync_observation_shadows(
@@ -2338,7 +2361,7 @@ class UniverseSelectionService:
                     {item.symbol for item in observed}
                     | set(rotation_observation_symbols)
                     | set(
-                        observation_overrides.already_observed_symbols
+                        observation_overrides.durable_observed_symbols
                     )
                 ),
             )

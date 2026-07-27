@@ -738,9 +738,21 @@ def test_observation_pool_overrides_separate_durable_and_opt_out() -> None:
         db.add_all(
             [
                 StrategyV2ShadowConfig(
+                    symbol="NVDA.US",
+                    enabled=True,
+                    universe_managed=False,
+                    opening_momentum_execution_eligible=False,
+                ),
+                StrategyV2ShadowConfig(
                     symbol="MRVL.US",
                     enabled=True,
                     universe_managed=False,
+                ),
+                StrategyV2ShadowConfig(
+                    symbol="CRWD.US",
+                    enabled=True,
+                    universe_managed=False,
+                    opening_momentum_execution_eligible=False,
                 ),
                 StrategyV2ShadowConfig(
                     symbol="TER.US",
@@ -761,7 +773,116 @@ def test_observation_pool_overrides_separate_durable_and_opt_out() -> None:
         assert overrides.already_observed_symbols == frozenset(
             {"NVDA.US", "MRVL.US"}
         )
+        assert overrides.durable_observed_symbols == frozenset(
+            {"NVDA.US", "MRVL.US", "CRWD.US"}
+        )
+        assert overrides.exploration_excluded_symbols == frozenset(
+            {"CRWD.US", "TER.US"}
+        )
         assert overrides.unobservable_symbols == frozenset({"TER.US"})
+    finally:
+        db.close()
+
+
+def test_observation_only_symbol_does_not_spend_exploration_budget() -> None:
+    db = _db()
+    try:
+        run = UniverseSelectionRun(
+            as_of_date=_NOW.date(),
+            algorithm_version="selector-v1",
+            source_version="catalog-v1",
+            status="COMPLETE",
+            candidate_count=3,
+            evaluable_count=3,
+            selected_count=1,
+            coverage_ratio=1.0,
+            parameters_json="{}",
+            started_at=_NOW - timedelta(hours=1),
+            completed_at=_NOW,
+            created_at=_NOW - timedelta(hours=1),
+        )
+        db.add(run)
+        db.flush()
+        db.add_all(
+            [
+                UniverseSelectionCandidate(
+                    run_id=run.id,
+                    symbol="AMD.US",
+                    market="US",
+                    alias="AMD",
+                    sector="Semiconductors",
+                    selected=True,
+                    rank=1,
+                    score=95.0,
+                    metrics_json="{}",
+                    exclusion_reasons_json="[]",
+                    created_at=_NOW,
+                ),
+                UniverseSelectionCandidate(
+                    run_id=run.id,
+                    symbol="CRWD.US",
+                    market="US",
+                    alias="CrowdStrike",
+                    sector="Software",
+                    selected=False,
+                    score=94.0,
+                    metrics_json="{}",
+                    exclusion_reasons_json='["SECTOR_CAP"]',
+                    created_at=_NOW,
+                ),
+                UniverseSelectionCandidate(
+                    run_id=run.id,
+                    symbol="MSTR.US",
+                    market="US",
+                    alias="Strategy",
+                    sector="Software",
+                    selected=False,
+                    score=90.0,
+                    metrics_json="{}",
+                    exclusion_reasons_json='["SECTOR_CAP"]',
+                    created_at=_NOW,
+                ),
+                StrategyV2ShadowConfig(
+                    symbol="CRWD.US",
+                    enabled=True,
+                    universe_managed=False,
+                    opening_momentum_execution_eligible=False,
+                ),
+            ]
+        )
+        db.commit()
+
+        service = UniverseSelectionService(
+            db,
+            _FakeBroker(),
+            catalog=_CATALOG,
+            config=_config(),
+            minimum_evaluable_ratio=0.5,
+            minimum_residency_days=1,
+            exploration_max_symbols=1,
+            exploration_top_score_challengers=0,
+            apply_to_watchlist=True,
+            enable_shadow=True,
+            now=_NOW,
+        )
+        result = service._result_for_existing(
+            run,
+            service.items_for_run(run.id),
+            should_apply=True,
+        )
+
+        assert result.exploration_symbols == ("MSTR.US",)
+        assert {
+            row.symbol for row in db.query(WatchlistItem).all()
+        } == {"AMD.US", "CRWD.US", "MSTR.US"}
+        crwd = (
+            db.query(StrategyV2ShadowConfig)
+            .filter(StrategyV2ShadowConfig.symbol == "CRWD.US")
+            .one()
+        )
+        assert crwd.enabled is True
+        assert crwd.universe_managed is False
+        assert crwd.opening_momentum_execution_eligible is False
     finally:
         db.close()
 

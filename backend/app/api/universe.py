@@ -99,7 +99,7 @@ def _run_response(
                     observation_overrides.already_observed_symbols
                 ),
                 unobservable_symbols=(
-                    observation_overrides.unobservable_symbols
+                    observation_overrides.exploration_excluded_symbols
                 ),
                 minimum_peer_dollar_volume=(
                     minimum_peer_observation_dollar_volume(
