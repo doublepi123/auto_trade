@@ -281,6 +281,21 @@ _WEAK_BREADTH_SPARSE_INDEX_COHORT_ALGORITHM_VERSION = (
     f"{ALGORITHM_VERSION}+"
     f"{_WEAK_BREADTH_SPARSE_INDEX_COHORT_VERSION}"
 )
+# A baseline-anchored discovery-only ablation selected MRVL as the best single
+# exclusion after 30bp cost, tail, drawdown, and four-displacement gates. Its
+# historical holdout was negative, so the live pool stays unchanged and only
+# strictly later sessions may inform this shadow comparison.
+_WEAK_BREADTH_MRVL_EXCLUSION_SYMBOLS = ("MRVL.US",)
+_WEAK_BREADTH_MRVL_EXCLUSION_VERSION = (
+    "forward-only-discovery-ablation-active-broad-minus-mrvl-"
+    "cost30-tail-dd-min4-holdout-contradicted-20260728-v1"
+)
+_WEAK_BREADTH_MRVL_EXCLUSION_SOURCE = (
+    "OPENING_EXECUTION_WEAK_BREADTH_EX_MRVL"
+)
+_WEAK_BREADTH_MRVL_EXCLUSION_ALGORITHM_VERSION = (
+    f"{ALGORITHM_VERSION}+{_WEAK_BREADTH_MRVL_EXCLUSION_VERSION}"
+)
 _EXECUTION_CRWD_FORWARD_COHORT_VERSION = (
     "forward-only-two-slice-positive-tail-backward-sparse-"
     "precommitted-20260727-v1"
@@ -333,6 +348,7 @@ _VariantName = Literal[
     "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER",
     "WEAK_BREADTH_INDEX_COHORT_CHALLENGER",
     "WEAK_BREADTH_SPARSE_INDEX_COHORT_CHALLENGER",
+    "WEAK_BREADTH_MRVL_EXCLUSION_CHALLENGER",
     "WEAK_BREADTH_WIDE_STOP_CHALLENGER",
     "ETF_REGIME_PATH_CHALLENGER",
     "ETF_REGIME_CRWD_CHALLENGER",
@@ -426,11 +442,16 @@ class _UniverseVariant:
     maximum_benchmark_average_return_bps: float | None = None
     opening_range_stop: bool = False
     required_symbols: tuple[str, ...] = ()
+    excluded_symbols: tuple[str, ...] = ()
     forward_evidence_start_date: date | None = None
     symbols: tuple[str, ...] = ()
     selection_run_id: int | None = None
 
     def __post_init__(self) -> None:
+        if set(self.required_symbols).intersection(self.excluded_symbols):
+            raise ValueError(
+                "required_symbols and excluded_symbols must not overlap"
+            )
         if self.minimum_path_efficiency is not None and (
             not math.isfinite(self.minimum_path_efficiency)
             or not 0 <= self.minimum_path_efficiency <= 1
@@ -1594,24 +1615,7 @@ class OpeningMomentumShadowService:
         ).first()
         if run is None:
             return [
-                _UniverseVariant(
-                    variant=identity.variant,
-                    algorithm_version=identity.algorithm_version,
-                    config_version=identity.config_version,
-                    universe_source="NONE",
-                    decision_config=identity.decision_config,
-                    signal_model=identity.signal_model,
-                    require_nonnegative_last_five=(
-                        identity.require_nonnegative_last_five
-                    ),
-                    minimum_data_coverage=(
-                        identity.minimum_data_coverage
-                    ),
-                    opening_range_stop=(
-                        identity.opening_range_stop
-                    ),
-                    required_symbols=identity.required_symbols,
-                )
+                replace(identity, universe_source="NONE")
                 for identity in identities
             ]
         candidates = (
@@ -1782,6 +1786,21 @@ class OpeningMomentumShadowService:
                 weak_breadth_path_identity.maximum_market_return_bps
             ),
             symbols=active_broad_symbols,
+            selection_run_id=run.id,
+        ))
+        weak_breadth_mrvl_exclusion_identity = identities_by_variant[
+            "WEAK_BREADTH_MRVL_EXCLUSION_CHALLENGER"
+        ]
+        excluded_symbols = set(
+            weak_breadth_mrvl_exclusion_identity.excluded_symbols
+        )
+        variants.append(replace(
+            weak_breadth_mrvl_exclusion_identity,
+            symbols=tuple(
+                symbol
+                for symbol in active_broad_symbols
+                if symbol not in excluded_symbols
+            ),
             selection_run_id=run.id,
         ))
         weak_breadth_relaxed_identity = identities_by_variant[
@@ -2025,6 +2044,9 @@ class OpeningMomentumShadowService:
             ))
             variants.append(
                 self._weak_breadth_path_variant_identity()
+            )
+            variants.append(
+                self._weak_breadth_mrvl_exclusion_variant_identity()
             )
             variants.append(_UniverseVariant(
                 variant="WEAK_BREADTH_RELAXED_CHALLENGER",
@@ -2383,6 +2405,37 @@ class OpeningMomentumShadowService:
             minimum_path_efficiency=_EXECUTION_PATH_EFFICIENCY_MINIMUM,
             maximum_market_return_bps=(
                 _WEAK_BREADTH_MAXIMUM_MARKET_RETURN_BPS
+            ),
+        )
+
+    def _weak_breadth_mrvl_exclusion_variant_identity(
+        self,
+    ) -> _UniverseVariant:
+        config = self._execution_broad_config()
+        return _UniverseVariant(
+            variant="WEAK_BREADTH_MRVL_EXCLUSION_CHALLENGER",
+            algorithm_version=(
+                _WEAK_BREADTH_MRVL_EXCLUSION_ALGORITHM_VERSION
+            ),
+            config_version=self._evidence_config_version(
+                f"{config.version_hash()}:"
+                f"{_WEAK_BREADTH_MRVL_EXCLUSION_VERSION}:"
+                f"{_EXECUTION_PATH_EFFICIENCY_MINIMUM:.2f}:"
+                f"{_WEAK_BREADTH_MAXIMUM_MARKET_RETURN_BPS:.1f}:"
+                f"{','.join(_WEAK_BREADTH_MRVL_EXCLUSION_SYMBOLS)}"
+            ),
+            universe_source=_WEAK_BREADTH_MRVL_EXCLUSION_SOURCE,
+            decision_config=config,
+            minimum_data_coverage=_EARLY_BROAD_MINIMUM_COVERAGE,
+            minimum_path_efficiency=(
+                _EXECUTION_PATH_EFFICIENCY_MINIMUM
+            ),
+            maximum_market_return_bps=(
+                _WEAK_BREADTH_MAXIMUM_MARKET_RETURN_BPS
+            ),
+            excluded_symbols=_WEAK_BREADTH_MRVL_EXCLUSION_SYMBOLS,
+            forward_evidence_start_date=(
+                _POST_20260727_FORWARD_EVIDENCE_START_DATE
             ),
         )
 
@@ -2775,6 +2828,7 @@ class OpeningMomentumShadowService:
                     "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER",
                     "WEAK_BREADTH_INDEX_COHORT_CHALLENGER",
                     "WEAK_BREADTH_SPARSE_INDEX_COHORT_CHALLENGER",
+                    "WEAK_BREADTH_MRVL_EXCLUSION_CHALLENGER",
                     "WEAK_BREADTH_WIDE_STOP_CHALLENGER",
                     "ETF_REGIME_PATH_CHALLENGER",
                 }
@@ -2949,6 +3003,9 @@ class OpeningMomentumShadowService:
                     ),
                     required_symbols=list(
                         identity.required_symbols
+                    ),
+                    excluded_symbols=list(
+                        identity.excluded_symbols
                     ),
                     holding_minutes=(
                         identity.decision_config.holding_minutes

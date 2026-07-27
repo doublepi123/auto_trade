@@ -13,6 +13,7 @@ from app.cli.opening_policy_research import (
     _build_policy_sessions,
     _cohort_subset_selection_payload,
     _default_policy_specs,
+    _exclusion_subset_selection_payload,
     main,
 )
 from app.core.market_calendar import get_session
@@ -277,6 +278,61 @@ def test_cohort_subset_selection_uses_discovery_not_holdout() -> None:
     assert holdout["cumulative_delta_bps"] == -400.0
 
 
+def test_exclusion_subset_selection_uses_explicit_exclusion_keys() -> None:
+    first = date(2026, 1, 2)
+    baseline = tuple(
+        OpeningPolicySession(
+            session_date=first + timedelta(days=index),
+            baseline_signal=True,
+            gross_return_bps=14.0,
+            market_return_bps=-1.0,
+            candidate_path_efficiency=0.8,
+            candidate_symbol="REMOVE.US",
+        )
+        for index in range(10)
+    )
+    reduced = tuple(
+        OpeningPolicySession(
+            session_date=first + timedelta(days=index),
+            baseline_signal=True,
+            gross_return_bps=(
+                114.0 if index < 4 else (-86.0 if index >= 6 else 14.0)
+            ),
+            market_return_bps=-1.0,
+            candidate_path_efficiency=0.8,
+            candidate_symbol="NEXT.US",
+        )
+        for index in range(10)
+    )
+    policy = OpeningPolicySpec(
+        PRODUCTION_POLICY_NAME,
+        minimum_path_efficiency=0.7,
+        maximum_market_return_bps=0.0,
+    )
+    reports = tuple(
+        evaluate_opening_policy_cohort(
+            baseline,
+            reduced,
+            policy=policy,
+            cohort_symbols=("REMOVE.US",),
+            round_trip_cost_bps=cost,
+        )
+        for cost in (14.0, 20.0, 30.0)
+    )
+
+    payload = _exclusion_subset_selection_payload({
+        ("REMOVE.US",): reports,
+    })
+
+    assert payload["selection_uses_holdout"] is False
+    assert payload["status"] == "SHADOW_CANDIDATE"
+    assert payload["selected_excluded_symbols"] == ["REMOVE.US"]
+    assert "selected_symbols" not in payload
+    selected = cast(dict[str, object], payload["selected"])
+    assert selected["excluded_symbols"] == ["REMOVE.US"]
+    assert "symbols" not in selected
+
+
 def test_cli_replays_existing_cache_without_broker(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -376,6 +432,62 @@ def test_cli_emits_joint_cohort_diagnostic(
     assert subset["evaluated_subset_count"] == 1
     assert subset["status"] == "REJECTED"
     assert stored["data_scope"]["cohort_subset_evaluated_count"] == 1
+
+
+def test_cli_emits_joint_exclusion_diagnostic(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    first = date(2026, 7, 6)
+    second = date(2026, 7, 7)
+    cache_path = tmp_path / "opening.json.gz"
+    output_path = tmp_path / "exclusion-report.json"
+    baseline_symbols = (*_SYMBOLS, _COHORT_SYMBOL)
+    _save_cache(
+        cache_path,
+        _bars_by_symbol_with_cohort(first, second),
+        start_date=first,
+        end_date=second,
+        retained_minutes_after_open=64,
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "opening_policy_research",
+        "--start-date",
+        first.isoformat(),
+        "--end-date",
+        second.isoformat(),
+        "--baseline-symbols",
+        ",".join(baseline_symbols),
+        "--exclusion-symbols",
+        _COHORT_SYMBOL,
+        "--select-exclusion-subset",
+        "--cache-path",
+        str(cache_path),
+        "--output",
+        str(output_path),
+    ])
+
+    assert main() == 0
+
+    stdout = json.loads(capsys.readouterr().out)
+    stored = json.loads(output_path.read_text(encoding="utf-8"))
+    assert stdout["exclusion"]["excluded_symbols"] == [_COHORT_SYMBOL]
+    assert stdout["exclusion"]["paired_sessions"] == 2
+    assert stdout["exclusion"]["discovery_end_date"] == first.isoformat()
+    assert len(stdout["exclusion_cost_stress"]) == 3
+    subset = stdout["exclusion_subset_selection"]
+    assert subset["selection_uses_holdout"] is False
+    assert subset["evaluated_subset_count"] == 1
+    assert stored["exclusion_diagnostic"]["comparison_mode"] == (
+        "BASELINE_MINUS_EXCLUSIONS"
+    )
+    assert stored["exclusion_diagnostic"]["diagnostic_only"] is True
+    assert stored["data_scope"]["exclusion_resolved_session_count"] == 2
+    assert stored["data_scope"]["exclusion_subset_evaluated_count"] == 1
+    assert stored["research_design"][
+        "exclusion_subset_selection_uses_holdout"
+    ] is False
 
 
 def test_cli_emits_paired_holding_horizon_rejections(

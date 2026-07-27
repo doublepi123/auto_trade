@@ -78,6 +78,7 @@ _ALL_CHALLENGER_VARIANTS = (
     "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER",
     "WEAK_BREADTH_INDEX_COHORT_CHALLENGER",
     "WEAK_BREADTH_SPARSE_INDEX_COHORT_CHALLENGER",
+    "WEAK_BREADTH_MRVL_EXCLUSION_CHALLENGER",
     "WEAK_BREADTH_WIDE_STOP_CHALLENGER",
     *_ETF_REGIME_VARIANTS,
     "OPENING_RANGE_STOP_CHALLENGER",
@@ -499,6 +500,32 @@ def _seed_active_broad_pool(db: Session) -> None:
     db.commit()
 
 
+def test_universe_free_status_preserves_forward_variant_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        settings,
+        "opening_momentum_challenger_enabled",
+        True,
+    )
+    engine, db = _database()
+    try:
+        variants = OpeningMomentumShadowService(db)._universe_variants()
+        exclusion = {
+            item.variant: item for item in variants
+        }["WEAK_BREADTH_MRVL_EXCLUSION_CHALLENGER"]
+
+        assert exclusion.universe_source == "NONE"
+        assert exclusion.minimum_path_efficiency == 0.70
+        assert exclusion.maximum_market_return_bps == 0.0
+        assert exclusion.excluded_symbols == ("MRVL.US",)
+        assert exclusion.forward_evidence_start_date == date(2026, 7, 28)
+        assert exclusion.symbols == ()
+    finally:
+        db.close()
+        Base.metadata.drop_all(bind=engine)
+
+
 def test_observation_only_symbols_are_isolated_from_opening_execution_pool(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -518,6 +545,12 @@ def test_observation_only_symbols_are_isolated_from_opening_execution_pool(
                 universe_managed=False,
                 opening_momentum_execution_eligible=False,
             ))
+        db.add(StrategyV2ShadowConfig(
+            symbol="MRVL.US",
+            enabled=True,
+            universe_managed=False,
+            opening_momentum_execution_eligible=True,
+        ))
         db.commit()
 
         variants = OpeningMomentumShadowService(db)._universe_variants()
@@ -529,6 +562,15 @@ def test_observation_only_symbols_are_isolated_from_opening_execution_pool(
         assert "TRV.US" not in by_variant[
             "WEAK_BREADTH_PATH_CHALLENGER"
         ].symbols
+        assert "MRVL.US" in by_variant[
+            "WEAK_BREADTH_PATH_CHALLENGER"
+        ].symbols
+        assert "MRVL.US" not in by_variant[
+            "WEAK_BREADTH_MRVL_EXCLUSION_CHALLENGER"
+        ].symbols
+        assert by_variant[
+            "WEAK_BREADTH_MRVL_EXCLUSION_CHALLENGER"
+        ].excluded_symbols == ("MRVL.US",)
         assert "CRWD.US" in by_variant[
             "ETF_REGIME_CRWD_CHALLENGER"
         ].symbols
@@ -1074,6 +1116,7 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
             "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER",
             "WEAK_BREADTH_INDEX_COHORT_CHALLENGER",
             "WEAK_BREADTH_SPARSE_INDEX_COHORT_CHALLENGER",
+            "WEAK_BREADTH_MRVL_EXCLUSION_CHALLENGER",
             "WEAK_BREADTH_WIDE_STOP_CHALLENGER",
             "ETF_REGIME_PATH_CHALLENGER",
             "ETF_REGIME_CRWD_CHALLENGER",
@@ -1111,6 +1154,9 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
         ]
         weak_breadth_sparse_index_cohort = by_variant[
             "WEAK_BREADTH_SPARSE_INDEX_COHORT_CHALLENGER"
+        ]
+        weak_breadth_mrvl_exclusion = by_variant[
+            "WEAK_BREADTH_MRVL_EXCLUSION_CHALLENGER"
         ]
         weak_breadth_wide_stop = by_variant[
             "WEAK_BREADTH_WIDE_STOP_CHALLENGER"
@@ -1275,6 +1321,30 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
         )
         assert "forward-only-discovery-joint-sparse-index" in (
             weak_breadth_sparse_index_cohort.algorithm_version
+        )
+        assert (
+            weak_breadth_mrvl_exclusion.decision_config
+            == execution.decision_config
+        )
+        assert weak_breadth_mrvl_exclusion.minimum_data_coverage == 0.95
+        assert weak_breadth_mrvl_exclusion.minimum_path_efficiency == 0.70
+        assert (
+            weak_breadth_mrvl_exclusion.maximum_market_return_bps
+            == 0.0
+        )
+        assert weak_breadth_mrvl_exclusion.required_symbols == ()
+        assert weak_breadth_mrvl_exclusion.excluded_symbols == (
+            "MRVL.US",
+        )
+        assert weak_breadth_mrvl_exclusion.universe_source == (
+            "OPENING_EXECUTION_WEAK_BREADTH_EX_MRVL"
+        )
+        assert "holdout-contradicted" in (
+            weak_breadth_mrvl_exclusion.algorithm_version
+        )
+        assert (
+            weak_breadth_mrvl_exclusion.forward_evidence_start_date
+            == date(2026, 7, 28)
         )
         assert etf_regime.decision_config == execution.decision_config
         assert etf_regime.minimum_data_coverage == 0.95
@@ -1719,7 +1789,7 @@ def test_challengers_use_one_market_snapshot_and_close_all_variants(
         assert opened.latest.universe_source == "UNIVERSE_SELECTION"
         assert opened.latest.candidate_symbol == "S1.US"
         assert opened.latest.selection_run_id == run.id
-        assert len(opened.variants) == 31
+        assert len(opened.variants) == 32
         by_variant = {
             item.variant: item for item in opened.variants
         }
@@ -1918,7 +1988,7 @@ def test_early_broad_challenger_keeps_independent_observation_window(
         )
 
         rows = db.query(OpeningMomentumShadowRun).all()
-        assert len(rows) == 25
+        assert len(rows) == 26
         assert candles.calls == [
             *_SYMBOLS,
             *_EXTENSION_SYMBOLS,
@@ -2012,6 +2082,16 @@ def test_early_broad_challenger_keeps_independent_observation_window(
         assert weak_breadth_wide_stop.comparison_baseline == (
             "WEAK_BREADTH_PATH_CHALLENGER"
         )
+        weak_breadth_mrvl_exclusion = early_by_variant[
+            "WEAK_BREADTH_MRVL_EXCLUSION_CHALLENGER"
+        ]
+        assert weak_breadth_mrvl_exclusion.latest is not None
+        assert weak_breadth_mrvl_exclusion.latest.status == "OPEN"
+        assert weak_breadth_mrvl_exclusion.excluded_symbols == ["MRVL.US"]
+        assert weak_breadth_mrvl_exclusion.latest.universe == list(_SYMBOLS)
+        assert weak_breadth_mrvl_exclusion.comparison_baseline == (
+            "WEAK_BREADTH_PATH_CHALLENGER"
+        )
         etf_regime = early_by_variant[
             "ETF_REGIME_PATH_CHALLENGER"
         ]
@@ -2054,7 +2134,7 @@ def test_early_broad_challenger_keeps_independent_observation_window(
             now=_SESSION_OPEN + timedelta(minutes=32, seconds=10),
         )
 
-        assert db.query(OpeningMomentumShadowRun).count() == 31
+        assert db.query(OpeningMomentumShadowRun).count() == 32
         assert candles.calls == list(_SYMBOLS[:4])
         by_variant = {
             item.variant: item for item in standard_opened.variants
@@ -2075,7 +2155,7 @@ def test_early_broad_challenger_keeps_independent_observation_window(
         rows = db.query(OpeningMomentumShadowRun).all()
         assert sum(row.status == "CLOSED" for row in rows) == 5
         assert sum(row.status == "SKIPPED" for row in rows) == 4
-        assert sum(row.status == "OPEN" for row in rows) == 22
+        assert sum(row.status == "OPEN" for row in rows) == 23
         by_variant = {
             item.variant: item for item in standard_closed.variants
         }
@@ -2106,7 +2186,7 @@ def test_early_broad_challenger_keeps_independent_observation_window(
         rows = db.query(OpeningMomentumShadowRun).all()
         assert candles.calls == ["S7.US"]
         assert execution_closed.state == "OPEN"
-        assert sum(row.status == "CLOSED" for row in rows) == 20
+        assert sum(row.status == "CLOSED" for row in rows) == 21
         assert sum(row.status == "SKIPPED" for row in rows) == 4
         assert sum(row.status == "OPEN" for row in rows) == 7
         execution_by_variant = {
@@ -2138,6 +2218,12 @@ def test_early_broad_challenger_keeps_independent_observation_window(
         assert (
             execution_by_variant[
                 "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER"
+            ].metrics.closed_trades
+            == 1
+        )
+        assert (
+            execution_by_variant[
+                "WEAK_BREADTH_MRVL_EXCLUSION_CHALLENGER"
             ].metrics.closed_trades
             == 1
         )
@@ -2833,7 +2919,7 @@ def test_breadth_challenger_skips_a_negative_market_snapshot(
         )
 
         assert candles.calls == list(_SYMBOLS[:4])
-        assert len(status.variants) == 31
+        assert len(status.variants) == 32
         by_variant = {
             item.variant: item for item in status.variants
         }

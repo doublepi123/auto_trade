@@ -683,9 +683,15 @@
                         : formatPercent(row.minimum_path_efficiency) }}
                     </template>
                   </el-table-column>
-                  <el-table-column label="强制标的" min-width="110">
+                  <el-table-column label="池子调整" min-width="130">
                     <template #default="{ row }">
-                      {{ row.required_symbols?.length ? row.required_symbols.join(', ') : '-' }}
+                      <template v-if="row.required_symbols?.length">
+                        + {{ row.required_symbols.join(', ') }}
+                      </template>
+                      <template v-else-if="row.excluded_symbols?.length">
+                        - {{ row.excluded_symbols.join(', ') }}
+                      </template>
+                      <template v-else>-</template>
                     </template>
                   </el-table-column>
                   <el-table-column label="持仓" min-width="90">
@@ -2494,6 +2500,9 @@ function openingMomentumVariantLabel(
   if (variant === 'WEAK_BREADTH_SPARSE_INDEX_COHORT_CHALLENGER') {
     return '弱广度 + 稀疏指数候选组'
   }
+  if (variant === 'WEAK_BREADTH_MRVL_EXCLUSION_CHALLENGER') {
+    return '弱广度 - MRVL'
+  }
   if (variant === 'WEAK_BREADTH_WIDE_STOP_CHALLENGER') return '弱广度 + 4% 灾难止损'
   if (variant === 'ETF_REGIME_PATH_CHALLENGER') return 'ETF 状态 + 路径效率'
   if (variant === 'ETF_REGIME_CRWD_CHALLENGER') return 'ETF 状态 + CRWD'
@@ -2515,6 +2524,7 @@ function openingMomentumVariantTagType(
     || variant === 'WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER'
     || variant === 'WEAK_BREADTH_INDEX_COHORT_CHALLENGER'
     || variant === 'WEAK_BREADTH_SPARSE_INDEX_COHORT_CHALLENGER'
+    || variant === 'WEAK_BREADTH_MRVL_EXCLUSION_CHALLENGER'
     || variant === 'WEAK_BREADTH_WIDE_STOP_CHALLENGER'
     || variant.startsWith('ETF_REGIME_')
     || variant === 'OPENING_RANGE_STOP_CHALLENGER'

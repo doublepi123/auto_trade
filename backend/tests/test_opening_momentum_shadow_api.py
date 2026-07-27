@@ -169,6 +169,9 @@ class TestOpeningMomentumShadowApi:
         weak_breadth_sparse_index_cohort = variants[
             "WEAK_BREADTH_SPARSE_INDEX_COHORT_CHALLENGER"
         ]
+        weak_breadth_mrvl_exclusion = variants[
+            "WEAK_BREADTH_MRVL_EXCLUSION_CHALLENGER"
+        ]
         weak_breadth_wide_stop = variants[
             "WEAK_BREADTH_WIDE_STOP_CHALLENGER"
         ]
@@ -177,7 +180,7 @@ class TestOpeningMomentumShadowApi:
             "OPENING_RANGE_STOP_CHALLENGER"
         ]
         execution_sndk = variants["EXECUTION_SNDK_CHALLENGER"]
-        assert len(variants) == 31
+        assert len(variants) == 32
         assert early["universe_source"] == "OPENING_EARLY_BROAD"
         assert early["signal_minutes"] == 3
         assert early["minimum_market_return_bps"] == -50.0
@@ -351,7 +354,7 @@ class TestOpeningMomentumShadowApi:
         assert exceptional_comparison["evidence_gate_passed"] is False
         assert (
             exceptional_comparison["multiple_testing_family_size"]
-            == 6
+            == 7
         )
         assert weak_breadth_index_cohort["universe_source"] == (
             "OPENING_EXECUTION_WEAK_BREADTH_INDEX_COHORT"
@@ -415,7 +418,7 @@ class TestOpeningMomentumShadowApi:
         )
         assert (
             sparse_cohort_comparison["multiple_testing_family_size"]
-            == 6
+            == 7
         )
         assert (
             cohort_comparison["evidence_gate_passed"]
@@ -423,8 +426,34 @@ class TestOpeningMomentumShadowApi:
         )
         assert (
             cohort_comparison["multiple_testing_family_size"]
-            == 6
+            == 7
         )
+        assert weak_breadth_mrvl_exclusion["universe_source"] == (
+            "OPENING_EXECUTION_WEAK_BREADTH_EX_MRVL"
+        )
+        assert weak_breadth_mrvl_exclusion[
+            "minimum_path_efficiency"
+        ] == 0.70
+        assert weak_breadth_mrvl_exclusion[
+            "maximum_market_return_bps"
+        ] == 0.0
+        assert weak_breadth_mrvl_exclusion["required_symbols"] == []
+        assert weak_breadth_mrvl_exclusion["excluded_symbols"] == [
+            "MRVL.US"
+        ]
+        assert weak_breadth_mrvl_exclusion[
+            "forward_evidence_start_date"
+        ] == "2026-07-28"
+        assert weak_breadth_mrvl_exclusion["comparison_baseline"] == (
+            "WEAK_BREADTH_PATH_CHALLENGER"
+        )
+        assert weak_breadth_mrvl_exclusion["comparison"] is not None
+        assert weak_breadth_mrvl_exclusion["comparison"][
+            "minimum_policy_displacement_sessions"
+        ] == 3
+        assert weak_breadth_mrvl_exclusion["comparison"][
+            "multiple_testing_family_size"
+        ] == 7
         assert weak_breadth_wide_stop["universe_source"] == (
             "OPENING_EXECUTION_WEAK_BREADTH_WIDE_STOP"
         )

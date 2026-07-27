@@ -1950,6 +1950,7 @@ export interface OpeningMomentumShadowVariant {
     | 'WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER'
     | 'WEAK_BREADTH_INDEX_COHORT_CHALLENGER'
     | 'WEAK_BREADTH_SPARSE_INDEX_COHORT_CHALLENGER'
+    | 'WEAK_BREADTH_MRVL_EXCLUSION_CHALLENGER'
     | 'WEAK_BREADTH_WIDE_STOP_CHALLENGER'
     | 'ETF_REGIME_PATH_CHALLENGER'
     | 'ETF_REGIME_CRWD_CHALLENGER'
@@ -1975,6 +1976,7 @@ export interface OpeningMomentumShadowVariant {
   exceptional_maximum_market_return_bps: number | null
   maximum_benchmark_average_return_bps: number | null
   required_symbols: string[]
+  excluded_symbols: string[]
   holding_minutes: number
   stop_loss_pct: number | null
   forward_evidence_start_date: string | null

@@ -636,6 +636,7 @@ class OpeningMomentumShadowVariantResponse(BaseModel):
         "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER",
         "WEAK_BREADTH_INDEX_COHORT_CHALLENGER",
         "WEAK_BREADTH_SPARSE_INDEX_COHORT_CHALLENGER",
+        "WEAK_BREADTH_MRVL_EXCLUSION_CHALLENGER",
         "WEAK_BREADTH_WIDE_STOP_CHALLENGER",
         "ETF_REGIME_PATH_CHALLENGER",
         "ETF_REGIME_CRWD_CHALLENGER",
@@ -670,6 +671,7 @@ class OpeningMomentumShadowVariantResponse(BaseModel):
     exceptional_maximum_market_return_bps: Optional[float] = None
     maximum_benchmark_average_return_bps: Optional[float] = None
     required_symbols: list[str] = Field(default_factory=list)
+    excluded_symbols: list[str] = Field(default_factory=list)
     holding_minutes: int
     stop_loss_pct: Optional[float] = None
     forward_evidence_start_date: Optional[date] = None
