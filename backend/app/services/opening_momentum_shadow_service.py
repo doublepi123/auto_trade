@@ -118,6 +118,45 @@ _WEAK_BREADTH_MAXIMUM_MARKET_RETURN_BPS = 0.0
 # The broad policy remains the comparison baseline, so every skipped or
 # entered session continues to produce a causal counterfactual.
 _PAPER_EXECUTION_VARIANT = "WEAK_BREADTH_PATH_CHALLENGER"
+# The active ranking pool is intentionally decoupled from this regime signal.
+# Adding one symbol can move a cross-sectional median across zero merely by
+# changing the pool parity; the QQQ/DIA average stays comparable as the pool
+# evolves. These variants start forward-only evidence after 2026-07-27.
+_ETF_REGIME_MAXIMUM_AVERAGE_RETURN_BPS = 0.0
+_ETF_REGIME_PATH_VERSION = (
+    "forward-only-qqq-dia-average-max0-path-efficiency-070-"
+    "precommitted-20260727-v1"
+)
+_ETF_REGIME_PATH_SOURCE = "OPENING_EXECUTION_ETF_REGIME"
+_ETF_REGIME_PATH_ALGORITHM_VERSION = (
+    f"{ALGORITHM_VERSION}+{_ETF_REGIME_PATH_VERSION}"
+)
+_ETF_REGIME_EXTENSION_VERSION = (
+    "forward-only-independent-etf-regime-extension-"
+    "precommitted-20260727-v1"
+)
+_ETF_REGIME_EXTENSION_SPECS = (
+    (
+        "ETF_REGIME_CRWD_CHALLENGER",
+        "CRWD.US",
+        "OPENING_EXECUTION_ETF_CRWD",
+    ),
+    (
+        "ETF_REGIME_TRV_CHALLENGER",
+        "TRV.US",
+        "OPENING_EXECUTION_ETF_TRV",
+    ),
+)
+_ETF_REGIME_EXTENSION_VARIANTS = frozenset(
+    variant for variant, _, _ in _ETF_REGIME_EXTENSION_SPECS
+)
+_ETF_REGIME_VARIANTS = (
+    "ETF_REGIME_PATH_CHALLENGER",
+    *(
+        variant
+        for variant, _, _ in _ETF_REGIME_EXTENSION_SPECS
+    ),
+)
 # Selected on data through 2026-07-24; only post-deployment rows count as
 # forward evidence for the wider catastrophic stop.
 _WEAK_BREADTH_WIDE_STOP_PCT = 4.0
@@ -156,6 +195,7 @@ _NON_COMPARABLE_SKIP_REASONS = frozenset(
     {
         "PREOPEN_UNIVERSE_UNAVAILABLE",
         "DATA_INCOMPLETE",
+        "BENCHMARK_DATA_INCOMPLETE",
         "ENTRY_BAR_MISSING",
         "INSUFFICIENT_UNIVERSE",
     }
@@ -195,6 +235,9 @@ _VariantName = Literal[
     "EXECUTION_PATH_EFFICIENCY_CHALLENGER",
     "WEAK_BREADTH_PATH_CHALLENGER",
     "WEAK_BREADTH_WIDE_STOP_CHALLENGER",
+    "ETF_REGIME_PATH_CHALLENGER",
+    "ETF_REGIME_CRWD_CHALLENGER",
+    "ETF_REGIME_TRV_CHALLENGER",
     "OPENING_RANGE_STOP_CHALLENGER",
     "EXECUTION_SNDK_CHALLENGER",
     "EXECUTION_INTC_CHALLENGER",
@@ -278,6 +321,7 @@ class _UniverseVariant:
     minimum_data_coverage: float = 1.0
     minimum_path_efficiency: float | None = None
     maximum_market_return_bps: float | None = None
+    maximum_benchmark_average_return_bps: float | None = None
     opening_range_stop: bool = False
     required_symbols: tuple[str, ...] = ()
     symbols: tuple[str, ...] = ()
@@ -304,6 +348,16 @@ class _UniverseVariant:
                     "maximum_market_return_bps must not be below the "
                     "minimum market return"
                 )
+        if (
+            self.maximum_benchmark_average_return_bps is not None
+            and not math.isfinite(
+                self.maximum_benchmark_average_return_bps
+            )
+        ):
+            raise ValueError(
+                "maximum_benchmark_average_return_bps must be finite "
+                "when set"
+            )
         if (
             self.opening_range_stop
             and self.decision_config.stop_loss_pct is None
@@ -678,11 +732,10 @@ class OpeningMomentumShadowService:
             selection_run_id=variant.selection_run_id,
             action=action,
             reason=reason,
-            symbol=(
-                decision.candidate_symbol
-                if action == "ENTER_LONG"
-                else None
-            ),
+            # Persist the evaluated candidate even when a gate skips it. The
+            # row is inactive in that case, so this improves diagnostics
+            # without exposing the symbol to the order registry.
+            symbol=decision.candidate_symbol,
             signal_at=signal_at,
             entry_due_at=entry_due_at,
             universe_size=decision.universe_size,
@@ -704,6 +757,7 @@ class OpeningMomentumShadowService:
                 "candidate_path_efficiency": (
                     candidate_path_efficiency
                 ),
+                "candidate_symbol": decision.candidate_symbol,
                 "minimum_path_efficiency": (
                     variant.minimum_path_efficiency
                 ),
@@ -956,6 +1010,15 @@ class OpeningMomentumShadowService:
                 )
                 for symbol in _OPENING_CONTEXT_BENCHMARKS
             }
+            benchmark_average_return_bps = (
+                sum(cast(float, value) for value in benchmark_returns.values())
+                / len(_OPENING_CONTEXT_BENCHMARKS)
+                if all(
+                    value is not None
+                    for value in benchmark_returns.values()
+                )
+                else None
+            )
             path_features = (
                 path_features_by_symbol.get(decision.candidate_symbol)
                 if decision.candidate_symbol is not None
@@ -1008,6 +1071,18 @@ class OpeningMomentumShadowService:
                     > variant.maximum_market_return_bps
                 )
             )
+            benchmark_data_incomplete = (
+                variant.maximum_benchmark_average_return_bps is not None
+                and decision.action == "ENTER_LONG"
+                and benchmark_average_return_bps is None
+            )
+            maximum_benchmark_average_gate_failed = (
+                variant.maximum_benchmark_average_return_bps is not None
+                and decision.action == "ENTER_LONG"
+                and benchmark_average_return_bps is not None
+                and benchmark_average_return_bps
+                > variant.maximum_benchmark_average_return_bps
+            )
             opening_range_stop_loss_pct: float | None = None
             if (
                 variant.opening_range_stop
@@ -1040,6 +1115,8 @@ class OpeningMomentumShadowService:
                     and not last_five_gate_failed
                     and not path_efficiency_gate_failed
                     and not maximum_market_return_gate_failed
+                    and not benchmark_data_incomplete
+                    and not maximum_benchmark_average_gate_failed
                     and not opening_range_stop_invalid
                 )
                 else "SKIPPED"
@@ -1054,6 +1131,10 @@ class OpeningMomentumShadowService:
                 reason = "PATH_EFFICIENCY_FILTER"
             elif maximum_market_return_gate_failed:
                 reason = "MAXIMUM_MARKET_RETURN_FILTER"
+            elif benchmark_data_incomplete:
+                reason = "BENCHMARK_DATA_INCOMPLETE"
+            elif maximum_benchmark_average_gate_failed:
+                reason = "BENCHMARK_AVERAGE_RETURN_FILTER"
             elif opening_range_stop_invalid:
                 reason = "OPENING_RANGE_STOP_INVALID"
             else:
@@ -1414,6 +1495,17 @@ class OpeningMomentumShadowService:
             symbols=active_broad_symbols,
             selection_run_id=run.id,
         ))
+        for variant_name in _ETF_REGIME_VARIANTS:
+            identity = identities_by_variant[
+                cast(_VariantName, variant_name)
+            ]
+            variants.append(replace(
+                identity,
+                symbols=tuple(dict.fromkeys(
+                    active_broad_symbols + identity.required_symbols
+                )),
+                selection_run_id=run.id,
+            ))
         weak_breadth_wide_stop_identity = identities_by_variant[
             "WEAK_BREADTH_WIDE_STOP_CHALLENGER"
         ]
@@ -1603,6 +1695,60 @@ class OpeningMomentumShadowService:
                 ),
             ))
             variants.append(self.paper_execution_variant_identity())
+            variants.append(_UniverseVariant(
+                variant="ETF_REGIME_PATH_CHALLENGER",
+                algorithm_version=(
+                    _ETF_REGIME_PATH_ALGORITHM_VERSION
+                ),
+                config_version=self._evidence_config_version(
+                    f"{execution_config.version_hash()}:"
+                    f"{_ETF_REGIME_PATH_VERSION}:"
+                    f"{_EXECUTION_PATH_EFFICIENCY_MINIMUM:.2f}:"
+                    f"{_ETF_REGIME_MAXIMUM_AVERAGE_RETURN_BPS:.1f}"
+                ),
+                universe_source=_ETF_REGIME_PATH_SOURCE,
+                decision_config=execution_config,
+                minimum_data_coverage=(
+                    _EARLY_BROAD_MINIMUM_COVERAGE
+                ),
+                minimum_path_efficiency=(
+                    _EXECUTION_PATH_EFFICIENCY_MINIMUM
+                ),
+                maximum_benchmark_average_return_bps=(
+                    _ETF_REGIME_MAXIMUM_AVERAGE_RETURN_BPS
+                ),
+            ))
+            for variant_name, symbol, universe_source in (
+                _ETF_REGIME_EXTENSION_SPECS
+            ):
+                variants.append(_UniverseVariant(
+                    variant=cast(_VariantName, variant_name),
+                    algorithm_version=(
+                        f"{_ETF_REGIME_PATH_ALGORITHM_VERSION}+"
+                        f"{_ETF_REGIME_EXTENSION_VERSION}+"
+                        f"{symbol.removesuffix('.US').lower()}"
+                    ),
+                    config_version=self._evidence_config_version(
+                        f"{execution_config.version_hash()}:"
+                        f"{_ETF_REGIME_PATH_VERSION}:"
+                        f"{_ETF_REGIME_EXTENSION_VERSION}:"
+                        f"{symbol}:"
+                        f"{_EXECUTION_PATH_EFFICIENCY_MINIMUM:.2f}:"
+                        f"{_ETF_REGIME_MAXIMUM_AVERAGE_RETURN_BPS:.1f}"
+                    ),
+                    universe_source=universe_source,
+                    decision_config=execution_config,
+                    minimum_data_coverage=(
+                        _EARLY_BROAD_MINIMUM_COVERAGE
+                    ),
+                    minimum_path_efficiency=(
+                        _EXECUTION_PATH_EFFICIENCY_MINIMUM
+                    ),
+                    maximum_benchmark_average_return_bps=(
+                        _ETF_REGIME_MAXIMUM_AVERAGE_RETURN_BPS
+                    ),
+                    required_symbols=(symbol,),
+                ))
             variants.append(_UniverseVariant(
                 variant="WEAK_BREADTH_WIDE_STOP_CHALLENGER",
                 algorithm_version=(
@@ -2140,11 +2286,18 @@ class OpeningMomentumShadowService:
                 }
             )
             uses_weak_breadth_baseline = (
-                identity.variant
-                == "WEAK_BREADTH_WIDE_STOP_CHALLENGER"
+                identity.variant in {
+                    "WEAK_BREADTH_WIDE_STOP_CHALLENGER",
+                    "ETF_REGIME_PATH_CHALLENGER",
+                }
+            )
+            uses_etf_regime_baseline = (
+                identity.variant in _ETF_REGIME_EXTENSION_VARIANTS
             )
             is_extension = (
-                is_early_extension or is_execution_extension
+                is_early_extension
+                or is_execution_extension
+                or uses_etf_regime_baseline
             )
             identity_rows_by_date = rows_by_date[
                 identity.config_version
@@ -2154,6 +2307,7 @@ class OpeningMomentumShadowService:
                 "EARLY_BROAD_CHALLENGER",
                 "EXECUTION_BROAD_CHALLENGER",
                 "WEAK_BREADTH_PATH_CHALLENGER",
+                "ETF_REGIME_PATH_CHALLENGER",
             ] | None
             if identity.variant == "INCUMBENT":
                 comparison_baseline = None
@@ -2161,6 +2315,8 @@ class OpeningMomentumShadowService:
                 comparison_baseline = "EARLY_BROAD_CHALLENGER"
             elif uses_execution_baseline:
                 comparison_baseline = "EXECUTION_BROAD_CHALLENGER"
+            elif uses_etf_regime_baseline:
+                comparison_baseline = "ETF_REGIME_PATH_CHALLENGER"
             elif uses_weak_breadth_baseline:
                 comparison_baseline = "WEAK_BREADTH_PATH_CHALLENGER"
             else:
@@ -2172,6 +2328,10 @@ class OpeningMomentumShadowService:
             elif uses_execution_baseline:
                 comparison_identity = identities_by_variant[
                     "EXECUTION_BROAD_CHALLENGER"
+                ]
+            elif uses_etf_regime_baseline:
+                comparison_identity = identities_by_variant[
+                    "ETF_REGIME_PATH_CHALLENGER"
                 ]
             elif uses_weak_breadth_baseline:
                 comparison_identity = identities_by_variant[
@@ -2280,6 +2440,9 @@ class OpeningMomentumShadowService:
                     ),
                     maximum_market_return_bps=(
                         identity.maximum_market_return_bps
+                    ),
+                    maximum_benchmark_average_return_bps=(
+                        identity.maximum_benchmark_average_return_bps
                     ),
                     required_symbols=list(
                         identity.required_symbols
@@ -2764,6 +2927,18 @@ class OpeningMomentumShadowService:
             ),
             benchmark_dia_return_bps=(
                 row.benchmark_dia_return_bps
+            ),
+            benchmark_average_return_bps=(
+                (
+                    row.benchmark_qqq_return_bps
+                    + row.benchmark_dia_return_bps
+                )
+                / 2
+                if (
+                    row.benchmark_qqq_return_bps is not None
+                    and row.benchmark_dia_return_bps is not None
+                )
+                else None
             ),
             entry_at=_optional_utc(row.entry_at),
             entry_price=row.entry_price,

@@ -567,6 +567,15 @@ class OpeningMomentumExecutionService:
     def _response(
         row: OpeningMomentumExecution,
     ) -> OpeningMomentumExecutionResponse:
+        signal_context = _json_object(row.signal_context_json)
+        candidate_path_efficiency_raw = signal_context.get(
+            "candidate_path_efficiency"
+        )
+        candidate_path_efficiency = (
+            float(candidate_path_efficiency_raw)
+            if isinstance(candidate_path_efficiency_raw, (int, float))
+            else None
+        )
         return OpeningMomentumExecutionResponse(
             id=row.id,
             session_date=row.session_date,
@@ -586,11 +595,12 @@ class OpeningMomentumExecutionService:
             market_return_bps=row.market_return_bps,
             candidate_return_bps=row.candidate_return_bps,
             excess_return_bps=row.excess_return_bps,
+            candidate_path_efficiency=candidate_path_efficiency,
             reference_entry_price=row.reference_entry_price,
             max_price_deviation_bps=row.max_price_deviation_bps,
             stop_loss_pct=row.stop_loss_pct,
             max_holding_minutes=row.max_holding_minutes,
-            signal_context=_json_object(row.signal_context_json),
+            signal_context=signal_context,
             submit_attempts=row.submit_attempts,
             entry_order_id=row.entry_order_id,
             exit_order_id=row.exit_order_id,

@@ -1867,6 +1867,7 @@ export interface OpeningMomentumShadowRun {
   candidate_prev_close_to_signal_bps: number | null
   benchmark_qqq_return_bps: number | null
   benchmark_dia_return_bps: number | null
+  benchmark_average_return_bps: number | null
   entry_at: string | null
   entry_price: number | null
   exit_due_at: string | null
@@ -1939,6 +1940,9 @@ export interface OpeningMomentumShadowVariant {
     | 'EXECUTION_PATH_EFFICIENCY_CHALLENGER'
     | 'WEAK_BREADTH_PATH_CHALLENGER'
     | 'WEAK_BREADTH_WIDE_STOP_CHALLENGER'
+    | 'ETF_REGIME_PATH_CHALLENGER'
+    | 'ETF_REGIME_CRWD_CHALLENGER'
+    | 'ETF_REGIME_TRV_CHALLENGER'
     | 'OPENING_RANGE_STOP_CHALLENGER'
     | 'EXECUTION_SNDK_CHALLENGER'
     | 'EXECUTION_INTC_CHALLENGER'
@@ -1956,6 +1960,7 @@ export interface OpeningMomentumShadowVariant {
   minimum_data_coverage: number
   minimum_path_efficiency: number | null
   maximum_market_return_bps: number | null
+  maximum_benchmark_average_return_bps: number | null
   required_symbols: string[]
   holding_minutes: number
   stop_loss_pct: number | null
@@ -1965,6 +1970,7 @@ export interface OpeningMomentumShadowVariant {
     | 'EARLY_BROAD_CHALLENGER'
     | 'EXECUTION_BROAD_CHALLENGER'
     | 'WEAK_BREADTH_PATH_CHALLENGER'
+    | 'ETF_REGIME_PATH_CHALLENGER'
     | null
   latest: OpeningMomentumShadowRun | null
   metrics: OpeningMomentumShadowMetrics
@@ -2032,6 +2038,7 @@ export interface OpeningMomentumExecution {
   market_return_bps: number | null
   candidate_return_bps: number | null
   excess_return_bps: number | null
+  candidate_path_efficiency: number | null
   reference_entry_price: number | null
   max_price_deviation_bps: number
   stop_loss_pct: number

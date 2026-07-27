@@ -63,6 +63,11 @@ _EXECUTION_EXTENSION_VARIANTS = (
     "EXECUTION_PANW_CHALLENGER",
     "EXECUTION_CRWD_CHALLENGER",
 )
+_ETF_REGIME_VARIANTS = (
+    "ETF_REGIME_PATH_CHALLENGER",
+    "ETF_REGIME_CRWD_CHALLENGER",
+    "ETF_REGIME_TRV_CHALLENGER",
+)
 _ALL_CHALLENGER_VARIANTS = (
     "EARLY_BROAD_CHALLENGER",
     *_EXTENSION_VARIANTS,
@@ -70,6 +75,7 @@ _ALL_CHALLENGER_VARIANTS = (
     "EXECUTION_PATH_EFFICIENCY_CHALLENGER",
     "WEAK_BREADTH_PATH_CHALLENGER",
     "WEAK_BREADTH_WIDE_STOP_CHALLENGER",
+    *_ETF_REGIME_VARIANTS,
     "OPENING_RANGE_STOP_CHALLENGER",
     *_EXECUTION_EXTENSION_VARIANTS,
 )
@@ -172,8 +178,20 @@ class _FakeCandles:
 
 
 class _OpeningContextCandles(_FakeCandles):
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(
+        self,
+        *,
+        benchmark_qqq_return_bps: float = 20.0,
+        benchmark_dia_return_bps: float = -10.0,
+        early_opening_returns_bps: dict[str, float] | None = None,
+    ) -> None:
+        super().__init__(
+            early_opening_returns_bps=early_opening_returns_bps,
+        )
+        self.benchmark_returns_bps = {
+            "QQQ.US": benchmark_qqq_return_bps,
+            "DIA.US": benchmark_dia_return_bps,
+        }
         self.history_calls: list[tuple[str, str, datetime]] = []
 
     def get_forward_adjusted_history_candlesticks_before(
@@ -199,15 +217,12 @@ class _OpeningContextCandles(_FakeCandles):
 
         assert period == "MIN_1"
         assert count == 500
-        terminal_return_bps = {
-            "QQQ.US": 20.0,
-            "DIA.US": -10.0,
-        }[symbol]
+        terminal_return_bps = self.benchmark_returns_bps[symbol]
         bars: list[BrokerCandle] = []
         for index in range(30):
             close = (
                 100.0 * (1 + terminal_return_bps / 10_000)
-                if index == 29
+                if index in {2, 29}
                 else 100.0
             )
             bars.append(BrokerCandle(
@@ -545,7 +560,7 @@ def test_execution_signal_skips_a_choppy_opening_leader(
         assert signal is not None
         assert signal.action == "SKIP"
         assert signal.reason == "PATH_EFFICIENCY_FILTER"
-        assert signal.symbol is None
+        assert signal.symbol == _SYMBOLS[-1]
         assert signal.context[
             "candidate_path_efficiency"
         ] == pytest.approx(1 / 7)
@@ -583,7 +598,7 @@ def test_execution_signal_skips_when_opening_breadth_is_positive(
         assert signal is not None
         assert signal.action == "SKIP"
         assert signal.reason == "MAXIMUM_MARKET_RETURN_FILTER"
-        assert signal.symbol is None
+        assert signal.symbol == _SYMBOLS[-1]
         assert signal.market_return_bps == pytest.approx(20.0)
         assert signal.context["candidate_path_efficiency"] == 1.0
     finally:
@@ -884,6 +899,9 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
             "EXECUTION_PATH_EFFICIENCY_CHALLENGER",
             "WEAK_BREADTH_PATH_CHALLENGER",
             "WEAK_BREADTH_WIDE_STOP_CHALLENGER",
+            "ETF_REGIME_PATH_CHALLENGER",
+            "ETF_REGIME_CRWD_CHALLENGER",
+            "ETF_REGIME_TRV_CHALLENGER",
             "OPENING_RANGE_STOP_CHALLENGER",
             "EXECUTION_SNDK_CHALLENGER",
             "EXECUTION_INTC_CHALLENGER",
@@ -909,6 +927,7 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
         weak_breadth_wide_stop = by_variant[
             "WEAK_BREADTH_WIDE_STOP_CHALLENGER"
         ]
+        etf_regime = by_variant["ETF_REGIME_PATH_CHALLENGER"]
         opening_range_stop = by_variant[
             "OPENING_RANGE_STOP_CHALLENGER"
         ]
@@ -971,6 +990,30 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
         assert weak_breadth_path.universe_source == (
             "OPENING_EXECUTION_WEAK_BREADTH_PATH"
         )
+        assert etf_regime.decision_config == execution.decision_config
+        assert etf_regime.minimum_data_coverage == 0.95
+        assert etf_regime.minimum_path_efficiency == 0.70
+        assert etf_regime.maximum_market_return_bps is None
+        assert (
+            etf_regime.maximum_benchmark_average_return_bps
+            == 0.0
+        )
+        assert etf_regime.required_symbols == ()
+        assert etf_regime.universe_source == (
+            "OPENING_EXECUTION_ETF_REGIME"
+        )
+        for variant, symbol in (
+            ("ETF_REGIME_CRWD_CHALLENGER", "CRWD.US"),
+            ("ETF_REGIME_TRV_CHALLENGER", "TRV.US"),
+        ):
+            extension = by_variant[variant]
+            assert extension.decision_config == execution.decision_config
+            assert extension.minimum_path_efficiency == 0.70
+            assert (
+                extension.maximum_benchmark_average_return_bps
+                == 0.0
+            )
+            assert extension.required_symbols == (symbol,)
         assert (
             weak_breadth_wide_stop.decision_config.signal_minutes
             == weak_breadth_path.decision_config.signal_minutes
@@ -1044,7 +1087,7 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
                 identity.config_version
                 for identity in identities
             }
-        ) == 24
+        ) == 27
     finally:
         db.close()
         Base.metadata.drop_all(bind=engine)
@@ -1297,7 +1340,7 @@ def test_challengers_use_one_market_snapshot_and_close_all_variants(
         assert opened.latest.universe_source == "UNIVERSE_SELECTION"
         assert opened.latest.candidate_symbol == "S1.US"
         assert opened.latest.selection_run_id == run.id
-        assert len(opened.variants) == 24
+        assert len(opened.variants) == 27
         by_variant = {
             item.variant: item for item in opened.variants
         }
@@ -1395,7 +1438,7 @@ def test_challengers_use_one_market_snapshot_and_close_all_variants(
                 item.config_version
                 for item in opened.variants
             }
-        ) == 24
+        ) == 27
 
         still_open = service.tick(
             now=_SESSION_OPEN + timedelta(minutes=47, seconds=10),
@@ -1496,13 +1539,14 @@ def test_early_broad_challenger_keeps_independent_observation_window(
         )
 
         rows = db.query(OpeningMomentumShadowRun).all()
-        assert len(rows) == 18
+        assert len(rows) == 21
         assert candles.calls == [
             *_SYMBOLS,
             *_EXTENSION_SYMBOLS,
+            "CRWD.US",
+            "TRV.US",
             "INTC.US",
             "PANW.US",
-            "CRWD.US",
         ]
         assert early_opened.state == "OPEN"
         assert early_opened.latest is None
@@ -1586,6 +1630,18 @@ def test_early_broad_challenger_keeps_independent_observation_window(
         assert weak_breadth_wide_stop.comparison_baseline == (
             "WEAK_BREADTH_PATH_CHALLENGER"
         )
+        etf_regime = early_by_variant[
+            "ETF_REGIME_PATH_CHALLENGER"
+        ]
+        assert etf_regime.latest is not None
+        assert etf_regime.latest.status == "SKIPPED"
+        assert etf_regime.latest.reason == (
+            "BENCHMARK_DATA_INCOMPLETE"
+        )
+        assert etf_regime.latest.candidate_symbol == "S7.US"
+        assert etf_regime.comparison_baseline == (
+            "WEAK_BREADTH_PATH_CHALLENGER"
+        )
         opening_range_stop = early_by_variant[
             "OPENING_RANGE_STOP_CHALLENGER"
         ]
@@ -1616,7 +1672,7 @@ def test_early_broad_challenger_keeps_independent_observation_window(
             now=_SESSION_OPEN + timedelta(minutes=32, seconds=10),
         )
 
-        assert db.query(OpeningMomentumShadowRun).count() == 24
+        assert db.query(OpeningMomentumShadowRun).count() == 27
         assert candles.calls == list(_SYMBOLS[:4])
         by_variant = {
             item.variant: item for item in standard_opened.variants
@@ -1636,7 +1692,7 @@ def test_early_broad_challenger_keeps_independent_observation_window(
         assert standard_closed.state == "OPEN"
         rows = db.query(OpeningMomentumShadowRun).all()
         assert sum(row.status == "CLOSED" for row in rows) == 5
-        assert sum(row.status == "SKIPPED" for row in rows) == 1
+        assert sum(row.status == "SKIPPED" for row in rows) == 4
         assert sum(row.status == "OPEN" for row in rows) == 18
         by_variant = {
             item.variant: item for item in standard_closed.variants
@@ -1669,7 +1725,7 @@ def test_early_broad_challenger_keeps_independent_observation_window(
         assert candles.calls == ["S7.US"]
         assert execution_closed.state == "OPEN"
         assert sum(row.status == "CLOSED" for row in rows) == 16
-        assert sum(row.status == "SKIPPED" for row in rows) == 1
+        assert sum(row.status == "SKIPPED" for row in rows) == 4
         assert sum(row.status == "OPEN" for row in rows) == 7
         execution_by_variant = {
             item.variant: item for item in execution_closed.variants
@@ -1947,6 +2003,108 @@ def test_weak_breadth_path_challenger_applies_maximum_market_gate(
         Base.metadata.drop_all(bind=engine)
 
 
+@pytest.mark.parametrize(
+    (
+        "benchmark_qqq_return_bps",
+        "benchmark_dia_return_bps",
+        "expected_status",
+        "expected_reason",
+    ),
+    [
+        (20.0, 10.0, "SKIPPED", "BENCHMARK_AVERAGE_RETURN_FILTER"),
+        (-20.0, 10.0, "OPEN", "OPENING_LEADER"),
+    ],
+)
+def test_etf_regime_path_challenger_uses_benchmark_average_gate(
+    monkeypatch: pytest.MonkeyPatch,
+    benchmark_qqq_return_bps: float,
+    benchmark_dia_return_bps: float,
+    expected_status: str,
+    expected_reason: str,
+) -> None:
+    monkeypatch.setattr(
+        settings,
+        "opening_momentum_shadow_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        settings,
+        "opening_momentum_challenger_enabled",
+        True,
+    )
+    engine, db = _database()
+    try:
+        _seed_variant_universe(db)
+        _seed_active_broad_pool(db)
+        service = OpeningMomentumShadowService(
+            db,
+            _OpeningContextCandles(
+                benchmark_qqq_return_bps=benchmark_qqq_return_bps,
+                benchmark_dia_return_bps=benchmark_dia_return_bps,
+                early_opening_returns_bps={
+                    symbol: (
+                        100.0 if symbol == "S7.US" else 20.0
+                    )
+                    for symbol in _SYMBOLS
+                },
+            ),
+            config=OpeningMomentumConfig(
+                minimum_universe_size=2,
+                minimum_excess_return_bps=0,
+            ),
+        )
+
+        status = service.tick(
+            now=_SESSION_OPEN + timedelta(minutes=5, seconds=10),
+        )
+
+        by_variant = {
+            item.variant: item for item in status.variants
+        }
+        weak_breadth = by_variant[
+            "WEAK_BREADTH_PATH_CHALLENGER"
+        ]
+        challenger = by_variant["ETF_REGIME_PATH_CHALLENGER"]
+        assert weak_breadth.latest is not None
+        assert weak_breadth.latest.status == "SKIPPED"
+        assert weak_breadth.latest.reason == (
+            "MAXIMUM_MARKET_RETURN_FILTER"
+        )
+        assert challenger.latest is not None
+        assert challenger.latest.status == expected_status
+        assert challenger.latest.reason == expected_reason
+        assert challenger.latest.candidate_symbol == "S7.US"
+        assert challenger.latest.benchmark_qqq_return_bps == pytest.approx(
+            benchmark_qqq_return_bps
+        )
+        assert challenger.latest.benchmark_dia_return_bps == pytest.approx(
+            benchmark_dia_return_bps
+        )
+        assert (
+            challenger.latest.benchmark_average_return_bps
+            == pytest.approx(
+                (
+                    benchmark_qqq_return_bps
+                    + benchmark_dia_return_bps
+                )
+                / 2
+            )
+        )
+        assert (
+            challenger.maximum_benchmark_average_return_bps
+            == 0.0
+        )
+        assert challenger.comparison_baseline == (
+            "WEAK_BREADTH_PATH_CHALLENGER"
+        )
+        assert challenger.latest.entry_price == (
+            100.5 if expected_status == "OPEN" else None
+        )
+    finally:
+        db.close()
+        Base.metadata.drop_all(bind=engine)
+
+
 def test_breadth_challenger_skips_a_negative_market_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1994,7 +2152,7 @@ def test_breadth_challenger_skips_a_negative_market_snapshot(
         )
 
         assert candles.calls == list(_SYMBOLS[:4])
-        assert len(status.variants) == 24
+        assert len(status.variants) == 27
         by_variant = {
             item.variant: item for item in status.variants
         }

@@ -547,6 +547,7 @@ class OpeningMomentumShadowRunResponse(BaseModel):
     candidate_prev_close_to_signal_bps: Optional[float] = None
     benchmark_qqq_return_bps: Optional[float] = None
     benchmark_dia_return_bps: Optional[float] = None
+    benchmark_average_return_bps: Optional[float] = None
     entry_at: Optional[datetime] = None
     entry_price: Optional[float] = None
     exit_due_at: Optional[datetime] = None
@@ -618,6 +619,9 @@ class OpeningMomentumShadowVariantResponse(BaseModel):
         "EXECUTION_PATH_EFFICIENCY_CHALLENGER",
         "WEAK_BREADTH_PATH_CHALLENGER",
         "WEAK_BREADTH_WIDE_STOP_CHALLENGER",
+        "ETF_REGIME_PATH_CHALLENGER",
+        "ETF_REGIME_CRWD_CHALLENGER",
+        "ETF_REGIME_TRV_CHALLENGER",
         "OPENING_RANGE_STOP_CHALLENGER",
         "EXECUTION_SNDK_CHALLENGER",
         "EXECUTION_INTC_CHALLENGER",
@@ -640,6 +644,7 @@ class OpeningMomentumShadowVariantResponse(BaseModel):
         le=1,
     )
     maximum_market_return_bps: Optional[float] = None
+    maximum_benchmark_average_return_bps: Optional[float] = None
     required_symbols: list[str] = Field(default_factory=list)
     holding_minutes: int
     stop_loss_pct: Optional[float] = None
@@ -650,6 +655,7 @@ class OpeningMomentumShadowVariantResponse(BaseModel):
             "EARLY_BROAD_CHALLENGER",
             "EXECUTION_BROAD_CHALLENGER",
             "WEAK_BREADTH_PATH_CHALLENGER",
+            "ETF_REGIME_PATH_CHALLENGER",
         ]
     ] = None
     latest: Optional[OpeningMomentumShadowRunResponse] = None
@@ -719,6 +725,7 @@ class OpeningMomentumExecutionResponse(BaseModel):
     market_return_bps: Optional[float] = None
     candidate_return_bps: Optional[float] = None
     excess_return_bps: Optional[float] = None
+    candidate_path_efficiency: Optional[float] = None
     reference_entry_price: Optional[float] = None
     max_price_deviation_bps: float
     stop_loss_pct: float

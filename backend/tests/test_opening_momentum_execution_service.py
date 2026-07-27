@@ -104,7 +104,10 @@ def _signal(service: OpeningMomentumExecutionService) -> OpeningMomentumExecutio
         reference_entry_price=100.0,
         stop_loss_pct=1.0,
         max_holding_minutes=60,
-        context={"ranking": ["NVDA.US", "AAPL.US"]},
+        context={
+            "ranking": ["NVDA.US", "AAPL.US"],
+            "candidate_path_efficiency": 0.82,
+        },
     )
 
 
@@ -136,6 +139,7 @@ def test_tick_submits_a_session_signal_exactly_once(
         assert runner.calls[0]["execution_id"] == first.latest.id
         assert runner.calls[0]["symbol"] == "NVDA.US"
         assert first.state == "SUBMITTED"
+        assert first.latest.candidate_path_efficiency == pytest.approx(0.82)
         assert second.state == "SUBMITTED"
         assert second.latest is not None
         assert second.latest.submit_attempts == 1

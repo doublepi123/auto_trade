@@ -398,6 +398,17 @@
                   </strong>
                 </div>
                 <div>
+                  <span>市场 / 候选涨幅</span>
+                  <strong>
+                    {{ formatNullableBps(openingExecutionStatus.latest.market_return_bps) }} /
+                    {{ formatNullableBps(openingExecutionStatus.latest.candidate_return_bps) }}
+                  </strong>
+                </div>
+                <div>
+                  <span>路径效率</span>
+                  <strong>{{ formatNullablePercent(openingExecutionStatus.latest.candidate_path_efficiency) }}</strong>
+                </div>
+                <div>
                   <span>入场订单</span>
                   <strong>{{ openingExecutionStatus.latest.entry_order_id || '-' }}</strong>
                 </div>
@@ -522,10 +533,11 @@
                     </strong>
                   </div>
                   <div>
-                    <span>同期 QQQ / DIA</span>
+                    <span>同期 QQQ / DIA / 均值</span>
                     <strong>
                       {{ formatNullableBps(openingMomentumStatus.latest.benchmark_qqq_return_bps) }} /
-                      {{ formatNullableBps(openingMomentumStatus.latest.benchmark_dia_return_bps) }}
+                      {{ formatNullableBps(openingMomentumStatus.latest.benchmark_dia_return_bps) }} /
+                      {{ formatNullableBps(openingMomentumStatus.latest.benchmark_average_return_bps) }}
                     </strong>
                   </div>
                   <div>
@@ -592,6 +604,11 @@
                     <template #default="{ row }">
                       {{ formatBps(row.minimum_candidate_return_bps) }} /
                       {{ formatBps(row.minimum_excess_return_bps) }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="QQQ/DIA 均值上限" min-width="130">
+                    <template #default="{ row }">
+                      {{ formatNullableBps(row.maximum_benchmark_average_return_bps) }}
                     </template>
                   </el-table-column>
                   <el-table-column label="数据覆盖" min-width="90">
@@ -2380,6 +2397,9 @@ function openingMomentumVariantLabel(
   if (variant === 'EXECUTION_PATH_EFFICIENCY_CHALLENGER') return '执行 + 路径效率'
   if (variant === 'WEAK_BREADTH_PATH_CHALLENGER') return '弱广度 + 路径效率'
   if (variant === 'WEAK_BREADTH_WIDE_STOP_CHALLENGER') return '弱广度 + 4% 灾难止损'
+  if (variant === 'ETF_REGIME_PATH_CHALLENGER') return 'ETF 状态 + 路径效率'
+  if (variant === 'ETF_REGIME_CRWD_CHALLENGER') return 'ETF 状态 + CRWD'
+  if (variant === 'ETF_REGIME_TRV_CHALLENGER') return 'ETF 状态 + TRV'
   if (variant === 'OPENING_RANGE_STOP_CHALLENGER') return '开盘区间止损'
   const execution = /^EXECUTION_(.+)_CHALLENGER$/.exec(variant)
   if (execution) return `执行 + ${execution[1]}`
@@ -2394,6 +2414,7 @@ function openingMomentumVariantTagType(
   if (
     variant === 'WEAK_BREADTH_PATH_CHALLENGER'
     || variant === 'WEAK_BREADTH_WIDE_STOP_CHALLENGER'
+    || variant.startsWith('ETF_REGIME_')
     || variant === 'OPENING_RANGE_STOP_CHALLENGER'
   ) return 'warning'
   if (variant.startsWith('EXECUTION_')) return 'success'

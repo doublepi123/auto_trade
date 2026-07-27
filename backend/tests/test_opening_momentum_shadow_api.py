@@ -149,11 +149,12 @@ class TestOpeningMomentumShadowApi:
         weak_breadth_wide_stop = variants[
             "WEAK_BREADTH_WIDE_STOP_CHALLENGER"
         ]
+        etf_regime = variants["ETF_REGIME_PATH_CHALLENGER"]
         opening_range_stop = variants[
             "OPENING_RANGE_STOP_CHALLENGER"
         ]
         execution_sndk = variants["EXECUTION_SNDK_CHALLENGER"]
-        assert len(variants) == 24
+        assert len(variants) == 27
         assert early["universe_source"] == "OPENING_EARLY_BROAD"
         assert early["signal_minutes"] == 3
         assert early["minimum_market_return_bps"] == -50.0
@@ -258,6 +259,32 @@ class TestOpeningMomentumShadowApi:
             "WEAK_BREADTH_PATH_CHALLENGER"
         )
         assert weak_breadth_wide_stop["comparison"] is not None
+        assert etf_regime["universe_source"] == (
+            "OPENING_EXECUTION_ETF_REGIME"
+        )
+        assert etf_regime["minimum_path_efficiency"] == 0.70
+        assert etf_regime["maximum_market_return_bps"] is None
+        assert (
+            etf_regime["maximum_benchmark_average_return_bps"]
+            == 0.0
+        )
+        assert etf_regime["comparison_baseline"] == (
+            "WEAK_BREADTH_PATH_CHALLENGER"
+        )
+        for variant, symbol in (
+            ("ETF_REGIME_CRWD_CHALLENGER", "CRWD.US"),
+            ("ETF_REGIME_TRV_CHALLENGER", "TRV.US"),
+        ):
+            extension = variants[variant]
+            assert extension["required_symbols"] == [symbol]
+            assert extension["minimum_path_efficiency"] == 0.70
+            assert (
+                extension["maximum_benchmark_average_return_bps"]
+                == 0.0
+            )
+            assert extension["comparison_baseline"] == (
+                "ETF_REGIME_PATH_CHALLENGER"
+            )
         assert opening_range_stop["universe_source"] == (
             "OPENING_EXECUTION_RANGE_STOP"
         )
@@ -384,6 +411,7 @@ class TestOpeningMomentumShadowApi:
         )
         assert runs.json()[0]["benchmark_qqq_return_bps"] == -8.0
         assert runs.json()[0]["benchmark_dia_return_bps"] == -12.0
+        assert runs.json()[0]["benchmark_average_return_bps"] == -10.0
         assert status.json()["metrics"]["closed_trades"] == 1
         assert status.json()["metrics"]["cumulative_net_return_bps"] == 86.0
 
