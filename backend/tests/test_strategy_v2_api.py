@@ -430,12 +430,17 @@ class TestStrategyV2ShadowApi:
 
         response = self.client.put(
             "/api/strategy-shadow/config",
-            json={"enabled": True, "max_adx": 19.5},
+            json={
+                "enabled": True,
+                "opening_momentum_execution_eligible": False,
+                "max_adx": 19.5,
+            },
             headers={"X-Forwarded-For": "192.0.2.10"},
         )
         assert response.status_code == 200
         body = response.json()
         assert body["enabled"] is True
+        assert body["opening_momentum_execution_eligible"] is False
         assert body["max_adx"] == 19.5
         assert body["algorithm_version"] == "strategy-v2-rth-mr-v5-causal-entry"
         assert body["estimated_fee_rate_us"] == 0.0005
@@ -445,7 +450,11 @@ class TestStrategyV2ShadowApi:
         action, details = self.audit.records[0]
         assert action == "STRATEGY_V2_SHADOW_UPDATE"
         assert details["result"] == "SUCCESS"
-        assert set(details["request_summary"]["changed"]) == {"enabled", "max_adx"}
+        assert set(details["request_summary"]["changed"]) == {
+            "enabled",
+            "opening_momentum_execution_eligible",
+            "max_adx",
+        }
 
         rejected = self.client.put(
             "/api/strategy-shadow/config",

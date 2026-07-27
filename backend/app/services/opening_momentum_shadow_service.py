@@ -1968,6 +1968,9 @@ class OpeningMomentumShadowService:
             self.db.query(StrategyV2ShadowConfig)
             .filter(
                 StrategyV2ShadowConfig.enabled.is_(True),
+                StrategyV2ShadowConfig.opening_momentum_execution_eligible.is_(
+                    True
+                ),
                 StrategyV2ShadowConfig.symbol.like("%.US"),
             )
             .order_by(StrategyV2ShadowConfig.symbol.asc())

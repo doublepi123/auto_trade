@@ -100,6 +100,11 @@ class StrategyV2ShadowConfig(Base):
         default=False,
         nullable=False,
     )
+    opening_momentum_execution_eligible: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        nullable=False,
+    )
     zscore_window_1m_bars: Mapped[int] = mapped_column(Integer, default=30, nullable=False)
     zscore_window_5m_bars: Mapped[int] = mapped_column(Integer, default=12, nullable=False)
     breach_zscore: Mapped[float] = mapped_column(Float, default=-2.0, nullable=False)

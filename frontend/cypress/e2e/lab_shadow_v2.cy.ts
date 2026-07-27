@@ -771,6 +771,10 @@ describe('Strategy v2 shadow lab', () => {
   it('saves only shadow tunables and never sends execution safety fields', () => {
     cy.intercept({ method: 'PUT', pathname: '/api/strategy-shadow/config' }, (req) => {
       expect(req.body).to.have.property('enabled', false)
+      expect(req.body).to.have.property(
+        'opening_momentum_execution_eligible',
+        false,
+      )
       expect(req.body).to.have.property('breach_zscore', -2)
       expect(req.body).to.have.property('reclaim_zscore', -1)
       expect(req.body).not.to.have.property('order_submission_allowed')
@@ -782,6 +786,7 @@ describe('Strategy v2 shadow lab', () => {
       req.reply({
         body: {
           enabled: false,
+          opening_momentum_execution_eligible: false,
           symbol: 'NVDA.US',
           zscore_window_1m_bars: 30,
           zscore_window_5m_bars: 20,
@@ -820,6 +825,7 @@ describe('Strategy v2 shadow lab', () => {
 
     openShadowTab()
     cy.get('[data-testid="shadow-enabled"]').click()
+    cy.get('[data-testid="shadow-opening-execution-eligible"]').click()
     cy.get('[data-testid="shadow-save-config"]').click()
     cy.get('.el-message-box').should('be.visible')
     cy.get('.el-message-box__btns .el-button--primary').click()

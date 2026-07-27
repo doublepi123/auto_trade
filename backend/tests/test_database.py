@@ -511,6 +511,7 @@ def test_strategy_v2_shadow_table_migration_is_complete_and_idempotent(tmp_path)
         "symbol",
         "enabled",
         "universe_managed",
+        "opening_momentum_execution_eligible",
         "breach_zscore",
         "reclaim_zscore",
         "estimated_fee_rate_us",
@@ -660,6 +661,37 @@ def test_strategy_v2_shadow_table_migration_is_complete_and_idempotent(tmp_path)
     }
 
     Base.metadata.drop_all(bind=engine)
+    engine.dispose()
+
+
+def test_opening_execution_eligibility_migration_preserves_existing_rows(
+    tmp_path,
+) -> None:
+    db_path = tmp_path / "legacy_strategy_v2_shadow.db"
+    engine = create_engine(f"sqlite:///{db_path}")
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "CREATE TABLE strategy_v2_shadow_config ("
+            "id INTEGER PRIMARY KEY, "
+            "symbol VARCHAR(50) NOT NULL, "
+            "enabled BOOLEAN NOT NULL DEFAULT 0"
+            ")"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO strategy_v2_shadow_config "
+            "(id, symbol, enabled) VALUES (1, 'NVDA.US', 1)"
+        )
+
+    database._ensure_strategy_v2_shadow_tables(engine)
+    database._ensure_strategy_v2_shadow_tables(engine)
+
+    with engine.begin() as connection:
+        value = connection.exec_driver_sql(
+            "SELECT opening_momentum_execution_eligible "
+            "FROM strategy_v2_shadow_config WHERE id = 1"
+        ).scalar_one()
+
+    assert value == 1
     engine.dispose()
 
 

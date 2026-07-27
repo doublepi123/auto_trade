@@ -872,6 +872,7 @@ class TestStrategyV2ShadowService:
 
             config = db.query(StrategyV2ShadowConfig).filter_by(symbol="AAPL.US").one()
             config.enabled = True
+            config.universe_managed = True
             version_before = service._config_version(config)
             state = StrategyV2ShadowState(
                 symbol="AAPL.US",
@@ -891,6 +892,19 @@ class TestStrategyV2ShadowService:
                 )
             )
             db.commit()
+
+            eligibility = service.update_config(
+                StrategyV2ShadowConfigUpdate(
+                    opening_momentum_execution_eligible=False,
+                )
+            )
+            db.refresh(state)
+            assert eligibility.opening_momentum_execution_eligible is False
+            assert config.universe_managed is False
+            assert eligibility.config_version == version_before
+            assert state.phase == "LONG"
+            assert state.state_json == '{"state":"LONG"}'
+
             with pytest.raises(ValueError, match="virtual trade is open"):
                 service.update_config(StrategyV2ShadowConfigUpdate(max_adx=18.0))
 

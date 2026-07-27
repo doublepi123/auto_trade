@@ -348,6 +348,7 @@ class StrategyV2ShadowConfigUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: Optional[bool] = None
+    opening_momentum_execution_eligible: Optional[bool] = None
     zscore_window_1m_bars: Optional[int] = Field(default=None, ge=10, le=240)
     zscore_window_5m_bars: Optional[int] = Field(default=None, ge=5, le=120)
     breach_zscore: Optional[float] = Field(default=None, ge=-6.0, lt=-0.1, allow_inf_nan=False)
@@ -363,6 +364,7 @@ class StrategyV2ShadowConfigUpdate(BaseModel):
 
 
 class StrategyV2ShadowConfigResponse(StrategyV2ShadowConfigValues):
+    opening_momentum_execution_eligible: bool = True
     config_version: str
     updated_at: datetime
     estimated_round_trip_cost_pct: float = Field(ge=0.0, allow_inf_nan=False)

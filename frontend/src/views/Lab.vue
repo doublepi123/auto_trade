@@ -1007,6 +1007,14 @@
                     data-testid="shadow-enabled"
                   />
                 </el-form-item>
+                <el-form-item label="开盘候选">
+                  <el-switch
+                    v-model="shadowForm.opening_momentum_execution_eligible"
+                    active-text="可入选"
+                    inactive-text="仅观察"
+                    data-testid="shadow-opening-execution-eligible"
+                  />
+                </el-form-item>
                 <el-form-item label="1m z-score 窗口">
                   <el-input-number v-model="shadowForm.zscore_window_1m_bars" :min="10" :max="240" :step="5" data-testid="shadow-window-1m" />
                 </el-form-item>
@@ -1069,6 +1077,7 @@
                 <div><span>加仓</span><strong>{{ shadowConfig.allow_position_addons ? '允许' : '禁止' }}</strong></div>
                 <div><span>做空</span><strong>{{ shadowConfig.short_entries_enabled ? '允许' : '禁止' }}</strong></div>
                 <div><span>订单提交</span><strong>{{ shadowConfig.order_submission_allowed ? '允许' : '禁止' }}</strong></div>
+                <div><span>开盘策略</span><strong>{{ shadowConfig.opening_momentum_execution_eligible ? '可入选' : '仅观察' }}</strong></div>
                 <div><span>算法版本</span><strong>{{ shadowConfig.algorithm_version }}</strong></div>
               </div>
             </section>
@@ -2448,6 +2457,7 @@ function openingMomentumRecommendationTagType(
 }
 const shadowForm = reactive<StrategyShadowConfigUpdate>({
   enabled: false,
+  opening_momentum_execution_eligible: true,
   zscore_window_1m_bars: 30,
   zscore_window_5m_bars: 20,
   breach_zscore: -2,
@@ -2478,6 +2488,7 @@ function applyShadowConfig(config: StrategyShadowConfig) {
   shadowConfig.value = config
   Object.assign(shadowForm, {
     enabled: config.enabled,
+    opening_momentum_execution_eligible: config.opening_momentum_execution_eligible,
     zscore_window_1m_bars: config.zscore_window_1m_bars,
     zscore_window_5m_bars: config.zscore_window_5m_bars,
     breach_zscore: config.breach_zscore,

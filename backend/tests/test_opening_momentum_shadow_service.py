@@ -469,6 +469,47 @@ def _seed_active_broad_pool(db: Session) -> None:
     db.commit()
 
 
+def test_observation_only_symbols_are_isolated_from_opening_execution_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        settings,
+        "opening_momentum_challenger_enabled",
+        True,
+    )
+    engine, db = _database()
+    try:
+        _seed_universe(db)
+        _seed_active_broad_pool(db)
+        for symbol in ("CRWD.US", "TRV.US"):
+            db.add(StrategyV2ShadowConfig(
+                symbol=symbol,
+                enabled=True,
+                universe_managed=False,
+                opening_momentum_execution_eligible=False,
+            ))
+        db.commit()
+
+        variants = OpeningMomentumShadowService(db)._universe_variants()
+        by_variant = {item.variant: item for item in variants}
+
+        assert "CRWD.US" not in by_variant[
+            "WEAK_BREADTH_PATH_CHALLENGER"
+        ].symbols
+        assert "TRV.US" not in by_variant[
+            "WEAK_BREADTH_PATH_CHALLENGER"
+        ].symbols
+        assert "CRWD.US" in by_variant[
+            "ETF_REGIME_CRWD_CHALLENGER"
+        ].symbols
+        assert "TRV.US" in by_variant[
+            "ETF_REGIME_TRV_CHALLENGER"
+        ].symbols
+    finally:
+        db.close()
+        Base.metadata.drop_all(bind=engine)
+
+
 def test_execution_signal_uses_only_completed_three_minute_bars(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

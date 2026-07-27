@@ -2063,6 +2063,7 @@ export interface OpeningMomentumExecutionStatus {
 
 export interface StrategyShadowConfig {
   enabled: boolean
+  opening_momentum_execution_eligible: boolean
   symbol: string
   zscore_window_1m_bars: number
   zscore_window_5m_bars: number
@@ -2099,6 +2100,7 @@ export interface StrategyShadowConfig {
 
 export interface StrategyShadowConfigUpdate {
   enabled: boolean
+  opening_momentum_execution_eligible: boolean
   zscore_window_1m_bars: number
   zscore_window_5m_bars: number
   breach_zscore: number

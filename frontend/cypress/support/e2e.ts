@@ -526,6 +526,7 @@ Cypress.Commands.add('stubApi', () => {
   }
   let strategyShadowConfig = {
     enabled: true,
+    opening_momentum_execution_eligible: true,
     symbol: 'NVDA.US',
     zscore_window_1m_bars: 30,
     zscore_window_5m_bars: 20,

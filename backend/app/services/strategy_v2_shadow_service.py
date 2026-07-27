@@ -412,6 +412,10 @@ class StrategyV2ShadowService:
         row = self._get_or_create_config(symbol)
         self._ensure_version_snapshot(row)
         updates = payload.model_dump(exclude_unset=True, exclude_none=True)
+        opening_execution_eligible = updates.pop(
+            "opening_momentum_execution_eligible",
+            None,
+        )
         tunable_updates = set(updates) - {"enabled"}
         open_trade = self._open_trade(row.symbol)
         if open_trade is not None and tunable_updates:
@@ -422,36 +426,52 @@ class StrategyV2ShadowService:
                 "strategy v2 shadow config cannot change while a bracket "
                 "challenger trade is open"
             )
-        if not updates:
+        if not updates and opening_execution_eligible is None:
             return self._config_response(row)
         ownership_changed = False
         if (
-            "enabled" in updates
+            (
+                "enabled" in updates
+                or opening_execution_eligible is not None
+            )
             and not preserve_universe_management
             and row.universe_managed
         ):
-            # An explicit operator toggle takes ownership away from the
-            # universe reconciler. In particular, a manual disable must not
-            # be undone by the next selection refresh.
+            # Explicit operator controls take ownership away from the
+            # universe reconciler so a refresh cannot undo them.
             row.universe_managed = False
             ownership_changed = True
 
         merged = self._config_values(row)
         merged.update(updates)
         validated = StrategyV2ShadowConfigValues.model_validate(merged)
-        if tunable_updates or validated.enabled:
+        if tunable_updates or (
+            "enabled" in updates and validated.enabled
+        ):
             self._validate_minimum_net_edge(validated.model_dump())
 
         was_enabled = row.enabled
-        changed = ownership_changed or any(
-            getattr(row, field) != value
-            for field, value in updates.items()
+        changed = (
+            ownership_changed
+            or any(
+                getattr(row, field) != value
+                for field, value in updates.items()
+            )
+            or (
+                opening_execution_eligible is not None
+                and row.opening_momentum_execution_eligible
+                != opening_execution_eligible
+            )
         )
         if not changed:
             return self._config_response(row)
         now = datetime.now(timezone.utc)
         for field in _CONFIG_FIELDS:
             setattr(row, field, getattr(validated, field))
+        if opening_execution_eligible is not None:
+            row.opening_momentum_execution_eligible = (
+                opening_execution_eligible
+            )
         row.updated_at = now
         self.db.add(row)
         self.db.flush()
@@ -4872,6 +4892,9 @@ class StrategyV2ShadowService:
         round_trip_cost, reward_risk = self._cost_diagnostics(values)
         return StrategyV2ShadowConfigResponse(
             **values,
+            opening_momentum_execution_eligible=(
+                row.opening_momentum_execution_eligible
+            ),
             config_version=self._config_version(row),
             updated_at=row.updated_at,
             estimated_round_trip_cost_pct=round_trip_cost,

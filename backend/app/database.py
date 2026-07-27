@@ -1506,6 +1506,12 @@ def _ensure_strategy_v2_shadow_tables(db_engine: Engine) -> None:
                 "ALTER TABLE strategy_v2_shadow_config "
                 "ADD COLUMN universe_managed BOOLEAN NOT NULL DEFAULT 0"
             )
+        if "opening_momentum_execution_eligible" not in config_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE strategy_v2_shadow_config "
+                "ADD COLUMN opening_momentum_execution_eligible "
+                "BOOLEAN NOT NULL DEFAULT 1"
+            )
         if "holding_deadline" not in trade_columns:
             connection.exec_driver_sql(
                 "ALTER TABLE strategy_v2_shadow_trades ADD COLUMN holding_deadline DATETIME"
