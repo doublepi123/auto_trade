@@ -165,6 +165,7 @@ _WEAK_BREADTH_EXCEPTIONAL_PATH_ALGORITHM_VERSION = (
     f"{ALGORITHM_VERSION}+"
     f"{_WEAK_BREADTH_EXCEPTIONAL_PATH_VERSION}"
 )
+_POST_20260727_FORWARD_EVIDENCE_START_DATE = date(2026, 7, 28)
 # The conditional rule is promoted only to the explicitly confirmed paper
 # executor. The original weak-breadth policy remains the paired shadow
 # baseline so every extra paper entry has a causal counterfactual.
@@ -425,6 +426,7 @@ class _UniverseVariant:
     maximum_benchmark_average_return_bps: float | None = None
     opening_range_stop: bool = False
     required_symbols: tuple[str, ...] = ()
+    forward_evidence_start_date: date | None = None
     symbols: tuple[str, ...] = ()
     selection_run_id: int | None = None
 
@@ -2077,6 +2079,9 @@ class OpeningMomentumShadowService:
                 required_symbols=(
                     _WEAK_BREADTH_INDEX_COHORT_SYMBOLS
                 ),
+                forward_evidence_start_date=(
+                    _POST_20260727_FORWARD_EVIDENCE_START_DATE
+                ),
             ))
             variants.append(_UniverseVariant(
                 variant=(
@@ -2107,6 +2112,9 @@ class OpeningMomentumShadowService:
                 required_symbols=(
                     _WEAK_BREADTH_SPARSE_INDEX_COHORT_SYMBOLS
                 ),
+                forward_evidence_start_date=(
+                    _POST_20260727_FORWARD_EVIDENCE_START_DATE
+                ),
             ))
             variants.append(_UniverseVariant(
                 variant="ETF_REGIME_PATH_CHALLENGER",
@@ -2129,6 +2137,9 @@ class OpeningMomentumShadowService:
                 ),
                 maximum_benchmark_average_return_bps=(
                     _ETF_REGIME_MAXIMUM_AVERAGE_RETURN_BPS
+                ),
+                forward_evidence_start_date=(
+                    _POST_20260727_FORWARD_EVIDENCE_START_DATE
                 ),
             ))
             for variant_name, symbol, universe_source in (
@@ -2161,6 +2172,9 @@ class OpeningMomentumShadowService:
                         _ETF_REGIME_MAXIMUM_AVERAGE_RETURN_BPS
                     ),
                     required_symbols=(symbol,),
+                    forward_evidence_start_date=(
+                        _POST_20260727_FORWARD_EVIDENCE_START_DATE
+                    ),
                 ))
             variants.append(_UniverseVariant(
                 variant="WEAK_BREADTH_WIDE_STOP_CHALLENGER",
@@ -2405,6 +2419,9 @@ class OpeningMomentumShadowService:
             ),
             exceptional_maximum_market_return_bps=(
                 EXCEPTIONAL_MAXIMUM_MARKET_RETURN_BPS
+            ),
+            forward_evidence_start_date=(
+                _POST_20260727_FORWARD_EVIDENCE_START_DATE
             ),
         )
 
@@ -2697,11 +2714,11 @@ class OpeningMomentumShadowService:
         self,
     ) -> list[OpeningMomentumShadowVariantResponse]:
         identities = self._variant_identities()
-        rows_by_version: dict[
+        raw_rows_by_version: dict[
             str, list[OpeningMomentumShadowRun]
         ] = {}
         for identity in identities:
-            rows_by_version[identity.config_version] = (
+            raw_rows_by_version[identity.config_version] = (
                 self.db.query(OpeningMomentumShadowRun)
                 .filter(
                     OpeningMomentumShadowRun.config_version
@@ -2713,12 +2730,22 @@ class OpeningMomentumShadowService:
                 )
                 .all()
             )
+        evidence_rows_by_version = {
+            identity.config_version: [
+                row
+                for row in raw_rows_by_version[identity.config_version]
+                if identity.forward_evidence_start_date is None
+                or row.session_date
+                >= identity.forward_evidence_start_date
+            ]
+            for identity in identities
+        }
         rows_by_date = {
             config_version: {
                 row.session_date: row
                 for row in rows
             }
-            for config_version, rows in rows_by_version.items()
+            for config_version, rows in evidence_rows_by_version.items()
         }
         identities_by_variant = {
             identity.variant: identity for identity in identities
@@ -2929,15 +2956,28 @@ class OpeningMomentumShadowService:
                     stop_loss_pct=(
                         identity.decision_config.stop_loss_pct
                     ),
+                    forward_evidence_start_date=(
+                        identity.forward_evidence_start_date
+                    ),
+                    excluded_pre_forward_sessions=(
+                        len(raw_rows_by_version[identity.config_version])
+                        - len(
+                            evidence_rows_by_version[
+                                identity.config_version
+                            ]
+                        )
+                    ),
                     comparison_sessions=len(comparison_dates),
                     comparison_baseline=comparison_baseline,
                     latest=(
                         self._run_response(
-                            rows_by_version[
+                            evidence_rows_by_version[
                                 identity.config_version
                             ][-1]
                         )
-                        if rows_by_version[identity.config_version]
+                        if evidence_rows_by_version[
+                            identity.config_version
+                        ]
                         else None
                     ),
                     metrics=metrics,

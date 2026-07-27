@@ -28,7 +28,7 @@ from app.services.opening_momentum_shadow_service import (
 )
 
 
-_SESSION_OPEN = datetime(2026, 7, 23, 13, 30, tzinfo=timezone.utc)
+_SESSION_OPEN = datetime(2026, 7, 29, 13, 30, tzinfo=timezone.utc)
 _SYMBOLS = tuple(f"S{index}.US" for index in range(8))
 _SNDK_SYMBOL = "SNDK.US"
 _EXTENSION_SYMBOLS = (
@@ -366,7 +366,7 @@ def test_tick_uses_only_a_universe_completed_before_session_open(
             db,
             symbols=_SYMBOLS[1:] + _SYMBOLS[:1],
             algorithm_version="test-v3",
-            as_of_date=date(2026, 7, 23),
+            as_of_date=_SESSION_OPEN.date(),
             completed_at=_SESSION_OPEN - timedelta(minutes=1),
         )
         candles = _FakeCandles()
@@ -1230,6 +1230,10 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
             == 5.0
         )
         assert (
+            weak_breadth_exceptional_path.forward_evidence_start_date
+            == date(2026, 7, 28)
+        )
+        assert (
             weak_breadth_index_cohort.decision_config
             == execution.decision_config
         )
@@ -1280,6 +1284,7 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
             etf_regime.maximum_benchmark_average_return_bps
             == 0.0
         )
+        assert etf_regime.forward_evidence_start_date == date(2026, 7, 28)
         assert etf_regime.required_symbols == ()
         assert etf_regime.universe_source == (
             "OPENING_EXECUTION_ETF_REGIME"
@@ -1295,6 +1300,7 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
                 extension.maximum_benchmark_average_return_bps
                 == 0.0
             )
+            assert extension.forward_evidence_start_date == date(2026, 7, 28)
             assert extension.required_symbols == (symbol,)
         assert (
             weak_breadth_wide_stop.decision_config.signal_minutes
@@ -1370,6 +1376,75 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
                 for identity in identities
             }
         ) == len(identities)
+    finally:
+        db.close()
+        Base.metadata.drop_all(bind=engine)
+
+
+def test_forward_scorecard_excludes_rows_before_the_frozen_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        settings,
+        "opening_momentum_challenger_enabled",
+        True,
+    )
+    engine, db = _database()
+    try:
+        service = OpeningMomentumShadowService(db)
+        identities = {
+            identity.variant: identity
+            for identity in service._variant_identities()
+        }
+        baseline = identities["WEAK_BREADTH_PATH_CHALLENGER"]
+        challenger = identities[
+            "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER"
+        ]
+        for session_date, baseline_return, challenger_return in (
+            (date(2026, 7, 27), 0.0, 100.0),
+            (date(2026, 7, 28), 0.0, 20.0),
+        ):
+            timestamp = datetime.combine(
+                session_date,
+                datetime.min.time(),
+                tzinfo=timezone.utc,
+            )
+            for identity, net_return_bps in (
+                (baseline, baseline_return),
+                (challenger, challenger_return),
+            ):
+                db.add(OpeningMomentumShadowRun(
+                    session_date=session_date,
+                    algorithm_version=identity.algorithm_version,
+                    config_version=identity.config_version,
+                    status="CLOSED",
+                    reason="FIXED_HOLD_EXIT",
+                    signal_at=timestamp,
+                    observed_at=timestamp,
+                    universe_source=identity.universe_source,
+                    universe_size=41,
+                    candidate_symbol="ISRG.US",
+                    estimated_cost_bps=14.0,
+                    net_return_bps=net_return_bps,
+                ))
+        db.commit()
+
+        response = {
+            item.variant: item
+            for item in service._variant_responses()
+        }["WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER"]
+
+        assert response.forward_evidence_start_date == date(2026, 7, 28)
+        assert response.excluded_pre_forward_sessions == 1
+        assert response.comparison_sessions == 1
+        assert response.latest is not None
+        assert response.latest.session_date == date(2026, 7, 28)
+        assert response.metrics.observed_sessions == 1
+        assert response.metrics.closed_trades == 1
+        assert response.metrics.cumulative_net_return_bps == 20.0
+        assert response.comparison is not None
+        assert response.comparison.resolved_sessions == 1
+        assert response.comparison.cumulative_delta_bps == 20.0
     finally:
         db.close()
         Base.metadata.drop_all(bind=engine)
@@ -3015,7 +3090,7 @@ def test_disabled_service_closes_stale_open_run_from_history(
         service = OpeningMomentumShadowService(db, candles)
         db.add(
             OpeningMomentumShadowRun(
-                session_date=date(2026, 7, 23),
+                session_date=_SESSION_OPEN.date(),
                 algorithm_version=ALGORITHM_VERSION,
                 config_version=service._incumbent_config_version(),
                 status="OPEN",

@@ -372,6 +372,10 @@
                     → {{ formatBps(openingExecutionStatus.config.exceptional_maximum_market_return_bps) }}
                   </strong>
                 </div>
+                <div v-if="openingExecutionStatus.config.forward_evidence_start_date">
+                  <span>前向计分起点</span>
+                  <strong>{{ openingExecutionStatus.config.forward_evidence_start_date }}</strong>
+                </div>
                 <div>
                   <span>最长持有</span>
                   <strong>{{ openingExecutionStatus.config.holding_minutes }} 分钟</strong>
@@ -617,6 +621,20 @@
                       >
                         {{ openingMomentumVariantLabel(row.variant) }}
                       </el-tag>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="前向证据" min-width="125">
+                    <template #default="{ row }">
+                      <div v-if="row.forward_evidence_start_date">
+                        <strong>{{ row.forward_evidence_start_date }}</strong>
+                        <small
+                          v-if="row.excluded_pre_forward_sessions > 0"
+                          class="opening-momentum-forward-excluded"
+                        >
+                          排除 {{ row.excluded_pre_forward_sessions }} 个事后日
+                        </small>
+                      </div>
+                      <span v-else>-</span>
                     </template>
                   </el-table-column>
                   <el-table-column label="信号" min-width="80">
@@ -4301,6 +4319,13 @@ onBeforeUnmount(() => {
 .opening-momentum-exception-threshold {
   margin-top: 2px;
   color: #6b7280;
+  font-size: 12px;
+}
+
+.opening-momentum-forward-excluded {
+  display: block;
+  margin-top: 2px;
+  color: #9a3412;
   font-size: 12px;
 }
 

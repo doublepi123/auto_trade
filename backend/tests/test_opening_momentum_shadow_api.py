@@ -107,6 +107,9 @@ class TestOpeningMomentumShadowApi:
             body["config"]["exceptional_maximum_market_return_bps"]
             == 5.0
         )
+        assert body["config"]["forward_evidence_start_date"] == (
+            "2026-07-28"
+        )
         assert body["config"]["universe_source"] == (
             "OPENING_EXECUTION_WEAK_BREADTH_EXCEPTIONAL_PATH"
         )
@@ -324,6 +327,18 @@ class TestOpeningMomentumShadowApi:
             == 5.0
         )
         assert weak_breadth_exceptional_path["required_symbols"] == []
+        assert (
+            weak_breadth_exceptional_path[
+                "forward_evidence_start_date"
+            ]
+            == "2026-07-28"
+        )
+        assert (
+            weak_breadth_exceptional_path[
+                "excluded_pre_forward_sessions"
+            ]
+            == 0
+        )
         assert (
             weak_breadth_exceptional_path["comparison_baseline"]
             == "WEAK_BREADTH_PATH_CHALLENGER"

@@ -1977,6 +1977,8 @@ export interface OpeningMomentumShadowVariant {
   required_symbols: string[]
   holding_minutes: number
   stop_loss_pct: number | null
+  forward_evidence_start_date: string | null
+  excluded_pre_forward_sessions: number
   comparison_sessions: number
   comparison_baseline:
     | 'INCUMBENT'
@@ -2029,6 +2031,7 @@ export interface OpeningMomentumExecutionConfig {
   maximum_market_return_bps: number | null
   exceptional_minimum_path_efficiency: number | null
   exceptional_maximum_market_return_bps: number | null
+  forward_evidence_start_date: string | null
   max_entry_delay_seconds: number
   max_price_deviation_bps: number
   capital_slots: 1

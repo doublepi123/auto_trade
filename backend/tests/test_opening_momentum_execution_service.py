@@ -20,7 +20,7 @@ from app.services.opening_momentum_shadow_service import (
 )
 
 
-_SESSION_OPEN = datetime(2026, 7, 23, 13, 30, tzinfo=timezone.utc)
+_SESSION_OPEN = datetime(2026, 7, 29, 13, 30, tzinfo=timezone.utc)
 _ENTRY_DUE = _SESSION_OPEN + timedelta(minutes=4)
 
 
@@ -87,7 +87,7 @@ def _enable_execution(monkeypatch: pytest.MonkeyPatch) -> None:
 def _signal(service: OpeningMomentumExecutionService) -> OpeningMomentumExecutionSignal:
     identity = service._execution_identity()
     return OpeningMomentumExecutionSignal(
-        session_date=date(2026, 7, 23),
+        session_date=_SESSION_OPEN.date(),
         algorithm_version=identity.algorithm_version,
         config_version=identity.config_version,
         universe_source=identity.universe_source,
@@ -133,8 +133,71 @@ def test_paper_execution_uses_the_exceptional_path_identity() -> None:
         assert identity.maximum_market_return_bps == 0.0
         assert identity.exceptional_minimum_path_efficiency == 0.90
         assert identity.exceptional_maximum_market_return_bps == 5.0
+        assert identity.forward_evidence_start_date == date(2026, 7, 28)
         assert identity.effective_maximum_market_return_bps(0.89) == 0.0
         assert identity.effective_maximum_market_return_bps(0.90) == 5.0
+    finally:
+        db.close()
+        Base.metadata.drop_all(bind=engine)
+
+
+def test_tick_does_not_evaluate_before_forward_evidence_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enable_execution(monkeypatch)
+    engine, db = _database()
+    runner = _FakeRunner([])
+    evaluated: list[datetime | None] = []
+    try:
+        monkeypatch.setattr(
+            OpeningMomentumShadowService,
+            "evaluate_execution_signal",
+            lambda _self, *, now=None: evaluated.append(now),
+        )
+
+        status = OpeningMomentumExecutionService(
+            db,
+            None,
+            runner,
+        ).tick(
+            now=datetime(2026, 7, 27, 13, 34, tzinfo=timezone.utc),
+        )
+
+        assert status.state == "WAITING"
+        assert status.latest is None
+        assert status.config.forward_evidence_start_date == date(2026, 7, 28)
+        assert evaluated == []
+        assert db.query(OpeningMomentumExecution).count() == 0
+        assert runner.refresh_count == 1
+    finally:
+        db.close()
+        Base.metadata.drop_all(bind=engine)
+
+
+def test_status_ignores_execution_from_a_superseded_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enable_execution(monkeypatch)
+    engine, db = _database()
+    try:
+        service = OpeningMomentumExecutionService(db)
+        legacy = service._record_signal(
+            _signal(service),
+            armed_at=_ENTRY_DUE,
+        )
+        legacy.config_version = "superseded-opening-policy"
+        legacy.algorithm_version = "superseded-opening-policy"
+        legacy.universe_source = "SUPERSEDED_OPENING_POLICY"
+        legacy.status = "SKIPPED"
+        db.commit()
+
+        status = service.get_status()
+
+        assert status.state == "WAITING"
+        assert status.latest is None
+        assert status.config.universe_source == (
+            "OPENING_EXECUTION_WEAK_BREADTH_EXCEPTIONAL_PATH"
+        )
     finally:
         db.close()
         Base.metadata.drop_all(bind=engine)

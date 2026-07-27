@@ -672,6 +672,8 @@ class OpeningMomentumShadowVariantResponse(BaseModel):
     required_symbols: list[str] = Field(default_factory=list)
     holding_minutes: int
     stop_loss_pct: Optional[float] = None
+    forward_evidence_start_date: Optional[date] = None
+    excluded_pre_forward_sessions: int = Field(default=0, ge=0)
     comparison_sessions: int = 0
     comparison_baseline: Optional[
         Literal[
@@ -719,6 +721,7 @@ class OpeningMomentumExecutionConfigResponse(BaseModel):
         le=1,
     )
     exceptional_maximum_market_return_bps: Optional[float] = None
+    forward_evidence_start_date: Optional[date] = None
     max_entry_delay_seconds: int
     max_price_deviation_bps: float
     capital_slots: Literal[1] = 1

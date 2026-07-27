@@ -106,6 +106,13 @@ class OpeningMomentumExecutionService:
 
         session = get_session("US")
         session_date = session.local(current).date()
+        identity = self._execution_identity()
+        if (
+            identity.forward_evidence_start_date is not None
+            and session_date < identity.forward_evidence_start_date
+        ):
+            self._refresh_runner_registry()
+            return self.get_status()
         row = self._execution_for_session(session_date)
         if row is None:
             if self.active_policies(self.db):
@@ -143,6 +150,10 @@ class OpeningMomentumExecutionService:
         identity = self._execution_identity()
         latest = (
             self.db.query(OpeningMomentumExecution)
+            .filter(
+                OpeningMomentumExecution.config_version
+                == identity.config_version
+            )
             .order_by(
                 OpeningMomentumExecution.session_date.desc(),
                 OpeningMomentumExecution.id.desc(),
@@ -191,6 +202,9 @@ class OpeningMomentumExecutionService:
                 ),
                 exceptional_maximum_market_return_bps=(
                     identity.exceptional_maximum_market_return_bps
+                ),
+                forward_evidence_start_date=(
+                    identity.forward_evidence_start_date
                 ),
                 max_entry_delay_seconds=(
                     settings.opening_momentum_execution_max_entry_delay_seconds
