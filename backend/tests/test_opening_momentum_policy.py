@@ -8,15 +8,19 @@ from app.domain.opening_momentum import OpeningMomentumConfig
 from app.domain.opening_momentum_policy import (
     OPENING_POLICY_COHORT_DIAGNOSTIC_VERSION,
     OPENING_POLICY_DIAGNOSTIC_VERSION,
+    OPENING_POLICY_HORIZON_DIAGNOSTIC_VERSION,
     PRODUCTION_POLICY_NAME,
     OpeningPolicyCohortReport,
     OpeningPolicyCohortSlice,
+    OpeningPolicyHorizonReport,
+    OpeningPolicyHorizonSlice,
     OpeningPolicyResult,
     OpeningPolicySession,
     OpeningPolicySlice,
     OpeningPolicySpec,
     evaluate_opening_policy_cohort,
     evaluate_opening_policy_grid,
+    evaluate_opening_policy_horizons,
     opening_execution_config,
 )
 
@@ -33,6 +37,19 @@ def _cohort_slice(
     name: str,
 ) -> OpeningPolicyCohortSlice:
     return next(value for value in report.slices if value.name == name)
+
+
+def _horizon_slice(
+    report: OpeningPolicyHorizonReport,
+    holding_minutes: int,
+    name: str,
+) -> OpeningPolicyHorizonSlice:
+    result = next(
+        value
+        for value in report.results
+        if value.holding_minutes == holding_minutes
+    )
+    return next(value for value in result.slices if value.name == name)
 
 
 def _sessions() -> tuple[OpeningPolicySession, ...]:
@@ -267,5 +284,115 @@ def test_cohort_report_requires_unique_paired_sessions_and_symbols() -> None:
             _sessions()[:2],
             policy=policy,
             cohort_symbols=(),
+            round_trip_cost_bps=14.0,
+        )
+
+
+def test_horizon_report_pairs_identical_decisions_and_exit_returns() -> None:
+    first = date(2026, 1, 2)
+    baseline_values = (100.0, -50.0, 40.0, 80.0, -20.0, 30.0)
+    challenger_values = (120.0, -40.0, 20.0, 100.0, -100.0, 60.0)
+
+    def build(
+        values: tuple[float, ...],
+        *,
+        stop_indexes: set[int],
+    ) -> tuple[OpeningPolicySession, ...]:
+        return tuple(
+            OpeningPolicySession(
+                session_date=first + timedelta(days=index),
+                baseline_signal=True,
+                gross_return_bps=value + 14.0,
+                market_return_bps=-1.0,
+                candidate_path_efficiency=0.8,
+                candidate_symbol=f"S{index}.US",
+                stop_triggered=index in stop_indexes,
+            )
+            for index, value in enumerate(values)
+        )
+
+    baseline = build(baseline_values, stop_indexes={4})
+    challenger = build(challenger_values, stop_indexes={1, 4}) + (
+        OpeningPolicySession(
+            session_date=first + timedelta(days=10),
+            baseline_signal=True,
+            gross_return_bps=114.0,
+            market_return_bps=-1.0,
+            candidate_path_efficiency=0.8,
+            candidate_symbol="EXTRA.US",
+        ),
+    )
+    report = evaluate_opening_policy_horizons(
+        {60: baseline, 90: challenger},
+        baseline_holding_minutes=60,
+        policy=OpeningPolicySpec(
+            PRODUCTION_POLICY_NAME,
+            minimum_path_efficiency=0.7,
+            maximum_market_return_bps=0.0,
+        ),
+        round_trip_cost_bps=14.0,
+    )
+
+    discovery = _horizon_slice(report, 90, "DISCOVERY")
+    holdout = _horizon_slice(report, 90, "HOLDOUT")
+    assert report.algorithm_version == (
+        OPENING_POLICY_HORIZON_DIAGNOSTIC_VERSION
+    )
+    sources = [
+        (value.holding_minutes, value.source_sessions)
+        for value in report.sources
+    ]
+    assert sources == [
+        (60, 6),
+        (90, 7),
+    ]
+    assert report.paired_sessions == 6
+    assert report.discovery_sessions == 3
+    assert report.holdout_sessions == 3
+    assert discovery.baseline.cumulative_return_bps == pytest.approx(90.0)
+    assert discovery.challenger.cumulative_return_bps == pytest.approx(100.0)
+    assert discovery.comparison.cumulative_delta_bps == pytest.approx(10.0)
+    assert holdout.baseline.cumulative_return_bps == pytest.approx(90.0)
+    assert holdout.challenger.cumulative_return_bps == pytest.approx(60.0)
+    assert holdout.comparison.cumulative_delta_bps == pytest.approx(-30.0)
+    assert holdout.baseline.stop_exits == 1
+    assert holdout.challenger.stop_exits == 1
+    assert holdout.changed_return_sessions == 3
+    assert holdout.deltas[1].delta_bps == pytest.approx(-80.0)
+    assert holdout.tail_robustness_available is False
+    assert holdout.tail_robustness_passed is False
+    assert report.diagnostic_only is True
+    assert report.automatic_promotion_allowed is False
+    assert report.to_dict()["baseline_holding_minutes"] == 60
+
+
+def test_horizon_report_rejects_changed_signal_decisions() -> None:
+    baseline = _sessions()[:2]
+    changed = (
+        OpeningPolicySession(
+            session_date=baseline[0].session_date,
+            baseline_signal=True,
+            gross_return_bps=baseline[0].gross_return_bps,
+            market_return_bps=baseline[0].market_return_bps,
+            candidate_path_efficiency=(
+                baseline[0].candidate_path_efficiency
+            ),
+            candidate_symbol="CHANGED.US",
+        ),
+        baseline[1],
+    )
+
+    with pytest.raises(ValueError, match="changed the signal decision"):
+        evaluate_opening_policy_horizons(
+            {60: baseline, 90: changed},
+            baseline_holding_minutes=60,
+            policy=OpeningPolicySpec(PRODUCTION_POLICY_NAME),
+            round_trip_cost_bps=14.0,
+        )
+    with pytest.raises(ValueError, match="baseline holding horizon"):
+        evaluate_opening_policy_horizons(
+            {90: baseline, 120: baseline},
+            baseline_holding_minutes=60,
+            policy=OpeningPolicySpec(PRODUCTION_POLICY_NAME),
             round_trip_cost_bps=14.0,
         )

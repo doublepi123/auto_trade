@@ -37,7 +37,12 @@ def _timestamp(session_date: date, minute_offset: int) -> datetime:
     )
 
 
-def _bars(symbol: str, session_date: date) -> tuple[RawMinuteBar, ...]:
+def _bars(
+    symbol: str,
+    session_date: date,
+    *,
+    retained_minutes: int = 64,
+) -> tuple[RawMinuteBar, ...]:
     symbol_index = (
         _SYMBOLS.index(symbol) if symbol in _SYMBOLS else -1
     )
@@ -52,7 +57,7 @@ def _bars(symbol: str, session_date: date) -> tuple[RawMinuteBar, ...]:
         101.00,
     )
     result: list[RawMinuteBar] = []
-    for offset in range(65):
+    for offset in range(retained_minutes + 1):
         open_price = 100.0
         close_price = 100.0
         if symbol == _COHORT_SYMBOL and offset < 3:
@@ -77,12 +82,17 @@ def _bars(symbol: str, session_date: date) -> tuple[RawMinuteBar, ...]:
 
 def _bars_by_symbol(
     *session_dates: date,
+    retained_minutes: int = 64,
 ) -> dict[str, tuple[RawMinuteBar, ...]]:
     return {
         symbol: tuple(
             bar
             for session_date in session_dates
-            for bar in _bars(symbol, session_date)
+            for bar in _bars(
+                symbol,
+                session_date,
+                retained_minutes=retained_minutes,
+            )
         )
         for symbol in _SYMBOLS
     }
@@ -246,6 +256,71 @@ def test_cli_emits_joint_cohort_diagnostic(
         "automatic_promotion_allowed"
     ] is False
     assert stored["data_scope"]["cohort_resolved_session_count"] == 2
+
+
+def test_cli_emits_paired_holding_horizon_rejections(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    first = date(2026, 7, 6)
+    second = date(2026, 7, 7)
+    cache_path = tmp_path / "opening.json.gz"
+    output_path = tmp_path / "horizon-report.json"
+    _save_cache(
+        cache_path,
+        _bars_by_symbol(
+            first,
+            second,
+            retained_minutes=124,
+        ),
+        start_date=first,
+        end_date=second,
+        retained_minutes_after_open=124,
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "opening_policy_research",
+        "--start-date",
+        first.isoformat(),
+        "--end-date",
+        second.isoformat(),
+        "--baseline-symbols",
+        ",".join(_SYMBOLS),
+        "--holding-horizons",
+        "90,120",
+        "--cache-path",
+        str(cache_path),
+        "--output",
+        str(output_path),
+    ])
+
+    assert main() == 0
+
+    stdout = json.loads(capsys.readouterr().out)
+    stored = json.loads(output_path.read_text(encoding="utf-8"))
+    horizon = stdout["holding_horizons"]
+    assert horizon["baseline_holding_minutes"] == 60
+    assert horizon["paired_sessions"] == 2
+    assert [value["holding_minutes"] for value in horizon["results"]] == [
+        90,
+        120,
+    ]
+    assert all(
+        value["status"] == "REJECTED"
+        for value in horizon["results"]
+    )
+    assert len(stdout["holding_horizon_cost_stress"]) == 3
+    assert stored["holding_horizon_diagnostic"]["diagnostic_only"] is True
+    assert stored["holding_horizon_diagnostic"][
+        "automatic_promotion_allowed"
+    ] is False
+    assert stored["holding_horizon_decisions"] == horizon
+    assert stored["data_scope"][
+        "holding_horizon_paired_session_count"
+    ] == 2
+    assert stored["research_design"][
+        "holding_horizon_selection_allowed"
+    ] is False
 
 
 def test_cli_refuses_to_overwrite_incompatible_cache(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
 from datetime import date
 from statistics import fmean, median
@@ -18,6 +19,9 @@ OPENING_POLICY_DIAGNOSTIC_VERSION = (
 )
 OPENING_POLICY_COHORT_DIAGNOSTIC_VERSION = (
     "opening-policy-cohort-paired-chronological-holdout-v1"
+)
+OPENING_POLICY_HORIZON_DIAGNOSTIC_VERSION = (
+    "opening-policy-horizon-paired-chronological-holdout-v1"
 )
 PRODUCTION_POLICY_NAME = "WEAK_BREADTH_PATH_CHALLENGER"
 PRODUCTION_MINIMUM_PATH_EFFICIENCY = 0.70
@@ -242,6 +246,72 @@ class OpeningPolicyCohortReport:
         }
 
 
+@dataclass(frozen=True)
+class OpeningPolicyHorizonDelta:
+    session_date: date
+    candidate_symbol: str | None
+    baseline_return_bps: float
+    challenger_return_bps: float
+    delta_bps: float
+    baseline_stop_triggered: bool
+    challenger_stop_triggered: bool
+
+
+@dataclass(frozen=True)
+class OpeningPolicyHorizonSlice:
+    name: OpeningPolicySliceName
+    start_date: date | None
+    end_date: date | None
+    resolved_sessions: int
+    changed_return_sessions: int
+    baseline: OpeningPolicyReturnMetrics
+    challenger: OpeningPolicyReturnMetrics
+    comparison: OpeningMomentumPairedComparison
+    deltas: tuple[OpeningPolicyHorizonDelta, ...]
+    tail_robustness_available: bool
+    tail_robustness_passed: bool
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            str(key): _json_safe(value)
+            for key, value in asdict(self).items()
+        }
+
+
+@dataclass(frozen=True)
+class OpeningPolicyHorizonResult:
+    holding_minutes: int
+    slices: tuple[OpeningPolicyHorizonSlice, ...]
+
+
+@dataclass(frozen=True)
+class OpeningPolicyHorizonSource:
+    holding_minutes: int
+    source_sessions: int
+
+
+@dataclass(frozen=True)
+class OpeningPolicyHorizonReport:
+    algorithm_version: str
+    policy: OpeningPolicySpec
+    discovery_ratio: float
+    round_trip_cost_bps: float
+    baseline_holding_minutes: int
+    sources: tuple[OpeningPolicyHorizonSource, ...]
+    paired_sessions: int
+    discovery_sessions: int
+    holdout_sessions: int
+    results: tuple[OpeningPolicyHorizonResult, ...]
+    diagnostic_only: Literal[True]
+    automatic_promotion_allowed: Literal[False]
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            str(key): _json_safe(value)
+            for key, value in asdict(self).items()
+        }
+
+
 def evaluate_opening_policy_grid(
     sessions: Sequence[OpeningPolicySession],
     *,
@@ -418,6 +488,122 @@ def evaluate_opening_policy_cohort(
     )
 
 
+def evaluate_opening_policy_horizons(
+    sessions_by_holding_minutes: Mapping[
+        int,
+        Sequence[OpeningPolicySession],
+    ],
+    *,
+    baseline_holding_minutes: int,
+    policy: OpeningPolicySpec,
+    round_trip_cost_bps: float,
+    discovery_ratio: float = 0.60,
+) -> OpeningPolicyHorizonReport:
+    """Compare fixed exits while holding every signal decision constant."""
+
+    if not math.isfinite(round_trip_cost_bps) or round_trip_cost_bps < 0:
+        raise ValueError("round_trip_cost_bps must be finite and non-negative")
+    if not 0 < discovery_ratio < 1:
+        raise ValueError("discovery_ratio must be in (0, 1)")
+    if baseline_holding_minutes <= 0:
+        raise ValueError("baseline_holding_minutes must be positive")
+    if len(sessions_by_holding_minutes) < 2:
+        raise ValueError("at least two holding horizons are required")
+
+    sessions_by_horizon: dict[
+        int,
+        dict[date, OpeningPolicySession],
+    ] = {}
+    for holding_minutes, sessions in sessions_by_holding_minutes.items():
+        if (
+            isinstance(holding_minutes, bool)
+            or not isinstance(holding_minutes, int)
+            or holding_minutes <= 0
+        ):
+            raise ValueError("holding horizons must be positive integers")
+        sessions_by_horizon[holding_minutes] = _sessions_by_date(
+            sessions,
+            field_name=f"sessions_by_holding_minutes[{holding_minutes}]",
+        )
+    baseline_by_date = sessions_by_horizon.get(
+        baseline_holding_minutes
+    )
+    if baseline_by_date is None:
+        raise ValueError("baseline holding horizon is missing")
+
+    paired_dates = tuple(sorted(set.intersection(
+        *(set(values) for values in sessions_by_horizon.values())
+    )))
+    if len(paired_dates) < 2:
+        raise ValueError("at least two paired horizon sessions are required")
+
+    for holding_minutes, sessions in sessions_by_horizon.items():
+        if holding_minutes == baseline_holding_minutes:
+            continue
+        for session_date in paired_dates:
+            _validate_same_horizon_decision(
+                baseline_by_date[session_date],
+                sessions[session_date],
+                holding_minutes=holding_minutes,
+            )
+
+    split_index = max(
+        1,
+        min(
+            len(paired_dates) - 1,
+            math.floor(len(paired_dates) * discovery_ratio),
+        ),
+    )
+    slice_specs: tuple[
+        tuple[OpeningPolicySliceName, tuple[date, ...]], ...
+    ] = (
+        ("ALL", paired_dates),
+        ("DISCOVERY", paired_dates[:split_index]),
+        ("HOLDOUT", paired_dates[split_index:]),
+    )
+    return OpeningPolicyHorizonReport(
+        algorithm_version=OPENING_POLICY_HORIZON_DIAGNOSTIC_VERSION,
+        policy=policy,
+        discovery_ratio=discovery_ratio,
+        round_trip_cost_bps=round_trip_cost_bps,
+        baseline_holding_minutes=baseline_holding_minutes,
+        sources=tuple(
+            OpeningPolicyHorizonSource(
+                holding_minutes=holding_minutes,
+                source_sessions=len(sessions),
+            )
+            for holding_minutes, sessions in sorted(
+                sessions_by_horizon.items()
+            )
+        ),
+        paired_sessions=len(paired_dates),
+        discovery_sessions=split_index,
+        holdout_sessions=len(paired_dates) - split_index,
+        results=tuple(
+            OpeningPolicyHorizonResult(
+                holding_minutes=holding_minutes,
+                slices=tuple(
+                    _horizon_evaluation_slice(
+                        name,
+                        dates,
+                        baseline_by_date=baseline_by_date,
+                        challenger_by_date=sessions,
+                        policy=policy,
+                        round_trip_cost_bps=round_trip_cost_bps,
+                    )
+                    for name, dates in slice_specs
+                ),
+            )
+            for holding_minutes, sessions in sorted(
+                sessions_by_horizon.items()
+            )
+            if holding_minutes != baseline_holding_minutes
+        ),
+        diagnostic_only=True,
+        automatic_promotion_allowed=False,
+    )
+
+
 def _sessions_by_date(
     sessions: Sequence[OpeningPolicySession],
     *,
@@ -429,6 +615,173 @@ def _sessions_by_date(
             raise ValueError(f"{field_name} dates must be unique")
         result[value.session_date] = value
     return result
+
+
+def _validate_same_horizon_decision(
+    baseline: OpeningPolicySession,
+    challenger: OpeningPolicySession,
+    *,
+    holding_minutes: int,
+) -> None:
+    if (
+        baseline.baseline_signal != challenger.baseline_signal
+        or baseline.candidate_symbol != challenger.candidate_symbol
+        or not _optional_float_matches(
+            baseline.market_return_bps,
+            challenger.market_return_bps,
+        )
+        or not _optional_float_matches(
+            baseline.candidate_path_efficiency,
+            challenger.candidate_path_efficiency,
+        )
+    ):
+        raise ValueError(
+            "holding horizon changed the signal decision for "
+            f"{baseline.session_date.isoformat()} at {holding_minutes}m"
+        )
+
+
+def _optional_float_matches(
+    left: float | None,
+    right: float | None,
+) -> bool:
+    if left is None or right is None:
+        return left is right
+    return math.isclose(left, right, rel_tol=1e-12, abs_tol=1e-12)
+
+
+def _horizon_evaluation_slice(
+    name: OpeningPolicySliceName,
+    dates: Sequence[date],
+    *,
+    baseline_by_date: Mapping[date, OpeningPolicySession],
+    challenger_by_date: Mapping[date, OpeningPolicySession],
+    policy: OpeningPolicySpec,
+    round_trip_cost_bps: float,
+) -> OpeningPolicyHorizonSlice:
+    baseline_sessions = tuple(baseline_by_date[value] for value in dates)
+    challenger_sessions = tuple(
+        challenger_by_date[value] for value in dates
+    )
+    accepted = tuple(
+        _policy_accepts(policy, value) for value in baseline_sessions
+    )
+    challenger_accepted = tuple(
+        _policy_accepts(policy, value) for value in challenger_sessions
+    )
+    if accepted != challenger_accepted:
+        raise ValueError("holding horizon changed policy acceptance")
+
+    baseline_returns = tuple(
+        _baseline_net_return(
+            value,
+            round_trip_cost_bps=round_trip_cost_bps,
+        )
+        if is_accepted
+        else 0.0
+        for value, is_accepted in zip(
+            baseline_sessions,
+            accepted,
+            strict=True,
+        )
+    )
+    challenger_returns = tuple(
+        _baseline_net_return(
+            value,
+            round_trip_cost_bps=round_trip_cost_bps,
+        )
+        if is_accepted
+        else 0.0
+        for value, is_accepted in zip(
+            challenger_sessions,
+            accepted,
+            strict=True,
+        )
+    )
+    baseline_stops = tuple(
+        value.stop_triggered and is_accepted
+        for value, is_accepted in zip(
+            baseline_sessions,
+            accepted,
+            strict=True,
+        )
+    )
+    challenger_stops = tuple(
+        value.stop_triggered and is_accepted
+        for value, is_accepted in zip(
+            challenger_sessions,
+            accepted,
+            strict=True,
+        )
+    )
+    baseline_metrics = _return_metrics(
+        baseline_returns,
+        accepted,
+        baseline_stops,
+    )
+    challenger_metrics = _return_metrics(
+        challenger_returns,
+        accepted,
+        challenger_stops,
+    )
+    deltas = tuple(
+        OpeningPolicyHorizonDelta(
+            session_date=baseline.session_date,
+            candidate_symbol=baseline.candidate_symbol,
+            baseline_return_bps=baseline_return,
+            challenger_return_bps=challenger_return,
+            delta_bps=challenger_return - baseline_return,
+            baseline_stop_triggered=baseline_stop,
+            challenger_stop_triggered=challenger_stop,
+        )
+        for (
+            baseline,
+            baseline_return,
+            challenger_return,
+            baseline_stop,
+            challenger_stop,
+        ) in zip(
+            baseline_sessions,
+            baseline_returns,
+            challenger_returns,
+            baseline_stops,
+            challenger_stops,
+            strict=True,
+        )
+        if (
+            not math.isclose(
+                baseline_return,
+                challenger_return,
+                rel_tol=1e-12,
+                abs_tol=1e-12,
+            )
+            or baseline_stop != challenger_stop
+        )
+    )
+    tail_robustness_available = (
+        baseline_metrics.entries >= 4
+        and challenger_metrics.entries >= 4
+    )
+    return OpeningPolicyHorizonSlice(
+        name=name,
+        start_date=dates[0] if dates else None,
+        end_date=dates[-1] if dates else None,
+        resolved_sessions=len(dates),
+        changed_return_sessions=len(deltas),
+        baseline=baseline_metrics,
+        challenger=challenger_metrics,
+        comparison=compare_opening_momentum_variants(
+            baseline_returns,
+            challenger_returns,
+        ),
+        deltas=deltas,
+        tail_robustness_available=tail_robustness_available,
+        tail_robustness_passed=(
+            tail_robustness_available
+            and challenger_metrics.cumulative_without_best_3_bps
+            >= baseline_metrics.cumulative_without_best_3_bps
+        ),
+    )
 
 
 def _cohort_evaluation_slice(

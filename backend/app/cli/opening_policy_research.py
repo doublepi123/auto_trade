@@ -5,7 +5,7 @@ import json
 import math
 import sys
 from collections.abc import Sequence
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -24,6 +24,7 @@ from app.cli.opening_extension_research import (
 from app.core.broker import BrokerGateway
 from app.core.market_calendar import get_session
 from app.domain.opening_momentum import (
+    OpeningMomentumConfig,
     evaluate_opening_momentum,
     opening_path_efficiency,
     shadow_round_trip_return_bps,
@@ -31,23 +32,28 @@ from app.domain.opening_momentum import (
 from app.domain.opening_momentum_policy import (
     OPENING_POLICY_COHORT_DIAGNOSTIC_VERSION,
     OPENING_POLICY_DIAGNOSTIC_VERSION,
+    OPENING_POLICY_HORIZON_DIAGNOSTIC_VERSION,
     PRODUCTION_MAXIMUM_MARKET_RETURN_BPS,
     PRODUCTION_MINIMUM_PATH_EFFICIENCY,
     PRODUCTION_POLICY_NAME,
     OpeningPolicyCohortReport,
     OpeningPolicyCohortSlice,
     OpeningPolicyDiagnosticReport,
+    OpeningPolicyHorizonReport,
+    OpeningPolicyHorizonResult,
+    OpeningPolicyHorizonSlice,
     OpeningPolicyResult,
     OpeningPolicySession,
     OpeningPolicySlice,
     OpeningPolicySpec,
     evaluate_opening_policy_cohort,
     evaluate_opening_policy_grid,
+    evaluate_opening_policy_horizons,
     opening_execution_config,
 )
 
 
-OPENING_POLICY_CLI_VERSION = "opening-policy-research-cli-v2"
+OPENING_POLICY_CLI_VERSION = "opening-policy-research-cli-v3"
 _DEFAULT_PATH_THRESHOLDS = (0.50, 0.60, 0.70, 0.80, 0.90)
 _DEFAULT_MARKET_MAXIMUMS_BPS = (-10.0, -5.0, 0.0, 5.0, 10.0, 20.0)
 _DEFAULT_MINIMUM_DATA_COVERAGE = 0.95
@@ -111,6 +117,7 @@ def _build_policy_sessions(
     session_dates: Sequence[date],
     minimum_data_coverage: float,
     required_symbols: Sequence[str] = (),
+    decision_config: OpeningMomentumConfig | None = None,
 ) -> tuple[OpeningPolicySession, ...]:
     if not 0 < minimum_data_coverage <= 1:
         raise ValueError("minimum_data_coverage must be in (0, 1]")
@@ -130,7 +137,7 @@ def _build_policy_sessions(
             "required_symbols are outside the policy universe: "
             + ", ".join(sorted(missing_required))
         )
-    config = opening_execution_config()
+    config = decision_config or opening_execution_config()
     source_sessions = _build_sessions(
         bars_by_symbol,
         symbols=normalized_symbols,
@@ -329,6 +336,158 @@ def _compact_cohort_payload(
     }
 
 
+def _horizon_slice(
+    result: OpeningPolicyHorizonResult,
+    name: str,
+) -> OpeningPolicyHorizonSlice:
+    return next(value for value in result.slices if value.name == name)
+
+
+def _horizon_result(
+    report: OpeningPolicyHorizonReport,
+    holding_minutes: int,
+) -> OpeningPolicyHorizonResult:
+    return next(
+        value
+        for value in report.results
+        if value.holding_minutes == holding_minutes
+    )
+
+
+def _horizon_blockers(
+    result: OpeningPolicyHorizonResult,
+    *,
+    conservative_result: OpeningPolicyHorizonResult,
+) -> tuple[str, ...]:
+    discovery = _horizon_slice(result, "DISCOVERY")
+    holdout = _horizon_slice(result, "HOLDOUT")
+    conservative_holdout = _horizon_slice(
+        conservative_result,
+        "HOLDOUT",
+    )
+    blockers: list[str] = []
+    if discovery.resolved_sessions < 20:
+        blockers.append("DISCOVERY_SESSIONS_BELOW_20")
+    if discovery.comparison.cumulative_delta_bps <= 0:
+        blockers.append("DISCOVERY_DELTA_NOT_POSITIVE")
+    if not discovery.tail_robustness_passed:
+        blockers.append("DISCOVERY_TAIL_ROBUSTNESS_FAILED")
+    if not discovery.comparison.risk_guard_passed:
+        blockers.append("DISCOVERY_DRAWDOWN_GUARD_FAILED")
+    if holdout.resolved_sessions < 20:
+        blockers.append("HOLDOUT_SESSIONS_BELOW_20")
+    if holdout.comparison.cumulative_delta_bps <= 0:
+        blockers.append("HOLDOUT_DELTA_NOT_POSITIVE")
+    if not holdout.tail_robustness_passed:
+        blockers.append("HOLDOUT_TAIL_ROBUSTNESS_FAILED")
+    if not holdout.comparison.risk_guard_passed:
+        blockers.append("HOLDOUT_DRAWDOWN_GUARD_FAILED")
+    if conservative_holdout.comparison.cumulative_delta_bps <= 0:
+        blockers.append("HOLDOUT_30BP_COST_STRESS_FAILED")
+    if not conservative_holdout.tail_robustness_passed:
+        blockers.append("HOLDOUT_30BP_TAIL_ROBUSTNESS_FAILED")
+    if not conservative_holdout.comparison.risk_guard_passed:
+        blockers.append("HOLDOUT_30BP_DRAWDOWN_GUARD_FAILED")
+    return tuple(blockers)
+
+
+def _compact_horizon_payload(
+    report: OpeningPolicyHorizonReport,
+    *,
+    cost_stress_reports: Sequence[OpeningPolicyHorizonReport],
+) -> dict[str, object]:
+    conservative = max(
+        cost_stress_reports,
+        key=lambda value: value.round_trip_cost_bps,
+    )
+    results: list[dict[str, object]] = []
+    for result in report.results:
+        discovery = _horizon_slice(result, "DISCOVERY")
+        holdout = _horizon_slice(result, "HOLDOUT")
+        conservative_result = _horizon_result(
+            conservative,
+            result.holding_minutes,
+        )
+        blockers = _horizon_blockers(
+            result,
+            conservative_result=conservative_result,
+        )
+        status = "REJECTED"
+        if not blockers:
+            confidence_lower = holdout.comparison.confidence_lower_bps
+            status = (
+                "HISTORICALLY_ROBUST"
+                if confidence_lower is not None and confidence_lower > 0
+                else "SHADOW_CANDIDATE"
+            )
+        results.append({
+            "holding_minutes": result.holding_minutes,
+            "status": status,
+            "promotion_blockers": list(blockers),
+            "discovery": discovery.to_dict(),
+            "holdout": holdout.to_dict(),
+        })
+    return {
+        "algorithm_version": report.algorithm_version,
+        "policy": asdict(report.policy),
+        "baseline_holding_minutes": report.baseline_holding_minutes,
+        "sources": [asdict(value) for value in report.sources],
+        "paired_sessions": report.paired_sessions,
+        "discovery_sessions": report.discovery_sessions,
+        "holdout_sessions": report.holdout_sessions,
+        "results": results,
+        "diagnostic_only": report.diagnostic_only,
+        "automatic_promotion_allowed": (
+            report.automatic_promotion_allowed
+        ),
+    }
+
+
+def _horizon_cost_stress_payload(
+    reports: Sequence[OpeningPolicyHorizonReport],
+) -> list[dict[str, object]]:
+    return [
+        {
+            "round_trip_cost_bps": report.round_trip_cost_bps,
+            "holdout": [
+                {
+                    "holding_minutes": result.holding_minutes,
+                    "slice": _horizon_slice(
+                        result,
+                        "HOLDOUT",
+                    ).to_dict(),
+                }
+                for result in report.results
+            ],
+        }
+        for report in reports
+    ]
+
+
+def _parse_holding_horizons(value: str) -> tuple[int, ...]:
+    raw_values = tuple(part.strip() for part in value.split(","))
+    if not raw_values or any(not part for part in raw_values):
+        raise ValueError(
+            "holding_horizons must contain comma-separated integers"
+        )
+    try:
+        values = tuple(int(part) for part in raw_values)
+    except ValueError as exc:
+        raise ValueError(
+            "holding_horizons must contain comma-separated integers"
+        ) from exc
+    if len(values) != len(set(values)):
+        raise ValueError("holding_horizons must contain unique values")
+    if any(not 1 <= value <= 120 for value in values):
+        raise ValueError("holding_horizons must be in [1, 120]")
+    baseline = opening_execution_config().holding_minutes
+    if baseline in values:
+        raise ValueError(
+            "holding_horizons must not include the production baseline"
+        )
+    return tuple(sorted(values))
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
@@ -350,6 +509,14 @@ def _parser() -> argparse.ArgumentParser:
         help=(
             "optional frozen comma-separated additions evaluated jointly "
             "against the baseline under the production policy"
+        ),
+    )
+    parser.add_argument(
+        "--holding-horizons",
+        help=(
+            "optional comma-separated fixed holding-minute challengers; "
+            "paired against the 60-minute production baseline with the "
+            "same signal, gates, and stop"
         ),
     )
     parser.add_argument("--discovery-ratio", type=float, default=0.60)
@@ -396,6 +563,11 @@ def main() -> int:
             if args.cohort_symbols
             else ()
         )
+        holding_horizons = (
+            _parse_holding_horizons(args.holding_horizons)
+            if args.holding_horizons
+            else ()
+        )
     except (RuntimeError, ValueError) as exc:
         parser.error(str(exc))
 
@@ -407,10 +579,13 @@ def main() -> int:
         )
 
     config = opening_execution_config()
+    maximum_holding_minutes = max(
+        (config.holding_minutes, *holding_horizons)
+    )
     maximum_offset = (
         config.signal_minutes
         + config.execution_delay_minutes
-        + config.holding_minutes
+        + maximum_holding_minutes
     )
     cache_path = Path(args.cache_path) if args.cache_path else Path(
         "data/research/"
@@ -528,6 +703,51 @@ def main() -> int:
             }
             for value in cohort_reports
         ]
+    horizon_reports: tuple[OpeningPolicyHorizonReport, ...] = ()
+    horizon_cost_stress: list[dict[str, object]] = []
+    horizon_decisions: dict[str, object] | None = None
+    if holding_horizons:
+        sessions_by_horizon = {config.holding_minutes: policy_sessions}
+        for holding_minutes in holding_horizons:
+            horizon_config = replace(
+                config,
+                holding_minutes=holding_minutes,
+            )
+            horizon_sessions = _build_policy_sessions(
+                bars_by_symbol,
+                symbols=baseline_symbols,
+                session_dates=session_dates,
+                minimum_data_coverage=args.minimum_data_coverage,
+                decision_config=horizon_config,
+            )
+            if len(horizon_sessions) < 2:
+                parser.error(
+                    "fewer than two causally resolved sessions were found "
+                    f"for the {holding_minutes}-minute horizon"
+                )
+            sessions_by_horizon[holding_minutes] = horizon_sessions
+        production_policy = next(
+            value
+            for value in policies
+            if value.name == PRODUCTION_POLICY_NAME
+        )
+        horizon_reports = tuple(
+            evaluate_opening_policy_horizons(
+                sessions_by_horizon,
+                baseline_holding_minutes=config.holding_minutes,
+                policy=production_policy,
+                round_trip_cost_bps=cost,
+                discovery_ratio=args.discovery_ratio,
+            )
+            for cost in (14.0, 20.0, 30.0)
+        )
+        horizon_cost_stress = _horizon_cost_stress_payload(
+            horizon_reports
+        )
+        horizon_decisions = _compact_horizon_payload(
+            horizon_reports[0],
+            cost_stress_reports=horizon_reports,
+        )
     generated = datetime.now(timezone.utc)
     generated_at = generated.isoformat()
     full_payload: dict[str, object] = {
@@ -546,6 +766,11 @@ def main() -> int:
                 if cohort_report is not None
                 else None
             ),
+            "holding_horizon_paired_session_count": (
+                horizon_reports[0].paired_sessions
+                if horizon_reports
+                else None
+            ),
             "cache_path": str(cache_path),
             "bar_counts": {
                 symbol: len(bars_by_symbol.get(symbol, ()))
@@ -560,6 +785,7 @@ def main() -> int:
             ),
             "baseline_symbols": list(baseline_symbols),
             "cohort_symbols": list(cohort_symbols),
+            "holding_horizons": list(holding_horizons),
             "signal_minutes": config.signal_minutes,
             "execution_delay_minutes": config.execution_delay_minutes,
             "holding_minutes": config.holding_minutes,
@@ -569,6 +795,7 @@ def main() -> int:
             "discovery_ratio": args.discovery_ratio,
             "production_policy_precommitted": True,
             "sensitivity_grid_selection_allowed": False,
+            "holding_horizon_selection_allowed": False,
             "automatic_promotion_allowed": False,
             "survivorship_bias": "CURRENT_BASELINE_SYMBOLS",
             "execution_price_approximation": (
@@ -587,6 +814,18 @@ def main() -> int:
             else None
         ),
         "cohort_cost_stress": cohort_cost_stress,
+        "holding_horizon_diagnostic_version": (
+            OPENING_POLICY_HORIZON_DIAGNOSTIC_VERSION
+            if horizon_reports
+            else None
+        ),
+        "holding_horizon_diagnostic": (
+            horizon_reports[0].to_dict()
+            if horizon_reports
+            else None
+        ),
+        "holding_horizon_cost_stress": horizon_cost_stress,
+        "holding_horizon_decisions": horizon_decisions,
     }
     output_path = Path(args.output) if args.output else Path(
         "data/research/"
@@ -629,6 +868,11 @@ def main() -> int:
             cohort_report
         )
         compact_payload["cohort_cost_stress"] = cohort_cost_stress
+    if horizon_reports:
+        compact_payload["holding_horizons"] = horizon_decisions
+        compact_payload["holding_horizon_cost_stress"] = (
+            horizon_cost_stress
+        )
     print(json.dumps(
         full_payload if args.full else compact_payload,
         ensure_ascii=False,
