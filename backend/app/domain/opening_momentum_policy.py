@@ -16,6 +16,9 @@ from app.domain.opening_momentum_comparison import (
 OPENING_POLICY_DIAGNOSTIC_VERSION = (
     "opening-policy-chronological-holdout-v1"
 )
+OPENING_POLICY_COHORT_DIAGNOSTIC_VERSION = (
+    "opening-policy-cohort-paired-chronological-holdout-v1"
+)
 PRODUCTION_POLICY_NAME = "WEAK_BREADTH_PATH_CHALLENGER"
 PRODUCTION_MINIMUM_PATH_EFFICIENCY = 0.70
 PRODUCTION_MAXIMUM_MARKET_RETURN_BPS = 0.0
@@ -179,6 +182,66 @@ class OpeningPolicyDiagnosticReport:
         }
 
 
+@dataclass(frozen=True)
+class OpeningPolicyCohortSlice:
+    name: OpeningPolicySliceName
+    start_date: date | None
+    end_date: date | None
+    resolved_sessions: int
+    candidate_displacement_sessions: int
+    execution_displacement_sessions: int
+    baseline_only_entry_sessions: int
+    cohort_only_entry_sessions: int
+    cohort_symbol_entry_sessions: int
+    baseline: OpeningPolicyReturnMetrics
+    cohort: OpeningPolicyReturnMetrics
+    comparison: OpeningMomentumPairedComparison
+    displacements: tuple[OpeningPolicyCohortDisplacement, ...]
+    tail_robustness_available: bool
+    tail_robustness_passed: bool
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            str(key): _json_safe(value)
+            for key, value in asdict(self).items()
+        }
+
+
+@dataclass(frozen=True)
+class OpeningPolicyCohortDisplacement:
+    session_date: date
+    baseline_candidate_symbol: str | None
+    cohort_candidate_symbol: str | None
+    baseline_entered: bool
+    cohort_entered: bool
+    baseline_return_bps: float
+    cohort_return_bps: float
+    delta_bps: float
+
+
+@dataclass(frozen=True)
+class OpeningPolicyCohortReport:
+    algorithm_version: str
+    policy: OpeningPolicySpec
+    discovery_ratio: float
+    round_trip_cost_bps: float
+    baseline_source_sessions: int
+    cohort_source_sessions: int
+    paired_sessions: int
+    discovery_sessions: int
+    holdout_sessions: int
+    cohort_symbols: tuple[str, ...]
+    slices: tuple[OpeningPolicyCohortSlice, ...]
+    diagnostic_only: Literal[True]
+    automatic_promotion_allowed: Literal[False]
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            str(key): _json_safe(value)
+            for key, value in asdict(self).items()
+        }
+
+
 def evaluate_opening_policy_grid(
     sessions: Sequence[OpeningPolicySession],
     *,
@@ -264,6 +327,261 @@ def evaluate_opening_policy_grid(
         production_policy_name=production_name,
         policies=results,
         automatic_promotion_allowed=False,
+    )
+
+
+def evaluate_opening_policy_cohort(
+    baseline_sessions: Sequence[OpeningPolicySession],
+    cohort_sessions: Sequence[OpeningPolicySession],
+    *,
+    policy: OpeningPolicySpec,
+    cohort_symbols: Sequence[str],
+    round_trip_cost_bps: float,
+    discovery_ratio: float = 0.60,
+) -> OpeningPolicyCohortReport:
+    """Pair two frozen universes under the same post-signal policy.
+
+    Only dates resolved by both universes enter the comparison. This prevents
+    missing cohort data from being treated as a zero-return skip and keeps the
+    result diagnostic-only even when historical metrics appear favorable.
+    """
+
+    if not math.isfinite(round_trip_cost_bps) or round_trip_cost_bps < 0:
+        raise ValueError("round_trip_cost_bps must be finite and non-negative")
+    if not 0 < discovery_ratio < 1:
+        raise ValueError("discovery_ratio must be in (0, 1)")
+    normalized_cohort = tuple(dict.fromkeys(
+        value.strip().upper() for value in cohort_symbols
+    ))
+    if not normalized_cohort or any(not value for value in normalized_cohort):
+        raise ValueError("cohort_symbols must contain non-empty symbols")
+
+    baseline_by_date = _sessions_by_date(
+        baseline_sessions,
+        field_name="baseline_sessions",
+    )
+    cohort_by_date = _sessions_by_date(
+        cohort_sessions,
+        field_name="cohort_sessions",
+    )
+    paired_dates = tuple(sorted(
+        set(baseline_by_date).intersection(cohort_by_date)
+    ))
+    if len(paired_dates) < 2:
+        raise ValueError("at least two paired cohort sessions are required")
+
+    split_index = max(
+        1,
+        min(
+            len(paired_dates) - 1,
+            math.floor(len(paired_dates) * discovery_ratio),
+        ),
+    )
+    paired = tuple(
+        (baseline_by_date[value], cohort_by_date[value])
+        for value in paired_dates
+    )
+    slice_specs: tuple[
+        tuple[
+            OpeningPolicySliceName,
+            tuple[tuple[OpeningPolicySession, OpeningPolicySession], ...],
+        ],
+        ...,
+    ] = (
+        ("ALL", paired),
+        ("DISCOVERY", paired[:split_index]),
+        ("HOLDOUT", paired[split_index:]),
+    )
+    return OpeningPolicyCohortReport(
+        algorithm_version=OPENING_POLICY_COHORT_DIAGNOSTIC_VERSION,
+        policy=policy,
+        discovery_ratio=discovery_ratio,
+        round_trip_cost_bps=round_trip_cost_bps,
+        baseline_source_sessions=len(baseline_by_date),
+        cohort_source_sessions=len(cohort_by_date),
+        paired_sessions=len(paired_dates),
+        discovery_sessions=split_index,
+        holdout_sessions=len(paired_dates) - split_index,
+        cohort_symbols=normalized_cohort,
+        slices=tuple(
+            _cohort_evaluation_slice(
+                name,
+                values,
+                policy=policy,
+                cohort_symbols=set(normalized_cohort),
+                round_trip_cost_bps=round_trip_cost_bps,
+            )
+            for name, values in slice_specs
+        ),
+        diagnostic_only=True,
+        automatic_promotion_allowed=False,
+    )
+
+
+def _sessions_by_date(
+    sessions: Sequence[OpeningPolicySession],
+    *,
+    field_name: str,
+) -> dict[date, OpeningPolicySession]:
+    result: dict[date, OpeningPolicySession] = {}
+    for value in sessions:
+        if value.session_date in result:
+            raise ValueError(f"{field_name} dates must be unique")
+        result[value.session_date] = value
+    return result
+
+
+def _cohort_evaluation_slice(
+    name: OpeningPolicySliceName,
+    sessions: Sequence[
+        tuple[OpeningPolicySession, OpeningPolicySession]
+    ],
+    *,
+    policy: OpeningPolicySpec,
+    cohort_symbols: set[str],
+    round_trip_cost_bps: float,
+) -> OpeningPolicyCohortSlice:
+    baseline_accepted = tuple(
+        _policy_accepts(policy, baseline)
+        for baseline, _ in sessions
+    )
+    cohort_accepted = tuple(
+        _policy_accepts(policy, cohort)
+        for _, cohort in sessions
+    )
+    baseline_returns = tuple(
+        _baseline_net_return(
+            baseline,
+            round_trip_cost_bps=round_trip_cost_bps,
+        )
+        if accepted
+        else 0.0
+        for (baseline, _), accepted in zip(
+            sessions,
+            baseline_accepted,
+            strict=True,
+        )
+    )
+    cohort_returns = tuple(
+        _baseline_net_return(
+            cohort,
+            round_trip_cost_bps=round_trip_cost_bps,
+        )
+        if accepted
+        else 0.0
+        for (_, cohort), accepted in zip(
+            sessions,
+            cohort_accepted,
+            strict=True,
+        )
+    )
+    baseline_metrics = _return_metrics(
+        baseline_returns,
+        baseline_accepted,
+        tuple(
+            baseline.stop_triggered and accepted
+            for (baseline, _), accepted in zip(
+                sessions,
+                baseline_accepted,
+                strict=True,
+            )
+        ),
+    )
+    cohort_metrics = _return_metrics(
+        cohort_returns,
+        cohort_accepted,
+        tuple(
+            cohort.stop_triggered and accepted
+            for (_, cohort), accepted in zip(
+                sessions,
+                cohort_accepted,
+                strict=True,
+            )
+        ),
+    )
+    comparison = compare_opening_momentum_variants(
+        baseline_returns,
+        cohort_returns,
+    )
+    execution_displacements = tuple(
+        OpeningPolicyCohortDisplacement(
+            session_date=baseline.session_date,
+            baseline_candidate_symbol=baseline.candidate_symbol,
+            cohort_candidate_symbol=cohort.candidate_symbol,
+            baseline_entered=baseline_entry,
+            cohort_entered=cohort_entry,
+            baseline_return_bps=baseline_return,
+            cohort_return_bps=cohort_return,
+            delta_bps=cohort_return - baseline_return,
+        )
+        for (
+            baseline,
+            cohort,
+        ), baseline_entry, cohort_entry, baseline_return, cohort_return in zip(
+            sessions,
+            baseline_accepted,
+            cohort_accepted,
+            baseline_returns,
+            cohort_returns,
+            strict=True,
+        )
+        if (
+            baseline_entry != cohort_entry
+            or (
+                baseline_entry
+                and cohort_entry
+                and baseline.candidate_symbol != cohort.candidate_symbol
+            )
+        )
+    )
+    tail_robustness_available = (
+        baseline_metrics.entries >= 4
+        and cohort_metrics.entries >= 4
+    )
+    return OpeningPolicyCohortSlice(
+        name=name,
+        start_date=(sessions[0][0].session_date if sessions else None),
+        end_date=(sessions[-1][0].session_date if sessions else None),
+        resolved_sessions=len(sessions),
+        candidate_displacement_sessions=sum(
+            baseline.candidate_symbol != cohort.candidate_symbol
+            for baseline, cohort in sessions
+        ),
+        execution_displacement_sessions=len(execution_displacements),
+        baseline_only_entry_sessions=sum(
+            baseline_entry and not cohort_entry
+            for baseline_entry, cohort_entry in zip(
+                baseline_accepted,
+                cohort_accepted,
+                strict=True,
+            )
+        ),
+        cohort_only_entry_sessions=sum(
+            cohort_entry and not baseline_entry
+            for baseline_entry, cohort_entry in zip(
+                baseline_accepted,
+                cohort_accepted,
+                strict=True,
+            )
+        ),
+        cohort_symbol_entry_sessions=sum(
+            cohort_entry and cohort.candidate_symbol in cohort_symbols
+            for (_, cohort), cohort_entry in zip(
+                sessions,
+                cohort_accepted,
+                strict=True,
+            )
+        ),
+        baseline=baseline_metrics,
+        cohort=cohort_metrics,
+        comparison=comparison,
+        displacements=execution_displacements,
+        tail_robustness_available=tail_robustness_available,
+        tail_robustness_passed=(
+            tail_robustness_available
+            and cohort_metrics.cumulative_without_best_3_bps
+            >= baseline_metrics.cumulative_without_best_3_bps
+        ),
     )
 
 

@@ -22,6 +22,7 @@ from app.domain.opening_momentum_policy import (
 
 
 _SYMBOLS = tuple(f"S{index}.US" for index in range(8))
+_COHORT_SYMBOL = "C0.US"
 
 
 def _timestamp(session_date: date, minute_offset: int) -> datetime:
@@ -37,7 +38,9 @@ def _timestamp(session_date: date, minute_offset: int) -> datetime:
 
 
 def _bars(symbol: str, session_date: date) -> tuple[RawMinuteBar, ...]:
-    symbol_index = _SYMBOLS.index(symbol)
+    symbol_index = (
+        _SYMBOLS.index(symbol) if symbol in _SYMBOLS else -1
+    )
     final_signal_closes = (
         99.30,
         99.40,
@@ -52,11 +55,16 @@ def _bars(symbol: str, session_date: date) -> tuple[RawMinuteBar, ...]:
     for offset in range(65):
         open_price = 100.0
         close_price = 100.0
-        if symbol == "S7.US" and offset < 3:
+        if symbol == _COHORT_SYMBOL and offset < 3:
+            close_price = (101.00, 101.10, 101.20)[offset]
+        elif symbol == "S7.US" and offset < 3:
             close_price = (101.50, 100.50, 101.00)[offset]
         elif offset < 3:
             close_price = final_signal_closes[symbol_index]
-        if offset == 64 and symbol == "S7.US":
+        if offset == 64 and symbol == _COHORT_SYMBOL:
+            open_price = 102.00
+            close_price = 102.00
+        elif offset == 64 and symbol == "S7.US":
             open_price = 101.50
             close_price = 101.50
         result.append(RawMinuteBar(
@@ -78,6 +86,18 @@ def _bars_by_symbol(
         )
         for symbol in _SYMBOLS
     }
+
+
+def _bars_by_symbol_with_cohort(
+    *session_dates: date,
+) -> dict[str, tuple[RawMinuteBar, ...]]:
+    result = _bars_by_symbol(*session_dates)
+    result[_COHORT_SYMBOL] = tuple(
+        bar
+        for session_date in session_dates
+        for bar in _bars(_COHORT_SYMBOL, session_date)
+    )
+    return result
 
 
 def test_default_grid_contains_unique_production_and_neighbors() -> None:
@@ -116,6 +136,28 @@ def test_policy_session_builder_matches_frozen_timing_and_path() -> None:
     assert value.candidate_path_efficiency == pytest.approx(1 / 3)
     assert value.gross_return_bps == pytest.approx(150.0)
     assert value.stop_triggered is False
+
+
+def test_policy_session_builder_requires_every_cohort_symbol() -> None:
+    session_date = date(2026, 7, 6)
+
+    sessions = _build_policy_sessions(
+        _bars_by_symbol(session_date),
+        symbols=(*_SYMBOLS, _COHORT_SYMBOL),
+        required_symbols=(_COHORT_SYMBOL,),
+        session_dates=(session_date,),
+        minimum_data_coverage=0.95,
+    )
+
+    assert sessions == ()
+    with pytest.raises(ValueError, match="outside the policy universe"):
+        _build_policy_sessions(
+            _bars_by_symbol(session_date),
+            symbols=_SYMBOLS,
+            required_symbols=(_COHORT_SYMBOL,),
+            session_dates=(session_date,),
+            minimum_data_coverage=0.95,
+        )
 
 
 def test_cli_replays_existing_cache_without_broker(
@@ -158,6 +200,52 @@ def test_cli_replays_existing_cache_without_broker(
     assert stored["data_scope"]["resolved_session_count"] == 2
     assert stored["report"]["source_sessions"] == 2
     assert stored["research_design"]["automatic_promotion_allowed"] is False
+
+
+def test_cli_emits_joint_cohort_diagnostic(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    first = date(2026, 7, 6)
+    second = date(2026, 7, 7)
+    cache_path = tmp_path / "opening.json.gz"
+    output_path = tmp_path / "cohort-report.json"
+    _save_cache(
+        cache_path,
+        _bars_by_symbol_with_cohort(first, second),
+        start_date=first,
+        end_date=second,
+        retained_minutes_after_open=64,
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "opening_policy_research",
+        "--start-date",
+        first.isoformat(),
+        "--end-date",
+        second.isoformat(),
+        "--baseline-symbols",
+        ",".join(_SYMBOLS),
+        "--cohort-symbols",
+        _COHORT_SYMBOL,
+        "--cache-path",
+        str(cache_path),
+        "--output",
+        str(output_path),
+    ])
+
+    assert main() == 0
+
+    stdout = json.loads(capsys.readouterr().out)
+    stored = json.loads(output_path.read_text(encoding="utf-8"))
+    assert stdout["cohort"]["cohort_symbols"] == [_COHORT_SYMBOL]
+    assert stdout["cohort"]["paired_sessions"] == 2
+    assert len(stdout["cohort_cost_stress"]) == 3
+    assert stored["cohort_diagnostic"]["diagnostic_only"] is True
+    assert stored["cohort_diagnostic"][
+        "automatic_promotion_allowed"
+    ] is False
+    assert stored["data_scope"]["cohort_resolved_session_count"] == 2
 
 
 def test_cli_refuses_to_overwrite_incompatible_cache(

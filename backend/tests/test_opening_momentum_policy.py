@@ -6,12 +6,16 @@ import pytest
 
 from app.domain.opening_momentum import OpeningMomentumConfig
 from app.domain.opening_momentum_policy import (
+    OPENING_POLICY_COHORT_DIAGNOSTIC_VERSION,
     OPENING_POLICY_DIAGNOSTIC_VERSION,
     PRODUCTION_POLICY_NAME,
+    OpeningPolicyCohortReport,
+    OpeningPolicyCohortSlice,
     OpeningPolicyResult,
     OpeningPolicySession,
     OpeningPolicySlice,
     OpeningPolicySpec,
+    evaluate_opening_policy_cohort,
     evaluate_opening_policy_grid,
     opening_execution_config,
 )
@@ -22,6 +26,13 @@ def _slice(
     name: str,
 ) -> OpeningPolicySlice:
     return next(value for value in result.slices if value.name == name)
+
+
+def _cohort_slice(
+    report: OpeningPolicyCohortReport,
+    name: str,
+) -> OpeningPolicyCohortSlice:
+    return next(value for value in report.slices if value.name == name)
 
 
 def _sessions() -> tuple[OpeningPolicySession, ...]:
@@ -140,5 +151,121 @@ def test_policy_grid_requires_explicit_ungated_baseline_and_production() -> None
         evaluate_opening_policy_grid(
             _sessions(),
             policies=(OpeningPolicySpec("BROAD"),),
+            round_trip_cost_bps=14.0,
+        )
+
+
+def test_cohort_report_pairs_dates_and_exposes_tail_and_displacements() -> None:
+    first = date(2026, 1, 2)
+    baseline = tuple(
+        OpeningPolicySession(
+            session_date=first + timedelta(days=index),
+            baseline_signal=True,
+            gross_return_bps=value + 14.0,
+            market_return_bps=-1.0,
+            candidate_path_efficiency=0.8,
+            candidate_symbol=f"BASE{index}.US",
+            stop_triggered=index == 4,
+        )
+        for index, value in enumerate((100.0, -50.0, 25.0, 200.0, -100.0))
+    )
+    cohort_values = (150.0, -60.0, 25.0, 300.0)
+    cohort = tuple(
+        OpeningPolicySession(
+            session_date=first + timedelta(days=index),
+            baseline_signal=True,
+            gross_return_bps=value + 14.0,
+            market_return_bps=-1.0,
+            candidate_path_efficiency=0.8,
+            candidate_symbol=(
+                "RKLB.US" if index == 3 else f"COHORT{index}.US"
+            ),
+        )
+        for index, value in enumerate(cohort_values)
+    ) + (
+        OpeningPolicySession(
+            session_date=first + timedelta(days=4),
+            baseline_signal=False,
+            gross_return_bps=0.0,
+            market_return_bps=-1.0,
+            candidate_path_efficiency=0.8,
+            candidate_symbol="PANW.US",
+        ),
+        OpeningPolicySession(
+            session_date=first + timedelta(days=10),
+            baseline_signal=True,
+            gross_return_bps=114.0,
+            market_return_bps=-1.0,
+            candidate_path_efficiency=0.8,
+            candidate_symbol="QCOM.US",
+        ),
+    )
+    policy = OpeningPolicySpec(
+        PRODUCTION_POLICY_NAME,
+        minimum_path_efficiency=0.7,
+        maximum_market_return_bps=0.0,
+    )
+
+    report = evaluate_opening_policy_cohort(
+        baseline,
+        cohort,
+        policy=policy,
+        cohort_symbols=("QCOM.US", "PANW.US", "RKLB.US"),
+        round_trip_cost_bps=14.0,
+    )
+
+    holdout = _cohort_slice(report, "HOLDOUT")
+    assert report.algorithm_version == (
+        OPENING_POLICY_COHORT_DIAGNOSTIC_VERSION
+    )
+    assert report.baseline_source_sessions == 5
+    assert report.cohort_source_sessions == 6
+    assert report.paired_sessions == 5
+    assert report.discovery_sessions == 3
+    assert report.holdout_sessions == 2
+    assert holdout.baseline.entries == 2
+    assert holdout.baseline.cumulative_return_bps == pytest.approx(100.0)
+    assert holdout.cohort.entries == 1
+    assert holdout.cohort.cumulative_return_bps == pytest.approx(300.0)
+    assert holdout.comparison.cumulative_delta_bps == pytest.approx(200.0)
+    assert holdout.candidate_displacement_sessions == 2
+    assert holdout.execution_displacement_sessions == 2
+    assert holdout.baseline_only_entry_sessions == 1
+    assert holdout.cohort_only_entry_sessions == 0
+    assert holdout.cohort_symbol_entry_sessions == 1
+    assert len(holdout.displacements) == 2
+    assert holdout.displacements[0].session_date == first + timedelta(days=3)
+    assert holdout.displacements[0].delta_bps == pytest.approx(100.0)
+    assert holdout.displacements[1].session_date == first + timedelta(days=4)
+    assert holdout.displacements[1].delta_bps == pytest.approx(100.0)
+    assert holdout.tail_robustness_available is False
+    assert holdout.tail_robustness_passed is False
+    assert report.diagnostic_only is True
+    assert report.automatic_promotion_allowed is False
+    assert report.to_dict()["cohort_symbols"] == [
+        "QCOM.US",
+        "PANW.US",
+        "RKLB.US",
+    ]
+
+
+def test_cohort_report_requires_unique_paired_sessions_and_symbols() -> None:
+    policy = OpeningPolicySpec(PRODUCTION_POLICY_NAME)
+    duplicate = (_sessions()[0], _sessions()[0], _sessions()[1])
+
+    with pytest.raises(ValueError, match="dates must be unique"):
+        evaluate_opening_policy_cohort(
+            duplicate,
+            _sessions()[:2],
+            policy=policy,
+            cohort_symbols=("QCOM.US",),
+            round_trip_cost_bps=14.0,
+        )
+    with pytest.raises(ValueError, match="non-empty symbols"):
+        evaluate_opening_policy_cohort(
+            _sessions()[:2],
+            _sessions()[:2],
+            policy=policy,
+            cohort_symbols=(),
             round_trip_cost_bps=14.0,
         )

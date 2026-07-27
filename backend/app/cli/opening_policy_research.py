@@ -29,21 +29,25 @@ from app.domain.opening_momentum import (
     shadow_round_trip_return_bps,
 )
 from app.domain.opening_momentum_policy import (
+    OPENING_POLICY_COHORT_DIAGNOSTIC_VERSION,
     OPENING_POLICY_DIAGNOSTIC_VERSION,
     PRODUCTION_MAXIMUM_MARKET_RETURN_BPS,
     PRODUCTION_MINIMUM_PATH_EFFICIENCY,
     PRODUCTION_POLICY_NAME,
+    OpeningPolicyCohortReport,
+    OpeningPolicyCohortSlice,
     OpeningPolicyDiagnosticReport,
     OpeningPolicyResult,
     OpeningPolicySession,
     OpeningPolicySlice,
     OpeningPolicySpec,
+    evaluate_opening_policy_cohort,
     evaluate_opening_policy_grid,
     opening_execution_config,
 )
 
 
-OPENING_POLICY_CLI_VERSION = "opening-policy-research-cli-v1"
+OPENING_POLICY_CLI_VERSION = "opening-policy-research-cli-v2"
 _DEFAULT_PATH_THRESHOLDS = (0.50, 0.60, 0.70, 0.80, 0.90)
 _DEFAULT_MARKET_MAXIMUMS_BPS = (-10.0, -5.0, 0.0, 5.0, 10.0, 20.0)
 _DEFAULT_MINIMUM_DATA_COVERAGE = 0.95
@@ -106,12 +110,26 @@ def _build_policy_sessions(
     symbols: Sequence[str],
     session_dates: Sequence[date],
     minimum_data_coverage: float,
+    required_symbols: Sequence[str] = (),
 ) -> tuple[OpeningPolicySession, ...]:
     if not 0 < minimum_data_coverage <= 1:
         raise ValueError("minimum_data_coverage must be in (0, 1]")
     normalized_symbols = tuple(
         dict.fromkeys(value.strip().upper() for value in symbols)
     )
+    normalized_required = tuple(
+        dict.fromkeys(value.strip().upper() for value in required_symbols)
+    )
+    if any(not value for value in normalized_required):
+        raise ValueError("required_symbols must contain non-empty symbols")
+    missing_required = set(normalized_required).difference(
+        normalized_symbols
+    )
+    if missing_required:
+        raise ValueError(
+            "required_symbols are outside the policy universe: "
+            + ", ".join(sorted(missing_required))
+        )
     config = opening_execution_config()
     source_sessions = _build_sessions(
         bars_by_symbol,
@@ -136,7 +154,13 @@ def _build_policy_sessions(
     market_session = get_session("US")
     result: list[OpeningPolicySession] = []
     for source in source_sessions:
-        if len(source.observations) < required_observations:
+        observed_symbols = {
+            value.symbol for value in source.observations
+        }
+        if (
+            len(source.observations) < required_observations
+            or not set(normalized_required).issubset(observed_symbols)
+        ):
             continue
         decision = evaluate_opening_momentum(source.observations, config)
         if decision.reason in {
@@ -278,6 +302,33 @@ def _sensitivity_summary_payload(
     }
 
 
+def _cohort_slice(
+    report: OpeningPolicyCohortReport,
+    name: str,
+) -> OpeningPolicyCohortSlice:
+    return next(value for value in report.slices if value.name == name)
+
+
+def _compact_cohort_payload(
+    report: OpeningPolicyCohortReport,
+) -> dict[str, object]:
+    discovery = _cohort_slice(report, "DISCOVERY")
+    holdout = _cohort_slice(report, "HOLDOUT")
+    return {
+        "algorithm_version": report.algorithm_version,
+        "policy": asdict(report.policy),
+        "cohort_symbols": list(report.cohort_symbols),
+        "round_trip_cost_bps": report.round_trip_cost_bps,
+        "paired_sessions": report.paired_sessions,
+        "discovery": discovery.to_dict(),
+        "holdout": holdout.to_dict(),
+        "diagnostic_only": report.diagnostic_only,
+        "automatic_promotion_allowed": (
+            report.automatic_promotion_allowed
+        ),
+    }
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
@@ -292,6 +343,13 @@ def _parser() -> argparse.ArgumentParser:
         help=(
             "optional frozen comma-separated baseline; defaults to current "
             "opening-execution eligible DB rows"
+        ),
+    )
+    parser.add_argument(
+        "--cohort-symbols",
+        help=(
+            "optional frozen comma-separated additions evaluated jointly "
+            "against the baseline under the production policy"
         ),
     )
     parser.add_argument("--discovery-ratio", type=float, default=0.60)
@@ -330,8 +388,23 @@ def main() -> int:
             if args.baseline_symbols
             else _load_current_baseline_symbols()
         )
+        cohort_symbols = (
+            _parse_symbols(
+                args.cohort_symbols,
+                field_name="cohort_symbols",
+            )
+            if args.cohort_symbols
+            else ()
+        )
     except (RuntimeError, ValueError) as exc:
         parser.error(str(exc))
+
+    overlap = set(baseline_symbols).intersection(cohort_symbols)
+    if overlap:
+        parser.error(
+            "cohort symbols already exist in baseline: "
+            + ", ".join(sorted(overlap))
+        )
 
     config = opening_execution_config()
     maximum_offset = (
@@ -354,9 +427,12 @@ def main() -> int:
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         parser.error(f"failed to load research cache: {exc}")
 
+    all_symbols = tuple(dict.fromkeys(
+        (*baseline_symbols, *cohort_symbols)
+    ))
     missing_symbols = tuple(
         symbol
-        for symbol in baseline_symbols
+        for symbol in all_symbols
         if not bars_by_symbol.get(symbol)
     )
     broker: BrokerGateway | None = None
@@ -411,6 +487,47 @@ def main() -> int:
         round_trip_cost_bps=config.round_trip_cost_bps,
         discovery_ratio=args.discovery_ratio,
     )
+    cohort_report: OpeningPolicyCohortReport | None = None
+    cohort_cost_stress: list[dict[str, object]] = []
+    if cohort_symbols:
+        cohort_policy_sessions = _build_policy_sessions(
+            bars_by_symbol,
+            symbols=all_symbols,
+            required_symbols=cohort_symbols,
+            session_dates=session_dates,
+            minimum_data_coverage=args.minimum_data_coverage,
+        )
+        if len(cohort_policy_sessions) < 2:
+            parser.error(
+                "fewer than two causally resolved cohort sessions were found"
+            )
+        production_policy = next(
+            value
+            for value in policies
+            if value.name == PRODUCTION_POLICY_NAME
+        )
+        cohort_reports = tuple(
+            evaluate_opening_policy_cohort(
+                policy_sessions,
+                cohort_policy_sessions,
+                policy=production_policy,
+                cohort_symbols=cohort_symbols,
+                round_trip_cost_bps=cost,
+                discovery_ratio=args.discovery_ratio,
+            )
+            for cost in (14.0, 20.0, 30.0)
+        )
+        cohort_report = cohort_reports[0]
+        cohort_cost_stress = [
+            {
+                "round_trip_cost_bps": value.round_trip_cost_bps,
+                "holdout": _cohort_slice(
+                    value,
+                    "HOLDOUT",
+                ).to_dict(),
+            }
+            for value in cohort_reports
+        ]
     generated = datetime.now(timezone.utc)
     generated_at = generated.isoformat()
     full_payload: dict[str, object] = {
@@ -424,10 +541,15 @@ def main() -> int:
             "adjustment": "NO_ADJUST",
             "candidate_session_count": len(session_dates),
             "resolved_session_count": len(policy_sessions),
+            "cohort_resolved_session_count": (
+                cohort_report.cohort_source_sessions
+                if cohort_report is not None
+                else None
+            ),
             "cache_path": str(cache_path),
             "bar_counts": {
                 symbol: len(bars_by_symbol.get(symbol, ()))
-                for symbol in baseline_symbols
+                for symbol in all_symbols
             },
         },
         "research_design": {
@@ -437,6 +559,7 @@ def main() -> int:
                 else "CURRENT_OPENING_EXECUTION_ELIGIBLE_STRATEGY_V2_CONFIG"
             ),
             "baseline_symbols": list(baseline_symbols),
+            "cohort_symbols": list(cohort_symbols),
             "signal_minutes": config.signal_minutes,
             "execution_delay_minutes": config.execution_delay_minutes,
             "holding_minutes": config.holding_minutes,
@@ -453,6 +576,17 @@ def main() -> int:
             ),
         },
         "report": report.to_dict(),
+        "cohort_diagnostic_version": (
+            OPENING_POLICY_COHORT_DIAGNOSTIC_VERSION
+            if cohort_report is not None
+            else None
+        ),
+        "cohort_diagnostic": (
+            cohort_report.to_dict()
+            if cohort_report is not None
+            else None
+        ),
+        "cohort_cost_stress": cohort_cost_stress,
     }
     output_path = Path(args.output) if args.output else Path(
         "data/research/"
@@ -490,6 +624,11 @@ def main() -> int:
         "automatic_promotion_allowed": False,
         "full_report_path": str(output_path),
     }
+    if cohort_report is not None:
+        compact_payload["cohort"] = _compact_cohort_payload(
+            cohort_report
+        )
+        compact_payload["cohort_cost_stress"] = cohort_cost_stress
     print(json.dumps(
         full_payload if args.full else compact_payload,
         ensure_ascii=False,
