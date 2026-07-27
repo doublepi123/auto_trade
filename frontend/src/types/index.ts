@@ -1917,6 +1917,10 @@ export interface OpeningMomentumPairedComparison {
   minimum_policy_displacement_sessions: number | null
   displacement_outperformance_rate: number | null
   evidence_gate_passed: boolean | null
+  multiple_testing_method: 'HOLM_BONFERRONI' | null
+  multiple_testing_family_size: number | null
+  multiple_testing_adjusted_pvalue: number | null
+  multiple_testing_evidence_passed: boolean | null
   promotion_ready: boolean
   recommendation: OpeningMomentumRecommendation
 }

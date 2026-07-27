@@ -723,6 +723,22 @@
                       {{ row.comparison ? formatNullableBps(row.comparison.confidence_lower_bps) : '-' }}
                     </template>
                   </el-table-column>
+                  <el-table-column label="Holm 校正" min-width="125">
+                    <template #default="{ row }">
+                      <el-tag
+                        v-if="row.comparison?.multiple_testing_adjusted_pvalue != null"
+                        :type="row.comparison.multiple_testing_evidence_passed ? 'success' : 'info'"
+                        effect="plain"
+                      >
+                        p={{ formatPercent(row.comparison.multiple_testing_adjusted_pvalue) }} ·
+                        {{ row.comparison.multiple_testing_family_size }} 项
+                      </el-tag>
+                      <span v-else-if="row.comparison">
+                        待满样本 · {{ row.comparison.multiple_testing_family_size ?? '-' }} 项
+                      </span>
+                      <span v-else>-</span>
+                    </template>
+                  </el-table-column>
                   <el-table-column label="评估" min-width="110">
                     <template #default="{ row }">
                       <el-tag

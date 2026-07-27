@@ -1258,12 +1258,17 @@ def test_extension_promotion_requires_actual_policy_displacements(
             (
                 identities["EARLY_RKLB_CHALLENGER"],
                 "RKLB.US",
-                5,
+                8,
             ),
             (
                 identities["EARLY_WDAY_CHALLENGER"],
                 "WDAY.US",
                 2,
+            ),
+            (
+                identities["EARLY_ALAB_CHALLENGER"],
+                "ALAB.US",
+                5,
             ),
         )
         for index in range(20):
@@ -1310,12 +1315,17 @@ def test_extension_promotion_requires_actual_policy_displacements(
         rklb = responses["EARLY_RKLB_CHALLENGER"].comparison
         assert rklb is not None
         assert rklb.resolved_sessions == 20
-        assert rklb.policy_displacement_sessions == 5
+        assert rklb.policy_displacement_sessions == 8
         assert rklb.minimum_policy_displacement_sessions == 3
         assert rklb.displacement_outperformance_rate == 1.0
         assert rklb.evidence_gate_passed is True
         assert rklb.confidence_lower_bps is not None
         assert rklb.confidence_lower_bps > 0
+        assert rklb.multiple_testing_method == "HOLM_BONFERRONI"
+        assert rklb.multiple_testing_family_size == 6
+        assert rklb.multiple_testing_adjusted_pvalue is not None
+        assert rklb.multiple_testing_adjusted_pvalue < 0.05
+        assert rklb.multiple_testing_evidence_passed is True
         assert rklb.promotion_ready is True
         assert rklb.recommendation == "PROMOTION_CANDIDATE"
 
@@ -1325,8 +1335,20 @@ def test_extension_promotion_requires_actual_policy_displacements(
         assert wday.policy_displacement_sessions == 2
         assert wday.displacement_outperformance_rate == 1.0
         assert wday.evidence_gate_passed is False
+        assert wday.multiple_testing_evidence_passed is False
         assert wday.promotion_ready is False
         assert wday.recommendation == "COLLECTING"
+
+        alab = responses["EARLY_ALAB_CHALLENGER"].comparison
+        assert alab is not None
+        assert alab.confidence_lower_bps is not None
+        assert alab.confidence_lower_bps > 0
+        assert alab.evidence_gate_passed is True
+        assert alab.multiple_testing_adjusted_pvalue is not None
+        assert alab.multiple_testing_adjusted_pvalue > 0.05
+        assert alab.multiple_testing_evidence_passed is False
+        assert alab.promotion_ready is False
+        assert alab.recommendation == "INCONCLUSIVE"
     finally:
         db.close()
         Base.metadata.drop_all(bind=engine)

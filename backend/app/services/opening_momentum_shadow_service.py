@@ -49,6 +49,10 @@ from app.models import (
     UniverseSelectionCandidate,
     UniverseSelectionRun,
 )
+from app.platform.multiple_testing import (
+    holm_adjusted_pvalues,
+    one_sample_greater_pvalue,
+)
 from app.schemas import (
     OpeningMomentumPairedComparisonResponse,
     OpeningMomentumRankResponse,
@@ -97,6 +101,8 @@ _EARLY_EXTENSION_COHORT_VERSION = (
 )
 _EXTENSION_MINIMUM_DISPLACEMENT_SESSIONS = 3
 _EXTENSION_MINIMUM_OUTPERFORMANCE_RATE = 0.55
+_MULTIPLE_TESTING_METHOD = "HOLM_BONFERRONI"
+_MULTIPLE_TESTING_SIGNIFICANCE_LEVEL = 0.05
 _EXECUTION_BROAD_VERSION = "active-broad-3m-signal-60m-hold-stop1-v1"
 _EXECUTION_BROAD_SOURCE = "OPENING_EXECUTION_BROAD"
 _EXECUTION_BROAD_ALGORITHM_VERSION = (
@@ -2280,6 +2286,7 @@ class OpeningMomentumShadowService:
         incumbent_identity = identities_by_variant["INCUMBENT"]
 
         responses: list[OpeningMomentumShadowVariantResponse] = []
+        paired_deltas_by_variant: dict[str, list[float]] = {}
         for identity in identities:
             is_early_extension = (
                 identity.variant in _EARLY_EXTENSION_VARIANTS
@@ -2400,6 +2407,14 @@ class OpeningMomentumShadowService:
                     )
                     for session_date in resolved_comparison_dates
                 ]
+                paired_deltas_by_variant[identity.variant] = [
+                    challenger_return - incumbent_return
+                    for incumbent_return, challenger_return in zip(
+                        incumbent_returns,
+                        challenger_returns,
+                        strict=True,
+                    )
+                ]
                 comparison = compare_opening_momentum_variants(
                     incumbent_returns,
                     challenger_returns,
@@ -2478,7 +2493,87 @@ class OpeningMomentumShadowService:
                     comparison=comparison_response,
                 )
             )
-        return responses
+        return self._apply_multiple_testing_evidence_gate(
+            responses,
+            paired_deltas_by_variant=paired_deltas_by_variant,
+        )
+
+    @staticmethod
+    def _apply_multiple_testing_evidence_gate(
+        responses: list[OpeningMomentumShadowVariantResponse],
+        *,
+        paired_deltas_by_variant: dict[str, list[float]],
+    ) -> list[OpeningMomentumShadowVariantResponse]:
+        family_indices: dict[str, list[int]] = {}
+        for index, response in enumerate(responses):
+            if (
+                response.comparison is None
+                or response.comparison_baseline is None
+            ):
+                continue
+            family_indices.setdefault(
+                response.comparison_baseline,
+                [],
+            ).append(index)
+
+        updated_responses = list(responses)
+        for indices in family_indices.values():
+            raw_pvalues = [
+                one_sample_greater_pvalue(
+                    paired_deltas_by_variant.get(
+                        responses[index].variant,
+                        [],
+                    )
+                )
+                for index in indices
+            ]
+            adjusted_pvalues = holm_adjusted_pvalues(raw_pvalues)
+            family_size = len(indices)
+            for index, adjusted_pvalue in zip(
+                indices,
+                adjusted_pvalues,
+                strict=True,
+            ):
+                response = responses[index]
+                comparison = response.comparison
+                if comparison is None:
+                    continue
+                enough_sessions = (
+                    comparison.resolved_sessions
+                    >= comparison.minimum_promotion_sessions
+                )
+                evidence_passed = (
+                    adjusted_pvalue
+                    <= _MULTIPLE_TESTING_SIGNIFICANCE_LEVEL
+                    if enough_sessions and adjusted_pvalue is not None
+                    else None
+                )
+                promotion_ready = (
+                    comparison.promotion_ready
+                    and evidence_passed is True
+                )
+                recommendation = comparison.recommendation
+                if comparison.promotion_ready and not promotion_ready:
+                    recommendation = "INCONCLUSIVE"
+
+                updated_comparison = comparison.model_copy(update={
+                    "multiple_testing_method": (
+                        _MULTIPLE_TESTING_METHOD
+                    ),
+                    "multiple_testing_family_size": family_size,
+                    "multiple_testing_adjusted_pvalue": (
+                        adjusted_pvalue
+                    ),
+                    "multiple_testing_evidence_passed": (
+                        evidence_passed
+                    ),
+                    "promotion_ready": promotion_ready,
+                    "recommendation": recommendation,
+                })
+                updated_responses[index] = response.model_copy(update={
+                    "comparison": updated_comparison,
+                })
+        return updated_responses
 
     @classmethod
     def _apply_extension_evidence_gate(

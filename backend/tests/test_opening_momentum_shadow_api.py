@@ -204,6 +204,28 @@ class TestOpeningMomentumShadowApi:
                 extension["comparison"]["evidence_gate_passed"]
                 is False
             )
+            assert (
+                extension["comparison"]["multiple_testing_method"]
+                == "HOLM_BONFERRONI"
+            )
+            assert (
+                extension["comparison"][
+                    "multiple_testing_family_size"
+                ]
+                == 6
+            )
+            assert (
+                extension["comparison"][
+                    "multiple_testing_adjusted_pvalue"
+                ]
+                is None
+            )
+            assert (
+                extension["comparison"][
+                    "multiple_testing_evidence_passed"
+                ]
+                is None
+            )
         assert execution["universe_source"] == "OPENING_EXECUTION_BROAD"
         assert execution["signal_minutes"] == 3
         assert execution["holding_minutes"] == 60

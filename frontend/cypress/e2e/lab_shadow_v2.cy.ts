@@ -139,6 +139,8 @@ describe('Strategy v2 shadow lab', () => {
       .and('contain', '2 / 3')
       .and('contain', '换选胜率')
       .and('contain', '17.6 bps')
+      .and('contain', 'Holm 校正')
+      .and('contain', 'p=18.00% · 6 项')
       .and('contain', '采集中')
       .and('contain', '154.0 bps')
 

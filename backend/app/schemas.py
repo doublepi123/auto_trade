@@ -591,6 +591,12 @@ class OpeningMomentumPairedComparisonResponse(BaseModel):
     minimum_policy_displacement_sessions: Optional[int] = None
     displacement_outperformance_rate: Optional[float] = None
     evidence_gate_passed: Optional[bool] = None
+    multiple_testing_method: Optional[
+        Literal["HOLM_BONFERRONI"]
+    ] = None
+    multiple_testing_family_size: Optional[int] = None
+    multiple_testing_adjusted_pvalue: Optional[float] = None
+    multiple_testing_evidence_passed: Optional[bool] = None
     promotion_ready: bool = False
     recommendation: Literal[
         "COLLECTING",
