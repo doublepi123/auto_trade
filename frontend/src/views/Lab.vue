@@ -362,6 +362,16 @@
                   <span>市场中位上限</span>
                   <strong>{{ formatNullableBps(openingExecutionStatus.config.maximum_market_return_bps) }}</strong>
                 </div>
+                <div
+                  v-if="openingExecutionStatus.config.exceptional_minimum_path_efficiency != null
+                    && openingExecutionStatus.config.exceptional_maximum_market_return_bps != null"
+                >
+                  <span>高效路径例外</span>
+                  <strong>
+                    {{ formatPercent(openingExecutionStatus.config.exceptional_minimum_path_efficiency) }}
+                    → {{ formatBps(openingExecutionStatus.config.exceptional_maximum_market_return_bps) }}
+                  </strong>
+                </div>
                 <div>
                   <span>最长持有</span>
                   <strong>{{ openingExecutionStatus.config.holding_minutes }} 分钟</strong>

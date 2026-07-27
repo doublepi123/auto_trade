@@ -186,6 +186,12 @@ class OpeningMomentumExecutionService:
                 maximum_market_return_bps=(
                     identity.maximum_market_return_bps
                 ),
+                exceptional_minimum_path_efficiency=(
+                    identity.exceptional_minimum_path_efficiency
+                ),
+                exceptional_maximum_market_return_bps=(
+                    identity.exceptional_maximum_market_return_bps
+                ),
                 max_entry_delay_seconds=(
                     settings.opening_momentum_execution_max_entry_delay_seconds
                 ),

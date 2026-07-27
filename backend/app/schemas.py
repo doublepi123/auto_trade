@@ -713,6 +713,12 @@ class OpeningMomentumExecutionConfigResponse(BaseModel):
     stop_loss_pct: float
     minimum_path_efficiency: Optional[float] = None
     maximum_market_return_bps: Optional[float] = None
+    exceptional_minimum_path_efficiency: Optional[float] = Field(
+        default=None,
+        ge=0,
+        le=1,
+    )
+    exceptional_maximum_market_return_bps: Optional[float] = None
     max_entry_delay_seconds: int
     max_price_deviation_bps: float
     capital_slots: Literal[1] = 1

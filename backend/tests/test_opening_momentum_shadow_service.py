@@ -600,7 +600,7 @@ def test_execution_signal_uses_only_completed_three_minute_bars(
         assert signal.stop_loss_pct == 1.0
         assert signal.max_holding_minutes == 60
         assert signal.universe_source == (
-            "OPENING_EXECUTION_WEAK_BREADTH_PATH"
+            "OPENING_EXECUTION_WEAK_BREADTH_EXCEPTIONAL_PATH"
         )
         assert signal.context["candidate_path_efficiency"] == 1.0
         assert signal.context["candidate_signal_turnover"] == pytest.approx(
@@ -615,6 +615,17 @@ def test_execution_signal_uses_only_completed_three_minute_bars(
         )
         assert signal.context["minimum_path_efficiency"] == 0.70
         assert signal.context["maximum_market_return_bps"] == 0.0
+        assert (
+            signal.context["exceptional_minimum_path_efficiency"]
+            == 0.90
+        )
+        assert (
+            signal.context["exceptional_maximum_market_return_bps"]
+            == 5.0
+        )
+        assert signal.context[
+            "effective_maximum_market_return_bps"
+        ] == 5.0
         assert sorted(candles.calls) == sorted(_SYMBOLS)
     finally:
         db.close()
@@ -685,6 +696,46 @@ def test_execution_signal_skips_when_opening_breadth_is_positive(
         assert signal.symbol == _SYMBOLS[-1]
         assert signal.market_return_bps == pytest.approx(20.0)
         assert signal.context["candidate_path_efficiency"] == 1.0
+    finally:
+        db.close()
+        Base.metadata.drop_all(bind=engine)
+
+
+def test_execution_signal_accepts_exceptional_path_at_three_bps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        settings,
+        "opening_momentum_challenger_enabled",
+        True,
+    )
+    engine, db = _database()
+    try:
+        _seed_universe(db)
+        _seed_active_broad_pool(db)
+        early_returns = {
+            symbol: (100.0 if symbol == _SYMBOLS[-1] else 3.0)
+            for symbol in _SYMBOLS
+        }
+
+        signal = OpeningMomentumShadowService(
+            db,
+            _FakeCandles(
+                early_opening_returns_bps=early_returns,
+            ),
+        ).evaluate_execution_signal(
+            now=_SESSION_OPEN + timedelta(minutes=3, seconds=5),
+        )
+
+        assert signal is not None
+        assert signal.action == "ENTER_LONG"
+        assert signal.reason == "OPENING_LEADER"
+        assert signal.symbol == _SYMBOLS[-1]
+        assert signal.market_return_bps == pytest.approx(3.0)
+        assert signal.context["candidate_path_efficiency"] == 1.0
+        assert signal.context[
+            "effective_maximum_market_return_bps"
+        ] == 5.0
     finally:
         db.close()
         Base.metadata.drop_all(bind=engine)

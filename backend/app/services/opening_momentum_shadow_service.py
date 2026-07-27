@@ -28,6 +28,7 @@ from app.domain.opening_momentum_comparison import (
 from app.domain.opening_momentum_policy import (
     EXCEPTIONAL_MAXIMUM_MARKET_RETURN_BPS,
     EXCEPTIONAL_MINIMUM_PATH_EFFICIENCY,
+    EXCEPTIONAL_PATH_POLICY_NAME,
     PRODUCTION_MAXIMUM_MARKET_RETURN_BPS,
     PRODUCTION_MINIMUM_PATH_EFFICIENCY,
     PRODUCTION_POLICY_NAME,
@@ -149,8 +150,9 @@ _WEAK_BREADTH_RELAXED_ALGORITHM_VERSION = (
 )
 # Discovery-only paired research retained the two profitable +0..5bp breadth
 # sessions while excluding the lower-quality loser by requiring a 0.90 path.
-# The rule was designed after inspecting 2026-07-27, so it starts collecting
-# only on later sessions and cannot affect paper orders automatically.
+# The rule was designed after inspecting 2026-07-27, so evidence through that
+# date remains post-hoc. It is explicitly promoted only to the confirmed paper
+# executor for later sessions while the original rule stays as its baseline.
 _WEAK_BREADTH_EXCEPTIONAL_PATH_VERSION = (
     "forward-only-post-20260727-conditional-max-median5-"
     "when-path-efficiency-090-otherwise-max-median0-"
@@ -163,10 +165,10 @@ _WEAK_BREADTH_EXCEPTIONAL_PATH_ALGORITHM_VERSION = (
     f"{ALGORITHM_VERSION}+"
     f"{_WEAK_BREADTH_EXCEPTIONAL_PATH_VERSION}"
 )
-# Paper execution uses the same frozen identity as the paired shadow variant.
-# The broad policy remains the comparison baseline, so every skipped or
-# entered session continues to produce a causal counterfactual.
-_PAPER_EXECUTION_VARIANT = PRODUCTION_POLICY_NAME
+# The conditional rule is promoted only to the explicitly confirmed paper
+# executor. The original weak-breadth policy remains the paired shadow
+# baseline so every extra paper entry has a causal counterfactual.
+_PAPER_EXECUTION_VARIANT = EXCEPTIONAL_PATH_POLICY_NAME
 # The active ranking pool is intentionally decoupled from this regime signal.
 # Adding one symbol can move a cross-sectional median across zero merely by
 # changing the pool parity; the QQQ/DIA average stays comparable as the pool
@@ -2019,7 +2021,9 @@ class OpeningMomentumShadowService:
                     _EXECUTION_PATH_EFFICIENCY_MINIMUM
                 ),
             ))
-            variants.append(self.paper_execution_variant_identity())
+            variants.append(
+                self._weak_breadth_path_variant_identity()
+            )
             variants.append(_UniverseVariant(
                 variant="WEAK_BREADTH_RELAXED_CHALLENGER",
                 algorithm_version=(
@@ -2043,41 +2047,9 @@ class OpeningMomentumShadowService:
                     _WEAK_BREADTH_RELAXED_MAXIMUM_MARKET_RETURN_BPS
                 ),
             ))
-            variants.append(_UniverseVariant(
-                variant=(
-                    "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER"
-                ),
-                algorithm_version=(
-                    _WEAK_BREADTH_EXCEPTIONAL_PATH_ALGORITHM_VERSION
-                ),
-                config_version=self._evidence_config_version(
-                    f"{execution_config.version_hash()}:"
-                    f"{_WEAK_BREADTH_EXCEPTIONAL_PATH_VERSION}:"
-                    f"{_EXECUTION_PATH_EFFICIENCY_MINIMUM:.2f}:"
-                    f"{_WEAK_BREADTH_MAXIMUM_MARKET_RETURN_BPS:.1f}:"
-                    f"{EXCEPTIONAL_MINIMUM_PATH_EFFICIENCY:.2f}:"
-                    f"{EXCEPTIONAL_MAXIMUM_MARKET_RETURN_BPS:.1f}"
-                ),
-                universe_source=(
-                    _WEAK_BREADTH_EXCEPTIONAL_PATH_SOURCE
-                ),
-                decision_config=execution_config,
-                minimum_data_coverage=(
-                    _EARLY_BROAD_MINIMUM_COVERAGE
-                ),
-                minimum_path_efficiency=(
-                    _EXECUTION_PATH_EFFICIENCY_MINIMUM
-                ),
-                maximum_market_return_bps=(
-                    _WEAK_BREADTH_MAXIMUM_MARKET_RETURN_BPS
-                ),
-                exceptional_minimum_path_efficiency=(
-                    EXCEPTIONAL_MINIMUM_PATH_EFFICIENCY
-                ),
-                exceptional_maximum_market_return_bps=(
-                    EXCEPTIONAL_MAXIMUM_MARKET_RETURN_BPS
-                ),
-            ))
+            variants.append(
+                self._weak_breadth_exceptional_path_variant_identity()
+            )
             variants.append(_UniverseVariant(
                 variant="WEAK_BREADTH_INDEX_COHORT_CHALLENGER",
                 algorithm_version=(
@@ -2380,10 +2352,10 @@ class OpeningMomentumShadowService:
             minimum_data_coverage=_EARLY_BROAD_MINIMUM_COVERAGE,
         )
 
-    def paper_execution_variant_identity(self) -> _UniverseVariant:
+    def _weak_breadth_path_variant_identity(self) -> _UniverseVariant:
         config = self._execution_broad_config()
         return _UniverseVariant(
-            variant=_PAPER_EXECUTION_VARIANT,
+            variant=PRODUCTION_POLICY_NAME,
             algorithm_version=_WEAK_BREADTH_PATH_ALGORITHM_VERSION,
             config_version=self._evidence_config_version(
                 f"{config.version_hash()}:"
@@ -2399,6 +2371,50 @@ class OpeningMomentumShadowService:
                 _WEAK_BREADTH_MAXIMUM_MARKET_RETURN_BPS
             ),
         )
+
+    def _weak_breadth_exceptional_path_variant_identity(
+        self,
+    ) -> _UniverseVariant:
+        config = self._execution_broad_config()
+        return _UniverseVariant(
+            variant=EXCEPTIONAL_PATH_POLICY_NAME,
+            algorithm_version=(
+                _WEAK_BREADTH_EXCEPTIONAL_PATH_ALGORITHM_VERSION
+            ),
+            config_version=self._evidence_config_version(
+                f"{config.version_hash()}:"
+                f"{_WEAK_BREADTH_EXCEPTIONAL_PATH_VERSION}:"
+                f"{_EXECUTION_PATH_EFFICIENCY_MINIMUM:.2f}:"
+                f"{_WEAK_BREADTH_MAXIMUM_MARKET_RETURN_BPS:.1f}:"
+                f"{EXCEPTIONAL_MINIMUM_PATH_EFFICIENCY:.2f}:"
+                f"{EXCEPTIONAL_MAXIMUM_MARKET_RETURN_BPS:.1f}"
+            ),
+            universe_source=(
+                _WEAK_BREADTH_EXCEPTIONAL_PATH_SOURCE
+            ),
+            decision_config=config,
+            minimum_data_coverage=_EARLY_BROAD_MINIMUM_COVERAGE,
+            minimum_path_efficiency=(
+                _EXECUTION_PATH_EFFICIENCY_MINIMUM
+            ),
+            maximum_market_return_bps=(
+                _WEAK_BREADTH_MAXIMUM_MARKET_RETURN_BPS
+            ),
+            exceptional_minimum_path_efficiency=(
+                EXCEPTIONAL_MINIMUM_PATH_EFFICIENCY
+            ),
+            exceptional_maximum_market_return_bps=(
+                EXCEPTIONAL_MAXIMUM_MARKET_RETURN_BPS
+            ),
+        )
+
+    def paper_execution_variant_identity(self) -> _UniverseVariant:
+        identity = (
+            self._weak_breadth_exceptional_path_variant_identity()
+        )
+        if identity.variant != _PAPER_EXECUTION_VARIANT:
+            raise RuntimeError("paper execution variant identity mismatch")
+        return identity
 
     def _active_broad_symbols(self) -> tuple[str, ...]:
         rows = (

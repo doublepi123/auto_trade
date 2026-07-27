@@ -114,6 +114,32 @@ def _signal(service: OpeningMomentumExecutionService) -> OpeningMomentumExecutio
     )
 
 
+def test_paper_execution_uses_the_exceptional_path_identity() -> None:
+    engine, db = _database()
+    try:
+        identity = OpeningMomentumExecutionService(
+            db,
+            None,
+            _FakeRunner([]),
+        )._execution_identity()
+
+        assert identity.variant == (
+            "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER"
+        )
+        assert identity.universe_source == (
+            "OPENING_EXECUTION_WEAK_BREADTH_EXCEPTIONAL_PATH"
+        )
+        assert identity.minimum_path_efficiency == 0.70
+        assert identity.maximum_market_return_bps == 0.0
+        assert identity.exceptional_minimum_path_efficiency == 0.90
+        assert identity.exceptional_maximum_market_return_bps == 5.0
+        assert identity.effective_maximum_market_return_bps(0.89) == 0.0
+        assert identity.effective_maximum_market_return_bps(0.90) == 5.0
+    finally:
+        db.close()
+        Base.metadata.drop_all(bind=engine)
+
+
 def test_tick_submits_a_session_signal_exactly_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

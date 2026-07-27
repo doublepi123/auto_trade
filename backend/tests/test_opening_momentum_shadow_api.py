@@ -99,8 +99,16 @@ class TestOpeningMomentumShadowApi:
         assert body["config"]["stop_loss_pct"] == 1.0
         assert body["config"]["minimum_path_efficiency"] == 0.70
         assert body["config"]["maximum_market_return_bps"] == 0.0
+        assert (
+            body["config"]["exceptional_minimum_path_efficiency"]
+            == 0.90
+        )
+        assert (
+            body["config"]["exceptional_maximum_market_return_bps"]
+            == 5.0
+        )
         assert body["config"]["universe_source"] == (
-            "OPENING_EXECUTION_WEAK_BREADTH_PATH"
+            "OPENING_EXECUTION_WEAK_BREADTH_EXCEPTIONAL_PATH"
         )
 
         runs = self.client.get(
