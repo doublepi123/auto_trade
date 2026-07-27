@@ -154,6 +154,12 @@ class OpeningMomentumExecutionService:
                 stop_loss_pct=float(
                     identity.decision_config.stop_loss_pct or 0
                 ),
+                minimum_path_efficiency=(
+                    identity.minimum_path_efficiency
+                ),
+                maximum_market_return_bps=(
+                    identity.maximum_market_return_bps
+                ),
                 max_entry_delay_seconds=(
                     settings.opening_momentum_execution_max_entry_delay_seconds
                 ),
@@ -244,7 +250,7 @@ class OpeningMomentumExecutionService:
     def _execution_identity(self):
         return OpeningMomentumShadowService(
             self.db
-        ).execution_variant_identity()
+        ).paper_execution_variant_identity()
 
     def _execution_for_session(
         self,

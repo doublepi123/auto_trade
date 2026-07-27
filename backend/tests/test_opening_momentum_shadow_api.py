@@ -97,6 +97,11 @@ class TestOpeningMomentumShadowApi:
         assert body["config"]["execution_delay_minutes"] == 1
         assert body["config"]["holding_minutes"] == 60
         assert body["config"]["stop_loss_pct"] == 1.0
+        assert body["config"]["minimum_path_efficiency"] == 0.70
+        assert body["config"]["maximum_market_return_bps"] == 0.0
+        assert body["config"]["universe_source"] == (
+            "OPENING_EXECUTION_WEAK_BREADTH_PATH"
+        )
 
         runs = self.client.get(
             "/api/opening-momentum-shadow/execution/runs"

@@ -114,6 +114,10 @@ _WEAK_BREADTH_PATH_ALGORITHM_VERSION = (
     f"{ALGORITHM_VERSION}+{_WEAK_BREADTH_PATH_VERSION}"
 )
 _WEAK_BREADTH_MAXIMUM_MARKET_RETURN_BPS = 0.0
+# Paper execution uses the same frozen identity as the paired shadow variant.
+# The broad policy remains the comparison baseline, so every skipped or
+# entered session continues to produce a causal counterfactual.
+_PAPER_EXECUTION_VARIANT = "WEAK_BREADTH_PATH_CHALLENGER"
 # Selected on data through 2026-07-24; only post-deployment rows count as
 # forward evidence for the wider catastrophic stop.
 _WEAK_BREADTH_WIDE_STOP_PCT = 4.0
@@ -512,7 +516,7 @@ class OpeningMomentumShadowService:
         *,
         now: datetime | None = None,
     ) -> OpeningMomentumExecutionSignal | None:
-        """Build the fixed-stop decision using completed signal bars only."""
+        """Build the paper execution decision from completed signal bars."""
         current = _as_utc(now or datetime.now(timezone.utc))
         if not is_trading_hours("US", current):
             return None
@@ -527,11 +531,12 @@ class OpeningMomentumShadowService:
             session_date=local.date(),
             completed_before=session_open,
         )
+        execution_identity = self.paper_execution_variant_identity()
         variant = next(
             (
                 item
                 for item in variants
-                if item.variant == "EXECUTION_BROAD_CHALLENGER"
+                if item.variant == execution_identity.variant
             ),
             None,
         )
@@ -569,6 +574,7 @@ class OpeningMomentumShadowService:
             for index in range(config.signal_minutes)
         }
         observations: list[OpeningMomentumObservation] = []
+        path_efficiency_by_symbol: dict[str, float] = {}
         excluded: dict[str, str] = {}
         for symbol in variant.symbols:
             try:
@@ -597,6 +603,13 @@ class OpeningMomentumShadowService:
             if opening_bar is None or signal_bar is None:
                 excluded[symbol] = "SIGNAL_BARS_MISSING"
                 continue
+            signal_candles = [
+                by_timestamp[timestamp]
+                for timestamp in sorted(expected_signal_bars)
+            ]
+            path_efficiency_by_symbol[symbol] = (
+                self._opening_path_efficiency(signal_candles)
+            )
             observations.append(OpeningMomentumObservation(
                 symbol=symbol,
                 session_open=opening_bar.open,
@@ -608,6 +621,11 @@ class OpeningMomentumShadowService:
             ))
 
         decision = evaluate_opening_momentum(observations, config)
+        candidate_path_efficiency = (
+            path_efficiency_by_symbol.get(decision.candidate_symbol)
+            if decision.candidate_symbol is not None
+            else None
+        )
         required_observations = max(
             config.minimum_universe_size,
             math.ceil(
@@ -621,12 +639,36 @@ class OpeningMomentumShadowService:
         )
         action: Literal["ENTER_LONG", "SKIP"] = decision.action
         reason = decision.reason
+        path_efficiency_gate_failed = (
+            variant.minimum_path_efficiency is not None
+            and action == "ENTER_LONG"
+            and (
+                candidate_path_efficiency is None
+                or candidate_path_efficiency
+                < variant.minimum_path_efficiency
+            )
+        )
+        maximum_market_return_gate_failed = (
+            variant.maximum_market_return_bps is not None
+            and action == "ENTER_LONG"
+            and (
+                decision.market_return_bps is None
+                or decision.market_return_bps
+                > variant.maximum_market_return_bps
+            )
+        )
         if variant.selection_run_id is None:
             action = "SKIP"
             reason = "PREOPEN_UNIVERSE_UNAVAILABLE"
         elif not data_complete:
             action = "SKIP"
             reason = "DATA_INCOMPLETE"
+        elif path_efficiency_gate_failed:
+            action = "SKIP"
+            reason = "PATH_EFFICIENCY_FILTER"
+        elif maximum_market_return_gate_failed:
+            action = "SKIP"
+            reason = "MAXIMUM_MARKET_RETURN_FILTER"
 
         return OpeningMomentumExecutionSignal(
             session_date=local.date(),
@@ -659,6 +701,15 @@ class OpeningMomentumShadowService:
                 "observed_at": current.isoformat(),
                 "required_observations": required_observations,
                 "observed_symbols": len(observations),
+                "candidate_path_efficiency": (
+                    candidate_path_efficiency
+                ),
+                "minimum_path_efficiency": (
+                    variant.minimum_path_efficiency
+                ),
+                "maximum_market_return_bps": (
+                    variant.maximum_market_return_bps
+                ),
                 "universe": list(variant.symbols),
                 "excluded_symbols": excluded,
                 "ranking": [
@@ -1551,29 +1602,7 @@ class OpeningMomentumShadowService:
                     _EXECUTION_PATH_EFFICIENCY_MINIMUM
                 ),
             ))
-            variants.append(_UniverseVariant(
-                variant="WEAK_BREADTH_PATH_CHALLENGER",
-                algorithm_version=(
-                    _WEAK_BREADTH_PATH_ALGORITHM_VERSION
-                ),
-                config_version=self._evidence_config_version(
-                    f"{execution_config.version_hash()}:"
-                    f"{_WEAK_BREADTH_PATH_VERSION}:"
-                    f"{_EXECUTION_PATH_EFFICIENCY_MINIMUM:.2f}:"
-                    f"{_WEAK_BREADTH_MAXIMUM_MARKET_RETURN_BPS:.1f}"
-                ),
-                universe_source=_WEAK_BREADTH_PATH_SOURCE,
-                decision_config=execution_config,
-                minimum_data_coverage=(
-                    _EARLY_BROAD_MINIMUM_COVERAGE
-                ),
-                minimum_path_efficiency=(
-                    _EXECUTION_PATH_EFFICIENCY_MINIMUM
-                ),
-                maximum_market_return_bps=(
-                    _WEAK_BREADTH_MAXIMUM_MARKET_RETURN_BPS
-                ),
-            ))
+            variants.append(self.paper_execution_variant_identity())
             variants.append(_UniverseVariant(
                 variant="WEAK_BREADTH_WIDE_STOP_CHALLENGER",
                 algorithm_version=(
@@ -1766,6 +1795,26 @@ class OpeningMomentumShadowService:
             universe_source=_EXECUTION_BROAD_SOURCE,
             decision_config=config,
             minimum_data_coverage=_EARLY_BROAD_MINIMUM_COVERAGE,
+        )
+
+    def paper_execution_variant_identity(self) -> _UniverseVariant:
+        config = self._execution_broad_config()
+        return _UniverseVariant(
+            variant=_PAPER_EXECUTION_VARIANT,
+            algorithm_version=_WEAK_BREADTH_PATH_ALGORITHM_VERSION,
+            config_version=self._evidence_config_version(
+                f"{config.version_hash()}:"
+                f"{_WEAK_BREADTH_PATH_VERSION}:"
+                f"{_EXECUTION_PATH_EFFICIENCY_MINIMUM:.2f}:"
+                f"{_WEAK_BREADTH_MAXIMUM_MARKET_RETURN_BPS:.1f}"
+            ),
+            universe_source=_WEAK_BREADTH_PATH_SOURCE,
+            decision_config=config,
+            minimum_data_coverage=_EARLY_BROAD_MINIMUM_COVERAGE,
+            minimum_path_efficiency=_EXECUTION_PATH_EFFICIENCY_MINIMUM,
+            maximum_market_return_bps=(
+                _WEAK_BREADTH_MAXIMUM_MARKET_RETURN_BPS
+            ),
         )
 
     def _active_broad_symbols(self) -> tuple[str, ...]:

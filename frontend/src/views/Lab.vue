@@ -325,7 +325,7 @@
             >
               <div class="shadow-section-header">
                 <div>
-                  <h3>3 分钟动量模拟执行</h3>
+                  <h3>3 分钟相对强势模拟执行</h3>
                   <small>
                     {{ openingExecutionStatus.config.algorithm_version }} ·
                     {{ shortVersion(openingExecutionStatus.config.config_version) }}
@@ -353,6 +353,14 @@
                 <div>
                   <span>固定止损</span>
                   <strong>{{ openingExecutionStatus.config.stop_loss_pct.toFixed(2) }}%</strong>
+                </div>
+                <div>
+                  <span>最小路径效率</span>
+                  <strong>{{ openingExecutionStatus.config.minimum_path_efficiency?.toFixed(2) ?? '-' }}</strong>
+                </div>
+                <div>
+                  <span>市场中位上限</span>
+                  <strong>{{ formatNullableBps(openingExecutionStatus.config.maximum_market_return_bps) }}</strong>
                 </div>
                 <div>
                   <span>最长持有</span>

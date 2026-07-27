@@ -510,7 +510,82 @@ def test_execution_signal_uses_only_completed_three_minute_bars(
         assert signal.reference_entry_price == pytest.approx(101.0)
         assert signal.stop_loss_pct == 1.0
         assert signal.max_holding_minutes == 60
+        assert signal.universe_source == (
+            "OPENING_EXECUTION_WEAK_BREADTH_PATH"
+        )
+        assert signal.context["candidate_path_efficiency"] == 1.0
+        assert signal.context["minimum_path_efficiency"] == 0.70
+        assert signal.context["maximum_market_return_bps"] == 0.0
         assert sorted(candles.calls) == sorted(_SYMBOLS)
+    finally:
+        db.close()
+        Base.metadata.drop_all(bind=engine)
+
+
+def test_execution_signal_skips_a_choppy_opening_leader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        settings,
+        "opening_momentum_challenger_enabled",
+        True,
+    )
+    engine, db = _database()
+    try:
+        _seed_universe(db)
+        _seed_active_broad_pool(db)
+
+        signal = OpeningMomentumShadowService(
+            db,
+            _FakeCandles(low_efficiency_for=_SYMBOLS[-1]),
+        ).evaluate_execution_signal(
+            now=_SESSION_OPEN + timedelta(minutes=3, seconds=5),
+        )
+
+        assert signal is not None
+        assert signal.action == "SKIP"
+        assert signal.reason == "PATH_EFFICIENCY_FILTER"
+        assert signal.symbol is None
+        assert signal.context[
+            "candidate_path_efficiency"
+        ] == pytest.approx(1 / 7)
+    finally:
+        db.close()
+        Base.metadata.drop_all(bind=engine)
+
+
+def test_execution_signal_skips_when_opening_breadth_is_positive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        settings,
+        "opening_momentum_challenger_enabled",
+        True,
+    )
+    engine, db = _database()
+    try:
+        _seed_universe(db)
+        _seed_active_broad_pool(db)
+        early_returns = {
+            symbol: (100.0 if symbol == _SYMBOLS[-1] else 20.0)
+            for symbol in _SYMBOLS
+        }
+
+        signal = OpeningMomentumShadowService(
+            db,
+            _FakeCandles(
+                early_opening_returns_bps=early_returns,
+            ),
+        ).evaluate_execution_signal(
+            now=_SESSION_OPEN + timedelta(minutes=3, seconds=5),
+        )
+
+        assert signal is not None
+        assert signal.action == "SKIP"
+        assert signal.reason == "MAXIMUM_MARKET_RETURN_FILTER"
+        assert signal.symbol is None
+        assert signal.market_return_bps == pytest.approx(20.0)
+        assert signal.context["candidate_path_efficiency"] == 1.0
     finally:
         db.close()
         Base.metadata.drop_all(bind=engine)

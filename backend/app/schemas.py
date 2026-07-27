@@ -681,6 +681,8 @@ class OpeningMomentumExecutionConfigResponse(BaseModel):
     execution_delay_minutes: int
     holding_minutes: int
     stop_loss_pct: float
+    minimum_path_efficiency: Optional[float] = None
+    maximum_market_return_bps: Optional[float] = None
     max_entry_delay_seconds: int
     max_price_deviation_bps: float
     capital_slots: Literal[1] = 1

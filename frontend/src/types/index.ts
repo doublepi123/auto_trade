@@ -2006,6 +2006,8 @@ export interface OpeningMomentumExecutionConfig {
   execution_delay_minutes: number
   holding_minutes: number
   stop_loss_pct: number
+  minimum_path_efficiency: number | null
+  maximum_market_return_bps: number | null
   max_entry_delay_seconds: number
   max_price_deviation_bps: number
   capital_slots: 1
