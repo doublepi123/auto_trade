@@ -34,6 +34,9 @@ from app.database import SessionLocal
 from app.models import OrderRecord, TrackedEntry, TradeEvent
 from app.services.daily_pnl_service import DailyPnlService
 from app.services.notification_log_service import get_notification_sink
+from app.services.opening_momentum_execution_service import (
+    opening_execution_reservation_window,
+)
 from app.core.credential_crypto import CredentialIntegrityError
 from app.services.credentials_service import CredentialsService, PlainCredentials
 from app.services.runtime_state_service import (
@@ -1869,11 +1872,11 @@ class AppRunner:
                             active_engine.state.value,
                             transition_status,
                         )
-                elif self._opening_execution_policies:
+                elif self._opening_execution_capital_slot_reserved():
                     # The opening strategy owns the single capital slot from
-                    # ARMED through settlement. Its selected position uses the
-                    # fixed stop/time policy; other symbols remain observation
-                    # only until the slot is released.
+                    # its signal window through settlement. Its selected
+                    # position uses the fixed stop/time policy; other symbols
+                    # remain observation only until the slot is released.
                     active_engine.record_price(quote.last_price)
                     decision.early_return = True
                 elif (
@@ -3325,16 +3328,15 @@ class AppRunner:
         normalized_action = str(action or "").upper()
         if normalized_action not in _ENTRY_ACTIONS:
             return None
-        with self._state_lock:
-            if self._opening_execution_policies:
-                return EntryPolicyCheckResult(
-                    issue="opening momentum execution owns the capital slot",
-                    skip_category="PENDING",
-                    details={
-                        "entry_policy": "OPENING_MOMENTUM_CAPITAL_SLOT",
-                        "policy_reason": "CAPITAL_SLOT_RESERVED",
-                    },
-                )
+        if self._opening_execution_capital_slot_reserved():
+            return EntryPolicyCheckResult(
+                issue="opening momentum execution owns the capital slot",
+                skip_category="PENDING",
+                details={
+                    "entry_policy": "OPENING_MOMENTUM_CAPITAL_SLOT",
+                    "policy_reason": "CAPITAL_SLOT_RESERVED",
+                },
+            )
         crossing_result = self._validate_live_entry_crossing(
             symbol,
             normalized_action,
@@ -3352,6 +3354,14 @@ class AppRunner:
                     settings.live_max_entries_per_symbol_per_day
                 ),
             ).evaluate(symbol, normalized_action, market)
+
+    def _opening_execution_capital_slot_reserved(self) -> bool:
+        with self._state_lock:
+            has_active_execution = bool(self._opening_execution_policies)
+        return (
+            has_active_execution
+            or opening_execution_reservation_window()
+        )
 
     def _validate_opening_momentum_entry_policy(
         self,

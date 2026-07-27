@@ -7045,6 +7045,42 @@ class TestOpeningMomentumExecution:
             "CAPITAL_SLOT_RESERVED"
         )
 
+    def test_signal_window_reserves_capital_before_signal_is_armed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        runner = TestAppRunner._runner_with_primary_quote_runtime()
+        runner._running = True
+        runner.engine.params.buy_low = 100.0
+        runner.engine.state = EngineState.FLAT
+        assert runner._opening_execution_policies == {}
+        monkeypatch.setattr(
+            runner_module,
+            "opening_execution_reservation_window",
+            lambda: True,
+        )
+
+        decision = runner._evaluate_quote_trigger(Quote(
+            "NVDA.US",
+            99.0,
+            98.99,
+            99.01,
+            _fresh_timestamp(),
+        ))
+        policy_result = runner._validate_live_entry_policy(
+            "NVDA.US",
+            "BUY",
+            "US",
+        )
+
+        assert decision.early_return is True
+        assert decision.result is None
+        assert runner.engine.state == EngineState.FLAT
+        assert isinstance(policy_result, EntryPolicyCheckResult)
+        assert policy_result.details["policy_reason"] == (
+            "CAPITAL_SLOT_RESERVED"
+        )
+
     def test_entry_retries_when_an_existing_position_owns_capital_slot(
         self,
         monkeypatch: pytest.MonkeyPatch,

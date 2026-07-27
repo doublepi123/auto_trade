@@ -79,8 +79,6 @@ _watchlist_quant_lock = asyncio.Lock()
 _llm_globals_lock = threading.Lock()
 _watchlist_quant_sync_lock = threading.Lock()
 _WATCHLIST_QUANT_POLL_SECONDS = 60
-_OPENING_EXECUTION_PRIORITY_LEAD_MINUTES = 2
-_OPENING_EXECUTION_PRIORITY_MINUTES = 5
 _LLM_SECONDARY_ACTION_PRIORITY = {
     "CANDIDATE": 0,
     "WATCH": 1,
@@ -94,31 +92,11 @@ def _opening_execution_priority_window(
     now: datetime | None = None,
 ) -> bool:
     """Reserve market-data and DB capacity for the causal opening entry."""
-    if not settings.opening_momentum_execution_enabled:
-        return False
-    from app.core.market_calendar import get_session
-
-    current = now or datetime.now(timezone.utc)
-    if current.tzinfo is None:
-        current = current.replace(tzinfo=timezone.utc)
-    else:
-        current = current.astimezone(timezone.utc)
-    session = get_session("US")
-    local = session.local(current)
-    if local.weekday() >= 5:
-        return False
-    session_open = datetime.combine(
-        local.date(),
-        session.rth_open,
-        tzinfo=session.timezone,
-    ).astimezone(timezone.utc)
-    return (
-        session_open
-        - timedelta(minutes=_OPENING_EXECUTION_PRIORITY_LEAD_MINUTES)
-        <= current
-        < session_open
-        + timedelta(minutes=_OPENING_EXECUTION_PRIORITY_MINUTES)
+    from app.services.opening_momentum_execution_service import (
+        opening_execution_reservation_window,
     )
+
+    return opening_execution_reservation_window(now)
 
 
 def _price_drift_pct(current_price: float, last_price: float) -> float:

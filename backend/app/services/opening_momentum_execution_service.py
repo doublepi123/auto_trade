@@ -31,6 +31,31 @@ _ACTIVE_STATUSES = frozenset({
 })
 _ENTRY_ACTIONS = frozenset({"BUY"})
 _EXIT_ACTIONS = frozenset({"SELL"})
+_RESERVATION_LEAD_MINUTES = 2
+_RESERVATION_MINUTES = 5
+
+
+def opening_execution_reservation_window(
+    now: datetime | None = None,
+) -> bool:
+    """Reserve the single capital slot while the opening signal forms."""
+    if not settings.opening_momentum_execution_enabled:
+        return False
+    current = _as_utc(now or datetime.now(timezone.utc))
+    session = get_session("US")
+    local = session.local(current)
+    if local.weekday() >= 5:
+        return False
+    session_open = datetime.combine(
+        local.date(),
+        session.rth_open,
+        tzinfo=session.timezone,
+    ).astimezone(timezone.utc)
+    return (
+        session_open - timedelta(minutes=_RESERVATION_LEAD_MINUTES)
+        <= current
+        < session_open + timedelta(minutes=_RESERVATION_MINUTES)
+    )
 
 
 class OpeningExecutionRunner(Protocol):
