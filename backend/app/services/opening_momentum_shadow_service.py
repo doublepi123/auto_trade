@@ -131,6 +131,20 @@ _WEAK_BREADTH_PATH_ALGORITHM_VERSION = (
 _WEAK_BREADTH_MAXIMUM_MARKET_RETURN_BPS = (
     PRODUCTION_MAXIMUM_MARKET_RETURN_BPS
 )
+# Post-hoc sensitivity analysis found the adjacent +5 bps ceiling produced
+# the same holdout trades as production while accepting three additional
+# discovery winners. It remains forward-only and cannot affect paper orders.
+_WEAK_BREADTH_RELAXED_MAXIMUM_MARKET_RETURN_BPS = 5.0
+_WEAK_BREADTH_RELAXED_VERSION = (
+    "forward-only-posthoc-grid-neighbor-max-median5-"
+    "path-efficiency-070-20260727-v1"
+)
+_WEAK_BREADTH_RELAXED_SOURCE = (
+    "OPENING_EXECUTION_WEAK_BREADTH_RELAXED"
+)
+_WEAK_BREADTH_RELAXED_ALGORITHM_VERSION = (
+    f"{ALGORITHM_VERSION}+{_WEAK_BREADTH_RELAXED_VERSION}"
+)
 # Paper execution uses the same frozen identity as the paired shadow variant.
 # The broad policy remains the comparison baseline, so every skipped or
 # entered session continues to produce a causal counterfactual.
@@ -251,6 +265,7 @@ _VariantName = Literal[
     "EXECUTION_BROAD_CHALLENGER",
     "EXECUTION_PATH_EFFICIENCY_CHALLENGER",
     "WEAK_BREADTH_PATH_CHALLENGER",
+    "WEAK_BREADTH_RELAXED_CHALLENGER",
     "WEAK_BREADTH_WIDE_STOP_CHALLENGER",
     "ETF_REGIME_PATH_CHALLENGER",
     "ETF_REGIME_CRWD_CHALLENGER",
@@ -1512,6 +1527,14 @@ class OpeningMomentumShadowService:
             symbols=active_broad_symbols,
             selection_run_id=run.id,
         ))
+        weak_breadth_relaxed_identity = identities_by_variant[
+            "WEAK_BREADTH_RELAXED_CHALLENGER"
+        ]
+        variants.append(replace(
+            weak_breadth_relaxed_identity,
+            symbols=active_broad_symbols,
+            selection_run_id=run.id,
+        ))
         for variant_name in _ETF_REGIME_VARIANTS:
             identity = identities_by_variant[
                 cast(_VariantName, variant_name)
@@ -1712,6 +1735,29 @@ class OpeningMomentumShadowService:
                 ),
             ))
             variants.append(self.paper_execution_variant_identity())
+            variants.append(_UniverseVariant(
+                variant="WEAK_BREADTH_RELAXED_CHALLENGER",
+                algorithm_version=(
+                    _WEAK_BREADTH_RELAXED_ALGORITHM_VERSION
+                ),
+                config_version=self._evidence_config_version(
+                    f"{execution_config.version_hash()}:"
+                    f"{_WEAK_BREADTH_RELAXED_VERSION}:"
+                    f"{_EXECUTION_PATH_EFFICIENCY_MINIMUM:.2f}:"
+                    f"{_WEAK_BREADTH_RELAXED_MAXIMUM_MARKET_RETURN_BPS:.1f}"
+                ),
+                universe_source=_WEAK_BREADTH_RELAXED_SOURCE,
+                decision_config=execution_config,
+                minimum_data_coverage=(
+                    _EARLY_BROAD_MINIMUM_COVERAGE
+                ),
+                minimum_path_efficiency=(
+                    _EXECUTION_PATH_EFFICIENCY_MINIMUM
+                ),
+                maximum_market_return_bps=(
+                    _WEAK_BREADTH_RELAXED_MAXIMUM_MARKET_RETURN_BPS
+                ),
+            ))
             variants.append(_UniverseVariant(
                 variant="ETF_REGIME_PATH_CHALLENGER",
                 algorithm_version=(
@@ -2304,6 +2350,7 @@ class OpeningMomentumShadowService:
             )
             uses_weak_breadth_baseline = (
                 identity.variant in {
+                    "WEAK_BREADTH_RELAXED_CHALLENGER",
                     "WEAK_BREADTH_WIDE_STOP_CHALLENGER",
                     "ETF_REGIME_PATH_CHALLENGER",
                 }
