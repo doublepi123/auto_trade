@@ -6,6 +6,7 @@ import pytest
 
 from app.domain.opening_momentum import OpeningMomentumConfig
 from app.domain.opening_momentum_policy import (
+    EXCEPTIONAL_PATH_POLICY_NAME,
     OPENING_POLICY_COHORT_DIAGNOSTIC_VERSION,
     OPENING_POLICY_DIAGNOSTIC_VERSION,
     OPENING_POLICY_HORIZON_DIAGNOSTIC_VERSION,
@@ -134,6 +135,92 @@ def test_baseline_policy_preserves_every_resolved_signal() -> None:
     assert baseline.metrics.cumulative_return_bps == pytest.approx(90.0)
     assert baseline.displacement.displaced_signal_sessions == 0
     assert production.metrics == baseline.metrics
+
+
+def test_exceptional_path_gate_only_relaxes_mild_positive_breadth() -> None:
+    first = date(2026, 7, 20)
+    sessions = tuple(
+        OpeningPolicySession(
+            session_date=first + timedelta(days=index),
+            baseline_signal=True,
+            gross_return_bps=gross_return_bps,
+            market_return_bps=market_return_bps,
+            candidate_path_efficiency=path_efficiency,
+            candidate_symbol=f"S{index}.US",
+        )
+        for index, (
+            gross_return_bps,
+            market_return_bps,
+            path_efficiency,
+        ) in enumerate((
+            (114.0, 3.0, 0.95),
+            (214.0, 3.0, 0.85),
+            (64.0, -1.0, 0.75),
+            (314.0, 6.0, 1.0),
+        ))
+    )
+    report = evaluate_opening_policy_grid(
+        sessions,
+        policies=(
+            OpeningPolicySpec("BROAD"),
+            OpeningPolicySpec(
+                PRODUCTION_POLICY_NAME,
+                minimum_path_efficiency=0.70,
+                maximum_market_return_bps=0.0,
+            ),
+            OpeningPolicySpec(
+                EXCEPTIONAL_PATH_POLICY_NAME,
+                minimum_path_efficiency=0.70,
+                maximum_market_return_bps=0.0,
+                exceptional_minimum_path_efficiency=0.90,
+                exceptional_maximum_market_return_bps=5.0,
+            ),
+        ),
+        round_trip_cost_bps=14.0,
+    )
+
+    production = _slice(report.policies[1], "ALL")
+    exceptional = _slice(report.policies[2], "ALL")
+    assert production.metrics.entries == 1
+    assert production.metrics.cumulative_return_bps == pytest.approx(50.0)
+    assert exceptional.metrics.entries == 2
+    assert exceptional.metrics.cumulative_return_bps == pytest.approx(150.0)
+    assert exceptional.displacement.displaced_signal_sessions == 2
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    (
+        (
+            {"exceptional_minimum_path_efficiency": 0.90},
+            "must be set together",
+        ),
+        (
+            {
+                "minimum_path_efficiency": 0.70,
+                "maximum_market_return_bps": 0.0,
+                "exceptional_minimum_path_efficiency": 0.60,
+                "exceptional_maximum_market_return_bps": 5.0,
+            },
+            "must not be below the base path threshold",
+        ),
+        (
+            {
+                "minimum_path_efficiency": 0.70,
+                "maximum_market_return_bps": 0.0,
+                "exceptional_minimum_path_efficiency": 0.90,
+                "exceptional_maximum_market_return_bps": -1.0,
+            },
+            "must not be below the base maximum",
+        ),
+    ),
+)
+def test_policy_spec_rejects_invalid_exceptional_gate(
+    kwargs: dict[str, float],
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        OpeningPolicySpec("INVALID", **kwargs)
 
 
 def test_execution_config_is_shared_and_preserves_cost_inputs() -> None:

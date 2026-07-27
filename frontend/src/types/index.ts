@@ -1944,6 +1944,7 @@ export interface OpeningMomentumShadowVariant {
     | 'EXECUTION_PATH_EFFICIENCY_CHALLENGER'
     | 'WEAK_BREADTH_PATH_CHALLENGER'
     | 'WEAK_BREADTH_RELAXED_CHALLENGER'
+    | 'WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER'
     | 'WEAK_BREADTH_INDEX_COHORT_CHALLENGER'
     | 'WEAK_BREADTH_SPARSE_INDEX_COHORT_CHALLENGER'
     | 'WEAK_BREADTH_WIDE_STOP_CHALLENGER'
@@ -1967,6 +1968,8 @@ export interface OpeningMomentumShadowVariant {
   minimum_data_coverage: number
   minimum_path_efficiency: number | null
   maximum_market_return_bps: number | null
+  exceptional_minimum_path_efficiency: number | null
+  exceptional_maximum_market_return_bps: number | null
   maximum_benchmark_average_return_bps: number | null
   required_symbols: string[]
   holding_minutes: number

@@ -627,6 +627,7 @@ class OpeningMomentumShadowVariantResponse(BaseModel):
         "EXECUTION_PATH_EFFICIENCY_CHALLENGER",
         "WEAK_BREADTH_PATH_CHALLENGER",
         "WEAK_BREADTH_RELAXED_CHALLENGER",
+        "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER",
         "WEAK_BREADTH_INDEX_COHORT_CHALLENGER",
         "WEAK_BREADTH_SPARSE_INDEX_COHORT_CHALLENGER",
         "WEAK_BREADTH_WIDE_STOP_CHALLENGER",
@@ -655,6 +656,12 @@ class OpeningMomentumShadowVariantResponse(BaseModel):
         le=1,
     )
     maximum_market_return_bps: Optional[float] = None
+    exceptional_minimum_path_efficiency: Optional[float] = Field(
+        default=None,
+        ge=0,
+        le=1,
+    )
+    exceptional_maximum_market_return_bps: Optional[float] = None
     maximum_benchmark_average_return_bps: Optional[float] = None
     required_symbols: list[str] = Field(default_factory=list)
     holding_minutes: int

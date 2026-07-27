@@ -592,12 +592,22 @@
                       {{ row.signal_minutes }} 分钟
                     </template>
                   </el-table-column>
-                  <el-table-column label="市场门槛" min-width="100">
+                  <el-table-column label="市场门槛" min-width="150">
                     <template #default="{ row }">
-                      {{ formatBps(row.minimum_market_return_bps) }}
-                      <template v-if="row.maximum_market_return_bps != null">
-                        至 {{ formatBps(row.maximum_market_return_bps) }}
-                      </template>
+                      <div>
+                        {{ formatBps(row.minimum_market_return_bps) }}
+                        <template v-if="row.maximum_market_return_bps != null">
+                          至 {{ formatBps(row.maximum_market_return_bps) }}
+                        </template>
+                      </div>
+                      <div
+                        v-if="row.exceptional_minimum_path_efficiency != null
+                          && row.exceptional_maximum_market_return_bps != null"
+                        class="opening-momentum-exception-threshold"
+                      >
+                        路径 {{ formatPercent(row.exceptional_minimum_path_efficiency) }}：
+                        至 {{ formatBps(row.exceptional_maximum_market_return_bps) }}
+                      </div>
                     </template>
                   </el-table-column>
                   <el-table-column label="候选 / 超额" min-width="130">
@@ -2422,6 +2432,9 @@ function openingMomentumVariantLabel(
   if (variant === 'EXECUTION_PATH_EFFICIENCY_CHALLENGER') return '执行 + 路径效率'
   if (variant === 'WEAK_BREADTH_PATH_CHALLENGER') return '弱广度 + 路径效率'
   if (variant === 'WEAK_BREADTH_RELAXED_CHALLENGER') return '弱广度 + 5bp 上限'
+  if (variant === 'WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER') {
+    return '弱广度 + 强路径例外'
+  }
   if (variant === 'WEAK_BREADTH_INDEX_COHORT_CHALLENGER') return '弱广度 + PANW'
   if (variant === 'WEAK_BREADTH_SPARSE_INDEX_COHORT_CHALLENGER') {
     return '弱广度 + 稀疏指数候选组'
@@ -2444,6 +2457,7 @@ function openingMomentumVariantTagType(
   if (
     variant === 'WEAK_BREADTH_PATH_CHALLENGER'
     || variant === 'WEAK_BREADTH_RELAXED_CHALLENGER'
+    || variant === 'WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER'
     || variant === 'WEAK_BREADTH_INDEX_COHORT_CHALLENGER'
     || variant === 'WEAK_BREADTH_SPARSE_INDEX_COHORT_CHALLENGER'
     || variant === 'WEAK_BREADTH_WIDE_STOP_CHALLENGER'
@@ -4237,6 +4251,12 @@ onBeforeUnmount(() => {
   padding-left: 10px;
   border-left: 3px solid #909399;
   color: #4b5563;
+}
+
+.opening-momentum-exception-threshold {
+  margin-top: 2px;
+  color: #6b7280;
+  font-size: 12px;
 }
 
 .shadow-pagination {

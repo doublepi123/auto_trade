@@ -2687,6 +2687,47 @@ Cypress.Commands.add('stubApi', () => {
             recommendation: 'COLLECTING',
           },
         },
+        {
+          variant: 'WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER',
+          universe_source: (
+            'OPENING_EXECUTION_WEAK_BREADTH_EXCEPTIONAL_PATH'
+          ),
+          algorithm_version: (
+            'cross-sectional-opening-momentum-v3-preopen-frozen-universe+'
+            + 'forward-only-post-20260727-conditional-path090-max5-v1'
+          ),
+          config_version: 'opening-weak-breadth-exception-stub-v1',
+          signal_minutes: 3,
+          minimum_market_return_bps: -50,
+          maximum_market_return_bps: 0,
+          exceptional_minimum_path_efficiency: 0.9,
+          exceptional_maximum_market_return_bps: 5,
+          maximum_benchmark_average_return_bps: null,
+          minimum_candidate_return_bps: 50,
+          minimum_excess_return_bps: 25,
+          minimum_data_coverage: 0.95,
+          minimum_path_efficiency: 0.7,
+          required_symbols: [],
+          holding_minutes: 60,
+          stop_loss_pct: 1,
+          comparison_sessions: 0,
+          comparison_baseline: 'WEAK_BREADTH_PATH_CHALLENGER',
+          latest: null,
+          metrics: {
+            observed_sessions: 0,
+            skipped_sessions: 0,
+            signals: 0,
+            open_trades: 0,
+            closed_trades: 0,
+            wins: 0,
+            win_rate: 0,
+            mean_net_return_bps: 0,
+            cumulative_net_return_bps: 0,
+            max_drawdown_bps: 0,
+            profit_factor: null,
+          },
+          comparison: null,
+        },
         ...([
           {
             variant: 'WEAK_BREADTH_INDEX_COHORT_CHALLENGER',

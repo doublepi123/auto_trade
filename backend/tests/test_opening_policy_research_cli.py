@@ -17,6 +17,9 @@ from app.cli.opening_policy_research import (
 )
 from app.core.market_calendar import get_session
 from app.domain.opening_momentum_policy import (
+    EXCEPTIONAL_MAXIMUM_MARKET_RETURN_BPS,
+    EXCEPTIONAL_MINIMUM_PATH_EFFICIENCY,
+    EXCEPTIONAL_PATH_POLICY_NAME,
     PRODUCTION_MAXIMUM_MARKET_RETURN_BPS,
     PRODUCTION_MINIMUM_PATH_EFFICIENCY,
     PRODUCTION_POLICY_NAME,
@@ -122,8 +125,13 @@ def test_default_grid_contains_unique_production_and_neighbors() -> None:
     production = next(
         value for value in policies if value.name == PRODUCTION_POLICY_NAME
     )
+    exceptional = next(
+        value
+        for value in policies
+        if value.name == EXCEPTIONAL_PATH_POLICY_NAME
+    )
 
-    assert len(policies) == 36
+    assert len(policies) == 37
     assert len(names) == len(set(names))
     assert policies[0].name == "BROAD"
     assert production.minimum_path_efficiency == (
@@ -131,6 +139,18 @@ def test_default_grid_contains_unique_production_and_neighbors() -> None:
     )
     assert production.maximum_market_return_bps == (
         PRODUCTION_MAXIMUM_MARKET_RETURN_BPS
+    )
+    assert exceptional.minimum_path_efficiency == (
+        PRODUCTION_MINIMUM_PATH_EFFICIENCY
+    )
+    assert exceptional.maximum_market_return_bps == (
+        PRODUCTION_MAXIMUM_MARKET_RETURN_BPS
+    )
+    assert exceptional.exceptional_minimum_path_efficiency == (
+        EXCEPTIONAL_MINIMUM_PATH_EFFICIENCY
+    )
+    assert exceptional.exceptional_maximum_market_return_bps == (
+        EXCEPTIONAL_MAXIMUM_MARKET_RETURN_BPS
     )
 
 

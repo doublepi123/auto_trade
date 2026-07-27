@@ -32,6 +32,9 @@ from app.domain.opening_momentum import (
     shadow_round_trip_return_bps,
 )
 from app.domain.opening_momentum_policy import (
+    EXCEPTIONAL_MAXIMUM_MARKET_RETURN_BPS,
+    EXCEPTIONAL_MINIMUM_PATH_EFFICIENCY,
+    EXCEPTIONAL_PATH_POLICY_NAME,
     OPENING_POLICY_COHORT_DIAGNOSTIC_VERSION,
     OPENING_POLICY_DIAGNOSTIC_VERSION,
     OPENING_POLICY_HORIZON_DIAGNOSTIC_VERSION,
@@ -55,7 +58,7 @@ from app.domain.opening_momentum_policy import (
 )
 
 
-OPENING_POLICY_CLI_VERSION = "opening-policy-research-cli-v4"
+OPENING_POLICY_CLI_VERSION = "opening-policy-research-cli-v5"
 _DEFAULT_PATH_THRESHOLDS = (0.50, 0.60, 0.70, 0.80, 0.90)
 _DEFAULT_MARKET_MAXIMUMS_BPS = (-10.0, -5.0, 0.0, 5.0, 10.0, 20.0)
 _DEFAULT_MINIMUM_DATA_COVERAGE = 0.95
@@ -100,6 +103,21 @@ def _default_policy_specs() -> tuple[OpeningPolicySpec, ...]:
                 minimum_path_efficiency=path_threshold,
                 maximum_market_return_bps=market_maximum,
             ))
+    policies.append(OpeningPolicySpec(
+        EXCEPTIONAL_PATH_POLICY_NAME,
+        minimum_path_efficiency=(
+            PRODUCTION_MINIMUM_PATH_EFFICIENCY
+        ),
+        maximum_market_return_bps=(
+            PRODUCTION_MAXIMUM_MARKET_RETURN_BPS
+        ),
+        exceptional_minimum_path_efficiency=(
+            EXCEPTIONAL_MINIMUM_PATH_EFFICIENCY
+        ),
+        exceptional_maximum_market_return_bps=(
+            EXCEPTIONAL_MAXIMUM_MARKET_RETURN_BPS
+        ),
+    ))
     return tuple(policies)
 
 

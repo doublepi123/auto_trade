@@ -15,7 +15,7 @@ from app.domain.opening_momentum_comparison import (
 
 
 OPENING_POLICY_DIAGNOSTIC_VERSION = (
-    "opening-policy-chronological-holdout-v1"
+    "opening-policy-chronological-holdout-v2"
 )
 OPENING_POLICY_COHORT_DIAGNOSTIC_VERSION = (
     "opening-policy-cohort-paired-chronological-holdout-v1"
@@ -26,6 +26,11 @@ OPENING_POLICY_HORIZON_DIAGNOSTIC_VERSION = (
 PRODUCTION_POLICY_NAME = "WEAK_BREADTH_PATH_CHALLENGER"
 PRODUCTION_MINIMUM_PATH_EFFICIENCY = 0.70
 PRODUCTION_MAXIMUM_MARKET_RETURN_BPS = 0.0
+EXCEPTIONAL_PATH_POLICY_NAME = (
+    "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER"
+)
+EXCEPTIONAL_MINIMUM_PATH_EFFICIENCY = 0.90
+EXCEPTIONAL_MAXIMUM_MARKET_RETURN_BPS = 5.0
 
 OpeningPolicySliceName = Literal["ALL", "DISCOVERY", "HOLDOUT"]
 
@@ -52,6 +57,8 @@ class OpeningPolicySpec:
     name: str
     minimum_path_efficiency: float | None = None
     maximum_market_return_bps: float | None = None
+    exceptional_minimum_path_efficiency: float | None = None
+    exceptional_maximum_market_return_bps: float | None = None
 
     def __post_init__(self) -> None:
         normalized = self.name.strip().upper()
@@ -71,6 +78,54 @@ class OpeningPolicySpec:
             raise ValueError(
                 "maximum_market_return_bps must be finite when set"
             )
+        exceptional_pair = (
+            self.exceptional_minimum_path_efficiency,
+            self.exceptional_maximum_market_return_bps,
+        )
+        if (exceptional_pair[0] is None) != (exceptional_pair[1] is None):
+            raise ValueError(
+                "exceptional path and market thresholds must be set together"
+            )
+        if self.exceptional_minimum_path_efficiency is not None:
+            if (
+                not math.isfinite(
+                    self.exceptional_minimum_path_efficiency
+                )
+                or not 0
+                <= self.exceptional_minimum_path_efficiency
+                <= 1
+            ):
+                raise ValueError(
+                    "exceptional_minimum_path_efficiency must be in [0, 1]"
+                )
+            if (
+                self.minimum_path_efficiency is not None
+                and self.exceptional_minimum_path_efficiency
+                < self.minimum_path_efficiency
+            ):
+                raise ValueError(
+                    "exceptional path threshold must not be below the base "
+                    "path threshold"
+                )
+        if self.exceptional_maximum_market_return_bps is not None:
+            if not math.isfinite(
+                self.exceptional_maximum_market_return_bps
+            ):
+                raise ValueError(
+                    "exceptional_maximum_market_return_bps must be finite"
+                )
+            if self.maximum_market_return_bps is None:
+                raise ValueError(
+                    "exceptional market threshold requires a base maximum"
+                )
+            if (
+                self.exceptional_maximum_market_return_bps
+                < self.maximum_market_return_bps
+            ):
+                raise ValueError(
+                    "exceptional market threshold must not be below the "
+                    "base maximum"
+                )
 
 
 @dataclass(frozen=True)
@@ -352,6 +407,8 @@ def evaluate_opening_policy_grid(
     if (
         baseline.minimum_path_efficiency is not None
         or baseline.maximum_market_return_bps is not None
+        or baseline.exceptional_minimum_path_efficiency is not None
+        or baseline.exceptional_maximum_market_return_bps is not None
     ):
         raise ValueError("baseline policy must not define post-signal gates")
     if production_name not in policy_by_name:
@@ -1035,12 +1092,22 @@ def _policy_accepts(
         )
     ):
         return False
+    maximum_market_return_bps = policy.maximum_market_return_bps
+    if (
+        policy.exceptional_minimum_path_efficiency is not None
+        and policy.exceptional_maximum_market_return_bps is not None
+        and session.candidate_path_efficiency is not None
+        and session.candidate_path_efficiency
+        >= policy.exceptional_minimum_path_efficiency
+    ):
+        maximum_market_return_bps = (
+            policy.exceptional_maximum_market_return_bps
+        )
     return not (
-        policy.maximum_market_return_bps is not None
+        maximum_market_return_bps is not None
         and (
             session.market_return_bps is None
-            or session.market_return_bps
-            > policy.maximum_market_return_bps
+            or session.market_return_bps > maximum_market_return_bps
         )
     )
 

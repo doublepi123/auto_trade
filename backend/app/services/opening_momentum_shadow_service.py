@@ -26,6 +26,8 @@ from app.domain.opening_momentum_comparison import (
     compare_opening_momentum_variants,
 )
 from app.domain.opening_momentum_policy import (
+    EXCEPTIONAL_MAXIMUM_MARKET_RETURN_BPS,
+    EXCEPTIONAL_MINIMUM_PATH_EFFICIENCY,
     PRODUCTION_MAXIMUM_MARKET_RETURN_BPS,
     PRODUCTION_MINIMUM_PATH_EFFICIENCY,
     PRODUCTION_POLICY_NAME,
@@ -144,6 +146,22 @@ _WEAK_BREADTH_RELAXED_SOURCE = (
 )
 _WEAK_BREADTH_RELAXED_ALGORITHM_VERSION = (
     f"{ALGORITHM_VERSION}+{_WEAK_BREADTH_RELAXED_VERSION}"
+)
+# Discovery-only paired research retained the two profitable +0..5bp breadth
+# sessions while excluding the lower-quality loser by requiring a 0.90 path.
+# The rule was designed after inspecting 2026-07-27, so it starts collecting
+# only on later sessions and cannot affect paper orders automatically.
+_WEAK_BREADTH_EXCEPTIONAL_PATH_VERSION = (
+    "forward-only-post-20260727-conditional-max-median5-"
+    "when-path-efficiency-090-otherwise-max-median0-"
+    "cost30-tail-dd-v1"
+)
+_WEAK_BREADTH_EXCEPTIONAL_PATH_SOURCE = (
+    "OPENING_EXECUTION_WEAK_BREADTH_EXCEPTIONAL_PATH"
+)
+_WEAK_BREADTH_EXCEPTIONAL_PATH_ALGORITHM_VERSION = (
+    f"{ALGORITHM_VERSION}+"
+    f"{_WEAK_BREADTH_EXCEPTIONAL_PATH_VERSION}"
 )
 # Paper execution uses the same frozen identity as the paired shadow variant.
 # The broad policy remains the comparison baseline, so every skipped or
@@ -309,6 +327,7 @@ _VariantName = Literal[
     "EXECUTION_PATH_EFFICIENCY_CHALLENGER",
     "WEAK_BREADTH_PATH_CHALLENGER",
     "WEAK_BREADTH_RELAXED_CHALLENGER",
+    "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER",
     "WEAK_BREADTH_INDEX_COHORT_CHALLENGER",
     "WEAK_BREADTH_SPARSE_INDEX_COHORT_CHALLENGER",
     "WEAK_BREADTH_WIDE_STOP_CHALLENGER",
@@ -398,6 +417,8 @@ class _UniverseVariant:
     minimum_data_coverage: float = 1.0
     minimum_path_efficiency: float | None = None
     maximum_market_return_bps: float | None = None
+    exceptional_minimum_path_efficiency: float | None = None
+    exceptional_maximum_market_return_bps: float | None = None
     maximum_benchmark_average_return_bps: float | None = None
     opening_range_stop: bool = False
     required_symbols: tuple[str, ...] = ()
@@ -425,6 +446,54 @@ class _UniverseVariant:
                     "maximum_market_return_bps must not be below the "
                     "minimum market return"
                 )
+        exceptional_pair = (
+            self.exceptional_minimum_path_efficiency,
+            self.exceptional_maximum_market_return_bps,
+        )
+        if (exceptional_pair[0] is None) != (exceptional_pair[1] is None):
+            raise ValueError(
+                "exceptional path and market thresholds must be set together"
+            )
+        if self.exceptional_minimum_path_efficiency is not None:
+            if (
+                not math.isfinite(
+                    self.exceptional_minimum_path_efficiency
+                )
+                or not 0
+                <= self.exceptional_minimum_path_efficiency
+                <= 1
+            ):
+                raise ValueError(
+                    "exceptional_minimum_path_efficiency must be in [0, 1]"
+                )
+            if (
+                self.minimum_path_efficiency is not None
+                and self.exceptional_minimum_path_efficiency
+                < self.minimum_path_efficiency
+            ):
+                raise ValueError(
+                    "exceptional path threshold must not be below the base "
+                    "path threshold"
+                )
+        if self.exceptional_maximum_market_return_bps is not None:
+            if not math.isfinite(
+                self.exceptional_maximum_market_return_bps
+            ):
+                raise ValueError(
+                    "exceptional_maximum_market_return_bps must be finite"
+                )
+            if self.maximum_market_return_bps is None:
+                raise ValueError(
+                    "exceptional market threshold requires a base maximum"
+                )
+            if (
+                self.exceptional_maximum_market_return_bps
+                < self.maximum_market_return_bps
+            ):
+                raise ValueError(
+                    "exceptional market threshold must not be below the "
+                    "base maximum"
+                )
         if (
             self.maximum_benchmark_average_return_bps is not None
             and not math.isfinite(
@@ -442,6 +511,20 @@ class _UniverseVariant:
             raise ValueError(
                 "opening-range stop requires a maximum stop-loss percent"
             )
+
+    def effective_maximum_market_return_bps(
+        self,
+        candidate_path_efficiency: float | None,
+    ) -> float | None:
+        if (
+            self.exceptional_minimum_path_efficiency is not None
+            and self.exceptional_maximum_market_return_bps is not None
+            and candidate_path_efficiency is not None
+            and candidate_path_efficiency
+            >= self.exceptional_minimum_path_efficiency
+        ):
+            return self.exceptional_maximum_market_return_bps
+        return self.maximum_market_return_bps
 
 
 @dataclass(frozen=True)
@@ -779,13 +862,18 @@ class OpeningMomentumShadowService:
                 < variant.minimum_path_efficiency
             )
         )
+        effective_maximum_market_return_bps = (
+            variant.effective_maximum_market_return_bps(
+                candidate_path_efficiency
+            )
+        )
         maximum_market_return_gate_failed = (
-            variant.maximum_market_return_bps is not None
+            effective_maximum_market_return_bps is not None
             and action == "ENTER_LONG"
             and (
                 decision.market_return_bps is None
                 or decision.market_return_bps
-                > variant.maximum_market_return_bps
+                > effective_maximum_market_return_bps
             )
         )
         if variant.selection_run_id is None:
@@ -840,6 +928,15 @@ class OpeningMomentumShadowService:
                 ),
                 "maximum_market_return_bps": (
                     variant.maximum_market_return_bps
+                ),
+                "exceptional_minimum_path_efficiency": (
+                    variant.exceptional_minimum_path_efficiency
+                ),
+                "exceptional_maximum_market_return_bps": (
+                    variant.exceptional_maximum_market_return_bps
+                ),
+                "effective_maximum_market_return_bps": (
+                    effective_maximum_market_return_bps
                 ),
                 "universe": list(variant.symbols),
                 "excluded_symbols": excluded,
@@ -1139,13 +1236,18 @@ class OpeningMomentumShadowService:
                     < variant.minimum_path_efficiency
                 )
             )
+            effective_maximum_market_return_bps = (
+                variant.effective_maximum_market_return_bps(
+                    path_efficiency
+                )
+            )
             maximum_market_return_gate_failed = (
-                variant.maximum_market_return_bps is not None
+                effective_maximum_market_return_bps is not None
                 and decision.action == "ENTER_LONG"
                 and (
                     decision.market_return_bps is None
                     or decision.market_return_bps
-                    > variant.maximum_market_return_bps
+                    > effective_maximum_market_return_bps
                 )
             )
             benchmark_data_incomplete = (
@@ -1580,6 +1682,14 @@ class OpeningMomentumShadowService:
             symbols=active_broad_symbols,
             selection_run_id=run.id,
         ))
+        weak_breadth_exceptional_path_identity = identities_by_variant[
+            "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER"
+        ]
+        variants.append(replace(
+            weak_breadth_exceptional_path_identity,
+            symbols=active_broad_symbols,
+            selection_run_id=run.id,
+        ))
         weak_breadth_index_cohort_identity = identities_by_variant[
             "WEAK_BREADTH_INDEX_COHORT_CHALLENGER"
         ]
@@ -1825,6 +1935,41 @@ class OpeningMomentumShadowService:
                 ),
                 maximum_market_return_bps=(
                     _WEAK_BREADTH_RELAXED_MAXIMUM_MARKET_RETURN_BPS
+                ),
+            ))
+            variants.append(_UniverseVariant(
+                variant=(
+                    "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER"
+                ),
+                algorithm_version=(
+                    _WEAK_BREADTH_EXCEPTIONAL_PATH_ALGORITHM_VERSION
+                ),
+                config_version=self._evidence_config_version(
+                    f"{execution_config.version_hash()}:"
+                    f"{_WEAK_BREADTH_EXCEPTIONAL_PATH_VERSION}:"
+                    f"{_EXECUTION_PATH_EFFICIENCY_MINIMUM:.2f}:"
+                    f"{_WEAK_BREADTH_MAXIMUM_MARKET_RETURN_BPS:.1f}:"
+                    f"{EXCEPTIONAL_MINIMUM_PATH_EFFICIENCY:.2f}:"
+                    f"{EXCEPTIONAL_MAXIMUM_MARKET_RETURN_BPS:.1f}"
+                ),
+                universe_source=(
+                    _WEAK_BREADTH_EXCEPTIONAL_PATH_SOURCE
+                ),
+                decision_config=execution_config,
+                minimum_data_coverage=(
+                    _EARLY_BROAD_MINIMUM_COVERAGE
+                ),
+                minimum_path_efficiency=(
+                    _EXECUTION_PATH_EFFICIENCY_MINIMUM
+                ),
+                maximum_market_return_bps=(
+                    _WEAK_BREADTH_MAXIMUM_MARKET_RETURN_BPS
+                ),
+                exceptional_minimum_path_efficiency=(
+                    EXCEPTIONAL_MINIMUM_PATH_EFFICIENCY
+                ),
+                exceptional_maximum_market_return_bps=(
+                    EXCEPTIONAL_MAXIMUM_MARKET_RETURN_BPS
                 ),
             ))
             variants.append(_UniverseVariant(
@@ -2478,6 +2623,7 @@ class OpeningMomentumShadowService:
             uses_weak_breadth_baseline = (
                 identity.variant in {
                     "WEAK_BREADTH_RELAXED_CHALLENGER",
+                    "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER",
                     "WEAK_BREADTH_INDEX_COHORT_CHALLENGER",
                     "WEAK_BREADTH_SPARSE_INDEX_COHORT_CHALLENGER",
                     "WEAK_BREADTH_WIDE_STOP_CHALLENGER",
@@ -2642,6 +2788,12 @@ class OpeningMomentumShadowService:
                     ),
                     maximum_market_return_bps=(
                         identity.maximum_market_return_bps
+                    ),
+                    exceptional_minimum_path_efficiency=(
+                        identity.exceptional_minimum_path_efficiency
+                    ),
+                    exceptional_maximum_market_return_bps=(
+                        identity.exceptional_maximum_market_return_bps
                     ),
                     maximum_benchmark_average_return_bps=(
                         identity.maximum_benchmark_average_return_bps
