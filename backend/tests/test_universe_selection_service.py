@@ -819,13 +819,13 @@ def test_observation_pool_overrides_separate_durable_and_opt_out() -> None:
             {"NVDA.US", "MRVL.US"}
         )
         assert overrides.durable_observed_symbols == frozenset(
-            {"NVDA.US", "MRVL.US", "CRWD.US"}
-        )
-        assert overrides.challenger_excluded_symbols == frozenset(
             {"NVDA.US", "MRVL.US", "CRWD.US", "AAPL.US"}
         )
+        assert overrides.challenger_excluded_symbols == frozenset(
+            {"MRVL.US", "AAPL.US"}
+        )
         assert overrides.exploration_excluded_symbols == frozenset(
-            {"CRWD.US", "TER.US"}
+            {"AAPL.US", "CRWD.US", "TER.US"}
         )
         assert overrides.unobservable_symbols == frozenset({"TER.US"})
     finally:
@@ -1271,6 +1271,129 @@ def test_refresh_reconciles_exploration_into_read_only_evidence() -> None:
         assert all(
             row.is_active is False
             for row in db.query(WatchlistItem).all()
+        )
+    finally:
+        db.close()
+
+
+def test_reconcile_keeps_execution_pool_and_challengers_stable() -> None:
+    db = _db()
+    try:
+        run = UniverseSelectionRun(
+            as_of_date=_NOW.date(),
+            algorithm_version="selector-v1",
+            source_version="catalog-v1",
+            status="COMPLETE",
+            candidate_count=5,
+            evaluable_count=5,
+            selected_count=1,
+            coverage_ratio=1.0,
+            parameters_json="{}",
+            started_at=_NOW - timedelta(minutes=2),
+            completed_at=_NOW - timedelta(minutes=1),
+            created_at=_NOW - timedelta(minutes=2),
+        )
+        db.add(run)
+        db.flush()
+
+        def candidate(
+            symbol: str,
+            score: float,
+            *,
+            selected: bool = False,
+        ) -> UniverseSelectionCandidate:
+            return UniverseSelectionCandidate(
+                run_id=run.id,
+                symbol=symbol,
+                market="US",
+                alias=symbol,
+                sector=(
+                    "Financials" if selected else "Semiconductors"
+                ),
+                memberships_json='["NASDAQ_100"]',
+                selected=selected,
+                rank=1 if selected else None,
+                score=score,
+                metrics_json="{}",
+                exclusion_reasons_json=json.dumps(
+                    [] if selected else ["SECTOR_CAP"]
+                ),
+                created_at=_NOW,
+            )
+
+        db.add_all(
+            [
+                candidate("AAPL.US", 100, selected=True),
+                candidate("ASML.US", 99),
+                candidate("KLAC.US", 98),
+                candidate("AVGO.US", 97),
+                candidate("LRCX.US", 96),
+                StrategyV2ShadowConfig(
+                    symbol="AVGO.US",
+                    enabled=True,
+                    universe_managed=True,
+                    opening_momentum_execution_eligible=True,
+                ),
+                StrategyV2ShadowConfig(
+                    symbol="LRCX.US",
+                    enabled=True,
+                    universe_managed=True,
+                    opening_momentum_execution_eligible=True,
+                ),
+            ]
+        )
+        db.commit()
+        service = UniverseSelectionService(
+            db,
+            _FakeBroker(),
+            catalog=_CATALOG,
+            config=_config(),
+            minimum_evaluable_ratio=0.5,
+            minimum_residency_days=1,
+            exploration_max_symbols=2,
+            exploration_top_score_challengers=2,
+            apply_to_watchlist=True,
+            enable_shadow=True,
+            now=_NOW,
+        )
+        items = service.items_for_run(run.id)
+
+        first = service._result_for_existing(
+            run,
+            items,
+            should_apply=True,
+        )
+        second = service._result_for_existing(
+            run,
+            items,
+            should_apply=True,
+        )
+
+        assert first.exploration_symbols == ("ASML.US", "KLAC.US")
+        assert second.exploration_symbols == first.exploration_symbols
+        assert first.shadow_enabled_symbols == (
+            "AAPL.US",
+            "ASML.US",
+            "KLAC.US",
+        )
+        assert second.shadow_enabled_symbols == ()
+        assert first.shadow_disabled_symbols == ()
+        assert second.shadow_disabled_symbols == ()
+        configs = {
+            row.symbol: row
+            for row in db.query(StrategyV2ShadowConfig).all()
+        }
+        assert all(
+            configs[symbol].enabled
+            and configs[symbol].opening_momentum_execution_eligible
+            for symbol in ("AVGO.US", "LRCX.US")
+        )
+        assert all(
+            configs[symbol].enabled
+            and not configs[
+                symbol
+            ].opening_momentum_execution_eligible
+            for symbol in ("ASML.US", "KLAC.US")
         )
     finally:
         db.close()
@@ -2248,6 +2371,7 @@ def test_reconcile_disables_shadow_owned_by_removed_universe_item() -> None:
                 symbol="REMOVE.US",
                 enabled=True,
                 universe_managed=True,
+                opening_momentum_execution_eligible=False,
             ),
         )
         db.commit()

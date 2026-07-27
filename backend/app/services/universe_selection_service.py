@@ -236,10 +236,19 @@ def observation_pool_overrides(
         configs = db.query(StrategyV2ShadowConfig).all()
         unmanaged = [row for row in configs if not row.universe_managed]
 
+    # Opening-approved symbols are operator-controlled and must not be
+    # retired by an automatic research-allocation refresh.
     durable_observed = {
         row.symbol.strip().upper()
-        for row in unmanaged
-        if row.enabled and row.symbol.strip()
+        for row in configs
+        if (
+            row.enabled
+            and (
+                not row.universe_managed
+                or row.opening_momentum_execution_eligible
+            )
+            and row.symbol.strip()
+        )
     }
     already_observed = {
         row.symbol.strip().upper()
@@ -250,11 +259,15 @@ def observation_pool_overrides(
             and row.symbol.strip()
         )
     }
-    observation_only = durable_observed - already_observed
+    exploration_excluded = durable_observed - already_observed
     challenger_excluded = {
         row.symbol.strip().upper()
         for row in configs
-        if row.enabled and row.symbol.strip()
+        if (
+            row.enabled
+            and row.opening_momentum_execution_eligible
+            and row.symbol.strip()
+        )
     }
     unobservable = {
         row.symbol.strip().upper()
@@ -267,14 +280,14 @@ def observation_pool_overrides(
         # per-symbol shadow toggle.
         already_observed.add(primary_symbol)
         durable_observed.add(primary_symbol)
-        observation_only.discard(primary_symbol)
+        exploration_excluded.discard(primary_symbol)
         unobservable.discard(primary_symbol)
     return ObservationPoolOverrides(
         already_observed_symbols=frozenset(already_observed),
         durable_observed_symbols=frozenset(durable_observed),
         challenger_excluded_symbols=frozenset(challenger_excluded),
         exploration_excluded_symbols=frozenset(
-            unobservable | observation_only
+            unobservable | exploration_excluded
         ),
         unobservable_symbols=frozenset(unobservable),
     )
