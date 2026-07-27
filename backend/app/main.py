@@ -79,6 +79,8 @@ _watchlist_quant_lock = asyncio.Lock()
 _llm_globals_lock = threading.Lock()
 _watchlist_quant_sync_lock = threading.Lock()
 _WATCHLIST_QUANT_POLL_SECONDS = 60
+_OPENING_MOMENTUM_POLL_SECONDS = 15
+_OPENING_MOMENTUM_PRIORITY_POLL_SECONDS = 5
 _LLM_SECONDARY_ACTION_PRIORITY = {
     "CANDIDATE": 0,
     "WATCH": 1,
@@ -97,6 +99,16 @@ def _opening_execution_priority_window(
     )
 
     return opening_execution_reservation_window(now)
+
+
+def _opening_momentum_poll_seconds(
+    now: datetime | None = None,
+) -> int:
+    return (
+        _OPENING_MOMENTUM_PRIORITY_POLL_SECONDS
+        if _opening_execution_priority_window(now)
+        else _OPENING_MOMENTUM_POLL_SECONDS
+    )
 
 
 def _price_drift_pct(current_price: float, last_price: float) -> float:
@@ -998,7 +1010,7 @@ def _opening_momentum_shadow_tick_sync() -> None:
 async def _opening_momentum_shadow_cron() -> None:
     """Poll the frozen daily opening-momentum shadow variants."""
     while True:
-        await asyncio.sleep(15)
+        await asyncio.sleep(_opening_momentum_poll_seconds())
         async with _opening_momentum_shadow_lock:
             try:
                 await asyncio.to_thread(

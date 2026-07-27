@@ -600,6 +600,47 @@ def test_opening_execution_priority_window(
     assert main_module._opening_execution_priority_window(now) is expected
 
 
+def test_opening_momentum_polling_accelerates_only_in_priority_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        main_module,
+        "_opening_execution_priority_window",
+        lambda _now=None: True,
+    )
+    assert main_module._opening_momentum_poll_seconds() == 5
+
+    monkeypatch.setattr(
+        main_module,
+        "_opening_execution_priority_window",
+        lambda _now=None: False,
+    )
+    assert main_module._opening_momentum_poll_seconds() == 15
+
+
+@pytest.mark.asyncio
+async def test_opening_momentum_cron_uses_dynamic_poll_interval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[float] = []
+
+    async def stop_after_sleep(seconds: float) -> None:
+        observed.append(seconds)
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(
+        main_module,
+        "_opening_momentum_poll_seconds",
+        lambda: 5,
+    )
+    monkeypatch.setattr(main_module.asyncio, "sleep", stop_after_sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await main_module._opening_momentum_shadow_cron()
+
+    assert observed == [5]
+
+
 def test_opening_priority_window_defers_heavy_research_ticks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
