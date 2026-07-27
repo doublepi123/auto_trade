@@ -163,6 +163,20 @@
             data-testid="roundtrip-symbol-search"
             data-view-search="true"
           />
+          <el-select
+            v-model="roundTripStrategySource"
+            class="roundtrips-strategy-select"
+            size="small"
+            data-testid="roundtrip-strategy-source"
+            @change="loadTradeData"
+          >
+            <el-option
+              v-for="option in strategySourceOptions"
+              :key="option.value"
+              :label="option.label"
+              :value="option.value"
+            />
+          </el-select>
           <el-button-group>
             <el-button size="small" :type="roundTripFilter === 'all' ? 'primary' : ''" data-testid="roundtrip-filter-all" @click="roundTripFilter = 'all'">全部</el-button>
             <el-button size="small" :type="roundTripFilter === 'winners' ? 'primary' : ''" data-testid="roundtrip-filter-winners" @click="roundTripFilter = 'winners'">胜</el-button>
@@ -186,6 +200,9 @@
               <div class="roundtrip-detail" data-testid="roundtrip-detail">
                 <span>entry #{{ row.entry_order_id }}</span>
                 <span>exit #{{ row.exit_order_id }}</span>
+                <span>策略 {{ strategySourceLabel(row.strategy_source) }}</span>
+                <span v-if="row.strategy_config_version">配置 {{ row.strategy_config_version.slice(0, 12) }}</span>
+                <span v-if="row.opening_execution_id != null">开盘执行 #{{ row.opening_execution_id }}</span>
                 <span>entry time {{ formatDateTime(row.entry_at) }}</span>
                 <span>exit time {{ formatDateTime(row.exit_at) }}</span>
                 <span>gross pnl {{ formatPnl(row.gross_pnl) }}</span>
@@ -202,6 +219,11 @@
             </template>
           </el-table-column>
           <el-table-column prop="symbol" label="标的" width="110" />
+          <el-table-column label="策略" width="100">
+            <template #default="{ row }">
+              <el-tag size="small" effect="plain">{{ strategySourceLabel(row.strategy_source) }}</el-tag>
+            </template>
+          </el-table-column>
           <el-table-column prop="side" label="方向" width="70">
             <template #default="{ row }">
               <el-tag size="small" :type="row.side === 'long' ? 'success' : 'danger'">{{ row.side === 'long' ? '多' : '空' }}</el-tag>
@@ -477,6 +499,7 @@ import type {
   TradePnlDistributionResponse,
   StatisticsQuality,
   TradeStats,
+  TradeStrategySource,
   TradeWeekdayAttributionResponse,
 } from '../types'
 import { orderSideLabel, orderStatusLabel } from '../utils/labels'
@@ -529,6 +552,18 @@ const rtToDate = ref('')
 const rtTotal = ref(0)
 const roundTripFilter = ref<'all' | 'winners' | 'losers' | 'long' | 'short'>('all')
 const roundTripSymbolSearch = ref('')
+const roundTripStrategySource = ref<'all' | TradeStrategySource>('all')
+const strategySourceOptions: Array<{
+  value: 'all' | TradeStrategySource
+  label: string
+}> = [
+  { value: 'all', label: '全部策略' },
+  { value: 'INTERVAL', label: '区间' },
+  { value: 'OPENING_MOMENTUM', label: '开盘动量' },
+  { value: 'LEGACY_UNATTRIBUTED', label: '历史未归因' },
+  { value: 'EXTERNAL_POSITION', label: '外部持仓' },
+  { value: 'MIXED', label: '混合来源' },
+]
 const tradeStats = ref<TradeStats | null>(null)
 const analyticsLoading = ref(false)
 const analyticsCollapse = ref<string[]>([])
@@ -613,6 +648,12 @@ function hydrateFiltersFromQuery() {
     if ((allowed as readonly string[]).includes(q.filter)) roundTripFilter.value = q.filter as typeof roundTripFilter.value
   }
   if (typeof q.symbol === 'string') roundTripSymbolSearch.value = q.symbol
+  if (typeof q.strategy === 'string') {
+    const allowed = strategySourceOptions.map((option) => option.value)
+    if ((allowed as string[]).includes(q.strategy)) {
+      roundTripStrategySource.value = q.strategy as 'all' | TradeStrategySource
+    }
+  }
   if (q.notes === '1') onlyWithNotes.value = true
 }
 
@@ -629,12 +670,13 @@ function syncFiltersToQuery() {
     if (rtToDate.value) next.to = rtToDate.value
     if (roundTripFilter.value !== 'all') next.filter = roundTripFilter.value
     if (roundTripSymbolSearch.value.trim()) next.symbol = roundTripSymbolSearch.value.trim()
+    if (roundTripStrategySource.value !== 'all') next.strategy = roundTripStrategySource.value
     if (onlyWithNotes.value) next.notes = '1'
     router.replace({ query: next })
   }, 300)
 }
 
-watch([scope, rtFromDate, rtToDate, roundTripFilter, roundTripSymbolSearch, onlyWithNotes], syncFiltersToQuery)
+watch([scope, rtFromDate, rtToDate, roundTripFilter, roundTripSymbolSearch, roundTripStrategySource, onlyWithNotes], syncFiltersToQuery)
 
 onMounted(() => {
   hydrateFiltersFromQuery()
@@ -654,6 +696,7 @@ const filteredClosedTrades = computed(() => {
     if (roundTripFilter.value === 'losers' && trade.net_pnl >= 0) return false
     if (roundTripFilter.value === 'long' && trade.side !== 'long') return false
     if (roundTripFilter.value === 'short' && trade.side !== 'short') return false
+    if (roundTripStrategySource.value !== 'all' && trade.strategy_source !== roundTripStrategySource.value) return false
     if (search && !trade.symbol.toLowerCase().includes(search)) return false
     return true
   })
@@ -729,7 +772,12 @@ const tradeAnalyticsInsights = computed(() => {
 
 async function loadTradeStats() {
   try {
-    tradeStats.value = await getTradeStats({ days: 30 })
+    tradeStats.value = await getTradeStats({
+      days: 30,
+      ...(roundTripStrategySource.value !== 'all'
+        ? { strategy_source: roundTripStrategySource.value }
+        : {}),
+    })
   } catch {
     // Stats are supplementary; never block the page on them.
   }
@@ -746,6 +794,9 @@ async function loadClosedTrades() {
     const data = await getClosedTrades({
       ...(rtFromDate.value ? { from_date: rtFromDate.value } : {}),
       ...(rtToDate.value ? { to_date: rtToDate.value } : {}),
+      ...(roundTripStrategySource.value !== 'all'
+        ? { strategy_source: roundTripStrategySource.value }
+        : {}),
       limit: 200,
     })
     closedTrades.value = data.items
@@ -764,6 +815,9 @@ async function loadTradeAnalytics() {
   const params = {
     ...(rtFromDate.value ? { from_date: rtFromDate.value } : {}),
     ...(rtToDate.value ? { to_date: rtToDate.value } : {}),
+    ...(roundTripStrategySource.value !== 'all'
+      ? { strategy_source: roundTripStrategySource.value }
+      : {}),
   }
   const [calendar, holdDuration, pnlDistribution, monthlySummary, weekdayAttribution] = await Promise.allSettled([
     getTradeCalendar(params),
@@ -780,10 +834,20 @@ async function loadTradeAnalytics() {
   analyticsLoading.value = false
 }
 
+function resetTradeAnalytics() {
+  tradeCalendar.value = null
+  tradeHoldDuration.value = null
+  tradePnlDistribution.value = null
+  tradeMonthlySummary.value = null
+  tradeWeekdayAttribution.value = null
+}
+
 async function loadTradeData() {
+  resetTradeAnalytics()
   const closedTradesPromise = loadClosedTrades()
+  const statsPromise = loadTradeStats()
   if (analyticsOpen.value) void loadTradeAnalytics()
-  await closedTradesPromise
+  await Promise.all([closedTradesPromise, statsPromise])
 }
 
 function handleAnalyticsCollapseChange(activeNames: string | string[]) {
@@ -803,6 +867,14 @@ function feeSourceLabel(source: ClosedTrade['fee_source']): string {
   return '估算'
 }
 
+function strategySourceLabel(source: TradeStrategySource | undefined): string {
+  if (source === 'INTERVAL') return '区间'
+  if (source === 'OPENING_MOMENTUM') return '开盘动量'
+  if (source === 'EXTERNAL_POSITION') return '外部持仓'
+  if (source === 'MIXED') return '混合'
+  return '历史未归因'
+}
+
 function formatLatency(ms: number): string {
   return ms >= 1000 ? `${(ms / 1000).toFixed(2)}s` : `${ms.toFixed(0)}ms`
 }
@@ -814,6 +886,9 @@ async function exportClosedTradesCsv() {
       ...(roundTripSymbolSearch.value.trim() ? { symbol: roundTripSymbolSearch.value.trim() } : {}),
       ...(rtFromDate.value ? { from_date: rtFromDate.value } : {}),
       ...(rtToDate.value ? { to_date: rtToDate.value } : {}),
+      ...(roundTripStrategySource.value !== 'all'
+        ? { strategy_source: roundTripStrategySource.value }
+        : {}),
     })
     const url = URL.createObjectURL(blob)
     const link = document.createElement('a')
@@ -1090,6 +1165,10 @@ function statusType(status: string): string {
 
 .roundtrips-symbol-search {
   width: 160px;
+}
+
+.roundtrips-strategy-select {
+  width: 140px;
 }
 
 .roundtrips-summary,

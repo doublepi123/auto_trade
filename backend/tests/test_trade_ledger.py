@@ -850,6 +850,210 @@ class TestPairRoundTrips:
         ]
         db.close()
 
+    def test_authoritative_exit_preserves_real_entry_provenance(self) -> None:
+        self._cleanup()
+        day = date(2026, 7, 24)
+        db = self._get_db()
+        entry = OrderRecord(
+            broker_order_id="attributed-interval-buy",
+            symbol="NVDA.US",
+            side="BUY",
+            quantity=10,
+            price=100,
+            executed_quantity=10,
+            executed_price=100,
+            actual_fee=1,
+            fee_source="ACTUAL",
+            status="FILLED",
+            filled_at=self._dt(day, 10),
+            config_version="interval-v1",
+            config_snapshot=(
+                '{"strategy_source":"INTERVAL","strategy":{"symbol":"NVDA.US"}}'
+            ),
+        )
+        db.add(entry)
+        db.flush()
+        entry_id = entry.id
+        db.add(OrderRecord(
+            broker_order_id="attributed-interval-sell",
+            symbol="NVDA.US",
+            side="SELL",
+            quantity=10,
+            price=110,
+            executed_quantity=10,
+            executed_price=110,
+            actual_fee=1,
+            fee_source="ACTUAL",
+            status="FILLED",
+            filled_at=self._dt(day, 11),
+            cost_basis_price=100,
+            cost_basis_quantity=10,
+            cost_basis_opened_at=self._dt(day, 10),
+            position_quantity_before=10,
+            gross_pnl=100,
+            pnl_fee=2,
+            net_pnl=98,
+            pnl_source="TRACKED_ENTRY",
+        ))
+        db.commit()
+
+        trade = DailyPnlService(db).pair_round_trips(
+            include_excursions=False,
+        )[0]
+
+        assert trade.entry_order_id == entry_id
+        assert trade.entry_at == self._dt(day, 10)
+        assert trade.strategy_source == "INTERVAL"
+        assert trade.strategy_config_version == "interval-v1"
+        assert trade.opening_execution_id is None
+        db.close()
+
+    def test_opening_entry_provenance_is_read_from_nested_signal(self) -> None:
+        self._cleanup()
+        day = date(2026, 7, 28)
+        db = self._get_db()
+        db.add_all([
+            OrderRecord(
+                broker_order_id="opening-buy",
+                symbol="AAPL.US",
+                side="BUY",
+                quantity=2,
+                price=200,
+                executed_quantity=2,
+                executed_price=200,
+                status="FILLED",
+                filled_at=self._dt(day, 13, 34),
+                config_version="opening-v1",
+                config_snapshot=(
+                    '{"strategy":{},"execution_signal":'
+                    '{"strategy_source":"OPENING_MOMENTUM",'
+                    '"opening_execution_id":17}}'
+                ),
+            ),
+            OrderRecord(
+                broker_order_id="opening-sell",
+                symbol="AAPL.US",
+                side="SELL",
+                quantity=2,
+                price=202,
+                executed_quantity=2,
+                executed_price=202,
+                status="FILLED",
+                filled_at=self._dt(day, 14),
+            ),
+        ])
+        db.commit()
+
+        trade = DailyPnlService(db).pair_round_trips(
+            include_excursions=False,
+        )[0]
+
+        assert trade.strategy_source == "OPENING_MOMENTUM"
+        assert trade.strategy_config_version == "opening-v1"
+        assert trade.opening_execution_id == 17
+        db.close()
+
+    def test_external_authoritative_position_is_not_misattributed(self) -> None:
+        self._cleanup()
+        day = date(2026, 7, 28)
+        db = self._get_db()
+        db.add(OrderRecord(
+            broker_order_id="external-position-sell",
+            symbol="MSFT.US",
+            side="SELL",
+            quantity=5,
+            price=510,
+            executed_quantity=5,
+            executed_price=510,
+            status="FILLED",
+            filled_at=self._dt(day, 15),
+            config_version="interval-exit-v1",
+            config_snapshot=(
+                '{"strategy_source":"INTERVAL","strategy":{}}'
+            ),
+            cost_basis_price=500,
+            cost_basis_quantity=5,
+            cost_basis_opened_at=self._dt(day, 14),
+            position_quantity_before=5,
+            gross_pnl=50,
+            pnl_fee=0,
+            net_pnl=50,
+            pnl_source="TRACKED_ENTRY",
+        ))
+        db.commit()
+
+        trade = DailyPnlService(db).pair_round_trips(
+            include_excursions=False,
+        )[0]
+
+        assert trade.entry_order_id == 0
+        assert trade.strategy_source == "EXTERNAL_POSITION"
+        assert trade.strategy_config_version == ""
+        assert trade.opening_execution_id is None
+        db.close()
+
+    def test_mixed_entry_sources_fail_closed_for_attribution(self) -> None:
+        self._cleanup()
+        day = date(2026, 7, 28)
+        db = self._get_db()
+        interval = OrderRecord(
+            broker_order_id="mixed-interval-buy",
+            symbol="META.US",
+            side="BUY",
+            quantity=1,
+            price=700,
+            executed_quantity=1,
+            executed_price=700,
+            status="FILLED",
+            filled_at=self._dt(day, 13),
+            config_version="interval-v1",
+            config_snapshot=(
+                '{"strategy_source":"INTERVAL","strategy":{}}'
+            ),
+        )
+        opening = OrderRecord(
+            broker_order_id="mixed-opening-buy",
+            symbol="META.US",
+            side="BUY",
+            quantity=1,
+            price=701,
+            executed_quantity=1,
+            executed_price=701,
+            status="FILLED",
+            filled_at=self._dt(day, 13, 1),
+            config_version="opening-v1",
+            config_snapshot=(
+                '{"strategy_source":"OPENING_MOMENTUM","strategy":{},'
+                '"execution_signal":{"strategy_source":"OPENING_MOMENTUM",'
+                '"opening_execution_id":18}}'
+            ),
+        )
+        db.add_all([
+            interval,
+            opening,
+            OrderRecord(
+                broker_order_id="mixed-sell",
+                symbol="META.US",
+                side="SELL",
+                quantity=2,
+                price=710,
+                executed_quantity=2,
+                executed_price=710,
+                status="FILLED",
+                filled_at=self._dt(day, 14),
+            ),
+        ])
+        db.commit()
+
+        trade = DailyPnlService(db).pair_round_trips(
+            include_excursions=False,
+        )[0]
+
+        assert trade.strategy_source == "MIXED"
+        assert trade.strategy_config_version == ""
+        assert trade.opening_execution_id is None
+        db.close()
+
     def test_issue_trade_day_is_resolved_per_symbol_market(self) -> None:
         self._cleanup()
         filled_at = datetime(2026, 5, 23, 1, tzinfo=timezone.utc)

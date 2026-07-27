@@ -2637,6 +2637,7 @@ class TestAppRunner:
         )
         snapshot = json.loads(cast(str, context["config_snapshot"]))
 
+        assert snapshot["strategy_source"] == "INTERVAL"
         assert (
             snapshot["hard_limits"]["sizing_caps_enforced_for_entry"]
             is not full_buying_power_usage
@@ -6933,6 +6934,7 @@ class TestOpeningMomentumExecution:
         assert snapshot["buying_power_usage_mode"] == (
             "FULL_BUYING_POWER"
         )
+        assert snapshot["strategy_source"] == "OPENING_MOMENTUM"
         assert snapshot["execution_signal"] == {
             "strategy_source": "OPENING_MOMENTUM",
             "opening_execution_id": 17,

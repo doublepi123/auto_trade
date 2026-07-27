@@ -707,9 +707,19 @@ export interface PositionPnlResult {
   error: string | null
 }
 
+export type TradeStrategySource =
+  | 'INTERVAL'
+  | 'OPENING_MOMENTUM'
+  | 'LEGACY_UNATTRIBUTED'
+  | 'EXTERNAL_POSITION'
+  | 'MIXED'
+
 export interface ClosedTrade {
   symbol: string
   side: string
+  strategy_source: TradeStrategySource
+  strategy_config_version: string
+  opening_execution_id: number | null
   entry_order_id: number
   exit_order_id: number
   entry_at: string

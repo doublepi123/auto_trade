@@ -2126,6 +2126,7 @@ class AppRunner:
             )
         )
         snapshot = {
+            "strategy_source": "INTERVAL",
             "strategy": asdict(params),
             "trading_session_mode": self._get_trading_session_mode(),
             "reduce_only": decision.reduce_only,
@@ -2212,6 +2213,7 @@ class AppRunner:
             snapshot = {}
         if not isinstance(snapshot, dict):
             snapshot = {}
+        snapshot["strategy_source"] = "OPENING_MOMENTUM"
         execution_signal: dict[str, object] = {
             "strategy_source": "OPENING_MOMENTUM",
             "opening_execution_id": policy.execution_id,

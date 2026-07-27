@@ -6,6 +6,7 @@ import type {
   TradeMonthlySummaryResponse,
   TradePnlDistributionResponse,
   TradeStats,
+  TradeStrategySource,
   TradeWeekdayAttributionResponse,
 } from '../types'
 
@@ -13,6 +14,7 @@ export interface ClosedTradeQuery {
   symbol?: string
   from_date?: string
   to_date?: string
+  strategy_source?: TradeStrategySource
   limit?: number
 }
 
@@ -31,6 +33,7 @@ export async function exportClosedTrades(params: ClosedTradeQuery = {}): Promise
 
 export interface TradeStatsQuery {
   symbol?: string
+  strategy_source?: TradeStrategySource
   days?: number
 }
 
@@ -41,6 +44,7 @@ export async function getTradeStats(params: TradeStatsQuery = {}): Promise<Trade
 
 export interface TradeAnalyticsQuery {
   symbol?: string
+  strategy_source?: TradeStrategySource
   from_date?: string
   to_date?: string
 }

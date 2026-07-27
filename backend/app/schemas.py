@@ -3384,6 +3384,9 @@ class ClosedTrade(BaseModel):
 
     symbol: str
     side: str
+    strategy_source: str = "LEGACY_UNATTRIBUTED"
+    strategy_config_version: str = ""
+    opening_execution_id: Optional[int] = None
     entry_order_id: int
     exit_order_id: int
     entry_at: datetime

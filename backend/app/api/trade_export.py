@@ -23,6 +23,9 @@ def build_closed_trade_items(
         ClosedTrade(
             symbol=trip.symbol,
             side=trip.side,
+            strategy_source=trip.strategy_source,
+            strategy_config_version=trip.strategy_config_version,
+            opening_execution_id=trip.opening_execution_id,
             entry_order_id=trip.entry_order_id,
             exit_order_id=trip.exit_order_id,
             entry_at=trip.entry_at,

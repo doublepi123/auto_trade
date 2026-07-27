@@ -7,6 +7,9 @@ describe('Closed round-trip trades', () => {
           {
             symbol: 'AAPL.US',
             side: 'long',
+            strategy_source: 'INTERVAL',
+            strategy_config_version: 'interval-v1',
+            opening_execution_id: null,
             entry_order_id: 1,
             exit_order_id: 2,
             entry_at: '2026-01-01T10:01:00Z',
@@ -33,6 +36,7 @@ describe('Closed round-trip trades', () => {
     cy.contains('AAPL.US').should('be.visible')
     cy.contains('+197.80').should('be.visible')
     cy.contains('+200.00').should('be.visible')
+    cy.contains('区间').should('be.visible')
   })
 
   it('shows empty state when no round trips are paired', () => {
@@ -91,6 +95,7 @@ describe('Closed round-trip trades', () => {
         items: [
           {
             symbol: 'AAPL.US', side: 'long', entry_order_id: 11, exit_order_id: 12,
+            strategy_source: 'INTERVAL', strategy_config_version: 'interval-v1', opening_execution_id: null,
             entry_at: '2026-06-17T10:00:00Z', exit_at: '2026-06-17T11:00:00Z',
             entry_price: 100, exit_price: 103, quantity: 10,
             gross_pnl: 30, est_fees: 1.2, net_pnl: 28.8, holding_seconds: 3600,
@@ -98,12 +103,14 @@ describe('Closed round-trip trades', () => {
           },
           {
             symbol: 'TSLA.US', side: 'short', entry_order_id: 21, exit_order_id: 22,
+            strategy_source: 'OPENING_MOMENTUM', strategy_config_version: 'opening-v1', opening_execution_id: 17,
             entry_at: '2026-06-16T10:00:00Z', exit_at: '2026-06-16T10:30:00Z',
             entry_price: 210, exit_price: 214, quantity: 5,
             gross_pnl: -20, est_fees: 1.5, net_pnl: -21.5, holding_seconds: 1800,
           },
           {
             symbol: 'MSFT.US', side: 'long', entry_order_id: 31, exit_order_id: 32,
+            strategy_source: 'LEGACY_UNATTRIBUTED', strategy_config_version: '', opening_execution_id: null,
             entry_at: '2026-06-15T10:00:00Z', exit_at: '2026-06-15T10:10:00Z',
             entry_price: 300, exit_price: 300.5, quantity: 2,
             gross_pnl: 1, est_fees: 0.6, net_pnl: 0.4, holding_seconds: 600,
@@ -134,6 +141,70 @@ describe('Closed round-trip trades', () => {
     cy.get('[data-testid="roundtrips-table"]').should('contain', 'TSLA.US').and('not.contain', 'AAPL.US')
     cy.get('[data-testid="roundtrip-filter-all"]').click()
     cy.get('.el-table__expand-icon').first().click()
-    cy.get('[data-testid="roundtrip-detail"]').should('contain', 'entry #11').and('contain', 'exit #12').and('contain', '费用 1.20（估算）')
+    cy.get('[data-testid="roundtrip-detail"]').should('contain', 'entry #11').and('contain', 'exit #12').and('contain', '策略 区间').and('contain', '费用 1.20（估算）')
+  })
+
+  it('applies the strategy source to list and stats requests', () => {
+    cy.stubApi()
+    cy.intercept({ method: 'GET', pathname: '/api/trades' }, (req) => {
+      req.reply({
+        body: {
+          items: [],
+          total: 0,
+          statistics_quality: {
+            status: 'COMPLETE',
+            known_exclusion_count: 0,
+            unresolved_issue_count: 0,
+            omitted_day_count: 0,
+            items: [],
+          },
+        },
+      })
+    }).as('strategyTrades')
+    cy.intercept({ method: 'GET', pathname: '/api/trades/stats' }, (req) => {
+      req.reply({
+        body: {
+          total_trades: 0,
+          win_count: 0,
+          loss_count: 0,
+          breakeven_count: 0,
+          win_rate: 0,
+          total_gross_pnl: 0,
+          total_net_pnl: 0,
+          avg_win: null,
+          avg_loss: null,
+          expectancy: 0,
+          profit_factor: null,
+          payoff_ratio: null,
+          largest_win: null,
+          largest_loss: null,
+          current_streak_type: 'none',
+          current_streak_count: 0,
+          max_win_streak: 0,
+          max_loss_streak: 0,
+          avg_hold_seconds: null,
+          total_fees: 0,
+          actual_fee_coverage_pct: 0,
+          avg_slippage_bps: null,
+          avg_ack_latency_ms: null,
+          statistics_quality: {
+            status: 'COMPLETE',
+            known_exclusion_count: 0,
+            unresolved_issue_count: 0,
+            omitted_day_count: 0,
+            items: [],
+          },
+        },
+      })
+    }).as('strategyStats')
+
+    cy.visit('/#/history')
+    cy.wait('@strategyTrades')
+    cy.wait('@strategyStats')
+    cy.contains('已实现成交（往返配对').click()
+    cy.get('[data-testid="roundtrip-strategy-source"]').click()
+    cy.get('.el-select-dropdown:visible').contains('.el-select-dropdown__item', '区间').click()
+    cy.wait('@strategyTrades').its('request.query.strategy_source').should('eq', 'INTERVAL')
+    cy.wait('@strategyStats').its('request.query.strategy_source').should('eq', 'INTERVAL')
   })
 })

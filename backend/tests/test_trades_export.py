@@ -25,6 +25,9 @@ TEST_DATABASE_URL = (
 CSV_COLUMNS = [
     "symbol",
     "side",
+    "strategy_source",
+    "strategy_config_version",
+    "opening_execution_id",
     "entry_order_id",
     "exit_order_id",
     "entry_at",
@@ -176,6 +179,35 @@ class TestTradesExportAPI:
         )
 
         assert [row["symbol"] for row in response.json()] == ["MSFT.US"]
+
+    def test_strategy_source_filter_and_provenance_are_exported(self) -> None:
+        self._seed_trip(_TradeSeed("interval", "AAPL.US", date(2026, 1, 5)))
+        self._seed_trip(_TradeSeed("legacy", "MSFT.US", date(2026, 1, 6)))
+        with Session(bind=self.engine) as db:
+            entry = db.query(OrderRecord).filter(
+                OrderRecord.broker_order_id == "interval-buy"
+            ).one()
+            entry.config_version = "interval-v1"
+            entry.config_snapshot = (
+                '{"strategy_source":"INTERVAL","strategy":{}}'
+            )
+            db.commit()
+
+        response = self.client.get(
+            "/api/trades/export",
+            params={
+                "format": "json",
+                "strategy_source": "INTERVAL",
+            },
+        )
+
+        assert response.status_code == 200, response.text
+        assert len(response.json()) == 1
+        row = response.json()[0]
+        assert row["symbol"] == "AAPL.US"
+        assert row["strategy_source"] == "INTERVAL"
+        assert row["strategy_config_version"] == "interval-v1"
+        assert row["opening_execution_id"] is None
 
     def test_date_filters_apply_to_exit_time(self) -> None:
         self._seed_trip(_TradeSeed("jan", "AAPL.US", date(2026, 1, 5)))

@@ -25,7 +25,11 @@ from app.schemas import (
     TradeWeekdayAttributionRow,
     TradeWeekdayAttributionResponse,
 )
-from app.services.daily_pnl_service import ClosedRoundTrip, DailyPnlService
+from app.services.daily_pnl_service import (
+    ClosedRoundTrip,
+    DailyPnlService,
+    TradeStrategySource,
+)
 from app.services.statistics_quality_service import (
     StatisticsSample,
     select_statistics_sample,
@@ -76,6 +80,7 @@ def _statistics_sample(
     symbol: str | None = None,
     from_date: str | None = None,
     to_date: str | None = None,
+    strategy_source: TradeStrategySource | None = None,
 ) -> StatisticsSample:
     fee_rate_us, fee_rate_hk = _active_fee_rates(db)
     from_dt = _day_bound(from_date, end_of_day=False)
@@ -85,7 +90,18 @@ def _statistics_sample(
         fee_rate_us=fee_rate_us,
         fee_rate_hk=fee_rate_hk,
     )
-    return select_statistics_sample(replay, from_dt=from_dt, to_dt=to_dt)
+    sample = select_statistics_sample(replay, from_dt=from_dt, to_dt=to_dt)
+    if strategy_source is None:
+        return sample
+    return StatisticsSample(
+        trades=[
+            trip
+            for trip in sample.trades
+            if trip.strategy_source == strategy_source.value
+        ],
+        issues=sample.issues,
+        quality=sample.quality,
+    )
 
 
 def _closed_trips(
@@ -94,25 +110,34 @@ def _closed_trips(
     symbol: str | None = None,
     from_date: str | None = None,
     to_date: str | None = None,
+    strategy_source: TradeStrategySource | None = None,
 ) -> list[ClosedRoundTrip]:
     fee_rate_us, fee_rate_hk = _active_fee_rates(db)
-    return DailyPnlService(db).pair_round_trips(
+    trips = DailyPnlService(db).pair_round_trips(
         symbol=symbol,
         from_dt=_day_bound(from_date, end_of_day=False),
         to_dt=_day_bound(to_date, end_of_day=True),
         fee_rate_us=fee_rate_us,
         fee_rate_hk=fee_rate_hk,
     )
+    if strategy_source is None:
+        return trips
+    return [
+        trip
+        for trip in trips
+        if trip.strategy_source == strategy_source.value
+    ]
 
 
 @router.get("/analytics/calendar", response_model=TradeCalendarResponse)
 def trade_calendar(
     symbol: str | None = Query(default=None, description="Filter by symbol (e.g. AAPL.US)"),
+    strategy_source: TradeStrategySource | None = Query(default=None, description="Filter by entry strategy source"),
     from_date: str | None = Query(default=None, description="Exit-time lower bound (YYYY-MM-DD)", pattern=_DATE_PATTERN),
     to_date: str | None = Query(default=None, description="Exit-time upper bound (YYYY-MM-DD)", pattern=_DATE_PATTERN),
     db: Session = Depends(get_db),
 ) -> TradeCalendarResponse:
-    sample = _statistics_sample(db, symbol=symbol, from_date=from_date, to_date=to_date)
+    sample = _statistics_sample(db, symbol=symbol, from_date=from_date, to_date=to_date, strategy_source=strategy_source)
     trips = sample.trades
     rows = compute_trade_calendar(trips)
     return TradeCalendarResponse(
@@ -126,11 +151,12 @@ def trade_calendar(
 @router.get("/analytics/hold-duration", response_model=TradeHoldDurationResponse)
 def trade_hold_duration(
     symbol: str | None = Query(default=None, description="Filter by symbol (e.g. AAPL.US)"),
+    strategy_source: TradeStrategySource | None = Query(default=None, description="Filter by entry strategy source"),
     from_date: str | None = Query(default=None, description="Exit-time lower bound (YYYY-MM-DD)", pattern=_DATE_PATTERN),
     to_date: str | None = Query(default=None, description="Exit-time upper bound (YYYY-MM-DD)", pattern=_DATE_PATTERN),
     db: Session = Depends(get_db),
 ) -> TradeHoldDurationResponse:
-    sample = _statistics_sample(db, symbol=symbol, from_date=from_date, to_date=to_date)
+    sample = _statistics_sample(db, symbol=symbol, from_date=from_date, to_date=to_date, strategy_source=strategy_source)
     trips = sample.trades
     return TradeHoldDurationResponse(
         items=[TradeHoldDurationBucket.model_validate(row) for row in compute_hold_duration_buckets(trips)],
@@ -142,11 +168,12 @@ def trade_hold_duration(
 @router.get("/analytics/pnl-distribution", response_model=TradePnlDistributionResponse)
 def trade_pnl_distribution(
     symbol: str | None = Query(default=None, description="Filter by symbol (e.g. AAPL.US)"),
+    strategy_source: TradeStrategySource | None = Query(default=None, description="Filter by entry strategy source"),
     from_date: str | None = Query(default=None, description="Exit-time lower bound (YYYY-MM-DD)", pattern=_DATE_PATTERN),
     to_date: str | None = Query(default=None, description="Exit-time upper bound (YYYY-MM-DD)", pattern=_DATE_PATTERN),
     db: Session = Depends(get_db),
 ) -> TradePnlDistributionResponse:
-    sample = _statistics_sample(db, symbol=symbol, from_date=from_date, to_date=to_date)
+    sample = _statistics_sample(db, symbol=symbol, from_date=from_date, to_date=to_date, strategy_source=strategy_source)
     trips = sample.trades
     return TradePnlDistributionResponse(
         items=[TradePnlDistributionBucket.model_validate(row) for row in compute_pnl_distribution(trips)],
@@ -159,11 +186,12 @@ def trade_pnl_distribution(
 @router.get("/analytics/monthly", response_model=TradeMonthlySummaryResponse)
 def trade_monthly_summary(
     symbol: str | None = Query(default=None, description="Filter by symbol (e.g. AAPL.US)"),
+    strategy_source: TradeStrategySource | None = Query(default=None, description="Filter by entry strategy source"),
     from_date: str | None = Query(default=None, description="Exit-time lower bound (YYYY-MM-DD)", pattern=_DATE_PATTERN),
     to_date: str | None = Query(default=None, description="Exit-time upper bound (YYYY-MM-DD)", pattern=_DATE_PATTERN),
     db: Session = Depends(get_db),
 ) -> TradeMonthlySummaryResponse:
-    sample = _statistics_sample(db, symbol=symbol, from_date=from_date, to_date=to_date)
+    sample = _statistics_sample(db, symbol=symbol, from_date=from_date, to_date=to_date, strategy_source=strategy_source)
     trips = sample.trades
     rows = compute_monthly_summary(trips)
     return TradeMonthlySummaryResponse(
@@ -177,11 +205,12 @@ def trade_monthly_summary(
 @router.get("/analytics/weekday", response_model=TradeWeekdayAttributionResponse)
 def trade_weekday_attribution(
     symbol: str | None = Query(default=None, description="Filter by symbol (e.g. AAPL.US)"),
+    strategy_source: TradeStrategySource | None = Query(default=None, description="Filter by entry strategy source"),
     from_date: str | None = Query(default=None, description="Exit-time lower bound (YYYY-MM-DD)", pattern=_DATE_PATTERN),
     to_date: str | None = Query(default=None, description="Exit-time upper bound (YYYY-MM-DD)", pattern=_DATE_PATTERN),
     db: Session = Depends(get_db),
 ) -> TradeWeekdayAttributionResponse:
-    sample = _statistics_sample(db, symbol=symbol, from_date=from_date, to_date=to_date)
+    sample = _statistics_sample(db, symbol=symbol, from_date=from_date, to_date=to_date, strategy_source=strategy_source)
     trips = sample.trades
     return TradeWeekdayAttributionResponse(
         items=[TradeWeekdayAttributionRow.model_validate(row) for row in compute_weekday_attribution(trips)],
@@ -194,6 +223,7 @@ def trade_weekday_attribution(
 @router.get("/stats", response_model=TradeStats)
 def trade_stats(
     symbol: str | None = Query(default=None, description="Filter by symbol (e.g. AAPL.US)"),
+    strategy_source: TradeStrategySource | None = Query(default=None, description="Filter by entry strategy source"),
     days: int = Query(default=30, ge=1, le=365, description="Lookback window in days (exit-time based)"),
     db: Session = Depends(get_db),
 ) -> TradeStats:
@@ -211,7 +241,16 @@ def trade_stats(
         fee_rate_hk=fee_rate_hk,
     )
     sample = select_statistics_sample(replay, from_dt=from_dt)
-    payload = asdict(compute_trade_stats(sample.trades))
+    trips = (
+        sample.trades
+        if strategy_source is None
+        else [
+            trip
+            for trip in sample.trades
+            if trip.strategy_source == strategy_source.value
+        ]
+    )
+    payload = asdict(compute_trade_stats(trips))
     payload["statistics_quality"] = asdict(sample.quality)
     return TradeStats.model_validate(payload)
 
@@ -220,13 +259,20 @@ def trade_stats(
 def export_closed_trades(
     format: str = Query(default="csv", pattern="^(csv|json)$"),
     symbol: str | None = Query(default=None, description="Filter by symbol (e.g. AAPL.US)"),
+    strategy_source: TradeStrategySource | None = Query(default=None, description="Filter by entry strategy source"),
     from_date: str | None = Query(default=None, description="Exit-time lower bound (YYYY-MM-DD)", pattern=_DATE_PATTERN),
     to_date: str | None = Query(default=None, description="Exit-time upper bound (YYYY-MM-DD)", pattern=_DATE_PATTERN),
     limit: int = Query(default=1000, ge=1, le=_MAX_EXPORT_LIMIT),
     db: Session = Depends(get_db),
 ) -> Response:
     items = build_closed_trade_items(
-        _closed_trips(db, symbol=symbol, from_date=from_date, to_date=to_date),
+        _closed_trips(
+            db,
+            symbol=symbol,
+            from_date=from_date,
+            to_date=to_date,
+            strategy_source=strategy_source,
+        ),
         limit,
     )
     return closed_trade_export_response(items, format)
@@ -235,6 +281,7 @@ def export_closed_trades(
 @router.get("", response_model=ClosedTradePage)
 def list_closed_trades(
     symbol: str | None = Query(default=None, description="Filter by symbol (e.g. AAPL.US)"),
+    strategy_source: TradeStrategySource | None = Query(default=None, description="Filter by entry strategy source"),
     from_date: str | None = Query(default=None, description="Exit-time lower bound (YYYY-MM-DD)", pattern=_DATE_PATTERN),
     to_date: str | None = Query(default=None, description="Exit-time upper bound (YYYY-MM-DD)", pattern=_DATE_PATTERN),
     limit: int = Query(default=200, ge=1, le=_MAX_LIMIT, description="Max round trips returned (most-recent first)"),
@@ -248,7 +295,13 @@ def list_closed_trades(
     is included even if its entry pre-dates it. ``net_pnl`` prefers actual
     broker charges and otherwise uses the fee estimate frozen at submission.
     """
-    sample = _statistics_sample(db, symbol=symbol, from_date=from_date, to_date=to_date)
+    sample = _statistics_sample(
+        db,
+        symbol=symbol,
+        from_date=from_date,
+        to_date=to_date,
+        strategy_source=strategy_source,
+    )
     trips = sample.trades
     total = len(trips)
     return ClosedTradePage(

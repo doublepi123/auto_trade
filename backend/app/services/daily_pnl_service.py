@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
@@ -69,6 +70,9 @@ class ClosedRoundTrip:
     est_fees: float
     net_pnl: float
     holding_seconds: float
+    strategy_source: str = "LEGACY_UNATTRIBUTED"
+    strategy_config_version: str = ""
+    opening_execution_id: int | None = None
     exit_broker_order_id: str = ""
     fee_source: str = "ESTIMATED"
     actual_fees: float | None = None
@@ -89,6 +93,14 @@ class PnlReplayIssueCode(str, Enum):
     PARTIAL_OVERCLOSE = "PARTIAL_OVERCLOSE"
     COST_BASIS_CONFLICT = "COST_BASIS_CONFLICT"
     UNVERIFIED_COST_BASIS = "UNVERIFIED_COST_BASIS"
+
+
+class TradeStrategySource(str, Enum):
+    INTERVAL = "INTERVAL"
+    OPENING_MOMENTUM = "OPENING_MOMENTUM"
+    LEGACY_UNATTRIBUTED = "LEGACY_UNATTRIBUTED"
+    EXTERNAL_POSITION = "EXTERNAL_POSITION"
+    MIXED = "MIXED"
 
 
 @dataclass(frozen=True)
@@ -130,6 +142,9 @@ class _Fill:
     quantity: Decimal
     price: Decimal
     filled_at: datetime
+    strategy_source: str = TradeStrategySource.LEGACY_UNATTRIBUTED.value
+    strategy_config_version: str = ""
+    opening_execution_id: int | None = None
     fee: Decimal | None = None
     fee_source: str = "UNKNOWN"
     actual_fee: Decimal | None = None
@@ -174,6 +189,9 @@ class _Lot:
     filled_at: datetime
     fee_remaining: Decimal | None = None
     fee_source: str = "UNKNOWN"
+    strategy_source: str = TradeStrategySource.LEGACY_UNATTRIBUTED.value
+    strategy_config_version: str = ""
+    opening_execution_id: int | None = None
 
 
 class DailyPnlService:
@@ -519,23 +537,29 @@ class DailyPnlService:
             if fill.side == "BUY":
                 book["long"].append(
                     _Lot(
-                        fill.id,
-                        fill.quantity,
-                        fill.price,
-                        fill.filled_at,
-                        fill.fee,
-                        fill.fee_source,
+                        order_id=fill.id,
+                        quantity=fill.quantity,
+                        price=fill.price,
+                        filled_at=fill.filled_at,
+                        fee_remaining=fill.fee,
+                        fee_source=fill.fee_source,
+                        strategy_source=fill.strategy_source,
+                        strategy_config_version=fill.strategy_config_version,
+                        opening_execution_id=fill.opening_execution_id,
                     )
                 )
             elif fill.side == "SELL_SHORT":
                 book["short"].append(
                     _Lot(
-                        fill.id,
-                        fill.quantity,
-                        fill.price,
-                        fill.filled_at,
-                        fill.fee,
-                        fill.fee_source,
+                        order_id=fill.id,
+                        quantity=fill.quantity,
+                        price=fill.price,
+                        filled_at=fill.filled_at,
+                        fee_remaining=fill.fee,
+                        fee_source=fill.fee_source,
+                        strategy_source=fill.strategy_source,
+                        strategy_config_version=fill.strategy_config_version,
+                        opening_execution_id=fill.opening_execution_id,
                     )
                 )
             elif fill.side == "SELL":
@@ -667,6 +691,7 @@ class DailyPnlService:
         if (
             authoritative_inventory
             and not cost_basis_conflict
+            and replay_cost_basis is None
             and (authoritative or unverified_cost_basis)
         ):
             basis_price = exit_fill.cost_basis_price or _ZERO
@@ -683,6 +708,7 @@ class DailyPnlService:
                     filled_at=opened_at,
                     fee_remaining=basis_price * synthetic_quantity * fee_rate,
                     fee_source="ESTIMATED",
+                    strategy_source=TradeStrategySource.EXTERNAL_POSITION.value,
                 )
             ]
 
@@ -694,6 +720,9 @@ class DailyPnlService:
         entry_fees_all_actual = True
         entry_order_id = 0
         first_entry_at: datetime | None = None
+        matched_strategy_sources: set[str] = set()
+        matched_config_versions: set[str] = set()
+        matched_opening_execution_ids: set[int | None] = set()
         while remaining > 0 and lot_queue:
             lot = lot_queue[0]
             if lot.quantity <= 0:
@@ -716,6 +745,9 @@ class DailyPnlService:
                 entry_order_id = lot.order_id
             if first_entry_at is None or lot.filled_at < first_entry_at:
                 first_entry_at = lot.filled_at
+            matched_strategy_sources.add(lot.strategy_source)
+            matched_config_versions.add(lot.strategy_config_version)
+            matched_opening_execution_ids.add(lot.opening_execution_id)
             lot.quantity -= take
             remaining -= take
             if lot.quantity <= 0:
@@ -753,6 +785,24 @@ class DailyPnlService:
                 issue_code=PnlReplayIssueCode.COST_BASIS_CONFLICT,
             )
 
+        strategy_source = (
+            next(iter(matched_strategy_sources))
+            if len(matched_strategy_sources) == 1
+            else TradeStrategySource.MIXED.value
+        )
+        strategy_config_version = (
+            next(iter(matched_config_versions))
+            if len(matched_config_versions) == 1
+            else ""
+        )
+        opening_execution_id = (
+            next(iter(matched_opening_execution_ids))
+            if len(matched_opening_execution_ids) == 1
+            else None
+        )
+        if strategy_source != TradeStrategySource.OPENING_MOMENTUM.value:
+            opening_execution_id = None
+
         if authoritative:
             basis_price = exit_fill.cost_basis_price or _ZERO
             pnl_fee, pnl_fee_source = DailyPnlService._effective_authoritative_fee(
@@ -775,6 +825,9 @@ class DailyPnlService:
                 est_fees=float(pnl_fee),
                 net_pnl=float(net_pnl),
                 holding_seconds=holding_seconds,
+                strategy_source=strategy_source,
+                strategy_config_version=strategy_config_version,
+                opening_execution_id=opening_execution_id,
                 exit_broker_order_id=exit_fill.broker_order_id,
                 fee_source=pnl_fee_source,
                 actual_fees=(
@@ -837,6 +890,9 @@ class DailyPnlService:
             est_fees=float(fees),
             net_pnl=float(gross - fees),
             holding_seconds=holding_seconds,
+            strategy_source=strategy_source,
+            strategy_config_version=strategy_config_version,
+            opening_execution_id=opening_execution_id,
             exit_broker_order_id=exit_fill.broker_order_id,
             fee_source=fee_source,
             actual_fees=float(fees) if fee_source == "ACTUAL" else None,
@@ -919,6 +975,11 @@ class DailyPnlService:
             estimated_fee,
             reported_fee_source,
         )
+        (
+            strategy_source,
+            strategy_config_version,
+            opening_execution_id,
+        ) = self._strategy_metadata_from_order(order)
         return _Fill(
             id=int(getattr(order, "id", 0) or 0),
             broker_order_id=str(getattr(order, "broker_order_id", "") or ""),
@@ -927,6 +988,9 @@ class DailyPnlService:
             quantity=quantity,
             price=price,
             filled_at=filled_at,
+            strategy_source=strategy_source,
+            strategy_config_version=strategy_config_version,
+            opening_execution_id=opening_execution_id,
             fee=fee,
             fee_source=fee_source,
             actual_fee=actual_fee,
@@ -961,6 +1025,51 @@ class DailyPnlService:
                 getattr(order, "pnl_fee_rate", None)
             ),
         )
+
+    @staticmethod
+    def _strategy_metadata_from_order(
+        order: Any,
+    ) -> tuple[str, str, int | None]:
+        config_version = str(
+            getattr(order, "config_version", "") or ""
+        ).strip()
+        raw_snapshot = getattr(order, "config_snapshot", "{}") or "{}"
+        try:
+            snapshot = json.loads(str(raw_snapshot))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            snapshot = {}
+        if not isinstance(snapshot, dict):
+            snapshot = {}
+
+        signal = snapshot.get("execution_signal")
+        signal_data = signal if isinstance(signal, dict) else {}
+        raw_source = snapshot.get("strategy_source") or signal_data.get(
+            "strategy_source"
+        )
+        try:
+            source = TradeStrategySource(str(raw_source).strip().upper()).value
+        except ValueError:
+            source = (
+                TradeStrategySource.INTERVAL.value
+                if config_version and isinstance(snapshot.get("strategy"), dict)
+                else TradeStrategySource.LEGACY_UNATTRIBUTED.value
+            )
+
+        opening_execution_id: int | None = None
+        if source == TradeStrategySource.OPENING_MOMENTUM.value:
+            raw_execution_id = signal_data.get("opening_execution_id")
+            try:
+                candidate = (
+                    int(raw_execution_id)
+                    if isinstance(raw_execution_id, (int, str))
+                    and not isinstance(raw_execution_id, bool)
+                    else 0
+                )
+            except (TypeError, ValueError, OverflowError):
+                candidate = 0
+            if candidate > 0:
+                opening_execution_id = candidate
+        return source, config_version, opening_execution_id
 
     def _attach_excursions(
         self,

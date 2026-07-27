@@ -117,6 +117,124 @@ class TestTradesAPI(_Base):
         assert data["total"] == 1
         assert data["items"][0]["symbol"] == "TSLA.US"
 
+    def test_strategy_source_filter_applies_to_all_trade_analytics(self) -> None:
+        db = self._db()
+        today = datetime.now(timezone.utc).date()
+        interval_buy = self._order(
+            "interval-buy",
+            "AAPL.US",
+            "BUY",
+            10,
+            100,
+            today,
+            9,
+        )
+        interval_buy.config_version = "interval-v1"
+        interval_buy.config_snapshot = (
+            '{"strategy_source":"INTERVAL","strategy":{}}'
+        )
+        opening_buy = self._order(
+            "opening-buy",
+            "MSFT.US",
+            "BUY",
+            10,
+            200,
+            today,
+            9,
+        )
+        opening_buy.config_version = "opening-v1"
+        opening_buy.config_snapshot = (
+            '{"strategy_source":"OPENING_MOMENTUM","strategy":{},'
+            '"execution_signal":{"strategy_source":"OPENING_MOMENTUM",'
+            '"opening_execution_id":27}}'
+        )
+        db.add_all([
+            interval_buy,
+            self._order(
+                "interval-sell",
+                "AAPL.US",
+                "SELL",
+                10,
+                110,
+                today,
+                10,
+            ),
+            opening_buy,
+            self._order(
+                "opening-sell",
+                "MSFT.US",
+                "SELL",
+                10,
+                210,
+                today,
+                10,
+            ),
+        ])
+        db.commit()
+        db.close()
+
+        params = {"strategy_source": "INTERVAL"}
+        listing = self.client.get("/api/trades", params=params)
+        stats = self.client.get("/api/trades/stats", params=params)
+        calendar = self.client.get(
+            "/api/trades/analytics/calendar",
+            params=params,
+        )
+        hold_duration = self.client.get(
+            "/api/trades/analytics/hold-duration",
+            params=params,
+        )
+        distribution = self.client.get(
+            "/api/trades/analytics/pnl-distribution",
+            params=params,
+        )
+        monthly = self.client.get(
+            "/api/trades/analytics/monthly",
+            params=params,
+        )
+        weekday = self.client.get(
+            "/api/trades/analytics/weekday",
+            params=params,
+        )
+
+        for response in (
+            listing,
+            stats,
+            calendar,
+            hold_duration,
+            distribution,
+            monthly,
+            weekday,
+        ):
+            assert response.status_code == 200, response.text
+        row = listing.json()["items"][0]
+        assert listing.json()["total"] == 1
+        assert row["symbol"] == "AAPL.US"
+        assert row["strategy_source"] == "INTERVAL"
+        assert row["strategy_config_version"] == "interval-v1"
+        assert row["opening_execution_id"] is None
+        assert stats.json()["total_trades"] == 1
+        assert calendar.json()["total_trades"] == 1
+        assert hold_duration.json()["total_trades"] == 1
+        assert distribution.json()["total_trades"] == 1
+        assert monthly.json()["total_trades"] == 1
+        assert weekday.json()["total_trades"] == 1
+
+        opening = self.client.get(
+            "/api/trades",
+            params={"strategy_source": "OPENING_MOMENTUM"},
+        ).json()
+        assert opening["total"] == 1
+        assert opening["items"][0]["opening_execution_id"] == 27
+
+    def test_invalid_strategy_source_returns_422(self) -> None:
+        response = self.client.get(
+            "/api/trades",
+            params={"strategy_source": "UNKNOWN"},
+        )
+
+        assert response.status_code == 422
+
     def test_date_filter_on_exit(self) -> None:
         db = self._db()
         db.add_all([
