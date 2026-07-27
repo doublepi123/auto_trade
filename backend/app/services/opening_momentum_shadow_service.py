@@ -215,20 +215,20 @@ _OPENING_RANGE_STOP_ALGORITHM_VERSION = (
     f"{ALGORITHM_VERSION}+{_OPENING_RANGE_STOP_VERSION}"
 )
 _EXECUTION_EXTENSION_COHORT_VERSION = (
-    "discovery-top6-positive-delta-min4-stop1-v1-20260724"
+    "individual-discovery-top6-positive-delta-min4-stop1-shortlist-v2-"
+    "20260724"
 )
-# The research execution cohort was selected from the discovery slice only,
-# but this combined policy was created after the full report was inspected.
-# Its separate identity therefore accepts only post-deployment evidence.
+# An exhaustive discovery-only joint-subset search selected PANW from the
+# individual QCOM/PANW/RKLB shortlist. The 30bp cost, tail, and drawdown gates
+# rejected every larger subset. This identity remains forward-only because the
+# research report was generated before deployment.
 _WEAK_BREADTH_INDEX_COHORT_SYMBOLS = (
-    "QCOM.US",
     "PANW.US",
-    "RKLB.US",
 )
 _WEAK_BREADTH_INDEX_COHORT_VERSION = (
-    "forward-only-posthoc-combined-active-broad-plus-qcom-panw-rklb-"
+    "forward-only-discovery-joint-subset-active-broad-plus-panw-"
     "max-median0-path-efficiency-070-"
-    f"{_EXECUTION_EXTENSION_COHORT_VERSION}-20260727-v1"
+    f"{_EXECUTION_EXTENSION_COHORT_VERSION}-20260728-v1"
 )
 _WEAK_BREADTH_INDEX_COHORT_SOURCE = (
     "OPENING_EXECUTION_WEAK_BREADTH_INDEX_COHORT"

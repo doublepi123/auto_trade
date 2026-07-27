@@ -1059,15 +1059,11 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
         assert weak_breadth_index_cohort.minimum_data_coverage == 0.95
         assert weak_breadth_index_cohort.minimum_path_efficiency == 0.70
         assert weak_breadth_index_cohort.maximum_market_return_bps == 0.0
-        assert weak_breadth_index_cohort.required_symbols == (
-            "QCOM.US",
-            "PANW.US",
-            "RKLB.US",
-        )
+        assert weak_breadth_index_cohort.required_symbols == ("PANW.US",)
         assert weak_breadth_index_cohort.universe_source == (
             "OPENING_EXECUTION_WEAK_BREADTH_INDEX_COHORT"
         )
-        assert "forward-only-posthoc-combined" in (
+        assert "forward-only-discovery-joint-subset" in (
             weak_breadth_index_cohort.algorithm_version
         )
         assert etf_regime.decision_config == execution.decision_config
@@ -2223,7 +2219,7 @@ def test_weak_breadth_index_cohort_can_displace_production_candidate(
             symbol: 100.0 if symbol == "S7.US" else 0.0
             for symbol in _SYMBOLS
         }
-        early_returns["QCOM.US"] = 200.0
+        early_returns["PANW.US"] = 200.0
         service = OpeningMomentumShadowService(
             db,
             _FakeCandles(
@@ -2252,22 +2248,16 @@ def test_weak_breadth_index_cohort_can_displace_production_candidate(
         assert cohort.latest is not None
         assert cohort.latest.status == "OPEN"
         assert cohort.latest.reason == "OPENING_LEADER"
-        assert cohort.latest.candidate_symbol == "QCOM.US"
+        assert cohort.latest.candidate_symbol == "PANW.US"
         assert cohort.latest.entry_price == 100.0
         assert cohort.latest.market_return_bps == pytest.approx(0.0)
         assert cohort.latest.universe == [
             *_SYMBOLS,
-            "QCOM.US",
             "PANW.US",
-            "RKLB.US",
         ]
         assert cohort.minimum_path_efficiency == 0.70
         assert cohort.maximum_market_return_bps == 0.0
-        assert cohort.required_symbols == [
-            "QCOM.US",
-            "PANW.US",
-            "RKLB.US",
-        ]
+        assert cohort.required_symbols == ["PANW.US"]
         assert cohort.comparison_baseline == (
             "WEAK_BREADTH_PATH_CHALLENGER"
         )

@@ -4,10 +4,12 @@ import argparse
 import json
 import math
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, replace
 from datetime import date, datetime, timedelta, timezone
+from itertools import combinations
 from pathlib import Path
+from typing import cast
 
 from app.cli.opening_extension_research import (
     RawMinuteBar,
@@ -53,10 +55,16 @@ from app.domain.opening_momentum_policy import (
 )
 
 
-OPENING_POLICY_CLI_VERSION = "opening-policy-research-cli-v3"
+OPENING_POLICY_CLI_VERSION = "opening-policy-research-cli-v4"
 _DEFAULT_PATH_THRESHOLDS = (0.50, 0.60, 0.70, 0.80, 0.90)
 _DEFAULT_MARKET_MAXIMUMS_BPS = (-10.0, -5.0, 0.0, 5.0, 10.0, 20.0)
 _DEFAULT_MINIMUM_DATA_COVERAGE = 0.95
+_COHORT_COST_STRESS_BPS = (14.0, 20.0, 30.0)
+_COHORT_SUBSET_MAX_CANDIDATES = 6
+_COHORT_SUBSET_MINIMUM_EXECUTION_DISPLACEMENTS = 4
+_COHORT_SUBSET_SELECTION_VERSION = (
+    "discovery-exhaustive-joint-subset-cost30-drawdown-v1"
+)
 
 
 def _default_policy_specs() -> tuple[OpeningPolicySpec, ...]:
@@ -336,6 +344,183 @@ def _compact_cohort_payload(
     }
 
 
+def _cohort_subset_blockers(
+    primary: OpeningPolicyCohortReport,
+    conservative: OpeningPolicyCohortReport,
+) -> tuple[str, ...]:
+    discovery = _cohort_slice(primary, "DISCOVERY")
+    conservative_discovery = _cohort_slice(
+        conservative,
+        "DISCOVERY",
+    )
+    blockers: list[str] = []
+    if (
+        discovery.execution_displacement_sessions
+        < _COHORT_SUBSET_MINIMUM_EXECUTION_DISPLACEMENTS
+    ):
+        blockers.append("DISCOVERY_EXECUTION_DISPLACEMENTS_BELOW_4")
+    if discovery.comparison.cumulative_delta_bps <= 0:
+        blockers.append("DISCOVERY_DELTA_NOT_POSITIVE")
+    if not discovery.tail_robustness_passed:
+        blockers.append("DISCOVERY_TAIL_ROBUSTNESS_FAILED")
+    if not discovery.comparison.risk_guard_passed:
+        blockers.append("DISCOVERY_DRAWDOWN_GUARD_FAILED")
+    if conservative_discovery.comparison.cumulative_delta_bps <= 0:
+        blockers.append("DISCOVERY_30BP_DELTA_NOT_POSITIVE")
+    if not conservative_discovery.tail_robustness_passed:
+        blockers.append("DISCOVERY_30BP_TAIL_ROBUSTNESS_FAILED")
+    if not conservative_discovery.comparison.risk_guard_passed:
+        blockers.append("DISCOVERY_30BP_DRAWDOWN_GUARD_FAILED")
+    return tuple(blockers)
+
+
+def _cohort_slice_summary(
+    value: OpeningPolicyCohortSlice,
+) -> dict[str, object]:
+    return {
+        "resolved_sessions": value.resolved_sessions,
+        "execution_displacement_sessions": (
+            value.execution_displacement_sessions
+        ),
+        "cumulative_delta_bps": value.comparison.cumulative_delta_bps,
+        "max_drawdown_delta_bps": (
+            value.comparison.max_drawdown_delta_bps
+        ),
+        "risk_guard_passed": value.comparison.risk_guard_passed,
+        "tail_robustness_available": value.tail_robustness_available,
+        "tail_robustness_passed": value.tail_robustness_passed,
+        "tail_delta_bps": (
+            value.cohort.cumulative_without_best_3_bps
+            - value.baseline.cumulative_without_best_3_bps
+        ),
+    }
+
+
+def _cohort_subset_selection_payload(
+    reports_by_symbols: Mapping[
+        tuple[str, ...],
+        Sequence[OpeningPolicyCohortReport],
+    ],
+) -> dict[str, object]:
+    """Select a joint cohort using discovery data and cost stress only."""
+
+    if not reports_by_symbols:
+        raise ValueError("at least one cohort subset report is required")
+    evaluated: list[dict[str, object]] = []
+    eligible: list[
+        tuple[
+            float,
+            float,
+            float,
+            tuple[str, ...],
+            dict[str, object],
+        ]
+    ] = []
+    seen: set[tuple[str, ...]] = set()
+    for raw_symbols, raw_reports in reports_by_symbols.items():
+        symbols = tuple(value.strip().upper() for value in raw_symbols)
+        if (
+            not symbols
+            or any(not value for value in symbols)
+            or len(symbols) != len(set(symbols))
+        ):
+            raise ValueError(
+                "cohort subset keys must contain unique non-empty symbols"
+            )
+        if symbols in seen:
+            raise ValueError("cohort subset keys must be unique")
+        seen.add(symbols)
+        reports = tuple(raw_reports)
+        if not reports:
+            raise ValueError("each cohort subset requires cost reports")
+        if any(report.cohort_symbols != symbols for report in reports):
+            raise ValueError(
+                "cohort subset report symbols must match the mapping key"
+            )
+        costs = [report.round_trip_cost_bps for report in reports]
+        if len(costs) != len(set(costs)):
+            raise ValueError("cohort subset report costs must be unique")
+        by_cost = {report.round_trip_cost_bps: report for report in reports}
+        if 14.0 not in by_cost or 30.0 not in by_cost:
+            raise ValueError(
+                "cohort subset selection requires 14bp and 30bp reports"
+            )
+        primary = by_cost[14.0]
+        conservative = by_cost[30.0]
+        discovery = _cohort_slice(primary, "DISCOVERY")
+        holdout = _cohort_slice(primary, "HOLDOUT")
+        conservative_discovery = _cohort_slice(
+            conservative,
+            "DISCOVERY",
+        )
+        blockers = _cohort_subset_blockers(primary, conservative)
+        payload: dict[str, object] = {
+            "symbols": list(symbols),
+            "status": "ELIGIBLE" if not blockers else "REJECTED",
+            "selection_blockers": list(blockers),
+            "primary_cost_bps": primary.round_trip_cost_bps,
+            "conservative_cost_bps": conservative.round_trip_cost_bps,
+            "discovery": _cohort_slice_summary(discovery),
+            "conservative_discovery": _cohort_slice_summary(
+                conservative_discovery
+            ),
+            # Holdout is disclosed for audit, but never enters blockers or rank.
+            "holdout_diagnostic": _cohort_slice_summary(holdout),
+        }
+        evaluated.append(payload)
+        if not blockers:
+            eligible.append((
+                conservative_discovery.comparison.cumulative_delta_bps,
+                discovery.comparison.cumulative_delta_bps,
+                (
+                    conservative_discovery.cohort
+                    .cumulative_without_best_3_bps
+                    - conservative_discovery.baseline
+                    .cumulative_without_best_3_bps
+                ),
+                symbols,
+                payload,
+            ))
+
+    evaluated.sort(
+        key=lambda value: (
+            len(cast(list[str], value["symbols"])),
+            cast(list[str], value["symbols"]),
+        )
+    )
+    eligible.sort(
+        key=lambda value: (
+            -value[0],
+            -value[1],
+            -value[2],
+            len(value[3]),
+            value[3],
+        )
+    )
+    selected = eligible[0][4] if eligible else None
+    return {
+        "selection_version": _COHORT_SUBSET_SELECTION_VERSION,
+        "selection_uses_holdout": False,
+        "maximum_candidate_symbols": _COHORT_SUBSET_MAX_CANDIDATES,
+        "minimum_execution_displacements": (
+            _COHORT_SUBSET_MINIMUM_EXECUTION_DISPLACEMENTS
+        ),
+        "evaluated_subset_count": len(evaluated),
+        "eligible_subset_count": len(eligible),
+        "status": "SHADOW_CANDIDATE" if selected else "REJECTED",
+        "selected_symbols": (
+            cast(list[str], selected["symbols"]) if selected else []
+        ),
+        "selection_blockers": (
+            [] if selected else ["NO_DISCOVERY_ROBUST_SUBSET"]
+        ),
+        "selected": selected,
+        "subsets": evaluated,
+        "diagnostic_only": True,
+        "automatic_promotion_allowed": False,
+    }
+
+
 def _horizon_slice(
     result: OpeningPolicyHorizonResult,
     name: str,
@@ -512,6 +697,14 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--select-cohort-subset",
+        action="store_true",
+        help=(
+            "exhaustively select a discovery-only joint subset from up to "
+            "six --cohort-symbols with 30bp cost and drawdown guards"
+        ),
+    )
+    parser.add_argument(
         "--holding-horizons",
         help=(
             "optional comma-separated fixed holding-minute challengers; "
@@ -568,6 +761,18 @@ def main() -> int:
             if args.holding_horizons
             else ()
         )
+        if args.select_cohort_subset and not cohort_symbols:
+            raise ValueError(
+                "select_cohort_subset requires cohort_symbols"
+            )
+        if (
+            args.select_cohort_subset
+            and len(cohort_symbols) > _COHORT_SUBSET_MAX_CANDIDATES
+        ):
+            raise ValueError(
+                "select_cohort_subset supports at most "
+                f"{_COHORT_SUBSET_MAX_CANDIDATES} cohort symbols"
+            )
     except (RuntimeError, ValueError) as exc:
         parser.error(str(exc))
 
@@ -664,6 +869,7 @@ def main() -> int:
     )
     cohort_report: OpeningPolicyCohortReport | None = None
     cohort_cost_stress: list[dict[str, object]] = []
+    cohort_subset_selection: dict[str, object] | None = None
     if cohort_symbols:
         cohort_policy_sessions = _build_policy_sessions(
             bars_by_symbol,
@@ -690,7 +896,7 @@ def main() -> int:
                 round_trip_cost_bps=cost,
                 discovery_ratio=args.discovery_ratio,
             )
-            for cost in (14.0, 20.0, 30.0)
+            for cost in _COHORT_COST_STRESS_BPS
         )
         cohort_report = cohort_reports[0]
         cohort_cost_stress = [
@@ -703,6 +909,47 @@ def main() -> int:
             }
             for value in cohort_reports
         ]
+        if args.select_cohort_subset:
+            reports_by_symbols: dict[
+                tuple[str, ...],
+                tuple[OpeningPolicyCohortReport, ...],
+            ] = {}
+            for subset_size in range(1, len(cohort_symbols) + 1):
+                for subset in combinations(cohort_symbols, subset_size):
+                    subset_sessions = (
+                        cohort_policy_sessions
+                        if subset == cohort_symbols
+                        else _build_policy_sessions(
+                            bars_by_symbol,
+                            symbols=tuple(dict.fromkeys(
+                                (*baseline_symbols, *subset)
+                            )),
+                            required_symbols=subset,
+                            session_dates=session_dates,
+                            minimum_data_coverage=(
+                                args.minimum_data_coverage
+                            ),
+                        )
+                    )
+                    if len(subset_sessions) < 2:
+                        parser.error(
+                            "fewer than two causally resolved sessions were "
+                            "found for cohort subset " + ",".join(subset)
+                        )
+                    reports_by_symbols[subset] = tuple(
+                        evaluate_opening_policy_cohort(
+                            policy_sessions,
+                            subset_sessions,
+                            policy=production_policy,
+                            cohort_symbols=subset,
+                            round_trip_cost_bps=cost,
+                            discovery_ratio=args.discovery_ratio,
+                        )
+                        for cost in _COHORT_COST_STRESS_BPS
+                    )
+            cohort_subset_selection = (
+                _cohort_subset_selection_payload(reports_by_symbols)
+            )
     horizon_reports: tuple[OpeningPolicyHorizonReport, ...] = ()
     horizon_cost_stress: list[dict[str, object]] = []
     horizon_decisions: dict[str, object] | None = None
@@ -766,6 +1013,11 @@ def main() -> int:
                 if cohort_report is not None
                 else None
             ),
+            "cohort_subset_evaluated_count": (
+                cohort_subset_selection["evaluated_subset_count"]
+                if cohort_subset_selection is not None
+                else None
+            ),
             "holding_horizon_paired_session_count": (
                 horizon_reports[0].paired_sessions
                 if horizon_reports
@@ -785,6 +1037,10 @@ def main() -> int:
             ),
             "baseline_symbols": list(baseline_symbols),
             "cohort_symbols": list(cohort_symbols),
+            "cohort_subset_selection_requested": bool(
+                args.select_cohort_subset
+            ),
+            "cohort_subset_selection_uses_holdout": False,
             "holding_horizons": list(holding_horizons),
             "signal_minutes": config.signal_minutes,
             "execution_delay_minutes": config.execution_delay_minutes,
@@ -814,6 +1070,12 @@ def main() -> int:
             else None
         ),
         "cohort_cost_stress": cohort_cost_stress,
+        "cohort_subset_selection_version": (
+            _COHORT_SUBSET_SELECTION_VERSION
+            if cohort_subset_selection is not None
+            else None
+        ),
+        "cohort_subset_selection": cohort_subset_selection,
         "holding_horizon_diagnostic_version": (
             OPENING_POLICY_HORIZON_DIAGNOSTIC_VERSION
             if horizon_reports
@@ -868,6 +1130,10 @@ def main() -> int:
             cohort_report
         )
         compact_payload["cohort_cost_stress"] = cohort_cost_stress
+    if cohort_subset_selection is not None:
+        compact_payload["cohort_subset_selection"] = (
+            cohort_subset_selection
+        )
     if horizon_reports:
         compact_payload["holding_horizons"] = horizon_decisions
         compact_payload["holding_horizon_cost_stress"] = (

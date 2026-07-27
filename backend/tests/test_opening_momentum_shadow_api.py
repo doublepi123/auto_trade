@@ -295,11 +295,7 @@ class TestOpeningMomentumShadowApi:
             weak_breadth_index_cohort["maximum_market_return_bps"]
             == 0.0
         )
-        assert weak_breadth_index_cohort["required_symbols"] == [
-            "QCOM.US",
-            "PANW.US",
-            "RKLB.US",
-        ]
+        assert weak_breadth_index_cohort["required_symbols"] == ["PANW.US"]
         assert weak_breadth_index_cohort["comparison_baseline"] == (
             "WEAK_BREADTH_PATH_CHALLENGER"
         )

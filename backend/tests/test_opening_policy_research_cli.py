@@ -4,12 +4,14 @@ import json
 import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from typing import cast
 
 import pytest
 
 from app.cli.opening_extension_research import RawMinuteBar, _save_cache
 from app.cli.opening_policy_research import (
     _build_policy_sessions,
+    _cohort_subset_selection_payload,
     _default_policy_specs,
     main,
 )
@@ -18,6 +20,10 @@ from app.domain.opening_momentum_policy import (
     PRODUCTION_MAXIMUM_MARKET_RETURN_BPS,
     PRODUCTION_MINIMUM_PATH_EFFICIENCY,
     PRODUCTION_POLICY_NAME,
+    OpeningPolicyCohortReport,
+    OpeningPolicySession,
+    OpeningPolicySpec,
+    evaluate_opening_policy_cohort,
 )
 
 
@@ -170,6 +176,87 @@ def test_policy_session_builder_requires_every_cohort_symbol() -> None:
         )
 
 
+def test_cohort_subset_selection_uses_discovery_not_holdout() -> None:
+    first = date(2026, 1, 2)
+    baseline = tuple(
+        OpeningPolicySession(
+            session_date=first + timedelta(days=index),
+            baseline_signal=True,
+            gross_return_bps=14.0,
+            market_return_bps=-1.0,
+            candidate_path_efficiency=0.8,
+            candidate_symbol="BASE.US",
+        )
+        for index in range(10)
+    )
+
+    def reports(
+        symbol: str,
+        *,
+        discovery_delta_bps: float,
+        holdout_delta_bps: float,
+    ) -> tuple[OpeningPolicyCohortReport, ...]:
+        cohort = tuple(
+            OpeningPolicySession(
+                session_date=first + timedelta(days=index),
+                baseline_signal=True,
+                gross_return_bps=(
+                    14.0 + discovery_delta_bps
+                    if index < 4
+                    else (
+                        14.0 + holdout_delta_bps
+                        if index >= 6
+                        else 14.0
+                    )
+                ),
+                market_return_bps=-1.0,
+                candidate_path_efficiency=0.8,
+                candidate_symbol=(
+                    symbol if index < 4 or index >= 6 else "BASE.US"
+                ),
+            )
+            for index in range(10)
+        )
+        policy = OpeningPolicySpec(
+            PRODUCTION_POLICY_NAME,
+            minimum_path_efficiency=0.7,
+            maximum_market_return_bps=0.0,
+        )
+        return tuple(
+            evaluate_opening_policy_cohort(
+                baseline,
+                cohort,
+                policy=policy,
+                cohort_symbols=(symbol,),
+                round_trip_cost_bps=cost,
+            )
+            for cost in (14.0, 20.0, 30.0)
+        )
+
+    payload = _cohort_subset_selection_payload({
+        ("A.US",): reports(
+            "A.US",
+            discovery_delta_bps=100.0,
+            holdout_delta_bps=-100.0,
+        ),
+        ("B.US",): reports(
+            "B.US",
+            discovery_delta_bps=50.0,
+            holdout_delta_bps=500.0,
+        ),
+    })
+
+    assert payload["selection_uses_holdout"] is False
+    assert payload["status"] == "SHADOW_CANDIDATE"
+    assert payload["selected_symbols"] == ["A.US"]
+    assert payload["eligible_subset_count"] == 2
+    selected = cast(dict[str, object], payload["selected"])
+    discovery = cast(dict[str, object], selected["discovery"])
+    holdout = cast(dict[str, object], selected["holdout_diagnostic"])
+    assert discovery["cumulative_delta_bps"] == 400.0
+    assert holdout["cumulative_delta_bps"] == -400.0
+
+
 def test_cli_replays_existing_cache_without_broker(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -238,6 +325,7 @@ def test_cli_emits_joint_cohort_diagnostic(
         ",".join(_SYMBOLS),
         "--cohort-symbols",
         _COHORT_SYMBOL,
+        "--select-cohort-subset",
         "--cache-path",
         str(cache_path),
         "--output",
@@ -256,6 +344,11 @@ def test_cli_emits_joint_cohort_diagnostic(
         "automatic_promotion_allowed"
     ] is False
     assert stored["data_scope"]["cohort_resolved_session_count"] == 2
+    subset = stdout["cohort_subset_selection"]
+    assert subset["selection_uses_holdout"] is False
+    assert subset["evaluated_subset_count"] == 1
+    assert subset["status"] == "REJECTED"
+    assert stored["data_scope"]["cohort_subset_evaluated_count"] == 1
 
 
 def test_cli_emits_paired_holding_horizon_rejections(

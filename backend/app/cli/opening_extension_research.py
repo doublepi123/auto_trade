@@ -44,7 +44,7 @@ _FROZEN_SELECTION_STOP_LOSS_PCT = 1.0
 _EXECUTION_COHORT_MAX_SYMBOLS = 6
 _EXECUTION_COHORT_MINIMUM_DISPLACEMENTS = 4
 _EXECUTION_COHORT_SELECTION_VERSION = (
-    "discovery-top6-positive-delta-min4-stop1-v1"
+    "individual-discovery-top6-positive-delta-min4-stop1-shortlist-v2"
 )
 
 
@@ -673,7 +673,10 @@ def _execution_cohort_payload(
     selected = eligible[:_EXECUTION_COHORT_MAX_SYMBOLS]
     return {
         "selection_version": _EXECUTION_COHORT_SELECTION_VERSION,
+        "selection_stage": "INDIVIDUAL_CANDIDATE_SHORTLIST",
         "selection_uses_holdout": False,
+        "joint_subset_selection_required": True,
+        "automatic_execution_cohort_allowed": False,
         "maximum_symbols": _EXECUTION_COHORT_MAX_SYMBOLS,
         "minimum_displacement_sessions": (
             _EXECUTION_COHORT_MINIMUM_DISPLACEMENTS

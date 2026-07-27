@@ -453,6 +453,9 @@ def test_execution_cohort_is_frozen_from_discovery_only() -> None:
     payload = _execution_cohort_payload(grid)
 
     assert payload["selection_uses_holdout"] is False
+    assert payload["selection_stage"] == "INDIVIDUAL_CANDIDATE_SHORTLIST"
+    assert payload["joint_subset_selection_required"] is True
+    assert payload["automatic_execution_cohort_allowed"] is False
     assert payload["symbols"] == ["EXT.US"]
 
 
