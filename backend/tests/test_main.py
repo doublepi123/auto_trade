@@ -565,6 +565,90 @@ class TestPriceDriftPct:
         assert main_module._price_drift_pct(100.0, 100.0) == 0.0
 
 
+@pytest.mark.parametrize(
+    ("now", "enabled", "expected"),
+    [
+        (
+            datetime(2026, 7, 27, 13, 27, 59, tzinfo=timezone.utc),
+            True,
+            False,
+        ),
+        (datetime(2026, 7, 27, 13, 28, tzinfo=timezone.utc), True, True),
+        (datetime(2026, 7, 27, 13, 30, tzinfo=timezone.utc), True, True),
+        (
+            datetime(2026, 7, 27, 13, 34, 59, tzinfo=timezone.utc),
+            True,
+            True,
+        ),
+        (datetime(2026, 7, 27, 13, 35, tzinfo=timezone.utc), True, False),
+        (datetime(2026, 7, 25, 13, 32, tzinfo=timezone.utc), True, False),
+        (datetime(2026, 7, 27, 13, 32, tzinfo=timezone.utc), False, False),
+    ],
+)
+def test_opening_execution_priority_window(
+    monkeypatch: pytest.MonkeyPatch,
+    now: datetime,
+    enabled: bool,
+    expected: bool,
+) -> None:
+    monkeypatch.setattr(
+        main_module.settings,
+        "opening_momentum_execution_enabled",
+        enabled,
+    )
+
+    assert main_module._opening_execution_priority_window(now) is expected
+
+
+def test_opening_priority_window_defers_heavy_research_ticks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_factory = MagicMock(
+        side_effect=AssertionError("priority window must avoid DB work")
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_opening_execution_priority_window",
+        lambda: True,
+    )
+    monkeypatch.setattr(main_module, "SessionLocal", session_factory)
+    monkeypatch.setattr(
+        main_module.settings,
+        "watchlist_quant_auto_score_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        main_module.settings,
+        "universe_selection_enabled",
+        True,
+    )
+
+    main_module._strategy_v2_shadow_tick_sync()
+    main_module._watchlist_quant_tick_sync()
+    main_module._universe_selection_tick_sync()
+
+    session_factory.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_opening_priority_window_defers_llm_analysis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_factory = MagicMock(
+        side_effect=AssertionError("priority window must avoid DB work")
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_opening_execution_priority_window",
+        lambda: True,
+    )
+    monkeypatch.setattr(main_module, "SessionLocal", session_factory)
+
+    await main_module._llm_analysis_tick()
+
+    session_factory.assert_not_called()
+
+
 class TestShouldRunLLMAnalysis:
     def test_time_gate_passed_no_baseline(self) -> None:
         time_passed, vol_triggered = main_module._should_run_llm_analysis(
