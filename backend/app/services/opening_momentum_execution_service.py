@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import math
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Protocol, cast
 
 from sqlalchemy.orm import Session
@@ -118,14 +118,27 @@ class OpeningMomentumExecutionService:
             if self.active_policies(self.db):
                 self._refresh_runner_registry()
                 return self.get_status()
-            signal = OpeningMomentumShadowService(
-                self.db,
-                self.candle_provider,
-            ).evaluate_execution_signal(now=current)
-            if signal is None:
-                self._refresh_runner_registry()
-                return self.get_status()
-            row = self._record_signal(signal, armed_at=current)
+            _, _, entry_deadline_at = self._session_entry_schedule(
+                identity,
+                session_date=session_date,
+            )
+            if current > entry_deadline_at:
+                variant = self._execution_variant()
+                row = self._record_missed_session(
+                    variant or identity,
+                    variant=variant,
+                    session_date=session_date,
+                    observed_at=current,
+                )
+            else:
+                signal = OpeningMomentumShadowService(
+                    self.db,
+                    self.candle_provider,
+                ).evaluate_execution_signal(now=current)
+                if signal is None:
+                    self._refresh_runner_registry()
+                    return self.get_status()
+                row = self._record_signal(signal, armed_at=current)
             self.db.commit()
             self._refresh_runner_registry()
             if not explicit_now:
@@ -160,12 +173,9 @@ class OpeningMomentumExecutionService:
             if variant is not None
             else identity.excluded_symbols
         )
-        universe_ready = bool(
-            variant is not None
-            and variant.universe_source != "NONE"
-            and len(universe) >= identity.decision_config.minimum_universe_size
-            and set(required_symbols).issubset(universe)
-            and not set(excluded_symbols).intersection(universe)
+        universe_ready = self._variant_universe_ready(
+            identity,
+            variant,
         )
         latest = (
             self.db.query(OpeningMomentumExecution)
@@ -339,7 +349,7 @@ class OpeningMomentumExecutionService:
 
     def _execution_for_session(
         self,
-        session_date,
+        session_date: date,
     ) -> OpeningMomentumExecution | None:
         return (
             self.db.query(OpeningMomentumExecution)
@@ -349,6 +359,114 @@ class OpeningMomentumExecutionService:
             .order_by(OpeningMomentumExecution.id.desc())
             .first()
         )
+
+    @staticmethod
+    def _session_entry_schedule(
+        identity: Any,
+        *,
+        session_date: date,
+    ) -> tuple[datetime, datetime, datetime]:
+        session = get_session("US")
+        session_open = datetime.combine(
+            session_date,
+            session.rth_open,
+            tzinfo=session.timezone,
+        ).astimezone(timezone.utc)
+        config = identity.decision_config
+        signal_at = session_open + timedelta(
+            minutes=config.signal_minutes - 1,
+        )
+        entry_due_at = session_open + timedelta(
+            minutes=(
+                config.signal_minutes
+                + config.execution_delay_minutes
+            ),
+        )
+        entry_deadline_at = entry_due_at + timedelta(
+            seconds=(
+                settings
+                .opening_momentum_execution_max_entry_delay_seconds
+            ),
+        )
+        return signal_at, entry_due_at, entry_deadline_at
+
+    @staticmethod
+    def _variant_universe_ready(
+        identity: Any,
+        variant: Any | None,
+    ) -> bool:
+        if variant is None or variant.universe_source == "NONE":
+            return False
+        universe = tuple(variant.symbols)
+        return bool(
+            len(universe)
+            >= identity.decision_config.minimum_universe_size
+            and set(variant.required_symbols).issubset(universe)
+            and not set(variant.excluded_symbols).intersection(universe)
+        )
+
+    def _record_missed_session(
+        self,
+        identity: Any,
+        *,
+        variant: Any | None,
+        session_date: date,
+        observed_at: datetime,
+    ) -> OpeningMomentumExecution:
+        signal_at, entry_due_at, entry_deadline_at = (
+            self._session_entry_schedule(
+                identity,
+                session_date=session_date,
+            )
+        )
+        universe = tuple(variant.symbols) if variant is not None else ()
+        universe_ready = self._variant_universe_ready(identity, variant)
+        reason = (
+            "ENTRY_WINDOW_MISSED"
+            if universe_ready
+            else "PREOPEN_UNIVERSE_UNAVAILABLE"
+        )
+        signal = OpeningMomentumExecutionSignal(
+            session_date=session_date,
+            algorithm_version=identity.algorithm_version,
+            config_version=identity.config_version,
+            universe_source=(
+                variant.universe_source
+                if variant is not None
+                else "NONE"
+            ),
+            selection_run_id=(
+                variant.selection_run_id
+                if variant is not None
+                else None
+            ),
+            action="SKIP",
+            reason=reason,
+            symbol=None,
+            signal_at=signal_at,
+            entry_due_at=entry_due_at,
+            universe_size=len(universe),
+            market_return_bps=None,
+            candidate_return_bps=None,
+            excess_return_bps=None,
+            reference_entry_price=None,
+            stop_loss_pct=float(
+                identity.decision_config.stop_loss_pct or 0
+            ),
+            max_holding_minutes=(
+                identity.decision_config.holding_minutes
+            ),
+            context={
+                "entry_window_missed": True,
+                "observed_at": observed_at.isoformat(),
+                "universe_ready": universe_ready,
+                "universe": list(universe),
+                "entry_deadline_at": entry_deadline_at.isoformat(),
+            },
+        )
+        row = self._record_signal(signal, armed_at=observed_at)
+        row.status = "EXPIRED"
+        return row
 
     def _record_signal(
         self,

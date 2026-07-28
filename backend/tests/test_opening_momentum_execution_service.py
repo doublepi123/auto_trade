@@ -226,6 +226,164 @@ def test_tick_does_not_evaluate_before_forward_evidence_start(
         Base.metadata.drop_all(bind=engine)
 
 
+def test_tick_records_a_missed_entry_window_once_without_market_data(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enable_execution(monkeypatch)
+    engine, db = _database()
+    runner = _FakeRunner([])
+    evaluated: list[datetime | None] = []
+    try:
+        service = OpeningMomentumExecutionService(db, None, runner)
+        identity = service._execution_identity()
+        symbols = tuple(
+            f"TEST{index}.US"
+            for index in range(
+                identity.decision_config.minimum_universe_size
+            )
+        )
+        populated = replace(
+            identity,
+            symbols=symbols,
+            selection_run_id=7,
+        )
+        monkeypatch.setattr(
+            service,
+            "_execution_variant",
+            lambda: populated,
+        )
+        monkeypatch.setattr(
+            OpeningMomentumShadowService,
+            "evaluate_execution_signal",
+            lambda _self, *, now=None: evaluated.append(now),
+        )
+        observed_at = _ENTRY_DUE + timedelta(seconds=31)
+
+        first = service.tick(now=observed_at)
+        second = service.tick(now=observed_at + timedelta(seconds=1))
+
+        assert first.state == "EXPIRED"
+        assert first.latest is not None
+        assert first.latest.reason == "ENTRY_WINDOW_MISSED"
+        assert first.latest.selection_run_id == 7
+        assert first.latest.signal_at.replace(tzinfo=timezone.utc) == (
+            _SESSION_OPEN + timedelta(minutes=2)
+        )
+        assert first.latest.entry_due_at.replace(tzinfo=timezone.utc) == (
+            _ENTRY_DUE
+        )
+        assert first.latest.entry_deadline_at.replace(
+            tzinfo=timezone.utc,
+        ) == (
+            _ENTRY_DUE + timedelta(seconds=30)
+        )
+        assert first.latest.armed_at.replace(tzinfo=timezone.utc) == (
+            observed_at
+        )
+        assert first.latest.universe_size == len(symbols)
+        assert first.latest.signal_context == {
+            "entry_deadline_at": (
+                _ENTRY_DUE + timedelta(seconds=30)
+            ).isoformat(),
+            "entry_window_missed": True,
+            "observed_at": observed_at.isoformat(),
+            "universe": list(symbols),
+            "universe_ready": True,
+        }
+        assert second.state == "EXPIRED"
+        assert second.latest is not None
+        assert second.latest.id == first.latest.id
+        assert evaluated == []
+        assert runner.calls == []
+        assert db.query(OpeningMomentumExecution).count() == 1
+    finally:
+        db.close()
+        Base.metadata.drop_all(bind=engine)
+
+
+def test_tick_at_entry_deadline_still_evaluates_the_signal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enable_execution(monkeypatch)
+    engine, db = _database()
+    runner = _FakeRunner([])
+    evaluated: list[datetime | None] = []
+    try:
+        service = OpeningMomentumExecutionService(db, None, runner)
+        base = _signal(service)
+        skipped = OpeningMomentumExecutionSignal(
+            **{
+                **base.__dict__,
+                "action": "SKIP",
+                "reason": "MARKET_GATE",
+                "symbol": None,
+                "reference_entry_price": None,
+            }
+        )
+
+        def evaluate(
+            _self: OpeningMomentumShadowService,
+            *,
+            now: datetime | None = None,
+        ) -> OpeningMomentumExecutionSignal:
+            evaluated.append(now)
+            return skipped
+
+        monkeypatch.setattr(
+            OpeningMomentumShadowService,
+            "evaluate_execution_signal",
+            evaluate,
+        )
+        deadline = _ENTRY_DUE + timedelta(seconds=30)
+
+        status = service.tick(now=deadline)
+
+        assert status.state == "SKIPPED"
+        assert status.latest is not None
+        assert status.latest.reason == "MARKET_GATE"
+        assert evaluated == [deadline]
+        assert runner.calls == []
+        assert db.query(OpeningMomentumExecution).count() == 1
+    finally:
+        db.close()
+        Base.metadata.drop_all(bind=engine)
+
+
+def test_tick_records_unavailable_preopen_universe_after_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enable_execution(monkeypatch)
+    engine, db = _database()
+    runner = _FakeRunner([])
+    evaluated: list[datetime | None] = []
+    try:
+        monkeypatch.setattr(
+            OpeningMomentumShadowService,
+            "evaluate_execution_signal",
+            lambda _self, *, now=None: evaluated.append(now),
+        )
+
+        status = OpeningMomentumExecutionService(
+            db,
+            None,
+            runner,
+        ).tick(now=_ENTRY_DUE + timedelta(seconds=31))
+
+        assert status.state == "EXPIRED"
+        assert status.latest is not None
+        assert status.latest.reason == "PREOPEN_UNIVERSE_UNAVAILABLE"
+        assert status.latest.universe_source == "NONE"
+        assert status.latest.selection_run_id is None
+        assert status.latest.universe_size == 0
+        assert status.latest.signal_context["universe_ready"] is False
+        assert evaluated == []
+        assert runner.calls == []
+        assert db.query(OpeningMomentumExecution).count() == 1
+    finally:
+        db.close()
+        Base.metadata.drop_all(bind=engine)
+
+
 def test_status_ignores_execution_from_a_superseded_policy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
