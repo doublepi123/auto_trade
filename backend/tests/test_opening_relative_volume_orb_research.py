@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gzip
 import json
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from app.cli.import_opening_activity import OpeningActivityRecord
 from app.cli.opening_extension_research import RawMinuteBar, _save_cache
 from app.cli.opening_relative_volume_orb_research import (
     RelativeVolumeOrbResearchConfig,
+    RelativeVolumeOrbResearchResult,
     evaluate_relative_volume_orb,
     load_research_inputs,
     load_seed_research_inputs,
@@ -289,6 +291,44 @@ def test_research_uses_causal_activity_top_n_and_exact_exit_open() -> None:
     assert session.top_symbols == ("AAA.US",)
 
 
+def test_alternative_candidate_modes_are_explicit_and_deterministic() -> None:
+    bars_by_symbol, records, signal_date = _research_data()
+    breakout = evaluate_relative_volume_orb(
+        bars_by_symbol,
+        records,
+        config=replace(_config(), top_n=2),
+    )
+    activity = evaluate_relative_volume_orb(
+        bars_by_symbol,
+        records,
+        config=replace(
+            _config(),
+            top_n=2,
+            candidate_selection_mode="ACTIVITY_RATIO",
+        ),
+    )
+    opening_return = evaluate_relative_volume_orb(
+        bars_by_symbol,
+        records,
+        config=replace(
+            _config(),
+            top_n=2,
+            candidate_selection_mode="OPENING_RETURN",
+        ),
+    )
+
+    def selected_symbol(result: RelativeVolumeOrbResearchResult) -> str:
+        return next(
+            item.symbol
+            for item in result.trades
+            if item.session_date == signal_date
+        )
+
+    assert selected_symbol(breakout) == "BBB.US"
+    assert selected_symbol(activity) == "AAA.US"
+    assert selected_symbol(opening_return) == "BBB.US"
+
+
 def test_research_matches_opening_range_stop_fill_semantics() -> None:
     bars_by_symbol, records, signal_date = _research_data(
         stop_on_signal_day=True,
@@ -451,6 +491,7 @@ def test_report_keeps_holdout_separate_and_disables_auto_promotion() -> None:
         "fixed_catalog_universe": True,
         "point_in_time_membership": False,
         "selection_uses_holdout": False,
+        "candidate_selection_mode": "BREAKOUT_DEPTH",
         "production_exit_semantics": True,
         "required_maximum_offset": 8,
         "discovery_ratio": 0.60,

@@ -7,7 +7,7 @@ from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Protocol, Sequence
+from typing import Literal, Protocol, Sequence
 
 from app.cli.import_opening_activity import (
     OpeningActivityRecord,
@@ -32,7 +32,17 @@ from app.domain.opening_momentum import (
 )
 
 
-RESEARCH_VERSION = "relative-volume-orb-causal-research-v1"
+RESEARCH_VERSION = "relative-volume-orb-causal-research-v2"
+CandidateSelectionMode = Literal[
+    "BREAKOUT_DEPTH",
+    "ACTIVITY_RATIO",
+    "OPENING_RETURN",
+]
+_CANDIDATE_SELECTION_MODES: tuple[CandidateSelectionMode, ...] = (
+    "BREAKOUT_DEPTH",
+    "ACTIVITY_RATIO",
+    "OPENING_RETURN",
+)
 
 
 class HistoricalCandleProvider(Protocol):
@@ -58,6 +68,7 @@ class RelativeVolumeOrbResearchConfig:
     stop_loss_cap_pct: float = 4.0
     round_trip_cost_bps: float = 30.0
     discovery_ratio: float = 0.60
+    candidate_selection_mode: CandidateSelectionMode = "BREAKOUT_DEPTH"
 
     def __post_init__(self) -> None:
         positive_integers = (
@@ -89,6 +100,8 @@ class RelativeVolumeOrbResearchConfig:
             raise ValueError("round-trip cost must be in [0, 200]")
         if not 0 < self.discovery_ratio < 1:
             raise ValueError("discovery ratio must be in (0, 1)")
+        if self.candidate_selection_mode not in _CANDIDATE_SELECTION_MODES:
+            raise ValueError("candidate selection mode is unsupported")
 
     @property
     def required_maximum_offset(self) -> int:
@@ -364,17 +377,40 @@ def evaluate_relative_volume_orb(
             config=opening_config,
         )
         candidate = decision.candidate_symbol
-        if decision.action != "ENTER_LONG" or candidate is None:
+        action = decision.action
+        reason = decision.reason
+        entry_price = decision.entry_price
+        if params.candidate_selection_mode != "BREAKOUT_DEPTH":
+            selected = _select_alternative_candidate(
+                decision_observations,
+                top_symbols=top_symbols,
+                opening_range_highs=opening_range_highs,
+                activity_ratios=ratios,
+                mode=params.candidate_selection_mode,
+            )
+            if selected is None:
+                action = "SKIP"
+                reason = "OPENING_RANGE_BREAKOUT_MISSING"
+                candidate = None
+                entry_price = None
+            else:
+                candidate = selected.symbol
+                entry_price = selected.entry_open
+                if entry_price is None:
+                    action = "SKIP"
+                    reason = "ENTRY_BAR_MISSING"
+                else:
+                    action = "ENTER_LONG"
+        if action != "ENTER_LONG" or candidate is None:
             sessions.append(RelativeVolumeOrbSession(
                 session_date=session_date,
                 status="SKIPPED",
-                reason=decision.reason,
+                reason=reason,
                 observed_symbols=len(observations),
                 ratio_symbols=len(decision_observations),
                 top_symbols=top_symbols,
             ))
             continue
-        entry_price = decision.entry_price
         range_low = opening_range_lows.get(candidate)
         if entry_price is None or range_low is None:
             raise RuntimeError("ORB decision is missing entry evidence")
@@ -456,6 +492,55 @@ def evaluate_relative_volume_orb(
         sessions=tuple(sessions),
         trades=tuple(trades),
     )
+
+
+def _select_alternative_candidate(
+    observations: Sequence[OpeningMomentumObservation],
+    *,
+    top_symbols: Sequence[str],
+    opening_range_highs: dict[str, float],
+    activity_ratios: dict[str, float],
+    mode: CandidateSelectionMode,
+) -> OpeningMomentumObservation | None:
+    eligible = tuple(
+        item
+        for item in observations
+        if (
+            item.symbol in top_symbols
+            and item.symbol in opening_range_highs
+            and item.signal_close > opening_range_highs[item.symbol]
+        )
+    )
+    if not eligible:
+        return None
+    if mode == "ACTIVITY_RATIO":
+        return min(
+            eligible,
+            key=lambda item: (
+                -activity_ratios[item.symbol],
+                -(
+                    item.signal_close
+                    / opening_range_highs[item.symbol]
+                    - 1
+                ),
+                -item.opening_return_bps,
+                item.symbol,
+            ),
+        )
+    if mode == "OPENING_RETURN":
+        return min(
+            eligible,
+            key=lambda item: (
+                -item.opening_return_bps,
+                -(
+                    item.signal_close
+                    / opening_range_highs[item.symbol]
+                    - 1
+                ),
+                item.symbol,
+            ),
+        )
+    raise ValueError("alternative candidate selection mode is unsupported")
 
 
 def materialize_candidate_exit_paths(
@@ -605,6 +690,9 @@ def research_payload(
             "fixed_catalog_universe": True,
             "point_in_time_membership": False,
             "selection_uses_holdout": False,
+            "candidate_selection_mode": (
+                result.config.candidate_selection_mode
+            ),
             "production_exit_semantics": True,
             "required_maximum_offset": (
                 result.config.required_maximum_offset
@@ -798,6 +886,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--end-date", type=_parse_date, required=True)
     parser.add_argument("--symbols")
     parser.add_argument("--holding-minutes", default="60")
+    parser.add_argument(
+        "--candidate-selection-mode",
+        choices=_CANDIDATE_SELECTION_MODES,
+        default="BREAKOUT_DEPTH",
+    )
     parser.add_argument("--output", type=Path)
     parser.add_argument("--full", action="store_true")
     return parser
@@ -871,6 +964,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                         broker,
                         config=RelativeVolumeOrbResearchConfig(
                             holding_minutes=max(holding_grid),
+                            candidate_selection_mode=(
+                                args.candidate_selection_mode
+                            ),
                         ),
                         symbols=requested_symbols,
                     )
@@ -898,6 +994,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 activity_records,
                 config=RelativeVolumeOrbResearchConfig(
                     holding_minutes=holding_minutes,
+                    candidate_selection_mode=(
+                        args.candidate_selection_mode
+                    ),
                 ),
                 symbols=requested_symbols,
             )
@@ -911,6 +1010,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "cache_extension": (
             asdict(cache_extension) if cache_extension is not None else None
         ),
+        "candidate_selection_mode": args.candidate_selection_mode,
         "requested_holding_minutes": list(holding_grid),
         "reports": reports,
     }
