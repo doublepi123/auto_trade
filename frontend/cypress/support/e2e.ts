@@ -3214,7 +3214,7 @@ Cypress.Commands.add('stubApi', () => {
             displacement_outperformance_rate: null,
             evidence_gate_passed: false,
             multiple_testing_method: 'HOLM_BONFERRONI',
-            multiple_testing_family_size: 1,
+            multiple_testing_family_size: 3,
             multiple_testing_adjusted_pvalue: null,
             multiple_testing_evidence_passed: null,
             promotion_ready: false,

@@ -726,7 +726,7 @@
                       <template
                         v-if="row.variant === 'OPENING_RANGE_STOP_CHALLENGER'
                           || row.variant === 'FIVE_MINUTE_ORB_CHALLENGER'
-                          || row.variant === 'STOCKS_IN_PLAY_ORB_CHALLENGER'"
+                          || row.variant.startsWith('STOCKS_IN_PLAY_ORB')"
                       >
                         区间低点 / 4%上限
                       </template>
@@ -2647,7 +2647,9 @@ function openingMomentumVariantLabel(
   if (variant === 'ETF_REGIME_TRV_CHALLENGER') return 'ETF 状态 + TRV'
   if (variant === 'OPENING_RANGE_STOP_CHALLENGER') return '开盘区间止损'
   if (variant === 'FIVE_MINUTE_ORB_CHALLENGER') return '5 分钟 ORB 突破'
-  if (variant === 'STOCKS_IN_PLAY_ORB_CHALLENGER') return '活跃成交 ORB'
+  if (variant === 'STOCKS_IN_PLAY_ORB_CHALLENGER') return '活跃成交 ORB Top20'
+  const stocksInPlay = /^STOCKS_IN_PLAY_ORB_TOP(\d+)_CHALLENGER$/.exec(variant)
+  if (stocksInPlay) return `活跃成交 ORB Top${stocksInPlay[1]}`
   const execution = /^EXECUTION_(.+)_CHALLENGER$/.exec(variant)
   if (execution) return `执行 + ${execution[1]}`
   const extension = /^EARLY_(.+)_CHALLENGER$/.exec(variant)
@@ -2672,7 +2674,7 @@ function openingMomentumVariantTagType(
     || variant.startsWith('ETF_REGIME_')
     || variant === 'OPENING_RANGE_STOP_CHALLENGER'
     || variant === 'FIVE_MINUTE_ORB_CHALLENGER'
-    || variant === 'STOCKS_IN_PLAY_ORB_CHALLENGER'
+    || variant.startsWith('STOCKS_IN_PLAY_ORB')
   ) return 'warning'
   if (variant.startsWith('EXECUTION_')) return 'success'
   if (variant.startsWith('EARLY_')) return 'warning'

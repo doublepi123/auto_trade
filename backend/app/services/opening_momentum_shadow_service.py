@@ -283,15 +283,10 @@ _FIVE_MINUTE_ORB_SOURCE = "OPENING_FIVE_MINUTE_ORB"
 _FIVE_MINUTE_ORB_ALGORITHM_VERSION = (
     f"{ALGORITHM_VERSION}+{_FIVE_MINUTE_ORB_VERSION}"
 )
-_STOCKS_IN_PLAY_ORB_TOP_N = 20
-_STOCKS_IN_PLAY_ORB_VERSION = (
-    "forward-only-5m-orb-stocks-in-play-top20-opening5-turnover-"
-    "to-prior20d-adv-proxy-next-minute-open-range-low-stop-cap4-"
-    "hold60-cost30-precommitted-20260728-v1"
-)
 _STOCKS_IN_PLAY_ORB_SOURCE = "OPENING_FIVE_MINUTE_ORB_STOCKS_IN_PLAY"
-_STOCKS_IN_PLAY_ORB_ALGORITHM_VERSION = (
-    f"{ALGORITHM_VERSION}+{_STOCKS_IN_PLAY_ORB_VERSION}"
+_STOCKS_IN_PLAY_ORB_VERSION_SUFFIX = (
+    "opening5-turnover-to-prior20d-adv-proxy-next-minute-open-"
+    "range-low-stop-cap4-hold60-cost30-precommitted-20260728-v1"
 )
 _EXECUTION_EXTENSION_COHORT_VERSION = (
     "individual-discovery-top6-positive-delta-min4-stop1-shortlist-v2-"
@@ -400,6 +395,11 @@ _ExecutionExtensionVariantName = Literal[
     "EXECUTION_PANW_CHALLENGER",
     "EXECUTION_CRWD_CHALLENGER",
 ]
+_StocksInPlayOrbVariantName = Literal[
+    "STOCKS_IN_PLAY_ORB_CHALLENGER",
+    "STOCKS_IN_PLAY_ORB_TOP10_CHALLENGER",
+    "STOCKS_IN_PLAY_ORB_TOP5_CHALLENGER",
+]
 _VariantName = Literal[
     "INCUMBENT",
     "REVERSAL_CHALLENGER",
@@ -432,6 +432,8 @@ _VariantName = Literal[
     "OPENING_RANGE_STOP_CHALLENGER",
     "FIVE_MINUTE_ORB_CHALLENGER",
     "STOCKS_IN_PLAY_ORB_CHALLENGER",
+    "STOCKS_IN_PLAY_ORB_TOP10_CHALLENGER",
+    "STOCKS_IN_PLAY_ORB_TOP5_CHALLENGER",
     "EXECUTION_SNDK_CHALLENGER",
     "EXECUTION_INTC_CHALLENGER",
     "EXECUTION_QCOM_CHALLENGER",
@@ -506,6 +508,50 @@ class OpeningMomentumExecutionSignal:
     stop_loss_pct: float
     max_holding_minutes: int
     context: dict[str, object]
+
+
+@dataclass(frozen=True)
+class _StocksInPlayOrbSpec:
+    variant: _StocksInPlayOrbVariantName
+    top_n: int
+    universe_source: str
+
+    def __post_init__(self) -> None:
+        if self.top_n <= 0:
+            raise ValueError("stocks-in-play top_n must be positive")
+
+    @property
+    def version(self) -> str:
+        return (
+            f"forward-only-5m-orb-stocks-in-play-top{self.top_n}-"
+            f"{_STOCKS_IN_PLAY_ORB_VERSION_SUFFIX}"
+        )
+
+    @property
+    def algorithm_version(self) -> str:
+        return f"{ALGORITHM_VERSION}+{self.version}"
+
+
+_STOCKS_IN_PLAY_ORB_SPECS = (
+    _StocksInPlayOrbSpec(
+        "STOCKS_IN_PLAY_ORB_CHALLENGER",
+        20,
+        _STOCKS_IN_PLAY_ORB_SOURCE,
+    ),
+    _StocksInPlayOrbSpec(
+        "STOCKS_IN_PLAY_ORB_TOP10_CHALLENGER",
+        10,
+        f"{_STOCKS_IN_PLAY_ORB_SOURCE}_TOP10",
+    ),
+    _StocksInPlayOrbSpec(
+        "STOCKS_IN_PLAY_ORB_TOP5_CHALLENGER",
+        5,
+        f"{_STOCKS_IN_PLAY_ORB_SOURCE}_TOP5",
+    ),
+)
+_STOCKS_IN_PLAY_ORB_VARIANTS = frozenset(
+    spec.variant for spec in _STOCKS_IN_PLAY_ORB_SPECS
+)
 
 
 @dataclass(frozen=True)
@@ -1472,7 +1518,8 @@ class OpeningMomentumShadowService:
                         )
                     elif symbol not in activity_eligible:
                         excluded[symbol] = (
-                            "OPENING_ACTIVITY_RANK_OUTSIDE_TOP20"
+                            "OPENING_ACTIVITY_RANK_OUTSIDE_TOP"
+                            f"{variant.opening_activity_top_n}"
                         )
 
             decision = self._evaluate_variant_decision(
@@ -2245,14 +2292,15 @@ class OpeningMomentumShadowService:
             symbols=active_broad_symbols,
             selection_run_id=run.id,
         ))
-        stocks_in_play_orb_identity = identities_by_variant[
-            "STOCKS_IN_PLAY_ORB_CHALLENGER"
-        ]
-        variants.append(replace(
-            stocks_in_play_orb_identity,
-            symbols=active_broad_symbols,
-            selection_run_id=run.id,
-        ))
+        for spec in _STOCKS_IN_PLAY_ORB_SPECS:
+            stocks_in_play_orb_identity = identities_by_variant[
+                spec.variant
+            ]
+            variants.append(replace(
+                stocks_in_play_orb_identity,
+                symbols=active_broad_symbols,
+                selection_run_id=run.id,
+            ))
         for spec in _EXECUTION_EXTENSION_SPECS:
             identity = identities_by_variant[spec.variant]
             variants.append(_UniverseVariant(
@@ -2650,33 +2698,29 @@ class OpeningMomentumShadowService:
                     _POST_20260727_FORWARD_EVIDENCE_START_DATE
                 ),
             ))
-            variants.append(_UniverseVariant(
-                variant="STOCKS_IN_PLAY_ORB_CHALLENGER",
-                algorithm_version=(
-                    _STOCKS_IN_PLAY_ORB_ALGORITHM_VERSION
-                ),
-                config_version=self._evidence_config_version(
-                    f"{five_minute_orb_config.version_hash()}:"
-                    f"{_STOCKS_IN_PLAY_ORB_VERSION}:"
-                    f"{_STOCKS_IN_PLAY_ORB_TOP_N}"
-                ),
-                universe_source=_STOCKS_IN_PLAY_ORB_SOURCE,
-                decision_config=five_minute_orb_config,
-                signal_model="OPENING_RANGE_BREAKOUT",
-                candidate_selection_mode=(
-                    "OPENING_ACTIVITY_TOP_N_THEN_BREAKOUT"
-                ),
-                minimum_data_coverage=(
-                    _EARLY_BROAD_MINIMUM_COVERAGE
-                ),
-                opening_range_stop=True,
-                opening_activity_top_n=(
-                    _STOCKS_IN_PLAY_ORB_TOP_N
-                ),
-                forward_evidence_start_date=(
-                    _POST_20260727_FORWARD_EVIDENCE_START_DATE
-                ),
-            ))
+            for spec in _STOCKS_IN_PLAY_ORB_SPECS:
+                variants.append(_UniverseVariant(
+                    variant=spec.variant,
+                    algorithm_version=spec.algorithm_version,
+                    config_version=self._evidence_config_version(
+                        f"{five_minute_orb_config.version_hash()}:"
+                        f"{spec.version}:{spec.top_n}"
+                    ),
+                    universe_source=spec.universe_source,
+                    decision_config=five_minute_orb_config,
+                    signal_model="OPENING_RANGE_BREAKOUT",
+                    candidate_selection_mode=(
+                        "OPENING_ACTIVITY_TOP_N_THEN_BREAKOUT"
+                    ),
+                    minimum_data_coverage=(
+                        _EARLY_BROAD_MINIMUM_COVERAGE
+                    ),
+                    opening_range_stop=True,
+                    opening_activity_top_n=spec.top_n,
+                    forward_evidence_start_date=(
+                        _POST_20260727_FORWARD_EVIDENCE_START_DATE
+                    ),
+                ))
             for spec in _EXECUTION_EXTENSION_SPECS:
                 variants.append(_UniverseVariant(
                     variant=spec.variant,
@@ -3391,7 +3435,7 @@ class OpeningMomentumShadowService:
                 "FIVE_MINUTE_ORB_CHALLENGER",
             }
             uses_five_minute_orb_baseline = (
-                identity.variant == "STOCKS_IN_PLAY_ORB_CHALLENGER"
+                identity.variant in _STOCKS_IN_PLAY_ORB_VARIANTS
             )
             requires_displacement_evidence = (
                 is_early_extension
