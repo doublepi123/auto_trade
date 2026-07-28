@@ -257,6 +257,21 @@ _WEAK_BREADTH_INDEX_COHORT_SOURCE = (
 _WEAK_BREADTH_INDEX_COHORT_ALGORITHM_VERSION = (
     f"{ALGORITHM_VERSION}+{_WEAK_BREADTH_INDEX_COHORT_VERSION}"
 )
+# PANW was the only single addition to pass the exceptional-path discovery
+# gates, but its independent holdout contradicted that result. Keep the live
+# pool unchanged and collect strictly forward paired evidence against the
+# actual paper-execution policy before considering any promotion.
+_EXCEPTIONAL_PATH_PANW_COHORT_SYMBOLS = ("PANW.US",)
+_EXCEPTIONAL_PATH_PANW_COHORT_VERSION = (
+    "forward-only-exceptional-path-active-broad-plus-panw-"
+    "discovery-cost30-tail-dd-holdout-contradicted-20260728-v1"
+)
+_EXCEPTIONAL_PATH_PANW_COHORT_SOURCE = (
+    "OPENING_EXECUTION_EXCEPTIONAL_PANW_COHORT"
+)
+_EXCEPTIONAL_PATH_PANW_COHORT_ALGORITHM_VERSION = (
+    f"{ALGORITHM_VERSION}+{_EXCEPTIONAL_PATH_PANW_COHORT_VERSION}"
+)
 # The sparse-candidate shortlist was selected from discovery data only, then
 # exhaustively evaluated as joint subsets. This five-symbol subset had eight
 # execution displacements and passed 30bp cost, tail, and drawdown guards.
@@ -346,6 +361,7 @@ _VariantName = Literal[
     "WEAK_BREADTH_PATH_CHALLENGER",
     "WEAK_BREADTH_RELAXED_CHALLENGER",
     "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER",
+    "EXCEPTIONAL_PATH_PANW_COHORT_CHALLENGER",
     "WEAK_BREADTH_INDEX_COHORT_CHALLENGER",
     "WEAK_BREADTH_SPARSE_INDEX_COHORT_CHALLENGER",
     "WEAK_BREADTH_MRVL_EXCLUSION_CHALLENGER",
@@ -1821,6 +1837,17 @@ class OpeningMomentumShadowService:
             symbols=active_broad_symbols,
             selection_run_id=run.id,
         ))
+        exceptional_path_panw_cohort_identity = identities_by_variant[
+            "EXCEPTIONAL_PATH_PANW_COHORT_CHALLENGER"
+        ]
+        variants.append(replace(
+            exceptional_path_panw_cohort_identity,
+            symbols=tuple(dict.fromkeys(
+                active_broad_symbols
+                + exceptional_path_panw_cohort_identity.required_symbols
+            )),
+            selection_run_id=run.id,
+        ))
         weak_breadth_index_cohort_identity = identities_by_variant[
             "WEAK_BREADTH_INDEX_COHORT_CHALLENGER"
         ]
@@ -2075,6 +2102,9 @@ class OpeningMomentumShadowService:
             ))
             variants.append(
                 self._weak_breadth_exceptional_path_variant_identity()
+            )
+            variants.append(
+                self._exceptional_path_panw_cohort_variant_identity()
             )
             variants.append(_UniverseVariant(
                 variant="WEAK_BREADTH_INDEX_COHORT_CHALLENGER",
@@ -2488,6 +2518,45 @@ class OpeningMomentumShadowService:
             raise RuntimeError("paper execution variant identity mismatch")
         return identity
 
+    def _exceptional_path_panw_cohort_variant_identity(
+        self,
+    ) -> _UniverseVariant:
+        config = self._execution_broad_config()
+        return _UniverseVariant(
+            variant="EXCEPTIONAL_PATH_PANW_COHORT_CHALLENGER",
+            algorithm_version=(
+                _EXCEPTIONAL_PATH_PANW_COHORT_ALGORITHM_VERSION
+            ),
+            config_version=self._evidence_config_version(
+                f"{config.version_hash()}:"
+                f"{_EXCEPTIONAL_PATH_PANW_COHORT_VERSION}:"
+                f"{_EXECUTION_PATH_EFFICIENCY_MINIMUM:.2f}:"
+                f"{_WEAK_BREADTH_MAXIMUM_MARKET_RETURN_BPS:.1f}:"
+                f"{EXCEPTIONAL_MINIMUM_PATH_EFFICIENCY:.2f}:"
+                f"{EXCEPTIONAL_MAXIMUM_MARKET_RETURN_BPS:.1f}:"
+                f"{','.join(_EXCEPTIONAL_PATH_PANW_COHORT_SYMBOLS)}"
+            ),
+            universe_source=_EXCEPTIONAL_PATH_PANW_COHORT_SOURCE,
+            decision_config=config,
+            minimum_data_coverage=_EARLY_BROAD_MINIMUM_COVERAGE,
+            minimum_path_efficiency=(
+                _EXECUTION_PATH_EFFICIENCY_MINIMUM
+            ),
+            maximum_market_return_bps=(
+                _WEAK_BREADTH_MAXIMUM_MARKET_RETURN_BPS
+            ),
+            exceptional_minimum_path_efficiency=(
+                EXCEPTIONAL_MINIMUM_PATH_EFFICIENCY
+            ),
+            exceptional_maximum_market_return_bps=(
+                EXCEPTIONAL_MAXIMUM_MARKET_RETURN_BPS
+            ),
+            required_symbols=_EXCEPTIONAL_PATH_PANW_COHORT_SYMBOLS,
+            forward_evidence_start_date=(
+                _POST_20260727_FORWARD_EVIDENCE_START_DATE
+            ),
+        )
+
     def paper_execution_variant(
         self,
         *,
@@ -2868,11 +2937,15 @@ class OpeningMomentumShadowService:
             uses_etf_regime_baseline = (
                 identity.variant in _ETF_REGIME_EXTENSION_VARIANTS
             )
+            uses_exceptional_path_baseline = identity.variant == (
+                "EXCEPTIONAL_PATH_PANW_COHORT_CHALLENGER"
+            )
             requires_displacement_evidence = (
                 is_early_extension
                 or is_execution_extension
                 or uses_weak_breadth_baseline
                 or uses_etf_regime_baseline
+                or uses_exceptional_path_baseline
             )
             identity_rows_by_date = rows_by_date[
                 identity.config_version
@@ -2882,6 +2955,7 @@ class OpeningMomentumShadowService:
                 "EARLY_BROAD_CHALLENGER",
                 "EXECUTION_BROAD_CHALLENGER",
                 "WEAK_BREADTH_PATH_CHALLENGER",
+                "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER",
                 "ETF_REGIME_PATH_CHALLENGER",
             ] | None
             if identity.variant == "INCUMBENT":
@@ -2892,6 +2966,10 @@ class OpeningMomentumShadowService:
                 comparison_baseline = "EXECUTION_BROAD_CHALLENGER"
             elif uses_etf_regime_baseline:
                 comparison_baseline = "ETF_REGIME_PATH_CHALLENGER"
+            elif uses_exceptional_path_baseline:
+                comparison_baseline = (
+                    "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER"
+                )
             elif uses_weak_breadth_baseline:
                 comparison_baseline = "WEAK_BREADTH_PATH_CHALLENGER"
             else:
@@ -2907,6 +2985,10 @@ class OpeningMomentumShadowService:
             elif uses_etf_regime_baseline:
                 comparison_identity = identities_by_variant[
                     "ETF_REGIME_PATH_CHALLENGER"
+                ]
+            elif uses_exceptional_path_baseline:
+                comparison_identity = identities_by_variant[
+                    "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER"
                 ]
             elif uses_weak_breadth_baseline:
                 comparison_identity = identities_by_variant[

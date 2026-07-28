@@ -169,6 +169,9 @@ class TestOpeningMomentumShadowApi:
         weak_breadth_exceptional_path = variants[
             "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER"
         ]
+        exceptional_path_panw_cohort = variants[
+            "EXCEPTIONAL_PATH_PANW_COHORT_CHALLENGER"
+        ]
         weak_breadth_index_cohort = variants[
             "WEAK_BREADTH_INDEX_COHORT_CHALLENGER"
         ]
@@ -186,7 +189,7 @@ class TestOpeningMomentumShadowApi:
             "OPENING_RANGE_STOP_CHALLENGER"
         ]
         execution_sndk = variants["EXECUTION_SNDK_CHALLENGER"]
-        assert len(variants) == 32
+        assert len(variants) == 33
         assert early["universe_source"] == "OPENING_EARLY_BROAD"
         assert early["signal_minutes"] == 3
         assert early["minimum_market_return_bps"] == -50.0
@@ -362,6 +365,34 @@ class TestOpeningMomentumShadowApi:
             exceptional_comparison["multiple_testing_family_size"]
             == 7
         )
+        assert exceptional_path_panw_cohort["universe_source"] == (
+            "OPENING_EXECUTION_EXCEPTIONAL_PANW_COHORT"
+        )
+        assert exceptional_path_panw_cohort[
+            "minimum_path_efficiency"
+        ] == 0.70
+        assert exceptional_path_panw_cohort[
+            "maximum_market_return_bps"
+        ] == 0.0
+        assert exceptional_path_panw_cohort[
+            "exceptional_minimum_path_efficiency"
+        ] == 0.90
+        assert exceptional_path_panw_cohort[
+            "exceptional_maximum_market_return_bps"
+        ] == 5.0
+        assert exceptional_path_panw_cohort["required_symbols"] == [
+            "PANW.US"
+        ]
+        assert exceptional_path_panw_cohort[
+            "forward_evidence_start_date"
+        ] == "2026-07-28"
+        assert exceptional_path_panw_cohort["comparison_baseline"] == (
+            "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER"
+        )
+        assert exceptional_path_panw_cohort["comparison"] is not None
+        assert exceptional_path_panw_cohort["comparison"][
+            "multiple_testing_family_size"
+        ] == 1
         assert weak_breadth_index_cohort["universe_source"] == (
             "OPENING_EXECUTION_WEAK_BREADTH_INDEX_COHORT"
         )

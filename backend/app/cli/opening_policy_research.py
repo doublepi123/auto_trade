@@ -58,7 +58,7 @@ from app.domain.opening_momentum_policy import (
 )
 
 
-OPENING_POLICY_CLI_VERSION = "opening-policy-research-cli-v7"
+OPENING_POLICY_CLI_VERSION = "opening-policy-research-cli-v8"
 _DEFAULT_PATH_THRESHOLDS = (0.50, 0.60, 0.70, 0.80, 0.90)
 _DEFAULT_MARKET_MAXIMUMS_BPS = (-10.0, -5.0, 0.0, 5.0, 10.0, 20.0)
 _DEFAULT_MINIMUM_DATA_COVERAGE = 0.95
@@ -74,6 +74,10 @@ _EXCLUSION_DIAGNOSTIC_VERSION = (
 _EXCLUSION_SUBSET_SELECTION_VERSION = (
     "discovery-exhaustive-joint-exclusion-cost30-drawdown-v1"
 )
+_PAIRED_POLICY_NAMES = {
+    "production": PRODUCTION_POLICY_NAME,
+    "exceptional": EXCEPTIONAL_PATH_POLICY_NAME,
+}
 
 
 def _default_policy_specs() -> tuple[OpeningPolicySpec, ...]:
@@ -125,6 +129,16 @@ def _default_policy_specs() -> tuple[OpeningPolicySpec, ...]:
         ),
     ))
     return tuple(policies)
+
+
+def _resolve_paired_policy(
+    policies: Sequence[OpeningPolicySpec],
+    paired_policy: str,
+) -> OpeningPolicySpec:
+    policy_name = _PAIRED_POLICY_NAMES.get(paired_policy)
+    if policy_name is None:
+        raise ValueError(f"unsupported paired policy: {paired_policy}")
+    return next(value for value in policies if value.name == policy_name)
 
 
 def _sensitivity_policy_name(
@@ -847,7 +861,7 @@ def _parser() -> argparse.ArgumentParser:
         "--cohort-symbols",
         help=(
             "optional frozen comma-separated additions evaluated jointly "
-            "against the baseline under the production policy"
+            "against the baseline under --paired-policy"
         ),
     )
     parser.add_argument(
@@ -862,7 +876,7 @@ def _parser() -> argparse.ArgumentParser:
         "--exclusion-symbols",
         help=(
             "optional frozen comma-separated baseline symbols removed "
-            "jointly under the production policy"
+            "jointly under --paired-policy"
         ),
     )
     parser.add_argument(
@@ -877,8 +891,17 @@ def _parser() -> argparse.ArgumentParser:
         "--holding-horizons",
         help=(
             "optional comma-separated fixed holding-minute challengers; "
-            "paired against the 60-minute production baseline with the "
-            "same signal, gates, and stop"
+            "paired against the 60-minute baseline under --paired-policy "
+            "with the same signal timing and stop"
+        ),
+    )
+    parser.add_argument(
+        "--paired-policy",
+        choices=tuple(_PAIRED_POLICY_NAMES),
+        default="production",
+        help=(
+            "policy used for cohort, exclusion, and holding-horizon paired "
+            "diagnostics (default: production)"
         ),
     )
     parser.add_argument("--discovery-ratio", type=float, default=0.60)
@@ -1069,6 +1092,7 @@ def main() -> int:
         parser.error("fewer than two causally resolved sessions were found")
 
     policies = _default_policy_specs()
+    paired_policy = _resolve_paired_policy(policies, args.paired_policy)
     report = evaluate_opening_policy_grid(
         policy_sessions,
         policies=policies,
@@ -1090,16 +1114,11 @@ def main() -> int:
             parser.error(
                 "fewer than two causally resolved cohort sessions were found"
             )
-        production_policy = next(
-            value
-            for value in policies
-            if value.name == PRODUCTION_POLICY_NAME
-        )
         cohort_reports = tuple(
             evaluate_opening_policy_cohort(
                 policy_sessions,
                 cohort_policy_sessions,
-                policy=production_policy,
+                policy=paired_policy,
                 cohort_symbols=cohort_symbols,
                 round_trip_cost_bps=cost,
                 discovery_ratio=args.discovery_ratio,
@@ -1148,7 +1167,7 @@ def main() -> int:
                         evaluate_opening_policy_cohort(
                             policy_sessions,
                             subset_sessions,
-                            policy=production_policy,
+                            policy=paired_policy,
                             cohort_symbols=subset,
                             round_trip_cost_bps=cost,
                             discovery_ratio=args.discovery_ratio,
@@ -1162,11 +1181,6 @@ def main() -> int:
     exclusion_cost_stress: list[dict[str, object]] = []
     exclusion_subset_selection: dict[str, object] | None = None
     if exclusion_symbols:
-        production_policy = next(
-            value
-            for value in policies
-            if value.name == PRODUCTION_POLICY_NAME
-        )
         exclusion_set = set(exclusion_symbols)
         reduced_symbols = tuple(
             symbol
@@ -1187,7 +1201,7 @@ def main() -> int:
             evaluate_opening_policy_cohort(
                 policy_sessions,
                 reduced_policy_sessions,
-                policy=production_policy,
+                policy=paired_policy,
                 cohort_symbols=exclusion_symbols,
                 round_trip_cost_bps=cost,
                 discovery_ratio=args.discovery_ratio,
@@ -1244,7 +1258,7 @@ def main() -> int:
                         evaluate_opening_policy_cohort(
                             policy_sessions,
                             subset_sessions,
-                            policy=production_policy,
+                            policy=paired_policy,
                             cohort_symbols=subset,
                             round_trip_cost_bps=cost,
                             discovery_ratio=args.discovery_ratio,
@@ -1279,16 +1293,11 @@ def main() -> int:
                     f"for the {holding_minutes}-minute horizon"
                 )
             sessions_by_horizon[holding_minutes] = horizon_sessions
-        production_policy = next(
-            value
-            for value in policies
-            if value.name == PRODUCTION_POLICY_NAME
-        )
         horizon_reports = tuple(
             evaluate_opening_policy_horizons(
                 sessions_by_horizon,
                 baseline_holding_minutes=config.holding_minutes,
-                policy=production_policy,
+                policy=paired_policy,
                 round_trip_cost_bps=cost,
                 discovery_ratio=args.discovery_ratio,
             )
@@ -1352,6 +1361,7 @@ def main() -> int:
                 else "CURRENT_OPENING_EXECUTION_ELIGIBLE_STRATEGY_V2_CONFIG"
             ),
             "baseline_symbols": list(baseline_symbols),
+            "paired_policy_name": paired_policy.name,
             "cohort_symbols": list(cohort_symbols),
             "cohort_subset_selection_requested": bool(
                 args.select_cohort_subset

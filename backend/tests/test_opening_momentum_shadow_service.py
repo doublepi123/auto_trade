@@ -77,6 +77,7 @@ _ALL_CHALLENGER_VARIANTS = (
     "WEAK_BREADTH_PATH_CHALLENGER",
     "WEAK_BREADTH_RELAXED_CHALLENGER",
     "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER",
+    "EXCEPTIONAL_PATH_PANW_COHORT_CHALLENGER",
     "WEAK_BREADTH_INDEX_COHORT_CHALLENGER",
     "WEAK_BREADTH_SPARSE_INDEX_COHORT_CHALLENGER",
     "WEAK_BREADTH_MRVL_EXCLUSION_CHALLENGER",
@@ -1151,6 +1152,7 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
             "WEAK_BREADTH_PATH_CHALLENGER",
             "WEAK_BREADTH_RELAXED_CHALLENGER",
             "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER",
+            "EXCEPTIONAL_PATH_PANW_COHORT_CHALLENGER",
             "WEAK_BREADTH_INDEX_COHORT_CHALLENGER",
             "WEAK_BREADTH_SPARSE_INDEX_COHORT_CHALLENGER",
             "WEAK_BREADTH_MRVL_EXCLUSION_CHALLENGER",
@@ -1185,6 +1187,9 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
         ]
         weak_breadth_exceptional_path = by_variant[
             "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER"
+        ]
+        exceptional_path_panw_cohort = by_variant[
+            "EXCEPTIONAL_PATH_PANW_COHORT_CHALLENGER"
         ]
         weak_breadth_index_cohort = by_variant[
             "WEAK_BREADTH_INDEX_COHORT_CHALLENGER"
@@ -1314,6 +1319,33 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
         )
         assert (
             weak_breadth_exceptional_path.forward_evidence_start_date
+            == date(2026, 7, 28)
+        )
+        assert (
+            exceptional_path_panw_cohort.decision_config
+            == execution.decision_config
+        )
+        assert exceptional_path_panw_cohort.minimum_path_efficiency == 0.70
+        assert exceptional_path_panw_cohort.maximum_market_return_bps == 0.0
+        assert (
+            exceptional_path_panw_cohort
+            .exceptional_minimum_path_efficiency
+            == 0.90
+        )
+        assert (
+            exceptional_path_panw_cohort
+            .exceptional_maximum_market_return_bps
+            == 5.0
+        )
+        assert exceptional_path_panw_cohort.required_symbols == ("PANW.US",)
+        assert exceptional_path_panw_cohort.universe_source == (
+            "OPENING_EXECUTION_EXCEPTIONAL_PANW_COHORT"
+        )
+        assert "holdout-contradicted" in (
+            exceptional_path_panw_cohort.algorithm_version
+        )
+        assert (
+            exceptional_path_panw_cohort.forward_evidence_start_date
             == date(2026, 7, 28)
         )
         assert (
@@ -1826,7 +1858,7 @@ def test_challengers_use_one_market_snapshot_and_close_all_variants(
         assert opened.latest.universe_source == "UNIVERSE_SELECTION"
         assert opened.latest.candidate_symbol == "S1.US"
         assert opened.latest.selection_run_id == run.id
-        assert len(opened.variants) == 32
+        assert len(opened.variants) == 33
         by_variant = {
             item.variant: item for item in opened.variants
         }
@@ -2025,7 +2057,7 @@ def test_early_broad_challenger_keeps_independent_observation_window(
         )
 
         rows = db.query(OpeningMomentumShadowRun).all()
-        assert len(rows) == 26
+        assert len(rows) == 27
         assert candles.calls == [
             *_SYMBOLS,
             *_EXTENSION_SYMBOLS,
@@ -2171,7 +2203,7 @@ def test_early_broad_challenger_keeps_independent_observation_window(
             now=_SESSION_OPEN + timedelta(minutes=32, seconds=10),
         )
 
-        assert db.query(OpeningMomentumShadowRun).count() == 32
+        assert db.query(OpeningMomentumShadowRun).count() == 33
         assert candles.calls == list(_SYMBOLS[:4])
         by_variant = {
             item.variant: item for item in standard_opened.variants
@@ -2192,7 +2224,7 @@ def test_early_broad_challenger_keeps_independent_observation_window(
         rows = db.query(OpeningMomentumShadowRun).all()
         assert sum(row.status == "CLOSED" for row in rows) == 5
         assert sum(row.status == "SKIPPED" for row in rows) == 4
-        assert sum(row.status == "OPEN" for row in rows) == 23
+        assert sum(row.status == "OPEN" for row in rows) == 24
         by_variant = {
             item.variant: item for item in standard_closed.variants
         }
@@ -2223,7 +2255,7 @@ def test_early_broad_challenger_keeps_independent_observation_window(
         rows = db.query(OpeningMomentumShadowRun).all()
         assert candles.calls == ["S7.US"]
         assert execution_closed.state == "OPEN"
-        assert sum(row.status == "CLOSED" for row in rows) == 21
+        assert sum(row.status == "CLOSED" for row in rows) == 22
         assert sum(row.status == "SKIPPED" for row in rows) == 4
         assert sum(row.status == "OPEN" for row in rows) == 7
         execution_by_variant = {
@@ -2255,6 +2287,12 @@ def test_early_broad_challenger_keeps_independent_observation_window(
         assert (
             execution_by_variant[
                 "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER"
+            ].metrics.closed_trades
+            == 1
+        )
+        assert (
+            execution_by_variant[
+                "EXCEPTIONAL_PATH_PANW_COHORT_CHALLENGER"
             ].metrics.closed_trades
             == 1
         )
@@ -2757,6 +2795,9 @@ def test_weak_breadth_index_cohort_can_displace_production_candidate(
         cohort = by_variant[
             "WEAK_BREADTH_INDEX_COHORT_CHALLENGER"
         ]
+        exceptional_cohort = by_variant[
+            "EXCEPTIONAL_PATH_PANW_COHORT_CHALLENGER"
+        ]
         sparse_cohort = by_variant[
             "WEAK_BREADTH_SPARSE_INDEX_COHORT_CHALLENGER"
         ]
@@ -2781,6 +2822,26 @@ def test_weak_breadth_index_cohort_can_displace_production_candidate(
         )
         assert cohort.comparison is not None
         assert cohort.comparison.minimum_policy_displacement_sessions == 3
+        assert exceptional_cohort.latest is not None
+        assert exceptional_cohort.latest.status == "OPEN"
+        assert exceptional_cohort.latest.candidate_symbol == "PANW.US"
+        assert exceptional_cohort.latest.universe == [
+            *_SYMBOLS,
+            "PANW.US",
+        ]
+        assert exceptional_cohort.minimum_path_efficiency == 0.70
+        assert exceptional_cohort.maximum_market_return_bps == 0.0
+        assert exceptional_cohort.exceptional_minimum_path_efficiency == 0.90
+        assert exceptional_cohort.exceptional_maximum_market_return_bps == 5.0
+        assert exceptional_cohort.required_symbols == ["PANW.US"]
+        assert exceptional_cohort.comparison_baseline == (
+            "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER"
+        )
+        assert exceptional_cohort.comparison is not None
+        assert (
+            exceptional_cohort.comparison.minimum_policy_displacement_sessions
+            == 3
+        )
         assert sparse_cohort.latest is not None
         assert sparse_cohort.latest.status == "OPEN"
         assert sparse_cohort.latest.candidate_symbol == "S7.US"
@@ -2956,7 +3017,7 @@ def test_breadth_challenger_skips_a_negative_market_snapshot(
         )
 
         assert candles.calls == list(_SYMBOLS[:4])
-        assert len(status.variants) == 32
+        assert len(status.variants) == 33
         by_variant = {
             item.variant: item for item in status.variants
         }

@@ -372,6 +372,9 @@ def test_cli_replays_existing_cache_without_broker(
     )
     assert stored["data_scope"]["resolved_session_count"] == 2
     assert stored["report"]["source_sessions"] == 2
+    assert stored["research_design"]["paired_policy_name"] == (
+        PRODUCTION_POLICY_NAME
+    )
     assert stored["research_design"]["automatic_promotion_allowed"] is False
     assert stored["research_design"]["chronological_split"] == (
         "BASELINE_DATE_ANCHORED"
@@ -407,6 +410,8 @@ def test_cli_emits_joint_cohort_diagnostic(
         ",".join(_SYMBOLS),
         "--cohort-symbols",
         _COHORT_SYMBOL,
+        "--paired-policy",
+        "exceptional",
         "--select-cohort-subset",
         "--cache-path",
         str(cache_path),
@@ -423,6 +428,18 @@ def test_cli_emits_joint_cohort_diagnostic(
     assert stdout["cohort"]["discovery_end_date"] == first.isoformat()
     assert len(stdout["cohort_cost_stress"]) == 3
     assert stored["cohort_diagnostic"]["diagnostic_only"] is True
+    assert stored["research_design"]["paired_policy_name"] == (
+        EXCEPTIONAL_PATH_POLICY_NAME
+    )
+    assert stored["cohort_diagnostic"]["policy"]["name"] == (
+        EXCEPTIONAL_PATH_POLICY_NAME
+    )
+    assert stored["cohort_diagnostic"]["policy"][
+        "exceptional_minimum_path_efficiency"
+    ] == EXCEPTIONAL_MINIMUM_PATH_EFFICIENCY
+    assert stored["cohort_diagnostic"]["policy"][
+        "exceptional_maximum_market_return_bps"
+    ] == EXCEPTIONAL_MAXIMUM_MARKET_RETURN_BPS
     assert stored["cohort_diagnostic"][
         "automatic_promotion_allowed"
     ] is False

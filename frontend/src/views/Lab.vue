@@ -2508,6 +2508,9 @@ function openingMomentumVariantLabel(
   if (variant === 'WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER') {
     return '弱广度 + 强路径例外'
   }
+  if (variant === 'EXCEPTIONAL_PATH_PANW_COHORT_CHALLENGER') {
+    return '强路径例外 + PANW'
+  }
   if (variant === 'WEAK_BREADTH_INDEX_COHORT_CHALLENGER') return '弱广度 + PANW'
   if (variant === 'WEAK_BREADTH_SPARSE_INDEX_COHORT_CHALLENGER') {
     return '弱广度 + 稀疏指数候选组'
@@ -2534,6 +2537,7 @@ function openingMomentumVariantTagType(
     variant === 'WEAK_BREADTH_PATH_CHALLENGER'
     || variant === 'WEAK_BREADTH_RELAXED_CHALLENGER'
     || variant === 'WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER'
+    || variant === 'EXCEPTIONAL_PATH_PANW_COHORT_CHALLENGER'
     || variant === 'WEAK_BREADTH_INDEX_COHORT_CHALLENGER'
     || variant === 'WEAK_BREADTH_SPARSE_INDEX_COHORT_CHALLENGER'
     || variant === 'WEAK_BREADTH_MRVL_EXCLUSION_CHALLENGER'
