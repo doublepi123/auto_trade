@@ -1326,6 +1326,106 @@
 
             <section
               class="shadow-section"
+              data-testid="live-exit-challengers"
+            >
+              <div class="shadow-section-header">
+                <div>
+                  <h3>真实成交退出前向对照</h3>
+                  <small>
+                    {{ selectedShadowSymbol }} · 仅复制真实成交基线，注册前交易不回填
+                  </small>
+                </div>
+                <div class="shadow-tags">
+                  <el-tag
+                    v-if="liveExitChallengers"
+                    :type="liveExitChallengers?.enabled ? 'success' : 'info'"
+                    effect="plain"
+                  >
+                    {{ liveExitChallengers?.enabled ? '采集开启' : '采集关闭' }}
+                  </el-tag>
+                  <el-tag effect="plain">真实成交基线</el-tag>
+                  <el-tag type="info" effect="plain">永不下单</el-tag>
+                  <el-tag type="warning" effect="plain">不自动应用</el-tag>
+                </div>
+              </div>
+              <el-alert
+                v-if="liveExitError"
+                :title="liveExitError"
+                type="warning"
+                :closable="false"
+                show-icon
+                class="shadow-evidence-alert"
+                data-testid="live-exit-error"
+              />
+              <el-empty
+                v-else-if="liveExitRows.length === 0"
+                description="等待当前标的注册真实成交基线候选"
+              />
+              <div v-else class="shadow-bracket-table">
+                <el-table
+                  :data="liveExitRows"
+                  size="small"
+                  stripe
+                  data-testid="live-exit-table"
+                >
+                  <el-table-column label="方案" min-width="210">
+                    <template #default="{ row }">
+                      <strong>{{ liveExitPolicyLabel(row) }}</strong>
+                      <small class="shadow-cell-detail">{{ row.algorithm_version }}</small>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="状态" width="96">
+                    <template #default="{ row }">
+                      <el-tag
+                        :type="liveExitStatusMeta(row.status).type"
+                        effect="plain"
+                      >
+                        {{ liveExitStatusMeta(row.status).label }}
+                      </el-tag>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="前向生效" min-width="126">
+                    <template #default="{ row }">
+                      {{ formatDateTime(row.eligible_after) }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="配对 / 触发" width="126">
+                    <template #default="{ row }">
+                      {{ row.paired_trades }} / {{ row.profit_lock_exits }}
+                      <small v-if="row.open_trades"> · 开 {{ row.open_trades }}</small>
+                      <small v-if="row.awaiting_baseline_trades">
+                        · 待 {{ row.awaiting_baseline_trades }}
+                      </small>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="胜率" min-width="132">
+                    <template #default="{ row }">
+                      {{ formatPercent(row.baseline_win_rate) }} →
+                      {{ formatPercent(row.challenger_win_rate) }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="净收益增量" width="112">
+                    <template #default="{ row }">
+                      {{ formatSignedNullable(row.net_pnl_delta) }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="最大回撤" min-width="142">
+                    <template #default="{ row }">
+                      {{ row.baseline_max_drawdown.toFixed(2) }} →
+                      {{ row.challenger_max_drawdown.toFixed(2) }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="复核门槛" min-width="220">
+                    <template #default="{ row }">
+                      {{ liveExitBlockerSummary(row) }}
+                    </template>
+                  </el-table-column>
+                </el-table>
+              </div>
+            </section>
+
+            <section
+              class="shadow-section"
               data-testid="shadow-bracket-challengers"
             >
               <div class="shadow-section-header">
@@ -2145,6 +2245,7 @@ import DataState from '../components/DataState.vue'
 import MetricStat from '../components/MetricStat.vue'
 import {
   evaluateStrategyShadowAdxChallengers,
+  getLiveExitChallengers,
   getStrategyShadowBracketChallengers,
   getStrategyShadowConfig,
   getStrategyShadowConfigs,
@@ -2159,6 +2260,8 @@ import {
   updateStrategyShadowConfig,
 } from '../api/strategy_shadow'
 import type {
+  LiveExitChallengerReport,
+  LiveExitChallengerVariant,
   PromptVersion, ExperimentSummary, PerformanceStats,
   PerformanceVariant, IndicatorsResponse, LLMInteractionRecord, LLMIntervalStatus, LLMUsageSummary,
   OpeningMomentumRecommendation,
@@ -2420,6 +2523,8 @@ const selectedShadowVersion = ref('')
 const shadowEvaluation = ref<StrategyShadowEvaluation | null>(null)
 const shadowExitChallengers = ref<StrategyShadowExitChallengerReport | null>(null)
 const shadowExitError = ref('')
+const liveExitChallengers = ref<LiveExitChallengerReport | null>(null)
+const liveExitError = ref('')
 const shadowBracketChallengers = ref<StrategyShadowBracketChallengerReport | null>(null)
 const shadowBracketError = ref('')
 const shadowPortfolioRouting = ref<StrategyShadowPortfolioRoutingReport | null>(null)
@@ -2663,6 +2768,8 @@ async function loadStrategyShadow(symbol = selectedShadowSymbol.value || undefin
   shadowEvaluation.value = null
   shadowExitChallengers.value = null
   shadowExitError.value = ''
+  liveExitChallengers.value = null
+  liveExitError.value = ''
   shadowBracketChallengers.value = null
   shadowBracketError.value = ''
   shadowDecisions.value = []
@@ -2707,6 +2814,7 @@ async function loadStrategyShadow(symbol = selectedShadowSymbol.value || undefin
     shadowDecisionPage.value = decisions.page
     shadowLoaded.value = true
     void loadShadowExitChallengers(config.symbol, generation)
+    void loadLiveExitChallengers(config.symbol, generation)
     void loadShadowBracketChallengers(config.symbol, generation)
     void loadShadowAdxChallengers(config.symbol, currentVersion, generation)
     void loadShadowForwardValidation(config.symbol, currentVersion, generation)
@@ -2753,6 +2861,8 @@ async function loadShadowEvidence() {
   shadowForwardLoading.value = false
   shadowExitChallengers.value = null
   shadowExitError.value = ''
+  liveExitChallengers.value = null
+  liveExitError.value = ''
   shadowBracketChallengers.value = null
   shadowBracketError.value = ''
   try {
@@ -2775,6 +2885,7 @@ async function loadShadowEvidence() {
     shadowDecisionTotal.value = decisions.total
     shadowDecisionPage.value = decisions.page
     void loadShadowExitChallengers(symbol, generation)
+    void loadLiveExitChallengers(symbol, generation)
     void loadShadowBracketChallengers(symbol, generation)
     void loadShadowAdxChallengers(symbol, version, generation)
     void loadShadowForwardValidation(symbol, version, generation)
@@ -2813,6 +2924,35 @@ async function loadShadowExitChallengers(
     shadowExitError.value = resolveErrorMessage(
       error,
       '加载退出策略前向对照失败',
+    )
+  }
+}
+
+async function loadLiveExitChallengers(
+  symbol: string,
+  generation: number,
+) {
+  if (
+    generation !== shadowRequestGeneration.value
+    || selectedShadowSymbol.value !== symbol
+  ) return
+  liveExitError.value = ''
+  try {
+    const result = await getLiveExitChallengers(symbol)
+    if (
+      generation !== shadowRequestGeneration.value
+      || selectedShadowSymbol.value !== symbol
+    ) return
+    liveExitChallengers.value = result
+  } catch (error: unknown) {
+    if (
+      generation !== shadowRequestGeneration.value
+      || selectedShadowSymbol.value !== symbol
+    ) return
+    liveExitChallengers.value = null
+    liveExitError.value = resolveErrorMessage(
+      error,
+      '加载真实成交退出前向对照失败',
     )
   }
 }
@@ -3069,6 +3209,10 @@ const shadowExitRows = computed(() => (
   ) ?? []
 ))
 
+const liveExitRows = computed(() => (
+  liveExitChallengers.value?.variants ?? []
+))
+
 const shadowBracketRows = computed(() => (
   shadowBracketChallengers.value?.variants.filter(
     (item) => item.source_config_version === selectedShadowVersion.value,
@@ -3287,6 +3431,29 @@ function shadowExitStatusMeta(
     return { label: '可复核', type: 'warning' }
   }
   return { label: '采集中', type: 'info' }
+}
+
+function liveExitPolicyLabel(
+  variant: LiveExitChallengerVariant,
+): string {
+  return `+${variant.activation_pct.toFixed(2)}% → +${variant.locked_profit_pct.toFixed(2)}%`
+}
+
+function liveExitBlockerSummary(
+  variant: LiveExitChallengerVariant,
+): string {
+  return variant.blockers
+    .map((item) => shadowExitBlockerLabels[item] ?? item)
+    .join('；') || '可进入人工复核'
+}
+
+function liveExitStatusMeta(
+  status: LiveExitChallengerVariant['status'],
+): {
+  label: string
+  type: 'success' | 'warning' | 'info'
+} {
+  return shadowExitStatusMeta(status)
 }
 
 function shadowBracketBlockerSummary(
@@ -3727,6 +3894,8 @@ async function pollStrategyShadow() {
     shadowStatus.value = status
     shadowStatusFetchedAtMs.value = Date.now()
     shadowEvaluation.value = evaluation
+    void loadShadowExitChallengers(symbol, generation)
+    void loadLiveExitChallengers(symbol, generation)
     void loadShadowBracketChallengers(symbol, generation)
   } catch {
     // Keep the last good snapshot; the next manual refresh exposes the error.
@@ -4139,6 +4308,13 @@ onBeforeUnmount(() => {
 
 .shadow-bracket-table :deep(.el-table) {
   min-width: 1080px;
+}
+
+.shadow-cell-detail {
+  display: block;
+  margin-top: 2px;
+  color: #6b7280;
+  overflow-wrap: anywhere;
 }
 
 .portfolio-routing-section {

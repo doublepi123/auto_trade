@@ -58,6 +58,7 @@ describe('Strategy v2 shadow lab', () => {
       '@getStrategyShadowEvaluation',
       '@getStrategyShadowPortfolioRouting',
       '@getStrategyShadowExitChallengers',
+      '@getLiveExitChallengers',
       '@getStrategyShadowBracketChallengers',
       '@evaluateStrategyShadowAdxChallengers',
       '@getStrategyShadowForwardValidation',
@@ -254,6 +255,22 @@ describe('Strategy v2 shadow lab', () => {
       .and('contain', '限时退出')
       .and('contain', '+4.40')
       .and('contain', '持仓期限触发不足')
+
+    cy.get('[data-testid="live-exit-challengers"]')
+      .should('contain', '真实成交退出前向对照')
+      .and('contain', '采集开启')
+      .and('contain', '真实成交基线')
+      .and('contain', '注册前交易不回填')
+      .and('contain', '永不下单')
+      .and('contain', '不自动应用')
+      .and('contain', '+0.60% → +0.50%')
+      .and('contain', '+0.70% → +0.60%')
+    cy.contains('[data-testid="live-exit-table"] tr', '+0.60% → +0.50%')
+      .should('contain', 'live-profit-lock-a60-f50-v1')
+      .and('contain', '0 / 0')
+      .and('contain', '配对交易不足')
+    cy.get('[data-testid="live-exit-challengers"]')
+      .should('not.contain', '实盘应用')
 
     cy.get('[data-testid="tab-strategy-shadow"]').should('not.contain', '实盘应用')
     cy.get('[data-testid="shadow-portfolio-routing"]').should('not.contain', '实盘应用')

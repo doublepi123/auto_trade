@@ -2363,6 +2363,50 @@ export interface StrategyShadowExitChallengerReport {
   variants: StrategyShadowExitChallengerVariant[]
 }
 
+export interface LiveExitChallengerVariant {
+  registration_id: number
+  algorithm_version: string
+  evaluator_digest: string
+  activation_pct: number
+  locked_profit_pct: number
+  slippage_bps: number
+  registered_at: string
+  eligible_after: string
+  status: 'COLLECTING' | 'READY_FOR_REVIEW' | 'MATURE_EVIDENCE'
+  entry_config_versions: string[]
+  paired_trades: number
+  open_trades: number
+  awaiting_baseline_trades: number
+  profit_lock_exits: number
+  improved_trades: number
+  worsened_trades: number
+  unchanged_trades: number
+  baseline_win_rate: number
+  challenger_win_rate: number
+  baseline_net_pnl: number
+  challenger_net_pnl: number
+  net_pnl_delta: number
+  mean_net_pnl_delta: number
+  baseline_max_drawdown: number
+  challenger_max_drawdown: number
+  minimum_ready_pairs: 20
+  minimum_mature_pairs: 50
+  minimum_profit_lock_exits: 5
+  promotion_ready: boolean
+  blockers: string[]
+}
+
+export interface LiveExitChallengerReport {
+  symbol: string
+  enabled: boolean
+  mode: 'LIVE_BASELINE_SHADOW'
+  order_submission_allowed: false
+  automatic_promotion_allowed: false
+  historical_backfill_allowed: false
+  evaluation_scope: 'FORWARD_LIVE_BASELINE'
+  variants: LiveExitChallengerVariant[]
+}
+
 export interface StrategyShadowBracketChallengerVariant {
   registration_id: number
   algorithm_version: string

@@ -1,5 +1,6 @@
 import { api } from './client'
 import type {
+  LiveExitChallengerReport,
   StrategyShadowAdxChallengerRequest,
   StrategyShadowAdxChallengerResponse,
   StrategyShadowBracketChallengerReport,
@@ -14,6 +15,15 @@ import type {
   StrategyShadowEvaluation,
   StrategyShadowVersion,
 } from '../types'
+
+export async function getLiveExitChallengers(
+  symbol: string,
+): Promise<LiveExitChallengerReport> {
+  const response = await api.get('/api/strategy-shadow/live-exit-challengers', {
+    params: { symbol },
+  })
+  return response.data
+}
 
 export async function getStrategyShadowExitChallengers(
   symbol?: string,

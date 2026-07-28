@@ -3748,6 +3748,68 @@ Cypress.Commands.add('stubApi', () => {
     })
   }).as('getStrategyShadowExitChallengers')
 
+  cy.intercept('GET', '/api/strategy-shadow/live-exit-challengers*', (req) => {
+    const variant = (
+      registrationId: number,
+      algorithmVersion: string,
+      activationPct: number,
+      lockedProfitPct: number,
+      pairedTrades: number,
+      profitLockExits: number,
+      netPnlDelta: number,
+    ) => ({
+      registration_id: registrationId,
+      algorithm_version: algorithmVersion,
+      evaluator_digest: String(registrationId).repeat(64).slice(0, 64),
+      activation_pct: activationPct,
+      locked_profit_pct: lockedProfitPct,
+      slippage_bps: 2,
+      registered_at: '2026-07-28T01:02:16Z',
+      eligible_after: '2026-07-28T01:03:00Z',
+      status: 'COLLECTING',
+      entry_config_versions: pairedTrades > 0 ? [strategyShadowConfig.config_version] : [],
+      paired_trades: pairedTrades,
+      open_trades: 0,
+      awaiting_baseline_trades: 0,
+      profit_lock_exits: profitLockExits,
+      improved_trades: profitLockExits,
+      worsened_trades: 0,
+      unchanged_trades: Math.max(0, pairedTrades - profitLockExits),
+      baseline_win_rate: pairedTrades > 0 ? 0.5 : 0,
+      challenger_win_rate: pairedTrades > 0 ? 0.75 : 0,
+      baseline_net_pnl: pairedTrades > 0 ? -3.2 : 0,
+      challenger_net_pnl: pairedTrades > 0 ? -3.2 + netPnlDelta : 0,
+      net_pnl_delta: netPnlDelta,
+      mean_net_pnl_delta: pairedTrades > 0 ? netPnlDelta / pairedTrades : 0,
+      baseline_max_drawdown: pairedTrades > 0 ? 8.2 : 0,
+      challenger_max_drawdown: pairedTrades > 0 ? 7.4 : 0,
+      minimum_ready_pairs: 20,
+      minimum_mature_pairs: 50,
+      minimum_profit_lock_exits: 5,
+      promotion_ready: false,
+      blockers: ['MIN_PAIRED_TRADES', 'MIN_PROFIT_LOCK_EXITS'],
+    })
+    req.reply({
+      body: {
+        symbol: strategyShadowConfig.symbol,
+        enabled: true,
+        mode: 'LIVE_BASELINE_SHADOW',
+        order_submission_allowed: false,
+        automatic_promotion_allowed: false,
+        historical_backfill_allowed: false,
+        evaluation_scope: 'FORWARD_LIVE_BASELINE',
+        variants: [
+          variant(11, 'live-profit-lock-a40-f10-v1', 0.4, 0.1, 4, 2, 1.2),
+          variant(12, 'live-profit-lock-a40-f20-v1', 0.4, 0.2, 4, 2, 2.4),
+          variant(13, 'live-profit-lock-a40-f30-v1', 0.4, 0.3, 4, 1, 0.8),
+          variant(14, 'live-profit-lock-a60-f40-v1', 0.6, 0.4, 4, 1, 3.8),
+          variant(15, 'live-profit-lock-a60-f50-v1', 0.6, 0.5, 0, 0, 0),
+          variant(16, 'live-profit-lock-a70-f60-v1', 0.7, 0.6, 0, 0, 0),
+        ],
+      },
+    })
+  }).as('getLiveExitChallengers')
+
   cy.intercept('GET', '/api/strategy-shadow/bracket-challengers*', (req) => {
     const common = {
       source_config_version: strategyShadowConfig.config_version,
