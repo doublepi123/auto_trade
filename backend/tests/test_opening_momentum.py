@@ -6,6 +6,7 @@ from app.domain.opening_momentum import (
     OpeningMomentumConfig,
     OpeningMomentumObservation,
     evaluate_opening_momentum,
+    evaluate_opening_momentum_path_eligible,
     evaluate_opening_reversal,
     opening_path_efficiency,
     shadow_round_trip_return_bps,
@@ -103,6 +104,76 @@ def test_missing_next_bar_does_not_fall_through_to_second_rank() -> None:
     assert decision.action == "SKIP"
     assert decision.reason == "ENTRY_BAR_MISSING"
     assert decision.candidate_symbol == "S7.US"
+
+
+def test_path_eligible_rerank_selects_strongest_eligible_candidate() -> None:
+    observations = [
+        _observation(f"S{index}.US", value)
+        for index, value in enumerate(
+            (-10, 0, 5, 10, 15, 20, 80, 100),
+        )
+    ]
+
+    decision = evaluate_opening_momentum_path_eligible(
+        observations,
+        path_efficiency_by_symbol={
+            f"S{index}.US": 0.80 if index == 6 else 0.40
+            for index in range(8)
+        },
+        minimum_path_efficiency=0.70,
+    )
+
+    assert decision.action == "ENTER_LONG"
+    assert decision.reason == "PATH_ELIGIBLE_OPENING_LEADER"
+    assert decision.candidate_symbol == "S6.US"
+    assert decision.candidate_return_bps == pytest.approx(80.0)
+    assert decision.market_return_bps == pytest.approx(12.5)
+    assert decision.excess_return_bps == pytest.approx(67.5)
+    assert decision.ranking[0].symbol == "S7.US"
+
+
+def test_path_eligible_rerank_fails_closed_without_eligible_name() -> None:
+    observations = [
+        _observation(f"S{index}.US", value)
+        for index, value in enumerate(
+            (-10, 0, 5, 10, 15, 20, 80, 100),
+        )
+    ]
+
+    decision = evaluate_opening_momentum_path_eligible(
+        observations,
+        path_efficiency_by_symbol={
+            item.symbol: 0.69 for item in observations
+        },
+        minimum_path_efficiency=0.70,
+    )
+
+    assert decision.action == "SKIP"
+    assert decision.reason == "PATH_ELIGIBLE_CANDIDATE_MISSING"
+    assert decision.candidate_symbol is None
+    assert decision.market_return_bps == pytest.approx(12.5)
+    assert decision.ranking[0].symbol == "S7.US"
+
+
+@pytest.mark.parametrize(
+    ("efficiencies", "minimum"),
+    [
+        ({"S0.US": float("nan")}, 0.70),
+        ({"S0.US": 1.01}, 0.70),
+        ({"S0.US": 0.80}, -0.01),
+        ({"s0.us": 0.80, "S0.US": 0.90}, 0.70),
+    ],
+)
+def test_path_eligible_rerank_rejects_invalid_configuration(
+    efficiencies: dict[str, float],
+    minimum: float,
+) -> None:
+    with pytest.raises(ValueError):
+        evaluate_opening_momentum_path_eligible(
+            [_observation("S0.US", 100)],
+            path_efficiency_by_symbol=efficiencies,
+            minimum_path_efficiency=minimum,
+        )
 
 
 def test_selects_deterministic_opening_laggard_for_reversal() -> None:
@@ -232,6 +303,12 @@ def test_duplicate_symbols_are_rejected() -> None:
 
     with pytest.raises(ValueError, match="duplicate"):
         evaluate_opening_momentum([item, item])
+    with pytest.raises(ValueError, match="duplicate"):
+        evaluate_opening_momentum_path_eligible(
+            [item, item],
+            path_efficiency_by_symbol={"AAPL.US": 1.0},
+            minimum_path_efficiency=0.70,
+        )
     with pytest.raises(ValueError, match="duplicate"):
         evaluate_opening_reversal([item, item])
 

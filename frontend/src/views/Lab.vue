@@ -674,8 +674,14 @@
                   </el-table-column>
                   <el-table-column label="候选 / 超额" min-width="130">
                     <template #default="{ row }">
-                      {{ formatBps(row.minimum_candidate_return_bps) }} /
-                      {{ formatBps(row.minimum_excess_return_bps) }}
+                      <div>
+                        {{ formatBps(row.minimum_candidate_return_bps) }} /
+                        {{ formatBps(row.minimum_excess_return_bps) }}
+                      </div>
+                      <small
+                        v-if="row.candidate_selection_mode === 'PATH_ELIGIBLE_RERANK'"
+                        class="opening-momentum-exception-threshold"
+                      >路径合格重排</small>
                     </template>
                   </el-table-column>
                   <el-table-column label="QQQ/DIA 均值上限" min-width="130">
@@ -2614,6 +2620,9 @@ function openingMomentumVariantLabel(
   if (variant === 'WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER') {
     return '弱广度 + 强路径例外'
   }
+  if (variant === 'QUALITY_FIRST_PATH_RERANK_CHALLENGER') {
+    return '质量优先重排'
+  }
   if (variant === 'EXCEPTIONAL_PATH_PANW_COHORT_CHALLENGER') {
     return '强路径例外 + PANW'
   }
@@ -2644,6 +2653,7 @@ function openingMomentumVariantTagType(
     || variant === 'WEAK_BREADTH_RELAXED_CHALLENGER'
     || variant === 'MODERATE_BREADTH_PATH_CHALLENGER'
     || variant === 'WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER'
+    || variant === 'QUALITY_FIRST_PATH_RERANK_CHALLENGER'
     || variant === 'EXCEPTIONAL_PATH_PANW_COHORT_CHALLENGER'
     || variant === 'WEAK_BREADTH_INDEX_COHORT_CHALLENGER'
     || variant === 'WEAK_BREADTH_SPARSE_INDEX_COHORT_CHALLENGER'

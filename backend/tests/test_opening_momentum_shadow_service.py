@@ -78,6 +78,7 @@ _ALL_CHALLENGER_VARIANTS = (
     "WEAK_BREADTH_RELAXED_CHALLENGER",
     "MODERATE_BREADTH_PATH_CHALLENGER",
     "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER",
+    "QUALITY_FIRST_PATH_RERANK_CHALLENGER",
     "EXCEPTIONAL_PATH_PANW_COHORT_CHALLENGER",
     "WEAK_BREADTH_INDEX_COHORT_CHALLENGER",
     "WEAK_BREADTH_SPARSE_INDEX_COHORT_CHALLENGER",
@@ -1154,6 +1155,7 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
             "WEAK_BREADTH_RELAXED_CHALLENGER",
             "MODERATE_BREADTH_PATH_CHALLENGER",
             "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER",
+            "QUALITY_FIRST_PATH_RERANK_CHALLENGER",
             "EXCEPTIONAL_PATH_PANW_COHORT_CHALLENGER",
             "WEAK_BREADTH_INDEX_COHORT_CHALLENGER",
             "WEAK_BREADTH_SPARSE_INDEX_COHORT_CHALLENGER",
@@ -1192,6 +1194,9 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
         ]
         weak_breadth_exceptional_path = by_variant[
             "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER"
+        ]
+        quality_first_path_rerank = by_variant[
+            "QUALITY_FIRST_PATH_RERANK_CHALLENGER"
         ]
         exceptional_path_panw_cohort = by_variant[
             "EXCEPTIONAL_PATH_PANW_COHORT_CHALLENGER"
@@ -1344,6 +1349,40 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
         assert (
             weak_breadth_exceptional_path.forward_evidence_start_date
             == date(2026, 7, 28)
+        )
+        assert (
+            quality_first_path_rerank.decision_config
+            == execution.decision_config
+        )
+        assert (
+            quality_first_path_rerank.candidate_selection_mode
+            == "PATH_ELIGIBLE_RERANK"
+        )
+        assert quality_first_path_rerank.minimum_data_coverage == 0.95
+        assert quality_first_path_rerank.minimum_path_efficiency == 0.70
+        assert quality_first_path_rerank.maximum_market_return_bps == 0.0
+        assert (
+            quality_first_path_rerank
+            .exceptional_minimum_path_efficiency
+            == 0.90
+        )
+        assert (
+            quality_first_path_rerank
+            .exceptional_maximum_market_return_bps
+            == 5.0
+        )
+        assert quality_first_path_rerank.universe_source == (
+            "OPENING_EXECUTION_QUALITY_FIRST_PATH_RERANK"
+        )
+        assert quality_first_path_rerank.forward_evidence_start_date == date(
+            2026,
+            7,
+            28,
+        )
+        assert (
+            service.paper_execution_variant_identity()
+            .candidate_selection_mode
+            == "TOP_THEN_GATE"
         )
         assert (
             exceptional_path_panw_cohort.decision_config
@@ -1882,7 +1921,7 @@ def test_challengers_use_one_market_snapshot_and_close_all_variants(
         assert opened.latest.universe_source == "UNIVERSE_SELECTION"
         assert opened.latest.candidate_symbol == "S1.US"
         assert opened.latest.selection_run_id == run.id
-        assert len(opened.variants) == 34
+        assert len(opened.variants) == 35
         by_variant = {
             item.variant: item for item in opened.variants
         }
@@ -2081,7 +2120,7 @@ def test_early_broad_challenger_keeps_independent_observation_window(
         )
 
         rows = db.query(OpeningMomentumShadowRun).all()
-        assert len(rows) == 28
+        assert len(rows) == 29
         assert candles.calls == [
             *_SYMBOLS,
             *_EXTENSION_SYMBOLS,
@@ -2227,7 +2266,7 @@ def test_early_broad_challenger_keeps_independent_observation_window(
             now=_SESSION_OPEN + timedelta(minutes=32, seconds=10),
         )
 
-        assert db.query(OpeningMomentumShadowRun).count() == 34
+        assert db.query(OpeningMomentumShadowRun).count() == 35
         assert candles.calls == list(_SYMBOLS[:4])
         by_variant = {
             item.variant: item for item in standard_opened.variants
@@ -2248,7 +2287,7 @@ def test_early_broad_challenger_keeps_independent_observation_window(
         rows = db.query(OpeningMomentumShadowRun).all()
         assert sum(row.status == "CLOSED" for row in rows) == 5
         assert sum(row.status == "SKIPPED" for row in rows) == 4
-        assert sum(row.status == "OPEN" for row in rows) == 25
+        assert sum(row.status == "OPEN" for row in rows) == 26
         by_variant = {
             item.variant: item for item in standard_closed.variants
         }
@@ -2279,7 +2318,7 @@ def test_early_broad_challenger_keeps_independent_observation_window(
         rows = db.query(OpeningMomentumShadowRun).all()
         assert candles.calls == ["S7.US"]
         assert execution_closed.state == "OPEN"
-        assert sum(row.status == "CLOSED" for row in rows) == 23
+        assert sum(row.status == "CLOSED" for row in rows) == 24
         assert sum(row.status == "SKIPPED" for row in rows) == 4
         assert sum(row.status == "OPEN" for row in rows) == 7
         execution_by_variant = {
@@ -2311,6 +2350,12 @@ def test_early_broad_challenger_keeps_independent_observation_window(
         assert (
             execution_by_variant[
                 "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER"
+            ].metrics.closed_trades
+            == 1
+        )
+        assert (
+            execution_by_variant[
+                "QUALITY_FIRST_PATH_RERANK_CHALLENGER"
             ].metrics.closed_trades
             == 1
         )
@@ -2508,6 +2553,78 @@ def test_execution_path_efficiency_challenger_skips_choppy_leader(
         assert challenger.minimum_path_efficiency == 0.70
         assert challenger.comparison_baseline == (
             "EXECUTION_BROAD_CHALLENGER"
+        )
+    finally:
+        db.close()
+        Base.metadata.drop_all(bind=engine)
+
+
+def test_quality_first_rerank_uses_next_path_eligible_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        settings,
+        "opening_momentum_shadow_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        settings,
+        "opening_momentum_challenger_enabled",
+        True,
+    )
+    engine, db = _database()
+    try:
+        _seed_variant_universe(db)
+        _seed_active_broad_pool(db)
+        service = OpeningMomentumShadowService(
+            db,
+            _FakeCandles(
+                early_opening_returns_bps={"S6.US": 80.0},
+                low_efficiency_for="S7.US",
+            ),
+            config=OpeningMomentumConfig(
+                minimum_universe_size=2,
+                minimum_excess_return_bps=0,
+            ),
+        )
+
+        status = service.tick(
+            now=_SESSION_OPEN + timedelta(minutes=5, seconds=10),
+        )
+
+        by_variant = {
+            item.variant: item for item in status.variants
+        }
+        paper_policy = by_variant[
+            "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER"
+        ]
+        quality_first = by_variant[
+            "QUALITY_FIRST_PATH_RERANK_CHALLENGER"
+        ]
+        assert paper_policy.latest is not None
+        assert paper_policy.latest.status == "SKIPPED"
+        assert paper_policy.latest.reason == "PATH_EFFICIENCY_FILTER"
+        assert paper_policy.latest.candidate_symbol == "S7.US"
+        assert quality_first.latest is not None
+        assert quality_first.latest.status == "OPEN"
+        assert quality_first.latest.reason == (
+            "PATH_ELIGIBLE_OPENING_LEADER"
+        )
+        assert quality_first.latest.candidate_symbol == "S6.US"
+        assert quality_first.latest.candidate_return_bps == pytest.approx(
+            80.0
+        )
+        assert quality_first.latest.candidate_path_efficiency == 1.0
+        assert quality_first.candidate_selection_mode == (
+            "PATH_ELIGIBLE_RERANK"
+        )
+        assert quality_first.comparison_baseline == (
+            "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER"
+        )
+        assert quality_first.forward_evidence_start_date == date(
+            2026,
+            7,
+            28,
         )
     finally:
         db.close()
@@ -3128,7 +3245,7 @@ def test_breadth_challenger_skips_a_negative_market_snapshot(
         )
 
         assert candles.calls == list(_SYMBOLS[:4])
-        assert len(status.variants) == 34
+        assert len(status.variants) == 35
         by_variant = {
             item.variant: item for item in status.variants
         }

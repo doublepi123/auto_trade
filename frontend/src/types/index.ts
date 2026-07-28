@@ -1959,6 +1959,7 @@ export interface OpeningMomentumShadowVariant {
     | 'WEAK_BREADTH_RELAXED_CHALLENGER'
     | 'MODERATE_BREADTH_PATH_CHALLENGER'
     | 'WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER'
+    | 'QUALITY_FIRST_PATH_RERANK_CHALLENGER'
     | 'EXCEPTIONAL_PATH_PANW_COHORT_CHALLENGER'
     | 'WEAK_BREADTH_INDEX_COHORT_CHALLENGER'
     | 'WEAK_BREADTH_SPARSE_INDEX_COHORT_CHALLENGER'
@@ -1977,6 +1978,7 @@ export interface OpeningMomentumShadowVariant {
   universe_source: string
   algorithm_version: string
   config_version: string
+  candidate_selection_mode: 'TOP_THEN_GATE' | 'PATH_ELIGIBLE_RERANK'
   signal_minutes: number
   minimum_market_return_bps: number
   minimum_candidate_return_bps: number

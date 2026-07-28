@@ -635,6 +635,7 @@ class OpeningMomentumShadowVariantResponse(BaseModel):
         "WEAK_BREADTH_RELAXED_CHALLENGER",
         "MODERATE_BREADTH_PATH_CHALLENGER",
         "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER",
+        "QUALITY_FIRST_PATH_RERANK_CHALLENGER",
         "EXCEPTIONAL_PATH_PANW_COHORT_CHALLENGER",
         "WEAK_BREADTH_INDEX_COHORT_CHALLENGER",
         "WEAK_BREADTH_SPARSE_INDEX_COHORT_CHALLENGER",
@@ -654,6 +655,10 @@ class OpeningMomentumShadowVariantResponse(BaseModel):
     universe_source: str
     algorithm_version: str
     config_version: str
+    candidate_selection_mode: Literal[
+        "TOP_THEN_GATE",
+        "PATH_ELIGIBLE_RERANK",
+    ] = "TOP_THEN_GATE"
     signal_minutes: int
     minimum_market_return_bps: float
     minimum_candidate_return_bps: float

@@ -16,8 +16,10 @@ from app.domain.opening_momentum import (
     ALGORITHM_VERSION,
     REVERSAL_ALGORITHM_VERSION,
     OpeningMomentumConfig,
+    OpeningMomentumDecision,
     OpeningMomentumObservation,
     evaluate_opening_momentum,
+    evaluate_opening_momentum_path_eligible,
     evaluate_opening_reversal,
     opening_path_efficiency,
     shadow_round_trip_return_bps,
@@ -180,6 +182,22 @@ _WEAK_BREADTH_EXCEPTIONAL_PATH_SOURCE = (
 _WEAK_BREADTH_EXCEPTIONAL_PATH_ALGORITHM_VERSION = (
     f"{ALGORITHM_VERSION}+"
     f"{_WEAK_BREADTH_EXCEPTIONAL_PATH_VERSION}"
+)
+# Discovery retained four actual candidate displacements and improved the
+# 30bp-cost result, lower tail, and drawdown by choosing the strongest path-
+# eligible name instead of rejecting the absolute opening leader. Historical
+# holdout had no execution displacement, so this identity is forward-only and
+# cannot affect the paper executor.
+_QUALITY_FIRST_PATH_RERANK_VERSION = (
+    "forward-only-path-eligible-rerank-070-exceptional-breadth-"
+    "discovery-cost30-tail-dd-holdout-no-execution-displacement-"
+    "20260728-v1"
+)
+_QUALITY_FIRST_PATH_RERANK_SOURCE = (
+    "OPENING_EXECUTION_QUALITY_FIRST_PATH_RERANK"
+)
+_QUALITY_FIRST_PATH_RERANK_ALGORITHM_VERSION = (
+    f"{ALGORITHM_VERSION}+{_QUALITY_FIRST_PATH_RERANK_VERSION}"
 )
 _POST_20260727_FORWARD_EVIDENCE_START_DATE = date(2026, 7, 28)
 # The conditional rule is promoted only to the explicitly confirmed paper
@@ -378,6 +396,7 @@ _VariantName = Literal[
     "WEAK_BREADTH_RELAXED_CHALLENGER",
     "MODERATE_BREADTH_PATH_CHALLENGER",
     "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER",
+    "QUALITY_FIRST_PATH_RERANK_CHALLENGER",
     "EXCEPTIONAL_PATH_PANW_COHORT_CHALLENGER",
     "WEAK_BREADTH_INDEX_COHORT_CHALLENGER",
     "WEAK_BREADTH_SPARSE_INDEX_COHORT_CHALLENGER",
@@ -395,6 +414,10 @@ _VariantName = Literal[
     "EXECUTION_CRWD_CHALLENGER",
 ]
 _SignalModel = Literal["MOMENTUM", "REVERSAL"]
+_CandidateSelectionMode = Literal[
+    "TOP_THEN_GATE",
+    "PATH_ELIGIBLE_RERANK",
+]
 
 
 class CandleProvider(Protocol):
@@ -466,6 +489,7 @@ class _UniverseVariant:
     universe_source: str
     decision_config: OpeningMomentumConfig
     signal_model: _SignalModel = "MOMENTUM"
+    candidate_selection_mode: _CandidateSelectionMode = "TOP_THEN_GATE"
     require_nonnegative_last_five: bool = False
     minimum_data_coverage: float = 1.0
     minimum_path_efficiency: float | None = None
@@ -485,6 +509,15 @@ class _UniverseVariant:
             raise ValueError(
                 "required_symbols and excluded_symbols must not overlap"
             )
+        if self.candidate_selection_mode == "PATH_ELIGIBLE_RERANK":
+            if self.signal_model != "MOMENTUM":
+                raise ValueError(
+                    "path-eligible rerank requires the momentum signal"
+                )
+            if self.minimum_path_efficiency is None:
+                raise ValueError(
+                    "path-eligible rerank requires minimum path efficiency"
+                )
         if self.minimum_path_efficiency is not None and (
             not math.isfinite(self.minimum_path_efficiency)
             or not 0 <= self.minimum_path_efficiency <= 1
@@ -888,7 +921,11 @@ class OpeningMomentumShadowService:
                 entry_open=signal_bar.close,
             ))
 
-        decision = evaluate_opening_momentum(observations, config)
+        decision = self._evaluate_variant_decision(
+            variant,
+            observations,
+            path_efficiency_by_symbol,
+        )
         candidate_path_efficiency = (
             path_efficiency_by_symbol.get(decision.candidate_symbol)
             if decision.candidate_symbol is not None
@@ -1015,6 +1052,9 @@ class OpeningMomentumShadowService:
                     candidate_signal_turnover_ratio
                 ),
                 "candidate_symbol": decision.candidate_symbol,
+                "candidate_selection_mode": (
+                    variant.candidate_selection_mode
+                ),
                 "minimum_path_efficiency": (
                     variant.minimum_path_efficiency
                 ),
@@ -1036,6 +1076,34 @@ class OpeningMomentumShadowService:
                     asdict(item) for item in decision.ranking
                 ],
             },
+        )
+
+    @staticmethod
+    def _evaluate_variant_decision(
+        variant: _UniverseVariant,
+        observations: list[OpeningMomentumObservation],
+        path_efficiency_by_symbol: dict[str, float],
+    ) -> OpeningMomentumDecision:
+        if variant.signal_model == "REVERSAL":
+            return evaluate_opening_reversal(
+                observations,
+                variant.decision_config,
+            )
+        if variant.candidate_selection_mode == "PATH_ELIGIBLE_RERANK":
+            minimum_path_efficiency = variant.minimum_path_efficiency
+            if minimum_path_efficiency is None:
+                raise RuntimeError(
+                    "path-eligible rerank is missing its path threshold"
+                )
+            return evaluate_opening_momentum_path_eligible(
+                observations,
+                path_efficiency_by_symbol=path_efficiency_by_symbol,
+                minimum_path_efficiency=minimum_path_efficiency,
+                config=variant.decision_config,
+            )
+        return evaluate_opening_momentum(
+            observations,
+            variant.decision_config,
         )
 
     def _candidate_avg_dollar_volume_by_run(
@@ -1236,10 +1304,10 @@ class OpeningMomentumShadowService:
                         self._opening_path_features(signal_candles)
                     )
 
-            decision = (
-                evaluate_opening_reversal(observations, config)
-                if variant.signal_model == "REVERSAL"
-                else evaluate_opening_momentum(observations, config)
+            decision = self._evaluate_variant_decision(
+                variant,
+                observations,
+                path_efficiency_by_symbol,
             )
             candidate_observation = next(
                 (
@@ -1871,6 +1939,14 @@ class OpeningMomentumShadowService:
             symbols=active_broad_symbols,
             selection_run_id=run.id,
         ))
+        quality_first_path_rerank_identity = identities_by_variant[
+            "QUALITY_FIRST_PATH_RERANK_CHALLENGER"
+        ]
+        variants.append(replace(
+            quality_first_path_rerank_identity,
+            symbols=active_broad_symbols,
+            selection_run_id=run.id,
+        ))
         exceptional_path_panw_cohort_identity = identities_by_variant[
             "EXCEPTIONAL_PATH_PANW_COHORT_CHALLENGER"
         ]
@@ -2162,6 +2238,9 @@ class OpeningMomentumShadowService:
             ))
             variants.append(
                 self._weak_breadth_exceptional_path_variant_identity()
+            )
+            variants.append(
+                self._quality_first_path_rerank_variant_identity()
             )
             variants.append(
                 self._exceptional_path_panw_cohort_variant_identity()
@@ -2577,6 +2656,45 @@ class OpeningMomentumShadowService:
         if identity.variant != _PAPER_EXECUTION_VARIANT:
             raise RuntimeError("paper execution variant identity mismatch")
         return identity
+
+    def _quality_first_path_rerank_variant_identity(
+        self,
+    ) -> _UniverseVariant:
+        config = self._execution_broad_config()
+        return _UniverseVariant(
+            variant="QUALITY_FIRST_PATH_RERANK_CHALLENGER",
+            algorithm_version=(
+                _QUALITY_FIRST_PATH_RERANK_ALGORITHM_VERSION
+            ),
+            config_version=self._evidence_config_version(
+                f"{config.version_hash()}:"
+                f"{_QUALITY_FIRST_PATH_RERANK_VERSION}:"
+                "PATH_ELIGIBLE_RERANK:"
+                f"{_EXECUTION_PATH_EFFICIENCY_MINIMUM:.2f}:"
+                f"{_WEAK_BREADTH_MAXIMUM_MARKET_RETURN_BPS:.1f}:"
+                f"{EXCEPTIONAL_MINIMUM_PATH_EFFICIENCY:.2f}:"
+                f"{EXCEPTIONAL_MAXIMUM_MARKET_RETURN_BPS:.1f}"
+            ),
+            universe_source=_QUALITY_FIRST_PATH_RERANK_SOURCE,
+            decision_config=config,
+            candidate_selection_mode="PATH_ELIGIBLE_RERANK",
+            minimum_data_coverage=_EARLY_BROAD_MINIMUM_COVERAGE,
+            minimum_path_efficiency=(
+                _EXECUTION_PATH_EFFICIENCY_MINIMUM
+            ),
+            maximum_market_return_bps=(
+                _WEAK_BREADTH_MAXIMUM_MARKET_RETURN_BPS
+            ),
+            exceptional_minimum_path_efficiency=(
+                EXCEPTIONAL_MINIMUM_PATH_EFFICIENCY
+            ),
+            exceptional_maximum_market_return_bps=(
+                EXCEPTIONAL_MAXIMUM_MARKET_RETURN_BPS
+            ),
+            forward_evidence_start_date=(
+                _POST_20260727_FORWARD_EVIDENCE_START_DATE
+            ),
+        )
 
     def _exceptional_path_panw_cohort_variant_identity(
         self,
@@ -3000,6 +3118,7 @@ class OpeningMomentumShadowService:
             uses_exceptional_path_baseline = identity.variant in {
                 "MODERATE_BREADTH_PATH_CHALLENGER",
                 "EXCEPTIONAL_PATH_PANW_COHORT_CHALLENGER",
+                "QUALITY_FIRST_PATH_RERANK_CHALLENGER",
             }
             requires_displacement_evidence = (
                 is_early_extension
@@ -3146,6 +3265,9 @@ class OpeningMomentumShadowService:
                     universe_source=identity.universe_source,
                     algorithm_version=identity.algorithm_version,
                     config_version=identity.config_version,
+                    candidate_selection_mode=(
+                        identity.candidate_selection_mode
+                    ),
                     signal_minutes=(
                         identity.decision_config.signal_minutes
                     ),

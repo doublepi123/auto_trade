@@ -5,7 +5,7 @@ import json
 import math
 from dataclasses import asdict, dataclass
 from statistics import median
-from typing import Literal, Sequence
+from typing import Literal, Mapping, Sequence
 
 
 ALGORITHM_VERSION = (
@@ -133,13 +133,12 @@ class OpeningMomentumDecision:
     ranking: tuple[OpeningMomentumRank, ...]
 
 
-def evaluate_opening_momentum(
+def _rank_opening_observations(
     observations: Sequence[OpeningMomentumObservation],
-    config: OpeningMomentumConfig | None = None,
-) -> OpeningMomentumDecision:
-    """Rank completed opening returns and apply the frozen entry gates."""
-
-    params = config or OpeningMomentumConfig()
+) -> tuple[
+    dict[str, OpeningMomentumObservation],
+    tuple[OpeningMomentumRank, ...],
+]:
     by_symbol: dict[str, OpeningMomentumObservation] = {}
     for item in observations:
         if item.symbol in by_symbol:
@@ -156,6 +155,18 @@ def evaluate_opening_momentum(
             key=lambda row: (-row.opening_return_bps, row.symbol),
         )
     )
+    return by_symbol, ranking
+
+
+def _evaluate_ranked_opening_momentum(
+    *,
+    by_symbol: Mapping[str, OpeningMomentumObservation],
+    ranking: tuple[OpeningMomentumRank, ...],
+    candidate: OpeningMomentumRank | None,
+    params: OpeningMomentumConfig,
+    entry_reason: str,
+    missing_candidate_reason: str,
+) -> OpeningMomentumDecision:
     if len(ranking) < params.minimum_universe_size:
         return OpeningMomentumDecision(
             action="SKIP",
@@ -172,13 +183,25 @@ def evaluate_opening_momentum(
     market_return_bps = median(
         item.opening_return_bps for item in ranking
     )
-    candidate = ranking[0]
+    if candidate is None:
+        return OpeningMomentumDecision(
+            action="SKIP",
+            reason=missing_candidate_reason,
+            universe_size=len(ranking),
+            market_return_bps=market_return_bps,
+            candidate_symbol=None,
+            candidate_return_bps=None,
+            excess_return_bps=None,
+            entry_price=None,
+            ranking=ranking,
+        )
+
     excess_return_bps = (
         candidate.opening_return_bps - market_return_bps
     )
     observation = by_symbol[candidate.symbol]
     action: Literal["ENTER_LONG", "SKIP"] = "ENTER_LONG"
-    reason = "OPENING_LEADER"
+    reason = entry_reason
     if market_return_bps < params.minimum_market_return_bps:
         action = "SKIP"
         reason = "MARKET_FILTER"
@@ -209,6 +232,73 @@ def evaluate_opening_momentum(
             else None
         ),
         ranking=ranking,
+    )
+
+
+def evaluate_opening_momentum(
+    observations: Sequence[OpeningMomentumObservation],
+    config: OpeningMomentumConfig | None = None,
+) -> OpeningMomentumDecision:
+    """Rank completed opening returns and apply the frozen entry gates."""
+
+    params = config or OpeningMomentumConfig()
+    by_symbol, ranking = _rank_opening_observations(observations)
+    return _evaluate_ranked_opening_momentum(
+        by_symbol=by_symbol,
+        ranking=ranking,
+        candidate=ranking[0] if ranking else None,
+        params=params,
+        entry_reason="OPENING_LEADER",
+        missing_candidate_reason="CANDIDATE_MISSING",
+    )
+
+
+def evaluate_opening_momentum_path_eligible(
+    observations: Sequence[OpeningMomentumObservation],
+    *,
+    path_efficiency_by_symbol: Mapping[str, float],
+    minimum_path_efficiency: float,
+    config: OpeningMomentumConfig | None = None,
+) -> OpeningMomentumDecision:
+    """Select the strongest candidate whose completed path is eligible."""
+
+    if (
+        not math.isfinite(minimum_path_efficiency)
+        or not 0 <= minimum_path_efficiency <= 1
+    ):
+        raise ValueError("minimum_path_efficiency must be in [0, 1]")
+    normalized_efficiencies: dict[str, float] = {}
+    for raw_symbol, raw_efficiency in path_efficiency_by_symbol.items():
+        symbol = raw_symbol.strip().upper()
+        if not symbol:
+            raise ValueError("path efficiency symbol is required")
+        if symbol in normalized_efficiencies:
+            raise ValueError(f"duplicate path efficiency: {symbol}")
+        efficiency = float(raw_efficiency)
+        if not math.isfinite(efficiency) or not 0 <= efficiency <= 1:
+            raise ValueError(
+                "path efficiencies must contain finite values in [0, 1]"
+            )
+        normalized_efficiencies[symbol] = efficiency
+
+    params = config or OpeningMomentumConfig()
+    by_symbol, ranking = _rank_opening_observations(observations)
+    candidate = next(
+        (
+            item
+            for item in ranking
+            if normalized_efficiencies.get(item.symbol, -1.0)
+            >= minimum_path_efficiency
+        ),
+        None,
+    )
+    return _evaluate_ranked_opening_momentum(
+        by_symbol=by_symbol,
+        ranking=ranking,
+        candidate=candidate,
+        params=params,
+        entry_reason="PATH_ELIGIBLE_OPENING_LEADER",
+        missing_candidate_reason="PATH_ELIGIBLE_CANDIDATE_MISSING",
     )
 
 

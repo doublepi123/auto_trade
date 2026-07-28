@@ -172,6 +172,9 @@ class TestOpeningMomentumShadowApi:
         weak_breadth_exceptional_path = variants[
             "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER"
         ]
+        quality_first_path_rerank = variants[
+            "QUALITY_FIRST_PATH_RERANK_CHALLENGER"
+        ]
         exceptional_path_panw_cohort = variants[
             "EXCEPTIONAL_PATH_PANW_COHORT_CHALLENGER"
         ]
@@ -192,7 +195,7 @@ class TestOpeningMomentumShadowApi:
             "OPENING_RANGE_STOP_CHALLENGER"
         ]
         execution_sndk = variants["EXECUTION_SNDK_CHALLENGER"]
-        assert len(variants) == 34
+        assert len(variants) == 35
         assert early["universe_source"] == "OPENING_EARLY_BROAD"
         assert early["signal_minutes"] == 3
         assert early["minimum_market_return_bps"] == -50.0
@@ -341,7 +344,7 @@ class TestOpeningMomentumShadowApi:
         assert moderate_comparison["evidence_gate_passed"] is False
         assert moderate_comparison[
             "multiple_testing_family_size"
-        ] == 2
+        ] == 3
         assert weak_breadth_exceptional_path["universe_source"] == (
             "OPENING_EXECUTION_WEAK_BREADTH_EXCEPTIONAL_PATH"
         )
@@ -385,6 +388,10 @@ class TestOpeningMomentumShadowApi:
             == "WEAK_BREADTH_PATH_CHALLENGER"
         )
         assert weak_breadth_exceptional_path["comparison"] is not None
+        assert (
+            weak_breadth_exceptional_path["candidate_selection_mode"]
+            == "TOP_THEN_GATE"
+        )
         exceptional_comparison = weak_breadth_exceptional_path[
             "comparison"
         ]
@@ -394,6 +401,34 @@ class TestOpeningMomentumShadowApi:
             exceptional_comparison["multiple_testing_family_size"]
             == 7
         )
+        assert quality_first_path_rerank["universe_source"] == (
+            "OPENING_EXECUTION_QUALITY_FIRST_PATH_RERANK"
+        )
+        assert quality_first_path_rerank["candidate_selection_mode"] == (
+            "PATH_ELIGIBLE_RERANK"
+        )
+        assert quality_first_path_rerank[
+            "minimum_path_efficiency"
+        ] == 0.70
+        assert quality_first_path_rerank[
+            "maximum_market_return_bps"
+        ] == 0.0
+        assert quality_first_path_rerank[
+            "exceptional_minimum_path_efficiency"
+        ] == 0.90
+        assert quality_first_path_rerank[
+            "exceptional_maximum_market_return_bps"
+        ] == 5.0
+        assert quality_first_path_rerank[
+            "forward_evidence_start_date"
+        ] == "2026-07-28"
+        assert quality_first_path_rerank["comparison_baseline"] == (
+            "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER"
+        )
+        assert quality_first_path_rerank["comparison"] is not None
+        assert quality_first_path_rerank["comparison"][
+            "multiple_testing_family_size"
+        ] == 3
         assert exceptional_path_panw_cohort["universe_source"] == (
             "OPENING_EXECUTION_EXCEPTIONAL_PANW_COHORT"
         )
@@ -421,7 +456,7 @@ class TestOpeningMomentumShadowApi:
         assert exceptional_path_panw_cohort["comparison"] is not None
         assert exceptional_path_panw_cohort["comparison"][
             "multiple_testing_family_size"
-        ] == 2
+        ] == 3
         assert weak_breadth_index_cohort["universe_source"] == (
             "OPENING_EXECUTION_WEAK_BREADTH_INDEX_COHORT"
         )

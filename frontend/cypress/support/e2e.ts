@@ -2794,6 +2794,51 @@ Cypress.Commands.add('stubApi', () => {
           },
           comparison: null,
         },
+        {
+          variant: 'QUALITY_FIRST_PATH_RERANK_CHALLENGER',
+          universe_source: 'OPENING_EXECUTION_QUALITY_FIRST_PATH_RERANK',
+          algorithm_version: (
+            'cross-sectional-opening-momentum-v3-preopen-frozen-universe+'
+            + 'forward-only-path-eligible-rerank-070-v1'
+          ),
+          config_version: 'opening-quality-first-rerank-stub-v1',
+          candidate_selection_mode: 'PATH_ELIGIBLE_RERANK',
+          signal_minutes: 3,
+          minimum_market_return_bps: -50,
+          maximum_market_return_bps: 0,
+          exceptional_minimum_path_efficiency: 0.9,
+          exceptional_maximum_market_return_bps: 5,
+          maximum_benchmark_average_return_bps: null,
+          minimum_candidate_return_bps: 50,
+          minimum_excess_return_bps: 25,
+          minimum_data_coverage: 0.95,
+          minimum_path_efficiency: 0.7,
+          required_symbols: [],
+          excluded_symbols: [],
+          holding_minutes: 60,
+          stop_loss_pct: 1,
+          forward_evidence_start_date: '2026-07-28',
+          excluded_pre_forward_sessions: 0,
+          comparison_sessions: 0,
+          comparison_baseline: (
+            'WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER'
+          ),
+          latest: null,
+          metrics: {
+            observed_sessions: 0,
+            skipped_sessions: 0,
+            signals: 0,
+            open_trades: 0,
+            closed_trades: 0,
+            wins: 0,
+            win_rate: 0,
+            mean_net_return_bps: 0,
+            cumulative_net_return_bps: 0,
+            max_drawdown_bps: 0,
+            profit_factor: null,
+          },
+          comparison: null,
+        },
         ...([
           {
             variant: 'WEAK_BREADTH_INDEX_COHORT_CHALLENGER',

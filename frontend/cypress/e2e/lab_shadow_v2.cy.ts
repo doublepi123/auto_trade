@@ -125,6 +125,8 @@ describe('Strategy v2 shadow lab', () => {
       .and('contain', '适度广度 + 20bp 上限')
       .and('contain', '20.0 bps')
       .and('contain', '弱广度 + 强路径例外')
+      .and('contain', '质量优先重排')
+      .and('contain', '路径合格重排')
       .and('contain', '前向证据')
       .and('contain', '排除 1 个事后日')
       .and('contain', '路径 90.00%')
