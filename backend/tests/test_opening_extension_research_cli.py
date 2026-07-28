@@ -271,10 +271,15 @@ def test_cache_round_trip_and_scope_mismatch(tmp_path: Path) -> None:
     session_date = date(2026, 7, 6)
     path = tmp_path / "opening.json.gz"
     bars = {"AAA.US": _raw_bars("AAA.US", session_date)}
+    out_of_window = RawMinuteBar(
+        timestamp=_timestamp(session_date, 100),
+        open=101.0,
+        close=101.0,
+    )
 
     _save_cache(
         path,
-        bars,
+        {"AAA.US": (*bars["AAA.US"], out_of_window)},
         start_date=session_date,
         end_date=session_date,
         retained_minutes_after_open=35,
@@ -291,7 +296,7 @@ def test_cache_round_trip_and_scope_mismatch(tmp_path: Path) -> None:
         start_date=session_date,
         end_date=session_date,
         retained_minutes_after_open=34,
-    ) == bars
+    ) == {"AAA.US": bars["AAA.US"][:-1]}
     with pytest.raises(ValueError, match="covers only 35 minutes"):
         _load_cache(
             path,

@@ -428,13 +428,18 @@ def _parse_cached_bars(
             timestamp_raw, open_raw, high_raw, low_raw, close_raw = raw_bar
             if not isinstance(timestamp_raw, str):
                 raise ValueError("opening research cache timestamp is invalid")
-            parsed.append(RawMinuteBar(
+            bar = RawMinuteBar(
                 timestamp=datetime.fromisoformat(timestamp_raw),
                 open=float(open_raw),
                 high=float(high_raw),
                 low=float(low_raw),
                 close=float(close_raw),
-            ))
+            )
+            if _within_opening_window(
+                bar.timestamp,
+                retained_minutes_after_open=retained_minutes_after_open,
+            ):
+                parsed.append(bar)
         result[raw_symbol.strip().upper()] = tuple(parsed)
     return result
 
@@ -589,6 +594,10 @@ def _save_cache(
                     bar.close,
                 ]
                 for bar in values
+                if _within_opening_window(
+                    bar.timestamp,
+                    retained_minutes_after_open=retained_minutes_after_open,
+                )
             ]
             for symbol, values in sorted(bars_by_symbol.items())
         },
