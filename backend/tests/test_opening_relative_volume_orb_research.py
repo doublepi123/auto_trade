@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import gzip
+import json
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -11,8 +13,11 @@ from app.cli.opening_relative_volume_orb_research import (
     RelativeVolumeOrbResearchConfig,
     evaluate_relative_volume_orb,
     load_research_inputs,
+    load_seed_research_inputs,
+    materialize_candidate_exit_paths,
     research_payload,
 )
+from app.core.broker import BrokerCandle
 from app.core.market_calendar import get_session
 from app.services.opening_momentum_shadow_service import (
     OpeningMomentumShadowService,
@@ -78,6 +83,35 @@ def _shadow_candle(bar: RawMinuteBar) -> _Candle:
         low=bar.low,
         close=bar.close,
     )
+
+
+class _FakeHistoricalProvider:
+    def __init__(
+        self,
+        rows_by_symbol: dict[str, tuple[BrokerCandle, ...]],
+        *,
+        response_limit: int | None = None,
+    ) -> None:
+        self.rows_by_symbol = rows_by_symbol
+        self.response_limit = response_limit
+        self.calls: list[tuple[str, str, int, datetime]] = []
+
+    def get_history_candlesticks_by_offset(
+        self,
+        symbol: str,
+        period: str,
+        count: int,
+        after: datetime,
+    ) -> list[BrokerCandle]:
+        self.calls.append((symbol, period, count, after))
+        rows = [
+            item
+            for item in self.rows_by_symbol.get(symbol, ())
+            if item.timestamp >= after
+        ][:count]
+        if self.response_limit is not None:
+            rows = rows[: self.response_limit]
+        return rows
 
 
 def _research_data(
@@ -174,6 +208,61 @@ def test_loader_rejects_cache_that_cannot_settle_sixty_minute_exit(
         )
 
 
+def test_seed_loader_preserves_minutes_beyond_selection_horizon(
+    tmp_path: Path,
+) -> None:
+    session_date = date(2026, 7, 27)
+    ohlc_path = tmp_path / "opening-8.json.gz"
+    activity_path = tmp_path / "activity.json.gz"
+    bars = tuple(
+        RawMinuteBar(
+            timestamp=_timestamp(session_date, offset),
+            open=100.0,
+            high=100.0,
+            low=100.0,
+            close=100.0,
+        )
+        for offset in range(9)
+    )
+    _save_cache(
+        ohlc_path,
+        {"AAA.US": bars},
+        start_date=session_date,
+        end_date=session_date,
+        retained_minutes_after_open=8,
+    )
+    with gzip.open(activity_path, "wt", encoding="utf-8") as handle:
+        json.dump(
+            {
+                "cache_version": "opening-activity-first6-v1",
+                "start_date": session_date.isoformat(),
+                "end_date": session_date.isoformat(),
+                "window_minutes": 6,
+                "symbols": {
+                    "AAA.US": {
+                        _timestamp(session_date, offset).isoformat(): [
+                            100.0,
+                            1_000.0,
+                        ]
+                        for offset in range(5)
+                    },
+                },
+            },
+            handle,
+        )
+
+    loaded, activity = load_seed_research_inputs(
+        ohlc_cache_path=ohlc_path,
+        activity_cache_path=activity_path,
+        start_date=session_date,
+        end_date=session_date,
+        minimum_required_offset=6,
+    )
+
+    assert len(loaded["AAA.US"]) == 9
+    assert len(activity) == 1
+
+
 def test_research_uses_causal_activity_top_n_and_exact_exit_open() -> None:
     bars_by_symbol, records, signal_date = _research_data()
 
@@ -241,6 +330,109 @@ def test_research_matches_opening_range_stop_fill_semantics() -> None:
     )
     assert production_outcome.price == pytest.approx(trade.exit_price)
     assert production_outcome.reason == trade.exit_reason
+
+
+def test_materializer_fetches_only_selected_candidate_exit_gap() -> None:
+    bars_by_symbol, records, signal_date = _research_data()
+    complete_aaa = bars_by_symbol["AAA.US"]
+    partial = {
+        **bars_by_symbol,
+        "AAA.US": tuple(
+            bar
+            for bar in complete_aaa
+            if not (
+                get_session("US").local(bar.timestamp).date() == signal_date
+                and bar.timestamp
+                in {
+                    _timestamp(signal_date, 7),
+                    _timestamp(signal_date, 8),
+                }
+            )
+        ),
+    }
+    provider = _FakeHistoricalProvider({
+        "AAA.US": tuple(
+            BrokerCandle(
+                timestamp=bar.timestamp,
+                open=bar.open,
+                high=bar.high or bar.open,
+                low=bar.low or bar.open,
+                close=bar.close,
+                volume=1.0,
+            )
+            for bar in complete_aaa
+        ),
+    })
+
+    extended, report = materialize_candidate_exit_paths(
+        partial,
+        records,
+        provider,
+        config=_config(),
+    )
+
+    assert provider.calls == [
+        ("AAA.US", "MIN_1", 2, _timestamp(signal_date, 7)),
+    ]
+    assert report.required_maximum_offset == 8
+    assert report.incomplete_candidate_sessions_before == 1
+    assert report.fetch_requests == 1
+    assert report.fetched_bars == 2
+    assert report.incomplete_candidate_sessions_after == 0
+    result = evaluate_relative_volume_orb(
+        extended,
+        records,
+        config=_config(),
+    )
+    trade = next(
+        item for item in result.trades if item.session_date == signal_date
+    )
+    assert trade.symbol == "AAA.US"
+    assert trade.exit_price == pytest.approx(103.0)
+
+
+def test_materializer_rejects_an_incomplete_provider_response() -> None:
+    bars_by_symbol, records, signal_date = _research_data()
+    complete_aaa = bars_by_symbol["AAA.US"]
+    partial = {
+        **bars_by_symbol,
+        "AAA.US": tuple(
+            bar
+            for bar in complete_aaa
+            if bar.timestamp
+            not in {
+                _timestamp(signal_date, 7),
+                _timestamp(signal_date, 8),
+            }
+        ),
+    }
+    provider = _FakeHistoricalProvider(
+        {
+            "AAA.US": tuple(
+                BrokerCandle(
+                    timestamp=bar.timestamp,
+                    open=bar.open,
+                    high=bar.high or bar.open,
+                    low=bar.low or bar.open,
+                    close=bar.close,
+                    volume=1.0,
+                )
+                for bar in complete_aaa
+            ),
+        },
+        response_limit=1,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="did not complete candidate exit paths",
+    ):
+        materialize_candidate_exit_paths(
+            partial,
+            records,
+            provider,
+            config=_config(),
+        )
 
 
 def test_report_keeps_holdout_separate_and_disables_auto_promotion() -> None:

@@ -5,9 +5,9 @@ import json
 import math
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Sequence
+from typing import Protocol, Sequence
 
 from app.cli.import_opening_activity import (
     OpeningActivityRecord,
@@ -15,10 +15,15 @@ from app.cli.import_opening_activity import (
 )
 from app.cli.opening_extension_research import (
     RawMinuteBar,
+    _configure_longport_environment,
     _load_cache,
+    _merge_bars,
     _parse_integer_grid,
     _parse_symbols,
+    _read_cache_payload,
+    _save_cache,
 )
+from app.core.broker import BrokerCandle, BrokerGateway
 from app.core.market_calendar import get_session
 from app.domain.opening_momentum import (
     OpeningMomentumConfig,
@@ -28,6 +33,16 @@ from app.domain.opening_momentum import (
 
 
 RESEARCH_VERSION = "relative-volume-orb-causal-research-v1"
+
+
+class HistoricalCandleProvider(Protocol):
+    def get_history_candlesticks_by_offset(
+        self,
+        symbol: str,
+        period: str,
+        count: int,
+        after: datetime,
+    ) -> list[BrokerCandle]: ...
 
 
 @dataclass(frozen=True)
@@ -133,6 +148,16 @@ class RelativeVolumeOrbResearchResult:
     trades: tuple[RelativeVolumeOrbTrade, ...]
 
 
+@dataclass(frozen=True)
+class RelativeVolumeOrbCacheExtensionReport:
+    required_maximum_offset: int
+    candidate_sessions: int
+    incomplete_candidate_sessions_before: int
+    fetch_requests: int
+    fetched_bars: int
+    incomplete_candidate_sessions_after: int
+
+
 def load_research_inputs(
     *,
     ohlc_cache_path: Path,
@@ -166,6 +191,40 @@ def load_research_inputs(
     if not filtered_activity:
         raise ValueError("opening activity research cache is empty")
     return bars_by_symbol, filtered_activity
+
+
+def load_seed_research_inputs(
+    *,
+    ohlc_cache_path: Path,
+    activity_cache_path: Path,
+    start_date: date,
+    end_date: date,
+    minimum_required_offset: int,
+) -> tuple[
+    dict[str, tuple[RawMinuteBar, ...]],
+    tuple[OpeningActivityRecord, ...],
+]:
+    """Load every retained seed minute after checking selection coverage."""
+
+    raw = _read_cache_payload(ohlc_cache_path)
+    retained_offset = raw.get("retained_minutes_after_open")
+    if not isinstance(retained_offset, int):
+        raise ValueError(
+            "opening research cache retained-minute metadata is invalid"
+        )
+    if retained_offset < minimum_required_offset:
+        raise ValueError(
+            "opening research seed cache covers only "
+            f"{retained_offset} minutes after open but "
+            f"{minimum_required_offset} are required for selection"
+        )
+    return load_research_inputs(
+        ohlc_cache_path=ohlc_cache_path,
+        activity_cache_path=activity_cache_path,
+        start_date=start_date,
+        end_date=end_date,
+        required_maximum_offset=retained_offset,
+    )
 
 
 def evaluate_relative_volume_orb(
@@ -399,6 +458,130 @@ def evaluate_relative_volume_orb(
     )
 
 
+def materialize_candidate_exit_paths(
+    bars_by_symbol: dict[str, tuple[RawMinuteBar, ...]],
+    activity_records: Sequence[OpeningActivityRecord],
+    provider: HistoricalCandleProvider,
+    *,
+    config: RelativeVolumeOrbResearchConfig | None = None,
+    symbols: Sequence[str] | None = None,
+) -> tuple[
+    dict[str, tuple[RawMinuteBar, ...]],
+    RelativeVolumeOrbCacheExtensionReport,
+]:
+    """Fetch only exit-path minutes for causally selected candidates."""
+
+    params = config or RelativeVolumeOrbResearchConfig()
+    extended = {
+        symbol: tuple(values) for symbol, values in bars_by_symbol.items()
+    }
+    before = evaluate_relative_volume_orb(
+        extended,
+        activity_records,
+        config=params,
+        symbols=symbols,
+    )
+    gaps = _candidate_exit_path_gaps(before, extended)
+    market_session = get_session("US")
+    fetched_bars = 0
+    for session_date, symbol, missing_offsets in gaps:
+        first_offset = min(missing_offsets)
+        last_offset = max(missing_offsets)
+        local_open = datetime.combine(
+            session_date,
+            market_session.rth_open,
+            tzinfo=market_session.timezone,
+        )
+        after = (local_open + timedelta(minutes=first_offset)).astimezone(
+            timezone.utc
+        )
+        response = provider.get_history_candlesticks_by_offset(
+            symbol,
+            "MIN_1",
+            last_offset - first_offset + 1,
+            after,
+        )
+        expected = set(missing_offsets)
+        fetched: list[RawMinuteBar] = []
+        for candle in response:
+            timestamp = candle.timestamp
+            if timestamp.tzinfo is None:
+                timestamp = timestamp.replace(tzinfo=timezone.utc)
+            timestamp = timestamp.astimezone(timezone.utc)
+            local = market_session.local(timestamp)
+            if local.date() != session_date:
+                continue
+            offset_seconds = (local - local_open).total_seconds()
+            if offset_seconds % 60 != 0:
+                continue
+            offset = int(offset_seconds // 60)
+            if offset not in expected:
+                continue
+            fetched.append(RawMinuteBar(
+                timestamp=timestamp,
+                open=float(candle.open),
+                high=float(candle.high),
+                low=float(candle.low),
+                close=float(candle.close),
+            ))
+        fetched_bars += len(fetched)
+        extended[symbol] = _merge_bars(extended[symbol], fetched)
+
+    after = evaluate_relative_volume_orb(
+        extended,
+        activity_records,
+        config=params,
+        symbols=symbols,
+    )
+    remaining = _candidate_exit_path_gaps(after, extended)
+    if remaining:
+        rendered = ", ".join(
+            f"{session_date.isoformat()} {symbol} "
+            f"offsets={list(offsets)}"
+            for session_date, symbol, offsets in remaining[:10]
+        )
+        raise ValueError(
+            "historical provider did not complete candidate exit paths: "
+            + rendered
+        )
+    return extended, RelativeVolumeOrbCacheExtensionReport(
+        required_maximum_offset=params.required_maximum_offset,
+        candidate_sessions=sum(
+            item.candidate_symbol is not None for item in before.sessions
+        ),
+        incomplete_candidate_sessions_before=len(gaps),
+        fetch_requests=len(gaps),
+        fetched_bars=fetched_bars,
+        incomplete_candidate_sessions_after=0,
+    )
+
+
+def _candidate_exit_path_gaps(
+    result: RelativeVolumeOrbResearchResult,
+    bars_by_symbol: dict[str, tuple[RawMinuteBar, ...]],
+) -> tuple[tuple[date, str, tuple[int, ...]], ...]:
+    indexed = _index_bars(bars_by_symbol, result.universe)
+    entry_offset = (
+        result.config.signal_minutes
+        + result.config.execution_delay_minutes
+    )
+    exit_offset = result.config.required_maximum_offset
+    gaps: list[tuple[date, str, tuple[int, ...]]] = []
+    for session in result.sessions:
+        symbol = session.candidate_symbol
+        if session.reason != "EXIT_PATH_INCOMPLETE" or symbol is None:
+            continue
+        by_offset = indexed.get(session.session_date, {}).get(symbol, {})
+        missing = tuple(
+            offset
+            for offset in range(entry_offset, exit_offset + 1)
+            if offset not in by_offset
+        )
+        if missing:
+            gaps.append((session.session_date, symbol, missing))
+    return tuple(gaps)
+
+
 def research_payload(
     result: RelativeVolumeOrbResearchResult,
 ) -> dict[str, object]:
@@ -602,6 +785,14 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--ohlc-cache", type=Path, required=True)
+    parser.add_argument(
+        "--seed-ohlc-cache",
+        type=Path,
+        help=(
+            "immutable lower-horizon cache used to causally select candidates "
+            "and fetch only their missing exit-path minutes"
+        ),
+    )
     parser.add_argument("--activity-cache", type=Path, required=True)
     parser.add_argument("--start-date", type=_parse_date, required=True)
     parser.add_argument("--end-date", type=_parse_date, required=True)
@@ -632,13 +823,74 @@ def main(argv: Sequence[str] | None = None) -> int:
             else None
         )
         required_offset = max(5 + 1 + value for value in holding_grid)
-        bars_by_symbol, activity_records = load_research_inputs(
-            ohlc_cache_path=args.ohlc_cache,
-            activity_cache_path=args.activity_cache,
-            start_date=start_date,
-            end_date=end_date,
-            required_maximum_offset=required_offset,
-        )
+        if (
+            args.seed_ohlc_cache is not None
+            and args.seed_ohlc_cache.resolve() == args.ohlc_cache.resolve()
+        ):
+            raise ValueError(
+                "seed OHLC cache must differ from the target OHLC cache"
+            )
+        cache_extension: RelativeVolumeOrbCacheExtensionReport | None = None
+        if args.seed_ohlc_cache is None:
+            bars_by_symbol, activity_records = load_research_inputs(
+                ohlc_cache_path=args.ohlc_cache,
+                activity_cache_path=args.activity_cache,
+                start_date=start_date,
+                end_date=end_date,
+                required_maximum_offset=required_offset,
+            )
+        else:
+            seed_path = (
+                args.ohlc_cache
+                if args.ohlc_cache.exists()
+                else args.seed_ohlc_cache
+            )
+            if args.ohlc_cache.exists():
+                bars_by_symbol, activity_records = load_research_inputs(
+                    ohlc_cache_path=seed_path,
+                    activity_cache_path=args.activity_cache,
+                    start_date=start_date,
+                    end_date=end_date,
+                    required_maximum_offset=required_offset,
+                )
+            else:
+                bars_by_symbol, activity_records = load_seed_research_inputs(
+                    ohlc_cache_path=seed_path,
+                    activity_cache_path=args.activity_cache,
+                    start_date=start_date,
+                    end_date=end_date,
+                    minimum_required_offset=6,
+                )
+            _configure_longport_environment()
+            broker = BrokerGateway()
+            try:
+                bars_by_symbol, cache_extension = (
+                    materialize_candidate_exit_paths(
+                        bars_by_symbol,
+                        activity_records,
+                        broker,
+                        config=RelativeVolumeOrbResearchConfig(
+                            holding_minutes=max(holding_grid),
+                        ),
+                        symbols=requested_symbols,
+                    )
+                )
+            finally:
+                broker.close()
+            _save_cache(
+                args.ohlc_cache,
+                bars_by_symbol,
+                start_date=start_date,
+                end_date=end_date,
+                retained_minutes_after_open=required_offset,
+            )
+            bars_by_symbol, activity_records = load_research_inputs(
+                ohlc_cache_path=args.ohlc_cache,
+                activity_cache_path=args.activity_cache,
+                start_date=start_date,
+                end_date=end_date,
+                required_maximum_offset=required_offset,
+            )
         reports = []
         for holding_minutes in holding_grid:
             result = evaluate_relative_volume_orb(
@@ -650,12 +902,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 symbols=requested_symbols,
             )
             reports.append(research_payload(result))
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
         parser.error(str(exc))
 
     payload: dict[str, object] = {
         "research_version": RESEARCH_VERSION,
         "automatic_promotion_allowed": False,
+        "cache_extension": (
+            asdict(cache_extension) if cache_extension is not None else None
+        ),
         "requested_holding_minutes": list(holding_grid),
         "reports": reports,
     }
