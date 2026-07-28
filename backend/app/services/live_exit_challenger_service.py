@@ -47,6 +47,8 @@ _PROFIT_LOCK_SPECS = (
     _ProfitLockSpec("live-profit-lock-a40-f20-v1", 0.40, 0.20),
     _ProfitLockSpec("live-profit-lock-a40-f30-v1", 0.40, 0.30),
     _ProfitLockSpec("live-profit-lock-a60-f40-v1", 0.60, 0.40),
+    _ProfitLockSpec("live-profit-lock-a60-f50-v1", 0.60, 0.50),
+    _ProfitLockSpec("live-profit-lock-a70-f60-v1", 0.70, 0.60),
 )
 _EVALUATOR_VERSION = "live-profit-lock-forward-evaluator-v1"
 _MIN_READY_PAIRS = 20

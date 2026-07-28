@@ -173,8 +173,18 @@ class TestLiveExitChallengerService:
                 0.2,
                 0.3,
                 0.4,
+                0.5,
+                0.6,
             ]
-            assert {row.activation_pct for row in rows} == {0.4, 0.6}
+            assert {row.activation_pct for row in rows} == {0.4, 0.6, 0.7}
+            assert {row.algorithm_version for row in rows} == {
+                "live-profit-lock-a40-f10-v1",
+                "live-profit-lock-a40-f20-v1",
+                "live-profit-lock-a40-f30-v1",
+                "live-profit-lock-a60-f40-v1",
+                "live-profit-lock-a60-f50-v1",
+                "live-profit-lock-a70-f60-v1",
+            }
             assert {
                 row.eligible_after.replace(tzinfo=timezone.utc)
                 for row in rows
@@ -239,7 +249,7 @@ class TestLiveExitChallengerService:
             )
 
             rows = db.query(LiveExitChallengerTrade).all()
-            assert len(rows) == 4
+            assert len(rows) == 6
             assert {row.status for row in rows} == {"CLOSED"}
             assert {
                 row.challenger_exit_reason for row in rows
@@ -276,7 +286,7 @@ class TestLiveExitChallengerService:
             assert report.order_submission_allowed is False
             assert report.automatic_promotion_allowed is False
             assert report.historical_backfill_allowed is False
-            assert len(report.variants) == 4
+            assert len(report.variants) == 6
             assert all(item.paired_trades == 1 for item in report.variants)
             assert all(item.profit_lock_exits == 1 for item in report.variants)
             assert all(
