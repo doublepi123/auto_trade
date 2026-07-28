@@ -288,6 +288,25 @@ _STOCKS_IN_PLAY_ORB_VERSION_SUFFIX = (
     "opening5-turnover-to-prior20d-adv-proxy-next-minute-open-"
     "range-low-stop-cap4-hold60-cost30-precommitted-20260728-v1"
 )
+_INDEX_CATALOG_FIVE_MINUTE_ORB_SOURCE = (
+    "OPENING_INDEX_CATALOG_FIVE_MINUTE_ORB"
+)
+_INDEX_CATALOG_FIVE_MINUTE_ORB_VERSION = (
+    "forward-only-index-catalog-valid-adv-5m-close-over-range-high-"
+    "next-minute-open-range-low-stop-cap4-hold60-cost30-"
+    "precommitted-20260728-v1"
+)
+_INDEX_CATALOG_FIVE_MINUTE_ORB_ALGORITHM_VERSION = (
+    f"{ALGORITHM_VERSION}+{_INDEX_CATALOG_FIVE_MINUTE_ORB_VERSION}"
+)
+_INDEX_CATALOG_STOCKS_IN_PLAY_ORB_SOURCE = (
+    "OPENING_INDEX_CATALOG_FIVE_MINUTE_ORB_STOCKS_IN_PLAY"
+)
+_INDEX_CATALOG_STOCKS_IN_PLAY_ORB_VERSION_SUFFIX = (
+    "index-catalog-valid-adv-opening5-turnover-to-prior20d-adv-proxy-"
+    "next-minute-open-range-low-stop-cap4-hold60-cost30-"
+    "precommitted-20260728-v1"
+)
 _EXECUTION_EXTENSION_COHORT_VERSION = (
     "individual-discovery-top6-positive-delta-min4-stop1-shortlist-v2-"
     "20260724"
@@ -400,6 +419,11 @@ _StocksInPlayOrbVariantName = Literal[
     "STOCKS_IN_PLAY_ORB_TOP10_CHALLENGER",
     "STOCKS_IN_PLAY_ORB_TOP5_CHALLENGER",
 ]
+_IndexCatalogStocksInPlayOrbVariantName = Literal[
+    "INDEX_CATALOG_STOCKS_IN_PLAY_ORB_CHALLENGER",
+    "INDEX_CATALOG_STOCKS_IN_PLAY_ORB_TOP10_CHALLENGER",
+    "INDEX_CATALOG_STOCKS_IN_PLAY_ORB_TOP5_CHALLENGER",
+]
 _VariantName = Literal[
     "INCUMBENT",
     "REVERSAL_CHALLENGER",
@@ -434,6 +458,10 @@ _VariantName = Literal[
     "STOCKS_IN_PLAY_ORB_CHALLENGER",
     "STOCKS_IN_PLAY_ORB_TOP10_CHALLENGER",
     "STOCKS_IN_PLAY_ORB_TOP5_CHALLENGER",
+    "INDEX_CATALOG_FIVE_MINUTE_ORB_CHALLENGER",
+    "INDEX_CATALOG_STOCKS_IN_PLAY_ORB_CHALLENGER",
+    "INDEX_CATALOG_STOCKS_IN_PLAY_ORB_TOP10_CHALLENGER",
+    "INDEX_CATALOG_STOCKS_IN_PLAY_ORB_TOP5_CHALLENGER",
     "EXECUTION_SNDK_CHALLENGER",
     "EXECUTION_INTC_CHALLENGER",
     "EXECUTION_QCOM_CHALLENGER",
@@ -551,6 +579,51 @@ _STOCKS_IN_PLAY_ORB_SPECS = (
 )
 _STOCKS_IN_PLAY_ORB_VARIANTS = frozenset(
     spec.variant for spec in _STOCKS_IN_PLAY_ORB_SPECS
+)
+
+
+@dataclass(frozen=True)
+class _IndexCatalogStocksInPlayOrbSpec:
+    variant: _IndexCatalogStocksInPlayOrbVariantName
+    top_n: int
+    universe_source: str
+
+    def __post_init__(self) -> None:
+        if self.top_n <= 0:
+            raise ValueError("index-catalog stocks-in-play top_n must be positive")
+
+    @property
+    def version(self) -> str:
+        return (
+            "forward-only-5m-orb-stocks-in-play-"
+            f"top{self.top_n}-"
+            f"{_INDEX_CATALOG_STOCKS_IN_PLAY_ORB_VERSION_SUFFIX}"
+        )
+
+    @property
+    def algorithm_version(self) -> str:
+        return f"{ALGORITHM_VERSION}+{self.version}"
+
+
+_INDEX_CATALOG_STOCKS_IN_PLAY_ORB_SPECS = (
+    _IndexCatalogStocksInPlayOrbSpec(
+        "INDEX_CATALOG_STOCKS_IN_PLAY_ORB_CHALLENGER",
+        20,
+        _INDEX_CATALOG_STOCKS_IN_PLAY_ORB_SOURCE,
+    ),
+    _IndexCatalogStocksInPlayOrbSpec(
+        "INDEX_CATALOG_STOCKS_IN_PLAY_ORB_TOP10_CHALLENGER",
+        10,
+        f"{_INDEX_CATALOG_STOCKS_IN_PLAY_ORB_SOURCE}_TOP10",
+    ),
+    _IndexCatalogStocksInPlayOrbSpec(
+        "INDEX_CATALOG_STOCKS_IN_PLAY_ORB_TOP5_CHALLENGER",
+        5,
+        f"{_INDEX_CATALOG_STOCKS_IN_PLAY_ORB_SOURCE}_TOP5",
+    ),
+)
+_INDEX_CATALOG_STOCKS_IN_PLAY_ORB_VARIANTS = frozenset(
+    spec.variant for spec in _INDEX_CATALOG_STOCKS_IN_PLAY_ORB_SPECS
 )
 
 
@@ -2043,6 +2116,18 @@ class OpeningMomentumShadowService:
             identity.variant: identity for identity in identities
         }
         active_broad_symbols = self._active_broad_symbols()
+        index_catalog_symbols = tuple(dict.fromkeys(
+            row.symbol
+            for row in candidates
+            if (
+                (avg_dollar_volume := _optional_metric(
+                    row.metrics_json,
+                    "avg_dollar_volume",
+                ))
+                is not None
+                and avg_dollar_volume > 0
+            )
+        ))
         early_identity = identities_by_variant[
             "EARLY_BROAD_CHALLENGER"
         ]
@@ -2299,6 +2384,21 @@ class OpeningMomentumShadowService:
             variants.append(replace(
                 stocks_in_play_orb_identity,
                 symbols=active_broad_symbols,
+                selection_run_id=run.id,
+            ))
+        index_catalog_orb_identity = identities_by_variant[
+            "INDEX_CATALOG_FIVE_MINUTE_ORB_CHALLENGER"
+        ]
+        variants.append(replace(
+            index_catalog_orb_identity,
+            symbols=index_catalog_symbols,
+            selection_run_id=run.id,
+        ))
+        for spec in _INDEX_CATALOG_STOCKS_IN_PLAY_ORB_SPECS:
+            identity = identities_by_variant[spec.variant]
+            variants.append(replace(
+                identity,
+                symbols=index_catalog_symbols,
                 selection_run_id=run.id,
             ))
         for spec in _EXECUTION_EXTENSION_SPECS:
@@ -2699,6 +2799,53 @@ class OpeningMomentumShadowService:
                 ),
             ))
             for spec in _STOCKS_IN_PLAY_ORB_SPECS:
+                variants.append(_UniverseVariant(
+                    variant=spec.variant,
+                    algorithm_version=spec.algorithm_version,
+                    config_version=self._evidence_config_version(
+                        f"{five_minute_orb_config.version_hash()}:"
+                        f"{spec.version}:{spec.top_n}"
+                    ),
+                    universe_source=spec.universe_source,
+                    decision_config=five_minute_orb_config,
+                    signal_model="OPENING_RANGE_BREAKOUT",
+                    candidate_selection_mode=(
+                        "OPENING_ACTIVITY_TOP_N_THEN_BREAKOUT"
+                    ),
+                    minimum_data_coverage=(
+                        _EARLY_BROAD_MINIMUM_COVERAGE
+                    ),
+                    opening_range_stop=True,
+                    opening_activity_top_n=spec.top_n,
+                    forward_evidence_start_date=(
+                        _POST_20260727_FORWARD_EVIDENCE_START_DATE
+                    ),
+                ))
+            variants.append(_UniverseVariant(
+                variant=(
+                    "INDEX_CATALOG_FIVE_MINUTE_ORB_CHALLENGER"
+                ),
+                algorithm_version=(
+                    _INDEX_CATALOG_FIVE_MINUTE_ORB_ALGORITHM_VERSION
+                ),
+                config_version=self._evidence_config_version(
+                    f"{five_minute_orb_config.version_hash()}:"
+                    f"{_INDEX_CATALOG_FIVE_MINUTE_ORB_VERSION}"
+                ),
+                universe_source=(
+                    _INDEX_CATALOG_FIVE_MINUTE_ORB_SOURCE
+                ),
+                decision_config=five_minute_orb_config,
+                signal_model="OPENING_RANGE_BREAKOUT",
+                minimum_data_coverage=(
+                    _EARLY_BROAD_MINIMUM_COVERAGE
+                ),
+                opening_range_stop=True,
+                forward_evidence_start_date=(
+                    _POST_20260727_FORWARD_EVIDENCE_START_DATE
+                ),
+            ))
+            for spec in _INDEX_CATALOG_STOCKS_IN_PLAY_ORB_SPECS:
                 variants.append(_UniverseVariant(
                     variant=spec.variant,
                     algorithm_version=spec.algorithm_version,
@@ -3436,6 +3583,12 @@ class OpeningMomentumShadowService:
             }
             uses_five_minute_orb_baseline = (
                 identity.variant in _STOCKS_IN_PLAY_ORB_VARIANTS
+                or identity.variant
+                == "INDEX_CATALOG_FIVE_MINUTE_ORB_CHALLENGER"
+            )
+            uses_index_catalog_five_minute_orb_baseline = (
+                identity.variant
+                in _INDEX_CATALOG_STOCKS_IN_PLAY_ORB_VARIANTS
             )
             requires_displacement_evidence = (
                 is_early_extension
@@ -3444,6 +3597,7 @@ class OpeningMomentumShadowService:
                 or uses_etf_regime_baseline
                 or uses_exceptional_path_baseline
                 or uses_five_minute_orb_baseline
+                or uses_index_catalog_five_minute_orb_baseline
             )
             identity_rows_by_date = rows_by_date[
                 identity.config_version
@@ -3456,6 +3610,7 @@ class OpeningMomentumShadowService:
                 "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER",
                 "ETF_REGIME_PATH_CHALLENGER",
                 "FIVE_MINUTE_ORB_CHALLENGER",
+                "INDEX_CATALOG_FIVE_MINUTE_ORB_CHALLENGER",
             ] | None
             if identity.variant == "INCUMBENT":
                 comparison_baseline = None
@@ -3471,6 +3626,10 @@ class OpeningMomentumShadowService:
                 )
             elif uses_five_minute_orb_baseline:
                 comparison_baseline = "FIVE_MINUTE_ORB_CHALLENGER"
+            elif uses_index_catalog_five_minute_orb_baseline:
+                comparison_baseline = (
+                    "INDEX_CATALOG_FIVE_MINUTE_ORB_CHALLENGER"
+                )
             elif uses_weak_breadth_baseline:
                 comparison_baseline = "WEAK_BREADTH_PATH_CHALLENGER"
             else:
@@ -3494,6 +3653,10 @@ class OpeningMomentumShadowService:
             elif uses_five_minute_orb_baseline:
                 comparison_identity = identities_by_variant[
                     "FIVE_MINUTE_ORB_CHALLENGER"
+                ]
+            elif uses_index_catalog_five_minute_orb_baseline:
+                comparison_identity = identities_by_variant[
+                    "INDEX_CATALOG_FIVE_MINUTE_ORB_CHALLENGER"
                 ]
             elif uses_weak_breadth_baseline:
                 comparison_identity = identities_by_variant[

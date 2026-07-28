@@ -90,6 +90,10 @@ _ALL_CHALLENGER_VARIANTS = (
     "STOCKS_IN_PLAY_ORB_CHALLENGER",
     "STOCKS_IN_PLAY_ORB_TOP10_CHALLENGER",
     "STOCKS_IN_PLAY_ORB_TOP5_CHALLENGER",
+    "INDEX_CATALOG_FIVE_MINUTE_ORB_CHALLENGER",
+    "INDEX_CATALOG_STOCKS_IN_PLAY_ORB_CHALLENGER",
+    "INDEX_CATALOG_STOCKS_IN_PLAY_ORB_TOP10_CHALLENGER",
+    "INDEX_CATALOG_STOCKS_IN_PLAY_ORB_TOP5_CHALLENGER",
     *_EXECUTION_EXTENSION_VARIANTS,
 )
 
@@ -1234,6 +1238,12 @@ def test_stocks_in_play_orb_uses_five_minute_activity_proxy(
         challenger = variants["STOCKS_IN_PLAY_ORB_CHALLENGER"]
         top10 = variants["STOCKS_IN_PLAY_ORB_TOP10_CHALLENGER"]
         top5 = variants["STOCKS_IN_PLAY_ORB_TOP5_CHALLENGER"]
+        catalog_baseline = variants[
+            "INDEX_CATALOG_FIVE_MINUTE_ORB_CHALLENGER"
+        ]
+        catalog_top5 = variants[
+            "INDEX_CATALOG_STOCKS_IN_PLAY_ORB_TOP5_CHALLENGER"
+        ]
         assert baseline.latest is not None
         assert challenger.latest is not None
         assert challenger.latest.status == "OPEN"
@@ -1300,7 +1310,19 @@ def test_stocks_in_play_orb_uses_five_minute_activity_proxy(
             "FIVE_MINUTE_ORB_CHALLENGER"
         )
         assert challenger.comparison is not None
-        assert challenger.comparison.multiple_testing_family_size == 3
+        assert challenger.comparison.multiple_testing_family_size == 4
+        assert catalog_baseline.latest is not None
+        assert catalog_baseline.latest.candidate_symbol == "S7.US"
+        assert catalog_baseline.comparison_baseline == (
+            "FIVE_MINUTE_ORB_CHALLENGER"
+        )
+        assert catalog_top5.latest is not None
+        assert catalog_top5.latest.candidate_symbol == "S7.US"
+        assert catalog_top5.comparison_baseline == (
+            "INDEX_CATALOG_FIVE_MINUTE_ORB_CHALLENGER"
+        )
+        assert catalog_top5.comparison is not None
+        assert catalog_top5.comparison.multiple_testing_family_size == 3
     finally:
         db.close()
         Base.metadata.drop_all(bind=engine)
@@ -1369,6 +1391,96 @@ def test_stocks_in_play_orb_sensitivity_respects_precommitted_rank_cutoffs(
         Base.metadata.drop_all(bind=engine)
 
 
+def test_index_catalog_orb_observes_valid_adv_candidates_outside_active_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        settings,
+        "opening_momentum_shadow_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        settings,
+        "opening_momentum_challenger_enabled",
+        True,
+    )
+    engine, db = _database()
+    try:
+        run = _seed_universe(
+            db,
+            avg_dollar_volume=100_000_000.0,
+        )
+        run.candidate_count += 1
+        db.add(UniverseSelectionCandidate(
+            run_id=run.id,
+            symbol="NOADV.US",
+            market="US",
+            selected=False,
+            score=1.0,
+            metrics_json="{}",
+            exclusion_reasons_json='["DATA_UNAVAILABLE"]',
+        ))
+        for symbol in _SYMBOLS[:3]:
+            db.add(StrategyV2ShadowConfig(
+                symbol=symbol,
+                enabled=True,
+                opening_momentum_execution_eligible=True,
+            ))
+        db.commit()
+        candles = _FakeCandles(
+            orb_breakout_for="S7.US",
+            turnover_per_minute_by_symbol={
+                symbol: (
+                    2_000_000.0
+                    if symbol == "S7.US"
+                    else 1_000_000.0
+                )
+                for symbol in _SYMBOLS
+            },
+        )
+        service = OpeningMomentumShadowService(db, candles)
+
+        populated = {
+            item.variant: item for item in service._universe_variants()
+        }
+        catalog_identity = populated[
+            "INDEX_CATALOG_FIVE_MINUTE_ORB_CHALLENGER"
+        ]
+        assert catalog_identity.symbols == _SYMBOLS
+        assert "NOADV.US" not in catalog_identity.symbols
+        assert populated["FIVE_MINUTE_ORB_CHALLENGER"].symbols == (
+            _SYMBOLS[:3]
+        )
+
+        status = service.tick(
+            now=_SESSION_OPEN + timedelta(minutes=10, seconds=10),
+        )
+
+        variants = {item.variant: item for item in status.variants}
+        active_pool = variants["FIVE_MINUTE_ORB_CHALLENGER"]
+        catalog = variants[
+            "INDEX_CATALOG_FIVE_MINUTE_ORB_CHALLENGER"
+        ]
+        catalog_top5 = variants[
+            "INDEX_CATALOG_STOCKS_IN_PLAY_ORB_TOP5_CHALLENGER"
+        ]
+        assert active_pool.latest is not None
+        assert active_pool.latest.status == "SKIPPED"
+        assert active_pool.latest.reason == "DATA_INCOMPLETE"
+        assert catalog.latest is not None
+        assert catalog.latest.status == "OPEN"
+        assert catalog.latest.universe == list(_SYMBOLS)
+        assert catalog.latest.candidate_symbol == "S7.US"
+        assert catalog_top5.latest is not None
+        assert catalog_top5.latest.status == "OPEN"
+        assert catalog_top5.latest.candidate_symbol == "S7.US"
+        assert "S7.US" in candles.calls
+        assert "NOADV.US" not in candles.calls
+    finally:
+        db.close()
+        Base.metadata.drop_all(bind=engine)
+
+
 def test_challenger_variants_isolate_universe_and_entry_gates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1419,6 +1531,10 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
             "STOCKS_IN_PLAY_ORB_CHALLENGER",
             "STOCKS_IN_PLAY_ORB_TOP10_CHALLENGER",
             "STOCKS_IN_PLAY_ORB_TOP5_CHALLENGER",
+            "INDEX_CATALOG_FIVE_MINUTE_ORB_CHALLENGER",
+            "INDEX_CATALOG_STOCKS_IN_PLAY_ORB_CHALLENGER",
+            "INDEX_CATALOG_STOCKS_IN_PLAY_ORB_TOP10_CHALLENGER",
+            "INDEX_CATALOG_STOCKS_IN_PLAY_ORB_TOP5_CHALLENGER",
             "EXECUTION_SNDK_CHALLENGER",
             "EXECUTION_INTC_CHALLENGER",
             "EXECUTION_QCOM_CHALLENGER",
@@ -1482,6 +1598,18 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
         ]
         stocks_in_play_orb_top5 = by_variant[
             "STOCKS_IN_PLAY_ORB_TOP5_CHALLENGER"
+        ]
+        index_catalog_orb = by_variant[
+            "INDEX_CATALOG_FIVE_MINUTE_ORB_CHALLENGER"
+        ]
+        index_catalog_stocks_in_play = by_variant[
+            "INDEX_CATALOG_STOCKS_IN_PLAY_ORB_CHALLENGER"
+        ]
+        index_catalog_stocks_in_play_top10 = by_variant[
+            "INDEX_CATALOG_STOCKS_IN_PLAY_ORB_TOP10_CHALLENGER"
+        ]
+        index_catalog_stocks_in_play_top5 = by_variant[
+            "INDEX_CATALOG_STOCKS_IN_PLAY_ORB_TOP5_CHALLENGER"
         ]
         reversal = by_variant["REVERSAL_CHALLENGER"]
         continuation = by_variant["CONTINUATION_CHALLENGER"]
@@ -1852,6 +1980,44 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
             assert sensitivity.universe_source == (
                 "OPENING_FIVE_MINUTE_ORB_STOCKS_IN_PLAY_"
                 f"TOP{top_n}"
+            )
+        assert index_catalog_orb.signal_model == "OPENING_RANGE_BREAKOUT"
+        assert index_catalog_orb.decision_config == (
+            five_minute_orb.decision_config
+        )
+        assert index_catalog_orb.minimum_data_coverage == 0.95
+        assert index_catalog_orb.opening_range_stop is True
+        assert index_catalog_orb.forward_evidence_start_date == date(
+            2026,
+            7,
+            28,
+        )
+        assert index_catalog_orb.universe_source == (
+            "OPENING_INDEX_CATALOG_FIVE_MINUTE_ORB"
+        )
+        for sensitivity, top_n in (
+            (index_catalog_stocks_in_play, 20),
+            (index_catalog_stocks_in_play_top10, 10),
+            (index_catalog_stocks_in_play_top5, 5),
+        ):
+            assert sensitivity.signal_model == "OPENING_RANGE_BREAKOUT"
+            assert sensitivity.decision_config == (
+                five_minute_orb.decision_config
+            )
+            assert sensitivity.candidate_selection_mode == (
+                "OPENING_ACTIVITY_TOP_N_THEN_BREAKOUT"
+            )
+            assert sensitivity.opening_activity_top_n == top_n
+            assert sensitivity.opening_range_stop is True
+            assert sensitivity.forward_evidence_start_date == date(
+                2026,
+                7,
+                28,
+            )
+            suffix = "" if top_n == 20 else f"_TOP{top_n}"
+            assert sensitivity.universe_source == (
+                "OPENING_INDEX_CATALOG_FIVE_MINUTE_ORB_STOCKS_IN_PLAY"
+                f"{suffix}"
             )
         for variant, symbol in zip(
             _EXECUTION_EXTENSION_VARIANTS,
@@ -2239,7 +2405,7 @@ def test_challengers_use_one_market_snapshot_and_close_all_variants(
         assert opened.latest.universe_source == "UNIVERSE_SELECTION"
         assert opened.latest.candidate_symbol == "S1.US"
         assert opened.latest.selection_run_id == run.id
-        assert len(opened.variants) == 39
+        assert len(opened.variants) == 43
         by_variant = {
             item.variant: item for item in opened.variants
         }
@@ -3563,7 +3729,7 @@ def test_breadth_challenger_skips_a_negative_market_snapshot(
         )
 
         assert candles.calls == list(_SYMBOLS[:4])
-        assert len(status.variants) == 39
+        assert len(status.variants) == 43
         by_variant = {
             item.variant: item for item in status.variants
         }

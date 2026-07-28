@@ -204,8 +204,20 @@ class TestOpeningMomentumShadowApi:
         stocks_in_play_orb_top5 = variants[
             "STOCKS_IN_PLAY_ORB_TOP5_CHALLENGER"
         ]
+        index_catalog_orb = variants[
+            "INDEX_CATALOG_FIVE_MINUTE_ORB_CHALLENGER"
+        ]
+        index_catalog_stocks_in_play = variants[
+            "INDEX_CATALOG_STOCKS_IN_PLAY_ORB_CHALLENGER"
+        ]
+        index_catalog_stocks_in_play_top10 = variants[
+            "INDEX_CATALOG_STOCKS_IN_PLAY_ORB_TOP10_CHALLENGER"
+        ]
+        index_catalog_stocks_in_play_top5 = variants[
+            "INDEX_CATALOG_STOCKS_IN_PLAY_ORB_TOP5_CHALLENGER"
+        ]
         execution_sndk = variants["EXECUTION_SNDK_CHALLENGER"]
-        assert len(variants) == 39
+        assert len(variants) == 43
         assert early["universe_source"] == "OPENING_EARLY_BROAD"
         assert early["signal_minutes"] == 3
         assert early["minimum_market_return_bps"] == -50.0
@@ -671,7 +683,7 @@ class TestOpeningMomentumShadowApi:
         ] == 3
         assert stocks_in_play_orb["comparison"][
             "multiple_testing_family_size"
-        ] == 3
+        ] == 4
         for sensitivity, top_n in (
             (stocks_in_play_orb_top10, 10),
             (stocks_in_play_orb_top5, 5),
@@ -689,6 +701,47 @@ class TestOpeningMomentumShadowApi:
             )
             assert sensitivity["comparison_baseline"] == (
                 "FIVE_MINUTE_ORB_CHALLENGER"
+            )
+            assert sensitivity["comparison"] is not None
+            assert sensitivity["comparison"][
+                "multiple_testing_family_size"
+            ] == 4
+        assert index_catalog_orb["universe_source"] == (
+            "OPENING_INDEX_CATALOG_FIVE_MINUTE_ORB"
+        )
+        assert index_catalog_orb["signal_minutes"] == 5
+        assert index_catalog_orb["holding_minutes"] == 60
+        assert index_catalog_orb["stop_loss_pct"] == 4.0
+        assert index_catalog_orb["minimum_data_coverage"] == 0.95
+        assert index_catalog_orb["forward_evidence_start_date"] == (
+            "2026-07-28"
+        )
+        assert index_catalog_orb["comparison_baseline"] == (
+            "FIVE_MINUTE_ORB_CHALLENGER"
+        )
+        assert index_catalog_orb["comparison"] is not None
+        assert index_catalog_orb["comparison"][
+            "multiple_testing_family_size"
+        ] == 4
+        for sensitivity, top_n in (
+            (index_catalog_stocks_in_play, 20),
+            (index_catalog_stocks_in_play_top10, 10),
+            (index_catalog_stocks_in_play_top5, 5),
+        ):
+            suffix = "" if top_n == 20 else f"_TOP{top_n}"
+            assert sensitivity["universe_source"] == (
+                "OPENING_INDEX_CATALOG_FIVE_MINUTE_ORB_STOCKS_IN_PLAY"
+                f"{suffix}"
+            )
+            assert sensitivity["candidate_selection_mode"] == (
+                "OPENING_ACTIVITY_TOP_N_THEN_BREAKOUT"
+            )
+            assert sensitivity["opening_activity_top_n"] == top_n
+            assert sensitivity["forward_evidence_start_date"] == (
+                "2026-07-28"
+            )
+            assert sensitivity["comparison_baseline"] == (
+                "INDEX_CATALOG_FIVE_MINUTE_ORB_CHALLENGER"
             )
             assert sensitivity["comparison"] is not None
             assert sensitivity["comparison"][
