@@ -2610,6 +2610,7 @@ function openingMomentumVariantLabel(
   if (variant === 'EXECUTION_PATH_EFFICIENCY_CHALLENGER') return '执行 + 路径效率'
   if (variant === 'WEAK_BREADTH_PATH_CHALLENGER') return '弱广度 + 路径效率'
   if (variant === 'WEAK_BREADTH_RELAXED_CHALLENGER') return '弱广度 + 5bp 上限'
+  if (variant === 'MODERATE_BREADTH_PATH_CHALLENGER') return '适度广度 + 20bp 上限'
   if (variant === 'WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER') {
     return '弱广度 + 强路径例外'
   }
@@ -2641,6 +2642,7 @@ function openingMomentumVariantTagType(
   if (
     variant === 'WEAK_BREADTH_PATH_CHALLENGER'
     || variant === 'WEAK_BREADTH_RELAXED_CHALLENGER'
+    || variant === 'MODERATE_BREADTH_PATH_CHALLENGER'
     || variant === 'WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER'
     || variant === 'EXCEPTIONAL_PATH_PANW_COHORT_CHALLENGER'
     || variant === 'WEAK_BREADTH_INDEX_COHORT_CHALLENGER'

@@ -166,6 +166,9 @@ class TestOpeningMomentumShadowApi:
         weak_breadth_relaxed = variants[
             "WEAK_BREADTH_RELAXED_CHALLENGER"
         ]
+        moderate_breadth_path = variants[
+            "MODERATE_BREADTH_PATH_CHALLENGER"
+        ]
         weak_breadth_exceptional_path = variants[
             "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER"
         ]
@@ -189,7 +192,7 @@ class TestOpeningMomentumShadowApi:
             "OPENING_RANGE_STOP_CHALLENGER"
         ]
         execution_sndk = variants["EXECUTION_SNDK_CHALLENGER"]
-        assert len(variants) == 33
+        assert len(variants) == 34
         assert early["universe_source"] == "OPENING_EARLY_BROAD"
         assert early["signal_minutes"] == 3
         assert early["minimum_market_return_bps"] == -50.0
@@ -313,6 +316,32 @@ class TestOpeningMomentumShadowApi:
             == 3
         )
         assert relaxed_comparison["evidence_gate_passed"] is False
+        assert moderate_breadth_path["universe_source"] == (
+            "OPENING_EXECUTION_MODERATE_BREADTH_PATH"
+        )
+        assert moderate_breadth_path[
+            "minimum_path_efficiency"
+        ] == 0.70
+        assert moderate_breadth_path[
+            "maximum_market_return_bps"
+        ] == 20.0
+        assert moderate_breadth_path["required_symbols"] == []
+        assert moderate_breadth_path[
+            "forward_evidence_start_date"
+        ] == "2026-07-28"
+        assert moderate_breadth_path["comparison_baseline"] == (
+            "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER"
+        )
+        assert moderate_breadth_path["comparison"] is not None
+        moderate_comparison = moderate_breadth_path["comparison"]
+        assert moderate_comparison["policy_displacement_sessions"] == 0
+        assert moderate_comparison[
+            "minimum_policy_displacement_sessions"
+        ] == 3
+        assert moderate_comparison["evidence_gate_passed"] is False
+        assert moderate_comparison[
+            "multiple_testing_family_size"
+        ] == 2
         assert weak_breadth_exceptional_path["universe_source"] == (
             "OPENING_EXECUTION_WEAK_BREADTH_EXCEPTIONAL_PATH"
         )
@@ -392,7 +421,7 @@ class TestOpeningMomentumShadowApi:
         assert exceptional_path_panw_cohort["comparison"] is not None
         assert exceptional_path_panw_cohort["comparison"][
             "multiple_testing_family_size"
-        ] == 1
+        ] == 2
         assert weak_breadth_index_cohort["universe_source"] == (
             "OPENING_EXECUTION_WEAK_BREADTH_INDEX_COHORT"
         )

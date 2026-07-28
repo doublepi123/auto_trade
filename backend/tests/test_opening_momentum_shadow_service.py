@@ -76,6 +76,7 @@ _ALL_CHALLENGER_VARIANTS = (
     "EXECUTION_PATH_EFFICIENCY_CHALLENGER",
     "WEAK_BREADTH_PATH_CHALLENGER",
     "WEAK_BREADTH_RELAXED_CHALLENGER",
+    "MODERATE_BREADTH_PATH_CHALLENGER",
     "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER",
     "EXCEPTIONAL_PATH_PANW_COHORT_CHALLENGER",
     "WEAK_BREADTH_INDEX_COHORT_CHALLENGER",
@@ -781,7 +782,7 @@ def test_execution_signal_skips_when_opening_breadth_is_positive(
         Base.metadata.drop_all(bind=engine)
 
 
-def test_execution_signal_accepts_exceptional_path_at_three_bps(
+def test_execution_signal_accepts_exceptional_path_at_five_bps_boundary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -794,7 +795,7 @@ def test_execution_signal_accepts_exceptional_path_at_three_bps(
         _seed_universe(db)
         _seed_active_broad_pool(db)
         early_returns = {
-            symbol: (100.0 if symbol == _SYMBOLS[-1] else 3.0)
+            symbol: (100.0 if symbol == _SYMBOLS[-1] else 5.0)
             for symbol in _SYMBOLS
         }
 
@@ -811,7 +812,7 @@ def test_execution_signal_accepts_exceptional_path_at_three_bps(
         assert signal.action == "ENTER_LONG"
         assert signal.reason == "OPENING_LEADER"
         assert signal.symbol == _SYMBOLS[-1]
-        assert signal.market_return_bps == pytest.approx(3.0)
+        assert signal.market_return_bps == pytest.approx(5.0)
         assert signal.context["candidate_path_efficiency"] == 1.0
         assert signal.context[
             "effective_maximum_market_return_bps"
@@ -1151,6 +1152,7 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
             "EXECUTION_PATH_EFFICIENCY_CHALLENGER",
             "WEAK_BREADTH_PATH_CHALLENGER",
             "WEAK_BREADTH_RELAXED_CHALLENGER",
+            "MODERATE_BREADTH_PATH_CHALLENGER",
             "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER",
             "EXCEPTIONAL_PATH_PANW_COHORT_CHALLENGER",
             "WEAK_BREADTH_INDEX_COHORT_CHALLENGER",
@@ -1184,6 +1186,9 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
         ]
         weak_breadth_relaxed = by_variant[
             "WEAK_BREADTH_RELAXED_CHALLENGER"
+        ]
+        moderate_breadth_path = by_variant[
+            "MODERATE_BREADTH_PATH_CHALLENGER"
         ]
         weak_breadth_exceptional_path = by_variant[
             "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER"
@@ -1276,6 +1281,25 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
         assert weak_breadth_relaxed.required_symbols == ()
         assert weak_breadth_relaxed.universe_source == (
             "OPENING_EXECUTION_WEAK_BREADTH_RELAXED"
+        )
+        assert (
+            moderate_breadth_path.decision_config
+            == execution.decision_config
+        )
+        assert moderate_breadth_path.minimum_data_coverage == 0.95
+        assert moderate_breadth_path.minimum_path_efficiency == 0.70
+        assert moderate_breadth_path.maximum_market_return_bps == 20.0
+        assert moderate_breadth_path.required_symbols == ()
+        assert moderate_breadth_path.universe_source == (
+            "OPENING_EXECUTION_MODERATE_BREADTH_PATH"
+        )
+        assert "forward-only-post-20260727" in (
+            moderate_breadth_path.algorithm_version
+        )
+        assert moderate_breadth_path.forward_evidence_start_date == date(
+            2026,
+            7,
+            28,
         )
         assert (
             weak_breadth_exceptional_path.decision_config
@@ -1858,7 +1882,7 @@ def test_challengers_use_one_market_snapshot_and_close_all_variants(
         assert opened.latest.universe_source == "UNIVERSE_SELECTION"
         assert opened.latest.candidate_symbol == "S1.US"
         assert opened.latest.selection_run_id == run.id
-        assert len(opened.variants) == 33
+        assert len(opened.variants) == 34
         by_variant = {
             item.variant: item for item in opened.variants
         }
@@ -2057,7 +2081,7 @@ def test_early_broad_challenger_keeps_independent_observation_window(
         )
 
         rows = db.query(OpeningMomentumShadowRun).all()
-        assert len(rows) == 27
+        assert len(rows) == 28
         assert candles.calls == [
             *_SYMBOLS,
             *_EXTENSION_SYMBOLS,
@@ -2203,7 +2227,7 @@ def test_early_broad_challenger_keeps_independent_observation_window(
             now=_SESSION_OPEN + timedelta(minutes=32, seconds=10),
         )
 
-        assert db.query(OpeningMomentumShadowRun).count() == 33
+        assert db.query(OpeningMomentumShadowRun).count() == 34
         assert candles.calls == list(_SYMBOLS[:4])
         by_variant = {
             item.variant: item for item in standard_opened.variants
@@ -2224,7 +2248,7 @@ def test_early_broad_challenger_keeps_independent_observation_window(
         rows = db.query(OpeningMomentumShadowRun).all()
         assert sum(row.status == "CLOSED" for row in rows) == 5
         assert sum(row.status == "SKIPPED" for row in rows) == 4
-        assert sum(row.status == "OPEN" for row in rows) == 24
+        assert sum(row.status == "OPEN" for row in rows) == 25
         by_variant = {
             item.variant: item for item in standard_closed.variants
         }
@@ -2255,7 +2279,7 @@ def test_early_broad_challenger_keeps_independent_observation_window(
         rows = db.query(OpeningMomentumShadowRun).all()
         assert candles.calls == ["S7.US"]
         assert execution_closed.state == "OPEN"
-        assert sum(row.status == "CLOSED" for row in rows) == 22
+        assert sum(row.status == "CLOSED" for row in rows) == 23
         assert sum(row.status == "SKIPPED" for row in rows) == 4
         assert sum(row.status == "OPEN" for row in rows) == 7
         execution_by_variant = {
@@ -2650,6 +2674,93 @@ def test_relaxed_weak_breadth_challenger_is_forward_only_at_three_bps(
 
 
 @pytest.mark.parametrize(
+    ("market_return_bps", "expected_status"),
+    [
+        (20.0, "OPEN"),
+        (20.1, "SKIPPED"),
+    ],
+)
+def test_moderate_breadth_path_challenger_is_forward_only(
+    monkeypatch: pytest.MonkeyPatch,
+    market_return_bps: float,
+    expected_status: str,
+) -> None:
+    monkeypatch.setattr(
+        settings,
+        "opening_momentum_shadow_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        settings,
+        "opening_momentum_challenger_enabled",
+        True,
+    )
+    engine, db = _database()
+    try:
+        _seed_variant_universe(db)
+        _seed_active_broad_pool(db)
+        early_returns = {
+            symbol: (
+                100.0 if symbol == "S7.US" else market_return_bps
+            )
+            for symbol in _SYMBOLS
+        }
+        service = OpeningMomentumShadowService(
+            db,
+            _FakeCandles(
+                early_opening_returns_bps=early_returns,
+            ),
+            config=OpeningMomentumConfig(
+                minimum_universe_size=2,
+                minimum_excess_return_bps=0,
+            ),
+        )
+
+        status = service.tick(
+            now=_SESSION_OPEN + timedelta(minutes=5, seconds=10),
+        )
+
+        by_variant = {
+            item.variant: item for item in status.variants
+        }
+        executor = by_variant[
+            "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER"
+        ]
+        challenger = by_variant[
+            "MODERATE_BREADTH_PATH_CHALLENGER"
+        ]
+        assert executor.latest is not None
+        assert executor.latest.status == "SKIPPED"
+        assert executor.latest.reason == "MAXIMUM_MARKET_RETURN_FILTER"
+        assert challenger.latest is not None
+        assert challenger.latest.status == expected_status
+        assert challenger.latest.reason == (
+            "OPENING_LEADER"
+            if expected_status == "OPEN"
+            else "MAXIMUM_MARKET_RETURN_FILTER"
+        )
+        assert challenger.latest.market_return_bps == pytest.approx(
+            market_return_bps
+        )
+        assert challenger.minimum_path_efficiency == 0.70
+        assert challenger.maximum_market_return_bps == 20.0
+        assert challenger.forward_evidence_start_date == date(
+            2026,
+            7,
+            28,
+        )
+        assert challenger.comparison_baseline == (
+            "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER"
+        )
+        assert service.paper_execution_variant_identity().variant == (
+            "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER"
+        )
+    finally:
+        db.close()
+        Base.metadata.drop_all(bind=engine)
+
+
+@pytest.mark.parametrize(
     (
         "market_return_bps",
         "candidate_path_returns_bps",
@@ -3017,7 +3128,7 @@ def test_breadth_challenger_skips_a_negative_market_snapshot(
         )
 
         assert candles.calls == list(_SYMBOLS[:4])
-        assert len(status.variants) == 33
+        assert len(status.variants) == 34
         by_variant = {
             item.variant: item for item in status.variants
         }

@@ -73,6 +73,7 @@ _CANDLE_COUNT = 500
 _BAR_DURATION = timedelta(minutes=1)
 _SETTLEMENT_GRACE = timedelta(seconds=5)
 _DECISION_WINDOW = timedelta(minutes=5)
+_BPS_COMPARISON_EPSILON = 1e-9
 _OPENING_CONTEXT_BENCHMARKS = ("QQQ.US", "DIA.US")
 _INCUMBENT_SOURCE = "UNIVERSE_SELECTION"
 _CONTINUATION_SOURCE = "OPENING_CONTINUATION"
@@ -147,6 +148,21 @@ _WEAK_BREADTH_RELAXED_SOURCE = (
 )
 _WEAK_BREADTH_RELAXED_ALGORITHM_VERSION = (
     f"{ALGORITHM_VERSION}+{_WEAK_BREADTH_RELAXED_VERSION}"
+)
+# The +20 bps breadth ceiling was the highest-frequency path-efficiency
+# candidate whose chronological holdout delta remained positive through
+# 2026-07-27. Its confidence interval still crossed zero, so it is registered
+# only for forward paired evidence against the actual paper executor.
+_MODERATE_BREADTH_MAXIMUM_MARKET_RETURN_BPS = 20.0
+_MODERATE_BREADTH_PATH_VERSION = (
+    "forward-only-post-20260727-diagnostic-max-median20-"
+    "path-efficiency-070-holdout-ci-inconclusive-v1"
+)
+_MODERATE_BREADTH_PATH_SOURCE = (
+    "OPENING_EXECUTION_MODERATE_BREADTH_PATH"
+)
+_MODERATE_BREADTH_PATH_ALGORITHM_VERSION = (
+    f"{ALGORITHM_VERSION}+{_MODERATE_BREADTH_PATH_VERSION}"
 )
 # Discovery-only paired research retained the two profitable +0..5bp breadth
 # sessions while excluding the lower-quality loser by requiring a 0.90 path.
@@ -360,6 +376,7 @@ _VariantName = Literal[
     "EXECUTION_PATH_EFFICIENCY_CHALLENGER",
     "WEAK_BREADTH_PATH_CHALLENGER",
     "WEAK_BREADTH_RELAXED_CHALLENGER",
+    "MODERATE_BREADTH_PATH_CHALLENGER",
     "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER",
     "EXCEPTIONAL_PATH_PANW_COHORT_CHALLENGER",
     "WEAK_BREADTH_INDEX_COHORT_CHALLENGER",
@@ -938,7 +955,10 @@ class OpeningMomentumShadowService:
             and (
                 decision.market_return_bps is None
                 or decision.market_return_bps
-                > effective_maximum_market_return_bps
+                > (
+                    effective_maximum_market_return_bps
+                    + _BPS_COMPARISON_EPSILON
+                )
             )
         )
         if variant.selection_run_id is None:
@@ -1380,7 +1400,10 @@ class OpeningMomentumShadowService:
                 and (
                     decision.market_return_bps is None
                     or decision.market_return_bps
-                    > effective_maximum_market_return_bps
+                    > (
+                        effective_maximum_market_return_bps
+                        + _BPS_COMPARISON_EPSILON
+                    )
                 )
             )
             benchmark_data_incomplete = (
@@ -1393,7 +1416,10 @@ class OpeningMomentumShadowService:
                 and decision.action == "ENTER_LONG"
                 and benchmark_average_return_bps is not None
                 and benchmark_average_return_bps
-                > variant.maximum_benchmark_average_return_bps
+                > (
+                    variant.maximum_benchmark_average_return_bps
+                    + _BPS_COMPARISON_EPSILON
+                )
             )
             opening_range_stop_loss_pct: float | None = None
             if (
@@ -1829,6 +1855,14 @@ class OpeningMomentumShadowService:
             symbols=active_broad_symbols,
             selection_run_id=run.id,
         ))
+        moderate_breadth_path_identity = identities_by_variant[
+            "MODERATE_BREADTH_PATH_CHALLENGER"
+        ]
+        variants.append(replace(
+            moderate_breadth_path_identity,
+            symbols=active_broad_symbols,
+            selection_run_id=run.id,
+        ))
         weak_breadth_exceptional_path_identity = identities_by_variant[
             "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER"
         ]
@@ -2098,6 +2132,32 @@ class OpeningMomentumShadowService:
                 ),
                 maximum_market_return_bps=(
                     _WEAK_BREADTH_RELAXED_MAXIMUM_MARKET_RETURN_BPS
+                ),
+            ))
+            variants.append(_UniverseVariant(
+                variant="MODERATE_BREADTH_PATH_CHALLENGER",
+                algorithm_version=(
+                    _MODERATE_BREADTH_PATH_ALGORITHM_VERSION
+                ),
+                config_version=self._evidence_config_version(
+                    f"{execution_config.version_hash()}:"
+                    f"{_MODERATE_BREADTH_PATH_VERSION}:"
+                    f"{_EXECUTION_PATH_EFFICIENCY_MINIMUM:.2f}:"
+                    f"{_MODERATE_BREADTH_MAXIMUM_MARKET_RETURN_BPS:.1f}"
+                ),
+                universe_source=_MODERATE_BREADTH_PATH_SOURCE,
+                decision_config=execution_config,
+                minimum_data_coverage=(
+                    _EARLY_BROAD_MINIMUM_COVERAGE
+                ),
+                minimum_path_efficiency=(
+                    _EXECUTION_PATH_EFFICIENCY_MINIMUM
+                ),
+                maximum_market_return_bps=(
+                    _MODERATE_BREADTH_MAXIMUM_MARKET_RETURN_BPS
+                ),
+                forward_evidence_start_date=(
+                    _POST_20260727_FORWARD_EVIDENCE_START_DATE
                 ),
             ))
             variants.append(
@@ -2937,9 +2997,10 @@ class OpeningMomentumShadowService:
             uses_etf_regime_baseline = (
                 identity.variant in _ETF_REGIME_EXTENSION_VARIANTS
             )
-            uses_exceptional_path_baseline = identity.variant == (
-                "EXCEPTIONAL_PATH_PANW_COHORT_CHALLENGER"
-            )
+            uses_exceptional_path_baseline = identity.variant in {
+                "MODERATE_BREADTH_PATH_CHALLENGER",
+                "EXCEPTIONAL_PATH_PANW_COHORT_CHALLENGER",
+            }
             requires_displacement_evidence = (
                 is_early_extension
                 or is_execution_extension

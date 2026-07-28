@@ -122,6 +122,8 @@ describe('Strategy v2 shadow lab', () => {
       .and('contain', '3 分钟执行基线')
       .and('contain', '执行 + 路径效率')
       .and('contain', '弱广度 + 路径效率')
+      .and('contain', '适度广度 + 20bp 上限')
+      .and('contain', '20.0 bps')
       .and('contain', '弱广度 + 强路径例外')
       .and('contain', '前向证据')
       .and('contain', '排除 1 个事后日')
