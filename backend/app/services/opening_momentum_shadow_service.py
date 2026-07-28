@@ -318,6 +318,19 @@ _INDEX_CATALOG_RELATIVE_VOLUME_ORB_VERSION = (
 _INDEX_CATALOG_RELATIVE_VOLUME_ORB_ALGORITHM_VERSION = (
     f"{ALGORITHM_VERSION}+{_INDEX_CATALOG_RELATIVE_VOLUME_ORB_VERSION}"
 )
+_INDEX_CATALOG_RELATIVE_VOLUME_ORB_OPENING_RETURN_SOURCE = (
+    "OPENING_INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_OPENING_RETURN"
+)
+_INDEX_CATALOG_RELATIVE_VOLUME_ORB_OPENING_RETURN_VERSION = (
+    "forward-only-index-catalog-rvol14-min1-top5-orb5-"
+    "opening-return-rerank-hold60-cost30-"
+    "research-through-20260728-v1"
+)
+_INDEX_CATALOG_RELATIVE_VOLUME_ORB_OPENING_RETURN_ALGORITHM_VERSION = (
+    f"{ALGORITHM_VERSION}+"
+    f"{_INDEX_CATALOG_RELATIVE_VOLUME_ORB_OPENING_RETURN_VERSION}"
+)
+_POST_20260728_FORWARD_EVIDENCE_START_DATE = date(2026, 7, 29)
 _RELATIVE_VOLUME_LOOKBACK_SESSIONS = 14
 _RELATIVE_VOLUME_MINIMUM_RATIO = 1.0
 _RELATIVE_VOLUME_TOP_N = 5
@@ -482,6 +495,7 @@ _VariantName = Literal[
     "INDEX_CATALOG_STOCKS_IN_PLAY_ORB_TOP10_CHALLENGER",
     "INDEX_CATALOG_STOCKS_IN_PLAY_ORB_TOP5_CHALLENGER",
     "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_CHALLENGER",
+    "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_OPENING_RETURN_CHALLENGER",
     "EXECUTION_SNDK_CHALLENGER",
     "EXECUTION_INTC_CHALLENGER",
     "EXECUTION_QCOM_CHALLENGER",
@@ -494,6 +508,7 @@ _CandidateSelectionMode = Literal[
     "TOP_THEN_GATE",
     "PATH_ELIGIBLE_RERANK",
     "OPENING_ACTIVITY_TOP_N_THEN_BREAKOUT",
+    "OPENING_ACTIVITY_TOP_N_THEN_OPENING_RETURN_BREAKOUT",
 ]
 
 
@@ -787,7 +802,10 @@ class _UniverseVariant:
             if (
                 self.signal_model != "OPENING_RANGE_BREAKOUT"
                 or self.candidate_selection_mode
-                != "OPENING_ACTIVITY_TOP_N_THEN_BREAKOUT"
+                not in {
+                    "OPENING_ACTIVITY_TOP_N_THEN_BREAKOUT",
+                    "OPENING_ACTIVITY_TOP_N_THEN_OPENING_RETURN_BREAKOUT",
+                }
             ):
                 raise ValueError(
                     "opening activity ranking requires its ORB selection mode"
@@ -798,7 +816,10 @@ class _UniverseVariant:
                 )
         elif (
             self.candidate_selection_mode
-            == "OPENING_ACTIVITY_TOP_N_THEN_BREAKOUT"
+            in {
+                "OPENING_ACTIVITY_TOP_N_THEN_BREAKOUT",
+                "OPENING_ACTIVITY_TOP_N_THEN_OPENING_RETURN_BREAKOUT",
+            }
         ):
             raise ValueError(
                 "opening activity selection requires opening_activity_top_n"
@@ -1339,6 +1360,15 @@ class OpeningMomentumShadowService:
                     ),
                     minimum_opening_activity_ratio=(
                         variant.minimum_opening_activity_ratio
+                    ),
+                    candidate_ranking=(
+                        "OPENING_RETURN"
+                        if variant.candidate_selection_mode
+                        == (
+                            "OPENING_ACTIVITY_TOP_N_THEN_"
+                            "OPENING_RETURN_BREAKOUT"
+                        )
+                        else "BREAKOUT_DEPTH"
                     ),
                     config=variant.decision_config,
                 )
@@ -2634,14 +2664,21 @@ class OpeningMomentumShadowService:
                 symbols=index_catalog_symbols,
                 selection_run_id=run.id,
             ))
-        relative_volume_identity = identities_by_variant[
-            "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_CHALLENGER"
-        ]
-        variants.append(replace(
-            relative_volume_identity,
-            symbols=index_catalog_symbols,
-            selection_run_id=run.id,
-        ))
+        for variant_name in (
+            "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_CHALLENGER",
+            (
+                "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_"
+                "OPENING_RETURN_CHALLENGER"
+            ),
+        ):
+            relative_volume_identity = identities_by_variant[
+                cast(_VariantName, variant_name)
+            ]
+            variants.append(replace(
+                relative_volume_identity,
+                symbols=index_catalog_symbols,
+                selection_run_id=run.id,
+            ))
         for spec in _EXECUTION_EXTENSION_SPECS:
             identity = identities_by_variant[spec.variant]
             variants.append(_UniverseVariant(
@@ -3151,6 +3188,48 @@ class OpeningMomentumShadowService:
                 ),
                 forward_evidence_start_date=(
                     _POST_20260727_FORWARD_EVIDENCE_START_DATE
+                ),
+            ))
+            variants.append(_UniverseVariant(
+                variant=(
+                    "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_"
+                    "OPENING_RETURN_CHALLENGER"
+                ),
+                algorithm_version=(
+                    _INDEX_CATALOG_RELATIVE_VOLUME_ORB_OPENING_RETURN_ALGORITHM_VERSION
+                ),
+                config_version=self._evidence_config_version(
+                    f"{five_minute_orb_config.version_hash()}:"
+                    f"{_INDEX_CATALOG_RELATIVE_VOLUME_ORB_OPENING_RETURN_VERSION}:"
+                    f"{_RELATIVE_VOLUME_LOOKBACK_SESSIONS}:"
+                    f"{_RELATIVE_VOLUME_MINIMUM_RATIO:.2f}:"
+                    f"{_RELATIVE_VOLUME_TOP_N}:OPENING_RETURN"
+                ),
+                universe_source=(
+                    _INDEX_CATALOG_RELATIVE_VOLUME_ORB_OPENING_RETURN_SOURCE
+                ),
+                decision_config=five_minute_orb_config,
+                signal_model="OPENING_RANGE_BREAKOUT",
+                candidate_selection_mode=(
+                    "OPENING_ACTIVITY_TOP_N_THEN_"
+                    "OPENING_RETURN_BREAKOUT"
+                ),
+                minimum_data_coverage=(
+                    _EARLY_BROAD_MINIMUM_COVERAGE
+                ),
+                opening_range_stop=True,
+                opening_activity_top_n=_RELATIVE_VOLUME_TOP_N,
+                opening_activity_baseline=(
+                    "PRIOR_SAME_WINDOW_VOLUME"
+                ),
+                opening_activity_lookback_sessions=(
+                    _RELATIVE_VOLUME_LOOKBACK_SESSIONS
+                ),
+                minimum_opening_activity_ratio=(
+                    _RELATIVE_VOLUME_MINIMUM_RATIO
+                ),
+                forward_evidence_start_date=(
+                    _POST_20260728_FORWARD_EVIDENCE_START_DATE
                 ),
             ))
             for spec in _EXECUTION_EXTENSION_SPECS:
@@ -3880,6 +3959,10 @@ class OpeningMomentumShadowService:
                     }
                 )
             )
+            uses_relative_volume_orb_baseline = identity.variant == (
+                "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_"
+                "OPENING_RETURN_CHALLENGER"
+            )
             requires_displacement_evidence = (
                 is_early_extension
                 or is_execution_extension
@@ -3888,6 +3971,7 @@ class OpeningMomentumShadowService:
                 or uses_exceptional_path_baseline
                 or uses_five_minute_orb_baseline
                 or uses_index_catalog_five_minute_orb_baseline
+                or uses_relative_volume_orb_baseline
             )
             identity_rows_by_date = rows_by_date[
                 identity.config_version
@@ -3901,6 +3985,7 @@ class OpeningMomentumShadowService:
                 "ETF_REGIME_PATH_CHALLENGER",
                 "FIVE_MINUTE_ORB_CHALLENGER",
                 "INDEX_CATALOG_FIVE_MINUTE_ORB_CHALLENGER",
+                "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_CHALLENGER",
             ] | None
             if identity.variant == "INCUMBENT":
                 comparison_baseline = None
@@ -3916,6 +4001,10 @@ class OpeningMomentumShadowService:
                 )
             elif uses_five_minute_orb_baseline:
                 comparison_baseline = "FIVE_MINUTE_ORB_CHALLENGER"
+            elif uses_relative_volume_orb_baseline:
+                comparison_baseline = (
+                    "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_CHALLENGER"
+                )
             elif uses_index_catalog_five_minute_orb_baseline:
                 comparison_baseline = (
                     "INDEX_CATALOG_FIVE_MINUTE_ORB_CHALLENGER"
@@ -3943,6 +4032,10 @@ class OpeningMomentumShadowService:
             elif uses_five_minute_orb_baseline:
                 comparison_identity = identities_by_variant[
                     "FIVE_MINUTE_ORB_CHALLENGER"
+                ]
+            elif uses_relative_volume_orb_baseline:
+                comparison_identity = identities_by_variant[
+                    "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_CHALLENGER"
                 ]
             elif uses_index_catalog_five_minute_orb_baseline:
                 comparison_identity = identities_by_variant[

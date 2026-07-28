@@ -1981,6 +1981,7 @@ export interface OpeningMomentumShadowVariant {
     | 'INDEX_CATALOG_STOCKS_IN_PLAY_ORB_TOP10_CHALLENGER'
     | 'INDEX_CATALOG_STOCKS_IN_PLAY_ORB_TOP5_CHALLENGER'
     | 'INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_CHALLENGER'
+    | 'INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_OPENING_RETURN_CHALLENGER'
     | 'EXECUTION_SNDK_CHALLENGER'
     | 'EXECUTION_INTC_CHALLENGER'
     | 'EXECUTION_QCOM_CHALLENGER'
@@ -1994,6 +1995,7 @@ export interface OpeningMomentumShadowVariant {
     | 'TOP_THEN_GATE'
     | 'PATH_ELIGIBLE_RERANK'
     | 'OPENING_ACTIVITY_TOP_N_THEN_BREAKOUT'
+    | 'OPENING_ACTIVITY_TOP_N_THEN_OPENING_RETURN_BREAKOUT'
   signal_minutes: number
   minimum_market_return_bps: number
   minimum_candidate_return_bps: number
@@ -2027,6 +2029,7 @@ export interface OpeningMomentumShadowVariant {
     | 'ETF_REGIME_PATH_CHALLENGER'
     | 'FIVE_MINUTE_ORB_CHALLENGER'
     | 'INDEX_CATALOG_FIVE_MINUTE_ORB_CHALLENGER'
+    | 'INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_CHALLENGER'
     | null
   latest: OpeningMomentumShadowRun | null
   metrics: OpeningMomentumShadowMetrics

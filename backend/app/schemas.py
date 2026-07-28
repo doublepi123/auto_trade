@@ -660,6 +660,7 @@ class OpeningMomentumShadowVariantResponse(BaseModel):
         "INDEX_CATALOG_STOCKS_IN_PLAY_ORB_TOP10_CHALLENGER",
         "INDEX_CATALOG_STOCKS_IN_PLAY_ORB_TOP5_CHALLENGER",
         "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_CHALLENGER",
+        "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_OPENING_RETURN_CHALLENGER",
         "EXECUTION_SNDK_CHALLENGER",
         "EXECUTION_INTC_CHALLENGER",
         "EXECUTION_QCOM_CHALLENGER",
@@ -674,6 +675,7 @@ class OpeningMomentumShadowVariantResponse(BaseModel):
         "TOP_THEN_GATE",
         "PATH_ELIGIBLE_RERANK",
         "OPENING_ACTIVITY_TOP_N_THEN_BREAKOUT",
+        "OPENING_ACTIVITY_TOP_N_THEN_OPENING_RETURN_BREAKOUT",
     ] = "TOP_THEN_GATE"
     signal_minutes: int
     minimum_market_return_bps: float
@@ -722,6 +724,7 @@ class OpeningMomentumShadowVariantResponse(BaseModel):
             "ETF_REGIME_PATH_CHALLENGER",
             "FIVE_MINUTE_ORB_CHALLENGER",
             "INDEX_CATALOG_FIVE_MINUTE_ORB_CHALLENGER",
+            "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_CHALLENGER",
         ]
     ] = None
     latest: Optional[OpeningMomentumShadowRunResponse] = None

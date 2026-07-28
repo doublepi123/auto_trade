@@ -219,8 +219,12 @@ class TestOpeningMomentumShadowApi:
         index_catalog_relative_volume_top5 = variants[
             "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_CHALLENGER"
         ]
+        index_catalog_relative_volume_opening_return = variants[
+            "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_"
+            "OPENING_RETURN_CHALLENGER"
+        ]
         execution_sndk = variants["EXECUTION_SNDK_CHALLENGER"]
-        assert len(variants) == 44
+        assert len(variants) == 45
         assert early["universe_source"] == "OPENING_EARLY_BROAD"
         assert early["signal_minutes"] == 3
         assert early["minimum_market_return_bps"] == -50.0
@@ -778,6 +782,26 @@ class TestOpeningMomentumShadowApi:
         assert index_catalog_relative_volume_top5["comparison"][
             "multiple_testing_family_size"
         ] == 4
+        assert index_catalog_relative_volume_opening_return[
+            "universe_source"
+        ] == (
+            "OPENING_INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_OPENING_RETURN"
+        )
+        assert index_catalog_relative_volume_opening_return[
+            "candidate_selection_mode"
+        ] == "OPENING_ACTIVITY_TOP_N_THEN_OPENING_RETURN_BREAKOUT"
+        assert index_catalog_relative_volume_opening_return[
+            "forward_evidence_start_date"
+        ] == "2026-07-29"
+        assert index_catalog_relative_volume_opening_return[
+            "comparison_baseline"
+        ] == "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_CHALLENGER"
+        assert index_catalog_relative_volume_opening_return[
+            "comparison"
+        ] is not None
+        assert index_catalog_relative_volume_opening_return["comparison"][
+            "multiple_testing_family_size"
+        ] == 1
         assert execution_sndk["required_symbols"] == ["SNDK.US"]
         assert (
             execution_sndk["comparison_baseline"]

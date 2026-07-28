@@ -14,6 +14,12 @@ ALGORITHM_VERSION = (
 REVERSAL_ALGORITHM_VERSION = "cross-sectional-opening-reversal-v1"
 
 
+OpeningRangeBreakoutRanking = Literal[
+    "BREAKOUT_DEPTH",
+    "OPENING_RETURN",
+]
+
+
 @dataclass(frozen=True)
 class OpeningMomentumConfig:
     """Frozen parameters for the prospective opening-momentum shadow."""
@@ -265,6 +271,7 @@ def evaluate_opening_range_breakout(
         observations,
         opening_range_high_by_symbol=opening_range_high_by_symbol,
         eligible_symbols=None,
+        candidate_ranking="BREAKOUT_DEPTH",
         entry_reason="FIVE_MINUTE_OPENING_RANGE_BREAKOUT",
         config=config,
     )
@@ -277,6 +284,7 @@ def evaluate_stocks_in_play_opening_range_breakout(
     opening_activity_ratio_by_symbol: Mapping[str, float],
     maximum_stocks_in_play: int = 20,
     minimum_opening_activity_ratio: float | None = None,
+    candidate_ranking: OpeningRangeBreakoutRanking = "BREAKOUT_DEPTH",
     config: OpeningMomentumConfig | None = None,
 ) -> OpeningMomentumDecision:
     """Restrict ORB candidates to the most active opening names."""
@@ -290,6 +298,8 @@ def evaluate_stocks_in_play_opening_range_breakout(
         raise ValueError(
             "minimum_opening_activity_ratio must be positive and finite"
         )
+    if candidate_ranking not in {"BREAKOUT_DEPTH", "OPENING_RETURN"}:
+        raise ValueError("candidate_ranking is unsupported")
     normalized_activity: dict[str, float] = {}
     for raw_symbol, raw_ratio in opening_activity_ratio_by_symbol.items():
         symbol = raw_symbol.strip().upper()
@@ -343,7 +353,13 @@ def evaluate_stocks_in_play_opening_range_breakout(
         observations,
         opening_range_high_by_symbol=opening_range_high_by_symbol,
         eligible_symbols=stocks_in_play,
-        entry_reason="STOCKS_IN_PLAY_FIVE_MINUTE_OPENING_RANGE_BREAKOUT",
+        candidate_ranking=candidate_ranking,
+        entry_reason=(
+            "OPENING_RETURN_RERANKED_STOCKS_IN_PLAY_"
+            "FIVE_MINUTE_OPENING_RANGE_BREAKOUT"
+            if candidate_ranking == "OPENING_RETURN"
+            else "STOCKS_IN_PLAY_FIVE_MINUTE_OPENING_RANGE_BREAKOUT"
+        ),
         config=config,
     )
 
@@ -353,6 +369,7 @@ def _evaluate_opening_range_breakout(
     *,
     opening_range_high_by_symbol: Mapping[str, float],
     eligible_symbols: set[str] | None,
+    candidate_ranking: OpeningRangeBreakoutRanking,
     entry_reason: str,
     config: OpeningMomentumConfig | None,
 ) -> OpeningMomentumDecision:
@@ -412,18 +429,25 @@ def _evaluate_opening_range_breakout(
             ranking=ranking,
         )
 
-    candidate_observation = min(
-        eligible,
-        key=lambda item: (
-            -(
-                item.signal_close
-                / normalized_highs[item.symbol]
-                - 1
-            ),
+    def candidate_key(
+        item: OpeningMomentumObservation,
+    ) -> tuple[float, float, str]:
+        breakout_depth = (
+            item.signal_close / normalized_highs[item.symbol] - 1
+        )
+        if candidate_ranking == "OPENING_RETURN":
+            return (
+                -item.opening_return_bps,
+                -breakout_depth,
+                item.symbol,
+            )
+        return (
+            -breakout_depth,
             -item.opening_return_bps,
             item.symbol,
-        ),
-    )
+        )
+
+    candidate_observation = min(eligible, key=candidate_key)
     candidate_return_bps = candidate_observation.opening_return_bps
     excess_return_bps = candidate_return_bps - market_return_bps
     if candidate_observation.entry_open is None:

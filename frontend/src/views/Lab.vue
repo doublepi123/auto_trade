@@ -683,16 +683,25 @@
                         class="opening-momentum-exception-threshold"
                       >路径合格重排</small>
                       <small
-                        v-else-if="row.candidate_selection_mode === 'OPENING_ACTIVITY_TOP_N_THEN_BREAKOUT'"
+                        v-else-if="row.candidate_selection_mode === 'OPENING_ACTIVITY_TOP_N_THEN_BREAKOUT'
+                          || row.candidate_selection_mode === 'OPENING_ACTIVITY_TOP_N_THEN_OPENING_RETURN_BREAKOUT'"
                         class="opening-momentum-exception-threshold"
                       >
                         <template v-if="row.opening_activity_baseline === 'PRIOR_SAME_WINDOW_VOLUME'">
                           同窗量 {{ row.opening_activity_lookback_sessions }} 日
                           / 至少 {{ row.minimum_opening_activity_ratio?.toFixed(2) }}
-                          / Top {{ row.opening_activity_top_n }} 后突破
+                          / Top {{ row.opening_activity_top_n }} 后{{
+                            row.candidate_selection_mode === 'OPENING_ACTIVITY_TOP_N_THEN_OPENING_RETURN_BREAKOUT'
+                              ? '按开盘涨幅重排突破'
+                              : '突破'
+                          }}
                         </template>
                         <template v-else>
-                          开盘活跃度 Top {{ row.opening_activity_top_n }} 后突破
+                          开盘活跃度 Top {{ row.opening_activity_top_n }} 后{{
+                            row.candidate_selection_mode === 'OPENING_ACTIVITY_TOP_N_THEN_OPENING_RETURN_BREAKOUT'
+                              ? '按开盘涨幅重排突破'
+                              : '突破'
+                          }}
                         </template>
                       </small>
                     </template>
@@ -2664,6 +2673,9 @@ function openingMomentumVariantLabel(
   if (variant === 'INDEX_CATALOG_FIVE_MINUTE_ORB_CHALLENGER') return '全指数目录 5 分钟 ORB'
   if (variant === 'INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_CHALLENGER') {
     return '全指数目录相对开盘量 ORB Top5'
+  }
+  if (variant === 'INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_OPENING_RETURN_CHALLENGER') {
+    return '相对量 Top5 + 涨幅重排'
   }
   if (variant === 'INDEX_CATALOG_STOCKS_IN_PLAY_ORB_CHALLENGER') return '全指数目录活跃 ORB Top20'
   const indexCatalogStocksInPlay = /^INDEX_CATALOG_STOCKS_IN_PLAY_ORB_TOP(\d+)_CHALLENGER$/.exec(variant)

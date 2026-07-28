@@ -3360,6 +3360,61 @@ Cypress.Commands.add('stubApi', () => {
           comparison: null,
         },
         {
+          variant: (
+            'INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_'
+            + 'OPENING_RETURN_CHALLENGER'
+          ),
+          universe_source: (
+            'OPENING_INDEX_CATALOG_RELATIVE_VOLUME_ORB_'
+            + 'TOP5_OPENING_RETURN'
+          ),
+          algorithm_version: (
+            'index-catalog-relative-volume-orb-top5-'
+            + 'opening-return-stub-v1'
+          ),
+          config_version: (
+            'index-catalog-relative-volume-orb-top5-'
+            + 'opening-return-config-stub-v1'
+          ),
+          candidate_selection_mode: (
+            'OPENING_ACTIVITY_TOP_N_THEN_OPENING_RETURN_BREAKOUT'
+          ),
+          signal_minutes: 5,
+          minimum_market_return_bps: -10000,
+          minimum_candidate_return_bps: 0,
+          minimum_excess_return_bps: 0,
+          minimum_data_coverage: 0.95,
+          opening_activity_top_n: 5,
+          opening_activity_baseline: 'PRIOR_SAME_WINDOW_VOLUME',
+          opening_activity_lookback_sessions: 14,
+          minimum_opening_activity_ratio: 1,
+          required_symbols: [],
+          excluded_symbols: [],
+          holding_minutes: 60,
+          stop_loss_pct: 4,
+          forward_evidence_start_date: '2026-07-29',
+          excluded_pre_forward_sessions: 0,
+          comparison_sessions: 0,
+          comparison_baseline: (
+            'INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_CHALLENGER'
+          ),
+          latest: null,
+          metrics: {
+            observed_sessions: 0,
+            skipped_sessions: 0,
+            signals: 0,
+            open_trades: 0,
+            closed_trades: 0,
+            wins: 0,
+            win_rate: 0,
+            mean_net_return_bps: 0,
+            cumulative_net_return_bps: 0,
+            max_drawdown_bps: 0,
+            profit_factor: null,
+          },
+          comparison: null,
+        },
+        {
           variant: 'EXECUTION_SNDK_CHALLENGER',
           universe_source: 'OPENING_EXECUTION_SNDK',
           algorithm_version: (

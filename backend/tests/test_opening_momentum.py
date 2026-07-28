@@ -248,6 +248,49 @@ def test_stocks_in_play_orb_restricts_breakout_to_activity_leaders() -> None:
     assert decision.universe_size == 8
 
 
+def test_stocks_in_play_orb_can_rerank_breakouts_by_opening_return() -> None:
+    observations = [
+        _observation(f"S{index}.US", value)
+        for index, value in enumerate(
+            (-10, 0, 5, 10, 15, 20, 80, 100),
+        )
+    ]
+    range_highs = {
+        item.symbol: (
+            100.1
+            if item.symbol == "S6.US"
+            else 100.6
+            if item.symbol == "S7.US"
+            else item.signal_close + 0.1
+        )
+        for item in observations
+    }
+    activity = {item.symbol: 1.0 for item in observations}
+
+    breakout_depth = evaluate_stocks_in_play_opening_range_breakout(
+        observations,
+        opening_range_high_by_symbol=range_highs,
+        opening_activity_ratio_by_symbol=activity,
+        maximum_stocks_in_play=8,
+    )
+    opening_return = evaluate_stocks_in_play_opening_range_breakout(
+        observations,
+        opening_range_high_by_symbol=range_highs,
+        opening_activity_ratio_by_symbol=activity,
+        maximum_stocks_in_play=8,
+        candidate_ranking="OPENING_RETURN",
+    )
+
+    assert breakout_depth.candidate_symbol == "S6.US"
+    assert opening_return.action == "ENTER_LONG"
+    assert opening_return.reason == (
+        "OPENING_RETURN_RERANKED_STOCKS_IN_PLAY_"
+        "FIVE_MINUTE_OPENING_RANGE_BREAKOUT"
+    )
+    assert opening_return.candidate_symbol == "S7.US"
+    assert opening_return.candidate_return_bps == pytest.approx(100.0)
+
+
 def test_stocks_in_play_orb_fails_closed_with_missing_activity() -> None:
     observations = [
         _observation(f"S{index}.US", 10 + index)

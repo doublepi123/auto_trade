@@ -96,6 +96,7 @@ _ALL_CHALLENGER_VARIANTS = (
     "INDEX_CATALOG_STOCKS_IN_PLAY_ORB_TOP10_CHALLENGER",
     "INDEX_CATALOG_STOCKS_IN_PLAY_ORB_TOP5_CHALLENGER",
     "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_CHALLENGER",
+    "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_OPENING_RETURN_CHALLENGER",
     *_EXECUTION_EXTENSION_VARIANTS,
 )
 
@@ -113,6 +114,7 @@ class _FakeCandles:
         negative_last_five_for: str | None = None,
         low_efficiency_for: str | None = None,
         orb_breakout_for: str | None = None,
+        orb_breakout_returns_bps: dict[str, float] | None = None,
         unavailable_symbols: set[str] | None = None,
         turnover_per_minute_by_symbol: dict[str, float] | None = None,
     ) -> None:
@@ -125,6 +127,7 @@ class _FakeCandles:
         self.negative_last_five_for = negative_last_five_for
         self.low_efficiency_for = low_efficiency_for
         self.orb_breakout_for = orb_breakout_for
+        self.orb_breakout_returns_bps = orb_breakout_returns_bps or {}
         self.unavailable_symbols = unavailable_symbols or set()
         self.turnover_per_minute_by_symbol = (
             turnover_per_minute_by_symbol or {}
@@ -183,7 +186,13 @@ class _FakeCandles:
                 close_price = 100.0 * (
                     1 + opening_return_bps / 10_000
                 )
-            if symbol == self.orb_breakout_for and index == 5:
+            if index == 5 and symbol in self.orb_breakout_returns_bps:
+                close_price = 100.0 * (
+                    1
+                    + self.orb_breakout_returns_bps[symbol]
+                    / 10_000
+                )
+            elif symbol == self.orb_breakout_for and index == 5:
                 close_price = 101.0
             if (
                 index == 25
@@ -1436,6 +1445,88 @@ def test_index_catalog_relative_volume_orb_uses_only_prior_sessions(
         Base.metadata.drop_all(bind=engine)
 
 
+def test_relative_volume_opening_return_challenger_reranks_breakouts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        settings,
+        "opening_momentum_shadow_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        settings,
+        "opening_momentum_challenger_enabled",
+        True,
+    )
+    engine, db = _database()
+    try:
+        _seed_universe(db, avg_dollar_volume=100_000_000.0)
+        _seed_active_broad_pool(db)
+        _seed_opening_activity_history(
+            db,
+            low_baseline_symbol="S7.US",
+        )
+        service = OpeningMomentumShadowService(
+            db,
+            _FakeCandles(orb_breakout_returns_bps={
+                "S0.US": 80.0,
+                "S7.US": 100.0,
+            }),
+        )
+
+        opened = service.tick(
+            now=_SESSION_OPEN + timedelta(minutes=7, seconds=10),
+        )
+        opened_variants = {
+            item.variant: item for item in opened.variants
+        }
+        assert opened_variants[
+            "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_CHALLENGER"
+        ].latest is not None
+        opened_challenger = opened_variants[
+            "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_"
+            "OPENING_RETURN_CHALLENGER"
+        ]
+        assert opened_challenger.latest is not None
+        assert opened_challenger.latest.reason == (
+            "OPENING_RETURN_RERANKED_STOCKS_IN_PLAY_"
+            "FIVE_MINUTE_OPENING_RANGE_BREAKOUT"
+        )
+        status = service.tick(
+            now=_SESSION_OPEN + timedelta(minutes=67, seconds=10),
+        )
+
+        variants = {item.variant: item for item in status.variants}
+        baseline = variants[
+            "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_CHALLENGER"
+        ]
+        challenger = variants[
+            "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_"
+            "OPENING_RETURN_CHALLENGER"
+        ]
+        assert baseline.latest is not None
+        assert challenger.latest is not None
+        assert baseline.latest.status == "CLOSED"
+        assert baseline.latest.candidate_symbol == "S0.US"
+        assert challenger.latest.status == "CLOSED"
+        assert challenger.latest.candidate_symbol == "S7.US"
+        assert challenger.latest.reason == "STOP_LOSS_EXIT"
+        assert challenger.candidate_selection_mode == (
+            "OPENING_ACTIVITY_TOP_N_THEN_OPENING_RETURN_BREAKOUT"
+        )
+        assert challenger.forward_evidence_start_date == date(2026, 7, 29)
+        assert challenger.comparison_baseline == (
+            "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_CHALLENGER"
+        )
+        assert challenger.comparison is not None
+        assert challenger.comparison.multiple_testing_family_size == 1
+        assert challenger.comparison.policy_displacement_sessions == 1
+        assert challenger.comparison.promotion_ready is False
+    finally:
+        db.close()
+        Base.metadata.drop_all(bind=engine)
+
+
 def test_stocks_in_play_orb_sensitivity_respects_precommitted_rank_cutoffs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1644,6 +1735,7 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
             "INDEX_CATALOG_STOCKS_IN_PLAY_ORB_TOP10_CHALLENGER",
             "INDEX_CATALOG_STOCKS_IN_PLAY_ORB_TOP5_CHALLENGER",
             "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_CHALLENGER",
+            "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_OPENING_RETURN_CHALLENGER",
             "EXECUTION_SNDK_CHALLENGER",
             "EXECUTION_INTC_CHALLENGER",
             "EXECUTION_QCOM_CHALLENGER",
@@ -1719,6 +1811,13 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
         ]
         index_catalog_stocks_in_play_top5 = by_variant[
             "INDEX_CATALOG_STOCKS_IN_PLAY_ORB_TOP5_CHALLENGER"
+        ]
+        index_catalog_relative_volume_top5 = by_variant[
+            "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_CHALLENGER"
+        ]
+        index_catalog_relative_volume_opening_return = by_variant[
+            "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_"
+            "OPENING_RETURN_CHALLENGER"
         ]
         reversal = by_variant["REVERSAL_CHALLENGER"]
         continuation = by_variant["CONTINUATION_CHALLENGER"]
@@ -2128,6 +2227,36 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
                 "OPENING_INDEX_CATALOG_FIVE_MINUTE_ORB_STOCKS_IN_PLAY"
                 f"{suffix}"
             )
+        assert index_catalog_relative_volume_top5.candidate_selection_mode == (
+            "OPENING_ACTIVITY_TOP_N_THEN_BREAKOUT"
+        )
+        assert (
+            index_catalog_relative_volume_opening_return
+            .candidate_selection_mode
+            == "OPENING_ACTIVITY_TOP_N_THEN_OPENING_RETURN_BREAKOUT"
+        )
+        assert (
+            index_catalog_relative_volume_opening_return.decision_config
+            == index_catalog_relative_volume_top5.decision_config
+        )
+        assert (
+            index_catalog_relative_volume_opening_return
+            .opening_activity_top_n
+            == 5
+        )
+        assert (
+            index_catalog_relative_volume_opening_return
+            .opening_activity_baseline
+            == "PRIOR_SAME_WINDOW_VOLUME"
+        )
+        assert (
+            index_catalog_relative_volume_opening_return
+            .forward_evidence_start_date
+            == date(2026, 7, 29)
+        )
+        assert index_catalog_relative_volume_opening_return.universe_source == (
+            "OPENING_INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_OPENING_RETURN"
+        )
         for variant, symbol in zip(
             _EXECUTION_EXTENSION_VARIANTS,
             _EXECUTION_EXTENSION_SYMBOLS,
@@ -2240,6 +2369,81 @@ def test_forward_scorecard_excludes_rows_before_the_frozen_start(
         assert response.comparison is not None
         assert response.comparison.resolved_sessions == 1
         assert response.comparison.cumulative_delta_bps == 20.0
+    finally:
+        db.close()
+        Base.metadata.drop_all(bind=engine)
+
+
+def test_opening_return_rerank_excludes_july_28_design_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        settings,
+        "opening_momentum_challenger_enabled",
+        True,
+    )
+    engine, db = _database()
+    try:
+        service = OpeningMomentumShadowService(db)
+        identities = {
+            identity.variant: identity
+            for identity in service._variant_identities()
+        }
+        baseline = identities[
+            "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_CHALLENGER"
+        ]
+        challenger = identities[
+            "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_"
+            "OPENING_RETURN_CHALLENGER"
+        ]
+        for session_date, challenger_return in (
+            (date(2026, 7, 28), 500.0),
+            (date(2026, 7, 29), 10.0),
+        ):
+            timestamp = datetime.combine(
+                session_date,
+                datetime.min.time(),
+                tzinfo=timezone.utc,
+            )
+            for identity, symbol, net_return_bps in (
+                (baseline, "KO.US", 0.0),
+                (challenger, "WDAY.US", challenger_return),
+            ):
+                db.add(OpeningMomentumShadowRun(
+                    session_date=session_date,
+                    algorithm_version=identity.algorithm_version,
+                    config_version=identity.config_version,
+                    status="CLOSED",
+                    reason="FIXED_HOLD_EXIT",
+                    signal_at=timestamp,
+                    observed_at=timestamp,
+                    universe_source=identity.universe_source,
+                    universe_size=122,
+                    candidate_symbol=symbol,
+                    estimated_cost_bps=30.0,
+                    net_return_bps=net_return_bps,
+                ))
+        db.commit()
+
+        response = {
+            item.variant: item
+            for item in service._variant_responses()
+        }[
+            "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_"
+            "OPENING_RETURN_CHALLENGER"
+        ]
+
+        assert response.forward_evidence_start_date == date(2026, 7, 29)
+        assert response.excluded_pre_forward_sessions == 1
+        assert response.comparison_sessions == 1
+        assert response.latest is not None
+        assert response.latest.session_date == date(2026, 7, 29)
+        assert response.metrics.observed_sessions == 1
+        assert response.metrics.cumulative_net_return_bps == 10.0
+        assert response.comparison is not None
+        assert response.comparison.resolved_sessions == 1
+        assert response.comparison.cumulative_delta_bps == 10.0
+        assert response.comparison.policy_displacement_sessions == 1
     finally:
         db.close()
         Base.metadata.drop_all(bind=engine)
@@ -2514,7 +2718,7 @@ def test_challengers_use_one_market_snapshot_and_close_all_variants(
         assert opened.latest.universe_source == "UNIVERSE_SELECTION"
         assert opened.latest.candidate_symbol == "S1.US"
         assert opened.latest.selection_run_id == run.id
-        assert len(opened.variants) == 44
+        assert len(opened.variants) == 45
         by_variant = {
             item.variant: item for item in opened.variants
         }
@@ -3838,7 +4042,7 @@ def test_breadth_challenger_skips_a_negative_market_snapshot(
         )
 
         assert candles.calls == list(_SYMBOLS[:4])
-        assert len(status.variants) == 44
+        assert len(status.variants) == 45
         by_variant = {
             item.variant: item for item in status.variants
         }
