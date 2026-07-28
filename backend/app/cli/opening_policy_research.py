@@ -58,7 +58,7 @@ from app.domain.opening_momentum_policy import (
 )
 
 
-OPENING_POLICY_CLI_VERSION = "opening-policy-research-cli-v8"
+OPENING_POLICY_CLI_VERSION = "opening-policy-research-cli-v9"
 _DEFAULT_PATH_THRESHOLDS = (0.50, 0.60, 0.70, 0.80, 0.90)
 _DEFAULT_MARKET_MAXIMUMS_BPS = (-10.0, -5.0, 0.0, 5.0, 10.0, 20.0)
 _DEFAULT_MINIMUM_DATA_COVERAGE = 0.95
@@ -67,6 +67,9 @@ _COHORT_SUBSET_MAX_CANDIDATES = 6
 _COHORT_SUBSET_MINIMUM_EXECUTION_DISPLACEMENTS = 4
 _COHORT_SUBSET_SELECTION_VERSION = (
     "discovery-exhaustive-joint-subset-cost30-drawdown-v1"
+)
+_COHORT_INDIVIDUAL_SCREEN_VERSION = (
+    "discovery-individual-addition-cost30-drawdown-v1"
 )
 _EXCLUSION_DIAGNOSTIC_VERSION = (
     "opening-policy-exclusion-paired-baseline-anchored-holdout-v1"
@@ -672,6 +675,181 @@ def _cohort_subset_selection_payload(
     )
 
 
+def _cohort_individual_screen_payload(
+    reports_by_symbol: Mapping[
+        str,
+        Sequence[OpeningPolicyCohortReport],
+    ],
+    *,
+    coverage_failures: Mapping[str, str] | None = None,
+) -> dict[str, object]:
+    """Rank individually robust additions without consulting holdout returns."""
+
+    normalized_reports: dict[
+        str,
+        tuple[OpeningPolicyCohortReport, ...],
+    ] = {}
+    for raw_symbol, raw_reports in reports_by_symbol.items():
+        symbol = raw_symbol.strip().upper()
+        if not symbol or not symbol.endswith(".US"):
+            raise ValueError(
+                "individual screen symbols must be non-empty .US symbols"
+            )
+        if symbol in normalized_reports:
+            raise ValueError("individual screen symbols must be unique")
+        normalized_reports[symbol] = tuple(raw_reports)
+
+    normalized_failures: dict[str, str] = {}
+    for raw_symbol, raw_reason in (coverage_failures or {}).items():
+        symbol = raw_symbol.strip().upper()
+        reason = raw_reason.strip().upper()
+        if not symbol or not symbol.endswith(".US"):
+            raise ValueError(
+                "individual screen failure symbols must be non-empty .US symbols"
+            )
+        if not reason:
+            raise ValueError(
+                "individual screen coverage failure reasons must be non-empty"
+            )
+        if symbol in normalized_failures:
+            raise ValueError("individual screen failure symbols must be unique")
+        normalized_failures[symbol] = reason
+
+    overlap = set(normalized_reports).intersection(normalized_failures)
+    if overlap:
+        raise ValueError(
+            "individual screen symbols cannot be both evaluated and uncovered"
+        )
+    if not normalized_reports and not normalized_failures:
+        raise ValueError("at least one individual screen symbol is required")
+
+    evaluated_by_symbol: dict[str, dict[str, object]] = {}
+    if normalized_reports:
+        selection = _cohort_subset_selection_payload({
+            (symbol,): reports
+            for symbol, reports in normalized_reports.items()
+        })
+        for raw_candidate in cast(
+            list[dict[str, object]],
+            selection["subsets"],
+        ):
+            symbols = cast(list[str], raw_candidate["symbols"])
+            if len(symbols) != 1:
+                raise ValueError(
+                    "individual screen reports must contain singleton cohorts"
+                )
+            symbol = symbols[0]
+            candidate = {
+                key: value
+                for key, value in raw_candidate.items()
+                if key != "symbols"
+            }
+            candidate.update({
+                "symbol": symbol,
+                "coverage_status": "PAIRED_DISCOVERY_AND_HOLDOUT",
+                "coverage_reason": None,
+                "discovery_rank": None,
+                "shortlisted": False,
+            })
+            evaluated_by_symbol[symbol] = candidate
+
+    eligible_symbols = [
+        symbol
+        for symbol, candidate in evaluated_by_symbol.items()
+        if candidate["status"] == "ELIGIBLE"
+    ]
+
+    def discovery_rank_key(
+        symbol: str,
+    ) -> tuple[float, float, float, str]:
+        by_cost = {
+            value.round_trip_cost_bps: value
+            for value in normalized_reports[symbol]
+        }
+        primary_discovery = _cohort_slice(by_cost[14.0], "DISCOVERY")
+        conservative_discovery = _cohort_slice(
+            by_cost[30.0],
+            "DISCOVERY",
+        )
+        conservative_tail_delta = (
+            conservative_discovery.cohort.cumulative_without_best_3_bps
+            - conservative_discovery.baseline.cumulative_without_best_3_bps
+        )
+        return (
+            -conservative_discovery.comparison.cumulative_delta_bps,
+            -primary_discovery.comparison.cumulative_delta_bps,
+            -conservative_tail_delta,
+            symbol,
+        )
+
+    eligible_symbols.sort(key=discovery_rank_key)
+    discovery_shortlist = eligible_symbols[
+        :_COHORT_SUBSET_MAX_CANDIDATES
+    ]
+    shortlisted = set(discovery_shortlist)
+    for rank, symbol in enumerate(eligible_symbols, start=1):
+        candidate = evaluated_by_symbol[symbol]
+        candidate["discovery_rank"] = rank
+        candidate["shortlisted"] = symbol in shortlisted
+
+    candidates = list(evaluated_by_symbol.values())
+    candidates.extend(
+        {
+            "symbol": symbol,
+            "coverage_status": "NO_PAIRED_COVERAGE",
+            "coverage_reason": reason,
+            "status": "REJECTED",
+            "selection_blockers": ["NO_PAIRED_COVERAGE"],
+            "discovery_rank": None,
+            "shortlisted": False,
+        }
+        for symbol, reason in normalized_failures.items()
+    )
+
+    def candidate_sort_key(
+        candidate: dict[str, object],
+    ) -> tuple[int, int, str]:
+        rank = candidate["discovery_rank"]
+        symbol = cast(str, candidate["symbol"])
+        if isinstance(rank, int):
+            return (0, rank, symbol)
+        return (1, 0, symbol)
+
+    candidates.sort(key=candidate_sort_key)
+    return {
+        "screen_version": _COHORT_INDIVIDUAL_SCREEN_VERSION,
+        "selection_uses_holdout": False,
+        "ranking_fields": [
+            "DISCOVERY_30BP_CUMULATIVE_DELTA_BPS",
+            "DISCOVERY_14BP_CUMULATIVE_DELTA_BPS",
+            "DISCOVERY_30BP_TAIL_DELTA_BPS",
+            "SYMBOL",
+        ],
+        "minimum_execution_displacements": (
+            _COHORT_SUBSET_MINIMUM_EXECUTION_DISPLACEMENTS
+        ),
+        "shortlist_limit": _COHORT_SUBSET_MAX_CANDIDATES,
+        "screened_symbol_count": len(candidates),
+        "evaluable_symbol_count": len(normalized_reports),
+        "no_paired_coverage_count": len(normalized_failures),
+        "eligible_symbol_count": len(eligible_symbols),
+        "status": (
+            "DISCOVERY_SHORTLIST_AVAILABLE"
+            if discovery_shortlist
+            else "REJECTED"
+        ),
+        "discovery_shortlist": discovery_shortlist,
+        "selection_blockers": (
+            []
+            if discovery_shortlist
+            else ["NO_DISCOVERY_ROBUST_SYMBOL"]
+        ),
+        "candidates": candidates,
+        "diagnostic_only": True,
+        "automatic_promotion_allowed": False,
+    }
+
+
 def _exclusion_subset_selection_payload(
     reports_by_symbols: Mapping[
         tuple[str, ...],
@@ -873,6 +1051,14 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--screen-cohort-symbols",
+        help=(
+            "optional comma-separated additions screened one at a time under "
+            "--paired-policy; discovery-only ranking supports a full index "
+            "catalog and never promotes automatically"
+        ),
+    )
+    parser.add_argument(
         "--exclusion-symbols",
         help=(
             "optional frozen comma-separated baseline symbols removed "
@@ -900,8 +1086,8 @@ def _parser() -> argparse.ArgumentParser:
         choices=tuple(_PAIRED_POLICY_NAMES),
         default="production",
         help=(
-            "policy used for cohort, exclusion, and holding-horizon paired "
-            "diagnostics (default: production)"
+            "policy used for cohort, individual screen, exclusion, and "
+            "holding-horizon paired diagnostics (default: production)"
         ),
     )
     parser.add_argument("--discovery-ratio", type=float, default=0.60)
@@ -948,6 +1134,14 @@ def main() -> int:
             if args.cohort_symbols
             else ()
         )
+        screen_cohort_symbols = (
+            _parse_symbols(
+                args.screen_cohort_symbols,
+                field_name="screen_cohort_symbols",
+            )
+            if args.screen_cohort_symbols
+            else ()
+        )
         exclusion_symbols = (
             _parse_symbols(
                 args.exclusion_symbols,
@@ -985,9 +1179,14 @@ def main() -> int:
                 "select_exclusion_subset supports at most "
                 f"{_COHORT_SUBSET_MAX_CANDIDATES} exclusion symbols"
             )
-        if cohort_symbols and exclusion_symbols:
+        if sum((
+            bool(cohort_symbols),
+            bool(screen_cohort_symbols),
+            bool(exclusion_symbols),
+        )) > 1:
             raise ValueError(
-                "cohort_symbols and exclusion_symbols are mutually exclusive"
+                "cohort_symbols, screen_cohort_symbols, and exclusion_symbols "
+                "are mutually exclusive"
             )
     except (RuntimeError, ValueError) as exc:
         parser.error(str(exc))
@@ -998,6 +1197,14 @@ def main() -> int:
         parser.error(
             "cohort symbols already exist in baseline: "
             + ", ".join(sorted(overlap))
+        )
+    screen_overlap = set(baseline_symbols).intersection(
+        screen_cohort_symbols
+    )
+    if screen_overlap:
+        parser.error(
+            "screen cohort symbols already exist in baseline: "
+            + ", ".join(sorted(screen_overlap))
         )
     unknown_exclusions = set(exclusion_symbols).difference(
         baseline_symbols
@@ -1038,9 +1245,11 @@ def main() -> int:
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         parser.error(f"failed to load research cache: {exc}")
 
-    all_symbols = tuple(dict.fromkeys(
-        (*baseline_symbols, *cohort_symbols)
-    ))
+    all_symbols = tuple(dict.fromkeys((
+        *baseline_symbols,
+        *cohort_symbols,
+        *screen_cohort_symbols,
+    )))
     missing_symbols = tuple(
         symbol
         for symbol in all_symbols
@@ -1177,6 +1386,65 @@ def main() -> int:
             cohort_subset_selection = (
                 _cohort_subset_selection_payload(reports_by_symbols)
             )
+    cohort_individual_screen: dict[str, object] | None = None
+    if screen_cohort_symbols:
+        baseline_dates = {
+            value.session_date for value in policy_sessions
+        }
+        screen_reports: dict[
+            str,
+            tuple[OpeningPolicyCohortReport, ...],
+        ] = {}
+        coverage_failures: dict[str, str] = {}
+        for symbol in screen_cohort_symbols:
+            candidate_sessions = _build_policy_sessions(
+                bars_by_symbol,
+                symbols=tuple(dict.fromkeys((*baseline_symbols, symbol))),
+                required_symbols=(symbol,),
+                session_dates=session_dates,
+                minimum_data_coverage=args.minimum_data_coverage,
+            )
+            paired_dates = sorted(
+                baseline_dates.intersection(
+                    value.session_date for value in candidate_sessions
+                )
+            )
+            if len(paired_dates) < 2:
+                coverage_failures[symbol] = (
+                    "FEWER_THAN_TWO_PAIRED_SESSIONS"
+                )
+                continue
+            if not any(
+                value <= report.discovery_end_date
+                for value in paired_dates
+            ):
+                coverage_failures[symbol] = (
+                    "MISSING_BASELINE_DISCOVERY_COVERAGE"
+                )
+                continue
+            if not any(
+                value > report.discovery_end_date
+                for value in paired_dates
+            ):
+                coverage_failures[symbol] = (
+                    "MISSING_BASELINE_HOLDOUT_COVERAGE"
+                )
+                continue
+            screen_reports[symbol] = tuple(
+                evaluate_opening_policy_cohort(
+                    policy_sessions,
+                    candidate_sessions,
+                    policy=paired_policy,
+                    cohort_symbols=(symbol,),
+                    round_trip_cost_bps=cost,
+                    discovery_ratio=args.discovery_ratio,
+                )
+                for cost in _COHORT_COST_STRESS_BPS
+            )
+        cohort_individual_screen = _cohort_individual_screen_payload(
+            screen_reports,
+            coverage_failures=coverage_failures,
+        )
     exclusion_report: OpeningPolicyCohortReport | None = None
     exclusion_cost_stress: list[dict[str, object]] = []
     exclusion_subset_selection: dict[str, object] | None = None
@@ -1333,6 +1601,21 @@ def main() -> int:
                 if cohort_subset_selection is not None
                 else None
             ),
+            "cohort_individual_screen_symbol_count": (
+                cohort_individual_screen["screened_symbol_count"]
+                if cohort_individual_screen is not None
+                else None
+            ),
+            "cohort_individual_screen_evaluable_count": (
+                cohort_individual_screen["evaluable_symbol_count"]
+                if cohort_individual_screen is not None
+                else None
+            ),
+            "cohort_individual_screen_no_coverage_count": (
+                cohort_individual_screen["no_paired_coverage_count"]
+                if cohort_individual_screen is not None
+                else None
+            ),
             "exclusion_resolved_session_count": (
                 exclusion_report.cohort_source_sessions
                 if exclusion_report is not None
@@ -1367,6 +1650,13 @@ def main() -> int:
                 args.select_cohort_subset
             ),
             "cohort_subset_selection_uses_holdout": False,
+            "cohort_individual_screen_symbols": list(
+                screen_cohort_symbols
+            ),
+            "cohort_individual_screen_requested": bool(
+                screen_cohort_symbols
+            ),
+            "cohort_individual_screen_uses_holdout": False,
             "exclusion_symbols": list(exclusion_symbols),
             "exclusion_subset_selection_requested": bool(
                 args.select_exclusion_subset
@@ -1409,6 +1699,12 @@ def main() -> int:
             else None
         ),
         "cohort_subset_selection": cohort_subset_selection,
+        "cohort_individual_screen_version": (
+            _COHORT_INDIVIDUAL_SCREEN_VERSION
+            if cohort_individual_screen is not None
+            else None
+        ),
+        "cohort_individual_screen": cohort_individual_screen,
         "exclusion_diagnostic_version": (
             _EXCLUSION_DIAGNOSTIC_VERSION
             if exclusion_report is not None
@@ -1483,6 +1779,10 @@ def main() -> int:
     if cohort_subset_selection is not None:
         compact_payload["cohort_subset_selection"] = (
             cohort_subset_selection
+        )
+    if cohort_individual_screen is not None:
+        compact_payload["cohort_individual_screen"] = (
+            cohort_individual_screen
         )
     if exclusion_report is not None:
         compact_payload["exclusion"] = _compact_exclusion_payload(

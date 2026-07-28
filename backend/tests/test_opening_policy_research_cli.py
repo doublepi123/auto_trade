@@ -11,6 +11,7 @@ import pytest
 from app.cli.opening_extension_research import RawMinuteBar, _save_cache
 from app.cli.opening_policy_research import (
     _build_policy_sessions,
+    _cohort_individual_screen_payload,
     _cohort_subset_selection_payload,
     _default_policy_specs,
     _exclusion_subset_selection_payload,
@@ -33,6 +34,7 @@ from app.domain.opening_momentum_policy import (
 
 _SYMBOLS = tuple(f"S{index}.US" for index in range(8))
 _COHORT_SYMBOL = "C0.US"
+_UNCOVERED_COHORT_SYMBOL = "C1.US"
 
 
 def _timestamp(session_date: date, minute_offset: int) -> datetime:
@@ -120,6 +122,62 @@ def _bars_by_symbol_with_cohort(
     return result
 
 
+def _selection_reports(
+    symbol: str,
+    *,
+    discovery_delta_bps: float,
+    holdout_delta_bps: float,
+) -> tuple[OpeningPolicyCohortReport, ...]:
+    first = date(2026, 1, 2)
+    baseline = tuple(
+        OpeningPolicySession(
+            session_date=first + timedelta(days=index),
+            baseline_signal=True,
+            gross_return_bps=14.0,
+            market_return_bps=-1.0,
+            candidate_path_efficiency=0.8,
+            candidate_symbol="BASE.US",
+        )
+        for index in range(10)
+    )
+    cohort = tuple(
+        OpeningPolicySession(
+            session_date=first + timedelta(days=index),
+            baseline_signal=True,
+            gross_return_bps=(
+                14.0 + discovery_delta_bps
+                if index < 4
+                else (
+                    14.0 + holdout_delta_bps
+                    if index >= 6
+                    else 14.0
+                )
+            ),
+            market_return_bps=-1.0,
+            candidate_path_efficiency=0.8,
+            candidate_symbol=(
+                symbol if index < 4 or index >= 6 else "BASE.US"
+            ),
+        )
+        for index in range(10)
+    )
+    policy = OpeningPolicySpec(
+        PRODUCTION_POLICY_NAME,
+        minimum_path_efficiency=0.7,
+        maximum_market_return_bps=0.0,
+    )
+    return tuple(
+        evaluate_opening_policy_cohort(
+            baseline,
+            cohort,
+            policy=policy,
+            cohort_symbols=(symbol,),
+            round_trip_cost_bps=cost,
+        )
+        for cost in (14.0, 20.0, 30.0)
+    )
+
+
 def test_default_grid_contains_unique_production_and_neighbors() -> None:
     policies = _default_policy_specs()
     names = [value.name for value in policies]
@@ -198,69 +256,13 @@ def test_policy_session_builder_requires_every_cohort_symbol() -> None:
 
 
 def test_cohort_subset_selection_uses_discovery_not_holdout() -> None:
-    first = date(2026, 1, 2)
-    baseline = tuple(
-        OpeningPolicySession(
-            session_date=first + timedelta(days=index),
-            baseline_signal=True,
-            gross_return_bps=14.0,
-            market_return_bps=-1.0,
-            candidate_path_efficiency=0.8,
-            candidate_symbol="BASE.US",
-        )
-        for index in range(10)
-    )
-
-    def reports(
-        symbol: str,
-        *,
-        discovery_delta_bps: float,
-        holdout_delta_bps: float,
-    ) -> tuple[OpeningPolicyCohortReport, ...]:
-        cohort = tuple(
-            OpeningPolicySession(
-                session_date=first + timedelta(days=index),
-                baseline_signal=True,
-                gross_return_bps=(
-                    14.0 + discovery_delta_bps
-                    if index < 4
-                    else (
-                        14.0 + holdout_delta_bps
-                        if index >= 6
-                        else 14.0
-                    )
-                ),
-                market_return_bps=-1.0,
-                candidate_path_efficiency=0.8,
-                candidate_symbol=(
-                    symbol if index < 4 or index >= 6 else "BASE.US"
-                ),
-            )
-            for index in range(10)
-        )
-        policy = OpeningPolicySpec(
-            PRODUCTION_POLICY_NAME,
-            minimum_path_efficiency=0.7,
-            maximum_market_return_bps=0.0,
-        )
-        return tuple(
-            evaluate_opening_policy_cohort(
-                baseline,
-                cohort,
-                policy=policy,
-                cohort_symbols=(symbol,),
-                round_trip_cost_bps=cost,
-            )
-            for cost in (14.0, 20.0, 30.0)
-        )
-
     payload = _cohort_subset_selection_payload({
-        ("A.US",): reports(
+        ("A.US",): _selection_reports(
             "A.US",
             discovery_delta_bps=100.0,
             holdout_delta_bps=-100.0,
         ),
-        ("B.US",): reports(
+        ("B.US",): _selection_reports(
             "B.US",
             discovery_delta_bps=50.0,
             holdout_delta_bps=500.0,
@@ -276,6 +278,51 @@ def test_cohort_subset_selection_uses_discovery_not_holdout() -> None:
     holdout = cast(dict[str, object], selected["holdout_diagnostic"])
     assert discovery["cumulative_delta_bps"] == 400.0
     assert holdout["cumulative_delta_bps"] == -400.0
+
+
+def test_cohort_individual_screen_uses_discovery_and_keeps_no_coverage() -> None:
+    payload = _cohort_individual_screen_payload(
+        {
+            "A.US": _selection_reports(
+                "A.US",
+                discovery_delta_bps=100.0,
+                holdout_delta_bps=-100.0,
+            ),
+            "B.US": _selection_reports(
+                "B.US",
+                discovery_delta_bps=50.0,
+                holdout_delta_bps=500.0,
+            ),
+        },
+        coverage_failures={
+            "HONA.US": "MISSING_BASELINE_DISCOVERY_COVERAGE",
+        },
+    )
+
+    assert payload["selection_uses_holdout"] is False
+    assert payload["automatic_promotion_allowed"] is False
+    assert payload["screened_symbol_count"] == 3
+    assert payload["evaluable_symbol_count"] == 2
+    assert payload["no_paired_coverage_count"] == 1
+    assert payload["eligible_symbol_count"] == 2
+    assert payload["discovery_shortlist"] == ["A.US", "B.US"]
+    candidates = {
+        cast(dict[str, object], value)["symbol"]: value
+        for value in cast(list[object], payload["candidates"])
+    }
+    first = cast(dict[str, object], candidates["A.US"])
+    second = cast(dict[str, object], candidates["B.US"])
+    uncovered = cast(dict[str, object], candidates["HONA.US"])
+    assert first["discovery_rank"] == 1
+    assert second["discovery_rank"] == 2
+    assert cast(dict[str, object], first["holdout_diagnostic"])[
+        "cumulative_delta_bps"
+    ] == -400.0
+    assert cast(dict[str, object], second["holdout_diagnostic"])[
+        "cumulative_delta_bps"
+    ] == 2000.0
+    assert uncovered["coverage_status"] == "NO_PAIRED_COVERAGE"
+    assert uncovered["selection_blockers"] == ["NO_PAIRED_COVERAGE"]
 
 
 def test_exclusion_subset_selection_uses_explicit_exclusion_keys() -> None:
@@ -449,6 +496,79 @@ def test_cli_emits_joint_cohort_diagnostic(
     assert subset["evaluated_subset_count"] == 1
     assert subset["status"] == "REJECTED"
     assert stored["data_scope"]["cohort_subset_evaluated_count"] == 1
+
+
+def test_cli_emits_full_catalog_individual_screen_with_coverage_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    first = date(2026, 7, 6)
+    second = date(2026, 7, 7)
+    cache_path = tmp_path / "opening.json.gz"
+    output_path = tmp_path / "individual-screen-report.json"
+    bars_by_symbol = _bars_by_symbol_with_cohort(first, second)
+    bars_by_symbol[_UNCOVERED_COHORT_SYMBOL] = _bars(
+        _UNCOVERED_COHORT_SYMBOL,
+        second,
+    )
+    _save_cache(
+        cache_path,
+        bars_by_symbol,
+        start_date=first,
+        end_date=second,
+        retained_minutes_after_open=64,
+    )
+    monkeypatch.setattr(sys, "argv", [
+        "opening_policy_research",
+        "--start-date",
+        first.isoformat(),
+        "--end-date",
+        second.isoformat(),
+        "--baseline-symbols",
+        ",".join(_SYMBOLS),
+        "--screen-cohort-symbols",
+        f"{_COHORT_SYMBOL},{_UNCOVERED_COHORT_SYMBOL}",
+        "--paired-policy",
+        "exceptional",
+        "--cache-path",
+        str(cache_path),
+        "--output",
+        str(output_path),
+    ])
+
+    assert main() == 0
+
+    stdout = json.loads(capsys.readouterr().out)
+    stored = json.loads(output_path.read_text(encoding="utf-8"))
+    screen = stdout["cohort_individual_screen"]
+    assert screen["selection_uses_holdout"] is False
+    assert screen["automatic_promotion_allowed"] is False
+    assert screen["screened_symbol_count"] == 2
+    assert screen["evaluable_symbol_count"] == 1
+    assert screen["no_paired_coverage_count"] == 1
+    candidates = {
+        value["symbol"]: value for value in screen["candidates"]
+    }
+    assert candidates[_COHORT_SYMBOL]["coverage_status"] == (
+        "PAIRED_DISCOVERY_AND_HOLDOUT"
+    )
+    assert candidates[_UNCOVERED_COHORT_SYMBOL]["coverage_status"] == (
+        "NO_PAIRED_COVERAGE"
+    )
+    assert candidates[_UNCOVERED_COHORT_SYMBOL]["coverage_reason"] == (
+        "FEWER_THAN_TWO_PAIRED_SESSIONS"
+    )
+    assert stored["cohort_individual_screen_version"] == (
+        screen["screen_version"]
+    )
+    assert stored["research_design"][
+        "cohort_individual_screen_uses_holdout"
+    ] is False
+    assert stored["data_scope"][
+        "cohort_individual_screen_evaluable_count"
+    ] == 1
+    assert "cohort" not in stdout
 
 
 def test_cli_emits_joint_exclusion_diagnostic(
