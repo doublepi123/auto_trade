@@ -22,6 +22,7 @@ from app.cli.opening_extension_research import (
     _merge_bars,
     _parse_integer_grid,
     _parse_symbols,
+    _replace_bar_date_range,
     _save_cache,
     _select_discovery_winner,
     _selected_status,
@@ -354,6 +355,53 @@ def test_seed_cache_loads_prior_scope_and_merges_new_bars(
     assert next(
         bar for bar in merged if bar.timestamp == replacement.timestamp
     ) == replacement
+
+
+def test_replace_bar_date_range_replaces_complete_sessions() -> None:
+    first = date(2026, 7, 6)
+    second = date(2026, 7, 7)
+    existing = (
+        *_raw_bars("AAA.US", first),
+        *_raw_bars("AAA.US", second),
+    )
+    refreshed = list(_raw_bars("AAA.US", second))
+    refreshed[0] = replace(
+        refreshed[0],
+        open=99.0,
+        low=99.0,
+    )
+    refreshed.pop()
+
+    result = _replace_bar_date_range(
+        existing,
+        refreshed,
+        start_date=second,
+        end_date=second,
+    )
+
+    assert len(result) == len(existing) - 1
+    assert sum(bar.timestamp.date() == first for bar in result) == 36
+    second_bars = tuple(
+        bar for bar in result if bar.timestamp.date() == second
+    )
+    assert len(second_bars) == 35
+    assert second_bars[0].open == 99.0
+
+
+def test_replace_bar_date_range_rejects_missing_existing_session() -> None:
+    first = date(2026, 7, 6)
+    second = date(2026, 7, 7)
+
+    with pytest.raises(
+        ValueError,
+        match="refreshed bars omit existing trading sessions: 2026-07-07",
+    ):
+        _replace_bar_date_range(
+            (*_raw_bars("AAA.US", first), *_raw_bars("AAA.US", second)),
+            _raw_bars("AAA.US", first),
+            start_date=first,
+            end_date=second,
+        )
 
 
 def test_seed_cache_rejects_incompatible_scope(tmp_path: Path) -> None:

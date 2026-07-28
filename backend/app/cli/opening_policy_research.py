@@ -23,6 +23,7 @@ from app.cli.opening_extension_research import (
     _merge_bars,
     _parse_date,
     _parse_symbols,
+    _replace_bar_date_range,
     _save_cache,
 )
 from app.core.broker import BrokerGateway
@@ -60,10 +61,11 @@ from app.domain.opening_momentum_policy import (
 )
 
 
-OPENING_POLICY_CLI_VERSION = "opening-policy-research-cli-v10"
+OPENING_POLICY_CLI_VERSION = "opening-policy-research-cli-v11"
 _DEFAULT_PATH_THRESHOLDS = (0.50, 0.60, 0.70, 0.80, 0.90)
 _DEFAULT_MARKET_MAXIMUMS_BPS = (-10.0, -5.0, 0.0, 5.0, 10.0, 20.0)
 _DEFAULT_MINIMUM_DATA_COVERAGE = 0.95
+_CACHE_REFRESH_OVERLAP_DAYS = 7
 _COHORT_COST_STRESS_BPS = (14.0, 20.0, 30.0)
 _COHORT_SUBSET_MAX_CANDIDATES = 6
 _COHORT_SUBSET_MINIMUM_EXECUTION_DISPLACEMENTS = 4
@@ -1103,8 +1105,9 @@ def _parser() -> argparse.ArgumentParser:
         "--seed-cache-path",
         help=(
             "optional immutable cache with the same start date and an earlier "
-            "end date; used only when --cache-path does not yet exist so only "
-            "the missing date range is fetched"
+            "end date; used only when --cache-path does not yet exist, with "
+            "the final seven calendar days refreshed to absorb vendor data "
+            "revisions before fetching the missing range"
         ),
     )
     parser.add_argument("--output")
@@ -1272,7 +1275,10 @@ def main() -> int:
                 retained_minutes_after_open=maximum_offset,
             )
             seed_cache_used = seed_cache_path
-            incremental_fetch_start_date = seed_end_date + timedelta(days=1)
+            incremental_fetch_start_date = max(
+                start_date,
+                seed_end_date - timedelta(days=_CACHE_REFRESH_OVERLAP_DAYS),
+            )
         else:
             bars_by_symbol = {}
     except (OSError, ValueError, json.JSONDecodeError) as exc:
@@ -1326,9 +1332,17 @@ def main() -> int:
                     end_date=end_date,
                     retained_minutes_after_open=maximum_offset,
                 )
-                bars_by_symbol[symbol] = _merge_bars(
-                    bars_by_symbol.get(symbol, ()),
-                    fetched_bars,
+                existing_bars = bars_by_symbol.get(symbol, ())
+                bars_by_symbol[symbol] = (
+                    _replace_bar_date_range(
+                        existing_bars,
+                        fetched_bars,
+                        start_date=fetch_start_date,
+                        end_date=end_date,
+                    )
+                    if incremental_fetch_start_date is not None
+                    and existing_bars
+                    else _merge_bars(existing_bars, fetched_bars)
                 )
                 if (
                     incremental_fetch_start_date is None
@@ -1354,7 +1368,7 @@ def main() -> int:
                 broker.close()
 
     cache_update_mode = (
-        "SEEDED_INCREMENTAL"
+        "SEEDED_INCREMENTAL_WITH_OVERLAP"
         if seed_cache_used is not None
         else "EXACT_OR_FILL_MISSING"
         if cache_preexisting
@@ -1717,6 +1731,11 @@ def main() -> int:
                 else None
             ),
             "cache_update_mode": cache_update_mode,
+            "cache_refresh_overlap_days": (
+                _CACHE_REFRESH_OVERLAP_DAYS
+                if seed_cache_used is not None
+                else 0
+            ),
             "bar_counts": {
                 symbol: len(bars_by_symbol.get(symbol, ()))
                 for symbol in all_symbols
@@ -1730,6 +1749,11 @@ def main() -> int:
             ),
             "baseline_symbols": list(baseline_symbols),
             "cache_update_mode": cache_update_mode,
+            "cache_refresh_overlap_days": (
+                _CACHE_REFRESH_OVERLAP_DAYS
+                if seed_cache_used is not None
+                else 0
+            ),
             "paired_policy_name": paired_policy.name,
             "cohort_symbols": list(cohort_symbols),
             "cohort_subset_selection_requested": bool(

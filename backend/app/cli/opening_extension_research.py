@@ -516,6 +516,56 @@ def _merge_bars(
     return tuple(by_timestamp[timestamp] for timestamp in sorted(by_timestamp))
 
 
+def _replace_bar_date_range(
+    existing: Sequence[RawMinuteBar],
+    fetched: Sequence[RawMinuteBar],
+    *,
+    start_date: date,
+    end_date: date,
+) -> tuple[RawMinuteBar, ...]:
+    """Replace complete US sessions while guarding against empty refreshes."""
+    if end_date < start_date:
+        raise ValueError("end_date must not precede start_date")
+
+    session = get_session("US")
+
+    def session_date(bar: RawMinuteBar) -> date:
+        return session.local(bar.timestamp).date()
+
+    existing_refresh_dates = {
+        value
+        for bar in existing
+        if start_date <= (value := session_date(bar)) <= end_date
+    }
+    fetched_dates = {session_date(bar) for bar in fetched}
+    out_of_scope_dates = {
+        value
+        for value in fetched_dates
+        if value < start_date or value > end_date
+    }
+    if out_of_scope_dates:
+        rendered = ", ".join(
+            value.isoformat() for value in sorted(out_of_scope_dates)
+        )
+        raise ValueError(f"fetched bars fall outside refresh scope: {rendered}")
+
+    missing_dates = existing_refresh_dates - fetched_dates
+    if missing_dates:
+        rendered = ", ".join(
+            value.isoformat() for value in sorted(missing_dates)
+        )
+        raise ValueError(
+            "refreshed bars omit existing trading sessions: " + rendered
+        )
+
+    retained = tuple(
+        bar
+        for bar in existing
+        if not start_date <= session_date(bar) <= end_date
+    )
+    return _merge_bars(retained, fetched)
+
+
 def _save_cache(
     path: Path,
     bars_by_symbol: dict[str, tuple[RawMinuteBar, ...]],

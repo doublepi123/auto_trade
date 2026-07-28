@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import cast
@@ -436,14 +437,14 @@ def test_cli_replays_existing_cache_without_broker(
     )
 
 
-def test_cli_extends_seed_cache_by_fetching_only_missing_dates(
+def test_cli_extends_seed_cache_with_revision_overlap(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    first = date(2026, 7, 6)
-    second = date(2026, 7, 7)
-    third = date(2026, 7, 8)
+    first = date(2026, 7, 1)
+    second = date(2026, 7, 10)
+    third = date(2026, 7, 13)
     seed_path = tmp_path / "opening-seed.json.gz"
     cache_path = tmp_path / "opening-target.json.gz"
     output_path = tmp_path / "report.json"
@@ -483,10 +484,24 @@ def test_cli_extends_seed_cache_by_fetching_only_missing_dates(
             end_date,
             retained_minutes_after_open,
         ))
-        return _bars(
+        refreshed = list(_bars(
             symbol,
-            third,
+            second,
             retained_minutes=retained_minutes_after_open,
+        ))
+        if symbol == _COHORT_SYMBOL:
+            refreshed[0] = replace(
+                refreshed[0],
+                open=99.5,
+                low=99.5,
+            )
+        return (
+            *refreshed,
+            *_bars(
+                symbol,
+                third,
+                retained_minutes=retained_minutes_after_open,
+            ),
         )
 
     monkeypatch.setattr(research_cli, "BrokerGateway", _FakeBroker)
@@ -517,9 +532,10 @@ def test_cli_extends_seed_cache_by_fetching_only_missing_dates(
     assert main() == 0
 
     stdout = json.loads(capsys.readouterr().out)
+    refresh_start = second - timedelta(days=7)
     assert len(calls) == len(_SYMBOLS) + 1
     assert {value[0] for value in calls} == {*_SYMBOLS, _COHORT_SYMBOL}
-    assert all(value[1:] == (third, third, 64) for value in calls)
+    assert all(value[1:] == (refresh_start, third, 64) for value in calls)
     assert closed == [True]
     loaded = _load_cache(
         cache_path,
@@ -531,13 +547,19 @@ def test_cli_extends_seed_cache_by_fetching_only_missing_dates(
         len(loaded[symbol]) == 65 * 3
         for symbol in (*_SYMBOLS, _COHORT_SYMBOL)
     )
+    assert next(
+        bar
+        for bar in loaded[_COHORT_SYMBOL]
+        if bar.timestamp == _timestamp(second, 0)
+    ).open == 99.5
     assert "EXTRA.US" not in loaded
     assert stdout["data_scope"]["cache_update_mode"] == (
-        "SEEDED_INCREMENTAL"
+        "SEEDED_INCREMENTAL_WITH_OVERLAP"
     )
+    assert stdout["data_scope"]["cache_refresh_overlap_days"] == 7
     assert stdout["data_scope"]["seed_cache_path"] == str(seed_path)
     assert stdout["data_scope"]["incremental_fetch_start_date"] == (
-        third.isoformat()
+        refresh_start.isoformat()
     )
 
 
@@ -579,10 +601,14 @@ def test_cli_seed_extension_failure_leaves_target_absent(
         calls.append(symbol)
         if len(calls) == 2:
             raise RuntimeError("synthetic incremental fetch failure")
-        return _bars(
-            symbol,
-            third,
-            retained_minutes=retained_minutes_after_open,
+        return tuple(
+            bar
+            for session_date in (first, second, third)
+            for bar in _bars(
+                symbol,
+                session_date,
+                retained_minutes=retained_minutes_after_open,
+            )
         )
 
     monkeypatch.setattr(research_cli, "BrokerGateway", _FakeBroker)
