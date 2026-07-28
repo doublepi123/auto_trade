@@ -21,6 +21,7 @@ from app.domain.opening_momentum import (
     evaluate_opening_momentum,
     evaluate_opening_momentum_path_eligible,
     evaluate_opening_range_breakout,
+    evaluate_stocks_in_play_opening_range_breakout,
     evaluate_opening_reversal,
     opening_path_efficiency,
     shadow_round_trip_return_bps,
@@ -282,6 +283,16 @@ _FIVE_MINUTE_ORB_SOURCE = "OPENING_FIVE_MINUTE_ORB"
 _FIVE_MINUTE_ORB_ALGORITHM_VERSION = (
     f"{ALGORITHM_VERSION}+{_FIVE_MINUTE_ORB_VERSION}"
 )
+_STOCKS_IN_PLAY_ORB_TOP_N = 20
+_STOCKS_IN_PLAY_ORB_VERSION = (
+    "forward-only-5m-orb-stocks-in-play-top20-opening5-turnover-"
+    "to-prior20d-adv-proxy-next-minute-open-range-low-stop-cap4-"
+    "hold60-cost30-precommitted-20260728-v1"
+)
+_STOCKS_IN_PLAY_ORB_SOURCE = "OPENING_FIVE_MINUTE_ORB_STOCKS_IN_PLAY"
+_STOCKS_IN_PLAY_ORB_ALGORITHM_VERSION = (
+    f"{ALGORITHM_VERSION}+{_STOCKS_IN_PLAY_ORB_VERSION}"
+)
 _EXECUTION_EXTENSION_COHORT_VERSION = (
     "individual-discovery-top6-positive-delta-min4-stop1-shortlist-v2-"
     "20260724"
@@ -420,6 +431,7 @@ _VariantName = Literal[
     "ETF_REGIME_TRV_CHALLENGER",
     "OPENING_RANGE_STOP_CHALLENGER",
     "FIVE_MINUTE_ORB_CHALLENGER",
+    "STOCKS_IN_PLAY_ORB_CHALLENGER",
     "EXECUTION_SNDK_CHALLENGER",
     "EXECUTION_INTC_CHALLENGER",
     "EXECUTION_QCOM_CHALLENGER",
@@ -431,6 +443,7 @@ _SignalModel = Literal["MOMENTUM", "REVERSAL", "OPENING_RANGE_BREAKOUT"]
 _CandidateSelectionMode = Literal[
     "TOP_THEN_GATE",
     "PATH_ELIGIBLE_RERANK",
+    "OPENING_ACTIVITY_TOP_N_THEN_BREAKOUT",
 ]
 
 
@@ -512,6 +525,7 @@ class _UniverseVariant:
     exceptional_maximum_market_return_bps: float | None = None
     maximum_benchmark_average_return_bps: float | None = None
     opening_range_stop: bool = False
+    opening_activity_top_n: int | None = None
     required_symbols: tuple[str, ...] = ()
     excluded_symbols: tuple[str, ...] = ()
     forward_evidence_start_date: date | None = None
@@ -623,6 +637,24 @@ class _UniverseVariant:
         ):
             raise ValueError(
                 "opening-range breakout requires a five-minute range stop"
+            )
+        if self.opening_activity_top_n is not None:
+            if self.opening_activity_top_n <= 0:
+                raise ValueError("opening_activity_top_n must be positive")
+            if (
+                self.signal_model != "OPENING_RANGE_BREAKOUT"
+                or self.candidate_selection_mode
+                != "OPENING_ACTIVITY_TOP_N_THEN_BREAKOUT"
+            ):
+                raise ValueError(
+                    "opening activity ranking requires its ORB selection mode"
+                )
+        elif (
+            self.candidate_selection_mode
+            == "OPENING_ACTIVITY_TOP_N_THEN_BREAKOUT"
+        ):
+            raise ValueError(
+                "opening activity selection requires opening_activity_top_n"
             )
 
     def effective_maximum_market_return_bps(
@@ -1105,11 +1137,30 @@ class OpeningMomentumShadowService:
         observations: list[OpeningMomentumObservation],
         path_efficiency_by_symbol: dict[str, float],
         opening_range_high_by_symbol: dict[str, float] | None = None,
+        opening_activity_ratio_by_symbol: dict[str, float] | None = None,
     ) -> OpeningMomentumDecision:
         if variant.signal_model == "OPENING_RANGE_BREAKOUT":
             if opening_range_high_by_symbol is None:
                 raise RuntimeError(
                     "opening-range breakout is missing its frozen highs"
+                )
+            if variant.opening_activity_top_n is not None:
+                if opening_activity_ratio_by_symbol is None:
+                    raise RuntimeError(
+                        "stocks-in-play ORB is missing opening activity"
+                    )
+                return evaluate_stocks_in_play_opening_range_breakout(
+                    observations,
+                    opening_range_high_by_symbol=(
+                        opening_range_high_by_symbol
+                    ),
+                    opening_activity_ratio_by_symbol=(
+                        opening_activity_ratio_by_symbol
+                    ),
+                    maximum_stocks_in_play=(
+                        variant.opening_activity_top_n
+                    ),
+                    config=variant.decision_config,
                 )
             return evaluate_opening_range_breakout(
                 observations,
@@ -1305,6 +1356,8 @@ class OpeningMomentumShadowService:
             opening_range_low_by_symbol: dict[str, float] = {}
             opening_range_high_by_symbol: dict[str, float] = {}
             signal_turnover_by_symbol: dict[str, float] = {}
+            opening_turnover_by_symbol: dict[str, float] = {}
+            opening_activity_ratio_by_symbol: dict[str, float] = {}
             excluded = {
                 symbol: fetch_errors[symbol]
                 for symbol in variant.symbols
@@ -1364,16 +1417,63 @@ class OpeningMomentumShadowService:
                 )
                 if signal_turnover is not None:
                     signal_turnover_by_symbol[symbol] = signal_turnover
+                opening_turnover = self._signal_turnover(signal_candles)
+                if opening_turnover is not None:
+                    opening_turnover_by_symbol[symbol] = opening_turnover
+                    average_daily_turnover = (
+                        avg_dollar_volume_by_candidate.get((
+                            variant.selection_run_id,
+                            symbol,
+                        ))
+                        if variant.selection_run_id is not None
+                        else None
+                    )
+                    if (
+                        average_daily_turnover is not None
+                        and average_daily_turnover > 0
+                    ):
+                        opening_activity_ratio_by_symbol[symbol] = (
+                            opening_turnover / average_daily_turnover
+                        )
                 if len(signal_candles) >= 5:
                     path_features_by_symbol[symbol] = (
                         self._opening_path_features(signal_candles)
                     )
+
+            opening_activity_data_complete = True
+            if variant.opening_activity_top_n is not None:
+                observation_symbols = {
+                    item.symbol for item in observations
+                }
+                opening_activity_data_complete = (
+                    observation_symbols.issubset(
+                        opening_activity_ratio_by_symbol
+                    )
+                )
+                activity_ranking = [
+                    symbol
+                    for symbol, _ in sorted(
+                        opening_activity_ratio_by_symbol.items(),
+                        key=lambda item: (-item[1], item[0]),
+                    )[:variant.opening_activity_top_n]
+                ]
+                activity_eligible = set(activity_ranking)
+                for symbol in observation_symbols:
+                    if symbol not in opening_activity_ratio_by_symbol:
+                        excluded[symbol] = (
+                            "OPENING_ACTIVITY_DATA_MISSING"
+                        )
+                    elif symbol not in activity_eligible:
+                        excluded[symbol] = (
+                            "OPENING_ACTIVITY_RANK_OUTSIDE_TOP20"
+                        )
 
             decision = self._evaluate_variant_decision(
                 variant,
                 observations,
                 path_efficiency_by_symbol,
                 opening_range_high_by_symbol,
+                opening_activity_ratio_by_symbol,
             )
             candidate_observation = next(
                 (
@@ -1468,7 +1568,15 @@ class OpeningMomentumShadowService:
                 else None
             )
             candidate_signal_turnover = (
-                signal_turnover_by_symbol.get(decision.candidate_symbol)
+                (
+                    opening_turnover_by_symbol.get(
+                        decision.candidate_symbol
+                    )
+                    if variant.opening_activity_top_n is not None
+                    else signal_turnover_by_symbol.get(
+                        decision.candidate_symbol
+                    )
+                )
                 if decision.candidate_symbol is not None
                 else None
             )
@@ -1502,6 +1610,7 @@ class OpeningMomentumShadowService:
             data_complete = (
                 bool(variant.symbols)
                 and len(observations) >= required_observations
+                and opening_activity_data_complete
                 and set(variant.required_symbols).issubset(
                     {item.symbol for item in observations}
                 )
@@ -2116,6 +2225,14 @@ class OpeningMomentumShadowService:
             symbols=active_broad_symbols,
             selection_run_id=run.id,
         ))
+        stocks_in_play_orb_identity = identities_by_variant[
+            "STOCKS_IN_PLAY_ORB_CHALLENGER"
+        ]
+        variants.append(replace(
+            stocks_in_play_orb_identity,
+            symbols=active_broad_symbols,
+            selection_run_id=run.id,
+        ))
         for spec in _EXECUTION_EXTENSION_SPECS:
             identity = identities_by_variant[spec.variant]
             variants.append(_UniverseVariant(
@@ -2509,6 +2626,33 @@ class OpeningMomentumShadowService:
                     _EARLY_BROAD_MINIMUM_COVERAGE
                 ),
                 opening_range_stop=True,
+                forward_evidence_start_date=(
+                    _POST_20260727_FORWARD_EVIDENCE_START_DATE
+                ),
+            ))
+            variants.append(_UniverseVariant(
+                variant="STOCKS_IN_PLAY_ORB_CHALLENGER",
+                algorithm_version=(
+                    _STOCKS_IN_PLAY_ORB_ALGORITHM_VERSION
+                ),
+                config_version=self._evidence_config_version(
+                    f"{five_minute_orb_config.version_hash()}:"
+                    f"{_STOCKS_IN_PLAY_ORB_VERSION}:"
+                    f"{_STOCKS_IN_PLAY_ORB_TOP_N}"
+                ),
+                universe_source=_STOCKS_IN_PLAY_ORB_SOURCE,
+                decision_config=five_minute_orb_config,
+                signal_model="OPENING_RANGE_BREAKOUT",
+                candidate_selection_mode=(
+                    "OPENING_ACTIVITY_TOP_N_THEN_BREAKOUT"
+                ),
+                minimum_data_coverage=(
+                    _EARLY_BROAD_MINIMUM_COVERAGE
+                ),
+                opening_range_stop=True,
+                opening_activity_top_n=(
+                    _STOCKS_IN_PLAY_ORB_TOP_N
+                ),
                 forward_evidence_start_date=(
                     _POST_20260727_FORWARD_EVIDENCE_START_DATE
                 ),
@@ -3226,12 +3370,16 @@ class OpeningMomentumShadowService:
                 "QUALITY_FIRST_PATH_RERANK_CHALLENGER",
                 "FIVE_MINUTE_ORB_CHALLENGER",
             }
+            uses_five_minute_orb_baseline = (
+                identity.variant == "STOCKS_IN_PLAY_ORB_CHALLENGER"
+            )
             requires_displacement_evidence = (
                 is_early_extension
                 or is_execution_extension
                 or uses_weak_breadth_baseline
                 or uses_etf_regime_baseline
                 or uses_exceptional_path_baseline
+                or uses_five_minute_orb_baseline
             )
             identity_rows_by_date = rows_by_date[
                 identity.config_version
@@ -3243,6 +3391,7 @@ class OpeningMomentumShadowService:
                 "WEAK_BREADTH_PATH_CHALLENGER",
                 "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER",
                 "ETF_REGIME_PATH_CHALLENGER",
+                "FIVE_MINUTE_ORB_CHALLENGER",
             ] | None
             if identity.variant == "INCUMBENT":
                 comparison_baseline = None
@@ -3256,6 +3405,8 @@ class OpeningMomentumShadowService:
                 comparison_baseline = (
                     "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER"
                 )
+            elif uses_five_minute_orb_baseline:
+                comparison_baseline = "FIVE_MINUTE_ORB_CHALLENGER"
             elif uses_weak_breadth_baseline:
                 comparison_baseline = "WEAK_BREADTH_PATH_CHALLENGER"
             else:
@@ -3275,6 +3426,10 @@ class OpeningMomentumShadowService:
             elif uses_exceptional_path_baseline:
                 comparison_identity = identities_by_variant[
                     "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER"
+                ]
+            elif uses_five_minute_orb_baseline:
+                comparison_identity = identities_by_variant[
+                    "FIVE_MINUTE_ORB_CHALLENGER"
                 ]
             elif uses_weak_breadth_baseline:
                 comparison_identity = identities_by_variant[
@@ -3403,6 +3558,9 @@ class OpeningMomentumShadowService:
                     ),
                     maximum_benchmark_average_return_bps=(
                         identity.maximum_benchmark_average_return_bps
+                    ),
+                    opening_activity_top_n=(
+                        identity.opening_activity_top_n
                     ),
                     required_symbols=list(
                         identity.required_symbols

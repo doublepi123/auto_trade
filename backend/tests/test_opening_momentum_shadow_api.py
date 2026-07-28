@@ -195,8 +195,11 @@ class TestOpeningMomentumShadowApi:
             "OPENING_RANGE_STOP_CHALLENGER"
         ]
         five_minute_orb = variants["FIVE_MINUTE_ORB_CHALLENGER"]
+        stocks_in_play_orb = variants[
+            "STOCKS_IN_PLAY_ORB_CHALLENGER"
+        ]
         execution_sndk = variants["EXECUTION_SNDK_CHALLENGER"]
-        assert len(variants) == 36
+        assert len(variants) == 37
         assert early["universe_source"] == "OPENING_EARLY_BROAD"
         assert early["signal_minutes"] == 3
         assert early["minimum_market_return_bps"] == -50.0
@@ -639,6 +642,30 @@ class TestOpeningMomentumShadowApi:
         assert five_minute_orb["comparison"][
             "multiple_testing_family_size"
         ] == 4
+        assert stocks_in_play_orb["universe_source"] == (
+            "OPENING_FIVE_MINUTE_ORB_STOCKS_IN_PLAY"
+        )
+        assert stocks_in_play_orb["signal_minutes"] == 5
+        assert stocks_in_play_orb["holding_minutes"] == 60
+        assert stocks_in_play_orb["stop_loss_pct"] == 4.0
+        assert stocks_in_play_orb["minimum_data_coverage"] == 0.95
+        assert stocks_in_play_orb["candidate_selection_mode"] == (
+            "OPENING_ACTIVITY_TOP_N_THEN_BREAKOUT"
+        )
+        assert stocks_in_play_orb["opening_activity_top_n"] == 20
+        assert stocks_in_play_orb["forward_evidence_start_date"] == (
+            "2026-07-28"
+        )
+        assert stocks_in_play_orb["comparison_baseline"] == (
+            "FIVE_MINUTE_ORB_CHALLENGER"
+        )
+        assert stocks_in_play_orb["comparison"] is not None
+        assert stocks_in_play_orb["comparison"][
+            "minimum_policy_displacement_sessions"
+        ] == 3
+        assert stocks_in_play_orb["comparison"][
+            "multiple_testing_family_size"
+        ] == 1
         assert execution_sndk["required_symbols"] == ["SNDK.US"]
         assert (
             execution_sndk["comparison_baseline"]

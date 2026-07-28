@@ -140,6 +140,8 @@ describe('Strategy v2 shadow lab', () => {
       .and('contain', '弱广度 + 4% 灾难止损')
       .and('contain', '开盘区间止损')
       .and('contain', '5 分钟 ORB 突破')
+      .and('contain', '活跃成交 ORB')
+      .and('contain', '开盘活跃度 Top 20 后突破')
       .and('contain', '区间低点 / 4%上限')
       .and('contain', '执行 + SNDK')
       .and('contain', '执行 + CRWD')

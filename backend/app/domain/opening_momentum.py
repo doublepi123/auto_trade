@@ -261,6 +261,88 @@ def evaluate_opening_range_breakout(
 ) -> OpeningMomentumDecision:
     """Select the strongest close-confirmed opening-range breakout."""
 
+    return _evaluate_opening_range_breakout(
+        observations,
+        opening_range_high_by_symbol=opening_range_high_by_symbol,
+        eligible_symbols=None,
+        entry_reason="FIVE_MINUTE_OPENING_RANGE_BREAKOUT",
+        config=config,
+    )
+
+
+def evaluate_stocks_in_play_opening_range_breakout(
+    observations: Sequence[OpeningMomentumObservation],
+    *,
+    opening_range_high_by_symbol: Mapping[str, float],
+    opening_activity_ratio_by_symbol: Mapping[str, float],
+    maximum_stocks_in_play: int = 20,
+    config: OpeningMomentumConfig | None = None,
+) -> OpeningMomentumDecision:
+    """Restrict ORB candidates to the most active opening names."""
+
+    if maximum_stocks_in_play <= 0:
+        raise ValueError("maximum_stocks_in_play must be positive")
+    normalized_activity: dict[str, float] = {}
+    for raw_symbol, raw_ratio in opening_activity_ratio_by_symbol.items():
+        symbol = raw_symbol.strip().upper()
+        if not symbol:
+            raise ValueError("opening activity symbol is required")
+        if symbol in normalized_activity:
+            raise ValueError(f"duplicate opening activity ratio: {symbol}")
+        ratio = float(raw_ratio)
+        if not math.isfinite(ratio) or ratio <= 0:
+            raise ValueError(
+                "opening activity ratios must contain positive finite values"
+            )
+        normalized_activity[symbol] = ratio
+
+    observation_symbols = {item.symbol for item in observations}
+    if not observation_symbols.issubset(normalized_activity):
+        params = config or OpeningMomentumConfig()
+        _, ranking = _rank_opening_observations(observations)
+        return OpeningMomentumDecision(
+            action="SKIP",
+            reason="OPENING_ACTIVITY_DATA_INCOMPLETE",
+            universe_size=len(ranking),
+            market_return_bps=(
+                median(item.opening_return_bps for item in ranking)
+                if len(ranking) >= params.minimum_universe_size
+                else None
+            ),
+            candidate_symbol=None,
+            candidate_return_bps=None,
+            excess_return_bps=None,
+            entry_price=None,
+            ranking=ranking,
+        )
+
+    stocks_in_play = {
+        symbol
+        for symbol, _ in sorted(
+            (
+                (symbol, normalized_activity[symbol])
+                for symbol in observation_symbols
+            ),
+            key=lambda item: (-item[1], item[0]),
+        )[:maximum_stocks_in_play]
+    }
+    return _evaluate_opening_range_breakout(
+        observations,
+        opening_range_high_by_symbol=opening_range_high_by_symbol,
+        eligible_symbols=stocks_in_play,
+        entry_reason="STOCKS_IN_PLAY_FIVE_MINUTE_OPENING_RANGE_BREAKOUT",
+        config=config,
+    )
+
+
+def _evaluate_opening_range_breakout(
+    observations: Sequence[OpeningMomentumObservation],
+    *,
+    opening_range_high_by_symbol: Mapping[str, float],
+    eligible_symbols: set[str] | None,
+    entry_reason: str,
+    config: OpeningMomentumConfig | None,
+) -> OpeningMomentumDecision:
     normalized_highs: dict[str, float] = {}
     for raw_symbol, raw_high in opening_range_high_by_symbol.items():
         symbol = raw_symbol.strip().upper()
@@ -297,8 +379,10 @@ def evaluate_opening_range_breakout(
         item
         for item in by_symbol.values()
         if (
-            (opening_range_high := normalized_highs.get(item.symbol))
-            is not None
+            (eligible_symbols is None or item.symbol in eligible_symbols)
+            and (
+                opening_range_high := normalized_highs.get(item.symbol)
+            ) is not None
             and item.signal_close > opening_range_high
         )
     ]
@@ -335,7 +419,7 @@ def evaluate_opening_range_breakout(
         entry_price = None
     else:
         action = "ENTER_LONG"
-        reason = "FIVE_MINUTE_OPENING_RANGE_BREAKOUT"
+        reason = entry_reason
         entry_price = candidate_observation.entry_open
 
     return OpeningMomentumDecision(

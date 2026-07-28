@@ -1970,6 +1970,7 @@ export interface OpeningMomentumShadowVariant {
     | 'ETF_REGIME_TRV_CHALLENGER'
     | 'OPENING_RANGE_STOP_CHALLENGER'
     | 'FIVE_MINUTE_ORB_CHALLENGER'
+    | 'STOCKS_IN_PLAY_ORB_CHALLENGER'
     | 'EXECUTION_SNDK_CHALLENGER'
     | 'EXECUTION_INTC_CHALLENGER'
     | 'EXECUTION_QCOM_CHALLENGER'
@@ -1979,7 +1980,10 @@ export interface OpeningMomentumShadowVariant {
   universe_source: string
   algorithm_version: string
   config_version: string
-  candidate_selection_mode: 'TOP_THEN_GATE' | 'PATH_ELIGIBLE_RERANK'
+  candidate_selection_mode:
+    | 'TOP_THEN_GATE'
+    | 'PATH_ELIGIBLE_RERANK'
+    | 'OPENING_ACTIVITY_TOP_N_THEN_BREAKOUT'
   signal_minutes: number
   minimum_market_return_bps: number
   minimum_candidate_return_bps: number
@@ -1990,6 +1994,7 @@ export interface OpeningMomentumShadowVariant {
   exceptional_minimum_path_efficiency: number | null
   exceptional_maximum_market_return_bps: number | null
   maximum_benchmark_average_return_bps: number | null
+  opening_activity_top_n?: number | null
   required_symbols: string[]
   excluded_symbols: string[]
   holding_minutes: number
@@ -2004,6 +2009,7 @@ export interface OpeningMomentumShadowVariant {
     | 'WEAK_BREADTH_PATH_CHALLENGER'
     | 'WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER'
     | 'ETF_REGIME_PATH_CHALLENGER'
+    | 'FIVE_MINUTE_ORB_CHALLENGER'
     | null
   latest: OpeningMomentumShadowRun | null
   metrics: OpeningMomentumShadowMetrics

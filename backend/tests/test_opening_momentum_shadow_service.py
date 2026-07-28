@@ -87,6 +87,7 @@ _ALL_CHALLENGER_VARIANTS = (
     *_ETF_REGIME_VARIANTS,
     "OPENING_RANGE_STOP_CHALLENGER",
     "FIVE_MINUTE_ORB_CHALLENGER",
+    "STOCKS_IN_PLAY_ORB_CHALLENGER",
     *_EXECUTION_EXTENSION_VARIANTS,
 )
 
@@ -1190,6 +1191,80 @@ def test_five_minute_orb_uses_confirmed_breakout_and_next_open(
         Base.metadata.drop_all(bind=engine)
 
 
+def test_stocks_in_play_orb_uses_five_minute_activity_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        settings,
+        "opening_momentum_shadow_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        settings,
+        "opening_momentum_challenger_enabled",
+        True,
+    )
+    engine, db = _database()
+    try:
+        _seed_universe(db, avg_dollar_volume=100_000_000.0)
+        _seed_active_broad_pool(db)
+        service = OpeningMomentumShadowService(
+            db,
+            _FakeCandles(
+                orb_breakout_for="S7.US",
+                turnover_per_minute_by_symbol={
+                    symbol: 1_000_000.0 for symbol in _SYMBOLS
+                },
+            ),
+        )
+
+        status = service.tick(
+            now=_SESSION_OPEN + timedelta(minutes=7, seconds=10),
+        )
+
+        variants = {item.variant: item for item in status.variants}
+        baseline = variants["FIVE_MINUTE_ORB_CHALLENGER"]
+        challenger = variants["STOCKS_IN_PLAY_ORB_CHALLENGER"]
+        assert baseline.latest is not None
+        assert challenger.latest is not None
+        assert challenger.latest.status == "OPEN"
+        assert challenger.latest.reason == (
+            "STOCKS_IN_PLAY_FIVE_MINUTE_OPENING_RANGE_BREAKOUT"
+        )
+        assert challenger.latest.candidate_symbol == "S7.US"
+        assert challenger.latest.signal_at == (
+            _SESSION_OPEN + timedelta(minutes=5)
+        )
+        assert challenger.latest.entry_at == (
+            _SESSION_OPEN + timedelta(minutes=6)
+        )
+        assert challenger.latest.candidate_signal_turnover == pytest.approx(
+            5_000_000.0
+        )
+        assert challenger.latest.candidate_avg_dollar_volume == pytest.approx(
+            100_000_000.0
+        )
+        assert (
+            challenger.latest.candidate_signal_turnover_ratio
+            == pytest.approx(0.05)
+        )
+        assert baseline.latest.candidate_signal_turnover == pytest.approx(
+            6_000_000.0
+        )
+        assert challenger.candidate_selection_mode == (
+            "OPENING_ACTIVITY_TOP_N_THEN_BREAKOUT"
+        )
+        assert challenger.opening_activity_top_n == 20
+        assert challenger.comparison_baseline == (
+            "FIVE_MINUTE_ORB_CHALLENGER"
+        )
+        assert challenger.comparison is not None
+        assert challenger.comparison.multiple_testing_family_size == 1
+    finally:
+        db.close()
+        Base.metadata.drop_all(bind=engine)
+
+
 def test_challenger_variants_isolate_universe_and_entry_gates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1237,6 +1312,7 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
             "ETF_REGIME_TRV_CHALLENGER",
             "OPENING_RANGE_STOP_CHALLENGER",
             "FIVE_MINUTE_ORB_CHALLENGER",
+            "STOCKS_IN_PLAY_ORB_CHALLENGER",
             "EXECUTION_SNDK_CHALLENGER",
             "EXECUTION_INTC_CHALLENGER",
             "EXECUTION_QCOM_CHALLENGER",
@@ -1291,6 +1367,9 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
         ]
         five_minute_orb = by_variant[
             "FIVE_MINUTE_ORB_CHALLENGER"
+        ]
+        stocks_in_play_orb = by_variant[
+            "STOCKS_IN_PLAY_ORB_CHALLENGER"
         ]
         reversal = by_variant["REVERSAL_CHALLENGER"]
         continuation = by_variant["CONTINUATION_CHALLENGER"]
@@ -1623,6 +1702,23 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
             28,
         )
         assert five_minute_orb.universe_source == "OPENING_FIVE_MINUTE_ORB"
+        assert stocks_in_play_orb.signal_model == "OPENING_RANGE_BREAKOUT"
+        assert stocks_in_play_orb.decision_config == (
+            five_minute_orb.decision_config
+        )
+        assert stocks_in_play_orb.candidate_selection_mode == (
+            "OPENING_ACTIVITY_TOP_N_THEN_BREAKOUT"
+        )
+        assert stocks_in_play_orb.opening_activity_top_n == 20
+        assert stocks_in_play_orb.opening_range_stop is True
+        assert stocks_in_play_orb.forward_evidence_start_date == date(
+            2026,
+            7,
+            28,
+        )
+        assert stocks_in_play_orb.universe_source == (
+            "OPENING_FIVE_MINUTE_ORB_STOCKS_IN_PLAY"
+        )
         for variant, symbol in zip(
             _EXECUTION_EXTENSION_VARIANTS,
             _EXECUTION_EXTENSION_SYMBOLS,
@@ -2009,7 +2105,7 @@ def test_challengers_use_one_market_snapshot_and_close_all_variants(
         assert opened.latest.universe_source == "UNIVERSE_SELECTION"
         assert opened.latest.candidate_symbol == "S1.US"
         assert opened.latest.selection_run_id == run.id
-        assert len(opened.variants) == 36
+        assert len(opened.variants) == 37
         by_variant = {
             item.variant: item for item in opened.variants
         }
@@ -3333,7 +3429,7 @@ def test_breadth_challenger_skips_a_negative_market_snapshot(
         )
 
         assert candles.calls == list(_SYMBOLS[:4])
-        assert len(status.variants) == 36
+        assert len(status.variants) == 37
         by_variant = {
             item.variant: item for item in status.variants
         }

@@ -646,6 +646,7 @@ class OpeningMomentumShadowVariantResponse(BaseModel):
         "ETF_REGIME_TRV_CHALLENGER",
         "OPENING_RANGE_STOP_CHALLENGER",
         "FIVE_MINUTE_ORB_CHALLENGER",
+        "STOCKS_IN_PLAY_ORB_CHALLENGER",
         "EXECUTION_SNDK_CHALLENGER",
         "EXECUTION_INTC_CHALLENGER",
         "EXECUTION_QCOM_CHALLENGER",
@@ -659,6 +660,7 @@ class OpeningMomentumShadowVariantResponse(BaseModel):
     candidate_selection_mode: Literal[
         "TOP_THEN_GATE",
         "PATH_ELIGIBLE_RERANK",
+        "OPENING_ACTIVITY_TOP_N_THEN_BREAKOUT",
     ] = "TOP_THEN_GATE"
     signal_minutes: int
     minimum_market_return_bps: float
@@ -678,6 +680,7 @@ class OpeningMomentumShadowVariantResponse(BaseModel):
     )
     exceptional_maximum_market_return_bps: Optional[float] = None
     maximum_benchmark_average_return_bps: Optional[float] = None
+    opening_activity_top_n: Optional[int] = Field(default=None, ge=1)
     required_symbols: list[str] = Field(default_factory=list)
     excluded_symbols: list[str] = Field(default_factory=list)
     holding_minutes: int
@@ -693,6 +696,7 @@ class OpeningMomentumShadowVariantResponse(BaseModel):
             "WEAK_BREADTH_PATH_CHALLENGER",
             "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER",
             "ETF_REGIME_PATH_CHALLENGER",
+            "FIVE_MINUTE_ORB_CHALLENGER",
         ]
     ] = None
     latest: Optional[OpeningMomentumShadowRunResponse] = None

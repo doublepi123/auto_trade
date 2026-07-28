@@ -8,6 +8,7 @@ from app.domain.opening_momentum import (
     evaluate_opening_momentum,
     evaluate_opening_momentum_path_eligible,
     evaluate_opening_range_breakout,
+    evaluate_stocks_in_play_opening_range_breakout,
     evaluate_opening_reversal,
     opening_path_efficiency,
     shadow_round_trip_return_bps,
@@ -202,6 +203,93 @@ def test_opening_range_breakout_rejects_invalid_highs(
         evaluate_opening_range_breakout(
             [_observation("S0.US", 10)],
             opening_range_high_by_symbol=range_highs,
+        )
+
+
+def test_stocks_in_play_orb_restricts_breakout_to_activity_leaders() -> None:
+    observations = [
+        _observation(f"S{index}.US", value)
+        for index, value in enumerate(
+            (-10, 0, 5, 10, 15, 20, 80, 120),
+        )
+    ]
+    range_highs = {
+        item.symbol: (
+            item.signal_close - 0.2
+            if item.symbol in {"S6.US", "S7.US"}
+            else item.signal_close + 0.2
+        )
+        for item in observations
+    }
+
+    decision = evaluate_stocks_in_play_opening_range_breakout(
+        observations,
+        opening_range_high_by_symbol=range_highs,
+        opening_activity_ratio_by_symbol={
+            item.symbol: (
+                2.0
+                if item.symbol == "S6.US"
+                else 1.0
+                if item.symbol == "S5.US"
+                else 0.1
+            )
+            for item in observations
+        },
+        maximum_stocks_in_play=2,
+    )
+
+    assert decision.action == "ENTER_LONG"
+    assert decision.reason == (
+        "STOCKS_IN_PLAY_FIVE_MINUTE_OPENING_RANGE_BREAKOUT"
+    )
+    assert decision.candidate_symbol == "S6.US"
+    assert decision.candidate_return_bps == pytest.approx(80.0)
+    assert decision.market_return_bps == pytest.approx(12.5)
+    assert decision.universe_size == 8
+
+
+def test_stocks_in_play_orb_fails_closed_with_missing_activity() -> None:
+    observations = [
+        _observation(f"S{index}.US", 10 + index)
+        for index in range(8)
+    ]
+
+    decision = evaluate_stocks_in_play_opening_range_breakout(
+        observations,
+        opening_range_high_by_symbol={
+            item.symbol: item.signal_close - 0.1
+            for item in observations
+        },
+        opening_activity_ratio_by_symbol={
+            item.symbol: 1.0 for item in observations[:-1]
+        },
+    )
+
+    assert decision.action == "SKIP"
+    assert decision.reason == "OPENING_ACTIVITY_DATA_INCOMPLETE"
+    assert decision.candidate_symbol is None
+    assert decision.universe_size == 8
+
+
+@pytest.mark.parametrize(
+    ("activity", "limit"),
+    [
+        ({"S0.US": float("nan")}, 20),
+        ({"S0.US": 0.0}, 20),
+        ({"s0.us": 0.1, "S0.US": 0.2}, 20),
+        ({"S0.US": 0.1}, 0),
+    ],
+)
+def test_stocks_in_play_orb_rejects_invalid_activity(
+    activity: dict[str, float],
+    limit: int,
+) -> None:
+    with pytest.raises(ValueError):
+        evaluate_stocks_in_play_opening_range_breakout(
+            [_observation("S0.US", 10)],
+            opening_range_high_by_symbol={"S0.US": 100.0},
+            opening_activity_ratio_by_symbol=activity,
+            maximum_stocks_in_play=limit,
         )
 
 
