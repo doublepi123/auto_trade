@@ -262,4 +262,5 @@ def test_backend_image_includes_index_membership_snapshot() -> None:
         "index_membership_history.json"
     ) in dockerignore
     assert "COPY --chown=appuser:appuser app/ ./app/" in dockerfile
+    assert "chmod -R a+rX /app" in dockerfile
     assert snapshot.is_file()

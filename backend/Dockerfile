@@ -42,7 +42,9 @@ COPY --chown=appuser:appuser app/ ./app/
 COPY --chown=appuser:appuser alembic/ ./alembic/
 COPY --chown=appuser:appuser alembic.ini .
 COPY --chown=appuser:appuser docker-entrypoint.sh .
-RUN mkdir -p data && chown -R appuser:appuser /app
+RUN mkdir -p data \
+    && chown -R appuser:appuser /app \
+    && chmod -R a+rX /app
 
 USER appuser
 
