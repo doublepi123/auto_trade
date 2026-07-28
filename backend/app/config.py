@@ -171,6 +171,18 @@ class Settings(BaseSettings):
         le=5000,
         validation_alias="AUTO_TRADE_LLM_STORAGE_MAINTENANCE_BATCH_SIZE",
     )
+    strategy_v2_wait_retention_days: int = Field(
+        default=45,
+        ge=0,
+        le=3650,
+        validation_alias="AUTO_TRADE_STRATEGY_V2_WAIT_RETENTION_DAYS",
+    )
+    strategy_v2_wait_maintenance_batch_size: int = Field(
+        default=2500,
+        ge=10,
+        le=10000,
+        validation_alias="AUTO_TRADE_STRATEGY_V2_WAIT_MAINTENANCE_BATCH_SIZE",
+    )
     llm_interval_volatility_threshold_pct: float = Field(
         default=1.0,
         gt=0,

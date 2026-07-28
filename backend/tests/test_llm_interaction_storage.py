@@ -505,6 +505,8 @@ def test_storage_settings_are_configurable(monkeypatch) -> None:
     monkeypatch.setenv("AUTO_TRADE_LLM_CONTEXT_SNAPSHOT_MAX_BYTES", "32768")
     monkeypatch.setenv("AUTO_TRADE_LLM_STORAGE_MAINTENANCE_INTERVAL_MINUTES", "720")
     monkeypatch.setenv("AUTO_TRADE_LLM_STORAGE_MAINTENANCE_BATCH_SIZE", "500")
+    monkeypatch.setenv("AUTO_TRADE_STRATEGY_V2_WAIT_RETENTION_DAYS", "60")
+    monkeypatch.setenv("AUTO_TRADE_STRATEGY_V2_WAIT_MAINTENANCE_BATCH_SIZE", "3000")
 
     configured = Settings()
 
@@ -513,3 +515,5 @@ def test_storage_settings_are_configurable(monkeypatch) -> None:
     assert configured.llm_context_snapshot_max_bytes == 32768
     assert configured.llm_storage_maintenance_interval_minutes == 720
     assert configured.llm_storage_maintenance_batch_size == 500
+    assert configured.strategy_v2_wait_retention_days == 60
+    assert configured.strategy_v2_wait_maintenance_batch_size == 3000

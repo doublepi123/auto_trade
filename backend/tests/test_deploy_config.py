@@ -79,13 +79,15 @@ def test_env_example_documents_llm_provider_keys() -> None:
     assert "MINIMAX_API_KEY=" in env_example
 
 
-def test_deploy_files_expose_llm_storage_retention_controls() -> None:
+def test_deploy_files_expose_storage_retention_controls() -> None:
     keys = {
         "AUTO_TRADE_LLM_INTERACTION_RETENTION_DAYS",
         "AUTO_TRADE_LLM_NO_ACTION_RETENTION_DAYS",
         "AUTO_TRADE_LLM_CONTEXT_SNAPSHOT_MAX_BYTES",
         "AUTO_TRADE_LLM_STORAGE_MAINTENANCE_INTERVAL_MINUTES",
         "AUTO_TRADE_LLM_STORAGE_MAINTENANCE_BATCH_SIZE",
+        "AUTO_TRADE_STRATEGY_V2_WAIT_RETENTION_DAYS",
+        "AUTO_TRADE_STRATEGY_V2_WAIT_MAINTENANCE_BATCH_SIZE",
     }
     for filename in ("docker-compose.yaml", "docker-compose.dockerhub.yaml"):
         compose = (ROOT / filename).read_text(encoding="utf-8")

@@ -773,8 +773,9 @@ async def _alert_rules_cron() -> None:
 
 
 def _llm_storage_maintenance_tick_sync() -> None:
-    """Prune and compact LLM audit rows without running on the event loop."""
+    """Bound observational storage without running on the event loop."""
     from app.services.llm_interaction_service import LLMInteractionService
+    from app.services.strategy_v2_shadow_service import StrategyV2ShadowService
 
     db = SessionLocal()
     try:
@@ -790,6 +791,11 @@ def _llm_storage_maintenance_tick_sync() -> None:
             batch_size=min(25, settings.llm_storage_maintenance_batch_size),
             max_rows=settings.llm_storage_maintenance_batch_size,
         )
+        shadow_pruned = StrategyV2ShadowService(db).prune_expired_wait_decisions(
+            retention_days=settings.strategy_v2_wait_retention_days,
+            batch_size=settings.strategy_v2_wait_maintenance_batch_size,
+            max_batches=8,
+        )
         if pruned.deleted or compacted.compacted:
             logger.info(
                 "LLM storage maintenance: deleted=%d delete_batches=%d "
@@ -800,12 +806,18 @@ def _llm_storage_maintenance_tick_sync() -> None:
                 compacted.inspected,
                 compacted.batches,
             )
+        if shadow_pruned.deleted:
+            logger.info(
+                "Strategy v2 WAIT storage maintenance: deleted=%d batches=%d",
+                shadow_pruned.deleted,
+                shadow_pruned.batches,
+            )
     finally:
         db.close()
 
 
 async def _llm_storage_maintenance_cron() -> None:
-    """Run bounded SQLite maintenance; full VACUUM is intentionally offline-only."""
+    """Run bounded observation maintenance; VACUUM remains offline-only."""
     await asyncio.sleep(60)
     while True:
         try:
@@ -813,7 +825,7 @@ async def _llm_storage_maintenance_cron() -> None:
         except asyncio.CancelledError:
             raise
         except Exception:
-            logger.exception("LLM storage maintenance failed")
+            logger.exception("observational storage maintenance failed")
         await asyncio.sleep(settings.llm_storage_maintenance_interval_minutes * 60)
 
 
@@ -830,7 +842,9 @@ async def _run_llm_storage_maintenance_tick() -> None:
         try:
             await worker
         except Exception:
-            logger.exception("LLM storage maintenance failed during shutdown")
+            logger.exception(
+                "observational storage maintenance failed during shutdown"
+            )
         raise
 
 

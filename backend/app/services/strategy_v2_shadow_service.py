@@ -169,6 +169,13 @@ _ENTRY_GATE_REASONS = _FEATURE_NOT_READY_REASONS | frozenset({
     "MAX_SESSION_ENTRIES",
     "ENTRY_COOLDOWN",
 })
+_PRESERVED_WAIT_REASONS = frozenset({"SESSION_DATA_INCOMPLETE"})
+
+
+@dataclass(frozen=True)
+class StrategyV2WaitPruneResult:
+    deleted: int = 0
+    batches: int = 0
 
 
 @dataclass(frozen=True)
@@ -193,6 +200,75 @@ class StrategyV2ShadowService:
         self.exit_challengers = StrategyV2ExitChallengerService(db)
         self.bracket_challengers = StrategyV2BracketChallengerService(db)
         self.live_exit_challengers = LiveExitChallengerService(db)
+
+    def prune_expired_wait_decisions(
+        self,
+        *,
+        retention_days: int,
+        batch_size: int,
+        max_batches: int | None = 8,
+        now: datetime | None = None,
+    ) -> StrategyV2WaitPruneResult:
+        """Bound routine per-minute WAIT evidence without deleting actions.
+
+        Entry/exit actions are never eligible. Rare WAIT rows that passed the
+        gate, represent an armed state, change state, or record incomplete
+        session data are also retained for long-horizon diagnostics. SQLite
+        reuses the freed pages, so online pruning bounds growth without an
+        availability-impacting VACUUM.
+        """
+        if retention_days < 0:
+            raise ValueError("retention_days must be non-negative")
+        if batch_size <= 0:
+            raise ValueError("batch_size must be positive")
+        if retention_days == 0 or (max_batches is not None and max_batches <= 0):
+            return StrategyV2WaitPruneResult()
+
+        cutoff = (now or datetime.now(timezone.utc)) - timedelta(
+            days=retention_days
+        )
+        expired = (
+            StrategyV2ShadowDecision.action == StrategyV2Action.WAIT.value,
+            StrategyV2ShadowDecision.bar_at < cutoff,
+            StrategyV2ShadowDecision.gate_passed.is_(False),
+            StrategyV2ShadowDecision.breach_armed.is_(False),
+            StrategyV2ShadowDecision.state_before
+            == StrategyV2ShadowDecision.state_after,
+            StrategyV2ShadowDecision.reason.not_in(_PRESERVED_WAIT_REASONS),
+        )
+        deleted = 0
+        batches = 0
+        while max_batches is None or batches < max_batches:
+            ids = [
+                row[0]
+                for row in (
+                    self.db.query(StrategyV2ShadowDecision.id)
+                    .filter(*expired)
+                    .order_by(
+                        StrategyV2ShadowDecision.bar_at.asc(),
+                        StrategyV2ShadowDecision.id.asc(),
+                    )
+                    .limit(batch_size)
+                    .all()
+                )
+            ]
+            if not ids:
+                break
+            try:
+                deleted += int(
+                    self.db.query(StrategyV2ShadowDecision)
+                    .filter(
+                        StrategyV2ShadowDecision.id.in_(ids),
+                        *expired,
+                    )
+                    .delete(synchronize_session=False)
+                )
+                self.db.commit()
+            except Exception:
+                self.db.rollback()
+                raise
+            batches += 1
+        return StrategyV2WaitPruneResult(deleted=deleted, batches=batches)
 
     def get_config(self, symbol: str | None = None) -> StrategyV2ShadowConfigResponse:
         row = self._get_or_create_config(symbol)
