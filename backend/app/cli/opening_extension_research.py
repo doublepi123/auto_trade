@@ -10,7 +10,7 @@ from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, cast
 
 from app.config import settings
 from app.core.broker import BrokerCandle, BrokerGateway
@@ -387,29 +387,21 @@ def _session_exit_outcome(
     return exit_bar.open, False
 
 
-def _load_cache(
-    path: Path,
-    *,
-    start_date: date,
-    end_date: date,
-    retained_minutes_after_open: int,
-) -> dict[str, tuple[RawMinuteBar, ...]]:
-    if not path.exists():
-        return {}
+def _read_cache_payload(path: Path) -> dict[str, object]:
     with gzip.open(path, "rt", encoding="utf-8") as handle:
         raw = json.load(handle)
     if not isinstance(raw, dict):
         raise ValueError("opening research cache root must be an object")
-    expected_metadata = {
-        "cache_version": _CACHE_VERSION,
-        "start_date": start_date.isoformat(),
-        "end_date": end_date.isoformat(),
-    }
-    if any(raw.get(key) != value for key, value in expected_metadata.items()):
-        raise ValueError(
-            "opening research cache metadata does not match the requested "
-            "scope; choose a different cache path"
-        )
+    return cast(dict[str, object], raw)
+
+
+def _parse_cached_bars(
+    raw: dict[str, object],
+    *,
+    retained_minutes_after_open: int,
+) -> dict[str, tuple[RawMinuteBar, ...]]:
+    if raw.get("cache_version") != _CACHE_VERSION:
+        raise ValueError("opening research cache version is incompatible")
     cached_retained_minutes = raw.get("retained_minutes_after_open")
     if not isinstance(cached_retained_minutes, int):
         raise ValueError(
@@ -447,6 +439,83 @@ def _load_cache(
     return result
 
 
+def _load_cache(
+    path: Path,
+    *,
+    start_date: date,
+    end_date: date,
+    retained_minutes_after_open: int,
+) -> dict[str, tuple[RawMinuteBar, ...]]:
+    if not path.exists():
+        return {}
+    raw = _read_cache_payload(path)
+    expected_metadata = {
+        "cache_version": _CACHE_VERSION,
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+    }
+    if any(raw.get(key) != value for key, value in expected_metadata.items()):
+        raise ValueError(
+            "opening research cache metadata does not match the requested "
+            "scope; choose a different cache path"
+        )
+    return _parse_cached_bars(
+        raw,
+        retained_minutes_after_open=retained_minutes_after_open,
+    )
+
+
+def _load_seed_cache(
+    path: Path,
+    *,
+    start_date: date,
+    end_date: date,
+    retained_minutes_after_open: int,
+) -> tuple[dict[str, tuple[RawMinuteBar, ...]], date]:
+    """Load an immutable prior-range cache for a longer target scope."""
+    raw = _read_cache_payload(path)
+    raw_start = raw.get("start_date")
+    raw_end = raw.get("end_date")
+    if not isinstance(raw_start, str) or not isinstance(raw_end, str):
+        raise ValueError("opening research seed cache date metadata is invalid")
+    try:
+        seed_start = date.fromisoformat(raw_start)
+        seed_end = date.fromisoformat(raw_end)
+    except ValueError as exc:
+        raise ValueError(
+            "opening research seed cache date metadata is invalid"
+        ) from exc
+    if seed_start != start_date:
+        raise ValueError(
+            "opening research seed cache start date does not match the "
+            "requested scope"
+        )
+    if seed_end < seed_start:
+        raise ValueError("opening research seed cache date range is invalid")
+    if seed_end >= end_date:
+        raise ValueError(
+            "opening research seed cache end date must precede the requested "
+            "end date"
+        )
+    return (
+        _parse_cached_bars(
+            raw,
+            retained_minutes_after_open=retained_minutes_after_open,
+        ),
+        seed_end,
+    )
+
+
+def _merge_bars(
+    existing: Sequence[RawMinuteBar],
+    fetched: Sequence[RawMinuteBar],
+) -> tuple[RawMinuteBar, ...]:
+    """Merge minute bars deterministically, preferring the newly fetched bar."""
+    by_timestamp = {bar.timestamp: bar for bar in existing}
+    by_timestamp.update((bar.timestamp, bar) for bar in fetched)
+    return tuple(by_timestamp[timestamp] for timestamp in sorted(by_timestamp))
+
+
 def _save_cache(
     path: Path,
     bars_by_symbol: dict[str, tuple[RawMinuteBar, ...]],
@@ -476,15 +545,18 @@ def _save_cache(
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.tmp")
-    with gzip.open(temporary, "wt", encoding="utf-8") as handle:
-        json.dump(
-            payload,
-            handle,
-            ensure_ascii=True,
-            separators=(",", ":"),
-            sort_keys=True,
-        )
-    os.replace(temporary, path)
+    try:
+        with gzip.open(temporary, "wt", encoding="utf-8") as handle:
+            json.dump(
+                payload,
+                handle,
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _slice(

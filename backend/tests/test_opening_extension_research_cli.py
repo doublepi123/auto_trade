@@ -18,6 +18,8 @@ from app.cli.opening_extension_research import (
     _joint_exploration_shortlist_payload,
     _load_current_baseline_symbols,
     _load_cache,
+    _load_seed_cache,
+    _merge_bars,
     _parse_integer_grid,
     _parse_symbols,
     _save_cache,
@@ -302,6 +304,91 @@ def test_cache_round_trip_and_scope_mismatch(tmp_path: Path) -> None:
             start_date=session_date - timedelta(days=1),
             end_date=session_date,
             retained_minutes_after_open=35,
+        )
+
+
+def test_seed_cache_loads_prior_scope_and_merges_new_bars(
+    tmp_path: Path,
+) -> None:
+    first = date(2026, 7, 6)
+    second = date(2026, 7, 7)
+    third = date(2026, 7, 8)
+    path = tmp_path / "opening-seed.json.gz"
+    seed_bars = {
+        "AAA.US": (
+            *_raw_bars("AAA.US", first),
+            *_raw_bars("AAA.US", second),
+        )
+    }
+    _save_cache(
+        path,
+        seed_bars,
+        start_date=first,
+        end_date=second,
+        retained_minutes_after_open=35,
+    )
+
+    loaded, seed_end = _load_seed_cache(
+        path,
+        start_date=first,
+        end_date=third,
+        retained_minutes_after_open=35,
+    )
+
+    assert loaded == seed_bars
+    assert seed_end == second
+    replacement = replace(
+        _raw_bars("AAA.US", second)[0],
+        close=101.0,
+        high=101.0,
+    )
+    new_bar = _raw_bars("AAA.US", third)[0]
+    merged = _merge_bars(
+        loaded["AAA.US"],
+        (new_bar, replacement),
+    )
+    assert len(merged) == len(seed_bars["AAA.US"]) + 1
+    assert [bar.timestamp for bar in merged] == sorted(
+        bar.timestamp for bar in merged
+    )
+    assert next(
+        bar for bar in merged if bar.timestamp == replacement.timestamp
+    ) == replacement
+
+
+def test_seed_cache_rejects_incompatible_scope(tmp_path: Path) -> None:
+    first = date(2026, 7, 6)
+    second = date(2026, 7, 7)
+    third = date(2026, 7, 8)
+    path = tmp_path / "opening-seed.json.gz"
+    _save_cache(
+        path,
+        {"AAA.US": _raw_bars("AAA.US", first)},
+        start_date=first,
+        end_date=second,
+        retained_minutes_after_open=35,
+    )
+
+    with pytest.raises(ValueError, match="start date does not match"):
+        _load_seed_cache(
+            path,
+            start_date=first - timedelta(days=1),
+            end_date=third,
+            retained_minutes_after_open=35,
+        )
+    with pytest.raises(ValueError, match="must precede"):
+        _load_seed_cache(
+            path,
+            start_date=first,
+            end_date=second,
+            retained_minutes_after_open=35,
+        )
+    with pytest.raises(ValueError, match="covers only 35 minutes"):
+        _load_seed_cache(
+            path,
+            start_date=first,
+            end_date=third,
+            retained_minutes_after_open=36,
         )
 
 

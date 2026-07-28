@@ -8,7 +8,12 @@ from typing import cast
 
 import pytest
 
-from app.cli.opening_extension_research import RawMinuteBar, _save_cache
+import app.cli.opening_policy_research as research_cli
+from app.cli.opening_extension_research import (
+    RawMinuteBar,
+    _load_cache,
+    _save_cache,
+)
 from app.cli.opening_policy_research import (
     _build_policy_sessions,
     _cohort_individual_screen_payload,
@@ -429,6 +434,190 @@ def test_cli_replays_existing_cache_without_broker(
     assert stored["research_design"]["discovery_end_date"] == (
         stored["report"]["discovery_end_date"]
     )
+
+
+def test_cli_extends_seed_cache_by_fetching_only_missing_dates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    first = date(2026, 7, 6)
+    second = date(2026, 7, 7)
+    third = date(2026, 7, 8)
+    seed_path = tmp_path / "opening-seed.json.gz"
+    cache_path = tmp_path / "opening-target.json.gz"
+    output_path = tmp_path / "report.json"
+    seed_bars = _bars_by_symbol_with_cohort(first, second)
+    seed_bars["EXTRA.US"] = tuple(
+        bar
+        for session_date in (first, second)
+        for bar in _bars("EXTRA.US", session_date)
+    )
+    _save_cache(
+        seed_path,
+        seed_bars,
+        start_date=first,
+        end_date=second,
+        retained_minutes_after_open=64,
+    )
+    calls: list[tuple[str, date, date, int]] = []
+    closed: list[bool] = []
+
+    class _FakeBroker:
+        def close(self) -> None:
+            closed.append(True)
+
+    def fake_fetch(
+        provider: object,
+        symbol: str,
+        *,
+        start_date: date,
+        end_date: date,
+        retained_minutes_after_open: int,
+        page_size: int = 1000,
+    ) -> tuple[RawMinuteBar, ...]:
+        del provider, page_size
+        calls.append((
+            symbol,
+            start_date,
+            end_date,
+            retained_minutes_after_open,
+        ))
+        return _bars(
+            symbol,
+            third,
+            retained_minutes=retained_minutes_after_open,
+        )
+
+    monkeypatch.setattr(research_cli, "BrokerGateway", _FakeBroker)
+    monkeypatch.setattr(
+        research_cli,
+        "_configure_longport_environment",
+        lambda: None,
+    )
+    monkeypatch.setattr(research_cli, "_fetch_symbol_bars", fake_fetch)
+    monkeypatch.setattr(sys, "argv", [
+        "opening_policy_research",
+        "--start-date",
+        first.isoformat(),
+        "--end-date",
+        third.isoformat(),
+        "--baseline-symbols",
+        ",".join(_SYMBOLS),
+        "--screen-cohort-symbols",
+        _COHORT_SYMBOL,
+        "--cache-path",
+        str(cache_path),
+        "--seed-cache-path",
+        str(seed_path),
+        "--output",
+        str(output_path),
+    ])
+
+    assert main() == 0
+
+    stdout = json.loads(capsys.readouterr().out)
+    assert len(calls) == len(_SYMBOLS) + 1
+    assert {value[0] for value in calls} == {*_SYMBOLS, _COHORT_SYMBOL}
+    assert all(value[1:] == (third, third, 64) for value in calls)
+    assert closed == [True]
+    loaded = _load_cache(
+        cache_path,
+        start_date=first,
+        end_date=third,
+        retained_minutes_after_open=64,
+    )
+    assert all(
+        len(loaded[symbol]) == 65 * 3
+        for symbol in (*_SYMBOLS, _COHORT_SYMBOL)
+    )
+    assert "EXTRA.US" not in loaded
+    assert stdout["data_scope"]["cache_update_mode"] == (
+        "SEEDED_INCREMENTAL"
+    )
+    assert stdout["data_scope"]["seed_cache_path"] == str(seed_path)
+    assert stdout["data_scope"]["incremental_fetch_start_date"] == (
+        third.isoformat()
+    )
+
+
+def test_cli_seed_extension_failure_leaves_target_absent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = date(2026, 7, 6)
+    second = date(2026, 7, 7)
+    third = date(2026, 7, 8)
+    seed_path = tmp_path / "opening-seed.json.gz"
+    cache_path = tmp_path / "opening-target.json.gz"
+    output_path = tmp_path / "report.json"
+    _save_cache(
+        seed_path,
+        _bars_by_symbol_with_cohort(first, second),
+        start_date=first,
+        end_date=second,
+        retained_minutes_after_open=64,
+    )
+    original_seed = seed_path.read_bytes()
+    calls: list[str] = []
+    closed: list[bool] = []
+
+    class _FakeBroker:
+        def close(self) -> None:
+            closed.append(True)
+
+    def failing_fetch(
+        provider: object,
+        symbol: str,
+        *,
+        start_date: date,
+        end_date: date,
+        retained_minutes_after_open: int,
+        page_size: int = 1000,
+    ) -> tuple[RawMinuteBar, ...]:
+        del provider, start_date, end_date, page_size
+        calls.append(symbol)
+        if len(calls) == 2:
+            raise RuntimeError("synthetic incremental fetch failure")
+        return _bars(
+            symbol,
+            third,
+            retained_minutes=retained_minutes_after_open,
+        )
+
+    monkeypatch.setattr(research_cli, "BrokerGateway", _FakeBroker)
+    monkeypatch.setattr(
+        research_cli,
+        "_configure_longport_environment",
+        lambda: None,
+    )
+    monkeypatch.setattr(research_cli, "_fetch_symbol_bars", failing_fetch)
+    monkeypatch.setattr(sys, "argv", [
+        "opening_policy_research",
+        "--start-date",
+        first.isoformat(),
+        "--end-date",
+        third.isoformat(),
+        "--baseline-symbols",
+        ",".join(_SYMBOLS),
+        "--screen-cohort-symbols",
+        _COHORT_SYMBOL,
+        "--cache-path",
+        str(cache_path),
+        "--seed-cache-path",
+        str(seed_path),
+        "--output",
+        str(output_path),
+    ])
+
+    with pytest.raises(RuntimeError, match="synthetic incremental"):
+        main()
+
+    assert calls == ["S0.US", "S1.US"]
+    assert closed == [True]
+    assert seed_path.read_bytes() == original_seed
+    assert not cache_path.exists()
+    assert not output_path.exists()
 
 
 def test_cli_emits_joint_cohort_diagnostic(

@@ -18,7 +18,9 @@ from app.cli.opening_extension_research import (
     _configure_longport_environment,
     _fetch_symbol_bars,
     _load_cache,
+    _load_seed_cache,
     _load_current_baseline_symbols,
+    _merge_bars,
     _parse_date,
     _parse_symbols,
     _save_cache,
@@ -58,7 +60,7 @@ from app.domain.opening_momentum_policy import (
 )
 
 
-OPENING_POLICY_CLI_VERSION = "opening-policy-research-cli-v9"
+OPENING_POLICY_CLI_VERSION = "opening-policy-research-cli-v10"
 _DEFAULT_PATH_THRESHOLDS = (0.50, 0.60, 0.70, 0.80, 0.90)
 _DEFAULT_MARKET_MAXIMUMS_BPS = (-10.0, -5.0, 0.0, 5.0, 10.0, 20.0)
 _DEFAULT_MINIMUM_DATA_COVERAGE = 0.95
@@ -1097,6 +1099,14 @@ def _parser() -> argparse.ArgumentParser:
         default=_DEFAULT_MINIMUM_DATA_COVERAGE,
     )
     parser.add_argument("--cache-path")
+    parser.add_argument(
+        "--seed-cache-path",
+        help=(
+            "optional immutable cache with the same start date and an earlier "
+            "end date; used only when --cache-path does not yet exist so only "
+            "the missing date range is fetched"
+        ),
+    )
     parser.add_argument("--output")
     parser.add_argument(
         "--full",
@@ -1235,13 +1245,36 @@ def main() -> int:
         f"opening-extension-{start_date.isoformat()}-{end_date.isoformat()}"
         "-ohlc-v3.json.gz"
     )
+    seed_cache_path = (
+        Path(args.seed_cache_path) if args.seed_cache_path else None
+    )
+    if (
+        seed_cache_path is not None
+        and seed_cache_path.resolve() == cache_path.resolve()
+    ):
+        parser.error("seed_cache_path must differ from cache_path")
+    cache_preexisting = cache_path.exists()
+    seed_cache_used: Path | None = None
+    incremental_fetch_start_date: date | None = None
     try:
-        bars_by_symbol = _load_cache(
-            cache_path,
-            start_date=start_date,
-            end_date=end_date,
-            retained_minutes_after_open=maximum_offset,
-        )
+        if cache_preexisting:
+            bars_by_symbol = _load_cache(
+                cache_path,
+                start_date=start_date,
+                end_date=end_date,
+                retained_minutes_after_open=maximum_offset,
+            )
+        elif seed_cache_path is not None:
+            bars_by_symbol, seed_end_date = _load_seed_cache(
+                seed_cache_path,
+                start_date=start_date,
+                end_date=end_date,
+                retained_minutes_after_open=maximum_offset,
+            )
+            seed_cache_used = seed_cache_path
+            incremental_fetch_start_date = seed_end_date + timedelta(days=1)
+        else:
+            bars_by_symbol = {}
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         parser.error(f"failed to load research cache: {exc}")
 
@@ -1250,30 +1283,57 @@ def main() -> int:
         *cohort_symbols,
         *screen_cohort_symbols,
     )))
-    missing_symbols = tuple(
-        symbol
-        for symbol in all_symbols
-        if not bars_by_symbol.get(symbol)
-    )
+    if seed_cache_used is not None:
+        bars_by_symbol = {
+            symbol: bars_by_symbol[symbol]
+            for symbol in all_symbols
+            if bars_by_symbol.get(symbol)
+        }
+    if incremental_fetch_start_date is not None:
+        fetch_plan = tuple(
+            (
+                symbol,
+                incremental_fetch_start_date
+                if bars_by_symbol.get(symbol)
+                else start_date,
+            )
+            for symbol in all_symbols
+        )
+    else:
+        fetch_plan = tuple(
+            (symbol, start_date)
+            for symbol in all_symbols
+            if not bars_by_symbol.get(symbol)
+        )
     broker: BrokerGateway | None = None
-    if missing_symbols:
+    if fetch_plan:
         try:
             _configure_longport_environment()
             broker = BrokerGateway()
-            for index, symbol in enumerate(missing_symbols, start=1):
+            for index, (symbol, fetch_start_date) in enumerate(
+                fetch_plan,
+                start=1,
+            ):
                 print(
-                    f"minute history {index}/{len(missing_symbols)} {symbol}",
+                    f"minute history {index}/{len(fetch_plan)} {symbol}",
                     file=sys.stderr,
                     flush=True,
                 )
-                bars_by_symbol[symbol] = _fetch_symbol_bars(
+                fetched_bars = _fetch_symbol_bars(
                     broker,
                     symbol,
-                    start_date=start_date,
+                    start_date=fetch_start_date,
                     end_date=end_date,
                     retained_minutes_after_open=maximum_offset,
                 )
-                if index % 5 == 0 or index == len(missing_symbols):
+                bars_by_symbol[symbol] = _merge_bars(
+                    bars_by_symbol.get(symbol, ()),
+                    fetched_bars,
+                )
+                if (
+                    incremental_fetch_start_date is None
+                    and (index % 5 == 0 or index == len(fetch_plan))
+                ):
                     _save_cache(
                         cache_path,
                         bars_by_symbol,
@@ -1281,9 +1341,25 @@ def main() -> int:
                         end_date=end_date,
                         retained_minutes_after_open=maximum_offset,
                     )
+            if incremental_fetch_start_date is not None:
+                _save_cache(
+                    cache_path,
+                    bars_by_symbol,
+                    start_date=start_date,
+                    end_date=end_date,
+                    retained_minutes_after_open=maximum_offset,
+                )
         finally:
             if broker is not None:
                 broker.close()
+
+    cache_update_mode = (
+        "SEEDED_INCREMENTAL"
+        if seed_cache_used is not None
+        else "EXACT_OR_FILL_MISSING"
+        if cache_preexisting
+        else "FULL_RANGE_FETCH"
+    )
 
     session_dates = _baseline_session_dates(
         bars_by_symbol,
@@ -1632,6 +1708,15 @@ def main() -> int:
                 else None
             ),
             "cache_path": str(cache_path),
+            "seed_cache_path": (
+                str(seed_cache_used) if seed_cache_used is not None else None
+            ),
+            "incremental_fetch_start_date": (
+                incremental_fetch_start_date.isoformat()
+                if incremental_fetch_start_date is not None
+                else None
+            ),
+            "cache_update_mode": cache_update_mode,
             "bar_counts": {
                 symbol: len(bars_by_symbol.get(symbol, ()))
                 for symbol in all_symbols
@@ -1644,6 +1729,7 @@ def main() -> int:
                 else "CURRENT_OPENING_EXECUTION_ELIGIBLE_STRATEGY_V2_CONFIG"
             ),
             "baseline_symbols": list(baseline_symbols),
+            "cache_update_mode": cache_update_mode,
             "paired_policy_name": paired_policy.name,
             "cohort_symbols": list(cohort_symbols),
             "cohort_subset_selection_requested": bool(
