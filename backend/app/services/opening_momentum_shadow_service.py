@@ -1441,6 +1441,7 @@ class OpeningMomentumShadowService:
                     )
 
             opening_activity_data_complete = True
+            opening_activity_rank_by_symbol: dict[str, int] = {}
             if variant.opening_activity_top_n is not None:
                 observation_symbols = {
                     item.symbol for item in observations
@@ -1455,9 +1456,15 @@ class OpeningMomentumShadowService:
                     for symbol, _ in sorted(
                         opening_activity_ratio_by_symbol.items(),
                         key=lambda item: (-item[1], item[0]),
-                    )[:variant.opening_activity_top_n]
+                    )
                 ]
-                activity_eligible = set(activity_ranking)
+                opening_activity_rank_by_symbol = {
+                    symbol: rank
+                    for rank, symbol in enumerate(activity_ranking, start=1)
+                }
+                activity_eligible = set(
+                    activity_ranking[:variant.opening_activity_top_n]
+                )
                 for symbol in observation_symbols:
                     if symbol not in opening_activity_ratio_by_symbol:
                         excluded[symbol] = (
@@ -1720,6 +1727,19 @@ class OpeningMomentumShadowService:
                 reason = "OPENING_RANGE_STOP_INVALID"
             else:
                 reason = decision.reason
+            ranking_payload = []
+            for item in decision.ranking:
+                payload = asdict(item)
+                activity_rank = opening_activity_rank_by_symbol.get(
+                    item.symbol
+                )
+                activity_ratio = opening_activity_ratio_by_symbol.get(
+                    item.symbol
+                )
+                if activity_rank is not None and activity_ratio is not None:
+                    payload["opening_activity_rank"] = activity_rank
+                    payload["opening_activity_ratio"] = activity_ratio
+                ranking_payload.append(payload)
             self.db.add(OpeningMomentumShadowRun(
                 session_date=session_date,
                 algorithm_version=variant.algorithm_version,
@@ -1743,7 +1763,7 @@ class OpeningMomentumShadowService:
                     separators=(",", ":"),
                 ),
                 ranking_json=json.dumps(
-                    [asdict(item) for item in decision.ranking],
+                    ranking_payload,
                     ensure_ascii=True,
                     separators=(",", ":"),
                 ),

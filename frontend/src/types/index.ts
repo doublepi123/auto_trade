@@ -1847,6 +1847,8 @@ export interface OpeningMomentumShadowConfig {
 export interface OpeningMomentumRank {
   symbol: string
   opening_return_bps: number
+  opening_activity_rank?: number | null
+  opening_activity_ratio?: number | null
 }
 
 export interface OpeningMomentumShadowRun {

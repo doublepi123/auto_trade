@@ -519,6 +519,8 @@ class OpeningMomentumShadowConfigResponse(BaseModel):
 class OpeningMomentumRankResponse(BaseModel):
     symbol: str
     opening_return_bps: float
+    opening_activity_rank: Optional[int] = Field(default=None, ge=1)
+    opening_activity_ratio: Optional[float] = Field(default=None, gt=0)
 
 
 class OpeningMomentumShadowRunResponse(BaseModel):

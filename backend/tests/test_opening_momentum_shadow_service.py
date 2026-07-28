@@ -1213,7 +1213,12 @@ def test_stocks_in_play_orb_uses_five_minute_activity_proxy(
             _FakeCandles(
                 orb_breakout_for="S7.US",
                 turnover_per_minute_by_symbol={
-                    symbol: 1_000_000.0 for symbol in _SYMBOLS
+                    symbol: (
+                        2_000_000.0
+                        if symbol == "S7.US"
+                        else 1_000_000.0
+                    )
+                    for symbol in _SYMBOLS
                 },
             ),
         )
@@ -1239,17 +1244,41 @@ def test_stocks_in_play_orb_uses_five_minute_activity_proxy(
             _SESSION_OPEN + timedelta(minutes=6)
         )
         assert challenger.latest.candidate_signal_turnover == pytest.approx(
-            5_000_000.0
+            10_000_000.0
         )
         assert challenger.latest.candidate_avg_dollar_volume == pytest.approx(
             100_000_000.0
         )
         assert (
             challenger.latest.candidate_signal_turnover_ratio
-            == pytest.approx(0.05)
+            == pytest.approx(0.10)
         )
         assert baseline.latest.candidate_signal_turnover == pytest.approx(
-            6_000_000.0
+            12_000_000.0
+        )
+        activity_by_symbol = {
+            item.symbol: (
+                item.opening_activity_rank,
+                item.opening_activity_ratio,
+            )
+            for item in challenger.latest.ranking
+        }
+        assert activity_by_symbol["S7.US"] == (
+            1,
+            pytest.approx(0.10),
+        )
+        assert activity_by_symbol["S0.US"] == (
+            2,
+            pytest.approx(0.05),
+        )
+        assert all(
+            rank is not None and ratio is not None
+            for rank, ratio in activity_by_symbol.values()
+        )
+        assert all(
+            item.opening_activity_rank is None
+            and item.opening_activity_ratio is None
+            for item in baseline.latest.ranking
         )
         assert challenger.candidate_selection_mode == (
             "OPENING_ACTIVITY_TOP_N_THEN_BREAKOUT"
