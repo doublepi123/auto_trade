@@ -78,6 +78,7 @@ def init_db() -> None:
     _ensure_strategy_config_report_schedule_columns(engine)
     _ensure_strategy_v2_shadow_tables(engine)
     _ensure_opening_momentum_shadow_table(engine)
+    _ensure_opening_activity_observation_table(engine)
     _ensure_opening_momentum_execution_table(engine)
     _ensure_llm_interaction_variant_column(engine)
     _ensure_llm_interaction_token_columns(engine)
@@ -1633,6 +1634,7 @@ def _ensure_opening_momentum_shadow_table(db_engine: Engine) -> None:
         "candidate_signal_turnover": "FLOAT",
         "candidate_avg_dollar_volume": "FLOAT",
         "candidate_signal_turnover_ratio": "FLOAT",
+        "candidate_opening_activity_ratio": "FLOAT",
         "candidate_overnight_gap_bps": "FLOAT",
         "candidate_prev_close_to_signal_bps": "FLOAT",
         "benchmark_qqq_return_bps": "FLOAT",
@@ -1648,6 +1650,18 @@ def _ensure_opening_momentum_shadow_table(db_engine: Engine) -> None:
                     "ALTER TABLE opening_momentum_shadow_runs "
                     f"ADD COLUMN {name} {column_type}"
                 )
+
+
+def _ensure_opening_activity_observation_table(
+    db_engine: Engine,
+) -> None:
+    """Create the causal opening-activity history table in place."""
+    from app.models import Base
+
+    Base.metadata.tables["opening_activity_observations"].create(
+        db_engine,
+        checkfirst=True,
+    )
 
 
 def _ensure_opening_momentum_execution_table(db_engine: Engine) -> None:

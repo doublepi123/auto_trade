@@ -1878,6 +1878,7 @@ export interface OpeningMomentumShadowRun {
   candidate_signal_turnover: number | null
   candidate_avg_dollar_volume: number | null
   candidate_signal_turnover_ratio: number | null
+  candidate_opening_activity_ratio: number | null
   candidate_overnight_gap_bps: number | null
   candidate_prev_close_to_signal_bps: number | null
   benchmark_qqq_return_bps: number | null
@@ -1979,6 +1980,7 @@ export interface OpeningMomentumShadowVariant {
     | 'INDEX_CATALOG_STOCKS_IN_PLAY_ORB_CHALLENGER'
     | 'INDEX_CATALOG_STOCKS_IN_PLAY_ORB_TOP10_CHALLENGER'
     | 'INDEX_CATALOG_STOCKS_IN_PLAY_ORB_TOP5_CHALLENGER'
+    | 'INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_CHALLENGER'
     | 'EXECUTION_SNDK_CHALLENGER'
     | 'EXECUTION_INTC_CHALLENGER'
     | 'EXECUTION_QCOM_CHALLENGER'
@@ -2003,6 +2005,12 @@ export interface OpeningMomentumShadowVariant {
   exceptional_maximum_market_return_bps: number | null
   maximum_benchmark_average_return_bps: number | null
   opening_activity_top_n?: number | null
+  opening_activity_baseline?:
+    | 'DAILY_ADV_PROXY'
+    | 'PRIOR_SAME_WINDOW_VOLUME'
+    | null
+  opening_activity_lookback_sessions?: number | null
+  minimum_opening_activity_ratio?: number | null
   required_symbols: string[]
   excluded_symbols: string[]
   holding_minutes: number

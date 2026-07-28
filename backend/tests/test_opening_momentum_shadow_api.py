@@ -216,8 +216,11 @@ class TestOpeningMomentumShadowApi:
         index_catalog_stocks_in_play_top5 = variants[
             "INDEX_CATALOG_STOCKS_IN_PLAY_ORB_TOP5_CHALLENGER"
         ]
+        index_catalog_relative_volume_top5 = variants[
+            "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_CHALLENGER"
+        ]
         execution_sndk = variants["EXECUTION_SNDK_CHALLENGER"]
-        assert len(variants) == 43
+        assert len(variants) == 44
         assert early["universe_source"] == "OPENING_EARLY_BROAD"
         assert early["signal_minutes"] == 3
         assert early["minimum_market_return_bps"] == -50.0
@@ -746,7 +749,35 @@ class TestOpeningMomentumShadowApi:
             assert sensitivity["comparison"] is not None
             assert sensitivity["comparison"][
                 "multiple_testing_family_size"
-            ] == 3
+            ] == 4
+        assert index_catalog_relative_volume_top5["universe_source"] == (
+            "OPENING_INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5"
+        )
+        assert index_catalog_relative_volume_top5[
+            "candidate_selection_mode"
+        ] == "OPENING_ACTIVITY_TOP_N_THEN_BREAKOUT"
+        assert index_catalog_relative_volume_top5[
+            "opening_activity_top_n"
+        ] == 5
+        assert index_catalog_relative_volume_top5[
+            "opening_activity_baseline"
+        ] == "PRIOR_SAME_WINDOW_VOLUME"
+        assert index_catalog_relative_volume_top5[
+            "opening_activity_lookback_sessions"
+        ] == 14
+        assert index_catalog_relative_volume_top5[
+            "minimum_opening_activity_ratio"
+        ] == 1.0
+        assert index_catalog_relative_volume_top5[
+            "forward_evidence_start_date"
+        ] == "2026-07-28"
+        assert index_catalog_relative_volume_top5[
+            "comparison_baseline"
+        ] == "INDEX_CATALOG_FIVE_MINUTE_ORB_CHALLENGER"
+        assert index_catalog_relative_volume_top5["comparison"] is not None
+        assert index_catalog_relative_volume_top5["comparison"][
+            "multiple_testing_family_size"
+        ] == 4
         assert execution_sndk["required_symbols"] == ["SNDK.US"]
         assert (
             execution_sndk["comparison_baseline"]

@@ -276,12 +276,20 @@ def evaluate_stocks_in_play_opening_range_breakout(
     opening_range_high_by_symbol: Mapping[str, float],
     opening_activity_ratio_by_symbol: Mapping[str, float],
     maximum_stocks_in_play: int = 20,
+    minimum_opening_activity_ratio: float | None = None,
     config: OpeningMomentumConfig | None = None,
 ) -> OpeningMomentumDecision:
     """Restrict ORB candidates to the most active opening names."""
 
     if maximum_stocks_in_play <= 0:
         raise ValueError("maximum_stocks_in_play must be positive")
+    if minimum_opening_activity_ratio is not None and (
+        not math.isfinite(minimum_opening_activity_ratio)
+        or minimum_opening_activity_ratio <= 0
+    ):
+        raise ValueError(
+            "minimum_opening_activity_ratio must be positive and finite"
+        )
     normalized_activity: dict[str, float] = {}
     for raw_symbol, raw_ratio in opening_activity_ratio_by_symbol.items():
         symbol = raw_symbol.strip().upper()
@@ -322,6 +330,11 @@ def evaluate_stocks_in_play_opening_range_breakout(
             (
                 (symbol, normalized_activity[symbol])
                 for symbol in observation_symbols
+                if (
+                    minimum_opening_activity_ratio is None
+                    or normalized_activity[symbol]
+                    >= minimum_opening_activity_ratio
+                )
             ),
             key=lambda item: (-item[1], item[0]),
         )[:maximum_stocks_in_play]

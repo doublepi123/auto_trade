@@ -19,6 +19,7 @@ from app.domain.opening_momentum import (
 )
 from app.models import (
     Base,
+    OpeningActivityObservation,
     OpeningMomentumShadowRun,
     StrategyV2ShadowConfig,
     UniverseSelectionCandidate,
@@ -94,6 +95,7 @@ _ALL_CHALLENGER_VARIANTS = (
     "INDEX_CATALOG_STOCKS_IN_PLAY_ORB_CHALLENGER",
     "INDEX_CATALOG_STOCKS_IN_PLAY_ORB_TOP10_CHALLENGER",
     "INDEX_CATALOG_STOCKS_IN_PLAY_ORB_TOP5_CHALLENGER",
+    "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_CHALLENGER",
     *_EXECUTION_EXTENSION_VARIANTS,
 )
 
@@ -515,6 +517,34 @@ def _seed_active_broad_pool(db: Session) -> None:
         enabled=False,
         universe_managed=True,
     ))
+    db.commit()
+
+
+def _seed_opening_activity_history(
+    db: Session,
+    *,
+    low_baseline_symbol: str,
+) -> None:
+    for day_offset in range(1, 15):
+        session_date = (_SESSION_OPEN - timedelta(days=day_offset)).date()
+        for symbol in _SYMBOLS:
+            db.add(OpeningActivityObservation(
+                session_date=session_date,
+                symbol=symbol,
+                window_minutes=5,
+                volume=(
+                    2_500.0
+                    if symbol == low_baseline_symbol
+                    else 5_000.0
+                ),
+                turnover=500_000.0,
+                source="TEST",
+                observed_at=(
+                    _SESSION_OPEN
+                    - timedelta(days=day_offset)
+                    + timedelta(minutes=5)
+                ),
+            ))
     db.commit()
 
 
@@ -1322,7 +1352,85 @@ def test_stocks_in_play_orb_uses_five_minute_activity_proxy(
             "INDEX_CATALOG_FIVE_MINUTE_ORB_CHALLENGER"
         )
         assert catalog_top5.comparison is not None
-        assert catalog_top5.comparison.multiple_testing_family_size == 3
+        assert catalog_top5.comparison.multiple_testing_family_size == 4
+    finally:
+        db.close()
+        Base.metadata.drop_all(bind=engine)
+
+
+def test_index_catalog_relative_volume_orb_uses_only_prior_sessions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        settings,
+        "opening_momentum_shadow_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        settings,
+        "opening_momentum_challenger_enabled",
+        True,
+    )
+    engine, db = _database()
+    try:
+        _seed_universe(db, avg_dollar_volume=100_000_000.0)
+        _seed_active_broad_pool(db)
+        _seed_opening_activity_history(
+            db,
+            low_baseline_symbol="S7.US",
+        )
+        service = OpeningMomentumShadowService(
+            db,
+            _FakeCandles(orb_breakout_for="S7.US"),
+        )
+
+        status = service.tick(
+            now=_SESSION_OPEN + timedelta(minutes=7, seconds=10),
+        )
+
+        relative = {
+            item.variant: item for item in status.variants
+        }["INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_CHALLENGER"]
+        assert relative.latest is not None
+        assert relative.latest.status == "OPEN"
+        assert relative.latest.candidate_symbol == "S7.US"
+        assert relative.latest.candidate_opening_activity_ratio == pytest.approx(
+            2.0
+        )
+        ranking = {
+            item.symbol: (
+                item.opening_activity_rank,
+                item.opening_activity_ratio,
+            )
+            for item in relative.latest.ranking
+        }
+        assert ranking["S7.US"] == (1, pytest.approx(2.0))
+        assert relative.opening_activity_baseline == (
+            "PRIOR_SAME_WINDOW_VOLUME"
+        )
+        assert relative.opening_activity_lookback_sessions == 14
+        assert relative.minimum_opening_activity_ratio == 1.0
+        assert relative.opening_activity_top_n == 5
+        assert relative.forward_evidence_start_date == date(2026, 7, 28)
+        assert relative.comparison_baseline == (
+            "INDEX_CATALOG_FIVE_MINUTE_ORB_CHALLENGER"
+        )
+        assert relative.comparison is not None
+        assert relative.comparison.multiple_testing_family_size == 4
+        current_rows = (
+            db.query(OpeningActivityObservation)
+            .filter(
+                OpeningActivityObservation.session_date
+                == _SESSION_OPEN.date()
+            )
+            .all()
+        )
+        current_by_symbol = {row.symbol: row for row in current_rows}
+        assert set(_SYMBOLS).issubset(current_by_symbol)
+        assert all(
+            current_by_symbol[symbol].volume == 5_000.0
+            for symbol in _SYMBOLS
+        )
     finally:
         db.close()
         Base.metadata.drop_all(bind=engine)
@@ -1535,6 +1643,7 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
             "INDEX_CATALOG_STOCKS_IN_PLAY_ORB_CHALLENGER",
             "INDEX_CATALOG_STOCKS_IN_PLAY_ORB_TOP10_CHALLENGER",
             "INDEX_CATALOG_STOCKS_IN_PLAY_ORB_TOP5_CHALLENGER",
+            "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_CHALLENGER",
             "EXECUTION_SNDK_CHALLENGER",
             "EXECUTION_INTC_CHALLENGER",
             "EXECUTION_QCOM_CHALLENGER",
@@ -2405,7 +2514,7 @@ def test_challengers_use_one_market_snapshot_and_close_all_variants(
         assert opened.latest.universe_source == "UNIVERSE_SELECTION"
         assert opened.latest.candidate_symbol == "S1.US"
         assert opened.latest.selection_run_id == run.id
-        assert len(opened.variants) == 43
+        assert len(opened.variants) == 44
         by_variant = {
             item.variant: item for item in opened.variants
         }
@@ -3729,7 +3838,7 @@ def test_breadth_challenger_skips_a_negative_market_snapshot(
         )
 
         assert candles.calls == list(_SYMBOLS[:4])
-        assert len(status.variants) == 43
+        assert len(status.variants) == 44
         by_variant = {
             item.variant: item for item in status.variants
         }

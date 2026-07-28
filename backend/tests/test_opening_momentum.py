@@ -271,6 +271,35 @@ def test_stocks_in_play_orb_fails_closed_with_missing_activity() -> None:
     assert decision.universe_size == 8
 
 
+def test_stocks_in_play_orb_applies_minimum_activity_before_top_n() -> None:
+    observations = [
+        _observation(f"S{index}.US", 10 + index * 10)
+        for index in range(8)
+    ]
+    decision = evaluate_stocks_in_play_opening_range_breakout(
+        observations,
+        opening_range_high_by_symbol={
+            item.symbol: item.signal_close - 0.1
+            for item in observations
+        },
+        opening_activity_ratio_by_symbol={
+            item.symbol: (
+                0.9
+                if item.symbol == "S7.US"
+                else 1.2
+                if item.symbol == "S6.US"
+                else 0.5
+            )
+            for item in observations
+        },
+        maximum_stocks_in_play=5,
+        minimum_opening_activity_ratio=1.0,
+    )
+
+    assert decision.action == "ENTER_LONG"
+    assert decision.candidate_symbol == "S6.US"
+
+
 @pytest.mark.parametrize(
     ("activity", "limit"),
     [
@@ -290,6 +319,19 @@ def test_stocks_in_play_orb_rejects_invalid_activity(
             opening_range_high_by_symbol={"S0.US": 100.0},
             opening_activity_ratio_by_symbol=activity,
             maximum_stocks_in_play=limit,
+        )
+
+
+@pytest.mark.parametrize("minimum_ratio", [0.0, float("nan")])
+def test_stocks_in_play_orb_rejects_invalid_minimum_activity(
+    minimum_ratio: float,
+) -> None:
+    with pytest.raises(ValueError):
+        evaluate_stocks_in_play_opening_range_breakout(
+            [_observation("S0.US", 10)],
+            opening_range_high_by_symbol={"S0.US": 100.0},
+            opening_activity_ratio_by_symbol={"S0.US": 1.0},
+            minimum_opening_activity_ratio=minimum_ratio,
         )
 
 

@@ -685,7 +685,16 @@
                       <small
                         v-else-if="row.candidate_selection_mode === 'OPENING_ACTIVITY_TOP_N_THEN_BREAKOUT'"
                         class="opening-momentum-exception-threshold"
-                      >开盘活跃度 Top {{ row.opening_activity_top_n }} 后突破</small>
+                      >
+                        <template v-if="row.opening_activity_baseline === 'PRIOR_SAME_WINDOW_VOLUME'">
+                          同窗量 {{ row.opening_activity_lookback_sessions }} 日
+                          / 至少 {{ row.minimum_opening_activity_ratio?.toFixed(2) }}
+                          / Top {{ row.opening_activity_top_n }} 后突破
+                        </template>
+                        <template v-else>
+                          开盘活跃度 Top {{ row.opening_activity_top_n }} 后突破
+                        </template>
+                      </small>
                     </template>
                   </el-table-column>
                   <el-table-column label="QQQ/DIA 均值上限" min-width="130">
@@ -726,7 +735,8 @@
                       <template
                         v-if="row.variant === 'OPENING_RANGE_STOP_CHALLENGER'
                           || row.variant.includes('FIVE_MINUTE_ORB')
-                          || row.variant.includes('STOCKS_IN_PLAY_ORB')"
+                          || row.variant.includes('STOCKS_IN_PLAY_ORB')
+                          || row.variant.includes('RELATIVE_VOLUME_ORB')"
                       >
                         区间低点 / 4%上限
                       </template>
@@ -761,7 +771,11 @@
                   </el-table-column>
                   <el-table-column label="成交活跃度" min-width="110">
                     <template #default="{ row }">
-                      {{ formatNullablePercent(row.latest?.candidate_signal_turnover_ratio ?? null) }}
+                      {{ formatNullablePercent(
+                        row.latest?.candidate_opening_activity_ratio
+                          ?? row.latest?.candidate_signal_turnover_ratio
+                          ?? null,
+                      ) }}
                     </template>
                   </el-table-column>
                   <el-table-column label="窗口回撤" min-width="100">
@@ -2648,6 +2662,9 @@ function openingMomentumVariantLabel(
   if (variant === 'OPENING_RANGE_STOP_CHALLENGER') return '开盘区间止损'
   if (variant === 'FIVE_MINUTE_ORB_CHALLENGER') return '5 分钟 ORB 突破'
   if (variant === 'INDEX_CATALOG_FIVE_MINUTE_ORB_CHALLENGER') return '全指数目录 5 分钟 ORB'
+  if (variant === 'INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_CHALLENGER') {
+    return '全指数目录相对开盘量 ORB Top5'
+  }
   if (variant === 'INDEX_CATALOG_STOCKS_IN_PLAY_ORB_CHALLENGER') return '全指数目录活跃 ORB Top20'
   const indexCatalogStocksInPlay = /^INDEX_CATALOG_STOCKS_IN_PLAY_ORB_TOP(\d+)_CHALLENGER$/.exec(variant)
   if (indexCatalogStocksInPlay) return `全指数目录活跃 ORB Top${indexCatalogStocksInPlay[1]}`

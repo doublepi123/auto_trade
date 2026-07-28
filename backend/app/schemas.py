@@ -553,6 +553,10 @@ class OpeningMomentumShadowRunResponse(BaseModel):
         default=None,
         ge=0,
     )
+    candidate_opening_activity_ratio: Optional[float] = Field(
+        default=None,
+        gt=0,
+    )
     candidate_overnight_gap_bps: Optional[float] = None
     candidate_prev_close_to_signal_bps: Optional[float] = None
     benchmark_qqq_return_bps: Optional[float] = None
@@ -655,6 +659,7 @@ class OpeningMomentumShadowVariantResponse(BaseModel):
         "INDEX_CATALOG_STOCKS_IN_PLAY_ORB_CHALLENGER",
         "INDEX_CATALOG_STOCKS_IN_PLAY_ORB_TOP10_CHALLENGER",
         "INDEX_CATALOG_STOCKS_IN_PLAY_ORB_TOP5_CHALLENGER",
+        "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_CHALLENGER",
         "EXECUTION_SNDK_CHALLENGER",
         "EXECUTION_INTC_CHALLENGER",
         "EXECUTION_QCOM_CHALLENGER",
@@ -689,6 +694,17 @@ class OpeningMomentumShadowVariantResponse(BaseModel):
     exceptional_maximum_market_return_bps: Optional[float] = None
     maximum_benchmark_average_return_bps: Optional[float] = None
     opening_activity_top_n: Optional[int] = Field(default=None, ge=1)
+    opening_activity_baseline: Optional[
+        Literal["DAILY_ADV_PROXY", "PRIOR_SAME_WINDOW_VOLUME"]
+    ] = None
+    opening_activity_lookback_sessions: Optional[int] = Field(
+        default=None,
+        ge=1,
+    )
+    minimum_opening_activity_ratio: Optional[float] = Field(
+        default=None,
+        gt=0,
+    )
     required_symbols: list[str] = Field(default_factory=list)
     excluded_symbols: list[str] = Field(default_factory=list)
     holding_minutes: int

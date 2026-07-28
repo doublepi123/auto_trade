@@ -406,6 +406,7 @@ def test_opening_momentum_path_feature_migration_is_idempotent(
         "candidate_signal_turnover",
         "candidate_avg_dollar_volume",
         "candidate_signal_turnover_ratio",
+        "candidate_opening_activity_ratio",
         "candidate_overnight_gap_bps",
         "candidate_prev_close_to_signal_bps",
         "benchmark_qqq_return_bps",
@@ -414,6 +415,46 @@ def test_opening_momentum_path_feature_migration_is_idempotent(
         "maximum_adverse_excursion_bps",
         "maximum_favorable_excursion_bps",
     } <= columns
+
+
+def test_opening_activity_observation_table_migration_is_idempotent(
+    tmp_path,
+) -> None:
+    db_path = tmp_path / "opening_activity.db"
+    legacy_engine = create_engine(f"sqlite:///{db_path}")
+
+    database._ensure_opening_activity_observation_table(legacy_engine)
+    database._ensure_opening_activity_observation_table(legacy_engine)
+
+    inspector = inspect(legacy_engine)
+    assert {
+        "id",
+        "session_date",
+        "symbol",
+        "window_minutes",
+        "volume",
+        "turnover",
+        "source",
+        "observed_at",
+        "created_at",
+    } == {
+        column["name"]
+        for column in inspector.get_columns(
+            "opening_activity_observations"
+        )
+    }
+    assert "uq_opening_activity_session_symbol_window" in {
+        constraint["name"]
+        for constraint in inspector.get_unique_constraints(
+            "opening_activity_observations"
+        )
+    }
+    assert "ix_opening_activity_symbol_session" in {
+        index["name"]
+        for index in inspector.get_indexes(
+            "opening_activity_observations"
+        )
+    }
 
 
 def test_opening_momentum_execution_table_migration_is_idempotent(

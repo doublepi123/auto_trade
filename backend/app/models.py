@@ -1360,6 +1360,10 @@ class OpeningMomentumShadowRun(Base):
         Float,
         nullable=True,
     )
+    candidate_opening_activity_ratio: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+    )
     candidate_overnight_gap_bps: Mapped[Optional[float]] = mapped_column(
         Float,
         nullable=True,
@@ -1398,6 +1402,39 @@ class OpeningMomentumShadowRun(Base):
         _TZDateTime,
         default=_utcnow,
         onupdate=_utcnow,
+    )
+
+
+class OpeningActivityObservation(Base):
+    """Completed opening-window activity used by causal volume baselines."""
+
+    __tablename__ = "opening_activity_observations"
+    __table_args__ = (
+        UniqueConstraint(
+            "session_date",
+            "symbol",
+            "window_minutes",
+            name="uq_opening_activity_session_symbol_window",
+        ),
+        Index(
+            "ix_opening_activity_symbol_session",
+            "symbol",
+            "session_date",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_date: Mapped[date] = mapped_column(Date, nullable=False)
+    symbol: Mapped[str] = mapped_column(String(50), nullable=False)
+    window_minutes: Mapped[int] = mapped_column(Integer, nullable=False)
+    volume: Mapped[float] = mapped_column(Float, nullable=False)
+    turnover: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    source: Mapped[str] = mapped_column(String(48), nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(_TZDateTime, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        _TZDateTime,
+        default=_utcnow,
+        nullable=False,
     )
 
 

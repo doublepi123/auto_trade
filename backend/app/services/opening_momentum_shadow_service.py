@@ -51,6 +51,7 @@ from app.domain.universe_selection import (
     UNIVERSE_ALGORITHM_VERSION,
 )
 from app.models import (
+    OpeningActivityObservation,
     OpeningMomentumShadowRun,
     StrategyV2ShadowConfig,
     UniverseSelectionCandidate,
@@ -307,6 +308,20 @@ _INDEX_CATALOG_STOCKS_IN_PLAY_ORB_VERSION_SUFFIX = (
     "next-minute-open-range-low-stop-cap4-hold60-cost30-"
     "precommitted-20260728-v1"
 )
+_INDEX_CATALOG_RELATIVE_VOLUME_ORB_SOURCE = (
+    "OPENING_INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5"
+)
+_INDEX_CATALOG_RELATIVE_VOLUME_ORB_VERSION = (
+    "forward-only-index-catalog-rvol14-min1-top5-orb5-"
+    "hold60-cost30-research-through-20260727-v1"
+)
+_INDEX_CATALOG_RELATIVE_VOLUME_ORB_ALGORITHM_VERSION = (
+    f"{ALGORITHM_VERSION}+{_INDEX_CATALOG_RELATIVE_VOLUME_ORB_VERSION}"
+)
+_RELATIVE_VOLUME_LOOKBACK_SESSIONS = 14
+_RELATIVE_VOLUME_MINIMUM_RATIO = 1.0
+_RELATIVE_VOLUME_TOP_N = 5
+_OPENING_ACTIVITY_WINDOW_MINUTES = 5
 _EXECUTION_EXTENSION_COHORT_VERSION = (
     "individual-discovery-top6-positive-delta-min4-stop1-shortlist-v2-"
     "20260724"
@@ -424,6 +439,10 @@ _IndexCatalogStocksInPlayOrbVariantName = Literal[
     "INDEX_CATALOG_STOCKS_IN_PLAY_ORB_TOP10_CHALLENGER",
     "INDEX_CATALOG_STOCKS_IN_PLAY_ORB_TOP5_CHALLENGER",
 ]
+_OpeningActivityBaseline = Literal[
+    "DAILY_ADV_PROXY",
+    "PRIOR_SAME_WINDOW_VOLUME",
+]
 _VariantName = Literal[
     "INCUMBENT",
     "REVERSAL_CHALLENGER",
@@ -462,6 +481,7 @@ _VariantName = Literal[
     "INDEX_CATALOG_STOCKS_IN_PLAY_ORB_CHALLENGER",
     "INDEX_CATALOG_STOCKS_IN_PLAY_ORB_TOP10_CHALLENGER",
     "INDEX_CATALOG_STOCKS_IN_PLAY_ORB_TOP5_CHALLENGER",
+    "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_CHALLENGER",
     "EXECUTION_SNDK_CHALLENGER",
     "EXECUTION_INTC_CHALLENGER",
     "EXECUTION_QCOM_CHALLENGER",
@@ -493,6 +513,7 @@ class _Candle:
     high: float
     low: float
     close: float
+    volume: float | None = None
     turnover: float | None = None
 
 
@@ -645,6 +666,9 @@ class _UniverseVariant:
     maximum_benchmark_average_return_bps: float | None = None
     opening_range_stop: bool = False
     opening_activity_top_n: int | None = None
+    opening_activity_baseline: _OpeningActivityBaseline | None = None
+    opening_activity_lookback_sessions: int | None = None
+    minimum_opening_activity_ratio: float | None = None
     required_symbols: tuple[str, ...] = ()
     excluded_symbols: tuple[str, ...] = ()
     forward_evidence_start_date: date | None = None
@@ -768,6 +792,10 @@ class _UniverseVariant:
                 raise ValueError(
                     "opening activity ranking requires its ORB selection mode"
                 )
+            if self.opening_activity_baseline is None:
+                raise ValueError(
+                    "opening activity ranking requires a baseline"
+                )
         elif (
             self.candidate_selection_mode
             == "OPENING_ACTIVITY_TOP_N_THEN_BREAKOUT"
@@ -775,6 +803,36 @@ class _UniverseVariant:
             raise ValueError(
                 "opening activity selection requires opening_activity_top_n"
             )
+        if self.opening_activity_baseline is None:
+            if self.opening_activity_lookback_sessions is not None:
+                raise ValueError(
+                    "opening activity lookback requires a baseline"
+                )
+            if self.minimum_opening_activity_ratio is not None:
+                raise ValueError(
+                    "minimum opening activity ratio requires a baseline"
+                )
+        elif self.opening_activity_baseline == "DAILY_ADV_PROXY":
+            if self.opening_activity_lookback_sessions != 20:
+                raise ValueError(
+                    "daily ADV proxy requires a 20-session lookback"
+                )
+        elif self.opening_activity_baseline == "PRIOR_SAME_WINDOW_VOLUME":
+            if (
+                self.opening_activity_lookback_sessions is None
+                or self.opening_activity_lookback_sessions <= 0
+            ):
+                raise ValueError(
+                    "same-window volume requires a positive lookback"
+                )
+            if (
+                self.minimum_opening_activity_ratio is None
+                or not math.isfinite(self.minimum_opening_activity_ratio)
+                or self.minimum_opening_activity_ratio <= 0
+            ):
+                raise ValueError(
+                    "same-window volume requires a positive minimum ratio"
+                )
 
     def effective_maximum_market_return_bps(
         self,
@@ -1279,6 +1337,9 @@ class OpeningMomentumShadowService:
                     maximum_stocks_in_play=(
                         variant.opening_activity_top_n
                     ),
+                    minimum_opening_activity_ratio=(
+                        variant.minimum_opening_activity_ratio
+                    ),
                     config=variant.decision_config,
                 )
             return evaluate_opening_range_breakout(
@@ -1338,6 +1399,86 @@ class OpeningMomentumShadowService:
             if value is not None and value > 0:
                 result[(row.run_id, row.symbol)] = value
         return result
+
+    def _record_opening_activity(
+        self,
+        *,
+        session_date: date,
+        session_open: datetime,
+        observed_at: datetime,
+        bars_by_symbol: dict[str, dict[datetime, _Candle]],
+    ) -> None:
+        expected = tuple(
+            session_open + timedelta(minutes=offset)
+            for offset in range(_OPENING_ACTIVITY_WINDOW_MINUTES)
+        )
+        symbols = tuple(bars_by_symbol)
+        if not symbols:
+            return
+        existing = {
+            row.symbol
+            for row in self.db.query(OpeningActivityObservation)
+            .filter(
+                OpeningActivityObservation.session_date == session_date,
+                OpeningActivityObservation.window_minutes
+                == _OPENING_ACTIVITY_WINDOW_MINUTES,
+                OpeningActivityObservation.symbol.in_(symbols),
+            )
+            .all()
+        }
+        for symbol, by_timestamp in bars_by_symbol.items():
+            if symbol in existing or any(
+                timestamp not in by_timestamp for timestamp in expected
+            ):
+                continue
+            candles = [by_timestamp[timestamp] for timestamp in expected]
+            volume = self._signal_volume(candles)
+            if volume is None:
+                continue
+            self.db.add(OpeningActivityObservation(
+                session_date=session_date,
+                symbol=symbol,
+                window_minutes=_OPENING_ACTIVITY_WINDOW_MINUTES,
+                volume=volume,
+                turnover=self._signal_turnover(candles),
+                source="LIVE_COMPLETED_FIRST5",
+                observed_at=observed_at,
+            ))
+
+    def _prior_opening_volume_baselines(
+        self,
+        *,
+        symbols: tuple[str, ...],
+        before_date: date,
+        lookback_sessions: int,
+    ) -> dict[str, float]:
+        if not symbols or lookback_sessions <= 0:
+            return {}
+        rows = (
+            self.db.query(OpeningActivityObservation)
+            .filter(
+                OpeningActivityObservation.symbol.in_(symbols),
+                OpeningActivityObservation.window_minutes
+                == _OPENING_ACTIVITY_WINDOW_MINUTES,
+                OpeningActivityObservation.session_date < before_date,
+                OpeningActivityObservation.volume > 0,
+            )
+            .order_by(
+                OpeningActivityObservation.symbol.asc(),
+                OpeningActivityObservation.session_date.desc(),
+            )
+            .all()
+        )
+        values_by_symbol: dict[str, list[float]] = {}
+        for row in rows:
+            values = values_by_symbol.setdefault(row.symbol, [])
+            if len(values) < lookback_sessions:
+                values.append(float(row.volume))
+        return {
+            symbol: sum(values) / lookback_sessions
+            for symbol, values in values_by_symbol.items()
+            if len(values) == lookback_sessions
+        }
 
     @staticmethod
     def _variant_signal_at(
@@ -1425,6 +1566,30 @@ class OpeningMomentumShadowService:
                     exc,
                 )
 
+        self._record_opening_activity(
+            session_date=session_date,
+            session_open=session_open,
+            observed_at=current,
+            bars_by_symbol=bars_by_symbol,
+        )
+        relative_volume_lookbacks = {
+            cast(int, variant.opening_activity_lookback_sessions)
+            for variant in variants
+            if (
+                variant.opening_activity_baseline
+                == "PRIOR_SAME_WINDOW_VOLUME"
+                and variant.opening_activity_lookback_sessions is not None
+            )
+        }
+        prior_opening_volume_baselines = {
+            lookback: self._prior_opening_volume_baselines(
+                symbols=symbols,
+                before_date=session_date,
+                lookback_sessions=lookback,
+            )
+            for lookback in relative_volume_lookbacks
+        }
+
         benchmark_bars: dict[str, dict[datetime, _Candle]] = {}
         for symbol in _OPENING_CONTEXT_BENCHMARKS:
             try:
@@ -1476,6 +1641,7 @@ class OpeningMomentumShadowService:
             opening_range_high_by_symbol: dict[str, float] = {}
             signal_turnover_by_symbol: dict[str, float] = {}
             opening_turnover_by_symbol: dict[str, float] = {}
+            opening_volume_by_symbol: dict[str, float] = {}
             opening_activity_ratio_by_symbol: dict[str, float] = {}
             excluded = {
                 symbol: fetch_errors[symbol]
@@ -1539,6 +1705,10 @@ class OpeningMomentumShadowService:
                 opening_turnover = self._signal_turnover(signal_candles)
                 if opening_turnover is not None:
                     opening_turnover_by_symbol[symbol] = opening_turnover
+                opening_volume = self._signal_volume(signal_candles)
+                if opening_volume is not None:
+                    opening_volume_by_symbol[symbol] = opening_volume
+                if variant.opening_activity_baseline == "DAILY_ADV_PROXY":
                     average_daily_turnover = (
                         avg_dollar_volume_by_candidate.get((
                             variant.selection_run_id,
@@ -1548,28 +1718,65 @@ class OpeningMomentumShadowService:
                         else None
                     )
                     if (
-                        average_daily_turnover is not None
+                        opening_turnover is not None
+                        and average_daily_turnover is not None
                         and average_daily_turnover > 0
                     ):
                         opening_activity_ratio_by_symbol[symbol] = (
                             opening_turnover / average_daily_turnover
+                        )
+                elif (
+                    variant.opening_activity_baseline
+                    == "PRIOR_SAME_WINDOW_VOLUME"
+                    and opening_volume is not None
+                    and variant.opening_activity_lookback_sessions is not None
+                ):
+                    baseline = prior_opening_volume_baselines.get(
+                        variant.opening_activity_lookback_sessions,
+                        {},
+                    ).get(symbol)
+                    if baseline is not None and baseline > 0:
+                        opening_activity_ratio_by_symbol[symbol] = (
+                            opening_volume / baseline
                         )
                 if len(signal_candles) >= 5:
                     path_features_by_symbol[symbol] = (
                         self._opening_path_features(signal_candles)
                     )
 
+            required_observations = max(
+                config.minimum_universe_size,
+                math.ceil(
+                    len(variant.symbols)
+                    * variant.minimum_data_coverage
+                ),
+            )
+            decision_observations = observations
             opening_activity_data_complete = True
             opening_activity_rank_by_symbol: dict[str, int] = {}
             if variant.opening_activity_top_n is not None:
                 observation_symbols = {
                     item.symbol for item in observations
                 }
-                opening_activity_data_complete = (
-                    observation_symbols.issubset(
-                        opening_activity_ratio_by_symbol
+                if (
+                    variant.opening_activity_baseline
+                    == "PRIOR_SAME_WINDOW_VOLUME"
+                ):
+                    decision_observations = [
+                        item
+                        for item in observations
+                        if item.symbol in opening_activity_ratio_by_symbol
+                    ]
+                    opening_activity_data_complete = (
+                        len(decision_observations)
+                        >= required_observations
                     )
-                )
+                else:
+                    opening_activity_data_complete = (
+                        observation_symbols.issubset(
+                            opening_activity_ratio_by_symbol
+                        )
+                    )
                 activity_ranking = [
                     symbol
                     for symbol, _ in sorted(
@@ -1581,13 +1788,30 @@ class OpeningMomentumShadowService:
                     symbol: rank
                     for rank, symbol in enumerate(activity_ranking, start=1)
                 }
-                activity_eligible = set(
-                    activity_ranking[:variant.opening_activity_top_n]
-                )
+                activity_eligible = set([
+                    symbol
+                    for symbol in activity_ranking
+                    if (
+                        variant.minimum_opening_activity_ratio is None
+                        or opening_activity_ratio_by_symbol[symbol]
+                        >= variant.minimum_opening_activity_ratio
+                    )
+                ][:variant.opening_activity_top_n])
                 for symbol in observation_symbols:
                     if symbol not in opening_activity_ratio_by_symbol:
                         excluded[symbol] = (
-                            "OPENING_ACTIVITY_DATA_MISSING"
+                            "OPENING_ACTIVITY_BASELINE_MISSING"
+                            if variant.opening_activity_baseline
+                            == "PRIOR_SAME_WINDOW_VOLUME"
+                            else "OPENING_ACTIVITY_DATA_MISSING"
+                        )
+                    elif (
+                        variant.minimum_opening_activity_ratio is not None
+                        and opening_activity_ratio_by_symbol[symbol]
+                        < variant.minimum_opening_activity_ratio
+                    ):
+                        excluded[symbol] = (
+                            "OPENING_ACTIVITY_RATIO_BELOW_MINIMUM"
                         )
                     elif symbol not in activity_eligible:
                         excluded[symbol] = (
@@ -1597,7 +1821,7 @@ class OpeningMomentumShadowService:
 
             decision = self._evaluate_variant_decision(
                 variant,
-                observations,
+                decision_observations,
                 path_efficiency_by_symbol,
                 opening_range_high_by_symbol,
                 opening_activity_ratio_by_symbol,
@@ -1727,19 +1951,25 @@ class OpeningMomentumShadowService:
                 )
                 else None
             )
-            required_observations = max(
-                config.minimum_universe_size,
-                math.ceil(
-                    len(variant.symbols)
-                    * variant.minimum_data_coverage
-                ),
+            candidate_opening_activity_ratio = (
+                opening_activity_ratio_by_symbol.get(
+                    decision.candidate_symbol
+                )
+                if decision.candidate_symbol is not None
+                else None
+            )
+            coverage_observations = (
+                decision_observations
+                if variant.opening_activity_baseline
+                == "PRIOR_SAME_WINDOW_VOLUME"
+                else observations
             )
             data_complete = (
                 bool(variant.symbols)
-                and len(observations) >= required_observations
+                and len(coverage_observations) >= required_observations
                 and opening_activity_data_complete
                 and set(variant.required_symbols).issubset(
-                    {item.symbol for item in observations}
+                    {item.symbol for item in coverage_observations}
                 )
             )
             last_five_gate_failed = (
@@ -1918,6 +2148,9 @@ class OpeningMomentumShadowService:
                 candidate_avg_dollar_volume=candidate_avg_dollar_volume,
                 candidate_signal_turnover_ratio=(
                     candidate_signal_turnover_ratio
+                ),
+                candidate_opening_activity_ratio=(
+                    candidate_opening_activity_ratio
                 ),
                 candidate_overnight_gap_bps=(
                     candidate_overnight_gap_bps
@@ -2401,6 +2634,14 @@ class OpeningMomentumShadowService:
                 symbols=index_catalog_symbols,
                 selection_run_id=run.id,
             ))
+        relative_volume_identity = identities_by_variant[
+            "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_CHALLENGER"
+        ]
+        variants.append(replace(
+            relative_volume_identity,
+            symbols=index_catalog_symbols,
+            selection_run_id=run.id,
+        ))
         for spec in _EXECUTION_EXTENSION_SPECS:
             identity = identities_by_variant[spec.variant]
             variants.append(_UniverseVariant(
@@ -2817,6 +3058,8 @@ class OpeningMomentumShadowService:
                     ),
                     opening_range_stop=True,
                     opening_activity_top_n=spec.top_n,
+                    opening_activity_baseline="DAILY_ADV_PROXY",
+                    opening_activity_lookback_sessions=20,
                     forward_evidence_start_date=(
                         _POST_20260727_FORWARD_EVIDENCE_START_DATE
                     ),
@@ -2864,10 +3107,52 @@ class OpeningMomentumShadowService:
                     ),
                     opening_range_stop=True,
                     opening_activity_top_n=spec.top_n,
+                    opening_activity_baseline="DAILY_ADV_PROXY",
+                    opening_activity_lookback_sessions=20,
                     forward_evidence_start_date=(
                         _POST_20260727_FORWARD_EVIDENCE_START_DATE
                     ),
                 ))
+            variants.append(_UniverseVariant(
+                variant=(
+                    "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_CHALLENGER"
+                ),
+                algorithm_version=(
+                    _INDEX_CATALOG_RELATIVE_VOLUME_ORB_ALGORITHM_VERSION
+                ),
+                config_version=self._evidence_config_version(
+                    f"{five_minute_orb_config.version_hash()}:"
+                    f"{_INDEX_CATALOG_RELATIVE_VOLUME_ORB_VERSION}:"
+                    f"{_RELATIVE_VOLUME_LOOKBACK_SESSIONS}:"
+                    f"{_RELATIVE_VOLUME_MINIMUM_RATIO:.2f}:"
+                    f"{_RELATIVE_VOLUME_TOP_N}"
+                ),
+                universe_source=(
+                    _INDEX_CATALOG_RELATIVE_VOLUME_ORB_SOURCE
+                ),
+                decision_config=five_minute_orb_config,
+                signal_model="OPENING_RANGE_BREAKOUT",
+                candidate_selection_mode=(
+                    "OPENING_ACTIVITY_TOP_N_THEN_BREAKOUT"
+                ),
+                minimum_data_coverage=(
+                    _EARLY_BROAD_MINIMUM_COVERAGE
+                ),
+                opening_range_stop=True,
+                opening_activity_top_n=_RELATIVE_VOLUME_TOP_N,
+                opening_activity_baseline=(
+                    "PRIOR_SAME_WINDOW_VOLUME"
+                ),
+                opening_activity_lookback_sessions=(
+                    _RELATIVE_VOLUME_LOOKBACK_SESSIONS
+                ),
+                minimum_opening_activity_ratio=(
+                    _RELATIVE_VOLUME_MINIMUM_RATIO
+                ),
+                forward_evidence_start_date=(
+                    _POST_20260727_FORWARD_EVIDENCE_START_DATE
+                ),
+            ))
             for spec in _EXECUTION_EXTENSION_SPECS:
                 variants.append(_UniverseVariant(
                     variant=spec.variant,
@@ -3588,7 +3873,12 @@ class OpeningMomentumShadowService:
             )
             uses_index_catalog_five_minute_orb_baseline = (
                 identity.variant
-                in _INDEX_CATALOG_STOCKS_IN_PLAY_ORB_VARIANTS
+                in (
+                    _INDEX_CATALOG_STOCKS_IN_PLAY_ORB_VARIANTS
+                    | {
+                        "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_CHALLENGER"
+                    }
+                )
             )
             requires_displacement_evidence = (
                 is_early_extension
@@ -3788,6 +4078,15 @@ class OpeningMomentumShadowService:
                     ),
                     opening_activity_top_n=(
                         identity.opening_activity_top_n
+                    ),
+                    opening_activity_baseline=(
+                        identity.opening_activity_baseline
+                    ),
+                    opening_activity_lookback_sessions=(
+                        identity.opening_activity_lookback_sessions
+                    ),
+                    minimum_opening_activity_ratio=(
+                        identity.minimum_opening_activity_ratio
                     ),
                     required_symbols=list(
                         identity.required_symbols
@@ -4233,6 +4532,13 @@ class OpeningMomentumShadowService:
         return turnover if turnover > 0 and math.isfinite(turnover) else None
 
     @staticmethod
+    def _signal_volume(candles: list[_Candle]) -> float | None:
+        if not candles or any(candle.volume is None for candle in candles):
+            return None
+        volume = sum(cast(float, candle.volume) for candle in candles)
+        return volume if volume > 0 and math.isfinite(volume) else None
+
+    @staticmethod
     def _opening_range_stop_loss_pct(
         *,
         opening_range_low: float | None,
@@ -4295,6 +4601,14 @@ class OpeningMomentumShadowService:
                 high_price = max(open_price, close_price)
                 low_price = min(open_price, close_price)
             try:
+                volume = float(getattr(value, "volume"))
+            except (AttributeError, TypeError, ValueError):
+                volume = None
+            if volume is not None and (
+                not math.isfinite(volume) or volume < 0
+            ):
+                volume = None
+            try:
                 turnover = float(getattr(value, "turnover"))
             except (AttributeError, TypeError, ValueError):
                 turnover = None
@@ -4308,6 +4622,7 @@ class OpeningMomentumShadowService:
                 high=high_price,
                 low=low_price,
                 close=close_price,
+                volume=volume,
                 turnover=turnover,
             )
         return [
@@ -4374,6 +4689,9 @@ class OpeningMomentumShadowService:
             ),
             candidate_signal_turnover_ratio=(
                 row.candidate_signal_turnover_ratio
+            ),
+            candidate_opening_activity_ratio=(
+                row.candidate_opening_activity_ratio
             ),
             candidate_overnight_gap_bps=(
                 row.candidate_overnight_gap_bps
