@@ -33,6 +33,7 @@ from app.domain.opening_momentum import (
 
 
 RESEARCH_VERSION = "relative-volume-orb-causal-research-v2"
+CANDIDATE_PANEL_VERSION = "relative-volume-orb-candidate-panel-v1"
 CandidateSelectionMode = Literal[
     "BREAKOUT_DEPTH",
     "ACTIVITY_RATIO",
@@ -171,6 +172,65 @@ class RelativeVolumeOrbCacheExtensionReport:
     incomplete_candidate_sessions_after: int
 
 
+@dataclass(frozen=True)
+class RelativeVolumeOrbCandidateSignal:
+    session_date: date
+    symbol: str
+    activity_ratio: float
+    opening_return_bps: float
+    breakout_depth_bps: float
+    entry_price: float
+    stop_price: float
+
+
+@dataclass(frozen=True)
+class RelativeVolumeOrbCandidateOutcome:
+    session_date: date
+    symbol: str
+    activity_ratio: float
+    opening_return_bps: float
+    breakout_depth_bps: float
+    entry_price: float
+    stop_price: float
+    exit_price: float
+    exit_reason: str
+    gross_return_bps: float
+    net_return_bps: float
+
+
+@dataclass(frozen=True)
+class RelativeVolumeOrbCandidatePanel:
+    config: RelativeVolumeOrbResearchConfig
+    universe: tuple[str, ...]
+    evaluable_dates: tuple[date, ...]
+    candidates: tuple[RelativeVolumeOrbCandidateOutcome, ...]
+
+
+@dataclass(frozen=True)
+class RelativeVolumeOrbPanelCacheExtensionReport:
+    required_maximum_offset: int
+    candidate_sessions: int
+    candidate_paths: int
+    incomplete_candidate_paths_before: int
+    fetch_requests: int
+    fetched_bars: int
+    incomplete_candidate_paths_after: int
+
+
+@dataclass(frozen=True)
+class _RelativeVolumeOrbSessionInput:
+    session_date: date
+    bars_by_symbol: dict[str, dict[int, RawMinuteBar]]
+    observations: tuple[OpeningMomentumObservation, ...]
+    activity_ratios: dict[str, float]
+    top_symbols: tuple[str, ...]
+    opening_range_highs: dict[str, float]
+    opening_range_lows: dict[str, float]
+    observed_symbols: int
+    ratio_symbols: int
+    data_complete: bool
+
+
 def load_research_inputs(
     *,
     ohlc_cache_path: Path,
@@ -240,14 +300,13 @@ def load_seed_research_inputs(
     )
 
 
-def evaluate_relative_volume_orb(
+def _prepare_relative_volume_orb_sessions(
     bars_by_symbol: dict[str, tuple[RawMinuteBar, ...]],
     activity_records: Sequence[OpeningActivityRecord],
     *,
-    config: RelativeVolumeOrbResearchConfig | None = None,
-    symbols: Sequence[str] | None = None,
-) -> RelativeVolumeOrbResearchResult:
-    params = config or RelativeVolumeOrbResearchConfig()
+    config: RelativeVolumeOrbResearchConfig,
+    symbols: Sequence[str] | None,
+) -> tuple[tuple[str, ...], tuple[_RelativeVolumeOrbSessionInput, ...]]:
     activity_symbols = {item.symbol for item in activity_records}
     available_symbols = set(bars_by_symbol).intersection(activity_symbols)
     universe = tuple(
@@ -280,15 +339,14 @@ def evaluate_relative_volume_orb(
             )
         current[item.symbol] = item.volume
 
-    opening_config = params.opening_config()
     required_observations = max(
-        params.minimum_universe_size,
-        math.ceil(len(universe) * params.minimum_data_coverage),
+        config.minimum_universe_size,
+        math.ceil(len(universe) * config.minimum_data_coverage),
     )
     histories: dict[str, list[float]] = defaultdict(list)
-    sessions: list[RelativeVolumeOrbSession] = []
-    trades: list[RelativeVolumeOrbTrade] = []
+    prepared: list[_RelativeVolumeOrbSessionInput] = []
     all_dates = sorted(set(indexed_bars).union(activity_by_date))
+    entry_offset = config.signal_minutes + config.execution_delay_minutes
     for session_date in all_dates:
         bars_for_date = indexed_bars.get(session_date, {})
         activity_for_date = activity_by_date.get(session_date, {})
@@ -296,26 +354,23 @@ def evaluate_relative_volume_orb(
         observations: list[OpeningMomentumObservation] = []
         opening_range_highs: dict[str, float] = {}
         opening_range_lows: dict[str, float] = {}
-        entry_offset = (
-            params.signal_minutes + params.execution_delay_minutes
-        )
         for symbol in universe:
             current_volume = activity_for_date.get(symbol)
-            prior = histories[symbol][-params.lookback_sessions :]
+            prior = histories[symbol][-config.lookback_sessions :]
             if (
                 current_volume is not None
-                and len(prior) == params.lookback_sessions
+                and len(prior) == config.lookback_sessions
                 and sum(prior) > 0
             ):
                 ratios[symbol] = current_volume / (
-                    sum(prior) / params.lookback_sessions
+                    sum(prior) / config.lookback_sessions
                 )
 
             bars = bars_for_date.get(symbol, {})
-            opening_offsets = range(params.signal_minutes)
+            opening_offsets = range(config.signal_minutes)
             if any(offset not in bars for offset in opening_offsets):
                 continue
-            signal_bar = bars.get(params.signal_minutes)
+            signal_bar = bars.get(config.signal_minutes)
             if signal_bar is None:
                 continue
             opening_bar = bars[0]
@@ -335,13 +390,13 @@ def evaluate_relative_volume_orb(
                 for offset in opening_offsets
             )
 
-        # Today's observation becomes eligible only for later sessions.
+        # Today's opening volume becomes eligible only on later sessions.
         for symbol, volume in activity_for_date.items():
             histories[symbol].append(volume)
 
-        decision_observations = [
+        decision_observations = tuple(
             item for item in observations if item.symbol in ratios
-        ]
+        )
         decision_ratios = {
             item.symbol: ratios[item.symbol]
             for item in decision_observations
@@ -352,16 +407,101 @@ def evaluate_relative_volume_orb(
                 decision_ratios.items(),
                 key=lambda item: (-item[1], item[0]),
             )
-            if ratio >= params.minimum_activity_ratio
+            if ratio >= config.minimum_activity_ratio
         )
-        top_symbols = activity_ranking[: params.top_n]
-        if len(decision_observations) < required_observations:
+        prepared.append(_RelativeVolumeOrbSessionInput(
+            session_date=session_date,
+            bars_by_symbol=bars_for_date,
+            observations=decision_observations,
+            activity_ratios=decision_ratios,
+            top_symbols=activity_ranking[: config.top_n],
+            opening_range_highs=opening_range_highs,
+            opening_range_lows=opening_range_lows,
+            observed_symbols=len(observations),
+            ratio_symbols=len(decision_observations),
+            data_complete=(
+                len(decision_observations) >= required_observations
+            ),
+        ))
+    return universe, tuple(prepared)
+
+
+def _settle_candidate_path(
+    *,
+    session_date: date,
+    symbol: str,
+    activity_ratio: float,
+    entry_price: float,
+    stop_price: float,
+    bars: dict[int, RawMinuteBar],
+    config: RelativeVolumeOrbResearchConfig,
+) -> RelativeVolumeOrbTrade | None:
+    entry_offset = config.signal_minutes + config.execution_delay_minutes
+    exit_offset = config.required_maximum_offset
+    if any(
+        offset not in bars
+        for offset in range(entry_offset, exit_offset + 1)
+    ):
+        return None
+
+    exit_price = bars[exit_offset].open
+    exit_reason = "FIXED_HOLD_EXIT"
+    for offset in range(entry_offset, exit_offset):
+        bar = bars[offset]
+        if bar.open <= stop_price:
+            exit_price = bar.open
+            exit_reason = "STOP_LOSS_EXIT"
+            break
+        if _bar_low(bar) <= stop_price:
+            exit_price = stop_price
+            exit_reason = "STOP_LOSS_EXIT"
+            break
+    gross_return_bps = (exit_price / entry_price - 1) * 10_000
+    return RelativeVolumeOrbTrade(
+        session_date=session_date,
+        symbol=symbol,
+        activity_ratio=activity_ratio,
+        entry_price=entry_price,
+        stop_price=stop_price,
+        exit_price=exit_price,
+        exit_reason=exit_reason,
+        gross_return_bps=gross_return_bps,
+        net_return_bps=gross_return_bps - config.round_trip_cost_bps,
+    )
+
+
+def evaluate_relative_volume_orb(
+    bars_by_symbol: dict[str, tuple[RawMinuteBar, ...]],
+    activity_records: Sequence[OpeningActivityRecord],
+    *,
+    config: RelativeVolumeOrbResearchConfig | None = None,
+    symbols: Sequence[str] | None = None,
+) -> RelativeVolumeOrbResearchResult:
+    params = config or RelativeVolumeOrbResearchConfig()
+    universe, prepared_sessions = _prepare_relative_volume_orb_sessions(
+        bars_by_symbol,
+        activity_records,
+        config=params,
+        symbols=symbols,
+    )
+    opening_config = params.opening_config()
+    sessions: list[RelativeVolumeOrbSession] = []
+    trades: list[RelativeVolumeOrbTrade] = []
+    for prepared in prepared_sessions:
+        session_date = prepared.session_date
+        decision_observations = prepared.observations
+        decision_ratios = prepared.activity_ratios
+        top_symbols = prepared.top_symbols
+        opening_range_highs = prepared.opening_range_highs
+        opening_range_lows = prepared.opening_range_lows
+        bars_for_date = prepared.bars_by_symbol
+        if not prepared.data_complete:
             sessions.append(RelativeVolumeOrbSession(
                 session_date=session_date,
                 status="SKIPPED",
                 reason="DATA_INCOMPLETE_OR_WARMUP",
-                observed_symbols=len(observations),
-                ratio_symbols=len(decision_observations),
+                observed_symbols=prepared.observed_symbols,
+                ratio_symbols=prepared.ratio_symbols,
                 top_symbols=top_symbols,
             ))
             continue
@@ -385,7 +525,7 @@ def evaluate_relative_volume_orb(
                 decision_observations,
                 top_symbols=top_symbols,
                 opening_range_highs=opening_range_highs,
-                activity_ratios=ratios,
+                activity_ratios=decision_ratios,
                 mode=params.candidate_selection_mode,
             )
             if selected is None:
@@ -406,8 +546,8 @@ def evaluate_relative_volume_orb(
                 session_date=session_date,
                 status="SKIPPED",
                 reason=reason,
-                observed_symbols=len(observations),
-                ratio_symbols=len(decision_observations),
+                observed_symbols=prepared.observed_symbols,
+                ratio_symbols=prepared.ratio_symbols,
                 top_symbols=top_symbols,
             ))
             continue
@@ -423,67 +563,45 @@ def evaluate_relative_volume_orb(
                 session_date=session_date,
                 status="SKIPPED",
                 reason="OPENING_RANGE_STOP_INVALID",
-                observed_symbols=len(observations),
-                ratio_symbols=len(decision_observations),
+                observed_symbols=prepared.observed_symbols,
+                ratio_symbols=prepared.ratio_symbols,
                 top_symbols=top_symbols,
                 candidate_symbol=candidate,
-                candidate_activity_ratio=ratios[candidate],
+                candidate_activity_ratio=decision_ratios[candidate],
             ))
             continue
 
-        candidate_bars = bars_for_date[candidate]
-        exit_offset = params.required_maximum_offset
-        if any(
-            offset not in candidate_bars
-            for offset in range(entry_offset, exit_offset + 1)
-        ):
+        trade = _settle_candidate_path(
+            session_date=session_date,
+            symbol=candidate,
+            activity_ratio=decision_ratios[candidate],
+            entry_price=entry_price,
+            stop_price=stop_price,
+            bars=bars_for_date[candidate],
+            config=params,
+        )
+        if trade is None:
             sessions.append(RelativeVolumeOrbSession(
                 session_date=session_date,
                 status="SKIPPED",
                 reason="EXIT_PATH_INCOMPLETE",
-                observed_symbols=len(observations),
-                ratio_symbols=len(decision_observations),
+                observed_symbols=prepared.observed_symbols,
+                ratio_symbols=prepared.ratio_symbols,
                 top_symbols=top_symbols,
                 candidate_symbol=candidate,
-                candidate_activity_ratio=ratios[candidate],
+                candidate_activity_ratio=decision_ratios[candidate],
             ))
             continue
-
-        exit_price = candidate_bars[exit_offset].open
-        exit_reason = "FIXED_HOLD_EXIT"
-        for offset in range(entry_offset, exit_offset):
-            bar = candidate_bars[offset]
-            if bar.open <= stop_price:
-                exit_price = bar.open
-                exit_reason = "STOP_LOSS_EXIT"
-                break
-            if _bar_low(bar) <= stop_price:
-                exit_price = stop_price
-                exit_reason = "STOP_LOSS_EXIT"
-                break
-        gross_return_bps = (exit_price / entry_price - 1) * 10_000
-        trades.append(RelativeVolumeOrbTrade(
-            session_date=session_date,
-            symbol=candidate,
-            activity_ratio=ratios[candidate],
-            entry_price=entry_price,
-            stop_price=stop_price,
-            exit_price=exit_price,
-            exit_reason=exit_reason,
-            gross_return_bps=gross_return_bps,
-            net_return_bps=(
-                gross_return_bps - params.round_trip_cost_bps
-            ),
-        ))
+        trades.append(trade)
         sessions.append(RelativeVolumeOrbSession(
             session_date=session_date,
             status="CLOSED",
-            reason=exit_reason,
-            observed_symbols=len(observations),
-            ratio_symbols=len(decision_observations),
+            reason=trade.exit_reason,
+            observed_symbols=prepared.observed_symbols,
+            ratio_symbols=prepared.ratio_symbols,
             top_symbols=top_symbols,
             candidate_symbol=candidate,
-            candidate_activity_ratio=ratios[candidate],
+            candidate_activity_ratio=decision_ratios[candidate],
         ))
 
     return RelativeVolumeOrbResearchResult(
@@ -491,6 +609,149 @@ def evaluate_relative_volume_orb(
         universe=universe,
         sessions=tuple(sessions),
         trades=tuple(trades),
+    )
+
+
+def _eligible_candidate_observations(
+    observations: Sequence[OpeningMomentumObservation],
+    *,
+    top_symbols: Sequence[str],
+    opening_range_highs: dict[str, float],
+) -> tuple[OpeningMomentumObservation, ...]:
+    eligible_symbols = set(top_symbols)
+    return tuple(
+        item
+        for item in observations
+        if (
+            item.symbol in eligible_symbols
+            and item.symbol in opening_range_highs
+            and item.signal_close > opening_range_highs[item.symbol]
+        )
+    )
+
+
+def discover_relative_volume_orb_candidate_signals(
+    bars_by_symbol: dict[str, tuple[RawMinuteBar, ...]],
+    activity_records: Sequence[OpeningActivityRecord],
+    *,
+    config: RelativeVolumeOrbResearchConfig | None = None,
+    symbols: Sequence[str] | None = None,
+) -> tuple[
+    tuple[str, ...],
+    tuple[date, ...],
+    tuple[RelativeVolumeOrbCandidateSignal, ...],
+]:
+    """Return every causally tradeable Top-N confirmed ORB candidate."""
+
+    params = config or RelativeVolumeOrbResearchConfig()
+    universe, prepared_sessions = _prepare_relative_volume_orb_sessions(
+        bars_by_symbol,
+        activity_records,
+        config=params,
+        symbols=symbols,
+    )
+    evaluable_dates: list[date] = []
+    signals: list[RelativeVolumeOrbCandidateSignal] = []
+    for prepared in prepared_sessions:
+        if not prepared.data_complete:
+            continue
+        evaluable_dates.append(prepared.session_date)
+        for observation in _eligible_candidate_observations(
+            prepared.observations,
+            top_symbols=prepared.top_symbols,
+            opening_range_highs=prepared.opening_range_highs,
+        ):
+            entry_price = observation.entry_open
+            range_low = prepared.opening_range_lows.get(observation.symbol)
+            if entry_price is None or range_low is None:
+                continue
+            stop_price = max(
+                range_low,
+                entry_price * (1 - params.stop_loss_cap_pct / 100),
+            )
+            if stop_price >= entry_price:
+                continue
+            opening_range_high = prepared.opening_range_highs[
+                observation.symbol
+            ]
+            signals.append(RelativeVolumeOrbCandidateSignal(
+                session_date=prepared.session_date,
+                symbol=observation.symbol,
+                activity_ratio=prepared.activity_ratios[
+                    observation.symbol
+                ],
+                opening_return_bps=observation.opening_return_bps,
+                breakout_depth_bps=(
+                    observation.signal_close / opening_range_high - 1
+                )
+                * 10_000,
+                entry_price=entry_price,
+                stop_price=stop_price,
+            ))
+    return (
+        universe,
+        tuple(evaluable_dates),
+        tuple(sorted(
+            signals,
+            key=lambda item: (item.session_date, item.symbol),
+        )),
+    )
+
+
+def evaluate_relative_volume_orb_candidate_panel(
+    bars_by_symbol: dict[str, tuple[RawMinuteBar, ...]],
+    activity_records: Sequence[OpeningActivityRecord],
+    *,
+    config: RelativeVolumeOrbResearchConfig | None = None,
+    symbols: Sequence[str] | None = None,
+) -> RelativeVolumeOrbCandidatePanel:
+    params = config or RelativeVolumeOrbResearchConfig()
+    universe, evaluable_dates, signals = (
+        discover_relative_volume_orb_candidate_signals(
+            bars_by_symbol,
+            activity_records,
+            config=params,
+            symbols=symbols,
+        )
+    )
+    indexed_bars = _index_bars(bars_by_symbol, universe)
+    outcomes: list[RelativeVolumeOrbCandidateOutcome] = []
+    for signal in signals:
+        trade = _settle_candidate_path(
+            session_date=signal.session_date,
+            symbol=signal.symbol,
+            activity_ratio=signal.activity_ratio,
+            entry_price=signal.entry_price,
+            stop_price=signal.stop_price,
+            bars=indexed_bars.get(signal.session_date, {}).get(
+                signal.symbol,
+                {},
+            ),
+            config=params,
+        )
+        if trade is None:
+            raise ValueError(
+                "candidate panel exit path is incomplete: "
+                f"{signal.session_date} {signal.symbol}"
+            )
+        outcomes.append(RelativeVolumeOrbCandidateOutcome(
+            session_date=signal.session_date,
+            symbol=signal.symbol,
+            activity_ratio=signal.activity_ratio,
+            opening_return_bps=signal.opening_return_bps,
+            breakout_depth_bps=signal.breakout_depth_bps,
+            entry_price=trade.entry_price,
+            stop_price=trade.stop_price,
+            exit_price=trade.exit_price,
+            exit_reason=trade.exit_reason,
+            gross_return_bps=trade.gross_return_bps,
+            net_return_bps=trade.net_return_bps,
+        ))
+    return RelativeVolumeOrbCandidatePanel(
+        config=params,
+        universe=universe,
+        evaluable_dates=evaluable_dates,
+        candidates=tuple(outcomes),
     )
 
 
@@ -502,14 +763,10 @@ def _select_alternative_candidate(
     activity_ratios: dict[str, float],
     mode: CandidateSelectionMode,
 ) -> OpeningMomentumObservation | None:
-    eligible = tuple(
-        item
-        for item in observations
-        if (
-            item.symbol in top_symbols
-            and item.symbol in opening_range_highs
-            and item.signal_close > opening_range_highs[item.symbol]
-        )
+    eligible = _eligible_candidate_observations(
+        observations,
+        top_symbols=top_symbols,
+        opening_range_highs=opening_range_highs,
     )
     if not eligible:
         return None
@@ -543,30 +800,11 @@ def _select_alternative_candidate(
     raise ValueError("alternative candidate selection mode is unsupported")
 
 
-def materialize_candidate_exit_paths(
-    bars_by_symbol: dict[str, tuple[RawMinuteBar, ...]],
-    activity_records: Sequence[OpeningActivityRecord],
+def _fetch_exit_path_gaps(
+    extended: dict[str, tuple[RawMinuteBar, ...]],
+    gaps: Sequence[tuple[date, str, tuple[int, ...]]],
     provider: HistoricalCandleProvider,
-    *,
-    config: RelativeVolumeOrbResearchConfig | None = None,
-    symbols: Sequence[str] | None = None,
-) -> tuple[
-    dict[str, tuple[RawMinuteBar, ...]],
-    RelativeVolumeOrbCacheExtensionReport,
-]:
-    """Fetch only exit-path minutes for causally selected candidates."""
-
-    params = config or RelativeVolumeOrbResearchConfig()
-    extended = {
-        symbol: tuple(values) for symbol, values in bars_by_symbol.items()
-    }
-    before = evaluate_relative_volume_orb(
-        extended,
-        activity_records,
-        config=params,
-        symbols=symbols,
-    )
-    gaps = _candidate_exit_path_gaps(before, extended)
+) -> int:
     market_session = get_session("US")
     fetched_bars = 0
     for session_date, symbol, missing_offsets in gaps:
@@ -611,6 +849,34 @@ def materialize_candidate_exit_paths(
             ))
         fetched_bars += len(fetched)
         extended[symbol] = _merge_bars(extended[symbol], fetched)
+    return fetched_bars
+
+
+def materialize_candidate_exit_paths(
+    bars_by_symbol: dict[str, tuple[RawMinuteBar, ...]],
+    activity_records: Sequence[OpeningActivityRecord],
+    provider: HistoricalCandleProvider,
+    *,
+    config: RelativeVolumeOrbResearchConfig | None = None,
+    symbols: Sequence[str] | None = None,
+) -> tuple[
+    dict[str, tuple[RawMinuteBar, ...]],
+    RelativeVolumeOrbCacheExtensionReport,
+]:
+    """Fetch only exit-path minutes for causally selected candidates."""
+
+    params = config or RelativeVolumeOrbResearchConfig()
+    extended = {
+        symbol: tuple(values) for symbol, values in bars_by_symbol.items()
+    }
+    before = evaluate_relative_volume_orb(
+        extended,
+        activity_records,
+        config=params,
+        symbols=symbols,
+    )
+    gaps = _candidate_exit_path_gaps(before, extended)
+    fetched_bars = _fetch_exit_path_gaps(extended, gaps, provider)
 
     after = evaluate_relative_volume_orb(
         extended,
@@ -665,6 +931,106 @@ def _candidate_exit_path_gaps(
         if missing:
             gaps.append((session.session_date, symbol, missing))
     return tuple(gaps)
+
+
+def _candidate_panel_exit_path_gaps(
+    signals: Sequence[RelativeVolumeOrbCandidateSignal],
+    bars_by_symbol: dict[str, tuple[RawMinuteBar, ...]],
+    *,
+    universe: Sequence[str],
+    config: RelativeVolumeOrbResearchConfig,
+) -> tuple[tuple[date, str, tuple[int, ...]], ...]:
+    indexed = _index_bars(bars_by_symbol, universe)
+    entry_offset = config.signal_minutes + config.execution_delay_minutes
+    exit_offset = config.required_maximum_offset
+    gaps: list[tuple[date, str, tuple[int, ...]]] = []
+    for signal in signals:
+        by_offset = indexed.get(signal.session_date, {}).get(
+            signal.symbol,
+            {},
+        )
+        missing = tuple(
+            offset
+            for offset in range(entry_offset, exit_offset + 1)
+            if offset not in by_offset
+        )
+        if missing:
+            gaps.append((signal.session_date, signal.symbol, missing))
+    return tuple(gaps)
+
+
+def materialize_all_candidate_exit_paths(
+    bars_by_symbol: dict[str, tuple[RawMinuteBar, ...]],
+    activity_records: Sequence[OpeningActivityRecord],
+    provider: HistoricalCandleProvider,
+    *,
+    config: RelativeVolumeOrbResearchConfig | None = None,
+    symbols: Sequence[str] | None = None,
+) -> tuple[
+    dict[str, tuple[RawMinuteBar, ...]],
+    RelativeVolumeOrbPanelCacheExtensionReport,
+]:
+    """Fetch missing exit minutes for every causally eligible candidate."""
+
+    params = config or RelativeVolumeOrbResearchConfig()
+    extended = {
+        symbol: tuple(values) for symbol, values in bars_by_symbol.items()
+    }
+    universe, _, before_signals = (
+        discover_relative_volume_orb_candidate_signals(
+            extended,
+            activity_records,
+            config=params,
+            symbols=symbols,
+        )
+    )
+    gaps = _candidate_panel_exit_path_gaps(
+        before_signals,
+        extended,
+        universe=universe,
+        config=params,
+    )
+    fetched_bars = _fetch_exit_path_gaps(extended, gaps, provider)
+    after_universe, _, after_signals = (
+        discover_relative_volume_orb_candidate_signals(
+            extended,
+            activity_records,
+            config=params,
+            symbols=symbols,
+        )
+    )
+    if after_universe != universe or after_signals != before_signals:
+        raise RuntimeError(
+            "exit-path materialization changed causal candidate selection"
+        )
+    remaining = _candidate_panel_exit_path_gaps(
+        after_signals,
+        extended,
+        universe=universe,
+        config=params,
+    )
+    if remaining:
+        rendered = ", ".join(
+            f"{session_date.isoformat()} {symbol} "
+            f"offsets={list(offsets)}"
+            for session_date, symbol, offsets in remaining[:10]
+        )
+        raise ValueError(
+            "historical provider did not complete candidate panel exit "
+            "paths: "
+            + rendered
+        )
+    return extended, RelativeVolumeOrbPanelCacheExtensionReport(
+        required_maximum_offset=params.required_maximum_offset,
+        candidate_sessions=len({
+            item.session_date for item in before_signals
+        }),
+        candidate_paths=len(before_signals),
+        incomplete_candidate_paths_before=len(gaps),
+        fetch_requests=len(gaps),
+        fetched_bars=fetched_bars,
+        incomplete_candidate_paths_after=0,
+    )
 
 
 def research_payload(
@@ -725,6 +1091,248 @@ def research_payload(
             )),
         },
         "trades": [_trade_payload(item) for item in result.trades],
+    }
+
+
+def _candidate_outcome_trade(
+    item: RelativeVolumeOrbCandidateOutcome,
+) -> RelativeVolumeOrbTrade:
+    return RelativeVolumeOrbTrade(
+        session_date=item.session_date,
+        symbol=item.symbol,
+        activity_ratio=item.activity_ratio,
+        entry_price=item.entry_price,
+        stop_price=item.stop_price,
+        exit_price=item.exit_price,
+        exit_reason=item.exit_reason,
+        gross_return_bps=item.gross_return_bps,
+        net_return_bps=item.net_return_bps,
+    )
+
+
+def _candidate_outcome_sort_key(
+    item: RelativeVolumeOrbCandidateOutcome,
+    mode: CandidateSelectionMode,
+) -> tuple[float, float, float, str]:
+    if mode == "BREAKOUT_DEPTH":
+        return (
+            -item.breakout_depth_bps,
+            -item.opening_return_bps,
+            0.0,
+            item.symbol,
+        )
+    if mode == "ACTIVITY_RATIO":
+        return (
+            -item.activity_ratio,
+            -item.breakout_depth_bps,
+            -item.opening_return_bps,
+            item.symbol,
+        )
+    if mode == "OPENING_RETURN":
+        return (
+            -item.opening_return_bps,
+            -item.breakout_depth_bps,
+            0.0,
+            item.symbol,
+        )
+    raise ValueError("candidate outcome selection mode is unsupported")
+
+
+def _candidate_factor_value(
+    item: RelativeVolumeOrbCandidateOutcome,
+    mode: CandidateSelectionMode,
+) -> float:
+    if mode == "BREAKOUT_DEPTH":
+        return item.breakout_depth_bps
+    if mode == "ACTIVITY_RATIO":
+        return item.activity_ratio
+    if mode == "OPENING_RETURN":
+        return item.opening_return_bps
+    raise ValueError("candidate factor mode is unsupported")
+
+
+def _candidate_factor_diagnostics(
+    candidates: Sequence[RelativeVolumeOrbCandidateOutcome],
+    *,
+    mode: CandidateSelectionMode,
+) -> dict[str, object]:
+    by_date: dict[date, list[RelativeVolumeOrbCandidateOutcome]] = (
+        defaultdict(list)
+    )
+    for item in candidates:
+        by_date[item.session_date].append(item)
+
+    selected: list[RelativeVolumeOrbCandidateOutcome] = []
+    regrets: list[float] = []
+    winner_hits = 0
+    multi_candidate_regrets: list[float] = []
+    multi_candidate_winner_hits = 0
+    comparable_pairs = 0
+    concordant_pairs = 0
+    for session_date in sorted(by_date):
+        rows = by_date[session_date]
+        choice = min(
+            rows,
+            key=lambda item: _candidate_outcome_sort_key(item, mode),
+        )
+        selected.append(choice)
+        best_return = max(item.net_return_bps for item in rows)
+        regret = best_return - choice.net_return_bps
+        regrets.append(regret)
+        if regret == 0:
+            winner_hits += 1
+        if len(rows) > 1:
+            multi_candidate_regrets.append(regret)
+            if regret == 0:
+                multi_candidate_winner_hits += 1
+        for left_index, left in enumerate(rows):
+            for right in rows[left_index + 1 :]:
+                factor_delta = (
+                    _candidate_factor_value(left, mode)
+                    - _candidate_factor_value(right, mode)
+                )
+                outcome_delta = (
+                    left.net_return_bps - right.net_return_bps
+                )
+                if factor_delta == 0 or outcome_delta == 0:
+                    continue
+                comparable_pairs += 1
+                if factor_delta * outcome_delta > 0:
+                    concordant_pairs += 1
+
+    performance = _performance_payload(tuple(
+        _candidate_outcome_trade(item) for item in selected
+    ))
+    performance.update({
+        "candidate_sessions": len(selected),
+        "multi_candidate_sessions": sum(
+            len(rows) > 1 for rows in by_date.values()
+        ),
+        "winner_hits": winner_hits,
+        "winner_hit_rate": (
+            winner_hits / len(selected) if selected else 0.0
+        ),
+        "multi_candidate_winner_hits": multi_candidate_winner_hits,
+        "multi_candidate_winner_hit_rate": (
+            multi_candidate_winner_hits / len(multi_candidate_regrets)
+            if multi_candidate_regrets
+            else None
+        ),
+        "mean_regret_bps": (
+            sum(regrets) / len(regrets) if regrets else 0.0
+        ),
+        "cumulative_regret_bps": sum(regrets),
+        "mean_multi_candidate_regret_bps": (
+            sum(multi_candidate_regrets) / len(multi_candidate_regrets)
+            if multi_candidate_regrets
+            else None
+        ),
+        "comparable_pairs": comparable_pairs,
+        "concordant_pairs": concordant_pairs,
+        "pairwise_concordance": (
+            concordant_pairs / comparable_pairs
+            if comparable_pairs
+            else None
+        ),
+        "selected_symbols_by_date": [
+            {
+                "session_date": item.session_date.isoformat(),
+                "symbol": item.symbol,
+                "net_return_bps": item.net_return_bps,
+            }
+            for item in selected
+        ],
+    })
+    return performance
+
+
+def candidate_panel_payload(
+    panel: RelativeVolumeOrbCandidatePanel,
+) -> dict[str, object]:
+    discovery_dates, holdout_dates = _chronological_split(
+        panel.evaluable_dates,
+        panel.config.discovery_ratio,
+    )
+    discovery_set = set(discovery_dates)
+    holdout_set = set(holdout_dates)
+    by_date: dict[date, list[RelativeVolumeOrbCandidateOutcome]] = (
+        defaultdict(list)
+    )
+    for item in panel.candidates:
+        by_date[item.session_date].append(item)
+
+    factor_diagnostics: dict[str, object] = {}
+    for mode in _CANDIDATE_SELECTION_MODES:
+        factor_diagnostics[mode] = {
+            "all": _candidate_factor_diagnostics(
+                panel.candidates,
+                mode=mode,
+            ),
+            "discovery": _candidate_factor_diagnostics(
+                tuple(
+                    item
+                    for item in panel.candidates
+                    if item.session_date in discovery_set
+                ),
+                mode=mode,
+            ),
+            "holdout": _candidate_factor_diagnostics(
+                tuple(
+                    item
+                    for item in panel.candidates
+                    if item.session_date in holdout_set
+                ),
+                mode=mode,
+            ),
+        }
+    return {
+        "research_version": CANDIDATE_PANEL_VERSION,
+        "automatic_promotion_allowed": False,
+        "research_design": {
+            "causal_activity_baseline": True,
+            "all_tradeable_top_n_breakouts": True,
+            "candidate_selection_uses_future": False,
+            "outcomes_used_for_diagnostics_only": True,
+            "fixed_catalog_universe": True,
+            "point_in_time_membership": False,
+            "selection_uses_holdout": False,
+            "production_exit_semantics": True,
+            "required_maximum_offset": (
+                panel.config.required_maximum_offset
+            ),
+            "discovery_ratio": panel.config.discovery_ratio,
+        },
+        "config": asdict(panel.config),
+        "universe": {
+            "count": len(panel.universe),
+            "symbols": list(panel.universe),
+        },
+        "sessions": {
+            "evaluable": len(panel.evaluable_dates),
+            "with_candidates": len(by_date),
+            "multi_candidate": sum(
+                len(rows) > 1 for rows in by_date.values()
+            ),
+            "candidate_paths": len(panel.candidates),
+            "candidate_count_distribution": dict(sorted(Counter(
+                len(by_date.get(session_date, ()))
+                for session_date in panel.evaluable_dates
+            ).items())),
+            "discovery_dates": [
+                value.isoformat() for value in discovery_dates
+            ],
+            "holdout_dates": [
+                value.isoformat() for value in holdout_dates
+            ],
+        },
+        "factor_diagnostics": factor_diagnostics,
+        "candidates": [
+            {
+                **asdict(item),
+                "session_date": item.session_date.isoformat(),
+            }
+            for item in panel.candidates
+        ],
     }
 
 
@@ -891,6 +1499,14 @@ def _parser() -> argparse.ArgumentParser:
         choices=_CANDIDATE_SELECTION_MODES,
         default="BREAKOUT_DEPTH",
     )
+    parser.add_argument(
+        "--candidate-panel",
+        action="store_true",
+        help=(
+            "materialize and diagnose every tradeable Top-N confirmed "
+            "breakout, without changing the selected strategy"
+        ),
+    )
     parser.add_argument("--output", type=Path)
     parser.add_argument("--full", action="store_true")
     return parser
@@ -923,7 +1539,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise ValueError(
                 "seed OHLC cache must differ from the target OHLC cache"
             )
-        cache_extension: RelativeVolumeOrbCacheExtensionReport | None = None
+        cache_extension: (
+            RelativeVolumeOrbCacheExtensionReport
+            | RelativeVolumeOrbPanelCacheExtensionReport
+            | None
+        ) = None
         if args.seed_ohlc_cache is None:
             bars_by_symbol, activity_records = load_research_inputs(
                 ohlc_cache_path=args.ohlc_cache,
@@ -957,20 +1577,33 @@ def main(argv: Sequence[str] | None = None) -> int:
             _configure_longport_environment()
             broker = BrokerGateway()
             try:
-                bars_by_symbol, cache_extension = (
-                    materialize_candidate_exit_paths(
-                        bars_by_symbol,
-                        activity_records,
-                        broker,
-                        config=RelativeVolumeOrbResearchConfig(
-                            holding_minutes=max(holding_grid),
-                            candidate_selection_mode=(
-                                args.candidate_selection_mode
+                if args.candidate_panel:
+                    bars_by_symbol, cache_extension = (
+                        materialize_all_candidate_exit_paths(
+                            bars_by_symbol,
+                            activity_records,
+                            broker,
+                            config=RelativeVolumeOrbResearchConfig(
+                                holding_minutes=max(holding_grid),
                             ),
-                        ),
-                        symbols=requested_symbols,
+                            symbols=requested_symbols,
+                        )
                     )
-                )
+                else:
+                    bars_by_symbol, cache_extension = (
+                        materialize_candidate_exit_paths(
+                            bars_by_symbol,
+                            activity_records,
+                            broker,
+                            config=RelativeVolumeOrbResearchConfig(
+                                holding_minutes=max(holding_grid),
+                                candidate_selection_mode=(
+                                    args.candidate_selection_mode
+                                ),
+                            ),
+                            symbols=requested_symbols,
+                        )
+                    )
             finally:
                 broker.close()
             _save_cache(
@@ -987,7 +1620,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 end_date=end_date,
                 required_maximum_offset=required_offset,
             )
-        reports = []
+        reports: list[dict[str, object]] = []
+        candidate_panels: list[dict[str, object]] = []
         for holding_minutes in holding_grid:
             result = evaluate_relative_volume_orb(
                 bars_by_symbol,
@@ -1001,6 +1635,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                 symbols=requested_symbols,
             )
             reports.append(research_payload(result))
+            if args.candidate_panel:
+                candidate_panels.append(candidate_panel_payload(
+                    evaluate_relative_volume_orb_candidate_panel(
+                        bars_by_symbol,
+                        activity_records,
+                        config=RelativeVolumeOrbResearchConfig(
+                            holding_minutes=holding_minutes,
+                        ),
+                        symbols=requested_symbols,
+                    )
+                ))
     except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
         parser.error(str(exc))
 
@@ -1014,6 +1659,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "requested_holding_minutes": list(holding_grid),
         "reports": reports,
     }
+    if args.candidate_panel:
+        payload["candidate_panels"] = candidate_panels
     rendered = json.dumps(
         payload,
         ensure_ascii=True,

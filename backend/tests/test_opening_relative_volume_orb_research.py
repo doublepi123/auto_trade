@@ -13,9 +13,13 @@ from app.cli.opening_extension_research import RawMinuteBar, _save_cache
 from app.cli.opening_relative_volume_orb_research import (
     RelativeVolumeOrbResearchConfig,
     RelativeVolumeOrbResearchResult,
+    candidate_panel_payload,
+    discover_relative_volume_orb_candidate_signals,
+    evaluate_relative_volume_orb_candidate_panel,
     evaluate_relative_volume_orb,
     load_research_inputs,
     load_seed_research_inputs,
+    materialize_all_candidate_exit_paths,
     materialize_candidate_exit_paths,
     research_payload,
 )
@@ -168,6 +172,28 @@ def _config() -> RelativeVolumeOrbResearchConfig:
         top_n=1,
         minimum_universe_size=2,
         minimum_data_coverage=1.0,
+    )
+
+
+def _through_date(
+    bars_by_symbol: dict[str, tuple[RawMinuteBar, ...]],
+    records: tuple[OpeningActivityRecord, ...],
+    end_date: date,
+) -> tuple[
+    dict[str, tuple[RawMinuteBar, ...]],
+    tuple[OpeningActivityRecord, ...],
+]:
+    market_session = get_session("US")
+    return (
+        {
+            symbol: tuple(
+                bar
+                for bar in bars
+                if market_session.local(bar.timestamp).date() <= end_date
+            )
+            for symbol, bars in bars_by_symbol.items()
+        },
+        tuple(item for item in records if item.session_date <= end_date),
     )
 
 
@@ -329,6 +355,104 @@ def test_alternative_candidate_modes_are_explicit_and_deterministic() -> None:
     assert selected_symbol(opening_return) == "BBB.US"
 
 
+def test_candidate_panel_discovers_every_tradeable_top_n_breakout() -> None:
+    bars_by_symbol, records, signal_date = _research_data()
+    bars_by_symbol, records = _through_date(
+        bars_by_symbol,
+        records,
+        signal_date,
+    )
+
+    universe, evaluable_dates, signals = (
+        discover_relative_volume_orb_candidate_signals(
+            bars_by_symbol,
+            records,
+            config=replace(_config(), top_n=2),
+        )
+    )
+
+    assert universe == ("AAA.US", "BBB.US")
+    assert evaluable_dates == (signal_date,)
+    assert [item.symbol for item in signals] == ["AAA.US", "BBB.US"]
+    aaa, bbb = signals
+    assert aaa.activity_ratio == pytest.approx(10.0)
+    assert bbb.activity_ratio == pytest.approx(2.0)
+    assert aaa.opening_return_bps == pytest.approx(200.0)
+    assert bbb.opening_return_bps == pytest.approx(400.0)
+    assert aaa.breakout_depth_bps == pytest.approx(
+        (102.0 / 101.0 - 1) * 10_000
+    )
+    assert bbb.breakout_depth_bps == pytest.approx(
+        (104.0 / 101.0 - 1) * 10_000
+    )
+
+
+def test_candidate_panel_factor_diagnostics_use_paired_outcomes() -> None:
+    bars_by_symbol, records, signal_date = _research_data()
+    bars_by_symbol, records = _through_date(
+        bars_by_symbol,
+        records,
+        signal_date,
+    )
+
+    panel = evaluate_relative_volume_orb_candidate_panel(
+        bars_by_symbol,
+        records,
+        config=replace(_config(), top_n=2),
+    )
+    payload = candidate_panel_payload(panel)
+
+    assert payload["automatic_promotion_allowed"] is False
+    design = payload["research_design"]
+    assert isinstance(design, dict)
+    assert design["candidate_selection_uses_future"] is False
+    assert design["outcomes_used_for_diagnostics_only"] is True
+    sessions = payload["sessions"]
+    assert isinstance(sessions, dict)
+    assert sessions["candidate_paths"] == 2
+    assert sessions["multi_candidate"] == 1
+    diagnostics = payload["factor_diagnostics"]
+    assert isinstance(diagnostics, dict)
+    activity = diagnostics["ACTIVITY_RATIO"]["all"]
+    breakout = diagnostics["BREAKOUT_DEPTH"]["all"]
+    opening_return = diagnostics["OPENING_RETURN"]["all"]
+    assert activity["selected_symbols_by_date"][0]["symbol"] == "AAA.US"
+    assert breakout["selected_symbols_by_date"][0]["symbol"] == "BBB.US"
+    assert opening_return["selected_symbols_by_date"][0]["symbol"] == (
+        "BBB.US"
+    )
+    assert activity["winner_hit_rate"] == pytest.approx(1.0)
+    assert activity["multi_candidate_winner_hit_rate"] == pytest.approx(1.0)
+    assert activity["pairwise_concordance"] == pytest.approx(1.0)
+    assert breakout["winner_hit_rate"] == pytest.approx(0.0)
+    assert breakout["multi_candidate_winner_hit_rate"] == pytest.approx(0.0)
+    assert breakout["pairwise_concordance"] == pytest.approx(0.0)
+    assert opening_return["pairwise_concordance"] == pytest.approx(0.0)
+
+    for mode in ("BREAKOUT_DEPTH", "ACTIVITY_RATIO", "OPENING_RETURN"):
+        selected = diagnostics[mode]["all"]["selected_symbols_by_date"]
+        strategy = evaluate_relative_volume_orb(
+            bars_by_symbol,
+            records,
+            config=replace(
+                _config(),
+                top_n=2,
+                candidate_selection_mode=mode,
+            ),
+        )
+        assert [
+            (item["session_date"], item["symbol"], item["net_return_bps"])
+            for item in selected
+        ] == [
+            (
+                item.session_date.isoformat(),
+                item.symbol,
+                item.net_return_bps,
+            )
+            for item in strategy.trades
+        ]
+
+
 def test_research_matches_opening_range_stop_fill_semantics() -> None:
     bars_by_symbol, records, signal_date = _research_data(
         stop_on_signal_day=True,
@@ -472,6 +596,115 @@ def test_materializer_rejects_an_incomplete_provider_response() -> None:
             records,
             provider,
             config=_config(),
+        )
+
+
+def test_panel_materializer_fetches_every_candidate_exit_gap() -> None:
+    bars_by_symbol, records, signal_date = _research_data()
+    bars_by_symbol, records = _through_date(
+        bars_by_symbol,
+        records,
+        signal_date,
+    )
+    complete = bars_by_symbol
+    partial = {
+        symbol: tuple(
+            bar
+            for bar in rows
+            if bar.timestamp
+            not in {
+                _timestamp(signal_date, 7),
+                _timestamp(signal_date, 8),
+            }
+        )
+        for symbol, rows in complete.items()
+    }
+    provider = _FakeHistoricalProvider({
+        symbol: tuple(
+            BrokerCandle(
+                timestamp=bar.timestamp,
+                open=bar.open,
+                high=bar.high or bar.open,
+                low=bar.low or bar.open,
+                close=bar.close,
+                volume=1.0,
+            )
+            for bar in rows
+        )
+        for symbol, rows in complete.items()
+    })
+
+    extended, report = materialize_all_candidate_exit_paths(
+        partial,
+        records,
+        provider,
+        config=replace(_config(), top_n=2),
+    )
+
+    assert provider.calls == [
+        ("AAA.US", "MIN_1", 2, _timestamp(signal_date, 7)),
+        ("BBB.US", "MIN_1", 2, _timestamp(signal_date, 7)),
+    ]
+    assert report.candidate_sessions == 1
+    assert report.candidate_paths == 2
+    assert report.incomplete_candidate_paths_before == 2
+    assert report.fetch_requests == 2
+    assert report.fetched_bars == 4
+    assert report.incomplete_candidate_paths_after == 0
+    panel = evaluate_relative_volume_orb_candidate_panel(
+        extended,
+        records,
+        config=replace(_config(), top_n=2),
+    )
+    assert len(panel.candidates) == 2
+
+
+def test_panel_materializer_rejects_incomplete_provider_response() -> None:
+    bars_by_symbol, records, signal_date = _research_data()
+    bars_by_symbol, records = _through_date(
+        bars_by_symbol,
+        records,
+        signal_date,
+    )
+    partial = {
+        symbol: tuple(
+            bar
+            for bar in rows
+            if bar.timestamp
+            not in {
+                _timestamp(signal_date, 7),
+                _timestamp(signal_date, 8),
+            }
+        )
+        for symbol, rows in bars_by_symbol.items()
+    }
+    provider = _FakeHistoricalProvider(
+        {
+            symbol: tuple(
+                BrokerCandle(
+                    timestamp=bar.timestamp,
+                    open=bar.open,
+                    high=bar.high or bar.open,
+                    low=bar.low or bar.open,
+                    close=bar.close,
+                    volume=1.0,
+                )
+                for bar in rows
+            )
+            for symbol, rows in bars_by_symbol.items()
+        },
+        response_limit=1,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="did not complete candidate panel exit paths",
+    ):
+        materialize_all_candidate_exit_paths(
+            partial,
+            records,
+            provider,
+            config=replace(_config(), top_n=2),
         )
 
 
